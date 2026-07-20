@@ -35,7 +35,7 @@ import {
 import {
   createMutationRequestRunner,
   type MutationRequestContext,
-} from '../src/api/mutationHeaders'
+} from '../src/shared/api/mutationHeaders'
 import {
   developerPlatformResourcesFixture,
   issuedApiKeySecretFixture,

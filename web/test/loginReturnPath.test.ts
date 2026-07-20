@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { resolveSafeLoginReturnPath } from '../src/pages/loginReturnPath'
+import { resolveSafeLoginReturnPath } from '../src/pages/auth/loginReturnPath'
 
 describe('resolveSafeLoginReturnPath', () => {
   test('accepts a same-origin public request path with URL state', () => {

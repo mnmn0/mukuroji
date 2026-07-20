@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createMemoryRouter, RouterProvider } from 'react-router'
 import type { AuthSession } from '../src/auth/session'
-import { SecurityRecoveryPage } from '../src/pages/SecurityRecoveryPage'
+import { SecurityRecoveryPage } from '../src/pages/auth/SecurityRecoveryPage'
 
 const recoverySession = {
   accessToken: 'recovery-access-token',

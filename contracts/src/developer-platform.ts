@@ -2,7 +2,7 @@ import type {
   CanonicalWorkItem,
   CreateWorkItemInput,
   WorkItemPatch,
-} from './index'
+} from './work-items'
 
 /**
  * Public API client に付与できる最小権限 scope です。

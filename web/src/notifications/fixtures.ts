@@ -2,7 +2,7 @@ import type { InboxNotification, NotificationPreferences } from './api'
 import type {
   NotificationInboxController,
   NotificationPreferencesController,
-} from './useNotifications'
+} from './mutations/useNotifications'
 
 /**
  * Storybook と UI test で使う notification-backed Inbox の通知です。

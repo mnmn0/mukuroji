@@ -1,0 +1,109 @@
+import type { Meta, StoryObj } from '@storybook/react-vite'
+import { createSidebarLabels } from '../../i18n/i18n'
+import { Sidebar } from './Sidebar'
+import type { SidebarTeam } from './Sidebar'
+
+const teams: SidebarTeam[] = [
+  {
+    id: 'johns-first-team',
+    name: "John's First Team",
+    expanded: true,
+    projects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'marketing', name: 'Marketing', tone: 'purple' },
+      { id: 'customer-stories', name: 'Customer Stories', tone: 'green' },
+      { id: 'product-roadmap', name: 'Product Roadmap', tone: 'yellow' },
+    ],
+  },
+  {
+    id: 'design-team',
+    name: 'Design Team',
+  },
+  {
+    id: 'sales-team',
+    name: 'Sales Team',
+  },
+]
+
+const meta = {
+  title: 'Application/Navigation/Sidebar',
+  component: Sidebar,
+  parameters: {
+    layout: 'fullscreen',
+  },
+  args: {
+    teams,
+    labels: createSidebarLabels('ja'),
+    defaultActiveTeamId: 'johns-first-team',
+    defaultActiveProjectId: 'refero',
+    inboxCount: 3,
+    onArchiveProject: async () => undefined,
+    onArchiveTeam: async () => undefined,
+    onCreateProject: async () => undefined,
+    onCreateTeam: async () => undefined,
+    onOpenSearch: () => undefined,
+  },
+  decorators: [
+    (Story) => (
+      <div className="min-h-screen bg-slate-50">
+        <Story />
+      </div>
+    ),
+  ],
+} satisfies Meta<typeof Sidebar>
+
+/** Sidebar stories の metadata です。 */
+export default meta
+
+/** Storybook story type for Sidebar examples. */
+type Story = StoryObj<typeof meta>
+
+/** Default expanded sidebar state. */
+export const Default: Story = {}
+
+/** Collapsed sidebar state. */
+export const Collapsed: Story = {
+  args: {
+    defaultCollapsed: true,
+  },
+}
+
+/** English sidebar labels. */
+export const English: Story = {
+  args: {
+    labels: createSidebarLabels('en'),
+  },
+}
+
+/** Sidebar with the create modal open. */
+export const CreateModalOpen: Story = {
+  args: {
+    defaultCreatePanelOpen: true,
+  },
+}
+
+/** Sidebar with enough projects to exercise list scrolling. */
+export const ProjectListScrolled: Story = {
+  args: {
+    labels: createSidebarLabels('ja'),
+    defaultActiveTeamId: 'johns-first-team',
+    defaultActiveProjectId: 'refero',
+    teams: [
+      {
+        id: 'johns-first-team',
+        name: "John's First Team",
+        expanded: true,
+        projects: [
+          { id: 'refero', name: 'Refero', tone: 'blue' },
+          { id: 'marketing', name: 'Marketing', tone: 'purple' },
+          { id: 'customer-stories', name: 'Customer Stories', tone: 'green' },
+          { id: 'product-roadmap', name: 'Product Roadmap', tone: 'yellow' },
+          { id: 'launch-plan', name: 'Launch Plan', tone: 'blue' },
+          { id: 'brand-refresh', name: 'Brand Refresh', tone: 'purple' },
+          { id: 'analytics', name: 'Analytics', tone: 'green' },
+        ],
+      },
+      ...teams.slice(1),
+    ],
+  },
+}

@@ -3,17 +3,17 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import {
   EnterpriseDomainVerificationChallengeNotice,
   EnterpriseSecurityPanel,
-} from '../src/security/EnterpriseSecurityPanel'
+} from '../src/security/ui/EnterpriseSecurityPanel'
 import {
   createEnterpriseSecurityCapabilityBoundary,
   createEnterpriseSecurityStateBoundary,
   createSecurityAccessBoundaryKey,
   parseActiveEnterpriseRecoveryExpiry,
   resolveServiceAccountAssignableRoleIds,
-} from '../src/security/capabilityBoundary'
+} from '../src/security/model/capabilityBoundary'
 import { enterpriseSecuritySnapshotFixture } from '../src/security/fixtures'
 import { EnterpriseSecurityApiError } from '../src/security/api'
-import { requiresFreshEnterpriseAuthentication } from '../src/security/enterpriseAuthentication'
+import { requiresFreshEnterpriseAuthentication } from '../src/security/model/enterpriseAuthentication'
 
 const scopeOptions = [
   { id: 'workspace-demo', name: 'Workspace', type: 'workspace' as const },

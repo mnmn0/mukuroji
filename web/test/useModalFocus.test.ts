@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { activateModalFocus } from '../src/components/useModalFocus'
+import { activateModalFocus } from '../src/shared/ui/useModalFocus'
 
 describe('Modal focus management', () => {
   test('focuses on open, traps Tab in both directions, closes on Escape, and restores focus', () => {

@@ -19,12 +19,12 @@ import {
   analyticsSnapshotRecordFixture,
   analyticsWidgetFixtures,
 } from '../src/analytics/fixtures'
-import { updateAnalyticsMultiSelectValues } from '../src/analytics/filterDraft'
+import { updateAnalyticsMultiSelectValues } from '../src/analytics/model/filterDraft'
 import {
   createAnalyticsQueryInput,
   parseAnalyticsRouteState,
   serializeAnalyticsRouteState,
-} from '../src/analytics/queryState'
+} from '../src/analytics/model/queryState'
 
 const originalFetch = globalThis.fetch
 const mutationContext = {

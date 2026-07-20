@@ -1,11 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router'
-import { DocumentReadOnlyContent } from '../src/documents/DocumentEditor'
+import { DocumentReadOnlyContent } from '../src/documents/ui/DocumentEditor'
 import { DocumentScreen } from '../src/documents/DocumentPage'
 import { SharedDocumentScreen } from '../src/documents/SharedDocumentPage'
-import { DocumentTree } from '../src/documents/DocumentTree'
-import { WhiteboardCanvas } from '../src/documents/WhiteboardCanvas'
+import { DocumentTree } from '../src/documents/ui/DocumentTree'
+import { WhiteboardCanvas } from '../src/documents/ui/WhiteboardCanvas'
 import {
   documentCommentFixtures,
   documentRecordFixture,
@@ -15,7 +15,7 @@ import {
   publicWhiteboardFixture,
   whiteboardRecordFixture,
 } from '../src/documents/fixtures'
-import { createTranslator } from '../src/i18n'
+import { createTranslator } from '../src/shared/i18n/i18n'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
 
 const t = createTranslator('en')

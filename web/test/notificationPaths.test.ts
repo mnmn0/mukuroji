@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   isSafeApplicationPath,
   resolveNotificationPath,
-} from '../src/notifications/paths'
+} from '../src/notifications/model/paths'
 
 describe('notification deep links', () => {
   test('uses structured team, project, Work Item, and comment scope', () => {

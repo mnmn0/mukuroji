@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { shouldClearAnalyticsAuthSession } from '../src/analytics/authError'
+import { shouldClearAnalyticsAuthSession } from '../src/analytics/model/authError'
 import { ApiError } from '../src/auth/api'
 
 describe('Analytics current-user authentication failure', () => {

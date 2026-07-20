@@ -17,7 +17,7 @@ import {
   persistAndPublishRequestForm,
   synchronizeRequestRoutingTeam,
   updateRequestFormInput,
-} from '../src/requests/model'
+} from '../src/requests/model/requestForm'
 
 describe('request form model round-trip', () => {
   test('preserves ordered routing rules and custom field mappings', () => {

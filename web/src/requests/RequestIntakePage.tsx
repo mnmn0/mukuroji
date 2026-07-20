@@ -1,57 +1,58 @@
 import type {
   RequestForm,
   RequestSubmissionActionInput,
-  RequestSubmissionPage,
 } from '@mukuroji/contracts'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router'
-import useSWR from 'swr'
-import useSWRInfinite from 'swr/infinite'
-import { createMutationRequestRunner } from '../api/mutationHeaders'
+import { createMutationRequestRunner } from '../shared/api/mutationHeaders'
 import {
   canManageWorkspaceStructure,
-  getCurrentUser,
 } from '../auth/api'
+import { useCurrentUser } from '../auth/queries/useCurrentUser'
 import { resolveEnterpriseSessionErrorsAction } from '../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession } from '../auth/session'
-import { useWorkspaceCommandMenu } from '../commands/WorkspaceCommandMenuContext'
+import { useWorkspaceCommandMenu } from '../commands/ui/WorkspaceCommandMenuContext'
 import {
   MobileSidebarButton,
   MobileSidebarDrawer,
   Sidebar,
   type SidebarNavId,
   type SidebarTeamViewId,
-} from '../components/sidebar'
+} from '../shared/ui/sidebar'
 import {
   createSidebarLabels,
   createTranslator,
   getInitialLocale,
   type Locale,
-} from '../i18n'
+} from '../shared/i18n/i18n'
 import {
-  getProjectDirectory,
   type ProjectDirectoryTeam,
 } from '../projects/api'
+import { useProjectDirectory } from '../projects/queries/useProjectDirectory'
 import {
   createProjectIssuesPath,
   createTeamViewPath,
   workspaceNavPaths,
   type RequestsView,
-} from '../routes/paths'
-import { getWorkItemConfiguration } from '../work-items/api'
+} from '../shared/routing/paths'
+import {
+  useWorkItemConfiguration,
+} from '../work-items/queries/useWorkItemConfigurations'
 import {
   applyRequestSubmissionAction,
   createRequestAttachmentAccess,
   createRequestForm,
-  getRequestForm,
-  getRequestForms,
-  getRequestQueue,
-  getRequestSubmission,
   publishRequestForm,
   updateRequestForm,
 } from './api'
-import { getRequestFormEditorInstanceKey } from './editorState'
-import { RequestFormBuilder } from './RequestFormBuilder'
+import {
+  useRequestForm,
+  useRequestForms,
+  useRequestQueue,
+  useRequestSubmission,
+} from './queries/useRequestIntakeQueries'
+import { getRequestFormEditorInstanceKey } from './model/editorState'
+import { RequestFormBuilder } from './ui/RequestFormBuilder'
 import {
   createEmptyRequestFormDraft,
   createRequestFormInput,
@@ -60,8 +61,8 @@ import {
   persistAndPublishRequestForm,
   updateRequestFormInput,
   type RequestFormDraftModel,
-} from './model'
-import { RequestQueue } from './RequestQueue'
+} from './model/requestForm'
+import { RequestQueue } from './ui/RequestQueue'
 
 const emptyTeams: ProjectDirectoryTeam[] = []
 const emptyForms: RequestForm[] = []
@@ -91,28 +92,21 @@ export function RequestIntakePage() {
   const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
   const accessToken = session?.accessToken
   const requestedView = searchParams.get('view') === 'forms' ? 'forms' : 'queue'
-  const currentUserKey = accessToken ? (['current-user', accessToken] as const) : null
   const {
     data: user,
     error: currentUserError,
     isLoading: isCurrentUserLoading,
-  } = useSWR(
-    currentUserKey,
-    ([, token]) => getCurrentUser(token),
-    apiSWRConfig,
-  )
-  const projectDirectoryKey = accessToken && user && !currentUserError
-    ? (['project-directory', accessToken, locale] as const)
-    : null
+  } = useCurrentUser(accessToken)
   const {
     data: teams = emptyTeams,
     error: projectDirectoryError,
     isLoading: isProjectDirectoryLoading,
-  } = useSWR(
-    projectDirectoryKey,
-    ([, token, currentLocale]) => getProjectDirectory(token, currentLocale),
-    apiSWRConfig,
-  )
+  } = useProjectDirectory({
+    accessToken,
+    dedupingInterval: apiSWRConfig.dedupingInterval,
+    enabled: Boolean(user && !currentUserError),
+    locale,
+  })
   const canManageForms = canManageWorkspaceStructure(user)
   const activeView: RequestsView = requestedView === 'forms' && canManageForms
     ? 'forms'
@@ -124,31 +118,19 @@ export function RequestIntakePage() {
     mutate: mutateQueue,
     setSize: setQueuePageCount,
     size: queuePageCount,
-  } = useSWRInfinite(
-    (pageIndex, previousPage: RequestSubmissionPage | null) => {
-      if (!accessToken || !user || currentUserError || activeView !== 'queue') return null
-      if (pageIndex > 0 && !previousPage?.nextCursor) return null
-      return [
-        'request-queue',
-        accessToken,
-        pageIndex === 0 ? '' : previousPage?.nextCursor ?? '',
-      ] as const
-    },
-    ([, token, cursor]) => getRequestQueue(token, {
-      cursor: cursor || undefined,
-      limit: 50,
-    }),
-    apiSWRConfig,
+  } = useRequestQueue(
+    accessToken,
+    Boolean(user && !currentUserError && activeView === 'queue'),
   )
-  const formsKey = accessToken && user && !currentUserError && activeView === 'forms'
-    ? (['request-forms', accessToken] as const)
-    : null
   const {
     data: forms = emptyForms,
     error: formsError,
     isLoading: isFormsLoading,
     mutate: mutateForms,
-  } = useSWR(formsKey, ([, token]) => getRequestForms(token), apiSWRConfig)
+  } = useRequestForms(
+    accessToken,
+    Boolean(user && !currentUserError && activeView === 'forms'),
+  )
   const submissions = useMemo(
     () => {
       const normalized = (queuePages ?? []).flatMap((page) =>
@@ -163,30 +145,24 @@ export function RequestIntakePage() {
     queuePageCount > 0 && Boolean(queuePages) && queuePages?.[queuePageCount - 1] === undefined
   )
   const selectedSubmissionId = searchParams.get('submissionId') ?? submissions[0]?.id
-  const detailKey = accessToken && selectedSubmissionId && activeView === 'queue'
-    ? (['request-submission', accessToken, selectedSubmissionId] as const)
-    : null
   const {
     data: selectedSubmission,
     error: detailError,
     mutate: mutateSelectedSubmission,
-  } = useSWR(
-    detailKey,
-    ([, token, submissionId]) => getRequestSubmission(submissionId, token),
-    apiSWRConfig,
+  } = useRequestSubmission(
+    accessToken,
+    selectedSubmissionId,
+    activeView === 'queue',
   )
   const selectedFormId = searchParams.get('formId') ?? forms[0]?.id
-  const selectedFormKey = accessToken && selectedFormId && selectedFormId !== 'new' && activeView === 'forms'
-    ? (['request-form', accessToken, selectedFormId] as const)
-    : null
   const {
     data: selectedForm,
     error: selectedFormError,
     mutate: mutateSelectedForm,
-  } = useSWR(
-    selectedFormKey,
-    ([, token, formId]) => getRequestForm(formId, token),
-    apiSWRConfig,
+  } = useRequestForm(
+    accessToken,
+    selectedFormId,
+    activeView === 'forms',
   )
   const userLabel = user?.attributes.email ?? user?.attributes.name ?? user?.username ?? t('workspace.user.fallback')
   const userInitial = userLabel.trim().charAt(0).toUpperCase() || 'M'
@@ -483,13 +459,9 @@ function RequestFormEditorContainer({
   const [errorMessage, setErrorMessage] = useState<string>()
   const canEdit = initialForm?.capabilities.canEdit ?? true
   const canPublish = initialForm?.capabilities.canPublish ?? false
-  const configurationKey = accessToken && model.routing.teamId
-    ? (['request-routing-workflow', accessToken, model.routing.teamId] as const)
-    : null
-  const { data: resolvedConfiguration, error: configurationError } = useSWR(
-    configurationKey,
-    ([, token, teamId]) => getWorkItemConfiguration(token, { kind: 'team', teamId }),
-    apiSWRConfig,
+  const { data: resolvedConfiguration, error: configurationError } = useWorkItemConfiguration(
+    accessToken,
+    model.routing.teamId,
   )
 
   useEffect(() => {

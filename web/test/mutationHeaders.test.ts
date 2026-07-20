@@ -4,7 +4,7 @@ import {
   createMutationFingerprint,
   createMutationRequestRunner,
   type MutationRequestContext,
-} from '../src/api/mutationHeaders'
+} from '../src/shared/api/mutationHeaders'
 
 test('creates stable headers from one explicit mutation context', () => {
   const context: MutationRequestContext = {

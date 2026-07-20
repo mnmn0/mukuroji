@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { AnalyticsSnapshotListResponse } from '@mukuroji/contracts'
 import { analyticsSnapshotRecordFixture } from '../src/analytics/fixtures'
-import { resolveAnalyticsSnapshotAutoPagination } from '../src/analytics/snapshotPagination'
+import { resolveAnalyticsSnapshotAutoPagination } from '../src/analytics/model/snapshotPagination'
 
 const targetSnapshot = {
   ...analyticsSnapshotRecordFixture,

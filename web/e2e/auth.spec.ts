@@ -7,6 +7,14 @@ test.beforeEach(async ({ page }) => {
 })
 
 test('初回ログイン失敗後は新しいパスワードで通常ログインから再開できると案内する', async ({ page }) => {
+  await page.route('**/api/auth/sso/discovery?*', async (route) => {
+    await route.fulfill({
+      json: {
+        loginMode: 'password-or-sso',
+        ssoRequired: false,
+      },
+    })
+  })
   await page.route('**/api/auth/login', async (route) => {
     await route.fulfill({
       json: {
@@ -32,6 +40,7 @@ test('初回ログイン失敗後は新しいパスワードで通常ログイ�
 
   await page.goto('/')
   await page.getByLabel('メールアドレス').fill('invited@example.com')
+  await page.getByRole('button', { name: '続行', exact: true }).click()
   await page.getByLabel('パスワード', { exact: true }).fill('Temporary123!')
   await page.getByRole('button', { name: 'ログイン', exact: true }).click()
 
@@ -46,10 +55,19 @@ test('初回ログイン失敗後は新しいパスワードで通常ログイ�
 
   await expect(page.getByRole('heading', { name: 'ログイン' })).toBeVisible()
   await expect(page.getByLabel('メールアドレス')).toHaveValue('invited@example.com')
+  await page.getByRole('button', { name: '続行', exact: true }).click()
   await expect(page.getByLabel('パスワード', { exact: true })).toHaveValue('')
 })
 
 test('初回パスワードのポリシー違反は同じ画面で再入力を促す', async ({ page }) => {
+  await page.route('**/api/auth/sso/discovery?*', async (route) => {
+    await route.fulfill({
+      json: {
+        loginMode: 'password-or-sso',
+        ssoRequired: false,
+      },
+    })
+  })
   await page.route('**/api/auth/login', async (route) => {
     await route.fulfill({
       json: {
@@ -71,6 +89,7 @@ test('初回パスワードのポリシー違反は同じ画面で再入力を�
 
   await page.goto('/')
   await page.getByLabel('メールアドレス').fill('invited@example.com')
+  await page.getByRole('button', { name: '続行', exact: true }).click()
   await page.getByLabel('パスワード', { exact: true }).fill('Temporary123!')
   await page.getByRole('button', { name: 'ログイン', exact: true }).click()
   await page.getByLabel('新しいパスワード', { exact: true }).fill('weakpass')

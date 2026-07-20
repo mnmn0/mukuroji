@@ -5,8 +5,8 @@ import {
   type WorkItemConfiguration,
   type WorkItemRelation,
 } from '@mukuroji/contracts'
-import type { WorkItemPersonOption } from './WorkItemFieldsEditor'
-import type { WorkItemRelationCandidate } from './WorkItemRelationsEditor'
+import type { WorkItemPersonOption } from './ui/WorkItemFieldsEditor'
+import type { WorkItemRelationCandidate } from './ui/WorkItemRelationsEditor'
 
 /**
  * Workflow、全 custom field type、validation を含む Workspace 設定 fixture です。

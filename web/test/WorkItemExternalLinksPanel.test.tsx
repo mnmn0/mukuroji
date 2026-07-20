@@ -2,8 +2,8 @@ import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
   WorkItemExternalLinksPanel,
-} from '../src/work-items/WorkItemExternalLinksPanel'
-import { createWorkItemExternalLinksLabels } from '../src/work-items/externalLinkLabels'
+} from '../src/work-items/ui/WorkItemExternalLinksPanel'
+import { createWorkItemExternalLinksLabels } from '../src/work-items/ui/externalLinkLabels'
 import {
   externalLinkInstallationFixtures,
   externalWorkItemLinkFixtures,

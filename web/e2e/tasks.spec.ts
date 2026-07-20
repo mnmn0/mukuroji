@@ -3,6 +3,8 @@ import type { Page } from '@playwright/test'
 import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
+  type AnalyticsExportInput,
+  type AnalyticsQueryInput,
   type ApprovalRequest,
   type CustomFieldValue,
   type FileAnnotation,
@@ -13,6 +15,10 @@ import {
   type WorkItemRelationType,
 } from '@mukuroji/contracts'
 import { readFile } from 'node:fs/promises'
+import {
+  analyticsReportFixtures,
+  analyticsSnapshotFixture,
+} from '../src/analytics/fixtures'
 import type { TeamIssue, TeamIssueActivity, TeamIssueComment } from '../src/issues/api'
 import type { InboxNotification, NotificationPreferences } from '../src/notifications/api'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
@@ -528,6 +534,7 @@ async function mockAuthenticatedTaskPage(
       json: {
         username: 'demo@example.com',
         attributes: {
+          'custom:workspace_id': 'workspace-demo',
           email: 'demo@example.com',
           name: 'Demo User',
         },
@@ -1664,6 +1671,84 @@ function getMockRequestCounts(page: Page) {
   }
 
   return requestCounts
+}
+
+/**
+ * Analytics E2E mock が記録する request です。
+ */
+type MockAnalyticsRequestState = {
+  /** Live analytics query API へ送信された入力です。 */
+  queryInputs: AnalyticsQueryInput[]
+  /** Analytics export API へ送信された入力です。 */
+  exportInputs: AnalyticsExportInput[]
+}
+
+/**
+ * 現行 ReportsPage が利用するAnalytics APIを固定fixtureへ差し替えます。
+ *
+ * @param page - API routeを差し替えるPlaywright pageです。
+ * @returns Queryとexportの送信内容を確認するstateです。
+ */
+async function mockAnalyticsReportsPage(
+  page: Page,
+): Promise<MockAnalyticsRequestState> {
+  const state: MockAnalyticsRequestState = {
+    exportInputs: [],
+    queryInputs: [],
+  }
+
+  await page.route(
+    /.*\/api\/analytics\/reports(?:\?.*)?$/,
+    async (route) => {
+      await route.fulfill({
+        json: {
+          reports: [structuredClone(analyticsReportFixtures[0])],
+        },
+      })
+    },
+  )
+
+  await page.route(
+    /.*\/api\/analytics\/reports\/[^/]+\/snapshots(?:\?.*)?$/,
+    async (route) => {
+      await route.fulfill({
+        json: {
+          inspectedCount: 0,
+          snapshots: [],
+        },
+      })
+    },
+  )
+
+  await page.route('**/api/analytics/query', async (route) => {
+    const input = route.request().postDataJSON() as AnalyticsQueryInput
+    state.queryInputs.push(structuredClone(input))
+    await route.fulfill({
+      json: {
+        snapshot: {
+          ...structuredClone(analyticsSnapshotFixture),
+          asOf: input.asOf,
+          filter: input.filter,
+          timeZone: input.timeZone,
+        },
+      },
+    })
+  })
+
+  await page.route('**/api/analytics/export', async (route) => {
+    state.exportInputs.push(
+      structuredClone(route.request().postDataJSON() as AnalyticsExportInput),
+    )
+    await route.fulfill({
+      body: 'metric,value\nwip,14\noverdue,5\n',
+      headers: {
+        'Content-Disposition': 'attachment; filename="mukuroji-analytics.csv"',
+        'Content-Type': 'text/csv; charset=utf-8',
+      },
+    })
+  })
+
+  return state
 }
 
 /**
@@ -4356,119 +4441,57 @@ test.describe('authenticated task page', () => {
     )
   })
 
-  test('approval summary を受信箱の要確認理由とレポート集計へ反映する', async ({ page }) => {
-    const approvalIssue = createStoredTeamIssue({
-      approvalSummary: {
-        approvedCount: 0,
-        changesRequestedCount: 1,
-        nextDueAt: '2026-07-15T14:59:59.000Z',
-        overdueCount: 1,
-        pendingCount: 2,
-        rejectedCount: 0,
-      },
-      assignedProjectId: 'refero',
-      dueDate: '2099/12/31',
-      id: 'approval-proof',
-      priority: 'low',
-      workflowStatusId: 'todo',
-      teamId: 'core-team',
-      title: '承認待ち成果物',
-    })
-    const historicalDecisionIssue = createStoredTeamIssue({
-      approvalSummary: {
-        approvedCount: 1,
-        changesRequestedCount: 1,
-        overdueCount: 0,
-        pendingCount: 0,
-        rejectedCount: 1,
-      },
-      assignedProjectId: 'refero',
-      dueDate: '2099/12/31',
-      id: 'approval-history-only',
-      priority: 'low',
-      workflowStatusId: 'todo',
-      teamId: 'core-team',
-      title: '過去の承認判断だけがある成果物',
-    })
-
-    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
-      teamIssuesByTeam: { 'core-team': [approvalIssue, historicalDecisionIssue] },
-    })
-
-    await page.goto('/inbox')
-    const approvalRow = page.getByTestId('inbox-task-core-team-refero-approval-proof')
-
-    await expect(approvalRow).toBeVisible()
-    await expect(page.getByTestId('inbox-task-core-team-refero-approval-history-only')).toHaveCount(0)
-    await expect(approvalRow).toContainText('Approval 期限超過')
-    await page.getByTestId('inbox-filter-approval').click()
-    await expect(approvalRow).toBeVisible()
+  test('保存済みAnalyticsレポートのKPIを再現可能なquery結果から表示する', async ({ page }) => {
+    const analyticsState = await mockAnalyticsReportsPage(page)
 
     await page.goto('/reports')
-    await expect(page.getByTestId('reports-metric-pending-approvals').locator('p').last()).toHaveText('2')
-    await expect(page.getByTestId('reports-metric-overdue-approvals').locator('p').last()).toHaveText('1')
-    await expect(page.getByTestId('reports-project-core-team-refero')).toContainText('2')
-  })
 
-  test('started category の進行中 task を review 件数と理由へ混入させない', async ({ page }) => {
-    await mockAuthenticatedTaskPage(page, [], undefined, {
-      teamIssuesByTeam: {
-        'core-team': [
-          createStoredTeamIssue({
-            dueDate: '2099/12/31',
-            id: 'ordinary-in-progress',
-            priority: 'low',
-            title: '通常の進行中タスク',
-            workflowStatusId: 'in-progress',
-          }),
-          createStoredTeamIssue({
-            dueDate: '2099/12/31',
-            id: 'actual-review',
-            priority: 'low',
-            title: 'レビュー中タスク',
-            workflowStatusId: 'review',
-          }),
-        ],
-      },
-    })
-
-    await page.goto('/inbox')
-
-    await expect(page.getByTestId('inbox-task-core-team-refero-actual-review')).toContainText(
-      'レビュー待ち',
+    await expect(page.getByRole('heading', { name: 'Delivery health' })).toBeVisible()
+    await expect(page.getByTestId('analytics-report-selector')).toHaveValue(
+      'delivery-health',
     )
-    await expect(page.getByTestId('inbox-task-core-team-refero-ordinary-in-progress')).toHaveCount(0)
-
-    await page.goto('/reports')
-    await expect(
-      page.getByTestId('reports-project-core-team-refero').getByRole('cell').nth(4),
-    ).toHaveText('1')
+    await expect(page.getByTestId('analytics-widget-metric-wip')).toContainText('14')
+    await expect(page.getByTestId('analytics-widget-metric-overdue')).toContainText('5')
+    await expect.poll(() => analyticsState.queryInputs.at(-1)?.widgets.map(
+      (widget) => widget.id,
+    )).toEqual(analyticsReportFixtures[0].widgets.map((widget) => widget.id))
   })
 
-  test('レポートでプロジェクト健全性を絞り込み CSV 出力できる', async ({ page }) => {
+  test('Analyticsレポートはchart groupとtable evidenceを表示する', async ({ page }) => {
+    await mockAnalyticsReportsPage(page)
+
     await page.goto('/reports')
 
-    await expect(page.getByTestId('reports-workbench')).toBeVisible()
-    await expect(page.getByRole('heading', { name: 'ステータス構成', exact: true })).toBeVisible()
-    await expect(page.getByTestId('reports-project-core-team-refero')).toBeVisible()
+    await expect(page.getByTestId('analytics-widget-chart-cycle-time')).toContainText(
+      'Core team',
+    )
+    await expect(page.getByTestId('analytics-widget-chart-cycle-time')).toContainText(
+      'Design team',
+    )
+    await expect(page.getByTestId('analytics-widget-table-overdue')).toContainText(
+      'Harden billing webhook retries',
+    )
+  })
 
-    await openSidebarCreatePanel(page)
-    await page.getByRole('button', { name: 'プロジェクト', exact: true }).click()
-    await page.getByLabel('プロジェクト名').fill('=SUM(1,1)')
-    await page.getByRole('button', { name: 'プロジェクトを登録' }).click()
+  test('AnalyticsレポートをProjectで絞り込みCSV出力できる', async ({ page }) => {
+    const analyticsState = await mockAnalyticsReportsPage(page)
+    await page.goto('/reports')
 
-    await expect(page.getByTestId('reports-project-core-team-new-project')).toBeVisible()
-    await page.getByTestId('reports-project-search').fill('=SUM')
-
-    await expect(page.getByTestId('reports-project-core-team-new-project')).toBeVisible()
-    await expect(page.getByTestId('reports-project-core-team-refero')).toHaveCount(0)
+    await expect(page.getByTestId('analytics-widget-metric-wip')).toBeVisible()
+    await page.getByTestId('analytics-project-filter').getByRole(
+      'checkbox',
+      { name: 'Refero' },
+    ).check()
+    await expect.poll(() =>
+      analyticsState.queryInputs.at(-1)?.filter.projectIds
+    ).toEqual(['refero'])
 
     const downloadPromise = page.waitForEvent('download')
-    await page.getByTestId('reports-export-csv').click()
+    await page.getByRole('button', { name: 'CSV', exact: true }).click()
     const download = await downloadPromise
     const downloadPath = await download.path()
 
-    expect(download.suggestedFilename()).toBe('mukuroji-project-snapshot.csv')
+    expect(download.suggestedFilename()).toBe('mukuroji-analytics.csv')
     expect(downloadPath).not.toBeNull()
     if (!downloadPath) {
       throw new Error('CSV download path was not available.')
@@ -4476,59 +4499,43 @@ test.describe('authenticated task page', () => {
 
     const csv = await readFile(downloadPath, 'utf8')
 
-    expect(csv).toContain("'=SUM(1,1)")
-    expect(csv).not.toContain('Refero')
-
-    await page.getByTestId('reports-project-search').clear()
-    await page.getByTestId('reports-attention-only').check()
-
-    await expect(page.getByTestId('reports-project-core-team-refero')).toBeVisible()
-    await expect(page.getByTestId('reports-project-core-team-product-roadmap')).toHaveCount(0)
+    expect(csv).toContain('wip,14')
+    await expect.poll(() => analyticsState.exportInputs.at(-1)).toEqual(
+      expect.objectContaining({
+        format: 'csv',
+        locale: 'ja',
+        query: expect.objectContaining({
+          filter: expect.objectContaining({
+            projectIds: ['refero'],
+          }),
+        }),
+      }),
+    )
   })
 
-  test('Issue #21: レポートの custom field は project scope 外の Work Item を除外する', async ({ page }) => {
-    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
-      failedWorkItemConfigurationTeamIds: ['design-team'],
-      teamIssuesByTeam: {
-        'core-team': [
-          createStoredTeamIssue({
-            assignedProjectId: 'refero',
-            customFieldValues: { budget: 1_200_000 },
-            id: 'scoped-budget',
-            title: 'Scoped budget',
-            workflowStatusId: 'in-progress',
-          }),
-          createStoredTeamIssue({
-            assignedProjectId: 'product-roadmap',
-            customFieldValues: { budget: 2_400_000 },
-            id: 'out-of-scope-budget',
-            title: 'Out of scope budget',
-            workflowStatusId: 'todo',
-          }),
-        ],
-        'design-team': [
-          createStoredTeamIssue({
-            assignedProjectId: 'brand-refresh',
-            id: 'design-configuration-unavailable-report-task',
-            teamId: 'design-team',
-            title: 'Design configuration unavailable report task',
-          }),
-        ],
-      },
-      teamWorkItemConfigurations: {
-        'core-team': teamWorkItemConfigurationFixture,
-      },
-    })
+  test('Analyticsレポートのcustom field条件をqueryへ反映する', async ({ page }) => {
+    const analyticsState = await mockAnalyticsReportsPage(page)
     await page.goto('/reports')
 
-    await expect(page.getByRole('alert')).toContainText(
-      '一部 Team の Work Item 設定を取得できないため',
+    await expect(page.getByTestId('analytics-widget-metric-wip')).toBeVisible()
+    await page.getByText('詳細フィルター', { exact: true }).click()
+    const customFieldFilters = page.getByTestId('analytics-custom-field-filters')
+    await customFieldFilters.getByLabel('フィールドID').fill('budget')
+    await customFieldFilters.getByLabel('比較方法').selectOption(
+      'greater-than-or-equal',
     )
-    await page.getByTestId('reports-custom-field-filter').selectOption('core-team:budget')
-    await expect(page.getByTestId('reports-project-core-team-refero')).toBeVisible()
-    await expect(
-      page.getByTestId('reports-project-core-team-product-roadmap').getByRole('cell').nth(3),
-    ).toHaveText('0')
+    await customFieldFilters.getByLabel('値').fill('1200000')
+    await customFieldFilters.getByRole('button', { name: '条件を追加' }).click()
+
+    await expect.poll(() =>
+      analyticsState.queryInputs.at(-1)?.filter.customFields
+    ).toEqual([
+      {
+        fieldId: 'budget',
+        operator: 'greater-than-or-equal',
+        value: 1_200_000,
+      },
+    ])
   })
 
   test('設定画面でフォントサイズを変更して保存できる', async ({ page }) => {

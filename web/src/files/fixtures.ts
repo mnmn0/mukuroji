@@ -3,7 +3,7 @@ import type {
   FileAnnotation,
   FileAttachment,
 } from '@mukuroji/contracts'
-import type { FileArtifactsController } from './useFileArtifacts'
+import type { FileArtifactsController } from './mutations/useFileArtifacts'
 
 /**
  * Storybook と unit test で共有する image file fixture です。

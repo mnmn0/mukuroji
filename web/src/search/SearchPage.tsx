@@ -14,9 +14,8 @@ import {
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router'
-import useSWR from 'swr'
-import { createMutationRequestRunner } from '../api/mutationHeaders'
-import { getCurrentUser } from '../auth/api'
+import { createMutationRequestRunner } from '../shared/api/mutationHeaders'
+import { useCurrentUser } from '../auth/queries/useCurrentUser'
 import { resolveEnterpriseSessionErrorsAction } from '../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import {
@@ -25,29 +24,34 @@ import {
   Sidebar,
   type SidebarNavId,
   type SidebarTeamViewId,
-} from '../components/sidebar'
-import { useWorkspaceCommandMenu } from '../commands/WorkspaceCommandMenuContext'
+} from '../shared/ui/sidebar'
+import { useWorkspaceCommandMenu } from '../commands/ui/WorkspaceCommandMenuContext'
 import {
   createSidebarLabels,
   createTranslator,
   getInitialLocale,
   type Locale,
   type MessageKey,
-} from '../i18n'
-import { getProjectDirectory, type ProjectDirectoryTeam } from '../projects/api'
+} from '../shared/i18n/i18n'
+import type { ProjectDirectoryTeam } from '../projects/api'
+import { useProjectDirectory } from '../projects/queries/useProjectDirectory'
 import {
   createProjectIssuesPath,
   createTeamViewPath,
   workspaceNavPaths,
-} from '../routes/paths'
-import { getWorkItemConfiguration } from '../work-items/api'
+} from '../shared/routing/paths'
+import {
+  useTeamWorkItemConfigurations,
+} from '../work-items/queries/useWorkItemConfigurations'
 import {
   createSavedWorkspaceView,
   deleteSavedWorkspaceView,
-  getSavedWorkspaceViews,
   searchWorkspace,
   updateSavedWorkspaceView,
 } from './api'
+import {
+  useSavedWorkspaceViews,
+} from './queries/useSavedWorkspaceViews'
 import {
   deduplicateSearchMigrationWarnings,
   getSearchColumns,
@@ -65,9 +69,9 @@ import {
   serializeSearchRouteState,
   updateSearchRouteState,
   type SearchRouteState,
-} from './queryState'
-import { SearchResultCollection } from './SearchResultCollection'
-import { createSearchStatusOptions, type SearchStatusOption } from './statusOptions'
+} from './model/queryState'
+import { SearchResultCollection } from './ui/SearchResultCollection'
+import { createSearchStatusOptions, type SearchStatusOption } from './model/statusOptions'
 
 /**
  * Saved view作成フォームの入力stateです。
@@ -108,10 +112,6 @@ const savedViewVisibilities = ['personal', 'team', 'shared'] as const satisfies 
 const selectableColumns = ['type', 'status', 'assignee', 'creator', 'project', 'team', 'dueDate', 'updatedAt'] as const
 const emptyTeams: ProjectDirectoryTeam[] = []
 const emptyResolvedWorkItemConfigurations: Record<string, ResolvedWorkItemConfiguration> = {}
-const apiSWRConfig = {
-  dedupingInterval: 10_000,
-  shouldRetryOnError: false,
-} as const
 
 /**
  * Permission-aware Workspace search、saved view、cursor paginationを提供する画面です。
@@ -145,53 +145,36 @@ export function SearchPage() {
   const t = useMemo(() => createTranslator(locale), [locale])
   const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
   const accessToken = session?.accessToken
-  const currentUserKey = accessToken ? (['current-user', accessToken] as const) : null
   const {
     data: user,
     error: currentUserError,
     isLoading: isCurrentUserLoading,
-  } = useSWR(currentUserKey, ([, token]) => getCurrentUser(token), apiSWRConfig)
-  const projectDirectoryKey = accessToken && user && !currentUserError
-    ? (['project-directory', accessToken, locale] as const)
-    : null
+  } = useCurrentUser(accessToken)
   const {
     data: teams = emptyTeams,
     error: projectDirectoryError,
     isLoading: isProjectDirectoryLoading,
-  } = useSWR(
-    projectDirectoryKey,
-    ([, token, currentLocale]) => getProjectDirectory(token, currentLocale),
-    apiSWRConfig,
-  )
-  const teamIdsSignature = JSON.stringify(teams.map((team) => team.id).sort())
-  const workItemConfigurationsKey = accessToken && user && !currentUserError && !isProjectDirectoryLoading
-    ? (['search-work-item-configurations', accessToken, teamIdsSignature] as const)
-    : null
+  } = useProjectDirectory({
+    accessToken,
+    enabled: Boolean(user && !currentUserError),
+    locale,
+  })
   const {
     data: workItemConfigurationLoadResult,
     error: workItemConfigurationsError,
-  } = useSWR(
-    workItemConfigurationsKey,
-    ([, token, serializedTeamIds]) => loadSearchWorkItemConfigurations(
-      token,
-      readSerializedTeamIds(serializedTeamIds),
-    ),
-    apiSWRConfig,
+  } = useTeamWorkItemConfigurations(
+    accessToken,
+    'search',
+    teams.map((team) => team.id).sort(),
+    Boolean(user && !currentUserError && !isProjectDirectoryLoading),
   )
   const workItemConfigurationsByTeam = workItemConfigurationLoadResult?.configurationsByTeam ??
     emptyResolvedWorkItemConfigurations
-  const savedViewsKey = accessToken && user && !currentUserError
-    ? (['saved-workspace-views', accessToken] as const)
-    : null
   const {
     data: savedViews = [],
     error: savedViewsError,
     mutate: mutateSavedViews,
-  } = useSWR(
-    savedViewsKey,
-    ([, token]) => getSavedWorkspaceViews(token),
-    apiSWRConfig,
-  )
+  } = useSavedWorkspaceViews(accessToken, Boolean(user && !currentUserError))
   const routeState = useMemo(
     () => parseSearchRouteState(searchParams),
     [searchParams],
@@ -1327,38 +1310,6 @@ function hasExplicitSearchState(searchParams: URLSearchParams) {
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? value as Record<string, unknown> : {}
-}
-
-async function loadSearchWorkItemConfigurations(
-  accessToken: string,
-  teamIds: readonly string[],
-) {
-  const results = await Promise.allSettled(teamIds.map(async (teamId) => ({
-    configuration: await getWorkItemConfiguration(accessToken, { kind: 'team', teamId }),
-    teamId,
-  })))
-
-  return {
-    configurationsByTeam: Object.fromEntries(results.flatMap((result) =>
-      result.status === 'fulfilled'
-        ? [[result.value.teamId, result.value.configuration]]
-        : [],
-    )) as Record<string, ResolvedWorkItemConfiguration>,
-    errors: results.flatMap((result) =>
-      result.status === 'rejected' ? [result.reason] : []
-    ),
-  }
-}
-
-function readSerializedTeamIds(value: string) {
-  try {
-    const parsed: unknown = JSON.parse(value)
-    return Array.isArray(parsed) && parsed.every((teamId) => typeof teamId === 'string')
-      ? parsed
-      : []
-  } catch {
-    return []
-  }
 }
 
 function formatSavedViewMigrationWarnings(view: SavedWorkspaceView) {

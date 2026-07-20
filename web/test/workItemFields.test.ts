@@ -14,11 +14,11 @@ import {
   parseCustomFieldFormData,
   readCustomFieldIdFromFormName,
   validateCustomFieldValue,
-} from '../src/work-items/customFields'
+} from '../src/work-items/model/customFields'
 import { workspaceWorkItemConfigurationFixture } from '../src/work-items/fixtures'
 import {
   matchesWorkItemDefinitionFilter,
-} from '../src/work-items/workItemFilters'
+} from '../src/work-items/model/workItemFilters'
 import {
   formatWorkItemCustomFieldValue,
   isCompletedWorkItem,
@@ -27,7 +27,7 @@ import {
   resolveAllowedWorkflowStatuses,
   resolveWorkflowStatusCategory,
   resolveWorkflowStatusLabel,
-} from '../src/work-items/workItemDisplay'
+} from '../src/work-items/model/workItemDisplay'
 
 const definitions = workspaceWorkItemConfigurationFixture.customFields
 

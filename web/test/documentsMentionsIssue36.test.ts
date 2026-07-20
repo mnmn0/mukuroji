@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   extractDocumentMentions,
   extractMentionMemberKeys,
-} from '../src/documents/comments'
+} from '../src/documents/model/comments'
 
 describe('Document comment mentions', () => {
   test('keeps canonical email member keys and trims terminal punctuation', () => {

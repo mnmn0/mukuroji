@@ -5,7 +5,7 @@ import {
 } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { notificationInboxControllerFixture } from '../src/notifications/fixtures'
-import { WorkspaceScreen } from '../src/pages/WorkspacePage'
+import { WorkspaceScreen } from '../src/pages/workspace/WorkspacePage'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
 
 describe('Workspace approval Inbox', () => {

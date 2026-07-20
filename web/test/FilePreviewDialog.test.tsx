@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { FileAttachment } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { FilePreviewDialog } from '../src/files/FilePreviewDialog'
+import { FilePreviewDialog } from '../src/files/ui/FilePreviewDialog'
 import {
   fileArtifactsControllerFixture,
   imageFileFixture,

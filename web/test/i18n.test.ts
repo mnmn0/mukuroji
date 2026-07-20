@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import { createSidebarLabels } from '../src/i18n'
-import { createPlanningLabels } from '../src/planning/labels'
+import { createSidebarLabels } from '../src/shared/i18n/i18n'
+import { createPlanningLabels } from '../src/planning/ui/labels'
 
 describe('sidebar shortcut labels', () => {
   test('shows the supported modifier keys independently of locale', () => {
