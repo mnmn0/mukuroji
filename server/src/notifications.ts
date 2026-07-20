@@ -85,6 +85,8 @@ export type NotificationItem = {
   eventId: string
   /** `comment.replied` などの event type です。 */
   eventType: string
+  /** Notification の認可対象を再解決する canonical entity ID です。 */
+  entityId?: string
   /** Recipient が通知対象になった理由です。 */
   reasons: string[]
   /** Actor の安全な表示ラベルです。 */
@@ -966,6 +968,7 @@ function toNotificationItem(
     id: encodeNotificationIdentifier(recipientKey, notificationKey),
     eventId,
     eventType,
+    ...(readText(value.entityId) ? { entityId: readText(value.entityId) } : {}),
     reasons: readStringArray(value.reasons),
     ...(readText(value.actorLabel) ?? readText(value.actorMemberKey) ?? readText(value.actorUserId)
       ? { actorLabel: readText(value.actorLabel) ?? readText(value.actorMemberKey) ?? readText(value.actorUserId) }

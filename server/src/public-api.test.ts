@@ -18,6 +18,7 @@ import {
   toSafePublicApiErrorLog,
   type ConnectorAuthorizationService,
   type DeveloperManagementPrincipal,
+  type PublicApiDependencies,
   type PublicImportSourceInput,
   type PublicWorkItemService,
 } from './public-api'
@@ -87,12 +88,15 @@ function createDefaultWorkItemService(
     async get() {
       return workItem
     },
+    async authorizeCreate() {},
     async create() {
       return workItem
     },
+    async authorizeUpdate() {},
     async update() {
       return workItem
     },
+    async authorizeDelete() {},
     async delete() {
       return workItem
     },
@@ -129,6 +133,8 @@ function createTestRouter(input: {
   workItems?: PublicWorkItemService
   connectorAuthorization?: ConnectorAuthorizationService
   managementPrincipal?: DeveloperManagementPrincipal
+  /** Management authentication の request context を検証する override です。 */
+  authenticateManagement?: PublicApiDependencies['authenticateManagement']
   platform?: InMemoryDeveloperPlatformClient
   now?: () => Date
   queueWebhookDelivery?: (workspaceId: string, deliveryId: string) => Promise<void>
@@ -139,7 +145,8 @@ function createTestRouter(input: {
   )
   const router = createPublicApiRouter({
     developerPlatform: platform,
-    authenticateManagement: async () => input.managementPrincipal ?? managementPrincipal,
+    authenticateManagement: input.authenticateManagement ??
+      (async () => input.managementPrincipal ?? managementPrincipal),
     workItems: input.workItems ?? createDefaultWorkItemService(),
     openApiDocument: { openapi: '3.1.0' },
     cursorSecret: 'public-api-test-cursor-secret-at-least-32-bytes',
@@ -171,6 +178,36 @@ async function createApiKey(
 }
 
 describe('public API router', () => {
+  test('passes request metadata to management authentication', async () => {
+    const observations: string[] = []
+    const { router } = createTestRouter({
+      authenticateManagement: async (authorization, context) => {
+        observations.push(
+          authorization,
+          context.req.method,
+          context.req.path,
+          context.req.header('X-Management-Context') ?? '',
+        )
+        return managementPrincipal
+      },
+    })
+
+    const response = await router.request('http://localhost/developer', {
+      headers: {
+        Authorization: 'Bearer session-token',
+        'X-Management-Context': 'forwarded',
+      },
+    })
+
+    expect(response.status).toBe(200)
+    expect(observations).toEqual([
+      'Bearer session-token',
+      'GET',
+      '/developer',
+      'forwarded',
+    ])
+  })
+
   test('redacts error messages, stacks, causes, and unsafe codes from log fields', () => {
     const secret = 'provider-client-secret-must-not-appear'
     const unknownLog = JSON.stringify(toSafePublicApiErrorLog(
@@ -424,6 +461,185 @@ describe('public API router', () => {
     expect(receivedDueDates).toEqual(['2024-02-29', '2026-04-30'])
   })
 
+  test('rechecks current Work Item RBAC before replaying completed mutation receipts', async () => {
+    let allowReplay = false
+    const authorizationChecks: string[] = []
+    const operationCalls = { create: 0, update: 0, delete: 0 }
+    const requireReplayAccess = (operation: string) => {
+      authorizationChecks.push(operation)
+      if (!allowReplay) {
+        throw new PublicApiServiceError(403, 'forbidden', 'Work Item access was revoked.')
+      }
+    }
+    const workItems = createDefaultWorkItemService({
+      async authorizeCreate(_credential, input) {
+        expect(input.teamId).toBe('team-1')
+        requireReplayAccess('create')
+      },
+      async create() {
+        operationCalls.create += 1
+        return createWorkItem('work-item-created')
+      },
+      async authorizeUpdate(_credential, teamId, workItemId, input) {
+        expect({ teamId, workItemId, expectedRevision: input.expectedRevision }).toEqual({
+          teamId: 'team-1',
+          workItemId: 'work-item-1',
+          expectedRevision: 1,
+        })
+        requireReplayAccess('update')
+      },
+      async update() {
+        operationCalls.update += 1
+        return { ...createWorkItem(), title: 'Updated through API' }
+      },
+      async authorizeDelete(_credential, teamId, workItemId) {
+        expect({ teamId, workItemId }).toEqual({
+          teamId: 'team-1',
+          workItemId: 'work-item-1',
+        })
+        requireReplayAccess('delete')
+      },
+      async delete() {
+        operationCalls.delete += 1
+        return createWorkItem()
+      },
+    })
+    const { platform, router } = createTestRouter({ workItems })
+    const apiKey = await createApiKey(platform, ['work-items:write', 'work-items:delete'])
+    const authorization = { Authorization: `Bearer ${apiKey.secret}` }
+    const createRequest = () => router.request('http://localhost/v1/work-items', {
+      method: 'POST',
+      headers: {
+        ...authorization,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'replay-create-work-item',
+      },
+      body: JSON.stringify({
+        teamId: 'team-1',
+        title: 'Replay create',
+        assigneeUserId: 'user-1',
+        dueDate: '2026-07-31',
+        priority: 'medium',
+      }),
+    })
+    const updateRequest = () => router.request(
+      'http://localhost/v1/work-items/work-item-1?teamId=team-1',
+      {
+        method: 'PATCH',
+        headers: {
+          ...authorization,
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'replay-update-work-item',
+        },
+        body: JSON.stringify({ expectedRevision: 1, title: 'Updated through API' }),
+      },
+    )
+    const deleteRequest = () => router.request(
+      'http://localhost/v1/work-items/work-item-1?teamId=team-1',
+      {
+        method: 'DELETE',
+        headers: {
+          ...authorization,
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'replay-delete-work-item',
+        },
+        body: JSON.stringify({ expectedRevision: 1 }),
+      },
+    )
+
+    const created = await createRequest()
+    const createdBody = await created.json()
+    const updated = await updateRequest()
+    const updatedBody = await updated.json()
+    const deleted = await deleteRequest()
+    expect(created.status).toBe(201)
+    expect(updated.status).toBe(200)
+    expect(deleted.status).toBe(204)
+    expect(created.headers.get('Idempotency-Replayed')).toBeNull()
+    expect(updated.headers.get('Idempotency-Replayed')).toBeNull()
+    expect(deleted.headers.get('Idempotency-Replayed')).toBeNull()
+    expect(authorizationChecks).toEqual([])
+
+    for (const request of [createRequest, updateRequest, deleteRequest]) {
+      const denied = await request()
+      expect(denied.status).toBe(403)
+      expect(denied.headers.get('Idempotency-Replayed')).toBeNull()
+      expect(await denied.json()).toMatchObject({ code: 'forbidden' })
+    }
+    expect(operationCalls).toEqual({ create: 1, update: 1, delete: 1 })
+
+    allowReplay = true
+    const createdReplay = await createRequest()
+    const updatedReplay = await updateRequest()
+    const deletedReplay = await deleteRequest()
+    expect(createdReplay.status).toBe(201)
+    expect(updatedReplay.status).toBe(200)
+    expect(deletedReplay.status).toBe(204)
+    expect(createdReplay.headers.get('Idempotency-Replayed')).toBe('true')
+    expect(updatedReplay.headers.get('Idempotency-Replayed')).toBe('true')
+    expect(deletedReplay.headers.get('Idempotency-Replayed')).toBe('true')
+    expect(await createdReplay.json()).toEqual(createdBody)
+    expect(await updatedReplay.json()).toEqual(updatedBody)
+    expect(await deletedReplay.text()).toBe('')
+    expect(operationCalls).toEqual({ create: 1, update: 1, delete: 1 })
+    expect(authorizationChecks).toEqual([
+      'create',
+      'update',
+      'delete',
+      'create',
+      'update',
+      'delete',
+    ])
+  })
+
+  test('denies a replay before validating a malformed stored receipt', async () => {
+    let authorizationChecks = 0
+    let createCalls = 0
+    const workItems = createDefaultWorkItemService({
+      async authorizeCreate() {
+        authorizationChecks += 1
+        throw new PublicApiServiceError(403, 'forbidden', 'Work Item access was revoked.')
+      },
+      async create() {
+        createCalls += 1
+        return createWorkItem()
+      },
+    })
+    const { platform, router } = createTestRouter({ workItems })
+    const apiKey = await createApiKey(platform, ['work-items:write'])
+    platform.reserveIdempotency = async () => ({
+      status: 'replay' as const,
+      response: {
+        status: 299,
+        body: { receiptSecret: 'must-not-be-exposed' },
+      },
+    })
+
+    const response = await router.request('http://localhost/v1/work-items', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey.secret}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'malformed-receipt-with-revoked-access',
+      },
+      body: JSON.stringify({
+        teamId: 'team-1',
+        title: 'Denied replay',
+        assigneeUserId: 'user-1',
+        dueDate: '2026-07-31',
+        priority: 'medium',
+      }),
+    })
+
+    expect(response.status).toBe(403)
+    expect(response.headers.get('Idempotency-Replayed')).toBeNull()
+    const responseText = await response.text()
+    expect(responseText).not.toContain('must-not-be-exposed')
+    expect(JSON.parse(responseText)).toMatchObject({ code: 'forbidden' })
+    expect(authorizationChecks).toBe(1)
+    expect(createCalls).toBe(0)
+  })
+
   test('does not silently ignore cursors on advertised management lists', async () => {
     const { router } = createTestRouter()
     const paths = [
@@ -600,9 +816,13 @@ describe('public API router', () => {
 
   test('uses Team query scope for public external-link create, list, and delete', async () => {
     const authorized: Array<{ teamId: string; workItemId: string; write: boolean }> = []
+    let allowWrite = true
     const workItems = createDefaultWorkItemService({
       async authorizeExternalLink(_credential, teamId, workItemId, write) {
         authorized.push({ teamId, workItemId, write })
+        if (write && !allowWrite) {
+          throw new PublicApiServiceError(403, 'forbidden', 'Work Item access was revoked.')
+        }
       },
     })
     const { platform, router } = createTestRouter({ workItems })
@@ -668,6 +888,21 @@ describe('public API router', () => {
       },
     )
     expect(deleted.status).toBe(204)
+    allowWrite = false
+    const deniedReplay = await router.request(
+      `http://localhost/v1/work-items/work-item-1/external-links/${link.id}?teamId=team-1`,
+      {
+        method: 'DELETE',
+        headers: {
+          ...authorization,
+          'Idempotency-Key': 'delete-public-external-link',
+        },
+      },
+    )
+    expect(deniedReplay.status).toBe(403)
+    expect(deniedReplay.headers.get('Idempotency-Replayed')).toBeNull()
+    expect(await deniedReplay.json()).toMatchObject({ code: 'forbidden' })
+    allowWrite = true
     const replayedDelete = await router.request(
       `http://localhost/v1/work-items/work-item-1/external-links/${link.id}?teamId=team-1`,
       {
@@ -683,6 +918,8 @@ describe('public API router', () => {
     expect(authorized).toEqual([
       { teamId: 'team-1', workItemId: 'work-item-1', write: true },
       { teamId: 'team-1', workItemId: 'work-item-1', write: false },
+      { teamId: 'team-1', workItemId: 'work-item-1', write: true },
+      { teamId: 'team-1', workItemId: 'work-item-1', write: true },
       { teamId: 'team-1', workItemId: 'work-item-1', write: true },
     ])
   })
@@ -784,6 +1021,89 @@ describe('public API router', () => {
     })
   })
 
+  test('requires canonical scope and current RBAC before replaying a managed link deletion', async () => {
+    let allowWrite = true
+    const authorized: Array<{ teamId: string; workItemId: string; write: boolean }> = []
+    const workItems = createDefaultWorkItemService({
+      async authorizeExternalLink(_credential, teamId, workItemId, write) {
+        authorized.push({ teamId, workItemId, write })
+        if (write && !allowWrite) {
+          throw new PublicApiServiceError(403, 'forbidden', 'Work Item access was revoked.')
+        }
+      },
+    })
+    const { platform, router } = createTestRouter({ workItems })
+    const installation = await platform.installConnector({
+      workspaceId: 'workspace-1',
+      installedByUserId: 'user-1',
+      input: {
+        category: 'source-control',
+        provider: 'github',
+        name: 'Managed delete GitHub',
+        scopes: ['issues:read'],
+        credential: 'managed-delete-credential',
+      },
+    })
+    const link = await platform.createExternalWorkItemLink({
+      workspaceId: 'workspace-1',
+      input: {
+        teamId: 'team-1',
+        workItemId: 'work-item-1',
+        installationId: installation.id,
+        resourceType: 'issue',
+        externalId: 'GH-57',
+        externalUrl: 'https://github.com/mnmn0/mukuroji/issues/57',
+        displayKey: '#57',
+        syncDirection: 'bidirectional',
+      },
+    })
+    const deleteLink = platform.deleteExternalWorkItemLink.bind(platform)
+    let deleteCalls = 0
+    platform.deleteExternalWorkItemLink = async (request) => {
+      deleteCalls += 1
+      return deleteLink(request)
+    }
+    const scopedUrl = `http://localhost/developer/external-links/${link.id}` +
+      '?teamId=team-1&workItemId=work-item-1'
+    const request = (url = scopedUrl) => router.request(url, {
+      method: 'DELETE',
+      headers: {
+        Authorization: 'Bearer session-token',
+        'Idempotency-Key': 'delete-managed-link-with-current-rbac',
+      },
+    })
+
+    const missingScope = await request(
+      `http://localhost/developer/external-links/${link.id}`,
+    )
+    expect(missingScope.status).toBe(400)
+    expect(await missingScope.json()).toMatchObject({ code: 'invalid_request' })
+
+    const deleted = await request()
+    expect(deleted.status).toBe(204)
+    expect(deleted.headers.get('Idempotency-Replayed')).toBeNull()
+    expect(deleteCalls).toBe(1)
+
+    allowWrite = false
+    const deniedReplay = await request()
+    expect(deniedReplay.status).toBe(403)
+    expect(deniedReplay.headers.get('Idempotency-Replayed')).toBeNull()
+    expect(await deniedReplay.json()).toMatchObject({ code: 'forbidden' })
+    expect(deleteCalls).toBe(1)
+
+    allowWrite = true
+    const replay = await request()
+    expect(replay.status).toBe(204)
+    expect(replay.headers.get('Idempotency-Replayed')).toBe('true')
+    expect(await replay.text()).toBe('')
+    expect(deleteCalls).toBe(1)
+    expect(authorized).toEqual([
+      { teamId: 'team-1', workItemId: 'work-item-1', write: true },
+      { teamId: 'team-1', workItemId: 'work-item-1', write: true },
+      { teamId: 'team-1', workItemId: 'work-item-1', write: true },
+    ])
+  })
+
   test('binds mutation idempotency to the canonical teamId query', async () => {
     let updateCount = 0
     const workItems = createDefaultWorkItemService({
@@ -842,9 +1162,26 @@ describe('public API router', () => {
     expect(await expired.json()).toMatchObject({ code: 'invalid_request' })
   })
 
-  test('stages the full nested import source without blocking on a remote dry-run', async () => {
+  test('stages a nested import once and reauthorizes its completed replay', async () => {
     const received: PublicImportSourceInput[] = []
+    let allowReplay = false
+    let replayValidations = 0
     const workItems = createDefaultWorkItemService({
+      async dryRunImport(_principal, input) {
+        replayValidations += 1
+        expect(input.teamId).toBe('team-1')
+        if (!allowReplay) {
+          throw new PublicApiServiceError(403, 'forbidden', 'Import access was revoked.')
+        }
+        return {
+          valid: true,
+          totalRows: 1,
+          validRows: 1,
+          invalidRows: 0,
+          errors: [],
+          sample: [],
+        }
+      },
       async commitImport(_principal, jobId, input) {
         expect(jobId).toBeUndefined()
         received.push(structuredClone(input))
@@ -866,7 +1203,7 @@ describe('public API router', () => {
         { sourceField: 'Due', targetField: 'dueDate', required: true },
       ],
     }
-    const response = await router.request('http://localhost/developer/imports', {
+    const request = () => router.request('http://localhost/developer/imports', {
       method: 'POST',
       headers: {
         Authorization: 'Bearer session-token',
@@ -875,14 +1212,29 @@ describe('public API router', () => {
       },
       body: JSON.stringify(input),
     })
+    const response = await request()
+    const responseBody = await response.json()
 
     expect(response.status).toBe(202)
     expect(received).toEqual([input])
-    expect(await response.json()).toMatchObject({
+    expect(responseBody).toMatchObject({
       id: 'import-commit',
       status: 'queued',
       dryRun: false,
     })
+
+    const deniedReplay = await request()
+    expect(deniedReplay.status).toBe(403)
+    expect(deniedReplay.headers.get('Idempotency-Replayed')).toBeNull()
+    expect(received).toEqual([input])
+
+    allowReplay = true
+    const replay = await request()
+    expect(replay.status).toBe(202)
+    expect(replay.headers.get('Idempotency-Replayed')).toBe('true')
+    expect(await replay.json()).toEqual(responseBody)
+    expect(received).toEqual([input])
+    expect(replayValidations).toBe(2)
   })
 
   test('retries a side-effect-free import dry-run after response receipt persistence fails', async () => {
@@ -947,7 +1299,7 @@ describe('public API router', () => {
     const replay = await request()
     expect(replay.status).toBe(200)
     expect(replay.headers.get('Idempotency-Replayed')).toBe('true')
-    expect(validations).toBe(2)
+    expect(validations).toBe(3)
   })
 
   test('retries import cancellation deterministically after response receipt persistence fails', async () => {
@@ -978,7 +1330,15 @@ describe('public API router', () => {
       await completeIdempotency(request)
     }
     let cancellations = 0
+    let allowAuthorization = true
+    let authorizationChecks = 0
     const workItems = createDefaultWorkItemService({
+      async authorizeImportJob() {
+        authorizationChecks += 1
+        if (!allowAuthorization) {
+          throw new PublicApiServiceError(403, 'forbidden', 'Import access was revoked.')
+        }
+      },
       async cancelImport(_principal, current) {
         cancellations += 1
         if (current.status === 'cancelled') return current
@@ -1007,6 +1367,13 @@ describe('public API router', () => {
     expect(await retried.json()).toMatchObject({ id: job.id, status: 'cancelled' })
     expect(cancellations).toBe(2)
 
+    allowAuthorization = false
+    const deniedReplay = await request('cancel-import-receipt-retry')
+    expect(deniedReplay.status).toBe(404)
+    expect(deniedReplay.headers.get('Idempotency-Replayed')).toBeNull()
+    expect(cancellations).toBe(2)
+
+    allowAuthorization = true
     const replay = await request('cancel-import-receipt-retry')
     expect(replay.status).toBe(200)
     expect(replay.headers.get('Idempotency-Replayed')).toBe('true')
@@ -1019,6 +1386,7 @@ describe('public API router', () => {
       status: 'cancelled',
     })
     expect(cancellations).toBe(3)
+    expect(authorizationChecks).toBe(5)
   })
 
   test('requires the Workspace settings administrator capability for every management area', async () => {
@@ -1475,6 +1843,12 @@ describe('public API router', () => {
         'other-admin-webhook-rotate',
       ],
       [
+        `/developer/webhook-subscriptions/${created.subscription.id}`,
+        'other-admin-webhook-delete',
+        undefined,
+        'DELETE',
+      ],
+      [
         `/developer/webhook-deliveries/${deliveries[0]!.id}/replay`,
         'other-admin-webhook-replay',
       ],
@@ -1485,8 +1859,11 @@ describe('public API router', () => {
       expect(await response.json()).toMatchObject({ code: 'forbidden' })
     }
     expect(queued).toEqual([])
-    expect((await platform.listWebhookSubscriptions('workspace-1'))[0]?.url)
-      .toBe('https://hooks.example.test/original')
+    expect((await platform.listWebhookSubscriptions('workspace-1'))[0])
+      .toMatchObject({
+        status: 'active',
+        url: 'https://hooks.example.test/original',
+      })
 
     const authorizedTeamChecks: string[][] = []
     const ownerRouter = createTestRouter({
@@ -1512,7 +1889,12 @@ describe('public API router', () => {
       expect(response.status).toBe(403)
       expect(await response.json()).toMatchObject({ code: 'forbidden' })
     }
-    expect(authorizedTeamChecks).toEqual([['team-1'], ['team-1'], ['team-1']])
+    expect(authorizedTeamChecks).toEqual([
+      ['team-1'],
+      ['team-1'],
+      ['team-1'],
+      ['team-1'],
+    ])
     expect(queued).toEqual([])
   })
 
@@ -1585,6 +1967,9 @@ describe('public API router', () => {
       detectedAt: NOW.toISOString(),
     }
     const beginOperationIds: string[] = []
+    let allowConflictWrite = false
+    let conflictWriteChecks = 0
+    let resolveCalls = 0
     const connectorAuthorization: ConnectorAuthorizationService = {
       async begin(_principal, _input, operationId) {
         beginOperationIds.push(operationId ?? '')
@@ -1642,6 +2027,7 @@ describe('public API router', () => {
         return { items: [conflict], hasMore: false }
       },
       async resolveConflict(_principal, conflictId, input) {
+        resolveCalls += 1
         expect(conflictId).toBe('conflict-1')
         expect(input).toEqual({ resolution: 'use-local' })
         return {
@@ -1652,7 +2038,20 @@ describe('public API router', () => {
         }
       },
     }
-    const { router } = createTestRouter({ connectorAuthorization })
+    const workItems = createDefaultWorkItemService({
+      async authorizeExternalLink(_credential, teamId, workItemId, write) {
+        conflictWriteChecks += 1
+        expect({ teamId, workItemId, write }).toEqual({
+          teamId: 'team-1',
+          workItemId: 'work-item-1',
+          write: true,
+        })
+        if (!allowConflictWrite) {
+          throw new PublicApiServiceError(403, 'forbidden', 'Work Item access was revoked.')
+        }
+      },
+    })
+    const { platform, router } = createTestRouter({ connectorAuthorization, workItems })
     const beginRequest = () => router.request(
       'http://localhost/developer/connector-installations',
       {
@@ -1699,9 +2098,34 @@ describe('public API router', () => {
     expect(cancelled.headers.get('Location'))
       .toBe('/settings/developer?tab=connectors&connectorOAuth=cancelled')
 
-    const resolved = await router.request(
-      'http://localhost/developer/sync-conflicts/conflict-1/resolve',
-      {
+    const conflictInstallation = await platform.installConnector({
+      workspaceId: 'workspace-1',
+      installedByUserId: 'user-1',
+      input: {
+        category: 'source-control',
+        provider: 'github',
+        name: 'Conflict GitHub',
+        scopes: ['issues:read'],
+        credential: 'conflict-connector-credential',
+      },
+    })
+    const conflictLink = await platform.createExternalWorkItemLink({
+      workspaceId: 'workspace-1',
+      input: {
+        teamId: 'team-1',
+        workItemId: 'work-item-1',
+        installationId: conflictInstallation.id,
+        resourceType: 'issue',
+        externalId: 'GH-conflict',
+        externalUrl: 'https://github.com/mnmn0/mukuroji/issues/57',
+        displayKey: '#57',
+        syncDirection: 'bidirectional',
+      },
+    })
+    conflict.externalLinkId = conflictLink.id
+
+    const resolveRequest = () => router.request(
+      'http://localhost/developer/sync-conflicts/conflict-1/resolve', {
         method: 'POST',
         headers: {
           Authorization: 'Bearer session-token',
@@ -1711,7 +2135,22 @@ describe('public API router', () => {
         body: JSON.stringify({ resolution: 'use-local' }),
       },
     )
+    const resolved = await resolveRequest()
+    const resolvedBody = await resolved.json()
     expect(resolved.status).toBe(200)
-    expect(await resolved.json()).toMatchObject({ id: 'conflict-1', status: 'resolved' })
+    expect(resolvedBody).toMatchObject({ id: 'conflict-1', status: 'resolved' })
+
+    const deniedReplay = await resolveRequest()
+    expect(deniedReplay.status).toBe(403)
+    expect(deniedReplay.headers.get('Idempotency-Replayed')).toBeNull()
+    expect(resolveCalls).toBe(1)
+
+    allowConflictWrite = true
+    const replay = await resolveRequest()
+    expect(replay.status).toBe(200)
+    expect(replay.headers.get('Idempotency-Replayed')).toBe('true')
+    expect(await replay.json()).toEqual(resolvedBody)
+    expect(resolveCalls).toBe(1)
+    expect(conflictWriteChecks).toBe(2)
   })
 })

@@ -15,10 +15,8 @@ import {
   type TableDescription,
 } from '@aws-sdk/client-dynamodb'
 import {
-  DeleteCommand,
   DynamoDBDocumentClient,
   GetCommand,
-  PutCommand,
   QueryCommand,
   TransactWriteCommand,
   type TransactWriteCommandInput,
@@ -129,10 +127,14 @@ export const DOCUMENT_OPERATION_RECEIPT_RETENTION_DAYS = 30
 /**
  * 一つの Document から transactionally index できる backlink 数です。
  *
- * Restore の全差し替えでも current/version と合わせて DynamoDB の 100 action
- * 上限内に収めるため 45 件に制限します。
+ * 最大深度 32 の Document で restore が全 target を差し替えても、current/version、
+ * authorization lineage、backlink rows、target fence rowsを DynamoDB の 100 action
+ * 上限内に収めるため 14 件に制限します。
  */
-export const DOCUMENT_MAX_BACKLINK_COUNT = 45
+export const DOCUMENT_MAX_BACKLINK_COUNT = 14
+
+/** Work Item backlink target fence の schema version です。 */
+const DOCUMENT_BACKLINK_TARGET_FENCE_SCHEMA_VERSION = 1
 
 /** Conditional retry を行う最大回数です。 */
 const DOCUMENT_CONDITIONAL_RETRY_LIMIT = 6
@@ -220,6 +222,10 @@ export type DocumentAccessContext = {
   projectRole?: DocumentProjectRole
   /** Project ID ごとの現在の Project role です。 */
   projectRoles?: Readonly<Record<string, DocumentProjectRole>>
+  /** Enterprise RBAC が許可した scope だけへ Document ACL を制限するかどうかです。 */
+  restrictToAuthorizedScopes?: boolean
+  /** Enterprise RBAC が Workspace scope で許可した最大 Document role です。 */
+  workspaceScopeRole?: DocumentProjectRole
   /** Cognito group を現在確認済みの system administrator かどうかです。 */
   isSystemAdmin?: boolean
   /**
@@ -374,6 +380,8 @@ export type CreateDocumentRequest = {
   relations?: DocumentRelation[]
   /** Relation target 検証を source revision へ束縛する transaction guards です。 */
   relationTargetAuthorizationGuards?: readonly DocumentAuthorizationGenerationGuard[]
+  /** Template など作成元 Document の ACL snapshot を束縛する内部 transaction guards です。 */
+  sourceAuthorizationGuards?: readonly DocumentAuthorizationGenerationGuard[]
   /** Client retry を同じ Document ID へ束縛する key です。 */
   idempotencyKey?: string
   /** Materialized content ではなく caller intent を束縛する内部 fingerprint です。 */
@@ -1031,10 +1039,10 @@ type DocumentProjectionContext = {
 }
 
 /**
- * Public share mutation authorization を transactionへ束縛する read snapshot です。
+ * Document mutation authorization を transactionへ束縛する lineage snapshot です。
  */
-type DocumentShareAuthorizationSnapshot = {
-  /** Share 対象の current Document row です。 */
+type DocumentAuthorizationSnapshot = {
+  /** Capability 判定対象の current Document row です。 */
   documentRow: StoredDocumentItem
   /** 直近の親から root へ向かう ancestor rows です。 */
   ancestorRows: StoredDocumentItem[]
@@ -1309,6 +1317,30 @@ type StoredDocumentBacklinkItem = {
 }
 
 /**
+ * Work Item delete と Document backlink mutation を直列化する durable fence row です。
+ */
+type StoredDocumentBacklinkTargetFenceItem = {
+  /** Canonical Workspace partition key です。 */
+  workspaceId: string
+  /** Work Item target を識別する sort key です。 */
+  recordKey: string
+  /** Row discriminator です。 */
+  entryType: 'document-backlink-target-fence'
+  /** Fence row schema version です。 */
+  schemaVersion: 1
+  /** Fence 対象 relation target 種別です。 */
+  targetKind: 'work-item'
+  /** Canonical Work Item target ID です。 */
+  targetId: string
+  /** Archive 済み Document を含む active backlink row 数です。 */
+  activeBacklinkCount: number
+  /** Backlink add/remove/delete fence を直列化する単調増加 version です。 */
+  version: number
+  /** Work Item deletion が確定した timestamp です。 */
+  deletedAt?: string
+}
+
+/**
  * Tree list cursor の scope-bound payload です。
  */
 type DocumentTreeCursor = {
@@ -1399,6 +1431,16 @@ type DocumentRelationDiff = {
 }
 
 /**
+ * 一つの Work Item target に coalesce した backlink count 差分です。
+ */
+type WorkItemBacklinkTargetDelta = {
+  /** Canonical Work Item target ID です。 */
+  targetId: string
+  /** Transaction が増減する backlink row 数です。 */
+  delta: number
+}
+
+/**
  * Workspace member の manager eligibility を変更する前に検証する Document snapshot です。
  */
 export type DocumentManagerLifecycleSnapshot = {
@@ -1406,6 +1448,24 @@ export type DocumentManagerLifecycleSnapshot = {
   authorizationRevision: number
   /** 対象 member 以外に active/non-guest manager がいない最初の private Document ID です。 */
   blockingDocumentId?: string
+}
+
+/**
+ * Work Item delete transaction 用の Document backlink fence request です。
+ */
+export type PrepareDocumentWorkItemDeletionFenceRequest = {
+  /** Work Item を所有する Workspace ID です。 */
+  workspaceId: string
+  /** Document relation が参照する canonical Work Item target ID です。 */
+  workItemId: string
+}
+
+/**
+ * Work Item delete と backlink add を直列化する transaction item です。
+ */
+export type DocumentWorkItemDeletionFenceTransactWrite = {
+  /** Backlink count が 0 の場合だけ durable tombstone を保存する transaction item です。 */
+  transactWriteItem: NonNullable<TransactWriteCommandInput['TransactItems']>[number]
 }
 
 /**
@@ -1420,6 +1480,10 @@ export interface DocumentClient {
     memberKey: string,
     eligibleManagerMemberKeys: readonly string[],
   ): Promise<DocumentManagerLifecycleSnapshot>
+  /** Work Item delete transaction に Document backlink existence fence を追加します。 */
+  prepareWorkItemDeletionFenceTransactWrite(
+    request: PrepareDocumentWorkItemDeletionFenceRequest,
+  ): Promise<DocumentWorkItemDeletionFenceTransactWrite>
   /** Permission-filtered Document tree を page 取得します。 */
   list(input: ListDocumentsRequest): Promise<DocumentTreeResponse>
   /** 一つの permission-filtered Document detail を取得します。 */
@@ -2742,6 +2806,88 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     )
   }
 
+  /** Work Item delete transaction に Document backlink existence fence を追加します。 */
+  async prepareWorkItemDeletionFenceTransactWrite(
+    request: PrepareDocumentWorkItemDeletionFenceRequest,
+  ): Promise<DocumentWorkItemDeletionFenceTransactWrite> {
+    await this.ensureTable()
+    assertIdentifier(request.workspaceId, 'workspaceId')
+    assertCanonicalWorkItemId(
+      request.workItemId,
+      'workItemId',
+    )
+    const existing =
+      await this.getWorkItemBacklinkTargetFence(
+        request.workspaceId,
+        request.workItemId,
+      )
+    if (existing === undefined) {
+      const legacyBacklinkCount =
+        await this.countStoredWorkItemBacklinks(
+          request.workspaceId,
+          request.workItemId,
+        )
+      if (legacyBacklinkCount > 0) {
+        throw workItemDocumentBacklinkConflict(
+          legacyBacklinkCount,
+        )
+      }
+      return {
+        transactWriteItem: {
+          Put: {
+            TableName: this.tableName,
+            Item: createWorkItemBacklinkTargetFenceItem(
+              request.workspaceId,
+              request.workItemId,
+              0,
+              1,
+              this.now().toISOString(),
+            ),
+            ConditionExpression:
+              'attribute_not_exists(workspaceId)',
+          },
+        },
+      }
+    }
+    if (existing.activeBacklinkCount > 0) {
+      throw workItemDocumentBacklinkConflict(
+        existing.activeBacklinkCount,
+      )
+    }
+    return {
+      transactWriteItem: {
+        Put: {
+          TableName: this.tableName,
+          Item: {
+            ...existing,
+            version: existing.version + 1,
+            deletedAt: this.now().toISOString(),
+          } satisfies StoredDocumentBacklinkTargetFenceItem,
+          ConditionExpression:
+            '#entryType = :entryType AND ' +
+            'schemaVersion = :schemaVersion AND ' +
+            'targetKind = :targetKind AND targetId = :targetId AND ' +
+            'activeBacklinkCount = :zero AND #version = :expectedVersion',
+          ExpressionAttributeNames: {
+            '#entryType': 'entryType',
+            '#version': 'version',
+          },
+          ExpressionAttributeValues: {
+            ':entryType':
+              'document-backlink-target-fence',
+            ':schemaVersion':
+              DOCUMENT_BACKLINK_TARGET_FENCE_SCHEMA_VERSION,
+            ':targetKind': 'work-item',
+            ':targetId': request.workItemId,
+            ':zero': 0,
+            ':expectedVersion':
+              existing.version,
+          },
+        },
+      },
+    }
+  }
+
   /** Permission-filtered Document tree を page 取得します。 */
   async list(input: ListDocumentsRequest): Promise<DocumentTreeResponse> {
     await this.ensureTable()
@@ -3007,8 +3153,12 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       input.parentId === undefined
         ? undefined
         : await this.createTreeMutationGuard(input.workspaceId)
+    let parentAuthorization:
+      | DocumentAuthorizationSnapshot
+      | undefined
     if (input.parentId !== undefined) {
-      await this.validateParent(
+      parentAuthorization =
+        await this.validateParent(
         input.workspaceId,
         input.parentId,
         input.scope,
@@ -3038,10 +3188,14 @@ export class DynamoDbDocumentsClient implements DocumentClient {
         : undefined
     const mutationAuthorizationGuards =
       mergeAuthorizationGuards(
+        input.access.authorizationGuards,
         input.relationTargetAuthorizationGuards,
-        authorizationMutationGuard === undefined
-          ? undefined
-          : input.access.authorizationGuards,
+        input.sourceAuthorizationGuards,
+        documentAuthorizationSnapshotGuards(
+          this.tableName,
+          input.workspaceId,
+          [parentAuthorization],
+        ),
       )
     const base = {
       schemaVersion: DOCUMENT_SCHEMA_VERSION,
@@ -3108,6 +3262,16 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       createRequestFingerprint: requestFingerprint,
     }
     assertDynamoItemSize(row)
+    const relationDiff: DocumentRelationDiff = {
+      added: backlinkRelations(document),
+      removed: [],
+    }
+    const backlinkMutationActions =
+      await this.prepareBacklinkMutationActions(
+        input.workspaceId,
+        document.id,
+        relationDiff,
+      )
     const createActions: NonNullable<TransactWriteCommandInput['TransactItems']> = [
       {
         Put: {
@@ -3146,12 +3310,7 @@ export class DynamoDbDocumentsClient implements DocumentClient {
               document,
             ),
           ]),
-      ...backlinkPutActions(
-        this.tableName,
-        input.workspaceId,
-        document.id,
-        backlinkRelations(document),
-      ),
+      ...backlinkMutationActions,
       ...(treeMutationGuard === undefined
         ? []
         : [
@@ -3215,16 +3374,38 @@ export class DynamoDbDocumentsClient implements DocumentClient {
           'The document tree changed concurrently.',
         )
       }
+      const existing =
+        await this.getDocumentRow(
+          input.workspaceId,
+          documentId,
+        )
       if (idempotencyHash === undefined) {
+        if (existing === undefined) {
+          await this
+            .throwIfAddedWorkItemTargetDeleted(
+              input.workspaceId,
+              relationDiff,
+            )
+        }
         throw new DocumentError(
           409,
           'DocumentCreateConflict',
           'The document could not be created concurrently.',
         )
       }
-      const existing = await this.getDocumentRow(input.workspaceId, documentId)
+      if (existing === undefined) {
+        await this
+          .throwIfAddedWorkItemTargetDeleted(
+            input.workspaceId,
+            relationDiff,
+          )
+        throw new DocumentError(
+          409,
+          'DocumentCreateIdempotencyConflict',
+          'The idempotency key has already been used with different input.',
+        )
+      }
       if (
-        existing === undefined ||
         existing.createIdempotencyKeyHash !== idempotencyHash ||
         existing.createRequestFingerprint !== requestFingerprint
       ) {
@@ -3251,15 +3432,29 @@ export class DynamoDbDocumentsClient implements DocumentClient {
   /** Document metadata を revision 条件付きで更新します。 */
   async update(input: UpdateDocumentRequest): Promise<DocumentDetail> {
     await this.ensureTable()
-    const row = await this.requireMutableDocument(input.workspaceId, input.documentId, input.access, 'edit')
+    const authorization =
+      await this.requireMutableDocument(
+        input.workspaceId,
+        input.documentId,
+        input.access,
+        'edit',
+      )
+    const row = authorization.documentRow
+    const capabilities =
+      this.resolveDocumentAuthorizationCapabilities(
+        authorization,
+        input.access,
+      )
     requireExpectedRevision(row, input.expectedRevision)
     const normalizedPermission = input.permission === undefined
       ? undefined
       : normalizePermissionForActor(input.permission, input.access.memberKey)
     if (input.scope !== undefined) validateScope(input.scope)
     if (input.permission !== undefined) {
-      const projected = await this.projectDocument(input.workspaceId, row.document, input.access)
-      requireCapability(projected.capabilities.canManagePermissions, 'DocumentPermissionDenied')
+      requireCapability(
+        capabilities.canManagePermissions,
+        'DocumentPermissionDenied',
+      )
       validatePermission(normalizedPermission ?? input.permission)
     }
     const permissionAffectsAuthorization =
@@ -3277,12 +3472,6 @@ export class DynamoDbDocumentsClient implements DocumentClient {
             input.expectedAuthorizationRevision,
           )
         : undefined
-    const mutationAuthorizationGuards =
-      authorizationMutationGuard === undefined
-        ? undefined
-        : mergeAuthorizationGuards(
-            input.access.authorizationGuards,
-          )
     const nextScope = input.scope ?? row.document.scope
     const nextParentId = input.parentId === null
       ? undefined
@@ -3295,22 +3484,25 @@ export class DynamoDbDocumentsClient implements DocumentClient {
         ? await this.createTreeMutationGuard(input.workspaceId)
         : undefined
     if (scopeChanged || parentChanged) {
-      const projected = await this.projectDocument(input.workspaceId, row.document, input.access)
       requireCapability(
-        projected.capabilities.canManagePermissions,
+        capabilities.canManagePermissions,
         'DocumentTreePermissionDenied',
       )
       requireScopeManagePermission(nextScope, input.access)
     }
+    let parentAuthorization:
+      | DocumentAuthorizationSnapshot
+      | undefined
     if (nextParentId !== undefined && (scopeChanged || parentChanged)) {
-      await this.validateParent(
-        input.workspaceId,
-        nextParentId,
-        nextScope,
-        input.access,
-        input.documentId,
-        true,
-      )
+      parentAuthorization =
+        await this.validateParent(
+          input.workspaceId,
+          nextParentId,
+          nextScope,
+          input.access,
+          input.documentId,
+          true,
+        )
     }
     if (scopeChanged) {
       if (
@@ -3341,6 +3533,19 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     else if (input.parentId !== undefined) next.parentId = input.parentId
     incrementDocument(next, input.access.memberKey, this.now())
     validateDocumentPayload(next)
+    const mutationAuthorizationGuards =
+      mergeAuthorizationGuards(
+        input.access.authorizationGuards,
+        documentAuthorizationSnapshotGuards(
+          this.tableName,
+          input.workspaceId,
+          [
+            authorization,
+            parentAuthorization,
+          ],
+          [row.documentId],
+        ),
+      )
     await this.commitMutation(
       input.workspaceId,
       row,
@@ -3361,12 +3566,13 @@ export class DynamoDbDocumentsClient implements DocumentClient {
   ): Promise<PrepareDocumentOperationsResponse> {
     await this.ensureTable()
     validateApplyOperationsRequest(input)
-    const row = await this.requireMutableDocument(
-      input.workspaceId,
-      input.documentId,
-      input.access,
-      'edit',
-    )
+    const { documentRow: row } =
+      await this.requireMutableDocument(
+        input.workspaceId,
+        input.documentId,
+        input.access,
+        'edit',
+      )
     const receipts = await this.readOperationReceipts(input)
     if (receipts.pending.length > 0) {
       return {
@@ -3392,12 +3598,25 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     await this.ensureTable()
     validateApplyOperationsRequest(input)
     for (let attempt = 0; attempt < DOCUMENT_CONDITIONAL_RETRY_LIMIT; attempt += 1) {
-      const row = await this.requireMutableDocument(
-        input.workspaceId,
-        input.documentId,
-        input.access,
-        'edit',
-      )
+      const authorization =
+        await this.requireMutableDocument(
+          input.workspaceId,
+          input.documentId,
+          input.access,
+          'edit',
+        )
+      const row = authorization.documentRow
+      const mutationAuthorizationGuards =
+        mergeAuthorizationGuards(
+          input.access.authorizationGuards,
+          input.relationTargetAuthorizationGuards,
+          documentAuthorizationSnapshotGuards(
+            this.tableName,
+            input.workspaceId,
+            [authorization],
+            [row.documentId],
+          ),
+        )
       if (input.input.baseRevision > row.revision) {
         throw new DocumentError(
           409,
@@ -3496,6 +3715,12 @@ export class DynamoDbDocumentsClient implements DocumentClient {
         backlinkRelations(row.document),
         backlinkRelations(reduced.document),
       )
+      const backlinkMutationActions =
+        await this.prepareBacklinkMutationActions(
+          input.workspaceId,
+          input.documentId,
+          relationDiff,
+        )
       const receiptActions = pending.map((operation) => ({
         Put: {
           TableName: this.tableName,
@@ -3552,14 +3777,9 @@ export class DynamoDbDocumentsClient implements DocumentClient {
         ),
         ...receiptActions,
         ...authorizationGuardConditionChecks(
-          input.relationTargetAuthorizationGuards,
+          mutationAuthorizationGuards,
         ),
-        ...backlinkDiffActions(
-          this.tableName,
-          input.workspaceId,
-          input.documentId,
-          relationDiff,
-        ),
+        ...backlinkMutationActions,
       ]
       assertTransactionSize(actions)
       try {
@@ -3571,17 +3791,36 @@ export class DynamoDbDocumentsClient implements DocumentClient {
           updatedAt: reduced.document.updatedAt,
         }
       } catch (error) {
-        if (isConditionalFailure(error)) {
+        const retryableTransactionConflict =
+          isRetryableTransactionConflict(error)
+        if (
+          isConditionalFailure(error) ||
+          retryableTransactionConflict
+        ) {
           if (
             !await this.authorizationGuardsMatch(
-              input.relationTargetAuthorizationGuards,
+              mutationAuthorizationGuards,
             )
           ) {
             throw new DocumentError(
               409,
               'DocumentAuthorizationChanged',
-              'A relation target changed while applying Document operations.',
+              'Document authorization changed while applying operations.',
             )
+          }
+          const latest =
+            await this.getDocumentRow(
+              input.workspaceId,
+              input.documentId,
+            )
+          if (
+            latest?.revision === row.revision
+          ) {
+            await this
+              .throwIfAddedWorkItemTargetDeleted(
+                input.workspaceId,
+                relationDiff,
+              )
           }
           if (
             attempt + 1 <
@@ -3589,6 +3828,14 @@ export class DynamoDbDocumentsClient implements DocumentClient {
           ) {
             continue
           }
+          if (retryableTransactionConflict) {
+            throw normalizeDynamoError(error)
+          }
+          throw new DocumentError(
+            409,
+            'DocumentConcurrentUpdate',
+            'The document changed too frequently; retry the request.',
+          )
         }
         throw normalizeDynamoError(error)
       }
@@ -3655,13 +3902,15 @@ export class DynamoDbDocumentsClient implements DocumentClient {
   /** 過去 version snapshot を新しい revision として復元します。 */
   async restoreVersion(input: RestoreDocumentVersionRequest): Promise<DocumentDetail> {
     await this.ensureTable()
-    const row = await this.requireMutableDocument(
-      input.workspaceId,
-      input.documentId,
-      input.access,
-      'edit',
-      true,
-    )
+    const authorization =
+      await this.requireMutableDocument(
+        input.workspaceId,
+        input.documentId,
+        input.access,
+        'edit',
+        true,
+      )
+    const row = authorization.documentRow
     requireExpectedRevision(row, input.expectedRevision)
     const versionItem = await this.findVersion(input.workspaceId, input.documentId, input.versionId)
     const restoredSnapshot = structuredClone(versionItem.document)
@@ -3690,16 +3939,20 @@ export class DynamoDbDocumentsClient implements DocumentClient {
           collectDocumentRelationTargets(next),
         )
       ) ?? []
+    let parentAuthorization:
+      | DocumentAuthorizationSnapshot
+      | undefined
     if (next.parentId !== undefined) {
-      await this.validateParent(
-        input.workspaceId,
-        next.parentId,
-        next.scope,
-        input.access,
-        next.id,
-        false,
-        false,
-      )
+      parentAuthorization =
+        await this.validateParent(
+          input.workspaceId,
+          next.parentId,
+          next.scope,
+          input.access,
+          next.id,
+          false,
+          false,
+        )
     }
     const elementRevisions = restoredElementRevisions(
       row.document,
@@ -3708,6 +3961,20 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       next.revision,
     )
     validateDocumentPayload(next)
+    const mutationAuthorizationGuards =
+      mergeAuthorizationGuards(
+        input.access.authorizationGuards,
+        relationTargetAuthorizationGuards,
+        documentAuthorizationSnapshotGuards(
+          this.tableName,
+          input.workspaceId,
+          [
+            authorization,
+            parentAuthorization,
+          ],
+          [row.documentId],
+        ),
+      )
     await this.commitMutation(
       input.workspaceId,
       row,
@@ -3717,7 +3984,7 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       `Restored ${versionItem.version.id}`,
       undefined,
       undefined,
-      relationTargetAuthorizationGuards,
+      mutationAuthorizationGuards,
     )
     return this.projectDocument(input.workspaceId, next, input.access)
   }
@@ -3727,15 +3994,37 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     input: UpdateDocumentPreferenceRequest,
   ): Promise<DocumentPreferenceResult> {
     await this.ensureTable()
-    const document = await this.get({
-      workspaceId: input.workspaceId,
-      documentId: input.documentId,
-      access: input.access,
-      includeArchived: true,
-    })
+    const authorization =
+      await this.requireDocumentCapabilityAuthorization(
+        input.workspaceId,
+        input.documentId,
+        input.access,
+        'canView',
+        'DocumentViewDenied',
+        true,
+      )
+    const document = await this.projectDocument(
+      input.workspaceId,
+      authorization.documentRow.document,
+      input.access,
+      undefined,
+      authorization.ancestorRows.map(
+        ({ document: ancestor }) =>
+          ancestor,
+      ),
+    )
     if (input.openedAt !== undefined) {
       assertIsoTimestamp(input.openedAt, 'openedAt')
     }
+    const mutationAuthorizationGuards =
+      mergeAuthorizationGuards(
+        input.access.authorizationGuards,
+        documentAuthorizationSnapshotGuards(
+          this.tableName,
+          input.workspaceId,
+          [authorization],
+        ),
+      )
     for (
       let attempt = 0;
       attempt < DOCUMENT_CONDITIONAL_RETRY_LIMIT;
@@ -3783,54 +4072,61 @@ export class DynamoDbDocumentsClient implements DocumentClient {
               favorite: item.favorite,
               lastOpenedAt: openedAt,
             }
-      try {
-        await this.client.send(new TransactWriteCommand({
-          TransactItems: [
-            {
+      const actions: NonNullable<
+        TransactWriteCommandInput['TransactItems']
+      > = [
+        {
+          Put: {
+            TableName: this.tableName,
+            Item: item,
+            ConditionExpression:
+              existing === undefined
+                ? 'attribute_not_exists(workspaceId)'
+                : existing.preferenceRevision === undefined
+                  ? 'attribute_not_exists(preferenceRevision)'
+                  : 'preferenceRevision = :expectedPreferenceRevision',
+            ...(existing?.preferenceRevision === undefined
+              ? {}
+              : {
+                  ExpressionAttributeValues: {
+                    ':expectedPreferenceRevision':
+                      existing.preferenceRevision,
+                  },
+                }),
+          },
+        },
+        ...(existing?.lastOpenedAt !== undefined &&
+          existing.lastOpenedAt !== openedAt
+          ? [{
+              Delete: {
+                TableName: this.tableName,
+                Key: {
+                  workspaceId: input.workspaceId,
+                  recordKey: recentKey(
+                    input.access.memberKey,
+                    existing.lastOpenedAt,
+                    input.documentId,
+                  ),
+                },
+              },
+            }]
+          : []),
+        ...(recentItem === undefined
+          ? []
+          : [{
               Put: {
                 TableName: this.tableName,
-                Item: item,
-                ConditionExpression:
-                  existing === undefined
-                    ? 'attribute_not_exists(workspaceId)'
-                    : existing.preferenceRevision === undefined
-                      ? 'attribute_not_exists(preferenceRevision)'
-                      : 'preferenceRevision = :expectedPreferenceRevision',
-                ...(existing?.preferenceRevision === undefined
-                  ? {}
-                  : {
-                      ExpressionAttributeValues: {
-                        ':expectedPreferenceRevision':
-                          existing.preferenceRevision,
-                      },
-                    }),
+                Item: recentItem,
               },
-            },
-            ...(existing?.lastOpenedAt !== undefined &&
-              existing.lastOpenedAt !== openedAt
-              ? [{
-                  Delete: {
-                    TableName: this.tableName,
-                    Key: {
-                      workspaceId: input.workspaceId,
-                      recordKey: recentKey(
-                        input.access.memberKey,
-                        existing.lastOpenedAt,
-                        input.documentId,
-                      ),
-                    },
-                  },
-                }]
-              : []),
-            ...(recentItem === undefined
-              ? []
-              : [{
-                  Put: {
-                    TableName: this.tableName,
-                    Item: recentItem,
-                  },
-                }]),
-          ],
+            }]),
+        ...authorizationGuardConditionChecks(
+          mutationAuthorizationGuards,
+        ),
+      ]
+      assertTransactionSize(actions)
+      try {
+        await this.client.send(new TransactWriteCommand({
+          TransactItems: actions,
         }))
         const node = toDocumentNode({
           ...document,
@@ -3849,12 +4145,31 @@ export class DynamoDbDocumentsClient implements DocumentClient {
           document: node,
         }
       } catch (error) {
-        if (isConditionalFailure(error)) {
+        const retryableTransactionConflict =
+          isRetryableTransactionConflict(error)
+        if (
+          isConditionalFailure(error) ||
+          retryableTransactionConflict
+        ) {
+          if (
+            !await this.authorizationGuardsMatch(
+              mutationAuthorizationGuards,
+            )
+          ) {
+            throw new DocumentError(
+              409,
+              'DocumentAuthorizationChanged',
+              'Document authorization changed while updating the preference.',
+            )
+          }
           if (
             attempt + 1 <
               DOCUMENT_CONDITIONAL_RETRY_LIMIT
           ) {
             continue
+          }
+          if (retryableTransactionConflict) {
+            throw normalizeDynamoError(error)
           }
           throw new DocumentError(
             409,
@@ -3963,11 +4278,29 @@ export class DynamoDbDocumentsClient implements DocumentClient {
   /** Document を soft archive します。 */
   async archive(input: ChangeDocumentArchiveStateRequest): Promise<DocumentDetail> {
     await this.ensureTable()
-    const row = await this.getRequiredDocumentRow(input.workspaceId, input.documentId)
+    const authorization =
+      await this.requireDocumentCapabilityAuthorization(
+        input.workspaceId,
+        input.documentId,
+        input.access,
+        'canArchive',
+        'DocumentArchiveDenied',
+        true,
+        false,
+      )
+    const row = authorization.documentRow
     requireExpectedRevision(row, input.expectedRevision)
-    const projected = await this.projectDocument(input.workspaceId, row.document, input.access)
-    requireCapability(projected.capabilities.canArchive, 'DocumentArchiveDenied')
-    if (row.document.archivedAt !== undefined) return projected
+    if (row.document.archivedAt !== undefined) {
+      return this.projectDocument(
+        input.workspaceId,
+        row.document,
+        input.access,
+        undefined,
+        authorization.ancestorRows.map(
+          ({ document }) => document,
+        ),
+      )
+    }
     const treeMutationGuard =
       row.document.kind === 'folder'
         ? await this.createTreeMutationGuard(input.workspaceId)
@@ -3987,6 +4320,16 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       'edit',
       'Archived document',
       treeMutationGuard,
+      undefined,
+      mergeAuthorizationGuards(
+        input.access.authorizationGuards,
+        documentAuthorizationSnapshotGuards(
+          this.tableName,
+          input.workspaceId,
+          [authorization],
+          [row.documentId],
+        ),
+      ),
     )
     return this.projectDocument(input.workspaceId, next, input.access)
   }
@@ -3994,11 +4337,29 @@ export class DynamoDbDocumentsClient implements DocumentClient {
   /** Archive 済み Document を tree へ復元します。 */
   async restoreArchived(input: ChangeDocumentArchiveStateRequest): Promise<DocumentDetail> {
     await this.ensureTable()
-    const row = await this.getRequiredDocumentRow(input.workspaceId, input.documentId)
+    const authorization =
+      await this.requireDocumentCapabilityAuthorization(
+        input.workspaceId,
+        input.documentId,
+        input.access,
+        'canRestore',
+        'DocumentRestoreDenied',
+        true,
+        false,
+      )
+    const row = authorization.documentRow
     requireExpectedRevision(row, input.expectedRevision)
-    const projected = await this.projectDocument(input.workspaceId, row.document, input.access)
-    requireCapability(projected.capabilities.canRestore, 'DocumentRestoreDenied')
-    if (row.document.archivedAt === undefined) return projected
+    if (row.document.archivedAt === undefined) {
+      return this.projectDocument(
+        input.workspaceId,
+        row.document,
+        input.access,
+        undefined,
+        authorization.ancestorRows.map(
+          ({ document }) => document,
+        ),
+      )
+    }
     const next = structuredClone(row.document)
     delete next.archivedAt
     const requestedParentId = input.parentId === null
@@ -4015,16 +4376,20 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     }
     if (input.parentId === null) delete next.parentId
     else if (input.parentId !== undefined) next.parentId = input.parentId
+    let parentAuthorization:
+      | DocumentAuthorizationSnapshot
+      | undefined
     if (next.parentId !== undefined) {
-      await this.validateParent(
-        input.workspaceId,
-        next.parentId,
-        next.scope,
-        input.access,
-        next.id,
-        parentChanged,
-        parentChanged,
-      )
+      parentAuthorization =
+        await this.validateParent(
+          input.workspaceId,
+          next.parentId,
+          next.scope,
+          input.access,
+          next.id,
+          parentChanged,
+          parentChanged,
+        )
     }
     incrementDocument(next, input.access.memberKey, this.now())
     await this.commitMutation(
@@ -4036,7 +4401,19 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       'Restored archived document',
       treeMutationGuard,
       undefined,
-      input.relationTargetAuthorizationGuards,
+      mergeAuthorizationGuards(
+        input.access.authorizationGuards,
+        input.relationTargetAuthorizationGuards,
+        documentAuthorizationSnapshotGuards(
+          this.tableName,
+          input.workspaceId,
+          [
+            authorization,
+            parentAuthorization,
+          ],
+          [row.documentId],
+        ),
+      ),
     )
     return this.projectDocument(input.workspaceId, next, input.access)
   }
@@ -4093,11 +4470,16 @@ export class DynamoDbDocumentsClient implements DocumentClient {
         return projected
       }
     }
-    const template = await this.get({
-      workspaceId: input.workspaceId,
-      documentId: input.templateId,
-      access: input.access,
-    })
+    const templateAuthorization =
+      await this.requireDocumentCapabilityAuthorization(
+        input.workspaceId,
+        input.templateId,
+        input.access,
+        'canView',
+        'DocumentViewDenied',
+      )
+    const template =
+      templateAuthorization.documentRow.document
     if (template.kind !== 'template') {
       throw new DocumentError(400, 'DocumentIsNotTemplate', 'The source document is not a template.')
     }
@@ -4123,6 +4505,12 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       permission,
       blocks,
       relations: [],
+      sourceAuthorizationGuards:
+        documentAuthorizationSnapshotGuards(
+          this.tableName,
+          input.workspaceId,
+          [templateAuthorization],
+        ),
       idempotencyKey: input.idempotencyKey,
       idempotencyFingerprint: requestFingerprint,
       expectedAuthorizationRevision:
@@ -4161,12 +4549,16 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     input: CreateDocumentCommentRequest,
   ): Promise<StoredDocumentComment> {
     await this.ensureTable()
-    const document = await this.get({
-      workspaceId: input.workspaceId,
-      documentId: input.documentId,
-      access: input.access,
-    })
-    requireCapability(document.capabilities.canComment, 'DocumentCommentDenied')
+    const authorization =
+      await this.requireDocumentCapabilityAuthorization(
+        input.workspaceId,
+        input.documentId,
+        input.access,
+        'canComment',
+        'DocumentCommentDenied',
+      )
+    const document =
+      authorization.documentRow.document
     const normalized = normalizeCommentCreateRequest(input)
     const id = normalized.id ?? this.generateId()
     if (normalized.id !== undefined) {
@@ -4288,47 +4680,74 @@ export class DynamoDbDocumentsClient implements DocumentClient {
         },
       },
     )
+    const mutationAuthorizationGuards =
+      mergeAuthorizationGuards(
+        input.access.authorizationGuards,
+        documentAuthorizationSnapshotGuards(
+          this.tableName,
+          input.workspaceId,
+          [authorization],
+        ),
+      )
+    const actions: NonNullable<
+      TransactWriteCommandInput['TransactItems']
+    > = [
+      ...(storedParent === undefined
+        ? []
+        : [{
+            ConditionCheck: {
+              TableName: this.tableName,
+              Key: {
+                workspaceId: input.workspaceId,
+                recordKey: storedParent.recordKey,
+              },
+              ConditionExpression:
+                'resolved = :unresolved AND updatedAt = :parentUpdatedAt',
+              ExpressionAttributeValues: {
+                ':unresolved': false,
+                ':parentUpdatedAt': storedParent.updatedAt,
+              },
+            },
+          }]),
+      {
+        Put: {
+          TableName: this.tableName,
+          Item: item,
+          ConditionExpression: 'attribute_not_exists(workspaceId)',
+        },
+      },
+      {
+        Put: {
+          TableName: this.tableName,
+          Item: receipt,
+          ConditionExpression: 'attribute_not_exists(workspaceId)',
+        },
+      },
+      ...(auditPut === undefined ? [] : [auditPut]),
+      ...authorizationGuardConditionChecks(
+        mutationAuthorizationGuards,
+      ),
+    ]
+    assertTransactionSize(actions)
     try {
       await this.client.send(new TransactWriteCommand({
-        TransactItems: [
-          ...(storedParent === undefined
-            ? []
-            : [{
-                ConditionCheck: {
-                  TableName: this.tableName,
-                  Key: {
-                    workspaceId: input.workspaceId,
-                    recordKey: storedParent.recordKey,
-                  },
-                  ConditionExpression:
-                    'resolved = :unresolved AND updatedAt = :parentUpdatedAt',
-                  ExpressionAttributeValues: {
-                    ':unresolved': false,
-                    ':parentUpdatedAt': storedParent.updatedAt,
-                  },
-                },
-              }]),
-          {
-            Put: {
-              TableName: this.tableName,
-              Item: item,
-              ConditionExpression: 'attribute_not_exists(workspaceId)',
-            },
-          },
-          {
-            Put: {
-              TableName: this.tableName,
-              Item: receipt,
-              ConditionExpression: 'attribute_not_exists(workspaceId)',
-            },
-          },
-          ...(auditPut === undefined ? [] : [auditPut]),
-        ],
+        TransactItems: actions,
       }))
       return comment
     } catch (error) {
       if (!isConditionalFailure(error)) {
         throw normalizeDynamoError(error)
+      }
+      if (
+        !await this.authorizationGuardsMatch(
+          mutationAuthorizationGuards,
+        )
+      ) {
+        throw new DocumentError(
+          409,
+          'DocumentAuthorizationChanged',
+          'Document authorization changed while creating the comment.',
+        )
       }
       if (input.commentId !== undefined) {
         const replay = await this.readCommentCreateReplay(
@@ -4485,13 +4904,15 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     input: ResolveDocumentCommentRequest,
   ): Promise<StoredDocumentComment> {
     await this.ensureTable()
-    const document = await this.get({
-      workspaceId: input.workspaceId,
-      documentId: input.documentId,
-      access: input.access,
-      includeArchived: true,
-    })
-    requireCapability(document.capabilities.canComment, 'DocumentCommentDenied')
+    const authorization =
+      await this.requireDocumentCapabilityAuthorization(
+        input.workspaceId,
+        input.documentId,
+        input.access,
+        'canComment',
+        'DocumentCommentDenied',
+        true,
+      )
     const stored = await this.findStoredComment(
       input.workspaceId,
       input.documentId,
@@ -4509,15 +4930,50 @@ export class DynamoDbDocumentsClient implements DocumentClient {
         ? { resolvedAt: now, resolvedByUserId: input.access.memberKey }
         : { resolvedAt: undefined, resolvedByUserId: undefined }),
     }
+    const mutationAuthorizationGuards =
+      mergeAuthorizationGuards(
+        input.access.authorizationGuards,
+        documentAuthorizationSnapshotGuards(
+          this.tableName,
+          input.workspaceId,
+          [authorization],
+        ),
+      )
+    const actions: NonNullable<
+      TransactWriteCommandInput['TransactItems']
+    > = [
+      {
+        Put: {
+          TableName: this.tableName,
+          Item: next,
+          ConditionExpression: 'updatedAt = :updatedAt',
+          ExpressionAttributeValues: {
+            ':updatedAt': stored.updatedAt,
+          },
+        },
+      },
+      ...authorizationGuardConditionChecks(
+        mutationAuthorizationGuards,
+      ),
+    ]
+    assertTransactionSize(actions)
     try {
-      await this.client.send(new PutCommand({
-        TableName: this.tableName,
-        Item: next,
-        ConditionExpression: 'updatedAt = :updatedAt',
-        ExpressionAttributeValues: { ':updatedAt': stored.updatedAt },
+      await this.client.send(new TransactWriteCommand({
+        TransactItems: actions,
       }))
     } catch (error) {
       if (isConditionalFailure(error)) {
+        if (
+          !await this.authorizationGuardsMatch(
+            mutationAuthorizationGuards,
+          )
+        ) {
+          throw new DocumentError(
+            409,
+            'DocumentAuthorizationChanged',
+            'Document authorization changed while resolving the comment.',
+          )
+        }
         throw new DocumentError(409, 'DocumentCommentConflict', 'The comment changed concurrently.')
       }
       throw normalizeDynamoError(error)
@@ -4530,11 +4986,16 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     input: HeartbeatDocumentPresenceRequest,
   ): Promise<void> {
     await this.ensureTable()
-    const document = await this.get({
-      workspaceId: input.workspaceId,
-      documentId: input.documentId,
-      access: input.access,
-    })
+    const authorization =
+      await this.requireDocumentCapabilityAuthorization(
+        input.workspaceId,
+        input.documentId,
+        input.access,
+        'canView',
+        'DocumentViewDenied',
+      )
+    const document =
+      authorization.documentRow.document
     assertIdentifier(input.clientId, 'clientId')
     if (input.selection != null) {
       validatePresenceSelection(input.selection, document)
@@ -4557,15 +5018,51 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       lastSeenAt: now.toISOString(),
       expiresAtEpoch: Math.floor(now.getTime() / 1_000) + ttlSeconds,
     }
+    const mutationAuthorizationGuards =
+      mergeAuthorizationGuards(
+        input.access.authorizationGuards,
+        documentAuthorizationSnapshotGuards(
+          this.tableName,
+          input.workspaceId,
+          [authorization],
+        ),
+      )
+    const actions: NonNullable<
+      TransactWriteCommandInput['TransactItems']
+    > = [
+      {
+        Put: {
+          TableName: this.tableName,
+          Item: item,
+          ConditionExpression:
+            'attribute_not_exists(userId) OR userId = :userId',
+          ExpressionAttributeValues: {
+            ':userId': input.access.memberKey,
+          },
+        },
+      },
+      ...authorizationGuardConditionChecks(
+        mutationAuthorizationGuards,
+      ),
+    ]
+    assertTransactionSize(actions)
     try {
-      await this.client.send(new PutCommand({
-        TableName: this.tableName,
-        Item: item,
-        ConditionExpression: 'attribute_not_exists(userId) OR userId = :userId',
-        ExpressionAttributeValues: { ':userId': input.access.memberKey },
+      await this.client.send(new TransactWriteCommand({
+        TransactItems: actions,
       }))
     } catch (error) {
       if (isConditionalFailure(error)) {
+        if (
+          !await this.authorizationGuardsMatch(
+            mutationAuthorizationGuards,
+          )
+        ) {
+          throw new DocumentError(
+            409,
+            'DocumentAuthorizationChanged',
+            'Document authorization changed while updating presence.',
+          )
+        }
         throw new DocumentError(
           409,
           'DocumentPresenceClientConflict',
@@ -4583,25 +5080,66 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       throw new DocumentError(400, 'DocumentPresenceClientRequired', 'clientId is required.')
     }
     assertIdentifier(input.clientId, 'clientId')
+    const authorization =
+      await this.requireDocumentCapabilityAuthorization(
+        input.workspaceId,
+        input.documentId,
+        input.access,
+        'canView',
+        'DocumentViewDenied',
+      )
+    const mutationAuthorizationGuards =
+      mergeAuthorizationGuards(
+        input.access.authorizationGuards,
+        documentAuthorizationSnapshotGuards(
+          this.tableName,
+          input.workspaceId,
+          [authorization],
+        ),
+      )
+    const actions: NonNullable<
+      TransactWriteCommandInput['TransactItems']
+    > = [
+      {
+        Delete: {
+          TableName: this.tableName,
+          Key: {
+            workspaceId: input.workspaceId,
+            recordKey: presenceKey(
+              input.documentId,
+              input.access.memberKey,
+            ),
+          },
+          ConditionExpression:
+            'clientId = :clientId',
+          ExpressionAttributeValues: {
+            ':clientId': input.clientId,
+          },
+        },
+      },
+      ...authorizationGuardConditionChecks(
+        mutationAuthorizationGuards,
+      ),
+    ]
+    assertTransactionSize(actions)
     try {
-      await this.client.send(new DeleteCommand({
-        TableName: this.tableName,
-        Key: {
-          workspaceId: input.workspaceId,
-          recordKey: presenceKey(
-            input.documentId,
-            input.access.memberKey,
-          ),
-        },
-        ConditionExpression:
-          'clientId = :clientId',
-        ExpressionAttributeValues: {
-          ':clientId': input.clientId,
-        },
+      await this.client.send(new TransactWriteCommand({
+        TransactItems: actions,
       }))
     } catch (error) {
       if (!isConditionalFailure(error)) {
         throw normalizeDynamoError(error)
+      }
+      if (
+        !await this.authorizationGuardsMatch(
+          mutationAuthorizationGuards,
+        )
+      ) {
+        throw new DocumentError(
+          409,
+          'DocumentAuthorizationChanged',
+          'Document authorization changed while leaving presence.',
+        )
       }
     }
   }
@@ -4795,7 +5333,12 @@ export class DynamoDbDocumentsClient implements DocumentClient {
         )
         return { share, token }
       } catch (error) {
-        if (!isConditionalFailure(error)) {
+        const retryableTransactionConflict =
+          isRetryableTransactionConflict(error)
+        if (
+          !isConditionalFailure(error) &&
+          !retryableTransactionConflict
+        ) {
           throw normalizeDynamoError(error)
         }
         await this.verifyAuthorizationGuard(
@@ -4864,6 +5407,9 @@ export class DynamoDbDocumentsClient implements DocumentClient {
             DOCUMENT_CONDITIONAL_RETRY_LIMIT
         ) {
           continue
+        }
+        if (retryableTransactionConflict) {
+          throw normalizeDynamoError(error)
         }
         throw new DocumentError(
           409,
@@ -5390,43 +5936,101 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     return row
   }
 
+  /** Capability 判定に使う current Document と ancestor rows を一度だけ読み込みます。 */
+  private async loadDocumentAuthorizationSnapshot(
+    workspaceId: string,
+    documentId: string,
+  ): Promise<DocumentAuthorizationSnapshot> {
+    const documentRow =
+      await this.getRequiredDocumentRow(
+        workspaceId,
+        documentId,
+      )
+    const ancestorRows =
+      await this.loadAncestorRows(
+        workspaceId,
+        documentRow.document,
+      )
+    return {
+      documentRow,
+      ancestorRows,
+    }
+  }
+
+  /** Capability 判定結果と、その判定に使った lineage snapshot を返します。 */
+  private async requireDocumentCapabilityAuthorization(
+    workspaceId: string,
+    documentId: string,
+    access: DocumentAccessContext,
+    capability: keyof DocumentCapabilities,
+    errorCode: string,
+    includeArchivedDocument = false,
+    rejectArchivedAncestors = true,
+  ): Promise<DocumentAuthorizationSnapshot> {
+    const authorization =
+      await this.loadDocumentAuthorizationSnapshot(
+        workspaceId,
+        documentId,
+      )
+    if (
+      !includeArchivedDocument &&
+      authorization.documentRow.document
+        .archivedAt !== undefined
+    ) {
+      throw documentNotFound()
+    }
+    if (
+      rejectArchivedAncestors &&
+      authorization.ancestorRows.some(
+        ({ document }) =>
+          document.archivedAt !== undefined,
+      )
+    ) {
+      throw documentNotFound()
+    }
+    const capabilities =
+      this.resolveDocumentAuthorizationCapabilities(
+        authorization,
+        access,
+      )
+    requireCapability(
+      capabilities[capability],
+      errorCode,
+    )
+    return authorization
+  }
+
+  /** Lineage snapshot から Document capabilities を解決します。 */
+  private resolveDocumentAuthorizationCapabilities(
+    authorization: DocumentAuthorizationSnapshot,
+    access: DocumentAccessContext,
+  ): DocumentCapabilities {
+    return this.resolveStoredDocumentCapabilities(
+      authorization.documentRow.document,
+      access,
+      authorization.ancestorRows.map(
+        ({ document }) => document,
+      ),
+    )
+  }
+
   private async requireMutableDocument(
     workspaceId: string,
     documentId: string,
     access: DocumentAccessContext,
     capability: 'edit' | 'archive',
     includeArchived = false,
-  ): Promise<StoredDocumentItem> {
-    const row = await this.getRequiredDocumentRow(workspaceId, documentId)
-    if (!includeArchived && row.document.archivedAt !== undefined) throw documentNotFound()
-    const projectionContext: DocumentProjectionContext = {
-      documentRows: new Map([
-        [row.documentId, Promise.resolve(row)],
-      ]),
-      preferences: new Map(),
-    }
-    const ancestors = await this.loadAncestors(
+  ): Promise<DocumentAuthorizationSnapshot> {
+    return this.requireDocumentCapabilityAuthorization(
       workspaceId,
-      row.document,
-      projectionContext,
-    )
-    if (ancestors.some((ancestor) => ancestor.archivedAt !== undefined)) {
-      throw documentNotFound()
-    }
-    const projected = await this.projectDocument(
-      workspaceId,
-      row.document,
+      documentId,
       access,
-      projectionContext,
-      ancestors,
-    )
-    requireCapability(
       capability === 'edit'
-        ? projected.capabilities.canEdit
-        : projected.capabilities.canArchive,
+        ? 'canEdit'
+        : 'canArchive',
       'DocumentEditDenied',
+      includeArchived,
     )
-    return row
   }
 
   private async requireShareAuthorization(
@@ -5434,7 +6038,7 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     documentId: string,
     access: DocumentAccessContext,
     allowArchived: boolean,
-  ): Promise<DocumentShareAuthorizationSnapshot> {
+  ): Promise<DocumentAuthorizationSnapshot> {
     const documentRow =
       await this.getRequiredDocumentRow(
         workspaceId,
@@ -5608,6 +6212,10 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       projectRole: document.scope.type === 'project'
         ? access.projectRoles?.[document.scope.projectId] ?? access.projectRole
         : undefined,
+      restrictToAuthorizedScopes:
+        access.restrictToAuthorizedScopes,
+      workspaceScopeRole:
+        access.workspaceScopeRole,
     })
   }
 
@@ -5732,7 +6340,7 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     movingDocumentId?: string,
     requireManage = false,
     requireAccess = true,
-  ): Promise<void> {
+  ): Promise<DocumentAuthorizationSnapshot> {
     assertIdentifier(parentId, 'parentId')
     if (parentId === movingDocumentId) {
       throw new DocumentError(409, 'DocumentTreeCycle', 'A document cannot be its own parent.')
@@ -5748,32 +6356,46 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     if (!scopesEqual(parent.document.scope, scope)) {
       throw new DocumentError(400, 'DocumentParentScopeMismatch', 'Parent and child scopes must match.')
     }
-    if (requireAccess) {
-      const projected = await this.projectDocument(
-        workspaceId,
-        parent.document,
-        access,
-      )
-      requireCapability(
-        requireManage
-          ? projected.capabilities.canManagePermissions
-          : projected.capabilities.canEdit,
-        requireManage
-          ? 'DocumentParentManageDenied'
-          : 'DocumentParentEditDenied',
-      )
-    }
     const seen = new Set<string>(movingDocumentId === undefined ? [] : [movingDocumentId])
+    const ancestorRows: StoredDocumentItem[] = []
     let current: StoredDocumentItem | undefined = parent
     for (let depth = 0; current !== undefined; depth += 1) {
       if (depth >= DOCUMENT_MAX_TREE_DEPTH || seen.has(current.documentId)) {
         throw new DocumentError(409, 'DocumentTreeCycle', 'The requested parent would create a cycle.')
       }
       seen.add(current.documentId)
-      current = current.document.parentId === undefined
-        ? undefined
-        : await this.getDocumentRow(workspaceId, current.document.parentId)
+      const nextParent: StoredDocumentItem | undefined =
+        current.document.parentId === undefined
+          ? undefined
+          : await this.getDocumentRow(
+              workspaceId,
+              current.document.parentId,
+            )
+      if (nextParent !== undefined) {
+        ancestorRows.push(nextParent)
+      }
+      current = nextParent
     }
+    const authorization = {
+      documentRow: parent,
+      ancestorRows,
+    }
+    if (requireAccess) {
+      const capabilities =
+        this.resolveDocumentAuthorizationCapabilities(
+          authorization,
+          access,
+        )
+      requireCapability(
+        requireManage
+          ? capabilities.canManagePermissions
+          : capabilities.canEdit,
+        requireManage
+          ? 'DocumentParentManageDenied'
+          : 'DocumentParentEditDenied',
+      )
+    }
+    return authorization
   }
 
   private async hasDirectChildren(
@@ -6210,6 +6832,240 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     )
   }
 
+  private async getWorkItemBacklinkTargetFence(
+    workspaceId: string,
+    workItemId: string,
+  ): Promise<
+    StoredDocumentBacklinkTargetFenceItem | undefined
+  > {
+    const result = await this.client.send(
+      new GetCommand({
+        TableName: this.tableName,
+        Key: {
+          workspaceId,
+          recordKey:
+            workItemBacklinkTargetFenceKey(
+              workItemId,
+            ),
+        },
+        ConsistentRead: true,
+      }),
+    )
+    return readWorkItemBacklinkTargetFenceItem(
+      result.Item,
+      workspaceId,
+      workItemId,
+    )
+  }
+
+  /**
+   * Fence 導入前の backlink rows を consistent query で全 page 集計します。
+   *
+   * Fence row が存在しないだけで count 0 とみなさず、同じ fence key の
+   * conditional Put と組み合わせて既存データを fail-closed に移行します。
+   */
+  private async countStoredWorkItemBacklinks(
+    workspaceId: string,
+    workItemId: string,
+  ): Promise<number> {
+    let count = 0
+    let exclusiveStartKey:
+      | Record<string, unknown>
+      | undefined
+    do {
+      const result = await this.client.send(
+        new QueryCommand({
+          TableName: this.tableName,
+          KeyConditionExpression:
+            'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
+          ExpressionAttributeValues: {
+            ':workspaceId': workspaceId,
+            ':prefix': backlinkPrefix(
+              'work-item',
+              workItemId,
+            ),
+          },
+          ExclusiveStartKey: exclusiveStartKey,
+          ConsistentRead: true,
+        }),
+      )
+      for (const item of result.Items ?? []) {
+        readStoredWorkItemBacklinkItem(
+          item,
+          workspaceId,
+          workItemId,
+        )
+        count += 1
+        if (!Number.isSafeInteger(count)) {
+          throw invalidDocumentBacklinkTargetFence()
+        }
+      }
+      exclusiveStartKey =
+        result.LastEvaluatedKey
+    } while (exclusiveStartKey !== undefined)
+    return count
+  }
+
+  private async prepareBacklinkMutationActions(
+    workspaceId: string,
+    documentId: string,
+    diff: DocumentRelationDiff,
+  ): Promise<
+    NonNullable<
+      TransactWriteCommandInput['TransactItems']
+    >
+  > {
+    const fenceActions =
+      await mapWithConcurrency(
+        coalesceWorkItemBacklinkTargetDeltas(
+          diff,
+        ),
+        8,
+        ({ targetId, delta }) =>
+          this.prepareWorkItemBacklinkTargetDeltaAction(
+            workspaceId,
+            targetId,
+            delta,
+          ),
+      )
+    return [
+      ...backlinkDiffActions(
+        this.tableName,
+        workspaceId,
+        documentId,
+        diff,
+      ),
+      ...fenceActions,
+    ]
+  }
+
+  private async prepareWorkItemBacklinkTargetDeltaAction(
+    workspaceId: string,
+    workItemId: string,
+    delta: number,
+  ): Promise<
+    NonNullable<
+      TransactWriteCommandInput['TransactItems']
+    >[number]
+  > {
+    const existing =
+      await this.getWorkItemBacklinkTargetFence(
+        workspaceId,
+        workItemId,
+      )
+    if (existing === undefined) {
+      const legacyBacklinkCount =
+        await this.countStoredWorkItemBacklinks(
+          workspaceId,
+          workItemId,
+        )
+      const nextCount =
+        legacyBacklinkCount + delta
+      if (
+        !Number.isSafeInteger(nextCount) ||
+        nextCount < 0
+      ) {
+        throw invalidDocumentBacklinkTargetFence()
+      }
+      return {
+        Put: {
+          TableName: this.tableName,
+          Item: createWorkItemBacklinkTargetFenceItem(
+            workspaceId,
+            workItemId,
+            nextCount,
+            1,
+          ),
+          ConditionExpression:
+            'attribute_not_exists(workspaceId)',
+        },
+      }
+    }
+    if (
+      delta > 0 &&
+      existing.deletedAt !== undefined
+    ) {
+      throw documentRelationTargetDeleted()
+    }
+    const nextCount =
+      existing.activeBacklinkCount + delta
+    if (
+      !Number.isSafeInteger(nextCount) ||
+      nextCount < 0
+    ) {
+      throw invalidDocumentBacklinkTargetFence()
+    }
+    return {
+      Put: {
+        TableName: this.tableName,
+        Item: createWorkItemBacklinkTargetFenceItem(
+          workspaceId,
+          workItemId,
+          nextCount,
+          existing.version + 1,
+          existing.deletedAt,
+        ),
+        ConditionExpression:
+          '#entryType = :entryType AND ' +
+          'schemaVersion = :schemaVersion AND ' +
+          'targetKind = :targetKind AND targetId = :targetId AND ' +
+          'activeBacklinkCount = :expectedCount AND #version = :expectedVersion' +
+          (delta > 0
+            ? ' AND attribute_not_exists(deletedAt)'
+            : ''),
+        ExpressionAttributeNames: {
+          '#entryType': 'entryType',
+          '#version': 'version',
+        },
+        ExpressionAttributeValues: {
+          ':entryType':
+            'document-backlink-target-fence',
+          ':schemaVersion':
+            DOCUMENT_BACKLINK_TARGET_FENCE_SCHEMA_VERSION,
+          ':targetKind': 'work-item',
+          ':targetId': workItemId,
+          ':expectedCount':
+            existing.activeBacklinkCount,
+          ':expectedVersion': existing.version,
+        },
+      },
+    }
+  }
+
+  private async throwIfAddedWorkItemTargetDeleted(
+    workspaceId: string,
+    diff: DocumentRelationDiff,
+  ): Promise<void> {
+    const workItemIds = new Set<string>()
+    for (const relation of diff.added) {
+      if (
+        relation.target.kind ===
+          'work-item'
+      ) {
+        workItemIds.add(
+          relation.target.workItemId,
+        )
+      }
+    }
+    const fences = await mapWithConcurrency(
+      [...workItemIds],
+      8,
+      (workItemId) =>
+        this.getWorkItemBacklinkTargetFence(
+          workspaceId,
+          workItemId,
+        ),
+    )
+    if (
+      fences.some(
+        (fence) =>
+          fence?.deletedAt !== undefined,
+      )
+    ) {
+      throw documentRelationTargetDeleted()
+    }
+  }
+
   private async commitMutation(
     workspaceId: string,
     current: StoredDocumentItem,
@@ -6219,7 +7075,7 @@ export class DynamoDbDocumentsClient implements DocumentClient {
     summary?: string,
     treeMutationGuard?: DocumentTreeMutationGuard,
     authorizationMutationGuard?: DocumentAuthorizationRevisionGuard,
-    relationTargetAuthorizationGuards?: readonly DocumentAuthorizationGenerationGuard[],
+    mutationAuthorizationGuards?: readonly DocumentAuthorizationGenerationGuard[],
   ): Promise<void> {
     const createsVersionSnapshot =
       reason === 'restore' ||
@@ -6249,6 +7105,12 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       backlinkRelations(current.document),
       backlinkRelations(nextDocument),
     )
+    const backlinkMutationActions =
+      await this.prepareBacklinkMutationActions(
+        workspaceId,
+        current.documentId,
+        relationDiff,
+      )
     const actions: NonNullable<TransactWriteCommandInput['TransactItems']> = [
       currentDocumentPut(this.tableName, next, current.revision),
       documentSearchAccessPut(
@@ -6282,12 +7144,7 @@ export class DynamoDbDocumentsClient implements DocumentClient {
         current.document,
         nextDocument,
       ),
-      ...backlinkDiffActions(
-        this.tableName,
-        workspaceId,
-        current.documentId,
-        relationDiff,
-      ),
+      ...backlinkMutationActions,
       ...(treeMutationGuard === undefined
         ? []
         : [
@@ -6307,7 +7164,7 @@ export class DynamoDbDocumentsClient implements DocumentClient {
             ),
           ]),
       ...authorizationGuardConditionChecks(
-        relationTargetAuthorizationGuards,
+        mutationAuthorizationGuards,
       ),
     ]
     assertTransactionSize(actions)
@@ -6319,7 +7176,7 @@ export class DynamoDbDocumentsClient implements DocumentClient {
       if (isConditionalFailure(error)) {
         if (
           !await this.authorizationGuardsMatch(
-            relationTargetAuthorizationGuards,
+            mutationAuthorizationGuards,
           )
         ) {
           throw new DocumentError(
@@ -6340,6 +7197,20 @@ export class DynamoDbDocumentsClient implements DocumentClient {
             'DocumentAuthorizationConflict',
             'Document permissions changed concurrently.',
           )
+        }
+        const latest =
+          await this.getDocumentRow(
+            workspaceId,
+            current.documentId,
+          )
+        if (
+          latest?.revision === current.revision
+        ) {
+          await this
+            .throwIfAddedWorkItemTargetDeleted(
+              workspaceId,
+              relationDiff,
+            )
         }
         throw new DocumentError(409, 'DocumentRevisionConflict', 'The document changed concurrently.')
       }
@@ -6856,6 +7727,12 @@ function backlinkPrefix(
   targetId: string,
 ): string {
   return `BACKLINK#${targetKind}#${encodeKeyPart(targetId)}#`
+}
+
+function workItemBacklinkTargetFenceKey(
+  workItemId: string,
+): string {
+  return `BACKLINK_TARGET_FENCE#work-item#${encodeKeyPart(workItemId)}`
 }
 
 function backlinkKey(documentId: string, relation: DocumentRelation): string {
@@ -7487,6 +8364,46 @@ function mergeAuthorizationGuards(
   return [...merged.values()]
 }
 
+function documentAuthorizationSnapshotGuards(
+  tableName: string,
+  workspaceId: string,
+  snapshots: readonly (
+    | DocumentAuthorizationSnapshot
+    | undefined
+  )[],
+  excludedDocumentIds: readonly string[] = [],
+): readonly DocumentAuthorizationGenerationGuard[] {
+  const excluded = new Set(excludedDocumentIds)
+  return snapshots.flatMap(
+    (snapshot) =>
+      snapshot === undefined
+        ? []
+        : [
+            snapshot.documentRow,
+            ...snapshot.ancestorRows,
+          ],
+  )
+    .filter(
+      ({ documentId }) =>
+        !excluded.has(documentId),
+    )
+    .map((row) => ({
+      tableName,
+      key: {
+        workspaceId,
+        recordKey: documentKey(
+          row.documentId,
+        ),
+      },
+      generationAttribute: 'revision',
+      expectedGeneration: row.revision,
+      requiredAttributes: {
+        entryType: 'document',
+        documentId: row.documentId,
+      },
+    }))
+}
+
 function validateAuthorizationGuard(
   guard: DocumentAuthorizationGenerationGuard,
 ): DocumentAuthorizationGenerationGuard {
@@ -7662,7 +8579,7 @@ function authorizationGuardConditionCheck(
 function documentAuthorizationConditionChecks(
   tableName: string,
   workspaceId: string,
-  authorization: DocumentShareAuthorizationSnapshot,
+  authorization: DocumentAuthorizationSnapshot,
 ): NonNullable<
   TransactWriteCommandInput['TransactItems']
 > {
@@ -7688,7 +8605,7 @@ function documentAuthorizationConditionChecks(
 }
 
 function documentShareEpochLineage(
-  authorization: DocumentShareAuthorizationSnapshot,
+  authorization: DocumentAuthorizationSnapshot,
 ): Record<string, number> {
   return Object.fromEntries(
     [
@@ -7971,6 +8888,166 @@ function backlinkPutActions(
   }))
 }
 
+function coalesceWorkItemBacklinkTargetDeltas(
+  diff: DocumentRelationDiff,
+): WorkItemBacklinkTargetDelta[] {
+  const deltas = new Map<string, number>()
+  for (const relation of diff.removed) {
+    if (relation.target.kind !== 'work-item') {
+      continue
+    }
+    deltas.set(
+      relation.target.workItemId,
+      (deltas.get(
+        relation.target.workItemId,
+      ) ?? 0) - 1,
+    )
+  }
+  for (const relation of diff.added) {
+    if (relation.target.kind !== 'work-item') {
+      continue
+    }
+    deltas.set(
+      relation.target.workItemId,
+      (deltas.get(
+        relation.target.workItemId,
+      ) ?? 0) + 1,
+    )
+  }
+  return [...deltas]
+    .filter(([, delta]) => delta !== 0)
+    .map(([targetId, delta]) => ({
+      targetId,
+      delta,
+    }))
+}
+
+function createWorkItemBacklinkTargetFenceItem(
+  workspaceId: string,
+  workItemId: string,
+  activeBacklinkCount: number,
+  version: number,
+  deletedAt?: string,
+): StoredDocumentBacklinkTargetFenceItem {
+  return {
+    workspaceId,
+    recordKey:
+      workItemBacklinkTargetFenceKey(
+        workItemId,
+      ),
+    entryType:
+      'document-backlink-target-fence',
+    schemaVersion:
+      DOCUMENT_BACKLINK_TARGET_FENCE_SCHEMA_VERSION,
+    targetKind: 'work-item',
+    targetId: workItemId,
+    activeBacklinkCount,
+    version,
+    ...(deletedAt === undefined
+      ? {}
+      : { deletedAt }),
+  }
+}
+
+function readWorkItemBacklinkTargetFenceItem(
+  value: unknown,
+  workspaceId: string,
+  workItemId: string,
+): StoredDocumentBacklinkTargetFenceItem | undefined {
+  if (value === undefined) return undefined
+  if (
+    !isRecord(value) ||
+    value.workspaceId !== workspaceId ||
+    value.recordKey !==
+      workItemBacklinkTargetFenceKey(
+        workItemId,
+      ) ||
+    value.entryType !==
+      'document-backlink-target-fence' ||
+    value.schemaVersion !==
+      DOCUMENT_BACKLINK_TARGET_FENCE_SCHEMA_VERSION ||
+    value.targetKind !== 'work-item' ||
+    value.targetId !== workItemId ||
+    !Number.isSafeInteger(
+      value.activeBacklinkCount,
+    ) ||
+    Number(value.activeBacklinkCount) < 0 ||
+    !Number.isSafeInteger(value.version) ||
+    Number(value.version) < 1 ||
+    (
+      value.deletedAt !== undefined &&
+      (
+        typeof value.deletedAt !== 'string' ||
+        !Number.isFinite(
+          Date.parse(value.deletedAt),
+        )
+      )
+    )
+  ) {
+    throw invalidDocumentBacklinkTargetFence()
+  }
+  return value as
+    StoredDocumentBacklinkTargetFenceItem
+}
+
+function readStoredWorkItemBacklinkItem(
+  value: unknown,
+  workspaceId: string,
+  workItemId: string,
+): void {
+  if (
+    !isRecord(value) ||
+    value.workspaceId !== workspaceId ||
+    typeof value.recordKey !== 'string' ||
+    !value.recordKey.startsWith(
+      backlinkPrefix(
+        'work-item',
+        workItemId,
+      ),
+    ) ||
+    value.entryType !== 'document-backlink' ||
+    typeof value.documentId !== 'string' ||
+    value.targetKind !== 'work-item' ||
+    value.targetId !== workItemId ||
+    !isRecord(value.relation) ||
+    typeof value.relation.id !== 'string' ||
+    !isRecord(value.relation.target) ||
+    value.relation.target.kind !==
+      'work-item' ||
+    value.relation.target.workItemId !==
+      workItemId
+  ) {
+    throw invalidDocumentBacklinkTargetFence()
+  }
+}
+
+function invalidDocumentBacklinkTargetFence(): DocumentError {
+  return new DocumentError(
+    503,
+    'InvalidDocumentBacklinkTargetFence',
+    'Document backlink target fence data is invalid.',
+  )
+}
+
+function documentRelationTargetDeleted(): DocumentError {
+  return new DocumentError(
+    409,
+    'DocumentRelationTargetDeleted',
+    'The related Work Item has been deleted.',
+  )
+}
+
+function workItemDocumentBacklinkConflict(
+  activeBacklinkCount: number,
+): DocumentError {
+  return new DocumentError(
+    409,
+    'WorkItemDocumentBacklinkConflict',
+    'Unlink all Documents before deleting this Work Item.',
+    { activeBacklinkCount },
+  )
+}
+
 function backlinkRelations(document: DocumentDetail): DocumentRelation[] {
   if (document.kind !== 'whiteboard') return document.relations
   const workItemRelations: DocumentRelation[] = document.whiteboard.objects
@@ -8109,7 +9186,25 @@ function requireScopeCreatePermission(
   scope: DocumentScope,
   access: DocumentAccessContext,
 ): void {
-  if (access.isSystemAdmin || access.workspaceRole === 'owner' || access.workspaceRole === 'admin') return
+  if (access.isSystemAdmin) return
+  if (access.restrictToAuthorizedScopes) {
+    const role = scope.type === 'workspace'
+      ? access.workspaceScopeRole
+      : access.projectRoles?.[scope.projectId] ??
+        access.projectRole
+    if (
+      access.workspaceRole !== 'guest' &&
+      (role === 'manager' || role === 'member')
+    ) {
+      return
+    }
+    throw new DocumentError(
+      403,
+      'DocumentCreateDenied',
+      'Project or Workspace edit access is required.',
+    )
+  }
+  if (access.workspaceRole === 'owner' || access.workspaceRole === 'admin') return
   if (access.workspaceRole === 'guest') {
     throw new DocumentError(403, 'DocumentCreateDenied', 'Guests cannot create documents.')
   }
@@ -8124,8 +9219,20 @@ function requireScopeManagePermission(
   scope: DocumentScope,
   access: DocumentAccessContext,
 ): void {
+  if (access.isSystemAdmin) return
+  if (access.restrictToAuthorizedScopes) {
+    const role = scope.type === 'workspace'
+      ? access.workspaceScopeRole
+      : access.projectRoles?.[scope.projectId] ??
+        access.projectRole
+    if (role === 'manager') return
+    throw new DocumentError(
+      403,
+      'DocumentDestinationScopeDenied',
+      'Destination scope manager access is required to move this document.',
+    )
+  }
   if (
-    access.isSystemAdmin ||
     access.workspaceRole === 'owner' ||
     access.workspaceRole === 'admin'
   ) {
@@ -8408,7 +9515,51 @@ function publicShareNotFound(): DocumentError {
 
 function isConditionalFailure(error: unknown): boolean {
   const name = isRecord(error) && typeof error.name === 'string' ? error.name : ''
-  return name === 'ConditionalCheckFailedException' || name === 'TransactionCanceledException'
+  if (name === 'ConditionalCheckFailedException') return true
+  if (name !== 'TransactionCanceledException' || !isRecord(error)) return false
+  const reasons = error.CancellationReasons
+  if (!Array.isArray(reasons) || reasons.length === 0) return false
+  const codes = reasons.map((reason) =>
+    isRecord(reason) && typeof reason.Code === 'string'
+      ? reason.Code
+      : undefined
+  )
+  const failures = codes.filter((code) => code !== 'None')
+  return codes.every((code) => typeof code === 'string') &&
+    failures.length > 0 &&
+    failures.every((code) => code === 'ConditionalCheckFailed')
+}
+
+/**
+ * Retry loop が安全に再実行できる DynamoDB transaction conflict か判定します。
+ *
+ * `None` は未失敗 action として、`ConditionalCheckFailed` は次の attempt で再評価
+ * できる既知の競合として許可します。validation、throughput、unknown code が混在する
+ * cancellation は storage failure のまま fail closed にします。
+ */
+function isRetryableTransactionConflict(error: unknown): boolean {
+  if (
+    !isRecord(error) ||
+    error.name !== 'TransactionCanceledException'
+  ) {
+    return false
+  }
+  const reasons = error.CancellationReasons
+  if (!Array.isArray(reasons) || reasons.length === 0) {
+    return false
+  }
+  const codes = reasons.map((reason) =>
+    isRecord(reason) && typeof reason.Code === 'string'
+      ? reason.Code
+      : undefined
+  )
+  const failures = codes.filter((code) => code !== 'None')
+  return codes.every((code) => typeof code === 'string') &&
+    failures.includes('TransactionConflict') &&
+    failures.every((code) =>
+      code === 'ConditionalCheckFailed' ||
+      code === 'TransactionConflict'
+    )
 }
 
 function isResourceNotFound(error: unknown): boolean {
@@ -8420,6 +9571,12 @@ function isResourceInUse(error: unknown): boolean {
 }
 
 function normalizeDynamoError(error: unknown): Error {
-  if (error instanceof DocumentError || error instanceof Error) return error
-  return new DocumentError(500, 'DocumentsStoreError', 'The documents store request failed.')
+  if (error instanceof DocumentError) return error
+  return new DocumentError(
+    503,
+    'DocumentsStoreError',
+    'The documents store request failed.',
+    undefined,
+    { cause: error },
+  )
 }

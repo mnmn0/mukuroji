@@ -14,6 +14,7 @@ import {
   getCurrentUser,
   type DashboardSummary,
 } from '../auth/api'
+import { resolveEnterpriseSessionErrorsAction } from '../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession, type AuthSession } from '../auth/session'
 import { createMutationRequestRunner, type MutationRequestContext } from '../api/mutationHeaders'
 import { AutomationManagementPanelContainer } from '../automation/AutomationManagementPanelContainer'
@@ -85,6 +86,12 @@ import {
   type ProjectTask,
   type TaskPriority,
 } from '../tasks/api'
+import {
+  EnterpriseSecurityPanelContainer,
+} from '../security/EnterpriseSecurityPanelContainer'
+import type {
+  EnterpriseSecurityScopeOption,
+} from '../security/EnterpriseSecurityPanel'
 import { WorkspaceAccessPanelContainer } from '../workspace/WorkspaceAccessPanel'
 import { useWorkspaceCommandMenu } from '../commands/WorkspaceCommandMenuContext'
 import {
@@ -119,6 +126,7 @@ export type WorkspaceView =
   | 'reports'
   | 'help'
   | 'settings'
+  | 'enterprise-security'
   | 'team-overview'
   | 'team-members'
 
@@ -162,6 +170,8 @@ type TeamProjectMembersResult = {
    * member 取得に失敗したプロジェクト ID の一覧です。
    */
   failedProjectIds: string[]
+  /** Session policy を失わず shell へ伝える取得 error です。 */
+  errors: unknown[]
 }
 
 /**
@@ -226,6 +236,8 @@ type ReportCustomFieldOption = {
 type TeamWorkItemConfigurationLoadResult = {
   /** Team ID ごとに取得できた resolved configuration です。 */
   configurationsByTeam: Record<string, ResolvedWorkItemConfiguration>
+  /** Session policy を失わず shell へ伝える取得 error です。 */
+  errors: unknown[]
   /** 取得に失敗した Team ID です。 */
   failedTeamIds: string[]
 }
@@ -518,6 +530,7 @@ const emptyUserIdentityAliases: string[] = []
 const emptyResolvedWorkItemConfigurations: Record<string, ResolvedWorkItemConfiguration> = {}
 const emptyTeamWorkItemConfigurationLoadResult: TeamWorkItemConfigurationLoadResult = {
   configurationsByTeam: emptyResolvedWorkItemConfigurations,
+  errors: [],
   failedTeamIds: [],
 }
 const reportStatusOrder = [
@@ -577,6 +590,12 @@ const workspaceViewMetadata: Record<WorkspaceView, WorkspaceViewMetadata> = {
     titleKey: 'workspace.settings.title',
     descriptionKey: 'workspace.settings.description',
   },
+  'enterprise-security': {
+    activeNavId: 'settings',
+    eyebrowKey: 'security.page.eyebrow',
+    titleKey: 'security.page.title',
+    descriptionKey: 'security.page.description',
+  },
   'team-overview': {
     activeTeamViewId: 'overview',
     eyebrowKey: 'workspace.teamOverview.eyebrow',
@@ -595,11 +614,13 @@ const workspaceViewMetadata: Record<WorkspaceView, WorkspaceViewMetadata> = {
  * 認証済みワークスペースの固定ナビゲーション画面です。
  */
 export function WorkspacePage({ view }: WorkspacePageProps) {
+  const location = useLocation()
   const navigate = useNavigate()
   const params = useParams()
   const mutationRequestRunner = useRef(createMutationRequestRunner()).current
   const [session] = useState<AuthSession | null>(() => getAuthSession())
   const [locale, setLocale] = useState<Locale>(() => getInitialLocale())
+  const [authenticatedApiError, setAuthenticatedApiError] = useState<unknown>()
   const [fontSizePreference, setFontSizePreferenceState] = useState<FontSizePreference>(() =>
     getInitialFontSizePreference(),
   )
@@ -618,6 +639,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
     : null
   const {
     data: teams = emptyProjectDirectory,
+    error: projectDirectoryError,
     isLoading: isProjectDirectoryLoading,
     mutate: mutateProjectDirectory,
   } = useSWR(
@@ -630,7 +652,11 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
   const activeTeam = useMemo(() => findActiveTeam(teams, params.teamId), [params.teamId, teams])
   const activeTeamProjects = activeTeam?.projects ?? []
   const isTeamManagementView = view === 'team-overview' || view === 'team-members'
-  const needsWorkspaceWorkItems = !['help', 'settings'].includes(view)
+  const needsWorkspaceWorkItems = ![
+    'help',
+    'settings',
+    'enterprise-security',
+  ].includes(view)
   const workspaceWorkItemsKey =
     accessToken && user && !currentUserError && needsWorkspaceWorkItems
       ? (['workspace-work-items', accessToken] as const)
@@ -662,6 +688,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
     : null
   const {
     data: workItemConfigurationLoadResult = emptyTeamWorkItemConfigurationLoadResult,
+    error: workItemConfigurationsError,
     isLoading: isWorkItemConfigurationsLoading,
     mutate: mutateWorkItemConfigurations,
   } = useSWR(
@@ -683,6 +710,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       : null
   const {
     data: teamProjectMembersResult,
+    error: teamProjectMembersError,
     isLoading: isTeamProjectMembersLoading,
   } = useSWR(
     teamProjectMembersKey,
@@ -712,10 +740,33 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
   )
   const canManageStructure = canManageWorkspaceStructure(user)
   const canMutateContent = canMutateWorkspaceContent(user)
+  const currentUserErrorAction = resolveEnterpriseSessionErrorsAction(
+    currentUserError,
+    [
+      projectDirectoryError,
+      workspaceWorkItemsError,
+      workItemConfigurationsError,
+      ...workItemConfigurationLoadResult.errors,
+      teamProjectMembersError,
+      ...(teamProjectMembersResult?.errors ?? []),
+      ...(notificationInbox.sessionErrors ?? []),
+      ...(notificationPreferences.sessionErrors ?? []),
+      authenticatedApiError,
+    ],
+    `${location.pathname}${location.search}${location.hash}`,
+  )
+  const guardEnterpriseSession = async <Result,>(request: Promise<Result>) => {
+    try {
+      return await request
+    } catch (error) {
+      setAuthenticatedApiError(() => error)
+      throw error
+    }
+  }
   const isLoading =
     !session ||
     isCurrentUserLoading ||
-    Boolean(currentUserError) ||
+    Boolean(currentUserError && currentUserErrorAction?.kind !== 'stay') ||
     Boolean(user && isProjectDirectoryLoading) ||
     Boolean(
       user &&
@@ -736,11 +787,17 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
   }, [navigate, session])
 
   useEffect(() => {
-    if (currentUserError) {
-      clearAuthSession()
-      navigate('/', { replace: true })
+    if (currentUserErrorAction?.redirectTo) {
+      if (currentUserErrorAction.clearSession) {
+        clearAuthSession()
+      }
+      navigate(currentUserErrorAction.redirectTo, { replace: true })
     }
-  }, [currentUserError, navigate])
+  }, [
+    currentUserErrorAction?.clearSession,
+    currentUserErrorAction?.redirectTo,
+    navigate,
+  ])
 
   const handleLogout = () => {
     clearAuthSession()
@@ -762,9 +819,9 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       return
     }
 
-    await mutationRequestRunner.run('team:create', JSON.stringify(input), (context) =>
+    await guardEnterpriseSession(mutationRequestRunner.run('team:create', JSON.stringify(input), (context) =>
       createProjectDirectoryTeam(accessToken, input, context),
-    )
+    ))
     await mutateProjectDirectory()
   }
 
@@ -776,11 +833,11 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       return
     }
 
-    await mutationRequestRunner.run(
+    await guardEnterpriseSession(mutationRequestRunner.run(
       'project:create',
       JSON.stringify([teamId, input]),
       (context) => createProjectDirectoryProject(accessToken, teamId, input, context),
-    )
+    ))
     await mutateProjectDirectory()
   }
 
@@ -789,9 +846,9 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       return
     }
 
-    await mutationRequestRunner.run('team:archive', teamId, (context) =>
+    await guardEnterpriseSession(mutationRequestRunner.run('team:archive', teamId, (context) =>
       archiveProjectDirectoryTeam(accessToken, teamId, context),
-    )
+    ))
     await mutateProjectDirectory()
 
     if (params.teamId === teamId) {
@@ -804,11 +861,11 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
       return
     }
 
-    await mutationRequestRunner.run(
+    await guardEnterpriseSession(mutationRequestRunner.run(
       'project:archive',
       JSON.stringify([teamId, projectId]),
       (context) => archiveProjectDirectoryProject(accessToken, teamId, projectId, context),
-    )
+    ))
     await mutateProjectDirectory()
   }
 
@@ -860,7 +917,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
           ),
         { revalidate: false },
       )
-      const updatedTask = await mutationRequestRunner.run(
+      const updatedTask = await guardEnterpriseSession(mutationRequestRunner.run(
         `task:status:${taskKey}`,
         JSON.stringify([canonicalTask.revision, workflowStatusId]),
         (context) => updateWorkspaceTaskRemote(
@@ -869,7 +926,7 @@ export function WorkspacePage({ view }: WorkspacePageProps) {
           workflowStatusId,
           context,
         ),
-      )
+      ))
       await mutateWorkspaceWorkItems(
         (currentTasks = nextTasks) => replaceWorkspaceTask(currentTasks, updatedTask),
         {
@@ -1325,6 +1382,16 @@ function WorkspaceBody({
           userLabel={userLabel}
           onFontSizePreferenceChange={onFontSizePreferenceChange}
           onLocaleChange={onLocaleChange}
+        />
+      ) : null}
+      {view === 'enterprise-security' && accessToken ? (
+        <EnterpriseSecurityPanelContainer
+          accessToken={accessToken}
+          locale={locale}
+          scopeOptions={createEnterpriseSecurityScopeOptions(
+            teams,
+            t('security.scope.workspace'),
+          )}
         />
       ) : null}
       {view === 'team-overview' ? (
@@ -2572,6 +2639,30 @@ function SettingsView({
         t={t}
       />
 
+      <Link
+        className="workbench-panel group flex min-w-0 items-center justify-between gap-5 border-[#99d7cf] bg-[#f3fbfa] p-5 transition hover:border-[var(--workbench-primary)] hover:shadow-sm"
+        data-testid="enterprise-security-settings-link"
+        to="/settings/security"
+      >
+        <span className="min-w-0">
+          <span className="workbench-eyebrow">
+            {t('workspace.settings.securityEyebrow')}
+          </span>
+          <strong className="mt-2 block text-lg font-semibold text-[var(--workbench-text)]">
+            {t('workspace.settings.securityTitle')}
+          </strong>
+          <span className="mt-2 block max-w-[760px] text-sm font-medium leading-6 text-[var(--workbench-muted)]">
+            {t('workspace.settings.securityDescription')}
+          </span>
+        </span>
+        <span
+          aria-hidden="true"
+          className="grid h-11 w-11 flex-none place-items-center rounded-full border border-[#99d7cf] bg-white text-lg font-semibold text-[var(--workbench-primary)] transition-transform group-hover:translate-x-0.5"
+        >
+          →
+        </span>
+      </Link>
+
       {accessToken ? (
         <WorkspaceAccessPanelContainer accessToken={accessToken} locale={locale} />
       ) : null}
@@ -2617,6 +2708,46 @@ function SettingsView({
       </section>
     </div>
   )
+}
+
+function createEnterpriseSecurityScopeOptions(
+  teams: ProjectDirectoryTeam[],
+  workspaceLabel: string,
+): EnterpriseSecurityScopeOption[] {
+  const projects = new Map<
+    string,
+    { id: string; name: string; teamName: string }
+  >()
+
+  for (const team of teams) {
+    for (const project of team.projects) {
+      if (!projects.has(project.id)) {
+        projects.set(project.id, {
+          id: project.id,
+          name: project.name,
+          teamName: team.name,
+        })
+      }
+    }
+  }
+
+  return [
+    {
+      id: 'workspace',
+      name: workspaceLabel,
+      type: 'workspace',
+    },
+    ...teams.map((team) => ({
+      id: team.id,
+      name: team.name,
+      type: 'team' as const,
+    })),
+    ...Array.from(projects.values(), (project) => ({
+      id: project.id,
+      name: `${project.name} · ${project.teamName}`,
+      type: 'project' as const,
+    })),
+  ]
 }
 
 function WorkItemConfigurationPanelContainer({
@@ -3354,6 +3485,7 @@ async function loadTeamProjectMembers(
   )
   const members: TeamProjectMemberAccess[] = []
   const failedProjectIds: string[] = []
+  const errors: unknown[] = []
 
   for (const [index, result] of results.entries()) {
     if (result.status === 'fulfilled') {
@@ -3365,6 +3497,7 @@ async function loadTeamProjectMembers(
         })
       }
     } else {
+      errors.push(result.reason)
       const failedProjectId = projects[index]?.id
 
       if (failedProjectId) {
@@ -3374,6 +3507,7 @@ async function loadTeamProjectMembers(
   }
 
   return {
+    errors,
     failedProjectIds,
     members,
   }
@@ -3418,6 +3552,9 @@ async function loadTeamWorkItemConfigurations(
         ? [[result.value.teamId, result.value.configuration]]
         : [],
     )) as Record<string, ResolvedWorkItemConfiguration>,
+    errors: results.flatMap((result) =>
+      result.status === 'rejected' ? [result.reason] : []
+    ),
     failedTeamIds: results.flatMap((result, index) =>
       result.status === 'rejected' ? [teamIds[index] ?? ''] : [],
     ).filter(Boolean),

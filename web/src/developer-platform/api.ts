@@ -718,16 +718,21 @@ export function updateDeveloperExternalLink(
  * Work Item と外部 resource の link を解除します。
  *
  * @param accessToken - Authorization header に使う access token です。
+ * @param teamId - External link が属する Team ID です。
+ * @param workItemId - External link が属する Work Item ID です。
  * @param linkId - 削除対象 external link ID です。
  * @param mutationContext - Retry でも共有する mutation header context です。
  */
 export function deleteDeveloperExternalLink(
   accessToken: string,
+  teamId: string,
+  workItemId: string,
   linkId: string,
   mutationContext: MutationRequestContext,
 ) {
+  const search = new URLSearchParams({ teamId, workItemId })
   return requestJson<unknown>(
-    `/developer/external-links/${encodeURIComponent(linkId)}`,
+    `/developer/external-links/${encodeURIComponent(linkId)}?${search.toString()}`,
     accessToken,
     {
       headers: createMutationHeaders(mutationContext),

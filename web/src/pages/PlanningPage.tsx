@@ -5,6 +5,7 @@ import {
   canMutateWorkspaceContent,
   getCurrentUser,
 } from '../auth/api'
+import { resolveEnterpriseSessionErrorsAction } from '../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession, type AuthSession } from '../auth/session'
 import {
   createMutationRequestRunner,
@@ -98,6 +99,7 @@ export function PlanningPage() {
     : null
   const {
     data: teams = emptyTeams,
+    error: projectDirectoryError,
     isLoading: isProjectDirectoryLoading,
   } = useSWR(
     projectDirectoryKey,
@@ -128,7 +130,8 @@ export function PlanningPage() {
       ? ['planning-project-roles', accessToken, currentUserProjectKey, projectIds] as const
       : null
   const {
-    data: projectRoles = emptyProjectRoles,
+    data: projectRolesResult,
+    error: projectRolesError,
     isLoading: isProjectRolesLoading,
   } = useSWR(
     planningProjectRolesKey,
@@ -136,6 +139,7 @@ export function PlanningPage() {
       loadPlanningProjectRoles(token, memberKey, currentProjectIds),
     apiSWRConfig,
   )
+  const projectRoles = projectRolesResult?.roles ?? emptyProjectRoles
   const planningAccess = useMemo(
     () => createPlanningAccessSnapshot(teams, projectRoles),
     [projectRoles, teams],
@@ -148,6 +152,17 @@ export function PlanningPage() {
   const selectedEntityId = searchParams.get('entityId') ?? undefined
   const canManagePlanning = canManageAnyPlanningScope(user, planningAccess)
   const canMutatePlanningContent = canMutateWorkspaceContent(user)
+  const currentPath = `${location.pathname}${location.search}${location.hash}`
+  const currentUserErrorAction = resolveEnterpriseSessionErrorsAction(
+    currentUserError,
+    [
+      planningError,
+      projectDirectoryError,
+      projectRolesError,
+      ...(projectRolesResult?.errors ?? []),
+    ],
+    currentPath,
+  )
   const isLoading = !session || isCurrentUserLoading ||
     Boolean(user && isProjectDirectoryLoading) ||
     Boolean(planningProjectRolesKey && isProjectRolesLoading) ||
@@ -169,11 +184,17 @@ export function PlanningPage() {
   }, [navigate, session])
 
   useEffect(() => {
-    if (currentUserError) {
-      clearAuthSession()
-      navigate('/', { replace: true })
+    if (currentUserErrorAction?.redirectTo) {
+      if (currentUserErrorAction.clearSession) {
+        clearAuthSession()
+      }
+      navigate(currentUserErrorAction.redirectTo, { replace: true })
     }
-  }, [currentUserError, navigate])
+  }, [
+    currentUserErrorAction?.clearSession,
+    currentUserErrorAction?.redirectTo,
+    navigate,
+  ])
 
   const runMutation = async (
     key: string,
@@ -193,6 +214,19 @@ export function PlanningPage() {
       )
       await mutatePlanning(result, { revalidate: false })
     } catch (error) {
+      const sessionErrorAction = resolveEnterpriseSessionErrorsAction(
+        undefined,
+        [error],
+        currentPath,
+      )
+      if (sessionErrorAction?.redirectTo) {
+        if (sessionErrorAction.clearSession) {
+          clearAuthSession()
+        }
+        navigate(sessionErrorAction.redirectTo, { replace: true })
+        return
+      }
+
       const messageKey = resolvePlanningErrorMessageKey(error, 'mutation')
       setMutationErrorMessage(t(messageKey))
       if (messageKey === 'planning.conflict') {
@@ -454,5 +488,10 @@ async function loadPlanningProjectRoles(
     if (member) roles[response.value.projectId] = member.role
   }
 
-  return roles
+  return {
+    errors: responses.flatMap((response) =>
+      response.status === 'rejected' ? [response.reason] : []
+    ),
+    roles,
+  }
 }

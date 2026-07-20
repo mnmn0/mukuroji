@@ -145,6 +145,10 @@ export type IssueCollaborationController = {
    */
   mutationErrorStatus?: number
   /**
+   * Shell が認証 policy error を一元処理するための raw load/mutation errors です。
+   */
+  sessionErrors?: readonly unknown[]
+  /**
    * root comment ID ごとの reply pagination 状態です。
    */
   replyPagination: Record<string, TeamIssueReplyPagination>
@@ -217,7 +221,14 @@ export function useIssueCollaboration({
   const typingRef = useRef(false)
   const collaborationScope = `${enabled ? 'enabled' : 'disabled'}:${teamId ?? ''}:${issueId ?? ''}:${projectId ?? ''}`
   const [typingState, setTypingState] = useState({ active: false, scope: '' })
-  const [mutationError, setMutationError] = useState<{ scope: string; status?: number }>()
+  const [mutationError, setMutationError] = useState<{
+    /** API が返した安定 error code です。 */
+    code?: string
+    /** Error が属する collaboration scope です。 */
+    scope: string
+    /** API が返した HTTP status です。 */
+    status?: number
+  }>()
   const [replyPageState, setReplyPageState] = useState({
     comments: [] as TeamIssueComment[],
     cursors: {} as Record<string, string | undefined>,
@@ -472,8 +483,15 @@ export function useIssueCollaboration({
       const mutationErrorStatus = mutationError instanceof TeamIssuesApiError
         ? mutationError.status
         : undefined
+      const mutationErrorCode = mutationError instanceof TeamIssuesApiError
+        ? mutationError.code
+        : undefined
 
-      setMutationError({ scope: collaborationScope, status: mutationErrorStatus })
+      setMutationError({
+        code: mutationErrorCode,
+        scope: collaborationScope,
+        status: mutationErrorStatus,
+      })
       if (mutationErrorStatus === 409) {
         await refresh().catch(() => undefined)
       }
@@ -824,6 +842,7 @@ export function useIssueCollaboration({
     presence: firstPage?.presence ?? [],
     refresh,
     replyPagination,
+    sessionErrors: [error, activityError, activeMutationError],
     setResolved,
     toggleReaction,
     toggleProjectWatch: projectId ? toggleProjectWatch : undefined,

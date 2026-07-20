@@ -89,6 +89,33 @@ describe('Request intake paths', () => {
   })
 })
 
+describe('Enterprise security path', () => {
+  test('registers the dedicated security management route', () => {
+    expect(
+      matchRoutes(appRoutes, '/settings/security')?.at(-1)?.route.path,
+    ).toBe('/settings/security')
+  })
+
+  test('registers the enterprise SSO callback outside authenticated layouts', () => {
+    expect(
+      matchRoutes(appRoutes, '/auth/sso/callback')?.at(-1)?.route.path,
+    ).toBe('/auth/sso/callback')
+  })
+
+  test('registers an explicit login path for step-up return links', () => {
+    expect(
+      matchRoutes(appRoutes, '/login?returnTo=%2Fsettings%2Fsecurity')
+        ?.at(-1)?.route.path,
+    ).toBe('/login')
+  })
+
+  test('registers recovery access outside permission-gated Workspace layouts', () => {
+    expect(
+      matchRoutes(appRoutes, '/security/recovery')?.at(-1)?.route.path,
+    ).toBe('/security/recovery')
+  })
+})
+
 describe('Analytics report path', () => {
   test('registers the dedicated reports route', () => {
     expect(matchRoutes(appRoutes, '/reports')?.at(-1)?.route.path).toBe('/reports')

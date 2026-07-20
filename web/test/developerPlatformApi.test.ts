@@ -359,6 +359,8 @@ describe('Developer Platform API', () => {
     )
     await deleteDeveloperExternalLink(
       'access-token',
+      'team/product',
+      'work item/29',
       'link/29',
       mutationContext,
     )
@@ -367,7 +369,7 @@ describe('Developer Platform API', () => {
       [undefined, '/api/developer/work-items/work%20item%2F29/external-links?teamId=team%2Fproduct&cursor=next%2Flink+page&limit=25'],
       ['POST', '/api/developer/work-items/work%20item%2F29/external-links'],
       ['PATCH', '/api/developer/external-links/link%2F29'],
-      ['DELETE', '/api/developer/external-links/link%2F29'],
+      ['DELETE', '/api/developer/external-links/link%2F29?teamId=team%2Fproduct&workItemId=work+item%2F29'],
     ])
     expect(JSON.parse(String(requests[1]?.init.body))).toMatchObject({
       installationId: 'installation/github',
@@ -779,6 +781,8 @@ describe('Developer Platform API', () => {
     )).resolves.toEqual({})
     await expect(deleteDeveloperExternalLink(
       'access-token',
+      'team-29',
+      'work-item-29',
       'external-link-29',
       mutationContext,
     )).resolves.toEqual({})

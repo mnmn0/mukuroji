@@ -308,6 +308,8 @@ export function WorkItemExternalLinksPanelContainer({
           link.id,
           (context) => deleteDeveloperExternalLink(
             accessToken,
+            teamId,
+            workItemId,
             link.id,
             context,
           ),

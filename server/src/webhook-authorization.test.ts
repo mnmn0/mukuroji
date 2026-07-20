@@ -1,8 +1,19 @@
 import { expect, test } from 'bun:test'
+import type { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
-import type { WebhookSubscription } from '@mukuroji/contracts'
-import type { WorkspaceAccessClient } from './workspace-access'
-import { DynamoDbWebhookSubscriptionAuthorizer } from './webhook-authorization'
+import type {
+  EnterpriseIdentitySnapshot,
+  EnterpriseRoleAssignment,
+  EnterpriseSecurityPolicy,
+  WebhookSubscription,
+} from '@mukuroji/contracts'
+import type { EnterpriseIdentityReadClient } from './enterprise-identity'
+import type { WorkspaceAccessClient, WorkspaceMember } from './workspace-access'
+import {
+  AwsWebhookCognitoGroupsProvider,
+  DynamoDbWebhookSubscriptionAuthorizer,
+  type WebhookCognitoGroupsProvider,
+} from './webhook-authorization'
 import { createWebhookTeamGrantItem } from './webhook-authorization-projection'
 
 test('allows only an active creator with a current role in an active Team project', async () => {
@@ -49,6 +60,35 @@ test('fails closed after the creator loses project access or the Team is archive
     .toBe(false)
   expect(await archived.canDeliver('workspace-1', createSubscription(), 'team-1'))
     .toBe(false)
+})
+
+test('fails closed before policy reads when the subscription creator is no longer active', async () => {
+  const calls = {
+    authoritativeReads: 0,
+    directoryQueries: 0,
+    memberReads: 0,
+    enterpriseReads: 0,
+    groupReads: 0,
+  }
+  const authorizer = createAuthorizer(
+    [{ entryType: 'team', teamId: 'team-1' }],
+    calls,
+    Number.POSITIVE_INFINITY,
+    { member: null },
+  )
+
+  await expect(authorizer.canDeliver(
+    'workspace-1',
+    createSubscription(),
+    'team-1',
+  )).resolves.toBe(false)
+  expect(calls).toEqual({
+    authoritativeReads: 0,
+    directoryQueries: 0,
+    memberReads: 1,
+    enterpriseReads: 0,
+    groupReads: 0,
+  })
 })
 
 test('fails closed for an archived Project member row', async () => {
@@ -118,8 +158,62 @@ test('continues after 25 stale Team grants to find a current grant', async () =>
   expect(calls.teamGrantConsistentReads).toEqual([true, true])
 })
 
-test('reuses the current ACL snapshot within one Lambda batch', async () => {
-  const calls = { authoritativeReads: 0, directoryQueries: 0, memberReads: 0 }
+test('fails closed after a repeated Team grant pagination token', async () => {
+  const calls = {
+    authoritativeReads: 0,
+    directoryQueries: 0,
+    memberReads: 0,
+    teamGrantQueries: 0,
+  }
+  const authorizer = createAuthorizer(
+    [{ entryType: 'team', teamId: 'team-1' }],
+    calls,
+    Number.POSITIVE_INFINITY,
+    { grantPaginationMode: 'repeated-token' },
+  )
+
+  await expect(authorizer.canDeliver(
+    'workspace-1',
+    createSubscription(),
+    'team-1',
+  )).resolves.toBe(false)
+  expect(calls.teamGrantQueries).toBe(2)
+  expect(calls.directoryQueries).toBe(3)
+})
+
+test('fails closed after 100 distinct Team grant pagination tokens', async () => {
+  const calls = {
+    authoritativeReads: 0,
+    directoryQueries: 0,
+    memberReads: 0,
+    teamGrantQueries: 0,
+  }
+  const authorizer = createAuthorizer(
+    [{ entryType: 'team', teamId: 'team-1' }],
+    calls,
+    Number.POSITIVE_INFINITY,
+    { grantPaginationMode: 'unbounded-distinct' },
+  )
+
+  await expect(authorizer.canDeliver(
+    'workspace-1',
+    createSubscription(),
+    'team-1',
+  )).resolves.toBe(false)
+  expect(calls.teamGrantQueries).toBe(100)
+  expect(calls.directoryQueries).toBe(101)
+})
+
+test('reuses the current ACL and Enterprise snapshot within one Lambda batch', async () => {
+  const calls = {
+    authoritativeReads: 0,
+    directoryQueries: 0,
+    memberReads: 0,
+    enterpriseReads: 0,
+    groupReads: 0,
+    authoritativeConsistentReads: [] as boolean[],
+    resourceQueryIndexes: [] as Array<string | undefined>,
+  }
   const authorizer = createAuthorizer([
     { entryType: 'team', teamId: 'team-1' },
     { entryType: 'project', teamId: 'team-1', projectId: 'project-1' },
@@ -141,11 +235,23 @@ test('reuses the current ACL snapshot within one Lambda batch', async () => {
       'team-1',
       'project-1',
     ),
-  ])).resolves.toEqual([true, true])
+    batch!.canDeliver(
+      'workspace-1',
+      { ...createSubscription(), id: 'webhook-3' },
+      'team-1',
+    ),
+  ])).resolves.toEqual([true, true, true])
   expect(calls).toEqual({
     authoritativeReads: 4,
-    directoryQueries: 1,
+    directoryQueries: 3,
     memberReads: 1,
+    enterpriseReads: 1,
+    groupReads: 1,
+    authoritativeConsistentReads: [true, true, true, true],
+    resourceQueryIndexes: [
+      'WebhookAuthorizationIndex',
+      'WebhookAuthorizationIndex',
+    ],
   })
 })
 
@@ -154,8 +260,11 @@ test('does not scan unrelated creator Project memberships for Team-only authoriz
     authoritativeReads: 0,
     directoryQueries: 0,
     memberReads: 0,
+    enterpriseReads: 0,
+    groupReads: 0,
     teamGrantLimits: [] as number[],
     teamGrantConsistentReads: [] as boolean[],
+    resourceQueryIndexes: [] as Array<string | undefined>,
   }
   const fillerRows = Array.from({ length: 10_001 }, (_, index) => ({
     entryType: 'project-member',
@@ -186,10 +295,16 @@ test('does not scan unrelated creator Project memberships for Team-only authoriz
     ),
   ])).resolves.toEqual([true, true])
   expect(calls.memberReads).toBe(1)
-  expect(calls.directoryQueries).toBe(1)
+  expect(calls.enterpriseReads).toBe(1)
+  expect(calls.groupReads).toBe(1)
+  expect(calls.directoryQueries).toBe(3)
   expect(calls.authoritativeReads).toBe(4)
   expect(calls.teamGrantLimits).toEqual([25])
   expect(calls.teamGrantConsistentReads).toEqual([true])
+  expect(calls.resourceQueryIndexes).toEqual([
+    'WebhookAuthorizationIndex',
+    'WebhookAuthorizationIndex',
+  ])
 })
 
 test('uses strongly consistent grant source locators without cross-Team access', async () => {
@@ -229,30 +344,473 @@ test('uses strongly consistent grant source locators without cross-Team access',
   )).resolves.toBe(true)
 })
 
+test('ignores a stale legacy ACL when current Enterprise authority lacks Team access', async () => {
+  const snapshot = createEnterpriseSnapshot({
+    roleAssignments: [createRoleAssignment({
+      assignmentId: 'unrelated-project',
+      roleId: 'project:viewer',
+      scope: {
+        workspaceId: 'workspace-1',
+        kind: 'project',
+        targetId: 'project-other',
+      },
+    })],
+  })
+  const authorizer = createAuthorizer([
+    { entryType: 'team', teamId: 'team-1' },
+    { entryType: 'project', teamId: 'team-1', projectId: 'project-1' },
+    {
+      entryType: 'project-member',
+      projectId: 'project-1',
+      memberKey: 'creator-1',
+      role: 'viewer',
+    },
+  ], undefined, Number.POSITIVE_INFINITY, {
+    readSnapshot: async () => snapshot,
+  })
+
+  await expect(authorizer.canDeliver(
+    'workspace-1',
+    createSubscription(),
+    'team-1',
+  )).resolves.toBe(false)
+})
+
+test('allows Enterprise-only work-items.read grants at Team and Project scope', async () => {
+  const rows = [
+    { entryType: 'team', teamId: 'team-1' },
+    { entryType: 'project', teamId: 'team-1', projectId: 'project-1' },
+  ]
+  const teamAuthorizer = createAuthorizer(
+    rows,
+    undefined,
+    Number.POSITIVE_INFINITY,
+    {
+      readSnapshot: async () => createEnterpriseSnapshot({
+        roleAssignments: [createRoleAssignment({
+          assignmentId: 'team-reader',
+          roleId: 'team:member',
+          scope: {
+            workspaceId: 'workspace-1',
+            kind: 'team',
+            targetId: 'team-1',
+          },
+        })],
+      }),
+    },
+  )
+  const projectAuthorizer = createAuthorizer(
+    rows,
+    undefined,
+    Number.POSITIVE_INFINITY,
+    {
+      readSnapshot: async () => createEnterpriseSnapshot({
+        roleAssignments: [createRoleAssignment({
+          assignmentId: 'project-reader',
+          roleId: 'project:viewer',
+          scope: {
+            workspaceId: 'workspace-1',
+            kind: 'project',
+            targetId: 'project-1',
+          },
+        })],
+      }),
+    },
+  )
+
+  await expect(teamAuthorizer.canDeliver(
+    'workspace-1',
+    createSubscription(),
+    'team-1',
+  )).resolves.toBe(true)
+  await expect(projectAuthorizer.canDeliver(
+    'workspace-1',
+    createSubscription(),
+    'team-1',
+    'project-1',
+  )).resolves.toBe(true)
+})
+
+test('denies a later delivery after the Enterprise CONTROL grant is revoked', async () => {
+  let currentSnapshot = createEnterpriseSnapshot({
+    controlRevision: 1,
+    roleAssignments: [createRoleAssignment({
+      assignmentId: 'team-reader',
+      roleId: 'team:member',
+      scope: {
+        workspaceId: 'workspace-1',
+        kind: 'team',
+        targetId: 'team-1',
+      },
+    })],
+  })
+  const authorizer = createAuthorizer(
+    [{ entryType: 'team', teamId: 'team-1' }],
+    undefined,
+    Number.POSITIVE_INFINITY,
+    { readSnapshot: async () => currentSnapshot },
+  )
+
+  await expect(authorizer.canDeliver(
+    'workspace-1',
+    createSubscription(),
+    'team-1',
+  )).resolves.toBe(true)
+  currentSnapshot = createEnterpriseSnapshot({
+    controlRevision: 2,
+    roleAssignments: [],
+  })
+  await expect(authorizer.canDeliver(
+    'workspace-1',
+    createSubscription(),
+    'team-1',
+  )).resolves.toBe(false)
+})
+
+test('denies a creator after applied SCIM deprovisioning', async () => {
+  const timestamp = '2026-07-19T00:00:00.000Z'
+  const authorizer = createAuthorizer([
+    { entryType: 'team', teamId: 'team-1' },
+    { entryType: 'project', teamId: 'team-1', projectId: 'project-1' },
+    {
+      entryType: 'project-member',
+      projectId: 'project-1',
+      memberKey: 'creator-1',
+      role: 'viewer',
+    },
+  ], undefined, Number.POSITIVE_INFINITY, {
+    readSnapshot: async () => createEnterpriseSnapshot({
+      scimUsers: [{
+        workspaceId: 'workspace-1',
+        userId: 'scim-user-1',
+        externalId: 'external-user-1',
+        identityProviderId: 'idp-1',
+        userName: 'creator@example.test',
+        emails: ['creator@example.test'],
+        active: false,
+        linkedMemberKey: 'creator-1',
+        groupIds: [],
+        version: 2,
+        appliedVersion: 2,
+        appliedAt: timestamp,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }],
+    }),
+  })
+
+  await expect(authorizer.canDeliver(
+    'workspace-1',
+    createSubscription(),
+    'team-1',
+  )).resolves.toBe(false)
+})
+
+test('rechecks direct Cognito directory-group grants before every delivery', async () => {
+  let groups = ['delivery-readers']
+  const snapshot = createEnterpriseSnapshot({
+    roleAssignments: [createRoleAssignment({
+      assignmentId: 'cognito-team-reader',
+      principalKind: 'directory-group',
+      principalId: 'delivery-readers',
+      roleId: 'team:member',
+      scope: {
+        workspaceId: 'workspace-1',
+        kind: 'team',
+        targetId: 'team-1',
+      },
+    })],
+  })
+  const authorizer = createAuthorizer(
+    [{ entryType: 'team', teamId: 'team-1' }],
+    undefined,
+    Number.POSITIVE_INFINITY,
+    {
+      readSnapshot: async () => snapshot,
+      readGroups: async () => groups,
+    },
+  )
+
+  await expect(authorizer.canDeliver(
+    'workspace-1',
+    createSubscription(),
+    'team-1',
+  )).resolves.toBe(true)
+  groups = []
+  await expect(authorizer.canDeliver(
+    'workspace-1',
+    createSubscription(),
+    'team-1',
+  )).resolves.toBe(false)
+})
+
+test('loads all Cognito group pages and rejects a pagination cycle', async () => {
+  const requestedTokens: Array<string | undefined> = []
+  const client = {
+    async send(command: { input: { NextToken?: string } }) {
+      requestedTokens.push(command.input.NextToken)
+      if (!command.input.NextToken) {
+        return {
+          Groups: [{ GroupName: 'group-a' }],
+          NextToken: 'page-2',
+        }
+      }
+      return {
+        Groups: [{ GroupName: 'group-b' }, { GroupName: 'group-a' }],
+      }
+    },
+  } as unknown as CognitoIdentityProviderClient
+  const provider = new AwsWebhookCognitoGroupsProvider('pool-1', client)
+
+  expect(() => new AwsWebhookCognitoGroupsProvider(' ', client))
+    .toThrow('COGNITO_USER_POOL_ID is required')
+  await expect(provider.getGroups('creator-1')).resolves.toEqual([
+    'group-a',
+    'group-b',
+  ])
+  expect(requestedTokens).toEqual([undefined, 'page-2'])
+
+  const cyclingClient = {
+    async send() {
+      return { NextToken: 'same-token' }
+    },
+  } as unknown as CognitoIdentityProviderClient
+  const cyclingProvider = new AwsWebhookCognitoGroupsProvider(
+    'pool-1',
+    cyclingClient,
+  )
+  await expect(cyclingProvider.getGroups('creator-1')).rejects.toThrow(
+    'pagination token repeated',
+  )
+})
+
+test('enforces external guest, collaborator, and permission-ceiling policy', async () => {
+  const teamRows = [{ entryType: 'team', teamId: 'team-1' }]
+  const deniedGuest = createAuthorizer(
+    teamRows,
+    undefined,
+    Number.POSITIVE_INFINITY,
+    {
+      member: createWorkspaceMember({
+        email: 'guest@partner.test',
+        role: 'guest',
+      }),
+      readSnapshot: async () => createEnterpriseSnapshot({
+        policy: createEnterprisePolicy({
+          allowGuests: false,
+        }),
+      }),
+    },
+  )
+  const deniedCollaborator = createAuthorizer(
+    teamRows,
+    undefined,
+    Number.POSITIVE_INFINITY,
+    {
+      member: createWorkspaceMember({
+        email: 'creator@partner.test',
+        role: 'member',
+      }),
+      readSnapshot: async () => createEnterpriseSnapshot({
+        domains: [{
+          workspaceId: 'workspace-1',
+          domainId: 'domain-1',
+          domain: 'company.test',
+          status: 'verified',
+          enforceSso: false,
+          verificationRecordName: '_mukuroji.company.test',
+          verifiedAt: '2026-07-19T00:00:00.000Z',
+          revision: 1,
+          createdAt: '2026-07-19T00:00:00.000Z',
+          updatedAt: '2026-07-19T00:00:00.000Z',
+        }],
+        policy: createEnterprisePolicy({
+          allowExternalCollaborators: false,
+        }),
+      }),
+    },
+  )
+  const ceilingDenied = createAuthorizer(
+    teamRows,
+    undefined,
+    Number.POSITIVE_INFINITY,
+    {
+      member: createWorkspaceMember({
+        email: 'guest@partner.test',
+        role: 'guest',
+      }),
+      readSnapshot: async () => createEnterpriseSnapshot({
+        policy: createEnterprisePolicy({
+          permissionCeiling: ['workspace.read', 'teams.read'],
+        }),
+      }),
+    },
+  )
+
+  await expect(deniedGuest.canDeliver(
+    'workspace-1',
+    createSubscription(),
+    'team-1',
+  )).resolves.toBe(false)
+  await expect(deniedCollaborator.canDeliver(
+    'workspace-1',
+    createSubscription(),
+    'team-1',
+  )).resolves.toBe(false)
+  await expect(ceilingDenied.canDeliver(
+    'workspace-1',
+    createSubscription(),
+    'team-1',
+  )).resolves.toBe(false)
+})
+
+test('fails closed when Enterprise, Cognito, or ProjectDirectory reads fail', async () => {
+  const rows = [{ entryType: 'team', teamId: 'team-1' }]
+  const enterpriseFailure = createAuthorizer(
+    rows,
+    undefined,
+    Number.POSITIVE_INFINITY,
+    {
+      readSnapshot: async () => {
+        throw new Error('Enterprise unavailable')
+      },
+    },
+  )
+  const cognitoFailure = createAuthorizer(
+    rows,
+    undefined,
+    Number.POSITIVE_INFINITY,
+    {
+      readGroups: async () => {
+        throw new Error('Cognito unavailable')
+      },
+    },
+  )
+  const directoryFailure = createAuthorizer(
+    rows,
+    undefined,
+    Number.POSITIVE_INFINITY,
+    { failDirectory: true },
+  )
+
+  await expect(enterpriseFailure.canDeliver(
+    'workspace-1',
+    createSubscription(),
+    'team-1',
+  )).resolves.toBe(false)
+  await expect(cognitoFailure.canDeliver(
+    'workspace-1',
+    createSubscription(),
+    'team-1',
+  )).resolves.toBe(false)
+  await expect(directoryFailure.canDeliver(
+    'workspace-1',
+    createSubscription(),
+    'team-1',
+  )).resolves.toBe(false)
+})
+
+test('keeps current ProjectDirectory ACL fallback for a legacy Workspace', async () => {
+  const authorizer = createAuthorizer([
+    { entryType: 'team', teamId: 'team-1' },
+    { entryType: 'project', teamId: 'team-1', projectId: 'project-1' },
+    {
+      entryType: 'project-member',
+      projectId: 'project-1',
+      memberKey: 'creator-1',
+      role: 'viewer',
+    },
+  ])
+
+  await expect(authorizer.canDeliver(
+    'workspace-1',
+    createSubscription(),
+    'team-1',
+  )).resolves.toBe(true)
+})
+
+test('does not let system administrator status bypass an inactive Project', async () => {
+  const authorizer = createAuthorizer([
+    { entryType: 'team', teamId: 'team-1' },
+    {
+      entryType: 'project',
+      teamId: 'team-1',
+      projectId: 'project-1',
+      archivedAt: '2026-07-19T00:00:00.000Z',
+    },
+  ], undefined, Number.POSITIVE_INFINITY, {
+    readGroups: async () => ['system-admins'],
+    systemAdminGroups: ['system-admins'],
+  })
+
+  await expect(authorizer.canDeliver(
+    'workspace-1',
+    createSubscription(),
+    'team-1',
+    'project-1',
+  )).resolves.toBe(false)
+})
+
+/** Test double の current-state read 回数です。 */
+type AuthorizerTestCalls = {
+  /** ProjectDirectory base-table Get 回数です。 */
+  authoritativeReads: number
+  /** ProjectDirectory Query 回数です。 */
+  directoryQueries: number
+  /** Workspace membership read 回数です。 */
+  memberReads: number
+  /** Enterprise CONTROL snapshot read 回数です。 */
+  enterpriseReads?: number
+  /** Cognito group 全ページ read 回数です。 */
+  groupReads?: number
+  /** Legacy Team grant Query 回数です。 */
+  teamGrantQueries?: number
+  /** Base-table Get が強整合だったかどうかです。 */
+  authoritativeConsistentReads?: boolean[]
+  /** Legacy Team grant Query の Limit 一覧です。 */
+  teamGrantLimits?: number[]
+  /** Legacy Team grant Query の ConsistentRead 一覧です。 */
+  teamGrantConsistentReads?: boolean[]
+  /** Resource locator GSI Query の index 名一覧です。 */
+  resourceQueryIndexes?: Array<string | undefined>
+}
+
+/** Authorizer test double の current-state override です。 */
+type AuthorizerTestOptions = {
+  /** Active Workspace member。null は deactivated/missing member です。 */
+  member?: WorkspaceMember | null
+  /** Current Enterprise snapshot を返す reader override です。 */
+  readSnapshot?: () => Promise<EnterpriseIdentitySnapshot>
+  /** Current Cognito groups を返す reader override です。 */
+  readGroups?: () => Promise<string[]>
+  /** ProjectDirectory dependency failure を発生させるかどうかです。 */
+  failDirectory?: boolean
+  /** Legacy Team grant Query の異常 pagination response です。 */
+  grantPaginationMode?: 'repeated-token' | 'unbounded-distinct'
+  /** System administrator とみなす group names です。 */
+  systemAdminGroups?: string[]
+}
+
 function createAuthorizer(
   rows: Record<string, unknown>[],
-  calls?: {
-    authoritativeReads: number
-    directoryQueries: number
-    memberReads: number
-    teamGrantLimits?: number[]
-    teamGrantConsistentReads?: boolean[]
-  },
+  calls?: AuthorizerTestCalls,
   pageSize = Number.POSITIVE_INFINITY,
+  options: AuthorizerTestOptions = {},
 ) {
+  const defaultMember = {
+    id: 'member-1',
+    memberKey: 'creator-1',
+    email: 'creator@example.test',
+    role: 'admin',
+    status: 'active',
+    version: 1,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  } satisfies WorkspaceMember
   const workspaceAccess = {
     async getActiveMember() {
       if (calls) calls.memberReads += 1
-      return {
-        id: 'member-1',
-        memberKey: 'creator-1',
-        email: 'creator@example.test',
-        role: 'admin',
-        status: 'active',
-        version: 1,
-        createdAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-01T00:00:00.000Z',
-      }
+      return options.member === undefined ? defaultMember : options.member ?? undefined
     },
   } as unknown as WorkspaceAccessClient
   const sourceRows = rows.map((row, index) => withAuthorizationProjection(row, index))
@@ -313,13 +871,20 @@ function createAuthorizer(
     `${row.directoryId}\0${row.entryKey}`,
     row,
   ]))
+  let teamGrantQueryCount = 0
   const documentClient = {
     async send(command: {
       constructor: { name: string }
       input: Record<string, unknown>
     }) {
+      if (options.failDirectory) {
+        throw new Error('ProjectDirectory unavailable')
+      }
       if (command.constructor.name === 'GetCommand') {
         if (calls) calls.authoritativeReads += 1
+        calls?.authoritativeConsistentReads?.push(
+          command.input.ConsistentRead === true,
+        )
         const key = command.input.Key as { directoryId?: string; entryKey?: string }
         return {
           Item: storedRowsByKey.get(`${key.directoryId}\0${key.entryKey}`),
@@ -333,8 +898,24 @@ function createAuthorizer(
       const isGrantQuery =
         values[':grantDirectoryId']?.startsWith('WEBHOOK_TEAM_GRANT#')
       if (isGrantQuery) {
+        teamGrantQueryCount += 1
+        if (calls?.teamGrantQueries !== undefined) calls.teamGrantQueries += 1
         calls?.teamGrantLimits?.push(command.input.Limit as number)
         calls?.teamGrantConsistentReads?.push(command.input.ConsistentRead === true)
+        if (options.grantPaginationMode) {
+          return {
+            Count: 0,
+            Items: [],
+            LastEvaluatedKey: {
+              directoryId: values[':grantDirectoryId'],
+              entryKey: options.grantPaginationMode === 'repeated-token'
+                ? 'REPEATED'
+                : `PAGE#${teamGrantQueryCount}`,
+            },
+          }
+        }
+      } else {
+        calls?.resourceQueryIndexes?.push(command.input.IndexName as string | undefined)
       }
       const matching = storedRows.filter((row) => isGrantQuery
         ? row.directoryId === values[':grantDirectoryId'] &&
@@ -381,10 +962,28 @@ function createAuthorizer(
       }
     },
   } as unknown as DynamoDBDocumentClient
+  const enterpriseIdentity = {
+    async getSnapshot() {
+      if (calls?.enterpriseReads !== undefined) calls.enterpriseReads += 1
+      return options.readSnapshot
+        ? await options.readSnapshot()
+        : createEnterpriseSnapshot()
+    },
+  } as unknown as EnterpriseIdentityReadClient
+  const cognitoGroups = {
+    async getGroups() {
+      if (calls?.groupReads !== undefined) calls.groupReads += 1
+      return options.readGroups ? await options.readGroups() : []
+    },
+  } satisfies WebhookCognitoGroupsProvider
   return new DynamoDbWebhookSubscriptionAuthorizer(
     workspaceAccess,
     documentClient,
     'project-directory-test',
+    enterpriseIdentity,
+    cognitoGroups,
+    'WebhookAuthorizationIndex',
+    options.systemAdminGroups ?? ['mukuroji-system-admins'],
   )
 }
 
@@ -430,6 +1029,97 @@ function withAuthorizationProjection(
     }
   }
   return { directoryId, entryKey: `OTHER#${index}`, ...row }
+}
+
+function createRoleAssignment(
+  overrides: Partial<EnterpriseRoleAssignment> = {},
+): EnterpriseRoleAssignment {
+  return {
+    workspaceId: 'workspace-1',
+    assignmentId: 'assignment-1',
+    principalKind: 'member',
+    principalId: 'creator-1',
+    roleId: 'team:member',
+    scope: {
+      workspaceId: 'workspace-1',
+      kind: 'team',
+      targetId: 'team-1',
+    },
+    source: 'direct',
+    ...overrides,
+  }
+}
+
+function createWorkspaceMember(
+  overrides: Partial<WorkspaceMember> = {},
+): WorkspaceMember {
+  return {
+    id: 'member-1',
+    memberKey: 'creator-1',
+    email: 'creator@example.test',
+    role: 'admin',
+    status: 'active',
+    version: 1,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  }
+}
+
+function createEnterprisePolicy(
+  externalOverrides: Partial<EnterpriseSecurityPolicy['externalAccess']> = {},
+): EnterpriseSecurityPolicy {
+  const timestamp = '2026-07-19T00:00:00.000Z'
+  return {
+    workspaceId: 'workspace-1',
+    loginMode: 'password-or-sso',
+    mfaRequirement: 'optional',
+    sessionLifetimeMinutes: 480,
+    idleTimeoutMinutes: 60,
+    reauthenticationIntervalMinutes: 120,
+    sensitiveActionReauthenticationMinutes: 15,
+    ipAllowlistMode: 'disabled',
+    ipAllowlist: [],
+    externalAccess: {
+      allowGuests: true,
+      allowExternalCollaborators: true,
+      requireMfa: false,
+      maximumSessionLifetimeMinutes: 120,
+      allowedGuestDomains: [],
+      permissionCeiling: [
+        'workspace.read',
+        'teams.read',
+        'projects.read',
+        'work-items.read',
+      ],
+      ...externalOverrides,
+    },
+    revision: 1,
+    updatedAt: timestamp,
+    updatedBy: 'owner-1',
+  }
+}
+
+function createEnterpriseSnapshot(
+  overrides: Partial<EnterpriseIdentitySnapshot> = {},
+): EnterpriseIdentitySnapshot {
+  return {
+    workspaceId: 'workspace-1',
+    controlRevision: 1,
+    identityProviders: [],
+    domains: [],
+    customRoles: [],
+    groupMappings: [],
+    roleAssignments: [],
+    scimUsers: [],
+    scimGroups: [],
+    scimCredentials: [],
+    serviceAccounts: [],
+    breakGlassAccounts: [],
+    provisioningRuns: [],
+    provisioningLogs: [],
+    ...overrides,
+  }
 }
 
 function createSubscription() {

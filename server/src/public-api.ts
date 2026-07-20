@@ -109,12 +109,24 @@ export interface PublicWorkItemService {
     teamId: string,
     workItemId: string,
   ): Promise<CanonicalWorkItem>
+  /** Work Item 作成 receipt の replay 前に current create RBAC を再評価します。 */
+  authorizeCreate(
+    credential: AuthenticatedDeveloperCredential,
+    input: CreatePublicWorkItemRequest,
+  ): Promise<void>
   /** Current RBAC/configuration validation を通して Work Item を作成します。 */
   create(
     credential: AuthenticatedDeveloperCredential,
     input: CreatePublicWorkItemRequest,
     context: PublicMutationContext,
   ): Promise<CanonicalWorkItem>
+  /** Work Item 更新 receipt の replay 前に current source/target RBAC を再評価します。 */
+  authorizeUpdate(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    input: UpdatePublicWorkItemRequest,
+  ): Promise<void>
   /** Current RBAC/configuration/CAS を通して Work Item を更新します。 */
   update(
     credential: AuthenticatedDeveloperCredential,
@@ -124,6 +136,12 @@ export interface PublicWorkItemService {
     context: PublicMutationContext,
     idempotency?: IdempotencyMutationToken,
   ): Promise<CanonicalWorkItem>
+  /** Work Item 削除 receipt の replay 前に current delete RBAC を再評価します。 */
+  authorizeDelete(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+  ): Promise<void>
   /** Current RBAC/CAS を通して Work Item を削除します。 */
   delete(
     credential: AuthenticatedDeveloperCredential,
@@ -255,8 +273,11 @@ export interface ConnectorAuthorizationService {
 export type PublicApiDependencies = {
   /** Credential、webhook、connector、import metadata store です。 */
   developerPlatform: DeveloperPlatformClient
-  /** Cognito bearer token を current Workspace principal へ解決します。 */
-  authenticateManagement(authorization: string): Promise<DeveloperManagementPrincipal>
+  /** Cognito bearer token と request metadata を current Workspace principal へ解決します。 */
+  authenticateManagement(
+    authorization: string,
+    context: Context,
+  ): Promise<DeveloperManagementPrincipal>
   /** Canonical Work Item/RBAC adapter です。 */
   workItems: PublicWorkItemService
   /** Public OpenAPI 3.1 document です。 */
@@ -498,10 +519,19 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.post('/v1/work-items', async (c) => {
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
     const body = readCreatePublicWorkItemRequest(await readJson(c))
-    return executeIdempotentJson(c, dependencies, credential, body, async (mutationContext) => ({
-      status: 201,
-      body: await dependencies.workItems.create(credential, body, mutationContext),
-    }))
+    return executeIdempotentJson(
+      c,
+      dependencies,
+      credential,
+      body,
+      async (mutationContext) => ({
+        status: 201,
+        body: await dependencies.workItems.create(credential, body, mutationContext),
+      }),
+      {
+        authorizeReplay: () => dependencies.workItems.authorizeCreate(credential, body),
+      },
+    )
   })
 
   router.patch('/v1/work-items/:workItemId', async (c) => {
@@ -509,20 +539,30 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const body = readUpdatePublicWorkItemRequest(await readJson(c))
     const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
     const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
-    return executeIdempotentJson(c, dependencies, credential, body, async (
-      mutationContext,
-      idempotency,
-    ) => ({
-      status: 200,
-      body: await dependencies.workItems.update(
-        credential,
-        teamId,
-        workItemId,
-        body,
+    return executeIdempotentJson(
+      c,
+      dependencies,
+      credential,
+      body,
+      async (
         mutationContext,
         idempotency,
-      ),
-    }))
+      ) => ({
+        status: 200,
+        body: await dependencies.workItems.update(
+          credential,
+          teamId,
+          workItemId,
+          body,
+          mutationContext,
+          idempotency,
+        ),
+      }),
+      {
+        authorizeReplay: () =>
+          dependencies.workItems.authorizeUpdate(credential, teamId, workItemId, body),
+      },
+    )
   })
 
   router.delete('/v1/work-items/:workItemId', async (c) => {
@@ -530,20 +570,30 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const body = readDeletePublicWorkItemRequest(await readJson(c))
     const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
     const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
-    return executeIdempotentJson(c, dependencies, credential, body, async (
-      mutationContext,
-      idempotency,
-    ) => {
-      await dependencies.workItems.delete(
-        credential,
-        teamId,
-        workItemId,
-        body.expectedRevision,
+    return executeIdempotentJson(
+      c,
+      dependencies,
+      credential,
+      body,
+      async (
         mutationContext,
         idempotency,
-      )
-      return { status: 204, body: null }
-    })
+      ) => {
+        await dependencies.workItems.delete(
+          credential,
+          teamId,
+          workItemId,
+          body.expectedRevision,
+          mutationContext,
+          idempotency,
+        )
+        return { status: 204, body: null }
+      },
+      {
+        authorizeReplay: () =>
+          dependencies.workItems.authorizeDelete(credential, teamId, workItemId),
+      },
+    )
   })
 
   router.get('/v1/work-items/:workItemId/external-links', async (c) => {
@@ -602,26 +652,41 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
     const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
     const linkId = readRouteId(c.req.param('linkId'), 'External link ID')
-    return executeIdempotentJson(c, dependencies, credential, { teamId, workItemId, linkId }, async (
-      _context,
-      idempotency,
-    ) => {
-      await dependencies.workItems.authorizeExternalLink(
-        credential,
-        teamId,
-        workItemId,
-        true,
-      )
-      await platform.deleteExternalWorkItemLink({
-        workspaceId: credential.workspaceId,
-        teamId,
-        workItemId,
-        linkId,
-        deletedByActorId: `credential:${credential.credentialId}`,
+    return executeIdempotentJson(
+      c,
+      dependencies,
+      credential,
+      { teamId, workItemId, linkId },
+      async (
+        _context,
         idempotency,
-      })
-      return { status: 204, body: null }
-    })
+      ) => {
+        await dependencies.workItems.authorizeExternalLink(
+          credential,
+          teamId,
+          workItemId,
+          true,
+        )
+        await platform.deleteExternalWorkItemLink({
+          workspaceId: credential.workspaceId,
+          teamId,
+          workItemId,
+          linkId,
+          deletedByActorId: `credential:${credential.credentialId}`,
+          idempotency,
+        })
+        return { status: 204, body: null }
+      },
+      {
+        authorizeReplay: () =>
+          dependencies.workItems.authorizeExternalLink(
+            credential,
+            teamId,
+            workItemId,
+            true,
+          ),
+      },
+    )
   })
 
   router.get('/developer', async (c) => {
@@ -922,6 +987,12 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.delete('/developer/webhook-subscriptions/:subscriptionId', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canManageWebhooks')
     const subscriptionId = readRouteId(c.req.param('subscriptionId'), 'Webhook subscription ID')
+    const subscription = await requireWebhookSubscriptionCreator(
+      platform,
+      principal,
+      subscriptionId,
+    )
+    await dependencies.workItems.authorizeWebhookTeams(principal, subscription.teamIds)
     return executeManagementIdempotentJson(
       c,
       dependencies,
@@ -1299,33 +1370,51 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
 
   router.delete('/developer/external-links/:linkId', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canManageIntegrations')
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRequiredQuery(c.req.query('workItemId'), 'workItemId')
     const linkId = readRouteId(c.req.param('linkId'), 'External link ID')
     return executeManagementIdempotentJson(
       c,
       dependencies,
       principal,
-      { linkId },
+      { teamId, workItemId, linkId },
       async (_context, idempotency) => {
         const link = await requireExternalWorkItemLink(
           platform,
           principal.workspaceId,
           linkId,
         )
+        if (link.teamId !== teamId || link.workItemId !== workItemId) {
+          throw new PublicApiServiceError(
+            404,
+            'not_found',
+            'External Work Item link was not found.',
+          )
+        }
         await dependencies.workItems.authorizeExternalLink(
           toManagementCredential(principal),
-          link.teamId,
-          link.workItemId,
+          teamId,
+          workItemId,
           true,
         )
         await platform.deleteExternalWorkItemLink({
           workspaceId: principal.workspaceId,
-          teamId: link.teamId,
-          workItemId: link.workItemId,
+          teamId,
+          workItemId,
           linkId: link.id,
           deletedByActorId: principal.userId,
           idempotency,
         })
         return { status: 204, body: null }
+      },
+      {
+        authorizeReplay: () =>
+          dependencies.workItems.authorizeExternalLink(
+            toManagementCredential(principal),
+            teamId,
+            workItemId,
+            true,
+          ),
       },
     )
   })
@@ -1381,6 +1470,15 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
           input,
         ),
       }),
+      {
+        authorizeReplay: () => requireAuthorizedSyncConflict(
+          dependencies.connectorAuthorization!,
+          platform,
+          dependencies.workItems,
+          principal,
+          conflictId,
+        ),
+      },
     )
   })
 
@@ -1396,7 +1494,12 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
         status: 200,
         body: await dependencies.workItems.dryRunImport(principal, input),
       }),
-      { releaseReservationAfterCompletionFailure: true },
+      {
+        releaseReservationAfterCompletionFailure: true,
+        authorizeReplay: async () => {
+          await dependencies.workItems.dryRunImport(principal, input)
+        },
+      },
     )
   })
 
@@ -1429,6 +1532,11 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
           context,
         ),
       }),
+      {
+        authorizeReplay: async () => {
+          await dependencies.workItems.dryRunImport(principal, input)
+        },
+      },
     )
   })
 
@@ -1465,7 +1573,18 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
           context,
         ),
       }),
-      { releaseReservationAfterCompletionFailure: true },
+      {
+        releaseReservationAfterCompletionFailure: true,
+        authorizeReplay: async () => {
+          await requireAuthorizedImportJob(
+            platform,
+            dependencies.workItems,
+            principal,
+            jobId,
+            true,
+          )
+        },
+      },
     )
   })
 
@@ -1580,6 +1699,61 @@ async function requireExternalWorkItemLink(
     throw new PublicApiServiceError(404, 'not_found', 'External Work Item link was not found.')
   }
   return link
+}
+
+async function requireAuthorizedSyncConflict(
+  connectorAuthorization: ConnectorAuthorizationService,
+  platform: DeveloperPlatformClient,
+  workItems: PublicWorkItemService,
+  principal: DeveloperManagementPrincipal,
+  conflictId: string,
+) {
+  let cursor: string | undefined
+  const seenCursors = new Set<string>()
+  for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
+    const page = await connectorAuthorization.listConflicts(principal, {
+      ...(cursor ? { cursor } : {}),
+      limit: PUBLIC_API_MAX_PAGE_SIZE,
+    })
+    const conflict = page.items.find((candidate) => candidate.id === conflictId)
+    if (conflict) {
+      const link = await requireExternalWorkItemLink(
+        platform,
+        principal.workspaceId,
+        conflict.externalLinkId,
+      )
+      if (link.workItemId !== conflict.workItemId) {
+        throw new PublicApiServiceError(
+          404,
+          'not_found',
+          'Connector sync conflict was not found.',
+        )
+      }
+      await workItems.authorizeExternalLink(
+        toManagementCredential(principal),
+        link.teamId,
+        conflict.workItemId,
+        true,
+      )
+      return
+    }
+    if (!page.hasMore) break
+    if (!page.nextCursor || seenCursors.has(page.nextCursor)) {
+      throw new PublicApiServiceError(
+        503,
+        'temporarily_unavailable',
+        'Connector sync conflict authorization could not advance safely.',
+        true,
+      )
+    }
+    seenCursors.add(page.nextCursor)
+    cursor = page.nextCursor
+  }
+  throw new PublicApiServiceError(
+    404,
+    'not_found',
+    'Connector sync conflict was not found.',
+  )
 }
 
 function toManagementCredential(
@@ -1723,7 +1897,7 @@ async function authenticateManagementRequest(c: Context, dependencies: PublicApi
   if (!authorization) {
     throw new PublicApiServiceError(401, 'authentication_required', 'Bearer token is required.')
   }
-  const principal = await dependencies.authenticateManagement(authorization)
+  const principal = await dependencies.authenticateManagement(authorization, c)
   const rateLimit = await dependencies.developerPlatform.consumeRateLimit({
     workspaceId: principal.workspaceId,
     credentialId: `management:${principal.userId}`,
@@ -1762,6 +1936,14 @@ async function requireManagementCapability(
   return principal
 }
 
+/** Idempotent mutation の reservation/replay 制御 option です。 */
+type IdempotentExecutionOptions = {
+  /** Receipt 保存失敗後に安全に同じ domain operation を再実行できるかどうかです。 */
+  releaseReservationAfterCompletionFailure?: boolean
+  /** Completed receipt を返す直前に current domain authorization を再評価します。 */
+  authorizeReplay?: () => Promise<void>
+}
+
 async function executeIdempotentJson(
   c: Context,
   dependencies: PublicApiDependencies,
@@ -1771,11 +1953,12 @@ async function executeIdempotentJson(
     context: PublicMutationContext,
     idempotency: IdempotencyMutationToken,
   ) => Promise<{ status: 200 | 201 | 202 | 204; body: unknown }>,
+  options: IdempotentExecutionOptions = {},
 ) {
   return executeIdempotent(c, dependencies, {
     workspaceId: credential.workspaceId,
     credentialId: credential.credentialId,
-  }, body, operation)
+  }, body, operation, options)
 }
 
 async function executeManagementIdempotentJson(
@@ -1787,10 +1970,7 @@ async function executeManagementIdempotentJson(
     context: PublicMutationContext,
     idempotency: IdempotencyMutationToken,
   ) => Promise<{ status: 200 | 201 | 202 | 204; body: unknown }>,
-  options: {
-    /** Receipt 保存失敗後に安全に同じ domain operation を再実行できるかどうかです。 */
-    releaseReservationAfterCompletionFailure?: boolean
-  } = {},
+  options: IdempotentExecutionOptions = {},
 ) {
   return executeIdempotent(c, dependencies, {
     workspaceId: principal.workspaceId,
@@ -1807,10 +1987,7 @@ async function executeIdempotent(
     context: PublicMutationContext,
     idempotency: IdempotencyMutationToken,
   ) => Promise<{ status: 200 | 201 | 202 | 204; body: unknown }>,
-  options: {
-    /** Receipt 保存失敗後に安全に同じ domain operation を再実行できるかどうかです。 */
-    releaseReservationAfterCompletionFailure?: boolean
-  } = {},
+  options: IdempotentExecutionOptions = {},
 ) {
   const idempotencyKey = readIdempotencyKey(c.req.header('Idempotency-Key'))
   const requestUrl = new URL(c.req.url)
@@ -1835,6 +2012,7 @@ async function executeIdempotent(
     )
   }
   if (reservation.status === 'replay') {
+    await options.authorizeReplay?.()
     const replay = requireStoredResponse(reservation.response)
     c.header('Idempotency-Replayed', 'true')
     return respondIdempotent(c, replay)

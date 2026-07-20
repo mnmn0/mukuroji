@@ -107,6 +107,14 @@ export type DocumentApiPrincipal = {
    * Source of truth から取得した Project role map です。
    */
   projectRoles: Readonly<Record<string, DocumentProjectRole>>
+  /**
+   * Enterprise RBAC が許可した scope だけへ Document ACL を制限するかどうかです。
+   */
+  restrictToAuthorizedScopes?: boolean
+  /**
+   * Enterprise RBAC が Workspace scope で許可した最大 Document role です。
+   */
+  workspaceScopeRole?: DocumentProjectRole
 }
 
 /**
@@ -136,9 +144,12 @@ export type DocumentApiDependencies = {
    */
   getClient: () => DocumentClient
   /**
-   * Bearer token と active membership を検証します。
+   * Bearer token、active membership、current request policy を検証します。
    */
-  authenticate: (accessToken: string) => Promise<DocumentApiPrincipal>
+  authenticate: (
+    accessToken: string,
+    context: Context,
+  ) => Promise<DocumentApiPrincipal>
   /**
    * Mention/share 対象の active Workspace member を取得します。
    */
@@ -1140,7 +1151,7 @@ async function withDocumentPrincipal(
   }
 
   try {
-    const principal = await dependencies.authenticate(accessToken)
+    const principal = await dependencies.authenticate(accessToken, c)
     return await action(principal, toDocumentAccessContext(principal))
   } catch (error) {
     return toDocumentApiErrorResponse(c, error)
@@ -1153,6 +1164,18 @@ function toDocumentAccessContext(principal: DocumentApiPrincipal) {
     workspaceRole: principal.workspaceRole,
     isSystemAdmin: principal.isSystemAdmin,
     projectRoles: principal.projectRoles,
+    ...(principal.restrictToAuthorizedScopes === undefined
+      ? {}
+      : {
+          restrictToAuthorizedScopes:
+            principal.restrictToAuthorizedScopes,
+        }),
+    ...(principal.workspaceScopeRole === undefined
+      ? {}
+      : {
+          workspaceScopeRole:
+            principal.workspaceScopeRole,
+        }),
     ...(principal.authorizationGuards === undefined
       ? {}
       : { authorizationGuards: principal.authorizationGuards }),
@@ -1826,13 +1849,29 @@ function requireDocumentCreateCapability(
   principal: DocumentApiPrincipal,
   scope: DocumentScope,
 ): void {
-  if (
-    principal.isSystemAdmin ||
-    principal.workspaceRole === 'owner' ||
-    principal.workspaceRole === 'admin'
-  ) {
+  if (principal.isSystemAdmin) {
     return
   }
+  if (principal.restrictToAuthorizedScopes) {
+    const role = scope.type === 'workspace'
+      ? principal.workspaceScopeRole
+      : principal.projectRoles[scope.projectId]
+    if (
+      principal.workspaceRole !== 'guest' &&
+      (role === 'manager' || role === 'member')
+    ) {
+      return
+    }
+    throw new DocumentError(
+      403,
+      'DocumentCreateDenied',
+      'You do not have permission to create a Document in this scope.',
+    )
+  }
+  if (
+    principal.workspaceRole === 'owner' ||
+    principal.workspaceRole === 'admin'
+  ) return
   if (
     principal.workspaceRole !== 'guest' &&
     (

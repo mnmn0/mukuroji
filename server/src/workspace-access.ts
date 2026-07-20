@@ -54,15 +54,25 @@ const WORKSPACE_MEMBER_AUDIT_FIELDS = [
   'name',
   'role',
   'status',
+  'provisioningSource',
+  'externalIdentityId',
   'deactivatedAt',
 ] as const
-const WORKSPACE_AUDIT_REDACT_FIELDS = ['email', 'name', 'failureMessage'] as const
+const WORKSPACE_AUDIT_REDACT_FIELDS = [
+  'email',
+  'name',
+  'externalIdentityId',
+  'failureMessage',
+] as const
 
 /** Workspace 全体で付与する member role です。 */
 export type WorkspaceRole = 'owner' | 'admin' | 'member' | 'guest'
 
 /** Workspace member の利用状態です。 */
 export type WorkspaceMemberStatus = 'active' | 'deactivated'
+
+/** Workspace membership を管理する authority です。 */
+export type WorkspaceMemberProvisioningSource = 'manual' | 'directory'
 
 /** Workspace invitation の lifecycle 状態です。 */
 export type WorkspaceInvitationStatus =
@@ -93,6 +103,10 @@ export type WorkspaceMember = {
   role: WorkspaceRole
   /** Workspace へのアクセス状態です。 */
   status: WorkspaceMemberStatus
+  /** Membership が手動管理か directory 管理かを示します。 */
+  provisioningSource?: WorkspaceMemberProvisioningSource
+  /** Directory provider 側の immutable identity ID です。 */
+  externalIdentityId?: string
   /** 同時更新検知に使用する version です。 */
   version: number
   /** membership 作成日時の ISO 8601 timestamp です。 */
@@ -247,6 +261,40 @@ export type UpdateWorkspaceMemberInput = {
   expectedDocumentAuthorizationRevision?: number
 }
 
+/** Directory reconciliation で member を作成または収束させる入力です。 */
+export type ReconcileDirectoryWorkspaceMemberInput = {
+  /** Workspace 内で既存参照が使う immutable member key です。 */
+  memberKey: string
+  /** Directory が管理する現在のメールアドレスです。 */
+  email: string
+  /** Directory が管理する任意の表示名です。 */
+  name?: string
+  /** Directory mapping が付与する built-in Workspace role です。 */
+  role: Exclude<WorkspaceRole, 'owner'>
+  /** Directory provider 側の immutable identity ID です。 */
+  externalIdentityId: string
+  /** Existing member を更新する場合の optimistic version です。 */
+  expectedVersion?: number
+  /** Access graph と直列化する Planning revision です。 */
+  expectedPlanningRevision: number
+  /**
+   * Guest downgrade 時に private Document manager 検証へ束縛する ACL generation です。
+   */
+  expectedDocumentAuthorizationRevision?: number
+}
+
+/** Directory reconciliation で member を停止する入力です。 */
+export type DeprovisionDirectoryWorkspaceMemberInput = {
+  /** Directory provider 側の immutable identity ID です。 */
+  externalIdentityId: string
+  /** 読み込み時点の member version です。 */
+  expectedVersion: number
+  /** Access graph と直列化する Planning revision です。 */
+  expectedPlanningRevision: number
+  /** Private Document manager 検証へ束縛する ACL generation です。 */
+  expectedDocumentAuthorizationRevision: number
+}
+
 /** Workspace access domain error です。 */
 export class WorkspaceAccessError extends Error {
   /** API response に対応する HTTP status code です。 */
@@ -386,6 +434,19 @@ export interface WorkspaceAccessClient {
     input: UpdateWorkspaceMemberInput,
     auditContext?: MutationAuditContext,
   ): Promise<WorkspaceMember>
+  /** Directory authority から owner 以外の member を冪等に作成または更新します。 */
+  reconcileDirectoryMember?(
+    workspaceId: string,
+    input: ReconcileDirectoryWorkspaceMemberInput,
+    auditContext?: MutationAuditContext,
+  ): Promise<WorkspaceMember>
+  /** Directory authority から owner 以外の member を冪等に停止します。 */
+  deprovisionDirectoryMember?(
+    workspaceId: string,
+    targetMemberKey: string,
+    input: DeprovisionDirectoryWorkspaceMemberInput,
+    auditContext?: MutationAuditContext,
+  ): Promise<WorkspaceMember | undefined>
 }
 
 /** `workspace-created` identity だけが補償処理で安全に削除できることを判定します。 */
@@ -1622,6 +1683,460 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     }
   }
 
+  /** Directory authority から owner 以外の member を冪等に作成または更新します。 */
+  async reconcileDirectoryMember(
+    workspaceId: string,
+    input: ReconcileDirectoryWorkspaceMemberInput,
+    auditContext?: MutationAuditContext,
+  ) {
+    const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
+    const memberKey = normalizeMemberKey(input.memberKey)
+    const email = normalizeEmail(input.email)
+    const externalIdentityId = normalizeRequired(
+      input.externalIdentityId,
+      'External identity ID',
+    )
+    const role = requireWorkspaceRole(input.role)
+
+    if (role === 'owner') {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceDirectoryOwnerProtected',
+        'Directory provisioning cannot create or manage a Workspace owner.',
+      )
+    }
+
+    const existing = await this.getMember(normalizedWorkspaceId, memberKey)
+    const nowIso = this.clock().toISOString()
+
+    if (!existing) {
+      const member = {
+        id: memberKey,
+        memberKey,
+        email,
+        name: normalizeOptional(input.name),
+        role,
+        status: 'active',
+        provisioningSource: 'directory',
+        externalIdentityId,
+        version: 1,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      } satisfies WorkspaceMember
+      const auditPut = this.createWorkspaceAuditPut(auditContext, {
+        directoryId: normalizedWorkspaceId,
+        eventType: 'member.directory-provisioned',
+        entityType: 'member',
+        entityId: this.createMemberAuditEntityId(normalizedWorkspaceId, member.memberKey),
+        action: 'directory-provisioned',
+        occurredAt: nowIso,
+        changes: createAuditFieldChanges(
+          undefined,
+          member,
+          WORKSPACE_MEMBER_AUDIT_FIELDS,
+          WORKSPACE_AUDIT_REDACT_FIELDS,
+        ),
+        metadata: { kind: 'workspace-member', source: 'directory' },
+        sequence: 20,
+      })
+      const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [{
+        Put: {
+          TableName: this.tableName,
+          Item: toMemberItem(normalizedWorkspaceId, member),
+          ConditionExpression: 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+        },
+      }, createPlanningRevisionMutation(
+        this.planningTableName,
+        normalizedWorkspaceId,
+        input.expectedPlanningRevision,
+        nowIso,
+      )]
+      if (auditPut) transactItems.push(auditPut)
+
+      try {
+        await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+        return member
+      } catch (error) {
+        if (isConditionalTransactionCancellation(error)) {
+          if (isTransactionConditionalFailureAt(error, 1)) {
+            throw new WorkspaceAccessError(
+              409,
+              'PlanningRevisionConflict',
+              'Planning changed. Reload and try again.',
+              { cause: error },
+            )
+          }
+          const racedMember = await this.getMember(normalizedWorkspaceId, memberKey)
+          if (
+            racedMember?.externalIdentityId === externalIdentityId &&
+            racedMember.provisioningSource === 'directory' &&
+            racedMember.email === email &&
+            racedMember.name === normalizeOptional(input.name) &&
+            racedMember.role === role &&
+            racedMember.status === 'active'
+          ) {
+            return racedMember
+          }
+          throw new WorkspaceAccessError(
+            409,
+            'WorkspaceDirectoryIdentityConflict',
+            'Workspace member is already linked to another provisioning authority.',
+            { cause: error },
+          )
+        }
+        throw toWorkspaceAccessError(error)
+      }
+    }
+
+    if (existing.role === 'owner') {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceDirectoryOwnerProtected',
+        'Directory provisioning cannot create or manage a Workspace owner.',
+      )
+    }
+    if (
+      existing.provisioningSource !== 'directory' ||
+      existing.externalIdentityId !== externalIdentityId
+    ) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceDirectoryIdentityConflict',
+        'Workspace member is not managed by this directory identity.',
+      )
+    }
+
+    const nextMember = {
+      ...existing,
+      email,
+      name: normalizeOptional(input.name),
+      role,
+      status: 'active',
+      provisioningSource: 'directory',
+      externalIdentityId,
+      deactivatedAt: undefined,
+      version: existing.version + 1,
+      updatedAt: nowIso,
+    } satisfies WorkspaceMember
+    const changed = existing.email !== nextMember.email ||
+      existing.name !== nextMember.name ||
+      existing.role !== nextMember.role ||
+      existing.status !== nextMember.status ||
+      existing.provisioningSource !== nextMember.provisioningSource ||
+      existing.externalIdentityId !== nextMember.externalIdentityId
+
+    if (!changed) return existing
+    const changesDocumentAuthorization =
+      existing.status === 'active' &&
+      existing.role !== 'guest' &&
+      role === 'guest'
+    const documentAuthorizationRevision =
+      changesDocumentAuthorization
+        ? requireDocumentAuthorizationRevision(
+            input.expectedDocumentAuthorizationRevision,
+          )
+        : undefined
+    if (
+      input.expectedVersion !== undefined &&
+      existing.version !== input.expectedVersion
+    ) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceVersionConflict',
+        'Workspace member changed. Reload and try again.',
+      )
+    }
+    if (
+      !Number.isSafeInteger(input.expectedPlanningRevision) ||
+      input.expectedPlanningRevision < 0
+    ) {
+      throw new WorkspaceAccessError(
+        400,
+        'InvalidPlanningRevision',
+        'Planning expected revision is required for directory reconciliation.',
+      )
+    }
+
+    const auditPut = this.createWorkspaceAuditPut(auditContext, {
+      directoryId: normalizedWorkspaceId,
+      eventType: existing.status === 'deactivated'
+        ? 'member.directory-reactivated'
+        : 'member.directory-reconciled',
+      entityType: 'member',
+      entityId: this.createMemberAuditEntityId(normalizedWorkspaceId, existing.memberKey),
+      action: existing.status === 'deactivated'
+        ? 'directory-reactivated'
+        : 'directory-reconciled',
+      occurredAt: nowIso,
+      changes: createAuditFieldChanges(
+        existing,
+        nextMember,
+        WORKSPACE_MEMBER_AUDIT_FIELDS,
+        WORKSPACE_AUDIT_REDACT_FIELDS,
+      ),
+      metadata: { kind: 'workspace-member', source: 'directory' },
+      sequence: 20,
+    })
+    const updateExpressions = [
+      'email = :email',
+      '#role = :role',
+      '#status = :active',
+      'provisioningSource = :directory',
+      'externalIdentityId = :externalIdentityId',
+      'updatedAt = :now',
+      'version = version + :one',
+    ]
+    const removeExpressions = ['deactivatedAt']
+    const name = normalizeOptional(input.name)
+    if (name) {
+      updateExpressions.push('#name = :name')
+    } else {
+      removeExpressions.push('#name')
+    }
+    const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [{
+      Update: {
+        TableName: this.tableName,
+        Key: {
+          workspaceId: normalizedWorkspaceId,
+          recordKey: createMemberRecordKey(memberKey),
+        },
+        UpdateExpression:
+          `SET ${updateExpressions.join(', ')} REMOVE ${removeExpressions.join(', ')}`,
+        ConditionExpression:
+          'version = :expectedVersion AND #role <> :owner AND provisioningSource = :directory AND externalIdentityId = :externalIdentityId',
+        ExpressionAttributeNames: {
+          '#name': 'name',
+          '#role': 'role',
+          '#status': 'status',
+        },
+        ExpressionAttributeValues: {
+          ':active': 'active',
+          ':directory': 'directory',
+          ':email': email,
+          ':externalIdentityId': externalIdentityId,
+          ':name': name,
+          ':now': nowIso,
+          ':one': 1,
+          ':owner': 'owner',
+          ':role': role,
+          ':expectedVersion': existing.version,
+        },
+      },
+    }, createPlanningRevisionMutation(
+      this.planningTableName,
+      normalizedWorkspaceId,
+      input.expectedPlanningRevision,
+      nowIso,
+    )]
+    const documentAuthorizationItemIndex =
+      documentAuthorizationRevision === undefined
+        ? undefined
+        : transactItems.length
+    if (documentAuthorizationRevision !== undefined) {
+      transactItems.push(
+        createDocumentAuthorizationRevisionPut(
+          this.documentsTableName,
+          normalizedWorkspaceId,
+          {
+            expectedRevision:
+              documentAuthorizationRevision,
+            updatedAt: nowIso,
+          },
+        ),
+      )
+    }
+    if (auditPut) transactItems.push(auditPut)
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+      return nextMember
+    } catch (error) {
+      if (isConditionalTransactionCancellation(error)) {
+        if (isTransactionConditionalFailureAt(error, 1)) {
+          throw new WorkspaceAccessError(
+            409,
+            'PlanningRevisionConflict',
+            'Planning changed. Reload and try again.',
+            { cause: error },
+          )
+        }
+        if (
+          documentAuthorizationItemIndex !== undefined &&
+          isTransactionConditionalFailureAt(
+            error,
+            documentAuthorizationItemIndex,
+          )
+        ) {
+          throw new WorkspaceAccessError(
+            409,
+            'DocumentAuthorizationRevisionConflict',
+            'Document permissions changed. Reload and try again.',
+            { cause: error },
+          )
+        }
+        throw new WorkspaceAccessError(
+          409,
+          'WorkspaceDirectoryReconcileConflict',
+          'Workspace member changed while directory state was being reconciled.',
+          { cause: error },
+        )
+      }
+      throw toWorkspaceAccessError(error)
+    }
+  }
+
+  /** Directory authority から owner 以外の member を冪等に停止します。 */
+  async deprovisionDirectoryMember(
+    workspaceId: string,
+    targetMemberKey: string,
+    input: DeprovisionDirectoryWorkspaceMemberInput,
+    auditContext?: MutationAuditContext,
+  ) {
+    const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
+    const memberKey = normalizeMemberKey(targetMemberKey)
+    const externalIdentityId = normalizeRequired(
+      input.externalIdentityId,
+      'External identity ID',
+    )
+    const existing = await this.getMember(normalizedWorkspaceId, memberKey)
+
+    if (!existing) return undefined
+    if (existing.role === 'owner') {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceDirectoryOwnerProtected',
+        'Directory provisioning cannot deactivate a Workspace owner.',
+      )
+    }
+    if (
+      existing.provisioningSource !== 'directory' ||
+      existing.externalIdentityId !== externalIdentityId
+    ) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceDirectoryIdentityConflict',
+        'Workspace member is not managed by this directory identity.',
+      )
+    }
+    if (existing.status === 'deactivated') return existing
+    if (existing.version !== input.expectedVersion) {
+      throw new WorkspaceAccessError(
+        409,
+        'WorkspaceVersionConflict',
+        'Workspace member changed. Reload and try again.',
+      )
+    }
+    const documentAuthorizationRevision =
+      requireDocumentAuthorizationRevision(
+        input.expectedDocumentAuthorizationRevision,
+      )
+
+    const nowIso = this.clock().toISOString()
+    const nextMember = {
+      ...existing,
+      status: 'deactivated',
+      provisioningSource: 'directory',
+      externalIdentityId,
+      version: existing.version + 1,
+      updatedAt: nowIso,
+      deactivatedAt: nowIso,
+    } satisfies WorkspaceMember
+    const auditPut = this.createWorkspaceAuditPut(auditContext, {
+      directoryId: normalizedWorkspaceId,
+      eventType: 'member.directory-deprovisioned',
+      entityType: 'member',
+      entityId: this.createMemberAuditEntityId(normalizedWorkspaceId, existing.memberKey),
+      action: 'directory-deprovisioned',
+      occurredAt: nowIso,
+      changes: createAuditFieldChanges(
+        existing,
+        nextMember,
+        WORKSPACE_MEMBER_AUDIT_FIELDS,
+        WORKSPACE_AUDIT_REDACT_FIELDS,
+      ),
+      metadata: { kind: 'workspace-member', source: 'directory' },
+      sequence: 20,
+    })
+    const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [{
+      Update: {
+        TableName: this.tableName,
+        Key: {
+          workspaceId: normalizedWorkspaceId,
+          recordKey: createMemberRecordKey(memberKey),
+        },
+        UpdateExpression:
+          'SET #status = :deactivated, provisioningSource = :directory, externalIdentityId = :externalIdentityId, updatedAt = :now, deactivatedAt = :now, version = version + :one',
+        ConditionExpression:
+          'version = :expectedVersion AND #role <> :owner AND provisioningSource = :directory AND externalIdentityId = :externalIdentityId',
+        ExpressionAttributeNames: { '#role': 'role', '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':deactivated': 'deactivated',
+          ':directory': 'directory',
+          ':externalIdentityId': externalIdentityId,
+          ':now': nowIso,
+          ':one': 1,
+          ':owner': 'owner',
+          ':expectedVersion': input.expectedVersion,
+        },
+      },
+    }, createPlanningRevisionMutation(
+      this.planningTableName,
+      normalizedWorkspaceId,
+      input.expectedPlanningRevision,
+      nowIso,
+    )]
+    const documentAuthorizationItemIndex =
+      transactItems.length
+    transactItems.push(
+      createDocumentAuthorizationRevisionPut(
+        this.documentsTableName,
+        normalizedWorkspaceId,
+        {
+          expectedRevision:
+            documentAuthorizationRevision,
+          updatedAt: nowIso,
+        },
+      ),
+    )
+    if (auditPut) transactItems.push(auditPut)
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+      return nextMember
+    } catch (error) {
+      if (isConditionalTransactionCancellation(error)) {
+        if (isTransactionConditionalFailureAt(error, 1)) {
+          throw new WorkspaceAccessError(
+            409,
+            'PlanningRevisionConflict',
+            'Planning changed. Reload and try again.',
+            { cause: error },
+          )
+        }
+        if (
+          isTransactionConditionalFailureAt(
+            error,
+            documentAuthorizationItemIndex,
+          )
+        ) {
+          throw new WorkspaceAccessError(
+            409,
+            'DocumentAuthorizationRevisionConflict',
+            'Document permissions changed. Reload and try again.',
+            { cause: error },
+          )
+        }
+        throw new WorkspaceAccessError(
+          409,
+          'WorkspaceDirectoryDeprovisionConflict',
+          'Workspace member changed while directory access was being removed.',
+          { cause: error },
+        )
+      }
+      throw toWorkspaceAccessError(error)
+    }
+  }
+
   /** active actor を取得し、存在しない場合は拒否します。 */
   private async requireActiveActor(workspaceId: string, memberKey: string) {
     const actor = await this.getActiveMember(workspaceId, memberKey)
@@ -2270,6 +2785,15 @@ function toWorkspaceMember(value: unknown): WorkspaceMember {
     name: typeof value.name === 'string' ? value.name : undefined,
     role,
     status,
+    provisioningSource: value.provisioningSource === 'directory'
+      ? 'directory'
+      : value.provisioningSource === 'manual'
+        ? 'manual'
+        : undefined,
+    externalIdentityId: typeof value.externalIdentityId === 'string' &&
+        value.externalIdentityId.trim()
+      ? value.externalIdentityId.trim()
+      : undefined,
     version: value.version,
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
@@ -2392,6 +2916,8 @@ function toMemberItem(
     ...(member.name ? { name: member.name } : {}),
     role: member.role,
     status: member.status,
+    ...(member.provisioningSource ? { provisioningSource: member.provisioningSource } : {}),
+    ...(member.externalIdentityId ? { externalIdentityId: member.externalIdentityId } : {}),
     version: member.version,
     createdAt: member.createdAt,
     updatedAt: member.updatedAt,

@@ -76,9 +76,15 @@ export class ProjectTasksApiError extends Error {
    */
   readonly status: number
 
-  constructor(status: number, message: string) {
+  /**
+   * API が返した機械判定用の安定 error code です。
+   */
+  readonly code?: string
+
+  constructor(status: number, message: string, code?: string) {
     super(message)
     this.status = status
+    this.code = code
   }
 }
 
@@ -109,8 +115,14 @@ export async function getProjectTasks(projectId: string, accessToken?: string) {
       typeof data.message === 'string'
       ? data.message
       : 'tasks.error.loading'
+    const code = typeof data === 'object' &&
+      data !== null &&
+      'code' in data &&
+      typeof data.code === 'string'
+      ? data.code
+      : undefined
 
-    throw new ProjectTasksApiError(response.status, message)
+    throw new ProjectTasksApiError(response.status, message, code)
   }
 
   if (!isProjectTasksResponse(data)) {

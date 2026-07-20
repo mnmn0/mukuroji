@@ -6,9 +6,13 @@ import type {
   DocumentRelationTarget,
   PublicDocument,
 } from '@mukuroji/contracts'
-import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import {
+  TransactWriteCommand,
+  type DynamoDBDocumentClient,
+} from '@aws-sdk/lib-dynamodb'
 import { createMutationAuditContext } from './audit'
 import {
+  DOCUMENT_MAX_BACKLINK_COUNT,
   DOCUMENT_MAX_ITEM_BYTES,
   createDocumentSearchAccessReadContext,
   DynamoDbDocumentsClient,
@@ -39,6 +43,288 @@ const ownerShareAccess = {
     },
   }],
 } as const
+
+test('preserves a DynamoDB transaction conflict as a storage failure', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  memory.beforeTransaction(() => {
+    throw transactionCancellationError([
+      'None',
+      'TransactionConflict',
+    ])
+  })
+
+  await expect(client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Transaction conflict',
+    blocks: [],
+  })).rejects.toMatchObject({
+    status: 503,
+    code: 'DocumentsStoreError',
+  })
+})
+
+test('preserves mixed DynamoDB cancellation reasons as a storage failure', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  memory.beforeTransaction(() => {
+    throw transactionCancellationError([
+      'ConditionalCheckFailed',
+      'ProvisionedThroughputExceeded',
+    ])
+  })
+
+  await expect(client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Mixed cancellation',
+    blocks: [],
+  })).rejects.toMatchObject({
+    status: 503,
+    code: 'DocumentsStoreError',
+  })
+})
+
+test('keeps a pure conditional transaction cancellation as a semantic conflict', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  memory.beforeTransaction(() => {
+    throw transactionCancellationError([
+      'None',
+      'ConditionalCheckFailed',
+    ])
+  })
+
+  await expect(client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Conditional conflict',
+    blocks: [],
+  })).rejects.toMatchObject({
+    status: 409,
+    code: 'DocumentCreateConflict',
+  })
+})
+
+test('retries transaction conflicts in every bounded document mutation loop', async () => {
+  const memory = createMemoryDocumentClient()
+  seedOwnerAuthorization(memory)
+  const client = createClient(memory)
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerShareAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Retryable transaction conflicts',
+    blocks: [{
+      id: 'block-1',
+      type: 'paragraph',
+      text: 'Before',
+    }],
+  })
+  let injectedFailures = 0
+  const failNextTransaction = (
+    cancellationReasonCodes: readonly string[],
+  ) => {
+    memory.beforeTransaction(() => {
+      injectedFailures += 1
+      throw transactionCancellationError(
+        cancellationReasonCodes,
+      )
+    })
+  }
+
+  failNextTransaction([
+    'None',
+    'TransactionConflict',
+  ])
+  await expect(client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerShareAccess,
+    input: {
+      baseRevision: document.revision,
+      clientId: 'editor-1',
+      operations: [{
+        operationId:
+          'retryable-transaction-operation',
+        type: 'update-block',
+        blockId: 'block-1',
+        block: {
+          id: 'block-1',
+          type: 'paragraph',
+          text: 'After',
+        },
+      }],
+    },
+  })).resolves.toMatchObject({
+    documentId: document.id,
+    revision: 2,
+  })
+
+  failNextTransaction([
+    'ConditionalCheckFailed',
+    'TransactionConflict',
+  ])
+  await expect(client.updatePreference({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerShareAccess,
+    favorite: true,
+  })).resolves.toMatchObject({
+    documentId: document.id,
+    favorite: true,
+  })
+
+  failNextTransaction([
+    'TransactionConflict',
+    'None',
+  ])
+  await expect(client.createPublicShare({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerShareAccess,
+    expiresAt: '2026-07-19T00:00:00.000Z',
+    idempotencyKey:
+      'retryable-transaction-share',
+  })).resolves.toMatchObject({
+    share: {
+      documentId: document.id,
+    },
+  })
+  expect(injectedFailures).toBe(3)
+})
+
+test('returns a storage failure after transaction conflict retries are exhausted', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Transaction conflict exhaustion',
+    blocks: [{
+      id: 'block-1',
+      type: 'paragraph',
+      text: 'Before',
+    }],
+  })
+  let attempts = 0
+  const rejectTransaction = () => {
+    attempts += 1
+    memory.beforeTransaction(
+      rejectTransaction,
+    )
+    throw transactionCancellationError([
+      'None',
+      'TransactionConflict',
+    ])
+  }
+  memory.beforeTransaction(
+    rejectTransaction,
+  )
+
+  await expect(client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: document.revision,
+      clientId: 'editor-1',
+      operations: [{
+        operationId:
+          'transaction-conflict-exhaustion',
+        type: 'update-block',
+        blockId: 'block-1',
+        block: {
+          id: 'block-1',
+          type: 'paragraph',
+          text: 'After',
+        },
+      }],
+    },
+  })).rejects.toMatchObject({
+    status: 503,
+    code: 'DocumentsStoreError',
+  })
+  expect(attempts).toBe(6)
+})
+
+test('does not retry transaction conflicts mixed with non-retryable reasons', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Non-retryable transaction cancellation',
+    blocks: [{
+      id: 'block-1',
+      type: 'paragraph',
+      text: 'Before',
+    }],
+  })
+  const reasonSets = [
+    [
+      'TransactionConflict',
+      'ValidationError',
+    ],
+    [
+      'TransactionConflict',
+      'ProvisionedThroughputExceeded',
+    ],
+    [
+      'TransactionConflict',
+      'UnexpectedReason',
+    ],
+  ] as const
+
+  for (
+    const [index, cancellationReasonCodes] of
+      reasonSets.entries()
+  ) {
+    let attempts = 0
+    memory.beforeTransaction(() => {
+      attempts += 1
+      throw transactionCancellationError(
+        cancellationReasonCodes,
+      )
+    })
+    await expect(client.applyOperations({
+      workspaceId: 'workspace-1',
+      documentId: document.id,
+      access: ownerAccess,
+      input: {
+        baseRevision: document.revision,
+        clientId: 'editor-1',
+        operations: [{
+          operationId:
+            `non-retryable-cancellation-${index}`,
+          type: 'update-block',
+          blockId: 'block-1',
+          block: {
+            id: 'block-1',
+            type: 'paragraph',
+            text: 'After',
+          },
+        }],
+      },
+    })).rejects.toMatchObject({
+      status: 503,
+      code: 'DocumentsStoreError',
+    })
+    expect(attempts).toBe(1)
+  }
+})
 
 test('merges stale-base operations on independent elements and rejects a same-element conflict atomically', () => {
   const document = createPage()
@@ -2066,6 +2352,682 @@ test('indexes Whiteboard work-item cards as transactional backlinks', async () =
   })
 })
 
+test('coalesces Work Item backlink counts, retains archived links, and tombstones only after unlink', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const workItemId =
+    'team/team-a/issue/work-item-fenced'
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Fenced backlinks',
+    blocks: [],
+    relations: [
+      createWorkItemRelation(
+        'relation-a',
+        workItemId,
+      ),
+      createWorkItemRelation(
+        'relation-b',
+        workItemId,
+      ),
+    ],
+  })
+  expect(
+    findWorkItemBacklinkTargetFence(
+      memory,
+      workItemId,
+    ),
+  ).toMatchObject({
+    activeBacklinkCount: 2,
+    version: 1,
+  })
+
+  const archived = await client.archive({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    expectedRevision: created.revision,
+  })
+  expect(
+    findWorkItemBacklinkTargetFence(
+      memory,
+      workItemId,
+    ),
+  ).toMatchObject({
+    activeBacklinkCount: 2,
+    version: 1,
+  })
+  const restored =
+    await client.restoreArchived({
+      workspaceId: 'workspace-1',
+      documentId: created.id,
+      access: ownerAccess,
+      expectedRevision: archived.revision,
+    })
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: restored.revision,
+      clientId: 'editor-1',
+      operations: [
+        {
+          type: 'delete-relation',
+          operationId: 'unlink-a',
+          relationId: 'relation-a',
+        },
+        {
+          type: 'delete-relation',
+          operationId: 'unlink-b',
+          relationId: 'relation-b',
+        },
+      ],
+    },
+  })
+  expect(
+    findWorkItemBacklinkTargetFence(
+      memory,
+      workItemId,
+    ),
+  ).toMatchObject({
+    activeBacklinkCount: 0,
+    version: 2,
+  })
+
+  const deletionFence =
+    await client
+      .prepareWorkItemDeletionFenceTransactWrite({
+        workspaceId: 'workspace-1',
+        workItemId,
+      })
+  await memory.client.send(
+    new TransactWriteCommand({
+      TransactItems: [
+        deletionFence.transactWriteItem,
+      ],
+    }),
+  )
+  expect(
+    findWorkItemBacklinkTargetFence(
+      memory,
+      workItemId,
+    ),
+  ).toMatchObject({
+    activeBacklinkCount: 0,
+    version: 3,
+    deletedAt:
+      '2026-07-18T00:00:00.000Z',
+  })
+
+  await expect(client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Late backlink',
+    blocks: [],
+    relations: [
+      createWorkItemRelation(
+        'late-relation',
+        workItemId,
+      ),
+    ],
+  })).rejects.toMatchObject({
+    status: 409,
+    code: 'DocumentRelationTargetDeleted',
+  })
+})
+
+test('requires a canonical Work Item ID when preparing a deletion fence', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+
+  await expect(
+    client
+      .prepareWorkItemDeletionFenceTransactWrite({
+        workspaceId: 'workspace-1',
+        workItemId: 'issue-1',
+      }),
+  ).rejects.toMatchObject({
+    status: 400,
+    code: 'InvalidDocumentRelationTarget',
+  })
+  expect(memory.readKeys()).toEqual([])
+})
+
+test('classifies a deletion tombstone that wins a create fence race for non-idempotent and idempotent creates', async () => {
+  for (
+    const idempotencyKey of [
+      undefined,
+      'idempotent-create-race',
+    ]
+  ) {
+    const memory =
+      createMemoryDocumentClient()
+    const client = createClient(memory)
+    const workItemId =
+      `team/team-a/issue/create-race-${idempotencyKey ?? 'random'}`
+    const deletionFence =
+      await client
+        .prepareWorkItemDeletionFenceTransactWrite({
+          workspaceId: 'workspace-1',
+          workItemId,
+        })
+    const tombstone =
+      getPreparedFencePutItem(
+        deletionFence,
+      )
+    memory.beforeTransaction(() => {
+      memory.put(tombstone)
+    })
+
+    await expect(client.create({
+      workspaceId: 'workspace-1',
+      access: ownerAccess,
+      kind: 'page',
+      scope: { type: 'workspace' },
+      title: 'Racing create',
+      blocks: [],
+      relations: [
+        createWorkItemRelation(
+          'racing-relation',
+          workItemId,
+        ),
+      ],
+      ...(idempotencyKey === undefined
+        ? {}
+        : { idempotencyKey }),
+    })).rejects.toMatchObject({
+      status: 409,
+      code:
+        'DocumentRelationTargetDeleted',
+    })
+    expect(
+      memory.items().filter(
+        ({ entryType }) =>
+          entryType === 'document',
+      ),
+    ).toEqual([])
+  }
+})
+
+test('classifies a deletion tombstone that wins an operation backlink fence race', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const workItemId =
+    'team/team-a/issue/operation-race'
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Operation race',
+    blocks: [],
+  })
+  const deletionFence =
+    await client
+      .prepareWorkItemDeletionFenceTransactWrite({
+        workspaceId: 'workspace-1',
+        workItemId,
+      })
+  const tombstone =
+    getPreparedFencePutItem(
+      deletionFence,
+    )
+  memory.beforeTransaction(() => {
+    memory.put(tombstone)
+  })
+
+  await expect(client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: document.revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'upsert-relation',
+        operationId: 'add-racing-relation',
+        relation:
+          createWorkItemRelation(
+            'operation-racing-relation',
+            workItemId,
+          ),
+      }],
+    },
+  })).rejects.toMatchObject({
+    status: 409,
+    code: 'DocumentRelationTargetDeleted',
+  })
+  await expect(client.get({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+  })).resolves.toMatchObject({
+    revision: document.revision,
+    relations: [],
+  })
+})
+
+test('classifies a deletion tombstone that wins a version restore backlink fence race', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const workItemId =
+    'team/team-a/issue/restore-race'
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Restore race',
+    blocks: [],
+    relations: [
+      createWorkItemRelation(
+        'restore-racing-relation',
+        workItemId,
+      ),
+    ],
+  })
+  const unlinked =
+    await client.applyOperations({
+      workspaceId: 'workspace-1',
+      documentId: document.id,
+      access: ownerAccess,
+      input: {
+        baseRevision: document.revision,
+        clientId: 'editor-1',
+        operations: [{
+          type: 'delete-relation',
+          operationId:
+            'unlink-before-restore',
+          relationId:
+            'restore-racing-relation',
+        }],
+      },
+    })
+  const deletionFence =
+    await client
+      .prepareWorkItemDeletionFenceTransactWrite({
+        workspaceId: 'workspace-1',
+        workItemId,
+      })
+  const tombstone =
+    getPreparedFencePutItem(
+      deletionFence,
+    )
+  memory.beforeTransaction(() => {
+    memory.put(tombstone)
+  })
+
+  await expect(client.restoreVersion({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    versionId: '1',
+    expectedRevision: unlinked.revision,
+    access: ownerAccess,
+    validateRelationTargets:
+      async () => [],
+  })).rejects.toMatchObject({
+    status: 409,
+    code: 'DocumentRelationTargetDeleted',
+  })
+  await expect(client.get({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+  })).resolves.toMatchObject({
+    revision: unlinked.revision,
+    relations: [],
+  })
+})
+
+test('fails closed for legacy backlinks without a fence and bootstraps the exact count while unlinking', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const workItemId =
+    'team/team-a/issue/legacy-backlink'
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Legacy backlink',
+    blocks: [],
+    relations: [
+      createWorkItemRelation(
+        'legacy-relation-a',
+        workItemId,
+      ),
+      createWorkItemRelation(
+        'legacy-relation-b',
+        workItemId,
+      ),
+      createWorkItemRelation(
+        'legacy-relation-c',
+        workItemId,
+      ),
+    ],
+  })
+  const fence =
+    findWorkItemBacklinkTargetFence(
+      memory,
+      workItemId,
+    )
+  expect(fence).toBeDefined()
+  memory.remove(
+    'workspace-1',
+    String(fence?.recordKey),
+  )
+  memory.setQueryPageSize(1)
+
+  await expect(
+    client
+      .prepareWorkItemDeletionFenceTransactWrite({
+        workspaceId: 'workspace-1',
+        workItemId,
+      }),
+  ).rejects.toMatchObject({
+    status: 409,
+    code: 'WorkItemDocumentBacklinkConflict',
+    details: {
+      activeBacklinkCount: 3,
+    },
+  })
+
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: created.revision,
+      clientId: 'editor-1',
+      operations: [
+        {
+          type: 'delete-relation',
+          operationId: 'unlink-legacy-a',
+          relationId: 'legacy-relation-a',
+        },
+        {
+          type: 'delete-relation',
+          operationId: 'unlink-legacy-b',
+          relationId: 'legacy-relation-b',
+        },
+        {
+          type: 'delete-relation',
+          operationId: 'unlink-legacy-c',
+          relationId: 'legacy-relation-c',
+        },
+      ],
+    },
+  })
+  expect(
+    findWorkItemBacklinkTargetFence(
+      memory,
+      workItemId,
+    ),
+  ).toMatchObject({
+    activeBacklinkCount: 0,
+    version: 1,
+  })
+  await expect(
+    client
+      .prepareWorkItemDeletionFenceTransactWrite({
+        workspaceId: 'workspace-1',
+        workItemId,
+      }),
+  ).resolves.toHaveProperty(
+    'transactWriteItem.Put',
+  )
+})
+
+test('serializes concurrent legacy bootstrap puts and reports the losing deletion as a backlink conflict on retry', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const workItemId =
+    'team/team-a/issue/concurrent-backlink'
+  const staleDeletionFence =
+    await client
+      .prepareWorkItemDeletionFenceTransactWrite({
+        workspaceId: 'workspace-1',
+        workItemId,
+      })
+
+  await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Concurrent backlink',
+    blocks: [],
+    relations: [
+      createWorkItemRelation(
+        'concurrent-relation',
+        workItemId,
+      ),
+    ],
+  })
+  await expect(
+    memory.client.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          staleDeletionFence
+            .transactWriteItem,
+        ],
+      }),
+    ),
+  ).rejects.toMatchObject({
+    name: 'TransactionCanceledException',
+  })
+  await expect(
+    client
+      .prepareWorkItemDeletionFenceTransactWrite({
+        workspaceId: 'workspace-1',
+        workItemId,
+      }),
+  ).rejects.toMatchObject({
+    status: 409,
+    code: 'WorkItemDocumentBacklinkConflict',
+  })
+  expect(
+    findWorkItemBacklinkTargetFence(
+      memory,
+      workItemId,
+    ),
+  ).toMatchObject({
+    activeBacklinkCount: 1,
+    version: 1,
+  })
+})
+
+test('keeps deepest-tree full backlink replacement within 100 actions and rejects the next relation before writing', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const authorizationGuards =
+    Array.from(
+      { length: 3 },
+      (_value, index) => ({
+        tableName:
+          `authorization-table-${index}`,
+        key: {
+          workspaceId: 'workspace-1',
+          recordKey: `AUTH#${index}`,
+        },
+        generationAttribute: 'version',
+        expectedGeneration: 1,
+        requiredAttributes: {
+          entryType: 'authorization-row',
+        },
+      } as const),
+    )
+  for (
+    const [index, guard] of
+      authorizationGuards.entries()
+  ) {
+    memory.put({
+      workspaceId: 'workspace-1',
+      recordKey: `AUTH#${index}`,
+      entryType: 'authorization-row',
+      version: 1,
+      guardTableName: guard.tableName,
+    })
+  }
+  const deepestAccess = {
+    ...ownerAccess,
+    authorizationGuards,
+  }
+  let parentId: string | undefined
+  for (
+    let depth = 0;
+    depth < 32;
+    depth += 1
+  ) {
+    const folder = await client.create({
+      workspaceId: 'workspace-1',
+      access: deepestAccess,
+      kind: 'folder',
+      scope: { type: 'workspace' },
+      ...(parentId === undefined
+        ? {}
+        : { parentId }),
+      title: `Folder ${depth}`,
+    })
+    parentId = folder.id
+  }
+  const initialRelations = Array.from(
+    {
+      length:
+        DOCUMENT_MAX_BACKLINK_COUNT,
+    },
+    (_value, index) =>
+      createWorkItemRelation(
+        `relation-${index}`,
+        `team/team-a/issue/old-${index}`,
+      ),
+  )
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: deepestAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    parentId,
+    title: 'Maximum backlinks',
+    blocks: [],
+    relations: initialRelations,
+  })
+  let revision = document.revision
+  for (
+    let offset = 0;
+    offset <
+      DOCUMENT_MAX_BACKLINK_COUNT;
+    offset += 4
+  ) {
+    const operations =
+      initialRelations
+        .slice(offset, offset + 4)
+        .map(
+          (
+            relation,
+            relationOffset,
+          ) => ({
+            type:
+              'upsert-relation' as const,
+            operationId:
+              `replace-${offset + relationOffset}`,
+            relation: {
+              ...relation,
+              target: {
+                kind:
+                  'work-item' as const,
+                workItemId:
+                  `team/team-a/issue/new-${offset + relationOffset}`,
+              },
+            },
+          }),
+        )
+    const response =
+      await client.applyOperations({
+        workspaceId: 'workspace-1',
+        documentId: document.id,
+        access: deepestAccess,
+        input: {
+          baseRevision: revision,
+          clientId: 'editor-1',
+          operations,
+        },
+      })
+    revision = response.revision
+  }
+
+  await client.restoreVersion({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    versionId: '1',
+    expectedRevision: revision,
+    access: deepestAccess,
+    validateRelationTargets:
+      async () => [],
+  })
+  expect(
+    memory
+      .transactionActionCounts()
+      .at(-1),
+  ).toBe(97)
+  expect(
+    findWorkItemBacklinkTargetFence(
+      memory,
+      'team/team-a/issue/old-0',
+    ),
+  ).toMatchObject({
+    activeBacklinkCount: 1,
+  })
+  expect(
+    findWorkItemBacklinkTargetFence(
+      memory,
+      'team/team-a/issue/new-0',
+    ),
+  ).toMatchObject({
+    activeBacklinkCount: 0,
+  })
+
+  const transactionCount =
+    memory
+      .transactionActionCounts()
+      .length
+  await expect(client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Too many backlinks',
+    blocks: [],
+    relations: Array.from(
+      {
+        length:
+          DOCUMENT_MAX_BACKLINK_COUNT +
+          1,
+      },
+      (_value, index) =>
+        createWorkItemRelation(
+          `too-many-${index}`,
+          `team/team-a/issue/too-many-${index}`,
+        ),
+    ),
+  })).rejects.toMatchObject({
+    status: 413,
+    code:
+      'DocumentBacklinkLimitExceeded',
+  })
+  expect(
+    memory
+      .transactionActionCounts()
+      .length,
+  ).toBe(transactionCount)
+})
+
 test('hashes public tokens at rest, carries allowExport, and checks expiry synchronously', async () => {
   const memory = createMemoryDocumentClient()
   seedOwnerAuthorization(memory)
@@ -3955,6 +4917,691 @@ test('binds private ACL mutations to the active principal generation', async () 
   ).toHaveLength(0)
 })
 
+test('deduplicates principal and relation authorization guards in inherited create transactions', async () => {
+  const memory = createMemoryDocumentClient()
+  seedOwnerAuthorization(memory)
+  seedPlanningAuthorization(memory, 1)
+  let transaction:
+    | Array<Record<string, Record<string, unknown>>>
+    | undefined
+  const proxyClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      const actions = command.input.TransactItems as
+        | Array<Record<string, Record<string, unknown>>>
+        | undefined
+      if (actions !== undefined) {
+        transaction = structuredClone(actions)
+      }
+      return memory.client.send(command as never)
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = createClient({
+    ...memory,
+    client: proxyClient,
+  })
+  const planningGuard =
+    planningAuthorizationGuard(1)
+
+  await client.create({
+    workspaceId: 'workspace-1',
+    access: {
+      ...ownerAccess,
+      authorizationGuards: [
+        ...ownerShareAccess.authorizationGuards,
+        planningGuard,
+      ],
+    },
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Merged authorization guards',
+    blocks: [],
+    relations: [
+      createGoalRelation('deduplicated-guard'),
+    ],
+    relationTargetAuthorizationGuards: [
+      planningGuard,
+    ],
+  })
+
+  const conditionChecks =
+    (transaction ?? [])
+      .flatMap(({ ConditionCheck }) =>
+        ConditionCheck === undefined
+          ? []
+          : [ConditionCheck]
+      )
+  expect(conditionChecks).toHaveLength(2)
+  expect(
+    conditionChecks.map(({ TableName }) => TableName),
+  ).toEqual([
+    'workspace-access-table',
+    'planning-table',
+  ])
+})
+
+test('rejects inherited create and content or lifecycle mutations when principal authorization expires', async () => {
+  const expectAuthorizationRevocation =
+    async (
+      prepare: (
+        client: DynamoDbDocumentsClient,
+      ) => Promise<() => Promise<unknown>>,
+    ) => {
+      const memory =
+        createMemoryDocumentClient()
+      seedOwnerAuthorization(memory)
+      const client = createClient(memory)
+      const mutate = await prepare(client)
+      memory.beforeTransaction(() => {
+        seedOwnerAuthorization(memory, 2)
+      })
+      await expect(mutate()).rejects.toMatchObject({
+        code: 'DocumentAuthorizationChanged',
+        status: 409,
+      })
+    }
+
+  await expectAuthorizationRevocation(
+    async (client) => async () =>
+      client.create({
+        workspaceId: 'workspace-1',
+        access: ownerShareAccess,
+        kind: 'page',
+        scope: { type: 'workspace' },
+        title: 'Inherited guarded create',
+        blocks: [],
+      }),
+  )
+  await expectAuthorizationRevocation(
+    async (client) => {
+      const document = await client.create({
+        workspaceId: 'workspace-1',
+        access: ownerAccess,
+        kind: 'page',
+        scope: { type: 'workspace' },
+        title: 'Guarded edit',
+        blocks: [],
+      })
+      return async () =>
+        client.update({
+          workspaceId: 'workspace-1',
+          documentId: document.id,
+          access: ownerShareAccess,
+          expectedRevision: document.revision,
+          title: 'Revoked edit',
+        })
+    },
+  )
+  await expectAuthorizationRevocation(
+    async (client) => {
+      const document = await client.create({
+        workspaceId: 'workspace-1',
+        access: ownerAccess,
+        kind: 'page',
+        scope: { type: 'workspace' },
+        title: 'Guarded operations',
+        blocks: [{
+          id: 'block-1',
+          type: 'paragraph',
+          text: 'Before',
+        }],
+      })
+      return async () =>
+        client.applyOperations({
+          workspaceId: 'workspace-1',
+          documentId: document.id,
+          access: ownerShareAccess,
+          input: {
+            baseRevision: document.revision,
+            clientId: 'editor-1',
+            operations: [{
+              operationId: 'revoked-edit',
+              type: 'update-block',
+              blockId: 'block-1',
+              block: {
+                id: 'block-1',
+                type: 'paragraph',
+                text: 'After',
+              },
+            }],
+          },
+        })
+    },
+  )
+  await expectAuthorizationRevocation(
+    async (client) => {
+      const document = await client.create({
+        workspaceId: 'workspace-1',
+        access: ownerAccess,
+        kind: 'page',
+        scope: { type: 'workspace' },
+        title: 'Guarded version restore',
+        blocks: [],
+      })
+      const updated = await client.update({
+        workspaceId: 'workspace-1',
+        documentId: document.id,
+        access: ownerAccess,
+        expectedRevision: document.revision,
+        title: 'Updated title',
+      })
+      return async () =>
+        client.restoreVersion({
+          workspaceId: 'workspace-1',
+          documentId: document.id,
+          versionId: `${document.id}:1`,
+          expectedRevision: updated.revision,
+          access: ownerShareAccess,
+          validateRelationTargets:
+            async () => [],
+        })
+    },
+  )
+  await expectAuthorizationRevocation(
+    async (client) => {
+      const document = await client.create({
+        workspaceId: 'workspace-1',
+        access: ownerAccess,
+        kind: 'page',
+        scope: { type: 'workspace' },
+        title: 'Guarded archive',
+        blocks: [],
+      })
+      return async () =>
+        client.archive({
+          workspaceId: 'workspace-1',
+          documentId: document.id,
+          access: ownerShareAccess,
+          expectedRevision: document.revision,
+        })
+    },
+  )
+  await expectAuthorizationRevocation(
+    async (client) => {
+      const document = await client.create({
+        workspaceId: 'workspace-1',
+        access: ownerAccess,
+        kind: 'page',
+        scope: { type: 'workspace' },
+        title: 'Guarded archive restore',
+        blocks: [],
+      })
+      const archived = await client.archive({
+        workspaceId: 'workspace-1',
+        documentId: document.id,
+        access: ownerAccess,
+        expectedRevision: document.revision,
+      })
+      return async () =>
+        client.restoreArchived({
+          workspaceId: 'workspace-1',
+          documentId: document.id,
+          access: ownerShareAccess,
+          expectedRevision: archived.revision,
+        })
+    },
+  )
+  await expectAuthorizationRevocation(
+    async (client) => {
+      const template = await client.create({
+        workspaceId: 'workspace-1',
+        access: ownerAccess,
+        kind: 'template',
+        scope: { type: 'workspace' },
+        title: 'Guarded template',
+        blocks: [],
+      })
+      return async () =>
+        client.instantiateTemplate({
+          workspaceId: 'workspace-1',
+          templateId: template.id,
+          access: ownerShareAccess,
+          scope: { type: 'workspace' },
+        })
+    },
+  )
+})
+
+test('rejects comment mutations when principal authorization expires', async () => {
+  const memory = createMemoryDocumentClient()
+  seedOwnerAuthorization(memory)
+  const client = createClient(memory)
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Guarded comments',
+    blocks: [],
+  })
+  memory.beforeTransaction(() => {
+    seedOwnerAuthorization(memory, 2)
+  })
+  await expect(client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerShareAccess,
+    body: 'Revoked comment',
+  })).rejects.toMatchObject({
+    code: 'DocumentAuthorizationChanged',
+    status: 409,
+  })
+
+  seedOwnerAuthorization(memory)
+  const comment = await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Existing comment',
+  })
+  memory.beforeTransaction(() => {
+    seedOwnerAuthorization(memory, 2)
+  })
+  await expect(client.resolveComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    commentId: comment.id,
+    access: ownerShareAccess,
+    resolved: true,
+  })).rejects.toMatchObject({
+    code: 'DocumentAuthorizationChanged',
+    status: 409,
+  })
+})
+
+test('rejects preference and presence mutations when principal authorization expires', async () => {
+  const expectAuthorizationRevocation =
+    async (
+      prepare: (
+        client: DynamoDbDocumentsClient,
+      ) => Promise<() => Promise<unknown>>,
+    ) => {
+      const memory =
+        createMemoryDocumentClient()
+      seedOwnerAuthorization(memory)
+      const client = createClient(memory)
+      const mutate = await prepare(client)
+      memory.beforeTransaction(() => {
+        seedOwnerAuthorization(memory, 2)
+      })
+      await expect(mutate()).rejects.toMatchObject({
+        code: 'DocumentAuthorizationChanged',
+        status: 409,
+      })
+    }
+
+  await expectAuthorizationRevocation(
+    async (client) => {
+      const document = await client.create({
+        workspaceId: 'workspace-1',
+        access: ownerAccess,
+        kind: 'page',
+        scope: { type: 'workspace' },
+        title: 'Guarded preference',
+        blocks: [],
+      })
+      return async () =>
+        client.updatePreference({
+          workspaceId: 'workspace-1',
+          documentId: document.id,
+          access: ownerShareAccess,
+          favorite: true,
+        })
+    },
+  )
+  await expectAuthorizationRevocation(
+    async (client) => {
+      const document = await client.create({
+        workspaceId: 'workspace-1',
+        access: ownerAccess,
+        kind: 'page',
+        scope: { type: 'workspace' },
+        title: 'Guarded presence',
+        blocks: [],
+      })
+      return async () =>
+        client.heartbeatPresence({
+          workspaceId: 'workspace-1',
+          documentId: document.id,
+          access: ownerShareAccess,
+          clientId: 'client-1',
+        })
+    },
+  )
+  await expectAuthorizationRevocation(
+    async (client) => {
+      const document = await client.create({
+        workspaceId: 'workspace-1',
+        access: ownerAccess,
+        kind: 'page',
+        scope: { type: 'workspace' },
+        title: 'Guarded presence leave',
+        blocks: [],
+      })
+      await client.heartbeatPresence({
+        workspaceId: 'workspace-1',
+        documentId: document.id,
+        access: ownerAccess,
+        clientId: 'client-1',
+      })
+      return async () =>
+        client.leavePresence({
+          workspaceId: 'workspace-1',
+          documentId: document.id,
+          access: ownerShareAccess,
+          clientId: 'client-1',
+        })
+    },
+  )
+})
+
+test('binds ancestor ACL snapshots to document and related-item mutations', async () => {
+  const expectAncestorAuthorizationRevocation =
+    async (
+      prepare: (
+        client: DynamoDbDocumentsClient,
+        parent: DocumentDetail,
+      ) => Promise<() => Promise<unknown>>,
+    ) => {
+      const memory =
+        createMemoryDocumentClient()
+      const client = createClient(memory)
+      const parent = await client.create({
+        workspaceId: 'workspace-1',
+        access: ownerAccess,
+        kind: 'folder',
+        scope: { type: 'workspace' },
+        title: 'Authorization parent',
+      })
+      const mutate = await prepare(
+        client,
+        parent,
+      )
+      memory.beforeTransaction(() => {
+        mutateStoredDocument(
+          memory,
+          parent.id,
+          (document) => {
+            document.permission = {
+              mode: 'private',
+              memberGrants: [{
+                memberKey:
+                  'replacement@example.com',
+                role: 'manager',
+              }],
+            }
+          },
+        )
+      })
+      await expect(mutate()).rejects.toMatchObject({
+        code: 'DocumentAuthorizationChanged',
+        status: 409,
+      })
+    }
+
+  await expectAncestorAuthorizationRevocation(
+    async (client, parent) => async () =>
+      client.create({
+        workspaceId: 'workspace-1',
+        access: ownerAccess,
+        kind: 'page',
+        scope: { type: 'workspace' },
+        parentId: parent.id,
+        title: 'Revoked child create',
+        blocks: [],
+      }),
+  )
+  await expectAncestorAuthorizationRevocation(
+    async (client, parent) => {
+      const document = await client.create({
+        workspaceId: 'workspace-1',
+        access: ownerAccess,
+        kind: 'page',
+        scope: { type: 'workspace' },
+        parentId: parent.id,
+        title: 'Revoked child edit',
+        blocks: [],
+      })
+      return async () =>
+        client.update({
+          workspaceId: 'workspace-1',
+          documentId: document.id,
+          access: ownerAccess,
+          expectedRevision: document.revision,
+          title: 'Must not commit',
+        })
+    },
+  )
+  await expectAncestorAuthorizationRevocation(
+    async (client, parent) => {
+      const document = await client.create({
+        workspaceId: 'workspace-1',
+        access: ownerAccess,
+        kind: 'page',
+        scope: { type: 'workspace' },
+        parentId: parent.id,
+        title: 'Revoked child comment',
+        blocks: [],
+      })
+      return async () =>
+        client.createComment({
+          workspaceId: 'workspace-1',
+          documentId: document.id,
+          access: ownerAccess,
+          body: 'Must not commit',
+        })
+    },
+  )
+  await expectAncestorAuthorizationRevocation(
+    async (client, parent) => {
+      const document = await client.create({
+        workspaceId: 'workspace-1',
+        access: ownerAccess,
+        kind: 'page',
+        scope: { type: 'workspace' },
+        parentId: parent.id,
+        title: 'Revoked child preference',
+        blocks: [],
+      })
+      return async () =>
+        client.updatePreference({
+          workspaceId: 'workspace-1',
+          documentId: document.id,
+          access: ownerAccess,
+          favorite: true,
+        })
+    },
+  )
+  await expectAncestorAuthorizationRevocation(
+    async (client, parent) => {
+      const document = await client.create({
+        workspaceId: 'workspace-1',
+        access: ownerAccess,
+        kind: 'page',
+        scope: { type: 'workspace' },
+        parentId: parent.id,
+        title: 'Revoked child presence',
+        blocks: [],
+      })
+      return async () =>
+        client.heartbeatPresence({
+          workspaceId: 'workspace-1',
+          documentId: document.id,
+          access: ownerAccess,
+          clientId: 'revoked-client',
+        })
+    },
+  )
+  await expectAncestorAuthorizationRevocation(
+    async (client, parent) => {
+      const document = await client.create({
+        workspaceId: 'workspace-1',
+        access: ownerAccess,
+        kind: 'page',
+        scope: { type: 'workspace' },
+        parentId: parent.id,
+        title: 'Revoked presence leave',
+        blocks: [],
+      })
+      await client.heartbeatPresence({
+        workspaceId: 'workspace-1',
+        documentId: document.id,
+        access: ownerAccess,
+        clientId: 'revoked-client',
+      })
+      return async () =>
+        client.leavePresence({
+          workspaceId: 'workspace-1',
+          documentId: document.id,
+          access: ownerAccess,
+          clientId: 'revoked-client',
+        })
+    },
+  )
+})
+
+test('binds ancestor archive and topology snapshots to operation commits', async () => {
+  const expectAncestorMutationConflict =
+    async (
+      mutateAncestor: (
+        document: DocumentDetail,
+      ) => void,
+    ) => {
+      const memory =
+        createMemoryDocumentClient()
+      const client = createClient(memory)
+      const destination = await client.create({
+        workspaceId: 'workspace-1',
+        access: ownerAccess,
+        kind: 'folder',
+        scope: { type: 'workspace' },
+        title: 'Destination',
+      })
+      const parent = await client.create({
+        workspaceId: 'workspace-1',
+        access: ownerAccess,
+        kind: 'folder',
+        scope: { type: 'workspace' },
+        title: 'Mutable ancestor',
+      })
+      const document = await client.create({
+        workspaceId: 'workspace-1',
+        access: ownerAccess,
+        kind: 'page',
+        scope: { type: 'workspace' },
+        parentId: parent.id,
+        title: 'Guarded operations',
+        blocks: [{
+          id: 'block-1',
+          type: 'paragraph',
+          text: 'Before',
+        }],
+      })
+      memory.beforeTransaction(() => {
+        mutateStoredDocument(
+          memory,
+          parent.id,
+          (ancestor) => {
+            mutateAncestor(ancestor)
+            if (
+              ancestor.parentId ===
+                '__destination__'
+            ) {
+              ancestor.parentId =
+                destination.id
+            }
+          },
+        )
+      })
+      await expect(client.applyOperations({
+        workspaceId: 'workspace-1',
+        documentId: document.id,
+        access: ownerAccess,
+        input: {
+          baseRevision: document.revision,
+          clientId: 'editor-1',
+          operations: [{
+            operationId:
+              'ancestor-race-edit',
+            type: 'update-block',
+            blockId: 'block-1',
+            block: {
+              id: 'block-1',
+              type: 'paragraph',
+              text: 'After',
+            },
+          }],
+        },
+      })).rejects.toMatchObject({
+        code: 'DocumentAuthorizationChanged',
+        status: 409,
+      })
+    }
+
+  await expectAncestorMutationConflict(
+    (ancestor) => {
+      ancestor.archivedAt =
+        '2026-07-18T00:01:00.000Z'
+    },
+  )
+  await expectAncestorMutationConflict(
+    (ancestor) => {
+      ancestor.parentId = '__destination__'
+    },
+  )
+})
+
+test('returns a concurrent-update conflict when operation retries are exhausted', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Retry exhaustion',
+    blocks: [{
+      id: 'block-1',
+      type: 'paragraph',
+      text: 'Before',
+    }],
+  })
+  let attempts = 0
+  const rejectTransaction = () => {
+    attempts += 1
+    memory.beforeTransaction(
+      rejectTransaction,
+    )
+    throw conditionalError()
+  }
+  memory.beforeTransaction(
+    rejectTransaction,
+  )
+
+  await expect(client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: document.revision,
+      clientId: 'editor-1',
+      operations: [{
+        operationId: 'retry-exhaustion',
+        type: 'update-block',
+        blockId: 'block-1',
+        block: {
+          id: 'block-1',
+          type: 'paragraph',
+          text: 'After',
+        },
+      }],
+    },
+  })).rejects.toMatchObject({
+    code: 'DocumentConcurrentUpdate',
+    status: 409,
+  })
+  expect(attempts).toBe(6)
+})
+
 function createPage(
   overrides: Partial<Extract<DocumentDetail, { kind: 'page' }>> = {},
 ): Extract<DocumentDetail, { kind: 'page' }> {
@@ -4049,6 +5696,39 @@ function createClient(
   })
 }
 
+function mutateStoredDocument(
+  memory: ReturnType<
+    typeof createMemoryDocumentClient
+  >,
+  documentId: string,
+  mutate: (document: DocumentDetail) => void,
+): void {
+  const stored = memory.items().find(
+    (item) =>
+      item.entryType === 'document' &&
+      item.documentId === documentId,
+  )
+  if (stored === undefined) {
+    throw new Error(
+      `Stored Document ${documentId} was not found.`,
+    )
+  }
+  const document =
+    structuredClone(
+      stored.document,
+    ) as DocumentDetail
+  mutate(document)
+  document.revision += 1
+  document.updatedAt =
+    '2026-07-18T00:01:00.000Z'
+  memory.put({
+    ...stored,
+    revision:
+      Number(stored.revision) + 1,
+    document,
+  })
+}
+
 function seedOwnerAuthorization(
   memory: ReturnType<
     typeof createMemoryDocumentClient
@@ -4110,8 +5790,60 @@ function createGoalRelation(
   }
 }
 
+function createWorkItemRelation(
+  relationId: string,
+  workItemId: string,
+): DocumentDetail['relations'][number] {
+  return {
+    id: relationId,
+    source: { kind: 'document' },
+    target: {
+      kind: 'work-item',
+      workItemId,
+    },
+    createdByUserId: 'owner@example.com',
+    createdAt:
+      '2026-07-18T00:00:00.000Z',
+  }
+}
+
+function findWorkItemBacklinkTargetFence(
+  memory: ReturnType<
+    typeof createMemoryDocumentClient
+  >,
+  workItemId: string,
+): Record<string, unknown> | undefined {
+  return memory.items().find(
+    (item) =>
+      item.entryType ===
+        'document-backlink-target-fence' &&
+      item.targetKind === 'work-item' &&
+      item.targetId === workItemId,
+  )
+}
+
+function getPreparedFencePutItem(
+  prepared: Awaited<
+    ReturnType<
+      DynamoDbDocumentsClient[
+        'prepareWorkItemDeletionFenceTransactWrite'
+      ]
+    >
+  >,
+): Record<string, unknown> {
+  const item =
+    prepared.transactWriteItem.Put?.Item
+  if (item === undefined) {
+    throw new Error(
+      'Expected a prepared fence Put.',
+    )
+  }
+  return item
+}
+
 function createMemoryDocumentClient() {
   const stored = new Map<string, Record<string, unknown>>()
+  const transactionActionCounts: number[] = []
   const readKeys:
     Array<{
       workspaceId?: string
@@ -4129,6 +5861,9 @@ function createMemoryDocumentClient() {
         | Array<Record<string, Record<string, unknown>>>
         | undefined
       if (transaction !== undefined) {
+        transactionActionCounts.push(
+          transaction.length,
+        )
         const beforeTransaction =
           beforeNextTransaction
         beforeNextTransaction = undefined
@@ -4229,6 +5964,8 @@ function createMemoryDocumentClient() {
   return {
     client,
     items: () => [...stored.values()].map((item) => structuredClone(item)),
+    transactionActionCounts: () =>
+      [...transactionActionCounts],
     readKeys: () =>
       structuredClone(readKeys),
     clearReadKeys: () => {
@@ -4238,6 +5975,14 @@ function createMemoryDocumentClient() {
       stored.set(
         memoryKey(item.workspaceId, item.recordKey),
         structuredClone(item),
+      )
+    },
+    remove: (
+      workspaceId: string,
+      recordKey: string,
+    ) => {
+      stored.delete(
+        memoryKey(workspaceId, recordKey),
       )
     },
     setQueryPageSize: (pageSize: number) => {
@@ -4334,6 +6079,44 @@ function matchesCondition(
   if (condition === 'clientId = :clientId') {
     return current?.clientId === values[':clientId']
   }
+  if (
+    condition.includes(
+      '#entryType = :entryType',
+    ) &&
+    condition.includes(
+      'targetKind = :targetKind',
+    ) &&
+    condition.includes(
+      'targetId = :targetId',
+    ) &&
+    condition.includes(
+      '#version = :expectedVersion',
+    )
+  ) {
+    const expectedCount =
+      values[':expectedCount'] ??
+      values[':zero']
+    return (
+      current?.entryType ===
+        values[':entryType'] &&
+      current?.schemaVersion ===
+        values[':schemaVersion'] &&
+      current?.targetKind ===
+        values[':targetKind'] &&
+      current?.targetId ===
+        values[':targetId'] &&
+      current?.activeBacklinkCount ===
+        expectedCount &&
+      current?.version ===
+        values[':expectedVersion'] &&
+      (
+        !condition.includes(
+          'attribute_not_exists(deletedAt)',
+        ) ||
+        current?.deletedAt === undefined
+      )
+    )
+  }
   if (condition.includes('#authorization')) {
     const names =
       operation.ExpressionAttributeNames as
@@ -4371,7 +6154,19 @@ function memoryKey(workspaceId: unknown, recordKey: unknown): string {
 }
 
 function conditionalError(): Error {
-  const error = new Error('condition failed')
+  return transactionCancellationError([
+    'ConditionalCheckFailed',
+  ])
+}
+
+function transactionCancellationError(
+  cancellationReasonCodes: readonly string[],
+): Error {
+  const error = new Error('transaction canceled')
   error.name = 'TransactionCanceledException'
+  Object.assign(error, {
+    CancellationReasons:
+      cancellationReasonCodes.map((Code) => ({ Code })),
+  })
   return error
 }

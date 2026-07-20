@@ -1696,7 +1696,20 @@ const paths = {
       tags: ['External Link Management'],
       summary: '外部 Work Item link を削除する',
       security: sessionSecurity,
-      parameters: [idPathParameter('externalLinkId', 'External Work Item link ID です。'), ...idempotencyParameters],
+      parameters: [
+        idPathParameter('externalLinkId', 'External Work Item link ID です。'),
+        {
+          name: 'teamId', in: 'query', required: true,
+          description: 'External link が属する Team ID です。',
+          schema: { type: 'string' },
+        },
+        {
+          name: 'workItemId', in: 'query', required: true,
+          description: 'External link が属する Work Item ID です。',
+          schema: { type: 'string' },
+        },
+        ...idempotencyParameters,
+      ],
       responses: {
         '204': emptyResponse('External Work Item link を削除しました。', true),
         ...notFoundResponse,

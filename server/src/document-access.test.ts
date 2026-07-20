@@ -46,6 +46,78 @@ test('maps inherited Workspace and Project roles to Document capabilities', () =
   })
 })
 
+test('caps explicit grants and legacy Workspace administration at the authorized Project role', () => {
+  const document = createPage({
+    scope: { type: 'project', projectId: 'project-1' },
+    permission: {
+      mode: 'inherit',
+      memberGrants: [{ memberKey: 'admin@example.com', role: 'manager' }],
+    },
+  })
+
+  expect(resolveDocumentCapabilities({
+    principal: {
+      memberKey: 'admin@example.com',
+      workspaceRole: 'admin',
+      isSystemAdmin: false,
+    },
+    document,
+    projectRole: 'viewer',
+    restrictToAuthorizedScopes: true,
+  })).toEqual({
+    ...deniedCapabilities,
+    canView: true,
+    canComment: true,
+    canExport: true,
+  })
+})
+
+test('denies explicitly shared Documents outside externally authorized scopes', () => {
+  const document = createPage({
+    scope: { type: 'project', projectId: 'project-1' },
+    permission: {
+      mode: 'private',
+      memberGrants: [{ memberKey: 'admin@example.com', role: 'manager' }],
+    },
+  })
+
+  expect(resolveDocumentCapabilities({
+    principal: {
+      memberKey: 'admin@example.com',
+      workspaceRole: 'admin',
+      isSystemAdmin: false,
+    },
+    document,
+    restrictToAuthorizedScopes: true,
+  })).toEqual(deniedCapabilities)
+})
+
+test('caps externally authorized Workspace member access at edit capability', () => {
+  const document = createPage({
+    permission: {
+      mode: 'inherit',
+      memberGrants: [{ memberKey: 'admin@example.com', role: 'manager' }],
+    },
+  })
+
+  expect(resolveDocumentCapabilities({
+    principal: {
+      memberKey: 'admin@example.com',
+      workspaceRole: 'admin',
+      isSystemAdmin: false,
+    },
+    document,
+    restrictToAuthorizedScopes: true,
+    workspaceScopeRole: 'member',
+  })).toEqual({
+    ...deniedCapabilities,
+    canView: true,
+    canEdit: true,
+    canComment: true,
+    canExport: true,
+  })
+})
+
 test('caps an explicitly shared guest at read-only access', () => {
   const document = createPage({
     permission: {

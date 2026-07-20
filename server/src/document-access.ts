@@ -67,6 +67,14 @@ export type ResolveDocumentCapabilitiesInput = {
    * Project scope の場合に source of truth から取得した Project role です。
    */
   projectRole?: DocumentProjectRole
+  /**
+   * External RBAC が許可した scope と role を Document ACL の上限にするかどうかです。
+   */
+  restrictToAuthorizedScopes?: boolean
+  /**
+   * Workspace scope で External RBAC が許可した最大 role です。
+   */
+  workspaceScopeRole?: DocumentProjectRole
 }
 
 /**
@@ -123,7 +131,10 @@ function resolveDocumentAccessLevel(input: ResolveDocumentCapabilitiesInput) {
 
   let explicitLevel = resolveExplicitDocumentAccess(document, principal.memberKey)
   if (document.permission.mode === 'private') {
-    return capGuestAccess(explicitLevel, principal.workspaceRole)
+    return capAuthorizedScopeAccess(
+      capGuestAccess(explicitLevel, principal.workspaceRole),
+      input,
+    )
   }
 
   for (const ancestor of input.ancestors ?? []) {
@@ -132,12 +143,21 @@ function resolveDocumentAccessLevel(input: ResolveDocumentCapabilitiesInput) {
       resolveExplicitDocumentAccess(ancestor, principal.memberKey),
     )
     if (ancestor.permission.mode === 'private') {
-      return capGuestAccess(explicitLevel, principal.workspaceRole)
+      return capAuthorizedScopeAccess(
+        capGuestAccess(explicitLevel, principal.workspaceRole),
+        input,
+      )
     }
   }
 
   const scopeLevel = resolveScopeDocumentAccess(input)
-  return capGuestAccess(Math.max(explicitLevel, scopeLevel), principal.workspaceRole)
+  return capAuthorizedScopeAccess(
+    capGuestAccess(
+      Math.max(explicitLevel, scopeLevel),
+      principal.workspaceRole,
+    ),
+    input,
+  )
 }
 
 function resolveExplicitDocumentAccess(
@@ -173,6 +193,20 @@ function capGuestAccess(level: number, workspaceRole: WorkspaceRole) {
     : level
 }
 
+function capAuthorizedScopeAccess(
+  level: number,
+  input: ResolveDocumentCapabilitiesInput,
+) {
+  if (!input.restrictToAuthorizedScopes) return level
+  const authorizedRole = input.document.scope.type === 'workspace'
+    ? input.workspaceScopeRole
+    : input.projectRole
+  if (authorizedRole === undefined) {
+    return documentAccessWeights.denied
+  }
+  return Math.min(level, documentProjectRoleWeights[authorizedRole])
+}
+
 const documentAccessWeights = {
   denied: 0,
   viewer: 1,
@@ -185,3 +219,9 @@ const documentGrantWeights = {
   editor: documentAccessWeights.editor,
   manager: documentAccessWeights.manager,
 } as const satisfies Record<DocumentMemberGrantRole, number>
+
+const documentProjectRoleWeights = {
+  viewer: documentAccessWeights.viewer,
+  member: documentAccessWeights.editor,
+  manager: documentAccessWeights.manager,
+} as const satisfies Record<DocumentProjectRole, number>

@@ -16,6 +16,7 @@ import {
   createWorkspaceMemberAuditEntityId,
   DynamoDbAuditEventsClient,
   ensureLocalAuditEventsTable,
+  getConfiguredAuditRetentionDays,
   getConfiguredAuditTableName,
   getConfiguredDynamoDbEndpoint,
   readWorkspaceAuditPseudonymKey,
@@ -31,6 +32,38 @@ test('calculates audit expiry from the historical event occurrence time', () => 
   expect(calculateAuditExpiresAt(occurredAt, 30)).toBe(
     Math.floor(Date.parse(occurredAt) / 1000) + 30 * 86_400,
   )
+})
+
+test('treats blank audit retention environment values as unset', () => {
+  const originalMukurojiRetentionDays = process.env.MUKUROJI_AUDIT_RETENTION_DAYS
+  const originalRetentionDays = process.env.AUDIT_RETENTION_DAYS
+
+  try {
+    process.env.MUKUROJI_AUDIT_RETENTION_DAYS = ' '
+    process.env.AUDIT_RETENTION_DAYS = ''
+    expect(getConfiguredAuditRetentionDays()).toBe(2555)
+
+    process.env.AUDIT_RETENTION_DAYS = '365'
+    expect(getConfiguredAuditRetentionDays()).toBe(365)
+
+    for (const invalidValue of ['invalid', '0', '-1']) {
+      process.env.MUKUROJI_AUDIT_RETENTION_DAYS = invalidValue
+      expect(() => getConfiguredAuditRetentionDays()).toThrow(
+        'Audit retention days must be a positive number.',
+      )
+    }
+  } finally {
+    if (originalMukurojiRetentionDays === undefined) {
+      delete process.env.MUKUROJI_AUDIT_RETENTION_DAYS
+    } else {
+      process.env.MUKUROJI_AUDIT_RETENTION_DAYS = originalMukurojiRetentionDays
+    }
+    if (originalRetentionDays === undefined) {
+      delete process.env.AUDIT_RETENTION_DAYS
+    } else {
+      process.env.AUDIT_RETENTION_DAYS = originalRetentionDays
+    }
+  }
 })
 
 test('allows an omitted expiry only for an unknown-time backfill event', () => {
@@ -87,6 +120,28 @@ test('allows an omitted expiry only for an unknown-time backfill event', () => {
 
   expect(event.occurredAt).toBe(AUDIT_UNKNOWN_OCCURRED_AT)
   expect(event.expiresAt).toBeUndefined()
+})
+
+test('preserves a session-bound break-glass actor kind in immutable events', () => {
+  const context = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'recovery-admin', kind: 'break-glass' },
+    idempotencyKey: 'break-glass-policy-repair',
+    occurredAt: '2026-07-18T12:00:00.000Z',
+    request: { method: 'PUT', path: '/api/enterprise/security/policy' },
+    source: { kind: 'api' },
+  })
+  const event = createAuditEvent({
+    context,
+    eventType: 'security-policy.updated',
+    entity: { type: 'enterprise-security', id: 'policy' },
+    expiresAt: auditExpiresAt,
+  })
+
+  expect(upcastAuditEvent(event).actor).toEqual({
+    id: 'recovery-admin',
+    kind: 'break-glass',
+  })
 })
 
 test('creates stable keyed Workspace access IDs without exposing private identifiers', () => {
