@@ -4,7 +4,20 @@ import type {
   BulkOperationRequest,
   WorkItemPriority,
 } from '@mukuroji/contracts'
-import type { BulkOperationSelection } from './BulkOperationToolbar'
+
+/** Bulk selection を API identity と table selection key へ結び付けます。 */
+export type BulkOperationSelection = {
+  /** TaskPage 内で checkbox state を識別する key です。 */
+  selectionKey: string
+  /** Work Item を所有する Team ID です。 */
+  teamId: string
+  /** Team 内の Work Item ID です。 */
+  workItemId: string
+  /** Preview/apply の optimistic concurrency revision です。 */
+  expectedRevision: number
+  /** Toolbar の selection summary に表示する label です。 */
+  label: string
+}
 
 /** Bulk edit で更新できる Work Item fields です。 */
 export const bulkEditFields = ['workflowStatusId', 'assigneeUserId', 'dueDate', 'priority'] as const

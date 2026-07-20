@@ -1,5 +1,84 @@
+import type {
+  ExternalResourceType,
+  ExternalSyncDirection,
+} from '@mukuroji/contracts'
 import type { Locale } from '../../shared/i18n/i18n'
-import type { WorkItemExternalLinksLabels } from './WorkItemExternalLinksPanel'
+
+/**
+ * External link panel で表示する locale-aware 文言です。
+ */
+export type WorkItemExternalLinksLabels = {
+  /** Section 見出しです。 */
+  title: string
+  /** Section の用途説明です。 */
+  description: string
+  /** Mutation が許可されていない状態です。 */
+  readOnly: string
+  /** 初期読み込み中の文言です。 */
+  loading: string
+  /** 一覧読み込み失敗時の文言です。 */
+  loadError: string
+  /** 追加 page の読み込み失敗時の文言です。 */
+  loadMoreError: string
+  /** Mutation 失敗時の文言です。 */
+  operationError: string
+  /** 再読み込み action です。 */
+  retry: string
+  /** Link が無い状態の見出しです。 */
+  emptyTitle: string
+  /** Link が無い状態の説明です。 */
+  emptyDescription: string
+  /** Connected installation が無い状態の見出しです。 */
+  noInstallationsTitle: string
+  /** Connected installation が無い状態の説明です。 */
+  noInstallationsDescription: string
+  /** Link 追加 form を開く action です。 */
+  addLink: string
+  /** Link 作成 action です。 */
+  createLink: string
+  /** Link 作成 form を閉じる action です。 */
+  cancel: string
+  /** Connector installation field です。 */
+  installation: string
+  /** External resource type field です。 */
+  resourceType: string
+  /** External resource ID field です。 */
+  externalId: string
+  /** External HTTPS URL field です。 */
+  externalUrl: string
+  /** Provider UI の表示 key field です。 */
+  displayKey: string
+  /** Synchronization direction field です。 */
+  syncDirection: string
+  /** 最終同期日時の label です。 */
+  lastSynced: string
+  /** 同期実績が無い状態です。 */
+  never: string
+  /** Link を解除する action です。 */
+  unlink: string
+  /** Link 解除前に表示する確認文言です。 */
+  unlinkConfirm: string
+  /** Connector recovery 後に同期方向を変更できることを説明します。 */
+  reconnectRequired: string
+  /** Provider snapshot も取得できない場合の表示名です。 */
+  unknownProvider: string
+  /** 次 page を取得する action です。 */
+  loadMore: string
+  /** 次 page を取得中の文言です。 */
+  loadingMore: string
+  /** External ID input placeholder です。 */
+  externalIdPlaceholder: string
+  /** External URL input placeholder です。 */
+  externalUrlPlaceholder: string
+  /** Display key input placeholder です。 */
+  displayKeyPlaceholder: string
+  /** Resource type の表示名です。 */
+  resourceTypeLabels: Record<ExternalResourceType, string>
+  /** Sync direction の表示名です。 */
+  syncDirectionLabels: Record<ExternalSyncDirection, string>
+  /** Link status の表示名です。 */
+  statusLabels: Record<string, string>
+}
 
 /**
  * External link panel の日本語または英語 label set を作成します。

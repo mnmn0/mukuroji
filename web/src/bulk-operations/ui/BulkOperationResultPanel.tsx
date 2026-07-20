@@ -9,7 +9,7 @@ import {
   getResumableBulkOperationItems,
   getRetryableBulkOperationItems,
   getSucceededBulkOperationItems,
-} from './helpers'
+} from '../model/bulkOperation'
 
 /** Bulk operation review/result panel の props です。 */
 export type BulkOperationResultPanelProps = {

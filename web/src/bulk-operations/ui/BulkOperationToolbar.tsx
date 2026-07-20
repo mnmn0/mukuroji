@@ -12,23 +12,12 @@ import {
   createBulkEditPatch,
   isBulkOperationPreviewRequestCurrent,
   type BulkEditField,
-} from './helpers'
+  type BulkOperationSelection,
+} from '../model/bulkOperation'
+
+export type { BulkOperationSelection } from '../model/bulkOperation'
 
 const bulkPriorities = ['high', 'medium', 'low'] as const
-
-/** Bulk selection を API identity と table selection key へ結び付けます。 */
-export type BulkOperationSelection = {
-  /** TaskPage 内で checkbox state を識別する key です。 */
-  selectionKey: string
-  /** Work Item を所有する Team ID です。 */
-  teamId: string
-  /** Team 内の Work Item ID です。 */
-  workItemId: string
-  /** Preview/apply の optimistic concurrency revision です。 */
-  expectedRevision: number
-  /** Toolbar の selection summary に表示する label です。 */
-  label: string
-}
 
 /** Move action で選択できる Project です。 */
 export type BulkOperationProjectOption = {

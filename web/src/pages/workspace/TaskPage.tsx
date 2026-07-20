@@ -56,7 +56,7 @@ import {
 import {
   clearSucceededBulkSelection,
   updateBulkItemSelection,
-} from '../../bulk-operations/ui/helpers'
+} from '../../bulk-operations/model/bulkOperation'
 import {
   archiveProjectDirectoryProject,
   archiveProjectDirectoryTeam,

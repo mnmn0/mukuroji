@@ -14,7 +14,7 @@ import {
   isBulkOperationPreviewRequestCurrent,
   updateBulkItemSelection,
   updateVisibleBulkSelection,
-} from '../src/bulk-operations/ui/helpers'
+} from '../src/bulk-operations/model/bulkOperation'
 import { createTranslator } from '../src/shared/i18n/i18n'
 
 const selections: BulkOperationSelection[] = [
