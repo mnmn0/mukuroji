@@ -28,13 +28,17 @@ export function DashboardWorkspaceView({
 }) {
   const decisionTasks = workspacePresentation.createActionQueueTasks(tasks).slice(0, 5)
   const projects = teams.flatMap((team) =>
-    team.projects.map((project) => ({
-      progress: workspacePresentation.calculateProjectProgress(workspacePresentation.filterTasksByProjectIds(tasks, [project.id])),
-      id: `${team.id}-${project.id}`,
-      name: project.name,
-      teamName: team.name,
-      riskKey: workspacePresentation.resolvePortfolioRiskKey(workspacePresentation.filterTasksByProjectIds(tasks, [project.id])),
-    })),
+    team.projects.map((project) => {
+      const projectTasks = workspacePresentation.filterTasksByProjectIds(tasks, [project.id])
+
+      return {
+        progress: workspacePresentation.calculateProjectProgress(projectTasks),
+        id: `${team.id}-${project.id}`,
+        name: project.name,
+        teamName: team.name,
+        riskKey: workspacePresentation.resolvePortfolioRiskKey(projectTasks),
+      }
+    }),
   )
 
   return (

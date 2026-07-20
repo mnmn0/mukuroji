@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import type { MessageKey } from '../../i18n'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type {
@@ -36,8 +36,14 @@ export function ReportsView({
   const [projectSearchQuery, setProjectSearchQuery] = useState('')
   const [showAttentionOnly, setShowAttentionOnly] = useState(false)
   const openTasks = tasks.filter((task) => task.status !== 'done')
-  const attentionTasks = workspacePresentation.createInboxTasks(tasks)
-  const projectRows = workspacePresentation.createReportProjectRows(teams, tasks)
+  const attentionTasks = useMemo(
+    () => workspacePresentation.createInboxTasks(tasks),
+    [tasks],
+  )
+  const projectRows = useMemo(
+    () => workspacePresentation.createReportProjectRows(teams, tasks),
+    [teams, tasks],
+  )
   const normalizedProjectSearchQuery = workspacePresentation.normalizeWorkspaceSearchText(projectSearchQuery)
   const filteredProjectRows = projectRows.filter((project) => {
     if (showAttentionOnly && project.attentionTaskCount === 0) {

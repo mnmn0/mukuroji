@@ -1,16 +1,17 @@
 import { Link } from 'react-router'
 import type { MessageKey } from '../../i18n'
+import { workspaceNavPaths } from '../../routes/paths'
 
 const helpDestinations = [
   {
     descriptionKey: 'workspace.help.guideDescription',
     titleKey: 'workspace.help.guideTitle',
-    to: '/home',
+    to: workspaceNavPaths.home,
   },
   {
     descriptionKey: 'workspace.help.runbookDescription',
     titleKey: 'workspace.help.runbookTitle',
-    to: '/reports',
+    to: workspaceNavPaths.reports,
   },
   {
     descriptionKey: 'workspace.help.supportDescription',

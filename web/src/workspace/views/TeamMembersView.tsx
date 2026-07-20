@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import type { MessageKey } from '../../i18n'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { ProjectTask } from '../../tasks/api'
@@ -36,8 +36,16 @@ export function TeamMembersView({
 }) {
   const [searchQuery, setSearchQuery] = useState('')
   const [roleFilter, setRoleFilter] = useState<TeamMemberRoleFilter>('all')
-  const projects = team?.projects ?? []
-  const members = workspacePresentation.createTeamMemberRows(projects, tasks, teamProjectMembers, team?.id, t)
+  const members = useMemo(
+    () => workspacePresentation.createTeamMemberRows(
+      team?.projects ?? [],
+      tasks,
+      teamProjectMembers,
+      team?.id,
+      t,
+    ),
+    [team?.projects, tasks, teamProjectMembers, team?.id, t],
+  )
   const normalizedSearchQuery = searchQuery.trim().toLowerCase()
   const filteredMembers = members.filter((member) => {
     const matchesRole = roleFilter === 'all' || member.role === roleFilter
