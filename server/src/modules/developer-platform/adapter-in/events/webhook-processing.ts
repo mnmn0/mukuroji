@@ -23,7 +23,6 @@ import {
 } from '../../../audit'
 import {
   DeveloperPlatformError,
-  DynamoDbDeveloperPlatformClient,
   WEBHOOK_MAX_ATTEMPTS,
   type DeveloperPlatformClient,
   type PreparedWebhookDelivery,
@@ -35,7 +34,6 @@ import {
   type WebhookRequestResult,
 } from '../../webhook-delivery'
 import {
-  DynamoDbWebhookSubscriptionAuthorizer,
   type WebhookSubscriptionAuthorizer,
 } from '../../webhook-authorization'
 import {
@@ -323,28 +321,14 @@ export type WebhookSqsEvent = {
   Records?: WebhookSqsRecord[]
 }
 
-let defaultDeveloperPlatform: DeveloperPlatformClient | undefined
-let defaultWebhookAuthorizer: WebhookSubscriptionAuthorizer | undefined
-let defaultQueue: WebhookDeliveryQueue | undefined
-let defaultSqsClient: SQSClient | undefined
-let defaultWebhookDeliveryClaimStore: WebhookDeliveryClaimStore | undefined
-let defaultWebhookAuditEventReader: WebhookAuditEventReader | undefined
-let defaultWebhookProjectionStateStore: WebhookProjectionStateStore | undefined
-let defaultWebhookGrantCleanupStore: WebhookGrantCleanupStore | undefined
-
 /**
- * AuditEventsTable の pending insert を durable projection queue へ渡します。
- *
- * @remarks
- * Stream worker は ID だけを enqueue します。SQS worker が event を強整合読みし、bounded page
- * ごとに delivery を作成するため、subscription 数が多くても durable に継続できます。
+ * Audit projection dependencies に束縛された stream handler を作成します。
  */
-export async function projectionHandler(
-  event: WebhookDynamoStreamEvent,
-): Promise<WebhookBatchResponse> {
-  return await processWebhookProjectionBatch(event, {
-    queue: getDefaultWebhookQueue(),
-  })
+export function createWebhookProjectionHandler(
+  dependencies: WebhookProjectionDependencies,
+) {
+  return async (event: WebhookDynamoStreamEvent): Promise<WebhookBatchResponse> =>
+    await processWebhookProjectionBatch(event, dependencies)
 }
 
 /** Audit stream batch を処理して record 単位の retry response を返します。 */
@@ -364,20 +348,12 @@ export async function processWebhookProjectionBatch(
   return { batchItemFailures: results.filter(isDefined) }
 }
 
-/** SQS projection/delivery batch を処理し、失敗した message だけを再試行します。 */
-export async function deliveryHandler(event: WebhookSqsEvent): Promise<WebhookBatchResponse> {
-  return await processWebhookDeliveryBatch(event, {
-    auditEvents: getDefaultWebhookAuditEventReader(),
-    developerPlatform: getDefaultDeveloperPlatform(),
-    authorizer: getDefaultWebhookAuthorizer(),
-    projections: getDefaultWebhookProjectionStateStore(),
-    grantCleanup: getDefaultWebhookGrantCleanupStore(),
-    queue: getDefaultWebhookQueue(),
-    claims: getDefaultWebhookDeliveryClaimStore(),
-    deliver: deliverPreparedWebhook,
-    now: () => new Date(),
-    random: Math.random,
-  })
+/** SQS delivery dependencies に束縛された batch handler を作成します。 */
+export function createWebhookDeliveryHandler(
+  dependencies: WebhookDeliveryWorkerDependencies,
+) {
+  return async (event: WebhookSqsEvent): Promise<WebhookBatchResponse> =>
+    await processWebhookDeliveryBatch(event, dependencies)
 }
 
 /** Webhook queue batch を配信し、message 単位の retry response を返します。 */
@@ -401,18 +377,20 @@ export async function processWebhookDeliveryBatch(
   return { batchItemFailures: results.filter(isDefined) }
 }
 
-/** API replay と worker retry が共有する SQS enqueue helper です。 */
-export async function queueWebhookDeliveryMessage(
-  workspaceId: string,
-  deliveryId: string,
-  delaySeconds = 0,
-) {
-  await getDefaultWebhookQueue().enqueue({
-    kind: 'delivery',
-    workspaceId,
-    deliveryId,
-    delaySeconds,
-  })
+/** API replay と worker retry が共有する SQS enqueue helper を作成します。 */
+export function createQueueWebhookDeliveryMessage(queue: WebhookDeliveryQueue) {
+  return async (
+    workspaceId: string,
+    deliveryId: string,
+    delaySeconds = 0,
+  ) => {
+    await queue.enqueue({
+      kind: 'delivery',
+      workspaceId,
+      deliveryId,
+      delaySeconds,
+    })
+  }
 }
 
 async function projectAuditRecord(
@@ -810,7 +788,8 @@ async function processClaimedWebhookQueueRecord(
   await dependencies.queue.enqueue({ ...message, delaySeconds })
 }
 
-async function deliverPreparedWebhook(prepared: PreparedWebhookDelivery) {
+/** Prepared Webhook delivery を検証済み transport へ渡します。 */
+export async function deliverPreparedWebhook(prepared: PreparedWebhookDelivery) {
   return await deliverWebhookRequest({
     deliveryId: prepared.delivery.id,
     eventId: prepared.delivery.eventId,
@@ -1270,38 +1249,10 @@ implements WebhookGrantCleanupStore {
   }
 }
 
-function getDefaultDeveloperPlatform() {
-  defaultDeveloperPlatform ??= new DynamoDbDeveloperPlatformClient()
-  return defaultDeveloperPlatform
-}
-
-function getDefaultWebhookProjectionStateStore() {
-  defaultWebhookProjectionStateStore ??= new DynamoDbWebhookProjectionStateStore()
-  return defaultWebhookProjectionStateStore
-}
-
-function getDefaultWebhookGrantCleanupStore() {
-  defaultWebhookGrantCleanupStore ??= new DynamoDbWebhookGrantCleanupStore()
-  return defaultWebhookGrantCleanupStore
-}
-
-function getDefaultWebhookDeliveryClaimStore() {
-  defaultWebhookDeliveryClaimStore ??= new DynamoDbWebhookDeliveryClaimStore()
-  return defaultWebhookDeliveryClaimStore
-}
-
-function getDefaultWebhookAuditEventReader() {
-  defaultWebhookAuditEventReader ??= new DynamoDbWebhookAuditEventReader()
-  return defaultWebhookAuditEventReader
-}
-
-function getDefaultWebhookAuthorizer() {
-  defaultWebhookAuthorizer ??= new DynamoDbWebhookSubscriptionAuthorizer()
-  return defaultWebhookAuthorizer
-}
-
-function getDefaultWebhookQueue() {
-  defaultQueue ??= {
+/** Environment に束縛された SQS Webhook queue adapter を作成します。 */
+export function createSqsWebhookDeliveryQueue(): WebhookDeliveryQueue {
+  let sqsClient: SQSClient | undefined
+  return {
     async enqueue(message) {
       const queueUrl = process.env.WEBHOOK_DELIVERY_QUEUE_URL?.trim()
       if (!queueUrl) {
@@ -1314,22 +1265,21 @@ function getDefaultWebhookQueue() {
       const delaySeconds = normalizeQueueDelay(
         message.kind === 'delivery' ? message.delaySeconds : undefined,
       )
-      await createSqsClient().send(new SendMessageCommand({
+      sqsClient ??= createSqsClient()
+      await sqsClient.send(new SendMessageCommand({
         QueueUrl: queueUrl,
         MessageBody: JSON.stringify(createSerializedWebhookQueueMessage(message)),
         ...(delaySeconds > 0 ? { DelaySeconds: delaySeconds } : {}),
       }))
     },
   }
-  return defaultQueue
 }
 
 function createSqsClient() {
-  if (defaultSqsClient) return defaultSqsClient
   const endpoint = process.env.SQS_ENDPOINT ??
     process.env.AWS_ENDPOINT_URL_SQS ??
     process.env.AWS_ENDPOINT_URL
-  defaultSqsClient = new SQSClient({
+  return new SQSClient({
     region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
     ...(endpoint
       ? {
@@ -1341,7 +1291,6 @@ function createSqsClient() {
         }
       : {}),
   })
-  return defaultSqsClient
 }
 
 function createWebhookDocumentClient() {

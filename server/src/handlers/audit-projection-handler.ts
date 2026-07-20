@@ -5,8 +5,8 @@ import {
   handler as processCollaborationProjection,
 } from '../modules/collaboration/adapter-in/events/collaboration-projection'
 import {
-  projectionHandler as processWebhookProjection,
-} from '../modules/developer-platform/adapter-in/events/webhook-processing'
+  createProductionWebhookProjectionHandler,
+} from '../app/composition/webhook'
 import {
   auditProjectionHandler as processConnectorProjection,
 } from './connector-handler'
@@ -15,11 +15,16 @@ import type {
   DynamoStreamEvent,
 } from '../infrastructure/aws/dynamodb-stream'
 
+let webhookProjectionHandler:
+  | ReturnType<typeof createProductionWebhookProjectionHandler>
+  | undefined
+
 /** AuditEvents stream を全 downstream projection へ fan-out します。 */
 export async function handler(event: DynamoStreamEvent): Promise<BatchResponse> {
+  webhookProjectionHandler ??= createProductionWebhookProjectionHandler()
   return await processAuditProjectionBatch(event, [
     processCollaborationProjection,
-    processWebhookProjection,
+    webhookProjectionHandler,
     processConnectorProjection,
   ])
 }

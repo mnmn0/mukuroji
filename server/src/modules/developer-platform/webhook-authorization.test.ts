@@ -976,15 +976,15 @@ function createAuthorizer(
       return options.readGroups ? await options.readGroups() : []
     },
   } satisfies WebhookCognitoGroupsProvider
-  return new DynamoDbWebhookSubscriptionAuthorizer(
+  return new DynamoDbWebhookSubscriptionAuthorizer({
     workspaceAccess,
-    documentClient,
-    'project-directory-test',
     enterpriseIdentity,
+    documentClient,
+    projectDirectoryTableName: 'project-directory-test',
     cognitoGroups,
-    'WebhookAuthorizationIndex',
-    options.systemAdminGroups ?? ['mukuroji-system-admins'],
-  )
+    authorizationIndexName: 'WebhookAuthorizationIndex',
+    systemAdminGroups: options.systemAdminGroups ?? ['mukuroji-system-admins'],
+  })
 }
 
 function withAuthorizationProjection(

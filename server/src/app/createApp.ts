@@ -397,7 +397,9 @@ import {
   createWebhookTeamGrantEntryKey,
   createWebhookTeamGrantItem,
 } from '../modules/developer-platform/webhook-authorization-projection'
-import { queueWebhookDeliveryMessage } from '../modules/developer-platform/adapter-in/events/webhook-processing'
+import {
+  createProductionQueueWebhookDeliveryMessage,
+} from './composition/webhook'
 import {
   createDefaultWorkItemImportExecutionStore,
   createDefaultWorkItemImportQueue,
@@ -29668,6 +29670,8 @@ function getPublicApiCursorSecret() {
 }
 
 if (!loadServerConfig().runtimeRole) {
+  const queueWebhookDeliveryMessage =
+    createProductionQueueWebhookDeliveryMessage()
   const publicApiDependencies: PublicApiDependencies = {
     developerPlatform: createForwardingClient(() => developerPlatform),
     authenticateManagement: authenticateDeveloperManagement,

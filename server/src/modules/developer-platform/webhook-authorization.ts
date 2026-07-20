@@ -14,7 +14,6 @@ import type {
   WebhookSubscription,
 } from '@mukuroji/contracts'
 import {
-  DynamoDbEnterpriseIdentityReadClient,
   evaluateEnterpriseAccess,
   resolveEnterpriseDirectoryPrincipal,
   type EnterpriseIdentityReadClient,
@@ -30,7 +29,6 @@ import {
   createWebhookTeamAuthorizationSortKey,
 } from './webhook-authorization-projection'
 import {
-  DynamoDbWorkspaceAccessClient,
   type WorkspaceAccessClient,
   type WorkspaceRole,
 } from '../workspace-access'
@@ -56,6 +54,26 @@ export type WebhookTeamAuthorizationState = {
   activeTeam: boolean
   /** 対象 Team の active Project に creator の viewer 以上の role があるかどうかです。 */
   hasActiveProjectRole: boolean
+}
+
+/**
+ * DynamoDB Webhook authorizer の infrastructure dependencies と設定です。
+ */
+export type DynamoDbWebhookSubscriptionAuthorizerOptions = {
+  /** Workspace membership を強整合確認する client です。 */
+  workspaceAccess: WorkspaceAccessClient
+  /** Current Enterprise CONTROL snapshot を読む client です。 */
+  enterpriseIdentity: EnterpriseIdentityReadClient
+  /** Team / Project membership を読む DocumentClient です。 */
+  documentClient?: DynamoDBDocumentClient
+  /** Project directory table 名です。 */
+  projectDirectoryTableName?: string
+  /** Current Cognito groups を全ページ取得する provider です。 */
+  cognitoGroups?: WebhookCognitoGroupsProvider
+  /** Project directory resource locator GSI 名です。 */
+  authorizationIndexName?: string
+  /** Current system administrator とみなす Cognito group names です。 */
+  systemAdminGroups?: readonly string[]
 }
 
 /** Management API と delivery worker が共有する Team Webhook ACL predicate です。 */
@@ -344,28 +362,26 @@ implements WebhookSubscriptionAuthorizer {
   private readonly systemAdminGroups: ReadonlySet<string>
 
   /** Production Webhook subscription authorizer を作成します。 */
-  constructor(
-    workspaceAccess: WorkspaceAccessClient = new DynamoDbWorkspaceAccessClient(),
-    documentClient: DynamoDBDocumentClient = createDocumentClient(),
-    projectDirectoryTableName = process.env.PROJECT_DIRECTORY_TABLE_NAME ??
+  constructor(options: DynamoDbWebhookSubscriptionAuthorizerOptions) {
+    const documentClient = options.documentClient ?? createDocumentClient()
+    const projectDirectoryTableName = options.projectDirectoryTableName ??
+      process.env.PROJECT_DIRECTORY_TABLE_NAME ??
       process.env.MUKUROJI_PROJECT_DIRECTORY_TABLE ??
-      'mukuroji-project-directory-local',
-    enterpriseIdentity: EnterpriseIdentityReadClient =
-      createEnterpriseIdentityReadClient(),
-    cognitoGroups: WebhookCognitoGroupsProvider =
-      new AwsWebhookCognitoGroupsProvider(),
-    authorizationIndexName =
+      'mukuroji-project-directory-local'
+    const cognitoGroups = options.cognitoGroups ??
+      new AwsWebhookCognitoGroupsProvider()
+    const authorizationIndexName = options.authorizationIndexName ??
       process.env.PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME ??
-        DEFAULT_WEBHOOK_AUTHORIZATION_INDEX_NAME,
-    systemAdminGroups = readConfiguredSystemAdminGroups(),
-  ) {
-    this.workspaceAccess = workspaceAccess
+        DEFAULT_WEBHOOK_AUTHORIZATION_INDEX_NAME
+    const systemAdminGroups = options.systemAdminGroups ??
+      readConfiguredSystemAdminGroups()
+    this.workspaceAccess = options.workspaceAccess
     this.documentClient = documentClient
     this.projectDirectoryTableName = readIdentifier(
       projectDirectoryTableName,
       'Project directory table name',
     )
-    this.enterpriseIdentity = enterpriseIdentity
+    this.enterpriseIdentity = options.enterpriseIdentity
     this.cognitoGroups = cognitoGroups
     this.authorizationIndexName = readIdentifier(
       authorizationIndexName,
@@ -894,15 +910,6 @@ function createCognitoClient() {
   return new CognitoIdentityProviderClient({
     region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
   })
-}
-
-function createEnterpriseIdentityReadClient() {
-  return new DynamoDbEnterpriseIdentityReadClient(
-    readRequiredEnvironment(
-      process.env.ENTERPRISE_IDENTITY_TABLE_NAME,
-      'ENTERPRISE_IDENTITY_TABLE_NAME',
-    ),
-  )
 }
 
 function readConfiguredSystemAdminGroups() {
