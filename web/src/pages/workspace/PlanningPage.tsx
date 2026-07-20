@@ -13,8 +13,7 @@ import {
 } from '../../shared/api/mutationHeaders'
 import {
   MobileSidebarButton,
-  MobileSidebarDrawer,
-  Sidebar,
+  WorkspaceSidebar,
 } from '../../shared/ui/sidebar'
 import {
   createSidebarLabels,
@@ -225,39 +224,18 @@ export function PlanningPage() {
 
   return (
     <main className="workbench-shell flex h-svh min-h-0 overflow-hidden">
-      <Sidebar
+      <WorkspaceSidebar
         activeNavId="planning"
-        className="max-[980px]:hidden"
+        isMobileOpen={isMobileSidebarOpen}
         labels={sidebarLabels}
-        teams={teams}
+        mobileCloseLabel={t('sidebar.mobileClose')}
+        mobileDialogLabel={t('sidebar.mobileDialog')}
+        onMobileClose={() => setIsMobileSidebarOpen(false)}
         onSelectNav={(navId) => navigate(workspaceNavPaths[navId])}
         onSelectProject={(projectId, teamId) => navigate(createProjectIssuesPath(projectId, teamId))}
         onSelectTeamView={(teamId, viewId) => navigate(createTeamViewPath(teamId, viewId))}
+        teams={teams}
       />
-      <MobileSidebarDrawer
-        closeLabel={t('sidebar.mobileClose')}
-        dialogLabel={t('sidebar.mobileDialog')}
-        isOpen={isMobileSidebarOpen}
-        onClose={() => setIsMobileSidebarOpen(false)}
-      >
-        <Sidebar
-          activeNavId="planning"
-          labels={sidebarLabels}
-          teams={teams}
-          onSelectNav={(navId) => {
-            setIsMobileSidebarOpen(false)
-            navigate(workspaceNavPaths[navId])
-          }}
-          onSelectProject={(projectId, teamId) => {
-            setIsMobileSidebarOpen(false)
-            navigate(createProjectIssuesPath(projectId, teamId))
-          }}
-          onSelectTeamView={(teamId, viewId) => {
-            setIsMobileSidebarOpen(false)
-            navigate(createTeamViewPath(teamId, viewId))
-          }}
-        />
-      </MobileSidebarDrawer>
       <div className="relative min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain">
         <div className="absolute left-4 top-4 z-20 min-[981px]:hidden">
           <MobileSidebarButton label={t('sidebar.mobileOpen')} onClick={() => setIsMobileSidebarOpen(true)} />

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router'
+import { useWorkspaceCommandMenu } from '../../commands/ui/WorkspaceCommandMenuContext'
 import {
   getCurrentUser,
   getDashboardSummary,
@@ -10,7 +11,10 @@ import { useCurrentUser } from '../../auth/queries/useCurrentUser'
 import { useDashboardSummary } from '../../auth/queries/useDashboardSummary'
 import { resolveEnterpriseSessionErrorsAction } from '../../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession, type AuthSession } from '../../auth/session'
-import { Sidebar } from '../../shared/ui/sidebar'
+import {
+  MobileSidebarButton,
+  WorkspaceSidebar,
+} from '../../shared/ui/sidebar'
 import {
   createSidebarLabels,
   createTranslator,
@@ -26,7 +30,11 @@ import { getNotificationUnreadCount } from '../../notifications/api'
 import {
   useNotificationUnreadCount,
 } from '../../notifications/queries/useNotificationUnreadCount'
-import { createProjectIssuesPath } from '../../shared/routing/paths'
+import {
+  createProjectIssuesPath,
+  createTeamViewPath,
+  workspaceNavPaths,
+} from '../../shared/routing/paths'
 
 /**
  * ダッシュボード上の小さな指標カードに渡す表示値です。
@@ -102,6 +110,8 @@ export function DashboardPage({
   const navigate = useNavigate()
   const [session] = useState<AuthSession | null>(() => getSession())
   const [locale] = useState<Locale>(() => initialLocale ?? getInitialLocale())
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
+  const commandMenu = useWorkspaceCommandMenu()
   const t = useMemo(() => createTranslator(locale), [locale])
   const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
   const accessToken = session?.accessToken
@@ -186,19 +196,30 @@ export function DashboardPage({
 
   return (
     <main className="workbench-shell flex min-h-svh">
-      <Sidebar
+      <WorkspaceSidebar
         activeNavId="dashboard"
-        className="max-[900px]:hidden"
         inboxCount={inboxCount}
+        isMobileOpen={isMobileSidebarOpen}
         labels={sidebarLabels}
+        mobileCloseLabel={t('sidebar.mobileClose')}
+        mobileDialogLabel={t('sidebar.mobileDialog')}
+        onMobileClose={() => setIsMobileSidebarOpen(false)}
+        onOpenSearch={commandMenu.open}
+        onSelectNav={(navId) => navigate(workspaceNavPaths[navId])}
         onSelectProject={(projectId, teamId) =>
           navigate(createProjectIssuesPath(projectId, teamId))
         }
+        onSelectTeamView={(teamId, viewId) =>
+          navigate(createTeamViewPath(teamId, viewId))}
         teams={teams}
       />
 
       <section className="min-w-0 flex-1 px-[clamp(20px,4vw,48px)] py-[clamp(20px,4vw,36px)]">
         <header className="flex min-w-0 flex-wrap items-start justify-between gap-4 border-b border-[var(--workbench-border)] pb-5">
+          <MobileSidebarButton
+            label={t('sidebar.mobileOpen')}
+            onClick={() => setIsMobileSidebarOpen(true)}
+          />
           <div className="min-w-0">
             <p className="workbench-eyebrow">
               {t('dashboard.authProvider')}

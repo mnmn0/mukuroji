@@ -30,8 +30,7 @@ import { useCurrentUser } from '../auth/queries/useCurrentUser'
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import {
   MobileSidebarButton,
-  MobileSidebarDrawer,
-  Sidebar,
+  WorkspaceSidebar,
   type SidebarNavId,
   type SidebarTeamViewId,
 } from '../shared/ui/sidebar'
@@ -1608,69 +1607,42 @@ export function DocumentScreen({
   const selectDocument = (selectedId: string) =>
     runGuardedAction(() => actions.selectDocument(selectedId))
 
-  const globalSidebar = (
-    <Sidebar
-      activeNavId="documents"
-      inboxCount={inboxCount}
-      labels={sidebarLabels}
-      onOpenSearch={commandMenu.open}
-      onSelectNav={(navId) =>
-        void runGuardedAction(() => actions.selectNav?.(navId))
-      }
-      onSelectProject={(projectId, teamId) =>
-        void runGuardedAction(() =>
-          actions.selectProject?.(projectId, teamId),
-        )
-      }
-      onSelectTeamView={(teamId, viewId) =>
-        void runGuardedAction(() =>
-          actions.selectTeamView?.(teamId, viewId),
-        )
-      }
-      teams={data.teams}
-    />
-  )
+  const runSidebarSelection = (action: () => void | Promise<void>) => {
+    void runGuardedAction(action).then((completed) => {
+      if (completed) setIsMobileSidebarOpen(false)
+    })
+  }
+
+  const selectNavFromSidebar = (navId: SidebarNavId) => {
+    runSidebarSelection(() => actions.selectNav?.(navId))
+  }
+  const selectProjectFromSidebar = (projectId: string, teamId: string) => {
+    runSidebarSelection(() => actions.selectProject?.(projectId, teamId))
+  }
+  const selectTeamViewFromSidebar = (teamId: string, viewId: SidebarTeamViewId) => {
+    runSidebarSelection(() => actions.selectTeamView?.(teamId, viewId))
+  }
 
   return (
     <main className="workbench-shell flex h-svh min-h-0 overflow-hidden">
-      <div className="max-[980px]:hidden">{globalSidebar}</div>
-      <MobileSidebarDrawer
-        closeLabel={t('sidebar.mobileClose')}
-        dialogLabel={t('sidebar.mobileDialog')}
-        isOpen={isMobileSidebarOpen}
-        onClose={() => setIsMobileSidebarOpen(false)}
-      >
-        <Sidebar
-          activeNavId="documents"
-          inboxCount={inboxCount}
-          labels={sidebarLabels}
-          onOpenSearch={() => {
-            setIsMobileSidebarOpen(false)
-            commandMenu.open?.()
-          }}
-          onSelectNav={(navId) => {
-            void runGuardedAction(() => actions.selectNav?.(navId))
-              .then((completed) => {
-                if (completed) setIsMobileSidebarOpen(false)
-              })
-          }}
-          onSelectProject={(projectId, teamId) => {
-            void runGuardedAction(() =>
-              actions.selectProject?.(projectId, teamId),
-            ).then((completed) => {
-              if (completed) setIsMobileSidebarOpen(false)
-            })
-          }}
-          onSelectTeamView={(teamId, viewId) => {
-            void runGuardedAction(() =>
-              actions.selectTeamView?.(teamId, viewId),
-            ).then((completed) => {
-              if (completed) setIsMobileSidebarOpen(false)
-            })
-          }}
-          teams={data.teams}
-        />
-      </MobileSidebarDrawer>
+      <WorkspaceSidebar
+        activeNavId="documents"
+        closeMobileOnSelect={false}
+        inboxCount={inboxCount}
+        isMobileOpen={isMobileSidebarOpen}
+        labels={sidebarLabels}
+        mobileCloseLabel={t('sidebar.mobileClose')}
+        mobileDialogLabel={t('sidebar.mobileDialog')}
+        onMobileClose={() => setIsMobileSidebarOpen(false)}
+        onOpenSearch={() => {
+          setIsMobileSidebarOpen(false)
+          commandMenu.open?.()
+        }}
+        onSelectNav={selectNavFromSidebar}
+        onSelectProject={selectProjectFromSidebar}
+        onSelectTeamView={selectTeamViewFromSidebar}
+        teams={data.teams}
+      />
 
       <section className="workbench-main flex min-w-0 flex-1 flex-col overflow-hidden">
         <DocumentHeader
