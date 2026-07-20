@@ -725,8 +725,8 @@ aws dynamodb wait table-exists \
   Request Intake table は `expiresAt`、Work Item configuration table は
   `expiresAtEpochSeconds` TTL も有効です。
 - File bucket は public access を遮断し、TLS / SSE-S3 / versioning / `Retain` / malware tag-based download deny を有効にします。
-- API Lambda は `server/src/index.ts`、SCIM group worker は
-  `server/src/enterprise-scim-group-job-worker-handler.ts` を deploy 時に個別bundleします。旧 inline
+- API Lambda は `server/src/handlers/api.handler.ts`、SCIM group worker は
+  `server/src/handlers/enterprise-scim-group-job-worker-handler.ts` を deploy 時に個別bundleします。旧 inline
   Lambda copy はありません。
 
 ## Commands

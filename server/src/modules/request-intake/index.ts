@@ -1,0 +1,19 @@
+/** Request Intake module public application and domain surface. */
+export {
+  RequestIntakeError,
+  createRequestSubmissionEventProjection,
+  createRequestWorkItemInput,
+  evaluateRequestConditionGroup,
+  isRequestFieldVisible,
+  resolveRequestRouting,
+  validateRequestAnswers,
+  validateRequestFormDefinition,
+  validateRequestFormDraft,
+  type RequestAttachmentAccess,
+  type RequestConversionProjection,
+  type RequestExternalContext,
+  type RequestIntakeActor,
+  type RequestIntakeClient,
+  type RequestLinkResolution,
+  type RequestSubmissionListOptions,
+} from './request-intake'
