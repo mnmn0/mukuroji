@@ -185,7 +185,7 @@ consumer の DynamoDB projection と checkpoint は同じ transaction で更新�
 
 reader は `schemaVersion` ごとの decoder/upcaster を持ち、未知 version は黙って読み飛ばさず quarantine/error にする。schema を変更するときは古い event を in-place update せず、read-time upcast または新しい migration event を使う。
 
-初期 migration は [backfill-audit-events.ts](../server/scripts/backfill-audit-events.ts) を使用する。対象は次の 5 source である。
+初期 migration は [backfill-audit-events.ts](../server/scripts/backfills/backfill-audit-events.ts) を使用する。対象は次の 5 source である。
 
 - 既存 Team Issue event: `created` / `updated` / `commented` を汎用 event に変換する。
 - current Team Issue: `work-item.backfilled` snapshot を作る。
@@ -200,7 +200,7 @@ source item の key から logical idempotency key を決定的に作り、通�
 AWS_ENDPOINT_URL=http://localhost:4566 \
 AUDIT_EVENTS_TABLE_NAME=mukuroji-audit-events \
 MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<64-character-lowercase-hex-key> \
-bun server/scripts/backfill-audit-events.ts --dry-run --limit 100
+bun server/scripts/backfills/backfill-audit-events.ts --dry-run --limit 100
 
 # checkpoint を使って本実行する
 AWS_ENDPOINT_URL=http://localhost:4566 \
@@ -211,7 +211,7 @@ PROJECT_DIRECTORY_TABLE_NAME=mukuroji-project-directory-local \
 WORKSPACE_ACCESS_TABLE_NAME=mukuroji-workspace-access-local \
 AUDIT_EVENTS_TABLE_NAME=mukuroji-audit-events \
 MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<same-64-character-lowercase-hex-key-as-api-writer> \
-bun server/scripts/backfill-audit-events.ts \
+bun server/scripts/backfills/backfill-audit-events.ts \
   --checkpoint /tmp/mukuroji-audit-backfill-v2.json \
   --limit 1000
 ```

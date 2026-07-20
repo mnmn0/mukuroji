@@ -1547,7 +1547,7 @@ export class CdkStack extends cdk.Stack {
     });
 
     const apiFunction = new lambdaNodejs.NodejsFunction(this, 'ListProjectTasksFunction', {
-      entry: path.join(__dirname, '../../server/src/index.ts'),
+      entry: path.join(__dirname, '../../server/src/handlers/api.handler.ts'),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
       depsLockFilePath: path.join(__dirname, '../../bun.lock'),
@@ -1970,7 +1970,7 @@ export class CdkStack extends cdk.Stack {
       {
         entry: path.join(
           __dirname,
-          '../../server/src/enterprise-scim-group-job-worker-handler.ts',
+          '../../server/src/handlers/enterprise-scim-group-job-worker-handler.ts',
         ),
         handler: 'handler',
         runtime: lambda.Runtime.NODEJS_22_X,
@@ -2100,7 +2100,7 @@ export class CdkStack extends cdk.Stack {
       {
         entry: path.join(
           __dirname,
-          '../../server/src/enterprise-identity-maintenance-handler.ts',
+          '../../server/src/handlers/enterprise-identity-maintenance-handler.ts',
         ),
         handler: 'handler',
         runtime: lambda.Runtime.NODEJS_22_X,
@@ -2182,7 +2182,7 @@ export class CdkStack extends cdk.Stack {
       this,
       'WorkItemImportFunction',
       {
-        entry: path.join(__dirname, '../../server/src/index.ts'),
+        entry: path.join(__dirname, '../../server/src/handlers/work-item-import.handler.ts'),
         handler: 'workItemImportHandler',
         runtime: lambda.Runtime.NODEJS_22_X,
         depsLockFilePath: path.join(__dirname, '../../bun.lock'),
@@ -2346,7 +2346,7 @@ export class CdkStack extends cdk.Stack {
     apiFunction.addEnvironment('AUTOMATION_INBOUND_WEBHOOK_BASE_URL', httpApi.apiEndpoint);
 
     const realtimeFunction = new lambdaNodejs.NodejsFunction(this, 'RealtimeHandlerFunction', {
-      entry: path.join(__dirname, '../../server/src/realtime-handler.ts'),
+      entry: path.join(__dirname, '../../server/src/handlers/realtime-handler.ts'),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
       depsLockFilePath: path.join(__dirname, '../../bun.lock'),
@@ -2423,7 +2423,7 @@ export class CdkStack extends cdk.Stack {
       this,
       'CollaborationProjectionFunction',
       {
-        entry: path.join(__dirname, '../../server/src/audit-projection-handler.ts'),
+        entry: path.join(__dirname, '../../server/src/handlers/audit-projection-handler.ts'),
         handler: 'handler',
         runtime: lambda.Runtime.NODEJS_22_X,
         depsLockFilePath: path.join(__dirname, '../../bun.lock'),
@@ -2554,7 +2554,7 @@ export class CdkStack extends cdk.Stack {
       this,
       'AutomationEventFunction',
       {
-        entry: path.join(__dirname, '../../server/src/automation-event-handler.ts'),
+        entry: path.join(__dirname, '../../server/src/handlers/automation-event-handler.ts'),
         handler: 'handler',
         runtime: lambda.Runtime.NODEJS_22_X,
         depsLockFilePath: path.join(__dirname, '../../bun.lock'),
@@ -2676,7 +2676,7 @@ export class CdkStack extends cdk.Stack {
       this,
       'AutomationScheduleFunction',
       {
-        entry: path.join(__dirname, '../../server/src/automation-schedule-handler.ts'),
+        entry: path.join(__dirname, '../../server/src/handlers/automation-schedule-handler.ts'),
         handler: 'handler',
         runtime: lambda.Runtime.NODEJS_22_X,
         depsLockFilePath: path.join(__dirname, '../../bun.lock'),
@@ -2812,7 +2812,7 @@ export class CdkStack extends cdk.Stack {
       {
         entry: path.join(
           __dirname,
-          '../../server/src/webhook-authorization-backfill-handler.ts',
+          '../../server/src/handlers/webhook-authorization-backfill-handler.ts',
         ),
         handler: 'handler',
         runtime: lambda.Runtime.NODEJS_22_X,
@@ -2856,7 +2856,7 @@ export class CdkStack extends cdk.Stack {
         {
           entry: path.join(
             __dirname,
-            '../../server/src/webhook-authorization-backfill-handler.ts',
+            '../../server/src/handlers/webhook-authorization-backfill-handler.ts',
           ),
           handler: 'isCompleteHandler',
           runtime: lambda.Runtime.NODEJS_22_X,
@@ -2931,7 +2931,7 @@ export class CdkStack extends cdk.Stack {
       this,
       'WebhookDeliveryFunction',
       {
-        entry: path.join(__dirname, '../../server/src/webhook-handler.ts'),
+        entry: path.join(__dirname, '../../server/src/handlers/webhook-handler.ts'),
         handler: 'deliveryHandler',
         runtime: lambda.Runtime.NODEJS_22_X,
         depsLockFilePath: path.join(__dirname, '../../bun.lock'),
@@ -3047,7 +3047,7 @@ export class CdkStack extends cdk.Stack {
       this,
       'ConnectorSyncFunction',
       {
-        entry: path.join(__dirname, '../../server/src/connector-handler.ts'),
+        entry: path.join(__dirname, '../../server/src/handlers/connector-handler.ts'),
         handler: 'queueHandler',
         runtime: lambda.Runtime.NODEJS_22_X,
         depsLockFilePath: path.join(__dirname, '../../bun.lock'),
@@ -3171,7 +3171,7 @@ export class CdkStack extends cdk.Stack {
       this,
       'ConnectorPollFunction',
       {
-        entry: path.join(__dirname, '../../server/src/connector-handler.ts'),
+        entry: path.join(__dirname, '../../server/src/handlers/connector-handler.ts'),
         handler: 'pollHandler',
         runtime: lambda.Runtime.NODEJS_22_X,
         depsLockFilePath: path.join(__dirname, '../../bun.lock'),
@@ -3272,7 +3272,7 @@ export class CdkStack extends cdk.Stack {
       this,
       'AnalyticsScheduleFunction',
       {
-        entry: path.join(__dirname, '../../server/src/analytics-schedule-handler.ts'),
+        entry: path.join(__dirname, '../../server/src/handlers/analytics-schedule-handler.ts'),
         handler: 'handler',
         runtime: lambda.Runtime.NODEJS_22_X,
         depsLockFilePath: path.join(__dirname, '../../bun.lock'),
@@ -3370,7 +3370,7 @@ export class CdkStack extends cdk.Stack {
       this,
       'NotificationScheduleFunction',
       {
-        entry: path.join(__dirname, '../../server/src/notification-schedule-handler.ts'),
+        entry: path.join(__dirname, '../../server/src/handlers/notification-schedule-handler.ts'),
         handler: 'handler',
         runtime: lambda.Runtime.NODEJS_22_X,
         depsLockFilePath: path.join(__dirname, '../../bun.lock'),
@@ -3428,7 +3428,7 @@ export class CdkStack extends cdk.Stack {
       this,
       'RequestEmailIngestionFunction',
       {
-        entry: path.join(__dirname, '../../server/src/request-intake-email-handler.ts'),
+        entry: path.join(__dirname, '../../server/src/handlers/request-intake-email-handler.ts'),
         handler: 'handler',
         runtime: lambda.Runtime.NODEJS_22_X,
         depsLockFilePath: path.join(__dirname, '../../bun.lock'),
