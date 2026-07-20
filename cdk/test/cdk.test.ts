@@ -3,6 +3,13 @@ import { Match, Template } from 'aws-cdk-lib/assertions';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { expect, test } from '@jest/globals';
 import { acknowledgeKnownNagFindings } from '../lib/acknowledge-nag-findings';
+import {
+  createCanonicalWorkItemTransactItems,
+  createProjectDirectoryTransactItems,
+  createWorkspaceAccessTransactItems,
+  createWorkspaceBootstrapTransactItems,
+  createWorkspaceDemoMemberTransactItems,
+} from '../lib/bootstrap-data';
 import { CdkStack } from '../lib/cdk-stack';
 
 /**
@@ -4458,4 +4465,108 @@ test('canonical Work Item seed writes complete schema data and preserves demo da
   expect(directoryPayload).not.toContain('user#demo@example.com');
   expect(canonicalWorkItemSeed?.Properties.Update).toBeUndefined();
   expect(projectDirectorySeed?.Properties.Update).toBeUndefined();
+});
+
+test('bootstrap payload builders preserve deterministic keys, conditions, and idempotency', () => {
+  const workspaceAccess = createWorkspaceAccessTransactItems(
+    'WorkspaceAccessTable',
+    'workspace-1',
+    'owner@example.com',
+  );
+  const workspaceMembers = createWorkspaceDemoMemberTransactItems(
+    'WorkspaceAccessTable',
+    'workspace-1',
+  );
+  const canonicalWorkItems = createCanonicalWorkItemTransactItems('WorkItemsTable', 'directory-1');
+  const directoryItems = createProjectDirectoryTransactItems('DirectoryTable', 'directory-1');
+  const workspaceBootstrap = createWorkspaceBootstrapTransactItems(
+    'DirectoryTable',
+    'directory-1',
+    'owner@example.com',
+    'owner',
+  );
+
+  expect(workspaceAccess).toHaveLength(2);
+  expect(workspaceAccess[0].Update.Key).toEqual({
+    workspaceId: { S: 'workspace-1' },
+    recordKey: { S: 'WORKSPACE' },
+  });
+  expect(workspaceAccess[1].Update.Key).toEqual({
+    workspaceId: { S: 'workspace-1' },
+    recordKey: { S: 'MEMBER#owner@example.com' },
+  });
+  expect(workspaceAccess.every(({ Update }) =>
+    Update.ConditionExpression?.includes('attribute_not_exists(workspaceId)') &&
+    Update.UpdateExpression.includes('if_not_exists') &&
+    Update.ExpressionAttributeValues?.[':createdAt']?.S === '2026-07-11T00:00:00.000Z' &&
+    Update.ExpressionAttributeValues?.[':updatedAt']?.S === '2026-07-11T00:00:00.000Z',
+  )).toBe(true);
+  expect(workspaceAccess).toEqual(createWorkspaceAccessTransactItems(
+    'WorkspaceAccessTable',
+    'workspace-1',
+    'owner@example.com',
+  ));
+
+  expect(workspaceMembers).toHaveLength(5);
+  expect(workspaceMembers.map(({ Update }) => Update.Key.recordKey)).toEqual([
+    { S: 'MEMBER#sato@example.com' },
+    { S: 'MEMBER#suzuki@example.com' },
+    { S: 'MEMBER#tanaka@example.com' },
+    { S: 'MEMBER#yamamoto@example.com' },
+    { S: 'MEMBER#viewer@example.com' },
+  ]);
+  expect(workspaceMembers.every(({ Update }) =>
+    Update.ConditionExpression?.includes('memberKey = :memberKey') &&
+    Update.UpdateExpression.includes('if_not_exists') &&
+    Update.ExpressionAttributeValues?.[':createdAt']?.S === '2026-07-11T00:00:00.000Z' &&
+    Update.ExpressionAttributeValues?.[':updatedAt']?.S === '2026-07-11T00:00:00.000Z',
+  )).toBe(true);
+  expect(workspaceMembers).toEqual(createWorkspaceDemoMemberTransactItems(
+    'WorkspaceAccessTable',
+    'workspace-1',
+  ));
+
+  expect(canonicalWorkItems).toHaveLength(10);
+  expect(canonicalWorkItems.every(({ Put }) =>
+    Put.ConditionExpression === 'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)' &&
+    Put.Item.directoryId.S === 'directory-1' &&
+    Put.Item.createdAt.S === '2026-06-01T00:00:00.000Z' &&
+    Put.Item.updatedAt.S === '2026-06-01T00:00:00.000Z',
+  )).toBe(true);
+  expect(canonicalWorkItems).toEqual(createCanonicalWorkItemTransactItems('WorkItemsTable', 'directory-1'));
+
+  expect(directoryItems).toHaveLength(9);
+  expect(directoryItems.every(({ Put }) =>
+    Put.ConditionExpression === 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)' &&
+    Put.Item.directoryId.S === 'directory-1',
+  )).toBe(true);
+  expect(directoryItems.filter(({ Put }) => Put.Item.entryType.S === 'project-member').every(({ Put }) => {
+    const item = Put.Item as Record<string, { S?: string }>;
+
+    return item.createdAt?.S === '2026-06-08T00:00:00.000Z' &&
+      item.updatedAt?.S === '2026-06-08T00:00:00.000Z';
+  })).toBe(true);
+  expect(directoryItems).toEqual(createProjectDirectoryTransactItems('DirectoryTable', 'directory-1'));
+
+  expect(workspaceBootstrap).toHaveLength(7);
+  expect(workspaceBootstrap.every(({ Update }) =>
+    Update.ConditionExpression?.includes('attribute_not_exists(directoryId)') &&
+    !('Item' in Update),
+  )).toBe(true);
+  expect(workspaceBootstrap.filter(({ Update }) => {
+    const values = Update.ExpressionAttributeValues as Record<string, { S?: string }>;
+
+    return values[':timestamp'] !== undefined;
+  }).every(({ Update }) => {
+    const values = Update.ExpressionAttributeValues as Record<string, { S?: string }>;
+
+    return Update.UpdateExpression.includes('if_not_exists') &&
+      values[':timestamp']?.S === '2026-07-11T00:00:00.000Z';
+  })).toBe(true);
+  expect(workspaceBootstrap).toEqual(createWorkspaceBootstrapTransactItems(
+    'DirectoryTable',
+    'directory-1',
+    'owner@example.com',
+    'owner',
+  ));
 });

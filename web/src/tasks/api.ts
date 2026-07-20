@@ -20,6 +20,32 @@ export type TaskPriority = WorkItemPriority
  */
 export type ProjectTask = CanonicalWorkItem
 
+/**
+ * Canonical Work Item の workflow status を旧タスク画面の表示 status へ変換します。
+ *
+ * 分割済みの互換画面は固定 status を前提にしているため、既知の status ID を優先し、
+ * 未知の ID は標準 category から表示上の status を決定します。
+ */
+export function resolveProjectTaskStatus(task: ProjectTask): TaskStatus {
+  const normalizedStatusId = task.workflowStatusId.trim().toLowerCase()
+
+  if (isTaskStatus(normalizedStatusId)) {
+    return normalizedStatusId
+  }
+
+  switch (task.statusCategory) {
+    case 'completed':
+    case 'canceled':
+      return 'done'
+    case 'started':
+      return 'in-progress'
+    case 'backlog':
+    case 'unstarted':
+    default:
+      return 'todo'
+  }
+}
+
 /** Issue #20 の read-only adapter が返す legacy project task です。 */
 export type LegacyProjectTask = {
   /** 旧 Project task table を保存元とすることを表します。 */
