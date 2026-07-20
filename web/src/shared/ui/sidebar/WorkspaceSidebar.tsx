@@ -94,7 +94,9 @@ function createMobileSidebarProps(
     },
     onSelectNav: wrapSelection(sidebarProps.onSelectNav),
     onSelectTeamView: wrapSelection(sidebarProps.onSelectTeamView),
-    onSelectTeam: wrapSelection(sidebarProps.onSelectTeam),
+    onSelectTeam: sidebarProps.onSelectTeam
+      ? wrapSelection(sidebarProps.onSelectTeam)
+      : undefined,
     onSelectProject: wrapSelection(sidebarProps.onSelectProject),
   }
 }
