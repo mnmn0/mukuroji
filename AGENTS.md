@@ -17,8 +17,11 @@
 
 - `web/`: React + TypeScript + Vite のフロントエンド。
 - `server/`: Hono + Bun のサーバー。
+- `contracts/`: Web / Server 間で共有する副作用のない TypeScript contract。
 - `cdk/`: AWS CDK TypeScript プロジェクト。
 - `docs/`: ドキュメント置き場。
+- `scripts/`: ローカル環境の準備、seed、確認用スクリプト。
+- `floci/`: ローカル AWS 互換環境の初期化と backend deploy 補助。
 
 このリポジトリは Bun workspaces です。依存管理はルートで行い、lockfile はルートの `bun.lock` に集約します。各パッケージ配下に `bun.lock` を追加しないでください。
 
@@ -48,6 +51,7 @@ bun run oxc:lint:github
 ```sh
 bun run web:dev
 bun run web:lint
+bun run web:test
 bun run web:build
 bun run web:storybook
 bun run web:build-storybook
@@ -60,7 +64,7 @@ bun run web:build-storybook
 - Storybook のカテゴリは `Application/...` と `Design System/...` を基本にする。
 - コンポーネントは Storybook で単体確認できるように Story を追加・更新する。
 - 表示文言は i18n 対応を前提にし、固定文言をコンポーネントに閉じ込めない。
-- 既存の `web/src/i18n.ts` と `createTranslator` / `createSidebarLabels` の方針に合わせる。
+- 既存の `web/src/i18n` と `createTranslator` / `createSidebarLabels` の方針に合わせる。
 - ブランド表現には `BrandMark` と `mukuroji` 表記を使う。
 
 確認:
@@ -71,15 +75,15 @@ bun run web:build-storybook
 
 ## Server
 
-`server/` は Hono + Bun です。
+`server/` は Hono + Bun です。詳細な責務境界と検証方法は `server/AGENTS.md` に従ってください。
 
 主なコマンド:
 
 ```sh
 bun run server:dev
+bun run server:test
+bun run server:build:lambda
 ```
-
-サーバー側はまだ小さいため、追加する際はルートの責務、入力検証、レスポンス形式を明確にしてください。
 
 ## CDK
 
@@ -99,9 +103,9 @@ bun run cdk:synth
 
 作業内容に応じて必要な検証を実行し、結果をユーザーに伝えてください。
 
-- `web` の UI/Storybook 変更: `bun run web:lint`, `bun run web:build`, `bun run web:build-storybook`
+- `web` の UI/Storybook 変更: `bun run web:test`, `bun run web:lint`, `bun run web:build`, `bun run web:build-storybook`
 - CI / oxlint 設定の変更: `bun run oxc:lint`
 - `cdk` の変更: `bun run cdk:build`, `bun run cdk:test`
-- `server` の変更: 利用可能なスクリプトと変更内容に応じて確認
+- `server` の変更: `bun run server:test`, `bun run server:build:lambda`
 
 コミット前レビューで指摘が出た場合は、対応してから再度必要な検証を行ってください。
