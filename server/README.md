@@ -2,6 +2,20 @@
 
 Hono で実装した API を、Bun development server と Node.js 22 Lambda の同じ app / route 契約で実行します。コマンドは repository root から実行してください。
 
+## Source layout
+
+- `src/app/`: Hono app の組み立て、middleware、route inventory、共通 error mapping
+- `src/modules/<domain>/`: domain ごとの application port、use case、inbound/outbound adapter
+- `src/infrastructure/`: 業務知識を持たない runtime config と AWS transport type
+- `src/handlers/`: CDK と package script が参照する薄い Lambda entrypoint
+- `scripts/backfills/`: HTTP route を経由しない再実行可能な backfill
+
+`src/index.ts` は互換用の公開 re-export だけを持ちます。Bun と Lambda は
+`src/handlers/` を entrypoint とし、`createApp(dependencies)` へ instance ごとの依存を渡します。
+環境変数の共通 default と production validation は
+`src/infrastructure/config/server-config.ts` が所有します。各 module の外部公開面は
+`src/modules/<domain>/index.ts` に集約し、module 内部では具体的な sibling file を参照します。
+
 ## Local development
 
 初回起動前に `openssl rand -hex 32` を3回実行し、それぞれ独立した64桁小文字hex出力を
