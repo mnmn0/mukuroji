@@ -11,6 +11,8 @@
 - 変更は目的に対して小さく保ち、無関係な整形やリファクタリングを混ぜない。
 - TypeScript の exported 宣言には TSDoc を付ける。export 有無にかかわらず type / interface は宣言本体と各プロパティ、class は宣言本体とメンバー変数に TSDoc を付ける。
 - Add English TSDoc to functions and methods by default, including non-exported helpers introduced by a change. Exported declarations must describe their purpose and document parameters and return values when applicable; keep type, interface, and class member documentation complete.
+- Avoid TypeScript `as` assertions by default because they can hide invalid data at type boundaries; prefer runtime validation, type guards, or explicit construction of typed values.
+- Avoid `any` by default. Use `unknown` with narrowing or a specific type, and document a narrowly scoped exception when `any` is unavoidable.
 - コミット前にはサブエージェントレビューを受ける。
 - コミットは意味のある粒度に分ける。
 - 実装・修正作業を開始する前に、最新の `origin/main` をマージする。
