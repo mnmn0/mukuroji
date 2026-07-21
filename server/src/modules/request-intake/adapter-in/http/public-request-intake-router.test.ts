@@ -49,6 +49,12 @@ const replyReceipt = {
   replyId: 'reply-1',
 } as unknown as RequestRequesterReplyReceipt
 
+/**
+ * Builds a public Request Intake router with deterministic fake dependencies.
+ *
+ * @param overrides Optional dependency overrides for an individual test.
+ * @returns The router and a record of calls made by the fake dependencies.
+ */
 function createDependencies(
   overrides: Partial<PublicRequestIntakeRouterDependencies> = {},
 ) {

@@ -13,21 +13,26 @@ import {
   type RequestLinkResolution,
 } from '../../request-intake'
 
-/** Public Request Intake HTTP adapter に注入する境界です。 */
+/** Dependencies required by the public Request Intake HTTP adapter. */
 export type PublicRequestIntakeRouterDependencies = {
-  /** Request Intake application client です。 */
+  /** Request Intake application client. */
   requestIntake: RequestIntakeClient
-  /** Link の access mode と current Workspace を検証します。 */
+  /** Validates the link access mode and current Workspace. */
   authorizeRequestLink(context: Context, resolution: RequestLinkResolution): Promise<void>
-  /** Rate limit と idempotency に使う trusted request context を作成します。 */
+  /** Creates trusted request context for rate limiting and idempotency. */
   createExternalContext(context: Context): RequestExternalContext
-  /** Public boundary の error を既存 HTTP response へ変換します。 */
+  /** Maps public-boundary errors to the existing HTTP response contract. */
   mapError(context: Context, error: unknown): Response
-  /** Request JSON を安全に parse し、失敗時は undefined を返します。 */
+  /** Safely parses request JSON and returns undefined when parsing fails. */
   readJson(request: { json: () => Promise<unknown> }): Promise<unknown>
 }
 
-/** Public Request Form と requester thread の HTTP routes を作成します。 */
+/**
+ * Creates Hono routes for public Request Forms and requester threads.
+ *
+ * @param dependencies Application and transport callbacks required by the routes.
+ * @returns A Hono router containing the public Request Intake endpoints.
+ */
 export function createPublicRequestIntakeRouter(
   dependencies: PublicRequestIntakeRouterDependencies,
 ) {
@@ -100,6 +105,7 @@ export function createPublicRequestIntakeRouter(
   return router
 }
 
+/** Validates and normalizes a direct attachment upload request body. */
 function parseRequestAttachmentUploadInput(value: unknown): RequestAttachmentUploadInput {
   const body = requireRequestRecord(value, 'Request attachment upload')
   return {
@@ -111,6 +117,7 @@ function parseRequestAttachmentUploadInput(value: unknown): RequestAttachmentUpl
   }
 }
 
+/** Validates and normalizes a public Request Form submission body. */
 function parseSubmitRequestInput(value: unknown): SubmitRequestInput {
   const body = requireRequestRecord(value, 'Request submission')
   const attachmentClaims = body.attachmentClaims === undefined
@@ -133,6 +140,7 @@ function parseSubmitRequestInput(value: unknown): SubmitRequestInput {
   }
 }
 
+/** Validates and normalizes a requester thread reply body. */
 function parseRequestRequesterReplyInput(value: unknown): RequestRequesterReplyInput {
   const body = requireRequestRecord(value, 'Requester reply')
   return {
@@ -140,6 +148,7 @@ function parseRequestRequesterReplyInput(value: unknown): RequestRequesterReplyI
   }
 }
 
+/** Validates the typed answer map submitted for a Request Form. */
 function parseRequestAnswers(value: unknown): Record<string, RequestAnswerValue> {
   const answers = requireRequestRecord(value, 'Request answers')
   return Object.fromEntries(Object.entries(answers).map(([fieldId, answer]) => [
@@ -148,6 +157,7 @@ function parseRequestAnswers(value: unknown): Record<string, RequestAnswerValue>
   ]))
 }
 
+/** Validates one Request Form answer value. */
 function parseRequestAnswerValue(value: unknown, fieldId: string): RequestAnswerValue {
   if (typeof value === 'string' || typeof value === 'boolean') return value
   if (typeof value === 'number' && Number.isFinite(value)) return value
@@ -157,6 +167,7 @@ function parseRequestAnswerValue(value: unknown, fieldId: string): RequestAnswer
   throw invalidRequestInput(`Request answer "${fieldId}" is invalid.`)
 }
 
+/** Requires a JSON object and reports a stable Request Intake input error otherwise. */
 function requireRequestRecord(value: unknown, label: string): Record<string, unknown> {
   if (!isRequestRecord(value)) {
     throw invalidRequestInput(`${label} must be an object.`)
@@ -164,10 +175,12 @@ function requireRequestRecord(value: unknown, label: string): Record<string, unk
   return value
 }
 
+/** Returns whether a value is a non-array JSON object. */
 function isRequestRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/** Validates a string-valued JSON object such as attachment claims. */
 function requireRequestStringRecord(value: unknown, label: string): Record<string, string> {
   const record = requireRequestRecord(value, label)
   return Object.fromEntries(Object.entries(record).map(([key, entry]) => [
@@ -176,6 +189,7 @@ function requireRequestStringRecord(value: unknown, label: string): Record<strin
   ]))
 }
 
+/** Requires a non-empty bounded string and trims surrounding whitespace. */
 function requireRequestText(value: unknown, label: string, maxLength: number): string {
   if (typeof value !== 'string' || !value.trim() || value.trim().length > maxLength) {
     throw invalidRequestInput(`${label} is invalid.`)
@@ -183,6 +197,7 @@ function requireRequestText(value: unknown, label: string, maxLength: number): s
   return value.trim()
 }
 
+/** Requires a bounded string while allowing an empty value. */
 function requireOptionalRequestText(value: unknown, label: string, maxLength: number): string {
   if (typeof value !== 'string' || value.trim().length > maxLength) {
     throw invalidRequestInput(`${label} is invalid.`)
@@ -190,6 +205,7 @@ function requireOptionalRequestText(value: unknown, label: string, maxLength: nu
   return value.trim()
 }
 
+/** Requires a non-negative safe integer. */
 function requireRequestInteger(value: unknown, label: string): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
     throw invalidRequestInput(`${label} is invalid.`)
@@ -197,20 +213,24 @@ function requireRequestInteger(value: unknown, label: string): number {
   return value
 }
 
+/** Requires a boolean value. */
 function requireRequestBoolean(value: unknown, label: string): boolean {
   if (typeof value !== 'boolean') throw invalidRequestInput(`${label} must be boolean.`)
   return value
 }
 
+/** Requires a supported Request Form locale. */
 function requireRequestLocale(value: unknown): RequestLocale {
   if (value === 'ja' || value === 'en') return value
   throw invalidRequestInput('Request locale is invalid.')
 }
 
+/** Creates the stable error used for malformed public Request Intake input. */
 function invalidRequestInput(message: string): RequestIntakeError {
   return new RequestIntakeError(400, 'InvalidRequestIntakeInput', message)
 }
 
+/** Resolves and authorizes the capability link used by public form routes. */
 async function resolveAuthorizedLink(
   context: Context,
   dependencies: PublicRequestIntakeRouterDependencies,
