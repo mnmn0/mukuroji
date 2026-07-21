@@ -123,12 +123,22 @@ describe('public request intake router', () => {
     const uploadResponse = await router.request('/api/request-intake/token/uploads', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fieldId: 'attachment', fileName: 'report.pdf' }),
+      body: JSON.stringify({
+        sessionToken: 'session-token',
+        fieldId: 'attachment',
+        fileName: 'report.pdf',
+        contentType: 'application/pdf',
+        sizeBytes: 42,
+      }),
     })
     const submissionResponse = await router.request('/api/request-intake/token/submissions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ answers: { summary: 'hello' } }),
+      body: JSON.stringify({
+        sessionToken: 'session-token',
+        locale: 'ja',
+        answers: { summary: 'hello' },
+      }),
     })
 
     expect(uploadResponse.status).toBe(201)
@@ -138,11 +148,21 @@ describe('public request intake router', () => {
     expect(calls.filter(({ operation }) => operation === 'authorizeRequestLink')).toHaveLength(2)
     expect(calls.find(({ operation }) => operation === 'createAttachmentUpload')?.value).toMatchObject({
       context: externalContext,
-      input: { fieldId: 'attachment', fileName: 'report.pdf' },
+      input: {
+        sessionToken: 'session-token',
+        fieldId: 'attachment',
+        fileName: 'report.pdf',
+        contentType: 'application/pdf',
+        sizeBytes: 42,
+      },
     })
     expect(calls.find(({ operation }) => operation === 'submit')?.value).toMatchObject({
       context: externalContext,
-      input: { answers: { summary: 'hello' } },
+      input: {
+        sessionToken: 'session-token',
+        locale: 'ja',
+        answers: { summary: 'hello' },
+      },
     })
   })
 
@@ -152,7 +172,7 @@ describe('public request intake router', () => {
     const replyResponse = await router.request('/api/request-threads/thread-token/replies', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: 'More details' }),
+      body: JSON.stringify({ body: 'More details' }),
     })
 
     expect(threadResponse.status).toBe(200)
@@ -162,6 +182,47 @@ describe('public request intake router', () => {
     expect(calls.map(({ operation }) => operation)).toEqual([
       'getRequesterThread',
       'replyToThread',
+    ])
+    expect(calls.find(({ operation }) => operation === 'replyToThread')?.value).toMatchObject({
+      input: { body: 'More details' },
+    })
+  })
+
+  test('rejects malformed mutation bodies before invoking request intake operations', async () => {
+    const { calls, router } = createDependencies({
+      mapError: (context, error) => {
+        expect(error).toMatchObject({
+          code: 'InvalidRequestIntakeInput',
+          status: 400,
+        })
+        return context.json({ code: 'InvalidRequestIntakeInput' }, 400)
+      },
+    })
+
+    const uploadResponse = await router.request('/api/request-intake/token/uploads', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fieldId: 'attachment', fileName: 'report.pdf' }),
+    })
+    const submissionResponse = await router.request('/api/request-intake/token/submissions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ answers: { summary: 'hello' } }),
+    })
+    const replyResponse = await router.request('/api/request-threads/thread-token/replies', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: 'More details' }),
+    })
+
+    expect(uploadResponse.status).toBe(400)
+    expect(submissionResponse.status).toBe(400)
+    expect(replyResponse.status).toBe(400)
+    expect(calls.map(({ operation }) => operation)).toEqual([
+      'resolveLink',
+      'authorizeRequestLink',
+      'resolveLink',
+      'authorizeRequestLink',
     ])
   })
 

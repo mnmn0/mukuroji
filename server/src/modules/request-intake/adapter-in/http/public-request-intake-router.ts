@@ -1,13 +1,16 @@
 import { Hono, type Context } from 'hono'
 import type {
   RequestAttachmentUploadInput,
+  RequestAnswerValue,
   RequestRequesterReplyInput,
+  RequestLocale,
   SubmitRequestInput,
 } from '@mukuroji/contracts'
-import type {
-  RequestExternalContext,
-  RequestIntakeClient,
-  RequestLinkResolution,
+import {
+  RequestIntakeError,
+  type RequestExternalContext,
+  type RequestIntakeClient,
+  type RequestLinkResolution,
 } from '../../request-intake'
 
 /** Public Request Intake HTTP adapter に注入する境界です。 */
@@ -45,12 +48,10 @@ export function createPublicRequestIntakeRouter(
   router.post('/api/request-intake/:token/uploads', async (context) => {
     try {
       const resolution = await resolveAuthorizedLink(context, dependencies)
-      const body = await dependencies.readJson(context.req) as
-        | RequestAttachmentUploadInput
-        | undefined
+      const body = parseRequestAttachmentUploadInput(await dependencies.readJson(context.req))
       return context.json(await dependencies.requestIntake.createAttachmentUpload(
         resolution,
-        body ?? {} as RequestAttachmentUploadInput,
+        body,
         dependencies.createExternalContext(context),
       ), 201)
     } catch (error) {
@@ -61,10 +62,10 @@ export function createPublicRequestIntakeRouter(
   router.post('/api/request-intake/:token/submissions', async (context) => {
     try {
       const resolution = await resolveAuthorizedLink(context, dependencies)
-      const body = await dependencies.readJson(context.req) as SubmitRequestInput | undefined
+      const body = parseSubmitRequestInput(await dependencies.readJson(context.req))
       return context.json(await dependencies.requestIntake.submit(
         resolution,
-        body ?? {} as SubmitRequestInput,
+        body,
         dependencies.createExternalContext(context),
       ), 201)
     } catch (error) {
@@ -85,12 +86,10 @@ export function createPublicRequestIntakeRouter(
 
   router.post('/api/request-threads/:threadToken/replies', async (context) => {
     try {
-      const body = await dependencies.readJson(context.req) as
-        | RequestRequesterReplyInput
-        | undefined
+      const body = parseRequestRequesterReplyInput(await dependencies.readJson(context.req))
       return context.json(await dependencies.requestIntake.replyToThread(
         context.req.param('threadToken'),
-        body ?? {} as RequestRequesterReplyInput,
+        body,
         dependencies.createExternalContext(context),
       ), 201)
     } catch (error) {
@@ -99,6 +98,117 @@ export function createPublicRequestIntakeRouter(
   })
 
   return router
+}
+
+function parseRequestAttachmentUploadInput(value: unknown): RequestAttachmentUploadInput {
+  const body = requireRequestRecord(value, 'Request attachment upload')
+  return {
+    sessionToken: requireRequestText(body.sessionToken, 'Submission session token', 256),
+    fieldId: requireRequestText(body.fieldId, 'Attachment field ID', 160),
+    fileName: requireRequestText(body.fileName, 'Attachment file name', 255),
+    contentType: requireRequestText(body.contentType, 'Attachment content type', 200),
+    sizeBytes: requireRequestInteger(body.sizeBytes, 'Attachment size'),
+  }
+}
+
+function parseSubmitRequestInput(value: unknown): SubmitRequestInput {
+  const body = requireRequestRecord(value, 'Request submission')
+  const attachmentClaims = body.attachmentClaims === undefined
+    ? undefined
+    : requireRequestStringRecord(body.attachmentClaims, 'Attachment claims')
+  const consentAccepted = body.consentAccepted === undefined
+    ? undefined
+    : requireRequestBoolean(body.consentAccepted, 'Consent state')
+  const honeypot = body.honeypot === undefined
+    ? undefined
+    : requireOptionalRequestText(body.honeypot, 'Honeypot', 20_000)
+
+  return {
+    sessionToken: requireRequestText(body.sessionToken, 'Submission session token', 256),
+    locale: requireRequestLocale(body.locale),
+    answers: parseRequestAnswers(body.answers),
+    ...(attachmentClaims === undefined ? {} : { attachmentClaims }),
+    ...(consentAccepted === undefined ? {} : { consentAccepted }),
+    ...(honeypot === undefined ? {} : { honeypot }),
+  }
+}
+
+function parseRequestRequesterReplyInput(value: unknown): RequestRequesterReplyInput {
+  const body = requireRequestRecord(value, 'Requester reply')
+  return {
+    body: requireRequestText(body.body, 'Requester reply body', 20_000),
+  }
+}
+
+function parseRequestAnswers(value: unknown): Record<string, RequestAnswerValue> {
+  const answers = requireRequestRecord(value, 'Request answers')
+  return Object.fromEntries(Object.entries(answers).map(([fieldId, answer]) => [
+    fieldId,
+    parseRequestAnswerValue(answer, fieldId),
+  ]))
+}
+
+function parseRequestAnswerValue(value: unknown, fieldId: string): RequestAnswerValue {
+  if (typeof value === 'string' || typeof value === 'boolean') return value
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (Array.isArray(value) && value.every((entry): entry is string => typeof entry === 'string')) {
+    return value
+  }
+  throw invalidRequestInput(`Request answer "${fieldId}" is invalid.`)
+}
+
+function requireRequestRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!isRequestRecord(value)) {
+    throw invalidRequestInput(`${label} must be an object.`)
+  }
+  return value
+}
+
+function isRequestRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function requireRequestStringRecord(value: unknown, label: string): Record<string, string> {
+  const record = requireRequestRecord(value, label)
+  return Object.fromEntries(Object.entries(record).map(([key, entry]) => [
+    key,
+    requireRequestText(entry, `${label} value`, 256),
+  ]))
+}
+
+function requireRequestText(value: unknown, label: string, maxLength: number): string {
+  if (typeof value !== 'string' || !value.trim() || value.trim().length > maxLength) {
+    throw invalidRequestInput(`${label} is invalid.`)
+  }
+  return value.trim()
+}
+
+function requireOptionalRequestText(value: unknown, label: string, maxLength: number): string {
+  if (typeof value !== 'string' || value.trim().length > maxLength) {
+    throw invalidRequestInput(`${label} is invalid.`)
+  }
+  return value.trim()
+}
+
+function requireRequestInteger(value: unknown, label: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw invalidRequestInput(`${label} is invalid.`)
+  }
+  return value
+}
+
+function requireRequestBoolean(value: unknown, label: string): boolean {
+  if (typeof value !== 'boolean') throw invalidRequestInput(`${label} must be boolean.`)
+  return value
+}
+
+function requireRequestLocale(value: unknown): RequestLocale {
+  if (value === 'ja' || value === 'en') return value
+  throw invalidRequestInput('Request locale is invalid.')
+}
+
+function invalidRequestInput(message: string): RequestIntakeError {
+  return new RequestIntakeError(400, 'InvalidRequestIntakeInput', message)
 }
 
 async function resolveAuthorizedLink(
