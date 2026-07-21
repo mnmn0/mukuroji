@@ -2,66 +2,70 @@ import { Hono, type Context } from 'hono'
 import type { WorkItemConfiguration } from '@mukuroji/contracts'
 import type { WorkItemConfigurationClient } from '../../work-item-configuration'
 
-/** Work Item configuration adapter が必要とする principal の最小境界です。 */
+/** The minimum principal boundary required by the Work Item configuration adapter. */
 export type WorkItemConfigurationPrincipal = {
-  /** 認証・認可済み Workspace の directory ID です。 */
+  /** The directory ID of the authenticated and authorized Workspace. */
   directoryId: string
 }
 
-/** Work Item configuration の scope を検証する入力です。 */
+/** The scope that a Work Item configuration is expected to serve. */
 export type WorkItemConfigurationScope = {
-  /** configuration が適用される scope 種別です。 */
+  /** The type of scope where the configuration is applied. */
   scopeType: 'workspace' | 'team'
-  /** configuration が適用される Workspace または Team ID です。 */
+  /** The Workspace or Team ID where the configuration is applied. */
   scopeId: string
 }
 
-/** Work Item configuration HTTP adapter に注入する境界です。 */
+/** Dependencies injected into the Work Item configuration HTTP adapter. */
 export type WorkItemConfigurationRouterDependencies<
   TPrincipal extends WorkItemConfigurationPrincipal = WorkItemConfigurationPrincipal,
 > = {
-  /** Workspace または Team configuration の application client です。 */
+  /** The application client for Workspace and Team configurations. */
   workItemConfigurations: WorkItemConfigurationClient
-  /** Bearer access token を request から取得します。 */
+  /** Reads the bearer access token from a request context. */
   readBearerAccessToken(context: Context): string | undefined
-  /** access token を検証し current Workspace principal を返します。 */
+  /** Verifies an access token and returns the current Workspace principal. */
   authenticate(accessToken: string, context: Context): Promise<TPrincipal>
-  /** Workspace configuration を変更できる権限を要求します。 */
+  /** Requires permission to change the Workspace configuration. */
   requireWorkspaceAdministration(principal: TPrincipal): void
-  /** Team configuration を変更できる Workspace write 権限を要求します。 */
+  /** Requires Workspace business-write permission for a Team configuration change. */
   requireWorkspaceBusinessWrite(principal: TPrincipal): void
-  /** Team scope の read/write 権限を要求します。 */
+  /** Requires read or write permission for a Team scope. */
   requireTeamPermission(
     principal: TPrincipal,
     teamId: string,
     minimum: 'viewer' | 'manager',
   ): Promise<void>
-  /** Team configuration の管理権限を要求します。 */
+  /** Requires administration permission for a Team configuration. */
   requireTeamConfigurationAdministration(principal: TPrincipal, teamId: string): Promise<void>
-  /** Request JSON を安全に parse します。 */
+  /** Safely parses request JSON. */
   readJson(request: { json: () => Promise<unknown> }): Promise<unknown>
-  /** Scope を上書きし、configuration を厳格に検証します。 */
+  /** Validates a configuration against the expected scope. */
   validateConfiguration(value: unknown, expectedScope: WorkItemConfigurationScope): WorkItemConfiguration
-  /** 参照される Project、Team、person field を検証します。 */
+  /** Validates referenced Projects, Teams, and person fields. */
   validateReferences(
     workspaceId: string,
     configuration: WorkItemConfiguration,
     teamId?: string,
   ): Promise<void>
-  /** 既存 Work Item に対する configuration の互換性を検証します。 */
+  /** Validates compatibility with existing Work Items. */
   validateUsage(
     workspaceId: string,
     configuration: WorkItemConfiguration,
     teamId?: string,
   ): Promise<void>
-  /** Work Item configuration error を HTTP response に変換します。 */
+  /** Converts a Work Item configuration error into an HTTP response. */
   mapError(context: Context, error: unknown): Response
 }
 
-/** Workspace と Team の Work Item configuration routes を作成します。 */
+/** Creates Workspace and Team Work Item configuration routes.
+ *
+ * @param dependencies The application services and authorization functions used by the routes.
+ * @returns A Hono router containing the Work Item configuration routes.
+ */
 export function createWorkItemConfigurationRouter<
   TPrincipal extends WorkItemConfigurationPrincipal,
->(dependencies: WorkItemConfigurationRouterDependencies<TPrincipal>) {
+>(dependencies: WorkItemConfigurationRouterDependencies<TPrincipal>): Hono {
   const router = new Hono()
 
   router.get('/api/work-item-configuration', async (context) => {
@@ -90,7 +94,10 @@ export function createWorkItemConfigurationRouter<
       const principal = await dependencies.authenticate(accessToken, context)
       dependencies.requireWorkspaceAdministration(principal)
       const body = await dependencies.readJson(context.req)
-      const expectedScope = { scopeType: 'workspace' as const, scopeId: principal.directoryId }
+      const expectedScope: WorkItemConfigurationScope = {
+        scopeType: 'workspace',
+        scopeId: principal.directoryId,
+      }
       const configuration = dependencies.validateConfiguration(
         withConfigurationScope(body, expectedScope),
         expectedScope,
@@ -145,7 +152,10 @@ export function createWorkItemConfigurationRouter<
       dependencies.requireWorkspaceBusinessWrite(principal)
       await dependencies.requireTeamConfigurationAdministration(principal, teamId)
       const body = await dependencies.readJson(context.req)
-      const expectedScope = { scopeType: 'team' as const, scopeId: teamId }
+      const expectedScope: WorkItemConfigurationScope = {
+        scopeType: 'team',
+        scopeId: teamId,
+      }
       const configuration = dependencies.validateConfiguration(
         withConfigurationScope(body, expectedScope),
         expectedScope,
@@ -167,14 +177,25 @@ export function createWorkItemConfigurationRouter<
   return router
 }
 
+/** Replaces client-supplied scope fields with the scope selected by the request path.
+ *
+ * @param value The untrusted request body.
+ * @param scope The scope required by the request path.
+ * @returns A record normalized to the request path scope.
+ */
 function withConfigurationScope(
   value: unknown,
   scope: WorkItemConfigurationScope,
-) {
+): Record<string, unknown> {
   const source = isRecord(value) ? value : {}
   return { ...source, ...scope }
 }
 
+/** Determines whether an unknown value is a non-array object record.
+ *
+ * @param value The value to inspect.
+ * @returns Whether the value can be safely treated as a string-keyed record.
+ */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

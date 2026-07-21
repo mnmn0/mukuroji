@@ -4,23 +4,44 @@ import type {
   WorkItemConfiguration,
 } from '@mukuroji/contracts'
 import {
+  DEFAULT_WORK_ITEM_CONFIGURATION,
+  validateWorkItemConfiguration,
+  type WorkItemConfigurationClient,
+} from '../../work-item-configuration'
+import {
   createWorkItemConfigurationRouter,
   type WorkItemConfigurationRouterDependencies,
 } from './work-item-configuration-router'
-import type { WorkItemConfigurationClient } from '../../work-item-configuration'
 
 const principal = { directoryId: 'workspace-1' }
 
-const configuration = {
-  scopeType: 'workspace',
-  scopeId: 'workspace-1',
+const workspaceConfiguration: WorkItemConfiguration = {
+  ...structuredClone(DEFAULT_WORK_ITEM_CONFIGURATION),
+  scopeId: principal.directoryId,
   revision: 3,
-} as unknown as WorkItemConfiguration
+}
 
-const resolvedConfiguration = {
-  configuration,
-} as unknown as ResolvedWorkItemConfiguration
+const teamConfiguration: WorkItemConfiguration = {
+  ...structuredClone(DEFAULT_WORK_ITEM_CONFIGURATION),
+  scopeType: 'team',
+  scopeId: 'team-1',
+  revision: 3,
+}
 
+const resolvedConfiguration: ResolvedWorkItemConfiguration = {
+  configuration: workspaceConfiguration,
+}
+
+/** Represents an unused client operation in this router-focused test fixture. */
+const unsupportedOperation = async () => {
+  throw new Error('This client operation is outside the router test scope.')
+}
+
+/** Builds router dependencies and records the operations invoked by each request.
+ *
+ * @param overrides Dependency overrides for an individual test.
+ * @returns The recorded calls and configured test router.
+ */
 function createDependencies(
   overrides: Partial<WorkItemConfigurationRouterDependencies<typeof principal>> = {},
 ) {
@@ -53,7 +74,10 @@ function createDependencies(
       await usageCheck()
       return resolvedConfiguration
     },
-  } as unknown as WorkItemConfigurationClient
+    listRelations: unsupportedOperation,
+    createRelation: unsupportedOperation,
+    deleteRelation: unsupportedOperation,
+  } satisfies WorkItemConfigurationClient
   const dependencies: WorkItemConfigurationRouterDependencies<typeof principal> = {
     workItemConfigurations: requestClient,
     readBearerAccessToken: (context) =>
@@ -77,7 +101,7 @@ function createDependencies(
     readJson: async (request) => await request.json(),
     validateConfiguration(value, expectedScope) {
       calls.push({ operation: 'validateConfiguration', value: { value, expectedScope } })
-      return value as WorkItemConfiguration
+      return validateWorkItemConfiguration(value, expectedScope)
     },
     async validateReferences(workspaceId, value, teamId) {
       calls.push({ operation: 'validateReferences', value: { workspaceId, value, teamId } })
@@ -104,7 +128,7 @@ describe('work item configuration router', () => {
         Authorization: 'Bearer workspace-token',
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ revision: 3 }),
+      body: JSON.stringify(workspaceConfiguration),
     })
 
     expect(readResponse.status).toBe(200)
@@ -136,7 +160,7 @@ describe('work item configuration router', () => {
         Authorization: 'Bearer workspace-token',
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ revision: 3 }),
+      body: JSON.stringify(teamConfiguration),
     })
 
     expect(readResponse.status).toBe(200)
@@ -153,6 +177,50 @@ describe('work item configuration router', () => {
       .toMatchObject({ workspaceId: 'workspace-1', teamId: 'team-1', value: { scopeType: 'team', scopeId: 'team-1' } })
     expect(calls.find(({ operation }) => operation === 'validateReferences')?.value)
       .toMatchObject({ workspaceId: 'workspace-1', teamId: 'team-1' })
+    expect(calls.find(({ operation }) => operation === 'validateUsage')?.value)
+      .toMatchObject({ workspaceId: 'workspace-1', teamId: 'team-1' })
+    expect(calls.map(({ operation }) => operation)).toEqual([
+      'authenticate',
+      'requireTeamPermission',
+      'getTeamConfiguration',
+      'authenticate',
+      'requireWorkspaceBusinessWrite',
+      'requireTeamConfigurationAdministration',
+      'validateConfiguration',
+      'saveTeamConfiguration',
+      'validateReferences',
+      'validateUsage',
+    ])
+  })
+
+  test('normalizes the configuration scope to the request path', async () => {
+    const { calls, router } = createDependencies()
+    const response = await router.request('/api/work-item-configuration', {
+      method: 'PUT',
+      headers: {
+        Authorization: 'Bearer workspace-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ...teamConfiguration,
+        scopeId: 'other-workspace',
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    expect(calls.find(({ operation }) => operation === 'validateConfiguration')?.value)
+      .toMatchObject({
+        value: { scopeType: 'workspace', scopeId: 'workspace-1' },
+        expectedScope: { scopeType: 'workspace', scopeId: 'workspace-1' },
+      })
+    expect(calls.map(({ operation }) => operation)).toEqual([
+      'authenticate',
+      'requireWorkspaceAdministration',
+      'validateConfiguration',
+      'saveWorkspaceConfiguration',
+      'validateReferences',
+      'validateUsage',
+    ])
   })
 
   test('returns the stable missing-bearer response before authentication', async () => {
