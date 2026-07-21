@@ -5,3 +5,9 @@ export {
   type RealtimeTicket,
   type RealtimeTicketsClient,
 } from './realtime-ticket'
+export {
+  createRealtimeTicketRouter,
+  type IssueRealtimeTicketRequest,
+  type RealtimeTicketPrincipal,
+  type RealtimeTicketRouterDependencies,
+} from './adapter-in/http/realtime-ticket-router'

@@ -18,6 +18,7 @@ import {
   mergeDeletedObjectTags,
   parseAuditProjectionEvent,
   processCollaborationProjectionBatch,
+  publishRealtimeInvalidation,
   refreshScheduledNotificationEvent,
   tagDeletedFileObjectVersion,
   toSubscribedWatcherCandidates,
@@ -383,6 +384,49 @@ describe('collaboration projection pure helpers', () => {
     expect(response).toEqual({
       batchItemFailures: [{ itemIdentifier: 'stream-sequence-1' }],
     })
+  })
+
+  test('publishes the stable collaboration invalidation payload to its exact scope', async () => {
+    const publications: Array<{
+      scopeKey: string
+      payload: Readonly<Record<string, unknown>>
+    }> = []
+    const event = createProjectionEvent({
+      eventId: 'evt-realtime-1',
+      eventType: 'comment.updated',
+      entityId: 'team/core/issue/example',
+      targetId: 'comment-1',
+      occurredAt: '2026-07-12T12:30:00.000Z',
+    })
+
+    await publishRealtimeInvalidation(event, {
+      async publish(scopeKey, payload) {
+        publications.push({ scopeKey, payload })
+      },
+    })
+
+    expect(publications).toEqual([{
+      scopeKey: 'workspace-1#work-item#team/core/issue/example',
+      payload: {
+        type: 'collaboration.invalidated',
+        eventId: 'evt-realtime-1',
+        eventType: 'comment.updated',
+        scopeKey: 'workspace-1#work-item#team/core/issue/example',
+        entityId: 'team/core/issue/example',
+        targetId: 'comment-1',
+        occurredAt: '2026-07-12T12:30:00.000Z',
+      },
+    }])
+  })
+
+  test('propagates realtime publisher rejection for partial batch retry handling', async () => {
+    const failure = new Error('Realtime delivery unavailable')
+
+    await expect(publishRealtimeInvalidation(createProjectionEvent(), {
+      async publish() {
+        throw failure
+      },
+    })).rejects.toBe(failure)
   })
 
   test('builds deterministic recipient notification and receipt keys', () => {

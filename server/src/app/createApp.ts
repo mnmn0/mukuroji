@@ -173,9 +173,9 @@ import {
 } from '../modules/workspace-access/workspace-access'
 import {
   DynamoDbRealtimeTicketsClient,
-  RealtimeTicketError,
   type RealtimeTicketsClient,
 } from '../modules/realtime/realtime-ticket'
+import { createRealtimeTicketRouter } from '../modules/realtime'
 import {
   CollaborationError,
   DynamoDbCollaborationClient,
@@ -1936,20 +1936,6 @@ type TeamIssuePresenceRequestBody = {
    * Comment composer に入力中かどうかです。
    */
   typing?: unknown
-}
-
-/**
- * Realtime WebSocket ticket API が受け取る request body です。
- */
-type CreateRealtimeTicketRequestBody = {
-  /**
-   * 購読対象 Work Item の team ID です。
-   */
-  teamId?: unknown
-  /**
-   * 購読対象 Work Item の issue ID です。
-   */
-  issueId?: unknown
 }
 
 /**
@@ -9536,24 +9522,18 @@ routeApp.delete('/api/teams/:teamId/issues/:issueId/presence/:clientId', async (
   }
 })
 
-/**
- * 認証・認可済み Work Item scope 用の one-time Realtime ticket を発行します。
- */
-routeApp.post('/api/realtime/tickets', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    const body = await readJson<CreateRealtimeTicketRequestBody>(c.req) ?? {}
-    const teamId = readRequiredString(body.teamId, 'Team ID is required.')
-    const issueId = readRequiredString(body.issueId, 'Issue ID is required.')
-    const context = await requireTeamPermission(principal, teamId, 'viewer')
+routeApp.route('/', createRealtimeTicketRouter<WorkspacePrincipal>({
+  authenticate: async (accessToken, context) =>
+    await authenticateWorkspacePrincipal(accessToken, undefined, context),
+  issueTicket: async ({ accessToken, principal, teamId, issueId, context }) => {
+    const permissionContext = await requireTeamPermission(principal, teamId, 'viewer')
     const detail = await teamIssues.getTeamIssueDetail(principal.directoryId, teamId, issueId)
-    requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
+    requireAssignedProjectPermission(
+      principal,
+      permissionContext,
+      detail.issue.assignedProjectId,
+      'viewer',
+    )
     const tokenClaims = decodeJwtPayload<CognitoAccessTokenClaims>(accessToken)
     const issuedAt = readNumericClaim(tokenClaims?.iat) ?? Math.floor(Date.now() / 1_000)
     const authenticatedAt = readNumericClaim(tokenClaims?.auth_time) ?? issuedAt
@@ -9564,49 +9544,44 @@ routeApp.post('/api/realtime/tickets', async (c) => {
         createHash('sha256').update(accessToken).digest('base64url'),
       )
 
-    return c.json(
-      await realtimeTickets.createTicket({
-        workspaceId: principal.directoryId,
-        memberKey: principal.userKey,
+    return await realtimeTickets.createTicket({
+      workspaceId: principal.directoryId,
+      memberKey: principal.userKey,
+      teamId,
+      issueId,
+      projectId: detail.issue.assignedProjectId,
+      systemAdmin: principal.isSystemAdmin,
+      canWrite: canWriteTeamIssue(
+        principal,
+        permissionContext,
+        detail.issue.assignedProjectId,
+      ),
+      scopeKey: createWorkItemCollaborationEntityKey(
+        principal.directoryId,
         teamId,
         issueId,
-        projectId: detail.issue.assignedProjectId,
-        systemAdmin: principal.isSystemAdmin,
-        canWrite: canWriteTeamIssue(principal, context, detail.issue.assignedProjectId),
-        scopeKey: createWorkItemCollaborationEntityKey(
-          principal.directoryId,
-          teamId,
-          issueId,
-        ),
-        authenticatedAt,
-        tokenExpiresAt,
-        authenticationSessionId: createEnterpriseAuthenticationSessionId(accessToken),
-        authenticationMethods: [
-          ...new Set([
-            ...readCognitoAuthenticationMethods(tokenClaims),
-            ...verifiedAuthenticationMethods,
-          ]),
-        ],
-        clientIp: resolveEnterpriseClientIp(c),
-      }),
-      201,
-    )
-  } catch (error) {
+      ),
+      authenticatedAt,
+      tokenExpiresAt,
+      authenticationSessionId: createEnterpriseAuthenticationSessionId(accessToken),
+      authenticationMethods: [
+        ...new Set([
+          ...readCognitoAuthenticationMethods(tokenClaims),
+          ...verifiedAuthenticationMethods,
+        ]),
+      ],
+      clientIp: resolveEnterpriseClientIp(context),
+    })
+  },
+  mapError: (context, error) => {
     if (error instanceof CognitoServiceError) {
-      return toCognitoDirectoryErrorResponse(c, error)
+      return toCognitoDirectoryErrorResponse(context, error)
     }
 
-    if (error instanceof RealtimeTicketError) {
-      const status = error.status === 400 || error.status === 403 || error.status === 503
-        ? error.status
-        : 503
-
-      return c.json({ code: error.code, message: error.message }, status)
-    }
-
-    return toProjectDataErrorResponse(c, error)
-  }
-})
+    return toProjectDataErrorResponse(context, error)
+  },
+  readJson,
+}))
 
 const fileCollectionRoutes = [
   {
