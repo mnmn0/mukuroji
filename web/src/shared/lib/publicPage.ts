@@ -1,5 +1,9 @@
 /**
- * 指定文字列をブラウザの clipboard へコピーします。
+ * Copies text to the browser clipboard.
+ *
+ * @param value - The text to copy.
+ * @returns A promise that resolves when the text has been copied.
+ * @throws When the Clipboard API is unavailable or rejects the write operation.
  */
 export async function copyTextToClipboard(value: string) {
   if (!navigator.clipboard) {
@@ -10,7 +14,10 @@ export async function copyTextToClipboard(value: string) {
 }
 
 /**
- * 公開フォームで入力されたメールアドレスの基本形式を検証します。
+ * Validates the basic format of an email address entered in a public form.
+ *
+ * @param value - The email address to validate.
+ * @returns Whether the value matches the expected basic email format.
  */
 export function isValidEmailAddress(value: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim())

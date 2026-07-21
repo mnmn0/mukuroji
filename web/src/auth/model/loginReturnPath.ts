@@ -1,8 +1,8 @@
 /**
- * Login 完了後に戻せる same-origin の application path を解決します。
+ * Resolves a safe same-origin application path to use after login.
  *
- * @param value - Login URL の `returnTo` query value です。
- * @returns 許可された request path、または既定 dashboard path です。
+ * @param value - The `returnTo` query value from the login URL.
+ * @returns An allowed request path, or the default dashboard path.
  */
 export function resolveSafeLoginReturnPath(value: string | null | undefined) {
   if (!value || !value.startsWith('/') || value.startsWith('//') || value.includes('\\')) {
