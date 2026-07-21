@@ -63,10 +63,8 @@ import {
   type CreatePlanningDependencyInput,
   type CreatePlanningEntityInput,
   type CreateSavedWorkspaceViewInput,
-  type CreateRequestFormInput,
   type CustomFieldDefinition,
   type DocumentRelationTarget,
-  type PublishRequestFormInput,
   type RequestFormDraft,
   type RequestFormField,
   type RequestFormRoutingTarget,
@@ -75,7 +73,6 @@ import {
   type RequestRequesterReplyInput,
   type RequestAttachmentUploadInput,
   type SubmitRequestInput,
-  type UpdateRequestFormInput,
   type CustomFieldValue,
   type CycleRolloverInput,
   type DuplicatePlanningEntityInput,
@@ -235,6 +232,7 @@ import {
   type RequestIntakeClient,
   type RequestLinkResolution,
 } from '../modules/request-intake/request-intake'
+import { createAdminRequestIntakeRouter } from '../modules/request-intake/adapter-in/http/admin-request-intake-router'
 import {
   ENTERPRISE_SCIM_DISPLAY_NAME_MAX_BYTES,
   ENTERPRISE_SCIM_EXTERNAL_ID_MAX_BYTES,
@@ -7382,113 +7380,15 @@ routeApp.post('/api/request-threads/:threadToken/replies', async (c) => {
   }
 })
 
-/** Workspace admin が管理できる Request Form 一覧を返します。 */
-routeApp.get('/api/request-forms', async (c) => {
-  try {
-    const principal = await requireRequestAdministration(c)
-    return c.json(await requestIntake.listForms(principal.directoryId))
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error)
-  }
-})
-
-/** Workspace admin が Request Form draft と capability link を作成します。 */
-routeApp.post('/api/request-forms', async (c) => {
-  try {
-    const principal = await requireRequestAdministration(c)
-    const body = await readJson<CreateRequestFormInput>(c.req)
-    return c.json(await requestIntake.createForm(
-      principal.directoryId,
-      { id: principal.userKey },
-      body ?? {} as CreateRequestFormInput,
-    ), 201)
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error)
-  }
-})
-
-/** Workspace admin が Request Form detail と published version metadata を取得します。 */
-routeApp.get('/api/request-forms/:formId', async (c) => {
-  try {
-    const principal = await requireRequestAdministration(c)
-    return c.json(await requestIntake.getForm(principal.directoryId, c.req.param('formId')))
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error)
-  }
-})
-
-/** Workspace admin が Request Form draft/link を revision 条件付きで更新します。 */
-routeApp.put('/api/request-forms/:formId', async (c) => {
-  try {
-    const principal = await requireRequestAdministration(c)
-    const body = await readJson<UpdateRequestFormInput>(c.req)
-    return c.json(await requestIntake.updateForm(
-      principal.directoryId,
-      c.req.param('formId'),
-      { id: principal.userKey },
-      body ?? {} as UpdateRequestFormInput,
-    ))
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error)
-  }
-})
-
-/** Workspace admin が current draft を immutable Request Form version として公開します。 */
-routeApp.post('/api/request-forms/:formId/publish', async (c) => {
-  try {
-    const principal = await requireRequestAdministration(c)
-    const formId = c.req.param('formId')
-    const body = await readJson<PublishRequestFormInput>(c.req)
-    const publishInput = body ?? {} as PublishRequestFormInput
-    const current = await requestIntake.getForm(principal.directoryId, formId)
-    if (
-      !Number.isSafeInteger(publishInput.expectedRevision) ||
-      publishInput.expectedRevision !== current.revision
-    ) {
-      throw new RequestIntakeError(
-        409,
-        'RequestRevisionConflict',
-        'Request resource revision changed.',
-      )
-    }
-    await validateRequestFormRoutingReferences(principal.directoryId, current.draft)
-    return c.json(await requestIntake.publishForm(
-      principal.directoryId,
-      formId,
-      { id: principal.userKey },
-      publishInput,
-    ))
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error)
-  }
-})
-
-/** Workspace admin の intake queue を cursor pagination します。 */
-routeApp.get('/api/request-queue', async (c) => {
-  try {
-    const principal = await requireRequestAdministration(c)
-    return c.json(await requestIntake.listSubmissions(principal.directoryId, {
-      status: readRequestSubmissionStatus(c.req.query('status')),
-      limit: readOptionalPositiveQueryInteger(c.req.query('limit'), 'Request queue limit'),
-      cursor: c.req.query('cursor'),
-    }))
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error)
-  }
-})
-
-/** Workspace admin が historical form snapshot を含む submission detail を取得します。 */
-routeApp.get('/api/request-submissions/:submissionId', async (c) => {
-  try {
-    const principal = await requireRequestAdministration(c)
-    return c.json(await requestIntake.getSubmission(
-      principal.directoryId,
-      c.req.param('submissionId'),
-    ))
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error)
-  }
-})
+routeApp.route('/', createAdminRequestIntakeRouter({
+  requestIntake,
+  requireAdministration: requireRequestAdministration,
+  readJson,
+  validateFormRoutingReferences: validateRequestFormRoutingReferences,
+  readSubmissionStatus: readRequestSubmissionStatus,
+  readQueueLimit: (value) => readOptionalPositiveQueryInteger(value, 'Request queue limit'),
+  mapError: toRequestIntakeErrorResponse,
+}))
 
 /** Workspace admin が explicit triage transition または Work Item conversion を実行します。 */
 routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
@@ -7588,20 +7488,6 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
             : {}),
         },
       },
-    ))
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error)
-  }
-})
-
-/** Workspace admin が malware scan 済み request attachment の短命 URL を取得します。 */
-routeApp.post('/api/request-submissions/:submissionId/attachments/:attachmentId/access', async (c) => {
-  try {
-    const principal = await requireRequestAdministration(c)
-    return c.json(await requestIntake.createAttachmentAccess(
-      principal.directoryId,
-      c.req.param('submissionId'),
-      c.req.param('attachmentId'),
     ))
   } catch (error) {
     return toRequestIntakeErrorResponse(c, error)
