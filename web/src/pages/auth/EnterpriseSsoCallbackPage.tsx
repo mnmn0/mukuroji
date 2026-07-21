@@ -18,7 +18,7 @@ import {
   createTranslator,
   getInitialLocale,
 } from '../../shared/i18n/i18n'
-import { resolveSafeLoginReturnPath } from './loginReturnPath'
+import { resolveSafeLoginReturnPath } from '../../auth/model/loginReturnPath'
 
 /**
  * Enterprise SSO authorization callback を検証して login session を確立します。

@@ -325,12 +325,15 @@ shared
 次の依存を作りません。
 
 - `shared` から `pages`、`features`、`entities` を import する
+- `shared` から既存の業務領域フォルダや `app` を import する
 - `entities` から `features` や `pages` を import する
 - feature から別 feature の page や内部 UI を直接 import する
 - page から別 page を import する
 - 業務領域の内部実装を、無関係な領域から直接参照する
 
 ページは feature、entity、shared を組み立ててよいですが、業務操作や複雑な取得処理は feature の public な入口を通します。共有が必要な内部実装は、entity、`shared/ui`、または共通の model/API へ責務を移します。
+
+`.dependency-cruiser.cjs` は `shared`、`model`、`api`、`pages` と業務領域の依存方向を検査します。Storybook story から page entry point への依存だけは runtime の page 間依存ではないため、page 間ルールの対象外です。新しい境界違反は ignore / exclude に追加せず、所有する下位 layer へ実装を移して解消します。
 
 ## ページと feature の責務
 

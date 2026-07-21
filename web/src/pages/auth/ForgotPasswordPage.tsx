@@ -1,8 +1,8 @@
 import { useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
-import { PublicPageShell } from '../public/PublicPageShell'
-import { copyTextToClipboard, isValidEmailAddress } from '../public/publicPageUtils'
+import { copyTextToClipboard, isValidEmailAddress } from '../../shared/lib/publicPage'
+import { PublicPageShell } from '../../features/public-site/ui/PublicPageShell'
 
 /**
  * パスワード復旧ページの Storybook 初期状態です。

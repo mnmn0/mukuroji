@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
-import { PublicPageShell } from './PublicPageShell'
-import { copyTextToClipboard } from './publicPageUtils'
+import { copyTextToClipboard } from '../../shared/lib/publicPage'
+import { PublicPageShell } from '../../features/public-site/ui/PublicPageShell'
 
 /**
  * サポート記事を分類するカテゴリ ID です。

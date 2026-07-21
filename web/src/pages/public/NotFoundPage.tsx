@@ -1,6 +1,6 @@
 import { Link, useLocation } from 'react-router'
 import type { Locale } from '../../shared/i18n/i18n'
-import { PublicPageShell } from './PublicPageShell'
+import { PublicPageShell } from '../../features/public-site/ui/PublicPageShell'
 
 /**
  * 404ページの Storybook 初期状態です。

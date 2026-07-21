@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router'
-import { PublicPageShell } from '../src/pages/public/PublicPageShell'
+import { PublicPageShell } from '../src/features/public-site/ui/PublicPageShell'
 
 describe('PublicPageShell', () => {
   test('limits the locale selector to page-supported locales', () => {

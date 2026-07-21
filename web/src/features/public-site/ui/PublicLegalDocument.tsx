@@ -1,5 +1,5 @@
 import { Link } from 'react-router'
-import type { Locale, MessageKey } from '../../shared/i18n/i18n'
+import type { Locale, MessageKey } from '../../../shared/i18n/i18n'
 import { PublicPageShell } from './PublicPageShell'
 
 /**
@@ -23,7 +23,7 @@ export type LegalSection = {
 /**
  * 公開する法務文書ページの props です。
  */
-type PublicLegalPageProps = {
+type PublicLegalDocumentProps = {
   /**
    * 見出し上部に表示する分類ラベルの翻訳キーです。
    */
@@ -51,16 +51,20 @@ type PublicLegalPageProps = {
 }
 
 /**
- * 目次と読み幅を抑えた本文を持つ公開法務文書ページを描画します。
+ * Renders a public legal document with a table of contents and readable body width.
+ *
+ * @param props - Translation keys, locale, and sections used to render the document.
+ * @returns The public legal document page content.
  */
-export function PublicLegalPage({
-  eyebrowKey,
-  initialLocale,
-  introKey,
-  sections,
-  titleKey,
-  updatedKey,
-}: PublicLegalPageProps) {
+export function PublicLegalDocument(props: PublicLegalDocumentProps) {
+  const {
+    eyebrowKey,
+    initialLocale,
+    introKey,
+    sections,
+    titleKey,
+    updatedKey,
+  } = props
   return (
     <PublicPageShell initialLocale={initialLocale} titleKey={titleKey}>
       {({ t }) => (
