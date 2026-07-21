@@ -143,6 +143,18 @@ describe('realtime ticket router', () => {
       message: 'Realtime access is denied.',
     })
 
+    failure = new RealtimeTicketError(
+      404,
+      'RealtimeNotFound',
+      'Work Item was not found.',
+    )
+    const clamped = await request()
+    expect(clamped.status).toBe(503)
+    expect(await clamped.json()).toEqual({
+      code: 'RealtimeNotFound',
+      message: 'Work Item was not found.',
+    })
+
     failure = new Error('DynamoDB unavailable')
     const unavailable = await request()
     expect(unavailable.status).toBe(502)

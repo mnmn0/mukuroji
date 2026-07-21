@@ -175,7 +175,7 @@ import {
   DynamoDbRealtimeTicketsClient,
   type RealtimeTicketsClient,
 } from '../modules/realtime/realtime-ticket'
-import { createRealtimeTicketRouter } from '../modules/realtime/adapter-in/http/realtime-ticket-router'
+import { createRealtimeTicketRouter } from '../modules/realtime'
 import {
   CollaborationError,
   DynamoDbCollaborationClient,
