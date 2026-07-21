@@ -294,6 +294,7 @@ import {
   type MutateWorkItemRelationInput,
   type WorkItemConfigurationClient,
 } from '../modules/work-items/work-item-configuration'
+import { createWorkItemConfigurationRouter } from '../modules/work-items/adapter-in/http/work-item-configuration-router'
 import {
   AUTOMATION_TEMPLATE_APPLICATION_LEASE_MS,
   AutomationEngine,
@@ -7608,112 +7609,23 @@ routeApp.post('/api/request-submissions/:submissionId/attachments/:attachmentId/
   }
 })
 
-/** Workspace default または built-in Work Item configuration を返します。 */
-routeApp.get('/api/work-item-configuration', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    return c.json(await workItemConfigurations.getWorkspaceConfiguration(principal.directoryId))
-  } catch (error) {
-    return toWorkItemConfigurationErrorResponse(c, error)
-  }
-})
-
-/** Workspace default workflow/custom field configuration を保存します。 */
-routeApp.put('/api/work-item-configuration', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    requireWorkspaceAdministration(principal)
-    const body = await readJson<WorkItemConfiguration>(c.req)
-    const configuration = validateWorkItemConfiguration({
-      ...body,
-      scopeType: 'workspace',
-      scopeId: principal.directoryId,
-    })
-    return c.json(await workItemConfigurations.saveWorkspaceConfiguration(
-      principal.directoryId,
-      configuration,
-      async () => {
-        await validateWorkItemConfigurationReferences(principal.directoryId, configuration)
-        await validateWorkItemConfigurationUsage(principal.directoryId, configuration)
-      },
-    ))
-  } catch (error) {
-    return toWorkItemConfigurationErrorResponse(c, error)
-  }
-})
-
-/** Team override または Workspace/default から継承した configuration を返します。 */
-routeApp.get('/api/teams/:teamId/work-item-configuration', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-  const teamId = c.req.param('teamId')
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-  if (!teamId) {
-    return c.json({ message: 'Team ID is required.' }, 400)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    await requireTeamPermission(principal, teamId, 'viewer')
-    return c.json(await workItemConfigurations.getTeamConfiguration(principal.directoryId, teamId))
-  } catch (error) {
-    return toWorkItemConfigurationErrorResponse(c, error)
-  }
-})
-
-/** Team 固有 workflow/custom field configuration を保存します。 */
-routeApp.put('/api/teams/:teamId/work-item-configuration', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-  const teamId = c.req.param('teamId')
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-  if (!teamId) {
-    return c.json({ message: 'Team ID is required.' }, 400)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    requireWorkspaceBusinessWrite(principal)
-    await requireTeamConfigurationAdministration(principal, teamId)
-    const body = await readJson<WorkItemConfiguration>(c.req)
-    const configuration = validateWorkItemConfiguration({
-      ...body,
-      scopeType: 'team',
-      scopeId: teamId,
-    })
-    return c.json(await workItemConfigurations.saveTeamConfiguration(
-      principal.directoryId,
-      teamId,
-      configuration,
-      async () => {
-        await validateWorkItemConfigurationReferences(
-          principal.directoryId,
-          configuration,
-          teamId,
-        )
-        await validateWorkItemConfigurationUsage(
-          principal.directoryId,
-          configuration,
-          teamId,
-        )
-      },
-    ))
-  } catch (error) {
-    return toWorkItemConfigurationErrorResponse(c, error)
-  }
-})
+routeApp.route('/', createWorkItemConfigurationRouter<WorkspacePrincipal>({
+  workItemConfigurations,
+  readBearerAccessToken,
+  authenticate: async (accessToken, context) =>
+    await authenticateWorkspacePrincipal(accessToken, undefined, context),
+  requireWorkspaceAdministration,
+  requireWorkspaceBusinessWrite,
+  requireTeamPermission: async (principal, teamId, minimum) => {
+    await requireTeamPermission(principal, teamId, minimum)
+  },
+  requireTeamConfigurationAdministration,
+  readJson,
+  validateConfiguration: validateWorkItemConfiguration,
+  validateReferences: validateWorkItemConfigurationReferences,
+  validateUsage: validateWorkItemConfigurationUsage,
+  mapError: toWorkItemConfigurationErrorResponse,
+}))
 
 /** 同一 Team 内の Work Item 間へ reciprocal relation を作成します。 */
 routeApp.post('/api/teams/:teamId/issues/:issueId/relations', async (c) => {
