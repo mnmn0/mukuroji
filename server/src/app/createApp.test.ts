@@ -21,6 +21,7 @@ import {
   type PlanningSnapshot,
   type WorkItemConfiguration,
   type CanonicalWorkItem,
+  type RequestFormDraft,
 } from '@mukuroji/contracts'
 import type { LambdaEvent } from 'hono/aws-lambda'
 import type { Hono } from 'hono'
@@ -91,7 +92,10 @@ import {
 import { resolveDocumentCapabilities } from '../modules/documents/document-access'
 import { DocumentError, type DocumentClient } from '../modules/documents/documents'
 import { InMemoryPlanningClient, type PlanningClient } from '../modules/planning/planning'
-import type { RequestIntakeClient } from '../modules/request-intake/request-intake'
+import {
+  RequestIntakeError,
+  type RequestIntakeClient,
+} from '../modules/request-intake/request-intake'
 import {
   EnterpriseIdentityError,
   InMemoryEnterpriseIdentityClient,
@@ -3627,17 +3631,35 @@ test('uses a forwarded request rate-limit source only for a configured trusted p
   )).toBe('transport-unavailable')
 })
 
-test('rejects a future Request Form publish revision before validating a stale draft', async () => {
+test('delegates Request Form publish revision checks to the Request Intake client', async () => {
   configureFakeProjectClients(true, { workspaceRole: 'owner' })
   let publishCalls = 0
+  const conflict = new RequestIntakeError(
+    409,
+    'RequestRevisionConflict',
+    'Request resource revision changed.',
+  )
+  const draft = {
+    definition: { sections: [] },
+    routing: {
+      defaultTarget: {
+        teamId: 'core-team',
+        assigneeUserId: 'demo@example.com',
+        priority: 'medium',
+        dueDateOffsetDays: 1,
+      },
+      rules: [],
+      mapping: { titleFieldId: 'title' },
+    },
+  } satisfies RequestFormDraft
   setTestAppDependencies({
     requestIntake: {
       async getForm() {
-        return { revision: 1 }
+        return { revision: 1, draft }
       },
       async publishForm() {
         publishCalls += 1
-        return {} as never
+        throw conflict
       },
     } as RequestIntakeClient,
   })
@@ -3656,7 +3678,7 @@ test('rejects a future Request Form publish revision before validating a stale d
     code: 'RequestRevisionConflict',
     message: 'Request resource revision changed.',
   })
-  expect(publishCalls).toBe(0)
+  expect(publishCalls).toBe(1)
 })
 
 test('commits a Request conversion pointer in the same transaction as its canonical Work Item', async () => {

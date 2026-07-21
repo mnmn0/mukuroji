@@ -63,19 +63,13 @@ import {
   type CreatePlanningDependencyInput,
   type CreatePlanningEntityInput,
   type CreateSavedWorkspaceViewInput,
-  type CreateRequestFormInput,
   type CustomFieldDefinition,
   type DocumentRelationTarget,
-  type PublishRequestFormInput,
   type RequestFormDraft,
   type RequestFormField,
   type RequestFormRoutingTarget,
   type RequestSubmissionEvent,
   type RequestSubmissionActionInput,
-  type RequestRequesterReplyInput,
-  type RequestAttachmentUploadInput,
-  type SubmitRequestInput,
-  type UpdateRequestFormInput,
   type CustomFieldValue,
   type CycleRolloverInput,
   type DuplicatePlanningEntityInput,
@@ -173,9 +167,9 @@ import {
 } from '../modules/workspace-access/workspace-access'
 import {
   DynamoDbRealtimeTicketsClient,
-  RealtimeTicketError,
   type RealtimeTicketsClient,
 } from '../modules/realtime/realtime-ticket'
+import { createRealtimeTicketRouter } from '../modules/realtime'
 import {
   CollaborationError,
   DynamoDbCollaborationClient,
@@ -235,6 +229,8 @@ import {
   type RequestIntakeClient,
   type RequestLinkResolution,
 } from '../modules/request-intake/request-intake'
+import { createAdminRequestIntakeRouter } from '../modules/request-intake/adapter-in/http/admin-request-intake-router'
+import { createPublicRequestIntakeRouter } from '../modules/request-intake/adapter-in/http/public-request-intake-router'
 import {
   ENTERPRISE_SCIM_DISPLAY_NAME_MAX_BYTES,
   ENTERPRISE_SCIM_EXTERNAL_ID_MAX_BYTES,
@@ -1937,20 +1933,6 @@ type TeamIssuePresenceRequestBody = {
    * Comment composer に入力中かどうかです。
    */
   typing?: unknown
-}
-
-/**
- * Realtime WebSocket ticket API が受け取る request body です。
- */
-type CreateRealtimeTicketRequestBody = {
-  /**
-   * 購読対象 Work Item の team ID です。
-   */
-  teamId?: unknown
-  /**
-   * 購読対象 Work Item の issue ID です。
-   */
-  issueId?: unknown
 }
 
 /**
@@ -7314,182 +7296,23 @@ for (const projectWatchMethod of ['PUT', 'DELETE'] as const) {
   })
 }
 
-/** Opaque capability link から allowlist 済み public Request Form を返します。 */
-routeApp.get('/api/request-intake/:token', async (c) => {
-  try {
-    const resolution = await requestIntake.resolveLink(c.req.param('token'))
-    await authorizeRequestLink(c, resolution)
-    return c.json(await requestIntake.getPublicForm(resolution, createRequestExternalContext(c)))
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error, true)
-  }
-})
+routeApp.route('/', createPublicRequestIntakeRouter({
+  requestIntake,
+  authorizeRequestLink,
+  createExternalContext: createRequestExternalContext,
+  mapError: (context, error) => toRequestIntakeErrorResponse(context, error, true),
+  readJson,
+}))
 
-/** Public/authenticated Request Form 用の direct attachment upload session を作成します。 */
-routeApp.post('/api/request-intake/:token/uploads', async (c) => {
-  try {
-    const resolution = await requestIntake.resolveLink(c.req.param('token'))
-    await authorizeRequestLink(c, resolution)
-    const body = await readJson<RequestAttachmentUploadInput>(c.req)
-    return c.json(await requestIntake.createAttachmentUpload(
-      resolution,
-      body ?? {} as RequestAttachmentUploadInput,
-      createRequestExternalContext(c),
-    ), 201)
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error, true)
-  }
-})
-
-/** Public/authenticated Request Form の回答を intake queue へ保存します。 */
-routeApp.post('/api/request-intake/:token/submissions', async (c) => {
-  try {
-    const resolution = await requestIntake.resolveLink(c.req.param('token'))
-    await authorizeRequestLink(c, resolution)
-    const body = await readJson<SubmitRequestInput>(c.req)
-    return c.json(await requestIntake.submit(
-      resolution,
-      body ?? {} as SubmitRequestInput,
-      createRequestExternalContext(c),
-    ), 201)
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error, true)
-  }
-})
-
-/** Opaque thread capability から requester 向け message だけを返します。 */
-routeApp.get('/api/request-threads/:threadToken', async (c) => {
-  try {
-    return c.json(await requestIntake.getRequesterThread(
-      c.req.param('threadToken'),
-      createRequestExternalContext(c),
-    ))
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error, true)
-  }
-})
-
-/** Opaque thread capability から追加情報 reply を安全に保存します。 */
-routeApp.post('/api/request-threads/:threadToken/replies', async (c) => {
-  try {
-    const body = await readJson<RequestRequesterReplyInput>(c.req)
-    return c.json(await requestIntake.replyToThread(
-      c.req.param('threadToken'),
-      body ?? {} as RequestRequesterReplyInput,
-      createRequestExternalContext(c),
-    ), 201)
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error, true)
-  }
-})
-
-/** Workspace admin が管理できる Request Form 一覧を返します。 */
-routeApp.get('/api/request-forms', async (c) => {
-  try {
-    const principal = await requireRequestAdministration(c)
-    return c.json(await requestIntake.listForms(principal.directoryId))
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error)
-  }
-})
-
-/** Workspace admin が Request Form draft と capability link を作成します。 */
-routeApp.post('/api/request-forms', async (c) => {
-  try {
-    const principal = await requireRequestAdministration(c)
-    const body = await readJson<CreateRequestFormInput>(c.req)
-    return c.json(await requestIntake.createForm(
-      principal.directoryId,
-      { id: principal.userKey },
-      body ?? {} as CreateRequestFormInput,
-    ), 201)
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error)
-  }
-})
-
-/** Workspace admin が Request Form detail と published version metadata を取得します。 */
-routeApp.get('/api/request-forms/:formId', async (c) => {
-  try {
-    const principal = await requireRequestAdministration(c)
-    return c.json(await requestIntake.getForm(principal.directoryId, c.req.param('formId')))
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error)
-  }
-})
-
-/** Workspace admin が Request Form draft/link を revision 条件付きで更新します。 */
-routeApp.put('/api/request-forms/:formId', async (c) => {
-  try {
-    const principal = await requireRequestAdministration(c)
-    const body = await readJson<UpdateRequestFormInput>(c.req)
-    return c.json(await requestIntake.updateForm(
-      principal.directoryId,
-      c.req.param('formId'),
-      { id: principal.userKey },
-      body ?? {} as UpdateRequestFormInput,
-    ))
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error)
-  }
-})
-
-/** Workspace admin が current draft を immutable Request Form version として公開します。 */
-routeApp.post('/api/request-forms/:formId/publish', async (c) => {
-  try {
-    const principal = await requireRequestAdministration(c)
-    const formId = c.req.param('formId')
-    const body = await readJson<PublishRequestFormInput>(c.req)
-    const publishInput = body ?? {} as PublishRequestFormInput
-    const current = await requestIntake.getForm(principal.directoryId, formId)
-    if (
-      !Number.isSafeInteger(publishInput.expectedRevision) ||
-      publishInput.expectedRevision !== current.revision
-    ) {
-      throw new RequestIntakeError(
-        409,
-        'RequestRevisionConflict',
-        'Request resource revision changed.',
-      )
-    }
-    await validateRequestFormRoutingReferences(principal.directoryId, current.draft)
-    return c.json(await requestIntake.publishForm(
-      principal.directoryId,
-      formId,
-      { id: principal.userKey },
-      publishInput,
-    ))
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error)
-  }
-})
-
-/** Workspace admin の intake queue を cursor pagination します。 */
-routeApp.get('/api/request-queue', async (c) => {
-  try {
-    const principal = await requireRequestAdministration(c)
-    return c.json(await requestIntake.listSubmissions(principal.directoryId, {
-      status: readRequestSubmissionStatus(c.req.query('status')),
-      limit: readOptionalPositiveQueryInteger(c.req.query('limit'), 'Request queue limit'),
-      cursor: c.req.query('cursor'),
-    }))
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error)
-  }
-})
-
-/** Workspace admin が historical form snapshot を含む submission detail を取得します。 */
-routeApp.get('/api/request-submissions/:submissionId', async (c) => {
-  try {
-    const principal = await requireRequestAdministration(c)
-    return c.json(await requestIntake.getSubmission(
-      principal.directoryId,
-      c.req.param('submissionId'),
-    ))
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error)
-  }
-})
+routeApp.route('/', createAdminRequestIntakeRouter({
+  requestIntake,
+  requireAdministration: requireRequestAdministration,
+  readJson,
+  validateFormRoutingReferences: validateRequestFormRoutingReferences,
+  readSubmissionStatus: readRequestSubmissionStatus,
+  readQueueLimit: (value) => readOptionalPositiveQueryInteger(value, 'Request queue limit'),
+  mapError: toRequestIntakeErrorResponse,
+}))
 
 /** Workspace admin が explicit triage transition または Work Item conversion を実行します。 */
 routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
@@ -9448,24 +9271,18 @@ routeApp.delete('/api/teams/:teamId/issues/:issueId/presence/:clientId', async (
   }
 })
 
-/**
- * 認証・認可済み Work Item scope 用の one-time Realtime ticket を発行します。
- */
-routeApp.post('/api/realtime/tickets', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    const body = await readJson<CreateRealtimeTicketRequestBody>(c.req) ?? {}
-    const teamId = readRequiredString(body.teamId, 'Team ID is required.')
-    const issueId = readRequiredString(body.issueId, 'Issue ID is required.')
-    const context = await requireTeamPermission(principal, teamId, 'viewer')
+routeApp.route('/', createRealtimeTicketRouter<WorkspacePrincipal>({
+  authenticate: async (accessToken, context) =>
+    await authenticateWorkspacePrincipal(accessToken, undefined, context),
+  issueTicket: async ({ accessToken, principal, teamId, issueId, context }) => {
+    const permissionContext = await requireTeamPermission(principal, teamId, 'viewer')
     const detail = await teamIssues.getTeamIssueDetail(principal.directoryId, teamId, issueId)
-    requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
+    requireAssignedProjectPermission(
+      principal,
+      permissionContext,
+      detail.issue.assignedProjectId,
+      'viewer',
+    )
     const tokenClaims = decodeJwtPayload<CognitoAccessTokenClaims>(accessToken)
     const issuedAt = readNumericClaim(tokenClaims?.iat) ?? Math.floor(Date.now() / 1_000)
     const authenticatedAt = readNumericClaim(tokenClaims?.auth_time) ?? issuedAt
@@ -9476,49 +9293,44 @@ routeApp.post('/api/realtime/tickets', async (c) => {
         createHash('sha256').update(accessToken).digest('base64url'),
       )
 
-    return c.json(
-      await realtimeTickets.createTicket({
-        workspaceId: principal.directoryId,
-        memberKey: principal.userKey,
+    return await realtimeTickets.createTicket({
+      workspaceId: principal.directoryId,
+      memberKey: principal.userKey,
+      teamId,
+      issueId,
+      projectId: detail.issue.assignedProjectId,
+      systemAdmin: principal.isSystemAdmin,
+      canWrite: canWriteTeamIssue(
+        principal,
+        permissionContext,
+        detail.issue.assignedProjectId,
+      ),
+      scopeKey: createWorkItemCollaborationEntityKey(
+        principal.directoryId,
         teamId,
         issueId,
-        projectId: detail.issue.assignedProjectId,
-        systemAdmin: principal.isSystemAdmin,
-        canWrite: canWriteTeamIssue(principal, context, detail.issue.assignedProjectId),
-        scopeKey: createWorkItemCollaborationEntityKey(
-          principal.directoryId,
-          teamId,
-          issueId,
-        ),
-        authenticatedAt,
-        tokenExpiresAt,
-        authenticationSessionId: createEnterpriseAuthenticationSessionId(accessToken),
-        authenticationMethods: [
-          ...new Set([
-            ...readCognitoAuthenticationMethods(tokenClaims),
-            ...verifiedAuthenticationMethods,
-          ]),
-        ],
-        clientIp: resolveEnterpriseClientIp(c),
-      }),
-      201,
-    )
-  } catch (error) {
+      ),
+      authenticatedAt,
+      tokenExpiresAt,
+      authenticationSessionId: createEnterpriseAuthenticationSessionId(accessToken),
+      authenticationMethods: [
+        ...new Set([
+          ...readCognitoAuthenticationMethods(tokenClaims),
+          ...verifiedAuthenticationMethods,
+        ]),
+      ],
+      clientIp: resolveEnterpriseClientIp(context),
+    })
+  },
+  mapError: (context, error) => {
     if (error instanceof CognitoServiceError) {
-      return toCognitoDirectoryErrorResponse(c, error)
+      return toCognitoDirectoryErrorResponse(context, error)
     }
 
-    if (error instanceof RealtimeTicketError) {
-      const status = error.status === 400 || error.status === 403 || error.status === 503
-        ? error.status
-        : 503
-
-      return c.json({ code: error.code, message: error.message }, status)
-    }
-
-    return toProjectDataErrorResponse(c, error)
-  }
-})
+    return toProjectDataErrorResponse(context, error)
+  },
+  readJson,
+}))
 
 const fileCollectionRoutes = [
   {

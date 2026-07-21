@@ -125,12 +125,12 @@ knowledge_base:
 
 code_generation:
   docstrings:
-    language: "ja-JP"
+    language: "en-US"
     path_instructions:
       - path: "**/*.ts"
-        instructions: "このリポジトリの TSDoc 方針に従い、宣言本体と必要なメンバー/プロパティを日本語で簡潔に説明してください。"
+        instructions: "Follow this repository's TSDoc policy and describe declarations and required members or properties concisely in English."
       - path: "**/*.tsx"
-        instructions: "このリポジトリの TSDoc 方針に従い、宣言本体と必要なメンバー/プロパティを日本語で簡潔に説明してください。"
+        instructions: "Follow this repository's TSDoc policy and describe declarations and required members or properties concisely in English."
   unit_tests:
     path_instructions:
       - path: "web/**"

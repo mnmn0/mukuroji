@@ -707,7 +707,8 @@ async function projectNotification(
   }
 }
 
-async function publishRealtimeInvalidation(
+/** Collaboration audit event を購読 scope の realtime invalidation として配送します。 */
+export async function publishRealtimeInvalidation(
   event: AuditProjectionEvent,
   realtime: CollaborationRealtimePublisher,
 ) {
