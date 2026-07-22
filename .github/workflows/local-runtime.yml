@@ -73,6 +73,8 @@ jobs:
           set -a
           source .floci/generated/cognito.env
           set +a
+          export COGNITO_ENDPOINT=http://127.0.0.1:4566
+          export DYNAMODB_ENDPOINT=http://127.0.0.1:4566
 
           bun run server:dev > "${RUNNER_TEMP}/server.log" 2>&1 &
           server_pid=$!
@@ -124,6 +126,10 @@ jobs:
       - name: Print Floci logs on failure
         if: failure()
         run: docker compose logs floci
+
+      - name: Print server logs on failure
+        if: failure()
+        run: cat "${RUNNER_TEMP}/server.log" 2>/dev/null || true
 
       - name: Stop Floci
         if: always()
