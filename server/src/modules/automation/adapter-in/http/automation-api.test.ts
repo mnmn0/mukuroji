@@ -189,7 +189,10 @@ test('enforces Bulk operation ownership and redacts durable undo snapshots', () 
   try {
     requireBulkOperationOwner(operation, 'other@example.com')
   } catch (error) {
-    expect(error).toMatchObject({ code: 'BulkOperationForbidden', status: 403 })
+    expect(error).toMatchObject({
+      category: 'forbidden',
+      code: 'BulkOperationForbidden',
+    })
   }
   expect(toBulkOperationResponse(operation).items[0]).not.toHaveProperty('undoPayload')
   expect(operation.items[0]?.undoPayload).toEqual({ assignedProjectId: 'project-1' })
@@ -415,7 +418,7 @@ test('recovers Bulk apply and undo response loss only from their matching audit 
         expect(input.expectedRevision).toBe(beforeRevision)
         auditProofs.set(event.eventId, event)
         throw new AutomationError(
-          503,
+          'unavailable',
           'BulkMutationResponseLost',
           'The mutation committed but its response was lost.',
           true,
@@ -560,7 +563,7 @@ test('accepts an unauthenticated signed inbound webhook without exposing secret 
     expect(deliveryInput).toMatchObject({
       idempotencyKey: 'sender-delivery-1',
       signatureTimestamp: timestamp,
-      auditTransactItem: { Put: { TableName: 'AuditTable' } },
+      auditMutation: { Put: { TableName: 'AuditTable' } },
     })
     expect(JSON.stringify(deliveryInput)).not.toContain('server-issued-secret')
     expect(JSON.stringify(deliveryInput)).not.toContain(signature)
@@ -733,7 +736,7 @@ test('compensates a late secret provision after an administrator aborts provisio
       },
       async completeInboundWebhookProvisioning() {
         throw new AutomationError(
-          409,
+          'conflict',
           'AutomationInboundWebhookLifecycleConflict',
           'Endpoint was revoked while the secret write was in flight.',
         )
@@ -752,7 +755,7 @@ test('compensates a late secret provision after an administrator aborts provisio
       async provision() {
         if (provisionFails) {
           throw new AutomationError(
-            503,
+            'unavailable',
             'AutomationInboundWebhookSecretUnavailable',
             'Secret write response and recovery read were unavailable.',
             true,
@@ -845,7 +848,7 @@ test('recovers an automation Work Item update only from its deterministic audit 
           })
           if (withAuditProof) auditProof = event
           throw new AutomationError(
-            503,
+            'unavailable',
             'AutomationMutationResponseLost',
             'The mutation committed but its response was lost.',
             true,
@@ -902,7 +905,7 @@ test('recovers an automation Work Item update only from its deterministic audit 
     } else {
       await expect(execution).rejects.toMatchObject({
         code: 'AutomationMutationResponseLost',
-        status: 503,
+        category: 'unavailable',
       })
     }
     expect(auditProofReads).toBe(1)
@@ -994,7 +997,10 @@ test('fails closed before an automation comment targets a removed Team', async (
       type: 'comment',
       body: 'This must not be written.',
     }, context)
-  )).rejects.toMatchObject({ code: 'AutomationTeamUnavailable', status: 409 })
+  )).rejects.toMatchObject({
+    category: 'conflict',
+    code: 'AutomationTeamUnavailable',
+  })
   expect(calls.issueComments).toHaveLength(0)
 })
 
@@ -1135,7 +1141,7 @@ test('recovers a Project template application from atomic receipt success withou
         }
         return structuredClone(application)
       },
-      createTemplateApplicationCompletionTransactItem(candidate, result) {
+      createTemplateApplicationCompletionMutation(candidate, result) {
         return {
           Update: {
             TableName: 'AutomationTable',
@@ -1245,7 +1251,7 @@ test('applies a Workflow template atomically while preserving custom fields and 
         }
         return structuredClone(application)
       },
-      createTemplateApplicationCompletionTransactItem(candidate, result) {
+      createTemplateApplicationCompletionMutation(candidate, result) {
         return {
           Update: {
             TableName: 'AutomationTable',

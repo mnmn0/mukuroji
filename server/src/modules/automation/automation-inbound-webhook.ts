@@ -1,18 +1,14 @@
 import {
   createHash,
   createHmac,
-  randomBytes,
   timingSafeEqual,
 } from 'node:crypto'
-import {
-  CreateSecretCommand,
-  DeleteSecretCommand,
-  DescribeSecretCommand,
-  GetSecretValueCommand,
-  PutSecretValueCommand,
-  SecretsManagerClient,
-} from '@aws-sdk/client-secrets-manager'
-import { AutomationError } from './automation'
+import { AutomationError } from './domain/automation-error'
+
+export type {
+  AutomationInboundWebhookSecretReference,
+  AutomationInboundWebhookSecretStore,
+} from './application/ports'
 
 /** Inbound webhook secret を outbound secret から隔離する既定 prefix です。 */
 export const AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX =
@@ -23,125 +19,6 @@ export const AUTOMATION_INBOUND_WEBHOOK_MAX_BODY_BYTES = 256 * 1_024
 
 /** Sender timestamp に許容する clock skew 秒数です。 */
 export const AUTOMATION_INBOUND_WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS = 5 * 60
-
-/** Secrets Manager に固定する一つの endpoint secret generation です。 */
-export type AutomationInboundWebhookSecretReference = {
-  /** Endpoint が属する Workspace ID です。 */
-  workspaceId: string
-  /** Workspace 内の endpoint ID です。 */
-  endpointId: string
-  /** Secrets Manager secret resource ID です。 */
-  secretId: string
-  /** Secrets Manager の immutable version ID です。 */
-  secretVersionId: string
-  /** Endpoint の単調増加 secret generation です。 */
-  secretGeneration: number
-}
-
-/** Inbound webhook signing secret store の contract です。 */
-export type AutomationInboundWebhookSecretStore = {
-  /** 予約済み generation を作成または response-loss recovery して plaintext を返します。 */
-  provision(reference: AutomationInboundWebhookSecretReference): Promise<string>
-  /** Public delivery 検証用に pinned generation を読みます。 */
-  get(reference: AutomationInboundWebhookSecretReference): Promise<Uint8Array>
-  /** Revoke 済み endpoint の全 secret generations を削除します。 */
-  delete(reference: AutomationInboundWebhookSecretReference): Promise<void>
-}
-
-/** Secrets Manager を利用する inbound webhook secret store です。 */
-export class SecretsManagerAutomationInboundWebhookSecretStore
-implements AutomationInboundWebhookSecretStore {
-  /** Secrets Manager client です。 */
-  private readonly client: SecretsManagerClient
-
-  /** Secrets Manager secret store を作成します。 */
-  constructor(client = createSecretsManagerClient()) {
-    this.client = client
-  }
-
-  /** 予約済み generation を作成または response-loss recovery します。 */
-  async provision(reference: AutomationInboundWebhookSecretReference) {
-    const existing = await this.read(reference, true)
-    if (existing) return existing.toString('utf8')
-
-    const signingSecret = randomBytes(32).toString('base64url')
-    const secretExists = await this.describe(reference.secretId)
-    try {
-      if (secretExists) {
-        await this.client.send(new PutSecretValueCommand({
-          SecretId: reference.secretId,
-          ClientRequestToken: reference.secretVersionId,
-          SecretString: signingSecret,
-        }))
-      } else {
-        await this.client.send(new CreateSecretCommand({
-          Name: reference.secretId,
-          ClientRequestToken: reference.secretVersionId,
-          Description: 'mukuroji server-issued inbound webhook signing secret',
-          SecretString: signingSecret,
-        }))
-      }
-      return signingSecret
-    } catch {
-      const recovered = await this.read(reference, true)
-      if (recovered) return recovered.toString('utf8')
-      throw secretUnavailable()
-    }
-  }
-
-  /** Pinned secret generation を読みます。 */
-  async get(reference: AutomationInboundWebhookSecretReference) {
-    const secret = await this.read(reference, false)
-    if (!secret) throw secretUnavailable()
-    return secret
-  }
-
-  /** Endpoint secret resource を削除します。 */
-  async delete(reference: AutomationInboundWebhookSecretReference) {
-    try {
-      await this.client.send(new DeleteSecretCommand({
-        SecretId: reference.secretId,
-        ForceDeleteWithoutRecovery: true,
-      }))
-    } catch (error) {
-      if (isNamedError(error, 'ResourceNotFoundException')) return
-      throw secretUnavailable()
-    }
-  }
-
-  private async describe(secretId: string) {
-    try {
-      await this.client.send(new DescribeSecretCommand({ SecretId: secretId }))
-      return true
-    } catch (error) {
-      if (isNamedError(error, 'ResourceNotFoundException')) return false
-      throw secretUnavailable()
-    }
-  }
-
-  private async read(
-    reference: AutomationInboundWebhookSecretReference,
-    missingIsUndefined: boolean,
-  ) {
-    try {
-      const response = await this.client.send(new GetSecretValueCommand({
-        SecretId: reference.secretId,
-        VersionId: reference.secretVersionId,
-      }))
-      const secret = response.SecretString !== undefined
-        ? Buffer.from(response.SecretString, 'utf8')
-        : response.SecretBinary !== undefined
-          ? Buffer.from(response.SecretBinary)
-          : undefined
-      if (!secret || secret.byteLength === 0) throw secretUnavailable()
-      return secret
-    } catch (error) {
-      if (missingIsUndefined && isNamedError(error, 'ResourceNotFoundException')) return undefined
-      if (error instanceof AutomationError) throw error
-      throw secretUnavailable()
-    }
-  }
-}
 
 /** Workspace/endpoint を inbound-only Secrets Manager resource ID へ変換します。 */
 export function createAutomationInboundWebhookSecretId(
@@ -161,7 +38,7 @@ export function createAutomationInboundWebhookSecretVersionId(
 ) {
   if (!Number.isSafeInteger(secretGeneration) || secretGeneration < 1) {
     throw new AutomationError(
-      400,
+      'invalid-input',
       'InvalidAutomationInput',
       'Inbound webhook secret generation is invalid.',
     )
@@ -230,7 +107,7 @@ export async function readAutomationInboundWebhookBody(
   if (contentLength !== null) {
     const parsed = Number(contentLength)
     if (!Number.isSafeInteger(parsed) || parsed < 0) {
-      throw new AutomationError(400, 'AutomationInboundWebhookLengthInvalid', 'Content-Length is invalid.')
+      throw new AutomationError('invalid-input', 'AutomationInboundWebhookLengthInvalid', 'Content-Length is invalid.')
     }
     if (parsed > maximumBytes) throw bodyTooLarge()
   }
@@ -267,33 +144,13 @@ export function parseAutomationInboundWebhookJson(rawBody: Uint8Array) {
   try {
     text = new TextDecoder('utf-8', { fatal: true }).decode(rawBody)
   } catch {
-    throw new AutomationError(400, 'AutomationInboundWebhookJsonInvalid', 'Request body must be UTF-8 JSON.')
+    throw new AutomationError('invalid-input', 'AutomationInboundWebhookJsonInvalid', 'Request body must be UTF-8 JSON.')
   }
   try {
     return JSON.parse(text) as unknown
   } catch {
-    throw new AutomationError(400, 'AutomationInboundWebhookJsonInvalid', 'Request body must be valid JSON.')
+    throw new AutomationError('invalid-input', 'AutomationInboundWebhookJsonInvalid', 'Request body must be valid JSON.')
   }
-}
-
-function createSecretsManagerClient() {
-  const endpoint = [
-    process.env.SECRETS_MANAGER_ENDPOINT,
-    process.env.AWS_ENDPOINT_URL_SECRETSMANAGER,
-    process.env.AWS_ENDPOINT_URL,
-  ].map((value) => value?.trim()).find(Boolean)
-  return new SecretsManagerClient({
-    region: process.env.AWS_REGION ?? 'us-east-1',
-    ...(endpoint
-      ? {
-          endpoint,
-          credentials: {
-            accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? 'test',
-            secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? 'test',
-          },
-        }
-      : {}),
-  })
 }
 
 function readInboundWebhookSecretPrefix() {
@@ -306,7 +163,7 @@ function readInboundWebhookSecretPrefix() {
 function readIdentifier(value: string, label: string) {
   const normalized = value.trim()
   if (!normalized || normalized.length > 256 || !/^[A-Za-z0-9._:@#+/-]+$/.test(normalized)) {
-    throw new AutomationError(400, 'InvalidAutomationInput', `${label} is invalid.`)
+    throw new AutomationError('invalid-input', 'InvalidAutomationInput', `${label} is invalid.`)
   }
   return normalized
 }
@@ -316,26 +173,13 @@ function hashText(value: string) {
 }
 
 function signatureRejected(message: string) {
-  return new AutomationError(401, 'AutomationInboundWebhookSignatureInvalid', message)
+  return new AutomationError('unauthenticated', 'AutomationInboundWebhookSignatureInvalid', message)
 }
 
 function bodyTooLarge() {
   return new AutomationError(
-    413,
+    'payload-too-large',
     'AutomationInboundWebhookBodyTooLarge',
     'Inbound webhook body exceeds the configured limit.',
   )
-}
-
-function secretUnavailable() {
-  return new AutomationError(
-    503,
-    'AutomationInboundWebhookSecretUnavailable',
-    'Inbound webhook signing secret is unavailable.',
-    true,
-  )
-}
-
-function isNamedError(error: unknown, name: string) {
-  return typeof error === 'object' && error !== null && 'name' in error && error.name === name
 }

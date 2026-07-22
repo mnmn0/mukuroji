@@ -327,31 +327,45 @@ import {
 import {
   createWorkItemConfigurationRouter,
 } from '../modules/work-items/adapter-in/http/work-item-configuration-router'
+import { normalizeAutomationActionFailure } from '../modules/automation/application/action-failure'
 import {
-  AUTOMATION_TEMPLATE_APPLICATION_LEASE_MS,
-  AutomationEngine,
-  AutomationError,
   applyBulkOperation,
-  normalizeAutomationActionFailure,
   previewBulkOperation,
   retryBulkOperation,
-  toAutomationInboundWebhookEndpoint,
   undoBulkOperation,
-  validateCreateAutomationRuleInput,
-  validateCreateAutomationTemplateInput,
+} from '../modules/automation/application/bulk-operation-service'
+import { AutomationEngine } from '../modules/automation/application/execution-service'
+import {
+  toAutomationInboundWebhookEndpoint,
+} from '../modules/automation/application/inbound-webhook-view'
+import type {
+  AutomationActionExecutionContext,
+  AutomationActionExecutor,
+  AutomationInboundWebhookEndpointRecord,
+  AutomationInboundWebhookProvisioning,
+  AutomationRuleTemplatePort,
+  BulkOperationAdapter,
+} from '../modules/automation/application/ports'
+import {
+  AUTOMATION_TEMPLATE_APPLICATION_LEASE_MS,
+} from '../modules/automation/application/template-application-policy'
+import {
+  AutomationError,
+  type AutomationErrorCategory,
+} from '../modules/automation/domain/automation-error'
+import { isAutomationValue } from '../modules/automation/domain/automation-value'
+import {
   validateApplyAutomationTemplateInput,
   validateAutomationInboundWebhookLifecycleInput,
   validateCreateAutomationInboundWebhookEndpointInput,
+  validateCreateAutomationTemplateInput,
   validateCreateRecurringWorkInput,
   validateUpdateAutomationInboundWebhookEndpointInput,
-  isAutomationValue,
-  type AutomationActionExecutionContext,
-  type AutomationActionExecutor,
-  type AutomationEvent,
-  type AutomationInboundWebhookEndpointRecord,
-  type AutomationInboundWebhookProvisioning,
-  type BulkOperationAdapter,
-} from '../modules/automation/automation'
+} from '../modules/automation/domain/management-validation'
+import type { AutomationEvent } from '../modules/automation/domain/rule-evaluation'
+import {
+  validateCreateAutomationRuleInput,
+} from '../modules/automation/domain/rule-validation'
 import {
   isAutomationInboundWebhookJsonContentType,
   parseAutomationInboundWebhookJson,
@@ -1009,8 +1023,20 @@ const workItemDependencies: WorkItemDependencies = {
   },
 }
 const automationDependencies: AutomationDependencies = {
-  get automation() {
-    return requireAppDependencies().automation.automation
+  get ruleTemplates() {
+    return requireAppDependencies().automation.ruleTemplates
+  },
+  get inboundWebhooks() {
+    return requireAppDependencies().automation.inboundWebhooks
+  },
+  get recurringSchedules() {
+    return requireAppDependencies().automation.recurringSchedules
+  },
+  get executions() {
+    return requireAppDependencies().automation.executions
+  },
+  get bulkOperations() {
+    return requireAppDependencies().automation.bulkOperations
   },
   get automationInboundWebhookSecrets() {
     return requireAppDependencies().automation.automationInboundWebhookSecrets
@@ -4291,7 +4317,7 @@ routeApp.route('/', createNotificationRouter({
 routeApp.get('/api/automation/rules', async (c) => {
   try {
     const principal = await authenticateAutomationPrincipal(c)
-    return c.json({ rules: await automationDependencies.automation.listRules(principal.directoryId) })
+    return c.json({ rules: await automationDependencies.ruleTemplates.listRules(principal.directoryId) })
   } catch (error) {
     return toAutomationErrorResponse(c, error)
   }
@@ -4302,7 +4328,7 @@ routeApp.post('/api/automation/rules', async (c) => {
   try {
     const principal = await authenticateAutomationPrincipal(c, true)
     const input = validateCreateAutomationRuleInput(await readAutomationJson(c))
-    return c.json(await automationDependencies.automation.createRule(
+    return c.json(await automationDependencies.ruleTemplates.createRule(
       principal.directoryId,
       input,
       c.req.header('Idempotency-Key')?.trim() || undefined,
@@ -4317,7 +4343,7 @@ routeApp.patch('/api/automation/rules/:ruleId', async (c) => {
   try {
     const principal = await authenticateAutomationPrincipal(c, true)
     const input = await readAutomationJson(c) as UpdateAutomationRuleInput
-    return c.json(await automationDependencies.automation.updateRule(
+    return c.json(await automationDependencies.ruleTemplates.updateRule(
       principal.directoryId,
       c.req.param('ruleId'),
       input,
@@ -4332,7 +4358,7 @@ routeApp.get('/api/automation/inbound-webhooks', async (c) => {
   try {
     const principal = await authenticateAutomationPrincipal(c, true)
     return c.json({
-      endpoints: await automationDependencies.automation.listInboundWebhookEndpoints(principal.directoryId),
+      endpoints: await automationDependencies.inboundWebhooks.listInboundWebhookEndpoints(principal.directoryId),
     })
   } catch (error) {
     return toAutomationErrorResponse(c, error)
@@ -4344,7 +4370,7 @@ routeApp.post('/api/automation/inbound-webhooks', async (c) => {
   try {
     const principal = await authenticateAutomationPrincipal(c, true)
     const idempotencyKey = readRequiredInboundWebhookIdempotencyKey(c)
-    const provisioning = await automationDependencies.automation.reserveCreateInboundWebhookEndpoint(
+    const provisioning = await automationDependencies.inboundWebhooks.reserveCreateInboundWebhookEndpoint(
       principal.directoryId,
       principal.actorId,
       validateCreateAutomationInboundWebhookEndpointInput(await readAutomationJson(c)),
@@ -4380,7 +4406,7 @@ routeApp.get('/api/automation/inbound-webhooks/:endpointId', async (c) => {
 routeApp.patch('/api/automation/inbound-webhooks/:endpointId', async (c) => {
   try {
     const principal = await authenticateAutomationPrincipal(c, true)
-    return c.json(await automationDependencies.automation.updateInboundWebhookEndpoint(
+    return c.json(await automationDependencies.inboundWebhooks.updateInboundWebhookEndpoint(
       principal.directoryId,
       c.req.param('endpointId'),
       validateUpdateAutomationInboundWebhookEndpointInput(await readAutomationJson(c)),
@@ -4394,7 +4420,7 @@ routeApp.patch('/api/automation/inbound-webhooks/:endpointId', async (c) => {
 routeApp.post('/api/automation/inbound-webhooks/:endpointId/pause', async (c) => {
   try {
     const principal = await authenticateAutomationPrincipal(c, true)
-    return c.json(await automationDependencies.automation.setInboundWebhookEndpointStatus(
+    return c.json(await automationDependencies.inboundWebhooks.setInboundWebhookEndpointStatus(
       principal.directoryId,
       c.req.param('endpointId'),
       validateAutomationInboundWebhookLifecycleInput(await readAutomationJson(c)),
@@ -4409,7 +4435,7 @@ routeApp.post('/api/automation/inbound-webhooks/:endpointId/pause', async (c) =>
 routeApp.post('/api/automation/inbound-webhooks/:endpointId/resume', async (c) => {
   try {
     const principal = await authenticateAutomationPrincipal(c, true)
-    return c.json(await automationDependencies.automation.setInboundWebhookEndpointStatus(
+    return c.json(await automationDependencies.inboundWebhooks.setInboundWebhookEndpointStatus(
       principal.directoryId,
       c.req.param('endpointId'),
       validateAutomationInboundWebhookLifecycleInput(await readAutomationJson(c)),
@@ -4425,7 +4451,7 @@ routeApp.post('/api/automation/inbound-webhooks/:endpointId/rotate', async (c) =
   try {
     const principal = await authenticateAutomationPrincipal(c, true)
     const idempotencyKey = readRequiredInboundWebhookIdempotencyKey(c)
-    const provisioning = await automationDependencies.automation.reserveRotateInboundWebhookEndpoint(
+    const provisioning = await automationDependencies.inboundWebhooks.reserveRotateInboundWebhookEndpoint(
       principal.directoryId,
       principal.actorId,
       c.req.param('endpointId'),
@@ -4448,7 +4474,7 @@ routeApp.post('/api/automation/inbound-webhooks/:endpointId/rotate', async (c) =
 routeApp.delete('/api/automation/inbound-webhooks/:endpointId', async (c) => {
   try {
     const principal = await authenticateAutomationPrincipal(c, true)
-    const revoked = await automationDependencies.automation.revokeInboundWebhookEndpoint(
+    const revoked = await automationDependencies.inboundWebhooks.revokeInboundWebhookEndpoint(
       principal.directoryId,
       c.req.param('endpointId'),
       validateAutomationInboundWebhookLifecycleInput(await readAutomationJson(c)),
@@ -4465,7 +4491,7 @@ routeApp.delete('/api/automation/inbound-webhooks/:endpointId', async (c) => {
 /** External sender の raw JSON delivery を HMAC 検証して durable outbox event に変換します。 */
 routeApp.post('/api/automation/inbound-webhooks/:opaqueEndpointId', async (c) => {
   try {
-    const endpoint = await automationDependencies.automation.resolveInboundWebhookEndpoint(
+    const endpoint = await automationDependencies.inboundWebhooks.resolveInboundWebhookEndpoint(
       c.req.param('opaqueEndpointId'),
     )
     if (!endpoint || endpoint.status === 'provisioning' || endpoint.status === 'revoked') {
@@ -4473,14 +4499,14 @@ routeApp.post('/api/automation/inbound-webhooks/:opaqueEndpointId', async (c) =>
     }
     if (endpoint.status === 'paused') {
       throw new AutomationError(
-        423,
+        'locked',
         'AutomationInboundWebhookPaused',
         'Inbound webhook endpoint is paused.',
       )
     }
     if (!isAutomationInboundWebhookJsonContentType(c.req.header('Content-Type'))) {
       throw new AutomationError(
-        415,
+        'unsupported-media-type',
         'AutomationInboundWebhookContentTypeUnsupported',
         'Content-Type must be application/json with optional UTF-8 charset.',
       )
@@ -4502,7 +4528,7 @@ routeApp.post('/api/automation/inbound-webhooks/:opaqueEndpointId', async (c) =>
     const payload = parseAutomationInboundWebhookJson(rawBody)
     if (!isAutomationValue(payload)) {
       throw new AutomationError(
-        400,
+        'invalid-input',
         'AutomationInboundWebhookJsonInvalid',
         'Request body contains an unsupported JSON value.',
       )
@@ -4547,13 +4573,13 @@ routeApp.post('/api/automation/inbound-webhooks/:opaqueEndpointId', async (c) =>
         getConfiguredAuditRetentionDays(),
       ),
     })
-    const delivery = await automationDependencies.automation.recordInboundWebhookDelivery(endpoint, {
+    const delivery = await automationDependencies.inboundWebhooks.recordInboundWebhookDelivery(endpoint, {
       idempotencyKey,
       bodyFingerprint,
       signatureFingerprint,
       signatureTimestamp,
       eventId: event.eventId,
-      auditTransactItem: createAuditEventTransactPut(auditTableName, event),
+      auditMutation: createAuditEventTransactPut(auditTableName, event),
     })
     return c.json({ eventId: delivery.eventId }, 202)
   } catch (error) {
@@ -4565,7 +4591,7 @@ routeApp.post('/api/automation/inbound-webhooks/:opaqueEndpointId', async (c) =>
 routeApp.get('/api/automation/templates', async (c) => {
   try {
     const principal = await authenticateAutomationPrincipal(c)
-    return c.json({ templates: await automationDependencies.automation.listTemplates(principal.directoryId) })
+    return c.json({ templates: await automationDependencies.ruleTemplates.listTemplates(principal.directoryId) })
   } catch (error) {
     return toAutomationErrorResponse(c, error)
   }
@@ -4576,7 +4602,7 @@ routeApp.post('/api/automation/templates', async (c) => {
   try {
     const principal = await authenticateAutomationPrincipal(c, true)
     const input = validateCreateAutomationTemplateInput(await readAutomationJson(c))
-    return c.json(await automationDependencies.automation.createTemplate(
+    return c.json(await automationDependencies.ruleTemplates.createTemplate(
       principal.directoryId,
       input,
       c.req.header('Idempotency-Key')?.trim() || undefined,
@@ -4591,7 +4617,7 @@ routeApp.patch('/api/automation/templates/:templateId', async (c) => {
   try {
     const principal = await authenticateAutomationPrincipal(c, true)
     const input = await readAutomationJson(c) as UpdateAutomationTemplateInput
-    return c.json(await automationDependencies.automation.updateTemplate(
+    return c.json(await automationDependencies.ruleTemplates.updateTemplate(
       principal.directoryId,
       c.req.param('templateId'),
       input,
@@ -4605,14 +4631,14 @@ routeApp.patch('/api/automation/templates/:templateId', async (c) => {
 routeApp.post('/api/automation/templates/:templateId/duplicate', async (c) => {
   try {
     const principal = await authenticateAutomationPrincipal(c, true)
-    const source = await automationDependencies.automation.getTemplate(
+    const source = await automationDependencies.ruleTemplates.getTemplate(
       principal.directoryId,
       c.req.param('templateId'),
     )
     if (!source) {
-      throw new AutomationError(404, 'AutomationTemplateNotFound', 'Automation template was not found.')
+      throw new AutomationError('not-found', 'AutomationTemplateNotFound', 'Automation template was not found.')
     }
-    return c.json(await automationDependencies.automation.createTemplate(
+    return c.json(await automationDependencies.ruleTemplates.createTemplate(
       principal.directoryId,
       validateCreateAutomationTemplateInput({
         kind: source.kind,
@@ -4634,7 +4660,7 @@ routeApp.post('/api/automation/templates/:templateId/applications', async (c) =>
     const idempotencyKey = c.req.header('Idempotency-Key')?.trim()
     if (!idempotencyKey) {
       throw new AutomationError(
-        400,
+        'invalid-input',
         'AutomationIdempotencyKeyRequired',
         'Idempotency-Key is required for template application.',
       )
@@ -4646,7 +4672,7 @@ routeApp.post('/api/automation/templates/:templateId/applications', async (c) =>
       input.target.scopeId !== principal.directoryId
     ) {
       throw new AutomationError(
-        400,
+        'invalid-input',
         'InvalidAutomationInput',
         'Workspace workflow target must match the authenticated Workspace.',
       )
@@ -4654,7 +4680,7 @@ routeApp.post('/api/automation/templates/:templateId/applications', async (c) =>
     if (input.target.kind === 'workflow' && input.target.scopeType === 'team') {
       await requireTeamConfigurationAdministration(principal, input.target.scopeId)
     }
-    const application = await automationDependencies.automation.reserveTemplateApplication(
+    const application = await automationDependencies.ruleTemplates.reserveTemplateApplication(
       principal.directoryId,
       principal.actorId,
       c.req.param('templateId'),
@@ -4671,13 +4697,13 @@ routeApp.post('/api/automation/templates/:templateId/applications', async (c) =>
 routeApp.get('/api/automation/template-applications/:applicationId', async (c) => {
   try {
     const principal = await authenticateAutomationPrincipal(c, true)
-    const application = await automationDependencies.automation.getTemplateApplication(
+    const application = await automationDependencies.ruleTemplates.getTemplateApplication(
       principal.directoryId,
       c.req.param('applicationId'),
     )
     if (!application) {
       throw new AutomationError(
-        404,
+        'not-found',
         'AutomationTemplateApplicationNotFound',
         'Template application was not found.',
       )
@@ -4692,7 +4718,7 @@ routeApp.get('/api/automation/template-applications/:applicationId', async (c) =
 routeApp.get('/api/recurring-work', async (c) => {
   try {
     const principal = await authenticateAutomationPrincipal(c)
-    return c.json({ recurringWorks: await automationDependencies.automation.listRecurringWorks(principal.directoryId) })
+    return c.json({ recurringWorks: await automationDependencies.recurringSchedules.listRecurringWorks(principal.directoryId) })
   } catch (error) {
     return toAutomationErrorResponse(c, error)
   }
@@ -4704,7 +4730,7 @@ routeApp.post('/api/recurring-work', async (c) => {
     const principal = await authenticateAutomationPrincipal(c, true)
     const input = validateCreateRecurringWorkInput(await readAutomationJson(c))
     await requireAutomationTeam(principal.directoryId, input.teamId)
-    return c.json(await automationDependencies.automation.createRecurringWork(
+    return c.json(await automationDependencies.recurringSchedules.createRecurringWork(
       principal.directoryId,
       input,
       c.req.header('Idempotency-Key')?.trim() || undefined,
@@ -4719,15 +4745,15 @@ routeApp.patch('/api/recurring-work/:recurringWorkId', async (c) => {
   try {
     const principal = await authenticateAutomationPrincipal(c, true)
     const input = await readAutomationJson(c) as UpdateRecurringWorkInput
-    const current = await automationDependencies.automation.getRecurringWork(
+    const current = await automationDependencies.recurringSchedules.getRecurringWork(
       principal.directoryId,
       c.req.param('recurringWorkId'),
     )
     if (!current) {
-      throw new AutomationError(404, 'RecurringWorkNotFound', 'Recurring Work definition was not found.')
+      throw new AutomationError('not-found', 'RecurringWorkNotFound', 'Recurring Work definition was not found.')
     }
     await requireAutomationTeam(principal.directoryId, input.teamId ?? current.teamId)
-    return c.json(await automationDependencies.automation.updateRecurringWork(
+    return c.json(await automationDependencies.recurringSchedules.updateRecurringWork(
       principal.directoryId,
       c.req.param('recurringWorkId'),
       input,
@@ -4741,7 +4767,7 @@ routeApp.patch('/api/recurring-work/:recurringWorkId', async (c) => {
 routeApp.get('/api/automation/executions', async (c) => {
   try {
     const principal = await authenticateAutomationPrincipal(c)
-    return c.json(await automationDependencies.automation.listExecutions({
+    return c.json(await automationDependencies.executions.listExecutions({
       workspaceId: principal.directoryId,
       ruleId: c.req.query('ruleId'),
       status: readAutomationExecutionStatus(c.req.query('status')),
@@ -4758,11 +4784,14 @@ routeApp.post('/api/automation/executions/:executionId/retry', async (c) => {
   try {
     const principal = await authenticateAutomationPrincipal(c, true)
     const executionId = c.req.param('executionId')
-    const event = await automationDependencies.automation.getExecutionEvent(principal.directoryId, executionId)
+    const event = await automationDependencies.executions.getExecutionEvent(principal.directoryId, executionId)
     if (!event) {
-      throw new AutomationError(404, 'AutomationExecutionNotFound', 'Automation execution was not found.')
+      throw new AutomationError('not-found', 'AutomationExecutionNotFound', 'Automation execution was not found.')
     }
-    const engine = new AutomationEngine(automationDependencies.automation, createAutomationActionExecutor())
+    const engine = new AutomationEngine(
+      automationDependencies.executions,
+      createAutomationActionExecutor(),
+    )
     return c.json(await engine.retryExecution(principal.directoryId, executionId, event))
   } catch (error) {
     return toAutomationErrorResponse(c, error)
@@ -4822,7 +4851,7 @@ routeApp.post('/api/bulk-operations', async (c) => {
       preview,
       adapter,
       principal.userKey,
-      automationDependencies.automation,
+      automationDependencies.bulkOperations,
     )
     return c.json(toBulkOperationResponse(operation), 201)
   } catch (error) {
@@ -4840,7 +4869,7 @@ routeApp.post('/api/bulk-operations/:operationId/retry', async (c) => {
     const retried = await retryBulkOperation(
       operation,
       createApiBulkOperationAdapter(principal, c),
-      automationDependencies.automation,
+      automationDependencies.bulkOperations,
     )
     return c.json(toBulkOperationResponse(retried))
   } catch (error) {
@@ -4858,7 +4887,7 @@ routeApp.post('/api/bulk-operations/:operationId/undo', async (c) => {
     const undone = await undoBulkOperation(
       operation,
       createApiBulkOperationAdapter(principal, c),
-      automationDependencies.automation,
+      automationDependencies.bulkOperations,
     )
     return c.json(toBulkOperationResponse(undone))
   } catch (error) {
@@ -8877,7 +8906,7 @@ async function readAutomationJson(c: Context) {
   const value = await readJson<unknown>(c.req)
   if (!isRecord(value)) {
     throw new AutomationError(
-      400,
+      'invalid-input',
       'InvalidAutomationInput',
       'A JSON object request body is required.',
     )
@@ -8888,7 +8917,7 @@ async function readAutomationJson(c: Context) {
 async function authenticateAutomationPrincipal(c: Context, manage = false) {
   const accessToken = readBearerAccessToken(c)
   if (!accessToken) {
-    throw new AutomationError(401, 'AutomationAuthenticationRequired', 'Bearer token is required.')
+    throw new AutomationError('unauthenticated', 'AutomationAuthenticationRequired', 'Bearer token is required.')
   }
   const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
   if (manage) requireWorkspaceAdministration(principal)
@@ -8899,7 +8928,7 @@ function readRequiredInboundWebhookIdempotencyKey(c: Context) {
   const value = c.req.header('Idempotency-Key')?.trim()
   if (!value || value.length > 256) {
     throw new AutomationError(
-      400,
+      'invalid-input',
       'AutomationInboundWebhookIdempotencyKeyRequired',
       'A non-empty Idempotency-Key of at most 256 characters is required.',
     )
@@ -8915,7 +8944,7 @@ async function requireAutomationInboundWebhookEndpoint(
   workspaceId: string,
   endpointId: string,
 ) {
-  const endpoint = await automationDependencies.automation.getInboundWebhookEndpoint(workspaceId, endpointId)
+  const endpoint = await automationDependencies.inboundWebhooks.getInboundWebhookEndpoint(workspaceId, endpointId)
   if (!endpoint) throw automationInboundWebhookNotFound()
   return endpoint
 }
@@ -8939,11 +8968,11 @@ async function provisionAutomationInboundWebhookEndpoint(
   try {
     const signingSecret = await automationDependencies.automationInboundWebhookSecrets.provision(secretReference)
     return {
-      completed: await automationDependencies.automation.completeInboundWebhookProvisioning(provisioning),
+      completed: await automationDependencies.inboundWebhooks.completeInboundWebhookProvisioning(provisioning),
       signingSecret,
     }
   } catch (error) {
-    const current = await automationDependencies.automation.getInboundWebhookEndpoint(
+    const current = await automationDependencies.inboundWebhooks.getInboundWebhookEndpoint(
       provisioning.endpoint.workspaceId,
       provisioning.endpoint.id,
     ).catch(() => undefined)
@@ -8956,7 +8985,7 @@ async function provisionAutomationInboundWebhookEndpoint(
 
 function automationInboundWebhookNotFound() {
   return new AutomationError(
-    404,
+    'not-found',
     'AutomationInboundWebhookNotFound',
     'Inbound webhook endpoint was not found.',
   )
@@ -8964,7 +8993,7 @@ function automationInboundWebhookNotFound() {
 
 function automationInboundWebhookUnavailable() {
   return new AutomationError(
-    503,
+    'unavailable',
     'AutomationInboundWebhookUnavailable',
     'Inbound webhook service is unavailable.',
     true,
@@ -8975,7 +9004,7 @@ function readAutomationPageLimit(value: string | undefined) {
   if (value === undefined) return undefined
   const limit = Number(value)
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
-    throw new AutomationError(400, 'InvalidAutomationQuery', 'Automation page limit is invalid.')
+    throw new AutomationError('invalid-input', 'InvalidAutomationQuery', 'Automation page limit is invalid.')
   }
   return limit
 }
@@ -8992,7 +9021,7 @@ function readAutomationExecutionStatus(
     value === 'dead-letter' ||
     value === 'skipped'
   ) return value
-  throw new AutomationError(400, 'InvalidAutomationQuery', 'Automation execution status is invalid.')
+  throw new AutomationError('invalid-input', 'InvalidAutomationQuery', 'Automation execution status is invalid.')
 }
 
 function readWorkspaceBulkOperationRequest(
@@ -9006,9 +9035,9 @@ function readWorkspaceBulkOperationRequest(
 }
 
 async function requireBulkOperation(workspaceId: string, operationId: string) {
-  const operation = await automationDependencies.automation.getBulkOperation(workspaceId, operationId)
+  const operation = await automationDependencies.bulkOperations.getBulkOperation(workspaceId, operationId)
   if (!operation) {
-    throw new AutomationError(404, 'BulkOperationNotFound', 'Bulk operation was not found.')
+    throw new AutomationError('not-found', 'BulkOperationNotFound', 'Bulk operation was not found.')
   }
   return operation
 }
@@ -9021,7 +9050,7 @@ async function requireBulkOperation(workspaceId: string, operationId: string) {
  */
 export function requireBulkOperationOwner(operation: BulkOperation, actorMemberKey: string) {
   if (operation.actorMemberKey !== actorMemberKey) {
-    throw new AutomationError(403, 'BulkOperationForbidden', 'Bulk operation access is denied.')
+    throw new AutomationError('forbidden', 'BulkOperationForbidden', 'Bulk operation access is denied.')
   }
 }
 
@@ -9061,7 +9090,7 @@ async function putAutomationIngressEvent(
 ) {
   const tableName = getConfiguredAuditTableName()
   if (!tableName) {
-    throw new AutomationError(503, 'AutomationAuditUnavailable', 'Audit outbox is not configured.', true)
+    throw new AutomationError('unavailable', 'AutomationAuditUnavailable', 'Audit outbox is not configured.', true)
   }
   const context = createApiMutationContext(c, principal, metadata)
   const event = createAuditEvent({
@@ -9078,7 +9107,7 @@ async function putAutomationIngressEvent(
   const auditEvents = workspaceDependencies.auditEvents
   if (!auditEvents.putEvent) {
     throw new AutomationError(
-      503,
+      'unavailable',
       'AutomationAuditUnavailable',
       'Audit outbox does not provide an immutable writer.',
       true,
@@ -9089,7 +9118,7 @@ async function putAutomationIngressEvent(
   } catch (error) {
     if (error instanceof TypeError) {
       throw new AutomationError(
-        409,
+        'conflict',
         'IdempotencyConflict',
         'Idempotency key was already used with different automation ingress input.',
       )
@@ -9107,20 +9136,20 @@ async function executeAutomationTemplateApplication(
   if (initialApplication.status === 'succeeded') return initialApplication
   assertTemplateApplicationNotFailed(initialApplication)
   const now = new Date()
-  const application = await automationDependencies.automation.claimTemplateApplication(
+  const application = await automationDependencies.ruleTemplates.claimTemplateApplication(
     initialApplication,
     now,
     new Date(now.getTime() + AUTOMATION_TEMPLATE_APPLICATION_LEASE_MS).toISOString(),
   )
   if (!application) {
-    const current = await automationDependencies.automation.getTemplateApplication(
+    const current = await automationDependencies.ruleTemplates.getTemplateApplication(
       initialApplication.workspaceId,
       initialApplication.id,
     )
     if (current?.status === 'succeeded') return current
     if (current) assertTemplateApplicationNotFailed(current)
     throw new AutomationError(
-      409,
+      'conflict',
       'AutomationTemplateApplicationInProgress',
       'Template application is already in progress. Retry with the same Idempotency-Key.',
       true,
@@ -9128,14 +9157,14 @@ async function executeAutomationTemplateApplication(
   }
 
   try {
-    const template = await automationDependencies.automation.getTemplateVersion(
+    const template = await automationDependencies.ruleTemplates.getTemplateVersion(
       application.workspaceId,
       application.templateId,
       application.templateVersion,
     )
     if (!template || template.kind !== application.kind) {
       throw new AutomationError(
-        503,
+        'unavailable',
         'AutomationTemplateVersionUnavailable',
         'Pinned template version is unavailable.',
         true,
@@ -9144,7 +9173,7 @@ async function executeAutomationTemplateApplication(
     if (application.kind === 'project') {
       const target = application.target
       if (template.kind !== 'project' || target.kind !== 'project') {
-        throw new AutomationError(503, 'AutomationTemplateApplicationInvalid', 'Project template application is invalid.')
+        throw new AutomationError('unavailable', 'AutomationTemplateApplicationInvalid', 'Project template application is invalid.')
       }
       const names = readLocalizedNames(template.payload)
       const result = {
@@ -9175,7 +9204,7 @@ async function executeAutomationTemplateApplication(
           },
           application.id,
         ),
-        [automationDependencies.automation.createTemplateApplicationCompletionTransactItem(application, result)],
+        [automationDependencies.ruleTemplates.createTemplateApplicationCompletionMutation(application, result)],
       )
       await projectWorkspaceSearchDocumentBestEffort(
         () => {
@@ -9193,7 +9222,7 @@ async function executeAutomationTemplateApplication(
     }
 
     if (template.kind !== 'workflow' || application.target.kind !== 'workflow') {
-      throw new AutomationError(503, 'AutomationTemplateApplicationInvalid', 'Workflow template application is invalid.')
+      throw new AutomationError('unavailable', 'AutomationTemplateApplicationInvalid', 'Workflow template application is invalid.')
     }
     const target = application.target
     const resolved = target.scopeType === 'workspace'
@@ -9230,7 +9259,7 @@ async function executeAutomationTemplateApplication(
       revision: target.expectedRevision + 1,
     } as const
     const completionTransactItems = [
-      automationDependencies.automation.createTemplateApplicationCompletionTransactItem(application, result),
+      automationDependencies.ruleTemplates.createTemplateApplicationCompletionMutation(application, result),
     ]
     if (target.scopeType === 'workspace') {
       await workItemDependencies.workItemConfigurations.saveWorkspaceConfiguration(
@@ -9264,7 +9293,7 @@ async function executeAutomationTemplateApplication(
     }
     return await requireCompletedTemplateApplication(application)
   } catch (error) {
-    const current = await automationDependencies.automation.getTemplateApplication(application.workspaceId, application.id)
+    const current = await automationDependencies.ruleTemplates.getTemplateApplication(application.workspaceId, application.id)
       .catch(() => undefined)
     if (current?.status === 'succeeded') return current
     if (
@@ -9281,17 +9310,17 @@ async function executeAutomationTemplateApplication(
 function assertTemplateApplicationNotFailed(application: AutomationTemplateApplication) {
   if (application.status !== 'failed') return
   throw new AutomationError(
-    409,
+    'conflict',
     application.errorCode ?? 'AutomationTemplateApplicationFailed',
     application.errorMessage ?? 'Template application previously failed.',
   )
 }
 
 async function requireCompletedTemplateApplication(application: AutomationTemplateApplication) {
-  const completed = await automationDependencies.automation.getTemplateApplication(application.workspaceId, application.id)
+  const completed = await automationDependencies.ruleTemplates.getTemplateApplication(application.workspaceId, application.id)
   if (completed?.status === 'succeeded') return completed
   throw new AutomationError(
-    503,
+    'unavailable',
     'AutomationTemplateApplicationCompletionUnavailable',
     'Template application completion is not yet available.',
     true,
@@ -9311,7 +9340,7 @@ async function saveTemplateApplicationFailureState(
   } = application
   const updatedAt = new Date().toISOString()
   if (!isTerminalTemplateApplicationError(error)) {
-    await automationDependencies.automation.saveTemplateApplication({
+    await automationDependencies.ruleTemplates.saveTemplateApplication({
       ...base,
       status: 'pending',
       revision: application.revision + 1,
@@ -9327,13 +9356,15 @@ async function saveTemplateApplicationFailureState(
     errorMessage: error.message,
     updatedAt,
   }
-  await automationDependencies.automation.saveTemplateApplication(failed, application.revision)
+  await automationDependencies.ruleTemplates.saveTemplateApplication(failed, application.revision)
 }
 
 function isTerminalTemplateApplicationError(
   error: unknown,
 ): error is AutomationError | WorkItemConfigurationError | ProjectDataError {
-  if (error instanceof AutomationError) return error.status < 500 && !error.retryable
+  if (error instanceof AutomationError) {
+    return error.category !== 'unavailable' && !error.retryable
+  }
   return (error instanceof WorkItemConfigurationError || error instanceof ProjectDataError) &&
     error.status < 500
 }
@@ -9386,7 +9417,7 @@ function createApiBulkOperationAdapter(
   const loadCurrentItem = async (request: BulkOperationRequest, itemIndex: number) => {
     const item = request.items[itemIndex]
     if (!item) {
-      throw new AutomationError(400, 'BulkOperationTargetMissing', 'Bulk operation target is missing.')
+      throw new AutomationError('invalid-input', 'BulkOperationTargetMissing', 'Bulk operation target is missing.')
     }
     const context = await requireTeamPermission(principal, item.teamId, 'member')
     const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
@@ -9408,7 +9439,7 @@ function createApiBulkOperationAdapter(
     const loaded = await loadCurrentItem(request, itemIndex)
     if (loaded.detail.issue.revision !== loaded.item.expectedRevision) {
       throw new AutomationError(
-        409,
+        'conflict',
         'WorkItemRevisionConflict',
         'Work Item changed after it was selected.',
       )
@@ -9611,7 +9642,7 @@ function createApiBulkOperationAdapter(
     async undo(operation, itemIndex) {
       const item = operation.items[itemIndex]
       if (!item?.undoPayload || item.resultingRevision === undefined) {
-        throw new AutomationError(409, 'BulkUndoUnavailable', 'Bulk operation item cannot be undone.')
+        throw new AutomationError('conflict', 'BulkUndoUnavailable', 'Bulk operation item cannot be undone.')
       }
       const request: BulkOperationRequest = {
         workspaceId: operation.workspaceId,
@@ -9856,7 +9887,7 @@ export interface AutomationActionExecutorDependencies {
   /** Enables synchronous Workspace search projection updates. */
   workspaceSearchProjectionEnabled: boolean
   /** Provides Automation template persistence. */
-  automation: AutomationDependencies['automation']
+  automation: AutomationRuleTemplatePort
 }
 
 const ambientAutomationActionExecutorDependencies: AutomationActionExecutorDependencies = {
@@ -9888,7 +9919,7 @@ const ambientAutomationActionExecutorDependencies: AutomationActionExecutorDepen
     return workItemDependencies.workspaceSearchProjectionEnabled
   },
   get automation() {
-    return automationDependencies.automation
+    return automationDependencies.ruleTemplates
   },
 }
 
@@ -9971,7 +10002,7 @@ async function executeAutomationWorkItemUpdate(
   const unsafeFields = Object.keys(patch).filter((field) => !bulkEditableWorkItemFields.has(field))
   if (unsafeFields.length > 0) {
     throw new AutomationError(
-      400,
+      'invalid-input',
       'AutomationUpdateFieldUnsupported',
       `Automation cannot update fields: ${unsafeFields.join(', ')}.`,
     )
@@ -10120,7 +10151,7 @@ async function executeAutomationWorkItemCreate(
     : undefined
   if (action.templateId && (!template || !template.enabled || template.kind !== 'work-item')) {
     throw new AutomationError(
-      409,
+      'conflict',
       'AutomationTemplateUnavailable',
       'The selected Work Item template is unavailable.',
     )
@@ -10131,7 +10162,7 @@ async function executeAutomationWorkItemCreate(
   }
   const teamId = readAutomationText(values.teamId) ?? readAutomationMetadataText(context.event, 'teamId')
   if (!teamId) {
-    throw new AutomationError(400, 'AutomationTargetMissing', 'Create action requires a Team ID.')
+    throw new AutomationError('invalid-input', 'AutomationTargetMissing', 'Create action requires a Team ID.')
   }
   const body = { ...values }
   delete body.teamId
@@ -10194,7 +10225,7 @@ async function requireAutomationTeam(
   const team = directory.teams.find((candidate) => candidate.id === teamId)
   if (!team) {
     throw new AutomationError(
-      409,
+      'conflict',
       'AutomationTeamUnavailable',
       'The selected Work Item Team is unavailable.',
     )
@@ -10232,7 +10263,7 @@ async function executeAutomationApproval(
     !team.projects.some((project) => project.id === detail.issue.assignedProjectId)
   ) {
     throw new AutomationError(
-      409,
+      'conflict',
       'AutomationApprovalTargetUnavailable',
       'The approval Work Item project is not active in its owner Team.',
     )
@@ -10257,7 +10288,7 @@ async function executeAutomationApproval(
   const executionStartedAtEpoch = Date.parse(context.execution.startedAt)
   if (!Number.isFinite(executionStartedAtEpoch)) {
     throw new AutomationError(
-      503,
+      'unavailable',
       'AutomationExecutionStateInvalid',
       'Automation execution start time is invalid.',
     )
@@ -10347,7 +10378,7 @@ async function emitAutomationOutboxEvent(
 ) {
   const tableName = getConfiguredAuditTableName()
   if (!tableName) {
-    throw new AutomationError(503, 'AutomationAuditUnavailable', 'Audit outbox is not configured.', true)
+    throw new AutomationError('unavailable', 'AutomationAuditUnavailable', 'Audit outbox is not configured.', true)
   }
   const target = readOptionalAutomationWorkItemTarget(context.event)
   const event = createAuditEvent({
@@ -10376,7 +10407,7 @@ async function emitAutomationOutboxEvent(
   const auditEvents = dependencies.auditEvents
   if (!auditEvents.putEvent) {
     throw new AutomationError(
-      503,
+      'unavailable',
       'AutomationAuditUnavailable',
       'Audit outbox does not provide an immutable writer.',
       true,
@@ -10386,7 +10417,7 @@ async function emitAutomationOutboxEvent(
     await auditEvents.putEvent(event)
   } catch {
     throw new AutomationError(
-      503,
+      'unavailable',
       'AutomationAuditUnavailable',
       'Audit outbox write failed.',
       true,
@@ -10427,7 +10458,7 @@ function createAutomationRuleLineage(context: AutomationActionExecutionContext) 
 function readAutomationWorkItemTarget(event: AutomationEvent) {
   const target = readOptionalAutomationWorkItemTarget(event)
   if (!target) {
-    throw new AutomationError(400, 'AutomationTargetMissing', 'Action requires a Work Item target.')
+    throw new AutomationError('invalid-input', 'AutomationTargetMissing', 'Action requires a Work Item target.')
   }
   return target
 }
@@ -16242,21 +16273,31 @@ function toAutomationErrorResponse(c: Context, error: unknown) {
     console.error(error)
     return c.json({ message: 'Automation data is unavailable.' }, 502)
   }
-  if (error.status >= 500) console.error(error)
-  const status = error.status === 400 ||
-    error.status === 401 ||
-    error.status === 403 ||
-    error.status === 404 ||
-    error.status === 409 ||
-    error.status === 413 ||
-    error.status === 415 ||
-    error.status === 422 ||
-    error.status === 423 ||
-    error.status === 429 ||
-    error.status === 503
-    ? error.status
-    : 502
+  if (error.category === 'unavailable') console.error(error)
+  const status = mapAutomationErrorStatus(error.category)
   return c.json({ code: error.code, message: error.message }, status)
+}
+
+/**
+ * Maps a transport-neutral Automation error category to the HTTP API status.
+ *
+ * @param category - Stable Automation failure category.
+ * @returns HTTP status exposed by the Automation inbound adapter.
+ */
+function mapAutomationErrorStatus(category: AutomationErrorCategory) {
+  switch (category) {
+    case 'invalid-input': return 400
+    case 'unauthenticated': return 401
+    case 'forbidden': return 403
+    case 'not-found': return 404
+    case 'conflict': return 409
+    case 'payload-too-large': return 413
+    case 'unsupported-media-type': return 415
+    case 'unprocessable': return 422
+    case 'locked': return 423
+    case 'rate-limited': return 429
+    case 'unavailable': return 503
+  }
 }
 
 const currentAssigneeNotificationReasons = new Set([

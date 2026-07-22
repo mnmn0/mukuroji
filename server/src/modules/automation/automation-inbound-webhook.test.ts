@@ -3,7 +3,6 @@ import { describe, expect, test } from 'bun:test'
 import type { SecretsManagerClient } from '@aws-sdk/client-secrets-manager'
 import {
   AUTOMATION_INBOUND_WEBHOOK_MAX_BODY_BYTES,
-  SecretsManagerAutomationInboundWebhookSecretStore,
   createAutomationInboundWebhookSecretId,
   createAutomationInboundWebhookSecretVersionId,
   isAutomationInboundWebhookJsonContentType,
@@ -12,6 +11,9 @@ import {
   readAutomationInboundWebhookTimestamp,
   verifyAutomationInboundWebhookSignature,
 } from './automation-inbound-webhook'
+import {
+  SecretsManagerAutomationInboundWebhookSecretStore,
+} from './adapter-out/secrets-manager/inbound-webhook-secret-store'
 
 function createSecretsManagerProbe() {
   const versions = new Map<string, string>()
@@ -114,7 +116,9 @@ describe('inbound webhook raw request verification', () => {
       body: new Uint8Array(AUTOMATION_INBOUND_WEBHOOK_MAX_BODY_BYTES + 1),
       headers: { 'Content-Type': 'application/json' },
     })
-    await expect(readAutomationInboundWebhookBody(request)).rejects.toMatchObject({ status: 413 })
+    await expect(readAutomationInboundWebhookBody(request)).rejects.toMatchObject({
+      category: 'payload-too-large',
+    })
   })
 })
 
@@ -150,7 +154,7 @@ describe('inbound webhook secret provisioning', () => {
       .not.toHaveProperty('VersionStages')
 
     await store.delete(rotatedReference)
-    await expect(store.get(rotatedReference)).rejects.toMatchObject({ status: 503 })
+    await expect(store.get(rotatedReference)).rejects.toMatchObject({ category: 'unavailable' })
   })
 
   test('derives deterministic inbound-only secret resource and version IDs', () => {

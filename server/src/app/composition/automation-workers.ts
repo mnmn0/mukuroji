@@ -20,11 +20,9 @@ import {
 } from '../../modules/automation/adapter-in/schedules/automation-schedule'
 import {
   AutomationEngine,
-  DynamoDbAutomationClient,
-} from '../../modules/automation/automation'
-import {
+  DynamoDbAutomationRepository,
   SecretsManagerAutomationInboundWebhookSecretStore,
-} from '../../modules/automation/automation-inbound-webhook'
+} from '../../modules/automation'
 import { createCognitoClient } from '../../modules/authentication'
 import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
 import { createDefaultFileProofingClient } from '../../modules/files/file-proofing'
@@ -40,7 +38,7 @@ import { DynamoDbWorkspaceSearchClient } from '../../modules/workspace-search/wo
  * @returns Explicit action dependencies without API-only or import-worker adapters.
  */
 function createAutomationActionDependencies(
-  automation: DynamoDbAutomationClient,
+  automation: DynamoDbAutomationRepository,
   teamIssues: DynamoDbTeamIssuesClient,
 ): AutomationActionExecutorDependencies {
   return {

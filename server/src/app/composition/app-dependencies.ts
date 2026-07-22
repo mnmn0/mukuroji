@@ -7,8 +7,16 @@ import type {
   AuditEventV1,
 } from '../../modules/audit/audit'
 import type { CognitoClient } from '../../modules/authentication'
-import type { AutomationClient } from '../../modules/automation/automation'
-import type { AutomationInboundWebhookSecretStore } from '../../modules/automation/automation-inbound-webhook'
+import type {
+  AutomationBulkOperationPort,
+  AutomationExecutionServicePort,
+  AutomationInboundWebhookPort,
+  AutomationInboundWebhookSecretStore,
+  AutomationRecurringSchedulePort,
+  AutomationRepository,
+  AutomationRuleTemplatePort,
+  DynamoDbAutomationTransactionItem,
+} from '../../modules/automation'
 import type { CollaborationClient } from '../../modules/collaboration/collaboration'
 import type { DeveloperPlatformClient } from '../../modules/developer-platform/developer-platform'
 import type {
@@ -119,8 +127,16 @@ export interface WorkItemDependencies {
 
 /** Dependencies required by Automation routes. */
 export interface AutomationDependencies {
-  /** Provides Automation persistence. */
-  automation: AutomationClient
+  /** Provides Rule and Template application persistence. */
+  ruleTemplates: AutomationRuleTemplatePort<DynamoDbAutomationTransactionItem>
+  /** Provides inbound Webhook endpoint and replay persistence. */
+  inboundWebhooks: AutomationInboundWebhookPort<DynamoDbAutomationTransactionItem>
+  /** Provides recurring definition persistence. */
+  recurringSchedules: AutomationRecurringSchedulePort
+  /** Provides execution, lease, rate-limit, and receipt persistence. */
+  executions: AutomationExecutionServicePort
+  /** Provides durable Bulk operation checkpoints. */
+  bulkOperations: AutomationBulkOperationPort
   /** Provides Automation inbound webhook secret persistence. */
   automationInboundWebhookSecrets: AutomationInboundWebhookSecretStore
 }
@@ -182,4 +198,10 @@ export type AppDependencyOverrides = Partial<
   WorkItemDependencies &
   AutomationDependencies &
   DeveloperPlatformDependencies
->
+> & {
+  /** Backward-compatible all-capability Automation adapter override for tests. */
+  automation?: AutomationRepository<
+    DynamoDbAutomationTransactionItem,
+    DynamoDbAutomationTransactionItem
+  >
+}

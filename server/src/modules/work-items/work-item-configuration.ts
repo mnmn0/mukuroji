@@ -19,7 +19,6 @@ import {
   type CustomFieldValue,
   type ResolvedWorkItemConfiguration,
   type WorkflowStatusCategory,
-  type WorkflowStatusDefinition,
   type WorkItemConfiguration,
   type WorkItemConfigurationScopeType,
   type WorkItemRelation,
@@ -27,6 +26,10 @@ import {
   type WorkItemRelationsResponse,
   type WorkItemRelationType,
 } from '@mukuroji/contracts'
+import {
+  validateWorkflowDefinition as validateDomainWorkflowDefinition,
+  WorkflowDefinitionValidationError,
+} from '../../domain/workflow-definition'
 
 export { isCanonicalWorkItemRelationIds } from './canonical-work-item'
 
@@ -240,7 +243,7 @@ export function validateWorkItemConfiguration(
     throw invalidConfiguration('Configuration schema version is unsupported.')
   }
   const revision = readNonNegativeInteger(value.revision, 'Configuration revision')
-  const workflow = readWorkflowDefinition(value.workflow)
+  const workflow = validateWorkflowDefinition(value.workflow)
   const customFields = readCustomFieldDefinitions(value.customFields)
   validateFormulaDefinitions(customFields)
 
@@ -259,7 +262,14 @@ export function validateWorkItemConfiguration(
 
 /** Unknown input を厳格に検証済み Workflow definition へ変換します。 */
 export function validateWorkflowDefinition(value: unknown): WorkItemConfiguration['workflow'] {
-  return readWorkflowDefinition(value)
+  try {
+    return validateDomainWorkflowDefinition(value)
+  } catch (error) {
+    if (error instanceof WorkflowDefinitionValidationError) {
+      throw invalidConfiguration(error.message)
+    }
+    throw error
+  }
 }
 
 /** Work Item custom field値へdefault/patchを適用し、全definitionに対して検証します。 */
@@ -1122,61 +1132,6 @@ function createConfigurationGuards(
       revision: resolved.inheritedFrom === 'workspace' ? resolved.configuration.revision : 0,
     },
   ]
-}
-
-function readWorkflowDefinition(value: unknown): WorkItemConfiguration['workflow'] {
-  if (!isRecord(value)) {
-    throw invalidConfiguration('Workflow must be an object.')
-  }
-  const id = readConfigurationId(value.id, 'Workflow ID')
-  const name = readDisplayName(value.name, 'Workflow name')
-  const initialStatusId = readConfigurationId(value.initialStatusId, 'Initial status ID')
-  if (!Array.isArray(value.statuses) || value.statuses.length === 0 || value.statuses.length > 32) {
-    throw invalidConfiguration('Workflow must contain between 1 and 32 statuses.')
-  }
-  const statuses = value.statuses.map((status) => readWorkflowStatus(status))
-  assertUnique(statuses.map((status) => status.id), 'Workflow status ID')
-  assertUnique(statuses.map((status) => status.sortOrder), 'Workflow status sortOrder')
-  if (!statuses.some((status) => status.id === initialStatusId)) {
-    throw invalidConfiguration('Workflow initial status is not defined.')
-  }
-  if (!Array.isArray(value.transitions) || value.transitions.length > 1_024) {
-    throw invalidConfiguration('Workflow transitions must be an array with at most 1024 entries.')
-  }
-  const statusIds = new Set(statuses.map((status) => status.id))
-  const transitions = value.transitions.map((transition) => {
-    if (!isRecord(transition)) {
-      throw invalidConfiguration('Workflow transition must be an object.')
-    }
-    const fromStatusId = readConfigurationId(transition.fromStatusId, 'Transition source status')
-    const toStatusId = readConfigurationId(transition.toStatusId, 'Transition target status')
-    if (!statusIds.has(fromStatusId) || !statusIds.has(toStatusId) || fromStatusId === toStatusId) {
-      throw invalidConfiguration('Workflow transition references an invalid status.')
-    }
-    return { fromStatusId, toStatusId }
-  })
-  assertUnique(
-    transitions.map((transition) => `${transition.fromStatusId}\0${transition.toStatusId}`),
-    'Workflow transition',
-  )
-  return { id, name, initialStatusId, statuses, transitions }
-}
-
-function readWorkflowStatus(value: unknown): WorkflowStatusDefinition {
-  if (!isRecord(value)) {
-    throw invalidConfiguration('Workflow status must be an object.')
-  }
-  const category = value.category
-  if (!isWorkflowCategory(category)) {
-    throw invalidConfiguration('Workflow status category is invalid.')
-  }
-  return {
-    id: readConfigurationId(value.id, 'Workflow status ID'),
-    name: readDisplayName(value.name, 'Workflow status name'),
-    category,
-    sortOrder: readNonNegativeInteger(value.sortOrder, 'Workflow status sortOrder'),
-    ...(value.color === undefined ? {} : { color: readDisplayName(value.color, 'Workflow status color') }),
-  }
 }
 
 function readCustomFieldDefinitions(value: unknown) {
@@ -2082,11 +2037,6 @@ function readIsoTimestamp(value: unknown, label: string) {
     throw invalidConfiguration(`${label} is invalid.`)
   }
   return value
-}
-
-function isWorkflowCategory(value: unknown): value is WorkflowStatusCategory {
-  return value === 'backlog' || value === 'unstarted' || value === 'started' ||
-    value === 'completed' || value === 'canceled'
 }
 
 function isCustomFieldType(value: unknown): value is CustomFieldDefinition['type'] {

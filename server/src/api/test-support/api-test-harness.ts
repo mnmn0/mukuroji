@@ -182,7 +182,7 @@ function createBulkOperationAutomationFake(initialOperation?: BulkOperation) {
       async saveBulkOperation(operation: BulkOperation, expectedRevision: number) {
         if (!storedOperation || storedOperation.revision !== expectedRevision) {
           throw new AutomationError(
-            409,
+            'conflict',
             'BulkOperationRevisionConflict',
             'Bulk operation was modified concurrently.',
           )

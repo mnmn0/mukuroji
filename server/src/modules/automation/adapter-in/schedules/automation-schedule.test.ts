@@ -7,8 +7,6 @@ import {
 } from '@mukuroji/contracts'
 import {
   AutomationError,
-  createAutomationActionId,
-  createAutomationExecutionId,
   type AutomationClient,
   type AutomationInboundWebhookSecretCleanup,
 } from '../../automation'
@@ -225,27 +223,10 @@ describe('automation schedule handler', () => {
     let currentRule = rule
     let actionExecutions = 0
     const client = {
-      async reserveExecution(candidateRule, event, now) {
-        const executionId = createAutomationExecutionId(candidateRule, event.eventId)
+      async reserveExecution(execution) {
+        const executionId = execution.id
         if (executions.has(executionId)) return 'duplicate'
-        executions.set(executionId, {
-          schemaVersion: AUTOMATION_SCHEMA_VERSION,
-          id: executionId,
-          workspaceId: candidateRule.workspaceId,
-          ruleId: candidateRule.id,
-          ruleVersion: candidateRule.version,
-          triggerEventId: event.eventId,
-          status: 'pending',
-          attempts: 0,
-          actions: candidateRule.actions.map((_, actionIndex) => ({
-            actionIndex,
-            actionId: createAutomationActionId(executionId, actionIndex),
-            status: 'pending',
-            attempts: 0,
-          })),
-          startedAt: now.toISOString(),
-          retryable: false,
-        })
+        executions.set(executionId, structuredClone(execution))
         return 'created'
       },
       async getExecution(_workspaceId, executionId) {
@@ -492,7 +473,7 @@ describe('automation schedule handler', () => {
       actionExecutor: {
         async execute() {
           actionExecutions += 1
-          throw new AutomationError(503, 'TransientCreateFailure', 'Create is temporarily unavailable.', true)
+          throw new AutomationError('unavailable', 'TransientCreateFailure', 'Create is temporarily unavailable.', true)
         },
       },
     }
@@ -545,7 +526,7 @@ describe('automation schedule handler', () => {
       actionExecutor: {
         async execute() {
           actionExecutions += 1
-          throw new AutomationError(503, 'TransientCreateFailure', 'Create is temporarily unavailable.', true)
+          throw new AutomationError('unavailable', 'TransientCreateFailure', 'Create is temporarily unavailable.', true)
         },
       },
     }
@@ -593,7 +574,7 @@ describe('automation schedule handler', () => {
       actionExecutor: {
         async execute() {
           actionExecutions += 1
-          throw new AutomationError(503, 'TransientCreateFailure', 'Create is temporarily unavailable.', true)
+          throw new AutomationError('unavailable', 'TransientCreateFailure', 'Create is temporarily unavailable.', true)
         },
       },
     }
@@ -632,7 +613,7 @@ describe('automation schedule handler', () => {
         async execute() {
           actionExecutions += 1
           if (actionExecutions === 1) {
-            throw new AutomationError(503, 'TransientCreateFailure', 'Create is temporarily unavailable.', true)
+            throw new AutomationError('unavailable', 'TransientCreateFailure', 'Create is temporarily unavailable.', true)
           }
         },
       },
@@ -747,7 +728,7 @@ describe('automation schedule handler', () => {
         actionExecutor: {
           async execute() {
             actionExecutions += 1
-            throw new AutomationError(422, 'InvalidTemplate', 'Template cannot be materialized.')
+            throw new AutomationError('unprocessable', 'InvalidTemplate', 'Template cannot be materialized.')
           },
         },
       },

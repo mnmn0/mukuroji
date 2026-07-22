@@ -35,8 +35,8 @@ import {
   DynamoDbAuditEventsClient,
   getConfiguredAuditTableName,
 } from '../../modules/audit/audit'
-import { DynamoDbAutomationClient } from '../../modules/automation/automation'
-import { SecretsManagerAutomationInboundWebhookSecretStore } from '../../modules/automation/automation-inbound-webhook'
+import { DynamoDbAutomationRepository } from '../../modules/automation'
+import { SecretsManagerAutomationInboundWebhookSecretStore } from '../../modules/automation'
 import { DynamoDbCollaborationClient } from '../../modules/collaboration/collaboration'
 import { DynamoDbDeveloperPlatformClient } from '../../modules/developer-platform/developer-platform'
 import { DynamoDbDocumentsClient } from '../../modules/documents/documents'
@@ -121,13 +121,13 @@ export function createWorkItemConfigurationClient(): WorkItemConfigurationClient
 /**
  * Creates the configured Automation adapter.
  *
- * @returns A DynamoDB-backed Automation client.
+ * @returns A DynamoDB-backed Automation repository.
  */
-export function createAutomationClient(): DynamoDbAutomationClient {
+export function createAutomationClient(): DynamoDbAutomationRepository {
   const config = loadServerConfig()
   const dynamoDbClient = createDynamoDbClient()
 
-  return new DynamoDbAutomationClient(
+  return new DynamoDbAutomationRepository(
     config.environment.AUTOMATION_TABLE_NAME ??
       config.environment.MUKUROJI_AUTOMATION_TABLE ??
       'mukuroji-automation-local',
@@ -328,8 +328,13 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
  * @returns Automation dependencies backed by configured production adapters.
  */
 export function createProductionAutomationDependencies(): AutomationDependencies {
+  const automation = createAutomationClient()
   return {
-    automation: createAutomationClient(),
+    ruleTemplates: automation,
+    inboundWebhooks: automation,
+    recurringSchedules: automation,
+    executions: automation,
+    bulkOperations: automation,
     automationInboundWebhookSecrets:
       new SecretsManagerAutomationInboundWebhookSecretStore(),
   }
@@ -530,7 +535,22 @@ export function overrideAppDependencies(
     },
     automation: {
       ...dependencies.automation,
-      ...(overrides.automation ? { automation: overrides.automation } : {}),
+      ...(overrides.automation
+        ? {
+            ruleTemplates: overrides.automation,
+            inboundWebhooks: overrides.automation,
+            recurringSchedules: overrides.automation,
+            executions: overrides.automation,
+            bulkOperations: overrides.automation,
+          }
+        : {}),
+      ...(overrides.ruleTemplates ? { ruleTemplates: overrides.ruleTemplates } : {}),
+      ...(overrides.inboundWebhooks ? { inboundWebhooks: overrides.inboundWebhooks } : {}),
+      ...(overrides.recurringSchedules
+        ? { recurringSchedules: overrides.recurringSchedules }
+        : {}),
+      ...(overrides.executions ? { executions: overrides.executions } : {}),
+      ...(overrides.bulkOperations ? { bulkOperations: overrides.bulkOperations } : {}),
       ...(overrides.automationInboundWebhookSecrets
         ? {
             automationInboundWebhookSecrets:

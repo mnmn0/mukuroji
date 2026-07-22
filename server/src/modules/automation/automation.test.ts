@@ -16,6 +16,7 @@ import {
   applyBulkOperation,
   createAutomationActionId,
   createAutomationExecutionId,
+  createPendingAutomationExecution,
   createRecurringExecutionId,
   ensureLocalAutomationTable,
   evaluateAutomationCondition,
@@ -206,29 +207,16 @@ function createMemoryClient(forceRateLimited = false) {
       executions.set(execution.id, structuredClone(execution))
       return true
     },
-    async reserveExecution(rule: AutomationRule, event: AutomationEvent, now: Date) {
+    async reserveExecution(
+      execution: AutomationExecution,
+      event: AutomationEvent,
+      rule: AutomationRule,
+    ) {
       if (forceRateLimited) return 'rate-limited' as const
-      const id = createAutomationExecutionId(rule, event.eventId)
+      const id = execution.id
       if (executions.has(id)) return 'duplicate' as const
       rules.set(`${rule.id}\0${rule.version}`, structuredClone(rule))
-      executions.set(id, {
-        schemaVersion: AUTOMATION_SCHEMA_VERSION,
-        id,
-        workspaceId: rule.workspaceId,
-        ruleId: rule.id,
-        ruleVersion: rule.version,
-        triggerEventId: event.eventId,
-        status: 'pending',
-        attempts: 0,
-        actions: rule.actions.map((_action, actionIndex) => ({
-          actionIndex,
-          actionId: createAutomationActionId(id, actionIndex),
-          status: 'pending',
-          attempts: 0,
-        })),
-        startedAt: now.toISOString(),
-        retryable: false,
-      })
+      executions.set(id, structuredClone(execution))
       events.set(id, structuredClone(event))
       return 'created' as const
     },
@@ -351,7 +339,7 @@ describe('automation management create idempotency', () => {
       ...input,
       name: 'Different request',
     }, 'create-rule-1')).rejects.toMatchObject({
-      status: 409,
+      category: 'conflict',
       code: 'IdempotencyConflict',
     })
   })
@@ -708,7 +696,7 @@ test('fails closed when current-list pagination repeats the same cursor', async 
   await expect(client.listRules('workspace-1')).rejects.toMatchObject({
     code: 'AutomationPaginationCursorLoop',
     retryable: true,
-    status: 503,
+    category: 'unavailable',
   })
   expect(queryCalls).toBe(2)
 })
@@ -766,7 +754,7 @@ test('claims only one template application runner and binds atomic completion to
   expect([first, second].filter(Boolean)).toHaveLength(1)
   const claimed = (first ?? second)!
   expect(claimed).toMatchObject({ status: 'running', revision: 2, runnerLeaseExpiresAt: leaseExpiresAt })
-  const completion = client.createTemplateApplicationCompletionTransactItem(claimed, {
+  const completion = client.createTemplateApplicationCompletionMutation(claimed, {
     kind: 'project',
     teamId: 'core',
     projectId: claimed.id,
@@ -1019,7 +1007,7 @@ describe('automation execution safety', () => {
     expect(JSON.stringify(untrustedCodeFailure)).not.toContain(secret)
 
     expect(normalizeAutomationActionFailure(
-      new AutomationError(409, 'TrustedAutomationFailure', 'Safe domain message.'),
+      new AutomationError('conflict', 'TrustedAutomationFailure', 'Safe domain message.'),
     )).toEqual({
       code: 'TrustedAutomationFailure',
       message: 'Safe domain message.',
@@ -1595,11 +1583,13 @@ describe('automation execution safety', () => {
     } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
     const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
     const rule = createRule({ rateLimit: { maxExecutions: 2, windowSeconds: 60 } })
+    const event = createEvent()
+    const now = new Date('2026-07-16T00:00:30.000Z')
 
     const result = await client.reserveExecution(
+      createPendingAutomationExecution(rule, event, now),
+      event,
       rule,
-      createEvent(),
-      new Date('2026-07-16T00:00:30.000Z'),
     )
 
     expect(result).toBe('created')
@@ -1710,11 +1700,13 @@ describe('automation execution safety', () => {
       },
     } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
     const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+    const event = createEvent()
+    const now = new Date('2026-07-16T00:00:30.000Z')
 
     expect(await client.reserveExecution(
+      createPendingAutomationExecution(rule, event, now),
+      event,
       rule,
-      createEvent(),
-      new Date('2026-07-16T00:00:30.000Z'),
     )).toBe('stale-definition')
 
     let actionExecutions = 0
@@ -1866,7 +1858,7 @@ describe('automation execution safety', () => {
     client.claimExecution = async (execution, now, leaseExpiresAt) => {
       if (failBeforeAction) {
         failBeforeAction = false
-        throw new AutomationError(503, 'TemporaryPersistenceFailure', 'Retry delivery.', true)
+        throw new AutomationError('unavailable', 'TemporaryPersistenceFailure', 'Retry delivery.', true)
       }
       return await originalClaimExecution(execution, now, leaseExpiresAt)
     }
@@ -1915,7 +1907,7 @@ describe('automation execution safety', () => {
       async execute(_action, context) {
         calls[context.actionIndex] = (calls[context.actionIndex] ?? 0) + 1
         if (context.actionIndex === 1 && calls[1] === 1) {
-          throw new AutomationError(503, 'TemporaryActionFailure', 'Try again.', true)
+          throw new AutomationError('unavailable', 'TemporaryActionFailure', 'Try again.', true)
         }
       },
     })
@@ -1942,7 +1934,7 @@ describe('automation execution safety', () => {
     const executor = {
       async execute() {
         calls += 1
-        throw new AutomationError(503, 'StillFailing', 'Still failing.', true)
+        throw new AutomationError('unavailable', 'StillFailing', 'Still failing.', true)
       },
     }
     const rule = createRule({
@@ -2208,7 +2200,7 @@ test('creates bulk operations once and checkpoints them with revision CAS', asyn
   expect(await conflictingClient.createBulkOperation(createBulkOperationFixture())).toBe(false)
   await expect(conflictingClient.saveBulkOperation(operation, 1)).rejects.toMatchObject({
     code: 'BulkOperationRevisionConflict',
-    status: 409,
+    category: 'conflict',
   })
 })
 
@@ -2241,7 +2233,7 @@ test('keeps bulk partial failures across retry and safe undo', async () => {
     async saveBulkOperation(operation: BulkOperation, expectedRevision: number) {
       expectedRevisions.push(expectedRevision)
       if (persistedRevision !== expectedRevision) {
-        throw new AutomationError(409, 'BulkOperationRevisionConflict', 'Bulk operation revision does not match.')
+        throw new AutomationError('conflict', 'BulkOperationRevisionConflict', 'Bulk operation revision does not match.')
       }
       persistedRevision = operation.revision
       persistedOperation = structuredClone(operation)
@@ -2255,7 +2247,7 @@ test('keeps bulk partial failures across retry and safe undo', async () => {
     async apply(_request, itemIndex) {
       attempts[itemIndex] = (attempts[itemIndex] ?? 0) + 1
       if (itemIndex === 1 && attempts[itemIndex] === 1) {
-        throw new AutomationError(503, 'TemporaryBulkFailure', 'Retry item.', true)
+        throw new AutomationError('unavailable', 'TemporaryBulkFailure', 'Retry item.', true)
       }
       return {
         resultingRevision: itemIndex + 10,
@@ -2315,7 +2307,10 @@ test('rejects unsafe Bulk edit fields before previewing any item', async () => {
     workspaceId: 'workspace-1',
     items: [{ teamId: 'core', workItemId: 'one', expectedRevision: 1 }],
     action: { type: 'edit', patch: { archivedAt: '2026-07-16T00:00:00.000Z' } },
-  }, adapter)).rejects.toMatchObject({ code: 'InvalidAutomationInput', status: 400 })
+  }, adapter)).rejects.toMatchObject({
+    category: 'invalid-input',
+    code: 'InvalidAutomationInput',
+  })
   expect(previewCalls).toBe(0)
 })
 
@@ -2377,7 +2372,7 @@ test('deduplicates concurrent and replayed bulk apply requests by operation toke
     },
     async saveBulkOperation(operation: BulkOperation, expectedRevision: number) {
       if (!stored || stored.revision !== expectedRevision) {
-        throw new AutomationError(409, 'BulkOperationRevisionConflict', 'Bulk operation revision does not match.')
+        throw new AutomationError('conflict', 'BulkOperationRevisionConflict', 'Bulk operation revision does not match.')
       }
       stored = structuredClone(operation)
     },
@@ -2439,12 +2434,12 @@ test('resumes a bulk apply from the last durable item checkpoint', async () => {
     },
     async saveBulkOperation(operation: BulkOperation, expectedRevision: number) {
       if (!stored || stored.revision !== expectedRevision) {
-        throw new AutomationError(409, 'BulkOperationRevisionConflict', 'Bulk operation revision does not match.')
+        throw new AutomationError('conflict', 'BulkOperationRevisionConflict', 'Bulk operation revision does not match.')
       }
       stored = structuredClone(operation)
       if (failAfterFirstItem && operation.items[0]?.status === 'succeeded' && operation.items[1]?.status === 'ready') {
         failAfterFirstItem = false
-        throw new AutomationError(503, 'CheckpointResponseLost', 'Checkpoint response was lost.', true)
+        throw new AutomationError('unavailable', 'CheckpointResponseLost', 'Checkpoint response was lost.', true)
       }
     },
   } as AutomationClient
@@ -2592,7 +2587,7 @@ test('rejects one of concurrent bulk retry and undo mutations with 409', async (
     async saveBulkOperation(operation: BulkOperation, expectedRevision: number) {
       await Promise.resolve()
       if (stored.revision !== expectedRevision) {
-        throw new AutomationError(409, 'BulkOperationRevisionConflict', 'Bulk operation revision does not match.')
+        throw new AutomationError('conflict', 'BulkOperationRevisionConflict', 'Bulk operation revision does not match.')
       }
       stored = structuredClone(operation)
     },
@@ -2623,7 +2618,7 @@ test('rejects one of concurrent bulk retry and undo mutations with 409', async (
   expect(fulfilled).toHaveLength(1)
   expect(rejected).toHaveLength(1)
   expect(rejected[0]).toMatchObject({
-    reason: { code: 'BulkOperationRevisionConflict', status: 409 },
+    reason: { category: 'conflict', code: 'BulkOperationRevisionConflict' },
   })
   expect(applyCalls + undoCalls).toBe(1)
   expect(stored.revision).toBeGreaterThan(7)

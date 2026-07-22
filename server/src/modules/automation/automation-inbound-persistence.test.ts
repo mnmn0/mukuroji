@@ -423,7 +423,7 @@ describe('DynamoDB inbound webhook delivery receipts', () => {
       signatureFingerprint: fingerprint('signature-1'),
       signatureTimestamp: '1784160000',
       eventId: 'event-1',
-      auditTransactItem: auditPut('event-1'),
+      auditMutation: auditPut('event-1'),
     })
     expect(first).toEqual({ eventId: 'event-1', replayed: false })
     expect(await client.recordInboundWebhookDelivery(endpoint, {
@@ -432,7 +432,7 @@ describe('DynamoDB inbound webhook delivery receipts', () => {
       signatureFingerprint: fingerprint('signature-1'),
       signatureTimestamp: '1784160000',
       eventId: 'unused-event',
-      auditTransactItem: auditPut('unused-event'),
+      auditMutation: auditPut('unused-event'),
     })).toEqual({ eventId: 'event-1', replayed: true })
     expect(await client.recordInboundWebhookDelivery(endpoint, {
       idempotencyKey: 'delivery-key',
@@ -440,7 +440,7 @@ describe('DynamoDB inbound webhook delivery receipts', () => {
       signatureFingerprint: fingerprint('fresh-signature'),
       signatureTimestamp: '1784160001',
       eventId: 'unused-event',
-      auditTransactItem: auditPut('unused-event'),
+      auditMutation: auditPut('unused-event'),
     })).toEqual({ eventId: 'event-1', replayed: true })
 
     await expect(client.recordInboundWebhookDelivery(endpoint, {
@@ -449,7 +449,7 @@ describe('DynamoDB inbound webhook delivery receipts', () => {
       signatureFingerprint: fingerprint('signature-2'),
       signatureTimestamp: '1784160002',
       eventId: 'event-2',
-      auditTransactItem: auditPut('event-2'),
+      auditMutation: auditPut('event-2'),
     })).rejects.toMatchObject({ code: 'AutomationInboundWebhookIdempotencyConflict' })
     await expect(client.recordInboundWebhookDelivery(endpoint, {
       idempotencyKey: 'other-key',
@@ -457,7 +457,7 @@ describe('DynamoDB inbound webhook delivery receipts', () => {
       signatureFingerprint: fingerprint('signature-1'),
       signatureTimestamp: '1784160000',
       eventId: 'event-3',
-      auditTransactItem: auditPut('event-3'),
+      auditMutation: auditPut('event-3'),
     })).rejects.toMatchObject({ code: 'AutomationInboundWebhookSignatureReplay' })
 
     const paused = await client.setInboundWebhookEndpointStatus(
@@ -473,8 +473,11 @@ describe('DynamoDB inbound webhook delivery receipts', () => {
       signatureFingerprint: fingerprint('signature-1'),
       signatureTimestamp: '1784160000',
       eventId: 'unused-event',
-      auditTransactItem: auditPut('unused-event'),
-    })).rejects.toMatchObject({ code: 'AutomationInboundWebhookPaused', status: 423 })
+      auditMutation: auditPut('unused-event'),
+    })).rejects.toMatchObject({
+      category: 'locked',
+      code: 'AutomationInboundWebhookPaused',
+    })
 
     const resumed = await client.setInboundWebhookEndpointStatus(
       endpoint.workspaceId,
@@ -495,10 +498,10 @@ describe('DynamoDB inbound webhook delivery receipts', () => {
       signatureFingerprint: fingerprint('signature-1'),
       signatureTimestamp: '1784160000',
       eventId: 'unused-event',
-      auditTransactItem: auditPut('unused-event'),
+      auditMutation: auditPut('unused-event'),
     })).rejects.toMatchObject({
       code: 'AutomationInboundWebhookVersionConflict',
-      status: 409,
+      category: 'conflict',
     })
 
     const deliveryReceipt = [...probe.items.values()].find((item) =>

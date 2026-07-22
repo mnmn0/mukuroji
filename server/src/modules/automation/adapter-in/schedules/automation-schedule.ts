@@ -6,31 +6,54 @@ import {
   type RecurringWork,
 } from '@mukuroji/contracts'
 import {
-  AUTOMATION_SCHEDULE_SHARD_COUNT,
-  DEFAULT_AUTOMATION_RETRY_POLICY,
-  AutomationEngine,
-  AutomationError,
+  normalizeAutomationActionFailure,
+} from '../../application/action-failure'
+import { AutomationEngine } from '../../application/execution-service'
+import { AutomationError } from '../../domain/automation-error'
+import {
   createAutomationActionId,
   createAutomationExecutionId,
   createRecurringExecutionId,
+} from '../../domain/execution-identifiers'
+import { DEFAULT_AUTOMATION_RETRY_POLICY } from '../../domain/execution-policy'
+import {
   getNextRecurringOccurrence,
   getRecurringOccurrences,
-  normalizeAutomationActionFailure,
   selectCatchUpOccurrences,
-  type AutomationActionExecutor,
-  type AutomationClient,
-  type AutomationEvent,
-  type AutomationExecutionClaimToken,
-  type AutomationInboundWebhookSecretCleanup,
-} from '../../automation'
-import {
-  type AutomationInboundWebhookSecretStore,
-} from '../../automation-inbound-webhook'
+} from '../../domain/recurring-schedule'
+import type {
+  AutomationActionExecutor,
+  AutomationExecutionClaimToken,
+  AutomationExecutionServicePort,
+  AutomationInboundWebhookPort,
+  AutomationInboundWebhookSecretCleanup,
+  AutomationInboundWebhookSecretStore,
+  AutomationRecurringSchedulePort,
+  AutomationRuleTemplatePort,
+} from '../../application/ports'
+import type { AutomationEvent } from '../../domain/rule-evaluation'
+import { AUTOMATION_SCHEDULE_SHARD_COUNT } from '../../domain/schedule-shard'
+
+/** Focused capabilities required by the Automation schedule adapter. */
+export type AutomationSchedulePort =
+  AutomationRecurringSchedulePort &
+  AutomationExecutionServicePort &
+  Pick<
+    AutomationRuleTemplatePort,
+    | 'completeScheduledRule'
+    | 'getRule'
+    | 'listDueScheduledRules'
+  > &
+  Pick<
+    AutomationInboundWebhookPort,
+    | 'completeInboundWebhookSecretCleanup'
+    | 'listDueInboundWebhookSecretCleanups'
+  >
 
 /** Schedule invocation の dependency contract です。 */
 export type AutomationScheduleDependencies = {
   /** Automation definitions、execution、receipts の durable store です。 */
-  client: AutomationClient
+  client: AutomationSchedulePort
   /** Recurring Work Item create action の executor です。 */
   actionExecutor: AutomationActionExecutor
   /** Revoke 済み inbound webhook secret の durable cleanup store です。 */
@@ -51,7 +74,7 @@ export function resolveAutomationScheduleProcessingTime(
   wallClock = new Date(),
 ) {
   if (event.time && Number.isNaN(Date.parse(event.time))) {
-    throw new AutomationError(400, 'AutomationScheduleTimeInvalid', 'Schedule time is invalid.')
+    throw new AutomationError('invalid-input', 'AutomationScheduleTimeInvalid', 'Schedule time is invalid.')
   }
   return wallClock
 }
@@ -175,7 +198,7 @@ export async function processDueAutomationExecution(
     )
     if (!rule) {
       throw new AutomationError(
-        503,
+        'unavailable',
         'AutomationRuleVersionUnavailable',
         'Automation rule version is unavailable.',
         true,
@@ -184,7 +207,7 @@ export async function processDueAutomationExecution(
     const event = await dependencies.client.getExecutionEvent(execution.workspaceId, execution.id)
     if (!event) {
       throw new AutomationError(
-        503,
+        'unavailable',
         'AutomationTriggerEventUnavailable',
         'Automation trigger event is unavailable.',
         true,
@@ -250,7 +273,7 @@ export async function processScheduledAutomationRule(
   const lastCompleted = selected.at(-1) ?? occurrences.at(-1)!
   const nextRun = getNextRecurringOccurrence(rule.trigger.schedule, lastCompleted)
   if (!nextRun) {
-    throw new AutomationError(409, 'AutomationScheduleExhausted', 'Automation schedule has no next occurrence.')
+    throw new AutomationError('conflict', 'AutomationScheduleExhausted', 'Automation schedule has no next occurrence.')
   }
   try {
     return await dependencies.client.completeScheduledRule(
@@ -305,7 +328,7 @@ export async function processRecurringWorkDefinition(
   const lastCompleted = selected.at(-1) ?? occurrences.at(-1)!
   const nextRun = getNextRecurringOccurrence(definition.schedule, lastCompleted)
   if (!nextRun) {
-    throw new AutomationError(409, 'RecurringScheduleExhausted', 'Recurring schedule has no next occurrence.')
+    throw new AutomationError('conflict', 'RecurringScheduleExhausted', 'Recurring schedule has no next occurrence.')
   }
   try {
     return await dependencies.client.completeRecurringWork(
@@ -376,7 +399,7 @@ async function executeRecurringOccurrence(
     : await dependencies.client.getExecutionEvent(definition.workspaceId, executionId)
   if (!storedEvent) {
     throw new AutomationError(
-      503,
+      'unavailable',
       'AutomationTriggerEventUnavailable',
       'Automation trigger event is unavailable.',
       true,
@@ -392,7 +415,7 @@ async function executeRecurringOccurrence(
     !Number.isSafeInteger(storedTemplateVersion) ||
     !storedScheduledFor
   ) {
-    throw new AutomationError(503, 'RecurringExecutionInvalid', 'Recurring execution event is invalid.')
+    throw new AutomationError('unavailable', 'RecurringExecutionInvalid', 'Recurring execution event is invalid.')
   }
   const storedAction: AutomationAction = {
     type: 'create',
@@ -412,7 +435,7 @@ async function executeRecurringOccurrence(
   }
   const actionState = current.actions[0]
   if (!actionState) {
-    throw new AutomationError(503, 'RecurringExecutionInvalid', 'Recurring execution is invalid.')
+    throw new AutomationError('unavailable', 'RecurringExecutionInvalid', 'Recurring execution is invalid.')
   }
   const actionAlreadySucceeded = await dependencies.client.hasActionReceipt(
     definition.workspaceId,
@@ -529,7 +552,7 @@ async function executeRecurringOccurrence(
 }
 
 async function readRecurringExecutionCompletionAfterLeaseLoss(
-  client: AutomationClient,
+  client: AutomationExecutionServicePort,
   workspaceId: string,
   executionId: string,
 ) {
@@ -547,7 +570,7 @@ async function selectScheduledRuleDueOccurrences(
   occurrences: readonly Date[],
   maximum: number,
   now: Date,
-  client: AutomationClient,
+  client: AutomationExecutionServicePort,
 ) {
   if (rule.trigger.type !== 'schedule') return []
   if (rule.trigger.schedule.catchUpPolicy !== 'skip') {
@@ -574,7 +597,7 @@ async function selectRecurringDueOccurrences(
   fallbackOccurrence: Date,
   maximum: number,
   now: Date,
-  client: AutomationClient,
+  client: AutomationExecutionServicePort,
 ) {
   const selected = definition.schedule.catchUpPolicy === 'skip'
     ? selectOnTimeOccurrences(occurrences, now)

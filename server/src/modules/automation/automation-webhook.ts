@@ -77,7 +77,7 @@ export function createAutomationWebhookSecretId(
 ) {
   if (!workspaceId.trim() || !isAutomationWebhookSecretAlias(secretAlias)) {
     throw new AutomationError(
-      400,
+      'invalid-input',
       'AutomationWebhookSecretReferenceInvalid',
       'Automation webhook secret reference is invalid.',
     )
@@ -104,7 +104,7 @@ export async function deliverAutomationWebhook(
   const endpoint = readAutomationWebhookEndpoint(action.url)
   if (!endpoint) {
     throw new AutomationError(
-      422,
+      'unprocessable',
       'AutomationWebhookEndpointRejected',
       'Automation webhook endpoint is not allowed.',
     )
@@ -143,7 +143,7 @@ export async function deliverAutomationWebhook(
   } catch (error) {
     if (error instanceof AutomationError) throw error
     throw new AutomationError(
-      503,
+      'unavailable',
       'AutomationWebhookUnavailable',
       'Automation webhook request failed.',
       true,
@@ -151,14 +151,14 @@ export async function deliverAutomationWebhook(
   }
   if (status >= 300 && status < 400) {
     throw new AutomationError(
-      422,
+      'unprocessable',
       'AutomationWebhookRedirectRejected',
       'Automation webhook redirects are not allowed.',
     )
   }
   if (status < 200 || status >= 300) {
     throw new AutomationError(
-      status === 429 || status >= 500 ? 503 : 422,
+      status === 429 || status >= 500 ? 'unavailable' : 'unprocessable',
       'AutomationWebhookFailed',
       `Automation webhook returned HTTP ${status}.`,
       status === 429 || status >= 500,
@@ -185,7 +185,7 @@ export async function resolveAutomationWebhookAddress(
     addresses = await lookup(normalizedHostname)
   } catch {
     throw new AutomationError(
-      503,
+      'unavailable',
       'AutomationWebhookDnsUnavailable',
       'Automation webhook endpoint DNS resolution failed.',
       true,
@@ -221,7 +221,7 @@ export async function sendAutomationWebhookRequest(
     const timeout = setTimeout(() => {
       clientRequest?.destroy()
       settle(new AutomationError(
-        503,
+        'unavailable',
         'AutomationWebhookTimeout',
         'Automation webhook request timed out.',
         true,
@@ -248,7 +248,7 @@ export async function sendAutomationWebhookRequest(
         })
         clientRequest.once('error', () => {
           settle(new AutomationError(
-            503,
+            'unavailable',
             'AutomationWebhookUnavailable',
             'Automation webhook request failed.',
             true,
@@ -257,7 +257,7 @@ export async function sendAutomationWebhookRequest(
         clientRequest.end(request.body)
       } catch {
         settle(new AutomationError(
-          503,
+          'unavailable',
           'AutomationWebhookUnavailable',
           'Automation webhook request failed.',
           true,
@@ -267,7 +267,7 @@ export async function sendAutomationWebhookRequest(
       settle(error instanceof AutomationError
         ? error
         : new AutomationError(
-            503,
+            'unavailable',
             'AutomationWebhookDnsUnavailable',
             'Automation webhook endpoint DNS resolution failed.',
             true,
@@ -329,7 +329,7 @@ function readSecretPrefix() {
 
 function endpointRejected() {
   return new AutomationError(
-    422,
+    'unprocessable',
     'AutomationWebhookEndpointRejected',
     'Automation webhook endpoint is not allowed.',
   )
@@ -337,7 +337,7 @@ function endpointRejected() {
 
 function secretUnavailable() {
   return new AutomationError(
-    503,
+    'unavailable',
     'AutomationWebhookSecretUnavailable',
     'Automation webhook signing secret is unavailable.',
     true,
