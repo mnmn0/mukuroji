@@ -56,11 +56,14 @@ type DocumentOperationTarget = {
 }
 
 /**
- * Document operation batch を副作用なしで canonical snapshot へ適用します。
+ * Applies an operation batch to a cloned canonical document snapshot.
  *
- * Stale base revision でも、変更対象 element が base revision 以降に更新されて
- * いなければ現在 snapshot へ merge します。一件でも競合すると batch 全体を
- * 拒否し、入力 document は変更しません。
+ * A stale batch is merged when none of its target elements changed after the
+ * base revision. Any conflict rejects the complete batch without mutating the
+ * input snapshot.
+ *
+ * @param input - Current snapshot, element revisions, and operation batch.
+ * @returns Reduced snapshot, updated element revisions, and applied IDs.
  */
 export function reduceDocumentOperations(
   input: ReduceDocumentOperationsInput,
@@ -169,7 +172,9 @@ export function reduceDocumentOperations(
 }
 
 /**
- * Canonical Document snapshot の shape、参照整合性、DynamoDB item size を検証します。
+ * Validates a canonical document snapshot, internal references, and item size.
+ *
+ * @param document - Canonical document snapshot to validate.
  */
 export function validateDocumentPayload(document: DocumentDetail): void {
   if (!isRecord(document)) throw invalidPayload('Document must be an object.')
@@ -240,7 +245,11 @@ export function validateDocumentPayload(document: DocumentDetail): void {
 }
 
 /**
- * Canonical Document snapshot を Markdown、JSON、SVG の安全な text artifact へ描画します。
+ * Validates and renders a canonical document as a safe text artifact.
+ *
+ * @param document - Canonical document snapshot to render.
+ * @param format - Requested export format.
+ * @returns Safe rendered artifact.
  */
 export function renderDocumentExport(
   document: DocumentDetail,
@@ -255,7 +264,11 @@ export function renderDocumentExport(
 }
 
 /**
- * Public-safe Document projection を metadata を再導入せず text artifact へ描画します。
+ * Renders a public-safe document projection without reintroducing metadata.
+ *
+ * @param document - Public document projection to render.
+ * @param format - Requested export format.
+ * @returns Safe rendered artifact.
  */
 export function renderPublicDocumentExport(
   document: PublicDocument,
@@ -282,6 +295,14 @@ export function renderDocumentProjectionExport(
   return renderDocumentArtifact(document, format, document.id)
 }
 
+/**
+ * Renders a canonical or public document as a downloadable text artifact.
+ *
+ * @param document - Document projection to render.
+ * @param format - Requested export format.
+ * @param fallbackFileName - File name to use when the document title is empty.
+ * @returns Rendered export content and metadata.
+ */
 function renderDocumentArtifact(
   document: DocumentDetail | PublicDocument,
   format: DocumentExportFormat,
@@ -327,6 +348,13 @@ function renderDocumentArtifact(
   throw new DocumentError(400, 'UnsupportedDocumentExport', `Unsupported export format: ${String(format)}.`)
 }
 
+/**
+ * Collects every element revision target affected by an operation.
+ *
+ * @param operation - Operation to inspect.
+ * @param document - Current document snapshot.
+ * @returns Conflict targets affected by the operation.
+ */
 function getOperationTargets(
   operation: DocumentOperation,
   document: DocumentDetail,
@@ -394,6 +422,13 @@ function getOperationTargets(
   }
 }
 
+/**
+ * Creates a normalized element revision target.
+ *
+ * @param elementType - Kind of document element.
+ * @param elementId - Stable element identifier.
+ * @returns Normalized operation target.
+ */
 function elementTarget(
   elementType: DocumentOperationConflictDetail['elementType'],
   elementId: string,
@@ -401,6 +436,12 @@ function elementTarget(
   return { key: `${elementType}:${elementId}`, elementType, elementId }
 }
 
+/**
+ * Applies one validated document operation to a mutable snapshot clone.
+ *
+ * @param document - Mutable document snapshot.
+ * @param operation - Operation to apply.
+ */
 function applyDocumentOperation(document: DocumentDetail, operation: DocumentOperation): void {
   switch (operation.type) {
     case 'insert-block': {
@@ -517,6 +558,12 @@ function applyDocumentOperation(document: DocumentDetail, operation: DocumentOpe
   }
 }
 
+/**
+ * Returns the block collection for a page-like document.
+ *
+ * @param document - Document expected to contain blocks.
+ * @returns Mutable block collection.
+ */
 function requireBlocks(document: DocumentDetail): DocumentBlock[] {
   if (document.kind !== 'page' && document.kind !== 'template') {
     throw new DocumentError(400, 'InvalidDocumentOperation', 'Block operations require a page or template.')
@@ -524,6 +571,12 @@ function requireBlocks(document: DocumentDetail): DocumentBlock[] {
   return document.blocks
 }
 
+/**
+ * Returns whiteboard content from a whiteboard document.
+ *
+ * @param document - Document expected to be a whiteboard.
+ * @returns Mutable whiteboard content.
+ */
 function requireWhiteboard(document: DocumentDetail): WhiteboardContent {
   if (document.kind !== 'whiteboard') {
     throw new DocumentError(400, 'InvalidDocumentOperation', 'Whiteboard operations require a whiteboard.')
@@ -531,6 +584,14 @@ function requireWhiteboard(document: DocumentDetail): WhiteboardContent {
   return document.whiteboard
 }
 
+/**
+ * Finds an element index or raises the canonical missing-element error.
+ *
+ * @param values - Elements to search.
+ * @param id - Element identifier to find.
+ * @param type - Element type used in validation errors.
+ * @returns Matching array index.
+ */
 function findElementIndex<T extends { id: string }>(
   values: readonly T[],
   id: string,
@@ -544,6 +605,12 @@ function findElementIndex<T extends { id: string }>(
   return index
 }
 
+/**
+ * Inserts or replaces a structured clone by stable identifier.
+ *
+ * @param values - Mutable element collection.
+ * @param value - Element to insert or replace.
+ */
 function upsertById<T extends { id: string }>(values: T[], value: T): void {
   const index = values.findIndex(({ id }) => id === value.id)
   if (index < 0) values.push(structuredClone(value))
@@ -602,6 +669,13 @@ export function validateDocumentPermission(
   }
 }
 
+/**
+ * Replaces the actor's grant with a manager grant.
+ *
+ * @param permission - Permission state to normalize.
+ * @param memberKey - Actor who must remain a manager.
+ * @returns Permission state containing the manager grant.
+ */
 function ensureManagerGrant(
   permission: DocumentPermission,
   memberKey: string,
@@ -637,6 +711,11 @@ export function normalizeDocumentPermissionForActor(
   return normalized
 }
 
+/**
+ * Validates one page or template block.
+ *
+ * @param block - Block payload to validate.
+ */
 function validateBlock(block: DocumentBlock): void {
   if (
     !isRecord(block) ||
@@ -736,6 +815,11 @@ function validateBlock(block: DocumentBlock): void {
   }
 }
 
+/**
+ * Validates whiteboard collections and their internal references.
+ *
+ * @param whiteboard - Whiteboard payload to validate.
+ */
 function validateWhiteboard(whiteboard: WhiteboardContent): void {
   if (
     !isRecord(whiteboard) ||
@@ -771,6 +855,11 @@ function validateWhiteboard(whiteboard: WhiteboardContent): void {
   }
 }
 
+/**
+ * Validates one whiteboard object and its style.
+ *
+ * @param object - Whiteboard object to validate.
+ */
 function validateWhiteboardObject(object: WhiteboardObject): void {
   if (
     !isRecord(object) ||
@@ -824,6 +913,12 @@ function validateWhiteboardObject(object: WhiteboardObject): void {
   }
 }
 
+/**
+ * Validates a whiteboard connector against available objects.
+ *
+ * @param connector - Connector to validate.
+ * @param objectIds - Identifiers available as connector endpoints.
+ */
 function validateConnector(connector: WhiteboardConnector, objectIds: ReadonlySet<string>): void {
   if (
     !isRecord(connector) ||
@@ -873,6 +968,12 @@ function validateConnector(connector: WhiteboardConnector, objectIds: ReadonlySe
   }
 }
 
+/**
+ * Validates a whiteboard frame and its object references.
+ *
+ * @param frame - Frame to validate.
+ * @param objectIds - Identifiers available as frame members.
+ */
 function validateFrame(frame: WhiteboardFrame, objectIds: ReadonlySet<string>): void {
   if (!isRecord(frame) || !Array.isArray(frame.objectIds)) {
     throw invalidPayload('Whiteboard frame is invalid.')
@@ -894,6 +995,11 @@ function validateFrame(frame: WhiteboardFrame, objectIds: ReadonlySet<string>): 
   }
 }
 
+/**
+ * Validates finite, positive whiteboard bounds.
+ *
+ * @param bounds - Bounds payload to validate.
+ */
 function validateBounds(bounds: WhiteboardObject['bounds']): void {
   if (!isRecord(bounds)) throw invalidPayload('Whiteboard bounds are invalid.')
   if (
@@ -932,6 +1038,12 @@ function validateBounds(bounds: WhiteboardObject['bounds']): void {
   }
 }
 
+/**
+ * Validates a document relation and its local source reference.
+ *
+ * @param relation - Relation payload to validate.
+ * @param document - Document containing the relation source.
+ */
 function validateRelation(relation: DocumentRelation, document: DocumentDetail): void {
   if (
     !isRecord(relation) ||
@@ -1002,6 +1114,13 @@ export function validateCanonicalDocumentWorkItemId(
   }
 }
 
+/**
+ * Renders page blocks as escaped Markdown.
+ *
+ * @param title - Document title.
+ * @param blocks - Blocks to render.
+ * @returns Markdown document text.
+ */
 function renderMarkdown(title: string, blocks: readonly DocumentBlock[]): string {
   const parts = [`# ${escapeMarkdownText(title)}`]
   for (const block of blocks) {
@@ -1052,6 +1171,13 @@ function renderMarkdown(title: string, blocks: readonly DocumentBlock[]): string
   return `${parts.join('\n\n')}\n`
 }
 
+/**
+ * Renders source text inside a collision-safe Markdown code fence.
+ *
+ * @param source - Source text to wrap.
+ * @param infoString - Optional validated fence language.
+ * @returns Markdown code fence.
+ */
 function renderMarkdownCodeFence(
   source: string,
   infoString?: string,
@@ -1073,6 +1199,12 @@ function renderMarkdownCodeFence(
   return `${fence}${safeInfoString}\n${source}\n${fence}`
 }
 
+/**
+ * Renders a whiteboard projection as escaped standalone SVG.
+ *
+ * @param document - Whiteboard projection to render.
+ * @returns Standalone SVG text.
+ */
 function renderWhiteboardSvg(
   document:
     | Extract<DocumentDetail, { kind: 'whiteboard' }>
@@ -1126,6 +1258,12 @@ function renderWhiteboardSvg(
   return `<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="${escapeXml(document.title)}" viewBox="${minX - 20} ${minY - 20} ${width} ${height}"><rect x="${minX - 20}" y="${minY - 20}" width="${width}" height="${height}" fill="#ffffff"/>${frames}${connectors}${objects}</svg>\n`
 }
 
+/**
+ * Asserts that a value is a bounded, non-empty document identifier.
+ *
+ * @param value - Identifier candidate.
+ * @param field - Field name used in validation errors.
+ */
 function assertIdentifier(value: string, field: string): void {
   if (
     typeof value !== 'string' ||
@@ -1137,6 +1275,14 @@ function assertIdentifier(value: string, field: string): void {
   }
 }
 
+/**
+ * Asserts that text satisfies the configured length and emptiness rules.
+ *
+ * @param value - Text candidate.
+ * @param field - Field name used in validation errors.
+ * @param maxLength - Maximum number of characters.
+ * @param allowEmpty - Whether blank text is accepted.
+ */
 function assertText(
   value: string,
   field: string,
@@ -1156,6 +1302,12 @@ function assertText(
   }
 }
 
+/**
+ * Asserts that a Markdown code-fence info string is safe.
+ *
+ * @param value - Info string candidate.
+ * @param field - Field name used in validation errors.
+ */
 function assertCodeFenceInfoString(
   value: string,
   field: string,
@@ -1172,10 +1324,22 @@ function assertCodeFenceInfoString(
   }
 }
 
+/**
+ * Checks whether a Markdown code-fence info string is a single safe token.
+ *
+ * @param value - Info string candidate.
+ * @returns Whether the value is safe.
+ */
 function isSafeCodeFenceInfoString(value: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9_+.-]{0,99}$/u.test(value)
 }
 
+/**
+ * Asserts that a timestamp is canonical ISO-8601 text.
+ *
+ * @param value - Timestamp candidate.
+ * @param field - Field name used in validation errors.
+ */
 function assertIsoTimestamp(value: string, field: string): void {
   if (
     typeof value !== 'string' ||
@@ -1185,6 +1349,14 @@ function assertIsoTimestamp(value: string, field: string): void {
     throw new DocumentError(400, 'InvalidDocumentTimestamp', `${field} must be an ISO-8601 timestamp.`)
   }
 }
+
+/**
+ * Records an identifier after asserting it is unique in its collection.
+ *
+ * @param values - Previously observed identifiers.
+ * @param id - Identifier to record.
+ * @param type - Element type used in validation errors.
+ */
 function assertUniqueId(values: Set<string>, id: string, type: string): void {
   if (values.has(id)) {
     throw new DocumentError(400, 'DuplicateDocumentElementId', `Duplicate ${type} ID "${id}".`)
@@ -1192,6 +1364,13 @@ function assertUniqueId(values: Set<string>, id: string, type: string): void {
   values.add(id)
 }
 
+/**
+ * Asserts that an operation index is within collection bounds.
+ *
+ * @param index - Requested index.
+ * @param length - Current collection length.
+ * @param allowEnd - Whether insertion at the end is allowed.
+ */
 function assertIndex(index: number, length: number, allowEnd: boolean): void {
   const maximum = allowEnd ? length : Math.max(0, length - 1)
   if (!Number.isSafeInteger(index) || index < 0 || index > maximum) {
@@ -1199,9 +1378,19 @@ function assertIndex(index: number, length: number, allowEnd: boolean): void {
   }
 }
 
+/**
+ * Asserts that a URL is HTTP(S) or a single-slash application-relative path.
+ *
+ * @param value - URL candidate.
+ * @param field - Field name used in validation errors.
+ */
 function assertSafeUrl(value: string, field: string): void {
   assertText(value, field, 4_096, false)
-  if (value.startsWith('/')) return
+  if (
+    value.startsWith('/') &&
+    !value.startsWith('//') &&
+    !value.startsWith('/\\')
+  ) return
   try {
     const url = new URL(value)
     if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('unsafe scheme')
@@ -1210,6 +1399,12 @@ function assertSafeUrl(value: string, field: string): void {
   }
 }
 
+/**
+ * Checks whether a color uses the supported restricted CSS syntax.
+ *
+ * @param value - CSS color candidate.
+ * @returns Whether the color is safe for SVG output.
+ */
 function isSafeCssColor(value: string): boolean {
   return (
     /^#[\da-f]{3,8}$/iu.test(value) ||
@@ -1218,22 +1413,53 @@ function isSafeCssColor(value: string): boolean {
   )
 }
 
+/**
+ * Selects and escapes a safe SVG color value.
+ *
+ * @param value - Optional requested color.
+ * @param fallback - Trusted fallback color.
+ * @returns Escaped safe color.
+ */
 function safeSvgColor(value: string | undefined, fallback: string): string {
   return value !== undefined && isSafeCssColor(value) ? escapeXml(value) : fallback
 }
 
+/**
+ * Escapes Markdown punctuation in plain text.
+ *
+ * @param value - Plain text to escape.
+ * @returns Escaped Markdown text.
+ */
 function escapeMarkdownText(value: string): string {
   return value.replace(/([\\`*_[\]<>])/gu, '\\$1')
 }
 
+/**
+ * Escapes text for a Markdown table cell.
+ *
+ * @param value - Cell text to escape.
+ * @returns Escaped table-cell text.
+ */
 function escapeMarkdownTableCell(value: string): string {
   return escapeMarkdownText(value).replaceAll('|', '\\|').replace(/\r?\n/gu, '<br>')
 }
 
+/**
+ * Encodes a validated URL for a Markdown link destination.
+ *
+ * @param value - Validated URL.
+ * @returns Encoded Markdown destination.
+ */
 function escapeMarkdownUrl(value: string): string {
   return encodeURI(value).replaceAll('(', '%28').replaceAll(')', '%29')
 }
 
+/**
+ * Escapes XML metacharacters for SVG text and attributes.
+ *
+ * @param value - Text to escape.
+ * @returns XML-safe text.
+ */
 function escapeXml(value: string): string {
   return value
     .replaceAll('&', '&amp;')
@@ -1243,6 +1469,12 @@ function escapeXml(value: string): string {
     .replaceAll("'", '&apos;')
 }
 
+/**
+ * Normalizes user text into a bounded export file name.
+ *
+ * @param value - File-name candidate.
+ * @returns Safe base file name.
+ */
 function sanitizeFileName(value: string): string {
   const safe = value
     .normalize('NFKC')
@@ -1253,10 +1485,22 @@ function sanitizeFileName(value: string): string {
   return safe.length > 0 ? safe : 'document'
 }
 
+/**
+ * Capitalizes the first character of a label.
+ *
+ * @param value - Label to capitalize.
+ * @returns Capitalized label.
+ */
 function capitalize(value: string): string {
   return value.length === 0 ? value : `${value[0]?.toUpperCase()}${value.slice(1)}`
 }
 
+/**
+ * Returns the canonical identifier carried by a relation target.
+ *
+ * @param relation - Relation whose target to inspect.
+ * @returns Target identifier.
+ */
 function relationTargetId(relation: DocumentRelation): string {
   switch (relation.target.kind) {
     case 'work-item':
@@ -1267,19 +1511,42 @@ function relationTargetId(relation: DocumentRelation): string {
       return relation.target.goalId
   }
 }
+
+/**
+ * Checks whether a value is a non-array record.
+ *
+ * @param value - Value to inspect.
+ * @returns Whether the value is a record.
+ */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/**
+ * Checks whether a value is a non-null, non-array object.
+ *
+ * @param value - Value to inspect.
+ * @returns Whether the value is object-like.
+ */
 function isObjectLike(value: unknown): boolean {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
+
+/**
+ * Creates the canonical invalid document payload error.
+ *
+ * @param message - Stable validation detail.
+ * @returns Invalid payload error.
+ */
 function invalidPayload(message: string): DocumentError {
   return new DocumentError(400, 'InvalidDocumentPayload', message)
 }
 
 /**
- * Document snapshot が参照する外部 domain target を列挙します。
+ * Collects external domain targets referenced by a document snapshot.
+ *
+ * @param document - Document snapshot to inspect.
+ * @returns Cloned relation and whiteboard Work Item targets.
  */
 export function collectDocumentRelationTargets(
   document: DocumentDetail,

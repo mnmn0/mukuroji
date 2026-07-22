@@ -3982,6 +3982,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
 
   /** Document を安全な text format へ export します。 */
   async exportDocument(input: ExportDocumentRequest): Promise<RenderedDocumentExport> {
+    await this.ensureTable()
     const row = await this.getRequiredDocumentRow(
       input.workspaceId,
       input.documentId,
@@ -4837,28 +4838,39 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       }
     }
     if (metadata === undefined) {
-      const result = await this.client.send(new QueryCommand({
-        TableName: this.tableName,
-        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
-        ExpressionAttributeValues: {
-          ':workspaceId': workspaceId,
-          ':prefix': `VERSION#${documentId}#`,
-        },
-        ConsistentRead: true,
-      }))
-      metadata = (result.Items ?? [])
-        .map(
-          (item) =>
-            item as StoredDocumentVersionItem,
-        )
-        .find(
-          (item) =>
-            item.version.id === versionId &&
-            (
-              item.expiresAtEpoch === undefined ||
-              item.expiresAtEpoch > nowEpoch
-            ),
-        )
+      let exclusiveStartKey:
+        | Record<string, unknown>
+        | undefined
+      do {
+        const result = await this.client.send(new QueryCommand({
+          TableName: this.tableName,
+          KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
+          ExpressionAttributeValues: {
+            ':workspaceId': workspaceId,
+            ':prefix': `VERSION#${documentId}#`,
+          },
+          ConsistentRead: true,
+          ExclusiveStartKey: exclusiveStartKey,
+        }))
+        metadata = (result.Items ?? [])
+          .map(
+            (item) =>
+              item as StoredDocumentVersionItem,
+          )
+          .find(
+            (item) =>
+              item.version.id === versionId &&
+              (
+                item.expiresAtEpoch === undefined ||
+                item.expiresAtEpoch > nowEpoch
+              ),
+          )
+        exclusiveStartKey =
+          result.LastEvaluatedKey
+      } while (
+        metadata === undefined &&
+        exclusiveStartKey !== undefined
+      )
     }
     if (metadata === undefined) {
       throw new DocumentError(404, 'DocumentVersionNotFound', 'Document version was not found.')
@@ -6479,10 +6491,6 @@ function authorizationSnapshotGuards(
       isInvalidAuthorizationGeneration(snapshot.planningRevision) ||
       isInvalidAuthorizationGeneration(
         snapshot.enterpriseControlRevision,
-      ) ||
-      (
-        snapshot.enterpriseControlRevision !== undefined &&
-        !enterpriseTableName
       ) ||
       (
         !memberKeyPresent &&

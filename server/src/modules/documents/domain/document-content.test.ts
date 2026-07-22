@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
 import type { DocumentDetail } from '@mukuroji/contracts'
+import { DocumentError } from '../errors'
 import {
   collectDocumentRelationTargets,
   reduceDocumentOperations,
@@ -8,7 +9,7 @@ import {
 } from './document-content'
 
 test('reduces independent stale-base operations without mutating the input snapshot', () => {
-  const original = createPage()
+  const original = createPage({ revision: 2 })
   const reduced = reduceDocumentOperations({
     document: original,
     elementRevisions: {
@@ -16,24 +17,41 @@ test('reduces independent stale-base operations without mutating the input snaps
       'block:block-b': 1,
     },
     baseRevision: 1,
-    nextRevision: 2,
-    operations: [{
-      type: 'update-block',
-      operationId: 'operation-a',
-      blockId: 'block-a',
-      block: {
-        id: 'block-a',
-        type: 'paragraph',
-        text: 'A2',
+    nextRevision: 3,
+    operations: [
+      {
+        type: 'update-block',
+        operationId: 'operation-a',
+        blockId: 'block-a',
+        block: {
+          id: 'block-a',
+          type: 'paragraph',
+          text: 'A2',
+        },
       },
-    }],
+      {
+        type: 'update-block',
+        operationId: 'operation-b',
+        blockId: 'block-b',
+        block: {
+          id: 'block-b',
+          type: 'paragraph',
+          text: 'B2',
+        },
+      },
+    ],
   })
 
   expect(original.blocks[0]?.text).toBe('A1')
-  expect(reduced.document.revision).toBe(2)
+  expect(original.blocks[1]?.text).toBe('B1')
+  expect(reduced.document.revision).toBe(3)
   expect(reduced.document.blocks[0]).toMatchObject({
     id: 'block-a',
     text: 'A2',
+  })
+  expect(reduced.document.blocks[1]).toMatchObject({
+    id: 'block-b',
+    text: 'B2',
   })
 })
 
@@ -58,6 +76,69 @@ test('validates, renders, and collects relations without AWS or Hono dependencie
     workItemId: 'team/team-1/issue/issue-1',
   }])
 })
+
+test('rejects malformed document payloads with domain errors', () => {
+  const missingBlocks = createPage()
+  Reflect.deleteProperty(missingBlocks, 'blocks')
+  const duplicateRelations = createPage({
+    relations: [
+      createRelation('relation-1'),
+      createRelation('relation-1'),
+    ],
+  })
+  const invalidRevision = createPage({ revision: 0 })
+
+  for (const document of [
+    missingBlocks,
+    duplicateRelations,
+    invalidRevision,
+  ]) {
+    expect(() =>
+      validateDocumentPayload(document)
+    ).toThrow(DocumentError)
+  }
+})
+
+test('rejects slash and backslash protocol-relative embed URLs', () => {
+  for (const url of [
+    '//evil.example/path',
+    '/\\evil.example/path',
+  ]) {
+    const page = createPage({
+      blocks: [{
+        id: 'embed-1',
+        type: 'embed',
+        url,
+      }],
+    })
+
+    expect(() =>
+      validateDocumentPayload(page)
+    ).toThrow(DocumentError)
+  }
+})
+
+/**
+ * Creates a valid relation for payload validation tests.
+ *
+ * @param id - Stable relation identifier.
+ * @returns A valid document relation.
+ */
+function createRelation(
+  id: string,
+): DocumentDetail['relations'][number] {
+  return {
+    id,
+    source: { kind: 'document' },
+    target: {
+      kind: 'work-item',
+      workItemId:
+        'team/team-1/issue/issue-1',
+    },
+    createdByUserId: 'owner@example.com',
+    createdAt: '2026-07-18T00:00:00.000Z',
+  }
+}
 
 /**
  * Creates a valid page snapshot for pure domain tests.

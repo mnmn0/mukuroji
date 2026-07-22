@@ -1488,6 +1488,85 @@ test('reconstructs retained version deltas across paginated Query results', asyn
   })
 })
 
+test('finds a legacy version ID beyond the first Query page', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Legacy version lookup',
+    blocks: [{
+      id: 'block-a',
+      type: 'paragraph',
+      text: 'revision 1',
+    }],
+  })
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: 1,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'update-block',
+        operationId: 'operation-1',
+        blockId: 'block-a',
+        block: {
+          id: 'block-a',
+          type: 'paragraph',
+          text: 'revision 2',
+        },
+      }],
+    },
+  })
+  const targetMetadata = memory.items().find(
+    ({ entryType, recordKey }) =>
+      entryType === 'document-version' &&
+      typeof recordKey === 'string' &&
+      recordKey.endsWith('#000000000002'),
+  )
+  if (targetMetadata === undefined) {
+    throw new Error('Expected revision 2 version metadata.')
+  }
+  const targetVersion = targetMetadata.version
+  if (
+    typeof targetVersion !== 'object' ||
+    targetVersion === null ||
+    Array.isArray(targetVersion)
+  ) {
+    throw new Error('Expected stored version metadata.')
+  }
+  memory.put({
+    ...targetMetadata,
+    version: {
+      ...targetVersion,
+      id: 'legacy-version-2',
+    },
+  })
+
+  memory.setQueryPageSize(1)
+  const restored = await client.restoreVersion({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    versionId: 'legacy-version-2',
+    expectedRevision: 2,
+    validateRelationTargets:
+      async () => undefined,
+  })
+
+  expect(restored).toMatchObject({
+    revision: 3,
+    blocks: [{
+      id: 'block-a',
+      text: 'revision 2',
+    }],
+  })
+})
+
 test('revalidates relation and Whiteboard Work Item targets before restoring a snapshot', async () => {
   const memory = createMemoryDocumentClient()
   const client = createClient(memory)
@@ -4991,6 +5070,41 @@ test('rejects an authorization snapshot from another Workspace before writing', 
       ({ entryType }) => entryType === 'document',
     ),
   ).toHaveLength(0)
+})
+
+test('allows in-memory enterprise authorization snapshots without a physical control table', async () => {
+  const configuredTableName =
+    Bun.env.ENTERPRISE_IDENTITY_TABLE_NAME
+  delete Bun.env.ENTERPRISE_IDENTITY_TABLE_NAME
+  try {
+    const memory = createMemoryDocumentClient()
+    const client = createClient(memory)
+
+    await expect(client.create({
+      workspaceId: 'workspace-1',
+      access: {
+        ...ownerAccess,
+        authorizationSnapshots: [{
+          workspaceId: 'workspace-1',
+          enterpriseControlRevision: 1,
+        }],
+      },
+      kind: 'page',
+      scope: { type: 'workspace' },
+      title: 'In-memory enterprise authorization',
+      blocks: [],
+    })).resolves.toMatchObject({
+      title: 'In-memory enterprise authorization',
+      revision: 1,
+    })
+  } finally {
+    if (configuredTableName === undefined) {
+      delete Bun.env.ENTERPRISE_IDENTITY_TABLE_NAME
+    } else {
+      Bun.env.ENTERPRISE_IDENTITY_TABLE_NAME =
+        configuredTableName
+    }
+  }
 })
 
 test('deduplicates principal and relation authorization guards in inherited create transactions', async () => {

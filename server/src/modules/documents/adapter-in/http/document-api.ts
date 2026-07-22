@@ -103,7 +103,7 @@ export type DocumentApiPrincipal = {
    */
   isSystemAdmin: boolean
   /**
-   * Mutation transaction を認証時の authorization generations へ束縛する guards です。
+   * Mutation transaction を認証時の authorization snapshot へ束縛します。
    */
   authorizationSnapshots?: readonly DocumentAuthorizationFenceSnapshot[]
   /**
