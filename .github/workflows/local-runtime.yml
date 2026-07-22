@@ -5,6 +5,7 @@ on:
     paths:
       - .github/workflows/local-runtime.yml
       - bun.lock
+      - contracts/**
       - docker-compose.yml
       - floci/**
       - package.json
@@ -15,6 +16,7 @@ on:
     paths:
       - .github/workflows/local-runtime.yml
       - bun.lock
+      - contracts/**
       - docker-compose.yml
       - floci/**
       - package.json
@@ -31,6 +33,7 @@ jobs:
     env:
       ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET: '2222222222222222222222222222222222222222222222222222222222222222'
       ENTERPRISE_SSO_STATE_SECRET: '3333333333333333333333333333333333333333333333333333333333333333'
+      FLOCI_IMAGE: floci/floci:1.5.33-compat
       MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: '1111111111111111111111111111111111111111111111111111111111111111'
     steps:
       - name: Checkout
@@ -46,6 +49,9 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Prepare Floci generated directory
+        run: install -d -m 0777 .floci/generated
+
       - name: Start Floci
         run: docker compose up -d floci
 
@@ -53,7 +59,7 @@ jobs:
         run: |
           for attempt in {1..180}; do
             docker compose logs floci > "${RUNNER_TEMP}/floci.log"
-            if grep -Fq '=== AWS Local Emulator Ready ===' "${RUNNER_TEMP}/floci.log"; then
+            if [ -f .floci/generated/cognito.env ]; then
               exit 0
             fi
             sleep 1
@@ -94,10 +100,26 @@ jobs:
             exit 1
           fi
 
-          curl --fail-with-body --silent --show-error \
+          issues_response="$(curl --fail-with-body --silent --show-error \
             --header "Authorization: Bearer ${access_token}" \
-            http://127.0.0.1:3000/api/teams/core-team/issues \
-            >/dev/null
+            http://127.0.0.1:3000/api/teams/core-team/issues)"
+          if ! jq -e \
+            '.teamId == "core-team" and
+            (.issues | type) == "array" and
+            any(.issues[];
+              .id == "wireframe" and
+              .teamId == "core-team" and
+              .assignedProjectId == "refero" and
+              .schemaVersion == 1 and
+              .workflowSchemaVersion == 1 and
+              .workflowStatusId == "in-progress" and
+              .statusCategory == "started"
+            )' \
+            <<< "${issues_response}" >/dev/null; then
+            echo 'Work Item API did not return the expected seeded issue.' >&2
+            jq . <<< "${issues_response}" >&2
+            exit 1
+          fi
 
       - name: Print Floci logs on failure
         if: failure()

@@ -1,6 +1,6 @@
 services:
   floci:
-    image: floci/floci:latest-compat
+    image: "${FLOCI_IMAGE:-floci/floci:latest-compat}"
     ports:
       - "${FLOCI_PORT:-4566}:4566"
     environment:
