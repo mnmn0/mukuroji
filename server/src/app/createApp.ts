@@ -40,8 +40,6 @@ import {
   ENTERPRISE_PERMISSION_IDS,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
-  type AnalyticsEvidenceInput,
-  type AnalyticsExportInput,
   type AnalyticsQueryInput,
   type AnalyticsReport,
   type AnalyticsSnapshot,
@@ -120,6 +118,10 @@ import type { Context } from 'hono'
 import { createDependencyRuntime } from './composition/dependency-runtime'
 import { registerCommonMiddleware } from './middleware/common-middleware'
 import { createSystemRouter } from './routes/system-router'
+import {
+  createAnalyticsRouter,
+  type AnalyticsExportFile,
+} from '../modules/analytics/adapter-in/http/analytics-router'
 import { createDashboardRouter } from '../modules/analytics/adapter-in/http/dashboard-router'
 import { createAuditRouter } from '../modules/audit/adapter-in/http/audit-router'
 import { loadServerConfig } from '../infrastructure/config/server-config'
@@ -6107,308 +6109,22 @@ routeApp.route('/', createDashboardRouter<
 }))
 routeApp.route('/', createAuditRouter(handleWorkspaceAuditRequest))
 
-/** Current ACL を先に適用して ad-hoc または saved report を集計します。 */
-routeApp.post('/api/analytics/query', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    const body = await readAnalyticsJson(c)
-    const query = await resolveAnalyticsQuery(principal, body)
-    return c.json({ snapshot: await executeAnalyticsQuery(principal, query) })
-  } catch (error) {
-    return toAnalyticsErrorResponse(c, error)
-  }
-})
-
-/** Metric drill-down を current ACL で再実行して evidence page を返します。 */
-routeApp.post('/api/analytics/evidence', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    const evidence = await readAnalyticsJson(c) as AnalyticsEvidenceInput
-    return c.json(await executeAnalyticsEvidenceQuery(principal, evidence))
-  } catch (error) {
-    return toAnalyticsErrorResponse(c, error)
-  }
-})
-
-/** Current ACL で再計算した analytics snapshot を CSV/PDF として同期 export します。 */
-routeApp.post('/api/analytics/export', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    const input = await readAnalyticsJson(c) as AnalyticsExportInput
-    const format = readAnalyticsExportFormat(input.format)
-    const locale = normalizeAnalyticsExportLocale(input.locale)
-    const snapshot = await resolveAnalyticsExportSnapshot(principal, input)
-    const headers = {
-      'Cache-Control': 'private, no-store',
-      'Content-Disposition': `attachment; filename="mukuroji-analytics.${format}"`,
-      'Content-Type': format === 'csv'
-        ? 'text/csv; charset=utf-8'
-        : 'application/pdf',
-    }
-    if (format === 'csv') {
-      return c.body(createAnalyticsCsv(snapshot, locale), 200, headers)
-    }
-    return new Response(createAnalyticsPdf(snapshot, locale), { headers, status: 200 })
-  } catch (error) {
-    return toAnalyticsErrorResponse(c, error)
-  }
-})
-
-/** Current user が参照できる personal/team/shared analytics report を返します。 */
-routeApp.get('/api/analytics/reports', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    const context = await createWorkspaceSearchContext(principal)
-    const response = await analytics.listReports(
-      principal.directoryId,
-      readAnalyticsReportListLimit(c.req.query('limit')),
-      readAnalyticsReportListCursor(c.req.query('cursor')),
-    )
-    return c.json({
-      reports: response.reports.filter((report) =>
-        canReadAnalyticsReport(principal, context, report)
-      ),
-      ...(response.nextCursor === undefined
-        ? {}
-        : { nextCursor: response.nextCursor }),
-    })
-  } catch (error) {
-    return toAnalyticsErrorResponse(c, error)
-  }
-})
-
-/** Analytics report definition を visibility policy に従って保存します。 */
-routeApp.post('/api/analytics/reports', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    requireWorkspaceBusinessWrite(principal)
-    const body = await readAnalyticsJson(c)
-    const input = sanitizePublicAnalyticsReportCreateInput(body)
-    await requireAnalyticsVisibilityWrite(
-      principal,
-      input.visibility,
-      input.teamId,
-      principal.userKey,
-    )
-    return c.json({
-      report: await analytics.createReport(
-        principal.directoryId,
-        principal.userKey,
-        input,
-      ),
-    }, 201)
-  } catch (error) {
-    return toAnalyticsErrorResponse(c, error)
-  }
-})
-
-/** Analytics report definition を optimistic revision 付きで更新します。 */
-routeApp.patch('/api/analytics/reports/:reportId', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    requireWorkspaceBusinessWrite(principal)
-    const reportId = readAnalyticsIdentifier(c.req.param('reportId'), 'Analytics report ID')
-    const current = await requireAnalyticsReport(principal, reportId)
-    await requireAnalyticsReportWrite(principal, current)
-    const body = await readAnalyticsJson(c)
-    const input = sanitizePublicAnalyticsReportUpdateInput(body, current)
-    await requireAnalyticsVisibilityWrite(
-      principal,
-      input.visibility ?? current.visibility,
-      input.teamId === null ? undefined : input.teamId ?? current.teamId,
-      current.ownerMemberKey,
-    )
-    return c.json({
-      report: await analytics.updateReport(principal.directoryId, reportId, input),
-    })
-  } catch (error) {
-    return toAnalyticsErrorResponse(c, error)
-  }
-})
-
-/** Analytics report definition を optimistic revision 付きで削除します。 */
-routeApp.delete('/api/analytics/reports/:reportId', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    requireWorkspaceBusinessWrite(principal)
-    const reportId = readAnalyticsIdentifier(c.req.param('reportId'), 'Analytics report ID')
-    const current = await requireAnalyticsReport(principal, reportId)
-    await requireAnalyticsReportWrite(principal, current)
-    const input = await readAnalyticsJson(c)
-    const expectedRevision = readAnalyticsExpectedRevision(input.expectedRevision)
-    await analytics.deleteReport(principal.directoryId, reportId, expectedRevision)
-    return c.json({ deleted: true })
-  } catch (error) {
-    return toAnalyticsErrorResponse(c, error)
-  }
-})
-
-/** Report に保存された immutable analytics snapshot を current ACL で一覧化します。 */
-routeApp.get('/api/analytics/reports/:reportId/snapshots', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    const reportId = readAnalyticsIdentifier(c.req.param('reportId'), 'Analytics report ID')
-    const report = await requireAnalyticsReport(principal, reportId)
-    const visibleSnapshots: AnalyticsSnapshotRecord[] = []
-    const scopeCache =
-      new Map<string, ReturnType<typeof readAccessibleAnalyticsWorkItems>>()
-    const permissionScopeHashCache = new Map<string, Promise<string>>()
-    const seenCursors = new Set<string>()
-    let inspectedCount = 0
-    let repositoryPageCount = 0
-    let nextCursor = readAnalyticsSnapshotListCursor(c.req.query('cursor'))
-    if (nextCursor !== undefined) seenCursors.add(nextCursor)
-    do {
-      const pageCursor = nextCursor
-      const page = await analytics.listSnapshots(
-        principal.directoryId,
-        report.id,
-        Math.min(
-          ANALYTICS_SNAPSHOT_LIST_LIMIT,
-          ANALYTICS_SNAPSHOT_ACL_INSPECTION_LIMIT - inspectedCount,
-        ),
-        pageCursor,
-      )
-      repositoryPageCount += 1
-      let resumeCursor = page.nextCursor
-      for (const [recordIndex, record] of page.snapshots.entries()) {
-        inspectedCount += 1
-        const queryCacheKey = record.snapshot.queryHash
-        let pendingPermissionScopeHash = permissionScopeHashCache.get(queryCacheKey)
-        if (!pendingPermissionScopeHash) {
-          pendingPermissionScopeHash = readCurrentAnalyticsPermissionScopeHash(
-            principal,
-            record.query,
-            scopeCache,
-          )
-          permissionScopeHashCache.set(queryCacheKey, pendingPermissionScopeHash)
-        }
-        const currentPermissionScopeHash = await pendingPermissionScopeHash
-        if (currentPermissionScopeHash === record.snapshot.permissionScopeHash) {
-          visibleSnapshots.push(record)
-          if (visibleSnapshots.length === ANALYTICS_SNAPSHOT_LIST_LIMIT) {
-            resumeCursor = recordIndex < page.snapshots.length - 1
-              ? createAnalyticsSnapshotListCursor(
-                  principal.directoryId,
-                  report.id,
-                  record,
-                )
-              : page.nextCursor
-            break
-          }
-        }
-      }
-      nextCursor = resumeCursor
-      if (
-        nextCursor !== undefined &&
-        (
-          page.snapshots.length === 0 ||
-          nextCursor === pageCursor ||
-          seenCursors.has(nextCursor)
-        )
-      ) {
-        throw new AnalyticsError(
-          500,
-          'AnalyticsSnapshotPaginationInvalid',
-          'Analytics snapshot pagination did not make progress.',
-        )
-      }
-      if (nextCursor !== undefined) seenCursors.add(nextCursor)
-    } while (
-      visibleSnapshots.length < ANALYTICS_SNAPSHOT_LIST_LIMIT &&
-      inspectedCount < ANALYTICS_SNAPSHOT_ACL_INSPECTION_LIMIT &&
-      repositoryPageCount < ANALYTICS_SNAPSHOT_REPOSITORY_PAGE_LIMIT &&
-      nextCursor !== undefined
-    )
-    const response = {
-      snapshots: visibleSnapshots,
-      inspectedCount,
-      ...(nextCursor === undefined ? {} : { nextCursor }),
-    } satisfies AnalyticsSnapshotListResponse
-    return c.json(response)
-  } catch (error) {
-    return toAnalyticsErrorResponse(c, error)
-  }
-})
-
-/** Report definition と current ACL を再評価した immutable snapshot を保存します。 */
-routeApp.post('/api/analytics/reports/:reportId/snapshots', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    requireWorkspaceBusinessWrite(principal)
-    const reportId = readAnalyticsIdentifier(c.req.param('reportId'), 'Analytics report ID')
-    const report = await requireAnalyticsReport(principal, reportId)
-    await requireAnalyticsReportWrite(principal, report)
-    const body = await readAnalyticsJson(c)
-    const query = createAnalyticsReportQuery(report, body)
-    const snapshot = await executeAnalyticsQuery(principal, query)
-    const createdAt = new Date().toISOString()
-    const snapshotRecord = await analytics.putSnapshot({
-      id: createAnalyticsSnapshotId(
-        principal.directoryId,
-        report,
-        snapshot,
-        principal.userKey,
-        c.req.header('Idempotency-Key'),
-      ),
-      workspaceId: principal.directoryId,
-      reportId: report.id,
-      reportRevision: report.revision,
-      createdByMemberKey: principal.userKey,
-      createdAt,
-      query: structuredClone(query),
-      snapshot,
-    })
-    return c.json({ snapshotRecord }, 201)
-  } catch (error) {
-    return toAnalyticsErrorResponse(c, error)
-  }
-})
+routeApp.route('/', createAnalyticsRouter({
+  readBearerAccessToken,
+  authenticate: async (accessToken, context) =>
+    await authenticateWorkspacePrincipal(accessToken, undefined, context),
+  readJson: readAnalyticsJson,
+  executeQuery: executeAnalyticsHttpQuery,
+  executeEvidence: executeAnalyticsHttpEvidence,
+  createExport: createAnalyticsHttpExport,
+  listReports: listAnalyticsHttpReports,
+  createReport: createAnalyticsHttpReport,
+  updateReport: updateAnalyticsHttpReport,
+  deleteReport: deleteAnalyticsHttpReport,
+  listSnapshots: listAnalyticsHttpSnapshots,
+  createSnapshot: createAnalyticsHttpSnapshot,
+  mapError: toAnalyticsErrorResponse,
+}))
 
 routeApp.route('/', createNotificationRouter({
   notifications,
@@ -7412,20 +7128,6 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
             : {}),
         },
       },
-    ))
-  } catch (error) {
-    return toRequestIntakeErrorResponse(c, error)
-  }
-})
-
-/** Workspace admin が malware scan 済み request attachment の短命 URL を取得します。 */
-routeApp.post('/api/request-submissions/:submissionId/attachments/:attachmentId/access', async (c) => {
-  try {
-    const principal = await requireRequestAdministration(c)
-    return c.json(await requestIntake.createAttachmentAccess(
-      principal.directoryId,
-      c.req.param('submissionId'),
-      c.req.param('attachmentId'),
     ))
   } catch (error) {
     return toRequestIntakeErrorResponse(c, error)
@@ -9944,6 +9646,242 @@ async function readAnalyticsJson(c: Context): Promise<Record<string, unknown>> {
   return value
 }
 
+/** Executes an ad-hoc or saved Analytics query for the authenticated principal. */
+async function executeAnalyticsHttpQuery(
+  principal: WorkspacePrincipal,
+  input: Record<string, unknown>,
+) {
+  const query = await resolveAnalyticsQuery(principal, input)
+  return await executeAnalyticsQuery(principal, query)
+}
+
+/** Executes an Analytics evidence request for the authenticated principal. */
+async function executeAnalyticsHttpEvidence(
+  principal: WorkspacePrincipal,
+  input: Record<string, unknown>,
+) {
+  return await executeAnalyticsEvidenceQuery(principal, input)
+}
+
+/** Generates a CSV or PDF Analytics export for the authenticated principal. */
+async function createAnalyticsHttpExport(
+  principal: WorkspacePrincipal,
+  input: Record<string, unknown>,
+): Promise<AnalyticsExportFile> {
+  const format = readAnalyticsExportFormat(input.format)
+  const locale = normalizeAnalyticsExportLocale(
+    typeof input.locale === 'string' ? input.locale : undefined,
+  )
+  const snapshot = await resolveAnalyticsExportSnapshot(principal, input)
+  return format === 'csv'
+    ? {
+        body: createAnalyticsCsv(snapshot, locale),
+        extension: format,
+        contentType: 'text/csv; charset=utf-8',
+      }
+    : {
+        body: createAnalyticsPdf(snapshot, locale),
+        extension: format,
+        contentType: 'application/pdf',
+      }
+}
+
+/** Lists Analytics reports visible to the authenticated principal. */
+async function listAnalyticsHttpReports(
+  principal: WorkspacePrincipal,
+  limit: string | undefined,
+  cursor: string | undefined,
+) {
+  const context = await createWorkspaceSearchContext(principal)
+  const response = await analytics.listReports(
+    principal.directoryId,
+    readAnalyticsReportListLimit(limit),
+    readAnalyticsReportListCursor(cursor),
+  )
+  return {
+    reports: response.reports.filter((report) =>
+      canReadAnalyticsReport(principal, context, report)
+    ),
+    ...(response.nextCursor === undefined
+      ? {}
+      : { nextCursor: response.nextCursor }),
+  }
+}
+
+/** Creates an Analytics report after applying visibility authorization. */
+async function createAnalyticsHttpReport(
+  principal: WorkspacePrincipal,
+  input: Record<string, unknown>,
+) {
+  requireWorkspaceBusinessWrite(principal)
+  const normalized = sanitizePublicAnalyticsReportCreateInput(input)
+  await requireAnalyticsVisibilityWrite(
+    principal,
+    normalized.visibility,
+    normalized.teamId,
+    principal.userKey,
+  )
+  return await analytics.createReport(
+    principal.directoryId,
+    principal.userKey,
+    normalized,
+  )
+}
+
+/** Updates an Analytics report after authorization and revision checks. */
+async function updateAnalyticsHttpReport(
+  principal: WorkspacePrincipal,
+  reportIdValue: string,
+  input: Record<string, unknown>,
+) {
+  requireWorkspaceBusinessWrite(principal)
+  const reportId = readAnalyticsIdentifier(reportIdValue, 'Analytics report ID')
+  const current = await requireAnalyticsReport(principal, reportId)
+  await requireAnalyticsReportWrite(principal, current)
+  const normalized = sanitizePublicAnalyticsReportUpdateInput(input, current)
+  await requireAnalyticsVisibilityWrite(
+    principal,
+    normalized.visibility ?? current.visibility,
+    normalized.teamId === null ? undefined : normalized.teamId ?? current.teamId,
+    current.ownerMemberKey,
+  )
+  return await analytics.updateReport(principal.directoryId, reportId, normalized)
+}
+
+/** Deletes an Analytics report after authorization and revision checks. */
+async function deleteAnalyticsHttpReport(
+  principal: WorkspacePrincipal,
+  reportIdValue: string,
+  input: Record<string, unknown>,
+) {
+  requireWorkspaceBusinessWrite(principal)
+  const reportId = readAnalyticsIdentifier(reportIdValue, 'Analytics report ID')
+  const current = await requireAnalyticsReport(principal, reportId)
+  await requireAnalyticsReportWrite(principal, current)
+  const expectedRevision = readAnalyticsExpectedRevision(input.expectedRevision)
+  await analytics.deleteReport(principal.directoryId, reportId, expectedRevision)
+}
+
+/** Lists report snapshots that remain visible under the current ACL. */
+async function listAnalyticsHttpSnapshots(
+  principal: WorkspacePrincipal,
+  reportIdValue: string,
+  cursor: string | undefined,
+) {
+  const reportId = readAnalyticsIdentifier(reportIdValue, 'Analytics report ID')
+  const report = await requireAnalyticsReport(principal, reportId)
+  const visibleSnapshots: AnalyticsSnapshotRecord[] = []
+  const scopeCache = new Map<
+    string,
+    ReturnType<typeof readAccessibleAnalyticsWorkItems>
+  >()
+  const permissionScopeHashCache = new Map<string, Promise<string>>()
+  const seenCursors = new Set<string>()
+  let inspectedCount = 0
+  let repositoryPageCount = 0
+  let nextCursor = readAnalyticsSnapshotListCursor(cursor)
+  if (nextCursor !== undefined) seenCursors.add(nextCursor)
+  do {
+    const pageCursor = nextCursor
+    const page = await analytics.listSnapshots(
+      principal.directoryId,
+      report.id,
+      Math.min(
+        ANALYTICS_SNAPSHOT_LIST_LIMIT,
+        ANALYTICS_SNAPSHOT_ACL_INSPECTION_LIMIT - inspectedCount,
+      ),
+      pageCursor,
+    )
+    repositoryPageCount += 1
+    let resumeCursor = page.nextCursor
+    for (const [recordIndex, record] of page.snapshots.entries()) {
+      inspectedCount += 1
+      const queryCacheKey = record.snapshot.queryHash
+      let pendingPermissionScopeHash = permissionScopeHashCache.get(queryCacheKey)
+      if (!pendingPermissionScopeHash) {
+        pendingPermissionScopeHash = readCurrentAnalyticsPermissionScopeHash(
+          principal,
+          record.query,
+          scopeCache,
+        )
+        permissionScopeHashCache.set(queryCacheKey, pendingPermissionScopeHash)
+      }
+      const currentPermissionScopeHash = await pendingPermissionScopeHash
+      if (currentPermissionScopeHash === record.snapshot.permissionScopeHash) {
+        visibleSnapshots.push(record)
+        if (visibleSnapshots.length === ANALYTICS_SNAPSHOT_LIST_LIMIT) {
+          resumeCursor = recordIndex < page.snapshots.length - 1
+            ? createAnalyticsSnapshotListCursor(
+                principal.directoryId,
+                report.id,
+                record,
+              )
+            : page.nextCursor
+          break
+        }
+      }
+    }
+    nextCursor = resumeCursor
+    if (
+      nextCursor !== undefined &&
+      (
+        page.snapshots.length === 0 ||
+        nextCursor === pageCursor ||
+        seenCursors.has(nextCursor)
+      )
+    ) {
+      throw new AnalyticsError(
+        500,
+        'AnalyticsSnapshotPaginationInvalid',
+        'Analytics snapshot pagination did not make progress.',
+      )
+    }
+    if (nextCursor !== undefined) seenCursors.add(nextCursor)
+  } while (
+    visibleSnapshots.length < ANALYTICS_SNAPSHOT_LIST_LIMIT &&
+    inspectedCount < ANALYTICS_SNAPSHOT_ACL_INSPECTION_LIMIT &&
+    repositoryPageCount < ANALYTICS_SNAPSHOT_REPOSITORY_PAGE_LIMIT &&
+    nextCursor !== undefined
+  )
+  return {
+    snapshots: visibleSnapshots,
+    inspectedCount,
+    ...(nextCursor === undefined ? {} : { nextCursor }),
+  } satisfies AnalyticsSnapshotListResponse
+}
+
+/** Creates an immutable report snapshot under the current ACL. */
+async function createAnalyticsHttpSnapshot(
+  principal: WorkspacePrincipal,
+  reportIdValue: string,
+  input: Record<string, unknown>,
+  idempotencyKey: string | undefined,
+) {
+  requireWorkspaceBusinessWrite(principal)
+  const reportId = readAnalyticsIdentifier(reportIdValue, 'Analytics report ID')
+  const report = await requireAnalyticsReport(principal, reportId)
+  await requireAnalyticsReportWrite(principal, report)
+  const query = createAnalyticsReportQuery(report, input)
+  const snapshot = await executeAnalyticsQuery(principal, query)
+  const createdAt = new Date().toISOString()
+  return await analytics.putSnapshot({
+    id: createAnalyticsSnapshotId(
+      principal.directoryId,
+      report,
+      snapshot,
+      principal.userKey,
+      idempotencyKey,
+    ),
+    workspaceId: principal.directoryId,
+    reportId: report.id,
+    reportRevision: report.revision,
+    createdByMemberKey: principal.userKey,
+    createdAt,
+    query: structuredClone(query),
+    snapshot,
+  })
+}
+
 /** Public create input から server-owned schedule cursor を除外します。 */
 function sanitizePublicAnalyticsReportCreateInput(
   body: Record<string, unknown>,
@@ -10008,9 +9946,9 @@ function analyticsScheduleConfigurationKey(value: unknown) {
 async function resolveAnalyticsQuery(
   principal: WorkspacePrincipal,
   body: Record<string, unknown>,
-): Promise<AnalyticsQueryInput> {
+): Promise<unknown> {
   if (body.reportId === undefined) {
-    return body as unknown as AnalyticsQueryInput
+    return body
   }
   const reportId = readAnalyticsIdentifier(body.reportId, 'Analytics report ID')
   const report = await requireAnalyticsReport(principal, reportId)
@@ -10039,7 +9977,7 @@ function createAnalyticsReportQuery(
 /** Query を事前検証し、current ACL の Work Item/event だけで snapshot を作ります。 */
 async function executeAnalyticsQuery(
   principal: WorkspacePrincipal,
-  query: AnalyticsQueryInput,
+  query: unknown,
 ): Promise<AnalyticsSnapshot> {
   const normalizedQuery = normalizeAnalyticsQueryInput(query)
   const authorized = await readAuthorizedAnalyticsData(
@@ -10053,7 +9991,7 @@ async function executeAnalyticsQuery(
 /** Evidence query を事前検証し、current ACL の Work Item/event だけで再実行します。 */
 async function executeAnalyticsEvidenceQuery(
   principal: WorkspacePrincipal,
-  evidence: AnalyticsEvidenceInput,
+  evidence: unknown,
 ) {
   const normalizedEvidence = normalizeAnalyticsEvidenceInput(evidence)
   const authorized = await readAuthorizedAnalyticsData(
@@ -10481,7 +10419,7 @@ async function readCurrentAnalyticsPermissionScopeHash(
 /** Export selector を current ACL で再実行できる snapshot へ解決します。 */
 async function resolveAnalyticsExportSnapshot(
   principal: WorkspacePrincipal,
-  input: AnalyticsExportInput,
+  input: Record<string, unknown>,
 ) {
   const selectorCount = Number(input.query !== undefined) +
     Number(input.reportId !== undefined) +
