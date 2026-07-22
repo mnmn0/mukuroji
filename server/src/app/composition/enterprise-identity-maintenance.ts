@@ -1,12 +1,15 @@
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
-import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
-import {
-  processEnterpriseIdentityMaintenanceBatch,
-} from '../../modules/enterprise-identity/adapter-in/events/identity-maintenance'
 import {
   DynamoDbEnterpriseIdentityMaintenanceClient,
-} from '../../modules/enterprise-identity/enterprise-identity'
+  processEnterpriseIdentityMaintenanceBatch,
+} from '../../modules/enterprise-identity'
 import type { DynamoStreamEvent } from '../../infrastructure/aws/dynamodb-stream'
+import {
+  createDynamoDbClient,
+  createDynamoDbDocumentClient,
+} from '../../infrastructure/aws/dynamodb-client'
+import {
+  loadServerDynamoDbResourceConfig,
+} from '../../infrastructure/config/server-resource-config'
 
 /**
  * Creates the production Enterprise Identity maintenance handler.
@@ -14,18 +17,22 @@ import type { DynamoStreamEvent } from '../../infrastructure/aws/dynamodb-stream
  * @returns A handler for Enterprise Identity control-stream batches.
  */
 export function createProductionEnterpriseIdentityMaintenanceHandler() {
-  const dynamoDbClient = new DynamoDBClient({
-    region: process.env.AWS_REGION ?? 'us-east-1',
-  })
-  const documentClient = DynamoDBDocumentClient.from(dynamoDbClient, {
-    marshallOptions: { removeUndefinedValues: true },
-  })
+  const resourceConfig = loadServerDynamoDbResourceConfig()
+  const documentClient = createDynamoDbDocumentClient(createDynamoDbClient())
   const client = new DynamoDbEnterpriseIdentityMaintenanceClient(
-    process.env.ENTERPRISE_IDENTITY_TABLE_NAME ??
-      'mukuroji-enterprise-identity',
+    resourceConfig.enterpriseIdentityTableName,
     documentClient,
   )
 
-  return (event: DynamoStreamEvent) =>
-    processEnterpriseIdentityMaintenanceBatch(event, client)
+  /**
+   * Processes one Enterprise Identity control-stream batch.
+   *
+   * @param event - DynamoDB stream batch containing control-row changes.
+   * @returns The partial-batch response for retryable records.
+   */
+  function handleEnterpriseIdentityMaintenance(event: DynamoStreamEvent) {
+    return processEnterpriseIdentityMaintenanceBatch(event, client)
+  }
+
+  return handleEnterpriseIdentityMaintenance
 }

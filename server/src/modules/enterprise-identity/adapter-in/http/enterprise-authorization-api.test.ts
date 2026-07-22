@@ -1484,6 +1484,7 @@ test('preserves an empty Team and Team-scoped Planning aggregates for a director
       teams: [{
         id: 'empty-team',
         name: 'Empty Team',
+        expanded: true,
         projects: [],
       }],
     })

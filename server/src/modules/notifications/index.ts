@@ -25,3 +25,6 @@ export {
   type UpdateNotificationInput,
   type UpdateNotificationPreferencesInput,
 } from './notifications'
+export {
+  createNotificationScheduleHandler,
+} from './adapter-in/schedules/notification-schedule'

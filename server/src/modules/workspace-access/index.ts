@@ -5,6 +5,7 @@ export {
   type DocumentManagerLifecycleDependencies,
 } from './document-manager-lifecycle'
 export {
+  DynamoDbWorkspaceAccessClient,
   WorkspaceAccessError,
   isWorkspaceIdentitySafeToDelete,
   type CreateWorkspaceInvitationInput,

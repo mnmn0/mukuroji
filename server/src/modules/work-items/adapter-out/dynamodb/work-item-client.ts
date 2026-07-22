@@ -26,7 +26,6 @@ import {
 } from '../../../directory'
 import {
   createRequestSubmissionEventProjection,
-  createRequestSubmissionEventTransactionPut,
 } from '../../../request-intake'
 import {
   isCanonicalWorkItemRecord,
@@ -1058,13 +1057,36 @@ function createRequestConversionTransactionItems(
         },
       },
     },
-    createRequestSubmissionEventTransactionPut(
-      input.tableName,
-      input.scopeKey,
-      input.submissionId,
-      event,
-    ),
+    createRequestConversionEventTransactionPut(input, event),
   ]
+}
+
+/**
+ * Creates the immutable Request Intake event row owned by a conversion transaction.
+ *
+ * @param input - Request submission storage identity already validated by Request Intake.
+ * @param event - Canonical conversion event written with the Work Item mutation.
+ * @returns A DynamoDB transaction item that inserts the immutable event once.
+ */
+function createRequestConversionEventTransactionPut(
+  input: RequestConversionTransactionInput,
+  event: RequestSubmissionEvent,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  return {
+    Put: {
+      TableName: input.tableName,
+      Item: {
+        entryType: 'submission-event',
+        scopeKey: input.scopeKey,
+        recordKey:
+          `EVENT#${input.submissionId}#${event.createdAt}#${event.id}`,
+        submissionId: input.submissionId,
+        ...event,
+      },
+      ConditionExpression:
+        'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+    },
+  }
 }
 
 async function ensureConfiguredAuditTable(
@@ -2550,20 +2572,6 @@ export class DynamoDbTeamIssuesClient {
     }
   }
 
-  private async putIssueEvent(input: Omit<TeamIssueEventItem, 'directoryTeamIssueId' | 'eventId'>) {
-    const item = this.createIssueEventItem(input)
-
-    await this.documentClient.send(
-      new PutCommand({
-        TableName: this.eventTableName,
-        Item: item,
-        ConditionExpression: 'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
-      }),
-    )
-
-    return item
-  }
-
   private createIssueEventItem(
     input: Omit<TeamIssueEventItem, 'directoryTeamIssueId' | 'eventId'> & { eventId?: string },
   ) {
@@ -2961,6 +2969,11 @@ function createWorkItemConfigurationRevisionConflictError() {
   )
 }
 
+/**
+ * Creates the stable conflict returned when authorization changes during a mutation.
+ *
+ * @returns A Project Data conflict for a stale authorization snapshot.
+ */
 export function createWorkItemAuthorizationChangedError() {
   return new ProjectDataError(
     409,
@@ -3011,6 +3024,12 @@ function toProjectDataError(error: unknown) {
   )
 }
 
+/**
+ * Determines whether an unknown error represents a missing canonical Work Item.
+ *
+ * @param error - Error value caught at an application boundary.
+ * @returns Whether the value has the stable Team Issue not-found status and code.
+ */
 export function isTeamIssueNotFoundError(error: unknown) {
   if (error instanceof ProjectDataError) {
     return error.status === 404 && error.code === 'TeamIssueNotFound'
@@ -3019,6 +3038,12 @@ export function isTeamIssueNotFoundError(error: unknown) {
   return isRecord(error) && error.status === 404 && error.code === 'TeamIssueNotFound'
 }
 
+/**
+ * Parses a stored canonical Work Item into its public response representation.
+ *
+ * @param value - Untrusted DynamoDB item or replay payload.
+ * @returns A validated Team Issue response item.
+ */
 export function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
   const item = toTeamIssueItem(value)
   const issue: TeamIssueResponseItem = {
@@ -3235,6 +3260,13 @@ function isTeamIssueActivityType(value: unknown): value is TeamIssueActivityType
   return value === 'created' || value === 'updated' || value === 'commented'
 }
 
+/**
+ * Reads a required trimmed string from an untrusted Work Item input.
+ *
+ * @param value - Untrusted input value.
+ * @param message - Validation message returned when the value is invalid.
+ * @returns The normalized non-empty string.
+ */
 export function readRequiredString(value: unknown, message: string) {
   if (typeof value !== 'string' || !value.trim()) {
     throw new ProjectDataError(400, 'InvalidProjectWrite', message)
@@ -3243,6 +3275,12 @@ export function readRequiredString(value: unknown, message: string) {
   return value.trim()
 }
 
+/**
+ * Reads a positive expected Work Item revision used for optimistic concurrency.
+ *
+ * @param value - Untrusted revision value.
+ * @returns A validated positive safe integer revision.
+ */
 export function readWorkItemExpectedRevision(value: unknown) {
   if (
     typeof value !== 'number' ||
@@ -3320,6 +3358,13 @@ function readCustomFieldValues(value: unknown): Record<string, CustomFieldValue>
   return { ...value }
 }
 
+/**
+ * Compares two canonical custom-field records without relying on key insertion order.
+ *
+ * @param first - First custom-field record.
+ * @param second - Second custom-field record.
+ * @returns Whether both records contain identical scalar and array values.
+ */
 export function customFieldValueRecordsEqual(
   first: Readonly<Record<string, CustomFieldValue>>,
   second: Readonly<Record<string, CustomFieldValue>>,
@@ -3342,6 +3387,12 @@ export function customFieldValueRecordsEqual(
   })
 }
 
+/**
+ * Reads the optional Project assignment from an untrusted mutation body.
+ *
+ * @param value - Untrusted assignment value.
+ * @returns A normalized Project ID, null for removal, or undefined when omitted.
+ */
 export function readAssignedProjectId(value: unknown) {
   if (value === undefined) {
     return undefined
@@ -3379,6 +3430,12 @@ function readSourceRequestId(value: unknown) {
   return value.trim()
 }
 
+/**
+ * Reads an optional client-selected resource ID used by idempotent creation.
+ *
+ * @param value - Untrusted resource identifier.
+ * @returns The validated identifier or undefined when omitted.
+ */
 export function readIdempotencyResourceId(value: unknown) {
   if (value === undefined) return undefined
   if (
@@ -3439,6 +3496,12 @@ function readOptionalString(value: unknown, message: string) {
   return value.trim()
 }
 
+/**
+ * Reads and normalizes the required assignee identity from a Work Item mutation.
+ *
+ * @param input - Create or update mutation body.
+ * @returns The canonical Cognito user identifier.
+ */
 export function readTeamIssueAssigneeUserId(input: CreateTeamIssueRequestBody | UpdateTeamIssueRequestBody) {
   const value = input.assigneeUserId
 
@@ -3449,6 +3512,12 @@ export function readTeamIssueAssigneeUserId(input: CreateTeamIssueRequestBody | 
   return normalizeCognitoUserId(value)
 }
 
+/**
+ * Reads a required trimmed Work Item comment body.
+ *
+ * @param value - Untrusted comment body value.
+ * @returns The normalized non-empty comment body.
+ */
 export function readRequiredCommentBody(value: unknown) {
   if (typeof value !== 'string' || !value.trim()) {
     throw new ProjectDataError(400, 'InvalidProjectWrite', 'Issue comment body is required.')

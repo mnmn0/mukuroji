@@ -1,5 +1,3 @@
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
-import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
   AwsCognitoClient,
   CognitoServiceError,
@@ -8,17 +6,24 @@ import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
 import { DynamoDbTeamIssuesClient } from '../../modules/work-items'
 import {
   createAnalyticsScheduleRenderer,
+  DynamoDbAnalyticsRepository,
   processAnalyticsSchedule,
   renderInAppAnalyticsArtifact,
   resolveAnalyticsScheduleProcessingTime,
   type AnalyticsScheduleEvent,
-} from '../../modules/analytics/adapter-in/schedules/analytics-schedule'
-import { DynamoDbAnalyticsRepository } from '../../modules/analytics/analytics'
+} from '../../modules/analytics'
 import {
   DynamoDbAuditEventsClient,
-  getConfiguredDynamoDbEndpoint,
-} from '../../modules/audit/audit'
-import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'
+} from '../../modules/audit'
+import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access'
+import {
+  createDynamoDbClient,
+  createDynamoDbDocumentClient,
+  shouldBootstrapLocalDynamoDb,
+} from '../../infrastructure/aws/dynamodb-client'
+import {
+  loadServerDynamoDbResourceConfig,
+} from '../../infrastructure/config/server-resource-config'
 
 /**
  * Creates the production Analytics schedule processor.
@@ -26,20 +31,14 @@ import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access/wo
  * @returns A handler that renders and delivers due Analytics reports.
  */
 export function createProductionAnalyticsScheduleHandler() {
-  const configuredDynamoDbEndpoint = getConfiguredDynamoDbEndpoint()
-  const dynamoDbClient = new DynamoDBClient({
-    region: process.env.AWS_REGION ?? 'us-east-1',
-    ...(configuredDynamoDbEndpoint ? { endpoint: configuredDynamoDbEndpoint } : {}),
-  })
-  const documentClient = DynamoDBDocumentClient.from(dynamoDbClient, {
-    marshallOptions: { removeUndefinedValues: true },
-  })
+  const resourceConfig = loadServerDynamoDbResourceConfig()
+  const dynamoDbClient = createDynamoDbClient()
+  const documentClient = createDynamoDbDocumentClient(dynamoDbClient)
   const repository = new DynamoDbAnalyticsRepository(
-    process.env.ANALYTICS_TABLE_NAME ?? 'mukuroji-analytics',
+    resourceConfig.analyticsTableName,
     documentClient,
     {
-      scheduleDueIndexName:
-        process.env.ANALYTICS_SCHEDULE_INDEX_NAME ?? 'ScheduleDueIndex',
+      scheduleDueIndexName: resourceConfig.analyticsScheduleIndexName,
     },
   )
   const cognito = new AwsCognitoClient()
@@ -48,6 +47,12 @@ export function createProductionAnalyticsScheduleHandler() {
     workItems: new DynamoDbTeamIssuesClient(),
     workspaceAccess: new DynamoDbWorkspaceAccessClient(),
     systemAdmin: {
+      /**
+       * Resolves current system-administrator membership through Cognito.
+       *
+       * @param userId - Cognito user identifier to evaluate.
+       * @returns Whether the user currently belongs to a system administrator group.
+       */
       async isSystemAdmin(userId) {
         try {
           return await cognito.isSystemAdmin(userId)
@@ -62,16 +67,25 @@ export function createProductionAnalyticsScheduleHandler() {
     },
     auditEvents: new DynamoDbAuditEventsClient(
       documentClient,
-      process.env.AUDIT_EVENTS_TABLE_NAME ?? 'mukuroji-audit-events',
+      resourceConfig.auditEventsTableName,
       {},
       dynamoDbClient,
-      Boolean(configuredDynamoDbEndpoint),
+      shouldBootstrapLocalDynamoDb(),
     ),
   })
 
-  return async (event: AnalyticsScheduleEvent = {}) =>
-    await processAnalyticsSchedule(
+  /**
+   * Processes one Analytics schedule invocation.
+   *
+   * @param event - Optional schedule time override supplied by EventBridge or tests.
+   * @returns The due-report processing summary.
+   */
+  async function handleAnalyticsSchedule(event: AnalyticsScheduleEvent = {}) {
+    return await processAnalyticsSchedule(
       resolveAnalyticsScheduleProcessingTime(event),
       { repository, render, renderArtifact: renderInAppAnalyticsArtifact },
     )
+  }
+
+  return handleAnalyticsSchedule
 }

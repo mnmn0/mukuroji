@@ -425,6 +425,19 @@ type StoredRequestSubmissionEvent = RequestSubmissionEvent & {
   submissionId: string
 }
 
+/** Request Intake が所有する immutable submission event transaction item です。 */
+type RequestSubmissionEventTransactionItem = {
+  /** Submission event row を条件付きで追加する Put operation です。 */
+  Put: {
+    /** Request Intake table name です。 */
+    TableName: string
+    /** 永続化する canonical submission event row です。 */
+    Item: StoredRequestSubmissionEvent
+    /** Immutable event の重複作成を拒否する condition です。 */
+    ConditionExpression: string
+  }
+}
+
 /** Hashed requester reply capability の lookup row です。 */
 type StoredThreadLookup = {
   /** DynamoDB row discriminator です。 */
@@ -1145,13 +1158,21 @@ export function createRequestSubmissionEventProjection(
   )
 }
 
-/** Submission mutation と同じ transaction に追加する immutable event Put を作成します。 */
-export function createRequestSubmissionEventTransactionPut(
+/**
+ * Creates an immutable event Put for the owning Request submission transaction.
+ *
+ * @param tableName - Request Intake DynamoDB table name.
+ * @param scopeKey - Submission Workspace partition key.
+ * @param submissionId - Canonical submission identifier.
+ * @param event - Event to append atomically.
+ * @returns A DynamoDB transaction item for the immutable event row.
+ */
+function createRequestSubmissionEventTransactionPut(
   tableName: string,
   scopeKey: string,
   submissionId: string,
   event: RequestSubmissionEvent,
-): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+): RequestSubmissionEventTransactionItem {
   const normalizedSubmissionId = requireIdentifier(submissionId, 'Request submission ID')
   const normalizedEvent = normalizeRequestSubmissionEvent(event)
   const item: StoredRequestSubmissionEvent = {

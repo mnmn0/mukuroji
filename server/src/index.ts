@@ -5,7 +5,17 @@
  * package-level entrypoint for tests and local tooling.
  */
 export { default } from './app/composition/api-runtime'
-export * from './api/api-router'
-export * from './app/composition/api-dependencies'
-export * from './app/composition/api-runtime'
-export * from './app/createApp'
+export {
+  app,
+  handler,
+  validateApiServerConfig,
+} from './app/composition/api-runtime'
+export {
+  createProductionAppDependencies,
+  createTestAppDependencies,
+} from './app/composition/api-dependencies'
+export {
+  createApiHandler,
+  createApp,
+  type AppDependencies,
+} from './app/createApp'

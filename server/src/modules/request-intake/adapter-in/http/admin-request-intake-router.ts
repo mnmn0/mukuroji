@@ -213,9 +213,10 @@ export function createAdminRequestIntakeRouter(
       const principal = await dependencies.requireAdministration(context)
       const formId = context.req.param('formId') ?? ''
       const publishInput = readPublishRequestFormInput(await dependencies.readJson(context.req))
-      const current = await dependencies.getRequestIntake().getForm(principal.directoryId, formId)
+      const requestIntake = dependencies.getRequestIntake()
+      const current = await requestIntake.getForm(principal.directoryId, formId)
       await dependencies.validateFormRoutingReferences(principal.directoryId, current.draft)
-      return context.json(await dependencies.getRequestIntake().publishForm(
+      return context.json(await requestIntake.publishForm(
         principal.directoryId,
         formId,
         { id: principal.userKey },

@@ -1,6 +1,7 @@
 /** Enterprise Identity module public application and domain surface. */
 export {
   DynamoDbEnterpriseIdentityReadClient,
+  DynamoDbEnterpriseIdentityMaintenanceClient,
   EnterpriseIdentityError,
   assertEnterpriseCognitoProviderBinding,
   assertEnterpriseCognitoFederationBinding,
@@ -36,6 +37,9 @@ export {
   type EnterpriseSessionValidation,
   type EvaluateEnterpriseAccessInput,
 } from './enterprise-identity'
+export {
+  processEnterpriseIdentityMaintenanceBatch,
+} from './adapter-in/events/identity-maintenance'
 export {
   EnterpriseSessionActivityError,
   type EnterpriseSessionActivityClient,

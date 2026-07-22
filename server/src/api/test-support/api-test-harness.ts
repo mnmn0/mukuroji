@@ -4,6 +4,7 @@ import type { DynamoDBDocumentClient, TransactWriteCommandInput } from '@aws-sdk
 import {
   AUTOMATION_SCHEMA_VERSION,
   type AnalyticsQueryInput,
+  type ApiScope,
   type BulkOperation,
   type ApprovalRequest,
   type CustomFieldValue,
@@ -69,7 +70,6 @@ import {
 } from '../../modules/enterprise-identity/enterprise-identity'
 import {
   InMemoryDeveloperPlatformClient,
-  type ApiScope,
 } from '../../modules/developer-platform/developer-platform'
 import {
   createEnterpriseScimGroupJobWorkerHandler,
@@ -610,7 +610,7 @@ function createFileUploadSessionFixture() {
 
 /** Approval API route test で利用する標準 request fixture です。 */
 function createApprovalRequestFixture(
-  overrides: Partial<ApprovalRequest> = {},
+  overrides: Partial<Extract<ApprovalRequest, { subjectType: 'file-version' }>> = {},
 ): ApprovalRequest {
   return {
     id: 'approval-1',
@@ -747,7 +747,7 @@ function expectStableWorkspaceMutationAuditContexts(
   observations: ObservedWorkspaceMutationAuditContext[],
   expected: ExpectedWorkspaceMutationAuditContext,
 ) {
-  expect(observations.map(({ stage }) => stage)).toEqual(expected.stages)
+  expect(observations.map(({ stage }) => stage)).toEqual([...expected.stages])
   const first = observations[0]?.context
 
   if (!first) {
@@ -1533,7 +1533,9 @@ function configureFakeProjectClients(
       async deleteWorkspaceUser() {
         return 'deleted'
       },
-      async unlinkWorkspaceUser() {},
+      async unlinkWorkspaceUser() {
+        return 'completed'
+      },
     },
     dashboardSummary: {
       async getSummary(directoryId, accessContext) {
@@ -1575,7 +1577,10 @@ function configureFakeProjectClients(
                 },
               ],
             },
-            ...(options.additionalTeams ?? []),
+            ...(options.additionalTeams ?? []).map((team) => ({
+              ...team,
+              expanded: true,
+            })),
           ],
         }
       },
@@ -2309,6 +2314,7 @@ function configureFakeAuthenticatedUser(
 ) {
   setTestAppDependencies(state, {
     cognito: {
+      ...state.dependencies.authentication.cognito,
       async initiatePasswordAuth() {
         return {}
       },

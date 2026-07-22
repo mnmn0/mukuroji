@@ -549,6 +549,12 @@ export type CognitoClient = {
 
 const defaultSystemAdminGroups = ['mukuroji-system-admins']
 
+/**
+ * Determines whether a Cognito operation failed because the user does not exist.
+ *
+ * @param error - Error value caught from a Cognito operation.
+ * @returns Whether the value is the stable Cognito user-not-found error.
+ */
 export function isCognitoUserNotFoundError(error: unknown) {
   return error instanceof CognitoServiceError && error.code === 'UserNotFoundException'
 }
@@ -2012,6 +2018,12 @@ export class CognitoServiceError extends Error {
   }
 }
 
+/**
+ * Converts an unknown AWS SDK failure into the Cognito domain error contract.
+ *
+ * @param error - Error value caught from the AWS SDK.
+ * @returns A normalized Cognito service error.
+ */
 function toCognitoSdkError(error: unknown) {
   if (error instanceof CognitoServiceError) {
     return error
@@ -2033,6 +2045,12 @@ function toCognitoSdkError(error: unknown) {
   return new CognitoServiceError(status, code, message)
 }
 
+/**
+ * Parses a Floci HTTP response as JSON and rejects malformed payloads.
+ *
+ * @param response - HTTP response returned by the Cognito-compatible endpoint.
+ * @returns The parsed response body, or an empty object for an empty response.
+ */
 async function parseJsonResponse<T>(response: Response): Promise<T> {
   const text = await response.text()
 
@@ -2051,6 +2069,12 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
   }
 }
 
+/**
+ * Clamps a requested Cognito page size to the supported range.
+ *
+ * @param value - Optional requested page size.
+ * @returns An integer page size between one and sixty.
+ */
 export function clampCognitoPageLimit(value: number | undefined) {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return 20
@@ -2059,10 +2083,22 @@ export function clampCognitoPageLimit(value: number | undefined) {
   return Math.min(60, Math.max(1, Math.floor(value)))
 }
 
+/**
+ * Escapes a literal value embedded in a Cognito list-users filter.
+ *
+ * @param value - Raw filter literal.
+ * @returns The Cognito filter-safe literal value.
+ */
 function escapeCognitoFilterValue(value: string) {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
 }
 
+/**
+ * Normalizes a Cognito user identifier for stable identity comparisons.
+ *
+ * @param value - Raw user identifier.
+ * @returns A trimmed lowercase Cognito user identifier.
+ */
 export function normalizeCognitoUserId(value: string) {
   const normalized = value.trim().toLowerCase()
 
@@ -2073,6 +2109,12 @@ export function normalizeCognitoUserId(value: string) {
   return normalized
 }
 
+/**
+ * Validates a required Cognito username.
+ *
+ * @param value - Raw Cognito username.
+ * @returns The trimmed non-empty username.
+ */
 function requireCognitoUsername(value: string) {
   const username = value.trim()
 
@@ -2083,6 +2125,12 @@ function requireCognitoUsername(value: string) {
   return username
 }
 
+/**
+ * Validates a stable Cognito identity identifier returned by the service.
+ *
+ * @param value - Optional identity identifier from Cognito attributes.
+ * @returns The trimmed identity identifier.
+ */
 function requireCognitoIdentityId(value: string | undefined) {
   const identityId = value?.trim()
 
@@ -2097,6 +2145,11 @@ function requireCognitoIdentityId(value: string | undefined) {
   return identityId
 }
 
+/**
+ * Rejects an existing Workspace user when Cognito authentication is disabled.
+ *
+ * @param user - Workspace Cognito user to validate.
+ */
 function requireEnabledWorkspaceUser(user: CognitoWorkspaceUser) {
   if (user.profile.enabled !== false) {
     return
@@ -2109,6 +2162,12 @@ function requireEnabledWorkspaceUser(user: CognitoWorkspaceUser) {
   )
 }
 
+/**
+ * Converts a Cognito user record into the public profile contract.
+ *
+ * @param value - User record returned by Cognito or Floci.
+ * @returns A normalized profile, or undefined when required identity fields are absent.
+ */
 function toCognitoUserProfile(value: CognitoUserRecord): CognitoUserProfile | undefined {
   const username = value.Username?.trim()
   const email = readCognitoUserAttribute(value, 'email')?.trim().toLowerCase()
@@ -2131,10 +2190,23 @@ function toCognitoUserProfile(value: CognitoUserRecord): CognitoUserProfile | un
   }
 }
 
+/**
+ * Reads one named user attribute across Cognito response shapes.
+ *
+ * @param user - Cognito user record.
+ * @param name - Attribute name to locate.
+ * @returns The attribute value when present.
+ */
 function readCognitoUserAttribute(user: CognitoUserRecord, name: string) {
   return (user.Attributes ?? user.UserAttributes)?.find((attribute) => attribute.Name === name)?.Value
 }
 
+/**
+ * Resolves the canonical Workspace directory claim from a Cognito user.
+ *
+ * @param user - Cognito user record containing Workspace custom attributes.
+ * @returns The claimed directory identifier when present.
+ */
 function readCognitoUserDirectoryId(user: CognitoUserRecord) {
   const directoryId = readCognitoUserAttribute(user, 'custom:directory_id')?.trim() || undefined
   const workspaceId = readCognitoUserAttribute(user, 'custom:workspace_id')?.trim() || undefined
@@ -2150,6 +2222,14 @@ function readCognitoUserDirectoryId(user: CognitoUserRecord) {
   return directoryId ?? workspaceId
 }
 
+/**
+ * Creates the canonical Cognito attributes for a Workspace-managed user.
+ *
+ * @param email - User email address.
+ * @param directoryId - Owning Workspace directory identifier.
+ * @param name - Optional display name.
+ * @returns Cognito attributes ready for a create or update operation.
+ */
 function createWorkspaceCognitoUserAttributes(email: string, directoryId: string, name?: string) {
   return [
     { Name: 'email', Value: normalizeCognitoUserId(email) },
@@ -2159,6 +2239,13 @@ function createWorkspaceCognitoUserAttributes(email: string, directoryId: string
   ]
 }
 
+/**
+ * Determines whether a Cognito user belongs to the requested Workspace directory.
+ *
+ * @param user - Cognito user record to inspect.
+ * @param directoryId - Optional directory scope.
+ * @returns Whether the record has a compatible directory claim.
+ */
 function isCognitoUserInDirectory(user: CognitoUserRecord, directoryId: string | undefined) {
   if (!directoryId) {
     return true
@@ -2178,14 +2265,31 @@ function isCognitoUserInDirectory(user: CognitoUserRecord, directoryId: string |
   return (claimedDirectoryId ?? claimedWorkspaceId) === directoryId
 }
 
+/**
+ * Narrows an optional value to its defined variant.
+ *
+ * @param value - Optional value.
+ * @returns Whether the value is defined.
+ */
 function isDefined<T>(value: T | undefined): value is T {
   return value !== undefined
 }
 
+/**
+ * Narrows an unknown value to a non-array object record.
+ *
+ * @param value - Unknown value to inspect.
+ * @returns Whether the value is a record.
+ */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/**
+ * Resolves the configured Cognito groups that grant system administration.
+ *
+ * @returns Configured group names or the stable default group.
+ */
 export function getSystemAdminGroups() {
   const configuredGroups = (
     getEnv('MUKUROJI_SYSTEM_ADMIN_GROUPS') ??
@@ -2199,27 +2303,51 @@ export function getSystemAdminGroups() {
   return configuredGroups.length > 0 ? configuredGroups : defaultSystemAdminGroups
 }
 
+/** @returns The centralized AWS region used by Cognito clients. */
 function getAwsRegion() {
   return loadServerConfig().awsRegion
 }
 
+/** @returns The optional centralized Cognito-compatible endpoint. */
 function getCognitoEndpoint() {
   return loadServerConfig().cognitoEndpoint
 }
 
+/**
+ * Reads one environment value through centralized server configuration.
+ *
+ * @param name - Environment variable name.
+ * @returns The configured value when present.
+ */
 function getEnv(name: string) {
   return loadServerConfig().environment[name]
 }
 
+/**
+ * Removes trailing slashes from an endpoint URL.
+ *
+ * @param value - Endpoint URL to normalize.
+ * @returns The URL without trailing slashes.
+ */
 function trimTrailingSlash(value: string) {
   return value.replace(/\/+$/, '')
 }
 
+/**
+ * Removes an optional namespace prefix from a Cognito error code.
+ *
+ * @param value - Raw Cognito error type header.
+ * @returns The terminal error code segment when present.
+ */
 function normalizeCognitoErrorCode(value: string | undefined) {
   return value?.split('#').pop()
 }
 
-/** Runtime configuration に適合する Cognito adapter を生成します。 */
+/**
+ * Creates the Cognito adapter selected by centralized runtime configuration.
+ *
+ * @returns A Floci HTTP adapter for configured endpoints or the AWS SDK adapter.
+ */
 export function createCognitoClient(): CognitoClient {
   const endpoint = getCognitoEndpoint()
 

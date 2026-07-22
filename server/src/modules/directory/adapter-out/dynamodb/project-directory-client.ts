@@ -641,6 +641,7 @@ export type ProjectDirectoryClient = {
  */
 export type Locale = 'ja' | 'en'
 
+/** Numeric ordering used when comparing effective Project roles. */
 export const projectRoleWeights = {
   viewer: 1,
   member: 2,
@@ -756,7 +757,7 @@ export class DynamoDbProjectDirectoryClient {
   async getProjectAccess(directoryId: string, projectId: string, memberKey: string) {
     try {
       const normalizedMemberKey = normalizeProjectMemberKey(memberKey)
-      const items = await this.readValidDirectoryItems(directoryId)
+      const items = await this.readValidDirectoryItems(directoryId, true)
 
       return toProjectAccessEntries(items, normalizedMemberKey).find((access) => {
         return access.projectId === projectId
@@ -2897,6 +2898,12 @@ function isProjectTone(value: unknown): value is ProjectTone {
   return value === 'blue' || value === 'purple' || value === 'green' || value === 'yellow'
 }
 
+/**
+ * Reads and validates localized names from a Team or Project create request.
+ *
+ * @param input - Create request containing either a shared name or localized names.
+ * @returns Normalized Japanese and English names.
+ */
 export function readLocalizedNames(input: CreateTeamRequestBody | CreateProjectRequestBody) {
   const name = typeof input.name === 'string' ? input.name.trim() : ''
   const nameJa = typeof input.nameJa === 'string' ? input.nameJa.trim() : ''
@@ -2959,6 +2966,12 @@ function readOptionalProjectMemberName(value: unknown) {
   return name || undefined
 }
 
+/**
+ * Normalizes a Project member key for stable identity comparisons and storage keys.
+ *
+ * @param value - Untrusted member identifier.
+ * @returns A trimmed lowercase member key.
+ */
 export function normalizeProjectMemberKey(value: string) {
   const memberKey = value.trim().toLowerCase()
 

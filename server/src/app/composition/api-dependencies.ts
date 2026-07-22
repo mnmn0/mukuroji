@@ -68,6 +68,8 @@ import {
 import {
   DynamoDbProjectTasksClient,
   DynamoDbTeamIssuesClient,
+  type WorkItemImportQueue,
+  type WorkItemImportSourceStore,
 } from '../../modules/work-items'
 import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
 import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'
@@ -346,6 +348,82 @@ export function createProductionDeveloperPlatformDependencies(): DeveloperPlatfo
     workItemImportSources: createDefaultWorkItemImportSourceStore(),
     workItemImportQueue: createDefaultWorkItemImportQueue(),
     queueWebhookDelivery: createProductionQueueWebhookDeliveryMessage(),
+  }
+}
+
+/**
+ * Creates a Work Item import source port that validates production resources only when used.
+ *
+ * Connector workers do not process imports, so deferring this unrelated adapter prevents
+ * connector startup from requiring the import bucket while retaining a complete dependency graph.
+ *
+ * @returns A lazily initialized Work Item import source store.
+ */
+function createLazyWorkItemImportSourceStore(): WorkItemImportSourceStore {
+  let sourceStore: WorkItemImportSourceStore | undefined
+
+  /** Resolves the production source store on first import operation. */
+  function resolveSourceStore(): WorkItemImportSourceStore {
+    sourceStore ??= createDefaultWorkItemImportSourceStore()
+    return sourceStore
+  }
+
+  return {
+    putImmutable(request) {
+      return resolveSourceStore().putImmutable(request)
+    },
+    getVerified(locator, expected) {
+      return resolveSourceStore().getVerified(locator, expected)
+    },
+    deleteVersion(locator, expected) {
+      return resolveSourceStore().deleteVersion(locator, expected)
+    },
+  }
+}
+
+/**
+ * Creates a Work Item import queue port that validates production resources only when used.
+ *
+ * @returns A lazily initialized Work Item import queue.
+ */
+function createLazyWorkItemImportQueue(): WorkItemImportQueue {
+  let queue: WorkItemImportQueue | undefined
+
+  /** Resolves the production import queue on first enqueue operation. */
+  function resolveQueue(): WorkItemImportQueue {
+    queue ??= createDefaultWorkItemImportQueue()
+    return queue
+  }
+
+  return {
+    enqueue(message) {
+      return resolveQueue().enqueue(message)
+    },
+  }
+}
+
+/**
+ * Creates the complete dependency context required by Connector synchronization workers.
+ *
+ * Unrelated Work Item import adapters remain lazy so the Connector Lambda requires only
+ * Connector resources at startup.
+ *
+ * @returns A production dependency graph suitable for Connector worker invocations.
+ */
+export function createProductionConnectorAppDependencies(): AppDependencies {
+  return {
+    authentication: createProductionAuthenticationDependencies(),
+    workspace: createProductionWorkspaceDependencies(),
+    workItems: createProductionWorkItemDependencies(),
+    automation: createProductionAutomationDependencies(),
+    developerPlatform: {
+      developerPlatform: new DynamoDbDeveloperPlatformClient(),
+      publicWorkItems: createCanonicalPublicWorkItemService(),
+      workItemImportExecutions: createDefaultWorkItemImportExecutionStore(),
+      workItemImportSources: createLazyWorkItemImportSourceStore(),
+      workItemImportQueue: createLazyWorkItemImportQueue(),
+      queueWebhookDelivery: createProductionQueueWebhookDeliveryMessage(),
+    },
   }
 }
 

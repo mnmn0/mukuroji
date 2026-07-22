@@ -563,7 +563,18 @@ test('DynamoDB directory client reads project access consistently for Workspace 
   await expect(
     client.getProjectAccessList('user#demo@example.com', 'demo@example.com'),
   ).resolves.toEqual([{ projectId: 'refero', role: 'manager' }])
+  await expect(
+    client.getProjectAccess(
+      'user#demo@example.com',
+      'refero',
+      'demo@example.com',
+    ),
+  ).resolves.toEqual({ projectId: 'refero', role: 'manager' })
   expect(sentInputs).toEqual([
+    expect.objectContaining({
+      TableName: 'DirectoryTable',
+      ConsistentRead: true,
+    }),
     expect.objectContaining({
       TableName: 'DirectoryTable',
       ConsistentRead: true,

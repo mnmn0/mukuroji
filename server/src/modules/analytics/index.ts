@@ -6,6 +6,13 @@ export {
   type DashboardSummaryResponse,
 } from './adapter-out/dynamodb/dashboard-summary-client'
 export {
+  createAnalyticsScheduleRenderer,
+  processAnalyticsSchedule,
+  renderInAppAnalyticsArtifact,
+  resolveAnalyticsScheduleProcessingTime,
+  type AnalyticsScheduleEvent,
+} from './adapter-in/schedules/analytics-schedule'
+export {
   AnalyticsError,
   calculateAnalyticsNextRunAt,
   compareDynamoDbStringSortKeys,
@@ -24,6 +31,7 @@ export {
   parseAnalyticsEvidenceCursor,
   queryAnalyticsEvidence,
   validateAnalyticsSnapshotRecordSize,
+  DynamoDbAnalyticsRepository,
   type AnalyticsDeliveryReceipt,
   type AnalyticsDeliveryReceiptResult,
   type AnalyticsDueReportPage,

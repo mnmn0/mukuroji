@@ -2,7 +2,6 @@
 export {
   RequestIntakeError,
   createRequestSubmissionEventProjection,
-  createRequestSubmissionEventTransactionPut,
   createRequestWorkItemInput,
   evaluateRequestConditionGroup,
   isRequestFieldVisible,

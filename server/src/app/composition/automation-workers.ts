@@ -1,5 +1,3 @@
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
-import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
   createAutomationActionExecutor,
   shouldEnableWorkspaceSearchProjection,
@@ -7,6 +5,7 @@ import {
 } from '../../api/api-router'
 import {
   createAuditEventsClient,
+  createAutomationClient,
   createWorkItemConfigurationClient,
 } from './api-dependencies'
 import {
@@ -34,39 +33,22 @@ import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access/wo
 import { DynamoDbWorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
 
 /**
- * Creates the production Automation persistence adapter.
- *
- * @returns A DynamoDB-backed Automation client.
- */
-function createAutomationClient() {
-  const dynamoDbClient = new DynamoDBClient({
-    region: process.env.AWS_REGION ?? 'us-east-1',
-  })
-  const documentClient = DynamoDBDocumentClient.from(dynamoDbClient, {
-    marshallOptions: { removeUndefinedValues: true },
-  })
-  return new DynamoDbAutomationClient(
-    process.env.AUTOMATION_TABLE_NAME ?? 'mukuroji-automation',
-    documentClient,
-    dynamoDbClient,
-  )
-}
-
-/**
  * Creates only the production ports used by Automation actions.
  *
  * @param automation - Automation persistence shared with the engine.
+ * @param teamIssues - Canonical Work Item persistence shared with event processing.
  * @returns Explicit action dependencies without API-only or import-worker adapters.
  */
 function createAutomationActionDependencies(
   automation: DynamoDbAutomationClient,
+  teamIssues: DynamoDbTeamIssuesClient,
 ): AutomationActionExecutorDependencies {
   return {
     cognito: createCognitoClient(),
     projectDirectory: new DynamoDbProjectDirectoryClient(),
     workspaceAccess: new DynamoDbWorkspaceAccessClient(),
     auditEvents: createAuditEventsClient(),
-    teamIssues: new DynamoDbTeamIssuesClient(),
+    teamIssues,
     workItemConfigurations: createWorkItemConfigurationClient(),
     fileProofing: createDefaultFileProofingClient(),
     workspaceSearch: new DynamoDbWorkspaceSearchClient(),
@@ -82,13 +64,14 @@ function createAutomationActionDependencies(
  */
 export function createProductionAutomationEventHandler() {
   const automationClient = createAutomationClient()
+  const teamIssues = new DynamoDbTeamIssuesClient()
   const actionExecutor = createAutomationActionExecutor(
-    createAutomationActionDependencies(automationClient),
+    createAutomationActionDependencies(automationClient, teamIssues),
   )
   const processor = createAutomationEventProcessor(
     automationClient,
     new AutomationEngine(automationClient, actionExecutor),
-    new DynamoDbTeamIssuesClient(),
+    teamIssues,
   )
 
   return (event: DynamoStreamEvent) => processAutomationEventBatch(event, processor)
@@ -103,7 +86,10 @@ export function createProductionAutomationScheduleHandler() {
   const automationClient = createAutomationClient()
   const inboundWebhookSecrets = new SecretsManagerAutomationInboundWebhookSecretStore()
   const actionExecutor = createAutomationActionExecutor(
-    createAutomationActionDependencies(automationClient),
+    createAutomationActionDependencies(
+      automationClient,
+      new DynamoDbTeamIssuesClient(),
+    ),
   )
 
   return (event: AutomationScheduleEvent = {}) =>
