@@ -41,6 +41,38 @@ import type {
   UpdateDocumentRequest,
 } from '../../document-types'
 
+/** Semantic input for incrementing a Workspace document-authorization revision. */
+export type PrepareDocumentAuthorizationRevisionMutationRequest = {
+  /** Canonical Workspace ID whose authorization revision must advance. */
+  readonly workspaceId: string
+  /** Revision observed before the surrounding mutation. */
+  readonly expectedRevision: number
+  /** Canonical timestamp shared with the surrounding mutation. */
+  readonly updatedAt: string
+}
+
+/**
+ * Prepares a storage-specific document-authorization revision contribution.
+ *
+ * The transaction contribution remains generic so application consumers depend
+ * only on this semantic port rather than an AWS SDK transaction shape.
+ *
+ * @typeParam TransactionContribution - Adapter-owned atomic transaction item.
+ */
+export interface DocumentAuthorizationRevisionMutationPort<
+  TransactionContribution,
+> {
+  /**
+   * Prepares the contribution that advances one Workspace revision.
+   *
+   * @param input - Semantic revision mutation request.
+   * @returns Adapter-owned transaction contribution.
+   */
+  prepareAuthorizationRevisionMutation(
+    input: PrepareDocumentAuthorizationRevisionMutationRequest,
+  ): TransactionContribution
+}
+
 /** Reads the authorization revision used to fence document mutations. */
 export interface DocumentAuthorizationRevisionPort {
   /**

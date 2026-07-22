@@ -12,7 +12,3 @@ export {
 } from './domain/document-content'
 export * from './domain/document-limits'
 export * from './errors'
-export {
-  createDocumentAuthorizationRevisionPut,
-  type DocumentAuthorizationRevisionGuard,
-} from './adapter-out/dynamodb/document-authorization'

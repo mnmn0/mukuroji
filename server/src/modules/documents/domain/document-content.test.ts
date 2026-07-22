@@ -87,11 +87,15 @@ test('rejects malformed document payloads with domain errors', () => {
     ],
   })
   const invalidRevision = createPage({ revision: 0 })
+  const oversizedPosition = createPage({
+    position: 'a'.repeat(1_001),
+  })
 
   for (const document of [
     missingBlocks,
     duplicateRelations,
     invalidRevision,
+    oversizedPosition,
   ]) {
     expect(() =>
       validateDocumentPayload(document)

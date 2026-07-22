@@ -26,7 +26,9 @@ export interface DocumentClient extends DocumentApplicationClient {
 }
 
 export * from './application/ports/document-ports'
-export * from './adapter-out/dynamodb/dynamo-db-documents-client'
+export {
+  DynamoDbDocumentsClient,
+} from './adapter-out/dynamodb/dynamo-db-documents-client'
 export * from './document-types'
 export * from './domain/document-content'
 export * from './domain/document-limits'

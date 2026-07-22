@@ -180,6 +180,7 @@ export function validateDocumentPayload(document: DocumentDetail): void {
   if (!isRecord(document)) throw invalidPayload('Document must be an object.')
   assertIdentifier(document.id, 'document.id')
   assertText(document.title, 'document.title', DOCUMENT_MAX_TITLE_LENGTH, false)
+  assertText(document.position, 'document.position', 1_000, false)
   assertIdentifier(document.createdByUserId, 'document.createdByUserId')
   assertIdentifier(document.updatedByUserId, 'document.updatedByUserId')
   assertIsoTimestamp(document.createdAt, 'document.createdAt')
