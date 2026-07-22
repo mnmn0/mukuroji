@@ -533,15 +533,20 @@ export function validateEnterpriseSession(
 export function ipMatchesCidr(address: string, cidr: string) {
   const [network, prefixText, ...extra] = cidr.trim().split('/')
   if (!network || !prefixText || extra.length > 0) return false
-  const addressVersion = isIP(address.trim())
-  if (addressVersion === 0 || addressVersion !== isIP(network)) return false
+  const normalizedAddress = normalizeIpv4MappedAddress(address.trim())
+  const normalizedNetwork = normalizeIpv4MappedAddress(network)
+  const addressVersion = isIP(normalizedAddress)
+  if (addressVersion === 0 || addressVersion !== isIP(normalizedNetwork)) return false
   const bitLength = addressVersion === 4 ? 32 : 128
-  const prefix = Number(prefixText)
+  const rawPrefix = Number(prefixText)
+  const prefix = normalizedNetwork === network ? rawPrefix : rawPrefix - 96
   if (!Number.isInteger(prefix) || prefix < 0 || prefix > bitLength) return false
   const addressValue = addressVersion === 4
-    ? parseIpv4(address.trim())
-    : parseIpv6(address.trim())
-  const networkValue = addressVersion === 4 ? parseIpv4(network) : parseIpv6(network)
+    ? parseIpv4(normalizedAddress)
+    : parseIpv6(normalizedAddress)
+  const networkValue = addressVersion === 4
+    ? parseIpv4(normalizedNetwork)
+    : parseIpv6(normalizedNetwork)
   if (addressValue === undefined || networkValue === undefined) return false
   if (prefix === 0) return true
   const shift = BigInt(bitLength - prefix)
@@ -597,6 +602,28 @@ function scopeMatches(
       resource.kind === 'project' && scope.targetId === resource.parentTeamId
   }
   return resource.kind === 'project' && scope.targetId === resource.targetId
+}
+
+/** Normalizes an IPv4-mapped IPv6 address to its embedded canonical IPv4 address. */
+function normalizeIpv4MappedAddress(value: string) {
+  if (isIP(value) !== 6) return value
+  let parsedValue = parseIpv6(value)
+  if (parsedValue === undefined) {
+    const separatorIndex = value.lastIndexOf(':')
+    if (separatorIndex < 0) return value
+    const embeddedValue = parseIpv4(value.slice(separatorIndex + 1))
+    if (embeddedValue === undefined) return value
+    const highGroup = (embeddedValue >> 16n).toString(16)
+    const lowGroup = (embeddedValue & 0xffffn).toString(16)
+    parsedValue = parseIpv6(
+      `${value.slice(0, separatorIndex)}:${highGroup}:${lowGroup}`,
+    )
+  }
+  if (parsedValue === undefined || parsedValue >> 32n !== 0xffffn) return value
+  const embeddedValue = parsedValue & 0xffffffffn
+  return [24n, 16n, 8n, 0n]
+    .map((shift) => ((embeddedValue >> shift) & 0xffn).toString())
+    .join('.')
 }
 
 /** Parses a canonical IPv4 address into a bigint. */
