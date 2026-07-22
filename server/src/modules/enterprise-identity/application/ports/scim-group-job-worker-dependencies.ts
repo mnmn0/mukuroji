@@ -4,14 +4,14 @@ import type {
   WorkspaceAccessClient,
 } from '../../../workspace-access'
 import type {
-  EnterpriseIdentityClient,
-} from '../../enterprise-identity'
+  EnterpriseScimDirectoryCapability,
+} from './enterprise-identity-capabilities'
 
 /**
  * SCIM group worker が利用する enterprise identity client の最小契約です。
  */
 export type EnterpriseScimGroupJobIdentityClient = Pick<
-  EnterpriseIdentityClient,
+  EnterpriseScimDirectoryCapability,
   'processScimGroupJob'
 >
 
