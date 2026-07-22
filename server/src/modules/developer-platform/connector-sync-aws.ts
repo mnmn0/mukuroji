@@ -23,8 +23,8 @@ import type {
   ConnectorPollInventory,
   ConnectorPollInventoryPage,
   ConnectorPollInventoryTarget,
-  ConnectorWorkItemResourceType,
 } from './connector-sync-worker'
+import type { ConnectorWorkItemResourceType } from './connector-sync-runtime'
 
 /** DynamoDB poll adapter の共通 options です。 */
 export type DynamoDbConnectorPollOptions = {

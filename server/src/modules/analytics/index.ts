@@ -1,5 +1,11 @@
 /** Analytics module public application and domain surface. */
 export {
+  DynamoDbDashboardSummaryClient,
+  type DashboardSummaryAccessContext,
+  type DashboardSummaryClient,
+  type DashboardSummaryResponse,
+} from './adapter-out/dynamodb/dashboard-summary-client'
+export {
   AnalyticsError,
   calculateAnalyticsNextRunAt,
   compareDynamoDbStringSortKeys,

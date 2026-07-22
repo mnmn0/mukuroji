@@ -1,48 +1,21 @@
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
-import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
-  createAutomationActionExecutor,
-  createProductionAppDependencies,
-  runWithAppDependencies,
-} from '../app/createApp'
+  createProductionAutomationScheduleHandler,
+} from '../app/composition/automation-workers'
 import {
-  DynamoDbAutomationClient,
-} from '../modules/automation/automation'
-import {
-  SecretsManagerAutomationInboundWebhookSecretStore,
-} from '../modules/automation/automation-inbound-webhook'
-import {
-  processAutomationSchedule,
-  resolveAutomationScheduleProcessingTime,
   type AutomationScheduleEvent,
 } from '../modules/automation/adapter-in/schedules/automation-schedule'
 
-const dynamoDbClient = new DynamoDBClient({ region: process.env.AWS_REGION ?? 'us-east-1' })
-const documentClient = DynamoDBDocumentClient.from(dynamoDbClient, {
-  marshallOptions: { removeUndefinedValues: true },
-})
-const automationClient = new DynamoDbAutomationClient(
-  process.env.AUTOMATION_TABLE_NAME ?? 'mukuroji-automation',
-  documentClient,
-  dynamoDbClient,
-)
-const inboundWebhookSecrets = new SecretsManagerAutomationInboundWebhookSecretStore()
+let productionHandler: ReturnType<typeof createProductionAutomationScheduleHandler> | undefined
 
-/** Due automation work を timezone/DST policy に従って materialize します。 */
+/**
+ * Materializes due Automation work according to timezone and DST policy.
+ *
+ * @param event - Automation schedule invocation event.
+ * @returns The Automation schedule result.
+ */
 export async function handler(event: AutomationScheduleEvent = {}) {
-  const dependencies = createProductionAppDependencies()
-  return await runWithAppDependencies(
-    dependencies,
-    () =>
-      processAutomationSchedule(
-        resolveAutomationScheduleProcessingTime(event),
-        {
-          client: automationClient,
-          actionExecutor: createAutomationActionExecutor(),
-          inboundWebhookSecrets,
-        },
-      ),
-  )
+  productionHandler ??= createProductionAutomationScheduleHandler()
+  return await productionHandler(event)
 }
 
 export * from '../modules/automation/adapter-in/schedules/automation-schedule'

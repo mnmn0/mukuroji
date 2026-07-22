@@ -79,7 +79,7 @@ function createDependencies(
     deleteRelation: unsupportedOperation,
   } satisfies WorkItemConfigurationClient
   const dependencies: WorkItemConfigurationRouterDependencies<typeof principal> = {
-    workItemConfigurations: requestClient,
+    getWorkItemConfigurations: () => requestClient,
     readBearerAccessToken: (context) =>
       context.req.header('Authorization')?.replace(/^Bearer /u, ''),
     async authenticate(accessToken, context) {

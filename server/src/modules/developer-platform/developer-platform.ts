@@ -6353,8 +6353,11 @@ export class InMemoryDeveloperPlatformClient extends BaseDeveloperPlatformClient
       ) return false
     }
     const nextLink = readRecordValue<ExternalWorkItemLink>(linkRecord, 'external-link')
-    const pollTargetDelta = Number(isPollableExternalLink(nextLink)) -
-      Number(isPollableExternalLink(previousLink))
+    const nextLinkIsPollable = isPollableExternalLink(nextLink)
+    const previousLinkWasPollable = isPollableExternalLink(previousLink)
+    const pollTargetDelta: -1 | 0 | 1 = nextLinkIsPollable === previousLinkWasPollable
+      ? 0
+      : nextLinkIsPollable ? 1 : -1
     if (pollTargetDelta !== 0) {
       applyMemoryConnectorPollTargetDelta(
         this.records,
@@ -7672,8 +7675,11 @@ export class DynamoDbDeveloperPlatformClient extends BaseDeveloperPlatformClient
       linkRecord,
       'external-link',
     )
-    const pollTargetDelta = Number(isPollableExternalLink(nextLink)) -
-      Number(isPollableExternalLink(previousLink))
+    const nextLinkIsPollable = isPollableExternalLink(nextLink)
+    const previousLinkWasPollable = isPollableExternalLink(previousLink)
+    const pollTargetDelta: -1 | 0 | 1 = nextLinkIsPollable === previousLinkWasPollable
+      ? 0
+      : nextLinkIsPollable ? 1 : -1
     try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
@@ -8949,33 +8955,35 @@ function decodeActiveWebhookSubscriptionCursor(
     const lookupKey = createActiveWebhookSubscriptionLookupKey(expectedWorkspaceId)
     if (
       parsed.phase !== 'legacy' ||
-      parsed.lookupKey !== lookupKey ||
-      (
-        parsed.locator !== undefined &&
-        (
-          !isRecord(parsed.locator) ||
-          parsed.locator.workspaceId !== expectedWorkspaceId ||
-          typeof parsed.locator.recordKey !== 'string' ||
-          parsed.locator.lookupKey !== lookupKey ||
-          typeof parsed.locator.lookupSortKey !== 'string'
-        )
-      )
+      parsed.lookupKey !== lookupKey
+    ) throw new Error('invalid')
+    if (parsed.locator === undefined) {
+      return {
+        version: 1,
+        phase: 'legacy',
+        workspaceId: expectedWorkspaceId,
+        lookupKey,
+      }
+    }
+    const locator = parsed.locator
+    if (
+      !isRecord(locator) ||
+      locator.workspaceId !== expectedWorkspaceId ||
+      typeof locator.recordKey !== 'string' ||
+      locator.lookupKey !== lookupKey ||
+      typeof locator.lookupSortKey !== 'string'
     ) throw new Error('invalid')
     return {
       version: 1,
       phase: 'legacy',
       workspaceId: expectedWorkspaceId,
       lookupKey,
-      ...(parsed.locator
-        ? {
-            locator: {
-              workspaceId: expectedWorkspaceId,
-              recordKey: parsed.locator.recordKey,
-              lookupKey,
-              lookupSortKey: parsed.locator.lookupSortKey,
-            },
-          }
-        : {}),
+      locator: {
+        workspaceId: expectedWorkspaceId,
+        recordKey: locator.recordKey,
+        lookupKey,
+        lookupSortKey: locator.lookupSortKey,
+      },
     }
   } catch {
     throw invalid(

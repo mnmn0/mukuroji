@@ -132,7 +132,7 @@ function createDependencies(
   const calls: Array<{ operation: string; value: unknown }> = []
   const requestIntake = createRequestIntakeClient(calls, requestIntakeOverrides)
   const dependencies: AdminRequestIntakeRouterDependencies = {
-    requestIntake,
+    getRequestIntake: () => requestIntake,
     async requireAdministration(context) {
       calls.push({ operation: 'requireAdministration', value: context })
       return principal

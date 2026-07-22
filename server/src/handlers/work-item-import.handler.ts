@@ -1,6 +1,6 @@
-import { workItemImportHandler as appWorkItemImportHandler } from '../app/createApp'
+import {
+  createProductionWorkItemImportHandler,
+} from '../app/composition/work-item-import'
 
-/**
- * Durable Work Item import SQS batch を current RBAC で処理します。
- */
-export const workItemImportHandler = appWorkItemImportHandler
+/** Production Work Item import worker, initialized once per Lambda container. */
+export const workItemImportHandler = createProductionWorkItemImportHandler()

@@ -1,6 +1,7 @@
 import { createHash, createHmac } from 'node:crypto'
 import { lookup as lookupHostname } from 'node:dns/promises'
-import { request as httpsRequest, type ClientRequest } from 'node:https'
+import type { ClientRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
 import { isIP } from 'node:net'
 import {
   GetSecretValueCommand,
@@ -293,11 +294,25 @@ async function resolveAutomationWebhookSecret(workspaceId: string, secretAlias: 
   }
 }
 
-async function defaultAutomationWebhookLookup(hostname: string) {
+async function defaultAutomationWebhookLookup(
+  hostname: string,
+): Promise<AutomationWebhookResolvedAddress[]> {
   const addresses = await lookupHostname(hostname, { all: true, verbatim: true })
-  return addresses.flatMap(({ address, family }) =>
-    family === 4 || family === 6 ? [{ address, family }] : []
+  return addresses.flatMap<AutomationWebhookResolvedAddress>(({ address, family }) =>
+    isAutomationWebhookAddressFamily(family)
+      ? [{ address, family }]
+      : []
   )
+}
+
+/**
+ * Narrows a DNS address family to the IPv4 and IPv6 values accepted by webhook delivery.
+ *
+ * @param family - Address family returned by the DNS resolver.
+ * @returns Whether the family is IPv4 or IPv6.
+ */
+function isAutomationWebhookAddressFamily(family: number): family is 4 | 6 {
+  return family === 4 || family === 6
 }
 
 function getSecretsManagerClient() {

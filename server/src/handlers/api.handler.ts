@@ -1,16 +1,12 @@
 import server, {
   handler as apiHandler,
   validateApiServerConfig,
-} from '../app/createApp'
+} from '../app/composition/api-runtime'
 
 validateApiServerConfig()
 
-/**
- * API Gateway / Lambda Function URL events を共有 Hono app へ渡す handler です。
- */
+/** API Gateway and Lambda Function URL handler backed by the shared Hono app. */
 export const handler = apiHandler
 
-/**
- * Bun のローカル開発サーバー entrypoint です。
- */
+/** Bun development-server entrypoint. */
 export default server

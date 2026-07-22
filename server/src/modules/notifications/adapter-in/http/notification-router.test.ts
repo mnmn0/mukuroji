@@ -85,7 +85,7 @@ function createDependencies(marker: number) {
   } satisfies NotificationClient
 
   return {
-    notifications,
+    getNotifications: () => notifications,
     async authenticate(accessToken: string) {
       return {
         directoryId: `workspace-${accessToken}`,
