@@ -14,6 +14,9 @@ import {
   DynamoDbDeveloperPlatformClient,
 } from '../../modules/developer-platform/developer-platform'
 import {
+  DynamoDbDocumentAuthorizationRevisionMutationAdapter,
+} from '../../modules/documents/adapter-out/dynamodb/document-authorization'
+import {
   DynamoDbWebhookSubscriptionAuthorizer,
 } from '../../modules/developer-platform/webhook-authorization'
 import {
@@ -49,7 +52,10 @@ export function createProductionWebhookDeliveryHandler(
     auditEvents: new DynamoDbWebhookAuditEventReader(),
     developerPlatform: new DynamoDbDeveloperPlatformClient(),
     authorizer: new DynamoDbWebhookSubscriptionAuthorizer({
-      workspaceAccess: new DynamoDbWorkspaceAccessClient(),
+      workspaceAccess: new DynamoDbWorkspaceAccessClient({
+        documentAuthorizationRevisionMutationPort:
+          new DynamoDbDocumentAuthorizationRevisionMutationAdapter(),
+      }),
       enterpriseIdentity: new DynamoDbEnterpriseIdentityReadClient(
         readRequiredEnvironment('ENTERPRISE_IDENTITY_TABLE_NAME'),
       ),

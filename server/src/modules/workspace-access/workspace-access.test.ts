@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test'
+import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
   WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV,
@@ -6,6 +7,9 @@ import {
   createWorkspaceInvitationAuditEntityId,
   createWorkspaceMemberAuditEntityId,
 } from '../audit/audit'
+import {
+  DynamoDbDocumentAuthorizationRevisionMutationAdapter,
+} from '../documents/adapter-out/dynamodb/document-authorization'
 import {
   DynamoDbWorkspaceAccessClient,
   WorkspaceAccessError,
@@ -97,6 +101,46 @@ function createDocumentClient(
       return handler(command)
     },
   } as unknown as DynamoDBDocumentClient
+}
+
+/**
+ * Creates a Workspace Access adapter with the Documents revision port injected.
+ *
+ * @param tableName - Workspace Access table name.
+ * @param documentClient - DynamoDB document client used by the adapter.
+ * @param dynamoDbClient - Optional low-level DynamoDB client.
+ * @param bootstrapLocalTable - Whether local tables should be bootstrapped.
+ * @param clock - Optional test clock.
+ * @param planningTableName - Optional Planning table name.
+ * @param auditTableName - Optional Audit table name.
+ * @param auditPseudonymKey - Optional audit pseudonym key.
+ * @param documentsTableName - Optional Documents table name.
+ * @returns Configured Workspace Access adapter.
+ */
+function createWorkspaceAccessClientWithDocumentAuthorization(
+  tableName: string,
+  documentClient: DynamoDBDocumentClient,
+  dynamoDbClient?: DynamoDBClient,
+  bootstrapLocalTable?: boolean,
+  clock?: () => Date,
+  planningTableName?: string,
+  auditTableName?: string | null,
+  auditPseudonymKey?: string,
+  documentsTableName?: string,
+): DynamoDbWorkspaceAccessClient {
+  return new DynamoDbWorkspaceAccessClient(
+    tableName,
+    documentClient,
+    dynamoDbClient,
+    bootstrapLocalTable,
+    clock,
+    planningTableName,
+    auditTableName,
+    auditPseudonymKey,
+    new DynamoDbDocumentAuthorizationRevisionMutationAdapter(
+      documentsTableName,
+    ),
+  )
 }
 
 function createConditionalTransactionError(transactionLength: number, failedIndex: number) {
@@ -1280,7 +1324,7 @@ test('serializes member deactivation with the Planning graph revision', async ()
   const actor = createWorkspaceMember('demo@example.com')
   const target = createWorkspaceMember('member@example.com', 'member')
   const transactionInputs: Array<Record<string, unknown>> = []
-  const client = new DynamoDbWorkspaceAccessClient(
+  const client = createWorkspaceAccessClientWithDocumentAuthorization(
     'WorkspaceAccessTable',
     createDocumentClient((command) => {
       if (command.constructor.name === 'GetCommand') {
@@ -1338,6 +1382,44 @@ test('serializes member deactivation with the Planning graph revision', async ()
   })
 })
 
+test('fails before writing when the Documents revision port is not configured', async () => {
+  const actor = createWorkspaceMember('demo@example.com')
+  const target = createWorkspaceMember('member@example.com', 'member')
+  const transactionInputs: Array<Record<string, unknown>> = []
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      if (command.constructor.name === 'GetCommand') {
+        const key = command.input.Key as { recordKey?: string }
+        return {
+          Item: toMemberItem(
+            key.recordKey?.includes('member@example.com') ? target : actor,
+          ),
+        }
+      }
+      transactionInputs.push(command.input)
+      return {}
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+  )
+
+  await expect(
+    client.updateMember(workspaceId, actor.memberKey, target.memberKey, {
+      status: 'deactivated',
+      expectedVersion: target.version,
+      expectedPlanningRevision: 7,
+      expectedDocumentAuthorizationRevision: 3,
+    }),
+  ).rejects.toMatchObject({
+    status: 503,
+    code: 'DocumentAuthorizationRevisionPortMissing',
+  })
+  expect(transactionInputs).toHaveLength(0)
+})
+
 test('increments the Document authorization generation when deactivating a guest', async () => {
   const actor = createWorkspaceMember(
     'demo@example.com',
@@ -1348,7 +1430,7 @@ test('increments the Document authorization generation when deactivating a guest
   )
   const transactionInputs:
     Array<Record<string, unknown>> = []
-  const client = new DynamoDbWorkspaceAccessClient(
+  const client = createWorkspaceAccessClientWithDocumentAuthorization(
     'WorkspaceAccessTable',
     createDocumentClient((command) => {
       if (
@@ -1415,7 +1497,7 @@ test('increments the Document authorization generation when deactivating a guest
 test('classifies a Planning revision race during member deactivation', async () => {
   const actor = createWorkspaceMember('demo@example.com')
   const target = createWorkspaceMember('member@example.com', 'member')
-  const client = new DynamoDbWorkspaceAccessClient(
+  const client = createWorkspaceAccessClientWithDocumentAuthorization(
     'WorkspaceAccessTable',
     createDocumentClient((command) => {
       if (command.constructor.name === 'GetCommand') {
@@ -1456,7 +1538,7 @@ test('classifies a private Document ACL race during member deactivation', async 
     'member@example.com',
     'member',
   )
-  const client = new DynamoDbWorkspaceAccessClient(
+  const client = createWorkspaceAccessClientWithDocumentAuthorization(
     'WorkspaceAccessTable',
     createDocumentClient((command) => {
       if (command.constructor.name === 'GetCommand') {
@@ -1507,7 +1589,7 @@ test('classifies a private Document ACL race during member deactivation', async 
 test('preserves mixed Planning cancellation reasons as an infrastructure failure', async () => {
   const actor = createWorkspaceMember('demo@example.com')
   const target = createWorkspaceMember('member@example.com', 'member')
-  const client = new DynamoDbWorkspaceAccessClient(
+  const client = createWorkspaceAccessClientWithDocumentAuthorization(
     'WorkspaceAccessTable',
     createDocumentClient((command) => {
       if (command.constructor.name === 'GetCommand') {
@@ -1571,7 +1653,7 @@ test('classifies concurrent member updates through optimistic version checks', a
   const latest = createWorkspaceMember('member@example.com', 'guest', 'active', 2)
   const actor = createWorkspaceMember('demo@example.com')
   let targetReadCount = 0
-  const client = new DynamoDbWorkspaceAccessClient(
+  const client = createWorkspaceAccessClientWithDocumentAuthorization(
     'WorkspaceAccessTable',
     createDocumentClient((command) => {
       if (command.constructor.name === 'GetCommand') {
@@ -1603,7 +1685,7 @@ test('classifies concurrent member updates through optimistic version checks', a
 test('preserves non-conditional transaction cancellations as infrastructure failures', async () => {
   const actor = createWorkspaceMember('demo@example.com')
   const target = createWorkspaceMember('member@example.com', 'member')
-  const client = new DynamoDbWorkspaceAccessClient(
+  const client = createWorkspaceAccessClientWithDocumentAuthorization(
     'WorkspaceAccessTable',
     createDocumentClient((command) => {
       if (command.constructor.name === 'GetCommand') {
@@ -1957,7 +2039,7 @@ test('writes member role changes and their safe field diff atomically', async ()
   const inputs: Array<Record<string, unknown>> = []
   const actor = createWorkspaceMember('demo@example.com')
   const target = createWorkspaceMember('sato@example.com', 'member')
-  const client = new DynamoDbWorkspaceAccessClient(
+  const client = createWorkspaceAccessClientWithDocumentAuthorization(
     'WorkspaceAccessTable',
     createDocumentClient((command) => {
       if (command.constructor.name === 'GetCommand') {
@@ -2412,7 +2494,7 @@ test('deprovisions a directory member atomically with the Planning revision and 
     externalIdentityId: 'scim-user-123',
   }
   const inputs: Array<Record<string, unknown>> = []
-  const client = new DynamoDbWorkspaceAccessClient(
+  const client = createWorkspaceAccessClientWithDocumentAuthorization(
     'WorkspaceAccessTable',
     createDocumentClient((command) => {
       inputs.push(command.input)

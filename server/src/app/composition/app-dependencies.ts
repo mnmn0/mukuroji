@@ -16,7 +16,7 @@ import type {
   PublicWorkItemService,
 } from '../../modules/developer-platform/public-api'
 import type { ProjectDirectoryClient } from '../../modules/directory'
-import type { DocumentClient } from '../../modules/documents/documents'
+import type { DocumentClient } from '../../modules/documents'
 import type { EnterpriseIdentityClient } from '../../modules/enterprise-identity/enterprise-identity'
 import type { EnterpriseSessionActivityClient } from '../../modules/enterprise-identity/enterprise-session-activity'
 import type { FileProofingClient } from '../../modules/files/file-proofing'
