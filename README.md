@@ -17,13 +17,17 @@ mukuroji は、プロジェクトやタスクの進捗をチームで見渡す�
 bun install
 ```
 
-Floci を初めて起動する前に `openssl rand -hex 32` を一度実行し、その64桁の
-小文字hex出力をgit管理外の `.env` に保存してください。Docker Compose はこの値を
-ready hookへ渡し、未設定または形式不正なら起動前に停止します。保存後は
-`chmod 600 .env` でowner以外からの読み取りを禁止してください。
+ローカル環境を初めて起動する前に `openssl rand -hex 32` を3回実行し、それぞれ独立した
+64桁の小文字hex出力をgit管理外の `.env` に保存してください。Docker Compose が Floci
+コンテナへ渡すのは Workspace audit key だけで、ready hook がその形式を検証します。
+Enterprise credential/state secret は host 上の `server:dev` と `floci:deploy-backend` が
+`.env` から直接読み込み、Floci コンテナには渡しません。保存後は `chmod 600 .env` で
+owner以外からの読み取りを禁止してください。
 
 ```dotenv
 MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<64-character-lowercase-hex-output>
+ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET=<different-64-character-lowercase-hex-output>
+ENTERPRISE_SSO_STATE_SECRET=<third-64-character-lowercase-hex-output>
 ```
 
 Codex cloud のカスタムセットアップスクリプトには、以下を指定できます。
@@ -57,15 +61,23 @@ Floci の ready hook がローカル Cognito と Workspace を初期化します
 - メールアドレス: `demo@example.com`
 - パスワード: `Password123!`
 
-API サーバーはデフォルトで `http://localhost:4566` の Floci Cognito に接続し、`mukuroji-local` user pool と `mukuroji-web-local` client を自動検出します。初期 owner を含む local user の `custom:directory_id` と `custom:workspace_id` は、どちらも `workspace#mukuroji-local` に設定されます。生成された値は `.floci/generated/cognito.env` に出力されます。
+API サーバーはデフォルトで `http://localhost:4566` の Floci Cognito に接続し、
+`mukuroji-local` user pool、password/API 用の `mukuroji-web-local` public client、
+Hosted UI SSO 専用の `mukuroji-sso-local` public client を自動検出します。両 client ID は必ず異なり、
+SSO client は authorization-code flow、`openid email profile` scope、local callback だけを持ちます。
+初期 owner を含む local user の `custom:directory_id` と `custom:workspace_id` は、どちらも
+`workspace#mukuroji-local` に設定されます。生成された両 client ID と callback は
+`.floci/generated/cognito.env` に出力されます。
 この generated file は native Linux の host user からも読み込めるよう非secret値だけを含め、
-HMAC key は owner-only の root `.env` だけに保持します。関連する root package scripts は
-`--env-file=.env` を指定して子processへ明示的に渡します。
+secret は owner-only の root `.env` だけに保持します。Workspace audit key だけを ready hook
+へ渡し、Enterprise credential/state secret は関連する root package scripts が
+`--env-file=.env` を指定して host process へ明示的に渡します。
 
 同じ ready hook で DynamoDB table `mukuroji-dashboard-local`,
 `mukuroji-project-tasks-v2-local`, `mukuroji-project-directory-local`,
-`mukuroji-workspace-access-local`, `mukuroji-workspace-search-local`,
-`mukuroji-analytics-local` も作成し、ダッシュボード集計、Refero のタスク、
+`mukuroji-workspace-access-local`, `mukuroji-enterprise-identity-local`,
+`mukuroji-workspace-search-local`, `mukuroji-analytics-local` も作成し、
+ダッシュボード集計、Refero のタスク、
 サイドバー用チーム/プロジェクト階層、Workspace metadata/member を投入します。
 Analytics table は保存済みレポート、immutable snapshot、定期配信 receipt を保持し、
 `ScheduleDueIndex` で配信対象を取得できる本番同等の key schema を使います。
@@ -128,10 +140,15 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `VITE_TASKS_API_BASE_URL`: Work Item API を取得する Lambda Function URL。環境変数名は旧 client 互換で維持しています。CDK デプロイ後の `ProjectTasksApiUrl` 出力値を指定し、未指定時は `VITE_API_BASE_URL` または `/api` を使います。
 - `VITE_PROJECTS_API_BASE_URL`: DynamoDB のチーム/プロジェクト階層を取得する Lambda Function URL。未指定時は `VITE_TASKS_API_BASE_URL`、`VITE_API_BASE_URL`、`/api` の順に使います。
 - `VITE_WORKSPACE_API_BASE_URL`: 本番環境で Workspace member / invitation API を呼ぶ base URL。未指定時は `VITE_PROJECTS_API_BASE_URL`、`VITE_TASKS_API_BASE_URL`、`VITE_API_BASE_URL`、`/api` の順に使います。
+- `VITE_ENTERPRISE_IDENTITY_API_BASE_URL`: Enterprise identity/security 管理 API を呼ぶ base URL。未指定時は `VITE_WORKSPACE_API_BASE_URL`、`VITE_API_BASE_URL`、`/api` の順に使います。
 - `VITE_API_PROXY_TARGET`: Vite dev server が proxy する API。未指定時は `http://localhost:3000`
 - `COGNITO_ENDPOINT` / `AWS_ENDPOINT_URL`: API サーバーから見る Floci endpoint。未指定時は `http://localhost:4566`
 - `COGNITO_ISSUER`: access token の expected issuer。local ready hook が生成する値を利用します。本番では CDK の user pool から解決します。
-- `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`: 明示指定する場合の Cognito リソース ID
+- `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`: trust する User Pool と password/API 用 public client ID
+- `COGNITO_SSO_CLIENT_ID`: Hosted UI SSO 専用 public client ID。`COGNITO_CLIENT_ID` と同じ値は拒否します。API は access token の `client_id` がこの2値のいずれかに完全一致する場合だけ受け入れます。
+- `COGNITO_HOSTED_UI_DOMAIN`, `COGNITO_SSO_REDIRECT_URI`, `COGNITO_ENTERPRISE_IDP_NAME`: Cognito authorization-code + PKCE の enterprise federation 設定。Local callback の既定値は `http://localhost:5173/auth/sso/callback`
+- `COGNITO_SSO_USER_POOL_CLIENT_NAME`: Floci が作る SSO client 名。未指定時は `mukuroji-sso-local`
+- `ENTERPRISE_SSO_STATE_SECRET`: SSO state 署名専用の 32–256 文字 secret
 - `DYNAMODB_ENDPOINT` / `AWS_ENDPOINT_URL_DYNAMODB` / `AWS_ENDPOINT_URL`: API サーバーから見る Floci DynamoDB endpoint。未指定時は `http://localhost:4566`
 - `MUKUROJI_DASHBOARD_TABLE`: ダッシュボード集計値を保存する DynamoDB table 名。未指定時は `mukuroji-dashboard-local`
 - `MUKUROJI_PROJECT_TASKS_TABLE`: プロジェクト別タスクを保存する DynamoDB table 名。未指定時は `mukuroji-project-tasks-v2-local`
@@ -151,6 +168,8 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `MUKUROJI_REALTIME_SESSIONS_TABLE` / `REALTIME_SESSIONS_TABLE_NAME`: WebSocket ticket と connection lease を保存する DynamoDB table 名。未指定時は `mukuroji-realtime-sessions-local`
 - `REALTIME_WEBSOCKET_URL`: production の collaboration invalidation/presence 用 WebSocket URL。未指定時は Web が polling fallback を使います。
 - `MUKUROJI_AUDIT_EVENTS_TABLE` / `AUDIT_EVENTS_TABLE_NAME`: immutable audit event/outbox を保存する DynamoDB table 名。ローカル既定値は `mukuroji-audit-events`
+- `ENTERPRISE_IDENTITY_TABLE_NAME`: Workspace generation/`CONTROL` checkpoint、global domain claim、SSO/domain/policy/role、SCIM identity/group、provisioning run、service account、break-glass metadata を保存する DynamoDB table 名。Enterprise Identity 専用 GSI はなく、ローカル既定値は `mukuroji-enterprise-identity-local`
+- `ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET`: SCIM bearer token と service account credential を HMAC-SHA-256 する32–256文字の安定した secret。DynamoDB には credential kind・Workspace・credential ID で domain-separated な digest だけを保存します。作成・rotate response の raw credential は通常一回だけ表示し、同じ idempotency request の応答消失時に限り10分以内は同じ値を回復できます。
 - `MUKUROJI_AUTOMATION_TABLE` / `AUTOMATION_TABLE_NAME`: rule/template/recurring/execution/bulk/template application に加え、inbound webhook endpoint と delivery/replay receipt を保存する DynamoDB table 名。ローカル既定値は `mukuroji-automation-local`
 - `AUTOMATION_WEBHOOK_SECRET_PREFIX`: outbound webhook の workspace-scoped signing secret を置く Secrets Manager prefix。未指定時は `mukuroji/automation-webhooks`
 - `AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX`: server-issued inbound webhook signing secret を outbound secret から分離して置く Secrets Manager prefix。未指定時は `mukuroji/automation-inbound-webhooks`
@@ -170,9 +189,11 @@ API サーバーは `/api/workspace/access`, `/api/dashboard/summary`, `/api/tea
 `/api/notifications`, `/api/documents`, `/api/automation/rules`, `/api/automation/templates`,
 `/api/automation/inbound-webhooks`, `/api/recurring-work`,
 `/api/automation/executions`, `/api/bulk-operations`, `/api/planning`,
+`/api/auth/sso/discovery`, `/api/auth/sso/start`, `/api/auth/sso/exchange`,
+`/api/enterprise/security`, `/api/scim/v2/{workspaceId}`,
 `/api/analytics/query`, `/api/analytics/evidence`, `/api/analytics/reports`,
 `/api/analytics/reports/{reportId}/snapshots`, `/api/analytics/export`
-で DynamoDB を読み書きします。ローカルでは Vite proxy により、
+で各機能を提供します。ローカルでは Vite proxy により、
 Web から `/api` を呼ぶだけで Floci 上の DynamoDB データを取得できます。
 
 Analytics の権限、snapshot、schedule、forecast の契約は
@@ -201,6 +222,10 @@ Cycle rollover、戦略階層、roll-up、timeline dependency、critical path �
 Request Form、public intake、queue/triage、attachment、email reply、Work Item conversion の契約は
 [`docs/request-intake.md`](docs/request-intake.md) を参照してください。
 
+SSO discovery、SCIM provisioning、custom role、MFA/session/IP policy、service account、
+break-glass administrator の契約は
+[`docs/enterprise-identity.md`](docs/enterprise-identity.md) を参照してください。
+
 Document tree、block / whiteboard schema、同時編集、履歴、ACL、共有、検索、export の契約は
 [`docs/documents.md`](docs/documents.md) を参照してください。
 
@@ -223,6 +248,9 @@ AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- \
 
 `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` は generated file へ複製せず、API writer と
 backfill の両方が owner-only の root `.env` から同じ値を読み込みます。
+`ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET` と `ENTERPRISE_SSO_STATE_SECRET` も generated file
+へ複製せず、local backend deploy と `server:dev` が root `.env` の安定値を共有します。
+これら2つの Enterprise secret は ready hook や Floci コンテナへ渡しません。
 
 CDK stack も同じタスクデータと指定した Workspace 用の
 チーム/プロジェクト階層に加え、Workspace metadata と初期 active owner を
@@ -232,11 +260,17 @@ Web の環境変数へ渡してください。
 
 ```sh
 export COGNITO_USER_POOL_ID=<user-pool-id>
-export COGNITO_USER_POOL_CLIENT_ID=<public-app-client-id>
+export COGNITO_USER_POOL_CLIENT_ID=<password-public-app-client-id>
+export COGNITO_SSO_USER_POOL_CLIENT_ID=<dedicated-sso-public-app-client-id>
+export COGNITO_HOSTED_UI_DOMAIN=<pool-prefix>.auth.<region>.amazoncognito.com
+export COGNITO_SSO_REDIRECT_URI=https://app.example.com/auth/sso/callback
+export COGNITO_ENTERPRISE_IDP_NAME=<cognito-idp-name>
 export MUKUROJI_WORKSPACE_DIRECTORY_ID=<workspace-directory-id>
 export MUKUROJI_INITIAL_OWNER_EMAIL=<owner@example.com>
 export MUKUROJI_INITIAL_OWNER_USERNAME=<cognito-username>
 export MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY="$(openssl rand -hex 32)"
+export ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET="$(openssl rand -hex 32)"
+export ENTERPRISE_SSO_STATE_SECRET="$(openssl rand -hex 32)"
 export MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET=<at-least-32-random-characters>
 export MUKUROJI_REQUEST_TOKEN_HASH_SECRET=<different-at-least-32-random-characters>
 
@@ -247,8 +281,14 @@ bun run cdk:synth
 bun --filter cdk cdk diff \
   --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
   --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
+  --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
+  --parameters CognitoHostedUiDomain="$COGNITO_HOSTED_UI_DOMAIN" \
+  --parameters CognitoSsoRedirectUri="$COGNITO_SSO_REDIRECT_URI" \
+  --parameters CognitoEnterpriseIdpName="$COGNITO_ENTERPRISE_IDP_NAME" \
   --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
   --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
+  --parameters EnterpriseIdentityTokenHashSecret="$ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET" \
+  --parameters EnterpriseSsoStateSecret="$ENTERPRISE_SSO_STATE_SECRET" \
   --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
   --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME" \
   --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
@@ -256,6 +296,13 @@ bun --filter cdk cdk diff \
 ```
 
 `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` は環境作成時に一度だけ `openssl rand -hex 32` などで生成し、64桁の小文字hex値を secret store に保存して、API deploy と audit backfill で再利用してください。通常の再 deploy で生成し直すと Workspace access の audit ID が変わります。
+
+SSO client は password client とは別に作成し、client secret なし、
+`ExplicitAuthFlows=ALLOW_REFRESH_TOKEN_AUTH` のみ、OAuth server 有効、flow は `code` のみ、
+scope は `openid email profile` のみ、callback は `COGNITO_SSO_REDIRECT_URI` の1件だけにします。
+`SupportedIdentityProviders` も `COGNITO_ENTERPRISE_IDP_NAME` の1件だけとし、native login の
+`COGNITO` を含めないでください。通常の password client に federation を同居させると、password login
+で得た code を SSO exchange へ持ち込めるため、この構成は fail-closed で拒否されます。
 
 Lambda Function URL の CORS 許可 origin は CDK parameter
 `TaskApiAllowedOrigins` で指定します。未指定時は

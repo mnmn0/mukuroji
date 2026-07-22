@@ -6,8 +6,8 @@ import {
   type AnalyticsSnapshot,
   type AnalyticsSnapshotRecord,
 } from '@mukuroji/contracts'
-import { createDefaultAnalyticsWidgets } from './defaults'
-import { analyticsCalendarDateBoundaryToInstant } from './timeZone'
+import { createDefaultAnalyticsWidgets } from './model/defaults'
+import { analyticsCalendarDateBoundaryToInstant } from './model/timeZone'
 
 /**
  * Analytics Story と unit test で共有する固定 filter です。

@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import {
   type WorkItemRelationCandidate,
-} from '../src/work-items/WorkItemRelationsEditor'
-import { resolveAvailableWorkItemRelationCandidates } from '../src/work-items/workItemRelations'
+} from '../src/work-items/ui/WorkItemRelationsEditor'
+import { resolveAvailableWorkItemRelationCandidates } from '../src/work-items/model/workItemRelations'
 
 const candidates = [
   { id: 'issue-current', title: 'Current' },

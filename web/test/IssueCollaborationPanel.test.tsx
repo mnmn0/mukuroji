@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { IssueCollaborationPanel } from '../src/issues/IssueCollaborationPanel'
-import { mergeIssueComments } from '../src/issues/useIssueCollaboration'
+import { IssueCollaborationPanel } from '../src/issues/ui/IssueCollaborationPanel'
+import { mergeIssueComments } from '../src/issues/mutations/useIssueCollaboration'
 import {
   collaborationWorkspaceMemberFixtures,
   issueCollaborationControllerFixture,

@@ -5,16 +5,16 @@ import {
   emptyPlanningSnapshotFixture,
   planningSnapshotFixture,
 } from '../src/planning/fixtures'
-import { createPlanningLabels } from '../src/planning/labels'
+import { createPlanningLabels } from '../src/planning/ui/labels'
 import {
   PlanningScreen,
-} from '../src/planning/PlanningScreen'
+} from '../src/planning/ui/PlanningScreen'
 import {
   resolvePlanningMoveSelection,
   resolvePlanningParentCandidates,
-} from '../src/planning/hierarchy'
-import { createPlanningEntityDetailKey } from '../src/planning/selectors'
-import { resolvePlanningViewTabTarget } from '../src/routes/paths'
+} from '../src/planning/model/hierarchy'
+import { createPlanningEntityDetailKey } from '../src/planning/model/selectors'
+import { resolvePlanningViewTabTarget } from '../src/shared/routing/paths'
 
 const labels = createPlanningLabels('en')
 

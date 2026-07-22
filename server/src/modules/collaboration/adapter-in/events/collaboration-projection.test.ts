@@ -1,0 +1,1358 @@
+import { describe, expect, test } from 'bun:test'
+import { S3Client } from '@aws-sdk/client-s3'
+import type {
+  EnterpriseIdentitySnapshot,
+  EnterpriseSecurityPolicy,
+} from '@mukuroji/contracts'
+import {
+  cleanupDeletedFileProjection,
+  createDynamoBatchItemFailure,
+  createNotificationProjectionDeliveryState,
+  createNotificationProjectionItem,
+  createNotificationProjectionKeys,
+  groupNotificationCandidates,
+  hasActiveNotificationScope,
+  isActiveWorkspaceNotificationMember,
+  hasCurrentSystemAdminMembership,
+  hasEligibleProjectAccess,
+  mergeDeletedObjectTags,
+  parseAuditProjectionEvent,
+  processCollaborationProjectionBatch,
+  publishRealtimeInvalidation,
+  refreshScheduledNotificationEvent,
+  tagDeletedFileObjectVersion,
+  toSubscribedWatcherCandidates,
+  type AuditProjectionEvent,
+  type DeletedFileCleanupDependencies,
+  type DeletedFileMetadataKey,
+  type DeletedFileObjectVersion,
+  type ProjectDirectoryItem,
+} from './collaboration-projection'
+import {
+  capRealtimeSessionExpiry,
+  createCachedRealtimeCognitoProviderBindingReader,
+  evaluateRealtimeEnterpriseAccess,
+  hasActiveRealtimeResourceScope,
+  hasCurrentRealtimeEnterpriseSsoAssurance,
+  hasCurrentRealtimeSystemAdminMembership,
+  hasCurrentRealtimeWorkItemScope,
+  hasRealtimeDirectoryAccess,
+  hasRealtimeLegacyDirectoryAccess,
+  hasRealtimeDirectoryWriteAccess,
+  hasValidRealtimeCognitoProviderBindings,
+  isRealtimeTypingAllowed,
+  isRealtimeEnterpriseSessionFresh,
+  type RealtimeAuthorizationDirectoryItem,
+  type EvaluateRealtimeEnterpriseAccessInput,
+  type RealtimeSessionItem,
+  type RealtimeWorkItemRecord,
+} from '../../../realtime/adapter-in/events/realtime'
+import { createEnterpriseSsoAuthenticationMethod } from '../../../enterprise-identity/enterprise-sso'
+
+/**
+ * Pure projection helper tests で使う最小 audit event を作成します。
+ */
+function createProjectionEvent(
+  overrides: Partial<AuditProjectionEvent> = {},
+): AuditProjectionEvent {
+  return {
+    eventId: 'evt-1',
+    eventType: 'comment.created',
+    workspaceId: 'workspace-1',
+    actorUserId: 'cognito-sub-1',
+    actorMemberKey: 'author@example.com',
+    scopeKey: 'workspace-1#work-item#team/core/issue/example',
+    entityId: 'team/core/issue/example',
+    occurredAt: '2026-07-12T12:00:00.000Z',
+    notificationCandidates: [],
+    outboxStatus: 'pending',
+    ...overrides,
+  }
+}
+
+/** Realtime scope validation で使う canonical Work Item row を作成します。 */
+function createRealtimeWorkItem(
+  overrides: Partial<RealtimeWorkItemRecord> = {},
+): RealtimeWorkItemRecord {
+  return {
+    schemaVersion: 1,
+    revision: 1,
+    workflowSchemaVersion: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core',
+    directoryProjectId: 'workspace-1#project#platform',
+    teamId: 'core',
+    assignedProjectId: 'platform',
+    issueId: 'example',
+    sortOrder: 10,
+    title: 'Example',
+    assigneeUserId: 'member@example.com',
+    creatorMemberKey: 'creator@example.com',
+    workflowStatusId: 'in-progress',
+    statusCategory: 'started',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/07/31',
+    priority: 'medium',
+    createdAt: '2026-07-01T09:00:00.000Z',
+    updatedAt: '2026-07-12T09:00:00.000Z',
+    ...overrides,
+  }
+}
+
+/**
+ * Realtime enterprise authorization test 用の空 snapshot を作成します。
+ */
+function createRealtimeEnterpriseSnapshot(
+  overrides: Partial<EnterpriseIdentitySnapshot> = {},
+): EnterpriseIdentitySnapshot {
+  return {
+    workspaceId: 'workspace-1',
+    identityProviders: [],
+    domains: [],
+    customRoles: [],
+    groupMappings: [],
+    roleAssignments: [],
+    scimUsers: [],
+    scimGroups: [],
+    scimCredentials: [],
+    serviceAccounts: [],
+    breakGlassAccounts: [],
+    provisioningRuns: [],
+    provisioningLogs: [],
+    ...overrides,
+  }
+}
+
+describe('collaboration projection pure helpers', () => {
+  test('deduplicates recipients and excludes actor by Workspace member key', () => {
+    const grouped = groupNotificationCandidates(createProjectionEvent({
+      notificationCandidates: [
+        { memberKey: 'AUTHOR@example.com', reason: 'watcher' },
+        { memberKey: 'member@example.com', reason: 'watcher' },
+        { memberKey: 'MEMBER@example.com', reason: 'mention' },
+        { memberKey: 'member@example.com', reason: 'watcher' },
+      ],
+    }))
+
+    expect(grouped).toEqual([
+      {
+        memberKey: 'member@example.com',
+        reasons: ['mention', 'watcher'],
+      },
+    ])
+  })
+
+  test('projects only currently subscribed watcher rows into notification candidates', () => {
+    expect(toSubscribedWatcherCandidates([
+      {
+        entryType: 'watcher',
+        state: 'subscribed',
+        memberKey: 'watcher@example.com',
+      },
+      {
+        entryType: 'watcher',
+        state: 'unsubscribed',
+        memberKey: 'departed@example.com',
+      },
+    ], 'watcher')).toEqual([
+      { memberKey: 'watcher@example.com', reason: 'watcher' },
+    ])
+  })
+
+  test('parses actor member metadata and preserves suppressed outbox events', () => {
+    const event = parseAuditProjectionEvent({
+      eventId: 'evt-suppressed',
+      eventType: 'comment.created',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-12T12:00:00.000Z',
+      actorUserId: 'cognito-sub-1',
+      actor: { displayName: 'Author Example' },
+      entityKey: 'workspace-1#work-item#team/core/issue/example',
+      entityId: 'team/core/issue/example',
+      summary: 'A reply mentioned you.',
+      outboxStatus: 'suppressed',
+      metadata: {
+        actorMemberKey: 'author@example.com',
+        issueId: 'example',
+        fileId: 'file-1',
+        commentId: 'reply-1',
+        rootCommentId: 'root-1',
+        notificationTitle: 'Inbox foundations',
+        notificationCandidates: [
+          { memberKey: 'member@example.com', reason: 'mention' },
+          { memberKey: 42, reason: 'invalid' },
+        ],
+      },
+    })
+
+    expect(event).toMatchObject({
+      actorMemberKey: 'author@example.com',
+      actorLabel: 'Author Example',
+      issueId: 'example',
+      fileId: 'file-1',
+      commentId: 'reply-1',
+      rootCommentId: 'root-1',
+      notificationTitle: 'Inbox foundations',
+      summary: 'A reply mentioned you.',
+      outboxStatus: 'suppressed',
+      notificationCandidates: [
+        { memberKey: 'member@example.com', reason: 'mention' },
+      ],
+    })
+  })
+
+  test('durably quarantines immutable versions and expires related file metadata', async () => {
+    const taggedVersions: DeletedFileObjectVersion[] = []
+    const expiredKeys: DeletedFileMetadataKey[] = []
+    const queriedPrefixes: string[] = []
+    const dependencies: DeletedFileCleanupDependencies = {
+      async readFile(scopeKey, fileId) {
+        return {
+          scopeKey,
+          recordKey: `FILE#${fileId}`,
+          entryType: 'file',
+          fileId,
+          deletedAt: '2026-07-13T00:00:00.000Z',
+          retentionUntil: '2026-08-12T00:00:00.000Z',
+          expiresAt: 1_786_492_800,
+          versions: [
+            {
+              objectKey: 'workspaces/workspace-1/files/file-1/version-1/proof.png',
+              objectVersionId: 's3-version-1',
+            },
+            {
+              objectKey: 'workspaces/workspace-1/files/file-1/version-pending/proof.png',
+            },
+          ],
+        }
+      },
+      async queryRows(_scopeKey, recordPrefix) {
+        queriedPrefixes.push(recordPrefix)
+        if (recordPrefix.startsWith('ANNOTATION#')) {
+          return [{
+            scopeKey: 'WORKSPACE#workspace-1#TEAM#core#WORKITEM#example',
+            recordKey: 'ANNOTATION#file-1#version-1#annotation-1',
+            entryType: 'annotation',
+          }]
+        }
+        return [
+          {
+            scopeKey: 'WORKSPACE#workspace-1#TEAM#core#WORKITEM#example',
+            recordKey: 'FILE_APPROVAL#file-1#approval-1',
+            entryType: 'file-approval-index',
+            approvalId: 'approval-1',
+            fileId: 'file-1',
+            dueAt: '2026-07-20T00:00:00.000Z',
+            reviewerMemberKeys: ['Reviewer@Example.com'],
+          },
+        ]
+      },
+      async tagDeletedObjectVersion(target) {
+        taggedVersions.push(target)
+      },
+      async expireMetadata(keys, expiresAt, retentionUntil) {
+        expiredKeys.push(...keys)
+        expect(expiresAt).toBe(1_786_492_800)
+        expect(retentionUntil).toBe('2026-08-12T00:00:00.000Z')
+      },
+    }
+
+    await cleanupDeletedFileProjection(createProjectionEvent({
+      eventType: 'file.deleted',
+      workspaceId: 'workspace-1',
+      teamId: 'core',
+      issueId: 'example',
+      fileId: 'file-1',
+      targetId: 'file-1',
+    }), dependencies)
+
+    expect(taggedVersions).toEqual([{
+      objectKey: 'workspaces/workspace-1/files/file-1/version-1/proof.png',
+      objectVersionId: 's3-version-1',
+    }])
+    expect(queriedPrefixes).toEqual([
+      'ANNOTATION#file-1#',
+      'FILE_APPROVAL#file-1#',
+    ])
+    expect(expiredKeys).toEqual([
+      {
+        scopeKey: 'WORKSPACE#workspace-1#TEAM#core#WORKITEM#example',
+        recordKey: 'ANNOTATION#file-1#version-1#annotation-1',
+      },
+      {
+        scopeKey: 'WORKSPACE#workspace-1#TEAM#core#WORKITEM#example',
+        recordKey: 'FILE_APPROVAL#file-1#approval-1',
+      },
+      {
+        scopeKey: 'WORKSPACE#workspace-1#TEAM#core#WORKITEM#example',
+        recordKey: 'APPROVAL#approval-1',
+      },
+      {
+        scopeKey: 'WORKSPACE#workspace-1#REVIEWER#reviewer@example.com',
+        recordKey: 'APPROVAL#2026-07-20T00:00:00.000Z#approval-1',
+      },
+    ])
+  })
+
+  test('preserves scan and completion tags while applying deleted quarantine', () => {
+    expect(mergeDeletedObjectTags([
+      { Key: 'GuardDutyMalwareScanStatus', Value: 'NO_THREATS_FOUND' },
+      { Key: 'mukuroji-upload', Value: 'completed' },
+      { Key: 'mukuroji-deleted', Value: 'false' },
+    ])).toEqual([
+      { Key: 'GuardDutyMalwareScanStatus', Value: 'NO_THREATS_FOUND' },
+      { Key: 'mukuroji-upload', Value: 'completed' },
+      { Key: 'mukuroji-deleted', Value: 'true' },
+    ])
+  })
+
+  test('treats only missing immutable versions as completed deleted-file tagging', async () => {
+    const target: DeletedFileObjectVersion = {
+      objectKey: 'workspaces/workspace-1/files/file-1/version-1/proof.png',
+      objectVersionId: 's3-version-1',
+    }
+    const s3Client = new S3Client({
+      credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
+      region: 'us-east-1',
+    })
+    let failure = Object.assign(new Error('Object key is gone.'), { name: 'NoSuchKey' })
+    let sendCount = 0
+    ;(s3Client as unknown as { send(command: unknown): Promise<Record<string, unknown>> }).send =
+      async () => {
+        sendCount += 1
+        if (failure.name === 'NoSuchVersion' && sendCount === 1) {
+          return { TagSet: [] }
+        }
+        throw failure
+      }
+
+    await expect(tagDeletedFileObjectVersion(s3Client, 'files', target)).resolves.toBeUndefined()
+
+    failure = Object.assign(new Error('Object version is gone.'), { name: 'NoSuchVersion' })
+    sendCount = 0
+    await expect(tagDeletedFileObjectVersion(s3Client, 'files', target)).resolves.toBeUndefined()
+
+    failure = Object.assign(new Error('S3 is unavailable.'), { name: 'ServiceUnavailable' })
+    sendCount = 0
+    await expect(tagDeletedFileObjectVersion(s3Client, 'files', target)).rejects.toMatchObject({
+      message: 'S3 is unavailable.',
+      name: 'ServiceUnavailable',
+    })
+  })
+
+  test('returns a partial batch failure when durable file cleanup fails', async () => {
+    const failure = new Error('S3 tagging unavailable')
+    const dependencies: DeletedFileCleanupDependencies = {
+      async readFile() {
+        throw failure
+      },
+      async queryRows() {
+        return []
+      },
+      async tagDeletedObjectVersion() {},
+      async expireMetadata() {},
+    }
+    const response = await processCollaborationProjectionBatch({
+      Records: [{
+        eventID: 'event-1',
+        eventName: 'INSERT',
+        dynamodb: {
+          SequenceNumber: 'stream-sequence-1',
+          NewImage: {
+            eventId: { S: 'evt-file-delete' },
+            eventType: { S: 'file.deleted' },
+            workspaceId: { S: 'workspace-1' },
+            occurredAt: { S: '2026-07-13T00:00:00.000Z' },
+            targetId: { S: 'file-1' },
+            outboxStatus: { S: 'suppressed' },
+            metadata: {
+              M: {
+                teamId: { S: 'core' },
+                issueId: { S: 'example' },
+                fileId: { S: 'file-1' },
+              },
+            },
+          },
+        },
+      }],
+    }, {
+      deletedFileCleanup: dependencies,
+      realtime: { async publish() {} },
+    })
+
+    expect(response).toEqual({
+      batchItemFailures: [{ itemIdentifier: 'stream-sequence-1' }],
+    })
+  })
+
+  test('publishes the stable collaboration invalidation payload to its exact scope', async () => {
+    const publications: Array<{
+      scopeKey: string
+      payload: Readonly<Record<string, unknown>>
+    }> = []
+    const event = createProjectionEvent({
+      eventId: 'evt-realtime-1',
+      eventType: 'comment.updated',
+      entityId: 'team/core/issue/example',
+      targetId: 'comment-1',
+      occurredAt: '2026-07-12T12:30:00.000Z',
+    })
+
+    await publishRealtimeInvalidation(event, {
+      async publish(scopeKey, payload) {
+        publications.push({ scopeKey, payload })
+      },
+    })
+
+    expect(publications).toEqual([{
+      scopeKey: 'workspace-1#work-item#team/core/issue/example',
+      payload: {
+        type: 'collaboration.invalidated',
+        eventId: 'evt-realtime-1',
+        eventType: 'comment.updated',
+        scopeKey: 'workspace-1#work-item#team/core/issue/example',
+        entityId: 'team/core/issue/example',
+        targetId: 'comment-1',
+        occurredAt: '2026-07-12T12:30:00.000Z',
+      },
+    }])
+  })
+
+  test('propagates realtime publisher rejection for partial batch retry handling', async () => {
+    const failure = new Error('Realtime delivery unavailable')
+
+    await expect(publishRealtimeInvalidation(createProjectionEvent(), {
+      async publish() {
+        throw failure
+      },
+    })).rejects.toBe(failure)
+  })
+
+  test('builds deterministic recipient notification and receipt keys', () => {
+    const event = createProjectionEvent()
+    const first = createNotificationProjectionKeys(event, 'Member@Example.com')
+    const retry = createNotificationProjectionKeys(event, 'member@example.com')
+
+    expect(first).toEqual(retry)
+    expect(first).toEqual({
+      recipientKey: 'workspace-1#member@example.com',
+      notificationKey: '2026-07-12T12:00:00.000Z#evt-1',
+      consumerName: 'collaboration-notification#member@example.com',
+    })
+  })
+
+  test('applies in-app channel, digest frequency, and quiet hours to projection state', () => {
+    const state = createNotificationProjectionDeliveryState(
+      'workspace-1#member@example.com',
+      '2026-07-12T23:00:00.000Z',
+      {
+        version: 1,
+        channels: { inApp: false, email: true, push: false },
+        frequency: 'instant',
+        quietHours: {
+          enabled: true,
+          start: '22:00',
+          end: '07:00',
+          timeZone: 'UTC',
+        },
+      },
+    )
+
+    expect(state).toEqual({
+      inAppVisible: false,
+      inboxState: 'archived',
+      recipientStatusKey: 'workspace-1#member@example.com#archived',
+      archivedAt: '2026-07-12T23:00:00.000Z',
+      deliveryChannels: ['email'],
+      deliveryAfter: '2026-07-13T07:00:00.000Z',
+      deliveryFrequency: 'instant',
+    })
+  })
+
+  test('persists the Work Item identity required by current-permission reads', () => {
+    const event = createProjectionEvent({
+      issueId: 'notification-api',
+      projectId: 'refero',
+      teamId: 'core-team',
+    })
+    const deliveryState = createNotificationProjectionDeliveryState(
+      'workspace-1#member@example.com',
+      event.occurredAt,
+      {
+        version: 0,
+        channels: { inApp: true, email: false, push: false },
+        frequency: 'instant',
+        quietHours: {
+          enabled: false,
+          start: '22:00',
+          end: '07:00',
+          timeZone: 'UTC',
+        },
+      },
+    )
+
+    expect(createNotificationProjectionItem(
+      event,
+      { memberKey: 'member@example.com', reasons: ['status-change'] },
+      deliveryState,
+      1_800_000_000,
+    )).toMatchObject({
+      issueId: 'notification-api',
+      projectId: 'refero',
+      recipientKey: 'workspace-1#member@example.com',
+      recipientStatusKey: 'workspace-1#member@example.com#unread',
+      teamId: 'core-team',
+    })
+  })
+
+  test('refreshes scheduled candidates from the current assignee and suppresses stale due state', () => {
+    const scheduledEvent = createProjectionEvent({
+      dueDate: '2026-07-12',
+      eventType: 'work-item.due',
+      issueId: 'release-checklist',
+      notificationCandidates: [{ memberKey: 'old-owner@example.com', reason: 'due' }],
+      teamId: 'core-team',
+    })
+
+    expect(refreshScheduledNotificationEvent(scheduledEvent, {
+      assigneeMemberKey: 'new-owner@example.com',
+      checked: true,
+      dueDate: '2026-07-12',
+      exists: true,
+      statusCategory: 'started',
+    })).toBeUndefined()
+    expect(refreshScheduledNotificationEvent(scheduledEvent, {
+      assigneeMemberKey: 'old-owner@example.com',
+      checked: true,
+      dueDate: '2026-07-12',
+      exists: true,
+      statusCategory: 'started',
+    })?.notificationCandidates).toEqual([{
+      memberKey: 'old-owner@example.com',
+      reason: 'due',
+    }])
+    expect(refreshScheduledNotificationEvent(scheduledEvent, {
+      assigneeMemberKey: 'new-owner@example.com',
+      checked: true,
+      dueDate: '2026-07-13',
+      exists: true,
+      statusCategory: 'started',
+    })).toBeUndefined()
+    expect(refreshScheduledNotificationEvent(scheduledEvent, {
+      assigneeMemberKey: 'new-owner@example.com',
+      checked: true,
+      dueDate: '2026-07-12',
+      exists: true,
+      statusCategory: 'completed',
+    })).toBeUndefined()
+  })
+
+  test('tolerates legacy events without collaboration metadata', () => {
+    const event = parseAuditProjectionEvent({
+      eventId: 'evt-legacy',
+      eventType: 'work-item.updated',
+      directoryId: 'workspace-1',
+      occurredAt: '2026-07-12T12:00:00.000Z',
+      entityType: 'work-item',
+      entityId: 'team/core/issue/example',
+    })
+
+    expect(event).toMatchObject({
+      notificationCandidates: [],
+      outboxStatus: 'pending',
+      scopeKey: 'workspace-1#work-item#team/core/issue/example',
+    })
+  })
+
+  test('accepts future approval and automation notification producers through the generic contract', () => {
+    for (const [eventType, reason] of [
+      ['approval.decided', 'approval'],
+      ['automation.failed', 'automation-failure'],
+    ] as const) {
+      const event = parseAuditProjectionEvent({
+        eventId: `${eventType}-1`,
+        eventType,
+        workspaceId: 'workspace-1',
+        occurredAt: '2026-07-12T12:00:00.000Z',
+        actorUserId: 'system',
+        entityType: 'work-item',
+        entityId: 'team/core/issue/example',
+        metadata: {
+          teamId: 'core',
+          issueId: 'example',
+          deepLink: '/teams/core/issues?issueId=example',
+          notificationCandidates: [{ memberKey: 'owner@example.com', reason }],
+        },
+      })
+
+      expect(event).toBeDefined()
+      expect(groupNotificationCandidates(event as AuditProjectionEvent)).toEqual([
+        { memberKey: 'owner@example.com', reasons: [reason] },
+      ])
+    }
+  })
+
+  test('uses the DynamoDB sequence number for partial batch failures', () => {
+    expect(createDynamoBatchItemFailure({
+      eventID: 'diagnostic-event-id',
+      dynamodb: { SequenceNumber: '1234567890' },
+    })).toEqual({ itemIdentifier: '1234567890' })
+    expect(() => createDynamoBatchItemFailure({ eventID: 'diagnostic-event-id' })).toThrow(
+      'DynamoDB Streams sequence number is required',
+    )
+  })
+
+  test('rejects notification access when the parent team is archived', () => {
+    const activeDirectory: ProjectDirectoryItem[] = [
+      { entryType: 'team', teamId: 'core' },
+      { entryType: 'project', teamId: 'core', projectId: 'platform' },
+      {
+        entryType: 'project-member',
+        projectId: 'platform',
+        memberKey: 'member@example.com',
+        role: 'viewer',
+      },
+    ]
+    const event = { teamId: 'core', projectId: 'platform' }
+
+    expect(hasEligibleProjectAccess(event, 'member@example.com', activeDirectory)).toBe(true)
+    expect(hasEligibleProjectAccess(event, 'member@example.com', [
+      { entryType: 'team', teamId: 'core', archivedAt: '2026-07-12T12:00:00.000Z' },
+      ...activeDirectory.slice(1),
+    ])).toBe(false)
+  })
+
+  test('excludes deactivated Workspace members from notification recipients', () => {
+    expect(isActiveWorkspaceNotificationMember('departed@example.com', {
+      entryType: 'workspace-member',
+      memberKey: 'departed@example.com',
+      status: 'deactivated',
+    })).toBe(false)
+    expect(isActiveWorkspaceNotificationMember('active@example.com', {
+      entryType: 'workspace-member',
+      memberKey: 'active@example.com',
+      status: 'active',
+    })).toBe(true)
+  })
+
+  test('checks every current Cognito group page for the system-admin fallback', async () => {
+    const activeDirectory: ProjectDirectoryItem[] = [
+      { entryType: 'team', teamId: 'core' },
+      { entryType: 'project', teamId: 'core', projectId: 'platform' },
+    ]
+    const event = { teamId: 'core', projectId: 'platform' }
+    const requestedTokens: Array<string | undefined> = []
+    const currentSystemAdmin = await hasCurrentSystemAdminMembership(
+      ['mukuroji-system-admins'],
+      async (nextToken) => {
+        requestedTokens.push(nextToken)
+        return nextToken
+          ? { groupNames: ['mukuroji-system-admins'] }
+          : { groupNames: ['ordinary-members'], nextToken: 'page-2' }
+      },
+    )
+    const ordinaryMember = await hasCurrentSystemAdminMembership(
+      ['mukuroji-system-admins'],
+      async () => ({ groupNames: ['ordinary-members'] }),
+    )
+
+    expect(hasEligibleProjectAccess(event, 'admin@example.com', activeDirectory)).toBe(false)
+    expect(hasActiveNotificationScope(event, activeDirectory)).toBe(true)
+    expect(currentSystemAdmin).toBe(true)
+    expect(ordinaryMember).toBe(false)
+    expect(requestedTokens).toEqual([undefined, 'page-2'])
+    expect(hasActiveNotificationScope(event, [
+      { entryType: 'team', teamId: 'core', archivedAt: '2026-07-12T12:00:00.000Z' },
+      ...activeDirectory.slice(1),
+    ])).toBe(false)
+  })
+
+  test('realtime separates active resource existence from legacy project membership', () => {
+    const session: RealtimeSessionItem = {
+      connectionId: 'connection-1',
+      itemType: 'connection',
+      workspaceId: 'workspace-1',
+      memberKey: 'member@example.com',
+      teamId: 'core',
+      issueId: 'example',
+      projectId: 'platform',
+      systemAdmin: false,
+      canWrite: true,
+      scopeKey: 'workspace-1#work-item#team/core/issue/example',
+      expiresAt: 2_000_000_000,
+      authorizationExpiresAt: 2_000_000_000,
+    }
+    const activeDirectory: RealtimeAuthorizationDirectoryItem[] = [
+      { entryType: 'team', teamId: 'core' },
+      { entryType: 'project', teamId: 'core', projectId: 'platform' },
+      {
+        entryType: 'project-member',
+        projectId: 'platform',
+        memberKey: 'member@example.com',
+        role: 'viewer',
+      },
+    ]
+
+    expect(hasRealtimeDirectoryAccess(session, activeDirectory)).toBe(true)
+    expect(hasRealtimeDirectoryWriteAccess(session, activeDirectory, 'member')).toBe(false)
+    const memberDirectory = activeDirectory.map((item) =>
+      item.entryType === 'project-member' ? { ...item, role: 'member' } : item
+    )
+    expect(hasRealtimeDirectoryWriteAccess(session, memberDirectory, 'member')).toBe(true)
+    expect(hasRealtimeDirectoryWriteAccess(session, memberDirectory, 'guest')).toBe(false)
+    const directoryWithoutLegacyMember = activeDirectory.filter((item) =>
+      item.entryType !== 'project-member'
+    )
+    expect(hasActiveRealtimeResourceScope(session, directoryWithoutLegacyMember)).toBe(true)
+    expect(hasRealtimeLegacyDirectoryAccess(session, directoryWithoutLegacyMember)).toBe(false)
+    expect(hasRealtimeDirectoryAccess(session, directoryWithoutLegacyMember)).toBe(false)
+    expect(hasRealtimeDirectoryAccess(session, [
+      { entryType: 'team', teamId: 'core', archivedAt: '2026-07-12T12:00:00.000Z' },
+      ...activeDirectory.slice(1),
+    ])).toBe(false)
+    expect(hasCurrentRealtimeWorkItemScope(session, createRealtimeWorkItem())).toBe(true)
+    expect(hasCurrentRealtimeWorkItemScope(session, createRealtimeWorkItem({
+      directoryProjectId: 'workspace-1#project#replacement-project',
+      assignedProjectId: 'replacement-project',
+    }))).toBe(false)
+    expect(hasCurrentRealtimeWorkItemScope(session, {
+      ...createRealtimeWorkItem(),
+      status: 'started',
+    })).toBe(false)
+  })
+
+  test('realtime enterprise access combines live SCIM/Cognito groups and authoritative roles', async () => {
+    const updatedAt = '2026-07-18T00:00:00.000Z'
+    const snapshot = createRealtimeEnterpriseSnapshot({
+      identityProviders: [{
+        workspaceId: 'workspace-1',
+        providerId: 'provider-1',
+        kind: 'oidc',
+        displayName: 'Enterprise OIDC',
+        cognitoProviderName: 'EnterpriseOidc',
+        status: 'active',
+        revision: 1,
+        issuer: 'https://idp.example.com',
+        clientId: 'enterprise-client',
+        authorizationEndpoint: 'https://idp.example.com/authorize',
+        tokenEndpoint: 'https://idp.example.com/token',
+        jwksUri: 'https://idp.example.com/jwks',
+        scopes: ['openid', 'email'],
+        createdAt: updatedAt,
+        updatedAt,
+        lastTestedAt: updatedAt,
+      }],
+      customRoles: [{
+        workspaceId: 'workspace-1',
+        roleId: 'custom:realtime-reader',
+        name: 'Realtime reader',
+        permissions: ['work-items.read'],
+        guestAssignable: true,
+        revision: 1,
+        createdAt: updatedAt,
+        updatedAt,
+      }],
+      groupMappings: [{
+        workspaceId: 'workspace-1',
+        mappingId: 'mapping-1',
+        identityProviderId: 'provider-1',
+        directoryGroupId: 'entra-readers',
+        roleId: 'custom:realtime-reader',
+        scope: { workspaceId: 'workspace-1', kind: 'workspace' },
+        enabled: true,
+        priority: 10,
+        revision: 1,
+        updatedAt,
+      }],
+      scimUsers: [{
+        workspaceId: 'workspace-1',
+        userId: 'scim-user-1',
+        externalId: 'external-user-1',
+        identityProviderId: 'provider-1',
+        userName: 'member@example.com',
+        emails: ['member@example.com'],
+        active: true,
+        linkedMemberKey: 'member@example.com',
+        groupIds: ['scim-group-1'],
+        version: 1,
+        appliedVersion: 1,
+        appliedAt: updatedAt,
+        createdAt: updatedAt,
+        updatedAt,
+      }],
+      scimGroups: [{
+        workspaceId: 'workspace-1',
+        groupId: 'scim-group-1',
+        externalId: 'entra-readers',
+        identityProviderId: 'provider-1',
+        displayName: 'Realtime readers',
+        active: true,
+        memberUserIds: ['scim-user-1'],
+        version: 1,
+        appliedVersion: 1,
+        appliedAt: updatedAt,
+        createdAt: updatedAt,
+        updatedAt,
+      }],
+    })
+
+    const access = evaluateRealtimeEnterpriseAccess({
+      snapshot,
+      memberKey: 'member@example.com',
+      memberEmail: 'member@example.com',
+      workspaceRole: 'member',
+      cognitoGroupIds: ['cognito-current-group'],
+      currentSystemAdministrator: false,
+      breakGlass: false,
+      legacyReadAllowed: false,
+      legacyWriteAllowed: false,
+      teamId: 'core',
+      projectId: 'platform',
+    })
+
+    expect(access).toMatchObject({
+      allowed: true,
+      canWrite: false,
+      external: false,
+      workspaceRoleSuppressed: true,
+    })
+    expect(access.directoryGroupIds).toEqual(['cognito-current-group'])
+    expect(await hasValidRealtimeCognitoProviderBindings(
+      snapshot,
+      'member@example.com',
+      'member@example.com',
+      'EnterpriseOidc',
+      async () => ({
+        providerName: 'EnterpriseOidc',
+        providerType: 'OIDC',
+        providerDetails: {
+          oidc_issuer: 'https://idp.example.com',
+          client_id: 'enterprise-client',
+        },
+      }),
+    )).toBe(true)
+    expect(await hasValidRealtimeCognitoProviderBindings(
+      snapshot,
+      'member@example.com',
+      'member@example.com',
+      'EnterpriseOidc',
+      async () => ({
+        providerName: 'EnterpriseOidc',
+        providerType: 'OIDC',
+        providerDetails: {
+          oidc_issuer: 'https://replacement.example.com',
+          client_id: 'enterprise-client',
+        },
+      }),
+    )).toBe(false)
+
+    const unqualifiedCognitoMappingAccess = evaluateRealtimeEnterpriseAccess({
+      snapshot: {
+        ...snapshot,
+        groupMappings: snapshot.groupMappings.map((mapping) => ({
+          ...mapping,
+          directoryGroupId: 'cognito-current-group',
+        })),
+        scimUsers: [],
+        scimGroups: [],
+      },
+      memberKey: 'member@example.com',
+      memberEmail: 'member@example.com',
+      workspaceRole: 'member',
+      cognitoGroupIds: ['cognito-current-group'],
+      currentSystemAdministrator: false,
+      breakGlass: false,
+      legacyReadAllowed: true,
+      legacyWriteAllowed: true,
+      teamId: 'core',
+      projectId: 'platform',
+    })
+    expect(unqualifiedCognitoMappingAccess).toMatchObject({
+      allowed: true,
+      canWrite: true,
+      workspaceRoleSuppressed: false,
+    })
+
+    const mismatchedProviderAccess = evaluateRealtimeEnterpriseAccess({
+      snapshot: {
+        ...snapshot,
+        groupMappings: snapshot.groupMappings.map((mapping) => ({
+          ...mapping,
+          identityProviderId: 'provider-2',
+        })),
+      },
+      memberKey: 'member@example.com',
+      memberEmail: 'member@example.com',
+      workspaceRole: 'member',
+      cognitoGroupIds: [],
+      currentSystemAdministrator: false,
+      breakGlass: false,
+      legacyReadAllowed: true,
+      legacyWriteAllowed: true,
+      teamId: 'core',
+      projectId: 'platform',
+    })
+    expect(mismatchedProviderAccess).toMatchObject({
+      allowed: false,
+      canWrite: false,
+      workspaceRoleSuppressed: true,
+    })
+
+    const directMemberAssignmentAccess = evaluateRealtimeEnterpriseAccess({
+      snapshot: {
+        ...snapshot,
+        groupMappings: [],
+        scimUsers: [],
+        scimGroups: [],
+        roleAssignments: [{
+          workspaceId: 'workspace-1',
+          assignmentId: 'assignment-member-1',
+          principalKind: 'member',
+          principalId: 'member@example.com',
+          roleId: 'custom:realtime-reader',
+          scope: {
+            workspaceId: 'workspace-1',
+            kind: 'project',
+            targetId: 'platform',
+          },
+          source: 'direct',
+        }],
+      },
+      memberKey: 'member@example.com',
+      memberEmail: 'member@example.com',
+      workspaceRole: 'member',
+      cognitoGroupIds: [],
+      currentSystemAdministrator: false,
+      breakGlass: false,
+      legacyReadAllowed: false,
+      legacyWriteAllowed: false,
+      teamId: 'core',
+      projectId: 'platform',
+    })
+    expect(directMemberAssignmentAccess).toMatchObject({
+      allowed: true,
+      canWrite: false,
+      workspaceRoleSuppressed: true,
+    })
+
+    const directGroupAssignmentAccess = evaluateRealtimeEnterpriseAccess({
+      snapshot: {
+        ...snapshot,
+        groupMappings: [],
+        scimUsers: [],
+        scimGroups: [],
+        roleAssignments: [{
+          workspaceId: 'workspace-1',
+          assignmentId: 'assignment-group-1',
+          principalKind: 'directory-group',
+          principalId: 'cognito-current-group',
+          roleId: 'custom:realtime-reader',
+          scope: { workspaceId: 'workspace-1', kind: 'workspace' },
+          source: 'direct',
+        }],
+      },
+      memberKey: 'member@example.com',
+      memberEmail: 'member@example.com',
+      workspaceRole: 'member',
+      cognitoGroupIds: ['cognito-current-group'],
+      currentSystemAdministrator: false,
+      breakGlass: false,
+      legacyReadAllowed: false,
+      legacyWriteAllowed: false,
+      teamId: 'core',
+      projectId: 'platform',
+    })
+    expect(directGroupAssignmentAccess).toMatchObject({
+      allowed: true,
+      canWrite: false,
+      workspaceRoleSuppressed: true,
+    })
+
+    const projectScopedAccess = evaluateRealtimeEnterpriseAccess({
+      snapshot: {
+        ...snapshot,
+        groupMappings: snapshot.groupMappings.map((mapping) => ({
+          ...mapping,
+          scope: {
+            workspaceId: 'workspace-1',
+            kind: 'project' as const,
+            targetId: 'platform',
+          },
+        })),
+      },
+      memberKey: 'member@example.com',
+      memberEmail: 'member@example.com',
+      workspaceRole: 'member',
+      cognitoGroupIds: [],
+      currentSystemAdministrator: false,
+      breakGlass: false,
+      legacyReadAllowed: false,
+      legacyWriteAllowed: false,
+      teamId: 'core',
+      projectId: 'platform',
+    })
+    expect(projectScopedAccess).toMatchObject({
+      allowed: true,
+      canWrite: false,
+      workspaceRoleSuppressed: true,
+    })
+
+    const teamScopedAuthoritativeDenial = evaluateRealtimeEnterpriseAccess({
+      snapshot: createRealtimeEnterpriseSnapshot({
+        customRoles: [{
+          workspaceId: 'workspace-1',
+          roleId: 'custom:file-only',
+          name: 'File only',
+          permissions: ['files.read'],
+          guestAssignable: true,
+          revision: 1,
+          createdAt: updatedAt,
+          updatedAt,
+        }],
+        roleAssignments: [{
+          workspaceId: 'workspace-1',
+          assignmentId: 'assignment-team-1',
+          principalKind: 'member',
+          principalId: 'member@example.com',
+          roleId: 'custom:file-only',
+          scope: {
+            workspaceId: 'workspace-1',
+            kind: 'team',
+            targetId: 'core',
+          },
+          source: 'direct',
+        }],
+      }),
+      memberKey: 'member@example.com',
+      memberEmail: 'member@example.com',
+      workspaceRole: 'owner',
+      cognitoGroupIds: [],
+      currentSystemAdministrator: false,
+      breakGlass: false,
+      legacyReadAllowed: true,
+      legacyWriteAllowed: true,
+      teamId: 'core',
+    })
+    expect(teamScopedAuthoritativeDenial).toMatchObject({
+      allowed: false,
+      canWrite: false,
+      workspaceRoleSuppressed: true,
+    })
+  })
+
+  test('realtime shares raw Cognito provider reads only within the short cache TTL', async () => {
+    let currentTime = 0
+    let reads = 0
+    const readBinding = createCachedRealtimeCognitoProviderBindingReader(
+      async (providerName) => {
+        reads += 1
+        return {
+          providerName,
+          providerType: 'OIDC',
+          providerDetails: {
+            oidc_issuer: 'https://idp.example.com',
+            client_id: 'enterprise-client',
+          },
+        }
+      },
+      () => currentTime,
+    )
+
+    const [first, second] = await Promise.all([
+      readBinding('EnterpriseOidc'),
+      readBinding('EnterpriseOidc'),
+    ])
+    expect(first).toEqual(second)
+    expect(reads).toBe(1)
+
+    currentTime = 29_999
+    await readBinding('EnterpriseOidc')
+    expect(reads).toBe(1)
+
+    currentTime = 30_000
+    await readBinding('EnterpriseOidc')
+    expect(reads).toBe(2)
+  })
+
+  test('realtime SSO assurance rejects password and stale provider-revision tickets', () => {
+    const updatedAt = '2026-07-18T00:00:00.000Z'
+    const provider = {
+      workspaceId: 'workspace-1',
+      providerId: 'provider-1',
+      kind: 'oidc' as const,
+      displayName: 'Enterprise OIDC',
+      cognitoProviderName: 'EnterpriseOidc',
+      status: 'active' as const,
+      revision: 1,
+      issuer: 'https://idp.example.com',
+      clientId: 'enterprise-client',
+      authorizationEndpoint: 'https://idp.example.com/authorize',
+      tokenEndpoint: 'https://idp.example.com/token',
+      jwksUri: 'https://idp.example.com/jwks',
+      scopes: ['openid', 'email'],
+      createdAt: updatedAt,
+      updatedAt,
+      lastTestedAt: updatedAt,
+    }
+    const snapshot = createRealtimeEnterpriseSnapshot({
+      identityProviders: [provider],
+      domains: [{
+        workspaceId: 'workspace-1',
+        domainId: 'domain-1',
+        domain: 'example.com',
+        status: 'verified',
+        verificationRecordName: '_mukuroji.example.com',
+        enforceSso: true,
+        identityProviderId: provider.providerId,
+        revision: 1,
+        createdAt: updatedAt,
+        updatedAt,
+        verifiedAt: updatedAt,
+      }],
+    })
+    const currentMarker = createEnterpriseSsoAuthenticationMethod(
+      provider.providerId,
+      provider.revision,
+    )
+
+    expect(hasCurrentRealtimeEnterpriseSsoAssurance(
+      snapshot,
+      'member@example.com',
+      ['PASSWORD'],
+    )).toBe(false)
+    expect(hasCurrentRealtimeEnterpriseSsoAssurance(
+      snapshot,
+      'member@example.com',
+      [currentMarker],
+    )).toBe(true)
+
+    const revisedSnapshot = {
+      ...snapshot,
+      identityProviders: [{ ...provider, revision: provider.revision + 1 }],
+    }
+    expect(hasCurrentRealtimeEnterpriseSsoAssurance(
+      revisedSnapshot,
+      'member@example.com',
+      [currentMarker],
+    )).toBe(false)
+    expect(hasCurrentRealtimeEnterpriseSsoAssurance(
+      revisedSnapshot,
+      'member@example.com',
+      [createEnterpriseSsoAuthenticationMethod(provider.providerId, provider.revision + 1)],
+    )).toBe(true)
+    expect(hasCurrentRealtimeEnterpriseSsoAssurance(
+      snapshot,
+      'external@other.example',
+      ['PASSWORD'],
+    )).toBe(true)
+    expect(hasCurrentRealtimeEnterpriseSsoAssurance(
+      { ...snapshot, identityProviders: [] },
+      'member@example.com',
+      [currentMarker],
+    )).toBe(false)
+  })
+
+  test('realtime selects legacy ACL without weakening external ceilings or SCIM deactivation', () => {
+    const updatedAt = '2026-07-18T00:00:00.000Z'
+    const policy = {
+      workspaceId: 'workspace-1',
+      loginMode: 'password-or-sso',
+      mfaRequirement: 'optional',
+      sessionLifetimeMinutes: 480,
+      idleTimeoutMinutes: 60,
+      reauthenticationIntervalMinutes: 120,
+      sensitiveActionReauthenticationMinutes: 15,
+      ipAllowlistMode: 'disabled',
+      ipAllowlist: [],
+      externalAccess: {
+        allowGuests: true,
+        allowExternalCollaborators: true,
+        requireMfa: false,
+        maximumSessionLifetimeMinutes: 120,
+        allowedGuestDomains: [],
+        permissionCeiling: ['work-items.read'],
+      },
+      revision: 1,
+      updatedAt,
+      updatedBy: 'owner@example.com',
+    } satisfies EnterpriseSecurityPolicy
+    const snapshot = createRealtimeEnterpriseSnapshot({
+      policy,
+      domains: [{
+        workspaceId: 'workspace-1',
+        domainId: 'domain-1',
+        domain: 'managed.example',
+        status: 'verified',
+        verificationRecordName: '_mukuroji.managed.example',
+        enforceSso: false,
+        revision: 1,
+        createdAt: updatedAt,
+        updatedAt,
+      }],
+    })
+    const baseInput = {
+      snapshot,
+      memberKey: 'external@example.net',
+      memberEmail: 'external@example.net',
+      workspaceRole: 'member',
+      cognitoGroupIds: [],
+      currentSystemAdministrator: false,
+      breakGlass: false,
+      legacyReadAllowed: true,
+      legacyWriteAllowed: true,
+      teamId: 'core',
+      projectId: 'platform',
+    } satisfies EvaluateRealtimeEnterpriseAccessInput
+
+    expect(evaluateRealtimeEnterpriseAccess(baseInput)).toMatchObject({
+      allowed: true,
+      canWrite: false,
+      external: true,
+    })
+    expect(evaluateRealtimeEnterpriseAccess({
+      ...baseInput,
+      legacyReadAllowed: false,
+    })).toMatchObject({ allowed: false, canWrite: false })
+    expect(evaluateRealtimeEnterpriseAccess({
+      ...baseInput,
+      workspaceRole: 'guest',
+      snapshot: {
+        ...snapshot,
+        policy: {
+          ...policy,
+          externalAccess: {
+            ...policy.externalAccess,
+            allowGuests: false,
+          },
+        },
+      },
+    })).toMatchObject({ allowed: false, canWrite: false, external: true })
+    expect(evaluateRealtimeEnterpriseAccess({
+      ...baseInput,
+      snapshot: {
+        ...snapshot,
+        identityProviders: [{
+          workspaceId: 'workspace-1',
+          providerId: 'provider-1',
+          kind: 'oidc',
+          displayName: 'Enterprise OIDC',
+          cognitoProviderName: 'EnterpriseOidc',
+          status: 'active',
+          revision: 1,
+          issuer: 'https://idp.example.com',
+          clientId: 'enterprise-client',
+          authorizationEndpoint: 'https://idp.example.com/authorize',
+          tokenEndpoint: 'https://idp.example.com/token',
+          jwksUri: 'https://idp.example.com/jwks',
+          scopes: ['openid', 'email'],
+          createdAt: updatedAt,
+          updatedAt,
+          lastTestedAt: updatedAt,
+        }],
+        scimUsers: [{
+          workspaceId: 'workspace-1',
+          userId: 'scim-user-1',
+          externalId: 'external-user-1',
+          identityProviderId: 'provider-1',
+          userName: 'external@example.net',
+          emails: ['external@example.net'],
+          active: false,
+          linkedMemberKey: 'external@example.net',
+          groupIds: [],
+          version: 2,
+          appliedVersion: 1,
+          appliedAt: updatedAt,
+          createdAt: updatedAt,
+          updatedAt,
+        }],
+      },
+    })).toMatchObject({ allowed: false, canWrite: false })
+  })
+
+  test('realtime enterprise session obeys current policy reductions and idle deadlines', () => {
+    const now = 2_000_000_000
+    const policy = {
+      workspaceId: 'workspace-1',
+      loginMode: 'password-or-sso',
+      mfaRequirement: 'optional',
+      sessionLifetimeMinutes: 60,
+      idleTimeoutMinutes: 10,
+      reauthenticationIntervalMinutes: 5,
+      sensitiveActionReauthenticationMinutes: 1,
+      ipAllowlistMode: 'disabled',
+      ipAllowlist: [],
+      externalAccess: {
+        allowGuests: true,
+        allowExternalCollaborators: true,
+        requireMfa: false,
+        maximumSessionLifetimeMinutes: 2,
+        allowedGuestDomains: [],
+        permissionCeiling: ['work-items.read'],
+      },
+      revision: 1,
+      updatedAt: '2026-07-18T00:00:00.000Z',
+      updatedBy: 'owner@example.com',
+    } satisfies EnterpriseSecurityPolicy
+    const toTimestamp = (epochSeconds: number) => new Date(epochSeconds * 1_000).toISOString()
+    const session = {
+      authorizationExpiresAt: now + 3_600,
+      authenticatedAt: now - 30,
+      tokenExpiresAt: now + 3_600,
+      authenticationMethods: ['pwd', 'software_token_mfa'],
+      clientIp: '203.0.113.10',
+      createdAt: toTimestamp(now - 300),
+      connectedAt: toTimestamp(now - 300),
+      lastSeenAt: toTimestamp(now - 60),
+    }
+
+    expect(isRealtimeEnterpriseSessionFresh(policy, session, false, false, false, now)).toBe(true)
+    expect(isRealtimeEnterpriseSessionFresh(policy, {
+      ...session,
+      createdAt: toTimestamp(now - 301),
+    }, false, false, false, now)).toBe(false)
+    expect(isRealtimeEnterpriseSessionFresh(policy, {
+      ...session,
+      lastSeenAt: toTimestamp(now - 601),
+    }, false, false, false, now)).toBe(false)
+    expect(isRealtimeEnterpriseSessionFresh(policy, {
+      ...session,
+      createdAt: toTimestamp(now - 121),
+    }, true, false, false, now)).toBe(false)
+    expect(isRealtimeEnterpriseSessionFresh(policy, {
+      ...session,
+      createdAt: toTimestamp(now - 61),
+    }, false, true, false, now)).toBe(false)
+    expect(isRealtimeEnterpriseSessionFresh(undefined, {
+      ...session,
+      authorizationExpiresAt: now,
+    }, false, false, false, now)).toBe(false)
+  })
+
+  test('realtime system-admin authorization checks every current Cognito group page', async () => {
+    const requestedTokens: Array<string | undefined> = []
+    const authorized = await hasCurrentRealtimeSystemAdminMembership(
+      ['mukuroji-system-admins'],
+      async (nextToken) => {
+        requestedTokens.push(nextToken)
+        return nextToken
+          ? { groupNames: ['mukuroji-system-admins'] }
+          : { groupNames: ['ordinary-members'], nextToken: 'page-2' }
+      },
+    )
+
+    expect(authorized).toBe(true)
+    expect(requestedTokens).toEqual([undefined, 'page-2'])
+    expect(await hasCurrentRealtimeSystemAdminMembership(
+      ['mukuroji-system-admins'],
+      async () => ({ groupNames: ['ordinary-members'] }),
+    )).toBe(false)
+  })
+
+  test('realtime typing requires write access and session refresh cannot extend authorization', () => {
+    expect(isRealtimeTypingAllowed(false, true)).toBe(false)
+    expect(isRealtimeTypingAllowed(false, false)).toBe(true)
+    expect(isRealtimeTypingAllowed(true, true)).toBe(true)
+    expect(capRealtimeSessionExpiry(2_000_003_600, 2_000_000_900)).toBe(2_000_000_900)
+  })
+})

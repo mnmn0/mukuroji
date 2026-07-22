@@ -7,8 +7,8 @@ import {
   createRequestsPath,
   createTeamIssuesPath,
   createWorkItemSearchPath,
-} from '../src/routes/paths'
-import { appRoutes } from '../src/routes/router'
+} from '../src/shared/routing/paths'
+import { appRoutes } from '../src/app/router'
 
 describe('Work Item detail paths', () => {
   test('keeps assigned Work Items scoped by project, team, and issue', () => {
@@ -86,6 +86,33 @@ describe('Request intake paths', () => {
     expect(matchRoutes(appRoutes, '/request/opaque-token')?.at(-1)?.route.path).toBe(
       '/request/:linkToken',
     )
+  })
+})
+
+describe('Enterprise security path', () => {
+  test('registers the dedicated security management route', () => {
+    expect(
+      matchRoutes(appRoutes, '/settings/security')?.at(-1)?.route.path,
+    ).toBe('/settings/security')
+  })
+
+  test('registers the enterprise SSO callback outside authenticated layouts', () => {
+    expect(
+      matchRoutes(appRoutes, '/auth/sso/callback')?.at(-1)?.route.path,
+    ).toBe('/auth/sso/callback')
+  })
+
+  test('registers an explicit login path for step-up return links', () => {
+    expect(
+      matchRoutes(appRoutes, '/login?returnTo=%2Fsettings%2Fsecurity')
+        ?.at(-1)?.route.path,
+    ).toBe('/login')
+  })
+
+  test('registers recovery access outside permission-gated Workspace layouts', () => {
+    expect(
+      matchRoutes(appRoutes, '/security/recovery')?.at(-1)?.route.path,
+    ).toBe('/security/recovery')
   })
 })
 

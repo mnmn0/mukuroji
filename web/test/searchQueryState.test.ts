@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { SearchViewLayout, WorkspaceSearchResult } from '@mukuroji/contracts'
-import { sortWorkspaceSearchResults } from '../src/search/sortResults'
+import { sortWorkspaceSearchResults } from '../src/search/model/sortResults'
 import {
   deduplicateSearchMigrationWarnings,
   getSearchColumns,
@@ -14,7 +14,7 @@ import {
   getSearchStatuses,
   parseSearchRouteState,
   serializeSearchRouteState,
-} from '../src/search/queryState'
+} from '../src/search/model/queryState'
 
 describe('Workspace search URL state', () => {
   test('migration warnings keep first-seen order without duplicates', () => {

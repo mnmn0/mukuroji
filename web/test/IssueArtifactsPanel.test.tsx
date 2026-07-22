@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { FileAttachment } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { IssueArtifactsPanel } from '../src/files/IssueArtifactsPanel'
+import { IssueArtifactsPanel } from '../src/files/ui/IssueArtifactsPanel'
 import {
   blockedVideoFileFixture,
   fileArtifactsControllerFixture,

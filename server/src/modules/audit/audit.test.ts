@@ -1,0 +1,733 @@
+import { expect, test } from 'bun:test'
+import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import {
+  AUDIT_UNKNOWN_OCCURRED_AT,
+  AUDIT_TARGET_INDEX_NAME,
+  auditEventsToNdjson,
+  calculateAuditExpiresAt,
+  createAuditConsumerReceiptTransactPut,
+  createAuditEvent,
+  createAuditFieldDiff,
+  createAuditFieldChanges,
+  createAuditTransactPut,
+  createMutationAuditContext,
+  createWorkspaceInvitationAuditEntityId,
+  createWorkspaceMemberAuditEntityId,
+  DynamoDbAuditEventsClient,
+  ensureLocalAuditEventsTable,
+  getConfiguredAuditRetentionDays,
+  getConfiguredAuditTableName,
+  getConfiguredDynamoDbEndpoint,
+  readWorkspaceAuditPseudonymKey,
+  toAuditEventView,
+  upcastAuditEvent,
+} from './audit'
+
+const auditExpiresAt = 2_000_000_000
+
+test('calculates audit expiry from the historical event occurrence time', () => {
+  const occurredAt = '2020-01-02T03:04:05.000Z'
+
+  expect(calculateAuditExpiresAt(occurredAt, 30)).toBe(
+    Math.floor(Date.parse(occurredAt) / 1000) + 30 * 86_400,
+  )
+})
+
+test('treats blank audit retention environment values as unset', () => {
+  const originalMukurojiRetentionDays = process.env.MUKUROJI_AUDIT_RETENTION_DAYS
+  const originalRetentionDays = process.env.AUDIT_RETENTION_DAYS
+
+  try {
+    process.env.MUKUROJI_AUDIT_RETENTION_DAYS = ' '
+    process.env.AUDIT_RETENTION_DAYS = ''
+    expect(getConfiguredAuditRetentionDays()).toBe(2555)
+
+    process.env.AUDIT_RETENTION_DAYS = '365'
+    expect(getConfiguredAuditRetentionDays()).toBe(365)
+
+    for (const invalidValue of ['invalid', '0', '-1']) {
+      process.env.MUKUROJI_AUDIT_RETENTION_DAYS = invalidValue
+      expect(() => getConfiguredAuditRetentionDays()).toThrow(
+        'Audit retention days must be a positive number.',
+      )
+    }
+  } finally {
+    if (originalMukurojiRetentionDays === undefined) {
+      delete process.env.MUKUROJI_AUDIT_RETENTION_DAYS
+    } else {
+      process.env.MUKUROJI_AUDIT_RETENTION_DAYS = originalMukurojiRetentionDays
+    }
+    if (originalRetentionDays === undefined) {
+      delete process.env.AUDIT_RETENTION_DAYS
+    } else {
+      process.env.AUDIT_RETENTION_DAYS = originalRetentionDays
+    }
+  }
+})
+
+test('allows an omitted expiry only for an unknown-time backfill event', () => {
+  const apiContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'actor-1', kind: 'user' },
+    idempotencyKey: 'api-request',
+    occurredAt: '2026-07-11T12:00:00.000Z',
+    request: { method: 'PATCH', path: '/api/work-items/item-1' },
+    source: { kind: 'api' },
+  })
+
+  expect(() => createAuditEvent({
+    context: apiContext,
+    eventType: 'work-item.updated',
+    entity: { type: 'work-item', id: 'item-1' },
+  })).toThrow('Audit expiresAt may be omitted only for a backfill event')
+
+  const backfillContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'system:backfill', kind: 'system' },
+    idempotencyKey: 'backfill-request',
+    occurredAt: AUDIT_UNKNOWN_OCCURRED_AT,
+    request: { method: 'BACKFILL', path: '/audit/backfill/team-issues' },
+    source: { kind: 'backfill' },
+  })
+  const knownTimeBackfillContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'system:backfill', kind: 'system' },
+    idempotencyKey: 'known-time-backfill-request',
+    occurredAt: '2026-07-11T12:00:00.000Z',
+    request: { method: 'BACKFILL', path: '/audit/backfill/team-issues' },
+    source: { kind: 'backfill' },
+  })
+
+  expect(() => createAuditEvent({
+    context: knownTimeBackfillContext,
+    eventType: 'work-item.backfilled',
+    entity: { type: 'work-item', id: 'item-1' },
+    outboxStatus: 'suppressed',
+  })).toThrow('Audit expiresAt may be omitted only for a backfill event')
+  expect(() => createAuditEvent({
+    context: backfillContext,
+    eventType: 'work-item.backfilled',
+    entity: { type: 'work-item', id: 'item-1' },
+  })).toThrow('Audit expiresAt may be omitted only for a backfill event')
+
+  const event = createAuditEvent({
+    context: backfillContext,
+    eventType: 'work-item.backfilled',
+    entity: { type: 'work-item', id: 'item-1' },
+    outboxStatus: 'suppressed',
+  })
+
+  expect(event.occurredAt).toBe(AUDIT_UNKNOWN_OCCURRED_AT)
+  expect(event.expiresAt).toBeUndefined()
+})
+
+test('preserves a session-bound break-glass actor kind in immutable events', () => {
+  const context = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'recovery-admin', kind: 'break-glass' },
+    idempotencyKey: 'break-glass-policy-repair',
+    occurredAt: '2026-07-18T12:00:00.000Z',
+    request: { method: 'PUT', path: '/api/enterprise/security/policy' },
+    source: { kind: 'api' },
+  })
+  const event = createAuditEvent({
+    context,
+    eventType: 'security-policy.updated',
+    entity: { type: 'enterprise-security', id: 'policy' },
+    expiresAt: auditExpiresAt,
+  })
+
+  expect(upcastAuditEvent(event).actor).toEqual({
+    id: 'recovery-admin',
+    kind: 'break-glass',
+  })
+})
+
+test('creates stable keyed Workspace access IDs without exposing private identifiers', () => {
+  const key = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+  const workspaceId = 'user#owner@example.com'
+  const memberId = createWorkspaceMemberAuditEntityId(
+    workspaceId,
+    'member@example.com',
+    key,
+  )
+  const invitationId = createWorkspaceInvitationAuditEntityId(
+    workspaceId,
+    'member@example.com',
+    key,
+  )
+
+  expect(memberId).toMatch(
+    /^workspace\/wsp_v2_[a-f0-9]{48}\/member\/mbr_v2_[a-f0-9]{48}$/,
+  )
+  expect(memberId).toBe(
+    'workspace/wsp_v2_5602da2d003d94202fcaefcf30a1c671fd2a126556defb3b/' +
+    'member/mbr_v2_fbbd6cdf95b29a44b1030a5e5c5203a308d3fbb1985f7934',
+  )
+  expect(memberId).toBe(createWorkspaceMemberAuditEntityId(
+    workspaceId,
+    'member@example.com',
+    key,
+  ))
+  expect(invitationId).toMatch(
+    /^workspace\/wsp_v2_[a-f0-9]{48}\/invitation\/inv_v2_[a-f0-9]{48}$/,
+  )
+  expect(invitationId).toBe(
+    'workspace/wsp_v2_5602da2d003d94202fcaefcf30a1c671fd2a126556defb3b/' +
+    'invitation/inv_v2_987594a766d90a3eb75f812762f09f63e844ae31adba9c61',
+  )
+  expect(invitationId).not.toBe(memberId)
+  expect(memberId).not.toContain(workspaceId)
+  expect(memberId).not.toContain('member@example.com')
+  expect(createWorkspaceMemberAuditEntityId(
+    'workspace-2',
+    'member@example.com',
+    key,
+  )).not.toBe(memberId)
+  expect(() => readWorkspaceAuditPseudonymKey({})).toThrow('is required')
+  expect(() => readWorkspaceAuditPseudonymKey({
+    MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: 'too-short',
+  })).toThrow('exactly 64 lowercase hexadecimal characters')
+  expect(() => readWorkspaceAuditPseudonymKey({
+    MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY:
+      '0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF',
+  })).toThrow('exactly 64 lowercase hexadecimal characters')
+  expect(() => readWorkspaceAuditPseudonymKey({
+    MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: `g${'0'.repeat(63)}`,
+  })).toThrow('exactly 64 lowercase hexadecimal characters')
+  expect(() => readWorkspaceAuditPseudonymKey({
+    MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: '0'.repeat(65),
+  })).toThrow('exactly 64 lowercase hexadecimal characters')
+  expect(() => readWorkspaceAuditPseudonymKey({
+    MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: `${key} `,
+  })).toThrow('exactly 64 lowercase hexadecimal characters')
+  expect(readWorkspaceAuditPseudonymKey({
+    MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: key,
+  })).toBe(key)
+})
+
+test('uses the local audit table default for shared AWS endpoint variables', () => {
+  expect(getConfiguredDynamoDbEndpoint({
+    AWS_ENDPOINT_URL_DYNAMODB: ' http://127.0.0.1:4566 ',
+  })).toBe('http://127.0.0.1:4566')
+  expect(getConfiguredAuditTableName({
+    AWS_ENDPOINT_URL: 'http://localhost:4566',
+  })).toBe('mukuroji-audit-events')
+  expect(getConfiguredAuditTableName({
+    AWS_ENDPOINT_URL_DYNAMODB: 'http://127.0.0.1:4566',
+  })).toBe('mukuroji-audit-events')
+  expect(getConfiguredAuditTableName({
+    DYNAMODB_ENDPOINT: ' ',
+    AWS_ENDPOINT_URL: 'http://floci:4566',
+  })).toBe('mukuroji-audit-events')
+  expect(getConfiguredAuditTableName({
+    AWS_ENDPOINT_URL: 'https://dynamodb.ap-northeast-1.amazonaws.com',
+  })).toBeUndefined()
+})
+
+test('creates deterministic audit IDs and CDK-compatible DynamoDB keys', () => {
+  const context = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: {
+      id: 'actor-1',
+      kind: 'user',
+      displayName: 'Demo User',
+    },
+    idempotencyKey: 'request-1',
+    correlationId: 'correlation-1',
+    occurredAt: '2026-07-11T12:00:00.000Z',
+    request: {
+      method: 'PATCH',
+      path: '/api/work-items/item-1',
+      body: { status: 'done' },
+    },
+    source: {
+      kind: 'api',
+      requestId: 'request-id-1',
+    },
+  })
+  const first = createAuditEvent({
+    context,
+    expiresAt: auditExpiresAt,
+    eventType: 'work-item.updated',
+    entity: { type: 'work-item', id: 'item-1' },
+    action: 'updated',
+    before: { status: 'todo' },
+    after: { status: 'done' },
+  })
+  const second = createAuditEvent({
+    context,
+    expiresAt: auditExpiresAt,
+    eventType: 'work-item.updated',
+    entity: { type: 'work-item', id: 'item-1' },
+    action: 'updated',
+    before: { status: 'todo' },
+    after: { status: 'done' },
+  })
+  const retryAfterGeneratedIdChanged = createAuditEvent({
+    context,
+    expiresAt: auditExpiresAt,
+    eventType: 'work-item.created',
+    entity: { type: 'work-item', id: 'item-2' },
+    action: 'created',
+    after: { status: 'todo' },
+  })
+  const otherActorContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'actor-2', kind: 'user' },
+    idempotencyKey: 'request-1',
+    occurredAt: '2026-07-11T12:00:00.000Z',
+    request: { method: 'PATCH', path: '/api/work-items/item-1' },
+    source: { kind: 'api' },
+  })
+  const otherActorEvent = createAuditEvent({
+    context: otherActorContext,
+    expiresAt: auditExpiresAt,
+    eventType: 'work-item.updated',
+    entity: { type: 'work-item', id: 'item-1' },
+  })
+
+  expect(second.eventId).toBe(first.eventId)
+  expect(retryAfterGeneratedIdChanged.eventId).toBe(first.eventId)
+  expect(otherActorEvent.eventId).not.toBe(first.eventId)
+  expect(first).toMatchObject({
+    directoryId: 'workspace-1',
+    workspaceId: 'workspace-1',
+    workspaceKey: 'workspace-1',
+    actorKey: 'workspace-1#actor#actor-1',
+    entityKey: 'workspace-1#work-item#item-1',
+    targetKey: 'workspace-1#work-item#item-1',
+    workspaceEventKey: first.occurredAtEventId,
+    actorEventKey: first.occurredAtEventId,
+    entityEventKey: first.occurredAtEventId,
+    targetEventKey: first.occurredAtEventId,
+    source: 'api',
+    outboxStatus: 'pending',
+  })
+})
+
+test('creates field changes with default and explicit redaction', () => {
+  const changes = createAuditFieldChanges(
+    {
+      profile: {
+        email: 'before@example.com',
+        token: 'old-token',
+      },
+      status: 'todo',
+    },
+    {
+      profile: {
+        email: 'after@example.com',
+        token: 'new-token',
+      },
+      status: 'done',
+    },
+    ['profile', 'status'],
+    ['profile.email'],
+  )
+
+  expect(changes).toEqual([
+    {
+      field: 'profile.email',
+      before: '[REDACTED]',
+      after: '[REDACTED]',
+      redacted: true,
+    },
+    {
+      field: 'profile.token',
+      before: '[REDACTED]',
+      after: '[REDACTED]',
+      redacted: true,
+    },
+    {
+      field: 'status',
+      before: 'todo',
+      after: 'done',
+    },
+  ])
+})
+
+test('distinguishes missing fields from explicit null values', () => {
+  expect(createAuditFieldDiff(
+    {
+      removed: null,
+      unchanged: null,
+    },
+    {
+      added: null,
+      unchanged: null,
+    },
+  )).toEqual([
+    {
+      field: 'added',
+      after: null,
+    },
+    {
+      field: 'removed',
+      before: null,
+    },
+  ])
+})
+
+test('sanitizes direct changes and metadata before persistence', () => {
+  const context = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'actor-1', kind: 'user' },
+    idempotencyKey: 'request-sanitize',
+    occurredAt: '2026-07-11T12:00:00.000Z',
+    request: { method: 'PATCH', path: '/api/work-items/item-1' },
+    source: { kind: 'api' },
+  })
+  const longValue = 'x'.repeat(5_000)
+  const event = createAuditEvent({
+    context,
+    expiresAt: auditExpiresAt,
+    eventType: 'work-item.updated',
+    entity: { type: 'work-item', id: 'item-1' },
+    changes: [
+      { field: 'apiKey', after: 'plain-secret' },
+      { field: 'description', after: longValue },
+    ],
+    metadata: {
+      signedUrl: 'https://example.invalid/private',
+      note: longValue,
+    },
+  })
+
+  expect(event.changes[0]).toEqual({
+    field: 'apiKey',
+    after: '[REDACTED]',
+    redacted: true,
+  })
+  expect(String(event.changes[1]?.after)).toHaveLength(4_096)
+  expect(event.metadata?.signedUrl).toBe('[REDACTED]')
+  expect(String(event.metadata?.note)).toHaveLength(4_096)
+  const view = toAuditEventView({
+    ...event,
+    metadata: {
+      adapter: 'team-issue',
+      legacyKey: 'workspace-1#internal-partition',
+    },
+  })
+
+  expect(view.metadata).toEqual({ adapter: 'team-issue' })
+})
+
+test('creates a conditional audit transaction Put', () => {
+  const context = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'actor-1', kind: 'user' },
+    idempotencyKey: 'request-1',
+    occurredAt: '2026-07-11T12:00:00.000Z',
+    request: { method: 'POST', path: '/api/projects' },
+    source: { kind: 'api' },
+  })
+  const event = createAuditEvent({
+    context,
+    expiresAt: auditExpiresAt,
+    eventType: 'project.created',
+    entity: { type: 'project', id: 'project-1' },
+    after: { name: 'Project 1' },
+  })
+
+  expect(createAuditTransactPut('AuditTable', event)).toMatchObject({
+    Put: {
+      TableName: 'AuditTable',
+      Item: {
+        directoryId: 'workspace-1',
+        eventId: event.eventId,
+      },
+      ConditionExpression: 'attribute_not_exists(#directoryId) AND attribute_not_exists(#eventId)',
+      ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
+    },
+  })
+})
+
+test('creates a conditional consumer receipt for at-least-once delivery', () => {
+  expect(createAuditConsumerReceiptTransactPut('ProcessedEvents', {
+    consumerName: 'notifications',
+    eventId: 'evt_123',
+    processedAt: '2026-07-11T12:00:00.000Z',
+    expiresAt: 2_000_000_000,
+  })).toEqual({
+    Put: {
+      TableName: 'ProcessedEvents',
+      Item: {
+        consumerName: 'notifications',
+        eventId: 'evt_123',
+        processedAt: '2026-07-11T12:00:00.000Z',
+        expiresAt: 2_000_000_000,
+      },
+      ConditionExpression: 'attribute_not_exists(#consumerName) AND attribute_not_exists(#eventId)',
+      ExpressionAttributeNames: {
+        '#consumerName': 'consumerName',
+        '#eventId': 'eventId',
+      },
+      ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
+    },
+  })
+})
+
+test('queries the target timeline and binds cursor to the original filters', async () => {
+  const commands: Array<Record<string, unknown>> = []
+  const context = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'actor-1', kind: 'user' },
+    idempotencyKey: 'request-1',
+    occurredAt: '2026-07-11T12:00:00.000Z',
+    request: { method: 'POST', path: '/api/comments' },
+    source: { kind: 'api' },
+  })
+  const event = createAuditEvent({
+    context,
+    expiresAt: auditExpiresAt,
+    eventType: 'comment.created',
+    entity: { type: 'work-item', id: 'item-1' },
+    target: { type: 'comment', id: 'comment-1' },
+    after: { body: 'Hello' },
+  })
+  let page = 0
+  const documentClient = {
+    send: async (command: { input: Record<string, unknown> }) => {
+      commands.push(command.input)
+      page += 1
+
+      return page === 1
+        ? {
+            Items: [event],
+            LastEvaluatedKey: {
+              directoryId: event.directoryId,
+              eventId: event.eventId,
+              targetKey: event.targetKey,
+              targetEventKey: event.targetEventKey,
+            },
+          }
+        : { Items: [] }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbAuditEventsClient(documentClient, 'AuditTable')
+  const firstPage = await client.query({
+    workspaceId: 'workspace-1',
+    targetType: 'comment',
+    targetId: 'comment-1',
+    from: '2026-07-01T00:00:00.000Z',
+    to: '2026-07-31T23:59:59.999Z',
+    limit: 25,
+  })
+  const secondPage = await client.query({
+    workspaceId: 'workspace-1',
+    targetType: 'comment',
+    targetId: 'comment-1',
+    from: '2026-07-01T00:00:00.000Z',
+    to: '2026-07-31T23:59:59.999Z',
+    limit: 25,
+    cursor: firstPage.nextCursor,
+  })
+
+  expect(firstPage.events).toHaveLength(1)
+  expect(secondPage.events).toEqual([])
+  expect(commands[0]).toMatchObject({
+    TableName: 'AuditTable',
+    IndexName: AUDIT_TARGET_INDEX_NAME,
+    Limit: 25,
+    ScanIndexForward: false,
+    ExpressionAttributeValues: {
+      ':partitionValue': 'workspace-1#comment#comment-1',
+      ':workspaceId': 'workspace-1',
+    },
+  })
+  expect(commands[1]?.ExclusiveStartKey).toEqual({
+    directoryId: event.directoryId,
+    eventId: event.eventId,
+    targetKey: event.targetKey,
+    targetEventKey: event.targetEventKey,
+  })
+
+  const forgedCursorPayload = JSON.parse(
+    Buffer.from(firstPage.nextCursor ?? '', 'base64url').toString('utf8'),
+  ) as { lastEvaluatedKey: Record<string, unknown> }
+  forgedCursorPayload.lastEvaluatedKey.targetKey = 'workspace-1#comment#other-comment'
+  const forgedCursor = Buffer.from(JSON.stringify(forgedCursorPayload), 'utf8').toString('base64url')
+
+  await expect(client.query({
+    workspaceId: 'workspace-1',
+    targetType: 'comment',
+    targetId: 'comment-1',
+    from: '2026-07-01T00:00:00.000Z',
+    to: '2026-07-31T23:59:59.999Z',
+    limit: 25,
+    cursor: forgedCursor,
+  })).rejects.toThrow('Audit cursor does not match the query partition.')
+})
+
+test('gets a deterministic audit event with a strongly consistent read', async () => {
+  const commands: Array<Record<string, unknown>> = []
+  const context = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'actor-1', kind: 'user' },
+    idempotencyKey: 'bulk-item-1',
+    occurredAt: '2026-07-16T12:00:00.000Z',
+    request: { method: 'POST', path: '/internal/automation/bulk-item-mutation' },
+    source: { kind: 'api' },
+  })
+  const event = createAuditEvent({
+    context,
+    eventType: 'work-item.updated',
+    entity: { type: 'work-item', id: 'team/team-1/issue/item-1' },
+    action: 'updated',
+    expiresAt: auditExpiresAt,
+  })
+  const documentClient = {
+    send: async (command: { input: Record<string, unknown> }) => {
+      commands.push(command.input)
+      return { Item: event }
+    },
+  } as unknown as DynamoDBDocumentClient
+
+  const client = new DynamoDbAuditEventsClient(documentClient, 'AuditTable')
+  expect(await client.getEvent('workspace-1', event.eventId)).toEqual(event)
+  expect(commands).toEqual([{
+    TableName: 'AuditTable',
+    Key: {
+      directoryId: 'workspace-1',
+      eventId: event.eventId,
+    },
+    ConsistentRead: true,
+  }])
+})
+
+test('upcasts legacy issue activity without inventing an unavailable diff', () => {
+  const event = upcastAuditEvent({
+    directoryTeamIssueId: 'workspace-1#team#team-1#issue#issue-1',
+    eventId: '2026-07-11T12:00:00.000Z#updated#legacy',
+    directoryId: 'workspace-1',
+    teamId: 'team-1',
+    issueId: 'issue-1',
+    eventType: 'updated',
+    actorUserId: 'actor-1',
+    summary: 'Issue was updated.',
+    createdAt: '2026-07-11T12:00:00.000Z',
+  })
+
+  expect(event).toMatchObject({
+    schemaVersion: 1,
+    directoryId: 'workspace-1',
+    eventType: 'work-item.updated',
+    entityType: 'work-item',
+    entityId: 'team/team-1/issue/issue-1',
+    targetType: 'work-item',
+    targetId: 'team/team-1/issue/issue-1',
+    changes: [],
+    source: 'backfill',
+    outboxStatus: 'suppressed',
+    metadata: {
+      backfilled: true,
+      diffUnavailable: true,
+    },
+  })
+})
+
+test('exports schema-normalized events as newline-delimited JSON', async () => {
+  const output = await auditEventsToNdjson([
+    {
+      directoryTeamIssueId: 'workspace-1#team#team-1#issue#issue-1',
+      eventId: 'legacy-comment',
+      directoryId: 'workspace-1',
+      teamId: 'team-1',
+      issueId: 'issue-1',
+      eventType: 'commented',
+      actorUserId: 'actor-1',
+      body: 'Hello',
+      createdAt: '2026-07-11T12:00:00.000Z',
+    },
+  ])
+  const lines = output.trimEnd().split('\n')
+
+  expect(lines).toHaveLength(1)
+  expect(JSON.parse(lines[0] ?? '{}')).toMatchObject({
+    eventType: 'comment.created',
+    target: {
+      type: 'comment',
+      id: 'team/team-1/issue/issue-1/comment/legacy-comment',
+    },
+  })
+  expect(JSON.parse(lines[0] ?? '{}')).not.toHaveProperty('schemaVersion')
+  expect(JSON.parse(lines[0] ?? '{}')).not.toHaveProperty('targetType')
+  expect(JSON.parse(lines[0] ?? '{}')).not.toHaveProperty('requestFingerprint')
+  expect(JSON.parse(lines[0] ?? '{}')).not.toHaveProperty('idempotencyKeyHash')
+  expect(JSON.parse(lines[0] ?? '{}')).not.toHaveProperty('workspaceKey')
+  expect(JSON.parse(lines[0] ?? '{}')).not.toHaveProperty('sourceDetails')
+})
+
+test('bootstraps a local table with the CDK-compatible base key and GSIs', async () => {
+  const commands: Array<{ name: string; input: Record<string, unknown> }> = []
+  const dynamoDbClient = {
+    send: async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
+      commands.push({ name: command.constructor.name, input: command.input })
+
+      if (command.constructor.name === 'DescribeTableCommand') {
+        return {
+          Table: {
+            TableStatus: 'ACTIVE',
+            KeySchema: [
+              { AttributeName: 'directoryId', KeyType: 'HASH' },
+              { AttributeName: 'eventId', KeyType: 'RANGE' },
+            ],
+            GlobalSecondaryIndexes: [
+              {
+                IndexName: 'WorkspaceOccurredAtIndex',
+                KeySchema: [
+                  { AttributeName: 'workspaceKey', KeyType: 'HASH' },
+                  { AttributeName: 'workspaceEventKey', KeyType: 'RANGE' },
+                ],
+              },
+              {
+                IndexName: 'ActorOccurredAtIndex',
+                KeySchema: [
+                  { AttributeName: 'actorKey', KeyType: 'HASH' },
+                  { AttributeName: 'actorEventKey', KeyType: 'RANGE' },
+                ],
+              },
+              {
+                IndexName: 'EntityOccurredAtIndex',
+                KeySchema: [
+                  { AttributeName: 'entityKey', KeyType: 'HASH' },
+                  { AttributeName: 'entityEventKey', KeyType: 'RANGE' },
+                ],
+              },
+              {
+                IndexName: 'TargetOccurredAtIndex',
+                KeySchema: [
+                  { AttributeName: 'targetKey', KeyType: 'HASH' },
+                  { AttributeName: 'targetEventKey', KeyType: 'RANGE' },
+                ],
+              },
+            ],
+          },
+        }
+      }
+
+      return {}
+    },
+  } as unknown as DynamoDBClient
+
+  await ensureLocalAuditEventsTable('AuditTable', dynamoDbClient, { retryDelayMs: 0 })
+
+  expect(commands.map((command) => command.name)).toEqual([
+    'CreateTableCommand',
+    'DescribeTableCommand',
+  ])
+  expect(commands[0]?.input).toMatchObject({
+    TableName: 'AuditTable',
+    KeySchema: [
+      { AttributeName: 'directoryId', KeyType: 'HASH' },
+      { AttributeName: 'eventId', KeyType: 'RANGE' },
+    ],
+    BillingMode: 'PAY_PER_REQUEST',
+    StreamSpecification: {
+      StreamEnabled: true,
+      StreamViewType: 'NEW_IMAGE',
+    },
+  })
+})

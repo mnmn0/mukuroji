@@ -117,6 +117,10 @@ scope、および対象 Team の current RBAC を必要とする。
 管理 API では `PATCH /api/developer/external-links/{externalLinkId}` に
 `syncDirection` を送って同期方向を変更する。`none` は link を `paused`、それ以外は
 再同期待ちの `pending` にし、操作の再送時にも対象 Work Item の current RBAC を確認する。
+管理 API の削除は
+`DELETE /api/developer/external-links/{externalLinkId}?teamId={teamId}&workItemId={workItemId}`
+を使い、保存済み receipt の replay 時にも同じ Team / Work Item の current write RBAC を
+再評価する。
 
 External link の削除は link、provider identity claim、link 固有の sync state、Work Item ごとの active-link counter、監査 event、idempotency response を同じ transaction で確定する。Open conflict 中は通常の方向変更や削除を許可せず、先に resolve または ignore する。Work Item 自体を削除する場合も、すべての external link を先に解除する。削除 transaction は active-link counter を 0 条件で tombstone に置換し、並行する link 作成を同じ DynamoDB fence で直列化する。
 

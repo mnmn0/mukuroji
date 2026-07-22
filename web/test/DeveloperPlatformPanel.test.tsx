@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { DeveloperPlatformPanel } from '../src/developer-platform/DeveloperPlatformPanel'
+import { DeveloperPlatformPanel } from '../src/developer-platform/ui/DeveloperPlatformPanel'
 import {
   connectorConflictDeveloperPlatformResourcesFixture,
   developerPlatformLabelsFixture,

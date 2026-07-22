@@ -1,8 +1,11 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
-import App from './App.tsx'
-import { applyFontSizePreference, getInitialFontSizePreference } from './preferences/fontSize'
+import App from './app/App'
+import {
+  applyFontSizePreference,
+  getInitialFontSizePreference,
+} from './shared/lib/preferences/fontSize'
 
 applyFontSizePreference(getInitialFontSizePreference())
 

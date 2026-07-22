@@ -1,0 +1,28 @@
+/** Files module public application and domain surface. */
+export { isMissingFileObjectVersionError } from './file-object-errors'
+export {
+  FileProofingError,
+  S3FileObjectClient,
+  createApprovalSummary,
+  createFileProofingScopeKey,
+  mapGuardDutyScanStatus,
+  type CancelFileApprovalInput,
+  type CreateFileAnnotationInput,
+  type CreateFileApprovalDecisionInput,
+  type CreateFileApprovalInput,
+  type CreateFileUploadInput,
+  type CreateWorkItemApprovalInput,
+  type FileApprovalCompletionTransition,
+  type FileApprovalCompletionTransitionResolver,
+  type FileObjectClient,
+  type FileProofingActor,
+  type FileProofingClient,
+  type FileProofingCollection,
+  type FileProofingScope,
+  type FileUploadSession,
+  type FileVersionAccess,
+  type ListReviewerApprovalsOptions,
+  type PresignedPutUpload,
+  type ReviewerApprovalPage,
+  type VerifiedFileObject,
+} from './file-proofing'

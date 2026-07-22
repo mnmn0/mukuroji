@@ -3,6 +3,13 @@ import { Match, Template } from 'aws-cdk-lib/assertions';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { expect, test } from '@jest/globals';
 import { acknowledgeKnownNagFindings } from '../lib/acknowledge-nag-findings';
+import {
+  createCanonicalWorkItemTransactItems,
+  createProjectDirectoryTransactItems,
+  createWorkspaceAccessTransactItems,
+  createWorkspaceBootstrapTransactItems,
+  createWorkspaceDemoMemberTransactItems,
+} from '../lib/bootstrap-data';
 import { CdkStack } from '../lib/cdk-stack';
 
 /**
@@ -70,9 +77,45 @@ function serializeAwsSdkCall(value: unknown): string {
     .join('');
 }
 
+/**
+ * 指定した SQS queue が非 TLS request を resource policy で拒否することを検証します。
+ */
+function expectQueueRequiresSsl(template: Template, logicalIdPrefix: string) {
+  const queueEntry = Object.entries(template.findResources('AWS::SQS::Queue'))
+    .find(([logicalId]) => logicalId.startsWith(logicalIdPrefix));
+  expect(queueEntry).toBeDefined();
+  if (!queueEntry) {
+    throw new Error(`${logicalIdPrefix} was not synthesized.`);
+  }
+  const [queueId] = queueEntry;
+  const queuePolicy = Object.values(template.findResources('AWS::SQS::QueuePolicy'))
+    .find((resource) => JSON.stringify(resource.Properties?.Queues).includes(queueId));
+
+  expect(queuePolicy).toEqual(expect.objectContaining({
+    Properties: expect.objectContaining({
+      PolicyDocument: expect.objectContaining({
+        Statement: expect.arrayContaining([
+          expect.objectContaining({
+            Action: 'sqs:*',
+            Condition: {
+              Bool: {
+                'aws:SecureTransport': 'false',
+              },
+            },
+            Effect: 'Deny',
+            Principal: { AWS: '*' },
+            Resource: { 'Fn::GetAtt': [queueId, 'Arn'] },
+          }),
+        ]),
+      }),
+      Queues: expect.arrayContaining([{ Ref: queueId }]),
+    }),
+  }));
+}
+
 const synthesizedTemplate = createTemplate();
 
-test('fresh deployment requires explicit Cognito workspace and request secrets parameters', () => {
+test('fresh deployment requires explicit Cognito workspace and runtime secrets parameters', () => {
   const template = synthesizedTemplate;
   const parameters = template.toJSON().Parameters;
 
@@ -81,6 +124,10 @@ test('fresh deployment requires explicit Cognito workspace and request secrets p
     AllowedPattern: '^[a-z]{2}(?:-[a-z0-9]+)+_[A-Za-z0-9]+$',
   }));
   expect(parameters.CognitoUserPoolClientId).toEqual(expect.objectContaining({
+    Type: 'String',
+    AllowedPattern: '^[A-Za-z0-9]+$',
+  }));
+  expect(parameters.CognitoSsoUserPoolClientId).toEqual(expect.objectContaining({
     Type: 'String',
     AllowedPattern: '^[A-Za-z0-9]+$',
   }));
@@ -139,6 +186,8 @@ test('fresh deployment requires explicit Cognito workspace and request secrets p
     MaxValue: 10000,
   }));
   for (const secretParameterName of [
+    'EnterpriseIdentityTokenHashSecret',
+    'EnterpriseSsoStateSecret',
     'RequestEmailWebhookSecret',
     'RequestTokenHashSecret',
   ]) {
@@ -153,6 +202,9 @@ test('fresh deployment requires explicit Cognito workspace and request secrets p
   for (const parameterName of [
     'CognitoUserPoolId',
     'CognitoUserPoolClientId',
+    'CognitoSsoUserPoolClientId',
+    'EnterpriseIdentityTokenHashSecret',
+    'EnterpriseSsoStateSecret',
     'WorkspaceDirectoryId',
     'WorkspaceAuditPseudonymKey',
     'InitialOwnerEmail',
@@ -162,6 +214,34 @@ test('fresh deployment requires explicit Cognito workspace and request secrets p
   ]) {
     expect(parameters[parameterName].Default).toBeUndefined();
   }
+  expect(template.toJSON().Rules.EnterpriseSecretSeparation).toEqual({
+    Assertions: [{
+      Assert: {
+        'Fn::Not': [{
+          'Fn::Equals': [
+            { Ref: 'EnterpriseSsoStateSecret' },
+            { Ref: 'EnterpriseIdentityTokenHashSecret' },
+          ],
+        }],
+      },
+      AssertDescription:
+        'EnterpriseSsoStateSecret must differ from EnterpriseIdentityTokenHashSecret.',
+    }],
+  });
+  expect(template.toJSON().Rules.CognitoClientSeparation).toEqual({
+    Assertions: [{
+      Assert: {
+        'Fn::Not': [{
+          'Fn::Equals': [
+            { Ref: 'CognitoSsoUserPoolClientId' },
+            { Ref: 'CognitoUserPoolClientId' },
+          ],
+        }],
+      },
+      AssertDescription:
+        'CognitoSsoUserPoolClientId must differ from CognitoUserPoolClientId.',
+    }],
+  });
 
   template.resourceCountIs('AWS::Cognito::UserPool', 0);
   template.resourceCountIs('AWS::Cognito::UserPoolClient', 0);
@@ -193,7 +273,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
 
   const tables = template.findResources('AWS::DynamoDB::Table');
 
-  expect(Object.keys(tables)).toHaveLength(19);
+  expect(Object.keys(tables)).toHaveLength(20);
 
   for (const table of Object.values(tables)) {
     expect(table).toEqual(expect.objectContaining({
@@ -285,6 +365,311 @@ test('automation state is retained with due-schedule and execution history index
   template.hasOutput('AutomationTableName', {});
 });
 
+test('enterprise identity state is retained, protected, and free of unused indexes', () => {
+  const template = synthesizedTemplate;
+  const tableLogicalId = template.toJSON().Outputs.EnterpriseIdentityTableName?.Value?.Ref;
+  const table = template.toJSON().Resources[tableLogicalId];
+
+  expect(typeof tableLogicalId).toBe('string');
+  expect(table).toEqual(expect.objectContaining({
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+    Properties: expect.objectContaining({
+      AttributeDefinitions: [
+        { AttributeName: 'scopeKey', AttributeType: 'S' },
+        { AttributeName: 'recordKey', AttributeType: 'S' },
+      ],
+      BillingMode: 'PAY_PER_REQUEST',
+      DeletionProtectionEnabled: true,
+      KeySchema: [
+        { AttributeName: 'scopeKey', KeyType: 'HASH' },
+        { AttributeName: 'recordKey', KeyType: 'RANGE' },
+      ],
+      PointInTimeRecoverySpecification: {
+        PointInTimeRecoveryEnabled: true,
+      },
+      StreamSpecification: {
+        StreamViewType: 'NEW_IMAGE',
+      },
+      TimeToLiveSpecification: {
+        AttributeName: 'expiresAt',
+        Enabled: true,
+      },
+    }),
+  }));
+  expect(JSON.stringify(template.toJSON().Outputs))
+    .not.toContain('EnterpriseIdentityTokenHashSecret');
+});
+
+test('enterprise identity CONTROL stream runs bounded asynchronous maintenance', () => {
+  const template = synthesizedTemplate;
+  const resources = template.toJSON().Resources;
+  const tableLogicalId = template.toJSON().Outputs.EnterpriseIdentityTableName?.Value?.Ref;
+  const functionEntry = Object.entries(resources).find(([, resource]) =>
+    (resource as { Properties?: { Description?: string } }).Properties?.Description ===
+      'Compacts enterprise identity generations and applies grace-period TTL retirement.'
+  );
+
+  expect(functionEntry).toBeDefined();
+  const [functionLogicalId, maintenanceFunction] = functionEntry!;
+  expect(maintenanceFunction).toEqual(expect.objectContaining({
+    Properties: expect.objectContaining({
+      Environment: {
+        Variables: {
+          ENTERPRISE_IDENTITY_TABLE_NAME: { Ref: tableLogicalId },
+        },
+      },
+      MemorySize: 1024,
+      Timeout: 900,
+    }),
+  }));
+  expect(JSON.stringify(maintenanceFunction))
+    .not.toContain('ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET');
+
+  const eventSource = Object.values(resources).find((resource) =>
+    (resource as { Type?: string }).Type === 'AWS::Lambda::EventSourceMapping' &&
+    JSON.stringify(resource).includes(functionLogicalId)
+  ) as { Properties?: Record<string, unknown> } | undefined;
+  expect(eventSource?.Properties).toEqual(expect.objectContaining({
+    BatchSize: 1,
+    BisectBatchOnFunctionError: true,
+    FunctionResponseTypes: ['ReportBatchItemFailures'],
+    MaximumRetryAttempts: 10,
+    StartingPosition: 'TRIM_HORIZON',
+  }));
+  expect(JSON.stringify(eventSource?.Properties?.FilterCriteria))
+    .toContain('enterprise-identity-control');
+  expect(JSON.stringify(eventSource?.Properties?.FilterCriteria))
+    .toContain('maintenanceRequired');
+  expect(JSON.stringify(eventSource?.Properties?.EventSourceArn))
+    .toContain(String(tableLogicalId));
+  expect(JSON.stringify(eventSource?.Properties?.DestinationConfig))
+    .toContain('EnterpriseIdentityMaintenanceDlq');
+
+  const functionRoleLogicalId = (
+    (maintenanceFunction as {
+      Properties?: { Role?: { 'Fn::GetAtt'?: string[] } }
+    }).Properties?.Role?.['Fn::GetAtt'] ?? []
+  )[0];
+  const rolePolicies = Object.values(resources).filter((resource) =>
+    (resource as { Type?: string }).Type === 'AWS::IAM::Policy' &&
+    JSON.stringify(resource).includes(String(functionRoleLogicalId))
+  );
+  const serializedPolicies = JSON.stringify(rolePolicies);
+  expect(serializedPolicies).toContain('dynamodb:BatchWriteItem');
+  expect(serializedPolicies).toContain('dynamodb:GetItem');
+  expect(serializedPolicies).toContain('dynamodb:PutItem');
+  expect(serializedPolicies).toContain('dynamodb:Query');
+  expect(serializedPolicies).toContain('dynamodb:UpdateItem');
+  expect(serializedPolicies).not.toContain('dynamodb:DeleteItem');
+  expect(serializedPolicies).not.toContain('dynamodb:Scan');
+  expect(serializedPolicies).not.toContain('secretsmanager:');
+  expect(serializedPolicies).not.toContain('dynamodb:TransactWriteItems');
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription:
+      'Detects enterprise identity compaction or generation retirement failures.',
+  });
+  expectQueueRequiresSsl(template, 'EnterpriseIdentityMaintenanceDlq');
+  template.hasOutput('EnterpriseIdentityMaintenanceDlqUrl', {});
+});
+
+test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
+  const template = synthesizedTemplate;
+  const resources = template.toJSON().Resources;
+  const tableLogicalId = template.toJSON().Outputs.EnterpriseIdentityTableName?.Value?.Ref;
+  const functionEntry = Object.entries(resources).find(([, resource]) =>
+    (resource as { Properties?: { Description?: string } }).Properties?.Description ===
+      'Dedicated bounded worker for asynchronous enterprise SCIM group reconciliation.'
+  );
+
+  expect(functionEntry).toBeDefined();
+  const [functionLogicalId, workerFunction] = functionEntry!;
+  expect(workerFunction).toEqual(expect.objectContaining({
+    Properties: expect.objectContaining({
+      Handler: 'index.handler',
+      MemorySize: 512,
+      ReservedConcurrentExecutions: 5,
+      Runtime: 'nodejs22.x',
+      Timeout: 60,
+      Environment: {
+        Variables: expect.objectContaining({
+          AUDIT_EVENTS_TABLE_NAME: {
+            Ref: 'AuditEventsTable0723963E',
+          },
+          COGNITO_USER_POOL_ID: {
+            Ref: 'CognitoUserPoolId',
+          },
+          ENTERPRISE_IDENTITY_TABLE_NAME: {
+            Ref: String(tableLogicalId),
+          },
+          PLANNING_TABLE_NAME: {
+            Ref: 'PlanningTable2A0D4CC5',
+          },
+          PROJECT_DIRECTORY_TABLE_NAME: {
+            Ref: 'ProjectDirectoryTable9ED01C01',
+          },
+          WORKSPACE_ACCESS_TABLE_NAME: {
+            Ref: 'WorkspaceAccessTableD7C8D2C7',
+          },
+        }),
+      },
+    }),
+  }));
+  const eventSource = Object.values(resources).find((resource) =>
+    (resource as { Type?: string }).Type === 'AWS::Lambda::EventSourceMapping' &&
+    JSON.stringify(resource).includes(functionLogicalId) &&
+    JSON.stringify(resource).includes('enterprise-scim-group-job')
+  ) as { Properties?: Record<string, unknown> } | undefined;
+
+  expect(eventSource?.Properties).toEqual(expect.objectContaining({
+    BatchSize: 1,
+    BisectBatchOnFunctionError: true,
+    FunctionResponseTypes: ['ReportBatchItemFailures'],
+    MaximumRetryAttempts: 10,
+    ParallelizationFactor: 1,
+    StartingPosition: 'TRIM_HORIZON',
+  }));
+  expect(JSON.stringify(eventSource?.Properties?.FilterCriteria))
+    .toContain('enterprise-scim-group-job');
+  expect(JSON.stringify(eventSource?.Properties?.FilterCriteria))
+    .toContain('SCIM_GROUP_JOB#');
+  expect(JSON.stringify(eventSource?.Properties?.FilterCriteria))
+    .toContain('INSERT');
+  expect(JSON.stringify(eventSource?.Properties?.FilterCriteria))
+    .toContain('MODIFY');
+  expect(JSON.stringify(eventSource?.Properties?.EventSourceArn))
+    .toContain(String(tableLogicalId));
+  expect(JSON.stringify(eventSource?.Properties?.DestinationConfig))
+    .toContain('EnterpriseScimGroupJobDlq');
+
+  const functionRoleLogicalId = (
+    (workerFunction as {
+      Properties?: { Role?: { 'Fn::GetAtt'?: string[] } }
+    }).Properties?.Role?.['Fn::GetAtt'] ?? []
+  )[0];
+  const rolePolicies = Object.values(resources).filter((resource) =>
+    ['AWS::IAM::ManagedPolicy', 'AWS::IAM::Policy'].includes(
+      (resource as { Type?: string }).Type ?? '',
+    ) &&
+    JSON.stringify(resource).includes(String(functionRoleLogicalId))
+  );
+  const roleStatements = rolePolicies.flatMap((resource) =>
+    (resource as {
+      Properties?: {
+        PolicyDocument?: { Statement?: Array<Record<string, unknown>> }
+      }
+    }).Properties?.PolicyDocument?.Statement ?? []
+  );
+  const actionsForTable = (logicalId: string) => [
+    ...new Set(roleStatements
+      .filter((statement) =>
+        JSON.stringify(statement.Resource).includes(JSON.stringify({
+          'Fn::GetAtt': [logicalId, 'Arn'],
+        }))
+      )
+      .flatMap((statement) => {
+        const actions = Array.isArray(statement.Action)
+          ? statement.Action
+          : [statement.Action];
+        return actions.filter((action): action is string =>
+          typeof action === 'string'
+        );
+      })),
+  ].sort();
+  const serializedPolicies = JSON.stringify(rolePolicies);
+  expect(serializedPolicies).toContain('dynamodb:DescribeStream');
+  expect(serializedPolicies).toContain('dynamodb:GetRecords');
+  expect(serializedPolicies).toContain('dynamodb:GetShardIterator');
+  expect(serializedPolicies).toContain('dynamodb:ListStreams');
+  expect(serializedPolicies).toContain('sqs:SendMessage');
+  expect(serializedPolicies).toContain('dynamodb:BatchWriteItem');
+  expect(serializedPolicies).toContain('dynamodb:GetItem');
+  expect(serializedPolicies).toContain('dynamodb:Query');
+  expect(actionsForTable(String(tableLogicalId))).toEqual([
+    'dynamodb:BatchWriteItem',
+    'dynamodb:DeleteItem',
+    'dynamodb:GetItem',
+    'dynamodb:PutItem',
+    'dynamodb:Query',
+  ]);
+  expect(actionsForTable('WorkspaceAccessTableD7C8D2C7')).toEqual([
+    'dynamodb:GetItem',
+    'dynamodb:PutItem',
+    'dynamodb:Query',
+    'dynamodb:UpdateItem',
+  ]);
+  for (const logicalId of [
+    'PlanningTable2A0D4CC5',
+    'DocumentsTable7E808EE5',
+  ]) {
+    expect(actionsForTable(logicalId)).toEqual([
+      'dynamodb:GetItem',
+      'dynamodb:PutItem',
+      'dynamodb:Query',
+    ]);
+  }
+  expect(actionsForTable('AuditEventsTable0723963E')).toEqual([
+    'dynamodb:PutItem',
+  ]);
+  expect(serializedPolicies).not.toContain('dynamodb:ConditionCheckItem');
+  expect(serializedPolicies).not.toContain('dynamodb:TransactWriteItems');
+  expect(serializedPolicies).toContain('cognito-idp:AdminDisableUser');
+  expect(serializedPolicies).toContain('cognito-idp:AdminEnableUser');
+  expect(serializedPolicies).toContain('cognito-idp:AdminUserGlobalSignOut');
+  expect(serializedPolicies).toContain('EnterpriseIdentityTable');
+  expect(serializedPolicies).toContain('WorkspaceAccessTable');
+  expect(serializedPolicies).toContain('PlanningTable');
+  expect(serializedPolicies).toContain('AuditEventsTable');
+  expect(serializedPolicies).toContain('ProjectDirectoryTable');
+  expect(serializedPolicies).toContain('EnterpriseScimGroupJobDlq');
+  expect(serializedPolicies).not.toContain('TeamIssuesTable');
+  expect(serializedPolicies).not.toContain('dynamodb:Scan');
+  expect(serializedPolicies).not.toContain('secretsmanager:');
+
+  const apiFunction = resources.ListProjectTasksFunction2134AF4A;
+  expect(apiFunction.Properties.Timeout).toBe(15);
+  const apiFunctionRoleLogicalId = (
+    (apiFunction as {
+      Properties?: { Role?: { 'Fn::GetAtt'?: string[] } }
+    }).Properties?.Role?.['Fn::GetAtt'] ?? []
+  )[0];
+  const apiRolePolicies = Object.values(resources).filter((resource) =>
+    ['AWS::IAM::ManagedPolicy', 'AWS::IAM::Policy'].includes(
+      (resource as { Type?: string }).Type ?? '',
+    ) &&
+    JSON.stringify(resource).includes(String(apiFunctionRoleLogicalId))
+  );
+  const serializedApiPolicies = JSON.stringify(apiRolePolicies);
+  expect(serializedApiPolicies).not.toContain('dynamodb:DescribeStream');
+  expect(serializedApiPolicies).not.toContain('dynamodb:ListStreams');
+  expect(serializedApiPolicies).not.toContain('EnterpriseScimGroupJobDlq');
+  const apiEnterpriseStreamStatement = apiRolePolicies
+    .flatMap((resource) =>
+      (resource as {
+        Properties?: {
+          PolicyDocument?: { Statement?: Record<string, unknown>[] }
+        }
+      }).Properties?.PolicyDocument?.Statement ?? []
+    )
+    .find((statement) =>
+      JSON.stringify(statement.Action).includes('dynamodb:GetRecords') &&
+      JSON.stringify(statement.Resource).includes('EnterpriseIdentityTable')
+    );
+  expect(apiEnterpriseStreamStatement).toBeUndefined();
+  expect(Object.values(resources).some((resource) =>
+    (resource as { Type?: string }).Type === 'AWS::Lambda::EventSourceMapping' &&
+    JSON.stringify(resource).includes('ListProjectTasksFunction2134AF4A') &&
+    JSON.stringify(resource).includes('enterprise-scim-group-job')
+  )).toBe(false);
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription:
+      'Detects failed asynchronous enterprise SCIM group reconciliation jobs.',
+  });
+  expectQueueRequiresSsl(template, 'EnterpriseScimGroupJobDlq');
+  template.hasOutput('EnterpriseScimGroupJobFunctionName', {});
+  template.hasOutput('EnterpriseScimGroupJobDlqUrl', {});
+});
+
 test('analytics state is retained with a due-delivery index and scoped API access', () => {
   const template = synthesizedTemplate;
   const analyticsTableLogicalId = template.toJSON().Outputs.AnalyticsTableName?.Value?.Ref;
@@ -340,13 +725,23 @@ test('analytics state is retained with a due-delivery index and scoped API acces
     )?.[1];
   expect(JSON.stringify(apiAnalyticsPolicy)).toContain(analyticsTableLogicalId);
 
-  const apiTransactWritePolicy = Object.entries(template.toJSON().Resources)
+  const apiTransactionConditionCheckPolicy = Object.entries(template.toJSON().Resources)
     .find(([logicalId, resource]) =>
       logicalId.startsWith('ApiTransactWritePolicy') &&
       (resource as { Type?: string }).Type === 'AWS::IAM::Policy'
     )?.[1];
-  expect(JSON.stringify(apiTransactWritePolicy)).toContain('dynamodb:TransactWriteItems');
-  expect(JSON.stringify(apiTransactWritePolicy)).toContain(analyticsTableLogicalId);
+  const serializedApiTransactionConditionCheckPolicy = JSON.stringify(
+    apiTransactionConditionCheckPolicy,
+  );
+  expect(serializedApiTransactionConditionCheckPolicy).toContain(
+    'dynamodb:ConditionCheckItem',
+  );
+  expect(serializedApiTransactionConditionCheckPolicy).toContain(
+    'dynamodb:EnclosingOperation',
+  );
+  expect(serializedApiTransactionConditionCheckPolicy)
+    .not.toContain('dynamodb:TransactWriteItems');
+  expect(serializedApiTransactionConditionCheckPolicy).not.toContain(analyticsTableLogicalId);
 });
 
 test('analytics scheduled delivery reauthorizes source data without consuming the audit stream', () => {
@@ -430,7 +825,7 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
   expect(serializedSchedulePolicies).toContain(workspaceAccessTableLogicalId);
   expect(serializedSchedulePolicies).toContain('CognitoUserPoolId');
   expect(serializedSchedulePolicies).toContain('cognito-idp:AdminListGroupsForUser');
-  expect(serializedSchedulePolicies).toContain('dynamodb:TransactWriteItems');
+  expect(serializedSchedulePolicies).not.toContain('dynamodb:TransactWriteItems');
 
   const scheduleStatements = schedulePolicies.flatMap((policy) => {
     const statements =
@@ -456,7 +851,6 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
     'dynamodb:GetItem',
     'dynamodb:PutItem',
     'dynamodb:Query',
-    'dynamodb:TransactWriteItems',
   ]));
   expect(new Set(actionsForResource(auditTableLogicalId))).toEqual(
     new Set(['dynamodb:Query']),
@@ -540,6 +934,7 @@ test('shared server handler is bundled as a Lambda asset with production environ
     Description: 'Bundled shared Hono handler for the mukuroji Function URL and HTTP API.',
     Handler: 'index.handler',
     Runtime: 'nodejs22.x',
+    Timeout: 15,
     Environment: {
       Variables: Match.objectLike({
         AUTOMATION_INBOUND_WEBHOOK_BASE_URL: Match.anyValue(),
@@ -551,8 +946,15 @@ test('shared server handler is bundled as a Lambda asset with production environ
         COGNITO_CLIENT_ID: {
           Ref: 'CognitoUserPoolClientId',
         },
+        COGNITO_SSO_CLIENT_ID: {
+          Ref: 'CognitoSsoUserPoolClientId',
+        },
         COGNITO_USER_POOL_ID: {
           Ref: 'CognitoUserPoolId',
+        },
+        ENTERPRISE_IDENTITY_TABLE_NAME: Match.anyValue(),
+        ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET: {
+          Ref: 'EnterpriseIdentityTokenHashSecret',
         },
         DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID: Match.anyValue(),
         DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: 'LookupKeyIndex',
@@ -656,6 +1058,11 @@ test('durable Work Item imports use retained versioned sources and an isolated r
     [key: string]: unknown;
   }>;
   const outputs = template.toJSON().Outputs;
+  const enterpriseIdentityTableId = outputs.EnterpriseIdentityTableName?.Value?.Ref;
+  const planningTableId = outputs.PlanningTableName?.Value?.Ref;
+  const workItemConfigurationTableId =
+    outputs.WorkItemConfigurationTableName?.Value?.Ref;
+  const workspaceAccessTableId = outputs.WorkspaceAccessTableName?.Value?.Ref;
   const importBucketEntry = Object.entries(resources).find(([, resource]) =>
     resource.Type === 'AWS::S3::Bucket' &&
     JSON.stringify(resource).includes('ExpireImportSources')
@@ -677,6 +1084,10 @@ test('durable Work Item imports use retained versioned sources and an isolated r
   expect(importQueueEntry).toBeDefined();
   expect(importDlqEntry).toBeDefined();
   expect(workerEntry).toBeDefined();
+  expect(typeof enterpriseIdentityTableId).toBe('string');
+  expect(typeof planningTableId).toBe('string');
+  expect(typeof workItemConfigurationTableId).toBe('string');
+  expect(typeof workspaceAccessTableId).toBe('string');
   if (!importBucketEntry || !importQueueEntry || !importDlqEntry || !workerEntry) {
     throw new Error('Durable Work Item import resources were not synthesized.');
   }
@@ -829,6 +1240,8 @@ test('durable Work Item imports use retained versioned sources and an isolated r
     Environment: {
       Variables: expect.objectContaining({
         DEVELOPER_PLATFORM_TABLE_NAME: { Ref: 'DeveloperPlatformTable772E085C' },
+        ENTERPRISE_IDENTITY_TABLE_NAME: { Ref: enterpriseIdentityTableId },
+        PLANNING_TABLE_NAME: { Ref: planningTableId },
         MUKUROJI_RUNTIME_ROLE: 'work-item-import-worker',
         WORK_ITEM_IMPORT_BUCKET_NAME: { Ref: importBucketId },
         WORK_ITEM_IMPORT_QUEUE_URL: { Ref: importQueueId },
@@ -851,6 +1264,62 @@ test('durable Work Item imports use retained versioned sources and an isolated r
   )?.[1];
   expect(workerPolicy).toBeDefined();
   const serializedWorkerPolicy = JSON.stringify(workerPolicy);
+  const workerStatements = (
+    workerPolicy as {
+      Properties?: {
+        PolicyDocument?: { Statement?: Array<Record<string, unknown>> };
+      };
+    }
+  )?.Properties?.PolicyDocument?.Statement ?? [];
+  const authorizationConditionStatement = workerStatements.find((statement) =>
+    statement.Action === 'dynamodb:ConditionCheckItem'
+  );
+  const authorizationReadStatement = workerStatements.find((statement) =>
+    Array.isArray(statement.Action) &&
+    statement.Action.includes('dynamodb:GetItem') &&
+    JSON.stringify(statement.Resource).includes(String(enterpriseIdentityTableId)) &&
+    JSON.stringify(statement.Resource).includes(String(planningTableId))
+  );
+  expect(authorizationConditionStatement).toEqual({
+    Action: 'dynamodb:ConditionCheckItem',
+    Condition: {
+      'ForAnyValue:StringEquals': {
+        'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+      },
+    },
+    Effect: 'Allow',
+    Resource: expect.arrayContaining([
+      { 'Fn::GetAtt': [workspaceAccessTableId, 'Arn'] },
+      { 'Fn::GetAtt': [planningTableId, 'Arn'] },
+      { 'Fn::GetAtt': [enterpriseIdentityTableId, 'Arn'] },
+      { 'Fn::GetAtt': [workItemConfigurationTableId, 'Arn'] },
+    ]),
+  });
+  expect(
+    (authorizationConditionStatement?.Resource as unknown[] | undefined),
+  ).toHaveLength(4);
+  expect(authorizationReadStatement).toEqual(expect.objectContaining({
+    Action: ['dynamodb:GetItem', 'dynamodb:Query'],
+    Effect: 'Allow',
+    Resource: expect.arrayContaining([
+      { 'Fn::GetAtt': [planningTableId, 'Arn'] },
+      { 'Fn::GetAtt': [enterpriseIdentityTableId, 'Arn'] },
+    ]),
+  }));
+  expect(
+    authorizationReadStatement?.Resource as unknown[] | undefined,
+  ).toHaveLength(2);
+  const sensitiveAuthorizationActions = workerStatements
+    .filter((statement) => {
+      const resources = JSON.stringify(statement.Resource);
+      return resources.includes(String(enterpriseIdentityTableId)) ||
+        resources.includes(String(planningTableId));
+    })
+    .flatMap((statement) =>
+      Array.isArray(statement.Action) ? statement.Action : [statement.Action]
+    );
+  expect(sensitiveAuthorizationActions).not.toContain('dynamodb:BatchGetItem');
+  expect(sensitiveAuthorizationActions).not.toContain('dynamodb:Scan');
   for (const requiredPermission of [
     'cognito-idp:AdminGetUser',
     'cognito-idp:AdminListGroupsForUser',
@@ -1787,6 +2256,7 @@ test('realtime WebSocket routes use the dedicated ticket-consuming Lambda', () =
         COGNITO_USER_POOL_ID: {
           Ref: 'CognitoUserPoolId',
         },
+        ENTERPRISE_IDENTITY_TABLE_NAME: Match.anyValue(),
         PROJECT_DIRECTORY_TABLE_NAME: {
           Ref: 'ProjectDirectoryTable9ED01C01',
         },
@@ -1825,13 +2295,6 @@ test('realtime WebSocket routes use the dedicated ticket-consuming Lambda', () =
     PolicyDocument: {
       Statement: Match.arrayWith([
         Match.objectLike({
-          Action: 'dynamodb:TransactWriteItems',
-          Effect: 'Allow',
-          Resource: {
-            'Fn::GetAtt': ['RealtimeSessionsTable607096EB', 'Arn'],
-          },
-        }),
-        Match.objectLike({
           Action: 'execute-api:ManageConnections',
           Effect: 'Allow',
           Resource: Match.anyValue(),
@@ -1845,12 +2308,48 @@ test('realtime WebSocket routes use the dedicated ticket-consuming Lambda', () =
   const realtimePolicy = template.toJSON().Resources
     .RealtimeHandlerFunctionServiceRoleDefaultPolicy58738CCE;
   const serializedRealtimePolicy = JSON.stringify(realtimePolicy);
+  const enterpriseIdentityTableLogicalId =
+    template.toJSON().Outputs.EnterpriseIdentityTableName.Value.Ref;
+  const enterpriseIdentityStatements =
+    realtimePolicy.Properties.PolicyDocument.Statement.filter((statement: {
+      Resource?: unknown
+    }) => JSON.stringify(statement.Resource).includes(enterpriseIdentityTableLogicalId));
+  const realtimeSessionStatements =
+    realtimePolicy.Properties.PolicyDocument.Statement.filter((statement: {
+      Resource?: unknown
+    }) => JSON.stringify(statement.Resource).includes('RealtimeSessionsTable607096EB'));
+  const realtimeSessionActions = realtimeSessionStatements.flatMap((statement: {
+    Action?: unknown
+  }) => Array.isArray(statement.Action) ? statement.Action : [statement.Action]);
 
+  expect(serializedRealtimePolicy).toContain(enterpriseIdentityTableLogicalId);
+  expect(enterpriseIdentityStatements).toEqual([
+    expect.objectContaining({
+      Action: ['dynamodb:GetItem', 'dynamodb:Query'],
+      Effect: 'Allow',
+    }),
+  ]);
   expect(serializedRealtimePolicy).toContain('ProjectDirectoryTable9ED01C01');
   expect(serializedRealtimePolicy).toContain('TeamIssuesTable189D851D');
   expect(serializedRealtimePolicy).toContain('WorkspaceAccessTableD7C8D2C7');
   expect(serializedRealtimePolicy).toContain('cognito-idp:AdminListGroupsForUser');
+  expect(serializedRealtimePolicy).toContain('cognito-idp:DescribeIdentityProvider');
   expect(serializedRealtimePolicy).toContain('CognitoUserPoolId');
+  expect(realtimeSessionActions).toEqual(expect.arrayContaining([
+    'dynamodb:DeleteItem',
+    'dynamodb:PutItem',
+  ]));
+  expect(serializedRealtimePolicy).not.toContain('dynamodb:TransactWriteItems');
+  const realtimeFunctions = template.findResources('AWS::Lambda::Function', {
+    Description: 'Consumes one-time tickets and handles mukuroji WebSocket presence events.',
+    Environment: {
+      Variables: Match.objectLike({
+        COGNITO_ENTERPRISE_IDP_NAME: { Ref: 'CognitoEnterpriseIdpName' },
+      }),
+    },
+  });
+  expect(JSON.stringify(realtimeFunctions))
+    .not.toContain('ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET');
   expect(serializedRealtimePolicy).toContain('production/*/@connections/*');
   expect(serializedRealtimePolicy).not.toContain('/*/*/@connections/*');
 });
@@ -1961,14 +2460,6 @@ test('audit stream projects all downstream deliveries with one combined consumer
     PolicyDocument: {
       Statement: Match.arrayWith([
         Match.objectLike({
-          Action: 'dynamodb:TransactWriteItems',
-          Effect: 'Allow',
-          Resource: Match.arrayWith([
-            { 'Fn::GetAtt': ['NotificationsTable76DCFC6C', 'Arn'] },
-            { 'Fn::GetAtt': ['ProcessedAuditEventsTableFF485133', 'Arn'] },
-          ]),
-        }),
-        Match.objectLike({
           Action: 'execute-api:ManageConnections',
           Effect: 'Allow',
           Resource: Match.anyValue(),
@@ -1992,6 +2483,11 @@ test('audit stream projects all downstream deliveries with one combined consumer
   const fileCleanupS3Statement = projectionStatements.find((statement) =>
     JSON.stringify(statement.Action).includes('s3:PutObjectVersionTagging')
   );
+  const actionsForProjectionTable = (logicalId: string) => projectionStatements
+    .filter((statement) => JSON.stringify(statement.Resource).includes(logicalId))
+    .flatMap((statement) =>
+      Array.isArray(statement.Action) ? statement.Action : [statement.Action]
+    );
 
   expect(serializedProjectionPolicy).toContain('production/*/@connections/*');
   expect(serializedProjectionPolicy).toContain('WorkItemCollaborationTableFDECF217');
@@ -2002,7 +2498,11 @@ test('audit stream projects all downstream deliveries with one combined consumer
   expect(serializedProjectionPolicy).not.toContain('LookupKeyIndex');
   expect(serializedProjectionPolicy).toContain('WebhookDeliveryQueue2A244492');
   expect(serializedProjectionPolicy).toContain('ConnectorSyncQueue4F8E52D0');
-  expect(serializedProjectionPolicy).toContain('dynamodb:TransactWriteItems');
+  expect(serializedProjectionPolicy).not.toContain('dynamodb:TransactWriteItems');
+  expect(actionsForProjectionTable('NotificationsTable76DCFC6C'))
+    .toContain('dynamodb:PutItem');
+  expect(actionsForProjectionTable('ProcessedAuditEventsTableFF485133'))
+    .toContain('dynamodb:PutItem');
   expect(serializedProjectionPolicy).toContain('sqs:SendMessage');
   expect(serializedProjectionPolicy).toContain('FileProofingTable');
   expect(serializedProjectionPolicy).toContain('dynamodb:GetItem');
@@ -2061,6 +2561,8 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
     template.toJSON().Outputs.AuditEventsTableName?.Value?.Ref;
   const developerPlatformTableId =
     template.toJSON().Outputs.DeveloperPlatformTableName?.Value?.Ref;
+  const enterpriseIdentityTableId =
+    template.toJSON().Outputs.EnterpriseIdentityTableName?.Value?.Ref;
   const projectDirectoryTableId =
     template.toJSON().Outputs.ProjectDirectoryTableName?.Value?.Ref;
   const workspaceAccessTableId =
@@ -2071,12 +2573,14 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
   )?.[0];
   expect(typeof auditEventsTableId).toBe('string');
   expect(typeof developerPlatformTableId).toBe('string');
+  expect(typeof enterpriseIdentityTableId).toBe('string');
   expect(typeof projectDirectoryTableId).toBe('string');
   expect(typeof workspaceAccessTableId).toBe('string');
   expect(webhookKeyId).toBeDefined();
   if (
     typeof auditEventsTableId !== 'string' ||
     typeof developerPlatformTableId !== 'string' ||
+    typeof enterpriseIdentityTableId !== 'string' ||
     typeof projectDirectoryTableId !== 'string' ||
     typeof workspaceAccessTableId !== 'string' ||
     !webhookKeyId
@@ -2085,14 +2589,21 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
   }
   const deliveryEnvironment = {
     Variables: Match.objectLike({
+      COGNITO_USER_POOL_ID: { Ref: 'CognitoUserPoolId' },
       DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: 'LookupKeyIndex',
       DEVELOPER_PLATFORM_TABLE_NAME: {
         Ref: 'DeveloperPlatformTable772E085C',
       },
       DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID: Match.anyValue(),
+      ENTERPRISE_IDENTITY_TABLE_NAME: {
+        Ref: enterpriseIdentityTableId,
+      },
       PROJECT_DIRECTORY_TABLE_NAME: {
         Ref: 'ProjectDirectoryTable9ED01C01',
       },
+      PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME:
+        'WebhookAuthorizationIndex',
+      SYSTEM_ADMIN_GROUPS: { Ref: 'SystemAdminGroups' },
       WEBHOOK_DELIVERY_QUEUE_URL: {
         Ref: 'WebhookDeliveryQueue2A244492',
       },
@@ -2301,17 +2812,19 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
   expect(projectionPolicies).toContain('ConnectorSyncQueue4F8E52D0');
   expect(projectionPolicies).toContain('CollaborationProjectionDlqAF6DB4E6');
   expect(projectionPolicies).toContain('dynamodb:GetRecords');
-  expect(projectionPolicies).toContain('dynamodb:TransactWriteItems');
+  expect(projectionPolicies).not.toContain('dynamodb:TransactWriteItems');
   expect(projectionPolicies).not.toContain('kms:');
   expect(projectionPolicies).toContain('sqs:SendMessage');
   expect(deliveryPolicies).toContain('DeveloperPlatformTable772E085C');
+  expect(deliveryPolicies).toContain(enterpriseIdentityTableId);
   expect(deliveryPolicies).toContain('ProjectDirectoryTable9ED01C01');
   expect(deliveryPolicies).toContain('WorkspaceAccessTableD7C8D2C7');
   expect(deliveryPolicies).toContain('WebhookDeliveryQueue2A244492');
   expect(deliveryPolicies).toContain('dynamodb:PutItem');
   expect(deliveryPolicies).toContain('dynamodb:UpdateItem');
   expect(deliveryPolicies).toContain('dynamodb:DeleteItem');
-  expect(deliveryPolicies).not.toContain('WebhookAuthorizationIndex');
+  expect(deliveryPolicies).toContain('WebhookAuthorizationIndex');
+  expect(deliveryPolicies).toContain('cognito-idp:AdminListGroupsForUser');
   const deliveryStatements = policiesForRole(deliveryRoleId).flatMap((policy) =>
     (policy as {
       Properties?: {
@@ -2332,10 +2845,11 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
   expect(getItemResources).toEqual(expect.arrayContaining([
     { 'Fn::GetAtt': [auditEventsTableId, 'Arn'] },
     { 'Fn::GetAtt': [developerPlatformTableId, 'Arn'] },
+    { 'Fn::GetAtt': [enterpriseIdentityTableId, 'Arn'] },
     { 'Fn::GetAtt': [projectDirectoryTableId, 'Arn'] },
     { 'Fn::GetAtt': [workspaceAccessTableId, 'Arn'] },
   ]));
-  expect(getItemResources).toHaveLength(4);
+  expect(getItemResources).toHaveLength(5);
   expect(queryResources).toEqual(expect.arrayContaining([
     {
       'Fn::Join': [
@@ -2346,9 +2860,19 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
         ],
       ],
     },
+    { 'Fn::GetAtt': [enterpriseIdentityTableId, 'Arn'] },
     { 'Fn::GetAtt': [projectDirectoryTableId, 'Arn'] },
+    {
+      'Fn::Join': [
+        '',
+        [
+          { 'Fn::GetAtt': [projectDirectoryTableId, 'Arn'] },
+          '/index/WebhookAuthorizationIndex',
+        ],
+      ],
+    },
   ]));
-  expect(queryResources).toHaveLength(2);
+  expect(queryResources).toHaveLength(4);
   expect(deliveryStatements).toContainEqual({
     Action: 'dynamodb:DeleteItem',
     Effect: 'Allow',
@@ -2418,6 +2942,14 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
   const resources = template.toJSON().Resources;
   const developerPlatformTableId =
     template.toJSON().Outputs.DeveloperPlatformTableName?.Value?.Ref;
+  const enterpriseIdentityTableId =
+    template.toJSON().Outputs.EnterpriseIdentityTableName?.Value?.Ref;
+  const planningTableId =
+    template.toJSON().Outputs.PlanningTableName?.Value?.Ref;
+  const workItemConfigurationTableId =
+    template.toJSON().Outputs.WorkItemConfigurationTableName?.Value?.Ref;
+  const workspaceAccessTableId =
+    template.toJSON().Outputs.WorkspaceAccessTableName?.Value?.Ref;
   const findResourceId = (
     prefix: string,
     type: string,
@@ -2459,6 +2991,10 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
   expect(connectorKeyId).toBeDefined();
   expect(stateKeyId).toBeDefined();
   expect(typeof developerPlatformTableId).toBe('string');
+  expect(typeof enterpriseIdentityTableId).toBe('string');
+  expect(typeof planningTableId).toBe('string');
+  expect(typeof workItemConfigurationTableId).toBe('string');
+  expect(typeof workspaceAccessTableId).toBe('string');
   expect(Object.keys(resources).some((logicalId) =>
     logicalId.startsWith('ConnectorAuditProjectionFunction')
   )).toBe(false);
@@ -2473,7 +3009,11 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
     !pollFunctionId ||
     !connectorKeyId ||
     !stateKeyId ||
-    typeof developerPlatformTableId !== 'string'
+    typeof developerPlatformTableId !== 'string' ||
+    typeof enterpriseIdentityTableId !== 'string' ||
+    typeof planningTableId !== 'string' ||
+    typeof workItemConfigurationTableId !== 'string' ||
+    typeof workspaceAccessTableId !== 'string'
   ) {
     throw new Error('Connector runtime resources were not synthesized.');
   }
@@ -2575,6 +3115,12 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
         DEVELOPER_PLATFORM_TABLE_NAME: {
           Ref: 'DeveloperPlatformTable772E085C',
         },
+        ENTERPRISE_IDENTITY_TABLE_NAME: {
+          Ref: enterpriseIdentityTableId,
+        },
+        PLANNING_TABLE_NAME: {
+          Ref: planningTableId,
+        },
         WORK_ITEMS_TABLE_NAME: {
           Ref: 'TeamIssuesTable189D851D',
         },
@@ -2675,6 +3221,15 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
       };
     }).Properties?.PolicyDocument?.Statement ?? []
   );
+  const workerAuthorizationConditionStatement = workerStatements.find((statement) =>
+    statement.Action === 'dynamodb:ConditionCheckItem'
+  );
+  const workerAuthorizationReadStatement = workerStatements.find((statement) =>
+    Array.isArray(statement.Action) &&
+    statement.Action.includes('dynamodb:GetItem') &&
+    JSON.stringify(statement.Resource).includes(enterpriseIdentityTableId) &&
+    JSON.stringify(statement.Resource).includes(planningTableId)
+  );
 
   expect(projectionPolicies).toContain('AuditEventsTable0723963E');
   expect(projectionPolicies).toContain(queueId);
@@ -2688,6 +3243,46 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
   expect(workerPolicies).toContain('TeamIssuesTable189D851D');
   expect(workerPolicies).toContain('AuditEventsTable0723963E');
   expect(workerPolicies).toContain('WorkspaceAccessTableD7C8D2C7');
+  expect(workerAuthorizationConditionStatement).toEqual({
+    Action: 'dynamodb:ConditionCheckItem',
+    Condition: {
+      'ForAnyValue:StringEquals': {
+        'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+      },
+    },
+    Effect: 'Allow',
+    Resource: expect.arrayContaining([
+      { 'Fn::GetAtt': [workspaceAccessTableId, 'Arn'] },
+      { 'Fn::GetAtt': [planningTableId, 'Arn'] },
+      { 'Fn::GetAtt': [enterpriseIdentityTableId, 'Arn'] },
+      { 'Fn::GetAtt': [workItemConfigurationTableId, 'Arn'] },
+    ]),
+  });
+  expect(
+    workerAuthorizationConditionStatement?.Resource as unknown[] | undefined,
+  ).toHaveLength(4);
+  expect(workerAuthorizationReadStatement).toEqual(expect.objectContaining({
+    Action: ['dynamodb:GetItem', 'dynamodb:Query'],
+    Effect: 'Allow',
+    Resource: expect.arrayContaining([
+      { 'Fn::GetAtt': [planningTableId, 'Arn'] },
+      { 'Fn::GetAtt': [enterpriseIdentityTableId, 'Arn'] },
+    ]),
+  }));
+  expect(
+    workerAuthorizationReadStatement?.Resource as unknown[] | undefined,
+  ).toHaveLength(2);
+  const workerSensitiveAuthorizationActions = workerStatements
+    .filter((statement) => {
+      const resources = JSON.stringify(statement.Resource);
+      return resources.includes(enterpriseIdentityTableId) ||
+        resources.includes(planningTableId);
+    })
+    .flatMap((statement) =>
+      Array.isArray(statement.Action) ? statement.Action : [statement.Action]
+    );
+  expect(workerSensitiveAuthorizationActions).not.toContain('dynamodb:BatchGetItem');
+  expect(workerSensitiveAuthorizationActions).not.toContain('dynamodb:Scan');
   expect(workerPolicies).not.toContain('dynamodb:TransactWriteItems');
   expect(workerPolicies).toContain('kms:Decrypt');
   expect(workerPolicies).toContain('kms:GenerateDataKey');
@@ -2808,7 +3403,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     },
     MaximumRetryAttempts: 2,
   });
-  template.resourceCountIs('AWS::SQS::Queue', 13);
+  template.resourceCountIs('AWS::SQS::Queue', 15);
   template.hasResourceProperties('AWS::SQS::Queue', {
     MessageRetentionPeriod: 1209600,
     SqsManagedSseEnabled: true,
@@ -3052,15 +3647,15 @@ test('automation workers consume the audit outbox and run recurring schedules wi
   const schedulePolicy = Object.entries(resources).find(([logicalId]) =>
     logicalId.startsWith('AutomationScheduleFunctionServiceRoleDefaultPolicy')
   )?.[1];
-  const eventTransactPolicy = Object.entries(resources).find(([logicalId]) =>
+  const eventConditionCheckPolicy = Object.entries(resources).find(([logicalId]) =>
     logicalId.startsWith('AutomationEventTransactWritePolicy')
   )?.[1];
-  const scheduleTransactPolicy = Object.entries(resources).find(([logicalId]) =>
+  const scheduleConditionCheckPolicy = Object.entries(resources).find(([logicalId]) =>
     logicalId.startsWith('AutomationScheduleTransactWritePolicy')
   )?.[1];
-  for (const [policy, transactPolicy] of [
-    [eventPolicy, eventTransactPolicy],
-    [schedulePolicy, scheduleTransactPolicy],
+  for (const [policy, conditionCheckPolicy] of [
+    [eventPolicy, eventConditionCheckPolicy],
+    [schedulePolicy, scheduleConditionCheckPolicy],
   ]) {
     const serialized = JSON.stringify(policy);
     expect(serialized).toContain('AutomationTableE3D67F0D');
@@ -3072,20 +3667,37 @@ test('automation workers consume the audit outbox and run recurring schedules wi
     const statements = (policy as {
       Properties?: { PolicyDocument?: { Statement?: Array<Record<string, unknown>> } };
     } | undefined)?.Properties?.PolicyDocument?.Statement ?? [];
-    const transactStatements = (transactPolicy as {
+    const conditionCheckStatements = (conditionCheckPolicy as {
       Properties?: { PolicyDocument?: { Statement?: Array<Record<string, unknown>> } };
     } | undefined)?.Properties?.PolicyDocument?.Statement ?? [];
-    const transactStatement = transactStatements.find((statement) => {
+    const conditionCheckStatement = conditionCheckStatements.find((statement) => {
       const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
-      return actions.includes('dynamodb:TransactWriteItems');
+      return actions.includes('dynamodb:ConditionCheckItem');
     });
-    expect(transactStatement).toEqual(expect.objectContaining({
+    expect(conditionCheckStatement).toEqual(expect.objectContaining({
+      Action: 'dynamodb:ConditionCheckItem',
+      Condition: {
+        'ForAnyValue:StringEquals': {
+          'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+        },
+      },
       Effect: 'Allow',
       Resource: expect.arrayContaining([
         { 'Fn::GetAtt': ['AutomationTableE3D67F0D', 'Arn'] },
         { 'Fn::GetAtt': ['FileProofingTable81DA272F', 'Arn'] },
+        { 'Fn::GetAtt': ['WorkItemConfigurationTable35E94558', 'Arn'] },
+        { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
+        { 'Fn::GetAtt': ['WorkspaceSearchTable2575AD6B', 'Arn'] },
       ]),
     }));
+    expect(JSON.stringify(conditionCheckStatement)).not.toContain(
+      'AuditEventsTable0723963E',
+    );
+    expect(JSON.stringify(conditionCheckStatement)).not.toContain(
+      'TeamIssueEventsTable',
+    );
+    expect(JSON.stringify([policy, conditionCheckPolicy]))
+      .not.toContain('dynamodb:TransactWriteItems');
     const cognitoStatement = statements.find((statement) => {
       const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
       return actions.includes('cognito-idp:AdminGetUser');
@@ -3191,7 +3803,13 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   }
   const apiPolicies = Object.values(resources)
     .filter((resource) => {
-      if ((resource as { Type?: string }).Type !== 'AWS::IAM::Policy') return false;
+      if (
+        !['AWS::IAM::ManagedPolicy', 'AWS::IAM::Policy'].includes(
+          (resource as { Type?: string }).Type ?? '',
+        )
+      ) {
+        return false;
+      }
       const roles = (resource as { Properties?: { Roles?: unknown[] } }).Properties?.Roles ?? [];
       return roles.some((role) =>
         (role as { Ref?: string }).Ref === apiRoleLogicalId
@@ -3211,9 +3829,10 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Array.isArray(statement.Action) ? statement.Action : [statement.Action]
   );
   const serializedApiPolicies = JSON.stringify(apiPolicies);
-  const transactStatement = statements.find((statement) => {
+  const transactionConditionCheckStatement = statements.find((statement) => {
     const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
-    return actions.includes('dynamodb:TransactWriteItems') &&
+    return actions.includes('dynamodb:ConditionCheckItem') &&
+      JSON.stringify(statement.Condition)?.includes('dynamodb:EnclosingOperation') === true &&
       JSON.stringify(statement.Resource).includes('WorkspaceSearchTable2575AD6B');
   });
   const configurationDataStatement = statements.find((statement) =>
@@ -3221,7 +3840,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
       'Fn::GetAtt': ['WorkItemConfigurationTable35E94558', 'Arn'],
     }) &&
     Array.isArray(statement.Action) &&
-    statement.Action.includes('dynamodb:ConditionCheckItem')
+    statement.Action.includes('dynamodb:DescribeTable')
   );
   const automationDataStatement = statements.find((statement) =>
     JSON.stringify(statement.Resource).includes('AutomationTableE3D67F0D') &&
@@ -3236,7 +3855,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
       'Fn::GetAtt': ['PlanningTable2A0D4CC5', 'Arn'],
     }) &&
     Array.isArray(statement.Action) &&
-    statement.Action.includes('dynamodb:ConditionCheckItem')
+    statement.Action.includes('dynamodb:DescribeTable')
   );
   const planningStatements = statements.filter((statement) =>
     JSON.stringify(statement.Resource).includes('PlanningTable2A0D4CC5')
@@ -3270,25 +3889,46 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   const requestIntakeStatements = statements.filter((statement) =>
     JSON.stringify(statement.Resource).includes(String(requestTableLogicalId))
   );
-  const cognitoPolicy = Object.values(template.toJSON().Resources).find((resource) =>
-    JSON.stringify(resource).includes('cognito-idp:AdminGetUser')
+  const enterpriseIdentityTableLogicalId =
+    template.toJSON().Outputs.EnterpriseIdentityTableName?.Value?.Ref;
+  expect(typeof enterpriseIdentityTableLogicalId).toBe('string');
+  const enterpriseIdentityStatements = statements.filter((statement) =>
+    JSON.stringify(statement.Resource).includes(String(enterpriseIdentityTableLogicalId))
+  );
+  const realtimeSessionStatements = statements.filter((statement) =>
+    JSON.stringify(statement.Resource).includes('RealtimeSessionsTable607096EB')
+  );
+  const cognitoStatement = statements.find((statement) =>
+    (Array.isArray(statement.Action) ? statement.Action : [statement.Action])
+      .includes('cognito-idp:AdminGetUser')
   );
 
-  expect(transactStatement).toEqual(expect.objectContaining({
+  expect(transactionConditionCheckStatement).toEqual(expect.objectContaining({
+    Action: 'dynamodb:ConditionCheckItem',
+    Condition: {
+      'ForAnyValue:StringEquals': {
+        'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+      },
+    },
     Effect: 'Allow',
     Resource: expect.arrayContaining([
-      { 'Fn::GetAtt': ['AutomationTableE3D67F0D', 'Arn'] },
       { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
+      { 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] },
+      { 'Fn::GetAtt': ['WorkspaceAccessTableD7C8D2C7', 'Arn'] },
+      { 'Fn::GetAtt': ['WorkItemCollaborationTableFDECF217', 'Arn'] },
+      { 'Fn::GetAtt': ['DocumentsTable7E808EE5', 'Arn'] },
+      { 'Fn::GetAtt': ['FileProofingTable81DA272F', 'Arn'] },
       { 'Fn::GetAtt': ['WorkItemConfigurationTable35E94558', 'Arn'] },
       { 'Fn::GetAtt': ['PlanningTable2A0D4CC5', 'Arn'] },
-      { 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] },
-      { 'Fn::GetAtt': ['WorkItemCollaborationTableFDECF217', 'Arn'] },
-      { 'Fn::GetAtt': ['FileProofingTable81DA272F', 'Arn'] },
+      { 'Fn::GetAtt': [enterpriseIdentityTableLogicalId, 'Arn'] },
       { 'Fn::GetAtt': ['WorkspaceSearchTable2575AD6B', 'Arn'] },
     ]),
   }));
-  expect(JSON.stringify(transactStatement)).not.toContain(developerPlatformTableId);
-  expect(JSON.stringify(transactStatement)).not.toContain('DocumentsTable7E808EE5');
+  expect(JSON.stringify(transactionConditionCheckStatement))
+    .not.toContain('AutomationTableE3D67F0D');
+  expect(JSON.stringify(transactionConditionCheckStatement)).not.toContain(
+    developerPlatformTableId,
+  );
   expect(serializedApiPolicies).toContain('DocumentsTable7E808EE5');
   expect(serializedApiPolicies).toContain('WorkspaceSearchTable2575AD6B');
   expect(serializedApiPolicies).toContain('kms:Decrypt');
@@ -3299,8 +3939,10 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   expect(serializedApiPolicies).toContain('secretsmanager:GetSecretValue');
   expect(serializedApiPolicies).toContain(':secret:');
   expect(serializedApiPolicies).toContain('mukuroji/automation-webhooks/');
-  expect(JSON.stringify(transactStatement)).not.toContain('ProjectTasksTableE21F6637');
-  expect(JSON.stringify(transactStatement)).toContain('FileProofingTable');
+  expect(JSON.stringify(transactionConditionCheckStatement))
+    .not.toContain('ProjectTasksTableE21F6637');
+  expect(JSON.stringify(transactionConditionCheckStatement)).toContain('FileProofingTable');
+  expect(serializedApiPolicies).not.toContain('dynamodb:TransactWriteItems');
   expect(fileObjectStatements).not.toHaveLength(0);
   expect(fileObjectStatements).toEqual(expect.arrayContaining([
     expect.objectContaining({ Effect: 'Allow' }),
@@ -3333,12 +3975,11 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     'dynamodb:GetItem',
     'dynamodb:PutItem',
     'dynamodb:Query',
-    'dynamodb:TransactWriteItems',
+    'dynamodb:ConditionCheckItem',
     'dynamodb:UpdateItem',
   ]));
   expect(configurationDataStatement).toEqual({
     Action: [
-      'dynamodb:ConditionCheckItem',
       'dynamodb:DeleteItem',
       'dynamodb:DescribeTable',
       'dynamodb:GetItem',
@@ -3361,10 +4002,8 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Effect: 'Allow',
   }));
   expect(configurationStatements).toHaveLength(2);
-  expect(configurationStatements).toEqual(expect.arrayContaining([
-    configurationDataStatement,
-    transactStatement,
-  ]));
+  expect(configurationStatements).toContain(configurationDataStatement);
+  expect(configurationStatements).toContain(transactionConditionCheckStatement);
 
   const requestIntakeActions = requestIntakeStatements.flatMap((statement) =>
     Array.isArray(statement.Action) ? statement.Action : [statement.Action]
@@ -3376,9 +4015,31 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     'dynamodb:Query',
     'dynamodb:UpdateItem',
   ]));
+  const enterpriseIdentityActions = enterpriseIdentityStatements.flatMap((statement) =>
+    Array.isArray(statement.Action) ? statement.Action : [statement.Action]
+  );
+  expect(enterpriseIdentityActions).toEqual(expect.arrayContaining([
+    'dynamodb:BatchWriteItem',
+    'dynamodb:ConditionCheckItem',
+    'dynamodb:DeleteItem',
+    'dynamodb:DescribeTable',
+    'dynamodb:GetItem',
+    'dynamodb:PutItem',
+    'dynamodb:Query',
+    'dynamodb:UpdateItem',
+  ]));
+  expect(enterpriseIdentityActions).not.toContain('dynamodb:Scan');
+  expect(JSON.stringify(enterpriseIdentityStatements))
+    .toContain(String(enterpriseIdentityTableLogicalId));
+  const realtimeSessionActions = realtimeSessionStatements.flatMap((statement) =>
+    Array.isArray(statement.Action) ? statement.Action : [statement.Action]
+  );
+  expect(realtimeSessionActions).toEqual(expect.arrayContaining([
+    'dynamodb:GetItem',
+    'dynamodb:PutItem',
+  ]));
   expect(planningDataStatement).toEqual(expect.objectContaining({
     Action: [
-      'dynamodb:ConditionCheckItem',
       'dynamodb:DeleteItem',
       'dynamodb:DescribeTable',
       'dynamodb:GetItem',
@@ -3390,10 +4051,8 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Resource: { 'Fn::GetAtt': ['PlanningTable2A0D4CC5', 'Arn'] },
   }));
   expect(planningStatements).toHaveLength(2);
-  expect(planningStatements).toEqual(expect.arrayContaining([
-    planningDataStatement,
-    transactStatement,
-  ]));
+  expect(planningStatements).toContain(planningDataStatement);
+  expect(planningStatements).toContain(transactionConditionCheckStatement);
   expect(developerPlatformDataStatement).toEqual({
     Action: [
       'dynamodb:ConditionCheckItem',
@@ -3479,9 +4138,9 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     'dynamodb:GetItem',
     'dynamodb:PutItem',
     'dynamodb:Query',
+    'dynamodb:ConditionCheckItem',
     'dynamodb:UpdateItem',
   ]));
-  expect(documentsActions).not.toContain('dynamodb:TransactWriteItems');
 
   const legacyTaskStatements = statements.filter((statement) =>
     JSON.stringify(statement.Resource).includes('ProjectTasksTableE21F6637')
@@ -3506,12 +4165,18 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   ]) {
     expect(legacyTaskActions).not.toContain(writeAction);
   }
-  expect(JSON.stringify(cognitoPolicy)).toContain('cognito-idp:ListUsers');
-  expect(JSON.stringify(cognitoPolicy)).toContain('cognito-idp:AdminDeleteUserAttributes');
-  expect(JSON.stringify(cognitoPolicy)).toContain('CognitoUserPoolId');
-  expect(serializedApiPolicies).not.toContain('"Resource":"*"');
+  expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:ListUsers');
+  expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:DescribeIdentityProvider');
+  expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:DescribeUserPoolClient');
+  expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:AdminDeleteUserAttributes');
+  expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:AdminDisableUser');
+  expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:AdminEnableUser');
+  expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:AdminUserGlobalSignOut');
+  expect(JSON.stringify(cognitoStatement)).toContain('CognitoUserPoolId');
+  const wildcardStatements = statements.filter((statement) => statement.Resource === '*');
+  expect(wildcardStatements).toEqual([]);
   expect(serializedApiPolicies).not.toContain('"Action":"s3:*"');
-  expect(JSON.stringify(cognitoPolicy)).not.toContain('"Resource":"*"');
+  expect(JSON.stringify(cognitoStatement)).not.toContain('"Resource":"*"');
 });
 
 test('external Cognito client and initial owner attributes are validated on create and update', () => {
@@ -3696,6 +4361,7 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions for 
     expect(itemActionStatements.flatMap((statement) =>
       Array.isArray(statement.Action) ? statement.Action : [statement.Action]
     )).toEqual(expect.arrayContaining([...transactionCase.itemActions]));
+    expect(JSON.stringify(statements)).not.toContain('dynamodb:TransactWriteItems');
     for (const statement of itemActionStatements) {
       expect(statement).toEqual(expect.objectContaining({
         Condition: {
@@ -3772,11 +4438,6 @@ test('canonical Work Item seed writes complete schema data and preserves demo da
   expect(canonicalWorkItemSeedPolicy?.Properties?.PolicyDocument?.Statement).toEqual(
     expect.arrayContaining([
       expect.objectContaining({
-        Action: 'dynamodb:TransactWriteItems',
-        Effect: 'Allow',
-        Resource: { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
-      }),
-      expect.objectContaining({
         Action: 'dynamodb:PutItem',
         Condition: {
           'ForAnyValue:StringEquals': {
@@ -3788,6 +4449,8 @@ test('canonical Work Item seed writes complete schema data and preserves demo da
       }),
     ]),
   );
+  expect(JSON.stringify(canonicalWorkItemSeedPolicy))
+    .not.toContain('dynamodb:TransactWriteItems');
   expect(JSON.stringify(canonicalWorkItemSeedPolicy)).not.toContain('ProjectTasksTableE21F6637');
   expect(directoryPayload).toContain('WorkspaceDirectoryId');
   expect(directoryPayload.match(/"teamSourceEntryKey"/g)).toHaveLength(2);
@@ -3802,4 +4465,108 @@ test('canonical Work Item seed writes complete schema data and preserves demo da
   expect(directoryPayload).not.toContain('user#demo@example.com');
   expect(canonicalWorkItemSeed?.Properties.Update).toBeUndefined();
   expect(projectDirectorySeed?.Properties.Update).toBeUndefined();
+});
+
+test('bootstrap payload builders preserve deterministic keys, conditions, and idempotency', () => {
+  const workspaceAccess = createWorkspaceAccessTransactItems(
+    'WorkspaceAccessTable',
+    'workspace-1',
+    'owner@example.com',
+  );
+  const workspaceMembers = createWorkspaceDemoMemberTransactItems(
+    'WorkspaceAccessTable',
+    'workspace-1',
+  );
+  const canonicalWorkItems = createCanonicalWorkItemTransactItems('WorkItemsTable', 'directory-1');
+  const directoryItems = createProjectDirectoryTransactItems('DirectoryTable', 'directory-1');
+  const workspaceBootstrap = createWorkspaceBootstrapTransactItems(
+    'DirectoryTable',
+    'directory-1',
+    'owner@example.com',
+    'owner',
+  );
+
+  expect(workspaceAccess).toHaveLength(2);
+  expect(workspaceAccess[0].Update.Key).toEqual({
+    workspaceId: { S: 'workspace-1' },
+    recordKey: { S: 'WORKSPACE' },
+  });
+  expect(workspaceAccess[1].Update.Key).toEqual({
+    workspaceId: { S: 'workspace-1' },
+    recordKey: { S: 'MEMBER#owner@example.com' },
+  });
+  expect(workspaceAccess.every(({ Update }) =>
+    Update.ConditionExpression?.includes('attribute_not_exists(workspaceId)') &&
+    Update.UpdateExpression.includes('if_not_exists') &&
+    Update.ExpressionAttributeValues?.[':createdAt']?.S === '2026-07-11T00:00:00.000Z' &&
+    Update.ExpressionAttributeValues?.[':updatedAt']?.S === '2026-07-11T00:00:00.000Z',
+  )).toBe(true);
+  expect(workspaceAccess).toEqual(createWorkspaceAccessTransactItems(
+    'WorkspaceAccessTable',
+    'workspace-1',
+    'owner@example.com',
+  ));
+
+  expect(workspaceMembers).toHaveLength(5);
+  expect(workspaceMembers.map(({ Update }) => Update.Key.recordKey)).toEqual([
+    { S: 'MEMBER#sato@example.com' },
+    { S: 'MEMBER#suzuki@example.com' },
+    { S: 'MEMBER#tanaka@example.com' },
+    { S: 'MEMBER#yamamoto@example.com' },
+    { S: 'MEMBER#viewer@example.com' },
+  ]);
+  expect(workspaceMembers.every(({ Update }) =>
+    Update.ConditionExpression?.includes('memberKey = :memberKey') &&
+    Update.UpdateExpression.includes('if_not_exists') &&
+    Update.ExpressionAttributeValues?.[':createdAt']?.S === '2026-07-11T00:00:00.000Z' &&
+    Update.ExpressionAttributeValues?.[':updatedAt']?.S === '2026-07-11T00:00:00.000Z',
+  )).toBe(true);
+  expect(workspaceMembers).toEqual(createWorkspaceDemoMemberTransactItems(
+    'WorkspaceAccessTable',
+    'workspace-1',
+  ));
+
+  expect(canonicalWorkItems).toHaveLength(10);
+  expect(canonicalWorkItems.every(({ Put }) =>
+    Put.ConditionExpression === 'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)' &&
+    Put.Item.directoryId.S === 'directory-1' &&
+    Put.Item.createdAt.S === '2026-06-01T00:00:00.000Z' &&
+    Put.Item.updatedAt.S === '2026-06-01T00:00:00.000Z',
+  )).toBe(true);
+  expect(canonicalWorkItems).toEqual(createCanonicalWorkItemTransactItems('WorkItemsTable', 'directory-1'));
+
+  expect(directoryItems).toHaveLength(9);
+  expect(directoryItems.every(({ Put }) =>
+    Put.ConditionExpression === 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)' &&
+    Put.Item.directoryId.S === 'directory-1',
+  )).toBe(true);
+  expect(directoryItems.filter(({ Put }) => Put.Item.entryType.S === 'project-member').every(({ Put }) => {
+    const item = Put.Item as Record<string, { S?: string }>;
+
+    return item.createdAt?.S === '2026-06-08T00:00:00.000Z' &&
+      item.updatedAt?.S === '2026-06-08T00:00:00.000Z';
+  })).toBe(true);
+  expect(directoryItems).toEqual(createProjectDirectoryTransactItems('DirectoryTable', 'directory-1'));
+
+  expect(workspaceBootstrap).toHaveLength(7);
+  expect(workspaceBootstrap.every(({ Update }) =>
+    Update.ConditionExpression?.includes('attribute_not_exists(directoryId)') &&
+    !('Item' in Update),
+  )).toBe(true);
+  expect(workspaceBootstrap.filter(({ Update }) => {
+    const values = Update.ExpressionAttributeValues as Record<string, { S?: string }>;
+
+    return values[':timestamp'] !== undefined;
+  }).every(({ Update }) => {
+    const values = Update.ExpressionAttributeValues as Record<string, { S?: string }>;
+
+    return Update.UpdateExpression.includes('if_not_exists') &&
+      values[':timestamp']?.S === '2026-07-11T00:00:00.000Z';
+  })).toBe(true);
+  expect(workspaceBootstrap).toEqual(createWorkspaceBootstrapTransactItems(
+    'DirectoryTable',
+    'directory-1',
+    'owner@example.com',
+    'owner',
+  ));
 });

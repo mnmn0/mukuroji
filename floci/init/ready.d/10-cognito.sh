@@ -7,6 +7,9 @@ PUBLIC_ENDPOINT_URL="${PUBLIC_ENDPOINT_URL%/}"
 POOL_ID="${COGNITO_USER_POOL_ID:-us-east-1_mukuroji}"
 POOL_NAME="${COGNITO_USER_POOL_NAME:-mukuroji-local}"
 CLIENT_NAME="${COGNITO_USER_POOL_CLIENT_NAME:-mukuroji-web-local}"
+SSO_CLIENT_NAME="${COGNITO_SSO_USER_POOL_CLIENT_NAME:-mukuroji-sso-local}"
+SSO_REDIRECT_URI="${COGNITO_SSO_REDIRECT_URI:-http://localhost:5173/auth/sso/callback}"
+ENTERPRISE_IDP_NAME="${COGNITO_ENTERPRISE_IDP_NAME:-}"
 TEST_USERNAME="${COGNITO_TEST_USERNAME:-demo@example.com}"
 TEST_PASSWORD="${COGNITO_TEST_PASSWORD:-Password123!}"
 INITIAL_OWNER_USERNAME="${MUKUROJI_INITIAL_OWNER_USERNAME:-$TEST_USERNAME}"
@@ -28,6 +31,7 @@ AUDIT_EVENTS_TABLE="${MUKUROJI_AUDIT_EVENTS_TABLE:-${AUDIT_EVENTS_TABLE_NAME:-mu
 AUDIT_RETENTION_DAYS="${MUKUROJI_AUDIT_RETENTION_DAYS:-${AUDIT_RETENTION_DAYS:-2555}}"
 WORKSPACE_AUDIT_PSEUDONYM_KEY="${MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY:-}"
 WORKSPACE_ACCESS_TABLE="${MUKUROJI_WORKSPACE_ACCESS_TABLE:-mukuroji-workspace-access-local}"
+ENTERPRISE_IDENTITY_TABLE="${ENTERPRISE_IDENTITY_TABLE_NAME:-mukuroji-enterprise-identity-local}"
 WORKSPACE_DIRECTORY_ID="${MUKUROJI_WORKSPACE_DIRECTORY_ID:-${MUKUROJI_PROJECT_DIRECTORY_ID:-workspace#mukuroji-local}}"
 PROJECT_DIRECTORY_ID="$WORKSPACE_DIRECTORY_ID"
 PROJECT_MEMBER_KEY="$(printf '%s' "$INITIAL_OWNER_EMAIL" | tr '[:upper:]' '[:lower:]')"
@@ -38,7 +42,7 @@ COGNITO_ENV_FILE="$GENERATED_DIR/cognito.env"
 # 旧 ready hook が生成した file には secret が含まれるため、bootstrap が途中で
 # 失敗しても残存しないよう、非secret版を生成する前に legacy file だけ除去します。
 if [ -f "$COGNITO_ENV_FILE" ]; then
-  if grep -Eq '^(COGNITO_TEST_PASSWORD|MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY)=' "$COGNITO_ENV_FILE"; then
+  if grep -Eq '^(COGNITO_TEST_PASSWORD|ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET|ENTERPRISE_SSO_STATE_SECRET|MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY)=' "$COGNITO_ENV_FILE"; then
     rm -f "$COGNITO_ENV_FILE"
   else
     legacy_env_inspection_status=$?
@@ -65,6 +69,38 @@ if [ "${#WORKSPACE_AUDIT_PSEUDONYM_KEY}" -ne 64 ]; then
   exit 2
 fi
 
+case "$CLIENT_NAME" in
+  '' | *[!A-Za-z0-9._-]*)
+    echo "COGNITO_USER_POOL_CLIENT_NAME contains unsupported characters." >&2
+    exit 2
+    ;;
+esac
+
+case "$SSO_CLIENT_NAME" in
+  '' | *[!A-Za-z0-9._-]*)
+    echo "COGNITO_SSO_USER_POOL_CLIENT_NAME contains unsupported characters." >&2
+    exit 2
+    ;;
+esac
+
+case "$SSO_REDIRECT_URI" in
+  '' | *[!A-Za-z0-9:/._-]*)
+    echo "COGNITO_SSO_REDIRECT_URI contains unsupported characters for the generated local environment." >&2
+    exit 2
+    ;;
+esac
+
+case "$ENTERPRISE_IDP_NAME" in
+  COGNITO)
+    echo "COGNITO_ENTERPRISE_IDP_NAME must identify an external provider, not COGNITO." >&2
+    exit 2
+    ;;
+  *[!A-Za-z0-9._-]*)
+    echo "COGNITO_ENTERPRISE_IDP_NAME contains unsupported characters." >&2
+    exit 2
+    ;;
+esac
+
 case "$WORKSPACE_DIRECTORY_ID" in
   '' | *[!A-Za-z0-9._:/#@+-]*)
     echo "MUKUROJI_WORKSPACE_DIRECTORY_ID contains unsupported characters." >&2
@@ -86,8 +122,62 @@ case "$INITIAL_OWNER_USERNAME" in
     ;;
 esac
 
+# AWS CLI v1 follows http(s) string parameters by default. Use an ephemeral
+# config so Cognito callback URLs are sent as values instead of being fetched.
+AWS_CONFIG_FILE="${TMPDIR:-/tmp}/mukuroji-floci-aws-config"
+export AWS_CONFIG_FILE
+aws configure set cli_follow_urlparam false
+
 aws_local() {
   aws --endpoint-url "$ENDPOINT_URL" "$@"
+}
+
+text_list_is_exact() {
+  values_text="$1"
+  shift
+  actual_count=0
+
+  if [ -n "$values_text" ] && [ "$values_text" != "None" ]; then
+    for value in $values_text; do
+      found_expected=false
+      actual_count=$((actual_count + 1))
+      for expected in "$@"; do
+        if [ "$value" = "$expected" ]; then
+          found_expected=true
+          break
+        fi
+      done
+      if [ "$found_expected" != "true" ]; then
+        return 1
+      fi
+    done
+  fi
+
+  for expected in "$@"; do
+    found_actual=false
+    for value in $values_text; do
+      if [ "$value" = "$expected" ]; then
+        found_actual=true
+        break
+      fi
+    done
+    if [ "$found_actual" != "true" ]; then
+      return 1
+    fi
+  done
+
+  [ "$actual_count" -eq "$#" ]
+}
+
+text_list_is_absent_or_exact() {
+  values_text="$1"
+  shift
+
+  if [ -z "$values_text" ] || [ "$values_text" = "None" ]; then
+    return 0
+  fi
+
+  text_list_is_exact "$values_text" "$@"
 }
 
 if ! aws_local cognito-idp describe-user-pool --user-pool-id "$POOL_ID" >/dev/null 2>&1; then
@@ -144,6 +234,125 @@ if [ "$CLIENT_ID" = "None" ] || [ -z "$CLIENT_ID" ]; then
     --explicit-auth-flows ALLOW_USER_PASSWORD_AUTH ALLOW_REFRESH_TOKEN_AUTH \
     --query UserPoolClient.ClientId \
     --output text)"
+fi
+
+if [ -n "$ENTERPRISE_IDP_NAME" ]; then
+  if ! aws_local cognito-idp describe-identity-provider \
+    --user-pool-id "$POOL_ID" \
+    --provider-name "$ENTERPRISE_IDP_NAME" \
+    >/dev/null; then
+    echo "COGNITO_ENTERPRISE_IDP_NAME does not identify a Cognito provider: $ENTERPRISE_IDP_NAME" >&2
+    exit 1
+  fi
+  SSO_SUPPORTED_PROVIDER="$ENTERPRISE_IDP_NAME"
+else
+  # Floci does not emulate external federation. Keep a separate OAuth client even
+  # without an IdP so password auth can never be exchanged for SSO assurance.
+  SSO_SUPPORTED_PROVIDER="COGNITO"
+fi
+
+SSO_CLIENT_ID="$(aws_local cognito-idp list-user-pool-clients \
+  --user-pool-id "$POOL_ID" \
+  --max-results 60 \
+  --query "UserPoolClients[?ClientName=='$SSO_CLIENT_NAME'].ClientId | [0]" \
+  --output text)"
+
+if [ "$SSO_CLIENT_ID" = "None" ] || [ -z "$SSO_CLIENT_ID" ]; then
+  SSO_CLIENT_ID="$(aws_local cognito-idp create-user-pool-client \
+    --user-pool-id "$POOL_ID" \
+    --client-name "$SSO_CLIENT_NAME" \
+    --no-generate-secret \
+    --explicit-auth-flows ALLOW_REFRESH_TOKEN_AUTH \
+    --supported-identity-providers "$SSO_SUPPORTED_PROVIDER" \
+    --allowed-o-auth-flows code \
+    --allowed-o-auth-scopes openid email profile \
+    --allowed-o-auth-flows-user-pool-client \
+    --callback-urls "$SSO_REDIRECT_URI" \
+    --query UserPoolClient.ClientId \
+    --output text)"
+fi
+
+if [ "$SSO_CLIENT_ID" = "$CLIENT_ID" ]; then
+  echo "Cognito password and SSO app clients must be distinct." >&2
+  exit 1
+fi
+
+SSO_CLIENT_SECRET="$(aws_local cognito-idp describe-user-pool-client \
+  --user-pool-id "$POOL_ID" \
+  --client-id "$SSO_CLIENT_ID" \
+  --query UserPoolClient.ClientSecret \
+  --output text)"
+if [ -n "$SSO_CLIENT_SECRET" ] && [ "$SSO_CLIENT_SECRET" != "None" ]; then
+  echo "Cognito SSO app client must not have a client secret." >&2
+  exit 1
+fi
+
+# Reconcile mutable settings on every ready run so a persisted local client
+# cannot drift back to native Cognito password/SRP/custom authentication.
+if ! sso_client_update_error="$(aws_local cognito-idp update-user-pool-client \
+  --user-pool-id "$POOL_ID" \
+  --client-id "$SSO_CLIENT_ID" \
+  --client-name "$SSO_CLIENT_NAME" \
+  --explicit-auth-flows ALLOW_REFRESH_TOKEN_AUTH \
+  --supported-identity-providers "$SSO_SUPPORTED_PROVIDER" \
+  --allowed-o-auth-flows code \
+  --allowed-o-auth-scopes openid email profile \
+  --allowed-o-auth-flows-user-pool-client \
+  --callback-urls "$SSO_REDIRECT_URI" \
+  2>&1)"; then
+  case "$sso_client_update_error" in
+    *UnsupportedOperation* | *UnknownOperationException* | *"not supported"*)
+      echo "Floci does not expose UpdateUserPoolClient; validating the existing SSO client contract." >&2
+      ;;
+    *)
+      echo "$sso_client_update_error" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+SSO_CLIENT_EXPLICIT_FLOWS="$(aws_local cognito-idp describe-user-pool-client \
+  --user-pool-id "$POOL_ID" \
+  --client-id "$SSO_CLIENT_ID" \
+  --query UserPoolClient.ExplicitAuthFlows \
+  --output text)"
+SSO_CLIENT_PROVIDERS="$(aws_local cognito-idp describe-user-pool-client \
+  --user-pool-id "$POOL_ID" \
+  --client-id "$SSO_CLIENT_ID" \
+  --query UserPoolClient.SupportedIdentityProviders \
+  --output text)"
+SSO_CLIENT_OAUTH_ENABLED="$(aws_local cognito-idp describe-user-pool-client \
+  --user-pool-id "$POOL_ID" \
+  --client-id "$SSO_CLIENT_ID" \
+  --query UserPoolClient.AllowedOAuthFlowsUserPoolClient \
+  --output text)"
+SSO_CLIENT_OAUTH_FLOWS="$(aws_local cognito-idp describe-user-pool-client \
+  --user-pool-id "$POOL_ID" \
+  --client-id "$SSO_CLIENT_ID" \
+  --query UserPoolClient.AllowedOAuthFlows \
+  --output text)"
+SSO_CLIENT_OAUTH_SCOPES="$(aws_local cognito-idp describe-user-pool-client \
+  --user-pool-id "$POOL_ID" \
+  --client-id "$SSO_CLIENT_ID" \
+  --query UserPoolClient.AllowedOAuthScopes \
+  --output text)"
+SSO_CLIENT_CALLBACKS="$(aws_local cognito-idp describe-user-pool-client \
+  --user-pool-id "$POOL_ID" \
+  --client-id "$SSO_CLIENT_ID" \
+  --query UserPoolClient.CallbackURLs \
+  --output text)"
+
+# Floci 1.5.20 omits explicit auth flows, providers, and callback URLs from
+# DescribeUserPoolClient. Validate them when exposed and always validate the
+# OAuth settings that the emulator persists.
+if ! text_list_is_absent_or_exact "$SSO_CLIENT_EXPLICIT_FLOWS" ALLOW_REFRESH_TOKEN_AUTH ||
+  ! text_list_is_absent_or_exact "$SSO_CLIENT_PROVIDERS" "$SSO_SUPPORTED_PROVIDER" ||
+  [ "$SSO_CLIENT_OAUTH_ENABLED" != "True" ] ||
+  ! text_list_is_exact "$SSO_CLIENT_OAUTH_FLOWS" code ||
+  ! text_list_is_exact "$SSO_CLIENT_OAUTH_SCOPES" openid email profile ||
+  ! text_list_is_absent_or_exact "$SSO_CLIENT_CALLBACKS" "$SSO_REDIRECT_URI"; then
+  echo "Cognito SSO app client does not match the isolated code-flow contract." >&2
+  exit 1
 fi
 
 ensure_cognito_user() {
@@ -559,6 +768,35 @@ if ! aws_local dynamodb describe-table --table-name "$WORKSPACE_ACCESS_TABLE" >/
     >/dev/null
 fi
 
+if ! aws_local dynamodb describe-table --table-name "$ENTERPRISE_IDENTITY_TABLE" >/dev/null 2>&1; then
+  aws_local dynamodb create-table \
+    --table-name "$ENTERPRISE_IDENTITY_TABLE" \
+    --attribute-definitions \
+      AttributeName=scopeKey,AttributeType=S \
+      AttributeName=recordKey,AttributeType=S \
+    --key-schema \
+      AttributeName=scopeKey,KeyType=HASH \
+      AttributeName=recordKey,KeyType=RANGE \
+    --billing-mode PAY_PER_REQUEST \
+    >/dev/null
+fi
+
+aws_local dynamodb wait table-exists --table-name "$ENTERPRISE_IDENTITY_TABLE"
+
+ENTERPRISE_IDENTITY_TTL_STATUS="$(aws_local dynamodb describe-time-to-live \
+  --table-name "$ENTERPRISE_IDENTITY_TABLE" \
+  --query TimeToLiveDescription.TimeToLiveStatus \
+  --output text 2>/dev/null || true)"
+case "$ENTERPRISE_IDENTITY_TTL_STATUS" in
+  ENABLED | ENABLING) ;;
+  *)
+    aws_local dynamodb update-time-to-live \
+      --table-name "$ENTERPRISE_IDENTITY_TABLE" \
+      --time-to-live-specification AttributeName=expiresAt,Enabled=true \
+      >/dev/null
+    ;;
+esac
+
 if ! aws_local dynamodb describe-table --table-name "$WORKSPACE_SEARCH_TABLE" >/dev/null 2>&1; then
   aws_local dynamodb create-table \
     --table-name "$WORKSPACE_SEARCH_TABLE" \
@@ -779,6 +1017,9 @@ COGNITO_USER_POOL_ID=$POOL_ID
 COGNITO_USER_POOL_NAME=$POOL_NAME
 COGNITO_USER_POOL_CLIENT_NAME=$CLIENT_NAME
 COGNITO_CLIENT_ID=$CLIENT_ID
+COGNITO_SSO_USER_POOL_CLIENT_NAME=$SSO_CLIENT_NAME
+COGNITO_SSO_CLIENT_ID=$SSO_CLIENT_ID
+COGNITO_SSO_REDIRECT_URI=$SSO_REDIRECT_URI
 COGNITO_TEST_USERNAME=$INITIAL_OWNER_USERNAME
 MUKUROJI_INITIAL_OWNER_USERNAME=$INITIAL_OWNER_USERNAME
 MUKUROJI_INITIAL_OWNER_EMAIL=$PROJECT_MEMBER_KEY
@@ -807,6 +1048,7 @@ MUKUROJI_PROJECT_DIRECTORY_ID=$WORKSPACE_DIRECTORY_ID
 MUKUROJI_AUDIT_EVENTS_TABLE=$AUDIT_EVENTS_TABLE
 MUKUROJI_AUDIT_RETENTION_DAYS=$AUDIT_RETENTION_DAYS
 MUKUROJI_WORKSPACE_ACCESS_TABLE=$WORKSPACE_ACCESS_TABLE
+ENTERPRISE_IDENTITY_TABLE_NAME=$ENTERPRISE_IDENTITY_TABLE
 DYNAMODB_ENDPOINT=$PUBLIC_ENDPOINT_URL
 EOF
 # Host-owned .env に secret を残し、この discovery file は container UID と異なる
@@ -814,12 +1056,13 @@ EOF
 chmod 644 "$COGNITO_ENV_TEMP_FILE"
 mv -f "$COGNITO_ENV_TEMP_FILE" "$COGNITO_ENV_FILE"
 
-echo "mukuroji Cognito ready: userPoolId=$POOL_ID clientId=$CLIENT_ID username=$INITIAL_OWNER_USERNAME adminGroup=$SYSTEM_ADMIN_GROUP"
+echo "mukuroji Cognito ready: userPoolId=$POOL_ID clientId=$CLIENT_ID ssoClientId=$SSO_CLIENT_ID username=$INITIAL_OWNER_USERNAME adminGroup=$SYSTEM_ADMIN_GROUP"
 echo "mukuroji DynamoDB ready: table=$DASHBOARD_TABLE item=summary"
 echo "mukuroji DynamoDB ready: table=$PROJECT_TASKS_TABLE legacyTasks=read-only"
 echo "mukuroji DynamoDB ready: table=$WORK_ITEMS_TABLE canonicalSeed=ready"
 echo "mukuroji DynamoDB ready: table=$PROJECT_DIRECTORY_TABLE workspaceDirectory=$WORKSPACE_DIRECTORY_ID"
 echo "mukuroji audit configured: table=$AUDIT_EVENTS_TABLE retentionDays=$AUDIT_RETENTION_DAYS"
 echo "mukuroji DynamoDB ready: table=$WORKSPACE_ACCESS_TABLE workspace=$WORKSPACE_DIRECTORY_ID"
+echo "mukuroji DynamoDB ready: table=$ENTERPRISE_IDENTITY_TABLE enterpriseIdentity=ready"
 echo "mukuroji DynamoDB ready: table=$WORKSPACE_SEARCH_TABLE searchAndSavedViews=ready"
 echo "mukuroji DynamoDB ready: table=$ANALYTICS_TABLE scheduleIndex=$ANALYTICS_SCHEDULE_INDEX"

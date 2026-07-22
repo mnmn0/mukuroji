@@ -3,7 +3,7 @@ import {
   createDefaultAnalyticsFilter,
   parseAnalyticsRouteState,
   serializeAnalyticsRouteState,
-} from '../src/analytics/queryState'
+} from '../src/analytics/model/queryState'
 
 describe('Analytics report URL state', () => {
   test('round-trips report, snapshot, filters, timezone, and builder mode canonically', () => {

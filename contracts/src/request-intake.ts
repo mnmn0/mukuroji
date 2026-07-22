@@ -1,10 +1,20 @@
-import type { FileScanStatus, WorkItemPriority } from './index'
+import type { WorkItemPriority } from './work-items'
 
 /** 現在の Request Form schema version です。 */
 export const REQUEST_FORM_SCHEMA_VERSION = 1 as const
 
 /** 現在の Request Submission schema version です。 */
 export const REQUEST_SUBMISSION_SCHEMA_VERSION = 1 as const
+
+/**
+ * Object scan と利用可否をまとめた状態です。
+ */
+export type FileScanStatus =
+  | 'pending'
+  | 'scanning'
+  | 'available'
+  | 'blocked'
+  | 'failed'
 
 /** Request form と confirmation で利用できる locale です。 */
 export type RequestLocale = 'ja' | 'en'

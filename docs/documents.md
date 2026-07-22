@@ -33,7 +33,7 @@ embed、diagram を canonical block として保存します。Whiteboard は ob
 
 Client は `baseRevision`、`clientId`、一意な `operationId` を付けて operation batch を送ります。
 Server は block / object / connector / frame / relation ごとの最終更新 revision を比較します。
-Batch は DynamoDB transaction と backlink 更新を常に atomic に収めるため最大 4 operation です。
+Batch は DynamoDB transaction と backlink 更新を常に atomic に収めるため最大 14 operation です。
 
 - 別 element の更新は stale な `baseRevision` からでも現在 snapshot へ merge します。
 - 同じ element が更新済みの場合は batch 全体を `409 DocumentOperationConflict` で拒否します。

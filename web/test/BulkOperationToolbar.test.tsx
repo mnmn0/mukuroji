@@ -4,8 +4,8 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import {
   BulkOperationToolbar,
   type BulkOperationSelection,
-} from '../src/bulk-operations/BulkOperationToolbar'
-import { BulkOperationResultPanel } from '../src/bulk-operations/BulkOperationResultPanel'
+} from '../src/bulk-operations/ui/BulkOperationToolbar'
+import { BulkOperationResultPanel } from '../src/bulk-operations/ui/BulkOperationResultPanel'
 import {
   clearSucceededBulkSelection,
   createBulkEditPatch,
@@ -14,8 +14,8 @@ import {
   isBulkOperationPreviewRequestCurrent,
   updateBulkItemSelection,
   updateVisibleBulkSelection,
-} from '../src/bulk-operations/helpers'
-import { createTranslator } from '../src/i18n'
+} from '../src/bulk-operations/model/bulkOperation'
+import { createTranslator } from '../src/shared/i18n/i18n'
 
 const selections: BulkOperationSelection[] = [
   {

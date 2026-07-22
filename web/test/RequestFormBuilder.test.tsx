@@ -5,8 +5,8 @@ import { requestFormFixture } from '../src/requests/fixtures'
 import {
   normalizeRequestForm,
   synchronizeRequestRoutingTeam,
-} from '../src/requests/model'
-import { RequestFormBuilder } from '../src/requests/RequestFormBuilder'
+} from '../src/requests/model/requestForm'
+import { RequestFormBuilder } from '../src/requests/ui/RequestFormBuilder'
 
 describe('RequestFormBuilder', () => {
   test('disables the complete builder while a mutation is pending', () => {

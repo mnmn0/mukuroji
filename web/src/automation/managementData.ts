@@ -7,7 +7,7 @@ import type {
 } from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../projects/api'
 import { getWorkItemConfiguration } from '../work-items/api'
-import type { AutomationWorkflowTargetOption } from './AutomationManagementPanel'
+import type { AutomationWorkflowTargetOption } from './ui/AutomationManagementPanel'
 import {
   getAutomationExecutions,
   getAutomationInboundWebhookEndpoints,

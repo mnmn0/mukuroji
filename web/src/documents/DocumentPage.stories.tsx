@@ -16,7 +16,7 @@ import {
   type DocumentScreenActions,
   type DocumentScreenData,
 } from './DocumentPage'
-import { applyDocumentOperationsLocally } from './model'
+import { applyDocumentOperationsLocally } from './model/document'
 
 const screenData: DocumentScreenData = {
   backlinks: documentBacklinkFixtures,

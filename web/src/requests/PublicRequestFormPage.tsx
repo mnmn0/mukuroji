@@ -7,15 +7,15 @@ import type {
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useLocation, useParams } from 'react-router'
-import { createMutationRequestRunner } from '../api/mutationHeaders'
+import { createMutationRequestRunner } from '../shared/api/mutationHeaders'
 import { getAuthSession } from '../auth/session'
 import {
   createTranslator,
   getInitialLocale,
   setLocalePreference,
   type Locale,
-} from '../i18n'
-import { PublicPageShell } from '../pages/PublicPageShell'
+} from '../shared/i18n/i18n'
+import { PublicPageShell } from '../features/public-site/ui/PublicPageShell'
 import {
   createRequestAttachmentUpload,
   getPublicRequestForm,
@@ -29,7 +29,7 @@ import {
   normalizePublicRequestForm,
   type PublicRequestFormModel,
   type RequestBuilderField,
-} from './model'
+} from './model/requestForm'
 import {
   filterVisibleRequestAnswers,
   getVisibleRequestFieldIds,
@@ -40,7 +40,7 @@ import {
   selectRequestAttachmentClaims,
   updatePendingRequestAttachmentFields,
   validateVisibleRequestAnswers,
-} from './requestFormLogic'
+} from './model/requestFormLogic'
 
 const publicRequestSessionRenewalLeadMs = 30_000
 

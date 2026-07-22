@@ -4,7 +4,7 @@ import {
   publicRequestFormFixture,
   requestSubmissionReceiptFixture,
 } from '../src/requests/fixtures'
-import { normalizePublicRequestForm } from '../src/requests/model'
+import { normalizePublicRequestForm } from '../src/requests/model/requestForm'
 import { PublicRequestFormScreen } from '../src/requests/PublicRequestFormPage'
 
 test('uses custom trimmed validation without conflicting native text constraints', () => {

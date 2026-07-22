@@ -11,7 +11,7 @@ import {
   updatePendingRequestAttachmentFields,
   validateVisibleRequestAnswers,
   type RequestFormLogicVersion,
-} from '../src/requests/requestFormLogic'
+} from '../src/requests/model/requestFormLogic'
 
 const formVersion: RequestFormLogicVersion = {
   defaultLocale: 'ja',

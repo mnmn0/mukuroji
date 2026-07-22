@@ -9,7 +9,11 @@
 | Parameter | Required | Description |
 | --- | --- | --- |
 | `CognitoUserPoolId` | yes | 既存 Cognito user pool ID。access token の issuer と IAM scope に使います。 |
-| `CognitoUserPoolClientId` | yes | client secret なし、`ALLOW_USER_PASSWORD_AUTH` 有効の既存 public app client ID。access token の `client_id` と照合します。 |
+| `CognitoUserPoolClientId` | yes | client secret なし、`ALLOW_USER_PASSWORD_AUTH` 有効の既存 password/API public app client ID。access token の `client_id` と照合します。 |
+| `CognitoSsoUserPoolClientId` | yes | Password client とは異なる、Hosted UI authorization-code + PKCE 専用 public app client ID。 |
+| `CognitoHostedUiDomain` | yes | Enterprise SSO authorization-code flow に使う Cognito managed login domain。 |
+| `CognitoSsoRedirectUri` | yes | App client callback に完全一致で登録した HTTPS SPA callback URI。 |
+| `CognitoEnterpriseIdpName` | yes | Cognito に接続した SAML/OIDC provider 名。 |
 | `WorkspaceDirectoryId` | yes | Cognito の両 custom attribute と DynamoDB partition に使う canonical ID。例: `workspace#production`。 |
 | `WorkspaceAuditPseudonymKey` | yes | Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。`openssl rand -hex 32` などで生成し、`NoEcho` で Lambda に渡してbackfillにも同じ値を設定します。 |
 | `InitialOwnerEmail` | yes | lowercase の初期 owner email。Workspace/member/alias key に使います。 |
@@ -20,6 +24,8 @@
 | `RequestRateLimitPerHour` | no | public request capability ごとの1時間あたり submit 上限。既定値は 10、範囲は 1–10000 です。 |
 | `RequestEmailWebhookSecret` | yes | email adapter から渡される envelope の署名検証に使う 32–256 文字の secret。CloudFormation では `NoEcho` です。 |
 | `RequestTokenHashSecret` | yes | public form / reply capability token を保存前に hash する 32–256 文字の secret。CloudFormation では `NoEcho` です。 |
+| `EnterpriseIdentityTokenHashSecret` | yes | SCIM bearer token と service account credential の kind・Workspace・credential-ID domain-separated digest、および10分間の idempotency response recovery 用 token 導出に使う32–256文字の安定した secret。CloudFormation では `NoEcho` です。 |
+| `EnterpriseSsoStateSecret` | yes | 短命な OAuth state を署名する専用の32–256文字 secret。CloudFormation では `NoEcho` です。 |
 | `FileRetentionDays` | no | soft delete 後の metadata と S3 noncurrent version の保持日数。既定値は 30 日です。live current object の有効期限ではありません。 |
 | `FileUploadUrlTtlSeconds` | no | direct upload URL の有効秒数。既定値 600、範囲 60–3600 秒です。bucket policy もこの上限より古い upload 署名を拒否します。 |
 | `FileDownloadUrlTtlSeconds` | no | malware scan 済み file の download URL 有効秒数。既定値 300、範囲 60–3600 秒です。bucket policy もこの上限より古い download 署名を拒否します。 |
@@ -45,6 +51,9 @@
 - `NotificationsTableName`, `CollaborationProjectionDlqUrl`, `NotificationScheduleDlqUrl`
 - `AnalyticsScheduleDlqUrl`
 - `AuditEventsTableName`, `ProcessedAuditEventsTableName`
+- `EnterpriseIdentityMaintenanceDlqUrl`
+- `EnterpriseScimGroupJobFunctionName`, `EnterpriseScimGroupJobDlqUrl`
+- `EnterpriseIdentityTableName`（Workspace generation/`CONTROL` checkpoint、global domain claim、SSO/policy/role、SCIM projection、provisioning run の store。Enterprise Identity 専用 GSI は持ちません）
 - `WorkItemCollaborationTableName`, `RealtimeSessionsTableName`, `RealtimeWebSocketUrl`
 - `WorkspaceSearchTableName`（検索文書、saved view、ユーザー別 view preference）
 - `DeveloperPlatformTableName`, `DeveloperPlatformLookupIndexName`
@@ -383,18 +392,30 @@ DLQ の envelope は署名 timestamp が5分で失効するため、そのまま
 
 ### 1. Cognito と値を準備する
 
-初期 owner は既に Cognito に存在し、enabled / `CONFIRMED` である必要があります。app client は client secret なしで `ALLOW_USER_PASSWORD_AUTH` を許可します。
+初期 owner は既に Cognito に存在し、enabled / `CONFIRMED` である必要があります。
+Password/API client は client secret なしで `ALLOW_USER_PASSWORD_AUTH` を許可します。SSO client は
+別の client ID とし、client secret なし、`ExplicitAuthFlows=ALLOW_REFRESH_TOKEN_AUTH` のみ、
+OAuth server 有効、flow は `code` のみ、scope は `openid email profile` のみ、callback は
+`COGNITO_SSO_REDIRECT_URI` の1件だけ、`SupportedIdentityProviders` は
+`COGNITO_ENTERPRISE_IDP_NAME` の1件だけにします。Native user-pool login の `COGNITO` を
+SSO client に追加しないでください。
 
-`InitialOwnerUsername` が lowercase の `InitialOwnerEmail` と異なる場合、login form から email で認証できるよう、user pool の `UsernameAttributes` または `AliasAttributes` に `email` が必要です。`AliasAttributes=email` を使う場合は、初期 owner の Cognito `email_verified=true` も必須です。また app client の `ReadAttributes` を明示設定する場合は、`email`、`custom:directory_id`、`custom:workspace_id` をすべて含めます。`ReadAttributes` 自体が未設定の場合は Cognito default を利用できます。準備 script はこれらを検証し、不足時は Cognito や DynamoDB を更新する前に停止します。
+`InitialOwnerUsername` が lowercase の `InitialOwnerEmail` と異なる場合、login form から email で認証できるよう、user pool の `UsernameAttributes` または `AliasAttributes` に `email` が必要です。`AliasAttributes=email` を使う場合は、初期 owner の Cognito `email_verified=true` も必須です。また両 app client の `ReadAttributes` を明示設定する場合は、`email`、`custom:directory_id`、`custom:workspace_id` をすべて含めます。`ReadAttributes` 自体が未設定の場合は Cognito default を利用できます。準備 script は両 client と external IdP を含むこれらの contract を検証し、不足時は Cognito や DynamoDB を更新する前に停止します。
 
 ```sh
 export AWS_REGION=<region>
 export COGNITO_USER_POOL_ID=<user-pool-id>
-export COGNITO_USER_POOL_CLIENT_ID=<public-app-client-id>
+export COGNITO_USER_POOL_CLIENT_ID=<password-public-app-client-id>
+export COGNITO_SSO_USER_POOL_CLIENT_ID=<dedicated-sso-public-app-client-id>
+export COGNITO_HOSTED_UI_DOMAIN=<pool-prefix>.auth.<region>.amazoncognito.com
+export COGNITO_SSO_REDIRECT_URI=https://app.example.com/auth/sso/callback
+export COGNITO_ENTERPRISE_IDP_NAME=<cognito-idp-name>
 export MUKUROJI_WORKSPACE_DIRECTORY_ID=<workspace-directory-id>
 export MUKUROJI_INITIAL_OWNER_EMAIL=<lowercase-owner@example.com>
 export MUKUROJI_INITIAL_OWNER_USERNAME=<cognito-username>
 export MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY="$(openssl rand -hex 32)"
+export ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET="$(openssl rand -hex 32)"
+export ENTERPRISE_SSO_STATE_SECRET="$(openssl rand -hex 32)"
 export MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET=<at-least-32-random-characters>
 export MUKUROJI_REQUEST_TOKEN_HASH_SECRET=<different-at-least-32-random-characters>
 
@@ -402,6 +423,17 @@ bash scripts/prepare-workspace-cognito.sh
 ```
 
 `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` は環境作成時に一度だけ生成し、64桁の小文字hex値を secret store に保存して、以後の diff/deploy と audit backfill で再利用します。CloudFormation parameter とAPI/backfillのいずれも、この形式以外をfail-closedで拒否します。
+`ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET` も環境ごとに固定し、CI/CD の secret store から渡します。
+Raw SCIM/service credential は DynamoDB に保存しません。同じ idempotency request の応答消失時だけ
+10分以内は同じ token を決定的に回復でき、期限後は新しい logical rotate が必要です。
+Enterprise SSO を有効化する場合は、専用 app client に
+`COGNITO_ENTERPRISE_IDP_NAME` と同名の SAML/OIDC provider だけを接続します。
+CDK は既存 user pool と2つの app client ID を受け取り、同じ client ID の指定を deploy 前に拒否して
+Lambda へ渡しますが、それらの外部設定を上書きしません。`prepare-workspace-cognito.sh` が事前に
+code-flow/provider/callback contract を fail closed で検証し、API も SSO start/exchange ごとに
+current Cognito client contract を再検証します。
+通常 deploy で変更すると既存の SCIM/service account credential がすべて失効するため、rotation は
+credential 再発行を伴う独立した運用として実施してください。
 
 この script は user pool / client / owner を検証し、不足している mutable custom attribute `directory_id` と `workspace_id` を追加して、owner の `custom:directory_id` / `custom:workspace_id` を同じ Workspace ID に設定します。Cognito schema へ追加した custom attribute は削除できないため、値と対象 account を先に確認してください。再実行は同じ値へ収束します。
 
@@ -437,8 +469,14 @@ bun run cdk:synth
 bun --filter cdk cdk diff CdkStack \
   --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
   --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
+  --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
+  --parameters CognitoHostedUiDomain="$COGNITO_HOSTED_UI_DOMAIN" \
+  --parameters CognitoSsoRedirectUri="$COGNITO_SSO_REDIRECT_URI" \
+  --parameters CognitoEnterpriseIdpName="$COGNITO_ENTERPRISE_IDP_NAME" \
   --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
   --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
+  --parameters EnterpriseIdentityTokenHashSecret="$ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET" \
+  --parameters EnterpriseSsoStateSecret="$ENTERPRISE_SSO_STATE_SECRET" \
   --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
   --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME" \
   --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
@@ -448,8 +486,14 @@ bun --filter cdk cdk diff CdkStack \
 bun --filter cdk cdk deploy CdkStack \
   --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
   --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
+  --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
+  --parameters CognitoHostedUiDomain="$COGNITO_HOSTED_UI_DOMAIN" \
+  --parameters CognitoSsoRedirectUri="$COGNITO_SSO_REDIRECT_URI" \
+  --parameters CognitoEnterpriseIdpName="$COGNITO_ENTERPRISE_IDP_NAME" \
   --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
   --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
+  --parameters EnterpriseIdentityTokenHashSecret="$ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET" \
+  --parameters EnterpriseSsoStateSecret="$ENTERPRISE_SSO_STATE_SECRET" \
   --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
   --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME" \
   --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
@@ -479,7 +523,9 @@ export PROJECT_DIRECTORY_TABLE_NAME="$(aws cloudformation describe-stacks \
 bash scripts/validate-workspace-bootstrap.sh
 ```
 
-validator は Cognito pool/client、owner status/email、両 custom attribute、Workspace metadata/owner/alias、全 seed project の manager row を consistent read で照合します。
+`prepare-workspace-cognito.sh` は2つの client と external IdP contract を検証します。Bootstrap
+validator は Cognito pool/password client、owner status/email、両 custom attribute、
+Workspace metadata/owner/alias、全 seed project の manager row を consistent read で照合します。
 
 次に owner の新しい Cognito access token を用意し、4 経路がすべて `200` かつ同じ Workspace response を返すことを確認します。古い token は group / identity 更新前の session を表す可能性があるため再利用しません。
 
@@ -662,9 +708,26 @@ aws dynamodb wait table-exists \
 - Function URL、HTTP API、Hono CORS は同じ `TaskApiAllowedOrigins` に揃えます。本番で local default を使いません。
 - Lambda IAM は stack table、`workspaces/` file object prefix、指定 user pool に限定します。API role に bucket-wide `ListBucket` は付与しません。
 - Email ingestion Lambda は HTTP route を持たず、Request Intake table と failure DLQ 以外の data-plane 権限を持ちません。
-- stack が管理するすべての DynamoDB table は `Retain` + PITR enabled です。FileProofing / Request Intake table は `expiresAt`、Work Item configuration table は `expiresAtEpochSeconds` TTL も有効です。
+- Enterprise SCIM group reconciliation は API Lambda と concurrency を共有しない専用 Lambda で実行します。
+  Worker は60秒 timeout、reserved concurrency 5、batch size 1で既存DLQへ失敗を送り、API Lambda は
+  Stream権限を持たず15秒 timeoutを維持します。Worker IAMはEnterprise Identity/Workspace Access/
+  Planning/Audit/Project Directoryの必要なGet/Query/transaction操作と、指定Cognito user poolの
+  enable/disable/global sign-outに限定します。
+- stack が管理するすべての DynamoDB table は `Retain` + PITR enabled です。Enterprise Identity
+  table は deletion protection と `expiresAt` TTL を有効にし、Workspace partition と
+  conditional domain claim で一意性を保ちます。Entity delta を generation ごとに staging し、
+  `CONTROL` revision/head、domain claim、audit event の transaction を commit point とします。
+  16世代で CONTROL stream の15分 maintenance Lambda が sealed snapshot を非同期作成し、64世代の
+  hard bound までに CAS compaction します。旧 generation は in-flight read 用に1時間残してから
+  `expiresAt` を付与し、stream retry/DLQ で取りこぼしを回復します。Worker は credential secret を
+  受け取らず、IAM は対象 table の Get/Query/Put/Update/BatchWrite と stream read に限定します。
+  専用の lookup/due GSI、SCIM/RUN partition、worker fencing token はありません。FileProofing /
+  Request Intake table は `expiresAt`、Work Item configuration table は
+  `expiresAtEpochSeconds` TTL も有効です。
 - File bucket は public access を遮断し、TLS / SSE-S3 / versioning / `Retain` / malware tag-based download deny を有効にします。
-- Lambda は `server/src/index.ts` を deploy 時に bundle します。旧 inline Lambda copy はありません。
+- API Lambda は `server/src/handlers/api.handler.ts`、SCIM group worker は
+  `server/src/handlers/enterprise-scim-group-job-worker-handler.ts` を deploy 時に個別bundleします。旧 inline
+  Lambda copy はありません。
 
 ## Commands
 

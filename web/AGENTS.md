@@ -150,6 +150,50 @@ shared/
 
 全ファイルを一度に `features` / `entities` へ移動する大規模変更は避け、対象画面や API の変更に合わせて移行します。
 
+## `model/` と `ui/` の分離
+
+業務領域直下へ model 処理と React component を混在させず、責務に応じて `<area>/model/` と
+`<area>/ui/` に分けます。route component は `pages/`、HTTP 通信は `api/`、SWR は
+`queries/` / `mutations/` に置き、この分離へ混ぜません。
+
+### `model/`
+
+`model/` には React に依存しない業務型、入力の正規化、selector、権限判定、並び替え、
+表示用 model・label の生成などを置きます。
+
+- `react`、`react-router`、`swr`、DOM API を import しない
+- `ui/`、`queries/`、`mutations/` の型や内部実装へ依存しない
+- API response type を利用してよいが、HTTP 通信や cache 操作は行わない
+- `model.ts` のような領域全体を抱える名前を避け、`requestForm.ts`、
+  `workItemDisplay.ts` のように対象を表す
+- model 同士を分割するときは、画面単位ではなく一緒に変更される業務概念を単位にする
+
+### `ui/`
+
+`ui/` には React component、component 専用の表示型・label・focus helper、および対応する
+Storybook story を置きます。
+
+- component と story は同じ `ui/` 配下に置く
+- pure view は data と action を props で受け取り、HTTP/SWR の詳細を知らない
+- query/mutation と view を結ぶ component は `*Container` として区別してよい
+- route parameter、画面遷移、ページ全体の loading/error 境界を持つ component は
+  `ui/` ではなく `pages/` に置く
+- 複数領域で再利用する業務 UI は entity、業務知識を持たない UI は `shared/ui/` へ移す
+- `ui.ts` のような集約ファイルを領域直下へ置かず、公開面が必要なら `ui/index.ts` を使う
+
+依存方向は `pages → ui → model` を基本とし、`model/` から React component へ逆依存させません。
+
+### 型の配置
+
+領域直下の `types.ts` や汎用的な `types/` フォルダは作らず、型を所有する責務と同じ module に
+置きます。
+
+- Component props と表示専用型は、対応する `ui/` module に置く
+- 業務状態、selector、入力正規化で共有する型は、対象概念の `model/<concept>.ts` に置く
+- Endpoint 専用 request / response 型は、所有する `api/<resource>.ts` に置く
+- Web と Server が共有する契約型は、`contracts/src/<domain>.ts` に置く
+- 循環を避けるために型を別 module へ移す場合も、`types.ts` ではなく型が表す概念で命名する
+
 ## API と SWR の分離
 
 HTTP 通信の実装と、React/SWR による取得状態・キャッシュ管理を分離します。詳細は [`docs/frontend-data-access.md`](../docs/frontend-data-access.md) を参照してください。
@@ -168,6 +212,35 @@ HTTP 通信の実装と、React/SWR による取得状態・キャッシュ管�
 
 API 関数は可能な限り認証情報や locale などを明示的な引数で受け取ります。共通の通信処理は `shared/api/` に置きます。
 
+業務領域の API は `<area>/api.ts` へ集約せず、リソースまたは一緒に変更される機能単位で
+`<area>/api/<resource-or-capability>.ts` に分割します。
+
+```text
+projects/
+├── api/
+│   ├── directory.ts
+│   ├── members.ts
+│   ├── users.ts
+│   └── index.ts
+├── queries/
+└── mutations/
+```
+
+- `get.ts` / `post.ts` のような HTTP method 単位では分割しない
+- `DashboardApi.ts` のような page 単位では分割しない
+- 同じリソースを扱う取得・作成・更新・削除は同じ API module に置く
+- ファイル名には `common.ts`、`helpers.ts`、`management.ts` のような責務が広がりやすい名前を使わない
+- endpoint 専用の request / response type は、その endpoint を所有する API module に置く
+- 複数の API module で共有する業務型は `model/`、通信基盤は `shared/api/` に置く
+- `api/index.ts` は領域の公開 API を明示するために利用してよい。領域内の module から
+  `index.ts` を参照せず、循環依存を避けるため具体的な sibling module を import する
+- 新しいコードでは、公開範囲を狭く保てる場合は `<area>/api/members` のように具体的な
+  module を直接 import する
+
+複数 endpoint の呼び出し、画面向けのデータ集約、SWR key や cache 操作は `api/` に置かず、
+それぞれ `queries/` または `mutations/` に置きます。API module の分割と共通 transport の
+抽出は別の変更として扱い、一度に無関係な通信処理まで書き換えません。
+
 ### `queries/`
 
 `queries/` は `useSWR` を使う参照用 wrapper を置きます。
@@ -180,6 +253,12 @@ API 関数は可能な限り認証情報や locale などを明示的な引数�
 
 ページから `useSWR` を直接呼ばず、`useProjectDirectory`、`usePlanningSnapshot` のような業務上意味のある hook を利用します。
 
+- query hook は `<area>/queries/use<ResourceOrCapability>.ts` に置く
+- SWR key、取得条件、pagination、polling、deduplication は query hook の外へ公開しない
+- 複数 endpoint をまとめる React 非依存の loader も、その取得結果を所有する `queries/` に置く
+- `useData.ts`、`useQueries.ts` のような対象が分からない名前を使わない
+- page、UI、領域直下の `use*.ts` に `useSWR` / `useSWRInfinite` を残さない
+
 ### `mutations/`
 
 `mutations/` は更新 API と更新後の cache 整合性をまとめる場所です。
@@ -190,6 +269,13 @@ API 関数は可能な限り認証情報や locale などを明示的な引数�
 - 複数画面で同じ更新処理を共有する
 
 単純なフォーム送信で cache 更新が不要なら、feature 内の mutation/controller から API 関数を直接呼んでも構いません。ページや汎用 UI から直接 API を呼ばないでください。`useSWRMutation` を使うか、API 関数と `mutate` を組み合わせるかは、cache 更新の必要性と処理の複雑さで決めます。
+
+- mutation hook/controller は `<area>/mutations/use<ActionOrCapability>.ts` に置く
+- 更新処理は必要な query hook またはその key を利用し、page に cache key を再定義しない
+- 取得と更新をまとめて UI 向け controller を返す場合は `mutations/` に置き、取得部分は
+  `queries/` の hook を組み合わせる
+- `mutation.ts` や `useMutations.ts` が複数の無関係な更新を持つ場合は、resource/capability 単位へ分割する
+- mutation から page、UI、別 feature の内部実装を import しない
 
 依存方向は次の通りです。
 
@@ -239,12 +325,15 @@ shared
 次の依存を作りません。
 
 - `shared` から `pages`、`features`、`entities` を import する
+- `shared` から既存の業務領域フォルダや `app` を import する
 - `entities` から `features` や `pages` を import する
 - feature から別 feature の page や内部 UI を直接 import する
 - page から別 page を import する
 - 業務領域の内部実装を、無関係な領域から直接参照する
 
 ページは feature、entity、shared を組み立ててよいですが、業務操作や複雑な取得処理は feature の public な入口を通します。共有が必要な内部実装は、entity、`shared/ui`、または共通の model/API へ責務を移します。
+
+`.dependency-cruiser.cjs` は `shared`、`model`、`api`、`pages` と業務領域の依存方向を検査します。Storybook story から page entry point への依存だけは runtime の page 間依存ではないため、page 間ルールの対象外です。新しい境界違反は ignore / exclude に追加せず、所有する下位 layer へ実装を移して解消します。
 
 ## ページと feature の責務
 
@@ -330,6 +419,15 @@ error を空データとして扱ったり、例外を握りつぶしたりし�
 - Storybook 用 fixture と本番 API の取得処理を同じファイルへ混在させない
 - インタラクティブな UI は semantic HTML を優先し、label、focus、keyboard 操作、適切な accessible name を用意する
 - ARIA 属性は native HTML semantics で表現できない場合に限って追加し、role と keyboard 操作をセットで実装する
+
+### i18n message dictionary
+
+- message は `src/shared/i18n/locales/<locale>/<domain>.ts` に置き、locale と業務 domain の両方で分割する
+- domain file は `work-items.ts` のような kebab-case、export する辞書は `workItemsMessages` のような camelCase + `Messages` で命名する
+- key は `<namespace>.<feature>.<message>` を基本とし、`tasks.*`、`documents.*` のように所有する業務 namespace を先頭に置く
+- message を追加・移動するときは `ja` と `en` の同名 domain file を同時に更新し、各 locale の `index.ts` で集約する
+- 日本語辞書から `MessageKey` を導出し、英語辞書は不足 key と余分な key の両方を compile-time で拒否する構成を維持する
+- `i18n.ts` へ domain message を直接追加したり、未定義 key を別 locale へ暗黙 fallback させたりしない
 
 ## テスト
 

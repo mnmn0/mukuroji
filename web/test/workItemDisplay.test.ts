@@ -4,16 +4,16 @@ import {
   WORK_ITEM_SCHEMA_VERSION,
   type CanonicalWorkItem,
 } from '@mukuroji/contracts'
-import type { MessageKey } from '../src/i18n'
+import type { MessageKey } from '../src/shared/i18n/i18n'
 import {
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
-} from '../src/issues/workItemDisplay'
+} from '../src/issues/model/workItemDisplay'
 import {
   createCustomFieldErrorMessages,
   filterWorkItemsByTeam,
   readSelectedRelationGraphRevision,
-} from '../src/work-items/workItemDisplay'
+} from '../src/work-items/model/workItemDisplay'
 
 describe('Work Item display helpers', () => {
   test('uses the canonical literal title', () => {

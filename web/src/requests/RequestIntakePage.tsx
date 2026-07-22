@@ -1,56 +1,57 @@
 import type {
   RequestForm,
   RequestSubmissionActionInput,
-  RequestSubmissionPage,
 } from '@mukuroji/contracts'
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router'
-import useSWR from 'swr'
-import useSWRInfinite from 'swr/infinite'
-import { createMutationRequestRunner } from '../api/mutationHeaders'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useLocation, useNavigate, useSearchParams } from 'react-router'
+import { createMutationRequestRunner } from '../shared/api/mutationHeaders'
 import {
   canManageWorkspaceStructure,
-  getCurrentUser,
 } from '../auth/api'
+import { useCurrentUser } from '../auth/queries/useCurrentUser'
+import { resolveEnterpriseSessionErrorsAction } from '../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession } from '../auth/session'
-import { useWorkspaceCommandMenu } from '../commands/WorkspaceCommandMenuContext'
+import { useWorkspaceCommandMenu } from '../commands/ui/WorkspaceCommandMenuContext'
 import {
   MobileSidebarButton,
-  MobileSidebarDrawer,
-  Sidebar,
+  WorkspaceSidebar,
   type SidebarNavId,
   type SidebarTeamViewId,
-} from '../components/sidebar'
+} from '../shared/ui/sidebar'
 import {
   createSidebarLabels,
   createTranslator,
   getInitialLocale,
   type Locale,
-} from '../i18n'
+} from '../shared/i18n/i18n'
 import {
-  getProjectDirectory,
   type ProjectDirectoryTeam,
 } from '../projects/api'
+import { useProjectDirectory } from '../projects/queries/useProjectDirectory'
 import {
   createProjectIssuesPath,
   createTeamViewPath,
   workspaceNavPaths,
   type RequestsView,
-} from '../routes/paths'
-import { getWorkItemConfiguration } from '../work-items/api'
+} from '../shared/routing/paths'
+import {
+  useWorkItemConfiguration,
+} from '../work-items/queries/useWorkItemConfigurations'
 import {
   applyRequestSubmissionAction,
   createRequestAttachmentAccess,
   createRequestForm,
-  getRequestForm,
-  getRequestForms,
-  getRequestQueue,
-  getRequestSubmission,
   publishRequestForm,
   updateRequestForm,
 } from './api'
-import { getRequestFormEditorInstanceKey } from './editorState'
-import { RequestFormBuilder } from './RequestFormBuilder'
+import {
+  useRequestForm,
+  useRequestForms,
+  useRequestQueue,
+  useRequestSubmission,
+} from './queries/useRequestIntakeQueries'
+import { getRequestFormEditorInstanceKey } from './model/editorState'
+import { RequestFormBuilder } from './ui/RequestFormBuilder'
 import {
   createEmptyRequestFormDraft,
   createRequestFormInput,
@@ -59,8 +60,8 @@ import {
   persistAndPublishRequestForm,
   updateRequestFormInput,
   type RequestFormDraftModel,
-} from './model'
-import { RequestQueue } from './RequestQueue'
+} from './model/requestForm'
+import { RequestQueue } from './ui/RequestQueue'
 
 const emptyTeams: ProjectDirectoryTeam[] = []
 const emptyForms: RequestForm[] = []
@@ -73,6 +74,7 @@ const apiSWRConfig = {
  * Request intake queue と form builder を認証済み Workspace shell 内に描画します。
  */
 export function RequestIntakePage() {
+  const location = useLocation()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const mutationRunner = useRef(createMutationRequestRunner()).current
@@ -80,32 +82,30 @@ export function RequestIntakePage() {
   const [locale] = useState<Locale>(() => getInitialLocale())
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
   const [actionErrorMessage, setActionErrorMessage] = useState<string>()
+  const [authenticatedApiError, setAuthenticatedApiError] = useState<unknown>()
+  const handleAuthenticatedApiError = useCallback((error: unknown) => {
+    setAuthenticatedApiError(() => error)
+  }, [])
   const commandMenu = useWorkspaceCommandMenu()
   const t = useMemo(() => createTranslator(locale), [locale])
   const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
   const accessToken = session?.accessToken
   const requestedView = searchParams.get('view') === 'forms' ? 'forms' : 'queue'
-  const currentUserKey = accessToken ? (['current-user', accessToken] as const) : null
   const {
     data: user,
     error: currentUserError,
     isLoading: isCurrentUserLoading,
-  } = useSWR(
-    currentUserKey,
-    ([, token]) => getCurrentUser(token),
-    apiSWRConfig,
-  )
-  const projectDirectoryKey = accessToken && user && !currentUserError
-    ? (['project-directory', accessToken, locale] as const)
-    : null
+  } = useCurrentUser(accessToken)
   const {
     data: teams = emptyTeams,
+    error: projectDirectoryError,
     isLoading: isProjectDirectoryLoading,
-  } = useSWR(
-    projectDirectoryKey,
-    ([, token, currentLocale]) => getProjectDirectory(token, currentLocale),
-    apiSWRConfig,
-  )
+  } = useProjectDirectory({
+    accessToken,
+    dedupingInterval: apiSWRConfig.dedupingInterval,
+    enabled: Boolean(user && !currentUserError),
+    locale,
+  })
   const canManageForms = canManageWorkspaceStructure(user)
   const activeView: RequestsView = requestedView === 'forms' && canManageForms
     ? 'forms'
@@ -117,31 +117,19 @@ export function RequestIntakePage() {
     mutate: mutateQueue,
     setSize: setQueuePageCount,
     size: queuePageCount,
-  } = useSWRInfinite(
-    (pageIndex, previousPage: RequestSubmissionPage | null) => {
-      if (!accessToken || !user || currentUserError || activeView !== 'queue') return null
-      if (pageIndex > 0 && !previousPage?.nextCursor) return null
-      return [
-        'request-queue',
-        accessToken,
-        pageIndex === 0 ? '' : previousPage?.nextCursor ?? '',
-      ] as const
-    },
-    ([, token, cursor]) => getRequestQueue(token, {
-      cursor: cursor || undefined,
-      limit: 50,
-    }),
-    apiSWRConfig,
+  } = useRequestQueue(
+    accessToken,
+    Boolean(user && !currentUserError && activeView === 'queue'),
   )
-  const formsKey = accessToken && user && !currentUserError && activeView === 'forms'
-    ? (['request-forms', accessToken] as const)
-    : null
   const {
     data: forms = emptyForms,
     error: formsError,
     isLoading: isFormsLoading,
     mutate: mutateForms,
-  } = useSWR(formsKey, ([, token]) => getRequestForms(token), apiSWRConfig)
+  } = useRequestForms(
+    accessToken,
+    Boolean(user && !currentUserError && activeView === 'forms'),
+  )
   const submissions = useMemo(
     () => {
       const normalized = (queuePages ?? []).flatMap((page) =>
@@ -156,34 +144,44 @@ export function RequestIntakePage() {
     queuePageCount > 0 && Boolean(queuePages) && queuePages?.[queuePageCount - 1] === undefined
   )
   const selectedSubmissionId = searchParams.get('submissionId') ?? submissions[0]?.id
-  const detailKey = accessToken && selectedSubmissionId && activeView === 'queue'
-    ? (['request-submission', accessToken, selectedSubmissionId] as const)
-    : null
   const {
     data: selectedSubmission,
     error: detailError,
     mutate: mutateSelectedSubmission,
-  } = useSWR(
-    detailKey,
-    ([, token, submissionId]) => getRequestSubmission(submissionId, token),
-    apiSWRConfig,
+  } = useRequestSubmission(
+    accessToken,
+    selectedSubmissionId,
+    activeView === 'queue',
   )
   const selectedFormId = searchParams.get('formId') ?? forms[0]?.id
-  const selectedFormKey = accessToken && selectedFormId && selectedFormId !== 'new' && activeView === 'forms'
-    ? (['request-form', accessToken, selectedFormId] as const)
-    : null
   const {
     data: selectedForm,
     error: selectedFormError,
     mutate: mutateSelectedForm,
-  } = useSWR(
-    selectedFormKey,
-    ([, token, formId]) => getRequestForm(formId, token),
-    apiSWRConfig,
+  } = useRequestForm(
+    accessToken,
+    selectedFormId,
+    activeView === 'forms',
   )
   const userLabel = user?.attributes.email ?? user?.attributes.name ?? user?.username ?? t('workspace.user.fallback')
   const userInitial = userLabel.trim().charAt(0).toUpperCase() || 'M'
-  const isLoading = !session || isCurrentUserLoading || Boolean(user && isProjectDirectoryLoading)
+  const currentUserErrorAction = resolveEnterpriseSessionErrorsAction(
+    currentUserError,
+    [
+      projectDirectoryError,
+      queueError,
+      formsError,
+      detailError,
+      selectedFormError,
+      authenticatedApiError,
+    ],
+    `${location.pathname}${location.search}${location.hash}`,
+  )
+  const isLoading =
+    !session ||
+    isCurrentUserLoading ||
+    Boolean(user && isProjectDirectoryLoading) ||
+    Boolean(currentUserError && currentUserErrorAction?.kind !== 'stay')
 
   useEffect(() => {
     document.documentElement.lang = locale
@@ -195,11 +193,17 @@ export function RequestIntakePage() {
   }, [navigate, session])
 
   useEffect(() => {
-    if (currentUserError) {
-      clearAuthSession()
-      navigate('/', { replace: true })
+    if (currentUserErrorAction?.redirectTo) {
+      if (currentUserErrorAction.clearSession) {
+        clearAuthSession()
+      }
+      navigate(currentUserErrorAction.redirectTo, { replace: true })
     }
-  }, [currentUserError, navigate])
+  }, [
+    currentUserErrorAction?.clearSession,
+    currentUserErrorAction?.redirectTo,
+    navigate,
+  ])
 
   const selectView = (view: RequestsView) => {
     setSearchParams(view === 'forms' ? { view: 'forms' } : {}, { replace: true })
@@ -221,6 +225,7 @@ export function RequestIntakePage() {
     if (!accessToken) return
 
     setActionErrorMessage(undefined)
+    setAuthenticatedApiError(undefined)
     try {
       const updated = await mutationRunner.run(
         `request-submission:${submissionId}:${input.action}`,
@@ -235,6 +240,7 @@ export function RequestIntakePage() {
       await mutateSelectedSubmission(updated, { revalidate: false })
       await mutateQueue()
     } catch (error) {
+      setAuthenticatedApiError(() => error)
       setActionErrorMessage(error instanceof Error ? error.message : t('requests.action.error'))
       throw error
     }
@@ -243,63 +249,40 @@ export function RequestIntakePage() {
   const handleOpenAttachment = async (submissionId: string, attachmentId: string) => {
     if (!accessToken) return
 
-    const access = await mutationRunner.run(
-      `request-attachment-access:${submissionId}:${attachmentId}`,
-      `${submissionId}:${attachmentId}`,
-      (context) => createRequestAttachmentAccess(
-        submissionId,
-        attachmentId,
-        accessToken,
-        context,
-      ),
-    )
-    openDownloadUrl(access.url)
+    setAuthenticatedApiError(undefined)
+    try {
+      const access = await mutationRunner.run(
+        `request-attachment-access:${submissionId}:${attachmentId}`,
+        `${submissionId}:${attachmentId}`,
+        (context) => createRequestAttachmentAccess(
+          submissionId,
+          attachmentId,
+          accessToken,
+          context,
+        ),
+      )
+      openDownloadUrl(access.url)
+    } catch (error) {
+      setAuthenticatedApiError(() => error)
+      throw error
+    }
   }
-
-  const sidebar = (
-    <Sidebar
-      activeNavId="requests"
-      className="max-[980px]:hidden"
-      labels={sidebarLabels}
-      onOpenSearch={commandMenu.open}
-      onSelectNav={selectNav}
-      onSelectProject={selectProject}
-      onSelectTeamView={selectTeamView}
-      teams={teams}
-    />
-  )
 
   return (
     <main className="workbench-shell flex h-svh min-h-0 overflow-hidden">
-      {sidebar}
-      <MobileSidebarDrawer
-        closeLabel={t('sidebar.mobileClose')}
-        dialogLabel={t('sidebar.mobileDialog')}
-        isOpen={isMobileSidebarOpen}
-        onClose={() => setIsMobileSidebarOpen(false)}
-      >
-        <Sidebar
-          activeNavId="requests"
-          labels={sidebarLabels}
-          onOpenSearch={() => {
-            setIsMobileSidebarOpen(false)
-            commandMenu.open?.()
-          }}
-          onSelectNav={(navId) => {
-            setIsMobileSidebarOpen(false)
-            selectNav(navId)
-          }}
-          onSelectProject={(projectId, teamId) => {
-            setIsMobileSidebarOpen(false)
-            selectProject(projectId, teamId)
-          }}
-          onSelectTeamView={(teamId, viewId) => {
-            setIsMobileSidebarOpen(false)
-            selectTeamView(teamId, viewId)
-          }}
-          teams={teams}
-        />
-      </MobileSidebarDrawer>
+      <WorkspaceSidebar
+        activeNavId="requests"
+        isMobileOpen={isMobileSidebarOpen}
+        labels={sidebarLabels}
+        mobileCloseLabel={t('sidebar.mobileClose')}
+        mobileDialogLabel={t('sidebar.mobileDialog')}
+        onMobileClose={() => setIsMobileSidebarOpen(false)}
+        onOpenSearch={commandMenu.open}
+        onSelectNav={selectNav}
+        onSelectProject={selectProject}
+        onSelectTeamView={selectTeamView}
+        teams={teams}
+      />
 
       <section className="workbench-main flex min-w-0 flex-1 flex-col overflow-hidden">
         <header className="workbench-header flex-none px-[clamp(20px,3vw,34px)] py-4">
@@ -328,6 +311,15 @@ export function RequestIntakePage() {
 
         {isLoading ? (
           <div className="grid min-h-0 flex-1 place-items-center text-sm font-semibold text-[var(--workbench-muted)]">{t('requests.loading')}</div>
+        ) : currentUserErrorAction?.kind === 'stay' ? (
+          <div className="min-h-0 flex-1 overflow-auto overscroll-contain px-[clamp(20px,3vw,34px)] py-5">
+            <p
+              className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700"
+              role="alert"
+            >
+              {t('requests.loadError')}
+            </p>
+          </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-auto overscroll-contain px-[clamp(20px,3vw,34px)] py-5">
             <div className="mb-5 flex flex-wrap gap-2 border-b border-[var(--workbench-border)] pb-3" role="tablist">
@@ -385,6 +377,7 @@ export function RequestIntakePage() {
                       selectedFormId === 'new' ? undefined : selectedForm,
                     )}
                     locale={locale}
+                    onAuthenticatedApiError={handleAuthenticatedApiError}
                     teams={teams}
                     onCreated={(form) => {
                       void mutateForms()
@@ -413,6 +406,7 @@ function RequestFormEditorContainer({
   accessToken,
   initialForm,
   locale,
+  onAuthenticatedApiError,
   onCreated,
   onUpdated,
   teams,
@@ -420,6 +414,7 @@ function RequestFormEditorContainer({
   accessToken: string
   initialForm?: RequestForm
   locale: Locale
+  onAuthenticatedApiError: (error: unknown) => void
   onCreated: (form: RequestForm) => void
   onUpdated: (form: RequestForm) => void
   teams: ProjectDirectoryTeam[]
@@ -434,14 +429,16 @@ function RequestFormEditorContainer({
   const [errorMessage, setErrorMessage] = useState<string>()
   const canEdit = initialForm?.capabilities.canEdit ?? true
   const canPublish = initialForm?.capabilities.canPublish ?? false
-  const configurationKey = accessToken && model.routing.teamId
-    ? (['request-routing-workflow', accessToken, model.routing.teamId] as const)
-    : null
-  const { data: resolvedConfiguration } = useSWR(
-    configurationKey,
-    ([, token, teamId]) => getWorkItemConfiguration(token, { kind: 'team', teamId }),
-    apiSWRConfig,
+  const { data: resolvedConfiguration, error: configurationError } = useWorkItemConfiguration(
+    accessToken,
+    model.routing.teamId,
   )
+
+  useEffect(() => {
+    if (configurationError) {
+      onAuthenticatedApiError(configurationError)
+    }
+  }, [configurationError, onAuthenticatedApiError])
 
   const save = async () => {
     setIsSaving(true)
@@ -474,6 +471,7 @@ function RequestFormEditorContainer({
         onCreated(created)
       }
     } catch (error) {
+      onAuthenticatedApiError(error)
       setErrorMessage(error instanceof Error ? error.message : t('requests.builder.saveError'))
       throw error
     } finally {
@@ -513,6 +511,7 @@ function RequestFormEditorContainer({
       setModel(normalizeRequestForm(published))
       onUpdated(published)
     } catch (error) {
+      onAuthenticatedApiError(error)
       setErrorMessage(error instanceof Error ? error.message : t('requests.builder.publishError'))
       throw error
     } finally {
