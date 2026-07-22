@@ -420,6 +420,15 @@ error を空データとして扱ったり、例外を握りつぶしたりし�
 - インタラクティブな UI は semantic HTML を優先し、label、focus、keyboard 操作、適切な accessible name を用意する
 - ARIA 属性は native HTML semantics で表現できない場合に限って追加し、role と keyboard 操作をセットで実装する
 
+### i18n message dictionary
+
+- message は `src/shared/i18n/locales/<locale>/<domain>.ts` に置き、locale と業務 domain の両方で分割する
+- domain file は `work-items.ts` のような kebab-case、export する辞書は `workItemsMessages` のような camelCase + `Messages` で命名する
+- key は `<namespace>.<feature>.<message>` を基本とし、`tasks.*`、`documents.*` のように所有する業務 namespace を先頭に置く
+- message を追加・移動するときは `ja` と `en` の同名 domain file を同時に更新し、各 locale の `index.ts` で集約する
+- 日本語辞書から `MessageKey` を導出し、英語辞書は不足 key と余分な key の両方を compile-time で拒否する構成を維持する
+- `i18n.ts` へ domain message を直接追加したり、未定義 key を別 locale へ暗黙 fallback させたりしない
+
 ## テスト
 
 - API 関数は React を起動せずにテストする
