@@ -3,6 +3,9 @@ import {
   CognitoServiceError,
 } from '../../modules/authentication'
 import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
+import {
+  DynamoDbDocumentAuthorizationRevisionMutationAdapter,
+} from '../../modules/documents/adapter-out/dynamodb/document-authorization'
 import { DynamoDbTeamIssuesClient } from '../../modules/work-items'
 import {
   createAnalyticsScheduleRenderer,
@@ -45,7 +48,10 @@ export function createProductionAnalyticsScheduleHandler() {
   const render = createAnalyticsScheduleRenderer({
     directory: new DynamoDbProjectDirectoryClient(),
     workItems: new DynamoDbTeamIssuesClient(),
-    workspaceAccess: new DynamoDbWorkspaceAccessClient(),
+    workspaceAccess: new DynamoDbWorkspaceAccessClient({
+      documentAuthorizationRevisionMutationPort:
+        new DynamoDbDocumentAuthorizationRevisionMutationAdapter(),
+    }),
     systemAdmin: {
       /**
        * Resolves current system-administrator membership through Cognito.

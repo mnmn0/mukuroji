@@ -1,5 +1,9 @@
 import { expect, test } from 'bun:test'
-import type { DocumentDetail, DocumentPermission, DocumentScope } from '@mukuroji/contracts'
+import type {
+  DocumentDetail,
+  DocumentPermission,
+  DocumentScope,
+} from '@mukuroji/contracts'
 import { resolveDocumentCapabilities } from './document-access'
 
 test('maps inherited Workspace and Project roles to Document capabilities', () => {

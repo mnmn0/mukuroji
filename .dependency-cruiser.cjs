@@ -178,6 +178,13 @@ module.exports = {
       to: { path: '^(?:node_modules/hono|server/src/(?:app/|handlers/))' },
     },
     {
+      name: 'server-documents-http-does-not-depend-on-dynamodb',
+      comment: 'Documents HTTP routes must use application ports instead of DynamoDB implementation details.',
+      severity: 'error',
+      from: { path: '^server/src/modules/documents/adapter-in/http/' },
+      to: { path: '^server/src/modules/documents/adapter-out/dynamodb/' },
+    },
+    {
       name: 'server-handlers-do-not-use-compatibility-index',
       severity: 'error',
       from: { path: '^server/src/handlers/' },
