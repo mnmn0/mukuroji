@@ -7,11 +7,20 @@ import {
 } from './audit'
 import {
   createApp,
+} from '../../app/createApp'
+import {
   createTestAppDependencies,
+  overrideAppDependencies,
+} from '../../app/composition/api-dependencies'
+import type {
+  AppDependencyOverrides,
+} from '../../app/composition/app-dependencies'
+import {
   DynamoDbProjectDirectoryClient,
+} from '../directory'
+import {
   DynamoDbTeamIssuesClient,
-  type AppDependencies,
-} from '../../index'
+} from '../work-items'
 
 const workspaceId = 'workspace-1'
 const actorUserId = 'demo@example.com'
@@ -23,12 +32,9 @@ let testAppDependencies = createTestAppDependencies()
 let app = createApp(testAppDependencies)
 
 function setTestAppDependencies(
-  dependencies: Partial<AppDependencies>,
+  dependencies: AppDependencyOverrides,
 ) {
-  testAppDependencies = {
-    ...testAppDependencies,
-    ...dependencies,
-  }
+  testAppDependencies = overrideAppDependencies(testAppDependencies, dependencies)
   app = createApp(testAppDependencies)
 }
 

@@ -1914,7 +1914,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     ]))
 
     for (let index = 0; index < scopeKeys.length; index += 100) {
-      let keys = scopeKeys.slice(index, index + 100).map((scopeKey) => ({
+      let keys: Record<string, unknown>[] = scopeKeys.slice(index, index + 100).map((scopeKey) => ({
         scopeKey,
         recordKey: 'APPROVAL_SUMMARY',
       }))
@@ -1958,7 +1958,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     const readBudget = limit * 5
     const approvals: ApprovalRequest[] = []
     let evaluated = 0
-    let exclusiveStartKey = options.cursor
+    let exclusiveStartKey: Record<string, unknown> | undefined = options.cursor
       ? decodeReviewerApprovalCursor(options.cursor, scopeKey)
       : undefined
 
@@ -2196,7 +2196,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
   /** Compact reviewer pointers が参照する main approval rows を batch read します。 */
   private async batchGetReviewerApprovalItems(items: readonly StoredReviewerApprovalItem[]) {
     const approvals = new Map<string, StoredApprovalItem>()
-    let keys = [...new Map(items.map((item) => [
+    let keys: Record<string, unknown>[] = [...new Map(items.map((item) => [
       createReviewerApprovalPointerKey(item),
       {
         scopeKey: item.sourceScopeKey,

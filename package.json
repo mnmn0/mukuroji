@@ -14,7 +14,7 @@
     "oxc:lint": "oxlint .",
     "oxc:lint:github": "oxlint . --format=github",
     "typecheck:contracts": "tsc -p contracts/tsconfig.json --noEmit --pretty false",
-    "typecheck:server": "tsc -p server/tsconfig.typecheck.json --noEmit --pretty false",
+    "typecheck:server": "tsc -p server/tsconfig.typecheck.json --noEmit --pretty false && bun --filter server typecheck:test-support",
     "typecheck": "bun run typecheck:contracts && bun run typecheck:server && bun run web:build && bun run cdk:build",
     "dependencies:check": "depcruise --validate --output-type err server/src web/src cdk/lib cdk/bin contracts/src",
     "knip:check": "knip --reporter compact --include files,dependencies,unlisted,binaries,unresolved,catalog",

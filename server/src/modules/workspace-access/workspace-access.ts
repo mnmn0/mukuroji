@@ -1612,9 +1612,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       documentAuthorizationGuard !== undefined
         ? transactItems.length
         : undefined
-    if (
-      documentAuthorizationItemIndex !== undefined
-    ) {
+    if (documentAuthorizationGuard !== undefined) {
       transactItems.push(
         createDocumentAuthorizationRevisionPut(
           this.documentsTableName,

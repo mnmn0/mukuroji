@@ -15,8 +15,8 @@ import {
 
 /** Dependencies required by the public Request Intake HTTP adapter. */
 export type PublicRequestIntakeRouterDependencies = {
-  /** Request Intake application client. */
-  requestIntake: RequestIntakeClient
+  /** Returns the Request Intake application client bound to the current request. */
+  getRequestIntake(): RequestIntakeClient
   /** Validates the link access mode and current Workspace. */
   authorizeRequestLink(context: Context, resolution: RequestLinkResolution): Promise<void>
   /** Creates trusted request context for rate limiting and idempotency. */
@@ -41,7 +41,7 @@ export function createPublicRequestIntakeRouter(
   router.get('/api/request-intake/:token', async (context) => {
     try {
       const resolution = await resolveAuthorizedLink(context, dependencies)
-      return context.json(await dependencies.requestIntake.getPublicForm(
+      return context.json(await dependencies.getRequestIntake().getPublicForm(
         resolution,
         dependencies.createExternalContext(context),
       ))
@@ -54,7 +54,7 @@ export function createPublicRequestIntakeRouter(
     try {
       const resolution = await resolveAuthorizedLink(context, dependencies)
       const body = parseRequestAttachmentUploadInput(await dependencies.readJson(context.req))
-      return context.json(await dependencies.requestIntake.createAttachmentUpload(
+      return context.json(await dependencies.getRequestIntake().createAttachmentUpload(
         resolution,
         body,
         dependencies.createExternalContext(context),
@@ -68,7 +68,7 @@ export function createPublicRequestIntakeRouter(
     try {
       const resolution = await resolveAuthorizedLink(context, dependencies)
       const body = parseSubmitRequestInput(await dependencies.readJson(context.req))
-      return context.json(await dependencies.requestIntake.submit(
+      return context.json(await dependencies.getRequestIntake().submit(
         resolution,
         body,
         dependencies.createExternalContext(context),
@@ -80,7 +80,7 @@ export function createPublicRequestIntakeRouter(
 
   router.get('/api/request-threads/:threadToken', async (context) => {
     try {
-      return context.json(await dependencies.requestIntake.getRequesterThread(
+      return context.json(await dependencies.getRequestIntake().getRequesterThread(
         context.req.param('threadToken'),
         dependencies.createExternalContext(context),
       ))
@@ -92,7 +92,7 @@ export function createPublicRequestIntakeRouter(
   router.post('/api/request-threads/:threadToken/replies', async (context) => {
     try {
       const body = parseRequestRequesterReplyInput(await dependencies.readJson(context.req))
-      return context.json(await dependencies.requestIntake.replyToThread(
+      return context.json(await dependencies.getRequestIntake().replyToThread(
         context.req.param('threadToken'),
         body,
         dependencies.createExternalContext(context),
@@ -235,7 +235,7 @@ async function resolveAuthorizedLink(
   context: Context,
   dependencies: PublicRequestIntakeRouterDependencies,
 ) {
-  const resolution = await dependencies.requestIntake.resolveLink(
+  const resolution = await dependencies.getRequestIntake().resolveLink(
     context.req.param('token') ?? '',
   )
   await dependencies.authorizeRequestLink(context, resolution)

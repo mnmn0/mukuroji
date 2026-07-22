@@ -191,7 +191,9 @@ export function createWorkItemConfigurationGuardConditionChecks(
   const guards = createConfigurationGuards(workspaceId, teamId, resolved)
   const currentEpochSeconds = Math.floor(Date.now() / 1_000)
 
-  return guards.flatMap((guard) => [
+  return guards.flatMap<
+    NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+  >((guard) => [
     {
       ConditionCheck: {
         TableName: tableName,
@@ -215,7 +217,7 @@ export function createWorkItemConfigurationGuardConditionChecks(
             }),
       },
     },
-  ]) satisfies NonNullable<TransactWriteCommandInput['TransactItems']>
+  ])
 }
 
 /** Unknown input を厳格に検証済み configuration へ変換します。 */

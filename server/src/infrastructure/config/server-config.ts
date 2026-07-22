@@ -21,6 +21,8 @@ export interface ServerConfig {
   readonly awsRegion: string
   /** Optional DynamoDB endpoint, including the local Bun default. */
   readonly dynamoDbEndpoint: string | undefined
+  /** Optional SQS endpoint, including the shared AWS endpoint fallback. */
+  readonly sqsEndpoint: string | undefined
   /** Optional Cognito endpoint, including the local Bun default. */
   readonly cognitoEndpoint: string | undefined
   /** Browser origins accepted by the CORS middleware. */
@@ -78,11 +80,17 @@ export function loadServerConfig(
   ) ?? (runtime.localBun ? 'http://localhost:4566' : undefined)
   const cognitoEndpoint =
     environment.COGNITO_ENDPOINT ?? environment.AWS_ENDPOINT_URL
+  const sqsEndpoint = firstNonBlank(
+    environment.SQS_ENDPOINT,
+    environment.AWS_ENDPOINT_URL_SQS,
+    environment.AWS_ENDPOINT_URL,
+  )
 
   return Object.freeze({
     environment,
     awsRegion: environment.AWS_REGION ?? environment.AWS_DEFAULT_REGION ?? 'us-east-1',
     dynamoDbEndpoint,
+    sqsEndpoint,
     cognitoEndpoint: cognitoEndpoint?.trim()
       ? trimTrailingSlash(cognitoEndpoint.trim())
       : runtime.localBun

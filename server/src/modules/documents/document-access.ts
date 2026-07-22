@@ -190,7 +190,7 @@ function resolveScopeDocumentAccess(input: ResolveDocumentCapabilitiesInput) {
   return documentAccessWeights.denied
 }
 
-function capGuestAccess(level: number, workspaceRole: WorkspaceRole) {
+function capGuestAccess(level: number, workspaceRole: DocumentWorkspaceRole) {
   return workspaceRole === 'guest'
     ? Math.min(level, documentAccessWeights.viewer)
     : level

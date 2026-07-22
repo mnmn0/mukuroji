@@ -20,8 +20,8 @@ export type WorkItemConfigurationScope = {
 export type WorkItemConfigurationRouterDependencies<
   TPrincipal extends WorkItemConfigurationPrincipal = WorkItemConfigurationPrincipal,
 > = {
-  /** The application client for Workspace and Team configurations. */
-  workItemConfigurations: WorkItemConfigurationClient
+  /** Returns the configuration client bound to the current request. */
+  getWorkItemConfigurations(): WorkItemConfigurationClient
   /** Reads the bearer access token from a request context. */
   readBearerAccessToken(context: Context): string | undefined
   /** Verifies an access token and returns the current Workspace principal. */
@@ -76,7 +76,7 @@ export function createWorkItemConfigurationRouter<
 
     try {
       const principal = await dependencies.authenticate(accessToken, context)
-      return context.json(await dependencies.workItemConfigurations.getWorkspaceConfiguration(
+      return context.json(await dependencies.getWorkItemConfigurations().getWorkspaceConfiguration(
         principal.directoryId,
       ))
     } catch (error) {
@@ -102,7 +102,7 @@ export function createWorkItemConfigurationRouter<
         withConfigurationScope(body, expectedScope),
         expectedScope,
       )
-      return context.json(await dependencies.workItemConfigurations.saveWorkspaceConfiguration(
+      return context.json(await dependencies.getWorkItemConfigurations().saveWorkspaceConfiguration(
         principal.directoryId,
         configuration,
         async () => {
@@ -128,7 +128,7 @@ export function createWorkItemConfigurationRouter<
     try {
       const principal = await dependencies.authenticate(accessToken, context)
       await dependencies.requireTeamPermission(principal, teamId, 'viewer')
-      return context.json(await dependencies.workItemConfigurations.getTeamConfiguration(
+      return context.json(await dependencies.getWorkItemConfigurations().getTeamConfiguration(
         principal.directoryId,
         teamId,
       ))
@@ -160,7 +160,7 @@ export function createWorkItemConfigurationRouter<
         withConfigurationScope(body, expectedScope),
         expectedScope,
       )
-      return context.json(await dependencies.workItemConfigurations.saveTeamConfiguration(
+      return context.json(await dependencies.getWorkItemConfigurations().saveTeamConfiguration(
         principal.directoryId,
         teamId,
         configuration,

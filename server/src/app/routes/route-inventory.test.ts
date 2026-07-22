@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { expect, test } from 'bun:test'
-import { createApp, createTestAppDependencies } from '../createApp'
+import { createTestAppDependencies } from '../composition/api-dependencies'
+import { createApp } from '../createApp'
 
 test('preserves the complete HTTP method and canonical path inventory', () => {
   const application = createApp(createTestAppDependencies())

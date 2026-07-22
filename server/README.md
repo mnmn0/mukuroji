@@ -4,17 +4,41 @@ Hono で実装した API を、Bun development server と Node.js 22 Lambda の�
 
 ## Source layout
 
-- `src/app/`: Hono app の組み立て、middleware、route inventory、共通 error mapping
+- `src/app/createApp.ts`: Hono app、共通 middleware、system route、domain route の接続だけを行う composition root
+- `src/app/composition/`: domain ごとの production dependency bundle、API runtime singleton、worker composition
+- `src/api/`: 互換 HTTP route 群と route 固有の application orchestration。AWS adapter の生成や runtime entrypoint は持たない
+- `src/api/test-support/`: domain HTTP test 間で共有する fixture。各 test 本体は対象 module の adapter 隣へ配置
 - `src/modules/<domain>/`: domain ごとの application port、use case、inbound/outbound adapter
 - `src/infrastructure/`: 業務知識を持たない runtime config と AWS transport type
 - `src/handlers/`: CDK と package script が参照する薄い Lambda entrypoint
 - `scripts/backfills/`: HTTP route を経由しない再実行可能な backfill
 
 `src/index.ts` は互換用の公開 re-export だけを持ちます。Bun と Lambda は
-`src/handlers/` を entrypoint とし、`createApp(dependencies)` へ instance ごとの依存を渡します。
+`src/handlers/` を entrypoint とし、`createApp(dependencies)` へ instance ごとの immutable な
+dependency bundle を渡します。Authentication、Workspace/Enterprise、Work Item、Automation、
+Developer Platform の API bundle は `src/app/composition/api-dependencies.ts` が concrete adapter
+へ結び付け、worker は各 composition module が処理に必要な adapter だけを構成します。
 環境変数の共通 default と production validation は
 `src/infrastructure/config/server-config.ts` が所有します。各 module の外部公開面は
 `src/modules/<domain>/index.ts` に集約し、module 内部では具体的な sibling file を参照します。
+
+```mermaid
+flowchart LR
+  Handler[handlers/api.handler.ts] --> Runtime[app/composition/api-runtime.ts]
+  Runtime --> Dependencies[app/composition/api-dependencies.ts]
+  Runtime --> App[app/createApp.ts]
+  App --> Middleware[app/middleware]
+  App --> System[app/routes/system-router.ts]
+  App --> Api[api/api-router.ts]
+  Dependencies --> Ports[domain dependency bundles]
+  Ports --> Modules[modules/domain adapters]
+  Api --> Modules
+```
+
+API Lambda、Bun server、Work Item import worker は、それぞれの composition module が生成した
+immutable な production dependency set に束縛されます。Worker の起動では Hono app を生成しません。
+一方、`createApp` で直接作る app はそれぞれ別の frozen dependency set と async context に束縛され、
+同時に複数 instance を実行しても adapter state を共有しません。
 
 ## Local development
 

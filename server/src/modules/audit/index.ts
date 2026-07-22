@@ -8,6 +8,7 @@ export {
   AUDIT_TARGET_INDEX_NAME,
   AUDIT_UNKNOWN_OCCURRED_AT,
   AUDIT_WORKSPACE_INDEX_NAME,
+  DynamoDbAuditEventsClient,
   WORKSPACE_ACCESS_AUDIT_ENTITY_ID_CONTRACT_VERSION,
   calculateAuditExpiresAt,
   createAuditActorKey,

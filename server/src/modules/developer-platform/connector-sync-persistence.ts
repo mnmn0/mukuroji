@@ -273,8 +273,6 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
       currentLink.value.updatedAt !== input.link.updatedAt ||
       currentLink.value.syncDirection !== input.link.syncDirection ||
       currentLink.value.syncStatus !== input.link.syncStatus ||
-      currentLink.value.syncDirection === 'none' ||
-      currentLink.value.syncStatus === 'paused' ||
       (!input.deferLinkStatus && currentLink.value.syncStatus === 'conflict')
     ) return false
     const syncedAt = requireTimestamp(
@@ -744,7 +742,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
       : undefined
     try {
       const items: WorkItemSyncConflict[] = []
-      let startKey = exclusiveStartKey
+      let startKey: Record<string, unknown> | undefined = exclusiveStartKey
       for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
         const response = await this.documentClient.send(new QueryCommand({
           TableName: this.tableName,
@@ -816,7 +814,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
       /** Claim timestamp です。 */
       startedAt: string
     },
-  ) {
+  ): Promise<'claimed' | 'same-operation' | 'busy' | undefined> {
     const workspaceId = requireIdentifier(workspaceIdValue, 'Workspace ID')
     const conflictId = requireIdentifier(conflictIdValue, 'Conflict ID')
     const operationId = requireIdentifier(input.operationId, 'Resolution operation ID')

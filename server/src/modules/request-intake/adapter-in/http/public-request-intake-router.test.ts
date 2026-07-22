@@ -94,7 +94,7 @@ function createDependencies(
     },
   } as unknown as RequestIntakeClient
   const dependencies: PublicRequestIntakeRouterDependencies = {
-    requestIntake,
+    getRequestIntake: () => requestIntake,
     async authorizeRequestLink(context, value) {
       calls.push({ operation: 'authorizeRequestLink', value: { context, value } })
     },
@@ -239,11 +239,11 @@ describe('public request intake router', () => {
         expect(error).toBe(failure)
         return context.json({ code: 'RequestIntakeUnavailable' }, 503)
       },
-      requestIntake: {
+      getRequestIntake: () => ({
         async resolveLink() {
           throw failure
         },
-      } as unknown as RequestIntakeClient,
+      } as unknown as RequestIntakeClient),
     })
 
     const response = await router.request('/api/request-intake/token')

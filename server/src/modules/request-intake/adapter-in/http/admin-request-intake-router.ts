@@ -108,8 +108,8 @@ export type AdminRequestIntakeClient = {
 
 /** Dependencies injected into the admin Request Intake HTTP adapter. */
 export type AdminRequestIntakeRouterDependencies = {
-  /** The Request Intake application client. */
-  requestIntake: AdminRequestIntakeClient
+  /** Returns the Request Intake application client bound to the current request. */
+  getRequestIntake(): AdminRequestIntakeClient
   /** Verifies the bearer token and confirms Workspace administration access.
    *
    * @param context The Hono request context.
@@ -163,7 +163,7 @@ export function createAdminRequestIntakeRouter(
   router.get('/api/request-forms', async (context) => {
     try {
       const principal = await dependencies.requireAdministration(context)
-      return context.json(await dependencies.requestIntake.listForms(principal.directoryId))
+      return context.json(await dependencies.getRequestIntake().listForms(principal.directoryId))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -172,7 +172,7 @@ export function createAdminRequestIntakeRouter(
   router.post('/api/request-forms', async (context) => {
     try {
       const principal = await dependencies.requireAdministration(context)
-      return context.json(await dependencies.requestIntake.createForm(
+      return context.json(await dependencies.getRequestIntake().createForm(
         principal.directoryId,
         { id: principal.userKey },
         readCreateRequestFormInput(await dependencies.readJson(context.req)),
@@ -185,7 +185,7 @@ export function createAdminRequestIntakeRouter(
   router.get('/api/request-forms/:formId', async (context) => {
     try {
       const principal = await dependencies.requireAdministration(context)
-      return context.json(await dependencies.requestIntake.getForm(
+      return context.json(await dependencies.getRequestIntake().getForm(
         principal.directoryId,
         context.req.param('formId') ?? '',
       ))
@@ -197,7 +197,7 @@ export function createAdminRequestIntakeRouter(
   router.put('/api/request-forms/:formId', async (context) => {
     try {
       const principal = await dependencies.requireAdministration(context)
-      return context.json(await dependencies.requestIntake.updateForm(
+      return context.json(await dependencies.getRequestIntake().updateForm(
         principal.directoryId,
         context.req.param('formId') ?? '',
         { id: principal.userKey },
@@ -213,9 +213,10 @@ export function createAdminRequestIntakeRouter(
       const principal = await dependencies.requireAdministration(context)
       const formId = context.req.param('formId') ?? ''
       const publishInput = readPublishRequestFormInput(await dependencies.readJson(context.req))
-      const current = await dependencies.requestIntake.getForm(principal.directoryId, formId)
+      const requestIntake = dependencies.getRequestIntake()
+      const current = await requestIntake.getForm(principal.directoryId, formId)
       await dependencies.validateFormRoutingReferences(principal.directoryId, current.draft)
-      return context.json(await dependencies.requestIntake.publishForm(
+      return context.json(await requestIntake.publishForm(
         principal.directoryId,
         formId,
         { id: principal.userKey },
@@ -229,7 +230,7 @@ export function createAdminRequestIntakeRouter(
   router.get('/api/request-queue', async (context) => {
     try {
       const principal = await dependencies.requireAdministration(context)
-      return context.json(await dependencies.requestIntake.listSubmissions(principal.directoryId, {
+      return context.json(await dependencies.getRequestIntake().listSubmissions(principal.directoryId, {
         status: dependencies.readSubmissionStatus(context.req.query('status')),
         limit: dependencies.readQueueLimit(context.req.query('limit')),
         cursor: context.req.query('cursor'),
@@ -242,7 +243,7 @@ export function createAdminRequestIntakeRouter(
   router.get('/api/request-submissions/:submissionId', async (context) => {
     try {
       const principal = await dependencies.requireAdministration(context)
-      return context.json(await dependencies.requestIntake.getSubmission(
+      return context.json(await dependencies.getRequestIntake().getSubmission(
         principal.directoryId,
         context.req.param('submissionId') ?? '',
       ))
@@ -254,7 +255,7 @@ export function createAdminRequestIntakeRouter(
   router.post('/api/request-submissions/:submissionId/attachments/:attachmentId/access', async (context) => {
     try {
       const principal = await dependencies.requireAdministration(context)
-      return context.json(await dependencies.requestIntake.createAttachmentAccess(
+      return context.json(await dependencies.getRequestIntake().createAttachmentAccess(
         principal.directoryId,
         context.req.param('submissionId') ?? '',
         context.req.param('attachmentId') ?? '',

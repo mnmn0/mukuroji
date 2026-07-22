@@ -678,7 +678,7 @@ export class DynamoDbNotificationsClient implements NotificationClient {
           continue
         }
         const legacyScope = readLegacyWorkItemScope(row)
-        const next = {
+        const next: Record<string, unknown> = {
           ...row,
           ...(legacyScope.teamId ? { teamId: legacyScope.teamId } : {}),
           ...(legacyScope.issueId ? { issueId: legacyScope.issueId } : {}),

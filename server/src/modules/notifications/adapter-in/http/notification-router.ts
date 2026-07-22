@@ -24,8 +24,8 @@ export type NotificationPrincipal = {
 export type NotificationRouterDependencies<
   Principal extends NotificationPrincipal,
 > = {
-  /** Notification application port です。 */
-  notifications: NotificationClient
+  /** Returns the Notification application port bound to the current request. */
+  getNotifications(): NotificationClient
   /** Bearer token を current Workspace principal へ解決します。 */
   authenticate(
     accessToken: string,
@@ -72,8 +72,8 @@ export function createNotificationRouter<
         isVisible,
       }
       const [page, unreadCount] = await Promise.all([
-        dependencies.notifications.list(input),
-        dependencies.notifications.countUnread({
+        dependencies.getNotifications().list(input),
+        dependencies.getNotifications().countUnread({
           workspaceId: principal.directoryId,
           memberKey: principal.userKey,
           isVisible,
@@ -95,7 +95,7 @@ export function createNotificationRouter<
     try {
       const principal = await dependencies.authenticate(accessToken, context)
       const isVisible = await dependencies.createVisibilityFilter(principal)
-      const unreadCount = await dependencies.notifications.countUnread({
+      const unreadCount = await dependencies.getNotifications().countUnread({
         workspaceId: principal.directoryId,
         memberKey: principal.userKey,
         isVisible,
@@ -115,12 +115,12 @@ export function createNotificationRouter<
     try {
       const principal = await dependencies.authenticate(accessToken, context)
       const isVisible = await dependencies.createVisibilityFilter(principal)
-      const updatedCount = await dependencies.notifications.markAllRead({
+      const updatedCount = await dependencies.getNotifications().markAllRead({
         workspaceId: principal.directoryId,
         memberKey: principal.userKey,
         isVisible,
       })
-      const unreadCount = await dependencies.notifications.countUnread({
+      const unreadCount = await dependencies.getNotifications().countUnread({
         workspaceId: principal.directoryId,
         memberKey: principal.userKey,
         isVisible,
@@ -142,7 +142,7 @@ export function createNotificationRouter<
       const isVisible = await dependencies.createVisibilityFilter(principal)
       const value = await dependencies.readJson(context.req)
       const body = isRecord(value) ? value : {}
-      const notification = await dependencies.notifications.update({
+      const notification = await dependencies.getNotifications().update({
         workspaceId: principal.directoryId,
         memberKey: principal.userKey,
         notificationId: context.req.param('notificationId'),
@@ -164,7 +164,7 @@ export function createNotificationRouter<
 
     try {
       const principal = await dependencies.authenticate(accessToken, context)
-      return context.json(await dependencies.notifications.getPreferences({
+      return context.json(await dependencies.getNotifications().getPreferences({
         workspaceId: principal.directoryId,
         memberKey: principal.userKey,
       }))
@@ -183,7 +183,7 @@ export function createNotificationRouter<
       const principal = await dependencies.authenticate(accessToken, context)
       const value = await dependencies.readJson(context.req)
       const body = isRecord(value) ? value : {}
-      const preferences = await dependencies.notifications.savePreferences({
+      const preferences = await dependencies.getNotifications().savePreferences({
         workspaceId: principal.directoryId,
         memberKey: principal.userKey,
         preferences: readNotificationPreferencesInput(body),
