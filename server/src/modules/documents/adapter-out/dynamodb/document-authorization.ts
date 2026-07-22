@@ -2,7 +2,7 @@ import type {
   TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 
-/** Workspace ごとの Document ACL generation row の固定 sort key です。 */
+/** Fixed sort key for each Workspace document-ACL generation row. */
 export const DOCUMENT_AUTHORIZATION_REVISION_KEY =
   'DOCUMENT_AUTHORIZATION_REVISION' as const
 

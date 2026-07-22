@@ -39,7 +39,9 @@ import { DynamoDbAutomationClient } from '../../modules/automation/automation'
 import { SecretsManagerAutomationInboundWebhookSecretStore } from '../../modules/automation/automation-inbound-webhook'
 import { DynamoDbCollaborationClient } from '../../modules/collaboration/collaboration'
 import { DynamoDbDeveloperPlatformClient } from '../../modules/developer-platform/developer-platform'
-import { DynamoDbDocumentsClient } from '../../modules/documents/documents'
+import {
+  DynamoDbDocumentsClient,
+} from '../../modules/documents/adapter-out/dynamodb/dynamo-db-documents-client'
 import {
   createEnterpriseIdentityClient,
 } from '../../modules/enterprise-identity/enterprise-identity'

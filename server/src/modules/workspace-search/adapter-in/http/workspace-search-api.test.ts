@@ -300,43 +300,20 @@ test('binds cached Document roles to member and Planning authorization generatio
     {},
     {},
   ])
-  expect(accesses[0]?.authorizationGuards).toEqual([
+  expect(accesses[0]?.authorizationSnapshots).toEqual([
     {
-      tableName:
-        process.env.MUKUROJI_WORKSPACE_ACCESS_TABLE ??
-        process.env.WORKSPACE_ACCESS_TABLE_NAME ??
-        'mukuroji-workspace-access-local',
-      key: {
-        workspaceId: 'user#demo@example.com',
-        recordKey: 'MEMBER#demo@example.com',
-      },
-      generationAttribute: 'version',
-      expectedGeneration: 1,
-      requiredAttributes: {
-        entryType: 'workspace-member',
-        status: 'active',
-      },
-    },
-    {
-      tableName:
-        process.env.PLANNING_TABLE_NAME ??
-        'mukuroji-planning-local',
-      key: {
-        workspaceId: 'user#demo@example.com',
-        recordKey: 'META',
-      },
-      generationAttribute: 'revision',
-      expectedGeneration: 0,
-      requiredAttributes: {
-        entryType: 'planning-meta',
-        schemaVersion: 1,
-      },
-      allowMissingWhenExpectedZero: true,
+      workspaceId: 'user#demo@example.com',
+      workspaceMemberKey: 'demo@example.com',
+      workspaceMemberVersion: 1,
+      planningRevision: 0,
     },
   ])
-  expect(accesses[4]?.authorizationGuards?.map(
-    ({ expectedGeneration }) => expectedGeneration,
-  )).toEqual([2, 3])
+  expect(accesses[4]?.authorizationSnapshots).toEqual([{
+    workspaceId: 'user#demo@example.com',
+    workspaceMemberKey: 'demo@example.com',
+    workspaceMemberVersion: 2,
+    planningRevision: 3,
+  }])
 })
 
 test('isolates cached Document roles between app dependency sets', async () => {
@@ -395,7 +372,7 @@ test('rejects missing, non-Goal, archived, and invisible Planning Goal relation 
   let receivedGoalAuthorizationGuards:
     Parameters<
       DocumentClient['applyOperations']
-    >[0]['relationTargetAuthorizationGuards']
+    >[0]['relationTargetAuthorizationSnapshots']
   const editableDocument = {
     schemaVersion: 1,
     id: 'document-1',
@@ -431,7 +408,7 @@ test('rejects missing, non-Goal, archived, and invisible Planning Goal relation 
       async applyOperations(input) {
         applyCalls += 1
         receivedGoalAuthorizationGuards =
-          input.relationTargetAuthorizationGuards
+          input.relationTargetAuthorizationSnapshots
         return {
           documentId: input.documentId,
           revision: 2,
@@ -537,20 +514,8 @@ test('rejects missing, non-Goal, archived, and invisible Planning Goal relation 
   expect(
     receivedGoalAuthorizationGuards,
   ).toEqual([{
-    tableName:
-      process.env.PLANNING_TABLE_NAME ??
-      'mukuroji-planning-local',
-    key: {
-      workspaceId:
-        'user#demo@example.com',
-      recordKey: 'META',
-    },
-    generationAttribute: 'revision',
-    expectedGeneration: 2,
-    requiredAttributes: {
-      entryType: 'planning-meta',
-      schemaVersion: 1,
-    },
+    workspaceId: 'user#demo@example.com',
+    planningRevision: 2,
   }])
 })
 

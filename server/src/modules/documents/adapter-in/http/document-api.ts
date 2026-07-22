@@ -25,13 +25,22 @@ import type {
   WhiteboardContent,
   WhiteboardObjectStyle,
 } from '@mukuroji/contracts'
-import { DOCUMENT_SCHEMA_VERSION } from '@mukuroji/contracts'
 import { randomUUID } from 'node:crypto'
 import type { Context, Hono } from 'hono'
 import {
   createMutationAuditContext,
   type MutationAuditContext,
-} from '../audit'
+} from '../../../audit'
+import type {
+  DocumentHttpApplication,
+} from '../../application/ports/document-ports'
+import type {
+  CreateDocumentCommentRequest,
+  DocumentAccessContext,
+  DocumentAuthorizationFenceSnapshot,
+  DocumentBacklink,
+  DocumentProjectRole,
+} from '../../document-types'
 import {
   DOCUMENT_BACKLINK_MAX_PAGE_LIMIT,
   DOCUMENT_COMMENT_MAX_PAGE_LIMIT,
@@ -39,16 +48,10 @@ import {
   DOCUMENT_MAX_ITEM_BYTES,
   DOCUMENT_MAX_OPERATION_COUNT,
   DocumentError,
-  reduceDocumentOperations,
-  renderPublicDocumentExport,
-  validateDocumentPayload,
-  type DocumentAccessContext,
-  type DocumentAuthorizationGenerationGuard,
-  type DocumentBacklink,
-  type DocumentClient,
-  type DocumentProjectRole,
-  type CreateDocumentCommentRequest,
-} from './documents'
+  renderAuthorizedPublicDocumentExport,
+  validateCreateDocumentPayload,
+  validateDocumentOperationPayload,
+} from '../../application/document-use-cases'
 
 /** Document API が一 request で受け付ける JSON body の最大 byte 数です。 */
 export const DOCUMENT_API_MAX_BODY_BYTES = DOCUMENT_MAX_ITEM_BYTES
@@ -102,7 +105,7 @@ export type DocumentApiPrincipal = {
   /**
    * Mutation transaction を認証時の authorization generations へ束縛する guards です。
    */
-  authorizationGuards?: readonly DocumentAuthorizationGenerationGuard[]
+  authorizationSnapshots?: readonly DocumentAuthorizationFenceSnapshot[]
   /**
    * Source of truth から取得した Project role map です。
    */
@@ -142,7 +145,7 @@ export type DocumentApiDependencies = {
   /**
    * Test reset 後も現在の Document client を返す getter です。
    */
-  getClient: () => DocumentClient
+  getClient: () => DocumentHttpApplication
   /**
    * Bearer token、active membership、current request policy を検証します。
    */
@@ -165,7 +168,7 @@ export type DocumentApiDependencies = {
     principal: DocumentApiPrincipal,
     targets: readonly DocumentRelationTarget[],
   ) => Promise<
-    | readonly DocumentAuthorizationGenerationGuard[]
+    | readonly DocumentAuthorizationFenceSnapshot[]
     | void
   >
   /**
@@ -247,7 +250,7 @@ export function registerDocumentApiRoutes(
             input.permission.memberGrants.map(({ memberKey }) => memberKey),
           )
       }
-      const relationTargetAuthorizationGuards =
+      const relationTargetAuthorizationSnapshots =
         await validateDocumentRelationTargets(
           dependencies,
           principal,
@@ -289,10 +292,10 @@ export function registerDocumentApiRoutes(
               ? { blocks: input.blocks }
               : {}),
             ...(input.kind === 'whiteboard' ? { whiteboard: input.whiteboard } : {}),
-            ...(relationTargetAuthorizationGuards.length === 0
+            ...(relationTargetAuthorizationSnapshots.length === 0
               ? {}
               : {
-                  relationTargetAuthorizationGuards,
+                  relationTargetAuthorizationSnapshots,
                 }),
             ...(idempotencyKey ? { idempotencyKey } : {}),
           })
@@ -399,7 +402,7 @@ export function registerDocumentApiRoutes(
         pendingInput,
         principal.memberKey,
       )
-      const relationTargetAuthorizationGuards =
+      const relationTargetAuthorizationSnapshots =
         await validateDocumentRelationTargets(
           dependencies,
           principal,
@@ -416,10 +419,10 @@ export function registerDocumentApiRoutes(
                     operationId,
                 ),
             }),
-        ...(relationTargetAuthorizationGuards.length === 0
+        ...(relationTargetAuthorizationSnapshots.length === 0
           ? {}
           : {
-              relationTargetAuthorizationGuards,
+              relationTargetAuthorizationSnapshots,
             }),
       })
       const document = await client.get({
@@ -464,7 +467,7 @@ export function registerDocumentApiRoutes(
         'DocumentRestoreDenied',
       )
       requireCurrentDocumentRevision(archived, expectedRevision)
-      const relationTargetAuthorizationGuards =
+      const relationTargetAuthorizationSnapshots =
         await validateDocumentRelationTargets(
           dependencies,
           principal,
@@ -476,10 +479,10 @@ export function registerDocumentApiRoutes(
         access,
         expectedRevision,
         ...(input?.parentId !== undefined ? { parentId: input.parentId } : {}),
-        ...(relationTargetAuthorizationGuards.length === 0
+        ...(relationTargetAuthorizationSnapshots.length === 0
           ? {}
           : {
-              relationTargetAuthorizationGuards,
+              relationTargetAuthorizationSnapshots,
             }),
       })
       await upsertSearchDocumentBestEffort(dependencies, principal.workspaceId, document)
@@ -1058,14 +1061,8 @@ export function registerDocumentApiRoutes(
         throw new DocumentError(404, 'DocumentShareNotFound', 'Document share was not found.')
       }
       const resolved = await dependencies.getClient().resolvePublicShare(token)
-      if (!resolved.share.allowExport) {
-        throw new DocumentError(
-          403,
-          'DocumentPublicExportDenied',
-          'This public link does not allow export.',
-        )
-      }
-      const rendered = renderPublicDocumentExport(
+      const rendered = renderAuthorizedPublicDocumentExport(
+        resolved,
         toPublicDocument(resolved.document),
         readDocumentExportFormat(c.req.query('format')),
       )
@@ -1176,9 +1173,9 @@ function toDocumentAccessContext(principal: DocumentApiPrincipal) {
           workspaceScopeRole:
             principal.workspaceScopeRole,
         }),
-    ...(principal.authorizationGuards === undefined
+    ...(principal.authorizationSnapshots === undefined
       ? {}
-      : { authorizationGuards: principal.authorizationGuards }),
+      : { authorizationSnapshots: principal.authorizationSnapshots }),
   } as DocumentAccessContext
 }
 
@@ -1324,78 +1321,6 @@ function parseCreateDocumentInput(value: unknown): CreateDocumentInput {
   return parsed
 }
 
-function validateCreateDocumentPayload(input: CreateDocumentInput): void {
-  const inputPermission = input.permission ?? {
-    mode: 'inherit' as const,
-    memberGrants: [],
-  }
-  const permission = inputPermission.mode === 'private'
-    ? {
-        ...inputPermission,
-        memberGrants: [
-          ...inputPermission.memberGrants.filter(
-            ({ memberKey }) => memberKey !== 'document-input-validation',
-          ),
-          {
-            memberKey: 'document-input-validation',
-            role: 'manager' as const,
-          },
-        ],
-      }
-    : inputPermission
-  const base = {
-    schemaVersion: DOCUMENT_SCHEMA_VERSION,
-    id: 'document-input-validation',
-    scope: input.scope,
-    ...(input.parentId === undefined ? {} : { parentId: input.parentId }),
-    title: input.title,
-    position: input.position ?? 'document-input-validation',
-    revision: 1,
-    permission,
-    relations: [],
-    favorite: false,
-    capabilities: {
-      canView: false,
-      canEdit: false,
-      canComment: false,
-      canShare: false,
-      canManagePermissions: false,
-      canArchive: false,
-      canRestore: false,
-      canExport: false,
-    },
-    createdByUserId: 'document-input-validation',
-    updatedByUserId: 'document-input-validation',
-    createdAt: '2000-01-01T00:00:00.000Z',
-    updatedAt: '2000-01-01T00:00:00.000Z',
-  }
-  let document: DocumentDetail
-  switch (input.kind) {
-    case 'folder':
-      document = {
-        ...base,
-        kind: 'folder',
-        childCount: 0,
-      }
-      break
-    case 'page':
-    case 'template':
-      document = {
-        ...base,
-        kind: input.kind,
-        blocks: input.blocks,
-      }
-      break
-    case 'whiteboard':
-      document = {
-        ...base,
-        kind: 'whiteboard',
-        whiteboard: input.whiteboard,
-      }
-  }
-  validateDocumentPayload(document)
-}
-
 function readCreateDocumentRelationTargets(
   input: CreateDocumentInput,
 ): DocumentRelationTarget[] {
@@ -1532,44 +1457,6 @@ function readOperationRelationTargets(
   })
   requireDocumentRelationTargetLimit(targets)
   return targets
-}
-
-function validateDocumentOperationPayload(
-  current: DocumentDetail,
-  input: ApplyDocumentOperationsInput,
-  actorMemberKey: string,
-): void {
-  const validationDocument = structuredClone(current)
-  validationDocument.favorite = false
-  delete validationDocument.lastOpenedAt
-  validationDocument.capabilities = {
-    canView: false,
-    canEdit: false,
-    canComment: false,
-    canShare: false,
-    canManagePermissions: false,
-    canArchive: false,
-    canRestore: false,
-    canExport: false,
-  }
-  if (
-    validationDocument.permission.mode === 'private' &&
-    !validationDocument.permission.memberGrants.some(
-      ({ role }) => role === 'manager',
-    )
-  ) {
-    validationDocument.permission.memberGrants.push({
-      memberKey: actorMemberKey,
-      role: 'manager',
-    })
-  }
-  reduceDocumentOperations({
-    document: validationDocument,
-    elementRevisions: {},
-    baseRevision: input.baseRevision,
-    nextRevision: current.revision + 1,
-    operations: input.operations,
-  })
 }
 
 function readDocumentRelationTarget(value: unknown): DocumentRelationTarget {
@@ -2488,7 +2375,7 @@ async function validateDocumentRelationTargets(
   principal: DocumentApiPrincipal,
   targets: readonly DocumentRelationTarget[],
 ): Promise<
-  readonly DocumentAuthorizationGenerationGuard[]
+  readonly DocumentAuthorizationFenceSnapshot[]
 > {
   if (targets.length === 0) {
     return []

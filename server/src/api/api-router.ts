@@ -9,7 +9,6 @@ import { request as requestHttps } from 'node:https'
 import { isIP } from 'node:net'
 import {
   PUBLIC_API_OPENAPI_DOCUMENT,
-  PLANNING_SCHEMA_VERSION,
   ENTERPRISE_PERMISSION_IDS,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   type AnalyticsQueryInput,
@@ -424,16 +423,16 @@ import {
   createDocumentSearchAccessReadContext,
   DocumentError,
   type DocumentAccessContext,
-  type DocumentAuthorizationGenerationGuard,
+  type DocumentAuthorizationFenceSnapshot,
   type DocumentProjectRole,
-} from '../modules/documents/documents'
+} from '../modules/documents'
 import {
   requirePrivateDocumentManagerContinuity,
 } from '../modules/workspace-access/document-manager-lifecycle'
 import {
   registerDocumentApiRoutes,
   type DocumentApiPrincipal,
-} from '../modules/documents/document-api'
+} from '../modules/documents/adapter-in/http/document-api'
 import {
   AnalyticsError,
   createAnalyticsCsv,
@@ -14499,33 +14498,24 @@ async function createDocumentApiPrincipal(
       principal.userKey,
     workspaceRole: principal.workspaceRole,
     isSystemAdmin: principal.isSystemAdmin,
-    authorizationGuards: [
+    authorizationSnapshots: [{
+      workspaceId: principal.directoryId,
       ...(principal.principalKind === 'service-account'
-        ? []
-        : [{
-            tableName: getConfiguredWorkspaceAccessTableName(),
-            key: {
-              workspaceId: principal.directoryId,
-              recordKey:
-                `MEMBER#${normalizeProjectMemberKey(principal.userKey)}`,
-            },
-            generationAttribute: 'version',
-            expectedGeneration: principal.workspaceMember.version,
-            requiredAttributes: {
-              entryType: 'workspace-member',
-              status: 'active',
-            },
-          } satisfies DocumentAuthorizationGenerationGuard]),
-      {
-        ...createPlanningAuthorizationGuard(
-          principal.directoryId,
-          planningRevision,
-        ),
-      },
-      ...createEnterpriseDocumentAuthorizationGuards(
-        principal,
-      ),
-    ],
+        ? {}
+        : {
+            workspaceMemberKey: principal.userKey,
+            workspaceMemberVersion:
+              principal.workspaceMember.version,
+          }),
+      planningRevision,
+      ...(principal.enterprisePermissions === undefined ||
+          principal.enterpriseIdentityControlRevision === undefined
+        ? {}
+        : {
+            enterpriseControlRevision:
+              principal.enterpriseIdentityControlRevision,
+          }),
+    } satisfies DocumentAuthorizationFenceSnapshot],
     projectRoles,
     ...createDocumentEnterpriseScopeBoundary(principal),
   }
@@ -14680,40 +14670,6 @@ function createDocumentEnterpriseScopeBoundary(
   }
 }
 
-function createEnterpriseDocumentAuthorizationGuards(
-  principal: WorkspacePrincipal,
-): DocumentAuthorizationGenerationGuard[] {
-  const tableName =
-    getEnv('ENTERPRISE_IDENTITY_TABLE_NAME')
-  const expectedGeneration =
-    principal.enterpriseIdentityControlRevision
-  if (
-    principal.enterprisePermissions === undefined ||
-    !tableName ||
-    expectedGeneration === undefined ||
-    !Number.isSafeInteger(expectedGeneration) ||
-    expectedGeneration < 0
-  ) {
-    return []
-  }
-  return [{
-    tableName,
-    key: {
-      scopeKey:
-        `WORKSPACE#${principal.directoryId}`,
-      recordKey: 'CONTROL',
-    },
-    generationAttribute: 'controlRevision',
-    expectedGeneration,
-    requiredAttributes: {
-      entryType: 'enterprise-identity-control',
-    },
-    ...(expectedGeneration === 0
-      ? { allowMissingWhenExpectedZero: true }
-      : {}),
-  }]
-}
-
 async function getCachedDocumentProjectRoles(
   workspaceId: string,
   memberKey: string,
@@ -14758,39 +14714,6 @@ async function getCachedDocumentProjectRoles(
     value,
   })
   return value
-}
-
-function getConfiguredWorkspaceAccessTableName() {
-  return getEnv('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
-    getEnv('WORKSPACE_ACCESS_TABLE_NAME') ??
-    'mukuroji-workspace-access-local'
-}
-
-function getConfiguredPlanningTableName() {
-  return getEnv('PLANNING_TABLE_NAME') ??
-    'mukuroji-planning-local'
-}
-
-function createPlanningAuthorizationGuard(
-  workspaceId: string,
-  revision: number,
-): DocumentAuthorizationGenerationGuard {
-  return {
-    tableName: getConfiguredPlanningTableName(),
-    key: {
-      workspaceId,
-      recordKey: 'META',
-    },
-    generationAttribute: 'revision',
-    expectedGeneration: revision,
-    requiredAttributes: {
-      entryType: 'planning-meta',
-      schemaVersion: PLANNING_SCHEMA_VERSION,
-    },
-    ...(revision === 0
-      ? { allowMissingWhenExpectedZero: true }
-      : {}),
-  }
 }
 
 async function validateDocumentRelationTargets(
@@ -14957,12 +14880,10 @@ async function validateDocumentRelationTargets(
   }
   return planningAuthorizationState === undefined
     ? undefined
-    : [
-        createPlanningAuthorizationGuard(
-          principal.workspaceId,
-          planningAuthorizationState.revision,
-        ),
-      ]
+    : [{
+        workspaceId: principal.workspaceId,
+        planningRevision: planningAuthorizationState.revision,
+      } satisfies DocumentAuthorizationFenceSnapshot]
 }
 
 function readBearerAccessToken(c: Context) {

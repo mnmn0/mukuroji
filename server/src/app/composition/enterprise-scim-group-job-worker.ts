@@ -1,4 +1,6 @@
-import { DynamoDbDocumentsClient } from '../../modules/documents/documents'
+import {
+  DynamoDbDocumentsClient,
+} from '../../modules/documents/adapter-out/dynamodb/dynamo-db-documents-client'
 import {
   AwsEnterpriseScimGroupJobCognitoClient,
 } from '../../modules/enterprise-identity/adapter-out/cognito/enterprise-scim-group-job-cognito-client'
