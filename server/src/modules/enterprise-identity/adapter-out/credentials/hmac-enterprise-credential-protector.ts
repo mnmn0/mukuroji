@@ -106,11 +106,11 @@ function credentialPrefix(kind: EnterpriseCredentialKind): 'msc' | 'msa' {
 /** Validates canonical text before it reaches the HMAC boundary. */
 function requireCredentialText(value: string, label: string): string {
   const normalized = value.trim()
-  if (!normalized) {
+  if (!normalized || normalized.includes('\0')) {
     throw new EnterpriseIdentityError(
       400,
       'EnterpriseIdentityValidationFailed',
-      `${label} is required.`,
+      `${label} is required and must not contain NUL characters.`,
     )
   }
   return normalized

@@ -44,3 +44,27 @@ test('derives stable retry credentials without exposing the HMAC secret', () => 
   expect(first.includes(secret)).toBe(false)
   expect(protector.createRandomToken('scim').startsWith('msc_')).toBe(true)
 })
+
+test('rejects NUL-delimited field collisions without changing canonical digests', () => {
+  const protector = new HmacEnterpriseCredentialProtector(secret)
+
+  expect(protector.digest({
+    kind: 'scim',
+    workspaceId: 'workspace-1',
+    credentialId: 'credential-1',
+    token: 'msc_token',
+  })).toBe('e77c111493cc924135b5c1f6abad1f12257eaf070cf7520924d8b247142786ab')
+  expect(() => protector.digest({
+    kind: 'scim',
+    workspaceId: 'workspace-1\0credential',
+    credentialId: 'credential-1',
+    token: 'msc_token',
+  })).toThrow('must not contain NUL characters')
+  expect(() => protector.deriveOneTimeToken({
+    kind: 'service-account',
+    workspaceId: 'workspace-1',
+    entityId: 'account-1',
+    generation: 2,
+    receiptKey: 'receipt\0fingerprint',
+  })).toThrow('must not contain NUL characters')
+})

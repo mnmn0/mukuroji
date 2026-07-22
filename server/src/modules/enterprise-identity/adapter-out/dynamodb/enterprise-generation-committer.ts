@@ -33,6 +33,28 @@ type EnterpriseGenerationCheckpoint = {
   stateGeneration: string
 }
 
+/** Structured, secret-free record for a best-effort generation cleanup failure. */
+type EnterpriseGenerationCleanupFailure = {
+  /** Stable log event name. */
+  event: 'enterprise_identity_generation_cleanup_failed'
+  /** Generation identifier used to correlate the failed mutation. */
+  correlationId: string
+  /** Number of staged records included in the cleanup attempt. */
+  itemCount: number
+  /** Safe error class or AWS error name. */
+  errorName: string
+  /** Bounded error detail for operational diagnosis. */
+  errorMessage: string
+}
+
+/** Injected retry delay used before another AWS request attempt. */
+type EnterpriseGenerationRetryDelay = (attempt: number) => Promise<void>
+
+/** Injected sink for best-effort cleanup failures. */
+type EnterpriseGenerationCleanupFailureLogger = (
+  failure: EnterpriseGenerationCleanupFailure,
+) => void
+
 /** Output adapter that owns immutable generation staging and the atomic CONTROL transaction. */
 export class DynamoDbEnterpriseGenerationCommitter implements
   EnterpriseGenerationCommitter<EnterpriseDynamoTransactionItem>
@@ -41,14 +63,26 @@ export class DynamoDbEnterpriseGenerationCommitter implements
   private readonly tableName: string
   /** DynamoDB document client used for staging and checkpoint commits. */
   private readonly documentClient: DynamoDBDocumentClient
+  /** Retry delay policy used for transient and unprocessed AWS requests. */
+  private readonly retryDelay: EnterpriseGenerationRetryDelay
+  /** Structured logger for best-effort cleanup failures. */
+  private readonly logCleanupFailure: EnterpriseGenerationCleanupFailureLogger
 
   /**
    * Creates a DynamoDB generation committer.
    *
    * @param tableName - Enterprise Identity table name.
    * @param documentClient - DynamoDB document client.
+   * @param retryDelay - Delay policy applied before each retry.
+   * @param logCleanupFailure - Structured logger for cleanup failures.
    */
-  constructor(tableName: string, documentClient: DynamoDBDocumentClient) {
+  constructor(
+    tableName: string,
+    documentClient: DynamoDBDocumentClient,
+    retryDelay: EnterpriseGenerationRetryDelay = waitForGenerationRetry,
+    logCleanupFailure: EnterpriseGenerationCleanupFailureLogger =
+      logGenerationCleanupFailure,
+  ) {
     const normalizedTableName = tableName.trim()
     if (!normalizedTableName) {
       throw new EnterpriseIdentityError(
@@ -60,6 +94,8 @@ export class DynamoDbEnterpriseGenerationCommitter implements
     }
     this.tableName = normalizedTableName
     this.documentClient = documentClient
+    this.retryDelay = retryDelay
+    this.logCleanupFailure = logCleanupFailure
   }
 
   /**
@@ -81,7 +117,7 @@ export class DynamoDbEnterpriseGenerationCommitter implements
       )
     }
     const checkpoint = readGenerationCheckpoint(transactItems)
-    await this.stageGeneration(stagedItems)
+    await this.stageGeneration(stagedItems, checkpoint.stateGeneration)
     let transactionError: unknown
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
@@ -93,11 +129,12 @@ export class DynamoDbEnterpriseGenerationCommitter implements
       } catch (error) {
         transactionError = error
         if (isDefinitiveTransactionRejection(error)) break
+        if (attempt < 1) await this.retryDelay(attempt)
       }
     }
 
     if (isDefinitiveTransactionRejection(transactionError)) {
-      await this.cleanupGeneration(stagedItems)
+      await this.cleanupGeneration(stagedItems, checkpoint.stateGeneration)
       const conflictingOperationIndexes = readConditionalConflictIndexes(transactionError)
       if (conflictingOperationIndexes) {
         throw new EnterpriseGenerationCommitConflictError(
@@ -156,7 +193,10 @@ export class DynamoDbEnterpriseGenerationCommitter implements
   }
 
   /** Stages immutable generation records in bounded DynamoDB batches. */
-  private async stageGeneration(items: Record<string, unknown>[]): Promise<void> {
+  private async stageGeneration(
+    items: Record<string, unknown>[],
+    correlationId: string,
+  ): Promise<void> {
     try {
       for (let offset = 0; offset < items.length; offset += 25) {
         let pending: NonNullable<BatchWriteCommandInput['RequestItems']>[string] =
@@ -168,6 +208,9 @@ export class DynamoDbEnterpriseGenerationCommitter implements
             RequestItems: { [this.tableName]: pending },
           }))
           pending = response.UnprocessedItems?.[this.tableName] ?? []
+          if (pending.length > 0 && attempt < 4) {
+            await this.retryDelay(attempt)
+          }
         }
         if (pending.length > 0) {
           throw new EnterpriseIdentityError(
@@ -179,14 +222,17 @@ export class DynamoDbEnterpriseGenerationCommitter implements
         }
       }
     } catch (error) {
-      await this.cleanupGeneration(items)
+      await this.cleanupGeneration(items, correlationId)
       if (error instanceof EnterpriseIdentityError) throw error
       throw toEnterprisePersistenceError(error)
     }
   }
 
   /** Removes known keys for an uncommitted generation on a best-effort basis. */
-  private async cleanupGeneration(items: Record<string, unknown>[]): Promise<void> {
+  private async cleanupGeneration(
+    items: Record<string, unknown>[],
+    correlationId: string,
+  ): Promise<void> {
     try {
       for (let offset = 0; offset < items.length; offset += 25) {
         let pending: NonNullable<BatchWriteCommandInput['RequestItems']>[string] =
@@ -203,10 +249,23 @@ export class DynamoDbEnterpriseGenerationCommitter implements
             RequestItems: { [this.tableName]: pending },
           }))
           pending = response.UnprocessedItems?.[this.tableName] ?? []
+          if (pending.length > 0 && attempt < 2) {
+            await this.retryDelay(attempt)
+          }
+        }
+        if (pending.length > 0) {
+          throw new Error('DynamoDB returned unprocessed generation cleanup items.')
         }
       }
-    } catch {
-      // Orphaned UUID partitions are invisible unless CONTROL points to them.
+    } catch (error) {
+      this.logCleanupFailure({
+        event: 'enterprise_identity_generation_cleanup_failed',
+        correlationId,
+        itemCount: items.length,
+        errorName: readSafeErrorName(error),
+        errorMessage: readSafeErrorMessage(error),
+      })
+      // Orphaned UUID partitions remain invisible unless CONTROL points to them.
     }
   }
 }
@@ -247,7 +306,6 @@ function readGenerationCheckpoint(
 function isDefinitiveTransactionRejection(error: unknown): boolean {
   return error instanceof Error &&
     (
-      error.name === 'ConditionalCheckFailedException' ||
       error.name === 'TransactionCanceledException' ||
       error.name === 'ValidationException' ||
       error.name === 'IdempotentParameterMismatchException'
@@ -257,7 +315,6 @@ function isDefinitiveTransactionRejection(error: unknown): boolean {
 /** Returns the transaction indexes containing only conditional-check failures. */
 function readConditionalConflictIndexes(error: unknown): number[] | undefined {
   if (!(error instanceof Error)) return undefined
-  if (error.name === 'ConditionalCheckFailedException') return [0]
   if (error.name !== 'TransactionCanceledException') return undefined
   const reasonCodes = readCancellationReasonCodes(error)
   if (
@@ -286,6 +343,32 @@ function readCancellationReasonCodes(error: Error): string[] | undefined {
 /** Narrows an opaque value to a string-keyed record. */
 function isUnknownRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Waits with bounded exponential backoff and jitter before an AWS retry. */
+async function waitForGenerationRetry(attempt: number): Promise<void> {
+  const baseMilliseconds = Math.min(25 * 2 ** attempt, 400)
+  const delayMilliseconds =
+    baseMilliseconds + Math.floor(Math.random() * baseMilliseconds)
+  await new Promise<void>((resolve) => setTimeout(resolve, delayMilliseconds))
+}
+
+/** Writes a structured cleanup failure without exposing staged record contents. */
+function logGenerationCleanupFailure(
+  failure: EnterpriseGenerationCleanupFailure,
+): void {
+  console.error('Enterprise identity generation cleanup failed.', failure)
+}
+
+/** Returns a safe error name for structured persistence logs. */
+function readSafeErrorName(error: unknown): string {
+  return error instanceof Error && error.name ? error.name : 'UnknownError'
+}
+
+/** Returns a bounded error message for structured persistence logs. */
+function readSafeErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : 'Unknown cleanup failure.'
+  return message.slice(0, 1_024)
 }
 
 /** Maps an opaque DynamoDB failure to the stable Enterprise Identity error contract. */
