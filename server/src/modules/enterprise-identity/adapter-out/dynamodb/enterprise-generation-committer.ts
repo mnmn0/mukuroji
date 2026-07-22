@@ -258,13 +258,17 @@ export class DynamoDbEnterpriseGenerationCommitter implements
         }
       }
     } catch (error) {
-      this.logCleanupFailure({
-        event: 'enterprise_identity_generation_cleanup_failed',
-        correlationId,
-        itemCount: items.length,
-        errorName: readSafeErrorName(error),
-        errorMessage: readSafeErrorMessage(error),
-      })
+      try {
+        this.logCleanupFailure({
+          event: 'enterprise_identity_generation_cleanup_failed',
+          correlationId,
+          itemCount: items.length,
+          errorName: readSafeErrorName(error),
+          errorMessage: readSafeErrorMessage(error),
+        })
+      } catch {
+        // A failing log sink must not replace the original commit or staging error.
+      }
       // Orphaned UUID partitions remain invisible unless CONTROL points to them.
     }
   }

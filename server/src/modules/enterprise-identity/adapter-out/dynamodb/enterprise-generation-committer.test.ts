@@ -75,7 +75,7 @@ test('backs off before retrying unprocessed staging and an ambiguous transaction
   expect(transactionAttempts).toBe(2)
 })
 
-test('logs cleanup failures with the generation correlation ID without masking the commit error', async () => {
+test('cleanup and logger failures do not mask the original commit error', async () => {
   let batchAttempts = 0
   const retryAttempts: number[] = []
   const cleanupFailures: unknown[] = []
@@ -107,6 +107,7 @@ test('logs cleanup failures with the generation correlation ID without masking t
     },
     (failure) => {
       cleanupFailures.push(failure)
+      throw new Error('Injected cleanup logger failure')
     },
   )
 
