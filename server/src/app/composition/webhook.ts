@@ -21,7 +21,7 @@ import {
 } from '../../modules/developer-platform/webhook-authorization'
 import {
   DynamoDbEnterpriseIdentityReadClient,
-} from '../../modules/enterprise-identity/enterprise-identity'
+} from '../../modules/enterprise-identity'
 import {
   DynamoDbWorkspaceAccessClient,
 } from '../../modules/workspace-access/workspace-access'

@@ -1,11 +1,7 @@
 import {
   createHash,
-  createHmac,
-  randomBytes,
-  timingSafeEqual,
   X509Certificate,
 } from 'node:crypto'
-import { isIP } from 'node:net'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import {
   BatchWriteCommand,
@@ -14,7 +10,6 @@ import {
   GetCommand,
   PutCommand,
   QueryCommand,
-  TransactWriteCommand,
   type TransactWriteCommandInput,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb'
@@ -26,14 +21,10 @@ import {
   type EnterpriseIdentityProvider,
   type EnterpriseIdentitySnapshot,
   type EnterpriseIssuedCredential,
-  type EnterpriseIssuedServiceAccountCredential,
-  type EnterprisePermissionId,
   type EnterpriseProvisioningInput,
   type EnterpriseProvisioningPreview,
   type EnterpriseProvisioningRun,
   type EnterpriseRoleAssignment,
-  type EnterpriseRoleId,
-  type EnterpriseRoutePermissionRule,
   type EnterpriseScimGroup,
   type EnterpriseScimGroupInput,
   type EnterpriseScimCredential,
@@ -43,7 +34,7 @@ import {
   type EnterpriseServiceAccount,
   type EnterpriseServiceAccountCredential,
   type EnterpriseVerifiedDomain,
-  ENTERPRISE_PERMISSION_IDS,
+  ENTERPRISE_BUILT_IN_ROLE_IDS,
 } from '@mukuroji/contracts'
 import {
   createMutationAuditEventPut,
@@ -52,35 +43,136 @@ import {
 import type {
   EnterpriseScimGroupJobReference,
 } from './domain/scim-group-job-reference'
+import { EnterpriseIdentityError } from './errors'
+import type {
+  EnterpriseCredentialProtector,
+} from './application/ports/enterprise-credential-protector'
+import type {
+  EnterpriseGenerationCommitter,
+} from './application/ports/enterprise-generation-committer'
+import {
+  EnterpriseGenerationCommitConflictError,
+} from './application/ports/enterprise-generation-committer'
+import type {
+  EnterpriseIdentityApplicationCapability,
+  EnterpriseIdentityReadCapability,
+} from './application/ports/enterprise-identity-capabilities'
+import {
+  ENTERPRISE_SCIM_ACTIVE_CREDENTIAL_LIMIT_PER_PROVIDER,
+  ENTERPRISE_SCIM_ACTIVE_CREDENTIAL_LIMIT_PER_WORKSPACE,
+  ENTERPRISE_SCIM_DISPLAY_NAME_MAX_BYTES,
+  ENTERPRISE_SCIM_EXTERNAL_ID_MAX_BYTES,
+  ENTERPRISE_SCIM_GROUP_JOB_PAGE_SIZE,
+  ENTERPRISE_SCIM_GROUP_JOB_TARGET_LIMIT,
+  ENTERPRISE_SCIM_GROUP_MEMBER_LIMIT,
+  ENTERPRISE_SCIM_GROUP_PAGE_LIMIT,
+  ENTERPRISE_SCIM_IDEMPOTENCY_KEY_MAX_BYTES,
+  ENTERPRISE_SCIM_MEMBER_ID_MAX_BYTES,
+  ENTERPRISE_SCIM_RESOURCE_ID_MAX_BYTES,
+  ENTERPRISE_SCIM_RESOURCE_LIMITS,
+  ENTERPRISE_SCIM_USER_EMAIL_LIMIT,
+  ENTERPRISE_SCIM_USER_IDENTIFIER_MAX_BYTES,
+  type EnterpriseScimGroupJob,
+  type EnterpriseScimGroupJobApplyInput,
+  type EnterpriseScimGroupJobApplyUser,
+  type EnterpriseScimGroupJobProcessResult,
+  type EnterpriseScimGroupListFilter,
+  type EnterpriseScimGroupListInput,
+  type EnterpriseScimGroupPage,
+  type EnterpriseScimResourceLimits,
+  type EnterpriseScimUserListFilter,
+  type EnterpriseScimUserListInput,
+  type EnterpriseScimUserPage,
+  type EnterpriseScimWorkspaceAuthentication,
+} from './application/scim-contracts'
+import {
+  HmacEnterpriseCredentialProtector,
+} from './adapter-out/credentials/hmac-enterprise-credential-protector'
+import {
+  DynamoDbEnterpriseGenerationCommitter,
+} from './adapter-out/dynamodb/enterprise-generation-committer'
+import {
+  canAssignEnterpriseRole,
+  evaluateEnterpriseAccess,
+  ipMatchesCidr,
+  isEnterpriseRoleCompatibleWithScope,
+  resolveEnterpriseDirectoryPrincipal,
+  resolveEnterpriseRolePermissions,
+  resolveRoutePermission,
+  resolveRoutePermissions,
+  validateEnterpriseSession,
+  type EnterpriseAuthorizationResource,
+  type EnterpriseDirectoryGroupMembership,
+  type EnterpriseDirectoryPrincipalResolution,
+  type EnterpriseEffectiveAccess,
+  type EnterprisePrincipalContext,
+  type EnterpriseSessionContext,
+  type EnterpriseSessionValidation,
+  type EvaluateEnterpriseAccessInput,
+} from './domain/enterprise-authorization'
+
+export {
+  canAssignEnterpriseRole,
+  evaluateEnterpriseAccess,
+  ipMatchesCidr,
+  isEnterpriseRoleCompatibleWithScope,
+  resolveEnterpriseDirectoryPrincipal,
+  resolveEnterpriseRolePermissions,
+  resolveRoutePermission,
+  resolveRoutePermissions,
+  validateEnterpriseSession,
+}
+export type {
+  EnterpriseAuthorizationResource,
+  EnterpriseDirectoryGroupMembership,
+  EnterpriseDirectoryPrincipalResolution,
+  EnterpriseEffectiveAccess,
+  EnterprisePrincipalContext,
+  EnterpriseSessionContext,
+  EnterpriseSessionValidation,
+  EvaluateEnterpriseAccessInput,
+}
+export {
+  ENTERPRISE_SCIM_ACTIVE_CREDENTIAL_LIMIT_PER_PROVIDER,
+  ENTERPRISE_SCIM_ACTIVE_CREDENTIAL_LIMIT_PER_WORKSPACE,
+  ENTERPRISE_SCIM_DISPLAY_NAME_MAX_BYTES,
+  ENTERPRISE_SCIM_EXTERNAL_ID_MAX_BYTES,
+  ENTERPRISE_SCIM_GROUP_JOB_PAGE_SIZE,
+  ENTERPRISE_SCIM_GROUP_JOB_TARGET_LIMIT,
+  ENTERPRISE_SCIM_GROUP_MEMBER_LIMIT,
+  ENTERPRISE_SCIM_GROUP_PAGE_LIMIT,
+  ENTERPRISE_SCIM_IDEMPOTENCY_KEY_MAX_BYTES,
+  ENTERPRISE_SCIM_MEMBER_ID_MAX_BYTES,
+  ENTERPRISE_SCIM_RESOURCE_ID_MAX_BYTES,
+  ENTERPRISE_SCIM_RESOURCE_LIMITS,
+  ENTERPRISE_SCIM_USER_EMAIL_LIMIT,
+  ENTERPRISE_SCIM_USER_IDENTIFIER_MAX_BYTES,
+}
+export type {
+  EnterpriseScimGroupJob,
+  EnterpriseScimGroupJobApplyInput,
+  EnterpriseScimGroupJobApplyUser,
+  EnterpriseScimGroupJobProcessResult,
+  EnterpriseScimGroupListFilter,
+  EnterpriseScimGroupListInput,
+  EnterpriseScimGroupPage,
+  EnterpriseScimResourceLimits,
+  EnterpriseScimUserListFilter,
+  EnterpriseScimUserListInput,
+  EnterpriseScimUserPage,
+  EnterpriseScimWorkspaceAuthentication,
+}
+
+/** Internal adapter aggregate retained for composition and test compatibility. */
+export type EnterpriseIdentityClient = EnterpriseIdentityApplicationCapability
+
+/** Credential-free Enterprise Identity read port retained for compatibility. */
+export type EnterpriseIdentityReadClient = EnterpriseIdentityReadCapability
 
 /**
  * Enterprise identity domain の safe API error です。
  */
-export class EnterpriseIdentityError extends Error {
-  /** HTTP response に対応する status code です。 */
-  readonly status: number
-  /** Client が分岐に利用できる stable code です。 */
-  readonly code: string
-  /** 同一 operation を安全に retry できるかどうかです。 */
-  readonly retryable: boolean
-
-  /**
-   * Enterprise identity error を作成します。
-   */
-  constructor(
-    status: number,
-    code: string,
-    message: string,
-    retryable = false,
-    options?: ErrorOptions,
-  ) {
-    super(message, options)
-    this.name = 'EnterpriseIdentityError'
-    this.status = status
-    this.code = code
-    this.retryable = retryable
-  }
-}
+export { EnterpriseIdentityError }
 
 /**
  * Stored provider と実際に Cognito Hosted UI へ渡す federation provider 名を照合します。
@@ -235,1079 +327,6 @@ export function assertEnterpriseIdentityProviderReady(
 }
 
 /**
- * Enterprise authorization に渡す principal context です。
- */
-export type EnterprisePrincipalContext = {
-  /** Principal の種別です。 */
-  kind: 'member' | 'service-account' | 'break-glass'
-  /** Workspace 内の immutable principal ID です。 */
-  principalId: string
-  /** Cognito が現在の token に含めた directory group ID 一覧です。 */
-  directoryGroupIds: string[]
-  /** Provider-qualified な active SCIM group membership 一覧です。 */
-  directoryGroupMemberships?: EnterpriseDirectoryGroupMembership[]
-  /** Built-in Workspace role です。 */
-  workspaceRole?: 'owner' | 'admin' | 'member' | 'guest'
-  /** Built-in Workspace role permission を custom/mapped role と合成するかどうかです。 */
-  includeWorkspaceRolePermissions?: boolean
-  /** System administrator の live membership が確認済みかどうかです。 */
-  systemAdministrator?: boolean
-  /** Service account 等に直接付与された permission です。 */
-  directPermissions?: EnterprisePermissionId[]
-  /** Guest/external principal に適用する permission ceiling です。 */
-  permissionCeiling?: EnterprisePermissionId[]
-}
-
-/**
- * Provider-qualified な SCIM directory group membership です。
- */
-export type EnterpriseDirectoryGroupMembership = {
-  /** Group を供給した identity provider ID です。 */
-  identityProviderId: string
-  /** Mukuroji が発行した immutable SCIM group ID です。 */
-  groupId: string
-  /** Upstream directory が発行した immutable group ID です。 */
-  externalId: string
-}
-
-/**
- * HTTP/realtime evaluator が共有する authoritative directory principal 解決結果です。
- */
-export type EnterpriseDirectoryPrincipalResolution = {
-  /** Principal が provider readiness に関係なく SCIM directory 管理下かどうかです。 */
-  directoryManaged: boolean
-  /** 現在の Cognito token から取得した group ID 一覧です。 */
-  directoryGroupIds: string[]
-  /** Provider-qualified な active SCIM group membership 一覧です。 */
-  directoryGroupMemberships: EnterpriseDirectoryGroupMembership[]
-  /** 同じ provider の membership と一致する mapping 一覧です。 */
-  compatibleGroupMappings: EnterpriseDirectoryGroupMapping[]
-  /** Provider binding を満たす assignment 一覧です。 */
-  compatibleRoleAssignments: EnterpriseRoleAssignment[]
-  /** Principal に紐づく inactive SCIM user が存在するかどうかです。 */
-  deprovisioned: boolean
-}
-
-/**
- * Enterprise authorization が評価する resource context です。
- */
-export type EnterpriseAuthorizationResource = {
-  /** Resource が属する Workspace ID です。 */
-  workspaceId: string
-  /** Resource scope の種別です。 */
-  kind: 'workspace' | 'team' | 'project'
-  /** Team または Project ID です。 */
-  targetId?: string
-  /** Project resource が属する Team ID です。 */
-  parentTeamId?: string
-}
-
-/**
- * Enterprise access evaluator の入力です。
- */
-export type EvaluateEnterpriseAccessInput = {
-  /** Route が要求する permission です。 */
-  permission: EnterprisePermissionId
-  /** 認証済み principal です。 */
-  principal: EnterprisePrincipalContext
-  /** Direct/materialized role assignment 一覧です。 */
-  assignments: EnterpriseRoleAssignment[]
-  /** Workspace custom role 一覧です。 */
-  customRoles: EnterpriseCustomRole[]
-  /** Directory group mapping 一覧です。 */
-  groupMappings: EnterpriseDirectoryGroupMapping[]
-  /** 評価対象 resource です。 */
-  resource: EnterpriseAuthorizationResource
-}
-
-/**
- * Enterprise authorization の決定と effective permission set です。
- */
-export type EnterpriseEffectiveAccess = {
-  /** 要求 permission が許可されたかどうかです。 */
-  allowed: boolean
-  /** Resource 上で有効な permission 一覧です。 */
-  permissions: EnterprisePermissionId[]
-  /** Deny の safe reason code です。 */
-  reason?: 'permission-missing' | 'guest-ceiling' | 'scope-mismatch'
-}
-
-/**
- * Token/session security validation の入力です。
- */
-export type EnterpriseSessionContext = {
-  /** Access token の authentication time (epoch seconds) です。 */
-  authenticatedAt: number
-  /** 検証時刻 (epoch seconds) です。 */
-  now: number
-  /** Authentication method reference 一覧です。 */
-  authenticationMethods: string[]
-  /** 信頼済み transport/proxy から解決した client IP です。 */
-  clientIp?: string
-  /** Sensitive/privileged route かどうかです。 */
-  privileged: boolean
-  /** Guest/external principal かどうかです。 */
-  external: boolean
-  /** Active break-glass activation を使うかどうかです。 */
-  breakGlass: boolean
-}
-
-/**
- * Token/session security validation の結果です。
- */
-export type EnterpriseSessionValidation = {
-  /** Session が現在の policy を満たすかどうかです。 */
-  valid: boolean
-  /** Reject の safe reason code です。 */
-  reason?: 'mfa-required' | 'session-expired' | 'reauthentication-required' | 'ip-denied'
-}
-
-/**
- * SCIM User collection の equality filter です。
- */
-export type EnterpriseScimUserListFilter = {
-  /** DynamoDB lookup partition で照合する SCIM User field です。 */
-  field: 'externalId' | 'userName' | 'displayName'
-  /** externalId は case-sensitive、userName/displayName は case-insensitive に照合します。 */
-  value: string
-}
-
-/**
- * SCIM Group collection の equality filter です。
- */
-export type EnterpriseScimGroupListFilter = {
-  /** DynamoDB lookup partition で照合する SCIM Group field です。 */
-  field: 'externalId' | 'displayName'
-  /** externalId は case-sensitive、displayName は case-insensitive に照合します。 */
-  value: string
-}
-
-/**
- * SCIM User collection の page request です。
- */
-export type EnterpriseScimUserListInput = {
-  /** User collection が属する Workspace ID です。 */
-  workspaceId: string
-  /** Credential に bind された identity provider ID です。 */
-  identityProviderId: string
-  /** SCIM の1始まり page offset です。 */
-  startIndex: number
-  /** 返す最大 resource 数です。 */
-  count: number
-  /** Optional equality filter です。 */
-  filter?: EnterpriseScimUserListFilter
-}
-
-/**
- * SCIM Group collection の page request です。
- */
-export type EnterpriseScimGroupListInput = {
-  /** Group collection が属する Workspace ID です。 */
-  workspaceId: string
-  /** Credential に bind された identity provider ID です。 */
-  identityProviderId: string
-  /** SCIM の1始まり page offset です。 */
-  startIndex: number
-  /** 返す最大 resource 数です。 */
-  count: number
-  /** Optional equality filter です。 */
-  filter?: EnterpriseScimGroupListFilter
-}
-
-/**
- * SCIM User collection の page です。
- */
-export type EnterpriseScimUserPage = {
-  /** Filter 適用後の resource 総数です。 */
-  totalResults: number
-  /** Request と同じ1始まり page offset です。 */
-  startIndex: number
-  /** Page に含まれる SCIM Users です。 */
-  resources: EnterpriseScimUser[]
-}
-
-/**
- * SCIM Group collection の page です。
- */
-export type EnterpriseScimGroupPage = {
-  /** Filter 適用後の resource 総数です。 */
-  totalResults: number
-  /** Request と同じ1始まり page offset です。 */
-  startIndex: number
-  /** Page に含まれる SCIM Groups です。 */
-  resources: EnterpriseScimGroup[]
-}
-
-/**
- * SCIM bearer credential と current provider の targeted authentication 結果です。
- */
-export type EnterpriseScimWorkspaceAuthentication = {
-  /** 認証済み Workspace-scoped SCIM credential metadata です。 */
-  credential: EnterpriseScimCredential
-  /** Credential が bind された current active identity provider です。 */
-  provider: EnterpriseIdentityProvider
-}
-
-/**
- * Workspace ごとの SCIM resource hard cap です。
- */
-export type EnterpriseScimResourceLimits = {
-  /** Inactive resource を含む User 上限です。 */
-  maximumUsers: number
-  /** Inactive resource を含む Group 上限です。 */
-  maximumGroups: number
-}
-
-/**
- * Durable SCIM group reconciliation job の内部 state です。
- */
-export type EnterpriseScimGroupJob = {
-  /** Job が属する canonical Workspace ID です。 */
-  workspaceId: string
-  /** Group ごとに安定した reconciliation job ID です。 */
-  jobId: string
-  /** Reconcile 対象の immutable SCIM group ID です。 */
-  groupId: string
-  /** Job が適用する group desired version です。 */
-  groupVersion: number
-  /** 未処理 page を含む affected SCIM user ID 一覧です。 */
-  targetUserIds: string[]
-  /** Desired group 適用後の収束確認を含む現在の処理 phase です。 */
-  phase: 'apply' | 'settle'
-  /** 次の page が開始する0始まり offset です。 */
-  cursor: number
-  /** Stale stream event を除外する monotonically increasing revision です。 */
-  revision: number
-  /** Job 作成日時です。 */
-  createdAt: string
-  /** Job 最終更新日時です。 */
-  updatedAt: string
-}
-
-/**
- * 一つの SCIM group job user callback に渡す immutable snapshot です。
- */
-export type EnterpriseScimGroupJobApplyInput = {
-  /** Job page 全体で共有する一度だけ読み込んだ identity snapshot です。 */
-  snapshot: EnterpriseIdentitySnapshot
-  /** Callback が参照した identity snapshot の storage revision です。 */
-  snapshotRevision: number
-  /** Job が適用する current desired group です。 */
-  group: EnterpriseScimGroup
-  /** Sequential に適用する affected user です。 */
-  user: EnterpriseScimUser
-  /** Callback が desired-state 適用または適用後収束のどちらかを示します。 */
-  phase: EnterpriseScimGroupJob['phase']
-  /** Callback と retry を識別する durable job reference です。 */
-  reference: EnterpriseScimGroupJobReference
-  /** 同じ revision の retry で固定される job timestamp です。 */
-  jobUpdatedAt: string
-}
-
-/**
- * SCIM group job の一つの user side effect を適用する callback です。
- */
-export type EnterpriseScimGroupJobApplyUser = (
-  input: EnterpriseScimGroupJobApplyInput,
-) => Promise<void>
-
-/**
- * SCIM group job page processor の結果です。
- */
-export type EnterpriseScimGroupJobProcessResult =
-  | {
-      /** Event が current job と一致しないため副作用なしで完了した状態です。 */
-      status: 'stale'
-    }
-  | {
-      /** 次の MODIFY stream event で継続する状態です。 */
-      status: 'continued'
-      /** Atomic checkpoint が発行した次の durable reference です。 */
-      nextReference: EnterpriseScimGroupJobReference
-      /** この page で適用済みにした user ID 一覧です。 */
-      processedUserIds: string[]
-    }
-  | {
-      /** 全 target と group checkpoint が完了した状態です。 */
-      status: 'completed'
-      /** 最終 page で適用済みにした user ID 一覧です。 */
-      processedUserIds: string[]
-    }
-
-/** Production で適用する Workspace 単位の SCIM resource hard cap です。 */
-export const ENTERPRISE_SCIM_RESOURCE_LIMITS: EnterpriseScimResourceLimits = {
-  maximumUsers: 10_000,
-  maximumGroups: 2_000,
-}
-
-/** 一つの SCIM Group に保持できる member 数です。 */
-export const ENTERPRISE_SCIM_GROUP_MEMBER_LIMIT = 1_000
-
-/** 一つの durable SCIM Group job に保持できる affected user 数です。 */
-export const ENTERPRISE_SCIM_GROUP_JOB_TARGET_LIMIT = 2_000
-
-/** 一回の SCIM Group worker invocation で逐次処理する user 数です。 */
-export const ENTERPRISE_SCIM_GROUP_JOB_PAGE_SIZE = 5
-
-/** 一つの SCIM Group collection response に返せる resource 数です。 */
-export const ENTERPRISE_SCIM_GROUP_PAGE_LIMIT = 20
-
-/** SCIM member.value に許可する UTF-8 byte 数です。 */
-export const ENTERPRISE_SCIM_MEMBER_ID_MAX_BYTES = 128
-
-/** SCIM resource ID に許可する UTF-8 byte 数です。 */
-export const ENTERPRISE_SCIM_RESOURCE_ID_MAX_BYTES = 128
-
-/** SCIM externalId に許可する UTF-8 byte 数です。 */
-export const ENTERPRISE_SCIM_EXTERNAL_ID_MAX_BYTES = 256
-
-/** SCIM userName と email に許可する UTF-8 byte 数です。 */
-export const ENTERPRISE_SCIM_USER_IDENTIFIER_MAX_BYTES = 320
-
-/** SCIM displayName に許可する UTF-8 byte 数です。 */
-export const ENTERPRISE_SCIM_DISPLAY_NAME_MAX_BYTES = 256
-
-/** SCIM mutation の Idempotency-Key に許可する UTF-8 byte 数です。 */
-export const ENTERPRISE_SCIM_IDEMPOTENCY_KEY_MAX_BYTES = 256
-
-/** 一つの SCIM User に保持できる email 数です。 */
-export const ENTERPRISE_SCIM_USER_EMAIL_LIMIT = 10
-
-/** 一つの provider が同時に保持できる active SCIM credential 数です。 */
-export const ENTERPRISE_SCIM_ACTIVE_CREDENTIAL_LIMIT_PER_PROVIDER = 10
-
-/** 一つの Workspace が同時に保持できる active SCIM credential 数です。 */
-export const ENTERPRISE_SCIM_ACTIVE_CREDENTIAL_LIMIT_PER_WORKSPACE = 50
-
-/**
- * Enterprise identity state を読み書きする application client です。
- */
-export interface EnterpriseIdentityClient {
-  /** Workspace の enterprise identity/security snapshot を返します。 */
-  getSnapshot(workspaceId: string): Promise<EnterpriseIdentitySnapshot>
-  /** Provider-scoped SCIM User collection を page 取得します。 */
-  listScimUsers(input: EnterpriseScimUserListInput): Promise<EnterpriseScimUserPage>
-  /** Provider-scoped SCIM Group collection を page 取得します。 */
-  listScimGroups(input: EnterpriseScimGroupListInput): Promise<EnterpriseScimGroupPage>
-  /** Email domain に適用される active SSO provider を返します。 */
-  discoverSso(email: string): Promise<{
-    domain: EnterpriseVerifiedDomain
-    provider: EnterpriseIdentityProvider
-  } | undefined>
-  /** SAML/OIDC provider を安全に upsert します。 */
-  putIdentityProvider(
-    provider: EnterpriseIdentityProvider,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseIdentityProvider>
-  /** Verified domain claim を安全に upsert します。 */
-  putVerifiedDomain(
-    domain: EnterpriseVerifiedDomain,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseVerifiedDomain>
-  /** 全 verified domain の SSO enforcement を一つの transaction で切り替えます。 */
-  setSsoEnforcement(
-    workspaceId: string,
-    enforced: boolean,
-    identityProviderId: string | undefined,
-    expectedProviderRevision: number,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseVerifiedDomain[]>
-  /** Authentication/session policy を安全に upsert します。 */
-  putSecurityPolicy(
-    policy: EnterpriseSecurityPolicy,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseSecurityPolicy>
-  /** Custom role を安全に upsert します。 */
-  putCustomRole(
-    role: EnterpriseCustomRole,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseCustomRole>
-  /** 未使用 custom role を削除します。 */
-  deleteCustomRole(
-    workspaceId: string,
-    roleId: string,
-    expectedRevision: number,
-    auditContext?: MutationAuditContext,
-  ): Promise<void>
-  /** Directory group mapping を安全に upsert します。 */
-  putGroupMapping(
-    mapping: EnterpriseDirectoryGroupMapping,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseDirectoryGroupMapping>
-  /** Directory group mapping を削除します。 */
-  deleteGroupMapping(
-    workspaceId: string,
-    mappingId: string,
-    expectedRevision: number,
-    auditContext?: MutationAuditContext,
-  ): Promise<void>
-  /** SCIM bearer credential を一度だけ発行します。 */
-  issueScimToken(
-    workspaceId: string,
-    identityProviderId: string,
-    label: string,
-    expiresAt?: string,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseIssuedCredential>
-  /** 全 active SCIM credential を revoke し、新 credential を原子的に発行します。 */
-  rotateScimToken(
-    workspaceId: string,
-    identityProviderId: string,
-    label: string,
-    expectedGeneration: number,
-    idempotencyKey: string,
-    requestFingerprint: string,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseIssuedCredential>
-  /** SCIM bearer credential を HMAC digest で認証して provider binding を返します。 */
-  authenticateScimToken(
-    workspaceId: string,
-    token: string,
-  ): Promise<EnterpriseScimCredential | undefined>
-  /** Direct auth projection から SCIM credential と current provider を認証します。 */
-  authenticateScimWorkspace(
-    workspaceId: string,
-    token: string,
-  ): Promise<EnterpriseScimWorkspaceAuthentication | undefined>
-  /** SCIM bearer credential を revoke します。 */
-  revokeScimToken(
-    workspaceId: string,
-    credentialId: string,
-    auditContext?: MutationAuditContext,
-  ): Promise<void>
-  /** SCIM user desired state を idempotent に upsert します。 */
-  upsertScimUser(
-    input: EnterpriseScimUserInput,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseScimUser>
-  /** SCIM user desired state を idempotent に deactivate します。 */
-  deactivateScimUser(
-    workspaceId: string,
-    identityProviderId: string,
-    userId: string,
-    idempotencyKey: string,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseScimUser | undefined>
-  /** SCIM user desired version の Workspace 適用成功を checkpoint します。 */
-  markScimUserApplied(
-    workspaceId: string,
-    userId: string,
-    desiredVersion: number,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseScimUser>
-  /** SCIM group desired state を idempotent に upsert します。 */
-  upsertScimGroup(
-    input: EnterpriseScimGroupInput,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseScimGroup>
-  /** SCIM group desired state を idempotent に deactivate します。 */
-  deactivateScimGroup(
-    workspaceId: string,
-    identityProviderId: string,
-    groupId: string,
-    idempotencyKey: string,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseScimGroup | undefined>
-  /** SCIM group desired version の Workspace 適用成功を checkpoint します。 */
-  markScimGroupApplied(
-    workspaceId: string,
-    groupId: string,
-    desiredVersion: number,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseScimGroup>
-  /** Current pending SCIM group job の stream reference を返します。 */
-  getScimGroupJobReference(
-    workspaceId: string,
-    groupId: string,
-  ): Promise<EnterpriseScimGroupJobReference | undefined>
-  /** 一つの durable SCIM group job page を逐次適用し、原子的に checkpoint します。 */
-  processScimGroupJob(
-    reference: EnterpriseScimGroupJobReference,
-    applyUser: EnterpriseScimGroupJobApplyUser,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseScimGroupJobProcessResult>
-  /** Reconciliation の mutation-free impact preview を返します。 */
-  previewProvisioning(
-    input: EnterpriseProvisioningInput,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseProvisioningPreview>
-  /** ID で未失効 provisioning preview を返します。 */
-  getProvisioningPreview(
-    workspaceId: string,
-    previewId: string,
-  ): Promise<EnterpriseProvisioningPreview | undefined>
-  /** 確認済み preview を idempotent に apply します。 */
-  reconcileProvisioning(
-    input: EnterpriseProvisioningInput,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseProvisioningRun>
-  /** Reserved provisioning run を side effect の結果で確定します。 */
-  finalizeProvisioningRun(
-    workspaceId: string,
-    runId: string,
-    outcome: 'succeeded' | 'failed',
-    failureCode?: string,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseProvisioningRun>
-  /** Failed provisioning run を同じ plan で retry します。 */
-  retryProvisioning(
-    workspaceId: string,
-    runId: string,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseProvisioningRun>
-  /** Service account metadata を作成します。 */
-  createServiceAccount(
-    account: EnterpriseServiceAccount,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseServiceAccount>
-  /** Service account と最初の one-time credential を原子的かつ idempotent に作成します。 */
-  createServiceAccountWithToken(
-    account: EnterpriseServiceAccount,
-    idempotencyKey: string,
-    requestFingerprint: string,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseIssuedServiceAccountCredential & { account: EnterpriseServiceAccount }>
-  /** Service account credential を一度だけ発行します。 */
-  issueServiceAccountToken(
-    workspaceId: string,
-    accountId: string,
-    expiresAt?: string,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseIssuedServiceAccountCredential>
-  /** Existing credential を原子的に revoke して新しい credential を発行します。 */
-  rotateServiceAccountToken(
-    workspaceId: string,
-    accountId: string,
-    expectedRevision: number,
-    idempotencyKey: string,
-    requestFingerprint: string,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseIssuedServiceAccountCredential>
-  /** Service account bearer credential を認証します。 */
-  authenticateServiceAccountToken(
-    workspaceId: string,
-    token: string,
-  ): Promise<EnterpriseServiceAccount | undefined>
-  /** 全 boundary check 成功後に service account の last-used/audit を更新します。 */
-  recordServiceAccountUse(
-    workspaceId: string,
-    accountId: string,
-    auditContext?: MutationAuditContext,
-  ): Promise<void>
-  /** Service account credential または account 全体を revoke します。 */
-  revokeServiceAccountToken(
-    workspaceId: string,
-    accountId: string,
-    credentialId?: string,
-    expectedRevision?: number,
-    auditContext?: MutationAuditContext,
-  ): Promise<void>
-  /** Break-glass account metadata を upsert します。 */
-  putBreakGlassAccount(
-    account: EnterpriseBreakGlassAccount,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseBreakGlassAccount>
-  /** 理由・MFA・期限付きの break-glass activation を作成します。 */
-  activateBreakGlass(
-    workspaceId: string,
-    accountId: string,
-    actorMemberKey: string,
-    authenticationSessionId: string,
-    reason: string,
-    durationMinutes: number,
-    auditContext?: MutationAuditContext,
-  ): Promise<EnterpriseBreakGlassActivation>
-  /** Current member の active break-glass elevation だけを早期終了します。 */
-  revokeBreakGlassActivation(
-    workspaceId: string,
-    actorMemberKey: string,
-    authenticationSessionId: string,
-    auditContext?: MutationAuditContext,
-  ): Promise<void>
-  /** Active break-glass activation を早期 revoke します。 */
-  deactivateBreakGlass(
-    workspaceId: string,
-    accountId: string,
-    expectedRevision: number,
-    auditContext?: MutationAuditContext,
-  ): Promise<void>
-  /** Member の current authentication session に対する有効な activation を返します。 */
-  getActiveBreakGlassActivation(
-    workspaceId: string,
-    memberKey: string,
-    authenticationSessionId: string,
-  ): Promise<EnterpriseBreakGlassActivation | undefined>
-}
-
-/**
- * Credential secret を持たずに enterprise security state を読む client です。
- */
-export interface EnterpriseIdentityReadClient {
-  /** Workspace の enterprise identity/security snapshot を返します。 */
-  getSnapshot(workspaceId: string): Promise<EnterpriseIdentitySnapshot>
-  /** Member の current authentication session に対する有効な activation を返します。 */
-  getActiveBreakGlassActivation(
-    workspaceId: string,
-    memberKey: string,
-    authenticationSessionId: string,
-  ): Promise<EnterpriseBreakGlassActivation | undefined>
-}
-
-const builtInRolePermissions = {
-  'workspace:owner': [...ENTERPRISE_PERMISSION_IDS],
-  'workspace:admin': ENTERPRISE_PERMISSION_IDS.filter((permission) =>
-    permission !== 'audit.export' && permission !== 'service-accounts.use'
-  ),
-  'workspace:member': ENTERPRISE_PERMISSION_IDS.filter((permission) =>
-    !permission.endsWith('.manage') &&
-    permission !== 'audit.read' &&
-    permission !== 'audit.export' &&
-    permission !== 'identity.read' &&
-    permission !== 'security.read' &&
-    permission !== 'service-accounts.use'
-  ),
-  'workspace:guest': ENTERPRISE_PERMISSION_IDS.filter((permission) =>
-    permission.endsWith('.read') &&
-    permission !== 'audit.read' &&
-    permission !== 'identity.read' &&
-    permission !== 'security.read'
-  ),
-  'team:manager': ['teams.read', 'teams.write', 'teams.manage', 'projects.read', 'projects.write',
-    'projects.manage', 'work-items.read', 'work-items.write', 'documents.read', 'documents.write',
-    'documents.manage', 'files.read', 'files.write', 'files.approve', 'planning.read',
-    'planning.write', 'planning.manage'] as EnterprisePermissionId[],
-  'team:member': ['teams.read', 'teams.write', 'projects.read', 'projects.write', 'work-items.read',
-    'work-items.write', 'documents.read', 'documents.write', 'files.read', 'files.write',
-    'planning.read'] as EnterprisePermissionId[],
-  'project:manager': ['projects.read', 'projects.write', 'projects.manage', 'work-items.read',
-    'work-items.write', 'documents.read', 'documents.write', 'documents.manage', 'files.read',
-    'files.write', 'files.approve', 'planning.read', 'planning.write',
-    'planning.manage'] as EnterprisePermissionId[],
-  'project:member': ['projects.read', 'projects.write', 'work-items.read', 'work-items.write',
-    'documents.read', 'documents.write', 'files.read', 'files.write', 'planning.read'] as
-    EnterprisePermissionId[],
-  'project:viewer': ['projects.read', 'work-items.read', 'documents.read', 'files.read',
-    'planning.read'] as EnterprisePermissionId[],
-} as const
-
-/**
- * Built-in/custom role の canonical permission set を返します。
- *
- * @remarks
- * 不明な role ID は権限を一切返しません。呼び出し側は、この結果を role の存在確認の
- * 代用にせず、入力境界で role ID と scope の妥当性も検証してください。
- */
-export function resolveEnterpriseRolePermissions(
-  customRoles: readonly EnterpriseCustomRole[],
-  roleId: EnterpriseRoleId,
-): EnterprisePermissionId[] {
-  const builtIn = builtInRolePermissions[roleId as keyof typeof builtInRolePermissions]
-  if (builtIn) return [...builtIn]
-  return [...(customRoles.find((role) => role.roleId === roleId)?.permissions ?? [])]
-}
-
-/**
- * Role が指定 resource scope に割り当て可能な種類かどうかを返します。
- */
-export function isEnterpriseRoleCompatibleWithScope(
-  roleId: EnterpriseRoleId,
-  scopeKind: 'workspace' | 'team' | 'project',
-): boolean {
-  return roleId.startsWith('custom:') || roleId.startsWith(`${scopeKind}:`)
-}
-
-/**
- * 呼び出し principal が自分の effective permission を超えずに role を割り当てられるか返します。
- */
-export function canAssignEnterpriseRole(
-  customRoles: readonly EnterpriseCustomRole[],
-  callerPermissions: readonly EnterprisePermissionId[],
-  roleId: EnterpriseRoleId,
-  scopeKind: 'workspace' | 'team' | 'project',
-): boolean {
-  const roleExists = roleId.startsWith('custom:')
-    ? customRoles.some((role) => role.roleId === roleId)
-    : Object.hasOwn(builtInRolePermissions, roleId)
-  if (!roleExists || !isEnterpriseRoleCompatibleWithScope(roleId, scopeKind)) return false
-  return resolveEnterpriseRolePermissions(customRoles, roleId).every((permission) =>
-    callerPermissions.includes(permission)
-  )
-}
-
-/**
- * Request method/path に最初に一致する permission を返します。
- *
- * @remarks Rule が無い route は `undefined` となり deny-by-default です。
- */
-export function resolveRoutePermission(
-  method: string,
-  path: string,
-  rules: readonly EnterpriseRoutePermissionRule[],
-) {
-  return resolveRoutePermissions(method, path, rules)?.[0]
-}
-
-/**
- * Request method/path に最初に一致する rule の any-of permission 一覧を返します。
- *
- * @remarks Rule が無い route は `undefined` となり deny-by-default です。
- */
-export function resolveRoutePermissions(
-  method: string,
-  path: string,
-  rules: readonly EnterpriseRoutePermissionRule[],
-) {
-  const normalizedMethod = method.trim().toUpperCase()
-  const normalizedPath = normalizePath(path)
-  const rule = rules.find((candidate) =>
-    (candidate.method === '*' || candidate.method === normalizedMethod) &&
-    routePatternMatches(candidate.pathPattern, normalizedPath)
-  )
-  return rule
-    ? [rule.permission, ...(rule.alternativePermissions ?? [])]
-    : undefined
-}
-
-/**
- * SCIM user/group と Cognito group を provider-aware な認可 context へ解決します。
- *
- * @remarks
- * SCIM group ID は Cognito group ID と同じ namespace に flatten しません。Mapping は
- * user、group、mapping の `identityProviderId` がすべて一致した場合だけ有効です。
- */
-export function resolveEnterpriseDirectoryPrincipal(
-  snapshot: EnterpriseIdentitySnapshot,
-  principalId: string,
-  cognitoGroupIds: readonly string[],
-): EnterpriseDirectoryPrincipalResolution {
-  const normalizedPrincipalId = principalId.trim().toLowerCase()
-  const eligibleProviderIds = new Set(
-    snapshot.identityProviders
-      .filter((provider) =>
-        provider.status === 'active' &&
-        provider.lastTestedAt !== undefined &&
-        Number.isFinite(Date.parse(provider.lastTestedAt))
-      )
-      .map((provider) => provider.providerId),
-  )
-  const linkedScimUsers = snapshot.scimUsers.filter((candidate) =>
-    candidate.linkedMemberKey?.trim().toLowerCase() === normalizedPrincipalId
-  )
-  const activeScimUsers = linkedScimUsers.filter((candidate) =>
-    eligibleProviderIds.has(candidate.identityProviderId) &&
-    candidate.active && candidate.appliedVersion >= candidate.version
-  )
-  const directoryGroupMemberships = snapshot.scimGroups
-    .filter((group) =>
-      eligibleProviderIds.has(group.identityProviderId) &&
-      group.active &&
-      group.appliedVersion >= group.version &&
-      activeScimUsers.some((user) =>
-        user.identityProviderId === group.identityProviderId &&
-        group.memberUserIds.includes(user.userId)
-      )
-    )
-    .map((group) => ({
-      identityProviderId: group.identityProviderId,
-      groupId: group.groupId,
-      externalId: group.externalId,
-    }))
-  const compatibleGroupMappings = snapshot.groupMappings.filter((mapping) =>
-    eligibleProviderIds.has(mapping.identityProviderId) &&
-    mapping.enabled &&
-    directoryGroupMemberships.some((membership) =>
-      membership.identityProviderId === mapping.identityProviderId &&
-      (
-        membership.groupId === mapping.directoryGroupId ||
-        membership.externalId === mapping.directoryGroupId
-      )
-    )
-  )
-  const compatibleMappingIds = new Set(
-    compatibleGroupMappings.map((mapping) => mapping.mappingId),
-  )
-
-  return {
-    directoryManaged: linkedScimUsers.length > 0,
-    directoryGroupIds: [...new Set(
-      cognitoGroupIds.map((groupId) => groupId.trim()).filter(Boolean),
-    )],
-    directoryGroupMemberships,
-    compatibleGroupMappings,
-    compatibleRoleAssignments: snapshot.roleAssignments.filter((assignment) =>
-      assignment.principalKind !== 'directory-group' ||
-      assignment.source !== 'directory-mapping' ||
-      assignment.mappingId !== undefined && compatibleMappingIds.has(assignment.mappingId)
-    ),
-    deprovisioned: linkedScimUsers.length > 0 &&
-      linkedScimUsers.every((candidate) =>
-        !candidate.active &&
-        candidate.appliedVersion >= candidate.version
-      ),
-  }
-}
-
-/**
- * Built-in/custom role、direct assignment、directory mapping、guest ceiling を統合して認可します。
- */
-export function evaluateEnterpriseAccess(
-  input: EvaluateEnterpriseAccessInput,
-): EnterpriseEffectiveAccess {
-  if (input.principal.systemAdministrator || input.principal.kind === 'break-glass') {
-    return { allowed: true, permissions: [...ENTERPRISE_PERMISSION_IDS] }
-  }
-
-  const roleIds = new Set<string>()
-  if (
-    input.principal.workspaceRole &&
-    input.principal.includeWorkspaceRolePermissions !== false
-  ) {
-    roleIds.add(`workspace:${input.principal.workspaceRole}`)
-  }
-  let matchingScopedGrant = input.resource.kind === 'workspace'
-  for (const assignment of input.assignments) {
-    const mapping = assignment.source === 'directory-mapping' && assignment.mappingId
-      ? input.groupMappings.find((candidate) =>
-          candidate.enabled && candidate.mappingId === assignment.mappingId
-        )
-      : undefined
-    const principalMatches =
-      assignment.principalKind === input.principal.kind &&
-        assignment.principalId === input.principal.principalId ||
-      assignment.principalKind === 'directory-group' &&
-        (
-          assignment.source !== 'directory-mapping'
-            ? input.principal.directoryGroupIds.includes(assignment.principalId)
-            : mapping !== undefined &&
-              mapping.directoryGroupId === assignment.principalId &&
-              directoryMembershipMatches(
-                input.principal.directoryGroupMemberships,
-                mapping,
-              )
-        )
-    if (
-      principalMatches &&
-      scopeMatches(assignment.scope, input.resource)
-    ) {
-      roleIds.add(assignment.roleId)
-      matchingScopedGrant = true
-    }
-  }
-  for (const mapping of input.groupMappings) {
-    if (
-      mapping.enabled &&
-      directoryMembershipMatches(
-        input.principal.directoryGroupMemberships,
-        mapping,
-      ) &&
-      scopeMatches(mapping.scope, input.resource)
-    ) {
-      roleIds.add(mapping.roleId)
-      matchingScopedGrant = true
-    }
-  }
-
-  const permissions = new Set(input.principal.directPermissions ?? [])
-  for (const roleId of roleIds) {
-    const customRole = input.customRoles.find((role) => role.roleId === roleId)
-    if (
-      customRole &&
-      input.principal.workspaceRole === 'guest' &&
-      !customRole.guestAssignable
-    ) {
-      continue
-    }
-    for (const permission of resolveEnterpriseRolePermissions(
-      input.customRoles,
-      roleId as EnterpriseRoleId,
-    )) {
-      permissions.add(permission)
-    }
-  }
-
-  const ceiling = input.principal.permissionCeiling
-  if (ceiling) {
-    for (const permission of permissions) {
-      if (!ceiling.includes(permission)) permissions.delete(permission)
-    }
-    if (!ceiling.includes(input.permission)) {
-      return {
-        allowed: false,
-        permissions: [...permissions],
-        reason: 'guest-ceiling',
-      }
-    }
-  }
-  const allowed = permissions.has(input.permission)
-  return {
-    allowed,
-    permissions: [...permissions],
-    ...(allowed
-      ? {}
-      : { reason: matchingScopedGrant ? 'permission-missing' as const : 'scope-mismatch' as const }),
-  }
-}
-
-function directoryMembershipMatches(
-  memberships: readonly EnterpriseDirectoryGroupMembership[] | undefined,
-  mapping: EnterpriseDirectoryGroupMapping,
-) {
-  return memberships?.some((membership) =>
-    membership.identityProviderId === mapping.identityProviderId &&
-    (
-      membership.groupId === mapping.directoryGroupId ||
-      membership.externalId === mapping.directoryGroupId
-    )
-  ) === true
-}
-
-/**
- * MFA、absolute lifetime、sensitive re-authentication、IP allowlist を検証します。
- */
-export function validateEnterpriseSession(
-  policy: EnterpriseSecurityPolicy | undefined,
-  context: EnterpriseSessionContext,
-): EnterpriseSessionValidation {
-  const methods = new Set(context.authenticationMethods.map((method) => method.toLowerCase()))
-  if (!policy) {
-    return context.breakGlass &&
-        ![...methods].some((method) =>
-          method.includes('mfa') || method.includes('otp') || method.includes('webauthn')
-        )
-      ? { valid: false, reason: 'mfa-required' }
-      : { valid: true }
-  }
-  const requiresMfa = policy.mfaRequirement === 'required' ||
-    context.external && policy.externalAccess.requireMfa ||
-    context.breakGlass
-  if (
-    requiresMfa &&
-    ![...methods].some((method) =>
-      method.includes('mfa') || method.includes('otp') || method.includes('webauthn')
-    )
-  ) {
-    return { valid: false, reason: 'mfa-required' }
-  }
-  const absoluteLifetime = context.external
-    ? Math.min(
-        policy.sessionLifetimeMinutes,
-        policy.externalAccess.maximumSessionLifetimeMinutes,
-      )
-    : policy.sessionLifetimeMinutes
-  const ageSeconds = context.now - context.authenticatedAt
-  if (ageSeconds < 0 || ageSeconds > absoluteLifetime * 60) {
-    return { valid: false, reason: 'session-expired' }
-  }
-  const reauthenticationMinutes = context.privileged
-    ? policy.sensitiveActionReauthenticationMinutes
-    : policy.reauthenticationIntervalMinutes
-  if (ageSeconds > reauthenticationMinutes * 60) {
-    return { valid: false, reason: 'reauthentication-required' }
-  }
-  const appliesIpAllowlist = !context.breakGlass &&
-    (
-      policy.ipAllowlistMode === 'all-users' ||
-      policy.ipAllowlistMode === 'privileged-users' && context.privileged
-    )
-  if (
-    appliesIpAllowlist &&
-    (
-      !context.clientIp ||
-      !policy.ipAllowlist.some((cidr) => ipMatchesCidr(context.clientIp!, cidr))
-    )
-  ) {
-    return { valid: false, reason: 'ip-denied' }
-  }
-  return { valid: true }
-}
-
-/**
- * IPv4/IPv6 address が CIDR range に含まれるかを判定します。
- */
-export function ipMatchesCidr(address: string, cidr: string) {
-  const [network, prefixText, ...extra] = cidr.trim().split('/')
-  if (!network || !prefixText || extra.length > 0) return false
-  const addressVersion = isIP(address.trim())
-  if (addressVersion === 0 || addressVersion !== isIP(network)) return false
-  const bitLength = addressVersion === 4 ? 32 : 128
-  const prefix = Number(prefixText)
-  if (!Number.isInteger(prefix) || prefix < 0 || prefix > bitLength) return false
-  const addressValue = addressVersion === 4
-    ? parseIpv4(address.trim())
-    : parseIpv6(address.trim())
-  const networkValue = addressVersion === 4 ? parseIpv4(network) : parseIpv6(network)
-  if (addressValue === undefined || networkValue === undefined) return false
-  if (prefix === 0) return true
-  const shift = BigInt(bitLength - prefix)
-  return addressValue >> shift === networkValue >> shift
-}
-
-function normalizePath(path: string) {
-  const normalized = `/${path.trim().replace(/^\/+|\/+$/gu, '')}`
-  return normalized === '/' ? normalized : normalized.replace(/\/+$/gu, '')
-}
-
-function routePatternMatches(pattern: string, path: string) {
-  const normalizedPattern = normalizePath(pattern)
-  const wildcard = normalizedPattern.endsWith('*')
-  const base = wildcard ? normalizedPattern.slice(0, -1) : normalizedPattern
-  const expression = base
-    .split('/')
-    .map((segment) => segment.startsWith(':') ? '[^/]+' : escapeRegExp(segment))
-    .join('/')
-  return new RegExp(`^${expression}${wildcard ? '.*' : ''}$`, 'u').test(path)
-}
-
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
-}
-
-function scopeMatches(
-  scope: EnterpriseRoleAssignment['scope'],
-  resource: EnterpriseAuthorizationResource,
-) {
-  if (scope.workspaceId !== resource.workspaceId) return false
-  if (scope.kind === 'workspace') return true
-  if (scope.kind === 'team') {
-    return resource.kind === 'team' && scope.targetId === resource.targetId ||
-      resource.kind === 'project' && scope.targetId === resource.parentTeamId
-  }
-  return resource.kind === 'project' && scope.targetId === resource.targetId
-}
-
-function parseIpv4(value: string) {
-  const octets = value.split('.')
-  if (octets.length !== 4) return undefined
-  let parsed = 0n
-  for (const octet of octets) {
-    if (!/^(?:0|[1-9]\d{0,2})$/u.test(octet)) return undefined
-    const number = Number(octet)
-    if (number > 255) return undefined
-    parsed = parsed << 8n | BigInt(number)
-  }
-  return parsed
-}
-
-function parseIpv6(value: string) {
-  const normalized = value.toLowerCase()
-  if (normalized.includes('.')) return undefined
-  const doubleColonParts = normalized.split('::')
-  if (doubleColonParts.length > 2) return undefined
-  const left = doubleColonParts[0] ? doubleColonParts[0].split(':') : []
-  const right = doubleColonParts[1] ? doubleColonParts[1].split(':') : []
-  if (
-    [...left, ...right].some((part) => !/^[0-9a-f]{1,4}$/u.test(part)) ||
-    doubleColonParts.length === 1 && left.length !== 8 ||
-    doubleColonParts.length === 2 && left.length + right.length >= 8
-  ) return undefined
-  const groups = doubleColonParts.length === 2
-    ? [...left, ...Array<string>(8 - left.length - right.length).fill('0'), ...right]
-    : left
-  if (groups.length !== 8) return undefined
-  return groups.reduce((result, group) => result << 16n | BigInt(`0x${group}`), 0n)
-}
-
-/**
  * 永続 state に保持する service credential metadata と HMAC digest です。
  */
 type StoredServiceCredential = EnterpriseServiceAccountCredential & {
@@ -1430,12 +449,20 @@ type EnterpriseMutationAudit = {
   metadata?: Readonly<Record<string, unknown>>
 }
 
+/** Persistence and credential adapters composed into the DynamoDB client. */
+type DynamoDbEnterpriseIdentityAdapters = {
+  /** Plaintext credential generation, digest, and verification adapter. */
+  credentialProtector: EnterpriseCredentialProtector
+  /** Immutable generation staging and atomic checkpoint adapter. */
+  generationCommitter: EnterpriseGenerationCommitter<EnterpriseTransactWriteItem>
+}
+
 /**
  * Enterprise state persistence を抽象化する基底 service です。
  */
 abstract class EnterpriseIdentityService implements EnterpriseIdentityClient {
-  /** Credential digest に使う stable HMAC secret です。 */
-  private readonly tokenHashSecret: string
+  /** Plaintext credential の生成・digest・constant-time 検証 adapter です。 */
+  protected readonly credentialProtector: EnterpriseCredentialProtector
   /** Testable wall clock です。 */
   private readonly clock: () => Date
   /** Workspace 単位で適用する SCIM resource hard cap です。 */
@@ -1445,19 +472,12 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityClient {
    * Enterprise identity service を作成します。
    */
   protected constructor(
-    tokenHashSecret: string,
+    credentialProtector: EnterpriseCredentialProtector,
     clock: () => Date,
     scimResourceLimits: EnterpriseScimResourceLimits =
       ENTERPRISE_SCIM_RESOURCE_LIMITS,
   ) {
-    if (tokenHashSecret.length < 32 || tokenHashSecret.length > 256) {
-      throw new EnterpriseIdentityError(
-        503,
-        'EnterpriseIdentitySecretInvalid',
-        'Enterprise identity token hash secret must contain between 32 and 256 characters.',
-      )
-    }
-    this.tokenHashSecret = tokenHashSecret
+    this.credentialProtector = credentialProtector
     this.clock = clock
     this.scimResourceLimits = validateEnterpriseScimResourceLimits(
       scimResourceLimits,
@@ -1923,7 +943,7 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityClient {
     auditContext?: MutationAuditContext,
   ) {
     const normalizedProviderId = requireText(identityProviderId, 'Identity provider ID')
-    const token = `msc_${randomBytes(32).toString('base64url')}`
+    const token = this.credentialProtector.createRandomToken('scim')
     const createdAt = this.clock().toISOString()
     const credential = {
       workspaceId,
@@ -2110,7 +1130,7 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityClient {
   async authenticateScimWorkspace(workspaceId: string, token: string) {
     const state = await this.loadState(workspaceId)
     const match = state.scimCredentialDigests.find((candidate) =>
-      isMatchingCredentialDigest(
+      this.credentialProtector.matchesDigest(
         candidate.digest,
         this.digestToken('scim', workspaceId, candidate.credentialId, token),
       )
@@ -3297,7 +2317,7 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityClient {
     expiresAt?: string,
     auditContext?: MutationAuditContext,
   ) {
-    const token = `msa_${randomBytes(32).toString('base64url')}`
+    const token = this.credentialProtector.createRandomToken('service-account')
     const credentialId = crypto.randomUUID()
     const digest = this.digestToken('service-account', workspaceId, credentialId, token)
     const requestedExpiry = expiresAt
@@ -3461,7 +2481,7 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityClient {
   async authenticateServiceAccountToken(workspaceId: string, token: string) {
     const state = await this.loadState(workspaceId)
     const credential = state.serviceCredentials.find((candidate) =>
-      isMatchingCredentialDigest(
+      this.credentialProtector.matchesDigest(
         candidate.digest,
         this.digestToken(
           'service-account',
@@ -3830,14 +2850,7 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityClient {
     credentialId: string,
     token: string,
   ) {
-    return createHmac('sha256', this.tokenHashSecret)
-      .update([
-        kind,
-        requireText(workspaceId, 'Workspace ID'),
-        requireText(credentialId, 'Credential ID'),
-        requireText(token, 'Credential'),
-      ].join('\0'))
-      .digest('hex')
+    return this.credentialProtector.digest({ kind, workspaceId, credentialId, token })
   }
 
   /** Idempotency window 内だけ再生成できる one-time bearer token を導出します。 */
@@ -3848,24 +2861,13 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityClient {
     generation: number,
     receiptKey: string,
   ) {
-    if (!Number.isSafeInteger(generation) || generation < 1) {
-      throw new EnterpriseIdentityError(
-        400,
-        'EnterpriseCredentialGenerationInvalid',
-        'Credential generation must be a positive integer.',
-      )
-    }
-    const prefix = kind === 'scim' ? 'msc' : 'msa'
-    return `${prefix}_${createHmac('sha256', this.tokenHashSecret)
-      .update([
-        'enterprise-one-time-credential-v1',
-        kind,
-        requireText(workspaceId, 'Workspace ID'),
-        requireText(entityId, 'Credential entity ID'),
-        String(generation),
-        requireText(receiptKey, 'Credential receipt key'),
-      ].join('\0'))
-      .digest('base64url')}`
+    return this.credentialProtector.deriveOneTimeToken({
+      kind,
+      workspaceId,
+      entityId,
+      generation,
+      receiptKey,
+    })
   }
 }
 
@@ -3887,7 +2889,11 @@ export class InMemoryEnterpriseIdentityClient extends EnterpriseIdentityService 
     scimResourceLimits: EnterpriseScimResourceLimits =
       ENTERPRISE_SCIM_RESOURCE_LIMITS,
   ) {
-    super(tokenHashSecret, clock, scimResourceLimits)
+    super(
+      new HmacEnterpriseCredentialProtector(tokenHashSecret),
+      clock,
+      scimResourceLimits,
+    )
   }
 
   /** Memory state を clone して読み込みます。 */
@@ -3948,6 +2954,10 @@ export class DynamoDbEnterpriseIdentityClient extends EnterpriseIdentityService 
   private readonly auditTableName?: string
   /** DynamoDB document client です。 */
   private readonly documentClient: DynamoDBDocumentClient
+  /** Immutable generation staging と atomic checkpoint adapter です。 */
+  private readonly generationCommitter: EnterpriseGenerationCommitter<
+    EnterpriseTransactWriteItem
+  >
 
   /**
    * DynamoDB-backed enterprise identity client を作成します。
@@ -3961,10 +2971,20 @@ export class DynamoDbEnterpriseIdentityClient extends EnterpriseIdentityService 
     clock: () => Date = () => new Date(),
     scimResourceLimits: EnterpriseScimResourceLimits =
       ENTERPRISE_SCIM_RESOURCE_LIMITS,
+    adapters?: DynamoDbEnterpriseIdentityAdapters,
   ) {
-    super(tokenHashSecret, clock, scimResourceLimits)
-    this.tableName = requireText(tableName, 'Enterprise identity table name')
+    const normalizedTableName = requireText(tableName, 'Enterprise identity table name')
+    const composedAdapters = adapters ?? {
+      credentialProtector: new HmacEnterpriseCredentialProtector(tokenHashSecret),
+      generationCommitter: new DynamoDbEnterpriseGenerationCommitter(
+        normalizedTableName,
+        documentClient,
+      ),
+    }
+    super(composedAdapters.credentialProtector, clock, scimResourceLimits)
+    this.tableName = normalizedTableName
     this.documentClient = documentClient
+    this.generationCommitter = composedAdapters.generationCommitter
     this.auditTableName = auditTableName?.trim() || undefined
   }
 
@@ -4071,7 +3091,7 @@ export class DynamoDbEnterpriseIdentityClient extends EnterpriseIdentityService 
               normalizedWorkspaceId,
             )
           if (
-            isMatchingCredentialDigest(
+            this.credentialProtector.matchesDigest(
               digest,
               this.digestToken(
                 'scim',
@@ -4357,7 +3377,6 @@ export class DynamoDbEnterpriseIdentityClient extends EnterpriseIdentityService 
       },
       ...generationItems,
     ]
-    await this.stageEnterpriseGeneration(stagedItems)
     const controlWrite = {
       Put: {
         TableName: this.tableName,
@@ -4433,6 +3452,9 @@ export class DynamoDbEnterpriseIdentityClient extends EnterpriseIdentityService 
         sequence: 10,
       },
     )
+    const domainClaimOperationStart = 1 + scimGroupJobWrites.length
+    const domainClaimOperationEnd =
+      domainClaimOperationStart + domainClaimWrites.length
     const transactItems = [
       controlWrite,
       ...scimGroupJobWrites,
@@ -4440,96 +3462,38 @@ export class DynamoDbEnterpriseIdentityClient extends EnterpriseIdentityService 
       ...scimProjectionWrites,
       ...(auditPut ? [auditPut] : []),
     ]
-    if (transactItems.length > 100) {
-      await this.cleanupEnterpriseGeneration(stagedItems)
-      throw new EnterpriseIdentityError(
-        413,
-        'EnterpriseIdentityMutationTooLarge',
-        'This mutation changes too many enterprise records for one atomic checkpoint.',
-      )
-    }
     try {
-      await this.documentClient.send(new TransactWriteCommand({
-        TransactItems: transactItems,
-      }))
+      await this.generationCommitter.commit(stagedItems, transactItems)
     } catch (error) {
-      if (isConditionalWriteError(error)) {
-        await this.cleanupEnterpriseGeneration(stagedItems)
-        for (const domain of domainClaims.claimed) {
-          const ownerWorkspaceId = await this.findDomainWorkspace(domain)
-          if (ownerWorkspaceId && ownerWorkspaceId !== state.workspaceId) {
-            throw new EnterpriseIdentityError(
-              409,
-              'EnterpriseDomainAlreadyClaimed',
-              'The verified domain is already assigned to another workspace.',
-            )
+      if (error instanceof EnterpriseGenerationCommitConflictError) {
+        const conflictIndexes = new Set(error.conflictingOperationIndexes)
+        const domainClaimConflicted = error.conflictingOperationIndexes.some((index) =>
+          index >= domainClaimOperationStart && index < domainClaimOperationEnd
+        )
+        if (domainClaimConflicted) {
+          for (const domain of domainClaims.claimed) {
+            const ownerWorkspaceId = await this.findDomainWorkspace(domain)
+            if (ownerWorkspaceId && ownerWorkspaceId !== state.workspaceId) {
+              throw new EnterpriseIdentityError(
+                409,
+                'EnterpriseDomainAlreadyClaimed',
+                'The verified domain is already assigned to another workspace.',
+              )
+            }
           }
         }
-        throw new EnterpriseIdentityError(
-          409,
-          'EnterpriseIdentityRevisionConflict',
-          'Enterprise identity state changed. Reload and try again.',
-          true,
-          { cause: error },
-        )
-      }
-      await this.cleanupEnterpriseGeneration(stagedItems)
-      throw toEnterprisePersistenceError(error)
-    }
-  }
-
-  /** Immutable delta generation を DynamoDB の 25-item batch 単位で先行保存します。 */
-  private async stageEnterpriseGeneration(items: Record<string, unknown>[]) {
-    try {
-      for (let offset = 0; offset < items.length; offset += 25) {
-        let pending: NonNullable<BatchWriteCommandInput['RequestItems']>[string] =
-          items.slice(offset, offset + 25).map((item) => ({
-            PutRequest: { Item: item },
-          }))
-        for (let attempt = 0; pending.length > 0 && attempt < 5; attempt += 1) {
-          const response = await this.documentClient.send(new BatchWriteCommand({
-            RequestItems: { [this.tableName]: pending },
-          }))
-          pending = response.UnprocessedItems?.[this.tableName] ?? []
-        }
-        if (pending.length > 0) {
+        if (conflictIndexes.has(0)) {
           throw new EnterpriseIdentityError(
-            503,
-            'EnterpriseIdentityUnavailable',
-            'Enterprise identity state is unavailable.',
+            409,
+            'EnterpriseIdentityRevisionConflict',
+            'Enterprise identity state changed. Reload and try again.',
             true,
+            { cause: error.cause },
           )
         }
+        throw toEnterprisePersistenceError(error)
       }
-    } catch (error) {
-      await this.cleanupEnterpriseGeneration(items)
-      if (error instanceof EnterpriseIdentityError) throw error
-      throw toEnterprisePersistenceError(error)
-    }
-  }
-
-  /** 未commit generation の既知 key を best-effort で削除します。 */
-  private async cleanupEnterpriseGeneration(items: Record<string, unknown>[]) {
-    try {
-      for (let offset = 0; offset < items.length; offset += 25) {
-        let pending: NonNullable<BatchWriteCommandInput['RequestItems']>[string] =
-          items.slice(offset, offset + 25).map((item) => ({
-            DeleteRequest: {
-              Key: {
-                scopeKey: item.scopeKey,
-                recordKey: item.recordKey,
-              },
-            },
-          }))
-        for (let attempt = 0; pending.length > 0 && attempt < 3; attempt += 1) {
-          const response = await this.documentClient.send(new BatchWriteCommand({
-            RequestItems: { [this.tableName]: pending },
-          }))
-          pending = response.UnprocessedItems?.[this.tableName] ?? []
-        }
-      }
-    } catch {
-      // Orphaned UUID partitions are invisible unless CONTROL points to them.
+      throw error
     }
   }
 
@@ -4972,7 +3936,22 @@ export function createEnterpriseIdentityClient() {
       'ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET is required.',
     )
   }
-  return new DynamoDbEnterpriseIdentityClient(tableName, secret)
+  const documentClient = createEnterpriseDocumentClient()
+  return new DynamoDbEnterpriseIdentityClient(
+    tableName,
+    secret,
+    documentClient,
+    undefined,
+    undefined,
+    undefined,
+    {
+      credentialProtector: new HmacEnterpriseCredentialProtector(secret),
+      generationCommitter: new DynamoDbEnterpriseGenerationCommitter(
+        tableName,
+        documentClient,
+      ),
+    },
+  )
 }
 
 function createEnterpriseDocumentClient() {
@@ -7128,7 +6107,7 @@ function requireReadyIdentityProvider(
 }
 
 function roleExists(state: EnterpriseIdentityState, roleId: string) {
-  return roleId in builtInRolePermissions ||
+  return ENTERPRISE_BUILT_IN_ROLE_IDS.some((candidate) => candidate === roleId) ||
     state.customRoles.some((role) => role.roleId === roleId)
 }
 
@@ -7226,15 +6205,6 @@ function stableId(namespace: string, ...values: string[]) {
     .update(values.join('\0'))
     .digest('base64url')
     .slice(0, 22)}`
-}
-
-function isMatchingCredentialDigest(candidate: string, expected: string) {
-  if (
-    candidate.length !== expected.length ||
-    !/^[0-9a-f]{64}$/u.test(candidate) ||
-    !/^[0-9a-f]{64}$/u.test(expected)
-  ) return false
-  return timingSafeEqual(Buffer.from(candidate, 'hex'), Buffer.from(expected, 'hex'))
 }
 
 function upsertBy<T>(values: T[], next: T, predicate: (value: T) => boolean) {

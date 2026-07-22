@@ -15,7 +15,7 @@ import type {
 } from '../../modules/enterprise-identity/application/ports/scim-group-job-processor'
 import {
   createEnterpriseIdentityClient,
-} from '../../modules/enterprise-identity/enterprise-identity'
+} from '../../modules/enterprise-identity'
 import {
   createEnterpriseScimGroupJobProcessor,
 } from '../../modules/enterprise-identity/enterprise-scim-group-job-worker'
@@ -29,8 +29,12 @@ import {
  */
 export function createEnterpriseScimGroupJobWorkerProcessor():
   EnterpriseScimGroupJobProcessor {
+  const enterpriseIdentityClient = createEnterpriseIdentityClient()
   return createEnterpriseScimGroupJobProcessor({
-    enterpriseIdentity: createEnterpriseIdentityClient(),
+    enterpriseIdentity: Object.freeze({
+      processScimGroupJob:
+        enterpriseIdentityClient.processScimGroupJob.bind(enterpriseIdentityClient),
+    }),
     workspaceAccess: new DynamoDbWorkspaceAccessClient({
       documentAuthorizationRevisionMutationPort:
         new DynamoDbDocumentAuthorizationRevisionMutationAdapter(),

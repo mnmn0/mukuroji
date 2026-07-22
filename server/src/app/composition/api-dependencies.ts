@@ -47,7 +47,8 @@ import {
 } from '../../modules/documents/adapter-out/dynamodb/document-authorization'
 import {
   createEnterpriseIdentityClient,
-} from '../../modules/enterprise-identity/enterprise-identity'
+  createEnterpriseIdentityCapabilities,
+} from '../../modules/enterprise-identity'
 import {
   createEnterpriseSessionActivityClient,
 } from '../../modules/enterprise-identity/enterprise-session-activity'
@@ -293,6 +294,7 @@ export function createProductionAuthenticationDependencies(): AuthenticationDepe
  * @returns Workspace dependencies backed by configured production adapters.
  */
 export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
+  const enterpriseIdentityClient = createEnterpriseIdentityClient()
   return {
     dashboardSummary: new DynamoDbDashboardSummaryClient(),
     projectDirectory: new DynamoDbProjectDirectoryClient(),
@@ -301,7 +303,7 @@ export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
       documentAuthorizationRevisionMutationPort:
         new DynamoDbDocumentAuthorizationRevisionMutationAdapter(),
     }),
-    enterpriseIdentity: createEnterpriseIdentityClient(),
+    enterpriseIdentity: createEnterpriseIdentityCapabilities(enterpriseIdentityClient),
     enterpriseSessionActivity: createEnterpriseSessionActivityClient(),
     enterpriseIdentityProviderConnectionTester: testEnterpriseIdentityProviderConnection,
   }
@@ -497,7 +499,11 @@ export function overrideAppDependencies(
         ? { workspaceAccess: overrides.workspaceAccess }
         : {}),
       ...(overrides.enterpriseIdentity
-        ? { enterpriseIdentity: overrides.enterpriseIdentity }
+        ? {
+            enterpriseIdentity: createEnterpriseIdentityCapabilities(
+              overrides.enterpriseIdentity,
+            ),
+          }
         : {}),
       ...(overrides.enterpriseSessionActivity
         ? { enterpriseSessionActivity: overrides.enterpriseSessionActivity }
