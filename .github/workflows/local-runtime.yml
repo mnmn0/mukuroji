@@ -60,7 +60,7 @@ jobs:
 
       - name: Wait for Floci bootstrap
         run: |
-          for attempt in {1..180}; do
+          for attempt in {1..300}; do
             docker compose logs floci > "${RUNNER_TEMP}/floci.log"
             if [ -f .floci/generated/cognito.env ]; then
               exit 0

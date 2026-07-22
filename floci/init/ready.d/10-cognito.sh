@@ -839,6 +839,109 @@ case "$ENTERPRISE_IDENTITY_TTL_STATUS" in
     ;;
 esac
 
+if ! aws_local dynamodb describe-table --table-name "$REALTIME_SESSIONS_TABLE" >/dev/null 2>&1; then
+  aws_local dynamodb create-table \
+    --table-name "$REALTIME_SESSIONS_TABLE" \
+    --attribute-definitions \
+      AttributeName=connectionId,AttributeType=S \
+      AttributeName=scopeKey,AttributeType=S \
+    --key-schema AttributeName=connectionId,KeyType=HASH \
+    --global-secondary-indexes '[
+      {
+        "IndexName": "ScopeConnectionsIndex",
+        "KeySchema": [
+          {"AttributeName": "scopeKey", "KeyType": "HASH"},
+          {"AttributeName": "connectionId", "KeyType": "RANGE"}
+        ],
+        "Projection": {"ProjectionType": "ALL"}
+      }
+    ]' \
+    --billing-mode PAY_PER_REQUEST \
+    >/dev/null
+fi
+
+aws_local dynamodb wait table-exists --table-name "$REALTIME_SESSIONS_TABLE"
+
+REALTIME_SCOPE_INDEX_NAME="$(aws_local dynamodb describe-table \
+  --table-name "$REALTIME_SESSIONS_TABLE" \
+  --query "Table.GlobalSecondaryIndexes[?IndexName=='ScopeConnectionsIndex'] | [0].IndexName" \
+  --output text)"
+if [ -z "$REALTIME_SCOPE_INDEX_NAME" ] || [ "$REALTIME_SCOPE_INDEX_NAME" = "None" ]; then
+  aws_local dynamodb update-table \
+    --table-name "$REALTIME_SESSIONS_TABLE" \
+    --attribute-definitions AttributeName=scopeKey,AttributeType=S \
+    --global-secondary-index-updates \
+      '[{"Create":{"IndexName":"ScopeConnectionsIndex","KeySchema":[{"AttributeName":"scopeKey","KeyType":"HASH"},{"AttributeName":"connectionId","KeyType":"RANGE"}],"Projection":{"ProjectionType":"ALL"}}}]' \
+    >/dev/null
+fi
+
+REALTIME_SCOPE_INDEX_STATUS=""
+REALTIME_SCOPE_INDEX_WAIT_ATTEMPT=0
+while [ "$REALTIME_SCOPE_INDEX_WAIT_ATTEMPT" -lt 60 ]; do
+  REALTIME_SCOPE_INDEX_STATUS="$(aws_local dynamodb describe-table \
+    --table-name "$REALTIME_SESSIONS_TABLE" \
+    --query "Table.GlobalSecondaryIndexes[?IndexName=='ScopeConnectionsIndex'] | [0].IndexStatus" \
+    --output text)"
+  if [ "$REALTIME_SCOPE_INDEX_STATUS" = "ACTIVE" ]; then
+    break
+  fi
+
+  REALTIME_SCOPE_INDEX_WAIT_ATTEMPT=$((REALTIME_SCOPE_INDEX_WAIT_ATTEMPT + 1))
+  sleep 1
+done
+if [ "$REALTIME_SCOPE_INDEX_STATUS" != "ACTIVE" ]; then
+  echo "DynamoDB index ScopeConnectionsIndex did not become active for table $REALTIME_SESSIONS_TABLE." >&2
+  exit 1
+fi
+
+REALTIME_SESSIONS_TTL_STATUS="$(aws_local dynamodb describe-time-to-live \
+  --table-name "$REALTIME_SESSIONS_TABLE" \
+  --query TimeToLiveDescription.TimeToLiveStatus \
+  --output text 2>/dev/null || true)"
+case "$REALTIME_SESSIONS_TTL_STATUS" in
+  ENABLED | ENABLING) ;;
+  *)
+    aws_local dynamodb update-time-to-live \
+      --table-name "$REALTIME_SESSIONS_TABLE" \
+      --time-to-live-specification AttributeName=expiresAt,Enabled=true \
+      >/dev/null
+    ;;
+esac
+
+read_realtime_sessions_table_schema() {
+  aws_local dynamodb describe-table \
+    --table-name "$REALTIME_SESSIONS_TABLE" \
+    --query "$1" \
+    --output text
+}
+
+REALTIME_TABLE_BILLING_MODE="$(read_realtime_sessions_table_schema 'Table.BillingModeSummary.BillingMode')"
+REALTIME_TABLE_PARTITION_KEY="$(read_realtime_sessions_table_schema "Table.KeySchema[?KeyType=='HASH'].AttributeName | [0]")"
+REALTIME_TABLE_SORT_KEY="$(read_realtime_sessions_table_schema "Table.KeySchema[?KeyType=='RANGE'].AttributeName | [0]")"
+REALTIME_TABLE_PARTITION_KEY_TYPE="$(read_realtime_sessions_table_schema "Table.AttributeDefinitions[?AttributeName=='connectionId'].AttributeType | [0]")"
+REALTIME_INDEX_PARTITION_KEY="$(read_realtime_sessions_table_schema "Table.GlobalSecondaryIndexes[?IndexName=='ScopeConnectionsIndex'] | [0].KeySchema[?KeyType=='HASH'].AttributeName | [0]")"
+REALTIME_INDEX_SORT_KEY="$(read_realtime_sessions_table_schema "Table.GlobalSecondaryIndexes[?IndexName=='ScopeConnectionsIndex'] | [0].KeySchema[?KeyType=='RANGE'].AttributeName | [0]")"
+REALTIME_INDEX_PARTITION_KEY_TYPE="$(read_realtime_sessions_table_schema "Table.AttributeDefinitions[?AttributeName=='scopeKey'].AttributeType | [0]")"
+REALTIME_INDEX_PROJECTION_TYPE="$(read_realtime_sessions_table_schema "Table.GlobalSecondaryIndexes[?IndexName=='ScopeConnectionsIndex'] | [0].Projection.ProjectionType")"
+REALTIME_SESSIONS_TTL_ATTRIBUTE="$(aws_local dynamodb describe-time-to-live \
+  --table-name "$REALTIME_SESSIONS_TABLE" \
+  --query TimeToLiveDescription.AttributeName \
+  --output text)"
+
+if [ "$REALTIME_TABLE_BILLING_MODE" != "PAY_PER_REQUEST" ] ||
+  [ "$REALTIME_TABLE_PARTITION_KEY" != "connectionId" ] ||
+  [ "$REALTIME_TABLE_SORT_KEY" != "None" ] ||
+  [ "$REALTIME_TABLE_PARTITION_KEY_TYPE" != "S" ] ||
+  [ "$REALTIME_INDEX_PARTITION_KEY" != "scopeKey" ] ||
+  [ "$REALTIME_INDEX_SORT_KEY" != "connectionId" ] ||
+  [ "$REALTIME_INDEX_PARTITION_KEY_TYPE" != "S" ] ||
+  [ "$REALTIME_INDEX_PROJECTION_TYPE" != "ALL" ] ||
+  [ "$REALTIME_SESSIONS_TTL_ATTRIBUTE" != "expiresAt" ]; then
+  echo "Existing Realtime Sessions table schema does not match the local API contract: table=$REALTIME_SESSIONS_TABLE index=ScopeConnectionsIndex" >&2
+  echo "Actual: billingMode=$REALTIME_TABLE_BILLING_MODE primaryKey=$REALTIME_TABLE_PARTITION_KEY($REALTIME_TABLE_PARTITION_KEY_TYPE)/$REALTIME_TABLE_SORT_KEY indexKey=$REALTIME_INDEX_PARTITION_KEY($REALTIME_INDEX_PARTITION_KEY_TYPE)/$REALTIME_INDEX_SORT_KEY projection=$REALTIME_INDEX_PROJECTION_TYPE ttl=$REALTIME_SESSIONS_TTL_ATTRIBUTE" >&2
+  exit 1
+fi
+
 if ! aws_local dynamodb describe-table --table-name "$WORKSPACE_SEARCH_TABLE" >/dev/null 2>&1; then
   aws_local dynamodb create-table \
     --table-name "$WORKSPACE_SEARCH_TABLE" \
@@ -1106,5 +1209,6 @@ echo "mukuroji DynamoDB ready: table=$PROJECT_DIRECTORY_TABLE workspaceDirectory
 echo "mukuroji audit configured: table=$AUDIT_EVENTS_TABLE retentionDays=$AUDIT_RETENTION_DAYS"
 echo "mukuroji DynamoDB ready: table=$WORKSPACE_ACCESS_TABLE workspace=$WORKSPACE_DIRECTORY_ID"
 echo "mukuroji DynamoDB ready: table=$ENTERPRISE_IDENTITY_TABLE enterpriseIdentity=ready"
+echo "mukuroji DynamoDB ready: table=$REALTIME_SESSIONS_TABLE scopeIndex=ScopeConnectionsIndex"
 echo "mukuroji DynamoDB ready: table=$WORKSPACE_SEARCH_TABLE searchAndSavedViews=ready"
 echo "mukuroji DynamoDB ready: table=$ANALYTICS_TABLE scheduleIndex=$ANALYTICS_SCHEDULE_INDEX"
