@@ -51,6 +51,7 @@ import {
   type PlanningWorkItemSummary,
   type ResolvedWorkItemConfiguration,
   type ImportDryRunReport,
+  type ImportJob,
   type ImportReport,
   type ImportRowError,
   type UpdateAutomationRuleInput,
@@ -362,12 +363,11 @@ import {
 } from '../modules/automation/automation-inbound-webhook'
 import { deliverAutomationWebhook } from '../modules/automation/automation-webhook'
 import { PlanningError, type PlanningWorkItemState } from '../modules/planning/planning'
-import {
-  createDefaultSecretProtector,
-  type AuthenticatedDeveloperCredential,
-  type DeveloperPlatformClient,
-  type IdempotencyMutationToken,
-} from '../modules/developer-platform/developer-platform'
+import type {
+  AuthenticatedDeveloperCredential,
+  IdempotencyMutationToken,
+} from '../modules/developer-platform/application/ports'
+import { createDefaultSecretProtector } from '../modules/developer-platform/adapter-out/shared/developer-platform-store'
 import {
   ConnectorAuthorizationRuntime,
   createConnectorConflictRuntime,
@@ -381,13 +381,14 @@ import {
   createConnectorRuntimeCache,
   loadConnectorRuntimeEnvironment,
 } from '../modules/developer-platform/connector-runtime-configuration'
+import { createSecretsManagerConnectorRuntimeSecretLoader } from '../modules/developer-platform/adapter-out/secrets-manager/connector-runtime-secret-loader'
 import {
-  ConnectorOAuthStateManager,
   createDynamoDbConnectorOAuthStateStoreFromEnvironment,
-} from '../modules/developer-platform/connector-oauth-state'
+} from '../modules/developer-platform/adapter-out/dynamodb/connector-oauth-state-store'
+import { ConnectorOAuthStateManager } from '../modules/developer-platform/connector-oauth-state'
 import {
   createDynamoDbConnectorSyncPersistenceFromEnvironment,
-} from '../modules/developer-platform/connector-sync-persistence'
+} from '../modules/developer-platform/adapter-out/dynamodb/connector-sync-persistence'
 import {
   ConnectorSyncEngine,
   type ConnectorSyncHealthReporter,
@@ -1017,8 +1018,35 @@ const automationDependencies: AutomationDependencies = {
   },
 }
 const developerPlatformDependencies: DeveloperPlatformDependencies = {
-  get developerPlatform() {
-    return requireAppDependencies().developerPlatform.developerPlatform
+  get apiKeys() {
+    return requireAppDependencies().developerPlatform.apiKeys
+  },
+  get oauthCredentials() {
+    return requireAppDependencies().developerPlatform.oauthCredentials
+  },
+  get webhookSubscriptions() {
+    return requireAppDependencies().developerPlatform.webhookSubscriptions
+  },
+  get webhookDeliveries() {
+    return requireAppDependencies().developerPlatform.webhookDeliveries
+  },
+  get connectors() {
+    return requireAppDependencies().developerPlatform.connectors
+  },
+  get externalLinks() {
+    return requireAppDependencies().developerPlatform.externalLinks
+  },
+  get imports() {
+    return requireAppDependencies().developerPlatform.imports
+  },
+  get idempotency() {
+    return requireAppDependencies().developerPlatform.idempotency
+  },
+  get rateLimits() {
+    return requireAppDependencies().developerPlatform.rateLimits
+  },
+  get transactions() {
+    return requireAppDependencies().developerPlatform.transactions
   },
   get publicWorkItems() {
     return requireAppDependencies().developerPlatform.publicWorkItems
@@ -19195,12 +19223,12 @@ function createWorkItemIdempotencyTransaction(
   workspaceId: string,
   token: IdempotencyMutationToken | undefined,
 ): WorkItemIdempotencyTransaction | undefined {
-  if (!token || !developerPlatformDependencies.developerPlatform.prepareIdempotencyCompletionTransactWrite) {
+  if (!token || !developerPlatformDependencies.transactions.prepareIdempotencyCompletionTransactWrite) {
     return undefined
   }
   return {
     async prepare(response) {
-      return developerPlatformDependencies.developerPlatform.prepareIdempotencyCompletionTransactWrite?.({
+      return developerPlatformDependencies.transactions.prepareIdempotencyCompletionTransactWrite?.({
         workspaceId,
         credentialId: token.credentialId,
         idempotencyKey: token.idempotencyKey,
@@ -19585,7 +19613,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         },
       )
       const { principal, authorizationSnapshot } = authorization
-      const externalLinks = await developerPlatformDependencies.developerPlatform.listExternalWorkItemLinks({
+      const externalLinks = await developerPlatformDependencies.externalLinks.listExternalWorkItemLinks({
         workspaceId: principal.directoryId,
         teamId,
         workItemId,
@@ -19606,7 +19634,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         )
       }
       const [externalLinkFence, documentBacklinkFence] = await Promise.all([
-        developerPlatformDependencies.developerPlatform.prepareWorkItemDeletionFenceTransactWrite?.({
+        developerPlatformDependencies.transactions.prepareWorkItemDeletionFenceTransactWrite?.({
           workspaceId: principal.directoryId,
           teamId,
           workItemId,
@@ -19702,7 +19730,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
       })
       requireWorkspaceBusinessWrite(principal)
       if (dryRunJobId) {
-        const dryRunJob = (await developerPlatformDependencies.developerPlatform.listImportJobs(principal.directoryId))
+        const dryRunJob = (await developerPlatformDependencies.imports.listImportJobs(principal.directoryId))
           .find((job) => job.id === dryRunJobId)
         if (
           !dryRunJob ||
@@ -19732,7 +19760,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         principal.userKey,
         mutationContext.idempotencyKey,
       )
-      const job = await developerPlatformDependencies.developerPlatform.createImportJob({
+      const job = await developerPlatformDependencies.imports.createImportJob({
         workspaceId: principal.directoryId,
         createdByUserId: principal.userKey,
         jobId,
@@ -19952,7 +19980,9 @@ function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGateway {
         idempotencyKey: input.operationId,
         requestFingerprint,
       }
-      const reservation = await developerPlatformDependencies.developerPlatform.reserveIdempotency(reservationRequest)
+      const reservation = await developerPlatformDependencies.idempotency.reserveIdempotency(
+        reservationRequest,
+      )
       if (reservation.status === 'replay') {
         const replayPrincipal = await resolveConnectorActorPrincipal(
           input.workspaceId,
@@ -20027,7 +20057,7 @@ function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGateway {
         const { principal, authorizationSnapshot } = authorization
         const { detail, permission } = authorization.value
         if (detail.issue.revision !== input.expectedRevision) {
-          await developerPlatformDependencies.developerPlatform.releaseIdempotency(completionRequest)
+          await developerPlatformDependencies.idempotency.releaseIdempotency(completionRequest)
           return {
             kind: 'conflict',
             workItem: toConnectorWorkItemSnapshot(detail.issue),
@@ -20055,10 +20085,10 @@ function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGateway {
           configuration,
         )
         const idempotencyTransaction: WorkItemIdempotencyTransaction | undefined =
-          developerPlatformDependencies.developerPlatform.prepareIdempotencyCompletionTransactWrite
+          developerPlatformDependencies.transactions.prepareIdempotencyCompletionTransactWrite
             ? {
                 async prepare(response) {
-                  return developerPlatformDependencies.developerPlatform.prepareIdempotencyCompletionTransactWrite?.({
+                  return developerPlatformDependencies.transactions.prepareIdempotencyCompletionTransactWrite?.({
                     ...completionRequest,
                     response,
                   })
@@ -20094,7 +20124,7 @@ function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGateway {
           }),
           idempotencyTransaction,
         )
-        await developerPlatformDependencies.developerPlatform.completeIdempotency({
+        await developerPlatformDependencies.idempotency.completeIdempotency({
           ...completionRequest,
           response: { status: 200, body: response.issue },
         })
@@ -20108,7 +20138,9 @@ function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGateway {
           workItem: toConnectorWorkItemSnapshot(response.issue),
         }
       } catch (error) {
-        await developerPlatformDependencies.developerPlatform.releaseIdempotency(completionRequest).catch(() => undefined)
+        await developerPlatformDependencies.idempotency
+          .releaseIdempotency(completionRequest)
+          .catch(() => undefined)
         if (error instanceof ProjectDataError && error.code === 'WorkItemRevisionConflict') {
           const latest = await workItemDependencies.teamIssues.getTeamIssueDetail(
             input.workspaceId,
@@ -20255,7 +20287,26 @@ function createConfiguredConnectorRuntime(
     return authorization
   })
   const syncEngine = new ConnectorSyncEngine({
-    platform: createForwardingClient(() => developerPlatformDependencies.developerPlatform),
+    platform: createForwardingClient(() => ({
+      readConnectorLifecycleSnapshot: (request) =>
+        developerPlatformDependencies.connectors
+          .readConnectorLifecycleSnapshot(request),
+      readConnectorCredential: (request) =>
+        developerPlatformDependencies.connectors.readConnectorCredential(request),
+      updateConnectorStatus: (request) =>
+        developerPlatformDependencies.connectors.updateConnectorStatus(request),
+      recoverConnector: (request) =>
+        developerPlatformDependencies.connectors.recoverConnector(request),
+      claimConnectorCredentialRefresh: (request) =>
+        developerPlatformDependencies.connectors
+          .claimConnectorCredentialRefresh(request),
+      releaseConnectorCredentialRefresh: (request) =>
+        developerPlatformDependencies.connectors
+          .releaseConnectorCredentialRefresh(request),
+      listExternalWorkItemLinks: (request) =>
+        developerPlatformDependencies.externalLinks
+          .listExternalWorkItemLinks(request),
+    })),
     registry,
     workItems: createCanonicalConnectorWorkItemGateway(),
     persistence,
@@ -20266,7 +20317,7 @@ function createConfiguredConnectorRuntime(
     ),
   })
   authorization = new ConnectorAuthorizationRuntime({
-    platform: createForwardingClient(() => developerPlatformDependencies.developerPlatform),
+    platform: createForwardingClient(() => developerPlatformDependencies.connectors),
     registry,
     state,
     callbackAuthorizer: createConnectorOAuthCallbackAuthorizer(),
@@ -20345,7 +20396,10 @@ function hasConfiguredConnectorProviders(value: string | undefined) {
 const connectorRuntimeBundleCache = createConnectorRuntimeCache({
   async load() {
     return createConfiguredConnectorRuntime(
-      await loadConnectorRuntimeEnvironment(),
+      await loadConnectorRuntimeEnvironment(
+        process.env,
+        createSecretsManagerConnectorRuntimeSecretLoader(),
+      ),
     )
   },
 })
@@ -20518,7 +20572,7 @@ async function validatePublicImport(
 }
 
 async function requireImportJob(workspaceId: string, jobId: string) {
-  const job = (await developerPlatformDependencies.developerPlatform.listImportJobs(workspaceId))
+  const job = (await developerPlatformDependencies.imports.listImportJobs(workspaceId))
     .find((candidate) => candidate.id === jobId)
   if (!job) {
     throw new WorkItemImportError('ImportJobNotFound', 'Import job was not found.')
@@ -20537,7 +20591,7 @@ function createWorkItemImportJobLifecycle() {
           'Import job cannot be started from its current state.',
         )
       }
-      await developerPlatformDependencies.developerPlatform.updateImportJob({
+      await developerPlatformDependencies.imports.updateImportJob({
         workspaceId: execution.workspaceId,
         jobId: execution.jobId,
         status: 'running',
@@ -20556,7 +20610,7 @@ function createWorkItemImportJobLifecycle() {
           'Import job cannot be completed from its current state.',
         )
       }
-      await developerPlatformDependencies.developerPlatform.updateImportJob({
+      await developerPlatformDependencies.imports.updateImportJob({
         workspaceId: execution.workspaceId,
         jobId: execution.jobId,
         status: 'completed',
@@ -20573,7 +20627,7 @@ function createWorkItemImportJobLifecycle() {
       if (job.status === 'failed' || job.status === 'completed' || job.status === 'cancelled') {
         return
       }
-      await developerPlatformDependencies.developerPlatform.updateImportJob({
+      await developerPlatformDependencies.imports.updateImportJob({
         workspaceId: execution.workspaceId,
         jobId: execution.jobId,
         status: 'failed',
@@ -20587,7 +20641,7 @@ function createWorkItemImportJobLifecycle() {
       if (job.status === 'cancelled' || job.status === 'completed' || job.status === 'failed') {
         return
       }
-      await developerPlatformDependencies.developerPlatform.updateImportJob({
+      await developerPlatformDependencies.imports.updateImportJob({
         workspaceId: execution.workspaceId,
         jobId: execution.jobId,
         status: 'cancelled',
@@ -20795,7 +20849,7 @@ function toImportRowError(error: unknown, row: number): ImportRowError | undefin
 }
 
 function matchesImportJobInput(
-  job: Awaited<ReturnType<DeveloperPlatformClient['listImportJobs']>>[number],
+  job: ImportJob,
   input: PublicImportSourceInput,
 ) {
   return job.format === input.format &&
@@ -20879,7 +20933,7 @@ async function failImportJobBestEffort(
   error: unknown,
 ) {
   try {
-    await developerPlatformDependencies.developerPlatform.updateImportJob({
+    await developerPlatformDependencies.imports.updateImportJob({
       workspaceId,
       jobId,
       status: 'failed',
@@ -20988,7 +21042,25 @@ function getPublicApiCursorSecret() {
 
 if (!loadServerConfig().runtimeRole) {
   const publicApiDependencies: PublicApiDependencies = {
-    developerPlatform: createForwardingClient(() => developerPlatformDependencies.developerPlatform),
+    apiKeys: createForwardingClient(() => developerPlatformDependencies.apiKeys),
+    oauthCredentials: createForwardingClient(
+      () => developerPlatformDependencies.oauthCredentials,
+    ),
+    webhookSubscriptions: createForwardingClient(
+      () => developerPlatformDependencies.webhookSubscriptions,
+    ),
+    webhookDeliveries: createForwardingClient(
+      () => developerPlatformDependencies.webhookDeliveries,
+    ),
+    connectors: createForwardingClient(() => developerPlatformDependencies.connectors),
+    externalLinks: createForwardingClient(
+      () => developerPlatformDependencies.externalLinks,
+    ),
+    imports: createForwardingClient(() => developerPlatformDependencies.imports),
+    idempotency: createForwardingClient(
+      () => developerPlatformDependencies.idempotency,
+    ),
+    rateLimits: createForwardingClient(() => developerPlatformDependencies.rateLimits),
     authenticateManagement: authenticateDeveloperManagement,
     workItems: createForwardingClient(() => developerPlatformDependencies.publicWorkItems),
     openApiDocument: PUBLIC_API_OPENAPI_DOCUMENT as unknown as Record<string, unknown>,

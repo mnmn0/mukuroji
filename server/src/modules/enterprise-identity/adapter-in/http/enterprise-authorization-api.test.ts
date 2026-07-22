@@ -1003,7 +1003,7 @@ test('binds Enterprise Analytics report writes to Team and Workspace visibility 
     setTestAppDependencies({
       enterpriseIdentity: identity,
       analytics: analyticsRepository,
-      developerPlatform: {
+      rateLimits: {
         async consumeRateLimit() {
           return {
             allowed: true,
@@ -1012,6 +1012,8 @@ test('binds Enterprise Analytics report writes to Team and Workspace visibility 
             resetAt: '2026-07-18T00:01:00.000Z',
           }
         },
+      },
+      apiKeys: {
         async listApiKeys() {
           return []
         },

@@ -17,9 +17,9 @@ import {
 } from './connector-oauth'
 import {
   ConnectorOAuthStateManager,
-  DynamoDbConnectorOAuthStateStore,
   InMemoryConnectorOAuthStateStore,
 } from './connector-oauth-state'
+import { DynamoDbConnectorOAuthStateStore } from './adapter-out/dynamodb/connector-oauth-state-store'
 
 const NOW = new Date('2026-07-18T00:00:00.000Z')
 

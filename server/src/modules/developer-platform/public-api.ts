@@ -26,13 +26,21 @@ import type {
   WorkItemSyncConflict,
 } from '@mukuroji/contracts'
 import { Hono, type Context } from 'hono'
-import {
-  DeveloperPlatformError,
-  type AuthenticatedDeveloperCredential,
-  type ConnectorLifecycleSnapshot,
-  type DeveloperPlatformClient,
-  type IdempotencyMutationToken,
-} from './developer-platform'
+import type {
+  ApiKeyPort,
+  AuthenticatedDeveloperCredential,
+  ConnectorLifecycleSnapshot,
+  ConnectorPort,
+  ExternalLinkPort,
+  IdempotencyMutationToken,
+  IdempotencyPort,
+  ImportPort,
+  OAuthCredentialPort,
+  RateLimitPort,
+  WebhookDeliveryPort,
+  WebhookSubscriptionPort,
+} from './application/ports'
+import { DeveloperPlatformError } from './errors'
 import { assertSafeWebhookUrl, UnsafeWebhookUrlError } from './webhook-delivery'
 
 /** Public API が一 credential に許可する1分あたりの既定 request 数です。 */
@@ -271,8 +279,24 @@ export interface ConnectorAuthorizationService {
 
 /** Developer/public router の外部 dependencies です。 */
 export type PublicApiDependencies = {
-  /** Credential、webhook、connector、import metadata store です。 */
-  developerPlatform: DeveloperPlatformClient
+  /** API key lifecycle and authentication port. */
+  apiKeys: ApiKeyPort
+  /** OAuth application and token credential port. */
+  oauthCredentials: OAuthCredentialPort
+  /** Webhook subscription lifecycle port. */
+  webhookSubscriptions: WebhookSubscriptionPort
+  /** Webhook delivery persistence port. */
+  webhookDeliveries: WebhookDeliveryPort
+  /** Connector installation and credential lifecycle port. */
+  connectors: ConnectorPort
+  /** External Work Item link lifecycle port. */
+  externalLinks: ExternalLinkPort
+  /** Import job metadata port. */
+  imports: ImportPort
+  /** Idempotency reservation and replay port. */
+  idempotency: IdempotencyPort
+  /** Credential-scoped rate-limit port. */
+  rateLimits: RateLimitPort
   /** Cognito bearer token と request metadata を current Workspace principal へ解決します。 */
   authenticateManagement(
     authorization: string,
@@ -421,7 +445,6 @@ export function toSafePublicApiErrorLog(error: unknown) {
 /** `/api` 配下へ mount する developer management と versioned public router を作成します。 */
 export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   const router = new Hono<{ Variables: { requestId: string } }>()
-  const platform = dependencies.developerPlatform
 
   router.use('*', async (c, next) => {
     const requestId = readRequestId(c.req.header('X-Request-Id')) ??
@@ -476,7 +499,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     if (input.grantType !== 'client_credentials') {
       throw new PublicApiServiceError(400, 'invalid_request', 'grant_type must be client_credentials.')
     }
-    const token = await platform.issueOAuthToken({
+    const token = await dependencies.oauthCredentials.issueOAuthToken({
       clientId: input.clientId,
       clientSecret: input.clientSecret,
       ...(input.scopes.length > 0 ? { scopes: input.scopes } : {}),
@@ -605,7 +628,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
     const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
     await dependencies.workItems.authorizeExternalLink(credential, teamId, workItemId, false)
-    const links = await platform.listExternalWorkItemLinks({
+    const links = await dependencies.externalLinks.listExternalWorkItemLinks({
       workspaceId: credential.workspaceId,
       teamId,
       workItemId,
@@ -636,7 +659,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     await dependencies.workItems.authorizeExternalLink(credential, teamId, workItemId, true)
     return executeIdempotentJson(c, dependencies, credential, body, async () => ({
       status: 201,
-      body: await platform.createExternalWorkItemLink({
+      body: await dependencies.externalLinks.createExternalWorkItemLink({
         workspaceId: credential.workspaceId,
         input: { ...body, teamId, workItemId },
       }),
@@ -667,7 +690,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
           workItemId,
           true,
         )
-        await platform.deleteExternalWorkItemLink({
+        await dependencies.externalLinks.deleteExternalWorkItemLink({
           workspaceId: credential.workspaceId,
           teamId,
           workItemId,
@@ -697,12 +720,15 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     )
     const [apiKeys, oauthApps, webhookSubscriptions, deliveryPage, connectors, imports] =
       await Promise.all([
-        platform.listApiKeys(principal.workspaceId),
-        platform.listOAuthApps(principal.workspaceId),
-        platform.listWebhookSubscriptions(principal.workspaceId),
-        platform.listWebhookDeliveries({ workspaceId: principal.workspaceId, limit: 20 }),
-        platform.listConnectors(principal.workspaceId),
-        listAuthorizedImportJobs(platform, dependencies.workItems, principal),
+        dependencies.apiKeys.listApiKeys(principal.workspaceId),
+        dependencies.oauthCredentials.listOAuthApps(principal.workspaceId),
+        dependencies.webhookSubscriptions.listWebhookSubscriptions(principal.workspaceId),
+        dependencies.webhookDeliveries.listWebhookDeliveries({
+          workspaceId: principal.workspaceId,
+          limit: 20,
+        }),
+        dependencies.connectors.listConnectors(principal.workspaceId),
+        listAuthorizedImportJobs(dependencies.imports, dependencies.workItems, principal),
       ])
     return c.json({
       capabilities: principal.capabilities,
@@ -723,7 +749,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       idempotency,
     ) => ({
       status: 201,
-      body: await platform.createApiKey({
+      body: await dependencies.apiKeys.createApiKey({
         workspaceId: principal.workspaceId,
         createdByUserId: principal.userId,
         input,
@@ -734,7 +760,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
 
   router.get('/developer/api-keys', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canManageCredentials')
-    const apiKeys = await platform.listApiKeys(principal.workspaceId)
+    const apiKeys = await dependencies.apiKeys.listApiKeys(principal.workspaceId)
     return c.json(createSignedKeysetPage(
       c,
       dependencies,
@@ -747,7 +773,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/developer/api-keys/:apiKeyId', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canManageCredentials')
     const apiKeyId = readRouteId(c.req.param('apiKeyId'), 'API key ID')
-    const apiKey = (await platform.listApiKeys(principal.workspaceId))
+    const apiKey = (await dependencies.apiKeys.listApiKeys(principal.workspaceId))
       .find((candidate) => candidate.id === apiKeyId)
     if (!apiKey) throw new PublicApiServiceError(404, 'not_found', 'API key was not found.')
     return c.json(apiKey)
@@ -756,7 +782,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.post('/developer/api-keys/:apiKeyId/rotate', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canManageCredentials')
     const apiKeyId = readRouteId(c.req.param('apiKeyId'), 'API key ID')
-    const apiKey = (await platform.listApiKeys(principal.workspaceId))
+    const apiKey = (await dependencies.apiKeys.listApiKeys(principal.workspaceId))
       .find((candidate) => candidate.id === apiKeyId)
     requireResourceCreator(apiKey, principal.userId, 'API key')
     return executeManagementIdempotentJson(
@@ -766,7 +792,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       { apiKeyId },
       async (_context, idempotency) => ({
         status: 200,
-        body: await platform.rotateApiKey({
+        body: await dependencies.apiKeys.rotateApiKey({
           workspaceId: principal.workspaceId,
           apiKeyId,
           idempotency,
@@ -785,7 +811,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       { apiKeyId },
       async () => ({
         status: 200,
-        body: await platform.revokeApiKey({
+        body: await dependencies.apiKeys.revokeApiKey({
           workspaceId: principal.workspaceId,
           apiKeyId,
         }),
@@ -801,7 +827,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       idempotency,
     ) => ({
       status: 201,
-      body: await platform.createOAuthApp({
+      body: await dependencies.oauthCredentials.createOAuthApp({
         workspaceId: principal.workspaceId,
         createdByUserId: principal.userId,
         input,
@@ -812,7 +838,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
 
   router.get('/developer/oauth-apps', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canManageCredentials')
-    const oauthApps = await platform.listOAuthApps(principal.workspaceId)
+    const oauthApps = await dependencies.oauthCredentials.listOAuthApps(principal.workspaceId)
     return c.json(createSignedKeysetPage(
       c,
       dependencies,
@@ -825,7 +851,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/developer/oauth-apps/:oauthAppId', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canManageCredentials')
     const oauthAppId = readRouteId(c.req.param('oauthAppId'), 'OAuth app ID')
-    const oauthApp = (await platform.listOAuthApps(principal.workspaceId))
+    const oauthApp = (await dependencies.oauthCredentials.listOAuthApps(principal.workspaceId))
       .find((candidate) => candidate.id === oauthAppId)
     if (!oauthApp) throw new PublicApiServiceError(404, 'not_found', 'OAuth app was not found.')
     return c.json(oauthApp)
@@ -834,7 +860,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.post('/developer/oauth-apps/:oauthAppId/rotate-secret', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canManageCredentials')
     const oauthAppId = readRouteId(c.req.param('oauthAppId'), 'OAuth app ID')
-    const oauthApp = (await platform.listOAuthApps(principal.workspaceId))
+    const oauthApp = (await dependencies.oauthCredentials.listOAuthApps(principal.workspaceId))
       .find((candidate) => candidate.id === oauthAppId)
     requireResourceCreator(oauthApp, principal.userId, 'OAuth app')
     return executeManagementIdempotentJson(
@@ -844,7 +870,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       { oauthAppId },
       async (_context, idempotency) => ({
         status: 200,
-        body: await platform.rotateOAuthClientSecret({
+        body: await dependencies.oauthCredentials.rotateOAuthClientSecret({
           workspaceId: principal.workspaceId,
           oauthAppId,
           idempotency,
@@ -863,7 +889,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       { oauthAppId },
       async () => ({
         status: 200,
-        body: await platform.revokeOAuthApp({
+        body: await dependencies.oauthCredentials.revokeOAuthApp({
           workspaceId: principal.workspaceId,
           oauthAppId,
         }),
@@ -873,7 +899,9 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
 
   router.get('/developer/webhook-subscriptions', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canManageWebhooks')
-    const subscriptions = await platform.listWebhookSubscriptions(principal.workspaceId)
+    const subscriptions = await dependencies.webhookSubscriptions.listWebhookSubscriptions(
+      principal.workspaceId,
+    )
     return c.json(createSignedKeysetPage(
       c,
       dependencies,
@@ -892,7 +920,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       _context,
       idempotency,
     ) => {
-      const result = await platform.createWebhookSubscription({
+      const result = await dependencies.webhookSubscriptions.createWebhookSubscription({
         workspaceId: principal.workspaceId,
         createdByUserId: principal.userId,
         input,
@@ -914,7 +942,9 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       c.req.param('subscriptionId'),
       'Webhook subscription ID',
     )
-    const subscription = (await platform.listWebhookSubscriptions(principal.workspaceId))
+    const subscription = (await dependencies.webhookSubscriptions.listWebhookSubscriptions(
+      principal.workspaceId,
+    ))
       .find((candidate) => candidate.id === subscriptionId)
     if (!subscription) {
       throw new PublicApiServiceError(404, 'not_found', 'Webhook subscription was not found.')
@@ -930,7 +960,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     )
     const input = readUpdateWebhookSubscriptionInput(await readJson(c))
     const subscription = await requireWebhookSubscriptionCreator(
-      platform,
+      dependencies.webhookSubscriptions,
       principal,
       subscriptionId,
     )
@@ -943,7 +973,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       { subscriptionId, ...input },
       async (_context, idempotency) => ({
         status: 200,
-        body: await platform.updateWebhookSubscription({
+        body: await dependencies.webhookSubscriptions.updateWebhookSubscription({
           workspaceId: principal.workspaceId,
           subscriptionId,
           input,
@@ -957,7 +987,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const principal = await requireManagementCapability(c, dependencies, 'canManageWebhooks')
     const subscriptionId = readRouteId(c.req.param('subscriptionId'), 'Webhook subscription ID')
     const subscription = await requireWebhookSubscriptionCreator(
-      platform,
+      dependencies.webhookSubscriptions,
       principal,
       subscriptionId,
     )
@@ -968,7 +998,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       principal,
       { subscriptionId },
       async (_context, idempotency) => {
-        const result = await platform.rotateWebhookSecret({
+        const result = await dependencies.webhookSubscriptions.rotateWebhookSecret({
           workspaceId: principal.workspaceId,
           subscriptionId,
           idempotency,
@@ -988,7 +1018,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const principal = await requireManagementCapability(c, dependencies, 'canManageWebhooks')
     const subscriptionId = readRouteId(c.req.param('subscriptionId'), 'Webhook subscription ID')
     const subscription = await requireWebhookSubscriptionCreator(
-      platform,
+      dependencies.webhookSubscriptions,
       principal,
       subscriptionId,
     )
@@ -1000,7 +1030,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       { subscriptionId },
       async (_context, idempotency) => {
         const response = { status: 204 as const, body: null }
-        await platform.setWebhookSubscriptionStatus({
+        await dependencies.webhookSubscriptions.setWebhookSubscriptionStatus({
           workspaceId: principal.workspaceId,
           subscriptionId,
           status: 'disabled',
@@ -1026,7 +1056,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
         { subscriptionId },
       ),
       async (continuation, limit) => {
-        const page = await platform.listWebhookDeliveries({
+        const page = await dependencies.webhookDeliveries.listWebhookDeliveries({
           workspaceId: principal.workspaceId,
           ...(subscriptionId ? { subscriptionId } : {}),
           ...(continuation ? { cursor: continuation } : {}),
@@ -1045,7 +1075,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/developer/webhook-deliveries/:deliveryId', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canManageWebhooks')
     const deliveryId = readRouteId(c.req.param('deliveryId'), 'Webhook delivery ID')
-    return c.json(await platform.getWebhookDelivery({
+    return c.json(await dependencies.webhookDeliveries.getWebhookDelivery({
       workspaceId: principal.workspaceId,
       deliveryId,
     }))
@@ -1058,12 +1088,12 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       readIdempotencyKey(c.req.header('Idempotency-Key'))
       throw unavailableManagementMutation('Webhook replay queue')
     }
-    const requestedDelivery = await platform.getWebhookDelivery({
+    const requestedDelivery = await dependencies.webhookDeliveries.getWebhookDelivery({
       workspaceId: principal.workspaceId,
       deliveryId,
     })
     const subscription = await requireWebhookSubscriptionCreator(
-      platform,
+      dependencies.webhookSubscriptions,
       principal,
       requestedDelivery.subscriptionId,
     )
@@ -1074,7 +1104,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       principal,
       { deliveryId },
       async (_context, idempotency) => {
-        const delivery = await platform.replayWebhookDelivery({
+        const delivery = await dependencies.webhookDeliveries.replayWebhookDelivery({
           workspaceId: principal.workspaceId,
           deliveryId,
           operationId: createHash('sha256')
@@ -1133,7 +1163,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     ) {
       throw new PublicApiServiceError(400, 'invalid_request', 'Connector status is invalid.')
     }
-    const installations = await platform.listConnectors(principal.workspaceId)
+    const installations = await dependencies.connectors.listConnectors(principal.workspaceId)
     const filteredInstallations = status === undefined
       ? installations
       : installations.filter((installation) => installation.status === status)
@@ -1179,7 +1209,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       c.req.param('installationId'),
       'Connector installation ID',
     )
-    const installation = (await platform.listConnectors(principal.workspaceId))
+    const installation = (await dependencies.connectors.listConnectors(principal.workspaceId))
       .find((candidate) => candidate.id === installationId)
     if (!installation) {
       throw new PublicApiServiceError(404, 'not_found', 'Connector installation was not found.')
@@ -1280,7 +1310,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const installationId = c.req.query('installationId')
       ? readRequiredQuery(c.req.query('installationId'), 'installationId')
       : undefined
-    const links = await platform.listExternalWorkItemLinks({
+    const links = await dependencies.externalLinks.listExternalWorkItemLinks({
       workspaceId: principal.workspaceId,
       teamId,
       workItemId,
@@ -1311,7 +1341,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     )
     return executeManagementIdempotentJson(c, dependencies, principal, body, async () => ({
       status: 201,
-      body: await platform.createExternalWorkItemLink({
+      body: await dependencies.externalLinks.createExternalWorkItemLink({
         workspaceId: principal.workspaceId,
         input: { ...body, workItemId },
       }),
@@ -1321,7 +1351,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/developer/external-links/:linkId', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canManageIntegrations')
     const link = await requireExternalWorkItemLink(
-      platform,
+      dependencies.externalLinks,
       principal.workspaceId,
       readRouteId(c.req.param('linkId'), 'External link ID'),
     )
@@ -1337,7 +1367,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.patch('/developer/external-links/:linkId', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canManageIntegrations')
     const link = await requireExternalWorkItemLink(
-      platform,
+      dependencies.externalLinks,
       principal.workspaceId,
       readRouteId(c.req.param('linkId'), 'External link ID'),
     )
@@ -1355,7 +1385,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       body,
       async (_context, idempotency) => ({
         status: 200,
-        body: await platform.updateExternalWorkItemLink({
+        body: await dependencies.externalLinks.updateExternalWorkItemLink({
           workspaceId: principal.workspaceId,
           teamId: link.teamId,
           workItemId: link.workItemId,
@@ -1380,7 +1410,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       { teamId, workItemId, linkId },
       async (_context, idempotency) => {
         const link = await requireExternalWorkItemLink(
-          platform,
+          dependencies.externalLinks,
           principal.workspaceId,
           linkId,
         )
@@ -1397,7 +1427,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
           workItemId,
           true,
         )
-        await platform.deleteExternalWorkItemLink({
+        await dependencies.externalLinks.deleteExternalWorkItemLink({
           workspaceId: principal.workspaceId,
           teamId,
           workItemId,
@@ -1473,7 +1503,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       {
         authorizeReplay: () => requireAuthorizedSyncConflict(
           dependencies.connectorAuthorization!,
-          platform,
+          dependencies.externalLinks,
           dependencies.workItems,
           principal,
           conflictId,
@@ -1505,7 +1535,11 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
 
   router.get('/developer/imports', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canImport')
-    const imports = await listAuthorizedImportJobs(platform, dependencies.workItems, principal)
+    const imports = await listAuthorizedImportJobs(
+      dependencies.imports,
+      dependencies.workItems,
+      principal,
+    )
     return c.json(createSignedKeysetPage(
       c,
       dependencies,
@@ -1543,7 +1577,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/developer/imports/:jobId', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canImport')
     return c.json(await requireAuthorizedImportJob(
-      platform,
+      dependencies.imports,
       dependencies.workItems,
       principal,
       readRouteId(c.req.param('jobId'), 'Import job ID'),
@@ -1564,7 +1598,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
         body: await dependencies.workItems.cancelImport(
           principal,
           await requireAuthorizedImportJob(
-            platform,
+            dependencies.imports,
             dependencies.workItems,
             principal,
             jobId,
@@ -1577,7 +1611,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
         releaseReservationAfterCompletionFailure: true,
         authorizeReplay: async () => {
           await requireAuthorizedImportJob(
-            platform,
+            dependencies.imports,
             dependencies.workItems,
             principal,
             jobId,
@@ -1591,7 +1625,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/developer/imports/:jobId/report', async (c) => {
     const principal = await requireManagementCapability(c, dependencies, 'canImport')
     const job = await requireAuthorizedImportJob(
-      platform,
+      dependencies.imports,
       dependencies.workItems,
       principal,
       readRouteId(c.req.param('jobId'), 'Import job ID'),
@@ -1639,7 +1673,7 @@ function unavailableManagementMutation(capability: string) {
 }
 
 async function listAuthorizedImportJobs(
-  platform: DeveloperPlatformClient,
+  platform: ImportPort,
   workItems: PublicWorkItemService,
   principal: DeveloperManagementPrincipal,
 ) {
@@ -1664,7 +1698,7 @@ async function listAuthorizedImportJobs(
 }
 
 async function requireAuthorizedImportJob(
-  platform: DeveloperPlatformClient,
+  platform: ImportPort,
   workItems: PublicWorkItemService,
   principal: DeveloperManagementPrincipal,
   jobId: string,
@@ -1690,7 +1724,7 @@ async function requireAuthorizedImportJob(
 }
 
 async function requireExternalWorkItemLink(
-  platform: DeveloperPlatformClient,
+  platform: ExternalLinkPort,
   workspaceId: string,
   linkId: string,
 ) {
@@ -1703,7 +1737,7 @@ async function requireExternalWorkItemLink(
 
 async function requireAuthorizedSyncConflict(
   connectorAuthorization: ConnectorAuthorizationService,
-  platform: DeveloperPlatformClient,
+  platform: ExternalLinkPort,
   workItems: PublicWorkItemService,
   principal: DeveloperManagementPrincipal,
   conflictId: string,
@@ -1786,17 +1820,17 @@ async function authenticatePublicRequest(
   const bearer = readBearerToken(c.req.header('Authorization'))
   let credential: AuthenticatedDeveloperCredential
   if (bearer.startsWith('mk_key_')) {
-    credential = await dependencies.developerPlatform.authenticateApiKey({
+    credential = await dependencies.apiKeys.authenticateApiKey({
       credential: bearer,
       requiredScopes,
     })
   } else {
-    credential = await dependencies.developerPlatform.authenticateOAuthToken({
+    credential = await dependencies.oauthCredentials.authenticateOAuthToken({
       credential: bearer,
       requiredScopes,
     })
   }
-  const rateLimit = await dependencies.developerPlatform.consumeRateLimit({
+  const rateLimit = await dependencies.rateLimits.consumeRateLimit({
     workspaceId: credential.workspaceId,
     credentialId: credential.credentialId,
     limit: PUBLIC_API_RATE_LIMIT,
@@ -1825,7 +1859,7 @@ async function enforceOAuthTokenRateLimit(
   credentialId: string,
   limit: number,
 ) {
-  const rateLimit = await dependencies.developerPlatform.consumeRateLimit({
+  const rateLimit = await dependencies.rateLimits.consumeRateLimit({
     workspaceId: 'public-oauth-token',
     credentialId,
     limit,
@@ -1898,7 +1932,7 @@ async function authenticateManagementRequest(c: Context, dependencies: PublicApi
     throw new PublicApiServiceError(401, 'authentication_required', 'Bearer token is required.')
   }
   const principal = await dependencies.authenticateManagement(authorization, c)
-  const rateLimit = await dependencies.developerPlatform.consumeRateLimit({
+  const rateLimit = await dependencies.rateLimits.consumeRateLimit({
     workspaceId: principal.workspaceId,
     credentialId: `management:${principal.userId}`,
     limit: PUBLIC_API_RATE_LIMIT,
@@ -1998,7 +2032,7 @@ async function executeIdempotent(
   const requestFingerprint = createHash('sha256')
     .update(`${c.req.method}\n${canonicalTarget}\n${stableStringify(body)}`)
     .digest('hex')
-  const reservation = await dependencies.developerPlatform.reserveIdempotency({
+  const reservation = await dependencies.idempotency.reserveIdempotency({
     ...actor,
     idempotencyKey,
     requestFingerprint,
@@ -2035,7 +2069,7 @@ async function executeIdempotent(
     result = await operation(context, idempotency)
   } catch (error) {
     try {
-      await dependencies.developerPlatform.releaseIdempotency({
+      await dependencies.idempotency.releaseIdempotency({
         ...actor,
         idempotencyKey,
         requestFingerprint,
@@ -2050,7 +2084,7 @@ async function executeIdempotent(
     throw error
   }
   try {
-    await dependencies.developerPlatform.completeIdempotency({
+    await dependencies.idempotency.completeIdempotency({
       ...actor,
       idempotencyKey,
       requestFingerprint,
@@ -2060,7 +2094,7 @@ async function executeIdempotent(
   } catch (error) {
     if (options.releaseReservationAfterCompletionFailure) {
       try {
-        await dependencies.developerPlatform.releaseIdempotency({
+        await dependencies.idempotency.releaseIdempotency({
           ...actor,
           idempotencyKey,
           requestFingerprint,
@@ -3084,7 +3118,7 @@ function requireResourceCreator<T extends { createdByUserId: string }>(
 }
 
 async function requireWebhookSubscriptionCreator(
-  platform: DeveloperPlatformClient,
+  platform: WebhookSubscriptionPort,
   principal: DeveloperManagementPrincipal,
   subscriptionId: string,
 ) {

@@ -10,9 +10,7 @@ import {
   DynamoDbWebhookProjectionStateStore,
   type WebhookDeliveryQueue,
 } from '../../modules/developer-platform/adapter-in/events/webhook-processing'
-import {
-  DynamoDbDeveloperPlatformClient,
-} from '../../modules/developer-platform/developer-platform'
+import { createDynamoDbDeveloperPlatformAdapters } from '../../modules/developer-platform/adapter-out/dynamodb/developer-platform-adapters'
 import {
   DynamoDbWebhookSubscriptionAuthorizer,
 } from '../../modules/developer-platform/webhook-authorization'
@@ -45,9 +43,25 @@ export function createProductionWebhookProjectionHandler(
 export function createProductionWebhookDeliveryHandler(
   queue = createProductionWebhookQueue(),
 ) {
+  const adapters = createDynamoDbDeveloperPlatformAdapters()
   return createWebhookDeliveryHandler({
     auditEvents: new DynamoDbWebhookAuditEventReader(),
-    developerPlatform: new DynamoDbDeveloperPlatformClient(),
+    developerPlatform: {
+      enqueueWebhookEvent: (request) =>
+        adapters.webhookDeliveries.enqueueWebhookEvent(request),
+      listWebhookDeliveries: (request) =>
+        adapters.webhookDeliveries.listWebhookDeliveries(request),
+      getWebhookDelivery: (request) =>
+        adapters.webhookDeliveries.getWebhookDelivery(request),
+      prepareWebhookDelivery: (request) =>
+        adapters.webhookDeliveries.prepareWebhookDelivery(request),
+      recordWebhookDeliveryAttempt: (request) =>
+        adapters.webhookDeliveries.recordWebhookDeliveryAttempt(request),
+      replayWebhookDelivery: (request) =>
+        adapters.webhookDeliveries.replayWebhookDelivery(request),
+      listActiveWebhookSubscriptionsPage: (request) =>
+        adapters.webhookSubscriptions.listActiveWebhookSubscriptionsPage(request),
+    },
     authorizer: new DynamoDbWebhookSubscriptionAuthorizer({
       workspaceAccess: new DynamoDbWorkspaceAccessClient(),
       enterpriseIdentity: new DynamoDbEnterpriseIdentityReadClient(

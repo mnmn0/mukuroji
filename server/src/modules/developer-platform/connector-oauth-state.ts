@@ -3,14 +3,7 @@ import {
   randomBytes,
   timingSafeEqual,
 } from 'node:crypto'
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
-import {
-  DeleteCommand,
-  DynamoDBDocumentClient,
-  GetCommand,
-  PutCommand,
-} from '@aws-sdk/lib-dynamodb'
-import type { SecretProtector } from './developer-platform'
+import type { SecretProtector } from './application/ports'
 import {
   BUILT_IN_CONNECTOR_CATALOG,
   type ConnectorProviderId,
@@ -393,107 +386,6 @@ export class InMemoryConnectorOAuthStateStore implements ConnectorOAuthStateStor
   }
 }
 
-/** DynamoDB OAuth state store の構築 options です。 */
-export type DynamoDbConnectorOAuthStateStoreOptions = {
-  /** Developer platform compatible table 名です。 */
-  tableName: string
-  /** Test または production runtime が注入する document client です。 */
-  documentClient?: DynamoDBDocumentClient
-}
-
-/** DynamoDB に encrypted single-use OAuth state と TTL を保存します。 */
-export class DynamoDbConnectorOAuthStateStore implements ConnectorOAuthStateStore {
-  /** DynamoDB table 名です。 */
-  private readonly tableName: string
-  /** DynamoDB document client です。 */
-  private readonly documentClient: DynamoDBDocumentClient
-
-  /** DynamoDB-backed OAuth state store を作成します。 */
-  constructor(options: DynamoDbConnectorOAuthStateStoreOptions) {
-    if (!options.tableName.trim()) {
-      throw new ConnectorRuntimeError(
-        'ConnectorOAuthStateStoreInvalid',
-        'Connector OAuth state table name is required.',
-      )
-    }
-    this.tableName = options.tableName
-    this.documentClient = options.documentClient ??
-      DynamoDBDocumentClient.from(new DynamoDBClient({}))
-  }
-
-  /** State ID collision を conditionally 拒否して encrypted flow を保存します。 */
-  async put(state: StoredConnectorOAuthState) {
-    try {
-      await this.documentClient.send(new PutCommand({
-        TableName: this.tableName,
-        Item: {
-          workspaceId: statePartitionKey(state.stateId),
-          recordKey: stateRecordKey(state.stateId),
-          entryType: 'connector-oauth-state',
-          protectedPayload: state.protectedPayload,
-          expiresAt: state.expiresAtEpochSeconds,
-          version: 1,
-        },
-        ConditionExpression:
-          'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
-      }))
-    } catch (error) {
-      if (isConditionalCheckFailure(error)) {
-        throw new ConnectorRuntimeError(
-          'ConnectorOAuthStateCollision',
-          'Connector OAuth state ID already exists.',
-        )
-      }
-      throw error
-    }
-  }
-
-  /** DynamoDB から state snapshot を強整合取得します。 */
-  async get(stateId: string) {
-    const response = await this.documentClient.send(new GetCommand({
-      TableName: this.tableName,
-      Key: {
-        workspaceId: statePartitionKey(stateId),
-        recordKey: stateRecordKey(stateId),
-      },
-      ConsistentRead: true,
-    }))
-    return response.Item ? readStoredState(response.Item, stateId) : undefined
-  }
-
-  /** DynamoDB DeleteItem return-old-value で state を exactly once consume します。 */
-  async consume(stateId: string) {
-    const response = await this.documentClient.send(new DeleteCommand({
-      TableName: this.tableName,
-      Key: {
-        workspaceId: statePartitionKey(stateId),
-        recordKey: stateRecordKey(stateId),
-      },
-      ReturnValues: 'ALL_OLD',
-    }))
-    if (!response.Attributes) return undefined
-    return readStoredState(response.Attributes, stateId)
-  }
-}
-
-/** Environment から durable OAuth state store を作成します。 */
-export function createDynamoDbConnectorOAuthStateStoreFromEnvironment(
-  environment: Readonly<Record<string, string | undefined>>,
-  documentClient?: DynamoDBDocumentClient,
-) {
-  const tableName = environment.DEVELOPER_PLATFORM_TABLE_NAME
-  if (!tableName) {
-    throw new ConnectorRuntimeError(
-      'ConnectorOAuthStateStoreInvalid',
-      'DEVELOPER_PLATFORM_TABLE_NAME is required for connector OAuth state.',
-    )
-  }
-  return new DynamoDbConnectorOAuthStateStore({
-    tableName,
-    ...(documentClient ? { documentClient } : {}),
-  })
-}
-
 function createSignedStateToken(
   stateId: string,
   expiresAtEpochSeconds: number,
@@ -712,37 +604,6 @@ function readOAuthFlow(value: unknown): ConnectorOAuthFlow {
   return flow
 }
 
-function readStoredState(
-  value: Record<string, unknown>,
-  expectedStateId: string,
-): StoredConnectorOAuthState {
-  if (
-    value.entryType !== 'connector-oauth-state' ||
-    typeof value.protectedPayload !== 'string' ||
-    !value.protectedPayload ||
-    !Number.isSafeInteger(value.expiresAt)
-  ) {
-    throw new ConnectorRuntimeError(
-      'ConnectorOAuthStateInvalid',
-      'Stored connector OAuth state is malformed.',
-    )
-  }
-  return {
-    stateId: expectedStateId,
-    protectedPayload: value.protectedPayload,
-    expiresAtEpochSeconds: value.expiresAt as number,
-  }
-}
-
-function statePartitionKey(stateId: string) {
-  const safeStateId = requireIdentifier(stateId, 'OAuth state ID')
-  return `CONNECTOR-OAUTH-STATE#${safeStateId.slice(0, 2)}`
-}
-
-function stateRecordKey(stateId: string) {
-  return `STATE#${requireIdentifier(stateId, 'OAuth state ID')}`
-}
-
 function stateProtectionContext(stateId: string) {
   return `mukuroji:platform-state:connector-oauth:v1\0${stateId}`
 }
@@ -770,10 +631,6 @@ function requireString(value: unknown, label: string) {
     )
   }
   return value
-}
-
-function isConditionalCheckFailure(error: unknown) {
-  return isRecord(error) && error.name === 'ConditionalCheckFailedException'
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

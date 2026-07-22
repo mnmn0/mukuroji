@@ -8,8 +8,8 @@ import type {
 } from '@mukuroji/contracts'
 import {
   DeveloperPlatformError,
-  type DeveloperPlatformClient,
-} from './developer-platform'
+} from './errors'
+import type { ConnectorPort } from './application/ports'
 import type {
   ConnectorAuthorizationService,
   DeveloperManagementPrincipal,
@@ -94,7 +94,7 @@ export interface ConnectorConflictRuntime {
 /** Connector authorization runtime の構築 dependencies です。 */
 export type ConnectorAuthorizationRuntimeOptions = {
   /** Connector installation と encrypted credential store です。 */
-  platform: DeveloperPlatformClient
+  platform: ConnectorPort
   /** Configured OAuth provider registry です。 */
   registry: ConnectorRegistry
   /** Encrypted, signed, single-use OAuth state manager です。 */
@@ -115,7 +115,7 @@ export type ConnectorAuthorizationRuntimeOptions = {
 export class ConnectorAuthorizationRuntime
   implements ConnectorAuthorizationService, ConnectorSyncHealthReporter {
   /** Connector installation と encrypted credential store です。 */
-  private readonly platform: DeveloperPlatformClient
+  private readonly platform: ConnectorPort
   /** Configured provider adapter registry です。 */
   private readonly registry: ConnectorRegistry
   /** Signed single-use OAuth state manager です。 */
