@@ -82,7 +82,8 @@ export function createAnalyticsRouter<Principal extends AnalyticsPrincipal>(
 ): Hono {
   const router = new Hono()
 
-  router.post('/api/analytics/query', async (context) => {
+  /** Executes an authenticated ad-hoc or saved Analytics query. */
+  async function handleQuery(context: Context) {
     const access = await authenticateRequest(context, dependencies)
     if (access instanceof Response) return access
 
@@ -94,9 +95,12 @@ export function createAnalyticsRouter<Principal extends AnalyticsPrincipal>(
     } catch (error) {
       return dependencies.mapError(context, error)
     }
-  })
+  }
 
-  router.post('/api/analytics/evidence', async (context) => {
+  router.post('/api/analytics/query', handleQuery)
+
+  /** Returns an authenticated evidence page for an Analytics metric. */
+  async function handleEvidence(context: Context) {
     const access = await authenticateRequest(context, dependencies)
     if (access instanceof Response) return access
 
@@ -106,9 +110,12 @@ export function createAnalyticsRouter<Principal extends AnalyticsPrincipal>(
     } catch (error) {
       return dependencies.mapError(context, error)
     }
-  })
+  }
 
-  router.post('/api/analytics/export', async (context) => {
+  router.post('/api/analytics/evidence', handleEvidence)
+
+  /** Generates an authenticated CSV or PDF Analytics download. */
+  async function handleExport(context: Context) {
     const access = await authenticateRequest(context, dependencies)
     if (access instanceof Response) return access
 
@@ -127,9 +134,12 @@ export function createAnalyticsRouter<Principal extends AnalyticsPrincipal>(
     } catch (error) {
       return dependencies.mapError(context, error)
     }
-  })
+  }
 
-  router.get('/api/analytics/reports', async (context) => {
+  router.post('/api/analytics/export', handleExport)
+
+  /** Lists Analytics reports visible to the authenticated principal. */
+  async function handleListReports(context: Context) {
     const access = await authenticateRequest(context, dependencies)
     if (access instanceof Response) return access
 
@@ -142,9 +152,12 @@ export function createAnalyticsRouter<Principal extends AnalyticsPrincipal>(
     } catch (error) {
       return dependencies.mapError(context, error)
     }
-  })
+  }
 
-  router.post('/api/analytics/reports', async (context) => {
+  router.get('/api/analytics/reports', handleListReports)
+
+  /** Creates an Analytics report for the authenticated principal. */
+  async function handleCreateReport(context: Context) {
     const access = await authenticateRequest(context, dependencies)
     if (access instanceof Response) return access
 
@@ -156,9 +169,12 @@ export function createAnalyticsRouter<Principal extends AnalyticsPrincipal>(
     } catch (error) {
       return dependencies.mapError(context, error)
     }
-  })
+  }
 
-  router.patch('/api/analytics/reports/:reportId', async (context) => {
+  router.post('/api/analytics/reports', handleCreateReport)
+
+  /** Updates an authorized Analytics report at its current revision. */
+  async function handleUpdateReport(context: Context) {
     const access = await authenticateRequest(context, dependencies)
     if (access instanceof Response) return access
 
@@ -167,16 +183,19 @@ export function createAnalyticsRouter<Principal extends AnalyticsPrincipal>(
       return context.json({
         report: await dependencies.updateReport(
           access,
-          context.req.param('reportId'),
+          context.req.param('reportId') ?? '',
           input,
         ),
       })
     } catch (error) {
       return dependencies.mapError(context, error)
     }
-  })
+  }
 
-  router.delete('/api/analytics/reports/:reportId', async (context) => {
+  router.patch('/api/analytics/reports/:reportId', handleUpdateReport)
+
+  /** Deletes an authorized Analytics report at its expected revision. */
+  async function handleDeleteReport(context: Context) {
     const access = await authenticateRequest(context, dependencies)
     if (access instanceof Response) return access
 
@@ -184,31 +203,37 @@ export function createAnalyticsRouter<Principal extends AnalyticsPrincipal>(
       const input = await dependencies.readJson(context)
       await dependencies.deleteReport(
         access,
-        context.req.param('reportId'),
+        context.req.param('reportId') ?? '',
         input,
       )
       return context.json({ deleted: true })
     } catch (error) {
       return dependencies.mapError(context, error)
     }
-  })
+  }
 
-  router.get('/api/analytics/reports/:reportId/snapshots', async (context) => {
+  router.delete('/api/analytics/reports/:reportId', handleDeleteReport)
+
+  /** Lists report snapshots that remain visible under the current ACL. */
+  async function handleListSnapshots(context: Context) {
     const access = await authenticateRequest(context, dependencies)
     if (access instanceof Response) return access
 
     try {
       return context.json(await dependencies.listSnapshots(
         access,
-        context.req.param('reportId'),
+        context.req.param('reportId') ?? '',
         context.req.query('cursor'),
       ))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
-  })
+  }
 
-  router.post('/api/analytics/reports/:reportId/snapshots', async (context) => {
+  router.get('/api/analytics/reports/:reportId/snapshots', handleListSnapshots)
+
+  /** Creates an idempotent immutable snapshot for an authorized report. */
+  async function handleCreateSnapshot(context: Context) {
     const access = await authenticateRequest(context, dependencies)
     if (access instanceof Response) return access
 
@@ -217,7 +242,7 @@ export function createAnalyticsRouter<Principal extends AnalyticsPrincipal>(
       return context.json({
         snapshotRecord: await dependencies.createSnapshot(
           access,
-          context.req.param('reportId'),
+          context.req.param('reportId') ?? '',
           input,
           context.req.header('Idempotency-Key'),
         ),
@@ -225,7 +250,9 @@ export function createAnalyticsRouter<Principal extends AnalyticsPrincipal>(
     } catch (error) {
       return dependencies.mapError(context, error)
     }
-  })
+  }
+
+  router.post('/api/analytics/reports/:reportId/snapshots', handleCreateSnapshot)
 
   return router
 }
