@@ -5,7 +5,7 @@ import {
   type ReactNode,
 } from 'react'
 import { Link, NavLink } from 'react-router'
-import { BrandMark } from '../../shared/ui/BrandMark'
+import { BrandMark } from '../../../shared/ui/BrandMark'
 import {
   createTranslator,
   getInitialLocale,
@@ -13,7 +13,7 @@ import {
   setLocalePreference,
   type Locale,
   type MessageKey,
-} from '../../shared/i18n/i18n'
+} from '../../../shared/i18n/i18n'
 
 /**
  * 公開ページの描画関数へ渡す locale と翻訳関数です。

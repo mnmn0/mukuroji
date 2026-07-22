@@ -1,4 +1,4 @@
-import { resolveSafeLoginReturnPath } from '../pages/auth/loginReturnPath'
+import { resolveSafeLoginReturnPath } from './model/loginReturnPath'
 
 /**
  * Enterprise session policy error に対して認証 shell が実行する遷移種別です。

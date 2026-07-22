@@ -1,5 +1,5 @@
 import type { Locale } from '../../shared/i18n/i18n'
-import { PublicLegalPage, type LegalSection } from './PublicLegalPage'
+import { PublicLegalDocument, type LegalSection } from '../../features/public-site/ui/PublicLegalDocument'
 
 /**
  * 利用規約ページの Storybook 初期状態です。
@@ -83,7 +83,7 @@ const termsSections = [
  */
 export function TermsPage({ initialLocale }: TermsPageProps = {}) {
   return (
-    <PublicLegalPage
+    <PublicLegalDocument
       eyebrowKey="public.terms.eyebrow"
       initialLocale={initialLocale}
       introKey="public.terms.intro"

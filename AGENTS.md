@@ -15,6 +15,7 @@
 - Avoid `any` by default. Use `unknown` with narrowing or a specific type, and document a narrowly scoped exception when `any` is unavoidable.
 - コミット前にはサブエージェントレビューを受ける。
 - コミットは意味のある粒度に分ける。
+- 実装・修正作業が完了し、必要な検証とコミット前レビューが成功したら、ユーザーが明示的に不要または Draft を指定しない限り、Draft ではなくレビューレディーの PR を作成する。
 - 実装・修正作業を開始する前に、最新の `origin/main` をマージする。
 - `gh` コマンドを実行する場合は、サンドボックス外で実行する。
 - PR のレビューコメントに基づく変更を行った場合は、変更を push した後にレビューコメントへ返信する。
@@ -52,6 +53,13 @@ bun run knip:check
 
 `typecheck:server` は server の本番コード、`typecheck:contracts` は共有 contract の型検査です。
 `dependencies:check` は workspace 間の循環依存・禁止依存を、`knip:check` は未使用ファイル・依存を検査します。
+
+### Workspace の依存境界
+
+- `web`、`server`、`cdk` は互いの source を直接 import しない。共有する request / response / value type は `contracts` が所有する。
+- `contracts` は consumer である `web`、`server`、`cdk` に依存せず、runtime や infrastructure の実装を持ち込まない。
+- `web`、`server`、`cdk` から `contracts` への依存だけを workspace 間の共有契約として許可する。
+- これらの方向は `.dependency-cruiser.cjs` に全方向を明示し、workspace を追加した場合は同じ検査へ組み込む。
 
 ### `dependencies:check` / `knip:check` の修正方針
 

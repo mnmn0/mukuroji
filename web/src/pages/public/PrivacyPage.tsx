@@ -1,5 +1,5 @@
 import type { Locale } from '../../shared/i18n/i18n'
-import { PublicLegalPage, type LegalSection } from './PublicLegalPage'
+import { PublicLegalDocument, type LegalSection } from '../../features/public-site/ui/PublicLegalDocument'
 
 /**
  * プライバシーポリシーページの Storybook 初期状態です。
@@ -67,7 +67,7 @@ const privacySections = [
  */
 export function PrivacyPage({ initialLocale }: PrivacyPageProps = {}) {
   return (
-    <PublicLegalPage
+    <PublicLegalDocument
       eyebrowKey="public.privacy.eyebrow"
       initialLocale={initialLocale}
       introKey="public.privacy.intro"

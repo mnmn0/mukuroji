@@ -15,7 +15,7 @@ import {
   setLocalePreference,
   type Locale,
 } from '../shared/i18n/i18n'
-import { PublicPageShell } from '../pages/public/PublicPageShell'
+import { PublicPageShell } from '../features/public-site/ui/PublicPageShell'
 import {
   createRequestAttachmentUpload,
   getPublicRequestForm,

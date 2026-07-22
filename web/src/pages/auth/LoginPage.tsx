@@ -43,7 +43,7 @@ import {
   type Locale,
   type MessageKey,
 } from '../../shared/i18n/i18n'
-import { resolveSafeLoginReturnPath } from './loginReturnPath'
+import { resolveSafeLoginReturnPath } from '../../auth/model/loginReturnPath'
 
 function shouldRetainAuthMutationContext(error: unknown) {
   return !(error instanceof ApiError)
