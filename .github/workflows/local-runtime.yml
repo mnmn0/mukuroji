@@ -31,6 +31,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
+      AWS_ACCESS_KEY_ID: test
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_SECRET_ACCESS_KEY: test
       ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET: '2222222222222222222222222222222222222222222222222222222222222222'
       ENTERPRISE_SSO_STATE_SECRET: '3333333333333333333333333333333333333333333333333333333333333333'
       FLOCI_IMAGE: floci/floci:1.5.33-compat
@@ -73,8 +76,6 @@ jobs:
           set -a
           source .floci/generated/cognito.env
           set +a
-          export COGNITO_ENDPOINT=http://127.0.0.1:4566
-          export DYNAMODB_ENDPOINT=http://127.0.0.1:4566
 
           bun run server:dev > "${RUNNER_TEMP}/server.log" 2>&1 &
           server_pid=$!
