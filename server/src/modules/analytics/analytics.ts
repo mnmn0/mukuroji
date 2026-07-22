@@ -772,7 +772,7 @@ export function parseAnalyticsEvidenceCursor(cursor: string, scopeHash: string) 
  * @returns ACL read と最終計算の両方で再利用する canonical query です。
  */
 export function normalizeAnalyticsQueryInput(
-  query: AnalyticsQueryInput,
+  query: unknown,
 ): AnalyticsQueryInput {
   return structuredClone(normalizeAnalyticsQuery(query).query)
 }
@@ -788,7 +788,7 @@ export function normalizeAnalyticsQueryInput(
  * @returns ACL read と最終計算の両方で再利用する canonical evidence input です。
  */
 export function normalizeAnalyticsEvidenceInput(
-  evidence: AnalyticsEvidenceInput,
+  evidence: unknown,
 ): AnalyticsEvidenceInput {
   if (!isRecord(evidence)) {
     throw invalid('AnalyticsEvidenceInvalid', 'Analytics evidence input must be an object.')
@@ -798,7 +798,7 @@ export function normalizeAnalyticsEvidenceInput(
     ? undefined
     : readPositiveNumber(evidence.slaTargetHours, 'Analytics SLA target hours')
   const normalizedQuery = normalizeAnalyticsQueryInput({
-    filter: evidence.filter as AnalyticsFilter,
+    filter: evidence.filter,
     widgets: [{
       id: 'evidence',
       title: 'Evidence',
@@ -806,8 +806,8 @@ export function normalizeAnalyticsEvidenceInput(
       metric,
       ...(slaTargetHours === undefined ? {} : { slaTargetHours }),
     }],
-    asOf: evidence.asOf as string,
-    timeZone: evidence.timeZone as string,
+    asOf: evidence.asOf,
+    timeZone: evidence.timeZone,
   })
   const limit = evidence.limit === undefined
     ? DEFAULT_EVIDENCE_LIMIT
@@ -1175,7 +1175,7 @@ export function createAnalyticsPdf(snapshot: AnalyticsSnapshot, locale?: string)
   return new Uint8Array(Buffer.from(source, 'latin1'))
 }
 
-function normalizeAnalyticsQuery(query: AnalyticsQueryInput): NormalizedAnalyticsQuery {
+function normalizeAnalyticsQuery(query: unknown): NormalizedAnalyticsQuery {
   if (!isRecord(query)) {
     throw invalid('AnalyticsQueryInvalid', 'Analytics query must be an object.')
   }
@@ -1267,7 +1267,7 @@ function validateAnalyticsQueryComplexity(normalized: NormalizedAnalyticsQuery) 
   }
 }
 
-function normalizeFilter(filter: AnalyticsFilter): AnalyticsFilter {
+function normalizeFilter(filter: unknown): AnalyticsFilter {
   if (!isRecord(filter)) {
     throw invalid('AnalyticsFilterInvalid', 'Analytics filter must be an object.')
   }
