@@ -462,6 +462,7 @@ if ! aws_local dynamodb describe-table --table-name "$WORK_ITEMS_TABLE" >/dev/nu
       AttributeName=issueId,AttributeType=S \
       AttributeName=directoryProjectId,AttributeType=S \
       AttributeName=sortOrder,AttributeType=N \
+      AttributeName=updatedAt,AttributeType=S \
     --key-schema \
       AttributeName=directoryTeamId,KeyType=HASH \
       AttributeName=issueId,KeyType=RANGE \
@@ -481,6 +482,14 @@ if ! aws_local dynamodb describe-table --table-name "$WORK_ITEMS_TABLE" >/dev/nu
           {"AttributeName": "sortOrder", "KeyType": "RANGE"}
         ],
         "Projection": {"ProjectionType": "ALL"}
+      },
+      {
+        "IndexName": "TeamIssueUpdatedAtIndex",
+        "KeySchema": [
+          {"AttributeName": "directoryTeamId", "KeyType": "HASH"},
+          {"AttributeName": "updatedAt", "KeyType": "RANGE"}
+        ],
+        "Projection": {"ProjectionType": "ALL"}
       }
     ]' \
     --billing-mode PAY_PER_REQUEST \
@@ -488,6 +497,39 @@ if ! aws_local dynamodb describe-table --table-name "$WORK_ITEMS_TABLE" >/dev/nu
 fi
 
 aws_local dynamodb wait table-exists --table-name "$WORK_ITEMS_TABLE"
+
+TEAM_ISSUE_UPDATED_AT_INDEX_COUNT="$(aws_local dynamodb describe-table \
+  --table-name "$WORK_ITEMS_TABLE" \
+  --query "length(Table.GlobalSecondaryIndexes[?IndexName=='TeamIssueUpdatedAtIndex'])" \
+  --output text)"
+if [ "$TEAM_ISSUE_UPDATED_AT_INDEX_COUNT" = "0" ]; then
+  aws_local dynamodb update-table \
+    --table-name "$WORK_ITEMS_TABLE" \
+    --attribute-definitions AttributeName=updatedAt,AttributeType=S \
+    --global-secondary-index-updates \
+      '[{"Create":{"IndexName":"TeamIssueUpdatedAtIndex","KeySchema":[{"AttributeName":"directoryTeamId","KeyType":"HASH"},{"AttributeName":"updatedAt","KeyType":"RANGE"}],"Projection":{"ProjectionType":"ALL"}}}]' \
+    >/dev/null
+  aws_local dynamodb wait table-exists --table-name "$WORK_ITEMS_TABLE"
+fi
+
+TEAM_ISSUE_UPDATED_AT_INDEX_STATUS=""
+TEAM_ISSUE_UPDATED_AT_INDEX_WAIT_ATTEMPT=0
+while [ "$TEAM_ISSUE_UPDATED_AT_INDEX_WAIT_ATTEMPT" -lt 60 ]; do
+  TEAM_ISSUE_UPDATED_AT_INDEX_STATUS="$(aws_local dynamodb describe-table \
+    --table-name "$WORK_ITEMS_TABLE" \
+    --query "Table.GlobalSecondaryIndexes[?IndexName=='TeamIssueUpdatedAtIndex'] | [0].IndexStatus" \
+    --output text)"
+  if [ "$TEAM_ISSUE_UPDATED_AT_INDEX_STATUS" = "ACTIVE" ]; then
+    break
+  fi
+
+  TEAM_ISSUE_UPDATED_AT_INDEX_WAIT_ATTEMPT=$((TEAM_ISSUE_UPDATED_AT_INDEX_WAIT_ATTEMPT + 1))
+  sleep 1
+done
+if [ "$TEAM_ISSUE_UPDATED_AT_INDEX_STATUS" != "ACTIVE" ]; then
+  echo "DynamoDB index TeamIssueUpdatedAtIndex did not become active for table $WORK_ITEMS_TABLE." >&2
+  exit 1
+fi
 
 WORK_ITEM_SEED_TIMESTAMP="2026-06-01T00:00:00.000Z"
 
