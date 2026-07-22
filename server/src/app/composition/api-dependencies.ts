@@ -39,7 +39,12 @@ import { DynamoDbAutomationClient } from '../../modules/automation/automation'
 import { SecretsManagerAutomationInboundWebhookSecretStore } from '../../modules/automation/automation-inbound-webhook'
 import { DynamoDbCollaborationClient } from '../../modules/collaboration/collaboration'
 import { DynamoDbDeveloperPlatformClient } from '../../modules/developer-platform/developer-platform'
-import { DynamoDbDocumentsClient } from '../../modules/documents/documents'
+import {
+  DynamoDbDocumentsClient,
+} from '../../modules/documents/adapter-out/dynamodb/dynamo-db-documents-client'
+import {
+  DynamoDbDocumentAuthorizationRevisionMutationAdapter,
+} from '../../modules/documents/adapter-out/dynamodb/document-authorization'
 import {
   createEnterpriseIdentityClient,
   createEnterpriseIdentityCapabilities,
@@ -294,7 +299,10 @@ export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
     dashboardSummary: new DynamoDbDashboardSummaryClient(),
     projectDirectory: new DynamoDbProjectDirectoryClient(),
     auditEvents: createAuditEventsClient(),
-    workspaceAccess: new DynamoDbWorkspaceAccessClient(),
+    workspaceAccess: new DynamoDbWorkspaceAccessClient({
+      documentAuthorizationRevisionMutationPort:
+        new DynamoDbDocumentAuthorizationRevisionMutationAdapter(),
+    }),
     enterpriseIdentity: createEnterpriseIdentityCapabilities(enterpriseIdentityClient),
     enterpriseSessionActivity: createEnterpriseSessionActivityClient(),
     enterpriseIdentityProviderConnectionTester: testEnterpriseIdentityProviderConnection,

@@ -1,4 +1,9 @@
-import { DynamoDbDocumentsClient } from '../../modules/documents/documents'
+import {
+  DynamoDbDocumentsClient,
+} from '../../modules/documents/adapter-out/dynamodb/dynamo-db-documents-client'
+import {
+  DynamoDbDocumentAuthorizationRevisionMutationAdapter,
+} from '../../modules/documents/adapter-out/dynamodb/document-authorization'
 import {
   AwsEnterpriseScimGroupJobCognitoClient,
 } from '../../modules/enterprise-identity/adapter-out/cognito/enterprise-scim-group-job-cognito-client'
@@ -30,7 +35,10 @@ export function createEnterpriseScimGroupJobWorkerProcessor():
       processScimGroupJob:
         enterpriseIdentityClient.processScimGroupJob.bind(enterpriseIdentityClient),
     }),
-    workspaceAccess: new DynamoDbWorkspaceAccessClient(),
+    workspaceAccess: new DynamoDbWorkspaceAccessClient({
+      documentAuthorizationRevisionMutationPort:
+        new DynamoDbDocumentAuthorizationRevisionMutationAdapter(),
+    }),
     documents: new DynamoDbDocumentsClient(),
     planning: new DynamoDbPlanningClient(),
     projectManagerGuard: new DynamoDbEnterpriseScimProjectManagerGuard(),

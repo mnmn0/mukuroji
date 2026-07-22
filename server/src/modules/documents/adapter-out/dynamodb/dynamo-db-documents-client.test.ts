@@ -10,7 +10,7 @@ import {
   TransactWriteCommand,
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
-import { createMutationAuditContext } from '../audit/audit'
+import { createMutationAuditContext } from '../../../audit/audit'
 import {
   DOCUMENT_MAX_BACKLINK_COUNT,
   DOCUMENT_MAX_ITEM_BYTES,
@@ -20,7 +20,7 @@ import {
   renderDocumentExport,
   renderPublicDocumentExport,
   validateDocumentPayload,
-} from './documents'
+} from '../../documents'
 
 const ownerAccess = {
   memberKey: 'owner@example.com',
@@ -29,18 +29,10 @@ const ownerAccess = {
 
 const ownerShareAccess = {
   ...ownerAccess,
-  authorizationGuards: [{
-    tableName: 'workspace-access-table',
-    key: {
-      workspaceId: 'workspace-1',
-      recordKey: 'MEMBER#owner@example.com',
-    },
-    generationAttribute: 'version',
-    expectedGeneration: 1,
-    requiredAttributes: {
-      entryType: 'workspace-member',
-      status: 'active',
-    },
+  authorizationSnapshots: [{
+    workspaceId: 'workspace-1',
+    workspaceMemberKey: 'owner@example.com',
+    workspaceMemberVersion: 1,
   }],
 } as const
 
@@ -734,6 +726,62 @@ test('reuses an operation ID after its retained receipt has logically expired', 
   ])
 })
 
+test('fails closed when an operation receipt row is malformed', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Malformed operation receipt',
+    blocks: [{
+      id: 'block-a',
+      type: 'paragraph',
+      text: 'Before',
+    }],
+  })
+  const request = {
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: 1,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'update-block',
+        operationId: 'malformed-receipt',
+        blockId: 'block-a',
+        block: {
+          id: 'block-a',
+          type: 'paragraph',
+          text: 'After',
+        },
+      }] satisfies DocumentOperation[],
+    },
+  }
+  await client.applyOperations(request)
+  const receipt = memory.items().find(
+    (item) =>
+      item.entryType === 'document-operation' &&
+      item.operationId === 'malformed-receipt',
+  )
+  if (receipt === undefined) {
+    throw new Error('Expected a stored operation receipt.')
+  }
+  memory.put({
+    ...receipt,
+    revision: 'invalid',
+  })
+
+  await expect(
+    client.prepareOperations(request),
+  ).rejects.toMatchObject({
+    status: 503,
+    code: 'InvalidStoredDocumentData',
+  })
+})
+
 test('rejects an operation receipt that expires after API preflight', async () => {
   const memory = createMemoryDocumentClient()
   let now = new Date(
@@ -888,8 +936,8 @@ test('binds Goal validation revisions to create, update, version restore, and ar
       relations: [
         createGoalRelation('goal-create'),
       ],
-      relationTargetAuthorizationGuards: [
-        planningAuthorizationGuard(1),
+      relationTargetAuthorizationSnapshots: [
+        planningAuthorizationSnapshot(1),
       ],
     })).rejects.toMatchObject({
       code: 'DocumentAuthorizationChanged',
@@ -937,8 +985,8 @@ test('binds Goal validation revisions to create, update, version restore, and ar
             ),
         }],
       },
-      relationTargetAuthorizationGuards: [
-        planningAuthorizationGuard(1),
+      relationTargetAuthorizationSnapshots: [
+        planningAuthorizationSnapshot(1),
       ],
     })).rejects.toMatchObject({
       code: 'DocumentAuthorizationChanged',
@@ -1004,7 +1052,7 @@ test('binds Goal validation revisions to create, update, version restore, and ar
       expectedRevision: removed.revision,
       access: ownerAccess,
       validateRelationTargets: async () => [
-        planningAuthorizationGuard(1),
+        planningAuthorizationSnapshot(1),
       ],
     })).rejects.toMatchObject({
       code: 'DocumentAuthorizationChanged',
@@ -1051,8 +1099,8 @@ test('binds Goal validation revisions to create, update, version restore, and ar
       documentId: created.id,
       expectedRevision: archived.revision,
       access: ownerAccess,
-      relationTargetAuthorizationGuards: [
-        planningAuthorizationGuard(1),
+      relationTargetAuthorizationSnapshots: [
+        planningAuthorizationSnapshot(1),
       ],
     })).rejects.toMatchObject({
       code: 'DocumentAuthorizationChanged',
@@ -1436,6 +1484,85 @@ test('reconstructs retained version deltas across paginated Query results', asyn
     blocks: [{
       id: 'block-a',
       text: 'revision 3',
+    }],
+  })
+})
+
+test('finds a legacy version ID beyond the first Query page', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Legacy version lookup',
+    blocks: [{
+      id: 'block-a',
+      type: 'paragraph',
+      text: 'revision 1',
+    }],
+  })
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: 1,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'update-block',
+        operationId: 'operation-1',
+        blockId: 'block-a',
+        block: {
+          id: 'block-a',
+          type: 'paragraph',
+          text: 'revision 2',
+        },
+      }],
+    },
+  })
+  const targetMetadata = memory.items().find(
+    ({ entryType, recordKey }) =>
+      entryType === 'document-version' &&
+      typeof recordKey === 'string' &&
+      recordKey.endsWith('#000000000002'),
+  )
+  if (targetMetadata === undefined) {
+    throw new Error('Expected revision 2 version metadata.')
+  }
+  const targetVersion = targetMetadata.version
+  if (
+    typeof targetVersion !== 'object' ||
+    targetVersion === null ||
+    Array.isArray(targetVersion)
+  ) {
+    throw new Error('Expected stored version metadata.')
+  }
+  memory.put({
+    ...targetMetadata,
+    version: {
+      ...targetVersion,
+      id: 'legacy-version-2',
+    },
+  })
+
+  memory.setQueryPageSize(1)
+  const restored = await client.restoreVersion({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerAccess,
+    versionId: 'legacy-version-2',
+    expectedRevision: 2,
+    validateRelationTargets:
+      async () => undefined,
+  })
+
+  expect(restored).toMatchObject({
+    revision: 3,
+    blocks: [{
+      id: 'block-a',
+      text: 'revision 2',
     }],
   })
 })
@@ -2846,38 +2973,16 @@ test('serializes concurrent legacy bootstrap puts and reports the losing deletio
 test('keeps deepest-tree full backlink replacement within 100 actions and rejects the next relation before writing', async () => {
   const memory = createMemoryDocumentClient()
   const client = createClient(memory)
-  const authorizationGuards =
-    Array.from(
-      { length: 3 },
-      (_value, index) => ({
-        tableName:
-          `authorization-table-${index}`,
-        key: {
-          workspaceId: 'workspace-1',
-          recordKey: `AUTH#${index}`,
-        },
-        generationAttribute: 'version',
-        expectedGeneration: 1,
-        requiredAttributes: {
-          entryType: 'authorization-row',
-        },
-      } as const),
-    )
-  for (
-    const [index, guard] of
-      authorizationGuards.entries()
-  ) {
-    memory.put({
-      workspaceId: 'workspace-1',
-      recordKey: `AUTH#${index}`,
-      entryType: 'authorization-row',
-      version: 1,
-      guardTableName: guard.tableName,
-    })
-  }
+  seedOwnerAuthorization(memory)
+  seedPlanningAuthorization(memory, 1)
   const deepestAccess = {
     ...ownerAccess,
-    authorizationGuards,
+    authorizationSnapshots: [{
+      workspaceId: 'workspace-1',
+      workspaceMemberKey: 'owner@example.com',
+      workspaceMemberVersion: 1,
+      planningRevision: 1,
+    }],
   }
   let parentId: string | undefined
   for (
@@ -2975,7 +3080,7 @@ test('keeps deepest-tree full backlink replacement within 100 actions and reject
     memory
       .transactionActionCounts()
       .at(-1),
-  ).toBe(97)
+  ).toBe(96)
   expect(
     findWorkItemBacklinkTargetFence(
       memory,
@@ -3195,6 +3300,44 @@ test('lists and revokes public shares across paginated Query results', async () 
   )
 })
 
+test('hides malformed public-token lookup rows', async () => {
+  const memory = createMemoryDocumentClient()
+  seedOwnerAuthorization(memory)
+  const client = createClient(memory)
+  const created = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerShareAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Malformed public link',
+    blocks: [],
+  })
+  const shared = await client.createPublicShare({
+    workspaceId: 'workspace-1',
+    documentId: created.id,
+    access: ownerShareAccess,
+    expiresAt: '2026-07-19T00:00:00.000Z',
+  })
+  const link = memory.items().find(
+    ({ entryType }) =>
+      entryType === 'document-public-link',
+  )
+  if (link === undefined) {
+    throw new Error('Expected a public-token lookup row.')
+  }
+  memory.put({
+    ...link,
+    targetWorkspaceId: 42,
+  })
+
+  await expect(
+    client.resolvePublicShare(shared.token),
+  ).rejects.toMatchObject({
+    status: 404,
+    code: 'DocumentPublicShareNotFound',
+  })
+})
+
 test('permanently invalidates descendant public links across ancestor archive and permits archived revocation', async () => {
   const memory = createMemoryDocumentClient()
   seedOwnerAuthorization(memory)
@@ -3332,23 +3475,12 @@ test('condition-checks authorization generations in the public share transaction
 
   const refreshedAccess = {
     ...ownerAccess,
-    authorizationGuards: [
-      {
-        ...ownerShareAccess
-          .authorizationGuards[0],
-        expectedGeneration: 2,
-      },
-      {
-        tableName: 'planning-table',
-        key: {
-          directoryId: 'workspace-1',
-          recordKey: 'META',
-        },
-        generationAttribute: 'revision',
-        expectedGeneration: 0,
-        allowMissingWhenExpectedZero: true,
-      },
-    ],
+    authorizationSnapshots: [{
+      workspaceId: 'workspace-1',
+      workspaceMemberKey: 'owner@example.com',
+      workspaceMemberVersion: 2,
+      planningRevision: 0,
+    }],
   } as const
   expect(await client.createPublicShare({
     workspaceId: 'workspace-1',
@@ -4872,15 +5004,10 @@ test('binds private ACL mutations to the active principal generation', async () 
   })
   const guardedAccess = {
     ...ownerAccess,
-    authorizationGuards: [{
-      tableName: 'WorkspaceAccessTable',
-      key: memberKey,
-      generationAttribute: 'version',
-      expectedGeneration: 1,
-      requiredAttributes: {
-        entryType: 'workspace-member',
-        status: 'active',
-      },
+    authorizationSnapshots: [{
+      workspaceId: 'workspace-1',
+      workspaceMemberKey: 'owner',
+      workspaceMemberVersion: 1,
     }],
   }
   const client = createClient(memory)
@@ -4917,6 +5044,69 @@ test('binds private ACL mutations to the active principal generation', async () 
   ).toHaveLength(0)
 })
 
+test('rejects an authorization snapshot from another Workspace before writing', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+
+  await expect(client.create({
+    workspaceId: 'workspace-1',
+    access: {
+      ...ownerAccess,
+      authorizationSnapshots: [{
+        workspaceId: 'workspace-2',
+        planningRevision: 1,
+      }],
+    },
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Cross-Workspace authorization',
+    blocks: [],
+  })).rejects.toMatchObject({
+    status: 500,
+    code: 'InvalidDocumentAuthorizationSnapshot',
+  })
+  expect(
+    memory.items().filter(
+      ({ entryType }) => entryType === 'document',
+    ),
+  ).toHaveLength(0)
+})
+
+test('allows in-memory enterprise authorization snapshots without a physical control table', async () => {
+  const configuredTableName =
+    Bun.env.ENTERPRISE_IDENTITY_TABLE_NAME
+  delete Bun.env.ENTERPRISE_IDENTITY_TABLE_NAME
+  try {
+    const memory = createMemoryDocumentClient()
+    const client = createClient(memory)
+
+    await expect(client.create({
+      workspaceId: 'workspace-1',
+      access: {
+        ...ownerAccess,
+        authorizationSnapshots: [{
+          workspaceId: 'workspace-1',
+          enterpriseControlRevision: 1,
+        }],
+      },
+      kind: 'page',
+      scope: { type: 'workspace' },
+      title: 'In-memory enterprise authorization',
+      blocks: [],
+    })).resolves.toMatchObject({
+      title: 'In-memory enterprise authorization',
+      revision: 1,
+    })
+  } finally {
+    if (configuredTableName === undefined) {
+      delete Bun.env.ENTERPRISE_IDENTITY_TABLE_NAME
+    } else {
+      Bun.env.ENTERPRISE_IDENTITY_TABLE_NAME =
+        configuredTableName
+    }
+  }
+})
+
 test('deduplicates principal and relation authorization guards in inherited create transactions', async () => {
   const memory = createMemoryDocumentClient()
   seedOwnerAuthorization(memory)
@@ -4939,16 +5129,16 @@ test('deduplicates principal and relation authorization guards in inherited crea
     ...memory,
     client: proxyClient,
   })
-  const planningGuard =
-    planningAuthorizationGuard(1)
+  const planningSnapshot =
+    planningAuthorizationSnapshot(1)
 
   await client.create({
     workspaceId: 'workspace-1',
     access: {
       ...ownerAccess,
-      authorizationGuards: [
-        ...ownerShareAccess.authorizationGuards,
-        planningGuard,
+      authorizationSnapshots: [
+        ...ownerShareAccess.authorizationSnapshots,
+        planningSnapshot,
       ],
     },
     kind: 'page',
@@ -4958,8 +5148,8 @@ test('deduplicates principal and relation authorization guards in inherited crea
     relations: [
       createGoalRelation('deduplicated-guard'),
     ],
-    relationTargetAuthorizationGuards: [
-      planningGuard,
+    relationTargetAuthorizationSnapshots: [
+      planningSnapshot,
     ],
   })
 
@@ -4974,8 +5164,8 @@ test('deduplicates principal and relation authorization guards in inherited crea
   expect(
     conditionChecks.map(({ TableName }) => TableName),
   ).toEqual([
-    'workspace-access-table',
-    'planning-table',
+    'mukuroji-workspace-access-local',
+    'mukuroji-planning-local',
   ])
 })
 
@@ -5744,21 +5934,12 @@ function seedOwnerAuthorization(
   })
 }
 
-function planningAuthorizationGuard(
+function planningAuthorizationSnapshot(
   revision: number,
 ) {
   return {
-    tableName: 'planning-table',
-    key: {
-      workspaceId: 'workspace-1',
-      recordKey: 'META',
-    },
-    generationAttribute: 'revision',
-    expectedGeneration: revision,
-    requiredAttributes: {
-      entryType: 'planning-meta',
-      schemaVersion: 1,
-    },
+    workspaceId: 'workspace-1',
+    planningRevision: revision,
   } as const
 }
 

@@ -1,11 +1,12 @@
 services:
   floci:
-    image: floci/floci:latest-compat
+    image: "${FLOCI_IMAGE:-floci/floci:latest-compat}"
     ports:
       - "${FLOCI_PORT:-4566}:4566"
     environment:
       FLOCI_BASE_URL: "http://localhost:${FLOCI_PORT:-4566}"
       FLOCI_HOSTNAME: floci
+      FLOCI_INIT_HOOKS_TIMEOUT_SECONDS: "${FLOCI_INIT_HOOKS_TIMEOUT_SECONDS:-240}"
       FLOCI_STORAGE_MODE: persistent
       FLOCI_STORAGE_PERSISTENT_PATH: /app/data
       COGNITO_ENTERPRISE_IDP_NAME: "${COGNITO_ENTERPRISE_IDP_NAME:-}"
