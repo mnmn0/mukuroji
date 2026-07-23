@@ -13,6 +13,7 @@ on:
       - ".github/workflows/oxc.yml"
       - ".github/workflows/review-skill.yml"
       - "AGENTS.md"
+      - "**/AGENTS.md"
       - "README.md"
       - "package.json"
       - "scripts/validate-mukuroji-review-skill.ts"
@@ -37,6 +38,7 @@ jobs:
           sparse-checkout: |
             .github/workflows/review-skill.yml
             AGENTS.md
+            **/AGENTS.md
             scripts/validate-mukuroji-review-skill.test.ts
             scripts/validate-mukuroji-review-skill.ts
           sparse-checkout-cone-mode: false
@@ -53,6 +55,7 @@ jobs:
             .codex/skills/mukuroji-review
             .github/workflows/review-skill.yml
             AGENTS.md
+            **/AGENTS.md
             scripts/validate-mukuroji-review-skill.test.ts
             scripts/validate-mukuroji-review-skill.ts
           sparse-checkout-cone-mode: false
@@ -112,6 +115,56 @@ jobs:
           esac
           if [ "${trusted_skill_entry}" != "${target_skill_entry}" ]; then
             echo "Trust-root change: .codex/skills/mukuroji-review"
+            trust_root_changed=1
+          fi
+
+          list_agents_entries() {
+            local repository_path="$1"
+            local commit_oid="$2"
+            local entry
+            local entry_path
+
+            while IFS= read -r -d '' entry
+            do
+              entry_path="${entry#*$'\t'}"
+              case "${entry_path}" in
+                AGENTS.md|*/AGENTS.md)
+                  printf '%s\0' "${entry}"
+                  ;;
+              esac
+            done < <(
+              git -C "${repository_path}" ls-tree -rz --full-tree "${commit_oid}"
+            )
+          }
+
+          while IFS= read -r -d '' target_agents_entry
+          do
+            target_agents_metadata="${target_agents_entry%%$'\t'*}"
+            target_agents_path="${target_agents_entry#*$'\t'}"
+            case "${target_agents_metadata}" in
+              "100644 blob "*)
+                ;;
+              *)
+                printf \
+                  'Unsafe AGENTS.md mode or object: %q\n' \
+                  "${target_agents_path}"
+                exit 1
+                ;;
+            esac
+          done < <(list_agents_entries target "${HEAD_SHA}")
+
+          trusted_agents_digest="$(
+            list_agents_entries trusted "${BASE_SHA}" |
+              sha256sum |
+              cut -d ' ' -f 1
+          )"
+          target_agents_digest="$(
+            list_agents_entries target "${HEAD_SHA}" |
+              sha256sum |
+              cut -d ' ' -f 1
+          )"
+          if [ "${trusted_agents_digest}" != "${target_agents_digest}" ]; then
+            echo "Trust-root change: one or more AGENTS.md files"
             trust_root_changed=1
           fi
 

@@ -66,13 +66,15 @@ bun run skill:validate:test
 git diff --check
 ```
 
-trusted validator とその test、`review-skill.yml`、またはレビュー必須条件を持つ
-`AGENTS.md` を変更する PR では、default branch 側の `pull_request_target` workflow が
-変更前の validator と negative tests を使って対象 Skill を検証します。これらの trust
-root の変更を merge するには、内容を独立レビューした repository maintainer が
-現在の head commit SHA 全体を含む `review-ok:<full-head-sha>` label を付ける必要が
-あります。Skill tree 自体の変更もこの承認対象です。workflow は、その完全一致 label を
-PR author 以外の label 権限を持つ user が付けた最新 event だけを承認として受け入れます。
+trusted validator とその test、`review-skill.yml`、またはレビュー必須条件を持つ root /
+nested `AGENTS.md` を変更する PR では、default branch 側の
+`pull_request_target` workflow が変更前の validator と negative tests を使って対象
+Skill を検証します。全階層の `AGENTS.md` の追加・変更・削除も trust-root 変更として
+扱います。これらの trust root の変更を merge するには、内容を独立レビューした
+repository maintainer が現在の head commit SHA 全体を含む
+`review-ok:<full-head-sha>` label を付ける必要があります。Skill tree 自体の変更もこの
+承認対象です。workflow は、その完全一致 label を PR author 以外の label 権限を持つ
+user が付けた最新 event だけを承認として受け入れます。
 さらに GitHub の collaborator permission API で、その user の現在の base permission が
 `write` または `admin` であることを検証します（`maintain` は同 API で `write` に
 対応します）。head が更新されると別の label が必要になり、該当 label を外すと承認も
