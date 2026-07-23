@@ -277,7 +277,7 @@ export interface ConnectorAuthorizationService {
   ): Promise<WorkItemSyncConflict>
 }
 
-/** Developer/public router の外部 dependencies です。 */
+/** External ports and request-bound services required by the management and public API router. */
 export type PublicApiDependencies = {
   /** API key lifecycle and authentication port. */
   apiKeys: ApiKeyPort
@@ -442,7 +442,12 @@ export function toSafePublicApiErrorLog(error: unknown) {
   }
 }
 
-/** `/api` 配下へ mount する developer management と versioned public router を作成します。 */
+/**
+ * Creates the developer management and versioned public API router mounted below `/api`.
+ *
+ * @param dependencies - Authenticated application ports and router configuration.
+ * @returns A Hono router exposing management and public API routes.
+ */
 export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   const router = new Hono<{ Variables: { requestId: string } }>()
 

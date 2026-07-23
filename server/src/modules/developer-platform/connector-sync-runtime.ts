@@ -259,7 +259,7 @@ export interface ConnectorSyncPersistence {
   ): Promise<WorkItemSyncConflict | undefined>
 }
 
-/** Connector sync が必要とする developer platform client subset です。 */
+/** Authoritative platform operations used to read lifecycle state and persist sync health. */
 export type ConnectorSyncPlatform = Pick<
   ConnectorPort,
   | 'readConnectorLifecycleSnapshot'

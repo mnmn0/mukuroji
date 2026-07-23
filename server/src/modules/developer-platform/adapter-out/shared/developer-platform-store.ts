@@ -146,6 +146,9 @@ export const IDEMPOTENCY_MAX_RESPONSE_BYTES = 256 * 1024
 /** 未完了 idempotency reservation を takeover できるまでの lease 期間です。 */
 export const IDEMPOTENCY_RESERVATION_LEASE_SECONDS = 2 * 60
 
+/** Maximum conditional-write retries for one idempotency reservation. */
+const IDEMPOTENCY_RESERVATION_MAX_RETRIES = 3
+
 /** Webhook delivery log と index locator を保持する期間です。 */
 export const WEBHOOK_DELIVERY_RETENTION_SECONDS = 90 * 24 * 60 * 60
 
@@ -2891,6 +2894,12 @@ extends WebhookSubscriptionCapabilityStorage {
     if (typeof payload !== 'string') {
       throw invalid('WebhookPayloadInvalid', 'Webhook payload must be a string.')
     }
+    if (typeof request.signature !== 'string') {
+      throw invalid(
+        'WebhookSignatureInvalid',
+        'Webhook signature must be a string.',
+      )
+    }
     const timestamp = readPositiveInteger(request.timestamp, 'Webhook signature timestamp')
     const toleranceSeconds = readPositiveInteger(
       request.toleranceSeconds ?? WEBHOOK_SIGNATURE_TOLERANCE_SECONDS,
@@ -4612,6 +4621,14 @@ abstract class IdempotencyCapabilityStorage extends ImportCapabilityStorage {
   async reserveIdempotency(
     request: ReserveIdempotencyRequest,
   ): Promise<IdempotencyDecision> {
+    return this.reserveIdempotencyWithRetry(request, 0)
+  }
+
+  /** Attempts one reservation write and bounds retries after conditional conflicts. */
+  private async reserveIdempotencyWithRetry(
+    request: ReserveIdempotencyRequest,
+    retryCount: number,
+  ): Promise<IdempotencyDecision> {
     const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
     const credentialId = readIdentifier(request.credentialId, 'Credential ID')
     const idempotencyKey = readIdempotencyKey(request.idempotencyKey)
@@ -4688,7 +4705,10 @@ abstract class IdempotencyCapabilityStorage extends ImportCapabilityStorage {
     if (!await this.putRecord(record, existing
       ? { expectedVersion: existing.version }
       : { ifAbsent: true })) {
-      return this.reserveIdempotency(request)
+      if (retryCount >= IDEMPOTENCY_RESERVATION_MAX_RETRIES) {
+        throw persistenceConflict()
+      }
+      return this.reserveIdempotencyWithRetry(request, retryCount + 1)
     }
     return { status: 'reserved', reservationId } satisfies IdempotencyDecision
   }
@@ -5801,21 +5821,48 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
   /** DynamoDB DocumentClient です。 */
   private readonly documentClient: DynamoDBDocumentClient
 
+  /**
+   * Creates a DynamoDB-backed Developer Platform storage adapter.
+   *
+   * @param tableName - Explicit single-table name, required in production when unset in the environment.
+   * @param documentClient - DynamoDB document client used for persistence.
+   * @param secretProtector - Secret protector, derived from the environment when omitted.
+   * @param clock - Clock used for timestamps and expiry decisions.
+   * @param lookupIndexName - Explicit lookup GSI name.
+   * @param auditTableName - Optional immutable audit outbox table name.
+   * @param environment - Runtime environment used for configuration and production detection.
+   */
   constructor(
-    tableName = process.env.DEVELOPER_PLATFORM_TABLE_NAME ??
-      'mukuroji-developer-platform-local',
+    tableName: string | undefined = undefined,
     documentClient = createDeveloperPlatformDocumentClient(),
-    secretProtector: SecretProtector = createDefaultSecretProtector(),
+    secretProtector: SecretProtector | undefined = undefined,
     clock: () => Date = () => new Date(),
-    lookupIndexName = process.env.DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME ??
-      DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME,
-    auditTableName = getConfiguredAuditTableName(),
+    lookupIndexName: string | undefined = undefined,
+    auditTableName: string | undefined = undefined,
+    environment: Readonly<Record<string, string | undefined>> = process.env,
   ) {
-    super(secretProtector, clock, auditTableName)
-    this.tableName = requireText(tableName, 'Developer platform table name')
+    const configuredTableName = tableName ??
+      environment.DEVELOPER_PLATFORM_TABLE_NAME?.trim()
+    if (isProductionEnvironment(environment) && !configuredTableName) {
+      throw new DeveloperPlatformError(
+        500,
+        'DeveloperPlatformConfigurationMissing',
+        'Developer platform table name is required in production.',
+      )
+    }
+    super(
+      secretProtector ?? createDefaultSecretProtector(environment),
+      clock,
+      auditTableName ?? getConfiguredAuditTableName(environment),
+    )
+    this.tableName = requireText(
+      configuredTableName ?? 'mukuroji-developer-platform-local',
+      'Developer platform table name',
+    )
     this.documentClient = documentClient
     this.lookupIndexName = requireText(
-      lookupIndexName,
+      lookupIndexName ?? environment.DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME ??
+        DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME,
       'Developer platform lookup index name',
     )
   }
@@ -8945,22 +8992,38 @@ function createDefaultKmsEnvelopeClient(): KmsEnvelopeClient {
   }
 }
 
-/** Environment に応じて local AES または production KMS envelope protector を作成します。 */
-export function createDefaultSecretProtector() {
-  const configuredRawKey = process.env.DEVELOPER_PLATFORM_SECRET_PROTECTOR_KEY?.trim()
+/**
+ * Creates the environment-appropriate local AES or production KMS secret protector.
+ *
+ * @param environment - Runtime configuration used for production detection and key selection.
+ * @returns A configured secret protector that fails closed in production.
+ */
+export function createDefaultSecretProtector(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+) {
+  const configuredRawKey =
+    environment.DEVELOPER_PLATFORM_SECRET_PROTECTOR_KEY?.trim()
   const keyIds = {
-    webhook: process.env.DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID?.trim(),
-    connector: process.env.DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID?.trim(),
-    platformState: process.env.DEVELOPER_PLATFORM_STATE_KMS_KEY_ID?.trim(),
+    webhook: environment.DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID?.trim(),
+    connector: environment.DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID?.trim(),
+    platformState: environment.DEVELOPER_PLATFORM_STATE_KMS_KEY_ID?.trim(),
   }
-  const production = process.env.NODE_ENV === 'production' ||
-    Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME) ||
-    Boolean(process.env.AWS_EXECUTION_ENV)
+  const production = isProductionEnvironment(environment)
   if (production && configuredRawKey) {
     throw new DeveloperPlatformError(
       500,
       'RawSecretProtectorKeyForbidden',
       'Raw developer platform secret protector keys are forbidden in production.',
+    )
+  }
+  if (
+    production &&
+    (!keyIds.webhook || !keyIds.connector || !keyIds.platformState)
+  ) {
+    throw new DeveloperPlatformError(
+      500,
+      'SecretProtectorKmsKeyMissing',
+      'Webhook, connector, and platform-state KMS key IDs are required in production.',
     )
   }
   if (production || Object.values(keyIds).some(Boolean)) {
@@ -8977,6 +9040,15 @@ export function createDefaultSecretProtector() {
   return new LocalAesGcmSecretProtector(
     'mukuroji-local-developer-platform-secret-protector-key',
   )
+}
+
+/** Returns whether the supplied environment represents a production runtime. */
+function isProductionEnvironment(
+  environment: Readonly<Record<string, string | undefined>>,
+) {
+  return environment.NODE_ENV === 'production' ||
+    Boolean(environment.AWS_LAMBDA_FUNCTION_NAME) ||
+    Boolean(environment.AWS_EXECUTION_ENV)
 }
 
 function invalid(

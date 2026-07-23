@@ -783,4 +783,57 @@ describe('ConnectorOAuthStateManager', () => {
       expiresAtEpochSeconds: 1_800_000_600,
     })
   })
+
+  test('maps DynamoDB failures to stable retryable state-store errors', async () => {
+    const upstreamError = new Error('raw DynamoDB failure')
+    const documentClient = {
+      async send() {
+        throw upstreamError
+      },
+    } as unknown as DynamoDBDocumentClient
+    const store = new DynamoDbConnectorOAuthStateStore({
+      tableName: 'DeveloperPlatform',
+      documentClient,
+    })
+    const stateId = 'abcdefghijklmnopqrstuvwxyzABCDEF'
+
+    for (const operation of [
+      () => store.put({
+        stateId,
+        protectedPayload: 'ciphertext',
+        expiresAtEpochSeconds: 1_800_000_600,
+      }),
+      () => store.get(stateId),
+      () => store.consume(stateId),
+    ]) {
+      await expect(operation()).rejects.toMatchObject({
+        code: 'ConnectorOAuthStateStoreUnavailable',
+        retryable: true,
+        message: 'Connector OAuth state storage is temporarily unavailable.',
+      })
+    }
+  })
+
+  test('preserves the stable collision error for conditional writes', async () => {
+    const collision = new Error('condition failed')
+    collision.name = 'ConditionalCheckFailedException'
+    const documentClient = {
+      async send() {
+        throw collision
+      },
+    } as unknown as DynamoDBDocumentClient
+    const store = new DynamoDbConnectorOAuthStateStore({
+      tableName: 'DeveloperPlatform',
+      documentClient,
+    })
+
+    await expect(store.put({
+      stateId: 'abcdefghijklmnopqrstuvwxyzABCDEF',
+      protectedPayload: 'ciphertext',
+      expiresAtEpochSeconds: 1_800_000_600,
+    })).rejects.toMatchObject({
+      code: 'ConnectorOAuthStateCollision',
+      retryable: false,
+    })
+  })
 })

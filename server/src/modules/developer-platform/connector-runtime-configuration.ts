@@ -159,8 +159,14 @@ export function createConnectorRuntimeCache<TValue>(
 }
 
 /**
- * Secrets Manager-backed 設定を base environment へ一時的に重ねます。
- * 返却 object だけを runtime 構築に渡し、process.env 自体は変更しません。
+ * Overlays Secrets Manager-backed connector configuration onto a copied environment.
+ *
+ * The base environment is returned unchanged when no secret ID is configured. A configured
+ * secret ID requires a loader, and `process.env` itself is never mutated.
+ *
+ * @param baseEnvironment - Base process environment copied into the runtime configuration.
+ * @param loader - Secret loader required when a connector configuration secret ID is present.
+ * @returns A new environment containing validated secret-backed configuration values.
  */
 export async function loadConnectorRuntimeEnvironment(
   baseEnvironment: NodeJS.ProcessEnv = process.env,

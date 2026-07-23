@@ -91,7 +91,7 @@ export interface ConnectorConflictRuntime {
   ): Promise<WorkItemSyncConflict>
 }
 
-/** Connector authorization runtime の構築 dependencies です。 */
+/** Dependencies used to coordinate connector OAuth, authorization, and conflict recovery. */
 export type ConnectorAuthorizationRuntimeOptions = {
   /** Connector installation と encrypted credential store です。 */
   platform: ConnectorPort
@@ -111,7 +111,7 @@ export type ConnectorAuthorizationRuntimeOptions = {
   monotonicClock?: () => number
 }
 
-/** OAuth lifecycle、disconnect、reauth、conflict recovery を実装します。 */
+/** Coordinates connector OAuth lifecycle, disconnect, reauthorization, and conflict recovery. */
 export class ConnectorAuthorizationRuntime
   implements ConnectorAuthorizationService, ConnectorSyncHealthReporter {
   /** Connector installation と encrypted credential store です。 */

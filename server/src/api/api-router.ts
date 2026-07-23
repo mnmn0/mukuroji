@@ -19241,9 +19241,9 @@ async function createCanonicalPublicWorkItem(
 }
 
 /**
- * Adapts the canonical Work Item application backend to the Public API contract.
+ * Adapts request-bound canonical Work Item operations and authorization to the Public API port.
  *
- * @returns A Public API Work Item service using request-bound ports.
+ * @returns A Public API Work Item service backed by canonical application operations.
  */
 export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
   return {

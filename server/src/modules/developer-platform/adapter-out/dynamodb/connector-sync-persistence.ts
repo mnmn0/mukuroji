@@ -38,6 +38,9 @@ import type {
 /** Stuck conflict resolution claim を takeover できるまでの既定秒数です。 */
 export const CONNECTOR_CONFLICT_RESOLUTION_LEASE_SECONDS = 15 * 60
 
+/** Maximum conditional-write retries for one conflict resolution claim. */
+const CONNECTOR_CONFLICT_CLAIM_MAX_RETRIES = 3
+
 /** Public conflict cursor の既定有効期間秒数です。 */
 export const CONNECTOR_SYNC_CURSOR_TTL_SECONDS = 15 * 60
 
@@ -819,6 +822,23 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
     const conflictId = requireIdentifier(conflictIdValue, 'Conflict ID')
     const operationId = requireIdentifier(input.operationId, 'Resolution operation ID')
     const startedAt = requireTimestamp(input.startedAt, 'Resolution claim timestamp')
+    return this.claimConflictResolutionWithRetry(
+      workspaceId,
+      conflictId,
+      operationId,
+      startedAt,
+      0,
+    )
+  }
+
+  /** Attempts one conflict claim and bounds retries after conditional conflicts. */
+  private async claimConflictResolutionWithRetry(
+    workspaceId: string,
+    conflictId: string,
+    operationId: string,
+    startedAt: string,
+    retryCount: number,
+  ): Promise<'claimed' | 'same-operation' | 'busy' | undefined> {
     const value = await this.getRow(workspaceId, conflictRecordKey(conflictId))
     if (!value) return undefined
     const row = readConflictRow(value)
@@ -854,7 +874,16 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
       return 'claimed' as const
     } catch (error) {
       if (isConditionalFailure(error)) {
-        return this.claimConflictResolution(workspaceId, conflictId, input)
+        if (retryCount >= CONNECTOR_CONFLICT_CLAIM_MAX_RETRIES) {
+          throw connectorSyncStateConflict()
+        }
+        return this.claimConflictResolutionWithRetry(
+          workspaceId,
+          conflictId,
+          operationId,
+          startedAt,
+          retryCount + 1,
+        )
       }
       throw persistenceFailure(error)
     }

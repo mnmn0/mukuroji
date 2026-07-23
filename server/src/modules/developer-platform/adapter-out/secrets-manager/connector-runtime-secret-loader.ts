@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import {
   GetSecretValueCommand,
   SecretsManagerClient,
@@ -7,15 +8,40 @@ import {
   type ConnectorRuntimeSecretLoader,
 } from '../../connector-runtime-configuration'
 
+/** Internal diagnostic emitted when Secrets Manager cannot load runtime configuration. */
+type ConnectorRuntimeSecretLoadFailure = {
+  /** AWS request ID when available, otherwise a generated diagnostic identifier. */
+  correlationId: string
+  /** Original adapter error retained only in the internal log boundary. */
+  error: unknown
+}
+
+/** Reports one secret-loading failure without exposing the secret identifier. */
+type ConnectorRuntimeSecretLoadFailureReporter = (
+  failure: ConnectorRuntimeSecretLoadFailure,
+) => void
+
 /** Secrets Manager adapter that reads connector runtime configuration JSON. */
 export class SecretsManagerConnectorRuntimeSecretLoader
 implements ConnectorRuntimeSecretLoader {
   /** AWS Secrets Manager client. */
   private readonly client: SecretsManagerClient
+  /** Internal failure reporter used before returning a stable boundary error. */
+  private readonly reportFailure: ConnectorRuntimeSecretLoadFailureReporter
 
-  /** Creates a Secrets Manager connector configuration adapter. */
-  constructor(client: SecretsManagerClient = new SecretsManagerClient({})) {
+  /**
+   * Creates a Secrets Manager connector configuration adapter.
+   *
+   * @param client - Secrets Manager client used for retrieval.
+   * @param reportFailure - Internal diagnostic reporter for upstream failures.
+   */
+  constructor(
+    client: SecretsManagerClient = new SecretsManagerClient({}),
+    reportFailure: ConnectorRuntimeSecretLoadFailureReporter =
+      reportConnectorRuntimeSecretLoadFailure,
+  ) {
     this.client = client
+    this.reportFailure = reportFailure
   }
 
   /** Reads one UTF-8 secret by identifier. */
@@ -31,6 +57,10 @@ implements ConnectorRuntimeSecretLoader {
       throw new TypeError('Secrets Manager secret has no value.')
     } catch (error) {
       if (error instanceof ConnectorRuntimeConfigurationError) throw error
+      this.reportFailure({
+        correlationId: readAwsRequestId(error) ?? randomUUID(),
+        error,
+      })
       throw new ConnectorRuntimeConfigurationError(
         'ConnectorConfigurationUnavailable',
         'Connector runtime configuration could not be loaded.',
@@ -42,4 +72,25 @@ implements ConnectorRuntimeSecretLoader {
 /** Creates the production Secrets Manager connector configuration adapter. */
 export function createSecretsManagerConnectorRuntimeSecretLoader() {
   return new SecretsManagerConnectorRuntimeSecretLoader()
+}
+
+/** Writes an internal diagnostic without adding the secret identifier to the log. */
+function reportConnectorRuntimeSecretLoadFailure(
+  failure: ConnectorRuntimeSecretLoadFailure,
+) {
+  console.error('Connector runtime secret load failed.', failure)
+}
+
+/** Reads the AWS request ID from an SDK error when one is available. */
+function readAwsRequestId(error: unknown) {
+  if (!isRecord(error) || !isRecord(error.$metadata)) return undefined
+  const requestId = error.$metadata.requestId
+  return typeof requestId === 'string' && requestId.trim()
+    ? requestId.trim()
+    : undefined
+}
+
+/** Returns whether a value is a non-null object record. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

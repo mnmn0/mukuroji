@@ -62,35 +62,43 @@ export class DynamoDbConnectorOAuthStateStore implements ConnectorOAuthStateStor
           'Connector OAuth state ID already exists.',
         )
       }
-      throw error
+      throw toOAuthStateStoreError(error)
     }
   }
 
   /** Reads encrypted state without consuming it. */
   async get(stateId: string) {
-    const response = await this.documentClient.send(new GetCommand({
-      TableName: this.tableName,
-      Key: {
-        workspaceId: statePartitionKey(stateId),
-        recordKey: stateRecordKey(stateId),
-      },
-      ConsistentRead: true,
-    }))
-    return response.Item ? readStoredState(response.Item, stateId) : undefined
+    try {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        Key: {
+          workspaceId: statePartitionKey(stateId),
+          recordKey: stateRecordKey(stateId),
+        },
+        ConsistentRead: true,
+      }))
+      return response.Item ? readStoredState(response.Item, stateId) : undefined
+    } catch (error) {
+      throw toOAuthStateStoreError(error)
+    }
   }
 
   /** Atomically consumes encrypted state through DeleteItem return values. */
   async consume(stateId: string) {
-    const response = await this.documentClient.send(new DeleteCommand({
-      TableName: this.tableName,
-      Key: {
-        workspaceId: statePartitionKey(stateId),
-        recordKey: stateRecordKey(stateId),
-      },
-      ReturnValues: 'ALL_OLD',
-    }))
-    if (!response.Attributes) return undefined
-    return readStoredState(response.Attributes, stateId)
+    try {
+      const response = await this.documentClient.send(new DeleteCommand({
+        TableName: this.tableName,
+        Key: {
+          workspaceId: statePartitionKey(stateId),
+          recordKey: stateRecordKey(stateId),
+        },
+        ReturnValues: 'ALL_OLD',
+      }))
+      if (!response.Attributes) return undefined
+      return readStoredState(response.Attributes, stateId)
+    } catch (error) {
+      throw toOAuthStateStoreError(error)
+    }
   }
 }
 
@@ -176,6 +184,16 @@ function requireIdentifier(value: unknown) {
 /** Returns whether DynamoDB rejected a conditional write. */
 function isConditionalCheckFailure(error: unknown) {
   return isRecord(error) && error.name === 'ConditionalCheckFailedException'
+}
+
+/** Maps raw DynamoDB failures while preserving stable runtime validation errors. */
+function toOAuthStateStoreError(error: unknown) {
+  if (error instanceof ConnectorRuntimeError) return error
+  return new ConnectorRuntimeError(
+    'ConnectorOAuthStateStoreUnavailable',
+    'Connector OAuth state storage is temporarily unavailable.',
+    { retryable: true },
+  )
 }
 
 /** Narrows an unknown value to a string-keyed object. */
