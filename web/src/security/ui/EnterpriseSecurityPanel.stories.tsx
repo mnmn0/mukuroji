@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { expect, userEvent, within } from 'storybook/test'
 import { EnterpriseSecurityPanel } from './EnterpriseSecurityPanel'
 import {
   enterpriseProvisioningImpactFixture,
@@ -135,6 +136,69 @@ type Story = StoryObj<typeof meta>
 
 /** SSO、SCIM、同期エラー、特権経路をまとめた標準 overview です。 */
 export const Overview: Story = {}
+
+/** Capability で非表示の tab を除外して keyboard focus を移動します。 */
+export const KeyboardNavigation: Story = {
+  args: {
+    locale: 'en',
+    snapshot: {
+      ...enterpriseSecuritySnapshotFixture,
+      capabilities: {
+        ...enterpriseSecuritySnapshotFixture.capabilities,
+        canManageAccess: false,
+        canManageMappings: false,
+        canManageProvisioning: false,
+        canManageRoles: false,
+        canViewAccess: false,
+        canViewProvisioning: false,
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const overviewTab = canvas.getByRole('tab', { name: 'Overview' })
+    const identityTab = canvas.getByRole('tab', { name: 'Identity' })
+    const sessionsTab = canvas.getByRole('tab', { name: 'Sessions' })
+    const privilegedTab = canvas.getByRole('tab', { name: 'Privileged' })
+
+    await expect(
+      canvas.queryByRole('tab', { name: 'Provisioning' }),
+    ).not.toBeInTheDocument()
+    await expect(
+      canvas.queryByRole('tab', { name: 'Mappings and roles' }),
+    ).not.toBeInTheDocument()
+
+    await userEvent.click(overviewTab)
+    await userEvent.keyboard('{ArrowRight}')
+    await expect(identityTab).toHaveFocus()
+    await userEvent.keyboard('{ArrowRight}')
+    await expect(sessionsTab).toHaveFocus()
+    await userEvent.keyboard('{End}')
+    await expect(privilegedTab).toHaveFocus()
+    await userEvent.keyboard('{Home}')
+    await expect(overviewTab).toHaveFocus()
+  },
+}
+
+/** Mutation 中は選択中 tab の focus を保ち、移動を禁止します。 */
+export const BusyNavigationLocked: Story = {
+  args: {
+    busyOperation: 'domain:create',
+    initialTab: 'identity',
+    locale: 'en',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const identityTab = canvas.getByRole('tab', { name: 'Identity' })
+    const sessionsTab = canvas.getByRole('tab', { name: 'Sessions' })
+
+    await expect(sessionsTab).toBeDisabled()
+    await userEvent.click(identityTab)
+    await userEvent.keyboard('{ArrowRight}')
+    await expect(identityTab).toHaveFocus()
+    await expect(identityTab).toHaveAttribute('aria-selected', 'true')
+  },
+}
 
 /** 前提条件を満たすまで SSO enforcement を開始できない状態です。 */
 export const IdentityPrerequisitesBlocked: Story = {
