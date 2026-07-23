@@ -1,33 +1,14 @@
 import type { CursorPage, SyncConflictStatus, WorkItemSyncConflict } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
+import type {
+  ResolveDeveloperSyncConflictInput,
+} from '../model/connectors'
 import { DeveloperPlatformApiError } from './errors'
 
-/**
- * Connector 競合の解決方針です。
- */
-export type DeveloperSyncConflictResolution =
-  | 'keep-local'
-  | 'keep-remote'
-  | 'merge'
-  | 'ignore'
-
-/**
- * Work Item 同期競合を解決する入力です。
- */
-export type ResolveDeveloperSyncConflictInput = {
-  /**
-   * 一覧 API が返した同期競合 ID です。
-   */
-  conflictId: string
-  /**
-   * 競合した変更を収束させる方針です。
-   */
-  resolution: DeveloperSyncConflictResolution
-  /**
-   * Merge 解決で field ごとに採用する JSON value です。
-   */
-  mergedValues?: Record<string, unknown>
-}
+export type {
+  DeveloperSyncConflictResolution,
+  ResolveDeveloperSyncConflictInput,
+} from '../model/connectors'
 
 /**
  * Work Item 同期競合一覧の filter と pagination 入力です。

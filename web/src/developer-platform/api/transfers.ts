@@ -1,26 +1,17 @@
-import type { CreateImportDryRunInput, CursorPage, ImportDryRunReport, ImportJob, WorkItem } from '@mukuroji/contracts'
+import type { CursorPage, ImportDryRunReport, ImportJob, WorkItem } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
+import type {
+  DeveloperExportFormat,
+  DryRunDeveloperImportInput,
+} from '../model/transfers'
 import { DeveloperPlatformApiError } from './errors'
 
-/**
- * Import の source field と Work Item field の対応です。
- */
-export type DeveloperImportFieldMapping = ImportJob['mapping'][number]
-
-/**
- * Import source format です。
- */
-export type DeveloperImportFormat = ImportJob['format']
-
-/**
- * Import dry-run API の入力です。
- */
-export type DryRunDeveloperImportInput = CreateImportDryRunInput
-
-/**
- * Export 可能な Work Item format です。
- */
-export type DeveloperExportFormat = 'csv' | 'json'
+export type {
+  DeveloperExportFormat,
+  DeveloperImportFieldMapping,
+  DeveloperImportFormat,
+  DryRunDeveloperImportInput,
+} from '../model/transfers'
 
 /**
  * Work Item export response と download metadata です。

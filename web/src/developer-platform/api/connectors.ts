@@ -1,29 +1,15 @@
 import type { ConnectorAuthorizationOutput, ConnectorInstallation } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
+import type {
+  ConnectDeveloperConnectorInput,
+  DeveloperConnectorProvider,
+} from '../model/connectors'
 import { DeveloperPlatformApiError } from './errors'
 
-/**
- * Connector provider identifier です。
- */
-export type DeveloperConnectorProvider = ConnectorInstallation['provider']
-
-/**
- * Connector の新規接続入力です。
- */
-export type ConnectDeveloperConnectorInput = {
-  /**
-   * 管理画面で識別する installation 名です。
-   */
-  name: string
-  /**
-   * Connector に許可する scope 一覧です。
-   */
-  scopes: string[]
-  /**
-   * OAuth 完了後に戻る application-relative URL です。
-   */
-  returnUrl?: string
-}
+export type {
+  ConnectDeveloperConnectorInput,
+  DeveloperConnectorProvider,
+} from '../model/connectors'
 
 const developerApiBaseUrl = trimTrailingSlash(
   import.meta.env.VITE_WORKSPACE_API_BASE_URL ??

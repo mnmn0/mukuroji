@@ -1,51 +1,16 @@
-import type { ApiScope, WebhookDelivery, WebhookSubscription } from '@mukuroji/contracts'
+import type { WebhookDelivery } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
+import type {
+  CreateDeveloperWebhookInput,
+  IssuedWebhookSigningSecret,
+} from '../model/webhooks'
 import { DeveloperPlatformApiError } from './errors'
 
-/**
- * Webhook subscription が購読できる event type です。
- */
-export type DeveloperWebhookEventType = WebhookSubscription['eventTypes'][number]
-
-/**
- * Webhook subscription 作成 API の入力です。
- */
-export type CreateDeveloperWebhookInput = {
-  /**
-   * 管理画面で識別する subscription 名です。
-   */
-  name: string
-  /**
-   * Signed webhook を送信する HTTPS URL です。
-   */
-  url: string
-  /**
-   * 作成者が現在参照でき、event payload の配信を許可する Team ID 一覧です。
-   */
-  teamIds: string[]
-  /**
-   * 配信対象 event type 一覧です。
-   */
-  eventTypes: DeveloperWebhookEventType[]
-  /**
-   * Webhook payload に許可する scope 一覧です。
-   */
-  scopes: ApiScope[]
-}
-
-/**
- * Webhook subscription 作成または signing secret rotation 直後の response です。
- */
-export type IssuedWebhookSigningSecret = {
-  /**
-   * 発行後の webhook subscription metadata です。
-   */
-  subscription: WebhookSubscription
-  /**
-   * 一度だけ表示可能な webhook signing secret です。
-   */
-  signingSecret: string
-}
+export type {
+  CreateDeveloperWebhookInput,
+  DeveloperWebhookEventType,
+  IssuedWebhookSigningSecret,
+} from '../model/webhooks'
 
 const developerApiBaseUrl = trimTrailingSlash(
   import.meta.env.VITE_WORKSPACE_API_BASE_URL ??
