@@ -222,7 +222,7 @@ test('pages all accessible Work Items beyond aggregate Team and item hard caps',
     unassignedIssue: true,
   })
   setTestAppDependencies({
-    developerPlatform: {
+    rateLimits: {
       async consumeRateLimit() {
         return {
           allowed: true,
@@ -231,7 +231,7 @@ test('pages all accessible Work Items beyond aggregate Team and item hard caps',
           resetAt: '2026-07-18T00:01:00.000Z',
         }
       },
-    } as never,
+    },
   })
 
   const workItems: Array<{ id: string; teamId: string }> = []
