@@ -1,30 +1,37 @@
 import { useMemo } from 'react'
+import { useParams } from 'react-router'
+import type { ProjectDirectoryProject } from '../../projects/api'
+import { useWorkspaceProjectMembers } from '../../projects/queries/useProjectMembers'
+import { TeamOverviewView } from '../../projects/ui/TeamOverviewView'
 import { createTranslator } from '../../shared/i18n/i18n'
-import {
-  createWorkspaceSummary,
-  getUniqueWorkspaceProjectIds,
-} from '../../work-items/model/workspaceWorkItems'
+import { getUniqueWorkspaceProjectIds } from '../../work-items/model/workspaceWorkItems'
 import { useWorkspaceWorkItemData } from '../../workspace/queries/useWorkspaceWorkItemData'
-import { DashboardWorkspaceView } from '../../workspace/ui/DashboardWorkspaceView'
 import { WorkspaceTaskLoadNotice } from '../../workspace/ui/WorkspaceDataNotices'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
+const emptyTeamProjects: ProjectDirectoryProject[] = []
+
 /**
- * Renders the URL-specific Workspace dashboard route.
+ * Renders the URL-specific Team overview route.
  *
- * @returns Dashboard content rendered inside the shared Workspace shell.
+ * @returns Team overview content rendered inside the shared Workspace shell.
  */
-export function DashboardPage() {
+export function TeamOverviewPage() {
   const workspace = useWorkspaceRouteContext()
+  const params = useParams()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
+  const activeTeam = workspace.teams.find((team) => team.id === params.teamId)
+  const projects = activeTeam?.projects ?? emptyTeamProjects
   const workItems = useWorkspaceWorkItemData(
     workspace.accessToken,
     workspace.canLoadWorkspaceData,
   )
-  const summary = useMemo(
-    () => createWorkspaceSummary(workspace.teams, workItems.tasks),
-    [workItems.tasks, workspace.teams],
+  const projectMembers = useWorkspaceProjectMembers(
+    workspace.accessToken,
+    activeTeam?.id,
+    projects,
+    workspace.canLoadWorkspaceData && Boolean(activeTeam),
   )
   const failedProjectCount = workItems.workItemsError
     ? getUniqueWorkspaceProjectIds(workspace.teams).length
@@ -42,16 +49,23 @@ export function DashboardPage() {
         workItems.workItemsError,
         workItems.configurationsError,
         ...workItems.configurationErrors,
+        projectMembers.error,
+        ...(projectMembers.data?.errors ?? []),
       ]}
     >
       <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
         <WorkspaceTaskLoadNotice failedProjectCount={failedProjectCount} t={t} />
-        <DashboardWorkspaceView
+        <TeamOverviewView
+          isTeamProjectMembersLoading={Boolean(
+            projectMembers.key && projectMembers.isLoading,
+          )}
           onOpenTask={workspace.onOpenTask}
-          summary={summary}
+          onSelectProject={workspace.onSelectProject}
           t={t}
           tasks={workItems.tasks}
-          teams={workspace.teams}
+          team={activeTeam}
+          teamProjectMembers={projectMembers.data?.members ?? []}
+          teamProjectMembersFailedProjectIds={projectMembers.data?.failedProjectIds ?? []}
           workItemConfigurationsByTeam={workItems.configurationsByTeam}
         />
       </div>

@@ -5,6 +5,7 @@ import {
   type ProjectMemberRole,
 } from '../api/members'
 import type { ProjectDirectoryProject } from '../api/directory'
+import type { TeamProjectMemberAccess } from '../model/teamInsights'
 
 /**
  * 複数 Project の member を Workspace の Team 表示用にまとめて取得します。
@@ -23,11 +24,7 @@ export async function loadWorkspaceProjectMembers(
       project,
     })),
   )
-  const members: Array<{
-    projectId: string
-    projectName: string
-    member: ProjectMember
-  }> = []
+  const members: TeamProjectMemberAccess[] = []
   const failedProjectIds: string[] = []
   const errors: unknown[] = []
 

@@ -1,5 +1,15 @@
 import { describe, expect, test } from 'bun:test'
-import { matchRoutes } from 'react-router'
+import { isValidElement } from 'react'
+import { matchRoutes, type RouteObject } from 'react-router'
+import { DashboardPage } from '../src/pages/workspace/DashboardPage'
+import { EnterpriseSecurityPage } from '../src/pages/workspace/EnterpriseSecurityPage'
+import { HelpPage } from '../src/pages/workspace/HelpPage'
+import { HomePage } from '../src/pages/workspace/HomePage'
+import { InboxPage } from '../src/pages/workspace/InboxPage'
+import { MyTasksPage } from '../src/pages/workspace/MyTasksPage'
+import { SettingsPage } from '../src/pages/workspace/SettingsPage'
+import { TeamMembersPage } from '../src/pages/workspace/TeamMembersPage'
+import { TeamOverviewPage } from '../src/pages/workspace/TeamOverviewPage'
 import {
   createPlanningPath,
   createPublicRequestPath,
@@ -9,6 +19,8 @@ import {
   createWorkItemSearchPath,
 } from '../src/shared/routing/paths'
 import { appRoutes } from '../src/app/router'
+import { WorkspaceRoute } from '../src/workspace/ui/WorkspaceRoute'
+import { WorkspaceRouteProvider } from '../src/workspace/ui/WorkspaceRouteProvider'
 
 describe('Work Item detail paths', () => {
   test('keeps assigned Work Items scoped by project, team, and issue', () => {
@@ -86,6 +98,51 @@ describe('Request intake paths', () => {
     expect(matchRoutes(appRoutes, '/request/opaque-token')?.at(-1)?.route.path).toBe(
       '/request/:linkToken',
     )
+  })
+})
+
+describe('Workspace route pages', () => {
+  test('maps each split URL through one persistent shell to its direct page', () => {
+    const workspaceRoutes = [
+      { component: DashboardPage, path: '/dashboard' },
+      { component: HomePage, path: '/home' },
+      { component: MyTasksPage, path: '/my-tasks' },
+      { component: InboxPage, path: '/inbox' },
+      { component: HelpPage, path: '/help' },
+      { component: SettingsPage, path: '/settings' },
+      { component: EnterpriseSecurityPage, path: '/settings/security' },
+      { component: TeamOverviewPage, path: '/teams/core-team/overview' },
+      { component: TeamMembersPage, path: '/teams/core-team/members' },
+    ]
+    const shellRoutes = new Set<RouteObject>()
+
+    expect(new Set(workspaceRoutes.map(({ component }) => component)).size).toBe(9)
+
+    for (const { component, path } of workspaceRoutes) {
+      const matches = matchRoutes(appRoutes, path)
+      const providerMatch = matches?.find((match) =>
+        isValidElement(match.route.element) &&
+        match.route.element.type === WorkspaceRouteProvider
+      )
+      const shellMatch = matches?.find((match) =>
+        isValidElement(match.route.element) &&
+        match.route.element.type === WorkspaceRoute
+      )
+      const pageElement = matches?.at(-1)?.route.element
+
+      expect(providerMatch).toBeDefined()
+      expect(shellMatch).toBeDefined()
+      expect(isValidElement(pageElement)).toBe(true)
+
+      if (!shellMatch || !isValidElement(pageElement)) {
+        throw new Error(`Expected ${path} to render through the Workspace shell.`)
+      }
+
+      shellRoutes.add(shellMatch.route)
+      expect(pageElement.type).toBe(component)
+    }
+
+    expect(shellRoutes.size).toBe(1)
   })
 })
 

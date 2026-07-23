@@ -2,16 +2,28 @@ import type { ResolvedWorkItemConfiguration } from '@mukuroji/contracts'
 import { getWorkItemConfiguration } from '../api/configuration'
 
 /**
- * 複数 Team の Work Item configuration をまとめて取得します。
+ * Result of loading Work Item configurations for multiple Teams.
+ */
+export type TeamWorkItemConfigurationLoadResult = {
+  /** Resolved configurations indexed by Team ID. */
+  configurationsByTeam: Record<string, ResolvedWorkItemConfiguration>
+  /** Load errors also used to evaluate Enterprise session policy. */
+  errors: unknown[]
+  /** Team IDs whose configurations could not be loaded. */
+  failedTeamIds: string[]
+}
+
+/**
+ * Loads Work Item configurations for multiple Teams.
  *
- * @param accessToken - Work Item configuration API の access token です。
- * @param teamIds - 取得対象の Team ID 一覧です。
- * @returns Team ID ごとの configuration、失敗した Team ID、取得 error です。
+ * @param accessToken - Access token used by the Work Item configuration API.
+ * @param teamIds - Team IDs whose configurations should be loaded.
+ * @returns Configurations, failed Team IDs, and load errors.
  */
 export async function loadTeamWorkItemConfigurations(
   accessToken: string,
   teamIds: readonly string[],
-) {
+): Promise<TeamWorkItemConfigurationLoadResult> {
   const results = await Promise.allSettled(
     teamIds.map(async (teamId) => ({
       configuration: await getWorkItemConfiguration(accessToken, { kind: 'team', teamId }),
@@ -19,17 +31,27 @@ export async function loadTeamWorkItemConfigurations(
     })),
   )
 
+  const configurationsByTeam: Record<string, ResolvedWorkItemConfiguration> = {}
+  const errors: unknown[] = []
+  const failedTeamIds: string[] = []
+
+  for (const [index, result] of results.entries()) {
+    if (result.status === 'fulfilled') {
+      configurationsByTeam[result.value.teamId] = result.value.configuration
+      continue
+    }
+
+    errors.push(result.reason)
+    const failedTeamId = teamIds[index]
+
+    if (failedTeamId) {
+      failedTeamIds.push(failedTeamId)
+    }
+  }
+
   return {
-    configurationsByTeam: Object.fromEntries(results.flatMap((result) =>
-      result.status === 'fulfilled'
-        ? [[result.value.teamId, result.value.configuration]]
-        : [],
-    )) as Record<string, ResolvedWorkItemConfiguration>,
-    errors: results.flatMap((result) =>
-      result.status === 'rejected' ? [result.reason] : []
-    ),
-    failedTeamIds: results.flatMap((result, index) =>
-      result.status === 'rejected' ? [teamIds[index] ?? ''] : [],
-    ).filter(Boolean),
+    configurationsByTeam,
+    errors,
+    failedTeamIds,
   }
 }

@@ -92,10 +92,6 @@ import {
 } from '../../issues/queries/useWorkItems'
 import { IssueCollaborationPanel } from '../../issues/ui/IssueCollaborationPanel'
 import {
-  resolveWorkItemAssignee,
-  resolveWorkItemTitle,
-} from '../../issues/model/workItemDisplay'
-import {
   type IssueCollaborationController,
   useIssueCollaboration,
 } from '../../issues/mutations/useIssueCollaboration'
@@ -151,7 +147,9 @@ import {
   refreshRelationDetailAfterConflict,
   resolveCreateWorkflowStatuses,
   resolveEditableWorkflowStatuses,
+  resolveWorkItemAssignee,
   resolveWorkItemPersonOptions,
+  resolveWorkItemTitle,
   resolveWorkItemWorkflowStatusId,
   resolveWorkItemWorkflowStatusLabel,
   resolveWorkflowCategoryToneClassName,

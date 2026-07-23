@@ -348,11 +348,13 @@ export function useNotificationInbox(
  *
  * @param accessToken - API 認証に使う access token です。
  * @param enabled - 設定画面表示中だけ取得を有効にするかどうかです。
+ * @param onSessionError - Reports or clears an error for shared session policy handling.
  * @returns 設定画面描画用 controller です。
  */
 export function useNotificationPreferences(
   accessToken?: string,
   enabled = true,
+  onSessionError?: (error?: unknown) => void,
 ): NotificationPreferencesController {
   const mutationRunner = useRef(createMutationRequestRunner()).current
   const [isSaving, setIsSaving] = useState(false)
@@ -363,7 +365,7 @@ export function useNotificationPreferences(
     error,
     isLoading,
     mutate,
-  } = useNotificationPreferencesQuery(accessToken, enabled)
+  } = useNotificationPreferencesQuery(accessToken, enabled, onSessionError)
 
   const save = useCallback(async (nextPreferences: NotificationPreferences) => {
     if (!accessToken) {
@@ -382,11 +384,13 @@ export function useNotificationPreferences(
       )
 
       await mutate(savedPreferences, { revalidate: false })
+      onSessionError?.()
       setDidSave(true)
       return true
     } catch (saveError) {
       console.error('Notification preferences update failed:', saveError)
       setSaveError(saveError)
+      onSessionError?.(saveError)
 
       if (saveError instanceof NotificationsApiError && saveError.status === 409) {
         await mutate().catch(() => undefined)
@@ -396,7 +400,7 @@ export function useNotificationPreferences(
     } finally {
       setIsSaving(false)
     }
-  }, [accessToken, mutate, mutationRunner])
+  }, [accessToken, mutate, mutationRunner, onSessionError])
 
   return {
     didSave,

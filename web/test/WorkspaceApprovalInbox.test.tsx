@@ -2,15 +2,32 @@ import { describe, expect, test } from 'bun:test'
 import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
+  type ResolvedWorkItemConfiguration,
 } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { notificationInboxControllerFixture } from '../src/notifications/fixtures'
-import { WorkspaceScreen } from '../src/pages/workspace/WorkspacePage'
+import { WorkspaceInboxView } from '../src/notifications/ui/WorkspaceInboxView'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
+import { TeamOverviewView } from '../src/projects/ui/TeamOverviewView'
+import { createTranslator } from '../src/shared/i18n/i18n'
+import type { ProjectTask } from '../src/tasks/api'
+import { DashboardWorkspaceView } from '../src/workspace/ui/DashboardWorkspaceView'
+import { HomeWorkspaceView } from '../src/workspace/ui/HomeWorkspaceView'
+import { MyTasksWorkspaceView } from '../src/workspace/ui/MyTasksWorkspaceView'
+import {
+  WorkspaceConfigurationLoadNotice,
+  WorkspaceTaskLoadNotice,
+} from '../src/workspace/ui/WorkspaceDataNotices'
+
+const coreTeam = projectDirectoryFixtures.find((team) => team.id === 'core-team')
+
+if (!coreTeam) {
+  throw new Error('The core Team fixture is required for Workspace view tests.')
+}
 
 describe('Workspace approval Inbox', () => {
   test('uses Team configuration names for status labels on every Workspace summary surface', () => {
-    const task = {
+    const task: ProjectTask = {
       assignedProjectId: 'refero',
       assigneeUserId: 'demo@example.com',
       creatorMemberKey: 'demo@example.com',
@@ -18,32 +35,34 @@ describe('Workspace approval Inbox', () => {
       customFieldValues: {},
       dueDate: '2026/01/01',
       id: 'configured-status',
-      priority: 'high' as const,
+      priority: 'high',
       relationIds: [],
       revision: 1,
       schemaVersion: WORK_ITEM_SCHEMA_VERSION,
-      source: 'dynamodb' as const,
-      statusCategory: 'started' as const,
+      source: 'dynamodb',
+      statusCategory: 'started',
       teamId: 'core-team',
       title: 'Configured status task',
       updatedAt: '2026-07-16T00:00:00.000Z',
       workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
       workflowStatusId: 'active',
     }
-    const workItemConfigurationsByTeam = {
+    const workItemConfigurationsByTeam: Readonly<
+      Record<string, ResolvedWorkItemConfiguration>
+    > = {
       'core-team': {
         configuration: {
           customFields: [],
           revision: 1,
           schemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
           scopeId: 'core-team',
-          scopeType: 'team' as const,
+          scopeType: 'team',
           workflow: {
             id: 'core-workflow',
             initialStatusId: 'active',
             name: 'Core workflow',
             statuses: [{
-              category: 'started' as const,
+              category: 'started',
               id: 'active',
               name: 'Configured active',
               sortOrder: 0,
@@ -53,111 +72,120 @@ describe('Workspace approval Inbox', () => {
         },
       },
     }
+    const summary = {
+      blocked: 1,
+      projects: 1,
+      tasks: 1,
+    }
+    const t = createTranslator('en')
+    const views = [
+      <HomeWorkspaceView
+        summary={summary}
+        t={t}
+        tasks={[task]}
+        teams={projectDirectoryFixtures}
+        workItemConfigurationsByTeam={workItemConfigurationsByTeam}
+        onOpenTask={() => undefined}
+      />,
+      <DashboardWorkspaceView
+        summary={summary}
+        t={t}
+        tasks={[task]}
+        teams={projectDirectoryFixtures}
+        workItemConfigurationsByTeam={workItemConfigurationsByTeam}
+        onOpenTask={() => undefined}
+      />,
+      <WorkspaceInboxView
+        locale="en"
+        notificationInbox={notificationInboxControllerFixture}
+        t={t}
+        tasks={[task]}
+        teams={projectDirectoryFixtures}
+        workItemConfigurationsByTeam={workItemConfigurationsByTeam}
+        onOpenTask={() => undefined}
+      />,
+      <TeamOverviewView
+        isTeamProjectMembersLoading={false}
+        t={t}
+        tasks={[task]}
+        team={coreTeam}
+        teamProjectMembers={[]}
+        teamProjectMembersFailedProjectIds={[]}
+        workItemConfigurationsByTeam={workItemConfigurationsByTeam}
+        onOpenTask={() => undefined}
+      />,
+    ]
 
-    for (const view of ['home', 'dashboard', 'inbox', 'team-overview'] as const) {
-      const html = renderToStaticMarkup(
-        <WorkspaceScreen
-          activeTeamId="core-team"
-          fontSizePreference="standard"
-          locale="en"
-          notificationInbox={notificationInboxControllerFixture}
-          summary={{
-            blocked: 1,
-            projects: 1,
-            source: 'dynamodb',
-            tasks: 1,
-            updatedAt: '2026-07-16T00:00:00.000Z',
-          }}
-          tasks={[task]}
-          teams={projectDirectoryFixtures}
-          userInitial="D"
-          userLabel="demo@example.com"
-          view={view}
-          workItemConfigurationsByTeam={workItemConfigurationsByTeam}
-          onFontSizePreferenceChange={() => undefined}
-          onOpenTask={() => undefined}
-        />,
-      )
-
-      expect(html).toContain('Configured active')
+    for (const view of views) {
+      expect(renderToStaticMarkup(view)).toContain('Configured active')
     }
   })
 
   test('keeps durable notifications while exposing only actionable approval summaries', () => {
+    const tasks: ProjectTask[] = [
+      {
+        approvalSummary: {
+          approvedCount: 0,
+          changesRequestedCount: 0,
+          overdueCount: 1,
+          pendingCount: 2,
+          rejectedCount: 0,
+        },
+        assignedProjectId: 'refero',
+        assigneeUserId: 'demo@example.com',
+        creatorMemberKey: 'demo@example.com',
+        customFieldValues: {},
+        createdAt: '2026-07-14T00:00:00.000Z',
+        dueDate: '2099/12/31',
+        id: 'approval-proof',
+        priority: 'low',
+        relationIds: [],
+        revision: 1,
+        schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+        source: 'dynamodb',
+        statusCategory: 'unstarted',
+        teamId: 'core-team',
+        title: '承認待ち成果物',
+        updatedAt: '2026-07-14T00:00:00.000Z',
+        workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+        workflowStatusId: 'todo',
+      },
+      {
+        approvalSummary: {
+          approvedCount: 1,
+          changesRequestedCount: 1,
+          overdueCount: 0,
+          pendingCount: 0,
+          rejectedCount: 1,
+        },
+        assignedProjectId: 'refero',
+        assigneeUserId: 'demo@example.com',
+        creatorMemberKey: 'demo@example.com',
+        customFieldValues: {},
+        createdAt: '2026-07-14T00:00:00.000Z',
+        dueDate: '2099/12/31',
+        id: 'approval-history-only',
+        priority: 'low',
+        relationIds: [],
+        revision: 1,
+        schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+        source: 'dynamodb',
+        statusCategory: 'unstarted',
+        teamId: 'core-team',
+        title: '過去の承認判断だけがある成果物',
+        updatedAt: '2026-07-14T00:00:00.000Z',
+        workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+        workflowStatusId: 'todo',
+      },
+    ]
     const html = renderToStaticMarkup(
-      <WorkspaceScreen
-        fontSizePreference="standard"
-        inboxCount={2}
+      <WorkspaceInboxView
         locale="ja"
         notificationInbox={notificationInboxControllerFixture}
-        summary={{
-          blocked: 0,
-          projects: 1,
-          source: 'dynamodb',
-          tasks: 2,
-          updatedAt: '2026-07-14T00:00:00.000Z',
-        }}
-        tasks={[
-          {
-            approvalSummary: {
-              approvedCount: 0,
-              changesRequestedCount: 0,
-              overdueCount: 1,
-              pendingCount: 2,
-              rejectedCount: 0,
-            },
-            assignedProjectId: 'refero',
-            assigneeUserId: 'demo@example.com',
-            creatorMemberKey: 'demo@example.com',
-            customFieldValues: {},
-            createdAt: '2026-07-14T00:00:00.000Z',
-            dueDate: '2099/12/31',
-            id: 'approval-proof',
-            priority: 'low',
-            relationIds: [],
-            revision: 1,
-            schemaVersion: WORK_ITEM_SCHEMA_VERSION,
-            source: 'dynamodb',
-            statusCategory: 'unstarted',
-            teamId: 'core-team',
-            title: '承認待ち成果物',
-            updatedAt: '2026-07-14T00:00:00.000Z',
-            workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
-            workflowStatusId: 'todo',
-          },
-          {
-            approvalSummary: {
-              approvedCount: 1,
-              changesRequestedCount: 1,
-              overdueCount: 0,
-              pendingCount: 0,
-              rejectedCount: 1,
-            },
-            assignedProjectId: 'refero',
-            assigneeUserId: 'demo@example.com',
-            creatorMemberKey: 'demo@example.com',
-            customFieldValues: {},
-            createdAt: '2026-07-14T00:00:00.000Z',
-            dueDate: '2099/12/31',
-            id: 'approval-history-only',
-            priority: 'low',
-            relationIds: [],
-            revision: 1,
-            schemaVersion: WORK_ITEM_SCHEMA_VERSION,
-            source: 'dynamodb',
-            statusCategory: 'unstarted',
-            teamId: 'core-team',
-            title: '過去の承認判断だけがある成果物',
-            updatedAt: '2026-07-14T00:00:00.000Z',
-            workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
-            workflowStatusId: 'todo',
-          },
-        ]}
+        t={createTranslator('ja')}
+        tasks={tasks}
         teams={projectDirectoryFixtures}
-        userInitial="D"
-        userLabel="demo@example.com"
-        view="inbox"
-        onFontSizePreferenceChange={() => undefined}
+        workItemConfigurationsByTeam={{}}
         onOpenTask={() => undefined}
       />,
     )
@@ -171,27 +199,19 @@ describe('Workspace approval Inbox', () => {
   })
 
   test('keeps durable notifications visible beside a Work Item partial error', () => {
+    const t = createTranslator('ja')
     const html = renderToStaticMarkup(
-      <WorkspaceScreen
-        fontSizePreference="standard"
-        inboxCount={2}
-        locale="ja"
-        notificationInbox={notificationInboxControllerFixture}
-        summary={{
-          blocked: 0,
-          projects: 1,
-          source: 'dynamodb',
-          tasks: 0,
-          updatedAt: '2026-07-14T00:00:00.000Z',
-        }}
-        taskLoadFailedProjectIds={['refero']}
-        tasks={[]}
-        teams={projectDirectoryFixtures}
-        userInitial="D"
-        userLabel="demo@example.com"
-        view="inbox"
-        onFontSizePreferenceChange={() => undefined}
-      />,
+      <>
+        <WorkspaceTaskLoadNotice failedProjectCount={1} t={t} />
+        <WorkspaceInboxView
+          locale="ja"
+          notificationInbox={notificationInboxControllerFixture}
+          t={t}
+          tasks={[]}
+          teams={projectDirectoryFixtures}
+          workItemConfigurationsByTeam={{}}
+        />
+      </>,
     )
 
     expect(html).toContain('data-testid="workspace-task-partial-error"')
@@ -201,46 +221,42 @@ describe('Workspace approval Inbox', () => {
   })
 
   test('keeps canonical My Tasks visible when its Team configuration is unavailable', () => {
+    const task: ProjectTask = {
+      assignedProjectId: 'refero',
+      assigneeUserId: 'demo@example.com',
+      creatorMemberKey: 'demo@example.com',
+      createdAt: '2026-07-16T00:00:00.000Z',
+      customFieldValues: {},
+      dueDate: '2099/12/31',
+      id: 'configuration-unavailable',
+      priority: 'high',
+      relationIds: [],
+      revision: 1,
+      schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+      source: 'dynamodb',
+      statusCategory: 'started',
+      teamId: 'core-team',
+      title: '設定取得失敗中も表示するタスク',
+      updatedAt: '2026-07-16T00:00:00.000Z',
+      workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+      workflowStatusId: 'active',
+    }
+    const t = createTranslator('ja')
     const html = renderToStaticMarkup(
-      <WorkspaceScreen
-        fontSizePreference="standard"
-        locale="ja"
-        summary={{
-          blocked: 0,
-          projects: 1,
-          source: 'dynamodb',
-          tasks: 1,
-          updatedAt: '2026-07-16T00:00:00.000Z',
-        }}
-        tasks={[{
-          assignedProjectId: 'refero',
-          assigneeUserId: 'demo@example.com',
-          creatorMemberKey: 'demo@example.com',
-          createdAt: '2026-07-16T00:00:00.000Z',
-          customFieldValues: {},
-          dueDate: '2099/12/31',
-          id: 'configuration-unavailable',
-          priority: 'high',
-          relationIds: [],
-          revision: 1,
-          schemaVersion: WORK_ITEM_SCHEMA_VERSION,
-          source: 'dynamodb',
-          statusCategory: 'started',
-          teamId: 'core-team',
-          title: '設定取得失敗中も表示するタスク',
-          updatedAt: '2026-07-16T00:00:00.000Z',
-          workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
-          workflowStatusId: 'active',
-        }]}
-        teams={projectDirectoryFixtures}
-        userIdentityAliases={['demo@example.com']}
-        userInitial="D"
-        userLabel="demo@example.com"
-        view="my-tasks"
-        workItemConfigurationFailedTeamIds={['core-team']}
-        onFontSizePreferenceChange={() => undefined}
-        onRetryWorkItemConfigurations={() => undefined}
-      />,
+      <>
+        <WorkspaceConfigurationLoadNotice
+          failedTeamCount={1}
+          t={t}
+          onRetry={() => undefined}
+        />
+        <MyTasksWorkspaceView
+          configurationFailedTeamIds={['core-team']}
+          configurationsByTeam={{}}
+          t={t}
+          tasks={[task]}
+          teams={projectDirectoryFixtures}
+        />
+      </>,
     )
 
     expect(html).toContain('data-testid="my-tasks-configuration-error"')

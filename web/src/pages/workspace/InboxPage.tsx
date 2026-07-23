@@ -1,37 +1,33 @@
 import { useMemo } from 'react'
+import { useNotificationInbox } from '../../notifications/mutations/useNotifications'
+import { WorkspaceInboxView } from '../../notifications/ui/WorkspaceInboxView'
 import { createTranslator } from '../../shared/i18n/i18n'
-import {
-  createWorkspaceSummary,
-  getUniqueWorkspaceProjectIds,
-} from '../../work-items/model/workspaceWorkItems'
+import { getUniqueWorkspaceProjectIds } from '../../work-items/model/workspaceWorkItems'
 import { useWorkspaceWorkItemData } from '../../workspace/queries/useWorkspaceWorkItemData'
-import { DashboardWorkspaceView } from '../../workspace/ui/DashboardWorkspaceView'
 import { WorkspaceTaskLoadNotice } from '../../workspace/ui/WorkspaceDataNotices'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
 /**
- * Renders the URL-specific Workspace dashboard route.
+ * Renders the URL-specific Inbox route with durable notifications and Work Item attention.
  *
- * @returns Dashboard content rendered inside the shared Workspace shell.
+ * @returns Inbox content rendered inside the shared Workspace shell.
  */
-export function DashboardPage() {
+export function InboxPage() {
   const workspace = useWorkspaceRouteContext()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
-  const workItems = useWorkspaceWorkItemData(
+  const notificationInbox = useNotificationInbox(
     workspace.accessToken,
     workspace.canLoadWorkspaceData,
   )
-  const summary = useMemo(
-    () => createWorkspaceSummary(workspace.teams, workItems.tasks),
-    [workItems.tasks, workspace.teams],
+  const workItems = useWorkspaceWorkItemData(
+    workspace.accessToken,
+    workspace.canLoadWorkspaceData,
   )
   const failedProjectCount = workItems.workItemsError
     ? getUniqueWorkspaceProjectIds(workspace.teams).length
     : 0
   const isLoading = Boolean(
-    workItems.workItemsKey && workItems.isWorkItemsLoading,
-  ) || Boolean(
     workItems.configurationsKey && workItems.isConfigurationsLoading,
   )
 
@@ -42,13 +38,16 @@ export function DashboardPage() {
         workItems.workItemsError,
         workItems.configurationsError,
         ...workItems.configurationErrors,
+        ...(notificationInbox.sessionErrors ?? []),
       ]}
     >
       <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
         <WorkspaceTaskLoadNotice failedProjectCount={failedProjectCount} t={t} />
-        <DashboardWorkspaceView
+        <WorkspaceInboxView
+          locale={workspace.locale}
+          notificationInbox={notificationInbox}
+          onOpenNotification={workspace.onOpenNotification}
           onOpenTask={workspace.onOpenTask}
-          summary={summary}
           t={t}
           tasks={workItems.tasks}
           teams={workspace.teams}
