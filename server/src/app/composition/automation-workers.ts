@@ -25,6 +25,9 @@ import {
 } from '../../modules/automation'
 import { createCognitoClient } from '../../modules/authentication'
 import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
+import {
+  DynamoDbDocumentAuthorizationRevisionMutationAdapter,
+} from '../../modules/documents/adapter-out/dynamodb/document-authorization'
 import { createDefaultFileProofingClient } from '../../modules/files/file-proofing'
 import { DynamoDbTeamIssuesClient } from '../../modules/work-items'
 import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'
@@ -44,7 +47,10 @@ function createAutomationActionDependencies(
   return {
     cognito: createCognitoClient(),
     projectDirectory: new DynamoDbProjectDirectoryClient(),
-    workspaceAccess: new DynamoDbWorkspaceAccessClient(),
+    workspaceAccess: new DynamoDbWorkspaceAccessClient({
+      documentAuthorizationRevisionMutationPort:
+        new DynamoDbDocumentAuthorizationRevisionMutationAdapter(),
+    }),
     auditEvents: createAuditEventsClient(),
     teamIssues,
     workItemConfigurations: createWorkItemConfigurationClient(),

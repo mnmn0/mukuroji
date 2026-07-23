@@ -9,7 +9,7 @@ import {
 import {
   canAssignEnterpriseRole,
   resolveEnterpriseRolePermissions,
-} from './enterprise-identity'
+} from './domain/enterprise-authorization'
 
 const permissionMetadata = {
   'workspace.read': ['workspace', 'View workspace', 'View workspace settings and navigation.', false],

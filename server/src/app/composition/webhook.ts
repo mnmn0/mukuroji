@@ -14,11 +14,14 @@ import {
   DynamoDbDeveloperPlatformClient,
 } from '../../modules/developer-platform/developer-platform'
 import {
+  DynamoDbDocumentAuthorizationRevisionMutationAdapter,
+} from '../../modules/documents/adapter-out/dynamodb/document-authorization'
+import {
   DynamoDbWebhookSubscriptionAuthorizer,
 } from '../../modules/developer-platform/webhook-authorization'
 import {
   DynamoDbEnterpriseIdentityReadClient,
-} from '../../modules/enterprise-identity/enterprise-identity'
+} from '../../modules/enterprise-identity'
 import {
   DynamoDbWorkspaceAccessClient,
 } from '../../modules/workspace-access/workspace-access'
@@ -49,7 +52,10 @@ export function createProductionWebhookDeliveryHandler(
     auditEvents: new DynamoDbWebhookAuditEventReader(),
     developerPlatform: new DynamoDbDeveloperPlatformClient(),
     authorizer: new DynamoDbWebhookSubscriptionAuthorizer({
-      workspaceAccess: new DynamoDbWorkspaceAccessClient(),
+      workspaceAccess: new DynamoDbWorkspaceAccessClient({
+        documentAuthorizationRevisionMutationPort:
+          new DynamoDbDocumentAuthorizationRevisionMutationAdapter(),
+      }),
       enterpriseIdentity: new DynamoDbEnterpriseIdentityReadClient(
         readRequiredEnvironment('ENTERPRISE_IDENTITY_TABLE_NAME'),
       ),

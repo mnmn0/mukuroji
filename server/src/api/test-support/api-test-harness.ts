@@ -63,7 +63,7 @@ import type {
   CreateTeamIssueRequestBody,
   WorkItemAuthorizationSnapshot,
 } from '../../modules/work-items'
-import { type DocumentClient } from '../../modules/documents/documents'
+import { type DocumentClient } from '../../modules/documents'
 import { InMemoryPlanningClient } from '../../modules/planning/planning'
 import {
   InMemoryEnterpriseIdentityClient,

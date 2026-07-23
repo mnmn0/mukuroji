@@ -80,7 +80,11 @@ function createDynamoHarness() {
   const transactions: Array<Record<string, unknown>> = []
   const batchWrites: Array<Record<string, unknown>> = []
   const queries: Array<Record<string, unknown>> = []
+  const committedTransactionTokens = new Set<string>()
   let rejectBatchWritesFromCall: number | undefined
+  let failTransactionsAfterCommit = 0
+  let nextTransactionCancellationReasons: string[] | undefined
+  let cancelLastTransactionOperationConditionally = false
   const documentClient = {
     async send(command: unknown) {
       const commandName = (
@@ -202,7 +206,44 @@ function createDynamoHarness() {
       }
       if (commandName === 'TransactWriteCommand') {
         transactions.push(structuredClone(input))
+        const clientRequestToken = typeof input.ClientRequestToken === 'string'
+          ? input.ClientRequestToken
+          : undefined
+        if (
+          clientRequestToken &&
+          committedTransactionTokens.has(clientRequestToken)
+        ) {
+          if (failTransactionsAfterCommit > 0) {
+            failTransactionsAfterCommit -= 1
+            const error = new Error('Injected response loss after idempotent replay')
+            error.name = 'TimeoutError'
+            throw error
+          }
+          return {}
+        }
         const transactItems = input.TransactItems as Array<Record<string, unknown>>
+        if (cancelLastTransactionOperationConditionally) {
+          const error = new Error('Injected final-operation conditional cancellation')
+          error.name = 'TransactionCanceledException'
+          Object.assign(error, {
+            CancellationReasons: transactItems.map((_candidate, index) => ({
+              Code: index === transactItems.length - 1
+                ? 'ConditionalCheckFailed'
+                : 'None',
+            })),
+          })
+          cancelLastTransactionOperationConditionally = false
+          throw error
+        }
+        if (nextTransactionCancellationReasons) {
+          const error = new Error('Injected non-conditional transaction cancellation')
+          error.name = 'TransactionCanceledException'
+          Object.assign(error, {
+            CancellationReasons: nextTransactionCancellationReasons.map((Code) => ({ Code })),
+          })
+          nextTransactionCancellationReasons = undefined
+          throw error
+        }
         for (const operation of transactItems) {
           const put = operation.Put as
             | {
@@ -225,6 +266,25 @@ function createDynamoHarness() {
           if (createConflict || revisionConflict || generationConflict) {
             const error = new Error('Injected CONTROL revision conflict')
             error.name = 'TransactionCanceledException'
+            Object.assign(error, {
+              CancellationReasons: transactItems.map((candidate) => {
+                const candidatePut = candidate.Put
+                const candidateItem = typeof candidatePut === 'object' &&
+                    candidatePut !== null &&
+                    'Item' in candidatePut &&
+                    typeof candidatePut.Item === 'object' &&
+                    candidatePut.Item !== null
+                  ? candidatePut.Item
+                  : undefined
+                return {
+                  Code: candidateItem &&
+                      'recordKey' in candidateItem &&
+                      candidateItem.recordKey === 'CONTROL'
+                    ? 'ConditionalCheckFailed'
+                    : 'None',
+                }
+              }),
+            })
             throw error
           }
         }
@@ -239,6 +299,13 @@ function createDynamoHarness() {
             | { Key?: Record<string, unknown> }
             | undefined
           if (deletion?.Key) items.delete(enterpriseItemKey(deletion.Key))
+        }
+        if (clientRequestToken) committedTransactionTokens.add(clientRequestToken)
+        if (failTransactionsAfterCommit > 0) {
+          failTransactionsAfterCommit -= 1
+          const error = new Error('Injected response loss after transaction commit')
+          error.name = 'TimeoutError'
+          throw error
         }
         return {}
       }
@@ -256,6 +323,15 @@ function createDynamoHarness() {
     },
     resumeBatchWrites() {
       rejectBatchWritesFromCall = undefined
+    },
+    failNextTransactionAfterCommit() {
+      failTransactionsAfterCommit += 1
+    },
+    cancelNextTransaction(reasonCodes: string[]) {
+      nextTransactionCancellationReasons = [...reasonCodes]
+    },
+    cancelLastTransactionOperation() {
+      cancelLastTransactionOperationConditionally = true
     },
     resetQueries() {
       queries.length = 0
@@ -1481,6 +1557,86 @@ test('stages versioned state before atomically checkpointing domain claims and C
   expect(renameItems.some((item) =>
     (item.Put as { Item?: { recordKey?: string } } | undefined)?.Item?.recordKey === 'CONTROL'
   )).toBe(true)
+})
+
+test('recovers a generation commit whose successful response is lost', async () => {
+  const harness = createDynamoHarness()
+  const client = new DynamoDbEnterpriseIdentityClient(
+    'enterprise-identity',
+    tokenSecret,
+    harness.documentClient as never,
+    undefined,
+    () => now,
+  )
+  harness.failNextTransactionAfterCommit()
+  harness.failNextTransactionAfterCommit()
+
+  await expect(client.putIdentityProvider(
+    createActiveProvider('idp-ambiguous-commit'),
+  )).resolves.toMatchObject({ providerId: 'idp-ambiguous-commit' })
+
+  expect(harness.transactions).toHaveLength(2)
+  expect(harness.transactions[0]?.ClientRequestToken).toBe(
+    harness.transactions[1]?.ClientRequestToken,
+  )
+  await expect(client.getSnapshot(workspaceId)).resolves.toMatchObject({
+    identityProviders: [{ providerId: 'idp-ambiguous-commit' }],
+  })
+})
+
+test('does not classify non-conditional transaction cancellation as a revision conflict', async () => {
+  const harness = createDynamoHarness()
+  const client = new DynamoDbEnterpriseIdentityClient(
+    'enterprise-identity',
+    tokenSecret,
+    harness.documentClient as never,
+    undefined,
+    () => now,
+  )
+  harness.cancelNextTransaction(['ProvisionedThroughputExceeded'])
+
+  await expect(client.putIdentityProvider(
+    createActiveProvider('idp-capacity-cancellation'),
+  )).rejects.toMatchObject({
+    status: 503,
+    code: 'EnterpriseIdentityUnavailable',
+    retryable: true,
+  })
+  await expect(client.getSnapshot(workspaceId)).resolves.toMatchObject({
+    identityProviders: [],
+  })
+})
+
+test('does not classify an audit condition failure as a state revision conflict', async () => {
+  const harness = createDynamoHarness()
+  const client = new DynamoDbEnterpriseIdentityClient(
+    'enterprise-identity',
+    tokenSecret,
+    harness.documentClient as never,
+    'audit-events',
+    () => now,
+  )
+  harness.cancelLastTransactionOperation()
+
+  await expect(client.putIdentityProvider(
+    createActiveProvider('idp-audit-conflict'),
+    createMutationAuditContext({
+      workspaceId,
+      actor: { id: 'administrator-1', kind: 'user' },
+      idempotencyKey: 'audit-conflict-request',
+      request: {
+        method: 'PUT',
+        path: '/api/enterprise/security/identity-provider',
+        body: {},
+      },
+      source: { kind: 'api' },
+      occurredAt: now.toISOString(),
+    }),
+  )).rejects.toMatchObject({
+    status: 503,
+    code: 'EnterpriseIdentityUnavailable',
+    retryable: true,
+  })
 })
 
 test('atomically writes reference-only SCIM job rows through apply and settle continuation', async () => {

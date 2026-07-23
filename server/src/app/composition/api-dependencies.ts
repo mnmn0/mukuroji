@@ -39,10 +39,16 @@ import { DynamoDbAutomationRepository } from '../../modules/automation'
 import { SecretsManagerAutomationInboundWebhookSecretStore } from '../../modules/automation'
 import { DynamoDbCollaborationClient } from '../../modules/collaboration/collaboration'
 import { DynamoDbDeveloperPlatformClient } from '../../modules/developer-platform/developer-platform'
-import { DynamoDbDocumentsClient } from '../../modules/documents/documents'
+import {
+  DynamoDbDocumentsClient,
+} from '../../modules/documents/adapter-out/dynamodb/dynamo-db-documents-client'
+import {
+  DynamoDbDocumentAuthorizationRevisionMutationAdapter,
+} from '../../modules/documents/adapter-out/dynamodb/document-authorization'
 import {
   createEnterpriseIdentityClient,
-} from '../../modules/enterprise-identity/enterprise-identity'
+  createEnterpriseIdentityCapabilities,
+} from '../../modules/enterprise-identity'
 import {
   createEnterpriseSessionActivityClient,
 } from '../../modules/enterprise-identity/enterprise-session-activity'
@@ -288,12 +294,16 @@ export function createProductionAuthenticationDependencies(): AuthenticationDepe
  * @returns Workspace dependencies backed by configured production adapters.
  */
 export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
+  const enterpriseIdentityClient = createEnterpriseIdentityClient()
   return {
     dashboardSummary: new DynamoDbDashboardSummaryClient(),
     projectDirectory: new DynamoDbProjectDirectoryClient(),
     auditEvents: createAuditEventsClient(),
-    workspaceAccess: new DynamoDbWorkspaceAccessClient(),
-    enterpriseIdentity: createEnterpriseIdentityClient(),
+    workspaceAccess: new DynamoDbWorkspaceAccessClient({
+      documentAuthorizationRevisionMutationPort:
+        new DynamoDbDocumentAuthorizationRevisionMutationAdapter(),
+    }),
+    enterpriseIdentity: createEnterpriseIdentityCapabilities(enterpriseIdentityClient),
     enterpriseSessionActivity: createEnterpriseSessionActivityClient(),
     enterpriseIdentityProviderConnectionTester: testEnterpriseIdentityProviderConnection,
   }
@@ -494,7 +504,11 @@ export function overrideAppDependencies(
         ? { workspaceAccess: overrides.workspaceAccess }
         : {}),
       ...(overrides.enterpriseIdentity
-        ? { enterpriseIdentity: overrides.enterpriseIdentity }
+        ? {
+            enterpriseIdentity: createEnterpriseIdentityCapabilities(
+              overrides.enterpriseIdentity,
+            ),
+          }
         : {}),
       ...(overrides.enterpriseSessionActivity
         ? { enterpriseSessionActivity: overrides.enterpriseSessionActivity }

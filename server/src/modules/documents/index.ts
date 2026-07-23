@@ -1,11 +1,14 @@
 /** Documents module public application and domain surface. */
+export type { DocumentClient } from './documents'
+export * from './application/document-use-cases'
+export * from './application/ports/document-ports'
+export * from './document-types'
 export {
-  DocumentError,
+  collectDocumentRelationTargets,
+  reduceDocumentOperations,
+  renderDocumentExport,
+  renderPublicDocumentExport,
   validateDocumentPayload,
-  type DocumentClient,
-  type DocumentManagerLifecycleSnapshot,
-} from './documents'
-export {
-  createDocumentAuthorizationRevisionPut,
-  type DocumentAuthorizationRevisionGuard,
-} from './document-authorization'
+} from './domain/document-content'
+export * from './domain/document-limits'
+export * from './errors'

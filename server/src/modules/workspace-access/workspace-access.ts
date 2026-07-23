@@ -24,7 +24,7 @@ import {
   type MutationAuditEventInput,
 } from '../audit'
 import {
-  createDocumentAuthorizationRevisionPut,
+  type DocumentAuthorizationRevisionMutationPort,
 } from '../documents'
 import type { WorkspaceRole } from './domain/workspace-role'
 
@@ -449,6 +449,20 @@ export interface WorkspaceAccessClient {
   ): Promise<WorkspaceMember | undefined>
 }
 
+/** DynamoDB transaction item used by the Workspace Access adapter. */
+type WorkspaceAccessTransactWriteItem = NonNullable<
+  TransactWriteCommandInput['TransactItems']
+>[number]
+
+/** Production dependencies that are clearer to provide by name. */
+export type DynamoDbWorkspaceAccessClientOptions = {
+  /** Port that prepares the Documents authorization-revision transaction item. */
+  readonly documentAuthorizationRevisionMutationPort:
+    DocumentAuthorizationRevisionMutationPort<
+      WorkspaceAccessTransactWriteItem
+    >
+}
+
 /** `workspace-created` identity だけが補償処理で安全に削除できることを判定します。 */
 export function isWorkspaceIdentitySafeToDelete(ownership: WorkspaceIdentityOwnership) {
   return ownership === 'workspace-created'
@@ -468,8 +482,11 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   private readonly clock: () => Date
   /** Member の role / status 更新と直列化する Planning table 名です。 */
   private readonly planningTableName: string
-  /** Member manager eligibility 更新と直列化する Documents table 名です。 */
-  private readonly documentsTableName: string
+  /** Documents authorization revision mutation を準備する application port です。 */
+  private readonly documentAuthorizationRevisionMutationPort?:
+    DocumentAuthorizationRevisionMutationPort<
+      WorkspaceAccessTransactWriteItem
+    >
   /** immutable audit event を保存する DynamoDB table 名です。 */
   private readonly auditTableName?: string
   /** Workspace/member/invitation の公開 audit ID を導出する固定 HMAC key です。 */
@@ -477,8 +494,42 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   /** 進行中または完了済みの local table 初期化です。 */
   private localTableInitializer?: Promise<void>
 
+  /**
+   * Creates a Workspace Access adapter from named production dependencies.
+   *
+   * @param options - Named cross-module transaction dependencies.
+   */
+  constructor(options: DynamoDbWorkspaceAccessClientOptions)
+  /**
+   * Creates a Workspace Access adapter from compatibility positional dependencies.
+   *
+   * @param tableName - Optional Workspace Access table name.
+   * @param documentClient - Optional DynamoDB document client.
+   * @param dynamoDbClient - Optional low-level DynamoDB client.
+   * @param bootstrapLocalTable - Whether local tables should be bootstrapped.
+   * @param clock - Optional mutation clock.
+   * @param planningTableName - Optional Planning table name.
+   * @param auditTableName - Optional Audit table name.
+   * @param auditPseudonymKey - Optional audit pseudonym key.
+   * @param documentAuthorizationRevisionMutationPort - Optional Documents revision port.
+   */
   constructor(
-    tableName = readEnvironment('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
+    tableName?: string,
+    documentClient?: DynamoDBDocumentClient,
+    dynamoDbClient?: DynamoDBClient,
+    bootstrapLocalTable?: boolean,
+    clock?: () => Date,
+    planningTableName?: string,
+    auditTableName?: string | null,
+    auditPseudonymKey?: string,
+    documentAuthorizationRevisionMutationPort?:
+      DocumentAuthorizationRevisionMutationPort<
+        WorkspaceAccessTransactWriteItem
+      >,
+  )
+  constructor(
+    tableNameOrOptions: string | DynamoDbWorkspaceAccessClientOptions =
+      readEnvironment('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
       readEnvironment('WORKSPACE_ACCESS_TABLE_NAME') ??
       'mukuroji-workspace-access-local',
     documentClient?: DynamoDBDocumentClient,
@@ -492,12 +543,25 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     auditPseudonymKey: string | undefined = readEnvironment(
       'MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY',
     ),
-    documentsTableName =
-      readEnvironment('DOCUMENTS_TABLE_NAME') ??
-      readEnvironment('MUKUROJI_DOCUMENTS_TABLE') ??
-      'mukuroji-documents-local',
+    documentAuthorizationRevisionMutationPort?:
+      DocumentAuthorizationRevisionMutationPort<
+        WorkspaceAccessTransactWriteItem
+      >,
   ) {
-    this.tableName = tableName
+    const options =
+      typeof tableNameOrOptions === 'string'
+        ? undefined
+        : tableNameOrOptions
+    this.tableName =
+      typeof tableNameOrOptions === 'string'
+        ? tableNameOrOptions
+        : readEnvironment(
+            'MUKUROJI_WORKSPACE_ACCESS_TABLE',
+          ) ??
+          readEnvironment(
+            'WORKSPACE_ACCESS_TABLE_NAME',
+          ) ??
+          'mukuroji-workspace-access-local'
     this.dynamoDbClient = dynamoDbClient
     this.documentClient = documentClient ?? DynamoDBDocumentClient.from(dynamoDbClient, {
       marshallOptions: { removeUndefinedValues: true },
@@ -505,7 +569,9 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     this.bootstrapLocalTable = bootstrapLocalTable
     this.clock = clock
     this.planningTableName = planningTableName
-    this.documentsTableName = documentsTableName
+    this.documentAuthorizationRevisionMutationPort =
+      options?.documentAuthorizationRevisionMutationPort ??
+      documentAuthorizationRevisionMutationPort
     this.auditTableName = auditTableName ?? undefined
     this.auditPseudonymKey = auditPseudonymKey || undefined
   }
@@ -1614,10 +1680,10 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         : undefined
     if (documentAuthorizationGuard !== undefined) {
       transactItems.push(
-        createDocumentAuthorizationRevisionPut(
-          this.documentsTableName,
+        this.prepareDocumentAuthorizationRevisionMutation(
           normalizedWorkspaceId,
-          documentAuthorizationGuard,
+          documentAuthorizationGuard.expectedRevision,
+          documentAuthorizationGuard.updatedAt,
         ),
       )
     }
@@ -1932,14 +1998,10 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         : transactItems.length
     if (documentAuthorizationRevision !== undefined) {
       transactItems.push(
-        createDocumentAuthorizationRevisionPut(
-          this.documentsTableName,
+        this.prepareDocumentAuthorizationRevisionMutation(
           normalizedWorkspaceId,
-          {
-            expectedRevision:
-              documentAuthorizationRevision,
-            updatedAt: nowIso,
-          },
+          documentAuthorizationRevision,
+          nowIso,
         ),
       )
     }
@@ -2086,14 +2148,10 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     const documentAuthorizationItemIndex =
       transactItems.length
     transactItems.push(
-      createDocumentAuthorizationRevisionPut(
-        this.documentsTableName,
+      this.prepareDocumentAuthorizationRevisionMutation(
         normalizedWorkspaceId,
-        {
-          expectedRevision:
-            documentAuthorizationRevision,
-          updatedAt: nowIso,
-        },
+        documentAuthorizationRevision,
+        nowIso,
       ),
     )
     if (auditPut) transactItems.push(auditPut)
@@ -2144,6 +2202,35 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     }
 
     return actor
+  }
+
+  /**
+   * Prepares the Documents authorization-revision contribution for this transaction.
+   *
+   * @param workspaceId - Canonical Workspace ID.
+   * @param expectedRevision - Revision observed before the mutation.
+   * @param updatedAt - Timestamp shared with the surrounding mutation.
+   * @returns Adapter-owned DynamoDB transaction item.
+   */
+  private prepareDocumentAuthorizationRevisionMutation(
+    workspaceId: string,
+    expectedRevision: number,
+    updatedAt: string,
+  ): WorkspaceAccessTransactWriteItem {
+    const port =
+      this.documentAuthorizationRevisionMutationPort
+    if (port === undefined) {
+      throw new WorkspaceAccessError(
+        503,
+        'DocumentAuthorizationRevisionPortMissing',
+        'Document authorization revision mutations are not configured.',
+      )
+    }
+    return port.prepareAuthorizationRevisionMutation({
+      workspaceId,
+      expectedRevision,
+      updatedAt,
+    })
   }
 
   /** invitation を取得し、存在しない場合は 404 を返します。 */
