@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, userEvent, within } from 'storybook/test'
+import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { DeveloperPlatformPanel } from './DeveloperPlatformPanel'
 import {
   connectorConflictDeveloperPlatformResourcesFixture,
@@ -132,12 +132,11 @@ export const ReadOnly: Story = {
 export const SecretIssued: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
+    const createApiKeyButton = canvas.getByRole('button', {
+      name: developerPlatformLabelsFixture.actions.createApiKey,
+    })
 
-    await userEvent.click(
-      canvas.getByRole('button', {
-        name: developerPlatformLabelsFixture.actions.createApiKey,
-      }),
-    )
+    await userEvent.click(createApiKeyButton)
     const editor = within(
       canvas.getByRole('dialog', {
         name: developerPlatformLabelsFixture.headings['create-api-key'],
@@ -184,6 +183,29 @@ export const SecretIssued: Story = {
         name: developerPlatformLabelsFixture.closeDialog,
       }),
     ).toBeDisabled()
+    await userEvent.click(
+      canvas.getByRole('checkbox', {
+        name: developerPlatformLabelsFixture.secretStoredConfirmation,
+      }),
+    )
+    await expect(
+      canvas.getByRole('button', {
+        name: developerPlatformLabelsFixture.closeDialog,
+      }),
+    ).toBeEnabled()
+    await userEvent.click(
+      canvas.getByRole('button', {
+        name: developerPlatformLabelsFixture.closeDialog,
+      }),
+    )
+    await waitFor(() => {
+      expect(
+        canvas.queryByRole('dialog', {
+          name: developerPlatformLabelsFixture.secretTitles['api-key'],
+        }),
+      ).not.toBeInTheDocument()
+      expect(createApiKeyButton).toHaveFocus()
+    })
   },
 }
 
@@ -269,13 +291,18 @@ export const ConnectorConflict: Story = {
       canvas.getByRole('button', {
         name: developerPlatformLabelsFixture.actions.resolve,
       }),
-    ).toBeEnabled()
+    ).toBeDisabled()
     await userEvent.selectOptions(
       canvas.getByRole('combobox', {
         name: developerPlatformLabelsFixture.fields.conflictResolution,
       }),
       'merge',
     )
+    await expect(
+      canvas.getByRole('button', {
+        name: developerPlatformLabelsFixture.actions.resolve,
+      }),
+    ).toBeEnabled()
     await expect(
       canvas.getByRole('group', {
         name: developerPlatformLabelsFixture.fields.mergedValues,
