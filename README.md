@@ -73,9 +73,12 @@ root の変更を merge するには、内容を独立レビューした reposit
 現在の head commit SHA 全体を含む `review-ok:<full-head-sha>` label を付ける必要が
 あります。Skill tree 自体の変更もこの承認対象です。workflow は、その完全一致 label を
 PR author 以外の label 権限を持つ user が付けた最新 event だけを承認として受け入れます。
-head が更新されると別の label が必要になり、該当 label を外すと承認も無効になります。
-無関係な label 操作は承認状態を変えません。PR の本文や変更ファイル内の同名文字列、
-bot や PR author が付けた label は承認として扱われません。
+さらに GitHub の collaborator permission API で、その user の現在の base permission が
+`write` または `admin` であることを検証します（`maintain` は同 API で `write` に
+対応します）。head が更新されると別の label が必要になり、該当 label を外すと承認も
+無効になります。無関係な label 操作は承認状態を変えません。PR の本文や変更ファイル内の
+同名文字列、bot、PR author、read / triage 権限だけの user が付けた label は承認として
+扱われません。
 
 ## 開発
 

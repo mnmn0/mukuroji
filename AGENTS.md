@@ -102,6 +102,10 @@ TypeScript のコンパイル生成物は `cdk/dist/` に出力し、ソース�
 
 - CI / oxlint 設定の変更: `bun run oxc:lint`
 - review Skill の変更: `bun run skill:validate`, `bun run skill:validate:test`, `git diff --check`
+- review Skill の trust-root (`.github/workflows/review-skill.yml`,
+  `scripts/validate-mukuroji-review-skill.ts`,
+  `scripts/validate-mukuroji-review-skill.test.ts`) の変更:
+  `bun run skill:validate`, `bun run skill:validate:test`, `git diff --check`
 - Contracts の変更: `bun run typecheck:contracts`, `bun run dependencies:check`
 - ファイル配置・公開境界・エントリポイントの変更: `bun run dependencies:check`, `bun run knip:check`
 - `cdk` の変更: `bun run cdk:build`, `bun run cdk:test`

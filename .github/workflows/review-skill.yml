@@ -138,10 +138,26 @@ jobs:
               [ -z "${approval_actor}" ] ||
               [ "${approval_actor}" = "${PR_AUTHOR}" ]
             then
-              echo "An independent user with label permission must apply:"
+              echo "An independent repository maintainer must apply:"
               echo "${REQUIRED_LABEL}"
               exit 1
             fi
+
+            approval_permission="$(
+              gh api \
+                --header "X-GitHub-Api-Version: 2022-11-28" \
+                "repos/${GITHUB_REPOSITORY}/collaborators/${approval_actor}/permission" \
+                --jq '.permission'
+            )"
+            case "${approval_permission}" in
+              admin|write)
+                ;;
+              *)
+                echo "Approval actor must have write, maintain, or admin access:"
+                echo "${approval_actor}"
+                exit 1
+                ;;
+            esac
           fi
 
       - name: Setup Bun

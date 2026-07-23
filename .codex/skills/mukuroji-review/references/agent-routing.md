@@ -42,11 +42,15 @@ explicit perspective, model, and reasoning effort.
   remaining standard and lite perspectives by their concrete risk to this change.
   Do not use a fixed checklist order as a substitute for change-specific risk.
 - Run agents in waves of `min(runtime's currently available child slots, 4)` and obey
-  any stricter total-agent limit. If the runtime does not expose available capacity,
-  use one concurrent child. In child mode, a selected perspective whose child is not
-  started, does not return a final result, or is otherwise omitted makes the overall
-  result `INCOMPLETE`. In parent-only fallback, a selected perspective without a
-  separately recorded completed checklist has the same result.
+  any stricter total-agent limit. A total-agent limit never permits merging or
+  omitting selected perspectives: schedule high-tier perspectives first, list every
+  selected perspective that the limit prevents from starting under
+  `Review limitations`, and set the overall result to `INCOMPLETE`. If the runtime
+  does not expose available capacity, use one concurrent child. In child mode, a
+  selected perspective whose child is not started, does not return a final result, or
+  is otherwise omitted makes the overall result `INCOMPLETE`. In parent-only
+  fallback, a selected perspective without a separately recorded completed checklist
+  has the same result.
 
 ## Models and fallback
 
