@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { SendMessageCommand, type SQSClient } from '@aws-sdk/client-sqs'
 import { upcastAuditEvent, type AuditEventV1 } from '../audit'
-import type { DeveloperPlatformClient } from './developer-platform'
+import type { ConnectorPort, ExternalLinkPort } from './application/ports'
 import type {
   ConnectorSyncEngine,
   ConnectorWorkItemResourceType,
@@ -162,10 +162,12 @@ export interface ConnectorPollCheckpointStore {
   compareAndSet(input: CommitConnectorPollCheckpointInput): Promise<boolean>
 }
 
-/** Connector worker が current state の再読込に使う platform subset です。 */
+/** Authoritative platform operations used by workers to reload installations and links. */
 export type ConnectorSyncWorkerPlatform = Pick<
-  DeveloperPlatformClient,
-  | 'listConnectors'
+  ConnectorPort,
+  'listConnectors'
+> & Pick<
+  ExternalLinkPort,
   | 'listExternalWorkItemLinks'
   | 'pauseConnectorExternalLinksPage'
 >

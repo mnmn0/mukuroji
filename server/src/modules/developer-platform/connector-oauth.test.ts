@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import {
   DeleteCommand,
+  GetCommand,
   PutCommand,
-  type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
 import {
   BUILT_IN_CONNECTOR_CATALOG,
@@ -17,9 +17,9 @@ import {
 } from './connector-oauth'
 import {
   ConnectorOAuthStateManager,
-  DynamoDbConnectorOAuthStateStore,
   InMemoryConnectorOAuthStateStore,
 } from './connector-oauth-state'
+import { DynamoDbConnectorOAuthStateStore } from './adapter-out/dynamodb/connector-oauth-state-store'
 
 const NOW = new Date('2026-07-18T00:00:00.000Z')
 
@@ -735,9 +735,9 @@ describe('ConnectorOAuthStateManager', () => {
   })
 
   test('uses conditional put, TTL, sharded keys, and DeleteItem return-old-value', async () => {
-    const commands: unknown[] = []
+    const commands: Array<PutCommand | GetCommand | DeleteCommand> = []
     const documentClient = {
-      async send(command: unknown) {
+      async send(command: PutCommand | GetCommand | DeleteCommand) {
         commands.push(command)
         if (command instanceof DeleteCommand) {
           return {
@@ -750,7 +750,7 @@ describe('ConnectorOAuthStateManager', () => {
         }
         return {}
       },
-    } as unknown as DynamoDBDocumentClient
+    }
     const store = new DynamoDbConnectorOAuthStateStore({
       tableName: 'DeveloperPlatform',
       documentClient,
@@ -762,8 +762,12 @@ describe('ConnectorOAuthStateManager', () => {
     })
     const consumed = await store.consume('abcdefghijklmnopqrstuvwxyzABCDEF')
 
-    expect(commands[0]).toBeInstanceOf(PutCommand)
-    expect((commands[0] as PutCommand).input).toMatchObject({
+    const putCommand = commands[0]
+    expect(putCommand).toBeInstanceOf(PutCommand)
+    if (!(putCommand instanceof PutCommand)) {
+      throw new Error('OAuth state was not stored with PutCommand.')
+    }
+    expect(putCommand.input).toMatchObject({
       TableName: 'DeveloperPlatform',
       Item: {
         workspaceId: 'CONNECTOR-OAUTH-STATE#ab',
@@ -775,12 +779,69 @@ describe('ConnectorOAuthStateManager', () => {
       ConditionExpression:
         'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
     })
-    expect(commands[1]).toBeInstanceOf(DeleteCommand)
-    expect((commands[1] as DeleteCommand).input.ReturnValues).toBe('ALL_OLD')
+    const deleteCommand = commands[1]
+    expect(deleteCommand).toBeInstanceOf(DeleteCommand)
+    if (!(deleteCommand instanceof DeleteCommand)) {
+      throw new Error('OAuth state was not consumed with DeleteCommand.')
+    }
+    expect(deleteCommand.input.ReturnValues).toBe('ALL_OLD')
     expect(consumed).toEqual({
       stateId: 'abcdefghijklmnopqrstuvwxyzABCDEF',
       protectedPayload: 'ciphertext',
       expiresAtEpochSeconds: 1_800_000_600,
+    })
+  })
+
+  test('maps DynamoDB failures to stable retryable state-store errors', async () => {
+    const upstreamError = new Error('raw DynamoDB failure')
+    const documentClient = {
+      async send(_command: PutCommand | GetCommand | DeleteCommand) {
+        throw upstreamError
+      },
+    }
+    const store = new DynamoDbConnectorOAuthStateStore({
+      tableName: 'DeveloperPlatform',
+      documentClient,
+    })
+    const stateId = 'abcdefghijklmnopqrstuvwxyzABCDEF'
+
+    for (const operation of [
+      () => store.put({
+        stateId,
+        protectedPayload: 'ciphertext',
+        expiresAtEpochSeconds: 1_800_000_600,
+      }),
+      () => store.get(stateId),
+      () => store.consume(stateId),
+    ]) {
+      await expect(operation()).rejects.toMatchObject({
+        code: 'ConnectorOAuthStateStoreUnavailable',
+        retryable: true,
+        message: 'Connector OAuth state storage is temporarily unavailable.',
+      })
+    }
+  })
+
+  test('preserves the stable collision error for conditional writes', async () => {
+    const collision = new Error('condition failed')
+    collision.name = 'ConditionalCheckFailedException'
+    const documentClient = {
+      async send(_command: PutCommand | GetCommand | DeleteCommand) {
+        throw collision
+      },
+    }
+    const store = new DynamoDbConnectorOAuthStateStore({
+      tableName: 'DeveloperPlatform',
+      documentClient,
+    })
+
+    await expect(store.put({
+      stateId: 'abcdefghijklmnopqrstuvwxyzABCDEF',
+      protectedPayload: 'ciphertext',
+      expiresAtEpochSeconds: 1_800_000_600,
+    })).rejects.toMatchObject({
+      code: 'ConnectorOAuthStateCollision',
+      retryable: false,
     })
   })
 })

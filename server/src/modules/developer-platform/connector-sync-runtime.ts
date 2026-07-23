@@ -9,9 +9,12 @@ import type {
 } from '@mukuroji/contracts'
 import {
   DeveloperPlatformError,
-  type ConnectorLifecycleSnapshot,
-  type DeveloperPlatformClient,
-} from './developer-platform'
+} from './errors'
+import type {
+  ConnectorLifecycleSnapshot,
+  ConnectorPort,
+  ExternalLinkPort,
+} from './application/ports'
 import {
   BUILT_IN_CONNECTOR_CATALOG,
   ConnectorRegistry,
@@ -256,17 +259,16 @@ export interface ConnectorSyncPersistence {
   ): Promise<WorkItemSyncConflict | undefined>
 }
 
-/** Connector sync が必要とする developer platform client subset です。 */
+/** Authoritative platform operations used to read lifecycle state and persist sync health. */
 export type ConnectorSyncPlatform = Pick<
-  DeveloperPlatformClient,
+  ConnectorPort,
   | 'readConnectorLifecycleSnapshot'
-  | 'listExternalWorkItemLinks'
   | 'readConnectorCredential'
   | 'updateConnectorStatus'
   | 'recoverConnector'
   | 'claimConnectorCredentialRefresh'
   | 'releaseConnectorCredentialRefresh'
->
+> & Pick<ExternalLinkPort, 'listExternalWorkItemLinks'>
 
 /** Authorization failure と connector health を永続化する hook です。 */
 export interface ConnectorSyncHealthReporter {

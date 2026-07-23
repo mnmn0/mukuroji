@@ -38,6 +38,50 @@ bash scripts/codex-setup.sh
 
 検証まで実行したい場合は `CODEX_VALIDATE=1 bash scripts/codex-setup.sh` を使います。
 
+レビュー Skill の source は `.codex/skills/mukuroji-review` で管理します。この場所は
+repository-scoped Skill の自動検出先ではなく、reviewer instructions を branch-controlled
+なセットアップ処理から書き換えないため、`scripts/codex-setup.sh` も Skill を自動同期
+しません。
+
+personal scope へ導入するときは、変更が trusted な default branch へ merge された後に
+Codex の Skill installer へ以下を明示してください。
+
+- GitHub repository: `mnmn0/mukuroji`
+- path: `.codex/skills/mukuroji-review`
+- ref: `main`
+
+feature branch や可変な PR head から直接インストールしないでください。installer は同名の
+導入先が既に存在すると停止するため、更新時は現在の
+`$CODEX_HOME/skills/mukuroji-review` を `$CODEX_HOME/skills` の外にある backup 先へ
+移動してから、`ref: main` を明示して再導入します。導入に失敗した場合は backup を元の
+場所へ戻してください。レビュー開始前には `origin/main` の使用する commit OID を固定し、
+その commit の Skill tree と installed copy の全ファイルが一致することを確認して
+ください。欠落や差分がある場合はレビューを開始せず、trusted source から更新します。
+
+source 自体を変更した場合は次の検証を実行します。
+
+```sh
+bun run skill:validate
+bun run skill:validate:test
+git diff --check
+```
+
+trusted validator とその test、`review-skill.yml`、またはレビュー必須条件を持つ root /
+nested `AGENTS.md` を変更する PR では、default branch 側の
+`pull_request_target` workflow が変更前の validator と negative tests を使って対象
+Skill を検証します。全階層の `AGENTS.md` の追加・変更・削除も trust-root 変更として
+扱います。これらの trust root の変更を merge するには、内容を独立レビューした
+repository maintainer が現在の head commit SHA 全体を含む
+`review-ok:<full-head-sha>` label を付ける必要があります。Skill tree 自体の変更もこの
+承認対象です。workflow は、その完全一致 label を PR author 以外の label 権限を持つ
+user が付けた最新 event だけを承認として受け入れます。
+さらに GitHub の collaborator permission API で、その user の現在の base permission が
+`write` または `admin` であることを検証します（`maintain` は同 API で `write` に
+対応します）。head が更新されると別の label が必要になり、該当 label を外すと承認も
+無効になります。無関係な label 操作は承認状態を変えません。PR の本文や変更ファイル内の
+同名文字列、bot、PR author、read / triage 権限だけの user が付けた label は承認として
+扱われません。
+
 ## 開発
 
 Floci + Cognito + DynamoDB:
