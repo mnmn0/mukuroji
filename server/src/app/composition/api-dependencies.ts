@@ -39,7 +39,7 @@ import {
 import { DynamoDbAutomationRepository } from '../../modules/automation'
 import { SecretsManagerAutomationInboundWebhookSecretStore } from '../../modules/automation'
 import { DynamoDbCollaborationClient } from '../../modules/collaboration/collaboration'
-import { DynamoDbDeveloperPlatformClient } from '../../modules/developer-platform/developer-platform'
+import { createDynamoDbDeveloperPlatformAdapters } from '../../modules/developer-platform/adapter-out/dynamodb/developer-platform-adapters'
 import {
   DynamoDbDocumentsClient,
 } from '../../modules/documents/adapter-out/dynamodb/dynamo-db-documents-client'
@@ -380,8 +380,9 @@ export function createProductionAutomationDependencies(): AutomationDependencies
  * @returns Developer Platform dependencies backed by configured production adapters.
  */
 export function createProductionDeveloperPlatformDependencies(): DeveloperPlatformDependencies {
+  const adapters = createDynamoDbDeveloperPlatformAdapters()
   return {
-    developerPlatform: new DynamoDbDeveloperPlatformClient(),
+    ...adapters,
     publicWorkItems: createCanonicalPublicWorkItemService(),
     workItemImportExecutions: createDefaultWorkItemImportExecutionStore(),
     workItemImportSources: createDefaultWorkItemImportSourceStore(),
@@ -450,13 +451,14 @@ function createLazyWorkItemImportQueue(): WorkItemImportQueue {
  * @returns A production dependency graph suitable for Connector worker invocations.
  */
 export function createProductionConnectorAppDependencies(): AppDependencies {
+  const adapters = createDynamoDbDeveloperPlatformAdapters()
   return {
     authentication: createProductionAuthenticationDependencies(),
     workspace: createProductionWorkspaceDependencies(),
     workItems: createProductionWorkItemDependencies(),
     automation: createProductionAutomationDependencies(),
     developerPlatform: {
-      developerPlatform: new DynamoDbDeveloperPlatformClient(),
+      ...adapters,
       publicWorkItems: createCanonicalPublicWorkItemService(),
       workItemImportExecutions: createDefaultWorkItemImportExecutionStore(),
       workItemImportSources: createLazyWorkItemImportSourceStore(),
@@ -598,9 +600,22 @@ export function overrideAppDependencies(
     },
     developerPlatform: {
       ...dependencies.developerPlatform,
-      ...(overrides.developerPlatform
-        ? { developerPlatform: overrides.developerPlatform }
+      ...(overrides.apiKeys ? { apiKeys: overrides.apiKeys } : {}),
+      ...(overrides.oauthCredentials
+        ? { oauthCredentials: overrides.oauthCredentials }
         : {}),
+      ...(overrides.webhookSubscriptions
+        ? { webhookSubscriptions: overrides.webhookSubscriptions }
+        : {}),
+      ...(overrides.webhookDeliveries
+        ? { webhookDeliveries: overrides.webhookDeliveries }
+        : {}),
+      ...(overrides.connectors ? { connectors: overrides.connectors } : {}),
+      ...(overrides.externalLinks ? { externalLinks: overrides.externalLinks } : {}),
+      ...(overrides.imports ? { imports: overrides.imports } : {}),
+      ...(overrides.idempotency ? { idempotency: overrides.idempotency } : {}),
+      ...(overrides.rateLimits ? { rateLimits: overrides.rateLimits } : {}),
+      ...(overrides.transactions ? { transactions: overrides.transactions } : {}),
       ...(overrides.publicWorkItems
         ? { publicWorkItems: overrides.publicWorkItems }
         : {}),

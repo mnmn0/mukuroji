@@ -10,14 +10,6 @@ const DEFAULT_CONNECTOR_RUNTIME_RETRY_INITIAL_MS = 250
 /** Connector runtime load failure 後の既定最大 backoff です。 */
 const DEFAULT_CONNECTOR_RUNTIME_RETRY_MAX_MS = 5_000
 
-/** Warm runtime で共有する Secrets Manager client/command constructor です。 */
-let awsSecretsManagerRuntimePromise: Promise<{
-  /** 再利用する Secrets Manager client です。 */
-  client: Record<string, unknown>
-  /** GetSecretValue command constructor です。 */
-  Command: Function
-}> | undefined
-
 /** Connector runtime 設定を格納する Secrets Manager secret ARN の環境変数です。 */
 export const CONNECTOR_CONFIGURATION_SECRET_ARN_ENVIRONMENT_VARIABLE =
   'CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN'
@@ -167,12 +159,18 @@ export function createConnectorRuntimeCache<TValue>(
 }
 
 /**
- * Secrets Manager-backed 設定を base environment へ一時的に重ねます。
- * 返却 object だけを runtime 構築に渡し、process.env 自体は変更しません。
+ * Overlays Secrets Manager-backed connector configuration onto a copied environment.
+ *
+ * The base environment is returned unchanged when no secret ID is configured. A configured
+ * secret ID requires a loader, and `process.env` itself is never mutated.
+ *
+ * @param baseEnvironment - Base process environment copied into the runtime configuration.
+ * @param loader - Secret loader required when a connector configuration secret ID is present.
+ * @returns A new environment containing validated secret-backed configuration values.
  */
 export async function loadConnectorRuntimeEnvironment(
   baseEnvironment: NodeJS.ProcessEnv = process.env,
-  loader: ConnectorRuntimeSecretLoader = createAwsSecretsManagerLoader(),
+  loader?: ConnectorRuntimeSecretLoader,
 ): Promise<NodeJS.ProcessEnv> {
   const secretId = baseEnvironment[
     CONNECTOR_CONFIGURATION_SECRET_ARN_ENVIRONMENT_VARIABLE
@@ -180,6 +178,12 @@ export async function loadConnectorRuntimeEnvironment(
   if (!secretId) return { ...baseEnvironment }
   if (Buffer.byteLength(secretId, 'utf8') > 2_048) {
     throw configurationInvalid('Connector runtime secret ID is invalid.')
+  }
+  if (!loader) {
+    throw new ConnectorRuntimeConfigurationError(
+      'ConnectorConfigurationUnavailable',
+      'Connector runtime configuration loader is unavailable.',
+    )
   }
   let secret: string
   try {
@@ -222,75 +226,6 @@ export function parseConnectorRuntimeSecret(
     configuration[key] = value
   }
   return configuration
-}
-
-/** Lambda runtime 同梱の AWS SDK v3 を遅延利用する secret loader を作成します。 */
-function createAwsSecretsManagerLoader(): ConnectorRuntimeSecretLoader {
-  return {
-    async readSecret(secretId) {
-      try {
-        const { client, Command } = await getAwsSecretsManagerRuntime()
-        const send = client.send
-        if (typeof send !== 'function') {
-          throw new TypeError('Secrets Manager client is unavailable.')
-        }
-        const response = await Reflect.apply(send, client, [
-          Reflect.construct(Command, [{ SecretId: secretId }]),
-        ]) as unknown
-        if (!isRecord(response)) {
-          throw new TypeError('Secrets Manager response is invalid.')
-        }
-        if (typeof response.SecretString === 'string') return response.SecretString
-        if (response.SecretBinary instanceof Uint8Array) {
-          return Buffer.from(response.SecretBinary).toString('utf8')
-        }
-        throw new TypeError('Secrets Manager secret has no value.')
-      } catch (error) {
-        if (error instanceof ConnectorRuntimeConfigurationError) throw error
-        throw new ConnectorRuntimeConfigurationError(
-          'ConnectorConfigurationUnavailable',
-          'Connector runtime configuration could not be loaded.',
-        )
-      }
-    },
-  }
-}
-
-function getAwsSecretsManagerRuntime() {
-  if (!awsSecretsManagerRuntimePromise) {
-    const loading = loadAwsSecretsManagerRuntime()
-    awsSecretsManagerRuntimePromise = loading
-    void loading.catch(() => {
-      if (awsSecretsManagerRuntimePromise === loading) {
-        awsSecretsManagerRuntimePromise = undefined
-      }
-    })
-  }
-  return awsSecretsManagerRuntimePromise
-}
-
-async function loadAwsSecretsManagerRuntime() {
-  const packageName = ['@aws-sdk', 'client-secrets-manager'].join('/')
-  const sdk = await import(packageName) as Record<string, unknown>
-  const Client = requireConstructor(
-    sdk.SecretsManagerClient,
-    'SecretsManagerClient',
-  )
-  const Command = requireConstructor(
-    sdk.GetSecretValueCommand,
-    'GetSecretValueCommand',
-  )
-  return {
-    client: Reflect.construct(Client, []) as Record<string, unknown>,
-    Command,
-  }
-}
-
-function requireConstructor(value: unknown, name: string): Function {
-  if (typeof value !== 'function') {
-    throw new TypeError(`${name} is unavailable.`)
-  }
-  return value
 }
 
 function isAllowedConnectorEnvironmentKey(value: string) {

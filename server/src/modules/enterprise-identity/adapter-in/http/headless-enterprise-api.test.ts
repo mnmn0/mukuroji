@@ -20,9 +20,7 @@ import {
 } from '../../../../api/api-router'
 import { CognitoServiceError } from '../../../authentication'
 import { WorkspaceAccessError } from '../../../workspace-access/workspace-access'
-import {
-  InMemoryDeveloperPlatformClient,
-} from '../../../developer-platform/developer-platform'
+import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type {
   DocumentClient,
 } from '../../../documents/documents'
@@ -75,7 +73,6 @@ test('denies headless API credentials after an applied SCIM deprovision', async 
     'http://localhost/api/v1/work-items?teamId=core-team',
     { headers: { Authorization: `Bearer ${secret}` } },
   )
-
   expect(response.status).toBe(403)
   expect(await response.json()).toMatchObject({ code: 'forbidden' })
   expect(calls.publicIssuePageReads).toHaveLength(0)
@@ -294,8 +291,8 @@ test('uses current Cognito groups for direct Enterprise group assignments', asyn
         return typeof value === 'function' ? value.bind(target) : value
       },
     })
-    const platform = new InMemoryDeveloperPlatformClient()
-    const apiKey = await platform.createApiKey({
+    const platform = createInMemoryDeveloperPlatformAdapters()
+    const apiKey = await platform.apiKeys.createApiKey({
       workspaceId,
       createdByUserId: 'demo@example.com',
       input: {
@@ -305,7 +302,7 @@ test('uses current Cognito groups for direct Enterprise group assignments', asyn
       },
     })
     setTestAppDependencies({
-      developerPlatform: platform,
+      ...platform,
       enterpriseIdentity: identityWithDirectGroupAssignment,
     })
 
@@ -429,15 +426,17 @@ test('wires external and Document deletion fences through the canonical Public W
     },
   })
   setTestAppDependencies({
-    developerPlatform: {
+    externalLinks: {
       async listExternalWorkItemLinks(_input) {
         return hasExternalLinks ? [{}] : []
       },
+    } as never,
+    transactions: {
       async prepareWorkItemDeletionFenceTransactWrite(input) {
         externalFenceRequests.push(input)
         return { transactWriteItem: externalFence }
       },
-    } as never,
+    },
     documents: {
       async prepareWorkItemDeletionFenceTransactWrite(input) {
         documentFenceRequests.push(input)

@@ -1,12 +1,13 @@
+import {
+  WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  type CustomFieldValue,
+  type WorkflowStatusCategory,
+} from './work-item-configuration'
+
 /**
  * 現在の canonical Work Item schema version です。
  */
 export const WORK_ITEM_SCHEMA_VERSION = 1 as const
-
-/**
- * Work Item configuration の現行 schema version です。
- */
-export const WORK_ITEM_CONFIGURATION_SCHEMA_VERSION = 1 as const
 
 /**
  * Work Item の進捗状態です。
@@ -47,63 +48,6 @@ export type ApprovalSummary = {
    */
   nextDueAt?: string
 }
-
-/**
- * Workflow status を横断集計するための標準 category です。
- */
-export type WorkflowStatusCategory =
-  | 'backlog'
-  | 'unstarted'
-  | 'started'
-  | 'completed'
-  | 'canceled'
-
-/**
- * Workflow に含まれる status の定義です。
- */
-export type WorkflowStatusDefinition = {
-  /** Workflow 内で status を識別する ID です。 */
-  id: string
-  /** UI に表示する status 名です。 */
-  name: string
-  /** List/report を横断して利用する標準 category です。 */
-  category: WorkflowStatusCategory
-  /** Workflow 内の表示順です。 */
-  sortOrder: number
-  /** UI 表示に利用できる色 token です。 */
-  color?: string
-}
-
-/**
- * Workflow で許可する status transition です。
- */
-export type WorkflowTransition = {
-  /** 遷移元 status ID です。 */
-  fromStatusId: string
-  /** 遷移先 status ID です。 */
-  toStatusId: string
-}
-
-/**
- * Work Item に適用する workflow 定義です。
- */
-export type WorkflowDefinition = {
-  /** Workflow を識別する ID です。 */
-  id: string
-  /** UI に表示する workflow 名です。 */
-  name: string
-  /** Work Item 作成時に適用する status ID です。 */
-  initialStatusId: string
-  /** Workflow で利用できる status 一覧です。 */
-  statuses: WorkflowStatusDefinition[]
-  /** Workflow で許可する transition 一覧です。 */
-  transitions: WorkflowTransition[]
-}
-
-/**
- * Work Item custom field に保存できる JSON value です。
- */
-export type CustomFieldValue = string | number | boolean | string[]
 
 /**
  * Canonical Work Item が共有する field です。
@@ -298,4 +242,63 @@ export type UpdateWorkItemInput = WorkItemPatch & {
    * 読み込み時点の Work Item revision です。
    */
   expectedRevision: number
+}
+
+/**
+ * Work Item 間で管理できる relation 種別です。
+ */
+export type WorkItemRelationType =
+  | 'parent'
+  | 'child'
+  | 'blocks'
+  | 'blockedBy'
+  | 'related'
+  | 'duplicate'
+
+/**
+ * Work Item から別の Work Item への relation です。
+ */
+export type WorkItemRelation = {
+  /** Relation の起点 Work Item ID です。 */
+  sourceWorkItemId: string
+  /** Relation の向きと意味です。 */
+  type: WorkItemRelationType
+  /** Relation の終点 Work Item ID です。 */
+  targetWorkItemId: string
+  /** Relation の作成日時です。 */
+  createdAt?: string
+}
+
+/**
+ * Relation 作成・削除 API の共通入力です。
+ */
+export type WorkItemRelationMutationInput = {
+  /** 起点から見た relation 種別です。 */
+  type: WorkItemRelationType
+  /** Relation の終点 Work Item ID です。 */
+  targetWorkItemId: string
+  /** 読み込み時点の Team relation graph revision です。 */
+  expectedGraphRevision: number
+}
+
+/**
+ * Relation 作成・削除 API の response です。
+ */
+export type WorkItemRelationMutationResponse = {
+  /** 起点 Work Item から見た relation です。 */
+  relation: WorkItemRelation
+  /** 終点 Work Item に保存する reciprocal relation です。 */
+  reciprocalRelation: WorkItemRelation
+  /** Mutation 後の Team relation graph revision です。 */
+  graphRevision: number
+}
+
+/**
+ * Work Item relation 一覧 API の response です。
+ */
+export type WorkItemRelationsResponse = {
+  /** 起点 Work Item に保存された relation 一覧です。 */
+  relations: WorkItemRelation[]
+  /** 読み込み時点の Team relation graph revision です。 */
+  graphRevision: number
 }
