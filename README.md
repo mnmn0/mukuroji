@@ -38,6 +38,13 @@ bash scripts/codex-setup.sh
 
 検証まで実行したい場合は `CODEX_VALIDATE=1 bash scripts/codex-setup.sh` を使います。
 
+レビュー Skill の source は `.codex/skills/mukuroji-review` で管理します。global な
+reviewer instructions を branch-controlled なセットアップ処理から書き換えないため、
+`scripts/codex-setup.sh` は Skill を自動同期しません。Skill を personal scope へ導入する
+場合は、変更が trusted な default branch へ merge された後に、Codex の Skill installer
+へ GitHub repository `mnmn0/mukuroji` と path `.codex/skills/mukuroji-review` を指定して
+ください。feature branch の内容を直接インストールしないでください。
+
 ## 開発
 
 Floci + Cognito + DynamoDB:

@@ -13,9 +13,9 @@
 - Add English TSDoc to functions and methods by default, including non-exported helpers introduced by a change. Exported declarations must describe their purpose and document parameters and return values when applicable; keep type, interface, and class member documentation complete.
 - Avoid TypeScript `as` assertions by default because they can hide invalid data at type boundaries; prefer runtime validation, type guards, or explicit construction of typed values.
 - Avoid `any` by default. Use `unknown` with narrowing or a specific type, and document a narrowly scoped exception when `any` is unavoidable.
-- コミット前にはサブエージェントレビューを受ける。
-- コミットは意味のある粒度に分ける。
-- 実装・修正作業が完了し、必要な検証とコミット前レビューが成功したら、ユーザーが明示的に不要または Draft を指定しない限り、Draft ではなくレビューレディーの PR を作成する。
+- push 前にはサブエージェントレビューを受ける。レビュー時はtrustedなdefault branchから同期された `mukuroji-review` Skill を使い、Issue と変更領域に応じたレビュー観点を選択する。Skillや `AGENTS.md` 自体を変更する場合は、変更前のtrustedなSkill・ルールを使ってレビューする。
+- コミットを分けること自体を目的にせず、関連する変更はまとめてよい。レビューは push 前に一度行う。
+- 実装・修正作業が完了し、必要な検証と push 前レビューが成功したら、ユーザーが明示的に不要または Draft を指定しない限り、Draft ではなくレビューレディーの PR を作成する。
 - 実装・修正作業を開始する前に、最新の `origin/main` をマージする。
 - `gh` コマンドを実行する場合は、サンドボックス外で実行する。
 - PR のレビューコメントに基づく変更を行った場合は、変更を push した後にレビューコメントへ返信する。
@@ -91,7 +91,7 @@ TypeScript のコンパイル生成物は `cdk/dist/` に出力し、ソース�
 
 インフラ変更では `bun run cdk:build` と `bun run cdk:test` を通し、可能なら `bun run cdk:synth` で合成結果を確認してください。デプロイや AWS アカウントへ影響する操作はユーザーの明示確認を取ってください。
 
-## コミット前チェック
+## push 前チェック
 
 作業内容に応じて必要な検証を実行し、結果をユーザーに伝えてください。
 
@@ -100,4 +100,4 @@ TypeScript のコンパイル生成物は `cdk/dist/` に出力し、ソース�
 - ファイル配置・公開境界・エントリポイントの変更: `bun run dependencies:check`, `bun run knip:check`
 - `cdk` の変更: `bun run cdk:build`, `bun run cdk:test`
 
-コミット前レビューで指摘が出た場合は、対応してから再度必要な検証を行ってください。
+push 前レビューで指摘が出た場合は、対応してから再度必要な検証を行ってください。
