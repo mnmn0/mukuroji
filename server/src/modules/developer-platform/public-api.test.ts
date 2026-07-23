@@ -11,6 +11,24 @@ import {
   InMemoryDeveloperPlatformClient,
   LocalAesGcmSecretProtector,
 } from './developer-platform'
+import type { DeveloperPlatformPorts } from './application/developer-platform-ports'
+import {
+  ConnectorAdapter,
+  ExternalLinkAdapter,
+} from './adapter-out/shared/connector-adapters'
+import {
+  ApiKeyAdapter,
+  OAuthCredentialAdapter,
+} from './adapter-out/shared/credential-adapters'
+import { ImportAdapter } from './adapter-out/shared/import-adapter'
+import {
+  IdempotencyAdapter,
+  RateLimitAdapter,
+} from './adapter-out/shared/request-control-adapters'
+import {
+  WebhookDeliveryAdapter,
+  WebhookSubscriptionAdapter,
+} from './adapter-out/shared/webhook-adapters'
 import {
   createPublicApiRouter,
   PUBLIC_API_CURSOR_TTL_SECONDS,
@@ -129,6 +147,23 @@ function createDefaultWorkItemService(
   }
 }
 
+/** Binds the compatibility test store to the same focused ports used in production. */
+function createFocusedTestPlatform(
+  platform: InMemoryDeveloperPlatformClient,
+): DeveloperPlatformPorts {
+  return {
+    apiKeys: new ApiKeyAdapter(platform),
+    oauthCredentials: new OAuthCredentialAdapter(platform),
+    webhookSubscriptions: new WebhookSubscriptionAdapter(platform),
+    webhookDeliveries: new WebhookDeliveryAdapter(platform),
+    connectors: new ConnectorAdapter(platform),
+    externalLinks: new ExternalLinkAdapter(platform),
+    imports: new ImportAdapter(platform),
+    idempotency: new IdempotencyAdapter(platform),
+    rateLimits: new RateLimitAdapter(platform),
+  }
+}
+
 function createTestRouter(input: {
   workItems?: PublicWorkItemService
   connectorAuthorization?: ConnectorAuthorizationService
@@ -144,7 +179,7 @@ function createTestRouter(input: {
     () => new Date(NOW),
   )
   const router = createPublicApiRouter({
-    developerPlatform: platform,
+    ...createFocusedTestPlatform(platform),
     authenticateManagement: input.authenticateManagement ??
       (async () => input.managementPrincipal ?? managementPrincipal),
     workItems: input.workItems ?? createDefaultWorkItemService(),
