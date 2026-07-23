@@ -18,6 +18,8 @@
     "typecheck": "bun run typecheck:contracts && bun run typecheck:server && bun run web:build && bun run cdk:build",
     "dependencies:check": "depcruise --validate --output-type err server/src web/src cdk/lib cdk/bin contracts/src",
     "knip:check": "knip --reporter compact --include files,dependencies,unlisted,binaries,unresolved,catalog",
+    "skill:validate": "bun scripts/validate-mukuroji-review-skill.ts",
+    "skill:validate:test": "bun test scripts/validate-mukuroji-review-skill.test.ts",
     "cdk:nag": "bun --filter cdk nag",
     "web:dev": "bun --filter web dev",
     "web:lint": "bun --filter web lint",

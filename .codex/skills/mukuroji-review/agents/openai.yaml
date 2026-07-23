@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mukuroji Review"
+  short_description: "Risk-based multi-perspective review"
+  default_prompt: "Use $mukuroji-review to review this change against its GitHub Issue when present, otherwise the user's request or PR description. Select only the review perspectives and model tiers relevant to the diff."
