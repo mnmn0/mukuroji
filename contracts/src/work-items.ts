@@ -299,3 +299,62 @@ export type UpdateWorkItemInput = WorkItemPatch & {
    */
   expectedRevision: number
 }
+
+/**
+ * Work Item 間で管理できる relation 種別です。
+ */
+export type WorkItemRelationType =
+  | 'parent'
+  | 'child'
+  | 'blocks'
+  | 'blockedBy'
+  | 'related'
+  | 'duplicate'
+
+/**
+ * Work Item から別の Work Item への relation です。
+ */
+export type WorkItemRelation = {
+  /** Relation の起点 Work Item ID です。 */
+  sourceWorkItemId: string
+  /** Relation の向きと意味です。 */
+  type: WorkItemRelationType
+  /** Relation の終点 Work Item ID です。 */
+  targetWorkItemId: string
+  /** Relation の作成日時です。 */
+  createdAt?: string
+}
+
+/**
+ * Relation 作成・削除 API の共通入力です。
+ */
+export type WorkItemRelationMutationInput = {
+  /** 起点から見た relation 種別です。 */
+  type: WorkItemRelationType
+  /** Relation の終点 Work Item ID です。 */
+  targetWorkItemId: string
+  /** 読み込み時点の Team relation graph revision です。 */
+  expectedGraphRevision: number
+}
+
+/**
+ * Relation 作成・削除 API の response です。
+ */
+export type WorkItemRelationMutationResponse = {
+  /** 起点 Work Item から見た relation です。 */
+  relation: WorkItemRelation
+  /** 終点 Work Item に保存する reciprocal relation です。 */
+  reciprocalRelation: WorkItemRelation
+  /** Mutation 後の Team relation graph revision です。 */
+  graphRevision: number
+}
+
+/**
+ * Work Item relation 一覧 API の response です。
+ */
+export type WorkItemRelationsResponse = {
+  /** 起点 Work Item に保存された relation 一覧です。 */
+  relations: WorkItemRelation[]
+  /** 読み込み時点の Team relation graph revision です。 */
+  graphRevision: number
+}
