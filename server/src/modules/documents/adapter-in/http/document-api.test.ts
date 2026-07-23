@@ -14,8 +14,8 @@ import {
 import {
   DOCUMENT_MAX_BACKLINK_COUNT,
   DocumentError,
-  type DocumentClient,
-} from './documents'
+  type DocumentHttpApplication,
+} from '../../documents'
 
 test('requires authentication and never exposes an unexpected internal error', async () => {
   const errorLog = spyOn(console, 'error').mockImplementation(() => undefined)
@@ -644,14 +644,21 @@ test('rejects guest document creation before grant and target reads', async () =
   expect(createCalls).toBe(0)
 })
 
-test('forwards every authenticated authorization generation guard', async () => {
+test('forwards every authenticated authorization generation snapshot', async () => {
   let receivedGenerations: Array<string | number> = []
   const app = createTestApp(
     createDocumentClient({
       async create(input) {
         receivedGenerations =
-          input.access.authorizationGuards?.map(
-            ({ expectedGeneration }) => expectedGeneration,
+          input.access.authorizationSnapshots?.flatMap(
+            (snapshot) => [
+              snapshot.workspaceMemberVersion,
+              snapshot.planningRevision,
+              snapshot.enterpriseControlRevision,
+            ].filter(
+              (generation): generation is number =>
+                generation !== undefined,
+            ),
           ) ?? []
         return pageDocument
       },
@@ -664,28 +671,12 @@ test('forwards every authenticated authorization generation guard', async () => 
         workspaceRole: 'owner',
         isSystemAdmin: false,
         projectRoles: {},
-        authorizationGuards: [
+        authorizationSnapshots: [
           {
-            tableName: 'workspace-access',
-            key: {
-              directoryId: 'workspace-1',
-              memberKey: 'owner@example.com',
-            },
-            generationAttribute: 'version',
-            expectedGeneration: 7,
-            requiredAttributes: {
-              entryType: 'workspace-member',
-              status: 'active',
-            },
-          },
-          {
-            tableName: 'planning',
-            key: {
-              workspaceId: 'workspace-1',
-              recordKey: 'META',
-            },
-            generationAttribute: 'revision',
-            expectedGeneration: 11,
+            workspaceId: 'workspace-1',
+            workspaceMemberKey: 'owner@example.com',
+            workspaceMemberVersion: 7,
+            planningRevision: 11,
           },
         ],
       }),
@@ -2044,7 +2035,7 @@ test('forwards the mutation idempotency key when creating a public share', async
 })
 
 function createTestApp(
-  client: DocumentClient,
+  client: DocumentHttpApplication,
   overrides: Partial<DocumentApiDependencies> = {},
 ) {
   const app = new Hono()
@@ -2069,14 +2060,16 @@ function createTestApp(
   return app
 }
 
-function createDocumentClient(overrides: Partial<DocumentClient>): DocumentClient {
+function createDocumentClient(
+  overrides: Partial<DocumentHttpApplication>,
+): DocumentHttpApplication {
   const client = {
     getAuthorizationRevision: async () => 0,
     prepareOperations: async (input) => ({
       pendingInput: input.input,
     }),
     ...overrides,
-  } as DocumentClient
+  } as DocumentHttpApplication
   return new Proxy(client, {
     get(target, property, receiver) {
       const value = Reflect.get(target, property, receiver)

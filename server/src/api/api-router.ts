@@ -9,7 +9,6 @@ import { request as requestHttps } from 'node:https'
 import { isIP } from 'node:net'
 import {
   PUBLIC_API_OPENAPI_DOCUMENT,
-  PLANNING_SCHEMA_VERSION,
   ENTERPRISE_PERMISSION_IDS,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   type AnalyticsQueryInput,
@@ -296,7 +295,7 @@ import {
   type EnterpriseAuthorizationResource,
   type EnterpriseCognitoFederationBinding,
   type EnterprisePrincipalContext,
-} from '../modules/enterprise-identity/enterprise-identity'
+} from '../modules/enterprise-identity'
 import {
   createEnterpriseCognitoInspectionCache,
 } from '../modules/enterprise-identity/enterprise-cognito-inspection-cache'
@@ -425,16 +424,16 @@ import {
   createDocumentSearchAccessReadContext,
   DocumentError,
   type DocumentAccessContext,
-  type DocumentAuthorizationGenerationGuard,
+  type DocumentAuthorizationFenceSnapshot,
   type DocumentProjectRole,
-} from '../modules/documents/documents'
+} from '../modules/documents'
 import {
   requirePrivateDocumentManagerContinuity,
 } from '../modules/workspace-access/document-manager-lifecycle'
 import {
   registerDocumentApiRoutes,
   type DocumentApiPrincipal,
-} from '../modules/documents/document-api'
+} from '../modules/documents/adapter-in/http/document-api'
 import {
   AnalyticsError,
   createAnalyticsCsv,
@@ -1494,7 +1493,7 @@ routeApp.get('/api/auth/sso/discovery', async (c) => {
     return c.json({ code: 'EnterpriseEmailRequired', message: 'Email is required.' }, 400)
   }
   try {
-    const discovery = await workspaceDependencies.enterpriseIdentity.discoverSso(email)
+    const discovery = await workspaceDependencies.enterpriseIdentity.ssoDiscovery.discoverSso(email)
     if (!discovery) {
       return c.json({ ssoRequired: false, loginMode: 'password-or-sso' as const })
     }
@@ -1525,7 +1524,7 @@ routeApp.post('/api/auth/sso/start', async (c) => {
   try {
     const body = await readJson<Record<string, unknown>>(c.req)
     const email = readWorkspaceEmail(body?.email)
-    const discovery = await workspaceDependencies.enterpriseIdentity.discoverSso(email)
+    const discovery = await workspaceDependencies.enterpriseIdentity.ssoDiscovery.discoverSso(email)
     if (!discovery) {
       throw new EnterpriseSsoError(
         404,
@@ -1583,7 +1582,7 @@ routeApp.post('/api/auth/sso/exchange', async (c) => {
       hmacSecret: configuration.stateSecret,
       expectedRedirectUri: configuration.redirectUri,
     })
-    const discovery = await workspaceDependencies.enterpriseIdentity.discoverSso(validatedState.email)
+    const discovery = await workspaceDependencies.enterpriseIdentity.ssoDiscovery.discoverSso(validatedState.email)
     if (
       !discovery ||
       discovery.provider.providerId !== validatedState.providerId ||
@@ -1709,7 +1708,7 @@ routeApp.post('/api/auth/login', async (c) => {
   }
 
   try {
-    const discovery = await workspaceDependencies.enterpriseIdentity.discoverSso(email)
+    const discovery = await workspaceDependencies.enterpriseIdentity.ssoDiscovery.discoverSso(email)
     if (discovery) {
       return c.json({
         code: 'SsoRequired' as const,
@@ -1778,7 +1777,7 @@ routeApp.post('/api/auth/challenge/new-password', async (c) => {
   }
 
   try {
-    const discovery = await workspaceDependencies.enterpriseIdentity.discoverSso(email)
+    const discovery = await workspaceDependencies.enterpriseIdentity.ssoDiscovery.discoverSso(email)
     if (discovery) {
       return c.json({
         code: 'SsoRequired' as const,
@@ -1846,7 +1845,7 @@ routeApp.post('/api/auth/challenge/mfa', async (c) => {
   }
 
   try {
-    const discovery = await workspaceDependencies.enterpriseIdentity.discoverSso(email)
+    const discovery = await workspaceDependencies.enterpriseIdentity.ssoDiscovery.discoverSso(email)
     if (discovery) {
       return c.json({
         code: 'SsoRequired' as const,
@@ -2056,7 +2055,7 @@ routeApp.post('/api/workspace/invitations', async (c) => {
     const email = readWorkspaceEmail(body?.email)
     const role = readWorkspaceRole(body?.role)
     const name = readOptionalWorkspaceName(body?.name)
-    const enterpriseSnapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const enterpriseSnapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     requireEnterpriseExternalAccessAllowed(enterpriseSnapshot, email, role)
     const auditContext = createWorkspaceMutationContext(c, principal, { email, name, role })
     const invitation = await workspaceDependencies.workspaceAccess.createInvitation(
@@ -2296,7 +2295,7 @@ routeApp.patch('/api/workspace/members/:memberKey', async (c) => {
         )
       }
       requireEnterpriseExternalAccessAllowed(
-        await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId),
+        await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId),
         existingMember.email,
         role,
       )
@@ -2406,9 +2405,9 @@ routeApp.get('/api/auth/me', async (c) => {
 routeApp.get('/api/enterprise/security', async (c) => {
   try {
     const principal = await requireEnterpriseSecurityPrincipal(c)
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     const activeBreakGlassActivation = principal.enterpriseAuthenticationSessionId
-      ? await workspaceDependencies.enterpriseIdentity.getActiveBreakGlassActivation(
+      ? await workspaceDependencies.enterpriseIdentity.read.getActiveBreakGlassActivation(
         principal.directoryId,
         principal.userKey,
         principal.enterpriseAuthenticationSessionId,
@@ -2439,7 +2438,7 @@ routeApp.put('/api/enterprise/security/identity-provider', async (c) => {
     const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
     const auditContext = createWorkspaceMutationContext(c, principal, body)
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     if (typeof body?.enforced === 'boolean') {
       const provider = snapshot.identityProviders.find((candidate) =>
         candidate.status === 'active'
@@ -2476,7 +2475,7 @@ routeApp.put('/api/enterprise/security/identity-provider', async (c) => {
           'Identity provider changed. Reload before changing SSO enforcement.',
         )
       }
-      await workspaceDependencies.enterpriseIdentity.setSsoEnforcement(
+      await workspaceDependencies.enterpriseIdentity.identityProviderAdministration.setSsoEnforcement(
         principal.directoryId,
         body.enforced,
         body.enforced ? provider?.providerId : undefined,
@@ -2533,9 +2532,12 @@ routeApp.put('/api/enterprise/security/identity-provider', async (c) => {
         await assertEnterpriseCognitoFederationProvider(provider)
         await assertEnterpriseCognitoSsoAppClient(provider)
       }
-      await workspaceDependencies.enterpriseIdentity.putIdentityProvider(provider, auditContext)
+      await workspaceDependencies.enterpriseIdentity.identityProviderAdministration.putIdentityProvider(
+        provider,
+        auditContext,
+      )
     }
-    const nextSnapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const nextSnapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     return c.json({
       identityProvider: toEnterpriseSecuritySnapshotView(
         nextSnapshot,
@@ -2561,7 +2563,7 @@ routeApp.post('/api/enterprise/security/domains', async (c) => {
       principal.directoryId,
       requestIdempotencyKey,
     )
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     const receiptDomain = snapshot.domains.find((candidate) =>
       candidate.domainId === domainId
     )
@@ -2589,7 +2591,7 @@ routeApp.post('/api/enterprise/security/domains', async (c) => {
       )
     }
     const nowIso = new Date().toISOString()
-    const domain = await workspaceDependencies.enterpriseIdentity.putVerifiedDomain({
+    const domain = await workspaceDependencies.enterpriseIdentity.identityProviderAdministration.putVerifiedDomain({
       workspaceId: principal.directoryId,
       domainId,
       domain: domainName,
@@ -2617,7 +2619,7 @@ routeApp.post('/api/enterprise/security/domains/:domain/verify', async (c) => {
   try {
     const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     const domain = snapshot.domains.find((candidate) =>
       candidate.domain === c.req.param('domain').trim().toLowerCase()
     )
@@ -2650,7 +2652,7 @@ routeApp.post('/api/enterprise/security/domains/:domain/verify', async (c) => {
         )
       }
     }
-    const verified = await workspaceDependencies.enterpriseIdentity.putVerifiedDomain({
+    const verified = await workspaceDependencies.enterpriseIdentity.identityProviderAdministration.putVerifiedDomain({
       ...domain,
       status: 'verified',
       revision: domain.revision + 1,
@@ -2668,7 +2670,7 @@ routeApp.post('/api/enterprise/security/policy/preview', async (c) => {
   try {
     const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     const current = snapshot.policy ??
       createDefaultEnterpriseSecurityPolicy(principal.directoryId, principal.actorId)
     const expectedVersion = readEnterpriseInteger(body?.expectedVersion, 'Expected version', 0)
@@ -2699,7 +2701,7 @@ routeApp.put('/api/enterprise/security/policy', async (c) => {
   try {
     const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     const current = snapshot.policy ??
       createDefaultEnterpriseSecurityPolicy(principal.directoryId, principal.actorId)
     const expectedVersion = readEnterpriseInteger(body?.expectedVersion, 'Expected version', 0)
@@ -2748,7 +2750,7 @@ routeApp.put('/api/enterprise/security/policy', async (c) => {
         'Register and test an external break-glass account before excluding the current caller.',
       )
     }
-    const policy = await workspaceDependencies.enterpriseIdentity.putSecurityPolicy({
+    const policy = await workspaceDependencies.enterpriseIdentity.authorization.putSecurityPolicy({
       ...current,
       mfaRequirement: body?.mfaRequired === true ? 'required' : 'optional',
       sessionLifetimeMinutes: readEnterpriseInteger(
@@ -2811,7 +2813,7 @@ routeApp.post('/api/enterprise/security/scim/token', async (c) => {
     const requestIdempotencyKey =
       c.req.header('Idempotency-Key')?.trim() || crypto.randomUUID()
     const expectedVersion = readEnterpriseInteger(body?.expectedVersion, 'Expected version', 0)
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     const requestedProviderId = typeof body?.identityProviderId === 'string'
       ? readEnterpriseText(body.identityProviderId, 'Identity provider ID')
       : undefined
@@ -2836,7 +2838,7 @@ routeApp.post('/api/enterprise/security/scim/token', async (c) => {
       requireEnterpriseCognitoProviderName(),
     )
     await assertEnterpriseCognitoFederationProvider(provider)
-    const issued = await workspaceDependencies.enterpriseIdentity.rotateScimToken(
+    const issued = await workspaceDependencies.enterpriseIdentity.scimCredentialAdministration.rotateScimToken(
       principal.directoryId,
       provider.providerId,
       'Directory provider',
@@ -2850,7 +2852,7 @@ routeApp.post('/api/enterprise/security/scim/token', async (c) => {
         .digest('hex'),
       createWorkspaceMutationContext(c, principal, body, requestIdempotencyKey),
     )
-    const nextSnapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const nextSnapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     return c.json({
       scim: toEnterpriseSecuritySnapshotView(
         nextSnapshot,
@@ -2869,8 +2871,8 @@ routeApp.post('/api/enterprise/security/provisioning/preview', async (c) => {
   try {
     const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
-    const preview = await workspaceDependencies.enterpriseIdentity.previewProvisioning({
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
+    const preview = await workspaceDependencies.enterpriseIdentity.provisioning.previewProvisioning({
       workspaceId: principal.directoryId,
       source: 'directory-reconciliation',
       idempotencyKey: c.req.header('Idempotency-Key')?.trim() || crypto.randomUUID(),
@@ -2891,7 +2893,7 @@ routeApp.post('/api/enterprise/security/provisioning/reconcile', async (c) => {
     const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
     const previewId = readEnterpriseText(body?.previewId, 'Preview ID')
-    const preview = await workspaceDependencies.enterpriseIdentity.getProvisioningPreview(
+    const preview = await workspaceDependencies.enterpriseIdentity.provisioning.getProvisioningPreview(
       principal.directoryId,
       previewId,
     )
@@ -2906,13 +2908,13 @@ routeApp.post('/api/enterprise/security/provisioning/reconcile', async (c) => {
         'Provisioning preview changed or expired. Run a new dry-run.',
       )
     }
-    const currentPreview = await workspaceDependencies.enterpriseIdentity.previewProvisioning({
+    const currentPreview = await workspaceDependencies.enterpriseIdentity.provisioning.previewProvisioning({
       workspaceId: principal.directoryId,
       source: 'directory-reconciliation',
       idempotencyKey: `${previewId}:freshness-check`,
       protectedMemberKeys: await resolveEnterpriseProtectedProvisioningMemberKeys(
         principal.directoryId,
-        await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId),
+        await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId),
       ),
     })
     if (currentPreview.fingerprint !== preview.fingerprint) {
@@ -2922,7 +2924,7 @@ routeApp.post('/api/enterprise/security/provisioning/reconcile', async (c) => {
         'Directory desired state changed after the dry-run. Review a new preview.',
       )
     }
-    const run = await workspaceDependencies.enterpriseIdentity.reconcileProvisioning({
+    const run = await workspaceDependencies.enterpriseIdentity.provisioning.reconcileProvisioning({
       workspaceId: principal.directoryId,
       source: 'directory-reconciliation',
       idempotencyKey: c.req.header('Idempotency-Key')?.trim() || previewId,
@@ -2939,7 +2941,7 @@ routeApp.post('/api/enterprise/security/provisioning/reconcile', async (c) => {
     try {
       await applyEnterpriseProvisioningPlan(c, run)
       return c.json({
-        run: await workspaceDependencies.enterpriseIdentity.finalizeProvisioningRun(
+        run: await workspaceDependencies.enterpriseIdentity.provisioning.finalizeProvisioningRun(
           principal.directoryId,
           run.runId,
           'succeeded',
@@ -2948,7 +2950,7 @@ routeApp.post('/api/enterprise/security/provisioning/reconcile', async (c) => {
         ),
       })
     } catch (error) {
-      await workspaceDependencies.enterpriseIdentity.finalizeProvisioningRun(
+      await workspaceDependencies.enterpriseIdentity.provisioning.finalizeProvisioningRun(
         principal.directoryId,
         run.runId,
         'failed',
@@ -2966,7 +2968,7 @@ routeApp.post('/api/enterprise/security/provisioning/reconcile', async (c) => {
 routeApp.get('/api/enterprise/security/provisioning/logs', async (c) => {
   try {
     const principal = await requireEnterpriseSecurityPrincipal(c)
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     return c.json({
       logs: toEnterpriseSecuritySnapshotView(
         snapshot,
@@ -2983,7 +2985,7 @@ routeApp.get('/api/enterprise/security/provisioning/logs', async (c) => {
 routeApp.post('/api/enterprise/security/provisioning/logs/:runId/retry', async (c) => {
   try {
     const principal = await requireEnterpriseSecurityPrincipal(c)
-    const run = await workspaceDependencies.enterpriseIdentity.retryProvisioning(
+    const run = await workspaceDependencies.enterpriseIdentity.provisioning.retryProvisioning(
       principal.directoryId,
       c.req.param('runId'),
       createWorkspaceMutationContext(c, principal, { runId: c.req.param('runId') }),
@@ -2992,7 +2994,7 @@ routeApp.post('/api/enterprise/security/provisioning/logs/:runId/retry', async (
     try {
       await applyEnterpriseProvisioningPlan(c, run)
       return c.json({
-        run: await workspaceDependencies.enterpriseIdentity.finalizeProvisioningRun(
+        run: await workspaceDependencies.enterpriseIdentity.provisioning.finalizeProvisioningRun(
           principal.directoryId,
           run.runId,
           'succeeded',
@@ -3001,7 +3003,7 @@ routeApp.post('/api/enterprise/security/provisioning/logs/:runId/retry', async (
         ),
       })
     } catch (error) {
-      await workspaceDependencies.enterpriseIdentity.finalizeProvisioningRun(
+      await workspaceDependencies.enterpriseIdentity.provisioning.finalizeProvisioningRun(
         principal.directoryId,
         run.runId,
         'failed',
@@ -3036,7 +3038,7 @@ routeApp.post('/api/enterprise/security/roles', async (c) => {
       principal.enterprisePermissions,
       permissions,
     )
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     const receiptRole = snapshot.customRoles.find((candidate) =>
       candidate.roleId === roleId
     )
@@ -3064,7 +3066,7 @@ routeApp.post('/api/enterprise/security/roles', async (c) => {
       })
     }
     const nowIso = new Date().toISOString()
-    const role = await workspaceDependencies.enterpriseIdentity.putCustomRole({
+    const role = await workspaceDependencies.enterpriseIdentity.authorization.putCustomRole({
       workspaceId: principal.directoryId,
       roleId,
       name,
@@ -3086,7 +3088,7 @@ routeApp.post('/api/enterprise/security/roles/:roleId/impact', async (c) => {
   try {
     const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     const role = snapshot.customRoles.find((candidate) =>
       candidate.roleId === c.req.param('roleId')
     )
@@ -3126,7 +3128,7 @@ routeApp.put('/api/enterprise/security/roles/:roleId', async (c) => {
   try {
     const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     const existing = snapshot.customRoles.find((role) =>
       role.roleId === c.req.param('roleId')
     )
@@ -3160,7 +3162,7 @@ routeApp.put('/api/enterprise/security/roles/:roleId', async (c) => {
         'Preview and confirm the custom role assignment impact before saving.',
       )
     }
-    const role = await workspaceDependencies.enterpriseIdentity.putCustomRole({
+    const role = await workspaceDependencies.enterpriseIdentity.authorization.putCustomRole({
       ...existing,
       name: readEnterpriseText(body?.name, 'Role name'),
       description: typeof body?.description === 'string' ? body.description.trim() : undefined,
@@ -3185,7 +3187,7 @@ routeApp.delete('/api/enterprise/security/roles/:roleId', async (c) => {
   try {
     const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     const role = snapshot.customRoles.find((candidate) =>
       candidate.roleId === c.req.param('roleId')
     )
@@ -3221,7 +3223,7 @@ routeApp.delete('/api/enterprise/security/roles/:roleId', async (c) => {
         'Preview and confirm the custom role assignment impact before deleting.',
       )
     }
-    await workspaceDependencies.enterpriseIdentity.deleteCustomRole(
+    await workspaceDependencies.enterpriseIdentity.authorization.deleteCustomRole(
       principal.directoryId,
       c.req.param('roleId'),
       expectedVersion,
@@ -3238,7 +3240,7 @@ routeApp.post('/api/enterprise/security/group-mappings', async (c) => {
   try {
     const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     const requestIdempotencyKey =
       c.req.header('Idempotency-Key')?.trim() || crypto.randomUUID()
     const mappingId = createEnterpriseIdempotentResourceId(
@@ -3308,7 +3310,7 @@ routeApp.post('/api/enterprise/security/group-mappings', async (c) => {
       scopeType,
       scopeTargetId,
     )
-    const mapping = await workspaceDependencies.enterpriseIdentity.putGroupMapping({
+    const mapping = await workspaceDependencies.enterpriseIdentity.authorization.putGroupMapping({
       workspaceId: principal.directoryId,
       mappingId,
       identityProviderId,
@@ -3351,7 +3353,7 @@ routeApp.put('/api/enterprise/security/group-mappings/:mappingId', async (c) => 
   try {
     const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     const existing = snapshot.groupMappings.find((mapping) =>
       mapping.mappingId === c.req.param('mappingId')
     )
@@ -3405,7 +3407,7 @@ routeApp.put('/api/enterprise/security/group-mappings/:mappingId', async (c) => 
       scopeType,
       scopeTargetId,
     )
-    const mapping = await workspaceDependencies.enterpriseIdentity.putGroupMapping({
+    const mapping = await workspaceDependencies.enterpriseIdentity.authorization.putGroupMapping({
       ...existing,
       directoryGroupId,
       roleId,
@@ -3444,7 +3446,7 @@ routeApp.delete('/api/enterprise/security/group-mappings/:mappingId', async (c) 
   try {
     const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
-    await workspaceDependencies.enterpriseIdentity.deleteGroupMapping(
+    await workspaceDependencies.enterpriseIdentity.authorization.deleteGroupMapping(
       principal.directoryId,
       c.req.param('mappingId'),
       readEnterpriseInteger(body?.expectedVersion, 'Expected version', 1),
@@ -3461,7 +3463,7 @@ routeApp.post('/api/enterprise/security/service-accounts', async (c) => {
   try {
     const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     const roleId = readEnterpriseRoleId(body?.roleId)
     const scopeType = body?.scopeType === 'team' || body?.scopeType === 'project'
       ? body.scopeType
@@ -3499,7 +3501,7 @@ routeApp.post('/api/enterprise/security/service-accounts', async (c) => {
     const nowIso = new Date().toISOString()
     const requestIdempotencyKey =
       c.req.header('Idempotency-Key')?.trim() || crypto.randomUUID()
-    const issued = await workspaceDependencies.enterpriseIdentity.createServiceAccountWithToken({
+    const issued = await workspaceDependencies.enterpriseIdentity.serviceAccountAdministration.createServiceAccountWithToken({
       workspaceId: principal.directoryId,
       accountId: createEnterpriseIdempotentResourceId(
         'service-account',
@@ -3548,7 +3550,7 @@ routeApp.post('/api/enterprise/security/service-accounts/:accountId/rotate', asy
   try {
     const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     const account = snapshot.serviceAccounts.find((candidate) =>
       candidate.accountId === c.req.param('accountId')
     )
@@ -3562,7 +3564,7 @@ routeApp.post('/api/enterprise/security/service-accounts/:accountId/rotate', asy
     const requestIdempotencyKey =
       c.req.header('Idempotency-Key')?.trim() || crypto.randomUUID()
     const expectedVersion = readEnterpriseInteger(body?.expectedVersion, 'Expected version', 1)
-    const issued = await workspaceDependencies.enterpriseIdentity.rotateServiceAccountToken(
+    const issued = await workspaceDependencies.enterpriseIdentity.serviceAccountAdministration.rotateServiceAccountToken(
       principal.directoryId,
       account.accountId,
       expectedVersion,
@@ -3572,7 +3574,7 @@ routeApp.post('/api/enterprise/security/service-accounts/:accountId/rotate', asy
         .digest('hex'),
       createWorkspaceMutationContext(c, principal, body, requestIdempotencyKey),
     )
-    const rotatedAccount = (await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId))
+    const rotatedAccount = (await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId))
       .serviceAccounts.find((candidate) => candidate.accountId === account.accountId) ?? account
     return c.json({
       serviceAccount: toEnterpriseServiceAccountView(
@@ -3591,7 +3593,7 @@ routeApp.post('/api/enterprise/security/service-accounts/:accountId/revoke', asy
   try {
     const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     const account = snapshot.serviceAccounts.find((candidate) =>
       candidate.accountId === c.req.param('accountId')
     )
@@ -3602,7 +3604,7 @@ routeApp.post('/api/enterprise/security/service-accounts/:accountId/revoke', asy
     ) {
       return c.json({ revoked: true })
     }
-    await workspaceDependencies.enterpriseIdentity.revokeServiceAccountToken(
+    await workspaceDependencies.enterpriseIdentity.serviceAccountAdministration.revokeServiceAccountToken(
       principal.directoryId,
       c.req.param('accountId'),
       undefined,
@@ -3638,7 +3640,7 @@ routeApp.post('/api/enterprise/security/break-glass/accounts', async (c) => {
         'Configure MFA for this member before registering break-glass access.',
       )
     }
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     requireEnterpriseBreakGlassRecoveryDomainUnmanaged(snapshot, email)
     const requestIdempotencyKey =
       c.req.header('Idempotency-Key')?.trim() || crypto.randomUUID()
@@ -3666,7 +3668,7 @@ routeApp.post('/api/enterprise/security/break-glass/accounts', async (c) => {
       })
     }
     const nowIso = new Date().toISOString()
-    const account = await workspaceDependencies.enterpriseIdentity.putBreakGlassAccount({
+    const account = await workspaceDependencies.enterpriseIdentity.breakGlass.putBreakGlassAccount({
       workspaceId: principal.directoryId,
       accountId: existing?.accountId ?? accountId,
       linkedMemberKey: member.memberKey,
@@ -3706,7 +3708,7 @@ routeApp.post('/api/enterprise/security/break-glass/test', async (c) => {
       c,
       { breakGlassCandidate: true },
     )
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     const account = snapshot.breakGlassAccounts.find((candidate) =>
       candidate.linkedMemberKey === principal.userKey && candidate.status === 'active'
     )
@@ -3724,7 +3726,7 @@ routeApp.post('/api/enterprise/security/break-glass/test', async (c) => {
       snapshot.policy?.sensitiveActionReauthenticationMinutes ?? 15,
     )
     const nowIso = new Date().toISOString()
-    const tested = await workspaceDependencies.enterpriseIdentity.putBreakGlassAccount({
+    const tested = await workspaceDependencies.enterpriseIdentity.breakGlass.putBreakGlassAccount({
       ...account,
       lastTestedAt: nowIso,
       revision: account.revision + 1,
@@ -3761,7 +3763,7 @@ routeApp.post('/api/enterprise/security/break-glass/activate', async (c) => {
       { breakGlassCandidate: true },
     )
     const body = await readJson<Record<string, unknown>>(c.req)
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     const account = snapshot.breakGlassAccounts.find((candidate) =>
       candidate.linkedMemberKey === principal.userKey &&
       candidate.status === 'active'
@@ -3782,7 +3784,7 @@ routeApp.post('/api/enterprise/security/break-glass/activate', async (c) => {
       body?.reason ?? c.req.header('X-Break-Glass-Reason'),
       'Break-glass reason',
     )
-    const activationSnapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const activationSnapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     const activationAccount = activationSnapshot.breakGlassAccounts.find((candidate) =>
       candidate.accountId === account.accountId &&
       candidate.linkedMemberKey === principal.userKey &&
@@ -3802,7 +3804,7 @@ routeApp.post('/api/enterprise/security/break-glass/activate', async (c) => {
     const durationMinutes = body?.durationMinutes === undefined
       ? Math.min(15, activationAccount.maximumActivationMinutes)
       : readEnterpriseInteger(body.durationMinutes, 'Activation duration', 1)
-    const activation = await workspaceDependencies.enterpriseIdentity.activateBreakGlass(
+    const activation = await workspaceDependencies.enterpriseIdentity.breakGlass.activateBreakGlass(
       principal.directoryId,
       activationAccount.accountId,
       principal.userKey,
@@ -3845,7 +3847,7 @@ routeApp.post('/api/enterprise/security/break-glass/revoke-activation', async (c
       c,
       { breakGlassCandidate: true },
     )
-    await workspaceDependencies.enterpriseIdentity.revokeBreakGlassActivation(
+    await workspaceDependencies.enterpriseIdentity.breakGlass.revokeBreakGlassActivation(
       principal.directoryId,
       principal.userKey,
       createEnterpriseAuthenticationSessionId(accessToken),
@@ -3865,7 +3867,7 @@ routeApp.post('/api/enterprise/security/break-glass/deactivate', async (c) => {
     const principal = await requireEnterpriseSecurityPrincipal(c)
     const body = await readJson<Record<string, unknown>>(c.req)
     const accountId = readEnterpriseText(body?.administratorId, 'Administrator ID')
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     const account = snapshot.breakGlassAccounts.find((candidate) =>
       candidate.accountId === accountId
     )
@@ -3880,7 +3882,7 @@ routeApp.post('/api/enterprise/security/break-glass/deactivate', async (c) => {
     if (account.status === 'disabled' && expectedVersion + 1 === account.revision) {
       return c.json({ deactivated: true })
     }
-    await workspaceDependencies.enterpriseIdentity.deactivateBreakGlass(
+    await workspaceDependencies.enterpriseIdentity.breakGlass.deactivateBreakGlass(
       principal.directoryId,
       accountId,
       expectedVersion,
@@ -3922,7 +3924,7 @@ routeApp.get('/api/scim/v2/:workspaceId/Users', async (c) => {
   try {
     const { workspaceId, credential } = await requireEnterpriseScimWorkspace(c)
     const pagination = readScimPagination(c)
-    const page = await workspaceDependencies.enterpriseIdentity.listScimUsers({
+    const page = await workspaceDependencies.enterpriseIdentity.scimDirectory.listScimUsers({
       workspaceId,
       identityProviderId: credential.identityProviderId,
       ...pagination,
@@ -3948,7 +3950,7 @@ routeApp.post('/api/scim/v2/:workspaceId/Users', async (c) => {
   try {
     const { workspaceId, credential } = await requireEnterpriseScimWorkspace(c)
     const body = await readScimJson(c)
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(workspaceId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(workspaceId)
     const input = readEnterpriseScimUserInput(
       c,
       workspaceId,
@@ -3962,7 +3964,7 @@ routeApp.post('/api/scim/v2/:workspaceId/Users', async (c) => {
         snapshot,
       )
     }
-    const user = await workspaceDependencies.enterpriseIdentity.upsertScimUser(
+    const user = await workspaceDependencies.enterpriseIdentity.scimDirectory.upsertScimUser(
       input,
       createEnterpriseScimMutationContext(
         c,
@@ -3989,7 +3991,7 @@ routeApp.get('/api/scim/v2/:workspaceId/Users/:userId', async (c) => {
   try {
     const { workspaceId, credential } = await requireEnterpriseScimWorkspace(c)
     const userId = readScimResourceId(c.req.param('userId'), 'user')
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(workspaceId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(workspaceId)
     const user = snapshot.scimUsers.find((candidate) =>
       candidate.userId === userId &&
       candidate.identityProviderId === credential.identityProviderId
@@ -4010,7 +4012,7 @@ routeApp.on(['PUT', 'PATCH'], '/api/scim/v2/:workspaceId/Users/:userId', async (
     const { workspaceId, credential } = await requireEnterpriseScimWorkspace(c)
     const userId = readScimResourceId(c.req.param('userId'), 'user')
     const body = await readScimJson(c)
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(workspaceId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(workspaceId)
     const existing = snapshot.scimUsers.find((candidate) =>
       candidate.userId === userId &&
       candidate.identityProviderId === credential.identityProviderId
@@ -4040,7 +4042,7 @@ routeApp.on(['PUT', 'PATCH'], '/api/scim/v2/:workspaceId/Users/:userId', async (
         snapshot,
       )
     }
-    const user = await workspaceDependencies.enterpriseIdentity.upsertScimUser(
+    const user = await workspaceDependencies.enterpriseIdentity.scimDirectory.upsertScimUser(
       input,
       createEnterpriseScimMutationContext(
         c,
@@ -4062,7 +4064,7 @@ routeApp.delete('/api/scim/v2/:workspaceId/Users/:userId', async (c) => {
   try {
     const { workspaceId, credential } = await requireEnterpriseScimWorkspace(c)
     const userId = readScimResourceId(c.req.param('userId'), 'user')
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(workspaceId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(workspaceId)
     const existing = snapshot.scimUsers.find((candidate) =>
       candidate.userId === userId &&
       candidate.identityProviderId === credential.identityProviderId
@@ -4082,7 +4084,7 @@ routeApp.delete('/api/scim/v2/:workspaceId/Users/:userId', async (c) => {
         snapshot,
       )
     }
-    const user = await workspaceDependencies.enterpriseIdentity.deactivateScimUser(
+    const user = await workspaceDependencies.enterpriseIdentity.scimDirectory.deactivateScimUser(
       workspaceId,
       credential.identityProviderId,
       userId,
@@ -4109,7 +4111,7 @@ routeApp.get('/api/scim/v2/:workspaceId/Groups', async (c) => {
       c,
       ENTERPRISE_SCIM_GROUP_PAGE_LIMIT,
     )
-    const page = await workspaceDependencies.enterpriseIdentity.listScimGroups({
+    const page = await workspaceDependencies.enterpriseIdentity.scimDirectory.listScimGroups({
       workspaceId,
       identityProviderId: credential.identityProviderId,
       ...pagination,
@@ -4141,7 +4143,7 @@ routeApp.post('/api/scim/v2/:workspaceId/Groups', async (c) => {
       credential.identityProviderId,
       body,
     )
-    const group = await workspaceDependencies.enterpriseIdentity.upsertScimGroup(
+    const group = await workspaceDependencies.enterpriseIdentity.scimDirectory.upsertScimGroup(
       input,
       createEnterpriseScimMutationContext(
         c,
@@ -4170,7 +4172,7 @@ routeApp.get('/api/scim/v2/:workspaceId/Groups/:groupId', async (c) => {
   try {
     const { workspaceId, credential } = await requireEnterpriseScimWorkspace(c)
     const groupId = readScimResourceId(c.req.param('groupId'), 'group')
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(workspaceId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(workspaceId)
     const group = snapshot.scimGroups.find((candidate) =>
       candidate.groupId === groupId &&
       candidate.identityProviderId === credential.identityProviderId
@@ -4191,7 +4193,7 @@ routeApp.on(['PUT', 'PATCH'], '/api/scim/v2/:workspaceId/Groups/:groupId', async
     const { workspaceId, credential } = await requireEnterpriseScimWorkspace(c)
     const groupId = readScimResourceId(c.req.param('groupId'), 'group')
     const body = await readScimJson(c)
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(workspaceId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(workspaceId)
     const existing = snapshot.scimGroups.find((candidate) =>
       candidate.groupId === groupId &&
       candidate.identityProviderId === credential.identityProviderId
@@ -4206,7 +4208,7 @@ routeApp.on(['PUT', 'PATCH'], '/api/scim/v2/:workspaceId/Groups/:groupId', async
       active: existing.active,
       members: existing.memberUserIds.map((value) => ({ value })),
     })
-    const group = await workspaceDependencies.enterpriseIdentity.upsertScimGroup(
+    const group = await workspaceDependencies.enterpriseIdentity.scimDirectory.upsertScimGroup(
       readEnterpriseScimGroupInput(
         c,
         workspaceId,
@@ -4235,7 +4237,7 @@ routeApp.delete('/api/scim/v2/:workspaceId/Groups/:groupId', async (c) => {
   try {
     const { workspaceId, credential } = await requireEnterpriseScimWorkspace(c)
     const groupId = readScimResourceId(c.req.param('groupId'), 'group')
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(workspaceId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(workspaceId)
     const existing = snapshot.scimGroups.find((candidate) =>
       candidate.groupId === groupId &&
       candidate.identityProviderId === credential.identityProviderId
@@ -4248,7 +4250,7 @@ routeApp.delete('/api/scim/v2/:workspaceId/Groups/:groupId', async (c) => {
       )
     }
     requireScimIfMatch(c, existing.version)
-    await workspaceDependencies.enterpriseIdentity.deactivateScimGroup(
+    await workspaceDependencies.enterpriseIdentity.scimDirectory.deactivateScimGroup(
       workspaceId,
       credential.identityProviderId,
       groupId,
@@ -10700,7 +10702,7 @@ export async function auditRejectedEnterpriseSecurityMutation(
     if (scimWorkspaceId) {
       workspaceId = decodeURIComponent(scimWorkspaceId)
       const credential = token
-        ? await workspaceDependencies.enterpriseIdentity.authenticateScimToken(workspaceId, token)
+        ? await workspaceDependencies.enterpriseIdentity.scimAuthentication.authenticateScimToken(workspaceId, token)
         : undefined
       if (!credential) return
       actorId = credential.credentialId
@@ -10709,7 +10711,10 @@ export async function auditRejectedEnterpriseSecurityMutation(
       workspaceId = getEnv('MUKUROJI_WORKSPACE_DIRECTORY_ID') ??
         getEnv('MUKUROJI_PROJECT_DIRECTORY_ID')
       const account = workspaceId
-        ? await workspaceDependencies.enterpriseIdentity.authenticateServiceAccountToken(workspaceId, token)
+        ? await workspaceDependencies.enterpriseIdentity.serviceAccountAuthentication.authenticateServiceAccountToken(
+            workspaceId,
+            token,
+          )
         : undefined
       if (!workspaceId || !account) return
       actorId = account.accountId
@@ -11449,11 +11454,11 @@ async function authenticateWorkspacePrincipal(
     throw new WorkspaceAccessError(403, 'WorkspaceAccessDenied', 'Workspace access is denied.')
   }
 
-  const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId)
+  const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
   const recoveryAccount = snapshot.breakGlassAccounts.find((account) =>
     account.linkedMemberKey === principal.userKey && account.status === 'active'
   )
-  const breakGlassActivation = await workspaceDependencies.enterpriseIdentity.getActiveBreakGlassActivation(
+  const breakGlassActivation = await workspaceDependencies.enterpriseIdentity.read.getActiveBreakGlassActivation(
     principal.directoryId,
     principal.userKey,
     authenticationSessionId,
@@ -11756,15 +11761,15 @@ async function readStableEnterpriseServiceAccountSnapshot(
     attempt += 1
   ) {
     const before =
-      await workspaceDependencies.enterpriseIdentity.getSnapshot(workspaceId)
+      await workspaceDependencies.enterpriseIdentity.read.getSnapshot(workspaceId)
     const account =
-      await workspaceDependencies.enterpriseIdentity
+      await workspaceDependencies.enterpriseIdentity.serviceAccountAuthentication
         .authenticateServiceAccountToken(
           workspaceId,
           accessToken,
         )
     const after =
-      await workspaceDependencies.enterpriseIdentity.getSnapshot(workspaceId)
+      await workspaceDependencies.enterpriseIdentity.read.getSnapshot(workspaceId)
     if (
       before.controlRevision ===
         after.controlRevision
@@ -11957,7 +11962,7 @@ async function authenticateEnterpriseServiceAccount(
             '/enterprise/service-accounts/:accountId/authenticate',
         },
       })
-  await workspaceDependencies.enterpriseIdentity.recordServiceAccountUse(
+  await workspaceDependencies.enterpriseIdentity.serviceAccountAuthentication.recordServiceAccountUse(
     workspaceId,
     authenticatedAccount.accountId,
     serviceAccountAuditContext,
@@ -13610,7 +13615,7 @@ async function applyEnterpriseProvisioningPlan(
   c: Context,
   run: EnterpriseProvisioningRun,
 ) {
-  const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(run.workspaceId)
+  const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(run.workspaceId)
   const desiredGroupOverlays = run.changes
     .filter((change) => change.action !== 'noop' && change.entityType === 'group')
     .map((change) => {
@@ -13643,7 +13648,7 @@ async function applyEnterpriseProvisioningPlan(
     await applyEnterpriseScimUser(c, user, desiredGroupOverlays)
   }
   for (const group of desiredGroupOverlays) {
-    await workspaceDependencies.enterpriseIdentity.markScimGroupApplied(
+    await workspaceDependencies.enterpriseIdentity.scimDirectory.markScimGroupApplied(
       run.workspaceId,
       group.groupId,
       group.version,
@@ -13692,7 +13697,7 @@ async function applyEnterpriseScimUserState(
     user.userName.trim().toLowerCase()
   const existing = await workspaceDependencies.workspaceAccess.getMember(user.workspaceId, memberKey)
   if (user.active) {
-    const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(user.workspaceId)
+    const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(user.workspaceId)
     const workspaceRole = resolveEnterpriseScimWorkspaceRole(
       snapshot,
       user,
@@ -13760,7 +13765,7 @@ async function applyEnterpriseScimUserState(
     await authenticationDependencies.cognito.disableWorkspaceUser?.(memberKey)
     await authenticationDependencies.cognito.globallySignOutWorkspaceUser?.(memberKey)
   }
-  await workspaceDependencies.enterpriseIdentity.markScimUserApplied(
+  await workspaceDependencies.enterpriseIdentity.scimDirectory.markScimUserApplied(
     user.workspaceId,
     user.userId,
     user.version,
@@ -13832,7 +13837,10 @@ async function requireEnterpriseScimWorkspace(c: Context) {
   const workspaceId = readEnterpriseText(c.req.param('workspaceId'), 'Workspace ID')
   const token = readBearerAccessToken(c)
   const authentication = token
-    ? await workspaceDependencies.enterpriseIdentity.authenticateScimWorkspace(workspaceId, token)
+    ? await workspaceDependencies.enterpriseIdentity.scimAuthentication.authenticateScimWorkspace(
+        workspaceId,
+        token,
+      )
     : undefined
   if (!authentication) {
     throw new EnterpriseIdentityError(
@@ -14527,33 +14535,24 @@ async function createDocumentApiPrincipal(
       principal.userKey,
     workspaceRole: principal.workspaceRole,
     isSystemAdmin: principal.isSystemAdmin,
-    authorizationGuards: [
+    authorizationSnapshots: [{
+      workspaceId: principal.directoryId,
       ...(principal.principalKind === 'service-account'
-        ? []
-        : [{
-            tableName: getConfiguredWorkspaceAccessTableName(),
-            key: {
-              workspaceId: principal.directoryId,
-              recordKey:
-                `MEMBER#${normalizeProjectMemberKey(principal.userKey)}`,
-            },
-            generationAttribute: 'version',
-            expectedGeneration: principal.workspaceMember.version,
-            requiredAttributes: {
-              entryType: 'workspace-member',
-              status: 'active',
-            },
-          } satisfies DocumentAuthorizationGenerationGuard]),
-      {
-        ...createPlanningAuthorizationGuard(
-          principal.directoryId,
-          planningRevision,
-        ),
-      },
-      ...createEnterpriseDocumentAuthorizationGuards(
-        principal,
-      ),
-    ],
+        ? {}
+        : {
+            workspaceMemberKey: principal.userKey,
+            workspaceMemberVersion:
+              principal.workspaceMember.version,
+          }),
+      planningRevision,
+      ...(principal.enterprisePermissions === undefined ||
+          principal.enterpriseIdentityControlRevision === undefined
+        ? {}
+        : {
+            enterpriseControlRevision:
+              principal.enterpriseIdentityControlRevision,
+          }),
+    } satisfies DocumentAuthorizationFenceSnapshot],
     projectRoles,
     ...createDocumentEnterpriseScopeBoundary(principal),
   }
@@ -14708,40 +14707,6 @@ function createDocumentEnterpriseScopeBoundary(
   }
 }
 
-function createEnterpriseDocumentAuthorizationGuards(
-  principal: WorkspacePrincipal,
-): DocumentAuthorizationGenerationGuard[] {
-  const tableName =
-    getEnv('ENTERPRISE_IDENTITY_TABLE_NAME')
-  const expectedGeneration =
-    principal.enterpriseIdentityControlRevision
-  if (
-    principal.enterprisePermissions === undefined ||
-    !tableName ||
-    expectedGeneration === undefined ||
-    !Number.isSafeInteger(expectedGeneration) ||
-    expectedGeneration < 0
-  ) {
-    return []
-  }
-  return [{
-    tableName,
-    key: {
-      scopeKey:
-        `WORKSPACE#${principal.directoryId}`,
-      recordKey: 'CONTROL',
-    },
-    generationAttribute: 'controlRevision',
-    expectedGeneration,
-    requiredAttributes: {
-      entryType: 'enterprise-identity-control',
-    },
-    ...(expectedGeneration === 0
-      ? { allowMissingWhenExpectedZero: true }
-      : {}),
-  }]
-}
-
 async function getCachedDocumentProjectRoles(
   workspaceId: string,
   memberKey: string,
@@ -14786,39 +14751,6 @@ async function getCachedDocumentProjectRoles(
     value,
   })
   return value
-}
-
-function getConfiguredWorkspaceAccessTableName() {
-  return getEnv('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
-    getEnv('WORKSPACE_ACCESS_TABLE_NAME') ??
-    'mukuroji-workspace-access-local'
-}
-
-function getConfiguredPlanningTableName() {
-  return getEnv('PLANNING_TABLE_NAME') ??
-    'mukuroji-planning-local'
-}
-
-function createPlanningAuthorizationGuard(
-  workspaceId: string,
-  revision: number,
-): DocumentAuthorizationGenerationGuard {
-  return {
-    tableName: getConfiguredPlanningTableName(),
-    key: {
-      workspaceId,
-      recordKey: 'META',
-    },
-    generationAttribute: 'revision',
-    expectedGeneration: revision,
-    requiredAttributes: {
-      entryType: 'planning-meta',
-      schemaVersion: PLANNING_SCHEMA_VERSION,
-    },
-    ...(revision === 0
-      ? { allowMissingWhenExpectedZero: true }
-      : {}),
-  }
 }
 
 async function validateDocumentRelationTargets(
@@ -14985,12 +14917,10 @@ async function validateDocumentRelationTargets(
   }
   return planningAuthorizationState === undefined
     ? undefined
-    : [
-        createPlanningAuthorizationGuard(
-          principal.workspaceId,
-          planningAuthorizationState.revision,
-        ),
-      ]
+    : [{
+        workspaceId: principal.workspaceId,
+        planningRevision: planningAuthorizationState.revision,
+      } satisfies DocumentAuthorizationFenceSnapshot]
 }
 
 function readBearerAccessToken(c: Context) {
@@ -16731,7 +16661,7 @@ async function requireWebhookTeamPermission(
       principal.userKey,
     ),
     principal.enterpriseAuthorizationEvaluation?.snapshot ??
-      workspaceDependencies.enterpriseIdentity.getSnapshot(principal.directoryId),
+      workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId),
   ])
   const legacyReadAllowed = projectAccesses
     .filter((projectAccess) => teamProjectIds.has(projectAccess.projectId))
@@ -18976,7 +18906,7 @@ async function resolveDeveloperCredentialPrincipal(
   const isSystemAdmin = currentCognitoGroups.some((group) =>
     systemAdminGroups.has(group)
   )
-  const snapshot = await workspaceDependencies.enterpriseIdentity.getSnapshot(credential.workspaceId)
+  const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(credential.workspaceId)
   const directoryPrincipal = resolveEnterpriseDirectoryPrincipal(
     snapshot,
     member.memberKey,

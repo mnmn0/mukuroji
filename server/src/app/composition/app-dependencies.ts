@@ -27,8 +27,11 @@ import type {
   PublicWorkItemService,
 } from '../../modules/developer-platform/public-api'
 import type { ProjectDirectoryClient } from '../../modules/directory'
-import type { DocumentClient } from '../../modules/documents/documents'
-import type { EnterpriseIdentityClient } from '../../modules/enterprise-identity/enterprise-identity'
+import type { DocumentClient } from '../../modules/documents'
+import type {
+  EnterpriseIdentityCapabilities,
+  EnterpriseIdentityClient,
+} from '../../modules/enterprise-identity'
 import type { EnterpriseSessionActivityClient } from '../../modules/enterprise-identity/enterprise-session-activity'
 import type { FileProofingClient } from '../../modules/files/file-proofing'
 import type { NotificationClient } from '../../modules/notifications/notifications'
@@ -90,8 +93,8 @@ export interface WorkspaceDependencies {
   auditEvents: AuditEventsClient
   /** Provides Workspace membership persistence. */
   workspaceAccess: WorkspaceAccessClient
-  /** Provides Enterprise Identity persistence. */
-  enterpriseIdentity: EnterpriseIdentityClient
+  /** Provides capability-scoped Enterprise Identity application ports. */
+  enterpriseIdentity: EnterpriseIdentityCapabilities
   /** Provides Enterprise session assurance persistence. */
   enterpriseSessionActivity: EnterpriseSessionActivityClient
   /** Validates Enterprise Identity provider metadata and connectivity. */
@@ -207,8 +210,11 @@ export function freezeAppDependencies(
 /** Flat dependency overrides accepted by test composition helpers. */
 export type AppDependencyOverrides = Partial<
   AuthenticationDependencies &
-  WorkspaceDependencies &
+  Omit<WorkspaceDependencies, 'enterpriseIdentity'> &
   WorkItemDependencies &
   AutomationDependencies &
   DeveloperPlatformDependencies
->
+> & {
+  /** Test-only aggregate client converted to capability-scoped ports at composition. */
+  enterpriseIdentity?: EnterpriseIdentityClient
+}

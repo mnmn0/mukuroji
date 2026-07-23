@@ -18,7 +18,7 @@ import {
 } from '../../../analytics/analytics'
 import {
   resolveDocumentCapabilities,
-} from '../../../documents/document-access'
+} from '../../../documents/domain/document-access'
 import type {
   DocumentClient,
 } from '../../../documents/documents'
@@ -1585,7 +1585,7 @@ test('enforces service-account Project scope before recording successful use', a
     let documentAuthorizationGuards:
       Parameters<
         DocumentClient['update']
-      >[0]['access']['authorizationGuards']
+      >[0]['access']['authorizationSnapshots']
     let documentMutationControlRevision:
       number | undefined
     let documentGuardControlRevision:
@@ -1594,15 +1594,14 @@ test('enforces service-account Project scope before recording successful use', a
       documents: {
         async update(input) {
           documentAuthorizationGuards =
-            input.access.authorizationGuards
+            input.access.authorizationSnapshots
           const enterpriseGuard =
             documentAuthorizationGuards?.find(
-              ({ tableName }) =>
-                tableName ===
-                  'EnterpriseIdentityTable',
+              ({ enterpriseControlRevision }) =>
+                enterpriseControlRevision !== undefined,
             )
           documentGuardControlRevision =
-            enterpriseGuard?.expectedGeneration
+            enterpriseGuard?.enterpriseControlRevision
           documentMutationControlRevision =
             (
               await identity.getSnapshot(
@@ -1698,32 +1697,17 @@ test('enforces service-account Project scope before recording successful use', a
     expect(documentGuardControlRevision)
       .toBe(documentMutationControlRevision)
     expect(documentAuthorizationGuards)
-      .toEqual([
-        expect.objectContaining({
-          tableName: 'PlanningTable',
-          key: {
-            workspaceId:
-              'workspace-service-account',
-            recordKey: 'META',
-          },
-        }),
-        expect.objectContaining({
-          tableName:
-            'EnterpriseIdentityTable',
-          key: {
-            scopeKey:
-              'WORKSPACE#workspace-service-account',
-            recordKey: 'CONTROL',
-          },
-        }),
-      ])
+      .toEqual([{
+        workspaceId:
+          'workspace-service-account',
+        planningRevision: 0,
+        enterpriseControlRevision:
+          documentMutationControlRevision,
+      }])
     expect(
       documentAuthorizationGuards?.some(
-        (guard) =>
-          guard.tableName ===
-            'WorkspaceAccessTable' ||
-          guard.key.recordKey ===
-            'MEMBER#project-reader-service',
+        ({ workspaceMemberKey }) =>
+          workspaceMemberKey !== undefined,
       ),
     ).toBeFalse()
 

@@ -4,6 +4,7 @@ import type {
   DocumentPermission,
   DocumentScope,
 } from '@mukuroji/contracts'
+
 /**
  * Project scope の Document access に対応する既存 Project role です。
  */
