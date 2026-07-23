@@ -182,6 +182,21 @@ function requireObject(value: unknown, label: string): object {
 }
 
 /**
+ * Requires an unknown YAML value to be an array.
+ *
+ * @param value - Parsed YAML value to validate.
+ * @param label - Human-readable source label for validation errors.
+ * @returns The validated array while preserving unknown item types.
+ */
+function requireArray(value: unknown, label: string): unknown[] {
+  if (!Array.isArray(value)) {
+    throw new TypeError(`${label} must be a YAML sequence`);
+  }
+
+  return value;
+}
+
+/**
  * Reads a required string property from a validated object.
  *
  * @param value - Object containing the property.
@@ -197,6 +212,27 @@ function requireString(
   const propertyValue: unknown = Reflect.get(value, property);
   if (typeof propertyValue !== "string" || propertyValue.trim().length === 0) {
     throw new TypeError(`${label}.${property} must be a non-empty string`);
+  }
+
+  return propertyValue;
+}
+
+/**
+ * Reads a required boolean property from a validated object.
+ *
+ * @param value - Object containing the property.
+ * @param property - Property name to read.
+ * @param label - Human-readable source label for validation errors.
+ * @returns The boolean property value.
+ */
+function requireBoolean(
+  value: object,
+  property: string,
+  label: string,
+): boolean {
+  const propertyValue: unknown = Reflect.get(value, property);
+  if (typeof propertyValue !== "boolean") {
+    throw new TypeError(`${label}.${property} must be a boolean`);
   }
 
   return propertyValue;
@@ -386,6 +422,73 @@ if (shortDescription.length < 25 || shortDescription.length > 64) {
 if (!defaultPrompt.includes(`$${skillName}`)) {
   throw new TypeError(
     "agents/openai.yaml.interface.default_prompt must mention the Skill name",
+  );
+}
+
+const dependenciesValue: unknown = Reflect.get(
+  agentMetadata,
+  "dependencies",
+);
+if (dependenciesValue !== undefined) {
+  const dependenciesMetadata = requireObject(
+    dependenciesValue,
+    "agents/openai.yaml.dependencies",
+  );
+  requireOnlyKeys(
+    dependenciesMetadata,
+    new Set(["tools"]),
+    "agents/openai.yaml.dependencies",
+  );
+  const tools = requireArray(
+    Reflect.get(dependenciesMetadata, "tools"),
+    "agents/openai.yaml.dependencies.tools",
+  );
+  if (tools.length === 0) {
+    throw new TypeError(
+      "agents/openai.yaml.dependencies.tools must not be empty",
+    );
+  }
+
+  for (const [index, toolValue] of tools.entries()) {
+    const toolLabel = `agents/openai.yaml.dependencies.tools[${index}]`;
+    const tool = requireObject(toolValue, toolLabel);
+    requireOnlyKeys(
+      tool,
+      new Set([
+        "type",
+        "value",
+        "description",
+        "transport",
+        "url",
+      ]),
+      toolLabel,
+    );
+    const toolType = requireString(tool, "type", toolLabel);
+    if (toolType !== "mcp") {
+      throw new TypeError(`${toolLabel}.type must be mcp`);
+    }
+    requireString(tool, "value", toolLabel);
+    requireString(tool, "description", toolLabel);
+    requireString(tool, "transport", toolLabel);
+    requireString(tool, "url", toolLabel);
+  }
+}
+
+const policyValue: unknown = Reflect.get(agentMetadata, "policy");
+if (policyValue !== undefined) {
+  const policyMetadata = requireObject(
+    policyValue,
+    "agents/openai.yaml.policy",
+  );
+  requireOnlyKeys(
+    policyMetadata,
+    new Set(["allow_implicit_invocation"]),
+    "agents/openai.yaml.policy",
+  );
+  requireBoolean(
+    policyMetadata,
+    "allow_implicit_invocation",
+    "agents/openai.yaml.policy",
   );
 }
 
