@@ -1,12 +1,13 @@
+import {
+  WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  type CustomFieldValue,
+  type WorkflowStatusCategory,
+} from './work-item-configuration'
+
 /**
  * 現在の canonical Work Item schema version です。
  */
 export const WORK_ITEM_SCHEMA_VERSION = 1 as const
-
-/**
- * Work Item configuration の現行 schema version です。
- */
-export const WORK_ITEM_CONFIGURATION_SCHEMA_VERSION = 1 as const
 
 /**
  * Work Item の進捗状態です。
@@ -47,63 +48,6 @@ export type ApprovalSummary = {
    */
   nextDueAt?: string
 }
-
-/**
- * Workflow status を横断集計するための標準 category です。
- */
-export type WorkflowStatusCategory =
-  | 'backlog'
-  | 'unstarted'
-  | 'started'
-  | 'completed'
-  | 'canceled'
-
-/**
- * Workflow に含まれる status の定義です。
- */
-export type WorkflowStatusDefinition = {
-  /** Workflow 内で status を識別する ID です。 */
-  id: string
-  /** UI に表示する status 名です。 */
-  name: string
-  /** List/report を横断して利用する標準 category です。 */
-  category: WorkflowStatusCategory
-  /** Workflow 内の表示順です。 */
-  sortOrder: number
-  /** UI 表示に利用できる色 token です。 */
-  color?: string
-}
-
-/**
- * Workflow で許可する status transition です。
- */
-export type WorkflowTransition = {
-  /** 遷移元 status ID です。 */
-  fromStatusId: string
-  /** 遷移先 status ID です。 */
-  toStatusId: string
-}
-
-/**
- * Work Item に適用する workflow 定義です。
- */
-export type WorkflowDefinition = {
-  /** Workflow を識別する ID です。 */
-  id: string
-  /** UI に表示する workflow 名です。 */
-  name: string
-  /** Work Item 作成時に適用する status ID です。 */
-  initialStatusId: string
-  /** Workflow で利用できる status 一覧です。 */
-  statuses: WorkflowStatusDefinition[]
-  /** Workflow で許可する transition 一覧です。 */
-  transitions: WorkflowTransition[]
-}
-
-/**
- * Work Item custom field に保存できる JSON value です。
- */
-export type CustomFieldValue = string | number | boolean | string[]
 
 /**
  * Canonical Work Item が共有する field です。

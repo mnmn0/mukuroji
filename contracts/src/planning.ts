@@ -1,4 +1,4 @@
-import type { WorkflowStatusCategory } from './work-items'
+import type { WorkflowStatusCategory } from './work-item-configuration'
 
 /** Planning domain の現行 schema version です。 */
 export const PLANNING_SCHEMA_VERSION = 1 as const
