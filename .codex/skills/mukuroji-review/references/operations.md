@@ -21,4 +21,4 @@ Check:
   behavior are considered when the change affects scale or asynchronous work.
 
 Report missing recovery or diagnosis only when the changed path makes the gap
-material to the Issue or production safety.
+material to the selected intent source or production safety.

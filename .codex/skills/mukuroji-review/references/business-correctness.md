@@ -17,5 +17,5 @@ Check:
   projection, receipt, or audit record.
 - Whether the response reflects the committed state and stable error category/code.
 
-Do not infer product behavior from naming alone. Use the Issue, nearby domain code,
-docs, existing tests, and contracts as evidence.
+Do not infer product behavior from naming alone. Use the selected intent source,
+nearby domain code, docs, existing tests, and contracts as evidence.

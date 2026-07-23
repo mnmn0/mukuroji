@@ -16,9 +16,9 @@ Check:
 - Keyboard navigation, focus restoration, focus trap, labels, roles, error messages,
   contrast, reduced motion, and screen-reader announcements work for changed flows.
 - Responsive and mobile interaction, touch target size, slow network, and offline or
-  reconnect behavior are handled when the Issue requires them.
+  reconnect behavior are handled when the selected intent source requires them.
 - Existing test IDs, locale keys, Storybook stories, and important error text remain
-  compatible when the Issue says behavior is preserved.
+  compatible when the selected intent source says behavior is preserved.
 
 Prefer a finding with a reproducible interaction or user impact over subjective
 visual taste.
