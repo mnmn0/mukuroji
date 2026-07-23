@@ -7,6 +7,15 @@ import {
 } from './management-validation'
 
 describe('Automation management validation domain', () => {
+  test('preserves required-field messages at the extracted validation boundary', () => {
+    expect(() => validateCreateRecurringWorkInput({})).toThrow(
+      'Recurring Work name is required.',
+    )
+    expect(() => validateCreateAutomationInboundWebhookEndpointInput({})).toThrow(
+      'Inbound webhook endpoint name is required.',
+    )
+  })
+
   test('normalizes template and application inputs without persistence state', () => {
     expect(validateCreateAutomationTemplateInput({
       kind: 'work-item',

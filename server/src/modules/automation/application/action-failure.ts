@@ -38,9 +38,7 @@ export function normalizeAutomationActionFailure(error: unknown): AutomationActi
     return {
       code: error.code,
       message: error.message,
-      retryable: error.retryable ||
-        error.category === 'rate-limited' ||
-        error.category === 'unavailable',
+      retryable: error.retryable || isTransientFailureStatus(error.status),
     }
   }
   if (isRecord(error)) {

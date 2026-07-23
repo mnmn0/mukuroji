@@ -10,7 +10,6 @@ import {
   type RecurringWork,
 } from '@mukuroji/contracts'
 import {
-  AutomationEngine,
   AutomationError,
   DynamoDbAutomationClient,
   applyBulkOperation,
@@ -30,10 +29,12 @@ import {
   validateCreateAutomationRuleInput,
   validateCreateAutomationTemplateInput,
   type AutomationClient,
+  type AutomationErrorCategory,
   type AutomationEvent,
   type AutomationExecutionClaimToken,
   type BulkOperationAdapter,
 } from './automation'
+import { AutomationEngine } from './application/execution-service'
 
 function createRule(overrides: Partial<AutomationRule> = {}): AutomationRule {
   return {
@@ -978,6 +979,50 @@ describe('automation execution safety', () => {
     })
     expect(await invalidEngine.handleEvent(invalidRule, createEvent({ eventId: 'event-invalid' })))
       .toMatchObject({ status: 'dead-letter', nextRetryAt: undefined })
+  })
+
+  test('preserves legacy Automation error status while classifying transport-neutral categories', () => {
+    const mappings: Array<[AutomationErrorCategory, number]> = [
+      ['invalid-input', 400],
+      ['unauthenticated', 401],
+      ['forbidden', 403],
+      ['not-found', 404],
+      ['conflict', 409],
+      ['payload-too-large', 413],
+      ['unsupported-media-type', 415],
+      ['unprocessable', 422],
+      ['locked', 423],
+      ['rate-limited', 429],
+      ['unavailable', 503],
+    ]
+
+    for (const [category, status] of mappings) {
+      expect(new AutomationError(category, 'MappedFailure', 'Mapped failure.'))
+        .toMatchObject({ category, status, retryable: false })
+      expect(new AutomationError(status, 'LegacyFailure', 'Legacy failure.'))
+        .toMatchObject({ category, status, retryable: false })
+    }
+
+    expect(new AutomationError(418, 'UnknownLegacyFailure', 'Unknown legacy failure.'))
+      .toMatchObject({
+        category: 'unavailable',
+        status: 418,
+        retryable: false,
+      })
+    expect(normalizeAutomationActionFailure(
+      new AutomationError(418, 'UnknownLegacyFailure', 'Unknown legacy failure.'),
+    )).toEqual({
+      code: 'UnknownLegacyFailure',
+      message: 'Unknown legacy failure.',
+      retryable: false,
+    })
+    expect(normalizeAutomationActionFailure(
+      new AutomationError(503, 'LegacyTransientFailure', 'Legacy transient failure.'),
+    )).toEqual({
+      code: 'LegacyTransientFailure',
+      message: 'Legacy transient failure.',
+      retryable: true,
+    })
   })
 
   test('redacts untrusted action failure details before they reach durable history', () => {
@@ -1929,6 +1974,54 @@ describe('automation execution safety', () => {
     expect(calls).toEqual([1, 2])
   })
 
+  test('clears stale action failure metadata when recovering a successful receipt', async () => {
+    const client = createMemoryClient()
+    const rule = createRule({ actions: [{ type: 'comment', body: 'Already delivered' }] })
+    const event = createEvent()
+    const execution = createExecution()
+    const actionId = execution.actions[0]!.actionId
+    execution.actions[0] = {
+      actionIndex: 0,
+      actionId,
+      status: 'failed',
+      attempts: 1,
+      startedAt: '2026-07-16T00:00:00.000Z',
+      errorCode: 'StaleActionFailure',
+      errorMessage: 'This failure was persisted before the receipt was recovered.',
+    }
+    client.rules.set(`${rule.id}\0${rule.version}`, rule)
+    client.executions.set(execution.id, structuredClone(execution))
+    client.events.set(execution.id, structuredClone(event))
+    client.receipts.add(`${execution.id}\0${actionId}`)
+    let calls = 0
+    const engine = new AutomationEngine(client, {
+      async execute() {
+        calls += 1
+      },
+    })
+
+    const recovered = await engine.retryExecution(
+      execution.workspaceId,
+      execution.id,
+      undefined,
+      new Date('2026-07-16T00:02:00.000Z'),
+    )
+    const recoveredAction = recovered.actions[0]
+
+    expect(calls).toBe(0)
+    expect(recovered).toMatchObject({
+      status: 'succeeded',
+      errorCode: undefined,
+      errorMessage: undefined,
+    })
+    expect(recoveredAction).toMatchObject({
+      status: 'succeeded',
+      errorCode: undefined,
+      errorMessage: undefined,
+    })
+    expect(recoveredAction?.completedAt).toEqual(expect.any(String))
+  })
+
   test('prevents loops/rate overflow and dead-letters exhausted failures', async () => {
     let calls = 0
     const executor = {
@@ -2577,6 +2670,43 @@ test('does not mark Bulk permission or conflict failures as retryable', async ()
   expect(operation.items[0]).toMatchObject({ status: 'failed', retryable: false })
   await retryBulkOperation(operation, adapter)
   expect(applyCalls).toBe(1)
+})
+
+test('rejects incomplete durable Bulk checkpoints before retry or undo side effects', async () => {
+  let applyCalls = 0
+  let undoCalls = 0
+  const adapter: BulkOperationAdapter = {
+    async preview() {
+      return { allowed: true }
+    },
+    async apply() {
+      applyCalls += 1
+      return { resultingRevision: 20 }
+    },
+    async undo() {
+      undoCalls += 1
+      return { resultingRevision: 21 }
+    },
+  }
+  const retryOperation = createBulkOperationFixture()
+  const undoOperation = createBulkOperationFixture()
+  retryOperation.items.length += 1
+  undoOperation.items.length += 1
+
+  await expect(retryBulkOperation(retryOperation, adapter))
+    .rejects.toMatchObject({
+      category: 'unavailable',
+      code: 'BulkOperationInvalid',
+    })
+  await expect(undoBulkOperation(undoOperation, adapter))
+    .rejects.toMatchObject({
+      category: 'unavailable',
+      code: 'BulkOperationInvalid',
+    })
+
+  expect({ applyCalls, undoCalls }).toEqual({ applyCalls: 0, undoCalls: 0 })
+  expect(retryOperation.status).toBe('partial')
+  expect(undoOperation.status).toBe('partial')
 })
 
 test('rejects one of concurrent bulk retry and undo mutations with 409', async () => {

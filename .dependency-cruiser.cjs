@@ -200,6 +200,18 @@ module.exports = {
           '^server/src/(?:app/|handlers/)|^server/src/modules/[^/]+/adapter-in/',
       },
     },
+    {
+      name: 'server-automation-public-boundary',
+      comment: 'Server consumers outside Automation must use modules/automation/index.ts.',
+      severity: 'error',
+      from: {
+        path: '^server/src/',
+        pathNot: '^server/src/modules/automation/',
+      },
+      to: {
+        path: '^server/src/modules/automation/(?!index\\.ts$)',
+      },
+    },
     ...serverModuleBoundaryRules,
   ],
   options: {

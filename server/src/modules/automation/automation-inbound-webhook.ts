@@ -10,26 +10,19 @@ export type {
   AutomationInboundWebhookSecretStore,
 } from './application/ports'
 
-/** Inbound webhook secret を outbound secret から隔離する既定 prefix です。 */
-export const AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX =
-  'mukuroji/automation-inbound-webhooks'
+export {
+  AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX,
+  createAutomationInboundWebhookSecretId,
+} from './adapter-out/inbound-webhook-secret-id'
+export {
+  SecretsManagerAutomationInboundWebhookSecretStore,
+} from './adapter-out/secrets-manager/inbound-webhook-secret-store'
 
 /** Public inbound webhook が受け付ける raw body 上限です。 */
 export const AUTOMATION_INBOUND_WEBHOOK_MAX_BODY_BYTES = 256 * 1_024
 
 /** Sender timestamp に許容する clock skew 秒数です。 */
 export const AUTOMATION_INBOUND_WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS = 5 * 60
-
-/** Workspace/endpoint を inbound-only Secrets Manager resource ID へ変換します。 */
-export function createAutomationInboundWebhookSecretId(
-  workspaceId: string,
-  endpointId: string,
-  prefix = readInboundWebhookSecretPrefix(),
-) {
-  const normalizedWorkspaceId = readIdentifier(workspaceId, 'Workspace ID')
-  const normalizedEndpointId = readIdentifier(endpointId, 'Inbound webhook endpoint ID')
-  return `${prefix}/${hashText(normalizedWorkspaceId)}/${normalizedEndpointId}`
-}
 
 /** Operation ID から AWS が許可する deterministic immutable secret VersionId を作ります。 */
 export function createAutomationInboundWebhookSecretVersionId(
@@ -151,13 +144,6 @@ export function parseAutomationInboundWebhookJson(rawBody: Uint8Array) {
   } catch {
     throw new AutomationError('invalid-input', 'AutomationInboundWebhookJsonInvalid', 'Request body must be valid JSON.')
   }
-}
-
-function readInboundWebhookSecretPrefix() {
-  const prefix = process.env.AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX
-    ?.trim()
-    .replace(/^\/+|\/+$/g, '')
-  return prefix || AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX
 }
 
 function readIdentifier(value: string, label: string) {

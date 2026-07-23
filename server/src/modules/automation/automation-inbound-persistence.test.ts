@@ -1,10 +1,20 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, test } from 'bun:test'
 import {
+  AUTOMATION_SCHEMA_VERSION,
+  type AutomationRule,
+  type AutomationTemplateApplication,
+} from '@mukuroji/contracts'
+import {
   AUTOMATION_INBOUND_WEBHOOK_SECRET_CLEANUP_GRACE_MS,
   AUTOMATION_INBOUND_WEBHOOK_SECRET_RECOVERY_MS,
   DynamoDbAutomationClient,
+  type AutomationClient,
+  type AutomationEvent,
 } from './automation'
+import {
+  createAutomationInboundWebhookSecretId,
+} from './adapter-out/inbound-webhook-secret-id'
 
 function createInboundWebhookDocumentProbe() {
   const items = new Map<string, Record<string, unknown>>()
@@ -126,8 +136,7 @@ function createInboundWebhookDocumentProbe() {
             const tableName = String(update.TableName)
             const key = update.Key as Record<string, unknown>
             const existing = readExisting(tableName, key)
-            if (!existing) throw new Error('Test update item is missing.')
-            const updated = structuredClone(existing)
+            const updated = structuredClone(existing ?? key)
             const names = update.ExpressionAttributeNames as Record<string, string>
             const values = update.ExpressionAttributeValues as Record<string, unknown>
             for (const match of String(update.UpdateExpression)
@@ -205,6 +214,9 @@ describe('DynamoDB inbound webhook lifecycle', () => {
       'https://api.example.com/prod',
     )
     const created = await client.completeInboundWebhookProvisioning(createdProvisioning)
+    expect(created.secretId).toBe(
+      createAutomationInboundWebhookSecretId('workspace-1', created.id),
+    )
     expect(created.endpointUrl).toBe(
       `https://api.example.com/prod/api/automation/inbound-webhooks/${created.opaqueEndpointId}`,
     )
@@ -423,7 +435,7 @@ describe('DynamoDB inbound webhook delivery receipts', () => {
       signatureFingerprint: fingerprint('signature-1'),
       signatureTimestamp: '1784160000',
       eventId: 'event-1',
-      auditMutation: auditPut('event-1'),
+      auditTransactItem: auditPut('event-1'),
     })
     expect(first).toEqual({ eventId: 'event-1', replayed: false })
     expect(await client.recordInboundWebhookDelivery(endpoint, {
@@ -508,5 +520,120 @@ describe('DynamoDB inbound webhook delivery receipts', () => {
       item.entryType === 'inbound-webhook-delivery'
     )
     expect(deliveryReceipt?.expiresAt).toBeNumber()
+  })
+})
+
+describe('legacy DynamoDB Automation client compatibility', () => {
+  test('adapts legacy execution and template-completion boundaries to focused mutations', async () => {
+    const probe = createInboundWebhookDocumentProbe()
+    const client = new DynamoDbAutomationClient('AutomationTable', probe.documentClient)
+    const rule = {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'rule-legacy',
+      workspaceId: 'workspace-1',
+      name: 'Legacy reservation',
+      enabled: true,
+      version: 3,
+      revision: 5,
+      trigger: { type: 'status', toStatusId: 'done' },
+      conditions: [],
+      actions: [{ type: 'comment', body: 'Reserved' }],
+      retryPolicy: {
+        maxAttempts: 3,
+        initialDelayMs: 1_000,
+        backoffMultiplier: 2,
+        maxDelayMs: 60_000,
+      },
+      rateLimit: { maxExecutions: 10, windowSeconds: 60 },
+      allowReentry: false,
+      maxChainDepth: 8,
+      createdAt: '2026-07-16T00:00:00.000Z',
+      updatedAt: '2026-07-16T00:00:00.000Z',
+    } satisfies AutomationRule
+    const event = {
+      eventId: 'event-legacy',
+      eventType: 'work-item.updated',
+      workspaceId: rule.workspaceId,
+      occurredAt: '2026-07-16T00:00:30.000Z',
+      changes: [{ field: 'workflowStatusId', before: 'review', after: 'done' }],
+    } satisfies AutomationEvent
+    probe.items.set(
+      `AutomationTable\0workspace-1#automation\0RULE#${rule.id}`,
+      {
+        scopeKey: 'workspace-1#automation',
+        recordKey: `RULE#${rule.id}`,
+        entryType: 'rule',
+        ...rule,
+      },
+    )
+
+    expect(await client.reserveExecution(
+      rule,
+      event,
+      new Date('2026-07-16T00:00:30.000Z'),
+    )).toBe('created')
+    expect([...probe.items.values()].find((item) => item.entryType === 'execution'))
+      .toMatchObject({
+        ruleId: rule.id,
+        ruleVersion: rule.version,
+        status: 'pending',
+        triggerEvent: event,
+      })
+
+    const application = {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'application-legacy',
+      workspaceId: rule.workspaceId,
+      actorId: 'owner@example.com',
+      templateId: 'template-1',
+      templateVersion: 2,
+      kind: 'project',
+      target: { kind: 'project', teamId: 'core' },
+      status: 'running',
+      revision: 4,
+      runnerLeaseExpiresAt: '2026-07-16T00:05:00.000Z',
+      createdAt: '2026-07-16T00:00:00.000Z',
+      updatedAt: '2026-07-16T00:00:00.000Z',
+    } satisfies AutomationTemplateApplication
+    const completion = client.createTemplateApplicationCompletionTransactItem(
+      application,
+      {
+        kind: 'project',
+        teamId: 'core',
+        projectId: 'project-1',
+        name: 'Incident response',
+      },
+    )
+    expect(completion.Update).toMatchObject({
+      TableName: 'AutomationTable',
+      ExpressionAttributeValues: {
+        ':expectedRevision': application.revision,
+        ':runnerLeaseExpiresAt': application.runnerLeaseExpiresAt,
+        ':succeeded': 'succeeded',
+      },
+    })
+  })
+
+  test('keeps legacy fake boundaries structurally implementable', () => {
+    const legacyFake: Pick<
+      AutomationClient,
+      | 'createTemplateApplicationCompletionTransactItem'
+      | 'recordInboundWebhookDelivery'
+      | 'reserveExecution'
+    > = {
+      createTemplateApplicationCompletionTransactItem() {
+        return auditPut('completion-event')
+      },
+      async recordInboundWebhookDelivery(_endpoint, input) {
+        return { eventId: input.eventId, replayed: false }
+      },
+      async reserveExecution() {
+        return 'duplicate'
+      },
+    }
+
+    expect(legacyFake).toHaveProperty('reserveExecution')
+    expect(legacyFake).toHaveProperty('createTemplateApplicationCompletionTransactItem')
+    expect(legacyFake).toHaveProperty('recordInboundWebhookDelivery')
   })
 })

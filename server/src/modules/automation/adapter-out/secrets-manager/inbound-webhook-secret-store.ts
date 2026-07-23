@@ -12,6 +12,9 @@ import type {
   AutomationInboundWebhookSecretStore,
 } from '../../application/ports'
 import { AutomationError } from '../../domain/automation-error'
+import {
+  createSecretsManagerClient,
+} from '../../../../infrastructure/aws/secrets-manager-client'
 
 /** Secrets Manager adapter for inbound Webhook signing secrets. */
 export class SecretsManagerAutomationInboundWebhookSecretStore
@@ -22,9 +25,9 @@ implements AutomationInboundWebhookSecretStore {
   /**
    * Creates a Secrets Manager-backed inbound Webhook secret store.
    *
-   * @param client - Configured Secrets Manager client supplied by composition.
+   * @param client - Configured client; defaults to centralized validated server configuration.
    */
-  constructor(client: SecretsManagerClient) {
+  constructor(client: SecretsManagerClient = createSecretsManagerClient()) {
     this.client = client
   }
 
@@ -59,7 +62,9 @@ implements AutomationInboundWebhookSecretStore {
   }
 
   /** Reads one pinned secret generation. */
-  async get(reference: AutomationInboundWebhookSecretReference): Promise<Uint8Array> {
+  async get(
+    reference: AutomationInboundWebhookSecretReference,
+  ): Promise<Buffer<ArrayBuffer>> {
     const secret = await this.read(reference, false)
     if (!secret) throw secretUnavailable()
     return secret
@@ -93,7 +98,7 @@ implements AutomationInboundWebhookSecretStore {
   private async read(
     reference: AutomationInboundWebhookSecretReference,
     missingIsUndefined: boolean,
-  ): Promise<Buffer | undefined> {
+  ): Promise<Buffer<ArrayBuffer> | undefined> {
     try {
       const response = await this.client.send(new GetSecretValueCommand({
         SecretId: reference.secretId,

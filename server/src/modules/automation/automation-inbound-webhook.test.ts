@@ -9,11 +9,9 @@ import {
   parseAutomationInboundWebhookJson,
   readAutomationInboundWebhookBody,
   readAutomationInboundWebhookTimestamp,
+  SecretsManagerAutomationInboundWebhookSecretStore,
   verifyAutomationInboundWebhookSignature,
 } from './automation-inbound-webhook'
-import {
-  SecretsManagerAutomationInboundWebhookSecretStore,
-} from './adapter-out/secrets-manager/inbound-webhook-secret-store'
 
 function createSecretsManagerProbe() {
   const versions = new Map<string, string>()
@@ -123,6 +121,11 @@ describe('inbound webhook raw request verification', () => {
 })
 
 describe('inbound webhook secret provisioning', () => {
+  test('keeps the legacy no-argument Secrets Manager store constructor available', () => {
+    expect(new SecretsManagerAutomationInboundWebhookSecretStore())
+      .toBeInstanceOf(SecretsManagerAutomationInboundWebhookSecretStore)
+  })
+
   test('pins immutable versions and recovers create/rotate response loss without stages', async () => {
     const probe = createSecretsManagerProbe()
     const store = new SecretsManagerAutomationInboundWebhookSecretStore(probe.client)
@@ -160,6 +163,11 @@ describe('inbound webhook secret provisioning', () => {
   test('derives deterministic inbound-only secret resource and version IDs', () => {
     expect(createAutomationInboundWebhookSecretId('workspace-1', 'webhook-1'))
       .toMatch(/^mukuroji\/automation-inbound-webhooks\/[a-f0-9]{64}\/webhook-1$/)
+    expect(createAutomationInboundWebhookSecretId(
+      'workspace-1',
+      'webhook-1',
+      '/legacy-prefix/',
+    )).toMatch(/^\/legacy-prefix\/\/[a-f0-9]{64}\/webhook-1$/)
     expect(createAutomationInboundWebhookSecretVersionId('operation-1', 4))
       .toMatch(/^[a-f0-9]{64}$/)
     expect(createAutomationInboundWebhookSecretVersionId('operation-1', 4))

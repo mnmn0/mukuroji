@@ -41,7 +41,8 @@ import type {
   AutomationExecutionClaimToken,
   AutomationExecutionDefinitionGuard,
   AutomationExecutionQuery,
-  AutomationInboundWebhookDeliveryInput,
+  AutomationInboundWebhookDeliveryInput as AutomationInboundWebhookDeliveryMutationInput,
+  AutomationInboundWebhookDeliveryResult,
   AutomationInboundWebhookEndpointRecord,
   AutomationInboundWebhookProvisioning,
   AutomationInboundWebhookProvisioningOperation,
@@ -53,6 +54,7 @@ import { AutomationError } from '../../domain/automation-error'
 import {
   createRecurringExecutionId,
 } from '../../application/execution-identifiers'
+import { createPendingAutomationExecution } from '../../application/pending-execution'
 import {
   DEFAULT_AUTOMATION_RATE_LIMIT,
   DEFAULT_AUTOMATION_RETRY_POLICY,
@@ -74,6 +76,9 @@ import {
 import {
   createAutomationScheduleShard,
 } from '../../application/schedule-shard'
+import {
+  createAutomationInboundWebhookSecretId,
+} from '../inbound-webhook-secret-id'
 export { AutomationError } from '../../domain/automation-error'
 export { isAutomationValue } from '../../domain/automation-value'
 export { normalizeAutomationActionFailure } from '../../application/action-failure'
@@ -113,7 +118,6 @@ export type {
   AutomationExecutionPage,
   AutomationExecutionQuery,
   AutomationExecutionReservation,
-  AutomationInboundWebhookDeliveryInput,
   AutomationInboundWebhookDeliveryResult,
   AutomationInboundWebhookEndpointRecord,
   AutomationInboundWebhookProvisioning,
@@ -149,8 +153,57 @@ export const AUTOMATION_INBOUND_WEBHOOK_DELIVERY_RETENTION_SECONDS = 400 * 86_40
 /** One DynamoDB transaction mutation owned by the persistence adapter. */
 type DynamoDbAutomationTransactionItem =
   NonNullable<TransactWriteCommandInput['TransactItems']>[number]
-/** Backward-compatible transport-neutral alias for all focused Automation ports. */
-export type AutomationClient = AutomationRepository
+
+/**
+ * Legacy atomic inbound delivery input accepted by `AutomationClient`.
+ *
+ * The focused port calls the adapter-owned transaction value `auditMutation`;
+ * this compatibility shape preserves the original `auditTransactItem` field.
+ */
+export type AutomationInboundWebhookDeliveryInput = Omit<
+  AutomationInboundWebhookDeliveryMutationInput<DynamoDbAutomationTransactionItem>,
+  'auditMutation'
+> & {
+  /** Audit table Put item committed atomically with the delivery receipt. */
+  auditTransactItem: DynamoDbAutomationTransactionItem
+}
+
+/**
+ * Backward-compatible all-capability Automation persistence contract.
+ *
+ * @deprecated New application code should depend on the focused Automation ports.
+ */
+export type AutomationClient = Omit<
+  AutomationRepository<
+    DynamoDbAutomationTransactionItem,
+    DynamoDbAutomationTransactionItem
+  >,
+  | 'createTemplateApplicationCompletionMutation'
+  | 'recordInboundWebhookDelivery'
+  | 'reserveExecution'
+> & {
+  /** Creates the legacy adapter-owned template completion transaction item. */
+  createTemplateApplicationCompletionTransactItem(
+    application: AutomationTemplateApplication,
+    result: AutomationTemplateApplicationResult,
+  ): DynamoDbAutomationTransactionItem
+  /** Atomically records a legacy delivery receipt and audit transaction item. */
+  recordInboundWebhookDelivery(
+    endpoint: AutomationInboundWebhookEndpointRecord,
+    input: AutomationInboundWebhookDeliveryInput,
+  ): Promise<AutomationInboundWebhookDeliveryResult>
+  /** Creates and atomically reserves a pending rule execution. */
+  reserveExecution(
+    rule: AutomationRule,
+    event: AutomationEvent,
+    now: Date,
+  ): Promise<
+    | 'created'
+    | 'duplicate'
+    | 'rate-limited'
+    | 'stale-definition'
+  >
+}
 
 /** DynamoDB single-table adapter implementing the focused Automation ports. */
 export class DynamoDbAutomationRepository implements AutomationRepository<
@@ -892,7 +945,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     const endpointId = `webhook-${randomUUID()}`
     const opaqueEndpointId = randomBytes(32).toString('base64url')
     const secretGeneration = 1
-    const secretId = createInboundWebhookSecretId(normalizedWorkspaceId, endpointId)
+    const secretId = createAutomationInboundWebhookSecretId(normalizedWorkspaceId, endpointId)
     const secretVersionId = createInboundWebhookSecretVersionId(
       identity.operationId,
       secretGeneration,
@@ -1371,7 +1424,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
   /** Endpoint guard、delivery/signature receipt、audit outbox を atomic に保存します。 */
   async recordInboundWebhookDelivery(
     endpoint: AutomationInboundWebhookEndpointRecord,
-    input: AutomationInboundWebhookDeliveryInput<DynamoDbAutomationTransactionItem>,
+    input: AutomationInboundWebhookDeliveryMutationInput<DynamoDbAutomationTransactionItem>,
   ) {
     await this.ensureTable()
     const normalizedKey = requireBoundedText(input.idempotencyKey, 'Inbound webhook idempotency key', 256)
@@ -2831,8 +2884,101 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
   }
 }
 
-/** Backward-compatible name for the DynamoDB Automation repository. */
-export { DynamoDbAutomationRepository as DynamoDbAutomationClient }
+/**
+ * Backward-compatible DynamoDB Automation client.
+ *
+ * @deprecated New composition code should instantiate `DynamoDbAutomationRepository`
+ * and inject its focused capability interfaces.
+ */
+export class DynamoDbAutomationClient
+  extends DynamoDbAutomationRepository
+  implements AutomationClient {
+  /** Delegates focused execution reservations without changing their input. */
+  override async reserveExecution(
+    execution: AutomationExecution,
+    event: AutomationEvent,
+    rule: AutomationRule,
+  ): Promise<
+    | 'created'
+    | 'duplicate'
+    | 'rate-limited'
+    | 'stale-definition'
+  >
+  /** Creates the legacy pending execution before reserving it. */
+  async reserveExecution(
+    rule: AutomationRule,
+    event: AutomationEvent,
+    now: Date,
+  ): Promise<
+    | 'created'
+    | 'duplicate'
+    | 'rate-limited'
+    | 'stale-definition'
+  >
+  override async reserveExecution(
+    executionOrRule: AutomationExecution | AutomationRule,
+    event: AutomationEvent,
+    ruleOrNow: AutomationRule | Date,
+  ) {
+    if (ruleOrNow instanceof Date) {
+      if ('ruleId' in executionOrRule) {
+        throw invalidInput('Legacy execution reservation requires an Automation rule.')
+      }
+      return await super.reserveExecution(
+        createPendingAutomationExecution(executionOrRule, event, ruleOrNow),
+        event,
+        executionOrRule,
+      )
+    }
+    if (!('ruleId' in executionOrRule)) {
+      throw invalidInput('Focused execution reservation requires an Automation execution.')
+    }
+    return await super.reserveExecution(executionOrRule, event, ruleOrNow)
+  }
+
+  /**
+   * Delegates the legacy completion-item name to the focused mutation method.
+   *
+   * @param application - Running template application holding a lease.
+   * @param result - Durable application result.
+   * @returns The DynamoDB transaction item that completes the application.
+   */
+  createTemplateApplicationCompletionTransactItem(
+    application: AutomationTemplateApplication,
+    result: AutomationTemplateApplicationResult,
+  ) {
+    return super.createTemplateApplicationCompletionMutation(application, result)
+  }
+
+  /** Records a delivery through the focused audit-mutation input. */
+  override async recordInboundWebhookDelivery(
+    endpoint: AutomationInboundWebhookEndpointRecord,
+    input: AutomationInboundWebhookDeliveryMutationInput<DynamoDbAutomationTransactionItem>,
+  ): Promise<AutomationInboundWebhookDeliveryResult>
+  /** Records a delivery through the legacy audit-transaction-item input. */
+  async recordInboundWebhookDelivery(
+    endpoint: AutomationInboundWebhookEndpointRecord,
+    input: AutomationInboundWebhookDeliveryInput,
+  ): Promise<AutomationInboundWebhookDeliveryResult>
+  override async recordInboundWebhookDelivery(
+    endpoint: AutomationInboundWebhookEndpointRecord,
+    input:
+      | AutomationInboundWebhookDeliveryMutationInput<DynamoDbAutomationTransactionItem>
+      | AutomationInboundWebhookDeliveryInput,
+  ) {
+    if ('auditMutation' in input) {
+      return await super.recordInboundWebhookDelivery(endpoint, input)
+    }
+    return await super.recordInboundWebhookDelivery(endpoint, {
+      idempotencyKey: input.idempotencyKey,
+      bodyFingerprint: input.bodyFingerprint,
+      signatureFingerprint: input.signatureFingerprint,
+      signatureTimestamp: input.signatureTimestamp,
+      eventId: input.eventId,
+      auditMutation: input.auditTransactItem,
+    })
+  }
+}
 
 /** CDK と同じ key/GSI schema の local Automation table を作成します。 */
 export async function ensureLocalAutomationTable(tableName: string, client: DynamoDBClient) {
@@ -3003,17 +3149,6 @@ function createInboundWebhookOperationIdentity(
     operationId: `inbound_operation_${operationHash.slice(0, 48)}`,
     requestFingerprint: hashCanonicalText({ kind, endpointId, input: normalizedInput }),
   }
-}
-
-function createInboundWebhookSecretId(workspaceId: string, endpointId: string) {
-  const prefix = process.env.AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX
-    ?.trim()
-    .replace(/^\/+|\/+$/g, '') || 'mukuroji/automation-inbound-webhooks'
-  return `${prefix}/${hashCanonicalText(requireText(workspaceId, 'Workspace ID'))}/${requireBoundedText(
-    endpointId,
-    'Inbound webhook endpoint ID',
-    256,
-  )}`
 }
 
 function createInboundWebhookSecretVersionId(operationId: string, secretGeneration: number) {

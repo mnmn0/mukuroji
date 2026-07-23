@@ -370,10 +370,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /** Reads bounded non-empty text from untrusted input. */
 function requireBoundedText(value: unknown, label: string, maximum: number): string {
-  if (typeof value !== 'string' || !value.trim() || value.length > maximum) {
-    throw invalidInput(`${label} is invalid.`)
+  if (typeof value !== 'string' || !value.trim()) {
+    throw invalidInput(`${label} is required.`)
   }
-  return value.trim()
+  const text = value.trim()
+  if (text.length > maximum) {
+    throw invalidInput(`${label} must be ${maximum} characters or fewer.`)
+  }
+  return text
 }
 
 /** Reads a bounded integer from untrusted input. */
@@ -384,7 +388,7 @@ function requireInteger(
   maximum: number,
 ): number {
   if (!Number.isSafeInteger(value) || typeof value !== 'number' || value < minimum || value > maximum) {
-    throw invalidInput(`${label} is invalid.`)
+    throw invalidInput(`${label} must be an integer between ${minimum} and ${maximum}.`)
   }
   return value
 }

@@ -3,7 +3,6 @@ import type {
   WorkItemRelationMutationResponse,
   WorkItemRelationType,
 } from '@mukuroji/contracts'
-import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager'
 import {
   createCanonicalPublicWorkItemService,
   shouldEnableWorkspaceSearchProjection,
@@ -23,6 +22,7 @@ import {
   createDynamoDbDocumentClient,
   shouldBootstrapLocalDynamoDb,
 } from '../../infrastructure/aws/dynamodb-client'
+import { createSecretsManagerClient } from '../../infrastructure/aws/secrets-manager-client'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
 import { createCognitoClient } from '../../modules/authentication'
 import {
@@ -151,21 +151,9 @@ export function createAutomationClient(): DynamoDbAutomationRepository {
  */
 export function createAutomationInboundWebhookSecretStore(
 ): SecretsManagerAutomationInboundWebhookSecretStore {
-  const config = loadServerConfig()
-  const client = new SecretsManagerClient({
-    region: config.awsRegion,
-    ...(config.secretsManagerEndpoint
-      ? {
-          endpoint: config.secretsManagerEndpoint,
-          credentials: {
-            accessKeyId: config.environment.AWS_ACCESS_KEY_ID ?? 'test',
-            secretAccessKey: config.environment.AWS_SECRET_ACCESS_KEY ?? 'test',
-          },
-        }
-      : {}),
-  })
-
-  return new SecretsManagerAutomationInboundWebhookSecretStore(client)
+  return new SecretsManagerAutomationInboundWebhookSecretStore(
+    createSecretsManagerClient(),
+  )
 }
 
 /**

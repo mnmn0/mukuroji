@@ -242,8 +242,12 @@ export class AutomationEngine {
       const action = rule.actions[index]!
       const actionState = execution.actions[index]!
       if (await this.client.hasActionReceipt(execution.workspaceId, execution.id, actionState.actionId)) {
+        const savedAt = new Date()
         actionState.status = 'succeeded'
-        if (!await this.client.saveExecution(execution, claimToken, new Date())) {
+        actionState.completedAt ??= savedAt.toISOString()
+        actionState.errorCode = undefined
+        actionState.errorMessage = undefined
+        if (!await this.client.saveExecution(execution, claimToken, savedAt)) {
           return await readAutomationExecutionAfterLeaseLoss(this.client, execution)
         }
         continue

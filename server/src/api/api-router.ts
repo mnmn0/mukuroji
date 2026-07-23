@@ -327,54 +327,40 @@ import {
 import {
   createWorkItemConfigurationRouter,
 } from '../modules/work-items/adapter-in/http/work-item-configuration-router'
-import { normalizeAutomationActionFailure } from '../modules/automation/application/action-failure'
-import {
-  applyBulkOperation,
-  previewBulkOperation,
-  retryBulkOperation,
-  undoBulkOperation,
-} from '../modules/automation/application/bulk-operation-service'
-import { AutomationEngine } from '../modules/automation/application/execution-service'
-import {
-  toAutomationInboundWebhookEndpoint,
-} from '../modules/automation/application/inbound-webhook-view'
-import type {
-  AutomationActionExecutionContext,
-  AutomationActionExecutor,
-  AutomationInboundWebhookEndpointRecord,
-  AutomationInboundWebhookProvisioning,
-  AutomationRuleTemplatePort,
-  BulkOperationAdapter,
-} from '../modules/automation/application/ports'
 import {
   AUTOMATION_TEMPLATE_APPLICATION_LEASE_MS,
-} from '../modules/automation/application/template-application-policy'
-import {
+  AutomationEngine,
   AutomationError,
-  type AutomationErrorCategory,
-} from '../modules/automation/domain/automation-error'
-import { isAutomationValue } from '../modules/automation/domain/automation-value'
-import {
+  applyBulkOperation,
+  deliverAutomationWebhook,
+  isAutomationInboundWebhookJsonContentType,
+  isAutomationValue,
+  normalizeAutomationActionFailure,
+  parseAutomationInboundWebhookJson,
+  previewBulkOperation,
+  readAutomationInboundWebhookBody,
+  readAutomationInboundWebhookTimestamp,
+  retryBulkOperation,
+  toAutomationInboundWebhookEndpoint,
+  undoBulkOperation,
   validateApplyAutomationTemplateInput,
   validateAutomationInboundWebhookLifecycleInput,
   validateCreateAutomationInboundWebhookEndpointInput,
+  validateCreateAutomationRuleInput,
   validateCreateAutomationTemplateInput,
   validateCreateRecurringWorkInput,
   validateUpdateAutomationInboundWebhookEndpointInput,
-} from '../modules/automation/domain/management-validation'
-import type { AutomationEvent } from '../modules/automation/domain/rule-evaluation'
-import {
-  validateCreateAutomationRuleInput,
-} from '../modules/automation/domain/rule-validation'
-import {
-  isAutomationInboundWebhookJsonContentType,
-  parseAutomationInboundWebhookJson,
-  readAutomationInboundWebhookBody,
-  readAutomationInboundWebhookTimestamp,
   verifyAutomationInboundWebhookSignature,
+  type AutomationActionExecutionContext,
+  type AutomationActionExecutor,
+  type AutomationErrorCategory,
+  type AutomationEvent,
+  type AutomationInboundWebhookEndpointRecord,
+  type AutomationInboundWebhookProvisioning,
   type AutomationInboundWebhookSecretReference,
-} from '../modules/automation/automation-inbound-webhook'
-import { deliverAutomationWebhook } from '../modules/automation/automation-webhook'
+  type AutomationRuleTemplatePort,
+  type BulkOperationAdapter,
+} from '../modules/automation'
 import { PlanningError, type PlanningWorkItemState } from '../modules/planning/planning'
 import type {
   AuthenticatedDeveloperCredential,
@@ -9392,9 +9378,7 @@ async function saveTemplateApplicationFailureState(
 function isTerminalTemplateApplicationError(
   error: unknown,
 ): error is AutomationError | WorkItemConfigurationError | ProjectDataError {
-  if (error instanceof AutomationError) {
-    return error.category !== 'unavailable' && !error.retryable
-  }
+  if (error instanceof AutomationError) return error.status < 500 && !error.retryable
   return (error instanceof WorkItemConfigurationError || error instanceof ProjectDataError) &&
     error.status < 500
 }
@@ -16231,8 +16215,9 @@ function toAutomationErrorResponse(c: Context, error: unknown) {
     console.error(error)
     return c.json({ message: 'Automation data is unavailable.' }, 502)
   }
-  if (error.category === 'unavailable') console.error(error)
-  const status = mapAutomationErrorStatus(error.category)
+  if (error.status >= 500) console.error(error)
+  const categoryStatus = mapAutomationErrorStatus(error.category)
+  const status = error.status === categoryStatus ? categoryStatus : 502
   return c.json({ code: error.code, message: error.message }, status)
 }
 

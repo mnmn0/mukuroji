@@ -5,7 +5,6 @@ import {
   type AutomationRateLimit,
   type AutomationRetryPolicy,
   type AutomationTrigger,
-  type AutomationValue,
   type CreateAutomationRuleInput,
 } from '@mukuroji/contracts'
 import {
@@ -13,6 +12,7 @@ import {
   readAutomationWebhookEndpoint,
 } from '../automation-webhook-policy'
 import { AutomationError } from './automation-error'
+import { requireAutomationRecord } from './automation-record'
 import { isAutomationValue } from './automation-value'
 import { validateRecurringSchedule } from './recurring-schedule'
 
@@ -410,21 +410,6 @@ function validateAutomationRateLimit(value: unknown): AutomationRateLimit {
       86_400,
     ),
   }
-}
-
-/** Reads a JSON-compatible object and clones its values. */
-function requireAutomationRecord(
-  value: unknown,
-  label: string,
-): Record<string, AutomationValue> {
-  const record = requireRecord(value, label)
-  if (!isAutomationValue(record)) throw invalidInput(`${label} is invalid.`)
-  const result: Record<string, AutomationValue> = {}
-  for (const [key, entry] of Object.entries(record)) {
-    if (!isAutomationValue(entry)) throw invalidInput(`${label} is invalid.`)
-    result[key] = structuredClone(entry)
-  }
-  return result
 }
 
 /** Reads an object from untrusted input. */

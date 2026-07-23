@@ -128,6 +128,30 @@ test('preserves FileProofingError status and code in Automation API responses', 
   })
 })
 
+test('preserves the legacy AutomationError fallback for unsupported numeric statuses', async () => {
+  configureFakeProjectClients(true)
+  setTestAppDependencies({
+    automation: {
+      async listRules() {
+        throw new AutomationError(
+          418,
+          'UnsupportedLegacyAutomationStatus',
+          'Legacy Automation status is unsupported.',
+        )
+      },
+    } as unknown as AutomationClient,
+  })
+
+  const response = await app.request('/api/automation/rules', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(response.status).toBe(502)
+  expect(await response.json()).toEqual({
+    code: 'UnsupportedLegacyAutomationStatus',
+    message: 'Legacy Automation status is unsupported.',
+  })
+})
+
 test('derives stable and item-scoped audit idempotency keys for bulk apply', () => {
   const request = {
     workspaceId: 'workspace-1',
@@ -1188,6 +1212,101 @@ test('recovers a Project template application from atomic receipt success withou
   expect(replay.status).toBe(200)
   expect(await replay.json()).toMatchObject({ status: 'succeeded', id: application.id })
   expect({ createCalls, templateVersionReads }).toEqual({ createCalls: 1, templateVersionReads: 1 })
+})
+
+test('keeps unsupported legacy 4xx template failures terminal', async () => {
+  const now = '2026-07-16T00:00:00.000Z'
+  const template: AutomationTemplate = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'template-project-legacy-failure',
+    workspaceId: 'user#demo@example.com',
+    kind: 'project',
+    name: 'Legacy failure Project',
+    enabled: true,
+    version: 1,
+    revision: 1,
+    payload: { nameJa: '旧エラー', nameEn: 'Legacy failure', tone: 'purple' },
+    createdAt: now,
+    updatedAt: now,
+  }
+  let application: AutomationTemplateApplication = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'application_project_legacy_failure',
+    workspaceId: template.workspaceId,
+    actorId: 'demo@example.com',
+    templateId: template.id,
+    templateVersion: template.version,
+    kind: 'project',
+    target: { kind: 'project', teamId: 'core-team' },
+    status: 'pending',
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  }
+  let savedApplication: AutomationTemplateApplication | undefined
+  configureFakeProjectClients(true, {
+    async projectCreateHook() {
+      throw new AutomationError(
+        418,
+        'UnsupportedLegacyTemplateFailure',
+        'Legacy template failure is terminal.',
+      )
+    },
+  })
+  setTestAppDependencies({
+    automation: {
+      async reserveTemplateApplication() {
+        return structuredClone(application)
+      },
+      async claimTemplateApplication(candidate, _claimNow, leaseExpiresAt) {
+        application = {
+          ...candidate,
+          status: 'running',
+          revision: candidate.revision + 1,
+          runnerLeaseExpiresAt: leaseExpiresAt,
+        }
+        return structuredClone(application)
+      },
+      createTemplateApplicationCompletionMutation() {
+        return {
+          Update: {
+            TableName: 'AutomationTable',
+            Key: { scopeKey: application.workspaceId, recordKey: application.id },
+          },
+        }
+      },
+      async getTemplateApplication() {
+        return structuredClone(application)
+      },
+      async getTemplateVersion() {
+        return structuredClone(template)
+      },
+      async saveTemplateApplication(candidate) {
+        savedApplication = structuredClone(candidate)
+        application = structuredClone(candidate)
+      },
+    } as unknown as AutomationClient,
+  })
+
+  const response = await app.request(
+    `/api/automation/templates/${template.id}/applications`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'apply-project-legacy-failure',
+      },
+      body: JSON.stringify({ target: { kind: 'project', teamId: 'core-team' } }),
+    },
+  )
+
+  expect(response.status).toBe(502)
+  expect(savedApplication).toMatchObject({
+    status: 'failed',
+    errorCode: 'UnsupportedLegacyTemplateFailure',
+    errorMessage: 'Legacy template failure is terminal.',
+  })
 })
 
 test('applies a Workflow template atomically while preserving custom fields and target revision', async () => {

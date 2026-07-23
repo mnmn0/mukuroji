@@ -9,9 +9,9 @@ import {
 } from '@aws-sdk/client-secrets-manager'
 import type { AutomationAction } from '@mukuroji/contracts'
 import {
-  AutomationError,
   type AutomationActionExecutionContext,
-} from './automation'
+} from './application/ports'
+import { AutomationError } from './domain/automation-error'
 import {
   isAutomationWebhookSecretAlias,
   isPublicAutomationWebhookAddress,

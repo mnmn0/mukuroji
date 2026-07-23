@@ -12,16 +12,12 @@ import {
 import {
   createAutomationEventProcessor,
   processAutomationEventBatch,
-  type DynamoStreamEvent,
-} from '../../modules/automation/adapter-in/events/automation-event'
-import {
-  processAutomationSchedule,
-  resolveAutomationScheduleProcessingTime,
   type AutomationScheduleEvent,
-} from '../../modules/automation/adapter-in/schedules/automation-schedule'
-import {
   AutomationEngine,
   DynamoDbAutomationRepository,
+  type DynamoStreamEvent,
+  processAutomationSchedule,
+  resolveAutomationScheduleProcessingTime,
 } from '../../modules/automation'
 import { createCognitoClient } from '../../modules/authentication'
 import { DynamoDbProjectDirectoryClient } from '../../modules/directory'

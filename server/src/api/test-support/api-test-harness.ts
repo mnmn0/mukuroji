@@ -54,7 +54,7 @@ import {
   type AutomationClient,
   type AutomationInboundWebhookEndpointRecord,
   type AutomationInboundWebhookProvisioning,
-} from '../../modules/automation/automation'
+} from '../../modules/automation'
 import {
   DEFAULT_WORK_ITEM_CONFIGURATION,
   type WorkItemConfigurationClient,

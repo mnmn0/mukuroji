@@ -1,14 +1,13 @@
 import { createHash } from 'node:crypto'
 import {
   AUTOMATION_SCHEMA_VERSION,
-  type AutomationValue,
   type BulkOperation,
   type BulkOperationItemResult,
   type BulkOperationPreview,
   type BulkOperationRequest,
 } from '@mukuroji/contracts'
 import { AutomationError } from '../domain/automation-error'
-import { isAutomationValue } from '../domain/automation-value'
+import { requireAutomationRecord } from '../domain/automation-record'
 import { normalizeAutomationActionFailure } from './action-failure'
 import type {
   AutomationBulkOperationPort,
@@ -193,11 +192,13 @@ export async function retryBulkOperation(
   adapter: BulkOperationAdapter,
   client?: AutomationBulkOperationPort,
 ): Promise<BulkOperation> {
-  const retryableIndexes = operation.items.flatMap((item, itemIndex) =>
-    item.status === 'ready' || (item.status === 'failed' && item.retryable)
-      ? [itemIndex]
-      : []
-  )
+  const retryableIndexes: number[] = []
+  for (let itemIndex = 0; itemIndex < operation.items.length; itemIndex += 1) {
+    const item = requireBulkOperationCheckpoint(operation, itemIndex)
+    if (item.status === 'ready' || (item.status === 'failed' && item.retryable)) {
+      retryableIndexes.push(itemIndex)
+    }
+  }
   if (retryableIndexes.length === 0) {
     if (operation.status === 'running') {
       operation.status = summarizeBulkStatus(operation.items)
@@ -219,8 +220,7 @@ export async function retryBulkOperation(
   operation.updatedAt = new Date().toISOString()
   await saveBulkOperationCheckpoint(operation, client)
   for (const itemIndex of retryableIndexes) {
-    const item = operation.items[itemIndex]
-    if (!item) continue
+    const item = requireBulkOperationCheckpoint(operation, itemIndex)
     operation.items[itemIndex] = await applyBulkItem(request, item, itemIndex, adapter)
     operation.updatedAt = new Date().toISOString()
     await saveBulkOperationCheckpoint(operation, client)
@@ -244,12 +244,15 @@ export async function undoBulkOperation(
   adapter: BulkOperationAdapter,
   client?: AutomationBulkOperationPort,
 ): Promise<BulkOperation> {
+  for (let index = 0; index < operation.items.length; index += 1) {
+    requireBulkOperationCheckpoint(operation, index)
+  }
   operation.status = 'undoing'
   operation.updatedAt = new Date().toISOString()
   await saveBulkOperationCheckpoint(operation, client)
   for (let index = operation.items.length - 1; index >= 0; index -= 1) {
-    const item = operation.items[index]
-    if (!item || item.status !== 'succeeded' || !item.undoable) continue
+    const item = requireBulkOperationCheckpoint(operation, index)
+    if (item.status !== 'succeeded' || !item.undoable) continue
     try {
       const result = await adapter.undo(operation, index)
       operation.items[index] = {
@@ -426,6 +429,28 @@ function summarizeBulkStatus(
   return 'failed'
 }
 
+/**
+ * Reads one required checkpoint from a durable Bulk operation.
+ *
+ * @param operation - Durable operation being resumed or undone.
+ * @param itemIndex - Zero-based checkpoint index.
+ * @returns The required checkpoint.
+ */
+function requireBulkOperationCheckpoint(
+  operation: BulkOperation,
+  itemIndex: number,
+): BulkOperationItemResult {
+  const checkpoint = operation.items[itemIndex]
+  if (!checkpoint) {
+    throw new AutomationError(
+      'unavailable',
+      'BulkOperationInvalid',
+      'Bulk checkpoint is invalid.',
+    )
+  }
+  return checkpoint
+}
+
 /** Saves one revision-fenced operation checkpoint. */
 async function saveBulkOperationCheckpoint(
   operation: BulkOperation,
@@ -440,21 +465,6 @@ async function saveBulkOperationCheckpoint(
     operation.revision = expectedRevision
     throw error
   }
-}
-
-/** Reads a JSON-compatible record from untrusted input. */
-function requireAutomationRecord(
-  value: unknown,
-  label: string,
-): Record<string, AutomationValue> {
-  const record = requireRecord(value, label)
-  if (!isAutomationValue(record)) throw invalidInput(`${label} is invalid.`)
-  const result: Record<string, AutomationValue> = {}
-  for (const [key, entry] of Object.entries(record)) {
-    if (!isAutomationValue(entry)) throw invalidInput(`${label} is invalid.`)
-    result[key] = structuredClone(entry)
-  }
-  return result
 }
 
 /** Reads a plain record from untrusted input. */

@@ -7,6 +7,17 @@ import {
 } from './recurring-schedule'
 
 describe('Automation recurring schedule domain', () => {
+  test('preserves bounded-integer messages at the extracted validation boundary', () => {
+    expect(() => validateRecurringSchedule({
+      frequency: 'daily',
+      interval: 0,
+      timeZone: 'UTC',
+      localTime: '09:00',
+      startDate: '2026-07-01',
+      catchUpPolicy: 'latest',
+    })).toThrow('Recurring interval must be an integer between 1 and 365.')
+  })
+
   test('validates and normalizes weekly input without AWS or Hono', () => {
     expect(validateRecurringSchedule({
       frequency: 'weekly',

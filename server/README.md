@@ -65,6 +65,10 @@ bun run server:dev
 server は既定で `http://localhost:4566` の Floci Cognito / DynamoDB に接続します。
 Ready hook は password/API 用 `mukuroji-web-local` と Hosted UI SSO 専用
 `mukuroji-sso-local` を別の public client として作成します。
+`floci:deploy-backend` は Lambda から Secrets Manager emulator へ接続するため、
+`http://floci:4566` と `MUKUROJI_LOCAL_AWS_RUNTIME=floci` を必ず組にして渡します。
+この marker は `NODE_ENV=production` では無効です。通常の AWS runtime では設定せず、
+選択した region と一致する Secrets Manager standard/FIPS HTTPS endpoint を使います。
 `.floci/generated/cognito.env` は Cognito endpoint、両 client ID、SSO callback などの非secret値を保持し、native Linuxの
 host userからも読み込めます。Workspace access audit、enterprise credential digest、SSO state に必要な
 固定 secret はこのfileへ複製せず、API writer、backfill、local backend がowner-onlyのroot `.env`から

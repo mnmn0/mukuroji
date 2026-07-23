@@ -328,10 +328,14 @@ function assertOnlyKeys(value: Record<string, unknown>, keys: readonly string[],
 
 /** Reads a trimmed non-empty string within a maximum length. */
 function requireBoundedText(value: unknown, label: string, maximum: number) {
-  if (typeof value !== 'string' || !value.trim() || value.trim().length > maximum) {
-    throw invalidInput(`${label} must be between 1 and ${maximum} characters.`)
+  if (typeof value !== 'string' || !value.trim()) {
+    throw invalidInput(`${label} is required.`)
   }
-  return value.trim()
+  const text = value.trim()
+  if (text.length > maximum) {
+    throw invalidInput(`${label} must be ${maximum} characters or fewer.`)
+  }
+  return text
 }
 
 /** Reads an optional template string while preserving meaningful empty values. */
