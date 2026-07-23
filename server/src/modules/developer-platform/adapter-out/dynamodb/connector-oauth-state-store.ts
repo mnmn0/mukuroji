@@ -11,12 +11,28 @@ import type {
   StoredConnectorOAuthState,
 } from '../../connector-oauth-state'
 
+/** DynamoDB response fields consumed by the connector OAuth state adapter. */
+type ConnectorOAuthStateDocumentResponse = {
+  /** Stored state returned by a consistent read. */
+  Item?: Record<string, unknown>
+  /** Stored state returned by an atomic delete. */
+  Attributes?: Record<string, unknown>
+}
+
+/** Narrow DynamoDB dependency required by the connector OAuth state adapter. */
+type ConnectorOAuthStateDocumentClient = {
+  /** Sends one state Put, Get, or Delete command. */
+  send(
+    command: PutCommand | GetCommand | DeleteCommand,
+  ): Promise<ConnectorOAuthStateDocumentResponse>
+}
+
 /** Options used to construct the DynamoDB connector OAuth state adapter. */
 export type DynamoDbConnectorOAuthStateStoreOptions = {
   /** Developer Platform compatible table name. */
   tableName: string
   /** Document client injected by tests or the production composition root. */
-  documentClient?: DynamoDBDocumentClient
+  documentClient?: ConnectorOAuthStateDocumentClient
 }
 
 /** DynamoDB adapter for encrypted, single-use connector OAuth state. */
@@ -24,7 +40,7 @@ export class DynamoDbConnectorOAuthStateStore implements ConnectorOAuthStateStor
   /** DynamoDB table name. */
   private readonly tableName: string
   /** DynamoDB document client. */
-  private readonly documentClient: DynamoDBDocumentClient
+  private readonly documentClient: ConnectorOAuthStateDocumentClient
 
   /** Creates a DynamoDB-backed OAuth state store. */
   constructor(options: DynamoDbConnectorOAuthStateStoreOptions) {
@@ -111,7 +127,7 @@ export class DynamoDbConnectorOAuthStateStore implements ConnectorOAuthStateStor
  */
 export function createDynamoDbConnectorOAuthStateStoreFromEnvironment(
   environment: Readonly<Record<string, string | undefined>>,
-  documentClient?: DynamoDBDocumentClient,
+  documentClient?: ConnectorOAuthStateDocumentClient,
 ) {
   const tableName = environment.DEVELOPER_PLATFORM_TABLE_NAME
   if (!tableName) {

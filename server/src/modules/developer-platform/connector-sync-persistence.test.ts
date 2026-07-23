@@ -12,6 +12,12 @@ import type { StoredConnectorSyncConflict } from './connector-sync-runtime'
 
 const NOW = '2026-07-18T00:00:00.000Z'
 
+/**
+ * Creates an observable in-memory DynamoDB document client for persistence tests.
+ *
+ * @param conditionalPutFailures - Number of version-comparison Put failures to inject.
+ * @returns The document client together with its stored items and recorded commands.
+ */
 function createMemoryDocumentClient(conditionalPutFailures = 0) {
   const items = new Map<string, Record<string, unknown>>()
   const commands: Array<{ name: string; input: Record<string, unknown> }> = []
@@ -41,7 +47,10 @@ function createMemoryDocumentClient(conditionalPutFailures = 0) {
         const key = itemKey(input.TableName, item)
         const current = items.get(key)
         const condition = input.ConditionExpression
-        if (condition !== undefined && remainingConditionalPutFailures > 0) {
+        if (
+          condition === '#version = :expectedVersion' &&
+          remainingConditionalPutFailures > 0
+        ) {
           remainingConditionalPutFailures -= 1
           throw conditionalFailure()
         }

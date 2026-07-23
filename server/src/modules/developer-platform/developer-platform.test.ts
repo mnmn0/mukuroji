@@ -89,6 +89,12 @@ function readStoredRows(client: InMemoryDeveloperPlatformClient) {
   return [...records.values()]
 }
 
+/**
+ * Creates an observable in-memory DynamoDB document client for persistence tests.
+ *
+ * @param conditionalPutFailures - Number of version-comparison Put failures to inject.
+ * @returns The document client together with its stored items and recorded commands.
+ */
 function createMemoryDocumentClient(conditionalPutFailures = 0) {
   const items = new Map<string, Record<string, unknown>>()
   const commands: Array<{ name: string; input: Record<string, unknown> }> = []
@@ -107,7 +113,10 @@ function createMemoryDocumentClient(conditionalPutFailures = 0) {
         const mapKey = `${String(item.workspaceId)}\0${String(item.recordKey)}`
         const current = items.get(mapKey)
         const condition = input.ConditionExpression
-        if (condition !== undefined && remainingConditionalPutFailures > 0) {
+        if (
+          condition === '#version = :expectedVersion' &&
+          remainingConditionalPutFailures > 0
+        ) {
           remainingConditionalPutFailures -= 1
           const error = new Error('condition failed')
           error.name = 'ConditionalCheckFailedException'
@@ -4367,23 +4376,33 @@ describe('request safety primitives', () => {
 
   test('bounds idempotency reservation retries after repeated CAS conflicts', async () => {
     const memory = createMemoryDocumentClient(4)
+    let now = new Date(START)
     const client = new DynamoDbDeveloperPlatformClient(
       'DeveloperPlatformTable',
       memory.documentClient,
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(7)),
-      () => START,
+      () => now,
     )
-
-    await expect(client.reserveIdempotency({
+    const request = {
       workspaceId: 'workspace-1',
       credentialId: 'credential-1',
       idempotencyKey: 'contended-reservation',
       requestFingerprint: 'POST:/api/v1/work-items:body-sha',
-    })).rejects.toMatchObject({
+    }
+
+    await expect(client.reserveIdempotency(request)).resolves.toMatchObject({
+      status: 'reserved',
+    })
+    now = new Date(START.getTime() + 121_000)
+
+    await expect(client.reserveIdempotency(request)).rejects.toMatchObject({
       status: 409,
       code: 'DeveloperPlatformConcurrentMutation',
     })
-    expect(memory.commands.filter(({ name }) => name === 'PutCommand')).toHaveLength(4)
+    expect(memory.commands.filter(({ name, input }) =>
+      name === 'PutCommand' &&
+      input.ConditionExpression === '#version = :expectedVersion'
+    )).toHaveLength(4)
   })
 
   test('allows takeover only after an unfinished idempotency reservation lease expires', async () => {
