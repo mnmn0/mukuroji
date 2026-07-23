@@ -22,9 +22,9 @@ implements AutomationInboundWebhookSecretStore {
   /**
    * Creates a Secrets Manager-backed inbound Webhook secret store.
    *
-   * @param client - Optional configured Secrets Manager client.
+   * @param client - Configured Secrets Manager client supplied by composition.
    */
-  constructor(client = createSecretsManagerClient()) {
+  constructor(client: SecretsManagerClient) {
     this.client = client
   }
 
@@ -114,27 +114,6 @@ implements AutomationInboundWebhookSecretStore {
       throw secretUnavailable()
     }
   }
-}
-
-/** Creates the environment-configured Secrets Manager client. */
-function createSecretsManagerClient(): SecretsManagerClient {
-  const endpoint = [
-    process.env.SECRETS_MANAGER_ENDPOINT,
-    process.env.AWS_ENDPOINT_URL_SECRETSMANAGER,
-    process.env.AWS_ENDPOINT_URL,
-  ].map((value) => value?.trim()).find(Boolean)
-  return new SecretsManagerClient({
-    region: process.env.AWS_REGION ?? 'us-east-1',
-    ...(endpoint
-      ? {
-          endpoint,
-          credentials: {
-            accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? 'test',
-            secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? 'test',
-          },
-        }
-      : {}),
-  })
 }
 
 /** Creates the stable transient secret-store failure. */

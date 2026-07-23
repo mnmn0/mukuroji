@@ -14,7 +14,7 @@ import {
   createAutomationActionId,
   createAutomationExecutionId,
   createRecurringExecutionId,
-} from '../../domain/execution-identifiers'
+} from '../../application/execution-identifiers'
 import { DEFAULT_AUTOMATION_RETRY_POLICY } from '../../domain/execution-policy'
 import {
   getNextRecurringOccurrence,
@@ -32,7 +32,7 @@ import type {
   AutomationRuleTemplatePort,
 } from '../../application/ports'
 import type { AutomationEvent } from '../../domain/rule-evaluation'
-import { AUTOMATION_SCHEDULE_SHARD_COUNT } from '../../domain/schedule-shard'
+import { AUTOMATION_SCHEDULE_SHARD_COUNT } from '../../application/schedule-shard'
 
 /** Focused capabilities required by the Automation schedule adapter. */
 export type AutomationSchedulePort =

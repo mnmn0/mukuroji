@@ -22,7 +22,7 @@ export {
   createAutomationActionId,
   createAutomationExecutionId,
   createRecurringExecutionId,
-} from './domain/execution-identifiers'
+} from './application/execution-identifiers'
 export {
   getNextRecurringOccurrence,
   getRecurringOccurrences,
@@ -37,4 +37,4 @@ export {
   type AutomationEventChange,
 } from './domain/rule-evaluation'
 export { validateCreateAutomationRuleInput } from './domain/rule-validation'
-export { createPendingAutomationExecution } from './domain/pending-execution'
+export { createPendingAutomationExecution } from './application/pending-execution'

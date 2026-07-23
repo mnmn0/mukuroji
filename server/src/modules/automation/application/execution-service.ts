@@ -17,9 +17,9 @@ import {
   createAutomationActionId,
   createAutomationExecutionId,
   createRecurringExecutionId,
-} from '../domain/execution-identifiers'
+} from './execution-identifiers'
 import { DEFAULT_AUTOMATION_RETRY_POLICY } from '../domain/execution-policy'
-import { createPendingAutomationExecution } from '../domain/pending-execution'
+import { createPendingAutomationExecution } from './pending-execution'
 import {
   evaluateAutomationCondition as evaluateDomainAutomationCondition,
   matchesAutomationTrigger as matchesDomainAutomationTrigger,

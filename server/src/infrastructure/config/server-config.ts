@@ -23,6 +23,8 @@ export interface ServerConfig {
   readonly dynamoDbEndpoint: string | undefined
   /** Optional SQS endpoint, including the shared AWS endpoint fallback. */
   readonly sqsEndpoint: string | undefined
+  /** Optional Secrets Manager endpoint, including the shared AWS endpoint fallback. */
+  readonly secretsManagerEndpoint: string | undefined
   /** Optional Cognito endpoint, including the local Bun default. */
   readonly cognitoEndpoint: string | undefined
   /** Browser origins accepted by the CORS middleware. */
@@ -85,12 +87,19 @@ export function loadServerConfig(
     environment.AWS_ENDPOINT_URL_SQS,
     environment.AWS_ENDPOINT_URL,
   )
+  const secretsManagerEndpoint = firstNonBlank(
+    environment.SECRETS_MANAGER_ENDPOINT,
+    environment.AWS_ENDPOINT_URL_SECRETS_MANAGER,
+    environment.AWS_ENDPOINT_URL_SECRETSMANAGER,
+    environment.AWS_ENDPOINT_URL,
+  )
 
   return Object.freeze({
     environment,
     awsRegion: environment.AWS_REGION ?? environment.AWS_DEFAULT_REGION ?? 'us-east-1',
     dynamoDbEndpoint,
     sqsEndpoint,
+    secretsManagerEndpoint,
     cognitoEndpoint: cognitoEndpoint?.trim()
       ? trimTrailingSlash(cognitoEndpoint.trim())
       : runtime.localBun

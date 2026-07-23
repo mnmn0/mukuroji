@@ -52,7 +52,7 @@ import { toAutomationInboundWebhookEndpoint } from '../../application/inbound-we
 import { AutomationError } from '../../domain/automation-error'
 import {
   createRecurringExecutionId,
-} from '../../domain/execution-identifiers'
+} from '../../application/execution-identifiers'
 import {
   DEFAULT_AUTOMATION_RATE_LIMIT,
   DEFAULT_AUTOMATION_RETRY_POLICY,
@@ -73,7 +73,7 @@ import {
 } from '../../domain/management-validation'
 import {
   createAutomationScheduleShard,
-} from '../../domain/schedule-shard'
+} from '../../application/schedule-shard'
 export { AutomationError } from '../../domain/automation-error'
 export { isAutomationValue } from '../../domain/automation-value'
 export { normalizeAutomationActionFailure } from '../../application/action-failure'
@@ -104,7 +104,7 @@ export {
   createAutomationActionId,
   createAutomationExecutionId,
   createRecurringExecutionId,
-} from '../../domain/execution-identifiers'
+} from '../../application/execution-identifiers'
 export type {
   AutomationActionExecutionContext,
   AutomationActionExecutor,
@@ -136,7 +136,7 @@ export {
 export {
   AUTOMATION_SCHEDULE_SHARD_COUNT,
   createAutomationScheduleShard,
-} from '../../domain/schedule-shard'
+} from '../../application/schedule-shard'
 /** Inbound webhook plaintext secret を同じ key で回収できる時間です。 */
 export const AUTOMATION_INBOUND_WEBHOOK_SECRET_RECOVERY_MS = 24 * 60 * 60_000
 /** Revoke 後の late secret write を再削除する間隔です。 */
@@ -147,16 +147,16 @@ export const AUTOMATION_INBOUND_WEBHOOK_SECRET_CLEANUP_GRACE_MS =
 /** Audit outbox より長く保持する inbound webhook delivery receipt の秒数です。 */
 export const AUTOMATION_INBOUND_WEBHOOK_DELIVERY_RETENTION_SECONDS = 400 * 86_400
 /** One DynamoDB transaction mutation owned by the persistence adapter. */
-export type DynamoDbAutomationTransactionItem =
+type DynamoDbAutomationTransactionItem =
   NonNullable<TransactWriteCommandInput['TransactItems']>[number]
-/** Backward-compatible composition alias for all focused Automation ports. */
-export type AutomationClient = AutomationRepository<
-  DynamoDbAutomationTransactionItem,
-  DynamoDbAutomationTransactionItem
->
+/** Backward-compatible transport-neutral alias for all focused Automation ports. */
+export type AutomationClient = AutomationRepository
 
 /** DynamoDB single-table adapter implementing the focused Automation ports. */
-export class DynamoDbAutomationRepository implements AutomationClient {
+export class DynamoDbAutomationRepository implements AutomationRepository<
+  DynamoDbAutomationTransactionItem,
+  DynamoDbAutomationTransactionItem
+> {
   /** Automation table 名です。 */
   private readonly tableName: string
   /** DynamoDB DocumentClient です。 */

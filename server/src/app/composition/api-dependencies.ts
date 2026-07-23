@@ -3,6 +3,7 @@ import type {
   WorkItemRelationMutationResponse,
   WorkItemRelationType,
 } from '@mukuroji/contracts'
+import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager'
 import {
   createCanonicalPublicWorkItemService,
   shouldEnableWorkspaceSearchProjection,
@@ -141,6 +142,30 @@ export function createAutomationClient(): DynamoDbAutomationRepository {
     dynamoDbClient,
     shouldBootstrapLocalDynamoDb(),
   )
+}
+
+/**
+ * Creates the configured inbound Webhook secret-store adapter.
+ *
+ * @returns A Secrets Manager-backed secret store using centralized server configuration.
+ */
+export function createAutomationInboundWebhookSecretStore(
+): SecretsManagerAutomationInboundWebhookSecretStore {
+  const config = loadServerConfig()
+  const client = new SecretsManagerClient({
+    region: config.awsRegion,
+    ...(config.secretsManagerEndpoint
+      ? {
+          endpoint: config.secretsManagerEndpoint,
+          credentials: {
+            accessKeyId: config.environment.AWS_ACCESS_KEY_ID ?? 'test',
+            secretAccessKey: config.environment.AWS_SECRET_ACCESS_KEY ?? 'test',
+          },
+        }
+      : {}),
+  })
+
+  return new SecretsManagerAutomationInboundWebhookSecretStore(client)
 }
 
 /**
@@ -345,8 +370,7 @@ export function createProductionAutomationDependencies(): AutomationDependencies
     recurringSchedules: automation,
     executions: automation,
     bulkOperations: automation,
-    automationInboundWebhookSecrets:
-      new SecretsManagerAutomationInboundWebhookSecretStore(),
+    automationInboundWebhookSecrets: createAutomationInboundWebhookSecretStore(),
   }
 }
 

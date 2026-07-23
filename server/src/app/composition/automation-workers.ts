@@ -5,6 +5,7 @@ import {
 } from '../../api/api-router'
 import {
   createAuditEventsClient,
+  createAutomationInboundWebhookSecretStore,
   createAutomationClient,
   createWorkItemConfigurationClient,
 } from './api-dependencies'
@@ -21,7 +22,6 @@ import {
 import {
   AutomationEngine,
   DynamoDbAutomationRepository,
-  SecretsManagerAutomationInboundWebhookSecretStore,
 } from '../../modules/automation'
 import { createCognitoClient } from '../../modules/authentication'
 import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
@@ -88,7 +88,7 @@ export function createProductionAutomationEventHandler() {
  */
 export function createProductionAutomationScheduleHandler() {
   const automationClient = createAutomationClient()
-  const inboundWebhookSecrets = new SecretsManagerAutomationInboundWebhookSecretStore()
+  const inboundWebhookSecrets = createAutomationInboundWebhookSecretStore()
   const actionExecutor = createAutomationActionExecutor(
     createAutomationActionDependencies(
       automationClient,

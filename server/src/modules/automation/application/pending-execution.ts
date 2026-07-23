@@ -8,7 +8,7 @@ import {
   createAutomationActionId,
   createAutomationExecutionId,
 } from './execution-identifiers'
-import type { AutomationEvent } from './rule-evaluation'
+import type { AutomationEvent } from '../domain/rule-evaluation'
 
 /**
  * Creates the canonical initial execution candidate for a matched rule event.

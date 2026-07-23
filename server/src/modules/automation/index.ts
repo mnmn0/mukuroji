@@ -3,7 +3,6 @@ export {
   DynamoDbAutomationClient,
   DynamoDbAutomationRepository,
   type AutomationClient,
-  type DynamoDbAutomationTransactionItem,
 } from './adapter-out/dynamodb/automation-repository'
 export { normalizeAutomationActionFailure } from './application/action-failure'
 export { AutomationEngine } from './application/execution-service'
@@ -66,7 +65,7 @@ export {
   createAutomationActionId,
   createAutomationExecutionId,
   createRecurringExecutionId,
-} from './domain/execution-identifiers'
+} from './application/execution-identifiers'
 export {
   getNextRecurringOccurrence,
   getRecurringOccurrences,
@@ -81,5 +80,5 @@ export {
   type AutomationEventChange,
 } from './domain/rule-evaluation'
 export { validateCreateAutomationRuleInput } from './domain/rule-validation'
-export { createPendingAutomationExecution } from './domain/pending-execution'
-export { createAutomationScheduleShard } from './domain/schedule-shard'
+export { createPendingAutomationExecution } from './application/pending-execution'
+export { createAutomationScheduleShard } from './application/schedule-shard'

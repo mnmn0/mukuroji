@@ -10,7 +10,7 @@ import {
 import {
   validateWorkflowDefinition,
   WorkflowDefinitionValidationError,
-} from '../../../domain/workflow-definition'
+} from '../../work-item-workflow'
 import { AutomationError } from './automation-error'
 import { isAutomationValue } from './automation-value'
 import { validateRecurringSchedule } from './recurring-schedule'

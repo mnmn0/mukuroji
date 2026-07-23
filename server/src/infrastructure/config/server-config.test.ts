@@ -11,6 +11,7 @@ test('loads stable local server defaults without mutating the environment', () =
     awsRegion: 'us-east-1',
     cognitoEndpoint: 'http://localhost:4566',
     dynamoDbEndpoint: 'http://localhost:4566',
+    secretsManagerEndpoint: undefined,
     sqsEndpoint: undefined,
     port: 3000,
     production: false,
@@ -27,6 +28,7 @@ test('normalizes explicit endpoints, origins, and production cursor validation',
     AWS_LAMBDA_FUNCTION_NAME: 'api',
     COGNITO_ENDPOINT: 'https://cognito.example.com///',
     DYNAMODB_ENDPOINT: 'https://dynamodb.example.com',
+    SECRETS_MANAGER_ENDPOINT: ' https://secrets.example.com ',
     SQS_ENDPOINT: 'https://sqs.example.com',
     PORT: '8080',
     PUBLIC_API_CURSOR_SECRET: 'production-public-api-cursor-secret-value',
@@ -37,6 +39,7 @@ test('normalizes explicit endpoints, origins, and production cursor validation',
     awsRegion: 'ap-northeast-1',
     cognitoEndpoint: 'https://cognito.example.com',
     dynamoDbEndpoint: 'https://dynamodb.example.com',
+    secretsManagerEndpoint: 'https://secrets.example.com',
     sqsEndpoint: 'https://sqs.example.com',
     port: 8080,
     production: true,
@@ -58,6 +61,7 @@ test('preserves legacy blank Cognito endpoint, runtime role, and port semantics'
   }, { localBun: false })
 
   expect(config.cognitoEndpoint).toBeUndefined()
+  expect(config.secretsManagerEndpoint).toBe('https://fallback.example.com')
   expect(config.runtimeRole).toBe(' ')
   expect(config.port).toBe(0)
 })

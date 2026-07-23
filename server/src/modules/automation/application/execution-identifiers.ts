@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { AutomationRule } from '@mukuroji/contracts'
-import { AutomationError } from './automation-error'
+import { AutomationError } from '../domain/automation-error'
 
 /**
  * Creates a deterministic execution identifier for a logical Rule/event pair.

@@ -13,6 +13,7 @@ const serverModules = [
   'planning',
   'realtime',
   'request-intake',
+  'work-item-workflow',
   'work-items',
   'workspace-access',
   'workspace-search',

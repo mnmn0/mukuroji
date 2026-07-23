@@ -29,7 +29,7 @@ import {
 import {
   validateWorkflowDefinition as validateDomainWorkflowDefinition,
   WorkflowDefinitionValidationError,
-} from '../../domain/workflow-definition'
+} from '../work-item-workflow'
 
 export { isCanonicalWorkItemRelationIds } from './canonical-work-item'
 

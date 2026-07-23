@@ -1,4 +1,5 @@
 import type { EnterpriseIdentityProvider } from '@mukuroji/contracts'
+import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
 import type { DashboardSummaryClient } from '../../modules/analytics'
 import type { AnalyticsRepository } from '../../modules/analytics/analytics'
 import type {
@@ -15,7 +16,6 @@ import type {
   AutomationRecurringSchedulePort,
   AutomationRepository,
   AutomationRuleTemplatePort,
-  DynamoDbAutomationTransactionItem,
 } from '../../modules/automation'
 import type { CollaborationClient } from '../../modules/collaboration/collaboration'
 import type { DeveloperPlatformClient } from '../../modules/developer-platform/developer-platform'
@@ -47,6 +47,10 @@ import type {
 } from '../../modules/work-items/work-item-import'
 import type { WorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'
 import type { WorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
+
+/** DynamoDB transaction item shared only by adapters assembled at the API composition boundary. */
+type AutomationCompositionTransactionItem =
+  NonNullable<TransactWriteCommandInput['TransactItems']>[number]
 
 /** Append-only audit persistence required by Workspace routes. */
 export type AuditEventsClient = {
@@ -131,9 +135,9 @@ export interface WorkItemDependencies {
 /** Dependencies required by Automation routes. */
 export interface AutomationDependencies {
   /** Provides Rule and Template application persistence. */
-  ruleTemplates: AutomationRuleTemplatePort<DynamoDbAutomationTransactionItem>
+  ruleTemplates: AutomationRuleTemplatePort<AutomationCompositionTransactionItem>
   /** Provides inbound Webhook endpoint and replay persistence. */
-  inboundWebhooks: AutomationInboundWebhookPort<DynamoDbAutomationTransactionItem>
+  inboundWebhooks: AutomationInboundWebhookPort<AutomationCompositionTransactionItem>
   /** Provides recurring definition persistence. */
   recurringSchedules: AutomationRecurringSchedulePort
   /** Provides execution, lease, rate-limit, and receipt persistence. */
@@ -204,8 +208,8 @@ export type AppDependencyOverrides = Partial<
 > & {
   /** Backward-compatible all-capability Automation adapter override for tests. */
   automation?: AutomationRepository<
-    DynamoDbAutomationTransactionItem,
-    DynamoDbAutomationTransactionItem
+    AutomationCompositionTransactionItem,
+    AutomationCompositionTransactionItem
   >
   /** Test-only aggregate client converted to capability-scoped ports at composition. */
   enterpriseIdentity?: EnterpriseIdentityClient
