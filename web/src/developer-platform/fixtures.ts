@@ -9,7 +9,7 @@ import type {
   IssuedOAuthClientSecret,
   IssuedWebhookSigningSecret,
 } from './api'
-import type { DeveloperPlatformLabels } from './ui/DeveloperPlatformPanel'
+import type { DeveloperPlatformLabels } from './ui/DeveloperPlatformView'
 
 const connectorReauthorizationProblem = {
   type: 'https://mukuroji.example/problems/connector-reauthorization',

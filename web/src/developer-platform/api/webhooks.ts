@@ -1,51 +1,32 @@
-import type { ApiScope, WebhookDelivery, WebhookSubscription } from '@mukuroji/contracts'
+import type {
+  ApiScope,
+  CreateWebhookSubscriptionInput,
+  WebhookDelivery,
+  WebhookEventType,
+  WebhookSubscriptionSecretOutput,
+} from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { DeveloperPlatformApiError } from './errors'
 
 /**
- * Webhook subscription が購読できる event type です。
+ * Compatibility alias for webhook event identifiers.
  */
-export type DeveloperWebhookEventType = WebhookSubscription['eventTypes'][number]
+export type DeveloperWebhookEventType = WebhookEventType
 
 /**
- * Webhook subscription 作成 API の入力です。
+ * Compatibility webhook input that keeps the previously required scope field.
  */
-export type CreateDeveloperWebhookInput = {
-  /**
-   * 管理画面で識別する subscription 名です。
-   */
-  name: string
-  /**
-   * Signed webhook を送信する HTTPS URL です。
-   */
-  url: string
-  /**
-   * 作成者が現在参照でき、event payload の配信を許可する Team ID 一覧です。
-   */
-  teamIds: string[]
-  /**
-   * 配信対象 event type 一覧です。
-   */
-  eventTypes: DeveloperWebhookEventType[]
-  /**
-   * Webhook payload に許可する scope 一覧です。
-   */
-  scopes: ApiScope[]
-}
+export type CreateDeveloperWebhookInput =
+  Omit<CreateWebhookSubscriptionInput, 'scopes'> & {
+    /** Payload scopes granted to the subscription. */
+    scopes: ApiScope[]
+  }
 
 /**
- * Webhook subscription 作成または signing secret rotation 直後の response です。
+ * Compatibility alias for the canonical one-time webhook response.
  */
-export type IssuedWebhookSigningSecret = {
-  /**
-   * 発行後の webhook subscription metadata です。
-   */
-  subscription: WebhookSubscription
-  /**
-   * 一度だけ表示可能な webhook signing secret です。
-   */
-  signingSecret: string
-}
+export type IssuedWebhookSigningSecret =
+  WebhookSubscriptionSecretOutput
 
 const developerApiBaseUrl = trimTrailingSlash(
   import.meta.env.VITE_WORKSPACE_API_BASE_URL ??
@@ -66,10 +47,10 @@ const defaultDeveloperApiErrorMessage =
  */
 export function createDeveloperWebhook(
   accessToken: string,
-  input: CreateDeveloperWebhookInput,
+  input: CreateWebhookSubscriptionInput,
   mutationContext: MutationRequestContext,
 ) {
-  return requestJson<IssuedWebhookSigningSecret>(
+  return requestJson<WebhookSubscriptionSecretOutput>(
     '/developer/webhook-subscriptions',
     accessToken,
     createJsonMutation('POST', input, mutationContext),

@@ -1,48 +1,29 @@
-import type { ApiScope, OAuthAppSummary } from '@mukuroji/contracts'
+import type {
+  CreateOAuthAppInput,
+  OAuthAppOneTimeSecretOutput,
+  OAuthAppSummary,
+  OAuthGrantType,
+} from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { DeveloperPlatformApiError } from './errors'
 
 /**
- * 現在 Developer Platform で提供する OAuth app の grant type です。
+ * Compatibility alias for the supported OAuth grant type.
  */
 export type DeveloperOAuthGrantType = Extract<
-  OAuthAppSummary['grantTypes'][number],
+  OAuthGrantType,
   'client_credentials'
 >
 
 /**
- * OAuth app 作成 API の入力です。
+ * Compatibility alias for the canonical OAuth-app creation contract.
  */
-export type CreateDeveloperOAuthAppInput = {
-  /**
-   * 管理画面と consent 画面に表示する app 名です。
-   */
-  name: string
-  /** OAuth app が使用する grant type 一覧です。 */
-  grantTypes: DeveloperOAuthGrantType[]
-  /**
-   * OAuth app に付与する API scope 一覧です。
-   */
-  scopes: ApiScope[]
-  /**
-   * OAuth app credential の有効期限を表す ISO 8601 timestamp です。
-   */
-  expiresAt?: string
-}
+export type CreateDeveloperOAuthAppInput = CreateOAuthAppInput
 
 /**
- * OAuth app 作成または rotation 直後だけ返す one-time client secret です。
+ * Compatibility alias for the canonical one-time OAuth response.
  */
-export type IssuedOAuthClientSecret = {
-  /**
-   * 発行後の OAuth app metadata です。
-   */
-  oauthApp: OAuthAppSummary
-  /**
-   * 一度だけ表示可能な OAuth client secret です。
-   */
-  clientSecret: string
-}
+export type IssuedOAuthClientSecret = OAuthAppOneTimeSecretOutput
 
 const developerApiBaseUrl = trimTrailingSlash(
   import.meta.env.VITE_WORKSPACE_API_BASE_URL ??
