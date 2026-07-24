@@ -1,9 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import {
-  EnterpriseDomainVerificationChallengeNotice,
-  EnterpriseSecurityPanel,
-} from '../src/security/ui/EnterpriseSecurityPanel'
+import { EnterpriseSecurityPanel } from '../src/security/ui/EnterpriseSecurityPanel'
+import { EnterpriseDomainVerificationChallengeNotice } from '../src/security/ui/EnterpriseDomainVerificationChallengeNotice'
 import {
   createEnterpriseSecurityCapabilityBoundary,
   createEnterpriseSecurityStateBoundary,
@@ -114,6 +112,25 @@ describe('EnterpriseSecurityPanel', () => {
     expect(html.match(/role="tab"/g)).toHaveLength(6)
     expect(html).toContain('aria-selected="true"')
     expect(html).toContain('SSO enforcement readiness')
+  })
+
+  test('locks non-selected tabs while a one-time value mutation is pending', () => {
+    const html = renderToStaticMarkup(
+      <EnterpriseSecurityPanel
+        busyOperation="domain:create"
+        initialTab="identity"
+        locale="en"
+        scopeOptions={scopeOptions}
+        snapshot={enterpriseSecuritySnapshotFixture}
+      />,
+    )
+
+    expect(html).toMatch(
+      /aria-disabled="true"[^>]*data-testid="security-tab-overview"[^>]*disabled=""/,
+    )
+    expect(html).toMatch(
+      /aria-disabled="false"[^>]*data-testid="security-tab-identity"/,
+    )
   })
 
   test('gates SSO enforcement behind tested IdP, domain, and break-glass prerequisites', () => {
