@@ -1,0 +1,270 @@
+import * as cdk from 'aws-cdk-lib';
+import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
+import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as guardduty from 'aws-cdk-lib/aws-guardduty';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
+
+/**
+ * Resources whose deployment attributes are published as stack outputs.
+ */
+export type StackOutputResources = {
+  /** Legacy project task table retained for backward compatibility. */
+  readonly legacyTasksTable: dynamodb.ITable;
+  /** Project directory table. */
+  readonly projectDirectoryTable: dynamodb.ITable;
+  /** Canonical Work Item table, also exposed through the legacy team issue output. */
+  readonly workItemsTable: dynamodb.ITable;
+  /** Work Item workflow and custom field configuration table. */
+  readonly workItemConfigurationTable: dynamodb.ITable;
+  /** Automation rules and execution state table. */
+  readonly automationTable: dynamodb.ITable;
+  /** Planning and portfolio data table. */
+  readonly planningTable: dynamodb.ITable;
+  /** Developer platform state table. */
+  readonly developerPlatformTable: dynamodb.ITable;
+  /** Analytics facts, reports, and snapshots table. */
+  readonly analyticsTable: dynamodb.ITable;
+  /** Public request intake table. */
+  readonly requestIntakeTable: dynamodb.ITable;
+  /** Append-only Work Item event table. */
+  readonly teamIssueEventsTable: dynamodb.ITable;
+  /** Workspace directory identifier parameter. */
+  readonly workspaceDirectoryId: cdk.CfnParameter;
+  /** Workspace audit event table with a stream enabled. */
+  readonly auditEventsTable: dynamodb.ITable;
+  /** Table that tracks audit events processed by downstream consumers. */
+  readonly processedAuditEventsTable: dynamodb.ITable;
+  /** Workspace membership and invitation table. */
+  readonly workspaceAccessTable: dynamodb.ITable;
+  /** Enterprise identity and security state table. */
+  readonly enterpriseIdentityTable: dynamodb.ITable;
+  /** Collaborative documents table. */
+  readonly documentsTable: dynamodb.ITable;
+  /** Work Item collaboration projection table. */
+  readonly collaborationTable: dynamodb.ITable;
+  /** Workspace search index table. */
+  readonly workspaceSearchTable: dynamodb.ITable;
+  /** Durable notification table. */
+  readonly notificationsTable: dynamodb.ITable;
+  /** Realtime connection and session table. */
+  readonly realtimeSessionsTable: dynamodb.ITable;
+  /** File proofing metadata table. */
+  readonly fileProofingTable: dynamodb.ITable;
+  /** Versioned workspace file bucket. */
+  readonly fileBucket: s3.IBucket;
+  /** GuardDuty malware protection plan for workspace files. */
+  readonly malwareProtectionPlan: guardduty.CfnMalwareProtectionPlan;
+  /** Deployed realtime WebSocket stage. */
+  readonly realtimeWebSocketStage: apigatewayv2.WebSocketStage;
+  /** Dead-letter queue for collaboration projection failures. */
+  readonly collaborationProjectionDlq: sqs.IQueue;
+  /** Dead-letter queue for enterprise identity maintenance failures. */
+  readonly enterpriseIdentityMaintenanceDlq: sqs.IQueue;
+  /** Lambda function that processes enterprise SCIM group jobs. */
+  readonly enterpriseScimGroupJobFunction: lambda.IFunction;
+  /** Dead-letter queue for enterprise SCIM group jobs. */
+  readonly enterpriseScimGroupJobDlq: sqs.IQueue;
+  /** Queue that carries outbound webhook deliveries. */
+  readonly webhookDeliveryQueue: sqs.IQueue;
+  /** Dead-letter queue for outbound webhook delivery failures. */
+  readonly webhookDeliveryDlq: sqs.IQueue;
+  /** Versioned bucket that stores Work Item import sources. */
+  readonly workItemImportBucket: s3.IBucket;
+  /** Queue that carries resumable Work Item imports. */
+  readonly workItemImportQueue: sqs.IQueue;
+  /** Dead-letter queue for Work Item import failures. */
+  readonly workItemImportDlq: sqs.IQueue;
+  /** Secret that stores connector runtime credentials. */
+  readonly connectorRuntimeSecret: secretsmanager.ISecret;
+  /** Queue that carries connector synchronization work. */
+  readonly connectorSyncQueue: sqs.IQueue;
+  /** Dead-letter queue for connector synchronization failures. */
+  readonly connectorSyncDlq: sqs.IQueue;
+  /** Dead-letter queue for scheduled connector polling failures. */
+  readonly connectorPollDlq: sqs.IQueue;
+  /** Dead-letter queue for event-triggered automation failures. */
+  readonly automationEventDlq: sqs.IQueue;
+  /** Dead-letter queue for scheduled automation failures. */
+  readonly automationScheduleDlq: sqs.IQueue;
+  /** Dead-letter queue for scheduled analytics failures. */
+  readonly analyticsScheduleDlq: sqs.IQueue;
+  /** Dead-letter queue for scheduled notification failures. */
+  readonly notificationScheduleDlq: sqs.IQueue;
+  /** Lambda function that ingests request email. */
+  readonly requestEmailIngestionFunction: lambda.IFunction;
+  /** Dead-letter queue for request email ingestion failures. */
+  readonly requestEmailIngestionDlq: sqs.IQueue;
+  /** Lambda Function URL for the project task API. */
+  readonly functionUrl: lambda.FunctionUrl;
+  /** HTTP API Gateway endpoint for the project task API. */
+  readonly httpApi: apigatewayv2.HttpApi;
+};
+
+/**
+ * Publishes stable deployment attributes with their original output identifiers.
+ *
+ * @param scope Stack scope used directly to preserve existing construct paths.
+ * @param resources Resources whose deployment attributes are published.
+ * @returns Nothing.
+ */
+export function buildStackOutputs(
+  scope: cdk.Stack,
+  resources: StackOutputResources,
+): void {
+  new cdk.CfnOutput(scope, 'ProjectTasksTableName', {
+    value: resources.legacyTasksTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'ProjectDirectoryTableName', {
+    value: resources.projectDirectoryTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'TeamIssuesTableName', {
+    value: resources.workItemsTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'WorkItemsTableName', {
+    value: resources.workItemsTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'WorkItemConfigurationTableName', {
+    value: resources.workItemConfigurationTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'AutomationTableName', {
+    value: resources.automationTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'PlanningTableName', {
+    value: resources.planningTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'DeveloperPlatformTableName', {
+    value: resources.developerPlatformTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'DeveloperPlatformLookupIndexName', {
+    value: 'LookupKeyIndex',
+  });
+  new cdk.CfnOutput(scope, 'AnalyticsTableName', {
+    value: resources.analyticsTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'RequestIntakeTableName', {
+    value: resources.requestIntakeTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'TeamIssueEventsTableName', {
+    value: resources.teamIssueEventsTable.tableName,
+  });
+  const workspaceDirectoryIdOutput = new cdk.CfnOutput(
+    scope,
+    'WorkspaceDirectoryIdOutput',
+    {
+      value: resources.workspaceDirectoryId.valueAsString,
+    },
+  );
+  workspaceDirectoryIdOutput.overrideLogicalId('WorkspaceDirectoryId');
+  new cdk.CfnOutput(scope, 'AuditEventsTableName', {
+    value: resources.auditEventsTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'AuditEventsStreamArn', {
+    value: resources.auditEventsTable.tableStreamArn!,
+  });
+  new cdk.CfnOutput(scope, 'ProcessedAuditEventsTableName', {
+    value: resources.processedAuditEventsTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'WorkspaceAccessTableName', {
+    value: resources.workspaceAccessTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'EnterpriseIdentityTableName', {
+    value: resources.enterpriseIdentityTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'DocumentsTableName', {
+    value: resources.documentsTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'WorkItemCollaborationTableName', {
+    value: resources.collaborationTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'WorkspaceSearchTableName', {
+    value: resources.workspaceSearchTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'NotificationsTableName', {
+    value: resources.notificationsTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'RealtimeSessionsTableName', {
+    value: resources.realtimeSessionsTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'FileProofingTableName', {
+    value: resources.fileProofingTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'FileBucketName', {
+    value: resources.fileBucket.bucketName,
+  });
+  new cdk.CfnOutput(scope, 'FileMalwareProtectionPlanId', {
+    value: resources.malwareProtectionPlan.attrMalwareProtectionPlanId,
+  });
+  new cdk.CfnOutput(scope, 'RealtimeWebSocketUrl', {
+    value: resources.realtimeWebSocketStage.url,
+  });
+  new cdk.CfnOutput(scope, 'CollaborationProjectionDlqUrl', {
+    value: resources.collaborationProjectionDlq.queueUrl,
+  });
+  new cdk.CfnOutput(scope, 'EnterpriseIdentityMaintenanceDlqUrl', {
+    value: resources.enterpriseIdentityMaintenanceDlq.queueUrl,
+  });
+  new cdk.CfnOutput(scope, 'EnterpriseScimGroupJobFunctionName', {
+    value: resources.enterpriseScimGroupJobFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'EnterpriseScimGroupJobDlqUrl', {
+    value: resources.enterpriseScimGroupJobDlq.queueUrl,
+  });
+  new cdk.CfnOutput(scope, 'WebhookDeliveryQueueUrl', {
+    value: resources.webhookDeliveryQueue.queueUrl,
+  });
+  new cdk.CfnOutput(scope, 'WebhookDeliveryDlqUrl', {
+    value: resources.webhookDeliveryDlq.queueUrl,
+  });
+  new cdk.CfnOutput(scope, 'WorkItemImportBucketName', {
+    value: resources.workItemImportBucket.bucketName,
+  });
+  new cdk.CfnOutput(scope, 'WorkItemImportQueueUrl', {
+    value: resources.workItemImportQueue.queueUrl,
+  });
+  new cdk.CfnOutput(scope, 'WorkItemImportDlqUrl', {
+    value: resources.workItemImportDlq.queueUrl,
+  });
+  new cdk.CfnOutput(scope, 'ConnectorRuntimeSecretArn', {
+    value: resources.connectorRuntimeSecret.secretArn,
+  });
+  new cdk.CfnOutput(scope, 'ConnectorSyncQueueUrl', {
+    value: resources.connectorSyncQueue.queueUrl,
+  });
+  new cdk.CfnOutput(scope, 'ConnectorSyncDlqUrl', {
+    value: resources.connectorSyncDlq.queueUrl,
+  });
+  new cdk.CfnOutput(scope, 'ConnectorPollDlqUrl', {
+    value: resources.connectorPollDlq.queueUrl,
+  });
+  new cdk.CfnOutput(scope, 'AutomationEventDlqUrl', {
+    value: resources.automationEventDlq.queueUrl,
+  });
+  new cdk.CfnOutput(scope, 'AutomationScheduleDlqUrl', {
+    value: resources.automationScheduleDlq.queueUrl,
+  });
+  new cdk.CfnOutput(scope, 'AnalyticsScheduleDlqUrl', {
+    value: resources.analyticsScheduleDlq.queueUrl,
+  });
+  new cdk.CfnOutput(scope, 'NotificationScheduleDlqUrl', {
+    value: resources.notificationScheduleDlq.queueUrl,
+  });
+  new cdk.CfnOutput(scope, 'RequestEmailIngestionFunctionName', {
+    value: resources.requestEmailIngestionFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'RequestEmailIngestionDlqUrl', {
+    value: resources.requestEmailIngestionDlq.queueUrl,
+  });
+  new cdk.CfnOutput(scope, 'ProjectTasksApiUrl', {
+    value: resources.functionUrl.url,
+    description: 'Backward-compatible alias for the Lambda Function URL.',
+  });
+  new cdk.CfnOutput(scope, 'ProjectTasksFunctionUrl', {
+    value: resources.functionUrl.url,
+  });
+  new cdk.CfnOutput(scope, 'ProjectTasksApiGatewayUrl', {
+    value: resources.httpApi.apiEndpoint,
+  });
+}
