@@ -1,0 +1,23 @@
+name: Public API contract signal
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - edited
+      - opened
+      - ready_for_review
+      - reopened
+      - synchronize
+
+permissions: {}
+
+jobs:
+  signal:
+    name: signal-public-api-evaluation
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Signal trusted evaluation
+        run: ":"

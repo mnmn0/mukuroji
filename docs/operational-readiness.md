@@ -383,6 +383,40 @@ job/context 名を変更する場合は ruleset も同じ release で更新し�
 branch-wide required context にはせず、対象変更ごとの release evidence に結果または rate limit
 を記録します。
 
+### Public API contract trust root
+
+Public API compatibility gate は、権限を持たない `pull_request` signal の完了後に default
+branch の `.github/workflows/public-api-contract.yml` を `workflow_run` で実行します。Signal
+workflow、trusted workflow、comparator の3ファイルを trust root とし、候補側の blob OID が
+base と一致しない変更は専用 rotation 以外では拒否します。Pull request 側の checkout は
+OpenAPI source、canonical snapshot、3つの trust-root file を data として読むだけにし、依存
+install、artifact/cache download、候補側 code の実行を行いません。
+初回導入は comparator/workflows だけを先に merge します。次に default branch の trusted
+`workflow_run` だけが利用できる `public-api-contract-publisher` protected environment と専用
+check publisher GitHub App を設定し、その後の pull request で canonical snapshot を
+bootstrap します。Environment は `main` だけを許可し、deployment object を作らず、App には
+対象 repository の Checks write だけを付与します。実 workflow が候補 commit で専用 App check
+を成功させたことを確認してから、ruleset は同名の GitHub Actions job ではなく、専用 App の
+integration ID に固定した `public-api-compatibility` check を strict required check として
+要求します。Bootstrap、publisher、environment、ruleset 更新がすべて終わるまでは Public API
+compatibility gate を有効化済みと記録しません。
+
+Trust root の candidate OID は base と一致しない限り失敗します。Comparator または workflow
+を更新するときは、通常の feature/API 変更と同じ pull request に含めず、次の管理者手順を
+使います。
+
+1. Merge を一時停止し、OpenAPI source と canonical snapshot の blob OID が変わらない
+   trust-root 専用 pull request を作る。
+2. Base/merge-base/head OID、comparator test、workflow simulation、多観点 review の evidence
+   を固定し、他の required checks をすべて成功させる。
+3. Ruleset と protected environment の before JSON を保存し、専用 App に固定した Public API
+   context だけを一時的に required list から外す。Bypass actor と別 publisher は追加しない。
+4. 専用 pull request だけを merge し、新しい main を base にした trust-root probe pull
+   request で更新後 workflow の成功と候補 commit SHA を確認する。
+5. 同じ context を専用 App の integration ID 固定で直ちに required list へ戻し、effective
+   rules、protected environment、after JSON を保存してから merge 停止を解除する。失敗時は
+   旧 trust root へ戻し、context を外した状態で通常変更を merge しない。
+
 Lambda alias/weighted routing/CodeDeploy canary と一般的な kill switch はありません。このため
 production では先に別 environment で同一 artifact を検証し、変更 window 中に一つの stack を
 更新して以下の post-deploy check を行います。安全に段階化できない高リスク変更は deploy しません。
