@@ -273,14 +273,25 @@ export function TaskPage() {
     resolvedSelectedIssue,
     selectedWorkItemTeamId,
     tasks,
-  } = resolveProjectTaskRouteContext({
-    projectId,
-    projectIssues,
-    selectedIssueId,
-    selectedTeamId,
-    suppressIssueFallback: location.state === ambiguousIssueSelectionLocationState,
-    teams,
-  })
+  } = useMemo(
+    () => resolveProjectTaskRouteContext({
+      projectId,
+      projectIssues,
+      selectedIssueId,
+      selectedTeamId,
+      suppressIssueFallback:
+        location.state === ambiguousIssueSelectionLocationState,
+      teams,
+    }),
+    [
+      location.state,
+      projectId,
+      projectIssues,
+      selectedIssueId,
+      selectedTeamId,
+      teams,
+    ],
+  )
   const {
     data: workItemConfigurationLoadResult = emptyProjectWorkItemConfigurationLoadResult,
     error: workItemConfigurationError,

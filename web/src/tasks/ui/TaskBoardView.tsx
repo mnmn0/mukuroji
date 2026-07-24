@@ -129,6 +129,7 @@ export function TaskBoardView({
                       )}
                       locale={locale}
                       personLabels={personLabels}
+                      t={t}
                       task={task}
                     />
                     <div className="mt-3 flex flex-wrap items-center gap-2">

@@ -198,7 +198,46 @@ export const Default: Story = {
 
     await userEvent.click(statusButton)
     await expect(statusButton).toHaveAttribute('aria-expanded', 'true')
-    await userEvent.click(canvas.getByRole('button', { name: 'すべてのタスク' }))
+    const statusOptions = within(canvas.getByRole('menu')).getAllByRole(
+      'menuitemradio',
+    )
+    const firstStatusOption = statusOptions[0]
+    const secondStatusOption = statusOptions[1]
+    const lastStatusOption = statusOptions.at(-1)
+
+    if (!firstStatusOption || !secondStatusOption || !lastStatusOption) {
+      throw new Error('Expected at least two task status options.')
+    }
+
+    await expect(firstStatusOption).toHaveFocus()
+    await userEvent.keyboard('{ArrowDown}')
+    await expect(secondStatusOption).toHaveFocus()
+    await userEvent.keyboard('{End}')
+    await expect(lastStatusOption).toHaveFocus()
+    await userEvent.keyboard('{Home}')
+    await expect(firstStatusOption).toHaveFocus()
+    await userEvent.keyboard('{Escape}')
+    await expect(statusButton).toHaveFocus()
+    await expect(statusButton).toHaveAttribute('aria-expanded', 'false')
+    await expect(canvas.queryByRole('menu')).not.toBeInTheDocument()
+
+    await userEvent.click(statusButton)
+    await userEvent.click(canvas.getByRole('searchbox', { name: '検索...' }))
+    await expect(statusButton).toHaveAttribute('aria-expanded', 'false')
+    await expect(canvas.queryByRole('menu')).not.toBeInTheDocument()
+
+    await userEvent.click(statusButton)
+    await expect(canvas.getByRole('menuitemradio', {
+      name: 'すべてのステータス',
+    })).toHaveFocus()
+    await userEvent.tab()
+    await expect(statusButton).toHaveAttribute('aria-expanded', 'false')
+    await expect(canvas.queryByRole('menu')).not.toBeInTheDocument()
+
+    await userEvent.click(statusButton)
+    await userEvent.click(canvas.getByRole('menuitemradio', {
+      name: 'すべてのステータス',
+    }))
     await expect(statusButton).toHaveAttribute('aria-expanded', 'false')
     await expect(canvas.queryByRole('menu')).not.toBeInTheDocument()
   },

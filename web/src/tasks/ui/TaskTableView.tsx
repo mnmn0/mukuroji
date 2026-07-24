@@ -334,6 +334,7 @@ function TaskTableRow({
             configuration={configuration}
             locale={locale}
             personLabels={personLabels}
+            t={t}
             task={task}
           />
           {selected ? (

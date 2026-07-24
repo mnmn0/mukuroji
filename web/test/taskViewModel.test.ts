@@ -22,6 +22,7 @@ import {
   createTaskSummary,
   filterAndSortProjectTasks,
   findTaskBySelection,
+  formatTaskDateInputValue,
   isTaskInProjectStatusColumn,
   isTaskOverdue,
   matchesTaskDueDateFilter,
@@ -56,6 +57,14 @@ describe('task view constants and input normalization', () => {
     expect(resolveTaskPriority('urgent')).toBe('medium')
     expect(resolveTaskPriority(null)).toBe('medium')
     expect(resolveTaskPriority({ value: 'high' })).toBe('medium')
+  })
+
+  test('formats date input values from local calendar components', () => {
+    expect(formatTaskDateInputValue({
+      getDate: () => 4,
+      getFullYear: () => 2027,
+      getMonth: () => 0,
+    })).toBe('2027-01-04')
   })
 
   test('maps due-date filter and sort values to their existing message keys', () => {
@@ -342,13 +351,27 @@ describe('task custom-field display, filters, and sorting', () => {
       },
     })
     const personLabels = { 'reviewer@example.com': 'Review Person' }
-    const entries = resolveTaskCustomFieldEntries(task, configuration, 'en', personLabels)
+    const entries = resolveTaskCustomFieldEntries(
+      task,
+      configuration,
+      'en',
+      personLabels,
+      translateTaskLabel,
+    )
 
     expect(entries.map(({ definition, value }) => [definition.id, value])).toEqual([
       ['reviewer', 'Review Person'],
       ['risk', 'Urgent'],
     ])
-    expect(resolveTaskCustomFieldSearchValues(task, configuration, 'en', personLabels)).toEqual([
+    expect(
+      resolveTaskCustomFieldSearchValues(
+        task,
+        configuration,
+        'en',
+        personLabels,
+        translateTaskLabel,
+      ),
+    ).toEqual([
       'Reviewer',
       'Review Person',
       'Risk level',
@@ -429,7 +452,14 @@ describe('task calendar and summary models', () => {
     const first = createTask({ dueDate: '2026/07/23', id: 'first' })
     const second = createTask({ dueDate: '2026/07/23', id: 'second' })
     const undated = createTask({ dueDate: '', id: 'undated' })
-    const model = createTaskCalendarModel([later, first, undated, second])
+    const whitespaceOnly = createTask({ dueDate: '   ', id: 'whitespace-only' })
+    const model = createTaskCalendarModel([
+      later,
+      first,
+      undated,
+      whitespaceOnly,
+      second,
+    ])
 
     expect(model.days.map((day) => ({
       date: day.date,
@@ -438,7 +468,7 @@ describe('task calendar and summary models', () => {
       { date: '2026/07/23', ids: ['first', 'second'] },
       { date: '2026/07/25', ids: ['later'] },
     ])
-    expect(model.unscheduledTasks).toEqual([undated])
+    expect(model.unscheduledTasks).toEqual([undated, whitespaceOnly])
   })
 
   test('counts open, started, completed, and canceled categories consistently', () => {

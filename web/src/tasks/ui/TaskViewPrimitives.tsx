@@ -69,13 +69,17 @@ export type TaskStatusBadgeProps = {
  * Renders a workflow status with the tone associated with its category.
  *
  * @param props - Status definition or task and its configuration.
- * @returns The workflow-status badge.
+ * @returns The workflow-status badge, or `null` when no status source is supplied.
  */
 export function TaskStatusBadge({
   configuration,
   status,
   task,
 }: TaskStatusBadgeProps) {
+  if (!status && !task) {
+    return null
+  }
+
   const resolvedStatus = status ?? (task
     ? resolveWorkflowStatusDefinition(task, configuration)
     : undefined)
@@ -132,6 +136,8 @@ export type TaskCustomFieldSummaryProps = {
   locale: Locale
   /** Mapping from person identifiers to display names. */
   personLabels: Readonly<Record<string, string>>
+  /** Translator reused for custom-field value labels. */
+  t: TaskTranslator
   /** Work item whose custom fields should be summarized. */
   task: ProjectTask
 }
@@ -146,9 +152,16 @@ export function TaskCustomFieldSummary({
   configuration,
   locale,
   personLabels,
+  t,
   task,
 }: TaskCustomFieldSummaryProps) {
-  const values = resolveTaskCustomFieldEntries(task, configuration, locale, personLabels)
+  const values = resolveTaskCustomFieldEntries(
+    task,
+    configuration,
+    locale,
+    personLabels,
+    t,
+  )
 
   if (values.length === 0) {
     return null
