@@ -7,7 +7,6 @@ import {
 } from '@mukuroji/contracts'
 import {
   AutomationError,
-  type AutomationClient,
   type AutomationInboundWebhookSecretCleanup,
 } from '../../automation'
 import {
@@ -17,7 +16,101 @@ import {
   processRecurringWorkDefinition,
   processScheduledAutomationRule,
   resolveAutomationScheduleProcessingTime,
+  type AutomationScheduleDependencies,
+  type AutomationSchedulePort,
 } from './automation-schedule'
+
+/**
+ * Fails a test when it exercises a schedule capability that was not configured.
+ *
+ * @returns Never returns.
+ */
+function unexpectedAutomationSchedulePortCall(): never {
+  throw new Error('Unexpected Automation schedule port call.')
+}
+
+/**
+ * Creates a complete focused schedule port with fail-fast defaults.
+ *
+ * @param overrides - Schedule capabilities exercised by the current test.
+ * @returns A type-safe Automation schedule port.
+ */
+function createAutomationSchedulePort(
+  overrides: Partial<AutomationSchedulePort>,
+): AutomationSchedulePort {
+  return {
+    async listRecurringWorks() {
+      return unexpectedAutomationSchedulePortCall()
+    },
+    async getRecurringWork() {
+      return unexpectedAutomationSchedulePortCall()
+    },
+    async createRecurringWork() {
+      return unexpectedAutomationSchedulePortCall()
+    },
+    async updateRecurringWork() {
+      return unexpectedAutomationSchedulePortCall()
+    },
+    async completeRecurringWork() {
+      return unexpectedAutomationSchedulePortCall()
+    },
+    async deleteRecurringWork() {
+      return unexpectedAutomationSchedulePortCall()
+    },
+    async listDueRecurringWorks() {
+      return unexpectedAutomationSchedulePortCall()
+    },
+    async listDueExecutions() {
+      return unexpectedAutomationSchedulePortCall()
+    },
+    async reserveExecution() {
+      return unexpectedAutomationSchedulePortCall()
+    },
+    async createExecution() {
+      return unexpectedAutomationSchedulePortCall()
+    },
+    async getExecution() {
+      return unexpectedAutomationSchedulePortCall()
+    },
+    async getExecutionEvent() {
+      return unexpectedAutomationSchedulePortCall()
+    },
+    async claimExecution() {
+      return unexpectedAutomationSchedulePortCall()
+    },
+    async saveExecution() {
+      return unexpectedAutomationSchedulePortCall()
+    },
+    async listExecutions() {
+      return unexpectedAutomationSchedulePortCall()
+    },
+    async hasActionReceipt() {
+      return unexpectedAutomationSchedulePortCall()
+    },
+    async putActionReceipt() {
+      return unexpectedAutomationSchedulePortCall()
+    },
+    async getRuleVersion() {
+      return unexpectedAutomationSchedulePortCall()
+    },
+    async getRule() {
+      return unexpectedAutomationSchedulePortCall()
+    },
+    async listDueScheduledRules() {
+      return unexpectedAutomationSchedulePortCall()
+    },
+    async completeScheduledRule() {
+      return unexpectedAutomationSchedulePortCall()
+    },
+    async listDueInboundWebhookSecretCleanups() {
+      return unexpectedAutomationSchedulePortCall()
+    },
+    async completeInboundWebhookSecretCleanup() {
+      return unexpectedAutomationSchedulePortCall()
+    },
+    ...overrides,
+  }
+}
 
 describe('automation schedule handler', () => {
   test('validates event time without using an old delivery time for processing leases', () => {
@@ -34,11 +127,14 @@ describe('automation schedule handler', () => {
   test('materializes an on-time skip slot once across schedule redelivery', async () => {
     const definition = createRecurringWork()
     const executions = new Map<string, AutomationExecution>()
-    const events = new Map<string, Parameters<AutomationClient['createExecution']>[1]>()
+    const events = new Map<
+      string,
+      Parameters<AutomationSchedulePort['createExecution']>[1]
+    >()
     let currentDefinition = definition
     let actionExecutions = 0
     let completionCalls = 0
-    const client = {
+    const client = createAutomationSchedulePort({
       async createExecution(execution, event) {
         if (executions.has(execution.id)) return false
         executions.set(execution.id, structuredClone(execution))
@@ -92,7 +188,7 @@ describe('automation schedule handler', () => {
       async getRecurringWork() {
         return currentDefinition
       },
-    } as unknown as AutomationClient
+    })
     const dependencies = {
       client,
       actionExecutor: {
@@ -110,7 +206,7 @@ describe('automation schedule handler', () => {
           })
         },
       },
-    }
+    } satisfies AutomationScheduleDependencies
     const now = new Date('2026-07-16T00:00:00.000Z')
 
     const first = await processRecurringWorkDefinition(definition, now, dependencies)
@@ -126,11 +222,14 @@ describe('automation schedule handler', () => {
   test('keeps a recurring slot receipt stable when the definition version changes before CAS', async () => {
     const definition = createRecurringWork()
     const executions = new Map<string, AutomationExecution>()
-    const events = new Map<string, Parameters<AutomationClient['createExecution']>[1]>()
+    const events = new Map<
+      string,
+      Parameters<AutomationSchedulePort['createExecution']>[1]
+    >()
     let currentDefinition: RecurringWork = definition
     let injectVersionUpdate = true
     let actionExecutions = 0
-    const client = {
+    const client = createAutomationSchedulePort({
       async createExecution(execution, event) {
         if (executions.has(execution.id)) return false
         executions.set(execution.id, structuredClone(execution))
@@ -193,7 +292,7 @@ describe('automation schedule handler', () => {
       async getRecurringWork() {
         return structuredClone(currentDefinition)
       },
-    } satisfies Partial<AutomationClient> as AutomationClient
+    })
     const dependencies = {
       client,
       actionExecutor: {
@@ -201,7 +300,7 @@ describe('automation schedule handler', () => {
           actionExecutions += 1
         },
       },
-    }
+    } satisfies AutomationScheduleDependencies
     const now = new Date('2026-07-16T00:00:00.000Z')
 
     await expect(processRecurringWorkDefinition(definition, now, dependencies))
@@ -222,7 +321,7 @@ describe('automation schedule handler', () => {
     const receipts = new Set<string>()
     let currentRule = rule
     let actionExecutions = 0
-    const client = {
+    const client = createAutomationSchedulePort({
       async reserveExecution(execution) {
         const executionId = execution.id
         if (executions.has(executionId)) return 'duplicate'
@@ -273,7 +372,7 @@ describe('automation schedule handler', () => {
       async getRule() {
         return structuredClone(currentRule)
       },
-    } satisfies Partial<AutomationClient> as AutomationClient
+    })
     const dependencies = {
       client,
       actionExecutor: {
@@ -286,7 +385,7 @@ describe('automation schedule handler', () => {
           })
         },
       },
-    }
+    } satisfies AutomationScheduleDependencies
     const now = new Date('2026-07-16T00:00:00.000Z')
 
     const first = await processScheduledAutomationRule(rule, now, dependencies)
@@ -302,7 +401,7 @@ describe('automation schedule handler', () => {
     let currentDefinition = createRecurringWork()
     let currentRule = createScheduledRule()
     let actionExecutions = 0
-    const client: Partial<AutomationClient> = {
+    const client = createAutomationSchedulePort({
       async getExecution() {
         return undefined
       },
@@ -332,15 +431,15 @@ describe('automation schedule handler', () => {
       async getRule() {
         return structuredClone(currentRule)
       },
-    }
+    })
     const dependencies = {
-      client: client as AutomationClient,
+      client,
       actionExecutor: {
         async execute() {
           actionExecutions += 1
         },
       },
-    }
+    } satisfies AutomationScheduleDependencies
     const now = new Date('2026-07-16T00:01:00.000Z')
 
     const recurringResult = await processRecurringWorkDefinition(currentDefinition, now, dependencies)
@@ -361,22 +460,22 @@ describe('automation schedule handler', () => {
     const recurring = createRecurringWork()
     const rule = createScheduledRule()
     let actionExecutions = 0
-    const client: Partial<AutomationClient> = {
+    const client = createAutomationSchedulePort({
       async getRecurringWork() {
         return { ...recurring, enabled: false, revision: recurring.revision + 1 }
       },
       async getRule() {
         return { ...rule, enabled: false, revision: rule.revision + 1 }
       },
-    }
+    })
     const dependencies = {
-      client: client as AutomationClient,
+      client,
       actionExecutor: {
         async execute() {
           actionExecutions += 1
         },
       },
-    }
+    } satisfies AutomationScheduleDependencies
     const now = new Date('2026-07-16T00:00:00.000Z')
 
     expect(await processRecurringWorkDefinition(recurring, now, dependencies))
@@ -390,8 +489,8 @@ describe('automation schedule handler', () => {
     const definition = createRecurringWork()
     let actionExecutions = 0
     let completionCalls = 0
-    let observedGuard: Parameters<AutomationClient['createExecution']>[2]
-    const client = {
+    let observedGuard: Parameters<AutomationSchedulePort['createExecution']>[2]
+    const client = createAutomationSchedulePort({
       async getRecurringWork() {
         return structuredClone(definition)
       },
@@ -406,7 +505,7 @@ describe('automation schedule handler', () => {
         completionCalls += 1
         throw new Error('Unexpected recurring completion.')
       },
-    } as unknown as AutomationClient
+    })
 
     await processRecurringWorkDefinition(
       definition,
@@ -476,7 +575,7 @@ describe('automation schedule handler', () => {
           throw new AutomationError('unavailable', 'TransientCreateFailure', 'Create is temporarily unavailable.', true)
         },
       },
-    }
+    } satisfies AutomationScheduleDependencies
 
     await processRecurringWorkDefinition(definition, new Date('2026-07-16T00:00:00.000Z'), dependencies)
     let execution = [...harness.executions.values()][0]!
@@ -657,7 +756,7 @@ describe('automation schedule handler', () => {
           }
         },
       },
-    }
+    } satisfies AutomationScheduleDependencies
     await processRecurringWorkDefinition(
       definition,
       new Date('2026-07-16T00:00:00.000Z'),
@@ -777,7 +876,7 @@ describe('automation schedule handler', () => {
     }
     let actionExecutions = 0
     const receipts = new Set<string>()
-    const client: Partial<AutomationClient> = {
+    const client = createAutomationSchedulePort({
       async listDueRecurringWorks() {
         return []
       },
@@ -827,12 +926,12 @@ describe('automation schedule handler', () => {
         receipts.add(`${executionId}:${actionId}`)
         return true
       },
-    }
+    })
 
     const result = await processAutomationSchedule(
       new Date('2026-07-16T00:01:00.000Z'),
       {
-        client: client as AutomationClient,
+        client,
         actionExecutor: {
           async execute(action, context) {
             actionExecutions += 1
@@ -886,7 +985,7 @@ describe('automation schedule handler', () => {
       retryable: false,
     }
     let actionExecutions = 0
-    const client: Partial<AutomationClient> = {
+    const client = createAutomationSchedulePort({
       async getExecution() {
         return structuredClone(execution)
       },
@@ -922,13 +1021,13 @@ describe('automation schedule handler', () => {
         execution = structuredClone(updated)
         return true
       },
-    }
+    })
 
     const result = await processDueAutomationExecution(
       structuredClone(execution),
       new Date('2026-07-16T00:05:00.000Z'),
       {
-        client: client as AutomationClient,
+        client,
         actionExecutor: {
           async execute() {
             actionExecutions += 1
@@ -962,11 +1061,11 @@ describe('automation schedule handler', () => {
     const calls: string[] = []
     let deleteFails = true
     const dependencies = {
-      client: {
+      client: createAutomationSchedulePort({
         async completeInboundWebhookSecretCleanup() {
           calls.push('complete')
         },
-      } as unknown as AutomationClient,
+      }),
       actionExecutor: { async execute() {} },
       inboundWebhookSecrets: {
         async provision() {
@@ -980,7 +1079,7 @@ describe('automation schedule handler', () => {
           if (deleteFails) throw new Error('Secrets Manager is unavailable.')
         },
       },
-    }
+    } satisfies AutomationScheduleDependencies
 
     await expect(processInboundWebhookSecretCleanup(
       cleanup,
@@ -1064,11 +1163,14 @@ function createScheduledRule(): AutomationRule {
 
 function createRecurringExecutionHarness(definition: RecurringWork) {
   const executions = new Map<string, AutomationExecution>()
-  const events = new Map<string, Parameters<AutomationClient['createExecution']>[1]>()
+  const events = new Map<
+    string,
+    Parameters<AutomationSchedulePort['createExecution']>[1]
+  >()
   const receipts = new Set<string>()
   let currentDefinition = structuredClone(definition)
   let beforeClaim: (() => void) | undefined
-  const client: Partial<AutomationClient> = {
+  const client = createAutomationSchedulePort({
     async createExecution(execution, event) {
       if (executions.has(execution.id)) return false
       executions.set(execution.id, structuredClone(execution))
@@ -1134,9 +1236,9 @@ function createRecurringExecutionHarness(definition: RecurringWork) {
     async getRecurringWork() {
       return structuredClone(currentDefinition)
     },
-  }
+  })
   return {
-    client: client as AutomationClient,
+    client,
     executions,
     setCurrentDefinition(definitionValue: RecurringWork) {
       currentDefinition = structuredClone(definitionValue)

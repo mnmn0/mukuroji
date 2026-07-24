@@ -6,6 +6,7 @@ const {
   app,
   configureFakeProjectClients,
   createFakeAuthTokenSet,
+  createWorkspaceAccessFake,
   expectStableWorkspaceMutationAuditContexts,
   resetTestApp,
   setTestAppDependencies,
@@ -332,11 +333,16 @@ test('holds the invitation acceptance lock across the Cognito password challenge
       Parameters<typeof setTestAppDependencies>[0]['cognito']
     >,
     workspaceAccess: {
+      ...createWorkspaceAccessFake(),
       async getActiveMember() {
         sequence.push('get-active-member')
         return undefined
       },
-      async acquireInvitationAcceptanceLock(_workspaceId, _invitationId, auditContext) {
+      async acquireInvitationAcceptanceLock(
+        _workspaceId,
+        _invitationId,
+        auditContext,
+      ) {
         sequence.push('acquire-lock')
         auditContexts.push({ stage: 'acquireInvitationAcceptanceLock', context: auditContext })
         return invitation
@@ -356,8 +362,8 @@ test('holds the invitation acceptance lock across the Cognito password challenge
         }
       },
       async reconcileAuthenticatedMember(
-        _workspaceId: string,
-        input: { memberKey: string },
+        _workspaceId,
+        input,
         auditContext,
       ) {
         sequence.push('reconcile-member')
@@ -373,7 +379,7 @@ test('holds the invitation acceptance lock across the Cognito password challenge
           updatedAt: '2026-07-11T00:00:00.000Z',
         }
       },
-    } as unknown as WorkspaceAccessClient,
+    },
   })
 
   const response = await app.request('/api/auth/challenge/new-password', {

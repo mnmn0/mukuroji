@@ -230,6 +230,7 @@ test('guards inactive users before deprovisioning and signs out only after succe
           revision: 12,
           entities: [{
             id: 'roadmap-1',
+            type: 'roadmap',
             ownerMemberKey: 'managed@example.com',
           }],
           workItemLinks: [],

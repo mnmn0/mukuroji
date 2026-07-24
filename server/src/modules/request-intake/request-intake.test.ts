@@ -28,7 +28,7 @@ const sessionToken = 'S'.repeat(43)
 const threadToken = 'T'.repeat(43)
 const tokenHashSecret = 'request-intake-test-secret-0000000000000000'
 
-const definition = {
+const definition: RequestFormDefinition = {
   defaultLocale: 'ja',
   supportedLocales: ['ja', 'en'],
   title: { ja: 'お問い合わせ', en: 'Request' },
@@ -103,9 +103,9 @@ const definition = {
   confirmation: {
     message: { ja: '受け付けました。', en: 'Your request was received.' },
   },
-} satisfies RequestFormDefinition
+}
 
-const routing = {
+const routing: RequestFormDraft['routing'] = {
   defaultTarget: {
     teamId: 'team-core',
     assigneeUserId: 'triage@example.com',
@@ -150,9 +150,9 @@ const routing = {
     descriptionFieldIds: ['urgent-note', 'impact'],
     customFieldMappings: { category: 'request-channel', estimate: 'estimate' },
   },
-} satisfies RequestFormDraft['routing']
+}
 
-const draft = { definition, routing } satisfies RequestFormDraft
+const draft: RequestFormDraft = { definition, routing }
 
 const resolution = {
   workspaceId: 'workspace-1',
@@ -182,8 +182,12 @@ function createStoredVersion(
   } satisfies RequestFormVersion & Record<string, unknown>
 }
 
-function createStoredForm(overrides: Record<string, unknown> = {}) {
-  return {
+function createStoredForm(
+  overrides: Record<string, unknown> = {},
+): Omit<RequestForm, 'link'> & {
+  link: Omit<RequestForm['link'], 'token'>
+} & Record<string, unknown> {
+  const form = {
     entryType: 'form',
     scopeKey: 'WORKSPACE#workspace-1',
     recordKey: 'FORM_ROOT#form-1',
@@ -202,8 +206,10 @@ function createStoredForm(overrides: Record<string, unknown> = {}) {
     createdAt: '2026-07-16T08:00:00.000Z',
     updatedAt: '2026-07-16T08:00:00.000Z',
     capabilities: { canEdit: true, canPublish: true, canManageLink: true },
-    ...overrides,
-  } as RequestForm & Record<string, unknown>
+  } satisfies Omit<RequestForm, 'link'> & {
+    link: Omit<RequestForm['link'], 'token'>
+  } & Record<string, unknown>
+  return { ...form, ...overrides }
 }
 
 function createStoredSubmission(overrides: Record<string, unknown> = {}) {
@@ -930,7 +936,7 @@ test('forces link rotation when restoring an archived form and never revives its
   let transaction: Array<{
     Put?: { Item?: Record<string, unknown> }
     Update?: {
-      Key?: { scopeKey?: string }
+      Key?: { scopeKey?: string; recordKey?: string }
       ExpressionAttributeValues?: Record<string, unknown>
     }
   }> = []
@@ -1519,7 +1525,7 @@ test('applies explicit triage transitions and rejects mutation after a terminal 
     summary: 'Older event omitted from the root projection.',
     createdAt: '2026-07-16T08:00:00.000Z',
   }
-  const eventRows = [
+  const eventRows: Record<string, unknown>[] = [
     createStoredSubmissionEventRow(stored.id, historicalEvent),
     ...stored.events.map((event) => createStoredSubmissionEventRow(stored.id, event)),
   ]
@@ -1681,7 +1687,7 @@ test('makes Work Item conversion completion idempotent for the same trace target
     summary: 'Older event omitted from the root projection.',
     createdAt: '2026-07-16T08:00:00.000Z',
   }
-  const eventRows = [
+  const eventRows: Record<string, unknown>[] = [
     createStoredSubmissionEventRow(stored.id, historicalEvent),
     ...stored.events.map((event) => createStoredSubmissionEventRow(stored.id, event)),
   ]

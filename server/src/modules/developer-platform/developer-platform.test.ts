@@ -3884,7 +3884,8 @@ describe('connectors, links, and imports', () => {
         if (
           raceEnabled &&
           command.constructor.name === 'GetCommand' &&
-          key?.recordKey === raceTargetKey
+          typeof key?.recordKey === 'string' &&
+          key.recordKey === raceTargetKey
         ) {
           targetReads += 1
           if (targetReads === 2) {

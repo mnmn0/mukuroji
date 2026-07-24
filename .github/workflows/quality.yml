@@ -35,9 +35,7 @@ jobs:
       - name: Strict typecheck shared contracts
         run: bun run typecheck:contracts
 
-      # Keep the existing strict scope: Server production/scripts and shared test
-      # support. Expanding strict TypeScript to legacy test files is a separate migration.
-      - name: Strict typecheck Server production and test support
+      - name: Strict typecheck all Server TypeScript
         run: bun run typecheck:server
 
       - name: Strict typecheck and build Web

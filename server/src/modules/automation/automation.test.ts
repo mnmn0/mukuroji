@@ -28,12 +28,15 @@ import {
   undoBulkOperation,
   validateCreateAutomationRuleInput,
   validateCreateAutomationTemplateInput,
-  type AutomationClient,
   type AutomationErrorCategory,
   type AutomationEvent,
   type AutomationExecutionClaimToken,
   type BulkOperationAdapter,
 } from './automation'
+import type {
+  AutomationBulkOperationPort,
+  AutomationExecutionServicePort,
+} from './application/ports'
 import { AutomationEngine } from './application/execution-service'
 
 function createRule(overrides: Partial<AutomationRule> = {}): AutomationRule {
@@ -140,12 +143,21 @@ function createMemoryClient(forceRateLimited = false) {
   const receipts = new Set<string>()
   const rules = new Map<string, AutomationRule>()
   const recurringWorks = new Map<string, RecurringWork>()
-  const client = {
+  const client: AutomationExecutionServicePort & {
+    executions: Map<string, AutomationExecution>
+    events: Map<string, AutomationEvent>
+    receipts: Set<string>
+    rules: Map<string, AutomationRule>
+    recurringWorks: Map<string, RecurringWork>
+  } = {
     executions,
     events,
     receipts,
     rules,
     recurringWorks,
+    async listDueExecutions() {
+      return []
+    },
     async createExecution(execution: AutomationExecution, event: AutomationEvent) {
       if (executions.has(execution.id)) return false
       executions.set(execution.id, structuredClone(execution))
@@ -164,7 +176,9 @@ function createMemoryClient(forceRateLimited = false) {
       candidate: AutomationExecution,
       now: Date,
       leaseExpiresAt: string,
-      definitionGuard?: Parameters<AutomationClient['claimExecution']>[3],
+      definitionGuard?: Parameters<
+        AutomationExecutionServicePort['claimExecution']
+      >[3],
     ) {
       if (definitionGuard?.kind === 'recurring') {
         const definition = recurringWorks.get(definitionGuard.id)
@@ -213,13 +227,16 @@ function createMemoryClient(forceRateLimited = false) {
       event: AutomationEvent,
       rule: AutomationRule,
     ) {
-      if (forceRateLimited) return 'rate-limited' as const
+      if (forceRateLimited) return 'rate-limited'
       const id = execution.id
-      if (executions.has(id)) return 'duplicate' as const
+      if (executions.has(id)) return 'duplicate'
       rules.set(`${rule.id}\0${rule.version}`, structuredClone(rule))
       executions.set(id, structuredClone(execution))
       events.set(id, structuredClone(event))
-      return 'created' as const
+      return 'created'
+    },
+    async listExecutions() {
+      return { executions: [] }
     },
     async hasActionReceipt(_workspaceId: string, executionId: string, actionId: string) {
       return receipts.has(`${executionId}\0${actionId}`)
@@ -237,14 +254,40 @@ function createMemoryClient(forceRateLimited = false) {
       const definition = recurringWorks.get(recurringWorkId)
       return definition ? structuredClone(definition) : undefined
     },
-  } as unknown as AutomationClient & {
-    executions: Map<string, AutomationExecution>
-    events: Map<string, AutomationEvent>
-    receipts: Set<string>
-    rules: Map<string, AutomationRule>
-    recurringWorks: Map<string, RecurringWork>
   }
   return client
+}
+
+/**
+ * Fails a test when a Bulk-operation capability was not configured explicitly.
+ *
+ * @returns Never returns.
+ */
+function unexpectedBulkOperationPortCall(): never {
+  throw new Error('Unexpected Bulk-operation port call.')
+}
+
+/**
+ * Creates a complete durable Bulk-operation port with fail-fast defaults.
+ *
+ * @param overrides - Persistence behavior exercised by the current test.
+ * @returns A type-safe Bulk-operation checkpoint port.
+ */
+function createBulkOperationPort(
+  overrides: Partial<AutomationBulkOperationPort>,
+): AutomationBulkOperationPort {
+  return {
+    async createBulkOperation() {
+      return unexpectedBulkOperationPortCall()
+    },
+    async saveBulkOperation() {
+      return unexpectedBulkOperationPortCall()
+    },
+    async getBulkOperation() {
+      return unexpectedBulkOperationPortCall()
+    },
+    ...overrides,
+  }
 }
 
 function createIdempotencyDocumentClient() {
@@ -1755,14 +1798,9 @@ describe('automation execution safety', () => {
     )).toBe('stale-definition')
 
     let actionExecutions = 0
-    const engine = new AutomationEngine({
-      async getExecution() {
-        return undefined
-      },
-      async reserveExecution() {
-        return 'stale-definition'
-      },
-    } as unknown as AutomationClient, {
+    const staleClient = createMemoryClient()
+    staleClient.reserveExecution = async () => 'stale-definition'
+    const engine = new AutomationEngine(staleClient, {
       async execute() {
         actionExecutions += 1
       },
@@ -2312,7 +2350,7 @@ test('keeps bulk partial failures across retry and safe undo', async () => {
   const expectedRevisions: number[] = []
   let persistedRevision = 0
   let persistedOperation: BulkOperation | undefined
-  const persistence = {
+  const persistence = createBulkOperationPort({
     async getBulkOperation() {
       return persistedOperation ? structuredClone(persistedOperation) : undefined
     },
@@ -2332,7 +2370,7 @@ test('keeps bulk partial failures across retry and safe undo', async () => {
       persistedOperation = structuredClone(operation)
       saved.push(structuredClone(operation))
     },
-  } as AutomationClient
+  })
   const adapter: BulkOperationAdapter = {
     async preview() {
       return { allowed: true }
@@ -2453,7 +2491,7 @@ test('deduplicates concurrent and replayed bulk apply requests by operation toke
   let stored: BulkOperation | undefined
   let applyCalls = 0
   let createCalls = 0
-  const persistence = {
+  const persistence = createBulkOperationPort({
     async getBulkOperation() {
       return stored ? structuredClone(stored) : undefined
     },
@@ -2469,7 +2507,7 @@ test('deduplicates concurrent and replayed bulk apply requests by operation toke
       }
       stored = structuredClone(operation)
     },
-  } as AutomationClient
+  })
   const adapter: BulkOperationAdapter = {
     async preview() {
       return { allowed: true }
@@ -2497,8 +2535,14 @@ test('deduplicates concurrent and replayed bulk apply requests by operation toke
     persistence,
   )
 
-  expect(new Set(concurrentResults.map((operation) => operation.id))).toEqual(new Set([stored?.id]))
-  expect(replayed.id).toBe(stored?.id)
+  const durableOperation = stored
+  if (!durableOperation) {
+    throw new Error('Concurrent Bulk operation was not persisted.')
+  }
+  expect(new Set(concurrentResults.map((operation) => operation.id))).toEqual(
+    new Set([durableOperation.id]),
+  )
+  expect(replayed.id).toBe(durableOperation.id)
   expect(replayed.status).toBe('succeeded')
   expect(replayed.id).toMatch(/^bulk_[a-f0-9]{64}$/)
   expect(applyCalls).toBe(1)
@@ -2517,7 +2561,7 @@ test('resumes a bulk apply from the last durable item checkpoint', async () => {
   const attempts = [0, 0]
   let stored: BulkOperation | undefined
   let failAfterFirstItem = true
-  const persistence = {
+  const persistence = createBulkOperationPort({
     async getBulkOperation() {
       return stored ? structuredClone(stored) : undefined
     },
@@ -2535,7 +2579,7 @@ test('resumes a bulk apply from the last durable item checkpoint', async () => {
         throw new AutomationError('unavailable', 'CheckpointResponseLost', 'Checkpoint response was lost.', true)
       }
     },
-  } as AutomationClient
+  })
   const adapter: BulkOperationAdapter = {
     async preview() {
       return { allowed: true }
@@ -2557,8 +2601,9 @@ test('resumes a bulk apply from the last durable item checkpoint', async () => {
     'owner@example.com',
     persistence,
   )).rejects.toMatchObject({ code: 'CheckpointResponseLost' })
-  expect(stored?.items.map((item) => item.status)).toEqual(['succeeded', 'ready'])
-  expect(stored?.revision).toBe(2)
+  if (!stored) throw new Error('Bulk checkpoint was not persisted.')
+  expect(stored.items.map((item) => item.status)).toEqual(['succeeded', 'ready'])
+  expect(stored.revision).toBe(2)
 
   const resumed = await applyBulkOperation(
     { ...request, operationToken: preview.operationToken },
@@ -2569,7 +2614,9 @@ test('resumes a bulk apply from the last durable item checkpoint', async () => {
   )
   expect(resumed.status).toBe('succeeded')
   expect(attempts).toEqual([1, 1])
-  expect(resumed.revision).toBe(stored?.revision)
+  const resumedStored = stored
+  if (!resumedStored) throw new Error('Resumed Bulk checkpoint was not persisted.')
+  expect(resumed.revision).toBe(resumedStored.revision)
 })
 
 test('retains durable snapshots across apply and undo response loss recovery', async () => {
@@ -2713,7 +2760,7 @@ test('rejects one of concurrent bulk retry and undo mutations with 409', async (
   let stored = createBulkOperationFixture({ revision: 7 })
   let applyCalls = 0
   let undoCalls = 0
-  const persistence = {
+  const persistence = createBulkOperationPort({
     async saveBulkOperation(operation: BulkOperation, expectedRevision: number) {
       await Promise.resolve()
       if (stored.revision !== expectedRevision) {
@@ -2721,7 +2768,7 @@ test('rejects one of concurrent bulk retry and undo mutations with 409', async (
       }
       stored = structuredClone(operation)
     },
-  } as AutomationClient
+  })
   const adapter: BulkOperationAdapter = {
     async preview() {
       return { allowed: true }

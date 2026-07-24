@@ -37,7 +37,6 @@ import {
 } from '../../../work-items/work-item-configuration'
 import type {
   AutomationActionExecutionContext,
-  AutomationClient,
 } from '../../automation'
 import {
   AutomationError,
@@ -70,16 +69,258 @@ afterEach(() => {
   resetTestApp()
 })
 
+/** Focused execution port accepted by the API test dependency override. */
+type TestAutomationExecutionPort = NonNullable<
+  Parameters<typeof setTestAppDependencies>[0]['executions']
+>
+
+/** Focused Rule and Template port accepted by the API test dependency override. */
+type TestAutomationRuleTemplatePort = NonNullable<
+  Parameters<typeof setTestAppDependencies>[0]['ruleTemplates']
+>
+
+/** Focused inbound Webhook port accepted by the API test dependency override. */
+type TestAutomationInboundWebhookPort = NonNullable<
+  Parameters<typeof setTestAppDependencies>[0]['inboundWebhooks']
+>
+
+/** Focused recurring schedule port accepted by the API test dependency override. */
+type TestAutomationRecurringSchedulePort = NonNullable<
+  Parameters<typeof setTestAppDependencies>[0]['recurringSchedules']
+>
+
+/** Team Issues client accepted by the API test dependency override. */
+type TestTeamIssuesClient = NonNullable<
+  Parameters<typeof setTestAppDependencies>[0]['teamIssues']
+>
+
+/**
+ * Fails a test when it exercises a focused port capability that was not configured.
+ *
+ * @returns Never returns.
+ */
+function unexpectedAutomationPortCall(): never {
+  throw new Error('Unexpected Automation test port call.')
+}
+
+/**
+ * Creates a complete focused execution port with fail-fast defaults.
+ *
+ * @param overrides - Execution behavior exercised by the current test.
+ * @returns A type-safe execution port.
+ */
+function createAutomationExecutionPort(
+  overrides: Partial<TestAutomationExecutionPort>,
+): TestAutomationExecutionPort {
+  return {
+    async listDueExecutions() {
+      return unexpectedAutomationPortCall()
+    },
+    async reserveExecution() {
+      return unexpectedAutomationPortCall()
+    },
+    async createExecution() {
+      return unexpectedAutomationPortCall()
+    },
+    async getExecution() {
+      return unexpectedAutomationPortCall()
+    },
+    async getExecutionEvent() {
+      return unexpectedAutomationPortCall()
+    },
+    async claimExecution() {
+      return unexpectedAutomationPortCall()
+    },
+    async saveExecution() {
+      return unexpectedAutomationPortCall()
+    },
+    async listExecutions() {
+      return unexpectedAutomationPortCall()
+    },
+    async hasActionReceipt() {
+      return unexpectedAutomationPortCall()
+    },
+    async putActionReceipt() {
+      return unexpectedAutomationPortCall()
+    },
+    async getRuleVersion() {
+      return unexpectedAutomationPortCall()
+    },
+    async getRecurringWork() {
+      return unexpectedAutomationPortCall()
+    },
+    ...overrides,
+  }
+}
+
+/**
+ * Creates a complete focused Rule and Template port with fail-fast defaults.
+ *
+ * @param overrides - Rule or Template behavior exercised by the current test.
+ * @returns A type-safe Rule and Template port.
+ */
+function createAutomationRuleTemplatePort(
+  overrides: Partial<TestAutomationRuleTemplatePort>,
+): TestAutomationRuleTemplatePort {
+  return {
+    async listRules() {
+      return unexpectedAutomationPortCall()
+    },
+    async getRule() {
+      return unexpectedAutomationPortCall()
+    },
+    async getRuleVersion() {
+      return unexpectedAutomationPortCall()
+    },
+    async createRule() {
+      return unexpectedAutomationPortCall()
+    },
+    async updateRule() {
+      return unexpectedAutomationPortCall()
+    },
+    async deleteRule() {
+      return unexpectedAutomationPortCall()
+    },
+    async listDueScheduledRules() {
+      return unexpectedAutomationPortCall()
+    },
+    async completeScheduledRule() {
+      return unexpectedAutomationPortCall()
+    },
+    async listTemplates() {
+      return unexpectedAutomationPortCall()
+    },
+    async getTemplate() {
+      return unexpectedAutomationPortCall()
+    },
+    async getTemplateVersion() {
+      return unexpectedAutomationPortCall()
+    },
+    async createTemplate() {
+      return unexpectedAutomationPortCall()
+    },
+    async updateTemplate() {
+      return unexpectedAutomationPortCall()
+    },
+    async deleteTemplate() {
+      return unexpectedAutomationPortCall()
+    },
+    async reserveTemplateApplication() {
+      return unexpectedAutomationPortCall()
+    },
+    async getTemplateApplication() {
+      return unexpectedAutomationPortCall()
+    },
+    async claimTemplateApplication() {
+      return unexpectedAutomationPortCall()
+    },
+    createTemplateApplicationCompletionMutation() {
+      return unexpectedAutomationPortCall()
+    },
+    async saveTemplateApplication() {
+      return unexpectedAutomationPortCall()
+    },
+    ...overrides,
+  }
+}
+
+/**
+ * Creates a complete focused inbound Webhook port with fail-fast defaults.
+ *
+ * @param overrides - Webhook behavior exercised by the current test.
+ * @returns A type-safe inbound Webhook port.
+ */
+function createAutomationInboundWebhookPort(
+  overrides: Partial<TestAutomationInboundWebhookPort>,
+): TestAutomationInboundWebhookPort {
+  return {
+    async listInboundWebhookEndpoints() {
+      return unexpectedAutomationPortCall()
+    },
+    async getInboundWebhookEndpoint() {
+      return unexpectedAutomationPortCall()
+    },
+    async resolveInboundWebhookEndpoint() {
+      return unexpectedAutomationPortCall()
+    },
+    async reserveCreateInboundWebhookEndpoint() {
+      return unexpectedAutomationPortCall()
+    },
+    async reserveRotateInboundWebhookEndpoint() {
+      return unexpectedAutomationPortCall()
+    },
+    async completeInboundWebhookProvisioning() {
+      return unexpectedAutomationPortCall()
+    },
+    async updateInboundWebhookEndpoint() {
+      return unexpectedAutomationPortCall()
+    },
+    async setInboundWebhookEndpointStatus() {
+      return unexpectedAutomationPortCall()
+    },
+    async revokeInboundWebhookEndpoint() {
+      return unexpectedAutomationPortCall()
+    },
+    async recordInboundWebhookDelivery() {
+      return unexpectedAutomationPortCall()
+    },
+    async listDueInboundWebhookSecretCleanups() {
+      return unexpectedAutomationPortCall()
+    },
+    async completeInboundWebhookSecretCleanup() {
+      return unexpectedAutomationPortCall()
+    },
+    ...overrides,
+  }
+}
+
+/**
+ * Creates a complete focused recurring schedule port with fail-fast defaults.
+ *
+ * @param overrides - Recurring schedule behavior exercised by the current test.
+ * @returns A type-safe recurring schedule port.
+ */
+function createAutomationRecurringSchedulePort(
+  overrides: Partial<TestAutomationRecurringSchedulePort>,
+): TestAutomationRecurringSchedulePort {
+  return {
+    async listRecurringWorks() {
+      return unexpectedAutomationPortCall()
+    },
+    async getRecurringWork() {
+      return unexpectedAutomationPortCall()
+    },
+    async createRecurringWork() {
+      return unexpectedAutomationPortCall()
+    },
+    async updateRecurringWork() {
+      return unexpectedAutomationPortCall()
+    },
+    async completeRecurringWork() {
+      return unexpectedAutomationPortCall()
+    },
+    async deleteRecurringWork() {
+      return unexpectedAutomationPortCall()
+    },
+    async listDueRecurringWorks() {
+      return unexpectedAutomationPortCall()
+    },
+    ...overrides,
+  }
+}
+
 test('passes execution status into persistence pagination and rejects unknown statuses', async () => {
   configureFakeProjectClients(true)
-  const queries: Array<Parameters<AutomationClient['listExecutions']>[0]> = []
+  const queries: Array<
+    Parameters<TestAutomationExecutionPort['listExecutions']>[0]
+  > = []
   setTestAppDependencies({
-    automation: {
-      async listExecutions(query: Parameters<AutomationClient['listExecutions']>[0]) {
+    executions: createAutomationExecutionPort({
+      async listExecutions(query) {
         queries.push(query)
         return { executions: [] }
       },
-    } as unknown as AutomationClient,
+    }),
   })
 
   const response = await app.request(
@@ -107,7 +348,7 @@ test('passes execution status into persistence pagination and rejects unknown st
 test('preserves FileProofingError status and code in Automation API responses', async () => {
   configureFakeProjectClients(true)
   setTestAppDependencies({
-    automation: {
+    ruleTemplates: createAutomationRuleTemplatePort({
       async listRules() {
         throw new FileProofingError(
           409,
@@ -115,7 +356,7 @@ test('preserves FileProofingError status and code in Automation API responses', 
           'Approval changed. Reload and try again.',
         )
       },
-    } as unknown as AutomationClient,
+    }),
   })
 
   const response = await app.request('/api/automation/rules', {
@@ -131,7 +372,7 @@ test('preserves FileProofingError status and code in Automation API responses', 
 test('preserves the legacy AutomationError fallback for unsupported numeric statuses', async () => {
   configureFakeProjectClients(true)
   setTestAppDependencies({
-    automation: {
+    ruleTemplates: createAutomationRuleTemplatePort({
       async listRules() {
         throw new AutomationError(
           418,
@@ -139,7 +380,7 @@ test('preserves the legacy AutomationError fallback for unsupported numeric stat
           'Legacy Automation status is unsupported.',
         )
       },
-    } as unknown as AutomationClient,
+    }),
   })
 
   const response = await app.request('/api/automation/rules', {
@@ -236,7 +477,7 @@ test('does not recover a Bulk apply from a competing actor state without its aud
   let updateCalls = 0
   let auditProofReads = 0
   setTestAppDependencies({
-    automation: automationFake.client,
+    bulkOperations: automationFake.client,
     teamIssues: {
       async getTeamIssueDetail() {
         detailReads += 1
@@ -336,7 +577,7 @@ test('does not recover a Bulk undo from a competing actor state without its audi
   let updateCalls = 0
   let auditProofReads = 0
   setTestAppDependencies({
-    automation: automationFake.client,
+    bulkOperations: automationFake.client,
     teamIssues: {
       async getTeamIssueDetail() {
         detailReads += 1
@@ -395,7 +636,7 @@ test('recovers Bulk apply and undo response loss only from their matching audit 
   const automationFake = createBulkOperationAutomationFake()
   let updateCalls = 0
   setTestAppDependencies({
-    automation: automationFake.client,
+    bulkOperations: automationFake.client,
     teamIssues: {
       async getTeamIssueDetail() {
         return {
@@ -404,14 +645,14 @@ test('recovers Bulk apply and undo response loss only from their matching audit 
           activity: [],
         }
       },
-      async updateTeamIssue(
+      async updateTeamIssue(...[
         directoryId,
         teamId,
         issueId,
         input,
         actorUserId,
         auditContext,
-      ) {
+      ]: Parameters<TestTeamIssuesClient['updateTeamIssue']>) {
         if (!auditContext) throw new Error('Bulk mutation audit context is required.')
         updateCalls += 1
         mutationContexts.push(auditContext)
@@ -530,11 +771,13 @@ test('accepts an unauthenticated signed inbound webhook without exposing secret 
   process.env.MUKUROJI_AUDIT_EVENTS_TABLE = 'AuditTable'
   try {
     let resolvedEndpoint = createInboundWebhookEndpointRecord()
-    let deliveryInput: Parameters<AutomationClient['recordInboundWebhookDelivery']>[1] | undefined
+    let deliveryInput:
+      | Parameters<TestAutomationInboundWebhookPort['recordInboundWebhookDelivery']>[1]
+      | undefined
     const signingSecret = Buffer.from('server-issued-secret', 'utf8')
     const secretReads: unknown[] = []
     setTestAppDependencies({
-      automation: {
+      inboundWebhooks: createAutomationInboundWebhookPort({
         async resolveInboundWebhookEndpoint() {
           return structuredClone(resolvedEndpoint)
         },
@@ -542,7 +785,7 @@ test('accepts an unauthenticated signed inbound webhook without exposing secret 
           deliveryInput = input
           return { eventId: input.eventId, replayed: false }
         },
-      } as unknown as AutomationClient,
+      }),
       automationInboundWebhookSecrets: {
         async provision() {
           throw new Error('Public delivery must not provision a secret.')
@@ -606,11 +849,11 @@ test('accepts an unauthenticated signed inbound webhook without exposing secret 
 test('maps inbound webhook public validation failures without Cognito authentication', async () => {
   const endpoint = createInboundWebhookEndpointRecord()
   setTestAppDependencies({
-    automation: {
+    inboundWebhooks: createAutomationInboundWebhookPort({
       async resolveInboundWebhookEndpoint(opaqueEndpointId) {
         return opaqueEndpointId === endpoint.opaqueEndpointId ? endpoint : undefined
       },
-    } as unknown as AutomationClient,
+    }),
   })
   const baseUrl = `/api/automation/inbound-webhooks/${endpoint.opaqueEndpointId}`
   expect((await app.request(baseUrl, {
@@ -652,7 +895,7 @@ test('returns plaintext inbound secrets only from create/rotate and redacts dura
     },
   }
   setTestAppDependencies({
-    automation: {
+    inboundWebhooks: createAutomationInboundWebhookPort({
       async listInboundWebhookEndpoints() {
         return [toAutomationInboundWebhookEndpoint(current)]
       },
@@ -693,7 +936,7 @@ test('returns plaintext inbound secrets only from create/rotate and redacts dura
         }
         return structuredClone(current)
       },
-    } as unknown as AutomationClient,
+    }),
     automationInboundWebhookSecrets: secretStore,
   })
   const headers = {
@@ -754,7 +997,7 @@ test('compensates a late secret provision after an administrator aborts provisio
   let deletedSecrets = 0
   let provisionFails = false
   setTestAppDependencies({
-    automation: {
+    inboundWebhooks: createAutomationInboundWebhookPort({
       async reserveCreateInboundWebhookEndpoint() {
         return provisioning
       },
@@ -774,7 +1017,7 @@ test('compensates a late secret provision after an administrator aborts provisio
           provisioningTargetStatus: undefined,
         })
       },
-    } as unknown as AutomationClient,
+    }),
     automationInboundWebhookSecrets: {
       async provision() {
         if (provisionFails) {
@@ -838,14 +1081,14 @@ test('recovers an automation Work Item update only from its deterministic audit 
             activity: [],
           }
         },
-        async updateTeamIssue(
+        async updateTeamIssue(...[
           _directoryId,
           teamId,
           issueId,
           input,
           actorUserId,
           auditContext,
-        ) {
+        ]: Parameters<TestTeamIssuesClient['updateTeamIssue']>) {
           if (!auditContext) throw new Error('Automation mutation audit context is required.')
           const beforeRevision = currentIssue.revision
           const afterRevision = beforeRevision + 1
@@ -1032,7 +1275,7 @@ test('rejects removed recurring-work Teams on create and update before saving a 
   configureFakeProjectClients(true)
   let updateCalls = 0
   setTestAppDependencies({
-    automation: {
+    recurringSchedules: createAutomationRecurringSchedulePort({
       async getRecurringWork() {
         return {
           schemaVersion: AUTOMATION_SCHEMA_VERSION,
@@ -1062,7 +1305,7 @@ test('rejects removed recurring-work Teams on create and update before saving a 
         updateCalls += 1
         throw new Error('Removed Team must be rejected first.')
       },
-    } as unknown as AutomationClient,
+    }),
   })
   const headers = {
     Authorization: 'Bearer test-token',
@@ -1150,7 +1393,7 @@ test('recovers a Project template application from atomic receipt success withou
     },
   })
   setTestAppDependencies({
-    automation: {
+    ruleTemplates: createAutomationRuleTemplatePort({
       async reserveTemplateApplication() {
         return structuredClone(application)
       },
@@ -1182,7 +1425,7 @@ test('recovers a Project template application from atomic receipt success withou
         templateVersionReads += 1
         return structuredClone(template)
       },
-    } as unknown as AutomationClient,
+    }),
   })
   const request = () => app.request(
     `/api/automation/templates/${template.id}/applications`,
@@ -1254,7 +1497,7 @@ test('keeps unsupported legacy 4xx template failures terminal', async () => {
     },
   })
   setTestAppDependencies({
-    automation: {
+    ruleTemplates: createAutomationRuleTemplatePort({
       async reserveTemplateApplication() {
         return structuredClone(application)
       },
@@ -1272,6 +1515,9 @@ test('keeps unsupported legacy 4xx template failures terminal', async () => {
           Update: {
             TableName: 'AutomationTable',
             Key: { scopeKey: application.workspaceId, recordKey: application.id },
+            UpdateExpression: 'SET #status = :succeeded',
+            ExpressionAttributeNames: { '#status': 'status' },
+            ExpressionAttributeValues: { ':succeeded': 'succeeded' },
           },
         }
       },
@@ -1285,7 +1531,7 @@ test('keeps unsupported legacy 4xx template failures terminal', async () => {
         savedApplication = structuredClone(candidate)
         application = structuredClone(candidate)
       },
-    } as unknown as AutomationClient,
+    }),
   })
 
   const response = await app.request(
@@ -1356,7 +1602,7 @@ test('applies a Workflow template atomically while preserving custom fields and 
   let savedConfiguration: WorkItemConfiguration | undefined
   let completionCount = 0
   setTestAppDependencies({
-    automation: {
+    ruleTemplates: createAutomationRuleTemplatePort({
       async reserveTemplateApplication() {
         return structuredClone(application)
       },
@@ -1386,7 +1632,7 @@ test('applies a Workflow template atomically while preserving custom fields and 
       async getTemplateVersion() {
         return structuredClone(template)
       },
-    } as unknown as AutomationClient,
+    }),
     workItemConfigurations: createFakeWorkItemConfigurationClient({
       async getTeamConfiguration() {
         return { configuration: structuredClone(existingConfiguration) }

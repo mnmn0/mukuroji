@@ -31,6 +31,47 @@ afterEach(() => {
   resetTestApp()
 })
 
+/**
+ * Fails when a projection-focused test invokes another Search capability.
+ *
+ * @returns Never returns because the operation is unexpected.
+ */
+function failUnexpectedWorkspaceSearchOperation(): never {
+  throw new Error('Unexpected Workspace Search operation.')
+}
+
+/**
+ * Creates a complete Workspace Search client with a focused projection override.
+ *
+ * @param upsertDocument - Projection behavior exercised by the test.
+ * @returns A fail-closed client for the projection behavior under test.
+ */
+function createWorkspaceSearchProjectionClient(
+  upsertDocument: WorkspaceSearchClient['upsertDocument'],
+): WorkspaceSearchClient {
+  return {
+    upsertDocument,
+    async deleteDocument() {
+      failUnexpectedWorkspaceSearchOperation()
+    },
+    async search() {
+      return failUnexpectedWorkspaceSearchOperation()
+    },
+    async listSavedViews() {
+      return failUnexpectedWorkspaceSearchOperation()
+    },
+    async createSavedView() {
+      return failUnexpectedWorkspaceSearchOperation()
+    },
+    async updateSavedView() {
+      return failUnexpectedWorkspaceSearchOperation()
+    },
+    async deleteSavedView() {
+      return failUnexpectedWorkspaceSearchOperation()
+    },
+  }
+}
+
 test('reads and saves Workspace Work Item configuration through the authenticated scope', async () => {
   configureFakeProjectClients(true)
   const stored = createTestWorkItemConfiguration('workspace', 'user#demo@example.com', 3)
@@ -470,13 +511,13 @@ test('reprojects both Work Item relation endpoints after relation creation and d
         return response
       },
     }),
-    workspaceSearch: {
-      async upsertDocument(document) {
+    workspaceSearch: createWorkspaceSearchProjectionClient(
+      async (document) => {
         const projected = createWorkspaceSearchDocument(document)
         projectedDocuments.push(projected)
         return projected
       },
-    } as unknown as WorkspaceSearchClient,
+    ),
   })
   const headers = {
     Authorization: 'Bearer test-token',
@@ -542,11 +583,11 @@ test('keeps a relation mutation successful when current relation projection read
         throw new Error('Relation graph unavailable')
       },
     }),
-    workspaceSearch: {
-      async upsertDocument(document) {
+    workspaceSearch: createWorkspaceSearchProjectionClient(
+      async (document) => {
         return createWorkspaceSearchDocument(document)
       },
-    } as unknown as WorkspaceSearchClient,
+    ),
   })
   const originalConsoleError = console.error
   let projectionErrors = 0

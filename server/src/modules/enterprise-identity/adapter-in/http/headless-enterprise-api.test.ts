@@ -22,7 +22,12 @@ import { CognitoServiceError } from '../../../authentication'
 import { WorkspaceAccessError } from '../../../workspace-access/workspace-access'
 import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type {
+  ListExternalWorkItemLinksRequest,
+  PrepareWorkItemDeletionFenceRequest,
+} from '../../../developer-platform'
+import type {
   DocumentClient,
+  PrepareDocumentWorkItemDeletionFenceRequest,
 } from '../../../documents/documents'
 import {
   InMemoryPlanningClient,
@@ -406,8 +411,11 @@ test('wires external and Document deletion fences through the canonical Public W
       },
     },
   }
-  const externalFenceRequests: Array<Record<string, string>> = []
-  const documentFenceRequests: Array<Record<string, string>> = []
+  const externalFenceRequests:
+    PrepareWorkItemDeletionFenceRequest[] = []
+  const documentFenceRequests:
+    PrepareDocumentWorkItemDeletionFenceRequest[] =
+      []
   const deleteTransactions: Array<{
     authorizationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']>
     authorizationSnapshot?: WorkItemAuthorizationSnapshot
@@ -427,18 +435,25 @@ test('wires external and Document deletion fences through the canonical Public W
   })
   setTestAppDependencies({
     externalLinks: {
-      async listExternalWorkItemLinks(_input) {
+      async listExternalWorkItemLinks(
+        _input: ListExternalWorkItemLinksRequest,
+      ) {
         return hasExternalLinks ? [{}] : []
       },
     } as never,
     transactions: {
-      async prepareWorkItemDeletionFenceTransactWrite(input) {
+      async prepareWorkItemDeletionFenceTransactWrite(
+        input: PrepareWorkItemDeletionFenceRequest,
+      ) {
         externalFenceRequests.push(input)
         return { transactWriteItem: externalFence }
       },
     },
     documents: {
-      async prepareWorkItemDeletionFenceTransactWrite(input) {
+      async prepareWorkItemDeletionFenceTransactWrite(
+        input:
+          PrepareDocumentWorkItemDeletionFenceRequest,
+      ) {
         documentFenceRequests.push(input)
         return { transactWriteItem: documentFence }
       },

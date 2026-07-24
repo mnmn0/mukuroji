@@ -5,14 +5,13 @@ import {
 import type {
   ProjectRole,
 } from '../../../directory'
-import type {
-  WorkspaceAccessClient,
-} from '../../../workspace-access'
 const {
   app,
   configureFakeProjectClients,
   createCollaborationStub,
+  createDocumentFake,
   createFakeWorkItemConfigurationClient,
+  createWorkspaceAccessFake,
   getTestAppDependencies,
   resetTestApp,
   setTestAppDependencies,
@@ -52,12 +51,42 @@ afterEach(() => {
   resetTestApp()
 })
 
+/**
+ * Fails a Workspace Search fake when a test omitted a required operation.
+ *
+ * @returns Never returns because the operation is unexpected.
+ */
+function failUnexpectedWorkspaceSearchOperation(): never {
+  throw new Error('Unexpected Workspace Search operation.')
+}
+
+/**
+ * Creates a fail-closed Workspace Search fake with typed method overrides.
+ *
+ * @param overrides - Methods exercised by the current test.
+ * @returns A complete Workspace Search port.
+ */
+function createWorkspaceSearchFake(
+  overrides: Partial<WorkspaceSearchClient>,
+): WorkspaceSearchClient {
+  return {
+    upsertDocument: async () => failUnexpectedWorkspaceSearchOperation(),
+    deleteDocument: async () => failUnexpectedWorkspaceSearchOperation(),
+    search: async () => failUnexpectedWorkspaceSearchOperation(),
+    listSavedViews: async () => failUnexpectedWorkspaceSearchOperation(),
+    createSavedView: async () => failUnexpectedWorkspaceSearchOperation(),
+    updateSavedView: async () => failUnexpectedWorkspaceSearchOperation(),
+    deleteSavedView: async () => failUnexpectedWorkspaceSearchOperation(),
+    ...overrides,
+  }
+}
+
 test('search endpoint parses filters and revalidates comment scope against current RBAC', async () => {
   configureFakeProjectClients(true)
   let capturedInput: WorkspaceSearchQueryInput | undefined
   let resolvedProjectId: string | undefined
   setTestAppDependencies({
-    workspaceSearch: {
+    workspaceSearch: createWorkspaceSearchFake({
       async search(input) {
         capturedInput = input
         const document = createWorkspaceSearchDocument({
@@ -73,13 +102,13 @@ test('search endpoint parses filters and revalidates comment scope against curre
         resolvedProjectId = (await input.resolveCurrentScope?.(document))?.projectId
         return { schemaVersion: 1, results: [] }
       },
-    } as unknown as WorkspaceSearchClient,
+    }),
   })
   const filters = {
     keyword: 'scope',
     projectIds: ['refero'],
     customFields: [{ fieldId: 'score', operator: 'greater-than', value: 5 }],
-  }
+  } satisfies WorkspaceSearchQueryInput['filters']
 
   const response = await app.request(
     `/api/search?filters=${encodeURIComponent(JSON.stringify(filters))}&limit=25`,
@@ -104,6 +133,7 @@ test('resolves later Document search hits with compact access reads beyond thirt
     `${'x'.repeat(20_001)}tail-keyword`
   setTestAppDependencies({
     documents: {
+      ...createDocumentFake(),
       async get() {
         fullDocumentReads += 1
         throw new Error(
@@ -123,8 +153,8 @@ test('resolves later Document search hits with compact access reads beyond thirt
             }
           : undefined
       },
-    } as unknown as DocumentClient,
-    workspaceSearch: {
+    },
+    workspaceSearch: createWorkspaceSearchFake({
       async search(input) {
         const resolutions =
           await Promise.all(
@@ -156,7 +186,7 @@ test('resolves later Document search hits with compact access reads beyond thirt
             ?.body === fullBody
         return { schemaVersion: 1, results: [] }
       },
-    } as unknown as WorkspaceSearchClient,
+    }),
   })
 
   const response = await app.request('/api/search', {
@@ -178,6 +208,7 @@ test('skips Document access reads when Workspace search filters exclude Document
   let excludedDocuments = 0
   setTestAppDependencies({
     documents: {
+      ...createDocumentFake(),
       async get() {
         fullDocumentReads += 1
         throw new Error('Comment-only search must not read a Document source.')
@@ -188,8 +219,8 @@ test('skips Document access reads when Workspace search filters exclude Document
           'Comment-only search must not read Document access.',
         )
       },
-    } as unknown as DocumentClient,
-    workspaceSearch: {
+    },
+    workspaceSearch: createWorkspaceSearchFake({
       async search(input) {
         const resolutions = await Promise.all(Array.from({ length: 31 }, (_, index) =>
           input.resolveCurrentScope?.(createWorkspaceSearchDocument({
@@ -203,7 +234,7 @@ test('skips Document access reads when Workspace search filters exclude Document
         excludedDocuments = resolutions.filter((resolution) => resolution === undefined).length
         return { schemaVersion: 1, results: [] }
       },
-    } as unknown as WorkspaceSearchClient,
+    }),
   })
   const filters = encodeURIComponent(JSON.stringify({ entityTypes: ['comment'] }))
 
@@ -229,6 +260,7 @@ test('binds cached Document roles to member and Planning authorization generatio
   > = []
   setTestAppDependencies({
     documents: {
+      ...createDocumentFake(),
       async get(input) {
         accesses.push(input.access)
         throw new DocumentError(
@@ -237,7 +269,7 @@ test('binds cached Document roles to member and Planning authorization generatio
           'Document was not found.',
         )
       },
-    } as unknown as DocumentClient,
+    },
     planning: {
       async getAuthorizationRevision() {
         return planningRevision
@@ -260,6 +292,7 @@ test('binds cached Document roles to member and Planning authorization generatio
       typeof setTestAppDependencies
     >[0]['projectDirectory'],
     workspaceAccess: {
+      ...createWorkspaceAccessFake(),
       async getActiveMember(_workspaceId, memberKey) {
         return {
           id: memberKey,
@@ -272,7 +305,7 @@ test('binds cached Document roles to member and Planning authorization generatio
           updatedAt: '2026-07-18T00:00:00.000Z',
         }
       },
-    } as unknown as WorkspaceAccessClient,
+    },
   })
   const readDocument = () => app.request(
     '/api/documents/document-1',
@@ -331,6 +364,7 @@ test('isolates cached Document roles between app dependency sets', async () => {
   ) =>
     createApp(overrideAppDependencies(baseDependencies, {
       documents: {
+        ...baseDependencies.workItems.documents,
         async get(input) {
           accesses.push(input.access)
           throw new DocumentError(
@@ -339,7 +373,7 @@ test('isolates cached Document roles between app dependency sets', async () => {
             'Document was not found.',
           )
         },
-      } as unknown as DocumentClient,
+      },
       projectDirectory: {
         async getProjectAccessList() {
           return [{ projectId: 'refero', role }]
@@ -402,6 +436,10 @@ test('rejects missing, non-Goal, archived, and invisible Planning Goal relation 
   } satisfies DocumentDetail
   setTestAppDependencies({
     documents: {
+      ...createDocumentFake(),
+      async prepareOperations(input) {
+        return { pendingInput: input.input }
+      },
       async get() {
         return editableDocument
       },
@@ -418,7 +456,7 @@ test('rejects missing, non-Goal, archived, and invisible Planning Goal relation 
           updatedAt: '2026-07-18T00:01:00.000Z',
         }
       },
-    } as unknown as DocumentClient,
+    },
     planning: {
       async getAuthorizationRevision() {
         return 2
@@ -524,6 +562,7 @@ test('revalidates archived Planning Goal targets before restoring a Document ver
   let committed = false
   setTestAppDependencies({
     documents: {
+      ...createDocumentFake(),
       async restoreVersion(input) {
         await input.validateRelationTargets([{
           kind: 'goal',
@@ -532,7 +571,7 @@ test('revalidates archived Planning Goal targets before restoring a Document ver
         committed = true
         throw new Error('Archived Goal validation must reject the restore.')
       },
-    } as unknown as DocumentClient,
+    },
     planning: {
       async getAuthorizationRevision() {
         return 1
@@ -611,6 +650,7 @@ test('validates Document relation target reads with bounded concurrency', async 
   } satisfies DocumentDetail
   setTestAppDependencies({
     documents: {
+      ...createDocumentFake(),
       async restoreVersion(input) {
         await input.validateRelationTargets(
           Array.from({ length: 14 }, (_, index) => ({
@@ -621,7 +661,7 @@ test('validates Document relation target reads with bounded concurrency', async 
         )
         return editableDocument
       },
-    } as unknown as DocumentClient,
+    },
   })
 
   const response = await app.request(
@@ -660,9 +700,9 @@ test('search endpoint refreshes workflow, custom fields, and relations from curr
         }
       },
     }),
-    workspaceSearch: {
+    workspaceSearch: createWorkspaceSearchFake({
       async search(input) {
-        relationFilters = input.filters.relationIds
+        relationFilters = input.filters?.relationIds
         resolvedScope = await input.resolveCurrentScope?.(createWorkspaceSearchDocument({
           workspaceId: input.workspaceId,
           entityType: 'work-item',
@@ -676,7 +716,7 @@ test('search endpoint refreshes workflow, custom fields, and relations from curr
         }))
         return { schemaVersion: 1, results: [] }
       },
-    } as unknown as WorkspaceSearchClient,
+    }),
   })
 
   const filters = encodeURIComponent(JSON.stringify({
@@ -718,7 +758,7 @@ test('search endpoint refreshes comment content from its current source snapshot
         }
       },
     }),
-    workspaceSearch: {
+    workspaceSearch: createWorkspaceSearchFake({
       async search(input) {
         resolvedScope = await input.resolveCurrentScope?.(createWorkspaceSearchDocument({
           workspaceId: input.workspaceId,
@@ -733,7 +773,7 @@ test('search endpoint refreshes comment content from its current source snapshot
         }))
         return { schemaVersion: 1, results: [] }
       },
-    } as unknown as WorkspaceSearchClient,
+    }),
   })
 
   const response = await app.request('/api/search', {
@@ -775,7 +815,7 @@ test('search endpoint fails closed for missing, deleted, or malformed comment so
         }
       },
     }),
-    workspaceSearch: {
+    workspaceSearch: createWorkspaceSearchFake({
       async search(input) {
         for (const [commentId, parentId] of [
           ['missing', 'team/core-team/issue/issue-1'],
@@ -795,7 +835,7 @@ test('search endpoint fails closed for missing, deleted, or malformed comment so
         }
         return { schemaVersion: 1, results: [] }
       },
-    } as unknown as WorkspaceSearchClient,
+    }),
   })
 
   const response = await app.request('/api/search', {
@@ -811,7 +851,7 @@ test('search endpoint excludes archived Team documents for system administrators
   configureFakeProjectClients(true, { systemAdminMemberKeys: ['demo@example.com'] })
   let resolvedScope: unknown = 'not-called'
   setTestAppDependencies({
-    workspaceSearch: {
+    workspaceSearch: createWorkspaceSearchFake({
       async search(input) {
         resolvedScope = await input.resolveCurrentScope?.(createWorkspaceSearchDocument({
           workspaceId: input.workspaceId,
@@ -823,7 +863,7 @@ test('search endpoint excludes archived Team documents for system administrators
         }))
         return { schemaVersion: 1, results: [] }
       },
-    } as unknown as WorkspaceSearchClient,
+    }),
   })
 
   const response = await app.request('/api/search', {
@@ -859,7 +899,7 @@ test('saved view endpoints forward create update list and revision delete contra
     updatedAt: '2026-07-12T00:00:00.000Z',
   }
   setTestAppDependencies({
-    workspaceSearch: {
+    workspaceSearch: createWorkspaceSearchFake({
       async listSavedViews(input) {
         calls.lists.push(input)
         return { views: [view] }
@@ -876,7 +916,7 @@ test('saved view endpoints forward create update list and revision delete contra
         calls.deletes.push(input)
         return { id: input.viewId, revision: input.expectedRevision }
       },
-    } as unknown as WorkspaceSearchClient,
+    }),
   })
   const headers = {
     Authorization: 'Bearer test-token',
@@ -919,12 +959,12 @@ test('keeps a primary mutation successful when search projection fails', async (
   configureFakeProjectClients(true)
   let projectedTitle: string | undefined
   setTestAppDependencies({
-    workspaceSearch: {
+    workspaceSearch: createWorkspaceSearchFake({
       async upsertDocument(document) {
         projectedTitle = document.title
         throw new Error('Search index unavailable')
       },
-    } as unknown as WorkspaceSearchClient,
+    }),
   })
   const originalConsoleError = console.error
   let projectionErrors = 0
@@ -953,12 +993,12 @@ test('keeps a committed mutation successful when search document construction fa
   configureFakeProjectClients(true)
   let projectionWrites = 0
   setTestAppDependencies({
-    workspaceSearch: {
+    workspaceSearch: createWorkspaceSearchFake({
       async upsertDocument(document) {
         projectionWrites += 1
         return createWorkspaceSearchDocument(document)
       },
-    } as unknown as WorkspaceSearchClient,
+    }),
   })
   const originalConsoleError = console.error
   let projectionErrors = 0

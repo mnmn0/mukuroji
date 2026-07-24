@@ -16,6 +16,7 @@ import {
   createEnterpriseScimGroupJobWorkerHandler,
 } from '../../../../handlers/enterprise-scim-group-job-worker-handler'
 import type {
+  ReconcileDirectoryWorkspaceMemberInput,
   WorkspaceAccessClient,
 } from '../../../workspace-access/workspace-access'
 import {
@@ -475,7 +476,10 @@ test('uses provider-qualified SCIM authority and never grants failed desired sta
         async getMember(_workspaceId: string, memberKey: string) {
           return currentMember?.memberKey === memberKey ? currentMember : undefined
         },
-        async reconcileDirectoryMember(_workspaceId, input) {
+        async reconcileDirectoryMember(
+          _workspaceId: string,
+          input: ReconcileDirectoryWorkspaceMemberInput,
+        ) {
           reconciledAuthorityIds.push(input.externalIdentityId)
           if (
             currentMember?.externalIdentityId &&
@@ -956,7 +960,10 @@ test('settles interleaved multi-page SCIM group jobs to the final guest role', a
       Authorization: `Bearer ${scenario.scimToken}`,
       'Content-Type': 'application/scim+json',
     }
-    const users = []
+    const users: Array<{
+      id: string
+      userName: string
+    }> = []
     for (let index = 0; index < 6; index += 1) {
       const email = `interleaved-user-${index}@example.com`
       const response = await app.request(`${scimBaseUrl}/Users`, {
@@ -973,7 +980,24 @@ test('settles interleaved multi-page SCIM group jobs to the final guest role', a
         }),
       })
       expect(response.status).toBe(201)
-      users.push(await response.json())
+      const createdUser: unknown =
+        await response.json()
+      if (
+        typeof createdUser !== 'object' ||
+        createdUser === null ||
+        !('id' in createdUser) ||
+        typeof createdUser.id !== 'string' ||
+        !('userName' in createdUser) ||
+        typeof createdUser.userName !== 'string'
+      ) {
+        throw new Error(
+          'Expected the SCIM user response to include an ID and username.',
+        )
+      }
+      users.push({
+        id: createdUser.id,
+        userName: createdUser.userName,
+      })
     }
     const createGroup = async (suffix: string) => {
       const response = await app.request(`${scimBaseUrl}/Groups`, {

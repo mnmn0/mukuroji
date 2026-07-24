@@ -26,6 +26,8 @@ import type {
   DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
 import type {
+  PublicRequestForm,
+  RequestForm,
   RequestFormDraft,
 } from '@mukuroji/contracts'
 import {
@@ -38,23 +40,137 @@ afterEach(() => {
   resetTestApp()
 })
 
+/**
+ * Creates a rejected operation for a Request Intake capability that a test did not configure.
+ *
+ * @param operation - Port method that must not be reached by the focused test.
+ * @returns A fail-fast async implementation compatible with any Request Intake method.
+ */
+function createUnexpectedRequestIntakeCall(
+  operation: keyof RequestIntakeClient,
+): () => Promise<never> {
+  return async () => {
+    throw new Error(`Unexpected RequestIntakeClient call: ${operation}`)
+  }
+}
+
+/**
+ * Creates a complete Request Intake test port with explicit focused overrides.
+ *
+ * @param overrides - Capabilities exercised by the focused test.
+ * @returns A network-free client that rejects every unconfigured capability.
+ */
+function createRequestIntakeClient(
+  overrides: Readonly<Partial<RequestIntakeClient>>,
+): RequestIntakeClient {
+  return {
+    listForms: createUnexpectedRequestIntakeCall('listForms'),
+    getForm: createUnexpectedRequestIntakeCall('getForm'),
+    createForm: createUnexpectedRequestIntakeCall('createForm'),
+    updateForm: createUnexpectedRequestIntakeCall('updateForm'),
+    publishForm: createUnexpectedRequestIntakeCall('publishForm'),
+    resolveLink: createUnexpectedRequestIntakeCall('resolveLink'),
+    getPublicForm: createUnexpectedRequestIntakeCall('getPublicForm'),
+    createAttachmentUpload: createUnexpectedRequestIntakeCall(
+      'createAttachmentUpload',
+    ),
+    submit: createUnexpectedRequestIntakeCall('submit'),
+    listSubmissions: createUnexpectedRequestIntakeCall('listSubmissions'),
+    getSubmission: createUnexpectedRequestIntakeCall('getSubmission'),
+    applyAction: createUnexpectedRequestIntakeCall('applyAction'),
+    completeConversion: createUnexpectedRequestIntakeCall('completeConversion'),
+    getRequesterThread: createUnexpectedRequestIntakeCall('getRequesterThread'),
+    replyToThread: createUnexpectedRequestIntakeCall('replyToThread'),
+    ingestEmail: createUnexpectedRequestIntakeCall('ingestEmail'),
+    createAttachmentAccess: createUnexpectedRequestIntakeCall(
+      'createAttachmentAccess',
+    ),
+    ...overrides,
+  }
+}
+
+const draft = {
+  definition: {
+    defaultLocale: 'ja',
+    supportedLocales: ['ja'],
+    title: { ja: 'Request' },
+    sections: [{
+      id: 'main',
+      title: { ja: 'Request details' },
+      fields: [{
+        id: 'title',
+        type: 'short-text',
+        label: { ja: 'Title' },
+        validation: { required: true },
+      }],
+    }],
+    confirmation: {
+      message: { ja: 'Request received.' },
+    },
+  },
+  routing: {
+    defaultTarget: {
+      teamId: 'core-team',
+      assigneeUserId: 'demo@example.com',
+      priority: 'medium',
+      dueDateOffsetDays: 1,
+    },
+    rules: [],
+    mapping: { titleFieldId: 'title' },
+  },
+} satisfies RequestFormDraft
+
+const requestForm = {
+  id: 'form-1',
+  name: 'Request',
+  scope: { type: 'team', teamId: 'core-team' },
+  status: 'draft',
+  revision: 1,
+  draft,
+  publishedVersions: [],
+  link: {
+    linkId: 'link-1',
+    token: 'L'.repeat(43),
+    accessMode: 'public',
+  },
+  createdAt: '2026-07-16T00:00:00.000Z',
+  updatedAt: '2026-07-16T00:00:00.000Z',
+  capabilities: {
+    canEdit: true,
+    canPublish: true,
+    canManageLink: true,
+  },
+} satisfies RequestForm
+
 test('does not trust forwarded request rate-limit sources without a configured proxy', async () => {
   const clientKeys: string[] = []
+  const overrides = {
+    async resolveLink() {
+      return {
+        workspaceId: 'workspace-1',
+        formId: 'form-1',
+        accessMode: 'public',
+        tokenDigest: 'link-digest',
+      }
+    },
+    async getPublicForm(_resolution, context) {
+      clientKeys.push(context.clientKey)
+      return {
+        schemaVersion: 1,
+        formId: 'form-1',
+        version: 1,
+        accessMode: 'public',
+        definition: draft.definition,
+        submissionSession: {
+          token: 'S'.repeat(43),
+          expiresAt: '2026-07-16T00:15:00.000Z',
+          minimumSubmitAt: '2026-07-16T00:00:01.000Z',
+        },
+      } satisfies PublicRequestForm
+    },
+  } satisfies Pick<RequestIntakeClient, 'getPublicForm' | 'resolveLink'>
   setTestAppDependencies({
-    requestIntake: {
-      async resolveLink() {
-        return {
-          workspaceId: 'workspace-1',
-          formId: 'form-1',
-          accessMode: 'public',
-          tokenDigest: 'link-digest',
-        }
-      },
-      async getPublicForm(_resolution, context) {
-        clientKeys.push(context.clientKey)
-        return {}
-      },
-    } as RequestIntakeClient,
+    requestIntake: createRequestIntakeClient(overrides),
   })
 
   for (const userAgent of ['agent-one', 'agent-two']) {
@@ -96,29 +212,17 @@ test('delegates Request Form publish revision checks to the Request Intake clien
     'RequestRevisionConflict',
     'Request resource revision changed.',
   )
-  const draft = {
-    definition: { sections: [] },
-    routing: {
-      defaultTarget: {
-        teamId: 'core-team',
-        assigneeUserId: 'demo@example.com',
-        priority: 'medium',
-        dueDateOffsetDays: 1,
-      },
-      rules: [],
-      mapping: { titleFieldId: 'title' },
+  const overrides = {
+    async getForm() {
+      return requestForm
     },
-  } satisfies RequestFormDraft
+    async publishForm() {
+      publishCalls += 1
+      throw conflict
+    },
+  } satisfies Pick<RequestIntakeClient, 'getForm' | 'publishForm'>
   setTestAppDependencies({
-    requestIntake: {
-      async getForm() {
-        return { revision: 1, draft }
-      },
-      async publishForm() {
-        publishCalls += 1
-        throw conflict
-      },
-    } as RequestIntakeClient,
+    requestIntake: createRequestIntakeClient(overrides),
   })
 
   const response = await app.request('/api/request-forms/form-1/publish', {

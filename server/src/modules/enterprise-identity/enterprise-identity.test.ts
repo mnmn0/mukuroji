@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import type {
   EnterpriseCustomRole,
+  EnterpriseDirectoryGroupMapping,
   EnterpriseIdentityProvider,
   EnterpriseIdentitySnapshot,
   EnterpriseRoleAssignment,
@@ -738,7 +739,11 @@ test('processes SCIM group jobs in sequential five-user apply and settle pages',
 
   const firstPage = await client.processScimGroupJob(firstReference, applyUser)
   expect(firstPage.status).toBe('continued')
-  expect(firstPage.processedUserIds).toHaveLength(5)
+  if (firstPage.status !== 'continued') {
+    throw new Error('Expected the apply phase to continue.')
+  }
+  expect(firstPage.processedUserIds)
+    .toHaveLength(5)
   expect(maximumActiveCallbacks).toBe(1)
   expect(appliedPhases).toEqual(Array.from({ length: 5 }, () => 'apply'))
   expect((await client.getSnapshot(workspaceId)).scimGroups[0]).toMatchObject({
@@ -752,38 +757,41 @@ test('processes SCIM group jobs in sequential five-user apply and settle pages',
   })
   expect(appliedUserIds).toHaveLength(staleCallbackCount)
 
-  if (firstPage.status !== 'continued') {
-    throw new Error('Expected the apply phase to continue.')
-  }
   const applyCompleted = await client.processScimGroupJob(
     firstPage.nextReference,
     applyUser,
   )
   expect(applyCompleted.status).toBe('continued')
-  expect(applyCompleted.processedUserIds).toHaveLength(2)
+  if (applyCompleted.status !== 'continued') {
+    throw new Error('Expected the settle phase to start.')
+  }
+  expect(applyCompleted.processedUserIds)
+    .toHaveLength(2)
   expect((await client.getSnapshot(workspaceId)).scimGroups[0]).toMatchObject({
     version: 1,
     appliedVersion: 1,
   })
 
-  if (applyCompleted.status !== 'continued') {
-    throw new Error('Expected the settle phase to start.')
-  }
   const firstSettlePage = await client.processScimGroupJob(
     applyCompleted.nextReference,
     applyUser,
   )
   expect(firstSettlePage.status).toBe('continued')
-  expect(firstSettlePage.processedUserIds).toHaveLength(5)
   if (firstSettlePage.status !== 'continued') {
     throw new Error('Expected the settle phase to continue.')
   }
+  expect(firstSettlePage.processedUserIds)
+    .toHaveLength(5)
   const completed = await client.processScimGroupJob(
     firstSettlePage.nextReference,
     applyUser,
   )
   expect(completed.status).toBe('completed')
-  expect(completed.processedUserIds).toHaveLength(2)
+  if (completed.status !== 'completed') {
+    throw new Error('Expected the settle phase to complete.')
+  }
+  expect(completed.processedUserIds)
+    .toHaveLength(2)
   expect(appliedPhases).toEqual([
     ...Array.from({ length: 7 }, () => 'apply'),
     ...Array.from({ length: 7 }, () => 'settle'),
@@ -1129,6 +1137,9 @@ test('restarts pending apply and settle pages when guest mappings change', async
     },
   )
   expect(restartedSettlePage.status).toBe('continued')
+  if (restartedSettlePage.status !== 'continued') {
+    throw new Error('Expected the restarted settle page to continue.')
+  }
   expect(restartedSettlePage.processedUserIds).toEqual(
     firstSettlePage.processedUserIds,
   )
@@ -1195,7 +1206,7 @@ test('enqueues applied group jobs for guest mapping create, retarget, and delete
     priority: 0,
     revision: 1,
     updatedAt: now.toISOString(),
-  }
+  } satisfies EnterpriseDirectoryGroupMapping
   await client.putGroupMapping(mapping)
   const createReference = await client.getScimGroupJobReference(
     workspaceId,
@@ -1223,7 +1234,7 @@ test('enqueues applied group jobs for guest mapping create, retarget, and delete
     ...mapping,
     directoryGroupId: secondGroup.groupId,
     revision: 2,
-  }
+  } satisfies EnterpriseDirectoryGroupMapping
   await client.putGroupMapping(retargetedMapping)
   const firstRetargetReference = await client.getScimGroupJobReference(
     workspaceId,

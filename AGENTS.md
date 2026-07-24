@@ -56,7 +56,8 @@ bun run skill:validate:test
 
 `oxc:lint:github` は GitHub Actions の annotation 向けです。CI / oxlint 設定を変更した場合は、ローカルでは通常 `bun run oxc:lint` を確認してください。
 
-`typecheck:server` は server の本番コード、`typecheck:contracts` は共有 contract の型検査です。
+`typecheck:server` は test / test-support を含む server の全 TypeScript、
+`typecheck:contracts` は共有 contract の型検査です。
 `dependencies:check` は workspace 間の循環依存・禁止依存を、`knip:check` は未使用ファイル・依存を検査します。
 
 ### Workspace の依存境界

@@ -14,7 +14,7 @@ repository に固定せず、各実行の evidence record に残します。
 | Health | `/api/health` の liveness と `/api/ready` の DynamoDB readiness を分離する | Trusted probe と edge-level throttle を設定し、readiness の `503` を rollout 停止へ接続すること |
 | Trace | CDK が管理する全16個の Node.js Lambda で X-Ray active tracing を有効にし、API log に runtime-controlled invocation ID と X-Ray root trace ID を記録する | Correlation ID 自体の X-Ray annotation は未実装 |
 | Alarm | API、queue、DLQ、async destination の21個の CloudWatch alarm を定義する | Alarm action、SNS / Incident Manager、roster は未実装。通知先を接続し test alarm を確認するまで unattended production とみなさないこと |
-| Release | PR/push workflow が production source/build config の strict typecheck、static analysis、unit/integration、Web E2E、CDK test/nag/synth を実行する | Server の legacy test source 全体の strict 化と repository ruleset / branch protection は未完了 |
+| Release | PR/push workflow が Server test を含む全 source/build config の strict typecheck、static analysis、unit/integration、Web E2E、CDK test/nag/synth を実行し、main ruleset が6つの必須 check を強制する | Path-filtered local runtime と外部 reviewer は常時 required にせず、対象変更ごとの release evidence で結果または rate limit を確認すること |
 | Rollout | Backward-compatible CDK/Lambda update と CloudFormation rollback を利用できる | Lambda alias、CodeDeploy canary、一般的な feature flag / kill switch は未実装。段階 rollout が必要な変更は gate を満たさない |
 | Migration | Production-safe migration contract と entry/verification/rollback evidence を定義する | Workspace Search backfill は online fence、lease、lossless journal、完全検証、rollback を未実装。production gate には使用しないこと |
 | Data durability | Stateful DynamoDB table は `Retain` + PITR、file bucket は `Retain` + versioning を使う | 定期 restore、regional replication/failover、AWS Backup plan は未実装。drill と regional DR を別途有効化すること |
@@ -339,7 +339,7 @@ resource を skip して `continue-update-rollback` しません。
 
 1. Deploy commit OID、build artifact digest、target account/region/stack/parameters を固定する。
 2. GitHub の `static-analysis`、`strict-typecheck`、`application-unit-tests`、`web-e2e`、
-   `cdk-security` と、repository review policy をすべて成功させる。
+   `cdk-security`、`dependency-review` と、repository review policy をすべて成功させる。
 3. `cdk diff` / synth を保存し、stateful resource replacement/deletion、IAM拡大、PITR/Retain
    の解除がないことを確認する。
 4. Schema/API は backward-compatible にし、migration は上記 entry gate と verify/rollback
@@ -348,8 +348,11 @@ resource を skip して `continue-update-rollback` しません。
    していることを確認する。
 6. 直前の成功 revision と同じ必須 parameter を使う rollback command を review する。
 
-Workflow が存在しても branch protection の required check 設定がなければ gate は自動強制
-されません。Repository administrator が設定を確認します。
+`main quality gates` ruleset は上記6 context を strict mode で required にします。Workflow の
+job/context 名を変更する場合は ruleset も同じ release で更新し、対象 branch の effective rules
+を確認します。Path-filtered `local-runtime` と外部 CodeRabbit review は常時実行されないため
+branch-wide required context にはせず、対象変更ごとの release evidence に結果または rate limit
+を記録します。
 
 Lambda alias/weighted routing/CodeDeploy canary と一般的な kill switch はありません。このため
 production では先に別 environment で同一 artifact を検証し、変更 window 中に一つの stack を

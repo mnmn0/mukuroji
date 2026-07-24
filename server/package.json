@@ -4,7 +4,6 @@
     "dev": "bun run --hot src/handlers/api.handler.ts",
     "build:lambda": "bun build src/handlers/api.handler.ts --target node --format esm --outfile dist/lambda/index.mjs && bun build src/handlers/enterprise-scim-group-job-worker-handler.ts --target node --format esm --outfile dist/lambda/enterprise-scim-group-job-worker.mjs",
     "build:connector-lambda": "bun build src/handlers/connector-handler.ts --target node --format esm --outfile dist/lambda/connector-handler.mjs",
-    "typecheck:test-support": "tsc -p tsconfig.test-support.json --noEmit --pretty false",
     "test": "bun test --max-concurrency 1 src scripts",
     "audit:backfill": "bun run scripts/backfills/backfill-audit-events.ts",
     "search:backfill": "bun run scripts/backfills/backfill-workspace-search.ts"

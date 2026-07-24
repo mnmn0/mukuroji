@@ -497,6 +497,9 @@ describe('DynamoDB inbound webhook delivery receipts', () => {
       { expectedRevision: paused.revision },
       'active',
     )
+    const resumedRecord = await client.completeInboundWebhookProvisioning(
+      provisioning,
+    )
     await client.reserveRotateInboundWebhookEndpoint(
       endpoint.workspaceId,
       'actor-1',
@@ -504,7 +507,7 @@ describe('DynamoDB inbound webhook delivery receipts', () => {
       { expectedRevision: resumed.revision },
       'rotate-race-key',
     )
-    await expect(client.recordInboundWebhookDelivery(resumed, {
+    await expect(client.recordInboundWebhookDelivery(resumedRecord, {
       idempotencyKey: 'delivery-key',
       bodyFingerprint: fingerprint('raw body'),
       signatureFingerprint: fingerprint('signature-1'),

@@ -61,6 +61,7 @@ import {
 } from '../../modules/work-items/work-item-configuration'
 import type {
   CreateTeamIssueRequestBody,
+  TeamIssuesClient,
   WorkItemAuthorizationSnapshot,
 } from '../../modules/work-items'
 import { type DocumentClient } from '../../modules/documents'
@@ -559,6 +560,117 @@ function createCollaborationStub(
     leavePresence: unsupported,
     ...overrides,
   } satisfies CollaborationClient
+}
+
+/**
+ * Creates a complete Workspace Access test double whose unconfigured methods fail immediately.
+ *
+ * @param overrides - Methods exercised by the calling test.
+ * @returns A runtime-complete Workspace Access client.
+ */
+function createWorkspaceAccessFake(
+  overrides: Partial<WorkspaceAccessClient> = {},
+): WorkspaceAccessClient {
+  const unsupported = async () => {
+    throw new Error('Unexpected Workspace Access client call.')
+  }
+  return {
+    getMember: unsupported,
+    getActiveMember: unsupported,
+    getAccessSnapshot: unsupported,
+    listActiveMembers: unsupported,
+    createInvitation: unsupported,
+    getInvitation: unsupported,
+    acquireInvitationAcceptanceLock: unsupported,
+    releaseInvitationAcceptanceLock: unsupported,
+    markInvitationIdentityMutationStarted: unsupported,
+    markInvitationDirectoryClaimCleanupRequired: unsupported,
+    markInvitationDelivery: unsupported,
+    markInvitationCleanupFailure: unsupported,
+    markInvitationManualCleanupRequired: unsupported,
+    clearInvitationCleanupFailure: unsupported,
+    acknowledgeInvitationManualCleanup: unsupported,
+    prepareResend: unsupported,
+    revokeInvitation: unsupported,
+    prepareReinvite: unsupported,
+    reconcileAuthenticatedMember: unsupported,
+    updateMember: unsupported,
+    reconcileDirectoryMember: unsupported,
+    deprovisionDirectoryMember: unsupported,
+    ...overrides,
+  } satisfies Required<WorkspaceAccessClient>
+}
+
+/**
+ * Creates a complete Documents test double whose unconfigured methods fail immediately.
+ *
+ * @param overrides - Methods exercised by the calling test.
+ * @returns A runtime-complete Documents client.
+ */
+function createDocumentFake(
+  overrides: Partial<DocumentClient> = {},
+): DocumentClient {
+  const unsupported = async () => {
+    throw new Error('Unexpected Documents client call.')
+  }
+  return {
+    getAuthorizationRevision: unsupported,
+    getManagerLifecycleSnapshot: unsupported,
+    list: unsupported,
+    get: unsupported,
+    resolveSearchAccess: unsupported,
+    create: unsupported,
+    update: unsupported,
+    archive: unsupported,
+    restoreArchived: unsupported,
+    instantiateTemplate: unsupported,
+    prepareOperations: unsupported,
+    applyOperations: unsupported,
+    listVersions: unsupported,
+    restoreVersion: unsupported,
+    updatePreference: unsupported,
+    listRecent: unsupported,
+    getCommentCreateReplay: unsupported,
+    createComment: unsupported,
+    listComments: unsupported,
+    resolveComment: unsupported,
+    heartbeatPresence: unsupported,
+    leavePresence: unsupported,
+    listPresence: unsupported,
+    createPublicShare: unsupported,
+    listPublicShares: unsupported,
+    revokePublicShare: unsupported,
+    resolvePublicShare: unsupported,
+    listBacklinks: unsupported,
+    exportDocument: unsupported,
+    prepareWorkItemDeletionFenceTransactWrite: unsupported,
+    ...overrides,
+  } satisfies Required<DocumentClient>
+}
+
+/**
+ * Creates a complete Team Issues test double whose unconfigured methods fail immediately.
+ *
+ * @param overrides - Methods exercised by the calling test.
+ * @returns A runtime-complete Team Issues client.
+ */
+function createTeamIssuesFake(
+  overrides: Partial<TeamIssuesClient> = {},
+): TeamIssuesClient {
+  const unsupported = async () => {
+    throw new Error('Unexpected Team Issues client call.')
+  }
+  return {
+    getTeamIssues: unsupported,
+    getPublicWorkItemPage: unsupported,
+    getProjectIssues: unsupported,
+    getTeamIssueDetail: unsupported,
+    createTeamIssue: unsupported,
+    updateTeamIssue: unsupported,
+    deleteTeamIssue: unsupported,
+    createTeamIssueComment: unsupported,
+    ...overrides,
+  } satisfies Required<TeamIssuesClient>
 }
 
 function createFileUploadSessionFixture() {
@@ -2850,6 +2962,7 @@ export function createApiTestHarness() {
     createCollaborationStub,
     createCyclePlanningInput,
     createDirectoryMutationAuditContext,
+    createDocumentFake,
     createFakeAuditEvent,
     createFakeAuthTokenSet,
     createFakeCognitoProfile,
@@ -2871,7 +2984,9 @@ export function createApiTestHarness() {
     createNotificationVisibilityProbe,
     createProjectMemberFixtureItems,
     createSharedProjectCapacityClient,
+    createTeamIssuesFake,
     createTestWorkItemConfiguration,
+    createWorkspaceAccessFake,
     createWorkspaceBootstrapItems,
     drainEnterpriseScimGroupJob,
     enterpriseScimGroupJobProcessors,

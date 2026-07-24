@@ -23,6 +23,21 @@ import { DynamoDbConnectorOAuthStateStore } from './adapter-out/dynamodb/connect
 
 const NOW = new Date('2026-07-18T00:00:00.000Z')
 
+/**
+ * Adds a no-op Bun preconnect capability to a focused fetch implementation.
+ *
+ * @param implementation - Request implementation used by the test.
+ * @returns A fetch-compatible test function.
+ */
+function createFetchMock(
+  implementation: (
+    input: URL | RequestInfo,
+    init?: RequestInit,
+  ) => Promise<Response>,
+): typeof fetch {
+  return Object.assign(implementation, { preconnect() {} })
+}
+
 function createProviderOptions(fetcher: typeof fetch): ConfiguredOAuthConnectorOptions {
   const resourceBinding = {
     collectionPath: 'issues',
@@ -451,9 +466,9 @@ describe('ConfiguredOAuthConnectorAdapter', () => {
 
   test('wraps transport failures without exposing provider error details', async () => {
     const adapter = new ConfiguredOAuthConnectorAdapter(createProviderOptions(
-      (async () => {
+      createFetchMock(async () => {
         throw new Error('getaddrinfo ENOTFOUND token=provider-secret')
-      }) as typeof fetch,
+      }),
     ))
     try {
       await adapter.pull({
@@ -485,7 +500,7 @@ describe('ConfiguredOAuthConnectorAdapter', () => {
       },
     })
     const adapter = new ConfiguredOAuthConnectorAdapter(createProviderOptions(
-      (async () => new Response(body, { status: 200 })) as typeof fetch,
+      createFetchMock(async () => new Response(body, { status: 200 })),
     ))
 
     await expect(adapter.pull({

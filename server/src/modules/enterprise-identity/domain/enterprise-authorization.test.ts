@@ -40,7 +40,6 @@ test('evaluates role and guest ceilings without AWS or Hono adapters', () => {
       roleId: customRole.roleId,
       scope: { kind: 'workspace', workspaceId: 'workspace-1' },
       source: 'direct',
-      createdAt: '2026-07-22T00:00:00.000Z',
     }],
     customRoles: [customRole],
     groupMappings: [],
@@ -67,6 +66,7 @@ test('validates MFA, session lifetime, and IPv4/IPv6 allowlists', () => {
     loginMode: 'password-or-sso',
     mfaRequirement: 'required',
     sessionLifetimeMinutes: 480,
+    idleTimeoutMinutes: 60,
     reauthenticationIntervalMinutes: 120,
     sensitiveActionReauthenticationMinutes: 15,
     ipAllowlistMode: 'all-users',
@@ -76,9 +76,12 @@ test('validates MFA, session lifetime, and IPv4/IPv6 allowlists', () => {
       allowExternalCollaborators: true,
       requireMfa: true,
       maximumSessionLifetimeMinutes: 60,
+      allowedGuestDomains: [],
+      permissionCeiling: [],
     },
     revision: 1,
     updatedAt: '2026-07-22T00:00:00.000Z',
+    updatedBy: 'owner@example.com',
   } satisfies EnterpriseSecurityPolicy
 
   expect(validateEnterpriseSession(policy, {

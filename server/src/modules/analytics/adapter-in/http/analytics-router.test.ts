@@ -24,7 +24,7 @@ function createDependencies(
       if (typeof value !== 'object' || value === null || Array.isArray(value)) {
         throw new Error('validation')
       }
-      return value
+      return { ...value }
     },
     async executeQuery(value, input) {
       calls.push({ operation: 'executeQuery', value: { principal: value, input } })
