@@ -5,6 +5,7 @@ const {
   app,
   configureFakeProjectClients,
   configureHeadlessDeveloperCredential,
+  createDocumentFake,
   createHeadlessWorkItem,
   HEADLESS_DEVELOPER_WORKSPACE_ID,
   putAppliedHeadlessScimUser,
@@ -22,11 +23,11 @@ import { CognitoServiceError } from '../../../authentication'
 import { WorkspaceAccessError } from '../../../workspace-access/workspace-access'
 import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type {
+  ExternalLinkPort,
   ListExternalWorkItemLinksRequest,
   PrepareWorkItemDeletionFenceRequest,
 } from '../../../developer-platform'
 import type {
-  DocumentClient,
   PrepareDocumentWorkItemDeletionFenceRequest,
 } from '../../../documents/documents'
 import {
@@ -46,6 +47,31 @@ import {
   expect,
   test,
 } from 'bun:test'
+import type {
+  ExternalWorkItemLink,
+} from '@mukuroji/contracts'
+
+/**
+ * Creates a complete External Link test double whose unconfigured methods fail immediately.
+ *
+ * @param overrides - Methods exercised by the calling test.
+ * @returns A runtime-complete External Link port.
+ */
+function createExternalLinkFake(
+  overrides: Partial<ExternalLinkPort> = {},
+): ExternalLinkPort {
+  const unsupported = async () => {
+    throw new Error('Unexpected External Link port call.')
+  }
+  return {
+    pauseConnectorExternalLinksPage: unsupported,
+    createExternalWorkItemLink: unsupported,
+    listExternalWorkItemLinks: unsupported,
+    updateExternalWorkItemLink: unsupported,
+    deleteExternalWorkItemLink: unsupported,
+    ...overrides,
+  } satisfies Required<ExternalLinkPort>
+}
 
 afterEach(() => {
   resetTestApp()
@@ -356,7 +382,7 @@ test('replays a completed Work Item delete using current Team write access after
     ['work-items:delete'],
   )
   setTestAppDependencies({
-    documents: {
+    documents: createDocumentFake({
       async prepareWorkItemDeletionFenceTransactWrite() {
         return {
           transactWriteItem: {
@@ -370,7 +396,7 @@ test('replays a completed Work Item delete using current Team write access after
           },
         }
       },
-    } as unknown as DocumentClient,
+    }),
   })
   const request = () => app.request(
     'http://localhost/api/v1/work-items/onboarding-friction?teamId=core-team',
@@ -426,6 +452,19 @@ test('wires external and Document deletion fences through the canonical Public W
     issueId: string
   }> = []
   let hasExternalLinks = false
+  const existingExternalLink = {
+    id: 'external-link-1',
+    teamId: 'core-team',
+    workItemId: 'precheck-conflict',
+    installationId: 'installation-1',
+    resourceType: 'issue',
+    externalId: 'external-issue-1',
+    externalUrl: 'https://tracker.example.com/issues/external-issue-1',
+    syncDirection: 'bidirectional',
+    syncStatus: 'synced',
+    createdAt: '2026-07-24T00:00:00.000Z',
+    updatedAt: '2026-07-24T00:00:00.000Z',
+  } satisfies ExternalWorkItemLink
   const calls = configureFakeProjectClients(true, {
     role: 'member',
     workspaceRole: 'member',
@@ -434,13 +473,15 @@ test('wires external and Document deletion fences through the canonical Public W
     },
   })
   setTestAppDependencies({
-    externalLinks: {
+    externalLinks: createExternalLinkFake({
       async listExternalWorkItemLinks(
         _input: ListExternalWorkItemLinksRequest,
       ) {
-        return hasExternalLinks ? [{}] : []
+        return hasExternalLinks
+          ? [existingExternalLink]
+          : []
       },
-    } as never,
+    }),
     transactions: {
       async prepareWorkItemDeletionFenceTransactWrite(
         input: PrepareWorkItemDeletionFenceRequest,
@@ -449,7 +490,7 @@ test('wires external and Document deletion fences through the canonical Public W
         return { transactWriteItem: externalFence }
       },
     },
-    documents: {
+    documents: createDocumentFake({
       async prepareWorkItemDeletionFenceTransactWrite(
         input:
           PrepareDocumentWorkItemDeletionFenceRequest,
@@ -457,7 +498,7 @@ test('wires external and Document deletion fences through the canonical Public W
         documentFenceRequests.push(input)
         return { transactWriteItem: documentFence }
       },
-    } as unknown as DocumentClient,
+    }),
     planning: new InMemoryPlanningClient(),
   })
   const service = createCanonicalPublicWorkItemService()
