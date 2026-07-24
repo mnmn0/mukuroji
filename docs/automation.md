@@ -153,3 +153,5 @@ Create/duplicate mutation と inbound endpoint の create/rotate は `Idempotenc
 ## 運用
 
 Automation event consumer と recurring schedule は通知 consumer から分離する。どちらも partial retry または Lambda failure destination、暗号化済み SQS DLQ、CloudWatch alarm を持つ。実行履歴は audit event で代用せず、attempt、action result、失敗理由、retry/dead-letter 状態を Automation table に保存し、correlation ID で audit timeline と関連付ける。CDK は event Lambda に outbound webhook prefix の `secretsmanager:GetSecretValue` を付与する。Schedule Lambda は同じ outbound read に加えて、期限切れ inbound secret を削除するため inbound prefix の `secretsmanager:DeleteSecret` を持つ。API Lambda は inbound prefix に対する create/read/version/delete 権限と、outbound webhook 配信に必要な `secretsmanager:GetSecretValue` を持つ。
+
+Secrets Manager endpoint override は、選択した AWS region の standard/FIPS HTTPS hostname だけを許可する。Floci の local Lambda に限り、deploy script が `MUKUROJI_LOCAL_AWS_RUNTIME=floci` と内部 HTTP endpoint を組にして渡す。`NODE_ENV=production` ではこの marker を無効として local endpoint を拒否し、endpoint override だけを理由に固定の test credential を使わず AWS SDK provider chain に委譲する。

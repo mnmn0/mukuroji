@@ -1,11 +1,12 @@
 import type { AutomationValue } from '@mukuroji/contracts'
-import {
-  AutomationEngine,
-  AutomationError,
-  type AutomationActionExecutor,
-  type AutomationClient,
-  type AutomationEvent,
-} from '../../automation'
+import { AutomationEngine } from '../../application/execution-service'
+import type {
+  AutomationActionExecutor,
+  AutomationExecutionServicePort,
+  AutomationRuleTemplatePort,
+} from '../../application/ports'
+import { AutomationError } from '../../domain/automation-error'
+import type { AutomationEvent } from '../../domain/rule-evaluation'
 import type {
   BatchItemFailure,
   BatchResponse,
@@ -44,6 +45,10 @@ export interface AutomationWorkItemReader {
   }>
 }
 
+/** Focused Rule-read and execution capabilities required by event delivery. */
+export type AutomationEventPort = AutomationExecutionServicePort &
+  Pick<AutomationRuleTemplatePort, 'listRules'>
+
 /** Stream batch を record 単位で処理し、失敗した sequence だけを再配送させます。 */
 export async function processAutomationEventBatch(
   event: DynamoStreamEvent,
@@ -69,7 +74,7 @@ export function parseAutomationStreamRecord(record: DynamoStreamRecord) {
   if (record.eventName !== 'INSERT') return undefined
   if (!record.dynamodb?.NewImage) {
     throw new AutomationError(
-      400,
+      'invalid-input',
       'AutomationOutboxEventMalformed',
       'Inserted automation outbox record is missing NewImage.',
     )
@@ -88,7 +93,7 @@ export function parseAutomationStreamRecord(record: DynamoStreamRecord) {
     Number.isNaN(Date.parse(occurredAt))
   ) {
     throw new AutomationError(
-      400,
+      'invalid-input',
       'AutomationOutboxEventMalformed',
       'Inserted automation outbox record is missing required event fields.',
     )
@@ -112,7 +117,7 @@ export function parseAutomationStreamRecord(record: DynamoStreamRecord) {
 
 /** Durable action failure を scheduler へ引き渡す audit event processor を作成します。 */
 export function createAutomationEventProcessor(
-  client: AutomationClient,
+  client: AutomationEventPort,
   engine: Pick<AutomationEngine, 'handleEvent'> = new AutomationEngine(
     client,
     createUnavailableAutomationActionExecutor(),
@@ -159,7 +164,7 @@ function createUnavailableAutomationActionExecutor(): AutomationActionExecutor {
   return {
     async execute() {
       throw new AutomationError(
-        503,
+        'unavailable',
         'AutomationActionExecutorUnavailable',
         'Automation action execution is not configured.',
         true,

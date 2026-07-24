@@ -230,7 +230,7 @@ describe('automation event handler', () => {
 
     expect(handled).toBe(1)
     const persistenceError = new AutomationError(
-      503,
+      'unavailable',
       'AutomationPersistenceUnavailable',
       'Execution state could not be saved.',
       true,
