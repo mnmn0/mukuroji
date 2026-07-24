@@ -3,35 +3,42 @@ import {
   WORK_ITEM_SCHEMA_VERSION,
   type ResolvedWorkItemConfiguration,
 } from '@mukuroji/contracts'
+import type { TeamIssueDetail } from '../../issues/api'
 import type { ProjectTask } from '../api/tasks'
 import type { ProjectMember, ProjectUser } from '../../projects/api'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import { fileArtifactsControllerFixture } from '../../files/fixtures'
-import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
+import {
+  teamWorkItemConfigurationFixture,
+  workItemCustomFieldValueFixture,
+} from '../../work-items/fixtures'
 import type { ProjectTaskStatusColumn } from '../model/taskView'
+
+/** Task selected by the independent detail-pane story. */
+export const taskViewStorySelectedTask = {
+  schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+  revision: 1,
+  id: 'wireframe',
+  teamId: 'core-team',
+  assignedProjectId: 'refero',
+  title: 'ワイヤーフレームを確認する',
+  assigneeUserId: 'sato@example.com',
+  creatorMemberKey: 'sato@example.com',
+  workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  workflowStatusId: 'active',
+  statusCategory: 'started',
+  customFieldValues: {},
+  relationIds: [],
+  dueDate: '2026/06/03',
+  priority: 'high',
+  createdAt: '2026-06-01T00:00:00.000Z',
+  updatedAt: '2026-06-01T00:00:00.000Z',
+  source: 'dynamodb',
+} satisfies ProjectTask
 
 /** Project tasks shared by the independent task-view stories. */
 export const taskViewStoryTasks = [
-  {
-    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
-    revision: 1,
-    id: 'wireframe',
-    teamId: 'core-team',
-    assignedProjectId: 'refero',
-    title: 'ワイヤーフレームを確認する',
-    assigneeUserId: 'sato@example.com',
-    creatorMemberKey: 'sato@example.com',
-    workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
-    workflowStatusId: 'active',
-    statusCategory: 'started',
-    customFieldValues: {},
-    relationIds: [],
-    dueDate: '2026/06/03',
-    priority: 'high',
-    createdAt: '2026-06-01T00:00:00.000Z',
-    updatedAt: '2026-06-01T00:00:00.000Z',
-    source: 'dynamodb',
-  },
+  taskViewStorySelectedTask,
   {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
@@ -93,6 +100,23 @@ export const taskViewStoryTasks = [
     source: 'dynamodb',
   },
 ] satisfies ProjectTask[]
+
+/** Matching detail response used by the independent selected-task story. */
+export const taskViewStorySelectedIssueDetail = {
+  activity: [],
+  comments: [],
+  issue: {
+    ...taskViewStorySelectedTask,
+    assigneeEmail: 'sato@example.com',
+    assigneeName: '佐藤 花子',
+    customFieldValues: workItemCustomFieldValueFixture,
+    description: 'Refero の初回作業面を確認し、次に進める判断材料をそろえます。',
+  },
+  relations: [],
+  resolvedConfiguration: {
+    configuration: teamWorkItemConfigurationFixture,
+  },
+} satisfies TeamIssueDetail
 
 /** Single-team configuration map shared by task-view stories. */
 export const taskViewStoryConfigurationsByTeam = {

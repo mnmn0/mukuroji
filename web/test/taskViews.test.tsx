@@ -4,8 +4,10 @@ import { createTranslator } from '../src/shared/i18n/i18n'
 import { collaborationWorkspaceMemberFixtures } from '../src/issues/fixtures'
 import { teamWorkItemConfigurationFixture } from '../src/work-items/fixtures'
 import { createTaskKey } from '../src/tasks/model/taskView'
+import { CreateTaskPanel } from '../src/tasks/ui/CreateTaskPanel'
 import { TaskBoardView } from '../src/tasks/ui/TaskBoardView'
 import { TaskCalendarView } from '../src/tasks/ui/TaskCalendarView'
+import { TaskDetailPane } from '../src/tasks/ui/TaskDetailPane'
 import { TaskFileView } from '../src/tasks/ui/TaskFileView'
 import { TaskGanttView } from '../src/tasks/ui/TaskGanttView'
 import { TaskPermissionsView } from '../src/tasks/ui/TaskPermissionsView'
@@ -15,6 +17,7 @@ import {
   taskViewStoryProjectFiles,
   taskViewStoryProjectMembers,
   taskViewStoryProjectUsers,
+  taskViewStorySelectedIssueDetail,
   taskViewStoryStatusColumns,
   taskViewStoryTasks,
 } from '../src/tasks/ui/TaskView.stories.fixtures'
@@ -217,5 +220,81 @@ describe('independent task views', () => {
     expect(html).toContain('data-testid="permissions-view"')
     expect(html).toContain('Refero')
     expect(html).toContain('data-testid="permission-member-row-sato-example-com"')
+  })
+
+  test('renders task creation as an independently testable validated form', () => {
+    const html = renderToStaticMarkup(
+      <CreateTaskPanel
+        assigneeOptions={taskViewStoryProjectMembers}
+        configuration={teamWorkItemConfigurationFixture}
+        isAssigneeOptionsLoading={false}
+        isSubmitting={false}
+        locale="ja"
+        projectId="refero"
+        t={t}
+        workspaceMembers={collaborationWorkspaceMemberFixtures}
+        onCancel={() => undefined}
+        onSubmit={async () => undefined}
+      />,
+    )
+
+    expect(html).toContain('data-testid="create-task-form"')
+    expect(html).toContain('name="workflowStatusId"')
+    expect(html).toContain('name="custom-field:customer-impact"')
+    expect(html).toContain('佐藤 花子 / sato@example.com')
+  })
+
+  test('renders editable, error, and empty task details independently', () => {
+    const editableHtml = renderToStaticMarkup(
+      <TaskDetailPane
+        assigneeOptions={taskViewStoryProjectMembers}
+        configuration={teamWorkItemConfigurationFixture}
+        detail={taskViewStorySelectedIssueDetail}
+        isLoading={false}
+        isRelationCandidatesLoading={false}
+        locale="ja"
+        projects={[{ id: 'refero', name: 'Refero' }]}
+        relationCandidates={[]}
+        t={t}
+        task={taskViewStoryTasks[0]}
+        workspaceMembers={collaborationWorkspaceMemberFixtures}
+        onUpdateIssue={async () => undefined}
+      />,
+    )
+    const errorHtml = renderToStaticMarkup(
+      <TaskDetailPane
+        assigneeOptions={taskViewStoryProjectMembers}
+        errorMessage="Lambda returned 500."
+        isLoading={false}
+        isRelationCandidatesLoading={false}
+        locale="ja"
+        projects={[{ id: 'refero', name: 'Refero' }]}
+        relationCandidates={[]}
+        t={t}
+        task={taskViewStoryTasks[0]}
+        workspaceMembers={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+    const emptyHtml = renderToStaticMarkup(
+      <TaskDetailPane
+        assigneeOptions={[]}
+        isLoading={false}
+        isRelationCandidatesLoading={false}
+        locale="ja"
+        projects={[]}
+        relationCandidates={[]}
+        t={t}
+        workspaceMembers={[]}
+      />,
+    )
+
+    expect(editableHtml).toContain('data-testid="task-detail-pane"')
+    expect(editableHtml).toContain('Refero の初回作業面を確認し')
+    expect(editableHtml).toContain('name="custom-field:customer-impact"')
+    expect(editableHtml).toContain('Enterprise customers can complete setup')
+    expect(editableHtml).not.toContain('disabled="" type="submit"')
+    expect(errorHtml).toContain('Lambda returned 500.')
+    expect(errorHtml).toContain('disabled="" type="submit"')
+    expect(emptyHtml).toContain(t('tasks.detail.empty'))
   })
 })
