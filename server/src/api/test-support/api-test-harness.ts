@@ -725,7 +725,7 @@ type ObservedWorkspaceMutationAuditContext = {
 type ExpectedWorkspaceMutationAuditContext = {
   /** Context actor の安定 ID です。 */
   actorId: string
-  /** API が拒否する client 指定 correlation ID header です。 */
+  /** Client-provided correlation ID header that the API does not trust. */
   clientCorrelationId: string
   /** Request の raw idempotency key header です。 */
   idempotencyKey: string

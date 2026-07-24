@@ -1,5 +1,8 @@
 import { expect, test } from 'bun:test'
-import { createDynamoDbReadinessProbe } from './readiness'
+import {
+  createDynamoDbReadinessProbe,
+  recordReadinessFailure,
+} from './readiness'
 
 test('fails closed when any critical table configuration is missing', async () => {
   const describedTables: string[] = []
@@ -109,7 +112,49 @@ test('checks configured dependencies with a bounded timeout and caches the resul
   )).toBeTrue()
 })
 
+test('de-duplicates concurrent dependency checks while a refresh is pending', async () => {
+  const describedTables: string[] = []
+  let releaseChecks: (() => void) | undefined
+  const checksPending = new Promise<void>((resolve) => {
+    releaseChecks = resolve
+  })
+  const probe = createDynamoDbReadinessProbe({
+    environment: {
+      AUDIT_EVENTS_TABLE_NAME: 'audit-events',
+      WORK_ITEMS_TABLE_NAME: 'work-items',
+      WORKSPACE_ACCESS_TABLE_NAME: 'workspace-access',
+    },
+    describeTable: async (tableName) => {
+      describedTables.push(tableName)
+      await checksPending
+      return {
+        globalSecondaryIndexesActive: true,
+        tableActive: true,
+      }
+    },
+  })
+
+  const firstCheck = probe.check(
+    '83340932-0a6c-4d10-812f-76655717a762',
+  )
+  const concurrentCheck = probe.check(
+    'e1026cc1-7a0c-4f5e-a643-a7812143b367',
+  )
+  await Promise.resolve()
+
+  expect(describedTables).toHaveLength(3)
+  releaseChecks?.()
+  const [firstResult, concurrentResult] = await Promise.all([
+    firstCheck,
+    concurrentCheck,
+  ])
+
+  expect(describedTables).toHaveLength(3)
+  expect(concurrentResult).toBe(firstResult)
+})
+
 test('converts dependency errors to safe unavailable results', async () => {
+  const failureRecords: string[] = []
   const probe = createDynamoDbReadinessProbe({
     environment: {
       AUDIT_EVENTS_TABLE_NAME: 'audit-events',
@@ -125,9 +170,16 @@ test('converts dependency errors to safe unavailable results', async () => {
         tableActive: true,
       }
     },
+    recordFailure: (observation) =>
+      recordReadinessFailure(
+        observation,
+        (serializedRecord) => failureRecords.push(serializedRecord),
+      ),
   })
 
-  const result = await probe.check()
+  const result = await probe.check(
+    'e9011362-941d-4c29-b7c5-b84228eaef0a',
+  )
 
   expect(result).toEqual({
     checks: [
@@ -139,6 +191,18 @@ test('converts dependency errors to safe unavailable results', async () => {
   })
   expect(JSON.stringify(result)).not.toContain('raw AWS detail')
   expect(JSON.stringify(result)).not.toContain('workspace-access-physical-secret')
+  expect(failureRecords).toHaveLength(1)
+  expect(JSON.parse(failureRecords[0] ?? '')).toEqual({
+    event: 'readiness.dependency.failed',
+    service: 'mukuroji-api',
+    correlationId: 'e9011362-941d-4c29-b7c5-b84228eaef0a',
+    dependency: 'workspace-access',
+    errorType: 'Error',
+  })
+  expect(failureRecords[0]).not.toContain('raw AWS detail')
+  expect(failureRecords[0]).not.toContain(
+    'workspace-access-physical-secret',
+  )
 })
 
 test('fails closed for non-active tables and global secondary indexes', async () => {

@@ -6,6 +6,44 @@ import {
   loadServerConfig,
   type ServerEnvironment,
 } from '../config/server-config'
+import { classifyApiError } from './api-observability'
+
+/**
+ * Stable dependency categories allowed in readiness failure logs.
+ */
+export type ReadinessDependencyName =
+  | 'audit-events'
+  | 'readiness-probe'
+  | 'work-items'
+  | 'workspace-access'
+
+/**
+ * Safe metadata recorded when a readiness dependency check fails unexpectedly.
+ */
+export interface ReadinessFailureObservation {
+  /** Server-generated identifier joining the failure to its readiness request. */
+  readonly correlationId: string
+  /** Stable dependency category that excludes physical resource names. */
+  readonly dependency: ReadinessDependencyName
+  /** Bounded runtime error category without a message or stack trace. */
+  readonly errorType: string
+}
+
+/**
+ * Destination for one safe readiness failure observation.
+ *
+ * @param observation - Redacted readiness failure metadata.
+ */
+export type ReadinessFailureRecorder = (
+  observation: ReadinessFailureObservation,
+) => void
+
+/**
+ * Destination for one serialized readiness log record.
+ *
+ * @param serializedRecord - JSON log record safe for operational storage.
+ */
+type StructuredReadinessLogSink = (serializedRecord: string) => void
 
 /**
  * Result of one dependency readiness check.
@@ -34,9 +72,10 @@ export interface ReadinessProbe {
   /**
    * Verifies critical dependencies or returns a recent cached result.
    *
+   * @param correlationId - Optional server-generated identifier for failure logs.
    * @returns Safe readiness state without raw infrastructure errors.
    */
-  check(): Promise<ReadinessResult>
+  check(correlationId?: string): Promise<ReadinessResult>
 }
 
 /**
@@ -45,12 +84,16 @@ export interface ReadinessProbe {
 export interface DynamoDbReadinessProbeOptions {
   /** Cache lifetime that bounds repeated dependency calls. */
   readonly cacheMilliseconds?: number
+  /** Server-controlled identifier factory used outside an HTTP request. */
+  readonly createIdentifier?: () => string
   /** Optional table metadata adapter used by isolated tests. */
   readonly describeTable?: DescribeTableReadiness
   /** Environment map containing critical table names. */
   readonly environment?: ServerEnvironment
   /** Clock used for deterministic cache tests. */
   readonly now?: () => number
+  /** Optional destination for safe dependency failure observations. */
+  readonly recordFailure?: ReadinessFailureRecorder
   /** Per-table timeout that prevents readiness requests from hanging. */
   readonly timeoutMilliseconds?: number
 }
@@ -82,7 +125,7 @@ export type DescribeTableReadiness = (
  */
 interface CriticalTable {
   /** Safe dependency category returned by the probe. */
-  readonly name: string
+  readonly name: Exclude<ReadinessDependencyName, 'readiness-probe'>
   /** Configured physical table name, when present. */
   readonly tableName: string | undefined
 }
@@ -99,6 +142,50 @@ interface CachedReadiness {
 
 const DEFAULT_CACHE_MILLISECONDS = 30_000
 const DEFAULT_TIMEOUT_MILLISECONDS = 1_500
+const SERVER_CORRELATION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
+
+/**
+ * Writes a safe structured record for one unexpected readiness failure.
+ *
+ * The record excludes physical table names, exception messages, stack traces,
+ * request input, and other client-controlled values.
+ *
+ * @param observation - Safe readiness failure metadata.
+ * @param sink - Optional destination used by tests or the runtime console.
+ */
+export function recordReadinessFailure(
+  observation: ReadinessFailureObservation,
+  sink: StructuredReadinessLogSink = writeStandardError,
+): void {
+  sink(JSON.stringify({
+    event: 'readiness.dependency.failed',
+    service: 'mukuroji-api',
+    correlationId: observation.correlationId,
+    dependency: observation.dependency,
+    errorType: observation.errorType,
+  }))
+}
+
+/**
+ * Accepts only the API's canonical UUID v4 correlation ID contract.
+ *
+ * Values outside that contract are treated as untrusted input and replaced
+ * with a server-generated identifier before they can reach operational logs.
+ *
+ * @param value - Candidate identifier obtained from the request boundary.
+ * @param createIdentifier - Trusted server-side identifier factory.
+ * @returns A canonical server-controlled correlation identifier.
+ */
+export function resolveReadinessCorrelationId(
+  value: string | undefined,
+  createIdentifier: () => string = () => crypto.randomUUID(),
+): string {
+  const normalized = value?.trim()
+  return normalized && SERVER_CORRELATION_ID_PATTERN.test(normalized)
+    ? normalized
+    : createIdentifier()
+}
 
 /**
  * Creates a fail-closed readiness probe for the API's critical DynamoDB tables.
@@ -117,6 +204,9 @@ export function createDynamoDbReadinessProbe(
   const environment = serverConfig.environment
   const describeTable = options.describeTable ?? createDynamoDbTableDescriber()
   const now = options.now ?? Date.now
+  const createIdentifier =
+    options.createIdentifier ?? (() => crypto.randomUUID())
+  const recordFailure = options.recordFailure ?? recordReadinessFailure
   const cacheMilliseconds =
     options.cacheMilliseconds ?? DEFAULT_CACHE_MILLISECONDS
   const timeoutMilliseconds =
@@ -129,17 +219,23 @@ export function createDynamoDbReadinessProbe(
   let pending: Promise<ReadinessResult> | undefined
 
   return {
-    async check() {
+    async check(correlationId) {
       const checkedAt = now()
       if (cached && cached.validUntil > checkedAt) {
         return cached.result
       }
       if (pending) return pending
 
+      const effectiveCorrelationId = resolveReadinessCorrelationId(
+        correlationId,
+        createIdentifier,
+      )
       pending = checkCriticalTables(
         describeTable,
         criticalTables,
         timeoutMilliseconds,
+        effectiveCorrelationId,
+        recordFailure,
       )
       try {
         const result = await pending
@@ -199,12 +295,16 @@ function resolveCriticalTables(
  * @param client - DynamoDB client used for metadata requests.
  * @param tables - Safe dependency mappings to verify.
  * @param timeoutMilliseconds - Per-request abort timeout.
+ * @param correlationId - Server-generated identifier for failure logs.
+ * @param recordFailure - Destination for safe dependency failure observations.
  * @returns Aggregate fail-closed readiness result.
  */
 async function checkCriticalTables(
   describeTable: DescribeTableReadiness,
   tables: readonly CriticalTable[],
   timeoutMilliseconds: number,
+  correlationId: string,
+  recordFailure: ReadinessFailureRecorder,
 ): Promise<ReadinessResult> {
   const checks = await Promise.all(tables.map(async ({ name, tableName }) => {
     if (!tableName) return { name, ready: false }
@@ -215,7 +315,12 @@ async function checkCriticalTables(
         name,
         ready: state.tableActive && state.globalSecondaryIndexesActive,
       }
-    } catch {
+    } catch (error) {
+      recordFailure({
+        correlationId,
+        dependency: name,
+        errorType: classifyApiError(error),
+      })
       return { name, ready: false }
     }
   }))
@@ -258,4 +363,13 @@ function firstNonBlank(
   ...values: Array<string | undefined>
 ): string | undefined {
   return values.find((value) => value?.trim())?.trim()
+}
+
+/**
+ * Writes a serialized readiness failure record to standard error.
+ *
+ * @param serializedRecord - JSON record produced by the readiness boundary.
+ */
+function writeStandardError(serializedRecord: string): void {
+  console.error(serializedRecord)
 }

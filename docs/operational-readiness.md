@@ -175,13 +175,22 @@ Unexpected error log `api.request.failed` は `errorType` までを含め、exce
 trace を含めません。Request/response body、query value、authorization、entity ID はどちらの
 log にも記録しません。
 
+Readiness dependency の予期しない失敗は `readiness.dependency.failed` として、同じ
+server-generated `correlationId`、stable な `dependency` category、bounded `errorType` だけを
+記録します。Physical table name、exception message、stack trace、client 指定 correlation ID は
+記録しません。
+
 API incident の最初の query は対象 Lambda log group と alarm window を固定して実行します。
 
 ```text
 fields @timestamp, event, correlationId, requestId, invocationId, traceId,
-       method, routeGroup, status, durationMs, errorType
-| filter event = "api.request.completed" or event = "api.request.failed"
-| filter status >= 500 or event = "api.request.failed"
+       method, routeGroup, dependency, status, durationMs, errorType
+| filter event = "api.request.completed"
+      or event = "api.request.failed"
+      or event = "readiness.dependency.failed"
+| filter status >= 500
+      or event = "api.request.failed"
+      or event = "readiness.dependency.failed"
 | sort @timestamp desc
 ```
 

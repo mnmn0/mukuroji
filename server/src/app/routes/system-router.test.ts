@@ -1,4 +1,7 @@
 import { expect, test } from 'bun:test'
+import type {
+  ReadinessFailureObservation,
+} from '../../infrastructure/observability/readiness'
 import { createSystemRouter } from './system-router'
 
 test('keeps liveness independent from dependency readiness', async () => {
@@ -45,6 +48,8 @@ test('returns a dependency-aware ready response only after successful checks', a
 })
 
 test('fails readiness closed for unavailable or failing probes', async () => {
+  const failureObservations: ReadinessFailureObservation[] = []
+  let readinessCorrelationId: string | undefined
   const unavailableRouter = createSystemRouter({
     readiness: {
       async check() {
@@ -56,15 +61,22 @@ test('fails readiness closed for unavailable or failing probes', async () => {
     },
   })
   const failingRouter = createSystemRouter({
+    createIdentifier: () => '4d91a4df-e84b-49a6-91ec-a119806c7ac9',
     readiness: {
-      async check() {
+      async check(correlationId) {
+        readinessCorrelationId = correlationId
         throw new Error('raw infrastructure detail')
       },
     },
+    recordFailure: (observation) => failureObservations.push(observation),
   })
 
   const unavailableResponse = await unavailableRouter.request('/api/ready')
-  const failingResponse = await failingRouter.request('/api/ready')
+  const failingResponse = await failingRouter.request('/api/ready', {
+    headers: {
+      'X-Correlation-Id': 'client-supplied-correlation-secret',
+    },
+  })
 
   expect(unavailableResponse.status).toBe(503)
   expect(await unavailableResponse.json()).toEqual({
@@ -78,4 +90,18 @@ test('fails readiness closed for unavailable or failing probes', async () => {
     status: 'not-ready',
     checks: [{ name: 'readiness-probe', ready: false }],
   })
+  expect(readinessCorrelationId).toBe(
+    '4d91a4df-e84b-49a6-91ec-a119806c7ac9',
+  )
+  expect(failureObservations).toEqual([{
+    correlationId: '4d91a4df-e84b-49a6-91ec-a119806c7ac9',
+    dependency: 'readiness-probe',
+    errorType: 'Error',
+  }])
+  expect(JSON.stringify(failureObservations)).not.toContain(
+    'raw infrastructure detail',
+  )
+  expect(JSON.stringify(failureObservations)).not.toContain(
+    'client-supplied-correlation-secret',
+  )
 })
