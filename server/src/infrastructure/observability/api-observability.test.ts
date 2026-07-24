@@ -24,6 +24,18 @@ test('writes CloudWatch EMF access records without high-cardinality request data
 
   expect(records).toHaveLength(1)
   expect(JSON.parse(records[0] ?? '')).toMatchObject({
+    _aws: {
+      Timestamp: 1_700_000_000_000,
+      CloudWatchMetrics: [{
+        Namespace: 'Mukuroji/API',
+        Dimensions: [['Service']],
+        Metrics: [
+          { Name: 'RequestCount', Unit: 'Count' },
+          { Name: 'Latency', Unit: 'Milliseconds' },
+          { Name: 'ServerErrorCount', Unit: 'Count' },
+        ],
+      }],
+    },
     event: 'api.request.completed',
     Service: 'mukuroji-api',
     RequestCount: 1,

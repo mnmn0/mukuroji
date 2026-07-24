@@ -44,8 +44,8 @@ application EMF の `ServerErrorCount` を CloudWatch alarm として作成し�
 環境共通の監視 stack から設定してください。
 非同期 worker の DLQ alarm に加え、Notification schedule は failure destination 自体への配信失敗を
 `DestinationDeliveryFailures` で別に検出します。Audit projection、Automation event/schedule、
-Enterprise SCIM group/identity maintenance の各 DLQ は14日保持し、stack replacement/delete 時にも
-Retain します。
+Analytics/Notification schedule、Enterprise SCIM group/identity maintenance の各 DLQ は14日保持し、
+stack replacement/delete 時にも Retain します。
 
 ## Outputs
 

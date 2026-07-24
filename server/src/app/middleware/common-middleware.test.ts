@@ -156,6 +156,10 @@ test('maps unexpected failures to a safe correlated response and error record', 
     correlationId: 'generated-correlation',
     message: 'The request could not be completed.',
   })
+  expect(response.headers.get('X-Correlation-Id')).toBe(
+    'generated-correlation',
+  )
+  expect(response.headers.get('X-Request-Id')).toBe('generated-request')
   expect(captured.errors).toEqual([{
     correlationId: 'generated-correlation',
     errorType: 'Error',
@@ -194,6 +198,10 @@ test('maps non-Error thrown values to the same safe failure contract', async () 
     correlationId: 'generated-correlation',
     message: 'The request could not be completed.',
   })
+  expect(response.headers.get('X-Correlation-Id')).toBe(
+    'generated-correlation',
+  )
+  expect(response.headers.get('X-Request-Id')).toBe('generated-request')
   expect(captured.errors).toEqual([{
     correlationId: 'generated-correlation',
     errorType: 'UnknownError',

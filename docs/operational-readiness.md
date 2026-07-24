@@ -198,10 +198,10 @@ fields @timestamp, event, correlationId, requestId, invocationId, traceId,
 4. Read-only request や integration 前 failure は audit event を作らないため、user/tenant を
    必ず解決できるとは限らない。この場合は「unknown」と記録する。
 
-X-Ray は全 Lambda で active です。API log の `traceId` がある場合は exact X-Ray trace を、
-`invocationId` がある場合は Lambda invocation を起点に調査します。Correlation/request ID 自体を
-X-Ray annotation として登録していないため、correlation ID だけで X-Ray trace を一意検索できる
-とは記載しません。
+X-Ray は全 Lambda で active です。API log の `traceId` は sampled trace が保存されている場合の
+exact lookup に使い、保存されていない場合は `invocationId` と UTC window から Lambda log を
+起点に調査します。Correlation/request ID 自体を X-Ray annotation として登録していないため、
+correlation ID だけで X-Ray trace を一意検索できるとは記載しません。
 
 ## Severity、acknowledge、escalation
 
