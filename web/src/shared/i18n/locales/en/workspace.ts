@@ -2,26 +2,11 @@
  * English messages for the workspace domain.
  */
 export const workspaceMessages = {
-  'dashboard.title': 'Dashboard',
-  'dashboard.subtitle':
-    'You are accessing local mukuroji as a user authenticated by Cognito.',
-  'dashboard.loading': 'Checking user information.',
   'dashboard.loadError': 'Account information could not be verified. Try again later.',
-  'dashboard.authProvider': 'Cognito auth',
-  'dashboard.authProviderValue':
-    'Authenticated with the Floci local Cognito user pool',
-  'dashboard.signedInAs': 'Signed in as',
   'dashboard.logout': 'Log out',
-  'dashboard.stat.projects': 'Active projects',
-  'dashboard.stat.tasks': 'Open tasks',
-  'dashboard.stat.blocked': 'Needs review',
-  'dashboard.team.core': 'Core Team',
-  'dashboard.team.design': 'Design Team',
-  'dashboard.project.productRoadmap': 'Product Roadmap',
-  'dashboard.project.releasePlan': 'Release Plan',
-  'dashboard.project.customerFeedback': 'Customer Feedback',
   'projects.error.loading': 'Failed to load teams and projects',
   'workspace.loading': 'Checking the workspace.',
+  'workspace.error.retry': 'Reload',
   'workspace.user.label': 'Signed in',
   'workspace.user.fallback': 'mukuroji user',
   'workspace.home.eyebrow': "Today's operation",

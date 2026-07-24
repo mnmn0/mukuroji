@@ -1,102 +1,66 @@
-import {
-  WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
-  WORK_ITEM_SCHEMA_VERSION,
-} from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import type { DashboardSummary } from '../../auth/api'
+import { useState, type ReactElement } from 'react'
+import { MemoryRouter, Outlet, Route, Routes } from 'react-router'
 import {
-  notificationInboxControllerFixture,
-  notificationPreferencesControllerFixture,
-} from '../../notifications/fixtures'
+  WorkspaceCommandMenuContext,
+  type WorkspaceCommandMenuContextValue,
+} from '../../commands/ui/WorkspaceCommandMenuContext'
+import { notificationInboxControllerFixture } from '../../notifications/fixtures'
+import { WorkspaceInboxView } from '../../notifications/ui/WorkspaceInboxView'
 import { projectDirectoryFixtures } from '../../projects/fixtures'
+import type { TeamProjectMemberAccess } from '../../projects/model/teamInsights'
+import { TeamMembersView } from '../../projects/ui/TeamMembersView'
+import { TeamOverviewView } from '../../projects/ui/TeamOverviewView'
+import { enterpriseSecuritySnapshotFixture } from '../../security/fixtures'
+import { createWorkspaceSecurityScopeOptions } from '../../security/model/workspaceSecurityScopes'
+import { EnterpriseSecurityPanel } from '../../security/ui/EnterpriseSecurityPanel'
+import { createTranslator } from '../../shared/i18n/i18n'
+import type { ProjectTask } from '../../tasks/api'
 import { referoTaskFixtures } from '../../tasks/fixtures'
+import { inheritedWorkItemConfigurationFixture } from '../../work-items/fixtures'
+import type { WorkspaceSummary } from '../../work-items/model/workspaceWorkItems'
+import { DashboardWorkspaceView } from '../../workspace/ui/DashboardWorkspaceView'
+import { HelpWorkspaceView } from '../../workspace/ui/HelpWorkspaceView'
+import { HomeWorkspaceView } from '../../workspace/ui/HomeWorkspaceView'
+import { MyTasksWorkspaceView } from '../../workspace/ui/MyTasksWorkspaceView'
 import {
-  inheritedWorkItemConfigurationFixture,
-  workItemCustomFieldValueFixture,
-} from '../../work-items/fixtures'
-import { WorkspaceScreen } from './WorkspacePage'
+  WorkspaceRoute,
+  WorkspaceRouteContent,
+} from '../../workspace/ui/WorkspaceRoute'
+import type { WorkspaceRouteContextValue } from '../../workspace/ui/WorkspaceRouteProvider'
+import { WorkspaceSettingsView } from '../../workspace/ui/WorkspaceSettingsView'
 
-const storySummary: DashboardSummary = {
-  projects: 9,
-  tasks: 27,
-  blocked: 3,
-  updatedAt: '2026-06-03T00:00:00.000Z',
-  source: 'dynamodb',
+const t = createTranslator('ja')
+const englishTranslator = createTranslator('en')
+const coreTeam = projectDirectoryFixtures[0]
+const storyTasks: ProjectTask[] = referoTaskFixtures.map((task) => ({
+  ...task,
+  workflowStatusId: task.workflowStatusId === 'todo'
+    ? 'ready'
+    : task.workflowStatusId === 'in-progress'
+      ? 'active'
+      : task.workflowStatusId,
+}))
+
+const storySummary: WorkspaceSummary = {
+  blocked: 2,
+  projects: 5,
+  tasks: storyTasks.length,
 }
 
-const storyWorkspaceTasks = [
-  ...referoTaskFixtures.map((task) => ({
-    ...task,
-    assignedProjectId: 'refero',
-    teamId: 'core-team',
-    workflowStatusId: task.workflowStatusId === 'todo'
-      ? 'ready'
-      : task.workflowStatusId === 'in-progress'
-        ? 'active'
-        : task.workflowStatusId,
-  })),
-  {
-    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
-    revision: 1,
-    assigneeEmail: 'demo@example.com',
-    assigneeName: 'Demo User',
-    assigneeUserId: 'demo@example.com',
-    creatorMemberKey: 'demo@example.com',
-    dueDate: '2026/06/07',
-    id: 'roadmap-risk',
-    priority: 'high',
-    assignedProjectId: 'product-roadmap',
-    source: 'dynamodb' as const,
-    workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
-    workflowStatusId: 'review',
-    statusCategory: 'started',
-    customFieldValues: workItemCustomFieldValueFixture,
-    relationIds: [],
-    teamId: 'core-team',
-    title: 'ロードマップの依存リスクを確認',
-    createdAt: '2026-06-08T00:00:00.000Z',
-    updatedAt: '2026-06-08T00:00:00.000Z',
-  },
-  {
-    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
-    revision: 1,
-    assigneeEmail: 'suzuki@example.com',
-    assigneeName: '鈴木 大輔',
-    assigneeUserId: 'suzuki@example.com',
-    creatorMemberKey: 'suzuki@example.com',
-    dueDate: '2026/06/10',
-    id: 'launch-approval',
-    priority: 'medium',
-    assignedProjectId: 'shared-launch',
-    source: 'dynamodb' as const,
-    workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
-    workflowStatusId: 'ready',
-    statusCategory: 'unstarted',
-    customFieldValues: workItemCustomFieldValueFixture,
-    relationIds: [],
-    teamId: 'core-team',
-    title: '共通ローンチの承認導線を確認',
-    createdAt: '2026-06-08T00:00:00.000Z',
-    updatedAt: '2026-06-08T00:00:00.000Z',
-    approvalSummary: {
-      approvedCount: 0,
-      changesRequestedCount: 1,
-      nextDueAt: '2026-07-15T14:59:59.000Z',
-      overdueCount: 1,
-      pendingCount: 2,
-      rejectedCount: 0,
-    },
-  },
-] satisfies Parameters<typeof WorkspaceScreen>[0]['tasks']
+const storyWorkItemConfigurations = {
+  'core-team': inheritedWorkItemConfigurationFixture,
+  'design-team': inheritedWorkItemConfigurationFixture,
+}
 
-const storyTeamProjectMembers = [
+const storyTeamProjectMembers: TeamProjectMemberAccess[] = [
   {
     member: {
       email: 'demo@example.com',
       id: 'demo@example.com',
       name: 'Demo User',
       role: 'manager',
-      updatedAt: '2026-06-08T00:00:00.000Z',
+      updatedAt: '2026-07-12T00:00:00.000Z',
     },
     projectId: 'refero',
     projectName: 'Refero',
@@ -107,7 +71,7 @@ const storyTeamProjectMembers = [
       id: 'sato@example.com',
       name: '佐藤 花子',
       role: 'member',
-      updatedAt: '2026-06-08T00:00:00.000Z',
+      updatedAt: '2026-07-12T00:00:00.000Z',
     },
     projectId: 'refero',
     projectName: 'Refero',
@@ -118,332 +82,363 @@ const storyTeamProjectMembers = [
       id: 'suzuki@example.com',
       name: '鈴木 大輔',
       role: 'viewer',
-      updatedAt: '2026-06-08T00:00:00.000Z',
-    },
-    projectId: 'refero',
-    projectName: 'Refero',
-  },
-  {
-    member: {
-      email: 'demo@example.com',
-      id: 'demo@example.com',
-      name: 'Demo User',
-      role: 'manager',
-      updatedAt: '2026-06-08T00:00:00.000Z',
+      updatedAt: '2026-07-12T00:00:00.000Z',
     },
     projectId: 'product-roadmap',
     projectName: 'プロダクトロードマップ',
   },
-  {
-    member: {
-      email: 'yamada@example.com',
-      id: 'yamada@example.com',
-      name: '山田 太郎',
-      role: 'viewer',
-      updatedAt: '2026-06-08T00:00:00.000Z',
-    },
-    projectId: 'product-roadmap',
-    projectName: 'プロダクトロードマップ',
-  },
-  {
-    member: {
-      email: 'suzuki@example.com',
-      id: 'suzuki@example.com',
-      name: '鈴木 大輔',
-      role: 'member',
-      updatedAt: '2026-06-08T00:00:00.000Z',
-    },
-    projectId: 'shared-launch',
-    projectName: '共通ローンチ',
-  },
-] satisfies NonNullable<Parameters<typeof WorkspaceScreen>[0]['teamProjectMembers']>
+]
 
-const defaultArgs = {
-  activeTeamId: 'core-team',
+const storySecurityScopeOptions = createWorkspaceSecurityScopeOptions(
+  projectDirectoryFixtures,
+  t('security.scope.workspace'),
+)
+
+const storyWorkspaceCommandMenuContext: WorkspaceCommandMenuContextValue = {
+  open: () => undefined,
+}
+
+const storyWorkspaceRouteContext: WorkspaceRouteContextValue = {
+  accessToken: 'storybook-access-token',
+  canLoadWorkspaceData: true,
+  canManageWorkspaceConfiguration: true,
+  canMutateTeamConfiguration: true,
   fontSizePreference: 'standard',
-  inboxCount: 2,
+  guardEnterpriseSession: (request) => request,
+  inboxCount: 3,
+  isLoading: false,
   locale: 'ja',
-  summary: storySummary,
-  tasks: storyWorkspaceTasks,
-  notificationInbox: notificationInboxControllerFixture,
-  notificationPreferences: notificationPreferencesControllerFixture,
-  teamProjectMembers: storyTeamProjectMembers,
-  teams: projectDirectoryFixtures,
-  workItemConfigurationsByTeam: {
-    'core-team': inheritedWorkItemConfigurationFixture,
-    marketing: inheritedWorkItemConfigurationFixture,
-  },
-  onCreateProject: async () => undefined,
-  onCreateTeam: async () => undefined,
+  onArchiveProject: () => Promise.resolve(),
+  onArchiveTeam: () => Promise.resolve(),
+  onCreateProject: () => Promise.resolve(),
+  onCreateTeam: () => Promise.resolve(),
   onFontSizePreferenceChange: () => undefined,
-  onMoveTaskStatus: async () => undefined,
+  onLocaleChange: () => undefined,
+  onLogout: () => undefined,
+  onOpenNotification: () => undefined,
   onOpenTask: () => undefined,
+  onRetryCommonData: () => Promise.resolve(),
+  onSelectNav: () => undefined,
+  onSelectProject: () => undefined,
+  onSelectTeamView: () => undefined,
+  onSessionErrorAction: () => undefined,
+  reportNotificationPreferencesError: () => undefined,
+  resolveSessionErrors: () => undefined,
+  teams: projectDirectoryFixtures,
   userIdentityAliases: ['demo@example.com'],
   userInitial: 'D',
   userLabel: 'demo@example.com',
-  view: 'home',
-} satisfies Partial<Parameters<typeof WorkspaceScreen>[0]>
-
-const crowdedWorkflowStatuses = [
-  { id: 'ready', category: 'unstarted' },
-  { id: 'active', category: 'started' },
-  { id: 'review', category: 'started' },
-  { id: 'done', category: 'completed' },
-] as const
-
-const crowdedTasks = Array.from({ length: 18 }, (_, index) => {
-  const baseTask = referoTaskFixtures[index % referoTaskFixtures.length]
-  const workflowStatus = crowdedWorkflowStatuses[index % crowdedWorkflowStatuses.length]!
-
-  return {
-    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
-    revision: baseTask.revision,
-    id: `${baseTask.id}-${index + 1}`,
-    teamId: index % 2 === 0 ? 'core-team' : 'marketing',
-    title: `${index + 1}. ${index % 2 === 0 ? '長い名前の依存関係レビューと承認待ちタスク' : 'Design QA / release queue follow-up'} ${index + 1}`,
-    assigneeUserId: index % 2 === 0 ? 'demo@example.com' : 'suzuki@example.com',
-    creatorMemberKey: index % 2 === 0 ? 'demo@example.com' : 'suzuki@example.com',
-    workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
-    workflowStatusId: workflowStatus.id,
-    statusCategory: workflowStatus.category,
-    customFieldValues: {},
-    relationIds: [],
-    dueDate: baseTask.dueDate,
-    priority: (['high', 'medium', 'low'] as const)[index % 3],
-    assignedProjectId: index % 2 === 0 ? 'refero' : 'brand-refresh',
-    createdAt: '2026-06-08T00:00:00.000Z',
-    updatedAt: '2026-06-08T00:00:00.000Z',
-    source: 'dynamodb' as const,
-  }
-})
+}
 
 /**
- * WorkspaceScreen の Storybook meta です。ワークスペース各画面の単体確認に使います。
+ * Props for the Storybook-only outlet that supplies Workspace route context.
  */
+type WorkspaceRouteStoryOutletProps = {
+  /** Fake authenticated Workspace state exposed through React Router outlet context. */
+  context: WorkspaceRouteContextValue
+}
+
+/**
+ * Supplies the same outlet context boundary used by authenticated Workspace routes.
+ *
+ * @param props - Fake authenticated Workspace state.
+ * @returns A React Router outlet carrying the supplied Workspace context.
+ */
+function WorkspaceRouteStoryOutlet({
+  context,
+}: WorkspaceRouteStoryOutletProps) {
+  return <Outlet context={context} />
+}
+
+/**
+ * Props for a Storybook route mounted inside the shared Workspace shell.
+ */
+type WorkspaceRouteStoryHarnessProps = {
+  /** Shared Workspace route and its static story content. */
+  children: ReactElement
+  /** Fake authenticated Workspace state used by the shell. */
+  context: WorkspaceRouteContextValue
+  /** Absolute route path matched by the story. */
+  path: string
+}
+
+/**
+ * Mounts a Workspace route with Router outlet and command-menu context boundaries.
+ *
+ * @param props - Route path, shell content, and fake authenticated context.
+ * @returns A full-viewport Workspace shell story without HTTP or session dependencies.
+ */
+function WorkspaceRouteStoryHarness({
+  children,
+  context,
+  path,
+}: WorkspaceRouteStoryHarnessProps) {
+  return (
+    <div className="fixed inset-0 bg-[var(--workbench-bg)]">
+      <WorkspaceCommandMenuContext.Provider value={storyWorkspaceCommandMenuContext}>
+        <Routes location={path}>
+          <Route element={<WorkspaceRouteStoryOutlet context={context} />}>
+            <Route element={<WorkspaceRoute />}>
+              <Route element={children} path={path} />
+            </Route>
+          </Route>
+        </Routes>
+      </WorkspaceCommandMenuContext.Provider>
+    </div>
+  )
+}
+
+/**
+ * Renders the shared Home shell with a retryable common-data error boundary.
+ *
+ * @returns An interactive shell story whose retry action restores route content.
+ */
+function WorkspaceCommonErrorShellStory() {
+  const [hasCommonError, setHasCommonError] = useState(true)
+  const context: WorkspaceRouteContextValue = {
+    ...storyWorkspaceRouteContext,
+    commonErrorKey: hasCommonError ? 'dashboard.loadError' : undefined,
+    onRetryCommonData: () => {
+      setHasCommonError(false)
+      return Promise.resolve()
+    },
+    resolveSessionErrors: () => hasCommonError
+      ? {
+          clearSession: false,
+          kind: 'stay',
+        }
+      : undefined,
+  }
+
+  return (
+    <WorkspaceRouteStoryHarness context={context} path="/home">
+      <WorkspaceRouteContent>
+        <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
+          <HomeWorkspaceView
+            summary={storySummary}
+            t={t}
+            tasks={storyTasks}
+            teams={projectDirectoryFixtures}
+            workItemConfigurationsByTeam={storyWorkItemConfigurations}
+          />
+        </div>
+      </WorkspaceRouteContent>
+    </WorkspaceRouteStoryHarness>
+  )
+}
+
 const meta = {
-  title: 'Application/Pages/WorkspacePage',
-  component: WorkspaceScreen,
+  title: 'Application/Pages/WorkspaceRoutes',
   parameters: {
+    controls: {
+      disable: true,
+    },
     layout: 'fullscreen',
   },
-  args: defaultArgs,
-} satisfies Meta<typeof WorkspaceScreen>
+  decorators: [
+    (Story) => (
+      <MemoryRouter initialEntries={['/home']}>
+        <div className="min-h-screen bg-[var(--workbench-bg)] px-[clamp(20px,3vw,34px)] py-6">
+          <Story />
+        </div>
+      </MemoryRouter>
+    ),
+  ],
+} satisfies Meta
 
+/** Storybook metadata for the URL-specific Workspace route views. */
 export default meta
 
-/**
- * WorkspaceScreen stories の型です。
- */
+/** Story definitions for the URL-specific Workspace views. */
 type Story = StoryObj<typeof meta>
 
-/**
- * サイドバーのホーム画面です。
- */
-export const Home: Story = {}
-
-/**
- * マイタスクのカンバン画面です。
- */
-export const MyTasks: Story = {
-  args: {
-    view: 'my-tasks',
-  },
+/** The `/home` route overview with focus and attention queues. */
+export const HomeRoute: Story = {
+  render: () => (
+    <HomeWorkspaceView
+      summary={storySummary}
+      t={t}
+      tasks={storyTasks}
+      teams={projectDirectoryFixtures}
+      workItemConfigurationsByTeam={storyWorkItemConfigurations}
+    />
+  ),
 }
 
-/**
- * 混雑したカンバン列で密度とスクロールを確認する状態です。
- */
-export const CrowdedKanban: Story = {
-  args: {
-    tasks: crowdedTasks,
-    view: 'my-tasks',
-  },
+/** The `/my-tasks` route with Team-scoped workflow columns. */
+export const MyTasksRoute: Story = {
+  render: () => (
+    <MyTasksWorkspaceView
+      configurationFailedTeamIds={[]}
+      configurationsByTeam={storyWorkItemConfigurations}
+      onMoveTaskStatus={async () => undefined}
+      t={t}
+      tasks={storyTasks}
+      teams={projectDirectoryFixtures}
+    />
+  ),
 }
 
-/**
- * マイタスク移動失敗時の alert 表示です。
- */
-export const MoveError: Story = {
-  args: {
-    taskMoveErrorMessage: 'タスクの状態を更新できませんでした。',
-    view: 'my-tasks',
-  },
+/** The `/my-tasks` route after a workflow mutation fails. */
+export const MyTasksMoveError: Story = {
+  render: () => (
+    <MyTasksWorkspaceView
+      configurationFailedTeamIds={[]}
+      configurationsByTeam={storyWorkItemConfigurations}
+      onMoveTaskStatus={async () => undefined}
+      t={t}
+      taskMoveErrorMessage="タスクの状態を更新できませんでした。"
+      tasks={storyTasks}
+      teams={projectDirectoryFixtures}
+    />
+  ),
 }
 
-/**
- * 長いタスク名とプロジェクト名を含む判断キューです。
- */
-export const LongNames: Story = {
-  args: {
-    tasks: crowdedTasks.slice(0, 8),
-    view: 'home',
-  },
+/** The `/inbox` route with attention Work Items and durable notifications. */
+export const InboxRoute: Story = {
+  render: () => (
+    <WorkspaceInboxView
+      locale="ja"
+      notificationInbox={notificationInboxControllerFixture}
+      t={t}
+      tasks={storyTasks}
+      teams={projectDirectoryFixtures}
+      workItemConfigurationsByTeam={storyWorkItemConfigurations}
+    />
+  ),
 }
 
-/**
- * comfortable font preference で表示する作業台です。
- */
-export const ComfortableFont: Story = {
-  args: {
-    fontSizePreference: 'comfortable',
-    tasks: crowdedTasks.slice(0, 10),
-  },
-}
-
-/**
- * 受信箱の判断キュー画面です。
- */
-export const Inbox: Story = {
-  args: {
-    view: 'inbox',
-  },
-}
-
-/**
- * 通知がまだない受信箱です。
- */
+/** The `/inbox` route when the notification stream is empty. */
 export const InboxWithoutNotifications: Story = {
-  args: {
-    notificationInbox: {
-      ...notificationInboxControllerFixture,
-      hasMore: false,
-      notifications: [],
-      unreadCount: 0,
-    },
-    view: 'inbox',
-  },
+  render: () => (
+    <WorkspaceInboxView
+      locale="ja"
+      notificationInbox={{
+        ...notificationInboxControllerFixture,
+        hasMore: false,
+        notifications: [],
+        unreadCount: 0,
+      }}
+      t={t}
+      tasks={storyTasks}
+      teams={projectDirectoryFixtures}
+      workItemConfigurationsByTeam={storyWorkItemConfigurations}
+    />
+  ),
 }
 
-/**
- * 通知 API の初回 page を読み込み中の受信箱です。
- */
-export const InboxLoading: Story = {
-  args: {
-    notificationInbox: {
-      ...notificationInboxControllerFixture,
-      isLoading: true,
-      notifications: [],
-    },
-    view: 'inbox',
-  },
+/** The `/dashboard` route portfolio and decision queue. */
+export const DashboardRoute: Story = {
+  render: () => (
+    <DashboardWorkspaceView
+      summary={storySummary}
+      t={t}
+      tasks={storyTasks}
+      teams={projectDirectoryFixtures}
+      workItemConfigurationsByTeam={storyWorkItemConfigurations}
+    />
+  ),
 }
 
-/**
- * 通知 API の読み込みに失敗した受信箱です。
- */
-export const InboxLoadError: Story = {
-  args: {
-    notificationInbox: {
-      ...notificationInboxControllerFixture,
-      hasLoadError: true,
-      notifications: [],
-    },
-    view: 'inbox',
-  },
+/** The `/help` route navigation cards. */
+export const HelpRoute: Story = {
+  render: () => <HelpWorkspaceView t={t} />,
 }
 
-/**
- * ポートフォリオダッシュボード画面です。
- */
-export const Dashboard: Story = {
-  args: {
-    view: 'dashboard',
-  },
+/** The `/settings` route display preferences without authenticated feature requests. */
+export const SettingsRoute: Story = {
+  render: () => (
+    <WorkspaceSettingsView
+      fontSizePreference="standard"
+      locale="ja"
+      onFontSizePreferenceChange={() => undefined}
+      onLocaleChange={() => undefined}
+      t={t}
+      userLabel="demo@example.com"
+    />
+  ),
 }
 
-/**
- * レポート画面です。
- */
-export const Reports: Story = {
-  args: {
-    view: 'reports',
-  },
+/** The shared `/home` shell with its actual common error and retry boundary. */
+export const CommonDataErrorShell: Story = {
+  render: () => <WorkspaceCommonErrorShellStory />,
 }
 
-/**
- * タスクがまだ登録されていないポートフォリオのレポート画面です。
- */
-export const ReportsWithoutTasks: Story = {
-  args: {
-    tasks: [],
-    view: 'reports',
-  },
+/** The `/settings/security` feature inside the real Workspace sidebar and header shell. */
+export const EnterpriseSecurityShellRoute: Story = {
+  render: () => (
+    <WorkspaceRouteStoryHarness
+      context={storyWorkspaceRouteContext}
+      path="/settings/security"
+    >
+      <WorkspaceRouteContent>
+        <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
+          <EnterpriseSecurityPanel
+            locale="ja"
+            scopeOptions={storySecurityScopeOptions}
+            snapshot={enterpriseSecuritySnapshotFixture}
+          />
+        </div>
+      </WorkspaceRouteContent>
+    </WorkspaceRouteStoryHarness>
+  ),
 }
 
-/**
- * 表示設定を含む設定画面です。
- */
-export const Settings: Story = {
-  args: {
-    view: 'settings',
-  },
+/** The `/teams/:teamId/overview` route with Project-level delivery summaries. */
+export const TeamOverviewRoute: Story = {
+  render: () => (
+    <TeamOverviewView
+      isTeamProjectMembersLoading={false}
+      team={coreTeam}
+      teamProjectMembers={storyTeamProjectMembers}
+      teamProjectMembersFailedProjectIds={[]}
+      t={t}
+      tasks={storyTasks}
+      workItemConfigurationsByTeam={storyWorkItemConfigurations}
+    />
+  ),
 }
 
-/**
- * チーム概要画面です。
- */
-export const TeamOverview: Story = {
-  args: {
-    view: 'team-overview',
-  },
+/** The `/teams/:teamId/members` route with searchable member workload rows. */
+export const TeamMembersRoute: Story = {
+  render: () => (
+    <TeamMembersView
+      isTeamProjectMembersLoading={false}
+      team={coreTeam}
+      teamProjectMembers={storyTeamProjectMembers}
+      teamProjectMembersFailedProjectIds={[]}
+      t={t}
+      tasks={storyTasks}
+    />
+  ),
 }
 
-/**
- * チームメンバー画面です。
- */
-export const TeamMembers: Story = {
-  args: {
-    view: 'team-members',
-  },
-}
-
-/**
- * メンバーはいるが担当タスクがまだない状態です。
- */
-export const TeamMembersWithoutAssignments: Story = {
-  args: {
-    tasks: [],
-    view: 'team-members',
-  },
-}
-
-/**
- * 一部プロジェクトのメンバー権限取得に失敗した状態です。
- */
+/** The Team members route when one Project membership request fails. */
 export const TeamMembersPartialFailure: Story = {
-  args: {
-    teamProjectMembers: storyTeamProjectMembers.filter(
-      (access) => access.projectId !== 'product-roadmap',
-    ),
-    teamProjectMembersFailedProjectIds: ['product-roadmap'],
-    view: 'team-members',
-  },
+  render: () => (
+    <TeamMembersView
+      isTeamProjectMembersLoading={false}
+      team={coreTeam}
+      teamProjectMembers={storyTeamProjectMembers.filter(
+        (access) => access.projectId !== 'product-roadmap',
+      )}
+      teamProjectMembersFailedProjectIds={['product-roadmap']}
+      t={t}
+      tasks={storyTasks}
+    />
+  ),
 }
 
-/**
- * 認証と API 確認中の loading 表示です。
- */
-export const Loading: Story = {
-  args: {
-    isLoading: true,
-  },
-}
-
-/**
- * 英語 locale でワークスペースを表示する状態です。
- */
-export const English: Story = {
-  args: {
-    locale: 'en',
-  },
-}
-
-/**
- * 英語 locale のチームメンバー画面です。
- */
-export const EnglishTeamMembers: Story = {
-  args: {
-    locale: 'en',
-    view: 'team-members',
-  },
+/** The Team members route with the English message dictionary. */
+export const EnglishTeamMembersRoute: Story = {
+  render: () => (
+    <TeamMembersView
+      isTeamProjectMembersLoading={false}
+      team={coreTeam}
+      teamProjectMembers={storyTeamProjectMembers}
+      teamProjectMembersFailedProjectIds={[]}
+      t={englishTranslator}
+      tasks={storyTasks}
+    />
+  ),
 }

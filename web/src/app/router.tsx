@@ -5,12 +5,20 @@ import { NotFoundPage } from '../pages/public/NotFoundPage'
 import { PrivacyPage } from '../pages/public/PrivacyPage'
 import { SupportPage } from '../pages/public/SupportPage'
 import { TermsPage } from '../pages/public/TermsPage'
+import { DashboardPage } from '../pages/workspace/DashboardPage'
+import { EnterpriseSecurityPage } from '../pages/workspace/EnterpriseSecurityPage'
 import { GoalDocumentsPage } from '../pages/workspace/GoalDocumentsPage'
+import { HelpPage } from '../pages/workspace/HelpPage'
+import { HomePage } from '../pages/workspace/HomePage'
+import { InboxPage } from '../pages/workspace/InboxPage'
+import { MyTasksPage } from '../pages/workspace/MyTasksPage'
 import { PlanningPage } from '../pages/workspace/PlanningPage'
 import { ReportsPage } from '../pages/workspace/ReportsPage'
+import { SettingsPage } from '../pages/workspace/SettingsPage'
 import { TaskPage } from '../pages/workspace/TaskPage'
 import { TeamIssuePage } from '../pages/workspace/TeamIssuePage'
-import { WorkspacePage } from '../pages/workspace/WorkspacePage'
+import { TeamMembersPage } from '../pages/workspace/TeamMembersPage'
+import { TeamOverviewPage } from '../pages/workspace/TeamOverviewPage'
 import { ProjectTasksRedirect } from './ProjectTasksRedirect'
 import { WorkspaceCommandMenuLayout } from '../commands/ui/WorkspaceCommandMenu'
 import { SearchPage } from '../search/SearchPage'
@@ -20,9 +28,11 @@ import { EnterpriseSsoCallbackPage } from '../pages/auth/EnterpriseSsoCallbackPa
 import { DocumentPage } from '../documents/DocumentPage'
 import { SharedDocumentPage } from '../documents/SharedDocumentPage'
 import { SecurityRecoveryPage } from '../pages/auth/SecurityRecoveryPage'
+import { WorkspaceRoute } from '../workspace/ui/WorkspaceRoute'
+import { WorkspaceRouteProvider } from '../workspace/ui/WorkspaceRouteProvider'
 
 /**
- * アプリケーション全体の画面ルーティング定義です。
+ * Route definitions for the complete application.
  */
 export const appRoutes: RouteObject[] = [
   {
@@ -45,20 +55,50 @@ export const appRoutes: RouteObject[] = [
     element: <WorkspaceCommandMenuLayout />,
     children: [
       {
-        path: '/dashboard',
-        element: <WorkspacePage view="dashboard" />,
-      },
-      {
-        path: '/home',
-        element: <WorkspacePage view="home" />,
-      },
-      {
-        path: '/my-tasks',
-        element: <WorkspacePage view="my-tasks" />,
-      },
-      {
-        path: '/inbox',
-        element: <WorkspacePage view="inbox" />,
+        element: <WorkspaceRouteProvider />,
+        children: [
+          {
+            element: <WorkspaceRoute />,
+            children: [
+              {
+                path: '/dashboard',
+                element: <DashboardPage />,
+              },
+              {
+                path: '/home',
+                element: <HomePage />,
+              },
+              {
+                path: '/my-tasks',
+                element: <MyTasksPage />,
+              },
+              {
+                path: '/inbox',
+                element: <InboxPage />,
+              },
+              {
+                path: '/help',
+                element: <HelpPage />,
+              },
+              {
+                path: '/settings',
+                element: <SettingsPage />,
+              },
+              {
+                path: '/settings/security',
+                element: <EnterpriseSecurityPage />,
+              },
+              {
+                path: '/teams/:teamId/overview',
+                element: <TeamOverviewPage />,
+              },
+              {
+                path: '/teams/:teamId/members',
+                element: <TeamMembersPage />,
+              },
+            ],
+          },
+        ],
       },
       {
         path: '/requests',
@@ -101,28 +141,8 @@ export const appRoutes: RouteObject[] = [
         element: <ReportsPage />,
       },
       {
-        path: '/help',
-        element: <WorkspacePage view="help" />,
-      },
-      {
-        path: '/settings',
-        element: <WorkspacePage view="settings" />,
-      },
-      {
-        path: '/settings/security',
-        element: <WorkspacePage view="enterprise-security" />,
-      },
-      {
-        path: '/teams/:teamId/overview',
-        element: <WorkspacePage view="team-overview" />,
-      },
-      {
         path: '/teams/:teamId/issues',
         element: <TeamIssuePage />,
-      },
-      {
-        path: '/teams/:teamId/members',
-        element: <WorkspacePage view="team-members" />,
       },
       {
         path: '/projects/:projectId/issues',

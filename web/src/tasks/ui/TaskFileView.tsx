@@ -10,7 +10,7 @@ import { ProjectFilesPanel } from '../../files/ui/ProjectFilesPanel'
 import {
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
-} from '../../issues/model/workItemDisplay'
+} from '../../work-items/model/workItemDisplay'
 import {
   resolveWorkItemWorkflowStatusLabel,
   resolveWorkflowCategoryToneClassName,

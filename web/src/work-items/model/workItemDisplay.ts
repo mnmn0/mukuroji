@@ -51,6 +51,28 @@ type WorkItemRelationDetailLike = {
 }
 
 /**
+ * Returns the canonical literal title for a Work Item.
+ *
+ * @param workItem - Work Item whose title is displayed.
+ * @returns The Work Item title shown in the interface.
+ */
+export function resolveWorkItemTitle(workItem: CanonicalWorkItem) {
+  return workItem.title
+}
+
+/**
+ * Resolves the Work Item assignee label from canonical fields.
+ *
+ * @param workItem - Work Item whose assignee is displayed.
+ * @returns The assignee name, email, or user ID in fallback order.
+ */
+export function resolveWorkItemAssignee(workItem: CanonicalWorkItem) {
+  return workItem.assigneeName ??
+    workItem.assigneeEmail ??
+    workItem.assigneeUserId
+}
+
+/**
  * Work Item の status ID に対応する解決済み definition を返します。
  *
  * @param workItem - Status を表示する Work Item です。

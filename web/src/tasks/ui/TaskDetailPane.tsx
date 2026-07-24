@@ -7,7 +7,10 @@ import type {
   IssueCollaborationController,
 } from '../../issues/mutations/useIssueCollaboration'
 import type { TeamIssue, TeamIssueDetail, UpdateTeamIssueInput } from '../../issues/api'
-import { resolveWorkItemAssignee, resolveWorkItemTitle } from '../../issues/model/workItemDisplay'
+import {
+  resolveWorkItemAssignee,
+  resolveWorkItemTitle,
+} from '../../work-items/model/workItemDisplay'
 import { IssueCollaborationPanel } from '../../issues/ui/IssueCollaborationPanel'
 import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'

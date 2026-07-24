@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import type { Page } from '@playwright/test'
+import type { Locator, Page } from '@playwright/test'
 import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
@@ -1546,19 +1546,6 @@ async function mockAuthenticatedTaskPage(
     })
   })
 
-  await page.route('**/api/dashboard/summary', async (route) => {
-    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
-
-    await route.fulfill({
-      json: {
-        projects: 3,
-        tasks: 18,
-        blocked: 2,
-        updatedAt: '2026-05-31T00:00:00.000Z',
-        source: 'dynamodb',
-      },
-    })
-  })
 }
 
 function createDefaultNotifications(): InboxNotification[] {
@@ -2061,6 +2048,28 @@ async function expectTaskSplitPaneLayoutToStayInsideColumns(page: Page) {
 
   expect(result.formOverflows).toEqual([])
   expect(result.detailOverflows).toEqual([])
+}
+
+/**
+ * Verifies the shared authenticated shell rendered by a direct Workspace route.
+ *
+ * @param page - Playwright page opened on a Workspace route.
+ * @param title - Localized route title shown in the shell header.
+ * @returns The visible desktop sidebar for route-specific navigation assertions.
+ */
+async function expectWorkspaceRouteShell(page: Page, title: string): Promise<Locator> {
+  const shell = page.locator('main.workbench-shell')
+  const sidebar = shell.locator('aside[aria-label="メインサイドバー"]:visible')
+
+  await expect(shell).toBeVisible()
+  await expect(sidebar).toBeVisible()
+  await expect(
+    shell.getByRole('heading', { level: 1, name: title, exact: true }),
+  ).toBeVisible()
+  await expect(shell.getByRole('button', { name: 'ログアウト', exact: true })).toBeVisible()
+  await expect(page).toHaveTitle(`${title} | mukuroji`)
+
+  return sidebar
 }
 
 test.describe('authenticated task page', () => {
@@ -4192,6 +4201,35 @@ test.describe('authenticated task page', () => {
     await expect(page.locator('aside textarea[name="description"]')).toHaveValue(issueDescription)
   })
 
+  test('Workspace 直下ルート間の遷移でサイドバーの手動状態を保持する', async ({ page }) => {
+    await page.goto('/home')
+    const homeSidebar = await expectWorkspaceRouteShell(page, 'ホーム')
+    const coreTeamButton = homeSidebar
+      .getByTestId('sidebar-team-core-team')
+      .getByRole('button', { name: 'コアチーム', exact: true })
+
+    await expect(coreTeamButton).toHaveAttribute('aria-expanded', 'true')
+    await coreTeamButton.click()
+    await expect(coreTeamButton).toHaveAttribute('aria-expanded', 'false')
+
+    await homeSidebar.getByRole('button', { name: 'サイドバーを折りたたむ' }).click()
+    await expect(homeSidebar).toHaveAttribute('data-collapsed', 'true')
+
+    await homeSidebar.getByRole('button', { name: 'ダッシュボード', exact: true }).click()
+    await expect(page).toHaveURL('/dashboard')
+
+    const dashboardSidebar = await expectWorkspaceRouteShell(page, 'ダッシュボード')
+
+    await expect(dashboardSidebar).toHaveAttribute('data-collapsed', 'true')
+    await dashboardSidebar.getByRole('button', { name: 'サイドバーを展開する' }).click()
+    await expect(dashboardSidebar).toHaveAttribute('data-collapsed', 'false')
+    await expect(
+      dashboardSidebar
+        .getByTestId('sidebar-team-core-team')
+        .getByRole('button', { name: 'コアチーム', exact: true }),
+    ).toHaveAttribute('aria-expanded', 'false')
+  })
+
   test('チーム概要では選択チームのプロジェクトタスクだけを集計する', async ({ page }) => {
     await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
       teamIssuesByTeam: {
@@ -4209,6 +4247,13 @@ test.describe('authenticated task page', () => {
     })
 
     await page.goto('/teams/design-team/overview')
+    const sidebar = await expectWorkspaceRouteShell(page, 'デザインチーム の概要')
+
+    await expect(
+      sidebar
+        .getByTestId('sidebar-team-design-team')
+        .getByRole('button', { name: 'チーム概要', exact: true }),
+    ).toHaveAttribute('aria-current', 'page')
 
     await expect(page.getByTestId('team-overview-projects').locator('p').last()).toHaveText('2')
     await expect(page.getByTestId('team-overview-open-tasks').locator('p').last()).toHaveText('0')
@@ -4229,6 +4274,13 @@ test.describe('authenticated task page', () => {
     const requestCounts = getMockRequestCounts(page)
 
     await page.goto('/teams/core-team/members')
+    const sidebar = await expectWorkspaceRouteShell(page, 'コアチーム のメンバー')
+
+    await expect(
+      sidebar
+        .getByTestId('sidebar-team-core-team')
+        .getByRole('button', { name: 'メンバー', exact: true }),
+    ).toHaveAttribute('aria-current', 'page')
 
     await expect(page.getByTestId('team-members-directory')).toBeVisible()
     await expect.poll(() => requestCounts.projectMemberReads).toBeGreaterThanOrEqual(3)
@@ -4260,6 +4312,13 @@ test.describe('authenticated task page', () => {
     const requestCounts = getMockRequestCounts(page)
 
     await page.goto('/inbox')
+    const sidebar = await expectWorkspaceRouteShell(page, '受信箱')
+
+    await expect(
+      sidebar
+        .getByRole('navigation', { name: 'グローバルナビゲーション' })
+        .getByRole('button', { name: /^受信箱/ }),
+    ).toHaveAttribute('aria-current', 'page')
 
     await expect(page.getByTestId('notification-inbox')).toBeVisible()
     const wireframeNotification = page.getByTestId('notification-row-notification-wireframe')

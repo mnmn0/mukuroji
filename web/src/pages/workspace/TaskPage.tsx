@@ -62,9 +62,7 @@ import {
   useTeamIssueDetail,
   useTeamIssues,
 } from '../../issues/queries/useWorkItems'
-import {
-  useIssueCollaboration,
-} from '../../issues/mutations/useIssueCollaboration'
+import { useIssueCollaboration } from '../../issues/mutations/useIssueCollaboration'
 import {
   createProjectIssuesPath,
   createTeamViewPath,

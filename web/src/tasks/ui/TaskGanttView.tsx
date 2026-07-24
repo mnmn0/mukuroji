@@ -7,7 +7,7 @@ import type { MessageKey } from '../../shared/i18n/i18n'
 import {
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
-} from '../../issues/model/workItemDisplay'
+} from '../../work-items/model/workItemDisplay'
 import {
   createTaskKey,
   resolveProjectTaskConfiguration,

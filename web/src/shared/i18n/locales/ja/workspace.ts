@@ -2,25 +2,11 @@
  * Japanese messages for the workspace domain.
  */
 export const workspaceMessages = {
-  'dashboard.title': 'ダッシュボード',
-  'dashboard.subtitle':
-    'Cognito で認証されたユーザーとして、ローカル環境の mukuroji にアクセスしています。',
-  'dashboard.loading': 'ユーザー情報を確認しています。',
   'dashboard.loadError': 'アカウント情報を確認できませんでした。時間をおいて再度お試しください。',
-  'dashboard.authProvider': 'Cognito 認証',
-  'dashboard.authProviderValue': 'Floci のローカル Cognito ユーザープールで認証済み',
-  'dashboard.signedInAs': 'ログイン中のユーザー',
   'dashboard.logout': 'ログアウト',
-  'dashboard.stat.projects': '進行中プロジェクト',
-  'dashboard.stat.tasks': '未完了タスク',
-  'dashboard.stat.blocked': '要確認',
-  'dashboard.team.core': 'コアチーム',
-  'dashboard.team.design': 'デザインチーム',
-  'dashboard.project.productRoadmap': 'プロダクトロードマップ',
-  'dashboard.project.releasePlan': 'リリース計画',
-  'dashboard.project.customerFeedback': '顧客フィードバック',
   'projects.error.loading': 'チームとプロジェクトを取得できませんでした',
   'workspace.loading': 'ワークスペースを確認しています。',
+  'workspace.error.retry': '再読み込み',
   'workspace.user.label': 'ログイン中',
   'workspace.user.fallback': 'mukuroji ユーザー',
   'workspace.home.eyebrow': '今日の運用',
