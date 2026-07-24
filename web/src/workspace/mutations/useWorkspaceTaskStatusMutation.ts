@@ -89,13 +89,13 @@ export function useWorkspaceTaskStatusMutation({
       return
     }
 
-    setErrorMessage(undefined)
     const taskKey = createWorkspaceTaskKey(canonicalTask)
 
     if (pendingTaskMoveKeysRef.current.has(taskKey)) {
       return
     }
 
+    setErrorMessage(undefined)
     pendingTaskMoveKeysRef.current.add(taskKey)
     const nextTasks = updateWorkspaceTaskStatus(
       tasks,

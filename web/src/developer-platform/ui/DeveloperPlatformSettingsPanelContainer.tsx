@@ -1,8 +1,8 @@
 import { useMemo } from 'react'
-import { useLocation } from 'react-router'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { Locale } from '../../shared/i18n/i18n'
 import { DeveloperPlatformPanelContainer } from './DeveloperPlatformPanelContainer'
+import type { DeveloperPlatformSection } from './DeveloperPlatformView'
 import { createDeveloperPlatformLabels } from './labels'
 
 /**
@@ -11,6 +11,8 @@ import { createDeveloperPlatformLabels } from './labels'
 export type DeveloperPlatformSettingsPanelContainerProps = {
   /** Access token used by Developer Platform APIs. */
   accessToken: string
+  /** Section selected when the settings panel first mounts. */
+  initialSection?: DeveloperPlatformSection
   /** Locale used for labels and date formatting. */
   locale: Locale
   /** Workspace directory used to build import destinations. */
@@ -25,10 +27,10 @@ export type DeveloperPlatformSettingsPanelContainerProps = {
  */
 export function DeveloperPlatformSettingsPanelContainer({
   accessToken,
+  initialSection,
   locale,
   teams,
 }: DeveloperPlatformSettingsPanelContainerProps) {
-  const location = useLocation()
   const labels = useMemo(() => createDeveloperPlatformLabels(locale), [locale])
   const importTeamOptions = useMemo(
     () => teams.map((team) => ({
@@ -56,13 +58,6 @@ export function DeveloperPlatformSettingsPanelContainer({
     }),
     [locale],
   )
-  const initialSection = useMemo(
-    () => new URLSearchParams(location.search).get('developerSection') === 'connectors'
-      ? 'connectors'
-      : undefined,
-    [location.search],
-  )
-
   return (
     <DeveloperPlatformPanelContainer
       accessToken={accessToken}

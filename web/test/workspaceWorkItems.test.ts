@@ -10,6 +10,8 @@ import {
   createWorkspaceSummary,
   createWorkspaceTaskKey,
   isWorkspaceTaskAssignedToUser,
+  parseWorkspaceTaskDueDate,
+  resolveWorkspacePortfolioRisk,
 } from '../src/work-items/model/workspaceWorkItems'
 
 const baseTask = referoTaskFixtures.find((task) => task.id === 'wireframe')
@@ -130,6 +132,35 @@ describe('Workspace Work Item model', () => {
     expect(coreRow?.risk).toBe('low')
     expect(designRow?.progress).toBe(0)
     expect(designRow?.risk).toBe('watch')
+  })
+
+  test('parses only exact YYYY/MM/DD calendar dates', () => {
+    const leapDay = parseWorkspaceTaskDueDate('2024/02/29')
+
+    expect(leapDay?.getFullYear()).toBe(2024)
+    expect(leapDay?.getMonth()).toBe(1)
+    expect(leapDay?.getDate()).toBe(29)
+    expect([
+      '',
+      '2023/02/29',
+      '2026/02/30',
+      '2026/04/31',
+      '2026/13/01',
+      '2026/7/20',
+      '2026/07/20T00:00:00Z',
+    ].map(parseWorkspaceTaskDueDate)).toEqual([
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+    ])
+  })
+
+  test('does not report an empty Project portfolio as low risk', () => {
+    expect(resolveWorkspacePortfolioRisk([])).toBe('clear')
   })
 
   test('creates summary and progress without transport-only metadata', () => {

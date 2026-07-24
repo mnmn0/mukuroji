@@ -113,6 +113,55 @@ describe('Team insights model', () => {
     ])
   })
 
+  test('ignores empty and invalid due dates when selecting a member next due date', () => {
+    const tasks = [
+      createTask({
+        assignedProjectId: 'refero',
+        assigneeEmail: 'demo@example.com',
+        assigneeName: 'Demo User',
+        assigneeUserId: 'demo@example.com',
+        dueDate: '',
+        id: 'undated-task',
+        priority: 'low',
+        statusCategory: 'unstarted',
+        teamId: 'core-team',
+        workflowStatusId: 'todo',
+      }),
+      createTask({
+        assignedProjectId: 'refero',
+        assigneeEmail: 'demo@example.com',
+        assigneeName: 'Demo User',
+        assigneeUserId: 'demo@example.com',
+        dueDate: '0000/00/00',
+        id: 'invalid-date-task',
+        priority: 'low',
+        statusCategory: 'unstarted',
+        teamId: 'core-team',
+        workflowStatusId: 'todo',
+      }),
+      createTask({
+        assignedProjectId: 'product-roadmap',
+        assigneeEmail: 'demo@example.com',
+        assigneeName: 'Demo User',
+        assigneeUserId: 'demo@example.com',
+        dueDate: '2026/07/21',
+        id: 'dated-task',
+        priority: 'low',
+        statusCategory: 'unstarted',
+        teamId: 'core-team',
+        workflowStatusId: 'todo',
+      }),
+    ]
+
+    expect(createTeamMemberRows(
+      coreTeam.projects,
+      tasks,
+      memberAccesses,
+      referenceDate,
+      coreTeam.id,
+    )[0]?.nextDueDate).toBe('2026/07/21')
+  })
+
   test('builds Team-scoped Project summaries with member and next-action data', () => {
     const tasks = [
       createTask({

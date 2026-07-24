@@ -32,7 +32,7 @@ import { WorkspaceRoute } from '../workspace/ui/WorkspaceRoute'
 import { WorkspaceRouteProvider } from '../workspace/ui/WorkspaceRouteProvider'
 
 /**
- * アプリケーション全体の画面ルーティング定義です。
+ * Route definitions for the complete application.
  */
 export const appRoutes: RouteObject[] = [
   {

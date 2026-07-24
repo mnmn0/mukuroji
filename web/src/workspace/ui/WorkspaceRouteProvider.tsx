@@ -1,11 +1,11 @@
 import {
   useCallback,
-  useEffect,
   useMemo,
   useRef,
   useState,
 } from 'react'
 import {
+  Navigate,
   Outlet,
   useLocation,
   useMatch,
@@ -264,12 +264,6 @@ export function WorkspaceRouteProvider() {
       currentUserError && commonSessionErrorAction?.kind !== 'stay',
     ) ||
     Boolean(user && isProjectDirectoryLoading)
-
-  useEffect(() => {
-    if (!session) {
-      navigate('/', { replace: true })
-    }
-  }, [navigate, session])
 
   /** Clears the current session and replaces browser history with the public entry route. */
   const handleLogout = useCallback(() => {
@@ -530,6 +524,10 @@ export function WorkspaceRouteProvider() {
     userInitial,
     userLabel,
   ])
+
+  if (!session) {
+    return <Navigate replace to="/" />
+  }
 
   return <Outlet context={contextValue} />
 }

@@ -4,7 +4,6 @@ import type { ProjectDirectoryProject } from '../../projects/api'
 import { useWorkspaceProjectMembers } from '../../projects/queries/useProjectMembers'
 import { TeamOverviewView } from '../../projects/ui/TeamOverviewView'
 import { createTranslator } from '../../shared/i18n/i18n'
-import { getUniqueWorkspaceProjectIds } from '../../work-items/model/workspaceWorkItems'
 import { useWorkspaceWorkItemData } from '../../workspace/queries/useWorkspaceWorkItemData'
 import { WorkspaceTaskLoadNotice } from '../../workspace/ui/WorkspaceDataNotices'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
@@ -26,6 +25,7 @@ export function TeamOverviewPage() {
   const workItems = useWorkspaceWorkItemData(
     workspace.accessToken,
     workspace.canLoadWorkspaceData,
+    workspace.teams,
   )
   const projectMembers = useWorkspaceProjectMembers(
     workspace.accessToken,
@@ -33,18 +33,9 @@ export function TeamOverviewPage() {
     projects,
     workspace.canLoadWorkspaceData && Boolean(activeTeam),
   )
-  const failedProjectCount = workItems.workItemsError
-    ? getUniqueWorkspaceProjectIds(workspace.teams).length
-    : 0
-  const isLoading = Boolean(
-    workItems.workItemsKey && workItems.isWorkItemsLoading,
-  ) || Boolean(
-    workItems.configurationsKey && workItems.isConfigurationsLoading,
-  )
-
   return (
     <WorkspaceRouteContent
-      isLoading={isLoading}
+      isLoading={workItems.isLoading}
       sessionErrors={[
         workItems.workItemsError,
         workItems.configurationsError,
@@ -54,7 +45,7 @@ export function TeamOverviewPage() {
       ]}
     >
       <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
-        <WorkspaceTaskLoadNotice failedProjectCount={failedProjectCount} t={t} />
+        <WorkspaceTaskLoadNotice failedProjectCount={workItems.failedProjectCount} t={t} />
         <TeamOverviewView
           isTeamProjectMembersLoading={Boolean(
             projectMembers.key && projectMembers.isLoading,

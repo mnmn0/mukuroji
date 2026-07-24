@@ -1,9 +1,6 @@
 import { useMemo } from 'react'
 import { createTranslator } from '../../shared/i18n/i18n'
-import {
-  createWorkspaceSummary,
-  getUniqueWorkspaceProjectIds,
-} from '../../work-items/model/workspaceWorkItems'
+import { createWorkspaceSummary } from '../../work-items/model/workspaceWorkItems'
 import { useWorkspaceWorkItemData } from '../../workspace/queries/useWorkspaceWorkItemData'
 import { DashboardWorkspaceView } from '../../workspace/ui/DashboardWorkspaceView'
 import { WorkspaceTaskLoadNotice } from '../../workspace/ui/WorkspaceDataNotices'
@@ -21,23 +18,15 @@ export function DashboardPage() {
   const workItems = useWorkspaceWorkItemData(
     workspace.accessToken,
     workspace.canLoadWorkspaceData,
+    workspace.teams,
   )
   const summary = useMemo(
     () => createWorkspaceSummary(workspace.teams, workItems.tasks),
     [workItems.tasks, workspace.teams],
   )
-  const failedProjectCount = workItems.workItemsError
-    ? getUniqueWorkspaceProjectIds(workspace.teams).length
-    : 0
-  const isLoading = Boolean(
-    workItems.workItemsKey && workItems.isWorkItemsLoading,
-  ) || Boolean(
-    workItems.configurationsKey && workItems.isConfigurationsLoading,
-  )
-
   return (
     <WorkspaceRouteContent
-      isLoading={isLoading}
+      isLoading={workItems.isLoading}
       sessionErrors={[
         workItems.workItemsError,
         workItems.configurationsError,
@@ -45,7 +34,7 @@ export function DashboardPage() {
       ]}
     >
       <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
-        <WorkspaceTaskLoadNotice failedProjectCount={failedProjectCount} t={t} />
+        <WorkspaceTaskLoadNotice failedProjectCount={workItems.failedProjectCount} t={t} />
         <DashboardWorkspaceView
           onOpenTask={workspace.onOpenTask}
           summary={summary}

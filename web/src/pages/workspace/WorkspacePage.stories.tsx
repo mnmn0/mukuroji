@@ -246,6 +246,7 @@ const meta = {
   ],
 } satisfies Meta
 
+/** Storybook metadata for the URL-specific Workspace route views. */
 export default meta
 
 /** Story definitions for the URL-specific Workspace views. */
@@ -348,14 +349,11 @@ export const HelpRoute: Story = {
 export const SettingsRoute: Story = {
   render: () => (
     <WorkspaceSettingsView
-      canManageWorkspaceConfiguration={true}
-      canMutateTeamConfiguration={true}
       fontSizePreference="standard"
       locale="ja"
       onFontSizePreferenceChange={() => undefined}
       onLocaleChange={() => undefined}
       t={t}
-      teams={projectDirectoryFixtures}
       userLabel="demo@example.com"
     />
   ),

@@ -67,6 +67,24 @@ describe('Workspace Inbox model', () => {
       priority: 'medium',
       workflowStatusId: 'todo',
     })
+    const highPriority = createTask({
+      dueDate: '2026/07/30',
+      id: 'high-priority',
+      priority: 'high',
+      workflowStatusId: 'todo',
+    })
+    const review = createTask({
+      dueDate: '2026/07/30',
+      id: 'review',
+      priority: 'low',
+      workflowStatusId: 'review',
+    })
+    const overdue = createTask({
+      dueDate: '2026/07/19',
+      id: 'overdue',
+      priority: 'low',
+      workflowStatusId: 'todo',
+    })
     const approval = createTask({
       approvalSummary: {
         approvedCount: 0,
@@ -81,8 +99,17 @@ describe('Workspace Inbox model', () => {
       workflowStatusId: 'todo',
     })
 
-    expect(createWorkspaceInboxTasks([ordinary, approval], referenceDate).map(
-      (task) => task.id,
-    )).toEqual(['approval'])
+    expect(createWorkspaceInboxTasks([
+      ordinary,
+      highPriority,
+      review,
+      overdue,
+      approval,
+    ], referenceDate).map((task) => task.id).sort()).toEqual([
+      'approval',
+      'high-priority',
+      'overdue',
+      'review',
+    ])
   })
 })

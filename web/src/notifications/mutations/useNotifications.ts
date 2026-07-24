@@ -160,11 +160,11 @@ export type NotificationPreferencesController = {
 }
 
 /**
- * 全画面サイドバーで共有する通知未読件数を取得します。
+ * Reads the recipient's shared unread notification count for global navigation.
  *
- * @param accessToken - API 認証に使う access token です。
- * @param enabled - 認証確認後に取得を有効にするかどうかです。
- * @returns recipient の実未読件数です。
+ * @param accessToken - Access token used by the Notifications API.
+ * @param enabled - Whether the query may run after authentication is confirmed.
+ * @returns The recipient's current unread notification count.
  */
 export function useUnreadNotificationCount(accessToken?: string, enabled = true) {
   const { data } = useNotificationUnreadCount(accessToken, enabled)
@@ -173,11 +173,11 @@ export function useUnreadNotificationCount(accessToken?: string, enabled = true)
 }
 
 /**
- * 通知 Inbox の cursor pagination、filter、永続 action を管理します。
+ * Manages cursor pagination, filtering, and persisted actions for the notification Inbox.
  *
- * @param accessToken - API 認証に使う access token です。
- * @param enabled - Inbox 表示中だけ一覧取得を有効にするかどうかです。
- * @returns Inbox 描画用 controller です。
+ * @param accessToken - Access token used by the Notifications API.
+ * @param enabled - Whether the Inbox query may run.
+ * @returns The controller used to render and operate the Inbox.
  */
 export function useNotificationInbox(
   accessToken?: string,
@@ -345,12 +345,12 @@ export function useNotificationInbox(
 }
 
 /**
- * recipient の通知配信設定を取得・保存します。
+ * Loads and saves the recipient's notification delivery preferences.
  *
- * @param accessToken - API 認証に使う access token です。
- * @param enabled - 設定画面表示中だけ取得を有効にするかどうかです。
+ * @param accessToken - Access token used by the Notifications API.
+ * @param enabled - Whether the preferences query may run.
  * @param onSessionError - Reports or clears query and save errors for shared session handling.
- * @returns 設定画面描画用 controller です。
+ * @returns The controller used to render and operate notification settings.
  */
 export function useNotificationPreferences(
   accessToken?: string,

@@ -8,6 +8,10 @@ export type NotificationPreferencesSessionErrorSource = 'query' | 'save'
 
 /**
  * Reports or clears one notification-preference operation's session error.
+ *
+ * @param source - Notification-preference operation that owns the error slot.
+ * @param error - Current error, or `undefined` after the operation recovers.
+ * @returns Nothing.
  */
 export type NotificationPreferencesSessionErrorReporter = (
   source: NotificationPreferencesSessionErrorSource,
@@ -15,12 +19,12 @@ export type NotificationPreferencesSessionErrorReporter = (
 ) => void
 
 /**
- * Current userのnotification delivery preferencesを取得します。
+ * Loads the current user's notification delivery preferences.
  *
- * @param accessToken - Notifications API の access token です。
- * @param enabled - Settings viewを表示しているかどうかです。
+ * @param accessToken - Access token used by the Notifications API.
+ * @param enabled - Whether the Settings query may run.
  * @param onSessionError - Reports or clears the query's shared session-policy error.
- * @returns Notification preferences の SWR state です。
+ * @returns SWR state for the current notification preferences.
  */
 export function useNotificationPreferencesQuery(
   accessToken?: string,

@@ -5,6 +5,7 @@ import {
   isAttentionWorkspaceTask,
   isWorkspaceTaskInReview,
   calculateWorkspaceProgress,
+  parseWorkspaceTaskDueDate,
 } from '../../work-items/model/workspaceWorkItems'
 import { isOpenWorkItem } from '../../work-items/model/workItemDisplay'
 import type {
@@ -233,6 +234,7 @@ export function createTeamMemberRows(
       const openTaskCount = openTasks.length
       const nextDueDate = openTasks
         .map((task) => task.dueDate)
+        .filter((dueDate) => parseWorkspaceTaskDueDate(dueDate) !== null)
         .sort((firstDate, secondDate) => firstDate.localeCompare(secondDate))[0]
 
       return {

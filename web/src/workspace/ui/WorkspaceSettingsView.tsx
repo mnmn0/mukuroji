@@ -1,11 +1,5 @@
+import type { ReactNode } from 'react'
 import { Link } from 'react-router'
-import { AutomationManagementPanelContainer } from '../../automation/ui/AutomationManagementPanelContainer'
-import { DeveloperPlatformSettingsPanelContainer } from '../../developer-platform/ui/DeveloperPlatformSettingsPanelContainer'
-import { NotificationSettingsPanelContainer } from '../../notifications/ui/NotificationSettingsPanelContainer'
-import type {
-  NotificationPreferencesSessionErrorReporter,
-} from '../../notifications/queries/useNotificationPreferences'
-import type { ProjectDirectoryTeam } from '../../projects/api'
 import {
   fontSizePreferenceOptions,
   type FontSizePreference,
@@ -16,33 +10,25 @@ import {
   type MessageKey,
 } from '../../shared/i18n/i18n'
 import { InfoGrid, SectionHeader } from '../../shared/ui/WorkbenchPrimitives'
-import { WorkItemConfigurationPanelContainer } from '../../work-items/ui/WorkItemConfigurationPanelContainer'
-import { WorkspaceAccessPanelContainer } from './WorkspaceAccessPanel'
 
 /**
  * Inputs for the Workspace settings view.
  */
 export type WorkspaceSettingsViewProps = {
-  /** Access token used by settings feature containers. */
-  accessToken?: string
-  /** Whether Workspace-level administrative settings may be changed. */
-  canManageWorkspaceConfiguration: boolean
-  /** Whether Team-level configuration mutations may be attempted. */
-  canMutateTeamConfiguration: boolean
+  /** Composed administrative settings rendered after the security link. */
+  configurationSections?: ReactNode
   /** Currently selected font-size preference. */
   fontSizePreference: FontSizePreference
   /** Currently selected Workspace locale. */
   locale: Locale
+  /** Composed notification settings rendered after display preferences. */
+  notificationSettingsSection?: ReactNode
   /** Callback that persists font-size preference changes. */
   onFontSizePreferenceChange: (preference: FontSizePreference) => void
   /** Callback that persists locale changes. */
   onLocaleChange?: (locale: Locale) => void
-  /** Callback that forwards feature session errors to the shared shell. */
-  onSessionError?: NotificationPreferencesSessionErrorReporter
   /** Localized message resolver. */
   t: (key: MessageKey) => string
-  /** Workspace Team and Project directory. */
-  teams: readonly ProjectDirectoryTeam[]
   /** Current user's display label. */
   userLabel: string
 }
@@ -54,22 +40,19 @@ const fontSizePreferenceLabelKeys: Record<FontSizePreference, MessageKey> = {
 }
 
 /**
- * Composes Workspace preferences and independently owned settings feature containers.
+ * Renders Workspace preferences around page-composed settings sections.
  *
- * @param props - Shared Workspace context and preference callbacks.
+ * @param props - Preference data, actions, and composed section content.
  * @returns The complete Workspace settings view.
  */
 export function WorkspaceSettingsView({
-  accessToken,
-  canManageWorkspaceConfiguration,
-  canMutateTeamConfiguration,
+  configurationSections,
   fontSizePreference,
   locale,
+  notificationSettingsSection,
   onFontSizePreferenceChange,
   onLocaleChange,
-  onSessionError,
   t,
-  teams,
   userLabel,
 }: WorkspaceSettingsViewProps) {
   return (
@@ -141,13 +124,7 @@ export function WorkspaceSettingsView({
         </div>
       </section>
 
-      {accessToken ? (
-        <NotificationSettingsPanelContainer
-          accessToken={accessToken}
-          locale={locale}
-          onSessionError={onSessionError}
-        />
-      ) : null}
+      {notificationSettingsSection}
 
       <InfoGrid
         items={[
@@ -182,36 +159,7 @@ export function WorkspaceSettingsView({
         </span>
       </Link>
 
-      {accessToken ? (
-        <WorkspaceAccessPanelContainer accessToken={accessToken} locale={locale} />
-      ) : null}
-
-      {accessToken ? (
-        <DeveloperPlatformSettingsPanelContainer
-          accessToken={accessToken}
-          locale={locale}
-          teams={teams}
-        />
-      ) : null}
-
-      {accessToken ? (
-        <WorkItemConfigurationPanelContainer
-          accessToken={accessToken}
-          canManageWorkspaceConfiguration={canManageWorkspaceConfiguration}
-          canMutateTeamConfiguration={canMutateTeamConfiguration}
-          locale={locale}
-          teams={teams}
-        />
-      ) : null}
-
-      {accessToken ? (
-        <AutomationManagementPanelContainer
-          accessToken={accessToken}
-          canManage={canManageWorkspaceConfiguration}
-          locale={locale}
-          teams={[...teams]}
-        />
-      ) : null}
+      {configurationSections}
 
       <section className="workbench-panel p-5">
         <p className="workbench-eyebrow">{t('workspace.user.label')}</p>

@@ -425,16 +425,29 @@ export function isWorkspaceTaskOverdue(task: ProjectTask, referenceDate: Date) {
  * @returns The parsed date, or null when the value is invalid.
  */
 export function parseWorkspaceTaskDueDate(value: string) {
-  const [year, month, day] = value.split('/').map(Number)
+  const match = /^(\d{4})\/(\d{2})\/(\d{2})$/.exec(value)
 
-  if (!year || !month || !day) {
+  if (!match) {
     return null
   }
 
-  const date = new Date(year, month - 1, day)
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+
+  if (year < 1 || month < 1 || month > 12 || day < 1 || day > 31) {
+    return null
+  }
+
+  const date = new Date(0)
+  date.setFullYear(year, month - 1, day)
   date.setHours(0, 0, 0, 0)
 
-  return Number.isNaN(date.getTime()) ? null : date
+  return date.getFullYear() === year &&
+      date.getMonth() === month - 1 &&
+      date.getDate() === day
+    ? date
+    : null
 }
 
 /**
@@ -466,7 +479,7 @@ export function resolveWorkspacePortfolioRisk(
     return 'watch'
   }
 
-  if (tasks.every((task) => isCompletedWorkItem(task))) {
+  if (tasks.length > 0 && tasks.every((task) => isCompletedWorkItem(task))) {
     return 'low'
   }
 
