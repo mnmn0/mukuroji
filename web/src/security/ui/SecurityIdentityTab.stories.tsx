@@ -79,7 +79,7 @@ function IdentityVersionBoundaryStory(
   )
 }
 
-/** Creates a domain claim and preserves its value across a form remount. */
+/** Submits a normalized domain claim across an identity form remount. */
 export const DomainClaimInteraction: Story = {
   render: (args) => <IdentityVersionBoundaryStory {...args} />,
   play: async ({ args, canvasElement }) => {
@@ -92,9 +92,8 @@ export const DomainClaimInteraction: Story = {
     await expect(args.onCreateDomain).toHaveBeenCalledWith({
       domain: 'new.example',
     })
-    const notice = await canvas.findByTestId(
-      'enterprise-domain-verification-challenge',
-    )
-    await expect(notice).toBeInTheDocument()
+    await expect(
+      canvas.getByTestId('security-domain-input'),
+    ).toHaveValue('')
   },
 }

@@ -1,4 +1,4 @@
-import { useRef, useState, type FormEvent } from 'react'
+import { useState, type FormEvent } from 'react'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type {
   CreateEnterpriseServiceAccountInput,
@@ -27,7 +27,6 @@ import {
   EnterpriseSecurityStatusBadge,
   SecurityNumberField,
 } from './EnterpriseSecurityFields'
-import { EnterpriseOneTimeSecretNotice } from './EnterpriseOneTimeSecretNotice'
 
 /** Props consumed by the independently renderable privileged-access tab. */
 type SecurityPrivilegedTabProps = {
@@ -58,14 +57,10 @@ type SecurityPrivilegedTabProps = {
   /** Routes service-account revocation through confirmation. */
   onRequestRevokeServiceAccount: (
     account: EnterpriseServiceAccount,
-    onRevoked: () => void,
   ) => void
   /** Routes credential rotation through confirmation. */
   onRequestRotateServiceAccount: (
     account: EnterpriseServiceAccount,
-    onRotated: (
-      response: EnterpriseServiceAccountCredentialResponse,
-    ) => void,
   ) => void
 }
 
@@ -88,45 +83,14 @@ export function SecurityPrivilegedTab({
   onRequestRevokeServiceAccount,
   onRequestRotateServiceAccount,
 }: SecurityPrivilegedTabProps) {
-  const [oneTimeSecret, setOneTimeSecret] = useState<{
-    accountId: string
-    displayId: number
-    label: string
-    token: string
-  }>()
-  const oneTimeSecretDisplayIdRef = useRef(0)
   const formBoundary = `${snapshot.roles
     .map((role) => `${role.id}:${role.version}`)
     .join(',')}:${scopeOptions
     .map((scope) => `${scope.type}:${scope.id}`)
     .join(',')}`
 
-  /** Retains a service-account credential across form-boundary remounts. */
-  const showOneTimeSecret = (
-    response: EnterpriseServiceAccountCredentialResponse,
-  ) => {
-    oneTimeSecretDisplayIdRef.current += 1
-    setOneTimeSecret({
-      accountId: response.serviceAccount.id,
-      displayId: oneTimeSecretDisplayIdRef.current,
-      label: response.serviceAccount.name,
-      token: response.token,
-    })
-  }
-
   return (
     <div className="grid gap-5" data-testid="security-privileged">
-      {oneTimeSecret ? (
-        <EnterpriseOneTimeSecretNotice
-          key={oneTimeSecret.displayId}
-          kind="service-account"
-          label={oneTimeSecret.label}
-          locale={locale}
-          token={oneTimeSecret.token}
-          onDismiss={() => setOneTimeSecret(undefined)}
-        />
-      ) : null}
-
       <SecurityPrivilegedTabContent
         busyOperation={busyOperation}
         key={formBoundary}
@@ -139,12 +103,6 @@ export function SecurityPrivilegedTab({
         onRequestDeactivateBreakGlass={onRequestDeactivateBreakGlass}
         onRequestRevokeServiceAccount={onRequestRevokeServiceAccount}
         onRequestRotateServiceAccount={onRequestRotateServiceAccount}
-        onSecretIssued={showOneTimeSecret}
-        onServiceAccountRevoked={(accountId) =>
-          setOneTimeSecret((current) =>
-            current?.accountId === accountId ? undefined : current,
-          )
-        }
         onTestBreakGlass={onTestBreakGlass}
       />
     </div>
@@ -154,7 +112,7 @@ export function SecurityPrivilegedTab({
 /**
  * Owns privileged form drafts within the current role and scope boundary.
  *
- * @param props - Privileged tab props and one-time credential callbacks.
+ * @param props - Privileged tab props and mutation callbacks.
  * @returns Service-account and emergency-administrator controls.
  */
 function SecurityPrivilegedTabContent({
@@ -169,14 +127,7 @@ function SecurityPrivilegedTabContent({
   onRequestDeactivateBreakGlass,
   onRequestRevokeServiceAccount,
   onRequestRotateServiceAccount,
-  onSecretIssued,
-  onServiceAccountRevoked,
-}: SecurityPrivilegedTabProps & {
-  onSecretIssued: (
-    response: EnterpriseServiceAccountCredentialResponse,
-  ) => void
-  onServiceAccountRevoked: (accountId: string) => void
-}) {
+}: SecurityPrivilegedTabProps) {
   const canManageServiceAccounts =
     snapshot.capabilities.canManagePrivilegedAccess
   const canManageBreakGlass = snapshot.capabilities.canManageBreakGlass
@@ -245,7 +196,7 @@ function SecurityPrivilegedTabContent({
     }
 
     try {
-      const response = await onCreateServiceAccount({
+      await onCreateServiceAccount({
         allowedSourceCidrs: normalizedServiceAccountSourceCidrs,
         credentialLifetimeDays: serviceAccountCredentialLifetimeDays,
         name: serviceAccountName.trim(),
@@ -256,7 +207,6 @@ function SecurityPrivilegedTabContent({
             : selectedServiceAccountScope.id,
         scopeType: selectedServiceAccountScope.type,
       })
-      onSecretIssued(response)
       setServiceAccountName('')
       setServiceAccountRoleId('')
       setServiceAccountCredentialLifetimeDays(90)
@@ -495,12 +445,7 @@ function SecurityPrivilegedTabContent({
                       className="workbench-button-secondary min-h-9 px-3 disabled:cursor-not-allowed disabled:opacity-55"
                       disabled={isBusy}
                       type="button"
-                      onClick={() =>
-                        onRequestRotateServiceAccount(
-                          account,
-                          onSecretIssued,
-                        )
-                      }
+                      onClick={() => onRequestRotateServiceAccount(account)}
                     >
                       {t(
                         busyOperation ===
@@ -514,11 +459,7 @@ function SecurityPrivilegedTabContent({
                       className="workbench-button-secondary min-h-9 px-3 text-red-700 disabled:cursor-not-allowed disabled:opacity-55"
                       disabled={isBusy}
                       type="button"
-                      onClick={() =>
-                        onRequestRevokeServiceAccount(account, () =>
-                          onServiceAccountRevoked(account.id),
-                        )
-                      }
+                      onClick={() => onRequestRevokeServiceAccount(account)}
                     >
                       {t('security.privileged.revoke')}
                     </button>

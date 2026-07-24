@@ -12,7 +12,6 @@ import {
 } from '../model/enterpriseSecurityDisplay'
 import { createIdentityProviderDraft } from '../model/enterpriseSecurityForms'
 import type { EnterpriseSsoPrerequisites } from '../model/enterpriseSecurityReadiness'
-import { EnterpriseDomainVerificationChallengeNotice } from './EnterpriseDomainVerificationChallengeNotice'
 import {
   EnterpriseSecurityEmptyState,
   EnterpriseSecurityReadOnlyNotice,
@@ -64,19 +63,8 @@ export function SecurityIdentityTab({
   onUpdateIdentityProvider,
   onVerifyDomain,
 }: SecurityIdentityTabProps) {
-  const [domainChallenge, setDomainChallenge] =
-    useState<EnterpriseDomainVerificationChallenge>()
-
   return (
     <div className="grid gap-5" data-testid="security-identity">
-      {domainChallenge ? (
-        <EnterpriseDomainVerificationChallengeNotice
-          challenge={domainChallenge}
-          locale={locale}
-          onDismiss={() => setDomainChallenge(undefined)}
-        />
-      ) : null}
-
       <SecurityIdentityTabContent
         busyOperation={busyOperation}
         key={`identity:${snapshot.identityProvider.version}`}
@@ -84,13 +72,7 @@ export function SecurityIdentityTab({
         prerequisites={prerequisites}
         snapshot={snapshot}
         t={t}
-        onChallengeCreated={setDomainChallenge}
         onCreateDomain={onCreateDomain}
-        onDomainVerified={(verifiedDomain) =>
-          setDomainChallenge((current) =>
-            current?.domain.domain === verifiedDomain ? undefined : current,
-          )
-        }
         onRequestEnforcement={onRequestEnforcement}
         onUpdateIdentityProvider={onUpdateIdentityProvider}
         onVerifyDomain={onVerifyDomain}
@@ -102,7 +84,7 @@ export function SecurityIdentityTab({
 /**
  * Owns identity form drafts within the identity-provider version boundary.
  *
- * @param props - Identity tab props and one-time challenge lifecycle callbacks.
+ * @param props - Identity tab props and mutation callbacks.
  * @returns Identity forms and managed-domain controls.
  */
 function SecurityIdentityTabContent({
@@ -111,18 +93,11 @@ function SecurityIdentityTabContent({
   prerequisites,
   snapshot,
   t,
-  onChallengeCreated,
   onCreateDomain,
-  onDomainVerified,
   onRequestEnforcement,
   onUpdateIdentityProvider,
   onVerifyDomain,
-}: SecurityIdentityTabProps & {
-  onChallengeCreated: (
-    challenge: EnterpriseDomainVerificationChallenge,
-  ) => void
-  onDomainVerified: (domain: string) => void
-}) {
+}: SecurityIdentityTabProps) {
   const canManage = snapshot.capabilities.canManageIdentity
   const [draft, setDraft] = useState(() =>
     createIdentityProviderDraft(snapshot.identityProvider),
@@ -155,7 +130,7 @@ function SecurityIdentityTabContent({
     }
   }
 
-  /** Creates a managed-domain claim and retains its value only in this tab. */
+  /** Creates a managed-domain claim through the panel-owned challenge handler. */
   const handleDomainSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const normalizedDomain = domain.trim().toLowerCase()
@@ -165,8 +140,7 @@ function SecurityIdentityTabContent({
     }
 
     try {
-      const challenge = await onCreateDomain({ domain: normalizedDomain })
-      onChallengeCreated(challenge)
+      await onCreateDomain({ domain: normalizedDomain })
       setDomain('')
     } catch {
       // The container owns the shared mutation error banner.
@@ -392,9 +366,10 @@ function SecurityIdentityTabContent({
                       return
                     }
 
-                    void onVerifyDomain(claim.domain, claim.version)
-                      .then(() => onDomainVerified(claim.domain))
-                      .catch(() => undefined)
+                    void onVerifyDomain(
+                      claim.domain,
+                      claim.version,
+                    ).catch(() => undefined)
                   }}
                 >
                   {t('security.identity.verifyDomain')}

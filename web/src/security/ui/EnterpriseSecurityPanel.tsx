@@ -50,6 +50,8 @@ import {
   type EnterpriseSecurityTab,
 } from '../model/tabs'
 import { EnterpriseSecurityConfirmationDialog } from './EnterpriseSecurityConfirmationDialog'
+import { EnterpriseDomainVerificationChallengeNotice } from './EnterpriseDomainVerificationChallengeNotice'
+import { EnterpriseOneTimeSecretNotice } from './EnterpriseOneTimeSecretNotice'
 import { SecurityAccessTab } from './SecurityAccessTab'
 import { SecurityIdentityTab } from './SecurityIdentityTab'
 import { SecurityOverviewTab } from './SecurityOverviewTab'
@@ -196,6 +198,31 @@ const tabLabelKeys: Record<EnterpriseSecurityTab, MessageKey> = {
 }
 
 /**
+ * A one-time credential retained at the panel boundary across tab changes.
+ */
+type EnterpriseOneTimeSecretState =
+  | {
+      /** Identifies a SCIM bearer token. */
+      kind: 'scim'
+      /** Monotonically increasing key for resetting notice-local state. */
+      displayId: number
+      /** Bearer token returned only by the rotate response. */
+      token: string
+    }
+  | {
+      /** Identifies a service-account credential. */
+      kind: 'service-account'
+      /** Stable account identifier used for exact lifecycle cleanup. */
+      accountId: string
+      /** Monotonically increasing key for resetting notice-local state. */
+      displayId: number
+      /** Service-account name shown beside the credential. */
+      label: string
+      /** Bearer token returned only by the create or rotate response. */
+      token: string
+    }
+
+/**
  * Renders the capability-aware enterprise security workspace.
  *
  * @param props - Panel snapshot, loading state, scope options, and mutations.
@@ -211,7 +238,7 @@ export function EnterpriseSecurityPanel(props: EnterpriseSecurityPanelProps) {
 }
 
 /**
- * Owns only navigation and cross-tab confirmation state for the panel.
+ * Owns navigation, confirmation, and cross-tab one-time response state.
  *
  * @param props - Panel state and mutation callbacks.
  * @returns The loaded, error, or interactive panel state.
@@ -259,9 +286,16 @@ function EnterpriseSecurityPanelContent({
   )
   const [confirmation, setConfirmation] =
     useState<EnterpriseSecurityConfirmation>()
+  const [domainChallenge, setDomainChallenge] =
+    useState<EnterpriseDomainVerificationChallenge>()
+  const [provisioningImpact, setProvisioningImpact] =
+    useState<EnterpriseProvisioningImpact>()
+  const [oneTimeSecret, setOneTimeSecret] =
+    useState<EnterpriseOneTimeSecretState>()
   const [isConfirming, setIsConfirming] = useState(false)
   const pendingTabFocus = useRef<EnterpriseSecurityTab | undefined>(undefined)
   const confirmationReturnFocusRef = useRef<HTMLElement | null>(null)
+  const oneTimeSecretDisplayIdRef = useRef(0)
 
   useEffect(() => {
     if (pendingTabFocus.current !== selectedTab) {
@@ -308,6 +342,130 @@ function EnterpriseSecurityPanelContent({
     snapshot.capabilities,
   )
   const prerequisites = resolveEnterpriseSsoPrerequisites(snapshot)
+
+  /**
+   * Creates a managed-domain claim and retains its one-time DNS challenge.
+   *
+   * @param input - Normalized managed-domain claim input.
+   * @returns The domain verification challenge returned by the mutation.
+   */
+  const createDomain = async (
+    input: CreateEnterpriseDomainClaimInput,
+  ): Promise<EnterpriseDomainVerificationChallenge> => {
+    if (!onCreateDomain) {
+      throw new Error('Managed-domain creation is unavailable.')
+    }
+
+    const challenge = await onCreateDomain(input)
+    setDomainChallenge(challenge)
+    return challenge
+  }
+
+  /**
+   * Verifies a domain and clears only its matching retained challenge.
+   *
+   * @param domain - Managed domain to verify.
+   * @param expectedVersion - Version used for optimistic concurrency.
+   * @returns The underlying verification result.
+   */
+  const verifyDomain = async (
+    domain: string,
+    expectedVersion: number,
+  ): Promise<unknown> => {
+    if (!onVerifyDomain) {
+      throw new Error('Managed-domain verification is unavailable.')
+    }
+
+    const result = await onVerifyDomain(domain, expectedVersion)
+    setDomainChallenge((current) =>
+      current?.domain.domain === domain ? undefined : current,
+    )
+    return result
+  }
+
+  /**
+   * Replaces the retained reconciliation preview with a fresh dry run.
+   *
+   * @returns The provisioning impact returned by the mutation.
+   */
+  const previewProvisioning =
+    async (): Promise<EnterpriseProvisioningImpact> => {
+      if (!onPreviewProvisioning) {
+        throw new Error('Provisioning preview is unavailable.')
+      }
+
+      setProvisioningImpact(undefined)
+      const impact = await onPreviewProvisioning()
+      setProvisioningImpact(impact)
+      return impact
+    }
+
+  /**
+   * Retains a SCIM token in the current panel generation.
+   *
+   * @param response - One-time SCIM token response.
+   * @returns Nothing.
+   */
+  const retainScimToken = (response: EnterpriseScimTokenResponse): void => {
+    oneTimeSecretDisplayIdRef.current += 1
+    setOneTimeSecret({
+      displayId: oneTimeSecretDisplayIdRef.current,
+      kind: 'scim',
+      token: response.token,
+    })
+  }
+
+  /**
+   * Rotates the SCIM token and retains its one-time response.
+   *
+   * @returns The SCIM token response.
+   */
+  const rotateScimToken = async (): Promise<EnterpriseScimTokenResponse> => {
+    if (!onRotateScimToken) {
+      throw new Error('SCIM token rotation is unavailable.')
+    }
+
+    const response = await onRotateScimToken()
+    retainScimToken(response)
+    return response
+  }
+
+  /**
+   * Retains a service-account credential in the current panel generation.
+   *
+   * @param response - One-time service-account credential response.
+   * @returns Nothing.
+   */
+  const retainServiceAccountCredential = (
+    response: EnterpriseServiceAccountCredentialResponse,
+  ): void => {
+    oneTimeSecretDisplayIdRef.current += 1
+    setOneTimeSecret({
+      accountId: response.serviceAccount.id,
+      displayId: oneTimeSecretDisplayIdRef.current,
+      kind: 'service-account',
+      label: response.serviceAccount.name,
+      token: response.token,
+    })
+  }
+
+  /**
+   * Creates a service account and retains its one-time credential.
+   *
+   * @param input - Service-account creation input.
+   * @returns The created account and one-time credential.
+   */
+  const createServiceAccount = async (
+    input: CreateEnterpriseServiceAccountInput,
+  ): Promise<EnterpriseServiceAccountCredentialResponse> => {
+    if (!onCreateServiceAccount) {
+      throw new Error('Service-account creation is unavailable.')
+    }
+
+    const response = await onCreateServiceAccount(input)
+    retainServiceAccountCredential(response)
+    return response
+  }
 
   /** Captures the trigger element before opening a cross-tab confirmation. */
   const requestConfirmation = (next: EnterpriseSecurityConfirmation) => {
@@ -377,7 +535,11 @@ function EnterpriseSecurityPanelContent({
         })
       } else if (confirmation.kind === 'provisioning') {
         await onApplyProvisioning?.(confirmation.impact)
-        confirmation.onApplied?.()
+        setProvisioningImpact((current) =>
+          current?.previewId === confirmation.impact.previewId
+            ? undefined
+            : current,
+        )
       } else if (confirmation.kind === 'session-policy') {
         await onUpdateSessionPolicy?.({
           ...confirmation.input,
@@ -386,16 +548,21 @@ function EnterpriseSecurityPanelContent({
       } else if (confirmation.kind === 'scim-token-rotate') {
         const response = await onRotateScimToken?.()
         if (response) {
-          confirmation.onRotated?.(response)
+          retainScimToken(response)
         }
       } else if (confirmation.kind === 'service-account-rotate') {
         const response = await onRotateServiceAccount?.(confirmation.account)
         if (response) {
-          confirmation.onRotated?.(response)
+          retainServiceAccountCredential(response)
         }
       } else if (confirmation.kind === 'service-account-revoke') {
         await onRevokeServiceAccount?.(confirmation.account)
-        confirmation.onRevoked?.()
+        setOneTimeSecret((current) =>
+          current?.kind === 'service-account' &&
+          current.accountId === confirmation.account.id
+            ? undefined
+            : current,
+        )
       } else if (confirmation.kind === 'mapping-delete') {
         await onDeleteMapping?.(confirmation.mapping)
       } else if (confirmation.kind === 'mapping-update') {
@@ -502,6 +669,45 @@ function EnterpriseSecurityPanelContent({
         </div>
       ) : null}
 
+      {(domainChallenge &&
+        snapshot.capabilities.canManageIdentity) ||
+      (oneTimeSecret?.kind === 'scim' &&
+        snapshot.capabilities.canManageProvisioning) ||
+      (oneTimeSecret?.kind === 'service-account' &&
+        snapshot.capabilities.canManagePrivilegedAccess) ? (
+        <div className="grid gap-5 px-5 pt-5">
+          {domainChallenge && snapshot.capabilities.canManageIdentity ? (
+            <EnterpriseDomainVerificationChallengeNotice
+              challenge={domainChallenge}
+              locale={locale}
+              onDismiss={() => setDomainChallenge(undefined)}
+            />
+          ) : null}
+          {oneTimeSecret?.kind === 'scim' &&
+          snapshot.capabilities.canManageProvisioning ? (
+            <EnterpriseOneTimeSecretNotice
+              key={oneTimeSecret.displayId}
+              kind="scim"
+              label={t('security.provisioning.scimTokenLabel')}
+              locale={locale}
+              token={oneTimeSecret.token}
+              onDismiss={() => setOneTimeSecret(undefined)}
+            />
+          ) : null}
+          {oneTimeSecret?.kind === 'service-account' &&
+          snapshot.capabilities.canManagePrivilegedAccess ? (
+            <EnterpriseOneTimeSecretNotice
+              key={oneTimeSecret.displayId}
+              kind="service-account"
+              label={oneTimeSecret.label}
+              locale={locale}
+              token={oneTimeSecret.token}
+              onDismiss={() => setOneTimeSecret(undefined)}
+            />
+          ) : null}
+        </div>
+      ) : null}
+
       <fieldset className="contents" disabled={isStale}>
         <div
           aria-labelledby={`security-tab-${selectedTab}`}
@@ -527,36 +733,40 @@ function EnterpriseSecurityPanelContent({
               prerequisites={prerequisites}
               snapshot={snapshot}
               t={t}
-              onCreateDomain={onCreateDomain}
+              onCreateDomain={onCreateDomain ? createDomain : undefined}
               onRequestEnforcement={(enforced) =>
                 requestConfirmation({ enforced, kind: 'sso-enforcement' })
               }
               onUpdateIdentityProvider={onUpdateIdentityProvider}
-              onVerifyDomain={onVerifyDomain}
+              onVerifyDomain={onVerifyDomain ? verifyDomain : undefined}
             />
           ) : null}
           {selectedTab === 'provisioning' ? (
             <SecurityProvisioningTab
               busyOperation={busyOperation}
+              impact={provisioningImpact}
+              key={`provisioning:${provisioningImpact?.previewId ?? 'none'}`}
               locale={locale}
               snapshot={snapshot}
               t={t}
-              onPreview={onPreviewProvisioning}
-              onRequestApply={(impact, onApplied) =>
+              onPreview={
+                onPreviewProvisioning ? previewProvisioning : undefined
+              }
+              onRequestApply={(impact) =>
                 requestConfirmation({
                   impact,
                   kind: 'provisioning',
-                  onApplied,
                 })
               }
-              onRequestRotateToken={(onRotated) =>
+              onRequestRotateToken={() =>
                 requestConfirmation({
                   kind: 'scim-token-rotate',
-                  onRotated,
                 })
               }
               onRetryLog={onRetryProvisioningLog}
-              onRotateToken={onRotateScimToken}
+              onRotateToken={
+                onRotateScimToken ? rotateScimToken : undefined
+              }
             />
           ) : null}
           {selectedTab === 'access' ? (
@@ -636,7 +846,9 @@ function EnterpriseSecurityPanelContent({
               scopeOptions={scopeOptions}
               snapshot={snapshot}
               t={t}
-              onCreateServiceAccount={onCreateServiceAccount}
+              onCreateServiceAccount={
+                onCreateServiceAccount ? createServiceAccount : undefined
+              }
               onRegisterBreakGlass={onRegisterBreakGlass}
               onRequestDeactivateBreakGlass={(administrator) =>
                 requestConfirmation({
@@ -644,18 +856,16 @@ function EnterpriseSecurityPanelContent({
                   kind: 'break-glass',
                 })
               }
-              onRequestRevokeServiceAccount={(account, onRevoked) =>
+              onRequestRevokeServiceAccount={(account) =>
                 requestConfirmation({
                   account,
                   kind: 'service-account-revoke',
-                  onRevoked,
                 })
               }
-              onRequestRotateServiceAccount={(account, onRotated) =>
+              onRequestRotateServiceAccount={(account) =>
                 requestConfirmation({
                   account,
                   kind: 'service-account-rotate',
-                  onRotated,
                 })
               }
               onTestBreakGlass={onTestBreakGlass}

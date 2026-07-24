@@ -5,9 +5,7 @@ import type {
   EnterpriseProvisioningImpact,
   EnterpriseRoleDefinition,
   EnterpriseRoleImpact,
-  EnterpriseScimTokenResponse,
   EnterpriseServiceAccount,
-  EnterpriseServiceAccountCredentialResponse,
   EnterpriseSessionPolicyImpact,
   UpdateEnterpriseGroupRoleMappingInput,
   UpdateEnterpriseRoleInput,
@@ -29,8 +27,6 @@ export type EnterpriseSecurityConfirmation =
       kind: 'provisioning'
       /** 適用する dry-run preview です。 */
       impact: EnterpriseProvisioningImpact
-      /** Apply 成功後に tab-local preview を破棄する callback です。 */
-      onApplied?: () => void
     }
   | {
       /** Caller IP 除外を伴う session policy 更新を表す discriminant です。 */
@@ -43,26 +39,18 @@ export type EnterpriseSecurityConfirmation =
   | {
       /** SCIM credential rotate を表す discriminant です。 */
       kind: 'scim-token-rotate'
-      /** Rotate 成功後に tab-local one-time secret を表示する callback です。 */
-      onRotated?: (response: EnterpriseScimTokenResponse) => void
     }
   | {
       /** Service account credential rotate を表す discriminant です。 */
       kind: 'service-account-rotate'
       /** Credential を rotate する service account です。 */
       account: EnterpriseServiceAccount
-      /** Rotate 成功後に tab-local one-time secret を表示する callback です。 */
-      onRotated?: (
-        response: EnterpriseServiceAccountCredentialResponse,
-      ) => void
     }
   | {
       /** Service account revoke を表す discriminant です。 */
       kind: 'service-account-revoke'
       /** Revoke する service account です。 */
       account: EnterpriseServiceAccount
-      /** Revoke 成功後に関連する tab-local secret を破棄する callback です。 */
-      onRevoked?: () => void
     }
   | {
       /** Directory group mapping 削除を表す discriminant です。 */

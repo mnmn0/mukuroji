@@ -21,6 +21,10 @@ const meta = {
     ),
   ],
   args: {
+    impact: {
+      ...enterpriseProvisioningImpactFixture,
+      expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+    },
     locale: 'en',
     snapshot: enterpriseSecuritySnapshotFixture,
     t: createTranslator('en'),
@@ -47,7 +51,8 @@ export const PreviewInteraction: Story = {
     await userEvent.click(
       canvas.getByTestId('security-provisioning-preview'),
     )
-    const preview = await canvas.findByTestId('security-provisioning-impact')
+    await expect(args.onPreview).toHaveBeenCalledTimes(1)
+    const preview = canvas.getByTestId('security-provisioning-impact')
     await expect(preview).toBeInTheDocument()
     await userEvent.click(canvas.getByTestId('security-provisioning-apply'))
     await expect(args.onRequestApply).toHaveBeenCalledTimes(1)

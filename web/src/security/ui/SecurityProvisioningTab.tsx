@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type {
   EnterpriseProvisioningImpact,
@@ -18,7 +18,6 @@ import {
   EnterpriseSecuritySectionHeader,
   EnterpriseSecurityStatusBadge,
 } from './EnterpriseSecurityFields'
-import { EnterpriseOneTimeSecretNotice } from './EnterpriseOneTimeSecretNotice'
 
 /**
  * Renders SCIM credentials, reconciliation previews, and provisioning logs.
@@ -28,6 +27,7 @@ import { EnterpriseOneTimeSecretNotice } from './EnterpriseOneTimeSecretNotice'
  */
 export function SecurityProvisioningTab({
   busyOperation,
+  impact,
   locale,
   snapshot,
   t,
@@ -38,30 +38,19 @@ export function SecurityProvisioningTab({
   onRotateToken,
 }: {
   busyOperation?: string
+  impact?: EnterpriseProvisioningImpact
   locale: Locale
   snapshot: EnterpriseSecuritySnapshot
   t: (key: MessageKey) => string
   onPreview?: () => Promise<EnterpriseProvisioningImpact>
-  onRequestApply: (
-    impact: EnterpriseProvisioningImpact,
-    onApplied: () => void,
-  ) => void
-  onRequestRotateToken: (
-    onRotated: (response: EnterpriseScimTokenResponse) => void,
-  ) => void
+  onRequestApply: (impact: EnterpriseProvisioningImpact) => void
+  onRequestRotateToken: () => void
   onRetryLog?: (log: EnterpriseProvisioningLog) => Promise<unknown>
   onRotateToken?: () => Promise<EnterpriseScimTokenResponse>
 }) {
   const canManage = snapshot.capabilities.canManageProvisioning
   const isBusy = Boolean(busyOperation)
-  const [impact, setImpact] = useState<EnterpriseProvisioningImpact>()
   const [currentTime, setCurrentTime] = useState(() => Date.now())
-  const [oneTimeSecret, setOneTimeSecret] = useState<{
-    displayId: number
-    label: string
-    token: string
-  }>()
-  const oneTimeSecretDisplayIdRef = useRef(0)
   const impactExpiresAt = impact ? Date.parse(impact.expiresAt) : Number.NaN
   const impactExpiryDelay = Number.isFinite(impactExpiresAt)
     ? Math.max(0, impactExpiresAt - currentTime)
@@ -83,52 +72,23 @@ export function SecurityProvisioningTab({
     return () => window.clearTimeout(timeout)
   }, [impact, impactExpiryDelay, impactIsExpired])
 
-  /** Retains a rotated SCIM token only in the current tab generation. */
-  const showOneTimeSecret = (response: EnterpriseScimTokenResponse) => {
-    oneTimeSecretDisplayIdRef.current += 1
-    setOneTimeSecret({
-      displayId: oneTimeSecretDisplayIdRef.current,
-      label: t('security.provisioning.scimTokenLabel'),
-      token: response.token,
-    })
-  }
-
-  /** Refreshes the reconciliation preview and resets its expiry clock. */
+  /** Requests a replacement for the panel-owned reconciliation preview. */
   const previewProvisioning = async () => {
-    setImpact(undefined)
-    const nextImpact = await onPreview?.()
-    if (nextImpact) {
-      setCurrentTime(Date.now())
-      setImpact(nextImpact)
-    }
+    await onPreview?.()
   }
 
   /** Creates or requests confirmation to rotate the SCIM token. */
   const rotateToken = async () => {
     if (snapshot.scim.tokenGeneration > 0) {
-      onRequestRotateToken(showOneTimeSecret)
+      onRequestRotateToken()
       return
     }
 
-    const response = await onRotateToken?.()
-    if (response) {
-      showOneTimeSecret(response)
-    }
+    await onRotateToken?.()
   }
 
   return (
     <div className="grid gap-5" data-testid="security-provisioning">
-      {oneTimeSecret ? (
-        <EnterpriseOneTimeSecretNotice
-          key={oneTimeSecret.displayId}
-          kind="scim"
-          label={oneTimeSecret.label}
-          locale={locale}
-          token={oneTimeSecret.token}
-          onDismiss={() => setOneTimeSecret(undefined)}
-        />
-      ) : null}
-
       {!canManage ? <EnterpriseSecurityReadOnlyNotice t={t} /> : null}
 
       <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white">
@@ -235,7 +195,7 @@ export function SecurityProvisioningTab({
                   !impact.blocking &&
                   !isEnterpriseProvisioningImpactExpired(impact)
                 ) {
-                  onRequestApply(impact, () => setImpact(undefined))
+                  onRequestApply(impact)
                 }
               }}
             />

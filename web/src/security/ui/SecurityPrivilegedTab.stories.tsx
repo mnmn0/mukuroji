@@ -83,7 +83,7 @@ function PrivilegedVersionBoundaryStory(
   )
 }
 
-/** Creates an account and preserves its secret across a form remount. */
+/** Creates an account and resets its form across a role-version remount. */
 export const CreateServiceAccountInteraction: Story = {
   render: (args) => <PrivilegedVersionBoundaryStory {...args} />,
   play: async ({ args, canvasElement }) => {
@@ -100,15 +100,8 @@ export const CreateServiceAccountInteraction: Story = {
       canvas.getByRole('button', { name: /Create account/i }),
     )
     await expect(args.onCreateServiceAccount).toHaveBeenCalledTimes(1)
-    const notice = await canvas.findByTestId(
-      'enterprise-security-one-time-secret',
-    )
-    await expect(notice).toBeInTheDocument()
-    await userEvent.click(
-      canvas.getByTestId('enterprise-security-secret-dismiss'),
-    )
     await expect(
-      canvas.queryByTestId('enterprise-security-one-time-secret'),
-    ).not.toBeInTheDocument()
+      canvas.getByRole('textbox', { name: /Service account name/i }),
+    ).toHaveValue('')
   },
 }
