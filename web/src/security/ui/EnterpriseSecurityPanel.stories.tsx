@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { EnterpriseSecurityPanel } from './EnterpriseSecurityPanel'
 import {
   enterpriseProvisioningImpactFixture,
@@ -6,6 +7,7 @@ import {
   enterpriseSecuritySnapshotFixture,
   enterpriseServiceAccountCredentialResponseFixture,
 } from '../fixtures'
+import type { EnterpriseServiceAccountCredentialResponse } from '../api'
 
 const blockedIdentitySnapshot = {
   ...enterpriseSecuritySnapshotFixture,
@@ -116,8 +118,12 @@ const meta = {
     onRetryProvisioningLog: async () => undefined,
     onRevokeServiceAccount: async () => undefined,
     onRotateScimToken: async () => enterpriseScimTokenResponseFixture,
-    onRotateServiceAccount: async () =>
-      enterpriseServiceAccountCredentialResponseFixture,
+    onRotateServiceAccount: async (
+      account,
+    ): Promise<EnterpriseServiceAccountCredentialResponse> => {
+      void account
+      return enterpriseServiceAccountCredentialResponseFixture
+    },
     onTestBreakGlass: async () => undefined,
     onUpdateIdentityProvider: async () => undefined,
     onUpdateMapping: async () => undefined,
@@ -135,6 +141,69 @@ type Story = StoryObj<typeof meta>
 
 /** SSO、SCIM、同期エラー、特権経路をまとめた標準 overview です。 */
 export const Overview: Story = {}
+
+/** Capability で非表示の tab を除外して keyboard focus を移動します。 */
+export const KeyboardNavigation: Story = {
+  args: {
+    locale: 'en',
+    snapshot: {
+      ...enterpriseSecuritySnapshotFixture,
+      capabilities: {
+        ...enterpriseSecuritySnapshotFixture.capabilities,
+        canManageAccess: false,
+        canManageMappings: false,
+        canManageProvisioning: false,
+        canManageRoles: false,
+        canViewAccess: false,
+        canViewProvisioning: false,
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const overviewTab = canvas.getByRole('tab', { name: 'Overview' })
+    const identityTab = canvas.getByRole('tab', { name: 'Identity' })
+    const sessionsTab = canvas.getByRole('tab', { name: 'Sessions' })
+    const privilegedTab = canvas.getByRole('tab', { name: 'Privileged' })
+
+    await expect(
+      canvas.queryByRole('tab', { name: 'Provisioning' }),
+    ).not.toBeInTheDocument()
+    await expect(
+      canvas.queryByRole('tab', { name: 'Mappings and roles' }),
+    ).not.toBeInTheDocument()
+
+    await userEvent.click(overviewTab)
+    await userEvent.keyboard('{ArrowRight}')
+    await expect(identityTab).toHaveFocus()
+    await userEvent.keyboard('{ArrowRight}')
+    await expect(sessionsTab).toHaveFocus()
+    await userEvent.keyboard('{End}')
+    await expect(privilegedTab).toHaveFocus()
+    await userEvent.keyboard('{Home}')
+    await expect(overviewTab).toHaveFocus()
+  },
+}
+
+/** Mutation 中は選択中 tab の focus を保ち、移動を禁止します。 */
+export const BusyNavigationLocked: Story = {
+  args: {
+    busyOperation: 'domain:create',
+    initialTab: 'identity',
+    locale: 'en',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const identityTab = canvas.getByRole('tab', { name: 'Identity' })
+    const sessionsTab = canvas.getByRole('tab', { name: 'Sessions' })
+
+    await expect(sessionsTab).toBeDisabled()
+    await userEvent.click(identityTab)
+    await userEvent.keyboard('{ArrowRight}')
+    await expect(identityTab).toHaveFocus()
+    await expect(identityTab).toHaveAttribute('aria-selected', 'true')
+  },
+}
 
 /** 前提条件を満たすまで SSO enforcement を開始できない状態です。 */
 export const IdentityPrerequisitesBlocked: Story = {
@@ -159,11 +228,137 @@ export const SamlUrnEntityId: Story = {
   },
 }
 
+/** DNS challenge は tab を切り替えても保持し、対応する domain の検証成功時だけ破棄します。 */
+export const DomainChallengeAcrossTabs: Story = {
+  args: {
+    initialTab: 'identity',
+    locale: 'en',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await userEvent.type(
+      canvas.getByTestId('security-domain-input'),
+      'New.Example',
+    )
+    await userEvent.click(
+      canvas.getByRole('button', { name: 'Add domain' }),
+    )
+    await expect(
+      await canvas.findByTestId(
+        'enterprise-domain-verification-challenge',
+      ),
+    ).toBeInTheDocument()
+
+    await userEvent.click(canvas.getByRole('tab', { name: 'Sessions' }))
+    await expect(
+      canvas.getByTestId('enterprise-domain-verification-challenge'),
+    ).toBeInTheDocument()
+    await userEvent.click(canvas.getByRole('tab', { name: 'Identity' }))
+    await userEvent.click(
+      canvas.getByRole('button', {
+        name: 'Verify ownership: subsidiary.example',
+      }),
+    )
+
+    await waitFor(() =>
+      expect(
+        canvas.queryByTestId(
+          'enterprise-domain-verification-challenge',
+        ),
+      ).not.toBeInTheDocument(),
+    )
+  },
+}
+
 /** One-time token、dry-run、retryable log の provisioning 管理です。 */
 export const Provisioning: Story = {
   args: {
     initialTab: 'provisioning',
     locale: 'en',
+  },
+}
+
+/** SCIM secret は tab と確認 dialog の cancel をまたいで保持し、明示 close で破棄します。 */
+export const ScimSecretAcrossTabs: Story = {
+  args: {
+    initialTab: 'provisioning',
+    locale: 'en',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await userEvent.click(canvas.getByTestId('security-scim-token-rotate'))
+    let dialog = within(
+      await canvas.findByTestId('enterprise-security-confirmation'),
+    )
+    await userEvent.click(
+      dialog.getByRole('button', { name: 'Rotate token' }),
+    )
+    await expect(
+      await canvas.findByTestId('enterprise-security-one-time-secret'),
+    ).toBeInTheDocument()
+
+    await userEvent.click(canvas.getByRole('tab', { name: 'Sessions' }))
+    await expect(
+      canvas.getByTestId('enterprise-security-one-time-secret'),
+    ).toBeInTheDocument()
+    await userEvent.click(
+      canvas.getByRole('tab', { name: 'Provisioning' }),
+    )
+    await userEvent.click(canvas.getByTestId('security-scim-token-rotate'))
+    dialog = within(
+      await canvas.findByTestId('enterprise-security-confirmation'),
+    )
+    await userEvent.click(dialog.getByRole('button', { name: 'Cancel' }))
+    await expect(
+      canvas.getByTestId('enterprise-security-one-time-secret'),
+    ).toBeInTheDocument()
+
+    await userEvent.click(
+      canvas.getByTestId('enterprise-security-secret-dismiss'),
+    )
+    await expect(
+      canvas.queryByTestId('enterprise-security-one-time-secret'),
+    ).not.toBeInTheDocument()
+  },
+}
+
+/** Provisioning preview は tab をまたいで保持し、同じ preview の apply 成功時に破棄します。 */
+export const ProvisioningPreviewAcrossTabs: Story = {
+  args: {
+    initialTab: 'provisioning',
+    locale: 'en',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await userEvent.click(
+      canvas.getByTestId('security-provisioning-preview'),
+    )
+    await expect(
+      await canvas.findByTestId('security-provisioning-impact'),
+    ).toBeInTheDocument()
+    await userEvent.click(canvas.getByRole('tab', { name: 'Sessions' }))
+    await userEvent.click(
+      canvas.getByRole('tab', { name: 'Provisioning' }),
+    )
+    await expect(
+      canvas.getByTestId('security-provisioning-impact'),
+    ).toBeInTheDocument()
+
+    await userEvent.click(canvas.getByTestId('security-provisioning-apply'))
+    const dialog = within(
+      await canvas.findByTestId('enterprise-security-confirmation'),
+    )
+    await userEvent.click(
+      dialog.getByRole('button', { name: 'Apply this change set' }),
+    )
+    await waitFor(() =>
+      expect(
+        canvas.queryByTestId('security-provisioning-impact'),
+      ).not.toBeInTheDocument(),
+    )
   },
 }
 
@@ -214,6 +409,87 @@ export const SessionPolicy: Story = {
 export const PrivilegedAccess: Story = {
   args: {
     initialTab: 'privileged',
+  },
+}
+
+/** 同名 account の revoke では account ID が一致する one-time secret だけを破棄します。 */
+export const ServiceAccountSecretExactLifecycle: Story = {
+  args: {
+    initialTab: 'privileged',
+    locale: 'en',
+    snapshot: {
+      ...enterpriseSecuritySnapshotFixture,
+      serviceAccounts: [
+        ...enterpriseSecuritySnapshotFixture.serviceAccounts.map(
+          (account) => ({ ...account, name: 'Data export' }),
+        ),
+        enterpriseServiceAccountCredentialResponseFixture.serviceAccount,
+      ],
+    },
+    onRotateServiceAccount: async (account) => ({
+      serviceAccount: {
+        ...account,
+        credentialGeneration: account.credentialGeneration + 1,
+        version: account.version + 1,
+      },
+      token: `token-for-${account.id}`,
+    }),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const retainedAccount = within(
+      canvas.getByTestId(
+        'security-service-account-service-data-export',
+      ),
+    )
+
+    await userEvent.click(
+      retainedAccount.getByRole('button', {
+        name: 'Rotate credential: Data export',
+      }),
+    )
+    let dialog = within(
+      await canvas.findByTestId('enterprise-security-confirmation'),
+    )
+    await userEvent.click(
+      dialog.getByRole('button', { name: 'Rotate credential' }),
+    )
+    await expect(
+      await canvas.findByTestId('enterprise-security-one-time-secret'),
+    ).toBeInTheDocument()
+
+    const differentAccount = within(
+      canvas.getByTestId(
+        'security-service-account-service-release-bot',
+      ),
+    )
+    await userEvent.click(
+      differentAccount.getByRole('button', {
+        name: 'Revoke: Data export',
+      }),
+    )
+    dialog = within(
+      await canvas.findByTestId('enterprise-security-confirmation'),
+    )
+    await userEvent.click(dialog.getByRole('button', { name: 'Revoke' }))
+    await expect(
+      canvas.getByTestId('enterprise-security-one-time-secret'),
+    ).toBeInTheDocument()
+
+    await userEvent.click(
+      retainedAccount.getByRole('button', {
+        name: 'Revoke: Data export',
+      }),
+    )
+    dialog = within(
+      await canvas.findByTestId('enterprise-security-confirmation'),
+    )
+    await userEvent.click(dialog.getByRole('button', { name: 'Revoke' }))
+    await waitFor(() =>
+      expect(
+        canvas.queryByTestId('enterprise-security-one-time-secret'),
+      ).not.toBeInTheDocument(),
+    )
   },
 }
 

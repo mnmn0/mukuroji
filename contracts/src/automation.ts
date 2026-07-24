@@ -1,4 +1,4 @@
-import type { WorkflowDefinition } from './work-items'
+import type { WorkflowDefinition } from './work-item-configuration'
 
 /** Automation domain の現在の schema version です。 */
 export const AUTOMATION_SCHEMA_VERSION = 1 as const

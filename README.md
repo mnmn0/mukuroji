@@ -38,6 +38,50 @@ bash scripts/codex-setup.sh
 
 検証まで実行したい場合は `CODEX_VALIDATE=1 bash scripts/codex-setup.sh` を使います。
 
+レビュー Skill の source は `.codex/skills/mukuroji-review` で管理します。この場所は
+repository-scoped Skill の自動検出先ではなく、reviewer instructions を branch-controlled
+なセットアップ処理から書き換えないため、`scripts/codex-setup.sh` も Skill を自動同期
+しません。
+
+personal scope へ導入するときは、変更が trusted な default branch へ merge された後に
+Codex の Skill installer へ以下を明示してください。
+
+- GitHub repository: `mnmn0/mukuroji`
+- path: `.codex/skills/mukuroji-review`
+- ref: `main`
+
+feature branch や可変な PR head から直接インストールしないでください。installer は同名の
+導入先が既に存在すると停止するため、更新時は現在の
+`$CODEX_HOME/skills/mukuroji-review` を `$CODEX_HOME/skills` の外にある backup 先へ
+移動してから、`ref: main` を明示して再導入します。導入に失敗した場合は backup を元の
+場所へ戻してください。レビュー開始前には `origin/main` の使用する commit OID を固定し、
+その commit の Skill tree と installed copy の全ファイルが一致することを確認して
+ください。欠落や差分がある場合はレビューを開始せず、trusted source から更新します。
+
+source 自体を変更した場合は次の検証を実行します。
+
+```sh
+bun run skill:validate
+bun run skill:validate:test
+git diff --check
+```
+
+trusted validator とその test、`review-skill.yml`、またはレビュー必須条件を持つ root /
+nested `AGENTS.md` を変更する PR では、default branch 側の
+`pull_request_target` workflow が変更前の validator と negative tests を使って対象
+Skill を検証します。全階層の `AGENTS.md` の追加・変更・削除も trust-root 変更として
+扱います。これらの trust root の変更を merge するには、内容を独立レビューした
+repository maintainer が現在の head commit SHA 全体を含む
+`review-ok:<full-head-sha>` label を付ける必要があります。Skill tree 自体の変更もこの
+承認対象です。workflow は、その完全一致 label を PR author 以外の label 権限を持つ
+user が付けた最新 event だけを承認として受け入れます。
+さらに GitHub の collaborator permission API で、その user の現在の base permission が
+`write` または `admin` であることを検証します（`maintain` は同 API で `write` に
+対応します）。head が更新されると別の label が必要になり、該当 label を外すと承認も
+無効になります。無関係な label 操作は承認状態を変えません。PR の本文や変更ファイル内の
+同名文字列、bot、PR author、read / triage 権限だけの user が付けた label は承認として
+扱われません。
+
 ## 開発
 
 Floci + Cognito + DynamoDB:
@@ -94,7 +138,7 @@ bun run floci:up
 bun run floci:deploy-backend
 ```
 
-`floci:deploy-backend` は `server/src/index.ts` を Node.js 22 Lambda 用に bundle し、Floci の REST API Gateway から Lambda に proxy します。React から Lambda 経由 API を呼ぶ場合は、生成された `.floci/generated/backend.env` の `VITE_API_BASE_URL` を使います。Deploy script は ready hook が生成した `ANALYTICS_TABLE_NAME` と `ANALYTICS_SCHEDULE_INDEX_NAME` を Lambda に渡します。また、確定した REST API URL を `AUTOMATION_INBOUND_WEBHOOK_BASE_URL` として Lambda にも渡すため、管理 API が返す signed inbound webhook URL は sender から到達可能な同じ API を指します。Lambda adapter は `/teams/projects` のような直下パスと `/api/teams/projects` の両方を同じ Hono route へ正規化します。
+`floci:deploy-backend` は `server/src/index.ts` を Node.js 22 Lambda 用に bundle し、Floci の REST API Gateway から Lambda に proxy します。React から Lambda 経由 API を呼ぶ場合は、生成された `.floci/generated/backend.env` の `VITE_API_BASE_URL` を使います。Deploy script は ready hook が生成した `ANALYTICS_TABLE_NAME` と `ANALYTICS_SCHEDULE_INDEX_NAME` を Lambda に渡します。また、確定した REST API URL を `AUTOMATION_INBOUND_WEBHOOK_BASE_URL` として Lambda にも渡し、Secrets Manager の内部 HTTP endpoint と明示的な `MUKUROJI_LOCAL_AWS_RUNTIME=floci` marker を組にして渡します。管理 API が返す signed inbound webhook URL は sender から到達可能な同じ API を指します。Lambda adapter は `/teams/projects` のような直下パスと `/api/teams/projects` の両方を同じ Hono route へ正規化します。
 
 停止:
 
@@ -174,7 +218,8 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `AUTOMATION_WEBHOOK_SECRET_PREFIX`: outbound webhook の workspace-scoped signing secret を置く Secrets Manager prefix。未指定時は `mukuroji/automation-webhooks`
 - `AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX`: server-issued inbound webhook signing secret を outbound secret から分離して置く Secrets Manager prefix。未指定時は `mukuroji/automation-inbound-webhooks`
 - `AUTOMATION_INBOUND_WEBHOOK_BASE_URL`: Sender に渡す inbound webhook URL の public API base URL。Server はこの値へ `/api/automation/inbound-webhooks/{opaqueEndpointId}` を追加します。HTTPS が必須で、HTTP は `localhost`、`127.0.0.1`、`[::1]` の loopback development host だけに許可します。Floci deploy では作成済み REST API ID と stage から自動設定します。
-- `SECRETS_MANAGER_ENDPOINT` / `AWS_ENDPOINT_URL_SECRETSMANAGER` / `AWS_ENDPOINT_URL`: API Lambda から見る Secrets Manager endpoint。ローカル Lambda では Floci 内部 endpoint の `http://floci:4566` を使います。
+- `SECRETS_MANAGER_ENDPOINT` / `AWS_ENDPOINT_URL_SECRETS_MANAGER` / `AWS_ENDPOINT_URL_SECRETSMANAGER` / `AWS_ENDPOINT_URL`: API Lambda から見る Secrets Manager endpoint（左から優先）。AWS 接続では `AWS_REGION` と一致する standard/FIPS の HTTPS hostname だけを許可します。ローカル Lambda では Floci 内部 endpoint の `http://floci:4566` を使います。
+- `MUKUROJI_LOCAL_AWS_RUNTIME`: `floci` のときだけ loopback、`localhost`、`floci`、`localstack` の HTTP Secrets Manager endpoint を許可する明示的な local marker。`floci:deploy-backend` が自動設定し、`NODE_ENV=production` では常に無効です。本番環境へ設定しないでください。
 - `MUKUROJI_AUDIT_RETENTION_DAYS` / `AUDIT_RETENTION_DAYS`: audit event の保持日数。未指定時は 2555 日（7年）
 - `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY`: Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。本番では `openssl rand -hex 32` などで生成し、backfill と API で同じ値を使います。
 - `MUKUROJI_WORKSPACE_DIRECTORY_ID`: Cognito claim と DynamoDB partition で共有する canonical Workspace ID。未指定時は `workspace#mukuroji-local`

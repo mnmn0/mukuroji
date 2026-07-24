@@ -54,7 +54,7 @@ import {
   type AutomationClient,
   type AutomationInboundWebhookEndpointRecord,
   type AutomationInboundWebhookProvisioning,
-} from '../../modules/automation/automation'
+} from '../../modules/automation'
 import {
   DEFAULT_WORK_ITEM_CONFIGURATION,
   type WorkItemConfigurationClient,
@@ -68,9 +68,7 @@ import { InMemoryPlanningClient } from '../../modules/planning/planning'
 import {
   InMemoryEnterpriseIdentityClient,
 } from '../../modules/enterprise-identity/enterprise-identity'
-import {
-  InMemoryDeveloperPlatformClient,
-} from '../../modules/developer-platform/developer-platform'
+import { createInMemoryDeveloperPlatformAdapters } from '../../modules/developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import {
   createEnterpriseScimGroupJobWorkerHandler,
 } from '../../handlers/enterprise-scim-group-job-worker-handler'
@@ -182,7 +180,7 @@ function createBulkOperationAutomationFake(initialOperation?: BulkOperation) {
       async saveBulkOperation(operation: BulkOperation, expectedRevision: number) {
         if (!storedOperation || storedOperation.revision !== expectedRevision) {
           throw new AutomationError(
-            409,
+            'conflict',
             'BulkOperationRevisionConflict',
             'Bulk operation was modified concurrently.',
           )
@@ -992,8 +990,8 @@ async function configureHeadlessDeveloperCredential(
   scopes: ApiScope[],
 ) {
   const workspaceId = HEADLESS_DEVELOPER_WORKSPACE_ID
-  const platform = new InMemoryDeveloperPlatformClient()
-  const apiKey = await platform.createApiKey({
+  const platform = createInMemoryDeveloperPlatformAdapters()
+  const apiKey = await platform.apiKeys.createApiKey({
     workspaceId,
     createdByUserId: 'demo@example.com',
     input: {
@@ -1003,7 +1001,7 @@ async function configureHeadlessDeveloperCredential(
     },
   })
   setTestAppDependencies(state, {
-    developerPlatform: platform,
+    ...platform,
     enterpriseIdentity: identity,
   })
   return apiKey.secret

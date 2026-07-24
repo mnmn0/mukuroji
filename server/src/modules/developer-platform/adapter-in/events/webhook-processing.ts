@@ -21,12 +21,13 @@ import {
   upcastAuditEvent,
   type AuditEventV1,
 } from '../../../audit'
-import {
-  DeveloperPlatformError,
-  WEBHOOK_MAX_ATTEMPTS,
-  type DeveloperPlatformClient,
-  type PreparedWebhookDelivery,
-} from '../../developer-platform'
+import type {
+  PreparedWebhookDelivery,
+  WebhookDeliveryPort,
+  WebhookSubscriptionPort,
+} from '../../application/ports'
+import { WEBHOOK_MAX_ATTEMPTS } from '../../domain/webhook-policy'
+import { DeveloperPlatformError } from '../../errors'
 import {
   UnsafeWebhookUrlError,
   createWebhookRetryDelaySeconds,
@@ -288,7 +289,10 @@ export type WebhookDeliveryWorkerDependencies = {
   /** Projection message の Audit event を強整合読みします。 */
   auditEvents: WebhookAuditEventReader
   /** Subscription と delivery log の永続化境界です。 */
-  developerPlatform: DeveloperPlatformClient
+  developerPlatform: WebhookDeliveryPort & Pick<
+    WebhookSubscriptionPort,
+    'listActiveWebhookSubscriptionsPage'
+  >
   /** Retry/replay 時にも subscription 作成者の current ACL を再検証します。 */
   authorizer: WebhookSubscriptionAuthorizer
   /** Projection page のleaseとcontinuation checkpointです。 */

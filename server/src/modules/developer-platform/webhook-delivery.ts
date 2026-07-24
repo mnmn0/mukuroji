@@ -1,10 +1,10 @@
-import { createHmac, timingSafeEqual } from 'node:crypto'
+import { timingSafeEqual } from 'node:crypto'
 import { lookup } from 'node:dns/promises'
 import { request as sendHttpsRequest } from 'node:https'
 import { BlockList, isIP } from 'node:net'
+import { createWebhookSignature } from './domain/webhook-signature'
 
-/** Webhook request の署名 header prefix です。 */
-export const WEBHOOK_SIGNATURE_VERSION = 'v1'
+export { createWebhookSignature } from './domain/webhook-signature'
 
 /** Webhook receiver が受け入れる既定 replay window です。 */
 export const WEBHOOK_SIGNATURE_TOLERANCE_SECONDS = 5 * 60
@@ -102,18 +102,6 @@ export class UnsafeWebhookUrlError extends Error {
     super(message)
     this.name = 'UnsafeWebhookUrlError'
   }
-}
-
-/** Payload と timestamp を HMAC-SHA256 で署名します。 */
-export function createWebhookSignature(
-  signingSecret: string,
-  timestamp: number,
-  payload: string,
-) {
-  const digest = createHmac('sha256', signingSecret)
-    .update(`${timestamp}.${payload}`)
-    .digest('hex')
-  return `${WEBHOOK_SIGNATURE_VERSION}=${digest}`
 }
 
 /** Webhook signature を timing-safe に検証し、古い payload replay を拒否します。 */

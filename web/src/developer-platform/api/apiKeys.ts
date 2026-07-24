@@ -1,38 +1,20 @@
-import type { ApiKeySummary, ApiScope } from '@mukuroji/contracts'
+import type {
+  ApiKeyOneTimeSecretOutput,
+  ApiKeySummary,
+  CreateApiKeyInput,
+} from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { DeveloperPlatformApiError } from './errors'
 
 /**
- * API key 作成 API の入力です。
+ * Compatibility alias for the canonical API-key creation contract.
  */
-export type CreateDeveloperApiKeyInput = {
-  /**
-   * 管理画面で識別する API key 名です。
-   */
-  name: string
-  /**
-   * API key に付与する最小権限 scope です。
-   */
-  scopes: ApiScope[]
-  /**
-   * API key の有効期限を表す ISO 8601 timestamp です。
-   */
-  expiresAt?: string
-}
+export type CreateDeveloperApiKeyInput = CreateApiKeyInput
 
 /**
- * API key 作成または rotation 直後だけ返す one-time secret です。
+ * Compatibility alias for the canonical one-time API-key response.
  */
-export type IssuedApiKeySecret = {
-  /**
-   * 発行後の API key metadata です。
-   */
-  apiKey: ApiKeySummary
-  /**
-   * 一度だけ表示可能な API key secret です。
-   */
-  secret: string
-}
+export type IssuedApiKeySecret = ApiKeyOneTimeSecretOutput
 
 const developerApiBaseUrl = trimTrailingSlash(
   import.meta.env.VITE_WORKSPACE_API_BASE_URL ??

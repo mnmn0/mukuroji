@@ -2,7 +2,7 @@ import { useMemo } from 'react'
 import { useLocation } from 'react-router'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { Locale } from '../../shared/i18n/i18n'
-import { DeveloperPlatformPanelContainer } from './DeveloperPlatformPanel'
+import { DeveloperPlatformPanelContainer } from './DeveloperPlatformPanelContainer'
 import { createDeveloperPlatformLabels } from './labels'
 
 /**

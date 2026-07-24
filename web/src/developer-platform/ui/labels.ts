@@ -1,5 +1,5 @@
 import type { Locale } from '../../shared/i18n/i18n'
-import type { DeveloperPlatformLabels } from './DeveloperPlatformPanel'
+import type { DeveloperPlatformLabels } from './DeveloperPlatformView'
 
 /**
  * Developer Platform panel の日本語または英語 label set を作成します。

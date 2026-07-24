@@ -13,6 +13,7 @@ const serverModules = [
   'planning',
   'realtime',
   'request-intake',
+  'work-item-workflow',
   'work-items',
   'workspace-access',
   'workspace-search',
@@ -197,6 +198,18 @@ module.exports = {
       to: {
         path:
           '^server/src/(?:app/|handlers/)|^server/src/modules/[^/]+/adapter-in/',
+      },
+    },
+    {
+      name: 'server-automation-public-boundary',
+      comment: 'Server consumers outside Automation must use modules/automation/index.ts.',
+      severity: 'error',
+      from: {
+        path: '^server/src/',
+        pathNot: '^server/src/modules/automation/',
+      },
+      to: {
+        path: '^server/src/modules/automation/(?!index\\.ts$)',
       },
     },
     ...serverModuleBoundaryRules,

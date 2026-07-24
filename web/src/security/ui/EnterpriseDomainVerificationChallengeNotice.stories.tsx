@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { EnterpriseDomainVerificationChallengeNotice } from './EnterpriseSecurityPanel'
+import { EnterpriseDomainVerificationChallengeNotice } from './EnterpriseDomainVerificationChallengeNotice'
 import { enterpriseSecuritySnapshotFixture } from '../fixtures'
 
 /** EnterpriseDomainVerificationChallengeNotice の Storybook metadata です。 */

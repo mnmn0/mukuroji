@@ -12,9 +12,16 @@ import type { StoredConnectorSyncConflict } from './connector-sync-runtime'
 
 const NOW = '2026-07-18T00:00:00.000Z'
 
-function createMemoryDocumentClient() {
+/**
+ * Creates an observable in-memory DynamoDB document client for persistence tests.
+ *
+ * @param conditionalPutFailures - Number of version-comparison Put failures to inject.
+ * @returns The document client together with its stored items and recorded commands.
+ */
+function createMemoryDocumentClient(conditionalPutFailures = 0) {
   const items = new Map<string, Record<string, unknown>>()
   const commands: Array<{ name: string; input: Record<string, unknown> }> = []
+  let remainingConditionalPutFailures = conditionalPutFailures
   const itemKey = (
     tableName: unknown,
     value: {
@@ -40,6 +47,13 @@ function createMemoryDocumentClient() {
         const key = itemKey(input.TableName, item)
         const current = items.get(key)
         const condition = input.ConditionExpression
+        if (
+          condition === '#version = :expectedVersion' &&
+          remainingConditionalPutFailures > 0
+        ) {
+          remainingConditionalPutFailures -= 1
+          throw conditionalFailure()
+        }
         if (
           condition !== undefined &&
           condition !==
@@ -817,6 +831,32 @@ describe('DynamoDbConnectorSyncPersistence', () => {
       documentClient: createMemoryDocumentClient().documentClient,
       environment: { NODE_ENV: 'production' },
     })).toThrow('Connector sync cursor signing secret is required in production.')
+  })
+
+  test('bounds conflict claim retries after repeated CAS conflicts', async () => {
+    const memory = createMemoryDocumentClient(4)
+    const link = createLink()
+    seedLinkAndConnector(memory, link)
+    const persistence = new DynamoDbConnectorSyncPersistence({
+      tableName: 'DeveloperPlatformTable',
+      auditTableName: 'AuditEventsTable',
+      documentClient: memory.documentClient,
+      clock: () => new Date('2026-07-18T00:01:30.000Z'),
+    })
+    await persistence.createConflict(createConflict())
+
+    await expect(persistence.claimConflictResolution(
+      'workspace-1',
+      'conflict-1',
+      {
+        operationId: 'resolution-operation-1',
+        startedAt: '2026-07-18T00:01:00.000Z',
+      },
+    )).rejects.toMatchObject({
+      code: 'ConnectorSyncStateConflict',
+      retryable: true,
+    })
+    expect(memory.commands.filter(({ name }) => name === 'PutCommand')).toHaveLength(4)
   })
 
   test('persists and resolves conflicts with tenant isolation and audit events', async () => {

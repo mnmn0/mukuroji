@@ -12,10 +12,8 @@ import {
   createConnectorPollTargetRecordKey,
   createConnectorPollTargetShardLookupKey,
 } from './connector-poll-projection'
-import {
-  createDefaultSecretProtector,
-  type SecretProtector,
-} from './developer-platform'
+import type { SecretProtector } from './application/ports'
+import { createDefaultSecretProtector } from './adapter-out/shared/developer-platform-store'
 import { ConnectorRuntimeError } from './connector-oauth'
 import type {
   CommitConnectorPollCheckpointInput,

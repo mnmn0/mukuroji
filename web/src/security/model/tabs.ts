@@ -1,3 +1,5 @@
+import type { EnterpriseSecuritySnapshot } from '../api'
+
 /**
  * Enterprise identity と security policy の管理画面で選択できる tab です。
  */
@@ -14,6 +16,60 @@ export const enterpriseSecurityTabs = [
  * Enterprise identity と security policy の管理画面で選択できる tab です。
  */
 export type EnterpriseSecurityTab = (typeof enterpriseSecurityTabs)[number]
+
+/**
+ * Resolves the tabs visible under the current capability boundary.
+ *
+ * @param capabilities - Enterprise security capabilities, when loaded.
+ * @returns Visible tabs in their stable keyboard-navigation order.
+ */
+export function resolveVisibleEnterpriseSecurityTabs(
+  capabilities: EnterpriseSecuritySnapshot['capabilities'] | undefined,
+): EnterpriseSecurityTab[] {
+  if (!capabilities) {
+    return ['overview']
+  }
+
+  return enterpriseSecurityTabs.filter((tab) => {
+    if (tab === 'overview') {
+      return true
+    }
+
+    if (tab === 'identity') {
+      return capabilities.canViewIdentity
+    }
+
+    if (tab === 'provisioning') {
+      return capabilities.canViewProvisioning
+    }
+
+    if (tab === 'access') {
+      return capabilities.canViewAccess
+    }
+
+    if (tab === 'sessions') {
+      return capabilities.canViewSessions
+    }
+
+    return capabilities.canViewPrivileged
+  })
+}
+
+/**
+ * Falls back to overview when a requested tab is outside the capability boundary.
+ *
+ * @param requestedTab - Tab requested by the route or caller.
+ * @param capabilities - Enterprise security capabilities, when loaded.
+ * @returns The requested visible tab or overview.
+ */
+export function resolveVisibleEnterpriseSecurityTab(
+  requestedTab: EnterpriseSecurityTab,
+  capabilities: EnterpriseSecuritySnapshot['capabilities'] | undefined,
+): EnterpriseSecurityTab {
+  const visibleTabs = resolveVisibleEnterpriseSecurityTabs(capabilities)
+
+  return visibleTabs.includes(requestedTab) ? requestedTab : 'overview'
+}
 
 /**
  * URL query で受け取った Enterprise security tab を安全に解決します。

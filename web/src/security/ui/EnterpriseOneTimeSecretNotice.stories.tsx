@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { EnterpriseOneTimeSecretNotice } from './EnterpriseSecurityPanel'
+import { EnterpriseOneTimeSecretNotice } from './EnterpriseOneTimeSecretNotice'
 
 /** EnterpriseOneTimeSecretNotice の Storybook metadata です。 */
 const meta = {
