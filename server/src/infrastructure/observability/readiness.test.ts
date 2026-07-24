@@ -5,6 +5,7 @@ test('fails closed when any critical table configuration is missing', async () =
   const describedTables: string[] = []
   const probe = createDynamoDbReadinessProbe({
     environment: {
+      NODE_ENV: 'production',
       WORK_ITEMS_TABLE_NAME: 'work-items',
       WORKSPACE_ACCESS_TABLE_NAME: 'workspace-access',
     },
@@ -26,6 +27,51 @@ test('fails closed when any critical table configuration is missing', async () =
     ready: false,
   })
   expect(describedTables.sort()).toEqual(['work-items', 'workspace-access'])
+})
+
+test('uses adapter-compatible names and stable local table defaults', async () => {
+  const compatibilityTables: string[] = []
+  const compatibilityProbe = createDynamoDbReadinessProbe({
+    environment: {
+      AUDIT_EVENTS_TABLE_NAME: 'ignored-audit-events',
+      MUKUROJI_AUDIT_EVENTS_TABLE: 'audit-events',
+      MUKUROJI_TEAM_ISSUES_TABLE: 'work-items',
+      MUKUROJI_WORKSPACE_ACCESS_TABLE: 'workspace-access',
+      TEAM_ISSUES_TABLE_NAME: 'ignored-work-items',
+      WORKSPACE_ACCESS_TABLE_NAME: 'ignored-workspace-access',
+    },
+    describeTable: async (tableName) => {
+      compatibilityTables.push(tableName)
+      return {
+        globalSecondaryIndexesActive: true,
+        tableActive: true,
+      }
+    },
+  })
+  const localDefaultTables: string[] = []
+  const localDefaultProbe = createDynamoDbReadinessProbe({
+    environment: {},
+    describeTable: async (tableName) => {
+      localDefaultTables.push(tableName)
+      return {
+        globalSecondaryIndexesActive: true,
+        tableActive: true,
+      }
+    },
+  })
+
+  expect((await compatibilityProbe.check()).ready).toBeTrue()
+  expect(compatibilityTables).toEqual([
+    'work-items',
+    'workspace-access',
+    'audit-events',
+  ])
+  expect((await localDefaultProbe.check()).ready).toBeTrue()
+  expect(localDefaultTables).toEqual([
+    'mukuroji-team-issues-local',
+    'mukuroji-workspace-access-local',
+    'mukuroji-audit-events',
+  ])
 })
 
 test('checks configured dependencies with a bounded timeout and caches the result', async () => {

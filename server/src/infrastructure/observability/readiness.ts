@@ -113,14 +113,18 @@ const DEFAULT_TIMEOUT_MILLISECONDS = 1_500
 export function createDynamoDbReadinessProbe(
   options: DynamoDbReadinessProbeOptions = {},
 ): ReadinessProbe {
-  const environment = options.environment ?? loadServerConfig().environment
+  const serverConfig = loadServerConfig(options.environment)
+  const environment = serverConfig.environment
   const describeTable = options.describeTable ?? createDynamoDbTableDescriber()
   const now = options.now ?? Date.now
   const cacheMilliseconds =
     options.cacheMilliseconds ?? DEFAULT_CACHE_MILLISECONDS
   const timeoutMilliseconds =
     options.timeoutMilliseconds ?? DEFAULT_TIMEOUT_MILLISECONDS
-  const criticalTables = resolveCriticalTables(environment)
+  const criticalTables = resolveCriticalTables(
+    environment,
+    serverConfig.production,
+  )
   let cached: CachedReadiness | undefined
   let pending: Promise<ReadinessResult> | undefined
 
@@ -155,28 +159,36 @@ export function createDynamoDbReadinessProbe(
  * Resolves the three tables required for core request, authorization, and audit paths.
  *
  * @param environment - Untrusted runtime environment values.
+ * @param production - Whether missing explicit production table configuration must fail closed.
  * @returns Safe names paired with optional physical resource names.
  */
 function resolveCriticalTables(
   environment: ServerEnvironment,
+  production: boolean,
 ): readonly CriticalTable[] {
   return [
     {
       name: 'work-items',
       tableName: firstNonBlank(
-        environment.WORK_ITEMS_TABLE_NAME,
         environment.MUKUROJI_WORK_ITEMS_TABLE,
-        environment.TEAM_ISSUES_TABLE_NAME,
+        environment.WORK_ITEMS_TABLE_NAME,
         environment.MUKUROJI_TEAM_ISSUES_TABLE,
-      ),
+        environment.TEAM_ISSUES_TABLE_NAME,
+      ) ?? (production ? undefined : 'mukuroji-team-issues-local'),
     },
     {
       name: 'workspace-access',
-      tableName: firstNonBlank(environment.WORKSPACE_ACCESS_TABLE_NAME),
+      tableName: firstNonBlank(
+        environment.MUKUROJI_WORKSPACE_ACCESS_TABLE,
+        environment.WORKSPACE_ACCESS_TABLE_NAME,
+      ) ?? (production ? undefined : 'mukuroji-workspace-access-local'),
     },
     {
       name: 'audit-events',
-      tableName: firstNonBlank(environment.AUDIT_EVENTS_TABLE_NAME),
+      tableName: firstNonBlank(
+        environment.MUKUROJI_AUDIT_EVENTS_TABLE,
+        environment.AUDIT_EVENTS_TABLE_NAME,
+      ) ?? (production ? undefined : 'mukuroji-audit-events'),
     },
   ]
 }
