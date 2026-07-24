@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  isCanonicalWorkItemArchiveWindow,
   isCanonicalWorkItemDueDate,
   isCanonicalWorkItemRecord,
   isCanonicalWorkItemRelationIds,
@@ -195,5 +196,33 @@ describe('canonical Work Item validation', () => {
       archivedBy: 'archiver@example.com',
       updatedAt: '+010000-02-01T00:00:00.000Z',
     }))).toBe(true)
+  })
+
+  test('validates canonical archive windows as a domain rule', () => {
+    expect(isCanonicalWorkItemArchiveWindow(
+      '2026-07-01T09:00:00.000Z',
+      '2026-07-10T09:00:00.000Z',
+      '2026-07-12T09:00:00.000Z',
+    )).toBe(true)
+    expect(isCanonicalWorkItemArchiveWindow(
+      '2026-07-10T09:00:00.000Z',
+      '2026-07-01T09:00:00.000Z',
+      '2026-07-12T09:00:00.000Z',
+    )).toBe(false)
+    expect(isCanonicalWorkItemArchiveWindow(
+      '9999-12-31T23:59:59.999Z',
+      '+010000-02-01T00:00:00.000Z',
+      '+010000-01-01T00:00:00.000Z',
+    )).toBe(false)
+    expect(isCanonicalWorkItemArchiveWindow(
+      '2026-07-01T09:00:00Z',
+      '2026-07-10T09:00:00.000Z',
+      '2026-07-12T09:00:00.000Z',
+    )).toBe(false)
+    expect(isCanonicalWorkItemArchiveWindow(
+      '2026-07-01T09:00:00.000Z',
+      undefined,
+      '2026-07-12T09:00:00.000Z',
+    )).toBe(false)
   })
 })

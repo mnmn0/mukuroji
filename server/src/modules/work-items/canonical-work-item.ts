@@ -148,12 +148,12 @@ function hasCanonicalArchiveState(value: Record<string, unknown>) {
   if (value.archivedAt === undefined && value.archivedBy === undefined) {
     return true
   }
-  return isCanonicalUtcTimestamp(value.createdAt) &&
-    isCanonicalUtcTimestamp(value.updatedAt) &&
-    isCanonicalUtcTimestamp(value.archivedAt) &&
-    isNonEmptyString(value.archivedBy) &&
-    areUtcTimestampsChronological(value.createdAt, value.archivedAt) &&
-    areUtcTimestampsChronological(value.archivedAt, value.updatedAt)
+  return isNonEmptyString(value.archivedBy) &&
+    isCanonicalWorkItemArchiveWindow(
+      value.createdAt,
+      value.archivedAt,
+      value.updatedAt,
+    )
 }
 
 function isCanonicalCustomFieldValues(
@@ -239,6 +239,26 @@ export function isCanonicalWorkItemDueDate(value: unknown): value is string {
   return date.getUTCFullYear() === year &&
     date.getUTCMonth() === month - 1 &&
     date.getUTCDate() === day
+}
+
+/**
+ * Checks that canonical Work Item timestamps form one creation-to-archive-to-update window.
+ *
+ * @param createdAt - Candidate Work Item creation timestamp.
+ * @param archivedAt - Candidate Work Item archive timestamp.
+ * @param updatedAt - Candidate Work Item update timestamp.
+ * @returns True when all timestamps are canonical and chronologically ordered.
+ */
+export function isCanonicalWorkItemArchiveWindow(
+  createdAt: unknown,
+  archivedAt: unknown,
+  updatedAt: unknown,
+): boolean {
+  return isCanonicalUtcTimestamp(createdAt) &&
+    isCanonicalUtcTimestamp(archivedAt) &&
+    isCanonicalUtcTimestamp(updatedAt) &&
+    areUtcTimestampsChronological(createdAt, archivedAt) &&
+    areUtcTimestampsChronological(archivedAt, updatedAt)
 }
 
 /**
