@@ -23,6 +23,10 @@ export interface ServerConfig {
   readonly dynamoDbEndpoint: string | undefined
   /** Optional SQS endpoint, including the shared AWS endpoint fallback. */
   readonly sqsEndpoint: string | undefined
+  /** Optional Secrets Manager endpoint, including the shared AWS endpoint fallback. */
+  readonly secretsManagerEndpoint: string | undefined
+  /** Whether the validated Secrets Manager endpoint targets an explicit local emulator. */
+  readonly secretsManagerEndpointIsLocal: boolean
   /** Optional Cognito endpoint, including the local Bun default. */
   readonly cognitoEndpoint: string | undefined
   /** Browser origins accepted by the CORS middleware. */
@@ -50,6 +54,9 @@ const DEFAULT_ALLOWED_ORIGINS = [
 /** Local signing value retained for non-production development and tests. */
 const LOCAL_PUBLIC_API_CURSOR_SECRET = 'mukuroji-local-public-api-cursor-signing-secret'
 
+/** Explicit marker accepted for the repository's Floci AWS emulator runtime. */
+const LOCAL_AWS_RUNTIME_MARKER = 'floci'
+
 /**
  * Reads the live runtime environment without copying mutable process state.
  */
@@ -69,6 +76,7 @@ export function loadServerConfig(
   const production = environment.NODE_ENV === 'production' ||
     Boolean(environment.AWS_LAMBDA_FUNCTION_NAME) ||
     Boolean(environment.AWS_EXECUTION_ENV)
+  const awsRegion = environment.AWS_REGION ?? environment.AWS_DEFAULT_REGION ?? 'us-east-1'
   const configuredOrigins = (environment.ALLOWED_ORIGINS ?? '')
     .split(',')
     .map((origin) => origin.trim())
@@ -85,12 +93,25 @@ export function loadServerConfig(
     environment.AWS_ENDPOINT_URL_SQS,
     environment.AWS_ENDPOINT_URL,
   )
+  const configuredSecretsManagerEndpoint = firstNonBlank(
+    environment.SECRETS_MANAGER_ENDPOINT,
+    environment.AWS_ENDPOINT_URL_SECRETS_MANAGER,
+    environment.AWS_ENDPOINT_URL_SECRETSMANAGER,
+    environment.AWS_ENDPOINT_URL,
+  )
+  const secretsManagerEndpoint = configuredSecretsManagerEndpoint
+    ? validateSecretsManagerEndpoint(configuredSecretsManagerEndpoint, awsRegion, environment)
+    : undefined
 
   return Object.freeze({
     environment,
-    awsRegion: environment.AWS_REGION ?? environment.AWS_DEFAULT_REGION ?? 'us-east-1',
+    awsRegion,
     dynamoDbEndpoint,
     sqsEndpoint,
+    secretsManagerEndpoint,
+    secretsManagerEndpointIsLocal: secretsManagerEndpoint
+      ? isLocalSecretsManagerHostname(new URL(secretsManagerEndpoint).hostname)
+      : false,
     cognitoEndpoint: cognitoEndpoint?.trim()
       ? trimTrailingSlash(cognitoEndpoint.trim())
       : runtime.localBun
@@ -136,4 +157,105 @@ function firstNonBlank(...values: Array<string | undefined>): string | undefined
 /** Removes trailing slashes from endpoint URLs. */
 function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/, '')
+}
+
+/**
+ * Validates and normalizes a configured Secrets Manager endpoint.
+ *
+ * AWS endpoints must use the selected region's standard or FIPS hostname. Local
+ * HTTP endpoints require the explicit Floci marker and are never accepted when
+ * `NODE_ENV=production`.
+ */
+function validateSecretsManagerEndpoint(
+  value: string,
+  awsRegion: string,
+  environment: ServerEnvironment,
+): string {
+  let endpoint: URL
+  try {
+    endpoint = new URL(value)
+  } catch {
+    throw new TypeError('Secrets Manager endpoint must be a valid absolute URL.')
+  }
+
+  if (
+    endpoint.username ||
+    endpoint.password ||
+    endpoint.pathname !== '/' ||
+    endpoint.search ||
+    endpoint.hash
+  ) {
+    throw new TypeError(
+      'Secrets Manager endpoint must not include credentials, a path, a query, or a fragment.',
+    )
+  }
+
+  if (isLocalSecretsManagerHostname(endpoint.hostname)) {
+    if (
+      endpoint.protocol !== 'http:' ||
+      environment.MUKUROJI_LOCAL_AWS_RUNTIME !== LOCAL_AWS_RUNTIME_MARKER ||
+      environment.NODE_ENV === 'production'
+    ) {
+      throw new TypeError(
+        'Local Secrets Manager endpoints require MUKUROJI_LOCAL_AWS_RUNTIME=floci outside NODE_ENV=production.',
+      )
+    }
+    return endpoint.origin
+  }
+
+  if (
+    endpoint.protocol !== 'https:' ||
+    hasExplicitPort(value) ||
+    !isRegionBoundAwsSecretsManagerHostname(endpoint.hostname, awsRegion)
+  ) {
+    throw new TypeError(
+      'Secrets Manager endpoint must use the configured AWS region standard or FIPS HTTPS hostname.',
+    )
+  }
+
+  return endpoint.origin
+}
+
+/** Returns whether an absolute URL spells out a port in its authority component. */
+function hasExplicitPort(value: string): boolean {
+  const authorityStart = value.indexOf('://') + 3
+  const authorityEndOffset = value.slice(authorityStart).search(/[/?#]/)
+  const authorityEnd = authorityEndOffset === -1
+    ? value.length
+    : authorityStart + authorityEndOffset
+  const authority = value.slice(authorityStart, authorityEnd)
+  const hostAndPort = authority.slice(authority.lastIndexOf('@') + 1)
+
+  if (hostAndPort.startsWith('[')) {
+    return hostAndPort.indexOf(']') !== hostAndPort.length - 1
+  }
+  return hostAndPort.includes(':')
+}
+
+/** Returns whether a hostname is an explicitly supported local AWS emulator host. */
+function isLocalSecretsManagerHostname(hostname: string): boolean {
+  return [
+    'localhost',
+    '127.0.0.1',
+    '[::1]',
+    'floci',
+    'localstack',
+  ].includes(hostname)
+}
+
+/** Returns whether a hostname is an exact regional AWS Secrets Manager endpoint. */
+function isRegionBoundAwsSecretsManagerHostname(
+  hostname: string,
+  awsRegion: string,
+): boolean {
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)+-[0-9]+$/.test(awsRegion)) {
+    return false
+  }
+
+  return [
+    `secretsmanager.${awsRegion}.amazonaws.com`,
+    `secretsmanager-fips.${awsRegion}.amazonaws.com`,
+    `secretsmanager.${awsRegion}.amazonaws.com.cn`,
+    `secretsmanager-fips.${awsRegion}.amazonaws.com.cn`,
+  ].includes(hostname)
 }

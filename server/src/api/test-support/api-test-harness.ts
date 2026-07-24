@@ -54,7 +54,7 @@ import {
   type AutomationClient,
   type AutomationInboundWebhookEndpointRecord,
   type AutomationInboundWebhookProvisioning,
-} from '../../modules/automation/automation'
+} from '../../modules/automation'
 import {
   DEFAULT_WORK_ITEM_CONFIGURATION,
   type WorkItemConfigurationClient,
@@ -180,7 +180,7 @@ function createBulkOperationAutomationFake(initialOperation?: BulkOperation) {
       async saveBulkOperation(operation: BulkOperation, expectedRevision: number) {
         if (!storedOperation || storedOperation.revision !== expectedRevision) {
           throw new AutomationError(
-            409,
+            'conflict',
             'BulkOperationRevisionConflict',
             'Bulk operation was modified concurrently.',
           )

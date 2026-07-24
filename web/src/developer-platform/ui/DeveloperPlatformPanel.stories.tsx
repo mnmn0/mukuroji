@@ -1,6 +1,13 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, userEvent, within } from 'storybook/test'
+import {
+  expect,
+  fireEvent,
+  userEvent,
+  waitFor,
+  within,
+} from 'storybook/test'
 import { DeveloperPlatformPanel } from './DeveloperPlatformPanel'
+import type { ImportDryRunReport } from '@mukuroji/contracts'
 import {
   connectorConflictDeveloperPlatformResourcesFixture,
   deliveryFailureDeveloperPlatformResourcesFixture,
@@ -17,6 +24,50 @@ import {
   readOnlyDeveloperPlatformResourcesFixture,
   successfulImportDryRunReportFixture,
 } from '../fixtures'
+import type { DryRunDeveloperImportInput } from '../model/transfers'
+
+const staleImportDryRunInputs: DryRunDeveloperImportInput[] = []
+let resolveStaleImportDryRun:
+  | ((report: ImportDryRunReport) => void)
+  | undefined
+
+/** Releases a pending stale import dry-run response, if one exists. */
+function releaseStaleImportDryRun() {
+  const resolve = resolveStaleImportDryRun
+
+  resolveStaleImportDryRun = undefined
+  resolve?.(successfulImportDryRunReportFixture)
+}
+
+/** Resets recorded inputs and releases a request left by a prior render. */
+function resetStaleImportDryRunScenario() {
+  releaseStaleImportDryRun()
+  staleImportDryRunInputs.length = 0
+}
+
+/**
+ * Records an import dry-run and defers its response.
+ *
+ * @param input - Import input captured when the request starts.
+ * @returns A response Promise controlled by the story.
+ */
+function runStaleImportDryRunScenario(
+  input: DryRunDeveloperImportInput,
+) {
+  staleImportDryRunInputs.push(input)
+
+  return new Promise<ImportDryRunReport>((resolve) => {
+    resolveStaleImportDryRun = resolve
+  })
+}
+
+/**
+ * Returns the shared successful import dry-run fixture.
+ */
+const successfulImportDryRunHandler: (
+  input: DryRunDeveloperImportInput,
+) => Promise<ImportDryRunReport> = async () =>
+  successfulImportDryRunReportFixture
 
 /**
  * DeveloperPlatformPanel の Storybook metadata です。
@@ -59,8 +110,7 @@ const meta = {
     onCreateOAuthApp: async () => issuedOAuthClientSecretFixture,
     onCreateWebhook: async () => issuedWebhookSigningSecretFixture,
     onDisconnectConnector: async () => undefined,
-    onDryRunImport: async () =>
-      successfulImportDryRunReportFixture,
+    onDryRunImport: successfulImportDryRunHandler,
     onExport: async () => undefined,
     onReauthorizeConnector: async () => undefined,
     onReplayDelivery: async () => undefined,
@@ -132,12 +182,11 @@ export const ReadOnly: Story = {
 export const SecretIssued: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
+    const createApiKeyButton = canvas.getByRole('button', {
+      name: developerPlatformLabelsFixture.actions.createApiKey,
+    })
 
-    await userEvent.click(
-      canvas.getByRole('button', {
-        name: developerPlatformLabelsFixture.actions.createApiKey,
-      }),
-    )
+    await userEvent.click(createApiKeyButton)
     const editor = within(
       canvas.getByRole('dialog', {
         name: developerPlatformLabelsFixture.headings['create-api-key'],
@@ -184,6 +233,29 @@ export const SecretIssued: Story = {
         name: developerPlatformLabelsFixture.closeDialog,
       }),
     ).toBeDisabled()
+    await userEvent.click(
+      canvas.getByRole('checkbox', {
+        name: developerPlatformLabelsFixture.secretStoredConfirmation,
+      }),
+    )
+    await expect(
+      canvas.getByRole('button', {
+        name: developerPlatformLabelsFixture.closeDialog,
+      }),
+    ).toBeEnabled()
+    await userEvent.click(
+      canvas.getByRole('button', {
+        name: developerPlatformLabelsFixture.closeDialog,
+      }),
+    )
+    await waitFor(() => {
+      expect(
+        canvas.queryByRole('dialog', {
+          name: developerPlatformLabelsFixture.secretTitles['api-key'],
+        }),
+      ).not.toBeInTheDocument()
+      expect(createApiKeyButton).toHaveFocus()
+    })
   },
 }
 
@@ -269,13 +341,18 @@ export const ConnectorConflict: Story = {
       canvas.getByRole('button', {
         name: developerPlatformLabelsFixture.actions.resolve,
       }),
-    ).toBeEnabled()
+    ).toBeDisabled()
     await userEvent.selectOptions(
       canvas.getByRole('combobox', {
         name: developerPlatformLabelsFixture.fields.conflictResolution,
       }),
       'merge',
     )
+    await expect(
+      canvas.getByRole('button', {
+        name: developerPlatformLabelsFixture.actions.resolve,
+      }),
+    ).toBeEnabled()
     await expect(
       canvas.getByRole('group', {
         name: developerPlatformLabelsFixture.fields.mergedValues,
@@ -341,6 +418,86 @@ export const ImportDryRunError: Story = {
     initialSection: 'imports',
     resources:
       importDryRunErrorDeveloperPlatformResourcesFixture,
+  },
+}
+
+/**
+ * A stale dry-run response cannot restore validation after import input changes.
+ */
+export const StaleImportDryRunIgnored: Story = {
+  args: {
+    initialSection: 'imports',
+    resources: {
+      ...developerPlatformResourcesFixture,
+      imports: [],
+    },
+    onDryRunImport: runStaleImportDryRunScenario,
+  },
+  beforeEach: () => {
+    resetStaleImportDryRunScenario()
+    return releaseStaleImportDryRun
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await userEvent.click(
+      canvas.getByRole('button', {
+        name: developerPlatformLabelsFixture.actions.addMapping,
+      }),
+    )
+    await userEvent.type(
+      canvas.getByRole('textbox', {
+        name: developerPlatformLabelsFixture.fields.sourceField,
+      }),
+      'Title',
+    )
+    await userEvent.selectOptions(
+      canvas.getByRole('combobox', {
+        name: developerPlatformLabelsFixture.fields.targetField,
+      }),
+      'title',
+    )
+    await userEvent.upload(
+      canvas.getByLabelText(
+        developerPlatformLabelsFixture.fields.importFile,
+      ),
+      new File(['Title\nShip the stable API'], 'work-items.csv', {
+        type: 'text/csv',
+      }),
+    )
+    const dryRunButton = canvas.getByRole('button', {
+      name: developerPlatformLabelsFixture.actions.dryRun,
+    })
+    const importForm = dryRunButton.closest('form')
+
+    if (!importForm) {
+      throw new Error('Import form was not rendered.')
+    }
+    fireEvent.submit(importForm)
+    await waitFor(() => {
+      expect(staleImportDryRunInputs).toHaveLength(1)
+      expect(dryRunButton).toBeDisabled()
+    })
+
+    const jsonFormatLabel = canvas.getByText(
+      developerPlatformLabelsFixture.headings['source-json'],
+    )
+    const jsonFormatButton = jsonFormatLabel.closest('button')
+
+    if (!jsonFormatButton) {
+      throw new Error('JSON import format button was not rendered.')
+    }
+    await userEvent.click(jsonFormatButton)
+    releaseStaleImportDryRun()
+
+    await waitFor(() => {
+      expect(dryRunButton).toBeEnabled()
+      expect(
+        canvas.queryByRole('button', {
+          name: developerPlatformLabelsFixture.actions.commitImport,
+        }),
+      ).not.toBeInTheDocument()
+    })
   },
 }
 

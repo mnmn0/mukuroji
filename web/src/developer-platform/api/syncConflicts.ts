@@ -1,9 +1,14 @@
-import type { CursorPage, SyncConflictStatus, WorkItemSyncConflict } from '@mukuroji/contracts'
+import type {
+  CursorPage,
+  ResolveWorkItemSyncConflictInput,
+  SyncConflictStatus,
+  WorkItemSyncConflict,
+} from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { DeveloperPlatformApiError } from './errors'
 
 /**
- * Connector 競合の解決方針です。
+ * Compatibility resolution names used by the existing Web client.
  */
 export type DeveloperSyncConflictResolution =
   | 'keep-local'
@@ -12,20 +17,14 @@ export type DeveloperSyncConflictResolution =
   | 'ignore'
 
 /**
- * Work Item 同期競合を解決する入力です。
+ * Compatibility input that includes the conflict path identifier.
  */
 export type ResolveDeveloperSyncConflictInput = {
-  /**
-   * 一覧 API が返した同期競合 ID です。
-   */
+  /** Identifier of the conflict being resolved. */
   conflictId: string
-  /**
-   * 競合した変更を収束させる方針です。
-   */
+  /** Resolution selected by the user. */
   resolution: DeveloperSyncConflictResolution
-  /**
-   * Merge 解決で field ごとに採用する JSON value です。
-   */
+  /** Optional field values supplied for a merge resolution. */
   mergedValues?: Record<string, unknown>
 }
 
@@ -103,22 +102,25 @@ export function resolveDeveloperSyncConflict(
   input: ResolveDeveloperSyncConflictInput,
   mutationContext: MutationRequestContext,
 ) {
+  const resolution: ResolveWorkItemSyncConflictInput['resolution'] =
+    input.resolution === 'keep-local'
+      ? 'use-local'
+      : input.resolution === 'keep-remote'
+        ? 'use-external'
+        : input.resolution
+  const requestBody: ResolveWorkItemSyncConflictInput = {
+    resolution,
+    ...(resolution === 'merge'
+      ? { mergedValues: input.mergedValues }
+      : {}),
+  }
+
   return requestJson<WorkItemSyncConflict>(
     `/developer/sync-conflicts/${encodeURIComponent(input.conflictId)}/resolve`,
     accessToken,
     createJsonMutation(
       'POST',
-      {
-        resolution:
-          input.resolution === 'keep-local'
-            ? 'use-local'
-            : input.resolution === 'keep-remote'
-              ? 'use-external'
-              : input.resolution,
-        ...(input.resolution === 'merge'
-          ? { mergedValues: input.mergedValues }
-          : {}),
-      },
+      requestBody,
       mutationContext,
     ),
   )

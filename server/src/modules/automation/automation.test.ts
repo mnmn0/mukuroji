@@ -10,12 +10,12 @@ import {
   type RecurringWork,
 } from '@mukuroji/contracts'
 import {
-  AutomationEngine,
   AutomationError,
   DynamoDbAutomationClient,
   applyBulkOperation,
   createAutomationActionId,
   createAutomationExecutionId,
+  createPendingAutomationExecution,
   createRecurringExecutionId,
   ensureLocalAutomationTable,
   evaluateAutomationCondition,
@@ -29,10 +29,12 @@ import {
   validateCreateAutomationRuleInput,
   validateCreateAutomationTemplateInput,
   type AutomationClient,
+  type AutomationErrorCategory,
   type AutomationEvent,
   type AutomationExecutionClaimToken,
   type BulkOperationAdapter,
 } from './automation'
+import { AutomationEngine } from './application/execution-service'
 
 function createRule(overrides: Partial<AutomationRule> = {}): AutomationRule {
   return {
@@ -206,29 +208,16 @@ function createMemoryClient(forceRateLimited = false) {
       executions.set(execution.id, structuredClone(execution))
       return true
     },
-    async reserveExecution(rule: AutomationRule, event: AutomationEvent, now: Date) {
+    async reserveExecution(
+      execution: AutomationExecution,
+      event: AutomationEvent,
+      rule: AutomationRule,
+    ) {
       if (forceRateLimited) return 'rate-limited' as const
-      const id = createAutomationExecutionId(rule, event.eventId)
+      const id = execution.id
       if (executions.has(id)) return 'duplicate' as const
       rules.set(`${rule.id}\0${rule.version}`, structuredClone(rule))
-      executions.set(id, {
-        schemaVersion: AUTOMATION_SCHEMA_VERSION,
-        id,
-        workspaceId: rule.workspaceId,
-        ruleId: rule.id,
-        ruleVersion: rule.version,
-        triggerEventId: event.eventId,
-        status: 'pending',
-        attempts: 0,
-        actions: rule.actions.map((_action, actionIndex) => ({
-          actionIndex,
-          actionId: createAutomationActionId(id, actionIndex),
-          status: 'pending',
-          attempts: 0,
-        })),
-        startedAt: now.toISOString(),
-        retryable: false,
-      })
+      executions.set(id, structuredClone(execution))
       events.set(id, structuredClone(event))
       return 'created' as const
     },
@@ -351,7 +340,7 @@ describe('automation management create idempotency', () => {
       ...input,
       name: 'Different request',
     }, 'create-rule-1')).rejects.toMatchObject({
-      status: 409,
+      category: 'conflict',
       code: 'IdempotencyConflict',
     })
   })
@@ -708,7 +697,7 @@ test('fails closed when current-list pagination repeats the same cursor', async 
   await expect(client.listRules('workspace-1')).rejects.toMatchObject({
     code: 'AutomationPaginationCursorLoop',
     retryable: true,
-    status: 503,
+    category: 'unavailable',
   })
   expect(queryCalls).toBe(2)
 })
@@ -766,7 +755,7 @@ test('claims only one template application runner and binds atomic completion to
   expect([first, second].filter(Boolean)).toHaveLength(1)
   const claimed = (first ?? second)!
   expect(claimed).toMatchObject({ status: 'running', revision: 2, runnerLeaseExpiresAt: leaseExpiresAt })
-  const completion = client.createTemplateApplicationCompletionTransactItem(claimed, {
+  const completion = client.createTemplateApplicationCompletionMutation(claimed, {
     kind: 'project',
     teamId: 'core',
     projectId: claimed.id,
@@ -992,6 +981,50 @@ describe('automation execution safety', () => {
       .toMatchObject({ status: 'dead-letter', nextRetryAt: undefined })
   })
 
+  test('preserves legacy Automation error status while classifying transport-neutral categories', () => {
+    const mappings: Array<[AutomationErrorCategory, number]> = [
+      ['invalid-input', 400],
+      ['unauthenticated', 401],
+      ['forbidden', 403],
+      ['not-found', 404],
+      ['conflict', 409],
+      ['payload-too-large', 413],
+      ['unsupported-media-type', 415],
+      ['unprocessable', 422],
+      ['locked', 423],
+      ['rate-limited', 429],
+      ['unavailable', 503],
+    ]
+
+    for (const [category, status] of mappings) {
+      expect(new AutomationError(category, 'MappedFailure', 'Mapped failure.'))
+        .toMatchObject({ category, status, retryable: false })
+      expect(new AutomationError(status, 'LegacyFailure', 'Legacy failure.'))
+        .toMatchObject({ category, status, retryable: false })
+    }
+
+    expect(new AutomationError(418, 'UnknownLegacyFailure', 'Unknown legacy failure.'))
+      .toMatchObject({
+        category: 'unavailable',
+        status: 418,
+        retryable: false,
+      })
+    expect(normalizeAutomationActionFailure(
+      new AutomationError(418, 'UnknownLegacyFailure', 'Unknown legacy failure.'),
+    )).toEqual({
+      code: 'UnknownLegacyFailure',
+      message: 'Unknown legacy failure.',
+      retryable: false,
+    })
+    expect(normalizeAutomationActionFailure(
+      new AutomationError(503, 'LegacyTransientFailure', 'Legacy transient failure.'),
+    )).toEqual({
+      code: 'LegacyTransientFailure',
+      message: 'Legacy transient failure.',
+      retryable: true,
+    })
+  })
+
   test('redacts untrusted action failure details before they reach durable history', () => {
     const secret = 'outbound-secret-value'
     const awsFailure = Object.assign(new Error(`Request exposed ${secret}.`), {
@@ -1019,7 +1052,7 @@ describe('automation execution safety', () => {
     expect(JSON.stringify(untrustedCodeFailure)).not.toContain(secret)
 
     expect(normalizeAutomationActionFailure(
-      new AutomationError(409, 'TrustedAutomationFailure', 'Safe domain message.'),
+      new AutomationError('conflict', 'TrustedAutomationFailure', 'Safe domain message.'),
     )).toEqual({
       code: 'TrustedAutomationFailure',
       message: 'Safe domain message.',
@@ -1595,11 +1628,13 @@ describe('automation execution safety', () => {
     } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
     const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
     const rule = createRule({ rateLimit: { maxExecutions: 2, windowSeconds: 60 } })
+    const event = createEvent()
+    const now = new Date('2026-07-16T00:00:30.000Z')
 
     const result = await client.reserveExecution(
+      createPendingAutomationExecution(rule, event, now),
+      event,
       rule,
-      createEvent(),
-      new Date('2026-07-16T00:00:30.000Z'),
     )
 
     expect(result).toBe('created')
@@ -1710,11 +1745,13 @@ describe('automation execution safety', () => {
       },
     } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
     const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+    const event = createEvent()
+    const now = new Date('2026-07-16T00:00:30.000Z')
 
     expect(await client.reserveExecution(
+      createPendingAutomationExecution(rule, event, now),
+      event,
       rule,
-      createEvent(),
-      new Date('2026-07-16T00:00:30.000Z'),
     )).toBe('stale-definition')
 
     let actionExecutions = 0
@@ -1866,7 +1903,7 @@ describe('automation execution safety', () => {
     client.claimExecution = async (execution, now, leaseExpiresAt) => {
       if (failBeforeAction) {
         failBeforeAction = false
-        throw new AutomationError(503, 'TemporaryPersistenceFailure', 'Retry delivery.', true)
+        throw new AutomationError('unavailable', 'TemporaryPersistenceFailure', 'Retry delivery.', true)
       }
       return await originalClaimExecution(execution, now, leaseExpiresAt)
     }
@@ -1915,7 +1952,7 @@ describe('automation execution safety', () => {
       async execute(_action, context) {
         calls[context.actionIndex] = (calls[context.actionIndex] ?? 0) + 1
         if (context.actionIndex === 1 && calls[1] === 1) {
-          throw new AutomationError(503, 'TemporaryActionFailure', 'Try again.', true)
+          throw new AutomationError('unavailable', 'TemporaryActionFailure', 'Try again.', true)
         }
       },
     })
@@ -1937,12 +1974,60 @@ describe('automation execution safety', () => {
     expect(calls).toEqual([1, 2])
   })
 
+  test('clears stale action failure metadata when recovering a successful receipt', async () => {
+    const client = createMemoryClient()
+    const rule = createRule({ actions: [{ type: 'comment', body: 'Already delivered' }] })
+    const event = createEvent()
+    const execution = createExecution()
+    const actionId = execution.actions[0]!.actionId
+    execution.actions[0] = {
+      actionIndex: 0,
+      actionId,
+      status: 'failed',
+      attempts: 1,
+      startedAt: '2026-07-16T00:00:00.000Z',
+      errorCode: 'StaleActionFailure',
+      errorMessage: 'This failure was persisted before the receipt was recovered.',
+    }
+    client.rules.set(`${rule.id}\0${rule.version}`, rule)
+    client.executions.set(execution.id, structuredClone(execution))
+    client.events.set(execution.id, structuredClone(event))
+    client.receipts.add(`${execution.id}\0${actionId}`)
+    let calls = 0
+    const engine = new AutomationEngine(client, {
+      async execute() {
+        calls += 1
+      },
+    })
+
+    const recovered = await engine.retryExecution(
+      execution.workspaceId,
+      execution.id,
+      undefined,
+      new Date('2026-07-16T00:02:00.000Z'),
+    )
+    const recoveredAction = recovered.actions[0]
+
+    expect(calls).toBe(0)
+    expect(recovered).toMatchObject({
+      status: 'succeeded',
+      errorCode: undefined,
+      errorMessage: undefined,
+    })
+    expect(recoveredAction).toMatchObject({
+      status: 'succeeded',
+      errorCode: undefined,
+      errorMessage: undefined,
+    })
+    expect(recoveredAction?.completedAt).toEqual(expect.any(String))
+  })
+
   test('prevents loops/rate overflow and dead-letters exhausted failures', async () => {
     let calls = 0
     const executor = {
       async execute() {
         calls += 1
-        throw new AutomationError(503, 'StillFailing', 'Still failing.', true)
+        throw new AutomationError('unavailable', 'StillFailing', 'Still failing.', true)
       },
     }
     const rule = createRule({
@@ -2208,7 +2293,7 @@ test('creates bulk operations once and checkpoints them with revision CAS', asyn
   expect(await conflictingClient.createBulkOperation(createBulkOperationFixture())).toBe(false)
   await expect(conflictingClient.saveBulkOperation(operation, 1)).rejects.toMatchObject({
     code: 'BulkOperationRevisionConflict',
-    status: 409,
+    category: 'conflict',
   })
 })
 
@@ -2241,7 +2326,7 @@ test('keeps bulk partial failures across retry and safe undo', async () => {
     async saveBulkOperation(operation: BulkOperation, expectedRevision: number) {
       expectedRevisions.push(expectedRevision)
       if (persistedRevision !== expectedRevision) {
-        throw new AutomationError(409, 'BulkOperationRevisionConflict', 'Bulk operation revision does not match.')
+        throw new AutomationError('conflict', 'BulkOperationRevisionConflict', 'Bulk operation revision does not match.')
       }
       persistedRevision = operation.revision
       persistedOperation = structuredClone(operation)
@@ -2255,7 +2340,7 @@ test('keeps bulk partial failures across retry and safe undo', async () => {
     async apply(_request, itemIndex) {
       attempts[itemIndex] = (attempts[itemIndex] ?? 0) + 1
       if (itemIndex === 1 && attempts[itemIndex] === 1) {
-        throw new AutomationError(503, 'TemporaryBulkFailure', 'Retry item.', true)
+        throw new AutomationError('unavailable', 'TemporaryBulkFailure', 'Retry item.', true)
       }
       return {
         resultingRevision: itemIndex + 10,
@@ -2315,7 +2400,10 @@ test('rejects unsafe Bulk edit fields before previewing any item', async () => {
     workspaceId: 'workspace-1',
     items: [{ teamId: 'core', workItemId: 'one', expectedRevision: 1 }],
     action: { type: 'edit', patch: { archivedAt: '2026-07-16T00:00:00.000Z' } },
-  }, adapter)).rejects.toMatchObject({ code: 'InvalidAutomationInput', status: 400 })
+  }, adapter)).rejects.toMatchObject({
+    category: 'invalid-input',
+    code: 'InvalidAutomationInput',
+  })
   expect(previewCalls).toBe(0)
 })
 
@@ -2377,7 +2465,7 @@ test('deduplicates concurrent and replayed bulk apply requests by operation toke
     },
     async saveBulkOperation(operation: BulkOperation, expectedRevision: number) {
       if (!stored || stored.revision !== expectedRevision) {
-        throw new AutomationError(409, 'BulkOperationRevisionConflict', 'Bulk operation revision does not match.')
+        throw new AutomationError('conflict', 'BulkOperationRevisionConflict', 'Bulk operation revision does not match.')
       }
       stored = structuredClone(operation)
     },
@@ -2439,12 +2527,12 @@ test('resumes a bulk apply from the last durable item checkpoint', async () => {
     },
     async saveBulkOperation(operation: BulkOperation, expectedRevision: number) {
       if (!stored || stored.revision !== expectedRevision) {
-        throw new AutomationError(409, 'BulkOperationRevisionConflict', 'Bulk operation revision does not match.')
+        throw new AutomationError('conflict', 'BulkOperationRevisionConflict', 'Bulk operation revision does not match.')
       }
       stored = structuredClone(operation)
       if (failAfterFirstItem && operation.items[0]?.status === 'succeeded' && operation.items[1]?.status === 'ready') {
         failAfterFirstItem = false
-        throw new AutomationError(503, 'CheckpointResponseLost', 'Checkpoint response was lost.', true)
+        throw new AutomationError('unavailable', 'CheckpointResponseLost', 'Checkpoint response was lost.', true)
       }
     },
   } as AutomationClient
@@ -2584,6 +2672,43 @@ test('does not mark Bulk permission or conflict failures as retryable', async ()
   expect(applyCalls).toBe(1)
 })
 
+test('rejects incomplete durable Bulk checkpoints before retry or undo side effects', async () => {
+  let applyCalls = 0
+  let undoCalls = 0
+  const adapter: BulkOperationAdapter = {
+    async preview() {
+      return { allowed: true }
+    },
+    async apply() {
+      applyCalls += 1
+      return { resultingRevision: 20 }
+    },
+    async undo() {
+      undoCalls += 1
+      return { resultingRevision: 21 }
+    },
+  }
+  const retryOperation = createBulkOperationFixture()
+  const undoOperation = createBulkOperationFixture()
+  retryOperation.items.length += 1
+  undoOperation.items.length += 1
+
+  await expect(retryBulkOperation(retryOperation, adapter))
+    .rejects.toMatchObject({
+      category: 'unavailable',
+      code: 'BulkOperationInvalid',
+    })
+  await expect(undoBulkOperation(undoOperation, adapter))
+    .rejects.toMatchObject({
+      category: 'unavailable',
+      code: 'BulkOperationInvalid',
+    })
+
+  expect({ applyCalls, undoCalls }).toEqual({ applyCalls: 0, undoCalls: 0 })
+  expect(retryOperation.status).toBe('partial')
+  expect(undoOperation.status).toBe('partial')
+})
+
 test('rejects one of concurrent bulk retry and undo mutations with 409', async () => {
   let stored = createBulkOperationFixture({ revision: 7 })
   let applyCalls = 0
@@ -2592,7 +2717,7 @@ test('rejects one of concurrent bulk retry and undo mutations with 409', async (
     async saveBulkOperation(operation: BulkOperation, expectedRevision: number) {
       await Promise.resolve()
       if (stored.revision !== expectedRevision) {
-        throw new AutomationError(409, 'BulkOperationRevisionConflict', 'Bulk operation revision does not match.')
+        throw new AutomationError('conflict', 'BulkOperationRevisionConflict', 'Bulk operation revision does not match.')
       }
       stored = structuredClone(operation)
     },
@@ -2623,7 +2748,7 @@ test('rejects one of concurrent bulk retry and undo mutations with 409', async (
   expect(fulfilled).toHaveLength(1)
   expect(rejected).toHaveLength(1)
   expect(rejected[0]).toMatchObject({
-    reason: { code: 'BulkOperationRevisionConflict', status: 409 },
+    reason: { category: 'conflict', code: 'BulkOperationRevisionConflict' },
   })
   expect(applyCalls + undoCalls).toBe(1)
   expect(stored.revision).toBeGreaterThan(7)
