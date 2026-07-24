@@ -8,6 +8,7 @@ const {
   createAccessToken,
   createCognitoSdkTestError,
   createFakeAuthTokenSet,
+  createWorkspaceAccessFake,
   expectStableWorkspaceMutationAuditContexts,
   resetTestApp,
   setTestAppDependencies,
@@ -784,6 +785,7 @@ test('cleans invitation-owned claims when revoking a pre-existing Cognito identi
       Parameters<typeof setTestAppDependencies>[0]['cognito']
     >,
     workspaceAccess: {
+      ...createWorkspaceAccessFake(),
       async getActiveMember(_workspaceId: string, memberKey: string) {
         return {
           id: memberKey,
@@ -797,9 +799,9 @@ test('cleans invitation-owned claims when revoking a pre-existing Cognito identi
         }
       },
       async revokeInvitation(
-        _workspaceId: string,
-        _actorMemberKey: string,
-        invitationId: string,
+        _workspaceId,
+        _actorMemberKey,
+        invitationId,
         auditContext,
       ) {
         auditContexts.push({ stage: 'revokeInvitation', context: auditContext })
@@ -822,9 +824,9 @@ test('cleans invitation-owned claims when revoking a pre-existing Cognito identi
         }
       },
       async clearInvitationCleanupFailure(
-        _workspaceId: string,
-        invitationId: string,
-        expectedVersion: number,
+        _workspaceId,
+        invitationId,
+        expectedVersion,
         auditContext,
       ) {
         auditContexts.push({ stage: 'clearInvitationCleanupFailure', context: auditContext })
@@ -846,7 +848,7 @@ test('cleans invitation-owned claims when revoking a pre-existing Cognito identi
           updatedAt: '2026-07-11T00:00:00.000Z',
         }
       },
-    } as unknown as WorkspaceAccessClient,
+    },
   })
 
   const response = await app.request(
@@ -906,6 +908,7 @@ test('persists manual cleanup when stable Cognito mutation is unavailable', asyn
       Parameters<typeof setTestAppDependencies>[0]['cognito']
     >,
     workspaceAccess: {
+      ...createWorkspaceAccessFake(),
       async getActiveMember(_workspaceId: string, memberKey: string) {
         return {
           id: memberKey,
@@ -918,7 +921,11 @@ test('persists manual cleanup when stable Cognito mutation is unavailable', asyn
           updatedAt: '2026-07-11T00:00:00.000Z',
         }
       },
-      async revokeInvitation(_workspaceId, _actorMemberKey, invitationId) {
+      async revokeInvitation(
+        _workspaceId,
+        _actorMemberKey,
+        invitationId,
+      ) {
         return {
           id: invitationId,
           email: invitationId,
@@ -937,7 +944,11 @@ test('persists manual cleanup when stable Cognito mutation is unavailable', asyn
           failureMessage: 'Cognito cleanup is pending and can be retried safely.',
         }
       },
-      async markInvitationManualCleanupRequired(_workspaceId, invitationId, expectedVersion) {
+      async markInvitationManualCleanupRequired(
+        _workspaceId,
+        invitationId,
+        expectedVersion,
+      ) {
         manualMarkers += 1
         return {
           id: invitationId,
@@ -959,7 +970,7 @@ test('persists manual cleanup when stable Cognito mutation is unavailable', asyn
         cleanupCompletions += 1
         throw new Error('Manual cleanup must not be marked complete automatically.')
       },
-    } as unknown as WorkspaceAccessClient,
+    },
   })
 
   const response = await app.request(
@@ -1022,6 +1033,7 @@ test('keeps legacy revoke in manual cleanup without mutating Cognito', async () 
       Parameters<typeof setTestAppDependencies>[0]['cognito']
     >,
     workspaceAccess: {
+      ...createWorkspaceAccessFake(),
       async getActiveMember(_workspaceId: string, memberKey: string) {
         return {
           id: memberKey,
@@ -1034,7 +1046,11 @@ test('keeps legacy revoke in manual cleanup without mutating Cognito', async () 
           updatedAt: '2026-07-11T00:00:00.000Z',
         }
       },
-      async revokeInvitation(_workspaceId, _actorMemberKey, invitationId) {
+      async revokeInvitation(
+        _workspaceId,
+        _actorMemberKey,
+        invitationId,
+      ) {
         return {
           id: invitationId,
           email: invitationId,
@@ -1050,7 +1066,11 @@ test('keeps legacy revoke in manual cleanup without mutating Cognito', async () 
           failureMessage: 'Cognito cleanup is pending and can be retried safely.',
         }
       },
-      async clearInvitationCleanupFailure(_workspaceId, invitationId, expectedVersion) {
+      async clearInvitationCleanupFailure(
+        _workspaceId,
+        invitationId,
+        expectedVersion,
+      ) {
         cleanupCompletions += 1
         return {
           id: invitationId,
@@ -1066,7 +1086,11 @@ test('keeps legacy revoke in manual cleanup without mutating Cognito', async () 
           updatedAt: '2026-07-11T00:00:00.000Z',
         }
       },
-      async markInvitationManualCleanupRequired(_workspaceId, _invitationId, _expectedVersion) {
+      async markInvitationManualCleanupRequired(
+        _workspaceId,
+        _invitationId,
+        _expectedVersion,
+      ) {
         return {
           id: 'legacy@example.com',
           email: 'legacy@example.com',
@@ -1083,7 +1107,7 @@ test('keeps legacy revoke in manual cleanup without mutating Cognito', async () 
             'Manual Cognito cleanup is required. After removing the user or Workspace claims in Cognito, retry revocation to verify completion.',
         }
       },
-    } as unknown as WorkspaceAccessClient,
+    },
   })
 
   const response = await app.request(

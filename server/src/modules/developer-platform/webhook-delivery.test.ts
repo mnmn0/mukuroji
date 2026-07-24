@@ -6,6 +6,7 @@ import {
   createWebhookSignature,
   deliverWebhookRequest,
   verifyWebhookSignature,
+  type WebhookRequestTransport,
 } from './webhook-delivery'
 
 describe('webhook signature', () => {
@@ -76,7 +77,7 @@ describe('webhook SSRF policy', () => {
 
 describe('webhook delivery policy', () => {
   test('signature headers を付けて検証済み address へ固定送信する', async () => {
-    let request: Parameters<NonNullable<Parameters<typeof deliverWebhookRequest>[1]['transport']>>[0] | undefined
+    let request: Parameters<WebhookRequestTransport>[0] | undefined
     const result = await deliverWebhookRequest(
       {
         deliveryId: 'dlv_1',

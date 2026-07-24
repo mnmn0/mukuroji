@@ -42,9 +42,21 @@ test('reduces independent stale-base operations without mutating the input snaps
     ],
   })
 
-  expect(original.blocks[0]?.text).toBe('A1')
-  expect(original.blocks[1]?.text).toBe('B1')
+  expect(original.blocks[0]).toMatchObject({
+    id: 'block-a',
+    type: 'paragraph',
+    text: 'A1',
+  })
+  expect(original.blocks[1]).toMatchObject({
+    id: 'block-b',
+    type: 'paragraph',
+    text: 'B1',
+  })
   expect(reduced.document.revision).toBe(3)
+  expect(reduced.document.kind).toBe('page')
+  if (reduced.document.kind !== 'page') {
+    throw new Error('Expected the reduced document to remain a page.')
+  }
   expect(reduced.document.blocks[0]).toMatchObject({
     id: 'block-a',
     text: 'A2',

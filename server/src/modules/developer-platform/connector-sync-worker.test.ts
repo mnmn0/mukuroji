@@ -209,7 +209,10 @@ test('reloads links before outbound work and reuses a stable operation ID', asyn
     externalUrl: 'https://external.test/issues/current',
     updatedAt: '2026-07-18T00:01:00.000Z',
   }
-  const outbound = fixture.queued[0]!
+  const outbound = fixture.queued[0]
+  if (outbound?.kind !== 'outbound') {
+    throw new Error('Expected an outbound connector message.')
+  }
   await processConnectorSyncMessage(outbound, fixture.dependencies)
   await processConnectorSyncMessage(outbound, fixture.dependencies)
 

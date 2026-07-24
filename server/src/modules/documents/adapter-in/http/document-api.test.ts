@@ -1,9 +1,14 @@
 import { expect, spyOn, test } from 'bun:test'
 import type {
+  DocumentBlock,
+  DocumentChecklistItem,
   DocumentComment,
   DocumentDetail,
   DocumentPublicShare,
   DocumentRelationTarget,
+  WhiteboardConnector,
+  WhiteboardFrame,
+  WhiteboardObject,
 } from '@mukuroji/contracts'
 import { Hono } from 'hono'
 import {
@@ -1578,8 +1583,7 @@ test('parses comment pagination strictly and returns the canonical cursor page',
 })
 
 test('projects every public document kind without internal metadata', async () => {
-  const documentWithPrivateMetadata = {
-    ...pageDocument,
+  const privateDocumentMetadata = {
     scope: { type: 'project', projectId: 'private-project-id' },
     parentId: 'private-parent-id',
     position: 'private-position',
@@ -1602,14 +1606,152 @@ test('projects every public document kind without internal metadata', async () =
     lastOpenedAt: '2026-07-18T01:00:00.000Z',
     createdByUserId: 'private-creator@example.com',
     updatedByUserId: 'private-editor@example.com',
-  } as DocumentDetail
+  } satisfies Pick<
+    Extract<DocumentDetail, { kind: 'page' }>,
+    | 'scope'
+    | 'parentId'
+    | 'position'
+    | 'permission'
+    | 'relations'
+    | 'favorite'
+    | 'lastOpenedAt'
+    | 'createdByUserId'
+    | 'updatedByUserId'
+  >
+  const privateDocumentBase = {
+    ...documentDetailBase,
+    ...privateDocumentMetadata,
+  }
+  const paragraphBlock = {
+    id: 'block-1',
+    type: 'paragraph',
+    text: 'Plan safely.',
+  } satisfies Extract<DocumentBlock, { type: 'paragraph' }>
+  const paragraphPrivateMetadata = {
+    createdByUserId: 'private-block-author@example.com',
+  } satisfies Record<'createdByUserId', string>
+  const paragraphBlockWithPrivateMetadata = {
+    ...paragraphBlock,
+    ...paragraphPrivateMetadata,
+  }
+  const checklistItem = {
+    id: 'item-1',
+    text: 'Private owner assignment is hidden.',
+    checked: false,
+  } satisfies Omit<DocumentChecklistItem, 'assigneeMemberKey'>
+  const checklistItemPrivateMetadata = {
+    assigneeMemberKey: 'private-assignee@example.com',
+  } satisfies Pick<DocumentChecklistItem, 'assigneeMemberKey'>
+  const checklistBlock = {
+    id: 'block-2',
+    type: 'checklist',
+    items: [{
+      ...checklistItem,
+      ...checklistItemPrivateMetadata,
+    }],
+  } satisfies Extract<DocumentBlock, { type: 'checklist' }>
+  const headingBlock = {
+    id: 'template-block-1',
+    type: 'heading',
+    level: 2,
+    text: 'Template',
+  } satisfies Extract<DocumentBlock, { type: 'heading' }>
+  const headingPrivateMetadata = {
+    permission: { mode: 'private' },
+  } satisfies Record<'permission', { mode: 'private' }>
+  const headingBlockWithPrivateMetadata = {
+    ...headingBlock,
+    ...headingPrivateMetadata,
+  }
+  const workItemObjectBase = {
+    id: 'work-item-card-1',
+    type: 'work-item',
+    bounds: { x: 10, y: 20, width: 160, height: 96 },
+    zIndex: 1,
+    style: { fill: '#ffffff' },
+  } satisfies Omit<
+    Extract<WhiteboardObject, { type: 'work-item' }>,
+    'workItemId'
+  >
+  const workItemPrivateMetadata = {
+    workItemId: 'private-work-item-id',
+  } satisfies Pick<
+    Extract<WhiteboardObject, { type: 'work-item' }>,
+    'workItemId'
+  >
+  const workItemObject = {
+    ...workItemObjectBase,
+    ...workItemPrivateMetadata,
+  } satisfies Extract<WhiteboardObject, { type: 'work-item' }>
+  const noteObject = {
+    id: 'note-1',
+    type: 'note',
+    text: 'Public note',
+    bounds: { x: 220, y: 20, width: 160, height: 96 },
+    zIndex: 2,
+  } satisfies Extract<WhiteboardObject, { type: 'note' }>
+  const notePrivateMetadata = {
+    memberKey: 'private-note-author@example.com',
+  } satisfies Record<'memberKey', string>
+  const noteObjectWithPrivateMetadata = {
+    ...noteObject,
+    ...notePrivateMetadata,
+  }
+  const connector = {
+    id: 'connector-1',
+    from: { objectId: 'work-item-card-1' },
+    to: { objectId: 'note-1' },
+  } satisfies WhiteboardConnector
+  const connectorPrivateMetadata = {
+    createdByUserId: 'private-connector-author@example.com',
+  } satisfies Record<'createdByUserId', string>
+  const connectorWithPrivateMetadata = {
+    ...connector,
+    ...connectorPrivateMetadata,
+  }
+  const frame = {
+    id: 'frame-1',
+    title: 'Public frame',
+    bounds: { x: 0, y: 0, width: 400, height: 160 },
+    objectIds: ['work-item-card-1', 'note-1'],
+  } satisfies WhiteboardFrame
+  const framePrivateMetadata = {
+    parentId: 'private-frame-parent-id',
+  } satisfies Record<'parentId', string>
+  const frameWithPrivateMetadata = {
+    ...frame,
+    ...framePrivateMetadata,
+  }
+  const folderDocument = {
+    ...privateDocumentBase,
+    kind: 'folder',
+    childCount: 12,
+  } satisfies Extract<DocumentDetail, { kind: 'folder' }>
+  const pageDocumentWithPrivateMetadata = {
+    ...privateDocumentBase,
+    kind: 'page',
+    blocks: [
+      paragraphBlockWithPrivateMetadata,
+      checklistBlock,
+    ],
+  } satisfies Extract<DocumentDetail, { kind: 'page' }>
+  const templateDocument = {
+    ...privateDocumentBase,
+    kind: 'template',
+    blocks: [headingBlockWithPrivateMetadata],
+  } satisfies Extract<DocumentDetail, { kind: 'template' }>
+  const whiteboardDocument = {
+    ...privateDocumentBase,
+    kind: 'whiteboard',
+    whiteboard: {
+      objects: [workItemObject, noteObjectWithPrivateMetadata],
+      connectors: [connectorWithPrivateMetadata],
+      frames: [frameWithPrivateMetadata],
+    },
+  } satisfies Extract<DocumentDetail, { kind: 'whiteboard' }>
   const cases = [
     {
-      document: {
-        ...documentWithPrivateMetadata,
-        kind: 'folder',
-        childCount: 12,
-      } as DocumentDetail,
+      document: folderDocument,
       expected: {
         kind: 'folder',
         title: 'Roadmap',
@@ -1617,30 +1759,7 @@ test('projects every public document kind without internal metadata', async () =
       },
     },
     {
-      document: {
-        ...documentWithPrivateMetadata,
-        kind: 'page',
-        blocks: [
-          {
-            id: 'block-1',
-            type: 'paragraph',
-            text: 'Plan safely.',
-            createdByUserId: 'private-block-author@example.com',
-          },
-          {
-            id: 'block-2',
-            type: 'checklist',
-            items: [
-              {
-                id: 'item-1',
-                text: 'Private owner assignment is hidden.',
-                checked: false,
-                assigneeMemberKey: 'private-assignee@example.com',
-              },
-            ],
-          },
-        ],
-      } as DocumentDetail,
+      document: pageDocumentWithPrivateMetadata,
       expected: {
         kind: 'page',
         title: 'Roadmap',
@@ -1662,19 +1781,7 @@ test('projects every public document kind without internal metadata', async () =
       },
     },
     {
-      document: {
-        ...documentWithPrivateMetadata,
-        kind: 'template',
-        blocks: [
-          {
-            id: 'template-block-1',
-            type: 'heading',
-            level: 2,
-            text: 'Template',
-            permission: { mode: 'private' },
-          },
-        ],
-      } as DocumentDetail,
+      document: templateDocument,
       expected: {
         kind: 'template',
         title: 'Roadmap',
@@ -1683,47 +1790,7 @@ test('projects every public document kind without internal metadata', async () =
       },
     },
     {
-      document: {
-        ...documentWithPrivateMetadata,
-        kind: 'whiteboard',
-        whiteboard: {
-          objects: [
-            {
-              id: 'work-item-card-1',
-              type: 'work-item',
-              workItemId: 'private-work-item-id',
-              bounds: { x: 10, y: 20, width: 160, height: 96 },
-              zIndex: 1,
-              style: { fill: '#ffffff' },
-            },
-            {
-              id: 'note-1',
-              type: 'note',
-              text: 'Public note',
-              bounds: { x: 220, y: 20, width: 160, height: 96 },
-              zIndex: 2,
-              memberKey: 'private-note-author@example.com',
-            },
-          ],
-          connectors: [
-            {
-              id: 'connector-1',
-              from: { objectId: 'work-item-card-1' },
-              to: { objectId: 'note-1' },
-              createdByUserId: 'private-connector-author@example.com',
-            },
-          ],
-          frames: [
-            {
-              id: 'frame-1',
-              title: 'Public frame',
-              bounds: { x: 0, y: 0, width: 400, height: 160 },
-              objectIds: ['work-item-card-1', 'note-1'],
-              parentId: 'private-frame-parent-id',
-            },
-          ],
-        },
-      } as DocumentDetail,
+      document: whiteboardDocument,
       expected: {
         kind: 'whiteboard',
         title: 'Roadmap',
@@ -2081,10 +2148,9 @@ function createDocumentClient(
   })
 }
 
-const pageDocument: DocumentDetail = {
+const documentDetailBase = {
   schemaVersion: 1,
   id: 'document-1',
-  kind: 'page',
   scope: { type: 'workspace' },
   title: 'Roadmap',
   position: 'a0',
@@ -2109,8 +2175,16 @@ const pageDocument: DocumentDetail = {
   updatedByUserId: 'owner@example.com',
   createdAt: '2026-07-18T00:00:00.000Z',
   updatedAt: '2026-07-18T00:00:00.000Z',
+} satisfies Omit<
+  Extract<DocumentDetail, { kind: 'page' }>,
+  'blocks' | 'kind'
+>
+
+const pageDocument = {
+  ...documentDetailBase,
+  kind: 'page',
   blocks: [{ id: 'block-1', type: 'paragraph', text: 'Plan safely.' }],
-}
+} satisfies Extract<DocumentDetail, { kind: 'page' }>
 
 const publicShare: DocumentPublicShare = {
   type: 'public',

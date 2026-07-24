@@ -7,13 +7,13 @@ import {
 import {
   AutomationError,
   DynamoDbAutomationClient,
-  type AutomationClient,
   type AutomationEvent,
 } from '../../automation'
 import {
   createAutomationEventProcessor,
   parseAutomationStreamRecord,
   processAutomationEventBatch,
+  type AutomationEventPort,
 } from './automation-event'
 import type {
   DynamoStreamEvent,
@@ -189,7 +189,7 @@ describe('automation event handler', () => {
   })
 
   test('acknowledges a durably scheduled retry and propagates persistence failures', async () => {
-    const rule = { id: 'rule-1' } as AutomationRule
+    const rule = createRule('rule-1')
     const event: AutomationEvent = {
       eventId: 'event-1',
       eventType: 'work-item.updated',
@@ -211,11 +211,11 @@ describe('automation event handler', () => {
       nextRetryAt: '2026-07-16T00:01:00.000Z',
       retryable: true,
     }
-    const client = {
+    const client = createAutomationEventPort({
       async listRules() {
         return [rule]
       },
-    } as AutomationClient
+    })
     let handled = 0
     const processor = createAutomationEventProcessor(client, {
       async handleEvent(candidateRule, candidateEvent) {
@@ -262,6 +262,68 @@ function createRule(id: string): AutomationRule {
     maxChainDepth: 8,
     createdAt: '2026-07-15T00:00:00.000Z',
     updatedAt: '2026-07-15T00:00:00.000Z',
+  }
+}
+
+/**
+ * Fails a test when an event-port capability was not configured explicitly.
+ *
+ * @returns Never returns.
+ */
+function unexpectedAutomationEventPortCall(): never {
+  throw new Error('Unexpected Automation event port call.')
+}
+
+/**
+ * Creates a complete focused event port with fail-fast defaults.
+ *
+ * @param overrides - Capabilities exercised by the current test.
+ * @returns A type-safe Automation event port.
+ */
+function createAutomationEventPort(
+  overrides: Partial<AutomationEventPort> = {},
+): AutomationEventPort {
+  return {
+    async listDueExecutions() {
+      return unexpectedAutomationEventPortCall()
+    },
+    async reserveExecution() {
+      return unexpectedAutomationEventPortCall()
+    },
+    async createExecution() {
+      return unexpectedAutomationEventPortCall()
+    },
+    async getExecution() {
+      return unexpectedAutomationEventPortCall()
+    },
+    async getExecutionEvent() {
+      return unexpectedAutomationEventPortCall()
+    },
+    async claimExecution() {
+      return unexpectedAutomationEventPortCall()
+    },
+    async saveExecution() {
+      return unexpectedAutomationEventPortCall()
+    },
+    async listExecutions() {
+      return unexpectedAutomationEventPortCall()
+    },
+    async hasActionReceipt() {
+      return unexpectedAutomationEventPortCall()
+    },
+    async putActionReceipt() {
+      return unexpectedAutomationEventPortCall()
+    },
+    async getRuleVersion() {
+      return unexpectedAutomationEventPortCall()
+    },
+    async getRecurringWork() {
+      return unexpectedAutomationEventPortCall()
+    },
+    async listRules() {
+      return unexpectedAutomationEventPortCall()
+    },
+    ...overrides,
   }
 }
 

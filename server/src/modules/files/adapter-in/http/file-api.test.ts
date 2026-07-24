@@ -391,7 +391,9 @@ test('resolves approval completion with workflow metadata and configuration guar
       },
     }),
     workspaceSearch: {
-      async upsertDocument(document) {
+      async upsertDocument(
+        document: Parameters<WorkspaceSearchClient['upsertDocument']>[0],
+      ) {
         projectedDocuments.push(document)
         return createWorkspaceSearchDocument(document)
       },
@@ -449,7 +451,9 @@ test('does not project a Work Item when an approval decision has no completion t
       },
     }),
     workspaceSearch: {
-      async upsertDocument(document) {
+      async upsertDocument(
+        document: Parameters<WorkspaceSearchClient['upsertDocument']>[0],
+      ) {
         projectionWrites += 1
         return createWorkspaceSearchDocument(document)
       },

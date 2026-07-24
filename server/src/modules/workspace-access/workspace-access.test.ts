@@ -2657,6 +2657,9 @@ test('directory reconcile replay returns exact desired state before stale versio
     'PlanningTable',
   )
 
+  if (directoryMember.role === 'owner') {
+    throw new Error('Directory-managed members cannot use the owner role.')
+  }
   await expect(client.reconcileDirectoryMember(workspaceId, {
     memberKey: directoryMember.memberKey,
     email: directoryMember.email,

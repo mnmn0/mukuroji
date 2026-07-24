@@ -417,14 +417,22 @@ test('applies a directory-mapped custom role to only its assigned Project APIs',
     planning: new InMemoryPlanningClient(),
     analytics: analyticsRepository,
     documents: {
-      async get(input) {
+      async get(
+        input:
+          Parameters<DocumentClient['get']>[0],
+      ) {
         documentAccesses.push(input.access)
         return resolveEnterpriseDocumentForAccess(
           input.documentId,
           input.access,
         )
       },
-      async resolveSearchAccess(input) {
+      async resolveSearchAccess(
+        input:
+          Parameters<
+            DocumentClient['resolveSearchAccess']
+          >[0],
+      ) {
         documentSearchAccesses.push(input.access)
         try {
           const document =
@@ -454,12 +462,22 @@ test('applies a directory-mapped custom role to only its assigned Project APIs',
     } as unknown as DocumentClient,
     notifications: documentNotificationProbe.client,
     workspaceSearch: {
-      async upsertDocument(document) {
+      async upsertDocument(
+        document:
+          Parameters<
+            WorkspaceSearchClient['upsertDocument']
+          >[0],
+      ) {
         return createWorkspaceSearchDocument(
           document,
         )
       },
-      async search(input) {
+      async search(
+        input:
+          Parameters<
+            WorkspaceSearchClient['search']
+          >[0],
+      ) {
         for (
           const documentId of
           enterpriseDocuments.keys()
@@ -1592,7 +1610,10 @@ test('enforces service-account Project scope before recording successful use', a
       number | undefined
     setTestAppDependencies({
       documents: {
-        async update(input) {
+        async update(
+          input:
+            Parameters<DocumentClient['update']>[0],
+        ) {
           documentAuthorizationGuards =
             input.access.authorizationSnapshots
           const enterpriseGuard =
@@ -1674,6 +1695,14 @@ test('enforces service-account Project scope before recording successful use', a
           'workspace-service-account',
         )
       ).controlRevision
+    if (
+      controlRevisionBeforeDocumentMutation ===
+        undefined
+    ) {
+      throw new Error(
+        'Expected an enterprise control revision before the document mutation.',
+      )
+    }
     const documentResponse = await app.request(
       '/api/documents/refero-document',
       {

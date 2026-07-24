@@ -9,6 +9,7 @@ const {
   createAnalyticsQueryInput,
   createHistoricalAnalyticsWorkItem,
   createHistoricalAnalyticsWorkItemEvent,
+  createTeamIssuesFake,
   resetTestApp,
   setTestAppDependencies,
 } = createApiTestHarness()
@@ -430,13 +431,12 @@ test('retries Analytics history reads until the latest canonical revision reache
   setTestAppDependencies({
     analytics: new InMemoryAnalyticsRepository(),
     teamIssues: {
+      ...createTeamIssuesFake(),
       async getTeamIssues(_workspaceId, teamId) {
         workItemReads += 1
         return { teamId, issues: [current] }
       },
-    } as unknown as NonNullable<
-      Parameters<typeof setTestAppDependencies>[0]['teamIssues']
-    >,
+    },
     auditEvents: {
       async getEvent() {
         return undefined
@@ -476,13 +476,12 @@ test('fails closed when Analytics history never reaches the latest canonical rev
   setTestAppDependencies({
     analytics: new InMemoryAnalyticsRepository(),
     teamIssues: {
+      ...createTeamIssuesFake(),
       async getTeamIssues(_workspaceId, teamId) {
         workItemReads += 1
         return { teamId, issues: [current] }
       },
-    } as unknown as NonNullable<
-      Parameters<typeof setTestAppDependencies>[0]['teamIssues']
-    >,
+    },
     auditEvents: {
       async getEvent() {
         return undefined
@@ -523,13 +522,12 @@ test('rewinds post-asOf status, project, and archive changes from current author
   setTestAppDependencies({
     analytics: new InMemoryAnalyticsRepository(),
     teamIssues: {
+      ...createTeamIssuesFake(),
       async getTeamIssues(_workspaceId, teamId, options) {
         includeArchivedReads.push(options?.includeArchived === true)
         return { teamId, issues: [current] }
       },
-    } as unknown as NonNullable<
-      Parameters<typeof setTestAppDependencies>[0]['teamIssues']
-    >,
+    },
     auditEvents: {
       async getEvent() {
         return undefined
@@ -592,12 +590,11 @@ test('reads resolvable legacy raw Work Item audit identities through entity scop
   setTestAppDependencies({
     analytics: new InMemoryAnalyticsRepository(),
     teamIssues: {
+      ...createTeamIssuesFake(),
       async getTeamIssues(_workspaceId, teamId) {
         return { teamId, issues: [current] }
       },
-    } as unknown as NonNullable<
-      Parameters<typeof setTestAppDependencies>[0]['teamIssues']
-    >,
+    },
     auditEvents: {
       async getEvent() {
         return undefined
@@ -695,12 +692,11 @@ test('rejects legacy raw Work Item events whose identity sources disagree', asyn
   setTestAppDependencies({
     analytics: new InMemoryAnalyticsRepository(),
     teamIssues: {
+      ...createTeamIssuesFake(),
       async getTeamIssues(_workspaceId, teamId) {
         return { teamId, issues: [current] }
       },
-    } as unknown as NonNullable<
-      Parameters<typeof setTestAppDependencies>[0]['teamIssues']
-    >,
+    },
     auditEvents: {
       async getEvent() {
         return undefined
@@ -767,12 +763,11 @@ test('excludes historical Project state outside current ACL and invalidates its 
     setTestAppDependencies({
       analytics: repository,
       teamIssues: {
+        ...createTeamIssuesFake(),
         async getTeamIssues(_workspaceId, teamId) {
           return { teamId, issues: [current] }
         },
-      } as unknown as NonNullable<
-        Parameters<typeof setTestAppDependencies>[0]['teamIssues']
-      >,
+      },
       auditEvents: {
         async getEvent() {
           return undefined

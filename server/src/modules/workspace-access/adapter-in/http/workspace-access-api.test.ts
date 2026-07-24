@@ -6,7 +6,9 @@ const {
   app,
   configureFakeProjectClients,
   createCyclePlanningInput,
+  createDocumentFake,
   createFakeCognitoProfile,
+  createWorkspaceAccessFake,
   expectStableWorkspaceMutationAuditContexts,
   resetTestApp,
   setTestAppDependencies,
@@ -18,9 +20,6 @@ import type {
 import {
   createMutationAuditContext,
 } from '../../../audit/audit'
-import type {
-  DocumentClient,
-} from '../../../documents/documents'
 import {
   InMemoryPlanningClient,
 } from '../../../planning/planning'
@@ -56,6 +55,7 @@ test('serializes Workspace role updates with the Planning revision', async () =>
   const calls = configureFakeProjectClients(true)
   setTestAppDependencies({
     documents: {
+      ...createDocumentFake(),
       async getAuthorizationRevision() {
         return 5
       },
@@ -64,7 +64,7 @@ test('serializes Workspace role updates with the Planning revision', async () =>
           authorizationRevision: 5,
         }
       },
-    } as unknown as DocumentClient,
+    },
   })
 
   const response = await app.request('/api/workspace/members/sato%40example.com', {
@@ -100,6 +100,7 @@ test('forwards stable Workspace mutation audit headers and actor context to the 
   }
   setTestAppDependencies({
     documents: {
+      ...createDocumentFake(),
       async getAuthorizationRevision() {
         return 8
       },
@@ -108,8 +109,9 @@ test('forwards stable Workspace mutation audit headers and actor context to the 
           authorizationRevision: 8,
         }
       },
-    } as unknown as DocumentClient,
+    },
     workspaceAccess: {
+      ...createWorkspaceAccessFake(),
       async listActiveMembers() {
         return [
           owner,
@@ -152,7 +154,7 @@ test('forwards stable Workspace mutation audit headers and actor context to the 
           version: input.expectedVersion + 1,
         }
       },
-    } as unknown as WorkspaceAccessClient,
+    },
   })
 
   const response = await app.request('/api/workspace/members/sato%40example.com', {
@@ -170,6 +172,11 @@ test('forwards stable Workspace mutation audit headers and actor context to the 
   if (!capturedAuditContext) {
     throw new Error('Workspace mutation audit context was not captured.')
   }
+  const responseCorrelationId = response.headers.get('X-Correlation-Id')
+  const responseRequestId = response.headers.get('X-Request-Id')
+  if (!responseCorrelationId || !responseRequestId) {
+    throw new Error('Workspace mutation response identifiers were not returned.')
+  }
   expect(capturedAuditContext).toMatchObject({
     workspaceId: 'user#demo@example.com',
     actor: {
@@ -184,13 +191,13 @@ test('forwards stable Workspace mutation audit headers and actor context to the 
     },
   })
   expect(capturedAuditContext.correlationId).toBe(
-    response.headers.get('X-Correlation-Id'),
+    responseCorrelationId,
   )
   expect(capturedAuditContext.correlationId).not.toBe(
     'workspace-correlation-1',
   )
   expect(capturedAuditContext.source.requestId).toBe(
-    response.headers.get('X-Request-Id'),
+    responseRequestId,
   )
   expect(capturedAuditContext.idempotencyKeyHash).not.toContain(
     'workspace-member-role-change-1',
@@ -253,6 +260,7 @@ test('rejects changing the only active non-guest manager of a private Document t
     | undefined
   setTestAppDependencies({
     documents: {
+      ...createDocumentFake(),
       async getAuthorizationRevision() {
         return 12
       },
@@ -269,7 +277,7 @@ test('rejects changing the only active non-guest manager of a private Document t
             'private-document-1',
         }
       },
-    } as unknown as DocumentClient,
+    },
   })
 
   const response = await app.request(
@@ -308,6 +316,7 @@ test('binds member deactivation after private Document manager transfer to its A
   })
   setTestAppDependencies({
     documents: {
+      ...createDocumentFake(),
       async getAuthorizationRevision() {
         return 13
       },
@@ -316,7 +325,7 @@ test('binds member deactivation after private Document manager transfer to its A
           authorizationRevision: 13,
         }
       },
-    } as unknown as DocumentClient,
+    },
   })
 
   const response = await app.request(
@@ -373,6 +382,7 @@ test('retries private Document manager validation when eligibility changes befor
   )
   setTestAppDependencies({
     documents: {
+      ...createDocumentFake(),
       async getAuthorizationRevision() {
         authorizationRevisionReads += 1
         return authorizationRevisionReads === 1
@@ -391,8 +401,9 @@ test('retries private Document manager validation when eligibility changes befor
               }),
         }
       },
-    } as unknown as DocumentClient,
+    },
     workspaceAccess: {
+      ...createWorkspaceAccessFake(),
       async getMember(
         _workspaceId,
         memberKey,
@@ -424,7 +435,7 @@ test('retries private Document manager validation when eligibility changes befor
         memberUpdateCalls += 1
         return target
       },
-    } as unknown as WorkspaceAccessClient,
+    },
   })
 
   const response = await app.request(
@@ -533,6 +544,7 @@ test('persists created identity provenance when the successful delivery write fa
 
   setTestAppDependencies({
     workspaceAccess: {
+      ...createWorkspaceAccessFake(),
       async getActiveMember(_workspaceId: string, memberKey: string) {
         return {
           id: memberKey,
@@ -545,7 +557,11 @@ test('persists created identity provenance when the successful delivery write fa
           updatedAt: '2026-07-11T00:00:00.000Z',
         }
       },
-      async createInvitation(_workspaceId, _actorMemberKey, input) {
+      async createInvitation(
+        _workspaceId,
+        _actorMemberKey,
+        input,
+      ) {
         return {
           id: input.email,
           email: input.email,
@@ -579,7 +595,11 @@ test('persists created identity provenance when the successful delivery write fa
           updatedAt: '2026-07-11T00:00:00.000Z',
         }
       },
-      async markInvitationDelivery(_workspaceId, invitationId, input) {
+      async markInvitationDelivery(
+        _workspaceId,
+        invitationId,
+        input,
+      ) {
         deliveryInputs.push(input)
 
         if (input.deliveryStatus !== 'failed') {
@@ -603,7 +623,7 @@ test('persists created identity provenance when the successful delivery write fa
           failureMessage: input.failureMessage,
         }
       },
-    } as unknown as WorkspaceAccessClient,
+    },
   })
 
   const response = await app.request('/api/workspace/invitations', {
@@ -754,6 +774,7 @@ test('drops ownership and cleanup provenance when reinvite finds a replacement C
       Parameters<typeof setTestAppDependencies>[0]['cognito']
     >,
     workspaceAccess: {
+      ...createWorkspaceAccessFake(),
       async getActiveMember(_workspaceId: string, memberKey: string) {
         return {
           id: memberKey,
@@ -795,7 +816,12 @@ test('drops ownership and cleanup provenance when reinvite finds a replacement C
           version: expectedVersion + 1,
         }
       },
-      async markInvitationDelivery(_workspaceId, _invitationId, input, auditContext) {
+      async markInvitationDelivery(
+        _workspaceId,
+        _invitationId,
+        input,
+        auditContext,
+      ) {
         auditContexts.push({ stage: 'markInvitationDelivery', context: auditContext })
         deliveryInputs.push(input)
         return {
@@ -809,7 +835,7 @@ test('drops ownership and cleanup provenance when reinvite finds a replacement C
           version: input.expectedVersion + 1,
         }
       },
-    } as unknown as WorkspaceAccessClient,
+    },
   })
 
   const response = await app.request(
@@ -910,6 +936,7 @@ test('forwards one mutation audit context through every invitation resend stage'
       Parameters<typeof setTestAppDependencies>[0]['cognito']
     >,
     workspaceAccess: {
+      ...createWorkspaceAccessFake(),
       async getActiveMember(_workspaceId, memberKey) {
         return {
           id: memberKey,
@@ -949,7 +976,12 @@ test('forwards one mutation audit context through every invitation resend stage'
           version: expectedVersion + 1,
         }
       },
-      async markInvitationDelivery(_workspaceId, _invitationId, input, auditContext) {
+      async markInvitationDelivery(
+        _workspaceId,
+        _invitationId,
+        input,
+        auditContext,
+      ) {
         auditContexts.push({ stage: 'markInvitationDelivery', context: auditContext })
         return {
           ...preparedInvitation,
@@ -961,7 +993,7 @@ test('forwards one mutation audit context through every invitation resend stage'
           version: input.expectedVersion + 1,
         }
       },
-    } as unknown as WorkspaceAccessClient,
+    },
   })
 
   const response = await app.request(

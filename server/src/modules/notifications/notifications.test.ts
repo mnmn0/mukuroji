@@ -11,6 +11,8 @@ import {
   createNotificationRecipientKey,
   parseStoredNotificationPreferences,
   type NotificationItem,
+  type NotificationAction,
+  type NotificationState,
 } from './notifications'
 
 function createNotificationRow(overrides: Record<string, unknown> = {}) {
@@ -286,7 +288,11 @@ describe('notification store', () => {
   })
 
   test('persists read, unread, archive, and restore transitions', async () => {
-    const cases = [
+    const cases: ReadonlyArray<{
+      action: NotificationAction
+      row: ReturnType<typeof createNotificationRow>
+      expectedState: NotificationState
+    }> = [
       {
         action: 'mark-read' as const,
         row: createNotificationRow(),

@@ -51,14 +51,20 @@ class MemoryDocumentClient {
 
   async send(command: unknown) {
     if (command instanceof BatchGetCommand) {
-      const responses = Object.fromEntries(Object.entries(command.input.RequestItems).map(
-        ([tableName, request]) => [
-          tableName,
-          request.Keys.flatMap((key) => {
+      const requestItems = command.input.RequestItems
+      if (!requestItems) {
+        throw new Error('BatchGetCommand requires request items.')
+      }
+      const responses = Object.fromEntries(Object.entries(requestItems).map(
+        ([tableName, request]) => {
+          if (!request.Keys) {
+            throw new Error(`BatchGetCommand requires keys for ${tableName}.`)
+          }
+          return [tableName, request.Keys.flatMap((key) => {
             const item = this.items.get(createMemoryKey(key as Record<string, unknown>))
             return item ? [item] : []
-          }),
-        ],
+          })]
+        },
       ))
       return { Responses: responses }
     }
@@ -1248,7 +1254,9 @@ describe('file proofing domain', () => {
       createAuditContext('annotation'),
     )
     expect(annotation.anchor).toEqual({ kind: 'image', x: 0.25, y: 0.75 })
-    expect(objectClient.lastScanStatusObjectVersionId).toBe('immutable-object-version-1')
+    expect<string | undefined>(
+      objectClient.lastScanStatusObjectVersionId,
+    ).toBe('immutable-object-version-1')
     expect(await client.listAnnotations(scope, manager, session.file.id, session.version.id))
       .toHaveLength(1)
     await expect(client.createAnnotation(

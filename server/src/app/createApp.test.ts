@@ -15,14 +15,17 @@ test('binds concurrent app instances to independent immutable dependencies', asy
   const originalFetch = globalThis.fetch
   Bun.env.COGNITO_CLIENT_ID = 'isolated-client'
   Bun.env.COGNITO_USER_POOL_ID = 'us-east-1_isolated'
-  const cognitoFetch: typeof fetch = async (input) => {
-    const endpoint = new URL(String(input)).hostname
-    return Response.json({
-      AuthenticationResult: {
-        AccessToken: endpoint.startsWith('first-') ? 'first-token' : 'second-token',
-      },
-    })
-  }
+  const cognitoFetch = Object.assign(
+    async (input: URL | RequestInfo) => {
+      const endpoint = new URL(String(input)).hostname
+      return Response.json({
+        AuthenticationResult: {
+          AccessToken: endpoint.startsWith('first-') ? 'first-token' : 'second-token',
+        },
+      })
+    },
+    { preconnect() {} },
+  ) satisfies typeof fetch
   globalThis.fetch = cognitoFetch
 
   try {

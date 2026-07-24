@@ -258,7 +258,11 @@ test('seeds deduplicated automatic watchers when a comment is created', async ()
   const watcherUpdates = items.flatMap((item) => {
     const update = item.Update as Record<string, unknown> | undefined
     const key = update?.Key as Record<string, unknown> | undefined
-    return typeof key?.recordKey === 'string' && key.recordKey.startsWith('WATCHER#') ? [update] : []
+    return update !== undefined &&
+        typeof key?.recordKey === 'string' &&
+        key.recordKey.startsWith('WATCHER#')
+      ? [update]
+      : []
   })
   expect(watcherUpdates.map((update) => (update.Key as Record<string, unknown>).recordKey).sort()).toEqual([
     'WATCHER#assignee@example.com',

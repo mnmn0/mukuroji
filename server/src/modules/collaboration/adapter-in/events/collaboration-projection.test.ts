@@ -682,6 +682,11 @@ describe('collaboration projection pure helpers', () => {
       scopeKey: 'workspace-1#work-item#team/core/issue/example',
       expiresAt: 2_000_000_000,
       authorizationExpiresAt: 2_000_000_000,
+      authenticatedAt: 1_999_999_000,
+      tokenExpiresAt: 2_000_000_000,
+      authenticationSessionId: 'authentication-session-1',
+      authenticationMethods: ['pwd'],
+      clientIp: '203.0.113.10',
     }
     const activeDirectory: RealtimeAuthorizationDirectoryItem[] = [
       { entryType: 'team', teamId: 'core' },

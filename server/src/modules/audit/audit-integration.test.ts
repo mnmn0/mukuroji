@@ -387,6 +387,9 @@ test('workspace audit projects invitation lifecycle events without storage field
       async putEvent(auditEvent) {
         auditWrites.push(auditEvent as unknown as Record<string, unknown>)
       },
+      async getEvent() {
+        return undefined
+      },
       async query(input) {
         queries.push({ ...input })
         return { events: [event] }

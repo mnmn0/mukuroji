@@ -24,7 +24,11 @@ test('keeps the application dependency context active for Connector async handle
         return { batchItemFailures: [] }
       },
       async pollHandler() {
-        return { scheduled: 0 }
+        return {
+          pages: 0,
+          enqueued: 0,
+          continuationQueued: false,
+        }
       },
     },
   )

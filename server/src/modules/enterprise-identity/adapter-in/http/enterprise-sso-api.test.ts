@@ -113,34 +113,38 @@ test('binds SSO exchange assurance to the signed provider revision', async () =>
     })
     const originalFetch = globalThis.fetch
     let tokenExchangeCalls = 0
-    globalThis.fetch = (async () => {
-      tokenExchangeCalls += 1
-      const epochSeconds = Math.floor(Date.now() / 1_000)
-      return new Response(JSON.stringify({
-        access_token: accessToken,
-        id_token: createAccessToken([], {
-          amr: [
-            'upstream-mfa',
-            'mukuroji:enterprise-sso-provider-sha256:forged-id-claim',
-          ],
-          aud: 'mukuroji-sso-client',
-          email: 'demo@example.com',
-          email_verified: true,
-          exp: epochSeconds + 3_600,
-          iat: epochSeconds,
-          iss: 'https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_mukuroji',
-          nonce: tokenNonce,
-          sub: 'cognito-user-id',
-          token_use: 'id',
-        }),
-        expires_in: 3_600,
-        refresh_token: 'refresh-token',
-        token_type: 'Bearer',
-      }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      })
-    }) as typeof fetch
+    const tokenExchangeFetch = Object.assign(
+      async () => {
+        tokenExchangeCalls += 1
+        const epochSeconds = Math.floor(Date.now() / 1_000)
+        return new Response(JSON.stringify({
+          access_token: accessToken,
+          id_token: createAccessToken([], {
+            amr: [
+              'upstream-mfa',
+              'mukuroji:enterprise-sso-provider-sha256:forged-id-claim',
+            ],
+            aud: 'mukuroji-sso-client',
+            email: 'demo@example.com',
+            email_verified: true,
+            exp: epochSeconds + 3_600,
+            iat: epochSeconds,
+            iss: 'https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_mukuroji',
+            nonce: tokenNonce,
+            sub: 'cognito-user-id',
+            token_use: 'id',
+          }),
+          expires_in: 3_600,
+          refresh_token: 'refresh-token',
+          token_type: 'Bearer',
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      },
+      { preconnect() {} },
+    ) satisfies typeof fetch
+    globalThis.fetch = tokenExchangeFetch
 
     try {
       const updatedProviderRevision = provider.revision + 1
