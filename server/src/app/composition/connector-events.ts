@@ -3,7 +3,6 @@ import {
   runWithAppDependencies,
 } from '../../api/api-router'
 import { createConnectorEventHandlers } from '../../modules/developer-platform/adapter-in/events/connector-events'
-import { DynamoDbDeveloperPlatformClient } from '../../modules/developer-platform/developer-platform'
 import {
   DynamoDbConnectorPollCheckpointStore,
   DynamoDbConnectorPollInventory,
@@ -89,8 +88,16 @@ export function createProductionConnectorEventHandlers() {
     throw new TypeError('Connector sync queue is not configured.')
   }
   const appDependencies = createProductionConnectorAppDependencies()
+  const connectors = appDependencies.developerPlatform.connectors
+  const externalLinks = appDependencies.developerPlatform.externalLinks
   const handlers = createConnectorEventHandlers({
-    platform: new DynamoDbDeveloperPlatformClient(),
+    platform: {
+      listConnectors: (workspaceId) => connectors.listConnectors(workspaceId),
+      listExternalWorkItemLinks: (request) =>
+        externalLinks.listExternalWorkItemLinks(request),
+      pauseConnectorExternalLinksPage: (request) =>
+        externalLinks.pauseConnectorExternalLinksPage(request),
+    },
     getEngine: requireConfiguredConnectorSyncEngine,
     queue: new SqsConnectorSyncQueue(createSqsClient(), queueUrl),
     checkpoints: new DynamoDbConnectorPollCheckpointStore(),

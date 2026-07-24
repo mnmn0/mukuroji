@@ -2117,8 +2117,36 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('task-row-brand-guideline')).toBeHidden()
     await expect(page.getByTestId('tasks-count')).toContainText('1')
 
-    await page.getByRole('searchbox', { name: '検索...' }).clear()
-    await page.getByRole('button', { name: 'ステータス' }).click()
+    const searchbox = page.getByRole('searchbox', { name: '検索...' })
+    const statusFilterButton = page.getByRole('button', {
+      name: 'ステータス',
+    })
+
+    await searchbox.clear()
+    await statusFilterButton.click()
+    const statusOptions = page.getByRole('menuitemradio')
+
+    await expect(statusOptions.first()).toBeFocused()
+    await page.keyboard.press('ArrowDown')
+    await expect(statusOptions.nth(1)).toBeFocused()
+    await page.keyboard.press('End')
+    await expect(statusOptions.last()).toBeFocused()
+    await page.keyboard.press('Home')
+    await expect(statusOptions.first()).toBeFocused()
+    await page.keyboard.press('Escape')
+    await expect(statusFilterButton).toBeFocused()
+    await expect(statusOptions).toHaveCount(0)
+
+    await statusFilterButton.click()
+    await searchbox.click()
+    await expect(statusOptions).toHaveCount(0)
+
+    await statusFilterButton.click()
+    await expect(statusOptions.first()).toBeFocused()
+    await page.keyboard.press('Tab')
+    await expect(statusOptions).toHaveCount(0)
+
+    await statusFilterButton.click()
     await page.getByRole('menuitemradio', { name: '未着手' }).click()
 
     await expect(page.getByTestId('task-row-seo-research')).toBeVisible()
@@ -4478,10 +4506,14 @@ test.describe('authenticated task page', () => {
     await page.goto('/reports')
 
     await expect(page.getByTestId('analytics-widget-metric-wip')).toBeVisible()
-    await page.getByTestId('analytics-project-filter').getByRole(
+    const referoCheckbox = page.getByTestId('analytics-project-filter').getByRole(
       'checkbox',
       { name: 'Refero' },
-    ).check()
+    )
+
+    await referoCheckbox.click()
+    await expect(referoCheckbox).toBeChecked()
+    await expect(page).toHaveURL(/(?:[?&])project=refero(?:&|$)/u)
     await expect.poll(() =>
       analyticsState.queryInputs.at(-1)?.filter.projectIds
     ).toEqual(['refero'])

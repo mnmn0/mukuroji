@@ -17,6 +17,7 @@ import {
   WEBHOOK_DISABLED_SUBSCRIPTION_RETENTION_SECONDS,
   WEBHOOK_DELIVERY_RETENTION_SECONDS,
   WEBHOOK_SUBSCRIPTION_LIMIT,
+  createDefaultSecretProtector,
   createWebhookSignature,
 } from './developer-platform'
 
@@ -88,9 +89,16 @@ function readStoredRows(client: InMemoryDeveloperPlatformClient) {
   return [...records.values()]
 }
 
-function createMemoryDocumentClient() {
+/**
+ * Creates an observable in-memory DynamoDB document client for persistence tests.
+ *
+ * @param conditionalPutFailures - Number of version-comparison Put failures to inject.
+ * @returns The document client together with its stored items and recorded commands.
+ */
+function createMemoryDocumentClient(conditionalPutFailures = 0) {
   const items = new Map<string, Record<string, unknown>>()
   const commands: Array<{ name: string; input: Record<string, unknown> }> = []
+  let remainingConditionalPutFailures = conditionalPutFailures
   const documentClient = {
     async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
       const input = command.input
@@ -105,6 +113,15 @@ function createMemoryDocumentClient() {
         const mapKey = `${String(item.workspaceId)}\0${String(item.recordKey)}`
         const current = items.get(mapKey)
         const condition = input.ConditionExpression
+        if (
+          condition === '#version = :expectedVersion' &&
+          remainingConditionalPutFailures > 0
+        ) {
+          remainingConditionalPutFailures -= 1
+          const error = new Error('condition failed')
+          error.name = 'ConditionalCheckFailedException'
+          throw error
+        }
         if (
           condition === 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)' &&
           current
@@ -2344,6 +2361,24 @@ describe('webhook subscription and delivery', () => {
     })).rejects.toMatchObject({ status: 409, code: 'WebhookSubscriptionDisabled' })
   })
 
+  test('rejects a non-string webhook signature at the persistence boundary', async () => {
+    const { client } = createClient()
+    const request = {
+      workspaceId: 'workspace-1',
+      subscriptionId: 'subscription-1',
+      payload: '{}',
+      timestamp: Math.floor(START.getTime() / 1_000),
+      signature: 'valid-signature',
+    }
+    Object.defineProperty(request, 'signature', { value: 42 })
+
+    await expect(client.verifyWebhookSignature(request)).rejects.toMatchObject({
+      status: 400,
+      code: 'WebhookSignatureInvalid',
+      message: 'Webhook signature must be a string.',
+    })
+  })
+
   test('dual-writes legacy lookup until active locator migration completes', async () => {
     const pendingClient = new InMemoryDeveloperPlatformClient(
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(27)),
@@ -4339,6 +4374,37 @@ describe('request safety primitives', () => {
     })).resolves.toMatchObject({ status: 'reserved' })
   })
 
+  test('bounds idempotency reservation retries after repeated CAS conflicts', async () => {
+    const memory = createMemoryDocumentClient(4)
+    let now = new Date(START)
+    const client = new DynamoDbDeveloperPlatformClient(
+      'DeveloperPlatformTable',
+      memory.documentClient,
+      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(7)),
+      () => now,
+    )
+    const request = {
+      workspaceId: 'workspace-1',
+      credentialId: 'credential-1',
+      idempotencyKey: 'contended-reservation',
+      requestFingerprint: 'POST:/api/v1/work-items:body-sha',
+    }
+
+    await expect(client.reserveIdempotency(request)).resolves.toMatchObject({
+      status: 'reserved',
+    })
+    now = new Date(START.getTime() + 121_000)
+
+    await expect(client.reserveIdempotency(request)).rejects.toMatchObject({
+      status: 409,
+      code: 'DeveloperPlatformConcurrentMutation',
+    })
+    expect(memory.commands.filter(({ name, input }) =>
+      name === 'PutCommand' &&
+      input.ConditionExpression === '#version = :expectedVersion'
+    )).toHaveLength(4)
+  })
+
   test('allows takeover only after an unfinished idempotency reservation lease expires', async () => {
     const { client, clock } = createClient()
     const request = {
@@ -4588,5 +4654,32 @@ describe('request safety primitives', () => {
       status: 500,
       code: 'SecretProtectorKmsKeyMissing',
     })
+  })
+
+  test('fails fast when production storage and KMS configuration are incomplete', () => {
+    const memory = createMemoryDocumentClient()
+    expect(() => new DynamoDbDeveloperPlatformClient(
+      undefined,
+      memory.documentClient,
+      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(7)),
+      () => START,
+      undefined,
+      undefined,
+      { NODE_ENV: 'production' },
+    )).toThrow('Developer platform table name is required in production.')
+
+    expect(() => createDefaultSecretProtector({
+      NODE_ENV: 'production',
+    })).toThrow(
+      'Webhook, connector, and platform-state KMS key IDs are required in production.',
+    )
+    expect(createDefaultSecretProtector({
+      NODE_ENV: 'production',
+      DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID: 'arn:kms:webhook',
+      DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID: 'arn:kms:connector',
+      DEVELOPER_PLATFORM_STATE_KMS_KEY_ID: 'arn:kms:state',
+    })).toBeInstanceOf(KmsEnvelopeSecretProtector)
+    expect(createDefaultSecretProtector({ NODE_ENV: 'test' }))
+      .toBeInstanceOf(LocalAesGcmSecretProtector)
   })
 })

@@ -43,7 +43,7 @@ import {
   useNotificationPreferences,
   useUnreadNotificationCount,
 } from '../../notifications/mutations/useNotifications'
-import { DeveloperPlatformPanelContainer } from '../../developer-platform/ui/DeveloperPlatformPanel'
+import { DeveloperPlatformPanelContainer } from '../../developer-platform/ui/DeveloperPlatformPanelContainer'
 import { createDeveloperPlatformLabels } from '../../developer-platform/ui/labels'
 import { TeamIssuesApiError } from '../../issues/api'
 import { updateWorkspaceTaskRemote } from '../../issues/mutations/updateWorkspaceTask'

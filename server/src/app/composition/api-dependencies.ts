@@ -22,6 +22,7 @@ import {
   createDynamoDbDocumentClient,
   shouldBootstrapLocalDynamoDb,
 } from '../../infrastructure/aws/dynamodb-client'
+import { createSecretsManagerClient } from '../../infrastructure/aws/secrets-manager-client'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
 import { createCognitoClient } from '../../modules/authentication'
 import {
@@ -35,10 +36,10 @@ import {
   DynamoDbAuditEventsClient,
   getConfiguredAuditTableName,
 } from '../../modules/audit/audit'
-import { DynamoDbAutomationClient } from '../../modules/automation/automation'
-import { SecretsManagerAutomationInboundWebhookSecretStore } from '../../modules/automation/automation-inbound-webhook'
+import { DynamoDbAutomationRepository } from '../../modules/automation'
+import { SecretsManagerAutomationInboundWebhookSecretStore } from '../../modules/automation'
 import { DynamoDbCollaborationClient } from '../../modules/collaboration/collaboration'
-import { DynamoDbDeveloperPlatformClient } from '../../modules/developer-platform/developer-platform'
+import { createDynamoDbDeveloperPlatformAdapters } from '../../modules/developer-platform/adapter-out/dynamodb/developer-platform-adapters'
 import {
   DynamoDbDocumentsClient,
 } from '../../modules/documents/adapter-out/dynamodb/dynamo-db-documents-client'
@@ -127,19 +128,31 @@ export function createWorkItemConfigurationClient(): WorkItemConfigurationClient
 /**
  * Creates the configured Automation adapter.
  *
- * @returns A DynamoDB-backed Automation client.
+ * @returns A DynamoDB-backed Automation repository.
  */
-export function createAutomationClient(): DynamoDbAutomationClient {
+export function createAutomationClient(): DynamoDbAutomationRepository {
   const config = loadServerConfig()
   const dynamoDbClient = createDynamoDbClient()
 
-  return new DynamoDbAutomationClient(
+  return new DynamoDbAutomationRepository(
     config.environment.AUTOMATION_TABLE_NAME ??
       config.environment.MUKUROJI_AUTOMATION_TABLE ??
       'mukuroji-automation-local',
     createDynamoDbDocumentClient(dynamoDbClient),
     dynamoDbClient,
     shouldBootstrapLocalDynamoDb(),
+  )
+}
+
+/**
+ * Creates the configured inbound Webhook secret-store adapter.
+ *
+ * @returns A Secrets Manager-backed secret store using centralized server configuration.
+ */
+export function createAutomationInboundWebhookSecretStore(
+): SecretsManagerAutomationInboundWebhookSecretStore {
+  return new SecretsManagerAutomationInboundWebhookSecretStore(
+    createSecretsManagerClient(),
   )
 }
 
@@ -338,10 +351,14 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
  * @returns Automation dependencies backed by configured production adapters.
  */
 export function createProductionAutomationDependencies(): AutomationDependencies {
+  const automation = createAutomationClient()
   return {
-    automation: createAutomationClient(),
-    automationInboundWebhookSecrets:
-      new SecretsManagerAutomationInboundWebhookSecretStore(),
+    ruleTemplates: automation,
+    inboundWebhooks: automation,
+    recurringSchedules: automation,
+    executions: automation,
+    bulkOperations: automation,
+    automationInboundWebhookSecrets: createAutomationInboundWebhookSecretStore(),
   }
 }
 
@@ -351,8 +368,9 @@ export function createProductionAutomationDependencies(): AutomationDependencies
  * @returns Developer Platform dependencies backed by configured production adapters.
  */
 export function createProductionDeveloperPlatformDependencies(): DeveloperPlatformDependencies {
+  const adapters = createDynamoDbDeveloperPlatformAdapters()
   return {
-    developerPlatform: new DynamoDbDeveloperPlatformClient(),
+    ...adapters,
     publicWorkItems: createCanonicalPublicWorkItemService(),
     workItemImportExecutions: createDefaultWorkItemImportExecutionStore(),
     workItemImportSources: createDefaultWorkItemImportSourceStore(),
@@ -421,13 +439,14 @@ function createLazyWorkItemImportQueue(): WorkItemImportQueue {
  * @returns A production dependency graph suitable for Connector worker invocations.
  */
 export function createProductionConnectorAppDependencies(): AppDependencies {
+  const adapters = createDynamoDbDeveloperPlatformAdapters()
   return {
     authentication: createProductionAuthenticationDependencies(),
     workspace: createProductionWorkspaceDependencies(),
     workItems: createProductionWorkItemDependencies(),
     automation: createProductionAutomationDependencies(),
     developerPlatform: {
-      developerPlatform: new DynamoDbDeveloperPlatformClient(),
+      ...adapters,
       publicWorkItems: createCanonicalPublicWorkItemService(),
       workItemImportExecutions: createDefaultWorkItemImportExecutionStore(),
       workItemImportSources: createLazyWorkItemImportSourceStore(),
@@ -544,7 +563,22 @@ export function overrideAppDependencies(
     },
     automation: {
       ...dependencies.automation,
-      ...(overrides.automation ? { automation: overrides.automation } : {}),
+      ...(overrides.automation
+        ? {
+            ruleTemplates: overrides.automation,
+            inboundWebhooks: overrides.automation,
+            recurringSchedules: overrides.automation,
+            executions: overrides.automation,
+            bulkOperations: overrides.automation,
+          }
+        : {}),
+      ...(overrides.ruleTemplates ? { ruleTemplates: overrides.ruleTemplates } : {}),
+      ...(overrides.inboundWebhooks ? { inboundWebhooks: overrides.inboundWebhooks } : {}),
+      ...(overrides.recurringSchedules
+        ? { recurringSchedules: overrides.recurringSchedules }
+        : {}),
+      ...(overrides.executions ? { executions: overrides.executions } : {}),
+      ...(overrides.bulkOperations ? { bulkOperations: overrides.bulkOperations } : {}),
       ...(overrides.automationInboundWebhookSecrets
         ? {
             automationInboundWebhookSecrets:
@@ -554,9 +588,22 @@ export function overrideAppDependencies(
     },
     developerPlatform: {
       ...dependencies.developerPlatform,
-      ...(overrides.developerPlatform
-        ? { developerPlatform: overrides.developerPlatform }
+      ...(overrides.apiKeys ? { apiKeys: overrides.apiKeys } : {}),
+      ...(overrides.oauthCredentials
+        ? { oauthCredentials: overrides.oauthCredentials }
         : {}),
+      ...(overrides.webhookSubscriptions
+        ? { webhookSubscriptions: overrides.webhookSubscriptions }
+        : {}),
+      ...(overrides.webhookDeliveries
+        ? { webhookDeliveries: overrides.webhookDeliveries }
+        : {}),
+      ...(overrides.connectors ? { connectors: overrides.connectors } : {}),
+      ...(overrides.externalLinks ? { externalLinks: overrides.externalLinks } : {}),
+      ...(overrides.imports ? { imports: overrides.imports } : {}),
+      ...(overrides.idempotency ? { idempotency: overrides.idempotency } : {}),
+      ...(overrides.rateLimits ? { rateLimits: overrides.rateLimits } : {}),
+      ...(overrides.transactions ? { transactions: overrides.transactions } : {}),
       ...(overrides.publicWorkItems
         ? { publicWorkItems: overrides.publicWorkItems }
         : {}),

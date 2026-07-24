@@ -5,26 +5,20 @@ import {
 } from '../../api/api-router'
 import {
   createAuditEventsClient,
+  createAutomationInboundWebhookSecretStore,
   createAutomationClient,
   createWorkItemConfigurationClient,
 } from './api-dependencies'
 import {
   createAutomationEventProcessor,
   processAutomationEventBatch,
+  type AutomationScheduleEvent,
+  AutomationEngine,
+  DynamoDbAutomationRepository,
   type DynamoStreamEvent,
-} from '../../modules/automation/adapter-in/events/automation-event'
-import {
   processAutomationSchedule,
   resolveAutomationScheduleProcessingTime,
-  type AutomationScheduleEvent,
-} from '../../modules/automation/adapter-in/schedules/automation-schedule'
-import {
-  AutomationEngine,
-  DynamoDbAutomationClient,
-} from '../../modules/automation/automation'
-import {
-  SecretsManagerAutomationInboundWebhookSecretStore,
-} from '../../modules/automation/automation-inbound-webhook'
+} from '../../modules/automation'
 import { createCognitoClient } from '../../modules/authentication'
 import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
 import {
@@ -43,7 +37,7 @@ import { DynamoDbWorkspaceSearchClient } from '../../modules/workspace-search/wo
  * @returns Explicit action dependencies without API-only or import-worker adapters.
  */
 function createAutomationActionDependencies(
-  automation: DynamoDbAutomationClient,
+  automation: DynamoDbAutomationRepository,
   teamIssues: DynamoDbTeamIssuesClient,
 ): AutomationActionExecutorDependencies {
   return {
@@ -90,7 +84,7 @@ export function createProductionAutomationEventHandler() {
  */
 export function createProductionAutomationScheduleHandler() {
   const automationClient = createAutomationClient()
-  const inboundWebhookSecrets = new SecretsManagerAutomationInboundWebhookSecretStore()
+  const inboundWebhookSecrets = createAutomationInboundWebhookSecretStore()
   const actionExecutor = createAutomationActionExecutor(
     createAutomationActionDependencies(
       automationClient,

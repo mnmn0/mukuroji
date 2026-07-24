@@ -3,7 +3,8 @@ import {
   WORK_ITEM_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { TaskScreen } from './TaskPage'
+import { expect, userEvent, within } from 'storybook/test'
+import { TaskScreen } from './TaskScreen'
 import type { TeamIssueDetail } from '../../issues/api'
 import {
   collaborationWorkspaceMemberFixtures,
@@ -13,7 +14,7 @@ import {
 } from '../../issues/fixtures'
 import { projectDirectoryFixtures } from '../../projects/fixtures'
 import type { ProjectMember, ProjectUser } from '../../projects/api'
-import { referoTaskFixtures } from '../../tasks/fixtures'
+import { referoTaskFixtures } from '../fixtures'
 import { fileArtifactsControllerFixture } from '../../files/fixtures'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
@@ -145,7 +146,7 @@ const selectedIssueDetail: TeamIssueDetail = {
 }
 
 const meta = {
-  title: 'Application/Projects/Task Page',
+  title: 'Application/Projects/Task Screen',
   component: TaskScreen,
   parameters: {
     layout: 'fullscreen',
@@ -190,7 +191,57 @@ type Story = StoryObj<typeof meta>
 /**
  * DynamoDB から取得したタスク一覧を表示する標準状態です。
  */
-export const Default: Story = {}
+export const Default: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const statusButton = canvas.getByRole('button', { name: 'ステータス' })
+
+    await userEvent.click(statusButton)
+    await expect(statusButton).toHaveAttribute('aria-expanded', 'true')
+    const statusOptions = within(canvas.getByRole('menu')).getAllByRole(
+      'menuitemradio',
+    )
+    const firstStatusOption = statusOptions[0]
+    const secondStatusOption = statusOptions[1]
+    const lastStatusOption = statusOptions.at(-1)
+
+    if (!firstStatusOption || !secondStatusOption || !lastStatusOption) {
+      throw new Error('Expected at least two task status options.')
+    }
+
+    await expect(firstStatusOption).toHaveFocus()
+    await userEvent.keyboard('{ArrowDown}')
+    await expect(secondStatusOption).toHaveFocus()
+    await userEvent.keyboard('{End}')
+    await expect(lastStatusOption).toHaveFocus()
+    await userEvent.keyboard('{Home}')
+    await expect(firstStatusOption).toHaveFocus()
+    await userEvent.keyboard('{Escape}')
+    await expect(statusButton).toHaveFocus()
+    await expect(statusButton).toHaveAttribute('aria-expanded', 'false')
+    await expect(canvas.queryByRole('menu')).not.toBeInTheDocument()
+
+    await userEvent.click(statusButton)
+    await userEvent.click(canvas.getByRole('searchbox', { name: '検索...' }))
+    await expect(statusButton).toHaveAttribute('aria-expanded', 'false')
+    await expect(canvas.queryByRole('menu')).not.toBeInTheDocument()
+
+    await userEvent.click(statusButton)
+    await expect(canvas.getByRole('menuitemradio', {
+      name: 'すべてのステータス',
+    })).toHaveFocus()
+    await userEvent.tab()
+    await expect(statusButton).toHaveAttribute('aria-expanded', 'false')
+    await expect(canvas.queryByRole('menu')).not.toBeInTheDocument()
+
+    await userEvent.click(statusButton)
+    await userEvent.click(canvas.getByRole('menuitemradio', {
+      name: 'すべてのステータス',
+    }))
+    await expect(statusButton).toHaveAttribute('aria-expanded', 'false')
+    await expect(canvas.queryByRole('menu')).not.toBeInTheDocument()
+  },
+}
 
 /**
  * 認証とタスク取得中の loading 表示です。

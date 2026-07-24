@@ -1,4 +1,5 @@
 import type { EnterpriseIdentityProvider } from '@mukuroji/contracts'
+import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
 import type { DashboardSummaryClient } from '../../modules/analytics'
 import type { AnalyticsRepository } from '../../modules/analytics/analytics'
 import type {
@@ -7,10 +8,28 @@ import type {
   AuditEventV1,
 } from '../../modules/audit/audit'
 import type { CognitoClient } from '../../modules/authentication'
-import type { AutomationClient } from '../../modules/automation/automation'
-import type { AutomationInboundWebhookSecretStore } from '../../modules/automation/automation-inbound-webhook'
+import type {
+  AutomationBulkOperationPort,
+  AutomationExecutionServicePort,
+  AutomationInboundWebhookPort,
+  AutomationInboundWebhookSecretStore,
+  AutomationRecurringSchedulePort,
+  AutomationRepository,
+  AutomationRuleTemplatePort,
+} from '../../modules/automation'
 import type { CollaborationClient } from '../../modules/collaboration/collaboration'
-import type { DeveloperPlatformClient } from '../../modules/developer-platform/developer-platform'
+import type {
+  ApiKeyPort,
+  ConnectorPort,
+  ExternalLinkPort,
+  IdempotencyPort,
+  ImportPort,
+  OAuthCredentialPort,
+  RateLimitPort,
+  WebhookDeliveryPort,
+  WebhookSubscriptionPort,
+} from '../../modules/developer-platform/application/ports'
+import type { DeveloperPlatformTransactionPort } from '../../modules/developer-platform/adapter-out/dynamodb/developer-platform-transaction-port'
 import type {
   PublicApiDependencies,
   PublicWorkItemService,
@@ -39,6 +58,10 @@ import type {
 } from '../../modules/work-items/work-item-import'
 import type { WorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'
 import type { WorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
+
+/** DynamoDB transaction item shared only by adapters assembled at the API composition boundary. */
+type AutomationCompositionTransactionItem =
+  NonNullable<TransactWriteCommandInput['TransactItems']>[number]
 
 /** Append-only audit persistence required by Workspace routes. */
 export type AuditEventsClient = {
@@ -122,16 +145,42 @@ export interface WorkItemDependencies {
 
 /** Dependencies required by Automation routes. */
 export interface AutomationDependencies {
-  /** Provides Automation persistence. */
-  automation: AutomationClient
+  /** Provides Rule and Template application persistence. */
+  ruleTemplates: AutomationRuleTemplatePort<AutomationCompositionTransactionItem>
+  /** Provides inbound Webhook endpoint and replay persistence. */
+  inboundWebhooks: AutomationInboundWebhookPort<AutomationCompositionTransactionItem>
+  /** Provides recurring definition persistence. */
+  recurringSchedules: AutomationRecurringSchedulePort
+  /** Provides execution, lease, rate-limit, and receipt persistence. */
+  executions: AutomationExecutionServicePort
+  /** Provides durable Bulk operation checkpoints. */
+  bulkOperations: AutomationBulkOperationPort
   /** Provides Automation inbound webhook secret persistence. */
   automationInboundWebhookSecrets: AutomationInboundWebhookSecretStore
 }
 
 /** Dependencies required by Developer Platform routes and workers. */
 export interface DeveloperPlatformDependencies {
-  /** Provides Developer Platform persistence. */
-  developerPlatform: DeveloperPlatformClient
+  /** Provides API key lifecycle and authentication. */
+  apiKeys: ApiKeyPort
+  /** Provides OAuth application and token credentials. */
+  oauthCredentials: OAuthCredentialPort
+  /** Provides Webhook subscription lifecycle. */
+  webhookSubscriptions: WebhookSubscriptionPort
+  /** Provides Webhook delivery persistence. */
+  webhookDeliveries: WebhookDeliveryPort
+  /** Provides connector installation and credential lifecycle. */
+  connectors: ConnectorPort
+  /** Provides external Work Item link lifecycle. */
+  externalLinks: ExternalLinkPort
+  /** Provides import job metadata lifecycle. */
+  imports: ImportPort
+  /** Provides idempotency reservation and replay. */
+  idempotency: IdempotencyPort
+  /** Provides credential-scoped rate limiting. */
+  rateLimits: RateLimitPort
+  /** Provides DynamoDB transaction contributions for cross-store Work Item mutations. */
+  transactions: DeveloperPlatformTransactionPort
   /** Provides the canonical public Work Item use case. */
   publicWorkItems: PublicWorkItemService
   /** Provides durable Work Item import execution persistence. */
@@ -186,6 +235,11 @@ export type AppDependencyOverrides = Partial<
   AutomationDependencies &
   DeveloperPlatformDependencies
 > & {
+  /** Backward-compatible all-capability Automation adapter override for tests. */
+  automation?: AutomationRepository<
+    AutomationCompositionTransactionItem,
+    AutomationCompositionTransactionItem
+  >
   /** Test-only aggregate client converted to capability-scoped ports at composition. */
   enterpriseIdentity?: EnterpriseIdentityClient
 }
