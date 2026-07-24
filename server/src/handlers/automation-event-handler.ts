@@ -4,7 +4,7 @@ import {
 import {
   type BatchResponse,
   type DynamoStreamEvent,
-} from '../modules/automation/adapter-in/events/automation-event'
+} from '../modules/automation'
 
 let productionHandler: ReturnType<typeof createProductionAutomationEventHandler> | undefined
 
@@ -19,4 +19,13 @@ export async function handler(event: DynamoStreamEvent): Promise<BatchResponse> 
   return await productionHandler(event)
 }
 
-export * from '../modules/automation/adapter-in/events/automation-event'
+export {
+  createAutomationEventProcessor,
+  parseAutomationStreamRecord,
+  processAutomationEventBatch,
+  type AutomationEventPort,
+  type AutomationEventProcessor,
+  type AutomationWorkItemReader,
+  type BatchResponse,
+  type DynamoStreamEvent,
+} from '../modules/automation'

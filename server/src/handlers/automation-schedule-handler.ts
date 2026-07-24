@@ -3,7 +3,7 @@ import {
 } from '../app/composition/automation-workers'
 import {
   type AutomationScheduleEvent,
-} from '../modules/automation/adapter-in/schedules/automation-schedule'
+} from '../modules/automation'
 
 let productionHandler: ReturnType<typeof createProductionAutomationScheduleHandler> | undefined
 
@@ -18,4 +18,14 @@ export async function handler(event: AutomationScheduleEvent = {}) {
   return await productionHandler(event)
 }
 
-export * from '../modules/automation/adapter-in/schedules/automation-schedule'
+export {
+  processAutomationSchedule,
+  processDueAutomationExecution,
+  processInboundWebhookSecretCleanup,
+  processRecurringWorkDefinition,
+  processScheduledAutomationRule,
+  resolveAutomationScheduleProcessingTime,
+  type AutomationScheduleDependencies,
+  type AutomationScheduleEvent,
+  type AutomationSchedulePort,
+} from '../modules/automation'
