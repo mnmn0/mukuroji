@@ -4,6 +4,8 @@ import * as cdk from 'aws-cdk-lib';
  * CloudFormation parameters and derived values shared by stack subsystems.
  */
 export interface StackParameters {
+  /** Primary and secondary same-environment SNS topic ARNs for alarm actions. */
+  readonly alarmNotificationTopicArns: readonly [string, string];
   /** Origins accepted by the public API and file storage CORS policies. */
   readonly taskApiAllowedOrigins: cdk.CfnParameter;
   /** Tokenized list derived from the allowed origins parameter. */
@@ -71,6 +73,54 @@ export interface StackParameters {
  * @returns Parameters and derived values consumed by the stack subsystems.
  */
 export function buildStackParameters(stack: cdk.Stack): StackParameters {
+  const alarmPrimaryTopicName = new cdk.CfnParameter(
+    stack,
+    'AlarmPrimaryTopicName',
+    {
+      type: 'String',
+      minLength: 1,
+      maxLength: 256,
+      allowedPattern: '^[A-Za-z0-9_-]+$',
+      constraintDescription:
+        'AlarmPrimaryTopicName must be the name of a standard SNS topic in this stack account and region.',
+      description:
+        'Existing standard SNS topic used as the primary destination for every CloudWatch alarm.',
+    },
+  );
+  const alarmSecondaryTopicName = new cdk.CfnParameter(
+    stack,
+    'AlarmSecondaryTopicName',
+    {
+      type: 'String',
+      minLength: 1,
+      maxLength: 256,
+      allowedPattern: '^[A-Za-z0-9_-]+$',
+      constraintDescription:
+        'AlarmSecondaryTopicName must be the name of a standard SNS topic in this stack account and region.',
+      description:
+        'Existing standard SNS topic used as the secondary destination for every CloudWatch alarm.',
+    },
+  );
+  new cdk.CfnRule(stack, 'AlarmNotificationTopicSeparation', {
+    assertions: [{
+      assert: cdk.Fn.conditionNot(cdk.Fn.conditionEquals(
+        alarmPrimaryTopicName.valueAsString,
+        alarmSecondaryTopicName.valueAsString,
+      )),
+      assertDescription:
+        'AlarmPrimaryTopicName must differ from AlarmSecondaryTopicName.',
+    }],
+  });
+  const alarmNotificationTopicArns: readonly [string, string] = [
+    stack.formatArn({
+      service: 'sns',
+      resource: alarmPrimaryTopicName.valueAsString,
+    }),
+    stack.formatArn({
+      service: 'sns',
+      resource: alarmSecondaryTopicName.valueAsString,
+    }),
+  ];
   const taskApiAllowedOrigins = new cdk.CfnParameter(stack, 'TaskApiAllowedOrigins', {
     type: 'String',
     default: 'http://localhost:5173,http://127.0.0.1:5173',
@@ -295,6 +345,7 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
   });
 
   return {
+    alarmNotificationTopicArns,
     taskApiAllowedOrigins,
     taskApiAllowedOriginList,
     taskApiExposedHeaders,

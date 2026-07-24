@@ -13,7 +13,7 @@ repository に固定せず、各実行の evidence record に残します。
 | API log / metric | Secret-safe な JSON completion/error log と CloudWatch EMF `Mukuroji/API` を出力する | Log retention、dashboard、30日 SLO 集計を environment owner が有効化すること |
 | Health | `/api/health` の liveness と `/api/ready` の DynamoDB readiness を分離する | Trusted probe と edge-level throttle を設定し、readiness の `503` を rollout 停止へ接続すること |
 | Trace | CDK が管理する全16個の Node.js Lambda で X-Ray active tracing を有効にし、API log に runtime-controlled invocation ID と X-Ray root trace ID を記録する | Correlation ID 自体の X-Ray annotation は未実装 |
-| Alarm | API、queue、DLQ、async destination の21個の CloudWatch alarm を定義する | Alarm action、SNS / Incident Manager、roster は未実装。通知先を接続し test alarm を確認するまで unattended production とみなさないこと |
+| Alarm | API、queue、DLQ、async destination の21個の CloudWatch alarm を定義し、同一account/regionの必須primary/secondary SNS topicへ全alarm actionを接続する | SNS subscription、Incident Manager、rosterは環境側の責務。両経路のtest alarmを確認するまで unattended production とみなさないこと |
 | Release | PR/push workflow が Server test を含む全 source/build config の strict typecheck、static analysis、unit/integration、Web E2E、CDK test/nag/synth を実行し、main ruleset が6つの必須 check を強制する | Path-filtered local runtime と外部 reviewer は常時 required にせず、対象変更ごとの release evidence で結果または rate limit を確認すること |
 | Rollout | Backward-compatible CDK/Lambda update と CloudFormation rollback を利用できる | Lambda alias、CodeDeploy canary、一般的な feature flag / kill switch は未実装。段階 rollout が必要な変更は gate を満たさない |
 | Migration | Production-safe migration contract と entry/verification/rollback evidence を定義する | Workspace Search backfill は online fence、lease、lossless journal、完全検証、rollback を未実装。production gate には使用しないこと |
@@ -223,7 +223,8 @@ correlation ID だけで X-Ray trace を一意検索できるとは記載しま�
 Ack は通知 UI のボタンだけでなく、incident record に on-call、時刻、調査開始 window を記録して
 完了です。Target を超えた場合、通知先 roster の secondary、incident commander、service owner
 の順に escalation します。Roster や secondary が設定されていない environment は production
-gate を満たしません。
+gate を満たしません。ここでのsecondaryはsubscription先のack-aware on-call systemが管理する
+escalation targetであり、CloudWatch `AlarmActions`の配列順ではありません。
 
 ## Alarm catalog と追跡開始点
 
@@ -267,9 +268,17 @@ DLQ alarm の共通初動は次です。
    redrive または新規 job を承認する。Terminal job を盲目的に再送しない。
 6. Queue が空、system of record が期待状態、重複 side effect がないことを確認して閉じる。
 
-Alarm action は CDK からまだ接続されていません。全21 alarm の ARN、primary/secondary
-destination、test notification の UTC timestamp と受信者を environment evidence に残すまで、
-上記 ack target は実効性を持ちません。
+CDK deploy は、異なる既存standard SNS topic名を `AlarmPrimaryTopicName` と
+`AlarmSecondaryTopicName` に必須指定し、同一account/regionのARNへ変換して全21 alarmの
+`AlarmActions`へ設定します。Stackはtopic、subscription、Incident Manager、rosterを所有しません。
+両topicはalarm遷移時に同時通知され、ack target未達時の段階escalationはsubscription先が管理します。
+Topic policyは`cloudwatch.amazonaws.com`の`sns:Publish`を同一account/regionのalarm ARNと
+SourceAccountで制限して許可します。SSEを使う場合はcustomer-managed KMS keyにも同principalの
+`kms:GenerateDataKey*`/`kms:Decrypt`と同じconfused-deputy条件を設定します。Operatorによる直接
+SNS publishだけをdelivery evidenceにせず、controlled CloudWatch alarmの実state transition、
+alarm history、両subscription receipt、OK復帰まで確認します。
+全21 alarmのARN、primary/secondary destination、subscription/roster revision、test notificationの
+UTC timestampと受信者をenvironment evidenceに残すまで、上記ack targetは実効性を持ちません。
 
 ## Versioned migration
 

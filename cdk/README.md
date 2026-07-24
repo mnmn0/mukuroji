@@ -8,6 +8,8 @@
 
 | Parameter | Required | Description |
 | --- | --- | --- |
+| `AlarmPrimaryTopicName` | yes | 全 CloudWatch alarm の primary action に使う、同一 account/region 内の既存 standard SNS topic 名。 |
+| `AlarmSecondaryTopicName` | yes | 全 CloudWatch alarm の secondary action に使う、primary と異なる同一 account/region 内の既存 standard SNS topic 名。 |
 | `CognitoUserPoolId` | yes | 既存 Cognito user pool ID。access token の issuer と IAM scope に使います。 |
 | `CognitoUserPoolClientId` | yes | client secret なし、`ALLOW_USER_PASSWORD_AUTH` 有効の既存 password/API public app client ID。access token の `client_id` と照合します。 |
 | `CognitoSsoUserPoolClientId` | yes | Password client とは異なる、Hosted UI authorization-code + PKCE 専用 public app client ID。 |
@@ -40,12 +42,37 @@ trace/telemetry write action だけを追加します。API Lambda は readiness
 持つ独立 policy を使います。
 
 Stack は API Lambda の `Errors`、`Throttles`、p95 `Duration`（12秒）、HTTP API の 5xx、
-application EMF の `ServerErrorCount` を CloudWatch alarm として作成します。Alarm action は
-環境共通の監視 stack から設定してください。
+application EMF の `ServerErrorCount` を CloudWatch alarm として作成します。全21 alarm の
+`AlarmActions` は、必須parameterで指定した既存のprimary/secondary SNS topicへ接続します。
+Stackはtopic、subscription、Incident Manager escalation planを作成・変更しません。Topic ownerは
+同一account/regionのstandard topicを用意し、managed rosterへのsubscription、暗号化key policy、
+test notificationの受信をdeploy前に確認してください。CloudWatchはalarm遷移時に両topicへ同時に
+publishするため、ack target未達時の段階escalationはsubscription先のon-call systemで管理します。
 非同期 worker の DLQ alarm に加え、Notification schedule は failure destination 自体への配信失敗を
 `DestinationDeliveryFailures` で別に検出します。Audit projection、Automation event/schedule、
 Analytics/Notification schedule、Enterprise SCIM group/identity maintenance の各 DLQ は14日保持し、
 stack replacement/delete 時にも Retain します。
+
+### Alarm destination contract
+
+このstackは外部topicの存在、resource policy、KMS key policy、subscriptionを変更しません。
+Deploy前に両topicの`GetTopicAttributes`と`ListSubscriptionsByTopic`を取得し、次をすべて
+environment evidenceへ保存します。
+
+- ARNがdeploy対象と同じpartition/account/regionと指定topic名を持つ。
+- Confirm済みsubscriptionが1件以上あり、primary/secondaryが異なるmanaged destinationへ到達する。
+- Topic policyが`cloudwatch.amazonaws.com`の`sns:Publish`を許可し、
+  `aws:SourceAccount=<target-account>`と
+  `aws:SourceArn=arn:<partition>:cloudwatch:<region>:<target-account>:alarm:*`の両方で制限する。
+- SSE topicは編集可能なcustomer-managed KMS keyを使用し、同じCloudWatch principalへ
+  `kms:GenerateDataKey*`と`kms:Decrypt`を許可する。KMS policyも同じSourceAccount/SourceArnで
+  制限し、keyがtarget account/regionでenabledであることを確認する。
+
+Operator自身の`sns:Publish`だけではCloudWatch principalとKMS経路を検証できません。Deploy後は
+同じ両topic actionを持つcontrolled test alarmを実際に`OK → ALARM`へ遷移させ、CloudWatch alarm
+history、両subscriptionの受信時刻/message ID、`ALARM → OK`への復帰を保存します。全21 alarmの
+`AlarmActions`がprimary/secondaryの2 ARNを含み、inventory済みの既存actionも保持していることを
+templateとdeployed configurationの両方で照合します。
 
 ## Outputs
 
@@ -397,7 +424,7 @@ GuardDuty plan の作成は Malware Protection for S3 の利用条件と課金�
 
 Shared API Lambda は `REQUEST_INTAKE_TABLE_NAME`、`REQUEST_QUEUE_INDEX_NAME`、`REQUEST_RATE_LIMIT_PER_HOUR` と token hash secret parameter を environment から受け取り、request state、canonical Work Item、audit event を同じ DynamoDB transaction で更新できます。Email webhook secret は dedicated ingestion Lambda だけに渡します。Attachment body は新しい public bucket を作らず、既存の private `FileBucket` と GuardDuty scan boundary を利用します。外部 response に Workspace / Team / Project / workflow / IAM 情報を含めず、opaque capability token の hash だけを table に保存します。
 
-`RequestEmailIngestionFunction` は public HTTP URL、API Gateway route、SES receipt rule をこの stack では持ちません。Email provider / SES adapter は署名付きの正規化 envelope を作り、明示的に `lambda:InvokeFunction` を許可された principal からこの Lambda を非同期 invoke してください。Lambda は `RequestEmailWebhookSecret` で envelope を検証し、`RequestTokenHashSecret` で reply capability を解決します。Execution role は `RequestIntakeTable` への direct `GetItem` と、`dynamodb:EnclosingOperation=TransactWriteItems` 条件付き `PutItem`、failure destination の `GetQueueAttributes` / `GetQueueUrl` / `SendMessage` だけを持ちます。非同期 retry を2回使い、最終失敗は14日保持・stack rollback 時 Retain の encrypted DLQへ送られます。Visible message と `DestinationDeliveryFailures` は別々の alarm で検出します。Alarm action は環境共通の監視 stack から設定してください。
+`RequestEmailIngestionFunction` は public HTTP URL、API Gateway route、SES receipt rule をこの stack では持ちません。Email provider / SES adapter は署名付きの正規化 envelope を作り、明示的に `lambda:InvokeFunction` を許可された principal からこの Lambda を非同期 invoke してください。Lambda は `RequestEmailWebhookSecret` で envelope を検証し、`RequestTokenHashSecret` で reply capability を解決します。Execution role は `RequestIntakeTable` への direct `GetItem` と、`dynamodb:EnclosingOperation=TransactWriteItems` 条件付き `PutItem`、failure destination の `GetQueueAttributes` / `GetQueueUrl` / `SendMessage` だけを持ちます。非同期 retry を2回使い、最終失敗は14日保持・stack rollback 時 Retain の encrypted DLQへ送られます。Visible message と `DestinationDeliveryFailures` は別々の alarm で検出し、stack共通のprimary/secondary SNS actionへ通知します。
 
 `RequestEmailWebhookSecret` は adapter と Lambda の両方で同じ値を設定し、log、output、request metadata に残さないでください。`RequestTokenHashSecret` の rotation は未失効の public form / reply link を無効化するため、通常 deploy と分け、active capability の再発行を含む手順として実施します。`NoEcho` は CloudFormation 表示を抑止しますが、secret の command history や Lambda environment への露出を防ぐものではないため、値は CI/CD の secret store から渡してください。
 
@@ -433,6 +460,8 @@ export ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET="$(openssl rand -hex 32)"
 export ENTERPRISE_SSO_STATE_SECRET="$(openssl rand -hex 32)"
 export MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET=<at-least-32-random-characters>
 export MUKUROJI_REQUEST_TOKEN_HASH_SECRET=<different-at-least-32-random-characters>
+export MUKUROJI_ALARM_PRIMARY_TOPIC_NAME=<primary-standard-sns-topic-name>
+export MUKUROJI_ALARM_SECONDARY_TOPIC_NAME=<secondary-standard-sns-topic-name>
 
 bash scripts/prepare-workspace-cognito.sh
 ```
@@ -496,6 +525,8 @@ bun --filter cdk cdk diff CdkStack \
   --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME" \
   --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
   --parameters RequestTokenHashSecret="$MUKUROJI_REQUEST_TOKEN_HASH_SECRET" \
+  --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
+  --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters TaskApiAllowedOrigins=https://app.example.com
 
 bun --filter cdk cdk deploy CdkStack \
@@ -513,6 +544,8 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME" \
   --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
   --parameters RequestTokenHashSecret="$MUKUROJI_REQUEST_TOKEN_HASH_SECRET" \
+  --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
+  --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters TaskApiAllowedOrigins=https://app.example.com \
   --outputs-file /tmp/mukuroji-cdk-outputs.json
 ```
@@ -580,6 +613,14 @@ VITE_API_BASE_URL="$FUNCTION_URL" bun run web:dev
 4. 既存 partition ID を使って `prepare-workspace-cognito.sh` を実行する。
 5. `cdk diff` で table replacement / deletion がないこと、Lambda / custom resource / Retain / PITR の更新だけであることを確認する。
 6. deploy 後に `validate-workspace-bootstrap.sh` と Function URL / API Gateway の 4 経路を確認する。
+
+Alarm routingを初めて追加するupgradeでは、同一account/regionに異なる2つのstandard SNS topicを
+先に作成し、上記policy、KMS、subscription、controlled alarm testの契約を満たします。既存環境で
+monitoring stack、custom resource、または手動操作が`AlarmActions`を管理している場合は、全21 alarmの
+現行actionとownerをinventory化し、必要なdestinationを新topic側へ移行してから旧reconcilerを停止します。
+複数ownerが同じalarm propertyを更新する状態でdeployしません。`cdk diff`では
+2つの必須parameter、相異rule、既存21 alarmの`AlarmActions`以外にalarm resourceの置換や
+SNS resourceの新設がないことを確認し、そのtopic名を以後の通常deployでも固定して渡します。
 
 bootstrap update は同じ key・同じ owner なら再実行できます。既存の異なる種類の row と key が衝突した場合は上書きせず stack update を失敗させるため、row を調査してから再実行します。
 
@@ -685,7 +726,7 @@ Deploy前後に次を確認します。
 
 ## Rollback
 
-code / infrastructure rollback は、原則として直前に成功した revision を同じ必須 parameters（request intake 用の2 secretを含む）で deploy します。現行 stack に存在する retained resource を rollback template から削除しないでください。DynamoDB table は `Retain` で、PITR も有効ですが、stack から外れた resource は自動で再接続されません。Cognito custom schema は rollback しても残ります。
+code / infrastructure rollback は、原則として直前に成功した revision を同じ必須 parameters（request intake 用の2 secretとalarm topic名を含む）で deploy します。現行 stack に存在する retained resource を rollback template から削除しないでください。DynamoDB table は `Retain` で、PITR も有効ですが、stack から外れた resource は自動で再接続されません。Cognito custom schema は rollback しても残ります。Alarm routing導入前のtemplateへ戻すと全alarm actionが外れるため、active incident中は使用せず、applicationだけを戻すforward-fixを優先します。
 
 `RequestIntakeTable` または email DLQ を初めて追加した deploy から、それらを知らない旧 template へ直接 rollback しないでください。先に forward-fix revision で API/email ingestion を無効化し、retained resource と output を template に残したまま application code を戻します。どうしても旧 template を使う場合は resource import 用 template と logical ID を準備し、CloudFormation から外れた retained resource を放置した状態で同名 resource を再作成しません。
 

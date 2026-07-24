@@ -1,5 +1,6 @@
 import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
+import { configureAlarmRouting } from './aspects/alarm-routing';
 import { buildLambdaBuildPaths } from './config/lambda-build-paths';
 import { buildStackParameters } from './config/stack-parameters';
 import {
@@ -122,6 +123,9 @@ export class CdkStack extends cdk.Stack {
       parameters,
     });
 
+    configureAlarmRouting(this, {
+      notificationTopicArns: parameters.alarmNotificationTopicArns,
+    });
     buildBootstrapResources(this, {
       dataStores,
       parameters,
