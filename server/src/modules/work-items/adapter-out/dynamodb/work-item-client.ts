@@ -1947,6 +1947,14 @@ export class DynamoDbTeamIssuesClient {
       if (beforeIssue.revision !== expectedRevision) {
         throw createWorkItemRevisionConflictError()
       }
+      const archivedAt = expressionAttributeValues[':archivedAt']
+      if (archivedAt !== undefined) {
+        validateWorkItemArchiveWindow(
+          beforeIssue.createdAt,
+          archivedAt,
+          expressionAttributeValues[':updatedAt'],
+        )
+      }
       const afterIssue = {
         ...beforeIssue,
         schemaVersion: WORK_ITEM_SCHEMA_VERSION,
@@ -3288,6 +3296,36 @@ function readWorkItemDueDate(value: unknown): string {
     throw new ProjectDataError(400, 'InvalidProjectWrite', 'Issue due date is invalid.')
   }
   return dueDate
+}
+
+/**
+ * Rejects an archive timestamp outside the Work Item creation-to-update window.
+ *
+ * @param createdAt - Canonical persisted creation timestamp.
+ * @param archivedAt - Candidate normalized archive timestamp.
+ * @param updatedAt - Canonical timestamp assigned to the update.
+ */
+function validateWorkItemArchiveWindow(
+  createdAt: string,
+  archivedAt: unknown,
+  updatedAt: unknown,
+): void {
+  const createdEpoch = new Date(createdAt).getTime()
+  const archivedEpoch = typeof archivedAt === 'string'
+    ? new Date(archivedAt).getTime()
+    : Number.NaN
+  const updatedEpoch = typeof updatedAt === 'string'
+    ? new Date(updatedAt).getTime()
+    : Number.NaN
+  if (
+    !Number.isFinite(createdEpoch) ||
+    !Number.isFinite(archivedEpoch) ||
+    !Number.isFinite(updatedEpoch) ||
+    createdEpoch > archivedEpoch ||
+    archivedEpoch > updatedEpoch
+  ) {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Issue archive timestamp is invalid.')
+  }
 }
 
 /**

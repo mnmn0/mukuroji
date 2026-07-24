@@ -111,7 +111,7 @@ export function isCanonicalWorkItemRecord(value: unknown): value is CanonicalWor
     isWorkItemPriority(value.priority) &&
     isCanonicalUtcTimestamp(value.createdAt) &&
     isCanonicalUtcTimestamp(value.updatedAt) &&
-    value.createdAt <= value.updatedAt &&
+    areUtcTimestampsChronological(value.createdAt, value.updatedAt) &&
     hasCanonicalArchiveState(value)
 }
 
@@ -148,12 +148,12 @@ function hasCanonicalArchiveState(value: Record<string, unknown>) {
   if (value.archivedAt === undefined && value.archivedBy === undefined) {
     return true
   }
-  return isCanonicalUtcTimestamp(value.archivedAt) &&
+  return isCanonicalUtcTimestamp(value.createdAt) &&
+    isCanonicalUtcTimestamp(value.updatedAt) &&
+    isCanonicalUtcTimestamp(value.archivedAt) &&
     isNonEmptyString(value.archivedBy) &&
-    typeof value.createdAt === 'string' &&
-    typeof value.updatedAt === 'string' &&
-    value.createdAt <= value.archivedAt &&
-    value.archivedAt <= value.updatedAt
+    areUtcTimestampsChronological(value.createdAt, value.archivedAt) &&
+    areUtcTimestampsChronological(value.archivedAt, value.updatedAt)
 }
 
 function isCanonicalCustomFieldValues(
@@ -253,6 +253,17 @@ function isCanonicalUtcTimestamp(value: unknown): value is string {
   }
   const timestamp = new Date(value)
   return Number.isFinite(timestamp.getTime()) && timestamp.toISOString() === value
+}
+
+/**
+ * Compares two already-canonical UTC timestamps by their epoch values.
+ *
+ * @param earlier - Timestamp expected to occur first.
+ * @param later - Timestamp expected to occur second.
+ * @returns True when the timestamps are chronologically ordered.
+ */
+function areUtcTimestampsChronological(earlier: string, later: string): boolean {
+  return new Date(earlier).getTime() <= new Date(later).getTime()
 }
 
 /**

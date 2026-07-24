@@ -481,21 +481,13 @@ export function createAwsSdkTransport(
   const credentials = fromIni({ profile: configuration.profile })
   const dynamodbConfiguration: WorkItemsIntegrityAwsSdkClientConfiguration = {
     credentials,
-    endpoint: resolveOfficialDynamoDbEndpoint(
-      configuration.profile,
-      configuration.region,
-      credentials,
-    ),
+    endpoint: resolveOfficialAwsRegionalEndpoint('dynamodb', configuration.region),
     profile: configuration.profile,
     region: configuration.region,
   }
   const stsConfiguration: WorkItemsIntegrityAwsSdkClientConfiguration = {
     credentials,
-    endpoint: resolveOfficialStsEndpoint(
-      configuration.profile,
-      configuration.region,
-      credentials,
-    ),
+    endpoint: resolveOfficialAwsRegionalEndpoint('sts', configuration.region),
     profile: configuration.profile,
     region: configuration.region,
   }
@@ -506,55 +498,50 @@ export function createAwsSdkTransport(
 }
 
 /**
- * Resolves a partition-aware DynamoDB endpoint without consulting endpoint overrides.
+ * Constructs a partition-aware official AWS regional endpoint without consulting overrides.
  *
- * @param profile - Explicit AWS shared-configuration profile.
+ * @param service - Allowlisted AWS service endpoint prefix.
  * @param region - Explicit AWS region.
- * @param credentials - Explicit named-profile credential provider.
- * @returns Official DynamoDB endpoint URL.
+ * @returns Official regional endpoint URL.
  */
-function resolveOfficialDynamoDbEndpoint(
-  profile: string,
+function resolveOfficialAwsRegionalEndpoint(
+  service: 'dynamodb' | 'sts',
   region: string,
-  credentials: ReturnType<typeof fromIni>,
 ): string {
-  const resolverClient = new DynamoDBClient({ credentials, profile, region })
-  try {
-    return resolverClient.config.endpointProvider({
-      AccountIdEndpointMode: 'disabled',
-      Region: region,
-      UseDualStack: false,
-      UseFIPS: false,
-    }).url.href
-  } finally {
-    resolverClient.destroy()
+  if (!isAwsRegion(region)) {
+    throw invalidUsage()
   }
+  return `https://${service}.${region}.${resolveOfficialAwsDnsSuffix(region)}/`
 }
 
 /**
- * Resolves a partition-aware regional STS endpoint without consulting endpoint overrides.
+ * Resolves the official DNS suffix for every AWS partition supported by the pinned clients.
  *
- * @param profile - Explicit AWS shared-configuration profile.
  * @param region - Explicit AWS region.
- * @param credentials - Explicit named-profile credential provider.
- * @returns Official regional STS endpoint URL.
+ * @returns Official non-dualstack DNS suffix.
  */
-function resolveOfficialStsEndpoint(
-  profile: string,
+function resolveOfficialAwsDnsSuffix(
   region: string,
-  credentials: ReturnType<typeof fromIni>,
 ): string {
-  const resolverClient = new STSClient({ credentials, profile, region })
-  try {
-    return resolverClient.config.endpointProvider({
-      Region: region,
-      UseDualStack: false,
-      UseFIPS: false,
-      UseGlobalEndpoint: false,
-    }).url.href
-  } finally {
-    resolverClient.destroy()
+  if (region.startsWith('cn-')) {
+    return 'amazonaws.com.cn'
   }
+  if (region.startsWith('eusc-')) {
+    return 'amazonaws.eu'
+  }
+  if (region.startsWith('us-iso-')) {
+    return 'c2s.ic.gov'
+  }
+  if (region.startsWith('us-isob-')) {
+    return 'sc2s.sgov.gov'
+  }
+  if (region.startsWith('eu-isoe-')) {
+    return 'cloud.adc-e.uk'
+  }
+  if (region.startsWith('us-isof-')) {
+    return 'csp.hci.ic.gov'
+  }
+  return 'amazonaws.com'
 }
 
 /**
@@ -849,10 +836,20 @@ function containsControlCharacter(value: string): boolean {
  */
 function requireRegion(flags: ReadonlyMap<string, string>): string {
   const region = requireNonWhitespaceFlag(flags, '--region')
-  if (!/^[a-z0-9]+(?:-[a-z0-9]+){2,5}$/u.test(region)) {
+  if (!isAwsRegion(region)) {
     throw invalidUsage()
   }
   return region
+}
+
+/**
+ * Checks a bounded conventional AWS region identifier.
+ *
+ * @param value - Candidate AWS region.
+ * @returns True for a syntactically safe regional hostname component.
+ */
+function isAwsRegion(value: string): boolean {
+  return /^[a-z0-9]+(?:-[a-z0-9]+){2,5}$/u.test(value)
 }
 
 /**

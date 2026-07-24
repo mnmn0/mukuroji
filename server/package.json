@@ -13,7 +13,7 @@
     "@mukuroji/contracts": "workspace:*",
     "@aws-sdk/client-apigatewaymanagementapi": "^3.1057.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.1057.0",
-    "@aws-sdk/client-dynamodb": "^3.1057.0",
+    "@aws-sdk/client-dynamodb": "3.1057.0",
     "@aws-sdk/client-s3": "^3.1057.0",
     "@aws-sdk/client-secrets-manager": "^3.1057.0",
     "@aws-sdk/client-sqs": "^3.1057.0",

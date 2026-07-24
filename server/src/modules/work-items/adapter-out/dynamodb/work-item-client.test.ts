@@ -677,6 +677,92 @@ test('DynamoDB Work Item writes reject impossible due dates before persistence',
   expect(sendCount).toBe(0)
 })
 
+test('DynamoDB Work Item archive updates reject timestamps outside the canonical window', async () => {
+  const commandNames: string[] = []
+  const currentIssue = {
+    schemaVersion: 1,
+    revision: 1,
+    directoryId: 'user#demo@example.com',
+    directoryTeamId: 'user#demo@example.com#team#core-team',
+    teamId: 'core-team',
+    issueId: 'archive-window',
+    sortOrder: 10,
+    title: 'Archive window',
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026/06/03',
+    priority: 'high',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  const documentClient = {
+    async send(command: { constructor: { name: string } }) {
+      commandNames.push(command.constructor.name)
+      return { Item: currentIssue }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+  const expectedFailure = {
+    code: 'InvalidProjectWrite',
+    message: 'Issue archive timestamp is invalid.',
+    status: 400,
+  }
+
+  await expect(client.updateTeamIssue(
+    'user#demo@example.com',
+    'core-team',
+    'archive-window',
+    {
+      archivedAt: '2026-07-11T23:59:59.999Z',
+      expectedRevision: 1,
+    },
+    'demo@example.com',
+  )).rejects.toMatchObject(expectedFailure)
+  await expect(client.updateTeamIssue(
+    'user#demo@example.com',
+    'core-team',
+    'archive-window',
+    {
+      archivedAt: '+010000-01-01T00:00:00.000Z',
+      expectedRevision: 1,
+    },
+    'demo@example.com',
+  )).rejects.toMatchObject(expectedFailure)
+  await expect(client.updateTeamIssue(
+    'user#demo@example.com',
+    'core-team',
+    'archive-window',
+    {
+      archivedAt: currentIssue.createdAt,
+      expectedRevision: 1,
+    },
+    'demo@example.com',
+  )).resolves.toMatchObject({
+    issue: {
+      archivedAt: currentIssue.createdAt,
+      archivedBy: 'demo@example.com',
+    },
+  })
+
+  expect(commandNames).toEqual([
+    'GetCommand',
+    'GetCommand',
+    'GetCommand',
+    'TransactWriteCommand',
+  ])
+})
+
 test('DynamoDB Work Item comment idempotent replay returns comment and activity', async () => {
   const issue = {
     schemaVersion: 1,

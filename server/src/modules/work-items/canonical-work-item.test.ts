@@ -165,6 +165,14 @@ describe('canonical Work Item validation', () => {
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
       updatedAt: '2026-06-30T09:00:00.000Z',
     }))).toBe(false)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      createdAt: '9999-12-31T23:59:59.999Z',
+      updatedAt: '+010000-01-01T00:00:00.000Z',
+    }))).toBe(true)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      createdAt: '+010000-01-01T00:00:00.000Z',
+      updatedAt: '9999-12-31T23:59:59.999Z',
+    }))).toBe(false)
   })
 
   test('requires canonical import and archive metadata', () => {
@@ -181,5 +189,11 @@ describe('canonical Work Item validation', () => {
       archivedAt: '2026-07-13T09:00:00.000Z',
       archivedBy: 'archiver@example.com',
     }))).toBe(false)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      createdAt: '9999-12-31T23:59:59.999Z',
+      archivedAt: '+010000-01-01T00:00:00.000Z',
+      archivedBy: 'archiver@example.com',
+      updatedAt: '+010000-02-01T00:00:00.000Z',
+    }))).toBe(true)
   })
 })

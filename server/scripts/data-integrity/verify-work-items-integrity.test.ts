@@ -337,7 +337,7 @@ async function runRootCli(arguments_: readonly string[]): Promise<RootCliResult>
  * @param value - Previous value, or undefined when it was absent.
  */
 function restoreEnvironmentVariable(
-  name: 'AWS_ENDPOINT_URL_DYNAMODB' | 'AWS_ENDPOINT_URL_STS',
+  name: 'AWS_ENDPOINT_URL' | 'AWS_ENDPOINT_URL_DYNAMODB' | 'AWS_ENDPOINT_URL_STS',
   value: string | undefined,
 ): void {
   if (value === undefined) {
@@ -675,42 +675,85 @@ describe('Work Items integrity AWS adapter', () => {
     expect(transport.closeCount).toBe(1)
   })
 
-  test('pins both explicit-profile SDK clients to generated official endpoints', () => {
-    const transport = new RecordingAwsTransport()
-    let dynamodbConfiguration:
-      WorkItemsIntegrityAwsSdkClientConfiguration | undefined
-    let stsConfiguration: WorkItemsIntegrityAwsSdkClientConfiguration | undefined
+  test('pins both explicit-profile SDK clients to partition-specific official endpoints', () => {
+    const endpointCases = [
+      {
+        region: 'ap-northeast-1',
+        suffix: 'amazonaws.com',
+      },
+      {
+        region: 'cn-north-1',
+        suffix: 'amazonaws.com.cn',
+      },
+      {
+        region: 'eusc-de-east-1',
+        suffix: 'amazonaws.eu',
+      },
+      {
+        region: 'us-iso-east-1',
+        suffix: 'c2s.ic.gov',
+      },
+      {
+        region: 'us-isob-east-1',
+        suffix: 'sc2s.sgov.gov',
+      },
+      {
+        region: 'eu-isoe-west-1',
+        suffix: 'cloud.adc-e.uk',
+      },
+      {
+        region: 'us-isof-south-1',
+        suffix: 'csp.hci.ic.gov',
+      },
+      {
+        region: 'us-gov-west-1',
+        suffix: 'amazonaws.com',
+      },
+    ]
+    const previousGlobalEndpoint = process.env.AWS_ENDPOINT_URL
     const previousDynamoDbEndpoint = process.env.AWS_ENDPOINT_URL_DYNAMODB
     const previousStsEndpoint = process.env.AWS_ENDPOINT_URL_STS
     try {
+      process.env.AWS_ENDPOINT_URL = 'https://attacker.invalid/global'
       process.env.AWS_ENDPOINT_URL_DYNAMODB = 'https://attacker.invalid/dynamodb'
       process.env.AWS_ENDPOINT_URL_STS = 'https://attacker.invalid/sts'
 
-      const created = createAwsSdkTransport(
-        {
-          profile: 'integrity-read-only',
-          region: 'ap-northeast-1',
-        },
-        (nextDynamodbConfiguration, nextStsConfiguration) => {
-          dynamodbConfiguration = nextDynamodbConfiguration
-          stsConfiguration = nextStsConfiguration
-          return transport
-        },
-      )
+      for (const endpointCase of endpointCases) {
+        const transport = new RecordingAwsTransport()
+        let dynamodbConfiguration:
+          WorkItemsIntegrityAwsSdkClientConfiguration | undefined
+        let stsConfiguration: WorkItemsIntegrityAwsSdkClientConfiguration | undefined
+        const created = createAwsSdkTransport(
+          {
+            profile: 'integrity-read-only',
+            region: endpointCase.region,
+          },
+          (nextDynamodbConfiguration, nextStsConfiguration) => {
+            dynamodbConfiguration = nextDynamodbConfiguration
+            stsConfiguration = nextStsConfiguration
+            return transport
+          },
+        )
 
-      expect(created).toBe(transport)
-      expect(dynamodbConfiguration).toMatchObject({
-        endpoint: 'https://dynamodb.ap-northeast-1.amazonaws.com/',
+        expect(created).toBe(transport)
+        expect(dynamodbConfiguration).toMatchObject({
+          endpoint: `https://dynamodb.${endpointCase.region}.${endpointCase.suffix}/`,
+          profile: 'integrity-read-only',
+          region: endpointCase.region,
+        })
+        expect(stsConfiguration).toMatchObject({
+          endpoint: `https://sts.${endpointCase.region}.${endpointCase.suffix}/`,
+          profile: 'integrity-read-only',
+          region: endpointCase.region,
+        })
+        expect(dynamodbConfiguration?.credentials).toBe(stsConfiguration?.credentials)
+      }
+      expect(() => createAwsSdkTransport({
         profile: 'integrity-read-only',
-        region: 'ap-northeast-1',
-      })
-      expect(stsConfiguration).toMatchObject({
-        endpoint: 'https://sts.ap-northeast-1.amazonaws.com/',
-        profile: 'integrity-read-only',
-        region: 'ap-northeast-1',
-      })
-      expect(dynamodbConfiguration?.credentials).toBe(stsConfiguration?.credentials)
+        region: 'ap-northeast-1.attacker.invalid',
+      })).toThrow('INVALID_USAGE')
     } finally {
+      restoreEnvironmentVariable('AWS_ENDPOINT_URL', previousGlobalEndpoint)
       restoreEnvironmentVariable(
         'AWS_ENDPOINT_URL_DYNAMODB',
         previousDynamoDbEndpoint,
