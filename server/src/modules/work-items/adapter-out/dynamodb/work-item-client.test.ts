@@ -12,16 +12,19 @@ import {
 import {
   createMutationAuditContext,
 } from '../../../audit/audit'
-import type {
+import {
   DynamoDBClient,
 } from '@aws-sdk/client-dynamodb'
-import type {
+import {
   DynamoDBDocumentClient,
+} from '@aws-sdk/lib-dynamodb'
+import type {
   TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
   afterEach,
   expect,
+  spyOn,
   test,
 } from 'bun:test'
 
@@ -628,18 +631,20 @@ test('DynamoDB Work Item creation allocates IDs and sort order across archived r
 })
 
 test('DynamoDB Work Item writes reject impossible due dates before persistence', async () => {
-  let sendCount = 0
-  const documentClient = {
-    async send() {
-      sendCount += 1
-      return {}
+  const dynamoDbClient = new DynamoDBClient({
+    credentials: {
+      accessKeyId: 'test-access-key',
+      secretAccessKey: 'test-secret-key',
     },
-  } as unknown as DynamoDBDocumentClient
+    region: 'us-east-1',
+  })
+  const documentClient = DynamoDBDocumentClient.from(dynamoDbClient)
+  const sendSpy = spyOn(documentClient, 'send')
   const client = new DynamoDbTeamIssuesClient(
     'WorkItemsTable',
     'IssueEventsTable',
     documentClient,
-    {} as DynamoDBClient,
+    dynamoDbClient,
     false,
   )
   const expectedFailure = {
@@ -674,7 +679,8 @@ test('DynamoDB Work Item writes reject impossible due dates before persistence',
     'demo@example.com',
   )).rejects.toMatchObject(expectedFailure)
 
-  expect(sendCount).toBe(0)
+  expect(sendSpy).not.toHaveBeenCalled()
+  documentClient.destroy()
 })
 
 test('DynamoDB Work Item archive updates reject timestamps outside the canonical window', async () => {

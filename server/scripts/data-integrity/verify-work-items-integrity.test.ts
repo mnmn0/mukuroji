@@ -6,6 +6,7 @@ import {
   readdir,
   rm,
   stat,
+  unlink,
   writeFile,
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -839,6 +840,67 @@ describe('Work Items integrity file boundaries', () => {
       ).rejects.toThrow('OUTPUT_FILE_WRITE_FAILED')
 
       expect(await readFile(outputPath)).toEqual(existingEvidence)
+      expect(await readdir(directory)).toEqual(['manifest.json'])
+    } finally {
+      await rm(directory, { force: true, recursive: true })
+    }
+  })
+
+  test('preserves published evidence and reports persistent temporary cleanup failure', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'mukuroji-integrity-cleanup-failure-'))
+    const outputPath = join(directory, 'manifest.json')
+    let removalAttempts = 0
+    let syncAttempts = 0
+    try {
+      await expect(writeManifestAtomically(
+        outputPath,
+        createManifestFileFixture(),
+        {
+          /** Simulates a persistent failure to remove the temporary hard-link name. */
+          removeTemporaryFile: async () => {
+            removalAttempts += 1
+            throw new Error('simulated cleanup failure')
+          },
+          /** Records that final publication is still flushed after cleanup fails. */
+          syncOutputDirectory: async () => {
+            syncAttempts += 1
+          },
+        },
+      )).rejects.toThrow('OUTPUT_FILE_PUBLISHED_CLEANUP_FAILED')
+
+      expect(removalAttempts).toBe(2)
+      expect(syncAttempts).toBe(1)
+      expect(JSON.parse(await readFile(outputPath, 'utf8'))).toEqual(
+        createManifestFileFixture(),
+      )
+      const entries = await readdir(directory)
+      expect(entries).toContain('manifest.json')
+      expect(entries.some((entry) => entry.startsWith('manifest.json.tmp-'))).toBe(true)
+    } finally {
+      await rm(directory, { force: true, recursive: true })
+    }
+  })
+
+  test('preserves published evidence and reports unconfirmed directory durability', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'mukuroji-integrity-sync-failure-'))
+    const outputPath = join(directory, 'manifest.json')
+    try {
+      await expect(writeManifestAtomically(
+        outputPath,
+        createManifestFileFixture(),
+        {
+          /** Removes the temporary hard-link name through the real filesystem. */
+          removeTemporaryFile: unlink,
+          /** Simulates failure to confirm directory-entry durability. */
+          syncOutputDirectory: async () => {
+            throw new Error('simulated directory sync failure')
+          },
+        },
+      )).rejects.toThrow('OUTPUT_FILE_PUBLISHED_SYNC_FAILED')
+
+      expect(JSON.parse(await readFile(outputPath, 'utf8'))).toEqual(
+        createManifestFileFixture(),
+      )
       expect(await readdir(directory)).toEqual(['manifest.json'])
     } finally {
       await rm(directory, { force: true, recursive: true })

@@ -73,6 +73,8 @@ type WorkItemsIntegrityCliFailureCode =
   | 'INPUT_FILE_UNREADABLE'
   | 'INVALID_USAGE'
   | 'OPERATION_FAILED'
+  | 'OUTPUT_FILE_PUBLISHED_CLEANUP_FAILED'
+  | 'OUTPUT_FILE_PUBLISHED_SYNC_FAILED'
   | 'OUTPUT_FILE_WRITE_FAILED'
 
 /** Exit statuses used by the operator CLI. */
@@ -272,6 +274,14 @@ export type WorkItemsIntegrityCliDependencies = {
   createReader: (
     configuration: WorkItemsIntegrityAwsReaderConfiguration,
   ) => WorkItemsIntegrityManagedReadPort
+}
+
+/** Filesystem operations that run only after the final evidence path exists. */
+type WorkItemsIntegrityPostPublicationOperations = {
+  /** Removes only the temporary hard-link name, preserving final evidence. */
+  removeTemporaryFile: (temporaryPath: string) => Promise<void>
+  /** Flushes the directory entries that publish and remove manifest names. */
+  syncOutputDirectory: (outputPath: string) => Promise<void>
 }
 
 /** AWS SDK transport whose public surface contains no mutation operation. */
@@ -1113,10 +1123,13 @@ async function readBoundedUtf8Content(
  *
  * @param outputPath - Explicit final manifest path.
  * @param manifest - Authenticated secret-free manifest.
+ * @param postPublicationOperations - Injectable finalization operations.
  */
 export async function writeManifestAtomically(
   outputPath: string,
   manifest: WorkItemsIntegrityManifest,
+  postPublicationOperations: WorkItemsIntegrityPostPublicationOperations =
+    defaultPostPublicationOperations,
 ): Promise<void> {
   const temporaryPath = `${outputPath}.tmp-${randomBytes(12).toString('hex')}`
   try {
@@ -1128,12 +1141,34 @@ export async function writeManifestAtomically(
       await handle.close()
     }
     await link(temporaryPath, outputPath)
-    await unlink(temporaryPath)
-    await syncOutputDirectory(outputPath)
   } catch {
     await removeTemporaryFile(temporaryPath)
     throw new WorkItemsIntegrityCliFailure('OUTPUT_FILE_WRITE_FAILED', 1)
   }
+
+  const temporaryFileRemoved = await removePublishedTemporaryFile(
+    temporaryPath,
+    postPublicationOperations.removeTemporaryFile,
+  )
+  try {
+    await postPublicationOperations.syncOutputDirectory(outputPath)
+  } catch {
+    throw new WorkItemsIntegrityCliFailure(
+      'OUTPUT_FILE_PUBLISHED_SYNC_FAILED',
+      1,
+    )
+  }
+  if (!temporaryFileRemoved) {
+    throw new WorkItemsIntegrityCliFailure(
+      'OUTPUT_FILE_PUBLISHED_CLEANUP_FAILED',
+      1,
+    )
+  }
+}
+
+const defaultPostPublicationOperations: WorkItemsIntegrityPostPublicationOperations = {
+  removeTemporaryFile: unlink,
+  syncOutputDirectory,
 }
 
 /**
@@ -1148,6 +1183,28 @@ async function syncOutputDirectory(outputPath: string): Promise<void> {
   } finally {
     await directoryHandle.close()
   }
+}
+
+/**
+ * Retries removal of the temporary hard-link name after final publication.
+ *
+ * @param temporaryPath - Exact temporary path created by this process.
+ * @param removeFile - Injectable removal operation.
+ * @returns True when the temporary name was removed.
+ */
+async function removePublishedTemporaryFile(
+  temporaryPath: string,
+  removeFile: (path: string) => Promise<void>,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await removeFile(temporaryPath)
+      return true
+    } catch {
+      // A transient cleanup failure receives one bounded retry.
+    }
+  }
+  return false
 }
 
 /**

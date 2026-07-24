@@ -483,6 +483,10 @@ Output は atomic に作られ、owner-onlyの mode `0600` になります。Man
 table ARN/profileなどの infrastructure-sensitive metadataが含まれるため、access-controlledな
 evidence storeで管理し、digest keyとは別に保管します。
 既存outputは上書きせず失敗するため、drillごとに一意なevidence pathを指定します。
+`OUTPUT_FILE_PUBLISHED_CLEANUP_FAILED` または `OUTPUT_FILE_PUBLISHED_SYNC_FAILED` の場合は
+最終outputが既に存在します。同じpathで再実行せず、前者は残った `.tmp-*` hard link を
+owner-onlyのまま隔離してcleanupし、後者はfilesystem/directory durabilityを確認してから、
+既存manifestを検証対象として扱うか新しい一意なpathで再取得するかをchange recordへ残します。
 
 v1 は aggregate を primary-key digest 順にsortするため、走査中に最大
 `1,000,000` item分の固定長digestをメモリに保持します。上限を超えた場合は部分結果を出さず

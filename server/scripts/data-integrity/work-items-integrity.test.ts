@@ -129,6 +129,8 @@ type ManifestFixtureOptions = {
   tableArn?: string
   /** DynamoDB immutable table identifier. */
   tableId?: string
+  /** Optional DescribeTable fields merged into the canonical table fixture. */
+  tableOverrides?: Partial<TableDescription>
   /** Explicit physical table name. */
   tableName?: string
   /** Optional table state override. */
@@ -562,19 +564,22 @@ function startManifestCreation(options: ManifestFixtureOptions): ManifestAttempt
     (options.role === 'source' ? SOURCE_TABLE_ID : RESTORE_TABLE_ID)
   const sourceArn = options.restoreSourceArn ??
     createTableArn(account, region, SOURCE_TABLE_NAME)
-  const table = createTableDescription({
-    account,
-    gsiProjection: options.gsiProjection,
-    gsiStatus: options.gsiStatus,
-    region,
-    restoreDateTime: options.restoreDateTime ?? RESTORE_POINT,
-    restoreSourceArn: sourceArn,
-    role: options.role,
-    tableArn: options.tableArn,
-    tableId,
-    tableName,
-    tableStatus: options.tableStatus,
-  })
+  const table: TableDescription = {
+    ...createTableDescription({
+      account,
+      gsiProjection: options.gsiProjection,
+      gsiStatus: options.gsiStatus,
+      region,
+      restoreDateTime: options.restoreDateTime ?? RESTORE_POINT,
+      restoreSourceArn: sourceArn,
+      role: options.role,
+      tableArn: options.tableArn,
+      tableId,
+      tableName,
+      tableStatus: options.tableStatus,
+    }),
+    ...options.tableOverrides,
+  }
   const scanPages = options.scanPages ??
     [createScanPage(options.items ?? [createCanonicalItem()])]
   const reader = new FakeWorkItemsIntegrityReadPort({
@@ -708,6 +713,28 @@ describe('Work Items integrity manifest core', () => {
     })
   })
 
+  test('fails comparison when source and restore manifest roles are reversed', async () => {
+    const item = createCanonicalItem()
+    const source = await createManifestFixture({
+      role: 'source',
+      items: [item],
+    })
+    const restore = await createManifestFixture({
+      role: 'restore',
+      items: [item],
+      restoreSourceArn: source.manifest.observed.tableArn,
+    })
+
+    const comparison = compareWorkItemsIntegrityManifests(
+      restore.manifest,
+      source.manifest,
+      DIGEST_KEY,
+    )
+
+    expect(comparison.status).toBe('fail')
+    expect(comparison.failureCodes).toContain('MANIFEST_ROLE_MISMATCH')
+  })
+
   test('is stable across item order, page boundaries, empty pages, maps, and sets', async () => {
     const firstCursor = createCursor('cursor-page-one')
     const secondCursor = createCursor('cursor-page-two')
@@ -829,6 +856,24 @@ describe('Work Items integrity manifest core', () => {
     expect(attempt.reader.scanCalls).toEqual([])
   })
 
+  test('rejects digest keys shorter or longer than 32 bytes before any read', async () => {
+    for (const byteLength of [31, 33]) {
+      const attempt = startManifestCreation({
+        role: 'source',
+        digestKey: new Uint8Array(byteLength),
+      })
+
+      await expect(attempt.promise).rejects.toMatchObject({
+        code: 'DIGEST_KEY_INVALID',
+      })
+      expect(attempt.reader.readCallerAccountCallCount).toBe(0)
+      expect(attempt.reader.describeTableCalls).toEqual([])
+      expect(attempt.reader.describeContinuousBackupsCalls).toEqual([])
+      expect(attempt.reader.describeTimeToLiveCalls).toEqual([])
+      expect(attempt.reader.scanCalls).toEqual([])
+    }
+  })
+
   test('requires source PITR but allows PITR to be disabled on an isolated restore', async () => {
     const sourceAttempt = startManifestCreation({
       role: 'source',
@@ -891,6 +936,75 @@ describe('Work Items integrity manifest core', () => {
     expect(enabledTtl.reader.scanCalls).toEqual([])
   })
 
+  test('rejects unsupported table descriptor states before scan', async () => {
+    const unexpectedLocalIndex = startManifestCreation({
+      role: 'source',
+      tableOverrides: {
+        LocalSecondaryIndexes: [
+          {
+            IndexName: 'UnexpectedLocalIndex',
+            KeySchema: [
+              { AttributeName: 'directoryTeamId', KeyType: 'HASH' },
+              { AttributeName: 'sortOrder', KeyType: 'RANGE' },
+            ],
+            Projection: { ProjectionType: 'ALL' },
+          },
+        ],
+      },
+    })
+    await expect(unexpectedLocalIndex.promise).rejects.toMatchObject({
+      code: 'LOCAL_SECONDARY_INDEX_UNEXPECTED',
+    })
+    expect(unexpectedLocalIndex.reader.scanCalls).toEqual([])
+
+    const invalidAttributes = startManifestCreation({
+      role: 'source',
+      tableOverrides: {
+        AttributeDefinitions: [],
+      },
+    })
+    await expect(invalidAttributes.promise).rejects.toMatchObject({
+      code: 'ATTRIBUTE_DEFINITION_MISMATCH',
+    })
+    expect(invalidAttributes.reader.scanCalls).toEqual([])
+
+    const invalidBillingMode = startManifestCreation({
+      role: 'source',
+      tableOverrides: {
+        BillingModeSummary: { BillingMode: 'PROVISIONED' },
+      },
+    })
+    await expect(invalidBillingMode.promise).rejects.toMatchObject({
+      code: 'BILLING_MODE_MISMATCH',
+    })
+    expect(invalidBillingMode.reader.scanCalls).toEqual([])
+
+    const invalidEncryptionState = startManifestCreation({
+      role: 'source',
+      tableOverrides: {
+        SSEDescription: { Status: 'DISABLED', SSEType: 'AES256' },
+      },
+    })
+    await expect(invalidEncryptionState.promise).rejects.toMatchObject({
+      code: 'ENCRYPTION_STATE_INVALID',
+    })
+    expect(invalidEncryptionState.reader.scanCalls).toEqual([])
+  })
+
+  test('rejects a restore without DynamoDB provenance before scan', async () => {
+    const attempt = startManifestCreation({
+      role: 'restore',
+      tableOverrides: {
+        RestoreSummary: undefined,
+      },
+    })
+
+    await expect(attempt.promise).rejects.toMatchObject({
+      code: 'RESTORE_SUMMARY_MISSING',
+    })
+    expect(attempt.reader.scanCalls).toEqual([])
+  })
+
   test('fails closed for an invalid canonical row after scanning all pages', async () => {
     const attempt = startManifestCreation({
       role: 'source',
@@ -902,6 +1016,21 @@ describe('Work Items integrity manifest core', () => {
 
     await expect(attempt.promise).rejects.toMatchObject({
       code: 'INVALID_WORK_ITEM_RECORD',
+    })
+    expect(attempt.reader.scanCalls).toHaveLength(1)
+  })
+
+  test('rejects duplicate primary keys after scanning the table', async () => {
+    const attempt = startManifestCreation({
+      role: 'source',
+      items: [
+        createCanonicalItem({ title: 'First duplicate' }),
+        createCanonicalItem({ title: 'Second duplicate' }),
+      ],
+    })
+
+    await expect(attempt.promise).rejects.toMatchObject({
+      code: 'DUPLICATE_PRIMARY_KEY',
     })
     expect(attempt.reader.scanCalls).toHaveLength(1)
   })
