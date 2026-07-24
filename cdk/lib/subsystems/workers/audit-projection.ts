@@ -71,6 +71,7 @@ export function buildAuditProjectionWorker(
   const collaborationProjectionDlq = new sqs.Queue(scope, 'CollaborationProjectionDlq', {
     encryption: sqs.QueueEncryption.SQS_MANAGED,
     enforceSSL: true,
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
     retentionPeriod: cdk.Duration.days(14),
   });
   const collaborationProjectionFunction = new lambdaNodejs.NodejsFunction(
@@ -80,6 +81,7 @@ export function buildAuditProjectionWorker(
       entry: path.join(serverHandlersDirectory, 'audit-projection-handler.ts'),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
+      tracing: lambda.Tracing.ACTIVE,
       depsLockFilePath,
       projectRoot,
       timeout: cdk.Duration.seconds(30),

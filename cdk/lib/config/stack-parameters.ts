@@ -90,6 +90,7 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     'x-ratelimit-limit',
     'x-ratelimit-remaining',
     'x-ratelimit-reset',
+    'x-correlation-id',
     'x-request-id',
   ];
   const automationWebhookSecretPrefix = 'mukuroji/automation-webhooks';

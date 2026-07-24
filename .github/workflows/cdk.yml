@@ -6,13 +6,18 @@ on:
     branches:
       - main
 
+concurrency:
+  group: cdk-security-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   validate:
-    name: cdk
+    name: cdk-security
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -32,6 +37,9 @@ jobs:
 
       - name: Test CDK
         run: bun run cdk:test
+
+      - name: Run CDK security checks
+        run: bun run cdk:nag
 
       - name: Synthesize CloudFormation
         run: bun --filter cdk cdk synth --quiet

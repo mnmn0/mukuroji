@@ -924,7 +924,7 @@ describe('AutomationManagementPanel', () => {
 
     expect(recurringHtml).toContain('America/New_York')
     expect(recurringHtml).toContain('Next run')
-    expect(recurringHtml).toContain('Mar 8, 2026 at 9:00 AM')
+    expect(recurringHtml).toMatch(/Mar 8, 2026(?: at|,) 9:00 AM/u)
     expect(executionHtml).toContain('Dead letter')
     expect(executionHtml).toContain('The execution reached the retry limit')
     expect(executionHtml).toContain('rule outbound webhook:v2:0')

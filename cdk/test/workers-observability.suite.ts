@@ -1374,11 +1374,26 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
     ).Properties.PolicyDocument.Statement.filter((statement) => statement.Resource === '*')
   );
   expect(projectionWildcardStatements).toEqual([{
-    Action: 'dynamodb:ListStreams',
+    Action: [
+      'dynamodb:ListStreams',
+      'xray:PutTelemetryRecords',
+      'xray:PutTraceSegments',
+    ],
     Effect: 'Allow',
     Resource: '*',
   }]);
-  expect(deliveryPolicies).not.toContain('"Resource":"*"');
+  const deliveryWildcardStatements = policiesForRole(deliveryRoleId).flatMap((resource) =>
+    (
+      resource as {
+        Properties: { PolicyDocument: { Statement: Array<Record<string, unknown>> } };
+      }
+    ).Properties.PolicyDocument.Statement.filter((statement) => statement.Resource === '*')
+  );
+  expect(deliveryWildcardStatements).toEqual([{
+    Action: ['xray:PutTelemetryRecords', 'xray:PutTraceSegments'],
+    Effect: 'Allow',
+    Resource: '*',
+  }]);
 
   expect(template.toJSON().Outputs).not.toHaveProperty('WebhookProjectionDlqUrl');
   template.hasOutput('WebhookDeliveryQueueUrl', {
@@ -1789,7 +1804,13 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
   ]));
   expect(pollDeveloperPlatformStatements).toHaveLength(2);
   expect(pollPolicies).not.toContain('/index/*');
-  expect(pollPolicies).not.toContain('"Resource":"*"');
+  expect(
+    pollStatements.filter((statement) => statement.Resource === '*'),
+  ).toEqual([{
+    Action: ['xray:PutTelemetryRecords', 'xray:PutTraceSegments'],
+    Effect: 'Allow',
+    Resource: '*',
+  }]);
   expect(pollPolicies).not.toContain('dynamodb:Scan');
   expect(pollPolicies).not.toContain(secretId);
   expect(pollPolicies).not.toContain('secretsmanager:GetSecretValue');
@@ -1873,6 +1894,14 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     Threshold: 1,
     TreatMissingData: 'notBreaching',
   });
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription:
+      'Detects failures while Lambda delivers notification schedule failures to the DLQ.',
+    MetricName: 'DestinationDeliveryFailures',
+    Namespace: 'AWS/Lambda',
+    Threshold: 1,
+    TreatMissingData: 'notBreaching',
+  });
   template.hasResourceProperties('AWS::Events::Rule', {
     Description: 'Checks canonical Work Items for due and overdue notifications.',
     ScheduleExpression: 'rate(1 hour)',
@@ -1896,6 +1925,41 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
   expect(serializedSchedulePolicy).toContain('dynamodb:PutItem');
   expect(serializedSchedulePolicy).toContain('sqs:SendMessage');
   template.hasOutput('NotificationScheduleDlqUrl', {});
+});
+
+test('application Lambdas emit active X-Ray traces and critical DLQs survive replacement', () => {
+  const template = synthesizedTemplate;
+  const queues = template.findResources('AWS::SQS::Queue');
+
+  template.resourcePropertiesCountIs('AWS::Lambda::Function', {
+    TracingConfig: { Mode: 'Active' },
+  }, 16);
+
+  for (const logicalIdPrefix of [
+    'CollaborationProjectionDlq',
+    'AutomationEventDlq',
+    'AutomationScheduleDlq',
+    'AnalyticsScheduleDlq',
+    'NotificationScheduleDlq',
+    'EnterpriseScimGroupJobDlq',
+    'EnterpriseIdentityMaintenanceDlq',
+  ]) {
+    const queueEntry = Object.entries(queues).find(([logicalId]) =>
+      logicalId.startsWith(logicalIdPrefix)
+    );
+    expect(queueEntry).toBeDefined();
+    if (!queueEntry) {
+      throw new Error(`${logicalIdPrefix} was not synthesized.`);
+    }
+    expect(queueEntry[1]).toEqual(expect.objectContaining({
+      DeletionPolicy: 'Retain',
+      UpdateReplacePolicy: 'Retain',
+      Properties: expect.objectContaining({
+        MessageRetentionPeriod: 14 * 24 * 60 * 60,
+        SqsManagedSseEnabled: true,
+      }),
+    }));
+  }
 });
 
 test('request email ingestion is an asynchronous narrow-IAM Lambda with a monitored DLQ', () => {

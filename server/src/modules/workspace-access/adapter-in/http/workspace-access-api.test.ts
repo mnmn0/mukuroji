@@ -167,6 +167,9 @@ test('forwards stable Workspace mutation audit headers and actor context to the 
   })
 
   expect(response.status).toBe(200)
+  if (!capturedAuditContext) {
+    throw new Error('Workspace mutation audit context was not captured.')
+  }
   expect(capturedAuditContext).toMatchObject({
     workspaceId: 'user#demo@example.com',
     actor: {
@@ -174,14 +177,22 @@ test('forwards stable Workspace mutation audit headers and actor context to the 
       displayName: 'demo@example.com',
       kind: 'user',
     },
-    correlationId: 'workspace-correlation-1',
     source: {
       kind: 'api',
       method: 'PATCH',
       route: '/api/workspace/members/sato%40example.com',
     },
   })
-  expect(capturedAuditContext?.idempotencyKeyHash).not.toContain(
+  expect(capturedAuditContext.correlationId).toBe(
+    response.headers.get('X-Correlation-Id'),
+  )
+  expect(capturedAuditContext.correlationId).not.toBe(
+    'workspace-correlation-1',
+  )
+  expect(capturedAuditContext.source.requestId).toBe(
+    response.headers.get('X-Request-Id'),
+  )
+  expect(capturedAuditContext.idempotencyKeyHash).not.toContain(
     'workspace-member-role-change-1',
   )
 })
@@ -467,7 +478,7 @@ test('resends credentials when inviting an existing unconfirmed Workspace identi
   expect(calls.workspaceInvitationResends).toEqual(['invitee@example.com'])
   expectStableWorkspaceMutationAuditContexts(calls.workspaceMutationAuditContexts, {
     actorId: 'demo@example.com',
-    correlationId: 'workspace-invitation-create-correlation',
+    clientCorrelationId: 'workspace-invitation-create-correlation',
     idempotencyKey: 'workspace-invitation-create-1',
     method: 'POST',
     requestBody: { email: 'invitee@example.com', name: 'Invitee', role: 'member' },
@@ -647,7 +658,7 @@ test('keeps raced Cognito ownership ambiguous while resending temporary credenti
   expect(calls.workspaceInvitationResends).toEqual(['raced-user@example.com'])
   expectStableWorkspaceMutationAuditContexts(calls.workspaceMutationAuditContexts, {
     actorId: 'demo@example.com',
-    correlationId: 'workspace-invitation-race-correlation',
+    clientCorrelationId: 'workspace-invitation-race-correlation',
     idempotencyKey: 'workspace-invitation-race-1',
     method: 'POST',
     requestBody: { email: 'raced-user@example.com', role: 'member' },
@@ -817,7 +828,7 @@ test('drops ownership and cleanup provenance when reinvite finds a replacement C
   expect(resends).toEqual(['CaseSensitiveReplacement'])
   expectStableWorkspaceMutationAuditContexts(auditContexts, {
     actorId: 'demo@example.com',
-    correlationId: 'workspace-reinvite-correlation',
+    clientCorrelationId: 'workspace-reinvite-correlation',
     idempotencyKey: 'workspace-reinvite-1',
     method: 'POST',
     requestBody: { action: 'reinvite', invitationId: 'replacement@example.com' },
@@ -968,7 +979,7 @@ test('forwards one mutation audit context through every invitation resend stage'
   expect(response.status).toBe(200)
   expectStableWorkspaceMutationAuditContexts(auditContexts, {
     actorId: 'demo@example.com',
-    correlationId: 'workspace-resend-correlation',
+    clientCorrelationId: 'workspace-resend-correlation',
     idempotencyKey: 'workspace-resend-1',
     method: 'POST',
     requestBody: { action: 'resend', invitationId: 'resend@example.com' },
