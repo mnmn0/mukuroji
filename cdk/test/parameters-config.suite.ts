@@ -49,6 +49,17 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
     Type: 'String',
     AllowedPattern: '^https?://[^,\\s]+(,https?://[^,\\s]+)*$',
   }));
+  for (const parameterName of [
+    'AlarmPrimaryTopicName',
+    'AlarmSecondaryTopicName',
+  ]) {
+    expect(parameters[parameterName]).toEqual(expect.objectContaining({
+      Type: 'String',
+      MinLength: 1,
+      MaxLength: 256,
+      AllowedPattern: '^[A-Za-z0-9_-]+$',
+    }));
+  }
   expect(parameters.FileRetentionDays).toEqual(expect.objectContaining({
     Type: 'Number',
     Default: 30,
@@ -98,9 +109,25 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
     'InitialOwnerUsername',
     'RequestEmailWebhookSecret',
     'RequestTokenHashSecret',
+    'AlarmPrimaryTopicName',
+    'AlarmSecondaryTopicName',
   ]) {
     expect(parameters[parameterName].Default).toBeUndefined();
   }
+  expect(template.toJSON().Rules.AlarmNotificationTopicSeparation).toEqual({
+    Assertions: [{
+      Assert: {
+        'Fn::Not': [{
+          'Fn::Equals': [
+            { Ref: 'AlarmPrimaryTopicName' },
+            { Ref: 'AlarmSecondaryTopicName' },
+          ],
+        }],
+      },
+      AssertDescription:
+        'AlarmPrimaryTopicName must differ from AlarmSecondaryTopicName.',
+    }],
+  });
   expect(template.toJSON().Rules.EnterpriseSecretSeparation).toEqual({
     Assertions: [{
       Assert: {
