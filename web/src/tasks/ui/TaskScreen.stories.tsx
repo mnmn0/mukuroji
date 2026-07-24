@@ -250,6 +250,18 @@ export const Loading: Story = {
   args: {
     isLoading: true,
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const status = canvas.getByRole('status')
+    const busyRegion = status.closest('section')
+
+    if (!busyRegion) {
+      throw new Error('Expected the loading status inside the busy task region.')
+    }
+
+    await expect(status).toHaveTextContent('タスク一覧を確認しています。')
+    await expect(busyRegion).toHaveAttribute('aria-busy', 'true')
+  },
 }
 
 /**
