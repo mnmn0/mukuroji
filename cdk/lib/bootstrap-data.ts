@@ -1,7 +1,7 @@
 import * as customResources from 'aws-cdk-lib/custom-resources';
 
 /**
- * Project が複数 Team に表示される場合も含めた canonical owner Team です。
+ * Canonical owner Team for each Project, including Projects displayed under multiple Teams.
  */
 const projectOwnerTeamIds = {
   refero: 'core-team',
@@ -11,45 +11,60 @@ const projectOwnerTeamIds = {
 } as const;
 
 /**
- * Canonical Work Item table に初期投入する Refero の demo データです。
+ * Refero demo records seeded into the canonical Work Item table.
  */
 const canonicalWorkItemItems = [
-  ['refero', 'wireframe', 10, 'tasks.item.wireframe', '新しいランディングページのワイヤーフレーム作成', 'sato@example.com', 'in-progress', '2026/06/03', 'high'],
-  ['refero', 'brand-guideline', 20, 'tasks.item.brandGuideline', 'ブランドガイドラインの更新', 'suzuki@example.com', 'review', '2026/06/05', 'medium'],
-  ['refero', 'pricing-content', 30, 'tasks.item.pricingContent', '料金ページのコンテンツ作成', 'tanaka@example.com', 'in-progress', '2026/06/08', 'high'],
-  ['refero', 'seo-research', 40, 'tasks.item.seoResearch', 'SEO キーワードリサーチ', 'yamamoto@example.com', 'todo', '2026/06/09', 'medium'],
-  ['refero', 'hero-design', 50, 'tasks.item.heroDesign', 'ヒーロー画像のデザイン作成', 'sato@example.com', 'review', '2026/06/10', 'medium'],
-  ['refero', 'analytics-tags', 60, 'tasks.item.analyticsTags', 'アナリティクスタグの実装', 'suzuki@example.com', 'in-progress', '2026/06/11', 'low'],
-  ['refero', 'competitor-report', 70, 'tasks.item.competitorReport', '競合サイトの分析レポート作成', 'tanaka@example.com', 'done', '2026/06/02', 'low'],
-  ['refero', 'terms-page', 80, 'tasks.item.termsPage', '利用規約ページの作成', 'yamamoto@example.com', 'todo', '2026/06/12', 'medium'],
-  ['refero', 'faq-content', 90, 'tasks.item.faqContent', 'FAQ セクションのコンテンツ作成', 'sato@example.com', 'todo', '2026/06/15', 'low'],
-  ['refero', 'landing-release', 100, 'tasks.item.landingRelease', 'ランディングページの公開', 'suzuki@example.com', 'todo', '2026/06/16', 'high'],
+  ['refero', 'wireframe', 10, '新しいランディングページのワイヤーフレーム作成', 'sato@example.com', 'in-progress', '2026/06/03', 'high'],
+  ['refero', 'brand-guideline', 20, 'ブランドガイドラインの更新', 'suzuki@example.com', 'review', '2026/06/05', 'medium'],
+  ['refero', 'pricing-content', 30, '料金ページのコンテンツ作成', 'tanaka@example.com', 'in-progress', '2026/06/08', 'high'],
+  ['refero', 'seo-research', 40, 'SEO キーワードリサーチ', 'yamamoto@example.com', 'todo', '2026/06/09', 'medium'],
+  ['refero', 'hero-design', 50, 'ヒーロー画像のデザイン作成', 'sato@example.com', 'review', '2026/06/10', 'medium'],
+  ['refero', 'analytics-tags', 60, 'アナリティクスタグの実装', 'suzuki@example.com', 'in-progress', '2026/06/11', 'low'],
+  ['refero', 'competitor-report', 70, '競合サイトの分析レポート作成', 'tanaka@example.com', 'done', '2026/06/02', 'low'],
+  ['refero', 'terms-page', 80, '利用規約ページの作成', 'yamamoto@example.com', 'todo', '2026/06/12', 'medium'],
+  ['refero', 'faq-content', 90, 'FAQ セクションのコンテンツ作成', 'sato@example.com', 'todo', '2026/06/15', 'low'],
+  ['refero', 'landing-release', 100, 'ランディングページの公開', 'suzuki@example.com', 'todo', '2026/06/16', 'high'],
 ] as const;
 
 /**
- * Legacy task fallback が使用していた決定的な timestamp です。
+ * Canonical category corresponding to each built-in workflow status ID.
+ */
+const canonicalWorkflowStatusCategories = {
+  todo: 'unstarted',
+  'in-progress': 'started',
+  review: 'started',
+  done: 'completed',
+} as const;
+
+/**
+ * Deterministic timestamp used by canonical Work Item seed records.
  */
 const canonicalWorkItemSeedTimestamp = '2026-06-01T00:00:00.000Z';
 
 /**
- * 初期 owner を manager として登録する seed project ID です。
+ * Project IDs that register the initial owner as a manager.
  */
 const ownerProjectIds = ['refero', 'product-roadmap', 'shared-launch', 'brand-refresh'] as const;
 
 /**
- * 冪等 bootstrap row に使用する決定的な timestamp です。
+ * Deterministic timestamp used by idempotent workspace bootstrap records.
  */
 const workspaceBootstrapTimestamp = '2026-07-11T00:00:00.000Z';
 
 /**
- * Workspace access table の初期 metadata と owner を作成する transaction payload です。
+ * Creates the initial workspace metadata and owner transaction payload.
+ *
+ * @param tableName - Workspace access table name.
+ * @param workspaceId - Canonical workspace identifier.
+ * @param initialOwnerEmail - Lowercase email address of the initial owner.
+ * @returns Idempotent DynamoDB transaction items.
  */
 export function createWorkspaceAccessTransactItems(
   tableName: string,
   workspaceId: string,
   initialOwnerEmail: string,
 ) {
-  const createdAt = workspaceBootstrapTimestamp;
+  const createdAt = '2026-07-11T00:00:00.000Z';
 
   return [
     {
@@ -107,10 +122,14 @@ export function createWorkspaceAccessTransactItems(
 }
 
 /**
- * CDK demo data が参照する Workspace member を既存 role/status を上書きせず seed します。
+ * Creates demo workspace members without replacing an existing role or status.
+ *
+ * @param tableName - Workspace access table name.
+ * @param workspaceId - Canonical workspace identifier.
+ * @returns Idempotent DynamoDB transaction items for demo members.
  */
 export function createWorkspaceDemoMemberTransactItems(tableName: string, workspaceId: string) {
-  const createdAt = workspaceBootstrapTimestamp;
+  const createdAt = '2026-07-11T00:00:00.000Z';
   const members = [
     ['sato@example.com', '佐藤 花子', 'member'],
     ['suzuki@example.com', '鈴木 太郎', 'member'],
@@ -231,7 +250,7 @@ const projectDirectoryItems = [
 ] as const;
 
 /**
- * Refero プロジェクトに追加する owner 以外の demo member です。
+ * Demo members other than the owner seeded into the Refero Project.
  */
 const projectMemberItems = [
   ['refero', 'sato@example.com', 'sato@example.com', '佐藤 花子', 'member'],
@@ -239,45 +258,146 @@ const projectMemberItems = [
 ] as const;
 
 /**
- * DynamoDB に保存する project partition key を作成します。
+ * Returns the authoritative base-table sort key for a demo Team.
+ *
+ * @param teamId - Team identifier to locate.
+ * @returns Stable directory entry key for the Team.
+ */
+function findProjectDirectoryTeamEntryKey(teamId: string) {
+  const team = projectDirectoryItems.find((entry) =>
+    entry.entryType === 'team' && entry.teamId === teamId
+  );
+  if (!team) {
+    throw new Error(`Project directory Team "${teamId}" was not found.`);
+  }
+  return team.entryKey;
+}
+
+/**
+ * Creates the DynamoDB partition key for a Project.
+ *
+ * @param directoryId - Canonical workspace directory identifier.
+ * @param projectId - Project identifier.
+ * @returns Stable Project partition key.
  */
 function createDirectoryProjectId(directoryId: string, projectId: string) {
   return `${directoryId}#project#${projectId}`;
 }
 
 /**
- * DynamoDB に保存する project member sort key を作成します。
+ * Creates the DynamoDB sort key for a Project member.
+ *
+ * @param projectId - Project identifier.
+ * @param memberKey - Canonical member key.
+ * @returns Stable Project member sort key.
  */
 function createProjectMemberEntryKey(projectId: string, memberKey: string) {
   return `PROJECT_MEMBER#${projectId}#${memberKey}`;
 }
 
 /**
- * DynamoDB に保存する workspace member sort key を作成します。
+ * Creates materialized Put operations used to query Team-only Webhook access directly.
+ *
+ * @param tableName - Project directory table name.
+ * @param workspaceId - Canonical workspace identifier.
+ * @param teamId - Team identifier granting access.
+ * @param projectId - Project identifier covered by the grant.
+ * @param memberKey - Canonical member key receiving access.
+ * @param teamSourceEntryKey - Authoritative Team directory entry key.
+ * @param projectSourceEntryKey - Authoritative Project directory entry key.
+ * @returns Materialized Webhook Team grant and cleanup records.
+ */
+function createWebhookTeamGrantPuts(
+  tableName: string,
+  workspaceId: string,
+  teamId: string,
+  projectId: string,
+  memberKey: string,
+  teamSourceEntryKey: string,
+  projectSourceEntryKey: string,
+) {
+  return [
+    {
+      Put: {
+        TableName: tableName,
+        Item: {
+          directoryId: { S: `WEBHOOK_TEAM_GRANT#${workspaceId}#${memberKey}` },
+          entryKey: { S: `TEAM#${teamId}#PROJECT#${projectId}` },
+          entryType: { S: 'webhook-team-grant' },
+          workspaceId: { S: workspaceId },
+          teamId: { S: teamId },
+          projectId: { S: projectId },
+          memberKey: { S: memberKey },
+          sourceEntryKey: {
+            S: createProjectMemberEntryKey(projectId, memberKey),
+          },
+          teamSourceEntryKey: { S: teamSourceEntryKey },
+          projectSourceEntryKey: { S: projectSourceEntryKey },
+          webhookAuthorizationKey: {
+            S: `WEBHOOK_ACL#TEAM_MEMBER#${workspaceId}#${teamId}#${memberKey}`,
+          },
+          webhookAuthorizationSortKey: { S: `PROJECT#${projectId}` },
+        },
+      },
+    },
+    {
+      Put: {
+        TableName: tableName,
+        Item: {
+          directoryId: {
+            S: `WEBHOOK_GRANT_CLEANUP#${workspaceId}#${teamId}`,
+          },
+          entryKey: { S: `PROJECT#${projectId}#MEMBER#${memberKey}` },
+          entryType: { S: 'webhook-team-grant-cleanup' },
+          workspaceId: { S: workspaceId },
+          teamId: { S: teamId },
+          projectId: { S: projectId },
+          memberKey: { S: memberKey },
+          grantDirectoryId: {
+            S: `WEBHOOK_TEAM_GRANT#${workspaceId}#${memberKey}`,
+          },
+          grantEntryKey: { S: `TEAM#${teamId}#PROJECT#${projectId}` },
+        },
+      },
+    },
+  ];
+}
+
+/**
+ * Creates the DynamoDB sort key for a workspace member.
+ *
+ * @param memberKey - Canonical member key.
+ * @returns Stable workspace member sort key.
  */
 function createWorkspaceMemberEntryKey(memberKey: string) {
   return `WORKSPACE_MEMBER#${memberKey}`;
 }
 
 /**
- * DynamoDB に保存する email alias sort key を作成します。
+ * Creates the DynamoDB sort key for an email alias.
+ *
+ * @param email - Canonical lowercase email address.
+ * @returns Stable email alias sort key.
  */
 function createEmailAliasEntryKey(email: string) {
   return `EMAIL_ALIAS#${email}`;
 }
 
 /**
- * Team-owned canonical Work Item の初回 seed transaction を作成します。
+ * Creates the initial Team-owned canonical Work Item seed transaction.
+ *
+ * @param tableName - Canonical Work Item table name.
+ * @param directoryId - Canonical workspace directory identifier.
+ * @returns Conditional DynamoDB Put operations for demo Work Items.
  */
 export function createCanonicalWorkItemTransactItems(tableName: string, directoryId: string) {
   return canonicalWorkItemItems.map(([
     projectId,
     workItemId,
     sortOrder,
-    titleKey,
     title,
     assigneeUserId,
-    status,
+    workflowStatusId,
     dueDate,
     priority,
   ]) => {
@@ -294,23 +414,21 @@ export function createCanonicalWorkItemTransactItems(tableName: string, director
           teamId: { S: teamId },
           assignedProjectId: { S: projectId },
           issueId: { S: workItemId },
-          workItemId: { S: workItemId },
           schemaVersion: { N: '1' },
           revision: { N: '1' },
           sortOrder: { N: String(sortOrder) },
-          titleKey: { S: titleKey },
           title: { S: title },
           assigneeUserId: { S: assigneeUserId },
-          status: { S: status },
+          creatorMemberKey: { S: assigneeUserId },
+          workflowSchemaVersion: { N: '1' },
+          workflowStatusId: { S: workflowStatusId },
+          statusCategory: { S: canonicalWorkflowStatusCategories[workflowStatusId] },
+          customFieldValues: { M: {} },
+          relationIds: { L: [] },
           dueDate: { S: dueDate },
           priority: { S: priority },
           createdAt: { S: canonicalWorkItemSeedTimestamp },
           updatedAt: { S: canonicalWorkItemSeedTimestamp },
-          source: { S: 'dynamodb' },
-          migrationSource: { S: 'legacy-project-task' },
-          migrationSourceKey: {
-            S: `${createDirectoryProjectId(directoryId, projectId)}#task#${workItemId}`,
-          },
         },
       },
     };
@@ -318,7 +436,11 @@ export function createCanonicalWorkItemTransactItems(tableName: string, director
 }
 
 /**
- * Team/project directory の初回 seed transaction を作成します。
+ * Creates the initial Team and Project directory seed transaction.
+ *
+ * @param tableName - Project directory table name.
+ * @param directoryId - Canonical workspace directory identifier.
+ * @returns Conditional DynamoDB Put operations for directory and Webhook grant records.
  */
 export function createProjectDirectoryTransactItems(tableName: string, directoryId: string) {
   const directoryItems = projectDirectoryItems.map((entry) => ({
@@ -329,6 +451,12 @@ export function createProjectDirectoryTransactItems(tableName: string, directory
         directoryId: { S: directoryId },
         entryKey: { S: entry.entryKey },
         entryType: { S: entry.entryType },
+        webhookAuthorizationKey: { S: `WEBHOOK_ACL#RESOURCE#${directoryId}` },
+        webhookAuthorizationSortKey: {
+          S: entry.entryType === 'team'
+            ? `TEAM#${entry.teamId}`
+            : `PROJECT#${entry.projectId}`,
+        },
         teamId: { S: entry.teamId },
         teamSortOrder: { N: String(entry.teamSortOrder) },
         nameJa: { S: entry.nameJa },
@@ -353,6 +481,10 @@ export function createProjectDirectoryTransactItems(tableName: string, directory
         directoryId: { S: directoryId },
         entryKey: { S: createProjectMemberEntryKey(projectId, memberKey) },
         entryType: { S: 'project-member' },
+        webhookAuthorizationKey: {
+          S: `WEBHOOK_ACL#MEMBER#${directoryId}#${memberKey}`,
+        },
+        webhookAuthorizationSortKey: { S: `PROJECT#${projectId}` },
         projectId: { S: projectId },
         memberKey: { S: memberKey },
         email: { S: email },
@@ -363,12 +495,35 @@ export function createProjectDirectoryTransactItems(tableName: string, directory
       },
     },
   }));
+  const teamGrantItems = projectMemberItems.flatMap(([projectId, memberKey]) =>
+    projectDirectoryItems
+      .filter((entry) =>
+        entry.entryType === 'project' && entry.projectId === projectId
+      )
+      .flatMap((entry) =>
+        createWebhookTeamGrantPuts(
+          tableName,
+          directoryId,
+          entry.teamId,
+          projectId,
+          memberKey,
+          findProjectDirectoryTeamEntryKey(entry.teamId),
+          entry.entryKey,
+        )
+      )
+  );
 
-  return [...directoryItems, ...memberItems];
+  return [...directoryItems, ...memberItems, ...teamGrantItems];
 }
 
 /**
- * Workspace metadata、owner、email alias と owner project 権限を冪等投入します。
+ * Creates idempotent workspace metadata, owner, email alias, and Project permissions.
+ *
+ * @param tableName - Project directory table name.
+ * @param directoryId - Canonical workspace directory identifier.
+ * @param initialOwnerEmail - Lowercase email address of the initial owner.
+ * @param initialOwnerUsername - Cognito username of the initial owner.
+ * @returns Idempotent DynamoDB transaction items for workspace bootstrap.
  */
 export function createWorkspaceBootstrapTransactItems(
   tableName: string,
@@ -453,7 +608,7 @@ export function createWorkspaceBootstrapTransactItems(
         entryKey: { S: createProjectMemberEntryKey(projectId, initialOwnerEmail) },
       },
       UpdateExpression:
-        'SET #entryType = if_not_exists(#entryType, :entryType), projectId = if_not_exists(projectId, :projectId), memberKey = if_not_exists(memberKey, :memberKey), email = :email, #role = :role, createdAt = if_not_exists(createdAt, :timestamp), updatedAt = if_not_exists(updatedAt, :timestamp)',
+        'SET #entryType = if_not_exists(#entryType, :entryType), projectId = if_not_exists(projectId, :projectId), memberKey = if_not_exists(memberKey, :memberKey), webhookAuthorizationKey = :webhookAuthorizationKey, webhookAuthorizationSortKey = :webhookAuthorizationSortKey, email = :email, #role = if_not_exists(#role, :role), createdAt = if_not_exists(createdAt, :timestamp), updatedAt = if_not_exists(updatedAt, :timestamp)',
       ConditionExpression:
         'attribute_not_exists(directoryId) OR (#entryType = :entryType AND projectId = :projectId AND memberKey = :memberKey)',
       ExpressionAttributeNames: {
@@ -464,18 +619,49 @@ export function createWorkspaceBootstrapTransactItems(
         ':entryType': { S: 'project-member' },
         ':projectId': { S: projectId },
         ':memberKey': { S: initialOwnerEmail },
+        ':webhookAuthorizationKey': {
+          S: `WEBHOOK_ACL#MEMBER#${directoryId}#${initialOwnerEmail}`,
+        },
+        ':webhookAuthorizationSortKey': { S: `PROJECT#${projectId}` },
         ':email': { S: initialOwnerEmail },
         ':role': { S: 'manager' },
         ':timestamp': { S: workspaceBootstrapTimestamp },
       },
     },
   }));
+  const ownerTeamGrantItems = ownerProjectIds.flatMap((projectId) =>
+    projectDirectoryItems
+      .filter((entry) =>
+        entry.entryType === 'project' && entry.projectId === projectId
+      )
+      .flatMap((entry) =>
+        createWebhookTeamGrantPuts(
+          tableName,
+          directoryId,
+          entry.teamId,
+          projectId,
+          initialOwnerEmail,
+          findProjectDirectoryTeamEntryKey(entry.teamId),
+          entry.entryKey,
+        )
+      )
+  );
 
-  return [workspaceMetadataItem, workspaceOwnerItem, emailAliasItem, ...ownerProjectMemberItems];
+  return [
+    workspaceMetadataItem,
+    workspaceOwnerItem,
+    emailAliasItem,
+    ...ownerProjectMemberItems,
+    ...ownerTeamGrantItems,
+  ];
 }
 
 /**
- * Create と Update の両方で同じ AWS SDK call を行う custom resource properties を作成します。
+ * Creates custom resource properties that run the same AWS SDK call on create and update.
+ *
+ * @param call - AWS SDK call shared by create and update lifecycle events.
+ * @param policy - Least-privilege policy authorizing the SDK call.
+ * @returns Idempotent AWS custom resource properties.
  */
 export function createIdempotentAwsCustomResourceProps(
   call: customResources.AwsSdkCall,
