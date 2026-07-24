@@ -1,6 +1,7 @@
 import type {
   ConnectorInstallation,
   CursorPage,
+  CreateConnectorInstallationInput,
   WorkItemSyncConflict,
 } from '@mukuroji/contracts'
 import { formatConnectorProviderName } from './displayFormatting'
@@ -31,23 +32,27 @@ export type DeveloperConnectorCatalogItem = {
 /**
  * Input used to start a connector authorization flow.
  */
-export type ConnectDeveloperConnectorInput = {
-  /** Human-readable installation name. */
-  name: string
-  /** Provider scopes granted to the installation. */
-  scopes: string[]
-  /** Optional application-relative return URL after authorization. */
-  returnUrl?: string
-}
+export type ConnectDeveloperConnectorInput =
+  Omit<CreateConnectorInstallationInput, 'provider' | 'returnUrl'> & {
+    /** Optional application-relative return URL after authorization. */
+    returnUrl?: string
+  }
+
+/**
+ * Ordered supported resolutions for a work-item synchronization conflict.
+ */
+export const developerSyncConflictResolutionOptions = [
+  'keep-local',
+  'keep-remote',
+  'merge',
+  'ignore',
+] as const
 
 /**
  * Supported resolution for a work-item synchronization conflict.
  */
 export type DeveloperSyncConflictResolution =
-  | 'keep-local'
-  | 'keep-remote'
-  | 'merge'
-  | 'ignore'
+  (typeof developerSyncConflictResolutionOptions)[number]
 
 /**
  * Input used to resolve a work-item synchronization conflict.
@@ -70,11 +75,8 @@ export type ResolveDeveloperSyncConflictInput = {
 export function isDeveloperSyncConflictResolution(
   value: unknown,
 ): value is DeveloperSyncConflictResolution {
-  return (
-    value === 'keep-local' ||
-    value === 'keep-remote' ||
-    value === 'merge' ||
-    value === 'ignore'
+  return developerSyncConflictResolutionOptions.some(
+    (resolution) => resolution === value,
   )
 }
 

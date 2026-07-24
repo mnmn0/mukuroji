@@ -1,15 +1,20 @@
-import type { ApiKeySummary } from '@mukuroji/contracts'
-import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import type {
-  CreateDeveloperApiKeyInput,
-  IssuedApiKeySecret,
-} from '../model/credentials'
+  ApiKeyOneTimeSecretOutput,
+  ApiKeySummary,
+  CreateApiKeyInput,
+} from '@mukuroji/contracts'
+import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { DeveloperPlatformApiError } from './errors'
 
-export type {
-  CreateDeveloperApiKeyInput,
-  IssuedApiKeySecret,
-} from '../model/credentials'
+/**
+ * Compatibility alias for the canonical API-key creation contract.
+ */
+export type CreateDeveloperApiKeyInput = CreateApiKeyInput
+
+/**
+ * Compatibility alias for the canonical one-time API-key response.
+ */
+export type IssuedApiKeySecret = ApiKeyOneTimeSecretOutput
 
 const developerApiBaseUrl = trimTrailingSlash(
   import.meta.env.VITE_WORKSPACE_API_BASE_URL ??

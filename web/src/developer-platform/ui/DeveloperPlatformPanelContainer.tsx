@@ -44,13 +44,14 @@ import {
   useDeveloperPlatformResources,
   useDeveloperSyncConflicts,
 } from '../queries/useDeveloperPlatform'
-import { DeveloperPlatformPanel } from './DeveloperPlatformPanel'
+import { DeveloperPlatformPanel } from './DeveloperPlatformPanelView'
 import type {
   DeveloperImportProjectOption,
   DeveloperPlatformLabels,
   DeveloperPlatformOption,
   DeveloperPlatformSection,
 } from './DeveloperPlatformView'
+import { triggerDeveloperExportDownload } from './developerExportDownload'
 
 /**
  * Props used to connect the Developer Platform panel to authenticated data.
@@ -97,6 +98,7 @@ export function DeveloperPlatformPanelContainer({
     }),
     [accessToken],
   )
+  const mutationRequestRunner = mutationSession.requestRunner
   const {
     data: resources,
     error,
@@ -137,6 +139,16 @@ export function DeveloperPlatformPanelContainer({
       () => getDeveloperPlatformResources(mutationSession.accessToken),
       { revalidate: false },
     )
+    mutationRequestRunner.discardRetainedContexts()
+  }
+
+  /** Retries aggregate loading without leaking a rejected click-handler Promise. */
+  const retryLoad = async () => {
+    try {
+      await refresh()
+    } catch {
+      // Keep the SWR load error visible while preventing an unhandled rejection.
+    }
   }
 
   /** Resets conflict pagination and refreshes the first page. */
@@ -167,7 +179,7 @@ export function DeveloperPlatformPanelContainer({
   ) => {
     return runDeveloperPlatformMutation(
       () =>
-        mutationSession.requestRunner.run(
+        mutationRequestRunner.run(
           operationKey,
           fingerprint,
           request,
@@ -183,13 +195,10 @@ export function DeveloperPlatformPanelContainer({
       mutationSession.accessToken,
       format,
     )
-    const objectUrl = URL.createObjectURL(exportedFile.blob)
-    const anchor = document.createElement('a')
-
-    anchor.href = objectUrl
-    anchor.download = exportedFile.fileName
-    anchor.click()
-    URL.revokeObjectURL(objectUrl)
+    triggerDeveloperExportDownload(
+      exportedFile.blob,
+      exportedFile.fileName,
+    )
   }
 
   return (
@@ -376,7 +385,7 @@ export function DeveloperPlatformPanelContainer({
           // The mutation response already updated the cached conflict.
         }
       }}
-      onRetry={refresh}
+      onRetry={retryLoad}
       onLoadMoreSyncConflicts={
         syncConflictsHasMore
           ? async () => {

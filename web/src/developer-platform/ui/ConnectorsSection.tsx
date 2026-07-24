@@ -3,6 +3,7 @@ import type {
   WorkItemSyncConflict,
 } from '@mukuroji/contracts'
 import {
+  developerSyncConflictResolutionOptions,
   formatConflictMergeDraft,
   formatSyncConflictValue,
   isDeveloperSyncConflictResolution,
@@ -12,13 +13,6 @@ import {
 import { EmptyState, SectionHeader } from './DeveloperPlatformSectionParts'
 import { StatusBadge } from './DeveloperPlatformStatus'
 import type { DeveloperPlatformLabels } from './DeveloperPlatformView'
-
-const developerSyncConflictResolutionOptions: readonly DeveloperSyncConflictResolution[] = [
-  'keep-local',
-  'keep-remote',
-  'merge',
-  'ignore',
-]
 
 /**
  * Props for the Developer Platform connector and synchronization-conflict section.

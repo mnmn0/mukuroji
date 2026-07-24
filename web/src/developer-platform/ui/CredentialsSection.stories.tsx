@@ -6,6 +6,7 @@ import {
   emptyDeveloperPlatformResourcesFixture,
   readOnlyDeveloperPlatformResourcesFixture,
 } from '../fixtures'
+import { formatDeveloperTimestamp } from '../model/displayFormatting'
 import { CredentialsSection } from './CredentialsSection'
 
 /**
@@ -30,7 +31,7 @@ const meta = {
     apiKeys: developerPlatformResourcesFixture.apiKeys,
     canManage:
       developerPlatformResourcesFixture.capabilities.canManageCredentials,
-    formatDateTime: (value) => value,
+    formatDateTime: formatDeveloperTimestamp,
     labels: developerPlatformLabelsFixture,
     oauthApps: developerPlatformResourcesFixture.oauthApps,
     onCreateApiKey: fn(),

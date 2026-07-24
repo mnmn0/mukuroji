@@ -1,16 +1,29 @@
-import type { OAuthAppSummary } from '@mukuroji/contracts'
-import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import type {
-  CreateDeveloperOAuthAppInput,
-  IssuedOAuthClientSecret,
-} from '../model/credentials'
+  CreateOAuthAppInput,
+  OAuthAppOneTimeSecretOutput,
+  OAuthAppSummary,
+  OAuthGrantType,
+} from '@mukuroji/contracts'
+import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { DeveloperPlatformApiError } from './errors'
 
-export type {
-  CreateDeveloperOAuthAppInput,
-  DeveloperOAuthGrantType,
-  IssuedOAuthClientSecret,
-} from '../model/credentials'
+/**
+ * Compatibility alias for the supported OAuth grant type.
+ */
+export type DeveloperOAuthGrantType = Extract<
+  OAuthGrantType,
+  'client_credentials'
+>
+
+/**
+ * Compatibility alias for the canonical OAuth-app creation contract.
+ */
+export type CreateDeveloperOAuthAppInput = CreateOAuthAppInput
+
+/**
+ * Compatibility alias for the canonical one-time OAuth response.
+ */
+export type IssuedOAuthClientSecret = OAuthAppOneTimeSecretOutput
 
 const developerApiBaseUrl = trimTrailingSlash(
   import.meta.env.VITE_WORKSPACE_API_BASE_URL ??

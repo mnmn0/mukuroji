@@ -1,17 +1,34 @@
-import type { CursorPage, ImportDryRunReport, ImportJob, WorkItem } from '@mukuroji/contracts'
-import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import type {
-  DeveloperExportFormat,
-  DryRunDeveloperImportInput,
-} from '../model/transfers'
+  CreateImportDryRunInput,
+  CreateImportJobInput,
+  CursorPage,
+  ImportDryRunReport,
+  ImportJob,
+  WorkItem,
+} from '@mukuroji/contracts'
+import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { DeveloperPlatformApiError } from './errors'
 
-export type {
-  DeveloperExportFormat,
-  DeveloperImportFieldMapping,
-  DeveloperImportFormat,
-  DryRunDeveloperImportInput,
-} from '../model/transfers'
+/**
+ * Compatibility alias for an import field mapping.
+ */
+export type DeveloperImportFieldMapping =
+  ImportJob['mapping'][number]
+
+/**
+ * Compatibility alias for the import source format.
+ */
+export type DeveloperImportFormat = ImportJob['format']
+
+/**
+ * Compatibility alias for the import dry-run contract.
+ */
+export type DryRunDeveloperImportInput = CreateImportDryRunInput
+
+/**
+ * Compatibility export format accepted by the Work Item export endpoint.
+ */
+export type DeveloperExportFormat = 'csv' | 'json'
 
 /**
  * Work Item export response と download metadata です。
@@ -66,7 +83,7 @@ export function dryRunDeveloperImport(
  */
 export function createDeveloperImport(
   accessToken: string,
-  input: DryRunDeveloperImportInput,
+  input: CreateImportJobInput,
   mutationContext: MutationRequestContext,
 ) {
   return requestJson<ImportJob>(

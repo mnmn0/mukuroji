@@ -1,14 +1,32 @@
-import type { CursorPage, SyncConflictStatus, WorkItemSyncConflict } from '@mukuroji/contracts'
-import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import type {
-  ResolveDeveloperSyncConflictInput,
-} from '../model/connectors'
+  CursorPage,
+  ResolveWorkItemSyncConflictInput,
+  SyncConflictStatus,
+  WorkItemSyncConflict,
+} from '@mukuroji/contracts'
+import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { DeveloperPlatformApiError } from './errors'
 
-export type {
-  DeveloperSyncConflictResolution,
-  ResolveDeveloperSyncConflictInput,
-} from '../model/connectors'
+/**
+ * Compatibility resolution names used by the existing Web client.
+ */
+export type DeveloperSyncConflictResolution =
+  | 'keep-local'
+  | 'keep-remote'
+  | 'merge'
+  | 'ignore'
+
+/**
+ * Compatibility input that includes the conflict path identifier.
+ */
+export type ResolveDeveloperSyncConflictInput = {
+  /** Identifier of the conflict being resolved. */
+  conflictId: string
+  /** Resolution selected by the user. */
+  resolution: DeveloperSyncConflictResolution
+  /** Optional field values supplied for a merge resolution. */
+  mergedValues?: Record<string, unknown>
+}
 
 /**
  * Work Item 同期競合一覧の filter と pagination 入力です。
@@ -84,22 +102,25 @@ export function resolveDeveloperSyncConflict(
   input: ResolveDeveloperSyncConflictInput,
   mutationContext: MutationRequestContext,
 ) {
+  const resolution: ResolveWorkItemSyncConflictInput['resolution'] =
+    input.resolution === 'keep-local'
+      ? 'use-local'
+      : input.resolution === 'keep-remote'
+        ? 'use-external'
+        : input.resolution
+  const requestBody: ResolveWorkItemSyncConflictInput = {
+    resolution,
+    ...(resolution === 'merge'
+      ? { mergedValues: input.mergedValues }
+      : {}),
+  }
+
   return requestJson<WorkItemSyncConflict>(
     `/developer/sync-conflicts/${encodeURIComponent(input.conflictId)}/resolve`,
     accessToken,
     createJsonMutation(
       'POST',
-      {
-        resolution:
-          input.resolution === 'keep-local'
-            ? 'use-local'
-            : input.resolution === 'keep-remote'
-              ? 'use-external'
-              : input.resolution,
-        ...(input.resolution === 'merge'
-          ? { mergedValues: input.mergedValues }
-          : {}),
-      },
+      requestBody,
       mutationContext,
     ),
   )

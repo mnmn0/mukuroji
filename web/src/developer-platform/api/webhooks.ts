@@ -1,16 +1,32 @@
-import type { WebhookDelivery } from '@mukuroji/contracts'
-import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import type {
-  CreateDeveloperWebhookInput,
-  IssuedWebhookSigningSecret,
-} from '../model/webhooks'
+  ApiScope,
+  CreateWebhookSubscriptionInput,
+  WebhookDelivery,
+  WebhookEventType,
+  WebhookSubscriptionSecretOutput,
+} from '@mukuroji/contracts'
+import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { DeveloperPlatformApiError } from './errors'
 
-export type {
-  CreateDeveloperWebhookInput,
-  DeveloperWebhookEventType,
-  IssuedWebhookSigningSecret,
-} from '../model/webhooks'
+/**
+ * Compatibility alias for webhook event identifiers.
+ */
+export type DeveloperWebhookEventType = WebhookEventType
+
+/**
+ * Compatibility webhook input that keeps the previously required scope field.
+ */
+export type CreateDeveloperWebhookInput =
+  Omit<CreateWebhookSubscriptionInput, 'scopes'> & {
+    /** Payload scopes granted to the subscription. */
+    scopes: ApiScope[]
+  }
+
+/**
+ * Compatibility alias for the canonical one-time webhook response.
+ */
+export type IssuedWebhookSigningSecret =
+  WebhookSubscriptionSecretOutput
 
 const developerApiBaseUrl = trimTrailingSlash(
   import.meta.env.VITE_WORKSPACE_API_BASE_URL ??
@@ -31,10 +47,10 @@ const defaultDeveloperApiErrorMessage =
  */
 export function createDeveloperWebhook(
   accessToken: string,
-  input: CreateDeveloperWebhookInput,
+  input: CreateWebhookSubscriptionInput,
   mutationContext: MutationRequestContext,
 ) {
-  return requestJson<IssuedWebhookSigningSecret>(
+  return requestJson<WebhookSubscriptionSecretOutput>(
     '/developer/webhook-subscriptions',
     accessToken,
     createJsonMutation('POST', input, mutationContext),

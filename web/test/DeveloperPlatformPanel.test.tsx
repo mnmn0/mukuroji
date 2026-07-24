@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { DeveloperPlatformPanel } from '../src/developer-platform/ui/DeveloperPlatformPanel'
+import {
+  DeveloperPlatformPanel,
+  DeveloperPlatformPanelContainer,
+} from '../src/developer-platform/ui/DeveloperPlatformPanel'
 import {
   connectorConflictDeveloperPlatformResourcesFixture,
   developerPlatformLabelsFixture,
@@ -10,6 +13,11 @@ import {
 } from '../src/developer-platform/fixtures'
 
 describe('DeveloperPlatformPanel connector management', () => {
+  test('keeps the legacy panel module value exports available', () => {
+    expect(DeveloperPlatformPanel).toBeFunction()
+    expect(DeveloperPlatformPanelContainer).toBeFunction()
+  })
+
   test('reauthorizes a disconnected installation while keeping add-account separate', () => {
     const reauthorizeHtml = renderToStaticMarkup(
       <DeveloperPlatformPanel

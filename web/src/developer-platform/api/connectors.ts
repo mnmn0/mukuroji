@@ -1,15 +1,25 @@
-import type { ConnectorAuthorizationOutput, ConnectorInstallation } from '@mukuroji/contracts'
-import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import type {
-  ConnectDeveloperConnectorInput,
-  DeveloperConnectorProvider,
-} from '../model/connectors'
+  ConnectorAuthorizationOutput,
+  ConnectorInstallation,
+  ConnectorProvider,
+  CreateConnectorInstallationInput,
+} from '@mukuroji/contracts'
+import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { DeveloperPlatformApiError } from './errors'
 
-export type {
-  ConnectDeveloperConnectorInput,
-  DeveloperConnectorProvider,
-} from '../model/connectors'
+/**
+ * Compatibility alias for connector provider identifiers.
+ */
+export type DeveloperConnectorProvider = ConnectorProvider
+
+/**
+ * Compatibility connector input with the provider supplied as a path argument.
+ */
+export type ConnectDeveloperConnectorInput =
+  Omit<CreateConnectorInstallationInput, 'provider' | 'returnUrl'> & {
+    /** Optional application-relative return URL after authorization. */
+    returnUrl?: string
+  }
 
 const developerApiBaseUrl = trimTrailingSlash(
   import.meta.env.VITE_WORKSPACE_API_BASE_URL ??
@@ -35,16 +45,18 @@ export function connectDeveloperConnector(
   input: ConnectDeveloperConnectorInput,
   mutationContext: MutationRequestContext,
 ) {
+  const requestBody: CreateConnectorInstallationInput = {
+    ...input,
+    provider,
+    returnUrl: input.returnUrl ?? '/',
+  }
+
   return requestJson<ConnectorAuthorizationOutput>(
     '/developer/connector-installations',
     accessToken,
     createJsonMutation(
       'POST',
-      {
-        ...input,
-        provider,
-        returnUrl: input.returnUrl ?? '/',
-      },
+      requestBody,
       mutationContext,
     ),
   )

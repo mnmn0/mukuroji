@@ -7,6 +7,7 @@ import {
   emptyDeveloperPlatformResourcesFixture,
   readOnlyDeveloperPlatformResourcesFixture,
 } from '../fixtures'
+import { formatDeveloperTimestamp } from '../model/displayFormatting'
 import { WebhooksSection } from './WebhooksSection'
 
 /**
@@ -31,7 +32,7 @@ const meta = {
     canManage:
       developerPlatformResourcesFixture.capabilities.canManageWebhooks,
     deliveries: developerPlatformResourcesFixture.webhookDeliveries,
-    formatDateTime: (value) => value,
+    formatDateTime: formatDeveloperTimestamp,
     labels: developerPlatformLabelsFixture,
     subscriptions: developerPlatformResourcesFixture.webhookSubscriptions,
     onCreate: fn(),

@@ -67,7 +67,7 @@ function ConnectorsSectionStoryHarness(props: ConnectorsSectionProps) {
         setConflictMergedValueDrafts((currentDrafts) => ({
           ...currentDrafts,
           [conflictId]: {
-            ...(currentDrafts[conflictId] ?? {}),
+            ...currentDrafts[conflictId],
             [field]: value,
           },
         }))
