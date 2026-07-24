@@ -71,7 +71,8 @@ environment evidenceへ保存します。
 Operator自身の`sns:Publish`だけではCloudWatch principalとKMS経路を検証できません。Deploy後は
 同じ両topic actionを持つcontrolled test alarmを実際に`OK → ALARM`へ遷移させ、CloudWatch alarm
 history、両subscriptionの受信時刻/message ID、`ALARM → OK`への復帰を保存します。全21 alarmの
-`AlarmActions`が同じ2 ARNであることもtemplateとdeployed configurationの両方で照合します。
+`AlarmActions`がprimary/secondaryの2 ARNを含み、inventory済みの既存actionも保持していることを
+templateとdeployed configurationの両方で照合します。
 
 ## Outputs
 
