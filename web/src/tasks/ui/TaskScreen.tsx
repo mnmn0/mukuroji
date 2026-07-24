@@ -528,7 +528,10 @@ export function TaskScreen({
         teams={teams}
       />
 
-      <section className="workbench-main flex min-w-0 flex-1 flex-col overflow-hidden">
+      <section
+        aria-busy={isLoading}
+        className="workbench-main flex min-w-0 flex-1 flex-col overflow-hidden"
+      >
         <TaskHeader
           activeTab={activeTab}
           isCreateTaskOpen={isCreateTaskOpen}
@@ -543,7 +546,10 @@ export function TaskScreen({
         />
 
         {isLoading ? (
-          <div className="grid min-h-0 flex-1 place-items-center px-6 text-sm font-semibold text-[#5f6874]">
+          <div
+            className="grid min-h-0 flex-1 place-items-center px-6 text-sm font-semibold text-[#5f6874]"
+            role="status"
+          >
             {t('tasks.loading')}
           </div>
         ) : (

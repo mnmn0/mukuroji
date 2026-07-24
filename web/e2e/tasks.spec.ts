@@ -2077,6 +2077,101 @@ test.describe('authenticated task page', () => {
     await mockAuthenticatedTaskPage(page)
   })
 
+  test('主要タスクビューの読み上げ構造とキーボードタブ操作を維持する', async ({ page }) => {
+    await page.goto('/projects/refero/tasks')
+
+    const tablist = page.getByRole('tablist', { name: 'タスクビュー' })
+    await expect(tablist).toMatchAriaSnapshot(`
+      - tablist "タスクビュー":
+        - tab "テーブル" [selected]
+        - tab "ボード"
+        - tab "期限順"
+        - tab "期限カレンダー"
+        - tab "ファイル"
+        - tab "権限"
+    `)
+
+    const tableSnapshot = await page
+      .getByRole('region', { name: 'Refero のタスク一覧' })
+      .ariaSnapshot()
+    expect(tableSnapshot).toContain('- columnheader "タスク名"')
+    expect(tableSnapshot).toContain('- columnheader "担当者"')
+    expect(tableSnapshot).toContain('- columnheader "ステータス"')
+    expect(tableSnapshot).toContain(
+      '- checkbox "新しいランディングページのワイヤーフレーム作成"',
+    )
+    expect(tableSnapshot).toContain(
+      '- button "新しいランディングページのワイヤーフレーム作成"',
+    )
+
+    const tableTab = tablist.getByRole('tab', { name: 'テーブル' })
+    const boardTab = tablist.getByRole('tab', { name: 'ボード' })
+    await tableTab.focus()
+    await page.keyboard.press('ArrowRight')
+
+    await expect(boardTab).toBeFocused()
+    await expect(boardTab).toHaveAttribute('aria-selected', 'true')
+    await expect(page.getByRole('tabpanel')).toContainText('ボードビュー')
+  })
+
+  test('低速なタスクAPIを読み上げて一度だけ取得し、キーボード操作を保ったまま復帰する', async ({
+    page,
+  }) => {
+    let releaseTaskResponse: () => void = () => undefined
+    let markTaskRequestStarted: () => void = () => undefined
+    const taskResponseGate = new Promise<void>((resolve) => {
+      releaseTaskResponse = resolve
+    })
+    const taskRequestStarted = new Promise<void>((resolve) => {
+      markTaskRequestStarted = resolve
+    })
+    let interceptedTaskRequestCount = 0
+
+    await page.route('**/api/projects/refero/issues', async (route) => {
+      interceptedTaskRequestCount += 1
+      markTaskRequestStarted()
+      await taskResponseGate
+      await route.fallback()
+    })
+
+    try {
+      await page.goto('/projects/refero/tasks')
+      await taskRequestStarted
+
+      const taskMain = page.locator('main.workbench-shell > section.workbench-main')
+      await expect(taskMain).toHaveAttribute('aria-busy', 'true')
+      await expect(page.getByRole('status')).toHaveText('タスク一覧を確認しています。')
+      await expect(page.getByTestId('task-row-wireframe')).toHaveCount(0)
+
+      const searchTrigger = page.getByTestId('sidebar-search-trigger')
+      await searchTrigger.focus()
+      await page.keyboard.press('ControlOrMeta+K')
+      await expect(
+        page.getByRole('dialog', { name: 'Workspace command menu' })
+          .getByRole('combobox'),
+      ).toBeFocused()
+      await page.keyboard.press('Escape')
+      await expect(searchTrigger).toBeFocused()
+
+      const requestCounts = getMockRequestCounts(page)
+      expect(interceptedTaskRequestCount).toBe(1)
+      expect(requestCounts.issueCreates).toBe(0)
+      expect(requestCounts.issueUpdates).toBe(0)
+      expect(requestCounts.taskCreates).toBe(0)
+      expect(requestCounts.taskStatusUpdates).toBe(0)
+
+      releaseTaskResponse()
+
+      await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
+      await expect(page.getByRole('status')).toHaveCount(0)
+      await expect(taskMain).toHaveAttribute('aria-busy', 'false')
+      expect(interceptedTaskRequestCount).toBe(1)
+      expect(requestCounts.projectTasks.refero).toBe(1)
+    } finally {
+      releaseTaskResponse()
+    }
+  })
+
   test('command menuのquick createは同じ画面から繰り返し作成フォームを開く', async ({ page }) => {
     await page.goto('/projects/refero/issues?teamId=core-team')
 
