@@ -5,7 +5,14 @@ import type {
   ResolvedWorkItemConfiguration,
   WorkItemConfiguration,
 } from '@mukuroji/contracts'
-import { useState, type ReactNode } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  type FocusEvent,
+  type KeyboardEvent,
+  type ReactNode,
+} from 'react'
 import type {
   BulkOperationProjectOption,
   BulkOperationSelection,
@@ -555,8 +562,107 @@ function FilterMenu({
   menuId,
   onOpenChange,
 }: FilterMenuProps) {
+  const rootRef = useRef<HTMLDivElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!isOpen) {
+      return
+    }
+
+    const firstItem = menuRef.current?.querySelector<HTMLElement>(
+      '[role="menuitemradio"]:not([disabled])',
+    )
+    firstItem?.focus()
+
+    /**
+     * Closes this menu when pointer input begins outside its root.
+     *
+     * @param event - Pointer event whose target is compared with the menu root.
+     * @returns Nothing.
+     */
+    const handleDocumentPointerDown = (event: PointerEvent) => {
+      if (
+        event.target instanceof Node &&
+        !rootRef.current?.contains(event.target)
+      ) {
+        onOpenChange(false)
+      }
+    }
+
+    document.addEventListener('pointerdown', handleDocumentPointerDown)
+
+    return () => {
+      document.removeEventListener('pointerdown', handleDocumentPointerDown)
+    }
+  }, [isOpen, onOpenChange])
+
+  /**
+   * Closes the menu after keyboard focus leaves its trigger and items.
+   *
+   * @param event - Focus event whose next target determines whether the menu closes.
+   * @returns Nothing.
+   */
+  const handleMenuBlur = (event: FocusEvent<HTMLDivElement>) => {
+    if (
+      !(event.relatedTarget instanceof Node) ||
+      !event.currentTarget.contains(event.relatedTarget)
+    ) {
+      onOpenChange(false)
+    }
+  }
+
+  /**
+   * Moves focus within the menu or closes it in response to menu keys.
+   *
+   * @param event - Keyboard event used to navigate or close the menu.
+   * @returns Nothing.
+   */
+  const handleMenuKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const items = Array.from(
+      event.currentTarget.querySelectorAll<HTMLElement>(
+        '[role="menuitemradio"]:not([disabled])',
+      ),
+    )
+
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      onOpenChange(false)
+      document.getElementById(buttonId)?.focus()
+      return
+    }
+
+    if (items.length === 0) {
+      return
+    }
+
+    const currentIndex = items.findIndex(
+      (item) => item === document.activeElement,
+    )
+    let nextIndex: number | undefined
+
+    if (event.key === 'ArrowDown') {
+      nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % items.length
+    } else if (event.key === 'ArrowUp') {
+      nextIndex = currentIndex < 0
+        ? items.length - 1
+        : (currentIndex - 1 + items.length) % items.length
+    } else if (event.key === 'Home') {
+      nextIndex = 0
+    } else if (event.key === 'End') {
+      nextIndex = items.length - 1
+    }
+
+    if (nextIndex === undefined) {
+      return
+    }
+
+    event.preventDefault()
+    items[nextIndex]?.focus()
+  }
+
   return (
-    <div className="relative">
+    <div className="relative" ref={rootRef} onBlur={handleMenuBlur}>
       <FilterButton
         active={active}
         ariaControls={menuId}
@@ -572,7 +678,9 @@ function FilterMenu({
           aria-labelledby={buttonId}
           className={`absolute ${align === 'right' ? 'right-0' : 'left-0'} z-20 mt-2 rounded-md border border-[#d3d8df] bg-white p-1 shadow-[0_12px_24px_rgba(28,40,64,0.12)] ${menuClassName}`}
           id={menuId}
+          ref={menuRef}
           role="menu"
+          onKeyDown={handleMenuKeyDown}
         >
           {children}
         </div>
@@ -603,6 +711,7 @@ function MenuOption({ checked, label, onClick }: MenuOptionProps) {
       }`}
       onClick={onClick}
       role="menuitemradio"
+      tabIndex={-1}
       type="button"
     >
       {label}

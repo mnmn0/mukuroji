@@ -8,7 +8,6 @@ import {
 
 const t = createTranslator('ja')
 
-/** Storybook metadata for the independent project task permissions view. */
 const meta = {
   title: 'Application/Projects/Task Views/Permissions',
   component: TaskPermissionsView,
@@ -33,6 +32,7 @@ const meta = {
   },
 } satisfies Meta<typeof TaskPermissionsView>
 
+/** Storybook metadata for the independent project task permissions view. */
 export default meta
 
 /** Story type for the independent task permissions view. */

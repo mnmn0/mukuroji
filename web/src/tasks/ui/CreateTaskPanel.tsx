@@ -15,7 +15,11 @@ import {
 } from '../../work-items/model/workItemDisplay'
 import { WorkItemFieldsEditor } from '../../work-items/ui/WorkItemFieldsEditor'
 import type { CreateProjectTaskInput } from '../api/tasks'
-import { resolveTaskPriority, taskPriorities } from '../model/taskView'
+import {
+  formatTaskDateInputValue,
+  resolveTaskPriority,
+  taskPriorities,
+} from '../model/taskView'
 
 /** Props accepted by the inline project task creation panel. */
 export type CreateTaskPanelProps = {
@@ -65,7 +69,7 @@ export function CreateTaskPanel({
   t,
   workspaceMembers,
 }: CreateTaskPanelProps) {
-  const today = new Date().toISOString().slice(0, 10)
+  const today = formatTaskDateInputValue(new Date())
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
   const workflowStatuses = resolveCreateWorkflowStatuses(configuration)
   const initialWorkflowStatusId = configuration?.workflow.initialStatusId ?? ''

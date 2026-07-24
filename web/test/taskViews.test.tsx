@@ -12,6 +12,7 @@ import { TaskFileView } from '../src/tasks/ui/TaskFileView'
 import { TaskGanttView } from '../src/tasks/ui/TaskGanttView'
 import { TaskPermissionsView } from '../src/tasks/ui/TaskPermissionsView'
 import { TaskTableView } from '../src/tasks/ui/TaskTableView'
+import { TaskStatusBadge } from '../src/tasks/ui/TaskViewPrimitives'
 import {
   taskViewStoryConfigurationsByTeam,
   taskViewStoryProjectFiles,
@@ -242,6 +243,11 @@ describe('independent task views', () => {
     expect(html).toContain('name="workflowStatusId"')
     expect(html).toContain('name="custom-field:customer-impact"')
     expect(html).toContain('佐藤 花子 / sato@example.com')
+    expect(html).toContain('name="dueDate"')
+  })
+
+  test('omits a status badge when neither a status nor task is supplied', () => {
+    expect(renderToStaticMarkup(<TaskStatusBadge />)).toBe('')
   })
 
   test('renders editable, error, and empty task details independently', () => {

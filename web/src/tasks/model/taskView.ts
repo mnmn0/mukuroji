@@ -6,11 +6,7 @@ import type {
 } from '@mukuroji/contracts'
 import type { BulkOperationSelection } from '../../bulk-operations/model/bulkOperation'
 import type { ProjectDirectoryTeam } from '../../projects/api/directory'
-import {
-  createTranslator,
-  type Locale,
-  type MessageKey,
-} from '../../shared/i18n/i18n'
+import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { WorkspaceMember } from '../../workspace/api/access'
 import {
   isCustomFieldApplicable,
@@ -232,6 +228,22 @@ export function createBulkOperationSelection(
     teamId: task.teamId,
     workItemId: task.id,
   }
+}
+
+/**
+ * Formats a date as the local calendar value accepted by a date input.
+ *
+ * @param date - Date-like value whose local year, month, and day are formatted.
+ * @returns A `YYYY-MM-DD` value based on local calendar components.
+ */
+export function formatTaskDateInputValue(
+  date: Pick<Date, 'getDate' | 'getFullYear' | 'getMonth'>,
+) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+
+  return `${year}-${month}-${day}`
 }
 
 /**
@@ -522,6 +534,7 @@ export function createProjectStatusTestToken(value: string) {
  * @param configuration - Configuration containing field definitions.
  * @param locale - Locale used by typed value formatters.
  * @param personLabels - Person identities mapped to display labels.
+ * @param t - Translator reused by the task view.
  * @returns Applicable and populated fields in configured display order.
  */
 export function resolveTaskCustomFieldEntries(
@@ -529,12 +542,11 @@ export function resolveTaskCustomFieldEntries(
   configuration: WorkItemConfiguration | undefined,
   locale: Locale,
   personLabels: Readonly<Record<string, string>>,
+  t: TaskTranslator,
 ): TaskCustomFieldEntry[] {
   if (!configuration) {
     return []
   }
-
-  const t = createTranslator(locale)
 
   return sortCustomFieldDefinitions(configuration.customFields).flatMap((definition) => {
     const value = task.customFieldValues[definition.id]
@@ -567,6 +579,7 @@ export function resolveTaskCustomFieldEntries(
  * @param configuration - Configuration containing field definitions.
  * @param locale - Locale used by typed value formatters.
  * @param personLabels - Person identities mapped to display labels.
+ * @param t - Translator reused by the task view.
  * @returns Alternating definition names and formatted values.
  */
 export function resolveTaskCustomFieldSearchValues(
@@ -574,8 +587,15 @@ export function resolveTaskCustomFieldSearchValues(
   configuration: WorkItemConfiguration | undefined,
   locale: Locale,
   personLabels: Readonly<Record<string, string>>,
+  t: TaskTranslator,
 ) {
-  return resolveTaskCustomFieldEntries(task, configuration, locale, personLabels)
+  return resolveTaskCustomFieldEntries(
+    task,
+    configuration,
+    locale,
+    personLabels,
+    t,
+  )
     .flatMap(({ definition, value }) => [definition.name, value])
 }
 
@@ -589,7 +609,7 @@ export function createTaskCalendarModel(
   tasks: readonly ProjectTask[],
 ): TaskCalendarModel {
   const dates = Array.from(new Set(tasks.map((task) => task.dueDate)))
-    .filter(Boolean)
+    .filter((date) => date.trim().length > 0)
     .sort()
 
   return {
@@ -707,6 +727,7 @@ export function filterAndSortProjectTasks(
         resolvedTaskConfiguration,
         options.locale,
         options.personLabels,
+        options.t,
       ),
     ].some((value) => value.toLowerCase().includes(normalizedQuery))
   })
