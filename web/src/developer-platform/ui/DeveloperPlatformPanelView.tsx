@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useRef, useState, type FormEvent } from 'react'
 import type {
   ApiScope,
   DeveloperPlatformOverview,
@@ -280,6 +280,7 @@ export function DeveloperPlatformPanel({
     useState<ImportDryRunReport>()
   const [validatedImportInput, setValidatedImportInput] =
     useState<DryRunDeveloperImportInput>()
+  const importValidationGeneration = useRef(0)
   const availableImportProjectOptions = filterImportProjectOptions(
     importProjectOptions,
     importTeamId,
@@ -504,32 +505,65 @@ export function DeveloperPlatformPanel({
     }
   }
 
+  /**
+   * Invalidates any prior import validation and advances its generation.
+   *
+   * @returns The generation assigned to the next validation attempt.
+   */
+  const invalidateImportValidation = () => {
+    const nextGeneration = importValidationGeneration.current + 1
+
+    importValidationGeneration.current = nextGeneration
+    setPreviewImportReport(undefined)
+    setValidatedImportInput(undefined)
+    return nextGeneration
+  }
+
   /** Reads the selected import file and runs a dry-run. */
   const handleDryRun = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
 
     if (!importFile || !onDryRunImport) return
 
-    const content = await importFile.text()
-    const input = {
-      format: importFormat,
-      mapping: importMappings,
-      source: {
-        content,
-        fileName: importFile.name,
-        mediaType:
-          importFormat === 'csv' ? 'text/csv' : 'application/json',
+    const validationGeneration = invalidateImportValidation()
+    const validation = await runAction(
+      'import:dry-run',
+      async () => {
+        const content = await importFile.text()
+
+        if (
+          importValidationGeneration.current !==
+          validationGeneration
+        ) {
+          return undefined
+        }
+
+        const input = {
+          format: importFormat,
+          mapping: importMappings,
+          source: {
+            content,
+            fileName: importFile.name,
+            mediaType:
+              importFormat === 'csv'
+                ? 'text/csv'
+                : 'application/json',
+          },
+          teamId: importTeamId,
+          assignedProjectId: importProjectId || undefined,
+        } satisfies DryRunDeveloperImportInput
+        const report = await onDryRunImport(input)
+
+        return { input, report }
       },
-      teamId: importTeamId,
-      assignedProjectId: importProjectId || undefined,
-    } satisfies DryRunDeveloperImportInput
-    const result = await runAction('import:dry-run', () =>
-      onDryRunImport(input),
     )
 
-    if (result) {
-      setPreviewImportReport(result)
-      setValidatedImportInput(input)
+    if (
+      validation &&
+      importValidationGeneration.current === validationGeneration
+    ) {
+      setPreviewImportReport(validation.report)
+      setValidatedImportInput(validation.input)
     }
   }
 
@@ -913,31 +947,26 @@ export function DeveloperPlatformPanel({
                   ? () =>
                       void runAction('import:commit', async () => {
                         await onCommitImport(validatedImportInput)
-                        setPreviewImportReport(undefined)
-                        setValidatedImportInput(undefined)
+                        invalidateImportValidation()
                       })
                   : undefined
               }
               onExport={onExport ? handleExport : undefined}
               onFileChange={(file) => {
                 setImportFile(file)
-                setPreviewImportReport(undefined)
-                setValidatedImportInput(undefined)
+                invalidateImportValidation()
               }}
               onFormatChange={(format) => {
                 setImportFormat(format)
-                setPreviewImportReport(undefined)
-                setValidatedImportInput(undefined)
+                invalidateImportValidation()
               }}
               onMappingChange={(mappings) => {
                 setImportMappings(mappings)
-                setPreviewImportReport(undefined)
-                setValidatedImportInput(undefined)
+                invalidateImportValidation()
               }}
               onProjectChange={(projectId) => {
                 setImportProjectId(projectId)
-                setPreviewImportReport(undefined)
-                setValidatedImportInput(undefined)
+                invalidateImportValidation()
               }}
               onSubmit={onDryRunImport ? handleDryRun : undefined}
               onTeamChange={(teamId) => {
@@ -951,8 +980,7 @@ export function DeveloperPlatformPanel({
                 ) {
                   setImportProjectId('')
                 }
-                setPreviewImportReport(undefined)
-                setValidatedImportInput(undefined)
+                invalidateImportValidation()
               }}
             />
           ) : null}
