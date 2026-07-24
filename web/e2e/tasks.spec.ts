@@ -4478,10 +4478,14 @@ test.describe('authenticated task page', () => {
     await page.goto('/reports')
 
     await expect(page.getByTestId('analytics-widget-metric-wip')).toBeVisible()
-    await page.getByTestId('analytics-project-filter').getByRole(
+    const referoCheckbox = page.getByTestId('analytics-project-filter').getByRole(
       'checkbox',
       { name: 'Refero' },
-    ).check()
+    )
+
+    await referoCheckbox.click()
+    await expect(referoCheckbox).toBeChecked()
+    await expect(page).toHaveURL(/(?:[?&])project=refero(?:&|$)/u)
     await expect.poll(() =>
       analyticsState.queryInputs.at(-1)?.filter.projectIds
     ).toEqual(['refero'])
