@@ -59,7 +59,26 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
     }));
   expect(resources.TeamIssuesTable189D851D.Properties)
     .toEqual(expect.objectContaining({
-      GlobalSecondaryIndexes: expect.arrayContaining([
+      AttributeDefinitions: expect.arrayContaining([
+        { AttributeName: 'directoryTeamId', AttributeType: 'S' },
+        { AttributeName: 'issueId', AttributeType: 'S' },
+        { AttributeName: 'directoryProjectId', AttributeType: 'S' },
+        { AttributeName: 'sortOrder', AttributeType: 'N' },
+        { AttributeName: 'updatedAt', AttributeType: 'S' },
+      ]),
+      KeySchema: [
+        { AttributeName: 'directoryTeamId', KeyType: 'HASH' },
+        { AttributeName: 'issueId', KeyType: 'RANGE' },
+      ],
+      GlobalSecondaryIndexes: [
+        expect.objectContaining({
+          IndexName: 'TeamIssueSortOrderIndex',
+          KeySchema: [
+            { AttributeName: 'directoryTeamId', KeyType: 'HASH' },
+            { AttributeName: 'sortOrder', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'ALL' },
+        }),
         expect.objectContaining({
           IndexName: 'TeamIssueUpdatedAtIndex',
           KeySchema: [
@@ -68,7 +87,15 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
           ],
           Projection: { ProjectionType: 'ALL' },
         }),
-      ]),
+        expect.objectContaining({
+          IndexName: 'AssignedProjectIssueIndex',
+          KeySchema: [
+            { AttributeName: 'directoryProjectId', KeyType: 'HASH' },
+            { AttributeName: 'sortOrder', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'ALL' },
+        }),
+      ],
     }));
 });
 

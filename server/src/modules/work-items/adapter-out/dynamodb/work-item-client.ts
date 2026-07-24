@@ -28,6 +28,8 @@ import {
   createRequestSubmissionEventProjection,
 } from '../../../request-intake'
 import {
+  isCanonicalWorkItemArchiveWindow,
+  isCanonicalWorkItemDueDate,
   isCanonicalWorkItemRecord,
 } from '../../canonical-work-item'
 import { createResourceId } from '../../domain/resource-id'
@@ -1515,7 +1517,7 @@ export class DynamoDbTeamIssuesClient {
     const title = readRequiredString(input.title, 'Issue title is required.')
     const description = readOptionalString(input.description, 'Issue description is invalid.')
     const assigneeUserId = readTeamIssueAssigneeUserId(input)
-    const dueDate = readRequiredString(input.dueDate, 'Issue due date is required.')
+    const dueDate = readWorkItemDueDate(input.dueDate)
     const priority = readTaskPriority(input.priority)
     const assignedProjectId = readAssignedProjectId(input.assignedProjectId)
     const workflowSchemaVersion = readWorkflowSchemaVersion(input.workflowSchemaVersion)
@@ -1904,7 +1906,7 @@ export class DynamoDbTeamIssuesClient {
 
     if ('dueDate' in input) {
       expressionAttributeNames['#dueDate'] = 'dueDate'
-      expressionAttributeValues[':dueDate'] = readRequiredString(input.dueDate, 'Issue due date is required.')
+      expressionAttributeValues[':dueDate'] = readWorkItemDueDate(input.dueDate)
       setExpressions.push('#dueDate = :dueDate')
     }
 
@@ -1945,6 +1947,21 @@ export class DynamoDbTeamIssuesClient {
       const beforeIssue = await this.getRequiredTeamIssueItem(directoryId, teamId, issueId, true)
       if (beforeIssue.revision !== expectedRevision) {
         throw createWorkItemRevisionConflictError()
+      }
+      const archivedAt = expressionAttributeValues[':archivedAt']
+      if (
+        archivedAt !== undefined &&
+        !isCanonicalWorkItemArchiveWindow(
+          beforeIssue.createdAt,
+          archivedAt,
+          expressionAttributeValues[':updatedAt'],
+        )
+      ) {
+        throw new ProjectDataError(
+          400,
+          'InvalidProjectWrite',
+          'Issue archive timestamp is invalid.',
+        )
       }
       const afterIssue = {
         ...beforeIssue,
@@ -3273,6 +3290,20 @@ export function readRequiredString(value: unknown, message: string) {
   }
 
   return value.trim()
+}
+
+/**
+ * Reads one required Work Item due date in a supported persisted date-only format.
+ *
+ * @param value - Untrusted due date value.
+ * @returns A canonical real calendar day.
+ */
+function readWorkItemDueDate(value: unknown): string {
+  const dueDate = readRequiredString(value, 'Issue due date is required.')
+  if (!isCanonicalWorkItemDueDate(dueDate)) {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Issue due date is invalid.')
+  }
+  return dueDate
 }
 
 /**
