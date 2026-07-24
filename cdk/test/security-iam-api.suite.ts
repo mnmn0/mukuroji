@@ -356,6 +356,7 @@ test('Function URL and API Gateway expose the same restricted CORS contract', ()
     'x-ratelimit-limit',
     'x-ratelimit-remaining',
     'x-ratelimit-reset',
+    'x-correlation-id',
     'x-request-id',
   ];
 
@@ -1087,9 +1088,97 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:AdminUserGlobalSignOut');
   expect(JSON.stringify(cognitoStatement)).toContain('CognitoUserPoolId');
   const wildcardStatements = statements.filter((statement) => statement.Resource === '*');
-  expect(wildcardStatements).toEqual([]);
+  expect(wildcardStatements).toEqual([{
+    Action: ['xray:PutTelemetryRecords', 'xray:PutTraceSegments'],
+    Effect: 'Allow',
+    Resource: '*',
+  }]);
+  const readinessStatement = statements.find((statement) => {
+    const actions = Array.isArray(statement.Action)
+      ? statement.Action
+      : [statement.Action];
+    return actions.length === 1 &&
+      actions.includes('dynamodb:DescribeTable') &&
+      JSON.stringify(statement.Resource).includes('AuditEventsTable0723963E') &&
+      JSON.stringify(statement.Resource).includes('TeamIssuesTable189D851D') &&
+      JSON.stringify(statement.Resource).includes('WorkspaceAccessTableD7C8D2C7');
+  });
+  expect(readinessStatement).toEqual({
+    Action: 'dynamodb:DescribeTable',
+    Effect: 'Allow',
+    Resource: [
+      { 'Fn::GetAtt': ['AuditEventsTable0723963E', 'Arn'] },
+      { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
+      { 'Fn::GetAtt': ['WorkspaceAccessTableD7C8D2C7', 'Arn'] },
+    ],
+  });
   expect(serializedApiPolicies).not.toContain('"Action":"s3:*"');
   expect(JSON.stringify(cognitoStatement)).not.toContain('"Resource":"*"');
+});
+
+test('API runtime emits traces and alarms for errors throttles latency and gateway failures', () => {
+  const template = synthesizedTemplate;
+
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Description:
+      'Bundled shared Hono handler for the mukuroji Function URL and HTTP API.',
+    TracingConfig: { Mode: 'Active' },
+  });
+  for (const alarm of [
+    {
+      description:
+        'Detects unhandled or infrastructure errors returned by the shared API Lambda.',
+      metricName: 'Errors',
+      threshold: 1,
+    },
+    {
+      description:
+        'Detects shared API Lambda requests rejected by concurrency throttling.',
+      metricName: 'Throttles',
+      threshold: 1,
+    },
+    {
+      description:
+        'Detects sustained p95 shared API Lambda latency above the operational budget.',
+      metricName: 'Duration',
+      threshold: 12000,
+    },
+    {
+      description:
+        'Detects HTTP API responses that fail before or within the shared API integration.',
+      metricName: '5xx',
+      threshold: 1,
+    },
+  ]) {
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmDescription: alarm.description,
+      MetricName: alarm.metricName,
+      Threshold: alarm.threshold,
+      TreatMissingData: 'notBreaching',
+    });
+  }
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription:
+      'Detects sustained p95 shared API Lambda latency above the operational budget.',
+    ExtendedStatistic: 'p95',
+  });
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription:
+      'Detects API requests that the application completed with a server-error response.',
+    ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+    DatapointsToAlarm: 1,
+    Dimensions: [{
+      Name: 'Service',
+      Value: 'mukuroji-api',
+    }],
+    EvaluationPeriods: 1,
+    MetricName: 'ServerErrorCount',
+    Namespace: 'Mukuroji/API',
+    Period: 300,
+    Statistic: 'Sum',
+    Threshold: 1,
+    TreatMissingData: 'notBreaching',
+  });
 });
 
 test('external Cognito client and initial owner attributes are validated on create and update', () => {

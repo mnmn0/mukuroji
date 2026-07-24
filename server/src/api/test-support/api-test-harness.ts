@@ -725,8 +725,8 @@ type ObservedWorkspaceMutationAuditContext = {
 type ExpectedWorkspaceMutationAuditContext = {
   /** Context actor の安定 ID です。 */
   actorId: string
-  /** Request の correlation ID header です。 */
-  correlationId: string
+  /** API が拒否する client 指定 correlation ID header です。 */
+  clientCorrelationId: string
   /** Request の raw idempotency key header です。 */
   idempotencyKey: string
   /** Context fingerprint に含める canonical request body です。 */
@@ -756,7 +756,7 @@ function expectStableWorkspaceMutationAuditContexts(
     workspaceId: expected.workspaceId,
     actor: { id: expected.actorId, kind: 'user' },
     idempotencyKey: expected.idempotencyKey,
-    correlationId: expected.correlationId,
+    correlationId: first.correlationId,
     occurredAt: first.occurredAt,
     request: {
       method: expected.method,
@@ -776,13 +776,20 @@ function expectStableWorkspaceMutationAuditContexts(
       id: expected.actorId,
       kind: 'user',
     },
-    correlationId: expected.correlationId,
+    correlationId: first.correlationId,
     source: {
       kind: 'api',
       method: expected.method,
       route: expected.route,
     },
   })
+  expect(first.correlationId).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+  )
+  expect(first.correlationId).not.toBe(expected.clientCorrelationId)
+  expect(first.source.requestId).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+  )
   expect(first.idempotencyKeyHash).toBe(expectedContext.idempotencyKeyHash)
   expect(first.requestFingerprint).toBe(expectedContext.requestFingerprint)
 

@@ -68,6 +68,7 @@ export function buildEnterpriseIdentityWorkers(
     {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
       enforceSSL: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
       retentionPeriod: cdk.Duration.days(14),
     },
   );
@@ -81,6 +82,7 @@ export function buildEnterpriseIdentityWorkers(
       ),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
+      tracing: lambda.Tracing.ACTIVE,
       depsLockFilePath,
       projectRoot,
       timeout: cdk.Duration.seconds(60),
@@ -198,6 +200,7 @@ export function buildEnterpriseIdentityWorkers(
     {
       encryption: sqs.QueueEncryption.SQS_MANAGED,
       enforceSSL: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
       retentionPeriod: cdk.Duration.days(14),
     },
   );
@@ -211,6 +214,7 @@ export function buildEnterpriseIdentityWorkers(
       ),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
+      tracing: lambda.Tracing.ACTIVE,
       depsLockFilePath,
       projectRoot,
       timeout: cdk.Duration.minutes(15),

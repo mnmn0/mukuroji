@@ -1,6 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as apigatewayv2Integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
@@ -145,6 +146,7 @@ export function buildApiRuntime(
       entry: resolveLambdaHandlerEntry(input.lambdaBuildPaths, 'api.handler.ts'),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
+      tracing: lambda.Tracing.ACTIVE,
       depsLockFilePath,
       projectRoot,
       timeout: cdk.Duration.seconds(15),
@@ -522,6 +524,82 @@ export function buildApiRuntime(
       resources: [cognitoUserPoolArn],
     }),
   );
+  apiFunction.role.attachInlinePolicy(new iam.Policy(
+    scope,
+    'ApiReadinessPolicy',
+    {
+      statements: [new iam.PolicyStatement({
+        actions: ['dynamodb:DescribeTable'],
+        resources: [
+          auditEventsTable.tableArn,
+          workItemsTable.tableArn,
+          workspaceAccessTable.tableArn,
+        ],
+      })],
+    },
+  ));
+
+  new cloudwatch.Alarm(scope, 'ApiFunctionErrorAlarm', {
+    alarmDescription:
+      'Detects unhandled or infrastructure errors returned by the shared API Lambda.',
+    comparisonOperator:
+      cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    datapointsToAlarm: 1,
+    evaluationPeriods: 1,
+    metric: apiFunction.metric('Errors', {
+      period: cdk.Duration.minutes(5),
+      statistic: 'Sum',
+    }),
+    threshold: 1,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+  });
+  new cloudwatch.Alarm(scope, 'ApiFunctionThrottleAlarm', {
+    alarmDescription:
+      'Detects shared API Lambda requests rejected by concurrency throttling.',
+    comparisonOperator:
+      cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    datapointsToAlarm: 1,
+    evaluationPeriods: 1,
+    metric: apiFunction.metricThrottles({
+      period: cdk.Duration.minutes(5),
+      statistic: 'Sum',
+    }),
+    threshold: 1,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+  });
+  new cloudwatch.Alarm(scope, 'ApiFunctionLatencyAlarm', {
+    alarmDescription:
+      'Detects sustained p95 shared API Lambda latency above the operational budget.',
+    comparisonOperator:
+      cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    datapointsToAlarm: 2,
+    evaluationPeriods: 3,
+    metric: apiFunction.metricDuration({
+      period: cdk.Duration.minutes(5),
+      statistic: 'p95',
+    }),
+    threshold: cdk.Duration.seconds(12).toMilliseconds(),
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+  });
+  new cloudwatch.Alarm(scope, 'ApiApplicationServerErrorAlarm', {
+    alarmDescription:
+      'Detects API requests that the application completed with a server-error response.',
+    comparisonOperator:
+      cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    datapointsToAlarm: 1,
+    evaluationPeriods: 1,
+    metric: new cloudwatch.Metric({
+      namespace: 'Mukuroji/API',
+      metricName: 'ServerErrorCount',
+      dimensionsMap: {
+        Service: 'mukuroji-api',
+      },
+      period: cdk.Duration.minutes(5),
+      statistic: 'Sum',
+    }),
+    threshold: 1,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+  });
 
   return { apiFunction };
 }
@@ -609,6 +687,20 @@ export function buildApiTransportsAndRealtime(
       exposeHeaders: taskApiExposedHeaders,
     },
   });
+  new cloudwatch.Alarm(scope, 'ApiGatewayServerErrorAlarm', {
+    alarmDescription:
+      'Detects HTTP API responses that fail before or within the shared API integration.',
+    comparisonOperator:
+      cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    datapointsToAlarm: 1,
+    evaluationPeriods: 1,
+    metric: httpApi.metricServerError({
+      period: cdk.Duration.minutes(5),
+      statistic: 'Sum',
+    }),
+    threshold: 1,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+  });
   apiFunction.addEnvironment('AUTOMATION_INBOUND_WEBHOOK_BASE_URL', httpApi.apiEndpoint);
 
   const realtimeFunction = new lambdaNodejs.NodejsFunction(
@@ -618,6 +710,7 @@ export function buildApiTransportsAndRealtime(
       entry: resolveLambdaHandlerEntry(input.lambdaBuildPaths, 'realtime-handler.ts'),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
+      tracing: lambda.Tracing.ACTIVE,
       depsLockFilePath,
       projectRoot,
       timeout: cdk.Duration.seconds(10),

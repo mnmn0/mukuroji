@@ -32,6 +32,21 @@
 
 `WorkspaceDirectoryId`、`WorkspaceAuditPseudonymKey`、owner email / username は data key と認可境界に使います。環境ごとに固定し、通常の application deploy で変更しないでください。pseudonym key を変更すると既存 resource の audit timeline が分裂するため、通常の rotation 対象にはしません。
 
+## API observability
+
+Application Lambda 16個は X-Ray active tracing を有効にし、各 execution role には X-Ray が要求する
+trace/telemetry write action だけを追加します。API Lambda は readiness probe 用に
+`AuditEventsTable`、`WorkItemsTable`、`WorkspaceAccessTable` への `dynamodb:DescribeTable` だけを
+持つ独立 policy を使います。
+
+Stack は API Lambda の `Errors`、`Throttles`、p95 `Duration`（12秒）、HTTP API の 5xx、
+application EMF の `ServerErrorCount` を CloudWatch alarm として作成します。Alarm action は
+環境共通の監視 stack から設定してください。
+非同期 worker の DLQ alarm に加え、Notification schedule は failure destination 自体への配信失敗を
+`DestinationDeliveryFailures` で別に検出します。Audit projection、Automation event/schedule、
+Enterprise SCIM group/identity maintenance の各 DLQ は14日保持し、stack replacement/delete 時にも
+Retain します。
+
 ## Outputs
 
 - `ProjectTasksFunctionUrl`: Lambda Function URL

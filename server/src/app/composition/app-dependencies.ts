@@ -58,6 +58,11 @@ import type {
 } from '../../modules/work-items/work-item-import'
 import type { WorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'
 import type { WorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
+import type {
+  ApiAccessObservation,
+  ApiErrorObservation,
+} from '../../infrastructure/observability/api-observability'
+import type { ReadinessProbe } from '../../infrastructure/observability/readiness'
 
 /** DynamoDB transaction item shared only by adapters assembled at the API composition boundary. */
 type AutomationCompositionTransactionItem =
@@ -193,8 +198,28 @@ export interface DeveloperPlatformDependencies {
   queueWebhookDelivery: NonNullable<PublicApiDependencies['queueWebhookDelivery']>
 }
 
+/** Operational dependencies required by system routes. */
+export interface OperationalDependencies {
+  /** Verifies the API's critical runtime dependencies. */
+  readonly readiness: ReadinessProbe
+  /**
+   * Emits one safe structured API completion record.
+   *
+   * @param observation - Redacted request completion metadata.
+   */
+  recordAccess(observation: ApiAccessObservation): void
+  /**
+   * Emits one safe structured unexpected-error record.
+   *
+   * @param observation - Redacted unexpected-error metadata.
+   */
+  recordError(observation: ApiErrorObservation): void
+}
+
 /** Domain dependency bundles bound to one HTTP application instance. */
 export interface AppDependencies {
+  /** Operational health and readiness dependencies. */
+  operational: Readonly<OperationalDependencies>
   /** Authentication route dependencies. */
   authentication: Readonly<AuthenticationDependencies>
   /** Workspace and Enterprise Identity route dependencies. */
@@ -219,6 +244,7 @@ export function freezeAppDependencies(
   dependencies: AppDependencies,
 ): Readonly<AppDependencies> {
   return Object.freeze({
+    operational: Object.freeze({ ...dependencies.operational }),
     authentication: Object.freeze({ ...dependencies.authentication }),
     workspace: Object.freeze({ ...dependencies.workspace }),
     workItems: Object.freeze({ ...dependencies.workItems }),
@@ -233,7 +259,8 @@ export type AppDependencyOverrides = Partial<
   Omit<WorkspaceDependencies, 'enterpriseIdentity'> &
   WorkItemDependencies &
   AutomationDependencies &
-  DeveloperPlatformDependencies
+  DeveloperPlatformDependencies &
+  OperationalDependencies
 > & {
   /** Backward-compatible all-capability Automation adapter override for tests. */
   automation?: AutomationRepository<

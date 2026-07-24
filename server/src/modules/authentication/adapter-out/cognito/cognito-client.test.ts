@@ -871,7 +871,7 @@ test('cleans invitation-owned claims when revoking a pre-existing Cognito identi
   expect(cleanupMarkerClears).toBe(1)
   expectStableWorkspaceMutationAuditContexts(auditContexts, {
     actorId: 'demo@example.com',
-    correlationId: 'workspace-revoke-correlation',
+    clientCorrelationId: 'workspace-revoke-correlation',
     idempotencyKey: 'workspace-revoke-1',
     method: 'POST',
     requestBody: { invitationId: 'existing@example.com' },

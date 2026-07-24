@@ -11,6 +11,9 @@ mukuroji は、プロジェクトやタスクの進捗をチームで見渡す�
 - `cdk/`: AWS CDK TypeScript プロジェクト
 - `docs/`: ドキュメント
 
+SLO、alarm、incident response、migration、deploy、restore drill の運用契約は
+[`docs/operational-readiness.md`](docs/operational-readiness.md) を参照してください。
+
 ## セットアップ
 
 ```sh

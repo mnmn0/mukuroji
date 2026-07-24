@@ -74,7 +74,22 @@ host userからも読み込めます。Workspace access audit、enterprise crede
 固定 secret はこのfileへ複製せず、API writer、backfill、local backend がowner-onlyのroot `.env`から
 読み込みます。
 
-health check は `GET http://localhost:3000/api/health` です。Public Request Form / requester reply と `POST /api/auth/login` 以外の application API は、Cognito access token を `Authorization: Bearer <token>` で受け取ります。
+liveness check は `GET http://localhost:3000/api/health`、dependency readiness check は
+`GET http://localhost:3000/api/ready` です。Readiness は Work Items、Workspace Access、Audit
+Events の設定済み DynamoDB table を短い timeout 付き `DescribeTable` で実際に確認し、table
+または利用可能な GSI が `ACTIVE` ではない状態、設定不足、timeout、AWS error のいずれも
+`503 not-ready` として扱います。Control-plane call の集中を避けるため結果は execution
+environment ごとに30秒だけ cache し、同時 check は一つにまとめます。物理 table 名や raw error は
+response に含めません。
+
+すべての `/api/*` request は client 指定の `X-Correlation-Id` と `X-Request-Id` を信頼せず、
+server が canonical な値を生成します。両方を downstream request と response header へ伝播し、
+CORS でも browser へ公開します。共通 access log は CloudWatch Embedded Metric Format の request
+count、latency、server error count と相関 ID を構造化 JSON で記録します。Lambda では runtime
+管理の invocation ID と X-Ray root trace ID も join key として記録しますが、client header、body、
+query、entity ID、exception message、stack trace は保存しません。Public Request Form / requester reply と
+`POST /api/auth/login` 以外の application API は、Cognito access token を
+`Authorization: Bearer <token>` で受け取ります。
 
 ## API path contract
 

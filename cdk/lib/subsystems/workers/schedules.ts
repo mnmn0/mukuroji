@@ -64,6 +64,7 @@ export function buildScheduleWorkers(
   const analyticsScheduleDlq = new sqs.Queue(scope, 'AnalyticsScheduleDlq', {
     encryption: sqs.QueueEncryption.SQS_MANAGED,
     enforceSSL: true,
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
     retentionPeriod: cdk.Duration.days(14),
   });
   const analyticsScheduleFunction = new lambdaNodejs.NodejsFunction(
@@ -73,6 +74,7 @@ export function buildScheduleWorkers(
       entry: path.join(serverHandlersDirectory, 'analytics-schedule-handler.ts'),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
+      tracing: lambda.Tracing.ACTIVE,
       depsLockFilePath,
       projectRoot,
       timeout: cdk.Duration.minutes(5),
@@ -162,6 +164,7 @@ export function buildScheduleWorkers(
   const notificationScheduleDlq = new sqs.Queue(scope, 'NotificationScheduleDlq', {
     encryption: sqs.QueueEncryption.SQS_MANAGED,
     enforceSSL: true,
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
     retentionPeriod: cdk.Duration.days(14),
   });
   const notificationScheduleFunction = new lambdaNodejs.NodejsFunction(
@@ -171,6 +174,7 @@ export function buildScheduleWorkers(
       entry: path.join(serverHandlersDirectory, 'notification-schedule-handler.ts'),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
+      tracing: lambda.Tracing.ACTIVE,
       depsLockFilePath,
       projectRoot,
       timeout: cdk.Duration.minutes(5),
@@ -205,6 +209,20 @@ export function buildScheduleWorkers(
     metric: notificationScheduleDlq.metricApproximateNumberOfMessagesVisible({
       period: cdk.Duration.minutes(5),
       statistic: 'Maximum',
+    }),
+    threshold: 1,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+  });
+
+  new cloudwatch.Alarm(scope, 'NotificationScheduleDestinationFailureAlarm', {
+    alarmDescription:
+      'Detects failures while Lambda delivers notification schedule failures to the DLQ.',
+    comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    datapointsToAlarm: 1,
+    evaluationPeriods: 1,
+    metric: notificationScheduleFunction.metric('DestinationDeliveryFailures', {
+      period: cdk.Duration.minutes(5),
+      statistic: 'Sum',
     }),
     threshold: 1,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,

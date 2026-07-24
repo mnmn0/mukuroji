@@ -60,6 +60,7 @@ export function buildRequestEmailWorker(
       entry: path.join(serverHandlersDirectory, 'request-intake-email-handler.ts'),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
+      tracing: lambda.Tracing.ACTIVE,
       depsLockFilePath,
       projectRoot,
       timeout: cdk.Duration.seconds(30),

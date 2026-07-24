@@ -14,6 +14,7 @@ import type {
   AuthenticationDependencies,
   AutomationDependencies,
   DeveloperPlatformDependencies,
+  OperationalDependencies,
   WorkItemDependencies,
   WorkspaceDependencies,
 } from './app-dependencies'
@@ -24,6 +25,11 @@ import {
 } from '../../infrastructure/aws/dynamodb-client'
 import { createSecretsManagerClient } from '../../infrastructure/aws/secrets-manager-client'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
+import {
+  recordApiAccess,
+  recordApiError,
+} from '../../infrastructure/observability/api-observability'
+import { createDynamoDbReadinessProbe } from '../../infrastructure/observability/readiness'
 import { createCognitoClient } from '../../modules/authentication'
 import {
   DynamoDbDashboardSummaryClient,
@@ -380,6 +386,41 @@ export function createProductionDeveloperPlatformDependencies(): DeveloperPlatfo
 }
 
 /**
+ * Creates production operational dependencies with live critical-table checks.
+ *
+ * @returns Operational dependencies backed by fail-closed DynamoDB readiness probes.
+ */
+export function createProductionOperationalDependencies(): OperationalDependencies {
+  return {
+    readiness: createDynamoDbReadinessProbe(),
+    recordAccess: recordApiAccess,
+    recordError: recordApiError,
+  }
+}
+
+/**
+ * Creates deterministic operational dependencies for isolated server tests.
+ *
+ * @returns Operational dependencies that explicitly model an available test runtime.
+ */
+function createTestOperationalDependencies(): OperationalDependencies {
+  return {
+    readiness: {
+      async check() {
+        return {
+          checks: [
+            { name: 'test-runtime', ready: true },
+          ],
+          ready: true,
+        }
+      },
+    },
+    recordAccess() {},
+    recordError() {},
+  }
+}
+
+/**
  * Creates a Work Item import source port that validates production resources only when used.
  *
  * Connector workers do not process imports, so deferring this unrelated adapter prevents
@@ -441,6 +482,7 @@ function createLazyWorkItemImportQueue(): WorkItemImportQueue {
 export function createProductionConnectorAppDependencies(): AppDependencies {
   const adapters = createDynamoDbDeveloperPlatformAdapters()
   return {
+    operational: createProductionOperationalDependencies(),
     authentication: createProductionAuthenticationDependencies(),
     workspace: createProductionWorkspaceDependencies(),
     workItems: createProductionWorkItemDependencies(),
@@ -463,6 +505,7 @@ export function createProductionConnectorAppDependencies(): AppDependencies {
  */
 export function createProductionAppDependencies(): AppDependencies {
   return {
+    operational: createProductionOperationalDependencies(),
     authentication: createProductionAuthenticationDependencies(),
     workspace: createProductionWorkspaceDependencies(),
     workItems: createProductionWorkItemDependencies(),
@@ -480,6 +523,7 @@ export function createTestAppDependencies(): AppDependencies {
   const production = createProductionAppDependencies()
   return {
     ...production,
+    operational: createTestOperationalDependencies(),
     workItems: {
       ...production.workItems,
       workItemConfigurations: createDefaultWorkItemConfigurationClient(),
@@ -501,6 +545,14 @@ export function overrideAppDependencies(
   overrides: AppDependencyOverrides,
 ): AppDependencies {
   return {
+    operational: {
+      ...dependencies.operational,
+      ...(overrides.readiness ? { readiness: overrides.readiness } : {}),
+      ...(overrides.recordAccess
+        ? { recordAccess: overrides.recordAccess }
+        : {}),
+      ...(overrides.recordError ? { recordError: overrides.recordError } : {}),
+    },
     authentication: {
       ...dependencies.authentication,
       ...(overrides.cognito ? { cognito: overrides.cognito } : {}),

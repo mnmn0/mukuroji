@@ -1,4 +1,4 @@
-name: Oxc
+name: Static analysis
 
 on:
   pull_request:
@@ -6,13 +6,18 @@ on:
     branches:
       - main
 
+concurrency:
+  group: static-analysis-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   analyze:
-    name: oxlint
+    name: static-analysis
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -33,4 +38,13 @@ jobs:
           bun run skill:validate:test
 
       - name: Run oxlint
-        run: bun run oxc:lint:github
+        run: bun run oxc:lint:ci
+
+      - name: Run Web ESLint
+        run: bun run web:lint:ci
+
+      - name: Validate workspace dependency boundaries
+        run: bun run dependencies:check
+
+      - name: Detect unused and unresolved dependencies
+        run: bun run knip:check

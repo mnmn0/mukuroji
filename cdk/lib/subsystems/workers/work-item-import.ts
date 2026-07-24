@@ -76,6 +76,7 @@ export function buildWorkItemImportWorker(
       entry: path.join(serverHandlersDirectory, 'work-item-import.handler.ts'),
       handler: 'workItemImportHandler',
       runtime: lambda.Runtime.NODEJS_22_X,
+      tracing: lambda.Tracing.ACTIVE,
       depsLockFilePath,
       projectRoot,
       timeout: cdk.Duration.minutes(15),

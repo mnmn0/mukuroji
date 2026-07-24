@@ -402,7 +402,7 @@ test('holds the invitation acceptance lock across the Cognito password challenge
   ])
   expectStableWorkspaceMutationAuditContexts(auditContexts, {
     actorId: 'sub-invitee',
-    correlationId: 'workspace-challenge-correlation',
+    clientCorrelationId: 'workspace-challenge-correlation',
     idempotencyKey: 'workspace-challenge-1',
     method: 'POST',
     requestBody: { email: 'invitee@example.com' },
@@ -544,7 +544,7 @@ test('retries membership reconcile on normal login after password completion suc
     calls.workspaceMutationAuditContexts.slice(0, 1),
     {
       actorId: 'sub-demo@example.com',
-      correlationId: 'workspace-challenge-reconcile-correlation',
+      clientCorrelationId: 'workspace-challenge-reconcile-correlation',
       idempotencyKey: 'workspace-challenge-reconcile-1',
       method: 'POST',
       requestBody: { email: 'demo@example.com' },
@@ -557,7 +557,7 @@ test('retries membership reconcile on normal login after password completion suc
     calls.workspaceMutationAuditContexts.slice(1),
     {
       actorId: 'demo@example.com',
-      correlationId: 'workspace-login-reconcile-correlation',
+      clientCorrelationId: 'workspace-login-reconcile-correlation',
       idempotencyKey: 'workspace-login-reconcile-1',
       method: 'POST',
       requestBody: { email: 'demo@example.com' },

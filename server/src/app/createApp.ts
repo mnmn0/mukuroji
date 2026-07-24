@@ -27,8 +27,14 @@ export function createApp(dependencies: AppDependencies): Hono {
   registerCommonMiddleware(app, {
     getAllowedOrigins,
     auditRejectedEnterpriseSecurityMutation,
+    createIdentifier: () => crypto.randomUUID(),
+    now: Date.now,
+    recordAccess: dependencies.operational.recordAccess,
+    recordError: dependencies.operational.recordError,
   })
-  app.route('/', createSystemRouter())
+  app.route('/', createSystemRouter({
+    readiness: dependencies.operational.readiness,
+  }))
   registerApiRoutes(app)
 
   return app

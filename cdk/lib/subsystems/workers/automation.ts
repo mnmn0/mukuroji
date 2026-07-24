@@ -76,6 +76,7 @@ export function buildAutomationWorkers(
   const automationEventDlq = new sqs.Queue(scope, 'AutomationEventDlq', {
     encryption: sqs.QueueEncryption.SQS_MANAGED,
     enforceSSL: true,
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
     retentionPeriod: cdk.Duration.days(14),
   });
   const automationEventFunction = new lambdaNodejs.NodejsFunction(
@@ -85,6 +86,7 @@ export function buildAutomationWorkers(
       entry: path.join(serverHandlersDirectory, 'automation-event-handler.ts'),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
+      tracing: lambda.Tracing.ACTIVE,
       depsLockFilePath,
       projectRoot,
       timeout: cdk.Duration.minutes(2),
@@ -198,6 +200,7 @@ export function buildAutomationWorkers(
   const automationScheduleDlq = new sqs.Queue(scope, 'AutomationScheduleDlq', {
     encryption: sqs.QueueEncryption.SQS_MANAGED,
     enforceSSL: true,
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
     retentionPeriod: cdk.Duration.days(14),
   });
   const automationScheduleFunction = new lambdaNodejs.NodejsFunction(
@@ -207,6 +210,7 @@ export function buildAutomationWorkers(
       entry: path.join(serverHandlersDirectory, 'automation-schedule-handler.ts'),
       handler: 'handler',
       runtime: lambda.Runtime.NODEJS_22_X,
+      tracing: lambda.Tracing.ACTIVE,
       depsLockFilePath,
       projectRoot,
       timeout: cdk.Duration.minutes(5),
