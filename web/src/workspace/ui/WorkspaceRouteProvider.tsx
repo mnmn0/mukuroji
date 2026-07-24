@@ -17,6 +17,7 @@ import {
   canMutateWorkspaceContent,
 } from '../../auth/api'
 import {
+  resolveEnterpriseSessionErrorAction,
   resolveEnterpriseSessionErrorsAction,
   type EnterpriseSessionErrorAction,
 } from '../../auth/enterpriseSessionErrors'
@@ -25,6 +26,9 @@ import { clearAuthSession, getAuthSession, type AuthSession } from '../../auth/s
 import type { InboxNotification } from '../../notifications/api'
 import { resolveNotificationPath } from '../../notifications/model/paths'
 import { useNotificationUnreadCount } from '../../notifications/queries/useNotificationUnreadCount'
+import type {
+  NotificationPreferencesSessionErrorReporter,
+} from '../../notifications/queries/useNotificationPreferences'
 import {
   archiveProjectDirectoryProject,
   archiveProjectDirectoryTeam,
@@ -56,13 +60,12 @@ import {
 } from '../../shared/routing/paths'
 import type { SidebarNavId, SidebarTeamViewId } from '../../shared/ui/sidebar'
 import type { ProjectTask } from '../../tasks/api'
+import {
+  type AuthenticatedApiErrorReports,
+  listAuthenticatedApiErrors,
+  updateAuthenticatedApiErrorReport,
+} from '../model/authenticatedApiErrors'
 import { resolveWorkspaceCommonErrorKey } from '../model/workspaceRouteErrors'
-
-/** An authenticated API error reported by a descendant route or feature. */
-type AuthenticatedApiErrorReport = {
-  /** The raw error used only for enterprise session policy classification. */
-  error: unknown
-}
 
 /** Shared data and actions exposed to authenticated workspace routes. */
 export type WorkspaceRouteContextValue = {
@@ -94,8 +97,8 @@ export type WorkspaceRouteContextValue = {
   commonErrorKey?: MessageKey
   /** Runs an authenticated request and reports failures to the session guard. */
   guardEnterpriseSession: <Result>(request: Promise<Result>) => Promise<Result>
-  /** Reports a descendant API error for enterprise session policy handling. */
-  reportAuthenticatedApiError: (error?: unknown) => void
+  /** Reports notification-preference errors for enterprise session policy handling. */
+  reportNotificationPreferencesError: NotificationPreferencesSessionErrorReporter
   /** Resolves common and route errors into one prioritized session action. */
   resolveSessionErrors: (
     routeSessionErrors?: readonly unknown[],
@@ -150,8 +153,10 @@ export function WorkspaceRouteProvider() {
   const [locale, setLocale] = useState<Locale>(() => getInitialLocale())
   const [fontSizePreference, setFontSizePreferenceState] =
     useState<FontSizePreference>(() => getInitialFontSizePreference())
-  const [authenticatedApiErrorReport, setAuthenticatedApiErrorReport] =
-    useState<AuthenticatedApiErrorReport>()
+  const [authenticatedApiErrorReports, setAuthenticatedApiErrorReports] =
+    useState<AuthenticatedApiErrorReports>({
+      guardedSessionErrors: [],
+    })
   const t = useMemo(() => createTranslator(locale), [locale])
   const accessToken = session?.accessToken
   const {
@@ -193,10 +198,18 @@ export function WorkspaceRouteProvider() {
   const canMutateTeamConfiguration = canMutateWorkspaceContent(user)
   const currentPath = `${location.pathname}${location.search}${location.hash}`
 
-  /** Records a descendant request failure without turning a generic resource error fatal. */
-  const reportAuthenticatedApiError = useCallback((error?: unknown) => {
-    setAuthenticatedApiErrorReport(
-      error === undefined ? undefined : { error },
+  /** Records a notification-preference result without clearing guarded mutation failures. */
+  const reportNotificationPreferencesError = useCallback<
+    NotificationPreferencesSessionErrorReporter
+  >((source, error) => {
+    setAuthenticatedApiErrorReports((reports) =>
+      updateAuthenticatedApiErrorReport(
+        reports,
+        source === 'query'
+          ? 'notification-preferences-query'
+          : 'notification-preferences-save',
+        error,
+      ),
     )
   }, [])
 
@@ -205,10 +218,18 @@ export function WorkspaceRouteProvider() {
     try {
       return await request
     } catch (error) {
-      reportAuthenticatedApiError(error)
+      if (resolveEnterpriseSessionErrorAction(error, currentPath).kind !== 'stay') {
+        setAuthenticatedApiErrorReports((reports) =>
+          updateAuthenticatedApiErrorReport(
+            reports,
+            'guarded-session-error',
+            error,
+          ),
+        )
+      }
       throw error
     }
-  }, [reportAuthenticatedApiError])
+  }, [currentPath])
 
   /** Combines common and route errors before applying enterprise session precedence. */
   const resolveSessionErrors = useCallback((
@@ -218,12 +239,12 @@ export function WorkspaceRouteProvider() {
     [
       projectDirectoryError,
       notificationUnreadCountError,
-      authenticatedApiErrorReport?.error,
+      ...listAuthenticatedApiErrors(authenticatedApiErrorReports),
       ...routeSessionErrors,
     ],
     currentPath,
   ), [
-    authenticatedApiErrorReport?.error,
+    authenticatedApiErrorReports,
     currentPath,
     currentUserError,
     notificationUnreadCountError,
@@ -471,7 +492,7 @@ export function WorkspaceRouteProvider() {
     onSelectProject: handleSelectProject,
     onSelectTeamView: handleSelectTeamView,
     onSessionErrorAction: handleSessionErrorAction,
-    reportAuthenticatedApiError,
+    reportNotificationPreferencesError,
     resolveSessionErrors,
     teams,
     userIdentityAliases,
@@ -502,7 +523,7 @@ export function WorkspaceRouteProvider() {
     inboxCount,
     isLoading,
     locale,
-    reportAuthenticatedApiError,
+    reportNotificationPreferencesError,
     resolveSessionErrors,
     teams,
     userIdentityAliases,

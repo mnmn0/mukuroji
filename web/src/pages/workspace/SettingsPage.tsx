@@ -24,7 +24,7 @@ export function SettingsPage() {
           locale={workspace.locale}
           onFontSizePreferenceChange={workspace.onFontSizePreferenceChange}
           onLocaleChange={workspace.onLocaleChange}
-          onSessionError={workspace.reportAuthenticatedApiError}
+          onSessionError={workspace.reportNotificationPreferencesError}
           t={t}
           teams={workspace.teams}
           userLabel={workspace.userLabel}

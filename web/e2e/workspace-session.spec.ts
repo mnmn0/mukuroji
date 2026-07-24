@@ -273,3 +273,36 @@ test('generic route failure stays on the Workspace route and keeps the session',
     session: null,
   })
 })
+
+test('guarded Workspace mutation MFA failure clears the session and replaces history', async ({
+  page,
+}) => {
+  await mockWorkspaceSessionApis(page)
+  await page.route('**/api/teams', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.fallback()
+      return
+    }
+
+    await fulfillWorkspaceApiFailure(route, {
+      code: 'EnterpriseSessionMfaRequired',
+      status: 403,
+    })
+  })
+  await openProtectedRoute(page, '/dashboard', activeAuthSession)
+
+  await expect(
+    page.getByRole('heading', { level: 1, name: 'ダッシュボード' }),
+  ).toBeVisible()
+  await page.getByRole('button', { name: '新規登録' }).click()
+  await page.getByRole('button', { name: 'チーム', exact: true }).click()
+  await page.getByLabel('チーム名').fill('セッション検証チーム')
+  await page.getByRole('button', { name: 'チームを登録' }).click()
+
+  await expect(page).toHaveURL('/login?returnTo=%2Fdashboard')
+  await expect(readStoredAuthSession(page)).resolves.toEqual({
+    local: null,
+    session: null,
+  })
+  await expectProtectedHistoryEntryReplaced(page)
+})

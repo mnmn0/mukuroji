@@ -17,6 +17,7 @@ import {
 } from '../queries/useNotificationUnreadCount'
 import { useNotificationInboxPages } from '../queries/useNotificationInbox'
 import {
+  type NotificationPreferencesSessionErrorReporter,
   useNotificationPreferencesQuery,
 } from '../queries/useNotificationPreferences'
 
@@ -348,13 +349,13 @@ export function useNotificationInbox(
  *
  * @param accessToken - API 認証に使う access token です。
  * @param enabled - 設定画面表示中だけ取得を有効にするかどうかです。
- * @param onSessionError - Reports or clears an error for shared session policy handling.
+ * @param onSessionError - Reports or clears query and save errors for shared session handling.
  * @returns 設定画面描画用 controller です。
  */
 export function useNotificationPreferences(
   accessToken?: string,
   enabled = true,
-  onSessionError?: (error?: unknown) => void,
+  onSessionError?: NotificationPreferencesSessionErrorReporter,
 ): NotificationPreferencesController {
   const mutationRunner = useRef(createMutationRequestRunner()).current
   const [isSaving, setIsSaving] = useState(false)
@@ -384,13 +385,13 @@ export function useNotificationPreferences(
       )
 
       await mutate(savedPreferences, { revalidate: false })
-      onSessionError?.()
+      onSessionError?.('save')
       setDidSave(true)
       return true
     } catch (saveError) {
       console.error('Notification preferences update failed:', saveError)
       setSaveError(saveError)
-      onSessionError?.(saveError)
+      onSessionError?.('save', saveError)
 
       if (saveError instanceof NotificationsApiError && saveError.status === 409) {
         await mutate().catch(() => undefined)

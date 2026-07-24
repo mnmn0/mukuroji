@@ -27,7 +27,7 @@ const routeContext: WorkspaceRouteContextValue = {
   onSelectProject: () => undefined,
   onSelectTeamView: () => undefined,
   onSessionErrorAction: () => undefined,
-  reportAuthenticatedApiError: () => undefined,
+  reportNotificationPreferencesError: () => undefined,
   resolveSessionErrors: () => undefined,
   teams: [],
   userIdentityAliases: ['demo@example.com'],

@@ -2,6 +2,9 @@ import { Link } from 'react-router'
 import { AutomationManagementPanelContainer } from '../../automation/ui/AutomationManagementPanelContainer'
 import { DeveloperPlatformSettingsPanelContainer } from '../../developer-platform/ui/DeveloperPlatformSettingsPanelContainer'
 import { NotificationSettingsPanelContainer } from '../../notifications/ui/NotificationSettingsPanelContainer'
+import type {
+  NotificationPreferencesSessionErrorReporter,
+} from '../../notifications/queries/useNotificationPreferences'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import {
   fontSizePreferenceOptions,
@@ -35,7 +38,7 @@ export type WorkspaceSettingsViewProps = {
   /** Callback that persists locale changes. */
   onLocaleChange?: (locale: Locale) => void
   /** Callback that forwards feature session errors to the shared shell. */
-  onSessionError?: (error?: unknown) => void
+  onSessionError?: NotificationPreferencesSessionErrorReporter
   /** Localized message resolver. */
   t: (key: MessageKey) => string
   /** Workspace Team and Project directory. */

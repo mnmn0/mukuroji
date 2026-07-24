@@ -1,5 +1,8 @@
 import type { Locale } from '../../shared/i18n/i18n'
 import { useNotificationPreferences } from '../mutations/useNotifications'
+import type {
+  NotificationPreferencesSessionErrorReporter,
+} from '../queries/useNotificationPreferences'
 import { NotificationSettingsPanel } from './NotificationSettingsPanel'
 
 /**
@@ -11,7 +14,7 @@ export type NotificationSettingsPanelContainerProps = {
   /** Locale used by the notification settings panel. */
   locale: Locale
   /** Optional callback that forwards session-policy errors to the Workspace shell. */
-  onSessionError?: (error?: unknown) => void
+  onSessionError?: NotificationPreferencesSessionErrorReporter
 }
 
 /**

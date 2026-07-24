@@ -122,7 +122,7 @@ const storyWorkspaceRouteContext: WorkspaceRouteContextValue = {
   onSelectProject: () => undefined,
   onSelectTeamView: () => undefined,
   onSessionErrorAction: () => undefined,
-  reportAuthenticatedApiError: () => undefined,
+  reportNotificationPreferencesError: () => undefined,
   resolveSessionErrors: () => undefined,
   teams: projectDirectoryFixtures,
   userIdentityAliases: ['demo@example.com'],
