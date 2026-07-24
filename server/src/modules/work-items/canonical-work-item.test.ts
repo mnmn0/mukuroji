@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  isCanonicalWorkItemDueDate,
   isCanonicalWorkItemRecord,
   isCanonicalWorkItemRelationIds,
 } from './canonical-work-item'
@@ -46,6 +47,13 @@ describe('canonical Work Item validation', () => {
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem())).toBe(true)
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ sourceRequestId: 'req_20260716_example' })))
       .toBe(true)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      importRequestDigest: 'a'.repeat(64),
+    }))).toBe(true)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      archivedAt: '2026-07-10T09:00:00.000Z',
+      archivedBy: 'archiver@example.com',
+    }))).toBe(true)
     expect(isCanonicalWorkItemRecord(unassigned)).toBe(true)
   })
 
@@ -136,5 +144,42 @@ describe('canonical Work Item validation', () => {
       { length: 101 },
       (_, index) => `related:item-${String(index).padStart(3, '0')}`,
     ))).toBe(false)
+  })
+
+  test('requires canonical calendar dates and ordered UTC timestamps', () => {
+    expect(isCanonicalWorkItemDueDate('2024/02/29')).toBe(true)
+    expect(isCanonicalWorkItemDueDate('2024-02-29')).toBe(true)
+    expect(isCanonicalWorkItemDueDate('2026/02/29')).toBe(false)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      dueDate: '2026-07-31',
+    }))).toBe(true)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      dueDate: '2026/02/29',
+    }))).toBe(false)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      dueDate: '2026/07-31',
+    }))).toBe(false)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      createdAt: '2026-07-01T09:00:00Z',
+    }))).toBe(false)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      updatedAt: '2026-06-30T09:00:00.000Z',
+    }))).toBe(false)
+  })
+
+  test('requires canonical import and archive metadata', () => {
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      importRequestDigest: 'not-a-digest',
+    }))).toBe(false)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      archivedAt: '2026-07-10T09:00:00.000Z',
+    }))).toBe(false)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      archivedBy: 'archiver@example.com',
+    }))).toBe(false)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      archivedAt: '2026-07-13T09:00:00.000Z',
+      archivedBy: 'archiver@example.com',
+    }))).toBe(false)
   })
 })

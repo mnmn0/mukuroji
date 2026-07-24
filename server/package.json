@@ -6,7 +6,8 @@
     "build:connector-lambda": "bun build src/handlers/connector-handler.ts --target node --format esm --outfile dist/lambda/connector-handler.mjs",
     "test": "bun test --max-concurrency 1 src scripts",
     "audit:backfill": "bun run scripts/backfills/backfill-audit-events.ts",
-    "search:backfill": "bun run scripts/backfills/backfill-workspace-search.ts"
+    "search:backfill": "bun run scripts/backfills/backfill-workspace-search.ts",
+    "work-items:integrity": "bun run scripts/data-integrity/verify-work-items-integrity.ts"
   },
   "dependencies": {
     "@mukuroji/contracts": "workspace:*",
@@ -16,6 +17,8 @@
     "@aws-sdk/client-s3": "^3.1057.0",
     "@aws-sdk/client-secrets-manager": "^3.1057.0",
     "@aws-sdk/client-sqs": "^3.1057.0",
+    "@aws-sdk/client-sts": "3.1057.0",
+    "@aws-sdk/credential-provider-ini": "3.973.1",
     "@aws-sdk/lib-dynamodb": "^3.1057.0",
     "@aws-sdk/s3-request-presigner": "^3.1057.0",
     "hono": "^4.12.21"

@@ -36,7 +36,7 @@ Canonical row は次の field を持つ。
 | `customFieldValues` | yes | configuration に対して検証済みの field ID / value map。値がなくても `{}` を保存する。 |
 | `relationIds` | yes | Relation Graph から導出した `type:targetWorkItemId` の辞書順・重複なし配列。最大100件で、relation がなくても `[]` を保存する。 |
 | `priority` | yes | `low`、`medium`、`high`。 |
-| `dueDate` | yes | `YYYY/MM/DD` 形式の UTC calendar day。 |
+| `dueDate` | yes | `YYYY/MM/DD` または `YYYY-MM-DD` 形式の UTC calendar day。 |
 | `sortOrder` | yes | Team/project list の安定表示順。 |
 | `createdAt` / `updatedAt` | yes | UTC ISO 8601 timestamp。 |
 

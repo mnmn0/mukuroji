@@ -30,6 +30,8 @@ export type CanonicalWorkItemRecord = Record<string, unknown> & {
   assignedProjectId?: string
   /** Team 内で Work Item を識別する sort key です。 */
   issueId: string
+  /** Import の冪等作成 payload を識別する SHA-256 digest です。 */
+  importRequestDigest?: string
   /** Team/project 一覧で利用する表示順です。 */
   sortOrder: number
   /** Work Item の literal title です。 */
@@ -50,7 +52,7 @@ export type CanonicalWorkItemRecord = Record<string, unknown> & {
   customFieldValues: Record<string, CustomFieldValue>
   /** Relation Graph から同期した辞書順の派生 relation ID 一覧です。 */
   relationIds: string[]
-  /** UTC calendar day として扱う期限文字列です。 */
+  /** YYYY/MM/DD または YYYY-MM-DD の UTC calendar day です。 */
   dueDate: string
   /** Work Item の優先度です。 */
   priority: WorkItemPriority
@@ -58,6 +60,10 @@ export type CanonicalWorkItemRecord = Record<string, unknown> & {
   createdAt: string
   /** 最終 state 更新日時の ISO 8601 timestamp です。 */
   updatedAt: string
+  /** Reversible archive を適用した ISO 8601 timestamp です。 */
+  archivedAt?: string
+  /** Archive mutation を実行した Workspace member key です。 */
+  archivedBy?: string
 }
 
 const forbiddenCanonicalWorkItemFields = [
@@ -86,6 +92,8 @@ export function isCanonicalWorkItemRecord(value: unknown): value is CanonicalWor
     isNonEmptyString(value.teamId) &&
     value.directoryTeamId === `${value.directoryId}#team#${value.teamId}` &&
     isNonEmptyString(value.issueId) &&
+    (value.importRequestDigest === undefined ||
+      isSha256Digest(value.importRequestDigest)) &&
     typeof value.sortOrder === 'number' &&
     Number.isFinite(value.sortOrder) &&
     isNonEmptyString(value.title) &&
@@ -99,10 +107,12 @@ export function isCanonicalWorkItemRecord(value: unknown): value is CanonicalWor
     isWorkflowStatusCategory(value.statusCategory) &&
     isCanonicalCustomFieldValues(value.customFieldValues) &&
     isCanonicalWorkItemRelationIds(value.relationIds) &&
-    isNonEmptyString(value.dueDate) &&
+    isCanonicalWorkItemDueDate(value.dueDate) &&
     isWorkItemPriority(value.priority) &&
-    isNonEmptyString(value.createdAt) &&
-    isNonEmptyString(value.updatedAt)
+    isCanonicalUtcTimestamp(value.createdAt) &&
+    isCanonicalUtcTimestamp(value.updatedAt) &&
+    value.createdAt <= value.updatedAt &&
+    hasCanonicalArchiveState(value)
 }
 
 /** Canonical Work Item の derived relation ID 一覧を厳密検証します。 */
@@ -126,6 +136,24 @@ function hasCanonicalProjectAssignment(value: Record<string, unknown>) {
 
   return isNonEmptyString(value.assignedProjectId) &&
     value.directoryProjectId === `${value.directoryId}#project#${value.assignedProjectId}`
+}
+
+/**
+ * Validates the optional archive timestamp and actor as one atomic state.
+ *
+ * @param value - Candidate Work Item record.
+ * @returns True when both archive fields are absent or jointly canonical.
+ */
+function hasCanonicalArchiveState(value: Record<string, unknown>) {
+  if (value.archivedAt === undefined && value.archivedBy === undefined) {
+    return true
+  }
+  return isCanonicalUtcTimestamp(value.archivedAt) &&
+    isNonEmptyString(value.archivedBy) &&
+    typeof value.createdAt === 'string' &&
+    typeof value.updatedAt === 'string' &&
+    value.createdAt <= value.archivedAt &&
+    value.archivedAt <= value.updatedAt
 }
 
 function isCanonicalCustomFieldValues(
@@ -182,6 +210,59 @@ function isWorkItemRelationType(value: string) {
 
 function isPositiveInteger(value: unknown) {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1
+}
+
+/**
+ * Checks a real UTC calendar day in either supported persisted Work Item date-only format.
+ *
+ * @param value - Candidate due date.
+ * @returns True for a canonical real calendar day.
+ */
+export function isCanonicalWorkItemDueDate(value: unknown): value is string {
+  if (typeof value !== 'string') {
+    return false
+  }
+  const match = /^(\d{4})([/-])(\d{2})\2(\d{2})$/.exec(value)
+  if (!match) {
+    return false
+  }
+  const yearText = match[1]
+  const monthText = match[3]
+  const dayText = match[4]
+  if (!yearText || !monthText || !dayText) {
+    return false
+  }
+  const year = Number(yearText)
+  const month = Number(monthText)
+  const day = Number(dayText)
+  const date = new Date(Date.UTC(year, month - 1, day))
+  return date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+}
+
+/**
+ * Checks a canonical millisecond-precision UTC ISO timestamp.
+ *
+ * @param value - Candidate timestamp.
+ * @returns True when parsing and canonical serialization are lossless.
+ */
+function isCanonicalUtcTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') {
+    return false
+  }
+  const timestamp = new Date(value)
+  return Number.isFinite(timestamp.getTime()) && timestamp.toISOString() === value
+}
+
+/**
+ * Checks a lowercase SHA-256 digest.
+ *
+ * @param value - Candidate digest.
+ * @returns True for exactly 32 bytes of lowercase hexadecimal text.
+ */
+function isSha256Digest(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
 }
 
 function isNonEmptyString(value: unknown): value is string {

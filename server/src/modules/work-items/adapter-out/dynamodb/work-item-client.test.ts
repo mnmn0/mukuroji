@@ -501,6 +501,8 @@ test('DynamoDB Work Item list limits count visible rows instead of archived rows
               ...canonicalWorkItem,
               issueId: `${indexName}-archived`,
               archivedAt: '2026-07-12T01:00:00.000Z',
+              archivedBy: 'demo@example.com',
+              updatedAt: '2026-07-12T01:00:00.000Z',
             }],
             LastEvaluatedKey: { indexName, pageCount },
           }
@@ -573,8 +575,9 @@ test('DynamoDB Work Item creation allocates IDs and sort order across archived r
     dueDate: '2026/06/03',
     priority: 'high',
     createdAt: '2026-07-12T00:00:00.000Z',
-    updatedAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T01:00:00.000Z',
     archivedAt: '2026-07-12T01:00:00.000Z',
+    archivedBy: 'demo@example.com',
   }
   const documentClient = {
     async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
@@ -622,6 +625,56 @@ test('DynamoDB Work Item creation allocates IDs and sort order across archived r
       },
     },
   })
+})
+
+test('DynamoDB Work Item writes reject impossible due dates before persistence', async () => {
+  let sendCount = 0
+  const documentClient = {
+    async send() {
+      sendCount += 1
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+  const expectedFailure = {
+    code: 'InvalidProjectWrite',
+    message: 'Issue due date is invalid.',
+    status: 400,
+  }
+
+  await expect(client.createTeamIssue(
+    'user#demo@example.com',
+    'core-team',
+    {
+      title: 'Impossible date',
+      assigneeUserId: 'sato@example.com',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'todo',
+      statusCategory: 'unstarted',
+      customFieldValues: {},
+      dueDate: '2026/02/29',
+      priority: 'high',
+    },
+    'demo@example.com',
+  )).rejects.toMatchObject(expectedFailure)
+  await expect(client.updateTeamIssue(
+    'user#demo@example.com',
+    'core-team',
+    'impossible-date',
+    {
+      dueDate: '2026-02-29',
+      expectedRevision: 1,
+    },
+    'demo@example.com',
+  )).rejects.toMatchObject(expectedFailure)
+
+  expect(sendCount).toBe(0)
 })
 
 test('DynamoDB Work Item comment idempotent replay returns comment and activity', async () => {

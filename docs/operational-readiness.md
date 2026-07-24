@@ -18,7 +18,7 @@ repository に固定せず、各実行の evidence record に残します。
 | Web journey quality | Required Playwright gate が主要 Work Item 画面の keyboard/focus、390px viewport、screen-reader-facing ARIA tree、低速 API 中の status と復帰を検証する | Chromium と mock API による回帰 proxy であり、実 screen reader、visual regression、performance budget は未実装 |
 | Rollout | Backward-compatible CDK/Lambda update と CloudFormation rollback を利用できる | Lambda alias、CodeDeploy canary、一般的な feature flag / kill switch は未実装。段階 rollout が必要な変更は gate を満たさない |
 | Migration | Production-safe migration contract と entry/verification/rollback evidence を定義する | Workspace Search backfill は online fence、lease、lossless journal、完全検証、rollback を未実装。production gate には使用しないこと |
-| Data durability | Stateful DynamoDB table は `Retain` + PITR、file bucket は `Retain` + versioning を使う | 定期 restore、regional replication/failover、AWS Backup plan は未実装。drill と regional DR を別途有効化すること |
+| Data durability | Stateful DynamoDB table は `Retain` + PITR、file bucket は `Retain` + versioning を使う。Work Items には read-only の manifest/compare verifier がある | Restore、writer fence、定期実行、regional replication/failover、AWS Backup plan は未実装。verifier の導入だけで drill や regional DR を完了扱いにしないこと |
 
 この表の未実装項目を、手順書が存在することだけで実装済みとして扱ってはいけません。
 
@@ -409,6 +409,93 @@ recovery table まで `RTO <= 4時間` です。これは運用目標であり�
 Audit Events のいずれかを交代で restore します。現時点では定期実行 automation がないため、
 environment owner が schedule、対象、evidence location を登録しなければなりません。
 
+### Work Items integrity verifier v1
+
+Work Items table には、source または隔離済み restore table を read-only で走査して署名済み
+manifest を作り、2つの manifest を AWS access なしで比較する operator CLI があります。
+実行時には account、region、物理 table 名、AWS profile、専用 digest key file、output をすべて
+明示し、ambient credential、既定 table、環境変数からの暗黙選択に依存しません。
+例の`--silent`はBunによる引数echoを抑止し、CLIのstandalone JSONだけをstdout/stderrへ残します。
+AWS SDK clientはenvironment/shared configのendpoint overrideを無視し、明示regionのAWS endpoint
+以外へのredirectを許可しません。
+
+Digest key file は暗号学的に安全な乱数から生成した専用の32-byte keyを64桁の小文字hexで保持し、
+repository外で owner-only に管理します。Source writer を外部で停止または fence し、その状態が
+走査全体を覆う場合は`writer-fenced`を指定します。
+
+```sh
+umask 077
+openssl rand -hex 32 > work-items-integrity-key.hex
+chmod 600 work-items-integrity-key.hex
+
+bun run --silent work-items:integrity -- manifest \
+  --role source \
+  --account <12-digit-aws-account> \
+  --region <region> \
+  --table <source-work-items-table> \
+  --profile <read-only-profile> \
+  --digest-key-file work-items-integrity-key.hex \
+  --output <source-manifest-path> \
+  --source-consistency writer-fenced
+```
+
+Writer を止めず、ある時点の観測結果だけを記録する場合は
+`--source-consistency live-observation` を使います。この manifest は drift 調査には使えますが、
+exact restore 比較を `PASS` にできません。Restore manifest は application traffic と writer
+から隔離し、復元完了後に追加書き込みがない table から作ります。
+
+```sh
+bun run --silent work-items:integrity -- manifest \
+  --role restore \
+  --account <12-digit-aws-account> \
+  --region <region> \
+  --table <restore-work-items-table> \
+  --profile <read-only-profile> \
+  --digest-key-file <work-items-integrity-key-file> \
+  --output <restore-manifest-path>
+
+bun run --silent work-items:integrity -- compare \
+  --source-manifest <source-manifest-path> \
+  --restore-manifest <restore-manifest-path> \
+  --digest-key-file <work-items-integrity-key-file>
+```
+
+`manifest` が使う AWS action は次の allowlist に限ります。Operator role へ DynamoDB mutation、
+restore、delete、application write の権限を付与しません。
+
+- `sts:GetCallerIdentity`
+- `dynamodb:DescribeTable`
+- `dynamodb:DescribeContinuousBackups`
+- `dynamodb:DescribeTimeToLive`
+- `dynamodb:Scan`
+
+CLI は STS account と table ARN/account/region を明示値に照合してから base table を全走査します。
+`Scan` は `ConsistentRead=true` ですが、strong consistency は各 item の read に対するものであり、
+複数 page にまたがる table-wide snapshot isolation ではありません。Manifest はこの性質を
+`snapshotIsolation=false` として固定します。そのため `writer-fenced` は CLI が実現または証明
+する機能ではなく、data owner が外部の writer fence とその時刻を evidence record に残した場合
+だけ選択できます。
+
+Manifest は raw row や tenant/Workspace/Team/Work Item ID、title、description、custom value、
+scan cursor、per-item digest を含みません。同一専用 key を使った order-independent な
+HMAC-SHA-256 の key-set/content aggregate、key fingerprint、manifest MACだけを保存します。
+Output は atomic に作られ、owner-onlyの mode `0600` になります。Manifestにはaccount、region、
+table ARN/profileなどの infrastructure-sensitive metadataが含まれるため、access-controlledな
+evidence storeで管理し、digest keyとは別に保管します。
+既存outputは上書きせず失敗するため、drillごとに一意なevidence pathを指定します。
+
+v1 は aggregate を primary-key digest 順にsortするため、走査中に最大
+`1,000,000` item分の固定長digestをメモリに保持します。上限を超えた場合は部分結果を出さず
+fail-closedで停止します。これは大規模table向けexternal sortを未実装とする明示的な制限です。
+
+v1 の非目標は、DynamoDB restoreの実行/自動化、writer fenceの実装、90日scheduleとRPO/RTOの
+自動測定、Work Item Configuration/Relation Graph/Audit Eventsをまたぐ関係・設定・監査不変条件、
+S3 object restore、regional DRです。特に下記手順はproduction writerを止めないため、手順中の
+live source scanだけでは特定restore pointとの完全一致を証明できません。Exact comparisonには、
+選択restore pointに対応し、外部fenceの証拠を伴うsource manifestを別途取得しておく必要があります。
+Verifierが単独で成功しても、90日 PITR drillのRPO/RTO、cross-table invariants、cleanup evidenceが
+揃わない限りdrill完了とはみなしません。
+
 ### Drill procedure
 
 1. Change record と drill ID を作り、account/region/source table、responsible data/infrastructure
@@ -416,8 +503,10 @@ environment owner が schedule、対象、evidence location を登録しなけ�
    へ接続しない。
 2. `describe-continuous-backups` で PITR status、earliest/latest restorable time を保存し、
    latest restorable time が開始時刻から5分以内であることを確認する。
-3. Restore point を選び、その時点の key schema/GSI/TTL/encryption、logical partition count、
-   representative key digest、監査済み aggregate/checksum manifest を保存する。
+3. Restore point を選び、その時点の key schema/GSI/TTL/encryption を保存する。Work Items の
+   exact compare を行う場合は、restore point に対応する、外部 writer fence 証拠付きの
+   `writer-fenced` source manifest を用意する。現在の writer 継続手順でその場から得られる
+   `live-observation` manifest を exact baseline にしない。
 4. Source と異なる一意な recovery table 名へ restore し、table exists/active まで待つ。
 
 ```sh
@@ -435,8 +524,10 @@ aws dynamodb wait table-exists \
 5. 完了 UTC を記録し、descriptor を source/manifest と比較する。Restore 後に自動復元されない
    runtime setting がある前提で、TTL、PITR、stream、alarm、tags、IAM/application binding を
    個別に確認する。
-6. Recovery table を隔離した read-only verifier で exact key sample、logical partition count、
-   relationship/invariant、aggregate/checksum を確認する。Raw tenant data を evidence へ出さない。
+6. Recovery table を隔離して追加書き込みを禁止し、Work Items integrity verifier で canonical
+   row、exact item/logical partition count、key-set/content aggregate、descriptorを確認する。
+   Sourceとのexact比較には手順3の`writer-fenced` manifestを使う。Relation Graph、configuration、
+   auditのcross-table invariantは別のread-only検査で確認し、raw tenant dataをevidenceへ出さない。
 7. `latest restorable time` と選択 point から RPO、開始から verified までの RTO を計算し、
    目標の pass/fail と差分を記録する。
 8. Source table は削除/置換しない。実 incident の切替は reviewed conditional repair または
@@ -447,8 +538,10 @@ aws dynamodb wait table-exists \
 
 - Drill ID、owner、account/region、source/recovery table ARN、開始/完了 UTC
 - PITR status、earliest/latest restorable time、選択 restore point、measured RPO/RTO
-- Source/recovery の key schema、GSI、TTL、encryption、item/partition count、checksum
-- Representative records と relation/audit invariant の secret-free pass/fail
+- Source/recovery の key schema、GSI、TTL、encryption、item/partition count、HMAC aggregate、
+  manifest MAC、source writer fence evidence
+- Work Items verifierが対象外とするrelation/configuration/audit invariantの別検査による
+  secret-free pass/fail
 - CloudTrail/command output、approvals、cleanup ticket、gap と remediation due date
 
 File bucket は versioning/Retain により object version を保持しますが、この DynamoDB drill だけでは

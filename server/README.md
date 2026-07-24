@@ -91,6 +91,69 @@ query、entity ID、exception message、stack trace は保存しません。Publ
 `POST /api/auth/login` 以外の application API は、Cognito access token を
 `Authorization: Bearer <token>` で受け取ります。
 
+## Work Items integrity verifier
+
+`work-items:integrity` は Work Items の source table または隔離済み restore table を read-only
+で検査するoperator CLIです。Manifest生成ではaccount、region、物理table名、AWS profile、
+専用digest key file、outputをすべて明示します。AWS profileは明示されたprofileへcredentialsを
+束縛し、STS accountとtable ARN/account/regionが引数に一致しない場合はScan前に停止します。
+例の`--silent`はBunによる引数echoを抑止し、CLIのstandalone JSONだけをstdout/stderrへ残します。
+AWS SDK clientはenvironment/shared configのendpoint overrideを無視し、明示regionのAWS endpoint
+以外へのredirectを許可しません。
+
+```sh
+bun run --silent work-items:integrity -- manifest \
+  --role source \
+  --account <12-digit-aws-account> \
+  --region <region> \
+  --table <source-work-items-table> \
+  --profile <read-only-profile> \
+  --digest-key-file <owner-only-64-lowercase-hex-key-file> \
+  --output <source-manifest-path> \
+  --source-consistency writer-fenced
+
+bun run --silent work-items:integrity -- manifest \
+  --role restore \
+  --account <12-digit-aws-account> \
+  --region <region> \
+  --table <isolated-restore-work-items-table> \
+  --profile <read-only-profile> \
+  --digest-key-file <owner-only-64-lowercase-hex-key-file> \
+  --output <restore-manifest-path>
+
+bun run --silent work-items:integrity -- compare \
+  --source-manifest <source-manifest-path> \
+  --restore-manifest <restore-manifest-path> \
+  --digest-key-file <owner-only-64-lowercase-hex-key-file>
+```
+
+Source manifestでは`--source-consistency`が必須です。`writer-fenced`は外部のwriter停止/fenceが
+走査全体を覆うことをoperatorが別証拠で確認した場合だけ指定します。`live-observation`はwriterを
+止めない観測用で、exact restore比較は`PASS`になりません。Restore tableはapplication trafficと
+writerから隔離し、復元完了後に追加書き込みがない状態で走査します。
+
+CLIが要求するallowlistは`sts:GetCallerIdentity`、`dynamodb:DescribeTable`、
+`dynamodb:DescribeContinuousBackups`、`dynamodb:DescribeTimeToLive`、`dynamodb:Scan`だけです。
+DynamoDB mutation/restore/delete権限は不要です。`Scan`は`ConsistentRead=true`でも各item単位の
+strong readでありtable全体のsnapshotではないため、manifestには`snapshotIsolation=false`を
+記録します。
+
+Manifestはraw row、tenant/Workspace/Team/Work Item ID、field value、cursor、per-item digestを
+出力しません。`openssl rand -hex 32`等の暗号学的に安全な乱数で作った専用keyによる
+order-independentなHMAC-SHA-256 key-set/content aggregateとmanifest MACを保存し、atomic
+writeされたfileはmode `0600`になります。Key fileとmanifestはrepository外の別々の
+access-controlledな場所で管理してください。v1はdigest sortのため最大`1,000,000` item分を
+メモリに保持し、上限超過時は不正行を含めて数え、部分manifestを作らず停止します。
+既存outputは上書きせず失敗するため、drillごとに一意なevidence pathを指定してください。
+
+このCLIはrestoreやwriter fence、定期実行、RPO/RTO測定を自動化しません。またWork Item
+Configuration/Relation Graph/Audit Eventsをまたぐ不変条件、S3 restore、regional DRは検査対象外
+です。Production writerを継続する既存runbookでは、exact比較用にrestore pointと対応する
+外部fence証拠付きsource manifestを別途用意する必要があります。CLIの成功だけで90日 PITR
+restore drillを完了扱いにしないでください。完全な手順とevidence契約は
+[`docs/operational-readiness.md`](../docs/operational-readiness.md#work-items-integrity-verifier-v1)
+を参照してください。
+
 ## API path contract
 
 Hono app 内の canonical path は `/api` prefix 付きです。Lambda adapter は Function URL / API Gateway から届く prefix なしの path を canonical path へ正規化するため、次の 2 つは同じ route を呼びます。
