@@ -10,6 +10,9 @@ import { synthesizedTemplate } from './test-support';
 
 test('routes every CloudWatch alarm to distinct primary and secondary SNS topics', () => {
   const alarms = synthesizedTemplate.findResources('AWS::CloudWatch::Alarm');
+  const compositeAlarms = synthesizedTemplate.findResources(
+    'AWS::CloudWatch::CompositeAlarm',
+  );
   const expectedPrimaryAction = {
     'Fn::Join': [
       '',
@@ -41,10 +44,14 @@ test('routes every CloudWatch alarm to distinct primary and secondary SNS topics
     ],
   };
 
-  expect(Object.keys(alarms)).toHaveLength(21);
+  expect(Object.keys(alarms)).toHaveLength(23);
+  expect(Object.keys(compositeAlarms)).toHaveLength(1);
   synthesizedTemplate.resourceCountIs('AWS::SNS::Topic', 0);
   synthesizedTemplate.resourceCountIs('AWS::SNS::Subscription', 0);
-  for (const [logicalId, alarm] of Object.entries(alarms)) {
+  for (
+    const [logicalId, alarm]
+    of Object.entries({ ...alarms, ...compositeAlarms })
+  ) {
     const actions = alarm.Properties?.AlarmActions;
 
     expect(Array.isArray(actions)).toBe(true);

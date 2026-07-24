@@ -13,7 +13,7 @@ repository に固定せず、各実行の evidence record に残します。
 | API log / metric | Secret-safe な JSON completion/error log と CloudWatch EMF `Mukuroji/API` を出力する | Log retention、dashboard、30日 SLO 集計を environment owner が有効化すること |
 | Health | `/api/health` の liveness と `/api/ready` の DynamoDB readiness を分離する | Trusted probe と edge-level throttle を設定し、readiness の `503` を rollout 停止へ接続すること |
 | Trace | CDK が管理する全16個の Node.js Lambda で X-Ray active tracing を有効にし、API log に runtime-controlled invocation ID と X-Ray root trace ID を記録する | Correlation ID 自体の X-Ray annotation は未実装 |
-| Alarm | API、queue、DLQ、async destination の21個の CloudWatch alarm を定義し、同一account/regionの必須primary/secondary SNS topicへ全alarm actionを接続する | SNS subscription、Incident Manager、rosterは環境側の責務。両経路のtest alarmを確認するまで unattended production とみなさないこと |
+| Alarm | API、queue、DLQ、async destination の23 metric alarmと1 composite alarmを定義し、同一account/regionの必須primary/secondary SNS topicへ全alarm actionを接続する。Fast-burn component 2件はnotification無効 | SNS subscription、Incident Manager、rosterは環境側の責務。Compositeを含む通知有効な22件のtest evidenceを確認するまで unattended production とみなさないこと |
 | Release | PR/push workflow が Server test を含む全 source/build config の strict typecheck、static analysis、unit/integration、Web E2E、CDK test/nag/synth を実行し、main ruleset が6つの必須 check を強制する | Path-filtered local runtime と外部 reviewer は常時 required にせず、対象変更ごとの release evidence で結果または rate limit を確認すること |
 | Web journey quality | Required Playwright gate が主要 Work Item 画面の keyboard/focus、390px viewport、screen-reader-facing ARIA tree、低速 API 中の status と復帰を検証する | Chromium と mock API による回帰 proxy であり、実 screen reader、visual regression、performance budget は未実装 |
 | Rollout | Backward-compatible CDK/Lambda update と CloudFormation rollback を利用できる | Lambda alias、CodeDeploy canary、一般的な feature flag / kill switch は未実装。段階 rollout が必要な変更は gate を満たさない |
@@ -62,14 +62,20 @@ CORS preflight、operator が明示した load test は除外します。
 - `RequestCount`: common middleware が completion まで到達した `/api/*` request の raw 件数
 - `ServerErrorCount`: raw request のうち HTTP status が `500` 以上の件数
 - `Latency`: common middleware が測定した end-to-end milliseconds
+- `EligibleRequestCount`、`EligibleServerErrorCount`、`EligibleLatency`: raw completion から
+  health、readiness、preflightを除いた同じ単位の SLI metric
 - Good request: status が `500` 未満の eligible request。認証/認可/rate-limit を含む
   意図した `4xx` は server availability の失敗に数えない
 - Bad request: `500` 以上、または throttle/transport failure により middleware completion
   record を作れなかった eligible request
 
-Raw EMF は `Service` だけを dimension とし、health/readiness/preflight も含みます。30日 SLI は
-JSON completion log の `routeGroup` と `method` から除外対象を引いた eligible count を作り、
-raw EMF の集計値をそのまま分母にしません。
+Raw EMF は `Service` だけを dimension とし、health/readiness/preflight も含みます。
+Eligible EMF も同じ dimension とし、common middleware が exact path と method から対象可否を
+判定してからpathを破棄し、logにはboundedな`sliEligible`だけを残します。30日 SLI と
+fast-burn alarm は eligible metric を使い、raw EMF の集計値をそのまま分母にしません。
+Production load test を client-controlled header で
+除外することは禁止します。承認済みwindowをoffline reportから除外する場合もraw/eligible
+telemetryを保持し、fast-burn alarmは抑制しません。
 
 Application completion record は Function URL と HTTP API の両経路を同じ形式で数えます。
 一方、Lambda throttle や integration 前の API Gateway failure は EMF completion record を
@@ -79,8 +85,9 @@ report を **provisional** と表示します。`treatMissingData=notBreaching` 
 成功 evidence ではなく `no-data` です。
 
 Hono が catch して `500` response に変換した request は Lambda `Errors` を増やさないため、
-Function URL と HTTP API の両経路を数える EMF `ServerErrorCount` alarm で補完します。単一 failure
-alarm はありますが multi-window burn alert と両 transport の外形 probe は未実装です。
+Function URL と HTTP API の両経路を数える EMF `ServerErrorCount` alarm で補完します。Eligible
+completionには5分・1時間の multi-window fast-burn alertがあります。Middleware到達前failureを
+同じSLIへ重複なく統合する外形probeは未実装です。
 
 ### Objectives
 
@@ -103,9 +110,12 @@ Request 数が少ない場合も `allowed_bad` を切り上げません。fracti
 
 ### Burn response
 
-現在の CDK alarm は単一 failure または12秒 p95 を検出する safety alarm であり、次の
-multi-window burn alert 自体はまだ実装されていません。Environment owner は dashboard/alarm
-へ実装し、通知経路を試験する必要があります。
+CDK は eligible completion の bad/total を0.1% error budgetで正規化し、5分と1時間の
+component alarmがともに14.4倍以上のときだけ `ApiAvailabilityFastBurnAlarm` を発火します。
+Component alarmは重複pageを避けるため`ActionsEnabled=false`で、no trafficは成功へ0埋めせず
+`INSUFFICIENT_DATA`にします。Composite alarmだけがSEV1を
+通知します。Environment ownerは実trafficとcontrolled failureで両windowと通知経路を試験する
+必要があります。Medium/slow burnと30日budget dashboardは未実装です。
 
 | 条件 | Severity | 対応 |
 | --- | --- | --- |
@@ -167,10 +177,13 @@ Completion log `api.request.completed` は次を含みます。
 
 - `correlationId`、`requestId`、bounded `method`
 - ID/query を除いた `/api/<area>` 形式の `routeGroup`
+- exact pathを含まないboundedな`sliEligible`
 - Lambda runtime が供給した `invocationId` と X-Ray `traceId`（利用可能な場合）
 - `status`、`durationMs`
 - EMF namespace `Mukuroji/API`、dimension `Service=mukuroji-api`
 - `RequestCount`、`Latency`、`ServerErrorCount`
+- eligible requestだけに `EligibleRequestCount`、`EligibleLatency`、
+  `EligibleServerErrorCount`
 
 Unexpected error log `api.request.failed` は `errorType` までを含め、exception message と stack
 trace を含めません。Request/response body、query value、authorization、entity ID はどちらの
@@ -229,8 +242,9 @@ escalation targetであり、CloudWatch `AlarmActions`の配列順ではあり�
 
 ## Alarm catalog と追跡開始点
 
-Alarm 名は CloudFormation の physical name ではなく CDK construct ID です。全 alarm は
-missing data を `notBreaching` とするため、`OK` と telemetry が存在することを別々に確認します。
+Alarm 名は CloudFormation の physical name ではなく CDK construct ID です。Fast-burn component
+以外のalarmはmissing dataを`notBreaching`とし、componentは`missing`のまま扱います。いずれも
+`OK`とtelemetryが存在することを別々に確認します。
 
 | Alarm | 条件 | Default | 最初に保存する locator |
 | --- | --- | --- | --- |
@@ -238,6 +252,9 @@ missing data を `notBreaching` とするため、`OK` と telemetry が存在�
 | `ApiFunctionThrottleAlarm` | Lambda `Throttles Sum >= 1` / 5分 | SEV2 | Function concurrency、UTC window、transport metric。Middleware 未到達 request は request/user/tenant が unknown |
 | `ApiFunctionLatencyAlarm` | Lambda duration p95 `>= 12,000 ms`、5分 period の2/3 | SEV2 | `api.request.completed` の `durationMs`、request/correlation ID、route group |
 | `ApiApplicationServerErrorAlarm` | `Mukuroji/API` `ServerErrorCount Sum >= 1` / 5分 | SEV2 | Function URL / HTTP API の completion log、trusted request/correlation ID、route group |
+| `ApiAvailabilityFastBurnFiveMinuteAlarm` | eligible error ratio `>= 0.0144`（burn rate 14.4）/ 5分 | component、notification無効 | 5分windowのeligible bad/totalとcompletion log |
+| `ApiAvailabilityFastBurnOneHourAlarm` | eligible error ratio `>= 0.0144`（burn rate 14.4）/ 1時間 | component、notification無効 | 1時間windowのeligible bad/totalとcompletion log |
+| `ApiAvailabilityFastBurnAlarm` | 5分・1時間componentが同時に`ALARM` | SEV1 | 両componentのstate history、eligible bad/total、直前deploy/migration |
 | `ApiGatewayServerErrorAlarm` | HTTP API `5xx Sum >= 1` / 5分 | SEV2 | Stage/integration、UTC window。Lambda 到達時は API log、到達前 failure は correlation が unknown |
 | `CollaborationProjectionDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | Audit stream record の directory/event ID、correlation、actor/entity/target |
 | `AutomationEventDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | Audit outbox stream record の directory/event ID と automation rule/execution locator |
@@ -270,16 +287,18 @@ DLQ alarm の共通初動は次です。
 6. Queue が空、system of record が期待状態、重複 side effect がないことを確認して閉じる。
 
 CDK deploy は、異なる既存standard SNS topic名を `AlarmPrimaryTopicName` と
-`AlarmSecondaryTopicName` に必須指定し、同一account/regionのARNへ変換して全21 alarmの
+`AlarmSecondaryTopicName` に必須指定し、同一account/regionのARNへ変換して全24 alarmの
 `AlarmActions`へ設定します。Stackはtopic、subscription、Incident Manager、rosterを所有しません。
-両topicはalarm遷移時に同時通知され、ack target未達時の段階escalationはsubscription先が管理します。
+Fast-burn component 2件は`ActionsEnabled=false`で、残る21 metric alarmと1 composite alarmの
+遷移が両topicへ同時通知されます。Ack target未達時の段階escalationはsubscription先が管理します。
 Topic policyは`cloudwatch.amazonaws.com`の`sns:Publish`を同一account/regionのalarm ARNと
 SourceAccountで制限して許可します。SSEを使う場合はcustomer-managed KMS keyにも同principalの
 `kms:GenerateDataKey*`/`kms:Decrypt`と同じconfused-deputy条件を設定します。Operatorによる直接
 SNS publishだけをdelivery evidenceにせず、controlled CloudWatch alarmの実state transition、
 alarm history、両subscription receipt、OK復帰まで確認します。
-全21 alarmのARN、primary/secondary destination、subscription/roster revision、test notificationの
-UTC timestampと受信者をenvironment evidenceに残すまで、上記ack targetは実効性を持ちません。
+全24 alarmのARN、primary/secondary destination、subscription/roster revision、通知有効な22件の
+test notificationとfast-burn両component/compositeのstate history、UTC timestamp、受信者を
+environment evidenceに残すまで、上記ack targetは実効性を持ちません。
 
 ## Versioned migration
 
@@ -559,7 +578,8 @@ DR を要件とする場合、secondary region、replication、secret/key、Cogn
 
 ## Production readiness evidence checklist
 
-- [ ] Role/roster、primary/secondary notification、全21 alarm の test delivery
+- [ ] Role/roster、primary/secondary notification、通知有効な22 alarmのtest delivery、
+  fast-burn両component/compositeのstate history
 - [ ] 30日 availability/latency report、transport failure coverage、burn alert test
 - [ ] External liveness/readiness probe と rollout stop の test
 - [ ] Correlation ID を request → log → event → actor/tenant へ追える sample
