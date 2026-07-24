@@ -1179,6 +1179,80 @@ test('API runtime emits traces and alarms for errors throttles latency and gatew
     Threshold: 1,
     TreatMissingData: 'notBreaching',
   });
+  for (const burnWindow of [
+    {
+      description:
+        'Detects a 14.4x API availability error-budget burn over five minutes.',
+      period: 300,
+    },
+    {
+      description:
+        'Detects a 14.4x API availability error-budget burn over one hour.',
+      period: 3600,
+    },
+  ]) {
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      ActionsEnabled: false,
+      AlarmDescription: burnWindow.description,
+      ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+      DatapointsToAlarm: 1,
+      EvaluationPeriods: 1,
+      Metrics: Match.arrayWith([
+        Match.objectLike({
+          Expression:
+            'eligibleErrors / eligibleRequests',
+          ReturnData: true,
+        }),
+        Match.objectLike({
+          MetricStat: Match.objectLike({
+            Metric: {
+              Dimensions: [{
+                Name: 'Service',
+                Value: 'mukuroji-api',
+              }],
+              MetricName: 'EligibleServerErrorCount',
+              Namespace: 'Mukuroji/API',
+            },
+            Period: burnWindow.period,
+            Stat: 'Sum',
+          }),
+          ReturnData: false,
+        }),
+        Match.objectLike({
+          MetricStat: Match.objectLike({
+            Metric: {
+              Dimensions: [{
+                Name: 'Service',
+                Value: 'mukuroji-api',
+              }],
+              MetricName: 'EligibleRequestCount',
+              Namespace: 'Mukuroji/API',
+            },
+            Period: burnWindow.period,
+            Stat: 'Sum',
+          }),
+          ReturnData: false,
+        }),
+      ]),
+      Threshold: 0.0144,
+      TreatMissingData: 'missing',
+    });
+  }
+  template.hasResourceProperties('AWS::CloudWatch::CompositeAlarm', {
+    AlarmDescription:
+      'Pages when both API availability fast-burn windows exceed 14.4x.',
+    AlarmRule: Match.anyValue(),
+  });
+  const serializedCompositeAlarms = JSON.stringify(
+    template.findResources('AWS::CloudWatch::CompositeAlarm'),
+  );
+  expect(serializedCompositeAlarms).toContain(
+    'ApiAvailabilityFastBurnFiveMinuteAlarm',
+  );
+  expect(serializedCompositeAlarms).toContain(
+    'ApiAvailabilityFastBurnOneHourAlarm',
+  );
+  expect(serializedCompositeAlarms).toContain(' AND ALARM');
 });
 
 test('external Cognito client and initial owner attributes are validated on create and update', () => {

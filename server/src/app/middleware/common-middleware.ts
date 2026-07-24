@@ -8,6 +8,7 @@ import type {
 } from '../../infrastructure/observability/api-observability'
 import {
   classifyApiError,
+  isEligibleApiSliRequest,
   resolveApiRuntimeMetadata,
   summarizeApiMethod,
   summarizeApiRoute,
@@ -77,6 +78,10 @@ export function registerCommonMiddleware(
     const identifiers = createCanonicalRequestIdentifiers(
       dependencies.createIdentifier,
     )
+    const sliEligible = isEligibleApiSliRequest(
+      context.req.method,
+      context.req.path,
+    )
     const method = summarizeApiMethod(context.req.method)
     const routeGroup = summarizeApiRoute(context.req.path)
     const runtimeMetadata = resolveApiRuntimeMetadata(context.env)
@@ -116,6 +121,7 @@ export function registerCommonMiddleware(
       observedAtMilliseconds: completedAt,
       requestId: identifiers.requestId,
       routeGroup,
+      sliEligible,
       ...runtimeMetadata,
       status: context.res.status,
     })

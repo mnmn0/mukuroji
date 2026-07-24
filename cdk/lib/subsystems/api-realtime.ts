@@ -65,6 +65,41 @@ export type ApiTransportsAndRealtimeResources = Readonly<{
 }>;
 
 /**
+ * Creates an error-ratio expression for eligible API server errors.
+ *
+ * @param period - Aggregation window used for both eligible request metrics.
+ * @returns A metric-math expression for the eligible server-error ratio.
+ */
+function createApiAvailabilityErrorRatioMetric(
+  period: cdk.Duration,
+): cloudwatch.MathExpression {
+  const metricConfiguration = {
+    namespace: 'Mukuroji/API',
+    dimensionsMap: {
+      Service: 'mukuroji-api',
+    },
+    period,
+    statistic: 'Sum',
+  };
+
+  return new cloudwatch.MathExpression({
+    expression: 'eligibleErrors / eligibleRequests',
+    label: 'API availability error ratio',
+    period,
+    usingMetrics: {
+      eligibleErrors: new cloudwatch.Metric({
+        ...metricConfiguration,
+        metricName: 'EligibleServerErrorCount',
+      }),
+      eligibleRequests: new cloudwatch.Metric({
+        ...metricConfiguration,
+        metricName: 'EligibleRequestCount',
+      }),
+    },
+  });
+}
+
+/**
  * Builds the shared API Lambda, environment, grants, and focused IAM policies.
  *
  * @param scope Stack scope used directly to preserve existing construct paths.
@@ -599,6 +634,46 @@ export function buildApiRuntime(
     }),
     threshold: 1,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+  });
+  const apiAvailabilityFastBurnFiveMinuteAlarm = new cloudwatch.Alarm(
+    scope,
+    'ApiAvailabilityFastBurnFiveMinuteAlarm',
+    {
+      actionsEnabled: false,
+      alarmDescription:
+        'Detects a 14.4x API availability error-budget burn over five minutes.',
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metric: createApiAvailabilityErrorRatioMetric(cdk.Duration.minutes(5)),
+      threshold: 0.0144,
+      treatMissingData: cloudwatch.TreatMissingData.MISSING,
+    },
+  );
+  const apiAvailabilityFastBurnOneHourAlarm = new cloudwatch.Alarm(
+    scope,
+    'ApiAvailabilityFastBurnOneHourAlarm',
+    {
+      actionsEnabled: false,
+      alarmDescription:
+        'Detects a 14.4x API availability error-budget burn over one hour.',
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metric: createApiAvailabilityErrorRatioMetric(cdk.Duration.hours(1)),
+      threshold: 0.0144,
+      treatMissingData: cloudwatch.TreatMissingData.MISSING,
+    },
+  );
+  new cloudwatch.CompositeAlarm(scope, 'ApiAvailabilityFastBurnAlarm', {
+    alarmDescription:
+      'Pages when both API availability fast-burn windows exceed 14.4x.',
+    alarmRule: cloudwatch.AlarmRule.allOf(
+      apiAvailabilityFastBurnFiveMinuteAlarm,
+      apiAvailabilityFastBurnOneHourAlarm,
+    ),
   });
 
   return { apiFunction };

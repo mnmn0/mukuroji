@@ -96,6 +96,7 @@ test('replaces client identifiers with canonical server identifiers', async () =
     observedAtMilliseconds: 1_025,
     requestId: 'generated-request',
     routeGroup: '/api/work-items',
+    sliEligible: true,
     status: 200,
   }])
   expect(JSON.stringify(captured.access)).not.toContain('private-work-item-id')
@@ -243,6 +244,7 @@ test('preserves intentional Hono HTTPException responses', async () => {
     observedAtMilliseconds: 5_010,
     requestId: 'generated-request',
     routeGroup: '/api/work-items',
+    sliEligible: true,
     status: 418,
   }])
 })
