@@ -82,6 +82,18 @@ interface ResolvedParameter {
 }
 
 /**
+ * First validated owner of one document-wide Operation Object identity.
+ */
+interface ObservedOperationId {
+  /** First concrete API path that exposes this operation, when one exists. */
+  concreteLocation?: string
+  /** First component or concrete path location that declared the identifier. */
+  readonly firstLocation: string
+  /** Resolved Operation Object used to distinguish component aliases. */
+  readonly operation: JsonRecord
+}
+
+/**
  * Parsed and normalized representation of one OpenAPI path template.
  */
 interface ParsedPathTemplate {
@@ -417,7 +429,8 @@ export function findPublicApiCompatibilityIssues(
   if (!validateCandidateJsonDocument(candidate, issues)) {
     return Object.freeze(deduplicateIssues(issues))
   }
-  validateCandidateDocumentShape(candidate, issues)
+  const operationIds = new Map<string, ObservedOperationId>()
+  validateCandidateDocumentShape(candidate, operationIds, issues)
 
   compareExactSemanticValue(
     base.openapi,
@@ -454,7 +467,7 @@ export function findPublicApiCompatibilityIssues(
     return Object.freeze(deduplicateIssues(issues))
   }
 
-  validateCandidatePaths(candidate, candidatePaths, issues)
+  validateCandidatePaths(candidate, candidatePaths, operationIds, issues)
 
   for (const [path, basePathValue] of Object.entries(basePaths)) {
     const location = `$.paths[${JSON.stringify(path)}]`
@@ -561,10 +574,12 @@ function validateCandidateJsonDocument(
  * Validates required root fields and every supported Components Object entry.
  *
  * @param document - Candidate OpenAPI document.
+ * @param operationIds - Operation IDs observed across the candidate document.
  * @param issues - Mutable compatibility issue collector.
  */
 function validateCandidateDocumentShape(
   document: JsonRecord,
+  operationIds: Map<string, ObservedOperationId>,
   issues: IssueCollector,
 ): void {
   validateRequiredStringProperty(
@@ -600,17 +615,27 @@ function validateCandidateDocumentShape(
     )
   }
   validateServerArray(document.servers, '$candidate.servers', issues)
-  validateCandidateComponents(document, issues)
+  if (document.webhooks !== undefined) {
+    addIssue(
+      issues,
+      'invalid-contract',
+      '$candidate.webhooks',
+      'Top-level webhooks are not supported by the compatibility checker.',
+    )
+  }
+  validateCandidateComponents(document, operationIds, issues)
 }
 
 /**
  * Validates supported component kinds even when no operation references them.
  *
  * @param document - Candidate OpenAPI document.
+ * @param operationIds - Operation IDs observed across the candidate document.
  * @param issues - Mutable compatibility issue collector.
  */
 function validateCandidateComponents(
   document: JsonRecord,
+  operationIds: Map<string, ObservedOperationId>,
   issues: IssueCollector,
 ): void {
   const components = optionalRecord(
@@ -728,7 +753,7 @@ function validateCandidateComponents(
         document,
         pathItemValue,
         `$.components.pathItems[${JSON.stringify(name)}]`,
-        new Map(),
+        operationIds,
         issues,
       )
     }
@@ -752,14 +777,14 @@ function validateCandidateComponents(
  * @param document - Candidate OpenAPI document.
  * @param value - Path Item Object or local reference.
  * @param location - Component diagnostic location.
- * @param operationIds - Operation IDs already observed in Path Item components.
+ * @param operationIds - Operation IDs observed across the candidate document.
  * @param issues - Mutable compatibility issue collector.
  */
 function validateCandidateComponentPathItem(
   document: JsonRecord,
   value: unknown,
   location: string,
-  operationIds: Map<string, string>,
+  operationIds: Map<string, ObservedOperationId>,
   issues: IssueCollector,
 ): void {
   const pathItem = resolveObject(document, value, location, issues)
@@ -810,6 +835,7 @@ function validateCandidateComponentPathItem(
       operation,
       operationLocation,
       operationIds,
+      false,
       issues,
     )
     for (const key of Object.keys(operation)) {
@@ -838,14 +864,15 @@ function validateCandidateComponentPathItem(
  *
  * @param document - Candidate OpenAPI document.
  * @param paths - Candidate Paths Object.
+ * @param operationIds - Operation IDs observed across the candidate document.
  * @param issues - Mutable compatibility issue collector.
  */
 function validateCandidatePaths(
   document: JsonRecord,
   paths: JsonRecord,
+  operationIds: Map<string, ObservedOperationId>,
   issues: IssueCollector,
 ): void {
-  const operationIds = new Map<string, string>()
   const normalizedTemplates = new Map<string, string>()
   for (const [path, pathValue] of Object.entries(paths)) {
     const location = `$.paths[${JSON.stringify(path)}]`
@@ -933,6 +960,7 @@ function validateCandidatePaths(
         operation,
         operationLocation,
         operationIds,
+        true,
         issues,
       )
       validatePathTemplateParameters(
@@ -1057,13 +1085,15 @@ function parsePathTemplate(path: string): ParsedPathTemplate | undefined {
  * @param operation - Candidate operation.
  * @param location - Operation diagnostic location.
  * @param operationIds - Operation IDs already observed in the candidate.
+ * @param concretePath - Whether the operation is exposed by a concrete API path.
  * @param issues - Mutable compatibility issue collector.
  */
 function validateCandidateOperationShape(
   document: JsonRecord,
   operation: JsonRecord,
   location: string,
-  operationIds: Map<string, string>,
+  operationIds: Map<string, ObservedOperationId>,
+  concretePath: boolean,
   issues: IssueCollector,
 ): void {
   validateOptionalStringProperty(
@@ -1102,16 +1132,28 @@ function validateCandidateOperationShape(
     issues,
   )
   if (typeof operation.operationId === 'string') {
-    const previousLocation = operationIds.get(operation.operationId)
-    if (previousLocation) {
+    const previous = operationIds.get(operation.operationId)
+    const duplicateLocation = previous?.concreteLocation ??
+      (
+        previous && previous.operation !== operation
+          ? previous.firstLocation
+          : undefined
+      )
+    if (duplicateLocation) {
       addIssue(
         issues,
         'operation-contract',
         `${location}.operationId`,
-        `operationId duplicates the operation at ${previousLocation}.`,
+        `operationId duplicates the operation at ${duplicateLocation}.`,
       )
+    } else if (previous) {
+      if (concretePath) previous.concreteLocation = location
     } else {
-      operationIds.set(operation.operationId, location)
+      operationIds.set(operation.operationId, {
+        concreteLocation: concretePath ? location : undefined,
+        firstLocation: location,
+        operation,
+      })
     }
   }
   validateServerArray(operation.servers, `${location}.servers`, issues)

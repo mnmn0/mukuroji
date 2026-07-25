@@ -43,7 +43,7 @@ jobs:
             echo "Only the canonical signal workflow path is accepted." >&2
             exit 1
           fi
-          if [[ ! "$RUN_HEAD_SHA" =~ ^[0-9a-f]{40,64}$ ]]; then
+          if [[ ! "$RUN_HEAD_SHA" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
             echo "The signal run does not have a valid head commit." >&2
             exit 1
           fi
@@ -82,7 +82,7 @@ jobs:
           base_sha="$(jq -r '.[0].base.sha' <<<"$matching_pulls")"
           head_repository="$(jq -r '.[0].head.repo.full_name' <<<"$matching_pulls")"
           head_sha="$(jq -r '.[0].head.sha' <<<"$matching_pulls")"
-          if [[ ! "$base_sha" =~ ^[0-9a-f]{40,64}$ ]]; then
+          if [[ ! "$base_sha" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
             echo "The pull request does not have a valid base commit." >&2
             exit 1
           fi
