@@ -11,6 +11,10 @@ import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
 import type { DataStoreResources } from '../data-stores';
 import type { FileStorageResources } from '../file-storage';
+import {
+  bindRuntimeControls,
+  type RuntimeControlResources,
+} from '../runtime-controls';
 import type { WorkerChannels } from './channels';
 
 /**
@@ -25,6 +29,8 @@ export type AuditProjectionWorkerInput = {
   readonly lambdaBuildPaths: LambdaBuildPaths;
   /** Stack parameters used for authorization. */
   readonly parameters: StackParameters;
+  /** Dynamic operational controls shared by application runtimes. */
+  readonly runtimeControls: RuntimeControlResources;
   /** WebSocket stage used for realtime callbacks. */
   readonly realtimeWebSocketStage: apigatewayv2.WebSocketStage;
   /** Delivery queues targeted by audit projections. */
@@ -117,6 +123,11 @@ export function buildAuditProjectionWorker(
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
       },
     },
+  );
+  bindRuntimeControls(
+    input.runtimeControls,
+    collaborationProjectionFunction,
+    'audit-projection',
   );
 
   collaborationProjectionFunction.addEventSource(

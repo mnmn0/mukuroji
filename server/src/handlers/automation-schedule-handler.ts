@@ -1,22 +1,38 @@
 import {
   createProductionAutomationScheduleHandler,
 } from '../app/composition/automation-workers'
+import { createLazySingleton } from '../app/composition/lazy-singleton'
+import {
+  createRuntimeControlGuardedHandler,
+} from '../app/composition/runtime-control'
 import {
   type AutomationScheduleEvent,
 } from '../modules/automation'
 
-let productionHandler: ReturnType<typeof createProductionAutomationScheduleHandler> | undefined
+const getProductionHandler = createLazySingleton(
+  createProductionAutomationScheduleHandler,
+)
 
 /**
- * Materializes due Automation work according to timezone and DST policy.
+ * Materializes admitted Automation work according to timezone and DST policy.
  *
  * @param event - Automation schedule invocation event.
  * @returns The Automation schedule result.
  */
-export async function handler(event: AutomationScheduleEvent = {}) {
-  productionHandler ??= createProductionAutomationScheduleHandler()
-  return await productionHandler(event)
+async function processAutomationSchedule(event: AutomationScheduleEvent = {}) {
+  return await getProductionHandler()(event)
 }
+
+/**
+ * Runtime-control guarded Automation schedule entrypoint.
+ *
+ * @param event - Automation schedule invocation event.
+ * @returns The Automation schedule result.
+ */
+export const handler = createRuntimeControlGuardedHandler(
+  'automation-schedule',
+  processAutomationSchedule,
+)
 
 export {
   processAutomationSchedule,

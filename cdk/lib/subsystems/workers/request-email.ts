@@ -9,6 +9,10 @@ import * as sqs from 'aws-cdk-lib/aws-sqs';
 import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
 import type { DataStoreResources } from '../data-stores';
+import {
+  bindRuntimeControls,
+  type RuntimeControlResources,
+} from '../runtime-controls';
 
 /**
  * Inputs required by asynchronous request email ingestion.
@@ -20,6 +24,8 @@ export interface RequestEmailWorkerInput {
   readonly lambdaBuildPaths: LambdaBuildPaths;
   /** Authentication secrets supplied as stack parameters. */
   readonly parameters: StackParameters;
+  /** Dynamic operational controls shared by application runtimes. */
+  readonly runtimeControls: RuntimeControlResources;
 }
 
 /**
@@ -80,6 +86,11 @@ export function buildRequestEmailWorker(
         REQUEST_TOKEN_HASH_SECRET: requestTokenHashSecret.valueAsString,
       },
     },
+  );
+  bindRuntimeControls(
+    input.runtimeControls,
+    requestEmailIngestionFunction,
+    'request-intake-email',
   );
   requestEmailIngestionFunction.addToRolePolicy(
     new iam.PolicyStatement({

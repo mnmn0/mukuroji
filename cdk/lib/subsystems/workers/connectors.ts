@@ -14,6 +14,10 @@ import {
 } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
 import type { DataStoreResources } from '../data-stores';
+import {
+  bindRuntimeControls,
+  type RuntimeControlResources,
+} from '../runtime-controls';
 import type { WorkerChannels } from './channels';
 
 /**
@@ -26,6 +30,8 @@ export interface ConnectorWorkerInput {
   readonly lambdaBuildPaths: LambdaBuildPaths;
   /** Stack parameters used for connector authorization and audit behavior. */
   readonly parameters: StackParameters;
+  /** Dynamic operational controls shared by application runtimes. */
+  readonly runtimeControls: RuntimeControlResources;
   /** Connector queues and dead-letter queues. */
   readonly workerChannels: WorkerChannels;
 }
@@ -160,6 +166,11 @@ export function buildConnectorWorkers(
       },
     },
   );
+  bindRuntimeControls(
+    input.runtimeControls,
+    connectorSyncFunction,
+    'connector-sync',
+  );
   connectorSyncFunction.addEventSource(
     new lambdaEventSources.SqsEventSource(connectorSyncQueue, {
       batchSize: 1,
@@ -259,6 +270,11 @@ export function buildConnectorWorkers(
         MUKUROJI_RUNTIME_ROLE: 'connector-poll',
       },
     },
+  );
+  bindRuntimeControls(
+    input.runtimeControls,
+    connectorPollFunction,
+    'connector-poll',
   );
   connectorPollFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: [
