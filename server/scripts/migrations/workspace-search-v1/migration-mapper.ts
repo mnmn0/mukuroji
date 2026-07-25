@@ -12,6 +12,7 @@ import {
   createTeamWorkspaceSearchDocument,
   createWorkItemWorkspaceSearchDocument,
   createWorkspaceSearchDocumentRecordKey,
+  WorkspaceSearchError,
   type WorkspaceSearchDocument,
 } from '../../../src/modules/workspace-search'
 
@@ -71,6 +72,7 @@ export type WorkspaceSearchMigrationInvalidReason =
   | 'UNRECOGNIZED_COLLABORATION_ROW'
   | 'MALFORMED_DOCUMENT_TARGET'
   | 'UNRECOGNIZED_DOCUMENT_ROW'
+  | 'MAPPER_EXCEPTION'
 
 /**
  * Physical Workspace Search key produced by the pure mapper.
@@ -180,8 +182,20 @@ export function mapWorkspaceSearchMigrationRow(
       return mapCollaborationRow(item)
     }
     return mapDocumentRow(item)
-  } catch {
-    return malformedTarget(source)
+  } catch (error: unknown) {
+    if (error instanceof WorkspaceSearchError) {
+      if (source === 'project-directory') {
+        return invalidRow('MALFORMED_PROJECT_DIRECTORY_TARGET')
+      }
+      if (source === 'work-items') {
+        return invalidRow('MALFORMED_WORK_ITEM_TARGET')
+      }
+      if (source === 'collaboration') {
+        return invalidRow('MALFORMED_COLLABORATION_TARGET')
+      }
+      return invalidRow('MALFORMED_DOCUMENT_TARGET')
+    }
+    return invalidRow('MAPPER_EXCEPTION')
   }
 }
 
@@ -196,13 +210,16 @@ function mapProjectDirectoryRow(
 ): WorkspaceSearchMigrationRowClassification {
   const entryType = item.entryType
   if (typeof entryType === 'string' && projectDirectoryIgnoredEntryTypes.has(entryType)) {
+    if (hasProjectDirectoryTargetKey(item)) {
+      return invalidRow('MALFORMED_PROJECT_DIRECTORY_TARGET')
+    }
     return ignoredRow()
   }
   if (entryType !== 'team' && entryType !== 'project') {
     return invalidRow('UNRECOGNIZED_PROJECT_DIRECTORY_ROW')
   }
 
-  const workspaceId = readNonBlankString(item.directoryId)
+  const workspaceId = readCanonicalWorkspaceId(item.directoryId)
   const teamId = readNonBlankString(item.teamId)
   const teamSortOrder = readPositiveSafeInteger(item.teamSortOrder)
   const entryKey = readNonBlankString(item.entryKey)
@@ -215,6 +232,7 @@ function mapProjectDirectoryRow(
   if (
     !workspaceId ||
     !teamId ||
+    teamId.includes('/') ||
     !teamSortOrder ||
     !entryKey ||
     nameJa === undefined ||
@@ -228,9 +246,13 @@ function mapProjectDirectoryRow(
     return invalidRow('MALFORMED_PROJECT_DIRECTORY_TARGET')
   }
 
-  const title = readNonBlankString(nameJa) ?? readNonBlankString(nameEn)
-  const subtitle = readNonBlankString(nameJa) &&
-      readNonBlankString(nameEn) &&
+  const title = hasNonBlankString(nameJa)
+    ? nameJa
+    : hasNonBlankString(nameEn)
+      ? nameEn
+      : undefined
+  const subtitle = hasNonBlankString(nameJa) &&
+      hasNonBlankString(nameEn) &&
       nameJa !== nameEn
     ? nameEn
     : undefined
@@ -261,6 +283,7 @@ function mapProjectDirectoryRow(
   const projectSortOrder = readPositiveSafeInteger(item.projectSortOrder)
   if (
     !projectId ||
+    projectId.includes('/') ||
     !projectSortOrder ||
     !isProjectTone(item.tone) ||
     entryKey !== createProjectEntryKey(
@@ -296,6 +319,14 @@ function mapWorkItemRow(
   item: Readonly<Record<string, unknown>>,
 ): WorkspaceSearchMigrationRowClassification {
   if (!isCanonicalWorkItemRecord(item)) {
+    return invalidRow('MALFORMED_WORK_ITEM_TARGET')
+  }
+  if (
+    item.directoryId.length > 1_024 ||
+    item.teamId.includes('/') ||
+    item.issueId.includes('/') ||
+    item.assignedProjectId?.includes('/')
+  ) {
     return invalidRow('MALFORMED_WORK_ITEM_TARGET')
   }
   const deletedAt = readOptionalCanonicalTimestamp(item.deletedAt)
@@ -346,6 +377,9 @@ function mapCollaborationRow(
 ): WorkspaceSearchMigrationRowClassification {
   const entryType = item.entryType
   if (typeof entryType === 'string' && collaborationIgnoredEntryTypes.has(entryType)) {
+    if (hasRecordKeyPrefix(item, 'COMMENT#')) {
+      return invalidRow('MALFORMED_COLLABORATION_TARGET')
+    }
     return ignoredRow()
   }
   if (entryType !== 'comment') {
@@ -357,7 +391,7 @@ function mapCollaborationRow(
   const recordKey = readNonBlankString(item.recordKey)
   const rootCommentId = readNonBlankString(item.rootCommentId)
   const authorMemberKey = readNonBlankString(item.authorMemberKey)
-  const bodyMarkdown = readNonBlankString(item.bodyMarkdown)
+  const bodyMarkdown = readString(item.bodyMarkdown)
   const version = readPositiveSafeInteger(item.version)
   const createdAt = readCanonicalTimestamp(item.createdAt)
   const updatedAt = readCanonicalTimestamp(item.updatedAt)
@@ -379,7 +413,8 @@ function mapCollaborationRow(
     !rootCommentId ||
     rootCommentId.includes('/') ||
     !authorMemberKey ||
-    !bodyMarkdown ||
+    bodyMarkdown === undefined ||
+    (!deletedAt && !hasNonBlankString(bodyMarkdown)) ||
     !version ||
     !createdAt ||
     !updatedAt ||
@@ -436,13 +471,16 @@ function mapDocumentRow(
 ): WorkspaceSearchMigrationRowClassification {
   const entryType = item.entryType
   if (typeof entryType === 'string' && documentIgnoredEntryTypes.has(entryType)) {
+    if (hasRecordKeyPrefix(item, 'DOCUMENT#')) {
+      return invalidRow('MALFORMED_DOCUMENT_TARGET')
+    }
     return ignoredRow()
   }
   if (entryType !== 'document') {
     return invalidRow('UNRECOGNIZED_DOCUMENT_ROW')
   }
 
-  const workspaceId = readNonBlankString(item.workspaceId)
+  const workspaceId = readCanonicalWorkspaceId(item.workspaceId)
   const documentId = readNonBlankString(item.documentId)
   const revision = readPositiveSafeInteger(item.revision)
   if (
@@ -503,6 +541,8 @@ function isCanonicalDocumentDetail(value: unknown): value is DocumentDetail {
   }
 
   try {
+    // Keep the persisted value untrusted until the runtime validator succeeds;
+    // a direct call would require an unchecked DocumentDetail assertion here.
     Reflect.apply(validateDocumentPayload, undefined, [value])
   } catch {
     return false
@@ -542,6 +582,38 @@ function hasDocumentCapabilities(value: unknown): boolean {
 }
 
 /**
+ * Checks whether a Project Directory row occupies a Team or Project target key.
+ *
+ * @param item - Decoded Project Directory row.
+ * @returns Whether the physical key belongs to a migration target family.
+ */
+function hasProjectDirectoryTargetKey(
+  item: Readonly<Record<string, unknown>>,
+): boolean {
+  const entryKey = item.entryKey
+  return typeof entryKey === 'string' &&
+    (
+      /^[0-9]{6,}#000000#TEAM#[^#]+$/u.test(entryKey) ||
+      /^[0-9]{6,}#[0-9]{6,}#PROJECT#[^#]+$/u.test(entryKey)
+    )
+}
+
+/**
+ * Checks whether a row's sort key occupies one target-family prefix.
+ *
+ * @param item - Decoded single-table row.
+ * @param prefix - Physical target sort-key prefix.
+ * @returns Whether the row occupies the target prefix.
+ */
+function hasRecordKeyPrefix(
+  item: Readonly<Record<string, unknown>>,
+  prefix: string,
+): boolean {
+  return typeof item.recordKey === 'string' &&
+    item.recordKey.startsWith(prefix)
+}
+
+/**
  * Recovers a canonical Work Item scope from a Collaboration partition key.
  *
  * @param entityKey - Candidate Collaboration partition key.
@@ -563,9 +635,9 @@ function parseWorkItemCollaborationEntityKey(
   const teamId = remainder.slice(0, issueMarkerIndex)
   const issueId = remainder.slice(issueMarkerIndex + issueMarker.length)
   if (
-    !workspaceId ||
-    !teamId ||
-    !issueId ||
+    !readCanonicalWorkspaceId(workspaceId) ||
+    !readNonBlankString(teamId) ||
+    !readNonBlankString(issueId) ||
     teamId.includes('/') ||
     issueId.includes('/') ||
     `${workspaceId}${workItemMarker}${teamId}${issueMarker}${issueId}` !== entityKey
@@ -650,27 +722,6 @@ function invalidRow(
 }
 
 /**
- * Selects the malformed-target reason for an unexpected mapper exception.
- *
- * @param source - Logical source table role.
- * @returns Stable invalid result.
- */
-function malformedTarget(
-  source: WorkspaceSearchMigrationMapperSource,
-): WorkspaceSearchMigrationInvalidRow {
-  if (source === 'project-directory') {
-    return invalidRow('MALFORMED_PROJECT_DIRECTORY_TARGET')
-  }
-  if (source === 'work-items') {
-    return invalidRow('MALFORMED_WORK_ITEM_TARGET')
-  }
-  if (source === 'collaboration') {
-    return invalidRow('MALFORMED_COLLABORATION_TARGET')
-  }
-  return invalidRow('MALFORMED_DOCUMENT_TARGET')
-}
-
-/**
  * Creates a canonical Team directory sort key.
  *
  * @param teamSortOrder - Positive Team display order.
@@ -721,13 +772,40 @@ function isProjectTone(value: unknown): boolean {
 }
 
 /**
- * Reads a nonblank string without exposing it in an error.
+ * Reads a canonical nonblank string without exposing it in an error.
  *
  * @param value - Candidate value.
- * @returns Original nonblank string, or undefined.
+ * @returns Original trimmed nonblank string, or undefined.
  */
 function readNonBlankString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value : undefined
+  return typeof value === 'string' &&
+      value.length > 0 &&
+      value === value.trim()
+    ? value
+    : undefined
+}
+
+/**
+ * Reads the exact application-canonical Workspace Search partition key.
+ *
+ * @param value - Candidate Workspace ID.
+ * @returns Exact-trimmed ID up to the runtime's 1,024-character limit.
+ */
+function readCanonicalWorkspaceId(value: unknown): string | undefined {
+  const workspaceId = readNonBlankString(value)
+  return workspaceId && workspaceId.length <= 1_024
+    ? workspaceId
+    : undefined
+}
+
+/**
+ * Checks whether text contains at least one non-whitespace character.
+ *
+ * @param value - Candidate display or body text.
+ * @returns Whether the text contains visible content.
+ */
+function hasNonBlankString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0
 }
 
 /**

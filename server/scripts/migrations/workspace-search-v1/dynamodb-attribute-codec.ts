@@ -296,12 +296,24 @@ export function createAttributeMapDigest(
 export function decodeAttributeMapToNativeRecord(
   value: Readonly<Record<string, AttributeValue>>,
 ): Record<string, unknown> {
+  return decodeEncodedAttributeMapToNativeRecord(encodeAttributeMap(value))
+}
+
+/**
+ * Converts one validated tagged attribute map to mapper-native values.
+ *
+ * @param value - Validated lossless attribute map.
+ * @returns Native record containing strings, numbers, bytes, sets, lists, and maps.
+ */
+function decodeEncodedAttributeMapToNativeRecord(
+  value: EncodedAttributeMap,
+): Record<string, unknown> {
   const decoded: Record<string, unknown> = {}
 
   for (const name of Object.keys(value)) {
     const attribute = value[name]
     if (!attribute) return failCodec()
-    defineOwnProperty(decoded, name, decodeAttributeValueToNative(attribute))
+    defineOwnProperty(decoded, name, decodeEncodedAttributeValueToNative(attribute))
   }
 
   return decoded
@@ -385,35 +397,32 @@ function encodeUnknownAttributeMap(value: unknown): EncodedAttributeMap {
 }
 
 /**
- * Converts one raw attribute to its DocumentClient-like native value.
+ * Converts one validated tagged attribute to its DocumentClient-like native value.
  *
- * @param value - Raw low-level DynamoDB attribute.
+ * @param value - Validated lossless attribute.
  * @returns Native JavaScript value.
  */
-function decodeAttributeValueToNative(value: AttributeValue): unknown {
-  const encoded = encodeAttributeValue(value)
-
-  if (encoded.type === 'S') return encoded.value
-  if (encoded.type === 'N') return decodeSafeNumber(encoded.value)
-  if (encoded.type === 'B') return decodeCanonicalBase64(encoded.value)
-  if (encoded.type === 'SS') return new Set(encoded.value)
-  if (encoded.type === 'NS') {
-    return new Set(encoded.value.map(decodeSafeNumber))
+function decodeEncodedAttributeValueToNative(
+  value: EncodedAttributeValue,
+): unknown {
+  if (value.type === 'S') return value.value
+  if (value.type === 'N') return decodeSafeNumber(value.value)
+  if (value.type === 'B') return decodeCanonicalBase64(value.value)
+  if (value.type === 'SS') return new Set(value.value)
+  if (value.type === 'NS') {
+    return new Set(value.value.map(decodeSafeNumber))
   }
-  if (encoded.type === 'BS') {
-    return new Set(encoded.value.map(decodeCanonicalBase64))
+  if (value.type === 'BS') {
+    return new Set(value.value.map(decodeCanonicalBase64))
   }
-  if (encoded.type === 'M') {
-    const rawMap = decodeAttributeMap(encoded.value)
-    return decodeAttributeMapToNativeRecord(rawMap)
+  if (value.type === 'M') {
+    return decodeEncodedAttributeMapToNativeRecord(value.value)
   }
-  if (encoded.type === 'L') {
-    return encoded.value.map((entry) =>
-      decodeAttributeValueToNative(decodeAttributeValue(entry))
-    )
+  if (value.type === 'L') {
+    return value.value.map(decodeEncodedAttributeValueToNative)
   }
-  if (encoded.type === 'NULL') return null
-  return encoded.value
+  if (value.type === 'NULL') return null
+  return value.value
 }
 
 /**
@@ -505,6 +514,12 @@ function decodeCanonicalBase64(value: unknown): Uint8Array {
 function decodeSafeNumber(value: string): number {
   const number = Number(value)
   if (!Number.isFinite(number)) return failCodec()
+  if (
+    createNumberValueFingerprint(number.toString()) !==
+      createNumberValueFingerprint(value)
+  ) {
+    return failCodec()
+  }
   if (Number.isInteger(number) && !Number.isSafeInteger(number)) return failCodec()
   return number
 }

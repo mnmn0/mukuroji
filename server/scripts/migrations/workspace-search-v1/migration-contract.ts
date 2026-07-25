@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { AttributeValue } from '@aws-sdk/client-dynamodb'
+import type { EncodedAttributeMap } from './dynamodb-attribute-codec'
 
 /** Stable identifier for the first production Workspace Search maintenance migration. */
 export const WORKSPACE_SEARCH_MIGRATION_ID = 'workspace-search-maintenance'
@@ -86,8 +87,10 @@ export type MigrationTableIdentity = {
   billingMode: 'PAY_PER_REQUEST'
   /** Whether DynamoDB deletion protection was enabled. */
   deletionProtection: boolean
-  /** Observed encryption family without exposing a KMS key identifier. */
+  /** Observed encryption family. */
   encryption: 'AWS_OWNED' | 'KMS'
+  /** Canonical digest of the KMS key ARN, or null for AWS-owned encryption. */
+  kmsKeyDigest: string | null
   /** Observed DynamoDB TTL status and optional attribute. */
   ttl: {
     /** Whether TTL is enabled or disabled. */
@@ -112,6 +115,20 @@ export type MigrationJournalIdentity = {
   bucketName: string
   /** Customer-managed KMS key ARN configured on the bucket. */
   keyArn: string
+  /** Creation time of the exact customer-managed KMS key. */
+  keyCreationTime: string
+  /** KMS must report a customer-managed key. */
+  keyManager: 'CUSTOMER'
+  /** KMS key must be enabled when the entry gate is measured. */
+  keyState: 'Enabled'
+  /** Journal encryption requires a symmetric encrypt/decrypt key. */
+  keySpec: 'SYMMETRIC_DEFAULT'
+  /** Journal encryption requires the encrypt/decrypt usage family. */
+  keyUsage: 'ENCRYPT_DECRYPT'
+  /** Journal key material must be generated and retained by AWS KMS. */
+  keyOrigin: 'AWS_KMS'
+  /** Migration v1 uses a single-region journal key. */
+  keyMultiRegion: false
   /** Versioning must be enabled before any segment is accepted. */
   versioning: 'Enabled'
   /** Object Lock must use compliance mode. */
@@ -144,6 +161,8 @@ export type WorkspaceSearchMigrationConfiguration = {
   commit: string
   /** Caller ARN returned by STS, retained for audit without logging it. */
   callerArn: string
+  /** Stable IAM role unique ID recovered from STS GetCallerIdentity. */
+  callerRoleId: string
   /** Source, target, and state table identities measured at runtime. */
   tables: Readonly<Record<WorkspaceSearchMigrationTableRole, MigrationTableIdentity>>
   /** Measured Object-Lock and encryption configuration for the journal bucket. */
@@ -236,6 +255,23 @@ export type MigrationItemSnapshot =
       digest: string
     }
 
+/** JSON-safe exact present or absent item state stored in immutable evidence. */
+export type EncodedMigrationItemSnapshot =
+  | {
+      /** Indicates that no item existed at the key. */
+      exists: false
+      /** Stable digest of the absent state. */
+      digest: string
+    }
+  | {
+      /** Indicates that an item existed at the key. */
+      exists: true
+      /** Losslessly encoded low-level DynamoDB item. */
+      item: EncodedAttributeMap
+      /** Stable digest of the exact low-level item. */
+      digest: string
+    }
+
 /** Raw source binding used to prevent source drift during a target mutation. */
 export type MigrationSourceBinding = {
   /** Logical source name. */
@@ -296,6 +332,12 @@ export type WorkspaceSearchMigrationRunState = {
   maintenanceEvidenceDigest: string
   /** Secret-free maintenance evidence locator. */
   maintenanceEvidenceLocator: string
+  /** Digest of the exact reviewed dry-run evidence bytes. */
+  dryRunEvidenceDigest: string
+  /** Digest of the sealed deterministic operation plan. */
+  planDigest: string
+  /** Exact number of operations represented by the sealed plan. */
+  planOperationCount: number
   /** Current state-machine status. */
   status:
     | 'applying'
@@ -308,14 +350,36 @@ export type WorkspaceSearchMigrationRunState = {
   journalSequence: number
   /** Hash-chain head of the highest committed journal metadata row. */
   journalHeadDigest: string
-  /** Per-source durable scan checkpoints. */
-  sources: Readonly<Record<WorkspaceSearchMigrationSourceName, MigrationSourceCheckpoint>>
-  /** Durable target-reconciliation checkpoint. */
-  target: MigrationSourceCheckpoint
+  /** Durable apply traversal state kept independently from verification. */
+  apply: WorkspaceSearchMigrationTraversalProgress
+  /** Durable verification traversal state once verification begins. */
+  verification?: WorkspaceSearchMigrationTraversalProgress
+  /** Immutable S3 seal anchoring the final apply chain and aggregate. */
+  applySeal?: WorkspaceSearchApplySealReference
+  /** Reverse-order rollback progress once rollback begins. */
+  rollback?: WorkspaceSearchRollbackProgress
   /** Canonical UTC creation time. */
   createdAt: string
   /** Canonical UTC last state transition or checkpoint time. */
   updatedAt: string
+}
+
+/** Durable source and target traversal state for one migration phase. */
+export type WorkspaceSearchMigrationTraversalProgress = {
+  /** Per-source durable scan checkpoints. */
+  sources: Readonly<Record<WorkspaceSearchMigrationSourceName, MigrationSourceCheckpoint>>
+  /** Durable target-reconciliation or verification checkpoint. */
+  target: MigrationSourceCheckpoint
+}
+
+/** Serializable internal state required to resume an order-independent digest. */
+export type MigrationDigestState = {
+  /** Exact number of digests already accumulated. */
+  count: number
+  /** Modular 256-bit sum encoded as 64 lowercase hexadecimal characters. */
+  sumHex: string
+  /** Byte-wise XOR encoded as 64 lowercase hexadecimal characters. */
+  xorHex: string
 }
 
 /** Durable cursor and aggregate for a bounded scan. */
@@ -326,6 +390,10 @@ export type MigrationSourceCheckpoint = {
   cursor?: DynamoAttributeMap
   /** Cumulative secret-free counters and digests. */
   aggregate: MigrationScanAggregate
+  /** Restorable accumulator state for physical key digests. */
+  keyDigestState: MigrationDigestState
+  /** Restorable accumulator state for full row-content digests. */
+  contentDigestState: MigrationDigestState
 }
 
 /** Immutable S3 preimage segment stored before a target transaction. */
@@ -344,18 +412,22 @@ export type WorkspaceSearchJournalSegment = {
   configurationHash: string
   /** Monotonic sequence reserved by the pending transaction. */
   sequence: number
-  /** Fence token held when the segment was prepared. */
-  fenceToken: number
+  /** Fence token held when the immutable segment was first prepared. */
+  preparedFenceToken: number
   /** Stable operation identifier. */
   operationId: string
+  /** Digest of the exact source item, absent for orphan reconciliation. */
+  sourceDigest?: string
   /** Previous committed journal-chain head. */
   previousHeadDigest: string
+  /** Losslessly encoded exact target primary key required for restart-safe rollback. */
+  targetKey: EncodedAttributeMap
   /** Digest of the target primary key. */
   targetKeyDigest: string
-  /** Digest of the intended post-migration state. */
-  afterDigest: string
-  /** Exact low-level target preimage. */
-  before: MigrationItemSnapshot
+  /** Losslessly encoded exact target preimage. */
+  before: EncodedMigrationItemSnapshot
+  /** Losslessly encoded exact intended post-migration state used by rollback CAS. */
+  after: EncodedMigrationItemSnapshot
   /** Canonical UTC segment creation time. */
   createdAt: string
 }
@@ -374,6 +446,10 @@ export type WorkspaceSearchJournalReference = {
 
 /** Durable operation receipt written atomically with one target mutation. */
 export type WorkspaceSearchOperationReceipt = {
+  /** Operator-selected run identifier. */
+  runId: string
+  /** Reviewed configuration digest. */
+  configurationHash: string
   /** Stable operation identifier. */
   operationId: string
   /** Monotonic application sequence. */
@@ -392,6 +468,82 @@ export type WorkspaceSearchOperationReceipt = {
   journal: WorkspaceSearchJournalReference
   /** Canonical UTC commit time. */
   committedAt: string
+}
+
+/** Immutable apply-chain seal stored separately from mutable DynamoDB state. */
+export type WorkspaceSearchApplySeal = {
+  /** Seal document discriminator. */
+  kind: 'workspace-search-apply-seal'
+  /** Seal document schema version. */
+  sealVersion: 1
+  /** Stable migration identifier. */
+  migrationId: typeof WORKSPACE_SEARCH_MIGRATION_ID
+  /** Migration behavior version. */
+  migrationVersion: typeof WORKSPACE_SEARCH_MIGRATION_VERSION
+  /** Operator-selected run identifier. */
+  runId: string
+  /** Reviewed configuration digest. */
+  configurationHash: string
+  /** Highest contiguous committed journal sequence. */
+  journalSequence: number
+  /** Final independently anchored journal-chain head. */
+  journalHeadDigest: string
+  /** Exact count of committed apply receipts. */
+  receiptCount: number
+  /** Digest of the complete applied operation aggregate. */
+  applyAggregateDigest: string
+  /** Canonical UTC seal creation time. */
+  createdAt: string
+}
+
+/** Immutable reference to the independently anchored apply-chain seal. */
+export type WorkspaceSearchApplySealReference = {
+  /** Exact S3 object key. */
+  objectKey: string
+  /** Exact immutable S3 object version. */
+  versionId: string
+  /** SHA-256 digest of the exact stored seal bytes. */
+  contentDigest: string
+}
+
+/** Durable reverse-order rollback cursor and chain state. */
+export type WorkspaceSearchRollbackProgress = {
+  /** Final committed apply sequence captured when rollback starts. */
+  upperBoundSequence: number
+  /** Next sequence to restore, or zero after rollback is complete. */
+  nextSequence: number
+  /** Journal head expected at the next reverse step. */
+  expectedHeadDigest: string
+  /** Exact count of operations already restored. */
+  restored: number
+  /** Optimistic-concurrency revision for rollback progress updates. */
+  revision: number
+}
+
+/** Durable marker committed atomically with one reverse target mutation. */
+export type WorkspaceSearchRollbackReceipt = {
+  /** Operator-selected run identifier. */
+  runId: string
+  /** Reviewed configuration digest. */
+  configurationHash: string
+  /** Stable operation identifier restored by this transaction. */
+  operationId: string
+  /** Reverse journal sequence restored by this transaction. */
+  sequence: number
+  /** Digest of the exact apply receipt used as rollback authority. */
+  applyReceiptDigest: string
+  /** Digest of the exact target primary key. */
+  targetKeyDigest: string
+  /** Digest of the restored pre-migration state. */
+  beforeDigest: string
+  /** Digest of the replaced post-migration state. */
+  afterDigest: string
+  /** Apply journal head consumed by this reverse step. */
+  journalHeadDigest: string
+  /** Current fence token that committed the rollback transaction. */
+  fenceToken: number
+  /** Canonical UTC rollback commit time. */
+  rolledBackAt: string
 }
 
 /** Stable failure code emitted without raw AWS errors or tenant identifiers. */
@@ -425,14 +577,12 @@ export class WorkspaceSearchMigrationFailure extends Error {
    *
    * @param code - Stable failure code.
    * @param message - Secret-free operator guidance.
-   * @param options - Optional internal cause retained in memory only.
    */
   constructor(
     code: WorkspaceSearchMigrationFailureCode,
     message: string,
-    options?: ErrorOptions,
   ) {
-    super(message, options)
+    super(message)
     this.name = 'WorkspaceSearchMigrationFailure'
     this.code = code
   }
@@ -467,6 +617,32 @@ export function serializeCanonicalJson(value: unknown): string {
 export function createWorkspaceSearchConfigurationHash(
   configuration: WorkspaceSearchMigrationConfiguration,
 ): string {
+  const tables = {
+    'project-directory': createHashableTableIdentity(
+      configuration.tables['project-directory'],
+    ),
+    'work-items': createHashableTableIdentity(
+      configuration.tables['work-items'],
+    ),
+    collaboration: createHashableTableIdentity(
+      configuration.tables.collaboration,
+    ),
+    documents: createHashableTableIdentity(
+      configuration.tables.documents,
+    ),
+    'workspace-search': createHashableTableIdentity(
+      configuration.tables['workspace-search'],
+    ),
+    'migration-state': createHashableTableIdentity(
+      configuration.tables['migration-state'],
+    ),
+  } satisfies Readonly<
+    Record<
+      WorkspaceSearchMigrationTableRole,
+      ReturnType<typeof createHashableTableIdentity>
+    >
+  >
+
   return createMigrationDigest({
     migrationId: configuration.migrationId,
     migrationVersion: configuration.migrationVersion,
@@ -474,27 +650,11 @@ export function createWorkspaceSearchConfigurationHash(
     region: configuration.region,
     profile: configuration.profile,
     commit: configuration.commit,
-    callerIdentity: createHashableCallerIdentity(configuration.callerArn),
-    tables: {
-      'project-directory': createHashableTableIdentity(
-        configuration.tables['project-directory'],
-      ),
-      'work-items': createHashableTableIdentity(
-        configuration.tables['work-items'],
-      ),
-      collaboration: createHashableTableIdentity(
-        configuration.tables.collaboration,
-      ),
-      documents: createHashableTableIdentity(
-        configuration.tables.documents,
-      ),
-      'workspace-search': createHashableTableIdentity(
-        configuration.tables['workspace-search'],
-      ),
-      'migration-state': createHashableTableIdentity(
-        configuration.tables['migration-state'],
-      ),
-    },
+    callerIdentity: createHashableCallerIdentity(
+      configuration.callerArn,
+      configuration.callerRoleId,
+    ),
+    tables,
     journal: configuration.journal,
     journalPrefix: configuration.journalPrefix,
   })
@@ -506,7 +666,7 @@ export function createWorkspaceSearchConfigurationHash(
  * @returns Empty migration scan aggregate.
  */
 export function createEmptyMigrationScanAggregate(): MigrationScanAggregate {
-  const emptyDigest = createMigrationDigest({ count: 0, sum: zeroHexDigest(), xor: zeroHexDigest() })
+  const emptyDigest = new MigrationDigestAccumulator().digest()
   return {
     scanned: 0,
     mapped: 0,
@@ -659,12 +819,36 @@ export class MigrationDigestAccumulator {
   private sum = 0n
 
   /**
+   * Restores an accumulator from an exact durable checkpoint.
+   *
+   * @param state - Validated count, sum, and XOR state.
+   * @returns Accumulator that continues from the checkpoint without double counting.
+   */
+  static fromState(state: MigrationDigestState): MigrationDigestAccumulator {
+    requireNonNegativeInteger(state.count, 'aggregate digest count')
+    requireHexDigest(state.sumHex, 'aggregate digest sum')
+    requireHexDigest(state.xorHex, 'aggregate digest XOR')
+
+    const accumulator = new MigrationDigestAccumulator()
+    accumulator.count = state.count
+    accumulator.sum = BigInt(`0x${state.sumHex}`)
+    accumulator.xor.set(Buffer.from(state.xorHex, 'hex'))
+    return accumulator
+  }
+
+  /**
    * Adds one canonical lowercase SHA-256 digest.
    *
    * @param digest - Digest to add.
    */
   add(digest: string): void {
     requireHexDigest(digest, 'aggregate digest')
+    if (this.count === Number.MAX_SAFE_INTEGER) {
+      throw new WorkspaceSearchMigrationFailure(
+        'INVALID_STATE',
+        'Aggregate digest count exceeds the safe integer range.',
+      )
+    }
     const bytes = Buffer.from(digest, 'hex')
     for (let index = 0; index < this.xor.length; index += 1) {
       this.xor[index] = this.xor[index] ^ (bytes[index] ?? 0)
@@ -679,11 +863,25 @@ export class MigrationDigestAccumulator {
    * @returns Lowercase SHA-256 aggregate digest.
    */
   digest(): string {
+    const state = this.exportState()
     return createMigrationDigest({
-      count: this.count,
-      sum: this.sum.toString(16).padStart(64, '0'),
-      xor: Buffer.from(this.xor).toString('hex'),
+      count: state.count,
+      sum: state.sumHex,
+      xor: state.xorHex,
     })
+  }
+
+  /**
+   * Exports the complete serializable state required for exact resume.
+   *
+   * @returns Durable count, modular sum, and byte-wise XOR state.
+   */
+  exportState(): MigrationDigestState {
+    return {
+      count: this.count,
+      sumHex: this.sum.toString(16).padStart(64, '0'),
+      xorHex: Buffer.from(this.xor).toString('hex'),
+    }
   }
 
   /**
@@ -723,7 +921,7 @@ function normalizeJsonValue(
     for (const key of Object.keys(value).sort(compareUtf8Ordinal)) {
       const entry = value[key]
       if (entry !== undefined) {
-        normalized[key] = normalizeJsonValue(entry)
+        defineOwnProperty(normalized, key, normalizeJsonValue(entry))
       }
     }
     return normalized
@@ -732,6 +930,26 @@ function normalizeJsonValue(
     'INVALID_STATE',
     'Migration evidence contains a non-JSON-compatible value.',
   )
+}
+
+/**
+ * Defines an own data property without invoking the legacy `__proto__` setter.
+ *
+ * @param record - Destination canonical JSON record.
+ * @param key - Exact source property name.
+ * @param value - Canonically normalized property value.
+ */
+function defineOwnProperty(
+  record: Record<string, unknown>,
+  key: string,
+  value: unknown,
+): void {
+  Object.defineProperty(record, key, {
+    configurable: true,
+    enumerable: true,
+    value,
+    writable: true,
+  })
 }
 
 /**
@@ -769,6 +987,8 @@ function createHashableTableIdentity(identity: MigrationTableIdentity): {
   deletionProtection: boolean
   /** Exact encryption family. */
   encryption: 'AWS_OWNED' | 'KMS'
+  /** Canonical digest of the KMS key ARN, or null for AWS-owned encryption. */
+  kmsKeyDigest: string | null
   /** Exact TTL setting. */
   ttl: MigrationTableIdentity['ttl']
   /** Required point-in-time recovery state without volatile restore times. */
@@ -787,6 +1007,7 @@ function createHashableTableIdentity(identity: MigrationTableIdentity): {
     billingMode: identity.billingMode,
     deletionProtection: identity.deletionProtection,
     encryption: identity.encryption,
+    kmsKeyDigest: identity.kmsKeyDigest,
     ttl: identity.ttl,
     pitrStatus: identity.pitr.status,
   }
@@ -800,15 +1021,21 @@ function createHashableTableIdentity(identity: MigrationTableIdentity): {
  * fabricating an IAM role ARN. The exact session ARN remains in run evidence.
  *
  * @param callerArn - Exact caller ARN returned by STS GetCallerIdentity.
+ * @param callerRoleId - Stable IAM role unique ID returned in STS UserId.
  * @returns Stable assumed-role identity without the volatile session name.
  */
-function createHashableCallerIdentity(callerArn: string): {
+function createHashableCallerIdentity(
+  callerArn: string,
+  callerRoleId: string,
+): {
   /** AWS ARN partition. */
   partition: string
   /** AWS account that owns the assumed role. */
   account: string
   /** STS role name without the session name. */
   roleName: string
+  /** Stable IAM role unique ID that changes when the role is recreated. */
+  roleId: string
 } {
   const parts = callerArn.split(':')
   const resourceSegments = parts[5]?.split('/')
@@ -826,14 +1053,15 @@ function createHashableCallerIdentity(callerArn: string): {
     resourceSegments?.length !== 3 ||
     resourceSegments[0] !== 'assumed-role' ||
     !roleName ||
-    !sessionName
+    !sessionName ||
+    !/^AROA[A-Z0-9]{17}$/u.test(callerRoleId)
   ) {
     throw new WorkspaceSearchMigrationFailure(
       'INVALID_STATE',
       'Migration caller identity is not a valid assumed-role session.',
     )
   }
-  return { partition, account, roleName }
+  return { partition, account, roleName, roleId: callerRoleId }
 }
 
 /**
@@ -887,6 +1115,21 @@ function requirePositiveInteger(value: number, label: string): void {
     throw new WorkspaceSearchMigrationFailure(
       'INVALID_STATE',
       `${label} must be a positive integer.`,
+    )
+  }
+}
+
+/**
+ * Requires one non-negative safe integer.
+ *
+ * @param value - Candidate number.
+ * @param label - Secret-free field label.
+ */
+function requireNonNegativeInteger(value: number, label: string): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new WorkspaceSearchMigrationFailure(
+      'INVALID_STATE',
+      `${label} must be a non-negative integer.`,
     )
   }
 }

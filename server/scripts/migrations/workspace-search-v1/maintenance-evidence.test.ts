@@ -8,6 +8,9 @@ import {
 } from './maintenance-evidence'
 
 const encoder = new TextEncoder()
+const validationContext = {
+  now: new Date('2026-07-25T01:15:30.000Z'),
+}
 
 /**
  * Creates valid version-one maintenance evidence as an untrusted JSON object.
@@ -48,6 +51,16 @@ function serializeEvidence(
 }
 
 /**
+ * Parses evidence against the deterministic test invocation clock.
+ *
+ * @param bytes - Exact evidence bytes.
+ * @returns Validated maintenance evidence.
+ */
+function parseEvidence(bytes: Uint8Array) {
+  return parseMaintenanceEvidence(bytes, validationContext)
+}
+
+/**
  * Requires a mutable surface array from an evidence test object.
  *
  * @param evidence - Untrusted evidence object.
@@ -74,9 +87,21 @@ function requireTestSurfaces(
 }
 
 describe('Workspace Search maintenance evidence', () => {
+  test('keeps the runtime-control surface source of truth immutable', () => {
+    const firstSurface = maintenanceRuntimeControlSurfaces[0]
+
+    expect(Object.isFrozen(maintenanceRuntimeControlSurfaces)).toBe(true)
+    expect(Reflect.set(
+      maintenanceRuntimeControlSurfaces,
+      0,
+      'tenant-secret-surface',
+    )).toBe(false)
+    expect(maintenanceRuntimeControlSurfaces[0]).toBe(firstSurface)
+  })
+
   test('accepts all fourteen current disabled surfaces after a 900-second drain', () => {
     const bytes = serializeEvidence(createEvidence())
-    const parsed = parseMaintenanceEvidence(bytes)
+    const parsed = parseEvidence(bytes)
     const parsedEvidence: unknown = parsed.evidence
 
     expect(parsedEvidence).toEqual(createEvidence())
@@ -91,8 +116,8 @@ describe('Workspace Search maintenance evidence', () => {
     const compact = serializeEvidence(createEvidence())
     const indented = serializeEvidence(createEvidence(), 2)
 
-    expect(parseMaintenanceEvidence(compact).evidence)
-      .toEqual(parseMaintenanceEvidence(indented).evidence)
+    expect(parseEvidence(compact).evidence)
+      .toEqual(parseEvidence(indented).evidence)
     expect(createMaintenanceEvidenceFileDigest(compact))
       .not.toBe(createMaintenanceEvidenceFileDigest(indented))
   })
@@ -118,11 +143,41 @@ describe('Workspace Search maintenance evidence', () => {
       },
       { ...createEvidence(), locator: '' },
       { ...createEvidence(), locator: 'https://user:secret@example.test/evidence' },
+      {
+        ...createEvidence(),
+        locator: 'https://example.test/raw-secret-token-abc123',
+      },
+      { ...createEvidence(), locator: 'change:lowercase-secret-token' },
       { ...createEvidence(), extra: 'not-allowed' },
     ]
 
     for (const evidence of invalidEvidence) {
-      expect(() => parseMaintenanceEvidence(serializeEvidence(evidence)))
+      expect(() => parseEvidence(serializeEvidence(evidence)))
+        .toThrow(MaintenanceEvidenceError)
+    }
+  })
+
+  test('rejects duplicate keys and noncanonical numeric tokens before JSON parsing', () => {
+    const text = new TextDecoder().decode(serializeEvidence(createEvidence()))
+    const ambiguousDocuments = [
+      text.replace(
+        '"runtimeMode":"disabled"',
+        '"runtimeMode":"enabled","runtimeMode":"disabled"',
+      ),
+      text.replace(
+        '"surface":"analytics-schedule"',
+        '"surface":"api","surface":"analytics-schedule"',
+      ),
+      text.replace('"schemaVersion":1', '"schemaVersion":1.0000000000000001'),
+      text.replace('"runtimeRevision":42', '"runtimeRevision":4.2e1'),
+      text.replace(
+        '"observedWriterMutations":0',
+        '"observedWriterMutations":9007199254740993',
+      ),
+    ]
+
+    for (const document of ambiguousDocuments) {
+      expect(() => parseEvidence(encoder.encode(document)))
         .toThrow(MaintenanceEvidenceError)
     }
   })
@@ -165,13 +220,38 @@ describe('Workspace Search maintenance evidence', () => {
       observedBeforeDrain,
       extraField,
     ]) {
-      expect(() => parseMaintenanceEvidence(serializeEvidence(evidence)))
+      expect(() => parseEvidence(serializeEvidence(evidence)))
         .toThrow(MaintenanceEvidenceError)
     }
   })
 
-  test('rejects invalid UTF-8 and never includes raw identifiers in errors', () => {
+  test('rejects replayed, future, and invalid-clock evidence', () => {
+    const stale = createEvidence()
+    stale.drainStartedAt = '2026-07-25T00:45:00.000Z'
+    stale.drainCompletedAt = '2026-07-25T01:00:00.000Z'
+    for (const surface of requireTestSurfaces(stale)) {
+      surface.observedAt = '2026-07-25T01:00:01.000Z'
+    }
+
+    const future = createEvidence()
+    future.drainStartedAt = '2026-07-25T01:01:00.000Z'
+    future.drainCompletedAt = '2026-07-25T01:16:00.001Z'
+    for (const surface of requireTestSurfaces(future)) {
+      surface.observedAt = '2026-07-25T01:16:00.001Z'
+    }
+
+    expect(() => parseEvidence(serializeEvidence(stale)))
+      .toThrow(MaintenanceEvidenceError)
+    expect(() => parseEvidence(serializeEvidence(future)))
+      .toThrow(MaintenanceEvidenceError)
     expect(() => parseMaintenanceEvidence(
+      serializeEvidence(createEvidence()),
+      { now: new Date(Number.NaN) },
+    )).toThrow(MaintenanceEvidenceError)
+  })
+
+  test('rejects invalid UTF-8 and never includes raw identifiers in errors', () => {
+    expect(() => parseEvidence(
       Uint8Array.from([0x7b, 0x22, 0xff, 0x22, 0x7d]),
     )).toThrow(MaintenanceEvidenceError)
 
@@ -179,7 +259,7 @@ describe('Workspace Search maintenance evidence', () => {
     evidence.locator = 'tenant-secret-canary@example.test?token=raw-secret'
 
     try {
-      parseMaintenanceEvidence(serializeEvidence(evidence))
+      parseEvidence(serializeEvidence(evidence))
       throw new Error('Expected maintenance evidence failure.')
     } catch (error: unknown) {
       expect(error).toBeInstanceOf(MaintenanceEvidenceError)

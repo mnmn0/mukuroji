@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { inspect } from 'node:util'
 import type {
   AttributeDefinition,
   DescribeContinuousBackupsCommandOutput,
@@ -15,6 +16,7 @@ import type {
   GetObjectLockConfigurationOutput,
 } from '@aws-sdk/client-s3'
 import {
+  createMigrationDigest,
   createWorkspaceSearchConfigurationHash,
   WorkspaceSearchMigrationFailure,
   type WorkspaceSearchMigrationFailureCode,
@@ -23,6 +25,8 @@ import {
 import {
   measureWorkspaceSearchMigrationConfiguration,
   type WorkspaceSearchMigrationIdentityPort,
+  type WorkspaceSearchMigrationJournalKeyMetadata,
+  type WorkspaceSearchMigrationJournalLookup,
   type WorkspaceSearchMigrationRequestedResources,
 } from './migration-identity'
 
@@ -30,9 +34,14 @@ const TEST_ACCOUNT = '123456789012'
 const OTHER_ACCOUNT = '210987654321'
 const TEST_REGION = 'ap-northeast-1'
 const TEST_COMMIT = 'a'.repeat(40)
+const CALLER_ROLE_ID = 'AROA1234567890ABCDEFG'
 const JOURNAL_BUCKET = 'mukuroji-migration-journal-production'
 const JOURNAL_KEY_ARN =
   `arn:aws:kms:${TEST_REGION}:${TEST_ACCOUNT}:key/12345678-abcd-4321-abcd-1234567890ab`
+const DOCUMENTS_KEY_ARN =
+  `arn:aws:kms:${TEST_REGION}:${TEST_ACCOUNT}:key/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa`
+const MIGRATION_STATE_KEY_ARN =
+  `arn:aws:kms:${TEST_REGION}:${TEST_ACCOUNT}:key/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb`
 
 const tableRoles: readonly WorkspaceSearchMigrationTableRole[] = [
   'project-directory',
@@ -70,10 +79,17 @@ class FakeIdentityPort implements WorkspaceSearchMigrationIdentityPort {
   /** Unexpected S3 failure injected by a boundary-redaction test. */
   bucketFailure?: Error
 
+  /** Object Lock lookup failure injected by an error-mapping test. */
+  objectLockFailure?: Error
+
+  /** Bucket-encryption lookup failure injected by an error-mapping test. */
+  bucketEncryptionFailure?: Error
+
   /** Caller identity returned by the STS fake. */
   callerIdentity = {
     account: TEST_ACCOUNT,
     arn: `arn:aws:sts::${TEST_ACCOUNT}:assumed-role/MigrationOperator/test-session`,
+    userId: `${CALLER_ROLE_ID}:test-session`,
   }
 
   /** Per-name DynamoDB DescribeTable responses. */
@@ -85,6 +101,9 @@ class FakeIdentityPort implements WorkspaceSearchMigrationIdentityPort {
 
   /** Per-name DynamoDB TTL responses. */
   readonly ttlOutputs = new Map<string, DescribeTimeToLiveCommandOutput>()
+
+  /** Account-bound inputs received by all journal bucket lookups. */
+  readonly bucketLookups: WorkspaceSearchMigrationJournalLookup[] = []
 
   /** Journal bucket versioning response. */
   bucketVersioning: GetBucketVersioningOutput = {
@@ -119,6 +138,21 @@ class FakeIdentityPort implements WorkspaceSearchMigrationIdentityPort {
     },
   }
 
+  /** Journal KMS key metadata response. */
+  journalKeyMetadata: WorkspaceSearchMigrationJournalKeyMetadata = {
+    arn: JOURNAL_KEY_ARN,
+    awsAccountId: TEST_ACCOUNT,
+    keyId: '12345678-abcd-4321-abcd-1234567890ab',
+    creationDate: new Date('2026-07-01T00:00:00.000Z'),
+    enabled: true,
+    keyManager: 'CUSTOMER',
+    keyState: 'Enabled',
+    keyUsage: 'ENCRYPT_DECRYPT',
+    keySpec: 'SYMMETRIC_DEFAULT',
+    origin: 'AWS_KMS',
+    multiRegion: false,
+  }
+
   /** Journal bucket server-access logging response. */
   bucketLogging: GetBucketLoggingOutput = {
     LoggingEnabled: {
@@ -149,7 +183,11 @@ class FakeIdentityPort implements WorkspaceSearchMigrationIdentityPort {
    *
    * @returns Fake STS caller identity.
    */
-  async readCallerIdentity(): Promise<{ account: string; arn: string }> {
+  async readCallerIdentity(): Promise<{
+    account: string
+    arn: string
+    userId: string
+  }> {
     if (this.callerFailure) throw this.callerFailure
     return this.callerIdentity
   }
@@ -190,14 +228,30 @@ class FakeIdentityPort implements WorkspaceSearchMigrationIdentityPort {
   }
 
   /**
+   * Returns the configured journal KMS key metadata.
+   *
+   * @param keyArn - Requested journal key ARN.
+   * @returns Fake DescribeKey metadata.
+   */
+  async describeJournalKey(
+    keyArn: string,
+  ): Promise<WorkspaceSearchMigrationJournalKeyMetadata> {
+    if (keyArn !== JOURNAL_KEY_ARN) {
+      throw new Error('Unexpected journal key lookup.')
+    }
+    return this.journalKeyMetadata
+  }
+
+  /**
    * Returns the configured versioning state.
    *
-   * @param _bucketName - Requested bucket name.
+   * @param lookup - Requested bucket and expected owner.
    * @returns Fake GetBucketVersioning response.
    */
   async getBucketVersioning(
-    _bucketName: string,
+    lookup: WorkspaceSearchMigrationJournalLookup,
   ): Promise<GetBucketVersioningOutput> {
+    this.bucketLookups.push(lookup)
     if (this.bucketFailure) throw this.bucketFailure
     return this.bucketVersioning
   }
@@ -205,36 +259,41 @@ class FakeIdentityPort implements WorkspaceSearchMigrationIdentityPort {
   /**
    * Returns the configured Object Lock state.
    *
-   * @param _bucketName - Requested bucket name.
+   * @param lookup - Requested bucket and expected owner.
    * @returns Fake GetObjectLockConfiguration response.
    */
   async getObjectLockConfiguration(
-    _bucketName: string,
+    lookup: WorkspaceSearchMigrationJournalLookup,
   ): Promise<GetObjectLockConfigurationOutput> {
+    this.bucketLookups.push(lookup)
+    if (this.objectLockFailure) throw this.objectLockFailure
     return this.objectLockConfiguration
   }
 
   /**
    * Returns the configured bucket encryption state.
    *
-   * @param _bucketName - Requested bucket name.
+   * @param lookup - Requested bucket and expected owner.
    * @returns Fake GetBucketEncryption response.
    */
   async getBucketEncryption(
-    _bucketName: string,
+    lookup: WorkspaceSearchMigrationJournalLookup,
   ): Promise<GetBucketEncryptionOutput> {
+    this.bucketLookups.push(lookup)
+    if (this.bucketEncryptionFailure) throw this.bucketEncryptionFailure
     return this.bucketEncryption
   }
 
   /**
    * Returns the configured access logging state.
    *
-   * @param _bucketName - Requested bucket name.
+   * @param lookup - Requested bucket and expected owner.
    * @returns Fake GetBucketLogging response.
    */
   async getBucketLogging(
-    _bucketName: string,
+    lookup: WorkspaceSearchMigrationJournalLookup,
   ): Promise<GetBucketLoggingOutput> {
+    this.bucketLookups.push(lookup)
     return this.bucketLogging
   }
 }
@@ -253,10 +312,18 @@ describe('Workspace Search migration physical identity', () => {
       profile: 'production-operations',
       commit: TEST_COMMIT,
       callerArn: fixture.port.callerIdentity.arn,
+      callerRoleId: CALLER_ROLE_ID,
       journalPrefix: 'workspace-search/v1',
       journal: {
         bucketName: JOURNAL_BUCKET,
         keyArn: JOURNAL_KEY_ARN,
+        keyCreationTime: '2026-07-01T00:00:00.000Z',
+        keyManager: 'CUSTOMER',
+        keyState: 'Enabled',
+        keyUsage: 'ENCRYPT_DECRYPT',
+        keySpec: 'SYMMETRIC_DEFAULT',
+        keyOrigin: 'AWS_KMS',
+        keyMultiRegion: false,
         versioning: 'Enabled',
         objectLockMode: 'COMPLIANCE',
         defaultRetentionDays: 30,
@@ -278,6 +345,7 @@ describe('Workspace Search migration physical identity', () => {
       billingMode: 'PAY_PER_REQUEST',
       deletionProtection: false,
       encryption: 'AWS_OWNED',
+      kmsKeyDigest: null,
       ttl: { status: 'DISABLED' },
       pitr: {
         status: 'ENABLED',
@@ -287,25 +355,78 @@ describe('Workspace Search migration physical identity', () => {
     })
     expect(configuration.tables.documents).toMatchObject({
       encryption: 'KMS',
+      kmsKeyDigest: createMigrationDigest(DOCUMENTS_KEY_ARN),
       ttl: { status: 'ENABLED', attribute: 'expiresAtEpoch' },
     })
     expect(configuration.tables['migration-state']).toMatchObject({
       encryption: 'KMS',
+      kmsKeyDigest: createMigrationDigest(MIGRATION_STATE_KEY_ARN),
       deletionProtection: true,
       key: [
         { name: 'migrationId', role: 'HASH', type: 'S' },
         { name: 'recordKey', role: 'RANGE', type: 'S' },
       ],
     })
+    expect(JSON.stringify(configuration.tables)).not.toContain(DOCUMENTS_KEY_ARN)
+    expect(JSON.stringify(configuration.tables)).not.toContain(
+      MIGRATION_STATE_KEY_ARN,
+    )
+    expect(fixture.port.bucketLookups).toEqual(
+      Array.from({ length: 4 }, () => ({
+        bucketName: JOURNAL_BUCKET,
+        expectedBucketOwner: TEST_ACCOUNT,
+      })),
+    )
+  })
+
+  test('rejects unsafe operator resource identifiers before discovery', async () => {
+    const sharedMessage =
+      'Migration account, region, profile, commit, or journal configuration is invalid.'
+
+    await expectInvalidRequestedResources((requested) => {
+      requested.account = '123'
+    }, sharedMessage)
+    await expectInvalidRequestedResources((requested) => {
+      requested.region = 'ap_northeast_1'
+    }, sharedMessage)
+    await expectInvalidRequestedResources((requested) => {
+      requested.profile = '../production'
+    }, sharedMessage)
+    await expectInvalidRequestedResources((requested) => {
+      requested.commit = 'ABCDEF'
+    }, sharedMessage)
+    await expectInvalidRequestedResources((requested) => {
+      requested.journalBucket = 'Invalid_Journal_Bucket'
+    }, sharedMessage)
+    await expectInvalidRequestedResources((requested) => {
+      requested.journalKeyArn =
+        `arn:aws:kms:${TEST_REGION}:${OTHER_ACCOUNT}:key/eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee`
+    }, sharedMessage)
+    await expectInvalidRequestedResources((requested) => {
+      requested.tables = {
+        ...requested.tables,
+        documents: requested.tables.collaboration,
+      }
+    }, 'Migration table names must be valid and physically distinct.')
+    await expectInvalidRequestedResources((requested) => {
+      requested.tables = {
+        ...requested.tables,
+        documents: 'x',
+      }
+    }, 'Migration table names must be valid and physically distinct.')
   })
 
   test('retains exact caller evidence while hashes stay stable across sessions', async () => {
     const firstFixture = createIdentityFixture()
     firstFixture.port.callerIdentity.arn =
       `arn:aws:sts::${TEST_ACCOUNT}:assumed-role/MigrationOperator/session-one`
+    firstFixture.port.callerIdentity.userId =
+      `${CALLER_ROLE_ID}:session-one`
     const secondFixture = createIdentityFixture()
     secondFixture.port.callerIdentity.arn =
       `arn:aws:sts::${TEST_ACCOUNT}:assumed-role/MigrationOperator/session-two`
+    secondFixture.port.callerIdentity.userId =
+      `${CALLER_ROLE_ID}:session-two`
 
     const first = await measureFixture(firstFixture)
     const second = await measureFixture(secondFixture)
@@ -315,6 +436,13 @@ describe('Workspace Search migration physical identity', () => {
     expect(second.callerArn).not.toBe(first.callerArn)
     expect(createWorkspaceSearchConfigurationHash(second))
       .toBe(createWorkspaceSearchConfigurationHash(first))
+
+    const replacementFixture = createIdentityFixture()
+    replacementFixture.port.callerIdentity.userId =
+      'AROA7654321098ZYXWVUT:test-session'
+    const replacement = await measureFixture(replacementFixture)
+    expect(createWorkspaceSearchConfigurationHash(replacement))
+      .not.toBe(createWorkspaceSearchConfigurationHash(first))
   })
 
   test('rejects IAM users, federated sessions, and path-shaped STS ARNs', async () => {
@@ -370,11 +498,53 @@ describe('Workspace Search migration physical identity', () => {
     )
   })
 
+  test('maps absent Object Lock and encryption configurations to drift', async () => {
+    const objectLockFixture = createIdentityFixture()
+    objectLockFixture.port.objectLockFailure = createNamedError(
+      'ObjectLockConfigurationNotFoundError',
+      'sensitive absent Object Lock detail',
+    )
+    const objectLockFailure = await expectMigrationFailure(
+      measureFixture(objectLockFixture),
+      'CONFIGURATION_DRIFT',
+      'The migration journal Object Lock does not satisfy the v1 safety contract.',
+    )
+    expect(objectLockFailure.message).not.toContain('sensitive')
+
+    const encryptionFixture = createIdentityFixture()
+    encryptionFixture.port.bucketEncryptionFailure = createNamedError(
+      'ServerSideEncryptionConfigurationNotFoundError',
+      'sensitive absent encryption detail',
+    )
+    const encryptionFailure = await expectMigrationFailure(
+      measureFixture(encryptionFixture),
+      'CONFIGURATION_DRIFT',
+      'The migration journal encryption does not satisfy the v1 safety contract.',
+    )
+    expect(encryptionFailure.message).not.toContain('sensitive')
+  })
+
+  test('fails closed when an owner-bound S3 lookup is denied', async () => {
+    const fixture = createIdentityFixture()
+    const accessDenied = createNamedError(
+      'AccessDenied',
+      'sensitive cross-account bucket detail',
+    )
+    fixture.port.bucketFailure = accessDenied
+
+    await expectWrappedPortFailure(fixture, accessDenied, 'cross-account')
+    expect(fixture.port.bucketLookups).toHaveLength(4)
+    expect(fixture.port.bucketLookups.every(
+      ({ expectedBucketOwner }) => expectedBucketOwner === TEST_ACCOUNT,
+    )).toBe(true)
+  })
+
   test('rejects STS and table-ARN account drift with stable codes', async () => {
     const stsFixture = createIdentityFixture()
     stsFixture.port.callerIdentity = {
       account: OTHER_ACCOUNT,
       arn: `arn:aws:sts::${OTHER_ACCOUNT}:assumed-role/Unexpected/operator`,
+      userId: `${CALLER_ROLE_ID}:operator`,
     }
 
     await expectMigrationFailure(
@@ -439,6 +609,58 @@ describe('Workspace Search migration physical identity', () => {
       measureFixture(gsiFixture),
       'TABLE_SCHEMA_MISMATCH',
       'A migration table has an invalid global secondary index.',
+    )
+
+    const localIndexFixture = createIdentityFixture()
+    requireFixtureTable(localIndexFixture, 'collaboration').LocalSecondaryIndexes = [
+      {},
+    ]
+
+    await expectMigrationFailure(
+      measureFixture(localIndexFixture),
+      'TABLE_SCHEMA_MISMATCH',
+      'A migration table has an unsupported local secondary index.',
+    )
+  })
+
+  test('rejects DynamoDB encryption state and family drift', async () => {
+    const stateFixture = createIdentityFixture()
+    const stateDescription =
+      requireFixtureTable(stateFixture, 'documents').SSEDescription
+    if (!stateDescription) {
+      throw new Error('Missing documents encryption fixture.')
+    }
+    stateDescription.Status = 'UPDATING'
+
+    await expectMigrationFailure(
+      measureFixture(stateFixture),
+      'TABLE_SCHEMA_MISMATCH',
+      'A migration table has an invalid encryption state.',
+    )
+
+    const downgradedFixture = createIdentityFixture()
+    requireFixtureTable(downgradedFixture, 'documents').SSEDescription = {
+      Status: 'ENABLED',
+      SSEType: 'AES256',
+    }
+
+    await expectMigrationFailure(
+      measureFixture(downgradedFixture),
+      'TABLE_SCHEMA_MISMATCH',
+      'The documents table schema or safety settings do not match migration v1.',
+    )
+
+    const unexpectedKmsFixture = createIdentityFixture()
+    requireFixtureTable(unexpectedKmsFixture, 'workspace-search').SSEDescription = {
+      Status: 'ENABLED',
+      SSEType: 'KMS',
+      KMSMasterKeyArn: DOCUMENTS_KEY_ARN,
+    }
+
+    await expectMigrationFailure(
+      measureFixture(unexpectedKmsFixture),
+      'TABLE_SCHEMA_MISMATCH',
+      'The workspace-search table schema or safety settings do not match migration v1.',
     )
   })
 
@@ -551,6 +773,96 @@ describe('Workspace Search migration physical identity', () => {
     })
     expect(createWorkspaceSearchConfigurationHash(replacement))
       .not.toBe(createWorkspaceSearchConfigurationHash(original))
+  })
+
+  test('binds table identity and configuration hash to a digested KMS key', async () => {
+    const originalFixture = createIdentityFixture()
+    const original = await measureFixture(originalFixture)
+
+    const replacementFixture = createIdentityFixture()
+    const replacementKeyArn =
+      `arn:aws:kms:${TEST_REGION}:${TEST_ACCOUNT}:key/cccccccc-cccc-4ccc-8ccc-cccccccccccc`
+    const replacementTable = requireFixtureTable(
+      replacementFixture,
+      'documents',
+    )
+    if (!replacementTable.SSEDescription) {
+      throw new Error('Missing documents encryption fixture.')
+    }
+    replacementTable.SSEDescription.KMSMasterKeyArn = replacementKeyArn
+    const replacement = await measureFixture(replacementFixture)
+
+    expect(replacement.tables.documents.kmsKeyDigest).toBe(
+      createMigrationDigest(replacementKeyArn),
+    )
+    expect(replacement.tables.documents.kmsKeyDigest).not.toBe(
+      original.tables.documents.kmsKeyDigest,
+    )
+    expect(JSON.stringify(replacement.tables.documents)).not.toContain(
+      replacementKeyArn,
+    )
+    expect(createWorkspaceSearchConfigurationHash(replacement))
+      .not.toBe(createWorkspaceSearchConfigurationHash(original))
+  })
+
+  test('binds the reviewed hash to operator and journal configuration', async () => {
+    const original = await measureFixture(createIdentityFixture())
+    const originalHash = createWorkspaceSearchConfigurationHash(original)
+
+    const profileFixture = createIdentityFixture()
+    profileFixture.requested.profile = 'production-break-glass'
+    const profileConfiguration = await measureFixture(profileFixture)
+
+    const commitFixture = createIdentityFixture()
+    commitFixture.requested.commit = 'b'.repeat(40)
+    const commitConfiguration = await measureFixture(commitFixture)
+
+    const journalFixture = createIdentityFixture()
+    journalFixture.port.bucketLogging = {
+      LoggingEnabled: {
+        TargetBucket: 'mukuroji-migration-journal-access-logs-production',
+        TargetPrefix: 'workspace-search-migration-v2/',
+      },
+    }
+    const journalConfiguration = await measureFixture(journalFixture)
+
+    expect(createWorkspaceSearchConfigurationHash(profileConfiguration))
+      .not.toBe(originalHash)
+    expect(createWorkspaceSearchConfigurationHash(commitConfiguration))
+      .not.toBe(originalHash)
+    expect(createWorkspaceSearchConfigurationHash(journalConfiguration))
+      .not.toBe(originalHash)
+  })
+
+  test('rejects a missing or malformed DynamoDB KMS key identity', async () => {
+    const missingFixture = createIdentityFixture()
+    const missingDescription =
+      requireFixtureTable(missingFixture, 'documents').SSEDescription
+    if (!missingDescription) {
+      throw new Error('Missing documents encryption fixture.')
+    }
+    missingDescription.KMSMasterKeyArn = undefined
+
+    await expectMigrationFailure(
+      measureFixture(missingFixture),
+      'TABLE_SCHEMA_MISMATCH',
+      'A migration table has an invalid KMS key identity.',
+    )
+
+    const foreignFixture = createIdentityFixture()
+    const foreignDescription =
+      requireFixtureTable(foreignFixture, 'migration-state').SSEDescription
+    if (!foreignDescription) {
+      throw new Error('Missing migration-state encryption fixture.')
+    }
+    foreignDescription.KMSMasterKeyArn =
+      `arn:aws:kms:${TEST_REGION}:${OTHER_ACCOUNT}:key/dddddddd-dddd-4ddd-8ddd-dddddddddddd`
+
+    await expectMigrationFailure(
+      measureFixture(foreignFixture),
+      'TABLE_SCHEMA_MISMATCH',
+      'A migration table has an invalid KMS key identity.',
+    )
   })
 
   test('keeps the reviewed configuration hash stable as PITR windows advance', async () => {
@@ -669,6 +981,37 @@ describe('Workspace Search migration physical identity', () => {
     }
   })
 
+  test('rejects AWS-managed, disabled, and pending-deletion journal keys', async () => {
+    const awsManagedFixture = createIdentityFixture()
+    awsManagedFixture.port.journalKeyMetadata = {
+      ...awsManagedFixture.port.journalKeyMetadata,
+      keyManager: 'AWS',
+    }
+    const disabledFixture = createIdentityFixture()
+    disabledFixture.port.journalKeyMetadata = {
+      ...disabledFixture.port.journalKeyMetadata,
+      enabled: false,
+    }
+    const pendingDeletionFixture = createIdentityFixture()
+    pendingDeletionFixture.port.journalKeyMetadata = {
+      ...pendingDeletionFixture.port.journalKeyMetadata,
+      enabled: false,
+      keyState: 'PendingDeletion',
+    }
+
+    for (const fixture of [
+      awsManagedFixture,
+      disabledFixture,
+      pendingDeletionFixture,
+    ]) {
+      await expectMigrationFailure(
+        measureFixture(fixture),
+        'CONFIGURATION_DRIFT',
+        'The migration journal KMS key does not satisfy the v1 safety contract.',
+      )
+    }
+  })
+
   test('rejects absent, empty, and self-targeted journal access logging', async () => {
     const absentFixture = createIdentityFixture()
     absentFixture.port.bucketLogging = {}
@@ -782,6 +1125,26 @@ function measureFixture(
 }
 
 /**
+ * Mutates one explicit resource request and asserts fail-fast validation.
+ *
+ * @param mutate - Mutation that makes the operator request invalid.
+ * @param message - Expected operator-safe validation message.
+ */
+async function expectInvalidRequestedResources(
+  mutate: (requested: WorkspaceSearchMigrationRequestedResources) => void,
+  message: string,
+): Promise<void> {
+  const fixture = createIdentityFixture()
+  mutate(fixture.requested)
+  await expectMigrationFailure(
+    measureFixture(fixture),
+    'INVALID_ARGUMENT',
+    message,
+  )
+  expect(fixture.port.bucketLookups).toHaveLength(0)
+}
+
+/**
  * Builds a realistic active DynamoDB table response.
  *
  * @param role - Logical migration role.
@@ -809,12 +1172,27 @@ function createDescribeTableOutput(
     table.SSEDescription = {
       Status: 'ENABLED',
       SSEType: 'KMS',
+      KMSMasterKeyArn: readFixtureTableKmsKeyArn(role),
     }
   }
   return {
     Table: table,
     $metadata: {},
   }
+}
+
+/**
+ * Returns the stable KMS key ARN used by one encrypted table fixture.
+ *
+ * @param role - Logical migration table role.
+ * @returns Valid KMS key ARN for an encrypted fixture table.
+ */
+function readFixtureTableKmsKeyArn(
+  role: WorkspaceSearchMigrationTableRole,
+): string {
+  if (role === 'documents') return DOCUMENTS_KEY_ARN
+  if (role === 'migration-state') return MIGRATION_STATE_KEY_ARN
+  throw new Error(`The ${role} fixture does not use KMS encryption.`)
 }
 
 /**
@@ -1111,10 +1489,23 @@ function requireMapValue<Value>(
 }
 
 /**
+ * Creates an Error with one modeled AWS service exception name.
+ *
+ * @param name - Stable modeled exception name.
+ * @param message - Internal diagnostic message.
+ * @returns Named test error.
+ */
+function createNamedError(name: string, message: string): Error {
+  const error = new Error(message)
+  error.name = name
+  return error
+}
+
+/**
  * Asserts that one raw port failure crosses the boundary only as safe metadata.
  *
  * @param fixture - Fixture with an injected port failure.
- * @param cause - Exact internal failure retained for diagnostics.
+ * @param cause - Exact raw failure that must not cross the public boundary.
  * @param sensitiveText - Raw text that must not reach code or message.
  */
 async function expectWrappedPortFailure(
@@ -1127,10 +1518,12 @@ async function expectWrappedPortFailure(
     'IDENTITY_MISMATCH',
     'Migration resource identity could not be measured.',
   )
-  expect(failure.cause).toBe(cause)
+  expect(failure.cause).toBeUndefined()
   expect(failure.code).not.toContain(sensitiveText)
   expect(failure.message).not.toContain(sensitiveText)
   expect(failure.message).not.toContain(cause.message)
+  expect(inspect(failure, { depth: 5 })).not.toContain(sensitiveText)
+  expect(inspect(failure, { depth: 5 })).not.toContain(cause.message)
 }
 
 /**

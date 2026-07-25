@@ -252,24 +252,37 @@ describe('Workspace Search production migration mapper', () => {
   })
 
   test('maps canonical archived directory rows to deterministic deletes', () => {
-    for (const item of [
+    const activeTeam = requireMapped(
+      mapWorkspaceSearchMigrationRow('project-directory', createTeamRow()),
+    )
+    const archivedTeam = requireMapped(mapWorkspaceSearchMigrationRow(
+      'project-directory',
       createTeamRow({ archivedAt: '2026-07-25T01:00:00.000Z' }),
+    ))
+    const activeProject = requireMapped(
+      mapWorkspaceSearchMigrationRow('project-directory', createProjectRow()),
+    )
+    const archivedProject = requireMapped(mapWorkspaceSearchMigrationRow(
+      'project-directory',
       createProjectRow({ archivedAt: '2026-07-25T01:00:00.000Z' }),
-    ]) {
-      const result = requireMapped(
-        mapWorkspaceSearchMigrationRow('project-directory', item),
-      )
+    ))
 
-      expect(result.operation).toEqual({ action: 'delete' })
-      expect(result.targetKey.workspaceId).toBe('workspace-1')
-      expect(result.targetKey.recordKey).toMatch(/^DOCUMENT#/u)
-    }
+    expect(archivedTeam.operation).toEqual({ action: 'delete' })
+    expect(archivedTeam.targetKey).toEqual(activeTeam.targetKey)
+    expect(archivedProject.operation).toEqual({ action: 'delete' })
+    expect(archivedProject.targetKey).toEqual(activeProject.targetKey)
   })
 
   test('fails closed for malformed Team and Project target rows', () => {
     for (const item of [
       createTeamRow({ entryKey: 'wrong-key' }),
+      createTeamRow({ directoryId: ' workspace-1 ' }),
+      createTeamRow({
+        teamId: 'team/ambiguous',
+        entryKey: '000001#000000#TEAM#team/ambiguous',
+      }),
       createTeamRow({ nameJa: '', nameEn: '' }),
+      createTeamRow({ nameJa: 'x'.repeat(501) }),
       createTeamRow({ archivedAt: '2026-07-25T01:00:00Z' }),
       createTeamRow({
         createdAt: '2026-07-25T01:00:00.000Z',
@@ -280,6 +293,10 @@ describe('Workspace Search production migration mapper', () => {
       createProjectRow({ tone: undefined }),
       createProjectRow({ projectSortOrder: 0 }),
       createProjectRow({ entryKey: 'wrong-key' }),
+      createProjectRow({
+        projectId: 'project/ambiguous',
+        entryKey: '000001#000002#PROJECT#project/ambiguous',
+      }),
     ]) {
       expect(
         mapWorkspaceSearchMigrationRow('project-directory', item),
@@ -308,6 +325,16 @@ describe('Workspace Search production migration mapper', () => {
         reasonCode: 'RECOGNIZED_NON_TARGET_ROW',
       })
     }
+    expect(mapWorkspaceSearchMigrationRow(
+      'project-directory',
+      {
+        entryType: 'webhook-team-grant',
+        entryKey: 'TEAM#core-team#PROJECT#refero',
+      },
+    )).toEqual({
+      classification: 'ignored',
+      reasonCode: 'RECOGNIZED_NON_TARGET_ROW',
+    })
 
     expect(mapWorkspaceSearchMigrationRow(
       'project-directory',
@@ -315,6 +342,13 @@ describe('Workspace Search production migration mapper', () => {
     )).toEqual({
       classification: 'invalid',
       reasonCode: 'UNRECOGNIZED_PROJECT_DIRECTORY_ROW',
+    })
+    expect(mapWorkspaceSearchMigrationRow(
+      'project-directory',
+      createTeamRow({ entryType: 'workspace-member' }),
+    )).toEqual({
+      classification: 'invalid',
+      reasonCode: 'MALFORMED_PROJECT_DIRECTORY_TARGET',
     })
   })
 
@@ -366,7 +400,13 @@ describe('Workspace Search production migration mapper', () => {
     for (const item of [
       createWorkItemRow({ schemaVersion: 2 }),
       createWorkItemRow({ directoryTeamId: 'workspace-1#team#other' }),
+      createWorkItemRow({
+        teamId: 'team/ambiguous',
+        directoryTeamId: 'workspace-1#team#team/ambiguous',
+      }),
+      createWorkItemRow({ issueId: 'issue/ambiguous' }),
       createWorkItemRow({ title: '' }),
+      createWorkItemRow({ title: 'x'.repeat(501) }),
       createWorkItemRow({ dueDate: '2026-02-30' }),
       createWorkItemRow({ relationIds: ['related:z', 'blocks:a'] }),
       createWorkItemRow({ deletedAt: '2026-07-24T01:00:00Z' }),
@@ -376,6 +416,107 @@ describe('Workspace Search production migration mapper', () => {
       expect(mapWorkspaceSearchMigrationRow('work-items', item)).toEqual({
         classification: 'invalid',
         reasonCode: 'MALFORMED_WORK_ITEM_TARGET',
+      })
+    }
+  })
+
+  test('rejects structured entity ID delimiter collisions', () => {
+    const collidingProjects = [
+      createProjectRow({
+        teamId: 'a/project/b',
+        projectId: 'c',
+        entryKey: '000001#000002#PROJECT#c',
+      }),
+      createProjectRow({
+        teamId: 'a',
+        projectId: 'b/project/c',
+        entryKey: '000001#000002#PROJECT#b/project/c',
+      }),
+    ]
+    const collidingWorkItems = [
+      createWorkItemRow({
+        teamId: 'a/issue/b',
+        directoryTeamId: 'workspace-1#team#a/issue/b',
+        issueId: 'c',
+      }),
+      createWorkItemRow({
+        teamId: 'a',
+        directoryTeamId: 'workspace-1#team#a',
+        issueId: 'b/issue/c',
+      }),
+    ]
+
+    for (const item of collidingProjects) {
+      expect(mapWorkspaceSearchMigrationRow('project-directory', item)).toEqual({
+        classification: 'invalid',
+        reasonCode: 'MALFORMED_PROJECT_DIRECTORY_TARGET',
+      })
+    }
+    for (const item of collidingWorkItems) {
+      expect(mapWorkspaceSearchMigrationRow('work-items', item)).toEqual({
+        classification: 'invalid',
+        reasonCode: 'MALFORMED_WORK_ITEM_TARGET',
+      })
+    }
+  })
+
+  test('rejects overlong Workspace IDs on active and delete paths', () => {
+    const workspaceId = 'w'.repeat(1_025)
+    const workItemOverrides = {
+      directoryId: workspaceId,
+      directoryTeamId: `${workspaceId}#team#team-1`,
+      directoryProjectId: `${workspaceId}#project#project-1`,
+    }
+    const commentEntityKey =
+      `${workspaceId}#work-item#team/team-1/issue/issue-1`
+
+    for (const item of [
+      createTeamRow({ directoryId: workspaceId }),
+      createTeamRow({
+        directoryId: workspaceId,
+        archivedAt: '2026-07-25T01:00:00.000Z',
+      }),
+    ]) {
+      expect(mapWorkspaceSearchMigrationRow('project-directory', item)).toEqual({
+        classification: 'invalid',
+        reasonCode: 'MALFORMED_PROJECT_DIRECTORY_TARGET',
+      })
+    }
+    for (const item of [
+      createWorkItemRow(workItemOverrides),
+      createWorkItemRow({
+        ...workItemOverrides,
+        deletedAt: '2026-07-24T01:00:00.000Z',
+      }),
+    ]) {
+      expect(mapWorkspaceSearchMigrationRow('work-items', item)).toEqual({
+        classification: 'invalid',
+        reasonCode: 'MALFORMED_WORK_ITEM_TARGET',
+      })
+    }
+    for (const item of [
+      createCommentRow({ entityKey: commentEntityKey }),
+      createCommentRow({
+        entityKey: commentEntityKey,
+        bodyMarkdown: '',
+        deletedAt: '2026-07-24T02:00:00.000Z',
+      }),
+    ]) {
+      expect(mapWorkspaceSearchMigrationRow('collaboration', item)).toEqual({
+        classification: 'invalid',
+        reasonCode: 'MALFORMED_COLLABORATION_TARGET',
+      })
+    }
+    for (const item of [
+      createDocumentRow({}, { workspaceId }),
+      createDocumentRow(
+        { archivedAt: '2026-07-24T01:00:00.000Z' },
+        { workspaceId },
+      ),
+    ]) {
+      expect(mapWorkspaceSearchMigrationRow('documents', item)).toEqual({
+        classification: 'invalid',
+        reasonCode: 'MALFORMED_DOCUMENT_TARGET',
       })
     }
   })
@@ -400,6 +541,7 @@ describe('Workspace Search production migration mapper', () => {
     const deleted = requireMapped(mapWorkspaceSearchMigrationRow(
       'collaboration',
       createCommentRow({
+        bodyMarkdown: '',
         deletedAt: '2026-07-24T02:00:00.000Z',
       }),
     ))
@@ -425,15 +567,26 @@ describe('Workspace Search production migration mapper', () => {
       classification: 'invalid',
       reasonCode: 'UNRECOGNIZED_COLLABORATION_ROW',
     })
+    expect(mapWorkspaceSearchMigrationRow(
+      'collaboration',
+      createCommentRow({ entryType: 'reaction' }),
+    )).toEqual({
+      classification: 'invalid',
+      reasonCode: 'MALFORMED_COLLABORATION_TARGET',
+    })
   })
 
   test('fails closed for malformed Collaboration comment targets', () => {
     for (const item of [
       createCommentRow({ entityKey: 'not-a-work-item-key' }),
+      createCommentRow({
+        entityKey: 'workspace-1 #work-item#team/team-1/issue/issue-1',
+      }),
       createCommentRow({ recordKey: 'COMMENT#other' }),
       createCommentRow({ id: 'comment/ambiguous' }),
       createCommentRow({ rootCommentId: 'root/ambiguous' }),
       createCommentRow({ authorMemberKey: '' }),
+      createCommentRow({ bodyMarkdown: '' }),
       createCommentRow({ version: 0 }),
       createCommentRow({ mentionMemberKeys: undefined }),
       createCommentRow({
@@ -523,11 +676,20 @@ describe('Workspace Search production migration mapper', () => {
         reasonCode: 'RECOGNIZED_NON_TARGET_ROW',
       })
     }
+
+    expect(mapWorkspaceSearchMigrationRow(
+      'documents',
+      createDocumentRow({}, { entryType: 'document-comment' }),
+    )).toEqual({
+      classification: 'invalid',
+      reasonCode: 'MALFORMED_DOCUMENT_TARGET',
+    })
   })
 
   test('fails closed for malformed or unknown Document rows', () => {
     for (const item of [
       createDocumentRow({}, { recordKey: 'DOCUMENT#other' }),
+      createDocumentRow({}, { workspaceId: ' workspace-1 ' }),
       createDocumentRow({}, { revision: 3 }),
       createDocumentRow({ schemaVersion: 2 }),
       createDocumentRow({ title: '' }),
@@ -566,5 +728,21 @@ describe('Workspace Search production migration mapper', () => {
     })
     expect(serialized).not.toContain('tenant-secret-canary')
     expect(serialized).not.toContain('raw-secret-token')
+  })
+
+  test('distinguishes unexpected mapper exceptions from malformed rows', () => {
+    const exceptionalComment = createCommentRow()
+    Object.defineProperty(exceptionalComment, 'bodyMarkdown', {
+      get() {
+        throw new Error('unexpected mapper failure')
+      },
+    })
+
+    expect(
+      mapWorkspaceSearchMigrationRow('collaboration', exceptionalComment),
+    ).toEqual({
+      classification: 'invalid',
+      reasonCode: 'MAPPER_EXCEPTION',
+    })
   })
 })

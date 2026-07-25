@@ -150,6 +150,42 @@ describe('DynamoDB AttributeValue codec', () => {
     expect(native.list).toEqual(['first', null, { nested: 100 }])
   })
 
+  test('rejects unsafe integers at every mapper-native number boundary', () => {
+    const unsafeItems: Record<string, AttributeValue>[] = [
+      { unsafe: { N: '9007199254740993' } },
+      { unsafe: { NS: ['1', '9007199254740993'] } },
+      { unsafe: { L: [{ N: '9007199254740993' }] } },
+    ]
+
+    for (const item of unsafeItems) {
+      expect(() => decodeAttributeMapToNativeRecord(item)).toThrow(
+        DynamoDbAttributeCodecError,
+      )
+    }
+  })
+
+  test('rejects precision-losing decimals at every mapper-native number boundary', () => {
+    const precisionLosingItems: Record<string, AttributeValue>[] = [
+      { imprecise: { N: '1.0000000000000001' } },
+      { imprecise: { NS: ['0.1', '1.0000000000000001'] } },
+      { imprecise: { L: [{ N: '1.0000000000000001' }] } },
+    ]
+
+    for (const item of precisionLosingItems) {
+      expect(() => decodeAttributeMapToNativeRecord(item)).toThrow(
+        DynamoDbAttributeCodecError,
+      )
+    }
+
+    expect(decodeAttributeMapToNativeRecord({
+      decimal: { N: '0.1' },
+      exponent: { N: '1.00e+2' },
+    })).toEqual({
+      decimal: 0.1,
+      exponent: 100,
+    })
+  })
+
   test('rejects tampered tags, members, base64, sets, and non-canonical text', () => {
     const invalidValues: unknown[] = [
       { type: 'UNKNOWN', value: 'secret-canary' },

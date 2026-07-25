@@ -20,6 +20,7 @@ import {
   type MigrationTableIdentity,
   type WorkspaceSearchMigrationConfiguration,
   type WorkspaceSearchMigrationTableRole,
+  createMigrationDigest,
   serializeCanonicalJson,
   WorkspaceSearchMigrationFailure,
   WORKSPACE_SEARCH_MIGRATION_ID,
@@ -44,6 +45,40 @@ export type WorkspaceSearchMigrationRequestedResources = {
   journalKeyArn: string
 }
 
+/** Account-bound S3 lookup required for every journal control-plane read. */
+export type WorkspaceSearchMigrationJournalLookup = {
+  /** Explicit journal bucket name. */
+  readonly bucketName: string
+  /** Requested AWS account sent to S3 as ExpectedBucketOwner. */
+  readonly expectedBucketOwner: string
+}
+
+/** Narrow KMS DescribeKey metadata required by the migration entry gate. */
+export type WorkspaceSearchMigrationJournalKeyMetadata = {
+  /** Exact KMS key ARN. */
+  readonly arn?: string
+  /** AWS account that owns the key. */
+  readonly awsAccountId?: string
+  /** Physical KMS key identifier. */
+  readonly keyId?: string
+  /** Key creation timestamp. */
+  readonly creationDate?: Date
+  /** Whether KMS currently permits cryptographic operations. */
+  readonly enabled?: boolean
+  /** AWS-managed or customer-managed key family. */
+  readonly keyManager?: string
+  /** Current KMS lifecycle state. */
+  readonly keyState?: string
+  /** Cryptographic usage family. */
+  readonly keyUsage?: string
+  /** KMS key specification. */
+  readonly keySpec?: string
+  /** Source of the key material. */
+  readonly origin?: string
+  /** Whether the key is multi-region. */
+  readonly multiRegion?: boolean
+}
+
 /** Narrow identity and control-plane read port used before any tenant row is scanned. */
 export interface WorkspaceSearchMigrationIdentityPort {
   /**
@@ -56,6 +91,8 @@ export interface WorkspaceSearchMigrationIdentityPort {
     account: string
     /** Caller ARN returned by STS. */
     arn: string
+    /** Caller unique ID returned by STS. */
+    userId: string
   }>
   /**
    * Reads a DynamoDB table descriptor.
@@ -81,35 +118,50 @@ export interface WorkspaceSearchMigrationIdentityPort {
    */
   describeTimeToLive(tableName: string): Promise<DescribeTimeToLiveCommandOutput>
   /**
+   * Reads the dedicated journal KMS key metadata.
+   *
+   * @param keyArn - Exact operator-selected KMS key ARN.
+   * @returns Narrow DescribeKey metadata used by the entry gate.
+   */
+  describeJournalKey(
+    keyArn: string,
+  ): Promise<WorkspaceSearchMigrationJournalKeyMetadata>
+  /**
    * Reads journal bucket versioning.
    *
-   * @param bucketName - Explicit journal bucket name.
+   * @param lookup - Explicit bucket and required expected owner.
    * @returns Raw GetBucketVersioning output.
    */
-  getBucketVersioning(bucketName: string): Promise<GetBucketVersioningOutput>
+  getBucketVersioning(
+    lookup: WorkspaceSearchMigrationJournalLookup,
+  ): Promise<GetBucketVersioningOutput>
   /**
    * Reads journal bucket Object Lock configuration.
    *
-   * @param bucketName - Explicit journal bucket name.
+   * @param lookup - Explicit bucket and required expected owner.
    * @returns Raw GetObjectLockConfiguration output.
    */
   getObjectLockConfiguration(
-    bucketName: string,
+    lookup: WorkspaceSearchMigrationJournalLookup,
   ): Promise<GetObjectLockConfigurationOutput>
   /**
    * Reads journal bucket default encryption.
    *
-   * @param bucketName - Explicit journal bucket name.
+   * @param lookup - Explicit bucket and required expected owner.
    * @returns Raw GetBucketEncryption output.
    */
-  getBucketEncryption(bucketName: string): Promise<GetBucketEncryptionOutput>
+  getBucketEncryption(
+    lookup: WorkspaceSearchMigrationJournalLookup,
+  ): Promise<GetBucketEncryptionOutput>
   /**
    * Reads journal bucket server-access logging.
    *
-   * @param bucketName - Explicit journal bucket name.
+   * @param lookup - Explicit bucket and required expected owner.
    * @returns Raw GetBucketLogging output.
    */
-  getBucketLogging(bucketName: string): Promise<GetBucketLoggingOutput>
+  getBucketLogging(
+    lookup: WorkspaceSearchMigrationJournalLookup,
+  ): Promise<GetBucketLoggingOutput>
 }
 
 /** Expected schema and safety settings for one migration table role. */
@@ -124,6 +176,14 @@ type ExpectedTableDescriptor = {
   encryption: MigrationTableIdentity['encryption']
   /** Expected deletion protection state. */
   deletionProtection: boolean
+}
+
+/** Validated DynamoDB encryption identity measured before schema comparison. */
+type MeasuredTableEncryption = {
+  /** Observed encryption family. */
+  encryption: MigrationTableIdentity['encryption']
+  /** Canonical digest of the validated KMS key ARN, or null for AWS-owned encryption. */
+  kmsKeyDigest: string | null
 }
 
 /** Input required to measure one complete migration resource identity. */
@@ -242,12 +302,11 @@ export async function measureWorkspaceSearchMigrationConfiguration(
 ): Promise<WorkspaceSearchMigrationConfiguration> {
   try {
     return await measureMigrationConfiguration(input)
-  } catch (error) {
+  } catch (error: unknown) {
     if (error instanceof WorkspaceSearchMigrationFailure) throw error
     throw new WorkspaceSearchMigrationFailure(
       'IDENTITY_MISMATCH',
       'Migration resource identity could not be measured.',
-      { cause: error },
     )
   }
 }
@@ -272,6 +331,10 @@ async function measureMigrationConfiguration(
   const callerSessionArn = readValidatedCallerSessionArn(
     caller.arn,
     input.requested.account,
+  )
+  const callerRoleId = readValidatedCallerRoleId(
+    caller.userId,
+    callerSessionArn,
   )
 
   const tableEntries = await Promise.all(
@@ -301,6 +364,7 @@ async function measureMigrationConfiguration(
     profile: input.requested.profile,
     commit: input.requested.commit,
     callerArn: callerSessionArn,
+    callerRoleId,
     tables,
     journal,
     journalPrefix: 'workspace-search/v1',
@@ -363,6 +427,30 @@ function invalidCallerRoleIdentity(): WorkspaceSearchMigrationFailure {
 }
 
 /**
+ * Validates and extracts the stable role ID from STS GetCallerIdentity UserId.
+ *
+ * @param value - Exact STS UserId in role-id/session form.
+ * @param callerArn - Validated assumed-role session ARN.
+ * @returns Stable IAM role unique ID.
+ */
+function readValidatedCallerRoleId(value: string, callerArn: string): string {
+  const userIdSegments = value.split(':')
+  const roleId = userIdSegments[0]
+  const sessionName = userIdSegments[1]
+  const arnSessionName = callerArn.split('/')[2]
+  if (
+    userIdSegments.length !== 2 ||
+    !roleId ||
+    !/^AROA[A-Z0-9]{17}$/u.test(roleId) ||
+    !sessionName ||
+    sessionName !== arnSessionName
+  ) {
+    throw invalidCallerRoleIdentity()
+  }
+  return roleId
+}
+
+/**
  * Measures and validates one table against its role-specific descriptor.
  *
  * @param role - Migration table role.
@@ -400,7 +488,16 @@ async function measureTableIdentity(
       `The ${role} table does not match the requested account, region, and name.`,
     )
   }
-  const descriptor = readTableDescriptor(table, ttlOutput)
+  const measuredEncryption = readEncryption(
+    table,
+    requested.account,
+    requested.region,
+  )
+  const descriptor = readTableDescriptor(
+    table,
+    ttlOutput,
+    measuredEncryption.encryption,
+  )
   const expected = expectedTableDescriptors[role]
   if (serializeCanonicalJson(descriptor) !== serializeCanonicalJson(expected)) {
     throw new WorkspaceSearchMigrationFailure(
@@ -423,6 +520,7 @@ async function measureTableIdentity(
     billingMode: 'PAY_PER_REQUEST',
     deletionProtection: descriptor.deletionProtection,
     encryption: descriptor.encryption,
+    kmsKeyDigest: measuredEncryption.kmsKeyDigest,
     ttl: descriptor.ttl,
     pitr,
   }
@@ -439,12 +537,38 @@ async function measureJournalIdentity(
   requested: WorkspaceSearchMigrationRequestedResources,
   port: WorkspaceSearchMigrationIdentityPort,
 ): Promise<MigrationJournalIdentity> {
-  const [versioning, objectLock, encryption, logging] = await Promise.all([
-    port.getBucketVersioning(requested.journalBucket),
-    port.getObjectLockConfiguration(requested.journalBucket),
-    port.getBucketEncryption(requested.journalBucket),
-    port.getBucketLogging(requested.journalBucket),
-  ])
+  const lookup: WorkspaceSearchMigrationJournalLookup = {
+    bucketName: requested.journalBucket,
+    expectedBucketOwner: requested.account,
+  }
+  let versioning: GetBucketVersioningOutput
+  let objectLock: GetObjectLockConfigurationOutput
+  let encryption: GetBucketEncryptionOutput
+  let logging: GetBucketLoggingOutput
+  let keyMetadata: WorkspaceSearchMigrationJournalKeyMetadata
+  try {
+    [versioning, objectLock, encryption, logging, keyMetadata] = await Promise.all([
+      port.getBucketVersioning(lookup),
+      port.getObjectLockConfiguration(lookup),
+      port.getBucketEncryption(lookup),
+      port.getBucketLogging(lookup),
+      port.describeJournalKey(requested.journalKeyArn),
+    ])
+  } catch (error) {
+    if (hasErrorName(error, 'ObjectLockConfigurationNotFoundError')) {
+      throw invalidJournalConfiguration('Object Lock')
+    }
+    if (
+      hasErrorName(
+        error,
+        'ServerSideEncryptionConfigurationNotFoundError',
+      )
+    ) {
+      throw invalidJournalConfiguration('encryption')
+    }
+    throw error
+  }
+  const keyIdentity = readJournalKeyIdentity(keyMetadata, requested)
   if (versioning.Status !== 'Enabled') {
     throw invalidJournalConfiguration('versioning')
   }
@@ -483,6 +607,7 @@ async function measureJournalIdentity(
   return {
     bucketName: requested.journalBucket,
     keyArn: requested.journalKeyArn,
+    ...keyIdentity,
     versioning: 'Enabled',
     objectLockMode: 'COMPLIANCE',
     defaultRetentionDays: retention.Days ?? 0,
@@ -490,6 +615,55 @@ async function measureJournalIdentity(
     bucketKeyEnabled: true,
     accessLogBucket: loggingEnabled.TargetBucket,
     accessLogPrefix: loggingEnabled.TargetPrefix,
+  }
+}
+
+/**
+ * Validates that the journal key is the exact enabled customer-managed key.
+ *
+ * @param metadata - Narrow KMS DescribeKey response.
+ * @param requested - Explicit account, region, and key selection.
+ * @returns Stable KMS identity evidence bound into the configuration hash.
+ */
+function readJournalKeyIdentity(
+  metadata: WorkspaceSearchMigrationJournalKeyMetadata,
+  requested: WorkspaceSearchMigrationRequestedResources,
+): Pick<
+  MigrationJournalIdentity,
+  | 'keyCreationTime'
+  | 'keyManager'
+  | 'keyState'
+  | 'keySpec'
+  | 'keyUsage'
+  | 'keyOrigin'
+  | 'keyMultiRegion'
+> {
+  const keyId = requested.journalKeyArn.split(':')[5]?.slice('key/'.length)
+  const creationTime = metadata.creationDate?.getTime()
+  if (
+    metadata.arn !== requested.journalKeyArn ||
+    metadata.awsAccountId !== requested.account ||
+    metadata.keyId !== keyId ||
+    metadata.enabled !== true ||
+    metadata.keyManager !== 'CUSTOMER' ||
+    metadata.keyState !== 'Enabled' ||
+    metadata.keySpec !== 'SYMMETRIC_DEFAULT' ||
+    metadata.keyUsage !== 'ENCRYPT_DECRYPT' ||
+    metadata.origin !== 'AWS_KMS' ||
+    metadata.multiRegion !== false ||
+    typeof creationTime !== 'number' ||
+    !Number.isFinite(creationTime)
+  ) {
+    throw invalidJournalConfiguration('KMS key')
+  }
+  return {
+    keyCreationTime: new Date(creationTime).toISOString(),
+    keyManager: 'CUSTOMER',
+    keyState: 'Enabled',
+    keySpec: 'SYMMETRIC_DEFAULT',
+    keyUsage: 'ENCRYPT_DECRYPT',
+    keyOrigin: 'AWS_KMS',
+    keyMultiRegion: false,
   }
 }
 
@@ -547,11 +721,13 @@ function readPhysicalTableIdentity(table: TableDescription): {
  *
  * @param table - Raw DynamoDB table description.
  * @param ttlOutput - Raw TTL description.
+ * @param encryption - Validated encryption family.
  * @returns Normalized descriptor.
  */
 function readTableDescriptor(
   table: TableDescription,
   ttlOutput: DescribeTimeToLiveCommandOutput,
+  encryption: MigrationTableIdentity['encryption'],
 ): ExpectedTableDescriptor {
   if (table.BillingModeSummary?.BillingMode !== 'PAY_PER_REQUEST') {
     throw new WorkspaceSearchMigrationFailure(
@@ -574,7 +750,7 @@ function readTableDescriptor(
     key,
     globalSecondaryIndexes,
     ttl: readTtl(ttlOutput),
-    encryption: readEncryption(table),
+    encryption,
     deletionProtection: table.DeletionProtectionEnabled === true,
   }
 }
@@ -728,24 +904,58 @@ function readTtl(
 }
 
 /**
- * Reads the DynamoDB encryption family without exposing a KMS key identifier.
+ * Reads the DynamoDB encryption family and a digest of its KMS key ARN.
  *
  * @param table - Raw DynamoDB table description.
- * @returns Normalized encryption family.
+ * @param expectedAccount - Requested account used to validate a KMS key ARN.
+ * @param expectedRegion - Requested region used to validate a KMS key ARN.
+ * @returns Normalized encryption family and KMS key digest or null.
  */
 function readEncryption(
   table: TableDescription,
-): MigrationTableIdentity['encryption'] {
+  expectedAccount: string,
+  expectedRegion: string,
+): MeasuredTableEncryption {
   const description = table.SSEDescription
-  if (!description) return 'AWS_OWNED'
+  if (!description) {
+    return {
+      encryption: 'AWS_OWNED',
+      kmsKeyDigest: null,
+    }
+  }
   if (description.Status !== 'ENABLED') {
     throw new WorkspaceSearchMigrationFailure(
       'TABLE_SCHEMA_MISMATCH',
       'A migration table has an invalid encryption state.',
     )
   }
-  if (description.SSEType === 'KMS') return 'KMS'
-  if (description.SSEType === 'AES256') return 'AWS_OWNED'
+  if (description.SSEType === 'KMS') {
+    if (
+      !isKmsKeyArn(
+        description.KMSMasterKeyArn,
+        expectedAccount,
+        expectedRegion,
+      )
+    ) {
+      throw new WorkspaceSearchMigrationFailure(
+        'TABLE_SCHEMA_MISMATCH',
+        'A migration table has an invalid KMS key identity.',
+      )
+    }
+    return {
+      encryption: 'KMS',
+      kmsKeyDigest: createMigrationDigest(description.KMSMasterKeyArn),
+    }
+  }
+  if (
+    description.SSEType === 'AES256' &&
+    description.KMSMasterKeyArn === undefined
+  ) {
+    return {
+      encryption: 'AWS_OWNED',
+      kmsKeyDigest: null,
+    }
+  }
   throw new WorkspaceSearchMigrationFailure(
     'TABLE_SCHEMA_MISMATCH',
     'A migration table has an unsupported encryption state.',
@@ -826,7 +1036,7 @@ function parseDynamoTableArn(value: string): {
   if (
     parts.length !== 6 ||
     parts[0] !== 'arn' ||
-    !isNonEmptyString(parts[1]) ||
+    !isAwsPartition(parts[1]) ||
     parts[2] !== 'dynamodb' ||
     !isAwsRegion(parts[3]) ||
     !isAwsAccount(parts[4]) ||
@@ -907,7 +1117,7 @@ function validateRequestedResources(
     !isAwsRegion(requested.region) ||
     !isSafeProfile(requested.profile) ||
     !/^[0-9a-f]{40}$/.test(requested.commit) ||
-    !isNonEmptyString(requested.journalBucket) ||
+    !isS3BucketName(requested.journalBucket) ||
     !isKmsKeyArn(requested.journalKeyArn, requested.account, requested.region)
   ) {
     throw new WorkspaceSearchMigrationFailure(
@@ -918,11 +1128,11 @@ function validateRequestedResources(
   const uniqueNames = new Set(Object.values(requested.tables))
   if (
     uniqueNames.size !== 6 ||
-    [...uniqueNames].some((tableName) => !isNonEmptyString(tableName))
+    [...uniqueNames].some((tableName) => !isDynamoTableName(tableName))
   ) {
     throw new WorkspaceSearchMigrationFailure(
       'INVALID_ARGUMENT',
-      'Migration table names must be non-empty and physically distinct.',
+      'Migration table names must be valid and physically distinct.',
     )
   }
 }
@@ -1002,6 +1212,17 @@ function invalidJournalConfiguration(setting: string): WorkspaceSearchMigrationF
 }
 
 /**
+ * Checks one AWS service exception by its stable modeled error name.
+ *
+ * @param error - Unknown port failure.
+ * @param expectedName - Modeled AWS service exception name.
+ * @returns Whether the failure has the expected modeled name.
+ */
+function hasErrorName(error: unknown, expectedName: string): boolean {
+  return error instanceof Error && error.name === expectedName
+}
+
+/**
  * Converts a Date to canonical UTC form.
  *
  * @param value - Date returned by an AWS SDK response.
@@ -1073,6 +1294,46 @@ function isSafeProfile(value: unknown): value is string {
 }
 
 /**
+ * Checks a physical DynamoDB table name before any control-plane lookup.
+ *
+ * @param value - Candidate physical table name.
+ * @returns Whether the value satisfies DynamoDB table-name constraints.
+ */
+function isDynamoTableName(value: unknown): value is string {
+  return typeof value === 'string' &&
+    /^[A-Za-z0-9_.-]{3,255}$/.test(value)
+}
+
+/**
+ * Checks a general-purpose S3 bucket name before any control-plane lookup.
+ *
+ * @param value - Candidate journal bucket name.
+ * @returns Whether the value satisfies current general-purpose bucket rules.
+ */
+function isS3BucketName(value: unknown): value is string {
+  if (
+    typeof value !== 'string' ||
+    value.length < 3 ||
+    value.length > 63 ||
+    !/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/.test(value) ||
+    value.includes('..') ||
+    /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(value)
+  ) {
+    return false
+  }
+  const reservedPrefixes = ['xn--', 'sthree-', 'amzn_s3_demo_']
+  const reservedSuffixes = [
+    '-s3alias',
+    '--ol-s3',
+    '.mrap',
+    '--x-s3',
+    '--table-s3',
+  ]
+  return !reservedPrefixes.some((prefix) => value.startsWith(prefix)) &&
+    !reservedSuffixes.some((suffix) => value.endsWith(suffix))
+}
+
+/**
  * Checks one IAM role name carried by an STS assumed-role ARN.
  *
  * @param value - Candidate role name.
@@ -1109,7 +1370,7 @@ function isKmsKeyArn(value: unknown, account: string, region: string): value is 
   const parts = value.split(':')
   return parts.length === 6 &&
     parts[0] === 'arn' &&
-    isNonEmptyString(parts[1]) &&
+    isAwsPartition(parts[1]) &&
     parts[2] === 'kms' &&
     parts[3] === region &&
     parts[4] === account &&

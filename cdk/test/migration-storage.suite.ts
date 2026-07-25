@@ -142,6 +142,14 @@ test('Workspace Search journal is retained, write-once, encrypted, and access lo
             },
           }],
         },
+        LifecycleConfiguration: {
+          Rules: [expect.objectContaining({
+            ExpirationInDays: 90,
+            Id: 'ExpireMigrationJournalAccessLogs',
+            NoncurrentVersionExpiration: { NoncurrentDays: 90 },
+            Status: 'Enabled',
+          })],
+        },
         OwnershipControls: {
           Rules: [{ ObjectOwnership: 'BucketOwnerEnforced' }],
         },
@@ -167,16 +175,127 @@ test('Workspace Search journal is retained, write-once, encrypted, and access lo
       return isRecord(bucket) && bucket.Ref === journalBucketId;
     },
   );
+  const accessLogsBucketPolicy = Object.values(synthesized.Resources).find(
+    (resource) => {
+      if (!isRecord(resource) || resource.Type !== 'AWS::S3::BucketPolicy') {
+        return false;
+      }
+      const properties = resource.Properties;
+      if (!isRecord(properties)) return false;
+      const bucket = properties.Bucket;
+      return isRecord(bucket) && bucket.Ref === accessLogsBucketId;
+    },
+  );
+  const journalBucketPolicyRecord = isRecord(journalBucketPolicy)
+    ? journalBucketPolicy
+    : undefined;
+  const journalBucketPolicyProperties =
+    isRecord(journalBucketPolicyRecord?.Properties)
+      ? journalBucketPolicyRecord.Properties
+      : undefined;
+  const journalPolicyDocument =
+    isRecord(journalBucketPolicyProperties?.PolicyDocument)
+      ? journalBucketPolicyProperties.PolicyDocument
+      : undefined;
+  const journalPolicyStatements: Record<string, unknown>[] =
+    Array.isArray(journalPolicyDocument?.Statement)
+      ? journalPolicyDocument.Statement.filter(isRecord)
+      : [];
+  const deletionStatement = journalPolicyStatements.find(
+    (statement) => statement.Sid === 'DenyJournalObjectDeletion',
+  );
+  const unconditionalUploadStatement = journalPolicyStatements.find(
+    (statement) => statement.Sid === 'DenyUnconditionalJournalUploads',
+  );
+  const nonExclusiveUploadStatement = journalPolicyStatements.find(
+    (statement) => statement.Sid === 'DenyNonExclusiveJournalUploads',
+  );
+  const nonKmsUploadStatement = journalPolicyStatements.find(
+    (statement) => statement.Sid === 'DenyNonKmsJournalUploads',
+  );
+  const wrongKeyUploadStatement = journalPolicyStatements.find(
+    (statement) => statement.Sid === 'DenyWrongJournalKeyUploads',
+  );
   const serializedJournalPolicy = JSON.stringify(journalBucketPolicy);
+  const allJournalObjectsArn = {
+    'Fn::Join': [
+      '',
+      [
+        { 'Fn::GetAtt': [journalBucketId, 'Arn'] },
+        '/*',
+      ],
+    ],
+  };
+  const journalV1ObjectsArn = {
+    'Fn::Join': [
+      '',
+      [
+        { 'Fn::GetAtt': [journalBucketId, 'Arn'] },
+        '/workspace-search/v1/*',
+      ],
+    ],
+  };
 
-  expect(journalBucketPolicy).toBeDefined();
-  expect(serializedJournalPolicy).toContain('DenyJournalObjectDeletion');
-  expect(serializedJournalPolicy).toContain('s3:DeleteObjectVersion');
-  expect(serializedJournalPolicy).toContain('DenyUnconditionalJournalUploads');
-  expect(serializedJournalPolicy).toContain('DenyNonExclusiveJournalUploads');
-  expect(serializedJournalPolicy).toContain('s3:if-none-match');
-  expect(serializedJournalPolicy).toContain('"Null"');
-  expect(serializedJournalPolicy).toContain('StringNotEquals');
+  expect(journalBucketPolicy).toEqual(expect.objectContaining({
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+  }));
+  expect(accessLogsBucketPolicy).toEqual(expect.objectContaining({
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+  }));
+  expect(deletionStatement).toEqual(expect.objectContaining({
+    Action: ['s3:DeleteObject', 's3:DeleteObjectVersion'],
+    Effect: 'Deny',
+    Principal: { AWS: '*' },
+    Resource: allJournalObjectsArn,
+  }));
+  expect(unconditionalUploadStatement).toEqual(expect.objectContaining({
+    Action: 's3:PutObject',
+    Condition: {
+      Null: {
+        's3:if-none-match': 'true',
+      },
+    },
+    Effect: 'Deny',
+    Principal: { AWS: '*' },
+    Resource: journalV1ObjectsArn,
+  }));
+  expect(nonExclusiveUploadStatement).toEqual(expect.objectContaining({
+    Action: 's3:PutObject',
+    Condition: {
+      StringNotEquals: {
+        's3:if-none-match': '*',
+      },
+    },
+    Effect: 'Deny',
+    Principal: { AWS: '*' },
+    Resource: journalV1ObjectsArn,
+  }));
+  expect(nonKmsUploadStatement).toEqual(expect.objectContaining({
+    Action: 's3:PutObject',
+    Condition: {
+      StringNotEquals: {
+        's3:x-amz-server-side-encryption': 'aws:kms',
+      },
+    },
+    Effect: 'Deny',
+    Principal: { AWS: '*' },
+    Resource: journalV1ObjectsArn,
+  }));
+  expect(wrongKeyUploadStatement).toEqual(expect.objectContaining({
+    Action: 's3:PutObject',
+    Condition: {
+      StringNotEquals: {
+        's3:x-amz-server-side-encryption-aws-kms-key-id': {
+          'Fn::GetAtt': [journalKeyId, 'Arn'],
+        },
+      },
+    },
+    Effect: 'Deny',
+    Principal: { AWS: '*' },
+    Resource: journalV1ObjectsArn,
+  }));
   expect(serializedJournalPolicy).toContain('s3:TlsVersion');
   expect(serializedJournalPolicy).toContain('1.2');
   expect(serializedJournalPolicy).toContain('aws:SecureTransport');
@@ -328,6 +447,10 @@ test('Workspace Search migration operator policy is unattached and least privile
   expect(journalPutStatement?.Condition).toEqual({
     StringEquals: {
       's3:if-none-match': '*',
+      's3:x-amz-server-side-encryption': 'aws:kms',
+      's3:x-amz-server-side-encryption-aws-kms-key-id': {
+        'Fn::GetAtt': [journalKeyId, 'Arn'],
+      },
     },
   });
   expect(JSON.stringify(journalPutStatement?.Resource))
@@ -344,9 +467,16 @@ test('Workspace Search migration operator policy is unattached and least privile
   expect(kmsStatement?.Condition).toEqual(expect.objectContaining({
     StringEquals: expect.objectContaining({
       'kms:CallerAccount': { Ref: 'AWS::AccountId' },
+      'kms:EncryptionContext:aws:s3:arn': {
+        'Fn::GetAtt': [journalBucketId, 'Arn'],
+      },
       'kms:ViaService': expect.anything(),
     }),
   }));
+  expect(kmsStatement?.Action).toEqual([
+    'kms:Decrypt',
+    'kms:GenerateDataKey',
+  ]);
 
   for (const forbiddenAction of [
     'dynamodb:TransactWriteItems',
@@ -354,11 +484,11 @@ test('Workspace Search migration operator policy is unattached and least privile
     's3:BypassGovernanceRetention',
     's3:DeleteObject',
     's3:DeleteObjectVersion',
-    's3:PutBucket',
     's3:PutObjectRetention',
   ]) {
     expect(serializedOperatorPolicy).not.toContain(`"${forbiddenAction}"`);
   }
+  expect(serializedOperatorPolicy).not.toMatch(/"s3:PutBucket[A-Za-z]*"/u);
   expect(serializedOperatorPolicy).not.toContain('"Resource":"*"');
 });
 

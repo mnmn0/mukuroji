@@ -77,6 +77,11 @@ export function buildMigrationStorage(
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       enforceSSL: true,
+      lifecycleRules: [{
+        expiration: cdk.Duration.days(90),
+        id: 'ExpireMigrationJournalAccessLogs',
+        noncurrentVersionExpiration: cdk.Duration.days(90),
+      }],
       minimumTLSVersion: 1.2,
       objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
@@ -132,9 +137,13 @@ export function buildMigrationStorage(
       ],
       effect: iam.Effect.DENY,
       principals: [new iam.AnyPrincipal()],
-      resources: [journalObjectArn],
+      resources: [
+        workspaceSearchMigrationJournalBucket.arnForObjects('*'),
+      ],
     }),
   );
+  // Keep the explicit missing-header deny as defense in depth even though the
+  // nonexclusive-value deny also rejects a missing If-None-Match condition.
   workspaceSearchMigrationJournalBucket.addToResourcePolicy(
     new iam.PolicyStatement({
       sid: 'DenyUnconditionalJournalUploads',
@@ -163,6 +172,44 @@ export function buildMigrationStorage(
       resources: [journalObjectArn],
     }),
   );
+  workspaceSearchMigrationJournalBucket.addToResourcePolicy(
+    new iam.PolicyStatement({
+      sid: 'DenyNonKmsJournalUploads',
+      actions: ['s3:PutObject'],
+      conditions: {
+        StringNotEquals: {
+          's3:x-amz-server-side-encryption': 'aws:kms',
+        },
+      },
+      effect: iam.Effect.DENY,
+      principals: [new iam.AnyPrincipal()],
+      resources: [journalObjectArn],
+    }),
+  );
+  workspaceSearchMigrationJournalBucket.addToResourcePolicy(
+    new iam.PolicyStatement({
+      sid: 'DenyWrongJournalKeyUploads',
+      actions: ['s3:PutObject'],
+      conditions: {
+        StringNotEquals: {
+          's3:x-amz-server-side-encryption-aws-kms-key-id':
+            workspaceSearchMigrationJournalKey.keyArn,
+        },
+      },
+      effect: iam.Effect.DENY,
+      principals: [new iam.AnyPrincipal()],
+      resources: [journalObjectArn],
+    }),
+  );
+
+  const journalBucketPolicy = workspaceSearchMigrationJournalBucket.policy;
+  const journalAccessLogsBucketPolicy =
+    workspaceSearchMigrationJournalAccessLogsBucket.policy;
+  if (!journalBucketPolicy || !journalAccessLogsBucketPolicy) {
+    throw new Error('Migration journal bucket policies were not created.');
+  }
+  journalBucketPolicy.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
+  journalAccessLogsBucketPolicy.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
 
   const sourceTableArns = [
     input.projectDirectoryTable.tableArn,
@@ -182,6 +229,8 @@ export function buildMigrationStorage(
   const kmsViaS3Conditions = {
     StringEquals: {
       'kms:CallerAccount': cdk.Stack.of(scope).account,
+      'kms:EncryptionContext:aws:s3:arn':
+        workspaceSearchMigrationJournalBucket.bucketArn,
       'kms:ViaService':
         `s3.${cdk.Stack.of(scope).region}.${cdk.Stack.of(scope).urlSuffix}`,
     },
@@ -282,6 +331,9 @@ export function buildMigrationStorage(
           conditions: {
             StringEquals: {
               's3:if-none-match': '*',
+              's3:x-amz-server-side-encryption': 'aws:kms',
+              's3:x-amz-server-side-encryption-aws-kms-key-id':
+                workspaceSearchMigrationJournalKey.keyArn,
             },
           },
           resources: [journalObjectArn],
@@ -289,7 +341,6 @@ export function buildMigrationStorage(
         new iam.PolicyStatement({
           actions: [
             'kms:Decrypt',
-            'kms:Encrypt',
             'kms:GenerateDataKey',
           ],
           conditions: kmsViaS3Conditions,
