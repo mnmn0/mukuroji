@@ -1,6 +1,7 @@
 import {
   createProductionAnalyticsScheduleHandler,
 } from '../app/composition/analytics-schedule'
+import { createLazySingleton } from '../app/composition/lazy-singleton'
 import {
   createRuntimeControlGuardedHandler,
 } from '../app/composition/runtime-control'
@@ -8,7 +9,9 @@ import {
   type AnalyticsScheduleEvent,
 } from '../modules/analytics/adapter-in/schedules/analytics-schedule'
 
-let productionHandler: ReturnType<typeof createProductionAnalyticsScheduleHandler> | undefined
+const getProductionHandler = createLazySingleton(
+  createProductionAnalyticsScheduleHandler,
+)
 
 /**
  * Processes due Analytics reports after the runtime control admits the invocation.
@@ -17,8 +20,7 @@ let productionHandler: ReturnType<typeof createProductionAnalyticsScheduleHandle
  * @returns The Analytics schedule batch result.
  */
 async function processAnalyticsSchedule(event: AnalyticsScheduleEvent = {}) {
-  productionHandler ??= createProductionAnalyticsScheduleHandler()
-  return await productionHandler(event)
+  return await getProductionHandler()(event)
 }
 
 /**

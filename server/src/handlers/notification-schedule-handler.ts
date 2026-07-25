@@ -1,6 +1,7 @@
 import {
   createProductionNotificationScheduleHandler,
 } from '../app/composition/notification-schedule'
+import { createLazySingleton } from '../app/composition/lazy-singleton'
 import {
   createRuntimeControlGuardedHandler,
 } from '../app/composition/runtime-control'
@@ -8,9 +9,9 @@ import type {
   NotificationScheduleEvent,
 } from '../modules/notifications/adapter-in/schedules/notification-schedule'
 
-let productionHandler:
-  | ReturnType<typeof createProductionNotificationScheduleHandler>
-  | undefined
+const getProductionHandler = createLazySingleton(
+  createProductionNotificationScheduleHandler,
+)
 
 /**
  * Processes an admitted Work Item due-date notification schedule event.
@@ -21,8 +22,7 @@ let productionHandler:
 async function processNotificationSchedule(
   event: NotificationScheduleEvent = {},
 ) {
-  productionHandler ??= createProductionNotificationScheduleHandler()
-  return await productionHandler(event)
+  return await getProductionHandler()(event)
 }
 
 /**

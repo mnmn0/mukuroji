@@ -5,11 +5,13 @@ import {
 import {
   createDefaultRequestIntakeClient,
 } from '../modules/request-intake/request-intake'
+import { createLazySingleton } from '../app/composition/lazy-singleton'
 import {
   createRuntimeControlGuardedHandler,
 } from '../app/composition/runtime-control'
 
-let productionHandler: ReturnType<typeof createRequestEmailHandler> | undefined
+const getProductionHandler = createLazySingleton(() =>
+  createRequestEmailHandler(createDefaultRequestIntakeClient()))
 
 /**
  * Passes one admitted signed email to the Request Intake application port.
@@ -18,10 +20,7 @@ let productionHandler: ReturnType<typeof createRequestEmailHandler> | undefined
  * @returns The requester reply receipt.
  */
 async function processRequestEmail(event: SignedRequestEmailEvent) {
-  productionHandler ??= createRequestEmailHandler(
-    createDefaultRequestIntakeClient(),
-  )
-  return await productionHandler(event)
+  return await getProductionHandler()(event)
 }
 
 /**

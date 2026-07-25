@@ -1,6 +1,7 @@
 import {
   createProductionAutomationEventHandler,
 } from '../app/composition/automation-workers'
+import { createLazySingleton } from '../app/composition/lazy-singleton'
 import {
   createRuntimeControlGuardedHandler,
 } from '../app/composition/runtime-control'
@@ -9,7 +10,9 @@ import {
   type DynamoStreamEvent,
 } from '../modules/automation'
 
-let productionHandler: ReturnType<typeof createProductionAutomationEventHandler> | undefined
+const getProductionHandler = createLazySingleton(
+  createProductionAutomationEventHandler,
+)
 
 /**
  * Delivers an admitted Audit event batch to version-pinned Automation executions.
@@ -20,8 +23,7 @@ let productionHandler: ReturnType<typeof createProductionAutomationEventHandler>
 async function processAutomationEvent(
   event: DynamoStreamEvent,
 ): Promise<BatchResponse> {
-  productionHandler ??= createProductionAutomationEventHandler()
-  return await productionHandler(event)
+  return await getProductionHandler()(event)
 }
 
 /**

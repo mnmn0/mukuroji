@@ -1,6 +1,7 @@
 import {
   createEnterpriseScimGroupJobWorkerProcessor,
 } from '../app/composition/enterprise-scim-group-job-worker'
+import { createLazySingleton } from '../app/composition/lazy-singleton'
 import {
   createRuntimeControlGuardedHandler,
 } from '../app/composition/runtime-control'
@@ -10,11 +11,10 @@ import {
 import {
   processEnterpriseScimGroupJobBatch,
 } from '../modules/enterprise-identity/adapter-in/events/scim-group-job-batch'
-import type {
-  EnterpriseScimGroupJobProcessor,
-} from '../modules/enterprise-identity/application/ports/scim-group-job-processor'
 
-let defaultProcessor: EnterpriseScimGroupJobProcessor | undefined
+const getDefaultProcessor = createLazySingleton(
+  createEnterpriseScimGroupJobWorkerProcessor,
+)
 
 /**
  * Processes one admitted Enterprise SCIM group job stream batch.
@@ -25,8 +25,10 @@ let defaultProcessor: EnterpriseScimGroupJobProcessor | undefined
 const processEnterpriseScimGroupJob: EnterpriseScimGroupJobWorkerHandler = async (
   event,
 ) => {
-  defaultProcessor ??= createEnterpriseScimGroupJobWorkerProcessor()
-  return await processEnterpriseScimGroupJobBatch(event, defaultProcessor)
+  return await processEnterpriseScimGroupJobBatch(
+    event,
+    getDefaultProcessor(),
+  )
 }
 
 /**

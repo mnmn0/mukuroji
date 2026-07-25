@@ -29,6 +29,11 @@ import {
   type RuntimeControlSurface,
   type RuntimeControlWorkerSurface,
 } from '../../infrastructure/runtime/runtime-control'
+import {
+  getSafeRuntimeControlSnapshot,
+  readRuntimeControlObservedAt,
+  recordRuntimeControlObservationSafely,
+} from './runtime-control-safety'
 
 /**
  * Runtime-control surfaces backed by distinct deployed AppConfig scopes.
@@ -63,6 +68,7 @@ export interface RuntimeControlGuardDependencies {
 }
 
 const DEFAULT_MAX_STALENESS_SECONDS = 60
+const MAXIMUM_STALENESS_SECONDS = 60
 const configuredProviders = new Map<
   ConfiguredRuntimeControlSurface,
   RuntimeControlProvider
@@ -141,7 +147,7 @@ export function createProductionRuntimeControlProvider(
     environment.MUKUROJI_RUNTIME_CONTROL_MAX_STALE_SECONDS,
     DEFAULT_MAX_STALENESS_SECONDS,
     1,
-    DEFAULT_MAX_STALENESS_SECONDS,
+    MAXIMUM_STALENESS_SECONDS,
   )
 
   if (
@@ -205,12 +211,12 @@ export function createRuntimeControlGuardedHandler<
     createProductionRuntimeControlObservationRecorder()
 
   return async (...arguments_: Arguments): Promise<Result> => {
-    const snapshot = await getSafeSnapshot(provider)
+    const snapshot = await getSafeRuntimeControlSnapshot(provider)
     const allowed = runtimeControlAllowsExecution(snapshot)
-    recordObservationSafely(
+    recordRuntimeControlObservationSafely(
       recordObservation,
       {
-        observedAtMilliseconds: readObservedAt(now),
+        observedAtMilliseconds: readRuntimeControlObservedAt(now),
         outcome: allowed ? 'allowed' : 'blocked',
         snapshot,
         surface,
@@ -238,10 +244,10 @@ export function createRuntimeControlAwareReadinessProbe(
 ): ReadinessProbe {
   return Object.freeze({
     async check(correlationId?: string): Promise<ReadinessResult> {
-      const snapshot = await getSafeSnapshot(provider)
+      const snapshot = await getSafeRuntimeControlSnapshot(provider)
       const controlReady = runtimeControlIsReady(snapshot)
-      recordObservationSafely(recordObservation, {
-        observedAtMilliseconds: readObservedAt(now),
+      recordRuntimeControlObservationSafely(recordObservation, {
+        observedAtMilliseconds: readRuntimeControlObservedAt(now),
         outcome: controlReady ? 'ready' : 'not-ready',
         snapshot,
         surface: 'readiness',
@@ -311,43 +317,6 @@ function createUnavailableRuntimeControlProvider(): RuntimeControlProvider {
 }
 
 /**
- * Converts unexpected provider rejection into an unavailable decision.
- *
- * @param provider - Scoped provider used by the current operation.
- * @returns Provider snapshot or a redacted fail-closed substitute.
- */
-async function getSafeSnapshot(
-  provider: RuntimeControlProvider,
-): Promise<RuntimeControlSnapshot> {
-  try {
-    return await provider.getSnapshot()
-  } catch {
-    return Object.freeze({
-      mode: 'disabled',
-      status: 'unavailable',
-    })
-  }
-}
-
-/**
- * Records bounded telemetry without allowing an observer failure to admit or
- * disrupt controlled work.
- *
- * @param recorder - Optional observation destination.
- * @param observation - Bounded runtime-control decision.
- */
-function recordObservationSafely(
-  recorder: RuntimeControlObservationRecorder | undefined,
-  observation: Parameters<RuntimeControlObservationRecorder>[0],
-): void {
-  try {
-    recorder?.(observation)
-  } catch {
-    // Runtime admission is authoritative even when telemetry is unavailable.
-  }
-}
-
-/**
  * Reads a non-blank environment value.
  *
  * @param value - Candidate environment value.
@@ -397,22 +366,4 @@ function readSeconds(
  */
 function secondsToMilliseconds(seconds: number): number {
   return seconds * 1_000
-}
-
-/**
- * Reads a bounded timestamp without trusting an injected clock.
- *
- * @param now - Candidate timestamp source.
- * @returns Non-negative safe integer timestamp or zero.
- */
-function readObservedAt(now: () => number): number {
-  try {
-    const observedAtMilliseconds = now()
-    return Number.isSafeInteger(observedAtMilliseconds) &&
-      observedAtMilliseconds >= 0
-      ? observedAtMilliseconds
-      : 0
-  } catch {
-    return 0
-  }
 }

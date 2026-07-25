@@ -54,6 +54,9 @@ export type StructuredRuntimeControlLogSink = (
 
 const UNCONFIGURED_RUNTIME_CONTROL_ID = 'unconfigured'
 
+/** Maximum interval between routine current-enabled heartbeats per warm surface. */
+const CURRENT_ALLOWED_HEARTBEAT_INTERVAL_MILLISECONDS = 60_000
+
 /**
  * Derives the metric identity from the same AppConfig target identifiers used
  * for configuration polling.
@@ -77,6 +80,9 @@ export function createRuntimeControlMetricControlId(
 
 /**
  * Binds runtime-control observations to one validated stack control identity.
+ * Routine current-enabled observations are emitted as a bounded heartbeat per
+ * warm execution surface; every blocked, stale, invalid, or unavailable
+ * observation is emitted immediately.
  *
  * @param identity - Stack-scoped AppConfig metric identity.
  * @param sink - Optional output sink used by tests.
@@ -87,7 +93,38 @@ export function createRuntimeControlObservationRecorder(
   sink: StructuredRuntimeControlLogSink = writeStandardOutput,
 ): RuntimeControlObservationRecorder {
   const controlId = readMetricDimension(identity.controlId)
+  const lastCurrentAllowedBySurface = new Map<
+    RuntimeControlSurface,
+    {
+      readonly observedAtMilliseconds: number
+      readonly revision: number | undefined
+    }
+  >()
   return (observation) => {
+    if (
+      observation.outcome === 'allowed' &&
+      observation.snapshot.mode === 'enabled' &&
+      observation.snapshot.status === 'current'
+    ) {
+      const previous = lastCurrentAllowedBySurface.get(
+        observation.surface,
+      )
+      if (
+        previous &&
+        previous.revision === observation.snapshot.revision &&
+        observation.observedAtMilliseconds >=
+          previous.observedAtMilliseconds &&
+        observation.observedAtMilliseconds -
+          previous.observedAtMilliseconds <
+          CURRENT_ALLOWED_HEARTBEAT_INTERVAL_MILLISECONDS
+      ) {
+        return
+      }
+      lastCurrentAllowedBySurface.set(observation.surface, {
+        observedAtMilliseconds: observation.observedAtMilliseconds,
+        revision: observation.snapshot.revision,
+      })
+    }
     recordRuntimeControlObservation(
       observation,
       sink,

@@ -104,6 +104,37 @@ test('fails closed on a cold-start provider failure', async () => {
   expect(runtimeControlIsReady(snapshot)).toBeFalse()
 })
 
+test('classifies a cold-start unchanged response as unavailable', async () => {
+  let now = 0
+  let polls = 0
+  const provider = createRuntimeControlProvider({
+    source: {
+      async poll(): Promise<RuntimeControlSourceResult> {
+        polls += 1
+        return {
+          kind: 'unchanged',
+          nextPollIntervalMilliseconds: 20_000,
+        }
+      },
+    },
+    now: () => now,
+  })
+
+  const snapshot = await provider.getSnapshot()
+  expect(snapshot).toEqual({
+    mode: 'disabled',
+    status: 'unavailable',
+  })
+  expect(runtimeControlAllowsExecution(snapshot)).toBeFalse()
+  expect(runtimeControlIsReady(snapshot)).toBeFalse()
+  now = 19_999
+  expect((await provider.getSnapshot()).status).toBe('unavailable')
+  expect(polls).toBe(1)
+  now = 20_000
+  expect((await provider.getSnapshot()).status).toBe('unavailable')
+  expect(polls).toBe(2)
+})
+
 test('honors both the local minimum and provider-required poll interval', async () => {
   let now = 0
   let polls = 0

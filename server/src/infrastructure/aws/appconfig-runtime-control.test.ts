@@ -113,6 +113,7 @@ test('applies a bounded abort signal to AppConfig requests', async () => {
     applicationIdentifier: 'application',
     configurationProfileIdentifier: 'profile',
     environmentIdentifier: 'environment',
+    coldStartRequestTimeoutMilliseconds: 5,
     requestTimeoutMilliseconds: 5,
     client: {
       async startConfigurationSession() {
@@ -137,11 +138,91 @@ test('applies a bounded abort signal to AppConfig requests', async () => {
   expect(receivedSignal?.aborted).toBeTrue()
 })
 
-test('rejects missing tokens, invalid intervals, and oversized tokens safely', async () => {
+test('uses a longer cold-start deadline before returning to the warm deadline', async () => {
+  let polls = 0
+  const source = createAppConfigRuntimeControlSource({
+    applicationIdentifier: 'application',
+    configurationProfileIdentifier: 'profile',
+    environmentIdentifier: 'environment',
+    coldStartRequestTimeoutMilliseconds: 50,
+    requestTimeoutMilliseconds: 5,
+    client: {
+      async startConfigurationSession() {
+        return { initialConfigurationToken: 'initial-token' }
+      },
+      async getLatestConfiguration(_input, abortSignal) {
+        polls += 1
+        if (polls === 1) {
+          await Bun.sleep(15)
+          return {
+            nextPollConfigurationToken: 'warm-token',
+            nextPollIntervalInSeconds: 15,
+          }
+        }
+        return await new Promise((_resolve, reject) => {
+          abortSignal.addEventListener(
+            'abort',
+            () => reject(new Error('warm request aborted')),
+            { once: true },
+          )
+        })
+      },
+    },
+  })
+
+  expect(await source.poll()).toEqual({
+    kind: 'unchanged',
+    nextPollIntervalMilliseconds: 15_000,
+  })
+  await expect(source.poll()).rejects.toThrow(
+    'AppConfig runtime-control configuration is unavailable.',
+  )
+})
+
+test('clamps missing or undersized provider intervals without discarding configuration', async () => {
+  for (const nextPollIntervalInSeconds of [undefined, 14]) {
+    const source = createAppConfigRuntimeControlSource({
+      applicationIdentifier: 'application',
+      configurationProfileIdentifier: 'profile',
+      environmentIdentifier: 'environment',
+      minimumPollIntervalSeconds: 30,
+      client: {
+        async startConfigurationSession() {
+          return { initialConfigurationToken: 'initial-token' }
+        },
+        async getLatestConfiguration() {
+          return {
+            configuration: new TextEncoder().encode(
+              '{"schemaVersion":1,"revision":1,"mode":"enabled"}',
+            ),
+            nextPollConfigurationToken: 'next-token',
+            ...(nextPollIntervalInSeconds === undefined
+              ? {}
+              : { nextPollIntervalInSeconds }),
+          }
+        },
+      },
+    })
+
+    expect(await source.poll()).toEqual({
+      kind: 'configuration',
+      configuration: new TextEncoder().encode(
+        '{"schemaVersion":1,"revision":1,"mode":"enabled"}',
+      ),
+      nextPollIntervalMilliseconds: 30_000,
+    })
+  }
+})
+
+test('rejects missing tokens, malformed intervals, and oversized tokens safely', async () => {
   for (const response of [
     {
       nextPollConfigurationToken: 'next-token',
-      nextPollIntervalInSeconds: 14,
+      nextPollIntervalInSeconds: -1,
+    },
+    {
+      nextPollConfigurationToken: 'next-token',
+      nextPollIntervalInSeconds: 15.5,
     },
     {
       nextPollConfigurationToken: '',
@@ -190,5 +271,9 @@ test('validates source identifiers, minimum interval, and timeout', () => {
   expect(() => createAppConfigRuntimeControlSource({
     ...base,
     requestTimeoutMilliseconds: 30_001,
+  })).toThrow('AppConfig request timeout is invalid.')
+  expect(() => createAppConfigRuntimeControlSource({
+    ...base,
+    coldStartRequestTimeoutMilliseconds: 30_001,
   })).toThrow('AppConfig request timeout is invalid.')
 })

@@ -79,6 +79,73 @@ test('emits aggregate and per-surface runtime-control EMF dimensions', () => {
   })
 })
 
+test('bounds routine current-enabled records while preserving evidence heartbeats', () => {
+  const records: string[] = []
+  const record = createRuntimeControlObservationRecorder(
+    { controlId: 'stack:runtime-controls' },
+    (serializedRecord) => records.push(serializedRecord),
+  )
+  /**
+   * Emits one deterministic current-enabled observation.
+   *
+   * @param observedAtMilliseconds - Observation timestamp.
+   * @param revision - Accepted runtime-control revision.
+   * @param surface - Execution surface being observed.
+   * @returns Nothing.
+   */
+  const recordCurrent = (
+    observedAtMilliseconds: number,
+    revision: number,
+    surface: 'api' | 'realtime' = 'api',
+  ) => record({
+    observedAtMilliseconds,
+    outcome: 'allowed',
+    snapshot: {
+      mode: 'enabled',
+      revision,
+      status: 'current',
+    },
+    surface,
+  })
+
+  recordCurrent(0, 1)
+  recordCurrent(59_999, 1)
+  recordCurrent(60_000, 1)
+  recordCurrent(60_001, 2)
+  recordCurrent(60_001, 2, 'realtime')
+  for (const observedAtMilliseconds of [60_002, 60_003]) {
+    record({
+      observedAtMilliseconds,
+      outcome: 'blocked',
+      snapshot: {
+        mode: 'disabled',
+        status: 'invalid',
+      },
+      surface: 'api',
+    })
+  }
+
+  expect(records).toHaveLength(6)
+  expect(records.map((serializedRecord) => {
+    const parsed: unknown = JSON.parse(serializedRecord)
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      !('outcome' in parsed)
+    ) {
+      throw new Error('Runtime-control observation was not serialized.')
+    }
+    return parsed.outcome
+  })).toEqual([
+    'allowed',
+    'allowed',
+    'allowed',
+    'allowed',
+    'blocked',
+    'blocked',
+  ])
+})
+
 test('counts only invalid states as configuration failures', () => {
   const failureStatuses: RuntimeControlStatus[] = ['invalid']
   for (const status of failureStatuses) {

@@ -1,6 +1,7 @@
 import {
   createProductionEnterpriseIdentityMaintenanceHandler,
 } from '../app/composition/enterprise-identity-maintenance'
+import { createLazySingleton } from '../app/composition/lazy-singleton'
 import {
   createRuntimeControlGuardedHandler,
 } from '../app/composition/runtime-control'
@@ -9,9 +10,9 @@ import type {
   DynamoStreamEvent,
 } from '../infrastructure/aws/dynamodb-stream'
 
-let productionHandler:
-  | ReturnType<typeof createProductionEnterpriseIdentityMaintenanceHandler>
-  | undefined
+const getProductionHandler = createLazySingleton(
+  createProductionEnterpriseIdentityMaintenanceHandler,
+)
 
 /**
  * Passes an admitted Enterprise Identity control-stream batch to the worker.
@@ -22,8 +23,7 @@ let productionHandler:
 async function processEnterpriseIdentityMaintenance(
   event: DynamoStreamEvent,
 ): Promise<BatchResponse> {
-  productionHandler ??= createProductionEnterpriseIdentityMaintenanceHandler()
-  return await productionHandler(event)
+  return await getProductionHandler()(event)
 }
 
 /**

@@ -484,10 +484,10 @@ export function createRuntimeControlProvider(
 
     if (result.kind === 'unchanged') {
       if (!accepted) {
-        blockedStatus = 'invalid'
+        blockedStatus = 'unavailable'
         retryAtMilliseconds =
           checkedAtMilliseconds + nextPollIntervalMilliseconds
-        return createSnapshot('disabled', 'invalid')
+        return createSnapshot('disabled', 'unavailable')
       }
       if (blockedStatus === 'invalid') {
         retryAtMilliseconds = checkedAtMilliseconds +

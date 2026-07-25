@@ -19,6 +19,11 @@ export const MINIMUM_APPCONFIG_POLL_INTERVAL_SECONDS = 15
 export const DEFAULT_APPCONFIG_REQUEST_TIMEOUT_MILLISECONDS = 1_500
 
 /**
+ * Default timeout applied to session creation and its first configuration poll.
+ */
+export const DEFAULT_APPCONFIG_COLD_START_REQUEST_TIMEOUT_MILLISECONDS = 3_000
+
+/**
  * Input used to start one already-scoped AppConfig Data session.
  */
 export interface AppConfigRuntimeControlSessionInput {
@@ -95,6 +100,8 @@ export interface AppConfigRuntimeControlClient {
 export interface AppConfigRuntimeControlSourceOptions {
   /** AppConfig application identifier. */
   readonly applicationIdentifier: string
+  /** Longer timeout used only while establishing a new polling session. */
+  readonly coldStartRequestTimeoutMilliseconds?: number
   /** Optional client replacement used by isolated tests. */
   readonly client?: AppConfigRuntimeControlClient
   /** AppConfig configuration-profile identifier. */
@@ -178,7 +185,8 @@ export function createAwsAppConfigRuntimeControlClient(
  * Creates a stateful AppConfig Data source that safely rotates one-use tokens.
  *
  * A missing token, malformed provider interval, or SDK failure discards the
- * session and surfaces one redacted provider failure to the core. The next call
+ * session and surfaces one redacted provider failure to the core. Missing or
+ * undersized provider intervals use the configured lower bound. The next call
  * starts a fresh session instead of reusing a consumed token.
  *
  * @param options - Scoped identifiers, region, client, and poll minimum.
@@ -209,32 +217,42 @@ export function createAppConfigRuntimeControlSource(
     options.requestTimeoutMilliseconds ??
       DEFAULT_APPCONFIG_REQUEST_TIMEOUT_MILLISECONDS,
   )
+  const coldStartRequestTimeoutMilliseconds = readPositiveMilliseconds(
+    options.coldStartRequestTimeoutMilliseconds ??
+      DEFAULT_APPCONFIG_COLD_START_REQUEST_TIMEOUT_MILLISECONDS,
+  )
   let configurationToken: string | undefined
 
   return Object.freeze({
     async poll(): Promise<RuntimeControlSourceResult> {
       try {
-        if (!configurationToken) {
+        const startingSession = configurationToken === undefined
+        const activeRequestTimeoutMilliseconds = startingSession
+          ? coldStartRequestTimeoutMilliseconds
+          : requestTimeoutMilliseconds
+        let activeConfigurationToken = configurationToken
+        if (activeConfigurationToken === undefined) {
           const session = await client.startConfigurationSession({
             applicationIdentifier,
             configurationProfileIdentifier,
             environmentIdentifier,
             minimumPollIntervalSeconds,
-          }, AbortSignal.timeout(requestTimeoutMilliseconds))
-          configurationToken = readToken(
+          }, AbortSignal.timeout(activeRequestTimeoutMilliseconds))
+          activeConfigurationToken = readToken(
             session.initialConfigurationToken,
           )
         }
 
         const output = await client.getLatestConfiguration({
-          configurationToken,
-        }, AbortSignal.timeout(requestTimeoutMilliseconds))
+          configurationToken: activeConfigurationToken,
+        }, AbortSignal.timeout(activeRequestTimeoutMilliseconds))
         const nextToken = readToken(
           output.nextPollConfigurationToken,
         )
         const nextPollIntervalMilliseconds = secondsToMilliseconds(
-          readPollIntervalSeconds(
+          resolveProviderPollIntervalSeconds(
             output.nextPollIntervalInSeconds,
+            minimumPollIntervalSeconds,
           ),
         )
         configurationToken = nextToken
@@ -315,6 +333,25 @@ function readPollIntervalSeconds(
     throw new TypeError('AppConfig polling interval is invalid.')
   }
   return value
+}
+
+/**
+ * Resolves provider scheduling metadata without polling before the configured
+ * client-side minimum.
+ *
+ * @param value - Optional provider-directed duration in seconds.
+ * @param minimum - Validated client-side polling lower bound.
+ * @returns Safe provider duration clamped to the client lower bound.
+ */
+function resolveProviderPollIntervalSeconds(
+  value: number | undefined,
+  minimum: number,
+): number {
+  if (value === undefined) return minimum
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError('AppConfig polling interval is invalid.')
+  }
+  return Math.max(value, minimum)
 }
 
 /**

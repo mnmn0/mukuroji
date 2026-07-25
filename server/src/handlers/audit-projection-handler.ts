@@ -96,8 +96,9 @@ export function createAuditProjectionEntrypoint(
 /**
  * Runtime-control guarded outer AuditEvents projection entrypoint.
  *
- * The inner Connector projection intentionally remains unguarded because this
- * boundary must take one decision before any fan-out dependency is constructed.
+ * The inner collaboration, webhook, and connector projections intentionally
+ * remain unguarded because this boundary must take one decision before any
+ * fan-out dependency is constructed.
  *
  * @param event - DynamoDB stream batch.
  * @returns Merged partial-batch failures from every downstream projection.

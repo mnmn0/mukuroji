@@ -85,6 +85,22 @@ test('fails production startup configuration closed without throwing', async () 
     },
     {
       NODE_ENV: 'production',
+      MUKUROJI_RUNTIME_CONTROL_APPCONFIG_APPLICATION_ID: 'application',
+      MUKUROJI_RUNTIME_CONTROL_APPCONFIG_ENVIRONMENT_ID: 'environment',
+      MUKUROJI_RUNTIME_CONTROL_APPCONFIG_CONFIGURATION_PROFILE_ID: 'profile',
+      MUKUROJI_RUNTIME_CONTROL_SCOPE: 'api',
+      MUKUROJI_RUNTIME_CONTROL_MIN_POLL_INTERVAL_SECONDS: '',
+    },
+    {
+      NODE_ENV: 'production',
+      MUKUROJI_RUNTIME_CONTROL_APPCONFIG_APPLICATION_ID: 'application',
+      MUKUROJI_RUNTIME_CONTROL_APPCONFIG_ENVIRONMENT_ID: 'environment',
+      MUKUROJI_RUNTIME_CONTROL_APPCONFIG_CONFIGURATION_PROFILE_ID: 'profile',
+      MUKUROJI_RUNTIME_CONTROL_SCOPE: 'api',
+      MUKUROJI_RUNTIME_CONTROL_MAX_STALE_SECONDS: ' ',
+    },
+    {
+      NODE_ENV: 'production',
       MUKUROJI_RUNTIME_CONTROL_APPCONFIG_APPLICATION_ID:
         'application:wrong-control',
       MUKUROJI_RUNTIME_CONTROL_APPCONFIG_ENVIRONMENT_ID: 'environment',
@@ -142,6 +158,33 @@ test('derives observation identity from the exact AppConfig target', () => {
   expect(JSON.parse(records[0] ?? '{}')).toMatchObject({
     ControlId: 'application-a:profile-b',
     controlId: 'application-a:profile-b',
+  })
+})
+
+test('constructs a fail-closed observation recorder without AppConfig IDs', () => {
+  const originalWrite = console.log
+  const records: string[] = []
+  console.log = (record?: unknown) => {
+    if (typeof record === 'string') records.push(record)
+  }
+  try {
+    const record = createProductionRuntimeControlObservationRecorder({})
+    record({
+      observedAtMilliseconds: 1,
+      outcome: 'blocked',
+      snapshot: {
+        mode: 'disabled',
+        status: 'unavailable',
+      },
+      surface: 'api',
+    })
+  } finally {
+    console.log = originalWrite
+  }
+
+  expect(JSON.parse(records[0] ?? '{}')).toMatchObject({
+    ControlId: 'unconfigured',
+    ProviderFailureCount: 1,
   })
 })
 

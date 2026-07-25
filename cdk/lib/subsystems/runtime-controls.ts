@@ -87,6 +87,12 @@ const initialRuntimeControl = {
   schemaVersion: 1,
 };
 
+/** AppConfig polling lower bound injected into controlled runtimes, in seconds. */
+const runtimeControlMinimumPollIntervalSeconds = 15;
+
+/** Last-known-good staleness limit injected into controlled runtimes, in seconds. */
+const runtimeControlMaximumStalenessSeconds = 60;
+
 /**
  * Builds the retained AWS AppConfig control plane without adding a nested construct scope.
  *
@@ -157,12 +163,14 @@ export function buildRuntimeControls(
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     },
   );
+  configurationFailureAlarm.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
 
   const monitorRole = new iam.Role(scope, 'RuntimeControlAlarmMonitorRole', {
     assumedBy: new iam.ServicePrincipal('appconfig.amazonaws.com'),
     description:
       'Allows AWS AppConfig to observe runtime-control configuration failures.',
   });
+  monitorRole.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
   const monitorPolicy = new iam.Policy(
     scope,
     'RuntimeControlAlarmMonitorPolicy',
@@ -174,6 +182,7 @@ export function buildRuntimeControls(
       })],
     },
   );
+  monitorPolicy.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
 
   const alarmReadinessOnEventLogGroup = new logs.LogGroup(
     scope,
@@ -416,11 +425,11 @@ export function bindRuntimeControls(
   );
   targetFunction.addEnvironment(
     'MUKUROJI_RUNTIME_CONTROL_MIN_POLL_INTERVAL_SECONDS',
-    '15',
+    String(runtimeControlMinimumPollIntervalSeconds),
   );
   targetFunction.addEnvironment(
     'MUKUROJI_RUNTIME_CONTROL_MAX_STALE_SECONDS',
-    '60',
+    String(runtimeControlMaximumStalenessSeconds),
   );
   targetFunction.addEnvironment(
     'MUKUROJI_RUNTIME_CONTROL_SCOPE',

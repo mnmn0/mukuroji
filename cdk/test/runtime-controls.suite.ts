@@ -41,6 +41,45 @@ const runtimeControlPlaneFunctionIds = new Set([
   'RuntimeControlAlarmReadinessPollFunctionCD017060',
 ]);
 
+/**
+ * Narrows an unknown synthesized value to a string-keyed record.
+ *
+ * @param value Candidate synthesized value.
+ * @returns Whether the value is a non-array object.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Parses a Step Functions definition emitted as a CloudFormation Fn::Join.
+ *
+ * Intrinsic fragments are replaced with inert string placeholders so the
+ * surrounding Amazon States Language document can be asserted structurally.
+ *
+ * @param value Synthesized DefinitionString value.
+ * @returns Parsed Amazon States Language document.
+ */
+function parseJoinedStateMachineDefinition(value: unknown): unknown {
+  if (!isRecord(value)) {
+    throw new Error('State machine definition was not synthesized.');
+  }
+  const join = value['Fn::Join'];
+  if (
+    !Array.isArray(join) ||
+    join.length !== 2 ||
+    typeof join[0] !== 'string' ||
+    !Array.isArray(join[1])
+  ) {
+    throw new Error('State machine definition is not an Fn::Join.');
+  }
+  const serialized = join[1]
+    .map((fragment: unknown) =>
+      typeof fragment === 'string' ? fragment : 'TOKEN')
+    .join(join[0]);
+  return JSON.parse(serialized);
+}
+
 test('retains a validated hosted baseline and deploys it all at once', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
@@ -50,6 +89,9 @@ test('retains a validated hosted baseline and deploys it all at once', () => {
     'RuntimeControlConfigurationProfile',
     'RuntimeControlInitialConfiguration',
     'RuntimeControlCanaryDeploymentStrategy',
+    'RuntimeControlConfigurationFailureAlarm48E6159E',
+    'RuntimeControlAlarmMonitorRole5C5A5276',
+    'RuntimeControlAlarmMonitorPolicyBB68C59F',
   ];
 
   template.resourceCountIs('AWS::AppConfig::Application', 1);
@@ -342,8 +384,20 @@ test('waits read-only for a naturally OK actionable alarm before environment cre
       ),
   );
   expect(stateMachine).toBeDefined();
-  expect(JSON.stringify(stateMachine?.[1].Properties.DefinitionString))
-    .toContain('\\"IntervalSeconds\\":10,\\"MaxAttempts\\":90');
+  expect(parseJoinedStateMachineDefinition(
+    stateMachine?.[1].Properties.DefinitionString,
+  )).toMatchObject({
+    States: {
+      'framework-isComplete-task': {
+        Retry: [{
+          BackoffRate: 1,
+          ErrorEquals: ['States.ALL'],
+          IntervalSeconds: 10,
+          MaxAttempts: 90,
+        }],
+      },
+    },
+  });
 
   expect(
     resources

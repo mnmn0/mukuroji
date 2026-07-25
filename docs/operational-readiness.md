@@ -393,8 +393,8 @@ branch-wide required context にはせず、対象変更ごとの release eviden
 ### Dynamic runtime control
 
 CDK は retained な AWS AppConfig application、production environment、hosted configuration
-profile、JSON Schema validator、configuration failure alarm、operator 用 canary deployment
-strategy を作成します。初回stack作成ではread-only custom resourceが
+profile、JSON Schema validator、configuration failure alarm、alarm monitor role/policy、
+operator 用 canary deployment strategy を作成します。初回stack作成ではread-only custom resourceが
 `DescribeAlarms`だけを使い、alarmが自然に`OK`へ評価され`ActionsEnabled=true`になるまで
 AppConfig environment作成を待ちます。`SetAlarmState`で初期状態を偽装しません。Stack output の
 `RuntimeControlApplicationId`、`RuntimeControlEnvironmentId`、
@@ -500,14 +500,19 @@ durable retryしません。既存connectionは強制切断されず、blocked�
 snapshot は取得時刻から最大60秒だけ last-known-good として利用でき、それを超えてAppConfigを
 更新できない新規 invocation は fail-closed です。Cold start の設定不足、scope不一致、
 schema不正、取得失敗にも同じく domain operation / side effect を開始せず、固定された安全な
-失敗を返します。Valid な `disabled` version が runtime へ配布された後は次の
+失敗を返します。新しいsessionの開始と最初のpollは各3秒、warm sessionのpollは各1.5秒で
+client timeoutし、失敗時はone-use tokenを再利用せず次回に新しいsessionを開始します。
+Valid な `disabled` version が runtime へ配布された後は次の
 provider-approved poll で新規処理を拒否します。ただし canary deployment の20分 rollout と
 10分 bake はこの runtime-side interval の前段にあります。したがって absolute propagation
 bound は deployment strategy、provider が返した interval、最大60秒のstalenessをすべて含め、
 deployment 開始から全 runtime 停止までが15秒とは記録しません。
 
-各評価は secret-free な `runtime-control.evaluated` EMF record として、bounded な `surface`、
-`outcome`、`mode`、`status`、revision/ageを記録します。`ControlId`はruntimeがpollするのと同じ
+各 blocked/stale/invalid/unavailable 評価は secret-free な `runtime-control.evaluated` EMF
+record として必ず記録します。Current-enabled の allowed 評価はwarm runtime・surface・revision
+ごとに最大60秒間隔のheartbeatとして記録し、定常trafficに比例したlog取り込みを避けます。
+Recordはbounded な `surface`、`outcome`、`mode`、`status`、revision/ageを持ちます。
+`ControlId`はruntimeがpollするのと同じ
 AppConfig application IDとconfiguration profile IDから決定的に構成し、alarmも同じdimension
 だけを監視します。これにより別stackや同名stack再作成の直近metricを混在させません。
 `BlockedCount`、`DisabledCount`、`StaleCount`、`ProviderFailureCount`は停止とprovider劣化の
@@ -531,6 +536,18 @@ SQS workerは最大receive count到達後、stream workerはretry/bisect exhaust
 asynchronous schedule/emailは2回のretry後にfailure destination/DLQへ移ります。WebSocket
 integrationにはこのdurable retry契約がなく、client reconnectとsession expiryを別に確認します。
 長時間の停止ではretry budgetとsource retentionを先に評価し、DLQ alarmを抑制しません。
+
+SQS event source の現在の停止budgetは次のとおりです。値は連続して失敗し、各receive後に
+visibility timeoutを使い切る場合の`maxReceiveCount × visibility timeout`であり、無期限の
+kill switchを安全に吸収する保証ではありません。想定停止がbudgetへ近づく場合は、先に
+DLQ流入とredrive計画をincident recordへ固定します。
+
+| Surface | maxReceiveCount | Visibility timeout | Nominal budget | DLQ alarm |
+| --- | ---: | ---: | ---: | --- |
+| `webhook-delivery` | 5 | 3分 | 15分 | `WebhookDeliveryDlqAlarm` |
+| `connector-sync` | 5 | 30分 | 2時間30分 | `ConnectorSyncDlqAlarm` |
+| `work-item-import` | 5 | 90分 | 7時間30分 | `WorkItemImportDlqAlarm` |
+
 Re-enable後はsystem of record、idempotency key、checkpoint、partial-batch semanticsを確認し、
 上記「DLQ alarm の共通初動」に従ってowner承認後にredriveします。停止中のmessageを一括
 deleteしたり、terminal jobを盲目的にredriveしたりしません。

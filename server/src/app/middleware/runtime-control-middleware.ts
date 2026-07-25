@@ -6,8 +6,12 @@ import {
 import {
   runtimeControlAllowsExecution,
   type RuntimeControlProvider,
-  type RuntimeControlSnapshot,
 } from '../../infrastructure/runtime/runtime-control'
+import {
+  getSafeRuntimeControlSnapshot,
+  readRuntimeControlObservedAt,
+  recordRuntimeControlObservationSafely,
+} from '../composition/runtime-control-safety'
 import { readCanonicalCorrelationId } from './common-middleware'
 
 /**
@@ -60,10 +64,12 @@ export function registerRuntimeControlMiddleware(
       return await next()
     }
 
-    const snapshot = await getSafeSnapshot(dependencies.provider)
+    const snapshot = await getSafeRuntimeControlSnapshot(
+      dependencies.provider,
+    )
     const allowed = runtimeControlAllowsExecution(snapshot)
-    recordObservationSafely(recordObservation, {
-      observedAtMilliseconds: readObservedAt(now),
+    recordRuntimeControlObservationSafely(recordObservation, {
+      observedAtMilliseconds: readRuntimeControlObservedAt(now),
       outcome: allowed ? 'allowed' : 'blocked',
       snapshot,
       surface: 'api',
@@ -90,58 +96,4 @@ export function registerRuntimeControlMiddleware(
       'Content-Type': 'application/problem+json; charset=UTF-8',
     })
   })
-}
-
-/**
- * Converts an unexpected provider rejection into a disabled unavailable state.
- *
- * @param provider - API-scoped provider.
- * @returns Provider state or a redacted fail-closed substitute.
- */
-async function getSafeSnapshot(
-  provider: RuntimeControlProvider,
-): Promise<RuntimeControlSnapshot> {
-  try {
-    return await provider.getSnapshot()
-  } catch {
-    return Object.freeze({
-      mode: 'disabled',
-      status: 'unavailable',
-    })
-  }
-}
-
-/**
- * Emits safe decision telemetry without making observability authoritative.
- *
- * @param recorder - Observation destination.
- * @param observation - Bounded API decision.
- */
-function recordObservationSafely(
-  recorder: RuntimeControlObservationRecorder,
-  observation: Parameters<RuntimeControlObservationRecorder>[0],
-): void {
-  try {
-    recorder(observation)
-  } catch {
-    // Admission remains authoritative when telemetry is unavailable.
-  }
-}
-
-/**
- * Reads a bounded observation timestamp.
- *
- * @param now - Candidate timestamp source.
- * @returns Non-negative safe integer timestamp or zero.
- */
-function readObservedAt(now: () => number): number {
-  try {
-    const observedAtMilliseconds = now()
-    return Number.isSafeInteger(observedAtMilliseconds) &&
-      observedAtMilliseconds >= 0
-      ? observedAtMilliseconds
-      : 0
-  } catch {
-    return 0
-  }
 }
