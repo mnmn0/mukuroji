@@ -75,7 +75,7 @@ export const SAVED_VIEW_MAX_LIMIT = 100
 export type WorkspaceSearchDocument = {
   /** Search document schema version です。 */
   schemaVersion: typeof SEARCH_SCHEMA_VERSION
-  /** Canonical projection content bound to every application writer. */
+  /** すべての application writer が束縛する canonical projection 内容の digest です。 */
   projectionDigest: string
   /** DynamoDB partition key である canonical Workspace ID です。 */
   workspaceId: string
@@ -443,7 +443,10 @@ export function createSavedWorkspaceViewRecordKey(viewId: string) {
 }
 
 /**
- * Search document input を DynamoDB 保存形式へ正規化します。
+ * Normalizes one search document into its DynamoDB persistence shape.
+ *
+ * @param input - Untrusted projection fields supplied by an application writer.
+ * @returns A validated document with canonical keys and a server-owned digest.
  */
 export function createWorkspaceSearchDocument(
   input: Omit<
@@ -523,6 +526,9 @@ export function createWorkspaceSearchDocument(
 
 /**
  * Creates the server-owned digest used by migration and live-writer CAS checks.
+ *
+ * Increment `digestVersion` and update pinned digest fixtures whenever the
+ * canonicalization protocol changes.
  *
  * @param document - Fully normalized projection without its digest field.
  * @returns Lowercase SHA-256 digest of the versioned canonical projection.
