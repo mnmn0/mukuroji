@@ -4,6 +4,9 @@ import {
   createTestAppDependencies,
   overrideAppDependencies,
 } from './composition/api-dependencies'
+import type {
+  RuntimeControlSnapshot,
+} from '../infrastructure/runtime/runtime-control'
 import { createApp } from './createApp'
 
 test('binds concurrent app instances to independent immutable dependencies', async () => {
@@ -87,5 +90,171 @@ test('applies common CORS middleware around the mounted route inventory', async 
   } finally {
     if (originalAllowedOrigins === undefined) delete Bun.env.ALLOWED_ORIGINS
     else Bun.env.ALLOWED_ORIGINS = originalAllowedOrigins
+  }
+})
+
+test('keeps liveness independent from the runtime-control provider', async () => {
+  let providerCalls = 0
+  let readinessCalls = 0
+  const app = createApp(overrideAppDependencies(
+    createTestAppDependencies(),
+    {
+      readiness: {
+        async check() {
+          readinessCalls += 1
+          return { checks: [], ready: true }
+        },
+      },
+      runtimeControl: {
+        async getSnapshot() {
+          providerCalls += 1
+          throw new Error('runtime provider must not serve liveness')
+        },
+      },
+    },
+  ))
+
+  const response = await app.request('/api/health')
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    ok: true,
+    status: 'alive',
+  })
+  expect(providerCalls).toBe(0)
+  expect(readinessCalls).toBe(0)
+})
+
+test('fails readiness before dependency probes unless runtime control is current and enabled', async () => {
+  const blockedSnapshots: RuntimeControlSnapshot[] = [
+    {
+      mode: 'disabled',
+      revision: 1,
+      status: 'current',
+    },
+    {
+      ageMilliseconds: 1,
+      mode: 'enabled',
+      revision: 1,
+      status: 'stale',
+    },
+    {
+      mode: 'disabled',
+      status: 'unavailable',
+    },
+  ]
+
+  for (const snapshot of blockedSnapshots) {
+    let providerCalls = 0
+    let readinessCalls = 0
+    const app = createApp(overrideAppDependencies(
+      createTestAppDependencies(),
+      {
+        readiness: {
+          async check() {
+            readinessCalls += 1
+            return { checks: [], ready: true }
+          },
+        },
+        runtimeControl: {
+          async getSnapshot() {
+            providerCalls += 1
+            return snapshot
+          },
+        },
+      },
+    ))
+
+    const response = await app.request('/api/ready')
+
+    expect(response.status).toBe(503)
+    expect(await response.json()).toEqual({
+      ok: false,
+      status: 'not-ready',
+      checks: [{ name: 'runtime-control', ready: false }],
+    })
+    expect(providerCalls).toBe(1)
+    expect(readinessCalls).toBe(0)
+  }
+})
+
+test('runs dependency readiness after current enabled runtime admission', async () => {
+  let providerCalls = 0
+  let readinessCalls = 0
+  const app = createApp(overrideAppDependencies(
+    createTestAppDependencies(),
+    {
+      readiness: {
+        async check() {
+          readinessCalls += 1
+          return {
+            checks: [{ name: 'database', ready: true }],
+            ready: true,
+          }
+        },
+      },
+      runtimeControl: {
+        async getSnapshot() {
+          providerCalls += 1
+          return {
+            mode: 'enabled',
+            revision: 1,
+            status: 'current',
+          }
+        },
+      },
+    },
+  ))
+
+  const response = await app.request('/api/ready')
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    ok: true,
+    status: 'ready',
+    checks: [
+      { name: 'database', ready: true },
+      { name: 'runtime-control', ready: true },
+    ],
+  })
+  expect(providerCalls).toBe(1)
+  expect(readinessCalls).toBe(1)
+})
+
+test('never caches readiness across enabled and disabled control states', async () => {
+  let snapshot: RuntimeControlSnapshot = {
+    mode: 'enabled',
+    revision: 1,
+    status: 'current',
+  }
+  const app = createApp(overrideAppDependencies(
+    createTestAppDependencies(),
+    {
+      readiness: {
+        async check() {
+          return { checks: [], ready: true }
+        },
+      },
+      runtimeControl: {
+        async getSnapshot() {
+          return snapshot
+        },
+      },
+    },
+  ))
+
+  const readyResponse = await app.request('/api/ready')
+  snapshot = {
+    mode: 'disabled',
+    revision: 2,
+    status: 'current',
+  }
+  const blockedResponse = await app.request('/api/ready')
+
+  expect(readyResponse.status).toBe(200)
+  expect(blockedResponse.status).toBe(503)
+  for (const response of [readyResponse, blockedResponse]) {
+    expect(response.headers.get('Cache-Control')).toBe('private, no-store')
+    expect(response.headers.get('Pragma')).toBe('no-cache')
   }
 })

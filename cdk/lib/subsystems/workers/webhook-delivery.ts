@@ -11,6 +11,10 @@ import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
 import type { ApiRuntimeResources } from '../api-realtime';
 import type { DataStoreResources } from '../data-stores';
+import {
+  bindRuntimeControls,
+  type RuntimeControlResources,
+} from '../runtime-controls';
 import type { AuditProjectionWorkerResources } from './audit-projection';
 import type { WorkerChannels } from './channels';
 
@@ -28,6 +32,8 @@ export interface WebhookDeliveryWorkerInput {
   readonly lambdaBuildPaths: LambdaBuildPaths;
   /** Stack parameters used for Cognito authorization. */
   readonly parameters: StackParameters;
+  /** Dynamic operational controls shared by application runtimes. */
+  readonly runtimeControls: RuntimeControlResources;
   /** Durable Webhook delivery queue and dead-letter queue. */
   readonly workerChannels: WorkerChannels;
 }
@@ -254,6 +260,11 @@ export function buildWebhookDeliveryWorkers(
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
       },
     },
+  );
+  bindRuntimeControls(
+    input.runtimeControls,
+    webhookDeliveryFunction,
+    'webhook-delivery',
   );
   // First deploy the compatibility writer and dual-read consumers. The v3
   // resource drains old runtimes, backfills primary locators, cuts over,

@@ -22,6 +22,8 @@ const lambdaPaths = [
   'CollaborationProjectionFunction/Resource',
   'AutomationEventFunction/Resource',
   'AutomationScheduleFunction/Resource',
+  'RuntimeControlAlarmReadinessOnEventFunction/Resource',
+  'RuntimeControlAlarmReadinessPollFunction/Resource',
   'WebhookAuthorizationBackfillFunction/Resource',
   'WebhookAuthorizationBackfillProgressFunction/Resource',
   'WebhookDeliveryFunction/Resource',
@@ -39,6 +41,11 @@ const managedPolicyRolePaths = [
   'CollaborationProjectionFunction/ServiceRole/Resource',
   'AutomationEventFunction/ServiceRole/Resource',
   'AutomationScheduleFunction/ServiceRole/Resource',
+  'RuntimeControlAlarmReadinessOnEventFunction/ServiceRole/Resource',
+  'RuntimeControlAlarmReadinessPollFunction/ServiceRole/Resource',
+  'RuntimeControlAlarmReadinessProvider/framework-onEvent/ServiceRole/Resource',
+  'RuntimeControlAlarmReadinessProvider/framework-isComplete/ServiceRole/Resource',
+  'RuntimeControlAlarmReadinessProvider/framework-onTimeout/ServiceRole/Resource',
   'WebhookAuthorizationBackfillFunction/ServiceRole/Resource',
   'WebhookAuthorizationBackfillProgressFunction/ServiceRole/Resource',
   'WebhookAuthorizationBackfillProvider/framework-onEvent/ServiceRole/Resource',
@@ -63,6 +70,7 @@ const apiStagePaths = [
   'RealtimeWebSocketStage/Resource',
 ] as const;
 const waiterStateMachinePath = [
+  'RuntimeControlAlarmReadinessProvider/waiter-state-machine/Resource',
   'WebhookAuthorizationBackfillProvider/waiter-state-machine/Resource',
 ] as const;
 const iam5FindingScopePaths = new Map<string, readonly string[]>([
@@ -190,7 +198,33 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     [
       'CollaborationProjectionFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
+      'RuntimeControlAlarmReadinessPollFunction/ServiceRole/DefaultPolicy/Resource',
+      'RuntimeControlAlarmMonitorPolicy/Resource',
     ],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessOnEventFunctionA25C5A0C.Arn>:*]',
+    [
+      'RuntimeControlAlarmReadinessProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource',
+      'RuntimeControlAlarmReadinessProvider/framework-isComplete/ServiceRole/DefaultPolicy/Resource',
+      'RuntimeControlAlarmReadinessProvider/framework-onTimeout/ServiceRole/DefaultPolicy/Resource',
+    ],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessPollFunctionCD017060.Arn>:*]',
+    [
+      'RuntimeControlAlarmReadinessProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource',
+      'RuntimeControlAlarmReadinessProvider/framework-isComplete/ServiceRole/DefaultPolicy/Resource',
+      'RuntimeControlAlarmReadinessProvider/framework-onTimeout/ServiceRole/DefaultPolicy/Resource',
+    ],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessProviderframeworkisComplete30325ABD.Arn>:*]',
+    ['RuntimeControlAlarmReadinessProvider/waiter-state-machine/Role/DefaultPolicy/Resource'],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessProviderframeworkonTimeout38DF830E.Arn>:*]',
+    ['RuntimeControlAlarmReadinessProvider/waiter-state-machine/Role/DefaultPolicy/Resource'],
   ],
   [
     'AwsSolutions-IAM5[Resource::<WebhookAuthorizationBackfillFunction5ABBA705.Arn>:*]',
@@ -281,13 +315,17 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::<DeveloperPlatformTable772E085C.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:execute-api:<AWS::Region>:<AWS::AccountId>:<RealtimeWebSocketApiC99C6240>/production/*/@connections/*]',
     'AwsSolutions-IAM5[Resource::*]',
+    'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessOnEventFunctionA25C5A0C.Arn>:*]',
+    'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessPollFunctionCD017060.Arn>:*]',
+    'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessProviderframeworkisComplete30325ABD.Arn>:*]',
+    'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessProviderframeworkonTimeout38DF830E.Arn>:*]',
     'AwsSolutions-IAM5[Resource::<WebhookAuthorizationBackfillFunction5ABBA705.Arn>:*]',
     'AwsSolutions-IAM5[Resource::<WebhookAuthorizationBackfillProgressFunction1FF04FD2.Arn>:*]',
     'AwsSolutions-IAM5[Resource::<WebhookAuthorizationBackfillProviderframeworkisComplete0B745C37.Arn>:*]',
     'AwsSolutions-IAM5[Resource::<WebhookAuthorizationBackfillProviderframeworkonTimeoutB47F77F4.Arn>:*]',
   ].map((id) => ({
     id,
-    reason: 'The wildcard is constrained to the required S3 prefix, DynamoDB index, Secrets Manager namespace, API Gateway connection, GuardDuty rule, or CDK custom-resource provider resource.',
+    reason: 'The wildcard is constrained to the required S3 prefix, DynamoDB index, Secrets Manager namespace, API Gateway connection, GuardDuty rule, CDK custom-resource provider resource, or CloudWatch DescribeAlarms action required for AppConfig alarm monitoring.',
     scopePaths: iam5FindingScopePaths.get(id),
   })),
 ] as const;

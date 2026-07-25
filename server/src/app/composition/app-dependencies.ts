@@ -63,6 +63,12 @@ import type {
   ApiErrorObservation,
 } from '../../infrastructure/observability/api-observability'
 import type { ReadinessProbe } from '../../infrastructure/observability/readiness'
+import type {
+  RuntimeControlObservationRecorder,
+} from '../../infrastructure/observability/runtime-control-observability'
+import type {
+  RuntimeControlProvider,
+} from '../../infrastructure/runtime/runtime-control'
 
 /** DynamoDB transaction item shared only by adapters assembled at the API composition boundary. */
 type AutomationCompositionTransactionItem =
@@ -200,8 +206,12 @@ export interface DeveloperPlatformDependencies {
 
 /** Operational dependencies required by system routes. */
 export interface OperationalDependencies {
+  /** Records bounded runtime-control decisions and metrics. */
+  readonly recordRuntimeControl: RuntimeControlObservationRecorder
   /** Verifies the API's critical runtime dependencies. */
   readonly readiness: ReadinessProbe
+  /** Provides the API-scoped runtime admission state. */
+  readonly runtimeControl: RuntimeControlProvider
   /**
    * Emits one safe structured API completion record.
    *

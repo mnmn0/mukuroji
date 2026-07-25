@@ -30,6 +30,13 @@ import {
   recordApiError,
 } from '../../infrastructure/observability/api-observability'
 import { createDynamoDbReadinessProbe } from '../../infrastructure/observability/readiness'
+import {
+  createStaticRuntimeControlProvider,
+} from '../../infrastructure/runtime/runtime-control'
+import {
+  createProductionRuntimeControlProvider,
+  createProductionRuntimeControlObservationRecorder,
+} from './runtime-control'
 import { createCognitoClient } from '../../modules/authentication'
 import {
   DynamoDbDashboardSummaryClient,
@@ -392,9 +399,12 @@ export function createProductionDeveloperPlatformDependencies(): DeveloperPlatfo
  */
 export function createProductionOperationalDependencies(): OperationalDependencies {
   return {
+    recordRuntimeControl:
+      createProductionRuntimeControlObservationRecorder(),
     readiness: createDynamoDbReadinessProbe(),
     recordAccess: recordApiAccess,
     recordError: recordApiError,
+    runtimeControl: createProductionRuntimeControlProvider('api'),
   }
 }
 
@@ -405,6 +415,7 @@ export function createProductionOperationalDependencies(): OperationalDependenci
  */
 function createTestOperationalDependencies(): OperationalDependencies {
   return {
+    recordRuntimeControl() {},
     readiness: {
       async check() {
         return {
@@ -417,6 +428,7 @@ function createTestOperationalDependencies(): OperationalDependencies {
     },
     recordAccess() {},
     recordError() {},
+    runtimeControl: createStaticRuntimeControlProvider('enabled'),
   }
 }
 
@@ -547,11 +559,17 @@ export function overrideAppDependencies(
   return {
     operational: {
       ...dependencies.operational,
+      ...(overrides.recordRuntimeControl
+        ? { recordRuntimeControl: overrides.recordRuntimeControl }
+        : {}),
       ...(overrides.readiness ? { readiness: overrides.readiness } : {}),
       ...(overrides.recordAccess
         ? { recordAccess: overrides.recordAccess }
         : {}),
       ...(overrides.recordError ? { recordError: overrides.recordError } : {}),
+      ...(overrides.runtimeControl
+        ? { runtimeControl: overrides.runtimeControl }
+        : {}),
     },
     authentication: {
       ...dependencies.authentication,

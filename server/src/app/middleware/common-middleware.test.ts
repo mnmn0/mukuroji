@@ -34,7 +34,6 @@ function createTestMiddlewareDependencies(
     access,
     errors,
     dependencies: {
-      auditRejectedEnterpriseSecurityMutation: async (_context, next) => next(),
       createIdentifier() {
         const identifier = identifiers[identifierIndex]
         identifierIndex += 1

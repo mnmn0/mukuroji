@@ -9,9 +9,10 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(279)
+  expect(inventory).toHaveLength(280)
   expect(new Set(inventory).size).toBe(276)
+  expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    'ca2624b304dbe0182627cea81fc7c20b2aa2063187d1729936e9a5fc0a8fcc21',
+    '2cc159e9c00e29e223a6ebddf7fe1a672da0ff8ec8d9465b126cdf37acfbc095',
   )
 })

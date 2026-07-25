@@ -101,6 +101,14 @@ export type StackOutputResources = {
   readonly functionUrl: lambda.FunctionUrl;
   /** HTTP API Gateway endpoint for the project task API. */
   readonly httpApi: apigatewayv2.HttpApi;
+  /** AWS AppConfig application identifier for runtime controls. */
+  readonly applicationId: string;
+  /** AWS AppConfig environment identifier for runtime controls. */
+  readonly environmentId: string;
+  /** AWS AppConfig configuration profile identifier for runtime controls. */
+  readonly configurationProfileId: string;
+  /** AWS AppConfig canary deployment strategy identifier for operator changes. */
+  readonly canaryDeploymentStrategyId: string;
 };
 
 /**
@@ -266,5 +274,17 @@ export function buildStackOutputs(
   });
   new cdk.CfnOutput(scope, 'ProjectTasksApiGatewayUrl', {
     value: resources.httpApi.apiEndpoint,
+  });
+  new cdk.CfnOutput(scope, 'RuntimeControlApplicationId', {
+    value: resources.applicationId,
+  });
+  new cdk.CfnOutput(scope, 'RuntimeControlEnvironmentId', {
+    value: resources.environmentId,
+  });
+  new cdk.CfnOutput(scope, 'RuntimeControlConfigurationProfileId', {
+    value: resources.configurationProfileId,
+  });
+  new cdk.CfnOutput(scope, 'RuntimeControlCanaryDeploymentStrategyId', {
+    value: resources.canaryDeploymentStrategyId,
   });
 }

@@ -10,6 +10,10 @@ import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
 import type { DataStoreResources } from '../data-stores';
 import type { FileStorageResources } from '../file-storage';
+import {
+  bindRuntimeControls,
+  type RuntimeControlResources,
+} from '../runtime-controls';
 import type { WorkerChannels } from './channels';
 
 /**
@@ -24,6 +28,8 @@ export interface WorkItemImportWorkerInput {
   readonly lambdaBuildPaths: LambdaBuildPaths;
   /** Stack parameters used for authorization and audit behavior. */
   readonly parameters: StackParameters;
+  /** Dynamic operational controls shared by application runtimes. */
+  readonly runtimeControls: RuntimeControlResources;
   /** Durable import queue and dead-letter queue. */
   readonly workerChannels: WorkerChannels;
 }
@@ -118,6 +124,11 @@ export function buildWorkItemImportWorker(
         WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
       },
     },
+  );
+  bindRuntimeControls(
+    input.runtimeControls,
+    workItemImportFunction,
+    'work-item-import',
   );
   workItemImportFunction.addEventSource(
     new lambdaEventSources.SqsEventSource(workItemImportQueue, {

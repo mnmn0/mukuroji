@@ -19,11 +19,11 @@ test('enterprise identity CONTROL stream runs bounded asynchronous maintenance',
   const [functionLogicalId, maintenanceFunction] = functionEntry!;
   expect(maintenanceFunction).toEqual(expect.objectContaining({
     Properties: expect.objectContaining({
-      Environment: {
-        Variables: {
+      Environment: expect.objectContaining({
+        Variables: expect.objectContaining({
           ENTERPRISE_IDENTITY_TABLE_NAME: { Ref: tableLogicalId },
-        },
-      },
+        }),
+      }),
       MemorySize: 1024,
       Timeout: 900,
     }),
@@ -1933,7 +1933,7 @@ test('application Lambdas emit active X-Ray traces and critical DLQs survive rep
 
   template.resourcePropertiesCountIs('AWS::Lambda::Function', {
     TracingConfig: { Mode: 'Active' },
-  }, 16);
+  }, 18);
 
   for (const logicalIdPrefix of [
     'CollaborationProjectionDlq',
@@ -1981,13 +1981,13 @@ test('request email ingestion is an asynchronous narrow-IAM Lambda with a monito
       MemorySize: 512,
       Runtime: 'nodejs22.x',
       Timeout: 30,
-      Environment: {
-        Variables: {
+      Environment: expect.objectContaining({
+        Variables: expect.objectContaining({
           REQUEST_EMAIL_WEBHOOK_SECRET: { Ref: 'RequestEmailWebhookSecret' },
           REQUEST_INTAKE_TABLE_NAME: expect.anything(),
           REQUEST_TOKEN_HASH_SECRET: { Ref: 'RequestTokenHashSecret' },
-        },
-      },
+        }),
+      }),
     }),
   }));
 

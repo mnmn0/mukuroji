@@ -11,6 +11,10 @@ import * as sqs from 'aws-cdk-lib/aws-sqs';
 import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
 import type { DataStoreResources } from '../data-stores';
+import {
+  bindRuntimeControls,
+  type RuntimeControlResources,
+} from '../runtime-controls';
 
 /**
  * Inputs required by analytics and notification schedule workers.
@@ -22,6 +26,8 @@ export interface ScheduleWorkerInput {
   readonly lambdaBuildPaths: LambdaBuildPaths;
   /** Stack parameters used for authorization and retention. */
   readonly parameters: StackParameters;
+  /** Dynamic operational controls shared by application runtimes. */
+  readonly runtimeControls: RuntimeControlResources;
 }
 
 /**
@@ -101,6 +107,11 @@ export function buildScheduleWorkers(
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
       },
     },
+  );
+  bindRuntimeControls(
+    input.runtimeControls,
+    analyticsScheduleFunction,
+    'analytics-schedule',
   );
   analyticsScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:GetItem', 'dynamodb:PutItem'],
@@ -196,6 +207,11 @@ export function buildScheduleWorkers(
         WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
       },
     },
+  );
+  bindRuntimeControls(
+    input.runtimeControls,
+    notificationScheduleFunction,
+    'notification-schedule',
   );
   workItemsTable.grants.readData(notificationScheduleFunction);
   auditEventsTable.grants.writeData(notificationScheduleFunction);

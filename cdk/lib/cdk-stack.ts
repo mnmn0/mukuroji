@@ -17,6 +17,7 @@ import {
   configureFileStorageApiBoundary,
 } from './subsystems/file-storage';
 import { buildStackOutputs } from './subsystems/outputs';
+import { buildRuntimeControls } from './subsystems/runtime-controls';
 import { buildAuditProjectionWorker } from './subsystems/workers/audit-projection';
 import { buildAutomationWorkers } from './subsystems/workers/automation';
 import { buildWorkerChannels } from './subsystems/workers/channels';
@@ -43,6 +44,7 @@ export class CdkStack extends cdk.Stack {
 
     const lambdaBuildPaths = buildLambdaBuildPaths();
     const parameters = buildStackParameters(this);
+    const runtimeControls = buildRuntimeControls(this, { lambdaBuildPaths });
     const dataStores = buildDataStores(this, {
       connectorRuntimeConfiguration: parameters.connectorRuntimeConfiguration,
     });
@@ -61,6 +63,7 @@ export class CdkStack extends cdk.Stack {
       fileStorage,
       lambdaBuildPaths,
       parameters,
+      runtimeControls,
       workerChannels,
     });
     configureFileStorageApiBoundary(fileStorage, apiRuntime.apiFunction);
@@ -69,12 +72,14 @@ export class CdkStack extends cdk.Stack {
       dataStores,
       lambdaBuildPaths,
       parameters,
+      runtimeControls,
     });
     buildWorkItemImportWorker(this, {
       dataStores,
       fileStorage,
       lambdaBuildPaths,
       parameters,
+      runtimeControls,
       workerChannels,
     });
 
@@ -83,6 +88,7 @@ export class CdkStack extends cdk.Stack {
       dataStores,
       lambdaBuildPaths,
       parameters,
+      runtimeControls,
     });
     const auditProjection = buildAuditProjectionWorker(this, {
       dataStores,
@@ -90,6 +96,7 @@ export class CdkStack extends cdk.Stack {
       lambdaBuildPaths,
       parameters,
       realtimeWebSocketStage: apiTransports.realtimeWebSocketStage,
+      runtimeControls,
       workerChannels,
     });
     const automationWorkers = buildAutomationWorkers(this, {
@@ -97,6 +104,7 @@ export class CdkStack extends cdk.Stack {
       fileStorage,
       lambdaBuildPaths,
       parameters,
+      runtimeControls,
     });
     buildWebhookDeliveryWorkers(this, {
       apiRuntime,
@@ -104,23 +112,27 @@ export class CdkStack extends cdk.Stack {
       dataStores,
       lambdaBuildPaths,
       parameters,
+      runtimeControls,
       workerChannels,
     });
     buildConnectorWorkers(this, {
       dataStores,
       lambdaBuildPaths,
       parameters,
+      runtimeControls,
       workerChannels,
     });
     const scheduleWorkers = buildScheduleWorkers(this, {
       dataStores,
       lambdaBuildPaths,
       parameters,
+      runtimeControls,
     });
     const requestEmailWorker = buildRequestEmailWorker(this, {
       dataStores,
       lambdaBuildPaths,
       parameters,
+      runtimeControls,
     });
 
     configureAlarmRouting(this, {
@@ -140,6 +152,7 @@ export class CdkStack extends cdk.Stack {
       ...automationWorkers,
       ...scheduleWorkers,
       ...requestEmailWorker,
+      ...runtimeControls,
       workspaceDirectoryId: parameters.workspaceDirectoryId,
     });
   }

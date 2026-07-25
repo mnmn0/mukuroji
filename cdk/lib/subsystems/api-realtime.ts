@@ -12,6 +12,10 @@ import {
 import type { StackParameters } from '../config/stack-parameters';
 import type { DataStoreResources } from './data-stores';
 import type { FileStorageResources } from './file-storage';
+import {
+  bindRuntimeControls,
+  type RuntimeControlResources,
+} from './runtime-controls';
 import type { WorkerChannels } from './workers/channels';
 
 /**
@@ -26,6 +30,8 @@ export interface ApiRuntimeInput {
   readonly lambdaBuildPaths: LambdaBuildPaths;
   /** Stack parameters and derived security configuration. */
   readonly parameters: StackParameters;
+  /** Dynamic operational controls shared by application runtimes. */
+  readonly runtimeControls: RuntimeControlResources;
   /** Durable queues targeted by API mutations. */
   readonly workerChannels: WorkerChannels;
 }
@@ -50,6 +56,8 @@ export interface ApiTransportsAndRealtimeInput {
   readonly lambdaBuildPaths: LambdaBuildPaths;
   /** Stack parameters and derived transport configuration. */
   readonly parameters: StackParameters;
+  /** Dynamic operational controls shared by application runtimes. */
+  readonly runtimeControls: RuntimeControlResources;
 }
 
 /**
@@ -265,6 +273,7 @@ export function buildApiRuntime(
       },
     },
   );
+  bindRuntimeControls(input.runtimeControls, apiFunction, 'api');
 
   legacyTasksTable.grants.readData(apiFunction);
   workItemsTable.grants.readWriteData(apiFunction);
@@ -812,6 +821,7 @@ export function buildApiTransportsAndRealtime(
       },
     },
   );
+  bindRuntimeControls(input.runtimeControls, realtimeFunction, 'realtime');
   const realtimeIntegration = new apigatewayv2Integrations.WebSocketLambdaIntegration(
     'RealtimeLambdaIntegration',
     realtimeFunction,

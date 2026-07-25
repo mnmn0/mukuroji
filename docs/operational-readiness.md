@@ -11,12 +11,12 @@ repository に固定せず、各実行の evidence record に残します。
 | --- | --- | --- |
 | Request correlation | `/api/*` で client header を信頼せず server が correlation/request ID を生成し、内部 route、response、CORS exposed header へ渡す | 信頼済み service 間で parent correlation を継承する認証済み protocol は未実装 |
 | API log / metric | Secret-safe な JSON completion/error log と CloudWatch EMF `Mukuroji/API` を出力する | Log retention、dashboard、30日 SLO 集計を environment owner が有効化すること |
-| Health | `/api/health` の liveness と `/api/ready` の DynamoDB readiness を分離する | Trusted probe と edge-level throttle を設定し、readiness の `503` を rollout 停止へ接続すること |
-| Trace | CDK が管理する全16個の Node.js Lambda で X-Ray active tracing を有効にし、API log に runtime-controlled invocation ID と X-Ray root trace ID を記録する | Correlation ID 自体の X-Ray annotation は未実装 |
-| Alarm | API、queue、DLQ、async destination の23 metric alarmと1 composite alarmを定義し、同一account/regionの必須primary/secondary SNS topicへ全alarm actionを接続する。Fast-burn component 2件はnotification無効 | SNS subscription、Incident Manager、rosterは環境側の責務。Compositeを含む通知有効な22件のtest evidenceを確認するまで unattended production とみなさないこと |
+| Health | `/api/health` の liveness と、current-enabled runtime controlを先に確認してからDynamoDBを検証する `/api/ready` を分離し、readiness responseを`no-store`にする | Trusted probe と edge-level throttle を設定し、readiness の `503` を rollout 停止へ接続すること |
+| Trace | CDK が管理する全18個の Node.js Lambda で X-Ray active tracing を有効にし、API log に runtime-controlled invocation ID と X-Ray root trace ID を記録する | Correlation ID 自体の X-Ray annotation は未実装 |
+| Alarm | API、queue、DLQ、async destination、runtime control の24 metric alarmと1 composite alarmを定義し、同一account/regionの必須primary/secondary SNS topicへ全alarm actionを接続する。Fast-burn component 2件はnotification無効 | SNS subscription、Incident Manager、rosterは環境側の責務。Compositeを含む通知有効な23件のtest evidenceを確認するまで unattended production とみなさないこと |
 | Release | PR/push workflow が Server test を含む全 source/build config の strict typecheck、static analysis、unit/integration、Web E2E、CDK test/nag/synth を実行し、main ruleset が6つの必須 check を強制する | Path-filtered local runtime と外部 reviewer は常時 required にせず、対象変更ごとの release evidence で結果または rate limit を確認すること |
 | Web journey quality | Required Playwright gate が主要 Work Item 画面の keyboard/focus、390px viewport、screen-reader-facing ARIA tree、低速 API 中の status と復帰を検証する | Chromium と mock API による回帰 proxy であり、実 screen reader、visual regression、performance budget は未実装 |
-| Rollout | Backward-compatible CDK/Lambda update と CloudFormation rollback を利用できる | Lambda alias、CodeDeploy canary、一般的な feature flag / kill switch は未実装。段階 rollout が必要な変更は gate を満たさない |
+| Runtime control / rollout | AWS AppConfig の schema 検証済み `enabled` / `disabled` document を API、WebSocket、worker の entrypoint で fail-closed に評価し、operator 用 canary strategy と configuration failure alarm を定義する。Backward-compatible CDK/Lambda update と CloudFormation rollback も利用できる | `read-only` mode、route/effect registry、Lambda alias、CodeDeploy による code canary は未実装。AppConfig の停止制御を code/schema rollout の互換性検証や writer fence の代用にしないこと |
 | Migration | Production-safe migration contract と entry/verification/rollback evidence を定義する | Workspace Search backfill は online fence、lease、lossless journal、完全検証、rollback を未実装。production gate には使用しないこと |
 | Data durability | Stateful DynamoDB table は `Retain` + PITR、file bucket は `Retain` + versioning を使う。Work Items には read-only の manifest/compare verifier がある | Restore、writer fence、定期実行、regional replication/failover、AWS Backup plan は未実装。verifier の導入だけで drill や regional DR を完了扱いにしないこと |
 
@@ -139,31 +139,35 @@ maintenance を除外する場合も、開始前に承認された期間、理�
 依存先を確認せず、traffic を受けられる証明には使いません。Process restart probe は
 `/api/health`、rollout と traffic admission は `/api/ready` を使います。
 
-`GET /api/ready` は Work Items、Workspace Access、Audit Events の3 table を
-`DescribeTable` で検証します。各 call の timeout は1.5秒、結果 cache は30秒です。Table と
-設定済み GSI がすべて `ACTIVE` である場合だけ成功とし、設定不足、non-active status、timeout、
-AWS error のいずれも fail-closed で safe name だけを返します。
+`GET /api/ready` は同じ API-scoped runtime control が currentかつ`enabled`かを最初に確認します。
+Control が disabled/stale/unavailable の場合は DynamoDB を呼ばず、`runtime-control` check だけを
+返します。Control が ready の場合だけ Work Items、Workspace Access、Audit Events の3 tableを
+`DescribeTable` で検証します。各 DynamoDB call の timeout は1.5秒、結果 cache は30秒です。
+Table と設定済み GSI がすべて `ACTIVE` の場合だけ成功とし、設定不足、non-active status、
+timeout、AWS error のいずれも fail-closed で safe name だけを返します。
 
 ```json
 {
   "ok": false,
   "status": "not-ready",
   "checks": [
-    {"name":"work-items","ready":true},
-    {"name":"workspace-access","ready":false},
-    {"name":"audit-events","ready":true}
+    {"name":"runtime-control","ready":false}
   ]
 }
 ```
 
-全 check が成功したときだけ `200`、それ以外は `503` です。Physical table name や AWS error
-は response に出しません。Readiness `503` が2回連続した rollout は停止し、5分継続または
-複数 AZ/client で再現した場合は SEV2、全 request が失敗する場合は SEV1 へ上げます。
+Control が ready で dependency が失敗した場合は3つのtable checkと
+`{"name":"runtime-control","ready":true}`を返します。全 check が成功したときだけ `200`、
+それ以外は `503` です。Physical table name や AWS error は response に出しません。
+`200`/`503`のどちらにも`Cache-Control: private, no-store`と`Pragma: no-cache`を付与します。
+Readiness `503` が2回連続した rollout は停止し、5分継続または複数 AZ/client で再現した場合は
+SEV2、全 request が失敗する場合は SEV1 へ上げます。
 
-30秒 cache と同一 runtime 内の request coalescing は DynamoDB control-plane call を抑えますが、
-scale-out をまたぐ abuse 防止にはなりません。Production では API edge/WAF で `/api/ready` を
-trusted monitor に制限するか専用 rate limit を設定し、その制御を確認するまで public traffic へ
-無制限に公開しません。
+DynamoDB probe の30秒 cache と同一 runtime 内の request coalescing は control-plane call を
+抑えますが、scale-out をまたぐ abuse 防止にはなりません。Runtime control の
+required-minimum/provider-directed poll と60秒のstaleness契約は後述します。Production では
+API edge/WAF で `/api/ready` を trusted monitor に制限するか専用 rate limit を設定し、その
+制御を確認するまで public traffic へ無制限に公開しません。
 
 ## Correlation と structured evidence
 
@@ -256,6 +260,7 @@ Alarm 名は CloudFormation の physical name ではなく CDK construct ID で�
 | `ApiAvailabilityFastBurnOneHourAlarm` | eligible error ratio `>= 0.0144`（burn rate 14.4）/ 1時間 | component、notification無効 | 1時間windowのeligible bad/totalとcompletion log |
 | `ApiAvailabilityFastBurnAlarm` | 5分・1時間componentが同時に`ALARM` | SEV1 | 両componentのstate history、eligible bad/total、直前deploy/migration |
 | `ApiGatewayServerErrorAlarm` | HTTP API `5xx Sum >= 1` / 5分 | SEV2 | Stage/integration、UTC window。Lambda 到達時は API log、到達前 failure は correlation が unknown |
+| `RuntimeControlConfigurationFailureAlarm` | target固有`ControlId`の`ConfigurationFailureCount Sum >= 1` / 5分 | SEV2 | `runtime-control.evaluated` の ControlId、surface、status、revision、deployment number。Configuration 本文は記録しない |
 | `CollaborationProjectionDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | Audit stream record の directory/event ID、correlation、actor/entity/target |
 | `AutomationEventDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | Audit outbox stream record の directory/event ID と automation rule/execution locator |
 | `AutomationScheduleDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | Async destination envelope の invocation time、recurring definition/execution locator |
@@ -287,16 +292,16 @@ DLQ alarm の共通初動は次です。
 6. Queue が空、system of record が期待状態、重複 side effect がないことを確認して閉じる。
 
 CDK deploy は、異なる既存standard SNS topic名を `AlarmPrimaryTopicName` と
-`AlarmSecondaryTopicName` に必須指定し、同一account/regionのARNへ変換して全24 alarmの
+`AlarmSecondaryTopicName` に必須指定し、同一account/regionのARNへ変換して全25 alarmの
 `AlarmActions`へ設定します。Stackはtopic、subscription、Incident Manager、rosterを所有しません。
-Fast-burn component 2件は`ActionsEnabled=false`で、残る21 metric alarmと1 composite alarmの
+Fast-burn component 2件は`ActionsEnabled=false`で、残る22 metric alarmと1 composite alarmの
 遷移が両topicへ同時通知されます。Ack target未達時の段階escalationはsubscription先が管理します。
 Topic policyは`cloudwatch.amazonaws.com`の`sns:Publish`を同一account/regionのalarm ARNと
 SourceAccountで制限して許可します。SSEを使う場合はcustomer-managed KMS keyにも同principalの
 `kms:GenerateDataKey*`/`kms:Decrypt`と同じconfused-deputy条件を設定します。Operatorによる直接
 SNS publishだけをdelivery evidenceにせず、controlled CloudWatch alarmの実state transition、
 alarm history、両subscription receipt、OK復帰まで確認します。
-全24 alarmのARN、primary/secondary destination、subscription/roster revision、通知有効な22件の
+全25 alarmのARN、primary/secondary destination、subscription/roster revision、通知有効な23件の
 test notificationとfast-burn両component/compositeのstate history、UTC timestamp、受信者を
 environment evidenceに残すまで、上記ack targetは実効性を持ちません。
 
@@ -326,8 +331,10 @@ rollback evidence を取得するまでは dry-run と maintenance-window 内の
 7. Verify と rollback の command、停止条件、最大実行時間、data/application owner を incident
    または change record に記載する。
 
-一般的な maintenance read-only mode / global kill switch は未実装です。Writer 停止を確認できない
-production migration は開始しません。
+Runtime control には対象の API/WebSocket/worker entrypoint を止める `disabled` mode が
+ありますが、maintenance `read-only` mode と、mutation だけを網羅的に分類する route/effect
+registry は未実装です。`disabled` の反映と実測上の writer 停止を確認できない production
+migration は開始しません。
 
 ### Required verification and rollback semantics
 
@@ -383,6 +390,151 @@ job/context 名を変更する場合は ruleset も同じ release で更新し�
 branch-wide required context にはせず、対象変更ごとの release evidence に結果または rate limit
 を記録します。
 
+### Dynamic runtime control
+
+CDK は retained な AWS AppConfig application、production environment、hosted configuration
+profile、JSON Schema validator、configuration failure alarm、operator 用 canary deployment
+strategy を作成します。初回stack作成ではread-only custom resourceが
+`DescribeAlarms`だけを使い、alarmが自然に`OK`へ評価され`ActionsEnabled=true`になるまで
+AppConfig environment作成を待ちます。`SetAlarmState`で初期状態を偽装しません。Stack output の
+`RuntimeControlApplicationId`、`RuntimeControlEnvironmentId`、
+`RuntimeControlConfigurationProfileId`、
+`RuntimeControlCanaryDeploymentStrategyId` は stack/account/region と結び付けて change
+evidence に保存し、別 stack や手入力の名前から ID を推測しません。Configuration は secret を
+含まない次の strict schema だけを受け付けます。
+
+```json
+{
+  "schemaVersion": 1,
+  "mode": "disabled",
+  "revision": 2
+}
+```
+
+`schemaVersion` は `1`、`mode` は `enabled` または `disabled`、`revision` は1以上の整数です。
+追加 property は validator が拒否します。Revision はoperator evidenceの監査sequenceであり、
+runtimeのdurable fenceではありません。通常変更ではdeploymentごとに増加させ、同じrevisionの
+異なる内容を再利用しませんが、AppConfigが配布したvalidなrollback documentはrevisionの大小に
+かかわらずauthoritativeです。現行 document は global control であり、surfaceごとの mode、
+maintenance `read-only`、mutation を列挙する route/effect registry は未実装です。
+
+Control は API Lambda、WebSocket Lambda と、Audit projection の outer fan-out、Automation
+event/schedule、Connector sync/poll、Enterprise SCIM group/identity maintenance、
+Analytics/Notification schedule、Request Intake email、Webhook delivery、Work Item import の
+entrypoint で domain operation / side effect より前に評価します。Audit fan-out の composition
+自体も outer guard の後まで遅延し、内部の Connector projection は同じ判断を重複させません。
+`webhook-authorization-backfill-handler.ts` の `handler` と `isCompleteHandler` は
+CloudFormation rollback/recovery の deadlock を避けるため対象外です。これら migration
+function、runtime-control alarm readinessの2 function、CDK/CloudFormation Provider function、
+repository の operator script は、`disabled` でも停止しません。
+
+`/api/health` と CORS preflight は control-plane 障害時にも liveness/transport を観測できるよう
+guard を通しません。`/api/ready` は通常 API より厳しく、bounded-stale な `enabled` snapshot
+でも `503 not-ready` とし、controlがreadyでなければDynamoDB probeを開始しません。
+Readiness responseは常に`private, no-store`です。それ以外の `/api/*` は current または60秒以内の
+stale `enabled` だけを許可し、blocked 時は authentication、rejection audit、route処理より前に
+secret-free な `503 application/problem+json` と `Retry-After: 15` を返します。Worker は同じ
+状態で固定された `RuntimeControlBlockedError` をthrowし、各event sourceの既存retry契約へ
+戻します。WebSocket Lambdaもintegration failureを返しますが、API GatewayはLambda invocationを
+durable retryしません。既存connectionは強制切断されず、blocked中の`$disconnect` cleanupは
+実行されない場合があるため、logical expiryとDynamoDB TTLに委ねます。
+
+通常の operator update は次の順序で行います。
+
+1. Change/incident record に stack、account、region、4つの output、現在の document/revision、
+   変更理由、owner、想定時間、re-enable 条件、worker replay owner を保存する。
+2. 上記 schema の JSON を access-controlled な作業領域に作り、revision と mode を別の reviewer
+   が確認する。Document に credential、tenant ID、URL、自由記述の incident detail を入れない。
+3. Stackが所有する`RuntimeControlConfigurationFailureAlarm`のphysical nameを取得し、
+   `describe-alarms`の結果がexact 1件、`StateValue=OK`かつ`ActionsEnabled=true`であることを
+   deployment直前に確認する。Missing dataを`notBreaching`として得た`OK`だけではruntimeが
+   candidateを取得した証拠にならないため、stateとtelemetryを別々に保存する。
+
+   ```sh
+   aws cloudwatch describe-alarms \
+     --alarm-names 'PHYSICAL_ALARM_NAME_FROM_TARGET_STACK'
+   ```
+
+   初回stack作成ではalarm readiness custom resourceが同じ条件を最大15分待ちます。
+   `INSUFFICIENT_DATA`から自然な`OK`へのstate history、actions有効、custom resource成功を
+   bootstrap evidenceとして保存します。
+4. Hosted configuration version を作成し、返された `VersionNumber` を記録する。
+
+   ```sh
+   aws appconfig create-hosted-configuration-version \
+     --application-id 'APPLICATION_ID_FROM_STACK_OUTPUT' \
+     --configuration-profile-id 'PROFILE_ID_FROM_STACK_OUTPUT' \
+     --content-type 'application/json' \
+     --content 'fileb://runtime-control.json'
+   ```
+
+5. 通常変更は stack output の canary strategy で deployment を開始し、返された
+   `DeploymentNumber` を記録する。
+
+   ```sh
+   aws appconfig start-deployment \
+     --application-id 'APPLICATION_ID_FROM_STACK_OUTPUT' \
+     --environment-id 'ENVIRONMENT_ID_FROM_STACK_OUTPUT' \
+     --configuration-profile-id 'PROFILE_ID_FROM_STACK_OUTPUT' \
+     --configuration-version 'HOSTED_VERSION_NUMBER' \
+     --deployment-strategy-id 'CANARY_STRATEGY_ID_FROM_STACK_OUTPUT'
+   ```
+
+6. 20分のexponential rolloutと10分のbakeの各phaseでtrusted `/api/ready`と承認済みの
+   representative trafficを発生させ、対象revisionとtarget由来`ControlId`を持つfresh
+   `runtime-control.evaluated` recordをcritical surfaceごとに確認する。`get-deployment`で
+   `COMPLETE`/`ROLLED_BACK`、alarm state、開始/終了UTCも保存する。Alarmが`OK`でも対象revisionの
+   fresh recordがない、`ActionsEnabled=false`、deploymentが`BAKING`から進まない、または
+   想定外のsurfaceだけが動く場合は成功扱いにしない。
+7. Incident commander が即時停止を必要と判断した場合だけ、canary strategy の代わりに
+   `AppConfig.AllAtOnce` を明示して emergency deployment を行う。段階配布を省略した理由と
+   blast radius を record に残し、同じ post-check を省略しない。
+8. Recoveryは監査上、通常は`mode: "enabled"`とさらに大きいrevisionの新規hosted versionを
+   作成してdeployする。ただしruntimeはrevision fenceを持たず、AppConfigが配布したvalidな
+   既存versionへのrollbackもauthoritativeとして受理する。Trafficとworkerを一度に戻せない場合、
+   このglobal controlで段階化できると仮定せず、event source/rule側の明示的な制御計画を用意する。
+
+各 runtime は有効な snapshot を cache し、AppConfig session に15秒を required minimum として
+要求します。実際の次回確認は `GetLatestConfiguration` が返す `NextPollInterval` と15秒の
+遅い方で行い、provider 指示を無視して早く token を再利用しません。最後に取得した `enabled`
+snapshot は取得時刻から最大60秒だけ last-known-good として利用でき、それを超えてAppConfigを
+更新できない新規 invocation は fail-closed です。Cold start の設定不足、scope不一致、
+schema不正、取得失敗にも同じく domain operation / side effect を開始せず、固定された安全な
+失敗を返します。Valid な `disabled` version が runtime へ配布された後は次の
+provider-approved poll で新規処理を拒否します。ただし canary deployment の20分 rollout と
+10分 bake はこの runtime-side interval の前段にあります。したがって absolute propagation
+bound は deployment strategy、provider が返した interval、最大60秒のstalenessをすべて含め、
+deployment 開始から全 runtime 停止までが15秒とは記録しません。
+
+各評価は secret-free な `runtime-control.evaluated` EMF record として、bounded な `surface`、
+`outcome`、`mode`、`status`、revision/ageを記録します。`ControlId`はruntimeがpollするのと同じ
+AppConfig application IDとconfiguration profile IDから決定的に構成し、alarmも同じdimension
+だけを監視します。これにより別stackや同名stack再作成の直近metricを混在させません。
+`BlockedCount`、`DisabledCount`、`StaleCount`、`ProviderFailureCount`は停止とprovider劣化の
+調査に使い、`ConfigurationFailureCount`はruntime parserが拒否したinvalid documentだけを
+数えます。Revisionはrecordへ残す監査metadataであり、valid provider payloadの採用可否を
+process-local比較で決めません。Document本文やprovider error messageはlog、metric、alarm
+evidenceに含めません。Hosted profileのJSON Schemaは通常invalid versionをdeployment前に
+拒否するため、このalarmはdefense-in-depthです。Missing metricを`OK`扱いするalarmだけで
+candidate取得成功を証明せず、前述のfresh evaluation evidenceを必須にします。
+
+Guard はすでに開始した invocation を中断しません。したがって最後の `enabled` admission 後に
+side effect が継続する時間は handler の残り実行時間で決まり、構成上の hard upper bound は
+Lambda timeout の最大15分です。停止確認では deployment state だけでなく、少なくとも
+「最後の version 配布 + provider 指示の poll interval + 60秒 + 対象 Lambda の timeout」を
+越えた観測 window で mutation、queue drain、stream checkpoint、outbound delivery が
+増えていないことを確認します。
+
+`disabled` は EventBridge rule、DynamoDB stream mapping、SQS mapping、API Gateway 自体を
+無効化しません。拒否されたworker invocationはsourceごとの既存policyに従ってretryされ、
+SQS workerは最大receive count到達後、stream workerはretry/bisect exhaustion後、
+asynchronous schedule/emailは2回のretry後にfailure destination/DLQへ移ります。WebSocket
+integrationにはこのdurable retry契約がなく、client reconnectとsession expiryを別に確認します。
+長時間の停止ではretry budgetとsource retentionを先に評価し、DLQ alarmを抑制しません。
+Re-enable後はsystem of record、idempotency key、checkpoint、partial-batch semanticsを確認し、
+上記「DLQ alarm の共通初動」に従ってowner承認後にredriveします。停止中のmessageを一括
+deleteしたり、terminal jobを盲目的にredriveしたりしません。
+
 ### Public API contract trust root
 
 Public API compatibility gate は、権限を持たない `pull_request` signal の完了後に default
@@ -417,7 +569,8 @@ Trust root の candidate OID は base と一致しない限り失敗します。
    rules、protected environment、after JSON を保存してから merge 停止を解除する。失敗時は
    旧 trust root へ戻し、context を外した状態で通常変更を merge しない。
 
-Lambda alias/weighted routing/CodeDeploy canary と一般的な kill switch はありません。このため
+Lambda alias/weighted routing/CodeDeploy による code canary はありません。AppConfig の
+global `enabled` / `disabled` control は code/schema compatibility の段階 rollout ではないため、
 production では先に別 environment で同一 artifact を検証し、変更 window 中に一つの stack を
 更新して以下の post-deploy check を行います。安全に段階化できない高リスク変更は deploy しません。
 
@@ -612,7 +765,7 @@ DR を要件とする場合、secondary region、replication、secret/key、Cogn
 
 ## Production readiness evidence checklist
 
-- [ ] Role/roster、primary/secondary notification、通知有効な22 alarmのtest delivery、
+- [ ] Role/roster、primary/secondary notification、通知有効な23 alarmのtest delivery、
   fast-burn両component/compositeのstate history
 - [ ] 30日 availability/latency report、transport failure coverage、burn alert test
 - [ ] External liveness/readiness probe と rollout stop の test
@@ -620,9 +773,10 @@ DR を要件とする場合、secondary region、replication、secret/key、Cogn
 - [ ] Required CI checks と repository ruleset / branch protection の確認
 - [ ] Migration interruption/resume/verify/rollback の non-production evidence
 - [ ] Deploy/rollback rehearsal と previous artifact/parameter inventory
+- [ ] Runtime control の canary/emergency disable、fail-closed、re-enable、DLQ redrive の drill
 - [ ] 90日以内の PITR restore drill、RPO/RTO、integrity evidence
 - [ ] S3 restore と DynamoDB metadata 整合の drill
-- [ ] Canary/kill switch または同等の段階 rollout gate
+- [ ] Lambda code canary または同等の段階 rollout gate
 - [ ] Regional DR の要否決定。必要なら replication/failover game day
 
 関連する詳細手順は [Server backfills](../server/README.md#workspace-search-backfill) と

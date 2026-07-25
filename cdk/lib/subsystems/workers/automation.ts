@@ -13,6 +13,10 @@ import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
 import type { DataStoreResources } from '../data-stores';
 import type { FileStorageResources } from '../file-storage';
+import {
+  bindRuntimeControls,
+  type RuntimeControlResources,
+} from '../runtime-controls';
 
 /**
  * Inputs required by automation event and schedule workers.
@@ -26,6 +30,8 @@ export interface AutomationWorkerInput {
   readonly lambdaBuildPaths: LambdaBuildPaths;
   /** Stack parameters used for secrets, authorization, and retention. */
   readonly parameters: StackParameters;
+  /** Dynamic operational controls shared by application runtimes. */
+  readonly runtimeControls: RuntimeControlResources;
 }
 
 /**
@@ -121,6 +127,11 @@ export function buildAutomationWorkers(
         WORKSPACE_SEARCH_TABLE_NAME: workspaceSearchTable.tableName,
       },
     },
+  );
+  bindRuntimeControls(
+    input.runtimeControls,
+    automationEventFunction,
+    'automation-event',
   );
   automationEventFunction.addEventSource(
     new lambdaEventSources.DynamoEventSource(auditEventsTable, {
@@ -248,6 +259,11 @@ export function buildAutomationWorkers(
         WORKSPACE_SEARCH_TABLE_NAME: workspaceSearchTable.tableName,
       },
     },
+  );
+  bindRuntimeControls(
+    input.runtimeControls,
+    automationScheduleFunction,
+    'automation-schedule',
   );
   automationTable.grants.readWriteData(automationScheduleFunction);
   auditEventsTable.grants.readWriteData(automationScheduleFunction);

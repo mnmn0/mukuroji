@@ -9,6 +9,10 @@ import * as sqs from 'aws-cdk-lib/aws-sqs';
 import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
 import type { DataStoreResources } from '../data-stores';
+import {
+  bindRuntimeControls,
+  type RuntimeControlResources,
+} from '../runtime-controls';
 
 /**
  * Inputs required by enterprise identity background workers.
@@ -20,6 +24,8 @@ export interface EnterpriseIdentityWorkerInput {
   readonly lambdaBuildPaths: LambdaBuildPaths;
   /** Stack parameters and derived identity configuration. */
   readonly parameters: StackParameters;
+  /** Dynamic operational controls shared by application runtimes. */
+  readonly runtimeControls: RuntimeControlResources;
 }
 
 /**
@@ -111,6 +117,11 @@ export function buildEnterpriseIdentityWorkers(
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
       },
     },
+  );
+  bindRuntimeControls(
+    input.runtimeControls,
+    enterpriseScimGroupJobFunction,
+    'enterprise-scim-group-job',
   );
   enterpriseScimGroupJobFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: [
@@ -231,6 +242,11 @@ export function buildEnterpriseIdentityWorkers(
         ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
       },
     },
+  );
+  bindRuntimeControls(
+    input.runtimeControls,
+    enterpriseIdentityMaintenanceFunction,
+    'enterprise-identity-maintenance',
   );
   enterpriseIdentityMaintenanceFunction.addEventSource(
     new lambdaEventSources.DynamoEventSource(enterpriseIdentityTable, {

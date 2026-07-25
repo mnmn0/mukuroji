@@ -2,21 +2,35 @@ import {
   createProductionAutomationScheduleHandler,
 } from '../app/composition/automation-workers'
 import {
+  createRuntimeControlGuardedHandler,
+} from '../app/composition/runtime-control'
+import {
   type AutomationScheduleEvent,
 } from '../modules/automation'
 
 let productionHandler: ReturnType<typeof createProductionAutomationScheduleHandler> | undefined
 
 /**
- * Materializes due Automation work according to timezone and DST policy.
+ * Materializes admitted Automation work according to timezone and DST policy.
  *
  * @param event - Automation schedule invocation event.
  * @returns The Automation schedule result.
  */
-export async function handler(event: AutomationScheduleEvent = {}) {
+async function processAutomationSchedule(event: AutomationScheduleEvent = {}) {
   productionHandler ??= createProductionAutomationScheduleHandler()
   return await productionHandler(event)
 }
+
+/**
+ * Runtime-control guarded Automation schedule entrypoint.
+ *
+ * @param event - Automation schedule invocation event.
+ * @returns The Automation schedule result.
+ */
+export const handler = createRuntimeControlGuardedHandler(
+  'automation-schedule',
+  processAutomationSchedule,
+)
 
 export {
   processAutomationSchedule,
