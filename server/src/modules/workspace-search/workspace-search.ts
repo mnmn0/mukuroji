@@ -75,6 +75,8 @@ export const SAVED_VIEW_MAX_LIMIT = 100
 export type WorkspaceSearchDocument = {
   /** Search document schema version です。 */
   schemaVersion: typeof SEARCH_SCHEMA_VERSION
+  /** すべての application writer が束縛する canonical projection 内容の digest です。 */
+  projectionDigest: string
   /** DynamoDB partition key である canonical Workspace ID です。 */
   workspaceId: string
   /** DynamoDB sort key です。 */
@@ -254,6 +256,9 @@ export class WorkspaceSearchError extends Error {
     this.code = code
   }
 }
+
+/** Marks persisted projection content that disagrees with its server-owned digest. */
+class WorkspaceSearchProjectionDigestMismatchError extends WorkspaceSearchError {}
 
 /**
  * API handler と backfill が利用する Workspace search client contract です。
@@ -438,10 +443,16 @@ export function createSavedWorkspaceViewRecordKey(viewId: string) {
 }
 
 /**
- * Search document input を DynamoDB 保存形式へ正規化します。
+ * Normalizes one search document into its DynamoDB persistence shape.
+ *
+ * @param input - Untrusted projection fields supplied by an application writer.
+ * @returns A validated document with canonical keys and a server-owned digest.
  */
 export function createWorkspaceSearchDocument(
-  input: Omit<WorkspaceSearchDocument, 'schemaVersion' | 'entryType' | 'recordKey'> & {
+  input: Omit<
+    WorkspaceSearchDocument,
+    'schemaVersion' | 'entryType' | 'projectionDigest' | 'recordKey'
+  > & {
     /** Backfill が明示する場合の record key です。 */
     recordKey?: string
   },
@@ -457,7 +468,7 @@ export function createWorkspaceSearchDocument(
       'Search document record key does not match its entity identity.',
     )
   }
-  const document: WorkspaceSearchDocument = {
+  const document: Omit<WorkspaceSearchDocument, 'projectionDigest'> = {
     schemaVersion: SEARCH_SCHEMA_VERSION,
     workspaceId,
     recordKey: expectedRecordKey,
@@ -507,7 +518,30 @@ export function createWorkspaceSearchDocument(
     document.relationIds = normalizeStringList(input.relationIds, 'Search relation IDs', 100)
   }
 
-  return document
+  return {
+    ...document,
+    projectionDigest: createWorkspaceSearchProjectionDigest(document),
+  }
+}
+
+/**
+ * Creates the server-owned digest used by migration and live-writer CAS checks.
+ *
+ * Increment `digestVersion` and update pinned digest fixtures whenever the
+ * canonicalization protocol changes.
+ *
+ * @param document - Fully normalized projection without its digest field.
+ * @returns Lowercase SHA-256 digest of the versioned canonical projection.
+ */
+export function createWorkspaceSearchProjectionDigest(
+  document: Readonly<Omit<WorkspaceSearchDocument, 'projectionDigest'>>,
+): string {
+  return createHash('sha256')
+    .update(canonicalWorkspaceSearchProjectionValue({
+      digestVersion: 1,
+      document,
+    }))
+    .digest('hex')
 }
 
 /** Team source を runtime/backfill 共通の search document へ変換します。 */
@@ -1934,8 +1968,22 @@ function readWorkspaceSearchDocument(value: Record<string, unknown>) {
     throw new WorkspaceSearchError(503, 'InvalidSearchDocument', 'Search index contains an invalid document.')
   }
   try {
-    return createWorkspaceSearchDocument(value as WorkspaceSearchDocument)
+    const document = createWorkspaceSearchDocument(value as WorkspaceSearchDocument)
+    if (
+      value.projectionDigest !== undefined
+      && value.projectionDigest !== document.projectionDigest
+    ) {
+      throw new WorkspaceSearchProjectionDigestMismatchError(
+        503,
+        'InvalidSearchDocument',
+        'Search index projection digest is invalid.',
+      )
+    }
+    return document
   } catch (error) {
+    if (error instanceof WorkspaceSearchProjectionDigestMismatchError) {
+      throw error
+    }
     throw new WorkspaceSearchError(
       503,
       'InvalidSearchDocument',
@@ -1949,6 +1997,9 @@ function readWorkspaceSearchDocumentSafely(value: Record<string, unknown>) {
   try {
     return readWorkspaceSearchDocument(value)
   } catch (error) {
+    if (error instanceof WorkspaceSearchProjectionDigestMismatchError) {
+      throw error
+    }
     console.error('Workspace search skipped an invalid index document.', error)
     return undefined
   }
@@ -2357,6 +2408,58 @@ function canonicalValue(value: unknown): string {
     return `{${Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, item]) => `${JSON.stringify(key)}:${canonicalValue(item)}`).join(',')}}`
   }
   return JSON.stringify(value)
+}
+
+/**
+ * Serializes one normalized projection value with locale-independent key order.
+ *
+ * @param value - JSON-compatible normalized projection value.
+ * @returns Canonical JSON text used only by the projection digest protocol.
+ */
+function canonicalWorkspaceSearchProjectionValue(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalWorkspaceSearchProjectionValue).join(',')}]`
+  }
+  if (value && typeof value === 'object') {
+    const properties = Object.entries(value)
+      .sort(([left], [right]) =>
+        compareWorkspaceSearchProjectionKeys(left, right)
+      )
+      .map(([key, item]) =>
+        `${JSON.stringify(key)}:${canonicalWorkspaceSearchProjectionValue(item)}`
+      )
+    return `{${properties.join(',')}}`
+  }
+  const serialized = JSON.stringify(value)
+  if (serialized === undefined) {
+    throw new WorkspaceSearchError(
+      500,
+      'InvalidSearchDocument',
+      'Search projection contains an unsupported value.',
+    )
+  }
+  return serialized
+}
+
+/**
+ * Orders projection keys by UTF-8 bytes with a code-unit tie-breaker.
+ *
+ * @param left - First projection key.
+ * @param right - Second projection key.
+ * @returns A negative, zero, or positive comparison result.
+ */
+function compareWorkspaceSearchProjectionKeys(
+  left: string,
+  right: string,
+): number {
+  const utf8Comparison = Buffer.compare(
+    Buffer.from(left, 'utf8'),
+    Buffer.from(right, 'utf8'),
+  )
+  if (utf8Comparison !== 0 || left === right) {
+    return utf8Comparison
+  }
+  return left < right ? -1 : 1
 }
 
 function addSavedViewUpdateExpression(

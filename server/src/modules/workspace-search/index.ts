@@ -11,6 +11,7 @@ export {
   createWorkItemWorkspaceSearchDocument,
   createWorkspaceSearchDocument,
   createWorkspaceSearchDocumentRecordKey,
+  createWorkspaceSearchProjectionDigest,
   ensureLocalWorkspaceSearchTable,
   migrateSavedWorkspaceView,
   type CreateSavedWorkspaceViewRequest,
