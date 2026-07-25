@@ -7,8 +7,11 @@ const maintenanceEvidenceLocatorPattern =
   /^change:[A-Z][A-Z0-9]{1,15}(?:-[A-Z0-9]{1,16}){0,3}$/u
 const canonicalJsonIntegerPattern = /^(?:0|-?[1-9][0-9]*)$/u
 const jsonNumberTokenPattern =
-  /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/u
+  /-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/uy
 const minimumDrainMilliseconds = MINIMUM_MAINTENANCE_DRAIN_SECONDS * 1_000
+
+/** Maximum exact UTF-8 size accepted for one maintenance-evidence file. */
+export const MAINTENANCE_EVIDENCE_MAX_BYTES = 2 * 1024 * 1024
 
 /** Maximum age of drain completion and every surface observation at mutation time. */
 export const MAINTENANCE_EVIDENCE_MAX_AGE_SECONDS = 5 * 60
@@ -149,6 +152,13 @@ export function parseMaintenanceEvidence(
   bytes: Uint8Array,
   context: MaintenanceEvidenceValidationContext,
 ): ParsedWorkspaceSearchMaintenanceEvidence {
+  if (
+    bytes.byteLength === 0
+    || bytes.byteLength > MAINTENANCE_EVIDENCE_MAX_BYTES
+  ) {
+    return failEvidence()
+  }
+
   const fileSha256 = createMaintenanceEvidenceFileDigest(bytes)
   const document = parseJsonObject(bytes)
   const nowMilliseconds = readTrustedNow(context.now)
@@ -378,7 +388,8 @@ function parseStrictJsonString(
  * @returns Index immediately after the number.
  */
 function parseStrictJsonNumber(text: string, start: number): number {
-  const token = jsonNumberTokenPattern.exec(text.slice(start))?.[0]
+  jsonNumberTokenPattern.lastIndex = start
+  const token = jsonNumberTokenPattern.exec(text)?.[0]
   if (!token || !canonicalJsonIntegerPattern.test(token)) {
     return failEvidence()
   }

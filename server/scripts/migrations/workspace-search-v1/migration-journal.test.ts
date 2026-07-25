@@ -17,6 +17,7 @@ import {
   createAbsentMigrationItemDigest,
   parseWorkspaceSearchJournalSegment,
   serializeWorkspaceSearchJournalSegment,
+  WORKSPACE_SEARCH_JOURNAL_SEGMENT_MAX_BYTES,
 } from './migration-journal'
 
 /**
@@ -132,6 +133,25 @@ describe('Workspace Search migration journal', () => {
     )
 
     expect(parsed.before).toEqual(withPreimage.before)
+  })
+
+  test('rejects no-op segments before serialization', () => {
+    const segment = createJournalSegment()
+    const noOp: WorkspaceSearchJournalSegment = {
+      ...segment,
+      after: segment.before,
+    }
+
+    expect(() => serializeWorkspaceSearchJournalSegment(noOp))
+      .toThrow(WorkspaceSearchMigrationFailure)
+  })
+
+  test('rejects empty and oversized serialized segments', () => {
+    expect(() => parseWorkspaceSearchJournalSegment(''))
+      .toThrow(WorkspaceSearchMigrationFailure)
+    expect(() => parseWorkspaceSearchJournalSegment(
+      'x'.repeat(WORKSPACE_SEARCH_JOURNAL_SEGMENT_MAX_BYTES + 1),
+    )).toThrow(WorkspaceSearchMigrationFailure)
   })
 
   test('rejects digest drift, wrong item keys, extra fields, and noncanonical bytes', () => {

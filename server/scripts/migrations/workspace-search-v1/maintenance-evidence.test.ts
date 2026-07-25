@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { describe, expect, test } from 'bun:test'
 import {
   createMaintenanceEvidenceFileDigest,
+  MAINTENANCE_EVIDENCE_MAX_BYTES,
   MaintenanceEvidenceError,
   maintenanceRuntimeControlSurfaces,
   parseMaintenanceEvidence,
@@ -120,6 +121,14 @@ describe('Workspace Search maintenance evidence', () => {
       .toEqual(parseEvidence(indented).evidence)
     expect(createMaintenanceEvidenceFileDigest(compact))
       .not.toBe(createMaintenanceEvidenceFileDigest(indented))
+  })
+
+  test('rejects empty and oversized evidence files', () => {
+    expect(() => parseEvidence(new Uint8Array()))
+      .toThrow(MaintenanceEvidenceError)
+    expect(() => parseEvidence(
+      new Uint8Array(MAINTENANCE_EVIDENCE_MAX_BYTES + 1),
+    )).toThrow(MaintenanceEvidenceError)
   })
 
   test('rejects invalid global controls and incomplete drain evidence', () => {
