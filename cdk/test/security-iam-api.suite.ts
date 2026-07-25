@@ -308,12 +308,13 @@ test('developer platform and connector runtime secrets use rotated purpose-speci
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
 
-  template.resourceCountIs('AWS::KMS::Key', 4);
+  template.resourceCountIs('AWS::KMS::Key', 5);
   for (const description of [
     'Envelope key for developer platform Webhook signing secrets.',
     'Envelope key for developer platform connector credentials.',
     'Envelope key for developer platform cursors and idempotency state.',
     'Encryption key for connector provider runtime configuration.',
+    'Encrypts lossless Workspace Search migration preimage journal segments.',
   ]) {
     template.hasResourceProperties('AWS::KMS::Key', {
       Description: description,
@@ -323,7 +324,7 @@ test('developer platform and connector runtime secrets use rotated purpose-speci
   const protectedKmsKeys = Object.values(resources).filter((resource) =>
     (resource as { Type?: string }).Type === 'AWS::KMS::Key'
   ) as Array<{ DeletionPolicy?: string; UpdateReplacePolicy?: string }>;
-  expect(protectedKmsKeys).toHaveLength(4);
+  expect(protectedKmsKeys).toHaveLength(5);
   expect(protectedKmsKeys.every((resource) =>
     resource.DeletionPolicy === 'Retain' &&
     resource.UpdateReplacePolicy === 'Retain'
@@ -393,10 +394,14 @@ test('Function URL and API Gateway expose the same restricted CORS contract', ()
 
 test('GuardDuty scanning and bucket policy quarantine files until a clean result', () => {
   const template = synthesizedTemplate;
-  const serializedBucketPolicy = JSON.stringify(
-    Object.values(template.findResources('AWS::S3::BucketPolicy'))[0],
+  const bucketPolicy = Object.values(
+    template.findResources('AWS::S3::BucketPolicy'),
+  ).find((resource) =>
+    JSON.stringify(resource).includes('ListProjectTasksFunctionServiceRole')
   );
+  const serializedBucketPolicy = JSON.stringify(bucketPolicy);
 
+  expect(bucketPolicy).toBeDefined();
   expect(serializedBucketPolicy).toContain('ListProjectTasksFunctionServiceRole');
 
   template.hasResourceProperties('AWS::IAM::Role', {

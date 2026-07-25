@@ -1,0 +1,1148 @@
+import type {
+  DescribeContinuousBackupsCommandOutput,
+  DescribeTableCommandOutput,
+  DescribeTimeToLiveCommandOutput,
+  GlobalSecondaryIndexDescription,
+  KeySchemaElement,
+  ScalarAttributeType,
+  TableDescription,
+} from '@aws-sdk/client-dynamodb'
+import type {
+  GetBucketEncryptionOutput,
+  GetBucketLoggingOutput,
+  GetBucketVersioningOutput,
+  GetObjectLockConfigurationOutput,
+} from '@aws-sdk/client-s3'
+import {
+  type MigrationGlobalSecondaryIndex,
+  type MigrationJournalIdentity,
+  type MigrationKeyAttribute,
+  type MigrationTableIdentity,
+  type WorkspaceSearchMigrationConfiguration,
+  type WorkspaceSearchMigrationTableRole,
+  serializeCanonicalJson,
+  WorkspaceSearchMigrationFailure,
+  WORKSPACE_SEARCH_MIGRATION_ID,
+  WORKSPACE_SEARCH_MIGRATION_VERSION,
+} from './migration-contract'
+
+/** Explicit physical resources selected by an operator before identity discovery. */
+export type WorkspaceSearchMigrationRequestedResources = {
+  /** Expected AWS account confirmed through STS and resource ARNs. */
+  account: string
+  /** Explicit AWS region used by every SDK client. */
+  region: string
+  /** Explicit shared-configuration profile. */
+  profile: string
+  /** Exact reviewed Git commit OID. */
+  commit: string
+  /** Physical source, target, and state table names. */
+  tables: Readonly<Record<WorkspaceSearchMigrationTableRole, string>>
+  /** Dedicated journal bucket name. */
+  journalBucket: string
+  /** Expected customer-managed KMS key ARN. */
+  journalKeyArn: string
+}
+
+/** Narrow identity and control-plane read port used before any tenant row is scanned. */
+export interface WorkspaceSearchMigrationIdentityPort {
+  /**
+   * Reads the caller account and ARN from STS.
+   *
+   * @returns Caller identity bound to the explicit profile and region.
+   */
+  readCallerIdentity(): Promise<{
+    /** AWS account returned by STS. */
+    account: string
+    /** Caller ARN returned by STS. */
+    arn: string
+  }>
+  /**
+   * Reads a DynamoDB table descriptor.
+   *
+   * @param tableName - Explicit physical table name.
+   * @returns Raw DescribeTable output.
+   */
+  describeTable(tableName: string): Promise<DescribeTableCommandOutput>
+  /**
+   * Reads point-in-time recovery state for one table.
+   *
+   * @param tableName - Explicit physical table name.
+   * @returns Raw DescribeContinuousBackups output.
+   */
+  describeContinuousBackups(
+    tableName: string,
+  ): Promise<DescribeContinuousBackupsCommandOutput>
+  /**
+   * Reads TTL state for one table.
+   *
+   * @param tableName - Explicit physical table name.
+   * @returns Raw DescribeTimeToLive output.
+   */
+  describeTimeToLive(tableName: string): Promise<DescribeTimeToLiveCommandOutput>
+  /**
+   * Reads journal bucket versioning.
+   *
+   * @param bucketName - Explicit journal bucket name.
+   * @returns Raw GetBucketVersioning output.
+   */
+  getBucketVersioning(bucketName: string): Promise<GetBucketVersioningOutput>
+  /**
+   * Reads journal bucket Object Lock configuration.
+   *
+   * @param bucketName - Explicit journal bucket name.
+   * @returns Raw GetObjectLockConfiguration output.
+   */
+  getObjectLockConfiguration(
+    bucketName: string,
+  ): Promise<GetObjectLockConfigurationOutput>
+  /**
+   * Reads journal bucket default encryption.
+   *
+   * @param bucketName - Explicit journal bucket name.
+   * @returns Raw GetBucketEncryption output.
+   */
+  getBucketEncryption(bucketName: string): Promise<GetBucketEncryptionOutput>
+  /**
+   * Reads journal bucket server-access logging.
+   *
+   * @param bucketName - Explicit journal bucket name.
+   * @returns Raw GetBucketLogging output.
+   */
+  getBucketLogging(bucketName: string): Promise<GetBucketLoggingOutput>
+}
+
+/** Expected schema and safety settings for one migration table role. */
+type ExpectedTableDescriptor = {
+  /** Ordered base-table key descriptor. */
+  key: readonly MigrationKeyAttribute[]
+  /** Expected global secondary indexes. */
+  globalSecondaryIndexes: readonly MigrationGlobalSecondaryIndex[]
+  /** Expected TTL state. */
+  ttl: MigrationTableIdentity['ttl']
+  /** Expected encryption family. */
+  encryption: MigrationTableIdentity['encryption']
+  /** Expected deletion protection state. */
+  deletionProtection: boolean
+}
+
+/** Input required to measure one complete migration resource identity. */
+type WorkspaceSearchMigrationIdentityInput = {
+  /** Explicit resource selection. */
+  requested: WorkspaceSearchMigrationRequestedResources
+  /** Control-plane reader bound to the requested profile and region. */
+  port: WorkspaceSearchMigrationIdentityPort
+}
+
+const expectedTableDescriptors = {
+  'project-directory': {
+    key: [
+      keyAttribute('directoryId', 'HASH', 'S'),
+      keyAttribute('entryKey', 'RANGE', 'S'),
+    ],
+    globalSecondaryIndexes: [
+      globalSecondaryIndex(
+        'WebhookAuthorizationIndex',
+        [
+          keyAttribute('webhookAuthorizationKey', 'HASH', 'S'),
+          keyAttribute('webhookAuthorizationSortKey', 'RANGE', 'S'),
+        ],
+        'KEYS_ONLY',
+      ),
+    ],
+    ttl: { status: 'DISABLED' },
+    encryption: 'AWS_OWNED',
+    deletionProtection: false,
+  },
+  'work-items': {
+    key: [
+      keyAttribute('directoryTeamId', 'HASH', 'S'),
+      keyAttribute('issueId', 'RANGE', 'S'),
+    ],
+    globalSecondaryIndexes: [
+      globalSecondaryIndex(
+        'AssignedProjectIssueIndex',
+        [
+          keyAttribute('directoryProjectId', 'HASH', 'S'),
+          keyAttribute('sortOrder', 'RANGE', 'N'),
+        ],
+        'ALL',
+      ),
+      globalSecondaryIndex(
+        'TeamIssueSortOrderIndex',
+        [
+          keyAttribute('directoryTeamId', 'HASH', 'S'),
+          keyAttribute('sortOrder', 'RANGE', 'N'),
+        ],
+        'ALL',
+      ),
+      globalSecondaryIndex(
+        'TeamIssueUpdatedAtIndex',
+        [
+          keyAttribute('directoryTeamId', 'HASH', 'S'),
+          keyAttribute('updatedAt', 'RANGE', 'S'),
+        ],
+        'ALL',
+      ),
+    ],
+    ttl: { status: 'DISABLED' },
+    encryption: 'AWS_OWNED',
+    deletionProtection: false,
+  },
+  collaboration: {
+    key: [
+      keyAttribute('entityKey', 'HASH', 'S'),
+      keyAttribute('recordKey', 'RANGE', 'S'),
+    ],
+    globalSecondaryIndexes: [],
+    ttl: { status: 'ENABLED', attribute: 'expiresAt' },
+    encryption: 'AWS_OWNED',
+    deletionProtection: false,
+  },
+  documents: {
+    key: [
+      keyAttribute('workspaceId', 'HASH', 'S'),
+      keyAttribute('recordKey', 'RANGE', 'S'),
+    ],
+    globalSecondaryIndexes: [],
+    ttl: { status: 'ENABLED', attribute: 'expiresAtEpoch' },
+    encryption: 'KMS',
+    deletionProtection: false,
+  },
+  'workspace-search': {
+    key: [
+      keyAttribute('workspaceId', 'HASH', 'S'),
+      keyAttribute('recordKey', 'RANGE', 'S'),
+    ],
+    globalSecondaryIndexes: [],
+    ttl: { status: 'DISABLED' },
+    encryption: 'AWS_OWNED',
+    deletionProtection: false,
+  },
+  'migration-state': {
+    key: [
+      keyAttribute('migrationId', 'HASH', 'S'),
+      keyAttribute('recordKey', 'RANGE', 'S'),
+    ],
+    globalSecondaryIndexes: [],
+    ttl: { status: 'DISABLED' },
+    encryption: 'KMS',
+    deletionProtection: true,
+  },
+} satisfies Readonly<Record<WorkspaceSearchMigrationTableRole, ExpectedTableDescriptor>>
+
+/**
+ * Measures and validates every immutable resource identity before data-plane work.
+ *
+ * @param input - Explicit requested resources and narrow control-plane port.
+ * @returns Exact measured migration configuration.
+ */
+export async function measureWorkspaceSearchMigrationConfiguration(
+  input: WorkspaceSearchMigrationIdentityInput,
+): Promise<WorkspaceSearchMigrationConfiguration> {
+  try {
+    return await measureMigrationConfiguration(input)
+  } catch (error) {
+    if (error instanceof WorkspaceSearchMigrationFailure) throw error
+    throw new WorkspaceSearchMigrationFailure(
+      'IDENTITY_MISMATCH',
+      'Migration resource identity could not be measured.',
+      { cause: error },
+    )
+  }
+}
+
+/**
+ * Performs control-plane measurement inside the public redaction boundary.
+ *
+ * @param input - Explicit requested resources and narrow control-plane port.
+ * @returns Exact measured migration configuration.
+ */
+async function measureMigrationConfiguration(
+  input: WorkspaceSearchMigrationIdentityInput,
+): Promise<WorkspaceSearchMigrationConfiguration> {
+  validateRequestedResources(input.requested)
+  const caller = await input.port.readCallerIdentity()
+  if (caller.account !== input.requested.account) {
+    throw new WorkspaceSearchMigrationFailure(
+      'IDENTITY_MISMATCH',
+      'STS caller identity does not match the requested migration account.',
+    )
+  }
+  const callerSessionArn = readValidatedCallerSessionArn(
+    caller.arn,
+    input.requested.account,
+  )
+
+  const tableEntries = await Promise.all(
+    Object.entries(input.requested.tables).map(async ([roleValue, tableName]) => {
+      const role = readTableRole(roleValue)
+      const identity = await measureTableIdentity(
+        role,
+        tableName,
+        input.requested,
+        input.port,
+      )
+      const entry: readonly [
+        WorkspaceSearchMigrationTableRole,
+        MigrationTableIdentity,
+      ] = [role, identity]
+      return entry
+    }),
+  )
+  const tables = createTableIdentityRecord(tableEntries)
+  const journal = await measureJournalIdentity(input.requested, input.port)
+
+  return {
+    migrationId: WORKSPACE_SEARCH_MIGRATION_ID,
+    migrationVersion: WORKSPACE_SEARCH_MIGRATION_VERSION,
+    account: input.requested.account,
+    region: input.requested.region,
+    profile: input.requested.profile,
+    commit: input.requested.commit,
+    callerArn: callerSessionArn,
+    tables,
+    journal,
+    journalPrefix: 'workspace-search/v1',
+  }
+}
+
+/**
+ * Validates an STS assumed-role session ARN.
+ *
+ * The exact ARN remains audit evidence. Configuration hashing separately
+ * excludes the volatile session name because an STS ARN cannot reconstruct an
+ * IAM role path. Other caller families fail closed because an IAM user, root
+ * principal, or federated-user session is not the migration role identity.
+ *
+ * @param value - Caller ARN returned by STS GetCallerIdentity.
+ * @param expectedAccount - Explicit operator-selected AWS account.
+ * @returns Exact validated STS assumed-role session ARN.
+ */
+function readValidatedCallerSessionArn(
+  value: string,
+  expectedAccount: string,
+): string {
+  const parts = value.split(':')
+  const partition = parts[1]
+  const account = parts[4]
+  const resource = parts[5]
+  const assumedRolePrefix = 'assumed-role/'
+  if (
+    parts.length !== 6 ||
+    parts[0] !== 'arn' ||
+    !isAwsPartition(partition) ||
+    parts[2] !== 'sts' ||
+    parts[3] !== '' ||
+    account !== expectedAccount ||
+    !resource?.startsWith(assumedRolePrefix)
+  ) {
+    throw invalidCallerRoleIdentity()
+  }
+  const segments = resource.slice(assumedRolePrefix.length).split('/')
+  if (
+    segments.length !== 2 ||
+    !isIamRoleName(segments[0]) ||
+    !isRoleSessionName(segments[1])
+  ) {
+    throw invalidCallerRoleIdentity()
+  }
+  return value
+}
+
+/**
+ * Creates a stable caller-role validation failure.
+ *
+ * @returns Operator-safe identity failure without the raw ARN.
+ */
+function invalidCallerRoleIdentity(): WorkspaceSearchMigrationFailure {
+  return new WorkspaceSearchMigrationFailure(
+    'IDENTITY_MISMATCH',
+    'STS caller identity is not a valid assumed migration role.',
+  )
+}
+
+/**
+ * Measures and validates one table against its role-specific descriptor.
+ *
+ * @param role - Migration table role.
+ * @param tableName - Requested physical table name.
+ * @param requested - Shared account and region constraints.
+ * @param port - Control-plane read port.
+ * @returns Exact validated table identity.
+ */
+async function measureTableIdentity(
+  role: WorkspaceSearchMigrationTableRole,
+  tableName: string,
+  requested: WorkspaceSearchMigrationRequestedResources,
+  port: WorkspaceSearchMigrationIdentityPort,
+): Promise<MigrationTableIdentity> {
+  const [tableOutput, backupOutput, ttlOutput] = await Promise.all([
+    port.describeTable(tableName),
+    port.describeContinuousBackups(tableName),
+    port.describeTimeToLive(tableName),
+  ])
+  const table = tableOutput.Table
+  if (!table) {
+    throw new WorkspaceSearchMigrationFailure(
+      'IDENTITY_MISMATCH',
+      `The ${role} table identity is unavailable.`,
+    )
+  }
+  const observed = readPhysicalTableIdentity(table)
+  if (
+    observed.account !== requested.account ||
+    observed.region !== requested.region ||
+    observed.tableName !== tableName
+  ) {
+    throw new WorkspaceSearchMigrationFailure(
+      'IDENTITY_MISMATCH',
+      `The ${role} table does not match the requested account, region, and name.`,
+    )
+  }
+  const descriptor = readTableDescriptor(table, ttlOutput)
+  const expected = expectedTableDescriptors[role]
+  if (serializeCanonicalJson(descriptor) !== serializeCanonicalJson(expected)) {
+    throw new WorkspaceSearchMigrationFailure(
+      'TABLE_SCHEMA_MISMATCH',
+      `The ${role} table schema or safety settings do not match migration v1.`,
+    )
+  }
+  const pitr = readPitrEvidence(backupOutput, role)
+
+  return {
+    role,
+    tableName,
+    tableArn: observed.tableArn,
+    tableId: observed.tableId,
+    creationTime: observed.creationTime,
+    account: observed.account,
+    region: observed.region,
+    key: descriptor.key,
+    globalSecondaryIndexes: descriptor.globalSecondaryIndexes,
+    billingMode: 'PAY_PER_REQUEST',
+    deletionProtection: descriptor.deletionProtection,
+    encryption: descriptor.encryption,
+    ttl: descriptor.ttl,
+    pitr,
+  }
+}
+
+/**
+ * Measures journal versioning, Object Lock, encryption, and access logging.
+ *
+ * @param requested - Explicit journal bucket and key.
+ * @param port - Control-plane read port.
+ * @returns Validated journal identity.
+ */
+async function measureJournalIdentity(
+  requested: WorkspaceSearchMigrationRequestedResources,
+  port: WorkspaceSearchMigrationIdentityPort,
+): Promise<MigrationJournalIdentity> {
+  const [versioning, objectLock, encryption, logging] = await Promise.all([
+    port.getBucketVersioning(requested.journalBucket),
+    port.getObjectLockConfiguration(requested.journalBucket),
+    port.getBucketEncryption(requested.journalBucket),
+    port.getBucketLogging(requested.journalBucket),
+  ])
+  if (versioning.Status !== 'Enabled') {
+    throw invalidJournalConfiguration('versioning')
+  }
+  const retention = objectLock.ObjectLockConfiguration?.Rule?.DefaultRetention
+  if (
+    objectLock.ObjectLockConfiguration?.ObjectLockEnabled !== 'Enabled' ||
+    retention?.Mode !== 'COMPLIANCE' ||
+    !Number.isSafeInteger(retention.Days) ||
+    (retention.Days ?? 0) < 30 ||
+    retention.Years !== undefined
+  ) {
+    throw invalidJournalConfiguration('Object Lock')
+  }
+  const rules = encryption.ServerSideEncryptionConfiguration?.Rules
+  if (!rules || rules.length !== 1) {
+    throw invalidJournalConfiguration('encryption')
+  }
+  const encryptionRule = rules[0]
+  if (
+    encryptionRule?.ApplyServerSideEncryptionByDefault?.SSEAlgorithm !== 'aws:kms' ||
+    encryptionRule.ApplyServerSideEncryptionByDefault.KMSMasterKeyID !==
+      requested.journalKeyArn ||
+    encryptionRule.BucketKeyEnabled !== true
+  ) {
+    throw invalidJournalConfiguration('encryption')
+  }
+  const loggingEnabled = logging.LoggingEnabled
+  if (
+    !isNonEmptyString(loggingEnabled?.TargetBucket) ||
+    !isNonEmptyString(loggingEnabled.TargetPrefix) ||
+    loggingEnabled.TargetBucket === requested.journalBucket
+  ) {
+    throw invalidJournalConfiguration('access logging')
+  }
+
+  return {
+    bucketName: requested.journalBucket,
+    keyArn: requested.journalKeyArn,
+    versioning: 'Enabled',
+    objectLockMode: 'COMPLIANCE',
+    defaultRetentionDays: retention.Days ?? 0,
+    encryption: 'aws:kms',
+    bucketKeyEnabled: true,
+    accessLogBucket: loggingEnabled.TargetBucket,
+    accessLogPrefix: loggingEnabled.TargetPrefix,
+  }
+}
+
+/**
+ * Reads the exact table identity and validates the ARN shape.
+ *
+ * @param table - Raw DynamoDB table description.
+ * @returns Parsed physical identity.
+ */
+function readPhysicalTableIdentity(table: TableDescription): {
+  /** AWS account parsed from the ARN. */
+  account: string
+  /** Canonical creation timestamp. */
+  creationTime: string
+  /** AWS region parsed from the ARN. */
+  region: string
+  /** Exact table ARN. */
+  tableArn: string
+  /** Immutable TableId. */
+  tableId: string
+  /** Exact physical table name. */
+  tableName: string
+} {
+  if (
+    table.TableStatus !== 'ACTIVE' ||
+    !isNonEmptyString(table.TableArn) ||
+    !isNonEmptyString(table.TableId) ||
+    !isNonEmptyString(table.TableName) ||
+    !table.CreationDateTime
+  ) {
+    throw new WorkspaceSearchMigrationFailure(
+      'IDENTITY_MISMATCH',
+      'A migration table identity is incomplete or not active.',
+    )
+  }
+  const arn = parseDynamoTableArn(table.TableArn)
+  if (arn.tableName !== table.TableName) {
+    throw new WorkspaceSearchMigrationFailure(
+      'IDENTITY_MISMATCH',
+      'A migration table ARN does not match its reported table name.',
+    )
+  }
+  return {
+    account: arn.account,
+    creationTime: toCanonicalTimestamp(table.CreationDateTime),
+    region: arn.region,
+    tableArn: table.TableArn,
+    tableId: table.TableId,
+    tableName: table.TableName,
+  }
+}
+
+/**
+ * Normalizes one table schema and safety descriptor.
+ *
+ * @param table - Raw DynamoDB table description.
+ * @param ttlOutput - Raw TTL description.
+ * @returns Normalized descriptor.
+ */
+function readTableDescriptor(
+  table: TableDescription,
+  ttlOutput: DescribeTimeToLiveCommandOutput,
+): ExpectedTableDescriptor {
+  if (table.BillingModeSummary?.BillingMode !== 'PAY_PER_REQUEST') {
+    throw new WorkspaceSearchMigrationFailure(
+      'TABLE_SCHEMA_MISMATCH',
+      'A migration table is not configured for on-demand billing.',
+    )
+  }
+  const attributeTypes = readAttributeTypes(table)
+  const key = normalizeKeySchema(table.KeySchema, attributeTypes)
+  const globalSecondaryIndexes = (table.GlobalSecondaryIndexes ?? [])
+    .map((index) => normalizeGlobalSecondaryIndex(index, attributeTypes))
+    .sort((left, right) => compareUtf8Ordinal(left.name, right.name))
+  if ((table.LocalSecondaryIndexes?.length ?? 0) !== 0) {
+    throw new WorkspaceSearchMigrationFailure(
+      'TABLE_SCHEMA_MISMATCH',
+      'A migration table has an unsupported local secondary index.',
+    )
+  }
+  return {
+    key,
+    globalSecondaryIndexes,
+    ttl: readTtl(ttlOutput),
+    encryption: readEncryption(table),
+    deletionProtection: table.DeletionProtectionEnabled === true,
+  }
+}
+
+/**
+ * Reads AttributeDefinitions into a validated name-to-type map.
+ *
+ * @param table - Raw DynamoDB table description.
+ * @returns Validated scalar attribute types.
+ */
+function readAttributeTypes(
+  table: TableDescription,
+): ReadonlyMap<string, ScalarAttributeType> {
+  const result = new Map<string, ScalarAttributeType>()
+  for (const attribute of table.AttributeDefinitions ?? []) {
+    if (
+      !isNonEmptyString(attribute.AttributeName) ||
+      !isScalarAttributeType(attribute.AttributeType) ||
+      result.has(attribute.AttributeName)
+    ) {
+      throw new WorkspaceSearchMigrationFailure(
+        'TABLE_SCHEMA_MISMATCH',
+        'A migration table has invalid attribute definitions.',
+      )
+    }
+    result.set(attribute.AttributeName, attribute.AttributeType)
+  }
+  return result
+}
+
+/**
+ * Normalizes one DynamoDB key schema.
+ *
+ * @param schema - Raw key schema.
+ * @param attributeTypes - Validated attribute definitions.
+ * @returns Ordered key attributes.
+ */
+function normalizeKeySchema(
+  schema: readonly KeySchemaElement[] | undefined,
+  attributeTypes: ReadonlyMap<string, ScalarAttributeType>,
+): readonly MigrationKeyAttribute[] {
+  if (!schema || schema.length < 1 || schema.length > 2) {
+    throw new WorkspaceSearchMigrationFailure(
+      'TABLE_SCHEMA_MISMATCH',
+      'A migration table has an invalid key schema.',
+    )
+  }
+  const normalized = schema.map((element) => {
+    const name = element.AttributeName
+    const role = element.KeyType
+    const type = name ? attributeTypes.get(name) : undefined
+    if (
+      !isNonEmptyString(name) ||
+      (role !== 'HASH' && role !== 'RANGE') ||
+      !isScalarAttributeType(type)
+    ) {
+      throw new WorkspaceSearchMigrationFailure(
+        'TABLE_SCHEMA_MISMATCH',
+        'A migration table has an invalid key schema.',
+      )
+    }
+    return keyAttribute(name, role, type)
+  })
+  const hashCount = normalized.filter(({ role }) => role === 'HASH').length
+  const rangeCount = normalized.filter(({ role }) => role === 'RANGE').length
+  if (hashCount !== 1 || rangeCount !== normalized.length - 1) {
+    throw new WorkspaceSearchMigrationFailure(
+      'TABLE_SCHEMA_MISMATCH',
+      'A migration table has an invalid key schema.',
+    )
+  }
+  return normalized.sort((left, right) => keyRoleRank(left.role) - keyRoleRank(right.role))
+}
+
+/**
+ * Normalizes one global secondary index.
+ *
+ * @param index - Raw DynamoDB index description.
+ * @param attributeTypes - Validated attribute definitions.
+ * @returns Normalized active index descriptor.
+ */
+function normalizeGlobalSecondaryIndex(
+  index: GlobalSecondaryIndexDescription,
+  attributeTypes: ReadonlyMap<string, ScalarAttributeType>,
+): MigrationGlobalSecondaryIndex {
+  const projection = index.Projection?.ProjectionType
+  if (
+    !isNonEmptyString(index.IndexName) ||
+    index.IndexStatus !== 'ACTIVE' ||
+    (
+      projection !== 'ALL' &&
+      projection !== 'INCLUDE' &&
+      projection !== 'KEYS_ONLY'
+    )
+  ) {
+    throw new WorkspaceSearchMigrationFailure(
+      'TABLE_SCHEMA_MISMATCH',
+      'A migration table has an invalid global secondary index.',
+    )
+  }
+  const nonKeyAttributes = projection === 'INCLUDE'
+    ? [...(index.Projection?.NonKeyAttributes ?? [])].sort(compareUtf8Ordinal)
+    : []
+  if (
+    projection === 'INCLUDE' &&
+    (
+      nonKeyAttributes.length === 0 ||
+      nonKeyAttributes.some((value) => !isNonEmptyString(value))
+    )
+  ) {
+    throw new WorkspaceSearchMigrationFailure(
+      'TABLE_SCHEMA_MISMATCH',
+      'A migration table has an invalid INCLUDE projection.',
+    )
+  }
+  return {
+    name: index.IndexName,
+    key: normalizeKeySchema(index.KeySchema, attributeTypes),
+    projection,
+    nonKeyAttributes,
+    status: 'ACTIVE',
+  }
+}
+
+/**
+ * Reads DynamoDB TTL state without accepting transitional states.
+ *
+ * @param output - Raw DescribeTimeToLive output.
+ * @returns Normalized TTL state.
+ */
+function readTtl(
+  output: DescribeTimeToLiveCommandOutput,
+): MigrationTableIdentity['ttl'] {
+  const description = output.TimeToLiveDescription
+  if (description?.TimeToLiveStatus === 'DISABLED') {
+    return { status: 'DISABLED' }
+  }
+  if (
+    description?.TimeToLiveStatus === 'ENABLED' &&
+    isNonEmptyString(description.AttributeName)
+  ) {
+    return {
+      status: 'ENABLED',
+      attribute: description.AttributeName,
+    }
+  }
+  throw new WorkspaceSearchMigrationFailure(
+    'TABLE_SCHEMA_MISMATCH',
+    'A migration table has an invalid or transitional TTL state.',
+  )
+}
+
+/**
+ * Reads the DynamoDB encryption family without exposing a KMS key identifier.
+ *
+ * @param table - Raw DynamoDB table description.
+ * @returns Normalized encryption family.
+ */
+function readEncryption(
+  table: TableDescription,
+): MigrationTableIdentity['encryption'] {
+  const description = table.SSEDescription
+  if (!description) return 'AWS_OWNED'
+  if (description.Status !== 'ENABLED') {
+    throw new WorkspaceSearchMigrationFailure(
+      'TABLE_SCHEMA_MISMATCH',
+      'A migration table has an invalid encryption state.',
+    )
+  }
+  if (description.SSEType === 'KMS') return 'KMS'
+  if (description.SSEType === 'AES256') return 'AWS_OWNED'
+  throw new WorkspaceSearchMigrationFailure(
+    'TABLE_SCHEMA_MISMATCH',
+    'A migration table has an unsupported encryption state.',
+  )
+}
+
+/**
+ * Reads required point-in-time recovery evidence.
+ *
+ * @param output - Raw DescribeContinuousBackups output.
+ * @param role - Table role used in a secret-free error.
+ * @returns Normalized enabled PITR evidence.
+ */
+function readPitrEvidence(
+  output: DescribeContinuousBackupsCommandOutput,
+  role: WorkspaceSearchMigrationTableRole,
+): MigrationTableIdentity['pitr'] {
+  const description = output.ContinuousBackupsDescription
+  const recovery = description?.PointInTimeRecoveryDescription
+  if (
+    description?.ContinuousBackupsStatus !== 'ENABLED' ||
+    recovery?.PointInTimeRecoveryStatus !== 'ENABLED' ||
+    !recovery.EarliestRestorableDateTime ||
+    !recovery.LatestRestorableDateTime
+  ) {
+    throw invalidPitrEvidence(role)
+  }
+  const earliestRestorableTime = toCanonicalTimestamp(
+    recovery.EarliestRestorableDateTime,
+  )
+  const latestRestorableTime = toCanonicalTimestamp(
+    recovery.LatestRestorableDateTime,
+  )
+  if (
+    recovery.EarliestRestorableDateTime.getTime() >
+    recovery.LatestRestorableDateTime.getTime()
+  ) {
+    throw invalidPitrEvidence(role)
+  }
+  return {
+    status: 'ENABLED',
+    earliestRestorableTime,
+    latestRestorableTime,
+  }
+}
+
+/**
+ * Creates a stable unusable-PITR failure.
+ *
+ * @param role - Logical table role.
+ * @returns Operator-safe PITR failure.
+ */
+function invalidPitrEvidence(
+  role: WorkspaceSearchMigrationTableRole,
+): WorkspaceSearchMigrationFailure {
+  return new WorkspaceSearchMigrationFailure(
+    'PITR_NOT_READY',
+    `The ${role} table does not have usable point-in-time recovery.`,
+  )
+}
+
+/**
+ * Parses a DynamoDB table ARN without accepting endpoints or non-table resources.
+ *
+ * @param value - Candidate ARN.
+ * @returns Account, region, and physical table name.
+ */
+function parseDynamoTableArn(value: string): {
+  /** AWS account in the ARN. */
+  account: string
+  /** AWS region in the ARN. */
+  region: string
+  /** Physical table name in the ARN resource. */
+  tableName: string
+} {
+  const parts = value.split(':')
+  const resource = parts[5]
+  if (
+    parts.length !== 6 ||
+    parts[0] !== 'arn' ||
+    !isNonEmptyString(parts[1]) ||
+    parts[2] !== 'dynamodb' ||
+    !isAwsRegion(parts[3]) ||
+    !isAwsAccount(parts[4]) ||
+    !resource?.startsWith('table/')
+  ) {
+    throw new WorkspaceSearchMigrationFailure(
+      'IDENTITY_MISMATCH',
+      'A migration table ARN is invalid.',
+    )
+  }
+  const tableName = resource.slice('table/'.length)
+  if (!isNonEmptyString(tableName) || tableName.includes('/')) {
+    throw new WorkspaceSearchMigrationFailure(
+      'IDENTITY_MISMATCH',
+      'A migration table ARN resource is invalid.',
+    )
+  }
+  return {
+    account: parts[4],
+    region: parts[3],
+    tableName,
+  }
+}
+
+/**
+ * Creates a complete role-keyed table record and rejects omissions.
+ *
+ * @param entries - Measured role and identity pairs.
+ * @returns Complete identity record.
+ */
+function createTableIdentityRecord(
+  entries: readonly (readonly [
+    WorkspaceSearchMigrationTableRole,
+    MigrationTableIdentity,
+  ])[],
+): Readonly<Record<WorkspaceSearchMigrationTableRole, MigrationTableIdentity>> {
+  const map = new Map(entries)
+  const projectDirectory = map.get('project-directory')
+  const workItems = map.get('work-items')
+  const collaboration = map.get('collaboration')
+  const documents = map.get('documents')
+  const workspaceSearch = map.get('workspace-search')
+  const migrationState = map.get('migration-state')
+  if (
+    !projectDirectory ||
+    !workItems ||
+    !collaboration ||
+    !documents ||
+    !workspaceSearch ||
+    !migrationState ||
+    map.size !== 6
+  ) {
+    throw new WorkspaceSearchMigrationFailure(
+      'INVALID_ARGUMENT',
+      'Every migration table role must be configured exactly once.',
+    )
+  }
+  return {
+    'project-directory': projectDirectory,
+    'work-items': workItems,
+    collaboration,
+    documents,
+    'workspace-search': workspaceSearch,
+    'migration-state': migrationState,
+  }
+}
+
+/**
+ * Validates operator-selected account, region, profile, and resources.
+ *
+ * @param requested - Candidate requested resources.
+ */
+function validateRequestedResources(
+  requested: WorkspaceSearchMigrationRequestedResources,
+): void {
+  if (
+    !isAwsAccount(requested.account) ||
+    !isAwsRegion(requested.region) ||
+    !isSafeProfile(requested.profile) ||
+    !/^[0-9a-f]{40}$/.test(requested.commit) ||
+    !isNonEmptyString(requested.journalBucket) ||
+    !isKmsKeyArn(requested.journalKeyArn, requested.account, requested.region)
+  ) {
+    throw new WorkspaceSearchMigrationFailure(
+      'INVALID_ARGUMENT',
+      'Migration account, region, profile, commit, or journal configuration is invalid.',
+    )
+  }
+  const uniqueNames = new Set(Object.values(requested.tables))
+  if (
+    uniqueNames.size !== 6 ||
+    [...uniqueNames].some((tableName) => !isNonEmptyString(tableName))
+  ) {
+    throw new WorkspaceSearchMigrationFailure(
+      'INVALID_ARGUMENT',
+      'Migration table names must be non-empty and physically distinct.',
+    )
+  }
+}
+
+/**
+ * Creates one expected key descriptor.
+ *
+ * @param name - Physical attribute name.
+ * @param role - Partition or sort key role.
+ * @param type - DynamoDB scalar type.
+ * @returns Key descriptor.
+ */
+function keyAttribute(
+  name: string,
+  role: MigrationKeyAttribute['role'],
+  type: MigrationKeyAttribute['type'],
+): MigrationKeyAttribute {
+  return { name, role, type }
+}
+
+/**
+ * Creates one expected global secondary index descriptor.
+ *
+ * @param name - Physical index name.
+ * @param key - Ordered key descriptor.
+ * @param projection - Projection type.
+ * @returns Expected active index descriptor.
+ */
+function globalSecondaryIndex(
+  name: string,
+  key: readonly MigrationKeyAttribute[],
+  projection: MigrationGlobalSecondaryIndex['projection'],
+): MigrationGlobalSecondaryIndex {
+  return {
+    name,
+    key,
+    projection,
+    nonKeyAttributes: [],
+    status: 'ACTIVE',
+  }
+}
+
+/**
+ * Reads a table role produced by Object.entries.
+ *
+ * @param value - Candidate role.
+ * @returns Valid table role.
+ */
+function readTableRole(value: string): WorkspaceSearchMigrationTableRole {
+  if (
+    value === 'project-directory' ||
+    value === 'work-items' ||
+    value === 'collaboration' ||
+    value === 'documents' ||
+    value === 'workspace-search' ||
+    value === 'migration-state'
+  ) {
+    return value
+  }
+  throw new WorkspaceSearchMigrationFailure(
+    'INVALID_ARGUMENT',
+    'Migration table role is invalid.',
+  )
+}
+
+/**
+ * Creates a stable journal-configuration error.
+ *
+ * @param setting - Secret-free setting label.
+ * @returns Operator-safe migration failure.
+ */
+function invalidJournalConfiguration(setting: string): WorkspaceSearchMigrationFailure {
+  return new WorkspaceSearchMigrationFailure(
+    'CONFIGURATION_DRIFT',
+    `The migration journal ${setting} does not satisfy the v1 safety contract.`,
+  )
+}
+
+/**
+ * Converts a Date to canonical UTC form.
+ *
+ * @param value - Date returned by an AWS SDK response.
+ * @returns Canonical timestamp.
+ */
+function toCanonicalTimestamp(value: Date): string {
+  const time = value.getTime()
+  if (!Number.isFinite(time)) {
+    throw new WorkspaceSearchMigrationFailure(
+      'IDENTITY_MISMATCH',
+      'An AWS control-plane timestamp is invalid.',
+    )
+  }
+  return new Date(time).toISOString()
+}
+
+/**
+ * Returns a stable key-role sort rank.
+ *
+ * @param role - Partition or sort key role.
+ * @returns Sort rank.
+ */
+function keyRoleRank(role: MigrationKeyAttribute['role']): number {
+  return role === 'HASH' ? 0 : 1
+}
+
+/**
+ * Checks an AWS account identifier.
+ *
+ * @param value - Candidate account.
+ * @returns Whether the account is a 12-digit identifier.
+ */
+function isAwsAccount(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9]{12}$/.test(value)
+}
+
+/**
+ * Checks an AWS ARN partition identifier.
+ *
+ * @param value - Candidate partition.
+ * @returns Whether the partition uses an official AWS partition shape.
+ */
+function isAwsPartition(value: unknown): value is string {
+  return typeof value === 'string' && /^aws(?:-[a-z0-9-]+)?$/.test(value)
+}
+
+/**
+ * Checks a bounded conventional AWS region identifier.
+ *
+ * @param value - Candidate region.
+ * @returns Whether the region is safe in an official AWS endpoint.
+ */
+function isAwsRegion(value: unknown): value is string {
+  return typeof value === 'string' &&
+    value.length >= 8 &&
+    value.length <= 32 &&
+    /^[a-z]{2}(?:-[a-z0-9]+)+-[0-9]+$/.test(value)
+}
+
+/**
+ * Checks a shared-configuration profile without accepting whitespace or paths.
+ *
+ * @param value - Candidate profile.
+ * @returns Whether the profile is safe and explicit.
+ */
+function isSafeProfile(value: unknown): value is string {
+  return typeof value === 'string' &&
+    /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value)
+}
+
+/**
+ * Checks one IAM role name carried by an STS assumed-role ARN.
+ *
+ * @param value - Candidate role name.
+ * @returns Whether the segment uses the bounded IAM role-name shape.
+ */
+function isIamRoleName(value: unknown): value is string {
+  return typeof value === 'string' &&
+    value.length >= 1 &&
+    value.length <= 64 &&
+    /^[A-Za-z0-9_+=,.@-]+$/.test(value)
+}
+
+/**
+ * Checks the final STS assumed-role session segment.
+ *
+ * @param value - Candidate role session name.
+ * @returns Whether the name uses the bounded STS session-name shape.
+ */
+function isRoleSessionName(value: unknown): value is string {
+  return typeof value === 'string' &&
+    /^[A-Za-z0-9_+=,.@-]{2,64}$/.test(value)
+}
+
+/**
+ * Checks a KMS key ARN in the requested account and region.
+ *
+ * @param value - Candidate key ARN.
+ * @param account - Requested account.
+ * @param region - Requested region.
+ * @returns Whether the ARN identifies a key in the requested environment.
+ */
+function isKmsKeyArn(value: unknown, account: string, region: string): value is string {
+  if (typeof value !== 'string') return false
+  const parts = value.split(':')
+  return parts.length === 6 &&
+    parts[0] === 'arn' &&
+    isNonEmptyString(parts[1]) &&
+    parts[2] === 'kms' &&
+    parts[3] === region &&
+    parts[4] === account &&
+    /^key\/[A-Za-z0-9-]+$/.test(parts[5] ?? '')
+}
+
+/**
+ * Checks a DynamoDB scalar attribute type.
+ *
+ * @param value - Candidate type.
+ * @returns Whether the value is B, N, or S.
+ */
+function isScalarAttributeType(value: unknown): value is ScalarAttributeType {
+  return value === 'B' || value === 'N' || value === 'S'
+}
+
+/**
+ * Checks non-empty text without normalizing it.
+ *
+ * @param value - Candidate text.
+ * @returns Whether the value contains non-whitespace text.
+ */
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+/**
+ * Compares strings by UTF-8 bytes.
+ *
+ * @param left - First string.
+ * @param right - Second string.
+ * @returns Negative, zero, or positive comparison value.
+ */
+function compareUtf8Ordinal(left: string, right: string): number {
+  return Buffer.compare(Buffer.from(left), Buffer.from(right))
+}
