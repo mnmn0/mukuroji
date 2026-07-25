@@ -111,6 +111,99 @@ test('derives document keys from entity identity instead of trusting producer in
   })).toThrow('record key does not match')
 })
 
+test('binds live projections to a deterministic server-owned content digest', async () => {
+  const first = createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'work-item',
+    entityId: 'team/core/issue/issue-1',
+    title: 'Release readiness',
+    url: '/teams/core/issues?issueId=issue-1',
+    teamId: 'core',
+    customFields: {
+      effort: 8,
+      channel: ['web', 'mobile'],
+    },
+  })
+  const reordered = createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'work-item',
+    entityId: 'team/core/issue/issue-1',
+    title: 'Release readiness',
+    url: '/teams/core/issues?issueId=issue-1',
+    teamId: 'core',
+    customFields: {
+      channel: ['web', 'mobile'],
+      effort: 8,
+    },
+  })
+  const changed = createWorkspaceSearchDocument({
+    ...first,
+    title: 'Changed after migration planning',
+  })
+  const replacementEquivalentKeyOrder = createWorkspaceSearchDocument({
+    ...first,
+    customFields: {
+      '\uD800': 'first',
+      '\uD801': 'second',
+    },
+  })
+  const reversedReplacementEquivalentKeyOrder = createWorkspaceSearchDocument({
+    ...first,
+    customFields: {
+      '\uD801': 'second',
+      '\uD800': 'first',
+    },
+  })
+  const { projectionDigest: legacyProjectionDigest, ...legacyDocument } = first
+  const legacyClient = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([legacyDocument]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const corruptClient = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([{
+      ...first,
+      projectionDigest: '0'.repeat(64),
+    }]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const access = {
+    viewerUserId: 'viewer@example.com',
+    isSystemAdmin: false,
+    projectIds: new Set<string>(),
+    teamIds: new Set(['core']),
+  }
+  const errorSpy = spyOn(console, 'error').mockImplementation(() => {})
+
+  try {
+    expect(legacyProjectionDigest).toMatch(/^[0-9a-f]{64}$/u)
+    expect(first.projectionDigest).toBe(
+      '111162f5fe98780edfe8e96adfc1e1ad5981a8cced24b7143264b3f06e62d186',
+    )
+    expect(first.projectionDigest).toBe(reordered.projectionDigest)
+    expect(first.projectionDigest).not.toBe(changed.projectionDigest)
+    expect(replacementEquivalentKeyOrder.projectionDigest).toBe(
+      reversedReplacementEquivalentKeyOrder.projectionDigest,
+    )
+    expect((await legacyClient.search({
+      workspaceId: 'workspace-1',
+      access,
+    })).results.map((result) => result.id)).toEqual([
+      'team/core/issue/issue-1',
+    ])
+    expect((await corruptClient.search({
+      workspaceId: 'workspace-1',
+      access,
+    })).results).toEqual([])
+    expect(errorSpy).toHaveBeenCalled()
+  } finally {
+    errorSpy.mockRestore()
+  }
+})
+
 test('normalizes realtime and backfill Work Item and comment projection fields consistently', () => {
   const workItem = createWorkItemWorkspaceSearchDocument({
     workspaceId: 'workspace-1',
