@@ -176,32 +176,29 @@ test('binds live projections to a deterministic server-owned content digest', as
     projectIds: new Set<string>(),
     teamIds: new Set(['core']),
   }
-  const errorSpy = spyOn(console, 'error').mockImplementation(() => {})
 
-  try {
-    expect(legacyProjectionDigest).toMatch(/^[0-9a-f]{64}$/u)
-    expect(first.projectionDigest).toBe(
-      '111162f5fe98780edfe8e96adfc1e1ad5981a8cced24b7143264b3f06e62d186',
-    )
-    expect(first.projectionDigest).toBe(reordered.projectionDigest)
-    expect(first.projectionDigest).not.toBe(changed.projectionDigest)
-    expect(replacementEquivalentKeyOrder.projectionDigest).toBe(
-      reversedReplacementEquivalentKeyOrder.projectionDigest,
-    )
-    expect((await legacyClient.search({
-      workspaceId: 'workspace-1',
-      access,
-    })).results.map((result) => result.id)).toEqual([
-      'team/core/issue/issue-1',
-    ])
-    expect((await corruptClient.search({
-      workspaceId: 'workspace-1',
-      access,
-    })).results).toEqual([])
-    expect(errorSpy).toHaveBeenCalled()
-  } finally {
-    errorSpy.mockRestore()
-  }
+  expect(legacyProjectionDigest).toMatch(/^[0-9a-f]{64}$/u)
+  expect(first.projectionDigest).toBe(
+    '111162f5fe98780edfe8e96adfc1e1ad5981a8cced24b7143264b3f06e62d186',
+  )
+  expect(first.projectionDigest).toBe(reordered.projectionDigest)
+  expect(first.projectionDigest).not.toBe(changed.projectionDigest)
+  expect(replacementEquivalentKeyOrder.projectionDigest).toBe(
+    reversedReplacementEquivalentKeyOrder.projectionDigest,
+  )
+  expect((await legacyClient.search({
+    workspaceId: 'workspace-1',
+    access,
+  })).results.map((result) => result.id)).toEqual([
+    'team/core/issue/issue-1',
+  ])
+  expect(corruptClient.search({
+    workspaceId: 'workspace-1',
+    access,
+  })).rejects.toMatchObject({
+    code: 'InvalidSearchDocument',
+    status: 503,
+  })
 })
 
 test('normalizes realtime and backfill Work Item and comment projection fields consistently', () => {

@@ -257,6 +257,9 @@ export class WorkspaceSearchError extends Error {
   }
 }
 
+/** Marks persisted projection content that disagrees with its server-owned digest. */
+class WorkspaceSearchProjectionDigestMismatchError extends WorkspaceSearchError {}
+
 /**
  * API handler と backfill が利用する Workspace search client contract です。
  */
@@ -1964,7 +1967,7 @@ function readWorkspaceSearchDocument(value: Record<string, unknown>) {
       value.projectionDigest !== undefined
       && value.projectionDigest !== document.projectionDigest
     ) {
-      throw new WorkspaceSearchError(
+      throw new WorkspaceSearchProjectionDigestMismatchError(
         503,
         'InvalidSearchDocument',
         'Search index projection digest is invalid.',
@@ -1972,6 +1975,9 @@ function readWorkspaceSearchDocument(value: Record<string, unknown>) {
     }
     return document
   } catch (error) {
+    if (error instanceof WorkspaceSearchProjectionDigestMismatchError) {
+      throw error
+    }
     throw new WorkspaceSearchError(
       503,
       'InvalidSearchDocument',
@@ -1985,6 +1991,9 @@ function readWorkspaceSearchDocumentSafely(value: Record<string, unknown>) {
   try {
     return readWorkspaceSearchDocument(value)
   } catch (error) {
+    if (error instanceof WorkspaceSearchProjectionDigestMismatchError) {
+      throw error
+    }
     console.error('Workspace search skipped an invalid index document.', error)
     return undefined
   }
