@@ -16,6 +16,7 @@ import {
   buildFileStorage,
   configureFileStorageApiBoundary,
 } from './subsystems/file-storage';
+import { buildMigrationStorage } from './subsystems/migration-storage';
 import { buildStackOutputs } from './subsystems/outputs';
 import { buildRuntimeControls } from './subsystems/runtime-controls';
 import { buildAuditProjectionWorker } from './subsystems/workers/audit-projection';
@@ -47,6 +48,13 @@ export class CdkStack extends cdk.Stack {
     const runtimeControls = buildRuntimeControls(this, { lambdaBuildPaths });
     const dataStores = buildDataStores(this, {
       connectorRuntimeConfiguration: parameters.connectorRuntimeConfiguration,
+    });
+    const migrationStorage = buildMigrationStorage(this, {
+      collaborationTable: dataStores.collaborationTable,
+      documentsTable: dataStores.documentsTable,
+      projectDirectoryTable: dataStores.projectDirectoryTable,
+      workItemsTable: dataStores.workItemsTable,
+      workspaceSearchTable: dataStores.workspaceSearchTable,
     });
     const fileStorage = buildFileStorage(this, {
       allowedOrigins: parameters.taskApiAllowedOriginList,
@@ -145,6 +153,7 @@ export class CdkStack extends cdk.Stack {
     buildStackOutputs(this, {
       ...dataStores,
       ...fileStorage,
+      ...migrationStorage,
       ...workerChannels,
       ...apiTransports,
       ...enterpriseIdentityWorkers,

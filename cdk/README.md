@@ -98,6 +98,9 @@ templateとdeployed configurationの両方で照合します。
 - `EnterpriseIdentityTableName`（Workspace generation/`CONTROL` checkpoint、global domain claim、SSO/policy/role、SCIM projection、provisioning run の store。Enterprise Identity 専用 GSI は持ちません）
 - `WorkItemCollaborationTableName`, `RealtimeSessionsTableName`, `RealtimeWebSocketUrl`
 - `WorkspaceSearchTableName`（検索文書、saved view、ユーザー別 view preference）
+- `WorkspaceSearchMigrationStateTableName`（lease、checkpoint、operation receipt 用の retained/PITR store）
+- `WorkspaceSearchMigrationJournalBucketName`, `WorkspaceSearchMigrationJournalKeyArn`（30日間の Object Lock COMPLIANCE 付き lossless preimage journal。segment は2 MiB以下の単一 `PutObject` に限定し、multipart upload は許可しません。専用 access log bucket は current/noncurrent version を90日保持）
+- `WorkspaceSearchMigrationOperatorPolicyArn`（承認済み operator principal へ明示的に attach する未接続 policy）
 - `DeveloperPlatformTableName`, `DeveloperPlatformLookupIndexName`
 - `WebhookDeliveryQueueUrl`, `WebhookDeliveryDlqUrl`
 - `WorkItemImportBucketName`, `WorkItemImportQueueUrl`, `WorkItemImportDlqUrl`

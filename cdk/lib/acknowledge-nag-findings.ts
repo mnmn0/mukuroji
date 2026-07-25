@@ -151,6 +151,10 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     ],
   ],
   [
+    'AwsSolutions-IAM5[Resource::<WorkspaceSearchMigrationJournalBucket4E515934.Arn>/workspace-search/v1/*]',
+    ['WorkspaceSearchMigrationOperatorPolicy/Resource'],
+  ],
+  [
     'AwsSolutions-IAM5[Resource::<AutomationTableE3D67F0D.Arn>/index/*]',
     [
       'ApiAutomationDataPolicy/Resource',
@@ -308,6 +312,7 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::<TeamIssuesTable189D851D.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<RealtimeSessionsTable607096EB.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<WorkItemImportBucket14068778.Arn>/work-item-imports/*]',
+    'AwsSolutions-IAM5[Resource::<WorkspaceSearchMigrationJournalBucket4E515934.Arn>/workspace-search/v1/*]',
     'AwsSolutions-IAM5[Resource::<AutomationTableE3D67F0D.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<RequestIntakeTable608708D4.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*]',
