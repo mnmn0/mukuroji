@@ -10,6 +10,10 @@ import {
   requireCommitOid,
   requireMigrationIdentifier,
   serializeCanonicalJson,
+  type WorkspaceSearchMaintenanceEvidenceReceipt,
+  type WorkspaceSearchOperationMarker,
+  type WorkspaceSearchOperationReceipt,
+  type WorkspaceSearchRollbackReceipt,
   type WorkspaceSearchJournalSegment,
   WorkspaceSearchMigrationFailure,
   zeroHexDigest,
@@ -137,6 +141,120 @@ describe('Workspace Search migration contract', () => {
       contentDigest: createMigrationDigest('next-journal-bytes'),
       versionId: 'version-three',
     })).not.toBe(first)
+  })
+
+  test('represents applied and already-current operations as durable markers', () => {
+    const configurationHash = createMigrationDigest('configuration')
+    const operationId = createMigrationDigest('already-current-operation')
+    const targetKeyDigest = createMigrationDigest('target-key')
+    const sourceDigest = createMigrationDigest('source')
+    const afterDigest = createMigrationDigest('after')
+    const maintenanceEvidenceReceiptDigest = createMigrationDigest(
+      'maintenance-evidence-receipt',
+    )
+    const alreadyCurrent: WorkspaceSearchOperationMarker = {
+      kind: 'workspace-search-operation-already-current',
+      markerVersion: 1,
+      runId: 'run-1',
+      configurationHash,
+      operationId,
+      planSequence: 1,
+      planOperationDigest: createMigrationDigest('already-current-plan-entry'),
+      targetKeyDigest,
+      sourceDigest,
+      afterDigest,
+      fenceToken: 3,
+      maintenanceEvidenceReceiptDigest,
+      recordedAt: '2026-07-25T04:01:00.000Z',
+    }
+    const applied: WorkspaceSearchOperationReceipt = {
+      kind: 'workspace-search-operation-applied',
+      markerVersion: 1,
+      runId: 'run-1',
+      configurationHash,
+      operationId: createMigrationDigest('applied-operation'),
+      planSequence: 2,
+      planOperationDigest: createMigrationDigest('applied-plan-entry'),
+      sequence: 1,
+      targetKeyDigest,
+      sourceDigest,
+      beforeDigest: createMigrationDigest('before'),
+      afterDigest,
+      fenceToken: 3,
+      maintenanceEvidenceReceiptDigest,
+      journal: {
+        objectKey: 'workspace-search/v1/run-1/segments/000000000001.json',
+        versionId: 'version-one',
+        contentDigest: createMigrationDigest('journal-bytes'),
+        headDigest: createMigrationDigest('journal-head'),
+      },
+      committedAt: '2026-07-25T04:02:00.000Z',
+    }
+    const markers: readonly WorkspaceSearchOperationMarker[] = [
+      alreadyCurrent,
+      applied,
+    ]
+    const accumulator = new MigrationDigestAccumulator()
+
+    for (const marker of markers) {
+      accumulator.add(createMigrationDigest(marker))
+    }
+
+    expect(accumulator.size()).toBe(2)
+    expect(markers.flatMap((marker) => (
+      marker.kind === 'workspace-search-operation-applied'
+        ? [marker.sequence]
+        : []
+    ))).toEqual([1])
+    expect(createMigrationDigest(alreadyCurrent)).not.toBe(
+      createMigrationDigest(applied),
+    )
+  })
+
+  test('binds fresh maintenance evidence to one run and lease fence', () => {
+    const receipt: WorkspaceSearchMaintenanceEvidenceReceipt = {
+      runId: 'run-1',
+      evidenceDigest: createMigrationDigest('maintenance-evidence-bytes'),
+      evidenceLocator: 'change:OPS-2026',
+      runtimeRevision: 42,
+      fenceToken: 3,
+      validatedAt: '2026-07-25T04:00:00.000Z',
+      oldestObservationAt: '2026-07-25T04:00:00.000Z',
+      validUntil: '2026-07-25T04:05:00.001Z',
+    }
+
+    expect(isCanonicalTimestamp(receipt.validatedAt)).toBe(true)
+    expect(isCanonicalTimestamp(receipt.validUntil)).toBe(true)
+    expect(Date.parse(receipt.validatedAt)).toBeLessThan(
+      Date.parse(receipt.validUntil),
+    )
+    expect(createMigrationDigest(receipt)).not.toBe(
+      createMigrationDigest({ ...receipt, fenceToken: receipt.fenceToken + 1 }),
+    )
+  })
+
+  test('keeps rollback markers distinct from apply markers', () => {
+    const rollback: WorkspaceSearchRollbackReceipt = {
+      kind: 'workspace-search-operation-rolled-back',
+      markerVersion: 1,
+      runId: 'run-1',
+      configurationHash: createMigrationDigest('configuration'),
+      operationId: createMigrationDigest('operation'),
+      sequence: 1,
+      applyReceiptDigest: createMigrationDigest('apply-receipt'),
+      targetKeyDigest: createMigrationDigest('target-key'),
+      beforeDigest: createMigrationDigest('before'),
+      afterDigest: createMigrationDigest('after'),
+      journalHeadDigest: createMigrationDigest('journal-head'),
+      fenceToken: 4,
+      maintenanceEvidenceReceiptDigest: createMigrationDigest(
+        'maintenance-evidence-receipt',
+      ),
+      rolledBackAt: '2026-07-25T05:00:00.000Z',
+    }
+
+    expect(rollback.kind).toBe('workspace-search-operation-rolled-back')
+    expect(rollback.markerVersion).toBe(1)
   })
 
   test('keeps restart-safe target keys and snapshots JSON-safe in journal segments', () => {

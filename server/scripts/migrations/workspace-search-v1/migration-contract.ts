@@ -272,8 +272,10 @@ export type EncodedMigrationItemSnapshot =
       digest: string
     }
 
-/** Raw source binding used to prevent source drift during a target mutation. */
+/** Exact present source binding used to prevent source drift during a target mutation. */
 export type MigrationSourceBinding = {
+  /** Indicates that the planned source item must still exist. */
+  exists: true
   /** Logical source name. */
   source: WorkspaceSearchMigrationSourceName
   /** Immutable physical source TableId. */
@@ -282,18 +284,41 @@ export type MigrationSourceBinding = {
   tableName: string
   /** Exact low-level source primary key. */
   key: DynamoAttributeMap
+  /** Digest of the exact source primary key. */
+  keyDigest: string
   /** Exact low-level source item observed while planning. */
   item: DynamoAttributeMap
   /** Digest of the exact source item. */
   itemDigest: string
 }
 
+/** Exact absent source binding used to prevent orphan-reconciliation drift. */
+export type MigrationAbsentSourceBinding = {
+  /** Indicates that no source item may exist at the planned key. */
+  exists: false
+  /** Logical source name. */
+  source: WorkspaceSearchMigrationSourceName
+  /** Immutable physical source TableId. */
+  tableId: string
+  /** Exact source table name. */
+  tableName: string
+  /** Exact low-level source primary key whose absence was planned. */
+  key: DynamoAttributeMap
+  /** Digest of the exact source primary key. */
+  keyDigest: string
+}
+
+/** Exact present or absent source condition checked with every target mutation. */
+export type MigrationSourceCondition =
+  | MigrationAbsentSourceBinding
+  | MigrationSourceBinding
+
 /** Deterministic target plan derived from one source row or orphan target row. */
 export type WorkspaceSearchMigrationOperation = {
   /** Stable operation identifier that does not change when source content drifts. */
   operationId: string
-  /** Source binding, absent only for orphan-target reconciliation. */
-  source?: MigrationSourceBinding
+  /** Exact present or absent source state required when this operation commits. */
+  sourceCondition: MigrationSourceCondition
   /** Exact low-level target primary key. */
   targetKey: DynamoAttributeMap
   /** Digest used for target-receipt lookup without exposing tenant keys. */
@@ -314,30 +339,56 @@ export type WorkspaceSearchMigrationLease = {
   ownerId: string
   /** Monotonically increasing takeover token. */
   fenceToken: number
-  /** Canonical UTC lease expiry. */
+  /** Canonical UTC exclusive lease expiry. */
   expiresAt: string
   /** Canonical UTC heartbeat time. */
   heartbeatAt: string
+}
+
+/** Fresh maintenance evidence bound to one run and fenced lease holder. */
+export type WorkspaceSearchMaintenanceEvidenceReceipt = {
+  /** Operator-selected run identifier bound to the validated evidence. */
+  runId: string
+  /** Digest of the exact maintenance evidence bytes validated for this lease. */
+  evidenceDigest: string
+  /** Secret-free external locator copied from the validated evidence. */
+  evidenceLocator: string
+  /** Runtime-control revision shared by every validated surface observation. */
+  runtimeRevision: number
+  /** Fence token whose mutating transactions may consume this receipt. */
+  fenceToken: number
+  /** Canonical UTC time at which the evidence was validated. */
+  validatedAt: string
+  /** Oldest drain-completion or surface-observation time controlling freshness. */
+  oldestObservationAt: string
+  /** Canonical UTC exclusive deadline at which the evidence must be refreshed. */
+  validUntil: string
 }
 
 /** Durable lifecycle state for one migration run. */
 export type WorkspaceSearchMigrationRunState = {
   /** Operator-selected run identifier. */
   runId: string
+  /** Positive optimistic-concurrency revision for every durable state update. */
+  revision: number
   /** Reviewed configuration digest. */
   configurationHash: string
   /** Exact measured configuration. */
   configuration: WorkspaceSearchMigrationConfiguration
-  /** Digest of the reviewed maintenance evidence bytes. */
+  /** Digest of the current validated maintenance evidence bytes. */
   maintenanceEvidenceDigest: string
-  /** Secret-free maintenance evidence locator. */
+  /** Secret-free locator from the current validated maintenance evidence. */
   maintenanceEvidenceLocator: string
+  /** Fresh evidence validation bound to the current fenced lease. */
+  maintenanceEvidenceReceipt: WorkspaceSearchMaintenanceEvidenceReceipt
   /** Digest of the exact reviewed dry-run evidence bytes. */
   dryRunEvidenceDigest: string
   /** Digest of the sealed deterministic operation plan. */
   planDigest: string
   /** Exact number of operations represented by the sealed plan. */
   planOperationCount: number
+  /** Immutable S3 version that anchors the reviewed plan root and count. */
+  planSealReference: WorkspaceSearchPlanSealReference
   /** Current state-machine status. */
   status:
     | 'applying'
@@ -346,7 +397,11 @@ export type WorkspaceSearchMigrationRunState = {
     | 'verified'
     | 'rolling-back'
     | 'rolled-back'
-  /** Highest committed journal sequence. */
+  /** Exact number of durable apply markers, including already-current operations. */
+  appliedOperationCount: number
+  /** Restorable digest state for every durable apply marker. */
+  applyMarkerDigestState: MigrationDigestState
+  /** Highest committed journal sequence, counting target mutations only. */
   journalSequence: number
   /** Hash-chain head of the highest committed journal metadata row. */
   journalHeadDigest: string
@@ -354,6 +409,8 @@ export type WorkspaceSearchMigrationRunState = {
   apply: WorkspaceSearchMigrationTraversalProgress
   /** Durable verification traversal state once verification begins. */
   verification?: WorkspaceSearchMigrationTraversalProgress
+  /** Immutable complete verification evidence once verification succeeds. */
+  verificationEvidenceReference?: WorkspaceSearchVerificationEvidenceReference
   /** Immutable S3 seal anchoring the final apply chain and aggregate. */
   applySeal?: WorkspaceSearchApplySealReference
   /** Reverse-order rollback progress once rollback begins. */
@@ -370,6 +427,76 @@ export type WorkspaceSearchMigrationTraversalProgress = {
   sources: Readonly<Record<WorkspaceSearchMigrationSourceName, MigrationSourceCheckpoint>>
   /** Durable target-reconciliation or verification checkpoint. */
   target: MigrationSourceCheckpoint
+}
+
+/** Immutable root document anchoring one reviewed deterministic operation plan. */
+export type WorkspaceSearchPlanSeal = {
+  /** Plan-seal document discriminator. */
+  kind: 'workspace-search-plan-seal'
+  /** Plan-seal schema version. */
+  sealVersion: 1
+  /** Stable migration identifier. */
+  migrationId: typeof WORKSPACE_SEARCH_MIGRATION_ID
+  /** Migration behavior version. */
+  migrationVersion: typeof WORKSPACE_SEARCH_MIGRATION_VERSION
+  /** Operator-selected run identifier. */
+  runId: string
+  /** Reviewed configuration digest. */
+  configurationHash: string
+  /** Merkle root of the ordered exact operation plan. */
+  planDigest: string
+  /** Exact number of leaves in the ordered operation plan. */
+  planOperationCount: number
+  /** Canonical UTC plan sealing time. */
+  createdAt: string
+}
+
+/** Immutable S3 locator for one exact reviewed plan-seal version. */
+export type WorkspaceSearchPlanSealReference = {
+  /** Exact S3 object key. */
+  objectKey: string
+  /** Exact immutable S3 object version. */
+  versionId: string
+  /** SHA-256 digest of the exact canonical plan-seal bytes. */
+  contentDigest: string
+}
+
+/** Immutable complete full-scan evidence for one successful verification. */
+export type WorkspaceSearchVerificationEvidence = {
+  /** Verification-evidence document discriminator. */
+  kind: 'workspace-search-verification-evidence'
+  /** Verification-evidence schema version. */
+  evidenceVersion: 1
+  /** Stable migration identifier. */
+  migrationId: typeof WORKSPACE_SEARCH_MIGRATION_ID
+  /** Migration behavior version. */
+  migrationVersion: typeof WORKSPACE_SEARCH_MIGRATION_VERSION
+  /** Operator-selected run identifier. */
+  runId: string
+  /** Reviewed configuration digest. */
+  configurationHash: string
+  /** Merkle root of the exact reviewed operation plan. */
+  planDigest: string
+  /** Exact reviewed plan operation count. */
+  planOperationCount: number
+  /** Content digest of the immutable complete-plan apply seal. */
+  applySealContentDigest: string
+  /** Exact completed source and target verification checkpoints. */
+  verification: WorkspaceSearchMigrationTraversalProgress
+  /** Stable successful verification result. */
+  status: 'pass'
+  /** Canonical UTC verification completion time. */
+  completedAt: string
+}
+
+/** Immutable S3 locator for complete verification evidence. */
+export type WorkspaceSearchVerificationEvidenceReference = {
+  /** Exact S3 object key. */
+  objectKey: string
+  /** Exact immutable S3 object version. */
+  versionId: string
+  /** SHA-256 digest of the exact canonical verification evidence bytes. */
+  contentDigest: string
 }
 
 /** Serializable internal state required to resume an order-independent digest. */
@@ -444,14 +571,22 @@ export type WorkspaceSearchJournalReference = {
   headDigest: string
 }
 
-/** Durable operation receipt written atomically with one target mutation. */
+/** Durable operation marker written atomically with one target mutation. */
 export type WorkspaceSearchOperationReceipt = {
+  /** Operation-marker discriminator. */
+  kind: 'workspace-search-operation-applied'
+  /** Operation-marker schema version. */
+  markerVersion: 1
   /** Operator-selected run identifier. */
   runId: string
   /** Reviewed configuration digest. */
   configurationHash: string
   /** Stable operation identifier. */
   operationId: string
+  /** One-based position of this operation in the immutable sealed plan. */
+  planSequence: number
+  /** Digest of the exact immutable planned operation. */
+  planOperationDigest: string
   /** Monotonic application sequence. */
   sequence: number
   /** Digest of the exact target primary key. */
@@ -464,11 +599,50 @@ export type WorkspaceSearchOperationReceipt = {
   afterDigest: string
   /** Fence token that committed the operation. */
   fenceToken: number
+  /** Digest of the exact fresh maintenance-evidence receipt authorizing the commit. */
+  maintenanceEvidenceReceiptDigest: string
   /** Immutable preimage journal reference. */
   journal: WorkspaceSearchJournalReference
   /** Canonical UTC commit time. */
   committedAt: string
 }
+
+/** Durable marker for a planned operation whose intended target was already current. */
+export type WorkspaceSearchAlreadyCurrentOperationMarker = {
+  /** Operation-marker discriminator. */
+  kind: 'workspace-search-operation-already-current'
+  /** Operation-marker schema version. */
+  markerVersion: 1
+  /** Operator-selected run identifier. */
+  runId: string
+  /** Reviewed configuration digest. */
+  configurationHash: string
+  /** Stable operation identifier. */
+  operationId: string
+  /** One-based position of this operation in the immutable sealed plan. */
+  planSequence: number
+  /** Digest of the exact immutable planned operation. */
+  planOperationDigest: string
+  /** Digest of the exact target primary key. */
+  targetKeyDigest: string
+  /** Digest of the exact source item, absent for orphan reconciliation. */
+  sourceDigest?: string
+  /** Digest of the already-current intended target state. */
+  afterDigest: string
+  /** Fence token that recorded the operation. */
+  fenceToken: number
+  /** Digest of the exact fresh maintenance-evidence receipt authorizing the marker. */
+  maintenanceEvidenceReceiptDigest: string
+  /** Canonical UTC time at which the no-op marker was recorded. */
+  recordedAt: string
+}
+
+/**
+ * Durable apply marker covering both target mutations and already-current operations.
+ */
+export type WorkspaceSearchOperationMarker =
+  | WorkspaceSearchAlreadyCurrentOperationMarker
+  | WorkspaceSearchOperationReceipt
 
 /** Immutable apply-chain seal stored separately from mutable DynamoDB state. */
 export type WorkspaceSearchApplySeal = {
@@ -484,20 +658,28 @@ export type WorkspaceSearchApplySeal = {
   runId: string
   /** Reviewed configuration digest. */
   configurationHash: string
+  /** Whether the seal covers the complete plan or an aborted committed prefix. */
+  scope: 'committed-prefix' | 'complete-plan'
+  /** Digest of the immutable operation plan bound to this run. */
+  planDigest: string
+  /** Exact operation count in the immutable operation plan. */
+  planOperationCount: number
   /** Highest contiguous committed journal sequence. */
   journalSequence: number
   /** Final independently anchored journal-chain head. */
   journalHeadDigest: string
-  /** Exact count of committed apply receipts. */
-  receiptCount: number
-  /** Digest of the complete applied operation aggregate. */
-  applyAggregateDigest: string
+  /** Exact count of durable apply markers, including already-current operations. */
+  markerCount: number
+  /** Digest of the complete durable apply-marker aggregate. */
+  applyMarkerAggregateDigest: string
   /** Canonical UTC seal creation time. */
   createdAt: string
 }
 
 /** Immutable reference to the independently anchored apply-chain seal. */
 export type WorkspaceSearchApplySealReference = {
+  /** Whether the immutable seal covers the complete plan or a committed prefix. */
+  scope: WorkspaceSearchApplySeal['scope']
   /** Exact S3 object key. */
   objectKey: string
   /** Exact immutable S3 object version. */
@@ -516,12 +698,14 @@ export type WorkspaceSearchRollbackProgress = {
   expectedHeadDigest: string
   /** Exact count of operations already restored. */
   restored: number
-  /** Optimistic-concurrency revision for rollback progress updates. */
-  revision: number
 }
 
 /** Durable marker committed atomically with one reverse target mutation. */
 export type WorkspaceSearchRollbackReceipt = {
+  /** Rollback-marker discriminator. */
+  kind: 'workspace-search-operation-rolled-back'
+  /** Rollback-marker schema version. */
+  markerVersion: 1
   /** Operator-selected run identifier. */
   runId: string
   /** Reviewed configuration digest. */
@@ -542,6 +726,8 @@ export type WorkspaceSearchRollbackReceipt = {
   journalHeadDigest: string
   /** Current fence token that committed the rollback transaction. */
   fenceToken: number
+  /** Digest of the exact fresh maintenance-evidence receipt authorizing the rollback. */
+  maintenanceEvidenceReceiptDigest: string
   /** Canonical UTC rollback commit time. */
   rolledBackAt: string
 }

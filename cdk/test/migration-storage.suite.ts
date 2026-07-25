@@ -374,6 +374,21 @@ test('Workspace Search migration operator policy is unattached and least privile
     statement.Condition !== undefined &&
     JSON.stringify(statement.Resource).includes(stateTableId)
   );
+  const unconditionedStateMutationStatement = statements.find((statement) =>
+    (
+      statement.Action === 'dynamodb:PutItem' ||
+      statement.Action === 'dynamodb:UpdateItem' ||
+      (
+        Array.isArray(statement.Action) &&
+        (
+          statement.Action.includes('dynamodb:PutItem') ||
+          statement.Action.includes('dynamodb:UpdateItem')
+        )
+      )
+    ) &&
+    statement.Condition === undefined &&
+    JSON.stringify(statement.Resource).includes(stateTableId)
+  );
   const journalPutStatement = statements.find((statement) =>
     statement.Action === 's3:PutObject'
   );
@@ -428,6 +443,7 @@ test('Workspace Search migration operator policy is unattached and least privile
       'dynamodb:EnclosingOperation': ['TransactWriteItems'],
     },
   });
+  expect(unconditionedStateMutationStatement).toBeUndefined();
   expect(journalBucketStatement?.Resource).toEqual({
     'Fn::GetAtt': [journalBucketId, 'Arn'],
   });
