@@ -35,6 +35,9 @@ jobs:
       - name: Strict typecheck shared contracts
         run: bun run typecheck:contracts
 
+      - name: Strict typecheck Public API compatibility checker
+        run: bun run typecheck:api-contract
+
       - name: Strict typecheck all Server TypeScript
         run: bun run typecheck:server
 
@@ -61,6 +64,15 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Check tested Public API snapshot freshness
+        run: |
+          if [[ -f contracts/openapi/public-api-v1.json ]]; then
+            bun run api:contract:check
+          fi
+
+      - name: Test Public API compatibility checker
+        run: bun run api:contract:test
 
       - name: Run Server unit and integration tests
         run: bun run server:test
