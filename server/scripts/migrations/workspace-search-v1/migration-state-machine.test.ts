@@ -299,6 +299,7 @@ function createEvidenceReceipt(
  *
  * @param runId - Run owning the plan.
  * @param configurationHash - Reviewed configuration digest.
+ * @param dryRunEvidenceDigest - Exact reviewed dry-run evidence digest.
  * @param planDigest - Exact Merkle root.
  * @param planOperationCount - Exact leaf count.
  * @returns Canonical plan seal and reference.
@@ -306,6 +307,7 @@ function createEvidenceReceipt(
 function createPlanSeal(
   runId: string,
   configurationHash: string,
+  dryRunEvidenceDigest: string,
   planDigest: string,
   planOperationCount: number,
 ): {
@@ -316,13 +318,17 @@ function createPlanSeal(
 } {
   const seal: WorkspaceSearchPlanSeal = {
     kind: 'workspace-search-plan-seal',
-    sealVersion: 1,
+    sealVersion: 2,
     migrationId: 'workspace-search-maintenance',
     migrationVersion: 1,
     runId,
     configurationHash,
+    dryRunEvidenceDigest,
+    planningSnapshotDigest: createMigrationDigest('planning-snapshot'),
     planDigest,
     planOperationCount,
+    sourceOperationCount: planOperationCount,
+    orphanOperationCount: 0,
     createdAt: '2026-07-25T04:00:00.000Z',
   }
   return {
@@ -527,6 +533,7 @@ function createRunFixture(
   const planEvidence = createPlanSeal(
     'run-2026-07-25',
     configurationHash,
+    createMigrationDigest('dry-run-evidence'),
     planDigest,
     noOps.length,
   )
@@ -538,7 +545,7 @@ function createRunFixture(
     configuration,
     configurationHash,
     maintenanceEvidenceReceipt: createEvidenceReceipt(lease),
-    dryRunEvidenceDigest: createMigrationDigest('dry-run-evidence'),
+    dryRunEvidenceDigest: planEvidence.seal.dryRunEvidenceDigest,
     planDigest,
     planOperationCount: noOps.length,
     planSeal: planEvidence.seal,
@@ -2379,6 +2386,93 @@ describe('Workspace Search migration state machine', () => {
     )).toEqual(renewed.maintenanceEvidenceReceipt)
   })
 
+  test('binds run creation to the reviewed dry run and consistent plan counts', () => {
+    const fixture = createRunFixture([true])
+    const lease = createLease()
+    const candidates: readonly WorkspaceSearchPlanSeal[] = [
+      {
+        ...fixture.planSeal,
+        dryRunEvidenceDigest: createMigrationDigest('different-dry-run'),
+      },
+      {
+        ...fixture.planSeal,
+        planningSnapshotDigest: 'invalid-planning-snapshot-digest',
+      },
+      {
+        ...fixture.planSeal,
+        sourceOperationCount: fixture.planSeal.sourceOperationCount + 1,
+      },
+    ]
+
+    for (const planSeal of candidates) {
+      expectSyncMigrationFailure(
+        () => createWorkspaceSearchMigrationRunState({
+          runId: fixture.state.runId,
+          lease,
+          ownerId: lease.ownerId,
+          configurationHash: fixture.state.configurationHash,
+          configuration: fixture.state.configuration,
+          maintenanceEvidenceReceipt:
+            fixture.state.maintenanceEvidenceReceipt,
+          dryRunEvidenceDigest: fixture.state.dryRunEvidenceDigest,
+          planDigest: fixture.state.planDigest,
+          planOperationCount: fixture.state.planOperationCount,
+          planSeal,
+          planSealReference: {
+            ...fixture.planSealReference,
+            contentDigest: createMigrationDigest(planSeal),
+          },
+          createdAt: fixture.state.createdAt,
+        }),
+        'INVALID_STATE',
+      )
+    }
+
+    const emptyPlanDigest = createEmptyWorkspaceSearchPlanDigest()
+    const nonemptySealWithEmptyRoot: WorkspaceSearchPlanSeal = {
+      ...fixture.planSeal,
+      planDigest: emptyPlanDigest,
+    }
+    expectSyncMigrationFailure(
+      () => createWorkspaceSearchMigrationRunState({
+        runId: fixture.state.runId,
+        lease,
+        ownerId: lease.ownerId,
+        configurationHash: fixture.state.configurationHash,
+        configuration: fixture.state.configuration,
+        maintenanceEvidenceReceipt:
+          fixture.state.maintenanceEvidenceReceipt,
+        dryRunEvidenceDigest: fixture.state.dryRunEvidenceDigest,
+        planDigest: emptyPlanDigest,
+        planOperationCount: fixture.state.planOperationCount,
+        planSeal: nonemptySealWithEmptyRoot,
+        planSealReference: {
+          ...fixture.planSealReference,
+          contentDigest: createMigrationDigest(nonemptySealWithEmptyRoot),
+        },
+        createdAt: fixture.state.createdAt,
+      }),
+      'INVALID_STATE',
+    )
+
+    expectSyncMigrationFailure(
+      () => validateWorkspaceSearchMigrationRunState({
+        ...fixture.state,
+        planDigest: createEmptyWorkspaceSearchPlanDigest(),
+      }),
+      'INVALID_STATE',
+    )
+
+    const emptyFixture = createRunFixture([])
+    expectSyncMigrationFailure(
+      () => validateWorkspaceSearchMigrationRunState({
+        ...emptyFixture.state,
+        planDigest: createMigrationDigest('nonempty-plan-root'),
+      }),
+      'INVALID_STATE',
+    )
+  })
+
   test('parses exact evidence bytes, derives their deadline, and rejects invalid checkpoints', () => {
     const lease = createLease()
     const receipt = createWorkspaceSearchMaintenanceEvidenceReceipt({
@@ -2504,6 +2598,29 @@ describe('Workspace Search migration state machine', () => {
           sources: {
             ...emptyPlan.state.apply.sources,
             'work-items': wrongCursorCheckpoint,
+          },
+        },
+      }),
+      'INVALID_STATE',
+    )
+
+    const incompletePlan = createRunFixture([true, true])
+    const advancedCheckpoint: MigrationSourceCheckpoint = {
+      ...initialCheckpoint,
+      completed: true,
+      aggregate: {
+        ...initialCheckpoint.aggregate,
+        pageCount: 1,
+      },
+    }
+    expectSyncMigrationFailure(
+      () => validateWorkspaceSearchMigrationRunState({
+        ...incompletePlan.state,
+        apply: {
+          ...incompletePlan.state.apply,
+          sources: {
+            ...incompletePlan.state.apply.sources,
+            'project-directory': advancedCheckpoint,
           },
         },
       }),
@@ -2724,6 +2841,60 @@ describe('Workspace Search migration state machine', () => {
     )).toEqual(result.event.marker)
     expect(fixture.port.readTargetSnapshot(planned.operation.targetKeyDigest))
       .toEqual(planned.operation.before)
+  })
+
+  test('starts post-apply traversal only after every plan operation is durable', async () => {
+    const fixture = await createPersistedRun([true, true])
+    fixture.port.setClock('2026-07-25T04:00:05.000Z')
+    await expectMigrationFailure(
+      () => fixture.port.saveApplyCheckpoint({
+        expectedRevision: fixture.state.revision,
+        lease: fixture.port.currentLeaseClaim(),
+        location: 'project-directory',
+      }),
+      'INVALID_STATE',
+    )
+    expect((await fixture.port.readRunState(fixture.state.runId))?.revision)
+      .toBe(fixture.state.revision)
+
+    const firstPlan = fixture.plans[0]
+    const secondPlan = fixture.plans[1]
+    if (!firstPlan || !secondPlan) {
+      throw new TestAdapterFailure('Expected two plan rows.')
+    }
+    const first = await commitPlannedOperation(
+      fixture.port,
+      fixture.state,
+      firstPlan,
+      '2026-07-25T04:00:10.000Z',
+    )
+    fixture.port.setClock('2026-07-25T04:00:15.000Z')
+    await expectMigrationFailure(
+      () => fixture.port.saveApplyCheckpoint({
+        expectedRevision: first.state.revision,
+        lease: fixture.port.currentLeaseClaim(),
+        location: 'project-directory',
+      }),
+      'INVALID_STATE',
+    )
+    expect((await fixture.port.readRunState(fixture.state.runId))?.revision)
+      .toBe(first.state.revision)
+
+    const second = await commitPlannedOperation(
+      fixture.port,
+      first.state,
+      secondPlan,
+      '2026-07-25T04:00:20.000Z',
+    )
+    fixture.port.setClock('2026-07-25T04:00:25.000Z')
+    const checkpointed = await fixture.port.saveApplyCheckpoint({
+      expectedRevision: second.state.revision,
+      lease: fixture.port.currentLeaseClaim(),
+      location: 'project-directory',
+    })
+    expect(checkpointed.apply.sources['project-directory'].completed).toBe(
+      true,
+    )
   })
 
   test('requires journal durability, exposes response-loss markers, and rejects stale retries', async () => {
@@ -3005,6 +3176,25 @@ describe('Workspace Search migration state machine', () => {
         reference: prefix.reference,
       },
     })
+    const emptyCheckpoint = createEmptyWorkspaceSearchMigrationCheckpoint()
+    const advancedCheckpoint: MigrationSourceCheckpoint = {
+      ...emptyCheckpoint,
+      completed: true,
+      aggregate: {
+        ...emptyCheckpoint.aggregate,
+        pageCount: 1,
+      },
+    }
+    expectSyncMigrationFailure(
+      () => validateWorkspaceSearchMigrationRunState({
+        ...state,
+        apply: {
+          ...state.apply,
+          target: advancedCheckpoint,
+        },
+      }),
+      'INVALID_STATE',
+    )
     const reverseEvent = createRollbackCommand(
       mutation.receipt,
       mutation.segment,
@@ -3042,6 +3232,16 @@ describe('Workspace Search migration state machine', () => {
     })
 
     expect(state.status).toBe('rolled-back')
+    expectSyncMigrationFailure(
+      () => validateWorkspaceSearchMigrationRunState({
+        ...state,
+        apply: {
+          ...state.apply,
+          target: advancedCheckpoint,
+        },
+      }),
+      'INVALID_STATE',
+    )
     const restored = fixture.port.readTargetSnapshot(
       planned.operation.targetKeyDigest,
     )

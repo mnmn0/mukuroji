@@ -1,8 +1,16 @@
 import { createHash } from 'node:crypto'
 import type { AttributeValue } from '@aws-sdk/client-dynamodb'
+import { hasOnlyPairedSurrogates } from './migration-value-guards'
 
 const canonicalNumberPattern =
   /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$/u
+
+/** Maximum item size accepted by DynamoDB, including names and values. */
+export const DYNAMODB_MAX_ITEM_SIZE_BYTES = 400 * 1024
+
+const maximumDynamoDbDocumentDepth = 32
+const documentContainerOverheadBytes = 3
+const documentElementOverheadBytes = 1
 
 /**
  * Stable failure raised when DynamoDB attribute evidence is not canonical.
@@ -147,7 +155,7 @@ export type EncodedAttributeMap = Readonly<Record<string, EncodedAttributeValue>
  * @returns Strict tagged JSON-safe representation.
  */
 export function encodeAttributeValue(value: AttributeValue): EncodedAttributeValue {
-  return encodeUnknownAttributeValue(value)
+  return runCodecBoundary(() => encodeUnknownAttributeValue(value))
 }
 
 /**
@@ -157,46 +165,48 @@ export function encodeAttributeValue(value: AttributeValue): EncodedAttributeVal
  * @returns Raw low-level DynamoDB attribute.
  */
 export function decodeAttributeValue(value: unknown): AttributeValue {
-  const record = requireRecord(value)
-  const keys = Object.keys(record)
-  const type = record.type
+  return runCodecBoundary(() => {
+    const record = requireRecord(value)
+    const keys = Object.keys(record)
+    const type = record.type
 
-  if (type === 'NULL') {
-    requireExactKeys(keys, ['type'])
-    return { NULL: true }
-  }
+    if (type === 'NULL') {
+      requireExactKeys(keys, ['type'])
+      return { NULL: true }
+    }
 
-  requireExactKeys(keys, ['type', 'value'])
+    requireExactKeys(keys, ['type', 'value'])
 
-  if (type === 'S') {
-    return { S: requireString(record.value) }
-  }
-  if (type === 'N') {
-    return { N: requireNumberString(record.value) }
-  }
-  if (type === 'B') {
-    return { B: decodeCanonicalBase64(record.value) }
-  }
-  if (type === 'SS') {
-    return { SS: decodeStringSet(record.value) }
-  }
-  if (type === 'NS') {
-    return { NS: decodeNumberSet(record.value) }
-  }
-  if (type === 'BS') {
-    return { BS: decodeBinarySet(record.value) }
-  }
-  if (type === 'M') {
-    return { M: decodeAttributeMap(record.value) }
-  }
-  if (type === 'L') {
-    return { L: decodeAttributeList(record.value) }
-  }
-  if (type === 'BOOL') {
-    return { BOOL: requireBoolean(record.value) }
-  }
+    if (type === 'S') {
+      return { S: requireString(record.value) }
+    }
+    if (type === 'N') {
+      return { N: requireNumberString(record.value) }
+    }
+    if (type === 'B') {
+      return { B: decodeCanonicalBase64(record.value) }
+    }
+    if (type === 'SS') {
+      return { SS: decodeStringSet(record.value) }
+    }
+    if (type === 'NS') {
+      return { NS: decodeNumberSet(record.value) }
+    }
+    if (type === 'BS') {
+      return { BS: decodeBinarySet(record.value) }
+    }
+    if (type === 'M') {
+      return { M: decodeAttributeMap(record.value) }
+    }
+    if (type === 'L') {
+      return { L: decodeAttributeList(record.value) }
+    }
+    if (type === 'BOOL') {
+      return { BOOL: requireBoolean(record.value) }
+    }
 
-  return failCodec()
+    return failCodec()
+  })
 }
 
 /**
@@ -208,16 +218,18 @@ export function decodeAttributeValue(value: unknown): AttributeValue {
 export function encodeAttributeMap(
   value: Readonly<Record<string, AttributeValue>>,
 ): EncodedAttributeMap {
-  const encoded: Record<string, EncodedAttributeValue> = {}
+  return runCodecBoundary(() => {
+    const encoded: Record<string, EncodedAttributeValue> = {}
 
-  for (const name of Object.keys(value).sort(compareUtf8Ordinal)) {
-    requireAttributeName(name)
-    const attribute = value[name]
-    if (!attribute) return failCodec()
-    defineOwnProperty(encoded, name, encodeAttributeValue(attribute))
-  }
+    for (const name of Object.keys(value).sort(compareUtf8Ordinal)) {
+      requireAttributeName(name)
+      const attribute = value[name]
+      if (!attribute) return failCodec()
+      defineOwnProperty(encoded, name, encodeAttributeValue(attribute))
+    }
 
-  return encoded
+    return encoded
+  })
 }
 
 /**
@@ -227,15 +239,17 @@ export function encodeAttributeMap(
  * @returns Raw low-level DynamoDB item or key.
  */
 export function decodeAttributeMap(value: unknown): Record<string, AttributeValue> {
-  const record = requireRecord(value)
-  const decoded: Record<string, AttributeValue> = {}
+  return runCodecBoundary(() => {
+    const record = requireRecord(value)
+    const decoded: Record<string, AttributeValue> = {}
 
-  for (const name of Object.keys(record).sort(compareUtf8Ordinal)) {
-    requireAttributeName(name)
-    defineOwnProperty(decoded, name, decodeAttributeValue(record[name]))
-  }
+    for (const name of Object.keys(record).sort(compareUtf8Ordinal)) {
+      requireAttributeName(name)
+      defineOwnProperty(decoded, name, decodeAttributeValue(record[name]))
+    }
 
-  return decoded
+    return decoded
+  })
 }
 
 /**
@@ -247,7 +261,7 @@ export function decodeAttributeMap(value: unknown): Record<string, AttributeValu
 export function serializeCanonicalAttributeMap(
   value: Readonly<Record<string, AttributeValue>>,
 ): string {
-  return JSON.stringify(encodeAttributeMap(value))
+  return runCodecBoundary(() => JSON.stringify(encodeAttributeMap(value)))
 }
 
 /**
@@ -257,16 +271,18 @@ export function serializeCanonicalAttributeMap(
  * @returns Raw low-level DynamoDB item or key.
  */
 export function parseCanonicalAttributeMap(text: string): Record<string, AttributeValue> {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(text)
-  } catch {
-    return failCodec()
-  }
+  return runCodecBoundary(() => {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(text)
+    } catch {
+      return failCodec()
+    }
 
-  const decoded = decodeAttributeMap(parsed)
-  if (serializeCanonicalAttributeMap(decoded) !== text) return failCodec()
-  return decoded
+    const decoded = decodeAttributeMap(parsed)
+    if (serializeCanonicalAttributeMap(decoded) !== text) return failCodec()
+    return decoded
+  })
 }
 
 /**
@@ -278,9 +294,43 @@ export function parseCanonicalAttributeMap(text: string): Record<string, Attribu
 export function createAttributeMapDigest(
   value: Readonly<Record<string, AttributeValue>>,
 ): string {
-  return createHash('sha256')
-    .update(serializeCanonicalAttributeMap(value), 'utf8')
-    .digest('hex')
+  return runCodecBoundary(() =>
+    createHash('sha256')
+      .update(serializeCanonicalAttributeMap(value), 'utf8')
+      .digest('hex')
+  )
+}
+
+/**
+ * Calculates the DynamoDB item size represented by one low-level attribute map.
+ *
+ * The calculation follows DynamoDB's documented UTF-8, raw-binary,
+ * number-significance, collection, and nested-document accounting rules.
+ *
+ * @param value - Raw low-level DynamoDB item.
+ * @returns Estimated DynamoDB item bytes, excluding storage-only overhead.
+ */
+export function calculateDynamoDbItemSize(
+  value: Readonly<Record<string, AttributeValue>>,
+): number {
+  return runCodecBoundary(() =>
+    calculateEncodedAttributeMapSize(encodeAttributeMap(value), 0)
+  )
+}
+
+/**
+ * Rejects an item that cannot fit within DynamoDB's 400 KiB item boundary.
+ *
+ * @param value - Raw low-level DynamoDB item.
+ */
+export function validateDynamoDbItemSize(
+  value: Readonly<Record<string, AttributeValue>>,
+): void {
+  runCodecBoundary(() => {
+    if (calculateDynamoDbItemSize(value) > DYNAMODB_MAX_ITEM_SIZE_BYTES) {
+      return failCodec()
+    }
+  })
 }
 
 /**
@@ -296,7 +346,9 @@ export function createAttributeMapDigest(
 export function decodeAttributeMapToNativeRecord(
   value: Readonly<Record<string, AttributeValue>>,
 ): Record<string, unknown> {
-  return decodeEncodedAttributeMapToNativeRecord(encodeAttributeMap(value))
+  return runCodecBoundary(() =>
+    decodeEncodedAttributeMapToNativeRecord(encodeAttributeMap(value))
+  )
 }
 
 /**
@@ -317,6 +369,101 @@ function decodeEncodedAttributeMapToNativeRecord(
   }
 
   return decoded
+}
+
+/**
+ * Calculates one encoded map's nested DynamoDB size.
+ *
+ * @param value - Validated encoded map.
+ * @param depth - Number of enclosing List or Map containers.
+ * @returns Exact name, value, and nested-element bytes for the map entries.
+ */
+function calculateEncodedAttributeMapSize(
+  value: EncodedAttributeMap,
+  depth: number,
+): number {
+  let size = 0
+  for (const [name, attribute] of Object.entries(value)) {
+    size += Buffer.byteLength(name, 'utf8')
+    size += calculateEncodedAttributeValueSize(attribute, depth)
+  }
+  return size
+}
+
+/**
+ * Calculates one encoded attribute value's DynamoDB size.
+ *
+ * @param value - Validated encoded attribute.
+ * @param depth - Number of enclosing List or Map containers.
+ * @returns DynamoDB value bytes including nested document overhead.
+ */
+function calculateEncodedAttributeValueSize(
+  value: EncodedAttributeValue,
+  depth: number,
+): number {
+  if (value.type === 'S') return Buffer.byteLength(value.value, 'utf8')
+  if (value.type === 'N') return calculateDynamoDbNumberSize(value.value)
+  if (value.type === 'B') return Buffer.from(value.value, 'base64').byteLength
+  if (value.type === 'BOOL' || value.type === 'NULL') return 1
+  if (value.type === 'SS') {
+    return value.value.reduce(
+      (size, member) => size + Buffer.byteLength(member, 'utf8'),
+      0,
+    )
+  }
+  if (value.type === 'NS') {
+    return value.value.reduce(
+      (size, member) => size + calculateDynamoDbNumberSize(member),
+      0,
+    )
+  }
+  if (value.type === 'BS') {
+    return value.value.reduce(
+      (size, member) =>
+        size + Buffer.from(member, 'base64').byteLength,
+      0,
+    )
+  }
+
+  const nestedDepth = depth + 1
+  if (nestedDepth > maximumDynamoDbDocumentDepth) return failCodec()
+  if (value.type === 'L') {
+    return documentContainerOverheadBytes + value.value.reduce(
+      (size, member) =>
+        size +
+        documentElementOverheadBytes +
+        calculateEncodedAttributeValueSize(member, nestedDepth),
+      0,
+    )
+  }
+  return documentContainerOverheadBytes +
+    Object.entries(value.value).reduce(
+      (size, [name, member]) =>
+        size +
+        documentElementOverheadBytes +
+        Buffer.byteLength(name, 'utf8') +
+        calculateEncodedAttributeValueSize(member, nestedDepth),
+      0,
+    )
+}
+
+/**
+ * Estimates DynamoDB's variable-length internal number bytes.
+ *
+ * @param value - Validated exact DynamoDB number spelling.
+ * @returns One byte per two significant digits plus the documented extra byte.
+ */
+function calculateDynamoDbNumberSize(value: string): number {
+  const fingerprint = createNumberValueFingerprint(value)
+  if (fingerprint === '0') return 2
+  const exponentIndex = fingerprint.lastIndexOf('e')
+  const coefficient = exponentIndex < 0
+    ? fingerprint
+    : fingerprint.slice(0, exponentIndex)
+  const digitCount = coefficient.startsWith('-')
+    ? coefficient.length - 1
+    : coefficient.length
+  return Math.ceil(digitCount / 2) + 1
 }
 
 /**
@@ -626,7 +773,13 @@ function requireUniqueBinaryArray(value: unknown): Uint8Array[] {
  * @param value - Candidate name.
  */
 function requireAttributeName(value: string): void {
-  if (!value || Buffer.byteLength(value, 'utf8') > 65_535) return failCodec()
+  if (
+    !value ||
+    !hasOnlyPairedSurrogates(value) ||
+    Buffer.byteLength(value, 'utf8') > 65_535
+  ) {
+    return failCodec()
+  }
 }
 
 /**
@@ -636,7 +789,9 @@ function requireAttributeName(value: string): void {
  * @returns Validated string.
  */
 function requireString(value: unknown): string {
-  if (typeof value !== 'string') return failCodec()
+  if (typeof value !== 'string' || !hasOnlyPairedSurrogates(value)) {
+    return failCodec()
+  }
   return value
 }
 
@@ -655,11 +810,24 @@ function requireBoolean(value: unknown): boolean {
  * Requires one array.
  *
  * @param value - Candidate value.
- * @returns Validated unknown array.
+ * @returns Fresh dense snapshot of the validated array.
  */
 function requireArray(value: unknown): unknown[] {
   if (!Array.isArray(value)) return failCodec()
-  return value
+  const length = value.length
+  const keys = Object.keys(value)
+  if (
+    keys.length !== length ||
+    keys.some((key, index) => key !== String(index))
+  ) {
+    return failCodec()
+  }
+  const snapshot: unknown[] = []
+  for (let index = 0; index < length; index += 1) {
+    if (!Object.hasOwn(value, index)) return failCodec()
+    snapshot.push(value[index])
+  }
+  return snapshot
 }
 
 /**
@@ -769,6 +937,21 @@ function compareUtf8Ordinal(left: string, right: string): number {
  */
 function compareBytes(left: Uint8Array, right: Uint8Array): number {
   return Buffer.compare(Buffer.from(left), Buffer.from(right))
+}
+
+/**
+ * Converts every public-boundary failure into one fresh stable codec error.
+ *
+ * @param operation - Codec work that may encounter hostile values or accessors.
+ * @returns The successful codec result.
+ */
+function runCodecBoundary<Result>(operation: () => Result): Result {
+  try {
+    return operation()
+  } catch (error: unknown) {
+    void error
+    throw new DynamoDbAttributeCodecError()
+  }
 }
 
 /**

@@ -4,6 +4,7 @@ import {
   createEmptyMigrationScanAggregate,
   createJournalHeadDigest,
   createMigrationDigest,
+  createWorkspaceSearchMigrationScanSnapshotDigest,
   createWorkspaceSearchOperationId,
   isCanonicalTimestamp,
   MigrationDigestAccumulator,
@@ -360,5 +361,58 @@ describe('Workspace Search migration contract', () => {
       pageCount: 0,
     })
     expect(aggregate.keyDigest).toBe(aggregate.contentDigest)
+  })
+
+  test('binds planning snapshots to every source and target aggregate', () => {
+    const configurationHash = createMigrationDigest('configuration')
+    const empty = createEmptyMigrationScanAggregate()
+    const sources = {
+      'project-directory': empty,
+      'work-items': empty,
+      collaboration: empty,
+      documents: empty,
+    }
+    const digest = createWorkspaceSearchMigrationScanSnapshotDigest({
+      configurationHash,
+      sources,
+      target: empty,
+    })
+
+    expect(digest).toBe(createWorkspaceSearchMigrationScanSnapshotDigest({
+      configurationHash,
+      sources: {
+        documents: empty,
+        collaboration: empty,
+        'work-items': empty,
+        'project-directory': empty,
+      },
+      target: empty,
+    }))
+    expect(digest).not.toBe(createWorkspaceSearchMigrationScanSnapshotDigest({
+      configurationHash,
+      sources: {
+        ...sources,
+        documents: {
+          ...empty,
+          scanned: 1,
+          ignored: 1,
+          pageCount: 1,
+          keyDigest: createMigrationDigest('document-key'),
+          contentDigest: createMigrationDigest('document-row'),
+        },
+      },
+      target: empty,
+    }))
+    expect(() => createWorkspaceSearchMigrationScanSnapshotDigest({
+      configurationHash,
+      sources: {
+        ...sources,
+        documents: {
+          ...empty,
+          scanned: 1,
+        },
+      },
+      target: empty,
+    })).toThrow(WorkspaceSearchMigrationFailure)
   })
 })
