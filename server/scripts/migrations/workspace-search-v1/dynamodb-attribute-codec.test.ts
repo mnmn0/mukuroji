@@ -14,6 +14,7 @@ import {
   serializeCanonicalAttributeMap,
   validateDynamoDbItemSize,
 } from './dynamodb-attribute-codec'
+import { hasCanonicalDenseArrayShape } from './migration-value-guards'
 
 /**
  * Creates an item containing every DynamoDB AttributeValue variant.
@@ -292,6 +293,27 @@ describe('DynamoDB AttributeValue codec', () => {
     })).toEqual({
       L: [{ S: 'first' }],
     })
+  })
+
+  test('rejects symbol and non-enumerable side properties on dense arrays', () => {
+    const symbolSideProperty = ['first']
+    Object.defineProperty(symbolSideProperty, Symbol('side-property'), {
+      configurable: true,
+      enumerable: true,
+      value: 'secret-canary',
+      writable: true,
+    })
+    const hiddenSideProperty = ['first']
+    Object.defineProperty(hiddenSideProperty, 'side-property', {
+      configurable: true,
+      enumerable: false,
+      value: 'secret-canary',
+      writable: true,
+    })
+
+    expect(hasCanonicalDenseArrayShape(['first'])).toBe(true)
+    expect(hasCanonicalDenseArrayShape(symbolSideProperty)).toBe(false)
+    expect(hasCanonicalDenseArrayShape(hiddenSideProperty)).toBe(false)
   })
 
   test('enforces exact string item-size boundaries', () => {

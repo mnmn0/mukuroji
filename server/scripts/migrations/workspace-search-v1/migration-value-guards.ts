@@ -19,16 +19,26 @@ export function hasOnlyPairedSurrogates(value: string): boolean {
 }
 
 /**
- * Checks that an array has only every canonical enumerable numeric index.
+ * Checks that an array has only every canonical enumerable numeric index and
+ * its intrinsic length property.
  *
  * @param value - Runtime value whose callback semantics must match its length.
- * @returns Whether the value is a dense array without enumerable side properties.
+ * @returns Whether the value is a dense array without side properties.
  */
 export function hasCanonicalDenseArrayShape(
   value: unknown,
 ): value is readonly unknown[] {
   if (!Array.isArray(value)) return false
-  const keys = Object.keys(value)
-  return keys.length === value.length &&
-    keys.every((key, index) => key === String(index))
+  const length = value.length
+  const keys = Reflect.ownKeys(value)
+  if (
+    keys.length !== length + 1 ||
+    keys[length] !== 'length'
+  ) {
+    return false
+  }
+  return keys.slice(0, length).every((key, index) => {
+    if (typeof key !== 'string' || key !== String(index)) return false
+    return Object.getOwnPropertyDescriptor(value, key)?.enumerable === true
+  })
 }
