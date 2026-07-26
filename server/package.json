@@ -15,6 +15,7 @@
     "@aws-sdk/client-cloudwatch": "3.1057.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.1057.0",
     "@aws-sdk/client-dynamodb": "3.1057.0",
+    "@aws-sdk/client-kms": "3.1057.0",
     "@aws-sdk/client-s3": "^3.1057.0",
     "@aws-sdk/client-secrets-manager": "^3.1057.0",
     "@aws-sdk/client-sqs": "^3.1057.0",
@@ -23,6 +24,7 @@
     "@aws-sdk/lib-dynamodb": "^3.1057.0",
     "@aws-sdk/s3-request-presigner": "^3.1057.0",
     "@mukuroji/contracts": "workspace:*",
+    "@smithy/core": "3.30.0",
     "hono": "^4.12.21"
   },
   "devDependencies": {
