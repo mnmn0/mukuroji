@@ -308,7 +308,9 @@ export type WorkspaceSearchMigrationStateEvent =
 export type WorkspaceSearchMigrationDirectStateEvent = Exclude<
   WorkspaceSearchMigrationStateEvent,
   | WorkspaceSearchApplyCheckpointRecordedEvent
+  | WorkspaceSearchApplyOperationRecordedEvent
   | WorkspaceSearchMaintenanceEvidenceRenewedEvent
+  | WorkspaceSearchRollbackOperationRecordedEvent
   | WorkspaceSearchVerificationCheckpointRecordedEvent
 >
 
