@@ -244,10 +244,26 @@ function requireCanonicalMigrationEntityId(
   entityType: SearchEntityType,
   entityId: string,
 ): void {
-  if (entityId.length === 0 || entityId !== entityId.trim()) {
+  if (!isCanonicalWorkspaceSearchMigrationEntityId(entityType, entityId)) {
     return failJournal()
   }
-  if (entityType === 'document') return
+}
+
+/**
+ * Checks the unambiguous entity ID grammar emitted by migration v1 mappers.
+ *
+ * @param entityType - Migration-owned Search entity family.
+ * @param entityId - Decoded canonical entity identity.
+ * @returns Whether the identity can be journaled and replayed unambiguously.
+ */
+export function isCanonicalWorkspaceSearchMigrationEntityId(
+  entityType: SearchEntityType,
+  entityId: string,
+): boolean {
+  if (entityId.length === 0 || entityId !== entityId.trim()) {
+    return false
+  }
+  if (entityType === 'document') return true
 
   const parts = entityId.split('/')
   if (
@@ -256,7 +272,7 @@ function requireCanonicalMigrationEntityId(
     parts[0] === 'team' &&
     isCanonicalEntityIdPart(parts[1])
   ) {
-    return
+    return true
   }
   if (
     (entityType === 'project' || entityType === 'work-item') &&
@@ -266,7 +282,7 @@ function requireCanonicalMigrationEntityId(
     parts[2] === (entityType === 'project' ? 'project' : 'issue') &&
     isCanonicalEntityIdPart(parts[3])
   ) {
-    return
+    return true
   }
   if (
     entityType === 'comment' &&
@@ -278,9 +294,9 @@ function requireCanonicalMigrationEntityId(
     parts[4] === 'comment' &&
     isCanonicalEntityIdPart(parts[5])
   ) {
-    return
+    return true
   }
-  return failJournal()
+  return false
 }
 
 /**

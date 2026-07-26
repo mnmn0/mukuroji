@@ -14,6 +14,7 @@ export {
   createWorkspaceSearchProjectionDigest,
   ensureLocalWorkspaceSearchTable,
   migrateSavedWorkspaceView,
+  readWorkspaceSearchDocument,
   type CreateSavedWorkspaceViewRequest,
   type DeleteSavedWorkspaceViewRequest,
   type ListSavedWorkspaceViewsInput,

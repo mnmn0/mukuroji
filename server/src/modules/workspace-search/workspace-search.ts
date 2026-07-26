@@ -1963,7 +1963,18 @@ function normalizeSearchViewLayout(layout: SearchViewLayout) {
   } satisfies SearchViewLayout
 }
 
-function readWorkspaceSearchDocument(value: Record<string, unknown>) {
+/**
+ * Reads one strict current or legacy Workspace Search projection.
+ *
+ * Legacy rows may omit `projectionDigest`; when present, the digest must match
+ * the complete normalized projection or the read fails closed.
+ *
+ * @param value - Untrusted persisted projection fields.
+ * @returns Fully normalized document with its server-owned current digest.
+ */
+export function readWorkspaceSearchDocument(
+  value: Record<string, unknown>,
+): WorkspaceSearchDocument {
   if (value.schemaVersion !== SEARCH_SCHEMA_VERSION || value.entryType !== 'search-document') {
     throw new WorkspaceSearchError(503, 'InvalidSearchDocument', 'Search index contains an invalid document.')
   }

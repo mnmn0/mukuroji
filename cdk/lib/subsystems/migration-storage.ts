@@ -275,13 +275,6 @@ export function buildMigrationStorage(
         }),
         new iam.PolicyStatement({
           actions: [
-            'dynamodb:PutItem',
-            'dynamodb:UpdateItem',
-          ],
-          resources: [workspaceSearchMigrationStateTable.tableArn],
-        }),
-        new iam.PolicyStatement({
-          actions: [
             'dynamodb:ConditionCheckItem',
             'dynamodb:DeleteItem',
             'dynamodb:PutItem',
