@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { AttributeValue } from '@aws-sdk/client-dynamodb'
+import { hasOnlyPairedSurrogates } from './migration-value-guards'
 
 const canonicalNumberPattern =
   /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$/u
@@ -792,26 +793,6 @@ function requireString(value: unknown): string {
     return failCodec()
   }
   return value
-}
-
-/**
- * Rejects lone UTF-16 surrogate code units before UTF-8 ordering or hashing.
- *
- * @param value - Candidate JavaScript string.
- * @returns Whether every surrogate participates in one valid pair.
- */
-function hasOnlyPairedSurrogates(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const codeUnit = value.charCodeAt(index)
-    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
-      const next = value.charCodeAt(index + 1)
-      if (!(next >= 0xdc00 && next <= 0xdfff)) return false
-      index += 1
-    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
-      return false
-    }
-  }
-  return true
 }
 
 /**

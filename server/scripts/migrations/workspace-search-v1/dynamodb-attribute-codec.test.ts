@@ -337,9 +337,12 @@ describe('DynamoDB AttributeValue codec', () => {
       expect(() => decodeAttributeValue({ type: 'SS', value: members }))
         .toThrow(DynamoDbAttributeCodecError)
     }
-    expect(encodeAttributeValue({ S: '\ud83d\ude00' })).toEqual({
+    const pairedSurrogate = String.fromCharCode(0xd83d, 0xde00)
+    expect(pairedSurrogate).toHaveLength(2)
+    expect(() => encodeAttributeValue({ S: pairedSurrogate })).not.toThrow()
+    expect(encodeAttributeValue({ S: pairedSurrogate })).toEqual({
       type: 'S',
-      value: '😀',
+      value: pairedSurrogate,
     })
   })
 

@@ -195,7 +195,9 @@ describe('Workspace Search migration planner', () => {
 
     const sortedTargetDigests = candidates
       .map(({ operation }) => operation.targetKeyDigest)
-      .sort()
+      .sort((left, right) =>
+        Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'))
+      )
     expect(plan.operations.map(({ operation }) => operation.targetKeyDigest))
       .toEqual(sortedTargetDigests)
     expect(plan.operations.map(({ planSequence }) => planSequence))

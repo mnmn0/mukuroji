@@ -53,6 +53,7 @@ import {
   createWorkspaceSearchMigrationDocumentSnapshot,
   createWorkspaceSearchMigrationExistingSnapshot,
 } from './migration-target-snapshot'
+import { hasCanonicalDenseArrayShape } from './migration-value-guards'
 
 /** Origin of one deterministic operation candidate. */
 export type WorkspaceSearchMigrationPlanCandidateOrigin = 'orphan' | 'source'
@@ -468,6 +469,11 @@ function createWorkspaceSearchMigrationOrphanCandidateUnchecked(
  *
  * Ordering uses lowercase target-key digests, not Scan response order or page
  * boundaries. Every target digest must occur exactly once.
+ *
+ * This pure boundary intentionally materializes the complete candidate and
+ * operation lists. Production orchestration must preflight explicit row and
+ * byte limits and run in a bounded operator process; it must not route this
+ * implementation through Lambda until chunked persistence is available.
  *
  * @param input - Run identity, scan evidence, candidates, and seal time.
  * @returns Ordered immutable plan entries and canonical seal.
@@ -1223,21 +1229,6 @@ function equalDigestLists(
     hasCanonicalDenseArrayShape(right) &&
     left.length === right.length &&
     left.every((digest, index) => digest === right[index])
-}
-
-/**
- * Checks that an array has only every canonical enumerable numeric index.
- *
- * @param values - Runtime array whose callback semantics must match its length.
- * @returns Whether the array is dense and has no enumerable side properties.
- */
-function hasCanonicalDenseArrayShape(
-  values: readonly unknown[],
-): boolean {
-  if (!Array.isArray(values)) return false
-  const keys = Object.keys(values)
-  return keys.length === values.length &&
-    keys.every((key, index) => key === String(index))
 }
 
 /**

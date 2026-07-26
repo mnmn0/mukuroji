@@ -2402,10 +2402,6 @@ describe('Workspace Search migration state machine', () => {
         ...fixture.planSeal,
         sourceOperationCount: fixture.planSeal.sourceOperationCount + 1,
       },
-      {
-        ...fixture.planSeal,
-        planDigest: createEmptyWorkspaceSearchPlanDigest(),
-      },
     ]
 
     for (const planSeal of candidates) {
@@ -2431,6 +2427,33 @@ describe('Workspace Search migration state machine', () => {
         'INVALID_STATE',
       )
     }
+
+    const emptyPlanDigest = createEmptyWorkspaceSearchPlanDigest()
+    const nonemptySealWithEmptyRoot: WorkspaceSearchPlanSeal = {
+      ...fixture.planSeal,
+      planDigest: emptyPlanDigest,
+    }
+    expectSyncMigrationFailure(
+      () => createWorkspaceSearchMigrationRunState({
+        runId: fixture.state.runId,
+        lease,
+        ownerId: lease.ownerId,
+        configurationHash: fixture.state.configurationHash,
+        configuration: fixture.state.configuration,
+        maintenanceEvidenceReceipt:
+          fixture.state.maintenanceEvidenceReceipt,
+        dryRunEvidenceDigest: fixture.state.dryRunEvidenceDigest,
+        planDigest: emptyPlanDigest,
+        planOperationCount: fixture.state.planOperationCount,
+        planSeal: nonemptySealWithEmptyRoot,
+        planSealReference: {
+          ...fixture.planSealReference,
+          contentDigest: createMigrationDigest(nonemptySealWithEmptyRoot),
+        },
+        createdAt: fixture.state.createdAt,
+      }),
+      'INVALID_STATE',
+    )
 
     expectSyncMigrationFailure(
       () => validateWorkspaceSearchMigrationRunState({

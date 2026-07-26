@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test'
 import type { AttributeValue } from '@aws-sdk/client-dynamodb'
 import {
   createTeamWorkspaceSearchDocument,
-  type WorkspaceSearchDocument,
 } from '../../../src/modules/workspace-search'
 import {
   createAttributeMapDigest,
@@ -26,6 +25,9 @@ import {
   createWorkspaceSearchPlanLeafDigest,
   type WorkspaceSearchPlannedOperation,
 } from './migration-state-machine'
+import {
+  encodeWorkspaceSearchMigrationDocument,
+} from './migration-target-snapshot'
 import {
   parseWorkspaceSearchDryRunEvidence,
   parseWorkspaceSearchPlannedOperation,
@@ -117,51 +119,6 @@ function createPlanSeal(
 }
 
 /**
- * Encodes one JSON-compatible native value as a low-level AttributeValue.
- *
- * @param value - Native fixture value.
- * @returns Lossless low-level DynamoDB attribute.
- */
-function encodeNativeValue(value: unknown): AttributeValue {
-  if (typeof value === 'string') return { S: value }
-  if (typeof value === 'boolean') return { BOOL: value }
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return { N: String(value) }
-  }
-  if (value === null) return { NULL: true }
-  if (Array.isArray(value)) {
-    return { L: value.map(encodeNativeValue) }
-  }
-  if (isRecord(value)) {
-    return { M: encodeNativeRecord(value) }
-  }
-  throw new Error('Fixture contains an unsupported native value.')
-}
-
-/**
- * Encodes one native record as a low-level DynamoDB item.
- *
- * @param value - Native fixture record.
- * @returns Raw AttributeValue map.
- */
-function encodeNativeRecord(
-  value: Readonly<Record<string, unknown>>,
-): Record<string, AttributeValue> {
-  const result: Record<string, AttributeValue> = {}
-  for (const [name, field] of Object.entries(value)) {
-    if (field !== undefined) {
-      Object.defineProperty(result, name, {
-        configurable: true,
-        enumerable: true,
-        value: encodeNativeValue(field),
-        writable: true,
-      })
-    }
-  }
-  return result
-}
-
-/**
  * Creates one valid planned Team projection containing lossless source extras.
  *
  * @returns Planned operation whose only Merkle leaf is the plan root.
@@ -189,9 +146,7 @@ function createPlannedOperation(): WorkspaceSearchPlannedOperation {
     title: 'チーム',
     subtitle: 'Team',
   })
-  const targetItem = encodeNativeRecord(
-    createDocumentRecord(document),
-  )
+  const targetItem = encodeWorkspaceSearchMigrationDocument(document)
   const targetKey = {
     workspaceId: targetItem.workspaceId,
     recordKey: targetItem.recordKey,
@@ -286,18 +241,6 @@ function createPlannedOperationWithSourceExtra(
       operationDigest,
     }),
   }
-}
-
-/**
- * Copies a search document into a plain enumerable fixture record.
- *
- * @param document - Canonical search projection.
- * @returns Plain native record.
- */
-function createDocumentRecord(
-  document: WorkspaceSearchDocument,
-): Record<string, unknown> {
-  return { ...document }
 }
 
 /**
