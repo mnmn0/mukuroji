@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { AttributeValue } from '@aws-sdk/client-dynamodb'
 import {
+  calculateDynamoDbItemSize,
   createAttributeMapDigest,
   decodeAttributeMap,
   decodeAttributeMapToNativeRecord,
@@ -8,8 +9,10 @@ import {
   DynamoDbAttributeCodecError,
   encodeAttributeMap,
   encodeAttributeValue,
+  DYNAMODB_MAX_ITEM_SIZE_BYTES,
   parseCanonicalAttributeMap,
   serializeCanonicalAttributeMap,
+  validateDynamoDbItemSize,
 } from './dynamodb-attribute-codec'
 
 /**
@@ -219,6 +222,127 @@ describe('DynamoDB AttributeValue codec', () => {
     })).toThrow(DynamoDbAttributeCodecError)
   })
 
+  test('rejects sparse and side-property list or set arrays', () => {
+    const sparseList: AttributeValue[] = [{ S: 'first' }]
+    sparseList.length = 2
+    const sparseStringSet = ['first']
+    sparseStringSet.length = 2
+    const sparseNumberSet = ['1']
+    sparseNumberSet.length = 2
+    const sparseBinarySet = [Uint8Array.from([1])]
+    sparseBinarySet.length = 2
+    const sparseEncodedList: unknown[] = [{ type: 'S', value: 'first' }]
+    sparseEncodedList.length = 2
+
+    const rawValues: AttributeValue[] = [
+      { L: sparseList },
+      { SS: sparseStringSet },
+      { NS: sparseNumberSet },
+      { BS: sparseBinarySet },
+    ]
+    for (const value of rawValues) {
+      expect(() => encodeAttributeValue(value))
+        .toThrow(DynamoDbAttributeCodecError)
+    }
+    expect(() => decodeAttributeValue({
+      type: 'L',
+      value: sparseEncodedList,
+    })).toThrow(DynamoDbAttributeCodecError)
+
+    const replacedIndex: AttributeValue[] = [{ S: 'first' }]
+    replacedIndex.length = 2
+    Object.defineProperty(replacedIndex, 'extra', {
+      configurable: true,
+      enumerable: true,
+      value: { S: 'replacement' },
+      writable: true,
+    })
+    expect(() => encodeAttributeValue({ L: replacedIndex }))
+      .toThrow(DynamoDbAttributeCodecError)
+
+    const hidingList = new Proxy<AttributeValue[]>([{ S: 'first' }], {
+      has(target, property) {
+        return property === '0' ? false : Reflect.has(target, property)
+      },
+    })
+    const hidingStringSet = new Proxy<string[]>(['first'], {
+      has(target, property) {
+        return property === '0' ? false : Reflect.has(target, property)
+      },
+    })
+    const hidingEncodedList = new Proxy<unknown[]>(
+      [{ type: 'S', value: 'first' }],
+      {
+        has(target, property) {
+          return property === '0' ? false : Reflect.has(target, property)
+        },
+      },
+    )
+    expect(encodeAttributeValue({ L: hidingList })).toEqual({
+      type: 'L',
+      value: [{ type: 'S', value: 'first' }],
+    })
+    expect(encodeAttributeValue({ SS: hidingStringSet })).toEqual({
+      type: 'SS',
+      value: ['first'],
+    })
+    expect(decodeAttributeValue({
+      type: 'L',
+      value: hidingEncodedList,
+    })).toEqual({
+      L: [{ S: 'first' }],
+    })
+  })
+
+  test('enforces exact string item-size boundaries', () => {
+    const attributeName = 'payload'
+    const legal = {
+      [attributeName]: {
+        S: '\u0000'.repeat(
+          DYNAMODB_MAX_ITEM_SIZE_BYTES -
+            Buffer.byteLength(attributeName, 'utf8'),
+        ),
+      },
+    }
+    const oversized = {
+      [attributeName]: {
+        S: 'x'.repeat(
+          DYNAMODB_MAX_ITEM_SIZE_BYTES -
+            Buffer.byteLength(attributeName, 'utf8') +
+            1,
+        ),
+      },
+    }
+
+    expect(calculateDynamoDbItemSize(legal))
+      .toBe(DYNAMODB_MAX_ITEM_SIZE_BYTES)
+    expect(() => validateDynamoDbItemSize(legal)).not.toThrow()
+    expect(calculateDynamoDbItemSize(oversized))
+      .toBe(DYNAMODB_MAX_ITEM_SIZE_BYTES + 1)
+    expect(() => validateDynamoDbItemSize(oversized))
+      .toThrow(DynamoDbAttributeCodecError)
+  })
+
+  test('rejects unpaired surrogates before UTF-8 sorting or hashing', () => {
+    const high = '\ud800'
+    const nextHigh = '\ud801'
+    expect(() => encodeAttributeValue({ S: high }))
+      .toThrow(DynamoDbAttributeCodecError)
+    expect(() => encodeAttributeMap({ [high]: { S: 'value' } }))
+      .toThrow(DynamoDbAttributeCodecError)
+    for (const members of [
+      [high, nextHigh],
+      [nextHigh, high],
+    ]) {
+      expect(() => decodeAttributeValue({ type: 'SS', value: members }))
+        .toThrow(DynamoDbAttributeCodecError)
+    }
+    expect(encodeAttributeValue({ S: '\ud83d\ude00' })).toEqual({
+      type: 'S',
+      value: '😀',
+    })
+  })
+
   test('uses stable raw-value-free failures', () => {
     try {
       decodeAttributeValue({ type: 'S', value: 42, canary: 'tenant-secret-canary' })
@@ -230,6 +354,67 @@ describe('DynamoDB AttributeValue codec', () => {
         message: 'INVALID_DYNAMODB_ATTRIBUTE',
       })
       expect(String(error)).not.toContain('tenant-secret-canary')
+    }
+  })
+
+  test('replaces hostile same-class failures at every object boundary', () => {
+    const hostileError = new DynamoDbAttributeCodecError()
+    Object.defineProperty(hostileError, 'message', {
+      configurable: true,
+      value: 'TENANT_SECRET',
+      writable: true,
+    })
+    Object.defineProperty(hostileError, 'code', {
+      configurable: true,
+      value: 'RAW_SECRET_CODE',
+      writable: true,
+    })
+
+    const hostileAttribute: AttributeValue = { S: 'safe' }
+    Object.defineProperty(hostileAttribute, 'S', {
+      configurable: true,
+      enumerable: true,
+      get() {
+        throw hostileError
+      },
+    })
+    const hostileRawMap = new Proxy<Record<string, AttributeValue>>({}, {
+      ownKeys() {
+        throw hostileError
+      },
+    })
+    const hostileEncoded = new Proxy<Record<string, unknown>>({}, {
+      getPrototypeOf() {
+        throw hostileError
+      },
+    })
+    const operations: readonly (() => unknown)[] = [
+      () => encodeAttributeValue(hostileAttribute),
+      () => decodeAttributeValue(hostileEncoded),
+      () => encodeAttributeMap(hostileRawMap),
+      () => decodeAttributeMap(hostileEncoded),
+      () => serializeCanonicalAttributeMap(hostileRawMap),
+      () => createAttributeMapDigest(hostileRawMap),
+      () => calculateDynamoDbItemSize(hostileRawMap),
+      () => validateDynamoDbItemSize(hostileRawMap),
+      () => decodeAttributeMapToNativeRecord(hostileRawMap),
+    ]
+
+    for (const operation of operations) {
+      let caught: unknown
+      try {
+        operation()
+      } catch (error: unknown) {
+        caught = error
+      }
+      expect(caught).toBeInstanceOf(DynamoDbAttributeCodecError)
+      expect(caught).not.toBe(hostileError)
+      expect(caught).toMatchObject({
+        code: 'INVALID_DYNAMODB_ATTRIBUTE',
+        message: 'INVALID_DYNAMODB_ATTRIBUTE',
+      })
+      expect(String(caught)).not.toContain('TENANT_SECRET')
+      expect(String(caught)).not.toContain('RAW_SECRET_CODE')
     }
   })
 })

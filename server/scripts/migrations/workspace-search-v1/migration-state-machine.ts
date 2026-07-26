@@ -10,6 +10,7 @@ import {
   serializeWorkspaceSearchJournalSegment,
 } from './migration-journal'
 import { mapWorkspaceSearchMigrationRow } from './migration-mapper'
+import { encodeWorkspaceSearchMigrationDocument } from './migration-target-snapshot'
 import {
   MAINTENANCE_EVIDENCE_CLOCK_SKEW_SECONDS,
   MAINTENANCE_EVIDENCE_MAX_AGE_SECONDS,
@@ -952,6 +953,15 @@ export function createEmptyWorkspaceSearchPlanDigest(): string {
 export function createWorkspaceSearchMigrationOperationDigest(
   operation: WorkspaceSearchMigrationOperation,
 ): string {
+  requireExactObjectKeys(operation, [
+    'after',
+    'before',
+    'entityType',
+    'operationId',
+    'sourceCondition',
+    'targetKey',
+    'targetKeyDigest',
+  ], 'planned operation')
   requireDigest(operation.operationId, 'operation ID')
   validateSourceCondition(operation)
   validateTargetOperation(operation)
@@ -1054,6 +1064,7 @@ export function createWorkspaceSearchMigrationRunState(
     input.planSealReference,
     input.runId,
     input.configurationHash,
+    input.dryRunEvidenceDigest,
     input.planDigest,
     input.planOperationCount,
     input.createdAt,
@@ -1212,10 +1223,10 @@ export function validateWorkspaceSearchMigrationRunState(
   )
   validatePlanSealReference(state.planSealReference)
   if (
-    state.planOperationCount === 0 &&
-    state.planDigest !== createEmptyWorkspaceSearchPlanDigest()
+    (state.planOperationCount === 0) !==
+      (state.planDigest === createEmptyWorkspaceSearchPlanDigest())
   ) {
-    return failState('Empty migration plan does not use its canonical root.')
+    return failState('Migration plan count does not match its canonical root.')
   }
   requireNonNegativeSafeInteger(
     state.appliedOperationCount,
@@ -1244,6 +1255,14 @@ export function validateWorkspaceSearchMigrationRunState(
   }
 
   validateWorkspaceSearchMigrationTraversal(state.apply, state.configuration)
+  if (
+    state.appliedOperationCount < state.planOperationCount &&
+    !isCanonicalEmptyTraversal(state.apply)
+  ) {
+    return failState(
+      'Apply traversal advanced before every planned operation was durable.',
+    )
+  }
   if (state.verification !== undefined) {
     validateWorkspaceSearchMigrationTraversal(
       state.verification,
@@ -1515,6 +1534,11 @@ function recordApplyCheckpoint(
   event: WorkspaceSearchApplyCheckpointRecordedEvent,
 ): WorkspaceSearchMigrationRunState {
   requireStatus(state, 'applying')
+  if (state.appliedOperationCount !== state.planOperationCount) {
+    return failState(
+      'Apply traversal cannot begin before every planned operation is durable.',
+    )
+  }
   return {
     ...state,
     apply: replaceTraversalCheckpoint(
@@ -2223,6 +2247,32 @@ function validateSourceCondition(
   operation: WorkspaceSearchMigrationOperation,
 ): void {
   const source = operation.sourceCondition
+  if (source.exists !== true && source.exists !== false) {
+    return failState('Planned source discriminator is invalid.')
+  }
+  requireExactObjectKeys(
+    source,
+    source.exists
+      ? [
+          'exists',
+          'item',
+          'itemDigest',
+          'key',
+          'keyDigest',
+          'source',
+          'tableId',
+          'tableName',
+        ]
+      : [
+          'exists',
+          'key',
+          'keyDigest',
+          'source',
+          'tableId',
+          'tableName',
+        ],
+    'planned source condition',
+  )
   if (!isWorkspaceSearchMigrationSourceName(source.source)) {
     return failState('Planned operation uses an unsupported source.')
   }
@@ -2299,7 +2349,7 @@ function validateDeterministicSourceProjection(
   if (!operation.after.exists) {
     return failState('Canonical source projection cannot delete its target.')
   }
-  const expectedAfter = encodeWorkspaceSearchDocument(
+  const expectedAfter = encodeWorkspaceSearchMigrationDocument(
     mapped.operation.document,
   )
   if (
@@ -2520,6 +2570,16 @@ function validateTargetSnapshot(
   requireCurrentDigest: boolean,
   label: string,
 ): void {
+  if (snapshot.exists !== true && snapshot.exists !== false) {
+    return failState(`${label} target discriminator is invalid.`)
+  }
+  requireExactObjectKeys(
+    snapshot,
+    snapshot.exists
+      ? ['digest', 'exists', 'item']
+      : ['digest', 'exists'],
+    `${label} target snapshot`,
+  )
   requireDigest(snapshot.digest, `${label} target digest`)
   if (!snapshot.exists) {
     if (snapshot.digest !== createAbsentMigrationItemDigest()) {
@@ -2574,75 +2634,13 @@ function validateTargetSnapshot(
   ) {
     return failState(`${label} target item lacks its current projection digest.`)
   }
-  const canonicalItem = encodeWorkspaceSearchDocument(document)
+  const canonicalItem = encodeWorkspaceSearchMigrationDocument(document)
   const expectedItem = storedProjectionDigest === undefined
     ? withoutProjectionDigest(canonicalItem)
     : canonicalItem
   if (createAttributeMapDigest(expectedItem) !== snapshot.digest) {
     return failState(`${label} target item contains noncanonical fields.`)
   }
-}
-
-/**
- * Encodes one normalized search document into its exact low-level item shape.
- *
- * @param document - Fully normalized current Workspace Search projection.
- * @returns Canonical low-level DynamoDB item.
- */
-function encodeWorkspaceSearchDocument(
-  document: WorkspaceSearchDocument,
-): WorkspaceSearchMigrationOperation['targetKey'] {
-  const record: Record<string, unknown> = { ...document }
-  return encodeNativeRecord(record)
-}
-
-/**
- * Encodes one JSON-compatible native record as low-level DynamoDB attributes.
- *
- * @param record - Normalized document or nested custom-field map.
- * @returns Exact low-level attribute map.
- */
-function encodeNativeRecord(
-  record: Readonly<Record<string, unknown>>,
-): WorkspaceSearchMigrationOperation['targetKey'] {
-  const encoded: WorkspaceSearchMigrationOperation['targetKey'] = {}
-  for (const [key, value] of Object.entries(record)) {
-    if (value !== undefined) {
-      Object.defineProperty(encoded, key, {
-        configurable: true,
-        enumerable: true,
-        value: encodeNativeDocumentValue(value),
-        writable: true,
-      })
-    }
-  }
-  return encoded
-}
-
-/**
- * Encodes one normalized Workspace Search value without lossy coercion.
- *
- * @param value - Normalized JSON-compatible document value.
- * @returns Exact low-level DynamoDB attribute value.
- */
-function encodeNativeDocumentValue(
-  value: unknown,
-): WorkspaceSearchMigrationOperation['targetKey'][string] {
-  if (typeof value === 'string') return { S: value }
-  if (typeof value === 'boolean') return { BOOL: value }
-  if (value === null) return { NULL: true }
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return { N: String(value) }
-  }
-  if (Array.isArray(value)) {
-    return {
-      L: value.map((entry) => encodeNativeDocumentValue(entry)),
-    }
-  }
-  if (isPlainRecord(value)) {
-    return { M: encodeNativeRecord(value) }
-  }
-  return failState('Normalized search projection contains an unsupported value.')
 }
 
 /**
@@ -2685,6 +2683,28 @@ function encodeSnapshotForDigest(snapshot: MigrationItemSnapshot) {
     exists: true,
     item: encodeAttributeMap(snapshot.item),
     digest: snapshot.digest,
+  }
+}
+
+/**
+ * Requires an object to contain exactly the named enumerable own properties.
+ *
+ * @param value - Candidate object at the operation-digest trust boundary.
+ * @param expectedKeys - Complete allowed enumerable own-property set.
+ * @param label - Secret-free object purpose used in failures.
+ */
+function requireExactObjectKeys(
+  value: object,
+  expectedKeys: readonly string[],
+  label: string,
+): void {
+  const actualKeys = Object.keys(value)
+  const expectedKeySet = new Set(expectedKeys)
+  if (
+    actualKeys.length !== expectedKeys.length ||
+    actualKeys.some((key) => !expectedKeySet.has(key))
+  ) {
+    return failState(`${label} has an invalid shape.`)
   }
 }
 
@@ -2736,20 +2756,6 @@ function sourceForEntityType(
   if (entityType === 'document') return 'documents'
   if (entityType === 'work-item') return 'work-items'
   return 'project-directory'
-}
-
-/**
- * Narrows one unknown value to a plain string-keyed record.
- *
- * @param value - Candidate normalized document value.
- * @returns Whether the value is a plain record.
- */
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return false
-  }
-  const prototype = Object.getPrototypeOf(value)
-  return prototype === Object.prototype || prototype === null
 }
 
 /**
@@ -2857,6 +2863,21 @@ function isCompletedCleanTraversal(
     }
   }
   return traversal.target.completed && traversal.target.aggregate.invalid === 0
+}
+
+/**
+ * Checks whether a traversal is still the exact untouched initial state.
+ *
+ * @param traversal - Candidate apply traversal.
+ * @returns Whether every source and target checkpoint is canonical-empty.
+ */
+function isCanonicalEmptyTraversal(
+  traversal: WorkspaceSearchMigrationTraversalProgress,
+): boolean {
+  for (const source of workspaceSearchMigrationSourceNames) {
+    if (!isCanonicalEmptyCheckpoint(traversal.sources[source])) return false
+  }
+  return isCanonicalEmptyCheckpoint(traversal.target)
 }
 
 /**
@@ -3002,6 +3023,7 @@ function validateRetainedVerificationDuringRollback(
  * @param reference - Exact immutable object version.
  * @param runId - Run that must own the plan.
  * @param configurationHash - Reviewed configuration digest.
+ * @param dryRunEvidenceDigest - Exact reviewed dry-run evidence digest.
  * @param planDigest - Expected Merkle root.
  * @param planOperationCount - Expected exact leaf count.
  * @param createdAt - Run creation time after plan sealing.
@@ -3011,21 +3033,43 @@ function validatePlanSeal(
   reference: WorkspaceSearchPlanSealReference,
   runId: string,
   configurationHash: string,
+  dryRunEvidenceDigest: string,
   planDigest: string,
   planOperationCount: number,
   createdAt: string,
 ): void {
   if (
     seal.kind !== 'workspace-search-plan-seal' ||
-    seal.sealVersion !== 1 ||
+    seal.sealVersion !== 2 ||
     seal.migrationId !== 'workspace-search-maintenance' ||
     seal.migrationVersion !== 1 ||
     seal.runId !== runId ||
     seal.configurationHash !== configurationHash ||
+    seal.dryRunEvidenceDigest !== dryRunEvidenceDigest ||
     seal.planDigest !== planDigest ||
     seal.planOperationCount !== planOperationCount
   ) {
     return failState('Reviewed plan seal does not match run creation input.')
+  }
+  requireDigest(seal.dryRunEvidenceDigest, 'plan dry-run evidence digest')
+  requireDigest(seal.planningSnapshotDigest, 'planning snapshot digest')
+  requireNonNegativeSafeInteger(
+    seal.planOperationCount,
+    'plan operation count',
+  )
+  requireNonNegativeSafeInteger(
+    seal.sourceOperationCount,
+    'plan source operation count',
+  )
+  requireNonNegativeSafeInteger(
+    seal.orphanOperationCount,
+    'plan orphan operation count',
+  )
+  if (
+    seal.sourceOperationCount + seal.orphanOperationCount !==
+      seal.planOperationCount
+  ) {
+    return failState('Reviewed plan operation counts are inconsistent.')
   }
   requireCanonicalTime(seal.createdAt, 'plan seal creation time')
   if (Date.parse(seal.createdAt) > Date.parse(createdAt)) {
@@ -3036,10 +3080,10 @@ function validatePlanSeal(
     return failState('Plan seal reference does not identify the exact seal.')
   }
   if (
-    planOperationCount === 0 &&
-    planDigest !== createEmptyWorkspaceSearchPlanDigest()
+    (planOperationCount === 0) !==
+      (planDigest === createEmptyWorkspaceSearchPlanDigest())
   ) {
-    return failState('Empty reviewed plan does not use its canonical root.')
+    return failState('Reviewed plan count does not match its canonical root.')
   }
 }
 

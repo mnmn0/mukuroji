@@ -195,6 +195,16 @@ export type WorkspaceSearchDryRunEvidence = {
   status: 'pass'
 }
 
+/** Exact source and target aggregates reproduced while building a plan. */
+export type WorkspaceSearchMigrationScanSnapshot = {
+  /** Reviewed configuration digest shared with the dry-run evidence. */
+  configurationHash: string
+  /** Complete per-source aggregates reproduced during planning. */
+  sources: Readonly<Record<WorkspaceSearchMigrationSourceName, MigrationScanAggregate>>
+  /** Complete Workspace Search target aggregate reproduced during planning. */
+  target: MigrationScanAggregate
+}
+
 /** Order-independent, secret-free aggregate for a complete table scan. */
 export type MigrationScanAggregate = {
   /** Exact number of rows scanned from the base table. */
@@ -434,7 +444,7 @@ export type WorkspaceSearchPlanSeal = {
   /** Plan-seal document discriminator. */
   kind: 'workspace-search-plan-seal'
   /** Plan-seal schema version. */
-  sealVersion: 1
+  sealVersion: 2
   /** Stable migration identifier. */
   migrationId: typeof WORKSPACE_SEARCH_MIGRATION_ID
   /** Migration behavior version. */
@@ -443,10 +453,18 @@ export type WorkspaceSearchPlanSeal = {
   runId: string
   /** Reviewed configuration digest. */
   configurationHash: string
+  /** Digest of the exact operator-reviewed dry-run evidence. */
+  dryRunEvidenceDigest: string
+  /** Digest of the source/target scan aggregates reproduced while planning. */
+  planningSnapshotDigest: string
   /** Merkle root of the ordered exact operation plan. */
   planDigest: string
   /** Exact number of leaves in the ordered operation plan. */
   planOperationCount: number
+  /** Exact number of operations derived from present source rows. */
+  sourceOperationCount: number
+  /** Exact number of target-orphan deletion operations. */
+  orphanOperationCount: number
   /** Canonical UTC plan sealing time. */
   createdAt: string
 }
@@ -847,6 +865,68 @@ export function createWorkspaceSearchConfigurationHash(
 }
 
 /**
+ * Creates the domain-separated digest of the exact aggregates reproduced while
+ * planning.
+ *
+ * The digest deliberately excludes timestamps and page ordering so it can be
+ * compared with an independently reviewed dry run while still binding every
+ * source and target row classification and content aggregate.
+ *
+ * @param snapshot - Reviewed configuration and complete scan aggregates.
+ * @returns Lowercase SHA-256 planning-snapshot digest.
+ */
+export function createWorkspaceSearchMigrationScanSnapshotDigest(
+  snapshot: WorkspaceSearchMigrationScanSnapshot,
+): string {
+  if (
+    !isRecord(snapshot) ||
+    Object.keys(snapshot).sort(compareUtf8Ordinal).join('\u0000') !==
+      'configurationHash\u0000sources\u0000target' ||
+    !isRecord(snapshot.sources) ||
+    Object.keys(snapshot.sources).sort(compareUtf8Ordinal).join('\u0000') !==
+      'collaboration\u0000documents\u0000project-directory\u0000work-items'
+  ) {
+    throw new WorkspaceSearchMigrationFailure(
+      'INVALID_STATE',
+      'Planning snapshot shape is invalid.',
+    )
+  }
+  requireHexDigest(snapshot.configurationHash, 'planning configuration hash')
+  const sources = {
+    'project-directory': requireMigrationScanAggregate(
+      snapshot.sources['project-directory'],
+      'project-directory planning aggregate',
+    ),
+    'work-items': requireMigrationScanAggregate(
+      snapshot.sources['work-items'],
+      'work-items planning aggregate',
+    ),
+    collaboration: requireMigrationScanAggregate(
+      snapshot.sources.collaboration,
+      'collaboration planning aggregate',
+    ),
+    documents: requireMigrationScanAggregate(
+      snapshot.sources.documents,
+      'documents planning aggregate',
+    ),
+  } satisfies Readonly<
+    Record<WorkspaceSearchMigrationSourceName, MigrationScanAggregate>
+  >
+  const target = requireMigrationScanAggregate(
+    snapshot.target,
+    'target planning aggregate',
+  )
+
+  return createMigrationDigest({
+    kind: 'workspace-search-migration-scan-snapshot',
+    snapshotVersion: 1,
+    configurationHash: snapshot.configurationHash,
+    sources,
+    target,
+  })
+}
+
+/**
  * Creates an empty aggregate with canonical absent digests.
  *
  * @returns Empty migration scan aggregate.
@@ -863,6 +943,70 @@ export function createEmptyMigrationScanAggregate(): MigrationScanAggregate {
     keyDigest: emptyDigest,
     contentDigest: emptyDigest,
     pageCount: 0,
+  }
+}
+
+/**
+ * Validates and returns one complete scan aggregate.
+ *
+ * @param aggregate - Candidate aggregate.
+ * @param label - Secret-free aggregate purpose.
+ * @returns The validated aggregate.
+ */
+function requireMigrationScanAggregate(
+  aggregate: MigrationScanAggregate,
+  label: string,
+): MigrationScanAggregate {
+  const expectedKeys = [
+    'contentDigest',
+    'deleted',
+    'ignored',
+    'invalid',
+    'keyDigest',
+    'mapped',
+    'pageCount',
+    'projected',
+    'scanned',
+  ]
+  if (
+    !isRecord(aggregate) ||
+    Object.keys(aggregate).sort(compareUtf8Ordinal).join('\u0000') !==
+      expectedKeys.join('\u0000')
+  ) {
+    throw new WorkspaceSearchMigrationFailure(
+      'INVALID_STATE',
+      'Planning aggregate shape is invalid.',
+    )
+  }
+  requireNonNegativeInteger(aggregate.scanned, `${label} scanned count`)
+  requireNonNegativeInteger(aggregate.mapped, `${label} mapped count`)
+  requireNonNegativeInteger(aggregate.ignored, `${label} ignored count`)
+  requireNonNegativeInteger(aggregate.invalid, `${label} invalid count`)
+  requireNonNegativeInteger(aggregate.projected, `${label} projected count`)
+  requireNonNegativeInteger(aggregate.deleted, `${label} deleted count`)
+  requireNonNegativeInteger(aggregate.pageCount, `${label} page count`)
+  requireHexDigest(aggregate.keyDigest, `${label} key digest`)
+  requireHexDigest(aggregate.contentDigest, `${label} content digest`)
+  if (
+    aggregate.mapped + aggregate.ignored + aggregate.invalid !==
+      aggregate.scanned ||
+    aggregate.projected + aggregate.deleted !== aggregate.mapped
+  ) {
+    throw new WorkspaceSearchMigrationFailure(
+      'INVALID_STATE',
+      'Planning aggregate counters are inconsistent.',
+    )
+  }
+  return {
+    scanned: aggregate.scanned,
+    mapped: aggregate.mapped,
+    ignored: aggregate.ignored,
+    invalid: aggregate.invalid,
+    projected: aggregate.projected,
+    deleted: aggregate.deleted,
+    keyDigest: aggregate.keyDigest,
+    contentDigest: aggregate.contentDigest,
+    pageCount: aggregate.pageCount,
   }
 }
 
