@@ -23,6 +23,7 @@ import {
   type WorkspaceSearchMigrationTableRole,
 } from './migration-contract'
 import {
+  createWorkspaceSearchMigrationRequestedResourcesBinding,
   measureWorkspaceSearchMigrationConfiguration,
   type WorkspaceSearchMigrationIdentityPort,
   type WorkspaceSearchMigrationJournalKeyMetadata,
@@ -70,8 +71,11 @@ type TableSchemaFixture = {
 
 /** Mutable fake control-plane adapter for identity-validation tests. */
 class FakeIdentityPort implements WorkspaceSearchMigrationIdentityPort {
+  /** Digest of the immutable resource selection represented by this fake. */
+  private readonly requestedResourcesBinding: string
+
   /** Unexpected STS failure injected by a boundary-redaction test. */
-  callerFailure?: Error
+  callerFailure?: unknown
 
   /** Unexpected DynamoDB failure injected by a boundary-redaction test. */
   tableFailure?: Error
@@ -167,6 +171,8 @@ class FakeIdentityPort implements WorkspaceSearchMigrationIdentityPort {
    * @param requested - Explicit test resources.
    */
   constructor(requested: WorkspaceSearchMigrationRequestedResources) {
+    this.requestedResourcesBinding =
+      createWorkspaceSearchMigrationRequestedResourcesBinding(requested)
     for (const role of tableRoles) {
       const tableName = requested.tables[role]
       this.tableOutputs.set(
@@ -176,6 +182,15 @@ class FakeIdentityPort implements WorkspaceSearchMigrationIdentityPort {
       this.backupOutputs.set(tableName, createPitrOutput())
       this.ttlOutputs.set(tableName, createTtlOutput(role))
     }
+  }
+
+  /**
+   * Returns the resource-selection digest represented by this fake.
+   *
+   * @returns Lowercase SHA-256 binding digest.
+   */
+  readRequestedResourcesBinding(): string {
+    return this.requestedResourcesBinding
   }
 
   /**
@@ -379,6 +394,50 @@ describe('Workspace Search migration physical identity', () => {
     )
   })
 
+  test('binds every reviewed request field into the port selection digest', () => {
+    const baseline = createIdentityFixture().requested
+    const baselineBinding =
+      createWorkspaceSearchMigrationRequestedResourcesBinding(baseline)
+    const accountVariant = createIdentityFixture().requested
+    accountVariant.account = OTHER_ACCOUNT
+    accountVariant.journalKeyArn =
+      `arn:aws:kms:${TEST_REGION}:${OTHER_ACCOUNT}:key/12345678-abcd-4321-abcd-1234567890ab`
+    const regionVariant = createIdentityFixture().requested
+    regionVariant.region = 'us-east-1'
+    regionVariant.journalKeyArn =
+      `arn:aws:kms:us-east-1:${TEST_ACCOUNT}:key/12345678-abcd-4321-abcd-1234567890ab`
+    const profileVariant = createIdentityFixture().requested
+    profileVariant.profile = 'production-break-glass'
+    const commitVariant = createIdentityFixture().requested
+    commitVariant.commit = 'b'.repeat(40)
+    const tableVariant = createIdentityFixture().requested
+    Reflect.set(
+      tableVariant.tables,
+      'documents',
+      'mukuroji-documents-production-replacement',
+    )
+    const bucketVariant = createIdentityFixture().requested
+    bucketVariant.journalBucket = 'mukuroji-migration-journal-replacement'
+    const keyVariant = createIdentityFixture().requested
+    keyVariant.journalKeyArn =
+      `arn:aws:kms:${TEST_REGION}:${TEST_ACCOUNT}:key/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee`
+    const variants: readonly WorkspaceSearchMigrationRequestedResources[] = [
+      accountVariant,
+      regionVariant,
+      profileVariant,
+      commitVariant,
+      tableVariant,
+      bucketVariant,
+      keyVariant,
+    ]
+
+    for (const variant of variants) {
+      expect(
+        createWorkspaceSearchMigrationRequestedResourcesBinding(variant),
+      ).not.toBe(baselineBinding)
+    }
+  })
+
   test('rejects unsafe operator resource identifiers before discovery', async () => {
     const sharedMessage =
       'Migration account, region, profile, commit, or journal configuration is invalid.'
@@ -496,6 +555,50 @@ describe('Workspace Search migration physical identity', () => {
       bucketFailure,
       'journal-bucket-production',
     )
+  })
+
+  test('rejects a port bound to a different valid resource selection', async () => {
+    const fixture = createIdentityFixture()
+    fixture.requested.profile = 'production-break-glass'
+
+    await expectMigrationFailure(
+      measureFixture(fixture),
+      'INVALID_ARGUMENT',
+      'Migration identity port is not bound to the requested resources.',
+    )
+    expect(fixture.port.bucketLookups).toHaveLength(0)
+  })
+
+  test('redacts forged migration failures and hostile thrown proxies', async () => {
+    const forgedFixture = createIdentityFixture()
+    const rawForgedMessage = 'RAW-FORGED-MIGRATION-FAILURE'
+    forgedFixture.port.callerFailure = new WorkspaceSearchMigrationFailure(
+      'IDENTITY_MISMATCH',
+      rawForgedMessage,
+    )
+    const forgedFailure = await expectMigrationFailure(
+      measureFixture(forgedFixture),
+      'IDENTITY_MISMATCH',
+      'Migration resource identity could not be measured.',
+    )
+    expect(forgedFailure.message).not.toContain(rawForgedMessage)
+
+    const proxyFixture = createIdentityFixture()
+    const rawProxyMessage = 'RAW-PROXY-GET-PROTOTYPE'
+    proxyFixture.port.callerFailure = new Proxy(
+      {},
+      {
+        getPrototypeOf() {
+          throw new Error(rawProxyMessage)
+        },
+      },
+    )
+    const proxyFailure = await expectMigrationFailure(
+      measureFixture(proxyFixture),
+      'IDENTITY_MISMATCH',
+      'Migration resource identity could not be measured.',
+    )
+    expect(proxyFailure.message).not.toContain(rawProxyMessage)
   })
 
   test('maps absent Object Lock and encryption configurations to drift', async () => {
@@ -811,10 +914,12 @@ describe('Workspace Search migration physical identity', () => {
 
     const profileFixture = createIdentityFixture()
     profileFixture.requested.profile = 'production-break-glass'
+    profileFixture.port = new FakeIdentityPort(profileFixture.requested)
     const profileConfiguration = await measureFixture(profileFixture)
 
     const commitFixture = createIdentityFixture()
     commitFixture.requested.commit = 'b'.repeat(40)
+    commitFixture.port = new FakeIdentityPort(commitFixture.requested)
     const commitConfiguration = await measureFixture(commitFixture)
 
     const journalFixture = createIdentityFixture()

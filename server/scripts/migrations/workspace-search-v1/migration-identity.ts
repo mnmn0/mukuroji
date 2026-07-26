@@ -19,6 +19,7 @@ import {
   type MigrationKeyAttribute,
   type MigrationTableIdentity,
   type WorkspaceSearchMigrationConfiguration,
+  type WorkspaceSearchMigrationFailureCode,
   type WorkspaceSearchMigrationTableRole,
   createMigrationDigest,
   serializeCanonicalJson,
@@ -44,6 +45,10 @@ export type WorkspaceSearchMigrationRequestedResources = {
   /** Expected customer-managed KMS key ARN. */
   journalKeyArn: string
 }
+
+/** Immutable, detached resource selection used throughout one measurement. */
+export type WorkspaceSearchMigrationRequestedResourcesSnapshot =
+  Readonly<WorkspaceSearchMigrationRequestedResources>
 
 /** Account-bound S3 lookup required for every journal control-plane read. */
 export type WorkspaceSearchMigrationJournalLookup = {
@@ -81,6 +86,13 @@ export type WorkspaceSearchMigrationJournalKeyMetadata = {
 
 /** Narrow identity and control-plane read port used before any tenant row is scanned. */
 export interface WorkspaceSearchMigrationIdentityPort {
+  /**
+   * Returns the digest of the immutable resource selection that configured the
+   * port.
+   *
+   * @returns Lowercase SHA-256 resource-selection digest.
+   */
+  readRequestedResourcesBinding(): string
   /**
    * Reads the caller account and ARN from STS.
    *
@@ -189,10 +201,24 @@ type MeasuredTableEncryption = {
 /** Input required to measure one complete migration resource identity. */
 type WorkspaceSearchMigrationIdentityInput = {
   /** Explicit resource selection. */
-  requested: WorkspaceSearchMigrationRequestedResources
+  requested: WorkspaceSearchMigrationRequestedResourcesSnapshot
   /** Control-plane reader bound to the requested profile and region. */
   port: WorkspaceSearchMigrationIdentityPort
 }
+
+/** Exact table-role set accepted by the Workspace Search migration entry gate. */
+export const WORKSPACE_SEARCH_MIGRATION_TABLE_ROLES:
+  readonly WorkspaceSearchMigrationTableRole[] = Object.freeze([
+    'project-directory',
+    'work-items',
+    'collaboration',
+    'documents',
+    'workspace-search',
+    'migration-state',
+  ])
+
+/** Private provenance set for failures created by this validation module. */
+const trustedIdentityFailures = new WeakSet<object>()
 
 const expectedTableDescriptors = {
   'project-directory': {
@@ -292,6 +318,115 @@ const expectedTableDescriptors = {
 } satisfies Readonly<Record<WorkspaceSearchMigrationTableRole, ExpectedTableDescriptor>>
 
 /**
+ * Takes one validated, detached resource snapshot before any asynchronous
+ * identity read.
+ *
+ * @param requested - Candidate caller-owned resource selection.
+ * @returns Frozen resource selection safe for one complete measurement.
+ */
+export function createWorkspaceSearchMigrationRequestedResourcesSnapshot(
+  requested: WorkspaceSearchMigrationRequestedResourcesSnapshot,
+): WorkspaceSearchMigrationRequestedResourcesSnapshot {
+  const [snapshot, tableRoleKeys] = captureRequestedResources(requested)
+  if (!hasExactMigrationTableRoles(tableRoleKeys)) {
+    throw createIdentityFailure(
+      'INVALID_ARGUMENT',
+      'Migration table names must be valid and physically distinct.',
+    )
+  }
+  validateWorkspaceSearchMigrationRequestedResources(snapshot)
+  Object.freeze(snapshot.tables)
+  return Object.freeze(snapshot)
+}
+
+/**
+ * Creates the immutable binding checked between a resource request and its
+ * control-plane port.
+ *
+ * @param requested - Candidate resource selection.
+ * @returns Lowercase SHA-256 digest of the validated detached selection.
+ */
+export function createWorkspaceSearchMigrationRequestedResourcesBinding(
+  requested: WorkspaceSearchMigrationRequestedResourcesSnapshot,
+): string {
+  const snapshot =
+    createWorkspaceSearchMigrationRequestedResourcesSnapshot(requested)
+  return createRequestedResourcesBindingFromSnapshot(snapshot)
+}
+
+/**
+ * Reads every caller-owned resource field exactly once inside a redacted error
+ * boundary.
+ *
+ * @param requested - Candidate caller-owned resource selection.
+ * @returns Detached resource values and the raw table own-key shape.
+ */
+function captureRequestedResources(
+  requested: WorkspaceSearchMigrationRequestedResourcesSnapshot,
+): readonly [
+  WorkspaceSearchMigrationRequestedResourcesSnapshot,
+  readonly PropertyKey[],
+] {
+  try {
+    const tables = requested.tables
+    const tableRoleKeys = Reflect.ownKeys(tables)
+    const snapshot: WorkspaceSearchMigrationRequestedResources = {
+      account: requested.account,
+      region: requested.region,
+      profile: requested.profile,
+      commit: requested.commit,
+      tables: {
+        'project-directory': tables['project-directory'],
+        'work-items': tables['work-items'],
+        collaboration: tables.collaboration,
+        documents: tables.documents,
+        'workspace-search': tables['workspace-search'],
+        'migration-state': tables['migration-state'],
+      },
+      journalBucket: requested.journalBucket,
+      journalKeyArn: requested.journalKeyArn,
+    }
+    return [snapshot, tableRoleKeys]
+  } catch {
+    throw createIdentityFailure(
+      'INVALID_ARGUMENT',
+      'Migration requested resources are invalid or unreadable.',
+    )
+  }
+}
+
+/**
+ * Checks the raw table object before a fixed-role snapshot can discard unknown
+ * own keys.
+ *
+ * @param keys - Raw string and symbol own keys reported by the caller object.
+ * @returns Whether every required role, and no other role, is present.
+ */
+function hasExactMigrationTableRoles(keys: readonly PropertyKey[]): boolean {
+  return (
+    keys.length === WORKSPACE_SEARCH_MIGRATION_TABLE_ROLES.length &&
+    keys.every(
+      (key) =>
+        typeof key === 'string' &&
+        WORKSPACE_SEARCH_MIGRATION_TABLE_ROLES.some((role) => role === key),
+    )
+  )
+}
+
+/**
+ * Hashes one already validated resource snapshot without reading caller-owned
+ * values again.
+ *
+ * @param snapshot - Frozen validated resource selection.
+ * @returns Lowercase SHA-256 resource-selection digest.
+ */
+function createRequestedResourcesBindingFromSnapshot(
+  snapshot: WorkspaceSearchMigrationRequestedResourcesSnapshot,
+): string {
+  return createMigrationDigest(snapshot)
+}
+
+/**
  * Measures and validates every immutable resource identity before data-plane work.
  *
  * @param input - Explicit requested resources and narrow control-plane port.
@@ -301,10 +436,22 @@ export async function measureWorkspaceSearchMigrationConfiguration(
   input: WorkspaceSearchMigrationIdentityInput,
 ): Promise<WorkspaceSearchMigrationConfiguration> {
   try {
-    return await measureMigrationConfiguration(input)
+    const requested =
+      createWorkspaceSearchMigrationRequestedResourcesSnapshot(input.requested)
+    const port = input.port
+    if (
+      port.readRequestedResourcesBinding() !==
+      createRequestedResourcesBindingFromSnapshot(requested)
+    ) {
+      throw createIdentityFailure(
+        'INVALID_ARGUMENT',
+        'Migration identity port is not bound to the requested resources.',
+      )
+    }
+    return await measureMigrationConfiguration({ requested, port })
   } catch (error: unknown) {
-    if (error instanceof WorkspaceSearchMigrationFailure) throw error
-    throw new WorkspaceSearchMigrationFailure(
+    if (isTrustedIdentityFailure(error)) throw error
+    throw createIdentityFailure(
       'IDENTITY_MISMATCH',
       'Migration resource identity could not be measured.',
     )
@@ -320,10 +467,10 @@ export async function measureWorkspaceSearchMigrationConfiguration(
 async function measureMigrationConfiguration(
   input: WorkspaceSearchMigrationIdentityInput,
 ): Promise<WorkspaceSearchMigrationConfiguration> {
-  validateRequestedResources(input.requested)
+  validateWorkspaceSearchMigrationRequestedResources(input.requested)
   const caller = await input.port.readCallerIdentity()
   if (caller.account !== input.requested.account) {
-    throw new WorkspaceSearchMigrationFailure(
+    throw createIdentityFailure(
       'IDENTITY_MISMATCH',
       'STS caller identity does not match the requested migration account.',
     )
@@ -420,7 +567,7 @@ function readValidatedCallerSessionArn(
  * @returns Operator-safe identity failure without the raw ARN.
  */
 function invalidCallerRoleIdentity(): WorkspaceSearchMigrationFailure {
-  return new WorkspaceSearchMigrationFailure(
+  return createIdentityFailure(
     'IDENTITY_MISMATCH',
     'STS caller identity is not a valid assumed migration role.',
   )
@@ -462,7 +609,7 @@ function readValidatedCallerRoleId(value: string, callerArn: string): string {
 async function measureTableIdentity(
   role: WorkspaceSearchMigrationTableRole,
   tableName: string,
-  requested: WorkspaceSearchMigrationRequestedResources,
+  requested: WorkspaceSearchMigrationRequestedResourcesSnapshot,
   port: WorkspaceSearchMigrationIdentityPort,
 ): Promise<MigrationTableIdentity> {
   const [tableOutput, backupOutput, ttlOutput] = await Promise.all([
@@ -472,7 +619,7 @@ async function measureTableIdentity(
   ])
   const table = tableOutput.Table
   if (!table) {
-    throw new WorkspaceSearchMigrationFailure(
+    throw createIdentityFailure(
       'IDENTITY_MISMATCH',
       `The ${role} table identity is unavailable.`,
     )
@@ -483,7 +630,7 @@ async function measureTableIdentity(
     observed.region !== requested.region ||
     observed.tableName !== tableName
   ) {
-    throw new WorkspaceSearchMigrationFailure(
+    throw createIdentityFailure(
       'IDENTITY_MISMATCH',
       `The ${role} table does not match the requested account, region, and name.`,
     )
@@ -500,7 +647,7 @@ async function measureTableIdentity(
   )
   const expected = expectedTableDescriptors[role]
   if (serializeCanonicalJson(descriptor) !== serializeCanonicalJson(expected)) {
-    throw new WorkspaceSearchMigrationFailure(
+    throw createIdentityFailure(
       'TABLE_SCHEMA_MISMATCH',
       `The ${role} table schema or safety settings do not match migration v1.`,
     )
@@ -534,7 +681,7 @@ async function measureTableIdentity(
  * @returns Validated journal identity.
  */
 async function measureJournalIdentity(
-  requested: WorkspaceSearchMigrationRequestedResources,
+  requested: WorkspaceSearchMigrationRequestedResourcesSnapshot,
   port: WorkspaceSearchMigrationIdentityPort,
 ): Promise<MigrationJournalIdentity> {
   const lookup: WorkspaceSearchMigrationJournalLookup = {
@@ -627,7 +774,7 @@ async function measureJournalIdentity(
  */
 function readJournalKeyIdentity(
   metadata: WorkspaceSearchMigrationJournalKeyMetadata,
-  requested: WorkspaceSearchMigrationRequestedResources,
+  requested: WorkspaceSearchMigrationRequestedResourcesSnapshot,
 ): Pick<
   MigrationJournalIdentity,
   | 'keyCreationTime'
@@ -694,14 +841,14 @@ function readPhysicalTableIdentity(table: TableDescription): {
     !isNonEmptyString(table.TableName) ||
     !table.CreationDateTime
   ) {
-    throw new WorkspaceSearchMigrationFailure(
+    throw createIdentityFailure(
       'IDENTITY_MISMATCH',
       'A migration table identity is incomplete or not active.',
     )
   }
   const arn = parseDynamoTableArn(table.TableArn)
   if (arn.tableName !== table.TableName) {
-    throw new WorkspaceSearchMigrationFailure(
+    throw createIdentityFailure(
       'IDENTITY_MISMATCH',
       'A migration table ARN does not match its reported table name.',
     )
@@ -730,7 +877,7 @@ function readTableDescriptor(
   encryption: MigrationTableIdentity['encryption'],
 ): ExpectedTableDescriptor {
   if (table.BillingModeSummary?.BillingMode !== 'PAY_PER_REQUEST') {
-    throw new WorkspaceSearchMigrationFailure(
+    throw createIdentityFailure(
       'TABLE_SCHEMA_MISMATCH',
       'A migration table is not configured for on-demand billing.',
     )
@@ -741,7 +888,7 @@ function readTableDescriptor(
     .map((index) => normalizeGlobalSecondaryIndex(index, attributeTypes))
     .sort((left, right) => compareUtf8Ordinal(left.name, right.name))
   if ((table.LocalSecondaryIndexes?.length ?? 0) !== 0) {
-    throw new WorkspaceSearchMigrationFailure(
+    throw createIdentityFailure(
       'TABLE_SCHEMA_MISMATCH',
       'A migration table has an unsupported local secondary index.',
     )
@@ -771,7 +918,7 @@ function readAttributeTypes(
       !isScalarAttributeType(attribute.AttributeType) ||
       result.has(attribute.AttributeName)
     ) {
-      throw new WorkspaceSearchMigrationFailure(
+      throw createIdentityFailure(
         'TABLE_SCHEMA_MISMATCH',
         'A migration table has invalid attribute definitions.',
       )
@@ -793,7 +940,7 @@ function normalizeKeySchema(
   attributeTypes: ReadonlyMap<string, ScalarAttributeType>,
 ): readonly MigrationKeyAttribute[] {
   if (!schema || schema.length < 1 || schema.length > 2) {
-    throw new WorkspaceSearchMigrationFailure(
+    throw createIdentityFailure(
       'TABLE_SCHEMA_MISMATCH',
       'A migration table has an invalid key schema.',
     )
@@ -807,7 +954,7 @@ function normalizeKeySchema(
       (role !== 'HASH' && role !== 'RANGE') ||
       !isScalarAttributeType(type)
     ) {
-      throw new WorkspaceSearchMigrationFailure(
+      throw createIdentityFailure(
         'TABLE_SCHEMA_MISMATCH',
         'A migration table has an invalid key schema.',
       )
@@ -817,7 +964,7 @@ function normalizeKeySchema(
   const hashCount = normalized.filter(({ role }) => role === 'HASH').length
   const rangeCount = normalized.filter(({ role }) => role === 'RANGE').length
   if (hashCount !== 1 || rangeCount !== normalized.length - 1) {
-    throw new WorkspaceSearchMigrationFailure(
+    throw createIdentityFailure(
       'TABLE_SCHEMA_MISMATCH',
       'A migration table has an invalid key schema.',
     )
@@ -846,7 +993,7 @@ function normalizeGlobalSecondaryIndex(
       projection !== 'KEYS_ONLY'
     )
   ) {
-    throw new WorkspaceSearchMigrationFailure(
+    throw createIdentityFailure(
       'TABLE_SCHEMA_MISMATCH',
       'A migration table has an invalid global secondary index.',
     )
@@ -861,7 +1008,7 @@ function normalizeGlobalSecondaryIndex(
       nonKeyAttributes.some((value) => !isNonEmptyString(value))
     )
   ) {
-    throw new WorkspaceSearchMigrationFailure(
+    throw createIdentityFailure(
       'TABLE_SCHEMA_MISMATCH',
       'A migration table has an invalid INCLUDE projection.',
     )
@@ -897,7 +1044,7 @@ function readTtl(
       attribute: description.AttributeName,
     }
   }
-  throw new WorkspaceSearchMigrationFailure(
+  throw createIdentityFailure(
     'TABLE_SCHEMA_MISMATCH',
     'A migration table has an invalid or transitional TTL state.',
   )
@@ -924,7 +1071,7 @@ function readEncryption(
     }
   }
   if (description.Status !== 'ENABLED') {
-    throw new WorkspaceSearchMigrationFailure(
+    throw createIdentityFailure(
       'TABLE_SCHEMA_MISMATCH',
       'A migration table has an invalid encryption state.',
     )
@@ -937,7 +1084,7 @@ function readEncryption(
         expectedRegion,
       )
     ) {
-      throw new WorkspaceSearchMigrationFailure(
+      throw createIdentityFailure(
         'TABLE_SCHEMA_MISMATCH',
         'A migration table has an invalid KMS key identity.',
       )
@@ -956,7 +1103,7 @@ function readEncryption(
       kmsKeyDigest: null,
     }
   }
-  throw new WorkspaceSearchMigrationFailure(
+  throw createIdentityFailure(
     'TABLE_SCHEMA_MISMATCH',
     'A migration table has an unsupported encryption state.',
   )
@@ -1011,7 +1158,7 @@ function readPitrEvidence(
 function invalidPitrEvidence(
   role: WorkspaceSearchMigrationTableRole,
 ): WorkspaceSearchMigrationFailure {
-  return new WorkspaceSearchMigrationFailure(
+  return createIdentityFailure(
     'PITR_NOT_READY',
     `The ${role} table does not have usable point-in-time recovery.`,
   )
@@ -1042,14 +1189,14 @@ function parseDynamoTableArn(value: string): {
     !isAwsAccount(parts[4]) ||
     !resource?.startsWith('table/')
   ) {
-    throw new WorkspaceSearchMigrationFailure(
+    throw createIdentityFailure(
       'IDENTITY_MISMATCH',
       'A migration table ARN is invalid.',
     )
   }
   const tableName = resource.slice('table/'.length)
   if (!isNonEmptyString(tableName) || tableName.includes('/')) {
-    throw new WorkspaceSearchMigrationFailure(
+    throw createIdentityFailure(
       'IDENTITY_MISMATCH',
       'A migration table ARN resource is invalid.',
     )
@@ -1089,7 +1236,7 @@ function createTableIdentityRecord(
     !migrationState ||
     map.size !== 6
   ) {
-    throw new WorkspaceSearchMigrationFailure(
+    throw createIdentityFailure(
       'INVALID_ARGUMENT',
       'Every migration table role must be configured exactly once.',
     )
@@ -1109,28 +1256,34 @@ function createTableIdentityRecord(
  *
  * @param requested - Candidate requested resources.
  */
-function validateRequestedResources(
-  requested: WorkspaceSearchMigrationRequestedResources,
+export function validateWorkspaceSearchMigrationRequestedResources(
+  requested: WorkspaceSearchMigrationRequestedResourcesSnapshot,
 ): void {
   if (
     !isAwsAccount(requested.account) ||
     !isAwsRegion(requested.region) ||
     !isSafeProfile(requested.profile) ||
+    typeof requested.commit !== 'string' ||
     !/^[0-9a-f]{40}$/.test(requested.commit) ||
     !isS3BucketName(requested.journalBucket) ||
     !isKmsKeyArn(requested.journalKeyArn, requested.account, requested.region)
   ) {
-    throw new WorkspaceSearchMigrationFailure(
+    throw createIdentityFailure(
       'INVALID_ARGUMENT',
       'Migration account, region, profile, commit, or journal configuration is invalid.',
     )
   }
-  const uniqueNames = new Set(Object.values(requested.tables))
+  const tableRoleKeys = Reflect.ownKeys(requested.tables)
+  const tableNames = WORKSPACE_SEARCH_MIGRATION_TABLE_ROLES.map(
+    (role) => requested.tables[role],
+  )
+  const uniqueNames = new Set(tableNames)
   if (
+    !hasExactMigrationTableRoles(tableRoleKeys) ||
     uniqueNames.size !== 6 ||
-    [...uniqueNames].some((tableName) => !isDynamoTableName(tableName))
+    tableNames.some((tableName) => !isDynamoTableName(tableName))
   ) {
-    throw new WorkspaceSearchMigrationFailure(
+    throw createIdentityFailure(
       'INVALID_ARGUMENT',
       'Migration table names must be valid and physically distinct.',
     )
@@ -1192,7 +1345,7 @@ function readTableRole(value: string): WorkspaceSearchMigrationTableRole {
   ) {
     return value
   }
-  throw new WorkspaceSearchMigrationFailure(
+  throw createIdentityFailure(
     'INVALID_ARGUMENT',
     'Migration table role is invalid.',
   )
@@ -1205,7 +1358,7 @@ function readTableRole(value: string): WorkspaceSearchMigrationTableRole {
  * @returns Operator-safe migration failure.
  */
 function invalidJournalConfiguration(setting: string): WorkspaceSearchMigrationFailure {
-  return new WorkspaceSearchMigrationFailure(
+  return createIdentityFailure(
     'CONFIGURATION_DRIFT',
     `The migration journal ${setting} does not satisfy the v1 safety contract.`,
   )
@@ -1223,6 +1376,38 @@ function hasErrorName(error: unknown, expectedName: string): boolean {
 }
 
 /**
+ * Creates and privately brands one trusted operator-safe identity failure.
+ *
+ * @param code - Stable migration failure code.
+ * @param message - Secret-free operator guidance.
+ * @returns Branded failure that may cross the public redaction boundary.
+ */
+function createIdentityFailure(
+  code: WorkspaceSearchMigrationFailureCode,
+  message: string,
+): WorkspaceSearchMigrationFailure {
+  const failure = new WorkspaceSearchMigrationFailure(code, message)
+  Object.freeze(failure)
+  trustedIdentityFailures.add(failure)
+  return failure
+}
+
+/**
+ * Checks failure provenance without invoking attacker-controlled prototype
+ * traps.
+ *
+ * @param error - Unknown thrown value.
+ * @returns Whether this module created and branded the failure.
+ */
+function isTrustedIdentityFailure(
+  error: unknown,
+): error is WorkspaceSearchMigrationFailure {
+  return typeof error === 'object' &&
+    error !== null &&
+    trustedIdentityFailures.has(error)
+}
+
+/**
  * Converts a Date to canonical UTC form.
  *
  * @param value - Date returned by an AWS SDK response.
@@ -1231,7 +1416,7 @@ function hasErrorName(error: unknown, expectedName: string): boolean {
 function toCanonicalTimestamp(value: Date): string {
   const time = value.getTime()
   if (!Number.isFinite(time)) {
-    throw new WorkspaceSearchMigrationFailure(
+    throw createIdentityFailure(
       'IDENTITY_MISMATCH',
       'An AWS control-plane timestamp is invalid.',
     )
@@ -1279,7 +1464,7 @@ function isAwsRegion(value: unknown): value is string {
   return typeof value === 'string' &&
     value.length >= 8 &&
     value.length <= 32 &&
-    /^[a-z]{2}(?:-[a-z0-9]+)+-[0-9]+$/.test(value)
+    /^[a-z0-9]+(?:-[a-z0-9]+){2,5}$/.test(value)
 }
 
 /**
