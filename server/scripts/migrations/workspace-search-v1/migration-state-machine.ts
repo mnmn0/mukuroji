@@ -13,6 +13,8 @@ import { mapWorkspaceSearchMigrationRow } from './migration-mapper'
 import {
   MAINTENANCE_EVIDENCE_CLOCK_SKEW_SECONDS,
   MAINTENANCE_EVIDENCE_MAX_AGE_SECONDS,
+  MaintenanceEvidenceError,
+  parseMaintenanceEvidence,
   type ParsedWorkspaceSearchMaintenanceEvidence,
 } from './maintenance-evidence'
 import {
@@ -142,15 +144,15 @@ export type CreateWorkspaceSearchMigrationRunStateInput = {
   createdAt: string
 }
 
-/** Inputs used to bind parsed maintenance evidence to one active lease fence. */
+/** Inputs used to validate exact evidence bytes at one active lease fence. */
 export type CreateWorkspaceSearchMaintenanceEvidenceReceiptInput = {
   /** Operator-selected run identifier. */
   runId: string
   /** Exact active lease whose fence may consume the evidence. */
   lease: WorkspaceSearchMigrationLease
-  /** Validated evidence and digest of its exact source bytes. */
-  parsed: ParsedWorkspaceSearchMaintenanceEvidence
-  /** Canonical UTC time used when the evidence parser succeeded. */
+  /** Exact untrusted maintenance-evidence file bytes. */
+  evidenceBytes: Uint8Array
+  /** Adapter-owned canonical UTC validation time. */
   validatedAt: string
 }
 
@@ -165,6 +167,14 @@ export type WorkspaceSearchMaintenanceEvidenceRenewedEvent = {
   kind: 'maintenance-evidence-renewed'
   /** Newly validated evidence receipt bound to the current lease fence. */
   receipt: WorkspaceSearchMaintenanceEvidenceReceipt
+}
+
+/** Caller request whose exact bytes are validated inside the persistence boundary. */
+export type WorkspaceSearchMaintenanceEvidenceRenewalCommandEvent = {
+  /** Adapter-command discriminator. */
+  kind: 'maintenance-evidence-renewal-requested'
+  /** Exact untrusted maintenance-evidence file bytes. */
+  evidenceBytes: Uint8Array
 }
 
 /** Records one exact sealed-plan operation marker. */
@@ -294,10 +304,19 @@ export type WorkspaceSearchMigrationStateEvent =
   | WorkspaceSearchVerificationPassedEvent
   | WorkspaceSearchVerificationStartedEvent
 
+/** State events callers may request without supplying adapter-owned evidence. */
+export type WorkspaceSearchMigrationDirectStateEvent = Exclude<
+  WorkspaceSearchMigrationStateEvent,
+  | WorkspaceSearchApplyCheckpointRecordedEvent
+  | WorkspaceSearchMaintenanceEvidenceRenewedEvent
+  | WorkspaceSearchVerificationCheckpointRecordedEvent
+>
+
 /** Every event accepted at the persistence adapter command boundary. */
 export type WorkspaceSearchMigrationCommandEvent =
   | WorkspaceSearchApplyOperationCommandEvent
-  | WorkspaceSearchMigrationStateEvent
+  | WorkspaceSearchMigrationDirectStateEvent
+  | WorkspaceSearchMaintenanceEvidenceRenewalCommandEvent
   | WorkspaceSearchRollbackOperationCommandEvent
 
 /** One optimistic, fenced transition from a previously validated run state. */
@@ -331,19 +350,38 @@ export type HeartbeatWorkspaceSearchMigrationLeaseInput = {
 
 /** Atomic creation request for a run whose immutable plan is already sealed. */
 export type PersistWorkspaceSearchMigrationRunInput = {
-  /** Complete validated initial run state. */
-  state: WorkspaceSearchMigrationRunState
+  /** Operator-selected run identifier. */
+  runId: string
   /** Exact active lease identity expected at adapter-owned commit time. */
   lease: WorkspaceSearchMigrationLeaseClaim
+  /** Reviewed configuration digest. */
+  configurationHash: string
+  /** Exact measured migration configuration. */
+  configuration: WorkspaceSearchMigrationConfiguration
+  /** Exact untrusted maintenance-evidence file bytes. */
+  maintenanceEvidenceBytes: Uint8Array
+  /** Digest of the exact reviewed dry-run evidence bytes. */
+  dryRunEvidenceDigest: string
+  /** Digest of the immutable sealed operation plan. */
+  planDigest: string
+  /** Exact number of entries in the immutable sealed plan. */
+  planOperationCount: number
+  /** Exact immutable plan-seal document reviewed before run creation. */
+  planSeal: WorkspaceSearchPlanSeal
+  /** Immutable object version that stores the exact plan-seal bytes. */
+  planSealReference: WorkspaceSearchPlanSealReference
 }
 
-/** Adapter command that deliberately excludes a caller-supplied commit clock. */
+/**
+ * Adapter command that excludes caller-supplied state and commit time.
+ *
+ * The adapter must strongly read the durable state for `expectedRevision`
+ * immediately before reducing the event.
+ */
 export type WorkspaceSearchMigrationCommandInput<
   Event extends WorkspaceSearchMigrationCommandEvent =
-    WorkspaceSearchMigrationStateEvent,
+    WorkspaceSearchMigrationCommandEvent,
 > = {
-  /** Exact current durable state read before the command. */
-  current: WorkspaceSearchMigrationRunState
   /** Revision that persistence must compare atomically. */
   expectedRevision: number
   /** Exact active lease identity expected by the command. */
@@ -352,12 +390,26 @@ export type WorkspaceSearchMigrationCommandInput<
   event: Event
 }
 
+/** Adapter-owned request to scan and persist one bounded checkpoint page. */
+export type WorkspaceSearchMigrationCheckpointCommandInput = {
+  /** Revision that persistence must compare atomically. */
+  expectedRevision: number
+  /** Exact active lease identity expected by the command. */
+  lease: WorkspaceSearchMigrationLeaseClaim
+  /** Source or target table whose next page the adapter must strongly scan. */
+  location: WorkspaceSearchMigrationCheckpointLocation
+}
+
 /**
  * Persistence boundary for the Workspace Search migration state machine.
  *
  * Implementations must use condition-aware, strongly consistent operations.
  * No method permits an unrestricted state replacement. Every target mutation,
  * marker, receipt, and run revision change must commit in one atomic transaction.
+ * Every command strongly re-reads the durable state instead of accepting a
+ * caller-owned state object. Initial and renewed maintenance evidence is parsed
+ * from exact bytes inside this boundary, and checkpoint methods derive progress
+ * only from pages read by the adapter itself.
  * The adapter, not the command caller, owns the trusted clock. It captures time
  * after prerequisite reads/uploads immediately before the transaction, requires
  * the minimum deadline headroom, and configures request timeout below that margin.
@@ -412,13 +464,17 @@ export interface WorkspaceSearchMigrationStateMachinePort {
   ): Promise<WorkspaceSearchMaintenanceEvidenceReceipt | undefined>
 
   /**
-   * Creates a run and its immutable initial evidence-receipt row only when the
-   * exact plan seal is already durable, the run row is absent, and the supplied
-   * lease and fresh evidence are current.
+   * Validates exact evidence bytes at the adapter clock, constructs the
+   * canonical initial state, and creates it with its immutable receipt only
+   * when the plan seal is durable, the run row is absent, and the lease is
+   * current.
    *
-   * @param input - Validated initial state and active authority.
+   * @param input - Sealed plan, exact evidence bytes, and active authority.
+   * @returns Exact durable initial run state.
    */
-  createRunState(input: PersistWorkspaceSearchMigrationRunInput): Promise<void>
+  createRunState(
+    input: PersistWorkspaceSearchMigrationRunInput,
+  ): Promise<WorkspaceSearchMigrationRunState>
 
   /**
    * Reads and validates the exact immutable plan-seal object version.
@@ -510,29 +566,30 @@ export interface WorkspaceSearchMigrationStateMachinePort {
   ): Promise<WorkspaceSearchMigrationRunState>
 
   /**
-   * Atomically saves one apply checkpoint under the exact run revision, lease,
+   * Strongly scans the next bounded apply page, derives its checkpoint inside
+   * the adapter, and atomically saves it under the exact run revision, lease,
    * fence, and fresh evidence tuple.
    *
-   * @param input - Exact monotonic apply-checkpoint transition.
+   * @param input - Exact revision, authority, and scan location.
    * @returns Next durable run state.
    */
   saveApplyCheckpoint(
-    input: WorkspaceSearchMigrationCommandInput<
-      WorkspaceSearchApplyCheckpointRecordedEvent
-    >,
+    input: WorkspaceSearchMigrationCheckpointCommandInput,
   ): Promise<WorkspaceSearchMigrationRunState>
 
   /**
-   * Atomically writes the exact receipt to an immutable digest-keyed row and
-   * replaces fresh evidence while the exact lease is still active. The previous
-   * evidence may already be expired because this method does not mutate data.
+   * Strictly validates exact evidence bytes at the adapter-owned clock,
+   * atomically writes the resulting receipt to an immutable digest-keyed row,
+   * and replaces current evidence while the exact lease is still active. The
+   * previous evidence may already be expired because this method does not
+   * mutate application data.
    *
-   * @param input - Exact evidence-renewal transition.
+   * @param input - Exact evidence bytes, revision, and active authority.
    * @returns Next durable run state.
    */
   renewMaintenanceEvidence(
     input: WorkspaceSearchMigrationCommandInput<
-      WorkspaceSearchMaintenanceEvidenceRenewedEvent
+      WorkspaceSearchMaintenanceEvidenceRenewalCommandEvent
     >,
   ): Promise<WorkspaceSearchMigrationRunState>
 
@@ -561,15 +618,14 @@ export interface WorkspaceSearchMigrationStateMachinePort {
   ): Promise<WorkspaceSearchMigrationRunState>
 
   /**
-   * Atomically saves one verification checkpoint under current authority.
+   * Strongly scans the next bounded verification page, derives its checkpoint
+   * inside the adapter, and atomically saves it under current authority.
    *
-   * @param input - Exact monotonic verification-checkpoint transition.
+   * @param input - Exact revision, authority, and scan location.
    * @returns Next durable run state.
    */
   saveVerificationCheckpoint(
-    input: WorkspaceSearchMigrationCommandInput<
-      WorkspaceSearchVerificationCheckpointRecordedEvent
-    >,
+    input: WorkspaceSearchMigrationCheckpointCommandInput,
   ): Promise<WorkspaceSearchMigrationRunState>
 
   /**
@@ -629,14 +685,15 @@ export interface WorkspaceSearchMigrationStateMachinePort {
 }
 
 /**
- * Binds exact parsed maintenance evidence to one run and active lease fence.
+ * Strictly parses exact maintenance evidence bytes at the adapter clock and
+ * binds the validated result to one run and active lease fence.
  *
  * The exclusive validity deadline is derived from the oldest drain/surface
  * observation rather than validation time. One millisecond is added because
  * the evidence parser accepts the exact maximum-age millisecond while atomic
  * persistence conditions use `commitTime < validUntil`.
  *
- * @param input - Parsed evidence, exact lease, run, and validation time.
+ * @param input - Exact evidence bytes, lease, run, and validation time.
  * @returns Fresh receipt whose deadline cannot outlive any source observation.
  */
 export function createWorkspaceSearchMaintenanceEvidenceReceipt(
@@ -649,14 +706,48 @@ export function createWorkspaceSearchMaintenanceEvidenceReceipt(
     return failLease('Maintenance evidence lease belongs to another run.')
   }
 
+  let parsed: ParsedWorkspaceSearchMaintenanceEvidence
+  try {
+    parsed = parseMaintenanceEvidence(input.evidenceBytes, {
+      now: new Date(input.validatedAt),
+    })
+  } catch (error: unknown) {
+    if (error instanceof MaintenanceEvidenceError) {
+      return failEvidence('Maintenance evidence bytes are invalid.')
+    }
+    throw error
+  }
+  return createMaintenanceEvidenceReceiptFromParsed(
+    input.runId,
+    input.lease,
+    parsed,
+    input.validatedAt,
+  )
+}
+
+/**
+ * Creates one receipt from evidence parsed inside the trusted adapter boundary.
+ *
+ * @param runId - Run whose lease consumes the evidence.
+ * @param lease - Exact active lease bound to the receipt.
+ * @param parsed - Strict parser result for the exact source bytes.
+ * @param validatedAt - Adapter-owned canonical UTC validation time.
+ * @returns Fresh receipt whose deadline cannot outlive any observation.
+ */
+function createMaintenanceEvidenceReceiptFromParsed(
+  runId: string,
+  lease: WorkspaceSearchMigrationLease,
+  parsed: ParsedWorkspaceSearchMaintenanceEvidence,
+  validatedAt: string,
+): WorkspaceSearchMaintenanceEvidenceReceipt {
   requireCanonicalTime(
-    input.parsed.evidence.drainCompletedAt,
+    parsed.evidence.drainCompletedAt,
     'maintenance drain completion time',
   )
   let oldestObservationMilliseconds = Date.parse(
-    input.parsed.evidence.drainCompletedAt,
+    parsed.evidence.drainCompletedAt,
   )
-  for (const surface of input.parsed.evidence.surfaces) {
+  for (const surface of parsed.evidence.surfaces) {
     requireCanonicalTime(
       surface.observedAt,
       'maintenance surface observation time',
@@ -671,20 +762,20 @@ export function createWorkspaceSearchMaintenanceEvidenceReceipt(
     MAINTENANCE_EVIDENCE_MAX_AGE_SECONDS * 1_000 +
     1
   const receipt: WorkspaceSearchMaintenanceEvidenceReceipt = {
-    runId: input.runId,
-    evidenceDigest: input.parsed.fileSha256,
-    evidenceLocator: input.parsed.evidence.locator,
-    runtimeRevision: input.parsed.evidence.runtimeRevision,
-    fenceToken: input.lease.fenceToken,
-    validatedAt: input.validatedAt,
+    runId,
+    evidenceDigest: parsed.fileSha256,
+    evidenceLocator: parsed.evidence.locator,
+    runtimeRevision: parsed.evidence.runtimeRevision,
+    fenceToken: lease.fenceToken,
+    validatedAt,
     oldestObservationAt: new Date(oldestObservationMilliseconds).toISOString(),
     validUntil: new Date(exclusiveDeadlineMilliseconds).toISOString(),
   }
   validateMaintenanceEvidenceReceipt(
     receipt,
-    input.runId,
-    input.lease.fenceToken,
-    input.validatedAt,
+    runId,
+    lease.fenceToken,
+    validatedAt,
   )
   return receipt
 }

@@ -8,11 +8,13 @@ import {
 import {
   createAttributeMapDigest,
   decodeAttributeMap,
+  decodeAttributeMapToNativeRecord,
   encodeAttributeMap,
 } from './dynamodb-attribute-codec'
 import {
   createAbsentMigrationItemDigest,
 } from './migration-journal'
+import { mapWorkspaceSearchMigrationRow } from './migration-mapper'
 import {
   createJournalHeadDigest,
   createMigrationDigest,
@@ -44,19 +46,19 @@ import {
   workspaceSearchMigrationSourceNames,
   zeroHexDigest,
 } from './migration-contract'
-import type {
-  ParsedWorkspaceSearchMaintenanceEvidence,
-} from './maintenance-evidence'
+import { maintenanceRuntimeControlSurfaces } from './maintenance-evidence'
 import {
   type AcquireWorkspaceSearchMigrationLeaseInput,
   type HeartbeatWorkspaceSearchMigrationLeaseInput,
   type PersistWorkspaceSearchMigrationRunInput,
   type WorkspaceSearchApplyOperationCommandEvent,
+  type WorkspaceSearchMaintenanceEvidenceRenewalCommandEvent,
+  type WorkspaceSearchMigrationCheckpointCommandInput,
   type WorkspaceSearchMigrationCommandInput,
   type WorkspaceSearchMigrationLeaseClaim,
   type WorkspaceSearchMigrationStateEvent,
-  type WorkspaceSearchApplyCheckpointRecordedEvent,
   type WorkspaceSearchApplyOperationRecordedEvent,
+  type WorkspaceSearchMaintenanceEvidenceRenewedEvent,
   createEmptyWorkspaceSearchMigrationCheckpoint,
   createEmptyWorkspaceSearchPlanDigest,
   createWorkspaceSearchMaintenanceEvidenceReceipt,
@@ -70,6 +72,7 @@ import {
   type WorkspaceSearchPlannedOperation,
   type WorkspaceSearchRollbackOperationRecordedEvent,
   type WorkspaceSearchRollbackOperationCommandEvent,
+  type WorkspaceSearchVerificationStartedEvent,
   createWorkspaceSearchApplyOperationRecordedEvent,
   createWorkspaceSearchRollbackOperationRecordedEvent,
   reduceWorkspaceSearchMigrationRunState,
@@ -242,7 +245,40 @@ function createLease(
 }
 
 /**
- * Creates fresh evidence already bound to one lease fence.
+ * Serializes complete disabled-surface evidence as exact untrusted bytes.
+ *
+ * @param drainStartedAt - Beginning of the zero-writer drain interval.
+ * @param drainCompletedAt - End of the zero-writer drain interval.
+ * @param observedAt - Current disabled observation time for every surface.
+ * @param locator - Secret-free external change-record locator.
+ * @returns Exact UTF-8 JSON bytes accepted by the strict parser.
+ */
+function createMaintenanceEvidenceBytes(
+  drainStartedAt = '2026-07-25T03:40:50.000Z',
+  drainCompletedAt = '2026-07-25T03:55:50.000Z',
+  observedAt = '2026-07-25T03:55:50.000Z',
+  locator = 'change:OPS-2026',
+): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify({
+    schemaVersion: 1,
+    locator,
+    runtimeMode: 'disabled',
+    runtimeRevision: 42,
+    drainStartedAt,
+    drainCompletedAt,
+    observedWriterMutations: 0,
+    surfaces: maintenanceRuntimeControlSurfaces.map((surface) => ({
+      surface,
+      mode: 'disabled',
+      status: 'current',
+      revision: 42,
+      observedAt,
+    })),
+  }))
+}
+
+/**
+ * Creates fresh evidence from exact bytes already bound to one lease fence.
  *
  * @param lease - Lease whose fence owns the receipt.
  * @returns Receipt fresh through normal fixture transitions.
@@ -250,16 +286,12 @@ function createLease(
 function createEvidenceReceipt(
   lease: WorkspaceSearchMigrationLease,
 ): WorkspaceSearchMaintenanceEvidenceReceipt {
-  return {
+  return createWorkspaceSearchMaintenanceEvidenceReceipt({
     runId: lease.runId,
-    evidenceDigest: createMigrationDigest('maintenance-evidence-file'),
-    evidenceLocator: 'change:OPS-2026',
-    runtimeRevision: 42,
-    fenceToken: lease.fenceToken,
-    validatedAt: '2026-07-25T04:00:00.000Z',
-    oldestObservationAt: '2026-07-25T03:55:50.000Z',
-    validUntil: '2026-07-25T04:00:50.001Z',
-  }
+    lease,
+    evidenceBytes: createMaintenanceEvidenceBytes(),
+    validatedAt: '2026-07-25T04:00:01.000Z',
+  })
 }
 
 /**
@@ -539,6 +571,33 @@ function createRunFixture(
 }
 
 /**
+ * Creates an adapter-bound initial-run request without caller-owned state.
+ *
+ * @param fixture - Canonical expected state and immutable plan evidence.
+ * @param lease - Exact active lease claim.
+ * @param maintenanceEvidenceBytes - Exact untrusted evidence file bytes.
+ * @returns Initial persistence command reconstructed inside the adapter.
+ */
+function createPersistRunInput(
+  fixture: ReturnType<typeof createRunFixture>,
+  lease: WorkspaceSearchMigrationLeaseClaim,
+  maintenanceEvidenceBytes = createMaintenanceEvidenceBytes(),
+): PersistWorkspaceSearchMigrationRunInput {
+  return {
+    runId: fixture.state.runId,
+    lease,
+    configurationHash: fixture.state.configurationHash,
+    configuration: fixture.state.configuration,
+    maintenanceEvidenceBytes,
+    dryRunEvidenceDigest: fixture.state.dryRunEvidenceDigest,
+    planDigest: fixture.state.planDigest,
+    planOperationCount: fixture.state.planOperationCount,
+    planSeal: fixture.planSeal,
+    planSealReference: fixture.planSealReference,
+  }
+}
+
+/**
  * Creates a caller command without predicting adapter authority or timestamps.
  *
  * @param state - Current run before the operation commits.
@@ -601,23 +660,6 @@ function createApplyCommand(
           versionId,
         }),
       },
-    },
-  }
-}
-
-/**
- * Creates a valid completed zero-row checkpoint after one bounded page.
- *
- * @returns Clean completed checkpoint.
- */
-function createCompletedCheckpoint(): MigrationSourceCheckpoint {
-  const checkpoint = createEmptyWorkspaceSearchMigrationCheckpoint()
-  return {
-    ...checkpoint,
-    completed: true,
-    aggregate: {
-      ...checkpoint.aggregate,
-      pageCount: 1,
     },
   }
 }
@@ -960,46 +1002,63 @@ implements WorkspaceSearchMigrationStateMachinePort {
   }
 
   /**
-   * Creates an absent run under exact active authority.
+   * Parses exact evidence bytes and creates an absent run under live authority.
    *
-   * @param input - Initial state and authority.
+   * @param input - Sealed plan, exact evidence bytes, and authority claim.
+   * @returns Canonical durable initial state.
    */
-  createRunState(input: PersistWorkspaceSearchMigrationRunInput): Promise<void> {
+  createRunState(
+    input: PersistWorkspaceSearchMigrationRunInput,
+  ): Promise<WorkspaceSearchMigrationRunState> {
     if (this.state) {
       throw new WorkspaceSearchMigrationFailure(
         'INVALID_STATE',
         'The migration run already exists.',
       )
     }
-    this.requireExactLease(this.createAuthorityFromClaim(input.lease))
-    const now = Date.parse(this.clock)
-    if (
-      now >= Date.parse(input.state.maintenanceEvidenceReceipt.validUntil)
-    ) {
-      throw new WorkspaceSearchMigrationFailure(
-        'INVALID_MAINTENANCE_EVIDENCE',
-        'Maintenance evidence expired.',
-      )
-    }
+    const authority = this.createAuthorityFromClaim(input.lease)
+    this.requireExactLease(authority)
     const planSeal = this.planSeals.get(
-      input.state.planSealReference.contentDigest,
+      input.planSealReference.contentDigest,
     )
     if (
       !planSeal ||
       createMigrationDigest(planSeal) !==
-        input.state.planSealReference.contentDigest
+        input.planSealReference.contentDigest ||
+      createMigrationDigest(planSeal) !== createMigrationDigest(input.planSeal)
     ) {
       throw new WorkspaceSearchMigrationFailure(
         'INVALID_STATE',
         'The immutable reviewed plan seal is missing.',
       )
     }
-    this.state = cloneValue(input.state)
+    const maintenanceEvidenceReceipt =
+      createWorkspaceSearchMaintenanceEvidenceReceipt({
+        runId: input.runId,
+        lease: authority.lease,
+        evidenceBytes: input.maintenanceEvidenceBytes,
+        validatedAt: authority.at,
+      })
+    const state = createWorkspaceSearchMigrationRunState({
+      runId: input.runId,
+      lease: authority.lease,
+      ownerId: authority.ownerId,
+      configurationHash: input.configurationHash,
+      configuration: input.configuration,
+      maintenanceEvidenceReceipt,
+      dryRunEvidenceDigest: input.dryRunEvidenceDigest,
+      planDigest: input.planDigest,
+      planOperationCount: input.planOperationCount,
+      planSeal: input.planSeal,
+      planSealReference: input.planSealReference,
+      createdAt: authority.at,
+    })
+    this.state = cloneValue(state)
     this.maintenanceReceipts.set(
-      createMigrationDigest(input.state.maintenanceEvidenceReceipt),
-      cloneValue(input.state.maintenanceEvidenceReceipt),
+      createMigrationDigest(maintenanceEvidenceReceipt),
+      cloneValue(maintenanceEvidenceReceipt),
     )
-    return Promise.resolve()
+    return Promise.resolve(cloneValue(state))
   }
 
   /**
@@ -1115,16 +1174,17 @@ implements WorkspaceSearchMigrationStateMachinePort {
       WorkspaceSearchApplyOperationCommandEvent
     >,
   ): Promise<WorkspaceSearchMigrationRunState> {
+    const current = this.requireCurrentState(input.expectedRevision)
     const authority = this.createAuthorityFromClaim(input.lease)
     const event = createWorkspaceSearchApplyOperationRecordedEvent(
-      input.current,
+      current,
       authority,
       input.event,
     )
     const transition: WorkspaceSearchMigrationTransitionInput<
       WorkspaceSearchApplyOperationRecordedEvent
     > = {
-      current: input.current,
+      current,
       expectedRevision: input.expectedRevision,
       authority,
       event,
@@ -1201,11 +1261,18 @@ implements WorkspaceSearchMigrationStateMachinePort {
    * @returns Next durable state.
    */
   saveApplyCheckpoint(
-    input: WorkspaceSearchMigrationCommandInput<
-      WorkspaceSearchApplyCheckpointRecordedEvent
-    >,
+    input: WorkspaceSearchMigrationCheckpointCommandInput,
   ): Promise<WorkspaceSearchMigrationRunState> {
-    return this.commitStateOnly(input, true)
+    const current = this.requireCurrentState(input.expectedRevision)
+    return this.commitStateOnly({
+      expectedRevision: input.expectedRevision,
+      lease: input.lease,
+      event: {
+        kind: 'apply-checkpoint-recorded',
+        location: input.location,
+        checkpoint: this.createObservedCheckpoint(current, input.location),
+      },
+    }, true)
   }
 
   /**
@@ -1215,16 +1282,34 @@ implements WorkspaceSearchMigrationStateMachinePort {
    * @returns Next durable state.
    */
   renewMaintenanceEvidence(
-    input: Parameters<
-      WorkspaceSearchMigrationStateMachinePort['renewMaintenanceEvidence']
-    >[0],
+    input: WorkspaceSearchMigrationCommandInput<
+      WorkspaceSearchMaintenanceEvidenceRenewalCommandEvent
+    >,
   ): Promise<WorkspaceSearchMigrationRunState> {
-    const transition = this.createTransition(input)
+    const current = this.requireCurrentState(input.expectedRevision)
+    const authority = this.createAuthorityFromClaim(input.lease)
+    const receipt = createWorkspaceSearchMaintenanceEvidenceReceipt({
+      runId: current.runId,
+      lease: authority.lease,
+      evidenceBytes: input.event.evidenceBytes,
+      validatedAt: authority.at,
+    })
+    const transition: WorkspaceSearchMigrationTransitionInput<
+      WorkspaceSearchMaintenanceEvidenceRenewedEvent
+    > = {
+      current,
+      expectedRevision: input.expectedRevision,
+      authority,
+      event: {
+        kind: 'maintenance-evidence-renewed',
+        receipt,
+      },
+    }
     this.requireTransitionAuthority(transition, false)
     const next = reduceWorkspaceSearchMigrationRunState(transition)
     this.maintenanceReceipts.set(
-      createMigrationDigest(input.event.receipt),
-      cloneValue(input.event.receipt),
+      createMigrationDigest(receipt),
+      cloneValue(receipt),
     )
     this.state = cloneValue(next)
     return Promise.resolve(cloneValue(next))
@@ -1269,11 +1354,18 @@ implements WorkspaceSearchMigrationStateMachinePort {
    * @returns Next durable state.
    */
   saveVerificationCheckpoint(
-    input: Parameters<
-      WorkspaceSearchMigrationStateMachinePort['saveVerificationCheckpoint']
-    >[0],
+    input: WorkspaceSearchMigrationCheckpointCommandInput,
   ): Promise<WorkspaceSearchMigrationRunState> {
-    return this.commitStateOnly(input, true)
+    const current = this.requireCurrentState(input.expectedRevision)
+    return this.commitStateOnly({
+      expectedRevision: input.expectedRevision,
+      lease: input.lease,
+      event: {
+        kind: 'verification-checkpoint-recorded',
+        location: input.location,
+        checkpoint: this.createObservedCheckpoint(current, input.location),
+      },
+    }, true)
   }
 
   /**
@@ -1331,16 +1423,17 @@ implements WorkspaceSearchMigrationStateMachinePort {
       WorkspaceSearchRollbackOperationCommandEvent
     >,
   ): Promise<WorkspaceSearchMigrationRunState> {
+    const current = this.requireCurrentState(input.expectedRevision)
     const authority = this.createAuthorityFromClaim(input.lease)
     const event = createWorkspaceSearchRollbackOperationRecordedEvent(
-      input.current,
+      current,
       authority,
       input.event,
     )
     const transition: WorkspaceSearchMigrationTransitionInput<
       WorkspaceSearchRollbackOperationRecordedEvent
     > = {
-      current: input.current,
+      current,
       expectedRevision: input.expectedRevision,
       authority,
       event,
@@ -1428,8 +1521,16 @@ implements WorkspaceSearchMigrationStateMachinePort {
    * @param requireFreshEvidence - Whether maintenance freshness is required.
    * @returns Next detached durable state.
    */
-  private commitStateOnly<Event extends WorkspaceSearchMigrationStateEvent>(
-    input: WorkspaceSearchMigrationCommandInput<Event>,
+  private commitStateOnly<
+    Event extends Exclude<
+      WorkspaceSearchMigrationStateEvent,
+      WorkspaceSearchMaintenanceEvidenceRenewedEvent
+    >,
+  >(
+    input: Pick<
+      WorkspaceSearchMigrationCommandInput,
+      'expectedRevision' | 'lease'
+    > & { event: Event },
     requireFreshEvidence: boolean,
   ): Promise<WorkspaceSearchMigrationRunState> {
     const transition = this.createTransition(input)
@@ -1445,15 +1546,41 @@ implements WorkspaceSearchMigrationStateMachinePort {
    * @param input - Command carrying no caller-controlled commit time.
    * @returns Pure reducer transition captured immediately before conditions.
    */
-  private createTransition<Event extends WorkspaceSearchMigrationStateEvent>(
-    input: WorkspaceSearchMigrationCommandInput<Event>,
+  private createTransition<
+    Event extends Exclude<
+      WorkspaceSearchMigrationStateEvent,
+      WorkspaceSearchMaintenanceEvidenceRenewedEvent
+    >,
+  >(
+    input: Pick<
+      WorkspaceSearchMigrationCommandInput,
+      'expectedRevision' | 'lease'
+    > & { event: Event },
   ): WorkspaceSearchMigrationTransitionInput<Event> {
     return {
-      current: input.current,
+      current: this.requireCurrentState(input.expectedRevision),
       expectedRevision: input.expectedRevision,
       authority: this.createAuthorityFromClaim(input.lease),
       event: input.event,
     }
+  }
+
+  /**
+   * Strongly reads the exact durable state for one optimistic command.
+   *
+   * @param expectedRevision - Revision the caller observed before the command.
+   * @returns Detached durable state at that exact revision.
+   */
+  private requireCurrentState(
+    expectedRevision: number,
+  ): WorkspaceSearchMigrationRunState {
+    if (!this.state || this.state.revision !== expectedRevision) {
+      throw new WorkspaceSearchMigrationFailure(
+        'INVALID_STATE',
+        'The durable run revision changed.',
+      )
+    }
+    return cloneValue(this.state)
   }
 
   /**
@@ -1497,11 +1624,12 @@ implements WorkspaceSearchMigrationStateMachinePort {
       !this.state ||
       this.state.runId !== input.current.runId ||
       this.state.revision !== input.expectedRevision ||
-      input.current.revision !== input.expectedRevision
+      input.current.revision !== input.expectedRevision ||
+      createMigrationDigest(this.state) !== createMigrationDigest(input.current)
     ) {
       throw new WorkspaceSearchMigrationFailure(
         'INVALID_STATE',
-        'The durable run revision changed.',
+        'The durable run state changed.',
       )
     }
     this.requireExactLease(input.authority)
@@ -1715,6 +1843,93 @@ implements WorkspaceSearchMigrationStateMachinePort {
   }
 
   /**
+   * Derives one completed checkpoint from adapter-owned in-memory table rows.
+   *
+   * @param state - Exact durable state whose next page is scanned.
+   * @param location - Source or target table selected by the command.
+   * @returns Complete one-page checkpoint bound to every observed row digest.
+   */
+  private createObservedCheckpoint(
+    state: WorkspaceSearchMigrationRunState,
+    location: WorkspaceSearchMigrationCheckpointCommandInput['location'],
+  ): MigrationSourceCheckpoint {
+    const traversal = state.status === 'verifying'
+      ? state.verification
+      : state.apply
+    if (!traversal) {
+      throw new TestAdapterFailure('Expected scan traversal state.')
+    }
+    const previous = location === 'target'
+      ? traversal.target
+      : traversal.sources[location]
+    if (
+      previous.completed ||
+      previous.aggregate.pageCount !== 0 ||
+      previous.cursor !== undefined
+    ) {
+      throw new WorkspaceSearchMigrationFailure(
+        'INVALID_STATE',
+        'The compact adapter already consumed this table scan.',
+      )
+    }
+
+    const keyAccumulator = MigrationDigestAccumulator.fromState(
+      previous.keyDigestState,
+    )
+    const contentAccumulator = MigrationDigestAccumulator.fromState(
+      previous.contentDigestState,
+    )
+    const aggregate = { ...previous.aggregate, pageCount: 1 }
+
+    if (location === 'target') {
+      for (const [targetKeyDigest, snapshot] of this.targets) {
+        keyAccumulator.add(targetKeyDigest)
+        contentAccumulator.add(snapshot.digest)
+        aggregate.scanned += 1
+        aggregate.mapped += 1
+        aggregate.projected += 1
+      }
+    } else {
+      const prefix = `${location}:`
+      for (const [storageKey, snapshot] of this.sources) {
+        if (!storageKey.startsWith(prefix) || !snapshot.exists) continue
+        keyAccumulator.add(storageKey.slice(prefix.length))
+        contentAccumulator.add(snapshot.digest)
+        aggregate.scanned += 1
+        try {
+          const mapped = mapWorkspaceSearchMigrationRow(
+            location,
+            decodeAttributeMapToNativeRecord(snapshot.item),
+          )
+          if (mapped.classification === 'mapped') {
+            aggregate.mapped += 1
+            if (mapped.operation.action === 'put') {
+              aggregate.projected += 1
+            } else {
+              aggregate.deleted += 1
+            }
+          } else if (mapped.classification === 'ignored') {
+            aggregate.ignored += 1
+          } else {
+            aggregate.invalid += 1
+          }
+        } catch {
+          aggregate.invalid += 1
+        }
+      }
+    }
+
+    aggregate.keyDigest = keyAccumulator.digest()
+    aggregate.contentDigest = contentAccumulator.digest()
+    return {
+      completed: true,
+      aggregate,
+      keyDigestState: keyAccumulator.exportState(),
+      contentDigestState: contentAccumulator.exportState(),
+    }
+  }
+
+  /**
    * Creates a detached snapshot map for an atomic transaction candidate.
    *
    * @param source - Current snapshot map.
@@ -1790,13 +2005,20 @@ async function createPersistedRun(
   port.seedPlanSeal(fixture.planSeal)
   for (const planned of fixture.plans) port.seedPlan(planned)
   port.setClock(fixture.state.createdAt)
-  await port.createRunState({
-    state: fixture.state,
-    lease: port.currentLeaseClaim(),
-  })
+  const state = await port.createRunState(createPersistRunInput(
+    fixture,
+    port.currentLeaseClaim(),
+  ))
+  if (
+    createMigrationDigest(state) !== createMigrationDigest(fixture.state)
+  ) {
+    throw new TestAdapterFailure(
+      'Adapter-owned run creation differs from the canonical fixture.',
+    )
+  }
   return {
     port,
-    state: fixture.state,
+    state,
     plans: fixture.plans,
     planSeal: fixture.planSeal,
     planSealReference: fixture.planSealReference,
@@ -1824,14 +2046,9 @@ async function completeApplyTraversal(
   for (const location of locations) {
     port.setClock(at)
     state = await port.saveApplyCheckpoint({
-      current: state,
       expectedRevision: state.revision,
       lease: port.currentLeaseClaim(),
-      event: {
-        kind: 'apply-checkpoint-recorded',
-        location,
-        checkpoint: createCompletedCheckpoint(),
-      },
+      location,
     })
   }
   return state
@@ -1858,14 +2075,9 @@ async function completeVerificationTraversal(
   for (const location of locations) {
     port.setClock(at)
     state = await port.saveVerificationCheckpoint({
-      current: state,
       expectedRevision: state.revision,
       lease: port.currentLeaseClaim(),
-      event: {
-        kind: 'verification-checkpoint-recorded',
-        location,
-        checkpoint: createCompletedCheckpoint(),
-      },
+      location,
     })
   }
   return state
@@ -1899,7 +2111,6 @@ async function commitPlannedOperation(
   }
   port.setClock(at)
   const next = await port.commitApplyOperation({
-    current: state,
     expectedRevision: state.revision,
     lease: port.currentLeaseClaim(),
     event: command,
@@ -2085,61 +2296,122 @@ describe('Workspace Search migration state machine', () => {
     expect(heartbeat.fenceToken).toBe(takeover.fenceToken)
   })
 
-  test('derives the evidence deadline from the oldest observation and rejects invalid checkpoints', () => {
-    const lease = createLease()
-    const parsed: ParsedWorkspaceSearchMaintenanceEvidence = {
-      evidence: {
-        schemaVersion: 1,
-        locator: 'change:OPS-2026',
-        runtimeMode: 'disabled',
-        runtimeRevision: 42,
-        drainStartedAt: '2026-07-25T03:40:00.000Z',
-        drainCompletedAt: '2026-07-25T04:00:10.000Z',
-        observedWriterMutations: 0,
-        surfaces: [{
-          surface: 'api',
-          mode: 'disabled',
-          status: 'current',
-          revision: 42,
-          observedAt: '2026-07-25T04:00:00.000Z',
-        }],
-      },
-      fileSha256: createMigrationDigest('exact-maintenance-file'),
+  test('re-reads durable state and constructs evidence receipts from strict bytes', async () => {
+    const fixture = createRunFixture([])
+    const port = new InMemoryMigrationStateMachinePort()
+    port.seedLease(createLease())
+    port.seedPlanSeal(fixture.planSeal)
+    port.setClock(fixture.state.createdAt)
+    const invalidEvidenceBytes = new TextEncoder().encode('{}')
+    await expectMigrationFailure(
+      () => port.createRunState(createPersistRunInput(
+        fixture,
+        port.currentLeaseClaim(),
+        invalidEvidenceBytes,
+      )),
+      'INVALID_MAINTENANCE_EVIDENCE',
+    )
+    expect(await port.readRunState(fixture.state.runId)).toBeUndefined()
+
+    const state = await port.createRunState(createPersistRunInput(
+      fixture,
+      port.currentLeaseClaim(),
+    ))
+    const forgedEvent: WorkspaceSearchVerificationStartedEvent = {
+      kind: 'verification-started',
     }
+    const forgedCommand = {
+      current: {
+        ...state,
+        status: 'applied',
+      },
+      expectedRevision: state.revision,
+      lease: port.currentLeaseClaim(),
+      event: forgedEvent,
+    }
+    port.setClock('2026-07-25T04:00:10.000Z')
+    await expectMigrationFailure(
+      () => port.beginVerification(forgedCommand),
+      'INVALID_STATE',
+    )
+
+    const originalReceiptDigest = createMigrationDigest(
+      state.maintenanceEvidenceReceipt,
+    )
+    port.setClock('2026-07-25T04:00:41.000Z')
+    await expectMigrationFailure(
+      () => port.renewMaintenanceEvidence({
+        expectedRevision: state.revision,
+        lease: port.currentLeaseClaim(),
+        event: {
+          kind: 'maintenance-evidence-renewal-requested',
+          evidenceBytes: invalidEvidenceBytes,
+        },
+      }),
+      'INVALID_MAINTENANCE_EVIDENCE',
+    )
+    expect((await port.readRunState(state.runId))?.revision).toBe(state.revision)
+
+    const renewed = await port.renewMaintenanceEvidence({
+      expectedRevision: state.revision,
+      lease: port.currentLeaseClaim(),
+      event: {
+        kind: 'maintenance-evidence-renewal-requested',
+        evidenceBytes: createMaintenanceEvidenceBytes(
+          '2026-07-25T03:45:00.000Z',
+          '2026-07-25T04:00:00.000Z',
+          '2026-07-25T04:00:30.000Z',
+          'change:OPS-2026-RENEW',
+        ),
+      },
+    })
+    const renewedReceiptDigest = createMigrationDigest(
+      renewed.maintenanceEvidenceReceipt,
+    )
+    expect(renewedReceiptDigest).not.toBe(originalReceiptDigest)
+    expect(await port.readMaintenanceEvidenceReceipt(
+      state.runId,
+      originalReceiptDigest,
+    )).toEqual(state.maintenanceEvidenceReceipt)
+    expect(await port.readMaintenanceEvidenceReceipt(
+      state.runId,
+      renewedReceiptDigest,
+    )).toEqual(renewed.maintenanceEvidenceReceipt)
+  })
+
+  test('parses exact evidence bytes, derives their deadline, and rejects invalid checkpoints', () => {
+    const lease = createLease()
     const receipt = createWorkspaceSearchMaintenanceEvidenceReceipt({
       runId: lease.runId,
       lease,
-      parsed,
+      evidenceBytes: createMaintenanceEvidenceBytes(
+        '2026-07-25T03:45:00.000Z',
+        '2026-07-25T04:00:00.000Z',
+        '2026-07-25T04:00:10.000Z',
+      ),
       validatedAt: '2026-07-25T04:00:30.000Z',
     })
     expect(receipt.validUntil).toBe('2026-07-25T04:05:00.001Z')
-    for (const invalidTimestampEvidence of [
-      {
-        ...parsed,
-        evidence: {
-          ...parsed.evidence,
-          drainCompletedAt: 'not-a-timestamp',
-        },
-      },
-      {
-        ...parsed,
-        evidence: {
-          ...parsed.evidence,
-          surfaces: [{
-            ...parsed.evidence.surfaces[0],
-            observedAt: 'not-a-timestamp',
-          }],
-        },
-      },
-    ] satisfies readonly ParsedWorkspaceSearchMaintenanceEvidence[]) {
+    for (const invalidTimestampEvidenceBytes of [
+      createMaintenanceEvidenceBytes(
+        '2026-07-25T03:45:00.000Z',
+        'not-a-timestamp',
+        '2026-07-25T04:00:10.000Z',
+      ),
+      createMaintenanceEvidenceBytes(
+        '2026-07-25T03:45:00.000Z',
+        '2026-07-25T04:00:00.000Z',
+        'not-a-timestamp',
+      ),
+    ]) {
       expectSyncMigrationFailure(
         () => createWorkspaceSearchMaintenanceEvidenceReceipt({
           runId: lease.runId,
           lease,
-          parsed: invalidTimestampEvidence,
+          evidenceBytes: invalidTimestampEvidenceBytes,
           validatedAt: '2026-07-25T04:00:30.000Z',
         }),
-        'INVALID_STATE',
+        'INVALID_MAINTENANCE_EVIDENCE',
       )
     }
 
@@ -2466,7 +2738,6 @@ describe('Workspace Search migration state machine', () => {
     const journal = requireMutationCommandJournal(event)
     fixture.port.setClock('2026-07-25T04:00:10.000Z')
     const input = {
-      current: fixture.state,
       expectedRevision: fixture.state.revision,
       lease: fixture.port.currentLeaseClaim(),
       event,
@@ -2535,7 +2806,6 @@ describe('Workspace Search migration state machine', () => {
       fixture.port.injectFault(entry.fault)
       fixture.port.setClock('2026-07-25T04:00:10.000Z')
       const call = () => fixture.port.commitApplyOperation({
-        current: fixture.state,
         expectedRevision: fixture.state.revision,
         lease: fixture.port.currentLeaseClaim(),
         event,
@@ -2566,7 +2836,6 @@ describe('Workspace Search migration state machine', () => {
     outOfOrder.port.setClock('2026-07-25T04:00:10.000Z')
     await expectMigrationFailure(
       () => outOfOrder.port.commitApplyOperation({
-        current: outOfOrder.state,
         expectedRevision: outOfOrder.state.revision,
         lease: outOfOrder.port.currentLeaseClaim(),
         event: secondPlanEvent,
@@ -2591,7 +2860,6 @@ describe('Workspace Search migration state machine', () => {
     stale.port.setClock('2026-07-25T04:00:41.000Z')
     await expectMigrationFailure(
       () => stale.port.commitApplyOperation({
-        current: stale.state,
         expectedRevision: stale.state.revision,
         lease: stale.port.currentLeaseClaim(),
         event: staleEvidenceEvent,
@@ -2609,7 +2877,6 @@ describe('Workspace Search migration state machine', () => {
     stale.port.setClock('2026-07-25T04:00:10.000Z')
     await expectMigrationFailure(
       () => stale.port.commitApplyOperation({
-        current: stale.state,
         expectedRevision: stale.state.revision,
         lease: stale.port.currentLeaseClaim(),
         event: tamperedPlanEvent,
@@ -2643,7 +2910,6 @@ describe('Workspace Search migration state machine', () => {
     fixture.port.persistApplySeal(applyEvidence.seal)
     fixture.port.setClock('2026-07-25T04:00:20.000Z')
     state = await fixture.port.sealApply({
-      current: state,
       expectedRevision: state.revision,
       lease: fixture.port.currentLeaseClaim(),
       event: {
@@ -2654,7 +2920,6 @@ describe('Workspace Search migration state machine', () => {
     })
     fixture.port.setClock('2026-07-25T04:00:30.000Z')
     state = await fixture.port.beginVerification({
-      current: state,
       expectedRevision: state.revision,
       lease: fixture.port.currentLeaseClaim(),
       event: { kind: 'verification-started' },
@@ -2671,6 +2936,10 @@ describe('Workspace Search migration state machine', () => {
     if (!state.verification) {
       throw new TestAdapterFailure('Expected complete verification progress.')
     }
+    expect(
+      state.verification.sources['project-directory'].aggregate.scanned,
+    ).toBe(1)
+    expect(state.verification.target.aggregate.scanned).toBe(1)
     const evidence: WorkspaceSearchVerificationEvidence = {
       kind: 'workspace-search-verification-evidence',
       evidenceVersion: 1,
@@ -2694,7 +2963,6 @@ describe('Workspace Search migration state machine', () => {
     fixture.port.persistVerificationEvidence(evidence)
     fixture.port.setClock('2026-07-25T04:00:40.000Z')
     state = await fixture.port.completeVerification({
-      current: state,
       expectedRevision: state.revision,
       lease: fixture.port.currentLeaseClaim(),
       event: {
@@ -2729,7 +2997,6 @@ describe('Workspace Search migration state machine', () => {
     fixture.port.persistApplySeal(prefix.seal)
     fixture.port.setClock('2026-07-25T04:00:20.000Z')
     let state = await fixture.port.beginRollback({
-      current: applied.state,
       expectedRevision: applied.state.revision,
       lease: fixture.port.currentLeaseClaim(),
       event: {
@@ -2749,7 +3016,6 @@ describe('Workspace Search migration state machine', () => {
     fixture.port.setClock('2026-07-25T04:00:30.000Z')
     await expectMigrationFailure(
       () => fixture.port.commitRollbackOperation({
-        current: state,
         expectedRevision: state.revision,
         lease: fixture.port.currentLeaseClaim(),
         event: {
@@ -2764,14 +3030,12 @@ describe('Workspace Search migration state machine', () => {
 
     fixture.port.setClock('2026-07-25T04:00:30.000Z')
     state = await fixture.port.commitRollbackOperation({
-      current: state,
       expectedRevision: state.revision,
       lease: fixture.port.currentLeaseClaim(),
       event: reverseEvent,
     })
     fixture.port.setClock('2026-07-25T04:00:40.000Z')
     state = await fixture.port.finishRollback({
-      current: state,
       expectedRevision: state.revision,
       lease: fixture.port.currentLeaseClaim(),
       event: { kind: 'rollback-finished' },
@@ -2828,7 +3092,6 @@ describe('Workspace Search migration state machine', () => {
     fixture.port.persistApplySeal(applyEvidence.seal)
     fixture.port.setClock('2026-07-25T04:00:20.000Z')
     state = await fixture.port.sealApply({
-      current: state,
       expectedRevision: state.revision,
       lease: fixture.port.currentLeaseClaim(),
       event: {
@@ -2839,7 +3102,6 @@ describe('Workspace Search migration state machine', () => {
     })
     fixture.port.setClock('2026-07-25T04:00:30.000Z')
     state = await fixture.port.beginRollback({
-      current: state,
       expectedRevision: state.revision,
       lease: fixture.port.currentLeaseClaim(),
       event: {
@@ -2856,7 +3118,6 @@ describe('Workspace Search migration state machine', () => {
     fixture.port.setClock('2026-07-25T04:00:35.000Z')
     await expectMigrationFailure(
       () => fixture.port.commitRollbackOperation({
-        current: state,
         expectedRevision: state.revision,
         lease: fixture.port.currentLeaseClaim(),
         event: outOfOrder,
@@ -2872,7 +3133,6 @@ describe('Workspace Search migration state machine', () => {
     fixture.port.setClock('2026-07-25T04:00:36.000Z')
     await expectMigrationFailure(
       () => fixture.port.commitRollbackOperation({
-        current: state,
         expectedRevision: state.revision,
         lease: fixture.port.currentLeaseClaim(),
         event: secondReverse,
@@ -2892,7 +3152,6 @@ describe('Workspace Search migration state machine', () => {
     )
     await expectAdapterFailure(
       () => fixture.port.commitRollbackOperation({
-        current: state,
         expectedRevision: state.revision,
         lease: fixture.port.currentLeaseClaim(),
         event: reconciledSecond,
@@ -2918,14 +3177,12 @@ describe('Workspace Search migration state machine', () => {
       firstMutation.segment,
     )
     state = await fixture.port.commitRollbackOperation({
-      current: state,
       expectedRevision: state.revision,
       lease: fixture.port.currentLeaseClaim(),
       event: firstReverse,
     })
     fixture.port.setClock('2026-07-25T04:00:40.000Z')
     state = await fixture.port.finishRollback({
-      current: state,
       expectedRevision: state.revision,
       lease: fixture.port.currentLeaseClaim(),
       event: { kind: 'rollback-finished' },
