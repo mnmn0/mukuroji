@@ -252,9 +252,36 @@ describe('Workspace Search migration contract', () => {
       ),
       rolledBackAt: '2026-07-25T05:00:00.000Z',
     }
+    const applied: WorkspaceSearchOperationReceipt = {
+      kind: 'workspace-search-operation-applied',
+      markerVersion: 1,
+      runId: rollback.runId,
+      configurationHash: rollback.configurationHash,
+      operationId: rollback.operationId,
+      planSequence: 1,
+      planOperationDigest: createMigrationDigest('plan-entry'),
+      sequence: rollback.sequence,
+      targetKeyDigest: rollback.targetKeyDigest,
+      sourceDigest: createMigrationDigest('source'),
+      beforeDigest: rollback.beforeDigest,
+      afterDigest: rollback.afterDigest,
+      fenceToken: rollback.fenceToken,
+      maintenanceEvidenceReceiptDigest:
+        rollback.maintenanceEvidenceReceiptDigest,
+      journal: {
+        objectKey:
+          'workspace-search/v1/run-1/segments/000000000001.json',
+        versionId: 'version-one',
+        contentDigest: createMigrationDigest('journal-bytes'),
+        headDigest: rollback.journalHeadDigest,
+      },
+      committedAt: '2026-07-25T04:02:00.000Z',
+    }
 
-    expect(rollback.kind).toBe('workspace-search-operation-rolled-back')
-    expect(rollback.markerVersion).toBe(1)
+    expect(rollback.kind).not.toBe(applied.kind)
+    expect(createMigrationDigest(rollback)).not.toBe(
+      createMigrationDigest(applied),
+    )
   })
 
   test('keeps restart-safe target keys and snapshots JSON-safe in journal segments', () => {

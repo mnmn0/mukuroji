@@ -20,13 +20,6 @@ import {
   readWorkspaceSearchDocument,
   type WorkspaceSearchDocument,
 } from '../../../src/modules/workspace-search'
-
-/** Fixed fenced-lease duration assigned by the persistence adapter clock. */
-export const WORKSPACE_SEARCH_MIGRATION_LEASE_DURATION_MILLISECONDS = 60_000
-
-/** Required deadline headroom before an adapter starts one atomic commit. */
-export const WORKSPACE_SEARCH_MIGRATION_MINIMUM_COMMIT_WINDOW_MILLISECONDS =
-  10_000
 import {
   createEmptyMigrationScanAggregate,
   createJournalHeadDigest,
@@ -64,6 +57,13 @@ import {
   workspaceSearchMigrationSourceNames,
   zeroHexDigest,
 } from './migration-contract'
+
+/** Fixed fenced-lease duration assigned by the persistence adapter clock. */
+export const WORKSPACE_SEARCH_MIGRATION_LEASE_DURATION_MILLISECONDS = 60_000
+
+/** Required deadline headroom before an adapter starts one atomic commit. */
+export const WORKSPACE_SEARCH_MIGRATION_MINIMUM_COMMIT_WINDOW_MILLISECONDS =
+  10_000
 
 /** One sibling hash used to prove an operation's ordered plan membership. */
 export type WorkspaceSearchPlanMembershipProofStep = {
@@ -649,10 +649,18 @@ export function createWorkspaceSearchMaintenanceEvidenceReceipt(
     return failLease('Maintenance evidence lease belongs to another run.')
   }
 
+  requireCanonicalTime(
+    input.parsed.evidence.drainCompletedAt,
+    'maintenance drain completion time',
+  )
   let oldestObservationMilliseconds = Date.parse(
     input.parsed.evidence.drainCompletedAt,
   )
   for (const surface of input.parsed.evidence.surfaces) {
+    requireCanonicalTime(
+      surface.observedAt,
+      'maintenance surface observation time',
+    )
     const observedMilliseconds = Date.parse(surface.observedAt)
     if (observedMilliseconds < oldestObservationMilliseconds) {
       oldestObservationMilliseconds = observedMilliseconds
@@ -1312,7 +1320,19 @@ function applyAuthorizedEvent(
   if (event.kind === 'rollback-finished') {
     return finishRollback(input.current)
   }
-  return failState('Maintenance evidence renewal used the wrong authority path.')
+  if (event.kind === 'maintenance-evidence-renewed') {
+    return failState('Maintenance evidence renewal used the wrong authority path.')
+  }
+  return failUnsupportedMigrationStateEvent(event)
+}
+
+/**
+ * Preserves compile-time exhaustiveness for migration state events.
+ *
+ * @param event - Event variant omitted from the transition dispatcher.
+ */
+function failUnsupportedMigrationStateEvent(_event: never): never {
+  return failState('Migration transition received an unsupported event.')
 }
 
 /**
@@ -2273,13 +2293,17 @@ function validateAbsentSourceTargetIdentity(
     }
     return
   }
-  if (
-    readNonEmptyStringAttribute(source.key.workspaceId) !== workspaceId ||
-    readNonEmptyStringAttribute(source.key.recordKey) !==
-      `DOCUMENT#${entityId}`
-  ) {
-    return failState('Orphan Document source key differs from its target.')
+  if (source.source === 'documents') {
+    if (
+      readNonEmptyStringAttribute(source.key.workspaceId) !== workspaceId ||
+      readNonEmptyStringAttribute(source.key.recordKey) !==
+        `DOCUMENT#${entityId}`
+    ) {
+      return failState('Orphan Document source key differs from its target.')
+    }
+    return
   }
+  return failState('Orphan deletion is unsupported for this source table.')
 }
 
 /**

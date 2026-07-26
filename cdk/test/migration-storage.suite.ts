@@ -368,26 +368,36 @@ test('Workspace Search migration operator policy is unattached and least privile
     statement.Action.includes('dynamodb:DeleteItem') &&
     JSON.stringify(statement.Resource).includes(targetTableId)
   );
+  const targetAndStateReadOnlyStatement = statements.find((statement) =>
+    Array.isArray(statement.Action) &&
+    statement.Action.includes('dynamodb:DescribeContinuousBackups') &&
+    statement.Action.includes('dynamodb:GetItem') &&
+    JSON.stringify(statement.Resource).includes(targetTableId) &&
+    JSON.stringify(statement.Resource).includes(stateTableId)
+  );
   const stateTransactionStatement = statements.find((statement) =>
     Array.isArray(statement.Action) &&
     statement.Action.includes('dynamodb:UpdateItem') &&
     statement.Condition !== undefined &&
     JSON.stringify(statement.Resource).includes(stateTableId)
   );
-  const unconditionedStateMutationStatement = statements.find((statement) =>
-    (
-      statement.Action === 'dynamodb:PutItem' ||
-      statement.Action === 'dynamodb:UpdateItem' ||
-      (
-        Array.isArray(statement.Action) &&
-        (
-          statement.Action.includes('dynamodb:PutItem') ||
-          statement.Action.includes('dynamodb:UpdateItem')
-        )
-      )
-    ) &&
-    statement.Condition === undefined &&
+  const targetTableStatements = statements.filter((statement) =>
+    JSON.stringify(statement.Resource).includes(targetTableId)
+  );
+  const stateTableStatements = statements.filter((statement) =>
     JSON.stringify(statement.Resource).includes(stateTableId)
+  );
+  const dynamoDbStatements = statements.filter((statement) =>
+    (
+      typeof statement.Action === 'string' &&
+      statement.Action.startsWith('dynamodb:')
+    ) ||
+    (
+      Array.isArray(statement.Action) &&
+      statement.Action.some((action) =>
+        typeof action === 'string' && action.startsWith('dynamodb:')
+      )
+    )
   );
   const journalPutStatement = statements.find((statement) =>
     statement.Action === 's3:PutObject'
@@ -433,17 +443,62 @@ test('Workspace Search migration operator policy is unattached and least privile
   expect(sourceConditionStatement?.Resource).toEqual(
     sourceReadStatement?.Resource,
   );
+  expect(targetAndStateReadOnlyStatement?.Action).toEqual([
+    'dynamodb:DescribeContinuousBackups',
+    'dynamodb:DescribeTable',
+    'dynamodb:DescribeTimeToLive',
+    'dynamodb:GetItem',
+    'dynamodb:Query',
+    'dynamodb:Scan',
+  ]);
+  expect(targetAndStateReadOnlyStatement?.Resource).toHaveLength(2);
+  expect(targetAndStateReadOnlyStatement?.Resource).toEqual(
+    expect.arrayContaining([
+      { 'Fn::GetAtt': [targetTableId, 'Arn'] },
+      { 'Fn::GetAtt': [stateTableId, 'Arn'] },
+    ]),
+  );
+  expect(targetAndStateReadOnlyStatement?.Condition).toBeUndefined();
+  expect(targetTransactionStatement?.Action).toEqual([
+    'dynamodb:ConditionCheckItem',
+    'dynamodb:DeleteItem',
+    'dynamodb:PutItem',
+  ]);
+  expect(targetTransactionStatement?.Resource).toEqual({
+    'Fn::GetAtt': [targetTableId, 'Arn'],
+  });
   expect(targetTransactionStatement?.Condition).toEqual({
     'ForAnyValue:StringEquals': {
       'dynamodb:EnclosingOperation': ['TransactWriteItems'],
     },
+  });
+  expect(stateTransactionStatement?.Action).toEqual([
+    'dynamodb:ConditionCheckItem',
+    'dynamodb:PutItem',
+    'dynamodb:UpdateItem',
+  ]);
+  expect(stateTransactionStatement?.Resource).toEqual({
+    'Fn::GetAtt': [stateTableId, 'Arn'],
   });
   expect(stateTransactionStatement?.Condition).toEqual({
     'ForAnyValue:StringEquals': {
       'dynamodb:EnclosingOperation': ['TransactWriteItems'],
     },
   });
-  expect(unconditionedStateMutationStatement).toBeUndefined();
+  expect(targetTableStatements).toHaveLength(2);
+  expect(stateTableStatements).toHaveLength(2);
+  expect(dynamoDbStatements.some((statement) =>
+    statement.Action === 'dynamodb:*' ||
+    (
+      Array.isArray(statement.Action) &&
+      statement.Action.includes('dynamodb:*')
+    ) ||
+    statement.Resource === '*' ||
+    (
+      Array.isArray(statement.Resource) &&
+      statement.Resource.includes('*')
+    )
+  )).toBe(false);
   expect(journalBucketStatement?.Resource).toEqual({
     'Fn::GetAtt': [journalBucketId, 'Arn'],
   });

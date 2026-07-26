@@ -111,6 +111,37 @@ function cloneValue<Value>(value: Value): Value {
   return structuredClone(value)
 }
 
+/** Production-shaped primary keys indexed by migration table role. */
+const migrationTableKeys: Record<
+  MigrationTableIdentity['role'],
+  MigrationTableIdentity['key']
+> = {
+  'project-directory': [
+    { name: 'directoryId', role: 'HASH', type: 'S' },
+    { name: 'entryKey', role: 'RANGE', type: 'S' },
+  ],
+  'work-items': [
+    { name: 'directoryTeamId', role: 'HASH', type: 'S' },
+    { name: 'issueId', role: 'RANGE', type: 'S' },
+  ],
+  collaboration: [
+    { name: 'entityKey', role: 'HASH', type: 'S' },
+    { name: 'recordKey', role: 'RANGE', type: 'S' },
+  ],
+  documents: [
+    { name: 'workspaceId', role: 'HASH', type: 'S' },
+    { name: 'recordKey', role: 'RANGE', type: 'S' },
+  ],
+  'workspace-search': [
+    { name: 'workspaceId', role: 'HASH', type: 'S' },
+    { name: 'recordKey', role: 'RANGE', type: 'S' },
+  ],
+  'migration-state': [
+    { name: 'migrationId', role: 'HASH', type: 'S' },
+    { name: 'recordKey', role: 'RANGE', type: 'S' },
+  ],
+}
+
 /**
  * Creates the exact table identity required by a migration configuration.
  *
@@ -120,31 +151,6 @@ function cloneValue<Value>(value: Value): Value {
 function createTableIdentity(
   role: MigrationTableIdentity['role'],
 ): MigrationTableIdentity {
-  const key: MigrationTableIdentity['key'] =
-    role === 'project-directory'
-      ? [
-          { name: 'directoryId', role: 'HASH', type: 'S' },
-          { name: 'entryKey', role: 'RANGE', type: 'S' },
-        ]
-      : role === 'work-items'
-        ? [
-            { name: 'directoryTeamId', role: 'HASH', type: 'S' },
-            { name: 'issueId', role: 'RANGE', type: 'S' },
-          ]
-        : role === 'collaboration'
-          ? [
-              { name: 'entityKey', role: 'HASH', type: 'S' },
-              { name: 'recordKey', role: 'RANGE', type: 'S' },
-            ]
-          : role === 'migration-state'
-            ? [
-                { name: 'migrationId', role: 'HASH', type: 'S' },
-                { name: 'recordKey', role: 'RANGE', type: 'S' },
-              ]
-            : [
-                { name: 'workspaceId', role: 'HASH', type: 'S' },
-                { name: 'recordKey', role: 'RANGE', type: 'S' },
-              ]
   return {
     role,
     tableName: `mukuroji-${role}`,
@@ -153,7 +159,7 @@ function createTableIdentity(
     creationTime: '2026-07-01T00:00:00.000Z',
     account: '123456789012',
     region: 'ap-northeast-1',
-    key,
+    key: migrationTableKeys[role],
     globalSecondaryIndexes: [],
     billingMode: 'PAY_PER_REQUEST',
     deletionProtection: true,
@@ -583,7 +589,8 @@ function createApplyCommand(
       segment,
       reference: {
         objectKey:
-          `workspace-search/v1/${state.runId}/segments/${sequence}.json`,
+          `workspace-search/v1/${state.runId}/segments/` +
+          `${String(sequence).padStart(12, '0')}.json`,
         versionId,
         contentDigest,
         headDigest: createJournalHeadDigest({
@@ -1995,6 +2002,26 @@ async function expectMigrationFailure(
 }
 
 /**
+ * Asserts that one synchronous call fails with an exact migration code.
+ *
+ * @param call - Deferred synchronous operation.
+ * @param code - Expected stable migration failure code.
+ */
+function expectSyncMigrationFailure(
+  call: () => unknown,
+  code: WorkspaceSearchMigrationFailure['code'],
+): void {
+  try {
+    call()
+  } catch (error: unknown) {
+    if (!(error instanceof WorkspaceSearchMigrationFailure)) throw error
+    expect(error.code).toBe(code)
+    return
+  }
+  throw new TestAdapterFailure(`Expected ${code}.`)
+}
+
+/**
  * Asserts that one injected adapter response failure is observable.
  *
  * @param call - Deferred adapter operation.
@@ -2012,6 +2039,52 @@ async function expectAdapterFailure(
 }
 
 describe('Workspace Search migration state machine', () => {
+  test('fences active leases, expired takeovers, and exact heartbeats', async () => {
+    const port = new InMemoryMigrationStateMachinePort()
+    port.setClock('2026-07-25T04:00:00.000Z')
+    const first = await port.acquireLease({
+      runId: 'run-1',
+      ownerId: 'owner-1',
+    })
+    expect(first.fenceToken).toBe(1)
+
+    port.setClock('2026-07-25T04:00:01.000Z')
+    await expectMigrationFailure(
+      () => port.acquireLease({
+        runId: 'run-1',
+        ownerId: 'owner-2',
+      }),
+      'LEASE_CONFLICT',
+    )
+
+    port.setClock(first.expiresAt)
+    const takeover = await port.acquireLease({
+      runId: 'run-1',
+      ownerId: 'owner-2',
+    })
+    expect(takeover.fenceToken).toBe(first.fenceToken + 1)
+    await expectMigrationFailure(
+      () => port.heartbeatLease({
+        lease: {
+          runId: first.runId,
+          ownerId: first.ownerId,
+          fenceToken: first.fenceToken,
+        },
+      }),
+      'LEASE_LOST',
+    )
+
+    port.setClock('2026-07-25T04:01:10.000Z')
+    const heartbeat = await port.heartbeatLease({
+      lease: port.currentLeaseClaim(),
+    })
+    expect(heartbeat.heartbeatAt).toBe('2026-07-25T04:01:10.000Z')
+    expect(Date.parse(heartbeat.expiresAt)).toBeGreaterThan(
+      Date.parse(takeover.expiresAt),
+    )
+    expect(heartbeat.fenceToken).toBe(takeover.fenceToken)
+  })
+
   test('derives the evidence deadline from the oldest observation and rejects invalid checkpoints', () => {
     const lease = createLease()
     const parsed: ParsedWorkspaceSearchMaintenanceEvidence = {
@@ -2040,28 +2113,66 @@ describe('Workspace Search migration state machine', () => {
       validatedAt: '2026-07-25T04:00:30.000Z',
     })
     expect(receipt.validUntil).toBe('2026-07-25T04:05:00.001Z')
+    for (const invalidTimestampEvidence of [
+      {
+        ...parsed,
+        evidence: {
+          ...parsed.evidence,
+          drainCompletedAt: 'not-a-timestamp',
+        },
+      },
+      {
+        ...parsed,
+        evidence: {
+          ...parsed.evidence,
+          surfaces: [{
+            ...parsed.evidence.surfaces[0],
+            observedAt: 'not-a-timestamp',
+          }],
+        },
+      },
+    ] satisfies readonly ParsedWorkspaceSearchMaintenanceEvidence[]) {
+      expectSyncMigrationFailure(
+        () => createWorkspaceSearchMaintenanceEvidenceReceipt({
+          runId: lease.runId,
+          lease,
+          parsed: invalidTimestampEvidence,
+          validatedAt: '2026-07-25T04:00:30.000Z',
+        }),
+        'INVALID_STATE',
+      )
+    }
 
     const empty = createEmptyWorkspaceSearchMigrationCheckpoint()
-    expect(() => validateWorkspaceSearchMigrationCheckpoint({
-      ...empty,
-      completed: true,
-      cursor: { workspaceId: { S: 'unexpected' } },
-    })).toThrow(WorkspaceSearchMigrationFailure)
-    expect(() => validateWorkspaceSearchMigrationCheckpoint({
-      ...empty,
-      aggregate: {
-        ...empty.aggregate,
-        scanned: 1,
-      },
-    })).toThrow(WorkspaceSearchMigrationFailure)
-    expect(() => validateWorkspaceSearchMigrationCheckpoint({
-      ...empty,
-      completed: true,
-      aggregate: {
-        ...empty.aggregate,
-        pageCount: 2,
-      },
-    }, empty)).toThrow(WorkspaceSearchMigrationFailure)
+    expectSyncMigrationFailure(
+      () => validateWorkspaceSearchMigrationCheckpoint({
+        ...empty,
+        completed: true,
+        cursor: { workspaceId: { S: 'unexpected' } },
+      }),
+      'INVALID_STATE',
+    )
+    expectSyncMigrationFailure(
+      () => validateWorkspaceSearchMigrationCheckpoint({
+        ...empty,
+        aggregate: {
+          ...empty.aggregate,
+          scanned: 1,
+        },
+      }),
+      'INVALID_STATE',
+    )
+    expectSyncMigrationFailure(
+      () => validateWorkspaceSearchMigrationCheckpoint({
+        ...empty,
+        completed: true,
+        aggregate: {
+          ...empty.aggregate,
+          pageCount: 2,
+        },
+      }, empty),
+      'INVALID_STATE',
+    )
     const firstPage: MigrationSourceCheckpoint = {
       ...empty,
       cursor: {
@@ -2073,24 +2184,30 @@ describe('Workspace Search migration state machine', () => {
         pageCount: 1,
       },
     }
-    expect(() => validateWorkspaceSearchMigrationCheckpoint({
-      ...firstPage,
-      aggregate: {
-        ...firstPage.aggregate,
-        pageCount: 2,
-      },
-    }, firstPage)).toThrow(WorkspaceSearchMigrationFailure)
+    expectSyncMigrationFailure(
+      () => validateWorkspaceSearchMigrationCheckpoint({
+        ...firstPage,
+        aggregate: {
+          ...firstPage.aggregate,
+          pageCount: 2,
+        },
+      }, firstPage),
+      'INVALID_STATE',
+    )
 
     const run = createRunFixture([]).state
-    expect(() => validateWorkspaceSearchMigrationRunState({
-      ...run,
-      maintenanceEvidenceReceipt: {
-        ...run.maintenanceEvidenceReceipt,
-        validUntil: new Date(
-          Date.parse(run.maintenanceEvidenceReceipt.validUntil) + 1,
-        ).toISOString(),
-      },
-    })).toThrow(WorkspaceSearchMigrationFailure)
+    expectSyncMigrationFailure(
+      () => validateWorkspaceSearchMigrationRunState({
+        ...run,
+        maintenanceEvidenceReceipt: {
+          ...run.maintenanceEvidenceReceipt,
+          validUntil: new Date(
+            Date.parse(run.maintenanceEvidenceReceipt.validUntil) + 1,
+          ).toISOString(),
+        },
+      }),
+      'INVALID_STATE',
+    )
   })
 
   test('fails closed for cursor schema drift and noncanonical target projections', () => {
@@ -2107,16 +2224,19 @@ describe('Workspace Search migration state machine', () => {
         pageCount: 1,
       },
     }
-    expect(() => validateWorkspaceSearchMigrationRunState({
-      ...emptyPlan.state,
-      apply: {
-        ...emptyPlan.state.apply,
-        sources: {
-          ...emptyPlan.state.apply.sources,
-          'work-items': wrongCursorCheckpoint,
+    expectSyncMigrationFailure(
+      () => validateWorkspaceSearchMigrationRunState({
+        ...emptyPlan.state,
+        apply: {
+          ...emptyPlan.state.apply,
+          sources: {
+            ...emptyPlan.state.apply.sources,
+            'work-items': wrongCursorCheckpoint,
+          },
         },
-      },
-    })).toThrow(WorkspaceSearchMigrationFailure)
+      }),
+      'INVALID_STATE',
+    )
 
     const fixture = createRunFixture([false])
     const planned = fixture.plans[0]
@@ -2139,14 +2259,17 @@ describe('Workspace Search migration state machine', () => {
       },
     ]
     for (const item of candidates) {
-      expect(() => createWorkspaceSearchMigrationOperationDigest({
-        ...planned.operation,
-        after: {
-          exists: true,
-          item,
-          digest: createAttributeMapDigest(item),
-        },
-      })).toThrow(WorkspaceSearchMigrationFailure)
+      expectSyncMigrationFailure(
+        () => createWorkspaceSearchMigrationOperationDigest({
+          ...planned.operation,
+          after: {
+            exists: true,
+            item,
+            digest: createAttributeMapDigest(item),
+          },
+        }),
+        'INVALID_STATE',
+      )
     }
   })
 
@@ -2201,9 +2324,12 @@ describe('Workspace Search migration state machine', () => {
         digest: createAttributeMapDigest(crossWorkspaceAfter),
       },
     }
-    expect(() => createWorkspaceSearchMigrationOperationDigest(
-      crossWorkspaceOperation,
-    )).toThrow(WorkspaceSearchMigrationFailure)
+    expectSyncMigrationFailure(
+      () => createWorkspaceSearchMigrationOperationDigest(
+        crossWorkspaceOperation,
+      ),
+      'INVALID_STATE',
+    )
 
     const absentSource:
       WorkspaceSearchMigrationOperation['sourceCondition'] = {
@@ -2214,26 +2340,35 @@ describe('Workspace Search migration state machine', () => {
         key: source.key,
         keyDigest: source.keyDigest,
       }
-    expect(() => createWorkspaceSearchMigrationOperationDigest({
-      ...planned.operation,
-      sourceCondition: absentSource,
-    })).toThrow(WorkspaceSearchMigrationFailure)
-    expect(() => createWorkspaceSearchMigrationOperationDigest({
-      ...crossWorkspaceOperation,
-      sourceCondition: absentSource,
-      after: {
-        exists: false,
-        digest: createAbsentMigrationItemDigest(),
-      },
-    })).toThrow(WorkspaceSearchMigrationFailure)
-    expect(() => createWorkspaceSearchMigrationOperationDigest({
-      ...planned.operation,
-      sourceCondition: absentSource,
-      after: {
-        exists: false,
-        digest: createAbsentMigrationItemDigest(),
-      },
-    })).toThrow(WorkspaceSearchMigrationFailure)
+    expectSyncMigrationFailure(
+      () => createWorkspaceSearchMigrationOperationDigest({
+        ...planned.operation,
+        sourceCondition: absentSource,
+      }),
+      'INVALID_STATE',
+    )
+    expectSyncMigrationFailure(
+      () => createWorkspaceSearchMigrationOperationDigest({
+        ...crossWorkspaceOperation,
+        sourceCondition: absentSource,
+        after: {
+          exists: false,
+          digest: createAbsentMigrationItemDigest(),
+        },
+      }),
+      'INVALID_STATE',
+    )
+    expectSyncMigrationFailure(
+      () => createWorkspaceSearchMigrationOperationDigest({
+        ...planned.operation,
+        sourceCondition: absentSource,
+        after: {
+          exists: false,
+          digest: createAbsentMigrationItemDigest(),
+        },
+      }),
+      'INVALID_STATE',
+    )
 
     const orphanEntityId = 'team/team-1/issue/issue-1'
     const orphanTargetKey = {
@@ -2319,7 +2454,7 @@ describe('Workspace Search migration state machine', () => {
       .toEqual(planned.operation.before)
   })
 
-  test('requires journal durability and reconciles response loss by marker before stale revision', async () => {
+  test('requires journal durability, exposes response-loss markers, and rejects stale retries', async () => {
     const fixture = await createPersistedRun([false])
     const planned = fixture.plans[0]
     if (!planned) throw new TestAdapterFailure('Expected one plan row.')
