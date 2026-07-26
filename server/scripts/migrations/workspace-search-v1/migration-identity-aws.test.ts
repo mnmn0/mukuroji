@@ -442,13 +442,16 @@ describe('Workspace Search migration AWS identity adapter', () => {
       'AWS_ENDPOINT_URL_STS',
     ]
     const previousValues = endpointVariables.map((name) => process.env[name])
-    for (const name of endpointVariables) {
-      process.env[name] = `https://attacker.invalid/${name.toLowerCase()}`
-    }
-    const port = createAwsWorkspaceSearchMigrationIdentityPort(
-      createRequestedResources(),
-    )
+    let port:
+      ReturnType<typeof createAwsWorkspaceSearchMigrationIdentityPort> |
+      undefined
     try {
+      for (const name of endpointVariables) {
+        process.env[name] = `https://attacker.invalid/${name.toLowerCase()}`
+      }
+      port = createAwsWorkspaceSearchMigrationIdentityPort(
+        createRequestedResources(),
+      )
       const transport = readOwnObject(port, 'transport')
       const dynamodbClient = readOwnObject(transport, 'dynamodbClient')
       const kmsClient = readOwnObject(transport, 'kmsClient')
@@ -474,11 +477,41 @@ describe('Workspace Search migration AWS identity adapter', () => {
       )
       expect(followRegionRedirects).toBe(false)
     } finally {
-      port.close()
+      port?.close()
       endpointVariables.forEach((name, index) => {
         restoreEnvironmentVariable(name, previousValues[index])
       })
     }
+  })
+
+  test('closes every concrete SDK client when one destroy call fails', () => {
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      createRequestedResources(),
+    )
+    const transport = readOwnObject(port, 'transport')
+    const clients = [
+      ['dynamodb', readOwnObject(transport, 'dynamodbClient')],
+      ['kms', readOwnObject(transport, 'kmsClient')],
+      ['s3', readOwnObject(transport, 's3Client')],
+      ['sts', readOwnObject(transport, 'stsClient')],
+    ] satisfies readonly (readonly [string, object])[]
+    const closeOrder: string[] = []
+    for (const [name, client] of clients) {
+      const destroy: unknown = Reflect.get(client, 'destroy')
+      if (typeof destroy !== 'function') {
+        throw new Error(`Expected ${name} destroy function.`)
+      }
+      Reflect.set(client, 'destroy', () => {
+        closeOrder.push(name)
+        Reflect.apply(destroy, client, [])
+        if (name === 'dynamodb') {
+          throw new Error('simulated destroy failure')
+        }
+      })
+    }
+
+    expect(() => port.close()).not.toThrow()
+    expect(closeOrder).toEqual(['dynamodb', 'kms', 's3', 'sts'])
   })
 
   test('pins nested assume-role STS traffic and releases its client', async () => {
@@ -584,6 +617,14 @@ describe('Workspace Search migration AWS identity adapter', () => {
             throw new Error('Expected an AssumeRole command.')
           }
           observedCommands.push(command)
+          if (nestedClientSendCount === 2) {
+            return {
+              $metadata: {},
+              Credentials: {
+                AccessKeyId: 'ASIA-INCOMPLETE',
+              },
+            }
+          }
           const isInitialResolution = nestedClientSendCount === 1
           return {
             $metadata: {},
@@ -663,6 +704,9 @@ describe('Workspace Search migration AWS identity adapter', () => {
             '',
           ].join('\n'),
         )
+        await expect(configurations.sts.credentials()).rejects.toThrow(
+          'STS role assumption response is incomplete.',
+        )
         await expect(configurations.sts.credentials()).resolves.toMatchObject({
           accessKeyId: 'ASIA0987654321EXAMPLE',
           secretAccessKey: 'refreshed-role-secret',
@@ -676,7 +720,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
       expect(observedEndpoint).toBe(
         `https://sts.${TEST_REGION}.amazonaws.com/`,
       )
-      expect(observedCommands).toHaveLength(2)
+      expect(observedCommands).toHaveLength(3)
       for (const command of observedCommands) {
         expect(command.input).toEqual({
           RoleArn: `arn:aws:iam::${TEST_ACCOUNT}:role/MigrationOperator`,
@@ -696,9 +740,14 @@ describe('Workspace Search migration AWS identity adapter', () => {
           secretAccessKey: 'migration-source-secret',
           sessionToken: undefined,
         },
+        {
+          accessKeyId: 'AKIA1234567890EXAMPLE',
+          secretAccessKey: 'migration-source-secret',
+          sessionToken: undefined,
+        },
       ])
-      expect(nestedClientSendCount).toBe(2)
-      expect(nestedClientDestroyCount).toBe(2)
+      expect(nestedClientSendCount).toBe(3)
+      expect(nestedClientDestroyCount).toBe(3)
       expect(expirationOverrideCalls).toBe(0)
     } finally {
       restoreOwnProperty(
@@ -830,6 +879,78 @@ describe('Workspace Search migration AWS identity adapter', () => {
 
       expect(await Bun.file(processSentinelPath).exists()).toBe(false)
     } finally {
+      environmentNames.forEach((name, index) => {
+        restoreEnvironmentVariable(name, previousValues[index])
+      })
+      await rm(temporaryDirectory, { force: true, recursive: true })
+    }
+  })
+
+  test('retries an unestablished credential plan and pins the first success', async () => {
+    const temporaryDirectory = await mkdtemp(
+      join(tmpdir(), 'mukuroji-migration-profile-retry-'),
+    )
+    const credentialsPath = join(temporaryDirectory, 'credentials')
+    const configPath = join(temporaryDirectory, 'config')
+    await writeFile(credentialsPath, '')
+    await writeFile(configPath, '')
+    const environmentNames: readonly string[] = [
+      'AWS_CONFIG_FILE',
+      'AWS_SHARED_CREDENTIALS_FILE',
+    ]
+    const previousValues = environmentNames.map((name) => process.env[name])
+    let port:
+      ReturnType<typeof createAwsWorkspaceSearchMigrationIdentityPort> |
+      undefined
+    try {
+      process.env.AWS_CONFIG_FILE = configPath
+      process.env.AWS_SHARED_CREDENTIALS_FILE = credentialsPath
+      let configurations:
+        WorkspaceSearchMigrationIdentityAwsSdkConfigurations | undefined
+      port = createAwsWorkspaceSearchMigrationIdentityPort(
+        createRequestedResources(),
+        (createdConfigurations) => {
+          configurations = createdConfigurations
+          return new RecordingIdentityAwsTransport()
+        },
+      )
+      if (!configurations) {
+        throw new Error('Expected captured SDK configurations.')
+      }
+      const credentials = configurations.sts.credentials
+      await expect(credentials()).rejects.toThrow(
+        'Selected AWS profile credentials are unsupported or invalid.',
+      )
+
+      await writeFile(
+        credentialsPath,
+        [
+          `[${TEST_PROFILE}]`,
+          'aws_access_key_id = AKIA1234567890EXAMPLE',
+          'aws_secret_access_key = migration-recovered-secret',
+          '',
+        ].join('\n'),
+      )
+      await expect(credentials()).resolves.toMatchObject({
+        accessKeyId: 'AKIA1234567890EXAMPLE',
+        secretAccessKey: 'migration-recovered-secret',
+      })
+
+      await writeFile(
+        credentialsPath,
+        [
+          `[${TEST_PROFILE}]`,
+          'aws_access_key_id = AKIA0987654321EXAMPLE',
+          'aws_secret_access_key = attacker-replacement-secret',
+          '',
+        ].join('\n'),
+      )
+      await expect(credentials()).resolves.toMatchObject({
+        accessKeyId: 'AKIA1234567890EXAMPLE',
+        secretAccessKey: 'migration-recovered-secret',
+      })
+    } finally {
+      port?.close()
       environmentNames.forEach((name, index) => {
         restoreEnvironmentVariable(name, previousValues[index])
       })
@@ -1003,13 +1124,17 @@ describe('Workspace Search migration AWS identity adapter', () => {
       expectedBucketOwner: requested.account,
     }
 
-    expect(() => port.describeTable('other-production-table')).toThrow(
+    await expect(port.describeTable('other-production-table')).rejects.toThrow(
       'Migration identity lookup is outside the requested resource set.',
     )
-    expect(() => port.describeContinuousBackups('other-production-table')).toThrow(
+    await expect(
+      port.describeContinuousBackups('other-production-table'),
+    ).rejects.toThrow(
       'Migration identity lookup is outside the requested resource set.',
     )
-    expect(() => port.describeTimeToLive('other-production-table')).toThrow(
+    await expect(
+      port.describeTimeToLive('other-production-table'),
+    ).rejects.toThrow(
       'Migration identity lookup is outside the requested resource set.',
     )
     await expect(
@@ -1019,16 +1144,18 @@ describe('Workspace Search migration AWS identity adapter', () => {
     ).rejects.toThrow(
       'Migration identity lookup is outside the requested resource set.',
     )
-    expect(() => port.getBucketVersioning(wrongLookup)).toThrow(
+    await expect(port.getBucketVersioning(wrongLookup)).rejects.toThrow(
       'Migration identity lookup is outside the requested resource set.',
     )
-    expect(() => port.getObjectLockConfiguration(wrongLookup)).toThrow(
+    await expect(
+      port.getObjectLockConfiguration(wrongLookup),
+    ).rejects.toThrow(
       'Migration identity lookup is outside the requested resource set.',
     )
-    expect(() => port.getBucketEncryption(wrongLookup)).toThrow(
+    await expect(port.getBucketEncryption(wrongLookup)).rejects.toThrow(
       'Migration identity lookup is outside the requested resource set.',
     )
-    expect(() => port.getBucketLogging(wrongLookup)).toThrow(
+    await expect(port.getBucketLogging(wrongLookup)).rejects.toThrow(
       'Migration identity lookup is outside the requested resource set.',
     )
     expect(transport.describeTableCommands).toHaveLength(0)
@@ -1183,9 +1310,16 @@ describe('Workspace Search migration AWS identity adapter', () => {
       enumerable: true,
       get() {
         creationDateReads += 1
-        return creationDateReads === 1
+        const creationDate = creationDateReads === 1
           ? new Date('2026-07-01T00:00:00.000Z')
           : new Date('2030-01-01T00:00:00.000Z')
+        Object.defineProperty(creationDate, 'getTime', {
+          configurable: true,
+          value() {
+            throw new Error('RAW-HOSTILE-KMS-GET-TIME')
+          },
+        })
+        return creationDate
       },
     })
     const requested = createRequestedResources()
@@ -1233,6 +1367,9 @@ describe('Workspace Search migration AWS identity adapter', () => {
     expect(caught.code).toBe('IDENTITY_MISMATCH')
     expect(caught.message).toBe('STS caller identity response is incomplete.')
     expect(caught.message).not.toContain(rawCanary)
+    await expect(port.measureConfiguration()).rejects.toThrow(
+      'STS caller identity response is incomplete.',
+    )
     port.close()
   })
 

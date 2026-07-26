@@ -31,10 +31,9 @@ import {
   type GetCallerIdentityCommandOutput,
   STSClient,
 } from '@aws-sdk/client-sts'
-import { parseKnownFiles } from '@smithy/core/config'
 import {
   type WorkspaceSearchMigrationConfiguration,
-  WorkspaceSearchMigrationFailure,
+  type WorkspaceSearchMigrationFailure,
 } from './migration-contract'
 import {
   type WorkspaceSearchMigrationIdentityPort,
@@ -42,10 +41,16 @@ import {
   type WorkspaceSearchMigrationJournalLookup,
   type WorkspaceSearchMigrationRequestedResources,
   type WorkspaceSearchMigrationRequestedResourcesSnapshot,
+  createWorkspaceSearchMigrationIdentityAdapterFailure,
   createWorkspaceSearchMigrationRequestedResourcesBinding,
   createWorkspaceSearchMigrationRequestedResourcesSnapshot,
+  isWorkspaceSearchMigrationIdentityAdapterFailure,
   measureWorkspaceSearchMigrationConfiguration,
 } from './migration-identity'
+import {
+  type WorkspaceSearchMigrationSharedProfiles,
+  loadWorkspaceSearchMigrationSharedProfiles,
+} from './migration-shared-profile-loader'
 
 /** AWS services used by the migration identity entry gate. */
 type WorkspaceSearchMigrationIdentityAwsService =
@@ -67,10 +72,6 @@ type WorkspaceSearchMigrationProfileRoleAssumer = NonNullable<
 type WorkspaceSearchMigrationProfileCredentials = Awaited<
   ReturnType<ReturnType<typeof fromIni>>
 >
-
-/** Parsed shared profiles loaded from the selected AWS configuration files. */
-type WorkspaceSearchMigrationSharedProfiles =
-  Awaited<ReturnType<typeof parseKnownFiles>>
 
 /** Immutable selected-chain plan for static shared-profile credentials. */
 type WorkspaceSearchMigrationStaticCredentialPlan = {
@@ -309,10 +310,18 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
    * Releases every AWS SDK client.
    */
   close(): void {
-    this.dynamodbClient.destroy()
-    this.kmsClient.destroy()
-    this.s3Client.destroy()
-    this.stsClient.destroy()
+    for (const client of [
+      this.dynamodbClient,
+      this.kmsClient,
+      this.s3Client,
+      this.stsClient,
+    ]) {
+      try {
+        client.destroy()
+      } catch {
+        // Continue best-effort cleanup so one client cannot leak the others.
+      }
+    }
   }
 
   /**
@@ -499,7 +508,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
    * @param tableName - Operator-selected physical table name.
    * @returns DynamoDB recovery-state response.
    */
-  describeContinuousBackups(
+  async describeContinuousBackups(
     tableName: string,
   ): Promise<DescribeContinuousBackupsCommandOutput> {
     this.validateTableName(tableName)
@@ -541,7 +550,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
       keyId,
       creationDate: creationDate === undefined
         ? undefined
-        : new Date(creationDate.getTime()),
+        : new Date(Date.prototype.getTime.call(creationDate)),
       enabled,
       keyManager,
       keyState,
@@ -558,7 +567,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
    * @param tableName - Operator-selected physical table name.
    * @returns DynamoDB table metadata response.
    */
-  describeTable(tableName: string): Promise<DescribeTableCommandOutput> {
+  async describeTable(tableName: string): Promise<DescribeTableCommandOutput> {
     this.validateTableName(tableName)
     return this.transport.describeTable(
       new DescribeTableCommand({ TableName: tableName }),
@@ -571,7 +580,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
    * @param tableName - Operator-selected physical table name.
    * @returns DynamoDB TTL response.
    */
-  describeTimeToLive(
+  async describeTimeToLive(
     tableName: string,
   ): Promise<DescribeTimeToLiveCommandOutput> {
     this.validateTableName(tableName)
@@ -586,7 +595,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
    * @param lookup - Exact owner-bound journal bucket lookup.
    * @returns S3 encryption response.
    */
-  getBucketEncryption(
+  async getBucketEncryption(
     lookup: WorkspaceSearchMigrationJournalLookup,
   ): Promise<GetBucketEncryptionOutput> {
     const validatedLookup = this.createJournalLookupSnapshot(lookup)
@@ -601,7 +610,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
    * @param lookup - Exact owner-bound journal bucket lookup.
    * @returns S3 logging response.
    */
-  getBucketLogging(
+  async getBucketLogging(
     lookup: WorkspaceSearchMigrationJournalLookup,
   ): Promise<GetBucketLoggingOutput> {
     const validatedLookup = this.createJournalLookupSnapshot(lookup)
@@ -616,7 +625,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
    * @param lookup - Exact owner-bound journal bucket lookup.
    * @returns S3 versioning response.
    */
-  getBucketVersioning(
+  async getBucketVersioning(
     lookup: WorkspaceSearchMigrationJournalLookup,
   ): Promise<GetBucketVersioningOutput> {
     const validatedLookup = this.createJournalLookupSnapshot(lookup)
@@ -649,9 +658,8 @@ class AwsWorkspaceSearchMigrationIdentityPort
       !isNonEmptyString(arn) ||
       !isNonEmptyString(userId)
     ) {
-      throw new WorkspaceSearchMigrationFailure(
-        'IDENTITY_MISMATCH',
-        'STS caller identity response is incomplete.',
+      throw createWorkspaceSearchMigrationIdentityAdapterFailure(
+        'INCOMPLETE_CALLER_IDENTITY',
       )
     }
     return {
@@ -667,7 +675,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
    * @param lookup - Exact owner-bound journal bucket lookup.
    * @returns S3 Object Lock response.
    */
-  getObjectLockConfiguration(
+  async getObjectLockConfiguration(
     lookup: WorkspaceSearchMigrationJournalLookup,
   ): Promise<GetObjectLockConfigurationOutput> {
     const validatedLookup = this.createJournalLookupSnapshot(lookup)
@@ -784,28 +792,40 @@ function createPinnedProfileCredentials(
   let pendingRefresh:
     Promise<WorkspaceSearchMigrationProfileCredentials> | undefined
   return async () => {
+    if (
+      cachedCredentials &&
+      hasUsableProfileCredentialLifetime(cachedCredentials)
+    ) {
+      return detachProfileCredentials(cachedCredentials)
+    }
+    credentialPlan ??= loadPinnedCredentialPlan(requested.profile).catch(
+      (error: unknown) => {
+        credentialPlan = undefined
+        throw error
+      },
+    )
+    const refresh = pendingRefresh ??= credentialPlan.then((plan) =>
+      resolvePinnedProfileCredentials(
+        plan,
+        roleAssumer,
+      ),
+    )
     try {
-      if (
-        cachedCredentials &&
-        hasUsableProfileCredentialLifetime(cachedCredentials)
-      ) {
-        return detachProfileCredentials(cachedCredentials)
-      }
-      credentialPlan ??= loadPinnedCredentialPlan(requested.profile)
-      pendingRefresh ??= credentialPlan.then((plan) =>
-        resolvePinnedProfileCredentials(
-          plan,
-          roleAssumer,
-        ),
-      )
-      const resolved = await pendingRefresh
+      const resolved = await refresh
       cachedCredentials = Object.freeze(resolved)
       return detachProfileCredentials(cachedCredentials)
-    } catch {
-      cachedCredentials = undefined
+    } catch (error: unknown) {
+      if (pendingRefresh === refresh) {
+        cachedCredentials = undefined
+      }
+      if (isWorkspaceSearchMigrationIdentityAdapterFailure(error)) {
+        throw error
+      }
       throw invalidProfileCredentials()
     } finally {
-      pendingRefresh = undefined
+      if (pendingRefresh === refresh) {
+        pendingRefresh = undefined
+      }
     }
   }
 }
@@ -820,10 +840,8 @@ function createPinnedProfileCredentials(
 async function loadPinnedCredentialPlan(
   profileName: string,
 ): Promise<WorkspaceSearchMigrationCredentialPlan> {
-  const profiles = await parseKnownFiles({
-    ignoreCache: true,
-    profile: profileName,
-  })
+  const profiles =
+    await loadWorkspaceSearchMigrationSharedProfiles(profileName)
   return createPinnedCredentialPlan(
     profileName,
     profiles,
@@ -1246,9 +1264,8 @@ function resolveOfficialAwsDnsSuffix(region: string): string {
  * @returns Secret-free identity failure.
  */
 function invalidAssumedCredentials(): WorkspaceSearchMigrationFailure {
-  return new WorkspaceSearchMigrationFailure(
-    'IDENTITY_MISMATCH',
-    'STS role assumption response is incomplete.',
+  return createWorkspaceSearchMigrationIdentityAdapterFailure(
+    'INCOMPLETE_ASSUMED_CREDENTIALS',
   )
 }
 
@@ -1258,9 +1275,8 @@ function invalidAssumedCredentials(): WorkspaceSearchMigrationFailure {
  * @returns Secret-free identity failure.
  */
 function invalidProfileCredentials(): WorkspaceSearchMigrationFailure {
-  return new WorkspaceSearchMigrationFailure(
-    'IDENTITY_MISMATCH',
-    'Selected AWS profile credentials are unsupported or invalid.',
+  return createWorkspaceSearchMigrationIdentityAdapterFailure(
+    'INVALID_PROFILE_CREDENTIALS',
   )
 }
 
@@ -1270,9 +1286,8 @@ function invalidProfileCredentials(): WorkspaceSearchMigrationFailure {
  * @returns Secret-free invalid-argument failure.
  */
 function invalidIdentityLookup(): WorkspaceSearchMigrationFailure {
-  return new WorkspaceSearchMigrationFailure(
-    'INVALID_ARGUMENT',
-    'Migration identity lookup is outside the requested resource set.',
+  return createWorkspaceSearchMigrationIdentityAdapterFailure(
+    'OUT_OF_SCOPE_LOOKUP',
   )
 }
 

@@ -23,6 +23,7 @@ import {
   type WorkspaceSearchMigrationTableRole,
 } from './migration-contract'
 import {
+  createWorkspaceSearchMigrationIdentityAdapterFailure,
   createWorkspaceSearchMigrationRequestedResourcesBinding,
   measureWorkspaceSearchMigrationConfiguration,
   type WorkspaceSearchMigrationIdentityPort,
@@ -567,6 +568,30 @@ describe('Workspace Search migration physical identity', () => {
       'Migration identity port is not bound to the requested resources.',
     )
     expect(fixture.port.bucketLookups).toHaveLength(0)
+  })
+
+  test('preserves only fixed operator-safe adapter failures', async () => {
+    const profileFixture = createIdentityFixture()
+    profileFixture.port.callerFailure =
+      createWorkspaceSearchMigrationIdentityAdapterFailure(
+        'INVALID_PROFILE_CREDENTIALS',
+      )
+    await expectMigrationFailure(
+      measureFixture(profileFixture),
+      'IDENTITY_MISMATCH',
+      'Selected AWS profile credentials are unsupported or invalid.',
+    )
+
+    const lookupFixture = createIdentityFixture()
+    lookupFixture.port.callerFailure =
+      createWorkspaceSearchMigrationIdentityAdapterFailure(
+        'OUT_OF_SCOPE_LOOKUP',
+      )
+    await expectMigrationFailure(
+      measureFixture(lookupFixture),
+      'INVALID_ARGUMENT',
+      'Migration identity lookup is outside the requested resource set.',
+    )
   })
 
   test('redacts forged migration failures and hostile thrown proxies', async () => {

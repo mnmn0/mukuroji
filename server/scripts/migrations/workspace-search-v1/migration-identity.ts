@@ -217,8 +217,72 @@ export const WORKSPACE_SEARCH_MIGRATION_TABLE_ROLES:
     'migration-state',
   ])
 
+/** Fixed operator-safe failure reasons emitted by the production identity adapter. */
+export type WorkspaceSearchMigrationIdentityAdapterFailureReason =
+  | 'INCOMPLETE_ASSUMED_CREDENTIALS'
+  | 'INCOMPLETE_CALLER_IDENTITY'
+  | 'INVALID_PROFILE_CREDENTIALS'
+  | 'OUT_OF_SCOPE_LOOKUP'
+
 /** Private provenance set for failures created by this validation module. */
 const trustedIdentityFailures = new WeakSet<object>()
+
+/** Private provenance set for the adapter's closed failure vocabulary. */
+const trustedIdentityAdapterFailures = new WeakSet<object>()
+
+/**
+ * Creates one branded failure from the identity adapter's closed, secret-free
+ * failure vocabulary.
+ *
+ * @param reason - Fixed adapter failure reason.
+ * @returns Trusted operator-safe failure that may cross the redaction boundary.
+ */
+export function createWorkspaceSearchMigrationIdentityAdapterFailure(
+  reason: WorkspaceSearchMigrationIdentityAdapterFailureReason,
+): WorkspaceSearchMigrationFailure {
+  switch (reason) {
+    case 'INCOMPLETE_ASSUMED_CREDENTIALS':
+      return createIdentityAdapterFailure(
+        'IDENTITY_MISMATCH',
+        'STS role assumption response is incomplete.',
+      )
+    case 'INCOMPLETE_CALLER_IDENTITY':
+      return createIdentityAdapterFailure(
+        'IDENTITY_MISMATCH',
+        'STS caller identity response is incomplete.',
+      )
+    case 'INVALID_PROFILE_CREDENTIALS':
+      return createIdentityAdapterFailure(
+        'IDENTITY_MISMATCH',
+        'Selected AWS profile credentials are unsupported or invalid.',
+      )
+    case 'OUT_OF_SCOPE_LOOKUP':
+      return createIdentityAdapterFailure(
+        'INVALID_ARGUMENT',
+        'Migration identity lookup is outside the requested resource set.',
+      )
+    default:
+      return createIdentityAdapterFailure(
+        'IDENTITY_MISMATCH',
+        'Migration identity adapter failure is invalid.',
+      )
+  }
+}
+
+/**
+ * Checks whether the production adapter created one fixed operator-safe
+ * failure.
+ *
+ * @param error - Unknown adapter dependency failure.
+ * @returns Whether the error has private adapter-factory provenance.
+ */
+export function isWorkspaceSearchMigrationIdentityAdapterFailure(
+  error: unknown,
+): error is WorkspaceSearchMigrationFailure {
+  return typeof error === 'object' &&
+    error !== null &&
+    trustedIdentityAdapterFailures.has(error)
+}
 
 const expectedTableDescriptors = {
   'project-directory': {
@@ -1280,7 +1344,7 @@ export function validateWorkspaceSearchMigrationRequestedResources(
   const uniqueNames = new Set(tableNames)
   if (
     !hasExactMigrationTableRoles(tableRoleKeys) ||
-    uniqueNames.size !== 6 ||
+    uniqueNames.size !== WORKSPACE_SEARCH_MIGRATION_TABLE_ROLES.length ||
     tableNames.some((tableName) => !isDynamoTableName(tableName))
   ) {
     throw createIdentityFailure(
@@ -1373,6 +1437,22 @@ function invalidJournalConfiguration(setting: string): WorkspaceSearchMigrationF
  */
 function hasErrorName(error: unknown, expectedName: string): boolean {
   return error instanceof Error && error.name === expectedName
+}
+
+/**
+ * Creates and brands one failure from the adapter's closed safe vocabulary.
+ *
+ * @param code - Stable migration failure code.
+ * @param message - Fixed secret-free operator guidance.
+ * @returns Failure trusted by both adapter and public identity boundaries.
+ */
+function createIdentityAdapterFailure(
+  code: WorkspaceSearchMigrationFailureCode,
+  message: string,
+): WorkspaceSearchMigrationFailure {
+  const failure = createIdentityFailure(code, message)
+  trustedIdentityAdapterFailures.add(failure)
+  return failure
 }
 
 /**
