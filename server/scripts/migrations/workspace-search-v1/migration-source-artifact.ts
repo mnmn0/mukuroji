@@ -25,6 +25,10 @@ import {
 /** Schema version of one lossless planning-source artifact segment. */
 export const WORKSPACE_SEARCH_MIGRATION_SOURCE_ARTIFACT_VERSION = 1
 
+/** Content-addressed namespace reserved for planning source artifacts. */
+export const WORKSPACE_SEARCH_MIGRATION_SOURCE_ARTIFACT_OBJECT_KEY_PREFIX =
+  'workspace-search/v1/source-artifacts/v1'
+
 /**
  * Maximum canonical UTF-8 size of one planning-source artifact segment.
  *
@@ -265,6 +269,21 @@ export function createWorkspaceSearchMigrationPlanningSourceArtifactContentDiges
 }
 
 /**
+ * Creates the canonical content-addressed key for one planning artifact segment.
+ *
+ * @param contentDigest - Lowercase SHA-256 digest of the exact segment bytes.
+ * @returns Canonical secret-free S3 object key.
+ */
+export function createWorkspaceSearchMigrationPlanningSourceArtifactObjectKey(
+  contentDigest: string,
+): string {
+  return runSourceArtifactBoundary(() => {
+    if (!isHexDigest(contentDigest)) return failSourceArtifact()
+    return `${WORKSPACE_SEARCH_MIGRATION_SOURCE_ARTIFACT_OBJECT_KEY_PREFIX}/${contentDigest}.json`
+  })
+}
+
+/**
  * Common identity and authority shared by a page and every one of its segments.
  */
 type PlanningSourceArtifactCommonFields = {
@@ -491,7 +510,7 @@ function calculateConservativeSegmentByteLength(
   itemCount: number,
   encodedItemsByteLength: number,
 ): number {
-  const encoded = encodeSegmentValue({
+  const encoded: EncodedPlanningSourceArtifactSegmentValue = {
     ...commonSegmentValue(page),
     segmentIndex: WORKSPACE_SEARCH_MIGRATION_PAGE_SIZE - 1,
     segmentCount: WORKSPACE_SEARCH_MIGRATION_PAGE_SIZE,
@@ -499,7 +518,7 @@ function calculateConservativeSegmentByteLength(
     itemCount,
     pageItemCount: page.items.length,
     items: [],
-  })
+  }
   const emptyItemsLength = canonicalByteLength(encoded)
   return emptyItemsLength + encodedItemsByteLength
 }
@@ -753,16 +772,17 @@ function validateSegmentShape(
 function encodeCanonicalSegment(
   segment: WorkspaceSearchMigrationPlanningSourceArtifactSegment,
 ): Uint8Array {
+  const encoded: EncodedPlanningSourceArtifactSegmentValue = {
+    ...commonSegmentValue(segment),
+    segmentIndex: segment.segmentIndex,
+    segmentCount: segment.segmentCount,
+    itemStartIndex: segment.itemStartIndex,
+    itemCount: segment.itemCount,
+    pageItemCount: segment.pageItemCount,
+    items: segment.items.map(encodeAttributeMap),
+  }
   const bytes = new TextEncoder().encode(
-    serializeCanonicalJson(encodeSegmentValue({
-      ...commonSegmentValue(segment),
-      segmentIndex: segment.segmentIndex,
-      segmentCount: segment.segmentCount,
-      itemStartIndex: segment.itemStartIndex,
-      itemCount: segment.itemCount,
-      pageItemCount: segment.pageItemCount,
-      items: segment.items.map(encodeAttributeMap),
-    })),
+    serializeCanonicalJson(encoded),
   )
   if (
     bytes.byteLength === 0 ||
@@ -792,18 +812,6 @@ type EncodedPlanningSourceArtifactSegmentValue =
     /** Canonical tagged source items. */
     readonly items: readonly EncodedAttributeMap[]
   }
-
-/**
- * Returns an encoded segment value without altering its already canonical shape.
- *
- * @param value - Complete JSON-safe segment value.
- * @returns The same complete segment value.
- */
-function encodeSegmentValue(
-  value: EncodedPlanningSourceArtifactSegmentValue,
-): EncodedPlanningSourceArtifactSegmentValue {
-  return value
-}
 
 /**
  * Projects common segment fields into their strict JSON-safe representation.

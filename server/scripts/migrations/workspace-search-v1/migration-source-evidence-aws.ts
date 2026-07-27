@@ -986,9 +986,11 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
               predecessor,
               page,
             )
-          } catch {
+          } catch (verificationError: unknown) {
             return failSourceEvidenceAws(
-              'AMBIGUOUS_OPERATION_UNRESOLVED',
+              isSourceEvidenceConfigurationDrift(verificationError)
+                ? 'CONFIGURATION_DRIFT'
+                : 'AMBIGUOUS_OPERATION_UNRESOLVED',
             )
           }
         }

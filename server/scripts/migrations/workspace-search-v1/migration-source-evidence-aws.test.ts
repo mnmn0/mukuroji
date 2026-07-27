@@ -54,6 +54,7 @@ import {
   parseWorkspaceSearchMigrationPlanningSourceArtifactPage,
   serializeWorkspaceSearchMigrationPlanningSourceArtifactPage,
   type WorkspaceSearchMigrationPlanningSourceArtifactPage,
+  WORKSPACE_SEARCH_MIGRATION_SOURCE_ARTIFACT_VERSION,
 } from './migration-source-artifact'
 import type {
   WorkspaceSearchMigrationSourceScanReadInput,
@@ -273,6 +274,9 @@ class InMemoryPlanningSourceArtifactGateway
   /** One-shot raw page override returned after strict artifact validation. */
   private nextReadItems: readonly DynamoAttributeMap[] | undefined
 
+  /** One-shot failure raised before the next strict artifact read. */
+  private nextReadFailure: unknown
+
   /**
    * Creates a gateway over one scanner and shared immutable store.
    *
@@ -305,6 +309,15 @@ class InMemoryPlanningSourceArtifactGateway
    */
   failNextCaptureAfterScan(error: unknown): void {
     this.captureFailureAfterScan = error
+  }
+
+  /**
+   * Injects one failure before the next strict artifact read.
+   *
+   * @param error - Arbitrary gateway failure.
+   */
+  failNextRead(error: unknown): void {
+    this.nextReadFailure = error
   }
 
   /**
@@ -385,6 +398,9 @@ class InMemoryPlanningSourceArtifactGateway
     input: WorkspaceSearchMigrationPlanningSourceArtifactReadInput,
   ): Promise<WorkspaceSearchMigrationSourceScanPage> {
     this.readCalls.push(structuredClone(input))
+    const nextReadFailure = this.nextReadFailure
+    this.nextReadFailure = undefined
+    if (nextReadFailure !== undefined) throw nextReadFailure
     const bytes = input.sourceArtifacts.map((reference) => {
       const stored = this.store.read(reference)
       const digest = createHash('sha256').update(stored).digest('hex')
@@ -866,7 +882,7 @@ function createPlanningSourceArtifactPage(
   }
   return {
     kind: 'workspace-search-planning-source-artifact-page',
-    artifactVersion: 1,
+    artifactVersion: WORKSPACE_SEARCH_MIGRATION_SOURCE_ARTIFACT_VERSION,
     migrationId: WORKSPACE_SEARCH_MIGRATION_ID,
     migrationVersion: WORKSPACE_SEARCH_MIGRATION_VERSION,
     purpose: 'planning',
@@ -2032,6 +2048,67 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
       configuration,
       authorityContext.authority.lease.runId,
     ))).toEqual(recovered)
+  })
+
+  test('preserves configuration drift from response-loss artifact verification', async () => {
+    const configuration = createConfiguration()
+    const transport = new InMemorySourceEvidenceAwsTransport()
+    const clock = new MutableAuthorityClock(initialTime)
+    const authorityContext = await acquirePlanningAuthority(
+      configuration,
+      transport,
+      clock,
+      'run-response-loss-configuration-drift',
+      'owner-response-loss-configuration-drift',
+    )
+    const request = createPlanningRequest(
+      configuration,
+      authorityContext.authority,
+    )
+    const scanner = new SequencedSourceEvidenceScanner([{
+      items: [
+        createIgnoredProjectDirectoryItem(
+          'response-loss-configuration-drift',
+        ),
+      ],
+    }])
+    const planningArtifactGateway =
+      new InMemoryPlanningSourceArtifactGateway(
+        scanner,
+        transport.planningArtifactStore,
+      )
+    planningArtifactGateway.failNextRead(
+      new WorkspaceSearchMigrationFailure(
+        'CONFIGURATION_DRIFT',
+        'RAW-ARTIFACT-CONFIGURATION-DRIFT',
+      ),
+    )
+    const port = createSourceEvidencePort(
+      configuration,
+      scanner,
+      transport,
+      () => clock.read(),
+      planningArtifactGateway,
+    )
+    transport.failNextTransaction({
+      timing: 'after-commit',
+      error: createNamedError(
+        'TimeoutError',
+        'RAW-CONFIGURATION-DRIFT-RESPONSE-LOSS',
+      ),
+    })
+
+    const failure = await captureMigrationFailure(
+      () => port.commitNextPage(request),
+    )
+
+    expect(failure).toMatchObject({
+      code: 'CONFIGURATION_DRIFT',
+      message:
+        'Workspace Search source evidence stopped safely (CONFIGURATION_DRIFT).',
+    })
+    expect(planningArtifactGateway.captureCalls).toHaveLength(1)
+    expect(planningArtifactGateway.readCalls).toHaveLength(1)
   })
 
   test('does not adopt an exact planning response-loss commit with a corrupted chain marker', async () => {

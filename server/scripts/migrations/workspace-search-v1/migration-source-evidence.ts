@@ -18,6 +18,9 @@ import {
   WORKSPACE_SEARCH_MIGRATION_VERSION,
   zeroHexDigest,
 } from './migration-contract'
+import {
+  createWorkspaceSearchMigrationPlanningSourceArtifactObjectKey,
+} from './migration-source-artifact'
 import type {
   WorkspaceSearchMigrationSourceOwnershipBinding,
   WorkspaceSearchMigrationSourceScanRowEvidence,
@@ -38,10 +41,6 @@ export const WORKSPACE_SEARCH_MIGRATION_SOURCE_EVIDENCE_MAX_BYTES =
 
 /** Version of checkpoint and progress digest preimages. */
 const sourceEvidenceDigestVersion = 1
-
-/** Secret-free content-addressed namespace for planning source artifacts. */
-const sourceArtifactObjectKeyPrefix =
-  'workspace-search/v1/source-artifacts/v1'
 
 /** Independent pre-plan scan purpose bound to one evidence chain. */
 export type WorkspaceSearchMigrationSourceEvidencePurpose =
@@ -568,15 +567,19 @@ function readPlanningSourceArtifactReferences(
       'versionId',
     ])
     const contentDigest = readDigest(record.contentDigest)
+    const versionId = readNonBlankText(record.versionId)
     const reference:
       WorkspaceSearchMigrationPlanningSourceArtifactReference = {
         objectKey: readNonBlankText(record.objectKey),
-        versionId: readNonBlankText(record.versionId),
+        versionId,
         contentDigest,
-      }
+    }
     if (
       reference.objectKey !==
-        `${sourceArtifactObjectKeyPrefix}/${contentDigest}.json` ||
+        createWorkspaceSearchMigrationPlanningSourceArtifactObjectKey(
+          contentDigest,
+        ) ||
+      versionId === 'null' ||
       objectKeys.has(reference.objectKey)
     ) {
       return failEvidence()

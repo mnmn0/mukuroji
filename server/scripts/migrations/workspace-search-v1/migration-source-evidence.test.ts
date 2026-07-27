@@ -641,6 +641,9 @@ describe('Workspace Search source evidence', () => {
     const canonical =
       serializeWorkspaceSearchMigrationSourceEvidencePage(page)
     const validReference = createSourceArtifacts('strict-v3-artifact')[0]
+    if (validReference === undefined) {
+      throw new Error('Expected one strict version-three artifact reference.')
+    }
     const missing = decodeEvidenceRecord(canonical)
     Reflect.deleteProperty(missing, 'sourceArtifacts')
     const extra = decodeEvidenceRecord(canonical)
@@ -665,6 +668,11 @@ describe('Workspace Search source evidence', () => {
       ...validReference,
       versionId: ' ',
     }])
+    const nullVersion = decodeEvidenceRecord(canonical)
+    Reflect.set(nullVersion, 'sourceArtifacts', [{
+      ...validReference,
+      versionId: 'null',
+    }])
     const extraReferenceField = decodeEvidenceRecord(canonical)
     Reflect.set(extraReferenceField, 'sourceArtifacts', [{
       ...validReference,
@@ -684,6 +692,7 @@ describe('Workspace Search source evidence', () => {
       malformedDigest,
       mismatchedObjectKey,
       blankVersion,
+      nullVersion,
       extraReferenceField,
       duplicate,
     ]) {

@@ -649,6 +649,32 @@ describe('AWS planning source-artifact adapter', () => {
     expect(transport.headCommands[0]?.input.VersionId).toBeUndefined()
   })
 
+  test('fails a non-ambiguous PutObject error without Head or retry', async () => {
+    const configuration = createConfiguration()
+    const page = createPage(configuration)
+    const transport = new RecordingSourceArtifactTransport()
+    transport.putHandler = async () => {
+      throw createS3Error('AccessDenied', 403)
+    }
+    const port =
+      createAwsWorkspaceSearchMigrationSourceArtifactPort({
+        configuration,
+        configurationHash:
+          createWorkspaceSearchConfigurationHash(configuration),
+        transport,
+      })
+
+    const failure = await captureMigrationFailure(
+      port.writePlanningSourceArtifactPage({
+        expectedPage: page,
+      }),
+    )
+
+    expect(failure.code).toBe('SOURCE_ARTIFACT_WRITE_FAILED')
+    expect(transport.putCommands).toHaveLength(1)
+    expect(transport.headCommands).toHaveLength(0)
+  })
+
   test('reconciles an ambiguous write before one bounded conditional retry', async () => {
     const configuration = createConfiguration()
     const page = createPage(configuration)

@@ -28,6 +28,7 @@ import {
 } from './migration-contract'
 import {
   createWorkspaceSearchMigrationPlanningSourceArtifactContentDigest,
+  createWorkspaceSearchMigrationPlanningSourceArtifactObjectKey,
   parseWorkspaceSearchMigrationPlanningSourceArtifactPage,
   parseWorkspaceSearchMigrationPlanningSourceArtifactSegment,
   serializeWorkspaceSearchMigrationPlanningSourceArtifactPage,
@@ -49,14 +50,20 @@ import {
   hasOnlyPairedSurrogates,
 } from './migration-value-guards'
 
-/** Content-addressed namespace reserved for planning source artifacts. */
-export const WORKSPACE_SEARCH_MIGRATION_SOURCE_ARTIFACT_OBJECT_KEY_PREFIX =
-  'workspace-search/v1/source-artifacts/v1'
+export {
+  WORKSPACE_SEARCH_MIGRATION_SOURCE_ARTIFACT_OBJECT_KEY_PREFIX,
+} from './migration-source-artifact'
 
 const sourceArtifactContentType = 'application/json'
 const sourceArtifactKind =
   'workspace-search-planning-source-artifact-segment'
 const sourceArtifactMaximumRetryCount = 1
+/**
+ * Body-consumption deadline after the SDK request has returned its response.
+ *
+ * A version-pinned GET can therefore spend about ten seconds acquiring the
+ * response and another ten seconds consuming one segment body.
+ */
 const sourceArtifactBodyTimeoutMilliseconds = 10_000
 
 /**
@@ -803,7 +810,10 @@ function prepareSourceArtifactSegment(
     ) {
       return failSourceArtifactAws('INVALID_SOURCE_ARTIFACT')
     }
-    const objectKey = createSourceArtifactObjectKey(contentDigest)
+    const objectKey =
+      createWorkspaceSearchMigrationPlanningSourceArtifactObjectKey(
+        contentDigest,
+      )
     const metadata = createSourceArtifactMetadata(
       contentDigest,
       bytes.byteLength,
@@ -855,19 +865,6 @@ function createSourceArtifactPutCommand(
     SSEKMSKeyId: configuration.journal.keyArn,
     BucketKeyEnabled: true,
   })
-}
-
-/**
- * Creates one deterministic secret-free content-addressed object key.
- *
- * @param contentDigest - Exact lowercase SHA-256 content digest.
- * @returns Canonical source-artifact object key.
- */
-function createSourceArtifactObjectKey(contentDigest: string): string {
-  if (!isHexDigest(contentDigest)) {
-    return failSourceArtifactAws('INVALID_SOURCE_ARTIFACT')
-  }
-  return `${WORKSPACE_SEARCH_MIGRATION_SOURCE_ARTIFACT_OBJECT_KEY_PREFIX}/${contentDigest}.json`
 }
 
 /**
@@ -1495,7 +1492,10 @@ function snapshotSourceArtifactReference(
     'INVALID_SOURCE_ARTIFACT',
   )
   if (
-    objectKey !== createSourceArtifactObjectKey(contentDigest) ||
+    objectKey !==
+      createWorkspaceSearchMigrationPlanningSourceArtifactObjectKey(
+        contentDigest,
+      ) ||
     versionId === 'null'
   ) {
     return failSourceArtifactAws('INVALID_SOURCE_ARTIFACT')

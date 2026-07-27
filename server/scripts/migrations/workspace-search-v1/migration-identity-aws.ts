@@ -1534,6 +1534,12 @@ class AwsWorkspaceSearchMigrationIdentityPort
             input.configuration.tables[input.source]
           const stateTable =
             input.configuration.tables['migration-state']
+          if (
+            sourceTable === undefined ||
+            stateTable === undefined
+          ) {
+            return failSourceScanAws('IDENTITY_MISMATCH')
+          }
           const expectedPage:
             WorkspaceSearchMigrationPlanningSourceArtifactPage = {
               kind: 'workspace-search-planning-source-artifact-page',
@@ -1587,6 +1593,12 @@ class AwsWorkspaceSearchMigrationIdentityPort
             input.configuration.tables[input.source]
           const stateTable =
             input.configuration.tables['migration-state']
+          if (
+            sourceTable === undefined ||
+            stateTable === undefined
+          ) {
+            return failSourceScanAws('IDENTITY_MISMATCH')
+          }
           const page =
             await sourceArtifactPort.readPlanningSourceArtifactPage({
               expectedPage: {
