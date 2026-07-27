@@ -148,6 +148,10 @@ function reduceWorkspaceSearchMigrationSourceScanPageUnchecked(
 ): WorkspaceSearchMigrationSourceScanPageResult {
   const source = requireSourceName(input.source)
   const configuration = structuredClone(input.configuration)
+  const table = configuration.tables[source]
+  if (table === undefined) {
+    return failSourceScanPage('TABLE_SCHEMA_MISMATCH')
+  }
   const configurationHash = input.configurationHash
   if (
     !isHexDigest(configurationHash) ||
@@ -156,7 +160,6 @@ function reduceWorkspaceSearchMigrationSourceScanPageUnchecked(
     return failSourceScanPage('CONFIGURATION_HASH_MISMATCH')
   }
 
-  const table = configuration.tables[source]
   requireSourceTable(table, source)
   const previousCheckpoint = cloneCheckpoint(input.previousCheckpoint)
   validateWorkspaceSearchMigrationCheckpoint(previousCheckpoint)

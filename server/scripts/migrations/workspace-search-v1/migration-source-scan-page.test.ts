@@ -377,6 +377,19 @@ describe('Workspace Search migration source scan page', () => {
         }),
       'IDENTITY_MISMATCH',
     )
+
+    const missing = structuredClone(configuration)
+    const measuredHash = createWorkspaceSearchConfigurationHash(missing)
+    Reflect.deleteProperty(missing.tables, 'project-directory')
+    expectFailure(
+      () =>
+        reduceWorkspaceSearchMigrationSourceScanPage({
+          ...createInput([]),
+          configuration: missing,
+          configurationHash: measuredHash,
+        }),
+      'TABLE_SCHEMA_MISMATCH',
+    )
   })
 
   test('rejects completed checkpoints and safe-integer overflow', () => {
