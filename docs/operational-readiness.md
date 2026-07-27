@@ -17,7 +17,7 @@ repository に固定せず、各実行の evidence record に残します。
 | Release | PR/push workflow が Server test を含む全 source/build config の strict typecheck、static analysis、unit/integration、Web E2E、CDK test/nag/synth を実行し、main ruleset が6つの必須 check を強制する | Path-filtered local runtime と外部 reviewer は常時 required にせず、対象変更ごとの release evidence で結果または rate limit を確認すること |
 | Web journey quality | Required Playwright gate が主要 Work Item 画面の keyboard/focus、390px viewport、screen-reader-facing ARIA tree、低速 API 中の status と復帰を検証する | Chromium と mock API による回帰 proxy であり、実 screen reader、visual regression、performance budget は未実装 |
 | Runtime control / rollout | AWS AppConfig の schema 検証済み `enabled` / `disabled` document を API、WebSocket、worker の entrypoint で fail-closed に評価し、operator 用 canary strategy と configuration failure alarm を定義する。Backward-compatible CDK/Lambda update と CloudFormation rollback も利用できる | `read-only` mode、route/effect registry、Lambda alias、CodeDeploy による code canary は未実装。AppConfig の停止制御を code/schema rollout の互換性検証や writer fence の代用にしないこと |
-| Migration | Production-safe migration contract と entry/verification/rollback evidence を定義する。Workspace Search migration 専用の retained/PITR state table、Object Lock COMPLIANCE の segmented journal、transaction 限定 operator policy、物理 table/PITR/journal identity と maintenance drain evidence の strict validator、sealed plan/lease/fence/OCC/checkpoint/apply/verify/部分 apply からの reverse rollback を検証する永続 state-machine kernel を持つ。live projection writer は canonical 内容に server-owned `projectionDigest` を付与する | DynamoDB/S3 の concrete adapter、source/target scan planner、実行 CLI、writer fence、non-production 実行 evidence は未実装。kernel と既存 backfill だけを production migration gate に使用しないこと |
+| Migration | Production-safe migration contract と entry/verification/rollback evidence を定義する。Workspace Search migration 専用の retained/PITR state table、Object Lock COMPLIANCE の segmented journal、transaction 限定 operator policy、物理 table/PITR/journal identity と maintenance drain evidence の strict validator、sealed plan/lease/fence/OCC/checkpoint/apply/verify/部分 apply からの reverse rollback を検証する永続 state-machine kernel を持つ。同じ measured AWS session に identity-bound な source Scan 1 page と exact digest/checkpoint reducer を持つ。live projection writer は canonical 内容に server-owned `projectionDigest` を付与する | Durable な複数 page source evidence/checkpoint commit、target/state/evidence/S3 adapter、target join、実行 CLI、writer fence、non-production 実行 evidence は未実装。kernel と既存 backfill だけを production migration gate に使用しないこと |
 | Data durability | Stateful DynamoDB table は `Retain` + PITR、file bucket は `Retain` + versioning を使う。Work Items には read-only の manifest/compare verifier がある | Restore、writer fence、定期実行、regional replication/failover、AWS Backup plan は未実装。verifier の導入だけで drill や regional DR を完了扱いにしないこと |
 
 この表の未実装項目を、手順書が存在することだけで実装済みとして扱ってはいけません。
@@ -313,11 +313,17 @@ idempotent apply、verify、rollback/forward-fix のすべてを持つ必要が�
 現行の Workspace Search backfill は、この production migration contract を満たしません。
 専用 migration v1 には credential から実測する account/table identity、lossless preimage journal、
 fresh maintenance evidence、sealed plan と排他 lease/fence/OCC、checkpoint、独立 verify、部分 apply
-からも開始できる reverse rollback の永続 state-machine kernel があります。ただし DynamoDB/S3 の
-concrete adapter、source/target scan planner、実行 CLI、online writer fence と完全な
-source/target completeness 実行は未実装です。したがって production migration gate には使用せず、
-これらを実装して non-production で中断・再開・rollback evidence を取得するまでは、既存 backfill を
-dry-run と maintenance-window 内の再生成用途に限定します。
+からも開始できる reverse rollback の永続 state-machine kernel があります。Source については、
+同じ measured identity/pinned credential/DynamoDB client を使う、strongly consistent、
+unfiltered/full-item/non-segmented な1 page Scan と exact digest/checkpoint reducer まで実装済みです。
+各 page は Scan の前後で table ID/ARN/作成時刻を再確認し、継続 cursor を返却された最終 item の
+full primary key に結合します。一時的な throttling/transport 障害は安全に再試行できる固定 code で
+停止し、table incarnation の変化や cursor の不整合は fail-closed で拒否します。
+ただし durable な複数 page evidence/checkpoint commit、target/state/evidence/S3 adapter、target join、
+実行 CLI、online writer fence と完全な source/target completeness 実行は未実装です。したがって
+production migration gate には使用せず、これらを実装して non-production で中断・再開・rollback
+evidence を取得するまでは、既存 backfill を dry-run と maintenance-window 内の再生成用途に
+限定します。
 
 ### Entry gate
 

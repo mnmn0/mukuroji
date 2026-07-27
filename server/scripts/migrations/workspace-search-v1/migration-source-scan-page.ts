@@ -2,18 +2,15 @@ import {
   createAttributeMapDigest,
   decodeAttributeMap,
   decodeAttributeMapToNativeRecord,
-  encodeAttributeMap,
+  encodeUnknownAttributeMap,
   serializeCanonicalAttributeMap,
   validateDynamoDbItemSize,
 } from './dynamodb-attribute-codec'
 import {
-  createWorkspaceSearchConfigurationHash,
-  isHexDigest,
   MigrationDigestAccumulator,
   type DynamoAttributeMap,
   type MigrationSourceCheckpoint,
   type MigrationTableIdentity,
-  type WorkspaceSearchMigrationConfiguration,
   type WorkspaceSearchMigrationFailureCode,
   type WorkspaceSearchMigrationSourceName,
   WorkspaceSearchMigrationFailure,
@@ -28,6 +25,12 @@ import type {
   WorkspaceSearchMigrationSourceOwnershipBinding,
   WorkspaceSearchMigrationSourceScanRowEvidence,
 } from './migration-planner'
+import {
+  cloneWorkspaceSearchMigrationExactTableKey,
+  cloneWorkspaceSearchMigrationExactTableKeyFromItem,
+  prepareWorkspaceSearchMigrationSourceScanContext,
+  type WorkspaceSearchMigrationSourceScanContextInput,
+} from './migration-source-scan-context'
 import {
   validateWorkspaceSearchMigrationCheckpoint,
 } from './migration-state-machine'
@@ -46,18 +49,11 @@ export type WorkspaceSearchMigrationSourceScanPage = {
 /**
  * Input for reducing one bounded source scan page.
  */
-export type ReduceWorkspaceSearchMigrationSourceScanPageInput = {
-  /** Complete measured configuration that owns the source checkpoint. */
-  readonly configuration: WorkspaceSearchMigrationConfiguration
-  /** Reviewed digest of the exact measured configuration. */
-  readonly configurationHash: string
-  /** Logical source table returned by the scan. */
-  readonly source: WorkspaceSearchMigrationSourceName
-  /** Previously committed cumulative checkpoint. */
-  readonly previousCheckpoint: MigrationSourceCheckpoint
-  /** Exact unfiltered, full-item source page returned by DynamoDB. */
-  readonly page: WorkspaceSearchMigrationSourceScanPage
-}
+export type ReduceWorkspaceSearchMigrationSourceScanPageInput =
+  WorkspaceSearchMigrationSourceScanContextInput & {
+    /** Exact unfiltered, full-item source page returned by DynamoDB. */
+    readonly page: WorkspaceSearchMigrationSourceScanPage
+  }
 
 /**
  * Safe digest-only evidence for one source row rejected by the pure mapper.
@@ -146,42 +142,49 @@ export function reduceWorkspaceSearchMigrationSourceScanPage(
 function reduceWorkspaceSearchMigrationSourceScanPageUnchecked(
   input: ReduceWorkspaceSearchMigrationSourceScanPageInput,
 ): WorkspaceSearchMigrationSourceScanPageResult {
-  const source = requireSourceName(input.source)
-  const configuration = structuredClone(input.configuration)
-  const table = configuration.tables[source]
-  if (table === undefined) {
-    return failSourceScanPage('TABLE_SCHEMA_MISMATCH')
+  const preflight =
+    prepareWorkspaceSearchMigrationSourceScanContext(input)
+  if (!preflight.ok) {
+    return failSourceScanPage(preflight.code)
   }
-  const configurationHash = input.configurationHash
-  if (
-    !isHexDigest(configurationHash) ||
-    createWorkspaceSearchConfigurationHash(configuration) !== configurationHash
-  ) {
-    return failSourceScanPage('CONFIGURATION_HASH_MISMATCH')
-  }
-
-  requireSourceTable(table, source)
-  const previousCheckpoint = cloneCheckpoint(input.previousCheckpoint)
-  validateWorkspaceSearchMigrationCheckpoint(previousCheckpoint)
-  if (previousCheckpoint.completed) {
-    return failSourceScanPage('INVALID_STATE')
-  }
-  if (previousCheckpoint.cursor !== undefined) {
-    cloneExactTableKey(previousCheckpoint.cursor, table)
-  }
+  const {
+    previousCheckpoint,
+    source,
+    table,
+  } = preflight.context
 
   const page = input.page
-  const pageItems = page.items
+  const pageItemsValue = page.items
   if (
-    !hasCanonicalDenseArrayShape(pageItems) ||
-    pageItems.length > WORKSPACE_SEARCH_MIGRATION_PAGE_SIZE
+    !hasCanonicalDenseArrayShape(pageItemsValue) ||
+    pageItemsValue.length > WORKSPACE_SEARCH_MIGRATION_PAGE_SIZE
   ) {
     return failSourceScanPage('INVALID_ARGUMENT')
   }
+  const pageItems = cloneSourcePageItems(pageItemsValue)
   const lastEvaluatedKey = page.lastEvaluatedKey
-  const nextCursor = lastEvaluatedKey === undefined
-    ? undefined
-    : cloneExactTableKey(lastEvaluatedKey, table)
+  let nextCursor: DynamoAttributeMap | undefined
+  if (lastEvaluatedKey !== undefined) {
+    const keyResult = cloneWorkspaceSearchMigrationExactTableKey(
+      lastEvaluatedKey,
+      table,
+    )
+    if (!keyResult.ok) return failSourceScanPage(keyResult.code)
+    nextCursor = keyResult.key
+    const lastItem = pageItems[pageItems.length - 1]
+    if (lastItem === undefined) return failSourceScanPage('INVALID_STATE')
+    const lastItemKeyResult =
+      cloneWorkspaceSearchMigrationExactTableKeyFromItem(lastItem, table)
+    if (!lastItemKeyResult.ok) {
+      return failSourceScanPage(lastItemKeyResult.code)
+    }
+    if (
+      serializeCanonicalAttributeMap(nextCursor) !==
+        serializeCanonicalAttributeMap(lastItemKeyResult.key)
+    ) {
+      return failSourceScanPage('INVALID_STATE')
+    }
+  }
   rejectRepeatedCursor(previousCheckpoint.cursor, nextCursor)
 
   const scanned = addSafeCounter(
@@ -210,9 +213,8 @@ function reduceWorkspaceSearchMigrationSourceScanPageUnchecked(
   let deletedDelta = 0
 
   for (let index = 0; index < pageItems.length; index += 1) {
-    const pageItem = pageItems[index]
-    if (!pageItem) return failSourceScanPage('INVALID_ARGUMENT')
-    const item = cloneAttributeMap(pageItem)
+    const item = pageItems[index]
+    if (!item) return failSourceScanPage('INVALID_ARGUMENT')
     validateDynamoDbItemSize(item)
     const sourceKey = extractTableKey(item, table)
     const sourceKeyDigest = createAttributeMapDigest(sourceKey)
@@ -317,6 +319,37 @@ function reduceWorkspaceSearchMigrationSourceScanPageUnchecked(
 }
 
 /**
+ * Captures one canonical page array without invoking element accessors.
+ *
+ * @param value - Caller-owned dense source item array.
+ * @returns Detached exact item snapshot.
+ */
+function cloneSourcePageItems(
+  value: readonly DynamoAttributeMap[],
+): DynamoAttributeMap[] {
+  const itemCount = value.length
+  const items: DynamoAttributeMap[] = []
+  for (let index = 0; index < itemCount; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
+    const item: unknown =
+      descriptor !== undefined &&
+      descriptor.enumerable === true &&
+      Object.prototype.hasOwnProperty.call(descriptor, 'value')
+        ? descriptor.value
+        : undefined
+    if (item === undefined) return failSourceScanPage('INVALID_ARGUMENT')
+    items.push(cloneAttributeMap(item))
+  }
+  if (
+    value.length !== itemCount ||
+    !hasCanonicalDenseArrayShape(value)
+  ) {
+    return failSourceScanPage('INVALID_ARGUMENT')
+  }
+  return items
+}
+
+/**
  * Classifies one already detached source item without allowing codec failures
  * to escape the row-level invalid evidence boundary.
  *
@@ -342,31 +375,13 @@ function classifySourceItem(
 }
 
 /**
- * Clones and validates one checkpoint before using its mutable containers.
- *
- * @param checkpoint - Caller-owned previous checkpoint.
- * @returns Detached checkpoint with a losslessly cloned optional cursor.
- */
-function cloneCheckpoint(
-  checkpoint: MigrationSourceCheckpoint,
-): MigrationSourceCheckpoint {
-  const clone = structuredClone(checkpoint)
-  return clone.cursor === undefined
-    ? clone
-    : {
-        ...clone,
-        cursor: cloneAttributeMap(clone.cursor),
-      }
-}
-
-/**
  * Clones one low-level map through the strict lossless attribute codec.
  *
  * @param value - Caller-owned item or key.
  * @returns Detached canonical low-level map.
  */
-function cloneAttributeMap(value: DynamoAttributeMap): DynamoAttributeMap {
-  return decodeAttributeMap(encodeAttributeMap(value))
+function cloneAttributeMap(value: unknown): DynamoAttributeMap {
+  return decodeAttributeMap(encodeUnknownAttributeMap(value))
 }
 
 /**
@@ -380,128 +395,10 @@ function extractTableKey(
   item: DynamoAttributeMap,
   table: MigrationTableIdentity,
 ): DynamoAttributeMap {
-  const key: DynamoAttributeMap = {}
-  for (const descriptor of table.key) {
-    const attribute = item[descriptor.name]
-    if (!attribute || !matchesKeyAttributeType(attribute, descriptor.type)) {
-      return failSourceScanPage('TABLE_SCHEMA_MISMATCH')
-    }
-    Object.defineProperty(key, descriptor.name, {
-      configurable: true,
-      enumerable: true,
-      value: attribute,
-      writable: true,
-    })
-  }
-  return cloneExactTableKey(key, table)
-}
-
-/**
- * Clones and validates one opaque key against the exact measured table schema.
- *
- * @param key - Candidate exact table key.
- * @param table - Measured source table identity.
- * @returns Detached exact key.
- */
-function cloneExactTableKey(
-  key: DynamoAttributeMap,
-  table: MigrationTableIdentity,
-): DynamoAttributeMap {
-  const clone = cloneAttributeMap(key)
-  if (Object.keys(clone).length !== table.key.length) {
-    return failSourceScanPage('TABLE_SCHEMA_MISMATCH')
-  }
-  for (const descriptor of table.key) {
-    const attribute = clone[descriptor.name]
-    if (!attribute || !matchesKeyAttributeType(attribute, descriptor.type)) {
-      return failSourceScanPage('TABLE_SCHEMA_MISMATCH')
-    }
-  }
-  return clone
-}
-
-/**
- * Checks one low-level key attribute against its measured scalar type.
- *
- * @param value - Candidate exact key attribute.
- * @param type - Measured DynamoDB scalar key type.
- * @returns Whether the attribute has exactly the required scalar tag.
- */
-function matchesKeyAttributeType(
-  value: DynamoAttributeMap[string],
-  type: MigrationTableIdentity['key'][number]['type'],
-): boolean {
-  if (Object.keys(value).length !== 1) return false
-  if (type === 'S') return typeof value.S === 'string'
-  if (type === 'N') return typeof value.N === 'string'
-  return value.B instanceof Uint8Array
-}
-
-/**
- * Requires one canonical logical source name.
- *
- * @param source - Runtime source value.
- * @returns Narrowed source name.
- */
-function requireSourceName(
-  source: WorkspaceSearchMigrationSourceName,
-): WorkspaceSearchMigrationSourceName {
-  if (
-    source !== 'project-directory' &&
-    source !== 'work-items' &&
-    source !== 'collaboration' &&
-    source !== 'documents'
-  ) {
-    return failSourceScanPage('INVALID_ARGUMENT')
-  }
-  return source
-}
-
-/**
- * Requires a measured table identity to match the selected source and key shape.
- *
- * @param table - Measured source table identity.
- * @param source - Selected logical source.
- */
-function requireSourceTable(
-  table: MigrationTableIdentity,
-  source: WorkspaceSearchMigrationSourceName,
-): void {
-  if (table.role !== source) {
-    return failSourceScanPage('IDENTITY_MISMATCH')
-  }
-  if (
-    !hasCanonicalDenseArrayShape(table.key) ||
-    table.key.length < 1 ||
-    table.key.length > 2
-  ) {
-    return failSourceScanPage('TABLE_SCHEMA_MISMATCH')
-  }
-  const names = new Set<string>()
-  let hashCount = 0
-  let rangeCount = 0
-  for (const descriptor of table.key) {
-    if (
-      typeof descriptor.name !== 'string' ||
-      descriptor.name.length === 0 ||
-      descriptor.type !== 'B' &&
-        descriptor.type !== 'N' &&
-        descriptor.type !== 'S' ||
-      descriptor.role !== 'HASH' && descriptor.role !== 'RANGE' ||
-      names.has(descriptor.name)
-    ) {
-      return failSourceScanPage('TABLE_SCHEMA_MISMATCH')
-    }
-    names.add(descriptor.name)
-    if (descriptor.role === 'HASH') hashCount += 1
-    else rangeCount += 1
-  }
-  if (
-    hashCount !== 1 ||
-    rangeCount !== table.key.length - 1
-  ) {
-    return failSourceScanPage('TABLE_SCHEMA_MISMATCH')
-  }
+  const keyResult =
+    cloneWorkspaceSearchMigrationExactTableKeyFromItem(item, table)
+  if (!keyResult.ok) return failSourceScanPage(keyResult.code)
+  return keyResult.key
 }
 
 /**

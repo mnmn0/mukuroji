@@ -218,18 +218,19 @@ export function decodeAttributeValue(value: unknown): AttributeValue {
 export function encodeAttributeMap(
   value: Readonly<Record<string, AttributeValue>>,
 ): EncodedAttributeMap {
-  return runCodecBoundary(() => {
-    const encoded: Record<string, EncodedAttributeValue> = {}
+  return encodeUnknownAttributeMap(value)
+}
 
-    for (const name of Object.keys(value).sort(compareUtf8Ordinal)) {
-      requireAttributeName(name)
-      const attribute = value[name]
-      if (!attribute) return failCodec()
-      defineOwnProperty(encoded, name, encodeAttributeValue(attribute))
-    }
-
-    return encoded
-  })
+/**
+ * Encodes and validates an untrusted raw attribute map.
+ *
+ * @param value - Candidate low-level DynamoDB item or key.
+ * @returns Strict tagged JSON-safe attribute map.
+ */
+export function encodeUnknownAttributeMap(
+  value: unknown,
+): EncodedAttributeMap {
+  return runCodecBoundary(() => encodeUnknownAttributeMapUnchecked(value))
 }
 
 /**
@@ -506,7 +507,7 @@ function encodeUnknownAttributeValue(value: unknown): EncodedAttributeValue {
     return { type: 'BS', value: binaries }
   }
   if (tag === 'M') {
-    return { type: 'M', value: encodeUnknownAttributeMap(record.M) }
+    return { type: 'M', value: encodeUnknownAttributeMapUnchecked(record.M) }
   }
   if (tag === 'L') {
     return {
@@ -526,12 +527,14 @@ function encodeUnknownAttributeValue(value: unknown): EncodedAttributeValue {
 }
 
 /**
- * Encodes an unknown raw attribute map.
+ * Encodes an unknown raw attribute map inside an existing codec boundary.
  *
  * @param value - Candidate raw attribute map.
  * @returns Strict tagged map.
  */
-function encodeUnknownAttributeMap(value: unknown): EncodedAttributeMap {
+function encodeUnknownAttributeMapUnchecked(
+  value: unknown,
+): EncodedAttributeMap {
   const record = requireRecord(value)
   const encoded: Record<string, EncodedAttributeValue> = {}
 
