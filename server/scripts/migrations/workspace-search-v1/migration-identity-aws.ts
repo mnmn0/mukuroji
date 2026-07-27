@@ -125,6 +125,20 @@ import {
   cloneWorkspaceSearchMigrationExactTableKey,
   prepareWorkspaceSearchMigrationSourceScanContext,
 } from './migration-source-scan-context'
+import {
+  normalizeWorkspaceSearchMigrationTargetScanOutput,
+  type WorkspaceSearchMigrationTargetScanAwsTransport,
+  type WorkspaceSearchMigrationTargetScanReadInput,
+} from './migration-target-scan-aws'
+import {
+  reduceWorkspaceSearchMigrationTargetScanPage,
+  type ReduceWorkspaceSearchMigrationTargetScanPageInput,
+  type WorkspaceSearchMigrationTargetScanPage,
+  type WorkspaceSearchMigrationTargetScanPageResult,
+} from './migration-target-scan-page'
+import {
+  prepareWorkspaceSearchMigrationTargetScanContext,
+} from './migration-target-scan-context'
 import type {
   AcquireWorkspaceSearchMigrationLeaseInput,
   HeartbeatWorkspaceSearchMigrationLeaseInput,
@@ -269,6 +283,18 @@ type SourceScanAwsFailureCode =
   | 'TRANSIENT_INFRASTRUCTURE_FAILURE'
 
 /**
+ * Failure codes deliberately emitted by the private managed target data path.
+ */
+type TargetScanAwsFailureCode =
+  | 'CONFIGURATION_HASH_MISMATCH'
+  | 'IDENTITY_MISMATCH'
+  | 'INVALID_ARGUMENT'
+  | 'INVALID_STATE'
+  | 'TABLE_SCHEMA_MISMATCH'
+  | 'TARGET_DRIFT'
+  | 'TRANSIENT_INFRASTRUCTURE_FAILURE'
+
+/**
  * Secret-free structural AWS error supplied only to Smithy's classifiers.
  */
 type SourceScanAwsErrorClassificationInput =
@@ -297,6 +323,25 @@ class SourceScanAwsFailure extends Error {
 }
 
 /**
+ * Privately branded managed target failure that response data cannot forge.
+ */
+class TargetScanAwsFailure extends Error {
+  /** Stable operator-safe code selected inside the managed session. */
+  readonly code: TargetScanAwsFailureCode
+
+  /**
+   * Creates one private fixed-code target Scan failure.
+   *
+   * @param code - Stable code selected by trusted session logic.
+   */
+  constructor(code: TargetScanAwsFailureCode) {
+    super(code)
+    this.name = 'TargetScanAwsFailure'
+    this.code = code
+  }
+}
+
+/**
  * Detached reduction state paired with the authority that produced its page.
  */
 type PreparedManagedSourceScanReduction = {
@@ -308,12 +353,32 @@ type PreparedManagedSourceScanReduction = {
   readonly reductionInput: ReduceWorkspaceSearchMigrationSourceScanPageInput
 }
 
+/**
+ * Detached target reduction state paired with the authority that produced it.
+ */
+type PreparedManagedTargetScanReduction = {
+  /** Measurement hash captured before the Scan. */
+  readonly configurationHash: string
+  /** Managed-session generation captured before the Scan. */
+  readonly generation: number
+  /** Exact predecessor and page that must be reduced together. */
+  readonly reductionInput: ReduceWorkspaceSearchMigrationTargetScanPageInput
+}
+
 /** Exact private raw page paired with its public digest-only reduction. */
 type CapturedManagedSourceScanPage = {
   /** Detached normalized raw Scan items retained only inside the session. */
   readonly page: WorkspaceSearchMigrationSourceScanPage
   /** Digest-only reduction exposed by the public managed session. */
   readonly pageResult: WorkspaceSearchMigrationSourceScanPageResult
+}
+
+/** Exact private raw target page paired with its public digest-only reduction. */
+type CapturedManagedTargetScanPage = {
+  /** Detached normalized raw Scan items retained only inside the session. */
+  readonly page: WorkspaceSearchMigrationTargetScanPage
+  /** Digest-only reduction exposed by the public managed session. */
+  readonly pageResult: WorkspaceSearchMigrationTargetScanPageResult
 }
 
 /**
@@ -387,7 +452,8 @@ export interface WorkspaceSearchMigrationManagedIdentityPort
 }
 
 /**
- * Composite measured AWS session for identity, source reads, and authority I/O.
+ * Composite measured AWS session for identity, source/target reads, and
+ * authority I/O.
  */
 export interface WorkspaceSearchMigrationManagedAwsSession
   extends
@@ -402,6 +468,16 @@ export interface WorkspaceSearchMigrationManagedAwsSession
   scanSourcePage(
     input: WorkspaceSearchMigrationSourceScanReadInput,
   ): Promise<WorkspaceSearchMigrationSourceScanPageResult>
+
+  /**
+   * Reads and reduces one bounded target page through the measured AWS session.
+   *
+   * @param input - Measured target context and durable predecessor checkpoint.
+   * @returns Bound cumulative checkpoint and detached row evidence.
+   */
+  scanTargetPage(
+    input: WorkspaceSearchMigrationTargetScanReadInput,
+  ): Promise<WorkspaceSearchMigrationTargetScanPageResult>
 
   /**
    * Reads one durable pre-plan source evidence head.
@@ -528,7 +604,8 @@ export interface WorkspaceSearchMigrationManagedAwsTransport
     WorkspaceSearchMigrationPrePlanAuthorityAwsTransport,
     WorkspaceSearchMigrationSourceArtifactAwsTransport,
     WorkspaceSearchMigrationSourceScanAwsTransport,
-    WorkspaceSearchMigrationSourceEvidenceAwsTransport {}
+    WorkspaceSearchMigrationSourceEvidenceAwsTransport,
+    WorkspaceSearchMigrationTargetScanAwsTransport {}
 
 /**
  * Injectable constructor for the allowlisted AWS SDK transport.
@@ -636,6 +713,16 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
    * @returns Raw low-level DynamoDB page.
    */
   scanSource(command: ScanCommand): Promise<ScanCommandOutput> {
+    return this.dynamodbClient.send(command)
+  }
+
+  /**
+   * Sends one bounded target base-table Scan.
+   *
+   * @param command - Exact adapter-owned Scan command.
+   * @returns Raw low-level DynamoDB page.
+   */
+  scanTarget(command: ScanCommand): Promise<ScanCommandOutput> {
     return this.dynamodbClient.send(command)
   }
 
@@ -1112,6 +1199,145 @@ class AwsWorkspaceSearchMigrationIdentityPort
     return {
       page: prepared.reductionInput.page,
       pageResult: reduceWorkspaceSearchMigrationSourceScanPage(
+        prepared.reductionInput,
+      ),
+    }
+  }
+
+  /**
+   * Reads and reduces one target page through the same pinned credentials and
+   * DynamoDB client that performed identity measurement.
+   *
+   * The predecessor checkpoint is detached before I/O and is passed directly
+   * to the reducer, so callers cannot substitute another valid checkpoint
+   * between the Scan and cumulative evidence update.
+   *
+   * @param input - Measured target context and durable predecessor checkpoint.
+   * @returns Bound cumulative checkpoint and detached row evidence.
+   */
+  async scanTargetPage(
+    input: WorkspaceSearchMigrationTargetScanReadInput,
+  ): Promise<WorkspaceSearchMigrationTargetScanPageResult> {
+    const captured = await this.captureTargetPage(input)
+    return captured.pageResult
+  }
+
+  /**
+   * Captures one normalized raw target page and reduces those exact same items.
+   *
+   * The private primitive keeps the raw page inside the managed session so a
+   * later durable artifact gateway can reuse it without issuing a second Scan.
+   *
+   * @param input - Measured target context and durable predecessor checkpoint.
+   * @returns Detached raw page paired with its exact digest-only reduction.
+   */
+  private async captureTargetPage(
+    input: WorkspaceSearchMigrationTargetScanReadInput,
+  ): Promise<CapturedManagedTargetScanPage> {
+    const prepared = await runTargetScanAwsBoundary(async () => {
+      this.requireOpen()
+      const scanGeneration = this.generation
+      const authorizedConfigurationHash =
+        this.measuredConfigurationHash
+      if (authorizedConfigurationHash === undefined) {
+        return failTargetScanAws('INVALID_STATE')
+      }
+      const preflight =
+        prepareWorkspaceSearchMigrationTargetScanContext(input)
+      if (!preflight.ok) return failTargetScanAws(preflight.code)
+      const context = preflight.context
+      if (context.configurationHash !== authorizedConfigurationHash) {
+        return failTargetScanAws('CONFIGURATION_HASH_MISMATCH')
+      }
+      this.requireMeasuredConfigurationBinding(context.configuration)
+      this.requireMeasurementGeneration(
+        scanGeneration,
+        authorizedConfigurationHash,
+      )
+      let commandCursor: DynamoAttributeMap | undefined
+      if (context.previousCheckpoint.cursor !== undefined) {
+        const commandCursorResult =
+          cloneWorkspaceSearchMigrationExactTableKey(
+            context.previousCheckpoint.cursor,
+            context.table,
+          )
+        if (!commandCursorResult.ok) {
+          return failTargetScanAws(commandCursorResult.code)
+        }
+        commandCursor = commandCursorResult.key
+      }
+
+      await this.requireCurrentTargetTableIncarnation(
+        context.table,
+        scanGeneration,
+        authorizedConfigurationHash,
+      )
+      this.requireMeasurementGeneration(
+        scanGeneration,
+        authorizedConfigurationHash,
+      )
+      let output: ScanCommandOutput
+      try {
+        output = await this.transport.scanTarget(new ScanCommand({
+          TableName: this.requested.tables['workspace-search'],
+          ConsistentRead: true,
+          Limit: WORKSPACE_SEARCH_MIGRATION_PAGE_SIZE,
+          ...(commandCursor === undefined
+            ? {}
+            : { ExclusiveStartKey: commandCursor }),
+        }))
+      } catch (error: unknown) {
+        this.requireMeasurementGeneration(
+          scanGeneration,
+          authorizedConfigurationHash,
+        )
+        throw error
+      }
+      this.requireMeasurementGeneration(
+        scanGeneration,
+        authorizedConfigurationHash,
+      )
+      await this.requireCurrentTargetTableIncarnation(
+        context.table,
+        scanGeneration,
+        authorizedConfigurationHash,
+      )
+      this.requireMeasurementGeneration(
+        scanGeneration,
+        authorizedConfigurationHash,
+      )
+      const normalized =
+        normalizeWorkspaceSearchMigrationTargetScanOutput(
+          output,
+          context.table,
+        )
+      if (!normalized.ok) return failTargetScanAws(normalized.code)
+      this.requireMeasurementGeneration(
+        scanGeneration,
+        authorizedConfigurationHash,
+      )
+      return {
+        configurationHash: authorizedConfigurationHash,
+        generation: scanGeneration,
+        reductionInput: {
+          configuration: context.configuration,
+          configurationHash: context.configurationHash,
+          previousCheckpoint: context.previousCheckpoint,
+          page: normalized.page,
+        },
+      } satisfies PreparedManagedTargetScanReduction
+    })
+    if (
+      !this.isMeasurementGenerationCurrent(
+        prepared.generation,
+        prepared.configurationHash,
+      )
+    ) {
+      throw createTargetScanAwsBoundaryFailure('INVALID_STATE')
+    }
+    return {
+      page: prepared.reductionInput.page,
+      pageResult: reduceWorkspaceSearchMigrationTargetScanPage(
         prepared.reductionInput,
       ),
     }
@@ -1893,6 +2119,56 @@ class AwsWorkspaceSearchMigrationIdentityPort
         table.creationTime
     ) {
       return failSourceScanAws('SOURCE_DRIFT')
+    }
+    this.requireMeasurementGeneration(generation, configurationHash)
+  }
+
+  /**
+   * Revalidates the immutable target-table incarnation around target I/O.
+   *
+   * @param table - Measured target table identity authorized for the Scan.
+   * @param generation - Managed-session generation captured before the Scan.
+   * @param configurationHash - Measurement authority captured before the Scan.
+   */
+  private async requireCurrentTargetTableIncarnation(
+    table: MigrationTableIdentity,
+    generation: number,
+    configurationHash: string,
+  ): Promise<void> {
+    this.requireMeasurementGeneration(generation, configurationHash)
+    let output: DescribeTableCommandOutput
+    try {
+      output = await this.transport.describeTable(
+        new DescribeTableCommand({ TableName: table.tableName }),
+      )
+    } catch (error: unknown) {
+      this.requireMeasurementGeneration(generation, configurationHash)
+      if (error instanceof ResourceNotFoundException) {
+        return failTargetScanAws('TARGET_DRIFT')
+      }
+      throw error
+    }
+    this.requireMeasurementGeneration(generation, configurationHash)
+    const observed = output.Table
+    const creationTime = observed?.CreationDateTime
+    let creationTimeMilliseconds: number | undefined
+    try {
+      creationTimeMilliseconds = creationTime instanceof Date
+        ? Date.prototype.getTime.call(creationTime)
+        : undefined
+    } catch {
+      return failTargetScanAws('TARGET_DRIFT')
+    }
+    if (
+      observed?.TableStatus !== 'ACTIVE' ||
+      observed.TableName !== table.tableName ||
+      observed.TableArn !== table.tableArn ||
+      observed.TableId !== table.tableId ||
+      !Number.isFinite(creationTimeMilliseconds) ||
+      new Date(creationTimeMilliseconds ?? Number.NaN).toISOString() !==
+        table.creationTime
+    ) {
+      return failTargetScanAws('TARGET_DRIFT')
     }
     this.requireMeasurementGeneration(generation, configurationHash)
   }
@@ -2804,6 +3080,23 @@ async function runSourceScanAwsBoundary(
 }
 
 /**
+ * Runs managed target Scan I/O behind a fresh raw-error replacement boundary.
+ *
+ * @param operation - Authority checks and SDK work for one exact target page.
+ * @returns Detached reducer input and the authority that produced its page.
+ */
+async function runTargetScanAwsBoundary(
+  operation: () => Promise<PreparedManagedTargetScanReduction>,
+): Promise<PreparedManagedTargetScanReduction> {
+  try {
+    return await operation()
+  } catch (error: unknown) {
+    const code = readTargetScanAwsFailureCode(error)
+    throw createTargetScanAwsBoundaryFailure(code)
+  }
+}
+
+/**
  * Runs one managed evidence call behind a fixed raw-error replacement boundary.
  *
  * @param operation - Captured-authority validation and adapter operation.
@@ -2892,6 +3185,46 @@ function readSourceScanAwsFailureCode(
   try {
     if (error instanceof SourceScanAwsFailure) return error.code
     if (error instanceof ResourceNotFoundException) return 'SOURCE_DRIFT'
+    if (!(error instanceof Error)) return 'INVALID_STATE'
+    const classificationInput =
+      createSourceScanAwsErrorClassificationInput(error)
+    if (
+      isThrottlingError(classificationInput) ||
+      isTransientError(classificationInput)
+    ) {
+      return 'TRANSIENT_INFRASTRUCTURE_FAILURE'
+    }
+    return 'INVALID_STATE'
+  } catch {
+    return 'INVALID_STATE'
+  }
+}
+
+/**
+ * Reads only trusted target Scan failure codes and redacts raw transport data.
+ *
+ * @param error - Arbitrary value raised during target checks or SDK I/O.
+ * @returns Trusted private code or the fail-closed default.
+ */
+function readTargetScanAwsFailureCode(
+  error: unknown,
+): WorkspaceSearchMigrationFailureCode {
+  try {
+    if (error instanceof TargetScanAwsFailure) return error.code
+    if (error instanceof SourceScanAwsFailure) {
+      switch (error.code) {
+        case 'CONFIGURATION_HASH_MISMATCH':
+        case 'IDENTITY_MISMATCH':
+        case 'INVALID_ARGUMENT':
+        case 'INVALID_STATE':
+        case 'TABLE_SCHEMA_MISMATCH':
+        case 'TRANSIENT_INFRASTRUCTURE_FAILURE':
+          return error.code
+        default:
+          return 'INVALID_STATE'
+      }
+    }
+    if (error instanceof ResourceNotFoundException) return 'TARGET_DRIFT'
     if (!(error instanceof Error)) return 'INVALID_STATE'
     const classificationInput =
       createSourceScanAwsErrorClassificationInput(error)
@@ -3003,6 +3336,16 @@ function failSourceScanAws(code: SourceScanAwsFailureCode): never {
 }
 
 /**
+ * Raises one privately branded managed target Scan failure.
+ *
+ * @param code - Stable trusted adapter failure code.
+ * @returns Never returns.
+ */
+function failTargetScanAws(code: TargetScanAwsFailureCode): never {
+  throw new TargetScanAwsFailure(code)
+}
+
+/**
  * Creates one public fixed-error source Scan boundary failure.
  *
  * @param code - Stable operator-safe failure code.
@@ -3014,6 +3357,21 @@ function createSourceScanAwsBoundaryFailure(
   return new WorkspaceSearchMigrationFailure(
     code,
     `Workspace Search source Scan read stopped safely (${code}).`,
+  )
+}
+
+/**
+ * Creates one public fixed-error target Scan boundary failure.
+ *
+ * @param code - Stable operator-safe failure code.
+ * @returns Secret-free target Scan failure.
+ */
+function createTargetScanAwsBoundaryFailure(
+  code: WorkspaceSearchMigrationFailureCode,
+): WorkspaceSearchMigrationFailure {
+  return new WorkspaceSearchMigrationFailure(
+    code,
+    `Workspace Search target Scan read stopped safely (${code}).`,
   )
 }
 
