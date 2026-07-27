@@ -528,6 +528,11 @@ test('Workspace Search migration operator policy is unattached and least privile
     .toContain('workspace-search/v1/');
   expect(JSON.stringify(journalReadStatement?.Resource))
     .toContain('workspace-search/v1/');
+  expect(journalReadStatement?.Action).toEqual([
+    's3:GetObject',
+    's3:GetObjectRetention',
+    's3:GetObjectVersion',
+  ]);
   expect(kmsStatement?.Resource).toEqual({
     'Fn::GetAtt': [journalKeyId, 'Arn'],
   });

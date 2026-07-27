@@ -28,7 +28,12 @@ export function hasOnlyPairedSurrogates(value: string): boolean {
 export function hasCanonicalDenseArrayShape(
   value: unknown,
 ): value is readonly unknown[] {
-  if (!Array.isArray(value)) return false
+  if (
+    !Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Array.prototype
+  ) {
+    return false
+  }
   const length = value.length
   const keys = Reflect.ownKeys(value)
   if (
@@ -39,6 +44,10 @@ export function hasCanonicalDenseArrayShape(
   }
   return keys.slice(0, length).every((key, index) => {
     if (typeof key !== 'string' || key !== String(index)) return false
-    return Object.getOwnPropertyDescriptor(value, key)?.enumerable === true
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)
+    return (
+      descriptor?.enumerable === true &&
+      Object.hasOwn(descriptor, 'value')
+    )
   })
 }

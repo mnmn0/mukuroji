@@ -316,6 +316,26 @@ describe('DynamoDB AttributeValue codec', () => {
     expect(hasCanonicalDenseArrayShape(hiddenSideProperty)).toBe(false)
   })
 
+  test('rejects accessor elements and arrays with replaced prototypes', () => {
+    const accessorElement = ['first']
+    Object.defineProperty(accessorElement, '0', {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return 'forged'
+      },
+    })
+    const replacedPrototype = ['first']
+    Object.setPrototypeOf(replacedPrototype, {
+      map() {
+        return ['forged']
+      },
+    })
+
+    expect(hasCanonicalDenseArrayShape(accessorElement)).toBe(false)
+    expect(hasCanonicalDenseArrayShape(replacedPrototype)).toBe(false)
+  })
+
   test('enforces exact string item-size boundaries', () => {
     const attributeName = 'payload'
     const legal = {

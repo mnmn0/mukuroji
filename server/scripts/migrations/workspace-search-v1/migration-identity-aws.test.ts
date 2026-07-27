@@ -27,6 +27,8 @@ import {
   type DescribeKeyCommandOutput,
 } from '@aws-sdk/client-kms'
 import {
+  GetObjectCommand,
+  type GetObjectCommandOutput,
   GetBucketEncryptionCommand,
   type GetBucketEncryptionOutput,
   GetBucketLoggingCommand,
@@ -35,6 +37,10 @@ import {
   type GetBucketVersioningOutput,
   GetObjectLockConfigurationCommand,
   type GetObjectLockConfigurationOutput,
+  HeadObjectCommand,
+  type HeadObjectCommandOutput,
+  PutObjectCommand,
+  type PutObjectCommandOutput,
 } from '@aws-sdk/client-s3'
 import {
   AssumeRoleCommand,
@@ -55,6 +61,7 @@ import {
   createAwsWorkspaceSearchMigrationIdentityPort,
   type WorkspaceSearchMigrationIdentityAwsSdkConfigurations,
   type WorkspaceSearchMigrationManagedAwsTransport,
+  type WorkspaceSearchMigrationManagedAwsSession,
 } from './migration-identity-aws'
 import {
   createWorkspaceSearchMigrationRequestedResourcesBinding,
@@ -65,6 +72,9 @@ import {
 import type {
   WorkspaceSearchMigrationSourceEvidenceAwsCommitRequest,
 } from './migration-source-evidence-aws'
+import {
+  parseWorkspaceSearchMigrationPlanningSourceArtifactSegment,
+} from './migration-source-artifact'
 import type {
   WorkspaceSearchMigrationPrePlanAuthority,
 } from './migration-pre-plan-authority-aws'
@@ -236,6 +246,19 @@ class RecordingIdentityAwsTransport
   readonly getObjectLockConfigurationCommands:
     GetObjectLockConfigurationCommand[] = []
 
+  /** Recorded immutable source-artifact uploads. */
+  readonly putSourceArtifactCommands: PutObjectCommand[] = []
+
+  /** Recorded source-artifact reconciliation metadata reads. */
+  readonly headSourceArtifactCommands: HeadObjectCommand[] = []
+
+  /** Recorded exact-version source-artifact object reads. */
+  readonly getSourceArtifactCommands: GetObjectCommand[] = []
+
+  /** Uploaded source-artifact commands keyed by immutable object key. */
+  private readonly sourceArtifactPutCommandsByKey =
+    new Map<string, PutObjectCommand>()
+
   /** Number of transport close calls. */
   closeCount = 0
 
@@ -280,6 +303,15 @@ class RecordingIdentityAwsTransport
 
   /** S3 Object Lock response returned by the recording transport. */
   objectLockOutput: GetObjectLockConfigurationOutput = {}
+
+  /** Optional synchronous effect after recording a source-artifact upload. */
+  putSourceArtifactEffect: (() => void) | undefined
+
+  /** Optional synchronous effect after recording a source-artifact metadata read. */
+  headSourceArtifactEffect: (() => void) | undefined
+
+  /** Optional synchronous effect after recording an exact artifact read. */
+  getSourceArtifactEffect: (() => void) | undefined
 
   /** Source Scan response returned by the recording transport. */
   scanSourceOutput: ScanCommandOutput = {
@@ -602,6 +634,123 @@ class RecordingIdentityAwsTransport
       throw this.objectLockFailure
     }
     return this.objectLockOutput
+  }
+
+  /**
+   * Records one conditional immutable source-artifact upload.
+   *
+   * @param command - Exact adapter-owned PutObject command.
+   * @returns Configured fake immutable-version response.
+   */
+  async putSourceArtifact(
+    command: PutObjectCommand,
+  ): Promise<PutObjectCommandOutput> {
+    this.putSourceArtifactCommands.push(command)
+    const key = command.input.Key
+    if (key === undefined) {
+      throw new Error('Expected one source-artifact object key.')
+    }
+    this.sourceArtifactPutCommandsByKey.set(key, command)
+    this.putSourceArtifactEffect?.()
+    return {
+      $metadata: {},
+      VersionId: 'source-artifact-version-1',
+      ChecksumSHA256: command.input.ChecksumSHA256,
+      ChecksumType: 'FULL_OBJECT',
+      ServerSideEncryption: command.input.ServerSideEncryption,
+      SSEKMSKeyId: command.input.SSEKMSKeyId,
+      BucketKeyEnabled: command.input.BucketKeyEnabled,
+      Size: command.input.ContentLength,
+    }
+  }
+
+  /**
+   * Records one exact source-artifact metadata reconciliation read.
+   *
+   * @param command - Exact adapter-owned HeadObject command.
+   * @returns Configured fake metadata response.
+   */
+  async headSourceArtifact(
+    command: HeadObjectCommand,
+  ): Promise<HeadObjectCommandOutput> {
+    this.headSourceArtifactCommands.push(command)
+    this.headSourceArtifactEffect?.()
+    const putCommand = this.readSourceArtifactPutCommand(
+      command.input.Key,
+    )
+    return this.createSourceArtifactObjectOutput(putCommand)
+  }
+
+  /**
+   * Records one exact immutable source-artifact version read.
+   *
+   * @param command - Exact adapter-owned GetObject command.
+   * @returns Configured fake object response.
+   */
+  async getSourceArtifact(
+    command: GetObjectCommand,
+  ): Promise<GetObjectCommandOutput> {
+    this.getSourceArtifactCommands.push(command)
+    this.getSourceArtifactEffect?.()
+    const putCommand = this.readSourceArtifactPutCommand(
+      command.input.Key,
+    )
+    const output: GetObjectCommandOutput =
+      this.createSourceArtifactObjectOutput(putCommand)
+    const body = putCommand.input.Body
+    if (!(body instanceof Uint8Array)) {
+      throw new Error('Expected Uint8Array source-artifact body bytes.')
+    }
+    Reflect.set(output, 'Body', new Uint8Array(body))
+    return output
+  }
+
+  /**
+   * Reads one previously uploaded source-artifact command.
+   *
+   * @param key - Exact immutable S3 object key.
+   * @returns Recorded source-artifact upload.
+   */
+  private readSourceArtifactPutCommand(
+    key: string | undefined,
+  ): PutObjectCommand {
+    const command = key === undefined
+      ? undefined
+      : this.sourceArtifactPutCommandsByKey.get(key)
+    if (command === undefined) {
+      throw new Error('Expected a previously uploaded source artifact.')
+    }
+    return command
+  }
+
+  /**
+   * Creates one valid immutable Object Lock response for a recorded upload.
+   *
+   * @param command - Exact preceding source-artifact upload.
+   * @returns Complete safe HeadObject-compatible response.
+   */
+  private createSourceArtifactObjectOutput(
+    command: PutObjectCommand,
+  ): HeadObjectCommandOutput {
+    const lastModified =
+      new Date('2026-07-28T00:00:00.000Z')
+    const retainUntil =
+      new Date('2026-08-28T00:00:00.000Z')
+    return {
+      $metadata: {},
+      VersionId: 'source-artifact-version-1',
+      ContentLength: command.input.ContentLength,
+      ContentType: command.input.ContentType,
+      ChecksumSHA256: command.input.ChecksumSHA256,
+      ChecksumType: 'FULL_OBJECT',
+      ServerSideEncryption: command.input.ServerSideEncryption,
+      SSEKMSKeyId: command.input.SSEKMSKeyId,
+      BucketKeyEnabled: command.input.BucketKeyEnabled,
+      LastModified: lastModified,
+      ObjectLockMode: 'COMPLIANCE',
+      ObjectLockRetainUntilDate: retainUntil,
+      Metadata: command.input.Metadata,
+    }
   }
 }
 
@@ -1344,6 +1493,14 @@ describe('Workspace Search migration AWS identity adapter', () => {
     expect(result.sourceRows).toHaveLength(1)
     expect(result.sourceRows[0]?.classification).toBe('ignored')
     expect(result.invalidRows).toHaveLength(0)
+    expect(Reflect.has(result, 'items')).toBe(false)
+    expect(Reflect.has(result, 'page')).toBe(false)
+    const serializedResult = JSON.stringify(result)
+    expect(serializedResult).not.toContain('WORKSPACE_MEMBER#measured')
+    expect(serializedResult).not.toContain('fixture')
+    expect(transport.putSourceArtifactCommands).toHaveLength(0)
+    expect(transport.headSourceArtifactCommands).toHaveLength(0)
+    expect(transport.getSourceArtifactCommands).toHaveLength(0)
     port.close()
   })
 
@@ -1426,6 +1583,9 @@ describe('Workspace Search migration AWS identity adapter', () => {
       (command) => command instanceof GetItemCommand &&
         command.input.ConsistentRead === true,
     )).toBe(true)
+    expect(transport.putSourceArtifactCommands).toHaveLength(0)
+    expect(transport.headSourceArtifactCommands).toHaveLength(0)
+    expect(transport.getSourceArtifactCommands).toHaveLength(0)
     port.close()
   })
 
@@ -1433,6 +1593,23 @@ describe('Workspace Search migration AWS identity adapter', () => {
     const requested = createRequestedResources()
     const transport = new RecordingIdentityAwsTransport()
     seedValidMeasurementOutputs(transport, requested)
+    const exactScanItem: DynamoAttributeMap = {
+      ...createIgnoredSourceItem('planning-lossless'),
+      exactNumber: { N: '1.2300' },
+      nativeBinary: { B: new Uint8Array([0, 255, 17]) },
+      nestedValues: {
+        L: [
+          { NULL: true },
+          { M: { enabled: { BOOL: false } } },
+        ],
+      },
+    }
+    transport.scanSourceOutput = {
+      $metadata: {},
+      Count: 1,
+      Items: [exactScanItem],
+      ScannedCount: 1,
+    }
     const clockAt = '2026-07-28T06:00:00.000Z'
     let writeTrace: string[] | undefined
     const port = createAwsWorkspaceSearchMigrationIdentityPort(
@@ -1458,9 +1635,22 @@ describe('Workspace Search migration AWS identity adapter', () => {
       evidenceBytes: createManagedMaintenanceEvidenceBytes(clockAt),
     })
     const detachedAuthority = structuredClone(authority)
+    const sourceTableName = requested.tables['project-directory']
     const stateTableName = requested.tables['migration-state']
     writeTrace = []
+    transport.scanSourceEffect = () => {
+      writeTrace?.push('scan')
+    }
+    transport.putSourceArtifactEffect = () => {
+      writeTrace?.push('artifact-put')
+    }
+    transport.headSourceArtifactEffect = () => {
+      writeTrace?.push('artifact-head')
+    }
     transport.describeTableEffect = (tableName) => {
+      if (tableName === sourceTableName) {
+        writeTrace?.push('source-incarnation')
+      }
       if (tableName === stateTableName) {
         writeTrace?.push('state-incarnation')
       }
@@ -1482,6 +1672,67 @@ describe('Workspace Search migration AWS identity adapter', () => {
       purpose: 'planning',
       runId: 'managed-planning-evidence-run',
       pageSequence: 1,
+    })
+    expect(transport.scanSourceCommands).toHaveLength(1)
+    expect(transport.putSourceArtifactCommands).toHaveLength(1)
+    expect(transport.headSourceArtifactCommands).toHaveLength(1)
+    expect(transport.getSourceArtifactCommands).toHaveLength(0)
+    const putCommand = transport.putSourceArtifactCommands[0]
+    const artifactBytes = putCommand?.input.Body
+    const metadata = putCommand?.input.Metadata
+    const contentDigest =
+      metadata?.['mukuroji-content-sha256']
+    if (
+      !(artifactBytes instanceof Uint8Array) ||
+      metadata === undefined ||
+      contentDigest === undefined
+    ) {
+      throw new Error('Expected exact planning source-artifact upload.')
+    }
+    const artifactSegment =
+      parseWorkspaceSearchMigrationPlanningSourceArtifactSegment(
+        artifactBytes,
+      )
+    expect(artifactSegment.items).toEqual([exactScanItem])
+    expect(artifactSegment).toMatchObject({
+      pageSequence: 1,
+      segmentIndex: 0,
+      segmentCount: 1,
+      itemStartIndex: 0,
+      itemCount: 1,
+      pageItemCount: 1,
+    })
+    expect(putCommand.input).toEqual({
+      Bucket: requested.journalBucket,
+      Key:
+        `workspace-search/v1/source-artifacts/v1/${contentDigest}.json`,
+      Body: artifactBytes,
+      ContentLength: artifactBytes.byteLength,
+      ContentType: 'application/json',
+      ChecksumAlgorithm: 'SHA256',
+      ChecksumSHA256: putCommand.input.ChecksumSHA256,
+      IfNoneMatch: '*',
+      ExpectedBucketOwner: requested.account,
+      Metadata: {
+        'mukuroji-kind':
+          'workspace-search-planning-source-artifact-segment',
+        'mukuroji-version': '1',
+        'mukuroji-content-sha256': contentDigest,
+        'mukuroji-byte-length':
+          artifactBytes.byteLength.toString(),
+        'mukuroji-segment-index': '0',
+        'mukuroji-segment-count': '1',
+      },
+      ServerSideEncryption: 'aws:kms',
+      SSEKMSKeyId: requested.journalKeyArn,
+      BucketKeyEnabled: true,
+    })
+    expect(transport.headSourceArtifactCommands[0]?.input).toEqual({
+      Bucket: requested.journalBucket,
+      Key: putCommand.input.Key,
+      ExpectedBucketOwner: requested.account,
+      ChecksumMode: 'ENABLED',
+      VersionId: 'source-artifact-version-1',
     })
     expect(transport.transactWriteSourceEvidenceCommands).toHaveLength(1)
     const transaction =
@@ -1516,10 +1767,25 @@ describe('Workspace Search migration AWS identity adapter', () => {
       maintenanceEvidenceReceiptDigest:
         authority.maintenanceEvidenceReceiptDigest,
     })
+    expect(Reflect.get(decodedPage, 'sourceArtifacts')).toEqual([{
+      objectKey: putCommand.input.Key,
+      versionId: 'source-artifact-version-1',
+      contentDigest,
+    }])
+    expect(writeTrace.indexOf('scan'))
+      .toBeLessThan(writeTrace.indexOf('artifact-put'))
+    expect(writeTrace.indexOf('artifact-put'))
+      .toBeLessThan(writeTrace.indexOf('artifact-head'))
+    expect(writeTrace.indexOf('artifact-head'))
+      .toBeLessThan(writeTrace.indexOf('transaction'))
     const clockIndex = writeTrace.indexOf('clock')
-    expect(clockIndex).toBeGreaterThan(0)
-    expect(writeTrace[clockIndex - 1]).toBe('state-incarnation')
-    expect(writeTrace[clockIndex + 1]).toBe('transaction')
+    expect(clockIndex).toBeGreaterThan(1)
+    expect(writeTrace.slice(clockIndex - 2, clockIndex + 2)).toEqual([
+      'source-incarnation',
+      'state-incarnation',
+      'clock',
+      'transaction',
+    ])
     port.close()
   })
 
@@ -1575,6 +1841,335 @@ describe('Workspace Search migration AWS identity adapter', () => {
         'Workspace Search source evidence stopped safely (CONFIGURATION_DRIFT).',
     })
     expect(transport.scanSourceCommands).toHaveLength(1)
+    expect(transport.transactWriteSourceEvidenceCommands).toHaveLength(0)
+    expect(clockReads).toBe(clockReadsBeforeCommit)
+    port.close()
+  })
+
+  test('rejects source replacement during planning artifact upload before commit time', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const clockAt = '2026-07-28T06:12:00.000Z'
+    let clockReads = 0
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => {
+        clockReads += 1
+        return new Date(clockAt)
+      },
+    )
+    const configuration = await port.measureConfiguration()
+    const authority = await createManagedPlanningAuthority(
+      port,
+      clockAt,
+      'artifact-source-replacement',
+    )
+    const clockReadsBeforeCommit = clockReads
+    const sourceTableName = requested.tables['project-directory']
+    const replacement = createReplacementDescribeTableOutput(
+      'project-directory',
+      sourceTableName,
+      requested,
+    )
+    const canary =
+      'REPLACED-SOURCE-AFTER-ARTIFACT-CANARY-DO-NOT-LEAK'
+    if (replacement.Table === undefined) {
+      throw new Error('Expected one replacement source table.')
+    }
+    replacement.Table.TableId = canary
+    transport.putSourceArtifactEffect = () => {
+      transport.describeTableOutputs.set(sourceTableName, replacement)
+    }
+
+    const failure = await captureWorkspaceSearchMigrationFailure(
+      port.commitNextSourceEvidencePage(
+        createPlanningSourceEvidenceRequest(
+          configuration,
+          structuredClone(authority),
+        ),
+      ),
+    )
+    expect(failure).toMatchObject({
+      code: 'SOURCE_DRIFT',
+      message:
+        'Workspace Search source evidence stopped safely (SOURCE_DRIFT).',
+    })
+    expect(failure.message).not.toContain(canary)
+    expect(transport.scanSourceCommands).toHaveLength(1)
+    expect(transport.putSourceArtifactCommands).toHaveLength(1)
+    expect(transport.headSourceArtifactCommands).toHaveLength(1)
+    expect(transport.transactWriteSourceEvidenceCommands).toHaveLength(0)
+    expect(clockReads).toBe(clockReadsBeforeCommit)
+    port.close()
+  })
+
+  test('classifies source deletion after planning artifact upload as source drift', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const clockAt = '2026-07-28T06:13:00.000Z'
+    let clockReads = 0
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => {
+        clockReads += 1
+        return new Date(clockAt)
+      },
+    )
+    const configuration = await port.measureConfiguration()
+    const authority = await createManagedPlanningAuthority(
+      port,
+      clockAt,
+      'artifact-source-deletion',
+    )
+    const clockReadsBeforeCommit = clockReads
+    const sourceTableName = requested.tables['project-directory']
+    const canary =
+      'DELETED-SOURCE-AFTER-ARTIFACT-CANARY-DO-NOT-LEAK'
+    transport.putSourceArtifactEffect = () => {
+      transport.describeTableFailures.set(
+        sourceTableName,
+        new ResourceNotFoundException({
+          $metadata: {},
+          message: canary,
+        }),
+      )
+    }
+
+    const failure = await captureWorkspaceSearchMigrationFailure(
+      port.commitNextSourceEvidencePage(
+        createPlanningSourceEvidenceRequest(
+          configuration,
+          structuredClone(authority),
+        ),
+      ),
+    )
+
+    expect(failure).toMatchObject({
+      code: 'SOURCE_DRIFT',
+      message:
+        'Workspace Search source evidence stopped safely (SOURCE_DRIFT).',
+    })
+    expect(failure.message).not.toContain(canary)
+    expect(transport.scanSourceCommands).toHaveLength(1)
+    expect(transport.putSourceArtifactCommands).toHaveLength(1)
+    expect(transport.headSourceArtifactCommands).toHaveLength(1)
+    expect(transport.transactWriteSourceEvidenceCommands).toHaveLength(0)
+    expect(clockReads).toBe(clockReadsBeforeCommit)
+    port.close()
+  })
+
+  test('classifies state replacement after planning artifact upload as configuration drift', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const clockAt = '2026-07-28T06:13:20.000Z'
+    let clockReads = 0
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => {
+        clockReads += 1
+        return new Date(clockAt)
+      },
+    )
+    const configuration = await port.measureConfiguration()
+    const authority = await createManagedPlanningAuthority(
+      port,
+      clockAt,
+      'artifact-state-replacement',
+    )
+    const clockReadsBeforeCommit = clockReads
+    const stateTableName = requested.tables['migration-state']
+    const replacement = createReplacementDescribeTableOutput(
+      'migration-state',
+      stateTableName,
+      requested,
+    )
+    const canary =
+      'REPLACED-STATE-AFTER-ARTIFACT-CANARY-DO-NOT-LEAK'
+    if (replacement.Table === undefined) {
+      throw new Error('Expected one replacement state table.')
+    }
+    replacement.Table.TableId = canary
+    transport.putSourceArtifactEffect = () => {
+      transport.describeTableOutputs.set(stateTableName, replacement)
+    }
+
+    const failure = await captureWorkspaceSearchMigrationFailure(
+      port.commitNextSourceEvidencePage(
+        createPlanningSourceEvidenceRequest(
+          configuration,
+          structuredClone(authority),
+        ),
+      ),
+    )
+
+    expect(failure).toMatchObject({
+      code: 'CONFIGURATION_DRIFT',
+      message:
+        'Workspace Search source evidence stopped safely (CONFIGURATION_DRIFT).',
+    })
+    expect(failure.message).not.toContain(canary)
+    expect(transport.scanSourceCommands).toHaveLength(1)
+    expect(transport.putSourceArtifactCommands).toHaveLength(1)
+    expect(transport.headSourceArtifactCommands).toHaveLength(1)
+    expect(transport.transactWriteSourceEvidenceCommands).toHaveLength(0)
+    expect(clockReads).toBe(clockReadsBeforeCommit)
+    port.close()
+  })
+
+  test('classifies state deletion after planning artifact upload as configuration drift', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const clockAt = '2026-07-28T06:13:40.000Z'
+    let clockReads = 0
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => {
+        clockReads += 1
+        return new Date(clockAt)
+      },
+    )
+    const configuration = await port.measureConfiguration()
+    const authority = await createManagedPlanningAuthority(
+      port,
+      clockAt,
+      'artifact-state-deletion',
+    )
+    const clockReadsBeforeCommit = clockReads
+    const stateTableName = requested.tables['migration-state']
+    const canary =
+      'DELETED-STATE-AFTER-ARTIFACT-CANARY-DO-NOT-LEAK'
+    transport.putSourceArtifactEffect = () => {
+      transport.describeTableFailures.set(
+        stateTableName,
+        new ResourceNotFoundException({
+          $metadata: {},
+          message: canary,
+        }),
+      )
+    }
+
+    const failure = await captureWorkspaceSearchMigrationFailure(
+      port.commitNextSourceEvidencePage(
+        createPlanningSourceEvidenceRequest(
+          configuration,
+          structuredClone(authority),
+        ),
+      ),
+    )
+
+    expect(failure).toMatchObject({
+      code: 'CONFIGURATION_DRIFT',
+      message:
+        'Workspace Search source evidence stopped safely (CONFIGURATION_DRIFT).',
+    })
+    expect(failure.message).not.toContain(canary)
+    expect(transport.scanSourceCommands).toHaveLength(1)
+    expect(transport.putSourceArtifactCommands).toHaveLength(1)
+    expect(transport.headSourceArtifactCommands).toHaveLength(1)
+    expect(transport.transactWriteSourceEvidenceCommands).toHaveLength(0)
+    expect(clockReads).toBe(clockReadsBeforeCommit)
+    port.close()
+  })
+
+  test('rejects session close during planning artifact upload', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const clockAt = '2026-07-28T06:14:00.000Z'
+    let clockReads = 0
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => {
+        clockReads += 1
+        return new Date(clockAt)
+      },
+    )
+    const configuration = await port.measureConfiguration()
+    const authority = await createManagedPlanningAuthority(
+      port,
+      clockAt,
+      'artifact-session-close',
+    )
+    const clockReadsBeforeCommit = clockReads
+    transport.putSourceArtifactEffect = () => {
+      port.close()
+    }
+
+    await expect(
+      port.commitNextSourceEvidencePage(
+        createPlanningSourceEvidenceRequest(
+          configuration,
+          structuredClone(authority),
+        ),
+      ),
+    ).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search source evidence stopped safely (INVALID_STATE).',
+    })
+    expect(transport.scanSourceCommands).toHaveLength(1)
+    expect(transport.putSourceArtifactCommands).toHaveLength(1)
+    expect(transport.headSourceArtifactCommands).toHaveLength(0)
+    expect(transport.transactWriteSourceEvidenceCommands).toHaveLength(0)
+    expect(clockReads).toBe(clockReadsBeforeCommit)
+    expect(transport.closeCount).toBe(1)
+  })
+
+  test('rejects replacement measurement during planning artifact upload', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const clockAt = '2026-07-28T06:16:00.000Z'
+    let clockReads = 0
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => {
+        clockReads += 1
+        return new Date(clockAt)
+      },
+    )
+    const configuration = await port.measureConfiguration()
+    const authority = await createManagedPlanningAuthority(
+      port,
+      clockAt,
+      'artifact-remeasurement',
+    )
+    const clockReadsBeforeCommit = clockReads
+    let replacementMeasurement:
+      Promise<WorkspaceSearchMigrationConfiguration> | undefined
+    transport.putSourceArtifactEffect = () => {
+      replacementMeasurement = port.measureConfiguration()
+    }
+
+    await expect(
+      port.commitNextSourceEvidencePage(
+        createPlanningSourceEvidenceRequest(
+          configuration,
+          structuredClone(authority),
+        ),
+      ),
+    ).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search source evidence stopped safely (INVALID_STATE).',
+    })
+    if (replacementMeasurement === undefined) {
+      throw new Error('Expected replacement measurement to start.')
+    }
+    await expect(replacementMeasurement).resolves.toBeDefined()
+    expect(transport.scanSourceCommands).toHaveLength(1)
+    expect(transport.putSourceArtifactCommands).toHaveLength(1)
+    expect(transport.headSourceArtifactCommands).toHaveLength(0)
     expect(transport.transactWriteSourceEvidenceCommands).toHaveLength(0)
     expect(clockReads).toBe(clockReadsBeforeCommit)
     port.close()
@@ -2469,6 +3064,154 @@ describe('Workspace Search migration AWS identity adapter', () => {
     } finally {
       Reflect.set(globalThis, 'setTimeout', originalSetTimeout)
       Reflect.set(dynamodbClient, 'send', send)
+      port.close()
+    }
+  })
+
+  test('bounds concrete source-artifact S3 requests and normalizes only local aborts', async () => {
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      createRequestedResources(),
+    )
+    const transport = readOwnObject(port, 'transport')
+    const s3Client = readOwnObject(transport, 's3Client')
+    const send: unknown = Reflect.get(s3Client, 'send')
+    const originalSetTimeout: unknown = Reflect.get(
+      globalThis,
+      'setTimeout',
+    )
+    if (
+      typeof send !== 'function' ||
+      typeof originalSetTimeout !== 'function'
+    ) {
+      throw new Error('Expected concrete source-artifact transport functions.')
+    }
+    const requests = [
+      {
+        methodName: 'putSourceArtifact',
+        command: new PutObjectCommand({
+          Bucket: TEST_BUCKET,
+          Key: 'workspace-search/v1/source-artifacts/v1/put.json',
+          Body: new Uint8Array([1]),
+        }),
+      },
+      {
+        methodName: 'headSourceArtifact',
+        command: new HeadObjectCommand({
+          Bucket: TEST_BUCKET,
+          Key: 'workspace-search/v1/source-artifacts/v1/head.json',
+        }),
+      },
+      {
+        methodName: 'getSourceArtifact',
+        command: new GetObjectCommand({
+          Bucket: TEST_BUCKET,
+          Key: 'workspace-search/v1/source-artifacts/v1/get.json',
+          VersionId: 'exact-source-artifact-version',
+        }),
+      },
+    ]
+
+    try {
+      for (const request of requests) {
+        const operation: unknown = Reflect.get(
+          transport,
+          request.methodName,
+        )
+        if (typeof operation !== 'function') {
+          throw new Error(
+            `Expected concrete artifact operation: ${request.methodName}`,
+          )
+        }
+        const rawCanary =
+          `RAW-SOURCE-ARTIFACT-ABORT-${request.methodName}`
+        const rawAbort = new Error(rawCanary)
+        rawAbort.name = 'AbortError'
+        const observedDeadlines: number[] = []
+        Reflect.set(
+          s3Client,
+          'send',
+          (command: unknown, options: unknown): Promise<never> => {
+            expect(command).toBe(request.command)
+            const signal = readAbortSignal(options)
+            if (!signal.aborted) {
+              throw new Error('Expected the artifact deadline to abort first.')
+            }
+            return Promise.reject(rawAbort)
+          },
+        )
+        Reflect.set(
+          globalThis,
+          'setTimeout',
+          (callback: unknown, delay: unknown): number => {
+            if (
+              typeof callback !== 'function' ||
+              typeof delay !== 'number'
+            ) {
+              throw new Error('Expected one numeric artifact timeout.')
+            }
+            observedDeadlines.push(delay)
+            Reflect.apply(callback, undefined, [])
+            return 0
+          },
+        )
+
+        let normalized: unknown
+        try {
+          await Reflect.apply(operation, transport, [request.command])
+        } catch (error: unknown) {
+          normalized = error
+        }
+        expect(observedDeadlines).toEqual([10_000])
+        expect(normalized).toBeInstanceOf(Error)
+        if (!(normalized instanceof Error)) {
+          throw new Error('Expected normalized artifact timeout error.')
+        }
+        expect(normalized).toMatchObject({
+          name: 'TimeoutError',
+          code: 'ETIMEDOUT',
+        })
+        expect(normalized.message).not.toContain(rawCanary)
+
+        const preDeadlineAbort =
+          new Error(`PRE-DEADLINE-${request.methodName}`)
+        preDeadlineAbort.name = 'AbortError'
+        Reflect.set(
+          s3Client,
+          'send',
+          (command: unknown, options: unknown): Promise<never> => {
+            expect(command).toBe(request.command)
+            const signal = readAbortSignal(options)
+            if (signal.aborted) {
+              throw new Error(
+                'Expected an active artifact pre-deadline signal.',
+              )
+            }
+            return Promise.reject(preDeadlineAbort)
+          },
+        )
+        Reflect.set(
+          globalThis,
+          'setTimeout',
+          (_callback: unknown, delay: unknown): number => {
+            if (typeof delay !== 'number') {
+              throw new Error('Expected one numeric artifact delay.')
+            }
+            observedDeadlines.push(delay)
+            return 0
+          },
+        )
+        let preserved: unknown
+        try {
+          await Reflect.apply(operation, transport, [request.command])
+        } catch (error: unknown) {
+          preserved = error
+        }
+        expect(observedDeadlines).toEqual([10_000, 10_000])
+        expect(preserved).toBe(preDeadlineAbort)
+      }
+    } finally {
+      Reflect.set(globalThis, 'setTimeout', originalSetTimeout)
+      Reflect.set(s3Client, 'send', send)
       port.close()
     }
   })
@@ -3826,6 +4569,52 @@ function createPlanningSourceEvidenceRequest(
     source: 'project-directory',
     authority,
   }
+}
+
+/**
+ * Captures one expected fixed-message migration failure.
+ *
+ * @param operation - Managed operation expected to stop safely.
+ * @returns Exact public migration failure.
+ */
+async function captureWorkspaceSearchMigrationFailure(
+  operation: Promise<unknown>,
+): Promise<WorkspaceSearchMigrationFailure> {
+  try {
+    await operation
+  } catch (error: unknown) {
+    if (error instanceof WorkspaceSearchMigrationFailure) return error
+    throw error
+  }
+  throw new Error('Expected a Workspace Search migration failure.')
+}
+
+/**
+ * Acquires one lease and installs fresh maintenance evidence for planning.
+ *
+ * @param port - Measured managed identity session.
+ * @param clockAt - Trusted authority clock fixture.
+ * @param identifier - Unique lease identity suffix.
+ * @returns Current durable planning authority.
+ */
+async function createManagedPlanningAuthority(
+  port: WorkspaceSearchMigrationManagedAwsSession,
+  clockAt: string,
+  identifier: string,
+): Promise<WorkspaceSearchMigrationPrePlanAuthority> {
+  const lease = await port.acquireLease({
+    runId: `${identifier}-run`,
+    ownerId: `${identifier}-owner`,
+  })
+  return port.renewMaintenanceEvidence({
+    lease: {
+      runId: lease.runId,
+      ownerId: lease.ownerId,
+      fenceToken: lease.fenceToken,
+    },
+    expectedPointer: null,
+    evidenceBytes: createManagedMaintenanceEvidenceBytes(clockAt),
+  })
 }
 
 /**

@@ -1521,12 +1521,14 @@ function isWorkspaceSearchMigrationFailureCode(
     value === 'INVALID_ARGUMENT' ||
     value === 'INVALID_JOURNAL' ||
     value === 'INVALID_MAINTENANCE_EVIDENCE' ||
+    value === 'INVALID_SOURCE_ARTIFACT' ||
     value === 'INVALID_STATE' ||
     value === 'JOURNAL_WRITE_FAILED' ||
     value === 'LEASE_CONFLICT' ||
     value === 'LEASE_LOST' ||
     value === 'PITR_NOT_READY' ||
     value === 'ROLLBACK_TARGET_DRIFT' ||
+    value === 'SOURCE_ARTIFACT_WRITE_FAILED' ||
     value === 'SOURCE_DRIFT' ||
     value === 'TABLE_SCHEMA_MISMATCH' ||
     value === 'TARGET_DRIFT' ||
