@@ -6,6 +6,7 @@ import {
   DescribeTimeToLiveCommand,
   type DescribeTimeToLiveCommandOutput,
   DynamoDBClient,
+  ResourceNotFoundException,
   ScanCommand,
   type ScanCommandOutput,
 } from '@aws-sdk/client-dynamodb'
@@ -27,6 +28,10 @@ import {
 } from '@aws-sdk/client-s3'
 import type { fromIni } from '@aws-sdk/credential-provider-ini'
 import {
+  isThrottlingError,
+  isTransientError,
+} from '@smithy/core/retry'
+import {
   AssumeRoleCommand,
   type Credentials,
   GetCallerIdentityCommand,
@@ -36,6 +41,7 @@ import {
 import {
   createWorkspaceSearchConfigurationHash,
   type DynamoAttributeMap,
+  type MigrationTableIdentity,
   type WorkspaceSearchMigrationFailureCode,
   type WorkspaceSearchMigrationConfiguration,
   WorkspaceSearchMigrationFailure,
@@ -165,7 +171,18 @@ type SourceScanAwsFailureCode =
   | 'IDENTITY_MISMATCH'
   | 'INVALID_ARGUMENT'
   | 'INVALID_STATE'
+  | 'SOURCE_DRIFT'
   | 'TABLE_SCHEMA_MISMATCH'
+  | 'TRANSIENT_INFRASTRUCTURE_FAILURE'
+
+/**
+ * Secret-free structural AWS error supplied only to Smithy's classifiers.
+ */
+type SourceScanAwsErrorClassificationInput =
+  Parameters<typeof isTransientError>[0] & {
+    /** Optional Node.js network or timeout error code. */
+    readonly code?: string
+  }
 
 /**
  * Privately branded source Scan failure that response data cannot forge.
@@ -660,14 +677,41 @@ class AwsWorkspaceSearchMigrationIdentityPort
         commandCursor = commandCursorResult.key
       }
 
-      const output = await this.transport.scanSource(new ScanCommand({
-        TableName: this.requested.tables[context.source],
-        ConsistentRead: true,
-        Limit: WORKSPACE_SEARCH_MIGRATION_PAGE_SIZE,
-        ...(commandCursor === undefined
-          ? {}
-          : { ExclusiveStartKey: commandCursor }),
-      }))
+      await this.requireCurrentSourceTableIncarnation(
+        context.table,
+        scanGeneration,
+        authorizedConfigurationHash,
+      )
+      this.requireSourceScanGeneration(
+        scanGeneration,
+        authorizedConfigurationHash,
+      )
+      let output: ScanCommandOutput
+      try {
+        output = await this.transport.scanSource(new ScanCommand({
+          TableName: this.requested.tables[context.source],
+          ConsistentRead: true,
+          Limit: WORKSPACE_SEARCH_MIGRATION_PAGE_SIZE,
+          ...(commandCursor === undefined
+            ? {}
+            : { ExclusiveStartKey: commandCursor }),
+        }))
+      } catch (error: unknown) {
+        this.requireSourceScanGeneration(
+          scanGeneration,
+          authorizedConfigurationHash,
+        )
+        throw error
+      }
+      this.requireSourceScanGeneration(
+        scanGeneration,
+        authorizedConfigurationHash,
+      )
+      await this.requireCurrentSourceTableIncarnation(
+        context.table,
+        scanGeneration,
+        authorizedConfigurationHash,
+      )
       this.requireSourceScanGeneration(
         scanGeneration,
         authorizedConfigurationHash,
@@ -727,6 +771,53 @@ class AwsWorkspaceSearchMigrationIdentityPort
     if (binding !== this.requestedResourcesBinding) {
       return failSourceScanAws('IDENTITY_MISMATCH')
     }
+  }
+
+  /**
+   * Revalidates one immutable source-table incarnation around source I/O.
+   *
+   * @param table - Measured source table identity authorized for the Scan.
+   * @param generation - Managed-session generation captured before the Scan.
+   * @param configurationHash - Measurement authority captured before the Scan.
+   */
+  private async requireCurrentSourceTableIncarnation(
+    table: MigrationTableIdentity,
+    generation: number,
+    configurationHash: string,
+  ): Promise<void> {
+    this.requireSourceScanGeneration(generation, configurationHash)
+    let output: DescribeTableCommandOutput
+    try {
+      output = await this.transport.describeTable(
+        new DescribeTableCommand({ TableName: table.tableName }),
+      )
+    } catch (error: unknown) {
+      this.requireSourceScanGeneration(generation, configurationHash)
+      throw error
+    }
+    this.requireSourceScanGeneration(generation, configurationHash)
+    const observed = output.Table
+    const creationTime = observed?.CreationDateTime
+    let creationTimeMilliseconds: number | undefined
+    try {
+      creationTimeMilliseconds = creationTime instanceof Date
+        ? Date.prototype.getTime.call(creationTime)
+        : undefined
+    } catch {
+      return failSourceScanAws('SOURCE_DRIFT')
+    }
+    if (
+      observed?.TableStatus !== 'ACTIVE' ||
+      observed.TableName !== table.tableName ||
+      observed.TableArn !== table.tableArn ||
+      observed.TableId !== table.tableId ||
+      !Number.isFinite(creationTimeMilliseconds) ||
+      new Date(creationTimeMilliseconds ?? Number.NaN).toISOString() !==
+        table.creationTime
+    ) {
+      return failSourceScanAws('SOURCE_DRIFT')
+    }
+    this.requireSourceScanGeneration(generation, configurationHash)
   }
 
   /**
@@ -1631,12 +1722,106 @@ function readSourceScanAwsFailureCode(
   error: unknown,
 ): WorkspaceSearchMigrationFailureCode {
   try {
-    return error instanceof SourceScanAwsFailure
-      ? error.code
-      : 'INVALID_STATE'
+    if (error instanceof SourceScanAwsFailure) return error.code
+    if (error instanceof ResourceNotFoundException) return 'SOURCE_DRIFT'
+    if (!(error instanceof Error)) return 'INVALID_STATE'
+    const classificationInput =
+      createSourceScanAwsErrorClassificationInput(error)
+    if (
+      isThrottlingError(classificationInput) ||
+      isTransientError(classificationInput)
+    ) {
+      return 'TRANSIENT_INFRASTRUCTURE_FAILURE'
+    }
+    return 'INVALID_STATE'
   } catch {
     return 'INVALID_STATE'
   }
+}
+
+/**
+ * Copies only fields required by Smithy's retry classifiers.
+ *
+ * @param error - Raw SDK or Node.js transport error.
+ * @param depth - Bounded wrapped-cause depth copied so far.
+ * @returns Detached secret-free classifier input.
+ */
+function createSourceScanAwsErrorClassificationInput(
+  error: Error,
+  depth = 0,
+): SourceScanAwsErrorClassificationInput {
+  const nameValue: unknown = Reflect.get(error, 'name')
+  const codeValue: unknown = Reflect.get(error, 'code')
+  const metadataValue: unknown = Reflect.get(error, '$metadata')
+  const retryableValue: unknown = Reflect.get(error, '$retryable')
+  const causeValue: unknown =
+    depth <= 10 ? Reflect.get(error, 'cause') : undefined
+  const httpStatusCode = readOptionalNumericProperty(
+    metadataValue,
+    'httpStatusCode',
+  )
+  const throttling = readOptionalBooleanProperty(
+    retryableValue,
+    'throttling',
+  )
+  const hasRetryableTrait =
+    typeof retryableValue === 'object' && retryableValue !== null
+  return {
+    name: typeof nameValue === 'string' ? nameValue : '',
+    message: '',
+    ...(typeof codeValue === 'string' ? { code: codeValue } : {}),
+    ...(httpStatusCode === undefined
+      ? {}
+      : { $metadata: { httpStatusCode } }),
+    ...(hasRetryableTrait
+      ? {
+          $retryable:
+            throttling === undefined ? {} : { throttling },
+        }
+      : {}),
+    ...(causeValue instanceof Error
+      ? {
+          cause: createSourceScanAwsErrorClassificationInput(
+            causeValue,
+            depth + 1,
+          ),
+        }
+      : {}),
+  }
+}
+
+/**
+ * Reads one optional numeric classifier property without trusting its shape.
+ *
+ * @param value - Candidate object containing the property.
+ * @param property - Exact property name to read.
+ * @returns Finite number or undefined.
+ */
+function readOptionalNumericProperty(
+  value: unknown,
+  property: string,
+): number | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const propertyValue: unknown = Reflect.get(value, property)
+  return typeof propertyValue === 'number' && Number.isFinite(propertyValue)
+    ? propertyValue
+    : undefined
+}
+
+/**
+ * Reads one optional boolean classifier property without trusting its shape.
+ *
+ * @param value - Candidate object containing the property.
+ * @param property - Exact property name to read.
+ * @returns Boolean or undefined.
+ */
+function readOptionalBooleanProperty(
+  value: unknown,
+  property: string,
+): boolean | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const propertyValue: unknown = Reflect.get(value, property)
+  return typeof propertyValue === 'boolean' ? propertyValue : undefined
 }
 
 /**

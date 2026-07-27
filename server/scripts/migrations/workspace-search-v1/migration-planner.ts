@@ -1530,6 +1530,7 @@ function isWorkspaceSearchMigrationFailureCode(
     value === 'SOURCE_DRIFT' ||
     value === 'TABLE_SCHEMA_MISMATCH' ||
     value === 'TARGET_DRIFT' ||
+    value === 'TRANSIENT_INFRASTRUCTURE_FAILURE' ||
     value === 'VERIFY_FAILED'
 }
 

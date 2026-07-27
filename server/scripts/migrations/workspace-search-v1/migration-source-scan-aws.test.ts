@@ -26,7 +26,7 @@ describe('Workspace Search migration AWS source Scan output', () => {
       numberSet: { NS: ['2', '1'] },
       stringSet: { SS: ['z', 'a'] },
     }
-    const cursor = createCursor('next')
+    const cursor = createCursor('1')
     const output: ScanCommandOutput = {
       $metadata: { requestId: 'not-evidence' },
       Count: 1,
@@ -66,7 +66,7 @@ describe('Workspace Search migration AWS source Scan output', () => {
           numberSet: { NS: ['1', '2'] },
           stringSet: { SS: ['a', 'z'] },
         }],
-        lastEvaluatedKey: createCursor('next'),
+        lastEvaluatedKey: createCursor('1'),
       },
     })
   })
@@ -193,6 +193,37 @@ describe('Workspace Search migration AWS source Scan output', () => {
     ).toEqual({
       ok: false,
       code: 'TABLE_SCHEMA_MISMATCH',
+    })
+
+    expect(
+      normalizeWorkspaceSearchMigrationSourceScanOutput(
+        {
+          $metadata: {},
+          Count: 0,
+          Items: [],
+          LastEvaluatedKey: createCursor('empty-page'),
+          ScannedCount: 0,
+        },
+        table,
+      ),
+    ).toEqual({
+      ok: false,
+      code: 'INVALID_STATE',
+    })
+    expect(
+      normalizeWorkspaceSearchMigrationSourceScanOutput(
+        {
+          $metadata: {},
+          Count: 1,
+          Items: [createItem('last-returned')],
+          LastEvaluatedKey: createCursor('skipped-ahead'),
+          ScannedCount: 1,
+        },
+        table,
+      ),
+    ).toEqual({
+      ok: false,
+      code: 'INVALID_STATE',
     })
   })
 

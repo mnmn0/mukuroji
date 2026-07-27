@@ -5,6 +5,7 @@ import {
 import {
   decodeAttributeMap,
   encodeUnknownAttributeMap,
+  serializeCanonicalAttributeMap,
 } from './dynamodb-attribute-codec'
 import {
   type DynamoAttributeMap,
@@ -16,6 +17,7 @@ import type {
 } from './migration-source-scan-page'
 import {
   cloneWorkspaceSearchMigrationExactTableKey,
+  cloneWorkspaceSearchMigrationExactTableKeyFromItem,
   type WorkspaceSearchMigrationSourceScanContextInput,
 } from './migration-source-scan-context'
 import { hasCanonicalDenseArrayShape } from './migration-value-guards'
@@ -154,15 +156,29 @@ function normalizeSourceScanOutputUnchecked(
     lastEvaluatedKey,
     table,
   )
-  return cursorResult.ok
-    ? {
-        ok: true,
-        page: {
-          items,
-          lastEvaluatedKey: cursorResult.key,
-        },
-      }
-    : sourceScanOutputFailure(cursorResult.code)
+  if (!cursorResult.ok) return sourceScanOutputFailure(cursorResult.code)
+  const lastItem = items[itemCount - 1]
+  if (lastItem === undefined) {
+    return sourceScanOutputFailure('INVALID_STATE')
+  }
+  const lastItemKeyResult =
+    cloneWorkspaceSearchMigrationExactTableKeyFromItem(lastItem, table)
+  if (!lastItemKeyResult.ok) {
+    return sourceScanOutputFailure(lastItemKeyResult.code)
+  }
+  if (
+    serializeCanonicalAttributeMap(cursorResult.key) !==
+      serializeCanonicalAttributeMap(lastItemKeyResult.key)
+  ) {
+    return sourceScanOutputFailure('INVALID_STATE')
+  }
+  return {
+    ok: true,
+    page: {
+      items,
+      lastEvaluatedKey: cursorResult.key,
+    },
+  }
 }
 
 /**

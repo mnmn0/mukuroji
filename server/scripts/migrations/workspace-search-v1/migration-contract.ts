@@ -769,6 +769,7 @@ export type WorkspaceSearchMigrationFailureCode =
   | 'SOURCE_DRIFT'
   | 'TABLE_SCHEMA_MISMATCH'
   | 'TARGET_DRIFT'
+  | 'TRANSIENT_INFRASTRUCTURE_FAILURE'
   | 'VERIFY_FAILED'
 
 /** Error with a stable operator-safe code and no embedded tenant or AWS payload. */

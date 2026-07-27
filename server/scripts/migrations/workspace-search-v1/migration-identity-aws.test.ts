@@ -12,6 +12,7 @@ import {
   type DescribeTimeToLiveCommandOutput,
   type GlobalSecondaryIndexDescription,
   type KeySchemaElement,
+  ResourceNotFoundException,
   ScanCommand,
   type ScanCommandOutput,
   type TableDescription,
@@ -227,6 +228,9 @@ class RecordingIdentityAwsTransport
   /** Optional pending Scan response used by lifecycle race tests. */
   scanSourceDeferred: Promise<ScanCommandOutput> | undefined
 
+  /** Optional synchronous effect triggered immediately after recording a Scan. */
+  scanSourceEffect: (() => void) | undefined
+
   /**
    * Records transport closure.
    */
@@ -295,6 +299,7 @@ class RecordingIdentityAwsTransport
    */
   async scanSource(command: ScanCommand): Promise<ScanCommandOutput> {
     this.scanSourceCommands.push(command)
+    this.scanSourceEffect?.()
     if (this.scanSourceFailure !== undefined) {
       throw this.scanSourceFailure
     }
@@ -521,7 +526,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
       createSourceScanInput(configuration),
     )
 
-    expect(transport.describeTableCommands).toHaveLength(6)
+    expect(transport.describeTableCommands).toHaveLength(8)
     expect(transport.scanSourceCommands).toHaveLength(1)
     expect(transport.scanSourceCommands[0]).toBeInstanceOf(ScanCommand)
     expect(transport.scanSourceCommands[0]?.input).toEqual({
@@ -620,6 +625,200 @@ describe('Workspace Search migration AWS identity adapter', () => {
     port.close()
   })
 
+  test('classifies retryable source Scan failures without raw details', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const canary = 'RETRYABLE-SCAN-CANARY-DO-NOT-LEAK'
+    const retryableFailures = [
+      { name: 'TimeoutError' },
+      { name: 'ThrottlingException' },
+      { name: 'InternalServerError', status: 500 },
+      { causeCode: 'ETIMEDOUT', name: 'Error' },
+      { name: 'ReplicatedWriteConflictException', retryable: true },
+    ] as const
+
+    for (const retryableFailure of retryableFailures) {
+      const error = new Error(canary)
+      error.name = retryableFailure.name
+      if ('status' in retryableFailure) {
+        Reflect.set(error, '$metadata', {
+          httpStatusCode: retryableFailure.status,
+        })
+      }
+      if ('causeCode' in retryableFailure) {
+        const cause = new Error(canary)
+        Reflect.set(cause, 'code', retryableFailure.causeCode)
+        Reflect.set(error, 'cause', cause)
+      }
+      if ('retryable' in retryableFailure) {
+        Reflect.set(error, '$retryable', {})
+      }
+      transport.scanSourceFailure = error
+      let failure: unknown
+      try {
+        await port.scanSourcePage(createSourceScanInput(configuration))
+      } catch (caught: unknown) {
+        failure = caught
+      }
+      expect(failure).toBeInstanceOf(WorkspaceSearchMigrationFailure)
+      if (!(failure instanceof WorkspaceSearchMigrationFailure)) {
+        throw new Error('Expected a Workspace Search migration failure.')
+      }
+      expect(failure).toMatchObject({
+        code: 'TRANSIENT_INFRASTRUCTURE_FAILURE',
+        message:
+          'Workspace Search source Scan read stopped safely (TRANSIENT_INFRASTRUCTURE_FAILURE).',
+      })
+      expect(failure.message).not.toContain(canary)
+    }
+
+    transport.scanSourceFailure = undefined
+    const recovered = await port.scanSourcePage(
+      createSourceScanInput(configuration),
+    )
+    expect(recovered.checkpoint).toMatchObject({
+      completed: true,
+      aggregate: {
+        pageCount: 1,
+        scanned: 0,
+      },
+    })
+    expect(transport.scanSourceCommands).toHaveLength(6)
+    port.close()
+  })
+
+  test('rejects source table replacement before and during a Scan', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const source = 'project-directory'
+    const tableName = requested.tables[source]
+    const currentTable = createValidDescribeTableOutput(
+      source,
+      tableName,
+      requested,
+    )
+    const replacementTable = createReplacementDescribeTableOutput(
+      source,
+      tableName,
+      requested,
+    )
+
+    transport.describeTableOutputs.set(tableName, replacementTable)
+    await expect(
+      port.scanSourcePage(createSourceScanInput(configuration)),
+    ).rejects.toMatchObject({
+      code: 'SOURCE_DRIFT',
+      message:
+        'Workspace Search source Scan read stopped safely (SOURCE_DRIFT).',
+    })
+    expect(transport.scanSourceCommands).toHaveLength(0)
+
+    transport.describeTableOutputs.set(tableName, currentTable)
+    transport.scanSourceEffect = () => {
+      transport.describeTableOutputs.set(tableName, replacementTable)
+    }
+    await expect(
+      port.scanSourcePage(createSourceScanInput(configuration)),
+    ).rejects.toMatchObject({
+      code: 'SOURCE_DRIFT',
+      message:
+        'Workspace Search source Scan read stopped safely (SOURCE_DRIFT).',
+    })
+    expect(transport.scanSourceCommands).toHaveLength(1)
+    expect(
+      transport.describeTableCommands
+        .slice(-3)
+        .map((command) => command.input),
+    ).toEqual([
+      { TableName: tableName },
+      { TableName: tableName },
+      { TableName: tableName },
+    ])
+    port.close()
+  })
+
+  test('classifies a deleted source table as source drift', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const canary = 'DELETED-SOURCE-CANARY-DO-NOT-LEAK'
+    transport.scanSourceFailure = new ResourceNotFoundException({
+      $metadata: {},
+      message: canary,
+    })
+
+    let failure: unknown
+    try {
+      await port.scanSourcePage(createSourceScanInput(configuration))
+    } catch (caught: unknown) {
+      failure = caught
+    }
+    expect(failure).toBeInstanceOf(WorkspaceSearchMigrationFailure)
+    if (!(failure instanceof WorkspaceSearchMigrationFailure)) {
+      throw new Error('Expected a Workspace Search migration failure.')
+    }
+    expect(failure).toMatchObject({
+      code: 'SOURCE_DRIFT',
+      message:
+        'Workspace Search source Scan read stopped safely (SOURCE_DRIFT).',
+    })
+    expect(failure.message).not.toContain(canary)
+    port.close()
+  })
+
+  test('rechecks generation after source incarnation inspection', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const tableName = requested.tables['project-directory']
+    const output = transport.describeTableOutputs.get(tableName)
+    const table = output?.Table
+    const tableId = table?.TableId
+    if (table === undefined || tableId === undefined) {
+      throw new Error('Expected a complete source table fixture.')
+    }
+    Object.defineProperty(table, 'TableId', {
+      configurable: true,
+      enumerable: true,
+      get() {
+        queueMicrotask(() => port.close())
+        return tableId
+      },
+    })
+
+    await expect(
+      port.scanSourcePage(createSourceScanInput(configuration)),
+    ).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search source Scan read stopped safely (INVALID_STATE).',
+    })
+    expect(transport.scanSourceCommands).toHaveLength(0)
+    expect(transport.closeCount).toBe(1)
+  })
+
   test('selects only the four measured source tables with fixed commands', async () => {
     const requested = createRequestedResources()
     const transport = new RecordingIdentityAwsTransport()
@@ -659,6 +858,16 @@ describe('Workspace Search migration AWS identity adapter', () => {
           command.input.TableName === requested.tables['migration-state'],
       ),
     ).toBe(false)
+    expect(
+      transport.describeTableCommands
+        .slice(6)
+        .map((command) => command.input),
+    ).toEqual(
+      sources.flatMap((source) => [
+        { TableName: requested.tables[source] },
+        { TableName: requested.tables[source] },
+      ]),
+    )
     port.close()
   })
 
@@ -690,7 +899,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
         createIgnoredSourceItem('replacement-1'),
         createIgnoredSourceItem('replacement-2'),
       ],
-      LastEvaluatedKey: createProjectDirectoryCursor('replacement'),
+      LastEvaluatedKey: createProjectDirectoryCursor('replacement-2'),
       ScannedCount: 2,
     }
     const replacement = await port.scanSourcePage(
@@ -705,6 +914,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
     transport.scanSourceDeferred = deferred.promise
 
     const pending = port.scanSourcePage(pendingInput)
+    await waitForRecordedScanCount(transport, 3)
     expect(transport.scanSourceCommands).toHaveLength(3)
     Reflect.set(
       pendingInput,
@@ -754,7 +964,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
     transport.scanSourceOutput = {
       $metadata: {},
       Count: 1,
-      Items: [createIgnoredSourceItem('first')],
+      Items: [createIgnoredSourceItem('repeated')],
       LastEvaluatedKey: repeatedCursor,
       ScannedCount: 1,
     }
@@ -771,6 +981,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
         first.checkpoint,
       ),
     )
+    await waitForRecordedScanCount(transport, 2)
     const commandCursor =
       transport.scanSourceCommands[1]?.input.ExclusiveStartKey
     if (commandCursor === undefined) {
@@ -779,10 +990,10 @@ describe('Workspace Search migration AWS identity adapter', () => {
     commandCursor.directoryId = { S: 'workspace-command-mutated' }
     deferred.resolve({
       $metadata: {},
-      Count: 0,
-      Items: [],
+      Count: 1,
+      Items: [createIgnoredSourceItem('repeated')],
       LastEvaluatedKey: repeatedCursor,
-      ScannedCount: 0,
+      ScannedCount: 1,
     })
 
     await expect(pending).rejects.toMatchObject({
@@ -841,6 +1052,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
     const pendingRead = port.scanSourcePage(
       createSourceScanInput(configuration),
     )
+    await waitForRecordedScanCount(transport, 1)
     expect(transport.scanSourceCommands).toHaveLength(1)
     port.close()
     deferred.resolve(createEmptyScanOutput())
@@ -870,6 +1082,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
     const pendingRead = port.scanSourcePage(
       createSourceScanInput(configuration),
     )
+    await waitForRecordedScanCount(transport, 1)
     expect(transport.scanSourceCommands).toHaveLength(1)
     const replacement = await port.measureConfiguration()
     expect(createWorkspaceSearchConfigurationHash(replacement))
@@ -2111,6 +2324,32 @@ function createValidDescribeTableOutput(
 }
 
 /**
+ * Creates an active same-name table response for a different incarnation.
+ *
+ * @param role - Logical migration table role.
+ * @param tableName - Exact physical table name.
+ * @param requested - Account, region, and KMS identity constraints.
+ * @returns Valid schema with a replacement table ID and creation time.
+ */
+function createReplacementDescribeTableOutput(
+  role: WorkspaceSearchMigrationTableRole,
+  tableName: string,
+  requested: WorkspaceSearchMigrationRequestedResources,
+): DescribeTableCommandOutput {
+  const output = createValidDescribeTableOutput(
+    role,
+    tableName,
+    requested,
+  )
+  if (output.Table === undefined) {
+    throw new Error('Expected a complete replacement table fixture.')
+  }
+  output.Table.TableId = `replacement-table-id-${role}-v2`
+  output.Table.CreationDateTime = new Date('2026-07-27T00:00:00.000Z')
+  return output
+}
+
+/**
  * Returns the exact schema and safety fixture for one measured table role.
  *
  * @param role - Logical migration table role.
@@ -2355,7 +2594,7 @@ function createProjectDirectoryCursor(
   identifier: string,
 ): DynamoAttributeMap {
   return {
-    directoryId: { S: `workspace-${identifier}` },
+    directoryId: { S: 'workspace-1' },
     entryKey: { S: `WORKSPACE_MEMBER#${identifier}` },
   }
 }
@@ -2393,6 +2632,26 @@ function createDeferredScanOutput(): DeferredScanOutput {
       resolvePromise(output)
     },
   }
+}
+
+/**
+ * Waits for one fake Scan to reach the transport without wall-clock timing.
+ *
+ * @param transport - Recording transport whose async preflight is in progress.
+ * @param expectedCount - Minimum number of recorded Scan commands.
+ * @returns Resolves after the expected command count is observed.
+ */
+async function waitForRecordedScanCount(
+  transport: RecordingIdentityAwsTransport,
+  expectedCount: number,
+): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (transport.scanSourceCommands.length >= expectedCount) return
+    await Promise.resolve()
+  }
+  throw new Error(
+    `Expected ${expectedCount} recorded source Scan commands.`,
+  )
 }
 
 /**

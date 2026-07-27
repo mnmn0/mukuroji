@@ -149,6 +149,49 @@ export function cloneWorkspaceSearchMigrationExactTableKey(
 }
 
 /**
+ * Extracts and clones the exact measured primary key from one full item.
+ *
+ * @param item - Candidate full low-level DynamoDB item.
+ * @param table - Measured source table identity.
+ * @returns Detached exact key or a fixed raw-value-free failure code.
+ */
+export function cloneWorkspaceSearchMigrationExactTableKeyFromItem(
+  item: DynamoAttributeMap,
+  table: MigrationTableIdentity,
+): WorkspaceSearchMigrationExactTableKeyResult {
+  try {
+    const key: DynamoAttributeMap = {}
+    for (const descriptor of table.key) {
+      const property = Object.getOwnPropertyDescriptor(item, descriptor.name)
+      const attribute: unknown =
+        property !== undefined &&
+        property.enumerable === true &&
+        Object.prototype.hasOwnProperty.call(property, 'value')
+          ? property.value
+          : undefined
+      if (attribute === undefined) {
+        return {
+          ok: false,
+          code: 'TABLE_SCHEMA_MISMATCH',
+        }
+      }
+      Object.defineProperty(key, descriptor.name, {
+        configurable: true,
+        enumerable: true,
+        value: attribute,
+        writable: true,
+      })
+    }
+    return cloneExactTableKeyUnchecked(key, table)
+  } catch {
+    return {
+      ok: false,
+      code: 'INVALID_STATE',
+    }
+  }
+}
+
+/**
  * Performs shared preflight after the public raw-error replacement boundary.
  *
  * @param input - Caller-owned source context.

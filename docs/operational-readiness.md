@@ -316,6 +316,9 @@ fresh maintenance evidence、sealed plan と排他 lease/fence/OCC、checkpoint�
 からも開始できる reverse rollback の永続 state-machine kernel があります。Source については、
 同じ measured identity/pinned credential/DynamoDB client を使う、strongly consistent、
 unfiltered/full-item/non-segmented な1 page Scan と exact digest/checkpoint reducer まで実装済みです。
+各 page は Scan の前後で table ID/ARN/作成時刻を再確認し、継続 cursor を返却された最終 item の
+full primary key に結合します。一時的な throttling/transport 障害は安全に再試行できる固定 code で
+停止し、table incarnation の変化や cursor の不整合は fail-closed で拒否します。
 ただし durable な複数 page evidence/checkpoint commit、target/state/evidence/S3 adapter、target join、
 実行 CLI、online writer fence と完全な source/target completeness 実行は未実装です。したがって
 production migration gate には使用せず、これらを実装して non-production で中断・再開・rollback

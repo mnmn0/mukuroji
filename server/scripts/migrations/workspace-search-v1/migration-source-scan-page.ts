@@ -27,6 +27,7 @@ import type {
 } from './migration-planner'
 import {
   cloneWorkspaceSearchMigrationExactTableKey,
+  cloneWorkspaceSearchMigrationExactTableKeyFromItem,
   prepareWorkspaceSearchMigrationSourceScanContext,
   type WorkspaceSearchMigrationSourceScanContextInput,
 } from './migration-source-scan-context'
@@ -170,6 +171,19 @@ function reduceWorkspaceSearchMigrationSourceScanPageUnchecked(
     )
     if (!keyResult.ok) return failSourceScanPage(keyResult.code)
     nextCursor = keyResult.key
+    const lastItem = pageItems[pageItems.length - 1]
+    if (lastItem === undefined) return failSourceScanPage('INVALID_STATE')
+    const lastItemKeyResult =
+      cloneWorkspaceSearchMigrationExactTableKeyFromItem(lastItem, table)
+    if (!lastItemKeyResult.ok) {
+      return failSourceScanPage(lastItemKeyResult.code)
+    }
+    if (
+      serializeCanonicalAttributeMap(nextCursor) !==
+        serializeCanonicalAttributeMap(lastItemKeyResult.key)
+    ) {
+      return failSourceScanPage('INVALID_STATE')
+    }
   }
   rejectRepeatedCursor(previousCheckpoint.cursor, nextCursor)
 
@@ -381,20 +395,8 @@ function extractTableKey(
   item: DynamoAttributeMap,
   table: MigrationTableIdentity,
 ): DynamoAttributeMap {
-  const key: DynamoAttributeMap = {}
-  for (const descriptor of table.key) {
-    const attribute = item[descriptor.name]
-    if (!attribute) {
-      return failSourceScanPage('TABLE_SCHEMA_MISMATCH')
-    }
-    Object.defineProperty(key, descriptor.name, {
-      configurable: true,
-      enumerable: true,
-      value: attribute,
-      writable: true,
-    })
-  }
-  const keyResult = cloneWorkspaceSearchMigrationExactTableKey(key, table)
+  const keyResult =
+    cloneWorkspaceSearchMigrationExactTableKeyFromItem(item, table)
   if (!keyResult.ok) return failSourceScanPage(keyResult.code)
   return keyResult.key
 }

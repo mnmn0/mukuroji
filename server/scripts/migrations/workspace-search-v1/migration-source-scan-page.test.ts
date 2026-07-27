@@ -127,34 +127,28 @@ describe('Workspace Search migration source scan page', () => {
     }])
   })
 
-  test('advances an empty page and completes only without a cursor', () => {
-    const first = reduceWorkspaceSearchMigrationSourceScanPage(
-      createInput([], createCursor('next')),
+  test('completes an empty terminal page and rejects an empty cursor page', () => {
+    const terminal = reduceWorkspaceSearchMigrationSourceScanPage(
+      createInput([]),
     )
-    expect(first.checkpoint).toMatchObject({
-      completed: false,
-      cursor: createCursor('next'),
+    expect(terminal.checkpoint).toMatchObject({
+      completed: true,
       aggregate: { scanned: 0, pageCount: 1 },
     })
-
-    const second = reduceWorkspaceSearchMigrationSourceScanPage(
-      createInput([], undefined, first.checkpoint),
+    expectFailure(
+      () =>
+        reduceWorkspaceSearchMigrationSourceScanPage(
+          createInput([], createCursor('next')),
+        ),
+      'INVALID_STATE',
     )
-    expect(second.checkpoint).toMatchObject({
-      completed: true,
-      aggregate: { scanned: 0, pageCount: 2 },
-    })
-    expect(second.checkpoint.aggregate.keyDigest)
-      .toBe(first.checkpoint.aggregate.keyDigest)
-    expect(second.checkpoint.aggregate.contentDigest)
-      .toBe(first.checkpoint.aggregate.contentDigest)
   })
 
   test('resumes digest state and remains independent of page and row order', () => {
     const firstItem = createTeamItem('first')
     const secondItem = createIgnoredItem('second')
     const firstPage = reduceWorkspaceSearchMigrationSourceScanPage(
-      createInput([firstItem], createCursor('next')),
+      createInput([firstItem], createItemCursor(firstItem)),
     )
     const resumed = reduceWorkspaceSearchMigrationSourceScanPage(
       createInput([secondItem], undefined, firstPage.checkpoint),
@@ -212,7 +206,8 @@ describe('Workspace Search migration source scan page', () => {
         },
       },
     }
-    const cursor = createCursor('next')
+    const cursor = createItemCursor(item)
+    const expectedCursor = structuredClone(cursor)
     const previous = createEmptyWorkspaceSearchMigrationCheckpoint()
     const result = reduceWorkspaceSearchMigrationSourceScanPage(
       createInput([item], cursor, previous),
@@ -227,7 +222,7 @@ describe('Workspace Search migration source scan page', () => {
 
     expect(result.sourceRows[0]).toEqual(evidence)
     expect(result.checkpoint.aggregate).toEqual(aggregate)
-    expect(result.checkpoint.cursor).toEqual(createCursor('next'))
+    expect(result.checkpoint.cursor).toEqual(expectedCursor)
     expect(result.sourceRows[0]?.sourceItemDigest)
       .toBe(createAttributeMapDigest({
         ...item,
@@ -325,13 +320,31 @@ describe('Workspace Search migration source scan page', () => {
       'TABLE_SCHEMA_MISMATCH',
     )
 
+    const mismatchedItem = createIgnoredItem('last-returned')
+    expectFailure(
+      () =>
+        reduceWorkspaceSearchMigrationSourceScanPage(
+          createInput(
+            [mismatchedItem],
+            createCursor('skipped-ahead'),
+          ),
+        ),
+      'INVALID_STATE',
+    )
+
+    const repeatedItem = createIgnoredItem('repeated')
+    const repeatedCursor = createItemCursor(repeatedItem)
     const first = reduceWorkspaceSearchMigrationSourceScanPage(
-      createInput([], createCursor('repeated')),
+      createInput([repeatedItem], repeatedCursor),
     )
     expectFailure(
       () =>
         reduceWorkspaceSearchMigrationSourceScanPage(
-          createInput([], createCursor('repeated'), first.checkpoint),
+          createInput(
+            [repeatedItem],
+            repeatedCursor,
+            first.checkpoint,
+          ),
         ),
       'INVALID_STATE',
     )
@@ -452,7 +465,7 @@ describe('Workspace Search migration source scan page', () => {
         reduceWorkspaceSearchMigrationSourceScanPage(
           createInput(
             [createTeamItem('overflow')],
-            createCursor('after-maximum'),
+            createItemCursor(createTeamItem('overflow')),
             maximumCheckpoint,
           ),
         ),
@@ -626,6 +639,24 @@ function createCursor(identifier: string): DynamoAttributeMap {
     directoryId: { S: 'workspace-1' },
     entryKey: { S: `CURSOR#${identifier}` },
   }
+}
+
+/**
+ * Creates the exact Project Directory key for one complete fixture item.
+ *
+ * @param item - Project Directory source item with a composite string key.
+ * @returns Detached exact low-level table key.
+ */
+function createItemCursor(item: DynamoAttributeMap): DynamoAttributeMap {
+  const directoryId = item.directoryId
+  const entryKey = item.entryKey
+  if (directoryId === undefined || entryKey === undefined) {
+    throw new Error('Expected a complete Project Directory fixture key.')
+  }
+  return structuredClone({
+    directoryId,
+    entryKey,
+  })
 }
 
 /**
