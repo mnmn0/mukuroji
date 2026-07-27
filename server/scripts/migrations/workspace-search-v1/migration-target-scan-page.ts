@@ -141,7 +141,7 @@ function reduceWorkspaceSearchMigrationTargetScanPageUnchecked(
   const preflight =
     prepareWorkspaceSearchMigrationTargetScanContext(input)
   if (!preflight.ok) return failTargetScanPage(preflight.code)
-  const { previousCheckpoint, table } = preflight.context
+  const { configurationHash, previousCheckpoint, table } = preflight.context
   const pageItemsValue = input.page.items
   if (
     !hasCanonicalDenseArrayShape(pageItemsValue) ||
@@ -219,15 +219,20 @@ function reduceWorkspaceSearchMigrationTargetScanPageUnchecked(
       })
       continue
     }
-    ignoredDelta += 1
-    targetRows.push({
-      classification: 'ignored',
-      targetKeyDigest,
-      targetItemDigest,
-    })
+    if (classification.classification === 'ignored') {
+      ignoredDelta += 1
+      targetRows.push({
+        classification: 'ignored',
+        targetKeyDigest,
+        targetItemDigest,
+      })
+      continue
+    }
+    return failTargetScanPage('INVALID_STATE')
   }
 
   const checkpoint: WorkspaceSearchMigrationTargetScanCheckpoint = {
+    configurationHash,
     completed: nextCursor === undefined,
     ...(nextCursor === undefined ? {} : { cursor: nextCursor }),
     aggregate: {

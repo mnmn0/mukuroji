@@ -56,6 +56,8 @@ describe('Workspace Search migration target Scan page', () => {
       'pageCount',
       'scanned',
     ])
+    expect(result.checkpoint.configurationHash)
+      .toBe(createWorkspaceSearchConfigurationHash(createConfiguration()))
     expect(result.targetRows.map(({ classification }) => classification))
       .toEqual(['owned', 'ignored'])
     expect(result.invalidRows).toHaveLength(1)
@@ -193,7 +195,9 @@ describe('Workspace Search migration target Scan page', () => {
     const item = createIgnoredItem('detached')
     const cursor = createItemCursor(item)
     const previous =
-      createEmptyWorkspaceSearchMigrationTargetScanCheckpoint()
+      createEmptyWorkspaceSearchMigrationTargetScanCheckpoint(
+        createWorkspaceSearchConfigurationHash(createConfiguration()),
+      )
     const result = reduceWorkspaceSearchMigrationTargetScanPage(
       createInput([item], cursor, previous),
     )
@@ -259,6 +263,35 @@ describe('Workspace Search migration target Scan page', () => {
       () => reduceWorkspaceSearchMigrationTargetScanPage(wrongCursor),
       'INVALID_STATE',
     )
+
+    const firstItem = createIgnoredItem('old-incarnation')
+    const first = reduceWorkspaceSearchMigrationTargetScanPage(
+      createInput([firstItem], createItemCursor(firstItem)),
+    ).checkpoint
+    const currentConfiguration = createConfiguration()
+    const replacementConfiguration: WorkspaceSearchMigrationConfiguration = {
+      ...currentConfiguration,
+      tables: {
+        ...currentConfiguration.tables,
+        'workspace-search': {
+          ...currentConfiguration.tables['workspace-search'],
+          tableId: 'replacement-workspace-search-table-id',
+        },
+      },
+    }
+    const replacementInput = createInput([], undefined, first)
+    expectFailure(
+      () =>
+        reduceWorkspaceSearchMigrationTargetScanPage({
+          ...replacementInput,
+          configuration: replacementConfiguration,
+          configurationHash:
+            createWorkspaceSearchConfigurationHash(
+              replacementConfiguration,
+            ),
+        }),
+      'CONFIGURATION_HASH_MISMATCH',
+    )
   })
 
   test('rejects digest-state substitution without another observed row', () => {
@@ -269,6 +302,7 @@ describe('Workspace Search migration target Scan page', () => {
     const substitutedKeyAccumulator = new MigrationDigestAccumulator()
     substitutedKeyAccumulator.add('a'.repeat(64))
     const successor: WorkspaceSearchMigrationTargetScanCheckpoint = {
+      configurationHash: first.configurationHash,
       completed: true,
       aggregate: {
         ...first.aggregate,
@@ -301,15 +335,19 @@ describe('Workspace Search migration target Scan page', () => {
 function createInput(
   items: readonly DynamoAttributeMap[],
   lastEvaluatedKey?: DynamoAttributeMap,
-  previousCheckpoint: WorkspaceSearchMigrationTargetScanCheckpoint =
-    createEmptyWorkspaceSearchMigrationTargetScanCheckpoint(),
+  previousCheckpoint?: WorkspaceSearchMigrationTargetScanCheckpoint,
 ): ReduceWorkspaceSearchMigrationTargetScanPageInput {
   const configuration = createConfiguration()
+  const configurationHash =
+    createWorkspaceSearchConfigurationHash(configuration)
   return {
     configuration,
-    configurationHash:
-      createWorkspaceSearchConfigurationHash(configuration),
-    previousCheckpoint,
+    configurationHash,
+    previousCheckpoint:
+      previousCheckpoint ??
+        createEmptyWorkspaceSearchMigrationTargetScanCheckpoint(
+          configurationHash,
+        ),
     page: {
       items,
       ...(lastEvaluatedKey === undefined

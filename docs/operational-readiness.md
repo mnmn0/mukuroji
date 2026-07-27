@@ -403,7 +403,8 @@ orphan として費用/件数を観測します。後続実行が `List` や lat
 
 Lossless artifact の measured S3 adapter と planning v3 evidence/verification contract に加え、
 target table を同じ measured AWS session から強整合・無加工・100件上限で読み、Scan 前後の
-table incarnation と cursor を検証する read-only page primitive までは存在します。ただし、
+table incarnation と cursor を検証し、checkpoint を measured configuration hash に結合する
+read-only page primitive までは存在します。ただし、
 target raw artifact と durable evidence/checkpoint、complete target join、実行 CLI、heartbeat
 supervisor、online writer fence、migration 専用 observability/alarm、restore/failover/DR drill、
 完全な source/target completeness 実行は未実装です。

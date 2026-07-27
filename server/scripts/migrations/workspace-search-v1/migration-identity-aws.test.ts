@@ -1635,6 +1635,54 @@ describe('Workspace Search migration AWS identity adapter', () => {
     port.close()
   })
 
+  test('rejects a target checkpoint from an earlier measured incarnation', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const firstItem = createIgnoredTargetItem('first-incarnation')
+    transport.scanTargetOutput = {
+      $metadata: {},
+      Count: 1,
+      Items: [firstItem],
+      LastEvaluatedKey: createTargetCursor('first-incarnation'),
+      ScannedCount: 1,
+    }
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const firstConfiguration = await port.measureConfiguration()
+    const first = await port.scanTargetPage(
+      createTargetScanInput(firstConfiguration),
+    )
+    const targetTableName = requested.tables['workspace-search']
+    transport.describeTableOutputs.set(
+      targetTableName,
+      createReplacementDescribeTableOutput(
+        'workspace-search',
+        targetTableName,
+        requested,
+      ),
+    )
+    const replacementConfiguration = await port.measureConfiguration()
+    transport.scanTargetOutput = createEmptyScanOutput()
+
+    await expect(
+      port.scanTargetPage(
+        createTargetScanInput(
+          replacementConfiguration,
+          first.checkpoint,
+        ),
+      ),
+    ).rejects.toMatchObject({
+      code: 'CONFIGURATION_HASH_MISMATCH',
+      message:
+        'Workspace Search target Scan read stopped safely (CONFIGURATION_HASH_MISMATCH).',
+    })
+    expect(transport.scanTargetCommands).toHaveLength(1)
+    port.close()
+  })
+
   test('rejects target replacement before and after the Scan', async () => {
     const requested = createRequestedResources()
     const transport = new RecordingIdentityAwsTransport()
@@ -4841,14 +4889,18 @@ function createSourceScanInput(
  */
 function createTargetScanInput(
   configuration: WorkspaceSearchMigrationConfiguration,
-  previousCheckpoint: WorkspaceSearchMigrationTargetScanCheckpoint =
-    createEmptyWorkspaceSearchMigrationTargetScanCheckpoint(),
+  previousCheckpoint?: WorkspaceSearchMigrationTargetScanCheckpoint,
 ): WorkspaceSearchMigrationTargetScanReadInput {
+  const configurationHash =
+    createWorkspaceSearchConfigurationHash(configuration)
   return {
     configuration,
-    configurationHash:
-      createWorkspaceSearchConfigurationHash(configuration),
-    previousCheckpoint,
+    configurationHash,
+    previousCheckpoint:
+      previousCheckpoint ??
+        createEmptyWorkspaceSearchMigrationTargetScanCheckpoint(
+          configurationHash,
+        ),
   }
 }
 

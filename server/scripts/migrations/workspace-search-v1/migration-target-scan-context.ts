@@ -47,6 +47,8 @@ export type WorkspaceSearchMigrationTargetScanAggregate = {
  * every preceding raw page must also be durably retained and revalidated.
  */
 export type WorkspaceSearchMigrationTargetScanCheckpoint = {
+  /** Reviewed measured-configuration digest that owns this checkpoint. */
+  readonly configurationHash: string
   /** Whether the complete target base-table traversal finished. */
   readonly completed: boolean
   /** Low-level DynamoDB LastEvaluatedKey for the next page. */
@@ -124,13 +126,16 @@ export type WorkspaceSearchMigrationTargetScanPreflightResult =
 /**
  * Creates the canonical checkpoint used before the first target page.
  *
+ * @param configurationHash - Reviewed measured configuration that owns it.
  * @returns Empty incomplete target checkpoint with zero digest states.
  */
-export function createEmptyWorkspaceSearchMigrationTargetScanCheckpoint():
-  WorkspaceSearchMigrationTargetScanCheckpoint {
+export function createEmptyWorkspaceSearchMigrationTargetScanCheckpoint(
+  configurationHash: string,
+): WorkspaceSearchMigrationTargetScanCheckpoint {
   const keyAccumulator = new MigrationDigestAccumulator()
   const contentAccumulator = new MigrationDigestAccumulator()
   return {
+    configurationHash,
     completed: false,
     aggregate: {
       scanned: 0,
@@ -172,6 +177,9 @@ export function prepareWorkspaceSearchMigrationTargetScanContext(
     }
     const checkpoint = cloneTargetCheckpoint(input.previousCheckpoint)
     validateWorkspaceSearchMigrationTargetScanCheckpoint(checkpoint)
+    if (checkpoint.configurationHash !== configurationHash) {
+      return targetScanPreflightFailure('CONFIGURATION_HASH_MISMATCH')
+    }
     if (checkpoint.completed) {
       return targetScanPreflightFailure('INVALID_STATE')
     }
@@ -214,6 +222,9 @@ export function validateWorkspaceSearchMigrationTargetScanCheckpoint(
   previous?: WorkspaceSearchMigrationTargetScanCheckpoint,
 ): void {
   const aggregate = checkpoint.aggregate
+  if (!isHexDigest(checkpoint.configurationHash)) {
+    return failTargetCheckpoint()
+  }
   requireNonNegativeSafeInteger(aggregate.scanned)
   requireNonNegativeSafeInteger(aggregate.owned)
   requireNonNegativeSafeInteger(aggregate.ignored)
@@ -241,7 +252,10 @@ export function validateWorkspaceSearchMigrationTargetScanCheckpoint(
   ) {
     return failTargetCheckpoint()
   }
-  if (checkpoint.cursor !== undefined) encodeAttributeMap(checkpoint.cursor)
+  // Encoding validates that a retained cursor survives the strict codec.
+  if (checkpoint.cursor !== undefined) {
+    encodeAttributeMap(checkpoint.cursor)
+  }
   if (checkpoint.completed && checkpoint.cursor !== undefined) {
     return failTargetCheckpoint()
   }
@@ -265,6 +279,7 @@ export function validateWorkspaceSearchMigrationTargetScanCheckpoint(
   validateWorkspaceSearchMigrationTargetScanCheckpoint(previous)
   if (
     previous.completed ||
+    checkpoint.configurationHash !== previous.configurationHash ||
     aggregate.scanned < previous.aggregate.scanned ||
     aggregate.owned < previous.aggregate.owned ||
     aggregate.ignored < previous.aggregate.ignored ||
@@ -381,7 +396,9 @@ function requireNonNegativeSafeInteger(value: number): void {
 function isCanonicalEmptyTargetCheckpoint(
   checkpoint: WorkspaceSearchMigrationTargetScanCheckpoint,
 ): boolean {
-  const empty = createEmptyWorkspaceSearchMigrationTargetScanCheckpoint()
+  const empty = createEmptyWorkspaceSearchMigrationTargetScanCheckpoint(
+    checkpoint.configurationHash,
+  )
   return checkpoint.completed === false &&
     checkpoint.cursor === undefined &&
     checkpoint.aggregate.scanned === 0 &&

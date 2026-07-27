@@ -159,6 +159,8 @@ function normalizeTargetScanOutputUnchecked(
     table,
   )
   if (!cursorResult.ok) return targetScanOutputFailure(cursorResult.code)
+  // This managed Scan has no filter or projection, so a continuation key must
+  // identify the final full item counted and returned by the same response.
   const lastItem = items[itemCount - 1]
   if (lastItem === undefined) {
     return targetScanOutputFailure('INVALID_STATE')
