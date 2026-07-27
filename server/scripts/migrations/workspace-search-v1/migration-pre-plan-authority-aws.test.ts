@@ -18,6 +18,7 @@ import {
 } from './migration-contract'
 import {
   createAwsWorkspaceSearchMigrationPrePlanAuthorityPort,
+  createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks,
   type WorkspaceSearchMigrationPrePlanAuthority,
   type WorkspaceSearchMigrationPrePlanAuthorityAwsPort,
   type WorkspaceSearchMigrationPrePlanAuthorityAwsTransport,
@@ -488,6 +489,22 @@ describe('AWS Workspace Search pre-plan authority adapter', () => {
     )
     expectMigrationFailure(otherConfigurationFailure, 'LEASE_CONFLICT')
 
+    for (const otherIdentity of [
+      {
+        runId: 'other-run-acquire-retry',
+        ownerId: 'owner-acquire-retry',
+      },
+      {
+        runId: 'run-acquire-retry',
+        ownerId: 'other-owner-acquire-retry',
+      },
+    ]) {
+      const otherIdentityFailure = await captureMigrationFailure(
+        () => context.port.acquireLease(otherIdentity),
+      )
+      expectMigrationFailure(otherIdentityFailure, 'LEASE_CONFLICT')
+    }
+
     const recovered = await context.port.acquireLease({
       runId: 'run-acquire-retry',
       ownerId: 'owner-acquire-retry',
@@ -752,6 +769,386 @@ describe('AWS Workspace Search pre-plan authority adapter', () => {
         firstAuthority.maintenanceEvidenceReceiptDigest,
       ),
     ).toEqual(firstAuthority.maintenanceEvidenceReceipt)
+  })
+
+  test('creates exact lease, pointer, and receipt planning conditions in fixed order', async () => {
+    const context = createAuthorityContext()
+    const lease = await context.port.acquireLease({
+      runId: 'run-planning-conditions',
+      ownerId: 'owner-planning-conditions',
+    })
+    const authority = await context.port.renewMaintenanceEvidence({
+      lease: createLeaseClaim(lease),
+      expectedPointer: null,
+      evidenceBytes: createMaintenanceEvidenceBytes(initialTime),
+    })
+    const conditions =
+      createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks({
+        stateTable: context.stateTable,
+        configurationHash: context.configurationHash,
+        authority,
+        commitAt: new Date(initialTime),
+      })
+    expect(conditions).toHaveLength(3)
+
+    const durableRows = [
+      requireStoredItem(
+        context.transport.readStoredItemByKind(leaseKind),
+      ),
+      requireStoredItem(
+        context.transport.readStoredItemByKind(pointerKind),
+      ),
+      requireStoredItem(
+        context.transport.readStoredItemByKind(receiptKind),
+      ),
+    ]
+    for (const [index, durableRow] of durableRows.entries()) {
+      const check = requireConditionCheck(conditions[index])
+      expect(check.TableName).toBe(context.stateTable.tableName)
+      expect(readKeyRecordKey(check.Key))
+        .toBe(readStringAttribute(durableRow, 'recordKey'))
+      expect(conditionMatches(
+        durableRow,
+        check.ConditionExpression,
+        check.ExpressionAttributeNames,
+        check.ExpressionAttributeValues,
+      )).toBe(true)
+    }
+
+    const leaseCheck = requireConditionCheck(conditions[0])
+    expect(leaseCheck.ConditionExpression).toBe([
+      '#kind = :kind',
+      '#version = :version',
+      '#stateIncarnationDigest = :stateIncarnationDigest',
+      '#stateTableId = :stateTableId',
+      '#configurationHash = :configurationHash',
+      '#runId = :runId',
+      '#ownerId = :ownerId',
+      '#fenceToken = :fenceToken',
+      '#expiresEpochMilliseconds > :minimumExpiry',
+    ].join(' AND '))
+    expect(Object.values(
+      leaseCheck.ExpressionAttributeNames ?? {},
+    ).sort()).toEqual([
+      'configurationHash',
+      'expiresEpochMilliseconds',
+      'fenceToken',
+      'kind',
+      'ownerId',
+      'runId',
+      'stateIncarnationDigest',
+      'stateTableId',
+      'version',
+    ])
+
+    const pointerCheck = requireConditionCheck(conditions[1])
+    expect(pointerCheck.ConditionExpression).toContain(
+      '#receiptValidUntilEpochMilliseconds = :receiptValidUntilEpochMilliseconds',
+    )
+    expect(pointerCheck.ConditionExpression).toContain(
+      '#recordDigest = :recordDigest',
+    )
+    expect(pointerCheck.ConditionExpression).toContain(
+      '#receiptValidUntilEpochMilliseconds > :minimumExpiry',
+    )
+
+    const receiptCheck = requireConditionCheck(conditions[2])
+    const receiptRow = durableRows[2]
+    expect(Object.values(
+      receiptCheck.ExpressionAttributeNames ?? {},
+    ).sort()).toEqual(
+      Object.keys(receiptRow)
+        .filter((name) =>
+          name !== 'migrationId' && name !== 'recordKey'
+        )
+        .sort(),
+    )
+    expect(receiptCheck.ConditionExpression).toContain(
+      '#validatedAt = :validatedAt',
+    )
+    expect(receiptCheck.ConditionExpression).toContain(
+      '#validatedEpochMilliseconds = :validatedEpochMilliseconds',
+    )
+    expect(receiptCheck.ConditionExpression).toContain(
+      '#oldestObservationAt = :oldestObservationAt',
+    )
+    expect(receiptCheck.ConditionExpression).toContain(
+      '#oldestObservationEpochMilliseconds = :oldestObservationEpochMilliseconds',
+    )
+    expect(receiptCheck.ConditionExpression).toContain(
+      '#validUntil = :validUntil',
+    )
+    expect(receiptCheck.ConditionExpression).toContain(
+      '#validUntilEpochMilliseconds = :validUntilEpochMilliseconds',
+    )
+    expect(receiptCheck.ConditionExpression).toContain(
+      '#validUntilEpochMilliseconds > :minimumExpiry',
+    )
+    expect(JSON.stringify(conditions)).not.toContain('evidenceBytes')
+  })
+
+  test('allows a same-fence heartbeat to satisfy a previously created lease condition', async () => {
+    const context = createAuthorityContext()
+    const lease = await context.port.acquireLease({
+      runId: 'run-planning-heartbeat',
+      ownerId: 'owner-planning-heartbeat',
+    })
+    const authority = await context.port.renewMaintenanceEvidence({
+      lease: createLeaseClaim(lease),
+      expectedPointer: null,
+      evidenceBytes: createMaintenanceEvidenceBytes(initialTime),
+    })
+    context.clock.set('2026-07-25T04:00:20.000Z')
+    const heartbeated = await context.port.heartbeatLease({
+      lease: createLeaseClaim(lease),
+    })
+    expect(heartbeated.fenceToken).toBe(lease.fenceToken)
+    expect(heartbeated.heartbeatAt).not.toBe(lease.heartbeatAt)
+    expect(heartbeated.expiresAt).not.toBe(lease.expiresAt)
+
+    const conditions =
+      createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks({
+        stateTable: context.stateTable,
+        configurationHash: context.configurationHash,
+        authority,
+        commitAt: new Date('2026-07-25T04:00:25.000Z'),
+      })
+    const leaseCheck = requireConditionCheck(conditions[0])
+    const heartbeatedRow = requireStoredItem(
+      context.transport.readStoredItemByKind(leaseKind),
+    )
+    expect(conditionMatches(
+      heartbeatedRow,
+      leaseCheck.ConditionExpression,
+      leaseCheck.ExpressionAttributeNames,
+      leaseCheck.ExpressionAttributeValues,
+    )).toBe(true)
+    expect(Object.values(
+      leaseCheck.ExpressionAttributeNames ?? {},
+    )).not.toContain('heartbeatAt')
+    expect(Object.values(
+      leaseCheck.ExpressionAttributeNames ?? {},
+    )).not.toContain('heartbeatEpochMilliseconds')
+    expect(Object.values(
+      leaseCheck.ExpressionAttributeNames ?? {},
+    )).not.toContain('expiresAt')
+    expect(Object.values(
+      leaseCheck.ExpressionAttributeNames ?? {},
+    )).not.toContain('recordDigest')
+    expect(leaseCheck.ExpressionAttributeValues)
+      .not.toHaveProperty(':expiresEpochMilliseconds')
+  })
+
+  test('rejects drifted or internally inconsistent planning authority', async () => {
+    const context = createAuthorityContext()
+    const lease = await context.port.acquireLease({
+      runId: 'run-planning-rejection',
+      ownerId: 'owner-planning-rejection',
+    })
+    const authority = await context.port.renewMaintenanceEvidence({
+      lease: createLeaseClaim(lease),
+      expectedPointer: null,
+      evidenceBytes: createMaintenanceEvidenceBytes(initialTime),
+    })
+    const otherDigest = createMigrationDigest('planning-mismatch')
+
+    expectMigrationFailure(
+      captureSynchronousMigrationFailure(() =>
+        createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks({
+          stateTable: context.stateTable,
+          configurationHash: otherDigest,
+          authority,
+          commitAt: new Date(initialTime),
+        })
+      ),
+      'CONFIGURATION_DRIFT',
+    )
+    expectMigrationFailure(
+      captureSynchronousMigrationFailure(() =>
+        createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks({
+          stateTable: {
+            ...context.stateTable,
+            tableId: 'other-migration-state-table-id',
+          },
+          configurationHash: context.configurationHash,
+          authority,
+          commitAt: new Date(initialTime),
+        })
+      ),
+      'CONFIGURATION_DRIFT',
+    )
+    expectMigrationFailure(
+      captureSynchronousMigrationFailure(() =>
+        createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks({
+          stateTable: context.stateTable,
+          configurationHash: context.configurationHash,
+          authority: {
+            ...authority,
+            maintenanceEvidenceReceipt: {
+              ...authority.maintenanceEvidenceReceipt,
+              runId: 'other-run',
+            },
+          },
+          commitAt: new Date(initialTime),
+        })
+      ),
+      'INVALID_MAINTENANCE_EVIDENCE',
+    )
+    expectMigrationFailure(
+      captureSynchronousMigrationFailure(() =>
+        createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks({
+          stateTable: context.stateTable,
+          configurationHash: context.configurationHash,
+          authority: {
+            ...authority,
+            maintenanceEvidenceReceipt: {
+              ...authority.maintenanceEvidenceReceipt,
+              fenceToken: authority.lease.fenceToken + 1,
+            },
+          },
+          commitAt: new Date(initialTime),
+        })
+      ),
+      'INVALID_MAINTENANCE_EVIDENCE',
+    )
+    expectMigrationFailure(
+      captureSynchronousMigrationFailure(() =>
+        createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks({
+          stateTable: context.stateTable,
+          configurationHash: context.configurationHash,
+          authority: {
+            ...authority,
+            maintenanceEvidenceReceiptDigest: otherDigest,
+          },
+          commitAt: new Date(initialTime),
+        })
+      ),
+      'INVALID_MAINTENANCE_EVIDENCE',
+    )
+    expectMigrationFailure(
+      captureSynchronousMigrationFailure(() =>
+        createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks({
+          stateTable: context.stateTable,
+          configurationHash: context.configurationHash,
+          authority: {
+            ...authority,
+            maintenanceEvidenceReceipt: {
+              ...authority.maintenanceEvidenceReceipt,
+              evidenceLocator: 'change:MUTATED-RECEIPT',
+            },
+          },
+          commitAt: new Date(initialTime),
+        })
+      ),
+      'INVALID_MAINTENANCE_EVIDENCE',
+    )
+  })
+
+  test('requires strictly more than ten seconds at planning commit boundaries', async () => {
+    const leaseContext = createAuthorityContext()
+    const lease = await leaseContext.port.acquireLease({
+      runId: 'run-planning-boundary',
+      ownerId: 'owner-planning-boundary',
+    })
+    const authority =
+      await leaseContext.port.renewMaintenanceEvidence({
+        lease: createLeaseClaim(lease),
+        expectedPointer: null,
+        evidenceBytes: createMaintenanceEvidenceBytes(initialTime),
+      })
+    const leasePassingAt = new Date(
+      Date.parse(lease.expiresAt) - 10_001,
+    )
+    const passingConditions =
+      createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks({
+        stateTable: leaseContext.stateTable,
+        configurationHash: leaseContext.configurationHash,
+        authority,
+        commitAt: leasePassingAt,
+      })
+    for (const condition of passingConditions) {
+      const values =
+        requireConditionCheck(condition).ExpressionAttributeValues
+      expect(readNumberAttribute(
+        requireAttributeMap(values),
+        ':minimumExpiry',
+      )).toBe(leasePassingAt.getTime() + 10_000)
+    }
+    const leaseBoundaryConditions =
+      createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks({
+        stateTable: leaseContext.stateTable,
+        configurationHash: leaseContext.configurationHash,
+        authority,
+        commitAt: new Date(
+          Date.parse(lease.expiresAt) - 10_000,
+        ),
+      })
+    const leaseBoundaryCheck =
+      requireConditionCheck(leaseBoundaryConditions[0])
+    expect(conditionMatches(
+      requireStoredItem(
+        leaseContext.transport.readStoredItemByKind(leaseKind),
+      ),
+      leaseBoundaryCheck.ConditionExpression,
+      leaseBoundaryCheck.ExpressionAttributeNames,
+      leaseBoundaryCheck.ExpressionAttributeValues,
+    )).toBe(false)
+
+    const receiptContext = createAuthorityContext()
+    let currentLease = await receiptContext.port.acquireLease({
+      runId: 'run-receipt-commit-boundary',
+      ownerId: 'owner-receipt-commit-boundary',
+    })
+    const initialAuthority =
+      await receiptContext.port.renewMaintenanceEvidence({
+        lease: createLeaseClaim(currentLease),
+        expectedPointer: null,
+        evidenceBytes: createMaintenanceEvidenceBytes(initialTime),
+      })
+    for (const heartbeatAt of [
+      '2026-07-25T04:00:50.000Z',
+      '2026-07-25T04:01:40.000Z',
+      '2026-07-25T04:02:30.000Z',
+      '2026-07-25T04:03:20.000Z',
+    ]) {
+      receiptContext.clock.set(heartbeatAt)
+      currentLease = await receiptContext.port.heartbeatLease({
+        lease: createLeaseClaim(currentLease),
+      })
+    }
+    const receiptValidUntil = Date.parse(
+      initialAuthority.maintenanceEvidenceReceipt.validUntil,
+    )
+    const receiptPassingAt =
+      new Date(receiptValidUntil - 10_001)
+    receiptContext.clock.set(receiptPassingAt.toISOString())
+    const currentAuthority =
+      await receiptContext.port.readAuthority({
+        lease: createLeaseClaim(currentLease),
+        maintenanceEvidenceReceiptDigest:
+          initialAuthority.maintenanceEvidenceReceiptDigest,
+        maintenanceEvidencePointerRevision:
+          initialAuthority.maintenanceEvidencePointerRevision,
+      })
+    createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks({
+      stateTable: receiptContext.stateTable,
+      configurationHash: receiptContext.configurationHash,
+      authority: currentAuthority,
+      commitAt: receiptPassingAt,
+    })
+    const receiptBoundaryFailure =
+      captureSynchronousMigrationFailure(() =>
+        createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks({
+          stateTable: receiptContext.stateTable,
+          configurationHash: receiptContext.configurationHash,
+          authority: currentAuthority,
+          commitAt: new Date(receiptValidUntil - 10_000),
+        })
+      )
+    expectMigrationFailure(
+      receiptBoundaryFailure,
+      'INVALID_MAINTENANCE_EVIDENCE',
+    )
   })
 
   test('rejects a stale expected pointer without overwriting the current receipt', async () => {
@@ -1113,6 +1510,103 @@ describe('AWS Workspace Search pre-plan authority adapter', () => {
     expect(context.transport.prepareCalls).toHaveLength(1)
   })
 
+  test('rejects receipt retry recovery after lease takeover', async () => {
+    const context = createAuthorityContext()
+    const lease = await context.port.acquireLease({
+      runId: 'run-takeover-receipt-retry',
+      ownerId: 'owner-before-takeover',
+    })
+    const evidenceBytes = createMaintenanceEvidenceBytes(
+      initialTime,
+      'change:OPS-RETRY-TAKEOVER',
+    )
+    context.transport.failNextTransaction({
+      timing: 'after-commit',
+      error: createTimeoutError('TAKEOVER-RETRY-RESPONSE-CANARY'),
+      afterCommit: () => {
+        context.transport.failNextGet(
+          new Error('TAKEOVER-RECONCILIATION-READ-CANARY'),
+        )
+      },
+    })
+
+    const firstFailure = await captureMigrationFailure(
+      () => context.port.renewMaintenanceEvidence({
+        lease: createLeaseClaim(lease),
+        expectedPointer: null,
+        evidenceBytes,
+      }),
+    )
+    expectMigrationFailure(
+      firstFailure,
+      'AMBIGUOUS_OPERATION_UNRESOLVED',
+    )
+
+    context.clock.set(lease.expiresAt)
+    const successor = await context.port.acquireLease({
+      runId: lease.runId,
+      ownerId: 'owner-after-takeover',
+    })
+    expect(successor.fenceToken).toBe(lease.fenceToken + 1)
+    context.transport.clearHistory()
+
+    const retryFailure = await captureMigrationFailure(
+      () => context.port.renewMaintenanceEvidence({
+        lease: createLeaseClaim(lease),
+        expectedPointer: null,
+        evidenceBytes,
+      }),
+    )
+    expectMigrationFailure(retryFailure, 'LEASE_LOST')
+    expect(context.transport.transactionCommands).toHaveLength(0)
+    expect(context.transport.prepareCalls).toHaveLength(0)
+  })
+
+  test('rejects receipt retry recovery after current evidence expires', async () => {
+    const context = createAuthorityContext()
+    let lease = await context.port.acquireLease({
+      runId: 'run-stale-receipt-retry',
+      ownerId: 'owner-stale-receipt-retry',
+    })
+    const evidenceBytes = createMaintenanceEvidenceBytes(
+      initialTime,
+      'change:OPS-RETRY-STALE',
+    )
+    const authority = await context.port.renewMaintenanceEvidence({
+      lease: createLeaseClaim(lease),
+      expectedPointer: null,
+      evidenceBytes,
+    })
+    for (const heartbeatAt of [
+      '2026-07-25T04:00:50.000Z',
+      '2026-07-25T04:01:40.000Z',
+      '2026-07-25T04:02:30.000Z',
+      '2026-07-25T04:03:20.000Z',
+    ]) {
+      context.clock.set(heartbeatAt)
+      lease = await context.port.heartbeatLease({
+        lease: createLeaseClaim(lease),
+      })
+    }
+    context.clock.set(
+      authority.maintenanceEvidenceReceipt.validUntil,
+    )
+    context.transport.clearHistory()
+    const durableBefore = context.transport.readStoredItems()
+
+    const failure = await captureMigrationFailure(
+      () => context.port.renewMaintenanceEvidence({
+        lease: createLeaseClaim(lease),
+        expectedPointer: null,
+        evidenceBytes,
+      }),
+    )
+    expectMigrationFailure(failure, 'INVALID_MAINTENANCE_EVIDENCE')
+    expect(context.transport.transactionCommands).toHaveLength(0)
+    expect(context.transport.prepareCalls).toHaveLength(0)
+    expect(context.transport.readStoredItems()).toEqual(durableBefore)
+  })
+
   test('rejects an exact durable receipt without its successor pointer', async () => {
     const context = createAuthorityContext()
     const lease = await context.port.acquireLease({
@@ -1149,6 +1643,118 @@ describe('AWS Workspace Search pre-plan authority adapter', () => {
     expect(
       context.transport.readStoredItemByKind(receiptKind),
     ).toBeDefined()
+  })
+
+  test('rejects an exact new receipt when its non-null predecessor remains current', async () => {
+    const context = createAuthorityContext()
+    const lease = await context.port.acquireLease({
+      runId: 'run-mixed-successor',
+      ownerId: 'owner-mixed-successor',
+    })
+    const firstAuthority =
+      await context.port.renewMaintenanceEvidence({
+        lease: createLeaseClaim(lease),
+        expectedPointer: null,
+        evidenceBytes: createMaintenanceEvidenceBytes(
+          initialTime,
+          'change:OPS-MIXED-FIRST',
+        ),
+      })
+    const predecessorPointer = requireStoredItem(
+      context.transport.readStoredItemByKind(pointerKind),
+    )
+    context.clock.set('2026-07-25T04:00:01.000Z')
+    context.transport.clearHistory()
+    const rawCanary = 'MIXED-SUCCESSOR-RESPONSE-CANARY'
+    context.transport.failNextTransaction({
+      timing: 'after-commit',
+      error: createTimeoutError(rawCanary),
+      afterCommit: () => {
+        context.transport.replaceStoredItem(predecessorPointer)
+      },
+    })
+
+    const failure = await captureMigrationFailure(
+      () => context.port.renewMaintenanceEvidence({
+        lease: createLeaseClaim(lease),
+        expectedPointer: createPointerClaim(firstAuthority),
+        evidenceBytes: createMaintenanceEvidenceBytes(
+          '2026-07-25T04:00:01.000Z',
+          'change:OPS-MIXED-SECOND',
+        ),
+      }),
+    )
+    expectMigrationFailure(
+      failure,
+      'INVALID_MAINTENANCE_EVIDENCE',
+    )
+    expect(failure.message).not.toContain(rawCanary)
+    const currentPointer = requireStoredItem(
+      context.transport.readStoredItemByKind(pointerKind),
+    )
+    expect(readNumberAttribute(currentPointer, 'revision'))
+      .toBe(firstAuthority.maintenanceEvidencePointerRevision)
+    expect(readStringAttribute(currentPointer, 'receiptDigest'))
+      .toBe(firstAuthority.maintenanceEvidenceReceiptDigest)
+    expect(
+      context.transport.readStoredItems().filter((item) =>
+        readStringAttribute(item, 'kind') === receiptKind
+      ),
+    ).toHaveLength(2)
+  })
+
+  test('keeps in-progress lease and receipt transactions ambiguous after unchanged rereads', async () => {
+    const leaseContext = createAuthorityContext()
+    const leaseCanary = 'LEASE-IN-PROGRESS-CANARY'
+    leaseContext.transport.failNextTransaction({
+      timing: 'before-commit',
+      error: createTransactionInProgressError(leaseCanary),
+    })
+
+    const leaseFailure = await captureMigrationFailure(
+      () => leaseContext.port.acquireLease({
+        runId: 'run-lease-in-progress',
+        ownerId: 'owner-lease-in-progress',
+      }),
+    )
+
+    expectMigrationFailure(
+      leaseFailure,
+      'AMBIGUOUS_OPERATION_UNRESOLVED',
+    )
+    expect(leaseFailure.message).not.toContain(leaseCanary)
+    expect(leaseContext.transport.readStoredItems()).toHaveLength(0)
+
+    const receiptContext = createAuthorityContext()
+    const lease = await receiptContext.port.acquireLease({
+      runId: 'run-receipt-in-progress',
+      ownerId: 'owner-receipt-in-progress',
+    })
+    const receiptCanary = 'RECEIPT-IN-PROGRESS-CANARY'
+    receiptContext.transport.failNextTransaction({
+      timing: 'before-commit',
+      error: createTransactionInProgressError(receiptCanary),
+    })
+
+    const receiptFailure = await captureMigrationFailure(
+      () => receiptContext.port.renewMaintenanceEvidence({
+        lease: createLeaseClaim(lease),
+        expectedPointer: null,
+        evidenceBytes: createMaintenanceEvidenceBytes(initialTime),
+      }),
+    )
+
+    expectMigrationFailure(
+      receiptFailure,
+      'AMBIGUOUS_OPERATION_UNRESOLVED',
+    )
+    expect(receiptFailure.message).not.toContain(receiptCanary)
+    expect(
+      receiptContext.transport.readStoredItemByKind(pointerKind),
+    ).toBeUndefined()
+    expect(
+      receiptContext.transport.readStoredItemByKind(receiptKind),
+    ).toBeUndefined()
   })
 
   test('strictly parses every durable row and redacts malformed state and raw failures', async () => {
@@ -1413,6 +2019,24 @@ async function captureMigrationFailure(
 }
 
 /**
+ * Captures one synchronous public fixed-code migration failure.
+ *
+ * @param operation - Synchronous authority boundary expected to fail.
+ * @returns Exact public failure.
+ */
+function captureSynchronousMigrationFailure(
+  operation: () => unknown,
+): WorkspaceSearchMigrationFailure {
+  try {
+    operation()
+  } catch (error: unknown) {
+    expect(error).toBeInstanceOf(WorkspaceSearchMigrationFailure)
+    if (error instanceof WorkspaceSearchMigrationFailure) return error
+  }
+  throw new Error('Expected a Workspace Search migration failure.')
+}
+
+/**
  * Requires one exact stable public failure code and fixed message.
  *
  * @param failure - Captured public migration failure.
@@ -1442,6 +2066,18 @@ function createTimeoutError(canary: string): Error {
 }
 
 /**
+ * Creates a raw in-progress transaction error with one redaction canary.
+ *
+ * @param canary - Raw message that must never escape.
+ * @returns Transaction-in-progress-shaped raw error.
+ */
+function createTransactionInProgressError(canary: string): Error {
+  const error = new Error(canary)
+  error.name = 'TransactionInProgressException'
+  return error
+}
+
+/**
  * Requires one supported transaction item list.
  *
  * @param command - Candidate transaction command.
@@ -1455,6 +2091,21 @@ function requireTransactionItems(
     throw new Error('Expected one authority transaction.')
   }
   return entries
+}
+
+/**
+ * Requires one complete transaction condition check.
+ *
+ * @param item - Candidate transaction entry.
+ * @returns Exact low-level condition check.
+ */
+function requireConditionCheck(
+  item: TransactWriteItem | undefined,
+): NonNullable<TransactWriteItem['ConditionCheck']> {
+  if (item?.ConditionCheck === undefined) {
+    throw new Error('Expected one authority condition check.')
+  }
+  return item.ConditionCheck
 }
 
 /**

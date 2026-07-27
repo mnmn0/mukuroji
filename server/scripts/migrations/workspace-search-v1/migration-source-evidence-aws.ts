@@ -6,6 +6,7 @@ import {
   TransactWriteItemsCommand,
   type AttributeValue,
   type GetItemCommandOutput,
+  type TransactWriteItem,
   type TransactWriteItemsCommandOutput,
 } from '@aws-sdk/client-dynamodb'
 import {
@@ -21,13 +22,18 @@ import {
 import {
   createMigrationDigest,
   createWorkspaceSearchConfigurationHash,
+  isCanonicalTimestamp,
+  isHexDigest,
   isWorkspaceSearchMigrationFailureCode,
   type DynamoAttributeMap,
   type MigrationDigestState,
   type MigrationScanAggregate,
   type MigrationSourceCheckpoint,
+  type MigrationTableIdentity,
+  type WorkspaceSearchMaintenanceEvidenceReceipt,
   type WorkspaceSearchMigrationConfiguration,
   type WorkspaceSearchMigrationFailureCode,
+  type WorkspaceSearchMigrationLease,
   type WorkspaceSearchMigrationSourceName,
   WorkspaceSearchMigrationFailure,
   WORKSPACE_SEARCH_MIGRATION_ID,
@@ -50,15 +56,23 @@ import {
   serializeWorkspaceSearchMigrationSourceEvidencePage,
   type WorkspaceSearchMigrationSourceEvidenceIdentity,
   type WorkspaceSearchMigrationSourceEvidencePage,
+  type WorkspaceSearchMigrationPlanningAuthorityBinding,
   type WorkspaceSearchMigrationSourceEvidenceProgress,
   type WorkspaceSearchMigrationSourceEvidencePurpose,
   type WorkspaceSearchMigrationSourceEvidenceReplayResult,
 } from './migration-source-evidence'
 import {
+  createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks,
+  type WorkspaceSearchMigrationPrePlanAuthority,
+  type WorkspaceSearchMigrationPrePlanAuthorityClock,
+} from './migration-pre-plan-authority-aws'
+import {
   cloneWorkspaceSearchMigrationExactTableKey,
   prepareWorkspaceSearchMigrationSourceScanContext,
 } from './migration-source-scan-context'
 import {
+  validateWorkspaceSearchMaintenanceEvidenceReceipt,
+  validateWorkspaceSearchMigrationLease,
   validateWorkspaceSearchMigrationCheckpoint,
 } from './migration-state-machine'
 
@@ -82,6 +96,11 @@ export interface WorkspaceSearchMigrationSourceEvidenceAwsTransport {
    * @returns Raw low-level DynamoDB response.
    */
   getSourceEvidence(command: GetItemCommand): Promise<GetItemCommandOutput>
+
+  /**
+   * Completes the state-incarnation guard immediately before commit time.
+   */
+  prepareSourceEvidenceWrite(): Promise<void>
 
   /**
    * Atomically writes one immutable page and its successor head.
@@ -113,12 +132,14 @@ export interface WorkspaceSearchMigrationSourceEvidenceScanner {
  * Dependencies for one source-evidence AWS adapter.
  */
 export type CreateWorkspaceSearchMigrationSourceEvidenceAwsPortInput = {
-  /** Exact physical migration-state table name selected by the operator. */
-  readonly stateTableName: string
+  /** Exact measured migration-state table incarnation. */
+  readonly stateTable: MigrationTableIdentity
   /** Measured scanner sharing the pinned AWS identity session. */
   readonly scanner: WorkspaceSearchMigrationSourceEvidenceScanner
   /** Narrow strongly-consistent read and transactional-write transport. */
   readonly transport: WorkspaceSearchMigrationSourceEvidenceAwsTransport
+  /** Adapter-owned trusted clock sampled immediately before each write. */
+  readonly clock: WorkspaceSearchMigrationPrePlanAuthorityClock
 }
 
 /**
@@ -136,6 +157,35 @@ export type WorkspaceSearchMigrationSourceEvidenceAwsRequest = {
   /** Exact source table advanced by this evidence chain. */
   readonly source: WorkspaceSearchMigrationSourceName
 }
+
+/**
+ * Dry-run commit request that cannot carry planning authority.
+ */
+export type WorkspaceSearchMigrationDryRunSourceEvidenceAwsCommitRequest =
+  Omit<WorkspaceSearchMigrationSourceEvidenceAwsRequest, 'purpose'> & {
+    /** Non-authoritative dry-run chain. */
+    readonly purpose: 'dry-run'
+    /** Planning authority is forbidden on a dry-run chain. */
+    readonly authority?: never
+  }
+
+/**
+ * Planning commit request authorized by one exact durable lease and receipt.
+ */
+export type WorkspaceSearchMigrationPlanningSourceEvidenceAwsCommitRequest =
+  Omit<WorkspaceSearchMigrationSourceEvidenceAwsRequest, 'purpose'> & {
+    /** Authority-bearing planning chain. */
+    readonly purpose: 'planning'
+    /** Exact pre-plan authority atomically revalidated by the commit. */
+    readonly authority: WorkspaceSearchMigrationPrePlanAuthority
+  }
+
+/**
+ * Exact request accepted by a source-evidence mutation.
+ */
+export type WorkspaceSearchMigrationSourceEvidenceAwsCommitRequest =
+  | WorkspaceSearchMigrationDryRunSourceEvidenceAwsCommitRequest
+  | WorkspaceSearchMigrationPlanningSourceEvidenceAwsCommitRequest
 
 /**
  * Durable source-evidence operations exposed to the migration workflow.
@@ -168,7 +218,7 @@ export interface WorkspaceSearchMigrationSourceEvidenceAwsPort {
    * @returns Atomically committed successor progress.
    */
   commitNextPage(
-    input: WorkspaceSearchMigrationSourceEvidenceAwsRequest,
+    input: WorkspaceSearchMigrationSourceEvidenceAwsCommitRequest,
   ): Promise<WorkspaceSearchMigrationSourceEvidenceProgress>
 }
 
@@ -186,6 +236,11 @@ type PreparedSourceEvidenceAwsRequest = {
   readonly configurationHash: string
   /** Exact source advanced by the request. */
   readonly source: WorkspaceSearchMigrationSourceName
+  /** Detached durable authority required only by planning commits. */
+  readonly authority: WorkspaceSearchMigrationPrePlanAuthority | null
+  /** Compact canonical authority embedded in planning page bytes. */
+  readonly planningAuthority:
+    WorkspaceSearchMigrationPlanningAuthorityBinding | null
 }
 
 /**
@@ -218,14 +273,27 @@ type SourceEvidencePageRead = {
 }
 
 /**
+ * Adapter-owned canonical commit clock captured after write preparation.
+ */
+type SourceEvidenceCommitClock = {
+  /** Canonical UTC commit time. */
+  readonly at: string
+  /** Exact finite epoch milliseconds. */
+  readonly epochMilliseconds: number
+}
+
+/**
  * Failure codes deliberately emitted by the private AWS adapter.
  */
 type SourceEvidenceAwsFailureCode =
   | 'AMBIGUOUS_OPERATION_UNRESOLVED'
+  | 'CONFIGURATION_DRIFT'
   | 'CONFIGURATION_HASH_MISMATCH'
   | 'IDENTITY_MISMATCH'
   | 'INVALID_ARGUMENT'
+  | 'INVALID_MAINTENANCE_EVIDENCE'
   | 'INVALID_STATE'
+  | 'LEASE_LOST'
   | 'SOURCE_DRIFT'
   | 'TABLE_SCHEMA_MISMATCH'
   | 'TRANSIENT_INFRASTRUCTURE_FAILURE'
@@ -263,6 +331,9 @@ class SourceEvidenceAwsFailure extends Error {
  */
 class AwsWorkspaceSearchMigrationSourceEvidencePort
   implements WorkspaceSearchMigrationSourceEvidenceAwsPort {
+  /** Exact measured migration-state table incarnation. */
+  private readonly stateTable: MigrationTableIdentity
+
   /** Exact physical migration-state table selected by the operator. */
   private readonly stateTableName: string
 
@@ -272,6 +343,9 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
   /** Narrow DynamoDB command transport. */
   private readonly transport: WorkspaceSearchMigrationSourceEvidenceAwsTransport
 
+  /** Adapter-owned trusted clock sampled after write preparation. */
+  private readonly clock: WorkspaceSearchMigrationPrePlanAuthorityClock
+
   /**
    * Creates an adapter bound to one exact state table and transport.
    *
@@ -280,9 +354,11 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
   constructor(
     input: CreateWorkspaceSearchMigrationSourceEvidenceAwsPortInput,
   ) {
-    this.stateTableName = input.stateTableName
+    this.stateTable = structuredClone(input.stateTable)
+    this.stateTableName = this.stateTable.tableName
     this.scanner = input.scanner
     this.transport = input.transport
+    this.clock = input.clock
   }
 
   /**
@@ -297,7 +373,8 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
     return runSourceEvidenceAwsBoundary(async () => {
       const request = prepareSourceEvidenceAwsRequest(
         input,
-        this.stateTableName,
+        this.stateTable,
+        'read',
       )
       const current = await this.readHead(request)
       return current.exists
@@ -318,7 +395,8 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
     return runSourceEvidenceAwsBoundary(async () => {
       const request = prepareSourceEvidenceAwsRequest(
         input,
-        this.stateTableName,
+        this.stateTable,
+        'read',
       )
       const head = await this.readHead(request)
       const expectedProgress = head.exists
@@ -338,12 +416,13 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
    * @returns Committed successor or already-completed progress.
    */
   async commitNextPage(
-    input: WorkspaceSearchMigrationSourceEvidenceAwsRequest,
+    input: WorkspaceSearchMigrationSourceEvidenceAwsCommitRequest,
   ): Promise<WorkspaceSearchMigrationSourceEvidenceProgress> {
     return runSourceEvidenceAwsBoundary(async () => {
       const request = prepareSourceEvidenceAwsRequest(
         input,
-        this.stateTableName,
+        this.stateTable,
+        'commit',
       )
       const predecessorRead = await this.readHead(request)
       const predecessor = predecessorRead.exists
@@ -361,6 +440,7 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
         identity: request.identity,
         previousProgress: predecessor,
         pageResult,
+        planningAuthority: request.planningAuthority,
       })
       const successor =
         advanceWorkspaceSearchMigrationSourceEvidenceProgress(
@@ -403,6 +483,19 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
         createSourceEvidenceHeadRecordKey(request.identity),
         successor,
       )
+      await this.prepareWrite()
+      const commitClock = request.authority === null
+        ? null
+        : readSourceEvidenceCommitClock(this.clock)
+      const authorityConditionChecks =
+        request.authority === null || commitClock === null
+          ? []
+          : createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks({
+            stateTable: this.stateTable,
+            configurationHash: request.configurationHash,
+            authority: request.authority,
+            commitAt: new Date(commitClock.epochMilliseconds),
+          })
       const transaction = createSourceEvidenceCommitCommand({
         stateTableName: this.stateTableName,
         predecessorRead,
@@ -411,6 +504,8 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
         pageItem,
         successor,
         successorHeadItem,
+        authorityConditionChecks,
+        commitClock,
       })
 
       try {
@@ -423,11 +518,45 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
           pageRecordKey,
           page,
           successor,
+          request.identity.purpose,
           error,
         )
       }
       return successor
     })
+  }
+
+  /**
+   * Runs the final state-table write preparation with drift classification.
+   */
+  private async prepareWrite(): Promise<void> {
+    try {
+      await this.transport.prepareSourceEvidenceWrite()
+    } catch (error: unknown) {
+      if (error instanceof ResourceNotFoundException) {
+        return failSourceEvidenceAws('CONFIGURATION_DRIFT')
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Reads one migration-state row while preserving its table role in errors.
+   *
+   * @param command - Exact strongly consistent state-table GetItem command.
+   * @returns Raw low-level response for strict row parsing.
+   */
+  private async getStateEvidence(
+    command: GetItemCommand,
+  ): Promise<GetItemCommandOutput> {
+    try {
+      return await this.transport.getSourceEvidence(command)
+    } catch (error: unknown) {
+      if (error instanceof ResourceNotFoundException) {
+        return failSourceEvidenceAws('CONFIGURATION_DRIFT')
+      }
+      throw error
+    }
   }
 
   /**
@@ -440,7 +569,7 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
     request: PreparedSourceEvidenceAwsRequest,
   ): Promise<SourceEvidenceHeadRead> {
     const recordKey = createSourceEvidenceHeadRecordKey(request.identity)
-    const output = await this.transport.getSourceEvidence(
+    const output = await this.getStateEvidence(
       createStrongSourceEvidenceGetCommand(
         this.stateTableName,
         recordKey,
@@ -491,7 +620,7 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
     request: PreparedSourceEvidenceAwsRequest,
     recordKey: string,
   ): Promise<SourceEvidencePageRead | undefined> {
-    const output = await this.transport.getSourceEvidence(
+    const output = await this.getStateEvidence(
       createStrongSourceEvidenceGetCommand(
         this.stateTableName,
         recordKey,
@@ -579,6 +708,7 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
     pageRecordKey: string,
     page: WorkspaceSearchMigrationSourceEvidencePage,
     successor: WorkspaceSearchMigrationSourceEvidenceProgress,
+    purpose: WorkspaceSearchMigrationSourceEvidencePurpose,
     transactionError: unknown,
   ): Promise<WorkspaceSearchMigrationSourceEvidenceProgress> {
     let currentHead: SourceEvidenceHeadRead
@@ -586,8 +716,12 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
     try {
       currentHead = await this.readHead(request)
       currentPage = await this.readPage(request, pageRecordKey)
-    } catch {
-      return failSourceEvidenceAws('AMBIGUOUS_OPERATION_UNRESOLVED')
+    } catch (reconciliationError: unknown) {
+      return failSourceEvidenceAws(
+        isSourceEvidenceConfigurationDrift(reconciliationError)
+          ? 'CONFIGURATION_DRIFT'
+          : 'AMBIGUOUS_OPERATION_UNRESOLVED',
+      )
     }
 
     if (
@@ -606,8 +740,12 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
             request,
             currentHead.progress,
           )
-        } catch {
-          return failSourceEvidenceAws('AMBIGUOUS_OPERATION_UNRESOLVED')
+        } catch (replayError: unknown) {
+          return failSourceEvidenceAws(
+            isSourceEvidenceConfigurationDrift(replayError)
+              ? 'CONFIGURATION_DRIFT'
+              : 'AMBIGUOUS_OPERATION_UNRESOLVED',
+          )
         }
         return successor
       }
@@ -622,7 +760,7 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
       currentPage === undefined
     ) {
       return failSourceEvidenceAws(
-        classifySourceEvidenceTransactionError(transactionError),
+        classifySourceEvidenceTransactionError(transactionError, purpose),
       )
     }
 
@@ -640,7 +778,11 @@ export function createAwsWorkspaceSearchMigrationSourceEvidencePort(
   input: CreateWorkspaceSearchMigrationSourceEvidenceAwsPortInput,
 ): WorkspaceSearchMigrationSourceEvidenceAwsPort {
   try {
-    requireStateTableName(input.stateTableName)
+    requireMigrationStateTableIdentity(input.stateTable)
+    if (typeof input.clock !== 'function') {
+      return failSourceEvidenceAws('INVALID_ARGUMENT')
+    }
+    requireSourceEvidenceAwsTransport(input.transport)
     return new AwsWorkspaceSearchMigrationSourceEvidencePort(input)
   } catch {
     throw createSourceEvidenceAwsBoundaryFailure('INVALID_ARGUMENT')
@@ -665,19 +807,54 @@ type CreateSourceEvidenceCommitCommandInput = {
   readonly successor: WorkspaceSearchMigrationSourceEvidenceProgress
   /** Complete successor head item. */
   readonly successorHeadItem: Readonly<Record<string, AttributeValue>>
+  /** Planning-only lease, pointer, and receipt condition checks. */
+  readonly authorityConditionChecks:
+    readonly TransactWriteItem[]
+  /** Planning commit clock bound into authority conditions and token. */
+  readonly commitClock: SourceEvidenceCommitClock | null
 }
 
 /**
  * Validates and snapshots one public adapter request.
  *
  * @param input - Candidate request.
- * @param stateTableName - Adapter-bound physical state table name.
+ * @param adapterStateTable - Adapter-bound physical state-table incarnation.
  * @returns Detached evidence identity and scanner context.
  */
 function prepareSourceEvidenceAwsRequest(
-  input: WorkspaceSearchMigrationSourceEvidenceAwsRequest,
-  stateTableName: string,
+  input:
+    | WorkspaceSearchMigrationSourceEvidenceAwsRequest
+    | WorkspaceSearchMigrationSourceEvidenceAwsCommitRequest,
+  adapterStateTable: MigrationTableIdentity,
+  operation: 'commit' | 'read',
 ): PreparedSourceEvidenceAwsRequest {
+  const inputRecord = requireSourceEvidenceInputRecord(input)
+  const hasAuthority = Object.prototype.hasOwnProperty.call(
+    inputRecord,
+    'authority',
+  )
+  requireExactSourceEvidenceInputKeys(
+    inputRecord,
+    hasAuthority
+      ? [
+          'authority',
+          'configuration',
+          'configurationHash',
+          'purpose',
+          'runId',
+          'source',
+        ]
+      : [
+          'configuration',
+          'configurationHash',
+          'purpose',
+          'runId',
+          'source',
+        ],
+  )
+  if (operation === 'read' && hasAuthority) {
+    return failSourceEvidenceAws('INVALID_ARGUMENT')
+  }
   const configuration = structuredClone(input.configuration)
   const configurationHash = input.configurationHash
   if (
@@ -694,7 +871,10 @@ function prepareSourceEvidenceAwsRequest(
     stateTable === undefined ||
     sourceTable.role !== source ||
     stateTable.role !== 'migration-state' ||
-    stateTable.tableName !== stateTableName
+    !sourceEvidenceStateTableIdentityMatches(
+      stateTable,
+      adapterStateTable,
+    )
   ) {
     return failSourceEvidenceAws('IDENTITY_MISMATCH')
   }
@@ -705,6 +885,36 @@ function prepareSourceEvidenceAwsRequest(
     source,
     sourceTableId: sourceTable.tableId,
     stateTableId: stateTable.tableId,
+  }
+  let authority: WorkspaceSearchMigrationPrePlanAuthority | null = null
+  let planningAuthority:
+    WorkspaceSearchMigrationPlanningAuthorityBinding | null = null
+  if (operation === 'commit') {
+    if (identity.purpose === 'dry-run') {
+      if (hasAuthority) return failSourceEvidenceAws('INVALID_ARGUMENT')
+    } else {
+      if (!hasAuthority) {
+        return failSourceEvidenceAws('INVALID_MAINTENANCE_EVIDENCE')
+      }
+      authority = snapshotSourceEvidencePrePlanAuthority(
+        Reflect.get(input, 'authority'),
+      )
+      if (
+        authority.configurationHash !== configurationHash ||
+        authority.stateTableId !== stateTable.tableId ||
+        authority.lease.runId !== identity.runId
+      ) {
+        return failSourceEvidenceAws('IDENTITY_MISMATCH')
+      }
+      planningAuthority = {
+        ownerId: authority.lease.ownerId,
+        fenceToken: authority.lease.fenceToken,
+        maintenanceEvidencePointerRevision:
+          authority.maintenanceEvidencePointerRevision,
+        maintenanceEvidenceReceiptDigest:
+          authority.maintenanceEvidenceReceiptDigest,
+      }
+    }
   }
   const initialProgress =
     createInitialWorkspaceSearchMigrationSourceEvidenceProgress(identity)
@@ -721,6 +931,8 @@ function prepareSourceEvidenceAwsRequest(
     configuration: preflight.context.configuration,
     configurationHash,
     source,
+    authority,
+    planningAuthority,
   }
 }
 
@@ -877,6 +1089,16 @@ function createSourceEvidencePageItem(
 function createSourceEvidenceCommitCommand(
   input: CreateSourceEvidenceCommitCommandInput,
 ): TransactWriteItemsCommand {
+  const requiredAuthorityConditionCount =
+    input.successor.purpose === 'planning' ? 3 : 0
+  if (
+    input.authorityConditionChecks.length !==
+      requiredAuthorityConditionCount ||
+    (input.successor.purpose === 'planning') !==
+      (input.commitClock !== null)
+  ) {
+    return failSourceEvidenceAws('INVALID_STATE')
+  }
   const headCondition = input.predecessorRead.exists
     ? createExistingHeadCondition(input.predecessor)
     : createAbsentHeadCondition()
@@ -884,10 +1106,12 @@ function createSourceEvidenceCommitCommand(
     input.predecessor,
     input.successor,
     input.pageRecordKey,
+    input.commitClock,
   )
   return new TransactWriteItemsCommand({
     ClientRequestToken: transactionToken,
     TransactItems: [
+      ...input.authorityConditionChecks,
       {
         Put: {
           TableName: input.stateTableName,
@@ -1009,13 +1233,20 @@ function createExistingHeadCondition(
  * @param predecessor - Exact predecessor progress.
  * @param successor - Exact intended successor progress.
  * @param pageRecordKey - Deterministic immutable page record key.
+ * @param commitClock - Planning clock that shaped authority conditions.
  * @returns Stable token of at most 36 ASCII characters.
  */
 function createSourceEvidenceTransactionToken(
   predecessor: WorkspaceSearchMigrationSourceEvidenceProgress,
   successor: WorkspaceSearchMigrationSourceEvidenceProgress,
   pageRecordKey: string,
+  commitClock: SourceEvidenceCommitClock | null,
 ): string {
+  if (
+    (successor.purpose === 'planning') !== (commitClock !== null)
+  ) {
+    return failSourceEvidenceAws('INVALID_STATE')
+  }
   const digest = createMigrationDigest({
     kind: 'workspace-search-source-evidence-commit',
     version: sourceEvidenceAwsRecordVersion,
@@ -1024,6 +1255,8 @@ function createSourceEvidenceTransactionToken(
     successor:
       createWorkspaceSearchMigrationSourceEvidenceProgressDigest(successor),
     pageRecordKey,
+    authorityConditionEpochMilliseconds:
+      commitClock === null ? null : commitClock.epochMilliseconds,
   })
   return `wsm1-${digest.slice(0, 31)}`
 }
@@ -1404,6 +1637,30 @@ function requireProgressIdentity(
 }
 
 /**
+ * Compares immutable state-table incarnation fields across adapter and request.
+ *
+ * Mutable PITR windows are intentionally excluded because they advance while
+ * the same physical table remains authoritative.
+ *
+ * @param requested - State identity carried by the measured configuration.
+ * @param adapter - State identity captured when the adapter was constructed.
+ * @returns Whether both identify the exact same physical table incarnation.
+ */
+function sourceEvidenceStateTableIdentityMatches(
+  requested: MigrationTableIdentity,
+  adapter: MigrationTableIdentity,
+): boolean {
+  return requested.role === 'migration-state' &&
+    adapter.role === 'migration-state' &&
+    requested.tableName === adapter.tableName &&
+    requested.tableArn === adapter.tableArn &&
+    requested.tableId === adapter.tableId &&
+    requested.creationTime === adapter.creationTime &&
+    requested.account === adapter.account &&
+    requested.region === adapter.region
+}
+
+/**
  * Tests whether one page carries an exact evidence-chain identity.
  *
  * @param page - Strict parsed page evidence.
@@ -1685,6 +1942,364 @@ function requireSourceEvidencePageCountWithinLimit(
 }
 
 /**
+ * Detaches and validates planning authority before the operation's first await.
+ *
+ * Commit-time freshness and durable currentness are deliberately revalidated
+ * after the final state-incarnation guard. This snapshot prevents caller
+ * mutation during the preceding reads and source scan from changing the
+ * authority that the transaction eventually checks.
+ *
+ * @param value - Candidate caller-owned authority aggregate.
+ * @returns Exact detached authority material.
+ */
+function snapshotSourceEvidencePrePlanAuthority(
+  value: unknown,
+): WorkspaceSearchMigrationPrePlanAuthority {
+  const record = requireSourceEvidenceInputRecord(value)
+  requireExactSourceEvidenceInputKeys(record, [
+    'configurationHash',
+    'evaluatedAt',
+    'lease',
+    'maintenanceEvidencePointerRevision',
+    'maintenanceEvidenceReceipt',
+    'maintenanceEvidenceReceiptDigest',
+    'stateTableId',
+  ])
+  const lease = snapshotSourceEvidenceAuthorityLease(
+    Reflect.get(record, 'lease'),
+  )
+  const receipt = snapshotSourceEvidenceAuthorityReceipt(
+    Reflect.get(record, 'maintenanceEvidenceReceipt'),
+  )
+  const receiptDigest = readSourceEvidenceInputDigest(
+    Reflect.get(record, 'maintenanceEvidenceReceiptDigest'),
+  )
+  const pointerRevision = readSourceEvidencePositiveSafeInteger(
+    Reflect.get(record, 'maintenanceEvidencePointerRevision'),
+  )
+  if (
+    receipt.runId !== lease.runId ||
+    receipt.fenceToken !== lease.fenceToken ||
+    receiptDigest !== createMigrationDigest(receipt)
+  ) {
+    return failSourceEvidenceAws('INVALID_MAINTENANCE_EVIDENCE')
+  }
+  return {
+    configurationHash: readSourceEvidenceInputDigest(
+      Reflect.get(record, 'configurationHash'),
+    ),
+    stateTableId: readSourceEvidenceBoundedText(
+      Reflect.get(record, 'stateTableId'),
+      1_024,
+    ),
+    lease,
+    maintenanceEvidenceReceiptDigest: receiptDigest,
+    maintenanceEvidencePointerRevision: pointerRevision,
+    maintenanceEvidenceReceipt: receipt,
+    evaluatedAt: readSourceEvidenceCanonicalTime(
+      Reflect.get(record, 'evaluatedAt'),
+    ),
+  }
+}
+
+/**
+ * Detaches one complete lease embedded in a planning-authority aggregate.
+ *
+ * @param value - Candidate caller-owned lease.
+ * @returns Exact validated lease.
+ */
+function snapshotSourceEvidenceAuthorityLease(
+  value: unknown,
+): WorkspaceSearchMigrationLease {
+  const record = requireSourceEvidenceInputRecord(value)
+  requireExactSourceEvidenceInputKeys(record, [
+    'expiresAt',
+    'fenceToken',
+    'heartbeatAt',
+    'ownerId',
+    'runId',
+  ])
+  const lease: WorkspaceSearchMigrationLease = {
+    runId: readSourceEvidenceMigrationIdentifier(
+      Reflect.get(record, 'runId'),
+    ),
+    ownerId: readSourceEvidenceMigrationIdentifier(
+      Reflect.get(record, 'ownerId'),
+    ),
+    fenceToken: readSourceEvidencePositiveSafeInteger(
+      Reflect.get(record, 'fenceToken'),
+    ),
+    expiresAt: readSourceEvidenceCanonicalTime(
+      Reflect.get(record, 'expiresAt'),
+    ),
+    heartbeatAt: readSourceEvidenceCanonicalTime(
+      Reflect.get(record, 'heartbeatAt'),
+    ),
+  }
+  validateWorkspaceSearchMigrationLease(lease)
+  return lease
+}
+
+/**
+ * Detaches one complete receipt embedded in planning authority.
+ *
+ * @param value - Candidate caller-owned maintenance receipt.
+ * @returns Exact validated receipt.
+ */
+function snapshotSourceEvidenceAuthorityReceipt(
+  value: unknown,
+): WorkspaceSearchMaintenanceEvidenceReceipt {
+  const record = requireSourceEvidenceInputRecord(value)
+  requireExactSourceEvidenceInputKeys(record, [
+    'evidenceDigest',
+    'evidenceLocator',
+    'fenceToken',
+    'oldestObservationAt',
+    'runId',
+    'runtimeRevision',
+    'validatedAt',
+    'validUntil',
+  ])
+  const receipt: WorkspaceSearchMaintenanceEvidenceReceipt = {
+    runId: readSourceEvidenceMigrationIdentifier(
+      Reflect.get(record, 'runId'),
+    ),
+    evidenceDigest: readSourceEvidenceInputDigest(
+      Reflect.get(record, 'evidenceDigest'),
+    ),
+    evidenceLocator: readSourceEvidenceBoundedText(
+      Reflect.get(record, 'evidenceLocator'),
+      2_048,
+    ),
+    runtimeRevision: readSourceEvidencePositiveSafeInteger(
+      Reflect.get(record, 'runtimeRevision'),
+    ),
+    fenceToken: readSourceEvidencePositiveSafeInteger(
+      Reflect.get(record, 'fenceToken'),
+    ),
+    validatedAt: readSourceEvidenceCanonicalTime(
+      Reflect.get(record, 'validatedAt'),
+    ),
+    oldestObservationAt: readSourceEvidenceCanonicalTime(
+      Reflect.get(record, 'oldestObservationAt'),
+    ),
+    validUntil: readSourceEvidenceCanonicalTime(
+      Reflect.get(record, 'validUntil'),
+    ),
+  }
+  validateWorkspaceSearchMaintenanceEvidenceReceipt(
+    receipt,
+    receipt.runId,
+  )
+  return receipt
+}
+
+/**
+ * Captures one trusted clock value after write preparation.
+ *
+ * @param clock - Adapter-owned clock dependency.
+ * @returns Canonical time and exact epoch milliseconds.
+ */
+function readSourceEvidenceCommitClock(
+  clock: WorkspaceSearchMigrationPrePlanAuthorityClock,
+): SourceEvidenceCommitClock {
+  const value = clock()
+  if (!(value instanceof Date)) {
+    return failSourceEvidenceAws('INVALID_STATE')
+  }
+  let epochMilliseconds: number
+  try {
+    epochMilliseconds = Date.prototype.getTime.call(value)
+  } catch {
+    return failSourceEvidenceAws('INVALID_STATE')
+  }
+  if (
+    !Number.isSafeInteger(epochMilliseconds) ||
+    epochMilliseconds < 0
+  ) {
+    return failSourceEvidenceAws('INVALID_STATE')
+  }
+  try {
+    return {
+      at: new Date(epochMilliseconds).toISOString(),
+      epochMilliseconds,
+    }
+  } catch {
+    return failSourceEvidenceAws('INVALID_STATE')
+  }
+}
+
+/**
+ * Validates the immutable state-table fields consumed by this adapter.
+ *
+ * @param value - Candidate measured migration-state identity.
+ */
+function requireMigrationStateTableIdentity(value: unknown): void {
+  const record = requireSourceEvidenceInputRecord(value)
+  if (Reflect.get(record, 'role') !== 'migration-state') {
+    return failSourceEvidenceAws('INVALID_ARGUMENT')
+  }
+  requireStateTableName(Reflect.get(record, 'tableName'))
+  readSourceEvidenceBoundedText(Reflect.get(record, 'tableArn'), 2_048)
+  readSourceEvidenceBoundedText(Reflect.get(record, 'tableId'), 1_024)
+  readSourceEvidenceCanonicalTime(Reflect.get(record, 'creationTime'))
+  readSourceEvidenceBoundedText(Reflect.get(record, 'account'), 64)
+  readSourceEvidenceBoundedText(Reflect.get(record, 'region'), 64)
+}
+
+/**
+ * Validates the narrow source-evidence transport without invoking its methods.
+ *
+ * @param transport - Candidate transport dependency.
+ */
+function requireSourceEvidenceAwsTransport(transport: unknown): void {
+  if (
+    typeof transport !== 'object' ||
+    transport === null ||
+    typeof Reflect.get(transport, 'getSourceEvidence') !== 'function' ||
+    typeof Reflect.get(
+      transport,
+      'prepareSourceEvidenceWrite',
+    ) !== 'function' ||
+    typeof Reflect.get(
+      transport,
+      'transactWriteSourceEvidence',
+    ) !== 'function'
+  ) {
+    return failSourceEvidenceAws('INVALID_ARGUMENT')
+  }
+}
+
+/**
+ * Requires one non-array input object.
+ *
+ * @param value - Candidate runtime input.
+ * @returns Object suitable for bounded reflection.
+ */
+function requireSourceEvidenceInputRecord(value: unknown): object {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    Array.isArray(value)
+  ) {
+    return failSourceEvidenceAws('INVALID_ARGUMENT')
+  }
+  return value
+}
+
+/**
+ * Requires an input object to carry exactly the declared enumerable own keys.
+ *
+ * @param value - Candidate input object.
+ * @param expected - Exact accepted key names.
+ */
+function requireExactSourceEvidenceInputKeys(
+  value: object,
+  expected: readonly string[],
+): void {
+  let keys: string[]
+  try {
+    keys = Object.keys(value).sort()
+  } catch {
+    return failSourceEvidenceAws('INVALID_ARGUMENT')
+  }
+  const sortedExpected = [...expected].sort()
+  if (
+    keys.length !== sortedExpected.length ||
+    keys.some((key, index) => key !== sortedExpected[index])
+  ) {
+    return failSourceEvidenceAws('INVALID_ARGUMENT')
+  }
+}
+
+/**
+ * Reads one strict migration identifier from caller input.
+ *
+ * @param value - Candidate identifier.
+ * @returns Exact safe identifier.
+ */
+function readSourceEvidenceMigrationIdentifier(value: unknown): string {
+  if (
+    typeof value !== 'string' ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value)
+  ) {
+    return failSourceEvidenceAws('INVALID_ARGUMENT')
+  }
+  return value
+}
+
+/**
+ * Reads one lowercase SHA-256 digest from caller input.
+ *
+ * @param value - Candidate digest.
+ * @returns Exact validated digest.
+ */
+function readSourceEvidenceInputDigest(value: unknown): string {
+  if (!isHexDigest(value)) {
+    return failSourceEvidenceAws('INVALID_ARGUMENT')
+  }
+  return value
+}
+
+/**
+ * Reads one positive safe integer from caller input.
+ *
+ * @param value - Candidate numeric value.
+ * @returns Exact positive safe integer.
+ */
+function readSourceEvidencePositiveSafeInteger(value: unknown): number {
+  if (
+    typeof value !== 'number' ||
+    !Number.isSafeInteger(value) ||
+    value <= 0
+  ) {
+    return failSourceEvidenceAws('INVALID_ARGUMENT')
+  }
+  return value
+}
+
+/**
+ * Reads one nonempty bounded caller-supplied string.
+ *
+ * @param value - Candidate text.
+ * @param maximumLength - Maximum UTF-16 code-unit length.
+ * @returns Exact validated text.
+ */
+function readSourceEvidenceBoundedText(
+  value: unknown,
+  maximumLength: number,
+): string {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > maximumLength
+  ) {
+    return failSourceEvidenceAws('INVALID_ARGUMENT')
+  }
+  return value
+}
+
+/**
+ * Reads one canonical nonnegative UTC timestamp from caller input.
+ *
+ * @param value - Candidate timestamp.
+ * @returns Exact canonical timestamp.
+ */
+function readSourceEvidenceCanonicalTime(value: unknown): string {
+  if (!isCanonicalTimestamp(value)) {
+    return failSourceEvidenceAws('INVALID_ARGUMENT')
+  }
+  const epochMilliseconds = Date.parse(value)
+  if (
+    !Number.isSafeInteger(epochMilliseconds) ||
+    epochMilliseconds < 0
+  ) {
+    return failSourceEvidenceAws('INVALID_ARGUMENT')
+  }
+  return value
+}
+
+/**
  * Validates a physical DynamoDB table name without echoing it on failure.
  *
  * @param value - Candidate exact table name.
@@ -1738,6 +2353,9 @@ function readSourceEvidenceAwsFailureCode(
       return 'SOURCE_DRIFT'
     }
     if (!(error instanceof Error)) return 'INVALID_STATE'
+    if (isTransactionInProgressErrorName(error)) {
+      return 'AMBIGUOUS_OPERATION_UNRESOLVED'
+    }
     const classificationInput =
       createSourceEvidenceAwsErrorClassificationInput(error)
     if (
@@ -1753,17 +2371,40 @@ function readSourceEvidenceAwsFailureCode(
 }
 
 /**
+ * Detects trusted state-table drift failures during transaction reconciliation.
+ *
+ * @param error - Failure raised by a state read or managed preparation.
+ * @returns Whether the failure proves the migration-state incarnation changed.
+ */
+function isSourceEvidenceConfigurationDrift(error: unknown): boolean {
+  if (error instanceof ResourceNotFoundException) return true
+  if (error instanceof SourceEvidenceAwsFailure) {
+    return error.code === 'CONFIGURATION_DRIFT'
+  }
+  if (error instanceof WorkspaceSearchMigrationFailure) {
+    try {
+      return error.code === 'CONFIGURATION_DRIFT'
+    } catch {
+      return false
+    }
+  }
+  return false
+}
+
+/**
  * Classifies a transaction error only after rereads prove no write occurred.
  *
  * @param error - Raw transaction error retained inside the private boundary.
- * @returns Stable retryable or fail-closed failure code.
+ * @param purpose - Transaction layout discriminator.
+ * @returns Stable retryable, authority, ambiguous, or fail-closed code.
  */
 function classifySourceEvidenceTransactionError(
   error: unknown,
+  purpose: WorkspaceSearchMigrationSourceEvidencePurpose,
 ): SourceEvidenceAwsFailureCode {
   try {
     if (error instanceof ResourceNotFoundException) {
-      return 'SOURCE_DRIFT'
+      return 'CONFIGURATION_DRIFT'
     }
     if (
       error instanceof TransactionConflictException ||
@@ -1772,18 +2413,44 @@ function classifySourceEvidenceTransactionError(
       return 'TRANSIENT_INFRASTRUCTURE_FAILURE'
     }
     if (error instanceof TransactionCanceledException) {
+      if (purpose === 'planning') {
+        if (
+          readTransactionCancellationReasonCode(error, 0) ===
+            'ConditionalCheckFailed'
+        ) {
+          return 'LEASE_LOST'
+        }
+        if (
+          readTransactionCancellationReasonCode(error, 1) ===
+            'ConditionalCheckFailed' ||
+          readTransactionCancellationReasonCode(error, 2) ===
+            'ConditionalCheckFailed'
+        ) {
+          return 'INVALID_MAINTENANCE_EVIDENCE'
+        }
+      }
+      if (transactionCancellationHasConditionalFailure(error)) {
+        return 'INVALID_STATE'
+      }
       return transactionCancellationWasTransient(error)
         ? 'TRANSIENT_INFRASTRUCTURE_FAILURE'
         : 'INVALID_STATE'
     }
     if (!(error instanceof Error)) return 'INVALID_STATE'
+    if (isTransactionInProgressErrorName(error)) {
+      return 'AMBIGUOUS_OPERATION_UNRESOLVED'
+    }
     const classificationInput =
       createSourceEvidenceAwsErrorClassificationInput(error)
     if (
-      isThrottlingError(classificationInput) ||
-      isTransientError(classificationInput)
+      isThrottlingError(classificationInput)
     ) {
       return 'TRANSIENT_INFRASTRUCTURE_FAILURE'
+    }
+    if (
+      isTransientError(classificationInput)
+    ) {
+      return 'AMBIGUOUS_OPERATION_UNRESOLVED'
     }
     return 'INVALID_STATE'
   } catch {
@@ -1800,8 +2467,58 @@ function classifySourceEvidenceTransactionError(
 function isTransactionConflictErrorName(error: unknown): boolean {
   if (!(error instanceof Error)) return false
   const name: unknown = Reflect.get(error, 'name')
-  return name === 'TransactionConflictException' ||
-    name === 'TransactionInProgressException'
+  return name === 'TransactionConflictException'
+}
+
+/**
+ * Detects a transaction whose original idempotent request may still commit.
+ *
+ * @param error - Candidate raw SDK error.
+ * @returns Whether the stable name denotes an in-progress transaction.
+ */
+function isTransactionInProgressErrorName(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  const name: unknown = Reflect.get(error, 'name')
+  return name === 'TransactionInProgressException'
+}
+
+/**
+ * Reads one stable cancellation reason code by transaction item index.
+ *
+ * @param error - Raw DynamoDB transaction cancellation.
+ * @param index - Zero-based transaction item index.
+ * @returns Stable reason code or undefined.
+ */
+function readTransactionCancellationReasonCode(
+  error: TransactionCanceledException,
+  index: number,
+): string | undefined {
+  const reasons: unknown = Reflect.get(error, 'CancellationReasons')
+  if (!Array.isArray(reasons)) return undefined
+  const reason: unknown = reasons[index]
+  if (typeof reason !== 'object' || reason === null) return undefined
+  const code: unknown = Reflect.get(reason, 'Code')
+  return typeof code === 'string' ? code : undefined
+}
+
+/**
+ * Detects any conditional failure in one transaction cancellation.
+ *
+ * @param error - Raw DynamoDB transaction cancellation.
+ * @returns Whether one transaction item rejected its condition.
+ */
+function transactionCancellationHasConditionalFailure(
+  error: TransactionCanceledException,
+): boolean {
+  const reasons: unknown = Reflect.get(error, 'CancellationReasons')
+  if (!Array.isArray(reasons)) return false
+  for (const reason of reasons) {
+    if (typeof reason !== 'object' || reason === null) continue
+    if (Reflect.get(reason, 'Code') === 'ConditionalCheckFailed') {
+      return true
+    }
+  }
+  return false
 }
 
 /**
