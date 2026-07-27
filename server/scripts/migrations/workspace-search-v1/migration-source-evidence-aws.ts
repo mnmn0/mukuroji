@@ -334,9 +334,6 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
   /** Exact measured migration-state table incarnation. */
   private readonly stateTable: MigrationTableIdentity
 
-  /** Exact physical migration-state table selected by the operator. */
-  private readonly stateTableName: string
-
   /** Managed source scanner sharing the measured identity session. */
   private readonly scanner: WorkspaceSearchMigrationSourceEvidenceScanner
 
@@ -355,7 +352,6 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
     input: CreateWorkspaceSearchMigrationSourceEvidenceAwsPortInput,
   ) {
     this.stateTable = structuredClone(input.stateTable)
-    this.stateTableName = this.stateTable.tableName
     this.scanner = input.scanner
     this.transport = input.transport
     this.clock = input.clock
@@ -497,7 +493,7 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
             commitAt: new Date(commitClock.epochMilliseconds),
           })
       const transaction = createSourceEvidenceCommitCommand({
-        stateTableName: this.stateTableName,
+        stateTableName: this.stateTable.tableName,
         predecessorRead,
         predecessor,
         pageRecordKey,
@@ -571,7 +567,7 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
     const recordKey = createSourceEvidenceHeadRecordKey(request.identity)
     const output = await this.getStateEvidence(
       createStrongSourceEvidenceGetCommand(
-        this.stateTableName,
+        this.stateTable.tableName,
         recordKey,
       ),
     )
@@ -622,7 +618,7 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
   ): Promise<SourceEvidencePageRead | undefined> {
     const output = await this.getStateEvidence(
       createStrongSourceEvidenceGetCommand(
-        this.stateTableName,
+        this.stateTable.tableName,
         recordKey,
       ),
     )

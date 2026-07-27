@@ -3062,9 +3062,9 @@ function createCurrentReceiptAuthorityCondition(
     names[nameAlias] = attributeName
     values[valueAlias] = attributeValue
   }
-  clauses.push(
-    '#validUntilEpochMilliseconds > :minimumExpiry',
-  )
+  names['#validUntilEpochMilliseconds'] =
+    'validUntilEpochMilliseconds'
+  clauses.push('#validUntilEpochMilliseconds > :minimumExpiry')
   values[':minimumExpiry'] = {
     N: String(
       clock.epochMilliseconds +
