@@ -71,6 +71,9 @@ import type {
 import {
   createEmptyWorkspaceSearchMigrationCheckpoint,
 } from './migration-state-machine'
+import {
+  MAINTENANCE_EVIDENCE_MAX_BYTES,
+} from './maintenance-evidence'
 
 const TEST_ACCOUNT = '123456789012'
 const TEST_REGION = 'ap-northeast-1'
@@ -171,8 +174,22 @@ class RecordingIdentityAwsTransport
   readonly transactWriteSourceEvidenceCommands:
     TransactWriteItemsCommand[] = []
 
+  /** Recorded strongly consistent pre-plan authority point reads. */
+  readonly getPrePlanAuthorityCommands: GetItemCommand[] = []
+
+  /** Recorded atomic pre-plan authority transactions. */
+  readonly transactWritePrePlanAuthorityCommands:
+    TransactWriteItemsCommand[] = []
+
+  /** Number of low-level authority write preparations. */
+  preparePrePlanAuthorityWriteCount = 0
+
   /** Durable fake source-evidence items keyed by recordKey. */
   private readonly sourceEvidenceItems =
+    new Map<string, Readonly<Record<string, AttributeValue>>>()
+
+  /** Durable fake pre-plan authority items keyed by recordKey. */
+  private readonly prePlanAuthorityItems =
     new Map<string, Readonly<Record<string, AttributeValue>>>()
 
   /** Optional synchronous effect after recording an evidence point read. */
@@ -180,6 +197,15 @@ class RecordingIdentityAwsTransport
 
   /** Optional synchronous effect after recording an evidence transaction. */
   transactWriteSourceEvidenceEffect: (() => void) | undefined
+
+  /** Optional synchronous effect during authority write preparation. */
+  preparePrePlanAuthorityWriteEffect: (() => void) | undefined
+
+  /** Optional synchronous effect after recording an authority point read. */
+  getPrePlanAuthorityEffect: (() => void) | undefined
+
+  /** Optional synchronous effect after recording an authority transaction. */
+  transactWritePrePlanAuthorityEffect: (() => void) | undefined
 
   /** Recorded S3 bucket-encryption commands. */
   readonly getBucketEncryptionCommands: GetBucketEncryptionCommand[] = []
@@ -399,6 +425,80 @@ class RecordingIdentityAwsTransport
     }
     for (const entry of pending) {
       this.sourceEvidenceItems.set(entry.recordKey, entry.item)
+    }
+    return { $metadata: {} }
+  }
+
+  /**
+   * Records and serves one exact pre-plan authority point read.
+   *
+   * @param command - Exact adapter-owned GetItem command.
+   * @returns Detached durable item when one exists.
+   */
+  async getPrePlanAuthority(
+    command: GetItemCommand,
+  ): Promise<GetItemCommandOutput> {
+    this.getPrePlanAuthorityCommands.push(command)
+    this.getPrePlanAuthorityEffect?.()
+    const recordKey = command.input.Key?.recordKey?.S
+    if (recordKey === undefined) {
+      throw new Error('Expected exact pre-plan authority record key.')
+    }
+    const item = this.prePlanAuthorityItems.get(recordKey)
+    return {
+      $metadata: {},
+      ...(item === undefined ? {} : { Item: structuredClone(item) }),
+    }
+  }
+
+  /**
+   * Records the low-level no-op preparation owned by the managed wrapper.
+   *
+   * @returns Completed preparation.
+   */
+  preparePrePlanAuthorityWrite(): Promise<void> {
+    this.preparePrePlanAuthorityWriteCount += 1
+    this.preparePrePlanAuthorityWriteEffect?.()
+    return Promise.resolve()
+  }
+
+  /**
+   * Records and atomically installs every pre-plan authority Put item.
+   *
+   * The condition-aware authority adapter tests own condition semantics. This
+   * managed-session fake only proves command routing and atomic item exposure.
+   *
+   * @param command - Exact adapter-owned transaction command.
+   * @returns Empty successful transaction response.
+   */
+  async transactWritePrePlanAuthority(
+    command: TransactWriteItemsCommand,
+  ): Promise<TransactWriteItemsCommandOutput> {
+    this.transactWritePrePlanAuthorityCommands.push(command)
+    this.transactWritePrePlanAuthorityEffect?.()
+    const pending: {
+      /** Exact deterministic authority record key. */
+      readonly recordKey: string
+      /** Detached low-level authority item. */
+      readonly item: Readonly<Record<string, AttributeValue>>
+    }[] = []
+    for (const entry of command.input.TransactItems ?? []) {
+      if (entry.Put === undefined) continue
+      const item = entry.Put.Item
+      const recordKey = item?.recordKey?.S
+      if (item === undefined || recordKey === undefined) {
+        throw new Error('Expected one exact pre-plan authority Put item.')
+      }
+      pending.push({
+        recordKey,
+        item: structuredClone(item),
+      })
+    }
+    if (pending.length === 0) {
+      throw new Error('Expected at least one pre-plan authority Put item.')
+    }
+    for (const entry of pending) {
+      this.prePlanAuthorityItems.set(entry.recordKey, entry.item)
     }
     return { $metadata: {} }
   }
@@ -630,6 +730,215 @@ describe('Workspace Search migration AWS identity adapter', () => {
     expect(transport.transactWriteSourceEvidenceCommands).toHaveLength(0)
     expect(transport.scanSourceCommands).toHaveLength(0)
     port.close()
+  })
+
+  test('rejects every unmeasured pre-plan authority operation before data I/O', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const leaseClaim = {
+      runId: 'unmeasured-authority-run',
+      ownerId: 'unmeasured-authority-owner',
+      fenceToken: 1,
+    }
+    const receiptDigest = '0'.repeat(64)
+    const operations: (() => Promise<unknown>)[] = [
+      () => port.acquireLease({
+        runId: leaseClaim.runId,
+        ownerId: leaseClaim.ownerId,
+      }),
+      () => port.heartbeatLease({ lease: leaseClaim }),
+      () => port.renewMaintenanceEvidence({
+        lease: leaseClaim,
+        expectedPointer: null,
+        evidenceBytes: new Uint8Array([1]),
+      }),
+      () => port.readAuthority({
+        lease: leaseClaim,
+        maintenanceEvidenceReceiptDigest: receiptDigest,
+        maintenanceEvidencePointerRevision: 1,
+      }),
+      () => port.readMaintenanceEvidenceReceipt(
+        leaseClaim.runId,
+        receiptDigest,
+      ),
+    ]
+
+    for (const operation of operations) {
+      await expect(operation()).rejects.toMatchObject({
+        code: 'INVALID_STATE',
+        message:
+          'Workspace Search pre-plan authority stopped safely (INVALID_STATE).',
+      })
+    }
+    expect(transport.getPrePlanAuthorityCommands).toHaveLength(0)
+    expect(transport.transactWritePrePlanAuthorityCommands).toHaveLength(0)
+    expect(transport.describeTableCommands).toHaveLength(0)
+    port.close()
+  })
+
+  test('routes snapshotted lease acquire and heartbeat through the measured session', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    let clock = '2026-07-28T03:00:00.000Z'
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => new Date(clock),
+    )
+    await port.measureConfiguration()
+    let selectedRunId = 'managed-authority-run'
+    let selectedOwnerId = 'managed-authority-owner'
+    const acquireInput = {
+      get runId() {
+        return selectedRunId
+      },
+      get ownerId() {
+        return selectedOwnerId
+      },
+    }
+
+    const pendingAcquire = port.acquireLease(acquireInput)
+    selectedRunId = 'mutated-run'
+    selectedOwnerId = 'mutated-owner'
+    const acquired = await pendingAcquire
+    clock = '2026-07-28T03:00:59.999Z'
+    const heartbeated = await port.heartbeatLease({
+      lease: {
+        runId: acquired.runId,
+        ownerId: acquired.ownerId,
+        fenceToken: acquired.fenceToken,
+      },
+    })
+
+    expect(acquired).toEqual({
+      runId: 'managed-authority-run',
+      ownerId: 'managed-authority-owner',
+      fenceToken: 1,
+      heartbeatAt: '2026-07-28T03:00:00.000Z',
+      expiresAt: '2026-07-28T03:01:00.000Z',
+    })
+    expect(heartbeated).toEqual({
+      ...acquired,
+      heartbeatAt: '2026-07-28T03:00:59.999Z',
+      expiresAt: '2026-07-28T03:01:59.999Z',
+    })
+    expect(transport.getPrePlanAuthorityCommands).toHaveLength(2)
+    for (const command of transport.getPrePlanAuthorityCommands) {
+      expect(command.input).toMatchObject({
+        TableName: requested.tables['migration-state'],
+        ConsistentRead: true,
+      })
+    }
+    expect(transport.transactWritePrePlanAuthorityCommands).toHaveLength(2)
+    const acquireItem =
+      transport.transactWritePrePlanAuthorityCommands[0]
+        ?.input.TransactItems?.[0]?.Put?.Item
+    const heartbeatItem =
+      transport.transactWritePrePlanAuthorityCommands[1]
+        ?.input.TransactItems?.[0]?.Put?.Item
+    expect(acquireItem?.recordKey?.S).toBe(heartbeatItem?.recordKey?.S)
+    expect(acquireItem).toMatchObject({
+      runId: { S: 'managed-authority-run' },
+      ownerId: { S: 'managed-authority-owner' },
+      fenceToken: { N: '1' },
+    })
+    expect(heartbeatItem).toMatchObject({
+      heartbeatAt: { S: '2026-07-28T03:00:59.999Z' },
+      expiresAt: { S: '2026-07-28T03:01:59.999Z' },
+    })
+
+    const authorityReadCount =
+      transport.getPrePlanAuthorityCommands.length
+    const authorityWriteCount =
+      transport.transactWritePrePlanAuthorityCommands.length
+    const stateDescribeCount = transport.describeTableCommands.length
+    await expect(port.renewMaintenanceEvidence({
+      lease: {
+        runId: heartbeated.runId,
+        ownerId: heartbeated.ownerId,
+        fenceToken: heartbeated.fenceToken,
+      },
+      expectedPointer: null,
+      evidenceBytes:
+        new Uint8Array(MAINTENANCE_EVIDENCE_MAX_BYTES + 1),
+    })).rejects.toMatchObject({
+      code: 'INVALID_MAINTENANCE_EVIDENCE',
+      message:
+        'Workspace Search pre-plan authority stopped safely (INVALID_MAINTENANCE_EVIDENCE).',
+    })
+    expect(transport.getPrePlanAuthorityCommands)
+      .toHaveLength(authorityReadCount)
+    expect(transport.transactWritePrePlanAuthorityCommands)
+      .toHaveLength(authorityWriteCount)
+    expect(transport.describeTableCommands).toHaveLength(stateDescribeCount)
+    port.close()
+  })
+
+  test('fails closed when the migration-state table is replaced during authority commit', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => new Date('2026-07-28T04:00:00.000Z'),
+    )
+    await port.measureConfiguration()
+    const stateTableName = requested.tables['migration-state']
+    const replacement = createReplacementDescribeTableOutput(
+      'migration-state',
+      stateTableName,
+      requested,
+    )
+    transport.transactWritePrePlanAuthorityEffect = () => {
+      transport.describeTableOutputs.set(stateTableName, replacement)
+    }
+
+    await expect(
+      port.acquireLease({
+        runId: 'replacement-authority-run',
+        ownerId: 'replacement-authority-owner',
+      }),
+    ).rejects.toMatchObject({
+      code: 'CONFIGURATION_DRIFT',
+      message:
+        'Workspace Search pre-plan authority stopped safely (CONFIGURATION_DRIFT).',
+    })
+    expect(transport.getPrePlanAuthorityCommands).toHaveLength(2)
+    expect(transport.transactWritePrePlanAuthorityCommands).toHaveLength(1)
+    port.close()
+  })
+
+  test('invalidates an authority read when the managed session closes', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => new Date('2026-07-28T05:00:00.000Z'),
+    )
+    await port.measureConfiguration()
+    transport.getPrePlanAuthorityEffect = () => port.close()
+
+    await expect(
+      port.acquireLease({
+        runId: 'close-authority-run',
+        ownerId: 'close-authority-owner',
+      }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search pre-plan authority stopped safely (INVALID_STATE).',
+    })
+    expect(transport.getPrePlanAuthorityCommands).toHaveLength(1)
+    expect(transport.transactWritePrePlanAuthorityCommands).toHaveLength(0)
+    expect(transport.closeCount).toBe(1)
   })
 
   test('redacts forged managed evidence failure codes before data I/O', async () => {
@@ -1784,6 +2093,97 @@ describe('Workspace Search migration AWS identity adapter', () => {
       endpointVariables.forEach((name, index) => {
         restoreEnvironmentVariable(name, previousValues[index])
       })
+    }
+  })
+
+  test('normalizes only locally aborted concrete authority transactions', async () => {
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      createRequestedResources(),
+    )
+    const transport = readOwnObject(port, 'transport')
+    const dynamodbClient = readOwnObject(transport, 'dynamodbClient')
+    const send: unknown = Reflect.get(dynamodbClient, 'send')
+    const transact: unknown = Reflect.get(
+      transport,
+      'transactWritePrePlanAuthority',
+    )
+    const originalSetTimeout: unknown = Reflect.get(
+      globalThis,
+      'setTimeout',
+    )
+    if (
+      typeof send !== 'function' ||
+      typeof transact !== 'function' ||
+      typeof originalSetTimeout !== 'function'
+    ) {
+      throw new Error('Expected concrete authority transport functions.')
+    }
+    const command = new TransactWriteItemsCommand({
+      TransactItems: [],
+    })
+    const rawCanary = 'RAW-LOCAL-ABORT-CANARY'
+    const rawAbort = new Error(rawCanary)
+    rawAbort.name = 'AbortError'
+
+    try {
+      Reflect.set(
+        dynamodbClient,
+        'send',
+        (_command: unknown, options: unknown): Promise<never> => {
+          const signal = readAbortSignal(options)
+          if (!signal.aborted) {
+            throw new Error('Expected the local deadline to abort first.')
+          }
+          return Promise.reject(rawAbort)
+        },
+      )
+      Reflect.set(
+        globalThis,
+        'setTimeout',
+        (callback: unknown): number => {
+          if (typeof callback !== 'function') {
+            throw new Error('Expected one timeout callback.')
+          }
+          Reflect.apply(callback, undefined, [])
+          return 0
+        },
+      )
+
+      let normalized: unknown
+      try {
+        await Reflect.apply(transact, transport, [command])
+      } catch (error: unknown) {
+        normalized = error
+      }
+      expect(normalized).toBeInstanceOf(Error)
+      if (!(normalized instanceof Error)) {
+        throw new Error('Expected normalized timeout error.')
+      }
+      expect(normalized).toMatchObject({
+        name: 'TimeoutError',
+        code: 'ETIMEDOUT',
+      })
+      expect(normalized.message).not.toContain(rawCanary)
+
+      Reflect.set(globalThis, 'setTimeout', originalSetTimeout)
+      const externalAbort = new Error('EXTERNAL-ABORT-CANARY')
+      externalAbort.name = 'AbortError'
+      Reflect.set(
+        dynamodbClient,
+        'send',
+        (): Promise<never> => Promise.reject(externalAbort),
+      )
+      let preserved: unknown
+      try {
+        await Reflect.apply(transact, transport, [command])
+      } catch (error: unknown) {
+        preserved = error
+      }
+      expect(preserved).toBe(externalAbort)
+    } finally {
+      Reflect.set(globalThis, 'setTimeout', originalSetTimeout)
+      Reflect.set(dynamodbClient, 'send', send)
+      port.close()
     }
   })
 
@@ -3381,6 +3781,23 @@ function readOwnObject(owner: object, key: string): object {
     throw new Error(`Expected object implementation field: ${key}`)
   }
   return value
+}
+
+/**
+ * Reads one concrete SDK abort signal without a type assertion.
+ *
+ * @param options - Candidate handler options passed to the SDK client.
+ * @returns Exact abort signal installed by the authority transport.
+ */
+function readAbortSignal(options: unknown): AbortSignal {
+  if (typeof options !== 'object' || options === null) {
+    throw new Error('Expected concrete SDK handler options.')
+  }
+  const signal: unknown = Reflect.get(options, 'abortSignal')
+  if (!(signal instanceof AbortSignal)) {
+    throw new Error('Expected concrete SDK abort signal.')
+  }
+  return signal
 }
 
 /**

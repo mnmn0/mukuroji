@@ -17,7 +17,7 @@ repository に固定せず、各実行の evidence record に残します。
 | Release | PR/push workflow が Server test を含む全 source/build config の strict typecheck、static analysis、unit/integration、Web E2E、CDK test/nag/synth を実行し、main ruleset が6つの必須 check を強制する | Path-filtered local runtime と外部 reviewer は常時 required にせず、対象変更ごとの release evidence で結果または rate limit を確認すること |
 | Web journey quality | Required Playwright gate が主要 Work Item 画面の keyboard/focus、390px viewport、screen-reader-facing ARIA tree、低速 API 中の status と復帰を検証する | Chromium と mock API による回帰 proxy であり、実 screen reader、visual regression、performance budget は未実装 |
 | Runtime control / rollout | AWS AppConfig の schema 検証済み `enabled` / `disabled` document を API、WebSocket、worker の entrypoint で fail-closed に評価し、operator 用 canary strategy と configuration failure alarm を定義する。Backward-compatible CDK/Lambda update と CloudFormation rollback も利用できる | `read-only` mode、route/effect registry、Lambda alias、CodeDeploy による code canary は未実装。AppConfig の停止制御を code/schema rollout の互換性検証や writer fence の代用にしないこと |
-| Migration | Production-safe migration contract と entry/verification/rollback evidence を定義する。Workspace Search migration 専用の retained/PITR state table、Object Lock COMPLIANCE の segmented journal、transaction 限定 operator policy、物理 table/PITR/journal identity と maintenance drain evidence の strict validator、sealed plan/lease/fence/OCC/checkpoint/apply/verify/部分 apply からの reverse rollback を検証する永続 state-machine kernel を持つ。同じ measured AWS session に identity-bound な source Scan 1 page と exact digest/checkpoint reducer を持ち、複数 page の digest-only row evidence と累積 checkpoint を同じ conditional transaction で保存して、commit 後の response loss から再開できる。live projection writer は canonical 内容に server-owned `projectionDigest` を付与する | Raw source item を lossless に保持する immutable artifact と S3 adapter、target join、実行 CLI、writer fence、pre-plan scan の lease/fresh maintenance evidence binding、non-production 実行 evidence は未実装。digest-only row evidence は planning input や rollback preimage の代用にならず、kernel と既存 backfill だけを production migration gate に使用しないこと |
+| Migration | Production-safe migration contract と entry/verification/rollback evidence を定義する。Workspace Search migration 専用の retained/PITR state table、Object Lock COMPLIANCE の segmented journal、transaction 限定 operator policy、物理 table/PITR/journal identity と maintenance drain evidence の strict validator、sealed plan/lease/fence/OCC/checkpoint/apply/verify/部分 apply からの reverse rollback を検証する永続 state-machine kernel を持つ。同じ measured AWS session に identity-bound な source Scan 1 page と exact digest/checkpoint reducer を持ち、複数 page の digest-only row evidence と累積 checkpoint を同じ conditional transaction で保存して、commit 後の response loss から再開できる。Migration-state table には全 run/configuration で競合する global lease/heartbeat と、fresh maintenance evidence の immutable receipt/current pointer を永続化する。live projection writer は canonical 内容に server-owned `projectionDigest` を付与する | Raw source item を lossless に保持する immutable artifact と S3 adapter、target join、実行 CLI/heartbeat supervisor、writer fence、planning source page commit の lease/fence/current receipt binding、non-production 実行 evidence は未実装。digest-only row evidence は planning input や rollback preimage の代用にならず、kernel と既存 backfill だけを production migration gate に使用しないこと |
 | Data durability | Stateful DynamoDB table は `Retain` + PITR、file bucket は `Retain` + versioning を使う。Work Items には read-only の manifest/compare verifier がある | Restore、writer fence、定期実行、regional replication/failover、AWS Backup plan は未実装。verifier の導入だけで drill や regional DR を完了扱いにしないこと |
 
 この表の未実装項目を、手順書が存在することだけで実装済みとして扱ってはいけません。
@@ -327,9 +327,27 @@ head に条件付けた同じ transaction で保存します。Transaction の c
 Resume に必要な checkpoint cursor は raw DynamoDB key を含み、tenant identifier を含み得るため、
 digest-only なのは row evidence に限ります。Cursor は retained migration state table のみに保存し、
 ログや外部 artifact へ出力せず、同 table の read 権限も migration operator に限定します。
+Pre-plan authority は同じ measured AWS session と migration-state table に永続化します。物理
+state-table incarnation ごとに1つの global lease を使い、configuration/run が異なっても active
+lease と競合します。Lease は60秒、heartbeat は同じ run/owner/fence の未失効 lease だけを延長し、
+expiry ちょうどからの takeover は fence を単調増加させます。Configuration が変わった場合も
+期限切れ predecessor を exact CAS して同じ global fence chain を引き継ぎます。
+Strict に検証した maintenance evidence は raw bytes を table へ保存せず、exact byte digest、
+secret-free locator、観測時刻、runtime revision、run/fence を immutable receipt に保存します。
+Receipt と current pointer は1 transactionで commit し、lease の残り時間と receipt freshness が
+同じ adapter-owned commit clock で有効なことを要求します。Lease の残り時間が10秒を超えることは
+transaction の ConditionCheck で再確認し、receipt freshness は command 構築直前に検証します。
+Heartbeat は receipt を fresh にせず、receipt renewal も lease を延長しません。Strong read、
+deterministic idempotency token、
+exact successor reread によって response loss を回収し、receipt/pointer の torn state や別の
+successor は成功として採用しません。同じfenceでreceiptをrenewする場合は、callerが直前に読んだ
+pointer revision/digestをexact predecessorとして要求し、古いfresh evidenceによる上書きを
+拒否します。Table ID/ARN/作成時刻が変化した session も fail-closed です。
 ただし raw source item を lossless に保持する immutable artifact と S3 adapter、target join、実行 CLI、
-pre-plan scan の lease/fresh maintenance evidence binding、online writer fence と完全な source/target
-completeness 実行は未実装です。Digest-only evidence は process を越えた planning input、target join、
+planning source page transaction の global lease/fence/current immutable receipt binding、
+online writer fence と完全な source/target completeness 実行は未実装です。`dry-run` は lease取得前の
+非 authority evidence であり、その chain をそのまま planning input に昇格しません。
+Digest-only evidence は process を越えた planning input、target join、
 rollback preimage を再構成しません。したがって
 production migration gate には使用せず、これらを実装して non-production で中断・再開・rollback
 evidence を取得するまでは、既存 backfill を dry-run と maintenance-window 内の再生成用途に
@@ -340,11 +358,14 @@ evidence を取得するまでは、既存 backfill を dry-run と maintenance-
 1. STS と `DescribeTable` から実測した source/target account、region、table ARN/ID、作成時刻、
    対象 scope、migration version、実行 commit を固定し、configuration hash を保存する。
 2. PITR/backup、earliest/latest restorable time、source 件数、代表 key/checksum を保存する。
-3. Dry-run の scanned/projected/deleted/skipped/invalid 件数を review する。
+3. Dry-run の scanned/projected/deleted/skipped/invalid 件数を review する。Dry-run evidence は
+   lease/fenceを持たないため、planning source evidenceとして再利用しない。
 4. Online migration は writer fence/epoch または dual-write + high-watermark catch-up を有効化し、
    source scan と cutover の競合を閉じる。Maintenance migration は API、worker、connector など
    すべての writer を止め、実測で write が増えていないことを確認する。
-5. Owner/run ID 付き lease と heartbeat を取得し、apply/verify/rollback の同時実行を拒否する。
+5. Owner/run ID 付き global lease と heartbeat を取得し、fresh immutable maintenance receipt を
+   current pointerへcommitしてから planning/apply/verify/rollback の同時実行を拒否する。APIの
+   永続化境界は実装済みだが、heartbeat/renewal supervisorを含む実行CLIは未実装である。
 6. Preimage journal は DynamoDB native value を lossless に保持できる暗号化された segmented store
    に置き、bounded memory/I/O、retention、access audit を確認する。
 7. Verify と rollback の command、停止条件、最大実行時間、data/application owner を incident
@@ -388,6 +409,9 @@ resource を skip して `continue-update-rollback` しません。
   含み得る restricted state であり、ログや外部 evidence export へ含めない
 - Transaction response loss 後に exact successor tuple を再読して成功を回収したか、直前の durable
   checkpoint から再開したこと。異なる successor を成功として採用しない
+- Global lease の run/owner/fence/heartbeat/expiry、current receipt digest、receipt pointer revision、
+  receipt の exact evidence digest/secret-free locator/freshness window。Heartbeat と receipt renewal
+  を別操作として記録し、response loss後は exact leaseまたはreceipt/pointer successorだけを採用する
 - Source ごとの initial/final cursor、scanned/applied/skipped/invalid/rolled-back count
 - PITR status、restore point、backup ARN、lease owner/heartbeat/fence epoch
 - 各 operation marker/preimage journal の count と verification result
