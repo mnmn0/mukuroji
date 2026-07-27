@@ -44,6 +44,7 @@ import {
 } from '@aws-sdk/client-sts'
 import {
   createWorkspaceSearchConfigurationHash,
+  isWorkspaceSearchMigrationFailureCode,
   type DynamoAttributeMap,
   type MigrationTableIdentity,
   type WorkspaceSearchMigrationFailureCode,
@@ -69,7 +70,6 @@ import {
 } from './migration-shared-profile-loader'
 import {
   createAwsWorkspaceSearchMigrationSourceEvidencePort,
-  isWorkspaceSearchMigrationFailureCode,
   type WorkspaceSearchMigrationSourceEvidenceAwsPort,
   type WorkspaceSearchMigrationSourceEvidenceAwsRequest,
   type WorkspaceSearchMigrationSourceEvidenceAwsTransport,
@@ -180,9 +180,10 @@ const PROFILE_CREDENTIAL_REFRESH_WINDOW_MILLISECONDS = 5 * 60 * 1_000
 const MAXIMUM_PROFILE_ROLE_CHAIN_DEPTH = 8
 
 /**
- * Failure codes deliberately emitted by the private managed source Scan path.
+ * Failure codes deliberately emitted by the private managed source data path.
  */
 type SourceScanAwsFailureCode =
+  | 'CONFIGURATION_DRIFT'
   | 'CONFIGURATION_HASH_MISMATCH'
   | 'IDENTITY_MISMATCH'
   | 'INVALID_ARGUMENT'
@@ -201,7 +202,7 @@ type SourceScanAwsErrorClassificationInput =
   }
 
 /**
- * Privately branded source Scan failure that response data cannot forge.
+ * Privately branded managed source failure that response data cannot forge.
  */
 class SourceScanAwsFailure extends Error {
   /** Stable operator-safe code selected inside the managed session. */
@@ -239,6 +240,10 @@ type ManagedSourceEvidenceAuthority = {
   readonly generation: number
   /** Exact configuration hash authorized by the current measurement. */
   readonly configurationHash: string
+  /** Detached complete request that cannot change after authority capture. */
+  readonly request: WorkspaceSearchMigrationSourceEvidenceAwsRequest
+  /** Detached measured migration-state table incarnation. */
+  readonly stateTable: MigrationTableIdentity
 }
 
 /** Explicit AWS SDK client configuration retained for construction tests. */
@@ -655,6 +660,9 @@ class AwsWorkspaceSearchMigrationIdentityPort
   /** Hash authorized by the most recent successful identity measurement. */
   private sourceScanConfigurationHash: string | undefined
 
+  /** Migration-state table incarnation authorized by the current measurement. */
+  private sourceEvidenceStateTable: MigrationTableIdentity | undefined
+
   /**
    * Creates a port bound to immutable copies of the reviewed resources.
    *
@@ -683,6 +691,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.closed = true
     this.generation += 1
     this.sourceScanConfigurationHash = undefined
+    this.sourceEvidenceStateTable = undefined
     try {
       this.transport.close()
     } catch {
@@ -701,13 +710,20 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.generation += 1
     const measurementGeneration = this.generation
     this.sourceScanConfigurationHash = undefined
+    this.sourceEvidenceStateTable = undefined
     const configuration = await measureWorkspaceSearchMigrationConfiguration({
       requested: this.requested,
       port: this,
     })
     this.requireGeneration(measurementGeneration)
-    this.sourceScanConfigurationHash =
+    const configurationHash =
       createWorkspaceSearchConfigurationHash(configuration)
+    const stateTable = structuredClone(
+      configuration.tables['migration-state'],
+    )
+    this.requireGeneration(measurementGeneration)
+    this.sourceEvidenceStateTable = stateTable
+    this.sourceScanConfigurationHash = configurationHash
     return configuration
   }
 
@@ -841,16 +857,10 @@ class AwsWorkspaceSearchMigrationIdentityPort
   async readSourceEvidenceProgress(
     input: WorkspaceSearchMigrationSourceEvidenceAwsRequest,
   ): Promise<WorkspaceSearchMigrationSourceEvidenceProgress> {
-    return runManagedSourceEvidenceAwsBoundary(async () => {
-      const authority = this.captureSourceEvidenceAuthority(input)
-      const adapter = this.createManagedSourceEvidenceAdapter(authority)
-      const progress = await adapter.readProgress(input)
-      this.requireSourceScanGeneration(
-        authority.generation,
-        authority.configurationHash,
-      )
-      return progress
-    })
+    return this.runSourceEvidenceOperation(
+      input,
+      (adapter, request) => adapter.readProgress(request),
+    )
   }
 
   /**
@@ -862,16 +872,10 @@ class AwsWorkspaceSearchMigrationIdentityPort
   async readCommittedSourceEvidence(
     input: WorkspaceSearchMigrationSourceEvidenceAwsRequest,
   ): Promise<WorkspaceSearchMigrationSourceEvidenceReplayResult> {
-    return runManagedSourceEvidenceAwsBoundary(async () => {
-      const authority = this.captureSourceEvidenceAuthority(input)
-      const adapter = this.createManagedSourceEvidenceAdapter(authority)
-      const replay = await adapter.readCommittedEvidence(input)
-      this.requireSourceScanGeneration(
-        authority.generation,
-        authority.configurationHash,
-      )
-      return replay
-    })
+    return this.runSourceEvidenceOperation(
+      input,
+      (adapter, request) => adapter.readCommittedEvidence(request),
+    )
   }
 
   /**
@@ -883,15 +887,52 @@ class AwsWorkspaceSearchMigrationIdentityPort
   async commitNextSourceEvidencePage(
     input: WorkspaceSearchMigrationSourceEvidenceAwsRequest,
   ): Promise<WorkspaceSearchMigrationSourceEvidenceProgress> {
+    return this.runSourceEvidenceOperation(
+      input,
+      (adapter, request) => adapter.commitNextPage(request),
+    )
+  }
+
+  /**
+   * Runs one complete managed evidence operation against the exact measured
+   * migration-state table incarnation.
+   *
+   * @param input - Exact measured evidence-chain request.
+   * @param operation - Adapter operation over the detached captured request.
+   * @returns Detached operation result only while state identity stays current.
+   */
+  private async runSourceEvidenceOperation<Result>(
+    input: WorkspaceSearchMigrationSourceEvidenceAwsRequest,
+    operation: (
+      adapter: WorkspaceSearchMigrationSourceEvidenceAwsPort,
+      request: WorkspaceSearchMigrationSourceEvidenceAwsRequest,
+    ) => Promise<Result>,
+  ): Promise<Result> {
     return runManagedSourceEvidenceAwsBoundary(async () => {
       const authority = this.captureSourceEvidenceAuthority(input)
+      await this.requireCurrentSourceEvidenceStateTableIncarnation(authority)
       const adapter = this.createManagedSourceEvidenceAdapter(authority)
-      const progress = await adapter.commitNextPage(input)
+      let result: Result
+      try {
+        result = await operation(adapter, authority.request)
+      } catch (error: unknown) {
+        this.requireSourceScanGeneration(
+          authority.generation,
+          authority.configurationHash,
+        )
+        await this.requireCurrentSourceEvidenceStateTableIncarnation(authority)
+        throw error
+      }
       this.requireSourceScanGeneration(
         authority.generation,
         authority.configurationHash,
       )
-      return progress
+      await this.requireCurrentSourceEvidenceStateTableIncarnation(authority)
+      this.requireSourceScanGeneration(
+        authority.generation,
+        authority.configurationHash,
+      )
+      return result
     })
   }
 
@@ -905,19 +946,29 @@ class AwsWorkspaceSearchMigrationIdentityPort
     input: WorkspaceSearchMigrationSourceEvidenceAwsRequest,
   ): ManagedSourceEvidenceAuthority {
     this.requireOpen()
+    const request: WorkspaceSearchMigrationSourceEvidenceAwsRequest = {
+      runId: input.runId,
+      purpose: input.purpose,
+      configuration: structuredClone(input.configuration),
+      configurationHash: input.configurationHash,
+      source: input.source,
+    }
     const generation = this.generation
     const configurationHash = this.sourceScanConfigurationHash
-    if (configurationHash === undefined) {
+    const stateTable = this.sourceEvidenceStateTable
+    if (configurationHash === undefined || stateTable === undefined) {
       return failSourceScanAws('INVALID_STATE')
     }
-    if (input.configurationHash !== configurationHash) {
+    if (request.configurationHash !== configurationHash) {
       return failSourceScanAws('CONFIGURATION_HASH_MISMATCH')
     }
-    this.requireMeasuredConfigurationBinding(input.configuration)
+    this.requireMeasuredConfigurationBinding(request.configuration)
     this.requireSourceScanGeneration(generation, configurationHash)
     return {
       generation,
       configurationHash,
+      request,
+      stateTable: structuredClone(stateTable),
     }
   }
 
@@ -944,7 +995,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
           () => this.transport.getSourceEvidence(command),
         ),
       transactWriteSourceEvidence: (command) =>
-        this.runManagedSourceEvidenceIo(
+        this.runManagedSourceEvidenceStateWrite(
           authority,
           () => this.transport.transactWriteSourceEvidence(command),
         ),
@@ -957,7 +1008,10 @@ class AwsWorkspaceSearchMigrationIdentityPort
   }
 
   /**
-   * Guards one evidence Scan, GetItem, or transaction before and after I/O.
+   * Guards one evidence Scan or GetItem against session-generation changes.
+   *
+   * The complete public operation verifies the migration-state incarnation
+   * before and after its read phase. Transactions use the stricter write guard.
    *
    * @param authority - Captured measurement authority.
    * @param operation - One exact operation on the shared managed transport.
@@ -985,6 +1039,95 @@ class AwsWorkspaceSearchMigrationIdentityPort
       )
       throw error
     }
+  }
+
+  /**
+   * Revalidates the migration-state incarnation immediately around one write.
+   *
+   * @param authority - Captured measurement authority.
+   * @param operation - Exact evidence transaction on the shared client.
+   * @returns Raw transaction result only while state identity stays current.
+   */
+  private async runManagedSourceEvidenceStateWrite<Result>(
+    authority: ManagedSourceEvidenceAuthority,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    await this.requireCurrentSourceEvidenceStateTableIncarnation(authority)
+    try {
+      const result = await this.runManagedSourceEvidenceIo(
+        authority,
+        operation,
+      )
+      await this.requireCurrentSourceEvidenceStateTableIncarnation(authority)
+      return result
+    } catch (error: unknown) {
+      this.requireSourceScanGeneration(
+        authority.generation,
+        authority.configurationHash,
+      )
+      await this.requireCurrentSourceEvidenceStateTableIncarnation(authority)
+      throw error
+    }
+  }
+
+  /**
+   * Revalidates the measured migration-state table around managed evidence I/O.
+   *
+   * @param authority - Captured generation, hash, and state-table incarnation.
+   */
+  private async requireCurrentSourceEvidenceStateTableIncarnation(
+    authority: ManagedSourceEvidenceAuthority,
+  ): Promise<void> {
+    this.requireSourceScanGeneration(
+      authority.generation,
+      authority.configurationHash,
+    )
+    let output: DescribeTableCommandOutput
+    try {
+      output = await this.transport.describeTable(
+        new DescribeTableCommand({
+          TableName: authority.stateTable.tableName,
+        }),
+      )
+    } catch (error: unknown) {
+      this.requireSourceScanGeneration(
+        authority.generation,
+        authority.configurationHash,
+      )
+      if (error instanceof ResourceNotFoundException) {
+        return failSourceScanAws('CONFIGURATION_DRIFT')
+      }
+      throw error
+    }
+    this.requireSourceScanGeneration(
+      authority.generation,
+      authority.configurationHash,
+    )
+    const observed = output.Table
+    const creationTime = observed?.CreationDateTime
+    let creationTimeMilliseconds: number | undefined
+    try {
+      creationTimeMilliseconds = creationTime instanceof Date
+        ? Date.prototype.getTime.call(creationTime)
+        : undefined
+    } catch {
+      return failSourceScanAws('CONFIGURATION_DRIFT')
+    }
+    if (
+      observed?.TableStatus !== 'ACTIVE' ||
+      observed.TableName !== authority.stateTable.tableName ||
+      observed.TableArn !== authority.stateTable.tableArn ||
+      observed.TableId !== authority.stateTable.tableId ||
+      !Number.isFinite(creationTimeMilliseconds) ||
+      new Date(creationTimeMilliseconds ?? Number.NaN).toISOString() !==
+        authority.stateTable.creationTime
+    ) {
+      return failSourceScanAws('CONFIGURATION_DRIFT')
+    }
+    this.requireSourceScanGeneration(
+      authority.generation,
+      authority.configurationHash,
+    )
   }
 
   /**

@@ -772,6 +772,45 @@ export type WorkspaceSearchMigrationFailureCode =
   | 'TRANSIENT_INFRASTRUCTURE_FAILURE'
   | 'VERIFY_FAILED'
 
+const workspaceSearchMigrationFailureCodes = {
+  AMBIGUOUS_OPERATION_UNRESOLVED: true,
+  CONFIGURATION_DRIFT: true,
+  CONFIGURATION_HASH_MISMATCH: true,
+  DRY_RUN_INVALID_ROWS: true,
+  IDENTITY_MISMATCH: true,
+  INVALID_ARGUMENT: true,
+  INVALID_JOURNAL: true,
+  INVALID_MAINTENANCE_EVIDENCE: true,
+  INVALID_STATE: true,
+  JOURNAL_WRITE_FAILED: true,
+  LEASE_CONFLICT: true,
+  LEASE_LOST: true,
+  PITR_NOT_READY: true,
+  ROLLBACK_TARGET_DRIFT: true,
+  SOURCE_DRIFT: true,
+  TABLE_SCHEMA_MISMATCH: true,
+  TARGET_DRIFT: true,
+  TRANSIENT_INFRASTRUCTURE_FAILURE: true,
+  VERIFY_FAILED: true,
+} satisfies Readonly<Record<WorkspaceSearchMigrationFailureCode, true>>
+
+/**
+ * Narrows an arbitrary runtime value to the exhaustive migration failure-code
+ * allowlist.
+ *
+ * @param value - Candidate code read across an untrusted error boundary.
+ * @returns Whether the value is one supported operator-safe failure code.
+ */
+export function isWorkspaceSearchMigrationFailureCode(
+  value: unknown,
+): value is WorkspaceSearchMigrationFailureCode {
+  return typeof value === 'string' &&
+    Object.prototype.hasOwnProperty.call(
+      workspaceSearchMigrationFailureCodes,
+      value,
+    )
+}
+
 /** Error with a stable operator-safe code and no embedded tenant or AWS payload. */
 export class WorkspaceSearchMigrationFailure extends Error {
   /** Stable failure code suitable for logs and automation. */

@@ -21,6 +21,7 @@ import {
 import {
   createMigrationDigest,
   createWorkspaceSearchConfigurationHash,
+  isWorkspaceSearchMigrationFailureCode,
   type DynamoAttributeMap,
   type MigrationDigestState,
   type MigrationScanAggregate,
@@ -806,7 +807,7 @@ function createSourceEvidenceHeadItem(
   progress: WorkspaceSearchMigrationSourceEvidenceProgress,
 ): Readonly<Record<string, AttributeValue>> {
   requireProgressIdentity(identity, progress)
-  createWorkspaceSearchMigrationSourceEvidenceProgressDigest(progress)
+  void createWorkspaceSearchMigrationSourceEvidenceProgressDigest(progress)
   const item: Record<string, AttributeValue> = {
     migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
     recordKey: { S: recordKey },
@@ -1096,7 +1097,7 @@ function parseSourceEvidenceHeadItem(
     evidenceDigest: readRequiredStringAttribute(item, 'headDigest'),
     checkpoint,
   }
-  createWorkspaceSearchMigrationSourceEvidenceProgressDigest(progress)
+  void createWorkspaceSearchMigrationSourceEvidenceProgressDigest(progress)
   if (checkpoint.completed) return progress
   const context = prepareWorkspaceSearchMigrationSourceScanContext({
     configuration: request.configuration,
@@ -1749,37 +1750,6 @@ function readSourceEvidenceAwsFailureCode(
   } catch {
     return 'INVALID_STATE'
   }
-}
-
-/**
- * Narrows an arbitrary runtime value to the complete migration failure-code
- * allowlist.
- *
- * @param value - Candidate code read across an error boundary.
- * @returns Whether the value is one supported operator-safe failure code.
- */
-export function isWorkspaceSearchMigrationFailureCode(
-  value: unknown,
-): value is WorkspaceSearchMigrationFailureCode {
-  return value === 'AMBIGUOUS_OPERATION_UNRESOLVED' ||
-    value === 'CONFIGURATION_DRIFT' ||
-    value === 'CONFIGURATION_HASH_MISMATCH' ||
-    value === 'DRY_RUN_INVALID_ROWS' ||
-    value === 'IDENTITY_MISMATCH' ||
-    value === 'INVALID_ARGUMENT' ||
-    value === 'INVALID_JOURNAL' ||
-    value === 'INVALID_MAINTENANCE_EVIDENCE' ||
-    value === 'INVALID_STATE' ||
-    value === 'JOURNAL_WRITE_FAILED' ||
-    value === 'LEASE_CONFLICT' ||
-    value === 'LEASE_LOST' ||
-    value === 'PITR_NOT_READY' ||
-    value === 'ROLLBACK_TARGET_DRIFT' ||
-    value === 'SOURCE_DRIFT' ||
-    value === 'TABLE_SCHEMA_MISMATCH' ||
-    value === 'TARGET_DRIFT' ||
-    value === 'TRANSIENT_INFRASTRUCTURE_FAILURE' ||
-    value === 'VERIFY_FAILED'
 }
 
 /**

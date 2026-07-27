@@ -829,16 +829,35 @@ function validatePageEvidenceShape(
     readonly WorkspaceSearchMigrationInvalidSourceScanRowEvidence[],
   bindings: readonly WorkspaceSearchMigrationSourceOwnershipBinding[],
 ): void {
-  const mappedRows = sourceRows.filter(
-    (row) => row.classification === 'mapped',
-  )
   if (
     sourceRows.length + invalidRows.length >
-      WORKSPACE_SEARCH_MIGRATION_PAGE_SIZE ||
-    bindings.length !== mappedRows.length
+      WORKSPACE_SEARCH_MIGRATION_PAGE_SIZE
   ) {
     return failEvidence()
   }
+  validateEvidenceRelationships(sourceRows, invalidRows, bindings)
+}
+
+/**
+ * Validates row uniqueness and mapped-binding relationships at any scope.
+ *
+ * Page callers enforce the DynamoDB page-size limit separately, while complete
+ * replay validation deliberately accepts the accumulated rows from many pages.
+ *
+ * @param sourceRows - Mapped and ignored row evidence.
+ * @param invalidRows - Invalid row evidence.
+ * @param bindings - Mapped ownership bindings.
+ */
+function validateEvidenceRelationships(
+  sourceRows: readonly WorkspaceSearchMigrationSourceScanRowEvidence[],
+  invalidRows:
+    readonly WorkspaceSearchMigrationInvalidSourceScanRowEvidence[],
+  bindings: readonly WorkspaceSearchMigrationSourceOwnershipBinding[],
+): void {
+  const mappedRows = sourceRows.filter(
+    (row) => row.classification === 'mapped',
+  )
+  if (bindings.length !== mappedRows.length) return failEvidence()
   const bindingBySourceKey = new Map<
     string,
     WorkspaceSearchMigrationSourceOwnershipBinding
@@ -920,6 +939,32 @@ function validatePageDelta(
   bindings: readonly WorkspaceSearchMigrationSourceOwnershipBinding[],
 ): void {
   validatePageEvidenceShape(sourceRows, invalidRows, bindings)
+  validateAggregateDelta(
+    previous,
+    checkpoint,
+    sourceRows,
+    invalidRows,
+    bindings,
+  )
+}
+
+/**
+ * Reproduces one checkpoint transition from an already validated row set.
+ *
+ * @param previous - Predecessor checkpoint.
+ * @param checkpoint - Candidate successor checkpoint.
+ * @param sourceRows - Mapped and ignored row evidence.
+ * @param invalidRows - Invalid row evidence.
+ * @param bindings - Mapped ownership bindings.
+ */
+function validateAggregateDelta(
+  previous: MigrationSourceCheckpoint,
+  checkpoint: MigrationSourceCheckpoint,
+  sourceRows: readonly WorkspaceSearchMigrationSourceScanRowEvidence[],
+  invalidRows:
+    readonly WorkspaceSearchMigrationInvalidSourceScanRowEvidence[],
+  bindings: readonly WorkspaceSearchMigrationSourceOwnershipBinding[],
+): void {
   const mappedRows = sourceRows.filter(
     (row) => row.classification === 'mapped',
   )
@@ -1020,7 +1065,8 @@ function validateGlobalAggregate(
       pageCount: 0,
     },
   }
-  validatePageDelta(
+  validateEvidenceRelationships(sourceRows, invalidRows, bindings)
+  validateAggregateDelta(
     syntheticInitial,
     syntheticCheckpoint,
     sourceRows,

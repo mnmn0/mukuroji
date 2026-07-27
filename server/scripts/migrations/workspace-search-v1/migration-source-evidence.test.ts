@@ -4,6 +4,7 @@ import {
   MigrationDigestAccumulator,
   type DynamoAttributeMap,
   type MigrationSourceCheckpoint,
+  WORKSPACE_SEARCH_MIGRATION_PAGE_SIZE,
 } from './migration-contract'
 import type {
   WorkspaceSearchMigrationSourceOwnershipBinding,
@@ -259,6 +260,96 @@ describe('Workspace Search source evidence', () => {
     expect(replay.sourceBindings).toHaveLength(1)
   })
 
+  test('replays more than one page of rows while retaining the per-page cap', () => {
+    const initial =
+      createInitialWorkspaceSearchMigrationSourceEvidenceProgress(identity)
+    const firstRows: readonly PageRowFixture[] = Array.from(
+      { length: WORKSPACE_SEARCH_MIGRATION_PAGE_SIZE },
+      (_, index): PageRowFixture => ({
+        classification: 'ignored',
+        sourceKeyDigest: digest(`large-page-key-${index}`),
+        sourceItemDigest: digest(`large-page-item-${index}`),
+      }),
+    )
+    const first = commitPage(
+      initial,
+      createPageResult(
+        initial.checkpoint,
+        firstRows,
+        { partitionKey: { S: 'large-page-cursor' } },
+      ),
+    )
+    const second = commitPage(
+      first.progress,
+      createPageResult(first.progress.checkpoint, [{
+        classification: 'ignored',
+        sourceKeyDigest: digest('large-page-key-terminal'),
+        sourceItemDigest: digest('large-page-item-terminal'),
+      }]),
+    )
+
+    const replay = replayWorkspaceSearchMigrationSourceEvidencePages(
+      identity,
+      [first.page, second.page],
+    )
+
+    expect(replay.sourceRows).toHaveLength(
+      WORKSPACE_SEARCH_MIGRATION_PAGE_SIZE + 1,
+    )
+    expect(replay.progress.checkpoint.aggregate).toMatchObject({
+      scanned: WORKSPACE_SEARCH_MIGRATION_PAGE_SIZE + 1,
+      ignored: WORKSPACE_SEARCH_MIGRATION_PAGE_SIZE + 1,
+      pageCount: 2,
+    })
+
+    const oversizedRows: readonly PageRowFixture[] = [
+      ...firstRows,
+      {
+        classification: 'ignored',
+        sourceKeyDigest: digest('oversized-page-key'),
+        sourceItemDigest: digest('oversized-page-item'),
+      },
+    ]
+    expect(() =>
+      createWorkspaceSearchMigrationSourceEvidencePage({
+        identity,
+        previousProgress: initial,
+        pageResult: createPageResult(initial.checkpoint, oversizedRows),
+      })
+    ).toThrow(WorkspaceSearchMigrationSourceEvidenceError)
+
+    const combinedOversizedRows: readonly PageRowFixture[] = [
+      ...Array.from(
+        { length: 60 },
+        (_, index): PageRowFixture => ({
+          classification: 'ignored',
+          sourceKeyDigest: digest(`combined-ignored-key-${index}`),
+          sourceItemDigest: digest(`combined-ignored-item-${index}`),
+        }),
+      ),
+      ...Array.from(
+        { length: 41 },
+        (_, index): PageRowFixture => ({
+          classification: 'invalid',
+          sourceKeyDigest: digest(`combined-invalid-key-${index}`),
+          sourceItemDigest: digest(`combined-invalid-item-${index}`),
+          reasonCode: 'MAPPER_EXCEPTION',
+        }),
+      ),
+    ]
+    expect(() =>
+      createWorkspaceSearchMigrationSourceEvidencePage({
+        identity,
+        previousProgress: initial,
+        pageResult:
+          createPageResult(initial.checkpoint, combinedOversizedRows),
+      })
+    ).toThrow(WorkspaceSearchMigrationSourceEvidenceError)
+  })
+
+  // These golden values are compatibility boundaries. A deliberate change must
+  // evaluate digest-version or migration-version handling, not blindly replace
+  // the expected values.
   test('pins versioned checkpoint, page, and progress digest vectors', () => {
     const initial =
       createInitialWorkspaceSearchMigrationSourceEvidenceProgress(identity)
