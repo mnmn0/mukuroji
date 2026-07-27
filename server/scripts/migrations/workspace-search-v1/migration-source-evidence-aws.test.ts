@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { describe, expect, test } from 'bun:test'
 import {
   type AttributeValue,
@@ -11,6 +12,7 @@ import {
 import {
   createMigrationDigest,
   createWorkspaceSearchConfigurationHash,
+  serializeCanonicalJson,
   type DynamoAttributeMap,
   type MigrationKeyAttribute,
   type MigrationTableIdentity,
@@ -29,6 +31,10 @@ import {
   type WorkspaceSearchMigrationSourceEvidenceAwsPort,
   type WorkspaceSearchMigrationSourceEvidenceAwsTransport,
   type WorkspaceSearchMigrationSourceEvidenceScanner,
+  type WorkspaceSearchMigrationPlanningSourceArtifactCaptureInput,
+  type WorkspaceSearchMigrationPlanningSourceArtifactCaptureResult,
+  type WorkspaceSearchMigrationPlanningSourceArtifactGateway,
+  type WorkspaceSearchMigrationPlanningSourceArtifactReadInput,
 } from './migration-source-evidence-aws'
 import {
   createAwsWorkspaceSearchMigrationPrePlanAuthorityPort,
@@ -38,8 +44,18 @@ import {
 } from './migration-pre-plan-authority-aws'
 import {
   createWorkspaceSearchMigrationSourceCheckpointDigest,
+  createWorkspaceSearchMigrationSourceEvidencePageDigest,
+  parseWorkspaceSearchMigrationSourceEvidencePage,
+  type WorkspaceSearchMigrationPlanningSourceArtifactReference,
+  type WorkspaceSearchMigrationSourceEvidencePage,
   type WorkspaceSearchMigrationSourceEvidencePurpose,
 } from './migration-source-evidence'
+import {
+  parseWorkspaceSearchMigrationPlanningSourceArtifactPage,
+  serializeWorkspaceSearchMigrationPlanningSourceArtifactPage,
+  type WorkspaceSearchMigrationPlanningSourceArtifactPage,
+  WORKSPACE_SEARCH_MIGRATION_SOURCE_ARTIFACT_VERSION,
+} from './migration-source-artifact'
 import type {
   WorkspaceSearchMigrationSourceScanReadInput,
 } from './migration-source-scan-aws'
@@ -81,12 +97,45 @@ type TransactionFault = {
 type PendingSourceScan = {
   /** Detached exact Scan input observed by the fake. */
   readonly input: WorkspaceSearchMigrationSourceScanReadInput
-  /** Resolves the pending Scan with one reduced page. */
+  /** Resolves the pending Scan with one raw and reduced page pair. */
   readonly resolve: (
-    value: WorkspaceSearchMigrationSourceScanPageResult,
+    value: CapturedSourceScanPage,
   ) => void
   /** Rejects the pending Scan with an arbitrary raw failure. */
   readonly reject: (reason: unknown) => void
+}
+
+/** One exact raw Scan page paired with its deterministic reduction. */
+type CapturedSourceScanPage = {
+  /** Detached exact low-level Scan page. */
+  readonly rawPage: WorkspaceSearchMigrationSourceScanPage
+  /** Reduction produced from the same exact raw page. */
+  readonly pageResult: WorkspaceSearchMigrationSourceScanPageResult
+}
+
+/**
+ * Test scanner that can expose the same exact raw page to the planning gateway.
+ */
+interface CapturingSourceEvidenceScanner
+  extends WorkspaceSearchMigrationSourceEvidenceScanner {
+  /**
+   * Scans once and returns both raw and reduced forms of the same page.
+   *
+   * @param input - Exact measured Scan context and predecessor.
+   * @returns Same-page raw source items and deterministic reduction.
+   */
+  captureSourcePage(
+    input: WorkspaceSearchMigrationSourceScanReadInput,
+  ): Promise<CapturedSourceScanPage>
+}
+
+/** One immutable stored artifact segment owned by the in-memory fake. */
+type StoredPlanningSourceArtifactSegment = {
+  /** Exact reference returned to the source-evidence adapter. */
+  readonly reference:
+    WorkspaceSearchMigrationPlanningSourceArtifactReference
+  /** Exact canonical artifact-segment bytes. */
+  readonly bytes: Uint8Array
 }
 
 /** One condition-checked write prepared against a shared snapshot. */
@@ -133,6 +182,254 @@ class MutableAuthorityClock {
 }
 
 /**
+ * Shared immutable-segment store used by gateways attached to one transport.
+ */
+class InMemoryPlanningSourceArtifactStore {
+  /** Exact canonical segments keyed by object key and immutable version. */
+  private readonly segments =
+    new Map<string, StoredPlanningSourceArtifactSegment>()
+
+  /**
+   * Stores one immutable artifact segment.
+   *
+   * @param segment - Exact reference and canonical bytes.
+   */
+  store(segment: StoredPlanningSourceArtifactSegment): void {
+    const key = createStoredArtifactKey(segment.reference)
+    const existing = this.segments.get(key)
+    if (
+      existing !== undefined &&
+      (!Bun.deepEquals(existing.reference, segment.reference) ||
+        !Buffer.from(existing.bytes).equals(Buffer.from(segment.bytes)))
+    ) {
+      throw new Error('Attempted to replace an immutable artifact.')
+    }
+    this.segments.set(key, {
+      reference: structuredClone(segment.reference),
+      bytes: new Uint8Array(segment.bytes),
+    })
+  }
+
+  /**
+   * Reads one exact immutable artifact segment.
+   *
+   * @param reference - Exact object key, version, and content digest.
+   * @returns Detached canonical bytes.
+   */
+  read(
+    reference: WorkspaceSearchMigrationPlanningSourceArtifactReference,
+  ): Uint8Array {
+    const stored = this.segments.get(
+      createStoredArtifactKey(reference),
+    )
+    if (
+      stored === undefined ||
+      !Bun.deepEquals(stored.reference, reference)
+    ) {
+      throw new WorkspaceSearchMigrationFailure(
+        'INVALID_SOURCE_ARTIFACT',
+        'RAW-MISSING-PLANNING-SOURCE-ARTIFACT',
+      )
+    }
+    return new Uint8Array(stored.bytes)
+  }
+
+  /**
+   * Deletes one exact segment to model immutable-object loss.
+   *
+   * @param reference - Exact stored reference to remove.
+   */
+  delete(
+    reference: WorkspaceSearchMigrationPlanningSourceArtifactReference,
+  ): void {
+    this.segments.delete(createStoredArtifactKey(reference))
+  }
+}
+
+/**
+ * Strict planning gateway that captures, stores, reads, and verifies raw pages.
+ */
+class InMemoryPlanningSourceArtifactGateway
+  implements WorkspaceSearchMigrationPlanningSourceArtifactGateway {
+  /** Every detached planning capture input in call order. */
+  readonly captureCalls:
+    WorkspaceSearchMigrationPlanningSourceArtifactCaptureInput[] = []
+
+  /** Every detached committed-artifact read input in call order. */
+  readonly readCalls:
+    WorkspaceSearchMigrationPlanningSourceArtifactReadInput[] = []
+
+  /** Scanner returning raw and reduced forms of each exact source page. */
+  private readonly scanner: CapturingSourceEvidenceScanner
+
+  /** Shared immutable segment storage for every port on one transport. */
+  private readonly store: InMemoryPlanningSourceArtifactStore
+
+  /** One-shot upload failure raised after the source page was captured. */
+  private captureFailureAfterScan: unknown
+
+  /** One-shot action completed before the next planning capture. */
+  private beforeCapture: (() => void | Promise<void>) | undefined
+
+  /** One-shot raw page override returned after strict artifact validation. */
+  private nextReadItems: readonly DynamoAttributeMap[] | undefined
+
+  /** One-shot failure raised before the next strict artifact read. */
+  private nextReadFailure: unknown
+
+  /**
+   * Creates a gateway over one scanner and shared immutable store.
+   *
+   * @param scanner - Same managed scanner used for dry-run reads.
+   * @param store - Artifact store shared by ports on one transport.
+   */
+  constructor(
+    scanner: CapturingSourceEvidenceScanner,
+    store: InMemoryPlanningSourceArtifactStore,
+  ) {
+    this.scanner = scanner
+    this.store = store
+  }
+
+  /**
+   * Schedules one action immediately before the next planning capture.
+   *
+   * @param action - One-shot ordering assertion or state mutation.
+   */
+  beforeNextCapture(
+    action: () => void | Promise<void>,
+  ): void {
+    this.beforeCapture = action
+  }
+
+  /**
+   * Injects one upload failure after a raw page has been captured.
+   *
+   * @param error - Arbitrary raw gateway failure.
+   */
+  failNextCaptureAfterScan(error: unknown): void {
+    this.captureFailureAfterScan = error
+  }
+
+  /**
+   * Injects one failure before the next strict artifact read.
+   *
+   * @param error - Arbitrary gateway failure.
+   */
+  failNextRead(error: unknown): void {
+    this.nextReadFailure = error
+  }
+
+  /**
+   * Returns different raw items after the next strict artifact read.
+   *
+   * @param items - Wrong raw items used to exercise adapter re-reduction.
+   */
+  returnWrongItemsOnNextRead(
+    items: readonly DynamoAttributeMap[],
+  ): void {
+    this.nextReadItems = structuredClone(items)
+  }
+
+  /**
+   * Removes one stored immutable segment.
+   *
+   * @param reference - Exact artifact reference to remove.
+   */
+  deleteStoredArtifact(
+    reference: WorkspaceSearchMigrationPlanningSourceArtifactReference,
+  ): void {
+    this.store.delete(reference)
+  }
+
+  /**
+   * Captures and reduces one page, then stores canonical artifact segments.
+   *
+   * @param input - Exact planning capture context.
+   * @returns Same-page reduction and valid content-addressed references.
+   */
+  async captureAndStorePlanningPage(
+    input: WorkspaceSearchMigrationPlanningSourceArtifactCaptureInput,
+  ): Promise<WorkspaceSearchMigrationPlanningSourceArtifactCaptureResult> {
+    this.captureCalls.push(structuredClone(input))
+    const beforeCapture = this.beforeCapture
+    this.beforeCapture = undefined
+    await beforeCapture?.()
+    const captured = await this.scanner.captureSourcePage(input)
+    if (this.captureFailureAfterScan !== undefined) {
+      const error = this.captureFailureAfterScan
+      this.captureFailureAfterScan = undefined
+      throw error
+    }
+    const encoded =
+      serializeWorkspaceSearchMigrationPlanningSourceArtifactPage(
+        createPlanningSourceArtifactPage(input, captured.rawPage.items),
+      )
+    const sourceArtifacts = encoded.map((segment, index) => ({
+      objectKey:
+        `workspace-search/v1/source-artifacts/v1/${segment.contentDigest}.json`,
+      versionId:
+        `test-version-${input.pageSequence}-${index + 1}`,
+      contentDigest: segment.contentDigest,
+    }))
+    for (const [index, reference] of sourceArtifacts.entries()) {
+      const segment = encoded[index]
+      if (segment === undefined) {
+        throw new Error('Missing encoded planning artifact segment.')
+      }
+      this.store.store({
+        reference,
+        bytes: segment.bytes,
+      })
+    }
+    return {
+      pageResult: structuredClone(captured.pageResult),
+      sourceArtifacts: structuredClone(sourceArtifacts),
+    }
+  }
+
+  /**
+   * Reads and strictly verifies exact committed artifact segments.
+   *
+   * @param input - Exact committed page context and artifact references.
+   * @returns Detached raw items without a DynamoDB cursor.
+   */
+  async readVerifiedPlanningPage(
+    input: WorkspaceSearchMigrationPlanningSourceArtifactReadInput,
+  ): Promise<WorkspaceSearchMigrationSourceScanPage> {
+    this.readCalls.push(structuredClone(input))
+    const nextReadFailure = this.nextReadFailure
+    this.nextReadFailure = undefined
+    if (nextReadFailure !== undefined) throw nextReadFailure
+    const bytes = input.sourceArtifacts.map((reference) => {
+      const stored = this.store.read(reference)
+      const digest = createHash('sha256').update(stored).digest('hex')
+      if (digest !== reference.contentDigest) {
+        throw new WorkspaceSearchMigrationFailure(
+          'INVALID_SOURCE_ARTIFACT',
+          'RAW-PLANNING-SOURCE-ARTIFACT-DIGEST-MISMATCH',
+        )
+      }
+      return stored
+    })
+    const page =
+      parseWorkspaceSearchMigrationPlanningSourceArtifactPage(bytes)
+    const expected = createPlanningSourceArtifactPage(input, page.items)
+    if (!Bun.deepEquals(page, expected)) {
+      throw new WorkspaceSearchMigrationFailure(
+        'INVALID_SOURCE_ARTIFACT',
+        'RAW-PLANNING-SOURCE-ARTIFACT-IDENTITY-MISMATCH',
+      )
+    }
+    const nextReadItems = this.nextReadItems
+    this.nextReadItems = undefined
+    return {
+      items: structuredClone(nextReadItems ?? page.items),
+    }
+  }
+}
+
+/**
  * Condition-aware in-memory implementation of the narrow DynamoDB transport.
  */
 class InMemorySourceEvidenceAwsTransport
@@ -153,6 +450,10 @@ class InMemorySourceEvidenceAwsTransport
 
   /** One marker for each completed source pre-write preparation. */
   readonly prepareCalls: true[] = []
+
+  /** Planning artifact storage shared by every port on this transport. */
+  readonly planningArtifactStore =
+    new InMemoryPlanningSourceArtifactStore()
 
   /** Durable low-level rows keyed by deterministic recordKey. */
   private readonly items =
@@ -405,7 +706,7 @@ class InMemorySourceEvidenceAwsTransport
  * Reduces a fixed sequence of exact source pages as the adapter requests them.
  */
 class SequencedSourceEvidenceScanner
-  implements WorkspaceSearchMigrationSourceEvidenceScanner {
+  implements CapturingSourceEvidenceScanner {
   /** Every detached Scan input received from the adapter. */
   readonly inputs: WorkspaceSearchMigrationSourceScanReadInput[] = []
 
@@ -432,16 +733,33 @@ class SequencedSourceEvidenceScanner
   async scanSourcePage(
     input: WorkspaceSearchMigrationSourceScanReadInput,
   ): Promise<WorkspaceSearchMigrationSourceScanPageResult> {
+    const captured = await this.captureSourcePage(input)
+    return captured.pageResult
+  }
+
+  /**
+   * Returns the next raw page and its reduction from one exact Scan.
+   *
+   * @param input - Measured source context and durable predecessor.
+   * @returns Same-page raw source items and digest-only reduction.
+   */
+  async captureSourcePage(
+    input: WorkspaceSearchMigrationSourceScanReadInput,
+  ): Promise<CapturedSourceScanPage> {
     const index = this.inputs.length
     this.inputs.push(structuredClone(input))
     const page = this.pages[index]
     if (page === undefined) {
       throw new Error('The scanner was called after its terminal page.')
     }
-    return reduceWorkspaceSearchMigrationSourceScanPage({
-      ...input,
-      page: structuredClone(page),
-    })
+    const rawPage = structuredClone(page)
+    return {
+      rawPage,
+      pageResult: reduceWorkspaceSearchMigrationSourceScanPage({
+        ...input,
+        page: rawPage,
+      }),
+    }
   }
 }
 
@@ -449,7 +767,7 @@ class SequencedSourceEvidenceScanner
  * Holds source Scans until a concurrency test supplies each exact result.
  */
 class DeferredSourceEvidenceScanner
-  implements WorkspaceSearchMigrationSourceEvidenceScanner {
+  implements CapturingSourceEvidenceScanner {
   /** Every pending Scan, in invocation order. */
   private readonly pending: PendingSourceScan[] = []
 
@@ -468,9 +786,22 @@ class DeferredSourceEvidenceScanner
    * @param input - Measured source context and durable predecessor.
    * @returns Promise resolved explicitly by the test.
    */
-  scanSourcePage(
+  async scanSourcePage(
     input: WorkspaceSearchMigrationSourceScanReadInput,
   ): Promise<WorkspaceSearchMigrationSourceScanPageResult> {
+    const captured = await this.captureSourcePage(input)
+    return captured.pageResult
+  }
+
+  /**
+   * Records one pending source Scan retaining its eventual raw page.
+   *
+   * @param input - Measured source context and durable predecessor.
+   * @returns Promise resolved explicitly with raw and reduced forms.
+   */
+  captureSourcePage(
+    input: WorkspaceSearchMigrationSourceScanReadInput,
+  ): Promise<CapturedSourceScanPage> {
     return new Promise((resolve, reject) => {
       this.pending.push({
         input: structuredClone(input),
@@ -494,10 +825,14 @@ class DeferredSourceEvidenceScanner
     if (pending === undefined) {
       throw new Error('Expected one pending source Scan.')
     }
-    pending.resolve(reduceWorkspaceSearchMigrationSourceScanPage({
-      ...pending.input,
-      page: structuredClone(page),
-    }))
+    const rawPage = structuredClone(page)
+    pending.resolve({
+      rawPage,
+      pageResult: reduceWorkspaceSearchMigrationSourceScanPage({
+        ...pending.input,
+        page: rawPage,
+      }),
+    })
   }
 
   /**
@@ -512,6 +847,65 @@ class DeferredSourceEvidenceScanner
       throw new Error('Expected one pending source Scan.')
     }
     pending.reject(error)
+  }
+}
+
+/**
+ * Creates the in-memory identity of one exact immutable artifact version.
+ *
+ * @param reference - Exact content-addressed S3 reference.
+ * @returns Collision-free test-store key.
+ */
+function createStoredArtifactKey(
+  reference: WorkspaceSearchMigrationPlanningSourceArtifactReference,
+): string {
+  return `${reference.objectKey}\u0000${reference.versionId}`
+}
+
+/**
+ * Creates one canonical planning artifact page from adapter capture context.
+ *
+ * @param input - Exact capture or committed-read identity.
+ * @param items - Every raw item from the exact source Scan page.
+ * @returns Complete lossless planning artifact page.
+ */
+function createPlanningSourceArtifactPage(
+  input:
+    | WorkspaceSearchMigrationPlanningSourceArtifactCaptureInput
+    | WorkspaceSearchMigrationPlanningSourceArtifactReadInput,
+  items: readonly DynamoAttributeMap[],
+): WorkspaceSearchMigrationPlanningSourceArtifactPage {
+  const sourceTable = input.configuration.tables[input.source]
+  const stateTable = input.configuration.tables['migration-state']
+  if (sourceTable === undefined || stateTable === undefined) {
+    throw new Error('Expected measured source and state tables.')
+  }
+  return {
+    kind: 'workspace-search-planning-source-artifact-page',
+    artifactVersion: WORKSPACE_SEARCH_MIGRATION_SOURCE_ARTIFACT_VERSION,
+    migrationId: WORKSPACE_SEARCH_MIGRATION_ID,
+    migrationVersion: WORKSPACE_SEARCH_MIGRATION_VERSION,
+    purpose: 'planning',
+    runId: input.runId,
+    configurationHash: input.configurationHash,
+    source: input.source,
+    sourceTable: {
+      tableName: sourceTable.tableName,
+      tableArn: sourceTable.tableArn,
+      tableId: sourceTable.tableId,
+      creationTime: sourceTable.creationTime,
+    },
+    stateTable: {
+      tableName: stateTable.tableName,
+      tableArn: stateTable.tableArn,
+      tableId: stateTable.tableId,
+      creationTime: stateTable.creationTime,
+    },
+    pageSequence: input.pageSequence,
+    previousEvidenceDigest: input.previousEvidenceDigest,
+    previousCheckpointDigest: input.previousCheckpointDigest,
+    planningAuthority: structuredClone(input.planningAuthority),
+    items: structuredClone(items),
   }
 }
 
@@ -647,6 +1041,10 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
       requireItem(firstHeadPut?.Item),
       'source',
     )).toBe('project-directory')
+    expect(readNumberAttribute(
+      requireItem(firstHeadPut?.Item),
+      'chainEvidenceVersion',
+    )).toBe(1)
 
     expect(secondPagePut?.ConditionExpression)
       .toBe(firstPagePut?.ConditionExpression)
@@ -659,6 +1057,11 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
       .toContain('#purpose = :purpose')
     expect(secondHeadPut?.ConditionExpression)
       .toContain('#sourceTableId = :sourceTableId')
+    expect(secondHeadPut?.ConditionExpression)
+      .toContain('#chainEvidenceVersion = :chainEvidenceVersion')
+    expect(secondHeadPut?.ExpressionAttributeNames).toMatchObject({
+      '#chainEvidenceVersion': 'chainEvidenceVersion',
+    })
     expect(secondHeadPut?.ExpressionAttributeValues).toMatchObject({
       ':revision': { N: '1' },
       ':purpose': { S: 'dry-run' },
@@ -666,12 +1069,128 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
       ':sourceTableId': { S: 'table-id-project-directory' },
       ':stateTableId': { S: 'table-id-migration-state' },
       ':completed': { BOOL: false },
+      ':chainEvidenceVersion': { N: '1' },
     })
+    expect(readNumberAttribute(
+      requireItem(secondHeadPut?.Item),
+      'chainEvidenceVersion',
+    )).toBe(1)
     expect(firstCommand?.input.ClientRequestToken).toMatch(/^wsm1-[0-9a-f]{31}$/)
     expect(secondCommand?.input.ClientRequestToken)
       .toMatch(/^wsm1-[0-9a-f]{31}$/)
     expect(firstCommand?.input.ClientRequestToken)
       .not.toBe(secondCommand?.input.ClientRequestToken)
+  })
+
+  test('CAS-binds an existing historical head to marker absence', async () => {
+    const configuration = createConfiguration()
+    const request = createRequest(
+      configuration,
+      'project-directory',
+      'run-historical-chain-marker',
+    )
+    const transport = new InMemorySourceEvidenceAwsTransport()
+    const firstItem =
+      createIgnoredProjectDirectoryItem('historical-marker-1')
+    const scanner = new SequencedSourceEvidenceScanner([
+      {
+        items: [firstItem],
+        lastEvaluatedKey: createProjectDirectoryItemKey(firstItem),
+      },
+      {
+        items: [
+          createIgnoredProjectDirectoryItem('historical-marker-2'),
+        ],
+      },
+    ])
+    const port = createSourceEvidencePort(
+      configuration,
+      scanner,
+      transport,
+    )
+
+    await port.commitNextPage(request)
+    const historicalHead = requireStoredItem(
+      transport.readStoredItemByKind(
+        'workspace-search-migration-source-evidence-head',
+      ),
+    )
+    Reflect.deleteProperty(
+      historicalHead,
+      'chainEvidenceVersion',
+    )
+    transport.replaceStoredItem(historicalHead)
+
+    await port.commitNextPage(request)
+
+    const headPut =
+      transport.transactionCommands[1]?.input.TransactItems?.[1]?.Put
+    expect(headPut?.ConditionExpression)
+      .toContain('attribute_not_exists(#chainEvidenceVersion)')
+    expect(headPut?.ExpressionAttributeNames).toMatchObject({
+      '#chainEvidenceVersion': 'chainEvidenceVersion',
+    })
+    expect(
+      headPut?.ExpressionAttributeValues?.[':chainEvidenceVersion'],
+    ).toBeUndefined()
+    expect(readNumberAttribute(
+      requireItem(headPut?.Item),
+      'chainEvidenceVersion',
+    )).toBe(1)
+  })
+
+  test('does not classify a marker-only predecessor change as unchanged', async () => {
+    const configuration = createConfiguration()
+    const request = createRequest(
+      configuration,
+      'project-directory',
+      'run-marker-only-reconciliation-change',
+    )
+    const transport = new InMemorySourceEvidenceAwsTransport()
+    const firstItem =
+      createIgnoredProjectDirectoryItem('marker-only-change-1')
+    const scanner = new SequencedSourceEvidenceScanner([
+      {
+        items: [firstItem],
+        lastEvaluatedKey: createProjectDirectoryItemKey(firstItem),
+      },
+      {
+        items: [
+          createIgnoredProjectDirectoryItem('marker-only-change-2'),
+        ],
+      },
+    ])
+    const port = createSourceEvidencePort(
+      configuration,
+      scanner,
+      transport,
+    )
+    const predecessor = await port.commitNextPage(request)
+    transport.beforeNextSourcePrepare(() => {
+      const head = requireStoredItem(
+        transport.readStoredItemByKind(
+          'workspace-search-migration-source-evidence-head',
+        ),
+      )
+      Reflect.deleteProperty(head, 'chainEvidenceVersion')
+      transport.replaceStoredItem(head)
+    })
+
+    const failure = await captureMigrationFailure(
+      () => port.commitNextPage(request),
+    )
+
+    expect(failure.code).toBe('AMBIGUOUS_OPERATION_UNRESOLVED')
+    expect(await port.readProgress(request)).toEqual(predecessor)
+    expect(transport.transactionCommands).toHaveLength(2)
+    expect(transport.readStoredItems()).toHaveLength(2)
+    expect(
+      requireStoredItem(
+        transport.readStoredItemByKind(
+          'workspace-search-migration-source-evidence-head',
+        ),
+      ).chainEvidenceVersion,
+    ).toBeUndefined()
   })
 
   test('forbids dry-run authority and requires it for planning commits', async () => {
@@ -680,10 +1199,17 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
     const scanner = new SequencedSourceEvidenceScanner([{
       items: [createIgnoredProjectDirectoryItem('dry-run-authority')],
     }])
+    const planningArtifactGateway =
+      new InMemoryPlanningSourceArtifactGateway(
+        scanner,
+        transport.planningArtifactStore,
+      )
     const port = createSourceEvidencePort(
       configuration,
       scanner,
       transport,
+      () => new Date(initialTime),
+      planningArtifactGateway,
     )
     const dryRunRequest = createRequest(configuration)
     Object.defineProperty(dryRunRequest, 'authority', {
@@ -708,6 +1234,8 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
     expect(entries).toHaveLength(2)
     expect(entries?.[0]?.Put).toBeDefined()
     expect(entries?.[1]?.Put).toBeDefined()
+    expect(planningArtifactGateway.captureCalls).toHaveLength(0)
+    expect(planningArtifactGateway.readCalls).toHaveLength(0)
 
     const authorityTransport =
       new InMemorySourceEvidenceAwsTransport()
@@ -776,13 +1304,28 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
     planningTransport.beforeNextSourcePrepare(() => {
       planningClock.set(preparedAt)
     })
+    const planningScanner = new SequencedSourceEvidenceScanner([{
+      items: [createIgnoredProjectDirectoryItem('planning-clock')],
+    }])
+    const planningArtifactGateway =
+      new InMemoryPlanningSourceArtifactGateway(
+        planningScanner,
+        planningTransport.planningArtifactStore,
+      )
+    let planningClockCalls = 0
+    planningArtifactGateway.beforeNextCapture(() => {
+      expect(planningTransport.prepareCalls).toHaveLength(0)
+      expect(planningClockCalls).toBe(0)
+    })
     const planningPort = createSourceEvidencePort(
       configuration,
-      new SequencedSourceEvidenceScanner([{
-        items: [createIgnoredProjectDirectoryItem('planning-clock')],
-      }]),
+      planningScanner,
       planningTransport,
-      () => planningClock.read(),
+      () => {
+        planningClockCalls += 1
+        return planningClock.read()
+      },
+      planningArtifactGateway,
     )
 
     await planningPort.commitNextPage(createPlanningRequest(
@@ -798,6 +1341,11 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
       requireItem(leaseCheck.ExpressionAttributeValues),
       ':minimumExpiry',
     )).toBe(Date.parse(preparedAt) + 10_000)
+    expect(planningArtifactGateway.captureCalls).toHaveLength(1)
+    expect(planningClockCalls).toBe(1)
+    expect(
+      planningTransport.transactionCommands[0]?.input.TransactItems,
+    ).toHaveLength(5)
 
     const driftedStateTable: MigrationTableIdentity = {
       ...configuration.tables['migration-state'],
@@ -811,6 +1359,11 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
       createAwsWorkspaceSearchMigrationSourceEvidencePort({
         stateTable: driftedStateTable,
         scanner: driftScanner,
+        planningArtifactGateway:
+          new InMemoryPlanningSourceArtifactGateway(
+            driftScanner,
+            driftTransport.planningArtifactStore,
+          ),
         transport: driftTransport,
         clock: () => new Date(initialTime),
       })
@@ -835,13 +1388,20 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
       'run-fixed-planning-layout',
       'owner-fixed-planning-layout',
     )
+    const scanner = new SequencedSourceEvidenceScanner([{
+      items: [createIgnoredProjectDirectoryItem('planning-layout')],
+    }])
+    const planningArtifactGateway =
+      new InMemoryPlanningSourceArtifactGateway(
+        scanner,
+        transport.planningArtifactStore,
+      )
     const port = createSourceEvidencePort(
       configuration,
-      new SequencedSourceEvidenceScanner([{
-        items: [createIgnoredProjectDirectoryItem('planning-layout')],
-      }]),
+      scanner,
       transport,
       () => clock.read(),
+      planningArtifactGateway,
     )
 
     const result = await port.commitNextPage(createPlanningRequest(
@@ -873,15 +1433,340 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
         check.ExpressionAttributeValues,
       )).toBe(true)
     }
-    expect(readStringAttribute(
-      requireItem(entries?.[3]?.Put?.Item),
-      'kind',
-    )).toBe('workspace-search-migration-source-evidence-page-record')
+    const pageItem = requireItem(entries?.[3]?.Put?.Item)
+    expect(readStringAttribute(pageItem, 'kind'))
+      .toBe('workspace-search-migration-source-evidence-page-record')
     expect(readStringAttribute(
       requireItem(entries?.[4]?.Put?.Item),
       'kind',
     )).toBe('workspace-search-migration-source-evidence-head')
+    expect(readNumberAttribute(
+      requireItem(entries?.[4]?.Put?.Item),
+      'chainEvidenceVersion',
+    )).toBe(3)
     expect(transport.prepareCalls).toHaveLength(1)
+    expect(planningArtifactGateway.captureCalls).toHaveLength(1)
+    expect(planningArtifactGateway.readCalls).toHaveLength(0)
+    const planningPage = readPlanningEvidencePage(pageItem)
+    expect(planningPage.evidenceVersion).toBe(3)
+    if (planningPage.evidenceVersion !== 3) {
+      throw new Error('Expected artifact-bound planning evidence.')
+    }
+    expect(planningPage.sourceArtifacts).toHaveLength(1)
+    for (const reference of planningPage.sourceArtifacts) {
+      expect(reference.objectKey).toBe(
+        `workspace-search/v1/source-artifacts/v1/${reference.contentDigest}.json`,
+      )
+      expect(reference.versionId).toMatch(/^test-version-/)
+    }
+  })
+
+  test('fails an artifact upload before preparation, clock, or transaction', async () => {
+    const configuration = createConfiguration()
+    const transport = new InMemorySourceEvidenceAwsTransport()
+    const clock = new MutableAuthorityClock(initialTime)
+    const authorityContext = await acquirePlanningAuthority(
+      configuration,
+      transport,
+      clock,
+      'run-artifact-upload-failure',
+      'owner-artifact-upload-failure',
+    )
+    const scanner = new SequencedSourceEvidenceScanner([{
+      items: [createIgnoredProjectDirectoryItem('artifact-upload-failure')],
+    }])
+    const planningArtifactGateway =
+      new InMemoryPlanningSourceArtifactGateway(
+        scanner,
+        transport.planningArtifactStore,
+      )
+    planningArtifactGateway.failNextCaptureAfterScan(
+      createNamedError(
+        'TimeoutError',
+        'RAW-ARTIFACT-UPLOAD-FAILURE',
+      ),
+    )
+    let clockCalls = 0
+    const port = createSourceEvidencePort(
+      configuration,
+      scanner,
+      transport,
+      () => {
+        clockCalls += 1
+        return clock.read()
+      },
+      planningArtifactGateway,
+    )
+
+    const failure = await captureMigrationFailure(
+      () => port.commitNextPage(createPlanningRequest(
+        configuration,
+        authorityContext.authority,
+      )),
+    )
+
+    expect(failure.code).toBe('TRANSIENT_INFRASTRUCTURE_FAILURE')
+    expect(failure.message).not.toContain('RAW-ARTIFACT-UPLOAD-FAILURE')
+    expect(planningArtifactGateway.captureCalls).toHaveLength(1)
+    expect(scanner.inputs).toHaveLength(1)
+    expect(transport.prepareCalls).toHaveLength(0)
+    expect(transport.transactionCommands).toHaveLength(0)
+    expect(clockCalls).toBe(0)
+  })
+
+  test('refuses a legacy planning v2 head before another artifact capture', async () => {
+    const configuration = createConfiguration()
+    const transport = new InMemorySourceEvidenceAwsTransport()
+    const clock = new MutableAuthorityClock(initialTime)
+    const authorityContext = await acquirePlanningAuthority(
+      configuration,
+      transport,
+      clock,
+      'run-legacy-v2-head',
+      'owner-legacy-v2-head',
+    )
+    const request = createPlanningRequest(
+      configuration,
+      authorityContext.authority,
+    )
+    const initialScanner = new SequencedSourceEvidenceScanner([{
+      items: [createIgnoredProjectDirectoryItem('legacy-v2-head')],
+    }])
+    const initialPort = createSourceEvidencePort(
+      configuration,
+      initialScanner,
+      transport,
+      () => clock.read(),
+    )
+    await initialPort.commitNextPage(request)
+    const pageItem = requireStoredItem(
+      transport.readStoredItemByKind(
+        'workspace-search-migration-source-evidence-page-record',
+      ),
+    )
+    const headItem = requireStoredItem(
+      transport.readStoredItemByKind(
+        'workspace-search-migration-source-evidence-head',
+      ),
+    )
+    const legacyValue = decodeEvidencePayloadRecord(pageItem)
+    Reflect.set(legacyValue, 'evidenceVersion', 2)
+    Reflect.deleteProperty(legacyValue, 'sourceArtifacts')
+    const legacyPayload = new TextEncoder().encode(
+      serializeCanonicalJson(legacyValue),
+    )
+    const legacyPage =
+      parseWorkspaceSearchMigrationSourceEvidencePage(legacyPayload)
+    const legacyDigest =
+      createWorkspaceSearchMigrationSourceEvidencePageDigest(legacyPage)
+    transport.replaceStoredItem({
+      ...pageItem,
+      pageDigest: { S: legacyDigest },
+      payload: { B: legacyPayload },
+    })
+    const legacyHead = {
+      ...headItem,
+      headDigest: { S: legacyDigest },
+    }
+    Reflect.deleteProperty(legacyHead, 'chainEvidenceVersion')
+    transport.replaceStoredItem(legacyHead)
+    const scanner = new SequencedSourceEvidenceScanner([])
+    const planningArtifactGateway =
+      new InMemoryPlanningSourceArtifactGateway(
+        scanner,
+        transport.planningArtifactStore,
+      )
+    const port = createSourceEvidencePort(
+      configuration,
+      scanner,
+      transport,
+      () => clock.read(),
+      planningArtifactGateway,
+    )
+    const transactionCount = transport.transactionCommands.length
+    const prepareCount = transport.prepareCalls.length
+    const replay = await port.readCommittedEvidence(
+      createPlanningReadRequest(
+        configuration,
+        authorityContext.authority.lease.runId,
+      ),
+    )
+
+    const failure = await captureMigrationFailure(
+      () => port.commitNextPage(request),
+    )
+
+    expect(legacyPage.evidenceVersion).toBe(2)
+    expect(replay.progress.evidenceDigest).toBe(legacyDigest)
+    expect(replay.progress.checkpoint.completed).toBe(true)
+    expect(replay.progress.checkpoint.aggregate.pageCount).toBe(1)
+    expect(failure.code).toBe('INVALID_STATE')
+    expect(planningArtifactGateway.captureCalls).toHaveLength(0)
+    expect(planningArtifactGateway.readCalls).toHaveLength(0)
+    expect(scanner.inputs).toHaveLength(0)
+    expect(transport.prepareCalls).toHaveLength(prepareCount)
+    expect(transport.transactionCommands).toHaveLength(transactionCount)
+  })
+
+  test('refuses a planning v3 head missing its chain marker before side effects', async () => {
+    const configuration = createConfiguration()
+    const transport = new InMemorySourceEvidenceAwsTransport()
+    const clock = new MutableAuthorityClock(initialTime)
+    const authorityContext = await acquirePlanningAuthority(
+      configuration,
+      transport,
+      clock,
+      'run-missing-v3-chain-marker',
+      'owner-missing-v3-chain-marker',
+    )
+    const request = createPlanningRequest(
+      configuration,
+      authorityContext.authority,
+    )
+    const initialScanner = new SequencedSourceEvidenceScanner([{
+      items: [
+        createIgnoredProjectDirectoryItem('missing-v3-chain-marker'),
+      ],
+    }])
+    const initialPort = createSourceEvidencePort(
+      configuration,
+      initialScanner,
+      transport,
+      () => clock.read(),
+    )
+    await initialPort.commitNextPage(request)
+    const pageItem = requireStoredItem(
+      transport.readStoredItemByKind(
+        'workspace-search-migration-source-evidence-page-record',
+      ),
+    )
+    expect(readPlanningEvidencePage(pageItem).evidenceVersion).toBe(3)
+    const historicalHead = requireStoredItem(
+      transport.readStoredItemByKind(
+        'workspace-search-migration-source-evidence-head',
+      ),
+    )
+    Reflect.deleteProperty(
+      historicalHead,
+      'chainEvidenceVersion',
+    )
+    transport.replaceStoredItem(historicalHead)
+
+    const scanner = new SequencedSourceEvidenceScanner([])
+    const planningArtifactGateway =
+      new InMemoryPlanningSourceArtifactGateway(
+        scanner,
+        transport.planningArtifactStore,
+      )
+    let clockCalls = 0
+    const port = createSourceEvidencePort(
+      configuration,
+      scanner,
+      transport,
+      () => {
+        clockCalls += 1
+        return clock.read()
+      },
+      planningArtifactGateway,
+    )
+    const transactionCount = transport.transactionCommands.length
+    const prepareCount = transport.prepareCalls.length
+
+    const failure = await captureMigrationFailure(
+      () => port.commitNextPage(request),
+    )
+
+    expect(failure.code).toBe('INVALID_STATE')
+    expect(planningArtifactGateway.captureCalls).toHaveLength(0)
+    expect(planningArtifactGateway.readCalls).toHaveLength(0)
+    expect(scanner.inputs).toHaveLength(0)
+    expect(transport.prepareCalls).toHaveLength(prepareCount)
+    expect(transport.transactionCommands).toHaveLength(transactionCount)
+    expect(clockCalls).toBe(0)
+  })
+
+  test('re-reduces committed raw artifacts and rejects missing or wrong raw data', async () => {
+    const configuration = createConfiguration()
+    const transport = new InMemorySourceEvidenceAwsTransport()
+    const clock = new MutableAuthorityClock(initialTime)
+    const authorityContext = await acquirePlanningAuthority(
+      configuration,
+      transport,
+      clock,
+      'run-artifact-replay',
+      'owner-artifact-replay',
+    )
+    const rawItem = createIgnoredProjectDirectoryItem('artifact-replay')
+    const scanner = new SequencedSourceEvidenceScanner([{
+      items: [rawItem],
+    }])
+    const planningArtifactGateway =
+      new InMemoryPlanningSourceArtifactGateway(
+        scanner,
+        transport.planningArtifactStore,
+      )
+    const port = createSourceEvidencePort(
+      configuration,
+      scanner,
+      transport,
+      () => clock.read(),
+      planningArtifactGateway,
+    )
+    const request = createPlanningRequest(
+      configuration,
+      authorityContext.authority,
+    )
+    const committed = await port.commitNextPage(request)
+    const pageItem = requireStoredItem(
+      transport.readStoredItemByKind(
+        'workspace-search-migration-source-evidence-page-record',
+      ),
+    )
+    const planningPage = readPlanningEvidencePage(pageItem)
+    if (planningPage.evidenceVersion !== 3) {
+      throw new Error('Expected artifact-bound planning evidence.')
+    }
+
+    const replay = await port.readCommittedEvidence(
+      createPlanningReadRequest(
+        configuration,
+        authorityContext.authority.lease.runId,
+      ),
+    )
+
+    expect(replay.progress).toEqual(committed)
+    expect(replay.sourceRows).toHaveLength(1)
+    expect(planningArtifactGateway.readCalls).toHaveLength(1)
+    expect(
+      planningArtifactGateway.readCalls[0]?.sourceArtifacts,
+    ).toEqual(planningPage.sourceArtifacts)
+
+    planningArtifactGateway.returnWrongItemsOnNextRead([
+      createIgnoredProjectDirectoryItem('wrong-artifact-replay'),
+    ])
+    const wrongFailure = await captureMigrationFailure(
+      () => port.readCommittedEvidence(createPlanningReadRequest(
+        configuration,
+        authorityContext.authority.lease.runId,
+      )),
+    )
+    expect(wrongFailure.code).toBe('INVALID_SOURCE_ARTIFACT')
+    expect(wrongFailure.message).not.toContain('wrong-artifact-replay')
+
+    const firstReference = planningPage.sourceArtifacts[0]
+    if (firstReference === undefined) {
+      throw new Error('Expected one planning artifact reference.')
+    }
+    planningArtifactGateway.deleteStoredArtifact(firstReference)
+    const missingFailure = await captureMigrationFailure(
+      () => port.readCommittedEvidence(createPlanningReadRequest(
+        configuration,
+        authorityContext.authority.lease.runId,
+      )),
+    )
+    expect(missingFailure.code).toBe('INVALID_SOURCE_ARTIFACT')
+    expect(missingFailure.message)
+      .not.toContain('RAW-MISSING-PLANNING-SOURCE-ARTIFACT')
   })
 
   test('classifies each planning authority condition by its fixed index', async () => {
@@ -1105,13 +1990,20 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
       configuration,
       authorityContext.authority,
     )
+    const scanner = new SequencedSourceEvidenceScanner([{
+      items: [createIgnoredProjectDirectoryItem('planning-response-loss')],
+    }])
+    const planningArtifactGateway =
+      new InMemoryPlanningSourceArtifactGateway(
+        scanner,
+        transport.planningArtifactStore,
+      )
     const port = createSourceEvidencePort(
       configuration,
-      new SequencedSourceEvidenceScanner([{
-        items: [createIgnoredProjectDirectoryItem('planning-response-loss')],
-      }]),
+      scanner,
       transport,
       () => clock.read(),
+      planningArtifactGateway,
     )
     transport.failNextTransaction({
       timing: 'after-commit',
@@ -1141,10 +2033,172 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
       maintenanceEvidenceReceiptDigest:
         authorityContext.authority.maintenanceEvidenceReceiptDigest,
     })
+    const planningPage = readPlanningEvidencePage(page)
+    if (planningPage.evidenceVersion !== 3) {
+      throw new Error('Expected artifact-bound planning evidence.')
+    }
+    expect(planningArtifactGateway.readCalls).toHaveLength(1)
+    expect(
+      planningArtifactGateway.readCalls[0]?.sourceArtifacts,
+    ).toEqual(planningPage.sourceArtifacts)
+    expect(
+      planningArtifactGateway.readCalls[0]?.planningAuthority,
+    ).toEqual(planningPage.planningAuthority)
     expect(await port.readProgress(createPlanningReadRequest(
       configuration,
       authorityContext.authority.lease.runId,
     ))).toEqual(recovered)
+  })
+
+  test('preserves configuration drift from response-loss artifact verification', async () => {
+    const configuration = createConfiguration()
+    const transport = new InMemorySourceEvidenceAwsTransport()
+    const clock = new MutableAuthorityClock(initialTime)
+    const authorityContext = await acquirePlanningAuthority(
+      configuration,
+      transport,
+      clock,
+      'run-response-loss-configuration-drift',
+      'owner-response-loss-configuration-drift',
+    )
+    const request = createPlanningRequest(
+      configuration,
+      authorityContext.authority,
+    )
+    const scanner = new SequencedSourceEvidenceScanner([{
+      items: [
+        createIgnoredProjectDirectoryItem(
+          'response-loss-configuration-drift',
+        ),
+      ],
+    }])
+    const planningArtifactGateway =
+      new InMemoryPlanningSourceArtifactGateway(
+        scanner,
+        transport.planningArtifactStore,
+      )
+    planningArtifactGateway.failNextRead(
+      new WorkspaceSearchMigrationFailure(
+        'CONFIGURATION_DRIFT',
+        'RAW-ARTIFACT-CONFIGURATION-DRIFT',
+      ),
+    )
+    const port = createSourceEvidencePort(
+      configuration,
+      scanner,
+      transport,
+      () => clock.read(),
+      planningArtifactGateway,
+    )
+    transport.failNextTransaction({
+      timing: 'after-commit',
+      error: createNamedError(
+        'TimeoutError',
+        'RAW-CONFIGURATION-DRIFT-RESPONSE-LOSS',
+      ),
+    })
+
+    const failure = await captureMigrationFailure(
+      () => port.commitNextPage(request),
+    )
+
+    expect(failure).toMatchObject({
+      code: 'CONFIGURATION_DRIFT',
+      message:
+        'Workspace Search source evidence stopped safely (CONFIGURATION_DRIFT).',
+    })
+    expect(planningArtifactGateway.captureCalls).toHaveLength(1)
+    expect(planningArtifactGateway.readCalls).toHaveLength(1)
+  })
+
+  test('does not adopt an exact planning response-loss commit with a corrupted chain marker', async () => {
+    const configuration = createConfiguration()
+    const markerMutations:
+      readonly ('changed' | 'removed')[] = ['removed', 'changed']
+
+    for (const markerMutation of markerMutations) {
+      const transport = new InMemorySourceEvidenceAwsTransport()
+      const clock = new MutableAuthorityClock(initialTime)
+      const authorityContext = await acquirePlanningAuthority(
+        configuration,
+        transport,
+        clock,
+        `run-response-loss-marker-${markerMutation}`,
+        `owner-response-loss-marker-${markerMutation}`,
+      )
+      const request = createPlanningRequest(
+        configuration,
+        authorityContext.authority,
+      )
+      const scanner = new SequencedSourceEvidenceScanner([{
+        items: [
+          createIgnoredProjectDirectoryItem(
+            `response-loss-marker-${markerMutation}`,
+          ),
+        ],
+      }])
+      const planningArtifactGateway =
+        new InMemoryPlanningSourceArtifactGateway(
+          scanner,
+          transport.planningArtifactStore,
+        )
+      const port = createSourceEvidencePort(
+        configuration,
+        scanner,
+        transport,
+        () => clock.read(),
+        planningArtifactGateway,
+      )
+      transport.failNextTransaction({
+        timing: 'after-commit',
+        error: createNamedError(
+          'TimeoutError',
+          `RAW-RESPONSE-LOSS-MARKER-${markerMutation}`,
+        ),
+        afterCommit: () => {
+          const head = requireStoredItem(
+            transport.readStoredItemByKind(
+              'workspace-search-migration-source-evidence-head',
+            ),
+          )
+          if (markerMutation === 'removed') {
+            Reflect.deleteProperty(head, 'chainEvidenceVersion')
+          } else {
+            Reflect.set(head, 'chainEvidenceVersion', { N: '2' })
+          }
+          transport.replaceStoredItem(head)
+          return Promise.resolve()
+        },
+      })
+
+      const failure = await captureMigrationFailure(
+        () => port.commitNextPage(request),
+      )
+
+      expect(failure.code).toBe('AMBIGUOUS_OPERATION_UNRESOLVED')
+      expect(failure.message).not.toContain('RAW-')
+      expect(planningArtifactGateway.captureCalls).toHaveLength(1)
+      expect(planningArtifactGateway.readCalls).toHaveLength(0)
+      const page = requireStoredItem(
+        transport.readStoredItemByKind(
+          'workspace-search-migration-source-evidence-page-record',
+        ),
+      )
+      expect(readPlanningEvidencePage(page).evidenceVersion).toBe(3)
+      const head = requireStoredItem(
+        transport.readStoredItemByKind(
+          'workspace-search-migration-source-evidence-head',
+        ),
+      )
+      if (markerMutation === 'removed') {
+        expect(head.chainEvidenceVersion).toBeUndefined()
+      } else {
+        expect(readNumberAttribute(
+          head,
+          'chainEvidenceVersion',
+        )).toBe(2)
+      }
+    }
   })
 
   test('does not let an old fence adopt the same scan page committed under a new fence', async () => {
@@ -1792,17 +2846,25 @@ function createPlanningReadRequest(
  * @param scanner - Source scanner used by the adapter.
  * @param transport - Shared condition-aware in-memory transport.
  * @param clock - Trusted commit clock.
+ * @param planningArtifactGateway - Planning-only raw page gateway.
  * @returns Configured source-evidence port.
  */
 function createSourceEvidencePort(
   configuration: WorkspaceSearchMigrationConfiguration,
-  scanner: WorkspaceSearchMigrationSourceEvidenceScanner,
+  scanner: CapturingSourceEvidenceScanner,
   transport: InMemorySourceEvidenceAwsTransport,
   clock: () => Date = () => new Date(initialTime),
+  planningArtifactGateway:
+    WorkspaceSearchMigrationPlanningSourceArtifactGateway =
+      new InMemoryPlanningSourceArtifactGateway(
+        scanner,
+        transport.planningArtifactStore,
+      ),
 ): WorkspaceSearchMigrationSourceEvidenceAwsPort {
   return createAwsWorkspaceSearchMigrationSourceEvidencePort({
     stateTable: configuration.tables['migration-state'],
     scanner,
+    planningArtifactGateway,
     transport,
     clock,
   })
@@ -2052,6 +3114,28 @@ function readStringAttribute(
 }
 
 /**
+ * Reads one exact binary attribute from a low-level item.
+ *
+ * @param item - Low-level DynamoDB item.
+ * @param name - Required binary attribute name.
+ * @returns Detached exact binary value.
+ */
+function readBinaryAttribute(
+  item: Readonly<Record<string, AttributeValue>>,
+  name: string,
+): Uint8Array {
+  const attribute = item[name]
+  if (
+    attribute === undefined ||
+    attribute.B === undefined ||
+    Object.keys(attribute).length !== 1
+  ) {
+    throw new Error(`Expected exact binary attribute ${name}.`)
+  }
+  return new Uint8Array(attribute.B)
+}
+
+/**
  * Reads one exact safe integer attribute from a low-level item.
  *
  * @param item - Low-level DynamoDB item.
@@ -2252,6 +3336,51 @@ function createNamedError(name: string, message: string): Error {
 }
 
 /**
+ * Parses one durable page payload as strict planning evidence.
+ *
+ * @param item - Durable low-level source-evidence page row.
+ * @returns Validated legacy v2 or artifact-bound v3 planning page.
+ */
+function readPlanningEvidencePage(
+  item: Readonly<Record<string, AttributeValue>>,
+): Extract<
+  WorkspaceSearchMigrationSourceEvidencePage,
+  { readonly purpose: 'planning' }
+> {
+  const page = parseWorkspaceSearchMigrationSourceEvidencePage(
+    readBinaryAttribute(item, 'payload'),
+  )
+  if (page.purpose !== 'planning') {
+    throw new Error('Expected one planning page document.')
+  }
+  return page
+}
+
+/**
+ * Decodes one page payload into a mutable non-array fixture record.
+ *
+ * @param item - Durable low-level source-evidence page row.
+ * @returns Mutable parsed payload record.
+ */
+function decodeEvidencePayloadRecord(
+  item: Readonly<Record<string, AttributeValue>>,
+): object {
+  const parsed: unknown = JSON.parse(
+    new TextDecoder('utf-8', { fatal: true }).decode(
+      readBinaryAttribute(item, 'payload'),
+    ),
+  )
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    Array.isArray(parsed)
+  ) {
+    throw new Error('Expected one evidence payload record.')
+  }
+  return parsed
+}
+
+/**
  * Reads the authority binding from one canonical planning page payload.
  *
  * @param item - Durable low-level source-evidence page row.
@@ -2260,21 +3389,9 @@ function createNamedError(name: string, message: string): Error {
 function readPlanningAuthorityBinding(
   item: Readonly<Record<string, AttributeValue>>,
 ): unknown {
-  const payload = item.payload
-  if (
-    payload === undefined ||
-    payload.B === undefined ||
-    Object.keys(payload).length !== 1
-  ) {
-    throw new Error('Expected one binary source-evidence payload.')
-  }
-  const parsed: unknown = JSON.parse(
-    new TextDecoder('utf-8', { fatal: true }).decode(payload.B),
+  return structuredClone(
+    readPlanningEvidencePage(item).planningAuthority,
   )
-  if (typeof parsed !== 'object' || parsed === null) {
-    throw new Error('Expected one planning page document.')
-  }
-  return structuredClone(Reflect.get(parsed, 'planningAuthority'))
 }
 
 /**

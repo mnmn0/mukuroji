@@ -17,6 +17,7 @@ import {
   createWorkspaceSearchOperationId,
   isCanonicalTimestamp,
   isHexDigest,
+  isWorkspaceSearchMigrationFailureCode,
   MigrationDigestAccumulator,
   type DynamoAttributeMap,
   type MigrationScanAggregate,
@@ -1502,36 +1503,6 @@ function readPlannerFailureCode(
     return 'INVALID_STATE'
   }
   return 'INVALID_STATE'
-}
-
-/**
- * Narrows an unknown value to the complete stable migration failure-code set.
- *
- * @param value - Candidate code read from an untrusted error object.
- * @returns Whether the value is one supported failure code.
- */
-function isWorkspaceSearchMigrationFailureCode(
-  value: unknown,
-): value is WorkspaceSearchMigrationFailureCode {
-  return value === 'AMBIGUOUS_OPERATION_UNRESOLVED' ||
-    value === 'CONFIGURATION_DRIFT' ||
-    value === 'CONFIGURATION_HASH_MISMATCH' ||
-    value === 'DRY_RUN_INVALID_ROWS' ||
-    value === 'IDENTITY_MISMATCH' ||
-    value === 'INVALID_ARGUMENT' ||
-    value === 'INVALID_JOURNAL' ||
-    value === 'INVALID_MAINTENANCE_EVIDENCE' ||
-    value === 'INVALID_STATE' ||
-    value === 'JOURNAL_WRITE_FAILED' ||
-    value === 'LEASE_CONFLICT' ||
-    value === 'LEASE_LOST' ||
-    value === 'PITR_NOT_READY' ||
-    value === 'ROLLBACK_TARGET_DRIFT' ||
-    value === 'SOURCE_DRIFT' ||
-    value === 'TABLE_SCHEMA_MISMATCH' ||
-    value === 'TARGET_DRIFT' ||
-    value === 'TRANSIENT_INFRASTRUCTURE_FAILURE' ||
-    value === 'VERIFY_FAILED'
 }
 
 /**

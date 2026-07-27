@@ -18,6 +18,9 @@ import {
   WORKSPACE_SEARCH_MIGRATION_VERSION,
   zeroHexDigest,
 } from './migration-contract'
+import {
+  createWorkspaceSearchMigrationPlanningSourceArtifactObjectKey,
+} from './migration-source-artifact'
 import type {
   WorkspaceSearchMigrationSourceOwnershipBinding,
   WorkspaceSearchMigrationSourceScanRowEvidence,
@@ -72,6 +75,16 @@ export type WorkspaceSearchMigrationPlanningAuthorityBinding = {
   readonly maintenanceEvidenceReceiptDigest: string
 }
 
+/** Exact immutable S3 version containing one ordered raw source segment. */
+export type WorkspaceSearchMigrationPlanningSourceArtifactReference = {
+  /** Deterministic secret-free content-addressed object key. */
+  readonly objectKey: string
+  /** Exact immutable S3 VersionId returned for the stored segment. */
+  readonly versionId: string
+  /** SHA-256 digest of the exact canonical segment bytes. */
+  readonly contentDigest: string
+}
+
 /**
  * Fields shared by dry-run and planning source evidence pages.
  */
@@ -119,10 +132,10 @@ type WorkspaceSearchMigrationDryRunSourceEvidencePage =
     readonly purpose: 'dry-run'
   }
 
-/** Version-two authority-bound planning source evidence page. */
-type WorkspaceSearchMigrationPlanningSourceEvidencePage =
+/** Legacy version-two authority-bound planning source evidence page. */
+type WorkspaceSearchMigrationLegacyPlanningSourceEvidencePage =
   WorkspaceSearchMigrationSourceEvidencePageBase & {
-    /** Authority-bound planning evidence schema version. */
+    /** Legacy authority-only planning evidence schema version. */
     readonly evidenceVersion: 2
     /** Authoritative planning scan purpose. */
     readonly purpose: 'planning'
@@ -131,12 +144,28 @@ type WorkspaceSearchMigrationPlanningSourceEvidencePage =
       WorkspaceSearchMigrationPlanningAuthorityBinding
   }
 
+/** Version-three authority and immutable-artifact-bound planning page. */
+type WorkspaceSearchMigrationPlanningSourceEvidencePage =
+  WorkspaceSearchMigrationSourceEvidencePageBase & {
+    /** Lossless artifact-bound planning evidence schema version. */
+    readonly evidenceVersion: 3
+    /** Authoritative planning scan purpose. */
+    readonly purpose: 'planning'
+    /** Exact durable pre-plan authority used for this page. */
+    readonly planningAuthority:
+      WorkspaceSearchMigrationPlanningAuthorityBinding
+    /** Ordered immutable S3 versions containing every raw Scan item. */
+    readonly sourceArtifacts:
+      readonly WorkspaceSearchMigrationPlanningSourceArtifactReference[]
+  }
+
 /**
  * Canonical digest-only row evidence plus the exact resume checkpoint for one
  * committed source Scan page.
  */
 export type WorkspaceSearchMigrationSourceEvidencePage =
   | WorkspaceSearchMigrationDryRunSourceEvidencePage
+  | WorkspaceSearchMigrationLegacyPlanningSourceEvidencePage
   | WorkspaceSearchMigrationPlanningSourceEvidencePage
 
 /** Durable head state required to resume one exact source evidence chain. */
@@ -157,6 +186,9 @@ export type CreateWorkspaceSearchMigrationSourceEvidencePageInput = {
   /** Per-page authority, required only for planning evidence. */
   readonly planningAuthority:
     WorkspaceSearchMigrationPlanningAuthorityBinding | null
+  /** Ordered immutable raw-source segments, required only for planning v3. */
+  readonly sourceArtifacts:
+    readonly WorkspaceSearchMigrationPlanningSourceArtifactReference[] | null
   /** Exact durable predecessor progress. */
   readonly previousProgress: WorkspaceSearchMigrationSourceEvidenceProgress
   /** Detached reducer result for the page read from that predecessor. */
@@ -242,7 +274,12 @@ export function createWorkspaceSearchMigrationSourceEvidencePage(
     }
     let page: WorkspaceSearchMigrationSourceEvidencePage
     if (identity.purpose === 'dry-run') {
-      if (input.planningAuthority !== null) return failEvidence()
+      if (
+        input.planningAuthority !== null ||
+        input.sourceArtifacts !== null
+      ) {
+        return failEvidence()
+      }
       page = {
         ...pageBase,
         evidenceVersion: 1,
@@ -251,10 +288,12 @@ export function createWorkspaceSearchMigrationSourceEvidencePage(
     } else {
       page = {
         ...pageBase,
-        evidenceVersion: 2,
+        evidenceVersion: 3,
         purpose: 'planning',
         planningAuthority:
           readPlanningAuthorityBinding(input.planningAuthority),
+        sourceArtifacts:
+          readPlanningSourceArtifactReferences(input.sourceArtifacts),
       }
     }
     validateSuccessor(previous, page)
@@ -313,8 +352,18 @@ export function replayWorkspaceSearchMigrationSourceEvidencePages(
       WorkspaceSearchMigrationSourceOwnershipBinding[] = []
     const sourceKeys = new Set<string>()
     const targetKeys = new Set<string>()
+    let planningEvidenceVersion: 2 | 3 | undefined
     for (const candidate of pages) {
       const page = readRawPage(candidate)
+      if (page.purpose === 'planning') {
+        if (
+          planningEvidenceVersion !== undefined &&
+          planningEvidenceVersion !== page.evidenceVersion
+        ) {
+          return failEvidence()
+        }
+        planningEvidenceVersion = page.evidenceVersion
+      }
       progress = advanceWorkspaceSearchMigrationSourceEvidenceProgress(
         progress,
         page,
@@ -491,6 +540,57 @@ function readPlanningAuthorityBinding(
 }
 
 /**
+ * Reads one complete ordered immutable artifact-reference set.
+ *
+ * @param value - Candidate reference array from a planning v3 page.
+ * @returns Detached exact S3-version references.
+ */
+function readPlanningSourceArtifactReferences(
+  value: unknown,
+): readonly WorkspaceSearchMigrationPlanningSourceArtifactReference[] {
+  if (
+    !hasCanonicalDenseArrayShape(value) ||
+    value.length === 0 ||
+    value.length > WORKSPACE_SEARCH_MIGRATION_PAGE_SIZE
+  ) {
+    return failEvidence()
+  }
+  const objectKeys = new Set<string>()
+  const references:
+    WorkspaceSearchMigrationPlanningSourceArtifactReference[] = []
+  for (let index = 0; index < value.length; index += 1) {
+    const candidate = value[index]
+    const record = requireRecord(candidate)
+    requireExactKeys(record, [
+      'contentDigest',
+      'objectKey',
+      'versionId',
+    ])
+    const contentDigest = readDigest(record.contentDigest)
+    const versionId = readNonBlankText(record.versionId)
+    const reference:
+      WorkspaceSearchMigrationPlanningSourceArtifactReference = {
+        objectKey: readNonBlankText(record.objectKey),
+        versionId,
+        contentDigest,
+    }
+    if (
+      reference.objectKey !==
+        createWorkspaceSearchMigrationPlanningSourceArtifactObjectKey(
+          contentDigest,
+        ) ||
+      versionId === 'null' ||
+      objectKeys.has(reference.objectKey)
+    ) {
+      return failEvidence()
+    }
+    objectKeys.add(reference.objectKey)
+    references.push(reference)
+  }
+  return references
+}
+
+/**
  * Reads and validates one source evidence progress head.
  *
  * @param value - Candidate progress.
@@ -582,9 +682,11 @@ function readEncodedPage(
   ]
   requireExactKeys(
     record,
-    identity.purpose === 'planning'
-      ? [...commonKeys, 'planningAuthority']
-      : commonKeys,
+    identity.purpose === 'dry-run'
+      ? commonKeys
+      : record.evidenceVersion === 3
+        ? [...commonKeys, 'planningAuthority', 'sourceArtifacts']
+        : [...commonKeys, 'planningAuthority'],
   )
   if (
     record.kind !== 'workspace-search-source-evidence-page' ||
@@ -592,7 +694,8 @@ function readEncodedPage(
     record.migrationVersion !== WORKSPACE_SEARCH_MIGRATION_VERSION ||
     (identity.purpose === 'dry-run'
       ? record.evidenceVersion !== 1
-      : record.evidenceVersion !== 2)
+      : record.evidenceVersion !== 2 &&
+        record.evidenceVersion !== 3)
   ) {
     return failEvidence()
   }
@@ -628,12 +731,23 @@ function readEncodedPage(
       purpose: 'dry-run',
     }
   }
+  const planningAuthority =
+    readPlanningAuthorityBinding(record.planningAuthority)
+  if (record.evidenceVersion === 2) {
+    return {
+      ...pageBase,
+      evidenceVersion: 2,
+      purpose: 'planning',
+      planningAuthority,
+    }
+  }
   return {
     ...pageBase,
-    evidenceVersion: 2,
+    evidenceVersion: 3,
     purpose: 'planning',
-    planningAuthority:
-      readPlanningAuthorityBinding(record.planningAuthority),
+    planningAuthority,
+    sourceArtifacts:
+      readPlanningSourceArtifactReferences(record.sourceArtifacts),
   }
 }
 
@@ -678,7 +792,7 @@ function encodePage(page: WorkspaceSearchMigrationSourceEvidencePage) {
     })),
   }
   if (page.purpose === 'dry-run') return encoded
-  return {
+  const planningEncoded = {
     ...encoded,
     planningAuthority: {
       ownerId: page.planningAuthority.ownerId,
@@ -688,6 +802,15 @@ function encodePage(page: WorkspaceSearchMigrationSourceEvidencePage) {
       maintenanceEvidenceReceiptDigest:
         page.planningAuthority.maintenanceEvidenceReceiptDigest,
     },
+  }
+  if (page.evidenceVersion === 2) return planningEncoded
+  return {
+    ...planningEncoded,
+    sourceArtifacts: page.sourceArtifacts.map((reference) => ({
+      objectKey: reference.objectKey,
+      versionId: reference.versionId,
+      contentDigest: reference.contentDigest,
+    })),
   }
 }
 

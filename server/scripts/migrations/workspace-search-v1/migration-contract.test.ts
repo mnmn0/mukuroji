@@ -7,6 +7,7 @@ import {
   createWorkspaceSearchMigrationScanSnapshotDigest,
   createWorkspaceSearchOperationId,
   isCanonicalTimestamp,
+  isWorkspaceSearchMigrationFailureCode,
   MigrationDigestAccumulator,
   requireCommitOid,
   requireMigrationIdentifier,
@@ -21,6 +22,18 @@ import {
 } from './migration-contract'
 
 describe('Workspace Search migration contract', () => {
+  test('recognizes source artifact failure codes without accepting arbitrary text', () => {
+    expect(isWorkspaceSearchMigrationFailureCode(
+      'INVALID_SOURCE_ARTIFACT',
+    )).toBe(true)
+    expect(isWorkspaceSearchMigrationFailureCode(
+      'SOURCE_ARTIFACT_WRITE_FAILED',
+    )).toBe(true)
+    expect(isWorkspaceSearchMigrationFailureCode(
+      'SOURCE_ARTIFACT_workspace-secret',
+    )).toBe(false)
+  })
+
   test('canonicalizes nested JSON and rejects unsupported values', () => {
     expect(serializeCanonicalJson({
       z: [3, { beta: true, alpha: 'first' }],

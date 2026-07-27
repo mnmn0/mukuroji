@@ -315,6 +315,7 @@ export function buildMigrationStorage(
         new iam.PolicyStatement({
           actions: [
             's3:GetObject',
+            's3:GetObjectRetention',
             's3:GetObjectVersion',
           ],
           resources: [journalObjectArn],

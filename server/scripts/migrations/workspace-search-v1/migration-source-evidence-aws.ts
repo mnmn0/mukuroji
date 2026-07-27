@@ -41,8 +41,10 @@ import {
 import type {
   WorkspaceSearchMigrationSourceScanReadInput,
 } from './migration-source-scan-aws'
-import type {
-  WorkspaceSearchMigrationSourceScanPageResult,
+import {
+  reduceWorkspaceSearchMigrationSourceScanPage,
+  type WorkspaceSearchMigrationSourceScanPage,
+  type WorkspaceSearchMigrationSourceScanPageResult,
 } from './migration-source-scan-page'
 import {
   createInitialWorkspaceSearchMigrationSourceEvidenceProgress,
@@ -57,6 +59,7 @@ import {
   type WorkspaceSearchMigrationSourceEvidenceIdentity,
   type WorkspaceSearchMigrationSourceEvidencePage,
   type WorkspaceSearchMigrationPlanningAuthorityBinding,
+  type WorkspaceSearchMigrationPlanningSourceArtifactReference,
   type WorkspaceSearchMigrationSourceEvidenceProgress,
   type WorkspaceSearchMigrationSourceEvidencePurpose,
   type WorkspaceSearchMigrationSourceEvidenceReplayResult,
@@ -129,6 +132,67 @@ export interface WorkspaceSearchMigrationSourceEvidenceScanner {
 }
 
 /**
+ * Planning-only gateway that keeps raw Scan items inside the managed session.
+ */
+export interface WorkspaceSearchMigrationPlanningSourceArtifactGateway {
+  /**
+   * Captures one exact page, reduces it, and stores every lossless segment.
+   *
+   * @param input - Exact predecessor, identity, authority, and measured scan context.
+   * @returns Digest evidence plus ordered immutable S3-version references.
+   */
+  captureAndStorePlanningPage(
+    input: WorkspaceSearchMigrationPlanningSourceArtifactCaptureInput,
+  ): Promise<WorkspaceSearchMigrationPlanningSourceArtifactCaptureResult>
+
+  /**
+   * Reads and verifies every exact immutable segment for one committed page.
+   *
+   * @param input - Expected page identity, authority, and exact S3 references.
+   * @returns Detached raw items without the restricted DynamoDB cursor.
+   */
+  readVerifiedPlanningPage(
+    input: WorkspaceSearchMigrationPlanningSourceArtifactReadInput,
+  ): Promise<WorkspaceSearchMigrationSourceScanPage>
+}
+
+/** Planning context required to capture and persist one raw source page. */
+export type WorkspaceSearchMigrationPlanningSourceArtifactCaptureInput =
+  WorkspaceSearchMigrationSourceScanReadInput & {
+    /** Operator-selected run owning the planning chain. */
+    readonly runId: string
+    /** One-based successor page sequence. */
+    readonly pageSequence: number
+    /** Digest of the exact predecessor evidence page. */
+    readonly previousEvidenceDigest: string
+    /** Digest of the exact predecessor checkpoint. */
+    readonly previousCheckpointDigest: string
+    /** Exact authority embedded in the artifact and planning evidence page. */
+    readonly planningAuthority:
+      WorkspaceSearchMigrationPlanningAuthorityBinding
+  }
+
+/** Result of one same-page planning capture, reduction, and immutable upload. */
+export type WorkspaceSearchMigrationPlanningSourceArtifactCaptureResult = {
+  /** Digest-only reduction of the exact captured raw page. */
+  readonly pageResult: WorkspaceSearchMigrationSourceScanPageResult
+  /** Ordered exact immutable S3 versions for every raw page segment. */
+  readonly sourceArtifacts:
+    readonly WorkspaceSearchMigrationPlanningSourceArtifactReference[]
+}
+
+/** Exact context required to read one already committed planning artifact page. */
+export type WorkspaceSearchMigrationPlanningSourceArtifactReadInput =
+  Omit<
+    WorkspaceSearchMigrationPlanningSourceArtifactCaptureInput,
+    'previousCheckpoint'
+  > & {
+    /** Ordered exact immutable S3 versions bound into planning evidence v3. */
+    readonly sourceArtifacts:
+      readonly WorkspaceSearchMigrationPlanningSourceArtifactReference[]
+  }
+
+/**
  * Dependencies for one source-evidence AWS adapter.
  */
 export type CreateWorkspaceSearchMigrationSourceEvidenceAwsPortInput = {
@@ -136,6 +200,9 @@ export type CreateWorkspaceSearchMigrationSourceEvidenceAwsPortInput = {
   readonly stateTable: MigrationTableIdentity
   /** Measured scanner sharing the pinned AWS identity session. */
   readonly scanner: WorkspaceSearchMigrationSourceEvidenceScanner
+  /** Managed planning-only raw-page capture and immutable artifact gateway. */
+  readonly planningArtifactGateway:
+    WorkspaceSearchMigrationPlanningSourceArtifactGateway
   /** Narrow strongly-consistent read and transactional-write transport. */
   readonly transport: WorkspaceSearchMigrationSourceEvidenceAwsTransport
   /** Adapter-owned trusted clock sampled immediately before each write. */
@@ -256,7 +323,22 @@ type SourceEvidenceHeadRead =
       readonly exists: true
       /** Exact validated durable progress. */
       readonly progress: WorkspaceSearchMigrationSourceEvidenceProgress
+      /** Payload schema version of the latest immutable page. */
+      readonly latestEvidenceVersion: 1 | 2 | 3
+      /**
+       * CAS-bound schema version for the complete chain, or null on a
+       * historical head created before this discriminator existed.
+       */
+      readonly chainEvidenceVersion: 1 | 2 | 3 | null
     }
+
+/** Strictly parsed progress and optional historical chain discriminator. */
+type ParsedSourceEvidenceHeadItem = {
+  /** Exact validated durable progress. */
+  readonly progress: WorkspaceSearchMigrationSourceEvidenceProgress
+  /** CAS-bound complete-chain schema version, when durably present. */
+  readonly chainEvidenceVersion: 1 | 2 | 3 | null
+}
 
 /**
  * Validated immutable page record used during response-loss reconciliation.
@@ -292,6 +374,7 @@ type SourceEvidenceAwsFailureCode =
   | 'IDENTITY_MISMATCH'
   | 'INVALID_ARGUMENT'
   | 'INVALID_MAINTENANCE_EVIDENCE'
+  | 'INVALID_SOURCE_ARTIFACT'
   | 'INVALID_STATE'
   | 'LEASE_LOST'
   | 'SOURCE_DRIFT'
@@ -337,6 +420,10 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
   /** Managed source scanner sharing the measured identity session. */
   private readonly scanner: WorkspaceSearchMigrationSourceEvidenceScanner
 
+  /** Planning-only lossless source artifact gateway. */
+  private readonly planningArtifactGateway:
+    WorkspaceSearchMigrationPlanningSourceArtifactGateway
+
   /** Narrow DynamoDB command transport. */
   private readonly transport: WorkspaceSearchMigrationSourceEvidenceAwsTransport
 
@@ -353,6 +440,7 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
   ) {
     this.stateTable = structuredClone(input.stateTable)
     this.scanner = input.scanner
+    this.planningArtifactGateway = input.planningArtifactGateway
     this.transport = input.transport
     this.clock = input.clock
   }
@@ -424,19 +512,58 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
       const predecessor = predecessorRead.exists
         ? predecessorRead.progress
         : request.initialProgress
+      if (
+        predecessorRead.exists &&
+        request.identity.purpose === 'planning' &&
+        (
+          predecessorRead.latestEvidenceVersion !== 3 ||
+          predecessorRead.chainEvidenceVersion !== 3
+        )
+      ) {
+        return failSourceEvidenceAws('INVALID_STATE')
+      }
       if (predecessor.checkpoint.completed) return predecessor
 
-      const pageResult = await this.scanner.scanSourcePage({
-        configuration: request.configuration,
-        configurationHash: request.configurationHash,
-        source: request.source,
-        previousCheckpoint: predecessor.checkpoint,
-      })
+      let pageResult: WorkspaceSearchMigrationSourceScanPageResult
+      let sourceArtifacts:
+        readonly WorkspaceSearchMigrationPlanningSourceArtifactReference[] |
+        null = null
+      if (request.identity.purpose === 'planning') {
+        const planningAuthority = request.planningAuthority
+        if (planningAuthority === null) {
+          return failSourceEvidenceAws('INVALID_STATE')
+        }
+        const captured =
+          await this.planningArtifactGateway.captureAndStorePlanningPage({
+            configuration: request.configuration,
+            configurationHash: request.configurationHash,
+            source: request.source,
+            previousCheckpoint: predecessor.checkpoint,
+            runId: request.identity.runId,
+            pageSequence: predecessor.pageSequence + 1,
+            previousEvidenceDigest: predecessor.evidenceDigest,
+            previousCheckpointDigest:
+              createWorkspaceSearchMigrationSourceCheckpointDigest(
+                predecessor.checkpoint,
+              ),
+            planningAuthority,
+          })
+        pageResult = captured.pageResult
+        sourceArtifacts = captured.sourceArtifacts
+      } else {
+        pageResult = await this.scanner.scanSourcePage({
+          configuration: request.configuration,
+          configurationHash: request.configurationHash,
+          source: request.source,
+          previousCheckpoint: predecessor.checkpoint,
+        })
+      }
       const page = createWorkspaceSearchMigrationSourceEvidencePage({
         identity: request.identity,
         previousProgress: predecessor,
         pageResult,
         planningAuthority: request.planningAuthority,
+        sourceArtifacts,
       })
       const successor =
         advanceWorkspaceSearchMigrationSourceEvidenceProgress(
@@ -455,6 +582,10 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
         const committedPages = await this.readEvidencePages(
           request,
           predecessor.pageSequence,
+        )
+        await this.verifyPlanningArtifactPages(
+          request,
+          committedPages,
         )
         const replay = replayWorkspaceSearchMigrationSourceEvidencePages(
           request.identity,
@@ -478,6 +609,7 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
         request.identity,
         createSourceEvidenceHeadRecordKey(request.identity),
         successor,
+        page.evidenceVersion,
       )
       await this.prepareWrite()
       const commitClock = request.authority === null
@@ -572,11 +704,12 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
       ),
     )
     if (output.Item === undefined) return { exists: false }
-    const progress = parseSourceEvidenceHeadItem(
+    const parsedHead = parseSourceEvidenceHeadItem(
       output.Item,
       recordKey,
       request,
     )
+    const progress = parsedHead.progress
     if (progress.pageSequence === 0) {
       return failSourceEvidenceAws('INVALID_STATE')
     }
@@ -590,6 +723,11 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
       latestPage === undefined ||
       latestPage.revision !== progress.pageSequence ||
       latestPage.pageDigest !== progress.evidenceDigest ||
+      (
+        parsedHead.chainEvidenceVersion !== null &&
+        parsedHead.chainEvidenceVersion !==
+          latestPage.page.evidenceVersion
+      ) ||
       createWorkspaceSearchMigrationSourceCheckpointDigest(
         latestPage.page.checkpoint,
       ) !==
@@ -602,6 +740,8 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
     return {
       exists: true,
       progress,
+      latestEvidenceVersion: latestPage.page.evidenceVersion,
+      chainEvidenceVersion: parsedHead.chainEvidenceVersion,
     }
   }
 
@@ -672,6 +812,7 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
       request,
       expectedProgress.pageSequence,
     )
+    await this.verifyPlanningArtifactPages(request, pages)
     const replay = replayWorkspaceSearchMigrationSourceEvidencePages(
       request.identity,
       pages,
@@ -683,6 +824,114 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
       return failSourceEvidenceAws('INVALID_STATE')
     }
     return replay
+  }
+
+  /**
+   * Verifies every artifact-bearing planning page against its exact transition.
+   *
+   * Legacy planning v2 remains readable as digest-only evidence but is never
+   * treated as artifact-complete.
+   *
+   * @param request - Exact measured chain request.
+   * @param pages - Ordered validated durable evidence pages.
+   */
+  private async verifyPlanningArtifactPages(
+    request: PreparedSourceEvidenceAwsRequest,
+    pages: readonly WorkspaceSearchMigrationSourceEvidencePage[],
+  ): Promise<void> {
+    let progress = request.initialProgress
+    for (const page of pages) {
+      if (
+        page.purpose === 'planning' &&
+        page.evidenceVersion === 3
+      ) {
+        await this.verifyPlanningArtifactPage(
+          request,
+          progress,
+          page,
+        )
+      }
+      progress =
+        advanceWorkspaceSearchMigrationSourceEvidenceProgress(
+          progress,
+          page,
+        )
+    }
+  }
+
+  /**
+   * Re-reduces one exact immutable raw page and compares its full v3 evidence.
+   *
+   * @param request - Exact measured chain request.
+   * @param predecessor - Exact predecessor progress.
+   * @param page - Artifact-bearing planning v3 page.
+   */
+  private async verifyPlanningArtifactPage(
+    request: PreparedSourceEvidenceAwsRequest,
+    predecessor: WorkspaceSearchMigrationSourceEvidenceProgress,
+    page: Extract<
+      WorkspaceSearchMigrationSourceEvidencePage,
+      { readonly evidenceVersion: 3 }
+    >,
+  ): Promise<void> {
+    const rawPage =
+      await this.planningArtifactGateway.readVerifiedPlanningPage({
+        configuration: request.configuration,
+        configurationHash: request.configurationHash,
+        source: request.source,
+        runId: page.runId,
+        pageSequence: page.pageSequence,
+        previousEvidenceDigest: page.previousEvidenceDigest,
+        previousCheckpointDigest: page.previousCheckpointDigest,
+        planningAuthority: page.planningAuthority,
+        sourceArtifacts: page.sourceArtifacts,
+      })
+    if (rawPage.lastEvaluatedKey !== undefined) {
+      return failSourceEvidenceAws('INVALID_SOURCE_ARTIFACT')
+    }
+    const cursor = page.checkpoint.cursor
+    if (
+      page.checkpoint.completed
+        ? cursor !== undefined
+        : cursor === undefined
+    ) {
+      return failSourceEvidenceAws('INVALID_STATE')
+    }
+    const reconstructedPage: WorkspaceSearchMigrationSourceScanPage =
+      cursor === undefined
+        ? { items: rawPage.items }
+        : {
+            items: rawPage.items,
+            lastEvaluatedKey: cursor,
+          }
+    const pageResult = reduceWorkspaceSearchMigrationSourceScanPage({
+      configuration: request.configuration,
+      configurationHash: request.configurationHash,
+      source: request.source,
+      previousCheckpoint: predecessor.checkpoint,
+      page: reconstructedPage,
+    })
+    const reconstructedEvidence =
+      createWorkspaceSearchMigrationSourceEvidencePage({
+        identity: request.identity,
+        previousProgress: predecessor,
+        pageResult,
+        planningAuthority: page.planningAuthority,
+        sourceArtifacts: page.sourceArtifacts,
+      })
+    if (
+      !Buffer.from(
+        serializeWorkspaceSearchMigrationSourceEvidencePage(
+          reconstructedEvidence,
+        ),
+      ).equals(
+        Buffer.from(
+          serializeWorkspaceSearchMigrationSourceEvidencePage(page),
+        ),
+      )
+    ) {
+      return failSourceEvidenceAws('INVALID_SOURCE_ARTIFACT')
+    }
   }
 
   /**
@@ -723,9 +972,28 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
     if (
       currentHead.exists &&
       currentPage !== undefined &&
+      currentHead.chainEvidenceVersion === page.evidenceVersion &&
       sourceEvidencePageReadEquals(currentPage, page, successor.pageSequence)
     ) {
       if (sourceEvidenceProgressEquals(currentHead.progress, successor)) {
+        if (
+          page.purpose === 'planning' &&
+          page.evidenceVersion === 3
+        ) {
+          try {
+            await this.verifyPlanningArtifactPage(
+              request,
+              predecessor,
+              page,
+            )
+          } catch (verificationError: unknown) {
+            return failSourceEvidenceAws(
+              isSourceEvidenceConfigurationDrift(verificationError)
+                ? 'CONFIGURATION_DRIFT'
+                : 'AMBIGUOUS_OPERATION_UNRESOLVED',
+            )
+          }
+        }
         return successor
       }
       if (
@@ -778,6 +1046,10 @@ export function createAwsWorkspaceSearchMigrationSourceEvidencePort(
     if (typeof input.clock !== 'function') {
       return failSourceEvidenceAws('INVALID_ARGUMENT')
     }
+    requireSourceEvidenceScanner(input.scanner)
+    requirePlanningSourceArtifactGateway(
+      input.planningArtifactGateway,
+    )
     requireSourceEvidenceAwsTransport(input.transport)
     return new AwsWorkspaceSearchMigrationSourceEvidencePort(input)
   } catch {
@@ -1007,15 +1279,23 @@ function createStrongSourceEvidenceGetCommand(
  * @param identity - Exact immutable evidence identity.
  * @param recordKey - Deterministic head record key.
  * @param progress - Exact successor progress.
+ * @param chainEvidenceVersion - Schema version shared by the complete chain.
  * @returns Validated low-level DynamoDB item.
  */
 function createSourceEvidenceHeadItem(
   identity: WorkspaceSearchMigrationSourceEvidenceIdentity,
   recordKey: string,
   progress: WorkspaceSearchMigrationSourceEvidenceProgress,
+  chainEvidenceVersion: 1 | 2 | 3,
 ): Readonly<Record<string, AttributeValue>> {
   requireProgressIdentity(identity, progress)
   void createWorkspaceSearchMigrationSourceEvidenceProgressDigest(progress)
+  if (
+    (progress.purpose === 'dry-run' && chainEvidenceVersion !== 1) ||
+    (progress.purpose === 'planning' && chainEvidenceVersion !== 3)
+  ) {
+    return failSourceEvidenceAws('INVALID_STATE')
+  }
   const item: Record<string, AttributeValue> = {
     migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
     recordKey: { S: recordKey },
@@ -1027,6 +1307,7 @@ function createSourceEvidenceHeadItem(
     source: { S: progress.source },
     sourceTableId: { S: progress.sourceTableId },
     stateTableId: { S: progress.stateTableId },
+    chainEvidenceVersion: { N: String(chainEvidenceVersion) },
     revision: { N: String(progress.pageSequence) },
     checkpointDigest: {
       S: createWorkspaceSearchMigrationSourceCheckpointDigest(
@@ -1096,7 +1377,10 @@ function createSourceEvidenceCommitCommand(
     return failSourceEvidenceAws('INVALID_STATE')
   }
   const headCondition = input.predecessorRead.exists
-    ? createExistingHeadCondition(input.predecessor)
+    ? createExistingHeadCondition(
+        input.predecessor,
+        input.predecessorRead.chainEvidenceVersion,
+      )
     : createAbsentHeadCondition()
   const transactionToken = createSourceEvidenceTransactionToken(
     input.predecessor,
@@ -1165,14 +1449,20 @@ function createAbsentHeadCondition(): SourceEvidenceHeadCondition {
  * Creates the complete exact-predecessor CAS for an existing head.
  *
  * @param predecessor - Exact validated predecessor progress.
+ * @param chainEvidenceVersion - Persisted chain discriminator, when present.
  * @returns Full kind, identity, revision, digest, and completion condition.
  */
 function createExistingHeadCondition(
   predecessor: WorkspaceSearchMigrationSourceEvidenceProgress,
+  chainEvidenceVersion: 1 | 2 | 3 | null,
 ): SourceEvidenceHeadCondition {
   if (predecessor.checkpoint.completed) {
     return failSourceEvidenceAws('INVALID_STATE')
   }
+  const chainVersionExpression =
+    chainEvidenceVersion === null
+      ? 'attribute_not_exists(#chainEvidenceVersion)'
+      : '#chainEvidenceVersion = :chainEvidenceVersion'
   return {
     expression: [
       '#kind = :kind',
@@ -1187,6 +1477,7 @@ function createExistingHeadCondition(
       '#checkpointDigest = :checkpointDigest',
       '#headDigest = :headDigest',
       '#completed = :completed',
+      chainVersionExpression,
     ].join(' AND '),
     names: {
       '#kind': 'kind',
@@ -1201,6 +1492,7 @@ function createExistingHeadCondition(
       '#checkpointDigest': 'checkpointDigest',
       '#headDigest': 'headDigest',
       '#completed': 'completed',
+      '#chainEvidenceVersion': 'chainEvidenceVersion',
     },
     values: {
       ':kind': { S: sourceEvidenceHeadKind },
@@ -1219,6 +1511,13 @@ function createExistingHeadCondition(
       },
       ':headDigest': { S: predecessor.evidenceDigest },
       ':completed': { BOOL: false },
+      ...(chainEvidenceVersion === null
+        ? {}
+        : {
+            ':chainEvidenceVersion': {
+              N: String(chainEvidenceVersion),
+            },
+          }),
     },
   }
 }
@@ -1263,15 +1562,15 @@ function createSourceEvidenceTransactionToken(
  * @param rawItem - Untrusted low-level DynamoDB item.
  * @param expectedRecordKey - Exact deterministic head key.
  * @param request - Exact requested identity and measured scan context.
- * @returns Detached validated durable progress.
+ * @returns Detached validated progress and optional chain discriminator.
  */
 function parseSourceEvidenceHeadItem(
   rawItem: Readonly<Record<string, AttributeValue>>,
   expectedRecordKey: string,
   request: PreparedSourceEvidenceAwsRequest,
-): WorkspaceSearchMigrationSourceEvidenceProgress {
+): ParsedSourceEvidenceHeadItem {
   const item = cloneSourceEvidenceItem(rawItem)
-  requireExactItemKeys(item, [
+  const headItemKeys = [
     'checkpoint',
     'checkpointDigest',
     'completed',
@@ -1287,7 +1586,15 @@ function parseSourceEvidenceHeadItem(
     'sourceTableId',
     'stateTableId',
     'version',
-  ])
+  ]
+  const hasChainEvidenceVersion =
+    Object.hasOwn(item, 'chainEvidenceVersion')
+  requireExactItemKeys(
+    item,
+    hasChainEvidenceVersion
+      ? [...headItemKeys, 'chainEvidenceVersion']
+      : headItemKeys,
+  )
   if (
     readRequiredStringAttribute(item, 'migrationId') !==
       WORKSPACE_SEARCH_MIGRATION_ID ||
@@ -1299,6 +1606,18 @@ function parseSourceEvidenceHeadItem(
       sourceEvidenceAwsRecordVersion
   ) {
     return failSourceEvidenceAws('INVALID_STATE')
+  }
+  let chainEvidenceVersion: 1 | 2 | 3 | null = null
+  if (hasChainEvidenceVersion) {
+    const candidate =
+      readRequiredPositiveNumberAttribute(
+        item,
+        'chainEvidenceVersion',
+      )
+    if (candidate !== 1 && candidate !== 2 && candidate !== 3) {
+      return failSourceEvidenceAws('INVALID_STATE')
+    }
+    chainEvidenceVersion = candidate
   }
   requireHeadIdentity(item, request.identity)
   const checkpoint = decodeSourceEvidenceCheckpoint(
@@ -1327,7 +1646,9 @@ function parseSourceEvidenceHeadItem(
     checkpoint,
   }
   void createWorkspaceSearchMigrationSourceEvidenceProgressDigest(progress)
-  if (checkpoint.completed) return progress
+  if (checkpoint.completed) {
+    return { progress, chainEvidenceVersion }
+  }
   const context = prepareWorkspaceSearchMigrationSourceScanContext({
     configuration: request.configuration,
     configurationHash: request.configurationHash,
@@ -1336,8 +1657,11 @@ function parseSourceEvidenceHeadItem(
   })
   if (!context.ok) return failSourceEvidenceAws(context.code)
   return {
-    ...progress,
-    checkpoint: context.context.previousCheckpoint,
+    progress: {
+      ...progress,
+      checkpoint: context.context.previousCheckpoint,
+    },
+    chainEvidenceVersion,
   }
 }
 
@@ -1730,6 +2054,8 @@ function sourceEvidenceHeadReadEquals(
 ): boolean {
   if (!before.exists) return !current.exists
   return current.exists &&
+    current.chainEvidenceVersion === before.chainEvidenceVersion &&
+    current.latestEvidenceVersion === before.latestEvidenceVersion &&
     sourceEvidenceProgressEquals(current.progress, predecessor)
 }
 
@@ -2160,6 +2486,43 @@ function requireSourceEvidenceAwsTransport(transport: unknown): void {
     typeof Reflect.get(
       transport,
       'transactWriteSourceEvidence',
+    ) !== 'function'
+  ) {
+    return failSourceEvidenceAws('INVALID_ARGUMENT')
+  }
+}
+
+/**
+ * Validates the digest-only scanner dependency without invoking it.
+ *
+ * @param scanner - Candidate managed source scanner.
+ */
+function requireSourceEvidenceScanner(scanner: unknown): void {
+  if (
+    typeof scanner !== 'object' ||
+    scanner === null ||
+    typeof Reflect.get(scanner, 'scanSourcePage') !== 'function'
+  ) {
+    return failSourceEvidenceAws('INVALID_ARGUMENT')
+  }
+}
+
+/**
+ * Validates the planning artifact gateway without invoking its methods.
+ *
+ * @param gateway - Candidate managed planning artifact gateway.
+ */
+function requirePlanningSourceArtifactGateway(gateway: unknown): void {
+  if (
+    typeof gateway !== 'object' ||
+    gateway === null ||
+    typeof Reflect.get(
+      gateway,
+      'captureAndStorePlanningPage',
+    ) !== 'function' ||
+    typeof Reflect.get(
+      gateway,
+      'readVerifiedPlanningPage',
     ) !== 'function'
   ) {
     return failSourceEvidenceAws('INVALID_ARGUMENT')

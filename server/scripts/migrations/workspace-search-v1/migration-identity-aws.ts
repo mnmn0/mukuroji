@@ -20,6 +20,8 @@ import {
   KMSClient,
 } from '@aws-sdk/client-kms'
 import {
+  GetObjectCommand,
+  type GetObjectCommandOutput,
   GetBucketEncryptionCommand,
   type GetBucketEncryptionOutput,
   GetBucketLoggingCommand,
@@ -28,6 +30,10 @@ import {
   type GetBucketVersioningOutput,
   GetObjectLockConfigurationCommand,
   type GetObjectLockConfigurationOutput,
+  HeadObjectCommand,
+  type HeadObjectCommandOutput,
+  PutObjectCommand,
+  type PutObjectCommandOutput,
   S3Client,
 } from '@aws-sdk/client-s3'
 import type { fromIni } from '@aws-sdk/credential-provider-ini'
@@ -85,12 +91,21 @@ import {
 } from './migration-pre-plan-authority-aws'
 import {
   createAwsWorkspaceSearchMigrationSourceEvidencePort,
+  type WorkspaceSearchMigrationPlanningSourceArtifactGateway,
   type WorkspaceSearchMigrationSourceEvidenceAwsPort,
   type WorkspaceSearchMigrationSourceEvidenceAwsCommitRequest,
   type WorkspaceSearchMigrationSourceEvidenceAwsRequest,
   type WorkspaceSearchMigrationSourceEvidenceAwsTransport,
   type WorkspaceSearchMigrationSourceEvidenceScanner,
 } from './migration-source-evidence-aws'
+import {
+  createAwsWorkspaceSearchMigrationSourceArtifactPort,
+  type WorkspaceSearchMigrationSourceArtifactAwsTransport,
+} from './migration-source-artifact-aws'
+import {
+  type WorkspaceSearchMigrationPlanningSourceArtifactPage,
+  WORKSPACE_SEARCH_MIGRATION_SOURCE_ARTIFACT_VERSION,
+} from './migration-source-artifact'
 import type {
   WorkspaceSearchMigrationSourceEvidenceProgress,
   WorkspaceSearchMigrationSourceEvidenceReplayResult,
@@ -103,6 +118,7 @@ import {
 import {
   reduceWorkspaceSearchMigrationSourceScanPage,
   type ReduceWorkspaceSearchMigrationSourceScanPageInput,
+  type WorkspaceSearchMigrationSourceScanPage,
   type WorkspaceSearchMigrationSourceScanPageResult,
 } from './migration-source-scan-page'
 import {
@@ -203,6 +219,9 @@ const MAXIMUM_PROFILE_ROLE_CHAIN_DEPTH = 8
 /** Hard deadline for one migration-state transaction SDK request. */
 const MIGRATION_STATE_TRANSACTION_TIMEOUT_MILLISECONDS = 5_000
 
+/** Hard deadline for one immutable source-artifact S3 SDK request. */
+const MIGRATION_SOURCE_ARTIFACT_TIMEOUT_MILLISECONDS = 10_000
+
 /**
  * Fixed secret-free timeout emitted when a local state-write deadline aborts.
  */
@@ -215,6 +234,22 @@ class MigrationStateTransactionTimeout extends Error {
    */
   constructor() {
     super('Migration-state transaction timed out.')
+    this.name = 'TimeoutError'
+  }
+}
+
+/**
+ * Fixed secret-free timeout emitted when one artifact S3 request is aborted.
+ */
+class MigrationSourceArtifactTimeout extends Error {
+  /** Node.js timeout code recognized by Smithy's transient-error classifier. */
+  readonly code = 'ETIMEDOUT'
+
+  /**
+   * Creates one classifier-compatible local artifact timeout.
+   */
+  constructor() {
+    super('Migration source-artifact request timed out.')
     this.name = 'TimeoutError'
   }
 }
@@ -271,6 +306,14 @@ type PreparedManagedSourceScanReduction = {
   readonly generation: number
   /** Exact predecessor and page that must be reduced together. */
   readonly reductionInput: ReduceWorkspaceSearchMigrationSourceScanPageInput
+}
+
+/** Exact private raw page paired with its public digest-only reduction. */
+type CapturedManagedSourceScanPage = {
+  /** Detached normalized raw Scan items retained only inside the session. */
+  readonly page: WorkspaceSearchMigrationSourceScanPage
+  /** Digest-only reduction exposed by the public managed session. */
+  readonly pageResult: WorkspaceSearchMigrationSourceScanPageResult
 }
 
 /**
@@ -483,6 +526,7 @@ export interface WorkspaceSearchMigrationManagedAwsTransport
   extends
     WorkspaceSearchMigrationIdentityAwsTransport,
     WorkspaceSearchMigrationPrePlanAuthorityAwsTransport,
+    WorkspaceSearchMigrationSourceArtifactAwsTransport,
     WorkspaceSearchMigrationSourceScanAwsTransport,
     WorkspaceSearchMigrationSourceEvidenceAwsTransport {}
 
@@ -696,6 +740,74 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
   }
 
   /**
+   * Sends one conditional immutable source-artifact upload.
+   *
+   * @param command - Exact adapter-owned PutObject command.
+   * @returns Raw S3 upload response.
+   */
+  putSourceArtifact(
+    command: PutObjectCommand,
+  ): Promise<PutObjectCommandOutput> {
+    return this.sendMigrationSourceArtifactRequest(
+      (abortSignal) => this.s3Client.send(command, { abortSignal }),
+    )
+  }
+
+  /**
+   * Reads exact source-artifact metadata for reconciliation.
+   *
+   * @param command - Exact adapter-owned HeadObject command.
+   * @returns Raw S3 metadata response.
+   */
+  headSourceArtifact(
+    command: HeadObjectCommand,
+  ): Promise<HeadObjectCommandOutput> {
+    return this.sendMigrationSourceArtifactRequest(
+      (abortSignal) => this.s3Client.send(command, { abortSignal }),
+    )
+  }
+
+  /**
+   * Reads one exact source-artifact object version.
+   *
+   * @param command - Exact adapter-owned GetObject command.
+   * @returns Raw S3 object response.
+   */
+  getSourceArtifact(
+    command: GetObjectCommand,
+  ): Promise<GetObjectCommandOutput> {
+    return this.sendMigrationSourceArtifactRequest(
+      (abortSignal) => this.s3Client.send(command, { abortSignal }),
+    )
+  }
+
+  /**
+   * Sends one source-artifact S3 request with a bounded local SDK deadline.
+   *
+   * @param operation - Exact request using the adapter-owned abort signal.
+   * @returns Raw successful S3 response.
+   */
+  private async sendMigrationSourceArtifactRequest<Result>(
+    operation: (abortSignal: AbortSignal) => Promise<Result>,
+  ): Promise<Result> {
+    const abortController = new AbortController()
+    const timeout = setTimeout(
+      () => abortController.abort(),
+      MIGRATION_SOURCE_ARTIFACT_TIMEOUT_MILLISECONDS,
+    )
+    try {
+      return await operation(abortController.signal)
+    } catch (error: unknown) {
+      if (abortController.signal.aborted) {
+        throw new MigrationSourceArtifactTimeout()
+      }
+      throw error
+    } finally {
+      clearTimeout(timeout)
+    }
+  }
+
+  /**
    * Sends one bucket-encryption read.
    *
    * @param command - Exact GetBucketEncryption command.
@@ -878,6 +990,23 @@ class AwsWorkspaceSearchMigrationIdentityPort
   async scanSourcePage(
     input: WorkspaceSearchMigrationSourceScanReadInput,
   ): Promise<WorkspaceSearchMigrationSourceScanPageResult> {
+    const captured = await this.captureSourcePage(input)
+    return captured.pageResult
+  }
+
+  /**
+   * Captures one normalized raw source page and reduces those exact same items.
+   *
+   * This private primitive is shared by the digest-only public API and the
+   * planning artifact gateway, so planning never issues a second Scan or
+   * retains an SDK-owned response across an artifact upload.
+   *
+   * @param input - Measured source context and durable predecessor checkpoint.
+   * @returns Detached raw page paired with its exact digest-only reduction.
+   */
+  private async captureSourcePage(
+    input: WorkspaceSearchMigrationSourceScanReadInput,
+  ): Promise<CapturedManagedSourceScanPage> {
     const prepared = await runSourceScanAwsBoundary(async () => {
       this.requireOpen()
       const scanGeneration = this.generation
@@ -980,9 +1109,12 @@ class AwsWorkspaceSearchMigrationIdentityPort
     ) {
       throw createSourceScanAwsBoundaryFailure('INVALID_STATE')
     }
-    return reduceWorkspaceSearchMigrationSourceScanPage(
-      prepared.reductionInput,
-    )
+    return {
+      page: prepared.reductionInput.page,
+      pageResult: reduceWorkspaceSearchMigrationSourceScanPage(
+        prepared.reductionInput,
+      ),
+    }
   }
 
   /**
@@ -1362,6 +1494,152 @@ class AwsWorkspaceSearchMigrationIdentityPort
     authority: ManagedSourceEvidenceAuthority,
   ): WorkspaceSearchMigrationSourceEvidenceAwsPort {
     let writePrepared = false
+    const sourceArtifactTransport:
+      WorkspaceSearchMigrationSourceArtifactAwsTransport = {
+        putSourceArtifact: (command) =>
+          this.runManagedMigrationStateIo(
+            authority,
+            () => this.transport.putSourceArtifact(command),
+          ),
+        headSourceArtifact: (command) =>
+          this.runManagedMigrationStateIo(
+            authority,
+            () => this.transport.headSourceArtifact(command),
+          ),
+        getSourceArtifact: (command) =>
+          this.runManagedMigrationStateIo(
+            authority,
+            () => this.transport.getSourceArtifact(command),
+          ),
+      }
+    const sourceArtifactPort =
+      createAwsWorkspaceSearchMigrationSourceArtifactPort({
+        configuration: authority.request.configuration,
+        configurationHash: authority.configurationHash,
+        transport: sourceArtifactTransport,
+      })
+    const planningArtifactGateway:
+      WorkspaceSearchMigrationPlanningSourceArtifactGateway = {
+        captureAndStorePlanningPage: async (input) => {
+          const captured = await this.runManagedMigrationStateIo(
+            authority,
+            () => this.captureSourcePage({
+              configuration: input.configuration,
+              configurationHash: input.configurationHash,
+              source: input.source,
+              previousCheckpoint: input.previousCheckpoint,
+            }),
+          )
+          const sourceTable =
+            input.configuration.tables[input.source]
+          const stateTable =
+            input.configuration.tables['migration-state']
+          if (
+            sourceTable === undefined ||
+            stateTable === undefined
+          ) {
+            return failSourceScanAws('IDENTITY_MISMATCH')
+          }
+          const expectedPage:
+            WorkspaceSearchMigrationPlanningSourceArtifactPage = {
+              kind: 'workspace-search-planning-source-artifact-page',
+              artifactVersion:
+                WORKSPACE_SEARCH_MIGRATION_SOURCE_ARTIFACT_VERSION,
+              migrationId: input.configuration.migrationId,
+              migrationVersion: input.configuration.migrationVersion,
+              purpose: 'planning',
+              runId: input.runId,
+              configurationHash: input.configurationHash,
+              source: input.source,
+              sourceTable: {
+                tableName: sourceTable.tableName,
+                tableArn: sourceTable.tableArn,
+                tableId: sourceTable.tableId,
+                creationTime: sourceTable.creationTime,
+              },
+              stateTable: {
+                tableName: stateTable.tableName,
+                tableArn: stateTable.tableArn,
+                tableId: stateTable.tableId,
+                creationTime: stateTable.creationTime,
+              },
+              pageSequence: input.pageSequence,
+              previousEvidenceDigest: input.previousEvidenceDigest,
+              previousCheckpointDigest:
+                input.previousCheckpointDigest,
+              planningAuthority: {
+                ownerId: input.planningAuthority.ownerId,
+                fenceToken: input.planningAuthority.fenceToken,
+                maintenanceEvidencePointerRevision:
+                  input.planningAuthority
+                    .maintenanceEvidencePointerRevision,
+                maintenanceEvidenceReceiptDigest:
+                  input.planningAuthority
+                    .maintenanceEvidenceReceiptDigest,
+              },
+              items: captured.page.items,
+            }
+          const sourceArtifacts =
+            await sourceArtifactPort.writePlanningSourceArtifactPage({
+              expectedPage,
+            })
+          return {
+            pageResult: captured.pageResult,
+            sourceArtifacts,
+          }
+        },
+        readVerifiedPlanningPage: async (input) => {
+          const sourceTable =
+            input.configuration.tables[input.source]
+          const stateTable =
+            input.configuration.tables['migration-state']
+          if (
+            sourceTable === undefined ||
+            stateTable === undefined
+          ) {
+            return failSourceScanAws('IDENTITY_MISMATCH')
+          }
+          const page =
+            await sourceArtifactPort.readPlanningSourceArtifactPage({
+              expectedPage: {
+                runId: input.runId,
+                configurationHash: input.configurationHash,
+                source: input.source,
+                sourceTable: {
+                  tableName: sourceTable.tableName,
+                  tableArn: sourceTable.tableArn,
+                  tableId: sourceTable.tableId,
+                  creationTime: sourceTable.creationTime,
+                },
+                stateTable: {
+                  tableName: stateTable.tableName,
+                  tableArn: stateTable.tableArn,
+                  tableId: stateTable.tableId,
+                  creationTime: stateTable.creationTime,
+                },
+                pageSequence: input.pageSequence,
+                previousEvidenceDigest:
+                  input.previousEvidenceDigest,
+                previousCheckpointDigest:
+                  input.previousCheckpointDigest,
+                planningAuthority: {
+                  ownerId: input.planningAuthority.ownerId,
+                  fenceToken: input.planningAuthority.fenceToken,
+                  maintenanceEvidencePointerRevision:
+                    input.planningAuthority
+                      .maintenanceEvidencePointerRevision,
+                  maintenanceEvidenceReceiptDigest:
+                    input.planningAuthority
+                      .maintenanceEvidenceReceiptDigest,
+                },
+              },
+              references: input.sourceArtifacts,
+            })
+          return {
+            items: page.items,
+          }
+        },
+      }
     const scanner: WorkspaceSearchMigrationSourceEvidenceScanner = {
       scanSourcePage: (input) =>
         this.runManagedMigrationStateIo(
@@ -1377,7 +1655,33 @@ class AwsWorkspaceSearchMigrationIdentityPort
         ),
       prepareSourceEvidenceWrite: async () => {
         if (writePrepared) return failSourceScanAws('INVALID_STATE')
-        await this.requireCurrentMigrationStateTableIncarnation(authority)
+        const sourceTable =
+          authority.request.configuration.tables[
+            authority.request.source
+          ]
+        if (sourceTable === undefined) {
+          return failSourceScanAws('IDENTITY_MISMATCH')
+        }
+        try {
+          await this.requireCurrentSourceTableIncarnation(
+            sourceTable,
+            authority.generation,
+            authority.configurationHash,
+          )
+        } catch (error: unknown) {
+          throw createManagedSourceEvidencePreparationFailure(
+            readManagedMigrationStateFailureCode(error),
+          )
+        }
+        try {
+          await this.requireCurrentMigrationStateTableIncarnation(
+            authority,
+          )
+        } catch (error: unknown) {
+          throw createManagedSourceEvidencePreparationFailure(
+            readManagedMigrationStateFailureCode(error),
+          )
+        }
         writePrepared = true
       },
       transactWriteSourceEvidence: (command) => {
@@ -1392,6 +1696,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
     return createAwsWorkspaceSearchMigrationSourceEvidencePort({
       stateTable: authority.stateTable,
       scanner,
+      planningArtifactGateway,
       transport,
       clock: this.prePlanAuthorityClock,
     })
@@ -2516,6 +2821,21 @@ async function runManagedSourceEvidenceAwsBoundary<Result>(
       `Workspace Search source evidence stopped safely (${code}).`,
     )
   }
+}
+
+/**
+ * Creates one public role-aware failure for final evidence-write preparation.
+ *
+ * @param code - Trusted source or migration-state failure classification.
+ * @returns Fixed source-evidence failure accepted by the inner AWS boundary.
+ */
+function createManagedSourceEvidencePreparationFailure(
+  code: WorkspaceSearchMigrationFailureCode,
+): WorkspaceSearchMigrationFailure {
+  return new WorkspaceSearchMigrationFailure(
+    code,
+    `Workspace Search source evidence stopped safely (${code}).`,
+  )
 }
 
 /**
