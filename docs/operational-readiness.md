@@ -401,9 +401,12 @@ orphan として費用/件数を観測します。後続実行が `List` や lat
 は S3 upload と authority ConditionCheck を持たない固定2 item transaction のままで、planning chain
 へ昇格できません。
 
-Lossless artifact の measured S3 adapter と planning v3 evidence/verification contract が存在しても、
-target join、実行 CLI、heartbeat supervisor、online writer fence、migration 専用
-observability/alarm、restore/failover/DR drill、完全な source/target completeness 実行は未実装です。
+Lossless artifact の measured S3 adapter と planning v3 evidence/verification contract に加え、
+target table を同じ measured AWS session から強整合・無加工・100件上限で読み、Scan 前後の
+table incarnation と cursor を検証する read-only page primitive までは存在します。ただし、
+target raw artifact と durable evidence/checkpoint、complete target join、実行 CLI、heartbeat
+supervisor、online writer fence、migration 専用 observability/alarm、restore/failover/DR drill、
+完全な source/target completeness 実行は未実装です。
 Digest-only な dry-run v1 と legacy planning v2 は process を越えた planning input、target join、
 rollback preimage を再構成しません。これらの未実装項目を完了し、non-production で
 artifact upload orphan、version substitution、cursor 境界の中断再開、verify/rollback evidence を

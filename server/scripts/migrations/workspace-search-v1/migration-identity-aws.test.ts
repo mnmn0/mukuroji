@@ -81,6 +81,13 @@ import type {
 import type {
   WorkspaceSearchMigrationSourceScanReadInput,
 } from './migration-source-scan-aws'
+import type {
+  WorkspaceSearchMigrationTargetScanReadInput,
+} from './migration-target-scan-aws'
+import {
+  createEmptyWorkspaceSearchMigrationTargetScanCheckpoint,
+  type WorkspaceSearchMigrationTargetScanCheckpoint,
+} from './migration-target-scan-context'
 import {
   createEmptyWorkspaceSearchMigrationCheckpoint,
 } from './migration-state-machine'
@@ -183,6 +190,9 @@ class RecordingIdentityAwsTransport
 
   /** Recorded DynamoDB source Scan commands. */
   readonly scanSourceCommands: ScanCommand[] = []
+
+  /** Recorded DynamoDB target Scan commands. */
+  readonly scanTargetCommands: ScanCommand[] = []
 
   /** Recorded strongly consistent source-evidence point reads. */
   readonly getSourceEvidenceCommands: GetItemCommand[] = []
@@ -330,6 +340,23 @@ class RecordingIdentityAwsTransport
   /** Optional synchronous effect triggered immediately after recording a Scan. */
   scanSourceEffect: (() => void) | undefined
 
+  /** Target Scan response returned by the recording transport. */
+  scanTargetOutput: ScanCommandOutput = {
+    $metadata: {},
+    Count: 0,
+    Items: [],
+    ScannedCount: 0,
+  }
+
+  /** Optional raw failure raised by the target Scan transport. */
+  scanTargetFailure: unknown
+
+  /** Optional pending target Scan response used by lifecycle race tests. */
+  scanTargetDeferred: Promise<ScanCommandOutput> | undefined
+
+  /** Optional synchronous effect triggered after recording a target Scan. */
+  scanTargetEffect: (() => void) | undefined
+
   /**
    * Records transport closure.
    */
@@ -410,6 +437,24 @@ class RecordingIdentityAwsTransport
       return await this.scanSourceDeferred
     }
     return this.scanSourceOutput
+  }
+
+  /**
+   * Records one target Scan command.
+   *
+   * @param command - Exact command under test.
+   * @returns Configured fake response.
+   */
+  async scanTarget(command: ScanCommand): Promise<ScanCommandOutput> {
+    this.scanTargetCommands.push(command)
+    this.scanTargetEffect?.()
+    if (this.scanTargetFailure !== undefined) {
+      throw this.scanTargetFailure
+    }
+    if (this.scanTargetDeferred !== undefined) {
+      return await this.scanTargetDeferred
+    }
+    return this.scanTargetOutput
   }
 
   /**
@@ -1502,6 +1547,263 @@ describe('Workspace Search migration AWS identity adapter', () => {
     expect(transport.headSourceArtifactCommands).toHaveLength(0)
     expect(transport.getSourceArtifactCommands).toHaveLength(0)
     port.close()
+  })
+
+  test('issues and reduces one exact target Scan without exposing raw rows', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    transport.scanTargetOutput = {
+      $metadata: { requestId: 'not-migration-evidence' },
+      Count: 1,
+      Items: [createIgnoredTargetItem('measured')],
+      ScannedCount: 1,
+    }
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+
+    const configuration = await port.measureConfiguration()
+    const result = await port.scanTargetPage(
+      createTargetScanInput(configuration),
+    )
+
+    expect(transport.describeTableCommands).toHaveLength(8)
+    expect(transport.scanTargetCommands).toHaveLength(1)
+    expect(transport.scanTargetCommands[0]).toBeInstanceOf(ScanCommand)
+    expect(transport.scanTargetCommands[0]?.input).toEqual({
+      TableName: requested.tables['workspace-search'],
+      ConsistentRead: true,
+      Limit: 100,
+    })
+    expect(result.checkpoint).toMatchObject({
+      completed: true,
+      aggregate: {
+        ignored: 1,
+        invalid: 0,
+        owned: 0,
+        pageCount: 1,
+        scanned: 1,
+      },
+    })
+    expect(result.targetRows).toHaveLength(1)
+    expect(result.targetRows[0]?.classification).toBe('ignored')
+    expect(result.invalidRows).toHaveLength(0)
+    expect(result.observedTargetBindings).toHaveLength(0)
+    expect(Reflect.has(result, 'items')).toBe(false)
+    expect(Reflect.has(result, 'page')).toBe(false)
+    expect(JSON.stringify(result)).not.toContain('VIEW#measured')
+    port.close()
+  })
+
+  test('uses only the exact target checkpoint cursor for continuation', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const cursor = createTargetCursor('first')
+    transport.scanTargetOutput = {
+      $metadata: {},
+      Count: 1,
+      Items: [createIgnoredTargetItem('first')],
+      LastEvaluatedKey: cursor,
+      ScannedCount: 1,
+    }
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+
+    const first = await port.scanTargetPage(
+      createTargetScanInput(configuration),
+    )
+    transport.scanTargetOutput = createEmptyScanOutput()
+    const terminal = await port.scanTargetPage(
+      createTargetScanInput(configuration, first.checkpoint),
+    )
+
+    expect(first.checkpoint.completed).toBe(false)
+    expect(terminal.checkpoint.completed).toBe(true)
+    expect(transport.scanTargetCommands).toHaveLength(2)
+    expect(transport.scanTargetCommands[1]?.input).toEqual({
+      TableName: requested.tables['workspace-search'],
+      ConsistentRead: true,
+      ExclusiveStartKey: cursor,
+      Limit: 100,
+    })
+    port.close()
+  })
+
+  test('rejects target replacement before and after the Scan', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const tableName = requested.tables['workspace-search']
+    const currentTable = createValidDescribeTableOutput(
+      'workspace-search',
+      tableName,
+      requested,
+    )
+    const replacementTable = createReplacementDescribeTableOutput(
+      'workspace-search',
+      tableName,
+      requested,
+    )
+
+    transport.describeTableOutputs.set(tableName, replacementTable)
+    await expect(
+      port.scanTargetPage(createTargetScanInput(configuration)),
+    ).rejects.toMatchObject({
+      code: 'TARGET_DRIFT',
+      message:
+        'Workspace Search target Scan read stopped safely (TARGET_DRIFT).',
+    })
+    expect(transport.scanTargetCommands).toHaveLength(0)
+
+    transport.describeTableOutputs.set(tableName, currentTable)
+    transport.scanTargetEffect = () => {
+      transport.describeTableOutputs.set(tableName, replacementTable)
+    }
+    await expect(
+      port.scanTargetPage(createTargetScanInput(configuration)),
+    ).rejects.toMatchObject({
+      code: 'TARGET_DRIFT',
+      message:
+        'Workspace Search target Scan read stopped safely (TARGET_DRIFT).',
+    })
+    expect(transport.scanTargetCommands).toHaveLength(1)
+    port.close()
+  })
+
+  test('redacts retryable target Scan transport failures', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const canary = 'TARGET-RETRYABLE-CANARY-DO-NOT-LEAK'
+    const failure = new Error(canary)
+    failure.name = 'TimeoutError'
+    transport.scanTargetFailure = failure
+
+    let caught: unknown
+    try {
+      await port.scanTargetPage(createTargetScanInput(configuration))
+    } catch (error: unknown) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(WorkspaceSearchMigrationFailure)
+    if (!(caught instanceof WorkspaceSearchMigrationFailure)) {
+      throw new Error('Expected a Workspace Search migration failure.')
+    }
+    expect(caught).toMatchObject({
+      code: 'TRANSIENT_INFRASTRUCTURE_FAILURE',
+      message:
+        'Workspace Search target Scan read stopped safely (TRANSIENT_INFRASTRUCTURE_FAILURE).',
+    })
+    expect(caught.message).not.toContain(canary)
+    port.close()
+  })
+
+  test('classifies target deletion and redacts non-retryable Scan failures', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    transport.scanTargetFailure = new ResourceNotFoundException({
+      $metadata: {},
+      message: 'RAW-DELETED-TARGET-DO-NOT-LEAK',
+    })
+
+    await expect(
+      port.scanTargetPage(createTargetScanInput(configuration)),
+    ).rejects.toMatchObject({
+      code: 'TARGET_DRIFT',
+      message:
+        'Workspace Search target Scan read stopped safely (TARGET_DRIFT).',
+    })
+
+    const canary = 'RAW-TARGET-FAILURE-DO-NOT-LEAK'
+    transport.scanTargetFailure = new Error(canary)
+    let caught: unknown
+    try {
+      await port.scanTargetPage(createTargetScanInput(configuration))
+    } catch (error: unknown) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(WorkspaceSearchMigrationFailure)
+    if (!(caught instanceof WorkspaceSearchMigrationFailure)) {
+      throw new Error('Expected a Workspace Search migration failure.')
+    }
+    expect(caught).toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search target Scan read stopped safely (INVALID_STATE).',
+    })
+    expect(caught.message).not.toContain(canary)
+    port.close()
+  })
+
+  test('rejects target Scans after close and replacement measurement', async () => {
+    const requested = createRequestedResources()
+    const closedTransport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(closedTransport, requested)
+    const closedPort = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => closedTransport,
+    )
+    const closedConfiguration = await closedPort.measureConfiguration()
+    closedPort.close()
+
+    await expect(
+      closedPort.scanTargetPage(
+        createTargetScanInput(closedConfiguration),
+      ),
+    ).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search target Scan read stopped safely (INVALID_STATE).',
+    })
+    expect(closedTransport.scanTargetCommands).toHaveLength(0)
+
+    const measuredTransport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(measuredTransport, requested)
+    const measuredPort = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => measuredTransport,
+    )
+    const measuredConfiguration =
+      await measuredPort.measureConfiguration()
+    const deferred = createDeferredScanOutput()
+    measuredTransport.scanTargetDeferred = deferred.promise
+    const pending = measuredPort.scanTargetPage(
+      createTargetScanInput(measuredConfiguration),
+    )
+    await waitForRecordedTargetScanCount(measuredTransport, 1)
+    await measuredPort.measureConfiguration()
+    measuredTransport.scanTargetDeferred = undefined
+    deferred.resolve(createEmptyScanOutput())
+
+    await expect(pending).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search target Scan read stopped safely (INVALID_STATE).',
+    })
+    expect(measuredTransport.scanTargetCommands).toHaveLength(1)
+    measuredPort.close()
   })
 
   test('commits and replays two evidence pages through one measured session', async () => {
@@ -4531,6 +4833,26 @@ function createSourceScanInput(
 }
 
 /**
+ * Creates one complete managed target Scan input.
+ *
+ * @param configuration - Successfully measured session configuration.
+ * @param previousCheckpoint - Durable predecessor to resume from.
+ * @returns Complete measured target read.
+ */
+function createTargetScanInput(
+  configuration: WorkspaceSearchMigrationConfiguration,
+  previousCheckpoint: WorkspaceSearchMigrationTargetScanCheckpoint =
+    createEmptyWorkspaceSearchMigrationTargetScanCheckpoint(),
+): WorkspaceSearchMigrationTargetScanReadInput {
+  return {
+    configuration,
+    configurationHash:
+      createWorkspaceSearchConfigurationHash(configuration),
+    previousCheckpoint,
+  }
+}
+
+/**
  * Creates one measured dry-run evidence-chain request.
  *
  * @param configuration - Successfully measured session configuration.
@@ -4680,6 +5002,33 @@ function createProjectDirectoryCursor(
 }
 
 /**
+ * Creates one recognized saved-view row outside migration ownership.
+ *
+ * @param identifier - Unique physical key suffix.
+ * @returns Exact low-level ignored target item.
+ */
+function createIgnoredTargetItem(identifier: string): DynamoAttributeMap {
+  return {
+    workspaceId: { S: 'workspace-1' },
+    recordKey: { S: `VIEW#${identifier}` },
+    entryType: { S: 'saved-view' },
+  }
+}
+
+/**
+ * Creates one exact Workspace Search target continuation key.
+ *
+ * @param identifier - Unique cursor suffix.
+ * @returns Exact low-level composite target key.
+ */
+function createTargetCursor(identifier: string): DynamoAttributeMap {
+  return {
+    workspaceId: { S: 'workspace-1' },
+    recordKey: { S: `VIEW#${identifier}` },
+  }
+}
+
+/**
  * Creates a valid empty low-level source Scan response.
  *
  * @returns Empty terminal DynamoDB Scan output.
@@ -4731,6 +5080,26 @@ async function waitForRecordedScanCount(
   }
   throw new Error(
     `Expected ${expectedCount} recorded source Scan commands.`,
+  )
+}
+
+/**
+ * Waits for one fake target Scan to reach the transport without timing.
+ *
+ * @param transport - Recording transport whose async preflight is in progress.
+ * @param expectedCount - Minimum number of recorded target Scan commands.
+ * @returns Resolves after the expected command count is observed.
+ */
+async function waitForRecordedTargetScanCount(
+  transport: RecordingIdentityAwsTransport,
+  expectedCount: number,
+): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (transport.scanTargetCommands.length >= expectedCount) return
+    await Promise.resolve()
+  }
+  throw new Error(
+    `Expected ${expectedCount} recorded target Scan commands.`,
   )
 }
 
