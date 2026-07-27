@@ -1321,6 +1321,41 @@ export function assertWorkspaceSearchMigrationLeaseAuthority(
 }
 
 /**
+ * Validates the durable shape of one active or historical migration lease.
+ *
+ * This public boundary lets persistence adapters reject malformed stored rows
+ * before they evaluate expiry or construct a new fenced successor.
+ *
+ * @param lease - Candidate durable lease.
+ */
+export function validateWorkspaceSearchMigrationLease(
+  lease: WorkspaceSearchMigrationLease,
+): void {
+  validateMigrationLease(lease)
+}
+
+/**
+ * Validates one durable maintenance-evidence receipt and optional authority.
+ *
+ * Persistence adapters use this boundary for strict row parsing, historical
+ * receipt reads, and current commit-time freshness checks without duplicating
+ * the state-machine's window rules.
+ *
+ * @param receipt - Candidate durable receipt.
+ * @param runId - Run that must own the receipt.
+ * @param fenceToken - Optional current lease fence.
+ * @param at - Optional trusted time requiring the minimum commit headroom.
+ */
+export function validateWorkspaceSearchMaintenanceEvidenceReceipt(
+  receipt: WorkspaceSearchMaintenanceEvidenceReceipt,
+  runId: string,
+  fenceToken?: number,
+  at?: string,
+): void {
+  validateMaintenanceEvidenceReceipt(receipt, runId, fenceToken, at)
+}
+
+/**
  * Validates the exact active lease and current fresh evidence for a mutation.
  *
  * @param state - Current run whose receipt must remain unchanged.
