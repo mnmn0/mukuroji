@@ -25,6 +25,7 @@ import {
   replayWorkspaceSearchMigrationSourceEvidencePages,
   serializeWorkspaceSearchMigrationSourceEvidencePage,
   WorkspaceSearchMigrationSourceEvidenceError,
+  type WorkspaceSearchMigrationPlanningAuthorityBinding,
   type WorkspaceSearchMigrationSourceEvidenceIdentity,
   type WorkspaceSearchMigrationSourceEvidenceProgress,
 } from './migration-source-evidence'
@@ -36,6 +37,14 @@ const identity: WorkspaceSearchMigrationSourceEvidenceIdentity = {
   source: 'project-directory',
   sourceTableId: 'source-table-id',
   stateTableId: 'state-table-id',
+}
+
+const planningAuthority: WorkspaceSearchMigrationPlanningAuthorityBinding = {
+  ownerId: 'source-evidence-owner',
+  fenceToken: 7,
+  maintenanceEvidencePointerRevision: 11,
+  maintenanceEvidenceReceiptDigest:
+    createMigrationDigest('maintenance-receipt'),
 }
 
 /** Compact page row fixture used to derive exact cumulative checkpoints. */
@@ -170,14 +179,18 @@ function digest(label: string): string {
  *
  * @param progress - Exact predecessor progress.
  * @param result - Exact reducer result.
+ * @param authority - Exact planning authority for this page.
  * @returns Parsed page and successor progress.
  */
 function commitPage(
   progress: WorkspaceSearchMigrationSourceEvidenceProgress,
   result: WorkspaceSearchMigrationSourceScanPageResult,
+  authority: WorkspaceSearchMigrationPlanningAuthorityBinding =
+    planningAuthority,
 ) {
   const page = createWorkspaceSearchMigrationSourceEvidencePage({
     identity,
+    planningAuthority: authority,
     previousProgress: progress,
     pageResult: result,
   })
@@ -229,6 +242,14 @@ describe('Workspace Search source evidence', () => {
           reasonCode: 'MAPPER_EXCEPTION',
         },
       ]),
+      {
+        ...planningAuthority,
+        ownerId: 'takeover-owner',
+        fenceToken: 8,
+        maintenanceEvidencePointerRevision: 12,
+        maintenanceEvidenceReceiptDigest:
+          digest('renewed-maintenance-receipt'),
+      },
     )
 
     const replay = replayWorkspaceSearchMigrationSourceEvidencePages(
@@ -258,6 +279,173 @@ describe('Workspace Search source evidence', () => {
     expect(replay.sourceRows).toHaveLength(2)
     expect(replay.invalidRows).toHaveLength(1)
     expect(replay.sourceBindings).toHaveLength(1)
+    if (first.page.purpose !== 'planning') {
+      throw new Error('Expected planning evidence.')
+    }
+    if (second.page.purpose !== 'planning') {
+      throw new Error('Expected planning evidence.')
+    }
+    expect(first.page.planningAuthority).toEqual(planningAuthority)
+    expect(second.page.planningAuthority).toEqual({
+      ...planningAuthority,
+      ownerId: 'takeover-owner',
+      fenceToken: 8,
+      maintenanceEvidencePointerRevision: 12,
+      maintenanceEvidenceReceiptDigest:
+        digest('renewed-maintenance-receipt'),
+    })
+  })
+
+  test('preserves canonical version-one dry-run page compatibility', () => {
+    const dryRunIdentity: WorkspaceSearchMigrationSourceEvidenceIdentity = {
+      ...identity,
+      purpose: 'dry-run',
+    }
+    const initial =
+      createInitialWorkspaceSearchMigrationSourceEvidenceProgress(
+        dryRunIdentity,
+      )
+    const page = createWorkspaceSearchMigrationSourceEvidencePage({
+      identity: dryRunIdentity,
+      planningAuthority: null,
+      previousProgress: initial,
+      pageResult: createPageResult(initial.checkpoint, []),
+    })
+    const bytes =
+      serializeWorkspaceSearchMigrationSourceEvidencePage(page)
+    const parsed =
+      parseWorkspaceSearchMigrationSourceEvidencePage(bytes)
+
+    expect(page.evidenceVersion).toBe(1)
+    expect('planningAuthority' in page).toBe(false)
+    expect(new TextDecoder().decode(bytes)).not.toContain(
+      'planningAuthority',
+    )
+    expect(parsed).toEqual(page)
+    expect(
+      advanceWorkspaceSearchMigrationSourceEvidenceProgress(
+        initial,
+        parsed,
+      ).checkpoint.completed,
+    ).toBe(true)
+  })
+
+  test('requires planning authority only for planning pages', () => {
+    const planningInitial =
+      createInitialWorkspaceSearchMigrationSourceEvidenceProgress(identity)
+    const dryRunIdentity: WorkspaceSearchMigrationSourceEvidenceIdentity = {
+      ...identity,
+      purpose: 'dry-run',
+    }
+    const dryRunInitial =
+      createInitialWorkspaceSearchMigrationSourceEvidenceProgress(
+        dryRunIdentity,
+      )
+
+    expect(() =>
+      createWorkspaceSearchMigrationSourceEvidencePage({
+        identity,
+        planningAuthority: null,
+        previousProgress: planningInitial,
+        pageResult: createPageResult(planningInitial.checkpoint, []),
+      })
+    ).toThrow(WorkspaceSearchMigrationSourceEvidenceError)
+    expect(() =>
+      createWorkspaceSearchMigrationSourceEvidencePage({
+        identity: dryRunIdentity,
+        planningAuthority,
+        previousProgress: dryRunInitial,
+        pageResult: createPageResult(dryRunInitial.checkpoint, []),
+      })
+    ).toThrow(WorkspaceSearchMigrationSourceEvidenceError)
+  })
+
+  test('rejects malformed or noncanonical planning authority', () => {
+    const initial =
+      createInitialWorkspaceSearchMigrationSourceEvidenceProgress(identity)
+    const pageResult = createPageResult(initial.checkpoint, [])
+    const authorities = [
+      { ...planningAuthority, ownerId: ' noncanonical-owner' },
+      { ...planningAuthority, fenceToken: 0 },
+      { ...planningAuthority, maintenanceEvidencePointerRevision: 0 },
+      { ...planningAuthority, maintenanceEvidenceReceiptDigest: 'invalid' },
+      { ...planningAuthority, rawMaintenanceEvidence: 'workspace-secret' },
+    ]
+
+    for (const authority of authorities) {
+      expect(() =>
+        createWorkspaceSearchMigrationSourceEvidencePage({
+          identity,
+          planningAuthority: authority,
+          previousProgress: initial,
+          pageResult,
+        })
+      ).toThrow(WorkspaceSearchMigrationSourceEvidenceError)
+    }
+  })
+
+  test('binds planning authority into the page digest and round-trip', () => {
+    const initial =
+      createInitialWorkspaceSearchMigrationSourceEvidenceProgress(identity)
+    const pageResult = createPageResult(initial.checkpoint, [])
+    const original = createWorkspaceSearchMigrationSourceEvidencePage({
+      identity,
+      planningAuthority,
+      previousProgress: initial,
+      pageResult,
+    })
+    const changed = createWorkspaceSearchMigrationSourceEvidencePage({
+      identity,
+      planningAuthority: {
+        ...planningAuthority,
+        maintenanceEvidenceReceiptDigest:
+          digest('substituted-maintenance-receipt'),
+      },
+      previousProgress: initial,
+      pageResult,
+    })
+    const parsed = parseWorkspaceSearchMigrationSourceEvidencePage(
+      serializeWorkspaceSearchMigrationSourceEvidencePage(original),
+    )
+
+    expect(original.evidenceVersion).toBe(2)
+    expect(
+      createWorkspaceSearchMigrationSourceEvidencePageDigest(changed),
+    ).not.toBe(
+      createWorkspaceSearchMigrationSourceEvidencePageDigest(original),
+    )
+    expect(parsed).toEqual(original)
+  })
+
+  test('rejects legacy version-one planning evidence', () => {
+    const initial =
+      createInitialWorkspaceSearchMigrationSourceEvidenceProgress(identity)
+    const page = createWorkspaceSearchMigrationSourceEvidencePage({
+      identity,
+      planningAuthority,
+      previousProgress: initial,
+      pageResult: createPageResult(initial.checkpoint, []),
+    })
+    const legacyValue: unknown = JSON.parse(
+      new TextDecoder().decode(
+        serializeWorkspaceSearchMigrationSourceEvidencePage(page),
+      ),
+    )
+    if (
+      typeof legacyValue !== 'object' ||
+      legacyValue === null ||
+      Array.isArray(legacyValue)
+    ) {
+      throw new Error('Expected encoded evidence object.')
+    }
+    Reflect.deleteProperty(legacyValue, 'planningAuthority')
+    Reflect.set(legacyValue, 'evidenceVersion', 1)
+
+    expect(() =>
+      parseWorkspaceSearchMigrationSourceEvidencePage(
+        new TextEncoder().encode(JSON.stringify(legacyValue)),
+      )
+    ).toThrow(WorkspaceSearchMigrationSourceEvidenceError)
   })
 
   test('replays more than one page of rows while retaining the per-page cap', () => {
@@ -313,6 +501,7 @@ describe('Workspace Search source evidence', () => {
     expect(() =>
       createWorkspaceSearchMigrationSourceEvidencePage({
         identity,
+        planningAuthority,
         previousProgress: initial,
         pageResult: createPageResult(initial.checkpoint, oversizedRows),
       })
@@ -340,6 +529,7 @@ describe('Workspace Search source evidence', () => {
     expect(() =>
       createWorkspaceSearchMigrationSourceEvidencePage({
         identity,
+        planningAuthority,
         previousProgress: initial,
         pageResult:
           createPageResult(initial.checkpoint, combinedOversizedRows),
@@ -355,6 +545,7 @@ describe('Workspace Search source evidence', () => {
       createInitialWorkspaceSearchMigrationSourceEvidenceProgress(identity)
     const page = createWorkspaceSearchMigrationSourceEvidencePage({
       identity,
+      planningAuthority,
       previousProgress: initial,
       pageResult: createPageResult(initial.checkpoint, []),
     })
@@ -373,9 +564,9 @@ describe('Workspace Search source evidence', () => {
       checkpoint:
         '9dea417c3fe19b288f7274274279c13ad358dcc87168dff45e2822f05bf502fb',
       page:
-        'f533c5e30d4c3ef0812594a72888c3e53902868effc8cd9ee9604c41de2e0ee3',
+        'f2a3d795bb475a86ca1886910973e246fd05d3d7166f8e68aaf5669134d2b9b1',
       progress:
-        'c7ee32dc216abf9f9f14d8f3ba24fb4a99eb6bf3e1d6d0616fd95e09c9c12d7a',
+        'dfd2f57d4b5f3c0f2163ec5ecd540e889aac482060ffabe52fcf53e9623c406e',
     })
   })
 
@@ -384,6 +575,7 @@ describe('Workspace Search source evidence', () => {
       createInitialWorkspaceSearchMigrationSourceEvidenceProgress(identity)
     const page = createWorkspaceSearchMigrationSourceEvidencePage({
       identity,
+      planningAuthority,
       previousProgress: initial,
       pageResult: createPageResult(initial.checkpoint, []),
     })
@@ -417,6 +609,7 @@ describe('Workspace Search source evidence', () => {
     expect(() =>
       createWorkspaceSearchMigrationSourceEvidencePage({
         identity,
+        planningAuthority,
         previousProgress: initial,
         pageResult: {
           ...result,
@@ -431,6 +624,7 @@ describe('Workspace Search source evidence', () => {
     expect(() =>
       createWorkspaceSearchMigrationSourceEvidencePage({
         identity,
+        planningAuthority,
         previousProgress: initial,
         pageResult: {
           ...result,
@@ -448,6 +642,7 @@ describe('Workspace Search source evidence', () => {
     expect(() =>
       createWorkspaceSearchMigrationSourceEvidencePage({
         identity,
+        planningAuthority,
         previousProgress: initial,
         pageResult: {
           checkpoint: initial.checkpoint,
@@ -498,6 +693,7 @@ describe('Workspace Search source evidence', () => {
     expect(() =>
       createWorkspaceSearchMigrationSourceEvidencePage({
         identity,
+        planningAuthority,
         previousProgress: duplicate.progress,
         pageResult: createPageResult(
           duplicate.progress.checkpoint,
@@ -529,6 +725,7 @@ describe('Workspace Search source evidence', () => {
     expect(() =>
       createWorkspaceSearchMigrationSourceEvidencePage({
         identity,
+        planningAuthority,
         previousProgress: initial,
         pageResult: createPageResult(
           initial.checkpoint,
@@ -563,6 +760,7 @@ describe('Workspace Search source evidence', () => {
       createInitialWorkspaceSearchMigrationSourceEvidenceProgress(identity)
     const page = createWorkspaceSearchMigrationSourceEvidencePage({
       identity,
+      planningAuthority,
       previousProgress: initial,
       pageResult: createPageResult(initial.checkpoint, [{
         classification: 'ignored',

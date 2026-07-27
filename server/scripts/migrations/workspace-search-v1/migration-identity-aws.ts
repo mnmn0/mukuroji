@@ -86,6 +86,7 @@ import {
 import {
   createAwsWorkspaceSearchMigrationSourceEvidencePort,
   type WorkspaceSearchMigrationSourceEvidenceAwsPort,
+  type WorkspaceSearchMigrationSourceEvidenceAwsCommitRequest,
   type WorkspaceSearchMigrationSourceEvidenceAwsRequest,
   type WorkspaceSearchMigrationSourceEvidenceAwsTransport,
   type WorkspaceSearchMigrationSourceEvidenceScanner,
@@ -199,13 +200,13 @@ const PROFILE_CREDENTIAL_REFRESH_WINDOW_MILLISECONDS = 5 * 60 * 1_000
 /** Maximum explicit source-profile depth accepted by the migration. */
 const MAXIMUM_PROFILE_ROLE_CHAIN_DEPTH = 8
 
-/** Hard deadline for one pre-plan authority transaction SDK request. */
-const PRE_PLAN_AUTHORITY_TRANSACTION_TIMEOUT_MILLISECONDS = 5_000
+/** Hard deadline for one migration-state transaction SDK request. */
+const MIGRATION_STATE_TRANSACTION_TIMEOUT_MILLISECONDS = 5_000
 
 /**
- * Fixed secret-free timeout emitted when the local authority deadline aborts.
+ * Fixed secret-free timeout emitted when a local state-write deadline aborts.
  */
-class PrePlanAuthorityTransactionTimeout extends Error {
+class MigrationStateTransactionTimeout extends Error {
   /** Node.js timeout code recognized by Smithy's transient-error classifier. */
   readonly code = 'ETIMEDOUT'
 
@@ -213,7 +214,7 @@ class PrePlanAuthorityTransactionTimeout extends Error {
    * Creates one classifier-compatible local transaction timeout.
    */
   constructor() {
-    super('Pre-plan authority transaction timed out.')
+    super('Migration-state transaction timed out.')
     this.name = 'TimeoutError'
   }
 }
@@ -287,9 +288,12 @@ type ManagedMigrationStateAuthority = {
 /**
  * Measurement authority captured for one complete source-evidence operation.
  */
-type ManagedSourceEvidenceAuthority = ManagedMigrationStateAuthority & {
+type ManagedSourceEvidenceAuthority<
+  Request extends WorkspaceSearchMigrationSourceEvidenceAwsRequest =
+    WorkspaceSearchMigrationSourceEvidenceAwsRequest,
+> = ManagedMigrationStateAuthority & {
   /** Detached complete request that cannot change after authority capture. */
-  readonly request: WorkspaceSearchMigrationSourceEvidenceAwsRequest
+  readonly request: Request
 }
 
 /** Explicit AWS SDK client configuration retained for construction tests. */
@@ -383,7 +387,7 @@ export interface WorkspaceSearchMigrationManagedAwsSession
    * @returns Exact committed successor or terminal progress.
    */
   commitNextSourceEvidencePage(
-    input: WorkspaceSearchMigrationSourceEvidenceAwsRequest,
+    input: WorkspaceSearchMigrationSourceEvidenceAwsCommitRequest,
   ): Promise<WorkspaceSearchMigrationSourceEvidenceProgress>
 }
 
@@ -604,7 +608,19 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
   }
 
   /**
+   * Defers the measured state-incarnation guard to the managed session wrapper.
+   *
+   * @returns An already completed low-level preparation.
+   */
+  prepareSourceEvidenceWrite(): Promise<void> {
+    return Promise.resolve()
+  }
+
+  /**
    * Sends one atomic immutable-page and CAS-head evidence commit.
+   *
+   * The abort deadline starts only when the SDK send begins, after the managed
+   * session's state-incarnation preparation has completed.
    *
    * @param command - Exact adapter-owned TransactWriteItems command.
    * @returns Raw low-level DynamoDB transaction response.
@@ -612,7 +628,7 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
   transactWriteSourceEvidence(
     command: TransactWriteItemsCommand,
   ): Promise<TransactWriteItemsCommandOutput> {
-    return this.dynamodbClient.send(command)
+    return this.sendMigrationStateTransaction(command)
   }
 
   /**
@@ -648,10 +664,22 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
   async transactWritePrePlanAuthority(
     command: TransactWriteItemsCommand,
   ): Promise<TransactWriteItemsCommandOutput> {
+    return this.sendMigrationStateTransaction(command)
+  }
+
+  /**
+   * Sends one state-table transaction with a bounded local SDK deadline.
+   *
+   * @param command - Exact adapter-owned state transaction.
+   * @returns Raw low-level DynamoDB transaction response.
+   */
+  private async sendMigrationStateTransaction(
+    command: TransactWriteItemsCommand,
+  ): Promise<TransactWriteItemsCommandOutput> {
     const abortController = new AbortController()
     const timeout = setTimeout(
       () => abortController.abort(),
-      PRE_PLAN_AUTHORITY_TRANSACTION_TIMEOUT_MILLISECONDS,
+      MIGRATION_STATE_TRANSACTION_TIMEOUT_MILLISECONDS,
     )
     try {
       return await this.dynamodbClient.send(command, {
@@ -659,7 +687,7 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
       })
     } catch (error: unknown) {
       if (abortController.signal.aborted) {
-        throw new PrePlanAuthorityTransactionTimeout()
+        throw new MigrationStateTransactionTimeout()
       }
       throw error
     } finally {
@@ -1224,7 +1252,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
    * @returns Exact committed successor or terminal progress.
    */
   async commitNextSourceEvidencePage(
-    input: WorkspaceSearchMigrationSourceEvidenceAwsRequest,
+    input: WorkspaceSearchMigrationSourceEvidenceAwsCommitRequest,
   ): Promise<WorkspaceSearchMigrationSourceEvidenceProgress> {
     return this.runSourceEvidenceOperation(
       input,
@@ -1240,11 +1268,14 @@ class AwsWorkspaceSearchMigrationIdentityPort
    * @param operation - Adapter operation over the detached captured request.
    * @returns Detached operation result only while state identity stays current.
    */
-  private async runSourceEvidenceOperation<Result>(
-    input: WorkspaceSearchMigrationSourceEvidenceAwsRequest,
+  private async runSourceEvidenceOperation<
+    Request extends WorkspaceSearchMigrationSourceEvidenceAwsRequest,
+    Result,
+  >(
+    input: Request,
     operation: (
       adapter: WorkspaceSearchMigrationSourceEvidenceAwsPort,
-      request: WorkspaceSearchMigrationSourceEvidenceAwsRequest,
+      request: Request,
     ) => Promise<Result>,
   ): Promise<Result> {
     return runManagedSourceEvidenceAwsBoundary(async () => {
@@ -1303,17 +1334,13 @@ class AwsWorkspaceSearchMigrationIdentityPort
    * @param input - Exact measured evidence-chain request.
    * @returns Generation and configuration hash guarded around every I/O.
    */
-  private captureSourceEvidenceAuthority(
-    input: WorkspaceSearchMigrationSourceEvidenceAwsRequest,
-  ): ManagedSourceEvidenceAuthority {
+  private captureSourceEvidenceAuthority<
+    Request extends WorkspaceSearchMigrationSourceEvidenceAwsRequest,
+  >(
+    input: Request,
+  ): ManagedSourceEvidenceAuthority<Request> {
     this.requireOpen()
-    const request: WorkspaceSearchMigrationSourceEvidenceAwsRequest = {
-      runId: input.runId,
-      purpose: input.purpose,
-      configuration: structuredClone(input.configuration),
-      configurationHash: input.configurationHash,
-      source: input.source,
-    }
+    const request = structuredClone(input)
     const authority = this.captureManagedMigrationStateAuthority()
     if (request.configurationHash !== authority.configurationHash) {
       return failSourceScanAws('CONFIGURATION_HASH_MISMATCH')
@@ -1334,6 +1361,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
   private createManagedSourceEvidenceAdapter(
     authority: ManagedSourceEvidenceAuthority,
   ): WorkspaceSearchMigrationSourceEvidenceAwsPort {
+    let writePrepared = false
     const scanner: WorkspaceSearchMigrationSourceEvidenceScanner = {
       scanSourcePage: (input) =>
         this.runManagedMigrationStateIo(
@@ -1347,16 +1375,25 @@ class AwsWorkspaceSearchMigrationIdentityPort
           authority,
           () => this.transport.getSourceEvidence(command),
         ),
-      transactWriteSourceEvidence: (command) =>
-        this.runManagedMigrationStateWrite(
+      prepareSourceEvidenceWrite: async () => {
+        if (writePrepared) return failSourceScanAws('INVALID_STATE')
+        await this.requireCurrentMigrationStateTableIncarnation(authority)
+        writePrepared = true
+      },
+      transactWriteSourceEvidence: (command) => {
+        if (!writePrepared) return failSourceScanAws('INVALID_STATE')
+        writePrepared = false
+        return this.runManagedPreparedMigrationStateWrite(
           authority,
           () => this.transport.transactWriteSourceEvidence(command),
-        ),
+        )
+      },
     }
     return createAwsWorkspaceSearchMigrationSourceEvidencePort({
-      stateTableName: this.requested.tables['migration-state'],
+      stateTable: authority.stateTable,
       scanner,
       transport,
+      clock: this.prePlanAuthorityClock,
     })
   }
 
@@ -1390,35 +1427,6 @@ class AwsWorkspaceSearchMigrationIdentityPort
         authority.generation,
         authority.configurationHash,
       )
-      throw error
-    }
-  }
-
-  /**
-   * Revalidates the migration-state incarnation immediately around one write.
-   *
-   * @param authority - Captured measurement authority.
-   * @param operation - Exact migration-state transaction on the shared client.
-   * @returns Raw transaction result only while state identity stays current.
-   */
-  private async runManagedMigrationStateWrite<Result>(
-    authority: ManagedMigrationStateAuthority,
-    operation: () => Promise<Result>,
-  ): Promise<Result> {
-    await this.requireCurrentMigrationStateTableIncarnation(authority)
-    try {
-      const result = await this.runManagedMigrationStateIo(
-        authority,
-        operation,
-      )
-      await this.requireCurrentMigrationStateTableIncarnation(authority)
-      return result
-    } catch (error: unknown) {
-      this.requireMeasurementGeneration(
-        authority.generation,
-        authority.configurationHash,
-      )
-      await this.requireCurrentMigrationStateTableIncarnation(authority)
       throw error
     }
   }

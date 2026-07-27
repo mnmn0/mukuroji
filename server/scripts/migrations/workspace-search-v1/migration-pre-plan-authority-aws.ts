@@ -124,6 +124,20 @@ export type WorkspaceSearchMigrationPrePlanAuthority = {
 }
 
 /**
+ * Inputs required to bind one planning transaction to current authority rows.
+ */
+export type CreateWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecksInput = {
+  /** Exact measured migration-state table incarnation. */
+  readonly stateTable: MigrationTableIdentity
+  /** Exact measured configuration digest bound to the authority rows. */
+  readonly configurationHash: string
+  /** Exact current durable pre-plan authority aggregate. */
+  readonly authority: WorkspaceSearchMigrationPrePlanAuthority
+  /** Adapter-owned trusted time captured immediately before the transaction. */
+  readonly commitAt: Date
+}
+
+/**
  * Claim used to resolve one exact current pre-plan authority.
  */
 export type WorkspaceSearchMigrationPrePlanAuthorityClaim = {
@@ -1031,6 +1045,99 @@ export function createAwsWorkspaceSearchMigrationPrePlanAuthorityPort(
 }
 
 /**
+ * Creates the fixed lease, current-pointer, and immutable-receipt conditions
+ * that a planning transaction must prepend to its own writes.
+ *
+ * @param input - Exact measured binding, current authority, and commit time.
+ * @returns Three condition checks ordered as lease, pointer, then receipt.
+ */
+export function createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks(
+  input:
+    CreateWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecksInput,
+): readonly [TransactWriteItem, TransactWriteItem, TransactWriteItem] {
+  try {
+    const inputRecord = requireInputRecord(input)
+    requireExactInputKeys(inputRecord, [
+      'authority',
+      'commitAt',
+      'configurationHash',
+      'stateTable',
+    ])
+    const binding = createBinding(
+      Reflect.get(inputRecord, 'stateTable'),
+      Reflect.get(inputRecord, 'configurationHash'),
+    )
+    const authority = readAuthorityAggregateForCommit(
+      Reflect.get(inputRecord, 'authority'),
+      binding,
+    )
+    const commitClock = readCommitClock(
+      Reflect.get(inputRecord, 'commitAt'),
+    )
+    requireAuthorityAtCommit(authority, commitClock)
+
+    const durableLease = createDurableLease(
+      binding,
+      authority.lease,
+    )
+    const durableReceipt = createDurableReceipt(
+      binding,
+      authority.lease.ownerId,
+      authority.maintenanceEvidenceReceipt,
+    )
+    const durablePointer = createDurableCurrentPointer(
+      binding,
+      authority,
+      durableReceipt,
+    )
+    const leaseCondition = createReceiptLeaseCondition(
+      durableLease,
+      commitClock,
+    )
+    const pointerCondition =
+      createCurrentPointerAuthorityCondition(
+        durablePointer,
+        commitClock,
+      )
+    const receiptCondition =
+      createCurrentReceiptAuthorityCondition(
+        binding,
+        durableReceipt,
+        commitClock,
+      )
+
+    return [
+      createPrePlanAuthorityConditionCheck(
+        binding,
+        createLeaseRecordKey(binding),
+        leaseCondition,
+      ),
+      createPrePlanAuthorityConditionCheck(
+        binding,
+        createPointerRecordKey(
+          binding,
+          authority.lease.runId,
+        ),
+        pointerCondition,
+      ),
+      createPrePlanAuthorityConditionCheck(
+        binding,
+        createReceiptRecordKey(
+          binding,
+          authority.lease.runId,
+          durableReceipt.receiptDigest,
+        ),
+        receiptCondition,
+      ),
+    ]
+  } catch (error: unknown) {
+    throw createPrePlanAuthorityBoundaryFailure(
+      readPrePlanAuthorityAwsFailureCode(error),
+    )
+  }
+}
+
+/**
  * Material needed to commit one global lease transition.
  */
 type CreatePrePlanLeaseCommitCommandInput = {
@@ -1103,18 +1210,35 @@ type CreatePrePlanReceiptInput = {
  * @returns Detached immutable adapter binding.
  */
 function createBinding(
-  stateTable: MigrationTableIdentity,
-  configurationHash: string,
+  stateTable: unknown,
+  configurationHash: unknown,
 ): PrePlanAuthorityBinding {
-  if (stateTable.role !== 'migration-state') {
+  const stateTableRecord = requireInputRecord(stateTable)
+  if (Reflect.get(stateTableRecord, 'role') !== 'migration-state') {
     return failPrePlanAuthorityAws('INVALID_ARGUMENT')
   }
-  const stateTableName = readStateTableName(stateTable.tableName)
-  const tableArn = readBoundedText(stateTable.tableArn, 2_048)
-  const stateTableId = readBoundedText(stateTable.tableId, 1_024)
-  const creationTime = readCanonicalInputTime(stateTable.creationTime)
-  const account = readBoundedText(stateTable.account, 64)
-  const region = readBoundedText(stateTable.region, 64)
+  const stateTableName = readStateTableName(
+    Reflect.get(stateTableRecord, 'tableName'),
+  )
+  const tableArn = readBoundedText(
+    Reflect.get(stateTableRecord, 'tableArn'),
+    2_048,
+  )
+  const stateTableId = readBoundedText(
+    Reflect.get(stateTableRecord, 'tableId'),
+    1_024,
+  )
+  const creationTime = readCanonicalInputTime(
+    Reflect.get(stateTableRecord, 'creationTime'),
+  )
+  const account = readBoundedText(
+    Reflect.get(stateTableRecord, 'account'),
+    64,
+  )
+  const region = readBoundedText(
+    Reflect.get(stateTableRecord, 'region'),
+    64,
+  )
   const validatedConfigurationHash = readDigest(configurationHash)
   const stateIncarnationDigest = createMigrationDigest({
     kind: 'workspace-search-migration-state-incarnation',
@@ -1184,6 +1308,247 @@ function readClock(
     at: new Date(epochMilliseconds).toISOString(),
     epochMilliseconds,
   }
+}
+
+/**
+ * Captures one caller-supplied commit Date without invoking an override.
+ *
+ * @param value - Candidate adapter-owned transaction time.
+ * @returns Detached canonical commit clock.
+ */
+function readCommitClock(
+  value: unknown,
+): PrePlanAuthorityClockSnapshot {
+  if (!(value instanceof Date)) {
+    return failPrePlanAuthorityAws('INVALID_ARGUMENT')
+  }
+  let epochMilliseconds: number
+  try {
+    epochMilliseconds = Date.prototype.getTime.call(value)
+  } catch {
+    return failPrePlanAuthorityAws('INVALID_ARGUMENT')
+  }
+  if (
+    !Number.isSafeInteger(epochMilliseconds) ||
+    epochMilliseconds < 0
+  ) {
+    return failPrePlanAuthorityAws('INVALID_ARGUMENT')
+  }
+  return {
+    at: new Date(epochMilliseconds).toISOString(),
+    epochMilliseconds,
+  }
+}
+
+/**
+ * Validates and detaches one complete current-authority aggregate.
+ *
+ * @param value - Candidate authority aggregate.
+ * @param binding - Exact measured state/configuration binding.
+ * @returns Detached internally consistent authority.
+ */
+function readAuthorityAggregateForCommit(
+  value: unknown,
+  binding: PrePlanAuthorityBinding,
+): WorkspaceSearchMigrationPrePlanAuthority {
+  const record = requireInputRecord(value)
+  requireExactInputKeys(record, [
+    'configurationHash',
+    'evaluatedAt',
+    'lease',
+    'maintenanceEvidencePointerRevision',
+    'maintenanceEvidenceReceipt',
+    'maintenanceEvidenceReceiptDigest',
+    'stateTableId',
+  ])
+  const configurationHash = readDigest(
+    Reflect.get(record, 'configurationHash'),
+  )
+  const stateTableId = readBoundedText(
+    Reflect.get(record, 'stateTableId'),
+    1_024,
+  )
+  if (
+    configurationHash !== binding.configurationHash ||
+    stateTableId !== binding.stateTableId
+  ) {
+    return failPrePlanAuthorityAws('CONFIGURATION_DRIFT')
+  }
+  const lease = readAuthorityLease(
+    Reflect.get(record, 'lease'),
+  )
+  const maintenanceEvidenceReceipt =
+    readAuthorityReceipt(
+      Reflect.get(record, 'maintenanceEvidenceReceipt'),
+    )
+  const maintenanceEvidenceReceiptDigest = readDigest(
+    Reflect.get(record, 'maintenanceEvidenceReceiptDigest'),
+  )
+  const maintenanceEvidencePointerRevision = Reflect.get(
+    record,
+    'maintenanceEvidencePointerRevision',
+  )
+  if (
+    !Number.isSafeInteger(maintenanceEvidencePointerRevision) ||
+    maintenanceEvidencePointerRevision <= 0
+  ) {
+    return failPrePlanAuthorityAws('INVALID_ARGUMENT')
+  }
+  const evaluatedAt = readCanonicalInputTime(
+    Reflect.get(record, 'evaluatedAt'),
+  )
+  if (
+    maintenanceEvidenceReceipt.runId !== lease.runId ||
+    maintenanceEvidenceReceipt.fenceToken !== lease.fenceToken ||
+    maintenanceEvidenceReceiptDigest !==
+      createMigrationDigest(maintenanceEvidenceReceipt)
+  ) {
+    return failPrePlanAuthorityAws('INVALID_MAINTENANCE_EVIDENCE')
+  }
+  assertWorkspaceSearchMigrationLeaseAuthority(lease.runId, {
+    lease,
+    ownerId: lease.ownerId,
+    at: evaluatedAt,
+  })
+  validateWorkspaceSearchMaintenanceEvidenceReceipt(
+    maintenanceEvidenceReceipt,
+    lease.runId,
+    lease.fenceToken,
+    evaluatedAt,
+  )
+  return {
+    configurationHash,
+    stateTableId,
+    lease: cloneLease(lease),
+    maintenanceEvidenceReceiptDigest,
+    maintenanceEvidencePointerRevision,
+    maintenanceEvidenceReceipt:
+      cloneReceipt(maintenanceEvidenceReceipt),
+    evaluatedAt,
+  }
+}
+
+/**
+ * Validates and detaches one complete lease embedded in authority input.
+ *
+ * @param value - Candidate lease.
+ * @returns Detached validated lease.
+ */
+function readAuthorityLease(
+  value: unknown,
+): WorkspaceSearchMigrationLease {
+  const record = requireInputRecord(value)
+  requireExactInputKeys(record, [
+    'expiresAt',
+    'fenceToken',
+    'heartbeatAt',
+    'ownerId',
+    'runId',
+  ])
+  const fenceToken = Reflect.get(record, 'fenceToken')
+  if (!Number.isSafeInteger(fenceToken) || fenceToken <= 0) {
+    return failPrePlanAuthorityAws('INVALID_ARGUMENT')
+  }
+  const lease = {
+    runId: readMigrationIdentifier(Reflect.get(record, 'runId')),
+    ownerId: readMigrationIdentifier(Reflect.get(record, 'ownerId')),
+    fenceToken,
+    expiresAt: readCanonicalInputTime(
+      Reflect.get(record, 'expiresAt'),
+    ),
+    heartbeatAt: readCanonicalInputTime(
+      Reflect.get(record, 'heartbeatAt'),
+    ),
+  }
+  validateWorkspaceSearchMigrationLease(lease)
+  return lease
+}
+
+/**
+ * Validates and detaches one complete receipt embedded in authority input.
+ *
+ * @param value - Candidate receipt.
+ * @returns Detached validated receipt.
+ */
+function readAuthorityReceipt(
+  value: unknown,
+): WorkspaceSearchMaintenanceEvidenceReceipt {
+  const record = requireInputRecord(value)
+  requireExactInputKeys(record, [
+    'evidenceDigest',
+    'evidenceLocator',
+    'fenceToken',
+    'oldestObservationAt',
+    'runId',
+    'runtimeRevision',
+    'validatedAt',
+    'validUntil',
+  ])
+  const runtimeRevision = Reflect.get(record, 'runtimeRevision')
+  const fenceToken = Reflect.get(record, 'fenceToken')
+  if (
+    !Number.isSafeInteger(runtimeRevision) ||
+    runtimeRevision <= 0 ||
+    !Number.isSafeInteger(fenceToken) ||
+    fenceToken <= 0
+  ) {
+    return failPrePlanAuthorityAws('INVALID_ARGUMENT')
+  }
+  const receipt = {
+    runId: readMigrationIdentifier(Reflect.get(record, 'runId')),
+    evidenceDigest: readDigest(
+      Reflect.get(record, 'evidenceDigest'),
+    ),
+    evidenceLocator: readBoundedText(
+      Reflect.get(record, 'evidenceLocator'),
+      2_048,
+    ),
+    runtimeRevision,
+    fenceToken,
+    validatedAt: readCanonicalInputTime(
+      Reflect.get(record, 'validatedAt'),
+    ),
+    oldestObservationAt: readCanonicalInputTime(
+      Reflect.get(record, 'oldestObservationAt'),
+    ),
+    validUntil: readCanonicalInputTime(
+      Reflect.get(record, 'validUntil'),
+    ),
+  }
+  validateWorkspaceSearchMaintenanceEvidenceReceipt(
+    receipt,
+    receipt.runId,
+  )
+  return receipt
+}
+
+/**
+ * Requires receipt freshness and monotonic time at transaction construction.
+ *
+ * The snapshot lease was already authoritative at `evaluatedAt`. Its expiry is
+ * not rechecked here because a concurrent same-fence heartbeat may have safely
+ * extended the live row. The emitted lease ConditionCheck verifies that live
+ * row's exact identity and commit headroom atomically with the caller's writes.
+ *
+ * @param authority - Strict detached current authority.
+ * @param commitClock - Adapter-owned time immediately before the transaction.
+ */
+function requireAuthorityAtCommit(
+  authority: WorkspaceSearchMigrationPrePlanAuthority,
+  commitClock: PrePlanAuthorityClockSnapshot,
+): void {
+  if (
+    commitClock.epochMilliseconds <
+      Date.parse(authority.evaluatedAt)
+  ) {
+    return failPrePlanAuthorityAws('INVALID_STATE')
+  }
+  validateWorkspaceSearchMaintenanceEvidenceReceipt(
+    authority.maintenanceEvidenceReceipt,
+    authority.lease.runId,
+    authority.lease.fenceToken,
+    commitClock.at,
+  )
 }
 
 /**
@@ -1560,6 +1925,45 @@ function createDurablePointer(
     revision,
     receiptDigest: receipt.receiptDigest,
     receiptValidUntilEpochMilliseconds,
+  }
+  return {
+    ...pointerWithoutDigest,
+    recordDigest: createPointerRecordDigest(pointerWithoutDigest),
+  }
+}
+
+/**
+ * Reconstructs the exact current pointer selected by a resolved authority.
+ *
+ * @param binding - Current measured state/configuration binding.
+ * @param authority - Strict detached current authority.
+ * @param receipt - Exact immutable receipt selected by the pointer.
+ * @returns Complete durable current pointer envelope.
+ */
+function createDurableCurrentPointer(
+  binding: PrePlanAuthorityBinding,
+  authority: WorkspaceSearchMigrationPrePlanAuthority,
+  receipt: DurablePrePlanMaintenanceReceipt,
+): DurablePrePlanMaintenancePointer {
+  requireBinding(binding, receipt)
+  if (
+    receipt.ownerId !== authority.lease.ownerId ||
+    receipt.receipt.runId !== authority.lease.runId ||
+    receipt.receipt.fenceToken !== authority.lease.fenceToken ||
+    receipt.receiptDigest !==
+      authority.maintenanceEvidenceReceiptDigest
+  ) {
+    return failPrePlanAuthorityAws('INVALID_MAINTENANCE_EVIDENCE')
+  }
+  const pointerWithoutDigest = {
+    ...binding,
+    runId: authority.lease.runId,
+    ownerId: authority.lease.ownerId,
+    fenceToken: authority.lease.fenceToken,
+    revision: authority.maintenanceEvidencePointerRevision,
+    receiptDigest: receipt.receiptDigest,
+    receiptValidUntilEpochMilliseconds:
+      Date.parse(receipt.receipt.validUntil),
   }
   return {
     ...pointerWithoutDigest,
@@ -2585,6 +2989,125 @@ function createExistingPointerCondition(
 }
 
 /**
+ * Extends the exact current-pointer fingerprint with receipt headroom.
+ *
+ * @param pointer - Exact current durable pointer.
+ * @param clock - Adapter-owned transaction time.
+ * @returns Exact pointer authority condition.
+ */
+function createCurrentPointerAuthorityCondition(
+  pointer: DurablePrePlanMaintenancePointer,
+  clock: PrePlanAuthorityClockSnapshot,
+): PrePlanAuthorityCondition & {
+  /** Current pointer checks always require exact operands. */
+  readonly values: Readonly<Record<string, AttributeValue>>
+} {
+  const exact = createExistingPointerCondition(pointer)
+  if (exact.values === undefined) {
+    return failPrePlanAuthorityAws('INVALID_STATE')
+  }
+  const minimumExpiry =
+    clock.epochMilliseconds +
+    WORKSPACE_SEARCH_MIGRATION_MINIMUM_COMMIT_WINDOW_MILLISECONDS
+  return {
+    expression: [
+      exact.expression,
+      '#receiptValidUntilEpochMilliseconds > :minimumExpiry',
+    ].join(' AND '),
+    names: exact.names,
+    values: {
+      ...exact.values,
+      ':minimumExpiry': { N: String(minimumExpiry) },
+    },
+  }
+}
+
+/**
+ * Creates the complete immutable-receipt fingerprint and freshness condition.
+ *
+ * The exact operands come from the canonical row encoder so the exported
+ * planning boundary cannot drift from private durable schema or digest rules.
+ *
+ * @param binding - Current measured state/configuration binding.
+ * @param receipt - Exact immutable durable receipt.
+ * @param clock - Adapter-owned transaction time.
+ * @returns Exact immutable-receipt authority condition.
+ */
+function createCurrentReceiptAuthorityCondition(
+  binding: PrePlanAuthorityBinding,
+  receipt: DurablePrePlanMaintenanceReceipt,
+  clock: PrePlanAuthorityClockSnapshot,
+): PrePlanAuthorityCondition & {
+  /** Current receipt checks always require exact operands. */
+  readonly values: Readonly<Record<string, AttributeValue>>
+} {
+  const item = createReceiptItem(binding, receipt)
+  const clauses: string[] = []
+  const names: Record<string, string> = {}
+  const values: Record<string, AttributeValue> = {}
+  for (const attributeName of Object.keys(item).sort()) {
+    if (
+      attributeName === 'migrationId' ||
+      attributeName === 'recordKey'
+    ) {
+      continue
+    }
+    const attributeValue = item[attributeName]
+    if (attributeValue === undefined) {
+      return failPrePlanAuthorityAws('INVALID_STATE')
+    }
+    const nameAlias = `#${attributeName}`
+    const valueAlias = `:${attributeName}`
+    clauses.push(`${nameAlias} = ${valueAlias}`)
+    names[nameAlias] = attributeName
+    values[valueAlias] = attributeValue
+  }
+  names['#validUntilEpochMilliseconds'] =
+    'validUntilEpochMilliseconds'
+  clauses.push('#validUntilEpochMilliseconds > :minimumExpiry')
+  values[':minimumExpiry'] = {
+    N: String(
+      clock.epochMilliseconds +
+        WORKSPACE_SEARCH_MIGRATION_MINIMUM_COMMIT_WINDOW_MILLISECONDS,
+    ),
+  }
+  return {
+    expression: clauses.join(' AND '),
+    names,
+    values,
+  }
+}
+
+/**
+ * Wraps one adapter-owned condition around one canonical authority key.
+ *
+ * @param binding - Current measured state/configuration binding.
+ * @param recordKey - Adapter-owned canonical record key.
+ * @param condition - Exact fingerprint and freshness condition.
+ * @returns One low-level transaction condition check.
+ */
+function createPrePlanAuthorityConditionCheck(
+  binding: PrePlanAuthorityBinding,
+  recordKey: string,
+  condition: PrePlanAuthorityCondition,
+): TransactWriteItem {
+  const conditionCheck:
+    NonNullable<TransactWriteItem['ConditionCheck']> = {
+      TableName: binding.stateTableName,
+      Key: {
+        migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
+        recordKey: { S: recordKey },
+      },
+      ConditionExpression: condition.expression,
+      ExpressionAttributeNames: condition.names,
+      ...(condition.values === undefined
+        ? {}
+        : { ExpressionAttributeValues: condition.values }),
+    }
+  return { ConditionCheck: conditionCheck }
+}
+
+/**
  * Creates one bounded deterministic lease transaction token.
  *
  * @param operation - Acquire/takeover or heartbeat.
@@ -3238,6 +3761,9 @@ function readPrePlanAuthorityAwsFailureCode(
       return 'CONFIGURATION_DRIFT'
     }
     if (!(error instanceof Error)) return 'INVALID_STATE'
+    if (isTransactionInProgressErrorName(error)) {
+      return 'AMBIGUOUS_OPERATION_UNRESOLVED'
+    }
     const classificationInput =
       createPrePlanAuthorityAwsErrorClassificationInput(error)
     if (
@@ -3287,6 +3813,9 @@ function classifyLeaseTransactionError(
         : 'INVALID_STATE'
     }
     if (!(error instanceof Error)) return 'INVALID_STATE'
+    if (isTransactionInProgressErrorName(error)) {
+      return 'AMBIGUOUS_OPERATION_UNRESOLVED'
+    }
     const classificationInput =
       createPrePlanAuthorityAwsErrorClassificationInput(error)
     if (
@@ -3346,6 +3875,9 @@ function classifyReceiptTransactionError(
         : 'INVALID_STATE'
     }
     if (!(error instanceof Error)) return 'INVALID_STATE'
+    if (isTransactionInProgressErrorName(error)) {
+      return 'AMBIGUOUS_OPERATION_UNRESOLVED'
+    }
     const classificationInput =
       createPrePlanAuthorityAwsErrorClassificationInput(error)
     if (
@@ -3371,6 +3903,18 @@ function isTransactionConflictErrorName(error: unknown): boolean {
   if (!(error instanceof Error)) return false
   const name: unknown = Reflect.get(error, 'name')
   return name === 'TransactionConflictException'
+}
+
+/**
+ * Detects a transaction whose idempotent request may still commit.
+ *
+ * @param error - Candidate raw SDK error.
+ * @returns Whether its stable name denotes an in-progress transaction.
+ */
+function isTransactionInProgressErrorName(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  const name: unknown = Reflect.get(error, 'name')
+  return name === 'TransactionInProgressException'
 }
 
 /**

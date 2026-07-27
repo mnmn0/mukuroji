@@ -60,21 +60,28 @@ export type WorkspaceSearchMigrationSourceEvidenceIdentity = {
   readonly stateTableId: string
 }
 
+/** Exact durable authority bound into one planning evidence page. */
+export type WorkspaceSearchMigrationPlanningAuthorityBinding = {
+  /** Operator lease owner that authorized this page. */
+  readonly ownerId: string
+  /** Positive fencing token of the authorizing global lease. */
+  readonly fenceToken: number
+  /** Positive revision of the selected maintenance-evidence pointer. */
+  readonly maintenanceEvidencePointerRevision: number
+  /** Digest addressing the selected immutable maintenance-evidence receipt. */
+  readonly maintenanceEvidenceReceiptDigest: string
+}
+
 /**
- * Canonical digest-only row evidence plus the exact resume checkpoint for one
- * committed source Scan page.
+ * Fields shared by dry-run and planning source evidence pages.
  */
-export type WorkspaceSearchMigrationSourceEvidencePage = {
+type WorkspaceSearchMigrationSourceEvidencePageBase = {
   /** Evidence document discriminator. */
   readonly kind: 'workspace-search-source-evidence-page'
-  /** Evidence schema version. */
-  readonly evidenceVersion: 1
   /** Stable migration identifier. */
   readonly migrationId: typeof WORKSPACE_SEARCH_MIGRATION_ID
   /** Versioned migration behavior. */
   readonly migrationVersion: typeof WORKSPACE_SEARCH_MIGRATION_VERSION
-  /** Independent scan purpose. */
-  readonly purpose: WorkspaceSearchMigrationSourceEvidencePurpose
   /** Operator-selected run identifier. */
   readonly runId: string
   /** Reviewed measured-configuration digest. */
@@ -103,6 +110,35 @@ export type WorkspaceSearchMigrationSourceEvidencePage = {
     readonly WorkspaceSearchMigrationSourceOwnershipBinding[]
 }
 
+/** Version-one non-authoritative dry-run source evidence page. */
+type WorkspaceSearchMigrationDryRunSourceEvidencePage =
+  WorkspaceSearchMigrationSourceEvidencePageBase & {
+    /** Dry-run evidence schema version. */
+    readonly evidenceVersion: 1
+    /** Non-authoritative dry-run scan purpose. */
+    readonly purpose: 'dry-run'
+  }
+
+/** Version-two authority-bound planning source evidence page. */
+type WorkspaceSearchMigrationPlanningSourceEvidencePage =
+  WorkspaceSearchMigrationSourceEvidencePageBase & {
+    /** Authority-bound planning evidence schema version. */
+    readonly evidenceVersion: 2
+    /** Authoritative planning scan purpose. */
+    readonly purpose: 'planning'
+    /** Exact durable pre-plan authority used for this page. */
+    readonly planningAuthority:
+      WorkspaceSearchMigrationPlanningAuthorityBinding
+  }
+
+/**
+ * Canonical digest-only row evidence plus the exact resume checkpoint for one
+ * committed source Scan page.
+ */
+export type WorkspaceSearchMigrationSourceEvidencePage =
+  | WorkspaceSearchMigrationDryRunSourceEvidencePage
+  | WorkspaceSearchMigrationPlanningSourceEvidencePage
+
 /** Durable head state required to resume one exact source evidence chain. */
 export type WorkspaceSearchMigrationSourceEvidenceProgress =
   WorkspaceSearchMigrationSourceEvidenceIdentity & {
@@ -118,6 +154,9 @@ export type WorkspaceSearchMigrationSourceEvidenceProgress =
 export type CreateWorkspaceSearchMigrationSourceEvidencePageInput = {
   /** Immutable evidence-chain identity. */
   readonly identity: WorkspaceSearchMigrationSourceEvidenceIdentity
+  /** Per-page authority, required only for planning evidence. */
+  readonly planningAuthority:
+    WorkspaceSearchMigrationPlanningAuthorityBinding | null
   /** Exact durable predecessor progress. */
   readonly previousProgress: WorkspaceSearchMigrationSourceEvidenceProgress
   /** Detached reducer result for the page read from that predecessor. */
@@ -183,12 +222,15 @@ export function createWorkspaceSearchMigrationSourceEvidencePage(
     const identity = readIdentity(input.identity)
     const previous = readProgress(encodeProgress(input.previousProgress))
     requireSameIdentity(identity, previous)
-    const page: WorkspaceSearchMigrationSourceEvidencePage = {
+    const pageBase: WorkspaceSearchMigrationSourceEvidencePageBase = {
       kind: 'workspace-search-source-evidence-page',
-      evidenceVersion: 1,
       migrationId: WORKSPACE_SEARCH_MIGRATION_ID,
       migrationVersion: WORKSPACE_SEARCH_MIGRATION_VERSION,
-      ...identity,
+      runId: identity.runId,
+      configurationHash: identity.configurationHash,
+      source: identity.source,
+      sourceTableId: identity.sourceTableId,
+      stateTableId: identity.stateTableId,
       pageSequence: previous.pageSequence + 1,
       previousEvidenceDigest: previous.evidenceDigest,
       previousCheckpointDigest:
@@ -197,6 +239,23 @@ export function createWorkspaceSearchMigrationSourceEvidencePage(
       sourceRows: readSourceRows(input.pageResult.sourceRows),
       invalidRows: readInvalidRows(input.pageResult.invalidRows),
       sourceBindings: readSourceBindings(input.pageResult.sourceBindings),
+    }
+    let page: WorkspaceSearchMigrationSourceEvidencePage
+    if (identity.purpose === 'dry-run') {
+      if (input.planningAuthority !== null) return failEvidence()
+      page = {
+        ...pageBase,
+        evidenceVersion: 1,
+        purpose: 'dry-run',
+      }
+    } else {
+      page = {
+        ...pageBase,
+        evidenceVersion: 2,
+        purpose: 'planning',
+        planningAuthority:
+          readPlanningAuthorityBinding(input.planningAuthority),
+      }
     }
     validateSuccessor(previous, page)
     return page
@@ -398,6 +457,40 @@ function readIdentity(
 }
 
 /**
+ * Reads and detaches one exact planning-authority binding.
+ *
+ * @param value - Candidate authority binding.
+ * @returns Validated immutable authority binding.
+ */
+function readPlanningAuthorityBinding(
+  value: unknown,
+): WorkspaceSearchMigrationPlanningAuthorityBinding {
+  const record = requireRecord(value)
+  requireExactKeys(record, [
+    'fenceToken',
+    'maintenanceEvidencePointerRevision',
+    'maintenanceEvidenceReceiptDigest',
+    'ownerId',
+  ])
+  const ownerIdValue = record.ownerId
+  if (typeof ownerIdValue !== 'string') return failEvidence()
+  let ownerId: string
+  try {
+    ownerId = requireMigrationIdentifier(ownerIdValue, 'Owner ID')
+  } catch {
+    return failEvidence()
+  }
+  return {
+    ownerId,
+    fenceToken: readPositiveSafeInteger(record.fenceToken),
+    maintenanceEvidencePointerRevision:
+      readPositiveSafeInteger(record.maintenanceEvidencePointerRevision),
+    maintenanceEvidenceReceiptDigest:
+      readDigest(record.maintenanceEvidenceReceiptDigest),
+  }
+}
+
+/**
  * Reads and validates one source evidence progress head.
  *
  * @param value - Candidate progress.
@@ -467,7 +560,8 @@ function readEncodedPage(
   value: unknown,
 ): WorkspaceSearchMigrationSourceEvidencePage {
   const record = requireRecord(value)
-  requireExactKeys(record, [
+  const identity = readIdentity(record)
+  const commonKeys = [
     'checkpoint',
     'configurationHash',
     'evidenceVersion',
@@ -485,12 +579,20 @@ function readEncodedPage(
     'sourceRows',
     'sourceTableId',
     'stateTableId',
-  ])
+  ]
+  requireExactKeys(
+    record,
+    identity.purpose === 'planning'
+      ? [...commonKeys, 'planningAuthority']
+      : commonKeys,
+  )
   if (
     record.kind !== 'workspace-search-source-evidence-page' ||
-    record.evidenceVersion !== 1 ||
     record.migrationId !== WORKSPACE_SEARCH_MIGRATION_ID ||
-    record.migrationVersion !== WORKSPACE_SEARCH_MIGRATION_VERSION
+    record.migrationVersion !== WORKSPACE_SEARCH_MIGRATION_VERSION ||
+    (identity.purpose === 'dry-run'
+      ? record.evidenceVersion !== 1
+      : record.evidenceVersion !== 2)
   ) {
     return failEvidence()
   }
@@ -502,12 +604,15 @@ function readEncodedPage(
   const invalidRows = readInvalidRows(record.invalidRows)
   const sourceBindings = readSourceBindings(record.sourceBindings)
   validatePageEvidenceShape(sourceRows, invalidRows, sourceBindings)
-  return {
+  const pageBase: WorkspaceSearchMigrationSourceEvidencePageBase = {
     kind: 'workspace-search-source-evidence-page',
-    evidenceVersion: 1,
     migrationId: WORKSPACE_SEARCH_MIGRATION_ID,
     migrationVersion: WORKSPACE_SEARCH_MIGRATION_VERSION,
-    ...readIdentity(record),
+    runId: identity.runId,
+    configurationHash: identity.configurationHash,
+    source: identity.source,
+    sourceTableId: identity.sourceTableId,
+    stateTableId: identity.stateTableId,
     pageSequence,
     previousEvidenceDigest: readDigest(record.previousEvidenceDigest),
     previousCheckpointDigest: readDigest(record.previousCheckpointDigest),
@@ -515,6 +620,20 @@ function readEncodedPage(
     sourceRows,
     invalidRows,
     sourceBindings,
+  }
+  if (identity.purpose === 'dry-run') {
+    return {
+      ...pageBase,
+      evidenceVersion: 1,
+      purpose: 'dry-run',
+    }
+  }
+  return {
+    ...pageBase,
+    evidenceVersion: 2,
+    purpose: 'planning',
+    planningAuthority:
+      readPlanningAuthorityBinding(record.planningAuthority),
   }
 }
 
@@ -525,7 +644,7 @@ function readEncodedPage(
  * @returns JSON-safe evidence document.
  */
 function encodePage(page: WorkspaceSearchMigrationSourceEvidencePage) {
-  return {
+  const encoded = {
     kind: page.kind,
     evidenceVersion: page.evidenceVersion,
     migrationId: page.migrationId,
@@ -557,6 +676,18 @@ function encodePage(page: WorkspaceSearchMigrationSourceEvidencePage) {
       targetKeyDigest: binding.targetKeyDigest,
       targetAction: binding.targetAction,
     })),
+  }
+  if (page.purpose === 'dry-run') return encoded
+  return {
+    ...encoded,
+    planningAuthority: {
+      ownerId: page.planningAuthority.ownerId,
+      fenceToken: page.planningAuthority.fenceToken,
+      maintenanceEvidencePointerRevision:
+        page.planningAuthority.maintenanceEvidencePointerRevision,
+      maintenanceEvidenceReceiptDigest:
+        page.planningAuthority.maintenanceEvidenceReceiptDigest,
+    },
   }
 }
 

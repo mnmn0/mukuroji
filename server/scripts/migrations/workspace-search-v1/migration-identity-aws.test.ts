@@ -63,8 +63,11 @@ import {
   validateWorkspaceSearchMigrationRequestedResources,
 } from './migration-identity'
 import type {
-  WorkspaceSearchMigrationSourceEvidenceAwsRequest,
+  WorkspaceSearchMigrationSourceEvidenceAwsCommitRequest,
 } from './migration-source-evidence-aws'
+import type {
+  WorkspaceSearchMigrationPrePlanAuthority,
+} from './migration-pre-plan-authority-aws'
 import type {
   WorkspaceSearchMigrationSourceScanReadInput,
 } from './migration-source-scan-aws'
@@ -73,6 +76,7 @@ import {
 } from './migration-state-machine'
 import {
   MAINTENANCE_EVIDENCE_MAX_BYTES,
+  maintenanceRuntimeControlSurfaces,
 } from './maintenance-evidence'
 
 const TEST_ACCOUNT = '123456789012'
@@ -157,6 +161,9 @@ class RecordingIdentityAwsTransport
   /** Optional raw table-description failures keyed by physical table name. */
   readonly describeTableFailures = new Map<string, unknown>()
 
+  /** Optional synchronous effect after recording one table description. */
+  describeTableEffect: ((tableName: string) => void) | undefined
+
   /** Recorded DynamoDB TTL commands. */
   readonly describeTimeToLiveCommands: DescribeTimeToLiveCommand[] = []
 
@@ -184,6 +191,9 @@ class RecordingIdentityAwsTransport
   /** Number of low-level authority write preparations. */
   preparePrePlanAuthorityWriteCount = 0
 
+  /** Number of low-level source-evidence write preparations. */
+  prepareSourceEvidenceWriteCount = 0
+
   /** Durable fake source-evidence items keyed by recordKey. */
   private readonly sourceEvidenceItems =
     new Map<string, Readonly<Record<string, AttributeValue>>>()
@@ -197,6 +207,9 @@ class RecordingIdentityAwsTransport
 
   /** Optional synchronous effect after recording an evidence transaction. */
   transactWriteSourceEvidenceEffect: (() => void) | undefined
+
+  /** Optional synchronous effect during evidence write preparation. */
+  prepareSourceEvidenceWriteEffect: (() => void) | undefined
 
   /** Optional synchronous effect during authority write preparation. */
   preparePrePlanAuthorityWriteEffect: (() => void) | undefined
@@ -328,6 +341,7 @@ class RecordingIdentityAwsTransport
   ): Promise<DescribeTableCommandOutput> {
     this.describeTableCommands.push(command)
     const tableName = command.input.TableName ?? ''
+    this.describeTableEffect?.(tableName)
     const failure = this.describeTableFailures.get(tableName)
     if (failure !== undefined) throw failure
     return this.describeTableOutputs.get(tableName) ??
@@ -389,6 +403,17 @@ class RecordingIdentityAwsTransport
   }
 
   /**
+   * Records the low-level no-op preparation owned by the managed wrapper.
+   *
+   * @returns Completed preparation.
+   */
+  prepareSourceEvidenceWrite(): Promise<void> {
+    this.prepareSourceEvidenceWriteCount += 1
+    this.prepareSourceEvidenceWriteEffect?.()
+    return Promise.resolve()
+  }
+
+  /**
    * Records and atomically installs one immutable page and successor head.
    *
    * This fake intentionally ignores condition expressions and writes both
@@ -403,8 +428,16 @@ class RecordingIdentityAwsTransport
     this.transactWriteSourceEvidenceCommands.push(command)
     this.transactWriteSourceEvidenceEffect?.()
     const entries = command.input.TransactItems
-    if (entries?.length !== 2) {
-      throw new Error('Expected one source-evidence page/head transaction.')
+    if (entries?.length !== 2 && entries?.length !== 5) {
+      throw new Error(
+        'Expected one dry-run or authority-bound source-evidence transaction.',
+      )
+    }
+    if (
+      entries.length === 5 &&
+      entries.slice(0, 3).some((entry) => entry.ConditionCheck === undefined)
+    ) {
+      throw new Error('Expected three planning authority condition checks.')
     }
     const pending: {
       /** Exact deterministic evidence record key. */
@@ -412,7 +445,7 @@ class RecordingIdentityAwsTransport
       /** Detached low-level evidence item. */
       readonly item: Readonly<Record<string, AttributeValue>>
     }[] = []
-    for (const entry of entries) {
+    for (const entry of entries.slice(-2)) {
       const item = entry.Put?.Item
       const recordKey = item?.recordKey?.S
       if (item === undefined || recordKey === undefined) {
@@ -1318,6 +1351,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
     const requested = createRequestedResources()
     const transport = new RecordingIdentityAwsTransport()
     seedValidMeasurementOutputs(transport, requested)
+    let authorityClockReads = 0
     const firstItem = createIgnoredSourceItem('evidence-page-1')
     transport.scanSourceOutput = {
       $metadata: {},
@@ -1330,6 +1364,10 @@ describe('Workspace Search migration AWS identity adapter', () => {
     const port = createAwsWorkspaceSearchMigrationIdentityPort(
       requested,
       () => transport,
+      () => {
+        authorityClockReads += 1
+        return new Date('2026-07-28T05:50:00.000Z')
+      },
     )
     const configuration = await port.measureConfiguration()
     const evidenceRequest = createSourceEvidenceRequest(configuration)
@@ -1381,12 +1419,231 @@ describe('Workspace Search migration AWS identity adapter', () => {
       .toBeInstanceOf(TransactWriteItemsCommand)
     expect(transport.transactWriteSourceEvidenceCommands[1])
       .toBeInstanceOf(TransactWriteItemsCommand)
+    expect(authorityClockReads).toBe(0)
     // GetItem calls: first commit 1, terminal commit 3, progress 2, replay 4.
     expect(transport.getSourceEvidenceCommands).toHaveLength(10)
     expect(transport.getSourceEvidenceCommands.every(
       (command) => command instanceof GetItemCommand &&
         command.input.ConsistentRead === true,
     )).toBe(true)
+    port.close()
+  })
+
+  test('commits detached planning authority with a guarded five-item transaction', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const clockAt = '2026-07-28T06:00:00.000Z'
+    let writeTrace: string[] | undefined
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => {
+        writeTrace?.push('clock')
+        return new Date(clockAt)
+      },
+    )
+    const configuration = await port.measureConfiguration()
+    const lease = await port.acquireLease({
+      runId: 'managed-planning-evidence-run',
+      ownerId: 'managed-planning-evidence-owner',
+    })
+    const authority = await port.renewMaintenanceEvidence({
+      lease: {
+        runId: lease.runId,
+        ownerId: lease.ownerId,
+        fenceToken: lease.fenceToken,
+      },
+      expectedPointer: null,
+      evidenceBytes: createManagedMaintenanceEvidenceBytes(clockAt),
+    })
+    const detachedAuthority = structuredClone(authority)
+    const stateTableName = requested.tables['migration-state']
+    writeTrace = []
+    transport.describeTableEffect = (tableName) => {
+      if (tableName === stateTableName) {
+        writeTrace?.push('state-incarnation')
+      }
+    }
+    transport.transactWriteSourceEvidenceEffect = () => {
+      writeTrace?.push('transaction')
+    }
+
+    const progress = await port.commitNextSourceEvidencePage(
+      createPlanningSourceEvidenceRequest(
+        configuration,
+        detachedAuthority,
+      ),
+    )
+
+    expect(detachedAuthority).not.toBe(authority)
+    expect(detachedAuthority.lease).not.toBe(authority.lease)
+    expect(progress).toMatchObject({
+      purpose: 'planning',
+      runId: 'managed-planning-evidence-run',
+      pageSequence: 1,
+    })
+    expect(transport.transactWriteSourceEvidenceCommands).toHaveLength(1)
+    const transaction =
+      transport.transactWriteSourceEvidenceCommands[0]?.input.TransactItems
+    expect(transaction).toHaveLength(5)
+    expect(transaction?.slice(0, 3).every(
+      (entry) =>
+        entry.ConditionCheck?.TableName === stateTableName,
+    )).toBe(true)
+    expect(transaction?.slice(3).every(
+      (entry) => entry.Put?.TableName === stateTableName,
+    )).toBe(true)
+    expect(
+      transaction?.[0]?.ConditionCheck
+        ?.ExpressionAttributeValues?.[':ownerId'],
+    ).toEqual({ S: authority.lease.ownerId })
+    const pagePayload = transaction?.[3]?.Put?.Item?.payload?.B
+    if (!(pagePayload instanceof Uint8Array)) {
+      throw new Error('Expected canonical planning evidence page bytes.')
+    }
+    const decodedPage: unknown = JSON.parse(
+      new TextDecoder().decode(pagePayload),
+    )
+    if (typeof decodedPage !== 'object' || decodedPage === null) {
+      throw new Error('Expected one decoded planning evidence page.')
+    }
+    expect(readOwnObject(decodedPage, 'planningAuthority')).toEqual({
+      ownerId: authority.lease.ownerId,
+      fenceToken: authority.lease.fenceToken,
+      maintenanceEvidencePointerRevision:
+        authority.maintenanceEvidencePointerRevision,
+      maintenanceEvidenceReceiptDigest:
+        authority.maintenanceEvidenceReceiptDigest,
+    })
+    const clockIndex = writeTrace.indexOf('clock')
+    expect(clockIndex).toBeGreaterThan(0)
+    expect(writeTrace[clockIndex - 1]).toBe('state-incarnation')
+    expect(writeTrace[clockIndex + 1]).toBe('transaction')
+    port.close()
+  })
+
+  test('rejects state-table replacement in evidence write preparation', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const clockAt = '2026-07-28T06:10:00.000Z'
+    let clockReads = 0
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => {
+        clockReads += 1
+        return new Date(clockAt)
+      },
+    )
+    const configuration = await port.measureConfiguration()
+    const lease = await port.acquireLease({
+      runId: 'replaced-planning-evidence-run',
+      ownerId: 'replaced-planning-evidence-owner',
+    })
+    const authority = await port.renewMaintenanceEvidence({
+      lease: {
+        runId: lease.runId,
+        ownerId: lease.ownerId,
+        fenceToken: lease.fenceToken,
+      },
+      expectedPointer: null,
+      evidenceBytes: createManagedMaintenanceEvidenceBytes(clockAt),
+    })
+    const clockReadsBeforeCommit = clockReads
+    const stateTableName = requested.tables['migration-state']
+    const replacement = createReplacementDescribeTableOutput(
+      'migration-state',
+      stateTableName,
+      requested,
+    )
+    transport.scanSourceEffect = () => {
+      transport.describeTableOutputs.set(stateTableName, replacement)
+    }
+
+    await expect(
+      port.commitNextSourceEvidencePage(
+        createPlanningSourceEvidenceRequest(
+          configuration,
+          structuredClone(authority),
+        ),
+      ),
+    ).rejects.toMatchObject({
+      code: 'CONFIGURATION_DRIFT',
+      message:
+        'Workspace Search source evidence stopped safely (CONFIGURATION_DRIFT).',
+    })
+    expect(transport.scanSourceCommands).toHaveLength(1)
+    expect(transport.transactWriteSourceEvidenceCommands).toHaveLength(0)
+    expect(clockReads).toBe(clockReadsBeforeCommit)
+    port.close()
+  })
+
+  test('captures planning authority before managed-session guard I/O', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const clockAt = '2026-07-28T06:20:00.000Z'
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => new Date(clockAt),
+    )
+    const configuration = await port.measureConfiguration()
+    const lease = await port.acquireLease({
+      runId: 'captured-planning-evidence-run',
+      ownerId: 'captured-planning-evidence-owner',
+    })
+    const authority = await port.renewMaintenanceEvidence({
+      lease: {
+        runId: lease.runId,
+        ownerId: lease.ownerId,
+        fenceToken: lease.fenceToken,
+      },
+      expectedPointer: null,
+      evidenceBytes: createManagedMaintenanceEvidenceBytes(clockAt),
+    })
+    const mutableAuthority = structuredClone(authority)
+    let selectedOwnerId = mutableAuthority.lease.ownerId
+    Object.defineProperty(mutableAuthority.lease, 'ownerId', {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return selectedOwnerId
+      },
+    })
+    const pending = port.commitNextSourceEvidencePage(
+      createPlanningSourceEvidenceRequest(
+        configuration,
+        mutableAuthority,
+      ),
+    )
+    selectedOwnerId = 'mutated-after-authority-capture'
+
+    await expect(pending).resolves.toMatchObject({
+      purpose: 'planning',
+      pageSequence: 1,
+    })
+    const transaction =
+      transport.transactWriteSourceEvidenceCommands[0]?.input.TransactItems
+    expect(
+      transaction?.[0]?.ConditionCheck
+        ?.ExpressionAttributeValues?.[':ownerId'],
+    ).toEqual({ S: 'captured-planning-evidence-owner' })
+    const pagePayload = transaction?.[3]?.Put?.Item?.payload?.B
+    if (!(pagePayload instanceof Uint8Array)) {
+      throw new Error('Expected captured planning page bytes.')
+    }
+    const decodedPage: unknown = JSON.parse(
+      new TextDecoder().decode(pagePayload),
+    )
+    if (typeof decodedPage !== 'object' || decodedPage === null) {
+      throw new Error('Expected one decoded captured planning page.')
+    }
+    expect(readOwnObject(decodedPage, 'planningAuthority')).toMatchObject({
+      ownerId: 'captured-planning-evidence-owner',
+    })
     port.close()
   })
 
@@ -2096,90 +2353,119 @@ describe('Workspace Search migration AWS identity adapter', () => {
     }
   })
 
-  test('normalizes only locally aborted concrete authority transactions', async () => {
+  test('bounds concrete state transactions and normalizes only local aborts', async () => {
     const port = createAwsWorkspaceSearchMigrationIdentityPort(
       createRequestedResources(),
     )
     const transport = readOwnObject(port, 'transport')
     const dynamodbClient = readOwnObject(transport, 'dynamodbClient')
     const send: unknown = Reflect.get(dynamodbClient, 'send')
-    const transact: unknown = Reflect.get(
-      transport,
-      'transactWritePrePlanAuthority',
-    )
     const originalSetTimeout: unknown = Reflect.get(
       globalThis,
       'setTimeout',
     )
     if (
       typeof send !== 'function' ||
-      typeof transact !== 'function' ||
       typeof originalSetTimeout !== 'function'
     ) {
-      throw new Error('Expected concrete authority transport functions.')
+      throw new Error('Expected concrete state transport functions.')
     }
     const command = new TransactWriteItemsCommand({
       TransactItems: [],
     })
-    const rawCanary = 'RAW-LOCAL-ABORT-CANARY'
-    const rawAbort = new Error(rawCanary)
-    rawAbort.name = 'AbortError'
+    const transactionMethods = [
+      'transactWritePrePlanAuthority',
+      'transactWriteSourceEvidence',
+    ]
 
     try {
-      Reflect.set(
-        dynamodbClient,
-        'send',
-        (_command: unknown, options: unknown): Promise<never> => {
-          const signal = readAbortSignal(options)
-          if (!signal.aborted) {
-            throw new Error('Expected the local deadline to abort first.')
-          }
-          return Promise.reject(rawAbort)
-        },
-      )
-      Reflect.set(
-        globalThis,
-        'setTimeout',
-        (callback: unknown): number => {
-          if (typeof callback !== 'function') {
-            throw new Error('Expected one timeout callback.')
-          }
-          Reflect.apply(callback, undefined, [])
-          return 0
-        },
-      )
+      for (const methodName of transactionMethods) {
+        const transact: unknown = Reflect.get(transport, methodName)
+        if (typeof transact !== 'function') {
+          throw new Error(`Expected concrete transaction: ${methodName}`)
+        }
+        const rawCanary = `RAW-LOCAL-ABORT-CANARY-${methodName}`
+        const rawAbort = new Error(rawCanary)
+        rawAbort.name = 'AbortError'
+        const observedDeadlines: number[] = []
+        Reflect.set(
+          dynamodbClient,
+          'send',
+          (_command: unknown, options: unknown): Promise<never> => {
+            const signal = readAbortSignal(options)
+            if (!signal.aborted) {
+              throw new Error('Expected the local deadline to abort first.')
+            }
+            return Promise.reject(rawAbort)
+          },
+        )
+        Reflect.set(
+          globalThis,
+          'setTimeout',
+          (callback: unknown, delay: unknown): number => {
+            if (
+              typeof callback !== 'function' ||
+              typeof delay !== 'number'
+            ) {
+              throw new Error('Expected one numeric timeout callback.')
+            }
+            observedDeadlines.push(delay)
+            Reflect.apply(callback, undefined, [])
+            return 0
+          },
+        )
 
-      let normalized: unknown
-      try {
-        await Reflect.apply(transact, transport, [command])
-      } catch (error: unknown) {
-        normalized = error
-      }
-      expect(normalized).toBeInstanceOf(Error)
-      if (!(normalized instanceof Error)) {
-        throw new Error('Expected normalized timeout error.')
-      }
-      expect(normalized).toMatchObject({
-        name: 'TimeoutError',
-        code: 'ETIMEDOUT',
-      })
-      expect(normalized.message).not.toContain(rawCanary)
+        let normalized: unknown
+        try {
+          await Reflect.apply(transact, transport, [command])
+        } catch (error: unknown) {
+          normalized = error
+        }
+        expect(observedDeadlines).toEqual([5_000])
+        expect(normalized).toBeInstanceOf(Error)
+        if (!(normalized instanceof Error)) {
+          throw new Error('Expected normalized timeout error.')
+        }
+        expect(normalized).toMatchObject({
+          name: 'TimeoutError',
+          code: 'ETIMEDOUT',
+        })
+        expect(normalized.message).not.toContain(rawCanary)
 
-      Reflect.set(globalThis, 'setTimeout', originalSetTimeout)
-      const externalAbort = new Error('EXTERNAL-ABORT-CANARY')
-      externalAbort.name = 'AbortError'
-      Reflect.set(
-        dynamodbClient,
-        'send',
-        (): Promise<never> => Promise.reject(externalAbort),
-      )
-      let preserved: unknown
-      try {
-        await Reflect.apply(transact, transport, [command])
-      } catch (error: unknown) {
-        preserved = error
+        const preDeadlineAbort =
+          new Error(`PRE-DEADLINE-ABORT-${methodName}`)
+        preDeadlineAbort.name = 'AbortError'
+        Reflect.set(
+          dynamodbClient,
+          'send',
+          (_command: unknown, options: unknown): Promise<never> => {
+            const signal = readAbortSignal(options)
+            if (signal.aborted) {
+              throw new Error('Expected an active pre-deadline signal.')
+            }
+            return Promise.reject(preDeadlineAbort)
+          },
+        )
+        Reflect.set(
+          globalThis,
+          'setTimeout',
+          (_callback: unknown, delay: unknown): number => {
+            if (typeof delay !== 'number') {
+              throw new Error('Expected one numeric timeout delay.')
+            }
+            observedDeadlines.push(delay)
+            return 0
+          },
+        )
+        let preserved: unknown
+        try {
+          await Reflect.apply(transact, transport, [command])
+        } catch (error: unknown) {
+          preserved = error
+        }
+        expect(observedDeadlines).toEqual([5_000, 5_000])
+        expect(preserved).toBe(preDeadlineAbort)
       }
-      expect(preserved).toBe(externalAbort)
     } finally {
       Reflect.set(globalThis, 'setTimeout', originalSetTimeout)
       Reflect.set(dynamodbClient, 'send', send)
@@ -3502,22 +3788,76 @@ function createSourceScanInput(
 }
 
 /**
- * Creates one measured planning evidence-chain request.
+ * Creates one measured dry-run evidence-chain request.
  *
  * @param configuration - Successfully measured session configuration.
  * @returns Exact managed source-evidence request.
  */
 function createSourceEvidenceRequest(
   configuration: WorkspaceSearchMigrationConfiguration,
-): WorkspaceSearchMigrationSourceEvidenceAwsRequest {
+): WorkspaceSearchMigrationSourceEvidenceAwsCommitRequest {
   return {
     runId: 'managed-source-evidence-run',
-    purpose: 'planning',
+    purpose: 'dry-run',
     configuration,
     configurationHash:
       createWorkspaceSearchConfigurationHash(configuration),
     source: 'project-directory',
   }
+}
+
+/**
+ * Creates one measured authority-bound planning evidence-chain request.
+ *
+ * @param configuration - Successfully measured session configuration.
+ * @param authority - Detached current durable pre-plan authority.
+ * @returns Exact managed planning source-evidence commit request.
+ */
+function createPlanningSourceEvidenceRequest(
+  configuration: WorkspaceSearchMigrationConfiguration,
+  authority: WorkspaceSearchMigrationPrePlanAuthority,
+): WorkspaceSearchMigrationSourceEvidenceAwsCommitRequest {
+  return {
+    runId: authority.lease.runId,
+    purpose: 'planning',
+    configuration,
+    configurationHash:
+      createWorkspaceSearchConfigurationHash(configuration),
+    source: 'project-directory',
+    authority,
+  }
+}
+
+/**
+ * Creates valid fresh maintenance-evidence bytes for one managed-session test.
+ *
+ * @param at - Trusted authority clock used to validate evidence freshness.
+ * @returns Strict UTF-8 JSON maintenance evidence.
+ */
+function createManagedMaintenanceEvidenceBytes(at: string): Uint8Array {
+  const now = Date.parse(at)
+  if (!Number.isFinite(now)) {
+    throw new Error('Expected one canonical authority fixture time.')
+  }
+  const drainCompletedAt = new Date(now - 60_000).toISOString()
+  const drainStartedAt =
+    new Date(now - 16 * 60_000).toISOString()
+  return new TextEncoder().encode(JSON.stringify({
+    schemaVersion: 1,
+    locator: 'change:OPS-2026',
+    runtimeMode: 'disabled',
+    runtimeRevision: 42,
+    drainStartedAt,
+    drainCompletedAt,
+    observedWriterMutations: 0,
+    surfaces: maintenanceRuntimeControlSurfaces.map((surface) => ({
+      surface,
+      mode: 'disabled',
+      status: 'current',
+      revision: 42,
+      observedAt: drainCompletedAt,
+    })),
+  }))
 }
 
 /**

@@ -3,7 +3,9 @@ import {
   type AttributeValue,
   GetItemCommand,
   type GetItemCommandOutput,
+  TransactionCanceledException,
   TransactWriteItemsCommand,
+  type TransactWriteItem,
   type TransactWriteItemsCommandOutput,
 } from '@aws-sdk/client-dynamodb'
 import {
@@ -21,10 +23,19 @@ import {
 } from './migration-contract'
 import {
   createAwsWorkspaceSearchMigrationSourceEvidencePort,
+  type WorkspaceSearchMigrationDryRunSourceEvidenceAwsCommitRequest,
+  type WorkspaceSearchMigrationPlanningSourceEvidenceAwsCommitRequest,
   type WorkspaceSearchMigrationSourceEvidenceAwsRequest,
+  type WorkspaceSearchMigrationSourceEvidenceAwsPort,
   type WorkspaceSearchMigrationSourceEvidenceAwsTransport,
   type WorkspaceSearchMigrationSourceEvidenceScanner,
 } from './migration-source-evidence-aws'
+import {
+  createAwsWorkspaceSearchMigrationPrePlanAuthorityPort,
+  type WorkspaceSearchMigrationPrePlanAuthority,
+  type WorkspaceSearchMigrationPrePlanAuthorityAwsPort,
+  type WorkspaceSearchMigrationPrePlanAuthorityAwsTransport,
+} from './migration-pre-plan-authority-aws'
 import {
   createWorkspaceSearchMigrationSourceCheckpointDigest,
   type WorkspaceSearchMigrationSourceEvidencePurpose,
@@ -37,6 +48,24 @@ import {
   type WorkspaceSearchMigrationSourceScanPage,
   type WorkspaceSearchMigrationSourceScanPageResult,
 } from './migration-source-scan-page'
+import type {
+  WorkspaceSearchMigrationLeaseClaim,
+} from './migration-state-machine'
+import {
+  maintenanceRuntimeControlSurfaces,
+} from './maintenance-evidence'
+
+/** Canonical starting point shared by deterministic authority tests. */
+const initialTime = '2026-07-25T04:00:00.000Z'
+
+/** Durable discriminator used by the global planning lease row. */
+const leaseKind = 'workspace-search-pre-plan-global-lease'
+
+/** Durable discriminator used by a current maintenance pointer row. */
+const pointerKind = 'workspace-search-pre-plan-maintenance-pointer'
+
+/** Durable discriminator used by an immutable maintenance receipt row. */
+const receiptKind = 'workspace-search-pre-plan-maintenance-receipt'
 
 /** One transaction failure injected before or after the atomic write. */
 type TransactionFault = {
@@ -60,16 +89,70 @@ type PendingSourceScan = {
   readonly reject: (reason: unknown) => void
 }
 
+/** One condition-checked write prepared against a shared snapshot. */
+type PlannedWrite = {
+  /** Deterministic record key replaced by the write. */
+  readonly recordKey: string
+  /** Detached complete low-level item installed atomically. */
+  readonly item: Readonly<Record<string, AttributeValue>>
+}
+
+/**
+ * Mutable adapter clock returning a fresh Date at the configured instant.
+ */
+class MutableAuthorityClock {
+  /** Current finite epoch millisecond supplied to both adapters. */
+  private epochMilliseconds: number
+
+  /**
+   * Creates a clock at one canonical UTC instant.
+   *
+   * @param at - Initial canonical timestamp.
+   */
+  constructor(at: string) {
+    this.epochMilliseconds = requireEpochMilliseconds(at)
+  }
+
+  /**
+   * Returns a detached current clock value.
+   *
+   * @returns Fresh Date at the configured instant.
+   */
+  read(): Date {
+    return new Date(this.epochMilliseconds)
+  }
+
+  /**
+   * Moves the test clock to one canonical UTC instant.
+   *
+   * @param at - Next canonical timestamp.
+   */
+  set(at: string): void {
+    this.epochMilliseconds = requireEpochMilliseconds(at)
+  }
+}
+
 /**
  * Condition-aware in-memory implementation of the narrow DynamoDB transport.
  */
 class InMemorySourceEvidenceAwsTransport
-  implements WorkspaceSearchMigrationSourceEvidenceAwsTransport {
+  implements
+    WorkspaceSearchMigrationSourceEvidenceAwsTransport,
+    WorkspaceSearchMigrationPrePlanAuthorityAwsTransport {
   /** Every strongly consistent point-read command in call order. */
   readonly getCommands: GetItemCommand[] = []
 
   /** Every attempted atomic page/head transaction in call order. */
   readonly transactionCommands: TransactWriteItemsCommand[] = []
+
+  /** Every authority point-read command in call order. */
+  readonly authorityGetCommands: GetItemCommand[] = []
+
+  /** Every authority transaction command in call order. */
+  readonly authorityTransactionCommands: TransactWriteItemsCommand[] = []
+
+  /** One marker for each completed source pre-write preparation. */
+  readonly prepareCalls: true[] = []
 
   /** Durable low-level rows keyed by deterministic recordKey. */
   private readonly items =
@@ -80,6 +163,14 @@ class InMemorySourceEvidenceAwsTransport
 
   /** One-shot transaction failure and commit timing. */
   private transactionFault: TransactionFault | undefined
+
+  /** One-shot action completed immediately before source condition checks. */
+  private beforeSourceTransaction:
+    (() => void | Promise<void>) | undefined
+
+  /** One-shot action completed inside source write preparation. */
+  private beforeSourcePrepare:
+    (() => void | Promise<void>) | undefined
 
   /**
    * Injects one raw read failure.
@@ -100,12 +191,51 @@ class InMemorySourceEvidenceAwsTransport
   }
 
   /**
+   * Schedules concurrent work before the next source transaction snapshot.
+   *
+   * @param action - One-shot concurrent operation.
+   */
+  beforeNextSourceTransaction(
+    action: () => void | Promise<void>,
+  ): void {
+    this.beforeSourceTransaction = action
+  }
+
+  /**
+   * Schedules one action inside the next source write preparation.
+   *
+   * @param action - One-shot operation before the trusted clock sample.
+   */
+  beforeNextSourcePrepare(
+    action: () => void | Promise<void>,
+  ): void {
+    this.beforeSourcePrepare = action
+  }
+
+  /**
    * Returns detached durable items for assertions.
    *
    * @returns Current atomic page and head records.
    */
   readStoredItems(): readonly Readonly<Record<string, AttributeValue>>[] {
     return [...this.items.values()].map((item) => structuredClone(item))
+  }
+
+  /**
+   * Returns one detached durable row selected by its discriminator.
+   *
+   * @param kind - Exact durable row kind.
+   * @returns Matching row or undefined.
+   */
+  readStoredItemByKind(
+    kind: string,
+  ): Readonly<Record<string, AttributeValue>> | undefined {
+    for (const item of this.items.values()) {
+      if (readStringAttribute(item, 'kind') === kind) {
+        return structuredClone(item)
+      }
+    }
+    return undefined
   }
 
   /**
@@ -147,6 +277,41 @@ class InMemorySourceEvidenceAwsTransport
   }
 
   /**
+   * Strongly reads one exact deterministic authority row.
+   *
+   * @param command - Authority-adapter-owned GetItem command.
+   * @returns Detached stored item when present.
+   */
+  async getPrePlanAuthority(
+    command: GetItemCommand,
+  ): Promise<GetItemCommandOutput> {
+    this.authorityGetCommands.push(command)
+    const recordKey = readCommandRecordKey(command)
+    const item = this.items.get(recordKey)
+    return {
+      $metadata: {},
+      ...(item === undefined ? {} : { Item: structuredClone(item) }),
+    }
+  }
+
+  /**
+   * Completes one source state-incarnation preparation.
+   */
+  async prepareSourceEvidenceWrite(): Promise<void> {
+    const action = this.beforeSourcePrepare
+    this.beforeSourcePrepare = undefined
+    await action?.()
+    this.prepareCalls.push(true)
+  }
+
+  /**
+   * Completes one authority state-incarnation preparation.
+   */
+  async preparePrePlanAuthorityWrite(): Promise<void> {
+    await Promise.resolve()
+  }
+
+  /**
    * Evaluates both Put conditions before atomically installing both rows.
    *
    * @param command - Adapter-owned transaction command.
@@ -160,6 +325,10 @@ class InMemorySourceEvidenceAwsTransport
     this.transactionFault = undefined
     if (fault?.timing === 'before-commit') throw fault.error
 
+    const concurrentAction = this.beforeSourceTransaction
+    this.beforeSourceTransaction = undefined
+    await concurrentAction?.()
+
     this.applyTransaction(command)
     if (fault?.timing === 'after-commit') {
       await fault.afterCommit?.()
@@ -169,44 +338,66 @@ class InMemorySourceEvidenceAwsTransport
   }
 
   /**
-   * Applies one page/head transaction with a condition-aware atomic boundary.
+   * Evaluates and installs one authority transaction atomically.
    *
-   * @param command - Exact two-Put transaction.
+   * @param command - Authority-adapter-owned transaction command.
+   * @returns Empty successful low-level response.
+   */
+  async transactWritePrePlanAuthority(
+    command: TransactWriteItemsCommand,
+  ): Promise<TransactWriteItemsCommandOutput> {
+    this.authorityTransactionCommands.push(command)
+    this.applyTransaction(command)
+    return { $metadata: {} }
+  }
+
+  /**
+   * Applies supported checks and writes with a condition-aware atomic boundary.
+   *
+   * @param command - Exact authority or source-evidence transaction.
    */
   private applyTransaction(command: TransactWriteItemsCommand): void {
-    const entries = command.input.TransactItems
-    const pagePut = entries?.[0]?.Put
-    const headPut = entries?.[1]?.Put
-    const pageItem = pagePut?.Item
-    const headItem = headPut?.Item
-    if (
-      entries?.length !== 2 ||
-      pagePut === undefined ||
-      headPut === undefined ||
-      pageItem === undefined ||
-      headItem === undefined
-    ) {
-      throw new Error('Expected one atomic page/head transaction.')
-    }
-    const pageRecordKey = readStringAttribute(pageItem, 'recordKey')
-    const headRecordKey = readStringAttribute(headItem, 'recordKey')
-    const currentPage = this.items.get(pageRecordKey)
-    const currentHead = this.items.get(headRecordKey)
-    const pageIsAbsent = currentPage === undefined
-    const headMatches = headPut.ExpressionAttributeValues === undefined
-      ? currentHead === undefined
-      : currentHead !== undefined &&
-        conditionValuesMatch(
-          currentHead,
-          headPut.ExpressionAttributeNames,
-          headPut.ExpressionAttributeValues,
-        )
-    if (!pageIsAbsent || !headMatches) {
-      throw new Error('ConditionalCheckFailed')
+    const entries = requireTransactionItems(command)
+    const failures: boolean[] = []
+    const writes: PlannedWrite[] = []
+
+    for (const entry of entries) {
+      if (entry.ConditionCheck !== undefined) {
+        const check = entry.ConditionCheck
+        const recordKey = readKeyRecordKey(check.Key)
+        failures.push(!conditionMatches(
+          this.items.get(recordKey),
+          check.ConditionExpression,
+          check.ExpressionAttributeNames,
+          check.ExpressionAttributeValues,
+        ))
+        continue
+      }
+      if (entry.Put !== undefined) {
+        const put = entry.Put
+        const item = requireItem(put.Item)
+        const recordKey = readStringAttribute(item, 'recordKey')
+        failures.push(!conditionMatches(
+          this.items.get(recordKey),
+          put.ConditionExpression,
+          put.ExpressionAttributeNames,
+          put.ExpressionAttributeValues,
+        ))
+        writes.push({
+          recordKey,
+          item: structuredClone(item),
+        })
+        continue
+      }
+      throw new Error('Unsupported in-memory transaction entry.')
     }
 
-    this.items.set(pageRecordKey, structuredClone(pageItem))
-    this.items.set(headRecordKey, structuredClone(headItem))
+    if (failures.some(Boolean)) {
+      throw createConditionalTransactionFailure(failures)
+    }
+    for (const write of writes) {
+      this.items.set(write.recordKey, write.item)
+    }
   }
 }
 
@@ -334,11 +525,11 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
       items: [firstItem],
       lastEvaluatedKey: createProjectDirectoryItemKey(firstItem),
     }])
-    const firstPort = createAwsWorkspaceSearchMigrationSourceEvidencePort({
-      stateTableName: configuration.tables['migration-state'].tableName,
-      scanner: firstScanner,
+    const firstPort = createSourceEvidencePort(
+      configuration,
+      firstScanner,
       transport,
-    })
+    )
 
     const first = await firstPort.commitNextPage(request)
     expect(first).toMatchObject({
@@ -356,11 +547,11 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
     const secondScanner = new SequencedSourceEvidenceScanner([{
       items: [createIgnoredProjectDirectoryItem('page-2')],
     }])
-    const resumedPort = createAwsWorkspaceSearchMigrationSourceEvidencePort({
-      stateTableName: configuration.tables['migration-state'].tableName,
-      scanner: secondScanner,
+    const resumedPort = createSourceEvidencePort(
+      configuration,
+      secondScanner,
       transport,
-    })
+    )
     const durableBeforeResume = await resumedPort.readProgress(request)
     expect(durableBeforeResume).toEqual(first)
 
@@ -408,11 +599,11 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
         items: [createIgnoredProjectDirectoryItem('conditions-2')],
       },
     ])
-    const port = createAwsWorkspaceSearchMigrationSourceEvidencePort({
-      stateTableName: configuration.tables['migration-state'].tableName,
+    const port = createSourceEvidencePort(
+      configuration,
       scanner,
       transport,
-    })
+    )
 
     await port.commitNextPage(request)
     await port.commitNextPage(request)
@@ -451,7 +642,7 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
     expect(readStringAttribute(
       requireItem(firstHeadPut?.Item),
       'purpose',
-    )).toBe('planning')
+    )).toBe('dry-run')
     expect(readStringAttribute(
       requireItem(firstHeadPut?.Item),
       'source',
@@ -470,7 +661,7 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
       .toContain('#sourceTableId = :sourceTableId')
     expect(secondHeadPut?.ExpressionAttributeValues).toMatchObject({
       ':revision': { N: '1' },
-      ':purpose': { S: 'planning' },
+      ':purpose': { S: 'dry-run' },
       ':source': { S: 'project-directory' },
       ':sourceTableId': { S: 'table-id-project-directory' },
       ':stateTableId': { S: 'table-id-migration-state' },
@@ -483,6 +674,560 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
       .not.toBe(secondCommand?.input.ClientRequestToken)
   })
 
+  test('forbids dry-run authority and requires it for planning commits', async () => {
+    const configuration = createConfiguration()
+    const transport = new InMemorySourceEvidenceAwsTransport()
+    const scanner = new SequencedSourceEvidenceScanner([{
+      items: [createIgnoredProjectDirectoryItem('dry-run-authority')],
+    }])
+    const port = createSourceEvidencePort(
+      configuration,
+      scanner,
+      transport,
+    )
+    const dryRunRequest = createRequest(configuration)
+    Object.defineProperty(dryRunRequest, 'authority', {
+      configurable: true,
+      enumerable: true,
+      value: undefined,
+    })
+
+    const forbidden = await captureMigrationFailure(
+      () => port.commitNextPage(dryRunRequest),
+    )
+
+    expect(forbidden.code).toBe('INVALID_ARGUMENT')
+    expect(scanner.inputs).toHaveLength(0)
+    expect(transport.transactionCommands).toHaveLength(0)
+    Reflect.deleteProperty(dryRunRequest, 'authority')
+
+    const committed = await port.commitNextPage(dryRunRequest)
+    expect(committed.purpose).toBe('dry-run')
+    const entries =
+      transport.transactionCommands[0]?.input.TransactItems
+    expect(entries).toHaveLength(2)
+    expect(entries?.[0]?.Put).toBeDefined()
+    expect(entries?.[1]?.Put).toBeDefined()
+
+    const authorityTransport =
+      new InMemorySourceEvidenceAwsTransport()
+    const clock = new MutableAuthorityClock(initialTime)
+    const authorityContext = await acquirePlanningAuthority(
+      configuration,
+      authorityTransport,
+      clock,
+      'run-planning-required',
+      'owner-planning-required',
+    )
+    const planningRequest = createPlanningRequest(
+      configuration,
+      authorityContext.authority,
+    )
+    Reflect.deleteProperty(planningRequest, 'authority')
+    const planningPort = createSourceEvidencePort(
+      configuration,
+      new SequencedSourceEvidenceScanner([{
+        items: [createIgnoredProjectDirectoryItem('missing-authority')],
+      }]),
+      authorityTransport,
+      () => clock.read(),
+    )
+
+    const missing = await captureMigrationFailure(
+      () => planningPort.commitNextPage(planningRequest),
+    )
+
+    expect(missing.code).toBe('INVALID_MAINTENANCE_EVIDENCE')
+    expect(authorityTransport.transactionCommands).toHaveLength(0)
+  })
+
+  test('samples only planning commit time after preparation and binds the full state incarnation', async () => {
+    const configuration = createConfiguration()
+    const dryRunTransport = new InMemorySourceEvidenceAwsTransport()
+    let dryRunClockCalls = 0
+    const dryRunPort = createSourceEvidencePort(
+      configuration,
+      new SequencedSourceEvidenceScanner([{
+        items: [createIgnoredProjectDirectoryItem('dry-run-clock')],
+      }]),
+      dryRunTransport,
+      () => {
+        dryRunClockCalls += 1
+        return new Date(initialTime)
+      },
+    )
+
+    await dryRunPort.commitNextPage(createRequest(configuration))
+
+    expect(dryRunClockCalls).toBe(0)
+    expect(dryRunTransport.transactionCommands[0]?.input.TransactItems)
+      .toHaveLength(2)
+
+    const planningTransport = new InMemorySourceEvidenceAwsTransport()
+    const planningClock = new MutableAuthorityClock(initialTime)
+    const authorityContext = await acquirePlanningAuthority(
+      configuration,
+      planningTransport,
+      planningClock,
+      'run-prepared-planning-clock',
+      'owner-prepared-planning-clock',
+    )
+    const preparedAt = '2026-07-25T04:00:05.000Z'
+    planningTransport.beforeNextSourcePrepare(() => {
+      planningClock.set(preparedAt)
+    })
+    const planningPort = createSourceEvidencePort(
+      configuration,
+      new SequencedSourceEvidenceScanner([{
+        items: [createIgnoredProjectDirectoryItem('planning-clock')],
+      }]),
+      planningTransport,
+      () => planningClock.read(),
+    )
+
+    await planningPort.commitNextPage(createPlanningRequest(
+      configuration,
+      authorityContext.authority,
+    ))
+
+    const leaseCheck = requireConditionCheck(
+      planningTransport.transactionCommands[0]
+        ?.input.TransactItems?.[0],
+    )
+    expect(readNumberAttribute(
+      requireItem(leaseCheck.ExpressionAttributeValues),
+      ':minimumExpiry',
+    )).toBe(Date.parse(preparedAt) + 10_000)
+
+    const driftedStateTable: MigrationTableIdentity = {
+      ...configuration.tables['migration-state'],
+      creationTime: '2026-01-01T00:00:00.001Z',
+    }
+    const driftScanner = new SequencedSourceEvidenceScanner([{
+      items: [createIgnoredProjectDirectoryItem('state-incarnation-drift')],
+    }])
+    const driftTransport = new InMemorySourceEvidenceAwsTransport()
+    const driftPort =
+      createAwsWorkspaceSearchMigrationSourceEvidencePort({
+        stateTable: driftedStateTable,
+        scanner: driftScanner,
+        transport: driftTransport,
+        clock: () => new Date(initialTime),
+      })
+
+    const driftFailure = await captureMigrationFailure(
+      () => driftPort.commitNextPage(createRequest(configuration)),
+    )
+
+    expect(driftFailure.code).toBe('IDENTITY_MISMATCH')
+    expect(driftScanner.inputs).toHaveLength(0)
+    expect(driftTransport.getCommands).toHaveLength(0)
+  })
+
+  test('prepends lease, pointer, and receipt checks to each planning page transaction', async () => {
+    const configuration = createConfiguration()
+    const transport = new InMemorySourceEvidenceAwsTransport()
+    const clock = new MutableAuthorityClock(initialTime)
+    const authorityContext = await acquirePlanningAuthority(
+      configuration,
+      transport,
+      clock,
+      'run-fixed-planning-layout',
+      'owner-fixed-planning-layout',
+    )
+    const port = createSourceEvidencePort(
+      configuration,
+      new SequencedSourceEvidenceScanner([{
+        items: [createIgnoredProjectDirectoryItem('planning-layout')],
+      }]),
+      transport,
+      () => clock.read(),
+    )
+
+    const result = await port.commitNextPage(createPlanningRequest(
+      configuration,
+      authorityContext.authority,
+    ))
+
+    expect(result).toMatchObject({
+      purpose: 'planning',
+      pageSequence: 1,
+      checkpoint: { completed: true },
+    })
+    const entries =
+      transport.transactionCommands[0]?.input.TransactItems
+    expect(entries).toHaveLength(5)
+    const durableAuthorityRows = [
+      requireStoredItem(transport.readStoredItemByKind(leaseKind)),
+      requireStoredItem(transport.readStoredItemByKind(pointerKind)),
+      requireStoredItem(transport.readStoredItemByKind(receiptKind)),
+    ]
+    for (const [index, durableRow] of durableAuthorityRows.entries()) {
+      const check = requireConditionCheck(entries?.[index])
+      expect(readKeyRecordKey(check.Key))
+        .toBe(readStringAttribute(durableRow, 'recordKey'))
+      expect(conditionMatches(
+        durableRow,
+        check.ConditionExpression,
+        check.ExpressionAttributeNames,
+        check.ExpressionAttributeValues,
+      )).toBe(true)
+    }
+    expect(readStringAttribute(
+      requireItem(entries?.[3]?.Put?.Item),
+      'kind',
+    )).toBe('workspace-search-migration-source-evidence-page-record')
+    expect(readStringAttribute(
+      requireItem(entries?.[4]?.Put?.Item),
+      'kind',
+    )).toBe('workspace-search-migration-source-evidence-head')
+    expect(transport.prepareCalls).toHaveLength(1)
+  })
+
+  test('classifies each planning authority condition by its fixed index', async () => {
+    const expectations = [
+      { index: 0, code: 'LEASE_LOST' },
+      { index: 1, code: 'INVALID_MAINTENANCE_EVIDENCE' },
+      { index: 2, code: 'INVALID_MAINTENANCE_EVIDENCE' },
+    ] as const
+
+    for (const expectation of expectations) {
+      const configuration = createConfiguration()
+      const transport = new InMemorySourceEvidenceAwsTransport()
+      const clock = new MutableAuthorityClock(initialTime)
+      const runId = `run-condition-index-${expectation.index}`
+      const authorityContext = await acquirePlanningAuthority(
+        configuration,
+        transport,
+        clock,
+        runId,
+        `owner-condition-index-${expectation.index}`,
+      )
+      const port = createSourceEvidencePort(
+        configuration,
+        new SequencedSourceEvidenceScanner([{
+          items: [createIgnoredProjectDirectoryItem(runId)],
+        }]),
+        transport,
+        () => clock.read(),
+      )
+      transport.failNextTransaction({
+        timing: 'before-commit',
+        error: createConditionalTransactionFailure(
+          [0, 1, 2, 3, 4].map(
+            (index) => index === expectation.index,
+          ),
+        ),
+      })
+
+      const failure = await captureMigrationFailure(
+        () => port.commitNextPage(createPlanningRequest(
+          configuration,
+          authorityContext.authority,
+        )),
+      )
+
+      expect(failure.code).toBe(expectation.code)
+      expect(transport.readStoredItemByKind(
+        'workspace-search-migration-source-evidence-head',
+      )).toBeUndefined()
+    }
+  })
+
+  test('allows a same-fence heartbeat between scan and planning commit', async () => {
+    const configuration = createConfiguration()
+    const transport = new InMemorySourceEvidenceAwsTransport()
+    const clock = new MutableAuthorityClock(initialTime)
+    const authorityContext = await acquirePlanningAuthority(
+      configuration,
+      transport,
+      clock,
+      'run-planning-heartbeat',
+      'owner-planning-heartbeat',
+    )
+    const port = createSourceEvidencePort(
+      configuration,
+      new SequencedSourceEvidenceScanner([{
+        items: [createIgnoredProjectDirectoryItem('same-fence-heartbeat')],
+      }]),
+      transport,
+      () => clock.read(),
+    )
+    let heartbeatFence = 0
+    transport.beforeNextSourceTransaction(async () => {
+      clock.set('2026-07-25T04:00:01.000Z')
+      const heartbeat = await authorityContext.port.heartbeatLease({
+        lease: createLeaseClaim(authorityContext.authority.lease),
+      })
+      heartbeatFence = heartbeat.fenceToken
+    })
+
+    const result = await port.commitNextPage(createPlanningRequest(
+      configuration,
+      authorityContext.authority,
+    ))
+
+    expect(result.pageSequence).toBe(1)
+    expect(heartbeatFence)
+      .toBe(authorityContext.authority.lease.fenceToken)
+    expect(transport.transactionCommands).toHaveLength(1)
+  })
+
+  test('rejects takeover, pointer drift, and receipt drift at the planning transaction', async () => {
+    const takeoverConfiguration = createConfiguration()
+    const takeoverTransport = new InMemorySourceEvidenceAwsTransport()
+    const takeoverClock = new MutableAuthorityClock(initialTime)
+    const takeoverAuthority = await acquirePlanningAuthority(
+      takeoverConfiguration,
+      takeoverTransport,
+      takeoverClock,
+      'run-stale-fence',
+      'owner-stale-fence',
+    )
+    const takeoverPort = createSourceEvidencePort(
+      takeoverConfiguration,
+      new SequencedSourceEvidenceScanner([{
+        items: [createIgnoredProjectDirectoryItem('stale-fence')],
+      }]),
+      takeoverTransport,
+      () => takeoverClock.read(),
+    )
+    takeoverTransport.beforeNextSourceTransaction(async () => {
+      takeoverClock.set(takeoverAuthority.authority.lease.expiresAt)
+      const successorPort = createAuthorityPort(
+        takeoverConfiguration,
+        takeoverTransport,
+        takeoverClock,
+      )
+      await successorPort.acquireLease({
+        runId: 'run-successor-fence',
+        ownerId: 'owner-successor-fence',
+      })
+    })
+
+    const takeoverFailure = await captureMigrationFailure(
+      () => takeoverPort.commitNextPage(createPlanningRequest(
+        takeoverConfiguration,
+        takeoverAuthority.authority,
+      )),
+    )
+    expect(takeoverFailure.code).toBe('LEASE_LOST')
+
+    const pointerConfiguration = createConfiguration()
+    const pointerTransport = new InMemorySourceEvidenceAwsTransport()
+    const pointerClock = new MutableAuthorityClock(initialTime)
+    const pointerAuthority = await acquirePlanningAuthority(
+      pointerConfiguration,
+      pointerTransport,
+      pointerClock,
+      'run-pointer-drift',
+      'owner-pointer-drift',
+    )
+    const pointerPort = createSourceEvidencePort(
+      pointerConfiguration,
+      new SequencedSourceEvidenceScanner([{
+        items: [createIgnoredProjectDirectoryItem('pointer-drift')],
+      }]),
+      pointerTransport,
+      () => pointerClock.read(),
+    )
+    const pointer = requireStoredItem(
+      pointerTransport.readStoredItemByKind(pointerKind),
+    )
+    pointerTransport.replaceStoredItem({
+      ...pointer,
+      revision: {
+        N: String(
+          pointerAuthority.authority
+            .maintenanceEvidencePointerRevision + 1,
+        ),
+      },
+    })
+
+    const pointerFailure = await captureMigrationFailure(
+      () => pointerPort.commitNextPage(createPlanningRequest(
+        pointerConfiguration,
+        pointerAuthority.authority,
+      )),
+    )
+    expect(pointerFailure.code).toBe('INVALID_MAINTENANCE_EVIDENCE')
+
+    const receiptConfiguration = createConfiguration()
+    const receiptTransport = new InMemorySourceEvidenceAwsTransport()
+    const receiptClock = new MutableAuthorityClock(initialTime)
+    const receiptAuthority = await acquirePlanningAuthority(
+      receiptConfiguration,
+      receiptTransport,
+      receiptClock,
+      'run-receipt-drift',
+      'owner-receipt-drift',
+    )
+    const receiptPort = createSourceEvidencePort(
+      receiptConfiguration,
+      new SequencedSourceEvidenceScanner([{
+        items: [createIgnoredProjectDirectoryItem('receipt-drift')],
+      }]),
+      receiptTransport,
+      () => receiptClock.read(),
+    )
+    const receipt = requireStoredItem(
+      receiptTransport.readStoredItemByKind(receiptKind),
+    )
+    receiptTransport.replaceStoredItem({
+      ...receipt,
+      runtimeRevision: { N: '43' },
+    })
+
+    const receiptFailure = await captureMigrationFailure(
+      () => receiptPort.commitNextPage(createPlanningRequest(
+        receiptConfiguration,
+        receiptAuthority.authority,
+      )),
+    )
+    expect(receiptFailure.code).toBe('INVALID_MAINTENANCE_EVIDENCE')
+    expect(receiptTransport.readStoredItemByKind(
+      'workspace-search-migration-source-evidence-head',
+    )).toBeUndefined()
+  })
+
+  test('recovers planning response loss only for the authority-bound durable page and head', async () => {
+    const configuration = createConfiguration()
+    const transport = new InMemorySourceEvidenceAwsTransport()
+    const clock = new MutableAuthorityClock(initialTime)
+    const authorityContext = await acquirePlanningAuthority(
+      configuration,
+      transport,
+      clock,
+      'run-planning-response-loss',
+      'owner-planning-response-loss',
+    )
+    const request = createPlanningRequest(
+      configuration,
+      authorityContext.authority,
+    )
+    const port = createSourceEvidencePort(
+      configuration,
+      new SequencedSourceEvidenceScanner([{
+        items: [createIgnoredProjectDirectoryItem('planning-response-loss')],
+      }]),
+      transport,
+      () => clock.read(),
+    )
+    transport.failNextTransaction({
+      timing: 'after-commit',
+      error: createNamedError(
+        'TimeoutError',
+        'RAW-PLANNING-RESPONSE-LOSS',
+      ),
+    })
+
+    const recovered = await port.commitNextPage(request)
+
+    expect(recovered).toMatchObject({
+      purpose: 'planning',
+      pageSequence: 1,
+      checkpoint: { completed: true },
+    })
+    const page = requireStoredItem(
+      transport.readStoredItemByKind(
+        'workspace-search-migration-source-evidence-page-record',
+      ),
+    )
+    expect(readPlanningAuthorityBinding(page)).toEqual({
+      ownerId: authorityContext.authority.lease.ownerId,
+      fenceToken: authorityContext.authority.lease.fenceToken,
+      maintenanceEvidencePointerRevision:
+        authorityContext.authority.maintenanceEvidencePointerRevision,
+      maintenanceEvidenceReceiptDigest:
+        authorityContext.authority.maintenanceEvidenceReceiptDigest,
+    })
+    expect(await port.readProgress(createPlanningReadRequest(
+      configuration,
+      authorityContext.authority.lease.runId,
+    ))).toEqual(recovered)
+  })
+
+  test('does not let an old fence adopt the same scan page committed under a new fence', async () => {
+    const configuration = createConfiguration()
+    const transport = new InMemorySourceEvidenceAwsTransport()
+    const clock = new MutableAuthorityClock(initialTime)
+    const runId = 'run-fenced-page-adoption'
+    const oldContext = await acquirePlanningAuthority(
+      configuration,
+      transport,
+      clock,
+      runId,
+      'owner-old-fence',
+    )
+    const sharedPage: WorkspaceSearchMigrationSourceScanPage = {
+      items: [createIgnoredProjectDirectoryItem('same-scan-result')],
+    }
+    const oldPort = createSourceEvidencePort(
+      configuration,
+      new SequencedSourceEvidenceScanner([sharedPage]),
+      transport,
+      () => clock.read(),
+    )
+    let newAuthority: WorkspaceSearchMigrationPrePlanAuthority | undefined
+    let newCommitSequence = 0
+    transport.beforeNextSourceTransaction(async () => {
+      clock.set(oldContext.authority.lease.expiresAt)
+      const newAuthorityPort = createAuthorityPort(
+        configuration,
+        transport,
+        clock,
+      )
+      const newLease = await newAuthorityPort.acquireLease({
+        runId,
+        ownerId: 'owner-new-fence',
+      })
+      newAuthority = await newAuthorityPort.renewMaintenanceEvidence({
+        lease: createLeaseClaim(newLease),
+        expectedPointer: null,
+        evidenceBytes: createMaintenanceEvidenceBytes(
+          oldContext.authority.lease.expiresAt,
+          'change:OPS-2027',
+        ),
+      })
+      const newPort = createSourceEvidencePort(
+        configuration,
+        new SequencedSourceEvidenceScanner([sharedPage]),
+        transport,
+        () => clock.read(),
+      )
+      const newResult = await newPort.commitNextPage(
+        createPlanningRequest(configuration, newAuthority),
+      )
+      newCommitSequence = newResult.pageSequence
+    })
+
+    const failure = await captureMigrationFailure(
+      () => oldPort.commitNextPage(createPlanningRequest(
+        configuration,
+        oldContext.authority,
+      )),
+    )
+
+    expect(failure.code).toBe('AMBIGUOUS_OPERATION_UNRESOLVED')
+    expect(newCommitSequence).toBe(1)
+    if (newAuthority === undefined) {
+      throw new Error('Expected the new fence to commit its page.')
+    }
+    const page = requireStoredItem(
+      transport.readStoredItemByKind(
+        'workspace-search-migration-source-evidence-page-record',
+      ),
+    )
+    expect(readPlanningAuthorityBinding(page)).toMatchObject({
+      ownerId: newAuthority.lease.ownerId,
+      fenceToken: newAuthority.lease.fenceToken,
+    })
+    expect(readPlanningAuthorityBinding(page)).not.toMatchObject({
+      ownerId: oldContext.authority.lease.ownerId,
+      fenceToken: oldContext.authority.lease.fenceToken,
+    })
+  })
+
   test('reconciles an exact commit after transaction response loss', async () => {
     const configuration = createConfiguration()
     const request = createRequest(configuration)
@@ -490,11 +1235,11 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
     const scanner = new SequencedSourceEvidenceScanner([{
       items: [createIgnoredProjectDirectoryItem('response-loss')],
     }])
-    const port = createAwsWorkspaceSearchMigrationSourceEvidencePort({
-      stateTableName: configuration.tables['migration-state'].tableName,
+    const port = createSourceEvidencePort(
+      configuration,
       scanner,
       transport,
-    })
+    )
     const timeout = new Error('RAW-TRANSACTION-CANARY')
     timeout.name = 'TimeoutError'
     transport.failNextTransaction({
@@ -524,18 +1269,18 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
     const firstItem = createIgnoredProjectDirectoryItem(
       'response-loss-advanced-1',
     )
-    const firstPort = createAwsWorkspaceSearchMigrationSourceEvidencePort({
-      stateTableName: configuration.tables['migration-state'].tableName,
-      scanner: new SequencedSourceEvidenceScanner([{
+    const firstPort = createSourceEvidencePort(
+      configuration,
+      new SequencedSourceEvidenceScanner([{
         items: [firstItem],
         lastEvaluatedKey: createProjectDirectoryItemKey(firstItem),
       }]),
       transport,
-    })
+    )
     const advancingPort =
-      createAwsWorkspaceSearchMigrationSourceEvidencePort({
-        stateTableName: configuration.tables['migration-state'].tableName,
-        scanner: new SequencedSourceEvidenceScanner([{
+      createSourceEvidencePort(
+        configuration,
+        new SequencedSourceEvidenceScanner([{
           items: [
             createIgnoredProjectDirectoryItem(
               'response-loss-advanced-2',
@@ -543,7 +1288,7 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
           ],
         }]),
         transport,
-      })
+      )
     let advancedPageSequence = 0
     const timeout = new Error('RAW-ADVANCED-TRANSACTION-CANARY')
     timeout.name = 'TimeoutError'
@@ -590,11 +1335,11 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
         items: [duplicateItem],
       },
     ])
-    const port = createAwsWorkspaceSearchMigrationSourceEvidencePort({
-      stateTableName: configuration.tables['migration-state'].tableName,
+    const port = createSourceEvidencePort(
+      configuration,
       scanner,
       transport,
-    })
+    )
 
     const first = await port.commitNextPage(request)
     const failure = await captureMigrationFailure(
@@ -611,13 +1356,13 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
     const configuration = createConfiguration()
     const request = createRequest(configuration)
     const transport = new InMemorySourceEvidenceAwsTransport()
-    const port = createAwsWorkspaceSearchMigrationSourceEvidencePort({
-      stateTableName: configuration.tables['migration-state'].tableName,
-      scanner: new SequencedSourceEvidenceScanner([{
+    const port = createSourceEvidencePort(
+      configuration,
+      new SequencedSourceEvidenceScanner([{
         items: [createIgnoredProjectDirectoryItem('over-limit')],
       }]),
       transport,
-    })
+    )
     const completed = await port.commitNextPage(request)
     const head = transport.readStoredItems().find(
       (item) =>
@@ -673,12 +1418,11 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
     }
     const identicalTransport = new InMemorySourceEvidenceAwsTransport()
     const identicalScanner = new DeferredSourceEvidenceScanner()
-    const identicalPort =
-      createAwsWorkspaceSearchMigrationSourceEvidencePort({
-        stateTableName: configuration.tables['migration-state'].tableName,
-        scanner: identicalScanner,
-        transport: identicalTransport,
-      })
+    const identicalPort = createSourceEvidencePort(
+      configuration,
+      identicalScanner,
+      identicalTransport,
+    )
 
     const identicalFirst = identicalPort.commitNextPage(request)
     const identicalSecond = identicalPort.commitNextPage(request)
@@ -694,12 +1438,11 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
 
     const differentTransport = new InMemorySourceEvidenceAwsTransport()
     const differentScanner = new DeferredSourceEvidenceScanner()
-    const differentPort =
-      createAwsWorkspaceSearchMigrationSourceEvidencePort({
-        stateTableName: configuration.tables['migration-state'].tableName,
-        scanner: differentScanner,
-        transport: differentTransport,
-      })
+    const differentPort = createSourceEvidencePort(
+      configuration,
+      differentScanner,
+      differentTransport,
+    )
     const differentFirst = differentPort.commitNextPage(request)
     const differentSecond = differentPort.commitNextPage(request)
     await waitForPendingScans(differentScanner, 2)
@@ -720,44 +1463,107 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
     expect(differentTransport.readStoredItems()).toHaveLength(2)
   })
 
-  test('classifies transient failures and redacts every raw error', async () => {
+  test('keeps ambiguous transaction outcomes fail-closed and retryable races transient', async () => {
     const configuration = createConfiguration()
     const request = createRequest(configuration)
-    const transientTransport = new InMemorySourceEvidenceAwsTransport()
-    const transientScanner = new SequencedSourceEvidenceScanner([{
-      items: [createIgnoredProjectDirectoryItem('transient')],
-    }])
-    const transientPort =
-      createAwsWorkspaceSearchMigrationSourceEvidencePort({
-        stateTableName: configuration.tables['migration-state'].tableName,
-        scanner: transientScanner,
-        transport: transientTransport,
-      })
-    const timeout = new Error('RAW-TIMEOUT-CANARY')
-    timeout.name = 'TimeoutError'
-    transientTransport.failNextTransaction({
-      timing: 'before-commit',
-      error: timeout,
-    })
-
-    const transientFailure = await captureMigrationFailure(
-      () => transientPort.commitNextPage(request),
+    const timeout = createNamedError(
+      'TimeoutError',
+      'RAW-TIMEOUT-CANARY',
     )
-    expect(transientFailure).toMatchObject({
-      code: 'TRANSIENT_INFRASTRUCTURE_FAILURE',
-      message:
-        'Workspace Search source evidence stopped safely (TRANSIENT_INFRASTRUCTURE_FAILURE).',
+    const internalServerError = createNamedError(
+      'InternalServerError',
+      'RAW-500-CANARY',
+    )
+    Object.defineProperty(internalServerError, '$metadata', {
+      value: { httpStatusCode: 500 },
     })
-    expect(transientFailure.message).not.toContain('RAW-TIMEOUT-CANARY')
-    expect(transientTransport.readStoredItems()).toHaveLength(0)
+    const transactionInProgress = createNamedError(
+      'TransactionInProgressException',
+      'RAW-IN-PROGRESS-CANARY',
+    )
+    const ambiguousResults: string[] = []
+    for (const [index, error] of [
+      timeout,
+      internalServerError,
+      transactionInProgress,
+    ].entries()) {
+      const transport = new InMemorySourceEvidenceAwsTransport()
+      const port = createSourceEvidencePort(
+        configuration,
+        new SequencedSourceEvidenceScanner([{
+          items: [createIgnoredProjectDirectoryItem(`ambiguous-${index}`)],
+        }]),
+        transport,
+      )
+      transport.failNextTransaction({
+        timing: 'before-commit',
+        error,
+      })
+
+      const failure = await captureMigrationFailure(
+        () => port.commitNextPage(request),
+      )
+
+      ambiguousResults.push(`${error.name}:${failure.code}`)
+      expect(failure.message).not.toContain('RAW-')
+      expect(transport.readStoredItems()).toHaveLength(0)
+    }
+    expect(ambiguousResults).toEqual([
+      'TimeoutError:AMBIGUOUS_OPERATION_UNRESOLVED',
+      'InternalServerError:AMBIGUOUS_OPERATION_UNRESOLVED',
+      'TransactionInProgressException:AMBIGUOUS_OPERATION_UNRESOLVED',
+    ])
+
+    const transientErrors: readonly Error[] = [
+      createNamedError(
+        'TransactionConflictException',
+        'RAW-CONFLICT-CANARY',
+      ),
+      createNamedError(
+        'ProvisionedThroughputExceededException',
+        'RAW-THROTTLE-CANARY',
+      ),
+      createCancellationWithReason('TransactionConflict', 2),
+    ]
+    for (const [index, error] of transientErrors.entries()) {
+      const transport = new InMemorySourceEvidenceAwsTransport()
+      const port = createSourceEvidencePort(
+        configuration,
+        new SequencedSourceEvidenceScanner([{
+          items: [createIgnoredProjectDirectoryItem(`transient-${index}`)],
+        }]),
+        transport,
+      )
+      transport.failNextTransaction({
+        timing: 'before-commit',
+        error,
+      })
+
+      const failure = await captureMigrationFailure(
+        () => port.commitNextPage(request),
+      )
+
+      expect(failure).toMatchObject({
+        code: 'TRANSIENT_INFRASTRUCTURE_FAILURE',
+        message:
+          'Workspace Search source evidence stopped safely (TRANSIENT_INFRASTRUCTURE_FAILURE).',
+      })
+      expect(failure.message).not.toContain('RAW-')
+      expect(transport.readStoredItems()).toHaveLength(0)
+    }
+  })
+
+  test('redacts every raw scanner and point-read error', async () => {
+    const configuration = createConfiguration()
+    const request = createRequest(configuration)
 
     const rawTransport = new InMemorySourceEvidenceAwsTransport()
     const rawScanner = new DeferredSourceEvidenceScanner()
-    const rawPort = createAwsWorkspaceSearchMigrationSourceEvidencePort({
-      stateTableName: configuration.tables['migration-state'].tableName,
-      scanner: rawScanner,
-      transport: rawTransport,
-    })
+    const rawPort = createSourceEvidencePort(
+      configuration,
+      rawScanner,
+      rawTransport,
+    )
     const pending = rawPort.commitNextPage(request)
     await waitForPendingScans(rawScanner, 1)
     rawScanner.rejectScan(
@@ -784,11 +1590,11 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
       value: forgedCodeCanary,
     })
     const forgedScanner = new DeferredSourceEvidenceScanner()
-    const forgedPort = createAwsWorkspaceSearchMigrationSourceEvidencePort({
-      stateTableName: configuration.tables['migration-state'].tableName,
-      scanner: forgedScanner,
-      transport: new InMemorySourceEvidenceAwsTransport(),
-    })
+    const forgedPort = createSourceEvidencePort(
+      configuration,
+      forgedScanner,
+      new InMemorySourceEvidenceAwsTransport(),
+    )
     const forgedPending = forgedPort.commitNextPage(request)
     await waitForPendingScans(forgedScanner, 1)
     forgedScanner.rejectScan(0, forgedFailure)
@@ -803,11 +1609,11 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
     expect(forgedCodeFailure.message).not.toContain(forgedCodeCanary)
 
     const readTransport = new InMemorySourceEvidenceAwsTransport()
-    const readPort = createAwsWorkspaceSearchMigrationSourceEvidencePort({
-      stateTableName: configuration.tables['migration-state'].tableName,
-      scanner: new SequencedSourceEvidenceScanner([]),
-      transport: readTransport,
-    })
+    const readPort = createSourceEvidencePort(
+      configuration,
+      new SequencedSourceEvidenceScanner([]),
+      readTransport,
+    )
     readTransport.failNextGet(new Error('RAW-GET-CANARY'))
     const readFailure = await captureMigrationFailure(
       () => readPort.readProgress(request),
@@ -823,26 +1629,40 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
       'planning',
     ]
     const transport = new InMemorySourceEvidenceAwsTransport()
+    const clock = new MutableAuthorityClock(initialTime)
+    const authorityContext = await acquirePlanningAuthority(
+      configuration,
+      transport,
+      clock,
+      'run-purpose-isolation',
+      'owner-purpose-isolation',
+    )
     const scanner = new SequencedSourceEvidenceScanner(
       purposes.flatMap(() =>
         workspaceSearchMigrationSourceNames.map(() => ({ items: [] }))
       ),
     )
-    const port = createAwsWorkspaceSearchMigrationSourceEvidencePort({
-      stateTableName: configuration.tables['migration-state'].tableName,
+    const port = createSourceEvidencePort(
+      configuration,
       scanner,
       transport,
-    })
+      () => clock.read(),
+    )
     const committedKeys = new Set<string>()
 
     for (const purpose of purposes) {
       for (const source of workspaceSearchMigrationSourceNames) {
-        const request = createRequest(
-          configuration,
-          purpose,
-          source,
-          'run-purpose-isolation',
-        )
+        const request = purpose === 'dry-run'
+          ? createRequest(
+              configuration,
+              source,
+              'run-purpose-isolation',
+            )
+          : createPlanningRequest(
+              configuration,
+              authorityContext.authority,
+              source,
+            )
         const result = await port.commitNextPage(request)
         expect(result).toMatchObject({
           purpose,
@@ -852,11 +1672,12 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
         })
         const command = transport.transactionCommands.at(-1)
         const entries = command?.input.TransactItems
+        const writeOffset = purpose === 'planning' ? 3 : 0
         const pageKey = readStringAttribute(
-          requireItem(entries?.[0]?.Put?.Item),
+          requireItem(entries?.[writeOffset]?.Put?.Item),
           'recordKey',
         )
-        const headItem = requireItem(entries?.[1]?.Put?.Item)
+        const headItem = requireItem(entries?.[writeOffset + 1]?.Put?.Item)
         const headKey = readStringAttribute(headItem, 'recordKey')
         expect(readStringAttribute(headItem, 'purpose')).toBe(purpose)
         expect(readStringAttribute(headItem, 'source')).toBe(source)
@@ -866,17 +1687,23 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
     }
 
     expect(committedKeys).toHaveLength(16)
-    expect(transport.readStoredItems()).toHaveLength(16)
+    expect(transport.readStoredItems()).toHaveLength(19)
     expect(scanner.inputs).toHaveLength(8)
 
     for (const purpose of purposes) {
       for (const source of workspaceSearchMigrationSourceNames) {
-        const progress = await port.readProgress(createRequest(
-          configuration,
-          purpose,
-          source,
-          'run-purpose-isolation',
-        ))
+        const request = purpose === 'dry-run'
+          ? createRequest(
+              configuration,
+              source,
+              'run-purpose-isolation',
+            )
+          : createPlanningReadRequest(
+              configuration,
+              authorityContext.authority.lease.runId,
+              source,
+            )
+        const progress = await port.readProgress(request)
         expect(progress).toMatchObject({
           purpose,
           source,
@@ -889,28 +1716,194 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
 })
 
 /**
- * Creates a complete evidence request for one purpose and source.
+ * Creates a complete non-authoritative dry-run commit request.
  *
  * @param configuration - Exact measured migration configuration.
- * @param purpose - Independent dry-run or planning chain.
  * @param source - Fixed source-table role.
  * @param runId - Operator-selected run identifier.
- * @returns Complete adapter request.
+ * @returns Complete dry-run adapter request.
  */
 function createRequest(
   configuration: WorkspaceSearchMigrationConfiguration,
-  purpose: WorkspaceSearchMigrationSourceEvidencePurpose = 'planning',
   source: WorkspaceSearchMigrationSourceName = 'project-directory',
   runId = 'run-source-evidence',
-): WorkspaceSearchMigrationSourceEvidenceAwsRequest {
+): WorkspaceSearchMigrationDryRunSourceEvidenceAwsCommitRequest {
   return {
     runId,
-    purpose,
+    purpose: 'dry-run',
     configuration,
     configurationHash:
       createWorkspaceSearchConfigurationHash(configuration),
     source,
   }
+}
+
+/**
+ * Creates a complete authority-bearing planning commit request.
+ *
+ * @param configuration - Exact measured migration configuration.
+ * @param authority - Exact current durable authority aggregate.
+ * @param source - Fixed source-table role.
+ * @returns Complete planning adapter request.
+ */
+function createPlanningRequest(
+  configuration: WorkspaceSearchMigrationConfiguration,
+  authority: WorkspaceSearchMigrationPrePlanAuthority,
+  source: WorkspaceSearchMigrationSourceName = 'project-directory',
+): WorkspaceSearchMigrationPlanningSourceEvidenceAwsCommitRequest {
+  return {
+    runId: authority.lease.runId,
+    purpose: 'planning',
+    configuration,
+    configurationHash:
+      createWorkspaceSearchConfigurationHash(configuration),
+    source,
+    authority: structuredClone(authority),
+  }
+}
+
+/**
+ * Creates a strict authority-free read request for one planning chain.
+ *
+ * @param configuration - Exact measured migration configuration.
+ * @param runId - Planning run identifier.
+ * @param source - Fixed source-table role.
+ * @returns Exact planning read request.
+ */
+function createPlanningReadRequest(
+  configuration: WorkspaceSearchMigrationConfiguration,
+  runId: string,
+  source: WorkspaceSearchMigrationSourceName = 'project-directory',
+): WorkspaceSearchMigrationSourceEvidenceAwsRequest {
+  return {
+    runId,
+    purpose: 'planning',
+    configuration,
+    configurationHash:
+      createWorkspaceSearchConfigurationHash(configuration),
+    source,
+  }
+}
+
+/**
+ * Creates one source-evidence adapter with the measured state incarnation.
+ *
+ * @param configuration - Exact measured migration configuration.
+ * @param scanner - Source scanner used by the adapter.
+ * @param transport - Shared condition-aware in-memory transport.
+ * @param clock - Trusted commit clock.
+ * @returns Configured source-evidence port.
+ */
+function createSourceEvidencePort(
+  configuration: WorkspaceSearchMigrationConfiguration,
+  scanner: WorkspaceSearchMigrationSourceEvidenceScanner,
+  transport: InMemorySourceEvidenceAwsTransport,
+  clock: () => Date = () => new Date(initialTime),
+): WorkspaceSearchMigrationSourceEvidenceAwsPort {
+  return createAwsWorkspaceSearchMigrationSourceEvidencePort({
+    stateTable: configuration.tables['migration-state'],
+    scanner,
+    transport,
+    clock,
+  })
+}
+
+/**
+ * Creates one authority adapter bound to the measured configuration.
+ *
+ * @param configuration - Exact measured migration configuration.
+ * @param transport - Shared condition-aware in-memory transport.
+ * @param clock - Mutable trusted clock.
+ * @returns Configured pre-plan authority port.
+ */
+function createAuthorityPort(
+  configuration: WorkspaceSearchMigrationConfiguration,
+  transport: InMemorySourceEvidenceAwsTransport,
+  clock: MutableAuthorityClock,
+): WorkspaceSearchMigrationPrePlanAuthorityAwsPort {
+  return createAwsWorkspaceSearchMigrationPrePlanAuthorityPort({
+    stateTable: configuration.tables['migration-state'],
+    configurationHash:
+      createWorkspaceSearchConfigurationHash(configuration),
+    transport,
+    clock: () => clock.read(),
+  })
+}
+
+/**
+ * Acquires one global lease and publishes its first maintenance receipt.
+ *
+ * @param configuration - Exact measured migration configuration.
+ * @param transport - Shared authority and source-evidence transport.
+ * @param clock - Mutable trusted clock.
+ * @param runId - Planning run identifier.
+ * @param ownerId - Planning owner identifier.
+ * @returns Authority port and exact current authority aggregate.
+ */
+async function acquirePlanningAuthority(
+  configuration: WorkspaceSearchMigrationConfiguration,
+  transport: InMemorySourceEvidenceAwsTransport,
+  clock: MutableAuthorityClock,
+  runId: string,
+  ownerId: string,
+) {
+  const port = createAuthorityPort(configuration, transport, clock)
+  const lease = await port.acquireLease({ runId, ownerId })
+  const authority = await port.renewMaintenanceEvidence({
+    lease: createLeaseClaim(lease),
+    expectedPointer: null,
+    evidenceBytes: createMaintenanceEvidenceBytes(clock.read().toISOString()),
+  })
+  return { port, authority }
+}
+
+/**
+ * Creates the exact fenced lease claim used by authority mutations.
+ *
+ * @param lease - Current durable lease.
+ * @returns Detached run, owner, and fence claim.
+ */
+function createLeaseClaim(
+  lease: WorkspaceSearchMigrationPrePlanAuthority['lease'],
+): WorkspaceSearchMigrationLeaseClaim {
+  return {
+    runId: lease.runId,
+    ownerId: lease.ownerId,
+    fenceToken: lease.fenceToken,
+  }
+}
+
+/**
+ * Creates valid fresh maintenance-evidence bytes at one clock instant.
+ *
+ * @param at - Adapter validation time.
+ * @param locator - Secret-free change-record locator.
+ * @returns Strict UTF-8 JSON evidence bytes.
+ */
+function createMaintenanceEvidenceBytes(
+  at: string,
+  locator = 'change:SOURCE-EVIDENCE',
+): Uint8Array {
+  const now = requireEpochMilliseconds(at)
+  const drainCompletedAt = new Date(now - 60_000).toISOString()
+  const drainStartedAt =
+    new Date(now - 60_000 - 15 * 60_000).toISOString()
+  return new TextEncoder().encode(JSON.stringify({
+    schemaVersion: 1,
+    locator,
+    runtimeMode: 'disabled',
+    runtimeRevision: 42,
+    drainStartedAt,
+    drainCompletedAt,
+    observedWriterMutations: 0,
+    surfaces: maintenanceRuntimeControlSurfaces.map((surface) => ({
+      surface,
+      mode: 'disabled',
+      status: 'current',
+      revision: 42,
+      observedAt: drainCompletedAt,
+    })),
+  }))
 }
 
 /**
@@ -955,9 +1948,70 @@ async function captureMigrationFailure(
  * @returns Exact state-table sort key.
  */
 function readCommandRecordKey(command: GetItemCommand): string {
-  const key = command.input.Key
-  if (key === undefined) throw new Error('Expected one GetItem key.')
+  return readKeyRecordKey(command.input.Key)
+}
+
+/**
+ * Reads a complete DynamoDB key and validates its migration partition.
+ *
+ * @param key - Candidate low-level key.
+ * @returns Exact deterministic record key.
+ */
+function readKeyRecordKey(
+  key: Record<string, AttributeValue> | undefined,
+): string {
+  if (key === undefined) throw new Error('Expected one DynamoDB key.')
+  if (
+    readStringAttribute(key, 'migrationId') !==
+      WORKSPACE_SEARCH_MIGRATION_ID
+  ) {
+    throw new Error('Unexpected migration partition key.')
+  }
   return readStringAttribute(key, 'recordKey')
+}
+
+/**
+ * Requires a nonempty adapter-generated transaction.
+ *
+ * @param command - Candidate transaction command.
+ * @returns Exact transaction entries.
+ */
+function requireTransactionItems(
+  command: TransactWriteItemsCommand,
+): readonly TransactWriteItem[] {
+  const entries = command.input.TransactItems
+  if (entries === undefined || entries.length === 0) {
+    throw new Error('Expected one nonempty transaction.')
+  }
+  return entries
+}
+
+/**
+ * Requires one complete transaction condition check.
+ *
+ * @param item - Candidate transaction entry.
+ * @returns Exact condition check.
+ */
+function requireConditionCheck(
+  item: TransactWriteItem | undefined,
+): NonNullable<TransactWriteItem['ConditionCheck']> {
+  if (item?.ConditionCheck === undefined) {
+    throw new Error('Expected one transaction condition check.')
+  }
+  return item.ConditionCheck
+}
+
+/**
+ * Requires one detached stored item.
+ *
+ * @param item - Candidate durable row.
+ * @returns Complete stored item.
+ */
+function requireStoredItem(
+  item: Readonly<Record<string, AttributeValue>> | undefined,
+): Readonly<Record<string, AttributeValue>> {
+  if (item === undefined) throw new Error('Expected one stored item.')
+  return item
 }
 
 /**
@@ -998,6 +2052,32 @@ function readStringAttribute(
 }
 
 /**
+ * Reads one exact safe integer attribute from a low-level item.
+ *
+ * @param item - Low-level DynamoDB item.
+ * @param name - Required numeric attribute name.
+ * @returns Parsed safe integer.
+ */
+function readNumberAttribute(
+  item: Readonly<Record<string, AttributeValue>>,
+  name: string,
+): number {
+  const attribute = item[name]
+  if (
+    attribute === undefined ||
+    attribute.N === undefined ||
+    Object.keys(attribute).length !== 1
+  ) {
+    throw new Error(`Expected exact number attribute ${name}.`)
+  }
+  const value = Number(attribute.N)
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(`Expected safe integer attribute ${name}.`)
+  }
+  return value
+}
+
+/**
  * Reads one exact map attribute from a low-level item.
  *
  * @param item - Low-level DynamoDB item or nested map.
@@ -1020,28 +2100,66 @@ function readMapAttribute(
 }
 
 /**
- * Checks every expression value against the corresponding current attribute.
+ * Evaluates the constrained condition grammar emitted by both adapters.
  *
- * @param current - Current durable head.
- * @param names - Expression attribute-name aliases.
- * @param values - Expected predecessor values.
- * @returns Whether the exact predecessor CAS matches.
+ * @param current - Existing row in the transaction snapshot.
+ * @param expression - Adapter-generated condition expression.
+ * @param names - Exact attribute aliases.
+ * @param values - Exact condition operands.
+ * @returns Whether every AND clause is true.
  */
-function conditionValuesMatch(
-  current: Readonly<Record<string, AttributeValue>>,
+function conditionMatches(
+  current: Readonly<Record<string, AttributeValue>> | undefined,
+  expression: string | undefined,
   names: Readonly<Record<string, string>> | undefined,
-  values: Readonly<Record<string, AttributeValue>>,
+  values: Readonly<Record<string, AttributeValue>> | undefined,
 ): boolean {
-  if (names === undefined) return false
-  for (const [valueToken, expected] of Object.entries(values)) {
-    const nameToken = `#${valueToken.slice(1)}`
-    const attributeName = names[nameToken]
-    const actual = attributeName === undefined
-      ? undefined
-      : current[attributeName]
+  if (expression === undefined) {
+    throw new Error('Every in-memory write must carry a condition.')
+  }
+  const attributeNames = names ?? {}
+  const attributeValues = values ?? {}
+  for (const clause of expression.split(' AND ')) {
+    const absentMatch =
+      /^attribute_not_exists\((#[A-Za-z0-9_]+)\)$/u.exec(clause)
+    if (absentMatch !== null) {
+      const alias = absentMatch[1]
+      if (alias === undefined) {
+        throw new Error('Malformed attribute-not-exists condition.')
+      }
+      const name = attributeNames[alias]
+      if (name === undefined) {
+        throw new Error('Missing attribute-name alias.')
+      }
+      if (current?.[name] !== undefined) return false
+      continue
+    }
+
+    const comparison =
+      /^(#[A-Za-z0-9_]+) (=|<=|>=|<|>) (:[A-Za-z0-9_]+)$/u
+        .exec(clause)
+    if (comparison === null) {
+      throw new Error(`Unsupported condition clause: ${clause}`)
+    }
+    const alias = comparison[1]
+    const operator = comparison[2]
+    const valueAlias = comparison[3]
+    if (
+      alias === undefined ||
+      operator === undefined ||
+      valueAlias === undefined
+    ) {
+      throw new Error('Malformed comparison condition.')
+    }
+    const name = attributeNames[alias]
+    const expected = attributeValues[valueAlias]
+    if (name === undefined || expected === undefined) {
+      throw new Error('Missing comparison alias or operand.')
+    }
+    const actual = current?.[name]
     if (
       actual === undefined ||
-      !attributeValuesEqual(actual, expected)
+      !attributeComparisonMatches(actual, operator, expected)
     ) {
       return false
     }
@@ -1050,17 +2168,127 @@ function conditionValuesMatch(
 }
 
 /**
- * Compares two low-level values including binary content.
+ * Compares two low-level values with the emitted condition operators.
  *
- * @param left - Current durable value.
- * @param right - Exact condition operand.
- * @returns Whether their detached structures match.
+ * @param actual - Existing attribute value.
+ * @param operator - Exact comparison operator.
+ * @param expected - Condition operand.
+ * @returns Whether the comparison succeeds.
  */
-function attributeValuesEqual(
-  left: AttributeValue,
-  right: AttributeValue,
+function attributeComparisonMatches(
+  actual: AttributeValue,
+  operator: string,
+  expected: AttributeValue,
 ): boolean {
-  return Bun.deepEquals(structuredClone(left), structuredClone(right))
+  if (operator === '=') return Bun.deepEquals(actual, expected)
+  if (actual.N === undefined || expected.N === undefined) {
+    throw new Error('Ordered conditions require numeric values.')
+  }
+  const actualNumber = Number(actual.N)
+  const expectedNumber = Number(expected.N)
+  if (
+    !Number.isFinite(actualNumber) ||
+    !Number.isFinite(expectedNumber)
+  ) {
+    throw new Error('Invalid numeric condition.')
+  }
+  if (operator === '<') return actualNumber < expectedNumber
+  if (operator === '<=') return actualNumber <= expectedNumber
+  if (operator === '>') return actualNumber > expectedNumber
+  if (operator === '>=') return actualNumber >= expectedNumber
+  throw new Error(`Unsupported comparison operator: ${operator}`)
+}
+
+/**
+ * Creates an SDK cancellation with one reason per transaction entry.
+ *
+ * @param failures - Whether each corresponding condition failed.
+ * @returns Real low-level transaction cancellation.
+ */
+function createConditionalTransactionFailure(
+  failures: readonly boolean[],
+): TransactionCanceledException {
+  return new TransactionCanceledException({
+    $metadata: {},
+    message: 'Condition-aware source evidence transaction was canceled.',
+    CancellationReasons: failures.map((failed) => ({
+      Code: failed ? 'ConditionalCheckFailed' : 'None',
+    })),
+  })
+}
+
+/**
+ * Creates a transaction cancellation carrying one transient reason code.
+ *
+ * @param code - Stable DynamoDB cancellation reason.
+ * @param entryCount - Transaction item count.
+ * @returns Real low-level transaction cancellation.
+ */
+function createCancellationWithReason(
+  code: string,
+  entryCount: number,
+): TransactionCanceledException {
+  return new TransactionCanceledException({
+    $metadata: {},
+    message: 'Transient source evidence transaction cancellation.',
+    CancellationReasons: Array.from(
+      { length: entryCount },
+      (_, index) => ({ Code: index === 0 ? code : 'None' }),
+    ),
+  })
+}
+
+/**
+ * Creates one raw error with an explicit stable classifier name.
+ *
+ * @param name - Error name consumed by the adapter classifier.
+ * @param message - Secret-bearing canary message.
+ * @returns Named raw error.
+ */
+function createNamedError(name: string, message: string): Error {
+  const error = new Error(message)
+  error.name = name
+  return error
+}
+
+/**
+ * Reads the authority binding from one canonical planning page payload.
+ *
+ * @param item - Durable low-level source-evidence page row.
+ * @returns Parsed planning-authority binding.
+ */
+function readPlanningAuthorityBinding(
+  item: Readonly<Record<string, AttributeValue>>,
+): unknown {
+  const payload = item.payload
+  if (
+    payload === undefined ||
+    payload.B === undefined ||
+    Object.keys(payload).length !== 1
+  ) {
+    throw new Error('Expected one binary source-evidence payload.')
+  }
+  const parsed: unknown = JSON.parse(
+    new TextDecoder('utf-8', { fatal: true }).decode(payload.B),
+  )
+  if (typeof parsed !== 'object' || parsed === null) {
+    throw new Error('Expected one planning page document.')
+  }
+  return structuredClone(Reflect.get(parsed, 'planningAuthority'))
+}
+
+/**
+ * Parses one canonical timestamp for mutable clock fixtures.
+ *
+ * @param at - Candidate timestamp.
+ * @returns Finite nonnegative epoch milliseconds.
+ */
+function requireEpochMilliseconds(at: string): number {
+  const value = Date.parse(at)
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error('Expected one valid test timestamp.')
+  }
+  return value
 }
 
 /**
