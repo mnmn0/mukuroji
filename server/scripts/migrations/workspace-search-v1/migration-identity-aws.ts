@@ -6,9 +6,13 @@ import {
   DescribeTimeToLiveCommand,
   type DescribeTimeToLiveCommandOutput,
   DynamoDBClient,
+  GetItemCommand,
+  type GetItemCommandOutput,
   ResourceNotFoundException,
   ScanCommand,
   type ScanCommandOutput,
+  TransactWriteItemsCommand,
+  type TransactWriteItemsCommandOutput,
 } from '@aws-sdk/client-dynamodb'
 import {
   DescribeKeyCommand,
@@ -63,6 +67,18 @@ import {
   type WorkspaceSearchMigrationSharedProfiles,
   loadWorkspaceSearchMigrationSharedProfiles,
 } from './migration-shared-profile-loader'
+import {
+  createAwsWorkspaceSearchMigrationSourceEvidencePort,
+  isWorkspaceSearchMigrationFailureCode,
+  type WorkspaceSearchMigrationSourceEvidenceAwsPort,
+  type WorkspaceSearchMigrationSourceEvidenceAwsRequest,
+  type WorkspaceSearchMigrationSourceEvidenceAwsTransport,
+  type WorkspaceSearchMigrationSourceEvidenceScanner,
+} from './migration-source-evidence-aws'
+import type {
+  WorkspaceSearchMigrationSourceEvidenceProgress,
+  WorkspaceSearchMigrationSourceEvidenceReplayResult,
+} from './migration-source-evidence'
 import {
   normalizeWorkspaceSearchMigrationSourceScanOutput,
   type WorkspaceSearchMigrationSourceScanAwsTransport,
@@ -215,6 +231,16 @@ type PreparedManagedSourceScanReduction = {
   readonly reductionInput: ReduceWorkspaceSearchMigrationSourceScanPageInput
 }
 
+/**
+ * Measurement authority captured for one complete source-evidence operation.
+ */
+type ManagedSourceEvidenceAuthority = {
+  /** Session generation captured before evidence validation or I/O. */
+  readonly generation: number
+  /** Exact configuration hash authorized by the current measurement. */
+  readonly configurationHash: string
+}
+
 /** Explicit AWS SDK client configuration retained for construction tests. */
 export type WorkspaceSearchMigrationIdentityAwsSdkClientConfiguration = {
   /** Credentials resolved only from the explicitly selected shared profile. */
@@ -276,6 +302,36 @@ export interface WorkspaceSearchMigrationManagedAwsSession
   scanSourcePage(
     input: WorkspaceSearchMigrationSourceScanReadInput,
   ): Promise<WorkspaceSearchMigrationSourceScanPageResult>
+
+  /**
+   * Reads one durable pre-plan source evidence head.
+   *
+   * @param input - Exact measured evidence-chain request.
+   * @returns Current durable or canonical initial progress.
+   */
+  readSourceEvidenceProgress(
+    input: WorkspaceSearchMigrationSourceEvidenceAwsRequest,
+  ): Promise<WorkspaceSearchMigrationSourceEvidenceProgress>
+
+  /**
+   * Reads and globally validates every page at one captured durable head.
+   *
+   * @param input - Exact measured evidence-chain request.
+   * @returns Replayed row evidence and its exact captured progress.
+   */
+  readCommittedSourceEvidence(
+    input: WorkspaceSearchMigrationSourceEvidenceAwsRequest,
+  ): Promise<WorkspaceSearchMigrationSourceEvidenceReplayResult>
+
+  /**
+   * Scans and atomically commits one next pre-plan source evidence page.
+   *
+   * @param input - Exact measured evidence-chain request.
+   * @returns Exact committed successor or terminal progress.
+   */
+  commitNextSourceEvidencePage(
+    input: WorkspaceSearchMigrationSourceEvidenceAwsRequest,
+  ): Promise<WorkspaceSearchMigrationSourceEvidenceProgress>
 }
 
 /** Narrow transport containing only managed identity reads. */
@@ -369,7 +425,8 @@ export interface WorkspaceSearchMigrationIdentityAwsTransport {
 export interface WorkspaceSearchMigrationManagedAwsTransport
   extends
     WorkspaceSearchMigrationIdentityAwsTransport,
-    WorkspaceSearchMigrationSourceScanAwsTransport {}
+    WorkspaceSearchMigrationSourceScanAwsTransport,
+    WorkspaceSearchMigrationSourceEvidenceAwsTransport {}
 
 /**
  * Injectable constructor for the allowlisted AWS SDK transport.
@@ -381,7 +438,7 @@ export type WorkspaceSearchMigrationIdentityAwsTransportConstructor = (
   configurations: WorkspaceSearchMigrationIdentityAwsSdkConfigurations,
 ) => WorkspaceSearchMigrationManagedAwsTransport
 
-/** AWS SDK transport whose public surface contains no mutation operation. */
+/** AWS SDK transport exposing only allowlisted identity, Scan, and evidence I/O. */
 class AwsSdkWorkspaceSearchMigrationIdentityTransport
   implements WorkspaceSearchMigrationManagedAwsTransport {
   /** DynamoDB client bound to the explicit profile and region. */
@@ -477,6 +534,30 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
    * @returns Raw low-level DynamoDB page.
    */
   scanSource(command: ScanCommand): Promise<ScanCommandOutput> {
+    return this.dynamodbClient.send(command)
+  }
+
+  /**
+   * Sends one strongly consistent source-evidence point read.
+   *
+   * @param command - Exact adapter-owned GetItem command.
+   * @returns Raw low-level DynamoDB item response.
+   */
+  getSourceEvidence(
+    command: GetItemCommand,
+  ): Promise<GetItemCommandOutput> {
+    return this.dynamodbClient.send(command)
+  }
+
+  /**
+   * Sends one atomic immutable-page and CAS-head evidence commit.
+   *
+   * @param command - Exact adapter-owned TransactWriteItems command.
+   * @returns Raw low-level DynamoDB transaction response.
+   */
+  transactWriteSourceEvidence(
+    command: TransactWriteItemsCommand,
+  ): Promise<TransactWriteItemsCommandOutput> {
     return this.dynamodbClient.send(command)
   }
 
@@ -749,6 +830,161 @@ class AwsWorkspaceSearchMigrationIdentityPort
     return reduceWorkspaceSearchMigrationSourceScanPage(
       prepared.reductionInput,
     )
+  }
+
+  /**
+   * Reads one durable source-evidence head through the current measurement.
+   *
+   * @param input - Exact measured evidence-chain request.
+   * @returns Current durable or canonical initial progress.
+   */
+  async readSourceEvidenceProgress(
+    input: WorkspaceSearchMigrationSourceEvidenceAwsRequest,
+  ): Promise<WorkspaceSearchMigrationSourceEvidenceProgress> {
+    return runManagedSourceEvidenceAwsBoundary(async () => {
+      const authority = this.captureSourceEvidenceAuthority(input)
+      const adapter = this.createManagedSourceEvidenceAdapter(authority)
+      const progress = await adapter.readProgress(input)
+      this.requireSourceScanGeneration(
+        authority.generation,
+        authority.configurationHash,
+      )
+      return progress
+    })
+  }
+
+  /**
+   * Reads and globally validates all pages at one captured durable head.
+   *
+   * @param input - Exact measured evidence-chain request.
+   * @returns Replayed row evidence and captured progress.
+   */
+  async readCommittedSourceEvidence(
+    input: WorkspaceSearchMigrationSourceEvidenceAwsRequest,
+  ): Promise<WorkspaceSearchMigrationSourceEvidenceReplayResult> {
+    return runManagedSourceEvidenceAwsBoundary(async () => {
+      const authority = this.captureSourceEvidenceAuthority(input)
+      const adapter = this.createManagedSourceEvidenceAdapter(authority)
+      const replay = await adapter.readCommittedEvidence(input)
+      this.requireSourceScanGeneration(
+        authority.generation,
+        authority.configurationHash,
+      )
+      return replay
+    })
+  }
+
+  /**
+   * Scans and atomically commits one next source-evidence page.
+   *
+   * @param input - Exact measured evidence-chain request.
+   * @returns Exact committed successor or terminal progress.
+   */
+  async commitNextSourceEvidencePage(
+    input: WorkspaceSearchMigrationSourceEvidenceAwsRequest,
+  ): Promise<WorkspaceSearchMigrationSourceEvidenceProgress> {
+    return runManagedSourceEvidenceAwsBoundary(async () => {
+      const authority = this.captureSourceEvidenceAuthority(input)
+      const adapter = this.createManagedSourceEvidenceAdapter(authority)
+      const progress = await adapter.commitNextPage(input)
+      this.requireSourceScanGeneration(
+        authority.generation,
+        authority.configurationHash,
+      )
+      return progress
+    })
+  }
+
+  /**
+   * Captures and validates the current measurement for one evidence call.
+   *
+   * @param input - Exact measured evidence-chain request.
+   * @returns Generation and configuration hash guarded around every I/O.
+   */
+  private captureSourceEvidenceAuthority(
+    input: WorkspaceSearchMigrationSourceEvidenceAwsRequest,
+  ): ManagedSourceEvidenceAuthority {
+    this.requireOpen()
+    const generation = this.generation
+    const configurationHash = this.sourceScanConfigurationHash
+    if (configurationHash === undefined) {
+      return failSourceScanAws('INVALID_STATE')
+    }
+    if (input.configurationHash !== configurationHash) {
+      return failSourceScanAws('CONFIGURATION_HASH_MISMATCH')
+    }
+    this.requireMeasuredConfigurationBinding(input.configuration)
+    this.requireSourceScanGeneration(generation, configurationHash)
+    return {
+      generation,
+      configurationHash,
+    }
+  }
+
+  /**
+   * Creates one ephemeral evidence adapter guarded by captured authority.
+   *
+   * @param authority - Current generation and configuration authorization.
+   * @returns Adapter composed from this session's scanner and DynamoDB client.
+   */
+  private createManagedSourceEvidenceAdapter(
+    authority: ManagedSourceEvidenceAuthority,
+  ): WorkspaceSearchMigrationSourceEvidenceAwsPort {
+    const scanner: WorkspaceSearchMigrationSourceEvidenceScanner = {
+      scanSourcePage: (input) =>
+        this.runManagedSourceEvidenceIo(
+          authority,
+          () => this.scanSourcePage(input),
+        ),
+    }
+    const transport: WorkspaceSearchMigrationSourceEvidenceAwsTransport = {
+      getSourceEvidence: (command) =>
+        this.runManagedSourceEvidenceIo(
+          authority,
+          () => this.transport.getSourceEvidence(command),
+        ),
+      transactWriteSourceEvidence: (command) =>
+        this.runManagedSourceEvidenceIo(
+          authority,
+          () => this.transport.transactWriteSourceEvidence(command),
+        ),
+    }
+    return createAwsWorkspaceSearchMigrationSourceEvidencePort({
+      stateTableName: this.requested.tables['migration-state'],
+      scanner,
+      transport,
+    })
+  }
+
+  /**
+   * Guards one evidence Scan, GetItem, or transaction before and after I/O.
+   *
+   * @param authority - Captured measurement authority.
+   * @param operation - One exact operation on the shared managed transport.
+   * @returns Raw operation result only while authority remains current.
+   */
+  private async runManagedSourceEvidenceIo<Result>(
+    authority: ManagedSourceEvidenceAuthority,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    this.requireSourceScanGeneration(
+      authority.generation,
+      authority.configurationHash,
+    )
+    try {
+      const result = await operation()
+      this.requireSourceScanGeneration(
+        authority.generation,
+        authority.configurationHash,
+      )
+      return result
+    } catch (error: unknown) {
+      this.requireSourceScanGeneration(
+        authority.generation,
+        authority.configurationHash,
+      )
+      throw error
+    }
   }
 
   /**
@@ -1710,6 +1946,48 @@ async function runSourceScanAwsBoundary(
     const code = readSourceScanAwsFailureCode(error)
     throw createSourceScanAwsBoundaryFailure(code)
   }
+}
+
+/**
+ * Runs one managed evidence call behind a fixed raw-error replacement boundary.
+ *
+ * @param operation - Captured-authority validation and adapter operation.
+ * @returns Detached progress from the managed evidence adapter.
+ */
+async function runManagedSourceEvidenceAwsBoundary<Result>(
+  operation: () => Promise<Result>,
+): Promise<Result> {
+  try {
+    return await operation()
+  } catch (error: unknown) {
+    const code = readManagedSourceEvidenceFailureCode(error)
+    throw new WorkspaceSearchMigrationFailure(
+      code,
+      `Workspace Search source evidence stopped safely (${code}).`,
+    )
+  }
+}
+
+/**
+ * Reads only an allowlisted code from a managed evidence failure.
+ *
+ * @param error - Arbitrary value raised during evidence authority or AWS I/O.
+ * @returns Operator-safe code or the fail-closed default.
+ */
+function readManagedSourceEvidenceFailureCode(
+  error: unknown,
+): WorkspaceSearchMigrationFailureCode {
+  try {
+    if (error instanceof WorkspaceSearchMigrationFailure) {
+      const code: unknown = error.code
+      return isWorkspaceSearchMigrationFailureCode(code)
+        ? code
+        : 'INVALID_STATE'
+    }
+  } catch {
+    return 'INVALID_STATE'
+  }
+  return readSourceScanAwsFailureCode(error)
 }
 
 /**
