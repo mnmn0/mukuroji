@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  type AttributeValue,
   type AttributeDefinition,
   DescribeContinuousBackupsCommand,
   type DescribeContinuousBackupsCommandOutput,
@@ -10,12 +11,16 @@ import {
   type DescribeTableCommandOutput,
   DescribeTimeToLiveCommand,
   type DescribeTimeToLiveCommandOutput,
+  GetItemCommand,
+  type GetItemCommandOutput,
   type GlobalSecondaryIndexDescription,
   type KeySchemaElement,
   ResourceNotFoundException,
   ScanCommand,
   type ScanCommandOutput,
   type TableDescription,
+  TransactWriteItemsCommand,
+  type TransactWriteItemsCommandOutput,
 } from '@aws-sdk/client-dynamodb'
 import {
   DescribeKeyCommand,
@@ -57,6 +62,9 @@ import {
   type WorkspaceSearchMigrationRequestedResources,
   validateWorkspaceSearchMigrationRequestedResources,
 } from './migration-identity'
+import type {
+  WorkspaceSearchMigrationSourceEvidenceAwsRequest,
+} from './migration-source-evidence-aws'
 import type {
   WorkspaceSearchMigrationSourceScanReadInput,
 } from './migration-source-scan-aws'
@@ -143,6 +151,9 @@ class RecordingIdentityAwsTransport
   /** Opt-in DynamoDB table outputs keyed by physical table name. */
   readonly describeTableOutputs = new Map<string, DescribeTableCommandOutput>()
 
+  /** Optional raw table-description failures keyed by physical table name. */
+  readonly describeTableFailures = new Map<string, unknown>()
+
   /** Recorded DynamoDB TTL commands. */
   readonly describeTimeToLiveCommands: DescribeTimeToLiveCommand[] = []
 
@@ -152,6 +163,23 @@ class RecordingIdentityAwsTransport
 
   /** Recorded DynamoDB source Scan commands. */
   readonly scanSourceCommands: ScanCommand[] = []
+
+  /** Recorded strongly consistent source-evidence point reads. */
+  readonly getSourceEvidenceCommands: GetItemCommand[] = []
+
+  /** Recorded atomic source-evidence page/head transactions. */
+  readonly transactWriteSourceEvidenceCommands:
+    TransactWriteItemsCommand[] = []
+
+  /** Durable fake source-evidence items keyed by recordKey. */
+  private readonly sourceEvidenceItems =
+    new Map<string, Readonly<Record<string, AttributeValue>>>()
+
+  /** Optional synchronous effect after recording an evidence point read. */
+  getSourceEvidenceEffect: (() => void) | undefined
+
+  /** Optional synchronous effect after recording an evidence transaction. */
+  transactWriteSourceEvidenceEffect: (() => void) | undefined
 
   /** Recorded S3 bucket-encryption commands. */
   readonly getBucketEncryptionCommands: GetBucketEncryptionCommand[] = []
@@ -273,7 +301,10 @@ class RecordingIdentityAwsTransport
     command: DescribeTableCommand,
   ): Promise<DescribeTableCommandOutput> {
     this.describeTableCommands.push(command)
-    return this.describeTableOutputs.get(command.input.TableName ?? '') ??
+    const tableName = command.input.TableName ?? ''
+    const failure = this.describeTableFailures.get(tableName)
+    if (failure !== undefined) throw failure
+    return this.describeTableOutputs.get(tableName) ??
       { $metadata: {} }
   }
 
@@ -307,6 +338,69 @@ class RecordingIdentityAwsTransport
       return await this.scanSourceDeferred
     }
     return this.scanSourceOutput
+  }
+
+  /**
+   * Records and serves one exact source-evidence point read.
+   *
+   * @param command - Exact adapter-owned GetItem command.
+   * @returns Detached durable item when one exists.
+   */
+  async getSourceEvidence(
+    command: GetItemCommand,
+  ): Promise<GetItemCommandOutput> {
+    this.getSourceEvidenceCommands.push(command)
+    this.getSourceEvidenceEffect?.()
+    const recordKey = command.input.Key?.recordKey?.S
+    if (recordKey === undefined) {
+      throw new Error('Expected exact source-evidence record key.')
+    }
+    const item = this.sourceEvidenceItems.get(recordKey)
+    return {
+      $metadata: {},
+      ...(item === undefined ? {} : { Item: structuredClone(item) }),
+    }
+  }
+
+  /**
+   * Records and atomically installs one immutable page and successor head.
+   *
+   * This fake intentionally ignores condition expressions and writes both
+   * items. CAS behavior is covered by the condition-aware adapter test fake.
+   *
+   * @param command - Exact adapter-owned TransactWriteItems command.
+   * @returns Empty successful transaction response.
+   */
+  async transactWriteSourceEvidence(
+    command: TransactWriteItemsCommand,
+  ): Promise<TransactWriteItemsCommandOutput> {
+    this.transactWriteSourceEvidenceCommands.push(command)
+    this.transactWriteSourceEvidenceEffect?.()
+    const entries = command.input.TransactItems
+    if (entries?.length !== 2) {
+      throw new Error('Expected one source-evidence page/head transaction.')
+    }
+    const pending: {
+      /** Exact deterministic evidence record key. */
+      readonly recordKey: string
+      /** Detached low-level evidence item. */
+      readonly item: Readonly<Record<string, AttributeValue>>
+    }[] = []
+    for (const entry of entries) {
+      const item = entry.Put?.Item
+      const recordKey = item?.recordKey?.S
+      if (item === undefined || recordKey === undefined) {
+        throw new Error('Expected one exact source-evidence Put item.')
+      }
+      pending.push({
+        recordKey,
+        item: structuredClone(item),
+      })
+    }
+    for (const entry of pending) {
+      this.sourceEvidenceItems.set(entry.recordKey, entry.item)
+    }
+    return { $metadata: {} }
   }
 
   /**
@@ -506,6 +600,368 @@ describe('Workspace Search migration AWS identity adapter', () => {
     expect(transport.closeCount).toBe(1)
   })
 
+  test('rejects unmeasured source evidence before DynamoDB data I/O', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    for (const methodName of [
+      'readSourceEvidenceProgress',
+      'readCommittedSourceEvidence',
+      'commitNextSourceEvidencePage',
+    ]) {
+      const method: unknown = Reflect.get(port, methodName)
+      if (typeof method !== 'function') {
+        throw new Error('Expected managed source-evidence method.')
+      }
+      const pending: unknown = Reflect.apply(method, port, [{}])
+      if (!(pending instanceof Promise)) {
+        throw new Error('Expected asynchronous source-evidence result.')
+      }
+      await expect(pending).rejects.toMatchObject({
+        code: 'INVALID_STATE',
+        message:
+          'Workspace Search source evidence stopped safely (INVALID_STATE).',
+      })
+    }
+    expect(transport.getSourceEvidenceCommands).toHaveLength(0)
+    expect(transport.transactWriteSourceEvidenceCommands).toHaveLength(0)
+    expect(transport.scanSourceCommands).toHaveLength(0)
+    port.close()
+  })
+
+  test('redacts forged managed evidence failure codes before data I/O', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const request = createSourceEvidenceRequest(configuration)
+    const forgedCodeCanary = 'RAW-MANAGED-EVIDENCE-CODE-CANARY'
+    const forgedFailure = new WorkspaceSearchMigrationFailure(
+      'IDENTITY_MISMATCH',
+      'fixed test failure',
+    )
+    Object.defineProperty(forgedFailure, 'code', {
+      value: forgedCodeCanary,
+    })
+    Object.defineProperty(request, 'configurationHash', {
+      get() {
+        throw forgedFailure
+      },
+    })
+
+    let failure: unknown
+    try {
+      await port.readSourceEvidenceProgress(request)
+    } catch (error: unknown) {
+      failure = error
+    }
+    expect(failure).toBeInstanceOf(WorkspaceSearchMigrationFailure)
+    if (!(failure instanceof WorkspaceSearchMigrationFailure)) {
+      throw new Error('Expected a Workspace Search migration failure.')
+    }
+    expect(failure).toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search source evidence stopped safely (INVALID_STATE).',
+    })
+    expect(failure.message).not.toContain(forgedCodeCanary)
+    expect(transport.getSourceEvidenceCommands).toHaveLength(0)
+    expect(transport.transactWriteSourceEvidenceCommands).toHaveLength(0)
+    expect(transport.scanSourceCommands).toHaveLength(0)
+    port.close()
+  })
+
+  test('snapshots a managed evidence request before state identity I/O', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const request = createSourceEvidenceRequest(configuration)
+    let selectedRunId = request.runId
+    Object.defineProperty(request, 'runId', {
+      get() {
+        return selectedRunId
+      },
+    })
+
+    const pending = port.readSourceEvidenceProgress(request)
+    selectedRunId = 'mutated-after-authority-capture'
+    const progress = await pending
+
+    expect(progress.runId).toBe('managed-source-evidence-run')
+    expect(transport.getSourceEvidenceCommands).toHaveLength(1)
+    expect(transport.transactWriteSourceEvidenceCommands).toHaveLength(0)
+    port.close()
+  })
+
+  test('invalidates evidence reads on close and replacement measurement races', async () => {
+    const closeRequested = createRequestedResources()
+    const closeTransport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(closeTransport, closeRequested)
+    const closePort = createAwsWorkspaceSearchMigrationIdentityPort(
+      closeRequested,
+      () => closeTransport,
+    )
+    const closeConfiguration = await closePort.measureConfiguration()
+    closeTransport.getSourceEvidenceEffect = () => closePort.close()
+
+    await expect(
+      closePort.readSourceEvidenceProgress(
+        createSourceEvidenceRequest(closeConfiguration),
+      ),
+    ).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search source evidence stopped safely (INVALID_STATE).',
+    })
+    expect(closeTransport.getSourceEvidenceCommands).toHaveLength(1)
+    expect(closeTransport.transactWriteSourceEvidenceCommands).toHaveLength(0)
+    expect(closeTransport.closeCount).toBe(1)
+
+    const replacementRequested = createRequestedResources()
+    const replacementTransport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(replacementTransport, replacementRequested)
+    const replacementPort = createAwsWorkspaceSearchMigrationIdentityPort(
+      replacementRequested,
+      () => replacementTransport,
+    )
+    const replacementConfiguration =
+      await replacementPort.measureConfiguration()
+    let replacementMeasurement:
+      Promise<WorkspaceSearchMigrationConfiguration> | undefined
+    replacementTransport.getSourceEvidenceEffect = () => {
+      replacementMeasurement = replacementPort.measureConfiguration()
+    }
+
+    await expect(
+      replacementPort.readSourceEvidenceProgress(
+        createSourceEvidenceRequest(replacementConfiguration),
+      ),
+    ).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search source evidence stopped safely (INVALID_STATE).',
+    })
+    if (replacementMeasurement === undefined) {
+      throw new Error('Expected replacement measurement to start.')
+    }
+    await replacementMeasurement
+    expect(replacementTransport.getSourceEvidenceCommands).toHaveLength(1)
+    expect(replacementTransport.transactWriteSourceEvidenceCommands)
+      .toHaveLength(0)
+    replacementPort.close()
+  })
+
+  test('rejects every migration-state incarnation mismatch before evidence reads', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const stateTableName = requested.tables['migration-state']
+    const expected = createValidDescribeTableOutput(
+      'migration-state',
+      stateTableName,
+      requested,
+    )
+    const replacementId = structuredClone(expected)
+    const replacementArn = structuredClone(expected)
+    const replacementCreation = structuredClone(expected)
+    if (
+      replacementId.Table === undefined ||
+      replacementArn.Table === undefined ||
+      replacementCreation.Table === undefined
+    ) {
+      throw new Error('Expected complete migration-state table fixtures.')
+    }
+    replacementId.Table.TableId = 'replacement-migration-state-table-id'
+    replacementArn.Table.TableArn =
+      `${replacementArn.Table.TableArn ?? ''}-replacement`
+    replacementCreation.Table.CreationDateTime =
+      new Date('2026-07-27T00:00:00.000Z')
+
+    for (const replacement of [
+      replacementId,
+      replacementArn,
+      replacementCreation,
+    ]) {
+      transport.describeTableOutputs.set(stateTableName, replacement)
+      await expect(
+        port.readSourceEvidenceProgress(
+          createSourceEvidenceRequest(configuration),
+        ),
+      ).rejects.toMatchObject({
+        code: 'CONFIGURATION_DRIFT',
+        message:
+          'Workspace Search source evidence stopped safely (CONFIGURATION_DRIFT).',
+      })
+    }
+    expect(transport.getSourceEvidenceCommands).toHaveLength(0)
+    expect(transport.transactWriteSourceEvidenceCommands).toHaveLength(0)
+    port.close()
+  })
+
+  test('rejects migration-state replacement during an evidence read', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const stateTableName = requested.tables['migration-state']
+    const replacement = createReplacementDescribeTableOutput(
+      'migration-state',
+      stateTableName,
+      requested,
+    )
+    transport.getSourceEvidenceEffect = () => {
+      transport.describeTableOutputs.set(stateTableName, replacement)
+    }
+
+    await expect(
+      port.readSourceEvidenceProgress(
+        createSourceEvidenceRequest(configuration),
+      ),
+    ).rejects.toMatchObject({
+      code: 'CONFIGURATION_DRIFT',
+      message:
+        'Workspace Search source evidence stopped safely (CONFIGURATION_DRIFT).',
+    })
+    expect(transport.getSourceEvidenceCommands).toHaveLength(1)
+    expect(transport.transactWriteSourceEvidenceCommands).toHaveLength(0)
+    port.close()
+  })
+
+  test('redacts migration-state deletion before evidence reads', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const stateTableName = requested.tables['migration-state']
+    const canary = 'DELETED-MIGRATION-STATE-CANARY-DO-NOT-LEAK'
+    transport.describeTableFailures.set(
+      stateTableName,
+      new ResourceNotFoundException({
+        $metadata: {},
+        message: canary,
+      }),
+    )
+
+    let failure: unknown
+    try {
+      await port.readSourceEvidenceProgress(
+        createSourceEvidenceRequest(configuration),
+      )
+    } catch (error: unknown) {
+      failure = error
+    }
+    expect(failure).toBeInstanceOf(WorkspaceSearchMigrationFailure)
+    if (!(failure instanceof WorkspaceSearchMigrationFailure)) {
+      throw new Error('Expected a Workspace Search migration failure.')
+    }
+    expect(failure).toMatchObject({
+      code: 'CONFIGURATION_DRIFT',
+      message:
+        'Workspace Search source evidence stopped safely (CONFIGURATION_DRIFT).',
+    })
+    expect(failure.message).not.toContain(canary)
+    expect(transport.getSourceEvidenceCommands).toHaveLength(0)
+    expect(transport.transactWriteSourceEvidenceCommands).toHaveLength(0)
+    port.close()
+  })
+
+  test('preserves retryable classification for state incarnation reads', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const stateTableName = requested.tables['migration-state']
+    const canary = 'STATE-DESCRIBE-THROTTLE-CANARY-DO-NOT-LEAK'
+    const retryable = new Error(canary)
+    retryable.name = 'ThrottlingException'
+    Reflect.set(retryable, '$retryable', { throttling: true })
+    transport.describeTableFailures.set(stateTableName, retryable)
+
+    let failure: unknown
+    try {
+      await port.readSourceEvidenceProgress(
+        createSourceEvidenceRequest(configuration),
+      )
+    } catch (error: unknown) {
+      failure = error
+    }
+    expect(failure).toBeInstanceOf(WorkspaceSearchMigrationFailure)
+    if (!(failure instanceof WorkspaceSearchMigrationFailure)) {
+      throw new Error('Expected a Workspace Search migration failure.')
+    }
+    expect(failure).toMatchObject({
+      code: 'TRANSIENT_INFRASTRUCTURE_FAILURE',
+      message:
+        'Workspace Search source evidence stopped safely (TRANSIENT_INFRASTRUCTURE_FAILURE).',
+    })
+    expect(failure.message).not.toContain(canary)
+    expect(transport.getSourceEvidenceCommands).toHaveLength(0)
+    port.close()
+  })
+
+  test('rejects migration-state replacement during an evidence transaction', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const stateTableName = requested.tables['migration-state']
+    const replacement = createReplacementDescribeTableOutput(
+      'migration-state',
+      stateTableName,
+      requested,
+    )
+    transport.transactWriteSourceEvidenceEffect = () => {
+      transport.describeTableOutputs.set(stateTableName, replacement)
+    }
+
+    await expect(
+      port.commitNextSourceEvidencePage(
+        createSourceEvidenceRequest(configuration),
+      ),
+    ).rejects.toMatchObject({
+      code: 'CONFIGURATION_DRIFT',
+      message:
+        'Workspace Search source evidence stopped safely (CONFIGURATION_DRIFT).',
+    })
+    expect(transport.getSourceEvidenceCommands.length).toBeGreaterThan(0)
+    expect(transport.scanSourceCommands).toHaveLength(1)
+    expect(transport.transactWriteSourceEvidenceCommands).toHaveLength(1)
+    port.close()
+  })
+
   test('measures identity before issuing and reducing one exact source Scan', async () => {
     const requested = createRequestedResources()
     const transport = new RecordingIdentityAwsTransport()
@@ -546,6 +1002,82 @@ describe('Workspace Search migration AWS identity adapter', () => {
     expect(result.sourceRows).toHaveLength(1)
     expect(result.sourceRows[0]?.classification).toBe('ignored')
     expect(result.invalidRows).toHaveLength(0)
+    port.close()
+  })
+
+  test('commits and replays two evidence pages through one measured session', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const firstItem = createIgnoredSourceItem('evidence-page-1')
+    transport.scanSourceOutput = {
+      $metadata: {},
+      Count: 1,
+      Items: [firstItem],
+      LastEvaluatedKey:
+        createProjectDirectoryCursor('evidence-page-1'),
+      ScannedCount: 1,
+    }
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const evidenceRequest = createSourceEvidenceRequest(configuration)
+
+    const first = await port.commitNextSourceEvidencePage(evidenceRequest)
+    transport.scanSourceOutput = {
+      $metadata: {},
+      Count: 1,
+      Items: [createIgnoredSourceItem('evidence-page-2')],
+      ScannedCount: 1,
+    }
+    const second = await port.commitNextSourceEvidencePage(evidenceRequest)
+    const durable = await port.readSourceEvidenceProgress(evidenceRequest)
+    const replay =
+      await port.readCommittedSourceEvidence(evidenceRequest)
+
+    expect(first).toMatchObject({
+      pageSequence: 1,
+      checkpoint: {
+        completed: false,
+        aggregate: {
+          ignored: 1,
+          pageCount: 1,
+          scanned: 1,
+        },
+      },
+    })
+    expect(second).toMatchObject({
+      pageSequence: 2,
+      checkpoint: {
+        completed: true,
+        aggregate: {
+          ignored: 2,
+          pageCount: 2,
+          scanned: 2,
+        },
+      },
+    })
+    expect(durable).toEqual(second)
+    expect(replay.progress).toEqual(second)
+    expect(replay.sourceRows).toHaveLength(2)
+    expect(replay.invalidRows).toHaveLength(0)
+    expect(replay.sourceBindings).toHaveLength(0)
+    expect(transport.scanSourceCommands).toHaveLength(2)
+    expect(transport.scanSourceCommands[1]?.input.ExclusiveStartKey)
+      .toEqual(createProjectDirectoryCursor('evidence-page-1'))
+    expect(transport.transactWriteSourceEvidenceCommands).toHaveLength(2)
+    expect(transport.transactWriteSourceEvidenceCommands[0])
+      .toBeInstanceOf(TransactWriteItemsCommand)
+    expect(transport.transactWriteSourceEvidenceCommands[1])
+      .toBeInstanceOf(TransactWriteItemsCommand)
+    // GetItem calls: first commit 1, terminal commit 3, progress 2, replay 4.
+    expect(transport.getSourceEvidenceCommands).toHaveLength(10)
+    expect(transport.getSourceEvidenceCommands.every(
+      (command) => command instanceof GetItemCommand &&
+        command.input.ConsistentRead === true,
+    )).toBe(true)
     port.close()
   })
 
@@ -2566,6 +3098,25 @@ function createSourceScanInput(
       createWorkspaceSearchConfigurationHash(configuration),
     source,
     previousCheckpoint,
+  }
+}
+
+/**
+ * Creates one measured planning evidence-chain request.
+ *
+ * @param configuration - Successfully measured session configuration.
+ * @returns Exact managed source-evidence request.
+ */
+function createSourceEvidenceRequest(
+  configuration: WorkspaceSearchMigrationConfiguration,
+): WorkspaceSearchMigrationSourceEvidenceAwsRequest {
+  return {
+    runId: 'managed-source-evidence-run',
+    purpose: 'planning',
+    configuration,
+    configurationHash:
+      createWorkspaceSearchConfigurationHash(configuration),
+    source: 'project-directory',
   }
 }
 

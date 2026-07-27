@@ -17,7 +17,7 @@ repository に固定せず、各実行の evidence record に残します。
 | Release | PR/push workflow が Server test を含む全 source/build config の strict typecheck、static analysis、unit/integration、Web E2E、CDK test/nag/synth を実行し、main ruleset が6つの必須 check を強制する | Path-filtered local runtime と外部 reviewer は常時 required にせず、対象変更ごとの release evidence で結果または rate limit を確認すること |
 | Web journey quality | Required Playwright gate が主要 Work Item 画面の keyboard/focus、390px viewport、screen-reader-facing ARIA tree、低速 API 中の status と復帰を検証する | Chromium と mock API による回帰 proxy であり、実 screen reader、visual regression、performance budget は未実装 |
 | Runtime control / rollout | AWS AppConfig の schema 検証済み `enabled` / `disabled` document を API、WebSocket、worker の entrypoint で fail-closed に評価し、operator 用 canary strategy と configuration failure alarm を定義する。Backward-compatible CDK/Lambda update と CloudFormation rollback も利用できる | `read-only` mode、route/effect registry、Lambda alias、CodeDeploy による code canary は未実装。AppConfig の停止制御を code/schema rollout の互換性検証や writer fence の代用にしないこと |
-| Migration | Production-safe migration contract と entry/verification/rollback evidence を定義する。Workspace Search migration 専用の retained/PITR state table、Object Lock COMPLIANCE の segmented journal、transaction 限定 operator policy、物理 table/PITR/journal identity と maintenance drain evidence の strict validator、sealed plan/lease/fence/OCC/checkpoint/apply/verify/部分 apply からの reverse rollback を検証する永続 state-machine kernel を持つ。同じ measured AWS session に identity-bound な source Scan 1 page と exact digest/checkpoint reducer を持つ。live projection writer は canonical 内容に server-owned `projectionDigest` を付与する | Durable な複数 page source evidence/checkpoint commit、target/state/evidence/S3 adapter、target join、実行 CLI、writer fence、non-production 実行 evidence は未実装。kernel と既存 backfill だけを production migration gate に使用しないこと |
+| Migration | Production-safe migration contract と entry/verification/rollback evidence を定義する。Workspace Search migration 専用の retained/PITR state table、Object Lock COMPLIANCE の segmented journal、transaction 限定 operator policy、物理 table/PITR/journal identity と maintenance drain evidence の strict validator、sealed plan/lease/fence/OCC/checkpoint/apply/verify/部分 apply からの reverse rollback を検証する永続 state-machine kernel を持つ。同じ measured AWS session に identity-bound な source Scan 1 page と exact digest/checkpoint reducer を持ち、複数 page の digest-only row evidence と累積 checkpoint を同じ conditional transaction で保存して、commit 後の response loss から再開できる。live projection writer は canonical 内容に server-owned `projectionDigest` を付与する | Raw source item を lossless に保持する immutable artifact と S3 adapter、target join、実行 CLI、writer fence、pre-plan scan の lease/fresh maintenance evidence binding、non-production 実行 evidence は未実装。digest-only row evidence は planning input や rollback preimage の代用にならず、kernel と既存 backfill だけを production migration gate に使用しないこと |
 | Data durability | Stateful DynamoDB table は `Retain` + PITR、file bucket は `Retain` + versioning を使う。Work Items には read-only の manifest/compare verifier がある | Restore、writer fence、定期実行、regional replication/failover、AWS Backup plan は未実装。verifier の導入だけで drill や regional DR を完了扱いにしないこと |
 
 この表の未実装項目を、手順書が存在することだけで実装済みとして扱ってはいけません。
@@ -319,8 +319,18 @@ unfiltered/full-item/non-segmented な1 page Scan と exact digest/checkpoint re
 各 page は Scan の前後で table ID/ARN/作成時刻を再確認し、継続 cursor を返却された最終 item の
 full primary key に結合します。一時的な throttling/transport 障害は安全に再試行できる固定 code で
 停止し、table incarnation の変化や cursor の不整合は fail-closed で拒否します。
-ただし durable な複数 page evidence/checkpoint commit、target/state/evidence/S3 adapter、target join、
-実行 CLI、online writer fence と完全な source/target completeness 実行は未実装です。したがって
+複数 page の走査では、`dry-run` と `planning` を分離し、各 page の digest-only row evidence と
+累積 checkpoint を、run、configuration、source/state table identity、直前 checkpoint と evidence
+head に条件付けた同じ transaction で保存します。Transaction の commit 後に response が失われた
+場合は、永続化済みの evidence/checkpoint tuple が期待した successor と完全一致するときだけ成功を
+回収し、それ以外は直前の durable checkpoint から停止または再開して page を飛ばしません。
+Resume に必要な checkpoint cursor は raw DynamoDB key を含み、tenant identifier を含み得るため、
+digest-only なのは row evidence に限ります。Cursor は retained migration state table のみに保存し、
+ログや外部 artifact へ出力せず、同 table の read 権限も migration operator に限定します。
+ただし raw source item を lossless に保持する immutable artifact と S3 adapter、target join、実行 CLI、
+pre-plan scan の lease/fresh maintenance evidence binding、online writer fence と完全な source/target
+completeness 実行は未実装です。Digest-only evidence は process を越えた planning input、target join、
+rollback preimage を再構成しません。したがって
 production migration gate には使用せず、これらを実装して non-production で中断・再開・rollback
 evidence を取得するまでは、既存 backfill を dry-run と maintenance-window 内の再生成用途に
 限定します。
@@ -371,6 +381,13 @@ resource を skip して `continue-update-rollback` しません。
 ### Migration evidence
 
 - Migration ID/version/configuration hash、実測した account/table identity、journal の secret-free locator
+- Source page の digest-only row evidence は中断再開と完全性検査、将来の lossless source artifact は
+  planning/target join、preimage journal は reverse rollback と、purpose を分離して記録する
+- 各 source page で同じ conditional transaction に保存した digest-only row evidence、累積
+  checkpoint、直前 checkpoint identity と evidence chain head。Resume cursor は tenant identifier を
+  含み得る restricted state であり、ログや外部 evidence export へ含めない
+- Transaction response loss 後に exact successor tuple を再読して成功を回収したか、直前の durable
+  checkpoint から再開したこと。異なる successor を成功として採用しない
 - Source ごとの initial/final cursor、scanned/applied/skipped/invalid/rolled-back count
 - PITR status、restore point、backup ARN、lease owner/heartbeat/fence epoch
 - 各 operation marker/preimage journal の count と verification result
