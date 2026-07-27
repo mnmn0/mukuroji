@@ -3,12 +3,18 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  type AttributeDefinition,
   DescribeContinuousBackupsCommand,
   type DescribeContinuousBackupsCommandOutput,
   DescribeTableCommand,
   type DescribeTableCommandOutput,
   DescribeTimeToLiveCommand,
   type DescribeTimeToLiveCommandOutput,
+  type GlobalSecondaryIndexDescription,
+  type KeySchemaElement,
+  ScanCommand,
+  type ScanCommandOutput,
+  type TableDescription,
 } from '@aws-sdk/client-dynamodb'
 import {
   DescribeKeyCommand,
@@ -30,11 +36,19 @@ import {
   type GetCallerIdentityCommandOutput,
   STSClient,
 } from '@aws-sdk/client-sts'
-import { WorkspaceSearchMigrationFailure } from './migration-contract'
+import {
+  createWorkspaceSearchConfigurationHash,
+  type DynamoAttributeMap,
+  type MigrationSourceCheckpoint,
+  type WorkspaceSearchMigrationConfiguration,
+  WorkspaceSearchMigrationFailure,
+  type WorkspaceSearchMigrationSourceName,
+  type WorkspaceSearchMigrationTableRole,
+} from './migration-contract'
 import {
   createAwsWorkspaceSearchMigrationIdentityPort,
   type WorkspaceSearchMigrationIdentityAwsSdkConfigurations,
-  type WorkspaceSearchMigrationIdentityAwsTransport,
+  type WorkspaceSearchMigrationManagedAwsTransport,
 } from './migration-identity-aws'
 import {
   createWorkspaceSearchMigrationRequestedResourcesBinding,
@@ -42,6 +56,12 @@ import {
   type WorkspaceSearchMigrationRequestedResources,
   validateWorkspaceSearchMigrationRequestedResources,
 } from './migration-identity'
+import type {
+  WorkspaceSearchMigrationSourceScanReadInput,
+} from './migration-source-scan-aws'
+import {
+  createEmptyWorkspaceSearchMigrationCheckpoint,
+} from './migration-state-machine'
 
 const TEST_ACCOUNT = '123456789012'
 const TEST_REGION = 'ap-northeast-1'
@@ -75,11 +95,43 @@ type UnsupportedProfileCase = {
   readonly entry: string
 }
 
+/** Schema and safety settings used by one valid measurement fixture table. */
+type MeasurementTableSchemaFixture = {
+  /** DynamoDB scalar attribute definitions. */
+  readonly attributeDefinitions: readonly AttributeDefinition[]
+  /** Base-table key schema. */
+  readonly keySchema: readonly KeySchemaElement[]
+  /** Exact global secondary indexes. */
+  readonly globalSecondaryIndexes: readonly GlobalSecondaryIndexDescription[]
+  /** TTL attribute, or undefined when TTL is disabled. */
+  readonly ttlAttribute: string | undefined
+  /** Whether the table uses a customer-managed KMS key. */
+  readonly kmsEncrypted: boolean
+  /** Whether deletion protection is enabled. */
+  readonly deletionProtection: boolean
+}
+
+/** Deferred Scan response controlled by one managed-session lifecycle test. */
+type DeferredScanOutput = {
+  /** Promise returned by the recording transport. */
+  readonly promise: Promise<ScanCommandOutput>
+  /**
+   * Resolves the pending Scan.
+   *
+   * @param output - Raw response supplied to the managed session.
+   */
+  readonly resolve: (output: ScanCommandOutput) => void
+}
+
 /** Allowlisted command recorder used without AWS credentials or network access. */
 class RecordingIdentityAwsTransport
-  implements WorkspaceSearchMigrationIdentityAwsTransport {
+  implements WorkspaceSearchMigrationManagedAwsTransport {
   /** Recorded DynamoDB recovery-state commands. */
   readonly continuousBackupsCommands: DescribeContinuousBackupsCommand[] = []
+
+  /** Opt-in DynamoDB recovery-state outputs keyed by physical table name. */
+  readonly continuousBackupsOutputs =
+    new Map<string, DescribeContinuousBackupsCommandOutput>()
 
   /** Recorded KMS key metadata commands. */
   readonly describeKeyCommands: DescribeKeyCommand[] = []
@@ -87,8 +139,18 @@ class RecordingIdentityAwsTransport
   /** Recorded DynamoDB table metadata commands. */
   readonly describeTableCommands: DescribeTableCommand[] = []
 
+  /** Opt-in DynamoDB table outputs keyed by physical table name. */
+  readonly describeTableOutputs = new Map<string, DescribeTableCommandOutput>()
+
   /** Recorded DynamoDB TTL commands. */
   readonly describeTimeToLiveCommands: DescribeTimeToLiveCommand[] = []
+
+  /** Opt-in DynamoDB TTL outputs keyed by physical table name. */
+  readonly describeTimeToLiveOutputs =
+    new Map<string, DescribeTimeToLiveCommandOutput>()
+
+  /** Recorded DynamoDB source Scan commands. */
+  readonly scanSourceCommands: ScanCommand[] = []
 
   /** Recorded S3 bucket-encryption commands. */
   readonly getBucketEncryptionCommands: GetBucketEncryptionCommand[] = []
@@ -139,6 +201,32 @@ class RecordingIdentityAwsTransport
   /** Optional Object Lock failure returned without adapter wrapping. */
   objectLockFailure?: Error
 
+  /** S3 bucket-encryption response returned by the recording transport. */
+  bucketEncryptionOutput: GetBucketEncryptionOutput = {}
+
+  /** S3 server-access-logging response returned by the recording transport. */
+  bucketLoggingOutput: GetBucketLoggingOutput = {}
+
+  /** S3 bucket-versioning response returned by the recording transport. */
+  bucketVersioningOutput: GetBucketVersioningOutput = {}
+
+  /** S3 Object Lock response returned by the recording transport. */
+  objectLockOutput: GetObjectLockConfigurationOutput = {}
+
+  /** Source Scan response returned by the recording transport. */
+  scanSourceOutput: ScanCommandOutput = {
+    $metadata: {},
+    Count: 0,
+    Items: [],
+    ScannedCount: 0,
+  }
+
+  /** Optional raw failure raised by the source Scan transport. */
+  scanSourceFailure: unknown
+
+  /** Optional pending Scan response used by lifecycle race tests. */
+  scanSourceDeferred: Promise<ScanCommandOutput> | undefined
+
   /**
    * Records transport closure.
    */
@@ -150,13 +238,14 @@ class RecordingIdentityAwsTransport
    * Records one DynamoDB recovery-state command.
    *
    * @param command - Exact command under test.
-   * @returns Empty fake response.
+   * @returns Configured fake response or the legacy empty fallback.
    */
   async describeContinuousBackups(
     command: DescribeContinuousBackupsCommand,
   ): Promise<DescribeContinuousBackupsCommandOutput> {
     this.continuousBackupsCommands.push(command)
-    return { $metadata: {} }
+    return this.continuousBackupsOutputs.get(command.input.TableName ?? '') ??
+      { $metadata: {} }
   }
 
   /**
@@ -174,65 +263,84 @@ class RecordingIdentityAwsTransport
    * Records one DynamoDB table metadata command.
    *
    * @param command - Exact command under test.
-   * @returns Empty fake response.
+   * @returns Configured fake response or the legacy empty fallback.
    */
   async describeTable(
     command: DescribeTableCommand,
   ): Promise<DescribeTableCommandOutput> {
     this.describeTableCommands.push(command)
-    return { $metadata: {} }
+    return this.describeTableOutputs.get(command.input.TableName ?? '') ??
+      { $metadata: {} }
   }
 
   /**
    * Records one DynamoDB TTL command.
    *
    * @param command - Exact command under test.
-   * @returns Empty fake response.
+   * @returns Configured fake response or the legacy empty fallback.
    */
   async describeTimeToLive(
     command: DescribeTimeToLiveCommand,
   ): Promise<DescribeTimeToLiveCommandOutput> {
     this.describeTimeToLiveCommands.push(command)
-    return { $metadata: {} }
+    return this.describeTimeToLiveOutputs.get(command.input.TableName ?? '') ??
+      { $metadata: {} }
+  }
+
+  /**
+   * Records one source Scan command.
+   *
+   * @param command - Exact command under test.
+   * @returns Configured fake response.
+   */
+  async scanSource(command: ScanCommand): Promise<ScanCommandOutput> {
+    this.scanSourceCommands.push(command)
+    if (this.scanSourceFailure !== undefined) {
+      throw this.scanSourceFailure
+    }
+    if (this.scanSourceDeferred !== undefined) {
+      return await this.scanSourceDeferred
+    }
+    return this.scanSourceOutput
   }
 
   /**
    * Records one S3 encryption command.
    *
    * @param command - Exact command under test.
-   * @returns Empty fake response.
+   * @returns Configured fake response.
    */
   async getBucketEncryption(
     command: GetBucketEncryptionCommand,
   ): Promise<GetBucketEncryptionOutput> {
     this.getBucketEncryptionCommands.push(command)
-    return {}
+    return this.bucketEncryptionOutput
   }
 
   /**
    * Records one S3 logging command.
    *
    * @param command - Exact command under test.
-   * @returns Empty fake response.
+   * @returns Configured fake response.
    */
   async getBucketLogging(
     command: GetBucketLoggingCommand,
   ): Promise<GetBucketLoggingOutput> {
     this.getBucketLoggingCommands.push(command)
-    return {}
+    return this.bucketLoggingOutput
   }
 
   /**
    * Records one S3 versioning command.
    *
    * @param command - Exact command under test.
-   * @returns Empty fake response.
+   * @returns Configured fake response.
    */
   async getBucketVersioning(
     command: GetBucketVersioningCommand,
   ): Promise<GetBucketVersioningOutput> {
     this.getBucketVersioningCommands.push(command)
-    return {}
+    return this.bucketVersioningOutput
   }
 
   /**
@@ -252,7 +360,7 @@ class RecordingIdentityAwsTransport
    * Records one S3 Object Lock command or raises the configured failure.
    *
    * @param command - Exact command under test.
-   * @returns Empty fake response.
+   * @returns Configured fake response.
    */
   async getObjectLockConfiguration(
     command: GetObjectLockConfigurationCommand,
@@ -261,7 +369,7 @@ class RecordingIdentityAwsTransport
     if (this.objectLockFailure) {
       throw this.objectLockFailure
     }
-    return {}
+    return this.objectLockOutput
   }
 }
 
@@ -355,6 +463,456 @@ describe('Workspace Search migration AWS identity adapter', () => {
       GetBucketLoggingCommand,
     )
     expect(configurations?.s3.followRegionRedirects).toBe(false)
+    expect(transport.closeCount).toBe(1)
+  })
+
+  test('requires measured Scan authority and closes the managed session once', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const scanSourcePage: unknown = Reflect.get(port, 'scanSourcePage')
+    if (typeof scanSourcePage !== 'function') {
+      throw new Error('Expected managed source Scan method.')
+    }
+    const unmeasuredRead: unknown = Reflect.apply(scanSourcePage, port, [{}])
+    if (!(unmeasuredRead instanceof Promise)) {
+      throw new Error('Expected asynchronous source Scan result.')
+    }
+
+    await expect(unmeasuredRead).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search source Scan read stopped safely (INVALID_STATE).',
+    })
+    expect(transport.scanSourceCommands).toHaveLength(0)
+
+    port.close()
+    port.close()
+    await expect(
+      port.describeTable(requested.tables['project-directory']),
+    ).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message: 'Workspace Search migration AWS session is no longer active.',
+    })
+    expect(transport.describeTableCommands).toHaveLength(0)
+    expect(transport.closeCount).toBe(1)
+  })
+
+  test('measures identity before issuing and reducing one exact source Scan', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    transport.scanSourceOutput = {
+      $metadata: { requestId: 'not-migration-evidence' },
+      Count: 1,
+      Items: [createIgnoredSourceItem('measured')],
+      ScannedCount: 1,
+    }
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+
+    const configuration = await port.measureConfiguration()
+    const result = await port.scanSourcePage(
+      createSourceScanInput(configuration),
+    )
+
+    expect(transport.describeTableCommands).toHaveLength(6)
+    expect(transport.scanSourceCommands).toHaveLength(1)
+    expect(transport.scanSourceCommands[0]).toBeInstanceOf(ScanCommand)
+    expect(transport.scanSourceCommands[0]?.input).toEqual({
+      TableName: requested.tables['project-directory'],
+      ConsistentRead: true,
+      Limit: 100,
+    })
+    expect(result.checkpoint).toMatchObject({
+      completed: true,
+      aggregate: {
+        ignored: 1,
+        mapped: 0,
+        pageCount: 1,
+        scanned: 1,
+      },
+    })
+    expect(result.sourceRows).toHaveLength(1)
+    expect(result.sourceRows[0]?.classification).toBe('ignored')
+    expect(result.invalidRows).toHaveLength(0)
+    port.close()
+  })
+
+  test('rejects another valid configuration hash before source I/O', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const measured = await port.measureConfiguration()
+    const differentConfiguration = structuredClone(measured)
+    differentConfiguration.callerRoleId = 'AROA0987654321ZYXWVUT'
+    expect(
+      createWorkspaceSearchConfigurationHash(differentConfiguration),
+    ).not.toBe(createWorkspaceSearchConfigurationHash(measured))
+
+    await expect(
+      port.scanSourcePage(
+        createSourceScanInput(differentConfiguration),
+      ),
+    ).rejects.toMatchObject({
+      code: 'CONFIGURATION_HASH_MISMATCH',
+      message:
+        'Workspace Search source Scan read stopped safely (CONFIGURATION_HASH_MISMATCH).',
+    })
+    expect(transport.scanSourceCommands).toHaveLength(0)
+    port.close()
+  })
+
+  test('redacts raw and hostile source Scan transport failures', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const canary = 'RAW-SCAN-CANARY-DO-NOT-LEAK'
+    transport.scanSourceFailure = new WorkspaceSearchMigrationFailure(
+      'IDENTITY_MISMATCH',
+      canary,
+    )
+
+    let rawFailure: unknown
+    try {
+      await port.scanSourcePage(createSourceScanInput(configuration))
+    } catch (error: unknown) {
+      rawFailure = error
+    }
+    expect(rawFailure).toBeInstanceOf(WorkspaceSearchMigrationFailure)
+    if (!(rawFailure instanceof WorkspaceSearchMigrationFailure)) {
+      throw new Error('Expected a Workspace Search migration failure.')
+    }
+    expect(rawFailure).toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search source Scan read stopped safely (INVALID_STATE).',
+    })
+    expect(rawFailure.message).not.toContain(canary)
+
+    transport.scanSourceFailure = new Proxy({}, {
+      getPrototypeOf() {
+        throw new Error(canary)
+      },
+    })
+    await expect(
+      port.scanSourcePage(createSourceScanInput(configuration)),
+    ).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search source Scan read stopped safely (INVALID_STATE).',
+    })
+    expect(transport.scanSourceCommands).toHaveLength(2)
+    port.close()
+  })
+
+  test('selects only the four measured source tables with fixed commands', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const sources: readonly WorkspaceSearchMigrationSourceName[] = [
+      'project-directory',
+      'work-items',
+      'collaboration',
+      'documents',
+    ]
+
+    for (const source of sources) {
+      await port.scanSourcePage(
+        createSourceScanInput(configuration, source),
+      )
+    }
+
+    expect(transport.scanSourceCommands).toHaveLength(4)
+    expect(
+      transport.scanSourceCommands.map((command) => command.input),
+    ).toEqual(
+      sources.map((source) => ({
+        TableName: requested.tables[source],
+        ConsistentRead: true,
+        Limit: 100,
+      })),
+    )
+    expect(
+      transport.scanSourceCommands.some(
+        (command) =>
+          command.input.TableName === requested.tables['workspace-search'] ||
+          command.input.TableName === requested.tables['migration-state'],
+      ),
+    ).toBe(false)
+    port.close()
+  })
+
+  test('binds a pending Scan and reduction to one detached predecessor', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const firstCursor = createProjectDirectoryCursor('first')
+    transport.scanSourceOutput = {
+      $metadata: {},
+      Count: 1,
+      Items: [createIgnoredSourceItem('first')],
+      LastEvaluatedKey: firstCursor,
+      ScannedCount: 1,
+    }
+    const first = await port.scanSourcePage(
+      createSourceScanInput(configuration),
+    )
+
+    transport.scanSourceOutput = {
+      $metadata: {},
+      Count: 2,
+      Items: [
+        createIgnoredSourceItem('replacement-1'),
+        createIgnoredSourceItem('replacement-2'),
+      ],
+      LastEvaluatedKey: createProjectDirectoryCursor('replacement'),
+      ScannedCount: 2,
+    }
+    const replacement = await port.scanSourcePage(
+      createSourceScanInput(configuration),
+    )
+    const pendingInput = createSourceScanInput(
+      configuration,
+      'project-directory',
+      first.checkpoint,
+    )
+    const deferred = createDeferredScanOutput()
+    transport.scanSourceDeferred = deferred.promise
+
+    const pending = port.scanSourcePage(pendingInput)
+    expect(transport.scanSourceCommands).toHaveLength(3)
+    Reflect.set(
+      pendingInput,
+      'previousCheckpoint',
+      replacement.checkpoint,
+    )
+    deferred.resolve(createEmptyScanOutput())
+    const result = await pending
+
+    expect(transport.scanSourceCommands[2]?.input).toEqual({
+      TableName: requested.tables['project-directory'],
+      ConsistentRead: true,
+      ExclusiveStartKey: firstCursor,
+      Limit: 100,
+    })
+    expect(result.checkpoint).toMatchObject({
+      completed: true,
+      aggregate: {
+        ignored: 1,
+        mapped: 0,
+        pageCount: 2,
+        scanned: 1,
+      },
+    })
+    expect(result.checkpoint.keyDigestState)
+      .toEqual(first.checkpoint.keyDigestState)
+    expect(result.checkpoint.contentDigestState)
+      .toEqual(first.checkpoint.contentDigestState)
+    expect(replacement.checkpoint.aggregate).toMatchObject({
+      ignored: 2,
+      pageCount: 1,
+      scanned: 2,
+    })
+    port.close()
+  })
+
+  test('keeps the reducer predecessor isolated from command mutation', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const repeatedCursor = createProjectDirectoryCursor('repeated')
+    transport.scanSourceOutput = {
+      $metadata: {},
+      Count: 1,
+      Items: [createIgnoredSourceItem('first')],
+      LastEvaluatedKey: repeatedCursor,
+      ScannedCount: 1,
+    }
+    const first = await port.scanSourcePage(
+      createSourceScanInput(configuration),
+    )
+    const deferred = createDeferredScanOutput()
+    transport.scanSourceDeferred = deferred.promise
+
+    const pending = port.scanSourcePage(
+      createSourceScanInput(
+        configuration,
+        'project-directory',
+        first.checkpoint,
+      ),
+    )
+    const commandCursor =
+      transport.scanSourceCommands[1]?.input.ExclusiveStartKey
+    if (commandCursor === undefined) {
+      throw new Error('Expected a detached command cursor.')
+    }
+    commandCursor.directoryId = { S: 'workspace-command-mutated' }
+    deferred.resolve({
+      $metadata: {},
+      Count: 0,
+      Items: [],
+      LastEvaluatedKey: repeatedCursor,
+      ScannedCount: 0,
+    })
+
+    await expect(pending).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search source scan page stopped safely (INVALID_STATE).',
+    })
+    expect(first.checkpoint.cursor).toEqual(repeatedCursor)
+    port.close()
+  })
+
+  test('always returns rejected Promises for source Scans after close', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const input = createSourceScanInput(configuration)
+    port.close()
+    port.close()
+
+    const firstRead = port.scanSourcePage(input)
+    expect(firstRead).toBeInstanceOf(Promise)
+    await expect(firstRead).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search source Scan read stopped safely (INVALID_STATE).',
+    })
+
+    const secondRead = port.scanSourcePage(input)
+    expect(secondRead).toBeInstanceOf(Promise)
+    await expect(secondRead).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search source Scan read stopped safely (INVALID_STATE).',
+    })
+    expect(transport.scanSourceCommands).toHaveLength(0)
+    expect(transport.closeCount).toBe(1)
+  })
+
+  test('invalidates a pending source Scan when the managed session closes', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const deferred = createDeferredScanOutput()
+    transport.scanSourceDeferred = deferred.promise
+
+    const pendingRead = port.scanSourcePage(
+      createSourceScanInput(configuration),
+    )
+    expect(transport.scanSourceCommands).toHaveLength(1)
+    port.close()
+    deferred.resolve(createEmptyScanOutput())
+
+    await expect(pendingRead).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search source Scan read stopped safely (INVALID_STATE).',
+    })
+    expect(transport.closeCount).toBe(1)
+  })
+
+  test('invalidates a pending source Scan after replacement measurement', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const configurationHash =
+      createWorkspaceSearchConfigurationHash(configuration)
+    const deferred = createDeferredScanOutput()
+    transport.scanSourceDeferred = deferred.promise
+
+    const pendingRead = port.scanSourcePage(
+      createSourceScanInput(configuration),
+    )
+    expect(transport.scanSourceCommands).toHaveLength(1)
+    const replacement = await port.measureConfiguration()
+    expect(createWorkspaceSearchConfigurationHash(replacement))
+      .toBe(configurationHash)
+    transport.scanSourceDeferred = undefined
+    deferred.resolve(createEmptyScanOutput())
+
+    await expect(pendingRead).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search source Scan read stopped safely (INVALID_STATE).',
+    })
+    expect(transport.scanSourceCommands).toHaveLength(1)
+    port.close()
+  })
+
+  test('rechecks generation after the asynchronous Scan boundary', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const output = createEmptyScanOutput()
+    Object.defineProperty(output, 'LastEvaluatedKey', {
+      configurable: true,
+      enumerable: true,
+      get() {
+        queueMicrotask(() => port.close())
+        return undefined
+      },
+    })
+    transport.scanSourceOutput = output
+
+    await expect(
+      port.scanSourcePage(createSourceScanInput(configuration)),
+    ).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search source Scan read stopped safely (INVALID_STATE).',
+    })
     expect(transport.closeCount).toBe(1)
   })
 
@@ -1417,6 +1975,477 @@ describe('Workspace Search migration AWS identity adapter', () => {
     port.close()
   })
 })
+
+/**
+ * Opts one recording transport into a complete valid identity measurement.
+ *
+ * Empty responses remain the transport default so existing negative tests keep
+ * exercising the same fail-closed behavior.
+ *
+ * @param transport - Recording transport to seed.
+ * @param requested - Exact resources whose identity will be measured.
+ */
+function seedValidMeasurementOutputs(
+  transport: RecordingIdentityAwsTransport,
+  requested: WorkspaceSearchMigrationRequestedResources,
+): void {
+  const tableRoles: readonly WorkspaceSearchMigrationTableRole[] = [
+    'project-directory',
+    'work-items',
+    'collaboration',
+    'documents',
+    'workspace-search',
+    'migration-state',
+  ]
+  for (const role of tableRoles) {
+    const tableName = requested.tables[role]
+    transport.describeTableOutputs.set(
+      tableName,
+      createValidDescribeTableOutput(role, tableName, requested),
+    )
+    transport.continuousBackupsOutputs.set(
+      tableName,
+      createValidContinuousBackupsOutput(),
+    )
+    transport.describeTimeToLiveOutputs.set(
+      tableName,
+      createValidTimeToLiveOutput(role),
+    )
+  }
+  transport.callerIdentityOutput = {
+    $metadata: {},
+    Account: requested.account,
+    Arn:
+      `arn:aws:sts::${requested.account}:assumed-role/MigrationOperator/${TEST_SESSION_NAME}`,
+    UserId: `${TEST_ROLE_ID}:${TEST_SESSION_NAME}`,
+  }
+  transport.keyOutput = {
+    $metadata: {},
+    KeyMetadata: {
+      Arn: requested.journalKeyArn,
+      AWSAccountId: requested.account,
+      CreationDate: new Date('2026-07-01T00:00:00.000Z'),
+      Enabled: true,
+      KeyId: TEST_KEY_ID,
+      KeyManager: 'CUSTOMER',
+      KeySpec: 'SYMMETRIC_DEFAULT',
+      KeyState: 'Enabled',
+      KeyUsage: 'ENCRYPT_DECRYPT',
+      MultiRegion: false,
+      Origin: 'AWS_KMS',
+    },
+  }
+  transport.bucketVersioningOutput = {
+    Status: 'Enabled',
+  }
+  transport.objectLockOutput = {
+    ObjectLockConfiguration: {
+      ObjectLockEnabled: 'Enabled',
+      Rule: {
+        DefaultRetention: {
+          Mode: 'COMPLIANCE',
+          Days: 30,
+        },
+      },
+    },
+  }
+  transport.bucketEncryptionOutput = {
+    ServerSideEncryptionConfiguration: {
+      Rules: [
+        {
+          ApplyServerSideEncryptionByDefault: {
+            SSEAlgorithm: 'aws:kms',
+            KMSMasterKeyID: requested.journalKeyArn,
+          },
+          BucketKeyEnabled: true,
+        },
+      ],
+    },
+  }
+  transport.bucketLoggingOutput = {
+    LoggingEnabled: {
+      TargetBucket: `${requested.journalBucket}-access-logs`,
+      TargetPrefix: 'workspace-search-migration/',
+    },
+  }
+}
+
+/**
+ * Creates one complete active table response for identity measurement.
+ *
+ * @param role - Logical migration table role.
+ * @param tableName - Exact physical table name.
+ * @param requested - Account, region, and KMS identity constraints.
+ * @returns Valid DynamoDB table response.
+ */
+function createValidDescribeTableOutput(
+  role: WorkspaceSearchMigrationTableRole,
+  tableName: string,
+  requested: WorkspaceSearchMigrationRequestedResources,
+): DescribeTableCommandOutput {
+  const schema = readMeasurementTableSchema(role)
+  const table: TableDescription = {
+    AttributeDefinitions: [...schema.attributeDefinitions],
+    TableName: tableName,
+    KeySchema: [...schema.keySchema],
+    TableStatus: 'ACTIVE',
+    CreationDateTime: new Date('2026-07-01T00:00:00.000Z'),
+    BillingModeSummary: { BillingMode: 'PAY_PER_REQUEST' },
+    TableArn:
+      `arn:${readPartition(requested.region)}:dynamodb:${requested.region}:${requested.account}:table/${tableName}`,
+    TableId: `table-id-${role}-v1`,
+    GlobalSecondaryIndexes: [...schema.globalSecondaryIndexes],
+    DeletionProtectionEnabled: schema.deletionProtection,
+  }
+  if (schema.kmsEncrypted) {
+    table.SSEDescription = {
+      Status: 'ENABLED',
+      SSEType: 'KMS',
+      KMSMasterKeyArn: requested.journalKeyArn,
+    }
+  }
+  return {
+    $metadata: {},
+    Table: table,
+  }
+}
+
+/**
+ * Returns the exact schema and safety fixture for one measured table role.
+ *
+ * @param role - Logical migration table role.
+ * @returns Valid role-specific descriptor.
+ */
+function readMeasurementTableSchema(
+  role: WorkspaceSearchMigrationTableRole,
+): MeasurementTableSchemaFixture {
+  if (role === 'project-directory') {
+    return {
+      attributeDefinitions: [
+        stringAttribute('directoryId'),
+        stringAttribute('entryKey'),
+        stringAttribute('webhookAuthorizationKey'),
+        stringAttribute('webhookAuthorizationSortKey'),
+      ],
+      keySchema: [
+        hashKey('directoryId'),
+        rangeKey('entryKey'),
+      ],
+      globalSecondaryIndexes: [
+        {
+          IndexName: 'WebhookAuthorizationIndex',
+          KeySchema: [
+            hashKey('webhookAuthorizationKey'),
+            rangeKey('webhookAuthorizationSortKey'),
+          ],
+          Projection: { ProjectionType: 'KEYS_ONLY' },
+          IndexStatus: 'ACTIVE',
+        },
+      ],
+      ttlAttribute: undefined,
+      kmsEncrypted: false,
+      deletionProtection: false,
+    }
+  }
+  if (role === 'work-items') {
+    return {
+      attributeDefinitions: [
+        stringAttribute('directoryTeamId'),
+        stringAttribute('issueId'),
+        stringAttribute('directoryProjectId'),
+        numberAttribute('sortOrder'),
+        stringAttribute('updatedAt'),
+      ],
+      keySchema: [
+        hashKey('directoryTeamId'),
+        rangeKey('issueId'),
+      ],
+      globalSecondaryIndexes: [
+        {
+          IndexName: 'AssignedProjectIssueIndex',
+          KeySchema: [
+            hashKey('directoryProjectId'),
+            rangeKey('sortOrder'),
+          ],
+          Projection: { ProjectionType: 'ALL' },
+          IndexStatus: 'ACTIVE',
+        },
+        {
+          IndexName: 'TeamIssueSortOrderIndex',
+          KeySchema: [
+            hashKey('directoryTeamId'),
+            rangeKey('sortOrder'),
+          ],
+          Projection: { ProjectionType: 'ALL' },
+          IndexStatus: 'ACTIVE',
+        },
+        {
+          IndexName: 'TeamIssueUpdatedAtIndex',
+          KeySchema: [
+            hashKey('directoryTeamId'),
+            rangeKey('updatedAt'),
+          ],
+          Projection: { ProjectionType: 'ALL' },
+          IndexStatus: 'ACTIVE',
+        },
+      ],
+      ttlAttribute: undefined,
+      kmsEncrypted: false,
+      deletionProtection: false,
+    }
+  }
+  if (role === 'collaboration') {
+    return {
+      attributeDefinitions: [
+        stringAttribute('entityKey'),
+        stringAttribute('recordKey'),
+      ],
+      keySchema: [
+        hashKey('entityKey'),
+        rangeKey('recordKey'),
+      ],
+      globalSecondaryIndexes: [],
+      ttlAttribute: 'expiresAt',
+      kmsEncrypted: false,
+      deletionProtection: false,
+    }
+  }
+  if (role === 'documents') {
+    return {
+      attributeDefinitions: [
+        stringAttribute('workspaceId'),
+        stringAttribute('recordKey'),
+      ],
+      keySchema: [
+        hashKey('workspaceId'),
+        rangeKey('recordKey'),
+      ],
+      globalSecondaryIndexes: [],
+      ttlAttribute: 'expiresAtEpoch',
+      kmsEncrypted: true,
+      deletionProtection: false,
+    }
+  }
+  if (role === 'workspace-search') {
+    return {
+      attributeDefinitions: [
+        stringAttribute('workspaceId'),
+        stringAttribute('recordKey'),
+      ],
+      keySchema: [
+        hashKey('workspaceId'),
+        rangeKey('recordKey'),
+      ],
+      globalSecondaryIndexes: [],
+      ttlAttribute: undefined,
+      kmsEncrypted: false,
+      deletionProtection: false,
+    }
+  }
+  return {
+    attributeDefinitions: [
+      stringAttribute('migrationId'),
+      stringAttribute('recordKey'),
+    ],
+    keySchema: [
+      hashKey('migrationId'),
+      rangeKey('recordKey'),
+    ],
+    globalSecondaryIndexes: [],
+    ttlAttribute: undefined,
+    kmsEncrypted: true,
+    deletionProtection: true,
+  }
+}
+
+/**
+ * Creates enabled PITR evidence with an ordered restore window.
+ *
+ * @returns Valid DynamoDB continuous-backup response.
+ */
+function createValidContinuousBackupsOutput():
+  DescribeContinuousBackupsCommandOutput {
+  return {
+    $metadata: {},
+    ContinuousBackupsDescription: {
+      ContinuousBackupsStatus: 'ENABLED',
+      PointInTimeRecoveryDescription: {
+        PointInTimeRecoveryStatus: 'ENABLED',
+        EarliestRestorableDateTime:
+          new Date('2026-07-01T00:01:00.000Z'),
+        LatestRestorableDateTime:
+          new Date('2026-07-24T23:59:00.000Z'),
+      },
+    },
+  }
+}
+
+/**
+ * Creates exact role-specific TTL evidence.
+ *
+ * @param role - Logical migration table role.
+ * @returns Valid DynamoDB TTL response.
+ */
+function createValidTimeToLiveOutput(
+  role: WorkspaceSearchMigrationTableRole,
+): DescribeTimeToLiveCommandOutput {
+  const ttlAttribute = readMeasurementTableSchema(role).ttlAttribute
+  if (ttlAttribute !== undefined) {
+    return {
+      $metadata: {},
+      TimeToLiveDescription: {
+        TimeToLiveStatus: 'ENABLED',
+        AttributeName: ttlAttribute,
+      },
+    }
+  }
+  return {
+    $metadata: {},
+    TimeToLiveDescription: {
+      TimeToLiveStatus: 'DISABLED',
+    },
+  }
+}
+
+/**
+ * Creates one complete managed source Scan input.
+ *
+ * @param configuration - Successfully measured session configuration.
+ * @param source - Selected allowlisted logical source.
+ * @param previousCheckpoint - Durable predecessor to resume from.
+ * @returns Complete measured source read.
+ */
+function createSourceScanInput(
+  configuration: WorkspaceSearchMigrationConfiguration,
+  source: WorkspaceSearchMigrationSourceName = 'project-directory',
+  previousCheckpoint: MigrationSourceCheckpoint =
+    createEmptyWorkspaceSearchMigrationCheckpoint(),
+): WorkspaceSearchMigrationSourceScanReadInput {
+  return {
+    configuration,
+    configurationHash:
+      createWorkspaceSearchConfigurationHash(configuration),
+    source,
+    previousCheckpoint,
+  }
+}
+
+/**
+ * Creates one recognized non-target Project Directory source item.
+ *
+ * @param identifier - Unique physical key suffix.
+ * @returns Exact low-level ignored source item.
+ */
+function createIgnoredSourceItem(identifier: string): DynamoAttributeMap {
+  return {
+    directoryId: { S: 'workspace-1' },
+    entryKey: { S: `WORKSPACE_MEMBER#${identifier}` },
+    entryType: { S: 'workspace-member' },
+    payload: { S: 'fixture' },
+  }
+}
+
+/**
+ * Creates one exact Project Directory continuation key.
+ *
+ * @param identifier - Unique cursor suffix.
+ * @returns Exact low-level composite table key.
+ */
+function createProjectDirectoryCursor(
+  identifier: string,
+): DynamoAttributeMap {
+  return {
+    directoryId: { S: `workspace-${identifier}` },
+    entryKey: { S: `WORKSPACE_MEMBER#${identifier}` },
+  }
+}
+
+/**
+ * Creates a valid empty low-level source Scan response.
+ *
+ * @returns Empty terminal DynamoDB Scan output.
+ */
+function createEmptyScanOutput(): ScanCommandOutput {
+  return {
+    $metadata: {},
+    Count: 0,
+    Items: [],
+    ScannedCount: 0,
+  }
+}
+
+/**
+ * Creates one manually controlled Scan response.
+ *
+ * @returns Promise and resolver pair.
+ */
+function createDeferredScanOutput(): DeferredScanOutput {
+  let resolvePromise: ((output: ScanCommandOutput) => void) | undefined
+  const promise = new Promise<ScanCommandOutput>((resolve) => {
+    resolvePromise = resolve
+  })
+  return {
+    promise,
+    resolve(output: ScanCommandOutput): void {
+      if (resolvePromise === undefined) {
+        throw new Error('Expected deferred Scan resolver.')
+      }
+      resolvePromise(output)
+    },
+  }
+}
+
+/**
+ * Creates one string attribute definition.
+ *
+ * @param name - Physical attribute name.
+ * @returns DynamoDB string attribute definition.
+ */
+function stringAttribute(name: string): AttributeDefinition {
+  return {
+    AttributeName: name,
+    AttributeType: 'S',
+  }
+}
+
+/**
+ * Creates one number attribute definition.
+ *
+ * @param name - Physical attribute name.
+ * @returns DynamoDB number attribute definition.
+ */
+function numberAttribute(name: string): AttributeDefinition {
+  return {
+    AttributeName: name,
+    AttributeType: 'N',
+  }
+}
+
+/**
+ * Creates one partition-key schema element.
+ *
+ * @param name - Physical attribute name.
+ * @returns DynamoDB partition-key descriptor.
+ */
+function hashKey(name: string): KeySchemaElement {
+  return {
+    AttributeName: name,
+    KeyType: 'HASH',
+  }
+}
+
+/**
+ * Creates one sort-key schema element.
+ *
+ * @param name - Physical attribute name.
+ * @returns DynamoDB sort-key descriptor.
+ */
+function rangeKey(name: string): KeySchemaElement {
+  return {
+    AttributeName: name,
+    KeyType: 'RANGE',
+  }
+}
 
 /**
  * Creates one valid explicit migration resource selection.

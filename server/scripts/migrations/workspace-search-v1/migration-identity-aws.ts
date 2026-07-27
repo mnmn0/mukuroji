@@ -6,6 +6,8 @@ import {
   DescribeTimeToLiveCommand,
   type DescribeTimeToLiveCommandOutput,
   DynamoDBClient,
+  ScanCommand,
+  type ScanCommandOutput,
 } from '@aws-sdk/client-dynamodb'
 import {
   DescribeKeyCommand,
@@ -32,8 +34,12 @@ import {
   STSClient,
 } from '@aws-sdk/client-sts'
 import {
+  createWorkspaceSearchConfigurationHash,
+  type DynamoAttributeMap,
+  type WorkspaceSearchMigrationFailureCode,
   type WorkspaceSearchMigrationConfiguration,
-  type WorkspaceSearchMigrationFailure,
+  WorkspaceSearchMigrationFailure,
+  WORKSPACE_SEARCH_MIGRATION_PAGE_SIZE,
 } from './migration-contract'
 import {
   type WorkspaceSearchMigrationIdentityPort,
@@ -51,6 +57,20 @@ import {
   type WorkspaceSearchMigrationSharedProfiles,
   loadWorkspaceSearchMigrationSharedProfiles,
 } from './migration-shared-profile-loader'
+import {
+  normalizeWorkspaceSearchMigrationSourceScanOutput,
+  type WorkspaceSearchMigrationSourceScanAwsTransport,
+  type WorkspaceSearchMigrationSourceScanReadInput,
+} from './migration-source-scan-aws'
+import {
+  reduceWorkspaceSearchMigrationSourceScanPage,
+  type ReduceWorkspaceSearchMigrationSourceScanPageInput,
+  type WorkspaceSearchMigrationSourceScanPageResult,
+} from './migration-source-scan-page'
+import {
+  cloneWorkspaceSearchMigrationExactTableKey,
+  prepareWorkspaceSearchMigrationSourceScanContext,
+} from './migration-source-scan-context'
 
 /** AWS services used by the migration identity entry gate. */
 type WorkspaceSearchMigrationIdentityAwsService =
@@ -137,6 +157,47 @@ const PROFILE_CREDENTIAL_REFRESH_WINDOW_MILLISECONDS = 5 * 60 * 1_000
 /** Maximum explicit source-profile depth accepted by the migration. */
 const MAXIMUM_PROFILE_ROLE_CHAIN_DEPTH = 8
 
+/**
+ * Failure codes deliberately emitted by the private managed source Scan path.
+ */
+type SourceScanAwsFailureCode =
+  | 'CONFIGURATION_HASH_MISMATCH'
+  | 'IDENTITY_MISMATCH'
+  | 'INVALID_ARGUMENT'
+  | 'INVALID_STATE'
+  | 'TABLE_SCHEMA_MISMATCH'
+
+/**
+ * Privately branded source Scan failure that response data cannot forge.
+ */
+class SourceScanAwsFailure extends Error {
+  /** Stable operator-safe code selected inside the managed session. */
+  readonly code: SourceScanAwsFailureCode
+
+  /**
+   * Creates one private fixed-code source Scan failure.
+   *
+   * @param code - Stable code selected by trusted session logic.
+   */
+  constructor(code: SourceScanAwsFailureCode) {
+    super(code)
+    this.name = 'SourceScanAwsFailure'
+    this.code = code
+  }
+}
+
+/**
+ * Detached reduction state paired with the authority that produced its page.
+ */
+type PreparedManagedSourceScanReduction = {
+  /** Measurement hash captured before the Scan. */
+  readonly configurationHash: string
+  /** Managed-session generation captured before the Scan. */
+  readonly generation: number
+  /** Exact predecessor and page that must be reduced together. */
+  readonly reductionInput: ReduceWorkspaceSearchMigrationSourceScanPageInput
+}
+
 /** Explicit AWS SDK client configuration retained for construction tests. */
 export type WorkspaceSearchMigrationIdentityAwsSdkClientConfiguration = {
   /** Credentials resolved only from the explicitly selected shared profile. */
@@ -184,7 +245,23 @@ export interface WorkspaceSearchMigrationManagedIdentityPort
   measureConfiguration(): Promise<WorkspaceSearchMigrationConfiguration>
 }
 
-/** Narrow transport containing only the identity entry gate's AWS reads. */
+/**
+ * Composite managed AWS session for identity and source data-plane reads.
+ */
+export interface WorkspaceSearchMigrationManagedAwsSession
+  extends WorkspaceSearchMigrationManagedIdentityPort {
+  /**
+   * Reads and reduces one bounded source page through the measured AWS session.
+   *
+   * @param input - Measured source context and durable predecessor checkpoint.
+   * @returns Bound cumulative checkpoint and detached row evidence.
+   */
+  scanSourcePage(
+    input: WorkspaceSearchMigrationSourceScanReadInput,
+  ): Promise<WorkspaceSearchMigrationSourceScanPageResult>
+}
+
+/** Narrow transport containing only managed identity reads. */
 export interface WorkspaceSearchMigrationIdentityAwsTransport {
   /**
    * Releases all underlying AWS SDK clients.
@@ -270,18 +347,26 @@ export interface WorkspaceSearchMigrationIdentityAwsTransport {
 }
 
 /**
+ * Composite transport sharing one pinned client set across identity and Scan.
+ */
+export interface WorkspaceSearchMigrationManagedAwsTransport
+  extends
+    WorkspaceSearchMigrationIdentityAwsTransport,
+    WorkspaceSearchMigrationSourceScanAwsTransport {}
+
+/**
  * Injectable constructor for the allowlisted AWS SDK transport.
  *
  * @param configurations - Explicit official-endpoint client configurations.
- * @returns Transport exposing only the identity entry gate's reads.
+ * @returns Composite transport exposing only managed identity and Scan reads.
  */
 export type WorkspaceSearchMigrationIdentityAwsTransportConstructor = (
   configurations: WorkspaceSearchMigrationIdentityAwsSdkConfigurations,
-) => WorkspaceSearchMigrationIdentityAwsTransport
+) => WorkspaceSearchMigrationManagedAwsTransport
 
 /** AWS SDK transport whose public surface contains no mutation operation. */
 class AwsSdkWorkspaceSearchMigrationIdentityTransport
-  implements WorkspaceSearchMigrationIdentityAwsTransport {
+  implements WorkspaceSearchMigrationManagedAwsTransport {
   /** DynamoDB client bound to the explicit profile and region. */
   private readonly dynamodbClient: DynamoDBClient
 
@@ -369,6 +454,16 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
   }
 
   /**
+   * Sends one bounded source base-table Scan.
+   *
+   * @param command - Exact adapter-owned Scan command.
+   * @returns Raw low-level DynamoDB page.
+   */
+  scanSource(command: ScanCommand): Promise<ScanCommandOutput> {
+    return this.dynamodbClient.send(command)
+  }
+
+  /**
    * Sends one bucket-encryption read.
    *
    * @param command - Exact GetBucketEncryption command.
@@ -431,7 +526,7 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
 
 /** Read-only AWS adapter bound to one validated resource selection. */
 class AwsWorkspaceSearchMigrationIdentityPort
-  implements WorkspaceSearchMigrationManagedIdentityPort {
+  implements WorkspaceSearchMigrationManagedAwsSession {
   /** Immutable resource snapshot shared with identity measurement. */
   private readonly requested: WorkspaceSearchMigrationRequestedResourcesSnapshot
 
@@ -451,7 +546,16 @@ class AwsWorkspaceSearchMigrationIdentityPort
   private readonly tableNames: ReadonlySet<string>
 
   /** Allowlisted AWS command transport. */
-  private readonly transport: WorkspaceSearchMigrationIdentityAwsTransport
+  private readonly transport: WorkspaceSearchMigrationManagedAwsTransport
+
+  /** Whether this managed session has permanently released its clients. */
+  private closed = false
+
+  /** Generation invalidated by close and every replacement measurement. */
+  private generation = 0
+
+  /** Hash authorized by the most recent successful identity measurement. */
+  private sourceScanConfigurationHash: string | undefined
 
   /**
    * Creates a port bound to immutable copies of the reviewed resources.
@@ -461,7 +565,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
    */
   constructor(
     requested: WorkspaceSearchMigrationRequestedResourcesSnapshot,
-    transport: WorkspaceSearchMigrationIdentityAwsTransport,
+    transport: WorkspaceSearchMigrationManagedAwsTransport,
   ) {
     this.requested = requested
     this.requestedResourcesBinding =
@@ -477,7 +581,15 @@ class AwsWorkspaceSearchMigrationIdentityPort
    * Releases every AWS SDK client owned by the transport.
    */
   close(): void {
-    this.transport.close()
+    if (this.closed) return
+    this.closed = true
+    this.generation += 1
+    this.sourceScanConfigurationHash = undefined
+    try {
+      this.transport.close()
+    } catch {
+      // The session remains closed even if an injected transport cannot clean up.
+    }
   }
 
   /**
@@ -486,11 +598,166 @@ class AwsWorkspaceSearchMigrationIdentityPort
    *
    * @returns Exact measured migration configuration.
    */
-  measureConfiguration(): Promise<WorkspaceSearchMigrationConfiguration> {
-    return measureWorkspaceSearchMigrationConfiguration({
+  async measureConfiguration(): Promise<WorkspaceSearchMigrationConfiguration> {
+    this.requireOpen()
+    this.generation += 1
+    const measurementGeneration = this.generation
+    this.sourceScanConfigurationHash = undefined
+    const configuration = await measureWorkspaceSearchMigrationConfiguration({
       requested: this.requested,
       port: this,
     })
+    this.requireGeneration(measurementGeneration)
+    this.sourceScanConfigurationHash =
+      createWorkspaceSearchConfigurationHash(configuration)
+    return configuration
+  }
+
+  /**
+   * Reads and reduces one source page through the same pinned credentials and
+   * DynamoDB client that performed identity measurement.
+   *
+   * The predecessor checkpoint is detached before I/O and is passed directly
+   * to the reducer, so callers cannot substitute another valid checkpoint
+   * between the Scan and cumulative evidence update.
+   *
+   * @param input - Measured source context and durable predecessor checkpoint.
+   * @returns Bound cumulative checkpoint and detached row evidence.
+   */
+  async scanSourcePage(
+    input: WorkspaceSearchMigrationSourceScanReadInput,
+  ): Promise<WorkspaceSearchMigrationSourceScanPageResult> {
+    const prepared = await runSourceScanAwsBoundary(async () => {
+      this.requireOpen()
+      const scanGeneration = this.generation
+      const authorizedConfigurationHash =
+        this.sourceScanConfigurationHash
+      if (authorizedConfigurationHash === undefined) {
+        return failSourceScanAws('INVALID_STATE')
+      }
+      const preflight =
+        prepareWorkspaceSearchMigrationSourceScanContext(input)
+      if (!preflight.ok) return failSourceScanAws(preflight.code)
+      const context = preflight.context
+      if (context.configurationHash !== authorizedConfigurationHash) {
+        return failSourceScanAws('CONFIGURATION_HASH_MISMATCH')
+      }
+      this.requireMeasuredConfigurationBinding(context.configuration)
+      this.requireSourceScanGeneration(
+        scanGeneration,
+        authorizedConfigurationHash,
+      )
+      let commandCursor: DynamoAttributeMap | undefined
+      if (context.previousCheckpoint.cursor !== undefined) {
+        const commandCursorResult =
+          cloneWorkspaceSearchMigrationExactTableKey(
+            context.previousCheckpoint.cursor,
+            context.table,
+          )
+        if (!commandCursorResult.ok) {
+          return failSourceScanAws(commandCursorResult.code)
+        }
+        commandCursor = commandCursorResult.key
+      }
+
+      const output = await this.transport.scanSource(new ScanCommand({
+        TableName: this.requested.tables[context.source],
+        ConsistentRead: true,
+        Limit: WORKSPACE_SEARCH_MIGRATION_PAGE_SIZE,
+        ...(commandCursor === undefined
+          ? {}
+          : { ExclusiveStartKey: commandCursor }),
+      }))
+      this.requireSourceScanGeneration(
+        scanGeneration,
+        authorizedConfigurationHash,
+      )
+      const normalized =
+        normalizeWorkspaceSearchMigrationSourceScanOutput(
+          output,
+          context.table,
+        )
+      if (!normalized.ok) return failSourceScanAws(normalized.code)
+      this.requireSourceScanGeneration(
+        scanGeneration,
+        authorizedConfigurationHash,
+      )
+      return {
+        configurationHash: authorizedConfigurationHash,
+        generation: scanGeneration,
+        reductionInput: {
+          configuration: context.configuration,
+          configurationHash: context.configurationHash,
+          source: context.source,
+          previousCheckpoint: context.previousCheckpoint,
+          page: normalized.page,
+        },
+      } satisfies PreparedManagedSourceScanReduction
+    })
+    if (
+      !this.isSourceScanGenerationCurrent(
+        prepared.generation,
+        prepared.configurationHash,
+      )
+    ) {
+      throw createSourceScanAwsBoundaryFailure('INVALID_STATE')
+    }
+    return reduceWorkspaceSearchMigrationSourceScanPage(
+      prepared.reductionInput,
+    )
+  }
+
+  /**
+   * Requires a detached measured configuration to remain bound to this
+   * session's immutable operator-selected resources.
+   *
+   * @param configuration - Detached configuration authorized for one Scan.
+   */
+  private requireMeasuredConfigurationBinding(
+    configuration: WorkspaceSearchMigrationConfiguration,
+  ): void {
+    let binding: string
+    try {
+      binding = createWorkspaceSearchMigrationRequestedResourcesBinding(
+        createRequestedResourcesFromConfiguration(configuration),
+      )
+    } catch {
+      return failSourceScanAws('IDENTITY_MISMATCH')
+    }
+    if (binding !== this.requestedResourcesBinding) {
+      return failSourceScanAws('IDENTITY_MISMATCH')
+    }
+  }
+
+  /**
+   * Requires one measured source-read generation to remain current.
+   *
+   * @param generation - Generation captured before source I/O.
+   * @param configurationHash - Measurement authority captured before I/O.
+   */
+  private requireSourceScanGeneration(
+    generation: number,
+    configurationHash: string,
+  ): void {
+    if (!this.isSourceScanGenerationCurrent(generation, configurationHash)) {
+      return failSourceScanAws('INVALID_STATE')
+    }
+  }
+
+  /**
+   * Checks whether one source-read authority remains the current measurement.
+   *
+   * @param generation - Generation captured before source I/O.
+   * @param configurationHash - Measurement authority captured before I/O.
+   * @returns Whether close or replacement measurement has not invalidated it.
+   */
+  private isSourceScanGenerationCurrent(
+    generation: number,
+    configurationHash: string,
+  ): boolean {
+    return !this.closed &&
+      this.generation === generation &&
+      this.sourceScanConfigurationHash === configurationHash
   }
 
   /**
@@ -511,6 +778,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
   async describeContinuousBackups(
     tableName: string,
   ): Promise<DescribeContinuousBackupsCommandOutput> {
+    this.requireOpen()
     this.validateTableName(tableName)
     return this.transport.describeContinuousBackups(
       new DescribeContinuousBackupsCommand({ TableName: tableName }),
@@ -526,6 +794,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
   async describeJournalKey(
     keyArn: string,
   ): Promise<WorkspaceSearchMigrationJournalKeyMetadata> {
+    this.requireOpen()
     if (keyArn !== this.journalKeyArn) {
       throw invalidIdentityLookup()
     }
@@ -568,6 +837,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
    * @returns DynamoDB table metadata response.
    */
   async describeTable(tableName: string): Promise<DescribeTableCommandOutput> {
+    this.requireOpen()
     this.validateTableName(tableName)
     return this.transport.describeTable(
       new DescribeTableCommand({ TableName: tableName }),
@@ -583,6 +853,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
   async describeTimeToLive(
     tableName: string,
   ): Promise<DescribeTimeToLiveCommandOutput> {
+    this.requireOpen()
     this.validateTableName(tableName)
     return this.transport.describeTimeToLive(
       new DescribeTimeToLiveCommand({ TableName: tableName }),
@@ -598,6 +869,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
   async getBucketEncryption(
     lookup: WorkspaceSearchMigrationJournalLookup,
   ): Promise<GetBucketEncryptionOutput> {
+    this.requireOpen()
     const validatedLookup = this.createJournalLookupSnapshot(lookup)
     return this.transport.getBucketEncryption(
       new GetBucketEncryptionCommand(createBucketLookupInput(validatedLookup)),
@@ -613,6 +885,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
   async getBucketLogging(
     lookup: WorkspaceSearchMigrationJournalLookup,
   ): Promise<GetBucketLoggingOutput> {
+    this.requireOpen()
     const validatedLookup = this.createJournalLookupSnapshot(lookup)
     return this.transport.getBucketLogging(
       new GetBucketLoggingCommand(createBucketLookupInput(validatedLookup)),
@@ -628,6 +901,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
   async getBucketVersioning(
     lookup: WorkspaceSearchMigrationJournalLookup,
   ): Promise<GetBucketVersioningOutput> {
+    this.requireOpen()
     const validatedLookup = this.createJournalLookupSnapshot(lookup)
     return this.transport.getBucketVersioning(
       new GetBucketVersioningCommand(createBucketLookupInput(validatedLookup)),
@@ -647,6 +921,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
     /** Caller unique ID returned by STS. */
     userId: string
   }> {
+    this.requireOpen()
     const output = await this.transport.getCallerIdentity(
       new GetCallerIdentityCommand({}),
     )
@@ -678,12 +953,31 @@ class AwsWorkspaceSearchMigrationIdentityPort
   async getObjectLockConfiguration(
     lookup: WorkspaceSearchMigrationJournalLookup,
   ): Promise<GetObjectLockConfigurationOutput> {
+    this.requireOpen()
     const validatedLookup = this.createJournalLookupSnapshot(lookup)
     return this.transport.getObjectLockConfiguration(
       new GetObjectLockConfigurationCommand(
         createBucketLookupInput(validatedLookup),
       ),
     )
+  }
+
+  /**
+   * Requires this managed session to retain its AWS clients.
+   */
+  private requireOpen(): void {
+    if (this.closed) throw inactiveManagedIdentityPort()
+  }
+
+  /**
+   * Requires an asynchronous measurement to remain the current generation.
+   *
+   * @param generation - Generation captured before identity I/O.
+   */
+  private requireGeneration(generation: number): void {
+    if (this.closed || this.generation !== generation) {
+      throw inactiveManagedIdentityPort()
+    }
   }
 
   /**
@@ -727,17 +1021,17 @@ class AwsWorkspaceSearchMigrationIdentityPort
 }
 
 /**
- * Creates a production identity port pinned to explicit resources and endpoints.
+ * Creates a managed AWS migration session pinned to resources and endpoints.
  *
  * @param requested - Complete operator-selected migration resources.
  * @param transportConstructor - Injectable allowlisted transport constructor.
- * @returns Closeable read-only identity port.
+ * @returns Closeable identity and source Scan session.
  */
 export function createAwsWorkspaceSearchMigrationIdentityPort(
   requested: WorkspaceSearchMigrationRequestedResources,
   transportConstructor: WorkspaceSearchMigrationIdentityAwsTransportConstructor =
     createDefaultAwsTransport,
-): WorkspaceSearchMigrationManagedIdentityPort {
+): WorkspaceSearchMigrationManagedAwsSession {
   const resources =
     createWorkspaceSearchMigrationRequestedResourcesSnapshot(requested)
   const credentials = createPinnedProfileCredentials(resources)
@@ -1188,12 +1482,42 @@ function readAssumedCredentials(
  * Creates the concrete allowlisted AWS SDK transport.
  *
  * @param configurations - Explicit official-endpoint client configurations.
- * @returns AWS SDK transport exposing only entry-gate reads.
+ * @returns AWS SDK transport exposing only managed migration reads.
  */
 function createDefaultAwsTransport(
   configurations: WorkspaceSearchMigrationIdentityAwsSdkConfigurations,
-): WorkspaceSearchMigrationIdentityAwsTransport {
+): WorkspaceSearchMigrationManagedAwsTransport {
   return new AwsSdkWorkspaceSearchMigrationIdentityTransport(configurations)
+}
+
+/**
+ * Reconstructs the operator-selected resources represented by a measurement.
+ *
+ * @param configuration - Detached measured migration configuration.
+ * @returns Exact resource selection represented by the configuration.
+ */
+function createRequestedResourcesFromConfiguration(
+  configuration: WorkspaceSearchMigrationConfiguration,
+): WorkspaceSearchMigrationRequestedResources {
+  return {
+    account: configuration.account,
+    region: configuration.region,
+    profile: configuration.profile,
+    commit: configuration.commit,
+    tables: {
+      'project-directory':
+        configuration.tables['project-directory'].tableName,
+      'work-items': configuration.tables['work-items'].tableName,
+      collaboration: configuration.tables.collaboration.tableName,
+      documents: configuration.tables.documents.tableName,
+      'workspace-search':
+        configuration.tables['workspace-search'].tableName,
+      'migration-state':
+        configuration.tables['migration-state'].tableName,
+    },
+    journalBucket: configuration.journal.bucketName,
+    journalKeyArn: configuration.journal.keyArn,
+  }
 }
 
 /**
@@ -1277,6 +1601,78 @@ function invalidAssumedCredentials(): WorkspaceSearchMigrationFailure {
 function invalidProfileCredentials(): WorkspaceSearchMigrationFailure {
   return createWorkspaceSearchMigrationIdentityAdapterFailure(
     'INVALID_PROFILE_CREDENTIALS',
+  )
+}
+
+/**
+ * Runs managed source Scan I/O behind a fresh raw-error replacement boundary.
+ *
+ * @param operation - Authority checks and SDK work for one exact source page.
+ * @returns Detached reducer input and the authority that produced its page.
+ */
+async function runSourceScanAwsBoundary(
+  operation: () => Promise<PreparedManagedSourceScanReduction>,
+): Promise<PreparedManagedSourceScanReduction> {
+  try {
+    return await operation()
+  } catch (error: unknown) {
+    const code = readSourceScanAwsFailureCode(error)
+    throw createSourceScanAwsBoundaryFailure(code)
+  }
+}
+
+/**
+ * Reads only a privately constructed managed source Scan failure code.
+ *
+ * @param error - Arbitrary value raised during authority checks or SDK I/O.
+ * @returns Trusted private code or the fail-closed default.
+ */
+function readSourceScanAwsFailureCode(
+  error: unknown,
+): WorkspaceSearchMigrationFailureCode {
+  try {
+    return error instanceof SourceScanAwsFailure
+      ? error.code
+      : 'INVALID_STATE'
+  } catch {
+    return 'INVALID_STATE'
+  }
+}
+
+/**
+ * Raises one privately branded managed source Scan failure.
+ *
+ * @param code - Stable trusted adapter failure code.
+ * @returns Never returns.
+ */
+function failSourceScanAws(code: SourceScanAwsFailureCode): never {
+  throw new SourceScanAwsFailure(code)
+}
+
+/**
+ * Creates one public fixed-error source Scan boundary failure.
+ *
+ * @param code - Stable operator-safe failure code.
+ * @returns Secret-free source Scan failure.
+ */
+function createSourceScanAwsBoundaryFailure(
+  code: WorkspaceSearchMigrationFailureCode,
+): WorkspaceSearchMigrationFailure {
+  return new WorkspaceSearchMigrationFailure(
+    code,
+    `Workspace Search source Scan read stopped safely (${code}).`,
+  )
+}
+
+/**
+ * Creates a stable failure after close or generation invalidation.
+ *
+ * @returns Secret-free invalid-state failure.
+ */
+function inactiveManagedIdentityPort(): WorkspaceSearchMigrationFailure {
+  return new WorkspaceSearchMigrationFailure(
+    'INVALID_STATE',
+    'Workspace Search migration AWS session is no longer active.',
   )
 }
 

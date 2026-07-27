@@ -274,6 +274,26 @@ describe('Workspace Search migration source scan page', () => {
         ),
       'INVALID_ARGUMENT',
     )
+
+    const lengthMutatingItems = [
+      createIgnoredItem('length-mutation-1'),
+      createIgnoredItem('length-mutation-2'),
+    ]
+    Object.defineProperty(lengthMutatingItems, '0', {
+      configurable: true,
+      enumerable: true,
+      get() {
+        lengthMutatingItems.length = 1
+        return createIgnoredItem('length-mutation-1')
+      },
+    })
+    expectFailure(
+      () =>
+        reduceWorkspaceSearchMigrationSourceScanPage(
+          createInput(lengthMutatingItems),
+        ),
+      'INVALID_ARGUMENT',
+    )
   })
 
   test('rejects malformed, repeated, and schema-mismatched cursors', () => {
