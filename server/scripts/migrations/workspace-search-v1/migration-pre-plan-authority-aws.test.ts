@@ -450,6 +450,67 @@ describe('AWS Workspace Search pre-plan authority adapter', () => {
     expect(leaseKeys[0]).not.toContain(configurationB)
   })
 
+  test('returns an active durable lease for an identical acquisition retry', async () => {
+    const context = createAuthorityContext()
+    const rawCanary = 'ACQUIRE-RECONCILIATION-READ-CANARY'
+    context.transport.failNextTransaction({
+      timing: 'after-commit',
+      error: createTimeoutError('ACQUIRE-RETRY-RESPONSE-CANARY'),
+      afterCommit: () => {
+        context.transport.failNextGet(new Error(rawCanary))
+      },
+    })
+
+    const firstFailure = await captureMigrationFailure(
+      () => context.port.acquireLease({
+        runId: 'run-acquire-retry',
+        ownerId: 'owner-acquire-retry',
+      }),
+    )
+    expectMigrationFailure(
+      firstFailure,
+      'AMBIGUOUS_OPERATION_UNRESOLVED',
+    )
+    expect(firstFailure.message).not.toContain(rawCanary)
+    context.clock.set('2026-07-25T04:00:01.000Z')
+
+    const otherConfigurationPort = createAuthorityPort(
+      context.stateTable,
+      createMigrationDigest('other-retry-configuration'),
+      context.transport,
+      context.clock,
+    )
+    const otherConfigurationFailure = await captureMigrationFailure(
+      () => otherConfigurationPort.acquireLease({
+        runId: 'run-acquire-retry',
+        ownerId: 'owner-acquire-retry',
+      }),
+    )
+    expectMigrationFailure(otherConfigurationFailure, 'LEASE_CONFLICT')
+
+    const recovered = await context.port.acquireLease({
+      runId: 'run-acquire-retry',
+      ownerId: 'owner-acquire-retry',
+    })
+    expect(recovered).toEqual({
+      runId: 'run-acquire-retry',
+      ownerId: 'owner-acquire-retry',
+      fenceToken: 1,
+      heartbeatAt: initialTime,
+      expiresAt: '2026-07-25T04:01:00.000Z',
+    })
+    context.clock.set('2026-07-25T03:59:59.999Z')
+    const rollbackFailure = await captureMigrationFailure(
+      () => context.port.acquireLease({
+        runId: 'run-acquire-retry',
+        ownerId: 'owner-acquire-retry',
+      }),
+    )
+    expectMigrationFailure(rollbackFailure, 'LEASE_CONFLICT')
+    expect(context.transport.transactionCommands).toHaveLength(1)
+    expect(context.transport.prepareCalls).toHaveLength(1)
+  })
+
   test('allows only one concurrent first acquirer to install fence one', async () => {
     const context = createAuthorityContext()
     const competitor = createAuthorityPort(
@@ -743,6 +804,64 @@ describe('AWS Workspace Search pre-plan authority adapter', () => {
       .toBe(secondAuthority.maintenanceEvidenceReceiptDigest)
   })
 
+  test('does not recover matching evidence more than one revision ahead', async () => {
+    const context = createAuthorityContext()
+    const lease = await context.port.acquireLease({
+      runId: 'run-skipped-retry',
+      ownerId: 'owner-skipped-retry',
+    })
+    const firstAuthority =
+      await context.port.renewMaintenanceEvidence({
+        lease: createLeaseClaim(lease),
+        expectedPointer: null,
+        evidenceBytes: createMaintenanceEvidenceBytes(
+          initialTime,
+          'change:OPS-SKIPPED-FIRST',
+        ),
+      })
+    context.clock.set('2026-07-25T04:00:01.000Z')
+    const secondAuthority =
+      await context.port.renewMaintenanceEvidence({
+        lease: createLeaseClaim(lease),
+        expectedPointer: createPointerClaim(firstAuthority),
+        evidenceBytes: createMaintenanceEvidenceBytes(
+          '2026-07-25T04:00:01.000Z',
+          'change:OPS-SKIPPED-SECOND',
+        ),
+      })
+    context.clock.set('2026-07-25T04:00:02.000Z')
+    const latestEvidenceBytes = createMaintenanceEvidenceBytes(
+      '2026-07-25T04:00:02.000Z',
+      'change:OPS-SKIPPED-LATEST',
+    )
+    const latestAuthority =
+      await context.port.renewMaintenanceEvidence({
+        lease: createLeaseClaim(lease),
+        expectedPointer: createPointerClaim(secondAuthority),
+        evidenceBytes: latestEvidenceBytes,
+      })
+    context.transport.clearHistory()
+    context.clock.set('2026-07-25T04:00:03.000Z')
+
+    const failure = await captureMigrationFailure(
+      () => context.port.renewMaintenanceEvidence({
+        lease: createLeaseClaim(lease),
+        expectedPointer: createPointerClaim(firstAuthority),
+        evidenceBytes: latestEvidenceBytes,
+      }),
+    )
+    expectMigrationFailure(failure, 'INVALID_MAINTENANCE_EVIDENCE')
+    expect(context.transport.transactionCommands).toHaveLength(0)
+    expect(
+      readNumberAttribute(
+        requireStoredItem(
+          context.transport.readStoredItemByKind(pointerKind),
+        ),
+        'revision',
+      ),
+    ).toBe(latestAuthority.maintenanceEvidencePointerRevision)
+  })
+
   test('does not partially persist receipt rows when the lease changes before commit', async () => {
     const context = createAuthorityContext()
     const lease = await context.port.acquireLease({
@@ -889,7 +1008,112 @@ describe('AWS Workspace Search pre-plan authority adapter', () => {
       ))
   })
 
-  test('fails closed when response-loss reconciliation observes a mixed receipt state', async () => {
+  test('recovers an initial receipt retry after its reconciliation read is lost', async () => {
+    const context = createAuthorityContext()
+    const lease = await context.port.acquireLease({
+      runId: 'run-initial-receipt-retry',
+      ownerId: 'owner-initial-receipt-retry',
+    })
+    context.transport.clearHistory()
+    const evidenceBytes = createMaintenanceEvidenceBytes(
+      initialTime,
+      'change:OPS-RETRY-INITIAL',
+    )
+    const rawCanary = 'INITIAL-RECEIPT-RECONCILIATION-CANARY'
+    context.transport.failNextTransaction({
+      timing: 'after-commit',
+      error: createTimeoutError('INITIAL-RECEIPT-RESPONSE-CANARY'),
+      afterCommit: () => {
+        context.transport.failNextGet(new Error(rawCanary))
+      },
+    })
+
+    const firstFailure = await captureMigrationFailure(
+      () => context.port.renewMaintenanceEvidence({
+        lease: createLeaseClaim(lease),
+        expectedPointer: null,
+        evidenceBytes,
+      }),
+    )
+    expectMigrationFailure(
+      firstFailure,
+      'AMBIGUOUS_OPERATION_UNRESOLVED',
+    )
+    expect(firstFailure.message).not.toContain(rawCanary)
+
+    context.clock.set('2026-07-25T04:00:01.000Z')
+    const recovered = await context.port.renewMaintenanceEvidence({
+      lease: createLeaseClaim(lease),
+      expectedPointer: null,
+      evidenceBytes,
+    })
+    expect(recovered.maintenanceEvidenceReceipt.validatedAt)
+      .toBe(initialTime)
+    expect(recovered.evaluatedAt).toBe('2026-07-25T04:00:01.000Z')
+    expect(recovered.maintenanceEvidencePointerRevision).toBe(1)
+    expect(context.transport.transactionCommands).toHaveLength(1)
+    expect(context.transport.prepareCalls).toHaveLength(1)
+    expect(context.transport.readStoredItems()).toHaveLength(3)
+  })
+
+  test('recovers a same-fence receipt retry only at its direct successor', async () => {
+    const context = createAuthorityContext()
+    const lease = await context.port.acquireLease({
+      runId: 'run-successor-receipt-retry',
+      ownerId: 'owner-successor-receipt-retry',
+    })
+    const firstAuthority =
+      await context.port.renewMaintenanceEvidence({
+        lease: createLeaseClaim(lease),
+        expectedPointer: null,
+        evidenceBytes: createMaintenanceEvidenceBytes(
+          initialTime,
+          'change:OPS-RETRY-FIRST',
+        ),
+      })
+    context.transport.clearHistory()
+    context.clock.set('2026-07-25T04:00:01.000Z')
+    const evidenceBytes = createMaintenanceEvidenceBytes(
+      '2026-07-25T04:00:01.000Z',
+      'change:OPS-RETRY-SECOND',
+    )
+    context.transport.failNextTransaction({
+      timing: 'after-commit',
+      error: createTimeoutError('SUCCESSOR-RECEIPT-RESPONSE-CANARY'),
+      afterCommit: () => {
+        context.transport.failNextGet(
+          new Error('SUCCESSOR-RECONCILIATION-READ-CANARY'),
+        )
+      },
+    })
+
+    const firstFailure = await captureMigrationFailure(
+      () => context.port.renewMaintenanceEvidence({
+        lease: createLeaseClaim(lease),
+        expectedPointer: createPointerClaim(firstAuthority),
+        evidenceBytes,
+      }),
+    )
+    expectMigrationFailure(
+      firstFailure,
+      'AMBIGUOUS_OPERATION_UNRESOLVED',
+    )
+
+    context.clock.set('2026-07-25T04:00:02.000Z')
+    const recovered = await context.port.renewMaintenanceEvidence({
+      lease: createLeaseClaim(lease),
+      expectedPointer: createPointerClaim(firstAuthority),
+      evidenceBytes,
+    })
+    expect(recovered.maintenanceEvidenceReceipt.validatedAt)
+      .toBe('2026-07-25T04:00:01.000Z')
+    expect(recovered.maintenanceEvidencePointerRevision)
+      .toBe(firstAuthority.maintenanceEvidencePointerRevision + 1)
+    expect(context.transport.transactionCommands).toHaveLength(1)
+    expect(context.transport.prepareCalls).toHaveLength(1)
+  })
+
+  test('rejects an exact durable receipt without its successor pointer', async () => {
     const context = createAuthorityContext()
     const lease = await context.port.acquireLease({
       runId: 'run-mixed',
@@ -915,7 +1139,7 @@ describe('AWS Workspace Search pre-plan authority adapter', () => {
     )
     expectMigrationFailure(
       failure,
-      'AMBIGUOUS_OPERATION_UNRESOLVED',
+      'INVALID_MAINTENANCE_EVIDENCE',
     )
     expect(failure.message).not.toContain(rawCanary)
     expect(context.transport.readStoredItems()).toHaveLength(2)

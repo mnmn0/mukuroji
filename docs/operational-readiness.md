@@ -335,8 +335,10 @@ expiry ちょうどからの takeover は fence を単調増加させます。Co
 Strict に検証した maintenance evidence は raw bytes を table へ保存せず、exact byte digest、
 secret-free locator、観測時刻、runtime revision、run/fence を immutable receipt に保存します。
 Receipt と current pointer は1 transactionで commit し、lease の残り時間と receipt freshness が
-ともに10秒を超えることを同じ transaction boundaryで要求します。Heartbeat は receipt を fresh に
-せず、receipt renewal も lease を延長しません。Strong read、deterministic idempotency token、
+同じ adapter-owned commit clock で有効なことを要求します。Lease の残り時間が10秒を超えることは
+transaction の ConditionCheck で再確認し、receipt freshness は command 構築直前に検証します。
+Heartbeat は receipt を fresh にせず、receipt renewal も lease を延長しません。Strong read、
+deterministic idempotency token、
 exact successor reread によって response loss を回収し、receipt/pointer の torn state や別の
 successor は成功として採用しません。同じfenceでreceiptをrenewする場合は、callerが直前に読んだ
 pointer revision/digestをexact predecessorとして要求し、古いfresh evidenceによる上書きを

@@ -203,6 +203,22 @@ const MAXIMUM_PROFILE_ROLE_CHAIN_DEPTH = 8
 const PRE_PLAN_AUTHORITY_TRANSACTION_TIMEOUT_MILLISECONDS = 5_000
 
 /**
+ * Fixed secret-free timeout emitted when the local authority deadline aborts.
+ */
+class PrePlanAuthorityTransactionTimeout extends Error {
+  /** Node.js timeout code recognized by Smithy's transient-error classifier. */
+  readonly code = 'ETIMEDOUT'
+
+  /**
+   * Creates one classifier-compatible local transaction timeout.
+   */
+  constructor() {
+    super('Pre-plan authority transaction timed out.')
+    this.name = 'TimeoutError'
+  }
+}
+
+/**
  * Failure codes deliberately emitted by the private managed source data path.
  */
 type SourceScanAwsFailureCode =
@@ -641,6 +657,11 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
       return await this.dynamodbClient.send(command, {
         abortSignal: abortController.signal,
       })
+    } catch (error: unknown) {
+      if (abortController.signal.aborted) {
+        throw new PrePlanAuthorityTransactionTimeout()
+      }
+      throw error
     } finally {
       clearTimeout(timeout)
     }

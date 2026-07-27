@@ -2096,6 +2096,97 @@ describe('Workspace Search migration AWS identity adapter', () => {
     }
   })
 
+  test('normalizes only locally aborted concrete authority transactions', async () => {
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      createRequestedResources(),
+    )
+    const transport = readOwnObject(port, 'transport')
+    const dynamodbClient = readOwnObject(transport, 'dynamodbClient')
+    const send: unknown = Reflect.get(dynamodbClient, 'send')
+    const transact: unknown = Reflect.get(
+      transport,
+      'transactWritePrePlanAuthority',
+    )
+    const originalSetTimeout: unknown = Reflect.get(
+      globalThis,
+      'setTimeout',
+    )
+    if (
+      typeof send !== 'function' ||
+      typeof transact !== 'function' ||
+      typeof originalSetTimeout !== 'function'
+    ) {
+      throw new Error('Expected concrete authority transport functions.')
+    }
+    const command = new TransactWriteItemsCommand({
+      TransactItems: [],
+    })
+    const rawCanary = 'RAW-LOCAL-ABORT-CANARY'
+    const rawAbort = new Error(rawCanary)
+    rawAbort.name = 'AbortError'
+
+    try {
+      Reflect.set(
+        dynamodbClient,
+        'send',
+        (_command: unknown, options: unknown): Promise<never> => {
+          const signal = readAbortSignal(options)
+          if (!signal.aborted) {
+            throw new Error('Expected the local deadline to abort first.')
+          }
+          return Promise.reject(rawAbort)
+        },
+      )
+      Reflect.set(
+        globalThis,
+        'setTimeout',
+        (callback: unknown): number => {
+          if (typeof callback !== 'function') {
+            throw new Error('Expected one timeout callback.')
+          }
+          Reflect.apply(callback, undefined, [])
+          return 0
+        },
+      )
+
+      let normalized: unknown
+      try {
+        await Reflect.apply(transact, transport, [command])
+      } catch (error: unknown) {
+        normalized = error
+      }
+      expect(normalized).toBeInstanceOf(Error)
+      if (!(normalized instanceof Error)) {
+        throw new Error('Expected normalized timeout error.')
+      }
+      expect(normalized).toMatchObject({
+        name: 'TimeoutError',
+        code: 'ETIMEDOUT',
+      })
+      expect(normalized.message).not.toContain(rawCanary)
+
+      Reflect.set(globalThis, 'setTimeout', originalSetTimeout)
+      const externalAbort = new Error('EXTERNAL-ABORT-CANARY')
+      externalAbort.name = 'AbortError'
+      Reflect.set(
+        dynamodbClient,
+        'send',
+        (): Promise<never> => Promise.reject(externalAbort),
+      )
+      let preserved: unknown
+      try {
+        await Reflect.apply(transact, transport, [command])
+      } catch (error: unknown) {
+        preserved = error
+      }
+      expect(preserved).toBe(externalAbort)
+    } finally {
+      Reflect.set(globalThis, 'setTimeout', originalSetTimeout)
+      Reflect.set(dynamodbClient, 'send', send)
+      port.close()
+    }
+  })
+
   test('closes every concrete SDK client when one destroy call fails', () => {
     const port = createAwsWorkspaceSearchMigrationIdentityPort(
       createRequestedResources(),
@@ -3690,6 +3781,23 @@ function readOwnObject(owner: object, key: string): object {
     throw new Error(`Expected object implementation field: ${key}`)
   }
   return value
+}
+
+/**
+ * Reads one concrete SDK abort signal without a type assertion.
+ *
+ * @param options - Candidate handler options passed to the SDK client.
+ * @returns Exact abort signal installed by the authority transport.
+ */
+function readAbortSignal(options: unknown): AbortSignal {
+  if (typeof options !== 'object' || options === null) {
+    throw new Error('Expected concrete SDK handler options.')
+  }
+  const signal: unknown = Reflect.get(options, 'abortSignal')
+  if (!(signal instanceof AbortSignal)) {
+    throw new Error('Expected concrete SDK abort signal.')
+  }
+  return signal
 }
 
 /**

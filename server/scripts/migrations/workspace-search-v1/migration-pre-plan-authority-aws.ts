@@ -168,10 +168,11 @@ export type RenewWorkspaceSearchMigrationPrePlanMaintenanceEvidenceInput = {
  */
 export interface WorkspaceSearchMigrationPrePlanAuthorityAwsPort {
   /**
-   * Acquires an absent global lease or takes over one expired lease.
+   * Acquires an absent lease, takes over an expired lease, or recovers an
+   * identical active acquisition retry.
    *
    * @param input - Operator-selected run and process-unique owner.
-   * @returns Exact newly durable fenced lease.
+   * @returns Exact durable fenced lease owned by this acquisition identity.
    */
   acquireLease(
     input: AcquireWorkspaceSearchMigrationLeaseInput,
@@ -362,10 +363,10 @@ class AwsWorkspaceSearchMigrationPrePlanAuthorityPort
   }
 
   /**
-   * Acquires an absent global lease or takes over one expired lease.
+   * Acquires, takes over, or idempotently recovers one global lease.
    *
    * @param input - Operator-selected run and owner.
-   * @returns Exact durable successor lease.
+   * @returns Exact durable lease owned by this acquisition identity.
    */
   async acquireLease(
     input: AcquireWorkspaceSearchMigrationLeaseInput,
@@ -380,6 +381,17 @@ class AwsWorkspaceSearchMigrationPrePlanAuthorityPort
         observedClock.epochMilliseconds <
           Date.parse(predecessor.lease.expiresAt)
       ) {
+        if (
+          isMatchingActiveAcquisitionRetry(
+            this.binding,
+            predecessor,
+            runId,
+            ownerId,
+            observedClock,
+          )
+        ) {
+          return cloneLease(predecessor.lease)
+        }
         return failPrePlanAuthorityAws('LEASE_CONFLICT')
       }
       await this.transport.preparePrePlanAuthorityWrite()
@@ -493,11 +505,6 @@ class AwsWorkspaceSearchMigrationPrePlanAuthorityPort
       const evidenceBytes = cloneEvidenceBytes(input.evidenceBytes)
       const lease = await this.requireClaimedLease(claim)
       const pointer = await this.readPointer(claim.runId)
-      requireExpectedRenewalPointer(
-        pointer,
-        claim,
-        expectedPointer,
-      )
       const validationClock = readClock(this.clock)
       requireActiveLease(lease, claim, validationClock.at)
       const receipt = createReceiptSafely({
@@ -511,6 +518,22 @@ class AwsWorkspaceSearchMigrationPrePlanAuthorityPort
         claim.ownerId,
         receipt,
       )
+      if (
+        !isExpectedRenewalPointer(pointer, claim, expectedPointer)
+      ) {
+        const recovered = await this.recoverMatchingReceiptRetry(
+          claim,
+          pointer,
+          expectedPointer,
+          durableReceipt,
+        )
+        if (recovered !== undefined) return recovered
+        requireExpectedRenewalPointer(
+          pointer,
+          claim,
+          expectedPointer,
+        )
+      }
       if (
         pointer?.ownerId === claim.ownerId &&
         pointer.fenceToken === claim.fenceToken &&
@@ -565,6 +588,54 @@ class AwsWorkspaceSearchMigrationPrePlanAuthorityPort
           successorPointer.revision,
       })
     })
+  }
+
+  /**
+   * Recovers an exact renewal retry whose first response and reconciliation
+   * read were both lost.
+   *
+   * Receipt validation time is adapter-owned and therefore changes across
+   * retries. Recovery compares every evidence-derived field while requiring
+   * the current pointer to be the direct successor of a supplied predecessor.
+   * A null predecessor may recover only a same-fence no-op selecting the same
+   * exact evidence, so it cannot overwrite or adopt different evidence.
+   *
+   * @param claim - Exact active lease claim.
+   * @param pointer - Current durable pointer observed by the retry.
+   * @param expectedPointer - Original predecessor supplied by the caller.
+   * @param intendedReceipt - Newly validated receipt for the same input bytes.
+   * @returns Current authority when an exact durable retry is proven.
+   */
+  private async recoverMatchingReceiptRetry(
+    claim: WorkspaceSearchMigrationLeaseClaim,
+    pointer: DurablePrePlanMaintenancePointer | undefined,
+    expectedPointer:
+      WorkspaceSearchMigrationPrePlanMaintenancePointerClaim | null,
+    intendedReceipt: DurablePrePlanMaintenanceReceipt,
+  ): Promise<WorkspaceSearchMigrationPrePlanAuthority | undefined> {
+    if (
+      !isRecoverableReceiptRetryPointer(
+        pointer,
+        claim,
+        expectedPointer,
+      )
+    ) {
+      return undefined
+    }
+    const authority = await this.readAuthority({
+      lease: claim,
+      maintenanceEvidenceReceiptDigest: pointer.receiptDigest,
+      maintenanceEvidencePointerRevision: pointer.revision,
+    })
+    if (
+      !sameMaintenanceEvidence(
+        authority.maintenanceEvidenceReceipt,
+        intendedReceipt.receipt,
+      )
+    ) {
+      return undefined
+    }
+    return authority
   }
 
   /**
@@ -900,6 +971,13 @@ class AwsWorkspaceSearchMigrationPrePlanAuthorityPort
       )
     ) {
       if (durableReceipt !== undefined) {
+        if (
+          durableReceipt.recordDigest === intendedReceipt.recordDigest
+        ) {
+          return failPrePlanAuthorityAws(
+            'INVALID_MAINTENANCE_EVIDENCE',
+          )
+        }
         return failPrePlanAuthorityAws(
           'AMBIGUOUS_OPERATION_UNRESOLVED',
         )
@@ -1490,6 +1568,95 @@ function createDurablePointer(
 }
 
 /**
+ * Detects one active durable lease created by an identical acquisition.
+ *
+ * The configuration binding is required because the global lease key is shared
+ * across configurations. Returning a lease from another measured configuration
+ * would incorrectly transfer its authority even when run and owner text match.
+ *
+ * @param binding - Current measured adapter binding.
+ * @param durable - Active durable lease read by the acquisition retry.
+ * @param runId - Retry run identifier.
+ * @param ownerId - Retry owner identifier.
+ * @param clock - Adapter-owned retry observation time.
+ * @returns Whether returning the durable lease is an exact idempotent success.
+ */
+function isMatchingActiveAcquisitionRetry(
+  binding: PrePlanAuthorityBinding,
+  durable: DurablePrePlanLease,
+  runId: string,
+  ownerId: string,
+  clock: PrePlanAuthorityClockSnapshot,
+): boolean {
+  return durable.stateTableName === binding.stateTableName &&
+    durable.stateIncarnationDigest === binding.stateIncarnationDigest &&
+    durable.stateTableId === binding.stateTableId &&
+    durable.configurationHash === binding.configurationHash &&
+    durable.lease.runId === runId &&
+    durable.lease.ownerId === ownerId &&
+    Date.parse(durable.lease.heartbeatAt) <= clock.epochMilliseconds &&
+    clock.epochMilliseconds < Date.parse(durable.lease.expiresAt)
+}
+
+/**
+ * Tests whether one durable pointer exactly matches the caller's predecessor.
+ *
+ * @param current - Current durable pointer, when present.
+ * @param lease - Exact active lease claim.
+ * @param expected - Caller-observed predecessor or explicit null.
+ * @returns Whether normal renewal may proceed from this pointer.
+ */
+function isExpectedRenewalPointer(
+  current: DurablePrePlanMaintenancePointer | undefined,
+  lease: WorkspaceSearchMigrationLeaseClaim,
+  expected:
+    WorkspaceSearchMigrationPrePlanMaintenancePointerClaim | null,
+): boolean {
+  if (expected === null) {
+    return current === undefined ||
+      current.fenceToken < lease.fenceToken
+  }
+  return expected.fenceToken === lease.fenceToken &&
+    current !== undefined &&
+    current.ownerId === lease.ownerId &&
+    current.fenceToken === lease.fenceToken &&
+    current.revision === expected.revision &&
+    current.receiptDigest === expected.receiptDigest
+}
+
+/**
+ * Detects a current pointer that can represent the caller's committed retry.
+ *
+ * An exact predecessor must advance by one revision. A null predecessor cannot
+ * reconstruct the older-fence revision, so recovery additionally relies on the
+ * same-fence owner and exact evidence comparison and remains a read-only no-op.
+ *
+ * @param current - Current durable pointer, when present.
+ * @param lease - Exact active lease claim.
+ * @param expected - Original predecessor or explicit null.
+ * @returns Whether the pointer may be checked for exact retry recovery.
+ */
+function isRecoverableReceiptRetryPointer(
+  current: DurablePrePlanMaintenancePointer | undefined,
+  lease: WorkspaceSearchMigrationLeaseClaim,
+  expected:
+    WorkspaceSearchMigrationPrePlanMaintenancePointerClaim | null,
+): current is DurablePrePlanMaintenancePointer {
+  if (
+    current === undefined ||
+    current.ownerId !== lease.ownerId ||
+    current.fenceToken !== lease.fenceToken
+  ) {
+    return false
+  }
+  if (expected === null) return true
+  return expected.fenceToken === lease.fenceToken &&
+    expected.revision < Number.MAX_SAFE_INTEGER &&
+    current.revision === expected.revision + 1 &&
+    current.receiptDigest !== expected.receiptDigest
+}
+
+/**
  * Requires the caller's pointer expectation before parsing new evidence.
  *
  * A null expectation is accepted only when no pointer exists or the current
@@ -1507,25 +1674,32 @@ function requireExpectedRenewalPointer(
   expected:
     WorkspaceSearchMigrationPrePlanMaintenancePointerClaim | null,
 ): void {
-  if (expected === null) {
-    if (
-      current === undefined ||
-      current.fenceToken < lease.fenceToken
-    ) {
-      return
-    }
+  if (!isExpectedRenewalPointer(current, lease, expected)) {
     return failPrePlanAuthorityAws('INVALID_MAINTENANCE_EVIDENCE')
   }
-  if (
-    expected.fenceToken !== lease.fenceToken ||
-    current === undefined ||
-    current.ownerId !== lease.ownerId ||
-    current.fenceToken !== lease.fenceToken ||
-    current.revision !== expected.revision ||
-    current.receiptDigest !== expected.receiptDigest
-  ) {
-    return failPrePlanAuthorityAws('INVALID_MAINTENANCE_EVIDENCE')
-  }
+}
+
+/**
+ * Compares every maintenance-evidence-derived receipt field.
+ *
+ * Adapter-owned validation time is deliberately excluded because an identical
+ * retry necessarily revalidates the same bytes at a later time.
+ *
+ * @param left - Durable receipt selected by the current pointer.
+ * @param right - Newly validated receipt created from retry bytes.
+ * @returns Whether both receipts represent the same exact maintenance evidence.
+ */
+function sameMaintenanceEvidence(
+  left: WorkspaceSearchMaintenanceEvidenceReceipt,
+  right: WorkspaceSearchMaintenanceEvidenceReceipt,
+): boolean {
+  return left.runId === right.runId &&
+    left.evidenceDigest === right.evidenceDigest &&
+    left.evidenceLocator === right.evidenceLocator &&
+    left.runtimeRevision === right.runtimeRevision &&
+    left.fenceToken === right.fenceToken &&
+    left.oldestObservationAt === right.oldestObservationAt &&
+    left.validUntil === right.validUntil
 }
 
 /**
