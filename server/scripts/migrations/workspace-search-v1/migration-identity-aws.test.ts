@@ -49,11 +49,13 @@ import {
   STSClient,
 } from '@aws-sdk/client-sts'
 import {
+  createMigrationDigest,
   createWorkspaceSearchConfigurationHash,
   type DynamoAttributeMap,
   type MigrationSourceCheckpoint,
   type WorkspaceSearchMigrationConfiguration,
   WorkspaceSearchMigrationFailure,
+  type WorkspaceSearchPlanSeal,
   type WorkspaceSearchMigrationSourceName,
   type WorkspaceSearchMigrationTableRole,
   workspaceSearchMigrationSourceNames,
@@ -108,6 +110,7 @@ import {
 } from './migration-target-scan-page'
 import {
   createEmptyWorkspaceSearchMigrationCheckpoint,
+  createEmptyWorkspaceSearchPlanDigest,
 } from './migration-state-machine'
 import {
   MAINTENANCE_EVIDENCE_MAX_BYTES,
@@ -172,6 +175,37 @@ type DeferredScanOutput = {
    * @param output - Raw response supplied to the managed session.
    */
   readonly resolve: (output: ScanCommandOutput) => void
+}
+
+/**
+ * One immutable object retained by the recording generic S3 transport.
+ */
+type RecordedImmutableArtifactObject = {
+  /** Exact PutObject command whose body and metadata were stored. */
+  readonly command: PutObjectCommand
+  /** Stable fake immutable version assigned to the upload. */
+  readonly versionId: string
+}
+
+/**
+ * Cancellable fake streaming body used to detect lifecycle cleanup.
+ */
+class CancellableImmutableArtifactBody {
+  /** Number of best-effort cancel calls. */
+  cancelCount = 0
+
+  /** Number of best-effort destroy calls. */
+  destroyCount = 0
+
+  /** Records one body cancellation. */
+  cancel(): void {
+    this.cancelCount += 1
+  }
+
+  /** Records one body destruction. */
+  destroy(): void {
+    this.destroyCount += 1
+  }
 }
 
 /**
@@ -323,6 +357,28 @@ class RecordingIdentityAwsTransport
   private readonly sourceArtifactPutCommandsByKey =
     new Map<string, PutObjectCommand>()
 
+  /** Recorded codec-agnostic immutable object uploads. */
+  readonly putImmutableArtifactCommands: PutObjectCommand[] = []
+
+  /** Core-owned abort signals received by immutable object uploads. */
+  readonly putImmutableArtifactAbortSignals: AbortSignal[] = []
+
+  /** Recorded codec-agnostic immutable object metadata reads. */
+  readonly headImmutableArtifactCommands: HeadObjectCommand[] = []
+
+  /** Core-owned abort signals received by immutable metadata reads. */
+  readonly headImmutableArtifactAbortSignals: AbortSignal[] = []
+
+  /** Recorded exact-version codec-agnostic immutable object reads. */
+  readonly getImmutableArtifactCommands: GetObjectCommand[] = []
+
+  /** Core-owned abort signals received by immutable object reads. */
+  readonly getImmutableArtifactAbortSignals: AbortSignal[] = []
+
+  /** Generic immutable objects keyed by exact content-addressed object key. */
+  private readonly immutableArtifactObjectsByKey =
+    new Map<string, RecordedImmutableArtifactObject>()
+
   /** Recorded immutable target-artifact uploads. */
   readonly putTargetArtifactCommands: PutObjectCommand[] = []
 
@@ -393,6 +449,18 @@ class RecordingIdentityAwsTransport
 
   /** Optional synchronous effect after recording an exact artifact read. */
   getSourceArtifactEffect: (() => void) | undefined
+
+  /** Optional synchronous effect after recording an immutable upload. */
+  putImmutableArtifactEffect: (() => void) | undefined
+
+  /** Optional synchronous effect after recording immutable object metadata. */
+  headImmutableArtifactEffect: (() => void) | undefined
+
+  /** Optional synchronous effect after recording an exact immutable read. */
+  getImmutableArtifactEffect: (() => void) | undefined
+
+  /** Optional fake streaming body returned by generic immutable GetObject. */
+  immutableArtifactGetBody: unknown
 
   /** Optional synchronous effect after recording a target-artifact upload. */
   putTargetArtifactEffect: (() => void) | undefined
@@ -858,6 +926,95 @@ class RecordingIdentityAwsTransport
   }
 
   /**
+   * Records one codec-agnostic immutable object upload.
+   *
+   * @param command - Exact adapter-owned PutObject command.
+   * @param abortSignal - Core-owned request deadline signal.
+   * @returns Configured fake immutable-version response.
+   */
+  async putImmutableArtifact(
+    command: PutObjectCommand,
+    abortSignal: AbortSignal,
+  ): Promise<PutObjectCommandOutput> {
+    this.putImmutableArtifactCommands.push(command)
+    this.putImmutableArtifactAbortSignals.push(abortSignal)
+    const key = command.input.Key
+    if (key === undefined) {
+      throw new Error('Expected one immutable artifact object key.')
+    }
+    const versionId =
+      `immutable-artifact-version-${this.putImmutableArtifactCommands.length}`
+    this.immutableArtifactObjectsByKey.set(key, {
+      command,
+      versionId,
+    })
+    this.putImmutableArtifactEffect?.()
+    return {
+      $metadata: {},
+      VersionId: versionId,
+      ChecksumSHA256: command.input.ChecksumSHA256,
+      ChecksumType: 'FULL_OBJECT',
+      ServerSideEncryption: command.input.ServerSideEncryption,
+      SSEKMSKeyId: command.input.SSEKMSKeyId,
+      BucketKeyEnabled: command.input.BucketKeyEnabled,
+      Size: command.input.ContentLength,
+    }
+  }
+
+  /**
+   * Records one codec-agnostic immutable object metadata read.
+   *
+   * @param command - Exact adapter-owned HeadObject command.
+   * @param abortSignal - Core-owned request deadline signal.
+   * @returns Complete metadata for the previously recorded object.
+   */
+  async headImmutableArtifact(
+    command: HeadObjectCommand,
+    abortSignal: AbortSignal,
+  ): Promise<HeadObjectCommandOutput> {
+    this.headImmutableArtifactCommands.push(command)
+    this.headImmutableArtifactAbortSignals.push(abortSignal)
+    this.headImmutableArtifactEffect?.()
+    const stored = this.readImmutableArtifactObject(
+      command.input.Key,
+      command.input.VersionId,
+    )
+    return this.createImmutableArtifactObjectOutput(stored)
+  }
+
+  /**
+   * Records one exact codec-agnostic immutable object version read.
+   *
+   * @param command - Exact adapter-owned GetObject command.
+   * @param abortSignal - Core-owned request deadline signal.
+   * @returns Complete metadata and detached bytes for the stored version.
+   */
+  async getImmutableArtifact(
+    command: GetObjectCommand,
+    abortSignal: AbortSignal,
+  ): Promise<GetObjectCommandOutput> {
+    this.getImmutableArtifactCommands.push(command)
+    this.getImmutableArtifactAbortSignals.push(abortSignal)
+    this.getImmutableArtifactEffect?.()
+    const stored = this.readImmutableArtifactObject(
+      command.input.Key,
+      command.input.VersionId,
+    )
+    const output: GetObjectCommandOutput =
+      this.createImmutableArtifactObjectOutput(stored)
+    const body = stored.command.input.Body
+    if (!(body instanceof Uint8Array)) {
+      throw new Error('Expected Uint8Array immutable artifact body bytes.')
+    }
+    Reflect.set(
+      output,
+      'Body',
+      this.immutableArtifactGetBody ?? new Uint8Array(body),
+    )
+    return output
+  }
+
+  /**
    * Records one conditional immutable source-artifact upload.
    *
    * @param command - Exact adapter-owned PutObject command.
@@ -1000,6 +1157,60 @@ class RecordingIdentityAwsTransport
     }
     Reflect.set(output, 'Body', new Uint8Array(body))
     return output
+  }
+
+  /**
+   * Reads one previously uploaded generic immutable object.
+   *
+   * @param key - Exact content-addressed S3 object key.
+   * @param versionId - Optional exact immutable object version.
+   * @returns Recorded immutable object and its assigned version.
+   */
+  private readImmutableArtifactObject(
+    key: string | undefined,
+    versionId?: string,
+  ): RecordedImmutableArtifactObject {
+    const stored = key === undefined
+      ? undefined
+      : this.immutableArtifactObjectsByKey.get(key)
+    if (
+      stored === undefined ||
+      (
+        versionId !== undefined &&
+        versionId !== stored.versionId
+      )
+    ) {
+      throw new Error('Expected one exact recorded immutable artifact.')
+    }
+    return stored
+  }
+
+  /**
+   * Creates one valid immutable Object Lock response for a generic object.
+   *
+   * @param stored - Exact preceding upload and assigned version.
+   * @returns Complete safe HeadObject-compatible response.
+   */
+  private createImmutableArtifactObjectOutput(
+    stored: RecordedImmutableArtifactObject,
+  ): HeadObjectCommandOutput {
+    const command = stored.command
+    return {
+      $metadata: {},
+      VersionId: stored.versionId,
+      ContentLength: command.input.ContentLength,
+      ContentType: command.input.ContentType,
+      ChecksumSHA256: command.input.ChecksumSHA256,
+      ChecksumType: 'FULL_OBJECT',
+      ServerSideEncryption: command.input.ServerSideEncryption,
+      SSEKMSKeyId: command.input.SSEKMSKeyId,
+      BucketKeyEnabled: command.input.BucketKeyEnabled,
+      LastModified: new Date('2026-07-28T00:00:00.000Z'),
+      ObjectLockMode: 'COMPLIANCE',
+      ObjectLockRetainUntilDate:
+        command.input.ObjectLockRetainUntilDate,
+      Metadata: command.input.Metadata,
+    }
   }
 
   /**
@@ -3875,6 +4086,282 @@ describe('Workspace Search migration AWS identity adapter', () => {
     expect(fixture.transport.closeCount).toBe(1)
   })
 
+  test('requires measurement before creating a planning artifact gateway', () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+
+    expect(
+      () => port.createPlanningArtifactGateway('unmeasured-artifact-run'),
+    ).toThrow(
+      new WorkspaceSearchMigrationFailure(
+        'INVALID_STATE',
+        'Workspace Search planning artifact storage stopped safely (INVALID_STATE).',
+      ),
+    )
+    expect(transport.putImmutableArtifactCommands).toHaveLength(0)
+    expect(transport.headImmutableArtifactCommands).toHaveLength(0)
+    expect(transport.getImmutableArtifactCommands).toHaveLength(0)
+    port.close()
+  })
+
+  test('stores and replays an empty plan through measured immutable S3', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const clockAt = '2026-07-28T00:00:00.000Z'
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => new Date(clockAt),
+    )
+    const configuration = await port.measureConfiguration()
+    const configurationHash =
+      createWorkspaceSearchConfigurationHash(configuration)
+    const runId = 'measured-artifact-run'
+    configuration.journal.bucketName = 'caller-mutated-bucket'
+    const gateway = port.createPlanningArtifactGateway(runId)
+
+    const stored = await gateway.writePlanArtifact({
+      planSeal: createManagedPlanningArtifactEmptyPlanSeal(
+        runId,
+        configurationHash,
+      ),
+      operations: [],
+      retainUntil: '2026-08-27T00:01:00.000Z',
+    })
+    const replayed = await gateway.replayPlanArtifact(stored)
+
+    expect(replayed.operations).toEqual([])
+    expect(replayed.planSeal).toMatchObject({
+      runId,
+      configurationHash,
+      planOperationCount: 0,
+    })
+    expect(transport.putImmutableArtifactCommands).toHaveLength(2)
+    expect(transport.headImmutableArtifactCommands).toHaveLength(2)
+    expect(transport.getImmutableArtifactCommands).toHaveLength(2)
+    for (const command of transport.putImmutableArtifactCommands) {
+      expect(command.input).toMatchObject({
+        Bucket: TEST_BUCKET,
+        ExpectedBucketOwner: TEST_ACCOUNT,
+        IfNoneMatch: '*',
+        ObjectLockMode: 'COMPLIANCE',
+      })
+    }
+    expect(
+      transport.headImmutableArtifactCommands.map(
+        (command) => command.input.VersionId,
+      ),
+    ).toEqual([
+      stored.planSealReference.versionId,
+      stored.manifestHeadReference.versionId,
+    ])
+    expect(
+      transport.getImmutableArtifactCommands.map(
+        (command) => command.input.VersionId,
+      ),
+    ).toEqual([
+      stored.planSealReference.versionId,
+      stored.manifestHeadReference.versionId,
+    ])
+    expect(
+      transport.putImmutableArtifactAbortSignals.every(
+        (signal) => signal instanceof AbortSignal,
+      ),
+    ).toBe(true)
+    expect(
+      transport.headImmutableArtifactAbortSignals.every(
+        (signal) => signal instanceof AbortSignal,
+      ),
+    ).toBe(true)
+    expect(
+      transport.getImmutableArtifactAbortSignals.every(
+        (signal) => signal instanceof AbortSignal,
+      ),
+    ).toBe(true)
+    port.close()
+  })
+
+  test('invalidates stale planning gateways and replacement-time factories', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const clockAt = '2026-07-28T00:00:00.000Z'
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => new Date(clockAt),
+    )
+    const firstConfiguration = await port.measureConfiguration()
+    const firstHash =
+      createWorkspaceSearchConfigurationHash(firstConfiguration)
+    const runId = 'stale-artifact-run'
+    const staleGateway = port.createPlanningArtifactGateway(runId)
+
+    const replacementMeasurement = port.measureConfiguration()
+    expect(
+      () => port.createPlanningArtifactGateway(runId),
+    ).toThrow(
+      new WorkspaceSearchMigrationFailure(
+        'INVALID_STATE',
+        'Workspace Search planning artifact storage stopped safely (INVALID_STATE).',
+      ),
+    )
+    const replacementConfiguration = await replacementMeasurement
+    expect(
+      createWorkspaceSearchConfigurationHash(replacementConfiguration),
+    ).toBe(firstHash)
+    await expect(
+      staleGateway.writePlanArtifact({
+        planSeal: createManagedPlanningArtifactEmptyPlanSeal(
+          runId,
+          firstHash,
+        ),
+        operations: [],
+        retainUntil: '2026-08-27T00:01:00.000Z',
+      }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search planning artifact storage stopped safely (INVALID_STATE).',
+    })
+    expect(transport.putImmutableArtifactCommands).toHaveLength(0)
+    expect(transport.headImmutableArtifactCommands).toHaveLength(0)
+    expect(transport.getImmutableArtifactCommands).toHaveLength(0)
+
+    const currentGateway =
+      port.createPlanningArtifactGateway('closed-artifact-run')
+    port.close()
+    expect(
+      () => port.createPlanningArtifactGateway('closed-factory-run'),
+    ).toThrow(
+      new WorkspaceSearchMigrationFailure(
+        'INVALID_STATE',
+        'Workspace Search migration AWS session is no longer active.',
+      ),
+    )
+    await expect(
+      currentGateway.writePlanArtifact({
+        planSeal: createManagedPlanningArtifactEmptyPlanSeal(
+          'closed-artifact-run',
+          firstHash,
+        ),
+        operations: [],
+        retainUntil: '2026-08-27T00:01:00.000Z',
+      }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search planning artifact storage stopped safely (INVALID_STATE).',
+    })
+    expect(transport.putImmutableArtifactCommands).toHaveLength(0)
+    expect(transport.closeCount).toBe(1)
+  })
+
+  test('invalidates every immutable S3 phase on close or remeasurement', async () => {
+    const phases = ['put', 'head', 'get'] as const
+    const lifecycles = ['close', 'remeasure'] as const
+
+    for (const phase of phases) {
+      for (const lifecycle of lifecycles) {
+        const requested = createRequestedResources()
+        const transport = new RecordingIdentityAwsTransport()
+        seedValidMeasurementOutputs(transport, requested)
+        const clockAt = '2026-07-28T00:00:00.000Z'
+        const port = createAwsWorkspaceSearchMigrationIdentityPort(
+          requested,
+          () => transport,
+          () => new Date(clockAt),
+        )
+        const configuration = await port.measureConfiguration()
+        const configurationHash =
+          createWorkspaceSearchConfigurationHash(configuration)
+        const runId = `artifact-${phase}-${lifecycle}`
+        const gateway = port.createPlanningArtifactGateway(runId)
+        const cancellableBody = phase === 'get'
+          ? new CancellableImmutableArtifactBody()
+          : undefined
+        transport.immutableArtifactGetBody = cancellableBody
+        const writeInput = {
+          planSeal: createManagedPlanningArtifactEmptyPlanSeal(
+            runId,
+            configurationHash,
+          ),
+          operations: [],
+          retainUntil: '2026-08-27T00:01:00.000Z',
+        }
+        let replacementMeasurement:
+          Promise<WorkspaceSearchMigrationConfiguration> | undefined
+        const invalidate = (): void => {
+          if (lifecycle === 'close') {
+            port.close()
+            return
+          }
+          replacementMeasurement = port.measureConfiguration()
+        }
+
+        if (phase === 'put') {
+          transport.putImmutableArtifactEffect = invalidate
+          await expect(
+            gateway.writePlanArtifact(writeInput),
+          ).rejects.toMatchObject({
+            code: 'INVALID_STATE',
+            message:
+              'Workspace Search planning artifact storage stopped safely (INVALID_STATE).',
+          })
+          expect(transport.putImmutableArtifactCommands).toHaveLength(1)
+          expect(transport.headImmutableArtifactCommands).toHaveLength(0)
+          expect(transport.getImmutableArtifactCommands).toHaveLength(0)
+        } else if (phase === 'head') {
+          transport.headImmutableArtifactEffect = () => {
+            if (transport.headImmutableArtifactCommands.length === 2) {
+              invalidate()
+            }
+          }
+          await expect(
+            gateway.writePlanArtifact(writeInput),
+          ).rejects.toMatchObject({
+            code: 'INVALID_STATE',
+            message:
+              'Workspace Search planning artifact storage stopped safely (INVALID_STATE).',
+          })
+          expect(transport.putImmutableArtifactCommands).toHaveLength(2)
+          expect(transport.headImmutableArtifactCommands).toHaveLength(2)
+          expect(transport.getImmutableArtifactCommands).toHaveLength(0)
+        } else {
+          const stored = await gateway.writePlanArtifact(writeInput)
+          transport.getImmutableArtifactEffect = invalidate
+          await expect(
+            gateway.replayPlanArtifact(stored),
+          ).rejects.toMatchObject({
+            code: 'INVALID_STATE',
+            message:
+              'Workspace Search planning artifact storage stopped safely (INVALID_STATE).',
+          })
+          expect(transport.putImmutableArtifactCommands).toHaveLength(2)
+          expect(transport.headImmutableArtifactCommands).toHaveLength(2)
+          expect(transport.getImmutableArtifactCommands).toHaveLength(1)
+          if (cancellableBody === undefined) {
+            throw new Error('Expected one cancellable GetObject body.')
+          }
+          expect(cancellableBody.destroyCount).toBe(1)
+          expect(cancellableBody.cancelCount).toBe(1)
+        }
+        if (lifecycle === 'remeasure') {
+          if (replacementMeasurement === undefined) {
+            throw new Error('Expected replacement measurement to start.')
+          }
+          await replacementMeasurement
+          port.close()
+        }
+      }
+    }
+  })
+
   test('redacts hostile join accessors before managed data I/O', async () => {
     const requested = createRequestedResources()
     const transport = new RecordingIdentityAwsTransport()
@@ -4984,6 +5471,103 @@ describe('Workspace Search migration AWS identity adapter', () => {
         expect(observedDeadlines).toEqual([10_000, 10_000])
         expect(preserved).toBe(preDeadlineAbort)
       }
+    } finally {
+      Reflect.set(globalThis, 'setTimeout', originalSetTimeout)
+      Reflect.set(s3Client, 'send', send)
+      port.close()
+    }
+  })
+
+  test('forwards immutable core signals without adding a transport timer', async () => {
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      createRequestedResources(),
+    )
+    const transport = readOwnObject(port, 'transport')
+    const s3Client = readOwnObject(transport, 's3Client')
+    const send: unknown = Reflect.get(s3Client, 'send')
+    const originalSetTimeout: unknown = Reflect.get(
+      globalThis,
+      'setTimeout',
+    )
+    if (
+      typeof send !== 'function' ||
+      typeof originalSetTimeout !== 'function'
+    ) {
+      throw new Error('Expected concrete immutable transport functions.')
+    }
+    const requests = [
+      {
+        methodName: 'putImmutableArtifact',
+        command: new PutObjectCommand({
+          Bucket: TEST_BUCKET,
+          Key: 'workspace-search/v1/planning/put.artifact',
+          Body: new Uint8Array([1]),
+        }),
+      },
+      {
+        methodName: 'headImmutableArtifact',
+        command: new HeadObjectCommand({
+          Bucket: TEST_BUCKET,
+          Key: 'workspace-search/v1/planning/head.artifact',
+        }),
+      },
+      {
+        methodName: 'getImmutableArtifact',
+        command: new GetObjectCommand({
+          Bucket: TEST_BUCKET,
+          Key: 'workspace-search/v1/planning/get.artifact',
+          VersionId: 'exact-immutable-version',
+        }),
+      },
+    ]
+    let timeoutCount = 0
+
+    try {
+      Reflect.set(
+        globalThis,
+        'setTimeout',
+        (): number => {
+          timeoutCount += 1
+          return 0
+        },
+      )
+      for (const request of requests) {
+        const operation: unknown = Reflect.get(
+          transport,
+          request.methodName,
+        )
+        if (typeof operation !== 'function') {
+          throw new Error(
+            `Expected concrete immutable operation: ${request.methodName}`,
+          )
+        }
+        const abortController = new AbortController()
+        const rawFailure =
+          new Error(`RAW-IMMUTABLE-SEND-${request.methodName}`)
+        Reflect.set(
+          s3Client,
+          'send',
+          (command: unknown, options: unknown): Promise<never> => {
+            expect(command).toBe(request.command)
+            expect(readAbortSignal(options)).toBe(
+              abortController.signal,
+            )
+            return Promise.reject(rawFailure)
+          },
+        )
+
+        let observed: unknown
+        try {
+          await Reflect.apply(operation, transport, [
+            request.command,
+            abortController.signal,
+          ])
+        } catch (error: unknown) {
+          observed = error
+        }
+        expect(observed).toBe(rawFailure)
+      }
+      expect(timeoutCount).toBe(0)
     } finally {
       Reflect.set(globalThis, 'setTimeout', originalSetTimeout)
       Reflect.set(s3Client, 'send', send)
@@ -6410,6 +6994,35 @@ function createTargetEvidenceReadRequest(
     configuration,
     configurationHash:
       createWorkspaceSearchConfigurationHash(configuration),
+  }
+}
+
+/**
+ * Creates one valid empty plan seal for managed storage composition tests.
+ *
+ * @param runId - Exact run owning the immutable planning graph.
+ * @param configurationHash - Exact measured-configuration digest.
+ * @returns Strict empty plan seal accepted by the planning gateway.
+ */
+function createManagedPlanningArtifactEmptyPlanSeal(
+  runId: string,
+  configurationHash: string,
+): WorkspaceSearchPlanSeal {
+  return {
+    kind: 'workspace-search-plan-seal',
+    sealVersion: 2,
+    migrationId: 'workspace-search-maintenance',
+    migrationVersion: 1,
+    runId,
+    configurationHash,
+    dryRunEvidenceDigest: createMigrationDigest('managed-dry-run'),
+    planningSnapshotDigest:
+      createMigrationDigest('managed-planning-snapshot'),
+    planDigest: createEmptyWorkspaceSearchPlanDigest(),
+    planOperationCount: 0,
+    sourceOperationCount: 0,
+    orphanOperationCount: 0,
+    createdAt: '2026-07-28T00:00:00.000Z',
   }
 }
 
