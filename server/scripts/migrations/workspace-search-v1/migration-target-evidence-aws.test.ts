@@ -1711,6 +1711,12 @@ describe('Workspace Search migration target evidence AWS adapter', () => {
         ':completed': { BOOL: true },
       },
     })
+    expect(conditionMatches(
+      head,
+      check.ConditionExpression,
+      check.ExpressionAttributeNames,
+      check.ExpressionAttributeValues,
+    )).toBe(true)
   })
 
   test('rejects nonterminal or mismatched terminal target progress', async () => {

@@ -1,3 +1,4 @@
+import { types as nodeUtilTypes } from 'node:util'
 import {
   createMigrationDigest,
   createWorkspaceSearchConfigurationHash,
@@ -5,6 +6,9 @@ import {
   isHexDigest,
   requireMigrationIdentifier,
   serializeCanonicalJson,
+  type MigrationDigestState,
+  type MigrationScanAggregate,
+  type MigrationSourceCheckpoint,
   type WorkspaceSearchMaintenanceEvidenceReceipt,
   type WorkspaceSearchMigrationConfiguration,
   type WorkspaceSearchMigrationSourceName,
@@ -24,6 +28,7 @@ import type {
   WorkspaceSearchMigrationPrePlanAuthority,
 } from './migration-pre-plan-authority-aws'
 import {
+  detachWorkspaceSearchMigrationPlanningConfiguration,
   type WorkspaceSearchMigrationPlanningAuthorityProvenance,
   type WorkspaceSearchMigrationPlanningAuthorityTraceEntry,
   type WorkspaceSearchMigrationPlanningAuthorityTransition,
@@ -39,12 +44,18 @@ import {
   assertWorkspaceSearchMigrationLeaseAuthority,
   createEmptyWorkspaceSearchPlanDigest,
   validateWorkspaceSearchMaintenanceEvidenceReceipt,
+  validateWorkspaceSearchMigrationCheckpoint,
 } from './migration-state-machine'
 import {
   createWorkspaceSearchMigrationTargetCheckpointDigest,
   createWorkspaceSearchMigrationTargetEvidenceProgressDigest,
   type WorkspaceSearchMigrationTargetEvidenceProgress,
 } from './migration-target-evidence'
+import {
+  type WorkspaceSearchMigrationTargetScanAggregate,
+  type WorkspaceSearchMigrationTargetScanCheckpoint,
+  validateWorkspaceSearchMigrationTargetScanCheckpoint,
+} from './migration-target-scan-context'
 import {
   hasCanonicalDenseArrayShape,
   hasOnlyPairedSurrogates,
@@ -88,9 +99,9 @@ extends Error {
 }
 
 /**
- * Exact immutable S3 reference for a complete planning provenance artifact.
+ * Exact immutable S3 reference shared by sealed planning artifacts.
  */
-export type WorkspaceSearchMigrationPlanningProvenanceArtifactReference = {
+export type WorkspaceSearchMigrationImmutableArtifactReference = {
   /** Exact content-addressed S3 object key. */
   readonly objectKey: string
   /** Exact immutable S3 object version. */
@@ -100,16 +111,16 @@ export type WorkspaceSearchMigrationPlanningProvenanceArtifactReference = {
 }
 
 /**
- * Exact immutable S3 reference for the complete planned-operation manifest.
+ * Role-specific reference for a complete planning provenance artifact.
  */
-export type WorkspaceSearchMigrationPlanManifestReference = {
-  /** Exact content-addressed S3 object key. */
-  readonly objectKey: string
-  /** Exact immutable S3 object version. */
-  readonly versionId: string
-  /** SHA-256 digest of the exact canonical manifest bytes. */
-  readonly contentDigest: string
-}
+export type WorkspaceSearchMigrationPlanningProvenanceArtifactReference =
+  WorkspaceSearchMigrationImmutableArtifactReference
+
+/**
+ * Role-specific reference for the complete planned-operation manifest.
+ */
+export type WorkspaceSearchMigrationPlanManifestReference =
+  WorkspaceSearchMigrationImmutableArtifactReference
 
 /**
  * One historical receipt proven to match a provenance transition.
@@ -418,7 +429,10 @@ export function createWorkspaceSearchMigrationSealedPlanningAuthority(
     const configurationHash = readDigest(
       readOwn(inputRecord, 'configurationHash'),
     )
-    const configuration = input.configuration
+    const configuration =
+      detachWorkspaceSearchMigrationPlanningConfiguration(
+        readOwn(inputRecord, 'configuration'),
+      )
     if (
       createWorkspaceSearchConfigurationHash(configuration) !==
         configurationHash
@@ -428,7 +442,7 @@ export function createWorkspaceSearchMigrationSealedPlanningAuthority(
     const tableIds = createTableIds(configuration)
     const stateTableId = tableIds['migration-state']
     const planSeal = parseWorkspaceSearchPlanSeal(
-      serializeWorkspaceSearchPlanSeal(input.planSeal),
+      serializeWorkspaceSearchPlanSeal(readOwn(input, 'planSeal')),
     )
     const planSealReference = readArtifactReference(
       readOwn(inputRecord, 'planSealReference'),
@@ -463,8 +477,12 @@ export function createWorkspaceSearchMigrationSealedPlanningAuthority(
       return failSealedAuthority()
     }
     const evidenceHeads = createSealedEvidenceHeads(
-      input.sourceProgress,
-      input.targetProgress,
+      readSealedSourceProgresses(
+        readOwn(inputRecord, 'sourceProgress'),
+      ),
+      readSealedTargetProgress(
+        readOwn(inputRecord, 'targetProgress'),
+      ),
       planningProvenanceArtifact.provenance,
       runId,
       configurationHash,
@@ -1147,6 +1165,363 @@ function createHistoricalReceiptBindingDigest(
 }
 
 /**
+ * Detaches the exact four terminal source progress heads through own data
+ * descriptors before any digest or correlation check is performed.
+ *
+ * @param value - Candidate fixed-role source progress record.
+ * @returns Four detached planning progress heads.
+ */
+function readSealedSourceProgresses(
+  value: unknown,
+): Readonly<
+  Record<
+    WorkspaceSearchMigrationSourceName,
+    WorkspaceSearchMigrationSourceEvidenceProgress
+  >
+> {
+  const record = requireRecord(value)
+  requireExactKeys(record, workspaceSearchMigrationSourceNames)
+  return {
+    'project-directory': readSealedSourceProgress(
+      readOwn(record, 'project-directory'),
+      'project-directory',
+    ),
+    'work-items': readSealedSourceProgress(
+      readOwn(record, 'work-items'),
+      'work-items',
+    ),
+    collaboration: readSealedSourceProgress(
+      readOwn(record, 'collaboration'),
+      'collaboration',
+    ),
+    documents: readSealedSourceProgress(
+      readOwn(record, 'documents'),
+      'documents',
+    ),
+  }
+}
+
+/**
+ * Detaches one terminal source progress head without invoking accessors.
+ *
+ * @param value - Candidate source progress.
+ * @param expectedSource - Fixed source role owning the progress.
+ * @returns Detached strict planning progress.
+ */
+function readSealedSourceProgress(
+  value: unknown,
+  expectedSource: WorkspaceSearchMigrationSourceName,
+): WorkspaceSearchMigrationSourceEvidenceProgress {
+  const record = requireRecord(value)
+  requireExactKeys(record, [
+    'checkpoint',
+    'configurationHash',
+    'evidenceDigest',
+    'pageSequence',
+    'purpose',
+    'runId',
+    'source',
+    'sourceTableId',
+    'stateTableId',
+  ])
+  if (
+    readOwn(record, 'purpose') !== 'planning' ||
+    readOwn(record, 'source') !== expectedSource
+  ) {
+    return failSealedAuthority()
+  }
+  return {
+    purpose: 'planning',
+    runId: readIdentifier(readOwn(record, 'runId')),
+    configurationHash: readDigest(
+      readOwn(record, 'configurationHash'),
+    ),
+    source: expectedSource,
+    sourceTableId: readBoundedText(
+      readOwn(record, 'sourceTableId'),
+      1_024,
+    ),
+    stateTableId: readBoundedText(
+      readOwn(record, 'stateTableId'),
+      1_024,
+    ),
+    pageSequence: readPositiveSafeInteger(
+      readOwn(record, 'pageSequence'),
+    ),
+    evidenceDigest: readDigest(
+      readOwn(record, 'evidenceDigest'),
+    ),
+    checkpoint: readSealedSourceCheckpoint(
+      readOwn(record, 'checkpoint'),
+    ),
+  }
+}
+
+/**
+ * Detaches one terminal target progress head without invoking accessors.
+ *
+ * @param value - Candidate target progress.
+ * @returns Detached strict planning progress.
+ */
+function readSealedTargetProgress(
+  value: unknown,
+): WorkspaceSearchMigrationTargetEvidenceProgress {
+  const record = requireRecord(value)
+  requireExactKeys(record, [
+    'checkpoint',
+    'configurationHash',
+    'evidenceDigest',
+    'pageSequence',
+    'purpose',
+    'runId',
+    'stateTableId',
+    'targetTableId',
+  ])
+  if (readOwn(record, 'purpose') !== 'planning') {
+    return failSealedAuthority()
+  }
+  return {
+    purpose: 'planning',
+    runId: readIdentifier(readOwn(record, 'runId')),
+    configurationHash: readDigest(
+      readOwn(record, 'configurationHash'),
+    ),
+    targetTableId: readBoundedText(
+      readOwn(record, 'targetTableId'),
+      1_024,
+    ),
+    stateTableId: readBoundedText(
+      readOwn(record, 'stateTableId'),
+      1_024,
+    ),
+    pageSequence: readPositiveSafeInteger(
+      readOwn(record, 'pageSequence'),
+    ),
+    evidenceDigest: readDigest(
+      readOwn(record, 'evidenceDigest'),
+    ),
+    checkpoint: readSealedTargetCheckpoint(
+      readOwn(record, 'checkpoint'),
+    ),
+  }
+}
+
+/**
+ * Detaches and validates one completed source checkpoint.
+ *
+ * @param value - Candidate source checkpoint.
+ * @returns Detached completed checkpoint without a cursor.
+ */
+function readSealedSourceCheckpoint(
+  value: unknown,
+): MigrationSourceCheckpoint {
+  const record = requireRecord(value)
+  const hasCursor = Object.hasOwn(record, 'cursor')
+  requireExactKeys(
+    record,
+    hasCursor
+      ? [
+          'aggregate',
+          'completed',
+          'contentDigestState',
+          'cursor',
+          'keyDigestState',
+        ]
+      : [
+          'aggregate',
+          'completed',
+          'contentDigestState',
+          'keyDigestState',
+        ],
+  )
+  if (
+    readOwn(record, 'completed') !== true ||
+    hasCursor && readOwn(record, 'cursor') !== undefined
+  ) {
+    return failSealedAuthority()
+  }
+  const checkpoint: MigrationSourceCheckpoint = {
+    completed: true,
+    aggregate: readSealedSourceAggregate(
+      readOwn(record, 'aggregate'),
+    ),
+    keyDigestState: readSealedDigestState(
+      readOwn(record, 'keyDigestState'),
+    ),
+    contentDigestState: readSealedDigestState(
+      readOwn(record, 'contentDigestState'),
+    ),
+  }
+  validateWorkspaceSearchMigrationCheckpoint(checkpoint)
+  return checkpoint
+}
+
+/**
+ * Detaches and validates one completed target checkpoint.
+ *
+ * @param value - Candidate target checkpoint.
+ * @returns Detached completed checkpoint without a cursor.
+ */
+function readSealedTargetCheckpoint(
+  value: unknown,
+): WorkspaceSearchMigrationTargetScanCheckpoint {
+  const record = requireRecord(value)
+  const hasCursor = Object.hasOwn(record, 'cursor')
+  requireExactKeys(
+    record,
+    hasCursor
+      ? [
+          'aggregate',
+          'completed',
+          'configurationHash',
+          'contentDigestState',
+          'cursor',
+          'keyDigestState',
+        ]
+      : [
+          'aggregate',
+          'completed',
+          'configurationHash',
+          'contentDigestState',
+          'keyDigestState',
+        ],
+  )
+  if (
+    readOwn(record, 'completed') !== true ||
+    hasCursor && readOwn(record, 'cursor') !== undefined
+  ) {
+    return failSealedAuthority()
+  }
+  const checkpoint: WorkspaceSearchMigrationTargetScanCheckpoint = {
+    configurationHash: readDigest(
+      readOwn(record, 'configurationHash'),
+    ),
+    completed: true,
+    aggregate: readSealedTargetAggregate(
+      readOwn(record, 'aggregate'),
+    ),
+    keyDigestState: readSealedDigestState(
+      readOwn(record, 'keyDigestState'),
+    ),
+    contentDigestState: readSealedDigestState(
+      readOwn(record, 'contentDigestState'),
+    ),
+  }
+  validateWorkspaceSearchMigrationTargetScanCheckpoint(checkpoint)
+  return checkpoint
+}
+
+/**
+ * Detaches one source scan aggregate from exact scalar data properties.
+ *
+ * @param value - Candidate source aggregate.
+ * @returns Detached source aggregate.
+ */
+function readSealedSourceAggregate(
+  value: unknown,
+): MigrationScanAggregate {
+  const record = requireRecord(value)
+  requireExactKeys(record, [
+    'contentDigest',
+    'deleted',
+    'ignored',
+    'invalid',
+    'keyDigest',
+    'mapped',
+    'pageCount',
+    'projected',
+    'scanned',
+  ])
+  return {
+    scanned: readNonNegativeSafeInteger(
+      readOwn(record, 'scanned'),
+    ),
+    mapped: readNonNegativeSafeInteger(
+      readOwn(record, 'mapped'),
+    ),
+    ignored: readNonNegativeSafeInteger(
+      readOwn(record, 'ignored'),
+    ),
+    invalid: readNonNegativeSafeInteger(
+      readOwn(record, 'invalid'),
+    ),
+    projected: readNonNegativeSafeInteger(
+      readOwn(record, 'projected'),
+    ),
+    deleted: readNonNegativeSafeInteger(
+      readOwn(record, 'deleted'),
+    ),
+    keyDigest: readDigest(readOwn(record, 'keyDigest')),
+    contentDigest: readDigest(
+      readOwn(record, 'contentDigest'),
+    ),
+    pageCount: readNonNegativeSafeInteger(
+      readOwn(record, 'pageCount'),
+    ),
+  }
+}
+
+/**
+ * Detaches one target scan aggregate from exact scalar data properties.
+ *
+ * @param value - Candidate target aggregate.
+ * @returns Detached target aggregate.
+ */
+function readSealedTargetAggregate(
+  value: unknown,
+): WorkspaceSearchMigrationTargetScanAggregate {
+  const record = requireRecord(value)
+  requireExactKeys(record, [
+    'contentDigest',
+    'ignored',
+    'invalid',
+    'keyDigest',
+    'owned',
+    'pageCount',
+    'scanned',
+  ])
+  return {
+    scanned: readNonNegativeSafeInteger(
+      readOwn(record, 'scanned'),
+    ),
+    owned: readNonNegativeSafeInteger(
+      readOwn(record, 'owned'),
+    ),
+    ignored: readNonNegativeSafeInteger(
+      readOwn(record, 'ignored'),
+    ),
+    invalid: readNonNegativeSafeInteger(
+      readOwn(record, 'invalid'),
+    ),
+    keyDigest: readDigest(readOwn(record, 'keyDigest')),
+    contentDigest: readDigest(
+      readOwn(record, 'contentDigest'),
+    ),
+    pageCount: readNonNegativeSafeInteger(
+      readOwn(record, 'pageCount'),
+    ),
+  }
+}
+
+/**
+ * Detaches one exact digest-accumulator state.
+ *
+ * @param value - Candidate accumulator state.
+ * @returns Detached validated scalar state.
+ */
+function readSealedDigestState(
+  value: unknown,
+): MigrationDigestState {
+  const record = requireRecord(value)
+  requireExactKeys(record, ['count', 'sumHex', 'xorHex'])
+  return {
+    count: readNonNegativeSafeInteger(readOwn(record, 'count')),
+    sumHex: readDigest(readOwn(record, 'sumHex')),
+    xorHex: readDigest(readOwn(record, 'xorHex')),
+  }
+}
+
+/**
  * Creates five exact head commitments and validates their provenance roots.
  *
  * @param sourceProgress - Four completed source progress heads.
@@ -1182,9 +1557,10 @@ function createSealedEvidenceHeads(
     ) {
       return failSealedAuthority()
     }
-    void createWorkspaceSearchMigrationSourceEvidenceProgressDigest(
-      progress,
-    )
+    const progressDigest =
+      createWorkspaceSearchMigrationSourceEvidenceProgressDigest(
+        progress,
+      )
     if (
       progress.purpose !== 'planning' ||
       progress.runId !== runId ||
@@ -1205,10 +1581,7 @@ function createSealedEvidenceHeads(
     }
     heads.push({
       chain: source,
-      progressDigest:
-        createWorkspaceSearchMigrationSourceEvidenceProgressDigest(
-          progress,
-        ),
+      progressDigest,
       pageCount: root.pageCount,
       terminalEvidenceDigest: root.terminalEvidenceDigest,
       terminalCheckpointDigest: root.terminalCheckpointDigest,
@@ -1216,7 +1589,8 @@ function createSealedEvidenceHeads(
   }
   const target = targetProgress
   const targetRoot = provenance.chainRoots[heads.length]
-  void createWorkspaceSearchMigrationTargetEvidenceProgressDigest(target)
+  const targetProgressDigest =
+    createWorkspaceSearchMigrationTargetEvidenceProgressDigest(target)
   if (
     targetRoot === undefined ||
     targetRoot.chain !== 'workspace-search' ||
@@ -1238,8 +1612,7 @@ function createSealedEvidenceHeads(
   }
   heads.push({
     chain: 'workspace-search',
-    progressDigest:
-      createWorkspaceSearchMigrationTargetEvidenceProgressDigest(target),
+    progressDigest: targetProgressDigest,
     pageCount: targetRoot.pageCount,
     terminalEvidenceDigest: targetRoot.terminalEvidenceDigest,
     terminalCheckpointDigest: targetRoot.terminalCheckpointDigest,
@@ -1666,7 +2039,7 @@ function readTableIds(
  */
 function readArtifactReference(
   value: unknown,
-): WorkspaceSearchMigrationPlanningProvenanceArtifactReference {
+): WorkspaceSearchMigrationImmutableArtifactReference {
   const record = requireRecord(value)
   requireExactKeys(record, ['contentDigest', 'objectKey', 'versionId'])
   return {
@@ -1738,7 +2111,8 @@ function requireRecord(value: unknown): object {
   if (
     typeof value !== 'object' ||
     value === null ||
-    Array.isArray(value)
+    Array.isArray(value) ||
+    nodeUtilTypes.isProxy(value)
   ) {
     return failSealedAuthority()
   }
@@ -1777,6 +2151,11 @@ function requireExactKeys(
  * @param key - Required property name.
  * @returns Exact property value.
  */
+function readOwn<Value extends object, Key extends keyof Value>(
+  value: Value,
+  key: Key,
+): Value[Key]
+function readOwn(value: object, key: string): unknown
 function readOwn(value: object, key: string): unknown {
   let descriptor: PropertyDescriptor | undefined
   try {
@@ -1807,6 +2186,7 @@ function requireDenseArray(
 ): readonly unknown[] {
   if (
     !Array.isArray(value) ||
+    nodeUtilTypes.isProxy(value) ||
     value.length > maximumLength ||
     !hasCanonicalDenseArrayShape(value)
   ) {

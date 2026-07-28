@@ -91,6 +91,7 @@ const sourceEvidenceHeadKind =
 const sourceEvidencePageRecordKind =
   'workspace-search-migration-source-evidence-page-record'
 const sourceEvidenceAwsRecordVersion = 1
+const planningSourceEvidenceChainVersion = 3
 const sourceEvidenceRecordKeyPrefix = 'source-evidence/v1'
 /** Maximum replayable pages, bounding evidence to 1,000,000 source rows. */
 const sourceEvidenceMaximumPageCount = 10_000
@@ -612,8 +613,10 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
         predecessorRead.exists &&
         request.identity.purpose === 'planning' &&
         (
-          predecessorRead.latestEvidenceVersion !== 3 ||
-          predecessorRead.chainEvidenceVersion !== 3
+          predecessorRead.latestEvidenceVersion !==
+            planningSourceEvidenceChainVersion ||
+          predecessorRead.chainEvidenceVersion !==
+            planningSourceEvidenceChainVersion
         )
       ) {
         return failSourceEvidenceAws('INVALID_STATE')
@@ -950,7 +953,7 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
     for (const page of pages) {
       if (
         page.purpose !== 'planning' ||
-        page.evidenceVersion !== 3
+        page.evidenceVersion !== planningSourceEvidenceChainVersion
       ) {
         return failSourceEvidenceAws('INVALID_STATE')
       }
@@ -1016,7 +1019,7 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
     for (const page of pages) {
       if (
         page.purpose === 'planning' &&
-        page.evidenceVersion === 3
+        page.evidenceVersion === planningSourceEvidenceChainVersion
       ) {
         await this.verifyPlanningArtifactPage(
           request,
@@ -1153,7 +1156,7 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
       if (sourceEvidenceProgressEquals(currentHead.progress, successor)) {
         if (
           page.purpose === 'planning' &&
-          page.evidenceVersion === 3
+          page.evidenceVersion === planningSourceEvidenceChainVersion
         ) {
           try {
             await this.verifyPlanningArtifactPage(
@@ -1328,7 +1331,9 @@ export function createWorkspaceSearchMigrationSourceTerminalHeadConditionCheck(
           ':source': { S: progress.source },
           ':sourceTableId': { S: progress.sourceTableId },
           ':stateTableId': { S: progress.stateTableId },
-          ':chainEvidenceVersion': { N: '3' },
+          ':chainEvidenceVersion': {
+            N: String(planningSourceEvidenceChainVersion),
+          },
           ':revision': { N: String(progress.pageSequence) },
           ':checkpoint': encodeSourceEvidenceCheckpoint(
             progress.checkpoint,
@@ -1585,7 +1590,10 @@ function createSourceEvidenceHeadItem(
   void createWorkspaceSearchMigrationSourceEvidenceProgressDigest(progress)
   if (
     (progress.purpose === 'dry-run' && chainEvidenceVersion !== 1) ||
-    (progress.purpose === 'planning' && chainEvidenceVersion !== 3)
+    (
+      progress.purpose === 'planning' &&
+      chainEvidenceVersion !== planningSourceEvidenceChainVersion
+    )
   ) {
     return failSourceEvidenceAws('INVALID_STATE')
   }

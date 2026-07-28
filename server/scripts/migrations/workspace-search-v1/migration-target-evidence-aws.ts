@@ -93,6 +93,7 @@ const targetEvidenceHeadKind =
 const targetEvidencePageRecordKind =
   'workspace-search-migration-target-evidence-page-record'
 const targetEvidenceAwsRecordVersion = 1
+const planningTargetEvidenceChainVersion = 1
 const targetEvidenceRecordKeyPrefix = 'target-evidence/v1'
 /** Maximum replayable pages, bounding evidence to 1,000,000 target rows. */
 export const WORKSPACE_SEARCH_MIGRATION_TARGET_EVIDENCE_MAXIMUM_PAGE_COUNT =
@@ -577,8 +578,10 @@ class AwsWorkspaceSearchMigrationTargetEvidencePort
       if (
         predecessorRead.exists &&
         (
-          predecessorRead.latestEvidenceVersion !== 1 ||
-          predecessorRead.chainEvidenceVersion !== 1
+          predecessorRead.latestEvidenceVersion !==
+            planningTargetEvidenceChainVersion ||
+          predecessorRead.chainEvidenceVersion !==
+            planningTargetEvidenceChainVersion
         )
       ) {
         return failTargetEvidenceAws('INVALID_STATE')
@@ -1262,7 +1265,9 @@ export function createWorkspaceSearchMigrationTargetTerminalHeadConditionCheck(
           ':config': { S: progress.configurationHash },
           ':targetTableId': { S: progress.targetTableId },
           ':stateTableId': { S: progress.stateTableId },
-          ':chainEvidenceVersion': { N: '1' },
+          ':chainEvidenceVersion': {
+            N: String(planningTargetEvidenceChainVersion),
+          },
           ':revision': { N: String(progress.pageSequence) },
           ':checkpoint': encodeTargetEvidenceCheckpoint(
             progress.checkpoint,
@@ -1509,7 +1514,7 @@ function createTargetEvidenceHeadItem(
 ): Readonly<Record<string, AttributeValue>> {
   requireProgressIdentity(identity, progress)
   void createWorkspaceSearchMigrationTargetEvidenceProgressDigest(progress)
-  if (chainEvidenceVersion !== 1) {
+  if (chainEvidenceVersion !== planningTargetEvidenceChainVersion) {
     return failTargetEvidenceAws('INVALID_STATE')
   }
   const item: Record<string, AttributeValue> = {
@@ -1809,7 +1814,7 @@ function parseTargetEvidenceHeadItem(
   }
   const chainEvidenceVersion =
     readRequiredPositiveNumberAttribute(item, 'chainEvidenceVersion')
-  if (chainEvidenceVersion !== 1) {
+  if (chainEvidenceVersion !== planningTargetEvidenceChainVersion) {
     return failTargetEvidenceAws('INVALID_STATE')
   }
   requireHeadIdentity(item, request.identity)

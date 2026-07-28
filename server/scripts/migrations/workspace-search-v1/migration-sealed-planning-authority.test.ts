@@ -32,6 +32,7 @@ import {
   parseWorkspaceSearchMigrationSealedPlanningAuthority,
   serializeWorkspaceSearchMigrationPlanningProvenanceArtifact,
   serializeWorkspaceSearchMigrationSealedPlanningAuthority,
+  type WorkspaceSearchMigrationSealedPlanningAuthority,
   WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_ARTIFACT_MAX_BYTES,
   WORKSPACE_SEARCH_MIGRATION_SEALED_PLANNING_AUTHORITY_MAX_BYTES,
   WorkspaceSearchMigrationSealedPlanningAuthorityError,
@@ -440,6 +441,138 @@ describe('Workspace Search sealed planning authority', () => {
   )
 
   test(
+    'rejects accessor and proxy inputs before seal values can diverge',
+    () => {
+      const fixture = createSealedPlanningFixture()
+      const accessorKeys: readonly (
+        keyof Pick<
+          typeof fixture.authorityInput,
+          | 'configuration'
+          | 'planSeal'
+          | 'sourceProgress'
+          | 'targetProgress'
+        >
+      )[] = [
+        'configuration',
+        'planSeal',
+        'sourceProgress',
+        'targetProgress',
+      ]
+      for (const key of accessorKeys) {
+        let reads = 0
+        const accessorInput = { ...fixture.authorityInput }
+        Reflect.defineProperty(accessorInput, key, {
+          configurable: true,
+          enumerable: true,
+          get() {
+            reads += 1
+            return fixture.authorityInput[key]
+          },
+        })
+        expectSealedAuthorityFailure(() =>
+          createWorkspaceSearchMigrationSealedPlanningAuthority(
+            accessorInput,
+          )
+        )
+        expect(reads).toBe(0)
+      }
+
+      const accessorConfiguration =
+        structuredClone(fixture.configuration)
+      const stateTable =
+        accessorConfiguration.tables['migration-state']
+      let stateTableReads = 0
+      Reflect.defineProperty(
+        accessorConfiguration.tables,
+        'migration-state',
+        {
+          configurable: true,
+          enumerable: true,
+          get() {
+            stateTableReads += 1
+            return stateTableReads === 1
+              ? stateTable
+              : { ...stateTable, tableId: 'divergent-state-table-id' }
+          },
+        },
+      )
+      expectSealedAuthorityFailure(() =>
+        createWorkspaceSearchMigrationSealedPlanningAuthority({
+          ...fixture.authorityInput,
+          configuration: accessorConfiguration,
+        })
+      )
+      expect(stateTableReads).toBe(0)
+
+      const accessorSourceProgress =
+        structuredClone(fixture.sourceProgress)
+      const sourceProgress =
+        accessorSourceProgress['project-directory']
+      const sourceEvidenceDigest = sourceProgress.evidenceDigest
+      let sourceDigestReads = 0
+      Reflect.defineProperty(sourceProgress, 'evidenceDigest', {
+        configurable: true,
+        enumerable: true,
+        get() {
+          sourceDigestReads += 1
+          return sourceDigestReads === 1
+            ? sourceEvidenceDigest
+            : digest('divergent-source-progress')
+        },
+      })
+      expectSealedAuthorityFailure(() =>
+        createWorkspaceSearchMigrationSealedPlanningAuthority({
+          ...fixture.authorityInput,
+          sourceProgress: accessorSourceProgress,
+        })
+      )
+      expect(sourceDigestReads).toBe(0)
+
+      const accessorTargetProgress =
+        structuredClone(fixture.targetProgress)
+      const targetEvidenceDigest =
+        accessorTargetProgress.evidenceDigest
+      let targetDigestReads = 0
+      Reflect.defineProperty(
+        accessorTargetProgress,
+        'evidenceDigest',
+        {
+          configurable: true,
+          enumerable: true,
+          get() {
+            targetDigestReads += 1
+            return targetDigestReads === 1
+              ? targetEvidenceDigest
+              : digest('divergent-target-progress')
+          },
+        },
+      )
+      expectSealedAuthorityFailure(() =>
+        createWorkspaceSearchMigrationSealedPlanningAuthority({
+          ...fixture.authorityInput,
+          targetProgress: accessorTargetProgress,
+        })
+      )
+      expect(targetDigestReads).toBe(0)
+
+      let proxyReads = 0
+      const targetProxy = new Proxy(fixture.targetProgress, {
+        get(target, key, receiver) {
+          proxyReads += 1
+          return Reflect.get(target, key, receiver)
+        },
+      })
+      expectSealedAuthorityFailure(() =>
+        createWorkspaceSearchMigrationSealedPlanningAuthority({
+          ...fixture.authorityInput,
+          targetProgress: targetProxy,
+        })
+      )
+      expect(proxyReads).toBe(0)
+    },
+  )
+
+  test(
     'commits exactly five canonical heads and all measured table incarnations',
     () => {
       const fixture = createSealedPlanningFixture()
@@ -558,6 +691,42 @@ describe('Workspace Search sealed planning authority', () => {
       expectSealedAuthorityFailure(() =>
         parseWorkspaceSearchMigrationSealedPlanningAuthority(
           encodeCanonical(tamperedAuthority),
+        )
+      )
+
+      const inconsistentEmptyPlan = structuredClone(authority)
+      Reflect.set(inconsistentEmptyPlan, 'planOperationCount', 1)
+      expectSealedAuthorityFailure(() =>
+        parseWorkspaceSearchMigrationSealedPlanningAuthority(
+          encodeAuthorityWithRecomputedDigest(inconsistentEmptyPlan),
+        )
+      )
+
+      const emptyHistoricalReceipts = structuredClone(authority)
+      Reflect.set(emptyHistoricalReceipts, 'historicalReceiptCount', 0)
+      expectSealedAuthorityFailure(() =>
+        parseWorkspaceSearchMigrationSealedPlanningAuthority(
+          encodeAuthorityWithRecomputedDigest(emptyHistoricalReceipts),
+        )
+      )
+
+      const missingTableRole = structuredClone(authority)
+      Reflect.deleteProperty(missingTableRole.tableIds, 'documents')
+      expectSealedAuthorityFailure(() =>
+        parseWorkspaceSearchMigrationSealedPlanningAuthority(
+          encodeAuthorityWithRecomputedDigest(missingTableRole),
+        )
+      )
+
+      const extraTableRole = structuredClone(authority)
+      Reflect.set(
+        extraTableRole.tableIds,
+        'unexpected-table-role',
+        'unexpected-table-id',
+      )
+      expectSealedAuthorityFailure(() =>
+        parseWorkspaceSearchMigrationSealedPlanningAuthority(
+          encodeAuthorityWithRecomputedDigest(extraTableRole),
         )
       )
 
@@ -1107,6 +1276,23 @@ function createEmptyPlanSeal(
  */
 function encodeCanonical(value: unknown): Uint8Array {
   return new TextEncoder().encode(serializeCanonicalJson(value))
+}
+
+/**
+ * Recomputes the compact authority self-digest after fixture mutation.
+ *
+ * @param authority - Mutated compact authority fixture.
+ * @returns Canonical bytes carrying the recomputed self-digest.
+ */
+function encodeAuthorityWithRecomputedDigest(
+  authority: WorkspaceSearchMigrationSealedPlanningAuthority,
+): Uint8Array {
+  const authorityFields = { ...authority }
+  Reflect.deleteProperty(authorityFields, 'authorityDigest')
+  return encodeCanonical({
+    ...authorityFields,
+    authorityDigest: createMigrationDigest(authorityFields),
+  })
 }
 
 /**
