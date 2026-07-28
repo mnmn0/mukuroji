@@ -66,6 +66,7 @@ import {
   createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks,
   type WorkspaceSearchMigrationPrePlanAuthority,
   type WorkspaceSearchMigrationPrePlanAuthorityClock,
+  workspaceSearchMigrationPrePlanAuthorityCommitConditionIndex,
 } from './migration-pre-plan-authority-aws'
 import {
   cloneWorkspaceSearchMigrationExactTableKey,
@@ -88,7 +89,10 @@ const targetEvidencePageRecordKind =
 const targetEvidenceAwsRecordVersion = 1
 const targetEvidenceRecordKeyPrefix = 'target-evidence/v1'
 /** Maximum replayable pages, bounding evidence to 1,000,000 target rows. */
-const targetEvidenceMaximumPageCount = 10_000
+export const WORKSPACE_SEARCH_MIGRATION_TARGET_EVIDENCE_MAXIMUM_PAGE_COUNT =
+  10_000
+/** Maximum number of strong page reads issued in one ordered prefetch wave. */
+const targetEvidencePageReadConcurrency = 25
 
 /**
  * Narrow DynamoDB transport used to read and atomically commit target evidence.
@@ -489,7 +493,8 @@ class AwsWorkspaceSearchMigrationTargetEvidencePort
       }
       if (predecessor.checkpoint.completed) return predecessor
       if (
-        predecessor.pageSequence >= targetEvidenceMaximumPageCount
+        predecessor.pageSequence >=
+          WORKSPACE_SEARCH_MIGRATION_TARGET_EVIDENCE_MAXIMUM_PAGE_COUNT
       ) {
         return failTargetEvidenceAws('INVALID_STATE')
       }
@@ -733,16 +738,36 @@ class AwsWorkspaceSearchMigrationTargetEvidencePort
   ): Promise<WorkspaceSearchMigrationTargetEvidencePage[]> {
     requireTargetEvidencePageCountWithinLimit(pageCount)
     const pages: WorkspaceSearchMigrationTargetEvidencePage[] = []
-    for (let sequence = 1; sequence <= pageCount; sequence += 1) {
-      const recordKey = createTargetEvidencePageRecordKey(
-        request.identity,
-        sequence,
+    for (
+      let batchStart = 1;
+      batchStart <= pageCount;
+      batchStart += targetEvidencePageReadConcurrency
+    ) {
+      const batchEnd = Math.min(
+        pageCount,
+        batchStart + targetEvidencePageReadConcurrency - 1,
       )
-      const page = await this.readPage(request, recordKey)
-      if (page === undefined || page.revision !== sequence) {
-        return failTargetEvidenceAws('INVALID_STATE')
+      const pageReads: Promise<TargetEvidencePageRead | undefined>[] = []
+      for (
+        let sequence = batchStart;
+        sequence <= batchEnd;
+        sequence += 1
+      ) {
+        const recordKey = createTargetEvidencePageRecordKey(
+          request.identity,
+          sequence,
+        )
+        pageReads.push(this.readPage(request, recordKey))
       }
-      pages.push(page.page)
+      const pageBatch = await Promise.all(pageReads)
+      for (let offset = 0; offset < pageBatch.length; offset += 1) {
+        const sequence = batchStart + offset
+        const page = pageBatch[offset]
+        if (page === undefined || page.revision !== sequence) {
+          return failTargetEvidenceAws('INVALID_STATE')
+        }
+        pages.push(page.page)
+      }
     }
     return pages
   }
@@ -853,14 +878,11 @@ class AwsWorkspaceSearchMigrationTargetEvidencePort
         targetArtifacts: page.targetArtifacts,
       })
     if (
-      !Buffer.from(
+      !uint8ArraysEqual(
         serializeWorkspaceSearchMigrationTargetEvidencePage(
           reconstructedEvidence,
         ),
-      ).equals(
-        Buffer.from(
-          serializeWorkspaceSearchMigrationTargetEvidencePage(page),
-        ),
+        serializeWorkspaceSearchMigrationTargetEvidencePage(page),
       )
     ) {
       return failTargetEvidenceAws('INVALID_TARGET_ARTIFACT')
@@ -1281,7 +1303,8 @@ function createTargetEvidenceCommitCommand(
   input: CreateTargetEvidenceCommitCommandInput,
 ): TransactWriteItemsCommand {
   if (
-    input.authorityConditionChecks.length !== 3
+    input.authorityConditionChecks.length !==
+      workspaceSearchMigrationPrePlanAuthorityCommitConditionIndex.count
   ) {
     return failTargetEvidenceAws('INVALID_STATE')
   }
@@ -1426,7 +1449,8 @@ function createExistingHeadCondition(
 }
 
 /**
- * Creates one bounded deterministic DynamoDB idempotency token.
+ * Creates one deterministic idempotency token that remains within DynamoDB's
+ * 36-character `ClientRequestToken` limit.
  *
  * @param predecessor - Exact predecessor progress.
  * @param successor - Exact intended successor progress.
@@ -1454,7 +1478,11 @@ function createTargetEvidenceTransactionToken(
     authorityConditionEpochMilliseconds:
       commitClock.epochMilliseconds,
   })
-  return `wsm1-${digest.slice(0, 31)}`
+  const token = `wsm1-${digest.slice(0, 31)}`
+  if (token.length > 36) {
+    return failTargetEvidenceAws('INVALID_STATE')
+  }
+  return token
 }
 
 /**
@@ -2136,7 +2164,8 @@ function requireTargetEvidencePageCountWithinLimit(
   if (
     !Number.isSafeInteger(pageCount) ||
     pageCount < 0 ||
-    pageCount > targetEvidenceMaximumPageCount
+    pageCount >
+      WORKSPACE_SEARCH_MIGRATION_TARGET_EVIDENCE_MAXIMUM_PAGE_COUNT
   ) {
     return failTargetEvidenceAws('INVALID_STATE')
   }
@@ -2634,15 +2663,24 @@ function classifyTargetEvidenceTransactionError(
     }
     if (error instanceof TransactionCanceledException) {
       if (
-        readTransactionCancellationReasonCode(error, 0) ===
+        readTransactionCancellationReasonCode(
+          error,
+          workspaceSearchMigrationPrePlanAuthorityCommitConditionIndex.lease,
+        ) ===
           'ConditionalCheckFailed'
       ) {
         return 'LEASE_LOST'
       }
       if (
-        readTransactionCancellationReasonCode(error, 1) ===
+        readTransactionCancellationReasonCode(
+          error,
+          workspaceSearchMigrationPrePlanAuthorityCommitConditionIndex.pointer,
+        ) ===
           'ConditionalCheckFailed' ||
-        readTransactionCancellationReasonCode(error, 2) ===
+        readTransactionCancellationReasonCode(
+          error,
+          workspaceSearchMigrationPrePlanAuthorityCommitConditionIndex.receipt,
+        ) ===
           'ConditionalCheckFailed'
       ) {
         return 'INVALID_MAINTENANCE_EVIDENCE'

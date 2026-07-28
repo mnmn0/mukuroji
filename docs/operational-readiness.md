@@ -412,7 +412,12 @@ artifact version を強整合で再読して reducer と canonical bytes を再�
 check、immutable page、exact predecessor-CAS head からなる固定5 item transaction で target evidence
 と checkpoint を進めます。Transaction response loss は exact successor なら intended page の全
 artifact segment、head-ahead なら exact committed prefix の全 page/artifact replay が期待状態に
-完全一致するときだけ回収します。ただし、この adapter と concrete managed AWS session
+完全一致するときだけ回収します。Durable page は強整合 `GetItem` を最大25件ずつ順序付きで
+先読みします。上限10,000 page の worst case は10,000 request / 最大400回の DynamoDB read wave
+に加えて、
+依存する progress を順番に進める最大10,000回の exact-version S3 artifact 検証となるため、
+運用 timeout は `400 × DynamoDB p95 + 10,000 × S3/reducer p95 + retry budget` を基準に
+見積もります。ただし、この adapter と concrete managed AWS session
 の raw-page capture composition は未接続であり、standalone adapter を planning の実行入口として
 使用できません。Complete target join、実行 CLI、heartbeat supervisor、online writer fence、migration 専用
 observability/alarm、restore/failover/DR drill、完全な source/target completeness 実行も未実装です。

@@ -40,6 +40,7 @@ import {
   type WorkspaceSearchMigrationTargetEvidenceAwsPort,
   type WorkspaceSearchMigrationTargetEvidenceAwsRequest,
   type WorkspaceSearchMigrationTargetEvidenceAwsTransport,
+  WORKSPACE_SEARCH_MIGRATION_TARGET_EVIDENCE_MAXIMUM_PAGE_COUNT,
 } from './migration-target-evidence-aws'
 import {
   createWorkspaceSearchMigrationPlanningTargetArtifactObjectKey,
@@ -443,6 +444,15 @@ class InMemoryTargetEvidenceAwsTransport
   /** Marker for every completed target pre-write preparation. */
   readonly prepareCalls: true[] = []
 
+  /** Whether page reads should yield so concurrent prefetch is measurable. */
+  private measureTargetPageReadConcurrency = false
+
+  /** Number of target page reads currently inside the measurement window. */
+  private activeTargetPageReads = 0
+
+  /** Highest measured number of simultaneous target page reads. */
+  private maximumConcurrentTargetPageReads = 0
+
   /** Exact-version target artifact storage shared across resumed ports. */
   readonly planningArtifactStore =
     new InMemoryPlanningTargetArtifactStore()
@@ -518,6 +528,24 @@ class InMemoryTargetEvidenceAwsTransport
   }
 
   /**
+   * Starts measuring target-page read concurrency for subsequent operations.
+   */
+  startTargetPageReadConcurrencyMeasurement(): void {
+    this.measureTargetPageReadConcurrency = true
+    this.activeTargetPageReads = 0
+    this.maximumConcurrentTargetPageReads = 0
+  }
+
+  /**
+   * Reads the maximum simultaneous target-page reads since measurement began.
+   *
+   * @returns Highest number of in-flight page reads.
+   */
+  readMaximumConcurrentTargetPageReads(): number {
+    return this.maximumConcurrentTargetPageReads
+  }
+
+  /**
    * Returns detached durable rows for assertions.
    *
    * @returns Current authority, page, and head rows.
@@ -587,7 +615,20 @@ class InMemoryTargetEvidenceAwsTransport
       this.getFailure = undefined
       throw failure
     }
-    const item = this.items.get(readCommandRecordKey(command))
+    const recordKey = readCommandRecordKey(command)
+    if (
+      this.measureTargetPageReadConcurrency &&
+      recordKey.includes('/page/')
+    ) {
+      this.activeTargetPageReads += 1
+      this.maximumConcurrentTargetPageReads = Math.max(
+        this.maximumConcurrentTargetPageReads,
+        this.activeTargetPageReads,
+      )
+      await Promise.resolve()
+      this.activeTargetPageReads -= 1
+    }
+    const item = this.items.get(recordKey)
     return {
       $metadata: {},
       ...(item === undefined ? {} : { Item: structuredClone(item) }),
@@ -1622,6 +1663,7 @@ describe('Workspace Search migration target evidence AWS adapter', () => {
     const prepareCount = transport.prepareCalls.length
     const transactionCount = transport.transactionCommands.length
     const repeated = await resumedPort.commitNextPage(request)
+    transport.startTargetPageReadConcurrencyMeasurement()
     const replay = await resumedPort.readCommittedEvidence(readRequest)
 
     expect(secondGateway.captureCalls[0]?.previousCheckpoint)
@@ -1645,6 +1687,7 @@ describe('Workspace Search migration target evidence AWS adapter', () => {
     expect(replay.targetRows).toHaveLength(1)
     expect(replay.invalidRows).toHaveLength(1)
     expect(replay.observedTargetBindings).toHaveLength(0)
+    expect(transport.readMaximumConcurrentTargetPageReads()).toBe(2)
     expect(secondGateway.captureCalls).toHaveLength(captureCount)
     expect(transport.prepareCalls).toHaveLength(prepareCount)
     expect(transport.transactionCommands).toHaveLength(transactionCount)
@@ -1981,6 +2024,8 @@ describe('Workspace Search migration target evidence AWS adapter', () => {
       .toMatch(/^wsm1-[0-9a-f]{31}$/u)
     expect(secondCommand.input.ClientRequestToken)
       .toMatch(/^wsm1-[0-9a-f]{31}$/u)
+    expect(firstCommand.input.ClientRequestToken).toHaveLength(36)
+    expect(secondCommand.input.ClientRequestToken).toHaveLength(36)
     expect(firstCommand.input.ClientRequestToken)
       .not.toBe(secondCommand.input.ClientRequestToken)
     const page = readTargetEvidencePage(
@@ -3289,7 +3334,8 @@ describe('Workspace Search migration target evidence AWS adapter', () => {
     )
     const checkpoint = readMapAttribute(head, 'checkpoint')
     const aggregate = readMapAttribute(checkpoint, 'aggregate')
-    const pageCount = 10_001
+    const pageCount =
+      WORKSPACE_SEARCH_MIGRATION_TARGET_EVIDENCE_MAXIMUM_PAGE_COUNT + 1
     const overLimitCheckpoint = {
       ...completed.checkpoint,
       aggregate: {
@@ -3330,7 +3376,7 @@ describe('Workspace Search migration target evidence AWS adapter', () => {
     expect(transport.getCommands).toHaveLength(readsBefore + 1)
   })
 
-  test('redacts raw gateway, read, prepare, and transaction errors', async () => {
+  test('redacts raw target gateway errors', async () => {
     const configuration = createConfiguration()
     const gatewayTransport = new InMemoryTargetEvidenceAwsTransport()
     const gatewayClock = new MutableAuthorityClock(initialTime)
@@ -3367,7 +3413,10 @@ describe('Workspace Search migration target evidence AWS adapter', () => {
     })
     expect(gatewayFailure.message)
       .not.toContain('RAW-TARGET-GATEWAY-CANARY')
+  })
 
+  test('redacts raw target evidence read errors', async () => {
+    const configuration = createConfiguration()
     const readTransport = new InMemoryTargetEvidenceAwsTransport()
     readTransport.failNextGet(new Error('RAW-TARGET-GET-CANARY'))
     const readFailure = await captureMigrationFailure(
@@ -3384,7 +3433,10 @@ describe('Workspace Search migration target evidence AWS adapter', () => {
     )
     expect(readFailure.code).toBe('INVALID_STATE')
     expect(readFailure.message).not.toContain('RAW-TARGET-GET-CANARY')
+  })
 
+  test('redacts raw target evidence preparation errors', async () => {
+    const configuration = createConfiguration()
     const prepareTransport = new InMemoryTargetEvidenceAwsTransport()
     const prepareClock = new MutableAuthorityClock(initialTime)
     const prepareAuthority = await acquirePlanningAuthority(
@@ -3414,7 +3466,10 @@ describe('Workspace Search migration target evidence AWS adapter', () => {
     expect(prepareFailure.code).toBe('INVALID_STATE')
     expect(prepareFailure.message)
       .not.toContain('RAW-TARGET-PREPARE-CANARY')
+  })
 
+  test('redacts raw target evidence transaction errors', async () => {
+    const configuration = createConfiguration()
     const transactionClassifications: readonly {
       /** Stable raw error name supplied to Smithy's classifier. */
       readonly name: string

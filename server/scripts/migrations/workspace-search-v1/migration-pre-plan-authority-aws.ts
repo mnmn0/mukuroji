@@ -1045,6 +1045,17 @@ export function createAwsWorkspaceSearchMigrationPrePlanAuthorityPort(
 }
 
 /**
+ * Fixed cancellation-reason positions prepended to every planning transaction.
+ */
+export const workspaceSearchMigrationPrePlanAuthorityCommitConditionIndex =
+  Object.freeze({
+    lease: 0,
+    pointer: 1,
+    receipt: 2,
+    count: 3,
+  })
+
+/**
  * Creates the fixed lease, current-pointer, and immutable-receipt conditions
  * that a planning transaction must prepend to its own writes.
  *
@@ -1105,13 +1116,13 @@ export function createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChe
         durableReceipt,
         commitClock,
       )
-
-    return [
+    const leaseConditionCheck =
       createPrePlanAuthorityConditionCheck(
         binding,
         createLeaseRecordKey(binding),
         leaseCondition,
-      ),
+      )
+    const pointerConditionCheck =
       createPrePlanAuthorityConditionCheck(
         binding,
         createPointerRecordKey(
@@ -1119,7 +1130,8 @@ export function createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChe
           authority.lease.runId,
         ),
         pointerCondition,
-      ),
+      )
+    const receiptConditionCheck =
       createPrePlanAuthorityConditionCheck(
         binding,
         createReceiptRecordKey(
@@ -1128,7 +1140,12 @@ export function createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChe
           durableReceipt.receiptDigest,
         ),
         receiptCondition,
-      ),
+      )
+
+    return [
+      leaseConditionCheck,
+      pointerConditionCheck,
+      receiptConditionCheck,
     ]
   } catch (error: unknown) {
     throw createPrePlanAuthorityBoundaryFailure(

@@ -68,6 +68,7 @@ import {
   createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks,
   type WorkspaceSearchMigrationPrePlanAuthority,
   type WorkspaceSearchMigrationPrePlanAuthorityClock,
+  workspaceSearchMigrationPrePlanAuthorityCommitConditionIndex,
 } from './migration-pre-plan-authority-aws'
 import {
   cloneWorkspaceSearchMigrationExactTableKey,
@@ -1367,7 +1368,9 @@ function createSourceEvidenceCommitCommand(
   input: CreateSourceEvidenceCommitCommandInput,
 ): TransactWriteItemsCommand {
   const requiredAuthorityConditionCount =
-    input.successor.purpose === 'planning' ? 3 : 0
+    input.successor.purpose === 'planning'
+      ? workspaceSearchMigrationPrePlanAuthorityCommitConditionIndex.count
+      : 0
   if (
     input.authorityConditionChecks.length !==
       requiredAuthorityConditionCount ||
@@ -2774,15 +2777,24 @@ function classifySourceEvidenceTransactionError(
     if (error instanceof TransactionCanceledException) {
       if (purpose === 'planning') {
         if (
-          readTransactionCancellationReasonCode(error, 0) ===
+          readTransactionCancellationReasonCode(
+            error,
+            workspaceSearchMigrationPrePlanAuthorityCommitConditionIndex.lease,
+          ) ===
             'ConditionalCheckFailed'
         ) {
           return 'LEASE_LOST'
         }
         if (
-          readTransactionCancellationReasonCode(error, 1) ===
+          readTransactionCancellationReasonCode(
+            error,
+            workspaceSearchMigrationPrePlanAuthorityCommitConditionIndex.pointer,
+          ) ===
             'ConditionalCheckFailed' ||
-          readTransactionCancellationReasonCode(error, 2) ===
+          readTransactionCancellationReasonCode(
+            error,
+            workspaceSearchMigrationPrePlanAuthorityCommitConditionIndex.receipt,
+          ) ===
             'ConditionalCheckFailed'
         ) {
           return 'INVALID_MAINTENANCE_EVIDENCE'
