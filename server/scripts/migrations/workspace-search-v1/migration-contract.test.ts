@@ -22,12 +22,18 @@ import {
 } from './migration-contract'
 
 describe('Workspace Search migration contract', () => {
-  test('recognizes source artifact failure codes without accepting arbitrary text', () => {
+  test('recognizes artifact failure codes without accepting arbitrary text', () => {
     expect(isWorkspaceSearchMigrationFailureCode(
       'INVALID_SOURCE_ARTIFACT',
     )).toBe(true)
     expect(isWorkspaceSearchMigrationFailureCode(
       'SOURCE_ARTIFACT_WRITE_FAILED',
+    )).toBe(true)
+    expect(isWorkspaceSearchMigrationFailureCode(
+      'INVALID_TARGET_ARTIFACT',
+    )).toBe(true)
+    expect(isWorkspaceSearchMigrationFailureCode(
+      'TARGET_ARTIFACT_WRITE_FAILED',
     )).toBe(true)
     expect(isWorkspaceSearchMigrationFailureCode(
       'SOURCE_ARTIFACT_workspace-secret',
