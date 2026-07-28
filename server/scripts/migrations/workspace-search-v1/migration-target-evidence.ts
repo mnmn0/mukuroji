@@ -259,17 +259,10 @@ export function advanceWorkspaceSearchMigrationTargetEvidenceProgress(
   return runTargetEvidenceBoundary(() => {
     const validatedPrevious = readProgress(encodeProgress(previous))
     const validatedPage = readRawPage(page)
-    validateSuccessor(validatedPrevious, validatedPage)
-    return {
-      purpose: 'planning',
-      runId: validatedPage.runId,
-      configurationHash: validatedPage.configurationHash,
-      targetTableId: validatedPage.targetTableId,
-      stateTableId: validatedPage.stateTableId,
-      pageSequence: validatedPage.pageSequence,
-      evidenceDigest: createPageDigestUnchecked(validatedPage),
-      checkpoint: cloneCheckpoint(validatedPage.checkpoint),
-    }
+    return advanceValidatedTargetEvidenceProgress(
+      validatedPrevious,
+      validatedPage,
+    )
   })
 }
 
@@ -293,24 +286,12 @@ export function replayWorkspaceSearchMigrationTargetEvidencePages(
       WorkspaceSearchMigrationInvalidTargetScanRowEvidence[] = []
     const observedTargetBindings:
       WorkspaceSearchMigrationObservedTargetBinding[] = []
-    const targetKeys = new Set<string>()
-    const boundTargetKeys = new Set<string>()
     for (const candidate of pages) {
       const page = readRawPage(candidate)
-      progress = advanceWorkspaceSearchMigrationTargetEvidenceProgress(
+      progress = advanceValidatedTargetEvidenceProgress(
         progress,
         page,
       )
-      for (const row of [...page.targetRows, ...page.invalidRows]) {
-        if (targetKeys.has(row.targetKeyDigest)) return failTargetEvidence()
-        targetKeys.add(row.targetKeyDigest)
-      }
-      for (const binding of page.observedTargetBindings) {
-        if (boundTargetKeys.has(binding.targetKeyDigest)) {
-          return failTargetEvidence()
-        }
-        boundTargetKeys.add(binding.targetKeyDigest)
-      }
       targetRows.push(...page.targetRows)
       invalidRows.push(...page.invalidRows)
       observedTargetBindings.push(...page.observedTargetBindings)
@@ -328,6 +309,30 @@ export function replayWorkspaceSearchMigrationTargetEvidencePages(
       observedTargetBindings,
     }
   })
+}
+
+/**
+ * Advances from already validated progress and page values without re-parsing.
+ *
+ * @param previous - Validated exact predecessor progress.
+ * @param page - Validated candidate successor page.
+ * @returns Detached validated successor progress.
+ */
+function advanceValidatedTargetEvidenceProgress(
+  previous: WorkspaceSearchMigrationTargetEvidenceProgress,
+  page: WorkspaceSearchMigrationTargetEvidencePage,
+): WorkspaceSearchMigrationTargetEvidenceProgress {
+  validateSuccessor(previous, page)
+  return {
+    purpose: 'planning',
+    runId: page.runId,
+    configurationHash: page.configurationHash,
+    targetTableId: page.targetTableId,
+    stateTableId: page.stateTableId,
+    pageSequence: page.pageSequence,
+    evidenceDigest: createPageDigestUnchecked(page),
+    checkpoint: cloneCheckpoint(page.checkpoint),
+  }
 }
 
 /**

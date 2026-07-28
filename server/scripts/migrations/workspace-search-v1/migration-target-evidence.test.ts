@@ -756,6 +756,20 @@ describe('Workspace Search target evidence', () => {
         advanceWorkspaceSearchMigrationTargetEvidenceProgress(initial, fork),
     )
 
+    const checkpointFork = structuredClone(first.page)
+    Reflect.set(
+      checkpointFork,
+      'previousCheckpointDigest',
+      digest('checkpoint-fork'),
+    )
+    expectTargetEvidenceFailure(
+      () =>
+        advanceWorkspaceSearchMigrationTargetEvidenceProgress(
+          initial,
+          checkpointFork,
+        ),
+    )
+
     const terminal = commitPage(
       initial,
       createPageResult(initial.checkpoint, []),
