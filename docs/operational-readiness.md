@@ -566,6 +566,20 @@ guard materialは、強整合で取得したexact open rowのcanonical bytesとd
 epochを取り直して同じmutationを継続してはいけません。Guard 1 itemを予約するため、application transaction
 が使用できる残りの上限は99 itemです。
 
+Application側のdormant foundationは、設定された6つのexact table nameをmutation時に独立して
+`DescribeTable`し、同一account/region、`ACTIVE`、TableId、ARN、作成時刻を検証した後、migration-stateの
+exact rowを強整合で取得します。取得はinvocation-local scopeで最初のPromiseを成功・失敗とも固定し、
+並行mutationやretryが別epochを取り直すことを禁止し、異なるsourceが同じinvocationへ混在した場合も
+再取得せずfail-closedにします。Guard materialはmigration-stateの完全な実測identityを持ち、
+table name、TableId、incarnation digestを再検証します。Low-level `AttributeValue`のguard materialは
+strict boundaryでnative DocumentClient valueへ変換し、guardをindex 0へ追加してから送信します。
+Application itemの`NumberValue`、set、binaryはmarshalling semanticsを保ってdetachし、未対応classは
+transport前に拒否します。Guard取得失敗はraw AWS errorやrow/table valueを記録せず、
+`validation`/`authorization`/`upstream`と安全なcorrelation IDだけを内部診断へ出します。
+`CancellationReasons[0]`のcondition failureはdomain conflict、idempotency reconciliation、retryより先に
+terminalなwriter-blocked failureへ分類します。このfoundationはまだentrypointやwriterへ配線しておらず、
+AWSへのguard readも実行しません。
+
 このConditionCheckはlive TableIdをDynamoDB transaction内で問い合わせません。全6 TableId bindingは
 guard token作成前の独立measurementとstrict row parseでrestore/replacement driftを検出しますが、
 measurement後からtransactionまでの同名table差替えとはatomicではありません。Restore/replacementは
