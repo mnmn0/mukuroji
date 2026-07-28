@@ -76,6 +76,16 @@ import {
   parseWorkspaceSearchMigrationPlanningSourceArtifactSegment,
 } from './migration-source-artifact'
 import type {
+  WorkspaceSearchMigrationTargetEvidenceAwsCommitRequest,
+  WorkspaceSearchMigrationTargetEvidenceAwsRequest,
+} from './migration-target-evidence-aws'
+import {
+  parseWorkspaceSearchMigrationTargetEvidencePage,
+} from './migration-target-evidence'
+import {
+  parseWorkspaceSearchMigrationPlanningTargetArtifactSegment,
+} from './migration-target-artifact'
+import type {
   WorkspaceSearchMigrationPrePlanAuthority,
 } from './migration-pre-plan-authority-aws'
 import type {
@@ -88,6 +98,9 @@ import {
   createEmptyWorkspaceSearchMigrationTargetScanCheckpoint,
   type WorkspaceSearchMigrationTargetScanCheckpoint,
 } from './migration-target-scan-context'
+import {
+  reduceWorkspaceSearchMigrationTargetScanPage,
+} from './migration-target-scan-page'
 import {
   createEmptyWorkspaceSearchMigrationCheckpoint,
 } from './migration-state-machine'
@@ -201,6 +214,13 @@ class RecordingIdentityAwsTransport
   readonly transactWriteSourceEvidenceCommands:
     TransactWriteItemsCommand[] = []
 
+  /** Recorded strongly consistent target-evidence point reads. */
+  readonly getTargetEvidenceCommands: GetItemCommand[] = []
+
+  /** Recorded atomic target-evidence page/head transactions. */
+  readonly transactWriteTargetEvidenceCommands:
+    TransactWriteItemsCommand[] = []
+
   /** Recorded strongly consistent pre-plan authority point reads. */
   readonly getPrePlanAuthorityCommands: GetItemCommand[] = []
 
@@ -214,8 +234,15 @@ class RecordingIdentityAwsTransport
   /** Number of low-level source-evidence write preparations. */
   prepareSourceEvidenceWriteCount = 0
 
+  /** Number of low-level target-evidence write preparations. */
+  prepareTargetEvidenceWriteCount = 0
+
   /** Durable fake source-evidence items keyed by recordKey. */
   private readonly sourceEvidenceItems =
+    new Map<string, Readonly<Record<string, AttributeValue>>>()
+
+  /** Durable fake target-evidence items keyed by recordKey. */
+  private readonly targetEvidenceItems =
     new Map<string, Readonly<Record<string, AttributeValue>>>()
 
   /** Durable fake pre-plan authority items keyed by recordKey. */
@@ -230,6 +257,15 @@ class RecordingIdentityAwsTransport
 
   /** Optional synchronous effect during evidence write preparation. */
   prepareSourceEvidenceWriteEffect: (() => void) | undefined
+
+  /** Optional synchronous effect after one target-evidence point read. */
+  getTargetEvidenceEffect: (() => void) | undefined
+
+  /** Optional synchronous effect after one target-evidence transaction. */
+  transactWriteTargetEvidenceEffect: (() => void) | undefined
+
+  /** Optional synchronous effect during target-evidence write preparation. */
+  prepareTargetEvidenceWriteEffect: (() => void) | undefined
 
   /** Optional synchronous effect during authority write preparation. */
   preparePrePlanAuthorityWriteEffect: (() => void) | undefined
@@ -268,6 +304,23 @@ class RecordingIdentityAwsTransport
   /** Uploaded source-artifact commands keyed by immutable object key. */
   private readonly sourceArtifactPutCommandsByKey =
     new Map<string, PutObjectCommand>()
+
+  /** Recorded immutable target-artifact uploads. */
+  readonly putTargetArtifactCommands: PutObjectCommand[] = []
+
+  /** Recorded target-artifact reconciliation metadata reads. */
+  readonly headTargetArtifactCommands: HeadObjectCommand[] = []
+
+  /** Recorded exact-version target-artifact object reads. */
+  readonly getTargetArtifactCommands: GetObjectCommand[] = []
+
+  /** Uploaded target-artifact commands keyed by immutable object key. */
+  private readonly targetArtifactPutCommandsByKey =
+    new Map<string, PutObjectCommand>()
+
+  /** Immutable target-artifact version IDs keyed by object key. */
+  private readonly targetArtifactVersionIdsByKey =
+    new Map<string, string>()
 
   /** Number of transport close calls. */
   closeCount = 0
@@ -322,6 +375,15 @@ class RecordingIdentityAwsTransport
 
   /** Optional synchronous effect after recording an exact artifact read. */
   getSourceArtifactEffect: (() => void) | undefined
+
+  /** Optional synchronous effect after recording a target-artifact upload. */
+  putTargetArtifactEffect: (() => void) | undefined
+
+  /** Optional synchronous effect after recording target-artifact metadata. */
+  headTargetArtifactEffect: (() => void) | undefined
+
+  /** Optional synchronous effect after recording an exact target-artifact read. */
+  getTargetArtifactEffect: (() => void) | undefined
 
   /** Source Scan response returned by the recording transport. */
   scanSourceOutput: ScanCommandOutput = {
@@ -540,6 +602,89 @@ class RecordingIdentityAwsTransport
   }
 
   /**
+   * Records and serves one exact target-evidence point read.
+   *
+   * @param command - Exact adapter-owned GetItem command.
+   * @returns Detached durable item when one exists.
+   */
+  async getTargetEvidence(
+    command: GetItemCommand,
+  ): Promise<GetItemCommandOutput> {
+    this.getTargetEvidenceCommands.push(command)
+    this.getTargetEvidenceEffect?.()
+    const recordKey = command.input.Key?.recordKey?.S
+    if (recordKey === undefined) {
+      throw new Error('Expected exact target-evidence record key.')
+    }
+    const item = this.targetEvidenceItems.get(recordKey)
+    return {
+      $metadata: {},
+      ...(item === undefined ? {} : { Item: structuredClone(item) }),
+    }
+  }
+
+  /**
+   * Records the target-evidence preparation owned by the managed wrapper.
+   *
+   * @returns Completed low-level preparation.
+   */
+  prepareTargetEvidenceWrite(): Promise<void> {
+    this.prepareTargetEvidenceWriteCount += 1
+    this.prepareTargetEvidenceWriteEffect?.()
+    return Promise.resolve()
+  }
+
+  /**
+   * Records and atomically installs one target evidence page and successor head.
+   *
+   * The fake checks the fixed planning layout while leaving condition
+   * evaluation to the target-evidence adapter tests.
+   *
+   * @param command - Exact adapter-owned TransactWriteItems command.
+   * @returns Empty successful transaction response.
+   */
+  async transactWriteTargetEvidence(
+    command: TransactWriteItemsCommand,
+  ): Promise<TransactWriteItemsCommandOutput> {
+    this.transactWriteTargetEvidenceCommands.push(command)
+    this.transactWriteTargetEvidenceEffect?.()
+    const entries = command.input.TransactItems
+    if (entries?.length !== 5) {
+      throw new Error(
+        'Expected one authority-bound target-evidence transaction.',
+      )
+    }
+    if (
+      entries.slice(0, 3).some(
+        (entry) => entry.ConditionCheck === undefined,
+      )
+    ) {
+      throw new Error('Expected three target planning authority checks.')
+    }
+    const pending: {
+      /** Exact deterministic target-evidence record key. */
+      readonly recordKey: string
+      /** Detached low-level target-evidence item. */
+      readonly item: Readonly<Record<string, AttributeValue>>
+    }[] = []
+    for (const entry of entries.slice(3)) {
+      const item = entry.Put?.Item
+      const recordKey = item?.recordKey?.S
+      if (item === undefined || recordKey === undefined) {
+        throw new Error('Expected one exact target-evidence Put item.')
+      }
+      pending.push({
+        recordKey,
+        item: structuredClone(item),
+      })
+    }
+    for (const entry of pending) {
+      this.targetEvidenceItems.set(entry.recordKey, entry.item)
+    }
+    return { $metadata: {} }
+  }
+
+  /**
    * Records and serves one exact pre-plan authority point read.
    *
    * @param command - Exact adapter-owned GetItem command.
@@ -751,6 +896,82 @@ class RecordingIdentityAwsTransport
   }
 
   /**
+   * Records one conditional immutable target-artifact upload.
+   *
+   * @param command - Exact adapter-owned PutObject command.
+   * @returns Configured fake immutable-version response.
+   */
+  async putTargetArtifact(
+    command: PutObjectCommand,
+  ): Promise<PutObjectCommandOutput> {
+    this.putTargetArtifactCommands.push(command)
+    const key = command.input.Key
+    if (key === undefined) {
+      throw new Error('Expected one target-artifact object key.')
+    }
+    const versionId =
+      `target-artifact-version-${this.putTargetArtifactCommands.length}`
+    this.targetArtifactPutCommandsByKey.set(key, command)
+    this.targetArtifactVersionIdsByKey.set(key, versionId)
+    this.putTargetArtifactEffect?.()
+    return {
+      $metadata: {},
+      VersionId: versionId,
+      ChecksumSHA256: command.input.ChecksumSHA256,
+      ChecksumType: 'FULL_OBJECT',
+      ServerSideEncryption: command.input.ServerSideEncryption,
+      SSEKMSKeyId: command.input.SSEKMSKeyId,
+      BucketKeyEnabled: command.input.BucketKeyEnabled,
+      Size: command.input.ContentLength,
+    }
+  }
+
+  /**
+   * Records one exact target-artifact metadata reconciliation read.
+   *
+   * @param command - Exact adapter-owned HeadObject command.
+   * @returns Configured fake immutable metadata response.
+   */
+  async headTargetArtifact(
+    command: HeadObjectCommand,
+  ): Promise<HeadObjectCommandOutput> {
+    this.headTargetArtifactCommands.push(command)
+    this.headTargetArtifactEffect?.()
+    const putCommand = this.readTargetArtifactPutCommand(
+      command.input.Key,
+      command.input.VersionId,
+    )
+    const versionId = this.readTargetArtifactVersionId(command.input.Key)
+    return this.createTargetArtifactObjectOutput(putCommand, versionId)
+  }
+
+  /**
+   * Records one exact immutable target-artifact version read.
+   *
+   * @param command - Exact adapter-owned GetObject command.
+   * @returns Configured fake object response.
+   */
+  async getTargetArtifact(
+    command: GetObjectCommand,
+  ): Promise<GetObjectCommandOutput> {
+    this.getTargetArtifactCommands.push(command)
+    this.getTargetArtifactEffect?.()
+    const putCommand = this.readTargetArtifactPutCommand(
+      command.input.Key,
+      command.input.VersionId,
+    )
+    const versionId = this.readTargetArtifactVersionId(command.input.Key)
+    const output: GetObjectCommandOutput =
+      this.createTargetArtifactObjectOutput(putCommand, versionId)
+    const body = putCommand.input.Body
+    if (!(body instanceof Uint8Array)) {
+      throw new Error('Expected Uint8Array target-artifact body bytes.')
+    }
+    Reflect.set(output, 'Body', new Uint8Array(body))
+    return output
+  }
+
+  /**
    * Reads one previously uploaded source-artifact command.
    *
    * @param key - Exact immutable S3 object key.
@@ -794,6 +1015,81 @@ class RecordingIdentityAwsTransport
       LastModified: lastModified,
       ObjectLockMode: 'COMPLIANCE',
       ObjectLockRetainUntilDate: retainUntil,
+      Metadata: command.input.Metadata,
+    }
+  }
+
+  /**
+   * Reads one previously uploaded target-artifact command.
+   *
+   * @param key - Exact immutable S3 object key.
+   * @param versionId - Optional exact immutable object version.
+   * @returns Recorded target-artifact upload.
+   */
+  private readTargetArtifactPutCommand(
+    key: string | undefined,
+    versionId?: string,
+  ): PutObjectCommand {
+    const command = key === undefined
+      ? undefined
+      : this.targetArtifactPutCommandsByKey.get(key)
+    const storedVersionId = key === undefined
+      ? undefined
+      : this.targetArtifactVersionIdsByKey.get(key)
+    if (
+      command === undefined ||
+      storedVersionId === undefined ||
+      (
+        versionId !== undefined &&
+        versionId !== storedVersionId
+      )
+    ) {
+      throw new Error('Expected one exact uploaded target artifact version.')
+    }
+    return command
+  }
+
+  /**
+   * Reads the immutable version assigned to one target-artifact upload.
+   *
+   * @param key - Exact content-addressed target-artifact object key.
+   * @returns Stable fake immutable version identifier.
+   */
+  private readTargetArtifactVersionId(key: string | undefined): string {
+    const versionId = key === undefined
+      ? undefined
+      : this.targetArtifactVersionIdsByKey.get(key)
+    if (versionId === undefined) {
+      throw new Error('Expected one recorded target-artifact version.')
+    }
+    return versionId
+  }
+
+  /**
+   * Creates one valid immutable target Object Lock response.
+   *
+   * @param command - Exact preceding target-artifact upload.
+   * @param versionId - Exact immutable object version.
+   * @returns Complete safe HeadObject-compatible response.
+   */
+  private createTargetArtifactObjectOutput(
+    command: PutObjectCommand,
+    versionId: string,
+  ): HeadObjectCommandOutput {
+    return {
+      $metadata: {},
+      VersionId: versionId,
+      ContentLength: command.input.ContentLength,
+      ContentType: command.input.ContentType,
+      ChecksumSHA256: command.input.ChecksumSHA256,
+      ChecksumType: 'FULL_OBJECT',
+      ServerSideEncryption: command.input.ServerSideEncryption,
+      SSEKMSKeyId: command.input.SSEKMSKeyId,
+      BucketKeyEnabled: command.input.BucketKeyEnabled,
+      LastModified: new Date('2026-07-28T00:00:00.000Z'),
+      ObjectLockMode: 'COMPLIANCE',
+      ObjectLockRetainUntilDate:
+        new Date('2026-08-28T00:00:00.000Z'),
       Metadata: command.input.Metadata,
     }
   }
@@ -2592,6 +2888,635 @@ describe('Workspace Search migration AWS identity adapter', () => {
     port.close()
   })
 
+  test('captures one raw target page and commits its exact lossless artifact', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const exactTargetItem: DynamoAttributeMap = {
+      ...createIgnoredTargetItem('planning-lossless'),
+      exactNumber: { N: '1.2300' },
+      nativeBinary: { B: new Uint8Array([0, 255, 17]) },
+      nestedValues: {
+        L: [
+          { NULL: true },
+          { M: { enabled: { BOOL: false } } },
+        ],
+      },
+    }
+    transport.scanTargetOutput = {
+      $metadata: {},
+      Count: 1,
+      Items: [exactTargetItem],
+      ScannedCount: 1,
+    }
+    const clockAt = '2026-07-28T06:25:00.000Z'
+    let writeTrace: string[] | undefined
+    let clockReads = 0
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => {
+        clockReads += 1
+        writeTrace?.push('clock')
+        return new Date(clockAt)
+      },
+    )
+    const configuration = await port.measureConfiguration()
+    const configurationHash =
+      createWorkspaceSearchConfigurationHash(configuration)
+    const expectedPageResult =
+      reduceWorkspaceSearchMigrationTargetScanPage({
+        configuration,
+        configurationHash,
+        previousCheckpoint:
+          createEmptyWorkspaceSearchMigrationTargetScanCheckpoint(
+            configurationHash,
+          ),
+        page: {
+          items: [exactTargetItem],
+        },
+      })
+    const authority = await createManagedPlanningAuthority(
+      port,
+      clockAt,
+      'target-lossless',
+    )
+    const targetTableName = requested.tables['workspace-search']
+    const stateTableName = requested.tables['migration-state']
+    const clockReadsBeforeCommit = clockReads
+    writeTrace = []
+    transport.describeTableEffect = (tableName) => {
+      if (tableName === targetTableName) {
+        writeTrace?.push('target-incarnation')
+      }
+      if (tableName === stateTableName) {
+        writeTrace?.push('state-incarnation')
+      }
+    }
+    transport.scanTargetEffect = () => {
+      writeTrace?.push('scan')
+      if (transport.scanTargetCommands.length !== 1) {
+        throw new Error('Target planning must never issue a second Scan.')
+      }
+    }
+    transport.putTargetArtifactEffect = () => {
+      writeTrace?.push('artifact-put')
+    }
+    transport.headTargetArtifactEffect = () => {
+      writeTrace?.push('artifact-head')
+    }
+    transport.transactWriteTargetEvidenceEffect = () => {
+      writeTrace?.push('transaction')
+    }
+
+    const progress = await port.commitNextTargetEvidencePage(
+      createPlanningTargetEvidenceRequest(
+        configuration,
+        structuredClone(authority),
+      ),
+    )
+
+    expect(progress).toMatchObject({
+      purpose: 'planning',
+      runId: authority.lease.runId,
+      pageSequence: 1,
+      checkpoint: {
+        completed: true,
+        aggregate: {
+          scanned: 1,
+          ignored: 1,
+          invalid: 0,
+          owned: 0,
+          pageCount: 1,
+        },
+      },
+    })
+    expect(transport.scanTargetCommands).toHaveLength(1)
+    expect(transport.scanTargetCommands[0]?.input).toEqual({
+      TableName: targetTableName,
+      ConsistentRead: true,
+      Limit: 100,
+    })
+    expect(transport.putTargetArtifactCommands).toHaveLength(1)
+    expect(transport.headTargetArtifactCommands).toHaveLength(1)
+    expect(transport.getTargetArtifactCommands).toHaveLength(0)
+    const artifactPut = transport.putTargetArtifactCommands[0]
+    if (artifactPut === undefined) {
+      throw new Error('Expected one planning target-artifact upload.')
+    }
+    const artifactBytes = artifactPut.input.Body
+    const artifactObjectKey = artifactPut.input.Key
+    const artifactContentDigest =
+      artifactPut.input.Metadata?.['mukuroji-content-sha256']
+    if (
+      !(artifactBytes instanceof Uint8Array) ||
+      artifactObjectKey === undefined ||
+      artifactContentDigest === undefined
+    ) {
+      throw new Error('Expected exact planning target-artifact bytes.')
+    }
+    const artifactSegment =
+      parseWorkspaceSearchMigrationPlanningTargetArtifactSegment(
+        artifactBytes,
+      )
+    expect(artifactSegment.items).toEqual([exactTargetItem])
+    expect(artifactSegment).toMatchObject({
+      runId: authority.lease.runId,
+      pageSequence: 1,
+      segmentIndex: 0,
+      segmentCount: 1,
+      itemStartIndex: 0,
+      itemCount: 1,
+      pageItemCount: 1,
+      planningAuthority: {
+        ownerId: authority.lease.ownerId,
+        fenceToken: authority.lease.fenceToken,
+      },
+    })
+    expect(artifactObjectKey)
+      .toMatch(/^workspace-search\/v1\/target-artifacts\/v1\/[0-9a-f]{64}\.json$/u)
+    expect(transport.headTargetArtifactCommands[0]?.input).toMatchObject({
+      Bucket: requested.journalBucket,
+      Key: artifactObjectKey,
+      ExpectedBucketOwner: requested.account,
+      ChecksumMode: 'ENABLED',
+      VersionId: 'target-artifact-version-1',
+    })
+    expect(transport.transactWriteTargetEvidenceCommands).toHaveLength(1)
+    const transaction =
+      transport.transactWriteTargetEvidenceCommands[0]?.input.TransactItems
+    expect(transaction).toHaveLength(5)
+    expect(transaction?.slice(0, 3).every(
+      (entry) => entry.ConditionCheck?.TableName === stateTableName,
+    )).toBe(true)
+    expect(transaction?.slice(3).every(
+      (entry) => entry.Put?.TableName === stateTableName,
+    )).toBe(true)
+    const evidencePayload = transaction?.[3]?.Put?.Item?.payload?.B
+    if (!(evidencePayload instanceof Uint8Array)) {
+      throw new Error('Expected canonical target-evidence page bytes.')
+    }
+    const evidencePage =
+      parseWorkspaceSearchMigrationTargetEvidencePage(evidencePayload)
+    expect({
+      checkpoint: evidencePage.checkpoint,
+      targetRows: evidencePage.targetRows,
+      invalidRows: evidencePage.invalidRows,
+      observedTargetBindings: evidencePage.observedTargetBindings,
+    }).toEqual(expectedPageResult)
+    expect(progress.checkpoint).toEqual(expectedPageResult.checkpoint)
+    expect(evidencePage.targetArtifacts).toEqual([{
+      objectKey: artifactObjectKey,
+      versionId: 'target-artifact-version-1',
+      contentDigest: artifactContentDigest,
+    }])
+    const completedWriteTrace = writeTrace
+    if (completedWriteTrace === undefined) {
+      throw new Error('Expected one target-evidence write trace.')
+    }
+    const clockIndex = completedWriteTrace.indexOf('clock')
+    expect(
+      completedWriteTrace.slice(clockIndex - 4, clockIndex + 2),
+    ).toEqual([
+      'artifact-put',
+      'artifact-head',
+      'target-incarnation',
+      'state-incarnation',
+      'clock',
+      'transaction',
+    ])
+    expect(clockReads).toBe(clockReadsBeforeCommit + 1)
+    port.close()
+  })
+
+  test('revalidates target and state incarnations after target artifact upload', async () => {
+    const tableRoles:
+      readonly ('workspace-search' | 'migration-state')[] = [
+        'workspace-search',
+        'migration-state',
+      ]
+    const driftKinds: readonly ('replacement' | 'deletion')[] = [
+      'replacement',
+      'deletion',
+    ]
+    for (const tableRole of tableRoles) {
+      for (const drift of driftKinds) {
+        const requested = createRequestedResources()
+        const transport = new RecordingIdentityAwsTransport()
+        seedValidMeasurementOutputs(transport, requested)
+        const clockAt = '2026-07-28T06:30:00.000Z'
+        let clockReads = 0
+        const port = createAwsWorkspaceSearchMigrationIdentityPort(
+          requested,
+          () => transport,
+          () => {
+            clockReads += 1
+            return new Date(clockAt)
+          },
+        )
+        const configuration = await port.measureConfiguration()
+        const identifier =
+          `target-post-upload-${tableRole}-${drift}`
+        const authority = await createManagedPlanningAuthority(
+          port,
+          clockAt,
+          identifier,
+        )
+        const clockReadsBeforeCommit = clockReads
+        const tableName = requested.tables[tableRole]
+        const canary =
+          `RAW-${tableRole}-${drift}-AFTER-TARGET-ARTIFACT`
+        transport.headTargetArtifactEffect = () => {
+          if (drift === 'replacement') {
+            const replacement = createReplacementDescribeTableOutput(
+              tableRole,
+              tableName,
+              requested,
+            )
+            if (replacement.Table === undefined) {
+              throw new Error('Expected one replacement table fixture.')
+            }
+            replacement.Table.TableId = canary
+            transport.describeTableOutputs.set(tableName, replacement)
+            return
+          }
+          transport.describeTableFailures.set(
+            tableName,
+            new ResourceNotFoundException({
+              $metadata: {},
+              message: canary,
+            }),
+          )
+        }
+
+        const failure = await captureWorkspaceSearchMigrationFailure(
+          port.commitNextTargetEvidencePage(
+            createPlanningTargetEvidenceRequest(
+              configuration,
+              structuredClone(authority),
+            ),
+          ),
+        )
+
+        const expectedCode = tableRole === 'workspace-search'
+          ? 'TARGET_DRIFT'
+          : 'CONFIGURATION_DRIFT'
+        expect(failure).toMatchObject({
+          code: expectedCode,
+          message:
+            `Workspace Search target evidence stopped safely (${expectedCode}).`,
+        })
+        expect(failure.message).not.toContain(canary)
+        expect(transport.scanTargetCommands).toHaveLength(1)
+        expect(transport.putTargetArtifactCommands).toHaveLength(1)
+        expect(transport.headTargetArtifactCommands).toHaveLength(1)
+        expect(transport.prepareTargetEvidenceWriteCount).toBe(0)
+        expect(transport.transactWriteTargetEvidenceCommands)
+          .toHaveLength(0)
+        expect(clockReads).toBe(clockReadsBeforeCommit)
+        port.close()
+      }
+    }
+  })
+
+  test('resumes and replays exact target versions without rescanning a terminal head', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const clockAt = '2026-07-28T06:35:00.000Z'
+    let clockReads = 0
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => {
+        clockReads += 1
+        return new Date(clockAt)
+      },
+    )
+    const configuration = await port.measureConfiguration()
+    const authority = await createManagedPlanningAuthority(
+      port,
+      clockAt,
+      'target-resume-replay',
+    )
+    const firstItem = createIgnoredTargetItem('target-page-one')
+    transport.scanTargetOutput = {
+      $metadata: {},
+      Count: 1,
+      Items: [firstItem],
+      LastEvaluatedKey: createTargetCursor('target-page-one'),
+      ScannedCount: 1,
+    }
+    const request = createPlanningTargetEvidenceRequest(
+      configuration,
+      structuredClone(authority),
+    )
+
+    const first = await port.commitNextTargetEvidencePage(request)
+    transport.scanTargetOutput = {
+      $metadata: {},
+      Count: 1,
+      Items: [createInvalidTargetItem('target-page-two')],
+      ScannedCount: 1,
+    }
+    const completed = await port.commitNextTargetEvidencePage(request)
+
+    expect(first).toMatchObject({
+      pageSequence: 1,
+      checkpoint: {
+        completed: false,
+        aggregate: {
+          scanned: 1,
+          ignored: 1,
+          invalid: 0,
+          pageCount: 1,
+        },
+      },
+    })
+    expect(completed).toMatchObject({
+      pageSequence: 2,
+      checkpoint: {
+        completed: true,
+        aggregate: {
+          scanned: 2,
+          ignored: 1,
+          invalid: 1,
+          pageCount: 2,
+        },
+      },
+    })
+    expect(transport.scanTargetCommands).toHaveLength(2)
+    expect(
+      transport.scanTargetCommands[1]?.input.ExclusiveStartKey,
+    ).toEqual(createTargetCursor('target-page-one'))
+    expect(transport.putTargetArtifactCommands).toHaveLength(2)
+    expect(transport.headTargetArtifactCommands).toHaveLength(2)
+    expect(transport.getTargetArtifactCommands).toHaveLength(1)
+    const scanCountBeforeReplay = transport.scanTargetCommands.length
+    transport.scanTargetFailure =
+      new Error('RAW-TARGET-REPLAY-MUST-NOT-SCAN')
+    const replay = await port.readCommittedTargetEvidence(
+      createTargetEvidenceReadRequest(
+        configuration,
+        authority.lease.runId,
+      ),
+    )
+
+    expect(replay.progress).toEqual(completed)
+    expect(replay.targetRows).toHaveLength(1)
+    expect(replay.targetRows[0]?.classification).toBe('ignored')
+    expect(replay.invalidRows).toHaveLength(1)
+    expect(replay.observedTargetBindings).toHaveLength(0)
+    expect(transport.scanTargetCommands).toHaveLength(
+      scanCountBeforeReplay,
+    )
+    expect(transport.getTargetArtifactCommands).toHaveLength(3)
+    for (const command of transport.getTargetArtifactCommands) {
+      expect(command.input).toMatchObject({
+        Bucket: requested.journalBucket,
+        ExpectedBucketOwner: requested.account,
+        ChecksumMode: 'ENABLED',
+      })
+      expect(command.input.Key)
+        .toMatch(/^workspace-search\/v1\/target-artifacts\/v1\/[0-9a-f]{64}\.json$/u)
+      expect(command.input.VersionId)
+        .toMatch(/^target-artifact-version-[12]$/u)
+    }
+
+    const terminalCounts = {
+      scans: transport.scanTargetCommands.length,
+      puts: transport.putTargetArtifactCommands.length,
+      heads: transport.headTargetArtifactCommands.length,
+      gets: transport.getTargetArtifactCommands.length,
+      preparations: transport.prepareTargetEvidenceWriteCount,
+      transactions:
+        transport.transactWriteTargetEvidenceCommands.length,
+      clockReads,
+    }
+    const repeated = await port.commitNextTargetEvidencePage(request)
+
+    expect(repeated).toEqual(completed)
+    expect(transport.scanTargetCommands).toHaveLength(terminalCounts.scans)
+    expect(transport.putTargetArtifactCommands)
+      .toHaveLength(terminalCounts.puts)
+    expect(transport.headTargetArtifactCommands)
+      .toHaveLength(terminalCounts.heads)
+    expect(transport.getTargetArtifactCommands)
+      .toHaveLength(terminalCounts.gets)
+    expect(transport.prepareTargetEvidenceWriteCount)
+      .toBe(terminalCounts.preparations)
+    expect(transport.transactWriteTargetEvidenceCommands)
+      .toHaveLength(terminalCounts.transactions)
+    expect(clockReads).toBe(terminalCounts.clockReads)
+    port.close()
+  })
+
+  test('invalidates target artifact Put and Get work on close or remeasurement', async () => {
+    const phases: readonly ('put' | 'get')[] = ['put', 'get']
+    const lifecycleChanges: readonly ('close' | 'remeasure')[] = [
+      'close',
+      'remeasure',
+    ]
+    for (const phase of phases) {
+      for (const lifecycle of lifecycleChanges) {
+        const requested = createRequestedResources()
+        const transport = new RecordingIdentityAwsTransport()
+        seedValidMeasurementOutputs(transport, requested)
+        const clockAt = '2026-07-28T06:40:00.000Z'
+        let clockReads = 0
+        const port = createAwsWorkspaceSearchMigrationIdentityPort(
+          requested,
+          () => transport,
+          () => {
+            clockReads += 1
+            return new Date(clockAt)
+          },
+        )
+        const configuration = await port.measureConfiguration()
+        const authority = await createManagedPlanningAuthority(
+          port,
+          clockAt,
+          `target-${phase}-${lifecycle}`,
+        )
+        transport.scanTargetOutput = {
+          $metadata: {},
+          Count: 1,
+          Items: [
+            createIgnoredTargetItem(`target-${phase}-${lifecycle}`),
+          ],
+          ScannedCount: 1,
+        }
+        const commitRequest = createPlanningTargetEvidenceRequest(
+          configuration,
+          structuredClone(authority),
+        )
+        if (phase === 'get') {
+          await port.commitNextTargetEvidencePage(commitRequest)
+        }
+        const countsBeforeLifecycle = {
+          scans: transport.scanTargetCommands.length,
+          puts: transport.putTargetArtifactCommands.length,
+          heads: transport.headTargetArtifactCommands.length,
+          gets: transport.getTargetArtifactCommands.length,
+          preparations: transport.prepareTargetEvidenceWriteCount,
+          transactions:
+            transport.transactWriteTargetEvidenceCommands.length,
+          clockReads,
+        }
+        let replacementMeasurement:
+          Promise<WorkspaceSearchMigrationConfiguration> | undefined
+        const lifecycleEffect = () => {
+          if (lifecycle === 'close') {
+            port.close()
+            return
+          }
+          replacementMeasurement = port.measureConfiguration()
+        }
+        if (phase === 'put') {
+          transport.putTargetArtifactEffect = lifecycleEffect
+        } else {
+          transport.getTargetArtifactEffect = lifecycleEffect
+        }
+
+        const failure = await captureWorkspaceSearchMigrationFailure(
+          phase === 'put'
+            ? port.commitNextTargetEvidencePage(commitRequest)
+            : port.readCommittedTargetEvidence(
+                createTargetEvidenceReadRequest(
+                  configuration,
+                  authority.lease.runId,
+                ),
+              ),
+        )
+
+        expect(failure).toMatchObject({
+          code: 'INVALID_STATE',
+          message:
+            'Workspace Search target evidence stopped safely (INVALID_STATE).',
+        })
+        if (replacementMeasurement !== undefined) {
+          await expect(replacementMeasurement).resolves.toBeDefined()
+        }
+        expect(transport.scanTargetCommands).toHaveLength(
+          phase === 'put'
+            ? countsBeforeLifecycle.scans + 1
+            : countsBeforeLifecycle.scans,
+        )
+        expect(transport.putTargetArtifactCommands).toHaveLength(
+          phase === 'put'
+            ? countsBeforeLifecycle.puts + 1
+            : countsBeforeLifecycle.puts,
+        )
+        expect(transport.headTargetArtifactCommands)
+          .toHaveLength(countsBeforeLifecycle.heads)
+        expect(transport.getTargetArtifactCommands).toHaveLength(
+          phase === 'get'
+            ? countsBeforeLifecycle.gets + 1
+            : countsBeforeLifecycle.gets,
+        )
+        expect(transport.prepareTargetEvidenceWriteCount)
+          .toBe(countsBeforeLifecycle.preparations)
+        expect(transport.transactWriteTargetEvidenceCommands)
+          .toHaveLength(countsBeforeLifecycle.transactions)
+        expect(clockReads).toBe(countsBeforeLifecycle.clockReads)
+        if (lifecycle === 'close') {
+          expect(transport.closeCount).toBe(1)
+        } else {
+          port.close()
+        }
+      }
+    }
+  })
+
+  test('snapshots target evidence request and authority before state guard I/O', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const clockAt = '2026-07-28T06:45:00.000Z'
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => new Date(clockAt),
+    )
+    const configuration = await port.measureConfiguration()
+    const authority = await createManagedPlanningAuthority(
+      port,
+      clockAt,
+      'target-snapshot',
+    )
+    const mutableAuthority = structuredClone(authority)
+    let selectedOwnerId = mutableAuthority.lease.ownerId
+    Object.defineProperty(mutableAuthority.lease, 'ownerId', {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return selectedOwnerId
+      },
+    })
+    const request = createPlanningTargetEvidenceRequest(
+      configuration,
+      mutableAuthority,
+    )
+    let selectedRunId = request.runId
+    Object.defineProperty(request, 'runId', {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return selectedRunId
+      },
+    })
+    transport.scanTargetOutput = {
+      $metadata: {},
+      Count: 1,
+      Items: [createIgnoredTargetItem('target-snapshot')],
+      ScannedCount: 1,
+    }
+
+    const pending = port.commitNextTargetEvidencePage(request)
+    selectedOwnerId = 'mutated-owner-after-target-authority-capture'
+    selectedRunId = 'mutated-run-after-target-authority-capture'
+    const progress = await pending
+
+    expect(progress).toMatchObject({
+      runId: authority.lease.runId,
+      pageSequence: 1,
+    })
+    const artifactBytes =
+      transport.putTargetArtifactCommands[0]?.input.Body
+    if (!(artifactBytes instanceof Uint8Array)) {
+      throw new Error('Expected snapshotted target artifact bytes.')
+    }
+    const artifactSegment =
+      parseWorkspaceSearchMigrationPlanningTargetArtifactSegment(
+        artifactBytes,
+      )
+    expect(artifactSegment).toMatchObject({
+      runId: authority.lease.runId,
+      planningAuthority: {
+        ownerId: authority.lease.ownerId,
+      },
+    })
+    const transaction =
+      transport.transactWriteTargetEvidenceCommands[0]?.input.TransactItems
+    expect(
+      transaction?.[0]?.ConditionCheck
+        ?.ExpressionAttributeValues?.[':ownerId'],
+    ).toEqual({ S: authority.lease.ownerId })
+    const evidencePayload = transaction?.[3]?.Put?.Item?.payload?.B
+    if (!(evidencePayload instanceof Uint8Array)) {
+      throw new Error('Expected snapshotted target evidence bytes.')
+    }
+    expect(
+      parseWorkspaceSearchMigrationTargetEvidencePage(evidencePayload),
+    ).toMatchObject({
+      runId: authority.lease.runId,
+      planningAuthority: {
+        ownerId: authority.lease.ownerId,
+      },
+    })
+    port.close()
+  })
+
   test('rejects another valid configuration hash before source I/O', async () => {
     const requested = createRequestedResources()
     const transport = new RecordingIdentityAwsTransport()
@@ -3321,6 +4246,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
     const transactionMethods = [
       'transactWritePrePlanAuthority',
       'transactWriteSourceEvidence',
+      'transactWriteTargetEvidence',
     ]
 
     try {
@@ -3418,7 +4344,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
     }
   })
 
-  test('bounds concrete source-artifact S3 requests and normalizes only local aborts', async () => {
+  test('bounds concrete artifact S3 requests and normalizes only local aborts', async () => {
     const port = createAwsWorkspaceSearchMigrationIdentityPort(
       createRequestedResources(),
     )
@@ -3457,6 +4383,29 @@ describe('Workspace Search migration AWS identity adapter', () => {
           Bucket: TEST_BUCKET,
           Key: 'workspace-search/v1/source-artifacts/v1/get.json',
           VersionId: 'exact-source-artifact-version',
+        }),
+      },
+      {
+        methodName: 'putTargetArtifact',
+        command: new PutObjectCommand({
+          Bucket: TEST_BUCKET,
+          Key: 'workspace-search/v1/target-artifacts/v1/put.json',
+          Body: new Uint8Array([1]),
+        }),
+      },
+      {
+        methodName: 'headTargetArtifact',
+        command: new HeadObjectCommand({
+          Bucket: TEST_BUCKET,
+          Key: 'workspace-search/v1/target-artifacts/v1/head.json',
+        }),
+      },
+      {
+        methodName: 'getTargetArtifact',
+        command: new GetObjectCommand({
+          Bucket: TEST_BUCKET,
+          Key: 'workspace-search/v1/target-artifacts/v1/get.json',
+          VersionId: 'exact-target-artifact-version',
         }),
       },
     ]
@@ -4946,6 +5895,47 @@ function createPlanningSourceEvidenceRequest(
 }
 
 /**
+ * Creates one measured authority-bound planning target evidence request.
+ *
+ * @param configuration - Successfully measured session configuration.
+ * @param authority - Detached current durable pre-plan authority.
+ * @returns Exact managed planning target-evidence commit request.
+ */
+function createPlanningTargetEvidenceRequest(
+  configuration: WorkspaceSearchMigrationConfiguration,
+  authority: WorkspaceSearchMigrationPrePlanAuthority,
+): WorkspaceSearchMigrationTargetEvidenceAwsCommitRequest {
+  return {
+    runId: authority.lease.runId,
+    purpose: 'planning',
+    configuration,
+    configurationHash:
+      createWorkspaceSearchConfigurationHash(configuration),
+    authority,
+  }
+}
+
+/**
+ * Creates one measured target evidence read request without mutable authority.
+ *
+ * @param configuration - Successfully measured session configuration.
+ * @param runId - Exact durable planning run to read.
+ * @returns Exact managed target-evidence read request.
+ */
+function createTargetEvidenceReadRequest(
+  configuration: WorkspaceSearchMigrationConfiguration,
+  runId: string,
+): WorkspaceSearchMigrationTargetEvidenceAwsRequest {
+  return {
+    runId,
+    purpose: 'planning',
+    configuration,
+    configurationHash:
+      createWorkspaceSearchConfigurationHash(configuration),
+  }
+}
+
+/**
  * Captures one expected fixed-message migration failure.
  *
  * @param operation - Managed operation expected to stop safely.
@@ -5064,6 +6054,20 @@ function createIgnoredTargetItem(identifier: string): DynamoAttributeMap {
     workspaceId: { S: 'workspace-1' },
     recordKey: { S: `VIEW#${identifier}` },
     entryType: { S: 'saved-view' },
+  }
+}
+
+/**
+ * Creates one key-valid target row with a conflicting family discriminator.
+ *
+ * @param identifier - Unique physical key suffix.
+ * @returns Exact low-level invalid target item.
+ */
+function createInvalidTargetItem(identifier: string): DynamoAttributeMap {
+  return {
+    workspaceId: { S: 'workspace-1' },
+    recordKey: { S: `VIEW#${identifier}` },
+    entryType: { S: 'search-document' },
   }
 }
 
