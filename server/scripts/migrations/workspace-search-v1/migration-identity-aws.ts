@@ -84,6 +84,10 @@ import {
   MAINTENANCE_EVIDENCE_MAX_BYTES,
 } from './maintenance-evidence'
 import {
+  createAwsWorkspaceSearchMigrationApplicationWriterFencePort,
+  type WorkspaceSearchMigrationApplicationWriterFenceAwsPort,
+} from './migration-application-writer-fence-aws'
+import {
   createAwsWorkspaceSearchMigrationPrePlanAuthorityPort,
   type RenewWorkspaceSearchMigrationPrePlanMaintenanceEvidenceInput,
   type WorkspaceSearchMigrationHistoricalMaintenanceEvidenceBinding,
@@ -490,6 +494,15 @@ type ManagedSealedPlanningAuthority = ManagedMigrationStateAuthority & {
 }
 
 /**
+ * Complete measured configuration captured by one writer-fence operator port.
+ */
+type ManagedApplicationWriterFenceAuthority =
+  ManagedMigrationStateAuthority & {
+    /** Detached configuration owning state and all five fenced datasets. */
+    readonly configuration: WorkspaceSearchMigrationConfiguration
+  }
+
+/**
  * Measurement authority captured for one complete source-evidence operation.
  */
 type ManagedSourceEvidenceAuthority<
@@ -777,6 +790,14 @@ export interface WorkspaceSearchMigrationManagedAwsSession
    */
   createSealedPlanningAuthorityPort():
     WorkspaceSearchMigrationSealedPlanningAuthorityV2AwsPort
+
+  /**
+   * Creates one generation-bound application writer-fence operator port.
+   *
+   * @returns Writer-fence operator port bound to the latest measurement.
+   */
+  createApplicationWriterFencePort():
+    WorkspaceSearchMigrationApplicationWriterFenceAwsPort
 }
 
 /** Narrow transport containing only managed identity reads. */
@@ -1400,6 +1421,11 @@ class AwsWorkspaceSearchMigrationIdentityPort
   private measuredMigrationStateTable: MigrationTableIdentity | undefined
 
   /**
+   * Whether an uncertain writer-fence commit quarantined this measurement.
+   */
+  private measuredApplicationWriterFenceQuarantined = false
+
+  /**
    * Creates a port bound to immutable copies of the reviewed resources.
    *
    * @param requested - Validated operator-selected resources.
@@ -1434,6 +1460,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.measuredConfiguration = undefined
     this.invalidateManagedPlanningArtifactPort()
     this.measuredMigrationStateTable = undefined
+    this.measuredApplicationWriterFenceQuarantined = false
     try {
       this.transport.close()
     } catch {
@@ -1455,6 +1482,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.measuredConfiguration = undefined
     this.invalidateManagedPlanningArtifactPort()
     this.measuredMigrationStateTable = undefined
+    this.measuredApplicationWriterFenceQuarantined = false
     const configuration = await measureWorkspaceSearchMigrationConfiguration({
       requested: this.requested,
       port: this,
@@ -1598,6 +1626,62 @@ class AwsWorkspaceSearchMigrationIdentityPort
         this.runManagedSealedPlanningAuthorityOperation(
           authority,
           () => delegate.publish(input),
+        ),
+    }
+  }
+
+  /**
+   * Creates one application writer-fence operator port bound to the current
+   * measured generation and all six physical table incarnations.
+   *
+   * @returns Generation-guarded application writer-fence operator port.
+   */
+  createApplicationWriterFencePort():
+    WorkspaceSearchMigrationApplicationWriterFenceAwsPort {
+    const authority = this.captureManagedApplicationWriterFenceAuthority()
+    const transport: WorkspaceSearchMigrationPrePlanAuthorityAwsTransport = {
+      getPrePlanAuthority: (command) =>
+        this.runManagedApplicationWriterFenceRead(
+          authority,
+          () => this.transport.getPrePlanAuthority(command),
+        ),
+      preparePrePlanAuthorityWrite: async () => {
+        await this.requireCurrentApplicationWriterFenceTableIncarnations(
+          authority,
+        )
+      },
+      transactWritePrePlanAuthority: (command) =>
+        this.runManagedPreparedApplicationWriterFenceWrite(
+          authority,
+          () => this.transport.transactWritePrePlanAuthority(command),
+        ),
+    }
+    const delegate =
+      createAwsWorkspaceSearchMigrationApplicationWriterFencePort(
+        authority.configuration,
+        authority.configurationHash,
+        transport,
+        this.prePlanAuthorityClock,
+    )
+    return {
+      bootstrapOpen: (
+        currentAuthority: WorkspaceSearchMigrationPrePlanAuthority,
+      ) =>
+        this.runManagedApplicationWriterFenceOperation(
+          authority,
+          delegate.bootstrapOpen(currentAuthority),
+        ),
+      read: () =>
+        this.runManagedApplicationWriterFenceOperation(
+          authority,
+          delegate.read(),
+        ),
+      close: (
+        currentAuthority: WorkspaceSearchMigrationPrePlanAuthority,
+      ) =>
+        this.runManagedApplicationWriterFenceOperation(
+          authority,
+          delegate.close(currentAuthority),
         ),
     }
   }
@@ -3690,6 +3774,211 @@ class AwsWorkspaceSearchMigrationIdentityPort
   }
 
   /**
+   * Captures all measured identities installed for writer-fence operations.
+   *
+   * @returns Detached generation, configuration, hash, and state identity.
+   */
+  private captureManagedApplicationWriterFenceAuthority():
+    ManagedApplicationWriterFenceAuthority {
+    const generation = this.generation
+    const configurationHash = this.measuredConfigurationHash
+    const configuration = this.measuredConfiguration
+    const stateTable = this.measuredMigrationStateTable
+    if (
+      configurationHash === undefined ||
+      configuration === undefined ||
+      stateTable === undefined ||
+      this.measuredApplicationWriterFenceQuarantined
+    ) {
+      return failManagedApplicationWriterFence()
+    }
+    const authority: ManagedApplicationWriterFenceAuthority = {
+      generation,
+      configurationHash,
+      configuration: structuredClone(configuration),
+      stateTable: structuredClone(stateTable),
+    }
+    this.requireManagedApplicationWriterFenceAuthority(authority)
+    return authority
+  }
+
+  /**
+   * Guards one complete writer-fence operation against lifecycle invalidation.
+   *
+   * The operation promise is created before this asynchronous wrapper is
+   * entered. That preserves the adapter's synchronous input detachment before
+   * its first guarded transport await.
+   *
+   * @param authority - Captured measured writer-fence authority.
+   * @param operation - Already-started adapter operation over detached input.
+   * @returns Result only while the captured measurement remains authoritative.
+   */
+  private async runManagedApplicationWriterFenceOperation<Result>(
+    authority: ManagedApplicationWriterFenceAuthority,
+    operation: Promise<Result>,
+  ): Promise<Result> {
+    try {
+      const result = await operation
+      this.requireManagedApplicationWriterFenceAuthority(authority)
+      return result
+    } catch (error: unknown) {
+      if (
+        !this.isMeasurementGenerationCurrent(
+          authority.generation,
+          authority.configurationHash,
+        )
+      ) {
+        return failManagedApplicationWriterFence()
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Requires one captured writer-fence authority to remain current and usable.
+   *
+   * @param authority - Captured generation and measured configuration hash.
+   */
+  private requireManagedApplicationWriterFenceAuthority(
+    authority: ManagedApplicationWriterFenceAuthority,
+  ): void {
+    if (
+      !this.isMeasurementGenerationCurrent(
+        authority.generation,
+        authority.configurationHash,
+      ) ||
+      this.measuredConfiguration === undefined ||
+      this.measuredApplicationWriterFenceQuarantined
+    ) {
+      return failManagedApplicationWriterFence()
+    }
+  }
+
+  /**
+   * Guards one writer-fence read with all six incarnation checks on both sides.
+   *
+   * @param authority - Captured measured writer-fence authority.
+   * @param operation - Exact strongly consistent control-row read.
+   * @returns Read result only while every fenced table stays current.
+   */
+  private async runManagedApplicationWriterFenceRead<Result>(
+    authority: ManagedApplicationWriterFenceAuthority,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    this.requireManagedApplicationWriterFenceAuthority(authority)
+    await this.requireCurrentApplicationWriterFenceTableIncarnations(
+      authority,
+    )
+    let result: Result
+    try {
+      result = await operation()
+    } catch (error: unknown) {
+      this.requireManagedApplicationWriterFenceAuthority(authority)
+      await this.requireCurrentApplicationWriterFenceTableIncarnations(
+        authority,
+      )
+      throw error
+    }
+    this.requireManagedApplicationWriterFenceAuthority(authority)
+    await this.requireCurrentApplicationWriterFenceTableIncarnations(
+      authority,
+    )
+    this.requireManagedApplicationWriterFenceAuthority(authority)
+    return result
+  }
+
+  /**
+   * Revalidates state, all four sources, and target in fixed fence order.
+   *
+   * @param authority - Captured measured configuration and generation.
+   */
+  private async requireCurrentApplicationWriterFenceTableIncarnations(
+    authority: ManagedApplicationWriterFenceAuthority,
+  ): Promise<void> {
+    this.requireManagedApplicationWriterFenceAuthority(authority)
+    try {
+      await this.requireCurrentMigrationStateTableIncarnation(authority)
+      for (const source of workspaceSearchMigrationSourceNames) {
+        await this.requireCurrentSourceTableIncarnation(
+          authority.configuration.tables[source],
+          authority.generation,
+          authority.configurationHash,
+        )
+      }
+      await this.requireCurrentTargetTableIncarnation(
+        authority.configuration.tables['workspace-search'],
+        authority.generation,
+        authority.configurationHash,
+      )
+    } catch (error: unknown) {
+      throw createManagedApplicationWriterFenceFailure(
+        readManagedMigrationStateFailureCode(error),
+      )
+    }
+    this.requireManagedApplicationWriterFenceAuthority(authority)
+  }
+
+  /**
+   * Sends one prepared fence transition and guards its uncertain commit result.
+   *
+   * A failure of the post-transaction six-table guard quarantines the complete
+   * measurement generation. No port from that generation may reconcile or
+   * continue control-row operations; a replacement measurement must
+   * re-establish identities before the closed state can be inspected.
+   *
+   * @param authority - Captured measured writer-fence authority.
+   * @param operation - Exact prepared transaction on the shared client.
+   * @returns Raw transaction result only after every identity is revalidated.
+   */
+  private async runManagedPreparedApplicationWriterFenceWrite<Result>(
+    authority: ManagedApplicationWriterFenceAuthority,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    this.requireManagedApplicationWriterFenceAuthority(authority)
+    let result: Result
+    try {
+      result = await this.runManagedMigrationStateIo(authority, operation)
+    } catch (error: unknown) {
+      try {
+        await this.requireCurrentApplicationWriterFenceTableIncarnations(
+          authority,
+        )
+      } catch (guardError: unknown) {
+        this.quarantineManagedApplicationWriterFence(authority)
+        throw guardError
+      }
+      throw error
+    }
+    try {
+      await this.requireCurrentApplicationWriterFenceTableIncarnations(
+        authority,
+      )
+    } catch (error: unknown) {
+      this.quarantineManagedApplicationWriterFence(authority)
+      throw error
+    }
+    return result
+  }
+
+  /**
+   * Permanently quarantines one still-current measured writer-fence generation.
+   *
+   * @param authority - Generation whose commit outcome became uncertain.
+   */
+  private quarantineManagedApplicationWriterFence(
+    authority: ManagedApplicationWriterFenceAuthority,
+  ): void {
+    if (
+      this.isMeasurementGenerationCurrent(
+        authority.generation,
+        authority.configurationHash,
+      )
+    ) {
+      this.measuredApplicationWriterFenceQuarantined = true
+    }
+  }
+
+  /**
    * Captures the private immutable port installed by current measurement.
    *
    * @returns Current generation, configuration hash, and private object port.
@@ -5200,6 +5489,30 @@ function createManagedSealedPlanningAuthorityFailure(
   return new WorkspaceSearchMigrationFailure(
     code,
     'Workspace Search sealed planning authority publication failed.',
+  )
+}
+
+/**
+ * Raises one stable managed application writer-fence lifecycle failure.
+ *
+ * @returns Never returns.
+ */
+function failManagedApplicationWriterFence(): never {
+  throw createManagedApplicationWriterFenceFailure('INVALID_STATE')
+}
+
+/**
+ * Creates one stable managed application writer-fence failure.
+ *
+ * @param code - Stable operator-safe lifecycle or drift classification.
+ * @returns Secret-free writer-fence failure.
+ */
+function createManagedApplicationWriterFenceFailure(
+  code: WorkspaceSearchMigrationFailureCode,
+): WorkspaceSearchMigrationFailure {
+  return new WorkspaceSearchMigrationFailure(
+    code,
+    'Workspace Search application writer fence operation failed.',
   )
 }
 
