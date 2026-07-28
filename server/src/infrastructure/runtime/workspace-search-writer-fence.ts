@@ -591,6 +591,129 @@ export function createWorkspaceSearchWriterFenceGuardMaterial(
 }
 
 /**
+ * Revalidates and detaches exact open-row application guard material.
+ *
+ * This public boundary prevents a forged closed-row condition from being
+ * relabeled with open epoch metadata. It reconstructs the independently bound
+ * durable row from canonical bytes and accepts only the exact guard material
+ * that the open-row factory would emit.
+ *
+ * @param material - Candidate low-level application guard material.
+ * @returns Detached strict open-row guard material.
+ */
+export function readWorkspaceSearchWriterFenceGuardMaterial(
+  material: unknown,
+): WorkspaceSearchWriterFenceGuardMaterial {
+  return atFenceBoundary(() => {
+    const candidate = requireRecord(material)
+    requireExactKeys(candidate, [
+      'conditionCheck',
+      'controlRevision',
+      'materialFingerprint',
+      'writerEpoch',
+    ])
+    const wrapper = requireRecord(Reflect.get(candidate, 'conditionCheck'))
+    requireExactKeys(wrapper, ['ConditionCheck'])
+    const condition = requireRecord(Reflect.get(wrapper, 'ConditionCheck'))
+    requireExactKeys(condition, [
+      'ConditionExpression',
+      'ExpressionAttributeNames',
+      'ExpressionAttributeValues',
+      'Key',
+      'ReturnValuesOnConditionCheckFailure',
+      'TableName',
+    ])
+    if (
+      Reflect.get(condition, 'ConditionExpression') !==
+        '#canonicalBytes = :canonicalBytes AND #recordDigest = :recordDigest' ||
+      Reflect.get(condition, 'ReturnValuesOnConditionCheckFailure') !==
+        'NONE'
+    ) {
+      return failFence()
+    }
+    const tableName = requireTableName(
+      Reflect.get(condition, 'TableName'),
+    )
+    const names = requireRecord(
+      Reflect.get(condition, 'ExpressionAttributeNames'),
+    )
+    requireExactKeys(names, ['#canonicalBytes', '#recordDigest'])
+    if (
+      Reflect.get(names, '#canonicalBytes') !== 'canonicalBytes' ||
+      Reflect.get(names, '#recordDigest') !== 'recordDigest'
+    ) {
+      return failFence()
+    }
+    const key = requireRecord(Reflect.get(condition, 'Key'))
+    requireExactKeys(key, ['migrationId', 'recordKey'])
+    const migrationId = readStringAttribute(
+      Reflect.get(key, 'migrationId'),
+    )
+    const recordKey = readStringAttribute(Reflect.get(key, 'recordKey'))
+    const values = requireRecord(
+      Reflect.get(condition, 'ExpressionAttributeValues'),
+    )
+    requireExactKeys(values, [':canonicalBytes', ':recordDigest'])
+    const canonicalBytes = readStringAttribute(
+      Reflect.get(values, ':canonicalBytes'),
+    )
+    const recordDigest = requireDigest(readStringAttribute(
+      Reflect.get(values, ':recordDigest'),
+    ))
+    const payload = parseCanonicalPayload(canonicalBytes)
+    const payloadBinding = requireRecord(Reflect.get(payload, 'binding'))
+    requireExactKeys(payloadBinding, [
+      'datasetBindingDigest',
+      'stateIncarnationDigest',
+      'stateTableId',
+      'tableIds',
+    ])
+    const binding = createWorkspaceSearchWriterFenceBinding({
+      stateTableName: tableName,
+      stateTableId: requireIdentifier(
+        Reflect.get(payloadBinding, 'stateTableId'),
+      ),
+      stateIncarnationDigest: requireDigest(
+        Reflect.get(payloadBinding, 'stateIncarnationDigest'),
+      ),
+      tableIds: readTableIds(Reflect.get(payloadBinding, 'tableIds')),
+    })
+    if (
+      migrationId !== writerFenceMigrationId ||
+      recordKey !== binding.recordKey ||
+      Reflect.get(payloadBinding, 'datasetBindingDigest') !==
+        binding.datasetBindingDigest ||
+      digestText(canonicalBytes) !== recordDigest
+    ) {
+      return failFence()
+    }
+    const observation = parseWorkspaceSearchWriterFenceObservation(
+      {
+        migrationId: { S: migrationId },
+        recordKey: { S: recordKey },
+        canonicalBytes: { S: canonicalBytes },
+        recordDigest: { S: recordDigest },
+      },
+      binding,
+    )
+    const expected = createWorkspaceSearchWriterFenceGuardMaterial(
+      observation,
+      binding,
+    )
+    if (
+      Reflect.get(candidate, 'materialFingerprint') !==
+        expected.materialFingerprint ||
+      Reflect.get(candidate, 'writerEpoch') !== expected.writerEpoch ||
+      Reflect.get(candidate, 'controlRevision') !==
+        expected.controlRevision
+    ) {
+      return failFence()
+    }
+    return expected
+  })
+}
+
+/**
  * Determines whether one durable closed row represents the same logical close.
  *
  * The close timestamp is intentionally excluded so a process restart can
