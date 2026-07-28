@@ -51,13 +51,16 @@ import {
 import {
   createWorkspaceSearchConfigurationHash,
   isWorkspaceSearchMigrationFailureCode,
+  requireMigrationIdentifier,
   type DynamoAttributeMap,
   type MigrationTableIdentity,
   type WorkspaceSearchMaintenanceEvidenceReceipt,
   type WorkspaceSearchMigrationFailureCode,
   type WorkspaceSearchMigrationLease,
   type WorkspaceSearchMigrationConfiguration,
+  type WorkspaceSearchMigrationSourceName,
   WorkspaceSearchMigrationFailure,
+  workspaceSearchMigrationSourceNames,
   WORKSPACE_SEARCH_MIGRATION_PAGE_SIZE,
 } from './migration-contract'
 import {
@@ -106,9 +109,10 @@ import {
   type WorkspaceSearchMigrationPlanningSourceArtifactPage,
   WORKSPACE_SEARCH_MIGRATION_SOURCE_ARTIFACT_VERSION,
 } from './migration-source-artifact'
-import type {
-  WorkspaceSearchMigrationSourceEvidenceProgress,
-  WorkspaceSearchMigrationSourceEvidenceReplayResult,
+import {
+  createWorkspaceSearchMigrationSourceEvidenceProgressDigest,
+  type WorkspaceSearchMigrationSourceEvidenceProgress,
+  type WorkspaceSearchMigrationSourceEvidenceReplayResult,
 } from './migration-source-evidence'
 import {
   normalizeWorkspaceSearchMigrationSourceScanOutput,
@@ -133,9 +137,10 @@ import {
   type WorkspaceSearchMigrationPlanningTargetArtifactPage,
   WORKSPACE_SEARCH_MIGRATION_TARGET_ARTIFACT_VERSION,
 } from './migration-target-artifact'
-import type {
-  WorkspaceSearchMigrationTargetEvidenceProgress,
-  WorkspaceSearchMigrationTargetEvidenceReplayResult,
+import {
+  createWorkspaceSearchMigrationTargetEvidenceProgressDigest,
+  type WorkspaceSearchMigrationTargetEvidenceProgress,
+  type WorkspaceSearchMigrationTargetEvidenceReplayResult,
 } from './migration-target-evidence'
 import {
   createAwsWorkspaceSearchMigrationTargetEvidencePort,
@@ -159,6 +164,16 @@ import {
 import {
   prepareWorkspaceSearchMigrationTargetScanContext,
 } from './migration-target-scan-context'
+import {
+  joinWorkspaceSearchMigrationPlanningEvidence,
+  type WorkspaceSearchMigrationPlanningJoinResult,
+} from './migration-planning-join'
+import type {
+  WorkspaceSearchMigrationPlanningJoinLimits,
+  WorkspaceSearchMigrationPlanningMaterialReadLimits,
+  WorkspaceSearchMigrationPlanningSourceChainMaterial,
+  WorkspaceSearchMigrationPlanningTargetChainMaterial,
+} from './migration-planning-material'
 import type {
   AcquireWorkspaceSearchMigrationLeaseInput,
   HeartbeatWorkspaceSearchMigrationLeaseInput,
@@ -255,6 +270,22 @@ const MIGRATION_STATE_TRANSACTION_TIMEOUT_MILLISECONDS = 5_000
 
 /** Hard deadline for one immutable migration-artifact S3 SDK request. */
 const MIGRATION_ARTIFACT_TIMEOUT_MILLISECONDS = 10_000
+
+/** Maximum rows one managed five-chain planning join may retain. */
+export const WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_TOTAL_ROWS =
+  100_000
+
+/** Maximum canonical item bytes one managed planning join may retain. */
+export const WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_CANONICAL_BYTES =
+  256 * 1024 * 1024
+
+/** Maximum candidate operations one managed planning join may construct. */
+export const WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_OPERATIONS =
+  100_000
+
+/** Maximum combined durable evidence pages one managed join may read. */
+export const WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_EVIDENCE_PAGES =
+  10_000
 
 /**
  * Fixed secret-free timeout emitted when a local state-write deadline aborts.
@@ -435,6 +466,99 @@ type ManagedTargetEvidenceAuthority<
   readonly request: Request
 }
 
+/**
+ * One complete managed planning-join request fixed to a measured generation.
+ */
+type ManagedPlanningJoinAuthority = ManagedMigrationStateAuthority & {
+  /** Detached read-only join request retained across every managed await. */
+  readonly request:
+    JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput
+}
+
+/**
+ * Source evidence request and adapter sharing one managed planning authority.
+ */
+type ManagedPlanningSourceEvidenceContext = {
+  /** Exact planning evidence-chain request for this source. */
+  readonly request: WorkspaceSearchMigrationSourceEvidenceAwsRequest
+  /** Ephemeral evidence adapter guarded by the shared session generation. */
+  readonly adapter: WorkspaceSearchMigrationSourceEvidenceAwsPort
+}
+
+/**
+ * All four source contexts in the migration's fixed canonical source order.
+ */
+type ManagedPlanningSourceEvidenceContexts = Readonly<
+  Record<
+    WorkspaceSearchMigrationSourceName,
+    ManagedPlanningSourceEvidenceContext
+  >
+>
+
+/**
+ * Target evidence request and adapter sharing one managed planning authority.
+ */
+type ManagedPlanningTargetEvidenceContext = {
+  /** Exact planning target evidence-chain request. */
+  readonly request: WorkspaceSearchMigrationTargetEvidenceAwsRequest
+  /** Ephemeral target adapter guarded by the shared session generation. */
+  readonly adapter: WorkspaceSearchMigrationTargetEvidenceAwsPort
+}
+
+/**
+ * Five strongly captured evidence heads for one planning material join.
+ */
+type ManagedPlanningEvidenceHeads = {
+  /** Exact source heads indexed by the four fixed source roles. */
+  readonly sources: Readonly<
+    Record<
+      WorkspaceSearchMigrationSourceName,
+      WorkspaceSearchMigrationSourceEvidenceProgress
+    >
+  >
+  /** Exact Workspace Search target evidence head. */
+  readonly target: WorkspaceSearchMigrationTargetEvidenceProgress
+}
+
+/**
+ * Remaining exact material budget while the five chains are read in order.
+ */
+type ManagedPlanningMaterialBudget = {
+  /** Additional raw rows that may still be retained. */
+  rows: number
+  /** Additional canonical UTF-8 item bytes that may still be retained. */
+  canonicalItemBytes: number
+}
+
+/**
+ * Complete exact-version material retained privately until the pure join.
+ */
+type ManagedPlanningEvidenceMaterial = {
+  /** Four source chain materials indexed by the fixed source roles. */
+  readonly sources: Readonly<
+    Record<
+      WorkspaceSearchMigrationSourceName,
+      WorkspaceSearchMigrationPlanningSourceChainMaterial
+    >
+  >
+  /** Exact target chain material. */
+  readonly target: WorkspaceSearchMigrationPlanningTargetChainMaterial
+}
+
+/**
+ * Read-only managed composition input without caller-supplied raw material.
+ */
+export type JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput = {
+  /** Operator-selected run shared by all five planning evidence chains. */
+  readonly runId: string
+  /** Exact measured configuration owning the durable evidence. */
+  readonly configuration: WorkspaceSearchMigrationConfiguration
+  /** Reviewed digest of the exact measured configuration. */
+  readonly configurationHash: string
+  /** Explicit total row, canonical-byte, and operation limits. */
+  readonly limits: WorkspaceSearchMigrationPlanningJoinLimits
+}
+
 /** Explicit AWS SDK client configuration retained for construction tests. */
 export type WorkspaceSearchMigrationIdentityAwsSdkClientConfiguration = {
   /** Credentials resolved only from the explicitly selected shared profile. */
@@ -569,6 +693,24 @@ export interface WorkspaceSearchMigrationManagedAwsSession
   commitNextTargetEvidencePage(
     input: WorkspaceSearchMigrationTargetEvidenceAwsCommitRequest,
   ): Promise<WorkspaceSearchMigrationTargetEvidenceProgress>
+
+  /**
+   * Reads five fixed terminal planning chains and joins their exact versions.
+   *
+   * Full raw page material remains private to this measured session. Returned
+   * candidates may contain required source or target preimages. Every durable
+   * head is strongly reread after the pure join before the result is returned.
+   *
+   * This read-only result is provisional evidence only. It is not a sealed
+   * plan and cannot open the production gate until writer fencing, current
+   * authority freshness, and atomic plan/head persistence are implemented.
+   *
+   * @param input - Run, measured identity, and bounded join limits.
+   * @returns Fully revalidated planning snapshot, ownership, and candidates.
+   */
+  joinCommittedPlanningEvidence(
+    input: JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput,
+  ): Promise<WorkspaceSearchMigrationPlanningJoinResult>
 }
 
 /** Narrow transport containing only managed identity reads. */
@@ -2403,6 +2545,592 @@ class AwsWorkspaceSearchMigrationIdentityPort
   }
 
   /**
+   * Reads and joins five terminal planning chains under one measurement.
+   *
+   * The method fixes all five heads before exact-version artifact reads, keeps
+   * full raw page material private, and strongly rereads every head after the
+   * pure join. Candidate preimages required by later plan sealing remain in the
+   * returned pure-join result.
+   *
+   * The result is provisional and grants no execution or production-gate
+   * authority without writer fencing, freshness checks, and atomic plan/head
+   * persistence.
+   *
+   * @param input - Run, measured identity, and bounded material limits.
+   * @returns Fully revalidated planning evidence ready for later plan sealing.
+   */
+  async joinCommittedPlanningEvidence(
+    input: JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput,
+  ): Promise<WorkspaceSearchMigrationPlanningJoinResult> {
+    return runManagedPlanningJoinAwsBoundary(async () => {
+      const authority = this.captureManagedPlanningJoinAuthority(input)
+      const sourceContexts =
+        this.createManagedPlanningSourceEvidenceContexts(authority)
+      const targetContext =
+        this.createManagedPlanningTargetEvidenceContext(authority)
+      try {
+        await this.requireCurrentPlanningJoinTableIncarnations(authority)
+        const capturedHeads = await this.readManagedPlanningEvidenceHeads(
+          sourceContexts,
+          targetContext,
+        )
+        this.requireManagedPlanningEvidenceHeadPreflight(
+          capturedHeads,
+          authority.request.limits,
+        )
+        const material = await this.readManagedPlanningEvidenceMaterial(
+          sourceContexts,
+          targetContext,
+          capturedHeads,
+          authority.request.limits,
+        )
+        const result = joinWorkspaceSearchMigrationPlanningEvidence({
+          runId: authority.request.runId,
+          configuration: authority.request.configuration,
+          configurationHash: authority.request.configurationHash,
+          limits: authority.request.limits,
+          sourcePages: {
+            'project-directory':
+              material.sources['project-directory'].materials,
+            'work-items': material.sources['work-items'].materials,
+            collaboration: material.sources.collaboration.materials,
+            documents: material.sources.documents.materials,
+          },
+          targetPages: material.target.materials,
+        })
+        const confirmedHeads = await this.readManagedPlanningEvidenceHeads(
+          sourceContexts,
+          targetContext,
+        )
+        this.requireManagedPlanningEvidenceHeadsEqual(
+          capturedHeads,
+          confirmedHeads,
+        )
+        await this.requireCurrentPlanningJoinTableIncarnations(authority)
+        this.requireMeasurementGeneration(
+          authority.generation,
+          authority.configurationHash,
+        )
+        return result
+      } catch (error: unknown) {
+        this.requireMeasurementGeneration(
+          authority.generation,
+          authority.configurationHash,
+        )
+        await this.requireCurrentPlanningJoinTableIncarnations(authority)
+        this.requireMeasurementGeneration(
+          authority.generation,
+          authority.configurationHash,
+        )
+        throw error
+      }
+    })
+  }
+
+  /**
+   * Detaches one managed planning-join request before the first guard await.
+   *
+   * @param input - Caller-owned run, configuration, hash, and limits.
+   * @returns One request fixed to the current measured session generation.
+   */
+  private captureManagedPlanningJoinAuthority(
+    input: JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput,
+  ): ManagedPlanningJoinAuthority {
+    const detached = detachManagedPlanningJoinInput(input)
+    const request: JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput = {
+      ...detached,
+      runId: requireMigrationIdentifier(detached.runId, 'Run ID'),
+    }
+    this.requireManagedPlanningJoinLimits(request.limits)
+    const authority = this.captureManagedMigrationStateAuthority()
+    if (
+      request.configurationHash !== authority.configurationHash ||
+      createManagedPlanningConfigurationHash(request.configuration) !==
+        authority.configurationHash
+    ) {
+      return failManagedPlanningJoin(
+        'CONFIGURATION_HASH_MISMATCH',
+      )
+    }
+    this.requireMeasuredConfigurationBinding(request.configuration)
+    return {
+      ...authority,
+      request,
+    }
+  }
+
+  /**
+   * Requires the three public planning limits to be positive safe integers.
+   *
+   * @param limits - Detached caller-selected material ceilings.
+   */
+  private requireManagedPlanningJoinLimits(
+    limits: WorkspaceSearchMigrationPlanningJoinLimits,
+  ): void {
+    if (
+      !Number.isSafeInteger(limits.maxTotalRows) ||
+      limits.maxTotalRows <= 0 ||
+      limits.maxTotalRows >
+        WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_TOTAL_ROWS ||
+      !Number.isSafeInteger(limits.maxTotalCanonicalItemBytes) ||
+      limits.maxTotalCanonicalItemBytes <= 0 ||
+      limits.maxTotalCanonicalItemBytes >
+        WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_CANONICAL_BYTES ||
+      !Number.isSafeInteger(limits.maxPlanOperations) ||
+      limits.maxPlanOperations <= 0 ||
+      limits.maxPlanOperations >
+        WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_OPERATIONS
+    ) {
+      return failManagedPlanningJoin('INVALID_ARGUMENT')
+    }
+  }
+
+  /**
+   * Creates four source evidence adapters from one captured generation.
+   *
+   * @param authority - Shared measured planning-join authority.
+   * @returns Fixed source-role request and adapter contexts.
+   */
+  private createManagedPlanningSourceEvidenceContexts(
+    authority: ManagedPlanningJoinAuthority,
+  ): ManagedPlanningSourceEvidenceContexts {
+    return {
+      'project-directory':
+        this.createManagedPlanningSourceEvidenceContext(
+          authority,
+          'project-directory',
+        ),
+      'work-items': this.createManagedPlanningSourceEvidenceContext(
+        authority,
+        'work-items',
+      ),
+      collaboration: this.createManagedPlanningSourceEvidenceContext(
+        authority,
+        'collaboration',
+      ),
+      documents: this.createManagedPlanningSourceEvidenceContext(
+        authority,
+        'documents',
+      ),
+    }
+  }
+
+  /**
+   * Creates one source adapter without recapturing session authority.
+   *
+   * @param authority - Shared measured planning-join authority.
+   * @param source - Fixed logical source role for this chain.
+   * @returns Exact request and ephemeral adapter.
+   */
+  private createManagedPlanningSourceEvidenceContext(
+    authority: ManagedPlanningJoinAuthority,
+    source: WorkspaceSearchMigrationSourceName,
+  ): ManagedPlanningSourceEvidenceContext {
+    const request: WorkspaceSearchMigrationSourceEvidenceAwsRequest = {
+      runId: authority.request.runId,
+      purpose: 'planning',
+      configuration: authority.request.configuration,
+      configurationHash: authority.request.configurationHash,
+      source,
+    }
+    const adapter = this.createManagedSourceEvidenceAdapter({
+      generation: authority.generation,
+      configurationHash: authority.configurationHash,
+      stateTable: authority.stateTable,
+      request,
+    })
+    return { request, adapter }
+  }
+
+  /**
+   * Creates the target adapter without recapturing session authority.
+   *
+   * @param authority - Shared measured planning-join authority.
+   * @returns Exact target request and ephemeral adapter.
+   */
+  private createManagedPlanningTargetEvidenceContext(
+    authority: ManagedPlanningJoinAuthority,
+  ): ManagedPlanningTargetEvidenceContext {
+    const request: WorkspaceSearchMigrationTargetEvidenceAwsRequest = {
+      runId: authority.request.runId,
+      purpose: 'planning',
+      configuration: authority.request.configuration,
+      configurationHash: authority.request.configurationHash,
+    }
+    const adapter = this.createManagedTargetEvidenceAdapter({
+      generation: authority.generation,
+      configurationHash: authority.configurationHash,
+      stateTable: authority.stateTable,
+      request,
+    })
+    return { request, adapter }
+  }
+
+  /**
+   * Strongly reads all five evidence heads in canonical source-then-target order.
+   *
+   * @param sources - Four source adapter contexts sharing one authority.
+   * @param target - Target adapter context sharing the same authority.
+   * @returns Detached exact progress for every chain.
+   */
+  private async readManagedPlanningEvidenceHeads(
+    sources: ManagedPlanningSourceEvidenceContexts,
+    target: ManagedPlanningTargetEvidenceContext,
+  ): Promise<ManagedPlanningEvidenceHeads> {
+    const projectDirectory =
+      await sources['project-directory'].adapter.readProgress(
+        sources['project-directory'].request,
+      )
+    const workItems = await sources['work-items'].adapter.readProgress(
+      sources['work-items'].request,
+    )
+    const collaboration =
+      await sources.collaboration.adapter.readProgress(
+        sources.collaboration.request,
+      )
+    const documents = await sources.documents.adapter.readProgress(
+      sources.documents.request,
+    )
+    const targetProgress = await target.adapter.readProgress(target.request)
+    return {
+      sources: {
+        'project-directory': projectDirectory,
+        'work-items': workItems,
+        collaboration,
+        documents,
+      },
+      target: targetProgress,
+    }
+  }
+
+  /**
+   * Rejects incomplete or oversized captured heads before any artifact GET.
+   *
+   * @param heads - Five strongly captured evidence heads.
+   * @param limits - Detached total material and operation ceilings.
+   */
+  private requireManagedPlanningEvidenceHeadPreflight(
+    heads: ManagedPlanningEvidenceHeads,
+    limits: WorkspaceSearchMigrationPlanningJoinLimits,
+  ): void {
+    let totalRows = 0
+    let totalSourceMapped = 0
+    let totalPages = 0
+    for (const source of workspaceSearchMigrationSourceNames) {
+      const progress = heads.sources[source]
+      const pageSequence = requireManagedPlanningHeadCount(
+        progress.pageSequence,
+      )
+      const scanned = requireManagedPlanningHeadCount(
+        progress.checkpoint.aggregate.scanned,
+      )
+      if (
+        pageSequence === 0 ||
+        progress.checkpoint.aggregate.pageCount !==
+          pageSequence ||
+        pageSequence >
+          addManagedPlanningHeadCount(scanned, 1) ||
+        !progress.checkpoint.completed ||
+        progress.checkpoint.cursor !== undefined ||
+        progress.checkpoint.aggregate.invalid !== 0
+      ) {
+        return failManagedPlanningJoin('DRY_RUN_INVALID_ROWS')
+      }
+      totalRows = addManagedPlanningHeadCount(
+        totalRows,
+        scanned,
+      )
+      totalSourceMapped = addManagedPlanningHeadCount(
+        totalSourceMapped,
+        progress.checkpoint.aggregate.mapped,
+      )
+      totalPages = addManagedPlanningHeadCount(
+        totalPages,
+        pageSequence,
+      )
+    }
+    const target = heads.target
+    const targetPageSequence = requireManagedPlanningHeadCount(
+      target.pageSequence,
+    )
+    const targetScanned = requireManagedPlanningHeadCount(
+      target.checkpoint.aggregate.scanned,
+    )
+    if (
+      targetPageSequence === 0 ||
+      target.checkpoint.aggregate.pageCount !== targetPageSequence ||
+      targetPageSequence >
+        addManagedPlanningHeadCount(targetScanned, 1) ||
+      !target.checkpoint.completed ||
+      target.checkpoint.cursor !== undefined ||
+      target.checkpoint.aggregate.invalid !== 0
+    ) {
+      return failManagedPlanningJoin('DRY_RUN_INVALID_ROWS')
+    }
+    totalRows = addManagedPlanningHeadCount(
+      totalRows,
+      targetScanned,
+    )
+    totalPages = addManagedPlanningHeadCount(
+      totalPages,
+      targetPageSequence,
+    )
+    const targetOwned = requireManagedPlanningHeadCount(
+      target.checkpoint.aggregate.owned,
+    )
+    if (
+      totalRows > limits.maxTotalRows ||
+      Math.max(totalSourceMapped, targetOwned) >
+        limits.maxPlanOperations ||
+      totalPages >
+        WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_EVIDENCE_PAGES
+    ) {
+      return failManagedPlanningJoin('INVALID_ARGUMENT')
+    }
+  }
+
+  /**
+   * Reads five exact-version material chains against their captured heads.
+   *
+   * Remaining rows and canonical bytes are passed by value to each adapter,
+   * preventing one chain from materializing work reserved for later chains.
+   *
+   * @param sources - Four source adapter contexts sharing one authority.
+   * @param target - Target adapter context sharing the same authority.
+   * @param heads - Initial fixed head for every material prefix.
+   * @param limits - Detached total material ceilings.
+   * @returns Private exact material for the pure planning join.
+   */
+  private async readManagedPlanningEvidenceMaterial(
+    sources: ManagedPlanningSourceEvidenceContexts,
+    target: ManagedPlanningTargetEvidenceContext,
+    heads: ManagedPlanningEvidenceHeads,
+    limits: WorkspaceSearchMigrationPlanningJoinLimits,
+  ): Promise<ManagedPlanningEvidenceMaterial> {
+    const budget: ManagedPlanningMaterialBudget = {
+      rows: limits.maxTotalRows,
+      canonicalItemBytes: limits.maxTotalCanonicalItemBytes,
+    }
+    const projectDirectory =
+      await this.readManagedPlanningSourceMaterial(
+        sources['project-directory'],
+        heads.sources['project-directory'],
+        budget,
+      )
+    const workItems = await this.readManagedPlanningSourceMaterial(
+      sources['work-items'],
+      heads.sources['work-items'],
+      budget,
+    )
+    const collaboration =
+      await this.readManagedPlanningSourceMaterial(
+        sources.collaboration,
+        heads.sources.collaboration,
+        budget,
+      )
+    const documents = await this.readManagedPlanningSourceMaterial(
+      sources.documents,
+      heads.sources.documents,
+      budget,
+    )
+    const targetMaterial =
+      await this.readManagedPlanningTargetMaterial(
+        target,
+        heads.target,
+        budget,
+      )
+    return {
+      sources: {
+        'project-directory': projectDirectory,
+        'work-items': workItems,
+        collaboration,
+        documents,
+      },
+      target: targetMaterial,
+    }
+  }
+
+  /**
+   * Reads and accounts for one source chain under the remaining total budget.
+   *
+   * @param context - Exact source request and measured adapter.
+   * @param expectedProgress - Initially captured durable head.
+   * @param budget - Mutable private remaining total budget.
+   * @returns Exact verified source material.
+   */
+  private async readManagedPlanningSourceMaterial(
+    context: ManagedPlanningSourceEvidenceContext,
+    expectedProgress: WorkspaceSearchMigrationSourceEvidenceProgress,
+    budget: ManagedPlanningMaterialBudget,
+  ): Promise<WorkspaceSearchMigrationPlanningSourceChainMaterial> {
+    const material = await context.adapter.readPlanningMaterialAtProgress(
+      context.request,
+      expectedProgress,
+      createManagedPlanningMaterialReadLimits(budget),
+    )
+    this.requireManagedPlanningSourceProgressEqual(
+      expectedProgress,
+      material.progress,
+    )
+    this.consumeManagedPlanningMaterialBudget(
+      budget,
+      material.rowCount,
+      material.canonicalItemBytes,
+      expectedProgress.checkpoint.aggregate.scanned,
+    )
+    return material
+  }
+
+  /**
+   * Reads and accounts for the target chain under the remaining total budget.
+   *
+   * @param context - Exact target request and measured adapter.
+   * @param expectedProgress - Initially captured durable target head.
+   * @param budget - Mutable private remaining total budget.
+   * @returns Exact verified target material.
+   */
+  private async readManagedPlanningTargetMaterial(
+    context: ManagedPlanningTargetEvidenceContext,
+    expectedProgress: WorkspaceSearchMigrationTargetEvidenceProgress,
+    budget: ManagedPlanningMaterialBudget,
+  ): Promise<WorkspaceSearchMigrationPlanningTargetChainMaterial> {
+    const material = await context.adapter.readPlanningMaterialAtProgress(
+      context.request,
+      expectedProgress,
+      createManagedPlanningMaterialReadLimits(budget),
+    )
+    this.requireManagedPlanningTargetProgressEqual(
+      expectedProgress,
+      material.progress,
+    )
+    this.consumeManagedPlanningMaterialBudget(
+      budget,
+      material.rowCount,
+      material.canonicalItemBytes,
+      expectedProgress.checkpoint.aggregate.scanned,
+    )
+    return material
+  }
+
+  /**
+   * Deducts one trusted adapter result from the remaining material budget.
+   *
+   * @param budget - Mutable private remaining total budget.
+   * @param rowCount - Exact rows retained by one chain.
+   * @param canonicalItemBytes - Exact canonical bytes retained by one chain.
+   * @param expectedRows - Captured head's exact scanned-row count.
+   */
+  private consumeManagedPlanningMaterialBudget(
+    budget: ManagedPlanningMaterialBudget,
+    rowCount: number,
+    canonicalItemBytes: number,
+    expectedRows: number,
+  ): void {
+    if (
+      !Number.isSafeInteger(rowCount) ||
+      rowCount < 0 ||
+      !Number.isSafeInteger(canonicalItemBytes) ||
+      canonicalItemBytes < 0 ||
+      rowCount !== expectedRows ||
+      rowCount > budget.rows ||
+      canonicalItemBytes > budget.canonicalItemBytes
+    ) {
+      return failManagedPlanningJoin('INVALID_STATE')
+    }
+    budget.rows -= rowCount
+    budget.canonicalItemBytes -= canonicalItemBytes
+  }
+
+  /**
+   * Requires every final strong head to equal its initially captured head.
+   *
+   * @param captured - Initial five head snapshot.
+   * @param confirmed - Five heads strongly reread after the pure join.
+   */
+  private requireManagedPlanningEvidenceHeadsEqual(
+    captured: ManagedPlanningEvidenceHeads,
+    confirmed: ManagedPlanningEvidenceHeads,
+  ): void {
+    for (const source of workspaceSearchMigrationSourceNames) {
+      this.requireManagedPlanningSourceProgressEqual(
+        captured.sources[source],
+        confirmed.sources[source],
+      )
+    }
+    this.requireManagedPlanningTargetProgressEqual(
+      captured.target,
+      confirmed.target,
+    )
+  }
+
+  /**
+   * Requires two source progress heads to have one exact CAS digest.
+   *
+   * @param expected - Initially captured source head.
+   * @param actual - Material or final source head.
+   */
+  private requireManagedPlanningSourceProgressEqual(
+    expected: WorkspaceSearchMigrationSourceEvidenceProgress,
+    actual: WorkspaceSearchMigrationSourceEvidenceProgress,
+  ): void {
+    if (
+      createWorkspaceSearchMigrationSourceEvidenceProgressDigest(
+        expected,
+      ) !==
+        createWorkspaceSearchMigrationSourceEvidenceProgressDigest(actual)
+    ) {
+      return failManagedPlanningJoin('INVALID_STATE')
+    }
+  }
+
+  /**
+   * Requires two target progress heads to have one exact CAS digest.
+   *
+   * @param expected - Initially captured target head.
+   * @param actual - Material or final target head.
+   */
+  private requireManagedPlanningTargetProgressEqual(
+    expected: WorkspaceSearchMigrationTargetEvidenceProgress,
+    actual: WorkspaceSearchMigrationTargetEvidenceProgress,
+  ): void {
+    if (
+      createWorkspaceSearchMigrationTargetEvidenceProgressDigest(
+        expected,
+      ) !==
+        createWorkspaceSearchMigrationTargetEvidenceProgressDigest(actual)
+    ) {
+      return failManagedPlanningJoin('INVALID_STATE')
+    }
+  }
+
+  /**
+   * Revalidates state, all four sources, and the target in fixed order.
+   *
+   * @param authority - One measured generation and detached configuration.
+   */
+  private async requireCurrentPlanningJoinTableIncarnations(
+    authority: ManagedPlanningJoinAuthority,
+  ): Promise<void> {
+    await this.requireCurrentMigrationStateTableIncarnation(authority)
+    for (const source of workspaceSearchMigrationSourceNames) {
+      await this.requireCurrentSourceTableIncarnation(
+        authority.request.configuration.tables[source],
+        authority.generation,
+        authority.configurationHash,
+      )
+    }
+    await this.requireCurrentTargetTableIncarnation(
+      authority.request.configuration.tables['workspace-search'],
+      authority.generation,
+      authority.configurationHash,
+    )
+    this.requireMeasurementGeneration(
+      authority.generation,
+      authority.configurationHash,
+    )
+  }
+
+  /**
    * Guards one managed operation against session-generation changes.
    *
    * The complete public operation verifies the migration-state incarnation
@@ -3571,6 +4299,201 @@ async function runTargetScanAwsBoundary(
 }
 
 /**
+ * Detaches the four-field public join input without trusting accessors.
+ *
+ * Descriptor inspection and structured cloning remain inside one private
+ * replacement boundary so hostile proxies cannot forge migration codes.
+ *
+ * @param input - Caller-owned public managed planning request.
+ * @returns Plain detached request safe to retain across asynchronous I/O.
+ */
+function detachManagedPlanningJoinInput(
+  input: JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput,
+): JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput {
+  try {
+    requireExactManagedPlanningOwnDataKeys(input, [
+      'configuration',
+      'configurationHash',
+      'limits',
+      'runId',
+    ])
+    const limits = readManagedPlanningOwnDataProperty(input, 'limits')
+    requireExactManagedPlanningOwnDataKeys(limits, [
+      'maxPlanOperations',
+      'maxTotalCanonicalItemBytes',
+      'maxTotalRows',
+    ])
+    const snapshot = structuredClone(input)
+    return {
+      runId: snapshot.runId,
+      configuration: snapshot.configuration,
+      configurationHash: snapshot.configurationHash,
+      limits: {
+        maxTotalRows: snapshot.limits.maxTotalRows,
+        maxTotalCanonicalItemBytes:
+          snapshot.limits.maxTotalCanonicalItemBytes,
+        maxPlanOperations: snapshot.limits.maxPlanOperations,
+      },
+    }
+  } catch {
+    return failSourceScanAws('INVALID_ARGUMENT')
+  }
+}
+
+/**
+ * Requires one record to expose exactly enumerable own data properties.
+ *
+ * @param value - Candidate caller-owned record or proxy.
+ * @param expectedKeys - Exact accepted string keys.
+ */
+function requireExactManagedPlanningOwnDataKeys(
+  value: unknown,
+  expectedKeys: readonly string[],
+): void {
+  if (typeof value !== 'object' || value === null) {
+    return failSourceScanAws('INVALID_ARGUMENT')
+  }
+  const keys = Reflect.ownKeys(value)
+  if (
+    keys.length !== expectedKeys.length ||
+    keys.some(
+      (key) => typeof key !== 'string' || !expectedKeys.includes(key),
+    )
+  ) {
+    return failSourceScanAws('INVALID_ARGUMENT')
+  }
+  for (const key of expectedKeys) {
+    const descriptor = Reflect.getOwnPropertyDescriptor(value, key)
+    if (
+      descriptor === undefined ||
+      !descriptor.enumerable ||
+      !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+    ) {
+      return failSourceScanAws('INVALID_ARGUMENT')
+    }
+  }
+}
+
+/**
+ * Reads one already validated own data descriptor without invoking a getter.
+ *
+ * @param owner - Caller-owned candidate record.
+ * @param property - Exact own data property to read.
+ * @returns Raw descriptor value for further validation.
+ */
+function readManagedPlanningOwnDataProperty(
+  owner: object,
+  property: string,
+): unknown {
+  const descriptor = Reflect.getOwnPropertyDescriptor(owner, property)
+  if (
+    descriptor === undefined ||
+    !descriptor.enumerable ||
+    !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+  ) {
+    return failSourceScanAws('INVALID_ARGUMENT')
+  }
+  return descriptor.value
+}
+
+/**
+ * Hashes one detached managed-planning configuration behind input validation.
+ *
+ * @param configuration - Detached caller-supplied measured configuration.
+ * @returns Reviewed configuration hash or a fixed invalid-input failure.
+ */
+function createManagedPlanningConfigurationHash(
+  configuration: WorkspaceSearchMigrationConfiguration,
+): string {
+  try {
+    return createWorkspaceSearchConfigurationHash(configuration)
+  } catch {
+    return failSourceScanAws('INVALID_ARGUMENT')
+  }
+}
+
+/**
+ * Runs one five-chain planning join behind a fixed redaction boundary.
+ *
+ * @param operation - Complete same-generation material composition.
+ * @returns Fully revalidated pure planning-join result.
+ */
+async function runManagedPlanningJoinAwsBoundary<Result>(
+  operation: () => Promise<Result>,
+): Promise<Result> {
+  try {
+    return await operation()
+  } catch (error: unknown) {
+    const code = readManagedMigrationStateFailureCode(error)
+    throw new WorkspaceSearchMigrationFailure(
+      code,
+      `Workspace Search planning material join stopped safely (${code}).`,
+    )
+  }
+}
+
+/**
+ * Copies one private remaining budget into an immutable adapter request.
+ *
+ * @param budget - Current private five-chain material budget.
+ * @returns Scalar remaining limits safe to retain across adapter awaits.
+ */
+function createManagedPlanningMaterialReadLimits(
+  budget: ManagedPlanningMaterialBudget,
+): WorkspaceSearchMigrationPlanningMaterialReadLimits {
+  return {
+    maxRows: budget.rows,
+    maxCanonicalItemBytes: budget.canonicalItemBytes,
+  }
+}
+
+/**
+ * Requires one evidence-head counter to be a nonnegative safe integer.
+ *
+ * @param value - Counter parsed from one durable progress head.
+ * @returns Validated exact count.
+ */
+function requireManagedPlanningHeadCount(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    return failManagedPlanningJoin('INVALID_STATE')
+  }
+  return value
+}
+
+/**
+ * Adds one evidence-head counter without permitting integer overflow.
+ *
+ * @param current - Accumulated validated count.
+ * @param additional - Next durable head count.
+ * @returns Exact safe sum.
+ */
+function addManagedPlanningHeadCount(
+  current: number,
+  additional: number,
+): number {
+  const sum = current + requireManagedPlanningHeadCount(additional)
+  if (!Number.isSafeInteger(sum)) {
+    return failManagedPlanningJoin('INVALID_STATE')
+  }
+  return sum
+}
+
+/**
+ * Raises one trusted secret-free managed planning-join failure.
+ *
+ * @param code - Stable failure selected by managed composition logic.
+ * @returns Never returns.
+ */
+function failManagedPlanningJoin(
+  code: WorkspaceSearchMigrationFailureCode,
+): never {
+  throw new WorkspaceSearchMigrationFailure(
+    code,
+    `Workspace Search planning material join stopped safely (${code}).`,
+  )
+}
+
+/**
  * Runs one managed evidence call behind a fixed raw-error replacement boundary.
  *
  * @param operation - Captured-authority validation and adapter operation.
@@ -3673,6 +4596,7 @@ function readManagedMigrationStateFailureCode(
         ? code
         : 'INVALID_STATE'
     }
+    if (error instanceof TargetScanAwsFailure) return error.code
   } catch {
     return 'INVALID_STATE'
   }

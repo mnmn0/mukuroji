@@ -24,6 +24,9 @@ import {
   WORKSPACE_SEARCH_MIGRATION_VERSION,
 } from './migration-contract'
 import {
+  serializeCanonicalAttributeMap,
+} from './dynamodb-attribute-codec'
+import {
   createAwsWorkspaceSearchMigrationSourceEvidencePort,
   type WorkspaceSearchMigrationDryRunSourceEvidenceAwsCommitRequest,
   type WorkspaceSearchMigrationPlanningSourceEvidenceAwsCommitRequest,
@@ -1591,6 +1594,19 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
         authorityContext.authority.lease.runId,
       ),
     )
+    const materialFailure = await captureMigrationFailure(
+      () => port.readPlanningMaterialAtProgress(
+        createPlanningReadRequest(
+          configuration,
+          authorityContext.authority.lease.runId,
+        ),
+        replay.progress,
+        {
+          maxRows: 1,
+          maxCanonicalItemBytes: 1_000_000,
+        },
+      ),
+    )
 
     const failure = await captureMigrationFailure(
       () => port.commitNextPage(request),
@@ -1600,6 +1616,7 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
     expect(replay.progress.evidenceDigest).toBe(legacyDigest)
     expect(replay.progress.checkpoint.completed).toBe(true)
     expect(replay.progress.checkpoint.aggregate.pageCount).toBe(1)
+    expect(materialFailure.code).toBe('INVALID_STATE')
     expect(failure.code).toBe('INVALID_STATE')
     expect(planningArtifactGateway.captureCalls).toHaveLength(0)
     expect(planningArtifactGateway.readCalls).toHaveLength(0)
@@ -1740,6 +1757,132 @@ describe('Workspace Search migration source evidence AWS adapter', () => {
     expect(
       planningArtifactGateway.readCalls[0]?.sourceArtifacts,
     ).toEqual(planningPage.sourceArtifacts)
+
+    planningArtifactGateway.readCalls.splice(0)
+    const pointReadCount = transport.getCommands.length
+    const canonicalItemBytes = Buffer.byteLength(
+      serializeCanonicalAttributeMap(rawItem),
+      'utf8',
+    )
+    const material =
+      await port.readPlanningMaterialAtProgress(
+        createPlanningReadRequest(
+          configuration,
+          authorityContext.authority.lease.runId,
+        ),
+        committed,
+        {
+          maxRows: 1,
+          maxCanonicalItemBytes: canonicalItemBytes,
+        },
+      )
+    expect(material).toEqual({
+      progress: committed,
+      materials: [{
+        page: planningPage,
+        items: [rawItem],
+      }],
+      rowCount: 1,
+      canonicalItemBytes,
+    })
+    expect(planningArtifactGateway.readCalls).toHaveLength(1)
+    expect(transport.getCommands).toHaveLength(pointReadCount + 1)
+
+    const boundedPointReadCount = transport.getCommands.length
+    const rowLimitFailure = await captureMigrationFailure(
+      () => port.readPlanningMaterialAtProgress(
+        createPlanningReadRequest(
+          configuration,
+          authorityContext.authority.lease.runId,
+        ),
+        committed,
+        {
+          maxRows: 0,
+          maxCanonicalItemBytes: canonicalItemBytes,
+        },
+      ),
+    )
+    expect(rowLimitFailure.code).toBe('INVALID_ARGUMENT')
+    expect(planningArtifactGateway.readCalls).toHaveLength(1)
+    expect(transport.getCommands).toHaveLength(boundedPointReadCount)
+
+    const progressWithExtraKey = {
+      ...committed,
+      unexpected: true,
+    }
+    const progressFailure = await captureMigrationFailure(
+      () => port.readPlanningMaterialAtProgress(
+        createPlanningReadRequest(
+          configuration,
+          authorityContext.authority.lease.runId,
+        ),
+        progressWithExtraKey,
+        {
+          maxRows: 1,
+          maxCanonicalItemBytes: canonicalItemBytes,
+        },
+      ),
+    )
+    const limitsWithExtraKey = {
+      maxRows: 1,
+      maxCanonicalItemBytes: canonicalItemBytes,
+      unexpected: true,
+    }
+    const limitsFailure = await captureMigrationFailure(
+      () => port.readPlanningMaterialAtProgress(
+        createPlanningReadRequest(
+          configuration,
+          authorityContext.authority.lease.runId,
+        ),
+        committed,
+        limitsWithExtraKey,
+      ),
+    )
+    expect(progressFailure.code).toBe('INVALID_ARGUMENT')
+    expect(limitsFailure.code).toBe('INVALID_ARGUMENT')
+    expect(transport.getCommands).toHaveLength(boundedPointReadCount)
+
+    let limitGetterCalls = 0
+    const accessorLimits = {
+      get maxRows(): number {
+        limitGetterCalls += 1
+        throw new WorkspaceSearchMigrationFailure(
+          'TARGET_DRIFT',
+          'RAW-FORGED-LIMIT-FAILURE',
+        )
+      },
+      maxCanonicalItemBytes: canonicalItemBytes,
+    }
+    const accessorFailure = await captureMigrationFailure(
+      () => port.readPlanningMaterialAtProgress(
+        createPlanningReadRequest(
+          configuration,
+          authorityContext.authority.lease.runId,
+        ),
+        committed,
+        accessorLimits,
+      ),
+    )
+    expect(accessorFailure.code).toBe('INVALID_ARGUMENT')
+    expect(accessorFailure.message).not.toContain('RAW-FORGED-LIMIT-FAILURE')
+    expect(limitGetterCalls).toBe(0)
+    expect(transport.getCommands).toHaveLength(boundedPointReadCount)
+
+    const byteLimitFailure = await captureMigrationFailure(
+      () => port.readPlanningMaterialAtProgress(
+        createPlanningReadRequest(
+          configuration,
+          authorityContext.authority.lease.runId,
+        ),
+        committed,
+        {
+          maxRows: 1,
+          maxCanonicalItemBytes: canonicalItemBytes - 1,
+        },
+      ),
+    )
+    expect(byteLimitFailure.code).toBe('INVALID_ARGUMENT')
+    expect(planningArtifactGateway.readCalls).toHaveLength(2)
 
     planningArtifactGateway.returnWrongItemsOnNextRead([
       createIgnoredProjectDirectoryItem('wrong-artifact-replay'),

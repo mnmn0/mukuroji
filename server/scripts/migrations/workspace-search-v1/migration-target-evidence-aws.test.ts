@@ -25,6 +25,9 @@ import {
   WORKSPACE_SEARCH_MIGRATION_VERSION,
 } from './migration-contract'
 import {
+  serializeCanonicalAttributeMap,
+} from './dynamodb-attribute-codec'
+import {
   createAwsWorkspaceSearchMigrationPrePlanAuthorityPort,
   type WorkspaceSearchMigrationPrePlanAuthority,
   type WorkspaceSearchMigrationPrePlanAuthorityAwsPort,
@@ -2802,13 +2805,14 @@ describe('Workspace Search migration target evidence AWS adapter', () => {
       'owner-target-artifact-replay',
     )
     const firstItem = createIgnoredTargetItem('artifact-replay-1')
+    const secondItem = createInvalidTargetItem('artifact-replay-2')
     const gateway = new InMemoryPlanningTargetArtifactGateway(
       [
         {
           items: [firstItem],
           lastEvaluatedKey: createTargetItemKey(firstItem),
         },
-        { items: [createInvalidTargetItem('artifact-replay-2')] },
+        { items: [secondItem] },
       ],
       transport.planningArtifactStore,
     )
@@ -2844,6 +2848,93 @@ describe('Workspace Search migration target evidence AWS adapter', () => {
     expect(gateway.readCalls[0]).not.toHaveProperty('previousCheckpoint')
     expect(gateway.readCalls[0]?.targetArtifacts[0]?.versionId)
       .toBe('target-version-1-1')
+
+    gateway.readCalls.splice(0)
+    const pointReadCount = transport.getCommands.length
+    const canonicalItemBytes =
+      Buffer.byteLength(
+        serializeCanonicalAttributeMap(firstItem),
+        'utf8',
+      ) +
+      Buffer.byteLength(
+        serializeCanonicalAttributeMap(secondItem),
+        'utf8',
+      )
+    const material =
+      await port.readPlanningMaterialAtProgress(
+        createReadRequest(
+          configuration,
+          authorityContext.authority.lease.runId,
+        ),
+        replay.progress,
+        {
+          maxRows: 2,
+          maxCanonicalItemBytes: canonicalItemBytes,
+        },
+      )
+    expect(material).toEqual({
+      progress: replay.progress,
+      materials: [
+        {
+          page: storedPages[0],
+          items: [firstItem],
+        },
+        {
+          page: storedPages[1],
+          items: [secondItem],
+        },
+      ],
+      rowCount: 2,
+      canonicalItemBytes,
+    })
+    expect(gateway.readCalls).toHaveLength(2)
+    expect(transport.getCommands).toHaveLength(pointReadCount + 2)
+
+    gateway.readCalls.splice(0)
+    const boundedPointReadCount = transport.getCommands.length
+    const rowLimitFailure = await captureMigrationFailure(
+      () => port.readPlanningMaterialAtProgress(
+        createReadRequest(
+          configuration,
+          authorityContext.authority.lease.runId,
+        ),
+        replay.progress,
+        {
+          maxRows: 1,
+          maxCanonicalItemBytes: canonicalItemBytes,
+        },
+      ),
+    )
+    expect(rowLimitFailure.code).toBe('INVALID_ARGUMENT')
+    expect(gateway.readCalls).toHaveLength(0)
+    expect(transport.getCommands).toHaveLength(boundedPointReadCount)
+
+    let limitGetterCalls = 0
+    const accessorLimits = {
+      maxRows: 2,
+      get maxCanonicalItemBytes(): number {
+        limitGetterCalls += 1
+        throw new WorkspaceSearchMigrationFailure(
+          'SOURCE_DRIFT',
+          'RAW-FORGED-TARGET-LIMIT-FAILURE',
+        )
+      },
+    }
+    const accessorFailure = await captureMigrationFailure(
+      () => port.readPlanningMaterialAtProgress(
+        createReadRequest(
+          configuration,
+          authorityContext.authority.lease.runId,
+        ),
+        replay.progress,
+        accessorLimits,
+      ),
+    )
+    expect(accessorFailure.code).toBe('INVALID_ARGUMENT')
+    expect(accessorFailure.message)
+      .not.toContain('RAW-FORGED-TARGET-LIMIT-FAILURE')
+    expect(limitGetterCalls).toBe(0)
+    expect(transport.getCommands).toHaveLength(boundedPointReadCount)
 
     gateway.returnWrongItemsOnNextRead([{
       ...firstItem,

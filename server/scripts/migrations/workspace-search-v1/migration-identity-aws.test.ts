@@ -56,12 +56,17 @@ import {
   WorkspaceSearchMigrationFailure,
   type WorkspaceSearchMigrationSourceName,
   type WorkspaceSearchMigrationTableRole,
+  workspaceSearchMigrationSourceNames,
 } from './migration-contract'
 import {
   createAwsWorkspaceSearchMigrationIdentityPort,
+  type JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput,
   type WorkspaceSearchMigrationIdentityAwsSdkConfigurations,
   type WorkspaceSearchMigrationManagedAwsTransport,
   type WorkspaceSearchMigrationManagedAwsSession,
+  WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_CANONICAL_BYTES,
+  WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_OPERATIONS,
+  WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_TOTAL_ROWS,
 } from './migration-identity-aws'
 import {
   createWorkspaceSearchMigrationRequestedResourcesBinding,
@@ -167,6 +172,19 @@ type DeferredScanOutput = {
    * @param output - Raw response supplied to the managed session.
    */
   readonly resolve: (output: ScanCommandOutput) => void
+}
+
+/**
+ * Complete terminal five-chain fixture for one managed planning join test.
+ */
+type ManagedCommittedPlanningFixture = {
+  /** Measured managed session owning all five evidence chains. */
+  readonly port: WorkspaceSearchMigrationManagedAwsSession
+  /** In-memory allowlisted transport recording exact managed I/O. */
+  readonly transport: RecordingIdentityAwsTransport
+  /** Detached public read-only join input. */
+  readonly input:
+    JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput
 }
 
 /** Allowlisted command recorder used without AWS credentials or network access. */
@@ -599,6 +617,19 @@ class RecordingIdentityAwsTransport
       this.sourceEvidenceItems.set(entry.recordKey, entry.item)
     }
     return { $metadata: {} }
+  }
+
+  /**
+   * Deletes the first committed source head to simulate an out-of-band race.
+   */
+  deleteFirstSourceEvidenceHead(): void {
+    for (const recordKey of this.sourceEvidenceItems.keys()) {
+      if (recordKey.endsWith('/head')) {
+        this.sourceEvidenceItems.delete(recordKey)
+        return
+      }
+    }
+    throw new Error('Expected one committed source evidence head.')
   }
 
   /**
@@ -3517,6 +3548,288 @@ describe('Workspace Search migration AWS identity adapter', () => {
     port.close()
   })
 
+  test('joins five fixed terminal heads from exact artifact versions', async () => {
+    const fixture = await createManagedCommittedPlanningFixture('happy')
+    const scansBefore = {
+      source: fixture.transport.scanSourceCommands.length,
+      target: fixture.transport.scanTargetCommands.length,
+    }
+    const sourceEvidenceReadsBefore =
+      fixture.transport.getSourceEvidenceCommands.length
+    const targetEvidenceReadsBefore =
+      fixture.transport.getTargetEvidenceCommands.length
+
+    const result = await fixture.port.joinCommittedPlanningEvidence(
+      fixture.input,
+    )
+
+    expect(result.candidates).toEqual([])
+    expect(result.targetProgress).toMatchObject({
+      pageSequence: 1,
+      checkpoint: {
+        completed: true,
+        aggregate: {
+          scanned: 2,
+          ignored: 2,
+          invalid: 0,
+        },
+      },
+    })
+    expect(result.planningAuthorityProvenance.chainRoots).toHaveLength(5)
+    expect(result.targetOwnershipEvidence.targetRows).toHaveLength(2)
+    expect(
+      result.sourceProgress['project-directory']
+        .checkpoint.aggregate,
+    ).toMatchObject({
+      scanned: 1,
+      ignored: 1,
+      invalid: 0,
+    })
+    expect(JSON.stringify(result)).not.toContain('happy-source')
+    expect(JSON.stringify(result)).not.toContain('happy-one')
+    expect(JSON.stringify(result)).not.toContain('happy-two')
+    expect(fixture.transport.scanSourceCommands).toHaveLength(
+      scansBefore.source,
+    )
+    expect(fixture.transport.scanTargetCommands).toHaveLength(
+      scansBefore.target,
+    )
+    expect(
+      fixture.transport.getSourceEvidenceCommands.length -
+        sourceEvidenceReadsBefore,
+    ).toBe(20)
+    expect(
+      fixture.transport.getTargetEvidenceCommands.length -
+        targetEvidenceReadsBefore,
+    ).toBe(5)
+    expect(fixture.transport.getSourceArtifactCommands).toHaveLength(4)
+    expect(fixture.transport.getTargetArtifactCommands).toHaveLength(1)
+    for (const command of [
+      ...fixture.transport.getSourceArtifactCommands,
+      ...fixture.transport.getTargetArtifactCommands,
+    ]) {
+      expect(command.input).toMatchObject({
+        Bucket: TEST_BUCKET,
+        ChecksumMode: 'ENABLED',
+        ExpectedBucketOwner: TEST_ACCOUNT,
+      })
+      expect(typeof command.input.VersionId).toBe('string')
+    }
+    fixture.port.close()
+  })
+
+  test('rejects changed evidence heads after the pure planning join', async () => {
+    const fixture = await createManagedCommittedPlanningFixture(
+      'head-race',
+    )
+    let deleted = false
+    fixture.transport.getTargetArtifactEffect = () => {
+      if (deleted) return
+      deleted = true
+      fixture.transport.deleteFirstSourceEvidenceHead()
+    }
+
+    const failure = await captureWorkspaceSearchMigrationFailure(
+      fixture.port.joinCommittedPlanningEvidence(fixture.input),
+    )
+
+    expect(deleted).toBe(true)
+    expect(failure).toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search planning material join stopped safely (INVALID_STATE).',
+    })
+    expect(fixture.transport.getSourceArtifactCommands).toHaveLength(4)
+    expect(fixture.transport.getTargetArtifactCommands).toHaveLength(1)
+    fixture.port.close()
+  })
+
+  test('enforces managed and captured-head limits before artifact GET', async () => {
+    const fixture = await createManagedCommittedPlanningFixture('limits')
+    const evidenceReadsBefore =
+      fixture.transport.getSourceEvidenceCommands.length +
+      fixture.transport.getTargetEvidenceCommands.length
+    const overHardLimits = [
+      {
+        ...fixture.input.limits,
+        maxTotalRows:
+          WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_TOTAL_ROWS + 1,
+      },
+      {
+        ...fixture.input.limits,
+        maxTotalCanonicalItemBytes:
+          WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_CANONICAL_BYTES + 1,
+      },
+      {
+        ...fixture.input.limits,
+        maxPlanOperations:
+          WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_OPERATIONS + 1,
+      },
+    ]
+    for (const limits of overHardLimits) {
+      const hardCapFailure = await captureWorkspaceSearchMigrationFailure(
+        fixture.port.joinCommittedPlanningEvidence({
+          ...fixture.input,
+          limits,
+        }),
+      )
+      expect(hardCapFailure.code).toBe('INVALID_ARGUMENT')
+    }
+    expect(
+      fixture.transport.getSourceEvidenceCommands.length +
+        fixture.transport.getTargetEvidenceCommands.length,
+    ).toBe(evidenceReadsBefore)
+
+    const headLimitFailure =
+      await captureWorkspaceSearchMigrationFailure(
+        fixture.port.joinCommittedPlanningEvidence({
+          ...fixture.input,
+          limits: {
+            ...fixture.input.limits,
+            maxTotalRows: 1,
+          },
+        }),
+      )
+    expect(headLimitFailure).toMatchObject({
+      code: 'INVALID_ARGUMENT',
+      message:
+        'Workspace Search planning material join stopped safely (INVALID_ARGUMENT).',
+    })
+    expect(fixture.transport.getSourceArtifactCommands).toHaveLength(0)
+    expect(fixture.transport.getTargetArtifactCommands).toHaveLength(0)
+    fixture.port.close()
+  })
+
+  test('prioritizes target incarnation drift found after material reads', async () => {
+    const fixture = await createManagedCommittedPlanningFixture(
+      'target-drift',
+    )
+    const requested = createRequestedResources()
+    const tableName =
+      fixture.input.configuration.tables['workspace-search'].tableName
+    const replacement = createReplacementDescribeTableOutput(
+      'workspace-search',
+      tableName,
+      requested,
+    )
+    fixture.transport.getTargetArtifactEffect = () => {
+      fixture.transport.describeTableOutputs.set(
+        tableName,
+        replacement,
+      )
+    }
+
+    const failure = await captureWorkspaceSearchMigrationFailure(
+      fixture.port.joinCommittedPlanningEvidence(fixture.input),
+    )
+
+    expect(failure).toMatchObject({
+      code: 'TARGET_DRIFT',
+      message:
+        'Workspace Search planning material join stopped safely (TARGET_DRIFT).',
+    })
+    expect(fixture.transport.getTargetArtifactCommands).toHaveLength(1)
+    fixture.port.close()
+  })
+
+  test('invalidates exact material reads when the managed session closes', async () => {
+    const fixture = await createManagedCommittedPlanningFixture(
+      'close-race',
+    )
+    fixture.transport.getSourceArtifactEffect = () => fixture.port.close()
+
+    const failure = await captureWorkspaceSearchMigrationFailure(
+      fixture.port.joinCommittedPlanningEvidence(fixture.input),
+    )
+
+    expect(failure).toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search planning material join stopped safely (INVALID_STATE).',
+    })
+    expect(fixture.transport.getSourceArtifactCommands).toHaveLength(1)
+    expect(fixture.transport.getTargetArtifactCommands).toHaveLength(0)
+    expect(fixture.transport.closeCount).toBe(1)
+  })
+
+  test('redacts hostile join accessors before managed data I/O', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const input: JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput = {
+      runId: 'hostile-managed-join',
+      configuration,
+      configurationHash:
+        createWorkspaceSearchConfigurationHash(configuration),
+      limits: {
+        maxTotalRows: 100,
+        maxTotalCanonicalItemBytes: 1024 * 1024,
+        maxPlanOperations: 100,
+      },
+    }
+    let getterCalled = false
+    Object.defineProperty(input, 'runId', {
+      configurable: true,
+      enumerable: true,
+      get() {
+        getterCalled = true
+        throw new WorkspaceSearchMigrationFailure(
+          'TARGET_DRIFT',
+          'RAW-FORGED-MANAGED-JOIN-CODE',
+        )
+      },
+    })
+
+    const failure = await captureWorkspaceSearchMigrationFailure(
+      port.joinCommittedPlanningEvidence(input),
+    )
+
+    expect(getterCalled).toBe(false)
+    expect(failure).toMatchObject({
+      code: 'INVALID_ARGUMENT',
+      message:
+        'Workspace Search planning material join stopped safely (INVALID_ARGUMENT).',
+    })
+    expect(failure.message).not.toContain('RAW-FORGED')
+    expect(transport.getSourceEvidenceCommands).toHaveLength(0)
+    expect(transport.getTargetEvidenceCommands).toHaveLength(0)
+
+    const malformedConfiguration = structuredClone(configuration)
+    expect(
+      Reflect.deleteProperty(
+        malformedConfiguration.tables,
+        'documents',
+      ),
+    ).toBe(true)
+    const malformedFailure =
+      await captureWorkspaceSearchMigrationFailure(
+        port.joinCommittedPlanningEvidence({
+          runId: 'malformed-managed-join',
+          configuration: malformedConfiguration,
+          configurationHash:
+            createWorkspaceSearchConfigurationHash(configuration),
+          limits: {
+            maxTotalRows: 100,
+            maxTotalCanonicalItemBytes: 1024 * 1024,
+            maxPlanOperations: 100,
+          },
+        }),
+      )
+    expect(malformedFailure).toMatchObject({
+      code: 'INVALID_ARGUMENT',
+      message:
+        'Workspace Search planning material join stopped safely (INVALID_ARGUMENT).',
+    })
+    expect(transport.getSourceEvidenceCommands).toHaveLength(0)
+    expect(transport.getTargetEvidenceCommands).toHaveLength(0)
+    port.close()
+  })
+
   test('rejects another valid configuration hash before source I/O', async () => {
     const requested = createRequestedResources()
     const transport = new RecordingIdentityAwsTransport()
@@ -5877,11 +6190,13 @@ function createSourceEvidenceRequest(
  *
  * @param configuration - Successfully measured session configuration.
  * @param authority - Detached current durable pre-plan authority.
+ * @param source - Fixed source evidence chain to address.
  * @returns Exact managed planning source-evidence commit request.
  */
 function createPlanningSourceEvidenceRequest(
   configuration: WorkspaceSearchMigrationConfiguration,
   authority: WorkspaceSearchMigrationPrePlanAuthority,
+  source: WorkspaceSearchMigrationSourceName = 'project-directory',
 ): WorkspaceSearchMigrationSourceEvidenceAwsCommitRequest {
   return {
     runId: authority.lease.runId,
@@ -5889,7 +6204,7 @@ function createPlanningSourceEvidenceRequest(
     configuration,
     configurationHash:
       createWorkspaceSearchConfigurationHash(configuration),
-    source: 'project-directory',
+    source,
     authority,
   }
 }
@@ -5979,6 +6294,80 @@ async function createManagedPlanningAuthority(
     expectedPointer: null,
     evidenceBytes: createManagedMaintenanceEvidenceBytes(clockAt),
   })
+}
+
+/**
+ * Commits one ignored source row, three empty source pages, and two target rows.
+ *
+ * @param identifier - Unique run and authority fixture suffix.
+ * @returns Measured session, recording transport, and bounded join input.
+ */
+async function createManagedCommittedPlanningFixture(
+  identifier: string,
+): Promise<ManagedCommittedPlanningFixture> {
+  const requested = createRequestedResources()
+  const transport = new RecordingIdentityAwsTransport()
+  seedValidMeasurementOutputs(transport, requested)
+  const clockAt = '2026-07-28T07:00:00.000Z'
+  const port = createAwsWorkspaceSearchMigrationIdentityPort(
+    requested,
+    () => transport,
+    () => new Date(clockAt),
+  )
+  const configuration = await port.measureConfiguration()
+  const authority = await createManagedPlanningAuthority(
+    port,
+    clockAt,
+    `managed-join-${identifier}`,
+  )
+  for (const source of workspaceSearchMigrationSourceNames) {
+    const sourceItems = source === 'project-directory'
+      ? [createIgnoredSourceItem(`${identifier}-source`)]
+      : []
+    transport.scanSourceOutput = {
+      $metadata: {},
+      Count: sourceItems.length,
+      Items: sourceItems,
+      ScannedCount: sourceItems.length,
+    }
+    await port.commitNextSourceEvidencePage(
+      createPlanningSourceEvidenceRequest(
+        configuration,
+        structuredClone(authority),
+        source,
+      ),
+    )
+  }
+  transport.scanTargetOutput = {
+    $metadata: {},
+    Count: 2,
+    Items: [
+      createIgnoredTargetItem(`${identifier}-one`),
+      createIgnoredTargetItem(`${identifier}-two`),
+    ],
+    ScannedCount: 2,
+  }
+  await port.commitNextTargetEvidencePage(
+    createPlanningTargetEvidenceRequest(
+      configuration,
+      structuredClone(authority),
+    ),
+  )
+  return {
+    port,
+    transport,
+    input: {
+      runId: authority.lease.runId,
+      configuration,
+      configurationHash:
+        createWorkspaceSearchConfigurationHash(configuration),
+      limits: {
+        maxTotalRows: 100,
+        maxTotalCanonicalItemBytes: 1024 * 1024,
+        maxPlanOperations: 100,
+      },
+    },
+  }
 }
 
 /**

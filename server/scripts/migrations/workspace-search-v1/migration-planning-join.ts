@@ -24,6 +24,16 @@ import {
   workspaceSearchMigrationSourceNames,
   WORKSPACE_SEARCH_MIGRATION_PAGE_SIZE,
 } from './migration-contract'
+import type {
+  WorkspaceSearchMigrationPlanningJoinLimits,
+  WorkspaceSearchMigrationPlanningSourcePageMaterial,
+  WorkspaceSearchMigrationPlanningTargetPageMaterial,
+} from './migration-planning-material'
+export type {
+  WorkspaceSearchMigrationPlanningJoinLimits,
+  WorkspaceSearchMigrationPlanningSourcePageMaterial,
+  WorkspaceSearchMigrationPlanningTargetPageMaterial,
+} from './migration-planning-material'
 import {
   classifyWorkspaceSearchMigrationTargetRow,
   createWorkspaceSearchMigrationOrphanCandidate,
@@ -260,41 +270,6 @@ type PlanningJoinEvidenceCloneBudget = {
   bytes: number
   /** Maximum canonical evidence bytes accepted by the strict codec. */
   readonly maximumBytes: number
-}
-
-/**
- * Explicit in-memory bounds for one complete planning-evidence join.
- */
-export type WorkspaceSearchMigrationPlanningJoinLimits = {
-  /** Maximum combined source and target rows accepted by the join. */
-  readonly maxTotalRows: number
-  /** Maximum combined canonical UTF-8 bytes of every exact raw item. */
-  readonly maxTotalCanonicalItemBytes: number
-  /** Maximum exact source and orphan operation candidates returned. */
-  readonly maxPlanOperations: number
-}
-
-/**
- * One exact planning source evidence page paired with its lossless raw items.
- */
-export type WorkspaceSearchMigrationPlanningSourcePageMaterial = {
-  /** Authoritative version-three source evidence page. */
-  readonly page: Extract<
-    WorkspaceSearchMigrationSourceEvidencePage,
-    { readonly purpose: 'planning'; readonly evidenceVersion: 3 }
-  >
-  /** Exact ordered raw DynamoDB items committed by the evidence page. */
-  readonly items: readonly DynamoAttributeMap[]
-}
-
-/**
- * One exact planning target evidence page paired with its lossless raw items.
- */
-export type WorkspaceSearchMigrationPlanningTargetPageMaterial = {
-  /** Authoritative version-one target evidence page. */
-  readonly page: WorkspaceSearchMigrationTargetEvidencePage
-  /** Exact ordered raw DynamoDB items committed by the evidence page. */
-  readonly items: readonly DynamoAttributeMap[]
 }
 
 /**
