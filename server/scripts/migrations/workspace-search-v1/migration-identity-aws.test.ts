@@ -4659,6 +4659,507 @@ describe('Workspace Search migration AWS identity adapter', () => {
     },
   )
 
+  test(
+    'bootstraps, reads, and closes the measured application writer fence',
+    async () => {
+      const requested = createRequestedResources()
+      const transport = new RecordingIdentityAwsTransport()
+      seedValidMeasurementOutputs(transport, requested)
+      const clockAt = '2026-07-29T01:00:00.000Z'
+      const port = createAwsWorkspaceSearchMigrationIdentityPort(
+        requested,
+        () => transport,
+        () => new Date(clockAt),
+      )
+      const expectedFailure = new WorkspaceSearchMigrationFailure(
+        'INVALID_STATE',
+        'Workspace Search application writer fence operation failed.',
+      )
+
+      expect(
+        () => port.createApplicationWriterFencePort(),
+      ).toThrow(expectedFailure)
+
+      const configuration = await port.measureConfiguration()
+      configuration.tables['project-directory'].tableId =
+        'caller-mutated-project-directory-table-id'
+      const authority = await createManagedPlanningAuthority(
+        port,
+        clockAt,
+        'managed-writer-fence',
+      )
+      const writerFence = port.createApplicationWriterFencePort()
+      const transactionCount =
+        transport.transactWritePrePlanAuthorityCommands.length
+      const guardTrace: string[] = []
+      transport.describeTableEffect = (tableName) => {
+        guardTrace.push(tableName)
+      }
+
+      const bootstrapped = await writerFence.bootstrapOpen(authority)
+      const read = await writerFence.read()
+      const bootstrappedAgain =
+        await writerFence.bootstrapOpen(authority)
+      const closed = await writerFence.close(authority)
+      if (
+        closed.status !== 'present' ||
+        closed.record.mode !== 'closed'
+      ) {
+        throw new Error('Expected one closed managed writer-fence row.')
+      }
+      const closedAgain = await writerFence.close(authority)
+
+      expect(bootstrapped).toMatchObject({
+        status: 'present',
+        record: {
+          mode: 'open',
+          writerEpoch: 1,
+          controlRevision: 1,
+          binding: {
+            stateTableName: requested.tables['migration-state'],
+            tableIds: {
+              'project-directory': 'table-id-project-directory-v1',
+            },
+          },
+        },
+      })
+      expect(read).toEqual(bootstrapped)
+      expect(bootstrappedAgain).toEqual(bootstrapped)
+      expect(closed).toMatchObject({
+        status: 'present',
+        record: {
+          mode: 'closed',
+          writerEpoch: 2,
+          controlRevision: 2,
+          authority: {
+            runId: authority.lease.runId,
+            ownerId: authority.lease.ownerId,
+            leaseFenceToken: authority.lease.fenceToken,
+            maintenanceEvidenceReceiptDigest:
+              authority.maintenanceEvidenceReceiptDigest,
+            maintenanceEvidencePointerRevision:
+              authority.maintenanceEvidencePointerRevision,
+          },
+        },
+      })
+      expect(closedAgain).toEqual(closed)
+      await expect(writerFence.read()).resolves.toEqual(closed)
+      expect(Reflect.get(writerFence, 'release')).toBeUndefined()
+      expect(
+        transport.transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactionCount + 2)
+      const expectedGuardOrder = [
+        requested.tables['migration-state'],
+        requested.tables['project-directory'],
+        requested.tables['work-items'],
+        requested.tables.collaboration,
+        requested.tables.documents,
+        requested.tables['workspace-search'],
+      ]
+      expect(guardTrace.length).toBeGreaterThan(0)
+      expect(guardTrace.length % expectedGuardOrder.length).toBe(0)
+      for (
+        let offset = 0;
+        offset < guardTrace.length;
+        offset += expectedGuardOrder.length
+      ) {
+        expect(
+          guardTrace.slice(offset, offset + expectedGuardOrder.length),
+        ).toEqual(expectedGuardOrder)
+      }
+      port.close()
+    },
+  )
+
+  const writerFenceReplacementCases: readonly {
+    readonly role: WorkspaceSearchMigrationTableRole
+    readonly expectedCode:
+      | 'CONFIGURATION_DRIFT'
+      | 'SOURCE_DRIFT'
+      | 'TARGET_DRIFT'
+  }[] = [
+    {
+      role: 'migration-state',
+      expectedCode: 'CONFIGURATION_DRIFT',
+    },
+    {
+      role: 'project-directory',
+      expectedCode: 'SOURCE_DRIFT',
+    },
+    {
+      role: 'work-items',
+      expectedCode: 'SOURCE_DRIFT',
+    },
+    {
+      role: 'collaboration',
+      expectedCode: 'SOURCE_DRIFT',
+    },
+    {
+      role: 'documents',
+      expectedCode: 'SOURCE_DRIFT',
+    },
+    {
+      role: 'workspace-search',
+      expectedCode: 'TARGET_DRIFT',
+    },
+  ]
+  for (const candidate of writerFenceReplacementCases) {
+    test(
+      `rejects a same-name ${candidate.role} replacement before a writer-fence read`,
+      async () => {
+        const requested = createRequestedResources()
+        const transport = new RecordingIdentityAwsTransport()
+        seedValidMeasurementOutputs(transport, requested)
+        const clockAt = '2026-07-29T01:10:00.000Z'
+        const port = createAwsWorkspaceSearchMigrationIdentityPort(
+          requested,
+          () => transport,
+          () => new Date(clockAt),
+        )
+        await port.measureConfiguration()
+        const authority = await createManagedPlanningAuthority(
+          port,
+          clockAt,
+          `managed-writer-fence-drift-${candidate.role}`,
+        )
+        const writerFence = port.createApplicationWriterFencePort()
+        await writerFence.bootstrapOpen(authority)
+        const readCount = transport.getPrePlanAuthorityCommands.length
+        const transactionCount =
+          transport.transactWritePrePlanAuthorityCommands.length
+        const tableName = requested.tables[candidate.role]
+        transport.describeTableOutputs.set(
+          tableName,
+          createReplacementDescribeTableOutput(
+            candidate.role,
+            tableName,
+            requested,
+          ),
+        )
+
+        await expect(writerFence.read()).rejects.toMatchObject({
+          code: candidate.expectedCode,
+          message:
+            'Workspace Search application writer fence operation failed.',
+        })
+        expect(transport.getPrePlanAuthorityCommands)
+          .toHaveLength(readCount)
+        expect(transport.transactWritePrePlanAuthorityCommands)
+          .toHaveLength(transactionCount)
+        port.close()
+      },
+    )
+  }
+
+  test(
+    'detaches writer-fence close input before managed guard I/O',
+    async () => {
+      const requested = createRequestedResources()
+      const transport = new RecordingIdentityAwsTransport()
+      seedValidMeasurementOutputs(transport, requested)
+      const clockAt = '2026-07-29T01:20:00.000Z'
+      const port = createAwsWorkspaceSearchMigrationIdentityPort(
+        requested,
+        () => transport,
+        () => new Date(clockAt),
+      )
+      await port.measureConfiguration()
+      const authority = await createManagedPlanningAuthority(
+        port,
+        clockAt,
+        'managed-writer-fence-detach',
+      )
+      const writerFence = port.createApplicationWriterFencePort()
+      await writerFence.bootstrapOpen(authority)
+      const mutableAuthority = structuredClone(authority)
+      const expectedRunId = mutableAuthority.lease.runId
+      const expectedOwnerId = mutableAuthority.lease.ownerId
+      let authorityMutated = false
+      transport.describeTableEffect = () => {
+        if (authorityMutated) return
+        authorityMutated = true
+        Object.defineProperty(mutableAuthority.lease, 'runId', {
+          value: 'caller-mutated-writer-fence-run',
+        })
+        Object.defineProperty(mutableAuthority.lease, 'ownerId', {
+          value: 'caller-mutated-writer-fence-owner',
+        })
+      }
+
+      const closed = await writerFence.close(mutableAuthority)
+
+      if (
+        closed.status !== 'present' ||
+        closed.record.mode !== 'closed'
+      ) {
+        throw new Error('Expected one detached closed writer-fence row.')
+      }
+      expect(closed.record.authority).toMatchObject({
+        runId: expectedRunId,
+        ownerId: expectedOwnerId,
+      })
+      await expect(writerFence.read()).resolves.toMatchObject({
+        status: 'present',
+        record: {
+          mode: 'closed',
+          authority: {
+            runId: expectedRunId,
+            ownerId: expectedOwnerId,
+          },
+        },
+      })
+      expect(authorityMutated).toBe(true)
+      port.close()
+    },
+  )
+
+  test(
+    'invalidates writer-fence ports across close and replacement measurement races',
+    async () => {
+      const closeRequested = createRequestedResources()
+      const closeTransport = new RecordingIdentityAwsTransport()
+      seedValidMeasurementOutputs(closeTransport, closeRequested)
+      const closeClockAt = '2026-07-29T01:30:00.000Z'
+      const closePort = createAwsWorkspaceSearchMigrationIdentityPort(
+        closeRequested,
+        () => closeTransport,
+        () => new Date(closeClockAt),
+      )
+      await closePort.measureConfiguration()
+      const closeAuthority = await createManagedPlanningAuthority(
+        closePort,
+        closeClockAt,
+        'managed-writer-fence-close-race',
+      )
+      const closingWriterFence =
+        closePort.createApplicationWriterFencePort()
+      await closingWriterFence.bootstrapOpen(closeAuthority)
+      closeTransport.getPrePlanAuthorityEffect = () => closePort.close()
+
+      await expect(closingWriterFence.read()).rejects.toMatchObject({
+        code: 'INVALID_STATE',
+        message:
+          'Workspace Search application writer fence operation failed.',
+      })
+      expect(closeTransport.closeCount).toBe(1)
+
+      const remeasureRequested = createRequestedResources()
+      const remeasureTransport = new RecordingIdentityAwsTransport()
+      seedValidMeasurementOutputs(remeasureTransport, remeasureRequested)
+      const remeasureClockAt = '2026-07-29T01:40:00.000Z'
+      const remeasurePort = createAwsWorkspaceSearchMigrationIdentityPort(
+        remeasureRequested,
+        () => remeasureTransport,
+        () => new Date(remeasureClockAt),
+      )
+      await remeasurePort.measureConfiguration()
+      const remeasureAuthority = await createManagedPlanningAuthority(
+        remeasurePort,
+        remeasureClockAt,
+        'managed-writer-fence-remeasure-race',
+      )
+      const staleWriterFence =
+        remeasurePort.createApplicationWriterFencePort()
+      await staleWriterFence.bootstrapOpen(remeasureAuthority)
+      let replacementMeasurement:
+        Promise<WorkspaceSearchMigrationConfiguration> | undefined
+      remeasureTransport.getPrePlanAuthorityEffect = () => {
+        remeasureTransport.getPrePlanAuthorityEffect = undefined
+        replacementMeasurement = remeasurePort.measureConfiguration()
+      }
+
+      await expect(staleWriterFence.read()).rejects.toMatchObject({
+        code: 'INVALID_STATE',
+        message:
+          'Workspace Search application writer fence operation failed.',
+      })
+      if (replacementMeasurement === undefined) {
+        throw new Error('Expected replacement writer-fence measurement.')
+      }
+      await replacementMeasurement
+      const readCount =
+        remeasureTransport.getPrePlanAuthorityCommands.length
+      await expect(staleWriterFence.read()).rejects.toMatchObject({
+        code: 'INVALID_STATE',
+        message:
+          'Workspace Search application writer fence operation failed.',
+      })
+      expect(remeasureTransport.getPrePlanAuthorityCommands)
+        .toHaveLength(readCount)
+      const replacementWriterFence =
+        remeasurePort.createApplicationWriterFencePort()
+      await expect(replacementWriterFence.read()).resolves.toMatchObject({
+        status: 'present',
+        record: {
+          mode: 'open',
+        },
+      })
+      remeasurePort.close()
+    },
+  )
+
+  test(
+    'quarantines a writer-fence generation after post-commit identity drift',
+    async () => {
+      const requested = createRequestedResources()
+      const transport = new RecordingIdentityAwsTransport()
+      seedValidMeasurementOutputs(transport, requested)
+      const clockAt = '2026-07-29T01:50:00.000Z'
+      const port = createAwsWorkspaceSearchMigrationIdentityPort(
+        requested,
+        () => transport,
+        () => new Date(clockAt),
+      )
+      await port.measureConfiguration()
+      const authority = await createManagedPlanningAuthority(
+        port,
+        clockAt,
+        'managed-writer-fence-quarantine',
+      )
+      const writerFence = port.createApplicationWriterFencePort()
+      await writerFence.bootstrapOpen(authority)
+      const transactionCount =
+        transport.transactWritePrePlanAuthorityCommands.length
+      const targetTableName = requested.tables['workspace-search']
+      const originalTarget =
+        transport.describeTableOutputs.get(targetTableName)
+      if (originalTarget === undefined) {
+        throw new Error('Expected measured writer-fence target identity.')
+      }
+      let postCommitDriftInjected = false
+      transport.transactWritePrePlanAuthorityPostCommitEffect = () => {
+        if (postCommitDriftInjected) return
+        postCommitDriftInjected = true
+        transport.describeTableOutputs.set(
+          targetTableName,
+          createReplacementDescribeTableOutput(
+            'workspace-search',
+            targetTableName,
+            requested,
+          ),
+        )
+      }
+
+      const failure = await captureWorkspaceSearchMigrationFailure(
+        writerFence.close(authority),
+      )
+
+      expect(failure).toMatchObject({
+        code: 'TARGET_DRIFT',
+        message:
+          'Workspace Search application writer fence operation failed.',
+      })
+      expect(postCommitDriftInjected).toBe(true)
+      expect(
+        transport.transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactionCount + 1)
+      transport.transactWritePrePlanAuthorityPostCommitEffect = undefined
+      transport.describeTableOutputs.set(targetTableName, originalTarget)
+      const readCount = transport.getPrePlanAuthorityCommands.length
+      expect(
+        () => port.createApplicationWriterFencePort(),
+      ).toThrow(
+        new WorkspaceSearchMigrationFailure(
+          'INVALID_STATE',
+          'Workspace Search application writer fence operation failed.',
+        ),
+      )
+      await expect(writerFence.read()).rejects.toMatchObject({
+        code: 'INVALID_STATE',
+        message:
+          'Workspace Search application writer fence operation failed.',
+      })
+      expect(transport.getPrePlanAuthorityCommands).toHaveLength(readCount)
+
+      await port.measureConfiguration()
+      const recoveredWriterFence =
+        port.createApplicationWriterFencePort()
+      await expect(recoveredWriterFence.read()).resolves.toMatchObject({
+        status: 'present',
+        record: {
+          mode: 'closed',
+          authority: {
+            runId: authority.lease.runId,
+          },
+        },
+      })
+      port.close()
+    },
+  )
+
+  test(
+    'revalidates all six writer-fence tables immediately before a transition',
+    async () => {
+      const requested = createRequestedResources()
+      const transport = new RecordingIdentityAwsTransport()
+      seedValidMeasurementOutputs(transport, requested)
+      const clockAt = '2026-07-29T02:00:00.000Z'
+      const port = createAwsWorkspaceSearchMigrationIdentityPort(
+        requested,
+        () => transport,
+        () => new Date(clockAt),
+      )
+      await port.measureConfiguration()
+      const authority = await createManagedPlanningAuthority(
+        port,
+        clockAt,
+        'managed-writer-fence-pre-send',
+      )
+      const writerFence = port.createApplicationWriterFencePort()
+      await writerFence.bootstrapOpen(authority)
+      const transactionCount =
+        transport.transactWritePrePlanAuthorityCommands.length
+      const sourceTableName = requested.tables['project-directory']
+      const originalSource =
+        transport.describeTableOutputs.get(sourceTableName)
+      if (originalSource === undefined) {
+        throw new Error('Expected measured writer-fence source identity.')
+      }
+      let describeCount = 0
+      // Close first rechecks six tables before and after its initial read.
+      // Check 13 starts the pre-send guard; check 14 is project-directory.
+      transport.describeTableEffect = (tableName) => {
+        describeCount += 1
+        if (
+          describeCount === 13 &&
+          tableName === requested.tables['migration-state']
+        ) {
+          transport.describeTableOutputs.set(
+            sourceTableName,
+            createReplacementDescribeTableOutput(
+              'project-directory',
+              sourceTableName,
+              requested,
+            ),
+          )
+        }
+      }
+
+      await expect(writerFence.close(authority)).rejects.toMatchObject({
+        code: 'SOURCE_DRIFT',
+        message:
+          'Workspace Search application writer fence operation failed.',
+      })
+      expect(describeCount).toBe(14)
+      expect(
+        transport.transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactionCount)
+
+      transport.describeTableEffect = undefined
+      transport.describeTableOutputs.set(sourceTableName, originalSource)
+      await expect(writerFence.close(authority)).resolves.toMatchObject({
+        status: 'present',
+        record: {
+          mode: 'closed',
+        },
+      })
+      expect(
+        transport.transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactionCount + 1)
+      port.close()
+    },
+  )
+
   test('stores and replays an empty plan through measured immutable S3', async () => {
     const requested = createRequestedResources()
     const transport = new RecordingIdentityAwsTransport()
