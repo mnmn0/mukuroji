@@ -17,7 +17,7 @@ repository に固定せず、各実行の evidence record に残します。
 | Release | PR/push workflow が Server test を含む全 source/build config の strict typecheck、static analysis、unit/integration、Web E2E、CDK test/nag/synth を実行し、main ruleset が6つの必須 check を強制する | Path-filtered local runtime と外部 reviewer は常時 required にせず、対象変更ごとの release evidence で結果または rate limit を確認すること |
 | Web journey quality | Required Playwright gate が主要 Work Item 画面の keyboard/focus、390px viewport、screen-reader-facing ARIA tree、低速 API 中の status と復帰を検証する | Chromium と mock API による回帰 proxy であり、実 screen reader、visual regression、performance budget は未実装 |
 | Runtime control / rollout | AWS AppConfig の schema 検証済み `enabled` / `disabled` document を API、WebSocket、worker の entrypoint で fail-closed に評価し、operator 用 canary strategy と configuration failure alarm を定義する。Backward-compatible CDK/Lambda update と CloudFormation rollback も利用できる | `read-only` mode、route/effect registry、Lambda alias、CodeDeploy による code canary は未実装。AppConfig の停止制御を code/schema rollout の互換性検証や writer fence の代用にしないこと |
-| Migration | Production-safe migration contract と entry/verification/rollback evidence を定義する。Workspace Search migration 専用の retained/PITR state table、Object Lock COMPLIANCE の segmented journal、transaction 限定 operator policy、物理 table/PITR/journal identity と maintenance drain evidence の strict validator、sealed plan/lease/fence/OCC/checkpoint/apply/verify/部分 apply からの reverse rollback を検証する永続 state-machine kernel を持つ。同じ measured AWS session に identity-bound な source Scan 1 page と exact digest/checkpoint reducer を持ち、複数 page の row evidence と累積 checkpoint を conditional transaction で保存して、commit 後の response loss から再開できる。Migration-state table には全 run/configuration で競合する global lease/heartbeat と、fresh maintenance evidence の immutable receipt/current pointer を永続化する。Source-evidence schema は S3 を使わない `dry-run` v1、read-only legacy planning v2、lossless artifact reference を必須にする planning v3 を分離する。Planning v3 は同じ measured AWS session の concrete S3 adapter で全 raw item を strict/lossless な DynamoDB AttributeValue segment（最大16 MiB）として Object Lock COMPLIANCE bucket へ保存し、順序付きの exact `{objectKey, versionId, contentDigest}` を lease/fence/current receipt と固定5 item transaction に結合する。Target raw page にも lossless codec と measured configuration-bound S3 adapter があり、exact object version を再読検証できる。Concrete managed AWS session は planning-only target evidence v1 を composition し、1 page ごとに raw target Scan を1回だけ行って lossless target artifact を upload する。Commit 前には target、続いて migration-state table の incarnation を再検証する。Exact-version artifact replay を可能にする順序付き reference、累積 checkpoint、authority の3 condition check、immutable page、predecessor-CAS head を固定5 item transaction に結合し、response loss を strict に照合できる。Pure planning join は planning v3 の4 source と target evidence v1 の raw page material を exact replayし、per-chain terminal identity/bounds、同一 run で実現可能な単調 authority 履歴と canonical provenance digest、target preimage、expected/observed/orphan set、candidate、target projected/deleted を決定的に構築する。Managed composition は同じ measured generation で state/source/target incarnation を前後検証し、5 head を強整合で固定して remaining budget 内の exact-version material を順次取得し、pure join 後に5 head を再確認する。同じ session は planning-artifact gateway も同一の pinned S3 client、measured configuration、generation 上へ composition し、caller は `runId` だけを指定する | Historical receipt の実在・binding と current authority freshness の検証、5 evidence head と plan provenance/storage の原子的な結合、application writer fence/snapshot isolation、実行 CLI/heartbeat supervisor、migration 専用 observability/alarm、restore/failover/DR drill、non-production 実行 evidence は未実装。Legacy planning v2 は digest-only のまま append/promote できない。Managed join と planning artifact/root は provisional な read-only evidence であり、sealed plan や production 実行 authority ではない。Production migration gate は閉じたままにすること |
+| Migration | Production-safe migration contract と entry/verification/rollback evidence を定義する。Workspace Search migration 専用の retained/PITR state table、Object Lock COMPLIANCE の segmented journal、transaction 限定 operator policy、物理 table/PITR/journal identity と maintenance drain evidence の strict validator、sealed plan/lease/fence/OCC/checkpoint/apply/verify/部分 apply からの reverse rollback を検証する永続 state-machine kernel を持つ。同じ measured AWS session に identity-bound な source Scan 1 page と exact digest/checkpoint reducer を持ち、複数 page の row evidence と累積 checkpoint を conditional transaction で保存して、commit 後の response loss から再開できる。Migration-state table には全 run/configuration で競合する global lease/heartbeat と、fresh maintenance evidence の immutable receipt/current pointer を永続化する。Source-evidence schema は S3 を使わない `dry-run` v1、read-only legacy planning v2、lossless artifact reference を必須にする planning v3 を分離する。Planning v3 は同じ measured AWS session の concrete S3 adapter で全 raw item を strict/lossless な DynamoDB AttributeValue segment（最大16 MiB）として Object Lock COMPLIANCE bucket へ保存し、順序付きの exact `{objectKey, versionId, contentDigest}` を lease/fence/current receipt と固定5 item transaction に結合する。Target raw page にも lossless codec と measured configuration-bound S3 adapter があり、exact object version を再読検証できる。Concrete managed AWS session は planning-only target evidence v1 を composition し、1 page ごとに raw target Scan を1回だけ行って lossless target artifact を upload する。Commit 前には target、続いて migration-state table の incarnation を再検証する。Exact-version artifact replay を可能にする順序付き reference、累積 checkpoint、authority の3 condition check、immutable page、predecessor-CAS head を固定5 item transaction に結合し、response loss を strict に照合できる。Pure planning join は planning v3 の4 source と target evidence v1 の raw page material を exact replayし、per-chain terminal identity/bounds、同一 run で実現可能な単調 authority 履歴と canonical provenance digest、target preimage、expected/observed/orphan set、candidate、target projected/deleted を決定的に構築する。Managed composition は同じ measured generation で state/source/target incarnation を前後検証し、5 head を強整合で固定して remaining budget 内の exact-version material を順次取得し、pure join 後に5 head を再確認する。同じ session は planning-artifact gateway も同一の pinned S3 client、measured configuration、generation 上へ composition し、caller は `runId` だけを指定する。Manifest-aware sealed authority v2 は、plan seal、plan/provenance manifest head、compact authority provenance、全6 TableId、5 terminal head、fresh current authority を結合し、authority 3条件、source 4 head、target head、未作成rootを固定9 item transactionで原子的に公開する。応答消失時は同一canonical rootの強整合再読だけを成功として回収する | Application writer fence/snapshot isolation、実行 CLI/heartbeat supervisor、migration 専用 observability/alarm、restore/failover/DR drill、non-production 実行 evidence は未実装。Legacy planning v2 は digest-only のまま append/promote できない。Manifest graph と sealed authority v2 publication も writer fence が成立するまでは apply authority ではない。Production migration gate は閉じたままにすること |
 | Data durability | Stateful DynamoDB table は `Retain` + PITR、file bucket は `Retain` + versioning を使う。Work Items には read-only の manifest/compare verifier がある | Restore、writer fence、定期実行、regional replication/failover、AWS Backup plan は未実装。verifier の導入だけで drill や regional DR を完了扱いにしないこと |
 
 この表の未実装項目を、手順書が存在することだけで実装済みとして扱ってはいけません。
@@ -519,30 +519,41 @@ non-authoritativeなretained orphanとして残る場合があります。`List`
 artifact/rootだけではplanning/apply authorityになりません。
 
 Direct writeはraw inputを最初のawaitより前にsnapshotするため、upload中のcaller mutationを採用しません。
-一方、現行replay APIはsegment graphからfull semantic artifactを再materializeし、sealed planning authorityも
-まだlegacy full artifact referenceを入力にします。したがって64 MiB超のdirect manifest headはprovisionalな
-immutable evidenceであり、plan/provenance manifest同士とsealed authorityのcross-artifact binding、
-complete manifest headとcurrent authority 3件および5 evidence headの原子的publicationはまだ未接続です。
+Legacy replay APIはsegment graphからfull semantic artifactを再materializeしますが、direct builderは
+64 MiBのlegacy envelopeを作らず、検証済みraw witnessからdetachedなcompact authority provenanceを
+manifest headと同時に返します。Manifest-aware sealed planning authority v2は、既存v1を
+read-compatibleなlegacy schemaとして凍結したまま、plan sealとplan/provenance manifest headのrichな
+exact `{objectKey, versionId, contentDigest, byteLength, retainUntil}`、compact authority provenance、
+plan/snapshot/count、全6 TableId、historical receipt binding、5 terminal head、publish時のcurrent authorityを
+一つのcanonical rootへcross-bindします。3つのroot referenceは同じretention deadlineを持ち、role、
+prefix、canonical bytes、digest、lengthを相互検証します。
+
+Concrete managed AWS sessionは成功したmeasurementのdetached configurationと同じpinned DynamoDB transport上へ
+v2 publication portをcompositionします。Publish直前にmigration-state、source 4 table、target tableの
+incarnationを順に再検証し、lease/current pointer/current receiptの3 ConditionCheck、source 4 head、
+target head、未作成immutable rootのPutを固定9 item transactionで実行します。Root keyとidempotency tokenは
+run/configuration/state bindingから決定的に作り、root itemにはstrict parserで再検証できるcanonical bytesを
+保存します。Transactionの応答消失や曖昧な失敗ではexact root keyを強整合で再読し、byte-identicalなrootだけを
+成功として回収します。Foreign/malformed root、state incarnation drift、condition位置ごとのauthority/head
+競合を区別してfail-closedにし、caller-owned inputは最初のawaitより前にaccessor/Proxy/cycle/非canonical
+valueを拒否してsnapshotします。S3 graphはこのroot transactionが成功するまでnon-authoritativeであり、
+失敗時に到達済みのCOMPLIANCE objectがretained orphanとして残っても再開authorityには採用しません。
+
 Writer fence、実行CLI/heartbeat supervisor、migration専用observability/alarm、restore/failover/DR drill、
-non-production実行evidenceも未完了であり、production migration gateは閉じたままです。
+non-production実行evidenceは未完了であり、sealed authority v2もapply authorityとして使用しません。
+Production migration gateは閉じたままです。
 Source planning v3 と target planning v1 の terminal head には、完全な identity、chain version、
 checkpoint、recursive head digest、`completed=true` を比較する transaction 用 ConditionCheck factory
 があります。
 
-ただし、sealed planning authority の schema と condition material が存在するだけでは publish は
-完了しません。Planned operation と provenance を Object Lock S3 artifact/manifest として bounded
-segmentation で保存し、その complete manifest head、current authority 3件、5 evidence head、
-immutable compact root を同じ DynamoDB transaction に固定する concrete adapter は後続です。
-Historical receipt と current authority の freshness を解決し、5 head と provenance/plan を同じ conditional
-transaction で固定し、application writer fence を成立させるまでは apply authority として使用しません。
+ただし、sealed planning authority v2 の原子的publicationはapplication writerを停止・隔離しません。
+Historical receipt と current authority の freshness、5 head、provenance/plan storageを固定したrootが
+存在しても、application writer fenceを成立させるまではapply authorityとして使用しません。
 Digest-only な dry-run v1 と legacy planning v2 は process を越えた planning input、target join、
 rollback preimage を再構成しません。これらの未実装項目を完了し、non-production で
 artifact upload orphan、version substitution、cursor 境界の中断再開、verify/rollback evidence を
 取得するまで production migration gate は閉じたままとし、既存 backfill は dry-run と
-maintenance-window 内の再生成用途に限定します。未実装項目には distinct historical receipt の
-全件取得と immutable provenance artifact 保存、plan 保存直前の live current lease/pointer/receipt
-freshness の transaction 固定、
-5 evidence head と plan provenance/storage の原子的な結合、
+maintenance-window 内の再生成用途に限定します。未実装項目には
 application writer fence/snapshot isolation、実行 CLI/heartbeat supervisor、migration 専用
 observability/alarm、restore/failover/DR drill、non-production 実行 evidence が含まれます。
 

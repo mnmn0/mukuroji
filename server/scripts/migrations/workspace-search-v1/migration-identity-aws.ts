@@ -186,6 +186,11 @@ import {
   type WorkspaceSearchMigrationPlanningArtifactAwsGateway,
   WORKSPACE_SEARCH_MIGRATION_PLANNING_ARTIFACT_MAX_OBJECT_BYTES,
 } from './migration-planning-artifact-aws'
+import {
+  createAwsWorkspaceSearchMigrationSealedPlanningAuthorityV2Port,
+  type WorkspaceSearchMigrationSealedPlanningAuthorityV2AwsPort,
+  type WorkspaceSearchMigrationSealedPlanningAuthorityV2AwsTransport,
+} from './migration-sealed-planning-authority-aws'
 import type {
   AcquireWorkspaceSearchMigrationLeaseInput,
   HeartbeatWorkspaceSearchMigrationLeaseInput,
@@ -477,6 +482,14 @@ type ManagedPlanningArtifactAuthority =
   }
 
 /**
+ * Complete measured configuration captured by one sealed publication port.
+ */
+type ManagedSealedPlanningAuthority = ManagedMigrationStateAuthority & {
+  /** Detached configuration owning state and all five evidence tables. */
+  readonly configuration: WorkspaceSearchMigrationConfiguration
+}
+
+/**
  * Measurement authority captured for one complete source-evidence operation.
  */
 type ManagedSourceEvidenceAuthority<
@@ -756,6 +769,14 @@ export interface WorkspaceSearchMigrationManagedAwsSession
   createPlanningArtifactGateway(
     runId: string,
   ): WorkspaceSearchMigrationPlanningArtifactAwsGateway
+
+  /**
+   * Creates one generation-bound atomic sealed-authority publication port.
+   *
+   * @returns Publication port bound to the latest measured configuration.
+   */
+  createSealedPlanningAuthorityPort():
+    WorkspaceSearchMigrationSealedPlanningAuthorityV2AwsPort
 }
 
 /** Narrow transport containing only managed identity reads. */
@@ -1363,6 +1384,10 @@ class AwsWorkspaceSearchMigrationIdentityPort
   /** Hash authorized by the most recent successful identity measurement. */
   private measuredConfigurationHash: string | undefined
 
+  /** Detached configuration authorized by the latest successful measurement. */
+  private measuredConfiguration:
+    WorkspaceSearchMigrationConfiguration | undefined
+
   /** Immutable object port installed by the current successful measurement. */
   private measuredPlanningArtifactPort:
     WorkspaceSearchMigrationImmutableArtifactAwsPort | undefined
@@ -1406,6 +1431,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.closed = true
     this.generation += 1
     this.measuredConfigurationHash = undefined
+    this.measuredConfiguration = undefined
     this.invalidateManagedPlanningArtifactPort()
     this.measuredMigrationStateTable = undefined
     try {
@@ -1426,6 +1452,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.generation += 1
     const measurementGeneration = this.generation
     this.measuredConfigurationHash = undefined
+    this.measuredConfiguration = undefined
     this.invalidateManagedPlanningArtifactPort()
     this.measuredMigrationStateTable = undefined
     const configuration = await measureWorkspaceSearchMigrationConfiguration({
@@ -1435,13 +1462,14 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.requireGeneration(measurementGeneration)
     const configurationHash =
       createWorkspaceSearchConfigurationHash(configuration)
+    const measuredConfiguration = structuredClone(configuration)
     const stateTable = structuredClone(
-      configuration.tables['migration-state'],
+      measuredConfiguration.tables['migration-state'],
     )
     const planningArtifactAbortController = new AbortController()
     const planningArtifactPort =
       this.createManagedPlanningArtifactPort(
-        configuration,
+        measuredConfiguration,
         {
           generation: measurementGeneration,
           configurationHash,
@@ -1453,6 +1481,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.measuredPlanningArtifactPort = planningArtifactPort
     this.measuredPlanningArtifactAbortController =
       planningArtifactAbortController
+    this.measuredConfiguration = measuredConfiguration
     this.measuredConfigurationHash = configurationHash
     return configuration
   }
@@ -1524,6 +1553,53 @@ class AwsWorkspaceSearchMigrationIdentityPort
           ),
       }
     return managedGateway
+  }
+
+  /**
+   * Creates one atomic publication port bound to the current measurement.
+   *
+   * @returns Generation-guarded sealed planning authority publication port.
+   */
+  createSealedPlanningAuthorityPort():
+    WorkspaceSearchMigrationSealedPlanningAuthorityV2AwsPort {
+    const authority = this.captureManagedSealedPlanningAuthority()
+    const transport:
+      WorkspaceSearchMigrationSealedPlanningAuthorityV2AwsTransport = {
+        getSealedPlanningAuthority: (command) =>
+          this.runManagedSealedPlanningAuthorityRead(
+            authority,
+            () => this.transport.getPrePlanAuthority(command),
+          ),
+        prepareSealedPlanningAuthorityWrite: async () => {
+          await this.requireCurrentSealedPlanningAuthorityTableIncarnations(
+            authority,
+          )
+        },
+        transactWriteSealedPlanningAuthority: (command) =>
+          this.runManagedPreparedSealedPlanningAuthorityWrite(
+            authority,
+            () => this.transport.transactWritePrePlanAuthority(command),
+          ),
+      }
+    const delegate =
+      createAwsWorkspaceSearchMigrationSealedPlanningAuthorityV2Port(
+        authority.stateTable,
+        authority.configurationHash,
+        transport,
+        this.prePlanAuthorityClock,
+      )
+    return {
+      read: (runId) =>
+        this.runManagedSealedPlanningAuthorityOperation(
+          authority,
+          () => delegate.read(runId),
+        ),
+      publish: (input) =>
+        this.runManagedSealedPlanningAuthorityOperation(
+          authority,
+          () => delegate.publish(input),
+        ),
+    }
   }
 
   /**
@@ -3428,6 +3504,192 @@ class AwsWorkspaceSearchMigrationIdentityPort
   }
 
   /**
+   * Captures the complete configuration installed by current measurement.
+   *
+   * @returns Detached generation, configuration, hash, and state identity.
+   */
+  private captureManagedSealedPlanningAuthority():
+    ManagedSealedPlanningAuthority {
+    const generation = this.generation
+    const configurationHash = this.measuredConfigurationHash
+    const configuration = this.measuredConfiguration
+    const stateTable = this.measuredMigrationStateTable
+    if (
+      configurationHash === undefined ||
+      configuration === undefined ||
+      stateTable === undefined
+    ) {
+      return failManagedSealedPlanningAuthority()
+    }
+    const authority: ManagedMigrationStateAuthority = {
+      generation,
+      configurationHash,
+      stateTable: structuredClone(stateTable),
+    }
+    this.requireManagedSealedPlanningAuthority(authority)
+    return {
+      ...authority,
+      configuration: structuredClone(configuration),
+    }
+  }
+
+  /**
+   * Guards one sealed publication operation against lifecycle invalidation.
+   *
+   * @param authority - Captured complete measurement authority.
+   * @param operation - Exact publication adapter or transport operation.
+   * @returns Result only while the captured generation remains current.
+   */
+  private async runManagedSealedPlanningAuthorityOperation<Result>(
+    authority: ManagedSealedPlanningAuthority,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    this.requireManagedSealedPlanningAuthority(authority)
+    try {
+      const result = await operation()
+      this.requireManagedSealedPlanningAuthority(authority)
+      return result
+    } catch (error: unknown) {
+      this.requireManagedSealedPlanningAuthority(authority)
+      throw error
+    }
+  }
+
+  /**
+   * Guards one publication read with state-incarnation checks on both sides.
+   *
+   * @param authority - Captured complete measurement authority.
+   * @param operation - Exact strongly consistent publication-root read.
+   * @returns Read result only while state identity remains measured.
+   */
+  private async runManagedSealedPlanningAuthorityRead<Result>(
+    authority: ManagedSealedPlanningAuthority,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    this.requireManagedSealedPlanningAuthority(authority)
+    await this.requireCurrentSealedPlanningAuthorityStateIncarnation(
+      authority,
+    )
+    let result: Result
+    try {
+      result = await operation()
+    } catch (error: unknown) {
+      this.requireManagedSealedPlanningAuthority(authority)
+      await this.requireCurrentSealedPlanningAuthorityStateIncarnation(
+        authority,
+      )
+      throw error
+    }
+    this.requireManagedSealedPlanningAuthority(authority)
+    await this.requireCurrentSealedPlanningAuthorityStateIncarnation(
+      authority,
+    )
+    this.requireManagedSealedPlanningAuthority(authority)
+    return result
+  }
+
+  /**
+   * Requires one captured publication authority to remain current.
+   *
+   * @param authority - Captured generation and configuration hash.
+   */
+  private requireManagedSealedPlanningAuthority(
+    authority: ManagedPlanningArtifactGenerationAuthority,
+  ): void {
+    if (
+      !this.isMeasurementGenerationCurrent(
+        authority.generation,
+        authority.configurationHash,
+      ) ||
+      this.measuredConfiguration === undefined
+    ) {
+      return failManagedSealedPlanningAuthority()
+    }
+  }
+
+  /**
+   * Revalidates every transaction-owned table immediately before publication.
+   *
+   * @param authority - Captured measured configuration and generation.
+   */
+  private async requireCurrentSealedPlanningAuthorityTableIncarnations(
+    authority: ManagedSealedPlanningAuthority,
+  ): Promise<void> {
+    try {
+      await this.requireCurrentMigrationStateTableIncarnation(authority)
+      for (const source of workspaceSearchMigrationSourceNames) {
+        await this.requireCurrentSourceTableIncarnation(
+          authority.configuration.tables[source],
+          authority.generation,
+          authority.configurationHash,
+        )
+      }
+      await this.requireCurrentTargetTableIncarnation(
+        authority.configuration.tables['workspace-search'],
+        authority.generation,
+        authority.configurationHash,
+      )
+    } catch (error: unknown) {
+      throw createManagedSealedPlanningAuthorityFailure(
+        readManagedMigrationStateFailureCode(error),
+      )
+    }
+    this.requireManagedSealedPlanningAuthority(authority)
+  }
+
+  /**
+   * Revalidates and safely classifies the publication state incarnation.
+   *
+   * @param authority - Captured measured state-table authority.
+   */
+  private async requireCurrentSealedPlanningAuthorityStateIncarnation(
+    authority: ManagedSealedPlanningAuthority,
+  ): Promise<void> {
+    try {
+      await this.requireCurrentMigrationStateTableIncarnation(authority)
+    } catch (error: unknown) {
+      throw createManagedSealedPlanningAuthorityFailure(
+        readManagedMigrationStateFailureCode(error),
+      )
+    }
+  }
+
+  /**
+   * Sends one prepared publication and revalidates all six table incarnations.
+   *
+   * The pre-send preparation closes drift detected before transaction
+   * construction. Repeating the complete check after either success or failure
+   * closes replacement races that occur between an earlier source check and
+   * the migration-state transaction.
+   *
+   * @param authority - Captured measured publication authority.
+   * @param operation - Exact prepared transaction on the shared client.
+   * @returns Raw transaction result only while every table identity stays current.
+   */
+  private async runManagedPreparedSealedPlanningAuthorityWrite<Result>(
+    authority: ManagedSealedPlanningAuthority,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    let result: Result
+    try {
+      result = await this.runManagedMigrationStateIo(
+        authority,
+        operation,
+      )
+    } catch (error: unknown) {
+      this.requireManagedSealedPlanningAuthority(authority)
+      await this.requireCurrentSealedPlanningAuthorityTableIncarnations(
+        authority,
+      )
+      throw error
+    }
+    await this.requireCurrentSealedPlanningAuthorityTableIncarnations(
+      authority,
+    )
+    return result
+  }
+
+  /**
    * Captures the private immutable port installed by current measurement.
    *
    * @returns Current generation, configuration hash, and private object port.
@@ -4914,6 +5176,30 @@ function failManagedPlanningArtifact(): never {
   throw new WorkspaceSearchMigrationFailure(
     'INVALID_STATE',
     'Workspace Search planning artifact storage stopped safely (INVALID_STATE).',
+  )
+}
+
+/**
+ * Raises one stable managed sealed-publication lifecycle failure.
+ *
+ * @returns Never returns.
+ */
+function failManagedSealedPlanningAuthority(): never {
+  throw createManagedSealedPlanningAuthorityFailure('INVALID_STATE')
+}
+
+/**
+ * Creates one stable managed sealed-publication failure.
+ *
+ * @param code - Stable operator-safe lifecycle or drift classification.
+ * @returns Secret-free publication failure.
+ */
+function createManagedSealedPlanningAuthorityFailure(
+  code: WorkspaceSearchMigrationFailureCode,
+): WorkspaceSearchMigrationFailure {
+  return new WorkspaceSearchMigrationFailure(
+    code,
+    'Workspace Search sealed planning authority publication failed.',
   )
 }
 

@@ -475,6 +475,9 @@ export type CreateWorkspaceSearchMigrationPlanningProvenanceDirectManifestHeadIn
  * the caller stores data segments, manifest pages, and the compact head.
  */
 export type WorkspaceSearchMigrationPlanningProvenanceDirectBuilder = {
+  /** Detached strict authority provenance derived from the raw evidence. */
+  readonly planningAuthorityProvenance:
+    WorkspaceSearchMigrationPlanningAuthorityProvenance
   /** Complete preflighted encoded segments in immutable dependency order. */
   readonly encodedSegments:
     readonly WorkspaceSearchMigrationPlanningProvenanceEncodedSegment[]
@@ -651,7 +654,15 @@ export function createWorkspaceSearchMigrationPlanningProvenanceDirectBuilder(
       maximumTotalSegmentBytes,
     )
     const capturedSummary = readSummary(summary)
+    const planningAuthorityProvenance = readProvenance(
+      material.provenance,
+      material.evidencePageWitnesses,
+      material.runId,
+      material.configurationHash,
+      material.tableIds['migration-state'],
+    )
     return {
+      planningAuthorityProvenance,
       encodedSegments,
       createManifestPageBuilder: (builderInput) =>
         runManifestBoundary(() => {

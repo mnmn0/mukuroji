@@ -450,6 +450,7 @@ describe('Workspace Search planning immutable artifact gateway', () => {
       ])
       port.calls.length = 0
       const replayed = await gateway.replayPlanArtifact(stored)
+      expect(stored.manifestHead).toEqual(replayed.manifestHead)
       expect(replayed.operations).toEqual([])
       expect(port.calls).toEqual([
         'read:plan-seals',
@@ -482,7 +483,7 @@ describe('Workspace Search planning immutable artifact gateway', () => {
       port.calls.length = 0
       await expect(
         gateway.replayPlanArtifact({
-          ...stored,
+          manifestHeadReference: stored.manifestHeadReference,
           planSealReference: {
             ...stored.planSealReference,
             byteLength:
@@ -496,7 +497,7 @@ describe('Workspace Search planning immutable artifact gateway', () => {
 
       await expect(
         gateway.replayPlanArtifact({
-          ...stored,
+          planSealReference: stored.planSealReference,
           manifestHeadReference: {
             ...stored.manifestHeadReference,
             byteLength:
@@ -509,6 +510,7 @@ describe('Workspace Search planning immutable artifact gateway', () => {
       expect(port.calls).toEqual([])
 
       const replayed = await gateway.replayPlanArtifact(stored)
+      expect(stored.manifestHead).toEqual(replayed.manifestHead)
       expect(replayed.planSeal).toEqual(plan.seal)
       expect(replayed.operations).toEqual(plan.operations)
       expect(port.calls).toEqual([
@@ -607,6 +609,43 @@ describe('Workspace Search planning immutable artifact gateway', () => {
       ).rejects.toBeInstanceOf(
         WorkspaceSearchMigrationPlanningArtifactAwsError,
       )
+    },
+  )
+
+  test(
+    'replays a write result but rejects a cached-head accessor without I/O',
+    async () => {
+      const { gateway, port } = createGateway()
+      const plan = createPlan(0)
+      const stored = await gateway.writePlanArtifact({
+        planSeal: plan.seal,
+        operations: plan.operations,
+        retainUntil,
+      })
+      expect(await gateway.replayPlanArtifact(stored)).toMatchObject({
+        manifestHead: stored.manifestHead,
+        planSeal: plan.seal,
+      })
+
+      const hostile = { ...stored }
+      let getterCalls = 0
+      Object.defineProperty(hostile, 'manifestHead', {
+        configurable: true,
+        enumerable: true,
+        get: () => {
+          getterCalls += 1
+          return stored.manifestHead
+        },
+      })
+      port.calls.length = 0
+
+      await expect(
+        gateway.replayPlanArtifact(hostile),
+      ).rejects.toBeInstanceOf(
+        WorkspaceSearchMigrationPlanningArtifactAwsError,
+      )
+      expect(getterCalls).toBe(0)
+      expect(port.calls).toEqual([])
     },
   )
 
@@ -905,6 +944,7 @@ describe('Workspace Search planning immutable artifact gateway', () => {
       const stored = await pending
 
       const replayed = await gateway.replayPlanArtifact(stored)
+      expect(stored.manifestHead).toEqual(replayed.manifestHead)
       expect(replayed.planSeal).toEqual(originalSeal)
       expect(replayed.operations).toEqual(originalOperations)
     },
@@ -950,6 +990,9 @@ describe('Workspace Search planning immutable artifact gateway', () => {
         'write:manifest-heads',
       ])
       expect(stored.manifestHead.manifestPageCount).toBeGreaterThan(1)
+      expect(stored.planningAuthorityProvenance).toEqual(
+        fixture.artifact.provenance,
+      )
 
       port.calls.length = 0
       await expect(
@@ -971,9 +1014,35 @@ describe('Workspace Search planning immutable artifact gateway', () => {
           manifestHeadReference: stored.manifestHeadReference,
         })
       expect(replayed).toEqual(fixture.artifact)
+      expect(stored.planningAuthorityProvenance).toEqual(
+        replayed.provenance,
+      )
       expect(port.calls[0]).toBe('read:manifest-heads')
       expect(port.calls).toContain('read:manifest-pages')
       expect(port.calls).toContain('read:segments')
+    },
+  )
+
+  test(
+    'returns detached authority provenance for compatibility writes',
+    async () => {
+      const { gateway } = createGateway()
+      const fixture = createProvenanceArtifact()
+      const stored =
+        await gateway.writePlanningProvenanceArtifact({
+          artifact: fixture.artifact,
+          retainUntil,
+        })
+
+      expect(stored.planningAuthorityProvenance).toEqual(
+        fixture.artifact.provenance,
+      )
+      expect(stored.planningAuthorityProvenance).not.toBe(
+        fixture.artifact.provenance,
+      )
+      expect(stored.planningAuthorityProvenance.chainRoots).not.toBe(
+        fixture.artifact.provenance.chainRoots,
+      )
     },
   )
 
