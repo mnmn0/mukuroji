@@ -67,6 +67,9 @@ import {
   serializeWorkspaceSearchMigrationPlanningProvenanceArtifact,
   type WorkspaceSearchMigrationPlanningProvenanceArtifact,
 } from './migration-sealed-planning-authority'
+import type {
+  WorkspaceSearchMigrationPlanningAuthorityProvenance,
+} from './migration-planning-join'
 import { hasOnlyPairedSurrogates } from './migration-value-guards'
 import type {
   WorkspaceSearchPlannedOperation,
@@ -152,6 +155,8 @@ export type WorkspaceSearchMigrationStoredPlanArtifact = {
   /** Exact immutable version containing the canonical plan seal. */
   readonly planSealReference:
     WorkspaceSearchMigrationImmutableArtifactReference
+  /** Detached strict compact operation-manifest head. */
+  readonly manifestHead: WorkspaceSearchMigrationPlanManifestHead
   /** Exact immutable version containing the compact operation-manifest head. */
   readonly manifestHeadReference:
     WorkspaceSearchMigrationImmutableArtifactReference
@@ -164,6 +169,12 @@ export type ReplayWorkspaceSearchMigrationStoredPlanArtifactInput = {
   /** Exact immutable version containing the canonical plan seal. */
   readonly planSealReference:
     WorkspaceSearchMigrationImmutableArtifactReference
+  /**
+   * Optional detached write-result cache ignored during replay.
+   *
+   * Exact immutable references remain the only replay authority.
+   */
+  readonly manifestHead?: WorkspaceSearchMigrationPlanManifestHead
   /** Exact immutable version containing the compact operation-manifest head. */
   readonly manifestHeadReference:
     WorkspaceSearchMigrationImmutableArtifactReference
@@ -223,6 +234,9 @@ export type WorkspaceSearchMigrationStoredPlanningProvenanceArtifact = {
   /** Detached strict compact provenance manifest head. */
   readonly manifestHead:
     WorkspaceSearchMigrationPlanningProvenanceManifestHead
+  /** Detached strict authority provenance derived from stored evidence. */
+  readonly planningAuthorityProvenance:
+    WorkspaceSearchMigrationPlanningAuthorityProvenance
   /** Exact immutable version containing the compact manifest head. */
   readonly manifestHeadReference:
     WorkspaceSearchMigrationImmutableArtifactReference
@@ -306,6 +320,9 @@ type PreparedPlanningArtifactObject = {
  * Fully preflighted provenance graph normalized across both write inputs.
  */
 type PreparedPlanningProvenanceGraph = {
+  /** Detached strict authority provenance validated before storage I/O. */
+  readonly planningAuthorityProvenance:
+    WorkspaceSearchMigrationPlanningAuthorityProvenance
   /** Complete encoded segment set validated before the first storage await. */
   readonly encodedSegments:
     readonly WorkspaceSearchMigrationPlanningProvenanceEncodedSegment[]
@@ -596,6 +613,8 @@ implements WorkspaceSearchMigrationPlanningArtifactAwsGateway {
           manifestPages: storedPages,
           segments: storedSegments,
         })
+      const manifestHead =
+        parseWorkspaceSearchMigrationPlanManifestHead(encodedHead.bytes)
       const manifestHeadReference = await this.writeObject({
         objectKeyPrefix:
           WORKSPACE_SEARCH_MIGRATION_PLAN_ARTIFACT_OBJECT_KEY_PREFIX,
@@ -609,7 +628,11 @@ implements WorkspaceSearchMigrationPlanningArtifactAwsGateway {
         planSealReference,
         manifestHeadReference.retainUntil,
       )
-      return { planSealReference, manifestHeadReference }
+      return {
+        planSealReference,
+        manifestHead,
+        manifestHeadReference,
+      }
     })
   }
 
@@ -624,10 +647,19 @@ implements WorkspaceSearchMigrationPlanningArtifactAwsGateway {
   ): Promise<WorkspaceSearchMigrationPlanArtifactReplayResult> {
     return runPlanningArtifactStorageAsyncBoundary(async () => {
       const inputRecord = requirePlanningArtifactRecord(input)
-      requireExactPlanningArtifactKeys(inputRecord, [
-        'manifestHeadReference',
-        'planSealReference',
-      ])
+      requireExactOptionalPlanningArtifactKeys(
+        inputRecord,
+        [
+          'manifestHead',
+          'manifestHeadReference',
+          'planSealReference',
+        ],
+        ['manifestHeadReference', 'planSealReference'],
+      )
+      void readOptionalPlanningArtifactData(
+        inputRecord,
+        'manifestHead',
+      )
       const planSealReference = readPlanningArtifactReference(
         readRequiredPlanningArtifactData(
           inputRecord,
@@ -841,6 +873,7 @@ implements WorkspaceSearchMigrationPlanningArtifactAwsGateway {
               : { maximumSegmentBytes }),
           })
         prepared = {
+          planningAuthorityProvenance: artifact.provenance,
           encodedSegments,
           createManifestPageBuilder: (storedSegments) =>
             createWorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder(
@@ -911,6 +944,8 @@ implements WorkspaceSearchMigrationPlanningArtifactAwsGateway {
               : { maximumTotalSegmentBytes }),
           })
         prepared = {
+          planningAuthorityProvenance:
+            directBuilder.planningAuthorityProvenance,
           encodedSegments: directBuilder.encodedSegments,
           createManifestPageBuilder: (storedSegments) =>
             directBuilder.createManifestPageBuilder({
@@ -993,7 +1028,12 @@ implements WorkspaceSearchMigrationPlanningArtifactAwsGateway {
         retainUntil,
         metadata: this.provenanceMetadata,
       })
-      return { manifestHead, manifestHeadReference }
+      return {
+        manifestHead,
+        planningAuthorityProvenance:
+          prepared.planningAuthorityProvenance,
+        manifestHeadReference,
+      }
     })
   }
 
