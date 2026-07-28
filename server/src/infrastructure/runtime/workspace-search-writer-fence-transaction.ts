@@ -307,6 +307,17 @@ function freezeWorkspaceSearchWriterFenceTransactionValue(
   if (typeof value !== 'object' || value === null || Object.isFrozen(value)) {
     return
   }
+  if (!Array.isArray(value)) {
+    let prototype: unknown
+    try {
+      prototype = Object.getPrototypeOf(value)
+    } catch {
+      return failTransactionPreparation()
+    }
+    if (prototype !== Object.prototype && prototype !== null) {
+      return
+    }
+  }
   for (const nested of Object.values(value)) {
     freezeWorkspaceSearchWriterFenceTransactionValue(nested)
   }

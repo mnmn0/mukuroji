@@ -211,6 +211,46 @@ test('accepts ninety-nine application actions after reserving the guard', () => 
   ).toHaveLength(100)
 })
 
+test('preserves detached native binary and set attribute values', () => {
+  const binary = new Uint8Array([1, 2, 3])
+  const labels = new Set(['alpha'])
+  const guarded = prependWorkspaceSearchWriterFenceGuard(
+    createGuardFixture(),
+    [{
+      Put: {
+        TableName: 'WorkspaceSearch',
+        Item: {
+          workspaceId: 'workspace-1',
+          recordKey: 'search/work-item/native-values',
+          binary,
+          labels,
+        },
+      },
+    }],
+  )
+  const applicationPut = guarded.transactItems[1]?.Put
+  if (!applicationPut?.Item) {
+    throw new Error('Expected prepared application Put.')
+  }
+  const preparedBinary = Reflect.get(applicationPut.Item, 'binary')
+  const preparedLabels = Reflect.get(applicationPut.Item, 'labels')
+  if (
+    !(preparedBinary instanceof Uint8Array) ||
+    !(preparedLabels instanceof Set)
+  ) {
+    throw new Error('Expected detached native DynamoDB values.')
+  }
+
+  binary[0] = 9
+  labels.add('caller-mutation')
+
+  expect([...preparedBinary]).toEqual([1, 2, 3])
+  expect([...preparedLabels]).toEqual(['alpha'])
+  expect(Object.isFrozen(guarded.transactItems)).toBe(true)
+  expect(Object.isFrozen(preparedBinary)).toBe(false)
+  expect(Object.isFrozen(preparedLabels)).toBe(false)
+})
+
 test('rejects one hundred application actions before transport', () => {
   const material = createGuardFixture()
   const applicationItems:
