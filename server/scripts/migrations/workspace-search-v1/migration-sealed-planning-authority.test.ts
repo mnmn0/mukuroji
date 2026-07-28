@@ -1044,6 +1044,7 @@ describe('Workspace Search sealed planning authority', () => {
       expect(totalBase64Characters).toBeLessThanOrEqual(
         WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_ARTIFACT_MAX_BYTES,
       )
+      // Keep witness bytes close enough that canonical envelope overhead crosses the cap.
       expect(
         WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_ARTIFACT_MAX_BYTES -
           totalBase64Characters,
@@ -1311,6 +1312,7 @@ function createSealedPlanningFixture() {
     requireTeamTargetItem(
       configuration,
       configurationHash,
+      // The pre-archive target row remains present and must be planned for deletion.
       createTeamSourceItem('archived'),
     ),
     requireTeamTargetItem(
@@ -1826,6 +1828,7 @@ function createNearLimitTargetEvidencePageBytes(
   const pageBytes: Uint8Array[] = []
   let base64Characters = 0
   let pageIndex = 0
+  // Leave room for the required terminal page before envelope overhead is added.
   const reservedTerminalCharacters = 32 * 1024
 
   while (true) {

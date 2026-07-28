@@ -508,7 +508,7 @@ export function createWorkspaceSearchMigrationSealedPlanningAuthority(
     const tableIds = createTableIds(configuration)
     const stateTableId = tableIds['migration-state']
     const planSeal = parseWorkspaceSearchPlanSeal(
-      serializeWorkspaceSearchPlanSeal(readOwn(input, 'planSeal')),
+      serializeWorkspaceSearchPlanSeal(readOwn(inputRecord, 'planSeal')),
     )
     const planSealReference = readArtifactReference(
       readOwn(inputRecord, 'planSealReference'),
@@ -529,6 +529,10 @@ export function createWorkspaceSearchMigrationSealedPlanningAuthority(
       readPlanningProvenanceArtifact(
         readOwn(inputRecord, 'planningProvenanceArtifact'),
       )
+    requireCanonicalArtifactSize(
+      planningProvenanceArtifact,
+      WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_ARTIFACT_MAX_BYTES,
+    )
     const planningProvenanceArtifactReference = readArtifactReference(
       readOwn(inputRecord, 'planningProvenanceArtifactReference'),
     )
@@ -1592,10 +1596,6 @@ function readPlanningProvenanceArtifact(
     historicalReceipts,
     historicalReceiptBindingDigest,
   }
-  requireCanonicalArtifactSize(
-    artifact,
-    WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_ARTIFACT_MAX_BYTES,
-  )
   return artifact
 }
 
@@ -3056,6 +3056,8 @@ function addSafeCounts(left: number, right: number): number {
  * @param value - Candidate runtime value.
  * @returns Object suitable for bounded reflection.
  */
+function requireRecord<Value extends object>(value: Value): Value
+function requireRecord(value: unknown): object
 function requireRecord(value: unknown): object {
   if (
     typeof value !== 'object' ||
