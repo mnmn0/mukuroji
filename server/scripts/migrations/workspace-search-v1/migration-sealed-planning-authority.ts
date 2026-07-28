@@ -447,13 +447,13 @@ export function parseWorkspaceSearchMigrationPlanningProvenanceArtifact(
   bytes: Uint8Array,
 ): WorkspaceSearchMigrationPlanningProvenanceArtifact {
   return runSealedAuthorityBoundary(() => {
-    const parsed = parseArtifactJson(
+    const parsedArtifact = parseArtifactJson(
       bytes,
       WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_ARTIFACT_MAX_BYTES,
     )
-    const artifact = readPlanningProvenanceArtifact(parsed)
+    const artifact = readPlanningProvenanceArtifact(parsedArtifact.value)
     requireCanonicalBytes(
-      bytes,
+      parsedArtifact.bytes,
       artifact,
       WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_ARTIFACT_MAX_BYTES,
     )
@@ -638,13 +638,13 @@ export function parseWorkspaceSearchMigrationSealedPlanningAuthority(
   bytes: Uint8Array,
 ): WorkspaceSearchMigrationSealedPlanningAuthority {
   return runSealedAuthorityBoundary(() => {
-    const parsed = parseArtifactJson(
+    const parsedArtifact = parseArtifactJson(
       bytes,
       WORKSPACE_SEARCH_MIGRATION_SEALED_PLANNING_AUTHORITY_MAX_BYTES,
     )
-    const authority = readSealedPlanningAuthority(parsed)
+    const authority = readSealedPlanningAuthority(parsedArtifact.value)
     requireCanonicalBytes(
-      bytes,
+      parsedArtifact.bytes,
       authority,
       WORKSPACE_SEARCH_MIGRATION_SEALED_PLANNING_AUTHORITY_MAX_BYTES,
     )
@@ -698,6 +698,16 @@ type PlanningEvidenceWitnessBudget = {
   canonicalPageBytes: number
   /** Combined canonical Base64 characters stored in the artifact. */
   base64Characters: number
+}
+
+/**
+ * Parsed JSON paired with the immutable byte snapshot it came from.
+ */
+type ParsedArtifactJson = {
+  /** Untrusted JSON value parsed from the exact byte snapshot. */
+  readonly value: unknown
+  /** Detached non-shared bytes used for parsing and canonical comparison. */
+  readonly bytes: Uint8Array
 }
 
 /**
@@ -1052,23 +1062,70 @@ function readDetachedEvidencePageBytes(
   maximumPageBytes: number,
   budget: PlanningEvidenceWitnessBudget,
 ): Uint8Array {
-  if (nodeUtilTypes.isProxy(value) || !(value instanceof Uint8Array)) {
-    return failSealedAuthority()
-  }
-  const byteLength = readIntrinsicUint8ArrayByteLength(value)
-  if (byteLength === 0 || byteLength > maximumPageBytes) {
-    return failSealedAuthority()
-  }
+  const detached = readDetachedUnsharedBytes(value, maximumPageBytes)
+  const byteLength = readIntrinsicUint8ArrayByteLength(detached)
   const base64Length = Math.ceil(byteLength / 3) * 4
   addEvidencePageToBudget(byteLength, base64Length, budget)
-  const detached: unknown = structuredClone(value)
+  return detached
+}
+
+/**
+ * Copies one exact byte view without accepting Proxy or shared backing memory.
+ *
+ * @param value - Candidate Uint8Array.
+ * @param maximumBytes - Maximum accepted byte length.
+ * @returns Detached ordinary-ArrayBuffer-backed bytes.
+ */
+function readDetachedUnsharedBytes(
+  value: unknown,
+  maximumBytes: number,
+): Uint8Array {
   if (
-    !(detached instanceof Uint8Array) ||
-    readIntrinsicUint8ArrayByteLength(detached) !== byteLength
+    nodeUtilTypes.isProxy(value) ||
+    !nodeUtilTypes.isUint8Array(value)
   ) {
     return failSealedAuthority()
   }
+  const buffer = readIntrinsicUint8ArrayBuffer(value)
+  const byteLength = readIntrinsicUint8ArrayByteLength(value)
+  if (
+    nodeUtilTypes.isSharedArrayBuffer(buffer) ||
+    byteLength === 0 ||
+    byteLength > maximumBytes
+  ) {
+    return failSealedAuthority()
+  }
+  const detached = new Uint8Array(value)
+  if (readIntrinsicUint8ArrayByteLength(detached) !== byteLength) {
+    return failSealedAuthority()
+  }
   return detached
+}
+
+/**
+ * Reads a typed array's internal backing buffer without own property access.
+ *
+ * @param value - Non-Proxy Uint8Array.
+ * @returns Intrinsic ArrayBuffer or SharedArrayBuffer backing store.
+ */
+function readIntrinsicUint8ArrayBuffer(
+  value: Uint8Array,
+): ArrayBufferLike {
+  const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype)
+  if (typedArrayPrototype === null) return failSealedAuthority()
+  const descriptor = Object.getOwnPropertyDescriptor(
+    typedArrayPrototype,
+    'buffer',
+  )
+  if (descriptor?.get === undefined) return failSealedAuthority()
+  const buffer: unknown = Reflect.apply(descriptor.get, value, [])
+  if (
+    !nodeUtilTypes.isArrayBuffer(buffer) &&
+    !nodeUtilTypes.isSharedArrayBuffer(buffer)
+  ) {
+    return failSealedAuthority()
+  }
+  return buffer
 }
 
 /**
@@ -3199,22 +3256,19 @@ function readBoundedPositiveSafeInteger(
 function parseArtifactJson(
   bytes: Uint8Array,
   maximumBytes: number,
-): unknown {
-  if (
-    !(bytes instanceof Uint8Array) ||
-    bytes.byteLength === 0 ||
-    bytes.byteLength > maximumBytes
-  ) {
-    return failSealedAuthority()
-  }
+): ParsedArtifactJson {
+  const detached = readDetachedUnsharedBytes(bytes, maximumBytes)
   let text: string
   try {
-    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    text = new TextDecoder('utf-8', { fatal: true }).decode(detached)
   } catch {
     return failSealedAuthority()
   }
   try {
-    return JSON.parse(text)
+    return {
+      value: JSON.parse(text),
+      bytes: detached,
+    }
   } catch {
     return failSealedAuthority()
   }

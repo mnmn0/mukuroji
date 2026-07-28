@@ -682,6 +682,89 @@ describe('Workspace Search sealed planning authority', () => {
   )
 
   test(
+    'snapshots byte inputs without accessors and rejects Proxy or shared memory',
+    () => {
+      const fixture = createSealedPlanningFixture()
+      const authority =
+        createWorkspaceSearchMigrationSealedPlanningAuthority(
+          fixture.authorityInput,
+        )
+      const authorityBytes =
+        serializeWorkspaceSearchMigrationSealedPlanningAuthority(
+          authority,
+        )
+      const accessorBytes = new Uint8Array(authorityBytes)
+      let byteLengthReads = 0
+      Reflect.defineProperty(accessorBytes, 'byteLength', {
+        configurable: true,
+        enumerable: false,
+        get() {
+          byteLengthReads += 1
+          return 0
+        },
+      })
+
+      expect(
+        parseWorkspaceSearchMigrationSealedPlanningAuthority(
+          accessorBytes,
+        ),
+      ).toEqual(authority)
+      expect(byteLengthReads).toBe(0)
+
+      let proxyReads = 0
+      let proxyPrototypeReads = 0
+      const bytesProxy = new Proxy(authorityBytes, {
+        get(target, key, receiver) {
+          proxyReads += 1
+          return Reflect.get(target, key, receiver)
+        },
+        getPrototypeOf(target) {
+          proxyPrototypeReads += 1
+          return Reflect.getPrototypeOf(target)
+        },
+      })
+      expectSealedAuthorityFailure(() =>
+        parseWorkspaceSearchMigrationSealedPlanningAuthority(bytesProxy)
+      )
+      expect(proxyReads).toBe(0)
+      expect(proxyPrototypeReads).toBe(0)
+
+      const sharedAuthorityBytes = new Uint8Array(
+        new SharedArrayBuffer(authorityBytes.byteLength),
+      )
+      sharedAuthorityBytes.set(authorityBytes)
+      expectSealedAuthorityFailure(() =>
+        parseWorkspaceSearchMigrationSealedPlanningAuthority(
+          sharedAuthorityBytes,
+        )
+      )
+
+      const sourcePage =
+        fixture.sourceEvidencePageBytes.documents[0]
+      if (sourcePage === undefined) {
+        throw new Error('Expected one document evidence page.')
+      }
+      const sharedSourcePage = new Uint8Array(
+        new SharedArrayBuffer(sourcePage.byteLength),
+      )
+      sharedSourcePage.set(sourcePage)
+      expectSealedAuthorityFailure(() =>
+        createWorkspaceSearchMigrationPlanningProvenanceArtifact({
+          sourceEvidencePageBytes: {
+            ...fixture.sourceEvidencePageBytes,
+            documents: [sharedSourcePage],
+          },
+          targetEvidencePageBytes:
+            fixture.targetEvidencePageBytes,
+          historicalReceiptBindings: [
+            fixture.historicalReceiptBinding,
+          ],
+        })
+      )
+    },
+  )
+
+  test(
     'commits exactly five canonical heads and all measured table incarnations',
     () => {
       const fixture = createSealedPlanningFixture()
