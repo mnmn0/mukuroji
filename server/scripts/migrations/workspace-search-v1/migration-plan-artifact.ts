@@ -40,6 +40,15 @@ export const WORKSPACE_SEARCH_MIGRATION_PLAN_MANIFEST_PAGE_MAX_BYTES =
 /** Maximum accepted planned-operation count. */
 export const WORKSPACE_SEARCH_MIGRATION_PLAN_MAX_OPERATIONS = 100_000
 
+/**
+ * Maximum combined canonical bytes retained by all plan segments.
+ *
+ * This separately bounds aggregate in-process planning material even when
+ * every individual segment remains below its own 16 MiB ceiling.
+ */
+export const WORKSPACE_SEARCH_MIGRATION_PLAN_MAX_TOTAL_SEGMENT_BYTES =
+  256 * 1024 * 1024
+
 /** Maximum canonical size of the compact manifest head. */
 export const WORKSPACE_SEARCH_MIGRATION_PLAN_MANIFEST_HEAD_MAX_BYTES =
   16 * 1024
@@ -240,14 +249,22 @@ export class WorkspaceSearchMigrationPlanArtifactError extends Error {
  *
  * @param planSeal - Reviewed immutable plan seal.
  * @param operations - Complete ordered planned operations.
+ * @param maximumTotalSegmentBytes - Optional smaller aggregate segment-byte
+ * ceiling that may only reject an otherwise valid plan.
  * @returns Ordered content-addressed canonical segments.
  */
 export function serializeWorkspaceSearchMigrationPlanArtifactSegments(
   planSeal: WorkspaceSearchPlanSeal,
   operations: readonly WorkspaceSearchPlannedOperation[],
+  maximumTotalSegmentBytes =
+    WORKSPACE_SEARCH_MIGRATION_PLAN_MAX_TOTAL_SEGMENT_BYTES,
 ): readonly WorkspaceSearchMigrationPlanArtifactEncodedSegment[] {
   return runPlanArtifactBoundary(() => {
     const seal = validatePlanSeal(planSeal)
+    const totalSegmentByteCeiling = readBoundedPositiveInteger(
+      maximumTotalSegmentBytes,
+      WORKSPACE_SEARCH_MIGRATION_PLAN_MAX_TOTAL_SEGMENT_BYTES,
+    )
     const operationCandidates = readDenseArray(
       operations,
       WORKSPACE_SEARCH_MIGRATION_PLAN_MAX_OPERATIONS,
@@ -262,9 +279,15 @@ export function serializeWorkspaceSearchMigrationPlanArtifactSegments(
     const planSealContentDigest = digestExactBytes(
       serializeWorkspaceSearchPlanSeal(seal),
     )
+    let totalOperationBytes = 0
     const encodedOperations = operationCandidates.map((candidate, index) => {
       const operation = readPlannedOperationCandidate(candidate)
       const bytes = serializeWorkspaceSearchPlannedOperation(operation)
+      totalOperationBytes = addBoundedPlanArtifactBytes(
+        totalOperationBytes,
+        bytes.byteLength,
+        totalSegmentByteCeiling,
+      )
       const parsed = parseWorkspaceSearchPlannedOperation(bytes)
       if (
         parsed.runId !== seal.runId ||
@@ -282,6 +305,7 @@ export function serializeWorkspaceSearchMigrationPlanArtifactSegments(
 
     const segments:
       WorkspaceSearchMigrationPlanArtifactEncodedSegment[] = []
+    let totalSegmentBytes = 0
     let operationIndex = 0
     let previousSegmentContentDigest: string | null = null
     while (operationIndex < encodedOperations.length) {
@@ -328,6 +352,11 @@ export function serializeWorkspaceSearchMigrationPlanArtifactSegments(
         segmentOperationCount: values.length,
       })
       const encoded = encodeSegment(segment)
+      totalSegmentBytes = addBoundedPlanArtifactBytes(
+        totalSegmentBytes,
+        encoded.byteLength,
+        totalSegmentByteCeiling,
+      )
       segments.push(encoded)
       previousSegmentContentDigest = encoded.contentDigest
     }
@@ -1028,23 +1057,36 @@ export type WorkspaceSearchMigrationPlanArtifactReplayResult = {
  * Replays and verifies a complete immutable plan artifact graph.
  *
  * @param input - Seal, compact head, and exact ordered stored objects.
+ * @param maximumTotalSegmentBytes - Optional smaller aggregate segment-byte
+ * ceiling that may only reject an otherwise valid replay.
  * @returns Detached complete ordered planned operations.
  */
 export function replayWorkspaceSearchMigrationPlanArtifact(
   input: WorkspaceSearchMigrationPlanArtifactReplayInput,
+  maximumTotalSegmentBytes =
+    WORKSPACE_SEARCH_MIGRATION_PLAN_MAX_TOTAL_SEGMENT_BYTES,
 ): WorkspaceSearchMigrationPlanArtifactReplayResult {
-  return runPlanArtifactBoundary(() => replayUnchecked(input))
+  return runPlanArtifactBoundary(() =>
+    replayUnchecked(input, maximumTotalSegmentBytes)
+  )
 }
 
 /**
  * Replays a complete bundle without replacing its failure boundary.
  *
  * @param input - Candidate complete replay graph.
+ * @param maximumTotalSegmentBytes - Aggregate segment-byte ceiling.
  * @returns Detached validated result.
  */
 function replayUnchecked(
   input: WorkspaceSearchMigrationPlanArtifactReplayInput,
+  maximumTotalSegmentBytes =
+    WORKSPACE_SEARCH_MIGRATION_PLAN_MAX_TOTAL_SEGMENT_BYTES,
 ): WorkspaceSearchMigrationPlanArtifactReplayResult {
+  const totalSegmentByteCeiling = readBoundedPositiveInteger(
+    maximumTotalSegmentBytes,
+    WORKSPACE_SEARCH_MIGRATION_PLAN_MAX_TOTAL_SEGMENT_BYTES,
+  )
   const inputRecord = requireRecord(input)
   requireExactKeys(inputRecord, replayInputKeys)
   const seal = validatePlanSeal(readOwn(inputRecord, 'planSeal'))
@@ -1112,6 +1154,15 @@ function replayUnchecked(
     )
   ) {
     return failPlanArtifact()
+  }
+
+  let totalSegmentBytes = 0
+  for (const binding of bindings) {
+    totalSegmentBytes = addBoundedPlanArtifactBytes(
+      totalSegmentBytes,
+      binding.reference.byteLength,
+      totalSegmentByteCeiling,
+    )
   }
 
   const operations: WorkspaceSearchPlannedOperation[] = []
@@ -1873,6 +1924,46 @@ function readPositiveInteger(value: unknown): number {
     return failPlanArtifact()
   }
   return value
+}
+
+/**
+ * Reads one positive safe integer under an inclusive ceiling.
+ *
+ * @param value - Candidate positive integer.
+ * @param maximum - Inclusive accepted ceiling.
+ * @returns Validated bounded positive integer.
+ */
+function readBoundedPositiveInteger(
+  value: unknown,
+  maximum: number,
+): number {
+  const parsed = readPositiveInteger(value)
+  if (parsed > maximum) return failPlanArtifact()
+  return parsed
+}
+
+/**
+ * Adds exact canonical bytes without exceeding one aggregate plan ceiling.
+ *
+ * @param current - Previously accumulated canonical bytes.
+ * @param additional - Additional canonical bytes to retain.
+ * @param maximum - Inclusive aggregate byte ceiling.
+ * @returns Exact safe-integer byte total.
+ */
+function addBoundedPlanArtifactBytes(
+  current: number,
+  additional: number,
+  maximum: number,
+): number {
+  const total = current + additional
+  if (
+    !Number.isSafeInteger(total) ||
+    additional < 0 ||
+    total > maximum
+  ) {
+    return failPlanArtifact()
+  }
+  return total
 }
 
 /**

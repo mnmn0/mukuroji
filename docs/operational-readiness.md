@@ -498,10 +498,19 @@ headroomを要求し、timeout時はtransportへ渡したAbortSignalで元のS3 
 headroomが尽きた場合は入力不正へ戻さず、未解決のambiguous operationとして停止します。
 
 この foundation の provenance segment builder は、既存のstrict validatorを通過した64 MiB以下の
-full provenance artifactを入力にします。Raw evidence witness / historical receiptからfull artifactを
-作らず直接segment化する経路、leafからmanifest headまでを順序付きでupload/replayするplanning専用
-adapter、sealed authorityとのmanifest本体相関はまだ未接続です。したがって64 MiBを超える正当なrunと
-upload途中のorphan処理は未完了であり、artifact uploadだけではplanning/apply authorityになりません。
+full provenance artifactを入力にします。Planning専用storage gatewayは、measured sessionから注入される
+codec非依存のimmutable object portだけを使い、plan seal、全segment、predecessor-linked manifest page、
+compact headの依存順でuploadします。Plan replayはsealとmanifest headのexact version referenceの組を
+rootとし、provenance replayはmanifest headのexact version referenceだけをrootとして、`List`やlatest
+lookupなしで全page/segmentをversion-pinned GETします。Caller-fixed retentionをgraph全体で共有し、
+plan/provenance segmentの総canonical byte数を各256 MiB以下へpreflightするため、write時の上限違反では
+upload I/Oを開始せず、replay時も全segment referenceを検証してからsegment GETを開始します。
+
+このgatewayはstandaloneなcomposition境界であり、AWS SDK clientやruntime entrypointを生成しません。
+Concrete measured AWS sessionへの接続、raw evidence witness / historical receiptから64 MiBのfull
+artifactを作らず直接segment化する経路、plan/provenance manifest同士とsealed authorityのcross-artifact
+bindingはまだ未接続です。したがって64 MiBを超える正当なrun、upload途中で残るretained orphanの記録・
+再利用、原子的publicationは未完了であり、artifact uploadだけではplanning/apply authorityになりません。
 Source planning v3 と target planning v1 の terminal head には、完全な identity、chain version、
 checkpoint、recursive head digest、`completed=true` を比較する transaction 用 ConditionCheck factory
 があります。
