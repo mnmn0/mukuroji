@@ -1367,6 +1367,10 @@ class AwsWorkspaceSearchMigrationIdentityPort
   private measuredPlanningArtifactPort:
     WorkspaceSearchMigrationImmutableArtifactAwsPort | undefined
 
+  /** One-way cancellation owned by the current measured immutable object port. */
+  private measuredPlanningArtifactAbortController:
+    AbortController | undefined
+
   /** Migration-state table incarnation authorized by the current measurement. */
   private measuredMigrationStateTable: MigrationTableIdentity | undefined
 
@@ -1402,7 +1406,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.closed = true
     this.generation += 1
     this.measuredConfigurationHash = undefined
-    this.measuredPlanningArtifactPort = undefined
+    this.invalidateManagedPlanningArtifactPort()
     this.measuredMigrationStateTable = undefined
     try {
       this.transport.close()
@@ -1422,7 +1426,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.generation += 1
     const measurementGeneration = this.generation
     this.measuredConfigurationHash = undefined
-    this.measuredPlanningArtifactPort = undefined
+    this.invalidateManagedPlanningArtifactPort()
     this.measuredMigrationStateTable = undefined
     const configuration = await measureWorkspaceSearchMigrationConfiguration({
       requested: this.requested,
@@ -1434,6 +1438,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
     const stateTable = structuredClone(
       configuration.tables['migration-state'],
     )
+    const planningArtifactAbortController = new AbortController()
     const planningArtifactPort =
       this.createManagedPlanningArtifactPort(
         configuration,
@@ -1441,10 +1446,13 @@ class AwsWorkspaceSearchMigrationIdentityPort
           generation: measurementGeneration,
           configurationHash,
         },
+        planningArtifactAbortController.signal,
       )
     this.requireGeneration(measurementGeneration)
     this.measuredMigrationStateTable = stateTable
     this.measuredPlanningArtifactPort = planningArtifactPort
+    this.measuredPlanningArtifactAbortController =
+      planningArtifactAbortController
     this.measuredConfigurationHash = configurationHash
     return configuration
   }
@@ -3336,11 +3344,13 @@ class AwsWorkspaceSearchMigrationIdentityPort
    *
    * @param configuration - Exact successful identity measurement.
    * @param authority - Generation and hash installing this private port.
+   * @param lifecycleSignal - One-way generation lifecycle cancellation.
    * @returns Immutable storage bound to the pinned S3 client and configuration.
    */
   private createManagedPlanningArtifactPort(
     configuration: WorkspaceSearchMigrationConfiguration,
     authority: ManagedPlanningArtifactGenerationAuthority,
+    lifecycleSignal: AbortSignal,
   ): WorkspaceSearchMigrationImmutableArtifactAwsPort {
     const transport: WorkspaceSearchMigrationImmutableArtifactAwsTransport = {
       /**
@@ -3400,9 +3410,21 @@ class AwsWorkspaceSearchMigrationIdentityPort
         MIGRATION_ARTIFACT_TIMEOUT_MILLISECONDS,
       bodyTimeoutMilliseconds:
         MIGRATION_ARTIFACT_TIMEOUT_MILLISECONDS,
+      lifecycleSignal,
       clock: this.prePlanAuthorityClock,
       transport,
     })
+  }
+
+  /**
+   * Cancels and forgets the immutable port owned by the previous generation.
+   */
+  private invalidateManagedPlanningArtifactPort(): void {
+    const abortController =
+      this.measuredPlanningArtifactAbortController
+    this.measuredPlanningArtifactAbortController = undefined
+    this.measuredPlanningArtifactPort = undefined
+    abortController?.abort()
   }
 
   /**

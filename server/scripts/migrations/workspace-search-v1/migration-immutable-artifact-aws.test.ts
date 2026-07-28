@@ -164,6 +164,9 @@ class RecordingImmutableArtifactTransport
  * Never-settling body used to prove finite body consumption.
  */
 class StalledImmutableArtifactBody {
+  /** Resolves when body consumption first asks for a chunk. */
+  readonly nextStarted: Promise<void>
+
   /** Whether iterator cleanup was requested. */
   returned = false;
 
@@ -175,6 +178,18 @@ class StalledImmutableArtifactBody {
 
   /** Number of underlying stream destruction requests. */
   destroyCalls = 0;
+
+  /** Resolves the body-consumption start notification once. */
+  private resolveNextStarted: (() => void) | undefined
+
+  /**
+   * Creates one controllable never-settling body.
+   */
+  constructor() {
+    this.nextStarted = new Promise((resolve) => {
+      this.resolveNextStarted = resolve
+    })
+  }
 
   /**
    * Returns this deliberately stalled iterator.
@@ -191,6 +206,8 @@ class StalledImmutableArtifactBody {
    * @returns Permanently pending result.
    */
   next(): Promise<never> {
+    this.resolveNextStarted?.()
+    this.resolveNextStarted = undefined
     return new Promise(() => undefined)
   }
 
@@ -324,6 +341,7 @@ function createTable(
  * @param bodyTimeoutMilliseconds - Optional focused body deadline.
  * @param requestTimeoutMilliseconds - Optional focused request deadline.
  * @param clock - Optional test-controlled trusted clock.
+ * @param lifecycleSignal - Optional one-way port lifecycle cancellation.
  * @returns Ready immutable object port.
  */
 function createPort(
@@ -333,6 +351,8 @@ function createPort(
   requestTimeoutMilliseconds = 1_000,
   clock: WorkspaceSearchMigrationImmutableArtifactClock =
     () => new Date(testNow),
+  lifecycleSignal: AbortSignal =
+    new AbortController().signal,
 ): WorkspaceSearchMigrationImmutableArtifactAwsPort {
   return createAwsWorkspaceSearchMigrationImmutableArtifactPort({
     configuration,
@@ -341,6 +361,7 @@ function createPort(
     maximumObjectBytes: 1_024,
     requestTimeoutMilliseconds,
     bodyTimeoutMilliseconds,
+    lifecycleSignal,
     clock,
     transport,
   })
@@ -1129,6 +1150,104 @@ describe('AWS immutable migration artifact core', () => {
     expect(body.destroyed).toBe(true)
   })
 
+  test('cancels a stalled body when the port lifecycle ends', async () => {
+    const configuration = createConfiguration()
+    const transport = new RecordingImmutableArtifactTransport()
+    const fixture = createArtifactFixture(configuration)
+    const body = new StalledImmutableArtifactBody()
+    const lifecycle = new AbortController()
+    transport.getHandler = async () =>
+      createValidGetOutput(configuration, fixture, body)
+    const port = createPort(
+      configuration,
+      transport,
+      1_000,
+      1_000,
+      () => new Date(testNow),
+      lifecycle.signal,
+    )
+    const read = port.readImmutableArtifact({
+      role: fixture.role,
+      objectKeyPrefix: testObjectKeyPrefix,
+      reference: fixture.reference,
+      metadata: testCallerMetadata,
+    })
+    await body.nextStarted
+
+    lifecycle.abort()
+
+    await captureFailure(
+      read,
+      'INVALID_STATE',
+    )
+    expect(body.returned).toBe(true)
+    expect(body.destroyed).toBe(true)
+    expect(body.returnCalls).toBe(1)
+    expect(body.destroyCalls).toBe(1)
+  })
+
+  test('does not start transport after the port lifecycle has ended', async () => {
+    const configuration = createConfiguration()
+    const transport = new RecordingImmutableArtifactTransport()
+    const fixture = createArtifactFixture(configuration)
+    const lifecycle = new AbortController()
+    lifecycle.abort()
+    const port = createPort(
+      configuration,
+      transport,
+      1_000,
+      1_000,
+      () => new Date(testNow),
+      lifecycle.signal,
+    )
+
+    await captureFailure(port.readImmutableArtifact({
+      role: fixture.role,
+      objectKeyPrefix: testObjectKeyPrefix,
+      reference: fixture.reference,
+      metadata: testCallerMetadata,
+    }), 'INVALID_STATE')
+
+    expect(transport.getCommands).toHaveLength(0)
+  })
+
+  test('does not traverse a native lifecycle signal prototype', async () => {
+    const configuration = createConfiguration()
+    const transport = new RecordingImmutableArtifactTransport()
+    const fixture = createArtifactFixture(configuration)
+    const lifecycle = new AbortController()
+    let prototypeTrapCalled = false
+    Object.setPrototypeOf(
+      lifecycle.signal,
+      new Proxy(AbortSignal.prototype, {
+        getPrototypeOf() {
+          prototypeTrapCalled = true
+          throw new Error('raw-secret lifecycle prototype trap')
+        },
+      }),
+    )
+    transport.getHandler = async () =>
+      createValidGetOutput(configuration, fixture)
+    const port = createPort(
+      configuration,
+      transport,
+      1_000,
+      1_000,
+      () => new Date(testNow),
+      lifecycle.signal,
+    )
+
+    const bytes = await port.readImmutableArtifact({
+      role: fixture.role,
+      objectKeyPrefix: testObjectKeyPrefix,
+      reference: fixture.reference,
+      metadata: testCallerMetadata,
+    })
+
+    expect(bytes).toEqual(fixture.bytes)
+    expect(prototypeTrapCalled).toBe(false)
+  })
+
   test('separates identical content by semantic role', async () => {
     const configuration = createConfiguration()
     const bytes = new Uint8Array([4, 5, 6])
@@ -1377,6 +1496,7 @@ describe('AWS immutable migration artifact core', () => {
         maximumObjectBytes: 1_024,
         requestTimeoutMilliseconds: 1_000,
         bodyTimeoutMilliseconds: 1_000,
+        lifecycleSignal: new AbortController().signal,
         clock: () => new Date(testNow),
         transport,
       }),

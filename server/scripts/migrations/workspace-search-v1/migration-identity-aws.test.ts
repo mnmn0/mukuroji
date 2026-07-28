@@ -191,20 +191,77 @@ type RecordedImmutableArtifactObject = {
  * Cancellable fake streaming body used to detect lifecycle cleanup.
  */
 class CancellableImmutableArtifactBody {
+  /** Resolves when body consumption first asks for a chunk. */
+  readonly nextStarted: Promise<void>
+
   /** Number of best-effort cancel calls. */
   cancelCount = 0
 
   /** Number of best-effort destroy calls. */
   destroyCount = 0
 
+  /** Whether the deliberately stalled read has been released. */
+  private released = false
+
+  /** Resolves the body-consumption start notification once. */
+  private resolveNextStarted: (() => void) | undefined
+
+  /** Resolves the current deliberately stalled iterator read. */
+  private resolvePendingRead:
+    ((result: IteratorResult<Uint8Array, undefined>) => void) | undefined
+
+  /**
+   * Creates one controllable streaming body.
+   */
+  constructor() {
+    this.nextStarted = new Promise((resolve) => {
+      this.resolveNextStarted = resolve
+    })
+  }
+
+  /**
+   * Returns this controlled body as its async iterator.
+   *
+   * @returns This async iterator.
+   */
+  [Symbol.asyncIterator](): CancellableImmutableArtifactBody {
+    return this
+  }
+
+  /**
+   * Starts one deliberately stalled body read.
+   *
+   * @returns Pending iterator result until cancellation or explicit release.
+   */
+  next(): Promise<IteratorResult<Uint8Array, undefined>> {
+    this.resolveNextStarted?.()
+    this.resolveNextStarted = undefined
+    if (this.released) {
+      return Promise.resolve({ done: true, value: undefined })
+    }
+    return new Promise((resolve) => {
+      this.resolvePendingRead = resolve
+    })
+  }
+
+  /** Releases the pending body read without wall-clock timing. */
+  releasePendingRead(): void {
+    this.released = true
+    const resolve = this.resolvePendingRead
+    this.resolvePendingRead = undefined
+    resolve?.({ done: true, value: undefined })
+  }
+
   /** Records one body cancellation. */
   cancel(): void {
     this.cancelCount += 1
+    this.releasePendingRead()
   }
 
   /** Records one body destruction. */
   destroy(): void {
     this.destroyCount += 1
+    this.releasePendingRead()
   }
 }
 
@@ -4358,6 +4415,82 @@ describe('Workspace Search migration AWS identity adapter', () => {
           await replacementMeasurement
           port.close()
         }
+      }
+    }
+  })
+
+  test('cancels active immutable bodies when the session lifecycle changes', async () => {
+    const lifecycles = ['close', 'remeasure'] as const
+
+    for (const lifecycle of lifecycles) {
+      const requested = createRequestedResources()
+      const transport = new RecordingIdentityAwsTransport()
+      seedValidMeasurementOutputs(transport, requested)
+      const clockAt = '2026-07-28T00:00:00.000Z'
+      const port = createAwsWorkspaceSearchMigrationIdentityPort(
+        requested,
+        () => transport,
+        () => new Date(clockAt),
+      )
+      const configuration = await port.measureConfiguration()
+      const configurationHash =
+        createWorkspaceSearchConfigurationHash(configuration)
+      const runId = `active-body-${lifecycle}`
+      const gateway = port.createPlanningArtifactGateway(runId)
+      const stored = await gateway.writePlanArtifact({
+        planSeal: createManagedPlanningArtifactEmptyPlanSeal(
+          runId,
+          configurationHash,
+        ),
+        operations: [],
+        retainUntil: '2026-08-27T00:01:00.000Z',
+      })
+      const body = new CancellableImmutableArtifactBody()
+      transport.immutableArtifactGetBody = body
+      const replay = gateway.replayPlanArtifact(stored)
+      let replaySettled = false
+      void replay.then(
+        () => {
+          replaySettled = true
+        },
+        () => {
+          replaySettled = true
+        },
+      )
+      await body.nextStarted
+      let replacementMeasurement:
+        Promise<WorkspaceSearchMigrationConfiguration> | undefined
+
+      if (lifecycle === 'close') {
+        port.close()
+      } else {
+        replacementMeasurement = port.measureConfiguration()
+      }
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        if (replaySettled) break
+        await Promise.resolve()
+      }
+      const settledBeforeManualRelease = replaySettled
+      const cancellationBeforeManualRelease = {
+        cancelCount: body.cancelCount,
+        destroyCount: body.destroyCount,
+      }
+      body.releasePendingRead()
+
+      await expect(replay).rejects.toMatchObject({
+        code: 'INVALID_STATE',
+        message:
+          'Workspace Search planning artifact storage stopped safely (INVALID_STATE).',
+      })
+      expect(settledBeforeManualRelease).toBe(true)
+      expect(cancellationBeforeManualRelease).toEqual({
+        cancelCount: 1,
+        destroyCount: 1,
+      })
+      expect(transport.getImmutableArtifactCommands).toHaveLength(1)
+      if (replacementMeasurement !== undefined) {
+        await replacementMeasurement
+        port.close()
       }
     }
   })

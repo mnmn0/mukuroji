@@ -111,6 +111,8 @@ export type CreateWorkspaceSearchMigrationImmutableArtifactAwsPortInput = {
   readonly requestTimeoutMilliseconds: number
   /** Finite deadline for consuming one returned GetObject body. */
   readonly bodyTimeoutMilliseconds: number
+  /** One-way signal that invalidates every request and body owned by this port. */
+  readonly lifecycleSignal: AbortSignal
   /** Trusted adapter clock used to prove retention headroom. */
   readonly clock: WorkspaceSearchMigrationImmutableArtifactClock
   /** Narrow S3 transport sharing the measured credential session. */
@@ -282,6 +284,8 @@ type PreparedImmutableArtifactPortInput = {
   readonly requestTimeoutMilliseconds: number
   /** Body-consumption timeout. */
   readonly bodyTimeoutMilliseconds: number
+  /** One-way lifecycle cancellation shared by requests and body reads. */
+  readonly lifecycleSignal: AbortSignal
   /** Detached trusted clock invocation. */
   readonly clock: WorkspaceSearchMigrationImmutableArtifactClock
   /** Detached narrow S3 operations. */
@@ -405,6 +409,9 @@ class AwsWorkspaceSearchMigrationImmutableArtifactPort
   /** Finite body-consumption deadline. */
   private readonly bodyTimeoutMilliseconds: number
 
+  /** One-way lifecycle cancellation for every request and body read. */
+  private readonly lifecycleSignal: AbortSignal
+
   /** Detached trusted clock invocation. */
   private readonly clock: WorkspaceSearchMigrationImmutableArtifactClock
 
@@ -423,6 +430,7 @@ class AwsWorkspaceSearchMigrationImmutableArtifactPort
     this.requestTimeoutMilliseconds =
       input.requestTimeoutMilliseconds
     this.bodyTimeoutMilliseconds = input.bodyTimeoutMilliseconds
+    this.lifecycleSignal = input.lifecycleSignal
     this.clock = input.clock
     this.transport = input.transport
   }
@@ -480,8 +488,15 @@ class AwsWorkspaceSearchMigrationImmutableArtifactPort
           abortSignal,
         ),
         this.requestTimeoutMilliseconds,
+        this.lifecycleSignal,
       )
     } catch (error: unknown) {
+      if (
+        !nodeUtilTypes.isProxy(error) &&
+        error instanceof ImmutableArtifactFailure
+      ) {
+        throw error
+      }
       if (isImmutableArtifactPreconditionFailure(error)) {
         const existing =
           await this.reconcileImmutableArtifact(artifact)
@@ -551,8 +566,15 @@ class AwsWorkspaceSearchMigrationImmutableArtifactPort
             abortSignal,
           ),
           this.requestTimeoutMilliseconds,
+          this.lifecycleSignal,
         )
       } catch (error: unknown) {
+        if (
+          !nodeUtilTypes.isProxy(error) &&
+          error instanceof ImmutableArtifactFailure
+        ) {
+          throw error
+        }
         if (isImmutableArtifactRetryableFailure(error)) {
           return failImmutableArtifact(
             'TRANSIENT_INFRASTRUCTURE_FAILURE',
@@ -580,6 +602,7 @@ class AwsWorkspaceSearchMigrationImmutableArtifactPort
         prepared.reference.byteLength,
         this.maximumObjectBytes,
         this.bodyTimeoutMilliseconds,
+        this.lifecycleSignal,
       )
       if (
         digestImmutableArtifactBytes(bytes) !==
@@ -620,8 +643,15 @@ class AwsWorkspaceSearchMigrationImmutableArtifactPort
           abortSignal,
         ),
         this.requestTimeoutMilliseconds,
+        this.lifecycleSignal,
       )
     } catch (error: unknown) {
+      if (
+        !nodeUtilTypes.isProxy(error) &&
+        error instanceof ImmutableArtifactFailure
+      ) {
+        throw error
+      }
       if (isImmutableArtifactNotFound(error)) return undefined
       if (
         !nodeUtilTypes.isProxy(error) &&
@@ -679,6 +709,7 @@ function prepareImmutableArtifactPortInput(
     'clock',
     'configuration',
     'configurationHash',
+    'lifecycleSignal',
     'maximumObjectBytes',
     'requestTimeoutMilliseconds',
     'transport',
@@ -726,6 +757,13 @@ function prepareImmutableArtifactPortInput(
     ),
     maximumTimeoutMilliseconds,
   )
+  const lifecycleSignal = snapshotImmutableArtifactLifecycleSignal(
+    readRequiredOwnData(
+      record,
+      'lifecycleSignal',
+      'INVALID_ARGUMENT',
+    ),
+  )
   const clock = snapshotImmutableArtifactClock(
     readRequiredOwnData(record, 'clock', 'INVALID_ARGUMENT'),
   )
@@ -738,6 +776,7 @@ function prepareImmutableArtifactPortInput(
     maximumObjectBytes,
     requestTimeoutMilliseconds,
     bodyTimeoutMilliseconds,
+    lifecycleSignal,
     clock,
     transport,
   }
@@ -1189,6 +1228,45 @@ function snapshotImmutableArtifactClock(
     return failImmutableArtifact('INVALID_ARGUMENT')
   }
   return () => Reflect.apply(value, undefined, [])
+}
+
+/**
+ * Validates one native non-proxy lifecycle signal.
+ *
+ * @param value - Candidate one-way port lifecycle signal.
+ * @returns Native AbortSignal with intact internal slots.
+ */
+function snapshotImmutableArtifactLifecycleSignal(
+  value: unknown,
+): AbortSignal {
+  if (!isNativeImmutableArtifactLifecycleSignal(value)) {
+    return failImmutableArtifact('INVALID_ARGUMENT')
+  }
+  return value
+}
+
+/**
+ * Recognizes AbortSignal internal slots without prototype traversal.
+ *
+ * @param value - Candidate lifecycle signal.
+ * @returns Whether native AbortSignal intrinsics accept the value.
+ */
+function isNativeImmutableArtifactLifecycleSignal(
+  value: unknown,
+): value is AbortSignal {
+  if (
+    (typeof value !== 'object' && typeof value !== 'function') ||
+    value === null ||
+    nodeUtilTypes.isProxy(value)
+  ) {
+    return false
+  }
+  try {
+    readImmutableArtifactLifecycleSignalAborted(value)
+  } catch {
+    return false
+  }
+  return true
 }
 
 /**
@@ -1893,6 +1971,7 @@ function metadataMapsEqual(
  * @param expectedLength - Exact expected byte length.
  * @param maximumBytes - Port object ceiling.
  * @param timeoutMilliseconds - Body deadline.
+ * @param lifecycleSignal - One-way port lifecycle cancellation.
  * @returns Detached exact bytes.
  */
 async function readBoundedImmutableArtifactBody(
@@ -1900,9 +1979,13 @@ async function readBoundedImmutableArtifactBody(
   expectedLength: number,
   maximumBytes: number,
   timeoutMilliseconds: number,
+  lifecycleSignal: AbortSignal,
 ): Promise<Uint8Array> {
   let iterator: ImmutableArtifactAsyncIterator | undefined
   try {
+    if (readImmutableArtifactLifecycleSignalAborted(lifecycleSignal)) {
+      throw new ImmutableArtifactFailure('INVALID_STATE')
+    }
     if (
       !Number.isSafeInteger(expectedLength) ||
       expectedLength <= 0 ||
@@ -1934,6 +2017,7 @@ async function readBoundedImmutableArtifactBody(
         maximumBytes,
       ),
       timeoutMilliseconds,
+      lifecycleSignal,
     )
   } catch (error: unknown) {
     cancelImmutableArtifactBody(
@@ -2111,12 +2195,17 @@ function invokeCancellationMethod(
  *
  * @param operation - Operation started immediately with its deadline signal.
  * @param timeoutMilliseconds - Validated finite deadline.
+ * @param lifecycleSignal - One-way port lifecycle cancellation.
  * @returns Operation result before the deadline.
  */
 async function runWithImmutableArtifactDeadline<Result>(
   operation: (abortSignal: AbortSignal) => Promise<Result>,
   timeoutMilliseconds: number,
+  lifecycleSignal: AbortSignal,
 ): Promise<Result> {
+  if (readImmutableArtifactLifecycleSignalAborted(lifecycleSignal)) {
+    throw new ImmutableArtifactFailure('INVALID_STATE')
+  }
   const abortController = new AbortController()
   let timeout: ReturnType<typeof setTimeout> | undefined
   const timeoutResult = new Promise<Result>((_resolve, reject) => {
@@ -2125,16 +2214,94 @@ async function runWithImmutableArtifactDeadline<Result>(
       abortController.abort()
     }, timeoutMilliseconds)
   })
+  let lifecycleAbortHandler: (() => void) | undefined
+  let lifecycleAborted = false
+  const lifecycleAbortResult = new Promise<Result>((_resolve, reject) => {
+    lifecycleAbortHandler = () => {
+      if (lifecycleAborted) return
+      lifecycleAborted = true
+      reject(new ImmutableArtifactFailure('INVALID_STATE'))
+      abortController.abort()
+    }
+    addImmutableArtifactLifecycleAbortListener(
+      lifecycleSignal,
+      lifecycleAbortHandler,
+    )
+    if (readImmutableArtifactLifecycleSignalAborted(lifecycleSignal)) {
+      lifecycleAbortHandler()
+    }
+  })
   try {
     return await Promise.race([
       Promise.resolve().then(
         () => operation(abortController.signal),
       ),
       timeoutResult,
+      lifecycleAbortResult,
     ])
   } finally {
     if (timeout !== undefined) clearTimeout(timeout)
+    if (lifecycleAbortHandler !== undefined) {
+      removeImmutableArtifactLifecycleAbortListener(
+        lifecycleSignal,
+        lifecycleAbortHandler,
+      )
+    }
   }
+}
+
+/**
+ * Reads native AbortSignal state without invoking caller-owned accessors.
+ *
+ * @param signal - Validated native lifecycle signal.
+ * @returns Whether the signal has permanently aborted.
+ */
+function readImmutableArtifactLifecycleSignalAborted(
+  signal: object | Function,
+): boolean {
+  const descriptor = Reflect.getOwnPropertyDescriptor(
+    AbortSignal.prototype,
+    'aborted',
+  )
+  const getter = descriptor?.get
+  if (getter === undefined) {
+    throw new Error('AbortSignal aborted getter is unavailable.')
+  }
+  return Reflect.apply(getter, signal, []) === true
+}
+
+/**
+ * Registers one abort listener through the native EventTarget method.
+ *
+ * @param signal - Validated native lifecycle signal.
+ * @param listener - Fixed lifecycle callback.
+ */
+function addImmutableArtifactLifecycleAbortListener(
+  signal: AbortSignal,
+  listener: () => void,
+): void {
+  Reflect.apply(
+    EventTarget.prototype.addEventListener,
+    signal,
+    ['abort', listener, { once: true }],
+  )
+}
+
+/**
+ * Removes one abort listener through the native EventTarget method.
+ *
+ * @param signal - Validated native lifecycle signal.
+ * @param listener - Previously registered lifecycle callback.
+ */
+function removeImmutableArtifactLifecycleAbortListener(
+  signal: AbortSignal,
+  listener: () => void,
+): void {
+  Reflect.apply(
+    EventTarget.prototype.removeEventListener,
+    signal,
+    ['abort', listener],
+  )
 }
 
 /**

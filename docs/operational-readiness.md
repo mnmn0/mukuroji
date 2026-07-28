@@ -509,7 +509,8 @@ upload I/Oを開始せず、replay時も全segment referenceを検証してか�
 このgatewayはAWS SDKに依存せず、clientやruntime entrypointを生成しません。Concrete managed AWS
 sessionが同じpinned S3 client、measured configuration、generation上へgatewayをcompositionし、公開factoryは
 `runId`だけを受け取ります。`close()`または再measurementでstaleになったgatewayは、top-level operationと
-各`Put` / `Head` / `Get`の境界でfail-closedに停止します。ただしS3へ到達済みのCOMPLIANCE objectは削除せず、
+各`Put` / `Head` / `Get`の境界でfail-closedに停止し、消費中の`GetObject` bodyも直ちにcancelします。
+ただしS3へ到達済みのCOMPLIANCE objectは削除せず、
 non-authoritativeなretained orphanとして残る場合があります。`List`、latest version lookup、deleteは使わず、
 artifact/rootだけではplanning/apply authorityになりません。
 
