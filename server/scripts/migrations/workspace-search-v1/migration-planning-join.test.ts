@@ -18,6 +18,7 @@ import {
   WorkspaceSearchMigrationFailure,
   workspaceSearchMigrationSourceNames,
   WORKSPACE_SEARCH_MIGRATION_ID,
+  WORKSPACE_SEARCH_MIGRATION_PAGE_SIZE,
   WORKSPACE_SEARCH_MIGRATION_VERSION,
 } from './migration-contract'
 import {
@@ -431,6 +432,41 @@ describe('Workspace Search migration planning evidence join', () => {
         'INVALID_MAINTENANCE_EVIDENCE',
       )
 
+      const sameFenceOwnerSwap = createJoinFixture()
+      const swappedOwner = {
+        ...sourceAuthority,
+        ownerId: 'same-fence-swapped-owner',
+        maintenanceEvidencePointerRevision: 24,
+        maintenanceEvidenceReceiptDigest: digest('same-fence-swap'),
+      } satisfies WorkspaceSearchMigrationPlanningAuthorityBinding
+      const swappedChain = createSourceChain(
+        sameFenceOwnerSwap.configuration,
+        sameFenceOwnerSwap.configurationHash,
+        'project-directory',
+        [
+          [sameFenceOwnerSwap.matchedSourceItem],
+          [
+            sameFenceOwnerSwap.absentSourceItem,
+            sameFenceOwnerSwap.ignoredSourceItem,
+          ],
+        ],
+        true,
+        3,
+        [sourceAuthority, swappedOwner],
+      )
+      Reflect.set(
+        sameFenceOwnerSwap.input.sourcePages,
+        'project-directory',
+        swappedChain.materials,
+      )
+      expectJoinFailure(
+        () =>
+          joinWorkspaceSearchMigrationPlanningEvidence(
+            sameFenceOwnerSwap.input,
+          ),
+        'INVALID_MAINTENANCE_EVIDENCE',
+      )
+
       const revisionConflict = createJoinFixture()
       const conflictingTargetAuthority = {
         ...targetAuthority,
@@ -722,18 +758,18 @@ describe('Workspace Search migration planning evidence join', () => {
   )
 
   test(
-    'rejects conflicting ownership evidence, duplicate targets, and ambiguous directory orphans',
+    'rejects corrupted ownership evidence, duplicate targets, and ambiguous directory orphans',
     () => {
-      const sourceCollision = createJoinFixture()
+      const corruptedSourceBinding = createJoinFixture()
       const workItem = createWorkItemSourceItem('collision')
       const workItemChain = createSourceChain(
-        sourceCollision.configuration,
-        sourceCollision.configurationHash,
+        corruptedSourceBinding.configuration,
+        corruptedSourceBinding.configurationHash,
         'work-items',
         [[workItem]],
       )
       const projectMaterial =
-        sourceCollision.input.sourcePages['project-directory'][0]
+        corruptedSourceBinding.input.sourcePages['project-directory'][0]
       const projectBinding = projectMaterial?.page.sourceBindings[0]
       const workItemBinding =
         workItemChain.materials[0]?.page.sourceBindings[0]
@@ -746,14 +782,14 @@ describe('Workspace Search migration planning evidence join', () => {
         projectBinding.targetKeyDigest,
       )
       Reflect.set(
-        sourceCollision.input.sourcePages,
+        corruptedSourceBinding.input.sourcePages,
         'work-items',
         workItemChain.materials,
       )
       expectJoinFailure(
         () =>
           joinWorkspaceSearchMigrationPlanningEvidence(
-            sourceCollision.input,
+            corruptedSourceBinding.input,
           ),
         'INVALID_STATE',
       )
@@ -776,13 +812,14 @@ describe('Workspace Search migration planning evidence join', () => {
         joinWorkspaceSearchMigrationPlanningEvidence(duplicateTarget.input)
       )
 
-      const ignoredCollision = createJoinFixture()
-      const ignoredMaterial = ignoredCollision.input.targetPages[0]
+      const corruptedIgnoredTargetRow = createJoinFixture()
+      const ignoredMaterial =
+        corruptedIgnoredTargetRow.input.targetPages[0]
       const ignoredRow = ignoredMaterial?.page.targetRows.find(
         ({ classification }) => classification === 'ignored',
       )
       const expectedBinding =
-        ignoredCollision.input.sourcePages['project-directory'][0]
+        corruptedIgnoredTargetRow.input.sourcePages['project-directory'][0]
           ?.page.sourceBindings[0]
       if (!ignoredRow || !expectedBinding) {
         throw new Error('Expected ignored and mapped fixture evidence.')
@@ -795,7 +832,7 @@ describe('Workspace Search migration planning evidence join', () => {
       expectJoinFailure(
         () =>
           joinWorkspaceSearchMigrationPlanningEvidence(
-            ignoredCollision.input,
+            corruptedIgnoredTargetRow.input,
           ),
         'INVALID_STATE',
       )
@@ -1213,7 +1250,7 @@ describe('Workspace Search migration planning evidence join', () => {
         oversizedEvidenceMaterial.page,
         'sourceRows',
         Array.from(
-          { length: 101 },
+          { length: WORKSPACE_SEARCH_MIGRATION_PAGE_SIZE + 1 },
           () => oversizedEvidenceRow,
         ),
       )
@@ -1371,16 +1408,23 @@ describe('Workspace Search migration planning evidence join', () => {
       if (!sourceMaterial || !targetMaterial) {
         throw new Error('Expected complete planning material.')
       }
+      const sourceItem = sourceMaterial.items[0]
+      const targetItem = targetMaterial.items[0]
+      const sourceRow = sourceMaterial.page.sourceRows[0]
+      const targetRow = targetMaterial.page.targetRows[0]
+      if (!sourceItem || !targetItem || !sourceRow || !targetRow) {
+        throw new Error('Expected complete detach mutation targets.')
+      }
       Reflect.set(detached.configuration, 'account', 'mutated-account')
-      Reflect.set(sourceMaterial.items[0] ?? {}, 'mutated', { S: 'source' })
-      Reflect.set(targetMaterial.items[0] ?? {}, 'mutated', { S: 'target' })
+      Reflect.set(sourceItem, 'mutated', { S: 'source' })
+      Reflect.set(targetItem, 'mutated', { S: 'target' })
       Reflect.set(
-        sourceMaterial.page.sourceRows[0] ?? {},
+        sourceRow,
         'sourceItemDigest',
         digest('mutated-source-evidence'),
       )
       Reflect.set(
-        targetMaterial.page.targetRows[0] ?? {},
+        targetRow,
         'targetItemDigest',
         digest('mutated-target-evidence'),
       )

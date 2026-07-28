@@ -1748,7 +1748,7 @@ function clonePlanningEvidenceStringRecords(
 function clonePlanningEvidenceAuthority(
   value: unknown,
   budget: PlanningJoinEvidenceCloneBudget,
-) {
+): WorkspaceSearchMigrationPlanningAuthorityBinding {
   requireExactOwnEnumerableKeys(value, [
     'fenceToken',
     'maintenanceEvidencePointerRevision',
@@ -1791,7 +1791,7 @@ function clonePlanningEvidenceAuthority(
 function clonePlanningSourceEvidenceCheckpoint(
   value: unknown,
   budget: PlanningJoinEvidenceCloneBudget,
-) {
+): WorkspaceSearchMigrationSourceEvidencePage['checkpoint'] {
   const record = requireObjectRecord(value)
   const hasCursor = Object.prototype.hasOwnProperty.call(record, 'cursor')
   requireExactOwnEnumerableKeys(
@@ -1847,7 +1847,7 @@ function clonePlanningSourceEvidenceCheckpoint(
 function clonePlanningTargetEvidenceCheckpoint(
   value: unknown,
   budget: PlanningJoinEvidenceCloneBudget,
-) {
+): WorkspaceSearchMigrationTargetEvidencePage['checkpoint'] {
   const record = requireObjectRecord(value)
   const hasCursor = Object.prototype.hasOwnProperty.call(record, 'cursor')
   requireExactOwnEnumerableKeys(
@@ -1925,7 +1925,7 @@ function clonePlanningEvidenceCursor(value: unknown): DynamoAttributeMap {
 function clonePlanningSourceEvidenceAggregate(
   value: unknown,
   budget: PlanningJoinEvidenceCloneBudget,
-) {
+): WorkspaceSearchMigrationSourceEvidencePage['checkpoint']['aggregate'] {
   requireExactOwnEnumerableKeys(value, [
     'contentDigest',
     'deleted',
@@ -1980,7 +1980,7 @@ function clonePlanningSourceEvidenceAggregate(
 function clonePlanningTargetEvidenceAggregate(
   value: unknown,
   budget: PlanningJoinEvidenceCloneBudget,
-) {
+): WorkspaceSearchMigrationTargetEvidencePage['checkpoint']['aggregate'] {
   requireExactOwnEnumerableKeys(value, [
     'contentDigest',
     'ignored',
@@ -2027,7 +2027,7 @@ function clonePlanningTargetEvidenceAggregate(
 function clonePlanningEvidenceDigestState(
   value: unknown,
   budget: PlanningJoinEvidenceCloneBudget,
-) {
+): WorkspaceSearchMigrationSourceEvidencePage['checkpoint']['keyDigestState'] {
   requireExactOwnEnumerableKeys(value, ['count', 'sumHex', 'xorHex'])
   return {
     count: requireNonnegativeSafeIntegerScalar(
@@ -3610,6 +3610,7 @@ function createJoinedCandidates(
     WorkspaceSearchMigrationPlanCandidate
   >()
   for (const source of workspaceSearchMigrationSourceNames) {
+    let mappedForSource = 0
     for (const sourceItem of sources[source].items) {
       const absentCandidate =
         createWorkspaceSearchMigrationSourceCandidate({
@@ -3656,12 +3657,13 @@ function createJoinedCandidates(
         candidate = existingCandidate
       }
       sourceCandidates.set(targetKeyDigest, candidate)
+      if (candidate.operation.sourceCondition.source === source) {
+        mappedForSource += 1
+      }
     }
     if (
-      [...sourceCandidates.values()].filter(
-        ({ operation }) =>
-          operation.sourceCondition.source === source,
-      ).length !== sources[source].progress.checkpoint.aggregate.mapped
+      mappedForSource !==
+        sources[source].progress.checkpoint.aggregate.mapped
     ) {
       return failPlanningJoin(
         'INVALID_STATE',
