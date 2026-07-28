@@ -7,7 +7,7 @@ import {
 } from './migration-contract'
 import {
   createWorkspaceSearchMigrationPlanningProvenanceManifestHead,
-  createWorkspaceSearchMigrationPlanningProvenanceManifestPages,
+  createWorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder,
   createWorkspaceSearchMigrationPlanningProvenanceSegments,
   parseWorkspaceSearchMigrationPlanningProvenanceManifestHead,
   parseWorkspaceSearchMigrationPlanningProvenanceManifestPage,
@@ -83,17 +83,14 @@ describe('Workspace Search planning provenance manifest', () => {
       ).toBe(6)
 
       const storedSegments = storeSegments(segments)
-      const pages =
-        createWorkspaceSearchMigrationPlanningProvenanceManifestPages({
-          artifact,
-          objectKeyPrefix,
-          storedSegments,
-          maximumManifestPageBytes: 8_192,
-        })
+      const { pages, storedPages } = createStoredManifestPages(
+        artifact,
+        storedSegments,
+        32_768,
+      )
       expect(pages.length).toBeGreaterThan(0)
-      expect(pages.every(({ byteLength }) => byteLength <= 8_192))
+      expect(pages.every(({ byteLength }) => byteLength <= 32_768))
         .toBe(true)
-      const storedPages = storeManifestPages(pages)
       const head =
         createWorkspaceSearchMigrationPlanningProvenanceManifestHead({
           artifact,
@@ -140,6 +137,149 @@ describe('Workspace Search planning provenance manifest', () => {
           })),
         })
       expect(replayed).toEqual(artifact)
+    },
+  )
+
+  test(
+    'discovers every exact manifest page from the compact head predecessor chain',
+    () => {
+      const artifact = createArtifact(1_500)
+      const segments =
+        createWorkspaceSearchMigrationPlanningProvenanceSegments({
+          artifact,
+          maximumSegmentBytes: 8_192,
+          objectKeyPrefix,
+        })
+      const storedSegments = storeSegments(segments)
+      const locators = storedSegments.map(({ encoded, reference }) => ({
+        role: encoded.segment.role,
+        segmentIndex: encoded.segment.segmentIndex,
+        segmentCount: encoded.segment.segmentCount,
+        entryStartIndex: encoded.segment.entryStartIndex,
+        entryCount: encoded.segment.entryCount,
+        segmentDigest: encoded.segment.segmentDigest,
+        reference,
+      }))
+      const summary = segments[0]?.segment.summary
+      if (summary === undefined) {
+        throw new Error('Expected provenance segments.')
+      }
+      const singleLocatorPageBytes = Math.max(
+        ...locators.map((locator) =>
+          canonicalByteLength(
+            createManifestPageSizeCandidate(summary, [locator]),
+          )
+        ),
+      )
+      const { storedPages } = createStoredManifestPages(
+        artifact,
+        storedSegments,
+        singleLocatorPageBytes,
+      )
+      expect(storedPages.length).toBeGreaterThan(1)
+      const head =
+        createWorkspaceSearchMigrationPlanningProvenanceManifestHead({
+          artifact,
+          objectKeyPrefix,
+          storedManifestPages: storedPages,
+        })
+
+      const discoveredReversed:
+        WorkspaceSearchMigrationPlanningProvenanceStoredManifestPage[] = []
+      let cursor:
+        WorkspaceSearchMigrationPlanningProvenanceManifestReference | null =
+          head.terminalManifestPageLocator.reference
+      for (
+        let index = 0;
+        index < head.manifestPageCount;
+        index += 1
+      ) {
+        if (cursor === null) {
+          throw new Error('Manifest predecessor chain ended early.')
+        }
+        const stored = storedPages.find(({ reference }) =>
+          reference.objectKey === cursor?.objectKey &&
+          reference.versionId === cursor?.versionId
+        )
+        if (stored === undefined) {
+          throw new Error('Exact predecessor page was not found.')
+        }
+        discoveredReversed.push(stored)
+        const page =
+          parseWorkspaceSearchMigrationPlanningProvenanceManifestPage(
+            stored.encoded.bytes,
+          )
+        cursor = page.previousPageReference
+      }
+      expect(cursor).toBeNull()
+      const discovered = discoveredReversed.reverse()
+      expect(discovered).toEqual([...storedPages])
+      expect(
+        replayWorkspaceSearchMigrationPlanningProvenanceManifest({
+          head,
+          manifestPages: discovered.map(({ encoded, reference }) => ({
+            reference,
+            bytes: encoded.bytes,
+          })),
+          segments: storedSegments.map(({ encoded, reference }) => ({
+            reference,
+            bytes: encoded.bytes,
+          })),
+        }),
+      ).toEqual(artifact)
+
+      const second = storedPages[1]
+      if (second === undefined) {
+        throw new Error('Expected a predecessor-linked second page.')
+      }
+      const tamperedPage = structuredClone(second.encoded.page)
+      const previousPageReference = tamperedPage.previousPageReference
+      if (previousPageReference === null) {
+        throw new Error('Expected a non-null predecessor reference.')
+      }
+      Reflect.set(tamperedPage, 'previousPageReference', {
+        ...previousPageReference,
+        versionId: 'substituted-predecessor-version',
+      })
+      Reflect.deleteProperty(tamperedPage, 'pageDigest')
+      Reflect.set(
+        tamperedPage,
+        'pageDigest',
+        createMigrationDigest(tamperedPage),
+      )
+      const tamperedBytes = encodeCanonicalCandidate(tamperedPage)
+      const parsedTamperedPage =
+        parseWorkspaceSearchMigrationPlanningProvenanceManifestPage(
+          tamperedBytes,
+        )
+      const tamperedContentDigest =
+        createMigrationDigest(parsedTamperedPage)
+      const tamperedStoredPage:
+        WorkspaceSearchMigrationPlanningProvenanceStoredManifestPage = {
+          encoded: {
+            page: parsedTamperedPage,
+            bytes: tamperedBytes,
+            contentDigest: tamperedContentDigest,
+            byteLength: tamperedBytes.byteLength,
+          },
+          reference: createReference(
+            'manifest-pages',
+            1,
+            tamperedContentDigest,
+            tamperedBytes.byteLength,
+          ),
+        }
+      expectManifestFailure(() =>
+        createWorkspaceSearchMigrationPlanningProvenanceManifestHead({
+          artifact,
+          objectKeyPrefix,
+          storedManifestPages: [
+            storedPages[0],
+            tamperedStoredPage,
+            ...storedPages.slice(2),
+          ].filter(isStoredManifestPage),
+        })
+      )
     },
   )
 
@@ -194,14 +334,14 @@ describe('Workspace Search planning provenance manifest', () => {
       expect(storedSegments.length).toBeGreaterThan(1)
 
       expectManifestFailure(() =>
-        createWorkspaceSearchMigrationPlanningProvenanceManifestPages({
+        createWorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder({
           artifact,
           objectKeyPrefix,
           storedSegments: storedSegments.slice(1),
         })
       )
       expectManifestFailure(() =>
-        createWorkspaceSearchMigrationPlanningProvenanceManifestPages({
+        createWorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder({
           artifact,
           objectKeyPrefix,
           storedSegments: [
@@ -222,9 +362,9 @@ describe('Workspace Search planning provenance manifest', () => {
             objectKey:
               `${objectKeyPrefix}/manifest-pages/${first.reference.contentDigest}.artifact`,
           },
-        }
+      }
       expectManifestFailure(() =>
-        createWorkspaceSearchMigrationPlanningProvenanceManifestPages({
+        createWorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder({
           artifact,
           objectKeyPrefix,
           storedSegments: [
@@ -240,13 +380,10 @@ describe('Workspace Search planning provenance manifest', () => {
           versionId: 'substituted-version',
         },
       }
-      const manifestPages =
-        createWorkspaceSearchMigrationPlanningProvenanceManifestPages({
-          artifact,
-          objectKeyPrefix,
-          storedSegments,
-        })
-      const storedPages = storeManifestPages(manifestPages)
+      const { storedPages } = createStoredManifestPages(
+        artifact,
+        storedSegments,
+      )
       const firstPage = storedPages[0]
       if (firstPage === undefined) {
         throw new Error('Expected one stored manifest page.')
@@ -300,7 +437,7 @@ describe('Workspace Search planning provenance manifest', () => {
         },
       }
       expectManifestFailure(() =>
-        createWorkspaceSearchMigrationPlanningProvenanceManifestPages({
+        createWorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder({
           artifact,
           objectKeyPrefix,
           storedSegments: [wrongLength, ...storedSegments.slice(1)],
@@ -553,7 +690,7 @@ describe('Workspace Search planning provenance manifest', () => {
     }
     Reflect.deleteProperty(missingPagePrefixInput, 'objectKeyPrefix')
     expectManifestFailure(() =>
-      createWorkspaceSearchMigrationPlanningProvenanceManifestPages(
+      createWorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder(
         missingPagePrefixInput,
       )
     )
@@ -568,7 +705,7 @@ describe('Workspace Search planning provenance manifest', () => {
       'storedSegments',
     )
     expectManifestFailure(() =>
-      createWorkspaceSearchMigrationPlanningProvenanceManifestPages(
+      createWorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder(
         missingStoredSegmentsInput,
       )
     )
@@ -717,7 +854,7 @@ describe('Workspace Search planning provenance manifest', () => {
           objectKeyPrefix,
         })
       expectManifestFailure(() =>
-        createWorkspaceSearchMigrationPlanningProvenanceManifestPages({
+        createWorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder({
           artifact: wrongTable,
           objectKeyPrefix,
           storedSegments: storeSegments(segments),
@@ -820,28 +957,15 @@ describe('Workspace Search planning provenance manifest', () => {
       expect(adjacentPairMinimum).toBeGreaterThan(
         maximumSingleLocatorPageBytes,
       )
-      const pages =
-        createWorkspaceSearchMigrationPlanningProvenanceManifestPages({
-          artifact,
-          maximumManifestPageBytes: maximumSingleLocatorPageBytes,
-          objectKeyPrefix,
-          storedSegments,
-        })
+      const { pages, storedPages } = createStoredManifestPages(
+        artifact,
+        storedSegments,
+        maximumSingleLocatorPageBytes,
+        maximumVersionId,
+      )
       expect(pages).toHaveLength(
         WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_MANIFEST_PAGES,
       )
-      const storedPages = pages.map((encoded, index) => ({
-        encoded,
-        reference: {
-          ...createReference(
-            'manifest-pages',
-            index,
-            encoded.contentDigest,
-            encoded.byteLength,
-          ),
-          versionId: maximumVersionId,
-        },
-      }))
       const head =
         createWorkspaceSearchMigrationPlanningProvenanceManifestHead({
           artifact,
@@ -1238,24 +1362,64 @@ function storeSegments(
 }
 
 /**
- * Creates exact rich immutable references for encoded manifest pages.
+ * Sequentially builds and stores predecessor-linked manifest pages.
  *
- * @param encoded - Ordered locally encoded manifest pages.
- * @returns Complete stored manifest-page envelopes.
+ * @param artifact - Strict provenance artifact owning every page.
+ * @param storedSegments - Complete exact stored segment set.
+ * @param maximumManifestPageBytes - Optional focused page ceiling.
+ * @param versionId - Optional version ID used by every stored-page fixture.
+ * @returns Ordered encoded pages and exact stored envelopes.
  */
-function storeManifestPages(
-  encoded:
-    readonly WorkspaceSearchMigrationPlanningProvenanceEncodedManifestPage[],
-): readonly WorkspaceSearchMigrationPlanningProvenanceStoredManifestPage[] {
-  return encoded.map((page, index) => ({
-    encoded: page,
-    reference: createReference(
+function createStoredManifestPages(
+  artifact: WorkspaceSearchMigrationPlanningProvenanceArtifact,
+  storedSegments:
+    readonly WorkspaceSearchMigrationPlanningProvenanceStoredSegment[],
+  maximumManifestPageBytes?: number,
+  versionId?: string,
+): {
+  /** Ordered locally encoded predecessor-linked pages. */
+  readonly pages:
+    readonly WorkspaceSearchMigrationPlanningProvenanceEncodedManifestPage[]
+  /** Ordered exact stored manifest-page envelopes. */
+  readonly storedPages:
+    readonly WorkspaceSearchMigrationPlanningProvenanceStoredManifestPage[]
+} {
+  const builder =
+    createWorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder({
+      artifact,
+      objectKeyPrefix,
+      storedSegments,
+      ...(maximumManifestPageBytes === undefined
+        ? {}
+        : { maximumManifestPageBytes }),
+    })
+  const pages:
+    WorkspaceSearchMigrationPlanningProvenanceEncodedManifestPage[] = []
+  const storedPages:
+    WorkspaceSearchMigrationPlanningProvenanceStoredManifestPage[] = []
+  let previous:
+    WorkspaceSearchMigrationPlanningProvenanceStoredManifestPage | null =
+      null
+  for (let index = 0; index < builder.pageCount; index += 1) {
+    const encoded = builder.createNextPage(previous)
+    const reference = createReference(
       'manifest-pages',
       index,
-      page.contentDigest,
-      page.byteLength,
-    ),
-  }))
+      encoded.contentDigest,
+      encoded.byteLength,
+    )
+    const stored: WorkspaceSearchMigrationPlanningProvenanceStoredManifestPage =
+      {
+        encoded,
+        reference: versionId === undefined
+          ? reference
+          : { ...reference, versionId },
+      }
+    pages.push(encoded)
+    storedPages.push(stored)
+    previous = stored
+  }
+  return { pages, storedPages }
 }
 
 /**
@@ -1284,12 +1448,9 @@ function createStoredBundle(): {
       objectKeyPrefix,
     }),
   )
-  const storedPages = storeManifestPages(
-    createWorkspaceSearchMigrationPlanningProvenanceManifestPages({
-      artifact,
-      objectKeyPrefix,
-      storedSegments,
-    }),
+  const { storedPages } = createStoredManifestPages(
+    artifact,
+    storedSegments,
   )
   return {
     artifact,
@@ -1402,6 +1563,14 @@ function createManifestPageSizeCandidate(
       WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_MANIFEST_PAGES,
     segmentStartIndex: first.segmentIndex,
     segmentCount: locators.length,
+    previousPageReference: {
+      objectKey:
+        `${objectKeyPrefix}/manifest-pages/${'0'.repeat(64)}.artifact`,
+      versionId: '\0'.repeat(2_048),
+      contentDigest: '0'.repeat(64),
+      byteLength: Number.MAX_SAFE_INTEGER,
+      retainUntil: '+275760-09-13T00:00:00.000Z',
+    },
     segments: locators,
     pageDigest: '0'.repeat(64),
   }
@@ -1427,6 +1596,19 @@ function isStoredSegment(
   value:
     WorkspaceSearchMigrationPlanningProvenanceStoredSegment | undefined,
 ): value is WorkspaceSearchMigrationPlanningProvenanceStoredSegment {
+  return value !== undefined
+}
+
+/**
+ * Checks a possibly missing stored manifest page for array narrowing.
+ *
+ * @param value - Candidate stored manifest page.
+ * @returns Whether the manifest page is defined.
+ */
+function isStoredManifestPage(
+  value:
+    WorkspaceSearchMigrationPlanningProvenanceStoredManifestPage | undefined,
+): value is WorkspaceSearchMigrationPlanningProvenanceStoredManifestPage {
   return value !== undefined
 }
 

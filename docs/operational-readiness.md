@@ -476,7 +476,9 @@ Bounded planning-artifact foundation は、planned operation を完全な operat
 content-addressed segment に決定的に分割し、最大256 referenceの manifest page predecessor chain と
 compact head で0件から100,000件までを表現します。Provenance も evidence page witness と対応する
 authority trace、historical receipt と対応する transition を完全な entry 境界で最大16 MiBに分割し、
-bounded manifest page と compact head から元の semantic artifact を再構成します。Plan側はrun、
+exact-version predecessor chain の bounded manifest page と terminal page reference を持つ compact
+head から元の semantic artifact を再構成します。Head の terminal reference だけを起点に `List` や
+latest version lookup を使わず全 page reference を逆順に発見し、正順へ戻して検証できます。Plan側はrun、
 configuration hash、plan root/count、plan seal digestを、provenance側はrun、configuration hash、
 全6 TableId、snapshot/provenance/receipt digest/countを、それぞれ同種artifact内の全layerに結合します。
 各graphはObject Lock期限を含む exact

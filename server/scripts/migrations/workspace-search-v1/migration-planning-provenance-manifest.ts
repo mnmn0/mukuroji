@@ -310,6 +310,9 @@ export type WorkspaceSearchMigrationPlanningProvenanceManifestPage = {
   /** Complete contiguous segment locators. */
   readonly segments:
     readonly WorkspaceSearchMigrationPlanningProvenanceSegmentLocator[]
+  /** Exact immutable reference to the immediately preceding page, if any. */
+  readonly previousPageReference:
+    WorkspaceSearchMigrationPlanningProvenanceManifestReference | null
   /** Digest of every preceding canonical manifest-page field. */
   readonly pageDigest: string
 }
@@ -406,7 +409,7 @@ export type CreateWorkspaceSearchMigrationPlanningProvenanceSegmentsInput = {
 /**
  * Manifest-page construction input after every data segment is immutable.
  */
-export type CreateWorkspaceSearchMigrationPlanningProvenanceManifestPagesInput = {
+export type CreateWorkspaceSearchMigrationPlanningProvenanceManifestPageBuilderInput = {
   /** Existing strict full provenance artifact owning every segment. */
   readonly artifact: WorkspaceSearchMigrationPlanningProvenanceArtifact
   /** Canonical run-scoped prefix fixed in the segment summaries. */
@@ -416,6 +419,25 @@ export type CreateWorkspaceSearchMigrationPlanningProvenanceManifestPagesInput =
     readonly WorkspaceSearchMigrationPlanningProvenanceStoredSegment[]
   /** Optional smaller manifest-page ceiling. */
   readonly maximumManifestPageBytes?: number
+}
+
+/**
+ * Stateful sequential builder for immutable provenance manifest pages.
+ */
+export type WorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder = {
+  /** Exact number of pages selected by the one-time deterministic layout. */
+  readonly pageCount: number
+  /**
+   * Creates the next page after validating its stored predecessor.
+   *
+   * @param previousStoredManifestPage - Null for page zero, otherwise the
+   * exact immutable envelope for the page returned by the preceding call.
+   * @returns Canonical bytes for the next page to upload immutably.
+   */
+  readonly createNextPage: (
+    previousStoredManifestPage:
+      WorkspaceSearchMigrationPlanningProvenanceStoredManifestPage | null,
+  ) => WorkspaceSearchMigrationPlanningProvenanceEncodedManifestPage
 }
 
 /**
@@ -602,15 +624,19 @@ export function parseWorkspaceSearchMigrationPlanningProvenanceSegment(
 }
 
 /**
- * Builds deterministic bounded pages of exact immutable segment locators.
+ * Builds one deterministic sequential manifest-page writer.
+ *
+ * The complete page layout is packed once. Each page after page zero can only
+ * be created after the caller supplies the exact immutable storage envelope
+ * for the page returned by the preceding call.
  *
  * @param input - Artifact, complete stored segments, and optional page ceiling.
- * @returns Ordered canonical manifest pages.
+ * @returns Stateful builder for the precomputed ordered page layout.
  */
-export function createWorkspaceSearchMigrationPlanningProvenanceManifestPages(
+export function createWorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder(
   input:
-    CreateWorkspaceSearchMigrationPlanningProvenanceManifestPagesInput,
-): readonly WorkspaceSearchMigrationPlanningProvenanceEncodedManifestPage[] {
+    CreateWorkspaceSearchMigrationPlanningProvenanceManifestPageBuilderInput,
+): WorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder {
   return runManifestBoundary(() => {
     const inputRecord = requireRecord(input)
     requireExactOptionalKeys(inputRecord, [
@@ -655,37 +681,100 @@ export function createWorkspaceSearchMigrationPlanningProvenanceManifestPages(
     ) {
       return failManifest()
     }
-    return pageRanges.map((range, pageIndex) => {
-      const segments = locators.slice(
-        range.segmentStartIndex,
-        range.segmentStartIndex + range.segmentCount,
-      )
-      const pageFields = {
-        kind: 'workspace-search-planning-provenance-manifest-page',
-        manifestPageVersion: 1,
-        summary,
-        pageIndex,
-        pageCount: pageRanges.length,
-        segmentStartIndex: range.segmentStartIndex,
-        segmentCount: segments.length,
-        segments,
-      } satisfies Omit<
-        WorkspaceSearchMigrationPlanningProvenanceManifestPage,
-        'pageDigest'
-      >
-      const page:
-        WorkspaceSearchMigrationPlanningProvenanceManifestPage = {
-          ...pageFields,
-          pageDigest: createMigrationDigest(pageFields),
-        }
-      const bytes = encodeCanonical(page, maximumManifestPageBytes)
-      return {
-        page,
-        bytes,
-        contentDigest: digestBytes(bytes),
-        byteLength: bytes.byteLength,
-      }
-    })
+    let nextPageIndex = 0
+    let expectedPreviousPageDigest: string | null = null
+    let expectedPreviousContentDigest: string | null = null
+    let expectedPreviousByteLength: number | null = null
+    return {
+      pageCount: pageRanges.length,
+      createNextPage: (previousStoredManifestPage) =>
+        runManifestBoundary(() => {
+          const range = pageRanges[nextPageIndex]
+          if (range === undefined) return failManifest()
+          let previousPageReference:
+            WorkspaceSearchMigrationPlanningProvenanceManifestReference
+              | null = null
+          if (nextPageIndex === 0) {
+            if (
+              previousStoredManifestPage !== null ||
+              expectedPreviousPageDigest !== null ||
+              expectedPreviousContentDigest !== null ||
+              expectedPreviousByteLength !== null
+            ) {
+              return failManifest()
+            }
+          } else {
+            if (
+              previousStoredManifestPage === null ||
+              expectedPreviousPageDigest === null ||
+              expectedPreviousContentDigest === null ||
+              expectedPreviousByteLength === null
+            ) {
+              return failManifest()
+            }
+            const previous = readStoredManifestPageLocator(
+              previousStoredManifestPage,
+              nextPageIndex - 1,
+              pageRanges.length,
+              summary,
+            )
+            if (
+              previous.encodedPage.pageDigest !==
+                expectedPreviousPageDigest ||
+              previous.locator.reference.contentDigest !==
+                expectedPreviousContentDigest ||
+              previous.locator.reference.byteLength !==
+                expectedPreviousByteLength
+            ) {
+              return failManifest()
+            }
+            previousPageReference = previous.locator.reference
+          }
+          const segments = locators.slice(
+            range.segmentStartIndex,
+            range.segmentStartIndex + range.segmentCount,
+          )
+          const pageFields = {
+            kind:
+              'workspace-search-planning-provenance-manifest-page',
+            manifestPageVersion: 1,
+            summary,
+            pageIndex: nextPageIndex,
+            pageCount: pageRanges.length,
+            segmentStartIndex: range.segmentStartIndex,
+            segmentCount: segments.length,
+            segments,
+            previousPageReference,
+          } satisfies Omit<
+            WorkspaceSearchMigrationPlanningProvenanceManifestPage,
+            'pageDigest'
+          >
+          const page:
+            WorkspaceSearchMigrationPlanningProvenanceManifestPage = {
+              ...pageFields,
+              pageDigest: createMigrationDigest(pageFields),
+            }
+          const bytes = encodeCanonical(
+            page,
+            maximumManifestPageBytes,
+          )
+          const detachedPage =
+            parseWorkspaceSearchMigrationPlanningProvenanceManifestPage(
+              bytes,
+            )
+          const encoded = {
+            page: detachedPage,
+            bytes,
+            contentDigest: digestBytes(bytes),
+            byteLength: bytes.byteLength,
+          }
+          nextPageIndex += 1
+          expectedPreviousPageDigest = detachedPage.pageDigest
+          expectedPreviousContentDigest = encoded.contentDigest
+          expectedPreviousByteLength = encoded.byteLength
+          return encoded
+        }),
+    }
   })
 }
 
@@ -1182,6 +1271,10 @@ function packManifestPageRanges(
   maximumBytes: number,
 ): readonly ProvenanceManifestPageRange[] {
   const locatorByteLengths = locators.map(canonicalByteLength)
+  const maximumPreviousPageReference =
+    createMaximumManifestPageReferencePlaceholder(
+      summary.objectKeyPrefix,
+    )
   const ranges: ProvenanceManifestPageRange[] = []
   let segmentStartIndex = 0
   while (segmentStartIndex < locators.length) {
@@ -1204,6 +1297,7 @@ function packManifestPageRanges(
         segmentStartIndex,
         segmentCount: nextCount,
         segments: [],
+        previousPageReference: maximumPreviousPageReference,
         pageDigest: placeholderDigest,
       } satisfies WorkspaceSearchMigrationPlanningProvenanceManifestPage
       const candidateByteLength =
@@ -1219,6 +1313,32 @@ function packManifestPageRanges(
     segmentStartIndex += acceptedCount
   }
   return ranges
+}
+
+/**
+ * Creates a conservative predecessor reference used only for size packing.
+ *
+ * Every field is at least as large canonically as an accepted stored-page
+ * reference, so the one-time page layout remains valid after upload supplies
+ * the exact version and retention values.
+ *
+ * @param objectKeyPrefix - Canonical run-scoped immutable-artifact prefix.
+ * @returns Maximum canonical-size placeholder for one page reference.
+ */
+function createMaximumManifestPageReferencePlaceholder(
+  objectKeyPrefix: string,
+): WorkspaceSearchMigrationPlanningProvenanceManifestReference {
+  return {
+    objectKey: createProvenanceObjectKey(
+      objectKeyPrefix,
+      'manifest-pages',
+      placeholderDigest,
+    ),
+    versionId: '\0'.repeat(maximumReferenceTextLength),
+    contentDigest: placeholderDigest,
+    byteLength: Number.MAX_SAFE_INTEGER,
+    retainUntil: '+275760-09-13T00:00:00.000Z',
+  }
 }
 
 /**
@@ -1460,12 +1580,23 @@ function requireCompleteManifestPageLocators(
   let segmentIndex = 0
   for (let index = 0; index < pages.length; index += 1) {
     const page = pages[index]
+    const previousPage = index === 0 ? undefined : pages[index - 1]
     if (
       page === undefined ||
       page.locator.pageIndex !== index ||
       page.locator.pageCount !== pages.length ||
       page.locator.segmentStartIndex !== segmentIndex ||
-      page.locator.segmentCount !== page.encodedPage.segments.length
+      page.locator.segmentCount !== page.encodedPage.segments.length ||
+      (
+        index === 0
+          ? page.encodedPage.previousPageReference !== null
+          : previousPage === undefined ||
+            page.encodedPage.previousPageReference === null ||
+            !sameReference(
+              page.encodedPage.previousPageReference,
+              previousPage.locator.reference,
+            )
+      )
     ) {
       return failManifest()
     }
@@ -2732,6 +2863,7 @@ function readManifestPage(
     'pageCount',
     'pageDigest',
     'pageIndex',
+    'previousPageReference',
     'segmentCount',
     'segmentStartIndex',
     'segments',
@@ -2764,8 +2896,19 @@ function readManifestPage(
   const segmentCount = readPositiveSafeInteger(
     readOwn(record, 'segmentCount'),
   )
+  const previousPageReferenceValue =
+    readOwn(record, 'previousPageReference')
+  const previousPageReference =
+    previousPageReferenceValue === null
+      ? null
+      : readReference(
+        previousPageReferenceValue,
+        summary.objectKeyPrefix,
+        'manifest-pages',
+      )
   if (
     pageIndex >= pageCount ||
+    (pageIndex === 0) !== (previousPageReference === null) ||
     segmentCount !== segments.length ||
     segments.some(
       (segment, index) =>
@@ -2783,6 +2926,7 @@ function readManifestPage(
     segmentStartIndex,
     segmentCount,
     segments,
+    previousPageReference,
   } satisfies Omit<
     WorkspaceSearchMigrationPlanningProvenanceManifestPage,
     'pageDigest'
