@@ -1,3 +1,4 @@
+import { types as nodeUtilTypes } from 'node:util'
 import {
   DescribeContinuousBackupsCommand,
   type DescribeContinuousBackupsCommandOutput,
@@ -169,12 +170,22 @@ import {
   joinWorkspaceSearchMigrationPlanningEvidence,
   type WorkspaceSearchMigrationPlanningJoinResult,
 } from './migration-planning-join'
+import {
+  createAwsWorkspaceSearchMigrationImmutableArtifactPort,
+  type WorkspaceSearchMigrationImmutableArtifactAwsPort,
+  type WorkspaceSearchMigrationImmutableArtifactAwsTransport,
+} from './migration-immutable-artifact-aws'
 import type {
   WorkspaceSearchMigrationPlanningJoinLimits,
   WorkspaceSearchMigrationPlanningMaterialReadLimits,
   WorkspaceSearchMigrationPlanningSourceChainMaterial,
   WorkspaceSearchMigrationPlanningTargetChainMaterial,
 } from './migration-planning-material'
+import {
+  createAwsWorkspaceSearchMigrationPlanningArtifactGateway,
+  type WorkspaceSearchMigrationPlanningArtifactAwsGateway,
+  WORKSPACE_SEARCH_MIGRATION_PLANNING_ARTIFACT_MAX_OBJECT_BYTES,
+} from './migration-planning-artifact-aws'
 import type {
   AcquireWorkspaceSearchMigrationLeaseInput,
   HeartbeatWorkspaceSearchMigrationLeaseInput,
@@ -446,6 +457,26 @@ type ManagedMigrationStateAuthority = {
 }
 
 /**
+ * Measured generation retained by one managed planning storage operation.
+ */
+type ManagedPlanningArtifactGenerationAuthority = {
+  /** Session generation that installed the immutable object port. */
+  readonly generation: number
+  /** Exact measured-configuration digest owned by that generation. */
+  readonly configurationHash: string
+}
+
+/**
+ * Current immutable object port paired with its measured generation.
+ */
+type ManagedPlanningArtifactAuthority =
+  ManagedPlanningArtifactGenerationAuthority & {
+    /** Private codec-agnostic port installed by successful measurement. */
+    readonly immutableArtifactPort:
+      WorkspaceSearchMigrationImmutableArtifactAwsPort
+  }
+
+/**
  * Measurement authority captured for one complete source-evidence operation.
  */
 type ManagedSourceEvidenceAuthority<
@@ -608,8 +639,8 @@ export interface WorkspaceSearchMigrationManagedIdentityPort
 }
 
 /**
- * Composite measured AWS session for identity, source/target reads, and
- * authority I/O.
+ * Composite measured AWS session for identity, source/target reads, authority
+ * I/O, and immutable planning artifact storage.
  */
 export interface WorkspaceSearchMigrationManagedAwsSession
   extends
@@ -712,6 +743,19 @@ export interface WorkspaceSearchMigrationManagedAwsSession
   joinCommittedPlanningEvidence(
     input: JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput,
   ): Promise<WorkspaceSearchMigrationPlanningJoinResult>
+
+  /**
+   * Creates one run-scoped immutable planning storage gateway.
+   *
+   * The gateway remains bound to the current measured generation and becomes
+   * unusable after close or any replacement measurement.
+   *
+   * @param runId - Operator-selected run owning every stored object.
+   * @returns Planning graph storage over the pinned measured S3 client.
+   */
+  createPlanningArtifactGateway(
+    runId: string,
+  ): WorkspaceSearchMigrationPlanningArtifactAwsGateway
 }
 
 /** Narrow transport containing only managed identity reads. */
@@ -805,6 +849,7 @@ export interface WorkspaceSearchMigrationIdentityAwsTransport {
 export interface WorkspaceSearchMigrationManagedAwsTransport
   extends
     WorkspaceSearchMigrationIdentityAwsTransport,
+    WorkspaceSearchMigrationImmutableArtifactAwsTransport,
     WorkspaceSearchMigrationPrePlanAuthorityAwsTransport,
     WorkspaceSearchMigrationSourceArtifactAwsTransport,
     WorkspaceSearchMigrationSourceScanAwsTransport,
@@ -1111,6 +1156,48 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
   }
 
   /**
+   * Sends one immutable object upload with the core-owned deadline signal.
+   *
+   * @param command - Exact codec-agnostic PutObject command.
+   * @param abortSignal - Signal owned by the immutable object core.
+   * @returns Raw S3 upload response.
+   */
+  putImmutableArtifact(
+    command: PutObjectCommand,
+    abortSignal: AbortSignal,
+  ): Promise<PutObjectCommandOutput> {
+    return this.s3Client.send(command, { abortSignal })
+  }
+
+  /**
+   * Reads immutable object metadata with the core-owned deadline signal.
+   *
+   * @param command - Exact current or version-pinned HeadObject command.
+   * @param abortSignal - Signal owned by the immutable object core.
+   * @returns Raw S3 metadata response.
+   */
+  headImmutableArtifact(
+    command: HeadObjectCommand,
+    abortSignal: AbortSignal,
+  ): Promise<HeadObjectCommandOutput> {
+    return this.s3Client.send(command, { abortSignal })
+  }
+
+  /**
+   * Reads one immutable object version with the core-owned deadline signal.
+   *
+   * @param command - Exact version-pinned GetObject command.
+   * @param abortSignal - Signal owned by the immutable object core.
+   * @returns Raw S3 object response.
+   */
+  getImmutableArtifact(
+    command: GetObjectCommand,
+    abortSignal: AbortSignal,
+  ): Promise<GetObjectCommandOutput> {
+    return this.s3Client.send(command, { abortSignal })
+  }
+
+  /**
    * Sends one conditional immutable target-artifact upload.
    *
    * @param command - Exact adapter-owned PutObject command.
@@ -1276,6 +1363,14 @@ class AwsWorkspaceSearchMigrationIdentityPort
   /** Hash authorized by the most recent successful identity measurement. */
   private measuredConfigurationHash: string | undefined
 
+  /** Immutable object port installed by the current successful measurement. */
+  private measuredPlanningArtifactPort:
+    WorkspaceSearchMigrationImmutableArtifactAwsPort | undefined
+
+  /** One-way cancellation owned by the current measured immutable object port. */
+  private measuredPlanningArtifactAbortController:
+    AbortController | undefined
+
   /** Migration-state table incarnation authorized by the current measurement. */
   private measuredMigrationStateTable: MigrationTableIdentity | undefined
 
@@ -1311,6 +1406,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.closed = true
     this.generation += 1
     this.measuredConfigurationHash = undefined
+    this.invalidateManagedPlanningArtifactPort()
     this.measuredMigrationStateTable = undefined
     try {
       this.transport.close()
@@ -1330,6 +1426,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.generation += 1
     const measurementGeneration = this.generation
     this.measuredConfigurationHash = undefined
+    this.invalidateManagedPlanningArtifactPort()
     this.measuredMigrationStateTable = undefined
     const configuration = await measureWorkspaceSearchMigrationConfiguration({
       requested: this.requested,
@@ -1341,10 +1438,92 @@ class AwsWorkspaceSearchMigrationIdentityPort
     const stateTable = structuredClone(
       configuration.tables['migration-state'],
     )
+    const planningArtifactAbortController = new AbortController()
+    const planningArtifactPort =
+      this.createManagedPlanningArtifactPort(
+        configuration,
+        {
+          generation: measurementGeneration,
+          configurationHash,
+        },
+        planningArtifactAbortController.signal,
+      )
     this.requireGeneration(measurementGeneration)
     this.measuredMigrationStateTable = stateTable
+    this.measuredPlanningArtifactPort = planningArtifactPort
+    this.measuredPlanningArtifactAbortController =
+      planningArtifactAbortController
     this.measuredConfigurationHash = configurationHash
     return configuration
+  }
+
+  /**
+   * Creates one run-scoped planning gateway over the current measured port.
+   *
+   * @param runId - Operator-selected run owning every immutable object.
+   * @returns Generation-guarded planning graph storage gateway.
+   */
+  createPlanningArtifactGateway(
+    runId: string,
+  ): WorkspaceSearchMigrationPlanningArtifactAwsGateway {
+    const authority = this.captureManagedPlanningArtifactAuthority()
+    const delegate =
+      createAwsWorkspaceSearchMigrationPlanningArtifactGateway({
+        runId,
+        configurationHash: authority.configurationHash,
+        immutableArtifactPort: authority.immutableArtifactPort,
+      })
+    const managedGateway:
+      WorkspaceSearchMigrationPlanningArtifactAwsGateway = {
+        /**
+         * Uploads one reviewed plan while the captured measurement is current.
+         *
+         * @param input - Reviewed plan graph and shared retention deadline.
+         * @returns Exact immutable plan roots.
+         */
+        writePlanArtifact: (input) =>
+          this.runManagedPlanningArtifactOperation(
+            authority,
+            () => delegate.writePlanArtifact(input),
+          ),
+
+        /**
+         * Replays one exact-version plan while measurement stays current.
+         *
+         * @param input - Exact immutable plan roots.
+         * @returns Detached and validated plan graph.
+         */
+        replayPlanArtifact: (input) =>
+          this.runManagedPlanningArtifactOperation(
+            authority,
+            () => delegate.replayPlanArtifact(input),
+          ),
+
+        /**
+         * Uploads one complete provenance graph under measured authority.
+         *
+         * @param input - Strict provenance material and packing limits.
+         * @returns Exact immutable provenance root.
+         */
+        writePlanningProvenanceArtifact: (input) =>
+          this.runManagedPlanningArtifactOperation(
+            authority,
+            () => delegate.writePlanningProvenanceArtifact(input),
+          ),
+
+        /**
+         * Replays one exact-version provenance graph under measured authority.
+         *
+         * @param input - Exact immutable provenance root.
+         * @returns Detached and validated provenance artifact.
+         */
+        replayPlanningProvenanceArtifact: (input) =>
+          this.runManagedPlanningArtifactOperation(
+            authority,
+            () => delegate.replayPlanningProvenanceArtifact(input),
+          ),
+      }
+    return managedGateway
   }
 
   /**
@@ -3158,6 +3337,201 @@ class AwsWorkspaceSearchMigrationIdentityPort
   }
 
   /**
+   * Installs one codec-agnostic immutable object port for a measurement.
+   *
+   * The low-level transport is guarded around every request, while the
+   * immutable core remains the sole owner of request and body deadlines.
+   *
+   * @param configuration - Exact successful identity measurement.
+   * @param authority - Generation and hash installing this private port.
+   * @param lifecycleSignal - One-way generation lifecycle cancellation.
+   * @returns Immutable storage bound to the pinned S3 client and configuration.
+   */
+  private createManagedPlanningArtifactPort(
+    configuration: WorkspaceSearchMigrationConfiguration,
+    authority: ManagedPlanningArtifactGenerationAuthority,
+    lifecycleSignal: AbortSignal,
+  ): WorkspaceSearchMigrationImmutableArtifactAwsPort {
+    const transport: WorkspaceSearchMigrationImmutableArtifactAwsTransport = {
+      /**
+       * Sends one guarded immutable PutObject request.
+       *
+       * @param command - Exact immutable upload command.
+       * @param abortSignal - Deadline signal owned by the immutable core.
+       * @returns Raw low-level S3 response.
+       */
+      putImmutableArtifact: (command, abortSignal) =>
+        this.runManagedPlanningArtifactOperation(
+          authority,
+          () => this.transport.putImmutableArtifact(
+            command,
+            abortSignal,
+          ),
+        ),
+
+      /**
+       * Sends one guarded immutable HeadObject request.
+       *
+       * @param command - Exact reconciliation or version-pinned metadata read.
+       * @param abortSignal - Deadline signal owned by the immutable core.
+       * @returns Raw low-level S3 response.
+       */
+      headImmutableArtifact: (command, abortSignal) =>
+        this.runManagedPlanningArtifactOperation(
+          authority,
+          () => this.transport.headImmutableArtifact(
+            command,
+            abortSignal,
+          ),
+        ),
+
+      /**
+       * Sends one guarded exact-version immutable GetObject request.
+       *
+       * @param command - Exact version-pinned object read.
+       * @param abortSignal - Deadline signal owned by the immutable core.
+       * @returns Raw low-level S3 response.
+       */
+      getImmutableArtifact: (command, abortSignal) =>
+        this.runManagedPlanningArtifactGetOperation(
+          authority,
+          () => this.transport.getImmutableArtifact(
+            command,
+            abortSignal,
+          ),
+        ),
+    }
+    return createAwsWorkspaceSearchMigrationImmutableArtifactPort({
+      configuration,
+      configurationHash: authority.configurationHash,
+      maximumObjectBytes:
+        WORKSPACE_SEARCH_MIGRATION_PLANNING_ARTIFACT_MAX_OBJECT_BYTES,
+      requestTimeoutMilliseconds:
+        MIGRATION_ARTIFACT_TIMEOUT_MILLISECONDS,
+      bodyTimeoutMilliseconds:
+        MIGRATION_ARTIFACT_TIMEOUT_MILLISECONDS,
+      lifecycleSignal,
+      clock: this.prePlanAuthorityClock,
+      transport,
+    })
+  }
+
+  /**
+   * Cancels and forgets the immutable port owned by the previous generation.
+   */
+  private invalidateManagedPlanningArtifactPort(): void {
+    const abortController =
+      this.measuredPlanningArtifactAbortController
+    this.measuredPlanningArtifactAbortController = undefined
+    this.measuredPlanningArtifactPort = undefined
+    abortController?.abort()
+  }
+
+  /**
+   * Captures the private immutable port installed by current measurement.
+   *
+   * @returns Current generation, configuration hash, and private object port.
+   */
+  private captureManagedPlanningArtifactAuthority():
+    ManagedPlanningArtifactAuthority {
+    this.requireOpen()
+    const configurationHash = this.measuredConfigurationHash
+    const immutableArtifactPort = this.measuredPlanningArtifactPort
+    if (
+      configurationHash === undefined ||
+      immutableArtifactPort === undefined
+    ) {
+      return failManagedPlanningArtifact()
+    }
+    const authority: ManagedPlanningArtifactAuthority = {
+      generation: this.generation,
+      configurationHash,
+      immutableArtifactPort,
+    }
+    this.requireManagedPlanningArtifactAuthority(authority)
+    return authority
+  }
+
+  /**
+   * Guards one planning storage step against session lifecycle changes.
+   *
+   * The callback is invoked synchronously before the first await so the
+   * standalone gateway snapshots caller input before storage I/O. Lifecycle
+   * invalidation takes precedence over any concurrent lower-layer failure.
+   *
+   * @param authority - Measurement generation captured for this gateway.
+   * @param operation - One high- or low-level immutable storage operation.
+   * @returns Result only while the captured measurement remains current.
+   */
+  private async runManagedPlanningArtifactOperation<Result>(
+    authority: ManagedPlanningArtifactGenerationAuthority,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    this.requireManagedPlanningArtifactAuthority(authority)
+    try {
+      const result = await operation()
+      this.requireManagedPlanningArtifactAuthority(authority)
+      return result
+    } catch (error: unknown) {
+      this.requireManagedPlanningArtifactAuthority(authority)
+      throw error
+    }
+  }
+
+  /**
+   * Guards one GetObject and releases its body if lifecycle authority changed.
+   *
+   * S3 may resolve GetObject after response headers while retaining a streaming
+   * body. A replacement measurement must not leak that body when rejecting the
+   * stale output before the immutable core can consume it.
+   *
+   * @param authority - Measurement generation captured for this gateway.
+   * @param operation - Exact low-level immutable GetObject operation.
+   * @returns Raw GetObject output only while authority remains current.
+   */
+  private async runManagedPlanningArtifactGetOperation(
+    authority: ManagedPlanningArtifactGenerationAuthority,
+    operation: () => Promise<GetObjectCommandOutput>,
+  ): Promise<GetObjectCommandOutput> {
+    this.requireManagedPlanningArtifactAuthority(authority)
+    let output: GetObjectCommandOutput
+    try {
+      output = await operation()
+    } catch (error: unknown) {
+      this.requireManagedPlanningArtifactAuthority(authority)
+      throw error
+    }
+    if (
+      !this.isMeasurementGenerationCurrent(
+        authority.generation,
+        authority.configurationHash,
+      )
+    ) {
+      cancelManagedPlanningArtifactGetBody(output)
+      return failManagedPlanningArtifact()
+    }
+    return output
+  }
+
+  /**
+   * Requires one planning gateway generation to remain current.
+   *
+   * @param authority - Captured measurement generation and hash.
+   */
+  private requireManagedPlanningArtifactAuthority(
+    authority: ManagedPlanningArtifactGenerationAuthority,
+  ): void {
+    if (
+      !this.isMeasurementGenerationCurrent(
+        authority.generation,
+        authority.configurationHash,
+      )
+    ) {
+      return failManagedPlanningArtifact()
+    }
+  }
+
+  /**
    * Guards one managed operation against session-generation changes.
    *
    * The complete public operation verifies the migration-state incarnation
@@ -4169,7 +4543,7 @@ function readAssumedCredentials(
  * Creates the concrete allowlisted AWS SDK transport.
  *
  * @param configurations - Explicit official-endpoint client configurations.
- * @returns AWS SDK transport exposing only managed migration reads.
+ * @returns AWS SDK transport exposing only allowlisted managed operations.
  */
 function createDefaultAwsTransport(
   configurations: WorkspaceSearchMigrationIdentityAwsSdkConfigurations,
@@ -4529,6 +4903,119 @@ function failManagedPlanningJoin(
     code,
     `Workspace Search planning material join stopped safely (${code}).`,
   )
+}
+
+/**
+ * Raises one stable managed planning storage lifecycle failure.
+ *
+ * @returns Never returns.
+ */
+function failManagedPlanningArtifact(): never {
+  throw new WorkspaceSearchMigrationFailure(
+    'INVALID_STATE',
+    'Workspace Search planning artifact storage stopped safely (INVALID_STATE).',
+  )
+}
+
+/**
+ * Best-effort releases an unconsumed stale GetObject body.
+ *
+ * @param output - Raw GetObject output rejected by lifecycle authority.
+ */
+function cancelManagedPlanningArtifactGetBody(
+  output: GetObjectCommandOutput,
+): void {
+  const body = readManagedPlanningArtifactGetBody(output)
+  invokeManagedPlanningArtifactBodyCancellation(body, 'destroy')
+  invokeManagedPlanningArtifactBodyCancellation(body, 'cancel')
+}
+
+/**
+ * Reads only an own data-valued GetObject body without invoking accessors.
+ *
+ * @param output - Raw potentially hostile GetObject output.
+ * @returns Untrusted body value or undefined when it cannot be read safely.
+ */
+function readManagedPlanningArtifactGetBody(
+  output: GetObjectCommandOutput,
+): unknown {
+  try {
+    if (nodeUtilTypes.isProxy(output)) return undefined
+    const descriptor = Reflect.getOwnPropertyDescriptor(output, 'Body')
+    if (
+      descriptor === undefined ||
+      !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+    ) {
+      return undefined
+    }
+    return descriptor.value
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Invokes one safe optional cancellation method without replacing the failure.
+ *
+ * @param body - Candidate stale S3 response body.
+ * @param methodName - Allowlisted body cancellation method.
+ */
+function invokeManagedPlanningArtifactBodyCancellation(
+  body: unknown,
+  methodName: 'cancel' | 'destroy',
+): void {
+  try {
+    if (
+      (
+        typeof body !== 'object' &&
+        typeof body !== 'function'
+      ) ||
+      body === null ||
+      nodeUtilTypes.isProxy(body)
+    ) {
+      return
+    }
+    const method = readManagedPlanningArtifactBodyMethod(
+      body,
+      methodName,
+    )
+    if (method === undefined) return
+    const result: unknown = Reflect.apply(method, body, [])
+    void Promise.resolve(result).catch(() => undefined)
+  } catch {
+    // Lifecycle invalidation remains authoritative over cleanup failures.
+  }
+}
+
+/**
+ * Finds one non-proxy cancellation method through data descriptors only.
+ *
+ * @param body - Validated non-proxy cancellation receiver.
+ * @param methodName - Allowlisted method name.
+ * @returns Callable data method or undefined.
+ */
+function readManagedPlanningArtifactBodyMethod(
+  body: object | Function,
+  methodName: 'cancel' | 'destroy',
+): Function | undefined {
+  let current: object | null = body
+  while (current !== null) {
+    if (nodeUtilTypes.isProxy(current)) return undefined
+    const descriptor =
+      Reflect.getOwnPropertyDescriptor(current, methodName)
+    if (descriptor !== undefined) {
+      return Object.prototype.hasOwnProperty.call(
+          descriptor,
+          'value',
+        ) &&
+          typeof descriptor.value === 'function' &&
+          !nodeUtilTypes.isProxy(descriptor.value)
+        ? descriptor.value
+        : undefined
+    }
+    current = Reflect.getPrototypeOf(current)
+  }
+  return undefined
 }
 
 /**
