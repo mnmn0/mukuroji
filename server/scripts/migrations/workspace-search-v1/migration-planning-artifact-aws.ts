@@ -10,6 +10,7 @@ import {
 import {
   parseWorkspaceSearchPlanSeal,
   serializeWorkspaceSearchPlanSeal,
+  WORKSPACE_SEARCH_MIGRATION_PLAN_SEAL_MAX_BYTES,
 } from './migration-artifacts'
 import {
   type WorkspaceSearchMigrationImmutableArtifactAwsPort,
@@ -81,6 +82,7 @@ export const WORKSPACE_SEARCH_MIGRATION_PLANNING_ARTIFACT_MAX_OBJECT_BYTES =
     WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_SEGMENT_MAX_BYTES,
     WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MANIFEST_PAGE_MAX_BYTES,
     WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MANIFEST_HEAD_MAX_BYTES,
+    WORKSPACE_SEARCH_MIGRATION_PLAN_SEAL_MAX_BYTES,
   )
 
 const planSealRole = 'plan-seals'
@@ -387,6 +389,7 @@ implements WorkspaceSearchMigrationPlanningArtifactAwsGateway {
     this.configurationHash = configurationHash
     this.provenanceObjectKeyPrefix =
       `${WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_ARTIFACT_OBJECT_KEY_PREFIX}/${runId}/${configurationHash}`
+    // Fail fast on the run-scoped prefix with a valid placeholder digest.
     void createWorkspaceSearchMigrationPlanningProvenanceObjectKey(
       this.provenanceObjectKeyPrefix,
       manifestHeadRole,
@@ -658,14 +661,11 @@ implements WorkspaceSearchMigrationPlanningArtifactAwsGateway {
         )
       let totalSegmentBytes = 0
       for (const reference of preparedSegmentReferences) {
-        totalSegmentBytes += reference.byteLength
-        if (
-          !Number.isSafeInteger(totalSegmentBytes) ||
-          totalSegmentBytes >
-            WORKSPACE_SEARCH_MIGRATION_PLAN_MAX_TOTAL_SEGMENT_BYTES
-        ) {
-          return failPlanningArtifactStorage()
-        }
+        totalSegmentBytes = addBoundedPlanningArtifactBytes(
+          totalSegmentBytes,
+          reference.byteLength,
+          WORKSPACE_SEARCH_MIGRATION_PLAN_MAX_TOTAL_SEGMENT_BYTES,
+        )
       }
       const segments:
         WorkspaceSearchMigrationPlanArtifactStoredObject[] = []
@@ -1506,7 +1506,7 @@ function readPlanningArtifactRoleMaximumBytes(
       WORKSPACE_SEARCH_MIGRATION_PLAN_ARTIFACT_OBJECT_KEY_PREFIX
   ) {
     if (role === planSealRole) {
-      return WORKSPACE_SEARCH_MIGRATION_PLANNING_ARTIFACT_MAX_OBJECT_BYTES
+      return WORKSPACE_SEARCH_MIGRATION_PLAN_SEAL_MAX_BYTES
     }
     if (role === segmentRole) {
       return WORKSPACE_SEARCH_MIGRATION_PLAN_SEGMENT_MAX_BYTES

@@ -989,6 +989,8 @@ describe('AWS immutable migration artifact core', () => {
     expect(transport.getCommands).toHaveLength(1)
     expect(body.returned).toBe(true)
     expect(body.destroyed).toBe(true)
+    expect(body.returnCalls).toBe(1)
+    expect(body.destroyCalls).toBe(1)
   })
 
   test('rejects proxied and accessor-backed GetObject state without traps', async () => {
@@ -1046,6 +1048,8 @@ describe('AWS immutable migration artifact core', () => {
     expect(metadataAccessorCalled).toBe(false)
     expect(accessorBody.returned).toBe(true)
     expect(accessorBody.destroyed).toBe(true)
+    expect(accessorBody.returnCalls).toBe(1)
+    expect(accessorBody.destroyCalls).toBe(1)
   })
 
   test('cleans a body when async-iterator snapshotting fails', async () => {

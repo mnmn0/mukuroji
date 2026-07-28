@@ -22,6 +22,7 @@ import {
 } from './migration-contract'
 import {
   serializeWorkspaceSearchPlanSeal,
+  WORKSPACE_SEARCH_MIGRATION_PLAN_SEAL_MAX_BYTES,
 } from './migration-artifacts'
 import type {
   ReadWorkspaceSearchMigrationImmutableArtifactInput,
@@ -461,6 +462,20 @@ describe('Workspace Search planning immutable artifact gateway', () => {
       await expect(
         gateway.replayPlanArtifact({
           ...stored,
+          planSealReference: {
+            ...stored.planSealReference,
+            byteLength:
+              WORKSPACE_SEARCH_MIGRATION_PLAN_SEAL_MAX_BYTES + 1,
+          },
+        }),
+      ).rejects.toBeInstanceOf(
+        WorkspaceSearchMigrationPlanningArtifactAwsError,
+      )
+      expect(port.calls).toEqual([])
+
+      await expect(
+        gateway.replayPlanArtifact({
+          ...stored,
           manifestHeadReference: {
             ...stored.manifestHeadReference,
             byteLength:
@@ -681,7 +696,9 @@ describe('Workspace Search planning immutable artifact gateway', () => {
           maximumTotalPlanSegmentBytes: 1,
           retainUntil,
         }),
-      ).rejects.toThrow()
+      ).rejects.toBeInstanceOf(
+        WorkspaceSearchMigrationPlanningArtifactAwsError,
+      )
       expect(port.calls).toEqual([])
     },
   )

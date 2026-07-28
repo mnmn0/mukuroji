@@ -36,6 +36,7 @@ import {
   serializeWorkspaceSearchPlannedOperation,
   serializeWorkspaceSearchPlanSeal,
   WORKSPACE_SEARCH_MIGRATION_ARTIFACT_MAX_BYTES,
+  WORKSPACE_SEARCH_MIGRATION_PLAN_SEAL_MAX_BYTES,
   WorkspaceSearchMigrationArtifactError,
 } from './migration-artifacts'
 
@@ -418,12 +419,25 @@ describe('Workspace Search plan-seal artifact codec', () => {
     const seal = createPlanSeal(evidence, planned.planDigest)
     const bytes = serializeWorkspaceSearchPlanSeal(seal)
 
+    expect(bytes.byteLength).toBeLessThanOrEqual(
+      WORKSPACE_SEARCH_MIGRATION_PLAN_SEAL_MAX_BYTES,
+    )
     expect(parseWorkspaceSearchPlanSeal(bytes)).toEqual(seal)
     expect(
       serializeWorkspaceSearchPlanSeal(
         parseWorkspaceSearchPlanSeal(bytes),
       ),
     ).toEqual(bytes)
+  })
+
+  test('rejects plan-seal input beyond its dedicated byte ceiling', () => {
+    expectArtifactFailure(
+      () => parseWorkspaceSearchPlanSeal(
+        new Uint8Array(
+          WORKSPACE_SEARCH_MIGRATION_PLAN_SEAL_MAX_BYTES + 1,
+        ),
+      ),
+    )
   })
 
   test('rejects count, digest, unknown-field, and canonical-byte tampering', () => {
