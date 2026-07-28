@@ -2,8 +2,11 @@ import { describe, expect, test } from 'bun:test'
 import {
   createMigrationDigest,
   createWorkspaceSearchConfigurationHash,
+  createWorkspaceSearchMigrationScanSnapshotDigest,
   serializeCanonicalJson,
+  type DynamoAttributeMap,
   type MigrationKeyAttribute,
+  type MigrationSourceCheckpoint,
   type MigrationTableIdentity,
   type WorkspaceSearchMaintenanceEvidenceReceipt,
   type WorkspaceSearchMigrationConfiguration,
@@ -20,11 +23,9 @@ import type {
   WorkspaceSearchMigrationHistoricalMaintenanceEvidenceBinding,
   WorkspaceSearchMigrationPrePlanAuthority,
 } from './migration-pre-plan-authority-aws'
-import type {
-  WorkspaceSearchMigrationPlanningAuthorityProvenance,
-  WorkspaceSearchMigrationPlanningAuthorityTraceEntry,
-  WorkspaceSearchMigrationPlanningEvidenceChainRoot,
-} from './migration-planning-join'
+import {
+  createWorkspaceSearchMigrationSourceCandidate,
+} from './migration-planner'
 import {
   createWorkspaceSearchMigrationPlanningProvenanceArtifact,
   createWorkspaceSearchMigrationSealedPlanningAuthority,
@@ -40,16 +41,17 @@ import {
 import {
   advanceWorkspaceSearchMigrationSourceEvidenceProgress,
   createInitialWorkspaceSearchMigrationSourceEvidenceProgress,
-  createWorkspaceSearchMigrationSourceCheckpointDigest,
   createWorkspaceSearchMigrationSourceEvidencePage,
+  parseWorkspaceSearchMigrationSourceEvidencePage,
+  serializeWorkspaceSearchMigrationSourceEvidencePage,
   type WorkspaceSearchMigrationPlanningAuthorityBinding,
-  type WorkspaceSearchMigrationSourceEvidenceProgress,
 } from './migration-source-evidence'
 import {
   createWorkspaceSearchMigrationPlanningSourceArtifactObjectKey,
 } from './migration-source-artifact'
 import {
   reduceWorkspaceSearchMigrationSourceScanPage,
+  type WorkspaceSearchMigrationSourceScanPageResult,
 } from './migration-source-scan-page'
 import {
   createEmptyWorkspaceSearchPlanDigest,
@@ -57,9 +59,8 @@ import {
 import {
   advanceWorkspaceSearchMigrationTargetEvidenceProgress,
   createInitialWorkspaceSearchMigrationTargetEvidenceProgress,
-  createWorkspaceSearchMigrationTargetCheckpointDigest,
   createWorkspaceSearchMigrationTargetEvidencePage,
-  type WorkspaceSearchMigrationTargetEvidenceProgress,
+  serializeWorkspaceSearchMigrationTargetEvidencePage,
 } from './migration-target-evidence'
 import {
   createWorkspaceSearchMigrationPlanningTargetArtifactObjectKey,
@@ -91,11 +92,79 @@ describe('Workspace Search sealed planning authority', () => {
       expect(provenanceBytes).toEqual(
         encodeCanonical(fixture.provenanceArtifact),
       )
-      expect(
+      const parsedProvenance =
         parseWorkspaceSearchMigrationPlanningProvenanceArtifact(
           provenanceBytes,
-        ),
-      ).toEqual(fixture.provenanceArtifact)
+        )
+      expect(parsedProvenance).toEqual(fixture.provenanceArtifact)
+      expect(parsedProvenance).toMatchObject({
+        sourceOperationCount: 2,
+        orphanOperationCount: 1,
+        planOperationCount: 3,
+        tableIds: {
+          'project-directory':
+            fixture.configuration.tables['project-directory'].tableId,
+          'workspace-search':
+            fixture.configuration.tables['workspace-search'].tableId,
+          'migration-state':
+            fixture.configuration.tables['migration-state'].tableId,
+        },
+      })
+      expect(
+        fixture.sourceProgress['project-directory'].checkpoint.aggregate,
+      ).toMatchObject({
+        mapped: 2,
+        projected: 1,
+        deleted: 1,
+      })
+      expect(fixture.targetProgress.checkpoint.aggregate).toMatchObject({
+        owned: 3,
+      })
+      const targetAggregate =
+        fixture.targetProgress.checkpoint.aggregate
+      expect(parsedProvenance.planningSnapshotDigest).toBe(
+        createWorkspaceSearchMigrationScanSnapshotDigest({
+          configurationHash: fixture.configurationHash,
+          sources: {
+            'project-directory':
+              fixture.sourceProgress['project-directory']
+                .checkpoint.aggregate,
+            'work-items':
+              fixture.sourceProgress['work-items'].checkpoint.aggregate,
+            collaboration:
+              fixture.sourceProgress.collaboration.checkpoint.aggregate,
+            documents:
+              fixture.sourceProgress.documents.checkpoint.aggregate,
+          },
+          target: {
+            scanned: targetAggregate.scanned,
+            mapped: targetAggregate.owned,
+            ignored: targetAggregate.ignored,
+            invalid: targetAggregate.invalid,
+            projected: 1,
+            deleted: 2,
+            keyDigest: targetAggregate.keyDigest,
+            contentDigest: targetAggregate.contentDigest,
+            pageCount: targetAggregate.pageCount,
+          },
+        }),
+      )
+      const binaryCursorWitness =
+        parsedProvenance.evidencePageWitnesses.sources[
+          'project-directory'
+        ][0]
+      if (binaryCursorWitness === undefined) {
+        throw new Error('Expected one binary-cursor page witness.')
+      }
+      const binaryCursorPage =
+        parseWorkspaceSearchMigrationSourceEvidencePage(
+          new Uint8Array(
+            Buffer.from(binaryCursorWitness, 'base64'),
+          ),
+        )
+      expect(binaryCursorPage.checkpoint.cursor).toEqual({
+        partitionKey: { B: Uint8Array.from([0, 1, 255]) },
+      })
       expect(
         serializeWorkspaceSearchMigrationPlanningProvenanceArtifact(
           parseWorkspaceSearchMigrationPlanningProvenanceArtifact(
@@ -149,20 +218,14 @@ describe('Workspace Search sealed planning authority', () => {
         structuredClone(fixture.historicalReceiptBinding)
       Reflect.set(wrongOwner, 'ownerId', 'different-owner')
       expectSealedAuthorityFailure(() =>
-        createWorkspaceSearchMigrationPlanningProvenanceArtifact({
-          provenance: fixture.provenance,
-          historicalReceiptBindings: [wrongOwner],
-        })
+        createProvenanceArtifactWithBindings(fixture, [wrongOwner])
       )
 
       const wrongRun =
         structuredClone(fixture.historicalReceiptBinding)
       Reflect.set(wrongRun.receipt, 'runId', 'different-run')
       expectSealedAuthorityFailure(() =>
-        createWorkspaceSearchMigrationPlanningProvenanceArtifact({
-          provenance: fixture.provenance,
-          historicalReceiptBindings: [wrongRun],
-        })
+        createProvenanceArtifactWithBindings(fixture, [wrongRun])
       )
 
       const wrongFence =
@@ -173,10 +236,7 @@ describe('Workspace Search sealed planning authority', () => {
         historicalFenceToken + 1,
       )
       expectSealedAuthorityFailure(() =>
-        createWorkspaceSearchMigrationPlanningProvenanceArtifact({
-          provenance: fixture.provenance,
-          historicalReceiptBindings: [wrongFence],
-        })
+        createProvenanceArtifactWithBindings(fixture, [wrongFence])
       )
 
       const wrongDigest =
@@ -187,10 +247,7 @@ describe('Workspace Search sealed planning authority', () => {
         digest('different-historical-receipt'),
       )
       expectSealedAuthorityFailure(() =>
-        createWorkspaceSearchMigrationPlanningProvenanceArtifact({
-          provenance: fixture.provenance,
-          historicalReceiptBindings: [wrongDigest],
-        })
+        createProvenanceArtifactWithBindings(fixture, [wrongDigest])
       )
 
       const wrongConfiguration =
@@ -201,20 +258,16 @@ describe('Workspace Search sealed planning authority', () => {
         digest('different-configuration'),
       )
       expectSealedAuthorityFailure(() =>
-        createWorkspaceSearchMigrationPlanningProvenanceArtifact({
-          provenance: fixture.provenance,
-          historicalReceiptBindings: [wrongConfiguration],
-        })
+        createProvenanceArtifactWithBindings(fixture, [
+          wrongConfiguration,
+        ])
       )
 
       const wrongStateTable =
         structuredClone(fixture.historicalReceiptBinding)
       Reflect.set(wrongStateTable, 'stateTableId', 'different-state-table')
       expectSealedAuthorityFailure(() =>
-        createWorkspaceSearchMigrationPlanningProvenanceArtifact({
-          provenance: fixture.provenance,
-          historicalReceiptBindings: [wrongStateTable],
-        })
+        createProvenanceArtifactWithBindings(fixture, [wrongStateTable])
       )
 
       const artifactShapedBinding =
@@ -222,10 +275,9 @@ describe('Workspace Search sealed planning authority', () => {
       Reflect.deleteProperty(artifactShapedBinding, 'configurationHash')
       Reflect.deleteProperty(artifactShapedBinding, 'stateTableId')
       expectSealedAuthorityFailure(() =>
-        createWorkspaceSearchMigrationPlanningProvenanceArtifact({
-          provenance: fixture.provenance,
-          historicalReceiptBindings: [artifactShapedBinding],
-        })
+        createProvenanceArtifactWithBindings(fixture, [
+          artifactShapedBinding,
+        ])
       )
     },
   )
@@ -569,6 +621,63 @@ describe('Workspace Search sealed planning authority', () => {
         })
       )
       expect(proxyReads).toBe(0)
+
+      const sourceBytesWithAccessor = {
+        ...fixture.sourceEvidencePageBytes,
+      }
+      let sourceBytesReads = 0
+      Reflect.defineProperty(sourceBytesWithAccessor, 'documents', {
+        configurable: true,
+        enumerable: true,
+        get() {
+          sourceBytesReads += 1
+          return fixture.sourceEvidencePageBytes.documents
+        },
+      })
+      expectSealedAuthorityFailure(() =>
+        createWorkspaceSearchMigrationPlanningProvenanceArtifact({
+          sourceEvidencePageBytes: sourceBytesWithAccessor,
+          targetEvidencePageBytes:
+            fixture.targetEvidencePageBytes,
+          historicalReceiptBindings: [
+            fixture.historicalReceiptBinding,
+          ],
+        })
+      )
+      expect(sourceBytesReads).toBe(0)
+
+      const firstDocumentPage =
+        fixture.sourceEvidencePageBytes.documents[0]
+      if (firstDocumentPage === undefined) {
+        throw new Error('Expected one document evidence page.')
+      }
+      let pageByteReads = 0
+      let pageBytePrototypeReads = 0
+      const pageBytesProxy = new Proxy(firstDocumentPage, {
+        get(target, key, receiver) {
+          pageByteReads += 1
+          return Reflect.get(target, key, receiver)
+        },
+        getPrototypeOf(target) {
+          pageBytePrototypeReads += 1
+          return Reflect.getPrototypeOf(target)
+        },
+      })
+      expectSealedAuthorityFailure(() =>
+        createWorkspaceSearchMigrationPlanningProvenanceArtifact({
+          sourceEvidencePageBytes: {
+            ...fixture.sourceEvidencePageBytes,
+            documents: [pageBytesProxy],
+          },
+          targetEvidencePageBytes:
+            fixture.targetEvidencePageBytes,
+          historicalReceiptBindings: [
+            fixture.historicalReceiptBinding,
+          ],
+        })
+      )
+      expect(pageByteReads).toBe(0)
+      expect(pageBytePrototypeReads).toBe(0)
     },
   )
 
@@ -674,6 +783,205 @@ describe('Workspace Search sealed planning authority', () => {
   )
 
   test(
+    'rejects foreign witness TableIds even when supplied progress identities are rewritten',
+    () => {
+      const fixture = createSealedPlanningFixture()
+      const foreignSourceEvidence =
+        createTwoPageTerminalSourceEvidence(
+          fixture.configuration,
+          fixture.configurationHash,
+          'project-directory',
+          fixture.authorityBinding,
+          fixture.sourceItems,
+          'foreign-project-directory-table-id',
+        )
+      const foreignSourceArtifact =
+        createWorkspaceSearchMigrationPlanningProvenanceArtifact({
+          sourceEvidencePageBytes: {
+            ...fixture.sourceEvidencePageBytes,
+            'project-directory':
+              foreignSourceEvidence.pageBytes,
+          },
+          targetEvidencePageBytes:
+            fixture.targetEvidencePageBytes,
+          historicalReceiptBindings: [
+            fixture.historicalReceiptBinding,
+          ],
+        })
+      expectSealedAuthorityFailure(() =>
+        createWorkspaceSearchMigrationSealedPlanningAuthority({
+          ...fixture.authorityInput,
+          planningProvenanceArtifact: foreignSourceArtifact,
+          planningProvenanceArtifactReference: {
+            ...fixture.authorityInput
+              .planningProvenanceArtifactReference,
+            contentDigest:
+              createMigrationDigest(foreignSourceArtifact),
+          },
+          sourceProgress: {
+            ...fixture.sourceProgress,
+            'project-directory': {
+              ...foreignSourceEvidence.progress,
+              sourceTableId:
+                fixture.configuration.tables['project-directory'].tableId,
+            },
+          },
+        })
+      )
+
+      const foreignTargetEvidence = createTerminalTargetEvidence(
+        fixture.configuration,
+        fixture.configurationHash,
+        fixture.authorityBinding,
+        fixture.targetItems,
+        'foreign-workspace-search-table-id',
+      )
+      const foreignTargetArtifact =
+        createWorkspaceSearchMigrationPlanningProvenanceArtifact({
+          sourceEvidencePageBytes:
+            fixture.sourceEvidencePageBytes,
+          targetEvidencePageBytes: [
+            foreignTargetEvidence.pageBytes,
+          ],
+          historicalReceiptBindings: [
+            fixture.historicalReceiptBinding,
+          ],
+        })
+      expectSealedAuthorityFailure(() =>
+        createWorkspaceSearchMigrationSealedPlanningAuthority({
+          ...fixture.authorityInput,
+          planningProvenanceArtifact: foreignTargetArtifact,
+          planningProvenanceArtifactReference: {
+            ...fixture.authorityInput
+              .planningProvenanceArtifactReference,
+            contentDigest:
+              createMigrationDigest(foreignTargetArtifact),
+          },
+          targetProgress: {
+            ...foreignTargetEvidence.progress,
+            targetTableId:
+              fixture.configuration.tables['workspace-search'].tableId,
+          },
+        })
+      )
+    },
+  )
+
+  test(
+    'rejects re-signed plan seals with a foreign snapshot or operation counts',
+    () => {
+      const fixture = createSealedPlanningFixture()
+      const mismatchedPlanSeal = {
+        ...fixture.planSeal,
+        planningSnapshotDigest:
+          digest('different-planning-snapshot'),
+      }
+
+      expectSealedAuthorityFailure(() =>
+        createWorkspaceSearchMigrationSealedPlanningAuthority({
+          ...fixture.authorityInput,
+          planSeal: mismatchedPlanSeal,
+          planSealReference: {
+            ...fixture.authorityInput.planSealReference,
+            contentDigest: createMigrationDigest(mismatchedPlanSeal),
+          },
+        })
+      )
+
+      const mismatchedCountTuples = [
+        {
+          sourceOperationCount:
+            fixture.planSeal.sourceOperationCount + 1,
+          orphanOperationCount:
+            fixture.planSeal.orphanOperationCount,
+          planOperationCount:
+            fixture.planSeal.planOperationCount + 1,
+        },
+        {
+          sourceOperationCount:
+            fixture.planSeal.sourceOperationCount,
+          orphanOperationCount:
+            fixture.planSeal.orphanOperationCount + 1,
+          planOperationCount:
+            fixture.planSeal.planOperationCount + 1,
+        },
+        {
+          sourceOperationCount:
+            fixture.planSeal.sourceOperationCount - 1,
+          orphanOperationCount:
+            fixture.planSeal.orphanOperationCount,
+          planOperationCount:
+            fixture.planSeal.planOperationCount - 1,
+        },
+      ] as const
+      for (const counts of mismatchedCountTuples) {
+        const mismatchedCountPlanSeal = {
+          ...fixture.planSeal,
+          ...counts,
+        }
+        expectSealedAuthorityFailure(() =>
+          createWorkspaceSearchMigrationSealedPlanningAuthority({
+            ...fixture.authorityInput,
+            planSeal: mismatchedCountPlanSeal,
+            planSealReference: {
+              ...fixture.authorityInput.planSealReference,
+              contentDigest:
+                createMigrationDigest(mismatchedCountPlanSeal),
+            },
+          })
+        )
+      }
+    },
+  )
+
+  test(
+    'rejects a valid witness set whose complete canonical artifact exceeds 64 MiB',
+    () => {
+      const fixture = createSealedPlanningFixture()
+      const sourceBase64Characters = workspaceSearchMigrationSourceNames
+        .flatMap((source) =>
+          fixture.sourceEvidencePageBytes[source]
+        )
+        .reduce(
+          (total, bytes) =>
+            total + Math.ceil(bytes.byteLength / 3) * 4,
+          0,
+        )
+      const oversizedTargetEvidence =
+        createNearLimitTargetEvidencePageBytes(
+          fixture.configuration,
+          fixture.configurationHash,
+          fixture.authorityBinding,
+          WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_ARTIFACT_MAX_BYTES -
+            sourceBase64Characters,
+        )
+      const totalBase64Characters =
+        sourceBase64Characters +
+        oversizedTargetEvidence.base64Characters
+      expect(totalBase64Characters).toBeLessThanOrEqual(
+        WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_ARTIFACT_MAX_BYTES,
+      )
+      expect(
+        WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_ARTIFACT_MAX_BYTES -
+          totalBase64Characters,
+      ).toBeLessThan(64 * 1024)
+
+      expectSealedAuthorityFailure(() =>
+        createWorkspaceSearchMigrationPlanningProvenanceArtifact({
+          sourceEvidencePageBytes:
+            fixture.sourceEvidencePageBytes,
+          targetEvidencePageBytes:
+            oversizedTargetEvidence.pageBytes,
+          historicalReceiptBindings: [
+            fixture.historicalReceiptBinding,
+          ],
+        })
+      )
+    },
+    60_000,
+  )
+
+  test(
     'rejects root and provenance tampering, extra fields, noncanonical bytes, and oversize input',
     () => {
       const fixture = createSealedPlanningFixture()
@@ -695,7 +1003,7 @@ describe('Workspace Search sealed planning authority', () => {
       )
 
       const inconsistentEmptyPlan = structuredClone(authority)
-      Reflect.set(inconsistentEmptyPlan, 'planOperationCount', 1)
+      Reflect.set(inconsistentEmptyPlan, 'planOperationCount', 0)
       expectSealedAuthorityFailure(() =>
         parseWorkspaceSearchMigrationSealedPlanningAuthority(
           encodeAuthorityWithRecomputedDigest(inconsistentEmptyPlan),
@@ -769,6 +1077,52 @@ describe('Workspace Search sealed planning authority', () => {
         )
       )
 
+      const resignedProvenance =
+        structuredClone(fixture.provenanceArtifact)
+      const firstTrace =
+        resignedProvenance.provenance.authorityTrace[0]
+      if (firstTrace === undefined) {
+        throw new Error('Expected one evidence trace entry.')
+      }
+      const substitutedEvidenceDigest =
+        digest('substituted-evidence-page')
+      Reflect.set(
+        firstTrace,
+        'evidenceDigest',
+        substitutedEvidenceDigest,
+      )
+      const resignedProvenanceFields = {
+        ...resignedProvenance.provenance,
+      }
+      Reflect.deleteProperty(
+        resignedProvenanceFields,
+        'provenanceDigest',
+      )
+      Reflect.set(
+        resignedProvenance.provenance,
+        'provenanceDigest',
+        createMigrationDigest(resignedProvenanceFields),
+      )
+      expectSealedAuthorityFailure(() =>
+        parseWorkspaceSearchMigrationPlanningProvenanceArtifact(
+          encodeCanonical(resignedProvenance),
+        )
+      )
+
+      expectSealedAuthorityFailure(() =>
+        createWorkspaceSearchMigrationPlanningProvenanceArtifact({
+          sourceEvidencePageBytes: {
+            ...fixture.sourceEvidencePageBytes,
+            documents: [],
+          },
+          targetEvidencePageBytes:
+            fixture.targetEvidencePageBytes,
+          historicalReceiptBindings: [
+            fixture.historicalReceiptBinding,
+          ],
+        })
+      )
+
       const canonicalAuthority =
         serializeWorkspaceSearchMigrationSealedPlanningAuthority(
           authority,
@@ -804,26 +1158,28 @@ describe('Workspace Search sealed planning authority', () => {
         () => fixture.historicalReceiptBinding,
       )
       expectSealedAuthorityFailure(() =>
-        createWorkspaceSearchMigrationPlanningProvenanceArtifact({
-          provenance: fixture.provenance,
-          historicalReceiptBindings: oversizedHistoricalBindings,
-        })
+        createProvenanceArtifactWithBindings(
+          fixture,
+          oversizedHistoricalBindings,
+        )
       )
 
-      const firstTraceEntry = fixture.provenance.authorityTrace[0]
-      if (firstTraceEntry === undefined) {
-        throw new Error('Expected one authority-trace fixture entry.')
-      }
-      const oversizedProvenance = {
-        ...fixture.provenance,
-        authorityTrace: Array.from(
-          { length: 10_001 },
-          () => firstTraceEntry,
-        ),
+      const firstSourcePage =
+        fixture.sourceEvidencePageBytes.documents[0]
+      if (firstSourcePage === undefined) {
+        throw new Error('Expected one source evidence page.')
       }
       expectSealedAuthorityFailure(() =>
         createWorkspaceSearchMigrationPlanningProvenanceArtifact({
-          provenance: oversizedProvenance,
+          sourceEvidencePageBytes: {
+            ...fixture.sourceEvidencePageBytes,
+            documents: Array.from(
+              { length: 10_001 },
+              () => firstSourcePage,
+            ),
+          },
+          targetEvidencePageBytes:
+            fixture.targetEvidencePageBytes,
           historicalReceiptBindings: [
             fixture.historicalReceiptBinding,
           ],
@@ -857,44 +1213,78 @@ function createSealedPlanningFixture() {
     maintenanceEvidenceReceiptDigest:
       historicalReceiptDigest,
   }
-  const sourceProgress = {
-    'project-directory': createTerminalSourceProgress(
+  const matchedSourceItem = createTeamSourceItem('matched')
+  const archivedSourceItem = createTeamSourceItem(
+    'archived',
+    '2026-07-25T01:00:00.000Z',
+  )
+  const sourceItems = [matchedSourceItem, archivedSourceItem]
+  const targetItems = [
+    requireTeamTargetItem(
+      configuration,
+      configurationHash,
+      matchedSourceItem,
+    ),
+    requireTeamTargetItem(
+      configuration,
+      configurationHash,
+      createTeamSourceItem('archived'),
+    ),
+    requireTeamTargetItem(
+      configuration,
+      configurationHash,
+      createTeamSourceItem('orphan'),
+    ),
+  ]
+  const sourceEvidence = {
+    'project-directory': createTwoPageTerminalSourceEvidence(
       configuration,
       configurationHash,
       'project-directory',
       authorityBinding,
+      sourceItems,
     ),
-    'work-items': createTerminalSourceProgress(
+    'work-items': createTerminalSourceEvidence(
       configuration,
       configurationHash,
       'work-items',
       authorityBinding,
     ),
-    collaboration: createTerminalSourceProgress(
+    collaboration: createTerminalSourceEvidence(
       configuration,
       configurationHash,
       'collaboration',
       authorityBinding,
     ),
-    documents: createTerminalSourceProgress(
+    documents: createTerminalSourceEvidence(
       configuration,
       configurationHash,
       'documents',
       authorityBinding,
     ),
   }
-  const targetProgress = createTerminalTargetProgress(
+  const sourceProgress = {
+    'project-directory':
+      sourceEvidence['project-directory'].progress,
+    'work-items': sourceEvidence['work-items'].progress,
+    collaboration: sourceEvidence.collaboration.progress,
+    documents: sourceEvidence.documents.progress,
+  }
+  const sourceEvidencePageBytes = {
+    'project-directory':
+      sourceEvidence['project-directory'].pageBytes,
+    'work-items': sourceEvidence['work-items'].pageBytes,
+    collaboration: sourceEvidence.collaboration.pageBytes,
+    documents: sourceEvidence.documents.pageBytes,
+  }
+  const targetEvidence = createTerminalTargetEvidence(
     configuration,
     configurationHash,
     authorityBinding,
+    targetItems,
   )
-  const provenance = createProvenance(
-    configurationHash,
-    configuration.tables['migration-state'].tableId,
-    sourceProgress,
-    targetProgress,
-    authorityBinding,
-  )
+  const targetProgress = targetEvidence.progress
+  const targetEvidencePageBytes = [targetEvidence.pageBytes]
   const historicalReceiptBinding:
     WorkspaceSearchMigrationHistoricalMaintenanceEvidenceBinding = {
       configurationHash,
@@ -906,10 +1296,17 @@ function createSealedPlanningFixture() {
     }
   const provenanceArtifact =
     createWorkspaceSearchMigrationPlanningProvenanceArtifact({
-      provenance,
+      sourceEvidencePageBytes,
+      targetEvidencePageBytes,
       historicalReceiptBindings: [historicalReceiptBinding],
     })
-  const planSeal = createEmptyPlanSeal(configurationHash)
+  const planSeal = createPlanSeal(
+    configurationHash,
+    provenanceArtifact.planningSnapshotDigest,
+    provenanceArtifact.planOperationCount,
+    provenanceArtifact.sourceOperationCount,
+    provenanceArtifact.orphanOperationCount,
+  )
   const currentAuthority = createCurrentAuthorityFromReceipt(
     configurationHash,
     configuration.tables['migration-state'].tableId,
@@ -954,7 +1351,11 @@ function createSealedPlanningFixture() {
     planSeal,
     sourceProgress,
     targetProgress,
-    provenance,
+    sourceEvidencePageBytes,
+    targetEvidencePageBytes,
+    authorityBinding,
+    sourceItems,
+    targetItems,
     historicalReceiptBinding,
     provenanceArtifact,
     currentAuthority,
@@ -963,20 +1364,39 @@ function createSealedPlanningFixture() {
 }
 
 /**
- * Creates one completed empty source evidence head through public reducers.
+ * Rebuilds a provenance artifact from the fixture's exact canonical pages.
+ *
+ * @param fixture - Complete canonical planning fixture.
+ * @param historicalReceiptBindings - Candidate durable receipt bindings.
+ * @returns Replayed provenance artifact.
+ */
+function createProvenanceArtifactWithBindings(
+  fixture: ReturnType<typeof createSealedPlanningFixture>,
+  historicalReceiptBindings:
+    readonly WorkspaceSearchMigrationHistoricalMaintenanceEvidenceBinding[],
+) {
+  return createWorkspaceSearchMigrationPlanningProvenanceArtifact({
+    sourceEvidencePageBytes: fixture.sourceEvidencePageBytes,
+    targetEvidencePageBytes: fixture.targetEvidencePageBytes,
+    historicalReceiptBindings,
+  })
+}
+
+/**
+ * Creates one completed empty source evidence page through public reducers.
  *
  * @param configuration - Complete measured configuration.
  * @param configurationHash - Digest of the measured configuration.
  * @param source - Exact logical source chain.
  * @param authority - Durable authority bound to its single page.
- * @returns Exact one-page terminal source progress.
+ * @returns Canonical page bytes and exact one-page terminal progress.
  */
-function createTerminalSourceProgress(
+function createTerminalSourceEvidence(
   configuration: WorkspaceSearchMigrationConfiguration,
   configurationHash: string,
   source: WorkspaceSearchMigrationSourceName,
   authority: WorkspaceSearchMigrationPlanningAuthorityBinding,
-): WorkspaceSearchMigrationSourceEvidenceProgress {
+) {
   const identity = {
     purpose: 'planning',
     runId,
@@ -1015,31 +1435,229 @@ function createTerminalSourceProgress(
     previousProgress: initial,
     pageResult,
   })
-  return advanceWorkspaceSearchMigrationSourceEvidenceProgress(
-    initial,
-    page,
-  )
+  return {
+    pageBytes: [
+      serializeWorkspaceSearchMigrationSourceEvidencePage(page),
+    ],
+    progress:
+      advanceWorkspaceSearchMigrationSourceEvidenceProgress(
+        initial,
+        page,
+      ),
+  }
 }
 
 /**
- * Creates one completed empty target evidence head through public reducers.
+ * Creates a two-page source chain with a binary durable cursor witness.
  *
  * @param configuration - Complete measured configuration.
  * @param configurationHash - Digest of the measured configuration.
- * @param authority - Durable authority bound to its single page.
- * @returns Exact one-page terminal target progress.
+ * @param source - Exact logical source chain.
+ * @param authority - Durable authority bound to both pages.
+ * @param sourceItems - Exact nonterminal-page source items.
+ * @param sourceTableId - Optional witness-only physical TableId override.
+ * @returns Two canonical pages and their exact terminal progress.
  */
-function createTerminalTargetProgress(
+function createTwoPageTerminalSourceEvidence(
   configuration: WorkspaceSearchMigrationConfiguration,
   configurationHash: string,
+  source: WorkspaceSearchMigrationSourceName,
   authority: WorkspaceSearchMigrationPlanningAuthorityBinding,
-): WorkspaceSearchMigrationTargetEvidenceProgress {
+  sourceItems: readonly DynamoAttributeMap[],
+  sourceTableId = configuration.tables[source].tableId,
+) {
   const identity = {
     purpose: 'planning',
     runId,
     configurationHash,
-    targetTableId:
-      configuration.tables['workspace-search'].tableId,
+    source,
+    sourceTableId,
+    stateTableId:
+      configuration.tables['migration-state'].tableId,
+  } satisfies Parameters<
+    typeof createInitialWorkspaceSearchMigrationSourceEvidenceProgress
+  >[0]
+  const initial =
+    createInitialWorkspaceSearchMigrationSourceEvidenceProgress(identity)
+  const cursor: DynamoAttributeMap = {
+    partitionKey: { B: Uint8Array.from([0, 1, 255]) },
+  }
+  const firstPage = createWorkspaceSearchMigrationSourceEvidencePage({
+    identity,
+    planningAuthority: authority,
+    sourceArtifacts: [
+      createSourceArtifactReference(`${source}:binary-cursor`),
+    ],
+    previousProgress: initial,
+    pageResult: createBinaryCursorSourcePageResult(
+      configuration,
+      configurationHash,
+      source,
+      initial.checkpoint,
+      cursor,
+      sourceItems,
+    ),
+  })
+  const firstProgress =
+    advanceWorkspaceSearchMigrationSourceEvidenceProgress(
+      initial,
+      firstPage,
+    )
+  const secondPage = createWorkspaceSearchMigrationSourceEvidencePage({
+    identity,
+    planningAuthority: authority,
+    sourceArtifacts: [
+      createSourceArtifactReference(`${source}:terminal`),
+    ],
+    previousProgress: firstProgress,
+    pageResult:
+      createEmptyTerminalSourcePageResult(firstProgress.checkpoint),
+  })
+  return {
+    pageBytes: [
+      serializeWorkspaceSearchMigrationSourceEvidencePage(firstPage),
+      serializeWorkspaceSearchMigrationSourceEvidencePage(secondPage),
+    ],
+    progress:
+      advanceWorkspaceSearchMigrationSourceEvidenceProgress(
+        firstProgress,
+        secondPage,
+      ),
+  }
+}
+
+/**
+ * Creates one reduced nonterminal page with an exact Binary cursor witness.
+ *
+ * @param configuration - Complete measured configuration.
+ * @param configurationHash - Digest of the measured configuration.
+ * @param source - Exact logical source chain.
+ * @param previous - Exact predecessor checkpoint.
+ * @param cursor - Exact durable next-page cursor.
+ * @param items - Exact source rows reduced into the page.
+ * @returns Internally consistent nonterminal page result.
+ */
+function createBinaryCursorSourcePageResult(
+  configuration: WorkspaceSearchMigrationConfiguration,
+  configurationHash: string,
+  source: WorkspaceSearchMigrationSourceName,
+  previous: MigrationSourceCheckpoint,
+  cursor: DynamoAttributeMap,
+  items: readonly DynamoAttributeMap[],
+): WorkspaceSearchMigrationSourceScanPageResult {
+  const reduced = reduceWorkspaceSearchMigrationSourceScanPage({
+    configuration,
+    configurationHash,
+    source,
+    previousCheckpoint: previous,
+    page: {
+      items: structuredClone(items),
+      lastEvaluatedKey: createExactFixtureKey(
+        items.at(-1),
+        configuration.tables[source],
+      ),
+    },
+  })
+  return {
+    ...reduced,
+    checkpoint: {
+      ...reduced.checkpoint,
+      cursor,
+    },
+  }
+}
+
+/**
+ * Extracts the exact measured primary key from one fixture item.
+ *
+ * @param item - Complete low-level source or target item.
+ * @param table - Measured table identity selecting key attributes.
+ * @returns Detached exact primary key.
+ */
+function createExactFixtureKey(
+  item: DynamoAttributeMap | undefined,
+  table: MigrationTableIdentity,
+): DynamoAttributeMap {
+  if (item === undefined) {
+    throw new Error('Expected a non-empty continued fixture page.')
+  }
+  const key: DynamoAttributeMap = {}
+  for (const descriptor of table.key) {
+    const value = item[descriptor.name]
+    if (value === undefined) {
+      throw new Error('Expected every measured fixture key attribute.')
+    }
+    key[descriptor.name] = structuredClone(value)
+  }
+  return key
+}
+
+/**
+ * Creates one empty terminal successor from a nonterminal checkpoint.
+ *
+ * @param previous - Exact nonterminal predecessor checkpoint.
+ * @returns Internally consistent empty terminal page result.
+ */
+function createEmptyTerminalSourcePageResult(
+  previous: MigrationSourceCheckpoint,
+): WorkspaceSearchMigrationSourceScanPageResult {
+  return {
+    checkpoint: {
+      completed: true,
+      aggregate: {
+        ...previous.aggregate,
+        pageCount: previous.aggregate.pageCount + 1,
+      },
+      keyDigestState: { ...previous.keyDigestState },
+      contentDigestState: { ...previous.contentDigestState },
+    },
+    sourceRows: [],
+    invalidRows: [],
+    sourceBindings: [],
+  }
+}
+
+/**
+ * Creates one strict immutable source-artifact reference.
+ *
+ * @param label - Stable source segment fixture label.
+ * @returns Exact content-addressed source artifact.
+ */
+function createSourceArtifactReference(label: string) {
+  const contentDigest = digest(`source-artifact:${label}`)
+  return {
+    objectKey:
+      createWorkspaceSearchMigrationPlanningSourceArtifactObjectKey(
+        contentDigest,
+      ),
+    versionId: `source-version-${label}`,
+    contentDigest,
+  }
+}
+
+/**
+ * Creates one completed target evidence page through public reducers.
+ *
+ * @param configuration - Complete measured configuration.
+ * @param configurationHash - Digest of the measured configuration.
+ * @param authority - Durable authority bound to its single page.
+ * @param items - Exact target rows captured by the page.
+ * @param targetTableId - Optional witness-only physical TableId override.
+ * @returns Canonical page bytes and exact one-page terminal progress.
+ */
+function createTerminalTargetEvidence(
+  configuration: WorkspaceSearchMigrationConfiguration,
+  configurationHash: string,
+  authority: WorkspaceSearchMigrationPlanningAuthorityBinding,
+  items: readonly DynamoAttributeMap[],
+  targetTableId =
+    configuration.tables['workspace-search'].tableId,
+) {
+  const identity = {
+    purpose: 'planning',
+    runId,
+    configurationHash,
+    targetTableId,
     stateTableId:
       configuration.tables['migration-state'].tableId,
   } satisfies Parameters<
@@ -1054,7 +1672,7 @@ function createTerminalTargetProgress(
       configuration,
       configurationHash,
       previousCheckpoint: initial.checkpoint,
-      page: { items: [] },
+      page: { items: structuredClone(items) },
     })
   const artifactDigest = digest('target-artifact')
   const page = createWorkspaceSearchMigrationTargetEvidencePage({
@@ -1071,88 +1689,290 @@ function createTerminalTargetProgress(
     previousProgress: initial,
     pageResult,
   })
-  return advanceWorkspaceSearchMigrationTargetEvidenceProgress(
-    initial,
-    page,
-  )
+  return {
+    pageBytes:
+      serializeWorkspaceSearchMigrationTargetEvidencePage(page),
+    progress:
+      advanceWorkspaceSearchMigrationTargetEvidenceProgress(
+        initial,
+        page,
+      ),
+  }
 }
 
 /**
- * Creates canonical five-chain provenance for one-page terminal heads.
- *
- * @param configurationHash - Reviewed configuration digest.
- * @param stateTableId - Immutable migration-state table incarnation.
- * @param sourceProgress - Four exact terminal source heads.
- * @param targetProgress - Exact terminal target head.
- * @param authority - Shared historical page authority.
- * @returns Canonical provenance with its self-authenticating digest.
+ * Near-limit canonical target chain used to exercise the final envelope cap.
  */
-function createProvenance(
+type NearLimitTargetEvidencePageBytes = {
+  /** Complete canonical target evidence page chain. */
+  readonly pageBytes: readonly Uint8Array[]
+  /** Base64 character count retained by the provenance artifact. */
+  readonly base64Characters: number
+}
+
+/**
+ * Builds a valid target chain whose Base64 witnesses nearly exhaust a budget.
+ *
+ * @param configuration - Complete measured configuration.
+ * @param configurationHash - Digest of the measured configuration.
+ * @param authority - Durable authority bound to every page.
+ * @param maximumBase64Characters - Remaining five-chain witness budget.
+ * @returns Complete terminal page bytes and their exact Base64 size.
+ */
+function createNearLimitTargetEvidencePageBytes(
+  configuration: WorkspaceSearchMigrationConfiguration,
   configurationHash: string,
-  stateTableId: string,
-  sourceProgress: Readonly<
-    Record<
-      WorkspaceSearchMigrationSourceName,
-      WorkspaceSearchMigrationSourceEvidenceProgress
-    >
-  >,
-  targetProgress: WorkspaceSearchMigrationTargetEvidenceProgress,
   authority: WorkspaceSearchMigrationPlanningAuthorityBinding,
-): WorkspaceSearchMigrationPlanningAuthorityProvenance {
-  const chainRoots:
-    WorkspaceSearchMigrationPlanningEvidenceChainRoot[] = []
-  const authorityTrace:
-    WorkspaceSearchMigrationPlanningAuthorityTraceEntry[] = []
-  for (const source of workspaceSearchMigrationSourceNames) {
-    const progress = sourceProgress[source]
-    chainRoots.push({
-      chain: source,
-      pageCount: progress.pageSequence,
-      terminalEvidenceDigest: progress.evidenceDigest,
-      terminalCheckpointDigest:
-        createWorkspaceSearchMigrationSourceCheckpointDigest(
-          progress.checkpoint,
-        ),
-    })
-    authorityTrace.push({
-      chain: source,
-      pageSequence: progress.pageSequence,
-      evidenceDigest: progress.evidenceDigest,
-      ...authority,
-    })
-  }
-  chainRoots.push({
-    chain: 'workspace-search',
-    pageCount: targetProgress.pageSequence,
-    terminalEvidenceDigest: targetProgress.evidenceDigest,
-    terminalCheckpointDigest:
-      createWorkspaceSearchMigrationTargetCheckpointDigest(
-        targetProgress.checkpoint,
-      ),
-  })
-  authorityTrace.push({
-    chain: 'workspace-search',
-    pageSequence: targetProgress.pageSequence,
-    evidenceDigest: targetProgress.evidenceDigest,
-    ...authority,
-  })
-  const provenanceFields = {
-    kind: 'workspace-search-planning-authority-provenance',
-    provenanceVersion: 1,
+  maximumBase64Characters: number,
+): NearLimitTargetEvidencePageBytes {
+  const identity = {
+    purpose: 'planning',
     runId,
     configurationHash,
-    stateTableId,
-    chainRoots,
-    authorityTrace,
-    authorityTransitions: [authority],
-  } satisfies Omit<
-    WorkspaceSearchMigrationPlanningAuthorityProvenance,
-    'provenanceDigest'
-  >
-  return {
-    ...provenanceFields,
-    provenanceDigest: createMigrationDigest(provenanceFields),
+    targetTableId:
+      configuration.tables['workspace-search'].tableId,
+    stateTableId:
+      configuration.tables['migration-state'].tableId,
+  } satisfies Parameters<
+    typeof createInitialWorkspaceSearchMigrationTargetEvidenceProgress
+  >[0]
+  let progress =
+    createInitialWorkspaceSearchMigrationTargetEvidenceProgress(
+      identity,
+    )
+  const pageBytes: Uint8Array[] = []
+  let base64Characters = 0
+  let pageIndex = 0
+  const reservedTerminalCharacters = 32 * 1024
+
+  while (true) {
+    const item = createIgnoredTargetFixtureItem(pageIndex)
+    const pageResult =
+      reduceWorkspaceSearchMigrationTargetScanPage({
+        configuration,
+        configurationHash,
+        previousCheckpoint: progress.checkpoint,
+        page: {
+          items: [item],
+          lastEvaluatedKey: createExactFixtureKey(
+            item,
+            configuration.tables['workspace-search'],
+          ),
+        },
+      })
+    const page = createWorkspaceSearchMigrationTargetEvidencePage({
+      identity,
+      planningAuthority: authority,
+      targetArtifacts: createLargeTargetArtifactReferences(
+        pageIndex,
+        100,
+        2_048,
+      ),
+      previousProgress: progress,
+      pageResult,
+    })
+    const bytes =
+      serializeWorkspaceSearchMigrationTargetEvidencePage(page)
+    const characters = Math.ceil(bytes.byteLength / 3) * 4
+    if (
+      base64Characters + characters +
+        reservedTerminalCharacters >
+          maximumBase64Characters
+    ) {
+      break
+    }
+    pageBytes.push(bytes)
+    base64Characters += characters
+    progress =
+      advanceWorkspaceSearchMigrationTargetEvidenceProgress(
+        progress,
+        page,
+      )
+    pageIndex += 1
   }
+
+  const fillItem = createIgnoredTargetFixtureItem(pageIndex)
+  const fillPageResult =
+    reduceWorkspaceSearchMigrationTargetScanPage({
+      configuration,
+      configurationHash,
+      previousCheckpoint: progress.checkpoint,
+      page: {
+        items: [fillItem],
+        lastEvaluatedKey: createExactFixtureKey(
+          fillItem,
+          configuration.tables['workspace-search'],
+        ),
+      },
+    })
+  let selectedPage:
+    ReturnType<typeof createWorkspaceSearchMigrationTargetEvidencePage> |
+      undefined
+  let selectedBytes: Uint8Array | undefined
+  let selectedCharacters = 0
+  const availableFillCharacters =
+    maximumBase64Characters -
+    base64Characters -
+    reservedTerminalCharacters
+  for (let referenceCount = 1; referenceCount <= 100; referenceCount += 1) {
+    const candidate =
+      createWorkspaceSearchMigrationTargetEvidencePage({
+        identity,
+        planningAuthority: authority,
+        targetArtifacts: createLargeTargetArtifactReferences(
+          pageIndex,
+          referenceCount,
+          2_048,
+        ),
+        previousProgress: progress,
+        pageResult: fillPageResult,
+      })
+    const candidateBytes =
+      serializeWorkspaceSearchMigrationTargetEvidencePage(candidate)
+    const candidateCharacters =
+      Math.ceil(candidateBytes.byteLength / 3) * 4
+    if (candidateCharacters > availableFillCharacters) break
+    selectedPage = candidate
+    selectedBytes = candidateBytes
+    selectedCharacters = candidateCharacters
+  }
+  if (selectedPage !== undefined && selectedBytes !== undefined) {
+    pageBytes.push(selectedBytes)
+    base64Characters += selectedCharacters
+    progress =
+      advanceWorkspaceSearchMigrationTargetEvidenceProgress(
+        progress,
+        selectedPage,
+      )
+    pageIndex += 1
+  }
+
+  const terminalResult =
+    reduceWorkspaceSearchMigrationTargetScanPage({
+      configuration,
+      configurationHash,
+      previousCheckpoint: progress.checkpoint,
+      page: { items: [] },
+    })
+  const terminalPage =
+    createWorkspaceSearchMigrationTargetEvidencePage({
+      identity,
+      planningAuthority: authority,
+      targetArtifacts: createLargeTargetArtifactReferences(
+        pageIndex,
+        1,
+        32,
+      ),
+      previousProgress: progress,
+      pageResult: terminalResult,
+    })
+  const terminalBytes =
+    serializeWorkspaceSearchMigrationTargetEvidencePage(terminalPage)
+  pageBytes.push(terminalBytes)
+  base64Characters +=
+    Math.ceil(terminalBytes.byteLength / 3) * 4
+  if (base64Characters > maximumBase64Characters) {
+    throw new Error('Near-limit target fixture exceeded its witness budget.')
+  }
+  return { pageBytes, base64Characters }
+}
+
+/**
+ * Creates one bounded set of large immutable target-artifact references.
+ *
+ * @param pageIndex - Zero-based target evidence page index.
+ * @param referenceCount - Number of unique references in this page.
+ * @param versionIdLength - Exact repeated version-ID character count.
+ * @returns Unique valid content-addressed target references.
+ */
+function createLargeTargetArtifactReferences(
+  pageIndex: number,
+  referenceCount: number,
+  versionIdLength: number,
+) {
+  return Array.from({ length: referenceCount }, (_, referenceIndex) => {
+    const contentDigest =
+      digest(`near-limit-target:${pageIndex}:${referenceIndex}`)
+    return {
+      objectKey:
+        createWorkspaceSearchMigrationPlanningTargetArtifactObjectKey(
+          contentDigest,
+        ),
+      versionId: 'v'.repeat(versionIdLength),
+      contentDigest,
+    }
+  })
+}
+
+/**
+ * Creates one recognized non-owned target row with a unique physical key.
+ *
+ * @param pageIndex - Zero-based target evidence page index.
+ * @returns Exact ignored Workspace Search item.
+ */
+function createIgnoredTargetFixtureItem(
+  pageIndex: number,
+): DynamoAttributeMap {
+  return {
+    workspaceId: { S: 'workspace-1' },
+    recordKey: { S: `VIEW#near-limit-${pageIndex}` },
+    entryType: { S: 'saved-view' },
+    payload: { S: 'near-limit-fixture' },
+  }
+}
+
+/**
+ * Creates one canonical active or archived Project Directory Team item.
+ *
+ * @param identifier - Unique Team key and entity suffix.
+ * @param archivedAt - Optional canonical archive timestamp.
+ * @returns Exact low-level source item.
+ */
+function createTeamSourceItem(
+  identifier: string,
+  archivedAt?: string,
+): DynamoAttributeMap {
+  return {
+    directoryId: { S: 'workspace-1' },
+    entryKey: { S: `000001#000000#TEAM#${identifier}` },
+    entryType: { S: 'team' },
+    teamId: { S: identifier },
+    teamSortOrder: { N: '1' },
+    nameJa: { S: `チーム ${identifier}` },
+    nameEn: { S: `Team ${identifier}` },
+    expanded: { BOOL: true },
+    ...(archivedAt === undefined
+      ? {}
+      : { archivedAt: { S: archivedAt } }),
+  }
+}
+
+/**
+ * Derives one exact present target item from an active Team source item.
+ *
+ * @param configuration - Complete measured configuration.
+ * @param configurationHash - Digest of the measured configuration.
+ * @param sourceItem - Canonical active Team source item.
+ * @returns Exact mapped Workspace Search target item.
+ */
+function requireTeamTargetItem(
+  configuration: WorkspaceSearchMigrationConfiguration,
+  configurationHash: string,
+  sourceItem: DynamoAttributeMap,
+): DynamoAttributeMap {
+  const candidate = createWorkspaceSearchMigrationSourceCandidate({
+    configurationHash,
+    source: 'project-directory',
+    sourceTable: configuration.tables['project-directory'],
+    sourceItem,
+  })
+  if (
+    candidate === undefined ||
+    !candidate.operation.after.exists
+  ) {
+    throw new Error('Expected one present Team target fixture.')
+  }
+  return structuredClone(candidate.operation.after.item)
 }
 
 /**
@@ -1243,13 +2063,21 @@ function createCurrentAuthority(
 }
 
 /**
- * Creates the canonical empty plan-seal v2 retained by the new authority root.
+ * Creates the canonical plan-seal v2 retained by the new authority root.
  *
  * @param configurationHash - Reviewed configuration digest.
+ * @param planningSnapshotDigest - Digest replayed from exact evidence pages.
+ * @param planOperationCount - Complete joined operation count.
+ * @param sourceOperationCount - Operations owned by present source rows.
+ * @param orphanOperationCount - Target-orphan deletion count.
  * @returns Existing strict plan-seal v2 fixture.
  */
-function createEmptyPlanSeal(
+function createPlanSeal(
   configurationHash: string,
+  planningSnapshotDigest: string,
+  planOperationCount: number,
+  sourceOperationCount: number,
+  orphanOperationCount: number,
 ): WorkspaceSearchPlanSeal {
   return {
     kind: 'workspace-search-plan-seal',
@@ -1259,11 +2087,13 @@ function createEmptyPlanSeal(
     runId,
     configurationHash,
     dryRunEvidenceDigest: digest('dry-run-evidence'),
-    planningSnapshotDigest: digest('planning-snapshot'),
-    planDigest: createEmptyWorkspaceSearchPlanDigest(),
-    planOperationCount: 0,
-    sourceOperationCount: 0,
-    orphanOperationCount: 0,
+    planningSnapshotDigest,
+    planDigest: planOperationCount === 0
+      ? createEmptyWorkspaceSearchPlanDigest()
+      : digest('sealed-planning-plan'),
+    planOperationCount,
+    sourceOperationCount,
+    orphanOperationCount,
     createdAt: planCreatedAt,
   }
 }

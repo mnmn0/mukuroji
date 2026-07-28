@@ -2,6 +2,7 @@ import { types as nodeUtilTypes } from 'node:util'
 import {
   createMigrationDigest,
   createWorkspaceSearchConfigurationHash,
+  createWorkspaceSearchMigrationScanSnapshotDigest,
   isCanonicalTimestamp,
   isHexDigest,
   requireMigrationIdentifier,
@@ -11,6 +12,7 @@ import {
   type MigrationSourceCheckpoint,
   type WorkspaceSearchMaintenanceEvidenceReceipt,
   type WorkspaceSearchMigrationConfiguration,
+  type WorkspaceSearchMigrationScanSnapshot,
   type WorkspaceSearchMigrationSourceName,
   type WorkspaceSearchMigrationTableRole,
   type WorkspaceSearchPlanSeal,
@@ -37,8 +39,13 @@ import {
 } from './migration-planning-join'
 import {
   createWorkspaceSearchMigrationSourceCheckpointDigest,
+  createWorkspaceSearchMigrationSourceEvidencePageDigest,
   createWorkspaceSearchMigrationSourceEvidenceProgressDigest,
+  parseWorkspaceSearchMigrationSourceEvidencePage,
+  replayWorkspaceSearchMigrationSourceEvidencePages,
+  type WorkspaceSearchMigrationSourceEvidencePage,
   type WorkspaceSearchMigrationSourceEvidenceProgress,
+  WORKSPACE_SEARCH_MIGRATION_SOURCE_EVIDENCE_MAX_BYTES,
 } from './migration-source-evidence'
 import {
   assertWorkspaceSearchMigrationLeaseAuthority,
@@ -48,8 +55,13 @@ import {
 } from './migration-state-machine'
 import {
   createWorkspaceSearchMigrationTargetCheckpointDigest,
+  createWorkspaceSearchMigrationTargetEvidencePageDigest,
   createWorkspaceSearchMigrationTargetEvidenceProgressDigest,
+  parseWorkspaceSearchMigrationTargetEvidencePage,
+  replayWorkspaceSearchMigrationTargetEvidencePages,
+  type WorkspaceSearchMigrationTargetEvidencePage,
   type WorkspaceSearchMigrationTargetEvidenceProgress,
+  WORKSPACE_SEARCH_MIGRATION_TARGET_EVIDENCE_MAX_BYTES,
 } from './migration-target-evidence'
 import {
   type WorkspaceSearchMigrationTargetScanAggregate,
@@ -123,6 +135,29 @@ export type WorkspaceSearchMigrationPlanManifestReference =
   WorkspaceSearchMigrationImmutableArtifactReference
 
 /**
+ * Exact authoritative source page accepted as a provenance witness.
+ */
+export type WorkspaceSearchMigrationPlanningSourceEvidencePage = Extract<
+  WorkspaceSearchMigrationSourceEvidencePage,
+  { readonly purpose: 'planning'; readonly evidenceVersion: 3 }
+>
+
+/**
+ * Canonical Base64 page witnesses that prove every provenance trace entry.
+ */
+export type WorkspaceSearchMigrationPlanningEvidencePageWitnesses = {
+  /** Four complete canonical source-page byte chains by fixed table role. */
+  readonly sources: Readonly<
+    Record<
+      WorkspaceSearchMigrationSourceName,
+      readonly string[]
+    >
+  >
+  /** Complete canonical Workspace Search target-page byte chain. */
+  readonly target: readonly string[]
+}
+
+/**
  * One historical receipt proven to match a provenance transition.
  */
 export type WorkspaceSearchMigrationVerifiedHistoricalReceipt = {
@@ -152,8 +187,21 @@ export type WorkspaceSearchMigrationPlanningProvenanceArtifact = {
   readonly configurationHash: string
   /** Immutable physical migration-state TableId. */
   readonly stateTableId: string
+  /** All six physical TableIds derived from the exact evidence witnesses. */
+  readonly tableIds: WorkspaceSearchMigrationSealedPlanningTableIds
+  /** Exact canonical page witnesses for every recursive evidence chain. */
+  readonly evidencePageWitnesses:
+    WorkspaceSearchMigrationPlanningEvidencePageWitnesses
   /** Complete canonical five-chain planning provenance. */
   readonly provenance: WorkspaceSearchMigrationPlanningAuthorityProvenance
+  /** Digest of source and joined-target aggregates proven by the pages. */
+  readonly planningSnapshotDigest: string
+  /** Exact number of source-owned planned operations proven by the pages. */
+  readonly sourceOperationCount: number
+  /** Exact number of orphan-target operations proven by the pages. */
+  readonly orphanOperationCount: number
+  /** Exact total planned-operation count proven by the pages. */
+  readonly planOperationCount: number
   /** Historical receipts ordered exactly like provenance transitions. */
   readonly historicalReceipts:
     readonly WorkspaceSearchMigrationVerifiedHistoricalReceipt[]
@@ -165,8 +213,12 @@ export type WorkspaceSearchMigrationPlanningProvenanceArtifact = {
  * Input used to bind provenance transitions to immutable receipt envelopes.
  */
 export type CreateWorkspaceSearchMigrationPlanningProvenanceArtifactInput = {
-  /** Complete canonical five-chain planning provenance. */
-  readonly provenance: WorkspaceSearchMigrationPlanningAuthorityProvenance
+  /** Canonical bytes for every authoritative source evidence page. */
+  readonly sourceEvidencePageBytes: Readonly<
+    Record<WorkspaceSearchMigrationSourceName, readonly Uint8Array[]>
+  >
+  /** Canonical bytes for every authoritative target evidence page. */
+  readonly targetEvidencePageBytes: readonly Uint8Array[]
   /** Durable historical bindings ordered like provenance transitions. */
   readonly historicalReceiptBindings:
     readonly WorkspaceSearchMigrationHistoricalMaintenanceEvidenceBinding[]
@@ -301,7 +353,7 @@ export type CreateWorkspaceSearchMigrationSealedPlanningAuthorityInput = {
  * Historical receipts are validated for immutable run/fence/owner/configuration
  * binding but are deliberately not required to remain fresh.
  *
- * @param input - Canonical provenance and ordered durable receipt bindings.
+ * @param input - Canonical evidence-page bytes and durable receipt bindings.
  * @returns Detached strict provenance artifact.
  */
 export function createWorkspaceSearchMigrationPlanningProvenanceArtifact(
@@ -311,15 +363,18 @@ export function createWorkspaceSearchMigrationPlanningProvenanceArtifact(
     const inputRecord = requireRecord(input)
     requireExactKeys(inputRecord, [
       'historicalReceiptBindings',
-      'provenance',
+      'sourceEvidencePageBytes',
+      'targetEvidencePageBytes',
     ])
-    const provenance = readPlanningAuthorityProvenance(
-      readOwn(inputRecord, 'provenance'),
-    )
     const bindings = requireDenseArray(
       readOwn(inputRecord, 'historicalReceiptBindings'),
       maximumPlanningEvidencePageCount,
     )
+    const verifiedEvidence = readPlanningEvidencePageByteInput(
+      readOwn(inputRecord, 'sourceEvidencePageBytes'),
+      readOwn(inputRecord, 'targetEvidencePageBytes'),
+    )
+    const provenance = verifiedEvidence.provenance
     if (
       bindings.length !== provenance.authorityTransitions.length
     ) {
@@ -339,7 +394,7 @@ export function createWorkspaceSearchMigrationPlanningProvenanceArtifact(
         provenance,
         historicalReceipts,
       )
-    return {
+    const artifact: WorkspaceSearchMigrationPlanningProvenanceArtifact = {
       kind: 'workspace-search-planning-provenance-artifact',
       artifactVersion: 1,
       migrationId: WORKSPACE_SEARCH_MIGRATION_ID,
@@ -347,10 +402,21 @@ export function createWorkspaceSearchMigrationPlanningProvenanceArtifact(
       runId: provenance.runId,
       configurationHash: provenance.configurationHash,
       stateTableId: provenance.stateTableId,
+      tableIds: verifiedEvidence.tableIds,
+      evidencePageWitnesses: verifiedEvidence.evidencePageWitnesses,
       provenance,
+      planningSnapshotDigest: verifiedEvidence.planningSnapshotDigest,
+      sourceOperationCount: verifiedEvidence.sourceOperationCount,
+      orphanOperationCount: verifiedEvidence.orphanOperationCount,
+      planOperationCount: verifiedEvidence.planOperationCount,
       historicalReceipts,
       historicalReceiptBindingDigest,
     }
+    requireCanonicalArtifactSize(
+      artifact,
+      WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_ARTIFACT_MAX_BYTES,
+    )
+    return artifact
   })
 }
 
@@ -471,8 +537,17 @@ export function createWorkspaceSearchMigrationSealedPlanningAuthority(
       planningProvenanceArtifact.configurationHash !==
         configurationHash ||
       planningProvenanceArtifact.stateTableId !== stateTableId ||
+      !sameTableIds(planningProvenanceArtifact.tableIds, tableIds) ||
       planningProvenanceArtifactReference.contentDigest !==
-        createMigrationDigest(planningProvenanceArtifact)
+        createMigrationDigest(planningProvenanceArtifact) ||
+      planningProvenanceArtifact.planningSnapshotDigest !==
+        planSeal.planningSnapshotDigest ||
+      planningProvenanceArtifact.sourceOperationCount !==
+        planSeal.sourceOperationCount ||
+      planningProvenanceArtifact.orphanOperationCount !==
+        planSeal.orphanOperationCount ||
+      planningProvenanceArtifact.planOperationCount !==
+        planSeal.planOperationCount
     ) {
       return failSealedAuthority()
     }
@@ -578,6 +653,750 @@ export function parseWorkspaceSearchMigrationSealedPlanningAuthority(
 }
 
 /**
+ * Detached parsed page chains used only while proving artifact correlations.
+ */
+type ParsedWorkspaceSearchMigrationPlanningEvidencePages = {
+  /** Four complete parsed planning-v3 source chains. */
+  readonly sources: Readonly<
+    Record<
+      WorkspaceSearchMigrationSourceName,
+      readonly WorkspaceSearchMigrationPlanningSourceEvidencePage[]
+    >
+  >
+  /** Complete parsed planning-v1 target chain. */
+  readonly target: readonly WorkspaceSearchMigrationTargetEvidencePage[]
+}
+
+/**
+ * Complete proof reconstructed from canonical page witnesses.
+ */
+type VerifiedWorkspaceSearchMigrationPlanningEvidence = {
+  /** Exact canonical Base64 witnesses retained by the artifact. */
+  readonly evidencePageWitnesses:
+    WorkspaceSearchMigrationPlanningEvidencePageWitnesses
+  /** All six physical TableIds derived from the replayed witnesses. */
+  readonly tableIds: WorkspaceSearchMigrationSealedPlanningTableIds
+  /** Provenance derived exclusively from replayed page witnesses. */
+  readonly provenance: WorkspaceSearchMigrationPlanningAuthorityProvenance
+  /** Digest of exact source and joined-target scan aggregates. */
+  readonly planningSnapshotDigest: string
+  /** Exact number of source-owned planned operations. */
+  readonly sourceOperationCount: number
+  /** Exact number of orphan-target planned operations. */
+  readonly orphanOperationCount: number
+  /** Exact total planned-operation count. */
+  readonly planOperationCount: number
+}
+
+/**
+ * Incremental cheap bounds applied before parsing canonical page witnesses.
+ */
+type PlanningEvidenceWitnessBudget = {
+  /** Combined page count across all five chains. */
+  pageCount: number
+  /** Combined decoded canonical page bytes. */
+  canonicalPageBytes: number
+  /** Combined canonical Base64 characters stored in the artifact. */
+  base64Characters: number
+}
+
+/**
+ * Reads caller-owned canonical page bytes and reconstructs their proof.
+ *
+ * @param sourceValue - Four fixed-role canonical source-page byte arrays.
+ * @param targetValue - Canonical target-page byte array.
+ * @returns Replayed page witnesses and all derived commitments.
+ */
+function readPlanningEvidencePageByteInput(
+  sourceValue: unknown,
+  targetValue: unknown,
+): VerifiedWorkspaceSearchMigrationPlanningEvidence {
+  const sourcesRecord = requireRecord(sourceValue)
+  requireExactKeys(sourcesRecord, workspaceSearchMigrationSourceNames)
+  const budget: PlanningEvidenceWitnessBudget = {
+    pageCount: 0,
+    canonicalPageBytes: 0,
+    base64Characters: 0,
+  }
+  const projectDirectory = readSourceEvidencePageByteChain(
+    readOwn(sourcesRecord, 'project-directory'),
+    'project-directory',
+    budget,
+  )
+  const workItems = readSourceEvidencePageByteChain(
+    readOwn(sourcesRecord, 'work-items'),
+    'work-items',
+    budget,
+  )
+  const collaboration = readSourceEvidencePageByteChain(
+    readOwn(sourcesRecord, 'collaboration'),
+    'collaboration',
+    budget,
+  )
+  const documents = readSourceEvidencePageByteChain(
+    readOwn(sourcesRecord, 'documents'),
+    'documents',
+    budget,
+  )
+  const target = readTargetEvidencePageByteChain(targetValue, budget)
+  return verifyPlanningEvidencePages(
+    {
+      sources: {
+        'project-directory': projectDirectory.pages,
+        'work-items': workItems.pages,
+        collaboration: collaboration.pages,
+        documents: documents.pages,
+      },
+      target: target.pages,
+    },
+    {
+      sources: {
+        'project-directory': projectDirectory.witnesses,
+        'work-items': workItems.witnesses,
+        collaboration: collaboration.witnesses,
+        documents: documents.witnesses,
+      },
+      target: target.witnesses,
+    },
+  )
+}
+
+/**
+ * Reads Base64 page witnesses already embedded in a parsed artifact.
+ *
+ * @param value - Candidate fixed-role witness bundle.
+ * @returns Replayed witnesses and all derived commitments.
+ */
+function readPlanningEvidencePagesArtifact(
+  value: unknown,
+): VerifiedWorkspaceSearchMigrationPlanningEvidence {
+  const record = requireRecord(value)
+  requireExactKeys(record, ['sources', 'target'])
+  const sourcesRecord = requireRecord(readOwn(record, 'sources'))
+  requireExactKeys(sourcesRecord, workspaceSearchMigrationSourceNames)
+  const budget: PlanningEvidenceWitnessBudget = {
+    pageCount: 0,
+    canonicalPageBytes: 0,
+    base64Characters: 0,
+  }
+  const projectDirectory = readStoredSourceEvidencePageChain(
+    readOwn(sourcesRecord, 'project-directory'),
+    'project-directory',
+    budget,
+  )
+  const workItems = readStoredSourceEvidencePageChain(
+    readOwn(sourcesRecord, 'work-items'),
+    'work-items',
+    budget,
+  )
+  const collaboration = readStoredSourceEvidencePageChain(
+    readOwn(sourcesRecord, 'collaboration'),
+    'collaboration',
+    budget,
+  )
+  const documents = readStoredSourceEvidencePageChain(
+    readOwn(sourcesRecord, 'documents'),
+    'documents',
+    budget,
+  )
+  const target = readStoredTargetEvidencePageChain(
+    readOwn(record, 'target'),
+    budget,
+  )
+  return verifyPlanningEvidencePages(
+    {
+      sources: {
+        'project-directory': projectDirectory.pages,
+        'work-items': workItems.pages,
+        collaboration: collaboration.pages,
+        documents: documents.pages,
+      },
+      target: target.pages,
+    },
+    {
+      sources: {
+        'project-directory': projectDirectory.witnesses,
+        'work-items': workItems.witnesses,
+        collaboration: collaboration.witnesses,
+        documents: documents.witnesses,
+      },
+      target: target.witnesses,
+    },
+  )
+}
+
+/**
+ * One parsed source chain paired with its retained Base64 witnesses.
+ */
+type ParsedSourceEvidencePageChain = {
+  /** Strict canonical planning-v3 source pages. */
+  readonly pages:
+    readonly WorkspaceSearchMigrationPlanningSourceEvidencePage[]
+  /** Exact canonical page bytes encoded as canonical Base64. */
+  readonly witnesses: readonly string[]
+}
+
+/**
+ * One parsed target chain paired with its retained Base64 witnesses.
+ */
+type ParsedTargetEvidencePageChain = {
+  /** Strict canonical planning-v1 target pages. */
+  readonly pages: readonly WorkspaceSearchMigrationTargetEvidencePage[]
+  /** Exact canonical page bytes encoded as canonical Base64. */
+  readonly witnesses: readonly string[]
+}
+
+/**
+ * Reads one caller-owned source-page byte chain under the shared budget.
+ *
+ * @param value - Candidate dense canonical byte array.
+ * @param expectedSource - Required fixed source role.
+ * @param budget - Shared five-chain byte and count budget.
+ * @returns Parsed source pages and canonical Base64 witnesses.
+ */
+function readSourceEvidencePageByteChain(
+  value: unknown,
+  expectedSource: WorkspaceSearchMigrationSourceName,
+  budget: PlanningEvidenceWitnessBudget,
+): ParsedSourceEvidencePageChain {
+  const candidates = requireDenseArray(
+    value,
+    maximumPlanningEvidencePageCount,
+  )
+  if (candidates.length === 0) return failSealedAuthority()
+  const pages: WorkspaceSearchMigrationPlanningSourceEvidencePage[] = []
+  const witnesses: string[] = []
+  for (const [index, candidate] of candidates.entries()) {
+    const bytes = readDetachedEvidencePageBytes(
+      candidate,
+      WORKSPACE_SEARCH_MIGRATION_SOURCE_EVIDENCE_MAX_BYTES,
+      budget,
+    )
+    const page = parseWorkspaceSearchMigrationSourceEvidencePage(bytes)
+    if (
+      page.purpose !== 'planning' ||
+      page.evidenceVersion !== 3 ||
+      page.source !== expectedSource ||
+      page.pageSequence !== index + 1
+    ) {
+      return failSealedAuthority()
+    }
+    pages.push(page)
+    witnesses.push(Buffer.from(bytes).toString('base64'))
+  }
+  return { pages, witnesses }
+}
+
+/**
+ * Reads one caller-owned target-page byte chain under the shared budget.
+ *
+ * @param value - Candidate dense canonical byte array.
+ * @param budget - Shared five-chain byte and count budget.
+ * @returns Parsed target pages and canonical Base64 witnesses.
+ */
+function readTargetEvidencePageByteChain(
+  value: unknown,
+  budget: PlanningEvidenceWitnessBudget,
+): ParsedTargetEvidencePageChain {
+  const candidates = requireDenseArray(
+    value,
+    maximumPlanningEvidencePageCount,
+  )
+  if (candidates.length === 0) return failSealedAuthority()
+  const pages: WorkspaceSearchMigrationTargetEvidencePage[] = []
+  const witnesses: string[] = []
+  for (const [index, candidate] of candidates.entries()) {
+    const bytes = readDetachedEvidencePageBytes(
+      candidate,
+      WORKSPACE_SEARCH_MIGRATION_TARGET_EVIDENCE_MAX_BYTES,
+      budget,
+    )
+    const page = parseWorkspaceSearchMigrationTargetEvidencePage(bytes)
+    if (page.pageSequence !== index + 1) return failSealedAuthority()
+    pages.push(page)
+    witnesses.push(Buffer.from(bytes).toString('base64'))
+  }
+  return { pages, witnesses }
+}
+
+/**
+ * Reads one artifact-embedded source witness chain.
+ *
+ * @param value - Candidate dense canonical Base64 array.
+ * @param expectedSource - Required fixed source role.
+ * @param budget - Shared five-chain byte and count budget.
+ * @returns Parsed source pages and canonical Base64 witnesses.
+ */
+function readStoredSourceEvidencePageChain(
+  value: unknown,
+  expectedSource: WorkspaceSearchMigrationSourceName,
+  budget: PlanningEvidenceWitnessBudget,
+): ParsedSourceEvidencePageChain {
+  const candidates = requireDenseArray(
+    value,
+    maximumPlanningEvidencePageCount,
+  )
+  if (candidates.length === 0) return failSealedAuthority()
+  const pages: WorkspaceSearchMigrationPlanningSourceEvidencePage[] = []
+  const witnesses: string[] = []
+  for (const [index, candidate] of candidates.entries()) {
+    const witness = readEvidencePageBase64(
+      candidate,
+      WORKSPACE_SEARCH_MIGRATION_SOURCE_EVIDENCE_MAX_BYTES,
+      budget,
+    )
+    const page = parseWorkspaceSearchMigrationSourceEvidencePage(
+      witness.bytes,
+    )
+    if (
+      page.purpose !== 'planning' ||
+      page.evidenceVersion !== 3 ||
+      page.source !== expectedSource ||
+      page.pageSequence !== index + 1
+    ) {
+      return failSealedAuthority()
+    }
+    pages.push(page)
+    witnesses.push(witness.base64)
+  }
+  return { pages, witnesses }
+}
+
+/**
+ * Reads one artifact-embedded target witness chain.
+ *
+ * @param value - Candidate dense canonical Base64 array.
+ * @param budget - Shared five-chain byte and count budget.
+ * @returns Parsed target pages and canonical Base64 witnesses.
+ */
+function readStoredTargetEvidencePageChain(
+  value: unknown,
+  budget: PlanningEvidenceWitnessBudget,
+): ParsedTargetEvidencePageChain {
+  const candidates = requireDenseArray(
+    value,
+    maximumPlanningEvidencePageCount,
+  )
+  if (candidates.length === 0) return failSealedAuthority()
+  const pages: WorkspaceSearchMigrationTargetEvidencePage[] = []
+  const witnesses: string[] = []
+  for (const [index, candidate] of candidates.entries()) {
+    const witness = readEvidencePageBase64(
+      candidate,
+      WORKSPACE_SEARCH_MIGRATION_TARGET_EVIDENCE_MAX_BYTES,
+      budget,
+    )
+    const page = parseWorkspaceSearchMigrationTargetEvidencePage(
+      witness.bytes,
+    )
+    if (page.pageSequence !== index + 1) return failSealedAuthority()
+    pages.push(page)
+    witnesses.push(witness.base64)
+  }
+  return { pages, witnesses }
+}
+
+/**
+ * Detached canonical Base64 witness and its decoded page bytes.
+ */
+type DecodedEvidencePageWitness = {
+  /** Canonical padded Base64 representation. */
+  readonly base64: string
+  /** Detached exact decoded page bytes. */
+  readonly bytes: Uint8Array
+}
+
+/**
+ * Reads one canonical Base64 page witness under shared bounds.
+ *
+ * @param value - Candidate Base64 text.
+ * @param maximumPageBytes - Strict page-codec byte ceiling.
+ * @param budget - Shared five-chain byte and count budget.
+ * @returns Canonical text and detached decoded bytes.
+ */
+function readEvidencePageBase64(
+  value: unknown,
+  maximumPageBytes: number,
+  budget: PlanningEvidenceWitnessBudget,
+): DecodedEvidencePageWitness {
+  const maximumBase64Length = Math.ceil(maximumPageBytes / 3) * 4
+  const base64 = readBoundedText(value, maximumBase64Length)
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(base64)) {
+    return failSealedAuthority()
+  }
+  const decoded = Buffer.from(base64, 'base64')
+  if (
+    decoded.byteLength === 0 ||
+    decoded.byteLength > maximumPageBytes ||
+    decoded.toString('base64') !== base64
+  ) {
+    return failSealedAuthority()
+  }
+  addEvidencePageToBudget(decoded.byteLength, base64.length, budget)
+  return {
+    base64,
+    bytes: new Uint8Array(decoded),
+  }
+}
+
+/**
+ * Copies caller-owned exact page bytes after cheap intrinsic bounds.
+ *
+ * @param value - Candidate Uint8Array.
+ * @param maximumPageBytes - Strict page-codec byte ceiling.
+ * @param budget - Shared five-chain byte and count budget.
+ * @returns Detached exact bytes.
+ */
+function readDetachedEvidencePageBytes(
+  value: unknown,
+  maximumPageBytes: number,
+  budget: PlanningEvidenceWitnessBudget,
+): Uint8Array {
+  if (nodeUtilTypes.isProxy(value) || !(value instanceof Uint8Array)) {
+    return failSealedAuthority()
+  }
+  const byteLength = readIntrinsicUint8ArrayByteLength(value)
+  if (byteLength === 0 || byteLength > maximumPageBytes) {
+    return failSealedAuthority()
+  }
+  const base64Length = Math.ceil(byteLength / 3) * 4
+  addEvidencePageToBudget(byteLength, base64Length, budget)
+  const detached: unknown = structuredClone(value)
+  if (
+    !(detached instanceof Uint8Array) ||
+    readIntrinsicUint8ArrayByteLength(detached) !== byteLength
+  ) {
+    return failSealedAuthority()
+  }
+  return detached
+}
+
+/**
+ * Reads a typed array's internal byte length without invoking own accessors.
+ *
+ * @param value - Non-Proxy Uint8Array.
+ * @returns Intrinsic byte length.
+ */
+function readIntrinsicUint8ArrayByteLength(value: Uint8Array): number {
+  const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype)
+  if (typedArrayPrototype === null) return failSealedAuthority()
+  const descriptor = Object.getOwnPropertyDescriptor(
+    typedArrayPrototype,
+    'byteLength',
+  )
+  if (descriptor?.get === undefined) return failSealedAuthority()
+  const byteLength: unknown = Reflect.apply(descriptor.get, value, [])
+  if (
+    typeof byteLength !== 'number' ||
+    !Number.isSafeInteger(byteLength) ||
+    byteLength < 0
+  ) {
+    return failSealedAuthority()
+  }
+  return byteLength
+}
+
+/**
+ * Adds one page to the aggregate witness budget before deep parsing.
+ *
+ * @param pageBytes - Exact decoded page byte length.
+ * @param base64Characters - Exact retained Base64 character length.
+ * @param budget - Mutable shared budget.
+ */
+function addEvidencePageToBudget(
+  pageBytes: number,
+  base64Characters: number,
+  budget: PlanningEvidenceWitnessBudget,
+): void {
+  budget.pageCount = addSafeCounts(budget.pageCount, 1)
+  budget.canonicalPageBytes = addSafeCounts(
+    budget.canonicalPageBytes,
+    pageBytes,
+  )
+  budget.base64Characters = addSafeCounts(
+    budget.base64Characters,
+    base64Characters,
+  )
+  if (
+    budget.pageCount > maximumPlanningEvidencePageCount ||
+    budget.canonicalPageBytes >
+      WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_ARTIFACT_MAX_BYTES ||
+    budget.base64Characters >
+      WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_ARTIFACT_MAX_BYTES
+  ) {
+    return failSealedAuthority()
+  }
+}
+
+/**
+ * Replays five canonical page chains and derives every retained commitment.
+ *
+ * @param evidencePages - Strict parsed source and target pages.
+ * @param evidencePageWitnesses - Exact canonical bytes retained as Base64.
+ * @returns Provenance, snapshot digest, and operation counts.
+ */
+function verifyPlanningEvidencePages(
+  evidencePages: ParsedWorkspaceSearchMigrationPlanningEvidencePages,
+  evidencePageWitnesses:
+    WorkspaceSearchMigrationPlanningEvidencePageWitnesses,
+): VerifiedWorkspaceSearchMigrationPlanningEvidence {
+  const anchor =
+    evidencePages.sources['project-directory'][0]
+  if (anchor === undefined) return failSealedAuthority()
+  const runId = anchor.runId
+  const configurationHash = anchor.configurationHash
+  const stateTableId = anchor.stateTableId
+  const chainRoots:
+    WorkspaceSearchMigrationPlanningEvidenceChainRoot[] = []
+  const authorityTrace:
+    WorkspaceSearchMigrationPlanningAuthorityTraceEntry[] = []
+  const sourceAggregates:
+    Partial<Record<WorkspaceSearchMigrationSourceName, MigrationScanAggregate>> =
+      {}
+  const sourceTableIds:
+    Partial<Record<WorkspaceSearchMigrationSourceName, string>> = {}
+  const sourceActionByTargetDigest = new Map<string, 'delete' | 'put'>()
+  let sourceOperationCount = 0
+  for (const source of workspaceSearchMigrationSourceNames) {
+    const pages = evidencePages.sources[source]
+    const first = pages[0]
+    if (
+      first === undefined ||
+      first.runId !== runId ||
+      first.configurationHash !== configurationHash ||
+      first.stateTableId !== stateTableId
+    ) {
+      return failSealedAuthority()
+    }
+    const replay = replayWorkspaceSearchMigrationSourceEvidencePages(
+      {
+        purpose: 'planning',
+        runId,
+        configurationHash,
+        source,
+        sourceTableId: first.sourceTableId,
+        stateTableId,
+      },
+      pages,
+    )
+    if (
+      !replay.progress.checkpoint.completed ||
+      replay.progress.checkpoint.cursor !== undefined ||
+      replay.progress.checkpoint.aggregate.invalid !== 0
+    ) {
+      return failSealedAuthority()
+    }
+    const progress = replay.progress
+    chainRoots.push({
+      chain: source,
+      pageCount: progress.pageSequence,
+      terminalEvidenceDigest: progress.evidenceDigest,
+      terminalCheckpointDigest:
+        createWorkspaceSearchMigrationSourceCheckpointDigest(
+          progress.checkpoint,
+        ),
+    })
+    sourceAggregates[source] = progress.checkpoint.aggregate
+    sourceTableIds[source] = first.sourceTableId
+    for (const page of pages) {
+      authorityTrace.push({
+        chain: source,
+        pageSequence: page.pageSequence,
+        evidenceDigest:
+          createWorkspaceSearchMigrationSourceEvidencePageDigest(page),
+        ownerId: page.planningAuthority.ownerId,
+        fenceToken: page.planningAuthority.fenceToken,
+        maintenanceEvidencePointerRevision:
+          page.planningAuthority.maintenanceEvidencePointerRevision,
+        maintenanceEvidenceReceiptDigest:
+          page.planningAuthority.maintenanceEvidenceReceiptDigest,
+      })
+    }
+    sourceOperationCount = addSafeCounts(
+      sourceOperationCount,
+      replay.sourceBindings.length,
+    )
+    for (const binding of replay.sourceBindings) {
+      if (sourceActionByTargetDigest.has(binding.targetKeyDigest)) {
+        return failSealedAuthority()
+      }
+      sourceActionByTargetDigest.set(
+        binding.targetKeyDigest,
+        binding.targetAction,
+      )
+    }
+  }
+  const targetPages = evidencePages.target
+  const firstTarget = targetPages[0]
+  if (
+    firstTarget === undefined ||
+    firstTarget.runId !== runId ||
+    firstTarget.configurationHash !== configurationHash ||
+    firstTarget.stateTableId !== stateTableId
+  ) {
+    return failSealedAuthority()
+  }
+  const targetReplay = replayWorkspaceSearchMigrationTargetEvidencePages(
+    {
+      purpose: 'planning',
+      runId,
+      configurationHash,
+      targetTableId: firstTarget.targetTableId,
+      stateTableId,
+    },
+    targetPages,
+  )
+  if (
+    !targetReplay.progress.checkpoint.completed ||
+    targetReplay.progress.checkpoint.cursor !== undefined ||
+    targetReplay.progress.checkpoint.aggregate.invalid !== 0
+  ) {
+    return failSealedAuthority()
+  }
+  const targetProgress = targetReplay.progress
+  chainRoots.push({
+    chain: 'workspace-search',
+    pageCount: targetProgress.pageSequence,
+    terminalEvidenceDigest: targetProgress.evidenceDigest,
+    terminalCheckpointDigest:
+      createWorkspaceSearchMigrationTargetCheckpointDigest(
+        targetProgress.checkpoint,
+      ),
+  })
+  for (const page of targetPages) {
+    authorityTrace.push({
+      chain: 'workspace-search',
+      pageSequence: page.pageSequence,
+      evidenceDigest:
+        createWorkspaceSearchMigrationTargetEvidencePageDigest(page),
+      ownerId: page.planningAuthority.ownerId,
+      fenceToken: page.planningAuthority.fenceToken,
+      maintenanceEvidencePointerRevision:
+        page.planningAuthority.maintenanceEvidencePointerRevision,
+      maintenanceEvidenceReceiptDigest:
+        page.planningAuthority.maintenanceEvidenceReceiptDigest,
+    })
+  }
+  const observedTargetDigests = new Set<string>()
+  let projectedTargetCount = 0
+  let orphanOperationCount = 0
+  for (const binding of targetReplay.observedTargetBindings) {
+    if (observedTargetDigests.has(binding.targetKeyDigest)) {
+      return failSealedAuthority()
+    }
+    observedTargetDigests.add(binding.targetKeyDigest)
+    const sourceAction = sourceActionByTargetDigest.get(
+      binding.targetKeyDigest,
+    )
+    if (sourceAction === undefined) {
+      orphanOperationCount = addSafeCounts(orphanOperationCount, 1)
+    } else if (sourceAction === 'put') {
+      projectedTargetCount = addSafeCounts(projectedTargetCount, 1)
+    }
+  }
+  for (const row of targetReplay.targetRows) {
+    if (
+      row.classification === 'ignored' &&
+      sourceActionByTargetDigest.has(row.targetKeyDigest)
+    ) {
+      return failSealedAuthority()
+    }
+  }
+  const planOperationCount = addSafeCounts(
+    sourceOperationCount,
+    orphanOperationCount,
+  )
+  if (
+    planOperationCount > maximumPlannedOperationCount ||
+    targetReplay.observedTargetBindings.length !==
+      targetProgress.checkpoint.aggregate.owned
+  ) {
+    return failSealedAuthority()
+  }
+  const projectDirectoryAggregate =
+    sourceAggregates['project-directory']
+  const workItemsAggregate = sourceAggregates['work-items']
+  const collaborationAggregate = sourceAggregates.collaboration
+  const documentsAggregate = sourceAggregates.documents
+  const projectDirectoryTableId =
+    sourceTableIds['project-directory']
+  const workItemsTableId = sourceTableIds['work-items']
+  const collaborationTableId = sourceTableIds.collaboration
+  const documentsTableId = sourceTableIds.documents
+  if (
+    projectDirectoryAggregate === undefined ||
+    workItemsAggregate === undefined ||
+    collaborationAggregate === undefined ||
+    documentsAggregate === undefined ||
+    projectDirectoryTableId === undefined ||
+    workItemsTableId === undefined ||
+    collaborationTableId === undefined ||
+    documentsTableId === undefined
+  ) {
+    return failSealedAuthority()
+  }
+  const targetAggregate = targetProgress.checkpoint.aggregate
+  const scanSnapshot: WorkspaceSearchMigrationScanSnapshot = {
+    configurationHash,
+    sources: {
+      'project-directory': projectDirectoryAggregate,
+      'work-items': workItemsAggregate,
+      collaboration: collaborationAggregate,
+      documents: documentsAggregate,
+    },
+    target: {
+      scanned: targetAggregate.scanned,
+      mapped: targetAggregate.owned,
+      ignored: targetAggregate.ignored,
+      invalid: targetAggregate.invalid,
+      projected: projectedTargetCount,
+      deleted:
+        targetReplay.observedTargetBindings.length -
+        projectedTargetCount,
+      keyDigest: targetAggregate.keyDigest,
+      contentDigest: targetAggregate.contentDigest,
+      pageCount: targetAggregate.pageCount,
+    },
+  }
+  const authorityTransitions =
+    derivePlanningAuthorityTransitions(authorityTrace)
+  const provenanceFields = {
+    kind: 'workspace-search-planning-authority-provenance',
+    provenanceVersion: 1,
+    runId,
+    configurationHash,
+    stateTableId,
+    chainRoots,
+    authorityTrace,
+    authorityTransitions,
+  } satisfies Omit<
+    WorkspaceSearchMigrationPlanningAuthorityProvenance,
+    'provenanceDigest'
+  >
+  const tableIds = readTableIds({
+    'project-directory': projectDirectoryTableId,
+    'work-items': workItemsTableId,
+    collaboration: collaborationTableId,
+    documents: documentsTableId,
+    'workspace-search': firstTarget.targetTableId,
+    'migration-state': stateTableId,
+  })
+  return {
+    evidencePageWitnesses,
+    tableIds,
+    provenance: {
+      ...provenanceFields,
+      provenanceDigest: createMigrationDigest(provenanceFields),
+    },
+    planningSnapshotDigest:
+      createWorkspaceSearchMigrationScanSnapshotDigest(scanSnapshot),
+    sourceOperationCount,
+    orphanOperationCount,
+    planOperationCount,
+  }
+}
+
+/**
  * Reads and validates one full provenance artifact.
  *
  * @param value - Candidate parsed artifact.
@@ -590,14 +1409,20 @@ function readPlanningProvenanceArtifact(
   requireExactKeys(record, [
     'artifactVersion',
     'configurationHash',
+    'evidencePageWitnesses',
     'historicalReceiptBindingDigest',
     'historicalReceipts',
     'kind',
     'migrationId',
     'migrationVersion',
+    'orphanOperationCount',
+    'planOperationCount',
+    'planningSnapshotDigest',
     'provenance',
     'runId',
+    'sourceOperationCount',
     'stateTableId',
+    'tableIds',
   ])
   if (
     readOwn(record, 'kind') !==
@@ -610,6 +1435,9 @@ function readPlanningProvenanceArtifact(
   ) {
     return failSealedAuthority()
   }
+  const verifiedEvidence = readPlanningEvidencePagesArtifact(
+    readOwn(record, 'evidencePageWitnesses'),
+  )
   const runId = readIdentifier(readOwn(record, 'runId'))
   const configurationHash = readDigest(
     readOwn(record, 'configurationHash'),
@@ -618,13 +1446,46 @@ function readPlanningProvenanceArtifact(
     readOwn(record, 'stateTableId'),
     1_024,
   )
+  const tableIds = readTableIds(readOwn(record, 'tableIds'))
   const provenance = readPlanningAuthorityProvenance(
     readOwn(record, 'provenance'),
   )
   if (
     provenance.runId !== runId ||
     provenance.configurationHash !== configurationHash ||
-    provenance.stateTableId !== stateTableId
+    provenance.stateTableId !== stateTableId ||
+    provenance.provenanceDigest !==
+      verifiedEvidence.provenance.provenanceDigest
+  ) {
+    return failSealedAuthority()
+  }
+  const planningSnapshotDigest = readDigest(
+    readOwn(record, 'planningSnapshotDigest'),
+  )
+  const sourceOperationCount = readNonNegativeSafeInteger(
+    readOwn(record, 'sourceOperationCount'),
+  )
+  const orphanOperationCount = readNonNegativeSafeInteger(
+    readOwn(record, 'orphanOperationCount'),
+  )
+  const planOperationCount = readNonNegativeSafeInteger(
+    readOwn(record, 'planOperationCount'),
+  )
+  if (
+    runId !== verifiedEvidence.provenance.runId ||
+    configurationHash !==
+      verifiedEvidence.provenance.configurationHash ||
+    stateTableId !== verifiedEvidence.provenance.stateTableId ||
+    stateTableId !== tableIds['migration-state'] ||
+    !sameTableIds(tableIds, verifiedEvidence.tableIds) ||
+    planningSnapshotDigest !==
+      verifiedEvidence.planningSnapshotDigest ||
+    sourceOperationCount !== verifiedEvidence.sourceOperationCount ||
+    orphanOperationCount !== verifiedEvidence.orphanOperationCount ||
+    planOperationCount !== verifiedEvidence.planOperationCount ||
+    planOperationCount > maximumPlannedOperationCount ||
+    addSafeCounts(sourceOperationCount, orphanOperationCount) !==
+      planOperationCount
   ) {
     return failSealedAuthority()
   }
@@ -656,7 +1517,7 @@ function readPlanningProvenanceArtifact(
   ) {
     return failSealedAuthority()
   }
-  return {
+  const artifact: WorkspaceSearchMigrationPlanningProvenanceArtifact = {
     kind: 'workspace-search-planning-provenance-artifact',
     artifactVersion: 1,
     migrationId: WORKSPACE_SEARCH_MIGRATION_ID,
@@ -664,10 +1525,21 @@ function readPlanningProvenanceArtifact(
     runId,
     configurationHash,
     stateTableId,
+    tableIds,
+    evidencePageWitnesses: verifiedEvidence.evidencePageWitnesses,
     provenance,
+    planningSnapshotDigest,
+    sourceOperationCount,
+    orphanOperationCount,
+    planOperationCount,
     historicalReceipts,
     historicalReceiptBindingDigest,
   }
+  requireCanonicalArtifactSize(
+    artifact,
+    WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_ARTIFACT_MAX_BYTES,
+  )
+  return artifact
 }
 
 /**
@@ -2032,6 +2904,26 @@ function readTableIds(
 }
 
 /**
+ * Compares every fixed-role physical table identity exactly.
+ *
+ * @param left - First complete table-ID record.
+ * @param right - Second complete table-ID record.
+ * @returns Whether all six immutable TableIds match.
+ */
+function sameTableIds(
+  left: WorkspaceSearchMigrationSealedPlanningTableIds,
+  right: WorkspaceSearchMigrationSealedPlanningTableIds,
+): boolean {
+  return (
+    workspaceSearchMigrationSourceNames.every((source) =>
+      left[source] === right[source]
+    ) &&
+    left['workspace-search'] === right['workspace-search'] &&
+    left['migration-state'] === right['migration-state']
+  )
+}
+
+/**
  * Reads one exact immutable S3 artifact reference.
  *
  * @param value - Candidate reference.
@@ -2347,6 +3239,19 @@ function encodeCanonicalArtifact(
     return failSealedAuthority()
   }
   return bytes
+}
+
+/**
+ * Requires one reconstructed artifact to fit its complete canonical envelope.
+ *
+ * @param value - Strict detached artifact value.
+ * @param maximumBytes - Maximum accepted canonical byte length.
+ */
+function requireCanonicalArtifactSize(
+  value: unknown,
+  maximumBytes: number,
+): void {
+  void encodeCanonicalArtifact(value, maximumBytes)
 }
 
 /**
