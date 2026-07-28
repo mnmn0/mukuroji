@@ -91,6 +91,7 @@ const sourceEvidenceHeadKind =
 const sourceEvidencePageRecordKind =
   'workspace-search-migration-source-evidence-page-record'
 const sourceEvidenceAwsRecordVersion = 1
+const planningSourceEvidenceChainVersion = 3
 const sourceEvidenceRecordKeyPrefix = 'source-evidence/v1'
 /** Maximum replayable pages, bounding evidence to 1,000,000 source rows. */
 const sourceEvidenceMaximumPageCount = 10_000
@@ -214,6 +215,16 @@ export type CreateWorkspaceSearchMigrationSourceEvidenceAwsPortInput = {
   readonly transport: WorkspaceSearchMigrationSourceEvidenceAwsTransport
   /** Adapter-owned trusted clock sampled immediately before each write. */
   readonly clock: WorkspaceSearchMigrationPrePlanAuthorityClock
+}
+
+/**
+ * Exact terminal planning head fixed by a later sealed-plan transaction.
+ */
+export type CreateWorkspaceSearchMigrationSourceTerminalHeadConditionCheckInput = {
+  /** Exact measured migration-state table containing the durable head. */
+  readonly stateTable: MigrationTableIdentity
+  /** Exact completed planning-v3 source progress to condition-check. */
+  readonly progress: WorkspaceSearchMigrationSourceEvidenceProgress
 }
 
 /**
@@ -602,8 +613,10 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
         predecessorRead.exists &&
         request.identity.purpose === 'planning' &&
         (
-          predecessorRead.latestEvidenceVersion !== 3 ||
-          predecessorRead.chainEvidenceVersion !== 3
+          predecessorRead.latestEvidenceVersion !==
+            planningSourceEvidenceChainVersion ||
+          predecessorRead.chainEvidenceVersion !==
+            planningSourceEvidenceChainVersion
         )
       ) {
         return failSourceEvidenceAws('INVALID_STATE')
@@ -940,7 +953,7 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
     for (const page of pages) {
       if (
         page.purpose !== 'planning' ||
-        page.evidenceVersion !== 3
+        page.evidenceVersion !== planningSourceEvidenceChainVersion
       ) {
         return failSourceEvidenceAws('INVALID_STATE')
       }
@@ -1006,7 +1019,7 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
     for (const page of pages) {
       if (
         page.purpose === 'planning' &&
-        page.evidenceVersion === 3
+        page.evidenceVersion === planningSourceEvidenceChainVersion
       ) {
         await this.verifyPlanningArtifactPage(
           request,
@@ -1143,7 +1156,7 @@ class AwsWorkspaceSearchMigrationSourceEvidencePort
       if (sourceEvidenceProgressEquals(currentHead.progress, successor)) {
         if (
           page.purpose === 'planning' &&
-          page.evidenceVersion === 3
+          page.evidenceVersion === planningSourceEvidenceChainVersion
         ) {
           try {
             await this.verifyPlanningArtifactPage(
@@ -1219,6 +1232,126 @@ export function createAwsWorkspaceSearchMigrationSourceEvidencePort(
     return new AwsWorkspaceSearchMigrationSourceEvidencePort(input)
   } catch {
     throw createSourceEvidenceAwsBoundaryFailure('INVALID_ARGUMENT')
+  }
+}
+
+/**
+ * Creates one exact terminal planning-v3 source-head ConditionCheck.
+ *
+ * The returned item is intended for a later sealed-plan publication
+ * transaction. It compares the complete durable identity, chain version,
+ * terminal checkpoint, recursive head digest, and completion state.
+ *
+ * @param input - Exact measured state table and terminal source progress.
+ * @returns One adapter-owned DynamoDB ConditionCheck transaction item.
+ */
+export function createWorkspaceSearchMigrationSourceTerminalHeadConditionCheck(
+  input:
+    CreateWorkspaceSearchMigrationSourceTerminalHeadConditionCheckInput,
+): TransactWriteItem {
+  try {
+    const inputRecord = requireSourceEvidenceInputRecord(input)
+    requireExactSourceEvidenceInputKeys(inputRecord, [
+      'progress',
+      'stateTable',
+    ])
+    const snapshot = structuredClone(input)
+    requireMigrationStateTableIdentity(snapshot.stateTable)
+    const progress = snapshot.progress
+    void createWorkspaceSearchMigrationSourceEvidenceProgressDigest(
+      progress,
+    )
+    if (
+      progress.purpose !== 'planning' ||
+      progress.stateTableId !== snapshot.stateTable.tableId ||
+      progress.pageSequence <= 0 ||
+      !progress.checkpoint.completed ||
+      progress.checkpoint.cursor !== undefined ||
+      progress.checkpoint.aggregate.pageCount !==
+        progress.pageSequence ||
+      progress.checkpoint.aggregate.invalid !== 0
+    ) {
+      return failSourceEvidenceAws('INVALID_STATE')
+    }
+    const identity: WorkspaceSearchMigrationSourceEvidenceIdentity = {
+      purpose: 'planning',
+      runId: progress.runId,
+      configurationHash: progress.configurationHash,
+      source: progress.source,
+      sourceTableId: progress.sourceTableId,
+      stateTableId: progress.stateTableId,
+    }
+    const conditionCheck:
+      NonNullable<TransactWriteItem['ConditionCheck']> = {
+        TableName: snapshot.stateTable.tableName,
+        Key: {
+          migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
+          recordKey: {
+            S: createSourceEvidenceHeadRecordKey(identity),
+          },
+        },
+        ConditionExpression: [
+          '#kind = :kind',
+          '#version = :version',
+          '#run = :run',
+          '#purpose = :purpose',
+          '#config = :config',
+          '#source = :source',
+          '#sourceTableId = :sourceTableId',
+          '#stateTableId = :stateTableId',
+          '#chainEvidenceVersion = :chainEvidenceVersion',
+          '#revision = :revision',
+          '#checkpoint = :checkpoint',
+          '#checkpointDigest = :checkpointDigest',
+          '#headDigest = :headDigest',
+          '#completed = :completed',
+        ].join(' AND '),
+        ExpressionAttributeNames: {
+          '#kind': 'kind',
+          '#version': 'version',
+          '#run': 'run',
+          '#purpose': 'purpose',
+          '#config': 'config',
+          '#source': 'source',
+          '#sourceTableId': 'sourceTableId',
+          '#stateTableId': 'stateTableId',
+          '#chainEvidenceVersion': 'chainEvidenceVersion',
+          '#revision': 'revision',
+          '#checkpoint': 'checkpoint',
+          '#checkpointDigest': 'checkpointDigest',
+          '#headDigest': 'headDigest',
+          '#completed': 'completed',
+        },
+        ExpressionAttributeValues: {
+          ':kind': { S: sourceEvidenceHeadKind },
+          ':version': { N: String(sourceEvidenceAwsRecordVersion) },
+          ':run': { S: progress.runId },
+          ':purpose': { S: 'planning' },
+          ':config': { S: progress.configurationHash },
+          ':source': { S: progress.source },
+          ':sourceTableId': { S: progress.sourceTableId },
+          ':stateTableId': { S: progress.stateTableId },
+          ':chainEvidenceVersion': {
+            N: String(planningSourceEvidenceChainVersion),
+          },
+          ':revision': { N: String(progress.pageSequence) },
+          ':checkpoint': encodeSourceEvidenceCheckpoint(
+            progress.checkpoint,
+          ),
+          ':checkpointDigest': {
+            S: createWorkspaceSearchMigrationSourceCheckpointDigest(
+              progress.checkpoint,
+            ),
+          },
+          ':headDigest': { S: progress.evidenceDigest },
+          ':completed': { BOOL: true },
+        },
+      }
+    return { ConditionCheck: conditionCheck }
+  } catch (error: unknown) {
+    throw createSourceEvidenceAwsBoundaryFailure(
+      readSourceEvidenceAwsFailureCode(error),
+    )
   }
 }
 
@@ -1457,7 +1590,10 @@ function createSourceEvidenceHeadItem(
   void createWorkspaceSearchMigrationSourceEvidenceProgressDigest(progress)
   if (
     (progress.purpose === 'dry-run' && chainEvidenceVersion !== 1) ||
-    (progress.purpose === 'planning' && chainEvidenceVersion !== 3)
+    (
+      progress.purpose === 'planning' &&
+      chainEvidenceVersion !== planningSourceEvidenceChainVersion
+    )
   ) {
     return failSourceEvidenceAws('INVALID_STATE')
   }

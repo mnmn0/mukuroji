@@ -771,6 +771,112 @@ describe('AWS Workspace Search pre-plan authority adapter', () => {
     ).toEqual(firstAuthority.maintenanceEvidenceReceipt)
   })
 
+  test('reads an expired historical receipt with its exact durable binding', async () => {
+    const context = createAuthorityContext()
+    const lease = await context.port.acquireLease({
+      runId: 'run-historical-binding',
+      ownerId: 'owner-historical-binding',
+    })
+    const authority = await context.port.renewMaintenanceEvidence({
+      lease: createLeaseClaim(lease),
+      expectedPointer: null,
+      evidenceBytes: createMaintenanceEvidenceBytes(initialTime),
+    })
+    context.clock.set(
+      authority.maintenanceEvidenceReceipt.validUntil,
+    )
+
+    const historical =
+      await context.port.readHistoricalMaintenanceEvidenceBinding(
+        lease.runId,
+        authority.maintenanceEvidenceReceiptDigest,
+      )
+
+    expect(historical).toEqual({
+      configurationHash: context.configurationHash,
+      stateTableId: context.stateTable.tableId,
+      ownerId: lease.ownerId,
+      receiptDigest: authority.maintenanceEvidenceReceiptDigest,
+      receipt: authority.maintenanceEvidenceReceipt,
+    })
+  })
+
+  test('fails closed for absent, foreign, and corrupt historical receipt bindings', async () => {
+    const context = createAuthorityContext()
+    const lease = await context.port.acquireLease({
+      runId: 'run-historical-corruption',
+      ownerId: 'owner-historical-corruption',
+    })
+    const authority = await context.port.renewMaintenanceEvidence({
+      lease: createLeaseClaim(lease),
+      expectedPointer: null,
+      evidenceBytes: createMaintenanceEvidenceBytes(initialTime),
+    })
+    const absentDigest = createMigrationDigest('absent-receipt')
+    expect(
+      await context.port.readHistoricalMaintenanceEvidenceBinding(
+        lease.runId,
+        absentDigest,
+      ),
+    ).toBeUndefined()
+    expect(
+      await context.port.readHistoricalMaintenanceEvidenceBinding(
+        'foreign-historical-run',
+        authority.maintenanceEvidenceReceiptDigest,
+      ),
+    ).toBeUndefined()
+
+    const originalReceipt =
+      requireStoredItem(context.transport.readStoredItemByKind(receiptKind))
+    for (const [attribute, value, code] of [
+      [
+        'ownerId',
+        { S: 'foreign-historical-owner' },
+        'INVALID_STATE',
+      ],
+      [
+        'configurationHash',
+        { S: createMigrationDigest('foreign-configuration') },
+        'CONFIGURATION_DRIFT',
+      ],
+      [
+        'stateTableId',
+        { S: 'foreign-state-table-id' },
+        'CONFIGURATION_DRIFT',
+      ],
+      [
+        'receiptDigest',
+        { S: createMigrationDigest('foreign-receipt') },
+        'INVALID_STATE',
+      ],
+      [
+        'evidenceDigest',
+        { S: createMigrationDigest('corrupt-receipt-payload') },
+        'INVALID_STATE',
+      ],
+    ] satisfies readonly (
+      readonly [
+        string,
+        AttributeValue,
+        WorkspaceSearchMigrationFailureCode,
+      ]
+    )[]) {
+      context.transport.replaceStoredItem({
+        ...originalReceipt,
+        [attribute]: value,
+      })
+      const failure = await captureMigrationFailure(
+        () =>
+          context.port.readHistoricalMaintenanceEvidenceBinding(
+            lease.runId,
+            authority.maintenanceEvidenceReceiptDigest,
+          ),
+      )
+      expectMigrationFailure(failure, code)
+    }
+    context.transport.replaceStoredItem(originalReceipt)
+  })
+
   test('creates exact lease, pointer, and receipt planning conditions in fixed order', async () => {
     const context = createAuthorityContext()
     const lease = await context.port.acquireLease({

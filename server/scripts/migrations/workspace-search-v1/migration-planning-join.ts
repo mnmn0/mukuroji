@@ -453,6 +453,24 @@ export function joinWorkspaceSearchMigrationPlanningEvidence(
 }
 
 /**
+ * Detaches one measured configuration through the planning boundary's strict,
+ * bounded descriptor projection.
+ *
+ * @param configuration - Caller-owned measured configuration.
+ * @returns Detached recognized configuration fields.
+ */
+export function detachWorkspaceSearchMigrationPlanningConfiguration(
+  configuration: unknown,
+): WorkspaceSearchMigrationConfiguration {
+  try {
+    return clonePlanningJoinConfiguration(configuration)
+  } catch (error: unknown) {
+    const code = readPlanningJoinDetachFailureCode(error)
+    return throwPlanningJoinBoundaryFailure(code ?? 'INVALID_STATE')
+  }
+}
+
+/**
  * Applies cheap material-envelope bounds before cloning caller-owned input.
  *
  * The raw boundary deliberately preserves no caller-thrown failure code. This

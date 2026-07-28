@@ -93,6 +93,7 @@ const targetEvidenceHeadKind =
 const targetEvidencePageRecordKind =
   'workspace-search-migration-target-evidence-page-record'
 const targetEvidenceAwsRecordVersion = 1
+const planningTargetEvidenceChainVersion = 1
 const targetEvidenceRecordKeyPrefix = 'target-evidence/v1'
 /** Maximum replayable pages, bounding evidence to 1,000,000 target rows. */
 export const WORKSPACE_SEARCH_MIGRATION_TARGET_EVIDENCE_MAXIMUM_PAGE_COUNT =
@@ -206,6 +207,16 @@ export type CreateWorkspaceSearchMigrationTargetEvidenceAwsPortInput = {
   readonly transport: WorkspaceSearchMigrationTargetEvidenceAwsTransport
   /** Adapter-owned trusted clock sampled immediately before each write. */
   readonly clock: WorkspaceSearchMigrationPrePlanAuthorityClock
+}
+
+/**
+ * Exact terminal planning head fixed by a later sealed-plan transaction.
+ */
+export type CreateWorkspaceSearchMigrationTargetTerminalHeadConditionCheckInput = {
+  /** Exact measured migration-state table containing the durable head. */
+  readonly stateTable: MigrationTableIdentity
+  /** Exact completed planning-v1 target progress to condition-check. */
+  readonly progress: WorkspaceSearchMigrationTargetEvidenceProgress
 }
 
 /**
@@ -567,8 +578,10 @@ class AwsWorkspaceSearchMigrationTargetEvidencePort
       if (
         predecessorRead.exists &&
         (
-          predecessorRead.latestEvidenceVersion !== 1 ||
-          predecessorRead.chainEvidenceVersion !== 1
+          predecessorRead.latestEvidenceVersion !==
+            planningTargetEvidenceChainVersion ||
+          predecessorRead.chainEvidenceVersion !==
+            planningTargetEvidenceChainVersion
         )
       ) {
         return failTargetEvidenceAws('INVALID_STATE')
@@ -1161,6 +1174,122 @@ export function createAwsWorkspaceSearchMigrationTargetEvidencePort(
 }
 
 /**
+ * Creates one exact terminal planning-v1 target-head ConditionCheck.
+ *
+ * The returned item is intended for a later sealed-plan publication
+ * transaction. It compares the complete durable identity, chain version,
+ * terminal checkpoint, recursive head digest, and completion state.
+ *
+ * @param input - Exact measured state table and terminal target progress.
+ * @returns One adapter-owned DynamoDB ConditionCheck transaction item.
+ */
+export function createWorkspaceSearchMigrationTargetTerminalHeadConditionCheck(
+  input:
+    CreateWorkspaceSearchMigrationTargetTerminalHeadConditionCheckInput,
+): TransactWriteItem {
+  try {
+    const inputRecord = requireTargetEvidenceInputRecord(input)
+    requireExactTargetEvidenceInputKeys(inputRecord, [
+      'progress',
+      'stateTable',
+    ])
+    const snapshot = structuredClone(input)
+    requireMigrationStateTableIdentity(snapshot.stateTable)
+    const progress = snapshot.progress
+    void createWorkspaceSearchMigrationTargetEvidenceProgressDigest(
+      progress,
+    )
+    if (
+      progress.purpose !== 'planning' ||
+      progress.stateTableId !== snapshot.stateTable.tableId ||
+      progress.pageSequence <= 0 ||
+      !progress.checkpoint.completed ||
+      progress.checkpoint.cursor !== undefined ||
+      progress.checkpoint.aggregate.pageCount !==
+        progress.pageSequence ||
+      progress.checkpoint.aggregate.invalid !== 0
+    ) {
+      return failTargetEvidenceAws('INVALID_STATE')
+    }
+    const identity: WorkspaceSearchMigrationTargetEvidenceIdentity = {
+      purpose: 'planning',
+      runId: progress.runId,
+      configurationHash: progress.configurationHash,
+      targetTableId: progress.targetTableId,
+      stateTableId: progress.stateTableId,
+    }
+    const conditionCheck:
+      NonNullable<TransactWriteItem['ConditionCheck']> = {
+        TableName: snapshot.stateTable.tableName,
+        Key: {
+          migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
+          recordKey: {
+            S: createTargetEvidenceHeadRecordKey(identity),
+          },
+        },
+        ConditionExpression: [
+          '#kind = :kind',
+          '#version = :version',
+          '#run = :run',
+          '#purpose = :purpose',
+          '#config = :config',
+          '#targetTableId = :targetTableId',
+          '#stateTableId = :stateTableId',
+          '#chainEvidenceVersion = :chainEvidenceVersion',
+          '#revision = :revision',
+          '#checkpoint = :checkpoint',
+          '#checkpointDigest = :checkpointDigest',
+          '#headDigest = :headDigest',
+          '#completed = :completed',
+        ].join(' AND '),
+        ExpressionAttributeNames: {
+          '#kind': 'kind',
+          '#version': 'version',
+          '#run': 'run',
+          '#purpose': 'purpose',
+          '#config': 'config',
+          '#targetTableId': 'targetTableId',
+          '#stateTableId': 'stateTableId',
+          '#chainEvidenceVersion': 'chainEvidenceVersion',
+          '#revision': 'revision',
+          '#checkpoint': 'checkpoint',
+          '#checkpointDigest': 'checkpointDigest',
+          '#headDigest': 'headDigest',
+          '#completed': 'completed',
+        },
+        ExpressionAttributeValues: {
+          ':kind': { S: targetEvidenceHeadKind },
+          ':version': { N: String(targetEvidenceAwsRecordVersion) },
+          ':run': { S: progress.runId },
+          ':purpose': { S: 'planning' },
+          ':config': { S: progress.configurationHash },
+          ':targetTableId': { S: progress.targetTableId },
+          ':stateTableId': { S: progress.stateTableId },
+          ':chainEvidenceVersion': {
+            N: String(planningTargetEvidenceChainVersion),
+          },
+          ':revision': { N: String(progress.pageSequence) },
+          ':checkpoint': encodeTargetEvidenceCheckpoint(
+            progress.checkpoint,
+          ),
+          ':checkpointDigest': {
+            S: createWorkspaceSearchMigrationTargetCheckpointDigest(
+              progress.checkpoint,
+            ),
+          },
+          ':headDigest': { S: progress.evidenceDigest },
+          ':completed': { BOOL: true },
+        },
+      }
+    return { ConditionCheck: conditionCheck }
+  } catch (error: unknown) {
+    throw createTargetEvidenceAwsBoundaryFailure(
+      readTargetEvidenceAwsFailureCode(error),
+    )
+  }
+}
+
+/**
  * Values required to build one atomic page/head commit.
  */
 type CreateTargetEvidenceCommitCommandInput = {
@@ -1385,7 +1514,7 @@ function createTargetEvidenceHeadItem(
 ): Readonly<Record<string, AttributeValue>> {
   requireProgressIdentity(identity, progress)
   void createWorkspaceSearchMigrationTargetEvidenceProgressDigest(progress)
-  if (chainEvidenceVersion !== 1) {
+  if (chainEvidenceVersion !== planningTargetEvidenceChainVersion) {
     return failTargetEvidenceAws('INVALID_STATE')
   }
   const item: Record<string, AttributeValue> = {
@@ -1685,7 +1814,7 @@ function parseTargetEvidenceHeadItem(
   }
   const chainEvidenceVersion =
     readRequiredPositiveNumberAttribute(item, 'chainEvidenceVersion')
-  if (chainEvidenceVersion !== 1) {
+  if (chainEvidenceVersion !== planningTargetEvidenceChainVersion) {
     return failTargetEvidenceAws('INVALID_STATE')
   }
   requireHeadIdentity(item, request.identity)

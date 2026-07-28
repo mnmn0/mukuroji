@@ -449,14 +449,45 @@ chain/全体 page 数を検査します。Source 固定順、target の順に re
 
 この head 再確認は sealed snapshot や writer fence ではありません。最終 head read の直後にも writer
 または別 operator が状態を変え得るため、result は provisional な read-only evidence です。Historical
-receipt と current authority の freshness を解決し、5 head と provenance/plan を同じ conditional
+receipt を plan publish 前に検証するため、immutable receipt payload だけでなく owner、configuration
+hash、migration-state TableId を保持する historical binding read を提供します。既存 plan seal v2 の
+canonical schema は変更せず、その外側に sealed planning authority v1 を定義します。この compact root
+は全6 TableId、plan seal/operation manifest/provenance artifact の exact version reference、
+plan root/count、5 terminal progress digest、historical receipt binding digest/count、publish 時の
+current authority tuple と adapter-owned time を結合します。Full provenance artifact は全 transition を
+対応する historical receipt の owner/run/fence/digest/configuration/state binding に照合し、期限切れの
+historical receipt は当時の証跡として保持しつつ canonical evidence window は検証します。Current
+authority は fixed 60秒 lease と evidence window に加え、sealed time から atomic commit まで最低10秒の
+headroom を要求します。
+Provenance artifact は、raw item ではなく source planning v3 / target planning v1 evidence page の
+canonical bytes を Base64 witness として保持します。作成時と parse 時の両方で全5 chain を zero head
+から replay し、全 page の predecessor digest、checkpoint、authority tuple、terminal root を
+provenance trace へ再導出します。同じ witness の digest-only row/binding から planning snapshot digest
+と source/orphan operation count も再構成し、plan seal と照合します。これにより、terminal root だけを
+残して中間 trace/receipt を再署名することや、別 capture の plan seal を混在させることを拒否します。
+Artifact は64 MiBで fail-closed とし、evidence page に resume key（Binary key を含む）が入り得るため
+raw artifact と同等に暗号化・最小権限・access audit の対象にします。この restricted immutable
+provenance object は、recursive page proof のために migration-state 外へ cursor を保持する唯一の
+許可された例外です。Standalone cursor、log、汎用 S3 evidence、外部 export には複製せず、object の
+exact version 全体を一単位として取得・監査します。この ceiling を超える正当な run の segmentation と
+complete manifest binding は後続の concrete storage adapter で閉じます。
+Source planning v3 と target planning v1 の terminal head には、完全な identity、chain version、
+checkpoint、recursive head digest、`completed=true` を比較する transaction 用 ConditionCheck factory
+があります。
+
+ただし、sealed planning authority の schema と condition material が存在するだけでは publish は
+完了しません。Planned operation と provenance を Object Lock S3 artifact/manifest として bounded
+segmentation で保存し、その complete manifest head、current authority 3件、5 evidence head、
+immutable compact root を同じ DynamoDB transaction に固定する concrete adapter は後続です。
+Historical receipt と current authority の freshness を解決し、5 head と provenance/plan を同じ conditional
 transaction で固定し、application writer fence を成立させるまでは apply authority として使用しません。
 Digest-only な dry-run v1 と legacy planning v2 は process を越えた planning input、target join、
 rollback preimage を再構成しません。これらの未実装項目を完了し、non-production で
 artifact upload orphan、version substitution、cursor 境界の中断再開、verify/rollback evidence を
 取得するまで production migration gate は閉じたままとし、既存 backfill は dry-run と
 maintenance-window 内の再生成用途に限定します。未実装項目には distinct historical receipt の
-実在・run/fence binding、plan 保存直前の current lease/pointer/receipt freshness、
+全件取得と immutable provenance artifact 保存、plan 保存直前の live current lease/pointer/receipt
+freshness の transaction 固定、
 5 evidence head と plan provenance/storage の原子的な結合、
 application writer fence/snapshot isolation、実行 CLI/heartbeat supervisor、migration 専用
 observability/alarm、restore/failover/DR drill、non-production 実行 evidence が含まれます。
@@ -519,8 +550,10 @@ resource を skip して `continue-update-rollback` しません。
   request token、exact artifact version replay の結果を同じ durable commit evidence として記録する
 - 各 source page で同じ conditional transaction に保存した digest-only row evidence、累積
   checkpoint、直前 checkpoint identity と evidence chain head。Resume cursor は tenant identifier を
-  含み得る restricted state であり、raw cursor はログ、S3、外部 evidence export へ含めず、
-  migration-state table 内の checkpoint locator と digest だけを外部 record に残す
+  含み得る restricted state であり、raw cursor はログ、汎用 S3 evidence、外部 evidence export へ
+  含めない。例外は、全 page の recursive proof に必要な canonical page bytes を暗号化・最小権限の
+  immutable provenance object の exact version 内に保持する場合だけとし、standalone cursor や
+  checkpoint locator から分離した複製を作らない
 - Planning source page の canonical bytes に結合した owner/fence、maintenance receipt digest、
   pointer revision、順序付き exact `{objectKey, versionId, contentDigest}` と、同じ transaction で
   確認した exact lease/pointer/receipt
@@ -540,7 +573,8 @@ resource を skip して `continue-update-rollback` しません。
   receipt の exact evidence digest/secret-free locator/freshness window。Heartbeat と receipt renewal
   を別操作として記録し、response loss後は exact leaseまたはreceipt/pointer successorだけを採用する
 - Source ごとの initial/final checkpoint digest と cursor 有無、scanned/applied/skipped/invalid/
-  rolled-back count。Raw cursor value は restricted state table 外へ複製しない
+  rolled-back count。Raw cursor value は restricted state table と、上記 restricted immutable
+  provenance object の exact canonical page witness 以外へ複製しない
 - PITR status、restore point、backup ARN、lease owner/heartbeat/fence epoch
 - 各 operation marker/preimage journal の count と verification result
 - Process interruption/resume の時刻、同じ operation が二重適用されなかった証拠

@@ -35,6 +35,7 @@ import {
 } from './migration-pre-plan-authority-aws'
 import {
   createAwsWorkspaceSearchMigrationTargetEvidencePort,
+  createWorkspaceSearchMigrationTargetTerminalHeadConditionCheck,
   type WorkspaceSearchMigrationPlanningTargetArtifactCaptureInput,
   type WorkspaceSearchMigrationPlanningTargetArtifactCaptureResult,
   type WorkspaceSearchMigrationPlanningTargetArtifactGateway,
@@ -1582,6 +1583,235 @@ function sourceKeyDescriptors(
 }
 
 describe('Workspace Search migration target evidence AWS adapter', () => {
+  test('creates an exact terminal planning-v1 target-head condition check', async () => {
+    const configuration = createConfiguration()
+    const transport = new InMemoryTargetEvidenceAwsTransport()
+    const clock = new MutableAuthorityClock(initialTime)
+    const authorityContext = await acquirePlanningAuthority(
+      configuration,
+      transport,
+      clock,
+      'run-target-terminal-condition',
+      'owner-target-terminal-condition',
+    )
+    const firstItem = createIgnoredTargetItem('terminal-condition-first')
+    const gateway = new InMemoryPlanningTargetArtifactGateway(
+      [
+        {
+          items: [firstItem],
+          lastEvaluatedKey: createTargetItemKey(firstItem),
+        },
+        {
+          items: [createIgnoredTargetItem('terminal-condition-last')],
+        },
+      ],
+      transport.planningArtifactStore,
+    )
+    const port = createTargetEvidencePort(
+      configuration,
+      gateway,
+      transport,
+      () => clock.read(),
+    )
+    const request = createPlanningRequest(
+      configuration,
+      authorityContext.authority,
+    )
+
+    await port.commitNextPage(request)
+    const terminal = await port.commitNextPage(request)
+    const head = requireStoredItem(
+      transport.readStoredItemByKind(targetHeadKind),
+    )
+    const identityDigest = createMigrationDigest({
+      kind: 'workspace-search-target-evidence-identity',
+      version: 1,
+      purpose: 'planning',
+      runId: terminal.runId,
+      configurationHash: terminal.configurationHash,
+      targetTableId: terminal.targetTableId,
+      stateTableId: terminal.stateTableId,
+    })
+    const item =
+      createWorkspaceSearchMigrationTargetTerminalHeadConditionCheck({
+        stateTable: configuration.tables['migration-state'],
+        progress: terminal,
+      })
+    const check = requireConditionCheck(item)
+
+    expect(terminal).toMatchObject({
+      purpose: 'planning',
+      pageSequence: 2,
+      checkpoint: {
+        completed: true,
+        aggregate: {
+          invalid: 0,
+          pageCount: 2,
+        },
+      },
+    })
+    expect(terminal.checkpoint.cursor).toBeUndefined()
+    expect(check).toEqual({
+      TableName: configuration.tables['migration-state'].tableName,
+      Key: {
+        migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
+        recordKey: {
+          S: `target-evidence/v1/${identityDigest}/head`,
+        },
+      },
+      ConditionExpression: [
+        '#kind = :kind',
+        '#version = :version',
+        '#run = :run',
+        '#purpose = :purpose',
+        '#config = :config',
+        '#targetTableId = :targetTableId',
+        '#stateTableId = :stateTableId',
+        '#chainEvidenceVersion = :chainEvidenceVersion',
+        '#revision = :revision',
+        '#checkpoint = :checkpoint',
+        '#checkpointDigest = :checkpointDigest',
+        '#headDigest = :headDigest',
+        '#completed = :completed',
+      ].join(' AND '),
+      ExpressionAttributeNames: {
+        '#kind': 'kind',
+        '#version': 'version',
+        '#run': 'run',
+        '#purpose': 'purpose',
+        '#config': 'config',
+        '#targetTableId': 'targetTableId',
+        '#stateTableId': 'stateTableId',
+        '#chainEvidenceVersion': 'chainEvidenceVersion',
+        '#revision': 'revision',
+        '#checkpoint': 'checkpoint',
+        '#checkpointDigest': 'checkpointDigest',
+        '#headDigest': 'headDigest',
+        '#completed': 'completed',
+      },
+      ExpressionAttributeValues: {
+        ':kind': {
+          S: 'workspace-search-migration-target-evidence-head',
+        },
+        ':version': { N: '1' },
+        ':run': { S: terminal.runId },
+        ':purpose': { S: 'planning' },
+        ':config': { S: terminal.configurationHash },
+        ':targetTableId': { S: terminal.targetTableId },
+        ':stateTableId': { S: terminal.stateTableId },
+        ':chainEvidenceVersion': { N: '1' },
+        ':revision': { N: '2' },
+        ':checkpoint': head.checkpoint,
+        ':checkpointDigest': {
+          S: createWorkspaceSearchMigrationTargetCheckpointDigest(
+            terminal.checkpoint,
+          ),
+        },
+        ':headDigest': { S: terminal.evidenceDigest },
+        ':completed': { BOOL: true },
+      },
+    })
+    expect(conditionMatches(
+      head,
+      check.ConditionExpression,
+      check.ExpressionAttributeNames,
+      check.ExpressionAttributeValues,
+    )).toBe(true)
+  })
+
+  test('rejects nonterminal or mismatched terminal target progress', async () => {
+    const configuration = createConfiguration()
+    const transport = new InMemoryTargetEvidenceAwsTransport()
+    const clock = new MutableAuthorityClock(initialTime)
+    const authorityContext = await acquirePlanningAuthority(
+      configuration,
+      transport,
+      clock,
+      'run-target-terminal-rejection',
+      'owner-target-terminal-rejection',
+    )
+    const firstItem = createIgnoredTargetItem('terminal-rejection-first')
+    const gateway = new InMemoryPlanningTargetArtifactGateway(
+      [
+        {
+          items: [firstItem],
+          lastEvaluatedKey: createTargetItemKey(firstItem),
+        },
+        {
+          items: [createIgnoredTargetItem('terminal-rejection-last')],
+        },
+      ],
+      transport.planningArtifactStore,
+    )
+    const port = createTargetEvidencePort(
+      configuration,
+      gateway,
+      transport,
+      () => clock.read(),
+    )
+    const request = createPlanningRequest(
+      configuration,
+      authorityContext.authority,
+    )
+    const nonterminal = await port.commitNextPage(request)
+    const terminal = await port.commitNextPage(request)
+    const wrongPurpose = structuredClone(terminal)
+    Reflect.set(wrongPurpose, 'purpose', 'dry-run')
+    const tampered = {
+      ...terminal,
+      checkpoint: {
+        ...terminal.checkpoint,
+        aggregate: {
+          ...terminal.checkpoint.aggregate,
+          pageCount: terminal.pageSequence + 1,
+        },
+      },
+    }
+    const wrongStateTable: MigrationTableIdentity = {
+      ...configuration.tables['migration-state'],
+      tableId: 'table-id-replaced-migration-state',
+    }
+    const cases = [
+      {
+        label: 'nonterminal',
+        stateTable: configuration.tables['migration-state'],
+        progress: nonterminal,
+      },
+      {
+        label: 'wrong-purpose',
+        stateTable: configuration.tables['migration-state'],
+        progress: wrongPurpose,
+      },
+      {
+        label: 'state-table-id',
+        stateTable: wrongStateTable,
+        progress: terminal,
+      },
+      {
+        label: 'tampered-checkpoint',
+        stateTable: configuration.tables['migration-state'],
+        progress: tampered,
+      },
+    ]
+
+    for (const candidate of cases) {
+      const failure = await captureMigrationFailure(async () =>
+        createWorkspaceSearchMigrationTargetTerminalHeadConditionCheck({
+          stateTable: candidate.stateTable,
+          progress: candidate.progress,
+        })
+      )
+
+      expect({
+        label: candidate.label,
+        code: failure.code,
+      }).toEqual({
+        label: candidate.label,
+        code: 'INVALID_STATE',
+      })
+    }
+  })
+
   test('resumes a multi-page chain and never captures a terminal head again', async () => {
     const configuration = createConfiguration()
     const transport = new InMemoryTargetEvidenceAwsTransport()
