@@ -1289,7 +1289,7 @@ type SafeOperationGraphBudget = {
   nodes: number
   /** Conservative projected string, key, and binary bytes. */
   bytes: number
-  /** Object identities already traversed, rejecting aliases and cycles. */
+  /** Object identities already traversed and skipped for cycle-safe traversal. */
   readonly seen: WeakSet<object>
 }
 
@@ -1729,7 +1729,7 @@ function isRecord(
     nodeUtilTypes.isProxy(value) ||
     Array.isArray(value)
   ) {
-    return failPlanArtifact()
+    return false
   }
   const prototype: unknown = Object.getPrototypeOf(value)
   return prototype === Object.prototype || prototype === null

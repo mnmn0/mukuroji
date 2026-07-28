@@ -72,8 +72,14 @@ class RecordingImmutableArtifactTransport
   /** Recorded current or exact-version HeadObject commands. */
   readonly headCommands: HeadObjectCommand[] = []
 
+  /** Deadline signals paired with recorded HeadObject commands. */
+  readonly headAbortSignals: AbortSignal[] = []
+
   /** Recorded exact-version GetObject commands. */
   readonly getCommands: GetObjectCommand[] = []
+
+  /** Deadline signals paired with recorded GetObject commands. */
+  readonly getAbortSignals: AbortSignal[] = []
 
   /** Test-controlled PutObject behavior. */
   putHandler:
@@ -87,14 +93,20 @@ class RecordingImmutableArtifactTransport
 
   /** Test-controlled HeadObject behavior. */
   headHandler:
-    (command: HeadObjectCommand) => Promise<HeadObjectCommandOutput> =
+    (
+      command: HeadObjectCommand,
+      abortSignal: AbortSignal,
+    ) => Promise<HeadObjectCommandOutput> =
       async () => {
         throw new Error('Unexpected HeadObject call.')
       }
 
   /** Test-controlled GetObject behavior. */
   getHandler:
-    (command: GetObjectCommand) => Promise<GetObjectCommandOutput> =
+    (
+      command: GetObjectCommand,
+      abortSignal: AbortSignal,
+    ) => Promise<GetObjectCommandOutput> =
       async () => {
         throw new Error('Unexpected GetObject call.')
       }
@@ -119,26 +131,32 @@ class RecordingImmutableArtifactTransport
    * Records and delegates one metadata read.
    *
    * @param command - Adapter-owned HeadObject command.
+   * @param abortSignal - Deadline signal for the underlying request.
    * @returns Test-controlled output.
    */
   headImmutableArtifact(
     command: HeadObjectCommand,
+    abortSignal: AbortSignal,
   ): Promise<HeadObjectCommandOutput> {
     this.headCommands.push(command)
-    return this.headHandler(command)
+    this.headAbortSignals.push(abortSignal)
+    return this.headHandler(command, abortSignal)
   }
 
   /**
    * Records and delegates one exact-version object read.
    *
    * @param command - Adapter-owned GetObject command.
+   * @param abortSignal - Deadline signal for the underlying request.
    * @returns Test-controlled output.
    */
   getImmutableArtifact(
     command: GetObjectCommand,
+    abortSignal: AbortSignal,
   ): Promise<GetObjectCommandOutput> {
     this.getCommands.push(command)
-    return this.getHandler(command)
+    this.getAbortSignals.push(abortSignal)
+    return this.getHandler(command, abortSignal)
   }
 }
 
@@ -702,6 +720,54 @@ describe('AWS immutable migration artifact core', () => {
     expect(transport.putAbortSignals.every(
       (abortSignal) => abortSignal.aborted,
     )).toBe(true)
+  })
+
+  test('aborts stalled HeadObject and GetObject transport requests', async () => {
+    const configuration = createConfiguration()
+    const transport = new RecordingImmutableArtifactTransport()
+    const fixture = createArtifactFixture(configuration)
+    let headAbortObserved = false
+    let getAbortObserved = false
+    transport.putHandler = async () => ({
+      $metadata: {},
+      VersionId: fixture.reference.versionId,
+    })
+    transport.headHandler = (_command, abortSignal) =>
+      new Promise<HeadObjectCommandOutput>(() => {
+        abortSignal.addEventListener('abort', () => {
+          headAbortObserved = true
+        }, { once: true })
+      })
+    const port = createPort(configuration, transport, 1_000, 10)
+
+    await captureFailure(port.writeImmutableArtifact({
+      role: fixture.role,
+      objectKeyPrefix: testObjectKeyPrefix,
+      bytes: fixture.bytes,
+      metadata: testCallerMetadata,
+      retainUntil: testRetainUntil,
+    }), 'AMBIGUOUS_OPERATION_UNRESOLVED')
+
+    expect(transport.headAbortSignals).toHaveLength(1)
+    expect(transport.headAbortSignals[0]?.aborted).toBe(true)
+    expect(headAbortObserved).toBe(true)
+
+    transport.getHandler = (_command, abortSignal) =>
+      new Promise<GetObjectCommandOutput>(() => {
+        abortSignal.addEventListener('abort', () => {
+          getAbortObserved = true
+        }, { once: true })
+      })
+    await captureFailure(port.readImmutableArtifact({
+      role: fixture.role,
+      objectKeyPrefix: testObjectKeyPrefix,
+      reference: fixture.reference,
+      metadata: testCallerMetadata,
+    }), 'TRANSIENT_INFRASTRUCTURE_FAILURE')
+
+    expect(transport.getAbortSignals).toHaveLength(1)
+    expect(transport.getAbortSignals[0]?.aborted).toBe(true)
+    expect(getAbortObserved).toBe(true)
   })
 
   test('does not reclassify exhausted retry headroom as invalid input', async () => {

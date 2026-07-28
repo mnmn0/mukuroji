@@ -69,20 +69,24 @@ export interface WorkspaceSearchMigrationImmutableArtifactAwsTransport {
    * Reads exact object metadata for reconciliation.
    *
    * @param command - Adapter-owned current or version-pinned HeadObject.
+   * @param abortSignal - Deadline signal for the underlying S3 request.
    * @returns Raw low-level S3 response.
    */
   headImmutableArtifact(
     command: HeadObjectCommand,
+    abortSignal: AbortSignal,
   ): Promise<HeadObjectCommandOutput>
 
   /**
    * Reads one exact immutable object version.
    *
    * @param command - Adapter-owned version-pinned GetObject.
+   * @param abortSignal - Deadline signal for the underlying S3 request.
    * @returns Raw low-level S3 response.
    */
   getImmutableArtifact(
     command: GetObjectCommand,
+    abortSignal: AbortSignal,
   ): Promise<GetObjectCommandOutput>
 }
 
@@ -252,10 +256,16 @@ type PreparedImmutableArtifactTransport = {
     ) => Promise<PutObjectCommandOutput>
   /** Detached HeadObject invocation. */
   readonly head:
-    (command: HeadObjectCommand) => Promise<HeadObjectCommandOutput>
+    (
+      command: HeadObjectCommand,
+      abortSignal: AbortSignal,
+    ) => Promise<HeadObjectCommandOutput>
   /** Detached GetObject invocation. */
   readonly get:
-    (command: GetObjectCommand) => Promise<GetObjectCommandOutput>
+    (
+      command: GetObjectCommand,
+      abortSignal: AbortSignal,
+    ) => Promise<GetObjectCommandOutput>
 }
 
 /**
@@ -530,7 +540,7 @@ class AwsWorkspaceSearchMigrationImmutableArtifactPort
       let output: GetObjectCommandOutput
       try {
         output = await runWithImmutableArtifactDeadline(
-          () => this.transport.get(
+          (abortSignal) => this.transport.get(
             new GetObjectCommand({
               Bucket: this.configuration.journal.bucketName,
               Key: prepared.reference.objectKey,
@@ -538,6 +548,7 @@ class AwsWorkspaceSearchMigrationImmutableArtifactPort
               ExpectedBucketOwner: this.configuration.account,
               ChecksumMode: 'ENABLED',
             }),
+            abortSignal,
           ),
           this.requestTimeoutMilliseconds,
         )
@@ -591,7 +602,7 @@ class AwsWorkspaceSearchMigrationImmutableArtifactPort
     let output: HeadObjectCommandOutput
     try {
       output = await runWithImmutableArtifactDeadline(
-        () => this.transport.head(
+        (abortSignal) => this.transport.head(
           new HeadObjectCommand({
             Bucket: this.configuration.journal.bucketName,
             Key: artifact.objectKey,
@@ -601,6 +612,7 @@ class AwsWorkspaceSearchMigrationImmutableArtifactPort
               ? {}
               : { VersionId: requestedVersionId }),
           }),
+          abortSignal,
         ),
         this.requestTimeoutMilliseconds,
       )
@@ -1141,10 +1153,18 @@ function snapshotImmutableArtifactTransport(
         value,
         [command, abortSignal],
       )),
-    head: (command) =>
-      Promise.resolve(Reflect.apply(head, value, [command])),
-    get: (command) =>
-      Promise.resolve(Reflect.apply(get, value, [command])),
+    head: (command, abortSignal) =>
+      Promise.resolve(Reflect.apply(
+        head,
+        value,
+        [command, abortSignal],
+      )),
+    get: (command, abortSignal) =>
+      Promise.resolve(Reflect.apply(
+        get,
+        value,
+        [command, abortSignal],
+      )),
   }
 }
 

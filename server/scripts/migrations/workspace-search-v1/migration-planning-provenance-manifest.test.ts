@@ -524,6 +524,56 @@ describe('Workspace Search planning provenance manifest', () => {
     },
   )
 
+  test('rejects builder inputs missing operation-specific required keys', () => {
+    const artifact = createArtifact()
+    const missingSegmentPrefixInput = {
+      artifact,
+      objectKeyPrefix,
+    }
+    Reflect.deleteProperty(
+      missingSegmentPrefixInput,
+      'objectKeyPrefix',
+    )
+    expectManifestFailure(() =>
+      createWorkspaceSearchMigrationPlanningProvenanceSegments(
+        missingSegmentPrefixInput,
+      )
+    )
+
+    const segments =
+      createWorkspaceSearchMigrationPlanningProvenanceSegments({
+        artifact,
+        objectKeyPrefix,
+      })
+    const storedSegments = storeSegments(segments)
+    const missingPagePrefixInput = {
+      artifact,
+      objectKeyPrefix,
+      storedSegments,
+    }
+    Reflect.deleteProperty(missingPagePrefixInput, 'objectKeyPrefix')
+    expectManifestFailure(() =>
+      createWorkspaceSearchMigrationPlanningProvenanceManifestPages(
+        missingPagePrefixInput,
+      )
+    )
+
+    const missingStoredSegmentsInput = {
+      artifact,
+      objectKeyPrefix,
+      storedSegments,
+    }
+    Reflect.deleteProperty(
+      missingStoredSegmentsInput,
+      'storedSegments',
+    )
+    expectManifestFailure(() =>
+      createWorkspaceSearchMigrationPlanningProvenanceManifestPages(
+        missingStoredSegmentsInput,
+      )
+    )
+  })
+
   test(
     'fails closed for Proxy, accessors, sparse arrays, shared bytes, and typed-array accessors',
     () => {

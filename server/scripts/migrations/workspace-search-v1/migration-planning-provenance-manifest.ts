@@ -496,6 +496,9 @@ export function createWorkspaceSearchMigrationPlanningProvenanceSegments(
       'artifact',
       'maximumSegmentBytes',
       'objectKeyPrefix',
+    ], [
+      'artifact',
+      'objectKeyPrefix',
     ])
     const artifact = readPlanningProvenanceArtifact(
       readOwn(inputRecord, 'artifact'),
@@ -613,6 +616,10 @@ export function createWorkspaceSearchMigrationPlanningProvenanceManifestPages(
     requireExactOptionalKeys(inputRecord, [
       'artifact',
       'maximumManifestPageBytes',
+      'objectKeyPrefix',
+      'storedSegments',
+    ], [
+      'artifact',
       'objectKeyPrefix',
       'storedSegments',
     ])
@@ -3322,8 +3329,7 @@ function sameSummary(
   left: WorkspaceSearchMigrationPlanningProvenanceManifestSummary,
   right: WorkspaceSearchMigrationPlanningProvenanceManifestSummary,
 ): boolean {
-  return left.summaryDigest === right.summaryDigest &&
-    createMigrationDigest(left) === createMigrationDigest(right)
+  return left.summaryDigest === right.summaryDigest
 }
 
 /**
@@ -3570,10 +3576,12 @@ function requireExactKeys(
  *
  * @param value - Candidate input object.
  * @param accepted - Exact complete accepted key set.
+ * @param required - Keys that must be present in the accepted set.
  */
 function requireExactOptionalKeys(
   value: object,
   accepted: readonly string[],
+  required: readonly string[],
 ): void {
   let keys: string[]
   try {
@@ -3583,7 +3591,7 @@ function requireExactOptionalKeys(
   }
   if (
     keys.some((key) => !accepted.includes(key)) ||
-    !keys.includes('artifact')
+    required.some((key) => !keys.includes(key))
   ) {
     return failManifest()
   }
