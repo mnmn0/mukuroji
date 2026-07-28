@@ -209,6 +209,16 @@ export type CreateWorkspaceSearchMigrationTargetEvidenceAwsPortInput = {
 }
 
 /**
+ * Exact terminal planning head fixed by a later sealed-plan transaction.
+ */
+export type CreateWorkspaceSearchMigrationTargetTerminalHeadConditionCheckInput = {
+  /** Exact measured migration-state table containing the durable head. */
+  readonly stateTable: MigrationTableIdentity
+  /** Exact completed planning-v1 target progress to condition-check. */
+  readonly progress: WorkspaceSearchMigrationTargetEvidenceProgress
+}
+
+/**
  * Identity and configuration required to address one durable scan head.
  */
 export type WorkspaceSearchMigrationTargetEvidenceAwsRequest = {
@@ -1157,6 +1167,120 @@ export function createAwsWorkspaceSearchMigrationTargetEvidencePort(
     return new AwsWorkspaceSearchMigrationTargetEvidencePort(input)
   } catch {
     throw createTargetEvidenceAwsBoundaryFailure('INVALID_ARGUMENT')
+  }
+}
+
+/**
+ * Creates one exact terminal planning-v1 target-head ConditionCheck.
+ *
+ * The returned item is intended for a later sealed-plan publication
+ * transaction. It compares the complete durable identity, chain version,
+ * terminal checkpoint, recursive head digest, and completion state.
+ *
+ * @param input - Exact measured state table and terminal target progress.
+ * @returns One adapter-owned DynamoDB ConditionCheck transaction item.
+ */
+export function createWorkspaceSearchMigrationTargetTerminalHeadConditionCheck(
+  input:
+    CreateWorkspaceSearchMigrationTargetTerminalHeadConditionCheckInput,
+): TransactWriteItem {
+  try {
+    const inputRecord = requireTargetEvidenceInputRecord(input)
+    requireExactTargetEvidenceInputKeys(inputRecord, [
+      'progress',
+      'stateTable',
+    ])
+    const snapshot = structuredClone(input)
+    requireMigrationStateTableIdentity(snapshot.stateTable)
+    const progress = snapshot.progress
+    void createWorkspaceSearchMigrationTargetEvidenceProgressDigest(
+      progress,
+    )
+    if (
+      progress.purpose !== 'planning' ||
+      progress.stateTableId !== snapshot.stateTable.tableId ||
+      progress.pageSequence <= 0 ||
+      !progress.checkpoint.completed ||
+      progress.checkpoint.cursor !== undefined ||
+      progress.checkpoint.aggregate.pageCount !==
+        progress.pageSequence ||
+      progress.checkpoint.aggregate.invalid !== 0
+    ) {
+      return failTargetEvidenceAws('INVALID_STATE')
+    }
+    const identity: WorkspaceSearchMigrationTargetEvidenceIdentity = {
+      purpose: 'planning',
+      runId: progress.runId,
+      configurationHash: progress.configurationHash,
+      targetTableId: progress.targetTableId,
+      stateTableId: progress.stateTableId,
+    }
+    const conditionCheck:
+      NonNullable<TransactWriteItem['ConditionCheck']> = {
+        TableName: snapshot.stateTable.tableName,
+        Key: {
+          migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
+          recordKey: {
+            S: createTargetEvidenceHeadRecordKey(identity),
+          },
+        },
+        ConditionExpression: [
+          '#kind = :kind',
+          '#version = :version',
+          '#run = :run',
+          '#purpose = :purpose',
+          '#config = :config',
+          '#targetTableId = :targetTableId',
+          '#stateTableId = :stateTableId',
+          '#chainEvidenceVersion = :chainEvidenceVersion',
+          '#revision = :revision',
+          '#checkpoint = :checkpoint',
+          '#checkpointDigest = :checkpointDigest',
+          '#headDigest = :headDigest',
+          '#completed = :completed',
+        ].join(' AND '),
+        ExpressionAttributeNames: {
+          '#kind': 'kind',
+          '#version': 'version',
+          '#run': 'run',
+          '#purpose': 'purpose',
+          '#config': 'config',
+          '#targetTableId': 'targetTableId',
+          '#stateTableId': 'stateTableId',
+          '#chainEvidenceVersion': 'chainEvidenceVersion',
+          '#revision': 'revision',
+          '#checkpoint': 'checkpoint',
+          '#checkpointDigest': 'checkpointDigest',
+          '#headDigest': 'headDigest',
+          '#completed': 'completed',
+        },
+        ExpressionAttributeValues: {
+          ':kind': { S: targetEvidenceHeadKind },
+          ':version': { N: String(targetEvidenceAwsRecordVersion) },
+          ':run': { S: progress.runId },
+          ':purpose': { S: 'planning' },
+          ':config': { S: progress.configurationHash },
+          ':targetTableId': { S: progress.targetTableId },
+          ':stateTableId': { S: progress.stateTableId },
+          ':chainEvidenceVersion': { N: '1' },
+          ':revision': { N: String(progress.pageSequence) },
+          ':checkpoint': encodeTargetEvidenceCheckpoint(
+            progress.checkpoint,
+          ),
+          ':checkpointDigest': {
+            S: createWorkspaceSearchMigrationTargetCheckpointDigest(
+              progress.checkpoint,
+            ),
+          },
+          ':headDigest': { S: progress.evidenceDigest },
+          ':completed': { BOOL: true },
+        },
+      }
+    return { ConditionCheck: conditionCheck }
+  } catch (error: unknown) {
+    throw createTargetEvidenceAwsBoundaryFailure(
+      readTargetEvidenceAwsFailureCode(error),
+    )
   }
 }
 

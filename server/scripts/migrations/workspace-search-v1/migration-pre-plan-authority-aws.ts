@@ -124,6 +124,22 @@ export type WorkspaceSearchMigrationPrePlanAuthority = {
 }
 
 /**
+ * Immutable historical maintenance receipt with its durable authority binding.
+ */
+export type WorkspaceSearchMigrationHistoricalMaintenanceEvidenceBinding = {
+  /** Exact measured configuration digest stored with the receipt. */
+  readonly configurationHash: string
+  /** Immutable physical migration-state TableId that owns the receipt row. */
+  readonly stateTableId: string
+  /** Lease owner that validated and persisted the receipt. */
+  readonly ownerId: string
+  /** Digest addressing the exact immutable receipt row. */
+  readonly receiptDigest: string
+  /** Exact historical maintenance-evidence receipt payload. */
+  readonly receipt: WorkspaceSearchMaintenanceEvidenceReceipt
+}
+
+/**
  * Inputs required to bind one planning transaction to current authority rows.
  */
 export type CreateWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecksInput = {
@@ -233,6 +249,23 @@ export interface WorkspaceSearchMigrationPrePlanAuthorityAwsPort {
     runId: string,
     receiptDigest: string,
   ): Promise<WorkspaceSearchMaintenanceEvidenceReceipt | undefined>
+
+  /**
+   * Strongly reads one immutable historical receipt and its durable envelope.
+   *
+   * Unlike a current-authority read, this operation deliberately does not
+   * require the historical receipt to remain fresh.
+   *
+   * @param runId - Run that owns the receipt.
+   * @param receiptDigest - Digest addressing the immutable receipt.
+   * @returns Exact historical binding or undefined when it does not exist.
+   */
+  readHistoricalMaintenanceEvidenceBinding(
+    runId: string,
+    receiptDigest: string,
+  ): Promise<
+    WorkspaceSearchMigrationHistoricalMaintenanceEvidenceBinding | undefined
+  >
 }
 
 /**
@@ -699,6 +732,31 @@ class AwsWorkspaceSearchMigrationPrePlanAuthorityPort
     runId: string,
     receiptDigest: string,
   ): Promise<WorkspaceSearchMaintenanceEvidenceReceipt | undefined> {
+    const binding = await this.readHistoricalMaintenanceEvidenceBinding(
+      runId,
+      receiptDigest,
+    )
+    return binding === undefined
+      ? undefined
+      : cloneReceipt(binding.receipt)
+  }
+
+  /**
+   * Strongly reads one immutable historical receipt and its durable envelope.
+   *
+   * Historical freshness is intentionally not evaluated: the immutable row is
+   * evidence that a planning page was authorized at its original commit time.
+   *
+   * @param runId - Run that owns the receipt.
+   * @param receiptDigest - Exact immutable receipt digest.
+   * @returns Exact historical binding or undefined when absent.
+   */
+  async readHistoricalMaintenanceEvidenceBinding(
+    runId: string,
+    receiptDigest: string,
+  ): Promise<
+    WorkspaceSearchMigrationHistoricalMaintenanceEvidenceBinding | undefined
+  > {
     return runPrePlanAuthorityAwsBoundary(async () => {
       const validatedRunId = readMigrationIdentifier(runId)
       const validatedDigest = readDigest(receiptDigest)
@@ -711,7 +769,13 @@ class AwsWorkspaceSearchMigrationPrePlanAuthorityPort
       if (durable.receipt.runId !== validatedRunId) {
         return failPrePlanAuthorityAws('INVALID_STATE')
       }
-      return cloneReceipt(durable.receipt)
+      return {
+        configurationHash: durable.configurationHash,
+        stateTableId: durable.stateTableId,
+        ownerId: durable.ownerId,
+        receiptDigest: durable.receiptDigest,
+        receipt: cloneReceipt(durable.receipt),
+      }
     })
   }
 

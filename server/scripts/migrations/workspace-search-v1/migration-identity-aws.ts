@@ -85,6 +85,7 @@ import {
 import {
   createAwsWorkspaceSearchMigrationPrePlanAuthorityPort,
   type RenewWorkspaceSearchMigrationPrePlanMaintenanceEvidenceInput,
+  type WorkspaceSearchMigrationHistoricalMaintenanceEvidenceBinding,
   type WorkspaceSearchMigrationPrePlanAuthority,
   type WorkspaceSearchMigrationPrePlanAuthorityAwsPort,
   type WorkspaceSearchMigrationPrePlanAuthorityAwsTransport,
@@ -1742,6 +1743,32 @@ class AwsWorkspaceSearchMigrationIdentityPort
           runIdSnapshot,
           receiptDigestSnapshot,
         ),
+      )
+    })
+  }
+
+  /**
+   * Reads one immutable historical receipt with its durable authority binding.
+   *
+   * @param runId - Run that owns the historical receipt.
+   * @param receiptDigest - Exact immutable receipt digest.
+   * @returns Exact historical binding or undefined when absent.
+   */
+  async readHistoricalMaintenanceEvidenceBinding(
+    runId: string,
+    receiptDigest: string,
+  ): Promise<
+    WorkspaceSearchMigrationHistoricalMaintenanceEvidenceBinding | undefined
+  > {
+    return runManagedPrePlanAuthorityAwsBoundary(async () => {
+      const runIdSnapshot = runId
+      const receiptDigestSnapshot = receiptDigest
+      return this.runPrePlanAuthorityOperation(
+        (adapter) =>
+          adapter.readHistoricalMaintenanceEvidenceBinding(
+            runIdSnapshot,
+            receiptDigestSnapshot,
+          ),
       )
     })
   }

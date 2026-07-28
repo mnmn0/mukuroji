@@ -1319,6 +1319,10 @@ describe('Workspace Search migration AWS identity adapter', () => {
         leaseClaim.runId,
         receiptDigest,
       ),
+      () => port.readHistoricalMaintenanceEvidenceBinding(
+        leaseClaim.runId,
+        receiptDigest,
+      ),
     ]
 
     for (const operation of operations) {
@@ -1433,6 +1437,45 @@ describe('Workspace Search migration AWS identity adapter', () => {
     port.close()
   })
 
+  test('passes through exact expired historical maintenance bindings', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    let clockAt = '2026-07-28T03:30:00.000Z'
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => new Date(clockAt),
+    )
+    const configuration = await port.measureConfiguration()
+    const authority = await createManagedPlanningAuthority(
+      port,
+      clockAt,
+      'managed-historical-binding',
+    )
+    clockAt = authority.maintenanceEvidenceReceipt.validUntil
+    const readCount = transport.getPrePlanAuthorityCommands.length
+
+    const historical =
+      await port.readHistoricalMaintenanceEvidenceBinding(
+        authority.lease.runId,
+        authority.maintenanceEvidenceReceiptDigest,
+      )
+
+    expect(historical).toEqual({
+      configurationHash:
+        createWorkspaceSearchConfigurationHash(configuration),
+      stateTableId:
+        configuration.tables['migration-state'].tableId,
+      ownerId: authority.lease.ownerId,
+      receiptDigest: authority.maintenanceEvidenceReceiptDigest,
+      receipt: authority.maintenanceEvidenceReceipt,
+    })
+    expect(transport.getPrePlanAuthorityCommands)
+      .toHaveLength(readCount + 1)
+    port.close()
+  })
+
   test('fails closed when the migration-state table is replaced during authority commit', async () => {
     const requested = createRequestedResources()
     const transport = new RecordingIdentityAwsTransport()
@@ -1493,6 +1536,86 @@ describe('Workspace Search migration AWS identity adapter', () => {
     expect(transport.getPrePlanAuthorityCommands).toHaveLength(1)
     expect(transport.transactWritePrePlanAuthorityCommands).toHaveLength(0)
     expect(transport.closeCount).toBe(1)
+  })
+
+  test('guards historical maintenance binding reads against session and state changes', async () => {
+    const closeRequested = createRequestedResources()
+    const closeTransport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(closeTransport, closeRequested)
+    const closeClockAt = '2026-07-28T05:10:00.000Z'
+    const closePort = createAwsWorkspaceSearchMigrationIdentityPort(
+      closeRequested,
+      () => closeTransport,
+      () => new Date(closeClockAt),
+    )
+    await closePort.measureConfiguration()
+    const closeAuthority = await createManagedPlanningAuthority(
+      closePort,
+      closeClockAt,
+      'close-historical-binding',
+    )
+    closeTransport.getPrePlanAuthorityEffect = () => closePort.close()
+
+    await expect(
+      closePort.readHistoricalMaintenanceEvidenceBinding(
+        closeAuthority.lease.runId,
+        closeAuthority.maintenanceEvidenceReceiptDigest,
+      ),
+    ).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search pre-plan authority stopped safely (INVALID_STATE).',
+    })
+    expect(closeTransport.closeCount).toBe(1)
+
+    const replacementRequested = createRequestedResources()
+    const replacementTransport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(
+      replacementTransport,
+      replacementRequested,
+    )
+    const replacementClockAt = '2026-07-28T05:20:00.000Z'
+    const replacementPort =
+      createAwsWorkspaceSearchMigrationIdentityPort(
+        replacementRequested,
+        () => replacementTransport,
+        () => new Date(replacementClockAt),
+      )
+    await replacementPort.measureConfiguration()
+    const replacementAuthority = await createManagedPlanningAuthority(
+      replacementPort,
+      replacementClockAt,
+      'replacement-historical-binding',
+    )
+    const stateTableName =
+      replacementRequested.tables['migration-state']
+    const replacement = createReplacementDescribeTableOutput(
+      'migration-state',
+      stateTableName,
+      replacementRequested,
+    )
+    const replacementReadCount =
+      replacementTransport.getPrePlanAuthorityCommands.length
+    replacementTransport.getPrePlanAuthorityEffect = () => {
+      replacementTransport.describeTableOutputs.set(
+        stateTableName,
+        replacement,
+      )
+    }
+
+    await expect(
+      replacementPort.readHistoricalMaintenanceEvidenceBinding(
+        replacementAuthority.lease.runId,
+        replacementAuthority.maintenanceEvidenceReceiptDigest,
+      ),
+    ).rejects.toMatchObject({
+      code: 'CONFIGURATION_DRIFT',
+      message:
+        'Workspace Search pre-plan authority stopped safely (CONFIGURATION_DRIFT).',
+    })
+    expect(replacementTransport.getPrePlanAuthorityCommands)
+      .toHaveLength(replacementReadCount + 1)
+    replacementPort.close()
   })
 
   test('redacts forged managed evidence failure codes before data I/O', async () => {
