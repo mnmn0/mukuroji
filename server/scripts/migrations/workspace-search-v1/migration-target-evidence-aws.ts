@@ -17,6 +17,7 @@ import {
   decodeAttributeMap,
   encodeAttributeMap,
   encodeUnknownAttributeMap,
+  serializeCanonicalAttributeMap,
   validateDynamoDbItemSize,
 } from './dynamodb-attribute-codec'
 import {
@@ -35,6 +36,11 @@ import {
   WorkspaceSearchMigrationFailure,
   WORKSPACE_SEARCH_MIGRATION_ID,
 } from './migration-contract'
+import type {
+  WorkspaceSearchMigrationPlanningMaterialReadLimits,
+  WorkspaceSearchMigrationPlanningTargetChainMaterial,
+  WorkspaceSearchMigrationPlanningTargetPageMaterial,
+} from './migration-planning-material'
 import type {
   WorkspaceSearchMigrationTargetScanReadInput,
 } from './migration-target-scan-aws'
@@ -258,6 +264,24 @@ export interface WorkspaceSearchMigrationTargetEvidenceAwsPort {
   ): Promise<WorkspaceSearchMigrationTargetEvidenceReplayResult>
 
   /**
+   * Reads exact planning-v1 artifacts at a caller-fixed durable progress.
+   *
+   * This operation deliberately does not reread the mutable durable head.
+   * It is an internal managed-composition raw-material primitive; its result
+   * cannot be used directly as production-gate or sealed-plan evidence.
+   *
+   * @param input - Exact planning evidence-chain identity and configuration.
+   * @param expectedProgress - Detached progress captured before this read.
+   * @param limits - Remaining row and canonical-item-byte budget.
+   * @returns Verified bounded raw material for the fixed target chain.
+   */
+  readPlanningMaterialAtProgress(
+    input: WorkspaceSearchMigrationTargetEvidenceAwsRequest,
+    expectedProgress: WorkspaceSearchMigrationTargetEvidenceProgress,
+    limits: WorkspaceSearchMigrationPlanningMaterialReadLimits,
+  ): Promise<WorkspaceSearchMigrationPlanningTargetChainMaterial>
+
+  /**
    * Commits exactly one next target page, or returns completed progress.
    *
    * @param input - Exact evidence-chain identity and measured configuration.
@@ -460,6 +484,64 @@ class AwsWorkspaceSearchMigrationTargetEvidencePort
         request,
         expectedProgress,
       )
+    })
+  }
+
+  /**
+   * Reads bounded planning-v1 raw material at one caller-fixed progress.
+   *
+   * This internal managed-composition primitive does not by itself establish
+   * production-gate or sealed-plan authority.
+   *
+   * @param input - Exact planning evidence-chain identity and configuration.
+   * @param expectedProgress - Exact progress captured before this read.
+   * @param limits - Remaining material budget for this chain.
+   * @returns Verified raw target material without rereading the durable head.
+   */
+  async readPlanningMaterialAtProgress(
+    input: WorkspaceSearchMigrationTargetEvidenceAwsRequest,
+    expectedProgress: WorkspaceSearchMigrationTargetEvidenceProgress,
+    limits: WorkspaceSearchMigrationPlanningMaterialReadLimits,
+  ): Promise<WorkspaceSearchMigrationPlanningTargetChainMaterial> {
+    return runTargetEvidenceAwsBoundary(async () => {
+      const request = prepareTargetEvidenceAwsRequest(
+        input,
+        this.stateTable,
+        'read',
+      )
+      const progress = snapshotPlanningTargetExpectedProgress(
+        expectedProgress,
+        request.identity,
+      )
+      const readLimits = snapshotPlanningTargetMaterialReadLimits(limits)
+      if (
+        progress.checkpoint.aggregate.scanned >
+          readLimits.maxRows
+      ) {
+        return failTargetEvidenceAws('INVALID_ARGUMENT')
+      }
+      const pages = await this.readEvidencePages(
+        request,
+        progress.pageSequence,
+      )
+      const replay = replayWorkspaceSearchMigrationTargetEvidencePages(
+        request.identity,
+        pages,
+      )
+      if (!targetEvidenceProgressEquals(replay.progress, progress)) {
+        return failTargetEvidenceAws('INVALID_STATE')
+      }
+      const material = await this.readPlanningTargetMaterials(
+        request,
+        pages,
+        readLimits,
+      )
+      return {
+        progress: replay.progress,
+        materials: material.materials,
+        rowCount: material.rowCount,
+        canonicalItemBytes: material.canonicalItemBytes,
+      }
     })
   }
 
@@ -802,6 +884,77 @@ class AwsWorkspaceSearchMigrationTargetEvidencePort
   }
 
   /**
+   * Reads and bounds every exact planning-v1 artifact page in chain order.
+   *
+   * @param request - Exact measured planning-chain request.
+   * @param pages - Ordered durable target evidence pages.
+   * @param limits - Detached remaining row and canonical-byte budget.
+   * @returns Verified page materials and their exact retained size.
+   */
+  private async readPlanningTargetMaterials(
+    request: PreparedTargetEvidenceAwsRequest,
+    pages: readonly WorkspaceSearchMigrationTargetEvidencePage[],
+    limits: WorkspaceSearchMigrationPlanningMaterialReadLimits,
+  ): Promise<{
+      /** Verified target materials in evidence-chain order. */
+      readonly materials:
+        readonly WorkspaceSearchMigrationPlanningTargetPageMaterial[]
+      /** Exact raw rows retained by the returned materials. */
+      readonly rowCount: number
+      /** Exact canonical UTF-8 item bytes retained by the materials. */
+      readonly canonicalItemBytes: number
+    }> {
+    const materials: WorkspaceSearchMigrationPlanningTargetPageMaterial[] = []
+    let progress = request.initialProgress
+    let rowCount = 0
+    let canonicalItemBytes = 0
+    for (const page of pages) {
+      const evidenceRowCount =
+        page.targetRows.length + page.invalidRows.length
+      if (evidenceRowCount > limits.maxRows - rowCount) {
+        return failTargetEvidenceAws('INVALID_ARGUMENT')
+      }
+      const items = await this.verifyPlanningArtifactPage(
+        request,
+        progress,
+        page,
+      )
+      if (items.length !== evidenceRowCount) {
+        return failTargetEvidenceAws('INVALID_TARGET_ARTIFACT')
+      }
+      let pageCanonicalItemBytes = 0
+      for (const item of items) {
+        const itemBytes = Buffer.byteLength(
+          serializeCanonicalAttributeMap(item),
+          'utf8',
+        )
+        if (
+          itemBytes >
+            limits.maxCanonicalItemBytes -
+              canonicalItemBytes -
+              pageCanonicalItemBytes
+        ) {
+          return failTargetEvidenceAws('INVALID_ARGUMENT')
+        }
+        pageCanonicalItemBytes += itemBytes
+      }
+      materials.push({ page, items })
+      rowCount += items.length
+      canonicalItemBytes += pageCanonicalItemBytes
+      progress =
+        advanceWorkspaceSearchMigrationTargetEvidenceProgress(
+          progress,
+          page,
+        )
+    }
+    return {
+      materials,
+      rowCount,
+      canonicalItemBytes,
+    }
+  }
+
+  /**
    * Verifies every artifact-bearing planning page against its exact transition.
    *
    * @param request - Exact measured chain request.
@@ -828,12 +981,13 @@ class AwsWorkspaceSearchMigrationTargetEvidencePort
    * @param request - Exact measured chain request.
    * @param predecessor - Exact predecessor progress.
    * @param page - Artifact-bearing planning v1 page.
+   * @returns Verified detached raw items for the exact committed page.
    */
   private async verifyPlanningArtifactPage(
     request: PreparedTargetEvidenceAwsRequest,
     predecessor: WorkspaceSearchMigrationTargetEvidenceProgress,
     page: WorkspaceSearchMigrationTargetEvidencePage,
-  ): Promise<void> {
+  ): Promise<readonly DynamoAttributeMap[]> {
     const rawPage =
       await this.planningArtifactGateway.readVerifiedPlanningPage({
         configuration: request.configuration,
@@ -887,6 +1041,7 @@ class AwsWorkspaceSearchMigrationTargetEvidencePort
     ) {
       return failTargetEvidenceAws('INVALID_TARGET_ARTIFACT')
     }
+    return rawPage.items
   }
 
   /**
@@ -1862,6 +2017,108 @@ function requireProgressIdentity(
   ) {
     return failTargetEvidenceAws('IDENTITY_MISMATCH')
   }
+}
+
+/**
+ * Strictly snapshots one caller-fixed planning target progress before I/O.
+ *
+ * @param value - Candidate progress captured by the managed composition.
+ * @param identity - Exact planning target chain being materialized.
+ * @returns Detached validated progress bound to the requested chain.
+ */
+function snapshotPlanningTargetExpectedProgress(
+  value: WorkspaceSearchMigrationTargetEvidenceProgress,
+  identity: WorkspaceSearchMigrationTargetEvidenceIdentity,
+): WorkspaceSearchMigrationTargetEvidenceProgress {
+  const record = requireTargetEvidenceInputRecord(value)
+  requireExactTargetEvidenceInputKeys(record, [
+    'checkpoint',
+    'configurationHash',
+    'evidenceDigest',
+    'pageSequence',
+    'purpose',
+    'runId',
+    'stateTableId',
+    'targetTableId',
+  ])
+  let progress: WorkspaceSearchMigrationTargetEvidenceProgress
+  try {
+    progress = structuredClone(value)
+    void createWorkspaceSearchMigrationTargetEvidenceProgressDigest(progress)
+  } catch {
+    return failTargetEvidenceAws('INVALID_ARGUMENT')
+  }
+  requireProgressIdentity(identity, progress)
+  if (
+    progress.pageSequence >
+      WORKSPACE_SEARCH_MIGRATION_TARGET_EVIDENCE_MAXIMUM_PAGE_COUNT
+  ) {
+    return failTargetEvidenceAws('INVALID_ARGUMENT')
+  }
+  return progress
+}
+
+/**
+ * Strictly snapshots one remaining planning-material budget before I/O.
+ *
+ * @param value - Candidate remaining row and canonical-byte limits.
+ * @returns Detached non-negative safe-integer limits.
+ */
+function snapshotPlanningTargetMaterialReadLimits(
+  value: WorkspaceSearchMigrationPlanningMaterialReadLimits,
+): WorkspaceSearchMigrationPlanningMaterialReadLimits {
+  const record = requireTargetEvidenceInputRecord(value)
+  requireExactTargetEvidenceInputKeys(record, [
+    'maxCanonicalItemBytes',
+    'maxRows',
+  ])
+  const maxRows = readPlanningTargetMaterialLimit(
+    record,
+    'maxRows',
+  )
+  const maxCanonicalItemBytes = readPlanningTargetMaterialLimit(
+    record,
+    'maxCanonicalItemBytes',
+  )
+  return {
+    maxRows,
+    maxCanonicalItemBytes,
+  }
+}
+
+/**
+ * Reads one non-negative safe integer from an own enumerable data descriptor.
+ *
+ * @param record - Exact limits record already checked for its own key set.
+ * @param property - Fixed material-limit property to read.
+ * @returns Detached validated scalar without invoking an accessor.
+ */
+function readPlanningTargetMaterialLimit(
+  record: object,
+  property: 'maxCanonicalItemBytes' | 'maxRows',
+): number {
+  let descriptor: PropertyDescriptor | undefined
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(record, property)
+  } catch {
+    return failTargetEvidenceAws('INVALID_ARGUMENT')
+  }
+  if (
+    descriptor === undefined ||
+    !descriptor.enumerable ||
+    !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+  ) {
+    return failTargetEvidenceAws('INVALID_ARGUMENT')
+  }
+  const candidate: unknown = descriptor.value
+  if (
+    typeof candidate !== 'number' ||
+    !Number.isSafeInteger(candidate) ||
+    candidate < 0
+  ) {
+    return failTargetEvidenceAws('INVALID_ARGUMENT')
+  }
+  return candidate
 }
 
 /**
