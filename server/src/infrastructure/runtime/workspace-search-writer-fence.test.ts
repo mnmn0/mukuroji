@@ -11,6 +11,7 @@ import {
   createWorkspaceSearchWriterFenceTransitionPut,
   encodeWorkspaceSearchWriterFenceRecord,
   parseWorkspaceSearchWriterFenceObservation,
+  readWorkspaceSearchWriterFenceGuardMaterial,
   WorkspaceSearchWriterFenceError,
   workspaceSearchWriterFenceClosedRecordMatchesAuthority,
   type WorkspaceSearchWriterFenceAuthority,
@@ -30,6 +31,27 @@ function digestFixture(value: string): string {
 }
 
 /**
+ * Creates one complete migration-state identity fixture.
+ *
+ * @param suffix - Distinguishes physical state-table incarnations.
+ * @returns Complete deterministic measured identity.
+ */
+function createStateIdentityFixture(
+  suffix = 'primary',
+): WorkspaceSearchWriterFenceStateIdentity {
+  return {
+    role: 'migration-state',
+    tableName: 'WorkspaceSearchMigrationState',
+    tableArn:
+      'arn:aws:dynamodb:ap-northeast-1:123456789012:table/WorkspaceSearchMigrationState',
+    tableId: `migration-state-${suffix}`,
+    creationTime: '2026-07-29T00:00:00.000Z',
+    account: '123456789012',
+    region: 'ap-northeast-1',
+  }
+}
+
+/**
  * Creates one complete measured writer-fence binding fixture.
  *
  * @param suffix - Distinguishes physical table incarnations.
@@ -38,18 +60,19 @@ function digestFixture(value: string): string {
 function createBindingFixture(
   suffix = 'primary',
 ): WorkspaceSearchWriterFenceBinding {
-  const stateTableId = `migration-state-${suffix}`
+  const stateIdentity = createStateIdentityFixture(suffix)
   return createWorkspaceSearchWriterFenceBinding({
-    stateTableName: 'WorkspaceSearchMigrationState',
-    stateTableId,
-    stateIncarnationDigest: digestFixture(`state-incarnation-${suffix}`),
+    stateTableName: stateIdentity.tableName,
+    stateTableId: stateIdentity.tableId,
+    stateIncarnationDigest:
+      createWorkspaceSearchWriterFenceStateIncarnationDigest(stateIdentity),
     tableIds: {
       'project-directory': `project-directory-${suffix}`,
       'work-items': `work-items-${suffix}`,
       collaboration: `collaboration-${suffix}`,
       documents: `documents-${suffix}`,
       'workspace-search': `workspace-search-${suffix}`,
-      'migration-state': stateTableId,
+      'migration-state': stateIdentity.tableId,
     },
   })
 }
@@ -60,10 +83,12 @@ function createBindingFixture(
  * @returns Binding equivalent to the primary fixture.
  */
 function createReorderedBindingFixture(): WorkspaceSearchWriterFenceBinding {
+  const stateIdentity = createStateIdentityFixture()
   return createWorkspaceSearchWriterFenceBinding({
-    stateTableName: 'WorkspaceSearchMigrationState',
-    stateTableId: 'migration-state-primary',
-    stateIncarnationDigest: digestFixture('state-incarnation-primary'),
+    stateTableName: stateIdentity.tableName,
+    stateTableId: stateIdentity.tableId,
+    stateIncarnationDigest:
+      createWorkspaceSearchWriterFenceStateIncarnationDigest(stateIdentity),
     tableIds: {
       'migration-state': 'migration-state-primary',
       'workspace-search': 'workspace-search-primary',
@@ -115,6 +140,29 @@ function createRawItem(
     canonicalBytes: { S: canonicalBytes },
     recordDigest: { S: recordDigest },
   }
+}
+
+/**
+ * Recomputes the public secret-free guard fingerprint for a table name.
+ *
+ * @param binding - Durable binding committed by the open row.
+ * @param recordDigest - Exact open-row digest.
+ * @param stateTableName - Candidate ConditionCheck table name.
+ * @returns Deterministic lowercase material fingerprint.
+ */
+function createMaterialFingerprintFixture(
+  binding: WorkspaceSearchWriterFenceBinding,
+  recordDigest: string,
+  stateTableName: string,
+): string {
+  return digestFixture(JSON.stringify({
+    datasetBindingDigest: binding.datasetBindingDigest,
+    recordDigest,
+    recordKey: binding.recordKey,
+    stateIncarnationDigest: binding.stateIncarnationDigest,
+    stateTableId: binding.stateTableId,
+    stateTableName,
+  }))
 }
 
 test('constructs deterministic bindings independent of property order', () => {
@@ -212,6 +260,7 @@ test('round-trips the initial open row through strict storage and read material'
     open.recordDigest,
     binding.recordKey,
   ))
+  expect(open.canonicalBytes).not.toContain('stateTableIdentity')
   expect(parseWorkspaceSearchWriterFenceObservation(
     item,
     binding,
@@ -238,15 +287,18 @@ test('round-trips the initial open row through strict storage and read material'
 
 test('fails closed instead of creating guard material for a missing row', () => {
   const binding = createBindingFixture()
+  const stateIdentity = createStateIdentityFixture()
 
   expect(() => createWorkspaceSearchWriterFenceGuardMaterial(
     { status: 'missing', binding },
     binding,
+    stateIdentity,
   )).toThrow(WorkspaceSearchWriterFenceError)
 })
 
 test('creates an exact deterministic guard for one open row', () => {
   const binding = createBindingFixture()
+  const stateIdentity = createStateIdentityFixture()
   const open = createWorkspaceSearchWriterFenceInitialOpenRecord(
     binding,
     new Date('2026-07-29T00:00:00.000Z'),
@@ -258,6 +310,7 @@ test('creates an exact deterministic guard for one open row', () => {
   const guard = createWorkspaceSearchWriterFenceGuardMaterial(
     observation,
     binding,
+    stateIdentity,
   )
 
   expect(guard).toEqual({
@@ -282,7 +335,8 @@ test('creates an exact deterministic guard for one open row', () => {
       },
     },
     materialFingerprint:
-      '8132a3dbbb164792512386528001d646710ad53dfc26f291b43855aab684c753',
+      '16c3962d869f4d3556603348aa44df6ced4b6cd5b560c09d026ed960ff527255',
+    stateTableIdentity: stateIdentity,
     writerEpoch: 1,
     controlRevision: 1,
   })
@@ -290,11 +344,95 @@ test('creates an exact deterministic guard for one open row', () => {
   expect(createWorkspaceSearchWriterFenceGuardMaterial(
     observation,
     binding,
+    stateIdentity,
   )).toEqual(guard)
+  expect(readWorkspaceSearchWriterFenceGuardMaterial(guard)).toEqual(guard)
+})
+
+test('rejects a substituted condition table with a recomputed fingerprint', () => {
+  const binding = createBindingFixture()
+  const stateIdentity = createStateIdentityFixture()
+  const open = createWorkspaceSearchWriterFenceInitialOpenRecord(
+    binding,
+    new Date('2026-07-29T00:00:00.000Z'),
+  )
+  const guard = createWorkspaceSearchWriterFenceGuardMaterial(
+    { status: 'present', record: open },
+    binding,
+    stateIdentity,
+  )
+  const forged = structuredClone(guard)
+  const substitutedTableName = 'RestoredWorkspaceSearchMigrationState'
+  const condition = forged.conditionCheck.ConditionCheck
+  if (condition === undefined) throw new Error('INVALID_TEST_FIXTURE')
+  Reflect.set(condition, 'TableName', substitutedTableName)
+  Reflect.set(
+    forged,
+    'materialFingerprint',
+    createMaterialFingerprintFixture(
+      binding,
+      open.recordDigest,
+      substitutedTableName,
+    ),
+  )
+
+  expect(() =>
+    readWorkspaceSearchWriterFenceGuardMaterial(forged)
+  ).toThrow(WorkspaceSearchWriterFenceError)
+})
+
+test('requires complete state identity to match the durable binding', () => {
+  const binding = createBindingFixture()
+  const stateIdentity = createStateIdentityFixture()
+  const open = createWorkspaceSearchWriterFenceInitialOpenRecord(
+    binding,
+    new Date('2026-07-29T00:00:00.000Z'),
+  )
+  const restoredTableName = 'RestoredWorkspaceSearchMigrationState'
+  const restoredIdentity: WorkspaceSearchWriterFenceStateIdentity = {
+    ...stateIdentity,
+    tableName: restoredTableName,
+    tableArn:
+      `arn:aws:dynamodb:ap-northeast-1:123456789012:table/${restoredTableName}`,
+  }
+
+  expect(
+    createWorkspaceSearchWriterFenceStateIncarnationDigest(restoredIdentity),
+  ).not.toBe(binding.stateIncarnationDigest)
+  expect(() => createWorkspaceSearchWriterFenceGuardMaterial(
+    { status: 'present', record: open },
+    binding,
+    restoredIdentity,
+  )).toThrow(WorkspaceSearchWriterFenceError)
+
+  const guard = createWorkspaceSearchWriterFenceGuardMaterial(
+    { status: 'present', record: open },
+    binding,
+    stateIdentity,
+  )
+  const forged = structuredClone(guard)
+  const condition = forged.conditionCheck.ConditionCheck
+  if (condition === undefined) throw new Error('INVALID_TEST_FIXTURE')
+  Reflect.set(condition, 'TableName', restoredTableName)
+  Reflect.set(forged, 'stateTableIdentity', restoredIdentity)
+  Reflect.set(
+    forged,
+    'materialFingerprint',
+    createMaterialFingerprintFixture(
+      binding,
+      open.recordDigest,
+      restoredTableName,
+    ),
+  )
+
+  expect(() =>
+    readWorkspaceSearchWriterFenceGuardMaterial(forged)
+  ).toThrow(WorkspaceSearchWriterFenceError)
 })
 
 test('increments epochs and revisions across the one-way exact close', () => {
   const binding = createBindingFixture()
+  const stateIdentity = createStateIdentityFixture()
   const authority = createAuthorityFixture()
   const initial = createWorkspaceSearchWriterFenceInitialOpenRecord(
     binding,
@@ -316,11 +454,13 @@ test('increments epochs and revisions across the one-way exact close', () => {
   expect(() => createWorkspaceSearchWriterFenceGuardMaterial(
     { status: 'present', record: closed },
     binding,
+    stateIdentity,
   )).toThrow(WorkspaceSearchWriterFenceError)
 })
 
 test('binds writer tokens and transitions to exact predecessor bytes', () => {
   const binding = createBindingFixture()
+  const stateIdentity = createStateIdentityFixture()
   const initial = createWorkspaceSearchWriterFenceInitialOpenRecord(
     binding,
     new Date('2026-07-29T00:00:00.000Z'),
@@ -333,6 +473,7 @@ test('binds writer tokens and transitions to exact predecessor bytes', () => {
   const guard = createWorkspaceSearchWriterFenceGuardMaterial(
     { status: 'present', record: initial },
     binding,
+    stateIdentity,
   )
   const closePut = createWorkspaceSearchWriterFenceTransitionPut(
     { status: 'present', record: initial },
@@ -406,6 +547,7 @@ test('uses missing-key and exact-predecessor transition conditions', () => {
 test('rejects rows, guards, and transitions bound to different tables', () => {
   const binding = createBindingFixture()
   const replacement = createBindingFixture('replacement')
+  const replacementStateIdentity = createStateIdentityFixture('replacement')
   const initial = createWorkspaceSearchWriterFenceInitialOpenRecord(
     binding,
     new Date('2026-07-29T00:00:00.000Z'),
@@ -418,6 +560,7 @@ test('rejects rows, guards, and transitions bound to different tables', () => {
   expect(() => createWorkspaceSearchWriterFenceGuardMaterial(
     { status: 'present', record: initial },
     replacement,
+    replacementStateIdentity,
   )).toThrow(WorkspaceSearchWriterFenceError)
   expect(() => createWorkspaceSearchWriterFenceTransitionPut(
     { status: 'missing', binding: replacement },

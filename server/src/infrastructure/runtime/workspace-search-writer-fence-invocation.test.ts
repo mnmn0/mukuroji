@@ -1,17 +1,19 @@
-import { createHash } from 'node:crypto'
 import { expect, test } from 'bun:test'
 import {
   createWorkspaceSearchWriterFenceBinding,
   createWorkspaceSearchWriterFenceGuardMaterial,
   createWorkspaceSearchWriterFenceInitialOpenRecord,
+  createWorkspaceSearchWriterFenceStateIncarnationDigest,
   encodeWorkspaceSearchWriterFenceRecord,
   parseWorkspaceSearchWriterFenceObservation,
   type WorkspaceSearchWriterFenceGuardMaterial,
+  type WorkspaceSearchWriterFenceStateIdentity,
 } from './workspace-search-writer-fence'
 import {
   createWorkspaceSearchWriterFenceGuardProvider,
   runWithWorkspaceSearchWriterFenceInvocation,
   WorkspaceSearchWriterFenceInvocationScopeError,
+  WorkspaceSearchWriterFenceInvocationSourceMismatchError,
 } from './workspace-search-writer-fence-invocation'
 
 /**
@@ -24,12 +26,23 @@ function createGuardFixture(
   suffix = 'primary',
 ): WorkspaceSearchWriterFenceGuardMaterial {
   const stateTableId = `migration-state-${suffix}`
+  const stateTableIdentity: WorkspaceSearchWriterFenceStateIdentity = {
+    role: 'migration-state',
+    tableName: 'WorkspaceSearchMigrationState',
+    tableArn:
+      'arn:aws:dynamodb:ap-northeast-1:123456789012:table/WorkspaceSearchMigrationState',
+    tableId: stateTableId,
+    creationTime: '2026-07-29T00:00:00.000Z',
+    account: '123456789012',
+    region: 'ap-northeast-1',
+  }
   const binding = createWorkspaceSearchWriterFenceBinding({
-    stateTableName: 'WorkspaceSearchMigrationState',
+    stateTableName: stateTableIdentity.tableName,
     stateTableId,
-    stateIncarnationDigest: createHash('sha256')
-      .update(`state-${suffix}`)
-      .digest('hex'),
+    stateIncarnationDigest:
+      createWorkspaceSearchWriterFenceStateIncarnationDigest(
+        stateTableIdentity,
+      ),
     tableIds: {
       'project-directory': `project-directory-${suffix}`,
       'work-items': `work-items-${suffix}`,
@@ -50,6 +63,7 @@ function createGuardFixture(
   return createWorkspaceSearchWriterFenceGuardMaterial(
     observation,
     binding,
+    stateTableIdentity,
   )
 }
 
@@ -138,7 +152,32 @@ test('acquires independently for separate and concurrent invocations', async () 
   ]).size).toBe(3)
 })
 
-test('shares the first acquisition across providers in one invocation', async () => {
+test('shares the first acquisition across providers using one source', async () => {
+  let firstCount = 0
+  const source = {
+    async acquire() {
+      firstCount += 1
+      return createGuardFixture('first-provider')
+    },
+  }
+  const firstProvider = createWorkspaceSearchWriterFenceGuardProvider(source)
+  const secondProvider = createWorkspaceSearchWriterFenceGuardProvider(source)
+
+  await runWithWorkspaceSearchWriterFenceInvocation(async () => {
+    const [first, repeatedFirst, second] = await Promise.all([
+      firstProvider.get(),
+      firstProvider.get(),
+      secondProvider.get(),
+    ])
+
+    expect(repeatedFirst).toBe(first)
+    expect(second).toBe(first)
+  })
+
+  expect(firstCount).toBe(1)
+})
+
+test('fails closed when one invocation mixes distinct guard sources', async () => {
   let firstCount = 0
   let secondCount = 0
   const firstProvider = createWorkspaceSearchWriterFenceGuardProvider({
@@ -155,14 +194,11 @@ test('shares the first acquisition across providers in one invocation', async ()
   })
 
   await runWithWorkspaceSearchWriterFenceInvocation(async () => {
-    const [first, repeatedFirst, second] = await Promise.all([
-      firstProvider.get(),
-      firstProvider.get(),
-      secondProvider.get(),
-    ])
-
-    expect(repeatedFirst).toBe(first)
-    expect(second).toBe(first)
+    const first = firstProvider.get()
+    await expect(secondProvider.get()).rejects.toBeInstanceOf(
+      WorkspaceSearchWriterFenceInvocationSourceMismatchError,
+    )
+    await first
   })
 
   expect(firstCount).toBe(1)

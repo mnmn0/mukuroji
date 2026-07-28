@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import {
   DescribeTableCommand,
   GetItemCommand,
@@ -10,8 +11,10 @@ import {
   createWorkspaceSearchWriterFenceReadMaterial,
   createWorkspaceSearchWriterFenceStateIncarnationDigest,
   parseWorkspaceSearchWriterFenceObservation,
+  WorkspaceSearchWriterFenceError,
   workspaceSearchWriterFenceTableRoles,
   type WorkspaceSearchWriterFenceGuardMaterial,
+  type WorkspaceSearchWriterFenceStateIdentity,
   type WorkspaceSearchWriterFenceTableRole,
 } from './workspace-search-writer-fence'
 
@@ -21,6 +24,19 @@ const awsPartitionPattern =
 const awsRegionPattern = /^[a-z0-9]+(?:-[a-z0-9]+)+-[0-9]+$/u
 const awsAccountPattern = /^[0-9]{12}$/u
 const tableIdPattern = /^[\u0021-\u007e]{1,1024}$/u
+const safeDiagnosticIdentifierPattern =
+  /^[A-Za-z0-9][A-Za-z0-9-]{0,127}$/u
+const authorizationErrorNames = new Set([
+  'AccessDeniedException',
+  'CredentialsProviderError',
+  'ExpiredTokenException',
+  'IncompleteSignature',
+  'InvalidClientTokenId',
+  'InvalidSignatureException',
+  'MissingAuthenticationTokenException',
+  'UnauthorizedException',
+  'UnrecognizedClientException',
+])
 
 /**
  * Exact configured table names measured before a writer guard is acquired.
@@ -61,6 +77,47 @@ export interface WorkspaceSearchWriterFenceAwsTransport {
    * @returns Raw low-level DynamoDB response.
    */
   getItem(command: GetItemCommand): Promise<GetItemCommandOutput>
+}
+
+/**
+ * Safe low-cardinality cause of one unavailable writer-fence acquisition.
+ */
+export type WorkspaceSearchWriterFenceFailureCategory =
+  | 'authorization'
+  | 'upstream'
+  | 'validation'
+
+/**
+ * Redacted internal diagnostic emitted before the public error is returned.
+ */
+export type WorkspaceSearchWriterFenceFailureDiagnostic = {
+  /** Fixed writer-fence failure event name. */
+  readonly event: 'workspace-search.writer-fence.unavailable'
+  /** Fixed runtime service name. */
+  readonly service: 'mukuroji-writer-fence'
+  /** Safe AWS request ID or server-generated diagnostic identifier. */
+  readonly correlationId: string
+  /** Low-cardinality failure classification without raw cause material. */
+  readonly category: WorkspaceSearchWriterFenceFailureCategory
+}
+
+/**
+ * Destination for one redacted writer-fence failure diagnostic.
+ *
+ * @param diagnostic - Safe fixed-shape diagnostic without raw cause values.
+ */
+export type WorkspaceSearchWriterFenceFailureRecorder = (
+  diagnostic: WorkspaceSearchWriterFenceFailureDiagnostic,
+) => void
+
+/**
+ * Optional diagnostics dependencies used by tests and runtime composition.
+ */
+export type WorkspaceSearchWriterFenceDiagnostics = {
+  /** Trusted fallback identifier factory when AWS has no safe request ID. */
+  readonly createCorrelationId?: () => string
+  /** Destination for one fixed-shape redacted failure diagnostic. */
+  readonly recordFailure?: WorkspaceSearchWriterFenceFailureRecorder
 }
 
 /**
@@ -116,6 +173,24 @@ type PreparedWorkspaceSearchWriterFenceAwsTransport = {
 }
 
 /**
+ * Captured diagnostics dependencies immune to later caller mutation.
+ */
+type PreparedWorkspaceSearchWriterFenceDiagnostics = {
+  /**
+   * Creates one trusted fallback diagnostic identifier.
+   *
+   * @returns Candidate server-generated identifier.
+   */
+  readonly createCorrelationId: () => string
+  /**
+   * Records one fixed-shape redacted failure diagnostic.
+   *
+   * @param diagnostic - Safe failure observation.
+   */
+  readonly recordFailure: WorkspaceSearchWriterFenceFailureRecorder
+}
+
+/**
  * Strict immutable identity measured from one active physical table.
  */
 type MeasuredWorkspaceSearchWriterFenceTable = {
@@ -162,18 +237,25 @@ implements WorkspaceSearchWriterFenceGuardSource {
   /** Captured narrow low-level DynamoDB transport. */
   private readonly transport: PreparedWorkspaceSearchWriterFenceAwsTransport
 
+  /** Captured safe failure diagnostics dependencies. */
+  private readonly diagnostics:
+    PreparedWorkspaceSearchWriterFenceDiagnostics
+
   /**
    * Creates one validated dormant guard source.
    *
    * @param tableNames - Detached exact six-table configuration.
    * @param transport - Captured narrow low-level transport.
+   * @param diagnostics - Captured safe diagnostics dependencies.
    */
   constructor(
     tableNames: WorkspaceSearchWriterFenceAwsTableNames,
     transport: PreparedWorkspaceSearchWriterFenceAwsTransport,
+    diagnostics: PreparedWorkspaceSearchWriterFenceDiagnostics,
   ) {
     this.tableNames = tableNames
     this.transport = transport
+    this.diagnostics = diagnostics
   }
 
   /**
@@ -182,11 +264,13 @@ implements WorkspaceSearchWriterFenceGuardSource {
    * @returns Exact guard material for one application invocation.
    */
   async acquire(): Promise<WorkspaceSearchWriterFenceGuardMaterial> {
-    return runWorkspaceSearchWriterFenceUnavailableBoundary(() =>
-      acquirePreparedWorkspaceSearchWriterFenceGuardMaterial(
-        this.tableNames,
-        this.transport,
-      )
+    return runWorkspaceSearchWriterFenceUnavailableBoundary(
+      () =>
+        acquirePreparedWorkspaceSearchWriterFenceGuardMaterial(
+          this.tableNames,
+          this.transport,
+        ),
+      this.diagnostics,
     )
   }
 }
@@ -196,17 +280,24 @@ implements WorkspaceSearchWriterFenceGuardSource {
  *
  * @param tableNames - Exact configured six-table names.
  * @param transport - Narrow low-level DynamoDB transport.
+ * @param diagnostics - Optional safe diagnostic dependencies.
  * @returns Validated guard source with no acquired-material cache.
  */
 export function createAwsWorkspaceSearchWriterFenceGuardSource(
   tableNames: WorkspaceSearchWriterFenceAwsTableNames,
   transport: WorkspaceSearchWriterFenceAwsTransport,
+  diagnostics: WorkspaceSearchWriterFenceDiagnostics = {},
 ): WorkspaceSearchWriterFenceGuardSource {
-  return runWorkspaceSearchWriterFenceUnavailableSyncBoundary(() =>
-    new AwsWorkspaceSearchWriterFenceGuardSource(
-      readWorkspaceSearchWriterFenceTableNames(tableNames),
-      prepareWorkspaceSearchWriterFenceTransport(transport),
-    )
+  const preparedDiagnostics =
+    prepareWorkspaceSearchWriterFenceDiagnostics(diagnostics)
+  return runWorkspaceSearchWriterFenceUnavailableSyncBoundary(
+    () =>
+      new AwsWorkspaceSearchWriterFenceGuardSource(
+        readWorkspaceSearchWriterFenceTableNames(tableNames),
+        prepareWorkspaceSearchWriterFenceTransport(transport),
+        preparedDiagnostics,
+      ),
+    preparedDiagnostics,
   )
 }
 
@@ -218,21 +309,28 @@ export function createAwsWorkspaceSearchWriterFenceGuardSource(
  *
  * @param tableNames - Exact configured six-table names.
  * @param transport - Narrow low-level DynamoDB transport.
+ * @param diagnostics - Optional safe diagnostic dependencies.
  * @returns Exact guard material for one application invocation.
  */
 export async function acquireWorkspaceSearchWriterFenceGuardMaterialFromAws(
   tableNames: WorkspaceSearchWriterFenceAwsTableNames,
   transport: WorkspaceSearchWriterFenceAwsTransport,
+  diagnostics: WorkspaceSearchWriterFenceDiagnostics = {},
 ): Promise<WorkspaceSearchWriterFenceGuardMaterial> {
-  return runWorkspaceSearchWriterFenceUnavailableBoundary(async () => {
-    const names = readWorkspaceSearchWriterFenceTableNames(tableNames)
-    const preparedTransport =
-      prepareWorkspaceSearchWriterFenceTransport(transport)
-    return acquirePreparedWorkspaceSearchWriterFenceGuardMaterial(
-      names,
-      preparedTransport,
-    )
-  })
+  const preparedDiagnostics =
+    prepareWorkspaceSearchWriterFenceDiagnostics(diagnostics)
+  return runWorkspaceSearchWriterFenceUnavailableBoundary(
+    async () => {
+      const names = readWorkspaceSearchWriterFenceTableNames(tableNames)
+      const preparedTransport =
+        prepareWorkspaceSearchWriterFenceTransport(transport)
+      return acquirePreparedWorkspaceSearchWriterFenceGuardMaterial(
+        names,
+        preparedTransport,
+      )
+    },
+    preparedDiagnostics,
+  )
 }
 
 /**
@@ -274,19 +372,22 @@ async function acquirePreparedWorkspaceSearchWriterFenceGuardMaterial(
     'migration-state',
   )
   requireCoLocatedDistinctTables(measuredTables)
+  const stateTableIdentity: WorkspaceSearchWriterFenceStateIdentity = {
+    role: 'migration-state',
+    tableName: migrationState.tableName,
+    tableArn: migrationState.tableArn,
+    tableId: migrationState.tableId,
+    creationTime: migrationState.creationTime,
+    account: migrationState.account,
+    region: migrationState.region,
+  }
   const binding = createWorkspaceSearchWriterFenceBinding({
     stateTableName: migrationState.tableName,
     stateTableId: migrationState.tableId,
     stateIncarnationDigest:
-      createWorkspaceSearchWriterFenceStateIncarnationDigest({
-        role: 'migration-state',
-        tableName: migrationState.tableName,
-        tableArn: migrationState.tableArn,
-        tableId: migrationState.tableId,
-        creationTime: migrationState.creationTime,
-        account: migrationState.account,
-        region: migrationState.region,
-      }),
+      createWorkspaceSearchWriterFenceStateIncarnationDigest(
+        stateTableIdentity,
+      ),
     tableIds: {
       'project-directory': projectDirectory.tableId,
       'work-items': workItems.tableId,
@@ -308,6 +409,7 @@ async function acquirePreparedWorkspaceSearchWriterFenceGuardMaterial(
   return createWorkspaceSearchWriterFenceGuardMaterial(
     observation,
     binding,
+    stateTableIdentity,
   )
 }
 
@@ -592,17 +694,287 @@ function prepareWorkspaceSearchWriterFenceTransport(
 }
 
 /**
+ * Captures diagnostics functions or falls back to structured standard error.
+ *
+ * Diagnostics are non-authoritative: malformed optional dependencies cannot
+ * weaken the guard or replace its stable public failure.
+ *
+ * @param diagnostics - Candidate caller-owned diagnostics dependencies.
+ * @returns Captured safe diagnostics functions.
+ */
+function prepareWorkspaceSearchWriterFenceDiagnostics(
+  diagnostics: WorkspaceSearchWriterFenceDiagnostics,
+): PreparedWorkspaceSearchWriterFenceDiagnostics {
+  try {
+    if (typeof diagnostics !== 'object' || diagnostics === null) {
+      return createDefaultWorkspaceSearchWriterFenceDiagnostics()
+    }
+    const createCorrelationId = diagnostics.createCorrelationId
+    const recordFailure = diagnostics.recordFailure
+    return {
+      createCorrelationId: typeof createCorrelationId === 'function'
+        ? () => createCorrelationId.call(diagnostics)
+        : randomUUID,
+      recordFailure: typeof recordFailure === 'function'
+        ? (diagnostic) => recordFailure.call(diagnostics, diagnostic)
+        : writeWorkspaceSearchWriterFenceFailureDiagnostic,
+    }
+  } catch {
+    return createDefaultWorkspaceSearchWriterFenceDiagnostics()
+  }
+}
+
+/**
+ * Creates the production diagnostics dependencies.
+ *
+ * @returns Server-generated identifiers and structured standard-error output.
+ */
+function createDefaultWorkspaceSearchWriterFenceDiagnostics():
+  PreparedWorkspaceSearchWriterFenceDiagnostics {
+  return {
+    createCorrelationId: randomUUID,
+    recordFailure: writeWorkspaceSearchWriterFenceFailureDiagnostic,
+  }
+}
+
+/**
+ * Records only a fixed-shape redacted structured failure.
+ *
+ * @param diagnostic - Safe observation without raw error material.
+ */
+function writeWorkspaceSearchWriterFenceFailureDiagnostic(
+  diagnostic: WorkspaceSearchWriterFenceFailureDiagnostic,
+): void {
+  console.error(JSON.stringify(diagnostic))
+}
+
+/**
+ * Emits one redacted diagnostic without allowing diagnostics to affect safety.
+ *
+ * @param error - Unknown internal failure used only for safe classification.
+ * @param diagnostics - Captured safe diagnostics dependencies.
+ */
+function recordWorkspaceSearchWriterFenceUnavailable(
+  error: unknown,
+  diagnostics: PreparedWorkspaceSearchWriterFenceDiagnostics,
+): void {
+  const diagnostic = Object.freeze({
+    event: 'workspace-search.writer-fence.unavailable',
+    service: 'mukuroji-writer-fence',
+    correlationId: resolveWorkspaceSearchWriterFenceCorrelationId(
+      error,
+      diagnostics.createCorrelationId,
+    ),
+    category: classifyWorkspaceSearchWriterFenceFailure(error),
+  }) satisfies WorkspaceSearchWriterFenceFailureDiagnostic
+  try {
+    diagnostics.recordFailure(diagnostic)
+  } catch {
+    try {
+      writeWorkspaceSearchWriterFenceFailureDiagnostic(diagnostic)
+    } catch {
+      // Diagnostics must never replace the stable fail-closed public error.
+    }
+  }
+}
+
+/**
+ * Classifies one failure without copying its message, stack, or raw fields.
+ *
+ * @param error - Unknown internal source failure.
+ * @returns Safe low-cardinality failure category.
+ */
+function classifyWorkspaceSearchWriterFenceFailure(
+  error: unknown,
+): WorkspaceSearchWriterFenceFailureCategory {
+  try {
+    if (
+      error instanceof WorkspaceSearchWriterFenceUnavailableError ||
+      error instanceof WorkspaceSearchWriterFenceError
+    ) {
+      return 'validation'
+    }
+    const errorName = readWorkspaceSearchWriterFenceErrorName(error)
+    const statusCode =
+      readWorkspaceSearchWriterFenceAwsHttpStatusCode(error)
+    if (
+      (errorName !== undefined &&
+        authorizationErrorNames.has(errorName)) ||
+      statusCode === 401 ||
+      statusCode === 403
+    ) {
+      return 'authorization'
+    }
+  } catch {
+    return 'upstream'
+  }
+  return 'upstream'
+}
+
+/**
+ * Resolves a bounded AWS request ID or a safe generated diagnostic ID.
+ *
+ * @param error - Unknown failure that may contain AWS response metadata.
+ * @param createCorrelationId - Trusted fallback identifier factory.
+ * @returns Bounded safe diagnostic correlation identifier.
+ */
+function resolveWorkspaceSearchWriterFenceCorrelationId(
+  error: unknown,
+  createCorrelationId: () => string,
+): string {
+  const awsRequestId =
+    readWorkspaceSearchWriterFenceAwsRequestId(error)
+  if (awsRequestId !== undefined) return awsRequestId
+  try {
+    const generated = readWorkspaceSearchWriterFenceDiagnosticIdentifier(
+      createCorrelationId(),
+    )
+    if (generated !== undefined) return generated
+  } catch {
+    // The trusted runtime UUID fallback below remains raw-value-free.
+  }
+  return randomUUID()
+}
+
+/**
+ * Reads one safe AWS SDK error name.
+ *
+ * @param error - Unknown caught failure.
+ * @returns Bounded exact error name when safely readable.
+ */
+function readWorkspaceSearchWriterFenceErrorName(
+  error: unknown,
+): string | undefined {
+  const record = readWorkspaceSearchWriterFenceUnknownRecord(error)
+  if (record === undefined) return undefined
+  try {
+    const name = Reflect.get(record, 'name')
+    return typeof name === 'string' && name.length <= 128
+      ? name
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Reads one AWS response status without retaining other metadata.
+ *
+ * @param error - Unknown caught failure.
+ * @returns Integer HTTP status when safely readable.
+ */
+function readWorkspaceSearchWriterFenceAwsHttpStatusCode(
+  error: unknown,
+): number | undefined {
+  const metadata = readWorkspaceSearchWriterFenceAwsMetadata(error)
+  if (metadata === undefined) return undefined
+  try {
+    const statusCode = Reflect.get(metadata, 'httpStatusCode')
+    return typeof statusCode === 'number' &&
+        Number.isSafeInteger(statusCode)
+      ? statusCode
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Reads one bounded AWS SDK request identifier.
+ *
+ * @param error - Unknown caught failure.
+ * @returns Safe request identifier when present.
+ */
+function readWorkspaceSearchWriterFenceAwsRequestId(
+  error: unknown,
+): string | undefined {
+  const metadata = readWorkspaceSearchWriterFenceAwsMetadata(error)
+  if (metadata === undefined) return undefined
+  try {
+    return readWorkspaceSearchWriterFenceDiagnosticIdentifier(
+      Reflect.get(metadata, 'requestId'),
+    )
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Reads AWS SDK metadata as an inspectable record.
+ *
+ * @param error - Unknown caught failure.
+ * @returns Metadata record when safely readable.
+ */
+function readWorkspaceSearchWriterFenceAwsMetadata(
+  error: unknown,
+): Record<string, unknown> | undefined {
+  const record = readWorkspaceSearchWriterFenceUnknownRecord(error)
+  if (record === undefined) return undefined
+  try {
+    return readWorkspaceSearchWriterFenceUnknownRecord(
+      Reflect.get(record, '$metadata'),
+    )
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Validates a generated or AWS-provided diagnostic identifier.
+ *
+ * @param value - Candidate identifier.
+ * @returns Bounded safe identifier when valid.
+ */
+function readWorkspaceSearchWriterFenceDiagnosticIdentifier(
+  value: unknown,
+): string | undefined {
+  return typeof value === 'string' &&
+      safeDiagnosticIdentifierPattern.test(value)
+    ? value
+    : undefined
+}
+
+/**
+ * Narrows one unknown value to an inspectable record.
+ *
+ * @param value - Unknown failure or metadata value.
+ * @returns Record when the value is a non-null object.
+ */
+function readWorkspaceSearchWriterFenceUnknownRecord(
+  value: unknown,
+): Record<string, unknown> | undefined {
+  return isWorkspaceSearchWriterFenceUnknownRecord(value)
+    ? value
+    : undefined
+}
+
+/**
+ * Determines whether one unknown value is an inspectable record.
+ *
+ * @param value - Unknown failure or metadata value.
+ * @returns Whether named properties can be inspected.
+ */
+function isWorkspaceSearchWriterFenceUnknownRecord(
+  value: unknown,
+): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+/**
  * Maps every asynchronous source failure to the one public unavailable error.
  *
  * @param operation - Complete source operation.
+ * @param diagnostics - Captured safe diagnostics dependencies.
  * @returns Operation result when every boundary is valid and available.
  */
 async function runWorkspaceSearchWriterFenceUnavailableBoundary<Result>(
   operation: () => Promise<Result>,
+  diagnostics: PreparedWorkspaceSearchWriterFenceDiagnostics,
 ): Promise<Result> {
   try {
     return await operation()
-  } catch {
+  } catch (error: unknown) {
+    recordWorkspaceSearchWriterFenceUnavailable(error, diagnostics)
     throw new WorkspaceSearchWriterFenceUnavailableError()
   }
 }
@@ -611,14 +983,17 @@ async function runWorkspaceSearchWriterFenceUnavailableBoundary<Result>(
  * Maps every synchronous source failure to the one public unavailable error.
  *
  * @param operation - Complete synchronous source operation.
+ * @param diagnostics - Captured safe diagnostics dependencies.
  * @returns Operation result when every boundary is valid.
  */
 function runWorkspaceSearchWriterFenceUnavailableSyncBoundary<Result>(
   operation: () => Result,
+  diagnostics: PreparedWorkspaceSearchWriterFenceDiagnostics,
 ): Result {
   try {
     return operation()
-  } catch {
+  } catch (error: unknown) {
+    recordWorkspaceSearchWriterFenceUnavailable(error, diagnostics)
     throw new WorkspaceSearchWriterFenceUnavailableError()
   }
 }

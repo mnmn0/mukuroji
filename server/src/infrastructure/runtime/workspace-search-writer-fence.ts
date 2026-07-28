@@ -231,6 +231,8 @@ export type WorkspaceSearchWriterFenceGuardMaterial = {
   readonly conditionCheck: TransactWriteItem
   /** Stable secret-free fingerprint for logs, receipts, and tests. */
   readonly materialFingerprint: string
+  /** Complete measured state-table identity committed by the incarnation digest. */
+  readonly stateTableIdentity: WorkspaceSearchWriterFenceStateIdentity
   /** Exact writer epoch captured once for the application invocation. */
   readonly writerEpoch: number
   /** Exact control revision captured with the writer epoch. */
@@ -263,28 +265,16 @@ export function createWorkspaceSearchWriterFenceStateIncarnationDigest(
   identity: WorkspaceSearchWriterFenceStateIdentity,
 ): string {
   return atFenceBoundary(() => {
-    const record = requireRecord(identity)
-    requireExactKeys(record, [
-      'account',
-      'creationTime',
-      'region',
-      'role',
-      'tableArn',
-      'tableId',
-      'tableName',
-    ])
-    if (Reflect.get(record, 'role') !== 'migration-state') {
-      return failFence()
-    }
+    const strict = readStateIdentity(identity)
     return digestCanonicalValue({
-      account: requireIdentifier(Reflect.get(record, 'account'), 64),
-      creationTime: requireTimestamp(Reflect.get(record, 'creationTime')),
+      account: strict.account,
+      creationTime: strict.creationTime,
       kind: 'workspace-search-migration-state-incarnation',
-      region: requireIdentifier(Reflect.get(record, 'region'), 64),
+      region: strict.region,
       role: 'migration-state',
-      tableArn: requireIdentifier(Reflect.get(record, 'tableArn'), 2_048),
-      tableId: requireIdentifier(Reflect.get(record, 'tableId'), 1_024),
-      tableName: requireTableName(Reflect.get(record, 'tableName')),
+      tableArn: strict.tableArn,
+      tableId: strict.tableId,
+      tableName: strict.tableName,
       version: stateIncarnationDigestVersion,
     })
   })
@@ -541,14 +531,18 @@ export function createWorkspaceSearchWriterFenceTransitionPut(
  *
  * @param observation - Strongly read strict fence observation.
  * @param expectedBinding - Independently measured current table identities.
+ * @param stateTableIdentity - Complete independently measured state identity.
  * @returns Exact condition and one-invocation token fingerprint.
  */
 export function createWorkspaceSearchWriterFenceGuardMaterial(
   observation: WorkspaceSearchWriterFenceObservation,
   expectedBinding: WorkspaceSearchWriterFenceBinding,
+  stateTableIdentity: WorkspaceSearchWriterFenceStateIdentity,
 ): WorkspaceSearchWriterFenceGuardMaterial {
   return atFenceBoundary(() => {
     const expected = readBinding(expectedBinding)
+    const measuredStateIdentity = readStateIdentity(stateTableIdentity)
+    requireStateIdentityMatchesBinding(measuredStateIdentity, expected)
     const observed = readObservation(observation)
     if (
       observed.status !== 'present' ||
@@ -584,6 +578,7 @@ export function createWorkspaceSearchWriterFenceGuardMaterial(
         stateTableId: expected.stateTableId,
         stateTableName: expected.stateTableName,
       }),
+      stateTableIdentity: measuredStateIdentity,
       writerEpoch: open.writerEpoch,
       controlRevision: open.controlRevision,
     }
@@ -610,8 +605,12 @@ export function readWorkspaceSearchWriterFenceGuardMaterial(
       'conditionCheck',
       'controlRevision',
       'materialFingerprint',
+      'stateTableIdentity',
       'writerEpoch',
     ])
+    const stateTableIdentity = readStateIdentity(
+      Reflect.get(candidate, 'stateTableIdentity'),
+    )
     const wrapper = requireRecord(Reflect.get(candidate, 'conditionCheck'))
     requireExactKeys(wrapper, ['ConditionCheck'])
     const condition = requireRecord(Reflect.get(wrapper, 'ConditionCheck'))
@@ -634,6 +633,9 @@ export function readWorkspaceSearchWriterFenceGuardMaterial(
     const tableName = requireTableName(
       Reflect.get(condition, 'TableName'),
     )
+    if (tableName !== stateTableIdentity.tableName) {
+      return failFence()
+    }
     const names = requireRecord(
       Reflect.get(condition, 'ExpressionAttributeNames'),
     )
@@ -669,7 +671,7 @@ export function readWorkspaceSearchWriterFenceGuardMaterial(
       'tableIds',
     ])
     const binding = createWorkspaceSearchWriterFenceBinding({
-      stateTableName: tableName,
+      stateTableName: stateTableIdentity.tableName,
       stateTableId: requireIdentifier(
         Reflect.get(payloadBinding, 'stateTableId'),
       ),
@@ -678,6 +680,7 @@ export function readWorkspaceSearchWriterFenceGuardMaterial(
       ),
       tableIds: readTableIds(Reflect.get(payloadBinding, 'tableIds')),
     })
+    requireStateIdentityMatchesBinding(stateTableIdentity, binding)
     if (
       migrationId !== writerFenceMigrationId ||
       recordKey !== binding.recordKey ||
@@ -699,6 +702,7 @@ export function readWorkspaceSearchWriterFenceGuardMaterial(
     const expected = createWorkspaceSearchWriterFenceGuardMaterial(
       observation,
       binding,
+      stateTableIdentity,
     )
     if (
       Reflect.get(candidate, 'materialFingerprint') !==
@@ -988,6 +992,39 @@ function readObservation(
     }
   }
   return failFence()
+}
+
+/**
+ * Reads and detaches one complete migration-state table identity.
+ *
+ * @param value - Candidate independently measured state identity.
+ * @returns Strict detached identity committed by the incarnation digest.
+ */
+function readStateIdentity(
+  value: unknown,
+): WorkspaceSearchWriterFenceStateIdentity {
+  const record = requireRecord(value)
+  requireExactKeys(record, [
+    'account',
+    'creationTime',
+    'region',
+    'role',
+    'tableArn',
+    'tableId',
+    'tableName',
+  ])
+  if (Reflect.get(record, 'role') !== 'migration-state') {
+    return failFence()
+  }
+  return {
+    role: 'migration-state',
+    tableName: requireTableName(Reflect.get(record, 'tableName')),
+    tableArn: requireIdentifier(Reflect.get(record, 'tableArn'), 2_048),
+    tableId: requireIdentifier(Reflect.get(record, 'tableId'), 1_024),
+    creationTime: requireTimestamp(Reflect.get(record, 'creationTime')),
+    account: requireIdentifier(Reflect.get(record, 'account'), 64),
+    region: requireIdentifier(Reflect.get(record, 'region'), 64),
+  }
 }
 
 /**
@@ -1377,6 +1414,26 @@ function requireSameBinding(
   }
   for (const role of workspaceSearchWriterFenceTableRoles) {
     if (left.tableIds[role] !== right.tableIds[role]) return failFence()
+  }
+}
+
+/**
+ * Requires one complete state identity to match its reconstructed binding.
+ *
+ * @param identity - Complete independently measured state-table identity.
+ * @param binding - Binding committed by the durable canonical row.
+ */
+function requireStateIdentityMatchesBinding(
+  identity: WorkspaceSearchWriterFenceStateIdentity,
+  binding: WorkspaceSearchWriterFenceBinding,
+): void {
+  if (
+    identity.tableName !== binding.stateTableName ||
+    identity.tableId !== binding.stateTableId ||
+    createWorkspaceSearchWriterFenceStateIncarnationDigest(identity) !==
+      binding.stateIncarnationDigest
+  ) {
+    return failFence()
   }
 }
 

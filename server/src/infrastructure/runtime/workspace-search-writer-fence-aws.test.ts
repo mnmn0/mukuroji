@@ -16,6 +16,7 @@ import {
   encodeWorkspaceSearchWriterFenceRecord,
   type WorkspaceSearchWriterFenceBinding,
   type WorkspaceSearchWriterFenceOpenRecord,
+  type WorkspaceSearchWriterFenceStateIdentity,
   type WorkspaceSearchWriterFenceTableIds,
 } from './workspace-search-writer-fence'
 import {
@@ -24,11 +25,18 @@ import {
   WorkspaceSearchWriterFenceUnavailableError,
   type WorkspaceSearchWriterFenceAwsTableNames,
   type WorkspaceSearchWriterFenceAwsTransport,
+  type WorkspaceSearchWriterFenceDiagnostics,
+  type WorkspaceSearchWriterFenceFailureDiagnostic,
 } from './workspace-search-writer-fence-aws'
 
 const fixtureAccount = '123456789012'
 const fixtureRegion = 'ap-northeast-1'
 const fixtureCreationTime = new Date('2026-07-29T00:00:00.000Z')
+
+const silentDiagnostics: WorkspaceSearchWriterFenceDiagnostics = {
+  createCorrelationId: () => 'silent-test-correlation',
+  recordFailure: () => {},
+}
 
 /**
  * Complete focused AWS source fixture.
@@ -44,6 +52,8 @@ type WorkspaceSearchWriterFenceAwsFixture = {
   readonly binding: WorkspaceSearchWriterFenceBinding
   /** Durable open row returned by the initial fake GetItem response. */
   readonly openRecord: WorkspaceSearchWriterFenceOpenRecord
+  /** Exact migration-state identity expected by guard construction. */
+  readonly stateTableIdentity: WorkspaceSearchWriterFenceStateIdentity
 }
 
 /**
@@ -276,6 +286,16 @@ function createFixture(): WorkspaceSearchWriterFenceAwsFixture {
       ),
     ],
   ])
+  const stateTableIdentity: WorkspaceSearchWriterFenceStateIdentity = {
+    role: 'migration-state',
+    tableName: tableNames['migration-state'],
+    tableArn:
+      `arn:aws:dynamodb:${fixtureRegion}:${fixtureAccount}:table/${tableNames['migration-state']}`,
+    tableId: tableIds['migration-state'],
+    creationTime: fixtureCreationTime.toISOString(),
+    account: fixtureAccount,
+    region: fixtureRegion,
+  }
   const binding = createExpectedBinding(tableNames, tableIds)
   const openRecord = createWorkspaceSearchWriterFenceInitialOpenRecord(
     binding,
@@ -294,6 +314,7 @@ function createFixture(): WorkspaceSearchWriterFenceAwsFixture {
     transport,
     binding,
     openRecord,
+    stateTableIdentity,
   }
 }
 
@@ -359,6 +380,7 @@ describe('Workspace Search writer-fence AWS source', () => {
     expect(guard).toEqual(createWorkspaceSearchWriterFenceGuardMaterial(
       { status: 'present', record: fixture.openRecord },
       fixture.binding,
+      fixture.stateTableIdentity,
     ))
     expect(
       fixture.transport.describeCommands.map(
@@ -422,6 +444,7 @@ describe('Workspace Search writer-fence AWS source', () => {
       acquireWorkspaceSearchWriterFenceGuardMaterialFromAws(
         missing.tableNames,
         missing.transport,
+        silentDiagnostics,
       )
     )
 
@@ -447,6 +470,7 @@ describe('Workspace Search writer-fence AWS source', () => {
       acquireWorkspaceSearchWriterFenceGuardMaterialFromAws(
         closed.tableNames,
         closed.transport,
+        silentDiagnostics,
       )
     )
 
@@ -464,6 +488,7 @@ describe('Workspace Search writer-fence AWS source', () => {
       acquireWorkspaceSearchWriterFenceGuardMaterialFromAws(
         malformed.tableNames,
         malformed.transport,
+        silentDiagnostics,
       )
     )
   })
@@ -480,6 +505,7 @@ describe('Workspace Search writer-fence AWS source', () => {
       acquireWorkspaceSearchWriterFenceGuardMaterialFromAws(
         crossAccount.tableNames,
         crossAccount.transport,
+        silentDiagnostics,
       )
     )
 
@@ -494,6 +520,7 @@ describe('Workspace Search writer-fence AWS source', () => {
       acquireWorkspaceSearchWriterFenceGuardMaterialFromAws(
         crossRegion.tableNames,
         crossRegion.transport,
+        silentDiagnostics,
       )
     )
 
@@ -507,6 +534,7 @@ describe('Workspace Search writer-fence AWS source', () => {
       acquireWorkspaceSearchWriterFenceGuardMaterialFromAws(
         duplicate.tableNames,
         duplicate.transport,
+        silentDiagnostics,
       )
     )
   })
@@ -553,6 +581,7 @@ describe('Workspace Search writer-fence AWS source', () => {
         acquireWorkspaceSearchWriterFenceGuardMaterialFromAws(
           fixture.tableNames,
           fixture.transport,
+          silentDiagnostics,
         )
       )
     }
@@ -569,6 +598,7 @@ describe('Workspace Search writer-fence AWS source', () => {
       acquireWorkspaceSearchWriterFenceGuardMaterialFromAws(
         malformedConfiguration.tableNames,
         malformedConfiguration.transport,
+        silentDiagnostics,
       )
     )
 
@@ -580,6 +610,7 @@ describe('Workspace Search writer-fence AWS source', () => {
       acquireWorkspaceSearchWriterFenceGuardMaterialFromAws(
         describeFailure.tableNames,
         describeFailure.transport,
+        silentDiagnostics,
       )
     )
 
@@ -594,8 +625,203 @@ describe('Workspace Search writer-fence AWS source', () => {
       acquireWorkspaceSearchWriterFenceGuardMaterialFromAws(
         getFailure.tableNames,
         getFailure.transport,
+        silentDiagnostics,
       )
     )
     Reflect.set(getFailure.transport, 'getItem', originalGetItem)
+  })
+
+  test('records validation, authorization, and upstream categories without raw values', async () => {
+    const validationDiagnostics:
+      WorkspaceSearchWriterFenceFailureDiagnostic[] = []
+    const malformed = createFixture()
+    malformed.transport.setGetOutput({
+      $metadata: {},
+      Item: {
+        ...encodeWorkspaceSearchWriterFenceRecord(
+          malformed.openRecord,
+        ),
+        rawUnexpectedValue: { S: 'RAW_SECRET_ROW_VALUE' },
+      },
+    })
+    await expectUnavailable(() =>
+      acquireWorkspaceSearchWriterFenceGuardMaterialFromAws(
+        malformed.tableNames,
+        malformed.transport,
+        {
+          createCorrelationId: () => 'validation-correlation',
+          recordFailure: (diagnostic) => {
+            validationDiagnostics.push(diagnostic)
+          },
+        },
+      )
+    )
+    expect(validationDiagnostics).toEqual([{
+      event: 'workspace-search.writer-fence.unavailable',
+      service: 'mukuroji-writer-fence',
+      correlationId: 'validation-correlation',
+      category: 'validation',
+    }])
+
+    const authorizationDiagnostics:
+      WorkspaceSearchWriterFenceFailureDiagnostic[] = []
+    const authorization = createFixture()
+    const authorizationError = new Error('RAW_AUTHORIZATION_SECRET')
+    authorizationError.name = 'AccessDeniedException'
+    Reflect.set(authorizationError, '$metadata', {
+      requestId: 'aws-request-123',
+      httpStatusCode: 403,
+      rawMetadata: 'RAW_METADATA_SECRET',
+    })
+    authorization.transport.setFailure(authorizationError)
+    await expectUnavailable(() =>
+      acquireWorkspaceSearchWriterFenceGuardMaterialFromAws(
+        authorization.tableNames,
+        authorization.transport,
+        {
+          createCorrelationId: () => 'unused-correlation',
+          recordFailure: (diagnostic) => {
+            authorizationDiagnostics.push(diagnostic)
+          },
+        },
+      )
+    )
+    expect(authorizationDiagnostics).toEqual([{
+      event: 'workspace-search.writer-fence.unavailable',
+      service: 'mukuroji-writer-fence',
+      correlationId: 'aws-request-123',
+      category: 'authorization',
+    }])
+
+    const upstreamDiagnostics:
+      WorkspaceSearchWriterFenceFailureDiagnostic[] = []
+    const upstream = createFixture()
+    const throttlingError = new Error('RAW_THROTTLING_SECRET')
+    throttlingError.name = 'ThrottlingException'
+    upstream.transport.setFailure(throttlingError)
+    await expectUnavailable(() =>
+      acquireWorkspaceSearchWriterFenceGuardMaterialFromAws(
+        upstream.tableNames,
+        upstream.transport,
+        {
+          createCorrelationId: () => 'upstream-correlation',
+          recordFailure: (diagnostic) => {
+            upstreamDiagnostics.push(diagnostic)
+          },
+        },
+      )
+    )
+    expect(upstreamDiagnostics).toEqual([{
+      event: 'workspace-search.writer-fence.unavailable',
+      service: 'mukuroji-writer-fence',
+      correlationId: 'upstream-correlation',
+      category: 'upstream',
+    }])
+
+    const serializedDiagnostics = JSON.stringify([
+      ...validationDiagnostics,
+      ...authorizationDiagnostics,
+      ...upstreamDiagnostics,
+    ])
+    expect(serializedDiagnostics).not.toContain('RAW_')
+    expect(serializedDiagnostics).not.toContain('message')
+    expect(serializedDiagnostics).not.toContain('cause')
+    expect(serializedDiagnostics).not.toContain(
+      malformed.tableNames['migration-state'],
+    )
+    for (const diagnostic of [
+      ...validationDiagnostics,
+      ...authorizationDiagnostics,
+      ...upstreamDiagnostics,
+    ]) {
+      expect(Reflect.ownKeys(diagnostic).sort()).toEqual([
+        'category',
+        'correlationId',
+        'event',
+        'service',
+      ])
+      expect(Object.isFrozen(diagnostic)).toBe(true)
+    }
+  })
+
+  test('records synchronous validation failure through injected diagnostics', async () => {
+    const fixture = createFixture()
+    const diagnostics:
+      WorkspaceSearchWriterFenceFailureDiagnostic[] = []
+    Reflect.set(
+      fixture.tableNames,
+      'rawUnexpectedRole',
+      'RAW_SECRET_TABLE',
+    )
+
+    await expectUnavailable(() =>
+      Promise.resolve().then(() =>
+        createAwsWorkspaceSearchWriterFenceGuardSource(
+          fixture.tableNames,
+          fixture.transport,
+          {
+            createCorrelationId: () => 'sync-validation-correlation',
+            recordFailure: (diagnostic) => {
+              diagnostics.push(diagnostic)
+            },
+          },
+        )
+      )
+    )
+
+    expect(diagnostics).toEqual([{
+      event: 'workspace-search.writer-fence.unavailable',
+      service: 'mukuroji-writer-fence',
+      correlationId: 'sync-validation-correlation',
+      category: 'validation',
+    }])
+    expect(JSON.stringify(diagnostics)).not.toContain(
+      'RAW_SECRET_TABLE',
+    )
+  })
+
+  test('writes the default redacted diagnostic as structured stderr', async () => {
+    const fixture = createFixture()
+    const rawFailure = new Error('RAW_DEFAULT_STDERR_SECRET')
+    rawFailure.name = 'ThrottlingException'
+    Reflect.set(rawFailure, '$metadata', {
+      requestId: 'aws-default-request',
+      rawMetadata: 'RAW_DEFAULT_METADATA_SECRET',
+    })
+    fixture.transport.setFailure(rawFailure)
+    const originalConsoleError = console.error
+    const stderrRecords: string[] = []
+    console.error = (value: unknown) => {
+      if (typeof value === 'string') stderrRecords.push(value)
+    }
+    try {
+      await expectUnavailable(() =>
+        acquireWorkspaceSearchWriterFenceGuardMaterialFromAws(
+          fixture.tableNames,
+          fixture.transport,
+        )
+      )
+    } finally {
+      console.error = originalConsoleError
+    }
+
+    expect(stderrRecords).toHaveLength(1)
+    expect(stderrRecords[0]).not.toContain('RAW_')
+    const parsed: unknown = JSON.parse(stderrRecords[0] ?? '')
+    expect(parsed).toEqual({
+      event: 'workspace-search.writer-fence.unavailable',
+      service: 'mukuroji-writer-fence',
+      correlationId: 'aws-default-request',
+      category: 'upstream',
+    })
+    if (typeof parsed !== 'object' || parsed === null) {
+      throw new Error('EXPECTED_STRUCTURED_DIAGNOSTIC')
+    }
+    expect(Reflect.ownKeys(parsed).sort()).toEqual([
+      'category',
+      'correlationId',
+      'event',
+      'service',
+    ])
   })
 })

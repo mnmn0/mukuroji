@@ -11,6 +11,8 @@ import type { WorkspaceSearchWriterFenceGuardSource } from './workspace-search-w
 type WorkspaceSearchWriterFenceInvocationStore = {
   /** First acquisition promise shared by every provider in this invocation. */
   acquisition?: Promise<WorkspaceSearchWriterFenceGuardMaterial>
+  /** Exact source permitted to satisfy this invocation's first acquisition. */
+  source?: WorkspaceSearchWriterFenceGuardSource
 }
 
 /**
@@ -45,6 +47,23 @@ export class WorkspaceSearchWriterFenceInvocationScopeError extends Error {
 }
 
 /**
+ * Stable failure raised when one invocation mixes distinct guard sources.
+ */
+export class WorkspaceSearchWriterFenceInvocationSourceMismatchError
+extends Error {
+  /** Machine-readable raw-value-free failure code. */
+  readonly code = 'WORKSPACE_SEARCH_WRITER_FENCE_INVOCATION_SOURCE_MISMATCH'
+
+  /**
+   * Creates one invocation-source mismatch failure.
+   */
+  constructor() {
+    super('WORKSPACE_SEARCH_WRITER_FENCE_INVOCATION_SOURCE_MISMATCH')
+    this.name = 'WorkspaceSearchWriterFenceInvocationSourceMismatchError'
+  }
+}
+
+/**
  * Concrete provider retaining one source result per invocation.
  */
 class InvocationWorkspaceSearchWriterFenceGuardProvider
@@ -53,12 +72,16 @@ implements WorkspaceSearchWriterFenceGuardProvider {
   private readonly acquireGuard:
     () => Promise<WorkspaceSearchWriterFenceGuardMaterial>
 
+  /** Exact source identity captured for invocation consistency checks. */
+  private readonly source: WorkspaceSearchWriterFenceGuardSource
+
   /**
    * Creates one invocation-scoped provider.
    *
    * @param source - Uncached measured AWS guard source.
    */
   constructor(source: WorkspaceSearchWriterFenceGuardSource) {
+    this.source = source
     this.acquireGuard = source.acquire.bind(source)
   }
 
@@ -76,8 +99,14 @@ implements WorkspaceSearchWriterFenceGuardProvider {
     }
     const existing = store.acquisition
     if (existing) {
+      if (store.source !== this.source) {
+        return Promise.reject(
+          new WorkspaceSearchWriterFenceInvocationSourceMismatchError(),
+        )
+      }
       return existing
     }
+    store.source = this.source
     const acquisition = Promise.resolve()
       .then(this.acquireGuard)
       .then(freezeWorkspaceSearchWriterFenceGuardMaterial)

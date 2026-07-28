@@ -1,4 +1,8 @@
-import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
+import { Buffer } from 'node:buffer'
+import {
+  NumberValue,
+  type TransactWriteCommandInput,
+} from '@aws-sdk/lib-dynamodb'
 import {
   readWorkspaceSearchWriterFenceGuardMaterial,
   type WorkspaceSearchWriterFenceGuardMaterial,
@@ -12,6 +16,26 @@ export const workspaceSearchWriterFenceApplicationItemIndexOffset = 1
 
 /** Maximum application-owned items after reserving the guard item. */
 export const workspaceSearchWriterFenceMaximumApplicationTransactionItems = 99
+
+/**
+ * Exact ArrayBuffer view prototypes accepted by DynamoDBDocumentClient.
+ */
+const workspaceSearchWriterFenceDocumentBinaryViewPrototypes:
+  ReadonlySet<object> = new Set([
+    Buffer.prototype,
+    BigInt64Array.prototype,
+    BigUint64Array.prototype,
+    DataView.prototype,
+    Float32Array.prototype,
+    Float64Array.prototype,
+    Int8Array.prototype,
+    Int16Array.prototype,
+    Int32Array.prototype,
+    Uint8Array.prototype,
+    Uint8ClampedArray.prototype,
+    Uint16Array.prototype,
+    Uint32Array.prototype,
+  ])
 
 /**
  * One native-value transaction item accepted by DynamoDBDocumentClient.
@@ -97,7 +121,10 @@ export function prependWorkspaceSearchWriterFenceGuard(
       return failTransactionPreparation()
     }
     const conditionCheck = readNativeConditionCheck(strictMaterial)
-    const detachedItems = structuredClone(applicationItems)
+    const detachedItems =
+      detachWorkspaceSearchWriterFenceDocumentTransactionItems(
+        applicationItems,
+      )
     const prepared: WorkspaceSearchWriterFenceGuardedTransaction = {
       transactItems: [
         { ConditionCheck: conditionCheck },
@@ -285,6 +312,272 @@ function readExactStringAttribute(value: unknown): string {
 }
 
 /**
+ * Detaches application items without changing DynamoDB marshalling semantics.
+ *
+ * @param items - Application-owned transaction items.
+ * @returns Independently mutable transaction items with preserved semantics.
+ */
+function detachWorkspaceSearchWriterFenceDocumentTransactionItems(
+  items: readonly WorkspaceSearchWriterFenceDocumentTransactionItem[],
+): WorkspaceSearchWriterFenceDocumentTransactionItem[] {
+  const detachedItems: WorkspaceSearchWriterFenceDocumentTransactionItem[] = []
+  for (const item of items) {
+    const detached = detachWorkspaceSearchWriterFenceDocumentValue(item)
+    if (!isWorkspaceSearchWriterFenceDocumentTransactionItem(detached)) {
+      return failTransactionPreparation()
+    }
+    detachedItems.push(detached)
+  }
+  return detachedItems
+}
+
+/**
+ * Recursively detaches one DynamoDBDocumentClient value.
+ *
+ * Unknown class instances are rejected because their prototype and private
+ * state cannot be reproduced without changing document-marshalling behavior.
+ *
+ * @param value - Candidate transaction structure or native attribute value.
+ * @returns A detached value with supported native marshalling semantics.
+ */
+function detachWorkspaceSearchWriterFenceDocumentValue(
+  value: unknown,
+): unknown {
+  if (
+    value === undefined ||
+    value === null ||
+    typeof value === 'boolean' ||
+    typeof value === 'bigint' ||
+    typeof value === 'number' ||
+    typeof value === 'string'
+  ) {
+    return value
+  }
+  if (typeof value !== 'object') {
+    return failTransactionPreparation()
+  }
+  if (value instanceof NumberValue) {
+    requireWorkspaceSearchWriterFenceDocumentPrototype(
+      value,
+      NumberValue.prototype,
+    )
+    return NumberValue.from(value.value)
+  }
+  if (value instanceof Boolean) {
+    requireWorkspaceSearchWriterFenceDocumentPrototype(
+      value,
+      Boolean.prototype,
+    )
+    return structuredClone(value)
+  }
+  if (value instanceof Number) {
+    requireWorkspaceSearchWriterFenceDocumentPrototype(
+      value,
+      Number.prototype,
+    )
+    return structuredClone(value)
+  }
+  if (value instanceof String) {
+    requireWorkspaceSearchWriterFenceDocumentPrototype(
+      value,
+      String.prototype,
+    )
+    return structuredClone(value)
+  }
+  if (Array.isArray(value)) {
+    requireWorkspaceSearchWriterFenceDocumentPrototype(
+      value,
+      Array.prototype,
+    )
+    return value.map((nested) =>
+      detachWorkspaceSearchWriterFenceDocumentValue(nested)
+    )
+  }
+  if (value instanceof Set) {
+    requireWorkspaceSearchWriterFenceDocumentPrototype(
+      value,
+      Set.prototype,
+    )
+    const source: Set<unknown> = value
+    const detached = new Set<unknown>()
+    for (const nested of source) {
+      detached.add(
+        detachWorkspaceSearchWriterFenceDocumentValue(nested),
+      )
+    }
+    return detached
+  }
+  if (value instanceof Map) {
+    requireWorkspaceSearchWriterFenceDocumentPrototype(
+      value,
+      Map.prototype,
+    )
+    const source: Map<unknown, unknown> = value
+    const detached = new Map<unknown, unknown>()
+    for (const [key, nested] of source) {
+      detached.set(
+        detachWorkspaceSearchWriterFenceDocumentValue(key),
+        detachWorkspaceSearchWriterFenceDocumentValue(nested),
+      )
+    }
+    return detached
+  }
+  const detachedBinary =
+    detachWorkspaceSearchWriterFenceDocumentBinary(value)
+  if (detachedBinary !== undefined) {
+    return detachedBinary
+  }
+  if (!isRecord(value)) {
+    return failTransactionPreparation()
+  }
+  const prototype = readWorkspaceSearchWriterFenceDocumentPrototype(value)
+  if (prototype !== Object.prototype && prototype !== null) {
+    return failTransactionPreparation()
+  }
+  const detached: Record<string, unknown> = {}
+  if (prototype === null) {
+    Object.setPrototypeOf(detached, null)
+  }
+  for (const [key, nested] of Object.entries(value)) {
+    detached[key] =
+      detachWorkspaceSearchWriterFenceDocumentValue(nested)
+  }
+  return detached
+}
+
+/**
+ * Detaches one exact binary value supported by DynamoDBDocumentClient.
+ *
+ * @param value - Candidate object value.
+ * @returns Independent binary bytes, or undefined for a non-binary value.
+ */
+function detachWorkspaceSearchWriterFenceDocumentBinary(
+  value: object,
+): object | undefined {
+  if (value instanceof ArrayBuffer) {
+    requireWorkspaceSearchWriterFenceDocumentPrototype(
+      value,
+      ArrayBuffer.prototype,
+    )
+    return value.slice(0)
+  }
+  if (ArrayBuffer.isView(value)) {
+    requireWorkspaceSearchWriterFenceDocumentPrototypeIn(
+      value,
+      workspaceSearchWriterFenceDocumentBinaryViewPrototypes,
+    )
+    const sourceBytes = new Uint8Array(
+      value.buffer,
+      value.byteOffset,
+      value.byteLength,
+    )
+    return Uint8Array.from(sourceBytes)
+  }
+  if (typeof File !== 'undefined' && value instanceof File) {
+    requireWorkspaceSearchWriterFenceDocumentPrototype(
+      value,
+      File.prototype,
+    )
+    return structuredClone(value)
+  }
+  if (typeof Blob !== 'undefined' && value instanceof Blob) {
+    requireWorkspaceSearchWriterFenceDocumentPrototype(
+      value,
+      Blob.prototype,
+    )
+    return structuredClone(value)
+  }
+  return undefined
+}
+
+/**
+ * Reads one runtime prototype at the fail-closed transaction boundary.
+ *
+ * @param value - Candidate object value.
+ * @returns Exact runtime prototype, including a null prototype.
+ */
+function readWorkspaceSearchWriterFenceDocumentPrototype(
+  value: object,
+): object | null {
+  let prototype: unknown
+  try {
+    prototype = Object.getPrototypeOf(value)
+  } catch {
+    return failTransactionPreparation()
+  }
+  if (
+    prototype !== null &&
+    typeof prototype !== 'object'
+  ) {
+    return failTransactionPreparation()
+  }
+  return prototype
+}
+
+/**
+ * Requires one exact supported runtime prototype.
+ *
+ * @param value - Candidate object value.
+ * @param expectedPrototype - Sole accepted prototype.
+ */
+function requireWorkspaceSearchWriterFenceDocumentPrototype(
+  value: object,
+  expectedPrototype: object,
+): void {
+  if (
+    readWorkspaceSearchWriterFenceDocumentPrototype(value) !==
+      expectedPrototype
+  ) {
+    return failTransactionPreparation()
+  }
+}
+
+/**
+ * Requires one runtime prototype from an exact supported allowlist.
+ *
+ * @param value - Candidate object value.
+ * @param expectedPrototypes - Complete accepted prototype allowlist.
+ */
+function requireWorkspaceSearchWriterFenceDocumentPrototypeIn(
+  value: object,
+  expectedPrototypes: ReadonlySet<object>,
+): void {
+  const prototype =
+    readWorkspaceSearchWriterFenceDocumentPrototype(value)
+  if (prototype === null || !expectedPrototypes.has(prototype)) {
+    return failTransactionPreparation()
+  }
+}
+
+/**
+ * Validates the detached top-level transaction item shape.
+ *
+ * @param value - Candidate detached value.
+ * @returns Whether exactly one DynamoDB transaction action is present.
+ */
+function isWorkspaceSearchWriterFenceDocumentTransactionItem(
+  value: unknown,
+): value is WorkspaceSearchWriterFenceDocumentTransactionItem {
+  if (!isRecord(value)) {
+    return false
+  }
+  const actionNames = ['ConditionCheck', 'Delete', 'Put', 'Update']
+  let actionCount = 0
+  for (const actionName of actionNames) {
+    const action = Reflect.get(value, actionName)
+    if (action === undefined) {
+      continue
+    }
+    if (!isRecord(action)) {
+      return false
+    }
+    actionCount += 1
+  }
+  return actionCount === 1 &&
+    Object.keys(value).every((key) => actionNames.includes(key))
+}
+
+/**
  * Determines whether one value is a non-array object record.
  *
  * @param value - Candidate runtime value.
@@ -308,12 +601,8 @@ function freezeWorkspaceSearchWriterFenceTransactionValue(
     return
   }
   if (!Array.isArray(value)) {
-    let prototype: unknown
-    try {
-      prototype = Object.getPrototypeOf(value)
-    } catch {
-      return failTransactionPreparation()
-    }
+    const prototype =
+      readWorkspaceSearchWriterFenceDocumentPrototype(value)
     if (prototype !== Object.prototype && prototype !== null) {
       return
     }
