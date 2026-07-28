@@ -470,7 +470,8 @@ raw artifact と同等に暗号化・最小権限・access audit の対象にし
 provenance object は、recursive page proof のために migration-state 外へ cursor を保持する唯一の
 許可された例外です。Standalone cursor、log、汎用 S3 evidence、外部 export には複製せず、object の
 exact version 全体を一単位として取得・監査します。この ceiling を超える正当なrunをraw witness/receipt
-から直接segment化し、complete manifestを実storageへ固定する経路は後続adapterで閉じます。
+から直接segment化し、complete manifestを実storageへ固定する経路は、後述のdirect staged builderと
+planning専用storage gatewayで提供します。
 
 Bounded planning-artifact foundation は、planned operation を完全な operation 境界で最大16 MiBの
 content-addressed segment に決定的に分割し、最大256 referenceの manifest page predecessor chain と
@@ -497,14 +498,17 @@ deadlineがnetwork遅延で30日未満にならないよう、各conditional Put
 headroomを要求し、timeout時はtransportへ渡したAbortSignalで元のS3 Putも中止します。Ambiguous write後に
 headroomが尽きた場合は入力不正へ戻さず、未解決のambiguous operationとして停止します。
 
-この foundation の provenance segment builder は、既存のstrict validatorを通過した64 MiB以下の
-full provenance artifactを入力にします。Planning専用storage gatewayは、measured sessionから注入される
-codec非依存のimmutable object portだけを使い、plan seal、全segment、predecessor-linked manifest page、
-compact headの依存順でuploadします。Plan replayはsealとmanifest headのexact version referenceの組を
-rootとし、provenance replayはmanifest headのexact version referenceだけをrootとして、`List`やlatest
-lookupなしで全page/segmentをversion-pinned GETします。Caller-fixed retentionをgraph全体で共有し、
-plan/provenance segmentの総canonical byte数を各256 MiB以下へpreflightするため、write時の上限違反では
-upload I/Oを開始せず、replay時も全segment referenceを検証してからsegment GETを開始します。
+この foundation は、既存のstrict validatorを通過した64 MiB以下のfull provenance artifactを受ける
+compatibility builderに加え、raw canonical evidence pageとdurable historical receipt bindingから
+legacy full-artifact envelopeを作らずに同じversion 1 segment bytesを生成するdirect staged builderを
+持ちます。Direct pathは全5 chainをzero headからreplayし、全TableId、authority transition、receipt binding、
+snapshot/countを再導出してから、segmentごとの16 MiBと総256 MiBをstorage I/O前にpreflightします。
+Planning専用storage gatewayは、measured sessionから注入されるcodec非依存のimmutable object portだけを使い、
+plan seal、全segment、predecessor-linked manifest page、compact headの依存順でuploadします。Plan replayは
+sealとmanifest headのexact version referenceの組をrootとし、provenance replayはmanifest headのexact
+version referenceだけをrootとして、`List`やlatest lookupなしで全page/segmentをversion-pinned GETします。
+Caller-fixed retentionをgraph全体で共有し、write時の上限違反ではupload I/Oを開始せず、replay時も
+全segment referenceを検証してからsegment GETを開始します。
 
 このgatewayはAWS SDKに依存せず、clientやruntime entrypointを生成しません。Concrete managed AWS
 sessionが同じpinned S3 client、measured configuration、generation上へgatewayをcompositionし、公開factoryは
@@ -514,11 +518,13 @@ sessionが同じpinned S3 client、measured configuration、generation上へgate
 non-authoritativeなretained orphanとして残る場合があります。`List`、latest version lookup、deleteは使わず、
 artifact/rootだけではplanning/apply authorityになりません。
 
-Raw evidence witness / historical receiptから64 MiBのfull provenance artifactを作らず直接segment化する経路、
-plan/provenance manifest同士とsealed authorityのcross-artifact binding、complete manifest headとcurrent
-authority 3件および5 evidence headの原子的publicationはまだ未接続です。Writer fence、実行CLI/heartbeat
-supervisor、migration専用observability/alarm、restore/failover/DR drill、non-production実行evidenceも
-未完了であり、production migration gateは閉じたままです。
+Direct writeはraw inputを最初のawaitより前にsnapshotするため、upload中のcaller mutationを採用しません。
+一方、現行replay APIはsegment graphからfull semantic artifactを再materializeし、sealed planning authorityも
+まだlegacy full artifact referenceを入力にします。したがって64 MiB超のdirect manifest headはprovisionalな
+immutable evidenceであり、plan/provenance manifest同士とsealed authorityのcross-artifact binding、
+complete manifest headとcurrent authority 3件および5 evidence headの原子的publicationはまだ未接続です。
+Writer fence、実行CLI/heartbeat supervisor、migration専用observability/alarm、restore/failover/DR drill、
+non-production実行evidenceも未完了であり、production migration gateは閉じたままです。
 Source planning v3 と target planning v1 の terminal head には、完全な identity、chain version、
 checkpoint、recursive head digest、`completed=true` を比較する transaction 用 ConditionCheck factory
 があります。

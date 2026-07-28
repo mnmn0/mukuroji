@@ -56,6 +56,9 @@ import {
   WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_TOTAL_SEGMENT_BYTES,
   WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_SEGMENT_MAX_BYTES,
 } from './migration-planning-provenance-manifest'
+import type {
+  WorkspaceSearchMigrationHistoricalMaintenanceEvidenceBinding,
+} from './migration-pre-plan-authority-aws'
 import {
   createWorkspaceSearchMigrationPlanningProvenanceArtifact,
   type WorkspaceSearchMigrationPlanningProvenanceArtifact,
@@ -412,6 +415,24 @@ type PlanFixture = {
   readonly operations: readonly WorkspaceSearchPlannedOperation[]
 }
 
+/**
+ * Raw canonical provenance material and its legacy artifact representation.
+ */
+type ProvenanceFixture = {
+  /** Strict legacy artifact derived from the raw fixture. */
+  readonly artifact: WorkspaceSearchMigrationPlanningProvenanceArtifact
+  /** Mutable canonical source chains used to test caller detachment. */
+  readonly sourceEvidencePageBytes: Record<
+    WorkspaceSearchMigrationSourceName,
+    Uint8Array[]
+  >
+  /** Mutable canonical target chain used to test caller detachment. */
+  readonly targetEvidencePageBytes: Uint8Array[]
+  /** Mutable historical bindings used to test caller detachment. */
+  readonly historicalReceiptBindings:
+    WorkspaceSearchMigrationHistoricalMaintenanceEvidenceBinding[]
+}
+
 describe('Workspace Search planning immutable artifact gateway', () => {
   test(
     'stores an empty plan as only its seal and compact head',
@@ -545,8 +566,8 @@ describe('Workspace Search planning immutable artifact gateway', () => {
     },
   )
 
-  test('rejects null and unpaired-surrogate version identifiers', async () => {
-    for (const invalidVersionId of ['null', '\uD800']) {
+  test('rejects noncanonical version identifiers', async () => {
+    for (const invalidVersionId of ['null', ' padded-version ', '\uD800']) {
       const { gateway, port } = createGateway()
       const plan = createPlan(0)
       port.invalidateNextVersionId(invalidVersionId)
@@ -890,25 +911,44 @@ describe('Workspace Search planning immutable artifact gateway', () => {
   )
 
   test(
-    'uploads and replays provenance from only the exact compact-head reference',
+    'uploads raw provenance in dependency order and replays the legacy artifact',
     async () => {
       const { gateway, port } = createGateway()
-      const artifact = createProvenanceArtifact()
+      const fixture = createProvenanceArtifact()
       const stored =
         await gateway.writePlanningProvenanceArtifact({
-          artifact,
-          maximumManifestPageBytes: 20_000,
+          sourceEvidencePageBytes: fixture.sourceEvidencePageBytes,
+          targetEvidencePageBytes: fixture.targetEvidencePageBytes,
+          historicalReceiptBindings:
+            fixture.historicalReceiptBindings,
+          maximumManifestPageBytes: 24_576,
           maximumSegmentBytes: 8_192,
           retainUntil,
         })
       expect(stored.manifestHead.summary.objectKeyPrefix).toBe(
         `${WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_ARTIFACT_OBJECT_KEY_PREFIX}/${runId}/${configurationHash}`,
       )
-      expect(port.calls.slice(0, 2)).toEqual([
-        'write:segments',
-        'write:segments',
+      const firstManifestPageWrite =
+        port.calls.indexOf('write:manifest-pages')
+      const manifestHeadWrite =
+        port.calls.indexOf('write:manifest-heads')
+      expect(firstManifestPageWrite).toBeGreaterThan(0)
+      expect(manifestHeadWrite).toBeGreaterThan(
+        firstManifestPageWrite,
+      )
+      expect(
+        port.calls
+          .slice(0, firstManifestPageWrite)
+          .every((call) => call === 'write:segments'),
+      ).toBe(true)
+      expect(
+        port.calls
+          .slice(firstManifestPageWrite, manifestHeadWrite)
+          .every((call) => call === 'write:manifest-pages'),
+      ).toBe(true)
+      expect(port.calls.slice(manifestHeadWrite)).toEqual([
+        'write:manifest-heads',
       ])
-      expect(port.calls.at(-1)).toBe('write:manifest-heads')
       expect(stored.manifestHead.manifestPageCount).toBeGreaterThan(1)
 
       port.calls.length = 0
@@ -930,10 +970,142 @@ describe('Workspace Search planning immutable artifact gateway', () => {
         await gateway.replayPlanningProvenanceArtifact({
           manifestHeadReference: stored.manifestHeadReference,
         })
-      expect(replayed).toEqual(artifact)
+      expect(replayed).toEqual(fixture.artifact)
       expect(port.calls[0]).toBe('read:manifest-heads')
       expect(port.calls).toContain('read:manifest-pages')
       expect(port.calls).toContain('read:segments')
+    },
+  )
+
+  test(
+    'rejects direct aggregate provenance segment bytes before storage',
+    async () => {
+      const { gateway, port } = createGateway()
+      const fixture = createProvenanceArtifact()
+      await expect(
+        gateway.writePlanningProvenanceArtifact({
+          sourceEvidencePageBytes: fixture.sourceEvidencePageBytes,
+          targetEvidencePageBytes: fixture.targetEvidencePageBytes,
+          historicalReceiptBindings:
+            fixture.historicalReceiptBindings,
+          maximumTotalSegmentBytes: 1,
+          retainUntil,
+        }),
+      ).rejects.toBeInstanceOf(
+        WorkspaceSearchMigrationPlanningArtifactAwsError,
+      )
+      expect(port.calls).toEqual([])
+    },
+  )
+
+  test(
+    'preflights direct and compatibility manifest page ceilings before storage',
+    async () => {
+      const fixture = createProvenanceArtifact()
+      const direct = createGateway()
+      await expect(
+        direct.gateway.writePlanningProvenanceArtifact({
+          sourceEvidencePageBytes: fixture.sourceEvidencePageBytes,
+          targetEvidencePageBytes: fixture.targetEvidencePageBytes,
+          historicalReceiptBindings:
+            fixture.historicalReceiptBindings,
+          maximumManifestPageBytes: 1,
+          retainUntil,
+        }),
+      ).rejects.toBeInstanceOf(
+        WorkspaceSearchMigrationPlanningArtifactAwsError,
+      )
+      expect(direct.port.calls).toEqual([])
+
+      const compatibility = createGateway()
+      await expect(
+        compatibility.gateway.writePlanningProvenanceArtifact({
+          artifact: fixture.artifact,
+          maximumManifestPageBytes: 1,
+          retainUntil,
+        }),
+      ).rejects.toBeInstanceOf(
+        WorkspaceSearchMigrationPlanningArtifactAwsError,
+      )
+      expect(compatibility.port.calls).toEqual([])
+    },
+  )
+
+  test(
+    'rejects mixed, partial, and accessor-backed direct inputs before storage',
+    async () => {
+      const mixed = createGateway()
+      const mixedFixture = createProvenanceArtifact()
+      await expect(
+        mixed.gateway.writePlanningProvenanceArtifact({
+          artifact: mixedFixture.artifact,
+          sourceEvidencePageBytes:
+            mixedFixture.sourceEvidencePageBytes,
+          targetEvidencePageBytes:
+            mixedFixture.targetEvidencePageBytes,
+          historicalReceiptBindings:
+            mixedFixture.historicalReceiptBindings,
+          retainUntil,
+        }),
+      ).rejects.toBeInstanceOf(
+        WorkspaceSearchMigrationPlanningArtifactAwsError,
+      )
+      expect(mixed.port.calls).toEqual([])
+
+      const partial = createGateway()
+      const partialFixture = createProvenanceArtifact()
+      const partialInput = {
+        sourceEvidencePageBytes:
+          partialFixture.sourceEvidencePageBytes,
+        targetEvidencePageBytes:
+          partialFixture.targetEvidencePageBytes,
+        historicalReceiptBindings:
+          partialFixture.historicalReceiptBindings,
+        retainUntil,
+      }
+      Reflect.deleteProperty(
+        partialInput,
+        'historicalReceiptBindings',
+      )
+      await expect(
+        partial.gateway.writePlanningProvenanceArtifact(partialInput),
+      ).rejects.toBeInstanceOf(
+        WorkspaceSearchMigrationPlanningArtifactAwsError,
+      )
+      expect(partial.port.calls).toEqual([])
+
+      const accessor = createGateway()
+      const accessorFixture = createProvenanceArtifact()
+      const accessorInput = {
+        sourceEvidencePageBytes:
+          accessorFixture.sourceEvidencePageBytes,
+        targetEvidencePageBytes:
+          accessorFixture.targetEvidencePageBytes,
+        historicalReceiptBindings:
+          accessorFixture.historicalReceiptBindings,
+        retainUntil,
+      }
+      let reads = 0
+      Reflect.defineProperty(
+        accessorInput,
+        'sourceEvidencePageBytes',
+        {
+          enumerable: true,
+          get: () => {
+            reads += 1
+            return accessorFixture.sourceEvidencePageBytes
+          },
+        },
+      )
+      await expect(
+        accessor.gateway.writePlanningProvenanceArtifact(
+          accessorInput,
+        ),
+      ).rejects.toBeInstanceOf(
+        WorkspaceSearchMigrationPlanningArtifactAwsError,
+      )
+      expect(reads).toBe(0)
+      expect(accessor.port.calls).toEqual([])
     },
   )
 
@@ -943,7 +1115,7 @@ describe('Workspace Search planning immutable artifact gateway', () => {
       const { gateway, port } = createGateway()
       const stored =
         await gateway.writePlanningProvenanceArtifact({
-          artifact: createProvenanceArtifact(),
+          artifact: createProvenanceArtifact().artifact,
           maximumSegmentBytes: 8_192,
           retainUntil,
         })
@@ -1103,7 +1275,7 @@ describe('Workspace Search planning immutable artifact gateway', () => {
   )
 
   test(
-    'does not reread caller-owned provenance after the first upload begins',
+    'does not reread caller-owned raw provenance after upload begins',
     async () => {
       const port = new DelayedFirstWriteImmutableArtifactPort()
       const gateway =
@@ -1112,17 +1284,29 @@ describe('Workspace Search planning immutable artifact gateway', () => {
           configurationHash,
           immutableArtifactPort: port,
         })
-      const artifact = createProvenanceArtifact()
-      const original = structuredClone(artifact)
+      const fixture = createProvenanceArtifact()
+      const original = structuredClone(fixture.artifact)
       const pending =
         gateway.writePlanningProvenanceArtifact({
-          artifact,
+          sourceEvidencePageBytes: fixture.sourceEvidencePageBytes,
+          targetEvidencePageBytes: fixture.targetEvidencePageBytes,
+          historicalReceiptBindings:
+            fixture.historicalReceiptBindings,
           maximumSegmentBytes: 8_192,
           retainUntil,
         })
       await port.firstWriteStarted
-      Reflect.set(artifact, 'runId', 'mutated-after-await')
-      Reflect.set(artifact, 'historicalReceipts', [])
+      const firstSourcePage =
+        fixture.sourceEvidencePageBytes['project-directory'][0]
+      const firstBinding = fixture.historicalReceiptBindings[0]
+      if (firstSourcePage === undefined || firstBinding === undefined) {
+        throw new Error('The provenance mutation fixture is incomplete.')
+      }
+      firstSourcePage.fill(0)
+      fixture.sourceEvidencePageBytes['project-directory'].splice(0)
+      fixture.targetEvidencePageBytes.splice(0)
+      Reflect.set(firstBinding, 'ownerId', 'mutated-after-await')
+      fixture.historicalReceiptBindings.splice(0)
       port.releaseFirstWrite()
       const stored = await pending
 
@@ -1140,7 +1324,7 @@ describe('Workspace Search planning immutable artifact gateway', () => {
       const { gateway, port } = createGateway()
       const stored =
         await gateway.writePlanningProvenanceArtifact({
-          artifact: createProvenanceArtifact(),
+          artifact: createProvenanceArtifact().artifact,
           maximumSegmentBytes: 8_192,
           retainUntil,
         })
@@ -1368,12 +1552,11 @@ function createSeal(
 }
 
 /**
- * Creates one coherent strict full provenance artifact fixture.
+ * Creates raw canonical provenance and its strict legacy representation.
  *
- * @returns Full artifact accepted by the segmented provenance boundary.
+ * @returns Raw direct-write material and its equivalent legacy artifact.
  */
-function createProvenanceArtifact():
-  WorkspaceSearchMigrationPlanningProvenanceArtifact {
+function createProvenanceArtifact(): ProvenanceFixture {
   const receipt = createReceipt()
   const receiptDigest = createMigrationDigest(receipt)
   const authority: WorkspaceSearchMigrationPlanningAuthorityBinding = {
@@ -1382,34 +1565,45 @@ function createProvenanceArtifact():
     maintenanceEvidencePointerRevision: 11,
     maintenanceEvidenceReceiptDigest: receiptDigest,
   }
-  return createWorkspaceSearchMigrationPlanningProvenanceArtifact({
-    sourceEvidencePageBytes: {
-      'project-directory': createSourceEvidencePageChain(
-        'project-directory',
-        authority,
-        12,
-      ),
-      'work-items': [
-        createTerminalSourceEvidencePage('work-items', authority),
-      ],
-      collaboration: [
-        createTerminalSourceEvidencePage('collaboration', authority),
-      ],
-      documents: [
-        createTerminalSourceEvidencePage('documents', authority),
-      ],
-    },
-    targetEvidencePageBytes: [
-      createTerminalTargetEvidencePage(authority),
+  const sourceEvidencePageBytes = {
+    'project-directory': createSourceEvidencePageChain(
+      'project-directory',
+      authority,
+      12,
+    ),
+    'work-items': [
+      createTerminalSourceEvidencePage('work-items', authority),
     ],
-    historicalReceiptBindings: [{
+    collaboration: [
+      createTerminalSourceEvidencePage('collaboration', authority),
+    ],
+    documents: [
+      createTerminalSourceEvidencePage('documents', authority),
+    ],
+  }
+  const targetEvidencePageBytes = [
+    createTerminalTargetEvidencePage(authority),
+  ]
+  const historicalReceiptBindings = [
+    {
       configurationHash,
       stateTableId: tableIds['migration-state'],
       ownerId,
       receiptDigest,
       receipt,
-    }],
-  })
+    },
+  ]
+  return {
+    artifact:
+      createWorkspaceSearchMigrationPlanningProvenanceArtifact({
+        sourceEvidencePageBytes,
+        targetEvidencePageBytes,
+        historicalReceiptBindings,
+      }),
+    sourceEvidencePageBytes,
+    targetEvidencePageBytes,
+    historicalReceiptBindings,
+  }
 }
 
 /**
@@ -1424,7 +1618,7 @@ function createSourceEvidencePageChain(
   source: WorkspaceSearchMigrationSourceName,
   authority: WorkspaceSearchMigrationPlanningAuthorityBinding,
   pageCount: number,
-): readonly Uint8Array[] {
+): Uint8Array[] {
   const identity = {
     purpose: 'planning',
     runId,

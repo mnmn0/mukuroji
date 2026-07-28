@@ -5,6 +5,7 @@ import {
   isHexDigest,
   isWorkspaceSearchMigrationFailureCode,
   WorkspaceSearchMigrationFailure,
+  type WorkspaceSearchMigrationSourceName,
   type WorkspaceSearchPlanSeal,
 } from './migration-contract'
 import {
@@ -35,6 +36,7 @@ import {
   WORKSPACE_SEARCH_MIGRATION_PLAN_SEGMENT_MAX_BYTES,
 } from './migration-plan-artifact'
 import {
+  createWorkspaceSearchMigrationPlanningProvenanceDirectBuilder,
   createWorkspaceSearchMigrationPlanningProvenanceManifestHead,
   createWorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder,
   createWorkspaceSearchMigrationPlanningProvenanceObjectKey,
@@ -43,7 +45,9 @@ import {
   parseWorkspaceSearchMigrationPlanningProvenanceManifestPage,
   replayWorkspaceSearchMigrationPlanningProvenanceManifest,
   serializeWorkspaceSearchMigrationPlanningProvenanceManifestHead,
+  type WorkspaceSearchMigrationPlanningProvenanceEncodedSegment,
   type WorkspaceSearchMigrationPlanningProvenanceManifestHead,
+  type WorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder,
   type WorkspaceSearchMigrationPlanningProvenanceManifestReference,
   type WorkspaceSearchMigrationPlanningProvenanceReferencedBytes,
   type WorkspaceSearchMigrationPlanningProvenanceStoredManifestPage,
@@ -55,6 +59,9 @@ import {
   WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_TOTAL_SEGMENT_BYTES,
   WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_SEGMENT_MAX_BYTES,
 } from './migration-planning-provenance-manifest'
+import type {
+  WorkspaceSearchMigrationHistoricalMaintenanceEvidenceBinding,
+} from './migration-pre-plan-authority-aws'
 import {
   parseWorkspaceSearchMigrationPlanningProvenanceArtifact,
   serializeWorkspaceSearchMigrationPlanningProvenanceArtifact,
@@ -89,6 +96,8 @@ const planSealRole = 'plan-seals'
 const segmentRole = 'segments'
 const manifestPageRole = 'manifest-pages'
 const manifestHeadRole = 'manifest-heads'
+/** Maximum version-ID length accepted from the immutable object port. */
+const maximumPlanningArtifactVersionIdLength = 1_024
 const maximumPlanManifestPages = Math.ceil(
   WORKSPACE_SEARCH_MIGRATION_PLAN_MAX_OPERATIONS /
     WORKSPACE_SEARCH_MIGRATION_PLAN_MANIFEST_PAGE_MAX_REFERENCES,
@@ -161,9 +170,9 @@ export type ReplayWorkspaceSearchMigrationStoredPlanArtifactInput = {
 }
 
 /**
- * Input for uploading one complete planning-provenance bundle.
+ * Compatibility input for provenance already accepted by the 64 MiB codec.
  */
-export type WriteWorkspaceSearchMigrationPlanningProvenanceArtifactInput = {
+export type WriteWorkspaceSearchMigrationPlanningProvenanceFullArtifactInput = {
   /** Strict full provenance artifact to segment without semantic loss. */
   readonly artifact: WorkspaceSearchMigrationPlanningProvenanceArtifact
   /** Shared canonical COMPLIANCE retention deadline for the entire graph. */
@@ -173,6 +182,39 @@ export type WriteWorkspaceSearchMigrationPlanningProvenanceArtifactInput = {
   /** Optional smaller manifest-page ceiling for constrained runs or tests. */
   readonly maximumManifestPageBytes?: number
 }
+
+/**
+ * Direct raw input that bypasses the legacy full-artifact size envelope.
+ */
+export type WriteWorkspaceSearchMigrationPlanningProvenanceDirectInput = {
+  /** Four complete canonical planning-v3 source evidence chains. */
+  readonly sourceEvidencePageBytes: Readonly<
+    Record<
+      WorkspaceSearchMigrationSourceName,
+      readonly Uint8Array[]
+    >
+  >
+  /** Complete canonical planning-v1 target evidence chain. */
+  readonly targetEvidencePageBytes: readonly Uint8Array[]
+  /** Durable historical bindings ordered by derived authority transition. */
+  readonly historicalReceiptBindings:
+    readonly WorkspaceSearchMigrationHistoricalMaintenanceEvidenceBinding[]
+  /** Shared canonical COMPLIANCE retention deadline for the entire graph. */
+  readonly retainUntil: string
+  /** Optional smaller segment ceiling for constrained runs or tests. */
+  readonly maximumSegmentBytes?: number
+  /** Optional smaller manifest-page ceiling for constrained runs or tests. */
+  readonly maximumManifestPageBytes?: number
+  /** Optional smaller reject-only ceiling for all encoded segment bytes. */
+  readonly maximumTotalSegmentBytes?: number
+}
+
+/**
+ * Complete compatibility or direct material accepted by provenance storage.
+ */
+export type WriteWorkspaceSearchMigrationPlanningProvenanceArtifactInput =
+  | WriteWorkspaceSearchMigrationPlanningProvenanceFullArtifactInput
+  | WriteWorkspaceSearchMigrationPlanningProvenanceDirectInput
 
 /**
  * Exact provenance head returned after every predecessor is immutable.
@@ -258,6 +300,35 @@ type PreparedPlanningArtifactObject = {
   readonly retainUntil: string
   /** Exact caller-owned metadata expected on write and read. */
   readonly metadata: Readonly<Record<string, string>>
+}
+
+/**
+ * Fully preflighted provenance graph normalized across both write inputs.
+ */
+type PreparedPlanningProvenanceGraph = {
+  /** Complete encoded segment set validated before the first storage await. */
+  readonly encodedSegments:
+    readonly WorkspaceSearchMigrationPlanningProvenanceEncodedSegment[]
+  /**
+   * Creates bounded pages from complete exact-version segment envelopes.
+   *
+   * @param storedSegments - Complete ordered stored segment set.
+   * @returns Stateful predecessor-linked page builder.
+   */
+  readonly createManifestPageBuilder: (
+    storedSegments:
+      readonly WorkspaceSearchMigrationPlanningProvenanceStoredSegment[],
+  ) => WorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder
+  /**
+   * Creates the compact root from complete exact-version page envelopes.
+   *
+   * @param storedManifestPages - Complete ordered stored page set.
+   * @returns Detached strict compact provenance head.
+   */
+  readonly createManifestHead: (
+    storedManifestPages:
+      readonly WorkspaceSearchMigrationPlanningProvenanceStoredManifestPage[],
+  ) => WorkspaceSearchMigrationPlanningProvenanceManifestHead
 }
 
 /**
@@ -699,30 +770,34 @@ implements WorkspaceSearchMigrationPlanningArtifactAwsGateway {
   ): Promise<WorkspaceSearchMigrationStoredPlanningProvenanceArtifact> {
     return runPlanningArtifactStorageAsyncBoundary(async () => {
       const inputRecord = requirePlanningArtifactRecord(input)
-      requireExactOptionalPlanningArtifactKeys(inputRecord, [
-        'artifact',
-        'maximumManifestPageBytes',
-        'maximumSegmentBytes',
-        'retainUntil',
-      ], ['artifact', 'retainUntil'])
+      const inputKeys = readPlanningArtifactOwnDataKeys(inputRecord)
+      const usesFullArtifact = inputKeys.includes('artifact')
+      if (usesFullArtifact) {
+        requireExactOptionalPlanningArtifactKeys(inputRecord, [
+          'artifact',
+          'maximumManifestPageBytes',
+          'maximumSegmentBytes',
+          'retainUntil',
+        ], ['artifact', 'retainUntil'])
+      } else {
+        requireExactOptionalPlanningArtifactKeys(inputRecord, [
+          'historicalReceiptBindings',
+          'maximumManifestPageBytes',
+          'maximumSegmentBytes',
+          'maximumTotalSegmentBytes',
+          'retainUntil',
+          'sourceEvidencePageBytes',
+          'targetEvidencePageBytes',
+        ], [
+          'historicalReceiptBindings',
+          'retainUntil',
+          'sourceEvidencePageBytes',
+          'targetEvidencePageBytes',
+        ])
+      }
       const retainUntil = readPlanningArtifactRetention(
         readRequiredPlanningArtifactData(inputRecord, 'retainUntil'),
       )
-      const artifactCandidate =
-        readRequiredPlanningArtifactData(inputRecord, 'artifact')
-      if (
-        !isWorkspaceSearchPlanningProvenanceArtifactCandidate(
-          artifactCandidate,
-        )
-      ) {
-        return failPlanningArtifactStorage()
-      }
-      const artifact =
-        parseWorkspaceSearchMigrationPlanningProvenanceArtifact(
-          serializeWorkspaceSearchMigrationPlanningProvenanceArtifact(
-            artifactCandidate,
-          ),
-        )
       const maximumSegmentBytes = readOptionalPlanningArtifactMaximum(
         readOptionalPlanningArtifactData(
           inputRecord,
@@ -738,17 +813,119 @@ implements WorkspaceSearchMigrationPlanningArtifactAwsGateway {
           ),
           WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MANIFEST_PAGE_MAX_BYTES,
         )
-      const encodedSegments =
-        createWorkspaceSearchMigrationPlanningProvenanceSegments({
-          artifact,
-          maximumTotalSegmentBytes:
+      let prepared: PreparedPlanningProvenanceGraph
+      if (usesFullArtifact) {
+        const artifactCandidate =
+          readRequiredPlanningArtifactData(inputRecord, 'artifact')
+        if (
+          !isWorkspaceSearchPlanningProvenanceArtifactCandidate(
+            artifactCandidate,
+          )
+        ) {
+          return failPlanningArtifactStorage()
+        }
+        const artifact =
+          parseWorkspaceSearchMigrationPlanningProvenanceArtifact(
+            serializeWorkspaceSearchMigrationPlanningProvenanceArtifact(
+              artifactCandidate,
+            ),
+          )
+        const encodedSegments =
+          createWorkspaceSearchMigrationPlanningProvenanceSegments({
+            artifact,
+            maximumTotalSegmentBytes:
+              WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_TOTAL_SEGMENT_BYTES,
+            objectKeyPrefix: this.provenanceObjectKeyPrefix,
+            ...(maximumSegmentBytes === undefined
+              ? {}
+              : { maximumSegmentBytes }),
+          })
+        prepared = {
+          encodedSegments,
+          createManifestPageBuilder: (storedSegments) =>
+            createWorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder(
+              {
+                artifact,
+                objectKeyPrefix: this.provenanceObjectKeyPrefix,
+                storedSegments,
+                ...(maximumManifestPageBytes === undefined
+                  ? {}
+                  : { maximumManifestPageBytes }),
+              },
+            ),
+          createManifestHead: (storedManifestPages) =>
+            createWorkspaceSearchMigrationPlanningProvenanceManifestHead({
+              artifact,
+              objectKeyPrefix: this.provenanceObjectKeyPrefix,
+              storedManifestPages,
+            }),
+        }
+      } else {
+        const sourceEvidencePageBytes =
+          readRequiredPlanningArtifactData(
+            inputRecord,
+            'sourceEvidencePageBytes',
+          )
+        const targetEvidencePageBytes =
+          readRequiredPlanningArtifactData(
+            inputRecord,
+            'targetEvidencePageBytes',
+          )
+        const historicalReceiptBindings =
+          readRequiredPlanningArtifactData(
+            inputRecord,
+            'historicalReceiptBindings',
+          )
+        if (
+          !isPlanningProvenanceSourceEvidenceBytesCandidate(
+            sourceEvidencePageBytes,
+          ) ||
+          !isPlanningProvenanceEvidenceByteArrayCandidate(
+            targetEvidencePageBytes,
+          ) ||
+          !isPlanningProvenanceHistoricalBindingArrayCandidate(
+            historicalReceiptBindings,
+          )
+        ) {
+          return failPlanningArtifactStorage()
+        }
+        const maximumTotalSegmentBytes =
+          readOptionalPlanningArtifactMaximum(
+            readOptionalPlanningArtifactData(
+              inputRecord,
+              'maximumTotalSegmentBytes',
+            ),
             WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_TOTAL_SEGMENT_BYTES,
-          objectKeyPrefix: this.provenanceObjectKeyPrefix,
-          ...(maximumSegmentBytes === undefined
-            ? {}
-            : { maximumSegmentBytes }),
-        })
-      const firstSegment = encodedSegments[0]
+          )
+        const directBuilder =
+          createWorkspaceSearchMigrationPlanningProvenanceDirectBuilder({
+            sourceEvidencePageBytes,
+            targetEvidencePageBytes,
+            historicalReceiptBindings,
+            objectKeyPrefix: this.provenanceObjectKeyPrefix,
+            ...(maximumSegmentBytes === undefined
+              ? {}
+              : { maximumSegmentBytes }),
+            ...(maximumTotalSegmentBytes === undefined
+              ? {}
+              : { maximumTotalSegmentBytes }),
+          })
+        prepared = {
+          encodedSegments: directBuilder.encodedSegments,
+          createManifestPageBuilder: (storedSegments) =>
+            directBuilder.createManifestPageBuilder({
+              storedSegments,
+              ...(maximumManifestPageBytes === undefined
+                ? {}
+                : { maximumManifestPageBytes }),
+            }),
+          createManifestHead: (storedManifestPages) =>
+            directBuilder.createManifestHead({
+              storedManifestPages,
+            }),
+        }
+      }
+      const firstSegment = prepared.encodedSegments[0]
       if (
         firstSegment === undefined ||
         firstSegment.segment.summary.runId !== this.runId ||
@@ -757,9 +934,16 @@ implements WorkspaceSearchMigrationPlanningArtifactAwsGateway {
       ) {
         return failPlanningArtifactStorage()
       }
+      void prepared.createManifestPageBuilder(
+        createPlanningProvenancePreflightStoredSegments(
+          prepared.encodedSegments,
+          this.provenanceObjectKeyPrefix,
+          retainUntil,
+        ),
+      )
       const storedSegments:
         WorkspaceSearchMigrationPlanningProvenanceStoredSegment[] = []
-      for (const encoded of encodedSegments) {
+      for (const encoded of prepared.encodedSegments) {
         const reference = await this.writeObject({
           objectKeyPrefix: this.provenanceObjectKeyPrefix,
           role: segmentRole,
@@ -772,16 +956,7 @@ implements WorkspaceSearchMigrationPlanningArtifactAwsGateway {
       }
 
       const builder =
-        createWorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder({
-          artifact,
-          objectKeyPrefix: this.provenanceObjectKeyPrefix,
-          storedSegments,
-          ...(maximumManifestPageBytes === undefined
-            ? {}
-            : {
-                maximumManifestPageBytes,
-              }),
-        })
+        prepared.createManifestPageBuilder(storedSegments)
       const storedManifestPages:
         WorkspaceSearchMigrationPlanningProvenanceStoredManifestPage[] = []
       let previousStoredManifestPage:
@@ -804,11 +979,7 @@ implements WorkspaceSearchMigrationPlanningArtifactAwsGateway {
         previousStoredManifestPage = stored
       }
       const manifestHead =
-        createWorkspaceSearchMigrationPlanningProvenanceManifestHead({
-          artifact,
-          objectKeyPrefix: this.provenanceObjectKeyPrefix,
-          storedManifestPages,
-        })
+        prepared.createManifestHead(storedManifestPages)
       this.requireProvenanceHeadIdentity(manifestHead)
       const manifestHeadBytes =
         serializeWorkspaceSearchMigrationPlanningProvenanceManifestHead(
@@ -1336,6 +1507,90 @@ function isWorkspaceSearchPlanningProvenanceArtifactCandidate(
 }
 
 /**
+ * Checks whether a candidate can enter the direct fixed-role source boundary.
+ *
+ * @param value - Candidate source evidence byte-chain record.
+ * @returns Whether deep direct validation can safely inspect the record.
+ */
+function isPlanningProvenanceSourceEvidenceBytesCandidate(
+  value: unknown,
+): value is Readonly<
+  Record<
+    WorkspaceSearchMigrationSourceName,
+    readonly Uint8Array[]
+  >
+> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    !nodeUtilTypes.isProxy(value)
+  )
+}
+
+/**
+ * Checks whether a candidate can enter a direct dense evidence-byte boundary.
+ *
+ * @param value - Candidate target evidence byte array.
+ * @returns Whether deep direct validation can safely inspect the array.
+ */
+function isPlanningProvenanceEvidenceByteArrayCandidate(
+  value: unknown,
+): value is readonly Uint8Array[] {
+  return Array.isArray(value) && !nodeUtilTypes.isProxy(value)
+}
+
+/**
+ * Checks whether a candidate can enter the direct receipt-binding boundary.
+ *
+ * @param value - Candidate historical receipt binding array.
+ * @returns Whether deep direct validation can safely inspect the array.
+ */
+function isPlanningProvenanceHistoricalBindingArrayCandidate(
+  value: unknown,
+): value is readonly WorkspaceSearchMigrationHistoricalMaintenanceEvidenceBinding[] {
+  return Array.isArray(value) && !nodeUtilTypes.isProxy(value)
+}
+
+/**
+ * Creates conservative stored-segment envelopes for manifest-page preflight.
+ *
+ * Every reference field already known before storage is exact. The only
+ * storage-owned field uses the gateway's maximum accepted version-ID length
+ * and NUL characters, whose canonical JSON escape is the worst-case six bytes
+ * per UTF-16 code unit.
+ *
+ * @param encodedSegments - Complete preflighted encoded provenance segments.
+ * @param objectKeyPrefix - Exact run-scoped provenance object-key prefix.
+ * @param retainUntil - Exact graph-wide COMPLIANCE retention deadline.
+ * @returns Conservative exact-shape references suitable only for page packing.
+ */
+function createPlanningProvenancePreflightStoredSegments(
+  encodedSegments:
+    readonly WorkspaceSearchMigrationPlanningProvenanceEncodedSegment[],
+  objectKeyPrefix: string,
+  retainUntil: string,
+): readonly WorkspaceSearchMigrationPlanningProvenanceStoredSegment[] {
+  const versionId =
+    '\0'.repeat(maximumPlanningArtifactVersionIdLength)
+  return encodedSegments.map((encoded) => ({
+    encoded,
+    reference: {
+      objectKey:
+        createWorkspaceSearchMigrationPlanningProvenanceObjectKey(
+          objectKeyPrefix,
+          segmentRole,
+          encoded.contentDigest,
+        ),
+      versionId,
+      contentDigest: encoded.contentDigest,
+      byteLength: encoded.byteLength,
+      retainUntil,
+    },
+  }))
+}
+
+/**
  * Reads one optional positive bounded packing limit.
  *
  * @param value - Candidate optional byte ceiling.
@@ -1455,7 +1710,8 @@ function readPlanningArtifactReference(
     typeof objectKey !== 'string' ||
     typeof versionId !== 'string' ||
     versionId.length === 0 ||
-    versionId.length > 1_024 ||
+    versionId.length > maximumPlanningArtifactVersionIdLength ||
+    versionId !== versionId.trim() ||
     versionId === 'null' ||
     !hasOnlyPairedSurrogates(versionId) ||
     !isHexDigest(contentDigest) ||

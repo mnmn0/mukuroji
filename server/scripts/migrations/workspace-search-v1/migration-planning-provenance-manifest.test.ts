@@ -6,6 +6,7 @@ import {
   type WorkspaceSearchMigrationSourceName,
 } from './migration-contract'
 import {
+  createWorkspaceSearchMigrationPlanningProvenanceDirectBuilder,
   createWorkspaceSearchMigrationPlanningProvenanceManifestHead,
   createWorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder,
   createWorkspaceSearchMigrationPlanningProvenanceSegments,
@@ -14,9 +15,11 @@ import {
   parseWorkspaceSearchMigrationPlanningProvenanceSegment,
   replayWorkspaceSearchMigrationPlanningProvenanceManifest,
   serializeWorkspaceSearchMigrationPlanningProvenanceManifestHead,
+  type CreateWorkspaceSearchMigrationPlanningProvenanceDirectBuilderInput,
   type WorkspaceSearchMigrationPlanningProvenanceArtifactRole,
   type WorkspaceSearchMigrationPlanningProvenanceEncodedManifestPage,
   type WorkspaceSearchMigrationPlanningProvenanceEncodedSegment,
+  type WorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder,
   WorkspaceSearchMigrationPlanningProvenanceManifestError,
   type WorkspaceSearchMigrationPlanningProvenanceManifestReference,
   type WorkspaceSearchMigrationPlanningProvenanceManifestSummary,
@@ -33,6 +36,7 @@ import {
 import {
   createWorkspaceSearchMigrationPlanningProvenanceArtifact,
   type WorkspaceSearchMigrationPlanningProvenanceArtifact,
+  WorkspaceSearchMigrationSealedPlanningAuthorityError,
   type WorkspaceSearchMigrationSealedPlanningTableIds,
 } from './migration-sealed-planning-authority'
 import {
@@ -62,6 +66,266 @@ const objectKeyPrefix =
   'workspace-search/migrations/planning-provenance-manifest-run/provenance'
 
 describe('Workspace Search planning provenance manifest', () => {
+  test(
+    'creates byte-identical deterministic segments from direct raw material',
+    () => {
+      const fixture = createArtifactFixture()
+      const legacy =
+        createWorkspaceSearchMigrationPlanningProvenanceSegments({
+          artifact: fixture.artifact,
+          maximumSegmentBytes: 8_192,
+          objectKeyPrefix,
+        })
+      const firstDirect =
+        createWorkspaceSearchMigrationPlanningProvenanceDirectBuilder({
+          ...fixture.rawMaterial,
+          maximumSegmentBytes: 8_192,
+          objectKeyPrefix,
+        }).encodedSegments
+      const secondDirect =
+        createWorkspaceSearchMigrationPlanningProvenanceDirectBuilder({
+          ...fixture.rawMaterial,
+          maximumSegmentBytes: 8_192,
+          objectKeyPrefix,
+        }).encodedSegments
+
+      expect(firstDirect.map(({ bytes }) => bytes)).toEqual(
+        legacy.map(({ bytes }) => bytes),
+      )
+      expect(firstDirect.map(({ contentDigest }) => contentDigest)).toEqual(
+        legacy.map(({ contentDigest }) => contentDigest),
+      )
+      expect(
+        firstDirect.map(({ segment }) => segment.segmentDigest),
+      ).toEqual(
+        legacy.map(({ segment }) => segment.segmentDigest),
+      )
+      expect(secondDirect).toEqual(firstDirect)
+    },
+  )
+
+  test(
+    'creates byte-identical manifest pages and head from direct raw material',
+    () => {
+      const fixture = createArtifactFixture()
+      const legacySegments =
+        createWorkspaceSearchMigrationPlanningProvenanceSegments({
+          artifact: fixture.artifact,
+          maximumSegmentBytes: 8_192,
+          objectKeyPrefix,
+        })
+      const direct =
+        createWorkspaceSearchMigrationPlanningProvenanceDirectBuilder({
+          ...fixture.rawMaterial,
+          maximumSegmentBytes: 8_192,
+          objectKeyPrefix,
+        })
+      const legacyStoredSegments = storeSegments(legacySegments)
+      const directStoredSegments = storeSegments(direct.encodedSegments)
+      expect(directStoredSegments).toEqual(legacyStoredSegments)
+
+      const legacyPages = createStoredManifestPages(
+        fixture.artifact,
+        legacyStoredSegments,
+        32_768,
+      )
+      const directPages = storeManifestPagesFromBuilder(
+        direct.createManifestPageBuilder({
+          maximumManifestPageBytes: 32_768,
+          storedSegments: directStoredSegments,
+        }),
+      )
+      expect(directPages).toEqual(legacyPages)
+
+      const legacyHead =
+        createWorkspaceSearchMigrationPlanningProvenanceManifestHead({
+          artifact: fixture.artifact,
+          objectKeyPrefix,
+          storedManifestPages: legacyPages.storedPages,
+        })
+      const directHead = direct.createManifestHead({
+        storedManifestPages: directPages.storedPages,
+      })
+      expect(directHead).toEqual(legacyHead)
+      expect(
+        serializeWorkspaceSearchMigrationPlanningProvenanceManifestHead(
+          directHead,
+        ),
+      ).toEqual(
+        serializeWorkspaceSearchMigrationPlanningProvenanceManifestHead(
+          legacyHead,
+        ),
+      )
+      Reflect.set(directHead.summary, 'runId', 'caller-mutated-head')
+      expect(
+        direct.createManifestHead({
+          storedManifestPages: directPages.storedPages,
+        }),
+      ).toEqual(legacyHead)
+    },
+  )
+
+  test(
+    'accepts the exact direct aggregate ceiling and rejects one byte less',
+    () => {
+      const fixture = createArtifactFixture()
+      const direct =
+        createWorkspaceSearchMigrationPlanningProvenanceDirectBuilder({
+          ...fixture.rawMaterial,
+          maximumSegmentBytes: 8_192,
+          objectKeyPrefix,
+        })
+      const totalSegmentBytes = direct.encodedSegments.reduce(
+        (total, segment) => total + segment.byteLength,
+        0,
+      )
+
+      expect(
+        createWorkspaceSearchMigrationPlanningProvenanceDirectBuilder({
+          ...fixture.rawMaterial,
+          maximumSegmentBytes: 8_192,
+          maximumTotalSegmentBytes: totalSegmentBytes,
+          objectKeyPrefix,
+        }).encodedSegments,
+      ).toEqual(direct.encodedSegments)
+      expectManifestFailure(() =>
+        createWorkspaceSearchMigrationPlanningProvenanceDirectBuilder({
+          ...fixture.rawMaterial,
+          maximumSegmentBytes: 8_192,
+          maximumTotalSegmentBytes: totalSegmentBytes - 1,
+          objectKeyPrefix,
+        })
+      )
+    },
+  )
+
+  test(
+    'rejects hostile direct raw material and mismatched receipt bindings',
+    () => {
+      const fixture = createArtifactFixture()
+      let proxyReads = 0
+      const proxiedSources = new Proxy(
+        fixture.rawMaterial.sourceEvidencePageBytes,
+        {
+          get(target, key, receiver) {
+            proxyReads += 1
+            return Reflect.get(target, key, receiver)
+          },
+        },
+      )
+      expectManifestFailure(() =>
+        createWorkspaceSearchMigrationPlanningProvenanceDirectBuilder({
+          ...fixture.rawMaterial,
+          objectKeyPrefix,
+          sourceEvidencePageBytes: proxiedSources,
+        })
+      )
+      expect(proxyReads).toBe(0)
+
+      let accessorReads = 0
+      const accessorInput = {
+        ...fixture.rawMaterial,
+        objectKeyPrefix,
+      }
+      Object.defineProperty(accessorInput, 'targetEvidencePageBytes', {
+        configurable: true,
+        enumerable: true,
+        get() {
+          accessorReads += 1
+          return fixture.rawMaterial.targetEvidencePageBytes
+        },
+      })
+      expectManifestFailure(() =>
+        createWorkspaceSearchMigrationPlanningProvenanceDirectBuilder(
+          accessorInput,
+        )
+      )
+      expect(accessorReads).toBe(0)
+
+      const sparseDocuments = [
+        ...fixture.rawMaterial.sourceEvidencePageBytes.documents,
+      ]
+      sparseDocuments.length += 1
+      expectManifestFailure(() =>
+        createWorkspaceSearchMigrationPlanningProvenanceDirectBuilder({
+          ...fixture.rawMaterial,
+          objectKeyPrefix,
+          sourceEvidencePageBytes: {
+            ...fixture.rawMaterial.sourceEvidencePageBytes,
+            documents: sparseDocuments,
+          },
+        })
+      )
+
+      const documentsPage =
+        fixture.rawMaterial.sourceEvidencePageBytes.documents[0]
+      if (documentsPage === undefined) {
+        throw new Error('Expected one documents evidence page.')
+      }
+      const sharedPage = new Uint8Array(
+        new SharedArrayBuffer(documentsPage.byteLength),
+      )
+      sharedPage.set(documentsPage)
+      expectManifestFailure(() =>
+        createWorkspaceSearchMigrationPlanningProvenanceDirectBuilder({
+          ...fixture.rawMaterial,
+          objectKeyPrefix,
+          sourceEvidencePageBytes: {
+            ...fixture.rawMaterial.sourceEvidencePageBytes,
+            documents: [sharedPage],
+          },
+        })
+      )
+
+      const historicalReceiptBinding =
+        fixture.rawMaterial.historicalReceiptBindings[0]
+      if (historicalReceiptBinding === undefined) {
+        throw new Error('Expected one historical receipt binding.')
+      }
+      expectManifestFailure(() =>
+        createWorkspaceSearchMigrationPlanningProvenanceDirectBuilder({
+          ...fixture.rawMaterial,
+          historicalReceiptBindings: [{
+            ...historicalReceiptBinding,
+            ownerId: 'different-owner',
+          }],
+          objectKeyPrefix,
+        })
+      )
+    },
+  )
+
+  test(
+    'rejects a noncanonical historical receipt window at direct and legacy boundaries',
+    () => {
+      const receipt: WorkspaceSearchMaintenanceEvidenceReceipt = {
+        ...createReceipt(),
+        validUntil: '2026-07-28T00:06:00.002Z',
+      }
+      const rawMaterial = createRawPlanningProvenanceMaterial(receipt)
+      const historicalReceiptBinding =
+        rawMaterial.historicalReceiptBindings[0]
+      if (historicalReceiptBinding === undefined) {
+        throw new Error('Expected one historical receipt binding.')
+      }
+      expect(
+        createMigrationDigest(historicalReceiptBinding.receipt),
+      ).toBe(historicalReceiptBinding.receiptDigest)
+
+      expect(() =>
+        createWorkspaceSearchMigrationPlanningProvenanceArtifact(
+          rawMaterial,
+        )
+      ).toThrow(WorkspaceSearchMigrationSealedPlanningAuthorityError)
+      expectManifestFailure(() =>
+        createWorkspaceSearchMigrationPlanningProvenanceDirectBuilder({
+          ...rawMaterial,
+          objectKeyPrefix,
+        })
+      )
+    },
+  )
+
   test(
     'segments complete entries, creates bounded manifest layers, and replays the exact artifact',
     () => {
@@ -1051,15 +1315,58 @@ describe('Workspace Search planning provenance manifest', () => {
 })
 
 /**
- * Creates one coherent existing full provenance artifact fixture.
+ * Raw evidence and receipt material shared by legacy and direct fixtures.
+ */
+type PlanningProvenanceRawMaterial = Pick<
+  CreateWorkspaceSearchMigrationPlanningProvenanceDirectBuilderInput,
+  | 'sourceEvidencePageBytes'
+  | 'targetEvidencePageBytes'
+  | 'historicalReceiptBindings'
+>
+
+/**
+ * Coherent provenance material represented at both compatibility boundaries.
+ */
+type PlanningProvenanceArtifactFixture = {
+  /** Strict legacy full provenance artifact. */
+  readonly artifact: WorkspaceSearchMigrationPlanningProvenanceArtifact
+  /** Exact raw material accepted by the direct builder. */
+  readonly rawMaterial: PlanningProvenanceRawMaterial
+}
+
+/**
+ * Creates coherent raw material and its legacy full provenance artifact.
  *
  * @param paddingLength - Optional canonical page padding used for packing tests.
- * @returns Strict artifact accepted by the segmented compatibility boundary.
+ * @returns Raw direct input and the equivalent strict legacy artifact.
  */
-function createArtifact(
+function createArtifactFixture(
   paddingLength = 0,
-): WorkspaceSearchMigrationPlanningProvenanceArtifact {
-  const receipt = createReceipt()
+): PlanningProvenanceArtifactFixture {
+  const rawMaterial = createRawPlanningProvenanceMaterial(
+    createReceipt(),
+    paddingLength,
+  )
+  return {
+    rawMaterial,
+    artifact:
+      createWorkspaceSearchMigrationPlanningProvenanceArtifact(
+        rawMaterial,
+      ),
+  }
+}
+
+/**
+ * Creates coherent raw page and receipt material for either provenance path.
+ *
+ * @param receipt - Historical receipt bound into every evidence-page authority.
+ * @param paddingLength - Optional canonical page padding used for packing tests.
+ * @returns Raw direct input with a self-consistent receipt digest and authority.
+ */
+function createRawPlanningProvenanceMaterial(
+  receipt: WorkspaceSearchMaintenanceEvidenceReceipt,
+  paddingLength = 0,
+): PlanningProvenanceRawMaterial {
   const receiptDigest = createMigrationDigest(receipt)
   const authority: WorkspaceSearchMigrationPlanningAuthorityBinding = {
     ownerId,
@@ -1097,7 +1404,7 @@ function createArtifact(
       ),
     ],
   }
-  return createWorkspaceSearchMigrationPlanningProvenanceArtifact({
+  const rawMaterial = {
     sourceEvidencePageBytes,
     targetEvidencePageBytes: [
       createTerminalTargetEvidencePage(authority),
@@ -1109,7 +1416,20 @@ function createArtifact(
       receiptDigest,
       receipt,
     }],
-  })
+  } satisfies PlanningProvenanceRawMaterial
+  return rawMaterial
+}
+
+/**
+ * Creates one coherent existing full provenance artifact fixture.
+ *
+ * @param paddingLength - Optional canonical page padding used for packing tests.
+ * @returns Strict artifact accepted by the segmented compatibility boundary.
+ */
+function createArtifact(
+  paddingLength = 0,
+): WorkspaceSearchMigrationPlanningProvenanceArtifact {
+  return createArtifactFixture(paddingLength).artifact
 }
 
 /**
@@ -1419,14 +1739,7 @@ function createStoredManifestPages(
     readonly WorkspaceSearchMigrationPlanningProvenanceStoredSegment[],
   maximumManifestPageBytes?: number,
   versionId?: string,
-): {
-  /** Ordered locally encoded predecessor-linked pages. */
-  readonly pages:
-    readonly WorkspaceSearchMigrationPlanningProvenanceEncodedManifestPage[]
-  /** Ordered exact stored manifest-page envelopes. */
-  readonly storedPages:
-    readonly WorkspaceSearchMigrationPlanningProvenanceStoredManifestPage[]
-} {
+): StoredManifestPagesFixture {
   const builder =
     createWorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder({
       artifact,
@@ -1436,6 +1749,32 @@ function createStoredManifestPages(
         ? {}
         : { maximumManifestPageBytes }),
     })
+  return storeManifestPagesFromBuilder(builder, versionId)
+}
+
+/**
+ * Encoded and exact-version manifest pages produced by one fixture builder.
+ */
+type StoredManifestPagesFixture = {
+  /** Ordered locally encoded predecessor-linked pages. */
+  readonly pages:
+    readonly WorkspaceSearchMigrationPlanningProvenanceEncodedManifestPage[]
+  /** Ordered exact stored manifest-page envelopes. */
+  readonly storedPages:
+    readonly WorkspaceSearchMigrationPlanningProvenanceStoredManifestPage[]
+}
+
+/**
+ * Stores every page emitted by one legacy or direct manifest-page builder.
+ *
+ * @param builder - Stateful predecessor-linked manifest-page builder.
+ * @param versionId - Optional version ID used by every stored-page fixture.
+ * @returns Ordered encoded pages and exact stored envelopes.
+ */
+function storeManifestPagesFromBuilder(
+  builder: WorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder,
+  versionId?: string,
+): StoredManifestPagesFixture {
   const pages:
     WorkspaceSearchMigrationPlanningProvenanceEncodedManifestPage[] = []
   const storedPages:
