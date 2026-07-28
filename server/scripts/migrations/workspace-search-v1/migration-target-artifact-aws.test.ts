@@ -224,31 +224,50 @@ class StalledTargetArtifactBody {
 /**
  * Creates a complete measured migration configuration.
  *
+ * @param region - Exact AWS region selected by the operator.
+ * @param partition - Matching official AWS ARN partition.
+ * @param bucketName - Exact measured general-purpose journal bucket.
  * @returns Exact measured configuration bound to an adapter.
  */
-function createConfiguration(): WorkspaceSearchMigrationConfiguration {
+function createConfiguration(
+  region = testRegion,
+  partition = 'aws',
+  bucketName = 'mukuroji-workspace-search-migration-journal',
+): WorkspaceSearchMigrationConfiguration {
   return {
     migrationId: WORKSPACE_SEARCH_MIGRATION_ID,
     migrationVersion: WORKSPACE_SEARCH_MIGRATION_VERSION,
     account: testAccount,
-    region: testRegion,
+    region,
     profile: 'production-operator',
     commit: 'a'.repeat(40),
     callerArn:
-      'arn:aws:sts::123456789012:assumed-role/migration-operator/session',
+      `arn:${partition}:sts::123456789012:assumed-role/migration-operator/session`,
     callerRoleId: 'AROA1234567890ABCDEFG',
     tables: {
-      'project-directory': createTable('project-directory'),
-      'work-items': createTable('work-items'),
-      collaboration: createTable('collaboration'),
-      documents: createTable('documents'),
-      'workspace-search': createTable('workspace-search'),
-      'migration-state': createTable('migration-state'),
+      'project-directory': createTable(
+        'project-directory',
+        region,
+        partition,
+      ),
+      'work-items': createTable('work-items', region, partition),
+      collaboration: createTable('collaboration', region, partition),
+      documents: createTable('documents', region, partition),
+      'workspace-search': createTable(
+        'workspace-search',
+        region,
+        partition,
+      ),
+      'migration-state': createTable(
+        'migration-state',
+        region,
+        partition,
+      ),
     },
     journal: {
-      bucketName: 'mukuroji-workspace-search-migration-journal',
+      bucketName,
       keyArn:
-        'arn:aws:kms:ap-northeast-1:123456789012:key/00000000-0000-0000-0000-000000000001',
+        `arn:${partition}:kms:${region}:123456789012:key/00000000-0000-0000-0000-000000000001`,
       keyCreationTime: '2026-07-01T00:00:00.000Z',
       keyManager: 'CUSTOMER',
       keyState: 'Enabled',
@@ -272,20 +291,24 @@ function createConfiguration(): WorkspaceSearchMigrationConfiguration {
  * Creates one complete physical table identity fixture.
  *
  * @param role - Exact logical table role.
+ * @param region - Exact measured AWS region.
+ * @param partition - Matching official AWS ARN partition.
  * @returns Complete measured table identity.
  */
 function createTable(
   role: WorkspaceSearchMigrationTableRole,
+  region = testRegion,
+  partition = 'aws',
 ): MigrationTableIdentity {
   return {
     role,
     tableName: `table-${role}`,
     tableArn:
-      `arn:aws:dynamodb:${testRegion}:${testAccount}:table/table-${role}`,
+      `arn:${partition}:dynamodb:${region}:${testAccount}:table/table-${role}`,
     tableId: `table-id-${role}`,
     creationTime: '2026-01-01T00:00:00.000Z',
     account: testAccount,
-    region: testRegion,
+    region,
     key: [
       { name: 'pk', role: 'HASH', type: 'S' },
     ],
@@ -557,6 +580,69 @@ async function captureMigrationFailure(
 }
 
 describe('AWS planning target-artifact adapter', () => {
+  test('accepts a measured official non-commercial partition', async () => {
+    const configuration =
+      createConfiguration('eusc-de-east-1', 'aws-eusc')
+    const page = createPage(configuration)
+    const fixture = createArtifactFixture(page)
+    const transport = new RecordingTargetArtifactTransport()
+    transport.putHandler = async () => ({
+      $metadata: {},
+      VersionId: fixture.reference.versionId,
+    })
+    transport.headHandler = async () =>
+      createValidHeadOutput(configuration, fixture)
+    const port =
+      createAwsWorkspaceSearchMigrationTargetArtifactPort({
+        configuration,
+        configurationHash:
+          createWorkspaceSearchConfigurationHash(configuration),
+        transport,
+      })
+
+    await expect(port.writePlanningTargetArtifactPage({
+      expectedPage: page,
+    })).resolves.toEqual([fixture.reference])
+    expect(transport.putCommands[0]?.input.SSEKMSKeyId).toBe(
+      configuration.journal.keyArn,
+    )
+  })
+
+  test('rejects reserved S3 alias names before target I/O', async () => {
+    const reservedBucketNames = [
+      'xn--migration-journal',
+      'migration-journal-s3alias',
+      'migration-journal.mrap',
+      'migration-journal--x-s3',
+      'migration-journal--table-s3',
+    ]
+    for (const bucketName of reservedBucketNames) {
+      const configuration = createConfiguration(
+        testRegion,
+        'aws',
+        bucketName,
+      )
+      const transport = new RecordingTargetArtifactTransport()
+      const failure = await captureMigrationFailure(
+        Promise.resolve().then(() =>
+          createAwsWorkspaceSearchMigrationTargetArtifactPort({
+            configuration,
+            configurationHash:
+              createWorkspaceSearchConfigurationHash(configuration),
+            transport,
+          })
+        ),
+      )
+
+      expect(`${bucketName}:${failure.code}`).toBe(
+        `${bucketName}:INVALID_ARGUMENT`,
+      )
+      expect(transport.putCommands).toHaveLength(0)
+      expect(transport.headCommands).toHaveLength(0)
+      expect(transport.getCommands).toHaveLength(0)
+    }
+  })
+
   test('writes exact conditional immutable S3 requests and pins the Head version', async () => {
     const configuration = createConfiguration()
     const page = createPage(configuration)
@@ -1040,6 +1126,35 @@ describe('AWS planning target-artifact adapter', () => {
     expect((await invalidHashFailure).code).toBe(
       'CONFIGURATION_HASH_MISMATCH',
     )
+    const partitionedConfiguration =
+      createConfiguration('cn-north-1', 'aws-cn')
+    const partitionedTargetTable =
+      partitionedConfiguration.tables['workspace-search']
+    const crossPartitionConfiguration:
+      WorkspaceSearchMigrationConfiguration = {
+        ...partitionedConfiguration,
+        tables: {
+          ...partitionedConfiguration.tables,
+          'workspace-search': {
+            ...partitionedTargetTable,
+            tableArn:
+              `arn:aws:dynamodb:${partitionedConfiguration.region}:${testAccount}:table/${partitionedTargetTable.tableName}`,
+          },
+        },
+      }
+    const partitionFailure = await captureMigrationFailure(
+      Promise.resolve().then(() =>
+        createAwsWorkspaceSearchMigrationTargetArtifactPort({
+          configuration: crossPartitionConfiguration,
+          configurationHash:
+            createWorkspaceSearchConfigurationHash(
+              crossPartitionConfiguration,
+            ),
+          transport,
+        })
+      ),
+    )
+    expect(partitionFailure.code).toBe('INVALID_ARGUMENT')
     const port =
       createAwsWorkspaceSearchMigrationTargetArtifactPort({
         configuration,

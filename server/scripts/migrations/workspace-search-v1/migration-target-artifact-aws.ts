@@ -965,7 +965,7 @@ function requireTargetArtifactConfiguration(
       WORKSPACE_SEARCH_MIGRATION_VERSION ||
     configuration.journalPrefix !== 'workspace-search/v1' ||
     !/^\d{12}$/u.test(configuration.account) ||
-    !/^[a-z]{2}(?:-[a-z0-9]+)+-\d$/u.test(configuration.region)
+    !isValidTargetArtifactRegion(configuration.region)
   ) {
     return failTargetArtifactAws('INVALID_ARGUMENT')
   }
@@ -1003,6 +1003,7 @@ function requireTargetArtifactConfiguration(
   ) {
     return failTargetArtifactAws('INVALID_ARGUMENT')
   }
+  const partition = readTargetArtifactArnPartition(keyArn)
   const tables = requireTargetArtifactInputRecord(
     configuration.tables,
     'INVALID_ARGUMENT',
@@ -1011,12 +1012,52 @@ function requireTargetArtifactConfiguration(
     Reflect.get(tables, 'workspace-search'),
     'workspace-search',
     configuration,
+    partition,
   )
   requireTargetArtifactTableIdentity(
     Reflect.get(tables, 'migration-state'),
     'migration-state',
     configuration,
+    partition,
   )
+}
+
+/**
+ * Checks a bounded official AWS region identifier.
+ *
+ * @param value - Candidate measured AWS region.
+ * @returns Whether the value has the same supported shape as identity discovery.
+ */
+function isValidTargetArtifactRegion(value: unknown): value is string {
+  return typeof value === 'string' &&
+    value.length >= 8 &&
+    value.length <= 32 &&
+    /^[a-z0-9]+(?:-[a-z0-9]+){2,5}$/u.test(value)
+}
+
+/**
+ * Checks an official AWS ARN partition identifier.
+ *
+ * @param value - Candidate partition component.
+ * @returns Whether the value is an official AWS partition shape.
+ */
+function isTargetArtifactAwsPartition(value: unknown): value is string {
+  return typeof value === 'string' &&
+    /^aws(?:-[a-z0-9]+)*$/u.test(value)
+}
+
+/**
+ * Reads the already validated partition from one measured resource ARN.
+ *
+ * @param value - Exact measured KMS key ARN.
+ * @returns Exact official AWS partition.
+ */
+function readTargetArtifactArnPartition(value: string): string {
+  const partition = value.split(':')[1]
+  if (!isTargetArtifactAwsPartition(partition)) {
+    return failTargetArtifactAws('INVALID_ARGUMENT')
+  }
+  return partition
 }
 
 /**
@@ -1038,8 +1079,7 @@ function isMeasuredTargetArtifactKmsKeyArn(
   const resource = parts[5]
   return parts.length === 6 &&
     parts[0] === 'arn' &&
-    typeof partition === 'string' &&
-    /^aws(?:-[a-z0-9]+)*$/u.test(partition) &&
+    isTargetArtifactAwsPartition(partition) &&
     parts[2] === 'kms' &&
     parts[3] === region &&
     parts[4] === account &&
@@ -1064,9 +1104,48 @@ function isValidTargetArtifactBucketName(value: unknown): value is string {
   ) {
     return false
   }
+  const reservedPrefixes = ['xn--', 'sthree-', 'amzn_s3_demo_']
+  const reservedSuffixes = [
+    '-s3alias',
+    '--ol-s3',
+    '.mrap',
+    '--x-s3',
+    '--table-s3',
+  ]
   return value.split('.').every((label) =>
     /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(label)
-  )
+  ) &&
+    !reservedPrefixes.some((prefix) => value.startsWith(prefix)) &&
+    !reservedSuffixes.some((suffix) => value.endsWith(suffix))
+}
+
+/**
+ * Checks an exact measured DynamoDB table ARN in the selected AWS partition.
+ *
+ * @param value - Candidate measured table ARN.
+ * @param tableName - Exact measured physical table name.
+ * @param region - Exact configured AWS region.
+ * @param account - Exact configured AWS account.
+ * @param partition - AWS partition selected by the measured journal key.
+ * @returns Whether the ARN identifies the exact table in the same partition.
+ */
+function isMeasuredTargetArtifactTableArn(
+  value: unknown,
+  tableName: string,
+  region: string,
+  account: string,
+  partition: string,
+): value is string {
+  if (typeof value !== 'string') return false
+  const parts = value.split(':')
+  return parts.length === 6 &&
+    parts[0] === 'arn' &&
+    parts[1] === partition &&
+    isTargetArtifactAwsPartition(parts[1]) &&
+    parts[2] === 'dynamodb' &&
+    parts[3] === region &&
+    parts[4] === account &&
+    parts[5] === `table/${tableName}`
 }
 
 /**
@@ -1075,11 +1154,13 @@ function isValidTargetArtifactBucketName(value: unknown): value is string {
  * @param value - Candidate measured table identity.
  * @param role - Exact configured table role.
  * @param configuration - Adapter-bound measured configuration.
+ * @param partition - Exact official partition shared by measured resources.
  */
 function requireTargetArtifactTableIdentity(
   value: unknown,
   role: MigrationTableIdentity['role'],
   configuration: WorkspaceSearchMigrationConfiguration,
+  partition: string,
 ): void {
   const record = requireTargetArtifactInputRecord(
     value,
@@ -1094,9 +1175,13 @@ function requireTargetArtifactTableIdentity(
     tableName.length < 3 ||
     tableName.length > 255 ||
     !/^[A-Za-z0-9_.-]+$/u.test(tableName) ||
-    typeof tableArn !== 'string' ||
-    tableArn !==
-      `arn:aws:dynamodb:${configuration.region}:${configuration.account}:table/${tableName}` ||
+    !isMeasuredTargetArtifactTableArn(
+      tableArn,
+      tableName,
+      configuration.region,
+      configuration.account,
+      partition,
+    ) ||
     typeof tableId !== 'string' ||
     tableId.length === 0 ||
     tableId.length > 1_024 ||
