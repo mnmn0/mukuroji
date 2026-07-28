@@ -443,7 +443,7 @@ GET より前に5つの terminal/nonempty head を強整合で固定し、invali
 chain/全体 page 数を検査します。Source 固定順、target の順に remaining row/canonical-byte budget を
 渡して committed exact object version だけを再構成し、pure join 後に同じ5 head の progress digest を
 強整合で再確認します。Managed ceiling は total 100,000 rows、256 MiB canonical item bytes、
-100,000 operations、全 chain 合計10,000 evidence pages です。Full ignored-page raw material は session
+100,000 operations、全 chain 合計 `10_000` evidence pages です。Full ignored-page raw material は session
 外へ返しませんが、join result の candidate は後続 plan に必要な source condition/target preimage を
 含みます。
 

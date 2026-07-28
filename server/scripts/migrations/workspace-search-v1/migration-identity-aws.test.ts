@@ -3799,6 +3799,46 @@ describe('Workspace Search migration AWS identity adapter', () => {
     expect(transport.getSourceEvidenceCommands).toHaveLength(0)
     expect(transport.getTargetEvidenceCommands).toHaveLength(0)
 
+    const nonStringRunIdInput: JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput = {
+      runId: 'non-string-run',
+      configuration,
+      configurationHash:
+        createWorkspaceSearchConfigurationHash(configuration),
+      limits: {
+        maxTotalRows: 100,
+        maxTotalCanonicalItemBytes: 1024 * 1024,
+        maxPlanOperations: 100,
+      },
+    }
+    expect(Reflect.set(nonStringRunIdInput, 'runId', 123)).toBe(true)
+    const nonStringRunIdFailure =
+      await captureWorkspaceSearchMigrationFailure(
+        port.joinCommittedPlanningEvidence(nonStringRunIdInput),
+      )
+    expect(nonStringRunIdFailure.code).toBe('INVALID_ARGUMENT')
+
+    const nonStringHashInput: JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput = {
+      runId: 'non-string-hash',
+      configuration,
+      configurationHash:
+        createWorkspaceSearchConfigurationHash(configuration),
+      limits: {
+        maxTotalRows: 100,
+        maxTotalCanonicalItemBytes: 1024 * 1024,
+        maxPlanOperations: 100,
+      },
+    }
+    expect(
+      Reflect.set(nonStringHashInput, 'configurationHash', false),
+    ).toBe(true)
+    const nonStringHashFailure =
+      await captureWorkspaceSearchMigrationFailure(
+        port.joinCommittedPlanningEvidence(nonStringHashInput),
+      )
+    expect(nonStringHashFailure.code).toBe('INVALID_ARGUMENT')
+    expect(transport.getSourceEvidenceCommands).toHaveLength(0)
+    expect(transport.getTargetEvidenceCommands).toHaveLength(0)
+
     const malformedConfiguration = structuredClone(configuration)
     expect(
       Reflect.deleteProperty(

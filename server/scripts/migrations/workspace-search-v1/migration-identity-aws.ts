@@ -4323,11 +4323,22 @@ function detachManagedPlanningJoinInput(
       'maxTotalCanonicalItemBytes',
       'maxTotalRows',
     ])
+    const runId = readManagedPlanningOwnDataProperty(input, 'runId')
+    const configurationHash = readManagedPlanningOwnDataProperty(
+      input,
+      'configurationHash',
+    )
+    if (
+      typeof runId !== 'string' ||
+      typeof configurationHash !== 'string'
+    ) {
+      return failSourceScanAws('INVALID_ARGUMENT')
+    }
     const snapshot = structuredClone(input)
     return {
-      runId: snapshot.runId,
+      runId,
       configuration: snapshot.configuration,
-      configurationHash: snapshot.configurationHash,
+      configurationHash,
       limits: {
         maxTotalRows: snapshot.limits.maxTotalRows,
         maxTotalCanonicalItemBytes:

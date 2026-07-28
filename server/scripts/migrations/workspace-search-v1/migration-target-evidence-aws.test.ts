@@ -2891,6 +2891,27 @@ describe('Workspace Search migration target evidence AWS adapter', () => {
     expect(transport.getCommands).toHaveLength(pointReadCount + 2)
 
     gateway.readCalls.splice(0)
+    const cumulativePointReadCount = transport.getCommands.length
+    const byteLimitFailure = await captureMigrationFailure(
+      () => port.readPlanningMaterialAtProgress(
+        createReadRequest(
+          configuration,
+          authorityContext.authority.lease.runId,
+        ),
+        replay.progress,
+        {
+          maxRows: 2,
+          maxCanonicalItemBytes: canonicalItemBytes - 1,
+        },
+      ),
+    )
+    expect(byteLimitFailure.code).toBe('INVALID_ARGUMENT')
+    expect(gateway.readCalls).toHaveLength(2)
+    expect(transport.getCommands).toHaveLength(
+      cumulativePointReadCount + 2,
+    )
+
+    gateway.readCalls.splice(0)
     const boundedPointReadCount = transport.getCommands.length
     const rowLimitFailure = await captureMigrationFailure(
       () => port.readPlanningMaterialAtProgress(
