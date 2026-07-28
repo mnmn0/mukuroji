@@ -404,10 +404,13 @@ orphan として費用/件数を観測します。後続実行が `List` や lat
 Lossless source/target artifact の codec と measured S3 adapter、source planning v3 の
 evidence/verification contract に加え、target table を同じ measured AWS session から強整合・
 無加工・100件上限で読み、Scan 前後の table incarnation と cursor を検証し、checkpoint を
-measured configuration hash に結合する read-only page primitive までは存在します。Target
-adapter は raw page を content-addressed な exact S3 version として upload/read-verify できますが、
-managed raw-page capture、durable target evidence/head、checkpoint 進行には未接続です。したがって
-upload 単体は non-authoritative であり、planning の進行や中断再開には使用できません。
+measured configuration hash に結合する read-only page primitive があります。Planning-only target
+evidence v1 の canonical chain/replay contract は、各 page の target row evidence、累積 checkpoint、
+owner/fence/current receipt、順序付き exact artifact reference を結合し、page 間の physical key
+重複と aggregate/binding 不整合を拒否します。Target adapter は raw page を content-addressed な
+exact S3 version として upload/read-verify できますが、managed raw-page capture、DynamoDB の
+durable target evidence/head、checkpoint transaction には未接続です。したがって pure contract や
+upload 単体は authoritative でも再開可能でもなく、planning の進行には使用できません。
 Complete target join、実行 CLI、heartbeat supervisor、online writer fence、migration 専用
 observability/alarm、restore/failover/DR drill、完全な source/target completeness 実行も未実装です。
 Digest-only な dry-run v1 と legacy planning v2 は process を越えた planning input、target join、
@@ -468,6 +471,9 @@ resource を skip して `continue-update-rollback` しません。
 - Source-evidence の purpose/schema version。`dry-run` v1 は S3 reference/upload なし、legacy
   planning v2 は digest-only かつ append/promote 不可、planning v3 は lossless artifact-bound と
   区別し、v1/v2 を v3 planning input として記録しない
+- Target-evidence は planning-only v1 とし、owner/fence/current receipt、順序付き exact target
+  artifact reference、target 専用 checkpoint を欠く page を受理しない。Pure replay の成功だけを
+  durable commit evidence とせず、後続の state-table head/transaction locator と併記する
 - 各 source page で同じ conditional transaction に保存した digest-only row evidence、累積
   checkpoint、直前 checkpoint identity と evidence chain head。Resume cursor は tenant identifier を
   含み得る restricted state であり、raw cursor はログ、S3、外部 evidence export へ含めず、
