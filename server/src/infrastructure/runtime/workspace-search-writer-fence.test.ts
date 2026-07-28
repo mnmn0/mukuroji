@@ -281,7 +281,8 @@ test('creates an exact deterministic guard for one open row', () => {
         ReturnValuesOnConditionCheckFailure: 'NONE',
       },
     },
-    materialFingerprint: guard.materialFingerprint,
+    materialFingerprint:
+      '8132a3dbbb164792512386528001d646710ad53dfc26f291b43855aab684c753',
     writerEpoch: 1,
     controlRevision: 1,
   })

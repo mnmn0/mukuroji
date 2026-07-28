@@ -598,6 +598,23 @@ describe('Workspace Search application writer fence AWS adapter', () => {
 
   })
 
+  test('classifies a pre-write strong-read failure as transient', async () => {
+    const fixture = createFenceFixture()
+    const transport = new RecordingFenceTransport()
+    const port = createPort(
+      fixture,
+      transport,
+      createFixedClock(initialOpenTime),
+    )
+    transport.armNextReadError(createNamedError('TimeoutError'))
+
+    const failure = await captureMigrationFailure(() => port.read())
+
+    expect(failure.code).toBe('TRANSIENT_INFRASTRUCTURE_FAILURE')
+    expect(transport.reads).toHaveLength(1)
+    expect(transport.transactions).toHaveLength(0)
+  })
+
   test('fails closed for foreign table identity and malformed durable rows', async () => {
     const fixture = createFenceFixture()
     const transport = new RecordingFenceTransport()
@@ -901,6 +918,15 @@ implements WorkspaceSearchMigrationPrePlanAuthorityAwsTransport {
    */
   setItem(item: Readonly<Record<string, AttributeValue>>): void {
     this.item = structuredClone(item)
+  }
+
+  /**
+   * Arms one raw error for the next strong read.
+   *
+   * @param error - Raw failure thrown by the next read.
+   */
+  armNextReadError(error: unknown): void {
+    this.nextReadError = error
   }
 
   /**

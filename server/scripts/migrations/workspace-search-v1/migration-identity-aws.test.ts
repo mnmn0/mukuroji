@@ -5116,6 +5116,8 @@ describe('Workspace Search migration AWS identity adapter', () => {
         throw new Error('Expected measured writer-fence source identity.')
       }
       let describeCount = 0
+      // Close first rechecks six tables before and after its initial read.
+      // Check 13 starts the pre-send guard; check 14 is project-directory.
       transport.describeTableEffect = (tableName) => {
         describeCount += 1
         if (

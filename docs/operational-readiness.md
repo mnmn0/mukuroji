@@ -578,6 +578,9 @@ closed successorへの遷移だけを提供します。Bootstrapとcloseはい�
 receiptの3条件とwriter-fence CASを固定4 item transactionでcommitし、応答消失時は同じlogical successorの
 強整合再読だけを成功として回収します。同じmeasured AWS sessionはstate、4 source、targetのincarnationをread前後、
 transition直前、transaction後に固定順で再検証し、post-commit driftがあればそのmeasurementを隔離します。
+Managed fence read/transitionは1回の操作で複数の`DescribeTable`を実行します。
+`TRANSIENT_INFRASTRUCTURE_FAILURE`からoperator操作を再試行するときはtight loopにせず、
+AWSのthrottlingが解消する十分な間隔を空けてからfresh measurementとauthorityを取り直します。
 既存の同一open/closed rowを返すread-only retryはdurable identityだけを証明し、その呼出時点のauthority
 freshnessを再証明しません。Freshnessを必要とする次の操作ではcurrent authorityを改めて評価します。
 Lease expiryやprocess crashでは自動openしません。Terminal apply/verify/rollback outcomeへ束縛した
@@ -623,14 +626,19 @@ migration 専用observability/alarm、restore/failover/DR drill、non-production
 2. PITR/backup、earliest/latest restorable time、source 件数、代表 key/checksum を保存する。
 3. Dry-run の scanned/projected/deleted/skipped/invalid 件数を review する。Dry-run evidence は
    lease/fenceを持たないため、planning source evidenceとして再利用しない。
-4. Online migration は writer fence/epoch または dual-write + high-watermark catch-up を有効化し、
+4. 初回guarded-code rolloutでは、まずAppConfig `disabled`でwriterを止めて初回drain evidenceを取得する。
+   そのevidenceを使い、Owner/run ID付きglobal leaseとheartbeatを取得し、fresh immutable maintenance
+   receiptをcurrent pointerへcommitする。Cutover前にもlease/receiptをrenewしてcurrent authorityを
+   解決する。`bootstrapOpen`/`close`、close後のdrain、再planningを、このlease/current pointer/current
+   receiptがcommitされる前に開始してはいけない。APIの永続化境界は実装済みだが、
+   heartbeat/renewal supervisorを含む実行CLIは未実装である。
+5. Online migration は writer fence/epoch または dual-write + high-watermark catch-up を有効化し、
    source scan と cutover の競合を閉じる。Workspace Search v1はmaintenance writer-fenceを選択する。
-   API、worker、connector、custom resource、backfillを含む全writerがexact open-row ConditionCheckを
-   同じtransactionへ含むこと、欠落rowでfail-closedになることを確認する。Fence close後にdrainを実測し、
-   source/target scanとsealed rootを再生成する。TTL service deleteは別途disjointnessまたは追加scanで閉じる。
-5. Owner/run ID 付き global lease と heartbeat を取得し、fresh immutable maintenance receipt を
-   current pointerへcommitしてから planning/apply/verify/rollback の同時実行を拒否する。APIの
-   永続化境界は実装済みだが、heartbeat/renewal supervisorを含む実行CLIは未実装である。
+   Step 4のcurrent authorityで初回`bootstrapOpen`を行い、API、worker、connector、custom resource、
+   backfillを含む全writerがexact open-row ConditionCheckを同じtransactionへ含むこと、欠落rowで
+   fail-closedになることを確認する。Cutoverではrenew済みの同authority prerequisiteを確認してから
+   `close`し、その後にdrainを実測してsource/target scanとsealed rootを新しいrunとして再生成する。
+   TTL service deleteは別途disjointnessまたは追加scanで閉じる。
 6. Preimage journal は DynamoDB native value を lossless に保持できる暗号化された segmented store
    に置き、bounded memory/I/O、retention、access audit を確認する。
 7. Verify と rollback の command、停止条件、最大実行時間、data/application owner を incident
