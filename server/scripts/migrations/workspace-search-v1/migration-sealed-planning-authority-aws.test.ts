@@ -57,6 +57,8 @@ import {
 } from './migration-sealed-planning-authority-aws'
 import {
   type CreateWorkspaceSearchMigrationSealedPlanningAuthorityV2Input,
+  createWorkspaceSearchMigrationSealedPlanningAuthorityV2,
+  parseWorkspaceSearchMigrationSealedPlanningAuthorityV2,
   serializeWorkspaceSearchMigrationSealedPlanningAuthorityV2,
 } from './migration-sealed-planning-authority-v2'
 import {
@@ -222,12 +224,182 @@ describe('Workspace Search sealed planning authority v2 AWS adapter', () => {
     const reread = await port.read(runId)
 
     expect(reread).toEqual(published)
-    expect(transport.reads).toHaveLength(2)
+    expect(transport.reads).toHaveLength(3)
     expect(
       transport.reads.every(({ input }) =>
         input.ConsistentRead === true
       ),
     ).toBe(true)
+  })
+
+  test('recovers the durable logical publication across retry timestamps', async () => {
+    const fixture = createPublicationFixture()
+    const cases: readonly ('absent' | 'timeout')[] = [
+      'absent',
+      'timeout',
+    ]
+
+    for (const reconciliation of cases) {
+      const events: string[] = []
+      const transport = new RecordingPublicationTransport(events)
+      transport.commitBeforeTransactionError = true
+      transport.nextTransactionError =
+        createNamedError('TimeoutError')
+      if (reconciliation === 'timeout') {
+        transport.nextReadErrorAfterTransaction =
+          createNamedError('TimeoutError')
+      } else {
+        transport.nextReadOutputAfterTransaction = { $metadata: {} }
+      }
+      const clock = createSequencedClock(events, [
+        preflightTime,
+        commitTime,
+      ])
+      const firstPort =
+        createAwsWorkspaceSearchMigrationSealedPlanningAuthorityV2Port(
+          fixture.stateTable,
+          fixture.configurationHash,
+          transport,
+          clock,
+        )
+
+      const firstFailure = await captureMigrationFailure(
+        () => firstPort.publish(fixture.publishInput),
+      )
+      expect(firstFailure.code).toBe(
+        'AMBIGUOUS_OPERATION_UNRESOLVED',
+      )
+      const firstCommand = requireTransaction(
+        transport.transactions[0],
+      )
+      const firstRootItem = requirePutItem(
+        requireRootPut(
+          firstCommand.input.TransactItems?.[
+            workspaceSearchMigrationSealedPlanningAuthorityV2TransactionIndex
+              .root
+          ],
+        ),
+      )
+      const firstRootBytes = requireBinaryAttribute(
+        firstRootItem,
+        'rootBytes',
+      )
+      const firstRoot =
+        parseWorkspaceSearchMigrationSealedPlanningAuthorityV2(
+          firstRootBytes,
+        )
+      transport.commitBeforeTransactionError = false
+      transport.nextTransactionError = createCancellation(
+        workspaceSearchMigrationSealedPlanningAuthorityV2TransactionIndex
+          .root,
+        'ConditionalCheckFailed',
+      )
+      let retryClockCalls = 0
+      const retryPort =
+        createAwsWorkspaceSearchMigrationSealedPlanningAuthorityV2Port(
+          fixture.stateTable,
+          fixture.configurationHash,
+          transport,
+          () => {
+            retryClockCalls += 1
+            return new Date('2026-07-29T02:00:00.000Z')
+          },
+        )
+
+      const recovered = await retryPort.publish(fixture.publishInput)
+
+      expect(recovered).toEqual(firstRoot)
+      expect(recovered.sealedAt).toBe(commitTime)
+      expect(
+        serializeWorkspaceSearchMigrationSealedPlanningAuthorityV2(
+          recovered,
+        ),
+      ).toEqual(firstRootBytes)
+      expect(transport.transactions).toHaveLength(1)
+      expect(transport.reads).toHaveLength(3)
+      expect(retryClockCalls).toBe(0)
+      expect(
+        transport.reads.every(({ input }) =>
+          input.ConsistentRead === true
+        ),
+      ).toBe(true)
+      expect(events).toEqual([
+        'clock',
+        'prepare',
+        'clock',
+        'transact',
+        'prepare',
+      ])
+    }
+  })
+
+  test('rejects a durable publication for different stable input', async () => {
+    const fixture = createPublicationFixture()
+    const transport = new RecordingPublicationTransport()
+    const port =
+      createAwsWorkspaceSearchMigrationSealedPlanningAuthorityV2Port(
+        fixture.stateTable,
+        fixture.configurationHash,
+        transport,
+        createFixedClock(commitTime),
+      )
+    await port.publish(fixture.publishInput)
+    const conflictingInput = {
+      ...fixture.publishInput,
+      planSealReference: {
+        ...fixture.publishInput.planSealReference,
+        versionId: 'different-plan-seal-version',
+      },
+    }
+
+    const failure = await captureMigrationFailure(
+      () => port.publish(conflictingInput),
+    )
+
+    expect(failure.code).toBe('INVALID_STATE')
+    expect(transport.transactions).toHaveLength(1)
+  })
+
+  test('recovers a same-input root won by a concurrent timestamp', async () => {
+    const fixture = createPublicationFixture()
+    const concurrentRoot =
+      createWorkspaceSearchMigrationSealedPlanningAuthorityV2({
+        ...fixture.publishInput,
+        sealedAt: '2026-07-29T01:01:55.000Z',
+      })
+    const concurrentRootBytes =
+      serializeWorkspaceSearchMigrationSealedPlanningAuthorityV2(
+        concurrentRoot,
+      )
+    const transport = new RecordingPublicationTransport()
+    transport.commitBeforeTransactionError = true
+    transport.nextTransactionError =
+      createNamedError('TimeoutError')
+    transport.transformCommittedItem = (item) => ({
+      ...item,
+      authorityDigest: { S: concurrentRoot.authorityDigest },
+      sealedAt: { S: concurrentRoot.sealedAt },
+      rootBytes: { B: concurrentRootBytes },
+    })
+    const port =
+      createAwsWorkspaceSearchMigrationSealedPlanningAuthorityV2Port(
+        fixture.stateTable,
+        fixture.configurationHash,
+        transport,
+        createSequencedClock([], [
+          preflightTime,
+          commitTime,
+        ]),
+      )
+
+    const recovered = await port.publish(fixture.publishInput)
+
+    expect(recovered).toEqual(concurrentRoot)
+    expect(
+      serializeWorkspaceSearchMigrationSealedPlanningAuthorityV2(
+        recovered,
+      ),
+    ).toEqual(concurrentRootBytes)
   })
 
   test('keeps absent ambiguous outcomes unresolved and explicit rejection transient', async () => {
@@ -326,7 +498,7 @@ describe('Workspace Search sealed planning authority v2 AWS adapter', () => {
       )
 
       expect(failure.code).toBe(candidate.expectedCode)
-      expect(transport.reads).toEqual([])
+      expect(transport.reads).toHaveLength(1)
     }
   })
 
@@ -356,7 +528,7 @@ describe('Workspace Search sealed planning authority v2 AWS adapter', () => {
     const missingTransport = new RecordingPublicationTransport()
     missingTransport.nextTransactionError =
       createNamedError('TimeoutError')
-    missingTransport.nextReadError =
+    missingTransport.nextReadErrorAfterTransaction =
       new ResourceNotFoundException({
         $metadata: {},
         message: 'redacted fixture',
@@ -378,7 +550,7 @@ describe('Workspace Search sealed planning authority v2 AWS adapter', () => {
       new RecordingPublicationTransport()
     guardedDriftTransport.nextTransactionError =
       createNamedError('TimeoutError')
-    guardedDriftTransport.nextReadError =
+    guardedDriftTransport.nextReadErrorAfterTransaction =
       new WorkspaceSearchMigrationFailure(
         'CONFIGURATION_DRIFT',
         'redacted managed drift',
@@ -531,8 +703,14 @@ implements WorkspaceSearchMigrationSealedPlanningAuthorityV2AwsTransport {
   /** Optional one-shot reconciliation read error. */
   nextReadError: unknown
 
+  /** Optional one-shot read error armed after transaction failure. */
+  nextReadErrorAfterTransaction: unknown
+
   /** Optional one-shot raw strong-read response. */
   nextReadOutput: GetItemCommandOutput | undefined
+
+  /** Optional one-shot read response armed after transaction failure. */
+  nextReadOutputAfterTransaction: GetItemCommandOutput | undefined
 
   /** Whether the next transaction installs its root before throwing. */
   commitBeforeTransactionError = false
@@ -630,7 +808,13 @@ implements WorkspaceSearchMigrationSealedPlanningAuthorityV2AwsTransport {
         : this.transformCommittedItem(candidate)
     }
     this.nextTransactionError = undefined
-    if (transactionError !== undefined) throw transactionError
+    if (transactionError !== undefined) {
+      this.nextReadError = this.nextReadErrorAfterTransaction
+      this.nextReadErrorAfterTransaction = undefined
+      this.nextReadOutput = this.nextReadOutputAfterTransaction
+      this.nextReadOutputAfterTransaction = undefined
+      throw transactionError
+    }
     return { $metadata: {} }
   }
 }

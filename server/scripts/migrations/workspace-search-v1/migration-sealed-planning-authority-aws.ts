@@ -276,6 +276,17 @@ implements WorkspaceSearchMigrationSealedPlanningAuthorityV2AwsPort {
   ): Promise<WorkspaceSearchMigrationSealedPlanningAuthorityV2> {
     return runSealedPlanningAuthorityPublicationBoundary(async () => {
       const snapshot = this.preparePublishInput(input)
+      const existing = await this.readPublication(snapshot.runId)
+      if (existing !== undefined) {
+        const recovered = this.recoverPublicationForInput(
+          snapshot,
+          existing,
+        )
+        await this.transport.prepare()
+        return recovered
+      }
+      const preflightAt = readPublicationClock(this.clock)
+      this.requireFreshPublishInput(snapshot, preflightAt)
       await this.transport.prepare()
       const commitAt = readPublicationClock(this.clock)
       const root =
@@ -304,6 +315,7 @@ implements WorkspaceSearchMigrationSealedPlanningAuthorityV2AwsPort {
           )
         }
         return this.reconcilePublication(
+          snapshot,
           root,
           record.rootBytes,
           transactionError,
@@ -322,7 +334,34 @@ implements WorkspaceSearchMigrationSealedPlanningAuthorityV2AwsPort {
     input: PublishWorkspaceSearchMigrationSealedPlanningAuthorityV2Input,
   ): PublishWorkspaceSearchMigrationSealedPlanningAuthorityV2Input {
     requireExactPublishInputKeys(input)
-    const preflightAt = readPublicationClock(this.clock)
+    const validationAt = readPublicationInputValidationTime(input)
+    const candidate = createTimedPublicationInput(
+      input,
+      validationAt,
+    )
+    const preflightRoot =
+      createWorkspaceSearchMigrationSealedPlanningAuthorityV2(candidate)
+    this.requireRootBinding(preflightRoot)
+    this.requireInputStateBinding(candidate)
+    let snapshot: CreateWorkspaceSearchMigrationSealedPlanningAuthorityV2Input
+    try {
+      snapshot = structuredClone(candidate)
+    } catch {
+      return failSealedPlanningAuthorityPublication('INVALID_ARGUMENT')
+    }
+    return omitPublicationTime(snapshot)
+  }
+
+  /**
+   * Revalidates time-sensitive authority before a new transaction attempt.
+   *
+   * @param input - Detached stable caller-owned publication material.
+   * @param preflightAt - Trusted current preflight instant.
+   */
+  private requireFreshPublishInput(
+    input: PublishWorkspaceSearchMigrationSealedPlanningAuthorityV2Input,
+    preflightAt: Date,
+  ): void {
     const candidate = createTimedPublicationInput(
       input,
       preflightAt.toISOString(),
@@ -347,13 +386,45 @@ implements WorkspaceSearchMigrationSealedPlanningAuthorityV2AwsPort {
       stateTable: candidate.configuration.tables['migration-state'],
       progress: candidate.targetProgress,
     })
-    let snapshot: CreateWorkspaceSearchMigrationSealedPlanningAuthorityV2Input
+  }
+
+  /**
+   * Recovers one durable logical publication using its root-owned timestamp.
+   *
+   * The caller-owned input is reconstructed with the already durable
+   * `sealedAt` so a retry cannot accept a different manifest, authority, or
+   * evidence graph merely because it addresses the same deterministic key.
+   *
+   * @param input - Detached stable caller-owned publication material.
+   * @param durable - Strict root read from the deterministic publication key.
+   * @returns Detached durable root only when every stable field matches.
+   */
+  private recoverPublicationForInput(
+    input: PublishWorkspaceSearchMigrationSealedPlanningAuthorityV2Input,
+    durable: WorkspaceSearchMigrationSealedPlanningAuthorityV2,
+  ): WorkspaceSearchMigrationSealedPlanningAuthorityV2 {
+    let candidate: WorkspaceSearchMigrationSealedPlanningAuthorityV2
     try {
-      snapshot = structuredClone(candidate)
+      candidate =
+        createWorkspaceSearchMigrationSealedPlanningAuthorityV2({
+          ...input,
+          sealedAt: durable.sealedAt,
+        })
     } catch {
-      return failSealedPlanningAuthorityPublication('INVALID_ARGUMENT')
+      return failSealedPlanningAuthorityPublication('INVALID_STATE')
     }
-    return omitPublicationTime(snapshot)
+    const candidateBytes =
+      serializeWorkspaceSearchMigrationSealedPlanningAuthorityV2(
+        candidate,
+      )
+    const durableBytes =
+      serializeWorkspaceSearchMigrationSealedPlanningAuthorityV2(
+        durable,
+      )
+    if (!uint8ArraysEqual(candidateBytes, durableBytes)) {
+      return failSealedPlanningAuthorityPublication('INVALID_STATE')
+    }
+    return clonePublicationRoot(durable)
   }
 
   /**
@@ -414,12 +485,14 @@ implements WorkspaceSearchMigrationSealedPlanningAuthorityV2AwsPort {
   /**
    * Resolves a failed transaction by strongly rereading its immutable key.
    *
+   * @param input - Detached stable caller-owned publication material.
    * @param intended - Exact intended root.
    * @param intendedBytes - Canonical bytes written by the transaction.
    * @param transactionError - Raw transaction error used only after absence.
-   * @returns Intended root only when durable bytes prove success.
+   * @returns Exact intended or stable-input-equivalent durable root.
    */
   private async reconcilePublication(
+    input: PublishWorkspaceSearchMigrationSealedPlanningAuthorityV2Input,
     intended: WorkspaceSearchMigrationSealedPlanningAuthorityV2,
     intendedBytes: Uint8Array,
     transactionError: unknown,
@@ -457,7 +530,7 @@ implements WorkspaceSearchMigrationSealedPlanningAuthorityV2AwsPort {
       if (uint8ArraysEqual(durableBytes, intendedBytes)) {
         return clonePublicationRoot(intended)
       }
-      return failSealedPlanningAuthorityPublication('INVALID_STATE')
+      return this.recoverPublicationForInput(input, durable)
     }
     return failSealedPlanningAuthorityPublication(
       classifyPublicationTransactionError(transactionError),
@@ -860,6 +933,40 @@ function createTimedPublicationInput(
 }
 
 /**
+ * Reads the earliest stable instant at which a valid input can be detached.
+ *
+ * This timestamp validates and snapshots the caller graph before I/O. It is
+ * not used as current authority for a new transaction; that proof is repeated
+ * later with the trusted adapter clock.
+ *
+ * @param input - Caller-owned publication material with exact top-level keys.
+ * @returns Later of plan creation and current-authority evaluation.
+ */
+function readPublicationInputValidationTime(
+  input: PublishWorkspaceSearchMigrationSealedPlanningAuthorityV2Input,
+): string {
+  const planSeal = readOwnDataObject(input, 'planSeal')
+  const currentAuthority = readOwnDataObject(
+    input,
+    'currentAuthority',
+  )
+  const createdAt = readOwnDataValue(planSeal, 'createdAt')
+  const evaluatedAt = readOwnDataValue(
+    currentAuthority,
+    'evaluatedAt',
+  )
+  if (
+    !isCanonicalTimestamp(createdAt) ||
+    !isCanonicalTimestamp(evaluatedAt)
+  ) {
+    return failSealedPlanningAuthorityPublication('INVALID_ARGUMENT')
+  }
+  return Date.parse(createdAt) >= Date.parse(evaluatedAt)
+    ? createdAt
+    : evaluatedAt
+}
+
+/**
  * Removes adapter-owned preflight time from one validated detached snapshot.
  *
  * @param input - Complete cloned v2 pure-boundary input.
@@ -911,6 +1018,29 @@ function readOwnDataProperty<
     return failSealedPlanningAuthorityPublication('INVALID_ARGUMENT')
   }
   return descriptor.value
+}
+
+/**
+ * Reads one own enumerable data property as a non-Proxy object.
+ *
+ * @param value - Candidate containing object.
+ * @param key - Required own data-property key.
+ * @returns Untrusted object value safe for descriptor inspection.
+ */
+function readOwnDataObject(
+  value: object,
+  key: PropertyKey,
+): object {
+  const candidate = readOwnDataValue(value, key)
+  if (
+    typeof candidate !== 'object' ||
+    candidate === null ||
+    Array.isArray(candidate) ||
+    nodeUtilTypes.isProxy(candidate)
+  ) {
+    return failSealedPlanningAuthorityPublication('INVALID_ARGUMENT')
+  }
+  return candidate
 }
 
 /**
