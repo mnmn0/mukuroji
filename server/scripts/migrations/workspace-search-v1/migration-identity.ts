@@ -788,7 +788,7 @@ async function measureJournalIdentity(
     objectLock.ObjectLockConfiguration?.ObjectLockEnabled !== 'Enabled' ||
     retention?.Mode !== 'COMPLIANCE' ||
     !Number.isSafeInteger(retention.Days) ||
-    (retention.Days ?? 0) < 30 ||
+    retention.Days !== 30 ||
     retention.Years !== undefined
   ) {
     throw invalidJournalConfiguration('Object Lock')

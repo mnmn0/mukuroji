@@ -469,8 +469,39 @@ Artifact は64 MiBで fail-closed とし、evidence page に resume key（Binary
 raw artifact と同等に暗号化・最小権限・access audit の対象にします。この restricted immutable
 provenance object は、recursive page proof のために migration-state 外へ cursor を保持する唯一の
 許可された例外です。Standalone cursor、log、汎用 S3 evidence、外部 export には複製せず、object の
-exact version 全体を一単位として取得・監査します。この ceiling を超える正当な run の segmentation と
-complete manifest binding は後続の concrete storage adapter で閉じます。
+exact version 全体を一単位として取得・監査します。この ceiling を超える正当なrunをraw witness/receipt
+から直接segment化し、complete manifestを実storageへ固定する経路は後続adapterで閉じます。
+
+Bounded planning-artifact foundation は、planned operation を完全な operation 境界で最大16 MiBの
+content-addressed segment に決定的に分割し、最大256 referenceの manifest page predecessor chain と
+compact head で0件から100,000件までを表現します。Provenance も evidence page witness と対応する
+authority trace、historical receipt と対応する transition を完全な entry 境界で最大16 MiBに分割し、
+exact-version predecessor chain の bounded manifest page と terminal page reference を持つ compact
+head から元の semantic artifact を再構成します。Head の terminal reference だけを起点に `List` や
+latest version lookup を使わず全 page reference を逆順に発見し、正順へ戻して検証できます。Plan側はrun、
+configuration hash、plan root/count、plan seal digestを、provenance側はrun、configuration hash、
+全6 TableId、snapshot/provenance/receipt digest/countを、それぞれ同種artifact内の全layerに結合します。
+各graphはObject Lock期限を含む exact
+`{objectKey, versionId, contentDigest, byteLength, retainUntil}` を保持し、同じgraph内のmissing、reorder、
+gap、別role key、version差替え、byte/digest差替えを fail-closed にします。Planとprovenance相互、および
+sealed authorityとのcross-artifact bindingはこのfoundationには含めません。
+
+Codec-agnostic な single-object S3 core は、role-separated key、`If-None-Match: *`、exact owner、
+full-object SHA-256、customer-managed SSE-KMS/Bucket Key、caller-fixed Object Lock COMPLIANCE期限を
+Put後のversion-pinned Headとexact-version Getの両方で検証します。412とresponse lossはHeadの完全一致
+だけを成功として回復し、ambiguous writeでabsenceを確認した場合だけconditional Putを1回再試行します。
+個別retention headerに必要な `s3:PutObjectRetention` はCOMPLIANCE modeかつ30日以上31日以下に限定し、
+bucket policyも範囲外のretentionを明示的に拒否します。S3の`LastModified`から実際のversion作成時点の
+保持日数を再計算し、Put遅延後も同じ30日から31日の範囲に入ることをHead/Getで検証します。下限ちょうどの
+deadlineがnetwork遅延で30日未満にならないよう、各conditional Put直前に30日とrequest timeoutの合計以上の
+headroomを要求し、timeout時はtransportへ渡したAbortSignalで元のS3 Putも中止します。Ambiguous write後に
+headroomが尽きた場合は入力不正へ戻さず、未解決のambiguous operationとして停止します。
+
+この foundation の provenance segment builder は、既存のstrict validatorを通過した64 MiB以下の
+full provenance artifactを入力にします。Raw evidence witness / historical receiptからfull artifactを
+作らず直接segment化する経路、leafからmanifest headまでを順序付きでupload/replayするplanning専用
+adapter、sealed authorityとのmanifest本体相関はまだ未接続です。したがって64 MiBを超える正当なrunと
+upload途中のorphan処理は未完了であり、artifact uploadだけではplanning/apply authorityになりません。
 Source planning v3 と target planning v1 の terminal head には、完全な identity、chain version、
 checkpoint、recursive head digest、`completed=true` を比較する transaction 用 ConditionCheck factory
 があります。

@@ -1053,6 +1053,14 @@ describe('Workspace Search migration physical identity', () => {
         ObjectLockConfiguration: {
           ObjectLockEnabled: 'Enabled',
           Rule: {
+            DefaultRetention: { Mode: 'COMPLIANCE', Days: 31 },
+          },
+        },
+      },
+      {
+        ObjectLockConfiguration: {
+          ObjectLockEnabled: 'Enabled',
+          Rule: {
             DefaultRetention: { Mode: 'COMPLIANCE', Years: 1 },
           },
         },

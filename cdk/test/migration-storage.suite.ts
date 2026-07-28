@@ -216,6 +216,12 @@ test('Workspace Search journal is retained, write-once, encrypted, and access lo
   const wrongKeyUploadStatement = journalPolicyStatements.find(
     (statement) => statement.Sid === 'DenyWrongJournalKeyUploads',
   );
+  const shortRetentionStatement = journalPolicyStatements.find(
+    (statement) => statement.Sid === 'DenyShortJournalRetention',
+  );
+  const longRetentionStatement = journalPolicyStatements.find(
+    (statement) => statement.Sid === 'DenyLongJournalRetention',
+  );
   const serializedJournalPolicy = JSON.stringify(journalBucketPolicy);
   const allJournalObjectsArn = {
     'Fn::Join': [
@@ -290,6 +296,28 @@ test('Workspace Search journal is retained, write-once, encrypted, and access lo
         's3:x-amz-server-side-encryption-aws-kms-key-id': {
           'Fn::GetAtt': [journalKeyId, 'Arn'],
         },
+      },
+    },
+    Effect: 'Deny',
+    Principal: { AWS: '*' },
+    Resource: journalV1ObjectsArn,
+  }));
+  expect(shortRetentionStatement).toEqual(expect.objectContaining({
+    Action: 's3:PutObjectRetention',
+    Condition: {
+      NumericLessThan: {
+        's3:object-lock-remaining-retention-days': 30,
+      },
+    },
+    Effect: 'Deny',
+    Principal: { AWS: '*' },
+    Resource: journalV1ObjectsArn,
+  }));
+  expect(longRetentionStatement).toEqual(expect.objectContaining({
+    Action: 's3:PutObjectRetention',
+    Condition: {
+      NumericGreaterThan: {
+        's3:object-lock-remaining-retention-days': 31,
       },
     },
     Effect: 'Deny',
@@ -401,6 +429,9 @@ test('Workspace Search migration operator policy is unattached and least privile
   );
   const journalPutStatement = statements.find((statement) =>
     statement.Action === 's3:PutObject'
+  );
+  const journalRetentionStatement = statements.find((statement) =>
+    statement.Action === 's3:PutObjectRetention'
   );
   const journalReadStatement = statements.find((statement) =>
     Array.isArray(statement.Action) &&
@@ -526,6 +557,19 @@ test('Workspace Search migration operator policy is unattached and least privile
   });
   expect(JSON.stringify(journalPutStatement?.Resource))
     .toContain('workspace-search/v1/');
+  expect(journalRetentionStatement?.Condition).toEqual({
+    NumericGreaterThanEquals: {
+      's3:object-lock-remaining-retention-days': 30,
+    },
+    NumericLessThanEquals: {
+      's3:object-lock-remaining-retention-days': 31,
+    },
+    StringEquals: {
+      's3:object-lock-mode': 'COMPLIANCE',
+    },
+  });
+  expect(JSON.stringify(journalRetentionStatement?.Resource))
+    .toContain('workspace-search/v1/');
   expect(JSON.stringify(journalReadStatement?.Resource))
     .toContain('workspace-search/v1/');
   expect(journalReadStatement?.Action).toEqual([
@@ -560,7 +604,7 @@ test('Workspace Search migration operator policy is unattached and least privile
     's3:BypassGovernanceRetention',
     's3:DeleteObject',
     's3:DeleteObjectVersion',
-    's3:PutObjectRetention',
+    's3:PutObjectLegalHold',
   ]) {
     expect(serializedOperatorPolicy).not.toContain(`"${forbiddenAction}"`);
   }

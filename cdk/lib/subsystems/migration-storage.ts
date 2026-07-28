@@ -4,6 +4,9 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 
+const minimumJournalRetentionDays = 30;
+const maximumJournalRetentionDays = 31;
+
 /**
  * Existing application tables used by the Workspace Search maintenance migration.
  */
@@ -111,7 +114,7 @@ export function buildMigrationStorage(
       enforceSSL: true,
       minimumTLSVersion: 1.2,
       objectLockDefaultRetention: s3.ObjectLockRetention.compliance(
-        cdk.Duration.days(30),
+        cdk.Duration.days(minimumJournalRetentionDays),
       ),
       objectLockEnabled: true,
       objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
@@ -194,6 +197,36 @@ export function buildMigrationStorage(
         StringNotEquals: {
           's3:x-amz-server-side-encryption-aws-kms-key-id':
             workspaceSearchMigrationJournalKey.keyArn,
+        },
+      },
+      effect: iam.Effect.DENY,
+      principals: [new iam.AnyPrincipal()],
+      resources: [journalObjectArn],
+    }),
+  );
+  workspaceSearchMigrationJournalBucket.addToResourcePolicy(
+    new iam.PolicyStatement({
+      sid: 'DenyShortJournalRetention',
+      actions: ['s3:PutObjectRetention'],
+      conditions: {
+        NumericLessThan: {
+          's3:object-lock-remaining-retention-days':
+            minimumJournalRetentionDays,
+        },
+      },
+      effect: iam.Effect.DENY,
+      principals: [new iam.AnyPrincipal()],
+      resources: [journalObjectArn],
+    }),
+  );
+  workspaceSearchMigrationJournalBucket.addToResourcePolicy(
+    new iam.PolicyStatement({
+      sid: 'DenyLongJournalRetention',
+      actions: ['s3:PutObjectRetention'],
+      conditions: {
+        NumericGreaterThan: {
+          's3:object-lock-remaining-retention-days':
+            maximumJournalRetentionDays,
         },
       },
       effect: iam.Effect.DENY,
@@ -328,6 +361,23 @@ export function buildMigrationStorage(
               's3:x-amz-server-side-encryption': 'aws:kms',
               's3:x-amz-server-side-encryption-aws-kms-key-id':
                 workspaceSearchMigrationJournalKey.keyArn,
+            },
+          },
+          resources: [journalObjectArn],
+        }),
+        new iam.PolicyStatement({
+          actions: ['s3:PutObjectRetention'],
+          conditions: {
+            NumericGreaterThanEquals: {
+              's3:object-lock-remaining-retention-days':
+                minimumJournalRetentionDays,
+            },
+            NumericLessThanEquals: {
+              's3:object-lock-remaining-retention-days':
+                maximumJournalRetentionDays,
+            },
+            StringEquals: {
+              's3:object-lock-mode': 'COMPLIANCE',
             },
           },
           resources: [journalObjectArn],
