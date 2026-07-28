@@ -126,6 +126,26 @@ import {
   prepareWorkspaceSearchMigrationSourceScanContext,
 } from './migration-source-scan-context'
 import {
+  createAwsWorkspaceSearchMigrationTargetArtifactPort,
+  type WorkspaceSearchMigrationTargetArtifactAwsTransport,
+} from './migration-target-artifact-aws'
+import {
+  type WorkspaceSearchMigrationPlanningTargetArtifactPage,
+  WORKSPACE_SEARCH_MIGRATION_TARGET_ARTIFACT_VERSION,
+} from './migration-target-artifact'
+import type {
+  WorkspaceSearchMigrationTargetEvidenceProgress,
+  WorkspaceSearchMigrationTargetEvidenceReplayResult,
+} from './migration-target-evidence'
+import {
+  createAwsWorkspaceSearchMigrationTargetEvidencePort,
+  type WorkspaceSearchMigrationPlanningTargetArtifactGateway,
+  type WorkspaceSearchMigrationTargetEvidenceAwsCommitRequest,
+  type WorkspaceSearchMigrationTargetEvidenceAwsPort,
+  type WorkspaceSearchMigrationTargetEvidenceAwsRequest,
+  type WorkspaceSearchMigrationTargetEvidenceAwsTransport,
+} from './migration-target-evidence-aws'
+import {
   normalizeWorkspaceSearchMigrationTargetScanOutput,
   type WorkspaceSearchMigrationTargetScanAwsTransport,
   type WorkspaceSearchMigrationTargetScanReadInput,
@@ -233,8 +253,8 @@ const MAXIMUM_PROFILE_ROLE_CHAIN_DEPTH = 8
 /** Hard deadline for one migration-state transaction SDK request. */
 const MIGRATION_STATE_TRANSACTION_TIMEOUT_MILLISECONDS = 5_000
 
-/** Hard deadline for one immutable source-artifact S3 SDK request. */
-const MIGRATION_SOURCE_ARTIFACT_TIMEOUT_MILLISECONDS = 10_000
+/** Hard deadline for one immutable migration-artifact S3 SDK request. */
+const MIGRATION_ARTIFACT_TIMEOUT_MILLISECONDS = 10_000
 
 /**
  * Fixed secret-free timeout emitted when a local state-write deadline aborts.
@@ -255,7 +275,7 @@ class MigrationStateTransactionTimeout extends Error {
 /**
  * Fixed secret-free timeout emitted when one artifact S3 request is aborted.
  */
-class MigrationSourceArtifactTimeout extends Error {
+class MigrationArtifactTimeout extends Error {
   /** Node.js timeout code recognized by Smithy's transient-error classifier. */
   readonly code = 'ETIMEDOUT'
 
@@ -263,7 +283,7 @@ class MigrationSourceArtifactTimeout extends Error {
    * Creates one classifier-compatible local artifact timeout.
    */
   constructor() {
-    super('Migration source-artifact request timed out.')
+    super('Migration artifact request timed out.')
     this.name = 'TimeoutError'
   }
 }
@@ -404,6 +424,17 @@ type ManagedSourceEvidenceAuthority<
   readonly request: Request
 }
 
+/**
+ * Measurement authority captured for one complete target-evidence operation.
+ */
+type ManagedTargetEvidenceAuthority<
+  Request extends WorkspaceSearchMigrationTargetEvidenceAwsRequest =
+    WorkspaceSearchMigrationTargetEvidenceAwsRequest,
+> = ManagedMigrationStateAuthority & {
+  /** Detached complete request that cannot change after authority capture. */
+  readonly request: Request
+}
+
 /** Explicit AWS SDK client configuration retained for construction tests. */
 export type WorkspaceSearchMigrationIdentityAwsSdkClientConfiguration = {
   /** Credentials resolved only from the explicitly selected shared profile. */
@@ -508,6 +539,36 @@ export interface WorkspaceSearchMigrationManagedAwsSession
   commitNextSourceEvidencePage(
     input: WorkspaceSearchMigrationSourceEvidenceAwsCommitRequest,
   ): Promise<WorkspaceSearchMigrationSourceEvidenceProgress>
+
+  /**
+   * Reads one durable pre-plan target evidence head.
+   *
+   * @param input - Exact measured target evidence-chain request.
+   * @returns Current durable or canonical initial target progress.
+   */
+  readTargetEvidenceProgress(
+    input: WorkspaceSearchMigrationTargetEvidenceAwsRequest,
+  ): Promise<WorkspaceSearchMigrationTargetEvidenceProgress>
+
+  /**
+   * Reads and globally validates every target page at one captured durable head.
+   *
+   * @param input - Exact measured target evidence-chain request.
+   * @returns Replayed target-row evidence and its exact captured progress.
+   */
+  readCommittedTargetEvidence(
+    input: WorkspaceSearchMigrationTargetEvidenceAwsRequest,
+  ): Promise<WorkspaceSearchMigrationTargetEvidenceReplayResult>
+
+  /**
+   * Scans and atomically commits one next pre-plan target evidence page.
+   *
+   * @param input - Exact measured target evidence-chain request and authority.
+   * @returns Exact committed successor or terminal target progress.
+   */
+  commitNextTargetEvidencePage(
+    input: WorkspaceSearchMigrationTargetEvidenceAwsCommitRequest,
+  ): Promise<WorkspaceSearchMigrationTargetEvidenceProgress>
 }
 
 /** Narrow transport containing only managed identity reads. */
@@ -605,6 +666,8 @@ export interface WorkspaceSearchMigrationManagedAwsTransport
     WorkspaceSearchMigrationSourceArtifactAwsTransport,
     WorkspaceSearchMigrationSourceScanAwsTransport,
     WorkspaceSearchMigrationSourceEvidenceAwsTransport,
+    WorkspaceSearchMigrationTargetArtifactAwsTransport,
+    WorkspaceSearchMigrationTargetEvidenceAwsTransport,
     WorkspaceSearchMigrationTargetScanAwsTransport {}
 
 /**
@@ -763,6 +826,42 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
   }
 
   /**
+   * Sends one strongly consistent target-evidence point read.
+   *
+   * @param command - Exact adapter-owned GetItem command.
+   * @returns Raw low-level DynamoDB item response.
+   */
+  getTargetEvidence(
+    command: GetItemCommand,
+  ): Promise<GetItemCommandOutput> {
+    return this.dynamodbClient.send(command)
+  }
+
+  /**
+   * Defers target and state incarnation guards to the managed session wrapper.
+   *
+   * @returns An already completed low-level preparation.
+   */
+  prepareTargetEvidenceWrite(): Promise<void> {
+    return Promise.resolve()
+  }
+
+  /**
+   * Sends one atomic immutable target page and CAS-head evidence commit.
+   *
+   * The abort deadline starts only when the SDK send begins, after target and
+   * state incarnation preparation has completed.
+   *
+   * @param command - Exact adapter-owned TransactWriteItems command.
+   * @returns Raw low-level DynamoDB transaction response.
+   */
+  transactWriteTargetEvidence(
+    command: TransactWriteItemsCommand,
+  ): Promise<TransactWriteItemsCommandOutput> {
+    return this.sendMigrationStateTransaction(command)
+  }
+
+  /**
    * Sends one strongly consistent pre-plan authority point read.
    *
    * @param command - Exact adapter-owned GetItem command.
@@ -835,7 +934,7 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
   putSourceArtifact(
     command: PutObjectCommand,
   ): Promise<PutObjectCommandOutput> {
-    return this.sendMigrationSourceArtifactRequest(
+    return this.sendMigrationArtifactRequest(
       (abortSignal) => this.s3Client.send(command, { abortSignal }),
     )
   }
@@ -849,7 +948,7 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
   headSourceArtifact(
     command: HeadObjectCommand,
   ): Promise<HeadObjectCommandOutput> {
-    return this.sendMigrationSourceArtifactRequest(
+    return this.sendMigrationArtifactRequest(
       (abortSignal) => this.s3Client.send(command, { abortSignal }),
     )
   }
@@ -863,30 +962,72 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
   getSourceArtifact(
     command: GetObjectCommand,
   ): Promise<GetObjectCommandOutput> {
-    return this.sendMigrationSourceArtifactRequest(
+    return this.sendMigrationArtifactRequest(
       (abortSignal) => this.s3Client.send(command, { abortSignal }),
     )
   }
 
   /**
-   * Sends one source-artifact S3 request with a bounded local SDK deadline.
+   * Sends one conditional immutable target-artifact upload.
+   *
+   * @param command - Exact adapter-owned PutObject command.
+   * @returns Raw S3 upload response.
+   */
+  putTargetArtifact(
+    command: PutObjectCommand,
+  ): Promise<PutObjectCommandOutput> {
+    return this.sendMigrationArtifactRequest(
+      (abortSignal) => this.s3Client.send(command, { abortSignal }),
+    )
+  }
+
+  /**
+   * Reads exact target-artifact metadata for reconciliation.
+   *
+   * @param command - Exact adapter-owned HeadObject command.
+   * @returns Raw S3 metadata response.
+   */
+  headTargetArtifact(
+    command: HeadObjectCommand,
+  ): Promise<HeadObjectCommandOutput> {
+    return this.sendMigrationArtifactRequest(
+      (abortSignal) => this.s3Client.send(command, { abortSignal }),
+    )
+  }
+
+  /**
+   * Reads one exact target-artifact object version.
+   *
+   * @param command - Exact adapter-owned GetObject command.
+   * @returns Raw S3 object response.
+   */
+  getTargetArtifact(
+    command: GetObjectCommand,
+  ): Promise<GetObjectCommandOutput> {
+    return this.sendMigrationArtifactRequest(
+      (abortSignal) => this.s3Client.send(command, { abortSignal }),
+    )
+  }
+
+  /**
+   * Sends one migration-artifact S3 request with a bounded local SDK deadline.
    *
    * @param operation - Exact request using the adapter-owned abort signal.
    * @returns Raw successful S3 response.
    */
-  private async sendMigrationSourceArtifactRequest<Result>(
+  private async sendMigrationArtifactRequest<Result>(
     operation: (abortSignal: AbortSignal) => Promise<Result>,
   ): Promise<Result> {
     const abortController = new AbortController()
     const timeout = setTimeout(
       () => abortController.abort(),
-      MIGRATION_SOURCE_ARTIFACT_TIMEOUT_MILLISECONDS,
+      MIGRATION_ARTIFACT_TIMEOUT_MILLISECONDS,
     )
     try {
       return await operation(abortController.signal)
     } catch (error: unknown) {
       if (abortController.signal.aborted) {
-        throw new MigrationSourceArtifactTimeout()
+        throw new MigrationArtifactTimeout()
       }
       throw error
     } finally {
@@ -1922,6 +2063,339 @@ class AwsWorkspaceSearchMigrationIdentityPort
     return createAwsWorkspaceSearchMigrationSourceEvidencePort({
       stateTable: authority.stateTable,
       scanner,
+      planningArtifactGateway,
+      transport,
+      clock: this.prePlanAuthorityClock,
+    })
+  }
+
+  /**
+   * Reads one durable target-evidence head through the current measurement.
+   *
+   * @param input - Exact measured target evidence-chain request.
+   * @returns Current durable or canonical initial target progress.
+   */
+  async readTargetEvidenceProgress(
+    input: WorkspaceSearchMigrationTargetEvidenceAwsRequest,
+  ): Promise<WorkspaceSearchMigrationTargetEvidenceProgress> {
+    return this.runTargetEvidenceOperation(
+      input,
+      (adapter, request) => adapter.readProgress(request),
+    )
+  }
+
+  /**
+   * Reads and globally validates all target pages at one captured durable head.
+   *
+   * @param input - Exact measured target evidence-chain request.
+   * @returns Replayed target-row evidence and captured progress.
+   */
+  async readCommittedTargetEvidence(
+    input: WorkspaceSearchMigrationTargetEvidenceAwsRequest,
+  ): Promise<WorkspaceSearchMigrationTargetEvidenceReplayResult> {
+    return this.runTargetEvidenceOperation(
+      input,
+      (adapter, request) => adapter.readCommittedEvidence(request),
+    )
+  }
+
+  /**
+   * Scans and atomically commits one next target-evidence page.
+   *
+   * @param input - Exact measured target evidence-chain request and authority.
+   * @returns Exact committed successor or terminal target progress.
+   */
+  async commitNextTargetEvidencePage(
+    input: WorkspaceSearchMigrationTargetEvidenceAwsCommitRequest,
+  ): Promise<WorkspaceSearchMigrationTargetEvidenceProgress> {
+    return this.runTargetEvidenceOperation(
+      input,
+      (adapter, request) => adapter.commitNextPage(request),
+    )
+  }
+
+  /**
+   * Runs one complete managed target-evidence operation against the exact
+   * measured migration-state table incarnation.
+   *
+   * @param input - Exact measured target evidence-chain request.
+   * @param operation - Adapter operation over the detached captured request.
+   * @returns Detached result only while state identity stays current.
+   */
+  private async runTargetEvidenceOperation<
+    Request extends WorkspaceSearchMigrationTargetEvidenceAwsRequest,
+    Result,
+  >(
+    input: Request,
+    operation: (
+      adapter: WorkspaceSearchMigrationTargetEvidenceAwsPort,
+      request: Request,
+    ) => Promise<Result>,
+  ): Promise<Result> {
+    return runManagedTargetEvidenceAwsBoundary(async () => {
+      const authority = this.captureTargetEvidenceAuthority(input)
+      await this.requireCurrentMigrationStateTableIncarnation(authority)
+      const adapter = this.createManagedTargetEvidenceAdapter(authority)
+      let result: Result
+      try {
+        result = await operation(adapter, authority.request)
+      } catch (error: unknown) {
+        this.requireMeasurementGeneration(
+          authority.generation,
+          authority.configurationHash,
+        )
+        await this.requireCurrentMigrationStateTableIncarnation(authority)
+        throw error
+      }
+      this.requireMeasurementGeneration(
+        authority.generation,
+        authority.configurationHash,
+      )
+      await this.requireCurrentMigrationStateTableIncarnation(authority)
+      this.requireMeasurementGeneration(
+        authority.generation,
+        authority.configurationHash,
+      )
+      return result
+    })
+  }
+
+  /**
+   * Captures and validates the current measurement for one target-evidence call.
+   *
+   * @param input - Exact measured target evidence-chain request.
+   * @returns Generation and configuration guarded around every managed I/O.
+   */
+  private captureTargetEvidenceAuthority<
+    Request extends WorkspaceSearchMigrationTargetEvidenceAwsRequest,
+  >(
+    input: Request,
+  ): ManagedTargetEvidenceAuthority<Request> {
+    this.requireOpen()
+    const request = structuredClone(input)
+    const authority = this.captureManagedMigrationStateAuthority()
+    if (request.configurationHash !== authority.configurationHash) {
+      throw createManagedTargetEvidenceFailure(
+        'CONFIGURATION_HASH_MISMATCH',
+      )
+    }
+    this.requireMeasuredConfigurationBinding(request.configuration)
+    return {
+      ...authority,
+      request,
+    }
+  }
+
+  /**
+   * Creates one ephemeral target-evidence adapter guarded by captured authority.
+   *
+   * @param authority - Current generation and configuration authorization.
+   * @returns Adapter composed from one private raw-page gateway and AWS clients.
+   */
+  private createManagedTargetEvidenceAdapter(
+    authority: ManagedTargetEvidenceAuthority,
+  ): WorkspaceSearchMigrationTargetEvidenceAwsPort {
+    let writePrepared = false
+    const targetArtifactTransport:
+      WorkspaceSearchMigrationTargetArtifactAwsTransport = {
+        putTargetArtifact: (command) =>
+          this.runManagedMigrationStateIo(
+            authority,
+            () => this.transport.putTargetArtifact(command),
+          ),
+        headTargetArtifact: (command) =>
+          this.runManagedMigrationStateIo(
+            authority,
+            () => this.transport.headTargetArtifact(command),
+          ),
+        getTargetArtifact: (command) =>
+          this.runManagedMigrationStateIo(
+            authority,
+            () => this.transport.getTargetArtifact(command),
+          ),
+      }
+    const targetArtifactPort =
+      createAwsWorkspaceSearchMigrationTargetArtifactPort({
+        configuration: authority.request.configuration,
+        configurationHash: authority.configurationHash,
+        transport: targetArtifactTransport,
+      })
+    const planningArtifactGateway:
+      WorkspaceSearchMigrationPlanningTargetArtifactGateway = {
+        captureAndStorePlanningPage: async (input) => {
+          const captured = await this.runManagedMigrationStateIo(
+            authority,
+            () => this.captureTargetPage({
+              configuration: input.configuration,
+              configurationHash: input.configurationHash,
+              previousCheckpoint: input.previousCheckpoint,
+            }),
+          )
+          const targetTable =
+            input.configuration.tables['workspace-search']
+          const stateTable =
+            input.configuration.tables['migration-state']
+          if (targetTable === undefined || stateTable === undefined) {
+            throw createManagedTargetEvidenceFailure(
+              'IDENTITY_MISMATCH',
+            )
+          }
+          const expectedPage:
+            WorkspaceSearchMigrationPlanningTargetArtifactPage = {
+              kind: 'workspace-search-planning-target-artifact-page',
+              artifactVersion:
+                WORKSPACE_SEARCH_MIGRATION_TARGET_ARTIFACT_VERSION,
+              migrationId: input.configuration.migrationId,
+              migrationVersion: input.configuration.migrationVersion,
+              purpose: 'planning',
+              runId: input.runId,
+              configurationHash: input.configurationHash,
+              targetTable: {
+                tableName: targetTable.tableName,
+                tableArn: targetTable.tableArn,
+                tableId: targetTable.tableId,
+                creationTime: targetTable.creationTime,
+              },
+              stateTable: {
+                tableName: stateTable.tableName,
+                tableArn: stateTable.tableArn,
+                tableId: stateTable.tableId,
+                creationTime: stateTable.creationTime,
+              },
+              pageSequence: input.pageSequence,
+              previousEvidenceDigest: input.previousEvidenceDigest,
+              previousCheckpointDigest:
+                input.previousCheckpointDigest,
+              planningAuthority: {
+                ownerId: input.planningAuthority.ownerId,
+                fenceToken: input.planningAuthority.fenceToken,
+                maintenanceEvidencePointerRevision:
+                  input.planningAuthority
+                    .maintenanceEvidencePointerRevision,
+                maintenanceEvidenceReceiptDigest:
+                  input.planningAuthority
+                    .maintenanceEvidenceReceiptDigest,
+              },
+              items: captured.page.items,
+            }
+          const targetArtifacts =
+            await this.runManagedMigrationStateIo(
+              authority,
+              () =>
+                targetArtifactPort.writePlanningTargetArtifactPage({
+                  expectedPage,
+                }),
+            )
+          return {
+            pageResult: captured.pageResult,
+            targetArtifacts,
+          }
+        },
+        readVerifiedPlanningPage: async (input) => {
+          const targetTable =
+            input.configuration.tables['workspace-search']
+          const stateTable =
+            input.configuration.tables['migration-state']
+          if (targetTable === undefined || stateTable === undefined) {
+            throw createManagedTargetEvidenceFailure(
+              'IDENTITY_MISMATCH',
+            )
+          }
+          const page = await this.runManagedMigrationStateIo(
+            authority,
+            () =>
+              targetArtifactPort.readPlanningTargetArtifactPage({
+                expectedPage: {
+                  runId: input.runId,
+                  configurationHash: input.configurationHash,
+                  targetTable: {
+                    tableName: targetTable.tableName,
+                    tableArn: targetTable.tableArn,
+                    tableId: targetTable.tableId,
+                    creationTime: targetTable.creationTime,
+                  },
+                  stateTable: {
+                    tableName: stateTable.tableName,
+                    tableArn: stateTable.tableArn,
+                    tableId: stateTable.tableId,
+                    creationTime: stateTable.creationTime,
+                  },
+                  pageSequence: input.pageSequence,
+                  previousEvidenceDigest:
+                    input.previousEvidenceDigest,
+                  previousCheckpointDigest:
+                    input.previousCheckpointDigest,
+                  planningAuthority: {
+                    ownerId: input.planningAuthority.ownerId,
+                    fenceToken: input.planningAuthority.fenceToken,
+                    maintenanceEvidencePointerRevision:
+                      input.planningAuthority
+                        .maintenanceEvidencePointerRevision,
+                    maintenanceEvidenceReceiptDigest:
+                      input.planningAuthority
+                        .maintenanceEvidenceReceiptDigest,
+                  },
+                },
+                references: input.targetArtifacts,
+              }),
+          )
+          return {
+            items: page.items,
+          }
+        },
+      }
+    const transport: WorkspaceSearchMigrationTargetEvidenceAwsTransport = {
+      getTargetEvidence: (command) =>
+        this.runManagedMigrationStateIo(
+          authority,
+          () => this.transport.getTargetEvidence(command),
+        ),
+      prepareTargetEvidenceWrite: async () => {
+        if (writePrepared) {
+          throw createManagedTargetEvidenceFailure('INVALID_STATE')
+        }
+        const targetTable =
+          authority.request.configuration.tables['workspace-search']
+        if (targetTable === undefined) {
+          throw createManagedTargetEvidenceFailure(
+            'IDENTITY_MISMATCH',
+          )
+        }
+        try {
+          await this.requireCurrentTargetTableIncarnation(
+            targetTable,
+            authority.generation,
+            authority.configurationHash,
+          )
+        } catch (error: unknown) {
+          throw createManagedTargetEvidenceFailure(
+            readTargetScanAwsFailureCode(error),
+          )
+        }
+        try {
+          await this.requireCurrentMigrationStateTableIncarnation(
+            authority,
+          )
+        } catch (error: unknown) {
+          throw createManagedTargetEvidenceFailure(
+            readManagedMigrationStateFailureCode(error),
+          )
+        }
+        writePrepared = true
+      },
+      transactWriteTargetEvidence: (command) => {
+        if (!writePrepared) {
+          throw createManagedTargetEvidenceFailure('INVALID_STATE')
+        }
+        writePrepared = false
+        return this.runManagedPreparedMigrationStateWrite(
+          authority,
+          () => this.transport.transactWriteTargetEvidence(command),
+        )
+      },
+    }
+    return createAwsWorkspaceSearchMigrationTargetEvidencePort({
+      stateTable: authority.stateTable,
       planningArtifactGateway,
       transport,
       clock: this.prePlanAuthorityClock,
@@ -3114,6 +3588,38 @@ async function runManagedSourceEvidenceAwsBoundary<Result>(
       `Workspace Search source evidence stopped safely (${code}).`,
     )
   }
+}
+
+/**
+ * Runs one managed target-evidence call behind a raw-error replacement boundary.
+ *
+ * @param operation - Captured-authority validation and adapter operation.
+ * @returns Detached progress or replay output from the measured adapter.
+ */
+async function runManagedTargetEvidenceAwsBoundary<Result>(
+  operation: () => Promise<Result>,
+): Promise<Result> {
+  try {
+    return await operation()
+  } catch (error: unknown) {
+    const code = readManagedMigrationStateFailureCode(error)
+    throw createManagedTargetEvidenceFailure(code)
+  }
+}
+
+/**
+ * Creates one fixed public failure for managed target-evidence operations.
+ *
+ * @param code - Trusted target, artifact, or migration-state classification.
+ * @returns Secret-free target-evidence failure accepted by adapter boundaries.
+ */
+function createManagedTargetEvidenceFailure(
+  code: WorkspaceSearchMigrationFailureCode,
+): WorkspaceSearchMigrationFailure {
+  return new WorkspaceSearchMigrationFailure(
+    code,
+    `Workspace Search target evidence stopped safely (${code}).`,
+  )
 }
 
 /**
