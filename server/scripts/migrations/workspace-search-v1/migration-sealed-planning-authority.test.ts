@@ -19,6 +19,13 @@ import {
 import {
   serializeWorkspaceSearchPlanSeal,
 } from './migration-artifacts'
+import {
+  createWorkspaceSearchMigrationPlanningProvenanceDirectBuilder,
+  replayWorkspaceSearchMigrationPlanningProvenanceManifest,
+  type WorkspaceSearchMigrationPlanningProvenanceStoredManifestPage,
+  WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_TOTAL_SEGMENT_BYTES,
+  WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_SEGMENT_MAX_BYTES,
+} from './migration-planning-provenance-manifest'
 import type {
   WorkspaceSearchMigrationHistoricalMaintenanceEvidenceBinding,
   WorkspaceSearchMigrationPrePlanAuthority,
@@ -1018,7 +1025,7 @@ describe('Workspace Search sealed planning authority', () => {
   )
 
   test(
-    'rejects a valid witness set whose complete canonical artifact exceeds 64 MiB',
+    'uses direct manifest planning when the legacy artifact exceeds 64 MiB',
     () => {
       const fixture = createSealedPlanningFixture()
       const sourceBase64Characters = workspaceSearchMigrationSourceNames
@@ -1050,19 +1057,168 @@ describe('Workspace Search sealed planning authority', () => {
           totalBase64Characters,
       ).toBeLessThan(64 * 1024)
 
+      const historicalReceiptBindings = [
+        fixture.historicalReceiptBinding,
+      ]
       expectSealedAuthorityFailure(() =>
         createWorkspaceSearchMigrationPlanningProvenanceArtifact({
           sourceEvidencePageBytes:
             fixture.sourceEvidencePageBytes,
           targetEvidencePageBytes:
             oversizedTargetEvidence.pageBytes,
-          historicalReceiptBindings: [
-            fixture.historicalReceiptBinding,
-          ],
+          historicalReceiptBindings,
         })
       )
+
+      const objectKeyPrefix =
+        `workspace-search/migrations/${runId}/provenance`
+      const directBuilder =
+        createWorkspaceSearchMigrationPlanningProvenanceDirectBuilder({
+          sourceEvidencePageBytes:
+            fixture.sourceEvidencePageBytes,
+          targetEvidencePageBytes:
+            oversizedTargetEvidence.pageBytes,
+          historicalReceiptBindings,
+          objectKeyPrefix,
+        })
+      const totalSegmentBytes =
+        directBuilder.encodedSegments.reduce(
+          (total, segment) => total + segment.byteLength,
+          0,
+        )
+      expect(totalSegmentBytes).toBeGreaterThan(
+        WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_ARTIFACT_MAX_BYTES,
+      )
+      expect(totalSegmentBytes).toBeLessThanOrEqual(
+        WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_TOTAL_SEGMENT_BYTES,
+      )
+      expect(
+        directBuilder.encodedSegments.every(
+          ({ byteLength }) =>
+            byteLength <=
+              WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_SEGMENT_MAX_BYTES,
+        ),
+      ).toBe(true)
+
+      const evidencePageCount =
+        workspaceSearchMigrationSourceNames.reduce(
+          (total, source) =>
+            total +
+            fixture.sourceEvidencePageBytes[source].length,
+          oversizedTargetEvidence.pageBytes.length,
+        )
+      const sourceOperationCount =
+        fixture.provenanceArtifact.sourceOperationCount
+      const orphanOperationCount = 0
+      const planOperationCount =
+        sourceOperationCount + orphanOperationCount
+      expect(
+        directBuilder.encodedSegments.every(({ segment }) =>
+          segment.summary.evidencePageCount === evidencePageCount &&
+          segment.summary.historicalReceiptCount ===
+            historicalReceiptBindings.length &&
+          segment.summary.sourceOperationCount ===
+            sourceOperationCount &&
+          segment.summary.orphanOperationCount ===
+            orphanOperationCount &&
+          segment.summary.planOperationCount ===
+            planOperationCount
+        ),
+      ).toBe(true)
+
+      const retainUntil = '2026-08-28T00:00:00.000Z'
+      const storedSegments = directBuilder.encodedSegments.map(
+        (encoded, index) => ({
+          encoded,
+          reference: {
+            objectKey:
+              `${objectKeyPrefix}/segments/${encoded.contentDigest}.artifact`,
+            versionId: `segment-version-${index}`,
+            contentDigest: encoded.contentDigest,
+            byteLength: encoded.byteLength,
+            retainUntil,
+          },
+        }),
+      )
+      const manifestPageBuilder =
+        directBuilder.createManifestPageBuilder({
+          storedSegments,
+        })
+      const storedManifestPages:
+        WorkspaceSearchMigrationPlanningProvenanceStoredManifestPage[] = []
+      let previousStoredManifestPage:
+        WorkspaceSearchMigrationPlanningProvenanceStoredManifestPage | null =
+          null
+      for (
+        let pageIndex = 0;
+        pageIndex < manifestPageBuilder.pageCount;
+        pageIndex += 1
+      ) {
+        const encoded =
+          manifestPageBuilder.createNextPage(
+            previousStoredManifestPage,
+          )
+        const storedManifestPage = {
+          encoded,
+          reference: {
+            objectKey:
+              `${objectKeyPrefix}/manifest-pages/${encoded.contentDigest}.artifact`,
+            versionId: `manifest-page-version-${pageIndex}`,
+            contentDigest: encoded.contentDigest,
+            byteLength: encoded.byteLength,
+            retainUntil,
+          },
+        }
+        storedManifestPages.push(storedManifestPage)
+        previousStoredManifestPage = storedManifestPage
+      }
+      const manifestHead = directBuilder.createManifestHead({
+        storedManifestPages,
+      })
+      expect(manifestHead.segmentCount).toBe(
+        directBuilder.encodedSegments.length,
+      )
+      expect(manifestHead.summary.evidencePageCount).toBe(
+        evidencePageCount,
+      )
+      expect(manifestHead.summary.historicalReceiptCount).toBe(
+        historicalReceiptBindings.length,
+      )
+
+      const replayed =
+        replayWorkspaceSearchMigrationPlanningProvenanceManifest({
+          head: manifestHead,
+          manifestPages: storedManifestPages.map(
+            ({ encoded, reference }) => ({
+              bytes: encoded.bytes,
+              reference,
+            }),
+          ),
+          segments: storedSegments.map(
+            ({ encoded, reference }) => ({
+              bytes: encoded.bytes,
+              reference,
+            }),
+          ),
+        })
+      for (const source of workspaceSearchMigrationSourceNames) {
+        expectEvidenceWitnessesToMatchRawBytes(
+          replayed.evidencePageWitnesses.sources[source],
+          fixture.sourceEvidencePageBytes[source],
+        )
+      }
+      expectEvidenceWitnessesToMatchRawBytes(
+        replayed.evidencePageWitnesses.target,
+        oversizedTargetEvidence.pageBytes,
+      )
+      expect(replayed.historicalReceipts).toEqual([{
+        ownerId: fixture.historicalReceiptBinding.ownerId,
+        receiptDigest:
+          fixture.historicalReceiptBinding.receiptDigest,
+        receipt: fixture.historicalReceiptBinding.receipt,
+      }])
     },
-    60_000,
+    120_000,
   )
 
   test(
@@ -1782,6 +1938,28 @@ function createTerminalTargetEvidence(
         initial,
         page,
       ),
+  }
+}
+
+/**
+ * Compares replayed Base64 witnesses with independently encoded raw pages.
+ *
+ * @param witnesses - Replayed canonical Base64 witnesses.
+ * @param pageBytes - Original canonical evidence-page bytes.
+ */
+function expectEvidenceWitnessesToMatchRawBytes(
+  witnesses: readonly string[],
+  pageBytes: readonly Uint8Array[],
+): void {
+  expect(witnesses).toHaveLength(pageBytes.length)
+  for (let index = 0; index < pageBytes.length; index += 1) {
+    const bytes = pageBytes[index]
+    if (bytes === undefined) {
+      throw new Error('Expected one canonical evidence page.')
+    }
+    expect(witnesses[index]).toBe(
+      Buffer.from(bytes).toString('base64'),
+    )
   }
 }
 

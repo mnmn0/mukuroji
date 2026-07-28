@@ -24,6 +24,12 @@ import type {
   WorkspaceSearchMigrationPlanningEvidenceChainRoot,
 } from './migration-planning-join'
 import type {
+  WorkspaceSearchMigrationHistoricalMaintenanceEvidenceBinding,
+} from './migration-pre-plan-authority-aws'
+import {
+  validateWorkspaceSearchMaintenanceEvidenceReceipt,
+} from './migration-state-machine'
+import type {
   WorkspaceSearchMigrationPlanningEvidencePageWitnesses,
   WorkspaceSearchMigrationPlanningProvenanceArtifact,
   WorkspaceSearchMigrationPlanningSourceEvidencePage,
@@ -35,6 +41,7 @@ import {
   createWorkspaceSearchMigrationSourceEvidencePageDigest,
   parseWorkspaceSearchMigrationSourceEvidencePage,
   replayWorkspaceSearchMigrationSourceEvidencePages,
+  WORKSPACE_SEARCH_MIGRATION_SOURCE_EVIDENCE_MAX_BYTES,
 } from './migration-source-evidence'
 import {
   createWorkspaceSearchMigrationTargetCheckpointDigest,
@@ -42,6 +49,7 @@ import {
   parseWorkspaceSearchMigrationTargetEvidencePage,
   replayWorkspaceSearchMigrationTargetEvidencePages,
   type WorkspaceSearchMigrationTargetEvidencePage,
+  WORKSPACE_SEARCH_MIGRATION_TARGET_EVIDENCE_MAX_BYTES,
 } from './migration-target-evidence'
 import {
   hasCanonicalDenseArrayShape,
@@ -415,6 +423,84 @@ export type CreateWorkspaceSearchMigrationPlanningProvenanceSegmentsInput = {
 }
 
 /**
+ * Raw canonical evidence and receipt bindings accepted by the direct manifest
+ * path without constructing the legacy 64 MiB full-artifact envelope.
+ */
+export type CreateWorkspaceSearchMigrationPlanningProvenanceDirectBuilderInput =
+  {
+    /** Four complete canonical planning-v3 source evidence chains. */
+    readonly sourceEvidencePageBytes: Readonly<
+      Record<
+        WorkspaceSearchMigrationSourceName,
+        readonly Uint8Array[]
+      >
+    >
+    /** Complete canonical planning-v1 target evidence chain. */
+    readonly targetEvidencePageBytes: readonly Uint8Array[]
+    /** Durable historical bindings ordered by derived authority transition. */
+    readonly historicalReceiptBindings:
+      readonly WorkspaceSearchMigrationHistoricalMaintenanceEvidenceBinding[]
+    /** Canonical run-scoped prefix used by every immutable manifest object. */
+    readonly objectKeyPrefix: string
+    /** Optional smaller segment ceiling used by constrained storage or tests. */
+    readonly maximumSegmentBytes?: number
+    /** Optional smaller reject-only ceiling for all canonical segment bytes. */
+    readonly maximumTotalSegmentBytes?: number
+  }
+
+/**
+ * Stored-segment input accepted by a direct builder after preflight succeeds.
+ */
+export type CreateWorkspaceSearchMigrationPlanningProvenanceDirectManifestPageBuilderInput =
+  {
+    /** Complete ordered exact-version envelopes for every prepared segment. */
+    readonly storedSegments:
+      readonly WorkspaceSearchMigrationPlanningProvenanceStoredSegment[]
+    /** Optional smaller manifest-page ceiling. */
+    readonly maximumManifestPageBytes?: number
+  }
+
+/**
+ * Stored-page input accepted by a direct builder after all pages are immutable.
+ */
+export type CreateWorkspaceSearchMigrationPlanningProvenanceDirectManifestHeadInput =
+  {
+    /** Complete ordered exact-version envelopes for every manifest page. */
+    readonly storedManifestPages:
+      readonly WorkspaceSearchMigrationPlanningProvenanceStoredManifestPage[]
+  }
+
+/**
+ * Staged direct builder that keeps its verified semantic summary private while
+ * the caller stores data segments, manifest pages, and the compact head.
+ */
+export type WorkspaceSearchMigrationPlanningProvenanceDirectBuilder = {
+  /** Complete preflighted encoded segments in immutable dependency order. */
+  readonly encodedSegments:
+    readonly WorkspaceSearchMigrationPlanningProvenanceEncodedSegment[]
+  /**
+   * Creates a page builder after validating every stored segment envelope.
+   *
+   * @param input - Complete stored segments and optional page ceiling.
+   * @returns Stateful predecessor-linked manifest-page builder.
+   */
+  readonly createManifestPageBuilder: (
+    input:
+      CreateWorkspaceSearchMigrationPlanningProvenanceDirectManifestPageBuilderInput,
+  ) => WorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder
+  /**
+   * Creates the compact head after validating every stored manifest page.
+   *
+   * @param input - Complete ordered stored manifest pages.
+   * @returns Detached strict compact provenance head.
+   */
+  readonly createManifestHead: (
+    input:
+      CreateWorkspaceSearchMigrationPlanningProvenanceDirectManifestHeadInput,
+  ) => WorkspaceSearchMigrationPlanningProvenanceManifestHead
+}
+
+/**
  * Manifest-page construction input after every data segment is immutable.
  */
 export type CreateWorkspaceSearchMigrationPlanningProvenanceManifestPageBuilderInput = {
@@ -511,6 +597,95 @@ export function createWorkspaceSearchMigrationPlanningProvenanceObjectKey(
 }
 
 /**
+ * Preflights and stages a provenance manifest directly from raw canonical
+ * evidence and durable receipt bindings.
+ *
+ * This path deliberately bypasses the compatibility full-artifact envelope,
+ * while preserving identical version-one segment, page, and head bytes for
+ * inputs that fit both boundaries.
+ *
+ * @param input - Raw evidence, exact receipt bindings, prefix, and limits.
+ * @returns Staged builder with every segment byte validated before storage I/O.
+ */
+export function createWorkspaceSearchMigrationPlanningProvenanceDirectBuilder(
+  input:
+    CreateWorkspaceSearchMigrationPlanningProvenanceDirectBuilderInput,
+): WorkspaceSearchMigrationPlanningProvenanceDirectBuilder {
+  return runManifestBoundary(() => {
+    const inputRecord = requireRecord(input)
+    requireExactOptionalKeys(inputRecord, [
+      'historicalReceiptBindings',
+      'maximumSegmentBytes',
+      'maximumTotalSegmentBytes',
+      'objectKeyPrefix',
+      'sourceEvidencePageBytes',
+      'targetEvidencePageBytes',
+    ], [
+      'historicalReceiptBindings',
+      'objectKeyPrefix',
+      'sourceEvidencePageBytes',
+      'targetEvidencePageBytes',
+    ])
+    const maximumSegmentBytes = readOptionalMaximumBytes(
+      readOwnOptional(inputRecord, 'maximumSegmentBytes'),
+      WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_SEGMENT_MAX_BYTES,
+    )
+    const maximumTotalSegmentBytes = readOptionalMaximumBytes(
+      readOwnOptional(inputRecord, 'maximumTotalSegmentBytes'),
+      WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_TOTAL_SEGMENT_BYTES,
+    )
+    const objectKeyPrefix = readObjectKeyPrefix(
+      readOwn(inputRecord, 'objectKeyPrefix'),
+    )
+    const material = readDirectPlanningProvenanceMaterial(
+      readOwn(inputRecord, 'sourceEvidencePageBytes'),
+      readOwn(inputRecord, 'targetEvidencePageBytes'),
+      readOwn(inputRecord, 'historicalReceiptBindings'),
+      maximumTotalSegmentBytes,
+    )
+    const summary = createManifestSummary(material, objectKeyPrefix)
+    const encodedSegments = createEncodedProvenanceSegments(
+      material,
+      summary,
+      maximumSegmentBytes,
+      maximumTotalSegmentBytes,
+    )
+    const capturedSummary = readSummary(summary)
+    return {
+      encodedSegments,
+      createManifestPageBuilder: (builderInput) =>
+        runManifestBoundary(() => {
+          const builderRecord = requireRecord(builderInput)
+          requireExactOptionalKeys(builderRecord, [
+            'maximumManifestPageBytes',
+            'storedSegments',
+          ], ['storedSegments'])
+          return createManifestPageBuilderFromSummary(
+            capturedSummary,
+            readOwn(builderRecord, 'storedSegments'),
+            readOptionalMaximumBytes(
+              readOwnOptional(
+                builderRecord,
+                'maximumManifestPageBytes',
+              ),
+              WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MANIFEST_PAGE_MAX_BYTES,
+            ),
+          )
+        }),
+      createManifestHead: (headInput) =>
+        runManifestBoundary(() => {
+          const headRecord = requireRecord(headInput)
+          requireExactKeys(headRecord, ['storedManifestPages'])
+          return createManifestHeadFromSummary(
+            capturedSummary,
+            readOwn(headRecord, 'storedManifestPages'),
+          )
+        }),
+    }
+  })
+}
+
+/**
  * Deterministically packs a previously verified full provenance artifact into
  * bounded complete-entry data segments.
  *
@@ -546,75 +721,12 @@ export function createWorkspaceSearchMigrationPlanningProvenanceSegments(
       readOwn(inputRecord, 'objectKeyPrefix'),
     )
     const summary = createManifestSummary(artifact, objectKeyPrefix)
-    const evidenceEntries = createEvidenceEntries(artifact)
-    const receiptEntries = createReceiptEntries(artifact)
-    const evidenceRanges = packSegmentRanges(
+    return createEncodedProvenanceSegments(
+      artifact,
       summary,
-      'evidence-pages',
-      evidenceEntries,
       maximumSegmentBytes,
+      maximumTotalSegmentBytes,
     )
-    const receiptRanges = packSegmentRanges(
-      summary,
-      'historical-receipts',
-      receiptEntries,
-      maximumSegmentBytes,
-    )
-    const segmentCount = evidenceRanges.length + receiptRanges.length
-    if (
-      segmentCount === 0 ||
-      segmentCount >
-        WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_SEGMENTS
-    ) {
-      return failManifest()
-    }
-    const encoded: WorkspaceSearchMigrationPlanningProvenanceEncodedSegment[] =
-      []
-    let totalSegmentBytes = 0
-    for (const range of [...evidenceRanges, ...receiptRanges]) {
-      const sourceEntries = range.role === 'evidence-pages'
-        ? evidenceEntries
-        : receiptEntries
-      const entries = sourceEntries.slice(
-        range.entryStartIndex,
-        range.entryStartIndex + range.entryCount,
-      )
-      const segmentFields = {
-        kind: 'workspace-search-planning-provenance-segment',
-        segmentVersion: 1,
-        summary,
-        role: range.role,
-        segmentIndex: encoded.length,
-        segmentCount,
-        entryStartIndex: range.entryStartIndex,
-        entryCount: entries.length,
-        entries,
-      } satisfies Omit<
-        WorkspaceSearchMigrationPlanningProvenanceSegment,
-        'segmentDigest'
-      >
-      const segment:
-        WorkspaceSearchMigrationPlanningProvenanceSegment = {
-          ...segmentFields,
-          segmentDigest: createMigrationDigest(segmentFields),
-        }
-      const bytes = encodeCanonical(
-        segment,
-        maximumSegmentBytes,
-      )
-      totalSegmentBytes = addBoundedCanonicalBytes(
-        totalSegmentBytes,
-        bytes.byteLength,
-        maximumTotalSegmentBytes,
-      )
-      encoded.push({
-        segment,
-        bytes,
-        contentDigest: digestBytes(bytes),
-        byteLength: bytes.byteLength,
-      })
-    }
-    return encoded
   })
 }
 
@@ -679,121 +791,11 @@ export function createWorkspaceSearchMigrationPlanningProvenanceManifestPageBuil
       readOwnOptional(inputRecord, 'maximumManifestPageBytes'),
       WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MANIFEST_PAGE_MAX_BYTES,
     )
-    const storedValues = requireDenseArray(
-      readOwn(inputRecord, 'storedSegments'),
-      WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_SEGMENTS,
-    )
-    if (storedValues.length === 0) return failManifest()
-    const locators = storedValues.map((value, index) =>
-      readStoredSegmentLocator(value, index, storedValues.length, summary)
-    )
-    requireCompleteSegmentLocatorStreams(locators, summary)
-    const pageRanges = packManifestPageRanges(
+    return createManifestPageBuilderFromSummary(
       summary,
-      locators,
+      readOwn(inputRecord, 'storedSegments'),
       maximumManifestPageBytes,
     )
-    if (
-      pageRanges.length === 0 ||
-      pageRanges.length >
-        WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_MANIFEST_PAGES
-    ) {
-      return failManifest()
-    }
-    let nextPageIndex = 0
-    let expectedPreviousPageDigest: string | null = null
-    let expectedPreviousContentDigest: string | null = null
-    let expectedPreviousByteLength: number | null = null
-    return {
-      pageCount: pageRanges.length,
-      createNextPage: (previousStoredManifestPage) =>
-        runManifestBoundary(() => {
-          const range = pageRanges[nextPageIndex]
-          if (range === undefined) return failManifest()
-          let previousPageReference:
-            WorkspaceSearchMigrationPlanningProvenanceManifestReference
-              | null = null
-          if (nextPageIndex === 0) {
-            if (
-              previousStoredManifestPage !== null ||
-              expectedPreviousPageDigest !== null ||
-              expectedPreviousContentDigest !== null ||
-              expectedPreviousByteLength !== null
-            ) {
-              return failManifest()
-            }
-          } else {
-            if (
-              previousStoredManifestPage === null ||
-              expectedPreviousPageDigest === null ||
-              expectedPreviousContentDigest === null ||
-              expectedPreviousByteLength === null
-            ) {
-              return failManifest()
-            }
-            const previous = readStoredManifestPageLocator(
-              previousStoredManifestPage,
-              nextPageIndex - 1,
-              pageRanges.length,
-              summary,
-            )
-            if (
-              previous.encodedPage.pageDigest !==
-                expectedPreviousPageDigest ||
-              previous.locator.reference.contentDigest !==
-                expectedPreviousContentDigest ||
-              previous.locator.reference.byteLength !==
-                expectedPreviousByteLength
-            ) {
-              return failManifest()
-            }
-            previousPageReference = previous.locator.reference
-          }
-          const segments = locators.slice(
-            range.segmentStartIndex,
-            range.segmentStartIndex + range.segmentCount,
-          )
-          const pageFields = {
-            kind:
-              'workspace-search-planning-provenance-manifest-page',
-            manifestPageVersion: 1,
-            summary,
-            pageIndex: nextPageIndex,
-            pageCount: pageRanges.length,
-            segmentStartIndex: range.segmentStartIndex,
-            segmentCount: segments.length,
-            segments,
-            previousPageReference,
-          } satisfies Omit<
-            WorkspaceSearchMigrationPlanningProvenanceManifestPage,
-            'pageDigest'
-          >
-          const page:
-            WorkspaceSearchMigrationPlanningProvenanceManifestPage = {
-              ...pageFields,
-              pageDigest: createMigrationDigest(pageFields),
-            }
-          const bytes = encodeCanonical(
-            page,
-            maximumManifestPageBytes,
-          )
-          const detachedPage =
-            parseWorkspaceSearchMigrationPlanningProvenanceManifestPage(
-              bytes,
-            )
-          const encoded = {
-            page: detachedPage,
-            bytes,
-            contentDigest: digestBytes(bytes),
-            byteLength: bytes.byteLength,
-          }
-          nextPageIndex += 1
-          expectedPreviousPageDigest = detachedPage.pageDigest
-          expectedPreviousContentDigest = encoded.contentDigest
-          expectedPreviousByteLength = encoded.byteLength
-          return encoded
-        }),
-    }
   })
 }
 
@@ -844,55 +846,10 @@ export function createWorkspaceSearchMigrationPlanningProvenanceManifestHead(
       readOwn(inputRecord, 'objectKeyPrefix'),
     )
     const summary = createManifestSummary(artifact, objectKeyPrefix)
-    const storedValues = requireDenseArray(
-      readOwn(inputRecord, 'storedManifestPages'),
-      WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_MANIFEST_PAGES,
-    )
-    if (storedValues.length === 0) return failManifest()
-    const manifestPages = storedValues.map((value, index) =>
-      readStoredManifestPageLocator(
-        value,
-        index,
-        storedValues.length,
-        summary,
-      )
-    )
-    const segmentCount = requireCompleteManifestPageLocators(manifestPages)
-    const evidenceSegmentCount = manifestPages
-      .flatMap(({ encodedPage }) => encodedPage.segments)
-      .filter(({ role }) => role === 'evidence-pages')
-      .length
-    const receiptSegmentCount = segmentCount - evidenceSegmentCount
-    if (evidenceSegmentCount === 0 || receiptSegmentCount === 0) {
-      return failManifest()
-    }
-    const locators = manifestPages.map(({ locator }) => locator)
-    const terminalManifestPageLocator = locators.at(-1)
-    if (terminalManifestPageLocator === undefined) return failManifest()
-    const headFields = {
-      kind: 'workspace-search-planning-provenance-manifest-head',
-      manifestHeadVersion: 1,
+    return createManifestHeadFromSummary(
       summary,
-      segmentCount,
-      evidenceSegmentCount,
-      receiptSegmentCount,
-      manifestPageCount: locators.length,
-      manifestPageLocatorsDigest:
-        createManifestPageLocatorsDigest(locators),
-      terminalManifestPageLocator,
-    } satisfies Omit<
-      WorkspaceSearchMigrationPlanningProvenanceManifestHead,
-      'headDigest'
-    >
-    const head: WorkspaceSearchMigrationPlanningProvenanceManifestHead = {
-      ...headFields,
-      headDigest: createMigrationDigest(headFields),
-    }
-    void encodeCanonical(
-      head,
-      WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MANIFEST_HEAD_MAX_BYTES,
+      readOwn(inputRecord, 'storedManifestPages'),
     )
-    return head
   })
 }
 
@@ -1104,6 +1061,56 @@ type ParsedPlanningEvidencePages = {
   readonly target: readonly WorkspaceSearchMigrationTargetEvidencePage[]
 }
 
+/**
+ * Semantic material shared by legacy full-artifact and direct raw builders.
+ */
+type PlanningProvenanceManifestMaterial = {
+  /** Operator-selected run shared by every evidence chain. */
+  readonly runId: string
+  /** Reviewed measured-configuration digest. */
+  readonly configurationHash: string
+  /** All six physical DynamoDB table incarnations. */
+  readonly tableIds: WorkspaceSearchMigrationSealedPlanningTableIds
+  /** Exact canonical page witnesses for all five chains. */
+  readonly evidencePageWitnesses:
+    WorkspaceSearchMigrationPlanningEvidencePageWitnesses
+  /** Complete canonical authority provenance derived from the pages. */
+  readonly provenance: WorkspaceSearchMigrationPlanningAuthorityProvenance
+  /** Digest of the complete replayed planning snapshot. */
+  readonly planningSnapshotDigest: string
+  /** Exact source-owned planned-operation count. */
+  readonly sourceOperationCount: number
+  /** Exact orphan-target planned-operation count. */
+  readonly orphanOperationCount: number
+  /** Exact complete planned-operation count. */
+  readonly planOperationCount: number
+  /** Transition-ordered verified historical receipts. */
+  readonly historicalReceipts:
+    readonly WorkspaceSearchMigrationVerifiedHistoricalReceipt[]
+  /** Digest of every verified historical receipt binding. */
+  readonly historicalReceiptBindingDigest: string
+}
+
+/**
+ * Raw evidence parse result retained only until semantic replay completes.
+ */
+type ParsedDirectPlanningEvidence = {
+  /** Detached canonical Base64 witnesses for all five chains. */
+  readonly witnesses: WorkspaceSearchMigrationPlanningEvidencePageWitnesses
+  /** Strict parsed planning evidence pages in fixed chain order. */
+  readonly pages: ParsedPlanningEvidencePages
+}
+
+/** Mutable aggregate budget used while snapshotting direct raw evidence. */
+type DirectPlanningEvidenceBudget = {
+  /** Number of canonical evidence pages accepted so far. */
+  pageCount: number
+  /** Canonical Base64 characters retained by accepted witnesses. */
+  base64Characters: number
+  /** Reject-only upper bound inherited from total segment bytes. */
+  readonly maximumBase64Characters: number
+}
+
 /** Evidence semantics independently replayed from retained witness bytes. */
 type VerifiedPlanningEvidenceSemantics = {
   /** All six physical table incarnations derived from exact pages. */
@@ -1129,7 +1136,7 @@ type VerifiedPlanningEvidenceSemantics = {
  * @returns Compact summary shared by every manifest layer.
  */
 function createManifestSummary(
-  artifact: WorkspaceSearchMigrationPlanningProvenanceArtifact,
+  artifact: PlanningProvenanceManifestMaterial,
   objectKeyPrefix: string,
 ): WorkspaceSearchMigrationPlanningProvenanceManifestSummary {
   const summaryFields = {
@@ -1168,7 +1175,7 @@ function createManifestSummary(
  * @returns Complete chain-major/page-major evidence entry stream.
  */
 function createEvidenceEntries(
-  artifact: WorkspaceSearchMigrationPlanningProvenanceArtifact,
+  artifact: PlanningProvenanceManifestMaterial,
 ): readonly WorkspaceSearchMigrationPlanningProvenanceEvidenceEntry[] {
   const entries:
     WorkspaceSearchMigrationPlanningProvenanceEvidenceEntry[] = []
@@ -1211,7 +1218,7 @@ function createEvidenceEntries(
  * @returns Complete transition-ordered receipt entry stream.
  */
 function createReceiptEntries(
-  artifact: WorkspaceSearchMigrationPlanningProvenanceArtifact,
+  artifact: PlanningProvenanceManifestMaterial,
 ): readonly WorkspaceSearchMigrationPlanningProvenanceReceiptEntry[] {
   if (
     artifact.provenance.authorityTransitions.length !==
@@ -1232,6 +1239,90 @@ function createReceiptEntries(
       }
     },
   )
+}
+
+/**
+ * Encodes both homogeneous provenance entry streams after exact preflight.
+ *
+ * @param material - Verified legacy or direct semantic material.
+ * @param summary - Exact manifest summary derived from that material.
+ * @param maximumSegmentBytes - Inclusive per-segment canonical byte ceiling.
+ * @param maximumTotalSegmentBytes - Inclusive aggregate byte ceiling.
+ * @returns Complete evidence-then-receipt encoded segment sequence.
+ */
+function createEncodedProvenanceSegments(
+  material: PlanningProvenanceManifestMaterial,
+  summary: WorkspaceSearchMigrationPlanningProvenanceManifestSummary,
+  maximumSegmentBytes: number,
+  maximumTotalSegmentBytes: number,
+): readonly WorkspaceSearchMigrationPlanningProvenanceEncodedSegment[] {
+  const evidenceEntries = createEvidenceEntries(material)
+  const receiptEntries = createReceiptEntries(material)
+  const evidenceRanges = packSegmentRanges(
+    summary,
+    'evidence-pages',
+    evidenceEntries,
+    maximumSegmentBytes,
+  )
+  const receiptRanges = packSegmentRanges(
+    summary,
+    'historical-receipts',
+    receiptEntries,
+    maximumSegmentBytes,
+  )
+  const ranges = [...evidenceRanges, ...receiptRanges]
+  const segmentCount = ranges.length
+  if (
+    segmentCount === 0 ||
+    segmentCount >
+      WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_SEGMENTS
+  ) {
+    return failManifest()
+  }
+  const encoded:
+    WorkspaceSearchMigrationPlanningProvenanceEncodedSegment[] = []
+  let totalSegmentBytes = 0
+  for (const range of ranges) {
+    const sourceEntries = range.role === 'evidence-pages'
+      ? evidenceEntries
+      : receiptEntries
+    const entries = sourceEntries.slice(
+      range.entryStartIndex,
+      range.entryStartIndex + range.entryCount,
+    )
+    const segmentFields = {
+      kind: 'workspace-search-planning-provenance-segment',
+      segmentVersion: 1,
+      summary,
+      role: range.role,
+      segmentIndex: encoded.length,
+      segmentCount,
+      entryStartIndex: range.entryStartIndex,
+      entryCount: entries.length,
+      entries,
+    } satisfies Omit<
+      WorkspaceSearchMigrationPlanningProvenanceSegment,
+      'segmentDigest'
+    >
+    const segment:
+      WorkspaceSearchMigrationPlanningProvenanceSegment = {
+        ...segmentFields,
+        segmentDigest: createMigrationDigest(segmentFields),
+      }
+    const bytes = encodeCanonical(segment, maximumSegmentBytes)
+    totalSegmentBytes = addBoundedCanonicalBytes(
+      totalSegmentBytes,
+      bytes.byteLength,
+      maximumTotalSegmentBytes,
+    )
+    encoded.push({
+      segment,
+      bytes,
+      contentDigest: digestBytes(bytes),
+      byteLength: bytes.byteLength,
+    })
+  }
+  return encoded
 }
 
 /**
@@ -1348,6 +1439,197 @@ function packManifestPageRanges(
     segmentStartIndex += acceptedCount
   }
   return ranges
+}
+
+/**
+ * Builds manifest pages against one privately captured verified summary.
+ *
+ * @param summary - Exact semantic summary derived before immutable writes.
+ * @param storedValue - Candidate complete stored-segment array.
+ * @param maximumManifestPageBytes - Inclusive canonical page ceiling.
+ * @returns Stateful predecessor-linked manifest-page builder.
+ */
+function createManifestPageBuilderFromSummary(
+  summary: WorkspaceSearchMigrationPlanningProvenanceManifestSummary,
+  storedValue: unknown,
+  maximumManifestPageBytes: number,
+): WorkspaceSearchMigrationPlanningProvenanceManifestPageBuilder {
+  const storedValues = requireDenseArray(
+    storedValue,
+    WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_SEGMENTS,
+  )
+  if (storedValues.length === 0) return failManifest()
+  const locators = storedValues.map((value, index) =>
+    readStoredSegmentLocator(value, index, storedValues.length, summary)
+  )
+  requireCompleteSegmentLocatorStreams(locators, summary)
+  const pageRanges = packManifestPageRanges(
+    summary,
+    locators,
+    maximumManifestPageBytes,
+  )
+  if (
+    pageRanges.length === 0 ||
+    pageRanges.length >
+      WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_MANIFEST_PAGES
+  ) {
+    return failManifest()
+  }
+  let nextPageIndex = 0
+  let expectedPreviousPageDigest: string | null = null
+  let expectedPreviousContentDigest: string | null = null
+  let expectedPreviousByteLength: number | null = null
+  return {
+    pageCount: pageRanges.length,
+    createNextPage: (previousStoredManifestPage) =>
+      runManifestBoundary(() => {
+        const range = pageRanges[nextPageIndex]
+        if (range === undefined) return failManifest()
+        let previousPageReference:
+          WorkspaceSearchMigrationPlanningProvenanceManifestReference
+            | null = null
+        if (nextPageIndex === 0) {
+          if (
+            previousStoredManifestPage !== null ||
+            expectedPreviousPageDigest !== null ||
+            expectedPreviousContentDigest !== null ||
+            expectedPreviousByteLength !== null
+          ) {
+            return failManifest()
+          }
+        } else {
+          if (
+            previousStoredManifestPage === null ||
+            expectedPreviousPageDigest === null ||
+            expectedPreviousContentDigest === null ||
+            expectedPreviousByteLength === null
+          ) {
+            return failManifest()
+          }
+          const previous = readStoredManifestPageLocator(
+            previousStoredManifestPage,
+            nextPageIndex - 1,
+            pageRanges.length,
+            summary,
+          )
+          if (
+            previous.encodedPage.pageDigest !==
+              expectedPreviousPageDigest ||
+            previous.locator.reference.contentDigest !==
+              expectedPreviousContentDigest ||
+            previous.locator.reference.byteLength !==
+              expectedPreviousByteLength
+          ) {
+            return failManifest()
+          }
+          previousPageReference = previous.locator.reference
+        }
+        const segments = locators.slice(
+          range.segmentStartIndex,
+          range.segmentStartIndex + range.segmentCount,
+        )
+        const pageFields = {
+          kind: 'workspace-search-planning-provenance-manifest-page',
+          manifestPageVersion: 1,
+          summary,
+          pageIndex: nextPageIndex,
+          pageCount: pageRanges.length,
+          segmentStartIndex: range.segmentStartIndex,
+          segmentCount: segments.length,
+          segments,
+          previousPageReference,
+        } satisfies Omit<
+          WorkspaceSearchMigrationPlanningProvenanceManifestPage,
+          'pageDigest'
+        >
+        const page:
+          WorkspaceSearchMigrationPlanningProvenanceManifestPage = {
+            ...pageFields,
+            pageDigest: createMigrationDigest(pageFields),
+          }
+        const bytes = encodeCanonical(page, maximumManifestPageBytes)
+        const detachedPage =
+          parseWorkspaceSearchMigrationPlanningProvenanceManifestPage(
+            bytes,
+          )
+        const encoded = {
+          page: detachedPage,
+          bytes,
+          contentDigest: digestBytes(bytes),
+          byteLength: bytes.byteLength,
+        }
+        nextPageIndex += 1
+        expectedPreviousPageDigest = detachedPage.pageDigest
+        expectedPreviousContentDigest = encoded.contentDigest
+        expectedPreviousByteLength = encoded.byteLength
+        return encoded
+      }),
+  }
+}
+
+/**
+ * Creates one compact head against a privately captured verified summary.
+ *
+ * @param summary - Exact semantic summary derived before immutable writes.
+ * @param storedValue - Candidate complete stored manifest-page array.
+ * @returns Detached strict compact provenance head.
+ */
+function createManifestHeadFromSummary(
+  summary: WorkspaceSearchMigrationPlanningProvenanceManifestSummary,
+  storedValue: unknown,
+): WorkspaceSearchMigrationPlanningProvenanceManifestHead {
+  const detachedSummary = readSummary(summary)
+  const storedValues = requireDenseArray(
+    storedValue,
+    WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_MANIFEST_PAGES,
+  )
+  if (storedValues.length === 0) return failManifest()
+  const manifestPages = storedValues.map((value, index) =>
+    readStoredManifestPageLocator(
+      value,
+      index,
+      storedValues.length,
+      detachedSummary,
+    )
+  )
+  const segmentCount = requireCompleteManifestPageLocators(manifestPages)
+  const evidenceSegmentCount = manifestPages
+    .flatMap(({ encodedPage }) => encodedPage.segments)
+    .filter(({ role }) => role === 'evidence-pages')
+    .length
+  const receiptSegmentCount = segmentCount - evidenceSegmentCount
+  if (evidenceSegmentCount === 0 || receiptSegmentCount === 0) {
+    return failManifest()
+  }
+  const locators = manifestPages.map(({ locator }) => locator)
+  const terminalManifestPageLocator = locators.at(-1)
+  if (terminalManifestPageLocator === undefined) return failManifest()
+  const headFields = {
+    kind: 'workspace-search-planning-provenance-manifest-head',
+    manifestHeadVersion: 1,
+    summary: detachedSummary,
+    segmentCount,
+    evidenceSegmentCount,
+    receiptSegmentCount,
+    manifestPageCount: locators.length,
+    manifestPageLocatorsDigest:
+      createManifestPageLocatorsDigest(locators),
+    terminalManifestPageLocator,
+  } satisfies Omit<
+    WorkspaceSearchMigrationPlanningProvenanceManifestHead,
+    'headDigest'
+  >
+  const head: WorkspaceSearchMigrationPlanningProvenanceManifestHead = {
+    ...headFields,
+    headDigest: createMigrationDigest(headFields),
+  }
+  const bytes = encodeCanonical(
+    head,
+    WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MANIFEST_HEAD_MAX_BYTES,
+  )
+  return parseWorkspaceSearchMigrationPlanningProvenanceManifestHead(
+    bytes,
+  )
 }
 
 /**
@@ -1736,6 +2018,313 @@ function reconstructArtifact(
     historicalReceiptBindingDigest:
       summary.historicalReceiptBindingDigest,
   }
+}
+
+/**
+ * Reads direct raw material without constructing the legacy full artifact.
+ *
+ * @param sourceValue - Four fixed-role canonical source evidence chains.
+ * @param targetValue - Canonical target evidence chain.
+ * @param bindingValue - Transition-ordered historical receipt bindings.
+ * @param maximumTotalSegmentBytes - Reject-only aggregate segment ceiling.
+ * @returns Verified semantic material suitable for manifest construction.
+ */
+function readDirectPlanningProvenanceMaterial(
+  sourceValue: unknown,
+  targetValue: unknown,
+  bindingValue: unknown,
+  maximumTotalSegmentBytes: number,
+): PlanningProvenanceManifestMaterial {
+  const directEvidence = readDirectPlanningEvidence(
+    sourceValue,
+    targetValue,
+    maximumTotalSegmentBytes,
+  )
+  const verifiedEvidence =
+    verifyParsedPlanningEvidencePages(directEvidence.pages)
+  const historicalReceipts = readDirectHistoricalReceiptBindings(
+    bindingValue,
+    verifiedEvidence.provenance,
+  )
+  return {
+    runId: verifiedEvidence.provenance.runId,
+    configurationHash:
+      verifiedEvidence.provenance.configurationHash,
+    tableIds: verifiedEvidence.tableIds,
+    evidencePageWitnesses: directEvidence.witnesses,
+    provenance: verifiedEvidence.provenance,
+    planningSnapshotDigest:
+      verifiedEvidence.planningSnapshotDigest,
+    sourceOperationCount: verifiedEvidence.sourceOperationCount,
+    orphanOperationCount: verifiedEvidence.orphanOperationCount,
+    planOperationCount: verifiedEvidence.planOperationCount,
+    historicalReceipts,
+    historicalReceiptBindingDigest:
+      createHistoricalReceiptBindingDigest(
+        verifiedEvidence.provenance,
+        historicalReceipts,
+      ),
+  }
+}
+
+/**
+ * Snapshots and parses five fixed raw evidence chains under one byte budget.
+ *
+ * @param sourceValue - Four fixed-role source byte arrays.
+ * @param targetValue - Target byte array.
+ * @param maximumBase64Characters - Early reject-only witness budget.
+ * @returns Detached witnesses paired with strict parsed pages.
+ */
+function readDirectPlanningEvidence(
+  sourceValue: unknown,
+  targetValue: unknown,
+  maximumBase64Characters: number,
+): ParsedDirectPlanningEvidence {
+  const sourceRecord = requireRecord(sourceValue)
+  requireExactKeys(sourceRecord, workspaceSearchMigrationSourceNames)
+  const budget: DirectPlanningEvidenceBudget = {
+    pageCount: 0,
+    base64Characters: 0,
+    maximumBase64Characters,
+  }
+  const projectDirectory = readDirectSourceEvidenceChain(
+    readOwn(sourceRecord, 'project-directory'),
+    'project-directory',
+    budget,
+  )
+  const workItems = readDirectSourceEvidenceChain(
+    readOwn(sourceRecord, 'work-items'),
+    'work-items',
+    budget,
+  )
+  const collaboration = readDirectSourceEvidenceChain(
+    readOwn(sourceRecord, 'collaboration'),
+    'collaboration',
+    budget,
+  )
+  const documents = readDirectSourceEvidenceChain(
+    readOwn(sourceRecord, 'documents'),
+    'documents',
+    budget,
+  )
+  const target = readDirectTargetEvidenceChain(targetValue, budget)
+  return {
+    witnesses: {
+      sources: {
+        'project-directory': projectDirectory.witnesses,
+        'work-items': workItems.witnesses,
+        collaboration: collaboration.witnesses,
+        documents: documents.witnesses,
+      },
+      target: target.witnesses,
+    },
+    pages: {
+      sources: {
+        'project-directory': projectDirectory.pages,
+        'work-items': workItems.pages,
+        collaboration: collaboration.pages,
+        documents: documents.pages,
+      },
+      target: target.pages,
+    },
+  }
+}
+
+/**
+ * Detached witnesses and strict pages from one direct source chain.
+ */
+type DirectSourceEvidenceChain = {
+  /** Canonical Base64 witnesses in exact page order. */
+  readonly witnesses: readonly string[]
+  /** Strict planning-v3 source pages in exact page order. */
+  readonly pages:
+    readonly WorkspaceSearchMigrationPlanningSourceEvidencePage[]
+}
+
+/**
+ * Reads one nonempty canonical planning-v3 source evidence chain.
+ *
+ * @param value - Candidate dense raw page-byte array.
+ * @param source - Required fixed logical source role.
+ * @param budget - Shared five-chain page and Base64 budget.
+ * @returns Detached canonical witnesses and strict parsed pages.
+ */
+function readDirectSourceEvidenceChain(
+  value: unknown,
+  source: WorkspaceSearchMigrationSourceName,
+  budget: DirectPlanningEvidenceBudget,
+): DirectSourceEvidenceChain {
+  const values = requireDenseArray(
+    value,
+    WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_EVIDENCE_PAGES,
+  )
+  if (values.length === 0) return failManifest()
+  const witnesses: string[] = []
+  const pages:
+    WorkspaceSearchMigrationPlanningSourceEvidencePage[] = []
+  for (let index = 0; index < values.length; index += 1) {
+    const bytes = readDetachedUnsharedBytes(
+      values[index],
+      WORKSPACE_SEARCH_MIGRATION_SOURCE_EVIDENCE_MAX_BYTES,
+    )
+    const witness = Buffer.from(bytes).toString('base64')
+    addDirectEvidencePageToBudget(witness.length, budget)
+    const page =
+      parseWorkspaceSearchMigrationSourceEvidencePage(bytes)
+    if (
+      page.purpose !== 'planning' ||
+      page.evidenceVersion !== 3 ||
+      page.source !== source ||
+      page.pageSequence !== index + 1
+    ) {
+      return failManifest()
+    }
+    witnesses.push(witness)
+    pages.push(page)
+  }
+  return { witnesses, pages }
+}
+
+/**
+ * Detached witnesses and strict pages from the direct target chain.
+ */
+type DirectTargetEvidenceChain = {
+  /** Canonical Base64 witnesses in exact page order. */
+  readonly witnesses: readonly string[]
+  /** Strict planning-v1 target pages in exact page order. */
+  readonly pages: readonly WorkspaceSearchMigrationTargetEvidencePage[]
+}
+
+/**
+ * Reads the nonempty canonical planning-v1 target evidence chain.
+ *
+ * @param value - Candidate dense raw target page-byte array.
+ * @param budget - Shared five-chain page and Base64 budget.
+ * @returns Detached canonical witnesses and strict parsed target pages.
+ */
+function readDirectTargetEvidenceChain(
+  value: unknown,
+  budget: DirectPlanningEvidenceBudget,
+): DirectTargetEvidenceChain {
+  const values = requireDenseArray(
+    value,
+    WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_EVIDENCE_PAGES,
+  )
+  if (values.length === 0) return failManifest()
+  const witnesses: string[] = []
+  const pages: WorkspaceSearchMigrationTargetEvidencePage[] = []
+  for (let index = 0; index < values.length; index += 1) {
+    const bytes = readDetachedUnsharedBytes(
+      values[index],
+      WORKSPACE_SEARCH_MIGRATION_TARGET_EVIDENCE_MAX_BYTES,
+    )
+    const witness = Buffer.from(bytes).toString('base64')
+    addDirectEvidencePageToBudget(witness.length, budget)
+    const page =
+      parseWorkspaceSearchMigrationTargetEvidencePage(bytes)
+    if (page.pageSequence !== index + 1) return failManifest()
+    witnesses.push(witness)
+    pages.push(page)
+  }
+  return { witnesses, pages }
+}
+
+/**
+ * Accounts for one direct witness before retaining or deeply replaying it.
+ *
+ * @param base64Characters - Exact canonical Base64 character count.
+ * @param budget - Shared mutable five-chain budget.
+ */
+function addDirectEvidencePageToBudget(
+  base64Characters: number,
+  budget: DirectPlanningEvidenceBudget,
+): void {
+  budget.pageCount = addSafeCounts(budget.pageCount, 1)
+  budget.base64Characters = addSafeCounts(
+    budget.base64Characters,
+    base64Characters,
+  )
+  if (
+    budget.pageCount >
+      WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_EVIDENCE_PAGES ||
+    budget.base64Characters > budget.maximumBase64Characters
+  ) {
+    return failManifest()
+  }
+}
+
+/**
+ * Reads direct durable receipt bindings against derived authority transitions.
+ *
+ * @param value - Candidate transition-ordered binding array.
+ * @param provenance - Exact authority provenance derived from raw pages.
+ * @returns Detached verified historical receipts.
+ */
+function readDirectHistoricalReceiptBindings(
+  value: unknown,
+  provenance: WorkspaceSearchMigrationPlanningAuthorityProvenance,
+): readonly WorkspaceSearchMigrationVerifiedHistoricalReceipt[] {
+  const values = requireDenseArray(
+    value,
+    WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_RECEIPTS,
+  )
+  if (values.length !== provenance.authorityTransitions.length) {
+    return failManifest()
+  }
+  return values.map((candidate, index) => {
+    const transition = provenance.authorityTransitions[index]
+    if (transition === undefined) return failManifest()
+    return readDirectHistoricalReceiptBinding(
+      candidate,
+      provenance,
+      transition,
+    )
+  })
+}
+
+/**
+ * Reads one durable receipt binding without applying present-time freshness.
+ *
+ * @param value - Candidate durable historical binding.
+ * @param provenance - Exact owning authority provenance.
+ * @param transition - Exact transition at the same ordered index.
+ * @returns Detached verified historical receipt.
+ */
+function readDirectHistoricalReceiptBinding(
+  value: unknown,
+  provenance: WorkspaceSearchMigrationPlanningAuthorityProvenance,
+  transition: WorkspaceSearchMigrationPlanningAuthorityTransition,
+): WorkspaceSearchMigrationVerifiedHistoricalReceipt {
+  const record = requireRecord(value)
+  requireExactKeys(record, [
+    'configurationHash',
+    'ownerId',
+    'receipt',
+    'receiptDigest',
+    'stateTableId',
+  ])
+  const configurationHash = readDigest(
+    readOwn(record, 'configurationHash'),
+  )
+  const stateTableId = readBoundedText(
+    readOwn(record, 'stateTableId'),
+    1_024,
+  )
+  const ownerId = readIdentifier(readOwn(record, 'ownerId'))
+  const receiptDigest = readDigest(readOwn(record, 'receiptDigest'))
+  const receipt = readMaintenanceReceipt(readOwn(record, 'receipt'))
+  if (
+    configurationHash !== provenance.configurationHash ||
+    stateTableId !== provenance.stateTableId ||
+    ownerId !== transition.ownerId ||
+    receiptDigest !== transition.maintenanceEvidenceReceiptDigest ||
+    receipt.runId !== provenance.runId ||
+    receipt.fenceToken !== transition.fenceToken ||
+    createMigrationDigest(receipt) !== receiptDigest
+  ) {
+    return failManifest()
+  }
+  return { ownerId, receiptDigest, receipt }
 }
 
 /**
@@ -2459,13 +3048,10 @@ function readMaintenanceReceipt(
     ),
     validUntil: readTimestamp(readOwn(record, 'validUntil')),
   }
-  if (
-    Date.parse(receipt.oldestObservationAt) >
-      Date.parse(receipt.validatedAt) ||
-    Date.parse(receipt.validatedAt) >= Date.parse(receipt.validUntil)
-  ) {
-    return failManifest()
-  }
+  validateWorkspaceSearchMaintenanceEvidenceReceipt(
+    receipt,
+    receipt.runId,
+  )
   return receipt
 }
 
