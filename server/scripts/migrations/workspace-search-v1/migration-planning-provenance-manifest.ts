@@ -52,6 +52,12 @@ import {
 export const WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_SEGMENT_MAX_BYTES =
   16 * 1024 * 1024
 
+/**
+ * Maximum combined canonical bytes retained by all provenance data segments.
+ */
+export const WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_TOTAL_SEGMENT_BYTES =
+  256 * 1024 * 1024
+
 /** Maximum canonical size of one immutable provenance manifest page. */
 export const WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MANIFEST_PAGE_MAX_BYTES =
   256 * 1024
@@ -404,6 +410,8 @@ export type CreateWorkspaceSearchMigrationPlanningProvenanceSegmentsInput = {
   readonly objectKeyPrefix: string
   /** Optional smaller segment ceiling used by constrained storage or tests. */
   readonly maximumSegmentBytes?: number
+  /** Optional smaller reject-only ceiling for all canonical segment bytes. */
+  readonly maximumTotalSegmentBytes?: number
 }
 
 /**
@@ -517,6 +525,7 @@ export function createWorkspaceSearchMigrationPlanningProvenanceSegments(
     requireExactOptionalKeys(inputRecord, [
       'artifact',
       'maximumSegmentBytes',
+      'maximumTotalSegmentBytes',
       'objectKeyPrefix',
     ], [
       'artifact',
@@ -528,6 +537,10 @@ export function createWorkspaceSearchMigrationPlanningProvenanceSegments(
     const maximumSegmentBytes = readOptionalMaximumBytes(
       readOwnOptional(inputRecord, 'maximumSegmentBytes'),
       WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_SEGMENT_MAX_BYTES,
+    )
+    const maximumTotalSegmentBytes = readOptionalMaximumBytes(
+      readOwnOptional(inputRecord, 'maximumTotalSegmentBytes'),
+      WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_TOTAL_SEGMENT_BYTES,
     )
     const objectKeyPrefix = readObjectKeyPrefix(
       readOwn(inputRecord, 'objectKeyPrefix'),
@@ -557,6 +570,7 @@ export function createWorkspaceSearchMigrationPlanningProvenanceSegments(
     }
     const encoded: WorkspaceSearchMigrationPlanningProvenanceEncodedSegment[] =
       []
+    let totalSegmentBytes = 0
     for (const range of [...evidenceRanges, ...receiptRanges]) {
       const sourceEntries = range.role === 'evidence-pages'
         ? evidenceEntries
@@ -587,6 +601,11 @@ export function createWorkspaceSearchMigrationPlanningProvenanceSegments(
       const bytes = encodeCanonical(
         segment,
         maximumSegmentBytes,
+      )
+      totalSegmentBytes = addBoundedCanonicalBytes(
+        totalSegmentBytes,
+        bytes.byteLength,
+        maximumTotalSegmentBytes,
       )
       encoded.push({
         segment,
@@ -924,12 +943,20 @@ export function parseWorkspaceSearchMigrationPlanningProvenanceManifestHead(
  * the original full provenance artifact with identical semantics.
  *
  * @param input - Compact head and exact version-pinned object bytes.
+ * @param maximumTotalSegmentBytes - Optional smaller aggregate segment-byte
+ * ceiling that may only reject an otherwise valid replay.
  * @returns Detached full provenance artifact equal to the segmented input.
  */
 export function replayWorkspaceSearchMigrationPlanningProvenanceManifest(
   input: ReplayWorkspaceSearchMigrationPlanningProvenanceManifestInput,
+  maximumTotalSegmentBytes =
+    WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_TOTAL_SEGMENT_BYTES,
 ): WorkspaceSearchMigrationPlanningProvenanceArtifact {
   return runManifestBoundary(() => {
+    const totalSegmentByteCeiling = readBoundedPositiveSafeInteger(
+      maximumTotalSegmentBytes,
+      WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_TOTAL_SEGMENT_BYTES,
+    )
     const inputRecord = requireRecord(input)
     requireExactKeys(inputRecord, ['head', 'manifestPages', 'segments'])
     const head = readManifestHead(readOwn(inputRecord, 'head'))
@@ -978,6 +1005,14 @@ export function replayWorkspaceSearchMigrationPlanningProvenanceManifest(
       return failManifest()
     }
     requireCompleteSegmentLocatorStreams(locators, head.summary)
+    let totalSegmentBytes = 0
+    for (const locator of locators) {
+      totalSegmentBytes = addBoundedCanonicalBytes(
+        totalSegmentBytes,
+        locator.reference.byteLength,
+        totalSegmentByteCeiling,
+      )
+    }
     const segmentBytes = readReferencedBytesArray(
       readOwn(inputRecord, 'segments'),
       locators.map(({ reference }) => reference),
@@ -3295,6 +3330,31 @@ function sameTableIds(
 function addSafeCounts(left: number, right: number): number {
   const total = left + right
   if (!Number.isSafeInteger(total) || total < 0) {
+    return failManifest()
+  }
+  return total
+}
+
+/**
+ * Adds canonical bytes without exceeding one aggregate segment ceiling.
+ *
+ * @param current - Previously accumulated canonical bytes.
+ * @param additional - Additional canonical bytes.
+ * @param maximum - Inclusive aggregate byte ceiling.
+ * @returns Exact bounded safe-integer byte total.
+ */
+function addBoundedCanonicalBytes(
+  current: number,
+  additional: number,
+  maximum: number,
+): number {
+  const total = current + additional
+  if (
+    !Number.isSafeInteger(total) ||
+    current < 0 ||
+    additional < 0 ||
+    total > maximum
+  ) {
     return failManifest()
   }
   return total

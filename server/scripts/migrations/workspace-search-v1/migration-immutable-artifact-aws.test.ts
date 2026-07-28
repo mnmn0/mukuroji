@@ -167,8 +167,14 @@ class StalledImmutableArtifactBody {
   /** Whether iterator cleanup was requested. */
   returned = false;
 
+  /** Number of iterator cleanup requests. */
+  returnCalls = 0;
+
   /** Whether underlying stream destruction was requested. */
   destroyed = false;
+
+  /** Number of underlying stream destruction requests. */
+  destroyCalls = 0;
 
   /**
    * Returns this deliberately stalled iterator.
@@ -200,6 +206,7 @@ class StalledImmutableArtifactBody {
     readonly value: undefined
   }> {
     this.returned = true
+    this.returnCalls += 1
     return Promise.resolve({ done: true, value: undefined })
   }
 
@@ -208,6 +215,22 @@ class StalledImmutableArtifactBody {
    */
   destroy(): void {
     this.destroyed = true
+    this.destroyCalls += 1
+  }
+}
+
+/**
+ * Body whose async-iterator initialization fails before consumption.
+ */
+class InvalidIteratorImmutableArtifactBody
+  extends StalledImmutableArtifactBody {
+  /**
+   * Simulates an invalid streaming body without exposing raw error text.
+   *
+   * @returns Never returns.
+   */
+  override [Symbol.asyncIterator](): StalledImmutableArtifactBody {
+    throw new Error('raw-secret iterator initialization failure')
   }
 }
 
@@ -949,8 +972,9 @@ describe('AWS immutable migration artifact core', () => {
     const configuration = createConfiguration()
     const transport = new RecordingImmutableArtifactTransport()
     const fixture = createArtifactFixture(configuration)
+    const body = new StalledImmutableArtifactBody()
     transport.getHandler = async () => ({
-      ...createValidGetOutput(configuration, fixture),
+      ...createValidGetOutput(configuration, fixture, body),
       ChecksumSHA256: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
     })
     const port = createPort(configuration, transport)
@@ -963,6 +987,10 @@ describe('AWS immutable migration artifact core', () => {
     }), 'INVALID_JOURNAL')
 
     expect(transport.getCommands).toHaveLength(1)
+    expect(body.returned).toBe(true)
+    expect(body.destroyed).toBe(true)
+    expect(body.returnCalls).toBe(1)
+    expect(body.destroyCalls).toBe(1)
   })
 
   test('rejects proxied and accessor-backed GetObject state without traps', async () => {
@@ -993,9 +1021,14 @@ describe('AWS immutable migration artifact core', () => {
     expect(bodyTrapCalled).toBe(false)
 
     let metadataAccessorCalled = false
+    const accessorBody = new StalledImmutableArtifactBody()
     transport.getHandler = async () => {
       const output =
-        createValidGetOutput(configuration, fixture)
+        createValidGetOutput(
+          configuration,
+          fixture,
+          accessorBody,
+        )
       Object.defineProperty(output, 'Metadata', {
         configurable: true,
         enumerable: true,
@@ -1013,6 +1046,67 @@ describe('AWS immutable migration artifact core', () => {
       metadata: testCallerMetadata,
     }), 'INVALID_JOURNAL')
     expect(metadataAccessorCalled).toBe(false)
+    expect(accessorBody.returned).toBe(true)
+    expect(accessorBody.destroyed).toBe(true)
+    expect(accessorBody.returnCalls).toBe(1)
+    expect(accessorBody.destroyCalls).toBe(1)
+  })
+
+  test('cleans a body when async-iterator snapshotting fails', async () => {
+    const configuration = createConfiguration()
+    const transport = new RecordingImmutableArtifactTransport()
+    const fixture = createArtifactFixture(configuration)
+    const body = new InvalidIteratorImmutableArtifactBody()
+    transport.getHandler = async () =>
+      createValidGetOutput(configuration, fixture, body)
+    const port = createPort(configuration, transport)
+
+    await captureFailure(port.readImmutableArtifact({
+      role: fixture.role,
+      objectKeyPrefix: testObjectKeyPrefix,
+      reference: fixture.reference,
+      metadata: testCallerMetadata,
+    }), 'INVALID_JOURNAL')
+
+    expect(body.returned).toBe(true)
+    expect(body.destroyed).toBe(true)
+  })
+
+  test('cleans a distinct iterator when its next method is invalid', async () => {
+    const configuration = createConfiguration()
+    const transport = new RecordingImmutableArtifactTransport()
+    const fixture = createArtifactFixture(configuration)
+    const body = new StalledImmutableArtifactBody()
+    const iterator = new StalledImmutableArtifactBody()
+    let nextAccessorCalled = false
+    Object.defineProperty(iterator, 'next', {
+      configurable: true,
+      get() {
+        nextAccessorCalled = true
+        throw new Error('raw-secret next accessor')
+      },
+    })
+    Object.defineProperty(body, Symbol.asyncIterator, {
+      configurable: true,
+      value: () => iterator,
+    })
+    transport.getHandler = async () =>
+      createValidGetOutput(configuration, fixture, body)
+    const port = createPort(configuration, transport)
+
+    await captureFailure(port.readImmutableArtifact({
+      role: fixture.role,
+      objectKeyPrefix: testObjectKeyPrefix,
+      reference: fixture.reference,
+      metadata: testCallerMetadata,
+    }), 'INVALID_JOURNAL')
+
+    expect(nextAccessorCalled).toBe(false)
+    expect(iterator.returned).toBe(true)
+    expect(iterator.returnCalls).toBe(1)
+    expect(body.returnCalls).toBe(1)
+    expect(body.destroyed).toBe(true)
+    expect(body.destroyCalls).toBe(1)
   })
 
   test('bounds stalled bodies and requests best-effort cleanup', async () => {

@@ -26,6 +26,7 @@ import {
   WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MANIFEST_HEAD_MAX_BYTES,
   WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_MANIFEST_PAGES,
   WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_SEGMENTS,
+  WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_TOTAL_SEGMENT_BYTES,
   WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MANIFEST_PAGE_MAX_BYTES,
   WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_SEGMENT_MAX_BYTES,
 } from './migration-planning-provenance-manifest'
@@ -81,6 +82,35 @@ describe('Workspace Search planning provenance manifest', () => {
       expect(
         segments.flatMap(({ segment }) => segment.entries).length,
       ).toBe(6)
+      const totalSegmentBytes = segments.reduce(
+        (total, segment) => total + segment.byteLength,
+        0,
+      )
+      expect(
+        createWorkspaceSearchMigrationPlanningProvenanceSegments({
+          artifact,
+          maximumSegmentBytes: 8_192,
+          maximumTotalSegmentBytes: totalSegmentBytes,
+          objectKeyPrefix,
+        }).map(({ bytes }) => bytes),
+      ).toEqual(segments.map(({ bytes }) => bytes))
+      expectManifestFailure(() =>
+        createWorkspaceSearchMigrationPlanningProvenanceSegments({
+          artifact,
+          maximumSegmentBytes: 8_192,
+          maximumTotalSegmentBytes: totalSegmentBytes - 1,
+          objectKeyPrefix,
+        })
+      )
+      expectManifestFailure(() =>
+        createWorkspaceSearchMigrationPlanningProvenanceSegments({
+          artifact,
+          maximumTotalSegmentBytes:
+            WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_TOTAL_SEGMENT_BYTES +
+            1,
+          objectKeyPrefix,
+        })
+      )
 
       const storedSegments = storeSegments(segments)
       const { pages, storedPages } = createStoredManifestPages(
@@ -124,18 +154,28 @@ describe('Workspace Search planning provenance manifest', () => {
         ).toEqual(page.page)
       }
 
+      const replayInput = {
+        head,
+        manifestPages: storedPages.map(({ encoded, reference }) => ({
+          reference,
+          bytes: encoded.bytes,
+        })),
+        segments: storedSegments.map(({ encoded, reference }) => ({
+          reference,
+          bytes: encoded.bytes,
+        })),
+      }
       const replayed =
-        replayWorkspaceSearchMigrationPlanningProvenanceManifest({
-          head,
-          manifestPages: storedPages.map(({ encoded, reference }) => ({
-            reference,
-            bytes: encoded.bytes,
-          })),
-          segments: storedSegments.map(({ encoded, reference }) => ({
-            reference,
-            bytes: encoded.bytes,
-          })),
-        })
+        replayWorkspaceSearchMigrationPlanningProvenanceManifest(
+          replayInput,
+          totalSegmentBytes,
+        )
+      expectManifestFailure(() =>
+        replayWorkspaceSearchMigrationPlanningProvenanceManifest(
+          replayInput,
+          totalSegmentBytes - 1,
+        )
+      )
       expect(replayed).toEqual(artifact)
     },
   )
@@ -998,6 +1038,9 @@ describe('Workspace Search planning provenance manifest', () => {
     expect(
       WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_SEGMENT_MAX_BYTES,
     ).toBe(16 * 1024 * 1024)
+    expect(
+      WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MAX_TOTAL_SEGMENT_BYTES,
+    ).toBe(256 * 1024 * 1024)
     expect(
       WORKSPACE_SEARCH_MIGRATION_PLANNING_PROVENANCE_MANIFEST_PAGE_MAX_BYTES,
     ).toBe(256 * 1024)

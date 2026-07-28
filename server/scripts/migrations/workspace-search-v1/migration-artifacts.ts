@@ -44,6 +44,10 @@ import {
 export const WORKSPACE_SEARCH_MIGRATION_ARTIFACT_MAX_BYTES =
   64 * 1024 * 1024
 
+/** Maximum canonical size reserved for one immutable plan seal. */
+export const WORKSPACE_SEARCH_MIGRATION_PLAN_SEAL_MAX_BYTES =
+  4 * 1024
+
 const maximumPlanMembershipProofSteps = 53
 
 /**
@@ -107,7 +111,10 @@ export function serializeWorkspaceSearchPlanSeal(
   value: WorkspaceSearchPlanSeal,
 ): Uint8Array {
   try {
-    return encodeCanonicalArtifact(readPlanSeal(value))
+    return encodeCanonicalArtifact(
+      readPlanSeal(value),
+      WORKSPACE_SEARCH_MIGRATION_PLAN_SEAL_MAX_BYTES,
+    )
   } catch (error: unknown) {
     return wrapArtifactFailure(error)
   }
@@ -123,9 +130,16 @@ export function parseWorkspaceSearchPlanSeal(
   bytes: Uint8Array,
 ): WorkspaceSearchPlanSeal {
   try {
-    const parsed = parseArtifactJson(bytes)
+    const parsed = parseArtifactJson(
+      bytes,
+      WORKSPACE_SEARCH_MIGRATION_PLAN_SEAL_MAX_BYTES,
+    )
     const seal = readPlanSeal(parsed)
-    requireCanonicalArtifactBytes(bytes, seal)
+    requireCanonicalArtifactBytes(
+      bytes,
+      seal,
+      WORKSPACE_SEARCH_MIGRATION_PLAN_SEAL_MAX_BYTES,
+    )
     return seal
   } catch (error: unknown) {
     return wrapArtifactFailure(error)
@@ -903,13 +917,17 @@ function requirePositiveSafeInteger(value: unknown): number {
  * Parses one bounded artifact as strict UTF-8 JSON.
  *
  * @param bytes - Candidate exact bytes.
+ * @param maximumBytes - Inclusive artifact-specific byte ceiling.
  * @returns Untrusted parsed JSON value.
  */
-function parseArtifactJson(bytes: Uint8Array): unknown {
+function parseArtifactJson(
+  bytes: Uint8Array,
+  maximumBytes = WORKSPACE_SEARCH_MIGRATION_ARTIFACT_MAX_BYTES,
+): unknown {
   if (
     !(bytes instanceof Uint8Array) ||
     bytes.byteLength === 0 ||
-    bytes.byteLength > WORKSPACE_SEARCH_MIGRATION_ARTIFACT_MAX_BYTES
+    bytes.byteLength > maximumBytes
   ) {
     return failArtifact()
   }
@@ -930,13 +948,17 @@ function parseArtifactJson(bytes: Uint8Array): unknown {
  * Encodes canonical JSON while enforcing the artifact byte bound.
  *
  * @param value - Validated JSON-safe artifact value.
+ * @param maximumBytes - Inclusive artifact-specific byte ceiling.
  * @returns Exact canonical UTF-8 bytes.
  */
-function encodeCanonicalArtifact(value: unknown): Uint8Array {
+function encodeCanonicalArtifact(
+  value: unknown,
+  maximumBytes = WORKSPACE_SEARCH_MIGRATION_ARTIFACT_MAX_BYTES,
+): Uint8Array {
   const bytes = new TextEncoder().encode(serializeCanonicalJson(value))
   if (
     bytes.byteLength === 0 ||
-    bytes.byteLength > WORKSPACE_SEARCH_MIGRATION_ARTIFACT_MAX_BYTES
+    bytes.byteLength > maximumBytes
   ) {
     return failArtifact()
   }
@@ -948,12 +970,14 @@ function encodeCanonicalArtifact(value: unknown): Uint8Array {
  *
  * @param actual - Original untrusted artifact bytes.
  * @param value - Reconstructed JSON-safe canonical value.
+ * @param maximumBytes - Inclusive artifact-specific byte ceiling.
  */
 function requireCanonicalArtifactBytes(
   actual: Uint8Array,
   value: unknown,
+  maximumBytes = WORKSPACE_SEARCH_MIGRATION_ARTIFACT_MAX_BYTES,
 ): void {
-  const expected = encodeCanonicalArtifact(value)
+  const expected = encodeCanonicalArtifact(value, maximumBytes)
   if (!Buffer.from(expected).equals(Buffer.from(actual))) {
     return failArtifact()
   }

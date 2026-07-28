@@ -562,14 +562,19 @@ class AwsWorkspaceSearchMigrationImmutableArtifactPort
       }
       const snapshot =
         snapshotImmutableArtifactObjectOutput(output, true)
-      requireImmutableArtifactObjectMatches(
-        snapshot,
-        prepared.reference,
-        prepared.checksumSha256,
-        prepared.retainUntilEpochMilliseconds,
-        prepared.metadata,
-        this.configuration,
-      )
+      try {
+        requireImmutableArtifactObjectMatches(
+          snapshot,
+          prepared.reference,
+          prepared.checksumSha256,
+          prepared.retainUntilEpochMilliseconds,
+          prepared.metadata,
+          this.configuration,
+        )
+      } catch (error: unknown) {
+        cancelImmutableArtifactBody(snapshot.body, snapshot.body)
+        throw error
+      }
       const bytes = await readBoundedImmutableArtifactBody(
         snapshot.body,
         prepared.reference.byteLength,
@@ -1589,52 +1594,60 @@ function snapshotImmutableArtifactObjectOutput(
     output,
     'INVALID_JOURNAL',
   )
-  return {
-    versionId: readOptionalOutputString(
-      readOptionalDataProperty(record, 'VersionId'),
-    ),
-    contentLength: readOptionalOutputInteger(
-      readOptionalDataProperty(record, 'ContentLength'),
-    ),
-    contentType: readOptionalOutputString(
-      readOptionalDataProperty(record, 'ContentType'),
-    ),
-    checksumSha256: readOptionalOutputString(
-      readOptionalDataProperty(record, 'ChecksumSHA256'),
-    ),
-    checksumType: readOptionalOutputString(
-      readOptionalDataProperty(record, 'ChecksumType'),
-    ),
-    serverSideEncryption: readOptionalOutputString(
-      readOptionalDataProperty(record, 'ServerSideEncryption'),
-    ),
-    sseKmsKeyId: readOptionalOutputString(
-      readOptionalDataProperty(record, 'SSEKMSKeyId'),
-    ),
-    bucketKeyEnabled: readOptionalOutputBoolean(
-      readOptionalDataProperty(record, 'BucketKeyEnabled'),
-    ),
-    deleteMarker: readOptionalOutputBoolean(
-      readOptionalDataProperty(record, 'DeleteMarker'),
-    ),
-    lastModifiedEpochMilliseconds: readOptionalOutputDate(
-      readOptionalDataProperty(record, 'LastModified'),
-    ),
-    objectLockMode: readOptionalOutputString(
-      readOptionalDataProperty(record, 'ObjectLockMode'),
-    ),
-    retainUntilEpochMilliseconds: readOptionalOutputDate(
-      readOptionalDataProperty(
-        record,
-        'ObjectLockRetainUntilDate',
+  const body = includeBody
+    ? readOptionalDataProperty(record, 'Body')
+    : undefined
+  try {
+    return {
+      versionId: readOptionalOutputString(
+        readOptionalDataProperty(record, 'VersionId'),
       ),
-    ),
-    metadata: snapshotResponseMetadata(
-      readOptionalDataProperty(record, 'Metadata'),
-    ),
-    body: includeBody
-      ? readOptionalDataProperty(record, 'Body')
-      : undefined,
+      contentLength: readOptionalOutputInteger(
+        readOptionalDataProperty(record, 'ContentLength'),
+      ),
+      contentType: readOptionalOutputString(
+        readOptionalDataProperty(record, 'ContentType'),
+      ),
+      checksumSha256: readOptionalOutputString(
+        readOptionalDataProperty(record, 'ChecksumSHA256'),
+      ),
+      checksumType: readOptionalOutputString(
+        readOptionalDataProperty(record, 'ChecksumType'),
+      ),
+      serverSideEncryption: readOptionalOutputString(
+        readOptionalDataProperty(record, 'ServerSideEncryption'),
+      ),
+      sseKmsKeyId: readOptionalOutputString(
+        readOptionalDataProperty(record, 'SSEKMSKeyId'),
+      ),
+      bucketKeyEnabled: readOptionalOutputBoolean(
+        readOptionalDataProperty(record, 'BucketKeyEnabled'),
+      ),
+      deleteMarker: readOptionalOutputBoolean(
+        readOptionalDataProperty(record, 'DeleteMarker'),
+      ),
+      lastModifiedEpochMilliseconds: readOptionalOutputDate(
+        readOptionalDataProperty(record, 'LastModified'),
+      ),
+      objectLockMode: readOptionalOutputString(
+        readOptionalDataProperty(record, 'ObjectLockMode'),
+      ),
+      retainUntilEpochMilliseconds: readOptionalOutputDate(
+        readOptionalDataProperty(
+          record,
+          'ObjectLockRetainUntilDate',
+        ),
+      ),
+      metadata: snapshotResponseMetadata(
+        readOptionalDataProperty(record, 'Metadata'),
+      ),
+      body,
+    }
+  } catch (error: unknown) {
+    if (includeBody) {
+      cancelImmutableArtifactBody(body, body)
+    }
+    throw error
   }
 }
 
@@ -1888,6 +1901,7 @@ async function readBoundedImmutableArtifactBody(
   maximumBytes: number,
   timeoutMilliseconds: number,
 ): Promise<Uint8Array> {
+  let iterator: ImmutableArtifactAsyncIterator | undefined
   try {
     if (
       !Number.isSafeInteger(expectedLength) ||
@@ -1910,22 +1924,22 @@ async function readBoundedImmutableArtifactBody(
       }
       return bytes
     }
-    const iterator = snapshotAsyncByteIterator(body)
-    try {
-      return await runWithImmutableArtifactDeadline(
-        () => readBoundedImmutableArtifactIterator(
-          iterator.receiver,
-          iterator.next,
-          expectedLength,
-          maximumBytes,
-        ),
-        timeoutMilliseconds,
-      )
-    } catch (error: unknown) {
-      cancelImmutableArtifactBody(iterator.receiver, body)
-      throw error
-    }
+    const preparedIterator = snapshotAsyncByteIterator(body)
+    iterator = preparedIterator
+    return await runWithImmutableArtifactDeadline(
+      () => readBoundedImmutableArtifactIterator(
+        preparedIterator.receiver,
+        preparedIterator.next,
+        expectedLength,
+        maximumBytes,
+      ),
+      timeoutMilliseconds,
+    )
   } catch (error: unknown) {
+    cancelImmutableArtifactBody(
+      iterator?.receiver ?? body,
+      body,
+    )
     if (
       !nodeUtilTypes.isProxy(error) &&
       error instanceof ImmutableArtifactFailure
@@ -1986,9 +2000,18 @@ function snapshotAsyncByteIterator(
   ) {
     return failImmutableArtifact('INVALID_JOURNAL')
   }
+  let next: Function
+  try {
+    next = readDataMethod(iterator, 'next', 'INVALID_JOURNAL')
+  } catch (error: unknown) {
+    if (iterator !== body) {
+      invokeCancellationMethod(iterator, 'return')
+    }
+    throw error
+  }
   return {
     receiver: iterator,
-    next: readDataMethod(iterator, 'next', 'INVALID_JOURNAL'),
+    next,
   }
 }
 

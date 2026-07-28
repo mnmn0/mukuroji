@@ -30,6 +30,7 @@ import {
   WORKSPACE_SEARCH_MIGRATION_PLAN_ARTIFACT_OBJECT_KEY_PREFIX,
   WORKSPACE_SEARCH_MIGRATION_PLAN_MANIFEST_HEAD_MAX_BYTES,
   WORKSPACE_SEARCH_MIGRATION_PLAN_MANIFEST_PAGE_MAX_REFERENCES,
+  WORKSPACE_SEARCH_MIGRATION_PLAN_MAX_TOTAL_SEGMENT_BYTES,
   WORKSPACE_SEARCH_MIGRATION_PLAN_SEGMENT_MAX_BYTES,
 } from './migration-plan-artifact'
 import {
@@ -436,16 +437,50 @@ describe('migration plan artifact codec', () => {
       expect(second.map(({ bytes }) => bytes)).toEqual(
         first.encodedSegments.map(({ bytes }) => bytes),
       )
+      const aggregateSegmentBytes = first.encodedSegments.reduce(
+        (total, segment) => total + segment.byteLength,
+        0,
+      )
+      const largestSegmentBytes = Math.max(
+        ...first.encodedSegments.map(({ byteLength }) => byteLength),
+      )
+      expect(largestSegmentBytes).toBeLessThan(
+        aggregateSegmentBytes - 1,
+      )
+      expect(
+        serializeWorkspaceSearchMigrationPlanArtifactSegments(
+          plan.seal,
+          plan.operations,
+          aggregateSegmentBytes,
+        ).map(({ bytes }) => bytes),
+      ).toEqual(first.encodedSegments.map(({ bytes }) => bytes))
+      expectArtifactFailure(() =>
+        serializeWorkspaceSearchMigrationPlanArtifactSegments(
+          plan.seal,
+          plan.operations,
+          aggregateSegmentBytes - 1,
+        )
+      )
       expect(first.encodedSegments.every(
         ({ byteLength }) =>
           byteLength <= WORKSPACE_SEARCH_MIGRATION_PLAN_SEGMENT_MAX_BYTES,
       )).toBe(true)
-      expect(replayWorkspaceSearchMigrationPlanArtifact({
+      const replayInput = {
         planSeal: plan.seal,
         manifestHeadBytes: first.headBytes,
         manifestPages: first.storedPages,
         segments: first.storedSegments,
-      }).operations).toEqual(plan.operations)
+      }
+      expect(replayWorkspaceSearchMigrationPlanArtifact(
+        replayInput,
+        aggregateSegmentBytes,
+      ).operations).toEqual(plan.operations)
+      expectArtifactFailure(() =>
+        replayWorkspaceSearchMigrationPlanArtifact(
+          replayInput,
+          aggregateSegmentBytes - 1,
+        )
+      )
       expectArtifactFailure(() =>
         serializeWorkspaceSearchMigrationPlanManifestHead({
           planSeal: plan.seal,
@@ -513,7 +548,7 @@ describe('migration plan artifact codec', () => {
         )
       }
     },
-    15_000,
+    30_000,
   )
 
   test('rejects sequence gaps and foreign plan identities before publication', () => {
@@ -533,6 +568,47 @@ describe('migration plan artifact codec', () => {
         )
       )
     }
+  })
+
+  test('enforces an inclusive aggregate canonical segment-byte ceiling', () => {
+    const plan = createPlan(1)
+    const baseline =
+      serializeWorkspaceSearchMigrationPlanArtifactSegments(
+        plan.seal,
+        plan.operations,
+      )
+    const exactSegmentBytes = baseline.reduce(
+      (total, segment) => total + segment.byteLength,
+      0,
+    )
+    expect(
+      serializeWorkspaceSearchMigrationPlanArtifactSegments(
+        plan.seal,
+        plan.operations,
+        exactSegmentBytes,
+      ).map(({ bytes }) => bytes),
+    ).toEqual(baseline.map(({ bytes }) => bytes))
+    expectArtifactFailure(() =>
+      serializeWorkspaceSearchMigrationPlanArtifactSegments(
+        plan.seal,
+        plan.operations,
+        exactSegmentBytes - 1,
+      )
+    )
+    expectArtifactFailure(() =>
+      serializeWorkspaceSearchMigrationPlanArtifactSegments(
+        plan.seal,
+        plan.operations,
+        0,
+      )
+    )
+    expectArtifactFailure(() =>
+      serializeWorkspaceSearchMigrationPlanArtifactSegments(
+        plan.seal,
+        plan.operations,
+        WORKSPACE_SEARCH_MIGRATION_PLAN_MAX_TOTAL_SEGMENT_BYTES + 1,
+      )
+    )
   })
 
   test('rejects noncanonical bytes and strict byte ceilings', () => {
