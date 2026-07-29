@@ -81,18 +81,23 @@ import {
   decodeWorkspaceSearchJournalRestorationMaterial,
   serializeWorkspaceSearchJournalSegment,
 } from './migration-journal'
+import {
+  createWorkspaceSearchMigrationFullVerificationConflictRecordKeys,
+} from './migration-full-verification-key'
 import type {
   WorkspaceSearchMigrationJournalAwsGateway,
 } from './migration-journal-aws'
 import {
   WORKSPACE_SEARCH_MIGRATION_PLAN_ARTIFACT_OBJECT_KEY_PREFIX,
 } from './migration-plan-artifact'
-import type {
-  WorkspaceSearchMigrationPrePlanAuthority,
+import {
+  createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks,
+  type WorkspaceSearchMigrationPrePlanAuthority,
 } from './migration-pre-plan-authority-aws'
 import {
   createAwsWorkspaceSearchMigrationRollbackOperationPort,
   createWorkspaceSearchMigrationRollbackStartSentinelAbsentConditionCheck,
+  type WorkspaceSearchMigrationRollbackAuthorityClaim,
   type WorkspaceSearchMigrationRollbackOperationAwsPort,
   workspaceSearchMigrationRollbackFinishTransactionIndex,
   workspaceSearchMigrationRollbackOperationTransactionIndex,
@@ -201,6 +206,9 @@ class RollbackOperationHarness {
   /** Monotonically advancing trusted clock. */
   private nextClockEpoch = Date.parse(rollbackClockStart)
 
+  /** Most recent trusted transaction clock instant. */
+  private lastClockEpoch: number | undefined
+
   /** Next raw transaction failure when selected by a test. */
   nextTransactionError: unknown
 
@@ -227,12 +235,38 @@ class RollbackOperationHarness {
   /** Narrow fresh-authority reader. */
   readonly authorityPort = {
     /**
-     * Returns the exact current fixture authority.
+     * Returns the exact current fixture authority for an exact current claim.
      *
+     * @param claim - Exact current lease, pointer, and receipt claim.
      * @returns Fresh detached current authority.
      */
-    readAuthority: async () =>
-      structuredClone(this.currentAuthority),
+    readAuthority: async (
+      claim: WorkspaceSearchMigrationRollbackAuthorityClaim,
+    ) => {
+      const expected = this.currentAuthorityClaim()
+      if (
+        claim.lease.runId !== expected.lease.runId ||
+        claim.lease.ownerId !== expected.lease.ownerId ||
+        claim.lease.fenceToken !== expected.lease.fenceToken
+      ) {
+        throw new WorkspaceSearchMigrationFailure(
+          'LEASE_LOST',
+          'Rollback lease claim is not current.',
+        )
+      }
+      if (
+        claim.maintenanceEvidenceReceiptDigest !==
+          expected.maintenanceEvidenceReceiptDigest ||
+        claim.maintenanceEvidencePointerRevision !==
+          expected.maintenanceEvidencePointerRevision
+      ) {
+        throw new WorkspaceSearchMigrationFailure(
+          'INVALID_MAINTENANCE_EVIDENCE',
+          'Rollback authority claim is not current.',
+        )
+      }
+      return structuredClone(this.currentAuthority)
+    },
   }
 
   /** Narrow complete-applied-root reader. */
@@ -328,6 +362,7 @@ class RollbackOperationHarness {
       const beforeSend = this.beforeNextTransaction
       this.beforeNextTransaction = undefined
       beforeSend?.()
+      this.requireCurrentAuthorityConditions(command)
       const selectedError = this.nextTransactionError
       this.nextTransactionError = undefined
       const winningTransaction =
@@ -355,6 +390,7 @@ class RollbackOperationHarness {
   /** Adapter-owned trusted clock. */
   readonly clock = (): Date => {
     const current = new Date(this.nextClockEpoch)
+    this.lastClockEpoch = this.nextClockEpoch
     this.nextClockEpoch += 1_000
     return current
   }
@@ -424,6 +460,37 @@ class RollbackOperationHarness {
       },
       evaluatedAt:
         new Date(milliseconds - 1_000).toISOString(),
+    }
+  }
+
+  /**
+   * Replaces the exact current authority returned by strong reads.
+   *
+   * @param authority - Fresh successor lease, pointer, and receipt.
+   */
+  setCurrentAuthority(
+    authority: WorkspaceSearchMigrationPrePlanAuthority,
+  ): void {
+    this.currentAuthority = structuredClone(authority)
+  }
+
+  /**
+   * Returns the exact claim needed to strongly resolve current authority.
+   *
+   * @returns Detached current lease, pointer, and receipt claim.
+   */
+  currentAuthorityClaim():
+    WorkspaceSearchMigrationRollbackAuthorityClaim {
+    return {
+      lease: {
+        runId: this.currentAuthority.lease.runId,
+        ownerId: this.currentAuthority.lease.ownerId,
+        fenceToken: this.currentAuthority.lease.fenceToken,
+      },
+      maintenanceEvidenceReceiptDigest:
+        this.currentAuthority.maintenanceEvidenceReceiptDigest,
+      maintenanceEvidencePointerRevision:
+        this.currentAuthority.maintenanceEvidencePointerRevision,
     }
   }
 
@@ -594,6 +661,40 @@ class RollbackOperationHarness {
   }
 
   /**
+   * Evaluates the three current-authority checks against fake durable state.
+   *
+   * @param command - Exact transaction whose authority checks must still hold.
+   */
+  private requireCurrentAuthorityConditions(
+    command: TransactWriteItemsCommand,
+  ): void {
+    if (this.lastClockEpoch === undefined) {
+      throw new Error('Missing rollback transaction clock.')
+    }
+    const items = requireTransactionItems(command)
+    const expected =
+      createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks({
+        stateTable:
+          this.fixture.configuration.tables['migration-state'],
+        configurationHash: this.fixture.configurationHash,
+        authority: this.currentAuthority,
+        commitAt: new Date(this.lastClockEpoch),
+      })
+    for (let index = 0; index < expected.length; index += 1) {
+      const actual = items[index]
+      const expectedItem = expected[index]
+      if (
+        actual === undefined ||
+        expectedItem === undefined ||
+        createMigrationDigest(actual) !==
+          createMigrationDigest(expectedItem)
+      ) {
+        throw createCancellation(index, items.length)
+      }
+    }
+  }
+
+  /**
    * Advances and applies one transaction after its selected read boundary.
    */
   private advanceScheduledStrongReadTransaction(): void {
@@ -680,7 +781,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
       let state = await context.port.beginRollback({
         expectedRevision:
           context.fixture.appliedState.revision,
-        lease: createLeaseClaim(context.fixture),
+        authority: context.harness.currentAuthorityClaim(),
       })
 
       const startItems = requireTransactionItems(
@@ -701,6 +802,30 @@ describe('Workspace Search rollback AWS operation adapter', () => {
             .verifiedRoot
         ]?.ConditionCheck,
       ).toBeDefined()
+      const verificationKeys =
+        createWorkspaceSearchMigrationFullVerificationConflictRecordKeys({
+          stateTableId:
+            context.fixture.configuration.tables['migration-state']
+              .tableId,
+          configurationHash: context.fixture.configurationHash,
+          runId: context.fixture.executionRun.runId,
+          executionRunDigest:
+            context.fixture.executionRun.executionRunDigest,
+          sealedPlanningAuthorityDigest:
+            context.fixture.sealedPlanningAuthority.authorityDigest,
+        })
+      expect(
+        startItems[
+          workspaceSearchMigrationRollbackStartTransactionIndex
+            .verificationState
+        ]?.ConditionCheck?.Key?.recordKey,
+      ).toEqual({ S: verificationKeys.state })
+      expect(
+        startItems[
+          workspaceSearchMigrationRollbackStartTransactionIndex
+            .verifiedRoot
+        ]?.ConditionCheck?.Key?.recordKey,
+      ).toEqual({ S: verificationKeys.root })
 
       const reverseExpectations: readonly {
         readonly sequence: number
@@ -714,7 +839,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
         const predecessorRevision = state.revision
         state = await context.port.commitRollbackOperation({
           expectedRevision: predecessorRevision,
-          lease: createLeaseClaim(context.fixture),
+          authority: context.harness.currentAuthorityClaim(),
         })
         expect(state.nextSequence).toBe(expectation.sequence - 1)
         const link = requireArrayEntry(
@@ -757,7 +882,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
 
       const root = await context.port.finishRollback({
         expectedRevision: state.revision,
-        lease: createLeaseClaim(context.fixture),
+        authority: context.harness.currentAuthorityClaim(),
       })
       expect(root.terminalState.status).toBe('rolled-back')
       expect(root.terminalReceipt?.sequence).toBe(1)
@@ -796,7 +921,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
       const initial = await context.port.beginRollback({
         expectedRevision:
           context.fixture.appliedState.revision,
-        lease: createLeaseClaim(context.fixture),
+        authority: context.harness.currentAuthorityClaim(),
       })
 
       const restarted = createRollbackPort(
@@ -809,7 +934,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
           await restarted.beginRollback({
             expectedRevision:
               context.fixture.appliedState.revision,
-            lease: createLeaseClaim(context.fixture),
+            authority: context.harness.currentAuthorityClaim(),
           })
         ).stateDigest,
       ).toBe(initial.stateDigest)
@@ -818,46 +943,204 @@ describe('Workspace Search rollback AWS operation adapter', () => {
         new Error('tenant-secret-step-response-loss')
       const afterThird = await restarted.commitRollbackOperation({
         expectedRevision: initial.revision,
-        lease: createLeaseClaim(context.fixture),
+        authority: context.harness.currentAuthorityClaim(),
       })
       const afterSecond =
         await restarted.commitRollbackOperation({
           expectedRevision: afterThird.revision,
-          lease: createLeaseClaim(context.fixture),
+          authority: context.harness.currentAuthorityClaim(),
         })
       const oldRetry =
         await restarted.commitRollbackOperation({
           expectedRevision: initial.revision,
-          lease: createLeaseClaim(context.fixture),
+          authority: context.harness.currentAuthorityClaim(),
         })
       expect(oldRetry.stateDigest).toBe(afterSecond.stateDigest)
 
       const afterFirst =
         await restarted.commitRollbackOperation({
           expectedRevision: afterSecond.revision,
-          lease: createLeaseClaim(context.fixture),
+          authority: context.harness.currentAuthorityClaim(),
         })
       context.harness.nextTransactionError =
         new Error('tenant-secret-finish-response-loss')
       const root = await restarted.finishRollback({
         expectedRevision: afterFirst.revision,
-        lease: createLeaseClaim(context.fixture),
+        authority: context.harness.currentAuthorityClaim(),
       })
 
       const retryAfterFinish =
         await restarted.commitRollbackOperation({
           expectedRevision: initial.revision,
-          lease: createLeaseClaim(context.fixture),
+          authority: context.harness.currentAuthorityClaim(),
         })
       expect(retryAfterFinish.status).toBe('rolled-back')
       expect(
         (
           await restarted.finishRollback({
             expectedRevision: afterFirst.revision,
-            lease: createLeaseClaim(context.fixture),
+            authority: context.harness.currentAuthorityClaim(),
           })
         ).rootDigest,
       ).toBe(root.rootDigest)
+    },
+    15_000,
+  )
+
+  test(
+    'adopts renewed and takeover authority across begin, restart, steps, and finish',
+    async () => {
+      const context = createTestContext()
+      const beginAuthority = createSuccessorAuthority(
+        context.fixture.currentAuthority,
+        {
+          ownerId,
+          fenceToken: 7,
+          pointerRevision: 13,
+          commitAt: '2026-07-29T01:21:00.000Z',
+        },
+      )
+      context.harness.setCurrentAuthority(beginAuthority)
+      context.harness.setClock('2026-07-29T01:21:00.000Z')
+      let state = await context.port.beginRollback({
+        expectedRevision: context.fixture.appliedState.revision,
+        authority: context.harness.currentAuthorityClaim(),
+      })
+      expect(state.currentAuthority.maintenanceEvidencePointerRevision)
+        .toBe(13)
+      expect(state.runState.maintenanceEvidenceReceipt)
+        .toEqual(beginAuthority.maintenanceEvidenceReceipt)
+
+      state = await context.port.commitRollbackOperation({
+        expectedRevision: state.revision,
+        authority: context.harness.currentAuthorityClaim(),
+      })
+      const staleClaim = context.harness.currentAuthorityClaim()
+      const renewedAuthority = createSuccessorAuthority(
+        beginAuthority,
+        {
+          ownerId,
+          fenceToken: 7,
+          pointerRevision: 14,
+          commitAt: '2026-07-29T01:21:10.000Z',
+        },
+      )
+      context.harness.setCurrentAuthority(renewedAuthority)
+      context.harness.setClock('2026-07-29T01:21:10.000Z')
+      const transactionCountBeforeStale =
+        context.harness.transactions.length
+      const staleFailure = await captureMigrationFailure(() =>
+        context.port.commitRollbackOperation({
+          expectedRevision: state.revision,
+          authority: staleClaim,
+        })
+      )
+      expect(staleFailure.code).toBe(
+        'INVALID_MAINTENANCE_EVIDENCE',
+      )
+      expect(context.harness.transactions).toHaveLength(
+        transactionCountBeforeStale,
+      )
+
+      state = await context.port.commitRollbackOperation({
+        expectedRevision: state.revision,
+        authority: context.harness.currentAuthorityClaim(),
+      })
+      expect(state.currentAuthority.maintenanceEvidencePointerRevision)
+        .toBe(14)
+      expect(state.runState.maintenanceEvidenceReceipt)
+        .toEqual(renewedAuthority.maintenanceEvidenceReceipt)
+
+      const takeoverAuthority = createSuccessorAuthority(
+        renewedAuthority,
+        {
+          ownerId: 'rollback-takeover-owner',
+          fenceToken: 8,
+          pointerRevision: 15,
+          commitAt: '2026-07-29T01:21:20.000Z',
+        },
+      )
+      const preTakeoverClaim =
+        context.harness.currentAuthorityClaim()
+      context.harness.setClock('2026-07-29T01:21:20.000Z')
+      context.harness.beforeNextTransaction = () => {
+        context.harness.setCurrentAuthority(takeoverAuthority)
+      }
+      const transactionCountBeforeTakeoverRace =
+        context.harness.transactions.length
+      const takeoverRaceFailure =
+        await captureMigrationFailure(() =>
+          context.port.commitRollbackOperation({
+            expectedRevision: state.revision,
+            authority: preTakeoverClaim,
+          })
+        )
+      expect(takeoverRaceFailure.code).toBe('LEASE_LOST')
+      expect(context.harness.transactions).toHaveLength(
+        transactionCountBeforeTakeoverRace + 1,
+      )
+
+      const transactionCountBeforeOldLease =
+        context.harness.transactions.length
+      const oldLeaseFailure = await captureMigrationFailure(() =>
+        context.port.commitRollbackOperation({
+          expectedRevision: state.revision,
+          authority: preTakeoverClaim,
+        })
+      )
+      expect(oldLeaseFailure.code).toBe('LEASE_LOST')
+      expect(context.harness.transactions).toHaveLength(
+        transactionCountBeforeOldLease,
+      )
+
+      context.harness.setClock('2026-07-29T01:21:20.000Z')
+      const restarted = createRollbackPort(
+        context.fixture,
+        context.harness,
+        context.applyBinding,
+      )
+      state = await restarted.commitRollbackOperation({
+        expectedRevision: state.revision,
+        authority: context.harness.currentAuthorityClaim(),
+      })
+      expect(state.currentAuthority.ownerId).toBe(
+        'rollback-takeover-owner',
+      )
+      expect(state.currentAuthority.fenceToken).toBe(8)
+      const takeoverReceipt =
+        await restarted.readRollbackReceipt(1)
+      expect(takeoverReceipt?.currentAuthority).toEqual(
+        state.currentAuthority,
+      )
+      expect(
+        takeoverReceipt?.rollbackReceipt
+          .maintenanceEvidenceReceiptDigest,
+      ).toBe(
+        takeoverAuthority.maintenanceEvidenceReceiptDigest,
+      )
+
+      const finishAuthority = createSuccessorAuthority(
+        takeoverAuthority,
+        {
+          ownerId: 'rollback-takeover-owner',
+          fenceToken: 8,
+          pointerRevision: 16,
+          commitAt: '2026-07-29T01:21:30.000Z',
+        },
+      )
+      context.harness.setCurrentAuthority(finishAuthority)
+      context.harness.setClock('2026-07-29T01:21:30.000Z')
+      const root = await restarted.finishRollback({
+        expectedRevision: state.revision,
+        authority: context.harness.currentAuthorityClaim(),
+      })
+      expect(root.finalAuthority.maintenanceEvidencePointerRevision)
+        .toBe(16)
+      expect(root.terminalState.currentAuthority).toEqual(
+        root.finalAuthority,
+      )
+      expect(root.terminalState.runState.maintenanceEvidenceReceipt)
+        .toEqual(finishAuthority.maintenanceEvidenceReceipt)
     },
     15_000,
   )
@@ -867,7 +1150,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
     await missingState.port.beginRollback({
       expectedRevision:
         missingState.fixture.appliedState.revision,
-      lease: createLeaseClaim(missingState.fixture),
+      authority: missingState.harness.currentAuthorityClaim(),
     })
     const startItems = requireTransactionItems(
       requireArrayEntry(missingState.harness.transactions, 0),
@@ -892,11 +1175,11 @@ describe('Workspace Search rollback AWS operation adapter', () => {
     const initial = await missingReceipt.port.beginRollback({
       expectedRevision:
         missingReceipt.fixture.appliedState.revision,
-      lease: createLeaseClaim(missingReceipt.fixture),
+      authority: missingReceipt.harness.currentAuthorityClaim(),
     })
     await missingReceipt.port.commitRollbackOperation({
       expectedRevision: initial.revision,
-      lease: createLeaseClaim(missingReceipt.fixture),
+      authority: missingReceipt.harness.currentAuthorityClaim(),
     })
     const operationItems = requireTransactionItems(
       requireArrayEntry(missingReceipt.harness.transactions, 1),
@@ -921,17 +1204,17 @@ describe('Workspace Search rollback AWS operation adapter', () => {
     let rolling = await missingRoot.port.beginRollback({
       expectedRevision:
         missingRoot.fixture.appliedState.revision,
-      lease: createLeaseClaim(missingRoot.fixture),
+      authority: missingRoot.harness.currentAuthorityClaim(),
     })
     for (let remaining = 3; remaining > 0; remaining -= 1) {
       rolling = await missingRoot.port.commitRollbackOperation({
         expectedRevision: rolling.revision,
-        lease: createLeaseClaim(missingRoot.fixture),
+        authority: missingRoot.harness.currentAuthorityClaim(),
       })
     }
     await missingRoot.port.finishRollback({
       expectedRevision: rolling.revision,
-      lease: createLeaseClaim(missingRoot.fixture),
+      authority: missingRoot.harness.currentAuthorityClaim(),
     })
     const finishItems = requireTransactionItems(
       requireArrayEntry(missingRoot.harness.transactions, 4),
@@ -964,18 +1247,18 @@ describe('Workspace Search rollback AWS operation adapter', () => {
       await missingTerminalState.port.beginRollback({
         expectedRevision:
           missingTerminalState.fixture.appliedState.revision,
-        lease: createLeaseClaim(missingTerminalState.fixture),
+        authority: missingTerminalState.harness.currentAuthorityClaim(),
       })
     for (let remaining = 3; remaining > 0; remaining -= 1) {
       terminalPredecessor =
         await missingTerminalState.port.commitRollbackOperation({
           expectedRevision: terminalPredecessor.revision,
-          lease: createLeaseClaim(missingTerminalState.fixture),
+          authority: missingTerminalState.harness.currentAuthorityClaim(),
         })
     }
     await missingTerminalState.port.finishRollback({
       expectedRevision: terminalPredecessor.revision,
-      lease: createLeaseClaim(missingTerminalState.fixture),
+      authority: missingTerminalState.harness.currentAuthorityClaim(),
     })
     const terminalItems = requireTransactionItems(
       requireArrayEntry(
@@ -1011,7 +1294,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
     const context = createTestContext()
     const state = await context.port.beginRollback({
       expectedRevision: context.fixture.appliedState.revision,
-      lease: createLeaseClaim(context.fixture),
+      authority: context.harness.currentAuthorityClaim(),
     })
     const next = requireArrayEntry(context.fixture.links, 2)
     context.harness.replaceTarget(next, {
@@ -1025,7 +1308,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
     const failure = await captureMigrationFailure(() =>
       context.port.commitRollbackOperation({
         expectedRevision: state.revision,
-        lease: createLeaseClaim(context.fixture),
+        authority: context.harness.currentAuthorityClaim(),
       })
     )
     expect(failure.code).toBe('ROLLBACK_TARGET_DRIFT')
@@ -1041,7 +1324,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
     const journalState = await journalContext.port.beginRollback({
       expectedRevision:
         journalContext.fixture.appliedState.revision,
-      lease: createLeaseClaim(journalContext.fixture),
+      authority: journalContext.harness.currentAuthorityClaim(),
     })
     const selected = requireArrayEntry(
       journalContext.fixture.links,
@@ -1059,7 +1342,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
         await captureMigrationFailure(() =>
           journalContext.port.commitRollbackOperation({
             expectedRevision: journalState.revision,
-            lease: createLeaseClaim(journalContext.fixture),
+            authority: journalContext.harness.currentAuthorityClaim(),
           })
         )
       ).code,
@@ -1068,7 +1351,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
     const rowContext = createTestContext()
     const rowState = await rowContext.port.beginRollback({
       expectedRevision: rowContext.fixture.appliedState.revision,
-      lease: createLeaseClaim(rowContext.fixture),
+      authority: rowContext.harness.currentAuthorityClaim(),
     })
     const projection = createApplyProjection(
       requireArrayEntry(rowContext.fixture.links, 2).receipt,
@@ -1086,7 +1369,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
         await captureMigrationFailure(() =>
           rowContext.port.commitRollbackOperation({
             expectedRevision: rowState.revision,
-            lease: createLeaseClaim(rowContext.fixture),
+            authority: rowContext.harness.currentAuthorityClaim(),
           })
         )
       ).code,
@@ -1101,7 +1384,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
       winner.harness.setClock('2026-07-29T01:21:05.000Z')
       const winnerInitial = await winner.port.beginRollback({
         expectedRevision: winner.fixture.appliedState.revision,
-        lease: createLeaseClaim(winner.fixture),
+        authority: winner.harness.currentAuthorityClaim(),
       })
       const winnerBeginTransaction = requireArrayEntry(
         winner.harness.transactions,
@@ -1118,7 +1401,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
       )
       let state = await context.port.beginRollback({
         expectedRevision: context.fixture.appliedState.revision,
-        lease: createLeaseClaim(context.fixture),
+        authority: context.harness.currentAuthorityClaim(),
       })
       expect(state.stateDigest).toBe(winnerInitial.stateDigest)
       expect(state.runState.updatedAt).toBe(
@@ -1136,7 +1419,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
           await captureMigrationFailure(() =>
             context.port.commitRollbackOperation({
               expectedRevision: state.revision,
-              lease: createLeaseClaim(context.fixture),
+              authority: context.harness.currentAuthorityClaim(),
             })
           )
         ).code,
@@ -1156,7 +1439,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
       )
       state = await context.port.commitRollbackOperation({
         expectedRevision: state.revision,
-        lease: createLeaseClaim(context.fixture),
+        authority: context.harness.currentAuthorityClaim(),
       })
       expect(state.runState.updatedAt).toBe(
         '2026-07-29T01:21:10.000Z',
@@ -1165,7 +1448,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
       while (state.nextSequence > 0) {
         state = await context.port.commitRollbackOperation({
           expectedRevision: state.revision,
-          lease: createLeaseClaim(context.fixture),
+          authority: context.harness.currentAuthorityClaim(),
         })
       }
 
@@ -1183,7 +1466,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
           await captureMigrationFailure(() =>
             context.port.finishRollback({
               expectedRevision: state.revision,
-              lease: createLeaseClaim(context.fixture),
+              authority: context.harness.currentAuthorityClaim(),
             })
           )
         ).code,
@@ -1203,7 +1486,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
       )
       const root = await context.port.finishRollback({
         expectedRevision: state.revision,
-        lease: createLeaseClaim(context.fixture),
+        authority: context.harness.currentAuthorityClaim(),
       })
       expect(root.finishedAt).toBe('2026-07-29T01:21:20.000Z')
       expect(root.rollbackStartedAt).toBe(
@@ -1217,12 +1500,12 @@ describe('Workspace Search rollback AWS operation adapter', () => {
     const context = createTestContext()
     let state = await context.port.beginRollback({
       expectedRevision: context.fixture.appliedState.revision,
-      lease: createLeaseClaim(context.fixture),
+      authority: context.harness.currentAuthorityClaim(),
     })
     while (state.nextSequence > 0) {
       state = await context.port.commitRollbackOperation({
         expectedRevision: state.revision,
-        lease: createLeaseClaim(context.fixture),
+        authority: context.harness.currentAuthorityClaim(),
       })
     }
     context.harness.nextTransactionError = createCancellation(
@@ -1233,7 +1516,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
     await captureMigrationFailure(() =>
       context.port.finishRollback({
         expectedRevision: state.revision,
-        lease: createLeaseClaim(context.fixture),
+        authority: context.harness.currentAuthorityClaim(),
       })
     )
     const finishTransaction = requireArrayEntry(
@@ -1261,11 +1544,11 @@ describe('Workspace Search rollback AWS operation adapter', () => {
     )
     let state = await context.port.beginRollback({
       expectedRevision: context.fixture.appliedState.revision,
-      lease: createLeaseClaim(context.fixture),
+      authority: context.harness.currentAuthorityClaim(),
     })
     state = await context.port.commitRollbackOperation({
       expectedRevision: state.revision,
-      lease: createLeaseClaim(context.fixture),
+      authority: context.harness.currentAuthorityClaim(),
     })
     const link = requireArrayEntry(context.fixture.links, 1)
     context.harness.beforeNextTransaction = () => {
@@ -1286,7 +1569,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
     const failure = await captureMigrationFailure(() =>
       context.port.commitRollbackOperation({
         expectedRevision: state.revision,
-        lease: createLeaseClaim(context.fixture),
+        authority: context.harness.currentAuthorityClaim(),
       })
     )
     expect(failure.code).toBe('ROLLBACK_TARGET_DRIFT')
@@ -1322,7 +1605,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
     const returnedFailure = await captureMigrationFailure(() =>
       returnedPort.beginRollback({
         expectedRevision: returned.fixture.appliedState.revision,
-        lease: createLeaseClaim(returned.fixture),
+        authority: returned.harness.currentAuthorityClaim(),
       })
     )
     expect(returnedFailure.code).toBe('INVALID_STATE')
@@ -1345,7 +1628,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
     const thrownFailure = await captureMigrationFailure(() =>
       thrownPort.beginRollback({
         expectedRevision: thrown.fixture.appliedState.revision,
-        lease: createLeaseClaim(thrown.fixture),
+        authority: thrown.harness.currentAuthorityClaim(),
       })
     )
     expect(thrownFailure.code).toBe('INVALID_STATE')
@@ -1363,7 +1646,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
         transaction.port.beginRollback({
           expectedRevision:
             transaction.fixture.appliedState.revision,
-          lease: createLeaseClaim(transaction.fixture),
+          authority: transaction.harness.currentAuthorityClaim(),
         })
       )
     expect(transactionFailure.code).toBe(
@@ -1387,7 +1670,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
         context.port.beginRollback({
           expectedRevision:
             context.fixture.appliedState.revision,
-          lease: createLeaseClaim(context.fixture),
+          authority: context.harness.currentAuthorityClaim(),
         })
       )
       const expectedCode: WorkspaceSearchMigrationFailureCode =
@@ -1416,14 +1699,14 @@ describe('Workspace Search rollback AWS operation adapter', () => {
       const state = await context.port.beginRollback({
         expectedRevision:
           context.fixture.appliedState.revision,
-        lease: createLeaseClaim(context.fixture),
+        authority: context.harness.currentAuthorityClaim(),
       })
       context.harness.nextTransactionError =
         createCancellation(failedIndex, index.count)
       const failure = await captureMigrationFailure(() =>
         context.port.commitRollbackOperation({
           expectedRevision: state.revision,
-          lease: createLeaseClaim(context.fixture),
+          authority: context.harness.currentAuthorityClaim(),
         })
       )
       const expectedCode: WorkspaceSearchMigrationFailureCode =
@@ -1452,12 +1735,12 @@ describe('Workspace Search rollback AWS operation adapter', () => {
       let state = await context.port.beginRollback({
         expectedRevision:
           context.fixture.appliedState.revision,
-        lease: createLeaseClaim(context.fixture),
+        authority: context.harness.currentAuthorityClaim(),
       })
       for (let sequence = 3; sequence > 0; sequence -= 1) {
         state = await context.port.commitRollbackOperation({
           expectedRevision: state.revision,
-          lease: createLeaseClaim(context.fixture),
+          authority: context.harness.currentAuthorityClaim(),
         })
       }
       context.harness.nextTransactionError =
@@ -1465,7 +1748,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
       const failure = await captureMigrationFailure(() =>
         context.port.finishRollback({
           expectedRevision: state.revision,
-          lease: createLeaseClaim(context.fixture),
+          authority: context.harness.currentAuthorityClaim(),
         })
       )
       const expectedCode: WorkspaceSearchMigrationFailureCode =
@@ -1489,7 +1772,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
     const mixed = createTestContext()
     const mixedState = await mixed.port.beginRollback({
       expectedRevision: mixed.fixture.appliedState.revision,
-      lease: createLeaseClaim(mixed.fixture),
+      authority: mixed.harness.currentAuthorityClaim(),
     })
     const operationIndex =
       workspaceSearchMigrationRollbackOperationTransactionIndex
@@ -1508,7 +1791,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
     const mixedFailure = await captureMigrationFailure(() =>
       mixed.port.commitRollbackOperation({
         expectedRevision: mixedState.revision,
-        lease: createLeaseClaim(mixed.fixture),
+        authority: mixed.harness.currentAuthorityClaim(),
       })
     )
     expect(mixedFailure.code).toBe('INVALID_STATE')
@@ -1518,7 +1801,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
     const transientState = await transient.port.beginRollback({
       expectedRevision:
         transient.fixture.appliedState.revision,
-      lease: createLeaseClaim(transient.fixture),
+      authority: transient.harness.currentAuthorityClaim(),
     })
     transient.harness.nextTransactionError =
       createCancellationWithCodes(
@@ -1535,7 +1818,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
         await captureMigrationFailure(() =>
           transient.port.commitRollbackOperation({
             expectedRevision: transientState.revision,
-            lease: createLeaseClaim(transient.fixture),
+            authority: transient.harness.currentAuthorityClaim(),
           })
         )
       ).code,
@@ -1546,14 +1829,28 @@ describe('Workspace Search rollback AWS operation adapter', () => {
     const zero = createTestContext(0)
     const rolling = await zero.port.beginRollback({
       expectedRevision: zero.fixture.appliedState.revision,
-      lease: createLeaseClaim(zero.fixture),
+      authority: zero.harness.currentAuthorityClaim(),
     })
+    const zeroFinishAuthority = createSuccessorAuthority(
+      zero.fixture.currentAuthority,
+      {
+        ownerId,
+        fenceToken: 7,
+        pointerRevision: 13,
+        commitAt: '2026-07-29T01:21:10.000Z',
+      },
+    )
+    zero.harness.setCurrentAuthority(zeroFinishAuthority)
+    zero.harness.setClock('2026-07-29T01:21:10.000Z')
     const root = await zero.port.finishRollback({
       expectedRevision: rolling.revision,
-      lease: createLeaseClaim(zero.fixture),
+      authority: zero.harness.currentAuthorityClaim(),
     })
     expect(root.terminalReceipt).toBeNull()
     expect(root.terminalState.restored).toBe(0)
+    expect(root.terminalState.currentAuthority).toEqual(
+      root.finalAuthority,
+    )
 
     const boundary = createTestContext(
       3,
@@ -1563,7 +1860,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
       boundary.port.beginRollback({
         expectedRevision:
           boundary.fixture.appliedState.revision,
-        lease: createLeaseClaim(boundary.fixture),
+        authority: boundary.harness.currentAuthorityClaim(),
       })
     )
     expect(failure.code).toBe('INVALID_JOURNAL')
@@ -1581,7 +1878,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
       })
     await probe.port.beginRollback({
       expectedRevision: probe.fixture.appliedState.revision,
-      lease: createLeaseClaim(probe.fixture),
+      authority: probe.harness.currentAuthorityClaim(),
     })
     const startPut = requireTransactionItem(
       requireTransactionItems(
@@ -1605,7 +1902,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
       context.port.beginRollback({
         expectedRevision:
           context.fixture.appliedState.revision,
-        lease: createLeaseClaim(context.fixture),
+        authority: context.harness.currentAuthorityClaim(),
       })
     )
     expect(failure.code).toBe('INVALID_STATE')
@@ -1630,7 +1927,7 @@ describe('Workspace Search rollback AWS operation adapter', () => {
             raced.port.beginRollback({
               expectedRevision:
                 raced.fixture.appliedState.revision,
-              lease: createLeaseClaim(raced.fixture),
+              authority: raced.harness.currentAuthorityClaim(),
             })
           )
         ).code,
@@ -2153,6 +2450,77 @@ function createCurrentAuthority(
     maintenanceEvidencePointerRevision: 12,
     maintenanceEvidenceReceipt: input.receipt,
     evaluatedAt: input.evaluatedAt,
+  }
+}
+
+/**
+ * Exact identity and commit time for one renewed authority fixture.
+ */
+type CreateSuccessorAuthorityInput = {
+  /** Lease owner selected by same-fence renewal or takeover. */
+  readonly ownerId: string
+  /** Nondecreasing takeover fence selected by the successor lease. */
+  readonly fenceToken: number
+  /** Strictly increasing maintenance pointer revision. */
+  readonly pointerRevision: number
+  /** Exact transaction time authorized by the successor. */
+  readonly commitAt: string
+}
+
+/**
+ * Creates one fresh same-fence or takeover authority successor.
+ *
+ * @param predecessor - Exact previously adopted authority.
+ * @param input - Successor owner, fence, pointer, and commit time.
+ * @returns Exact fresh authority with a new fence-bound receipt.
+ */
+function createSuccessorAuthority(
+  predecessor: WorkspaceSearchMigrationPrePlanAuthority,
+  input: CreateSuccessorAuthorityInput,
+): WorkspaceSearchMigrationPrePlanAuthority {
+  const commitMilliseconds = Date.parse(input.commitAt)
+  const evaluatedMilliseconds = commitMilliseconds - 1_000
+  const validatedMilliseconds = commitMilliseconds - 2_000
+  const oldestObservationMilliseconds =
+    commitMilliseconds - 30_000
+  const receipt: WorkspaceSearchMaintenanceEvidenceReceipt = {
+    runId: predecessor.lease.runId,
+    evidenceDigest: digest(
+      `maintenance-evidence:${input.fenceToken}:` +
+        `${input.pointerRevision}`,
+    ),
+    evidenceLocator:
+      'workspace-search/v1/maintenance/' +
+      `${input.pointerRevision}.json`,
+    runtimeRevision:
+      predecessor.maintenanceEvidenceReceipt.runtimeRevision + 1,
+    fenceToken: input.fenceToken,
+    validatedAt:
+      new Date(validatedMilliseconds).toISOString(),
+    oldestObservationAt:
+      new Date(oldestObservationMilliseconds).toISOString(),
+    validUntil: new Date(
+      oldestObservationMilliseconds + 300_001,
+    ).toISOString(),
+  }
+  return {
+    configurationHash: predecessor.configurationHash,
+    stateTableId: predecessor.stateTableId,
+    lease: {
+      runId: predecessor.lease.runId,
+      ownerId: input.ownerId,
+      fenceToken: input.fenceToken,
+      heartbeatAt:
+        new Date(evaluatedMilliseconds).toISOString(),
+      expiresAt:
+        new Date(evaluatedMilliseconds + 60_000).toISOString(),
+    },
+    maintenanceEvidenceReceiptDigest:
+      createMigrationDigest(receipt),
+    maintenanceEvidencePointerRevision: input.pointerRevision,
+    maintenanceEvidenceReceipt: receipt,
+    evaluatedAt:
+      new Date(evaluatedMilliseconds).toISOString(),
   }
 }
 
@@ -2926,29 +3294,6 @@ function createTableIds(
 }
 
 /**
- * Creates the exact caller lease claim for one fixture.
- *
- * @param fixture - Complete rollback fixture.
- * @returns Exact run, owner, and fence claim.
- */
-function createLeaseClaim(
-  fixture: RollbackOperationFixture,
-): {
-  /** Exact selected run identifier. */
-  readonly runId: string
-  /** Exact active owner identifier. */
-  readonly ownerId: string
-  /** Exact active takeover fence. */
-  readonly fenceToken: number
-} {
-  return {
-    runId: fixture.executionRun.runId,
-    ownerId,
-    fenceToken: 7,
-  }
-}
-
-/**
  * Creates one strict hidden apply-row projection.
  *
  * @param receipt - Exact forward apply receipt.
@@ -2977,9 +3322,8 @@ function createApplyProjection(
 function createVerificationConflictCondition(
   fixture: RollbackOperationFixture,
 ): TransactWriteItem {
-  const bindingDigest = createMigrationDigest({
-    kind: 'workspace-search-full-verification-run-binding',
-    version: 1,
+  const keys =
+    createWorkspaceSearchMigrationFullVerificationConflictRecordKeys({
     stateTableId:
       fixture.configuration.tables['migration-state'].tableId,
     configurationHash: fixture.configurationHash,
@@ -2995,7 +3339,7 @@ function createVerificationConflictCondition(
       Key: {
         migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
         recordKey: {
-          S: `full-verification-state/v1/${bindingDigest}`,
+          S: keys.state,
         },
       },
       ConditionExpression: 'attribute_not_exists(#recordKey)',

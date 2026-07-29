@@ -73,6 +73,10 @@ import {
   type WorkspaceSearchMigrationFullVerificationResult,
 } from './migration-full-verification'
 import {
+  createWorkspaceSearchMigrationFullVerificationConflictRecordKeys,
+  type WorkspaceSearchMigrationFullVerificationConflictRecordKeys,
+} from './migration-full-verification-key'
+import {
   decodeWorkspaceSearchMigrationFullVerificationProgressSnapshot,
   createWorkspaceSearchMigrationFullVerificationPageCommandIdentity,
   createWorkspaceSearchMigrationFullVerificationPageReceipt,
@@ -135,10 +139,8 @@ const verificationReceiptRecordKind =
   'workspace-search-migration-full-verification-page-receipt-record'
 const verifiedRootRecordKind =
   'workspace-search-migration-full-verification-verified-root-record'
-const verificationStateRecordKeyPrefix = 'full-verification-state/v1'
 const verificationReceiptRecordKeyPrefix =
   'full-verification-page-receipt/v1'
-const verifiedRootRecordKeyPrefix = 'full-verification-verified-root/v1'
 const pageTransactionItemCount = 10
 const publicationTransactionItemCount = 10
 
@@ -546,8 +548,9 @@ type FullVerificationBinding = {
     WorkspaceSearchMigrationSealedPlanningAuthorityV2
   /** Exact immutable execution admission. */
   readonly executionRun: WorkspaceSearchMigrationExecutionRun
-  /** Stable deterministic adapter row-addressing digest. */
-  readonly recordBindingDigest: string
+  /** Stable deterministic binding and conflict row keys. */
+  readonly recordKeys:
+    WorkspaceSearchMigrationFullVerificationConflictRecordKeys
 }
 
 /**
@@ -1825,9 +1828,8 @@ function createFullVerificationBinding(
   ) {
     return failVerification('CONFIGURATION_DRIFT')
   }
-  const recordBindingDigest = createMigrationDigest({
-    kind: 'workspace-search-full-verification-run-binding',
-    version: verificationRecordVersion,
+  const recordKeys =
+    createWorkspaceSearchMigrationFullVerificationConflictRecordKeys({
     stateTableId: stateTable.tableId,
     configurationHash,
     runId: executionRun.runId,
@@ -1845,7 +1847,7 @@ function createFullVerificationBinding(
     executionBoundary,
     sealedPlanningAuthority,
     executionRun,
-    recordBindingDigest,
+    recordKeys,
   }
 }
 
@@ -2955,8 +2957,7 @@ function requireRecordHeader(
 function createVerificationStateRecordKey(
   binding: FullVerificationBinding,
 ): string {
-  return `${verificationStateRecordKeyPrefix}` +
-    `/${binding.recordBindingDigest}`
+  return binding.recordKeys.state
 }
 
 /**
@@ -2971,7 +2972,7 @@ function createVerificationReceiptRecordKey(
   commandDigest: string,
 ): string {
   return `${verificationReceiptRecordKeyPrefix}` +
-    `/${binding.recordBindingDigest}/${commandDigest}`
+    `/${binding.recordKeys.bindingDigest}/${commandDigest}`
 }
 
 /**
@@ -2983,8 +2984,7 @@ function createVerificationReceiptRecordKey(
 function createVerifiedRootRecordKey(
   binding: FullVerificationBinding,
 ): string {
-  return `${verifiedRootRecordKeyPrefix}` +
-    `/${binding.recordBindingDigest}`
+  return binding.recordKeys.root
 }
 
 /**

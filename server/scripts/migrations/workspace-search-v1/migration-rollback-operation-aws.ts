@@ -84,6 +84,9 @@ import {
   detachWorkspaceSearchMigrationPlanningConfiguration,
 } from './migration-planning-join'
 import {
+  createWorkspaceSearchMigrationFullVerificationConflictRecordKeys,
+} from './migration-full-verification-key'
+import {
   createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks,
   type WorkspaceSearchMigrationPrePlanAuthority,
 } from './migration-pre-plan-authority-aws'
@@ -115,6 +118,7 @@ import {
   serializeWorkspaceSearchMigrationRollbackPersistenceState,
   serializeWorkspaceSearchMigrationRollbackStartRoot,
   serializeWorkspaceSearchMigrationRolledBackRoot,
+  validateWorkspaceSearchMigrationRollbackAuthoritySuccessor,
   type WorkspaceSearchMigrationRollbackOperationReceipt,
   type WorkspaceSearchMigrationRollbackPersistenceState,
   type WorkspaceSearchMigrationRollbackStartRoot,
@@ -312,24 +316,29 @@ export function createWorkspaceSearchMigrationRollbackStartSentinelAbsentConditi
 export type WorkspaceSearchMigrationRollbackOperationAwsClock = () => Date
 
 /**
+ * Exact current authority claim supplied for one rollback write.
+ */
+export type WorkspaceSearchMigrationRollbackAuthorityClaim = {
+  /** Exact active lease identity. */
+  readonly lease: WorkspaceSearchMigrationLeaseClaim
+  /** Digest of the current immutable maintenance receipt. */
+  readonly maintenanceEvidenceReceiptDigest: string
+  /** Exact current maintenance pointer revision. */
+  readonly maintenanceEvidencePointerRevision: number
+}
+
+/**
  * Narrow current-authority reader used before every rollback write.
  */
 export interface WorkspaceSearchMigrationRollbackOperationAuthorityReader {
   /**
    * Resolves the exact current lease, pointer, and immutable receipt.
    *
-   * @param claim - Exact caller lease and admission-time receipt claim.
+   * @param claim - Exact caller lease, current pointer, and receipt claim.
    * @returns Fresh strongly resolved durable authority.
    */
   readAuthority(
-    claim: {
-      /** Exact active lease identity. */
-      readonly lease: WorkspaceSearchMigrationLeaseClaim
-      /** Digest of the current immutable maintenance receipt. */
-      readonly maintenanceEvidenceReceiptDigest: string
-      /** Exact current maintenance pointer revision. */
-      readonly maintenanceEvidencePointerRevision: number
-    },
+    claim: WorkspaceSearchMigrationRollbackAuthorityClaim,
   ): Promise<WorkspaceSearchMigrationPrePlanAuthority>
 }
 
@@ -394,8 +403,8 @@ export interface WorkspaceSearchMigrationRollbackOperationAwsTransport {
 export type WorkspaceSearchMigrationRollbackCommandInput = {
   /** Exact durable predecessor revision expected by the caller. */
   readonly expectedRevision: number
-  /** Exact active lease identity authorizing the transition. */
-  readonly lease: WorkspaceSearchMigrationLeaseClaim
+  /** Exact current lease, pointer, and receipt authorizing the transition. */
+  readonly authority: WorkspaceSearchMigrationRollbackAuthorityClaim
 }
 
 /**
@@ -472,7 +481,7 @@ export interface WorkspaceSearchMigrationRollbackOperationAwsPort {
   /**
    * Atomically enters rollback from the complete applied root.
    *
-   * @param input - Exact predecessor revision and active lease.
+   * @param input - Exact predecessor revision and current authority claim.
    * @returns Current durable rolling-back state, including later progress on retry.
    */
   beginRollback(
@@ -482,7 +491,7 @@ export interface WorkspaceSearchMigrationRollbackOperationAwsPort {
   /**
    * Restores the adapter-selected next journal preimage atomically.
    *
-   * @param input - Exact predecessor revision and active lease.
+   * @param input - Exact predecessor revision and current authority claim.
    * @returns Current durable rollback state, including later progress on retry.
    */
   commitRollbackOperation(
@@ -492,7 +501,7 @@ export interface WorkspaceSearchMigrationRollbackOperationAwsPort {
   /**
    * Publishes the immutable terminal root at the zero journal head.
    *
-   * @param input - Exact zero-head predecessor revision and active lease.
+   * @param input - Exact zero-head revision and current authority claim.
    * @returns Exact immutable rolled-back root.
    */
   finishRollback(
@@ -621,8 +630,9 @@ type PreparedRollbackDependencies = {
 type PreparedRollbackCommand = {
   /** Exact expected durable predecessor revision. */
   readonly expectedRevision: number
-  /** Exact active lease identity. */
-  readonly lease: WorkspaceSearchMigrationLeaseClaim
+  /** Detached exact current authority claim. */
+  readonly authority:
+    WorkspaceSearchMigrationRollbackAuthorityClaim
 }
 
 /**
@@ -873,7 +883,7 @@ implements WorkspaceSearchMigrationRollbackOperationAwsPort {
   /**
    * Atomically starts complete-root rollback.
    *
-   * @param input - Exact predecessor revision and lease.
+   * @param input - Exact predecessor revision and current authority claim.
    * @returns Current durable rollback state.
    */
   async beginRollback(
@@ -945,7 +955,10 @@ implements WorkspaceSearchMigrationRollbackOperationAwsPort {
         parseWorkspaceSearchMigrationAppliedRoot(
           serializeWorkspaceSearchMigrationAppliedRoot(appliedRoot),
         )
-      requireLeaseClaimMatchesAuthority(command.lease, authority)
+      requireLeaseClaimMatchesAuthority(
+        command.authority.lease,
+        authority,
+      )
       await this.dependencies.prepare()
       const commitAt = readClock(this.dependencies.clock)
       requireRollbackStartRetention(detachedAppliedRoot, commitAt)
@@ -990,7 +1003,7 @@ implements WorkspaceSearchMigrationRollbackOperationAwsPort {
   /**
    * Atomically restores the adapter-selected next reverse sequence.
    *
-   * @param input - Exact predecessor revision and lease.
+   * @param input - Exact predecessor revision and current authority claim.
    * @returns Current durable rollback state.
    */
   async commitRollbackOperation(
@@ -1066,7 +1079,10 @@ implements WorkspaceSearchMigrationRollbackOperationAwsPort {
         applySequence,
         applyMarker,
       )
-      requireLeaseClaimMatchesAuthority(command.lease, authority)
+      requireLeaseClaimMatchesAuthority(
+        command.authority.lease,
+        authority,
+      )
       const restoration =
         decodeWorkspaceSearchJournalRestorationMaterial(
           journalSegment,
@@ -1155,7 +1171,7 @@ implements WorkspaceSearchMigrationRollbackOperationAwsPort {
   /**
    * Atomically publishes the terminal rolled-back root.
    *
-   * @param input - Exact zero-head predecessor revision and lease.
+   * @param input - Exact zero-head revision and current authority claim.
    * @returns Exact terminal immutable root.
    */
   async finishRollback(
@@ -1216,7 +1232,10 @@ implements WorkspaceSearchMigrationRollbackOperationAwsPort {
         predecessorState,
         command,
       )
-      requireLeaseClaimMatchesAuthority(command.lease, authority)
+      requireLeaseClaimMatchesAuthority(
+        command.authority.lease,
+        authority,
+      )
       const terminalReceipt =
         startRoot.originalJournalSequence === 0
           ? null
@@ -1264,15 +1283,9 @@ implements WorkspaceSearchMigrationRollbackOperationAwsPort {
   private async resolveAuthority(
     command: PreparedRollbackCommand,
   ): Promise<WorkspaceSearchMigrationPrePlanAuthority> {
-    const admission =
-      this.binding.executionRun.binding.currentAuthority
-    const candidate = await this.dependencies.readAuthority({
-      lease: command.lease,
-      maintenanceEvidenceReceiptDigest:
-        admission.maintenanceEvidenceReceiptDigest,
-      maintenanceEvidencePointerRevision:
-        admission.maintenanceEvidencePointerRevision,
-    })
+    const candidate = await this.dependencies.readAuthority(
+      command.authority,
+    )
     const detached =
       detachWorkspaceSearchMigrationPrePlanAuthorityForExecutionBoundary(
         candidate,
@@ -3007,9 +3020,7 @@ function createFullVerificationConflictRecordKeys(
   /** Deterministic immutable verified-root key. */
   readonly root: string
 } {
-  const digest = createMigrationDigest({
-    kind: 'workspace-search-full-verification-run-binding',
-    version: 1,
+  return createWorkspaceSearchMigrationFullVerificationConflictRecordKeys({
     stateTableId: binding.stateTable.tableId,
     configurationHash: binding.configurationHash,
     runId: binding.executionRun.runId,
@@ -3018,10 +3029,6 @@ function createFullVerificationConflictRecordKeys(
     sealedPlanningAuthorityDigest:
       binding.sealedPlanningAuthority.authorityDigest,
   })
-  return {
-    state: `full-verification-state/v1/${digest}`,
-    root: `full-verification-verified-root/v1/${digest}`,
-  }
 }
 
 /**
@@ -3305,23 +3312,61 @@ function requireTransactionCount(
  * Detaches one caller command before any asynchronous boundary.
  *
  * @param input - Candidate public rollback command.
- * @returns Exact detached revision and lease claim.
+ * @returns Exact detached revision and current authority claim.
  */
 function prepareRollbackCommand(
   input: WorkspaceSearchMigrationRollbackCommandInput,
 ): PreparedRollbackCommand {
   const record = requirePlainRecord(input, 'INVALID_ARGUMENT')
   requireExactKeys(record, [
+    'authority',
     'expectedRevision',
-    'lease',
   ], 'INVALID_ARGUMENT')
   return {
     expectedRevision: readPositiveSafeInteger(
       readOwn(record, 'expectedRevision', 'INVALID_ARGUMENT'),
       'INVALID_ARGUMENT',
     ),
+    authority: readRollbackAuthorityClaim(
+      readOwn(record, 'authority', 'INVALID_ARGUMENT'),
+    ),
+  }
+}
+
+/**
+ * Detaches one exact current lease, pointer, and receipt claim.
+ *
+ * @param value - Candidate current rollback authority claim.
+ * @returns Strict detached claim suitable for a strong authority read.
+ */
+function readRollbackAuthorityClaim(
+  value: unknown,
+): WorkspaceSearchMigrationRollbackAuthorityClaim {
+  const record = requirePlainRecord(value, 'INVALID_ARGUMENT')
+  requireExactKeys(record, [
+    'lease',
+    'maintenanceEvidencePointerRevision',
+    'maintenanceEvidenceReceiptDigest',
+  ], 'INVALID_ARGUMENT')
+  return {
     lease: readLeaseClaim(
       readOwn(record, 'lease', 'INVALID_ARGUMENT'),
+    ),
+    maintenanceEvidenceReceiptDigest: readDigest(
+      readOwn(
+        record,
+        'maintenanceEvidenceReceiptDigest',
+        'INVALID_ARGUMENT',
+      ),
+      'INVALID_ARGUMENT',
+    ),
+    maintenanceEvidencePointerRevision: readPositiveSafeInteger(
+      readOwn(
+        record,
+        'maintenanceEvidencePointerRevision',
+        'INVALID_ARGUMENT',
+      ),
+      'INVALID_ARGUMENT',
     ),
   }
 }
@@ -3365,9 +3410,11 @@ function requireStartMatchesBeginCommand(
 ): void {
   if (
     startRoot.predecessorRevision !== command.expectedRevision ||
-    startRoot.currentAuthority.ownerId !== command.lease.ownerId ||
-    startRoot.currentAuthority.fenceToken !== command.lease.fenceToken ||
-    startRoot.runId !== command.lease.runId
+    startRoot.currentAuthority.ownerId !==
+      command.authority.lease.ownerId ||
+    startRoot.currentAuthority.fenceToken !==
+      command.authority.lease.fenceToken ||
+    startRoot.runId !== command.authority.lease.runId
   ) {
     return failRollback('INVALID_STATE')
   }
@@ -3416,6 +3463,10 @@ function requireStateDescendsFromStart(
   startRoot: WorkspaceSearchMigrationRollbackStartRoot,
   state: WorkspaceSearchMigrationRollbackPersistenceState,
 ): void {
+  validateWorkspaceSearchMigrationRollbackAuthoritySuccessor(
+    startRoot.currentAuthority,
+    state.currentAuthority,
+  )
   requireStartAndStateBinding(startRoot, state)
   const revisionOffset =
     state.revision - startRoot.initialState.revision
@@ -3547,7 +3598,8 @@ function requireReceiptMatchesCommand(
     receipt.sequence !== expectedSequence ||
     receipt.predecessorRevision !== command.expectedRevision ||
     receipt.successorRevision !== command.expectedRevision + 1 ||
-    receipt.rollbackReceipt.fenceToken !== command.lease.fenceToken
+    receipt.rollbackReceipt.fenceToken !==
+      command.authority.lease.fenceToken
   ) {
     return failRollback('INVALID_STATE')
   }
@@ -3603,6 +3655,10 @@ function requireReceiptBelongsToStart(
   startRoot: WorkspaceSearchMigrationRollbackStartRoot,
   receipt: WorkspaceSearchMigrationRollbackOperationReceipt,
 ): void {
+  validateWorkspaceSearchMigrationRollbackAuthoritySuccessor(
+    startRoot.currentAuthority,
+    receipt.currentAuthority,
+  )
   const expectedPredecessorRevision =
     startRoot.initialState.revision +
       startRoot.originalJournalSequence - receipt.sequence
@@ -3632,6 +3688,10 @@ function requireStateAtOrAfterReceipt(
   receipt: WorkspaceSearchMigrationRollbackOperationReceipt,
 ): void {
   requireStateDescendsFromStart(startRoot, state)
+  validateWorkspaceSearchMigrationRollbackAuthoritySuccessor(
+    receipt.currentAuthority,
+    state.currentAuthority,
+  )
   const restoredThroughReceipt =
     startRoot.originalJournalSequence - receipt.sequence + 1
   if (
@@ -3685,9 +3745,11 @@ function requireRootMatchesFinishCommand(
     root.terminalState.revision !==
       command.expectedRevision + 1 ||
     root.terminalState.nextSequence !== 0 ||
-    root.finalAuthority.ownerId !== command.lease.ownerId ||
-    root.finalAuthority.fenceToken !== command.lease.fenceToken ||
-    root.runId !== command.lease.runId
+    root.finalAuthority.ownerId !==
+      command.authority.lease.ownerId ||
+    root.finalAuthority.fenceToken !==
+      command.authority.lease.fenceToken ||
+    root.runId !== command.authority.lease.runId
   ) {
     return failRollback('INVALID_STATE')
   }

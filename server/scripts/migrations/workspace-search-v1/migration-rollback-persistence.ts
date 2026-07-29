@@ -7,6 +7,7 @@ import {
   isHexDigest,
   requireMigrationIdentifier,
   serializeCanonicalJson,
+  type WorkspaceSearchMaintenanceEvidenceReceipt,
   type WorkspaceSearchApplySeal,
   type WorkspaceSearchApplySealReference,
   type WorkspaceSearchJournalSegment,
@@ -168,6 +169,9 @@ export type WorkspaceSearchMigrationRollbackPersistenceState = {
   readonly sealedPlanningAuthorityDigest: string
   /** Digest of the exact immutable rollback-start root. */
   readonly startRootDigest: string
+  /** Fresh authority atomically adopted by this durable state. */
+  readonly currentAuthority:
+    WorkspaceSearchMigrationRollbackAuthorityBinding
   /** Rolling-back or terminal rolled-back lifecycle status. */
   readonly status: 'rolling-back' | 'rolled-back'
   /** Exact optimistic-concurrency revision of the pure run state. */
@@ -319,6 +323,9 @@ export type WorkspaceSearchMigrationRollbackOperationReceipt = {
   readonly sealedPlanningAuthorityDigest: string
   /** Digest of the immutable rollback-start root. */
   readonly startRootDigest: string
+  /** Fresh authority atomically consumed by this reverse operation. */
+  readonly currentAuthority:
+    WorkspaceSearchMigrationRollbackAuthorityBinding
   /** Reverse journal sequence restored by this receipt. */
   readonly sequence: number
   /** Stable forward operation identifier restored by this receipt. */
@@ -595,17 +602,23 @@ export function createWorkspaceSearchMigrationRollbackStartRoot(
     requireAuthorityForRunState(
       binding,
       predecessorRunState,
+      appliedRoot.authority,
       currentAuthority,
       startedAt,
     )
     const authority = createPureAuthority(currentAuthority, startedAt)
+    const authorizedPredecessor = createAuthorityAdoptedRunState(
+      predecessorRunState,
+      currentAuthority,
+      startedAt,
+    )
     const pureSealBinding = {
       seal: createLegacyCompleteApplySeal(appliedRoot),
       reference:
         createLegacyCompleteApplySealReference(appliedRoot),
     }
     const purePredecessor: WorkspaceSearchMigrationRunState = {
-      ...predecessorRunState,
+      ...authorizedPredecessor,
       applySeal: pureSealBinding.reference,
     }
     const initialRunState = reduceWorkspaceSearchMigrationRunState({
@@ -621,6 +634,7 @@ export function createWorkspaceSearchMigrationRollbackStartRoot(
     const provisionalInitialState = createPersistenceState({
       binding,
       startRootDigest: zeroDigest(),
+      currentAuthority: createAuthorityBinding(currentAuthority),
       runState: initialRunState,
       predecessorKind: 'applied-root',
       predecessorDigest: appliedRoot.rootDigest,
@@ -658,6 +672,7 @@ export function createWorkspaceSearchMigrationRollbackStartRoot(
     const initialState = createPersistenceState({
       binding,
       startRootDigest,
+      currentAuthority: createAuthorityBinding(currentAuthority),
       runState: initialRunState,
       predecessorKind: 'applied-root',
       predecessorDigest: appliedRoot.rootDigest,
@@ -769,6 +784,7 @@ export function createWorkspaceSearchMigrationRollbackOperationTransition(
     requireAuthorityForRunState(
       createBindingFromStartRoot(startRoot),
       predecessorState.runState,
+      predecessorState.currentAuthority,
       currentAuthority,
       committedAt,
     )
@@ -776,8 +792,13 @@ export function createWorkspaceSearchMigrationRollbackOperationTransition(
       currentAuthority,
       committedAt,
     )
-    const event = createWorkspaceSearchRollbackOperationRecordedEvent(
+    const authorizedPredecessor = createAuthorityAdoptedRunState(
       predecessorState.runState,
+      currentAuthority,
+      committedAt,
+    )
+    const event = createWorkspaceSearchRollbackOperationRecordedEvent(
+      authorizedPredecessor,
       authority,
       {
         kind: 'rollback-operation-requested',
@@ -786,7 +807,7 @@ export function createWorkspaceSearchMigrationRollbackOperationTransition(
       },
     )
     const runState = reduceWorkspaceSearchMigrationRunState({
-      current: predecessorState.runState,
+      current: authorizedPredecessor,
       expectedRevision: predecessorState.revision,
       authority,
       event,
@@ -795,6 +816,7 @@ export function createWorkspaceSearchMigrationRollbackOperationTransition(
     const state = createPersistenceState({
       binding: createBindingFromStartRoot(startRoot),
       startRootDigest: startRoot.startRootDigest,
+      currentAuthority: createAuthorityBinding(currentAuthority),
       runState,
       predecessorKind: 'rollback-state',
       predecessorDigest: predecessorState.stateDigest,
@@ -819,6 +841,7 @@ export function createWorkspaceSearchMigrationRollbackOperationTransition(
       sealedPlanningAuthorityDigest:
         startRoot.sealedPlanningAuthorityDigest,
       startRootDigest: startRoot.startRootDigest,
+      currentAuthority: createAuthorityBinding(currentAuthority),
       sequence: applyReceipt.sequence,
       operationId: applyReceipt.operationId,
       commandDigest: commandIdentity.commandDigest,
@@ -921,6 +944,7 @@ export function finishWorkspaceSearchMigrationRollback(
     requireAuthorityForRunState(
       createBindingFromStartRoot(startRoot),
       predecessorState.runState,
+      predecessorState.currentAuthority,
       currentAuthority,
       finishedAt,
     )
@@ -928,8 +952,13 @@ export function finishWorkspaceSearchMigrationRollback(
       currentAuthority,
       finishedAt,
     )
+    const authorizedPredecessor = createAuthorityAdoptedRunState(
+      predecessorState.runState,
+      currentAuthority,
+      finishedAt,
+    )
     const runState = reduceWorkspaceSearchMigrationRunState({
-      current: predecessorState.runState,
+      current: authorizedPredecessor,
       expectedRevision: predecessorState.revision,
       authority,
       event: { kind: 'rollback-finished' },
@@ -937,6 +966,7 @@ export function finishWorkspaceSearchMigrationRollback(
     const state = createPersistenceState({
       binding: createBindingFromStartRoot(startRoot),
       startRootDigest: startRoot.startRootDigest,
+      currentAuthority: createAuthorityBinding(currentAuthority),
       runState,
       predecessorKind: 'rollback-state',
       predecessorDigest: predecessorState.stateDigest,
@@ -993,6 +1023,24 @@ export function decodeWorkspaceSearchMigrationRollbackRunState(
 ): WorkspaceSearchMigrationRunState {
   return atRollbackPersistenceBoundary(() =>
     readPersistenceState(state).runState
+  )
+}
+
+/**
+ * Validates that one compact rollback authority monotonically succeeds another.
+ *
+ * @param predecessor - Authority already fixed by durable rollback evidence.
+ * @param current - Candidate authority retained by a later state or receipt.
+ */
+export function validateWorkspaceSearchMigrationRollbackAuthoritySuccessor(
+  predecessor: WorkspaceSearchMigrationRollbackAuthorityBinding,
+  current: WorkspaceSearchMigrationRollbackAuthorityBinding,
+): void {
+  return atRollbackPersistenceBoundary(() =>
+    requireAuthorityBindingSuccessor(
+      readAuthorityBinding(predecessor),
+      readAuthorityBinding(current),
+    )
   )
 }
 
@@ -1217,6 +1265,10 @@ export function validateWorkspaceSearchMigrationRollbackOperationReceiptTransiti
       receipt.applyReceipt,
       journalSegment,
     )
+    requireAuthorityBindingSuccessor(
+      predecessorState.currentAuthority,
+      receipt.currentAuthority,
+    )
     const expectedCommand = createCommandIdentity(
       startRoot,
       predecessorState,
@@ -1233,6 +1285,10 @@ export function validateWorkspaceSearchMigrationRollbackOperationReceiptTransiti
       receipt.sequence !== predecessorState.nextSequence ||
       receipt.sequence !== receipt.applyReceipt.sequence ||
       receipt.operationId !== receipt.applyReceipt.operationId ||
+      !sameAuthorityBinding(
+        receipt.currentAuthority,
+        successorState.currentAuthority,
+      ) ||
       predecessorState.status !== 'rolling-back' ||
       successorState.status !== 'rolling-back' ||
       predecessorState.nextSequence < 1 ||
@@ -1254,23 +1310,29 @@ export function validateWorkspaceSearchMigrationRollbackOperationReceiptTransiti
       receipt.rollbackReceipt.journalHeadDigest !==
         predecessorState.expectedHeadDigest ||
       receipt.rollbackReceipt.fenceToken !==
-        predecessorState.runState.maintenanceEvidenceReceipt
-          .fenceToken ||
+        receipt.currentAuthority.fenceToken ||
       receipt.rollbackReceipt.maintenanceEvidenceReceiptDigest !==
+        receipt.currentAuthority.maintenanceEvidenceReceiptDigest ||
+      receipt.currentAuthority.maintenanceEvidenceReceiptDigest !==
         createMigrationDigest(
-          predecessorState.runState.maintenanceEvidenceReceipt,
+          successorState.runState.maintenanceEvidenceReceipt,
         )
     ) {
       return failRollbackPersistence()
     }
+    const authorizedPredecessor =
+      createReceiptValidationPredecessor(
+        predecessorState,
+        successorState,
+        receipt,
+      )
     const authority = createReceiptValidationAuthority(
-      startRoot,
       predecessorState,
       receipt,
     )
     const expectedEvent =
       createWorkspaceSearchRollbackOperationRecordedEvent(
-        predecessorState.runState,
+        authorizedPredecessor,
         authority,
         {
           kind: 'rollback-operation-requested',
@@ -1280,7 +1342,7 @@ export function validateWorkspaceSearchMigrationRollbackOperationReceiptTransiti
       )
     const expectedRunState =
       reduceWorkspaceSearchMigrationRunState({
-        current: predecessorState.runState,
+        current: authorizedPredecessor,
         expectedRevision: predecessorState.revision,
         authority,
         event: expectedEvent,
@@ -1296,6 +1358,7 @@ export function validateWorkspaceSearchMigrationRollbackOperationReceiptTransiti
     const expectedSuccessorState = createPersistenceState({
       binding: createBindingFromStartRoot(startRoot),
       startRootDigest: startRoot.startRootDigest,
+      currentAuthority: receipt.currentAuthority,
       runState: expectedRunState,
       predecessorKind: 'rollback-state',
       predecessorDigest: predecessorState.stateDigest,
@@ -1345,6 +1408,9 @@ type CreatePersistenceStateInput = {
   readonly binding: RollbackBinding
   /** Digest of the exact immutable rollback-start root. */
   readonly startRootDigest: string
+  /** Fresh authority atomically adopted by this state. */
+  readonly currentAuthority:
+    WorkspaceSearchMigrationRollbackAuthorityBinding
   /** Complete pure successor state. */
   readonly runState: WorkspaceSearchMigrationRunState
   /** Kind of predecessor consumed by this transition. */
@@ -1682,30 +1748,100 @@ function requireAppliedStartBindings(
  *
  * @param binding - Exact common rollback identity.
  * @param state - Exact pure run state being mutated.
+ * @param predecessorAuthority - Authority adopted by the durable predecessor.
  * @param currentAuthority - Fresh strongly resolved authority.
  * @param committedAt - Adapter-owned transaction time.
  */
 function requireAuthorityForRunState(
   binding: RollbackBinding,
   state: WorkspaceSearchMigrationRunState,
+  predecessorAuthority:
+    WorkspaceSearchMigrationRollbackAuthorityBinding,
   currentAuthority: WorkspaceSearchMigrationPrePlanAuthority,
   committedAt: string,
 ): void {
+  const currentBinding = createAuthorityBinding(currentAuthority)
+  requireAuthorityBindingSuccessor(
+    predecessorAuthority,
+    currentBinding,
+  )
   if (
     currentAuthority.configurationHash !== binding.configurationHash ||
     currentAuthority.stateTableId !==
       binding.tableIds['migration-state'] ||
     currentAuthority.lease.runId !== binding.runId ||
     currentAuthority.lease.ownerId.length === 0 ||
-    currentAuthority.maintenanceEvidenceReceiptDigest !==
+    predecessorAuthority.fenceToken !==
+      state.maintenanceEvidenceReceipt.fenceToken ||
+    predecessorAuthority.maintenanceEvidenceReceiptDigest !==
       createMigrationDigest(state.maintenanceEvidenceReceipt) ||
     createMigrationDigest(
       currentAuthority.maintenanceEvidenceReceipt,
     ) !== currentAuthority.maintenanceEvidenceReceiptDigest ||
-    Date.parse(committedAt) < Date.parse(currentAuthority.evaluatedAt)
+    Date.parse(committedAt) < Date.parse(currentAuthority.evaluatedAt) ||
+    Date.parse(committedAt) < Date.parse(state.updatedAt)
   ) {
     return failRollbackPersistence()
   }
+}
+
+/**
+ * Atomically adopts fresh maintenance evidence for one authorized mutation.
+ *
+ * The returned state is an in-transaction effective predecessor. It is never
+ * stored separately and therefore does not advance the optimistic revision;
+ * the enclosing start, reverse-step, or finish transaction stores only the
+ * event successor while condition-checking the exact durable predecessor.
+ *
+ * @param state - Exact durable pure predecessor state.
+ * @param authority - Fresh strongly resolved authority.
+ * @param committedAt - Adapter-owned enclosing transaction time.
+ * @returns Exact effective predecessor carrying current evidence.
+ */
+function createAuthorityAdoptedRunState(
+  state: WorkspaceSearchMigrationRunState,
+  authority: WorkspaceSearchMigrationPrePlanAuthority,
+  committedAt: string,
+): WorkspaceSearchMigrationRunState {
+  return createAuthorityAdoptedRunStateFromEvidence(
+    state,
+    createAuthorityBinding(authority),
+    authority.maintenanceEvidenceReceipt,
+    committedAt,
+  )
+}
+
+/**
+ * Reconstructs one evidence-adopted effective predecessor for pure replay.
+ *
+ * @param state - Exact durable pure predecessor state.
+ * @param authority - Compact authority atomically consumed by the mutation.
+ * @param receipt - Full maintenance receipt selected by that authority.
+ * @param committedAt - Adapter-owned enclosing transaction time.
+ * @returns Exact validated effective predecessor.
+ */
+function createAuthorityAdoptedRunStateFromEvidence(
+  state: WorkspaceSearchMigrationRunState,
+  authority: WorkspaceSearchMigrationRollbackAuthorityBinding,
+  receipt: WorkspaceSearchMaintenanceEvidenceReceipt,
+  committedAt: string,
+): WorkspaceSearchMigrationRunState {
+  if (
+    authority.fenceToken !== receipt.fenceToken ||
+    authority.maintenanceEvidenceReceiptDigest !==
+      createMigrationDigest(receipt) ||
+    Date.parse(authority.evaluatedAt) > Date.parse(committedAt) ||
+    Date.parse(state.updatedAt) > Date.parse(committedAt)
+  ) {
+    return failRollbackPersistence()
+  }
+  return readRunState({
+    ...state,
+    maintenanceEvidenceDigest: receipt.evidenceDigest,
+    maintenanceEvidenceLocator: receipt.evidenceLocator,
+    maintenanceEvidenceReceipt: receipt,
+    updatedAt: committedAt,
+  })
 }
 
 /**
@@ -1730,16 +1866,15 @@ function createPureAuthority(
  * Reconstructs the only pure authority facts retained by a rollback receipt.
  *
  * The synthetic lease window exists only to replay the pure reducer. Durable
- * ownership is not reconstructed; receipt validation separately binds the
- * stored fence and maintenance evidence to the exact predecessor state.
+ * ownership comes from the compact authority stored in the immutable receipt.
+ * Receipt validation separately binds its fence and maintenance evidence to
+ * the exact adopted successor state.
  *
- * @param startRoot - Immutable root retaining the original authority owner.
  * @param predecessor - Exact rolling-back predecessor state.
  * @param receipt - Candidate durable reverse-operation receipt.
  * @returns Deterministic authority suitable for pure successor replay.
  */
 function createReceiptValidationAuthority(
-  startRoot: WorkspaceSearchMigrationRollbackStartRoot,
   predecessor:
     WorkspaceSearchMigrationRollbackPersistenceState,
   receipt: WorkspaceSearchMigrationRollbackOperationReceipt,
@@ -1754,19 +1889,49 @@ function createReceiptValidationAuthority(
   ) {
     return failRollbackPersistence()
   }
-  const ownerId = startRoot.currentAuthority.ownerId
+  const ownerId = receipt.currentAuthority.ownerId
   return {
     lease: {
       runId: predecessor.runId,
       ownerId,
-      fenceToken:
-        predecessor.runState.maintenanceEvidenceReceipt.fenceToken,
+      fenceToken: receipt.currentAuthority.fenceToken,
       heartbeatAt: receipt.committedAt,
       expiresAt: new Date(expiresMilliseconds).toISOString(),
     },
     ownerId,
     at: receipt.committedAt,
   }
+}
+
+/**
+ * Reconstructs the effective predecessor used by an atomic reverse operation.
+ *
+ * @param predecessor - Exact durable state consumed by the transaction.
+ * @param successor - Exact durable state stored by the transaction.
+ * @param receipt - Immutable operation receipt retaining fresh authority.
+ * @returns Pure predecessor with the atomically adopted current evidence.
+ */
+function createReceiptValidationPredecessor(
+  predecessor:
+    WorkspaceSearchMigrationRollbackPersistenceState,
+  successor:
+    WorkspaceSearchMigrationRollbackPersistenceState,
+  receipt: WorkspaceSearchMigrationRollbackOperationReceipt,
+): WorkspaceSearchMigrationRunState {
+  if (
+    !sameAuthorityBinding(
+      successor.currentAuthority,
+      receipt.currentAuthority,
+    )
+  ) {
+    return failRollbackPersistence()
+  }
+  return createAuthorityAdoptedRunStateFromEvidence(
+    predecessor.runState,
+    receipt.currentAuthority,
+    successor.runState.maintenanceEvidenceReceipt,
+    receipt.committedAt,
+  )
 }
 
 /**
@@ -1792,9 +1957,9 @@ function createAuthorityBinding(
 /**
  * Requires a current authority tuple to succeed an immutable predecessor.
  *
- * A takeover may advance the fence and owner. Within one fence, the owner is
- * immutable and the maintenance pointer cannot move backward or substitute
- * content at the same revision.
+ * A takeover may advance the fence and owner. The pointer revision remains
+ * globally monotonic, one revision cannot substitute different content, and
+ * the owner remains immutable while the fence is unchanged.
  *
  * @param predecessor - Authority fixed by the preceding immutable root.
  * @param current - Fresh authority consumed by the next transaction.
@@ -1807,23 +1972,49 @@ function requireAuthorityBindingSuccessor(
     Date.parse(current.evaluatedAt) <
       Date.parse(predecessor.evaluatedAt) ||
     current.fenceToken < predecessor.fenceToken ||
+    current.maintenanceEvidencePointerRevision <
+      predecessor.maintenanceEvidencePointerRevision ||
+    (
+      current.maintenanceEvidencePointerRevision ===
+        predecessor.maintenanceEvidencePointerRevision &&
+      current.maintenanceEvidenceReceiptDigest !==
+        predecessor.maintenanceEvidenceReceiptDigest
+    ) ||
+    (
+      current.maintenanceEvidencePointerRevision >
+        predecessor.maintenanceEvidencePointerRevision &&
+      current.maintenanceEvidenceReceiptDigest ===
+        predecessor.maintenanceEvidenceReceiptDigest
+    ) ||
     (
       current.fenceToken === predecessor.fenceToken &&
-      (
-        current.ownerId !== predecessor.ownerId ||
-        current.maintenanceEvidencePointerRevision <
-          predecessor.maintenanceEvidencePointerRevision ||
-        (
-          current.maintenanceEvidencePointerRevision ===
-            predecessor.maintenanceEvidencePointerRevision &&
-          current.maintenanceEvidenceReceiptDigest !==
-            predecessor.maintenanceEvidenceReceiptDigest
-        )
-      )
+      current.ownerId !== predecessor.ownerId
     )
   ) {
     return failRollbackPersistence()
   }
+}
+
+/**
+ * Compares two compact authority tuples exactly.
+ *
+ * @param left - First validated authority binding.
+ * @param right - Second validated authority binding.
+ * @returns Whether every owner, fence, pointer, digest, and time field matches.
+ */
+function sameAuthorityBinding(
+  left: WorkspaceSearchMigrationRollbackAuthorityBinding,
+  right: WorkspaceSearchMigrationRollbackAuthorityBinding,
+): boolean {
+  return (
+    left.ownerId === right.ownerId &&
+    left.fenceToken === right.fenceToken &&
+    left.maintenanceEvidencePointerRevision ===
+      right.maintenanceEvidencePointerRevision &&
+    left.maintenanceEvidenceReceiptDigest ===
+      right.maintenanceEvidenceReceiptDigest &&
+    left.evaluatedAt === right.evaluatedAt
+  )
 }
 
 /**
@@ -1898,6 +2089,7 @@ function createPersistenceState(
     sealedPlanningAuthorityDigest:
       input.binding.sealedPlanningAuthorityDigest,
     startRootDigest: readDigest(input.startRootDigest),
+    currentAuthority: readAuthorityBinding(input.currentAuthority),
     status: readRollbackStatus(runState.status),
     revision: runState.revision,
     predecessorKind: input.predecessorKind,
@@ -1937,6 +2129,7 @@ function readPersistenceState(
   const record = requireExactRecord(value, [
     'appliedRootDigest',
     'configurationHash',
+    'currentAuthority',
     'executionRunDigest',
     'expectedHeadDigest',
     'kind',
@@ -1989,6 +2182,9 @@ function readPersistenceState(
   const startRootDigest = readDigest(
     readOwn(record, 'startRootDigest'),
   )
+  const currentAuthority = readAuthorityBinding(
+    readOwn(record, 'currentAuthority'),
+  )
   const status = readRollbackStatus(readOwn(record, 'status'))
   const revision = readPositiveSafeInteger(
     readOwn(record, 'revision'),
@@ -2031,6 +2227,7 @@ function readPersistenceState(
     appliedRootDigest,
     sealedPlanningAuthorityDigest,
     startRootDigest,
+    currentAuthority,
     status,
     revision,
     predecessorKind,
@@ -2074,6 +2271,14 @@ function requirePersistenceStateInvariants(
     state.runState.configurationHash !== state.configurationHash ||
     state.runState.status !== state.status ||
     state.runState.revision !== state.revision ||
+    state.currentAuthority.fenceToken !==
+      state.runState.maintenanceEvidenceReceipt.fenceToken ||
+    state.currentAuthority.maintenanceEvidenceReceiptDigest !==
+      createMigrationDigest(
+        state.runState.maintenanceEvidenceReceipt,
+      ) ||
+    Date.parse(state.currentAuthority.evaluatedAt) >
+      Date.parse(state.runState.updatedAt) ||
     !sameTableIds(
       state.tableIds,
       createTableIdsFromRunState(state.runState),
@@ -2371,6 +2576,10 @@ function readStartRoot(
     initialState.restored !== 0 ||
     initialState.lastRollbackReceiptDigest !== null ||
     initialState.runState.updatedAt !== startedAt ||
+    !sameAuthorityBinding(
+      currentAuthority,
+      initialState.currentAuthority,
+    ) ||
     currentAuthority.fenceToken !==
       initialState.runState.maintenanceEvidenceReceipt.fenceToken ||
     currentAuthority.maintenanceEvidenceReceiptDigest !==
@@ -2548,6 +2757,7 @@ function readOperationReceipt(
     'commandDigest',
     'committedAt',
     'configurationHash',
+    'currentAuthority',
     'executionRunDigest',
     'journalReferenceDigest',
     'kind',
@@ -2610,6 +2820,9 @@ function readOperationReceipt(
     ),
     startRootDigest: readDigest(
       readOwn(record, 'startRootDigest'),
+    ),
+    currentAuthority: readAuthorityBinding(
+      readOwn(record, 'currentAuthority'),
     ),
     sequence: readPositiveSafeInteger(
       readOwn(record, 'sequence'),
@@ -2678,6 +2891,12 @@ function readOperationReceipt(
       applyReceipt.journal.headDigest ||
     common.rollbackReceiptDigest !==
       createMigrationDigest(rollbackReceipt) ||
+    common.currentAuthority.fenceToken !==
+      rollbackReceipt.fenceToken ||
+    common.currentAuthority.maintenanceEvidenceReceiptDigest !==
+      rollbackReceipt.maintenanceEvidenceReceiptDigest ||
+    Date.parse(common.currentAuthority.evaluatedAt) >
+      Date.parse(common.committedAt) ||
     common.committedAt !== rollbackReceipt.rolledBackAt ||
     Date.parse(common.committedAt) <
       Date.parse(applyReceipt.committedAt) ||
@@ -2788,6 +3007,12 @@ function readRolledBackRoot(
   >
   const rootDigest = readDigest(readOwn(record, 'rootDigest'))
   const terminal = common.terminalState
+  if (common.terminalReceipt !== null) {
+    requireAuthorityBindingSuccessor(
+      common.terminalReceipt.currentAuthority,
+      common.finalAuthority,
+    )
+  }
   if (
     terminal.runId !== common.runId ||
     terminal.configurationHash !== common.configurationHash ||
@@ -2802,6 +3027,10 @@ function readRolledBackRoot(
     terminal.expectedHeadDigest !== zeroDigest() ||
     terminal.restored !== terminal.upperBoundSequence ||
     terminal.runState.updatedAt !== common.finishedAt ||
+    !sameAuthorityBinding(
+      common.finalAuthority,
+      terminal.currentAuthority,
+    ) ||
     common.finalAuthority.fenceToken !==
       terminal.runState.maintenanceEvidenceReceipt.fenceToken ||
     common.finalAuthority.maintenanceEvidenceReceiptDigest !==
@@ -2883,6 +3112,10 @@ function requireStateBelongsToStart(
   startRoot: WorkspaceSearchMigrationRollbackStartRoot,
   state: WorkspaceSearchMigrationRollbackPersistenceState,
 ): void {
+  requireAuthorityBindingSuccessor(
+    startRoot.currentAuthority,
+    state.currentAuthority,
+  )
   const rollingRevision =
     startRoot.predecessorRevision + 1 + state.restored
   const expectedRevision = state.status === 'rolled-back'
@@ -2969,6 +3202,10 @@ function requireReceiptBelongsToStart(
   startRoot: WorkspaceSearchMigrationRollbackStartRoot,
   receipt: WorkspaceSearchMigrationRollbackOperationReceipt,
 ): void {
+  requireAuthorityBindingSuccessor(
+    startRoot.currentAuthority,
+    receipt.currentAuthority,
+  )
   if (
     receipt.runId !== startRoot.runId ||
     receipt.configurationHash !== startRoot.configurationHash ||

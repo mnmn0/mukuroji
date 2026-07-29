@@ -405,6 +405,39 @@ describe('Workspace Search rollback persistence contract', () => {
         ).code,
       ).toBe('INVALID_ROLLBACK_PERSISTENCE')
 
+      const impossibleAuthority = {
+        ...transition.state.currentAuthority,
+        maintenanceEvidencePointerRevision:
+          transition.state.currentAuthority
+            .maintenanceEvidencePointerRevision + 1,
+      }
+      const impossibleAuthorityState = rehashRollbackState({
+        state: transition.state,
+        currentAuthority: impossibleAuthority,
+        runState: transition.state.runState,
+        lastRollbackReceiptDigest:
+          transition.state.lastRollbackReceiptDigest,
+      })
+      const impossibleAuthorityReceipt =
+        rehashRollbackOperationReceipt({
+          receipt: transition.receipt,
+          currentAuthority: impossibleAuthority,
+          rollbackReceipt: transition.receipt.rollbackReceipt,
+          successorStateDigest:
+            impossibleAuthorityState.stateDigest,
+        })
+      expect(
+        captureRollbackFailure(() =>
+          validateWorkspaceSearchMigrationRollbackOperationReceiptTransition({
+            startRoot,
+            receipt: impossibleAuthorityReceipt,
+            journalSegment,
+            predecessorState: startRoot.initialState,
+            successorState: impossibleAuthorityState,
+          })
+        ).code,
+      ).toBe('INVALID_ROLLBACK_PERSISTENCE')
+
       const substitutedFenceReceipt = {
         ...transition.receipt.rollbackReceipt,
         fenceToken:
@@ -1795,6 +1828,7 @@ function replaceRollbackStateStartRootDigest(
     sealedPlanningAuthorityDigest:
       state.sealedPlanningAuthorityDigest,
     startRootDigest: replacement,
+    currentAuthority: state.currentAuthority,
     status: state.status,
     revision: state.revision,
     predecessorKind: state.predecessorKind,
@@ -1848,6 +1882,9 @@ function replaceRollbackReceiptPreviousHeadDigest(
 type RehashRollbackStateInput = {
   /** Existing strict state whose chain fields remain unchanged. */
   readonly state: WorkspaceSearchMigrationRollbackPersistenceState
+  /** Optional replacement compact authority adopted by the state. */
+  readonly currentAuthority?:
+    WorkspaceSearchMigrationRollbackPersistenceState['currentAuthority']
   /** Replacement complete pure run state. */
   readonly runState: WorkspaceSearchMigrationRunState
   /** Replacement digest of the last pure rollback marker. */
@@ -1870,6 +1907,8 @@ function rehashRollbackState(
   void previousStateDigest
   const fields = {
     ...previousFields,
+    currentAuthority:
+      input.currentAuthority ?? previousFields.currentAuthority,
     lastRollbackReceiptDigest:
       input.lastRollbackReceiptDigest,
     runState: input.runState,
@@ -1887,6 +1926,9 @@ function rehashRollbackState(
 type RehashRollbackOperationReceiptInput = {
   /** Existing strict durable reverse receipt. */
   readonly receipt: WorkspaceSearchMigrationRollbackOperationReceipt
+  /** Optional replacement compact authority consumed by the receipt. */
+  readonly currentAuthority?:
+    WorkspaceSearchMigrationRollbackOperationReceipt['currentAuthority']
   /** Replacement pure rollback marker. */
   readonly rollbackReceipt:
     WorkspaceSearchMigrationRollbackOperationReceipt['rollbackReceipt']
@@ -1910,6 +1952,8 @@ function rehashRollbackOperationReceipt(
   void previousReceiptDigest
   const fields = {
     ...previousFields,
+    currentAuthority:
+      input.currentAuthority ?? previousFields.currentAuthority,
     rollbackReceipt: input.rollbackReceipt,
     rollbackReceiptDigest:
       createMigrationDigest(input.rollbackReceipt),

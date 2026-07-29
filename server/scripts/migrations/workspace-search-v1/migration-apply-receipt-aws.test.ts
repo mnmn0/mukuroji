@@ -484,7 +484,7 @@ describe('Workspace Search apply-receipt AWS boundary', () => {
   )
 
   test(
-    'rejects extra attributes, oversized substitutions, Proxies, and accessors without reading them',
+    'rejects extra attributes, operationId mismatches, Proxies, and accessors without reading them',
     () => {
       const fixture = createFixture()
       const binding =
