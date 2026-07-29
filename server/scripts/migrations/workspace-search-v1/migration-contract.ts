@@ -585,6 +585,10 @@ export type WorkspaceSearchJournalReference = {
   versionId: string
   /** SHA-256 digest of the exact stored bytes. */
   contentDigest: string
+  /** Exact canonical byte length required by exact-version reads. */
+  byteLength: number
+  /** Canonical UTC COMPLIANCE retention deadline for this exact version. */
+  retainUntil: string
   /** Hash-chain digest committed with the operation marker. */
   headDigest: string
 }

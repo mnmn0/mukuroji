@@ -110,6 +110,19 @@ export const workspaceSearchMigrationExecutionRunTransactionIndex =
   })
 
 /**
+ * Exact immutable execution-run admission row required by later transactions.
+ */
+export type CreateWorkspaceSearchMigrationExecutionRunAdmissionConditionCheckInput =
+  {
+    /** Exact measured migration-state table identity. */
+    readonly stateTable: MigrationTableIdentity
+    /** Exact reviewed configuration digest. */
+    readonly configurationHash: string
+    /** Strict revision-one admission envelope read from durable storage. */
+    readonly executionRun: WorkspaceSearchMigrationExecutionRun
+  }
+
+/**
  * Adapter-owned source of trusted execution-run commit time.
  *
  * @returns Current trusted adapter time.
@@ -470,6 +483,116 @@ export function createAwsWorkspaceSearchMigrationExecutionRunPort(
       transport,
       clock,
     )
+  } catch (error: unknown) {
+    throw createExecutionRunAwsPublicFailure(
+      readExecutionRunAwsFailureCode(error, true),
+    )
+  }
+}
+
+/**
+ * Creates the exact immutable admission-row check used by later execution work.
+ *
+ * The caller must supply an admission envelope obtained through the bound
+ * execution-run port. This helper snapshots it through the strict canonical
+ * codec and compares every durable admission attribute, including its bytes.
+ *
+ * @param input - Exact state-table identity, configuration, and admission.
+ * @returns One immutable execution-run admission ConditionCheck.
+ */
+export function createWorkspaceSearchMigrationExecutionRunAdmissionConditionCheck(
+  input:
+    CreateWorkspaceSearchMigrationExecutionRunAdmissionConditionCheckInput,
+): TransactWriteItem {
+  try {
+    const record = requireExecutionRunInputRecord(input)
+    requireExactExecutionRunInputKeys(record, [
+      'configurationHash',
+      'executionRun',
+      'stateTable',
+    ])
+    const strict = parseWorkspaceSearchMigrationExecutionRun(
+      serializeWorkspaceSearchMigrationExecutionRun(input.executionRun),
+    )
+    const stateTableValue = input.stateTable
+    if (
+      typeof stateTableValue !== 'object' ||
+      stateTableValue === null ||
+      nodeUtilTypes.isProxy(stateTableValue)
+    ) {
+      return failExecutionRunAws('INVALID_ARGUMENT')
+    }
+    const stateTableName = readExecutionRunOwnDataValue(
+      stateTableValue,
+      'tableName',
+      'INVALID_ARGUMENT',
+    )
+    const stateTableId = readExecutionRunOwnDataValue(
+      stateTableValue,
+      'tableId',
+      'INVALID_ARGUMENT',
+    )
+    const stateTableRole = readExecutionRunOwnDataValue(
+      stateTableValue,
+      'role',
+      'INVALID_ARGUMENT',
+    )
+    const expectedStateTable =
+      strict.runState.configuration.tables['migration-state']
+    if (
+      stateTableRole !== 'migration-state' ||
+      stateTableName !== expectedStateTable.tableName ||
+      stateTableId !== expectedStateTable.tableId ||
+      input.configurationHash !== strict.configurationHash
+    ) {
+      return failExecutionRunAws('CONFIGURATION_DRIFT')
+    }
+    const bytes =
+      serializeWorkspaceSearchMigrationExecutionRun(strict)
+    const conditionAttributes = {
+      kind: { S: executionRunRecordKind },
+      version: { N: String(executionRunRecordVersion) },
+      stateTableId: { S: expectedStateTable.tableId },
+      configurationHash: { S: strict.configurationHash },
+      runId: { S: strict.runId },
+      revision: { N: String(strict.revision) },
+      status: { S: strict.status },
+      bindingDigest: { S: strict.binding.bindingDigest },
+      stateDigest: { S: strict.stateDigest },
+      executionRunDigest: { S: strict.executionRunDigest },
+      executionRunBytes: { B: bytes },
+    } satisfies Readonly<Record<string, AttributeValue>>
+    const names: Record<string, string> = {}
+    const values: Record<string, AttributeValue> = {}
+    const clauses: string[] = []
+    let index = 0
+    for (const [name, value] of Object.entries(conditionAttributes)) {
+      const nameToken = `#field${index}`
+      const valueToken = `:value${index}`
+      names[nameToken] = name
+      values[valueToken] = value
+      clauses.push(`${nameToken} = ${valueToken}`)
+      index += 1
+    }
+    return {
+      ConditionCheck: {
+        TableName: expectedStateTable.tableName,
+        Key: {
+          migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
+          recordKey: {
+            S: createExecutionRunRecordKeyFromIdentity(
+              expectedStateTable.tableId,
+              strict.configurationHash,
+              strict.runId,
+            ),
+          },
+        },
+        ConditionExpression: clauses.join(' AND '),
+        ExpressionAttributeNames: names,
+        ExpressionAttributeValues: values,
+        ReturnValuesOnConditionCheckFailure: 'NONE',
+      },
+    }
   } catch (error: unknown) {
     throw createExecutionRunAwsPublicFailure(
       readExecutionRunAwsFailureCode(error, true),
@@ -1217,12 +1340,32 @@ function createExecutionRunReadCommand(
 function createExecutionRunRecordKey(
   binding: ExecutionRunAdapterBinding,
 ): string {
+  return createExecutionRunRecordKeyFromIdentity(
+    binding.stateTable.tableId,
+    binding.configurationHash,
+    binding.executionBoundary.runId,
+  )
+}
+
+/**
+ * Creates the deterministic admission-row key from exact immutable identity.
+ *
+ * @param stateTableId - Immutable migration-state TableId.
+ * @param configurationHash - Exact reviewed configuration digest.
+ * @param runId - Operator-selected migration run.
+ * @returns Deterministic run/configuration admission key.
+ */
+function createExecutionRunRecordKeyFromIdentity(
+  stateTableId: string,
+  configurationHash: string,
+  runId: string,
+): string {
   const digest = createMigrationDigest({
     kind: 'workspace-search-migration-execution-run-binding',
     version: executionRunRecordVersion,
-    stateTableId: binding.stateTable.tableId,
-    configurationHash: binding.configurationHash,
-    runId: binding.executionBoundary.runId,
+    stateTableId,
+    configurationHash,
+    runId,
   })
   return `${executionRunRecordKeyPrefix}/${digest}/state`
 }

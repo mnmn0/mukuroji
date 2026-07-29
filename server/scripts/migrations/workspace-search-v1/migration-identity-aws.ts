@@ -89,6 +89,12 @@ import {
   type WorkspaceSearchMigrationApplicationWriterFenceAwsPort,
 } from './migration-application-writer-fence-aws'
 import {
+  createAwsWorkspaceSearchMigrationApplyOperationPort,
+  type WorkspaceSearchMigrationApplyOperationAuthorityPort,
+  type WorkspaceSearchMigrationApplyOperationAwsPort,
+  type WorkspaceSearchMigrationApplyOperationAwsTransport,
+} from './migration-apply-operation-aws'
+import {
   createAwsWorkspaceSearchMigrationExecutionBoundaryPort,
   type WorkspaceSearchMigrationExecutionBoundaryAwsPort,
   type WorkspaceSearchMigrationExecutionBoundaryAwsTransport,
@@ -101,6 +107,11 @@ import {
   type WorkspaceSearchMigrationExecutionRunAwsPort,
   type WorkspaceSearchMigrationExecutionRunAwsTransport,
 } from './migration-execution-run-aws'
+import {
+  parseWorkspaceSearchMigrationExecutionRun,
+  serializeWorkspaceSearchMigrationExecutionRun,
+  type WorkspaceSearchMigrationExecutionRun,
+} from './migration-execution-run'
 import {
   createAwsWorkspaceSearchMigrationPrePlanAuthorityPort,
   type RenewWorkspaceSearchMigrationPrePlanMaintenanceEvidenceInput,
@@ -193,6 +204,9 @@ import {
   type WorkspaceSearchMigrationImmutableArtifactAwsPort,
   type WorkspaceSearchMigrationImmutableArtifactAwsTransport,
 } from './migration-immutable-artifact-aws'
+import {
+  createAwsWorkspaceSearchMigrationJournalGateway,
+} from './migration-journal-aws'
 import type {
   WorkspaceSearchMigrationPlanningJoinLimits,
   WorkspaceSearchMigrationPlanningMaterialReadLimits,
@@ -535,6 +549,16 @@ type ManagedExecutionRunAuthority =
   ManagedApplicationWriterFenceAuthority
 
 /**
+ * Complete measured authority retained by one apply-operation port.
+ */
+type ManagedApplyOperationAuthority =
+  ManagedExecutionRunAuthority & {
+    /** Private immutable object port installed by this generation. */
+    readonly immutableArtifactPort:
+      WorkspaceSearchMigrationImmutableArtifactAwsPort
+  }
+
+/**
  * Measurement authority captured for one complete source-evidence operation.
  */
 type ManagedSourceEvidenceAuthority<
@@ -872,6 +896,25 @@ export interface WorkspaceSearchMigrationManagedAwsSession
     closedWriterFenceRecord:
       WorkspaceSearchWriterFenceClosedRecord,
   ): WorkspaceSearchMigrationExecutionRunAwsPort
+
+  /**
+   * Creates one generation-bound atomic apply-operation port.
+   *
+   * @param executionBoundary - Exact revision-two planning admission.
+   * @param sealedPlanningAuthority - Exact immutable sealed planning root.
+   * @param closedWriterFenceRecord - Exact closed fence fixed by the boundary.
+   * @param executionRun - Exact immutable execution admission.
+   * @returns Apply port bound to the latest measured configuration.
+   */
+  createApplyOperationPort(
+    executionBoundary:
+      WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary,
+    sealedPlanningAuthority:
+      WorkspaceSearchMigrationSealedPlanningAuthorityV2,
+    closedWriterFenceRecord:
+      WorkspaceSearchWriterFenceClosedRecord,
+    executionRun: WorkspaceSearchMigrationExecutionRun,
+  ): WorkspaceSearchMigrationApplyOperationAwsPort
 }
 
 /** Narrow transport containing only managed identity reads. */
@@ -1863,6 +1906,111 @@ class AwsWorkspaceSearchMigrationIdentityPort
         this.runManagedExecutionRunOperation(
           authority,
           delegate.create(currentAuthority),
+      ),
+    }
+  }
+
+  /**
+   * Creates one atomic apply-operation port bound to the current measured
+   * generation, all six physical table incarnations, and its private journal
+   * storage capability.
+   *
+   * @param executionBoundary - Exact revision-two planning admission.
+   * @param sealedPlanningAuthority - Exact immutable sealed planning root.
+   * @param closedWriterFenceRecord - Exact closed fence fixed by the boundary.
+   * @param executionRun - Exact immutable execution admission.
+   * @returns Generation-guarded apply and reconciliation capability.
+   */
+  createApplyOperationPort(
+    executionBoundary:
+      WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary,
+    sealedPlanningAuthority:
+      WorkspaceSearchMigrationSealedPlanningAuthorityV2,
+    closedWriterFenceRecord:
+      WorkspaceSearchWriterFenceClosedRecord,
+    executionRun: WorkspaceSearchMigrationExecutionRun,
+  ): WorkspaceSearchMigrationApplyOperationAwsPort {
+    const authority = this.captureManagedApplyOperationAuthority()
+    let detachedExecutionRun: WorkspaceSearchMigrationExecutionRun
+    try {
+      detachedExecutionRun =
+        parseWorkspaceSearchMigrationExecutionRun(
+          serializeWorkspaceSearchMigrationExecutionRun(executionRun),
+        )
+    } catch {
+      return failManagedApplyOperation()
+    }
+    const immutableArtifactPort =
+      this.createManagedApplyImmutableArtifactPort(authority)
+    const journalGateway =
+      createAwsWorkspaceSearchMigrationJournalGateway({
+        configuration: authority.configuration,
+        configurationHash: authority.configurationHash,
+        runId: detachedExecutionRun.runId,
+        immutableArtifactPort,
+        clock: this.prePlanAuthorityClock,
+      })
+    const prePlanAuthorityAdapter =
+      this.createManagedPrePlanAuthorityAdapter(authority)
+    const authorityPort:
+      WorkspaceSearchMigrationApplyOperationAuthorityPort = {
+        readAuthority: (claim) =>
+          this.runManagedApplyOperationRead(
+            authority,
+            () => prePlanAuthorityAdapter.readAuthority(claim),
+          ),
+      }
+    const transport:
+      WorkspaceSearchMigrationApplyOperationAwsTransport = {
+        getApplyItem: (command) =>
+          this.runManagedApplyOperationRead(
+            authority,
+            () => this.transport.getPrePlanAuthority(command),
+          ),
+        prepareApplyWrite: async () => {
+          await this.requireCurrentApplyOperationTableIncarnations(
+            authority,
+          )
+        },
+        transactWriteApply: (command) =>
+          this.runManagedPreparedApplyOperationWrite(
+            authority,
+            () => this.transport.transactWritePrePlanAuthority(command),
+          ),
+      }
+    const delegate =
+      createAwsWorkspaceSearchMigrationApplyOperationPort({
+        configuration: authority.configuration,
+        configurationHash: authority.configurationHash,
+        executionBoundary,
+        sealedPlanningAuthority,
+        closedWriterFenceRecord,
+        executionRun: detachedExecutionRun,
+        authorityPort,
+        journalGateway,
+        transport,
+        clock: this.prePlanAuthorityClock,
+      })
+    return {
+      readRunState: () =>
+        this.runManagedApplyOperation(
+          authority,
+          () => delegate.readRunState(),
+        ),
+      readOperationMarker: (operationId) =>
+        this.runManagedApplyOperation(
+          authority,
+          () => delegate.readOperationMarker(operationId),
+        ),
+      readApplyReceipt: (sequence) =>
+        this.runManagedApplyOperation(
+          authority,
+          () => delegate.readApplyReceipt(sequence),
+        ),
+      commitApplyOperation: (input) =>
+        this.runManagedApplyOperation(
+          authority,
+          () => delegate.commitApplyOperation(input),
         ),
     }
   }
@@ -4199,6 +4347,254 @@ class AwsWorkspaceSearchMigrationIdentityPort
   }
 
   /**
+   * Captures the complete measured authority for one apply-operation port.
+   *
+   * @returns Detached generation, configuration, state identity, and private
+   * immutable object port.
+   */
+  private captureManagedApplyOperationAuthority():
+    ManagedApplyOperationAuthority {
+    const generation = this.generation
+    const configurationHash = this.measuredConfigurationHash
+    const configuration = this.measuredConfiguration
+    const stateTable = this.measuredMigrationStateTable
+    const immutableArtifactPort = this.measuredPlanningArtifactPort
+    if (
+      configurationHash === undefined ||
+      configuration === undefined ||
+      stateTable === undefined ||
+      immutableArtifactPort === undefined ||
+      this.measuredExecutionControlQuarantined
+    ) {
+      return failManagedApplyOperation()
+    }
+    const authority: ManagedApplyOperationAuthority = {
+      generation,
+      configurationHash,
+      configuration: structuredClone(configuration),
+      stateTable: structuredClone(stateTable),
+      immutableArtifactPort,
+    }
+    this.requireManagedApplyOperationAuthority(authority)
+    return authority
+  }
+
+  /**
+   * Guards one complete apply operation against lifecycle invalidation.
+   *
+   * The callback is invoked synchronously after the initial lifecycle guard so
+   * the standalone adapter snapshots caller input before its first await.
+   * A post-send ambiguous failure remains visible even after it quarantines the
+   * captured generation.
+   *
+   * @param authority - Captured measured apply-operation authority.
+   * @param operation - One standalone apply operation.
+   * @returns Result only while the captured generation remains current.
+   */
+  private async runManagedApplyOperation<Result>(
+    authority: ManagedApplyOperationAuthority,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    this.requireManagedApplyOperationAuthority(authority)
+    try {
+      const result = await operation()
+      this.requireManagedApplyOperationAuthority(authority)
+      return result
+    } catch (error: unknown) {
+      if (
+        !this.isMeasurementGenerationCurrent(
+          authority.generation,
+          authority.configurationHash,
+        )
+      ) {
+        return failManagedApplyOperation()
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Guards one apply read with all six table-incarnation checks on both sides.
+   *
+   * @param authority - Captured measured apply-operation authority.
+   * @param operation - Exact strongly consistent DynamoDB read.
+   * @returns Read result only while every measured table remains current.
+   */
+  private async runManagedApplyOperationRead<Result>(
+    authority: ManagedApplyOperationAuthority,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    this.requireManagedApplyOperationAuthority(authority)
+    await this.requireCurrentApplyOperationTableIncarnations(authority)
+    let result: Result
+    try {
+      result = await operation()
+    } catch (error: unknown) {
+      this.requireManagedApplyOperationAuthority(authority)
+      await this.requireCurrentApplyOperationTableIncarnations(authority)
+      throw error
+    }
+    this.requireManagedApplyOperationAuthority(authority)
+    await this.requireCurrentApplyOperationTableIncarnations(authority)
+    this.requireManagedApplyOperationAuthority(authority)
+    return result
+  }
+
+  /**
+   * Revalidates all six transaction-owned table incarnations for apply.
+   *
+   * @param authority - Captured measured apply-operation authority.
+   */
+  private async requireCurrentApplyOperationTableIncarnations(
+    authority: ManagedApplyOperationAuthority,
+  ): Promise<void> {
+    try {
+      await this.requireCurrentApplicationWriterFenceTableIncarnations(
+        authority,
+      )
+    } catch (error: unknown) {
+      throw createManagedApplyOperationFailure(
+        readManagedMigrationStateFailureCode(error),
+      )
+    }
+  }
+
+  /**
+   * Sends one prepared apply transaction and quarantines uncertain identity.
+   *
+   * Once the transaction transport has been invoked, failure of either the
+   * success-path or error-path all-six guard makes the commit outcome
+   * unreconcilable under the captured measurement. The shared execution
+   * generation is quarantined and a public ambiguous-outcome failure is
+   * returned so the standalone adapter does not attempt managed reconciliation.
+   *
+   * @param authority - Captured measured apply-operation authority.
+   * @param operation - Exact prepared eleven- or twelve-item transaction.
+   * @returns Raw transaction result after the post-send all-six guard.
+   */
+  private async runManagedPreparedApplyOperationWrite<Result>(
+    authority: ManagedApplyOperationAuthority,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    try {
+      this.requireManagedApplyOperationAuthority(authority)
+    } catch (error: unknown) {
+      throw createManagedApplyOperationFailure(
+        readManagedMigrationStateFailureCode(error),
+      )
+    }
+    let sent = false
+    let result: Result
+    try {
+      result = await this.runManagedMigrationStateIo(
+        authority,
+        () => {
+          sent = true
+          return operation()
+        },
+      )
+    } catch (error: unknown) {
+      if (!sent) {
+        throw createManagedApplyOperationFailure(
+          readManagedMigrationStateFailureCode(error),
+        )
+      }
+      try {
+        await this.requireCurrentApplyOperationTableIncarnations(
+          authority,
+        )
+      } catch {
+        this.quarantineManagedExecutionControl(authority)
+        throw createManagedApplyOperationFailure(
+          'AMBIGUOUS_OPERATION_UNRESOLVED',
+        )
+      }
+      throw error
+    }
+    try {
+      await this.requireCurrentApplyOperationTableIncarnations(
+        authority,
+      )
+    } catch {
+      this.quarantineManagedExecutionControl(authority)
+      throw createManagedApplyOperationFailure(
+        'AMBIGUOUS_OPERATION_UNRESOLVED',
+      )
+    }
+    return result
+  }
+
+  /**
+   * Creates a journal-only immutable port bound to one apply generation.
+   *
+   * @param authority - Captured measured apply-operation authority.
+   * @returns Immutable storage capability guarded around every S3 operation.
+   */
+  private createManagedApplyImmutableArtifactPort(
+    authority: ManagedApplyOperationAuthority,
+  ): WorkspaceSearchMigrationImmutableArtifactAwsPort {
+    const delegate = authority.immutableArtifactPort
+    return {
+      writeImmutableArtifact: (input) =>
+        this.runManagedApplyImmutableArtifactOperation(
+          authority,
+          () => delegate.writeImmutableArtifact(input),
+        ),
+      readImmutableArtifact: (input) =>
+        this.runManagedApplyImmutableArtifactOperation(
+          authority,
+          () => delegate.readImmutableArtifact(input),
+        ),
+    }
+  }
+
+  /**
+   * Guards one journal S3 operation with generation, configuration, and
+   * shared-quarantine checks before and after transport activity.
+   *
+   * @param authority - Captured measured apply-operation authority.
+   * @param operation - Exact immutable artifact read or write.
+   * @returns Storage result only while apply authority remains usable.
+   */
+  private async runManagedApplyImmutableArtifactOperation<Result>(
+    authority: ManagedApplyOperationAuthority,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    this.requireManagedApplyOperationAuthority(authority)
+    try {
+      const result = await operation()
+      this.requireManagedApplyOperationAuthority(authority)
+      return result
+    } catch (error: unknown) {
+      this.requireManagedApplyOperationAuthority(authority)
+      throw error
+    }
+  }
+
+  /**
+   * Requires one captured apply authority and private storage port to remain
+   * current and outside the shared execution-control quarantine.
+   *
+   * @param authority - Captured generation, configuration, and private port.
+   */
+  private requireManagedApplyOperationAuthority(
+    authority: ManagedApplyOperationAuthority,
+  ): void {
+    if (
+      !this.isMeasurementGenerationCurrent(
+        authority.generation,
+        authority.configurationHash,
+      ) ||
+      this.measuredConfiguration === undefined ||
+      this.measuredPlanningArtifactPort !==
+        authority.immutableArtifactPort ||
+      this.measuredExecutionControlQuarantined
+    ) {
+      return failManagedApplyOperation()
+    }
+  }
+
+  /**
    * Captures all measured identities installed for writer-fence operations.
    *
    * @returns Detached generation, configuration, hash, and state identity.
@@ -5986,6 +6382,30 @@ function createManagedExecutionRunFailure(
   return new WorkspaceSearchMigrationFailure(
     code,
     'Workspace Search migration execution run operation failed.',
+  )
+}
+
+/**
+ * Raises one stable managed apply-operation lifecycle failure.
+ *
+ * @returns Never returns.
+ */
+function failManagedApplyOperation(): never {
+  throw createManagedApplyOperationFailure('INVALID_STATE')
+}
+
+/**
+ * Creates one stable managed apply-operation failure.
+ *
+ * @param code - Stable operator-safe lifecycle, drift, or ambiguity code.
+ * @returns Secret-free apply-operation failure.
+ */
+function createManagedApplyOperationFailure(
+  code: WorkspaceSearchMigrationFailureCode,
+): WorkspaceSearchMigrationFailure {
+  return new WorkspaceSearchMigrationFailure(
+    code,
+    'Workspace Search migration apply operation failed.',
   )
 }
 

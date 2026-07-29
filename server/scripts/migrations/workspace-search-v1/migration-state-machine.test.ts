@@ -13,6 +13,7 @@ import {
 } from './dynamodb-attribute-codec'
 import {
   createAbsentMigrationItemDigest,
+  serializeWorkspaceSearchJournalSegment,
 } from './migration-journal'
 import { mapWorkspaceSearchMigrationRow } from './migration-mapper'
 import {
@@ -28,6 +29,7 @@ import {
   type MigrationTableIdentity,
   type WorkspaceSearchApplySeal,
   type WorkspaceSearchApplySealReference,
+  type WorkspaceSearchJournalReference,
   type WorkspaceSearchJournalSegment,
   type WorkspaceSearchMaintenanceEvidenceReceipt,
   type WorkspaceSearchMigrationConfiguration,
@@ -62,6 +64,7 @@ import {
   createEmptyWorkspaceSearchMigrationCheckpoint,
   createEmptyWorkspaceSearchPlanDigest,
   createWorkspaceSearchMaintenanceEvidenceReceipt,
+  createWorkspaceSearchApplyJournalSegment,
   createWorkspaceSearchMigrationOperationDigest,
   createWorkspaceSearchMigrationRunState,
   createWorkspaceSearchPlanLeafDigest,
@@ -647,6 +650,10 @@ function createApplyCommand(
     createdAt: preparedAt,
   }
   const contentDigest = createMigrationDigest(segment)
+  const byteLength = Buffer.byteLength(
+    serializeWorkspaceSearchJournalSegment(segment),
+    'utf8',
+  )
   const versionId = `journal-version-${sequence}`
   return {
     kind: 'apply-operation-requested',
@@ -659,6 +666,8 @@ function createApplyCommand(
           `${String(sequence).padStart(12, '0')}.json`,
         versionId,
         contentDigest,
+        byteLength,
+        retainUntil: '2026-08-25T04:00:00.000Z',
         headDigest: createJournalHeadDigest({
           previousHeadDigest: state.journalHeadDigest,
           sequence,
@@ -2842,6 +2851,103 @@ describe('Workspace Search migration state machine', () => {
     expect(fixture.port.readTargetSnapshot(planned.operation.targetKeyDigest))
       .toEqual(planned.operation.before)
   })
+
+  test(
+    'creates canonical mutation journal segments and rejects true plan no-ops',
+    () => {
+      const fixture = createRunFixture([false])
+      const planned = fixture.plans[0]
+      if (!planned) {
+        throw new TestAdapterFailure('Expected one mutation plan row.')
+      }
+      const createdAt = '2026-07-25T04:00:05.000Z'
+      const segment = createWorkspaceSearchApplyJournalSegment({
+        state: fixture.state,
+        plannedOperation: planned,
+        preparedFenceToken:
+          fixture.state.maintenanceEvidenceReceipt.fenceToken,
+        createdAt,
+      })
+      const expected = requireMutationCommandJournal(
+        createApplyCommand(fixture.state, planned, createdAt),
+      ).segment
+      expect(segment).toEqual(expected)
+      expect(
+        serializeWorkspaceSearchJournalSegment(segment),
+      ).toBe(serializeWorkspaceSearchJournalSegment(expected))
+
+      const noOpFixture = createRunFixture([true])
+      const noOp = noOpFixture.plans[0]
+      if (!noOp) {
+        throw new TestAdapterFailure('Expected one no-op plan row.')
+      }
+      expectSyncMigrationFailure(
+        () => createWorkspaceSearchApplyJournalSegment({
+          state: noOpFixture.state,
+          plannedOperation: noOp,
+          preparedFenceToken:
+            noOpFixture.state.maintenanceEvidenceReceipt.fenceToken,
+          createdAt,
+        }),
+        'INVALID_STATE',
+      )
+    },
+  )
+
+  test(
+    'rejects byte-length and retention tampering in rich journal references',
+    () => {
+      const fixture = createRunFixture([false])
+      const planned = fixture.plans[0]
+      if (!planned) {
+        throw new TestAdapterFailure('Expected one mutation plan row.')
+      }
+      const command = createApplyCommand(
+        fixture.state,
+        planned,
+        '2026-07-25T04:00:05.000Z',
+      )
+      const journal = requireMutationCommandJournal(command)
+      const authority: WorkspaceSearchMigrationAuthority = {
+        lease: createLease(),
+        ownerId: 'operator-one',
+        at: '2026-07-25T04:00:10.000Z',
+      }
+      const tamperedReferences: readonly WorkspaceSearchJournalReference[] = [
+        {
+          ...journal.reference,
+          byteLength: journal.reference.byteLength + 1,
+        },
+        {
+          ...journal.reference,
+          retainUntil: authority.at,
+        },
+      ]
+
+      for (const reference of tamperedReferences) {
+        const event = createWorkspaceSearchApplyOperationRecordedEvent(
+          fixture.state,
+          authority,
+          {
+            ...command,
+            journal: {
+              segment: journal.segment,
+              reference,
+            },
+          },
+        )
+        expectSyncMigrationFailure(
+          () => reduceWorkspaceSearchMigrationRunState({
+            current: fixture.state,
+            expectedRevision: fixture.state.revision,
+            authority,
+            event,
+          }),
+          'INVALID_STATE',
+        )
+      }
+    },
+  )
 
   test('starts post-apply traversal only after every plan operation is durable', async () => {
     const fixture = await createPersistedRun([true, true])

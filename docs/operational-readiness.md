@@ -663,11 +663,50 @@ control CLIと、single-flight heartbeat supervisorは実装済みです。Atomi
 execution-boundary AWS portとmanaged-session capability gateに加え、exact revision 2 boundary、closed
 writer-fence、sealed authority v2、fresh current authorityからrevision 1 `applying` stateを作る
 execution-run contractと、同じmeasured sessionでそのstateをstrong read/createするadmission portも
-実装済みです。これらはcontrol CLIとorchestratorへ公開していません。Target mutation、checkpoint、
-apply/verify/rollback transition、terminal outcomeに束縛したrelease、close後のdrainと再planning
-orchestration、migration専用observability/alarm、restore/failover/DR drill、non-production実行evidenceは
-未完了です。Sealed authority v2と作成済みinitial run stateだけをapply authorityとして使用せず、
-Production migration gateは閉じたままです。
+実装済みです。Revision 1 admissionはimmutableなrootとして残し、各operation後の状態はその
+`executionRunDigest`へ束縛した別のmutable execution-state rowへ保存します。このrowはexact canonical
+bytes、revision、run-state digest、self digestを相互検証し、最初のoperationではabsence、以後は強整合で
+取得したexact predecessorをCASして、admission自体を上書きしません。
+
+Apply journal gatewayは、losslessなnative `AttributeValue` preimageをrun/configuration namespaceへ
+immutable uploadし、`objectKey`、exact `versionId`、`contentDigest`、`byteLength`、`retainUntil`、
+chain `headDigest`を持つrich referenceを返します。Readはlatest lookupを使わず同じexact versionを取得し、
+canonical bytes、長さ、digest、retention、run/configuration/sequenceを再検証します。Mutationのjournalは
+target transactionより前に保存しますが、そのobjectはoperation markerへ原子的に参照されるまでは
+authoritativeなcommitted journalには数えません。
+
+One-operation apply AWS portは、lease/current pointer/receipt、closed writer fence、revision 2 boundary、
+sealed authority v2、immutable revision 1 admission、mutable execution state、source、target、
+operation-id markerを固定順で扱います。No-opはtarget ConditionCheckだけを行う11 item transaction、
+mutationは同じ位置でconditional Put/Deleteし、さらにjournal-sequence indexを追加する12 item
+transactionです。Sourceとtargetはjournal upload前にそれぞれ強整合Getし、planned snapshotのexact key、
+canonical digest、全observed top-level `AttributeValue`を再検証します。Mutation journalのupload後は
+all-six table incarnationを再検証してからfinal commit clockとtransactionを組み立てます。Conditionは
+observed属性のequalityとschema-knownだが不在だった属性の`attribute_not_exists`を併用します。No-op/mutationの両方で
+operation ID keyed markerをabsence Putし、mutationはsequence keyed indexも同じtransactionでabsence
+Putします。応答消失または再起動後はmarkerを先に強整合readし、mutationではsequence index、mutable
+successor、journal exact versionも相互検証して、同じcommitだけを成功として回収します。異なる内容で同じ
+operation IDまたはsequenceを再利用した場合はfail-closedにします。
+
+DynamoDB ConditionExpressionには、itemの未知のtop-level属性名を列挙せずに「完全な属性集合」を比較する
+primitiveがありません。したがって、強整合read後からtransactionまでにplanned itemにもknown schemaにも
+ない属性を追加するwriterが存在すると、その追加を完全CASすることはできません。Application writer fence、
+対象tableのmutation権限分離、全合法top-level名のknown schema列挙、apply attempt内の強整合read、
+journal upload後かつtransaction前のall-six incarnation再検証を一体のinvariantとします。強整合read後にも
+未知属性を追加できる別writerを排除できない環境では、このapply portを安全なproduction authorityとして
+使用しません。
+
+Managed resource-identity compositionは、同じmeasurement generation、pinned DynamoDB client、private
+immutable-artifact portからjournal gatewayとone-operation apply portを構築します。各strong readの前後と
+transaction直前にall-six-table incarnationを再検証し、送信後の成功・error pathで再検証できない場合は
+shared execution-control generationをquarantineして`AMBIGUOUS_OPERATION_UNRESOLVED`を返します。この
+post-send quarantineをstandalone adapter内の通常のresponse-loss retryへ戻しません。ただし、現時点では
+このmanaged apply capabilityをcontrol CLIまたはpost-close orchestratorへ公開していません。Checkpoint、
+apply seal、full verify、reverse rollback、terminal outcomeへ
+束縛したwriter-fence release、close後のdrain/replanning orchestration、apply CLI、migration専用
+observability/alarm、restore/failover/DR drill、non-production実行evidenceも未完了です。One-operation
+transactionが存在してもcomplete apply/verify/rollback supervisorにはならないため、Production migration
+gateは閉じたままです。
 Pure execution-boundary contractは、exact closed fence digest/authorityと全6 TableIdを持つ`closed` revision 1、
 fresh current authority、exact raw maintenance evidence、close後15分以上のdrainを持つ
 `planning-admitted` revision 2だけをcanonical bytes/digestとして受け付けます。Source planning v3 と
@@ -678,9 +717,10 @@ authority v2 rootに加え、exact planning-admitted execution boundaryのcanoni
 ConditionCheck factoryもあります。Fixed 10 item transactionへcompositionするexecution-boundary AWS
 portと、lease/pointer/receipt、closed fence、revision 2 boundary、sealed root、未作成execution-run rowを
 固定順の7 item transactionへcompositionするinitial execution-run admission portは、いずれも
-managed-session capability gateに束縛しています。ただし、operator CLI、post-close planning
-orchestrator、run state mutation adapterへは未接続です。したがって、これらのadapterの存在だけを根拠に
-writer-fenceを閉じたりplanning/applyを開始したりしてはいけません。
+managed-session capability gateに束縛しています。One-operation apply portはこれらのexact condition
+factoryを11/12 item transactionへ再利用し、managed resource-identity compositionにも接続済みですが、
+operator CLIとpost-close planning/apply orchestratorへは未接続です。したがって、これらのadapterの存在だけを根拠に
+writer-fenceを閉じたりcomplete planning/applyを開始したりしてはいけません。
 
 ただし、sealed planning authority v2 の原子的publication、durable writer-fence row、application writer
 guardの存在だけでは、supervisedなclose/drain/replanningを完了しません。Historical receipt と current
@@ -794,9 +834,13 @@ Process exit statusは、成功を`0`、migration failureまたは`OPERATION_FAI
    execution-run stateのstrong read/createと固定7項目admission transactionも実装済みです。ただし、
    admission時にはshared Object Lock deadlineまで実測default retentionの30日すべてが残っていることを
    create/parse/commit直前に要求し、不足するsealed planは再planningします。
-   close/admission/run creationのCLI・orchestrator配線、run state mutation adapter、
-   apply/verify/rollback supervisor、terminal outcomeに束縛したrelease、observability/alarm、
-   DR/non-production evidenceは未実装のため、migration全体のproduction gateはまだ実行可能とは扱いません。
+   Immutable rich journal reference、admission-rooted mutable execution state、source/targetの強整合readと
+   known-attribute CAS、operation marker/sequence indexによるresponse-loss reconciliation、固定11/12項目の
+   one-operation apply transactionと、そのmanaged identity composition、all-six pre/post guard、
+   post-send quarantineも実装済みです。ただし、close/admission/run creation/applyの
+   CLI・orchestrator配線、checkpoint、apply seal、full verify、reverse rollback、
+   terminal outcomeに束縛したrelease、observability/alarm、DR/non-production evidenceは未実装のため、
+   migration全体のproduction gateはまだ実行可能とは扱いません。
 5. Online migration は writer fence/epoch または dual-write + high-watermark catch-up を有効化し、
    source scan と cutover の競合を閉じる。Workspace Search v1はmaintenance writer-fenceを選択する。
    Step 4のcurrent authorityで初回`bootstrapOpen`を行い、API、worker、connector、backfillを含む全継続
@@ -806,7 +850,8 @@ Process exit statusは、成功を`0`、migration failureまたは`OPERATION_FAI
    runとして再生成する。TTL service deleteはmapperのdisjointness invariantを検証し、対象rowを追加した場合は
    invariant更新またはfence内の追加scanで閉じる。
 6. Preimage journal は DynamoDB native value を lossless に保持できる暗号化された segmented store
-   に置き、bounded memory/I/O、retention、access audit を確認する。
+   に置き、exact `versionId`、content digest、byte length、Object Lock `retainUntil`をoperation markerへ
+   固定し、bounded memory/I/O、retention、access audit を確認する。
 7. Verify と rollback の command、停止条件、最大実行時間、data/application owner を incident
    または change record に記載する。
 
@@ -818,10 +863,12 @@ fence close、実測上のwriter drainを確認できないproduction migration�
 
 ### Required verification and rollback semantics
 
-- Apply は全 writer と共有する revision/content digest を compare-and-swap し、取得後に追加された
-  unknown/optional field を無検知で上書きしない。
-- Ambiguous transaction response は durable operation marker と target digest で reconcile し、
-  commit 後の process loss を重複 mutation にしない。
+- Apply は全 writer と共有するrevision/content digest、強整合readでobservedした全top-level属性、
+  schema-knownだが不在だった属性をcompare-and-swapする。DynamoDBは未知のtop-level属性追加を完全CAS
+  できないため、writer fence、mutation権限分離、完全なknown schema、apply attempt内のstrong read、
+  journal upload後のall-six incarnation再検証を必須とし、未知属性writerを排除できなければ停止する。
+- Ambiguous transaction response は durable operation-id marker、mutationのjournal-sequence index、
+  mutable successor、journal exact versionをreconcileし、commit後のprocess lossを重複mutationにしない。
 - Verify は journal 内の item だけでなく source と target を再走査し、invalid row、欠落、stale target、
   件数、key/digest/checksum の completeness を検査する。
 - Rollback は逆順かつ compare-and-swap で exact preimage を復元し、migration 後の live change を
