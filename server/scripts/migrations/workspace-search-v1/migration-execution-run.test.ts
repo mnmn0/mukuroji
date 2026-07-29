@@ -225,6 +225,28 @@ describe('Workspace Search migration execution-run contract', () => {
         encodeCanonicalJson(authorityTimeTamper),
       )
     )
+
+    const retentionTamper = structuredClone(executionRun)
+    Reflect.set(
+      retentionTamper.binding.planSealReference,
+      'retainUntil',
+      '2026-08-28T01:19:59.999Z',
+    )
+    Reflect.set(
+      retentionTamper.binding,
+      'bindingDigest',
+      digestBinding(retentionTamper),
+    )
+    Reflect.set(
+      retentionTamper,
+      'executionRunDigest',
+      digestExecutionRun(retentionTamper),
+    )
+    expectExecutionRunFailure(() =>
+      parseWorkspaceSearchMigrationExecutionRun(
+        encodeCanonicalJson(retentionTamper),
+      )
+    )
   })
 
   test('rejects cross-run, configuration, TableId, root, and plan-reference mismatches', () => {
@@ -308,6 +330,26 @@ describe('Workspace Search migration execution-run contract', () => {
         ),
       })
     )
+    const exactRetentionRun =
+      createWorkspaceSearchMigrationExecutionRun({
+        ...fixture.input,
+        sealedPlanningAuthority: createSealedAuthority(
+          fixture.configurationHash,
+          createTableIds(fixture.configuration),
+          fixture.planSeal,
+          fixture.sealedPlanningAuthority.currentAuthority
+            .maintenanceEvidenceReceiptDigest,
+          sealedAt,
+          '2026-08-28T01:20:00.000Z',
+        ),
+      })
+    expect(
+      parseWorkspaceSearchMigrationExecutionRun(
+        serializeWorkspaceSearchMigrationExecutionRun(
+          exactRetentionRun,
+        ),
+      ),
+    ).toEqual(exactRetentionRun)
     expectExecutionRunFailure(() =>
       createWorkspaceSearchMigrationExecutionRun({
         ...fixture.input,
@@ -318,6 +360,20 @@ describe('Workspace Search migration execution-run contract', () => {
           fixture.sealedPlanningAuthority.currentAuthority
             .maintenanceEvidenceReceiptDigest,
           '2026-07-29T01:19:45.000Z',
+        ),
+      })
+    )
+    expectExecutionRunFailure(() =>
+      createWorkspaceSearchMigrationExecutionRun({
+        ...fixture.input,
+        sealedPlanningAuthority: createSealedAuthority(
+          fixture.configurationHash,
+          createTableIds(fixture.configuration),
+          fixture.planSeal,
+          fixture.sealedPlanningAuthority.currentAuthority
+            .maintenanceEvidenceReceiptDigest,
+          sealedAt,
+          '2026-08-28T01:19:59.999Z',
         ),
       })
     )
@@ -577,6 +633,7 @@ function createPlanSeal(
  * @param planSeal - Exact referenced plan seal.
  * @param receiptDigest - Receipt digest fixed by sealed planning.
  * @param rootSealedAt - Optional root publication time.
+ * @param rootRetainUntil - Optional graph-wide retention deadline.
  * @returns Exact version-two compact authority.
  */
 function createSealedAuthority(
@@ -585,6 +642,7 @@ function createSealedAuthority(
   planSeal: WorkspaceSearchPlanSeal,
   receiptDigest: string,
   rootSealedAt = sealedAt,
+  rootRetainUntil = retainUntil,
 ): WorkspaceSearchMigrationSealedPlanningAuthorityV2 {
   const planSealBytes = serializeWorkspaceSearchPlanSeal(planSeal)
   const planSealDigest = digestBytes(planSealBytes)
@@ -604,7 +662,7 @@ function createSealedAuthority(
       versionId: 'plan-seal-version-1',
       contentDigest: planSealDigest,
       byteLength: planSealBytes.byteLength,
-      retainUntil,
+      retainUntil: rootRetainUntil,
     },
     planManifestHeadReference: {
       objectKey:
@@ -612,7 +670,7 @@ function createSealedAuthority(
       versionId: 'plan-manifest-version-1',
       contentDigest: planManifestDigest,
       byteLength: 1,
-      retainUntil,
+      retainUntil: rootRetainUntil,
     },
     planningProvenanceManifestHeadReference: {
       objectKey:
@@ -624,7 +682,7 @@ function createSealedAuthority(
       versionId: 'provenance-manifest-version-1',
       contentDigest: provenanceManifestDigest,
       byteLength: 1,
-      retainUntil,
+      retainUntil: rootRetainUntil,
     },
     planDigest: planSeal.planDigest,
     planningSnapshotDigest: planSeal.planningSnapshotDigest,

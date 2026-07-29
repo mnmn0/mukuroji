@@ -792,6 +792,8 @@ Process exit statusは、成功を`0`、migration failureまたは`OPERATION_FAI
    revision 2へ進める固定10項目AWS transactionとmanaged-session capability gateは実装済みです。
    Exact revision 2 boundary、closed fence、sealed root、fresh authorityを固定したrevision 1
    execution-run stateのstrong read/createと固定7項目admission transactionも実装済みです。ただし、
+   admission時にはshared Object Lock deadlineまで実測default retentionの30日すべてが残っていることを
+   create/parse/commit直前に要求し、不足するsealed planは再planningします。
    close/admission/run creationのCLI・orchestrator配線、run state mutation adapter、
    apply/verify/rollback supervisor、terminal outcomeに束縛したrelease、observability/alarm、
    DR/non-production evidenceは未実装のため、migration全体のproduction gateはまだ実行可能とは扱いません。

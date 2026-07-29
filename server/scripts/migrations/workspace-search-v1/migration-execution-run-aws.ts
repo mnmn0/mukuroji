@@ -1077,6 +1077,8 @@ function requireExecutionRunStaticBinding(
     state.configurationHash !== binding.configurationHash ||
     state.revision !== 1 ||
     state.status !== 'applying' ||
+    state.runState.dryRunEvidenceDigest !==
+      binding.planSeal.dryRunEvidenceDigest ||
     state.binding.planningAdmittedAt !==
       binding.executionBoundary.planningAdmission.admittedAt ||
     state.binding.sealedAt !==

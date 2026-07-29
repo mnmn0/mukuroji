@@ -297,6 +297,44 @@ describe('Workspace Search migration execution-run AWS adapter', () => {
       await captureMigrationFailure(() => port.read(runId))
     expect(sealedTimestampFailure.code).toBe('INVALID_STATE')
 
+    const dryRunTamperedState = {
+      ...created.runState,
+      dryRunEvidenceDigest: digest('different-dry-run'),
+    }
+    const dryRunTampering =
+      redigestExecutionRunWithBinding(
+        created,
+        withoutBindingDigest(created.binding),
+        dryRunTamperedState,
+      )
+    transport.mutateState((item) => {
+      installExecutionRunState(item, dryRunTampering)
+    })
+    const dryRunReadFailure =
+      await captureMigrationFailure(() => port.read(runId))
+    expect(dryRunReadFailure.code).toBe('INVALID_STATE')
+
+    const dryRunConflictTransport =
+      new RecordingExecutionRunTransport()
+    dryRunConflictTransport.nextTransactionError =
+      new Error('tenant-secret-dry-run-response')
+    dryRunConflictTransport.replacementItemAfterTransaction = {
+      ...durableItem,
+      ...createExecutionRunStateAttributes(dryRunTampering),
+    }
+    const dryRunConflictPort = createExecutionRunPort(
+      fixture,
+      dryRunConflictTransport,
+    )
+    const dryRunReconciliationFailure =
+      await captureMigrationFailure(() =>
+        dryRunConflictPort.create(fixture.currentAuthority)
+      )
+    expect(dryRunReconciliationFailure.code).toBe('INVALID_STATE')
+    expect(dryRunReconciliationFailure.message).not.toContain(
+      'tenant-secret',
+    )
+
     const regressedReceipt = {
       ...created.runState.maintenanceEvidenceReceipt,
       fenceToken:
@@ -415,6 +453,29 @@ describe('Workspace Search migration execution-run AWS adapter', () => {
     expect(transport.transactions).toHaveLength(0)
   })
 
+  test('revalidates immutable retention headroom after transport preparation', async () => {
+    const fixture = createExecutionRunAwsFixture(
+      'retention-headroom',
+      '2026-08-28T01:19:31.000Z',
+    )
+    const transport = new RecordingExecutionRunTransport()
+    const port = createExecutionRunPort(
+      fixture,
+      transport,
+      createSequencedClock([
+        createdAt,
+        '2026-07-29T01:19:32.000Z',
+      ]),
+    )
+
+    const failure = await captureMigrationFailure(() =>
+      port.create(fixture.currentAuthority)
+    )
+    expect(failure.code).toBe('INVALID_ARGUMENT')
+    expect(transport.reads).toHaveLength(1)
+    expect(transport.transactions).toHaveLength(0)
+  })
+
   test('rejects a regressing commit clock before transaction construction', async () => {
     const fixture = createExecutionRunAwsFixture()
     const transport = new RecordingExecutionRunTransport()
@@ -504,10 +565,12 @@ type ExecutionRunAwsFixture = {
  * Creates one compact internally correlated adapter fixture.
  *
  * @param variant - Optional stable plan-reference variant.
+ * @param graphRetainUntil - Optional shared graph retention deadline.
  * @returns Complete adapter fixture.
  */
 function createExecutionRunAwsFixture(
   variant = 'default-plan',
+  graphRetainUntil = retainUntil,
 ): ExecutionRunAwsFixture {
   const configuration = createConfiguration()
   const configurationHash =
@@ -604,6 +667,7 @@ function createExecutionRunAwsFixture(
       planSeal,
       receiptDigest,
       variant,
+      graphRetainUntil,
     )
   return {
     configuration,
@@ -655,6 +719,7 @@ function createPlanSeal(
  * @param planSeal - Exact strict plan seal.
  * @param receiptDigest - Current immutable receipt digest.
  * @param variant - Stable fixture variant.
+ * @param graphRetainUntil - Shared graph retention deadline.
  * @returns Exact compact sealed authority.
  */
 function createCompactSealedAuthority(
@@ -663,6 +728,7 @@ function createCompactSealedAuthority(
   planSeal: WorkspaceSearchPlanSeal,
   receiptDigest: string,
   variant: string,
+  graphRetainUntil: string,
 ): WorkspaceSearchMigrationSealedPlanningAuthorityV2 {
   const planSealBytes = serializeWorkspaceSearchPlanSeal(planSeal)
   const planSealDigest = digestBytes(planSealBytes)
@@ -682,7 +748,7 @@ function createCompactSealedAuthority(
       versionId: `plan-seal-version-${variant}`,
       contentDigest: planSealDigest,
       byteLength: planSealBytes.byteLength,
-      retainUntil,
+      retainUntil: graphRetainUntil,
     },
     planManifestHeadReference: {
       objectKey:
@@ -690,7 +756,7 @@ function createCompactSealedAuthority(
       versionId: `plan-manifest-version-${variant}`,
       contentDigest: planManifestDigest,
       byteLength: 1,
-      retainUntil,
+      retainUntil: graphRetainUntil,
     },
     planningProvenanceManifestHeadReference: {
       objectKey:
@@ -702,7 +768,7 @@ function createCompactSealedAuthority(
       versionId: `provenance-version-${variant}`,
       contentDigest: provenanceDigest,
       byteLength: 1,
-      retainUntil,
+      retainUntil: graphRetainUntil,
     },
     planDigest: planSeal.planDigest,
     planningSnapshotDigest: planSeal.planningSnapshotDigest,

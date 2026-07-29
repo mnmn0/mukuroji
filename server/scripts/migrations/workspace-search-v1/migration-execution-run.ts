@@ -72,6 +72,7 @@ export const WORKSPACE_SEARCH_MIGRATION_EXECUTION_RUN_MAX_BYTES =
   256 * 1024
 
 const maximumTextLength = 1_024
+const retentionDayMilliseconds = 24 * 60 * 60 * 1_000
 const planSealRole = 'plan-seals'
 const tableRoles: readonly WorkspaceSearchMigrationTableRole[] = [
   ...workspaceSearchMigrationSourceNames,
@@ -493,15 +494,49 @@ function requireAdmissionCorrelation(
     planCreatedAt > sealedAt ||
     sealedAt > evaluatedAt ||
     evaluatedAt > creationTime ||
-    sealedAt > creationTime ||
-    Date.parse(planSealReference.retainUntil) <= creationTime
+    sealedAt > creationTime
   ) {
     return failExecutionRun()
   }
+  requireExecutionRunRetentionHeadroom(
+    configuration,
+    planSealReference.retainUntil,
+    createdAt,
+  )
   requireAuthorityIsCurrentSuccessor(
     sealedRoot.currentAuthority,
     currentAuthority,
   )
+}
+
+/**
+ * Requires one full measured retention interval after run admission.
+ *
+ * The immutable writer permits at most one additional retention day, so this
+ * also bounds planning, sealing, and admission delay to that existing margin.
+ *
+ * @param configuration - Exact measured migration configuration.
+ * @param retainUntil - Shared immutable graph retention deadline.
+ * @param createdAt - Execution-run admission time.
+ */
+function requireExecutionRunRetentionHeadroom(
+  configuration: WorkspaceSearchMigrationConfiguration,
+  retainUntil: string,
+  createdAt: string,
+): void {
+  const minimumRetentionMilliseconds =
+    configuration.journal.defaultRetentionDays *
+    retentionDayMilliseconds
+  const retentionHeadroomMilliseconds =
+    Date.parse(retainUntil) - Date.parse(createdAt)
+  if (
+    !Number.isSafeInteger(minimumRetentionMilliseconds) ||
+    minimumRetentionMilliseconds <= 0 ||
+    !Number.isSafeInteger(retentionHeadroomMilliseconds) ||
+    retentionHeadroomMilliseconds < minimumRetentionMilliseconds
+  ) {
+    return failExecutionRun()
+  }
 }
 
 /**
@@ -631,6 +666,11 @@ function readExecutionRun(
   ) {
     return failExecutionRun()
   }
+  requireExecutionRunRetentionHeadroom(
+    runState.configuration,
+    binding.planSealReference.retainUntil,
+    binding.createdAt,
+  )
   const fields = {
     kind: 'workspace-search-migration-execution-run',
     executionRunVersion: 1,
