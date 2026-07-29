@@ -29,6 +29,7 @@ import {
   createMigrationDigest,
   createWorkspaceSearchConfigurationHash,
   createWorkspaceSearchOperationId,
+  type EncodedMigrationItemSnapshot,
   isCanonicalTimestamp,
   isHexDigest,
   MigrationDigestAccumulator,
@@ -58,6 +59,8 @@ import {
   type WorkspaceSearchVerificationEvidence,
   type WorkspaceSearchVerificationEvidenceReference,
   workspaceSearchMigrationSourceNames,
+  WORKSPACE_SEARCH_MIGRATION_ID,
+  WORKSPACE_SEARCH_MIGRATION_VERSION,
   zeroHexDigest,
 } from './migration-contract'
 
@@ -274,6 +277,20 @@ export type WorkspaceSearchApplyOperationCommandEvent = {
     /** Exact immutable object version containing the segment bytes. */
     reference: WorkspaceSearchJournalReference
   }
+}
+
+/**
+ * Exact adapter-owned input for one immutable apply preimage segment.
+ */
+export type CreateWorkspaceSearchApplyJournalSegmentInput = {
+  /** Current durable run state before the operation commits. */
+  readonly state: WorkspaceSearchMigrationRunState
+  /** Next exact sealed-plan operation in strict plan order. */
+  readonly plannedOperation: WorkspaceSearchPlannedOperation
+  /** Current lease fence that prepared the immutable preimage. */
+  readonly preparedFenceToken: number
+  /** Adapter-owned canonical UTC preparation time. */
+  readonly createdAt: string
 }
 
 /** Caller payload for one reverse command before adapter authority is read. */
@@ -781,6 +798,80 @@ function createMaintenanceEvidenceReceiptFromParsed(
     validatedAt,
   )
   return receipt
+}
+
+/**
+ * Creates one exact immutable preimage segment before an apply transaction.
+ *
+ * This boundary validates strict plan order and membership before any storage
+ * upload. The segment remains non-authoritative until its exact version
+ * reference is committed with the target mutation and operation receipt.
+ *
+ * @param input - Current state, next plan entry, fence, and preparation time.
+ * @returns Canonical lossless preimage segment ready for immutable upload.
+ */
+export function createWorkspaceSearchApplyJournalSegment(
+  input: CreateWorkspaceSearchApplyJournalSegmentInput,
+): WorkspaceSearchJournalSegment {
+  validateWorkspaceSearchMigrationRunState(input.state)
+  requireStatus(input.state, 'applying')
+  validatePlannedOperation(input.state, input.plannedOperation)
+  requirePositiveSafeInteger(
+    input.preparedFenceToken,
+    'journal preparation fence token',
+  )
+  requireCanonicalTime(input.createdAt, 'journal preparation time')
+  if (
+    input.preparedFenceToken <
+      input.state.maintenanceEvidenceReceipt.fenceToken ||
+    Date.parse(input.createdAt) < Date.parse(input.state.updatedAt)
+  ) {
+    return failState('Journal preparation does not succeed durable run authority.')
+  }
+  const operation = input.plannedOperation.operation
+  if (operation.before.digest === operation.after.digest) {
+    return failState('A true plan no-op cannot create a journal segment.')
+  }
+  const segment: WorkspaceSearchJournalSegment = {
+    kind: 'workspace-search-preimage-segment',
+    segmentVersion: 1,
+    migrationId: WORKSPACE_SEARCH_MIGRATION_ID,
+    migrationVersion: WORKSPACE_SEARCH_MIGRATION_VERSION,
+    runId: input.state.runId,
+    configurationHash: input.state.configurationHash,
+    sequence: input.state.journalSequence + 1,
+    preparedFenceToken: input.preparedFenceToken,
+    operationId: operation.operationId,
+    ...(operation.sourceCondition.exists
+      ? { sourceDigest: operation.sourceCondition.itemDigest }
+      : {}),
+    previousHeadDigest: input.state.journalHeadDigest,
+    targetKey: encodeAttributeMap(operation.targetKey),
+    targetKeyDigest: operation.targetKeyDigest,
+    before: encodeSnapshotForDigest(operation.before),
+    after: encodeSnapshotForDigest(operation.after),
+    createdAt: input.createdAt,
+  }
+  serializeWorkspaceSearchJournalSegment(segment)
+  return segment
+}
+
+/**
+ * Validates that one detached plan entry is the next exact apply operation.
+ *
+ * Persistence adapters call this before external reads or journal uploads.
+ * Durable authority rows still need condition checks in the final transaction.
+ *
+ * @param state - Current exact durable run state.
+ * @param plannedOperation - Candidate next sealed-plan entry.
+ */
+export function validateWorkspaceSearchPlannedOperationForApply(
+  state: WorkspaceSearchMigrationRunState,
+  plannedOperation: WorkspaceSearchPlannedOperation,
+): void {
+  validateWorkspaceSearchMigrationRunState(state)
+  requireStatus(state, 'applying')
+  validatePlannedOperation(state, plannedOperation)
 }
 
 /**
@@ -2062,13 +2153,11 @@ function validateApplyJournalSegment(
     return failState('Journal segment was created after its target mutation.')
   }
 
-  serializeWorkspaceSearchJournalSegment(segment)
-  const contentDigest = createMigrationDigest(segment)
-  if (receipt.journal.contentDigest !== contentDigest) {
-    return failState('Apply receipt does not reference the exact journal bytes.')
-  }
-  requireNonEmptyText(receipt.journal.objectKey, 'journal object key')
-  requireNonEmptyText(receipt.journal.versionId, 'journal version ID')
+  const contentDigest = validateJournalReference(
+    segment,
+    receipt.journal,
+    receipt.committedAt,
+  )
   const headDigest = createJournalHeadDigest({
     previousHeadDigest: segment.previousHeadDigest,
     sequence: segment.sequence,
@@ -2079,6 +2168,40 @@ function validateApplyJournalSegment(
   if (receipt.journal.headDigest !== headDigest) {
     return failState('Apply receipt journal head does not extend the exact chain.')
   }
+}
+
+/**
+ * Validates one rich exact-version journal reference against canonical bytes.
+ *
+ * @param segment - Exact immutable journal segment.
+ * @param reference - Rich immutable reference committed by apply.
+ * @param committedAt - Adapter-owned apply commit time.
+ * @returns Digest of the exact canonical journal bytes.
+ */
+function validateJournalReference(
+  segment: WorkspaceSearchJournalSegment,
+  reference: WorkspaceSearchJournalReference,
+  committedAt: string,
+): string {
+  const serialized = serializeWorkspaceSearchJournalSegment(segment)
+  const byteLength = new TextEncoder().encode(serialized).byteLength
+  const contentDigest = createMigrationDigest(segment)
+  requireNonEmptyText(reference.objectKey, 'journal object key')
+  requireNonEmptyText(reference.versionId, 'journal version ID')
+  requirePositiveSafeInteger(reference.byteLength, 'journal byte length')
+  requireCanonicalTime(reference.retainUntil, 'journal retention deadline')
+  requireCanonicalTime(committedAt, 'journal commit time')
+  if (
+    reference.contentDigest !== contentDigest ||
+    reference.byteLength !== byteLength ||
+    Date.parse(segment.createdAt) >= Date.parse(reference.retainUntil) ||
+    Date.parse(committedAt) >= Date.parse(reference.retainUntil)
+  ) {
+    return failState(
+      'Apply receipt does not reference exact retained journal bytes.',
+    )
+  }
+  return contentDigest
 }
 
 /**
@@ -2130,8 +2253,11 @@ function validateRollbackReceipt(
   ) {
     return failState('Rollback journal segment does not match its apply receipt.')
   }
-  serializeWorkspaceSearchJournalSegment(segment)
-  const contentDigest = createMigrationDigest(segment)
+  const contentDigest = validateJournalReference(
+    segment,
+    applyReceipt.journal,
+    applyReceipt.committedAt,
+  )
   const expectedHeadDigest = createJournalHeadDigest({
     previousHeadDigest: segment.previousHeadDigest,
     sequence: segment.sequence,
@@ -2707,7 +2833,9 @@ function withoutProjectionDigest(
  * @param snapshot - Exact native target state.
  * @returns Canonical JSON-safe snapshot.
  */
-function encodeSnapshotForDigest(snapshot: MigrationItemSnapshot) {
+function encodeSnapshotForDigest(
+  snapshot: MigrationItemSnapshot,
+): EncodedMigrationItemSnapshot {
   if (!snapshot.exists) {
     return {
       exists: false,

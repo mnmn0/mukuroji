@@ -50,6 +50,9 @@ import {
   STSClient,
 } from '@aws-sdk/client-sts'
 import {
+  createTeamWorkspaceSearchDocument,
+} from '../../../src/modules/workspace-search'
+import {
   createMigrationDigest,
   createWorkspaceSearchConfigurationHash,
   type DynamoAttributeMap,
@@ -103,6 +106,9 @@ import {
   workspaceSearchMigrationExecutionRunTransactionIndex,
 } from './migration-execution-run-aws'
 import type {
+  WorkspaceSearchMigrationExecutionRun,
+} from './migration-execution-run'
+import type {
   PublishWorkspaceSearchMigrationSealedPlanningAuthorityV2Input,
 } from './migration-sealed-planning-authority-aws'
 import {
@@ -128,7 +134,14 @@ import {
 import {
   createEmptyWorkspaceSearchMigrationCheckpoint,
   createEmptyWorkspaceSearchPlanDigest,
+  createWorkspaceSearchPlanLeafDigest,
+  type WorkspaceSearchApplyOperationCommandEvent,
+  type WorkspaceSearchMigrationCommandInput,
+  type WorkspaceSearchPlannedOperation,
 } from './migration-state-machine'
+import {
+  encodeWorkspaceSearchMigrationDocument,
+} from './migration-target-snapshot'
 import {
   MAINTENANCE_EVIDENCE_MAX_BYTES,
   maintenanceRuntimeControlSurfaces,
@@ -312,6 +325,9 @@ type ManagedSealedPublicationFixture = {
   /** Strict publication input assembled from real committed evidence. */
   readonly publishInput:
     PublishWorkspaceSearchMigrationSealedPlanningAuthorityV2Input
+  /** Optional single planned operation stored by an apply fixture. */
+  readonly plannedOperation:
+    WorkspaceSearchPlannedOperation | undefined
 }
 
 /**
@@ -358,6 +374,19 @@ type ManagedExecutionRunFixture = {
   /** Exact closed writer-fence row fixed by the boundary. */
   readonly closedWriterFenceRecord:
     WorkspaceSearchWriterFenceClosedRecord
+  /** Optional single operation admitted for managed apply tests. */
+  readonly plannedOperation:
+    WorkspaceSearchPlannedOperation | undefined
+}
+
+/**
+ * Complete managed apply-operation fixture with one admitted operation.
+ */
+type ManagedApplyOperationFixture = ManagedExecutionRunFixture & {
+  /** Exact immutable execution admission consumed by the apply port. */
+  readonly executionRun: WorkspaceSearchMigrationExecutionRun
+  /** Exact single planned operation admitted by the sealed plan. */
+  readonly plannedOperation: WorkspaceSearchPlannedOperation
 }
 
 /** Allowlisted command recorder used without AWS credentials or network access. */
@@ -463,6 +492,11 @@ class RecordingIdentityAwsTransport
 
   /** Optional synchronous effect after recording an authority point read. */
   getPrePlanAuthorityEffect: (() => void) | undefined
+
+  /** Optional apply-specific output selected before record-key lookup. */
+  getPrePlanAuthorityApplyOutput:
+    ((command: GetItemCommand) =>
+      GetItemCommandOutput | undefined) | undefined
 
   /** Optional synchronous effect after recording an authority transaction. */
   transactWritePrePlanAuthorityEffect: (() => void) | undefined
@@ -604,6 +638,9 @@ class RecordingIdentityAwsTransport
 
   /** Optional fake streaming body returned by generic immutable GetObject. */
   immutableArtifactGetBody: unknown
+
+  /** Optional stored modification time for generic immutable objects. */
+  immutableArtifactLastModified: Date | undefined
 
   /** Optional synchronous effect after recording a target-artifact upload. */
   putTargetArtifactEffect: (() => void) | undefined
@@ -937,6 +974,11 @@ class RecordingIdentityAwsTransport
   ): Promise<GetItemCommandOutput> {
     this.getPrePlanAuthorityCommands.push(command)
     this.getPrePlanAuthorityEffect?.()
+    const applyOutput =
+      this.getPrePlanAuthorityApplyOutput?.(command)
+    if (applyOutput !== undefined) {
+      return structuredClone(applyOutput)
+    }
     const recordKey = command.input.Key?.recordKey?.S
     if (recordKey === undefined) {
       throw new Error('Expected exact pre-plan authority record key.')
@@ -1349,7 +1391,9 @@ class RecordingIdentityAwsTransport
       ServerSideEncryption: command.input.ServerSideEncryption,
       SSEKMSKeyId: command.input.SSEKMSKeyId,
       BucketKeyEnabled: command.input.BucketKeyEnabled,
-      LastModified: new Date('2026-07-28T00:00:00.000Z'),
+      LastModified:
+        this.immutableArtifactLastModified ??
+        new Date('2026-07-28T00:00:00.000Z'),
       ObjectLockMode: 'COMPLIANCE',
       ObjectLockRetainUntilDate:
         command.input.ObjectLockRetainUntilDate,
@@ -5879,6 +5923,382 @@ describe('Workspace Search migration AWS identity adapter', () => {
     },
   )
 
+  test(
+    'commits one managed mutation through journal storage and twelve-item send',
+    async () => {
+      const fixture =
+        await createManagedApplyOperationFixture(
+          'apply-mutation-success',
+          true,
+        )
+      const apply = fixture.port.createApplyOperationPort(
+        fixture.executionBoundary,
+        fixture.sealedPlanningAuthority,
+        fixture.closedWriterFenceRecord,
+        fixture.executionRun,
+      )
+      const journalPuts =
+        fixture.transport.putImmutableArtifactCommands.length
+      const journalHeads =
+        fixture.transport.headImmutableArtifactCommands.length
+      const journalGets =
+        fixture.transport.getImmutableArtifactCommands.length
+      const transactions =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+
+      const next = await apply.commitApplyOperation(
+        createManagedApplyOperationCommand(fixture),
+      )
+
+      expect(next).toMatchObject({
+        runId: fixture.currentAuthority.lease.runId,
+        revision: 2,
+        appliedOperationCount: 1,
+        journalSequence: 1,
+        status: 'applying',
+      })
+      expect(
+        fixture.transport.putImmutableArtifactCommands,
+      ).toHaveLength(journalPuts + 1)
+      expect(
+        fixture.transport.headImmutableArtifactCommands,
+      ).toHaveLength(journalHeads + 1)
+      expect(
+        fixture.transport.getImmutableArtifactCommands,
+      ).toHaveLength(journalGets + 1)
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactions + 1)
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands[
+            transactions
+          ]?.input.TransactItems,
+      ).toHaveLength(12)
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'routes managed apply reads through all six pinned table guards',
+    async () => {
+      const fixture =
+        await createManagedApplyOperationFixture('apply-read-guards')
+      const apply = fixture.port.createApplyOperationPort(
+        fixture.executionBoundary,
+        fixture.sealedPlanningAuthority,
+        fixture.closedWriterFenceRecord,
+        fixture.executionRun,
+      )
+      const reads =
+        fixture.transport.getPrePlanAuthorityCommands.length
+      const guardTrace: string[] = []
+      fixture.transport.describeTableEffect = (tableName) => {
+        guardTrace.push(tableName)
+      }
+
+      await expect(apply.readRunState()).resolves.toMatchObject({
+        runId: fixture.currentAuthority.lease.runId,
+        revision: 1,
+        status: 'applying',
+      })
+
+      expect(
+        fixture.transport.getPrePlanAuthorityCommands,
+      ).toHaveLength(reads + 2)
+      const expectedTables = [
+        fixture.requested.tables['migration-state'],
+        fixture.requested.tables['project-directory'],
+        fixture.requested.tables['work-items'],
+        fixture.requested.tables.collaboration,
+        fixture.requested.tables.documents,
+        fixture.requested.tables['workspace-search'],
+      ]
+      for (const tableName of expectedTables) {
+        expect(
+          guardTrace.filter((candidate) => candidate === tableName),
+        ).toHaveLength(4)
+      }
+      expect(new Set(guardTrace)).toEqual(new Set(expectedTables))
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'stops managed apply before send when any measured table is replaced',
+    async () => {
+      const fixture =
+        await createManagedApplyOperationFixture('apply-pre-send-drift')
+      const apply = fixture.port.createApplyOperationPort(
+        fixture.executionBoundary,
+        fixture.sealedPlanningAuthority,
+        fixture.closedWriterFenceRecord,
+        fixture.executionRun,
+      )
+      const sourceTableName =
+        fixture.requested.tables['work-items']
+      const originalSource =
+        fixture.transport.describeTableOutputs.get(sourceTableName)
+      if (originalSource === undefined) {
+        throw new Error('Expected measured apply source identity.')
+      }
+      const transactions =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+      const journalWrites =
+        fixture.transport.putImmutableArtifactCommands.length
+      const applyOutput =
+        fixture.transport.getPrePlanAuthorityApplyOutput
+      fixture.transport.getPrePlanAuthorityApplyOutput = (command) => {
+        const output = applyOutput?.(command)
+        if (
+          command.input.TableName ===
+            fixture.requested.tables['workspace-search']
+        ) {
+          fixture.transport.describeTableOutputs.set(
+            sourceTableName,
+            createReplacementDescribeTableOutput(
+              'work-items',
+              sourceTableName,
+              fixture.requested,
+            ),
+          )
+        }
+        return output
+      }
+
+      const failure =
+        await captureWorkspaceSearchMigrationFailure(
+          apply.commitApplyOperation(
+            createManagedApplyOperationCommand(fixture),
+          ),
+        )
+
+      expect(failure.code).toBe('SOURCE_DRIFT')
+      expect(failure.message).toBe(
+        'Workspace Search migration apply operation failed.',
+      )
+      expect(
+        fixture.transport.putImmutableArtifactCommands,
+      ).toHaveLength(journalWrites)
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactions)
+      fixture.transport.getPrePlanAuthorityApplyOutput = applyOutput
+      fixture.transport.describeTableOutputs.set(
+        sourceTableName,
+        originalSource,
+      )
+      await expect(apply.readRunState()).resolves.toMatchObject({
+        revision: 1,
+        status: 'applying',
+      })
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'quarantines every managed execution port after post-send apply drift',
+    async () => {
+      const fixture =
+        await createManagedApplyOperationFixture('apply-post-send-drift')
+      const apply = fixture.port.createApplyOperationPort(
+        fixture.executionBoundary,
+        fixture.sealedPlanningAuthority,
+        fixture.closedWriterFenceRecord,
+        fixture.executionRun,
+      )
+      const existingExecutionRun =
+        fixture.port.createExecutionRunPort(
+          fixture.executionBoundary,
+          fixture.sealedPlanningAuthority,
+          fixture.planSeal,
+          fixture.closedWriterFenceRecord,
+        )
+      const targetTableName =
+        fixture.requested.tables['workspace-search']
+      const originalTarget =
+        fixture.transport.describeTableOutputs.get(targetTableName)
+      if (originalTarget === undefined) {
+        throw new Error('Expected measured apply target identity.')
+      }
+      const transactions =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+      const expectedGuardOrder = [
+        fixture.requested.tables['migration-state'],
+        fixture.requested.tables['project-directory'],
+        fixture.requested.tables['work-items'],
+        fixture.requested.tables.collaboration,
+        fixture.requested.tables.documents,
+        fixture.requested.tables['workspace-search'],
+      ]
+      const guardTrace: string[] = []
+      let guardCountAtSend = 0
+      fixture.transport.describeTableEffect = (tableName) => {
+        guardTrace.push(tableName)
+      }
+      fixture.transport.transactWritePrePlanAuthorityEffect = () => {
+        guardCountAtSend = guardTrace.length
+        expect(
+          guardTrace.slice(-expectedGuardOrder.length),
+        ).toEqual(expectedGuardOrder)
+      }
+      fixture.transport
+        .transactWritePrePlanAuthorityPostCommitEffect = () => {
+          fixture.transport.describeTableOutputs.set(
+            targetTableName,
+            createReplacementDescribeTableOutput(
+              'workspace-search',
+              targetTableName,
+              fixture.requested,
+            ),
+          )
+        }
+
+      const failure =
+        await captureWorkspaceSearchMigrationFailure(
+          apply.commitApplyOperation(
+            createManagedApplyOperationCommand(fixture),
+          ),
+        )
+
+      expect(failure.code)
+        .toBe('AMBIGUOUS_OPERATION_UNRESOLVED')
+      expect(failure.message).toBe(
+        'Workspace Search migration apply operation failed.',
+      )
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactions + 1)
+      expect(guardCountAtSend).toBeGreaterThan(0)
+      expect(guardTrace.slice(guardCountAtSend))
+        .toEqual(expectedGuardOrder)
+      fixture.transport.transactWritePrePlanAuthorityEffect =
+        undefined
+      fixture.transport
+        .transactWritePrePlanAuthorityPostCommitEffect = undefined
+      fixture.transport.describeTableOutputs.set(
+        targetTableName,
+        originalTarget,
+      )
+      const journalWrites =
+        fixture.transport.putImmutableArtifactCommands.length
+      const reads =
+        fixture.transport.getPrePlanAuthorityCommands.length
+      const expectedApplyFailure =
+        new WorkspaceSearchMigrationFailure(
+          'INVALID_STATE',
+          'Workspace Search migration apply operation failed.',
+        )
+      const expectedExecutionRunFailure =
+        new WorkspaceSearchMigrationFailure(
+          'INVALID_STATE',
+          'Workspace Search migration execution run operation failed.',
+        )
+      await expect(
+        apply.commitApplyOperation(
+          createManagedApplyOperationCommand(fixture),
+        ),
+      ).rejects.toEqual(expectedApplyFailure)
+      await expect(apply.readRunState())
+        .rejects.toEqual(expectedApplyFailure)
+      await expect(
+        existingExecutionRun.read(
+          fixture.currentAuthority.lease.runId,
+        ),
+      ).rejects.toEqual(expectedExecutionRunFailure)
+      expect(() =>
+        fixture.port.createApplyOperationPort(
+          fixture.executionBoundary,
+          fixture.sealedPlanningAuthority,
+          fixture.closedWriterFenceRecord,
+          fixture.executionRun,
+        ),
+      ).toThrow(expectedApplyFailure)
+      expect(
+        fixture.transport.putImmutableArtifactCommands,
+      ).toHaveLength(journalWrites)
+      expect(
+        fixture.transport.getPrePlanAuthorityCommands,
+      ).toHaveLength(reads)
+
+      await fixture.port.measureConfiguration()
+      const recovered = fixture.port.createApplyOperationPort(
+        fixture.executionBoundary,
+        fixture.sealedPlanningAuthority,
+        fixture.closedWriterFenceRecord,
+        fixture.executionRun,
+      )
+      await expect(recovered.readRunState()).resolves.toMatchObject({
+        runId: fixture.currentAuthority.lease.runId,
+        revision: 2,
+        status: 'applying',
+      })
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'invalidates stale apply ports across remeasurement and close',
+    async () => {
+      const fixture =
+        await createManagedApplyOperationFixture('apply-lifecycle')
+      const stale = fixture.port.createApplyOperationPort(
+        fixture.executionBoundary,
+        fixture.sealedPlanningAuthority,
+        fixture.closedWriterFenceRecord,
+        fixture.executionRun,
+      )
+      const expectedFailure =
+        new WorkspaceSearchMigrationFailure(
+          'INVALID_STATE',
+          'Workspace Search migration apply operation failed.',
+        )
+
+      await fixture.port.measureConfiguration()
+      const readsAfterMeasurement =
+        fixture.transport.getPrePlanAuthorityCommands.length
+      await expect(stale.readRunState())
+        .rejects.toEqual(expectedFailure)
+      expect(
+        fixture.transport.getPrePlanAuthorityCommands,
+      ).toHaveLength(readsAfterMeasurement)
+
+      const current = fixture.port.createApplyOperationPort(
+        fixture.executionBoundary,
+        fixture.sealedPlanningAuthority,
+        fixture.closedWriterFenceRecord,
+        fixture.executionRun,
+      )
+      await expect(current.readRunState()).resolves.toMatchObject({
+        runId: fixture.currentAuthority.lease.runId,
+        revision: 1,
+        status: 'applying',
+      })
+      const readsBeforeClose =
+        fixture.transport.getPrePlanAuthorityCommands.length
+      fixture.port.close()
+      await expect(current.readRunState())
+        .rejects.toEqual(expectedFailure)
+      expect(
+        fixture.transport.getPrePlanAuthorityCommands,
+      ).toHaveLength(readsBeforeClose)
+      expect(() =>
+        fixture.port.createApplyOperationPort(
+          fixture.executionBoundary,
+          fixture.sealedPlanningAuthority,
+          fixture.closedWriterFenceRecord,
+          fixture.executionRun,
+        ),
+      ).toThrow(expectedFailure)
+    },
+  )
+
   test('stores and replays an empty plan through measured immutable S3', async () => {
     const requested = createRequestedResources()
     const transport = new RecordingIdentityAwsTransport()
@@ -8943,12 +9363,16 @@ async function createManagedPlanningAuthority(
  * @param identifier - Unique run and authority fixture suffix.
  * @param clock - Optional controllable clock shared by the managed session.
  * @param prepareAuthority - Optional execution-control preparation before planning.
+ * @param includeApplyOperation - Whether to commit one mapped source mutation.
+ * @param mutateApplyTarget - Whether the mapped target differs from its source.
  * @returns Measured session, recording transport, and bounded join input.
  */
 async function createManagedCommittedPlanningFixture(
   identifier: string,
   clock?: () => Date,
   prepareAuthority?: ManagedPlanningAuthorityPreparation,
+  includeApplyOperation = false,
+  mutateApplyTarget = false,
 ): Promise<ManagedCommittedPlanningFixture> {
   const requested = createRequestedResources()
   const transport = new RecordingIdentityAwsTransport()
@@ -8975,7 +9399,9 @@ async function createManagedCommittedPlanningFixture(
       })
   for (const source of workspaceSearchMigrationSourceNames) {
     const sourceItems = source === 'project-directory'
-      ? [createIgnoredSourceItem(`${identifier}-source`)]
+      ? includeApplyOperation
+        ? [createManagedApplySourceItem()]
+        : [createIgnoredSourceItem(`${identifier}-source`)]
       : []
     transport.scanSourceOutput = {
       $metadata: {},
@@ -8991,14 +9417,17 @@ async function createManagedCommittedPlanningFixture(
       ),
     )
   }
+  const targetItems = includeApplyOperation
+    ? [createManagedApplyTargetItem(mutateApplyTarget)]
+    : [
+        createIgnoredTargetItem(`${identifier}-one`),
+        createIgnoredTargetItem(`${identifier}-two`),
+      ]
   transport.scanTargetOutput = {
     $metadata: {},
-    Count: 2,
-    Items: [
-      createIgnoredTargetItem(`${identifier}-one`),
-      createIgnoredTargetItem(`${identifier}-two`),
-    ],
-    ScannedCount: 2,
+    Count: targetItems.length,
+    Items: targetItems,
+    ScannedCount: targetItems.length,
   }
   await port.commitNextTargetEvidencePage(
     createPlanningTargetEvidenceRequest(
@@ -9050,6 +9479,8 @@ function readManagedEvidencePageBytes(
  * @param prepareAuthority - Optional execution-control preparation before planning.
  * @param planCreatedAt - Optional canonical plan-seal creation time.
  * @param retainUntil - Optional immutable-artifact retention deadline.
+ * @param includeApplyOperation - Whether to seal the one mapped candidate.
+ * @param mutateApplyTarget - Whether the mapped target differs from its source.
  * @returns Complete measured publication fixture.
  */
 async function createManagedSealedPublicationFixture(
@@ -9058,11 +9489,15 @@ async function createManagedSealedPublicationFixture(
   prepareAuthority?: ManagedPlanningAuthorityPreparation,
   planCreatedAt = '2026-07-28T00:00:00.000Z',
   retainUntil = '2026-08-27T07:01:00.000Z',
+  includeApplyOperation = false,
+  mutateApplyTarget = false,
 ): Promise<ManagedSealedPublicationFixture> {
   const fixture = await createManagedCommittedPlanningFixture(
     identifier,
     clock,
     prepareAuthority,
+    includeApplyOperation,
+    mutateApplyTarget,
   )
   const joined = await fixture.port.joinCommittedPlanningEvidence(
     fixture.input,
@@ -9104,21 +9539,51 @@ async function createManagedSealedPublicationFixture(
       historicalReceiptBindings: [historical],
       retainUntil,
     })
-  const planSeal = createManagedPlanningArtifactEmptyPlanSeal(
+  const emptyPlanSeal = createManagedPlanningArtifactEmptyPlanSeal(
     fixture.input.runId,
     fixture.input.configurationHash,
     storedProvenance.manifestHead.summary.planningSnapshotDigest,
     planCreatedAt,
   )
+  let plannedOperation: WorkspaceSearchPlannedOperation | undefined
+  let planSeal = emptyPlanSeal
+  if (includeApplyOperation) {
+    const candidate = joined.candidates[0]
+    if (candidate === undefined || joined.candidates.length !== 1) {
+      throw new Error('Expected one exact managed apply candidate.')
+    }
+    const planDigest = createWorkspaceSearchPlanLeafDigest({
+      planSequence: 1,
+      operationDigest: candidate.operationDigest,
+    })
+    plannedOperation = {
+      runId: fixture.input.runId,
+      configurationHash: fixture.input.configurationHash,
+      planDigest,
+      planSequence: 1,
+      operationDigest: candidate.operationDigest,
+      membershipProof: [],
+      operation: candidate.operation,
+    }
+    planSeal = {
+      ...emptyPlanSeal,
+      planDigest,
+      planOperationCount: 1,
+      sourceOperationCount: 1,
+      orphanOperationCount: 0,
+    }
+  }
   const storedPlan = await gateway.writePlanArtifact({
     planSeal,
-    operations: [],
+    operations:
+      plannedOperation === undefined ? [] : [plannedOperation],
     retainUntil,
   })
   return {
     requested: fixture.requested,
     port: fixture.port,
     transport: fixture.transport,
+    plannedOperation,
     publishInput: {
       runId: fixture.input.runId,
       configuration: fixture.input.configuration,
@@ -9143,10 +9608,14 @@ async function createManagedSealedPublicationFixture(
  * Builds one planning-admitted, sealed, and still-fresh execution-run fixture.
  *
  * @param identifier - Unique execution-control fixture suffix.
+ * @param includeApplyOperation - Whether to admit one source mutation.
+ * @param mutateApplyTarget - Whether the admitted target requires a write.
  * @returns Complete measured execution-run admission material.
  */
 async function createManagedExecutionRunFixture(
   identifier: string,
+  includeApplyOperation = false,
+  mutateApplyTarget = false,
 ): Promise<ManagedExecutionRunFixture> {
   let clockAt = '2026-07-28T07:00:00.000Z'
   let executionBoundary:
@@ -9197,6 +9666,8 @@ async function createManagedExecutionRunFixture(
       },
       '2026-07-28T07:16:10.000Z',
       '2026-08-27T07:17:00.000Z',
+      includeApplyOperation,
+      mutateApplyTarget,
     )
   if (
     executionBoundary === undefined ||
@@ -9231,6 +9702,107 @@ async function createManagedExecutionRunFixture(
     sealedPlanningAuthority,
     planSeal: structuredClone(publication.publishInput.planSeal),
     closedWriterFenceRecord,
+    plannedOperation: publication.plannedOperation,
+  }
+}
+
+/**
+ * Builds one measured execution admission with one already-current operation.
+ *
+ * @param identifier - Unique managed apply fixture suffix.
+ * @param mutateApplyTarget - Whether the admitted target requires a write.
+ * @returns Complete apply port material and live source/target read outputs.
+ */
+async function createManagedApplyOperationFixture(
+  identifier: string,
+  mutateApplyTarget = false,
+): Promise<ManagedApplyOperationFixture> {
+  const fixture = await createManagedExecutionRunFixture(
+    identifier,
+    true,
+    mutateApplyTarget,
+  )
+  const plannedOperation = fixture.plannedOperation
+  if (plannedOperation === undefined) {
+    throw new Error('Expected one admitted managed apply operation.')
+  }
+  const executionRun = await fixture.port.createExecutionRunPort(
+    fixture.executionBoundary,
+    fixture.sealedPlanningAuthority,
+    fixture.planSeal,
+    fixture.closedWriterFenceRecord,
+  ).create(fixture.currentAuthority)
+  const source = plannedOperation.operation.sourceCondition
+  const before = plannedOperation.operation.before
+  const after = plannedOperation.operation.after
+  if (!source.exists || !before.exists || !after.exists) {
+    throw new Error('Expected present managed apply source and target.')
+  }
+  let applyCommitted = false
+  if (mutateApplyTarget) {
+    fixture.transport.immutableArtifactLastModified =
+      new Date('2026-07-28T07:16:30.000Z')
+    fixture.transport
+      .transactWritePrePlanAuthorityPostCommitEffect = () => {
+        applyCommitted = true
+      }
+  }
+  fixture.transport.getPrePlanAuthorityApplyOutput = (command) => {
+    if (command.input.TableName === source.tableName) {
+      return {
+        $metadata: {},
+        Item: structuredClone(source.item),
+      }
+    }
+    if (
+      command.input.TableName ===
+        fixture.requested.tables['workspace-search']
+    ) {
+      return {
+        $metadata: {},
+        Item: structuredClone(
+          applyCommitted ? after.item : before.item,
+        ),
+      }
+    }
+    return undefined
+  }
+  return {
+    requested: fixture.requested,
+    port: fixture.port,
+    transport: fixture.transport,
+    currentAuthority: fixture.currentAuthority,
+    executionBoundary: fixture.executionBoundary,
+    sealedPlanningAuthority: fixture.sealedPlanningAuthority,
+    planSeal: fixture.planSeal,
+    closedWriterFenceRecord: fixture.closedWriterFenceRecord,
+    executionRun,
+    plannedOperation,
+  }
+}
+
+/**
+ * Creates one strict managed apply command for the fixture's first revision.
+ *
+ * @param fixture - Exact admitted managed apply fixture.
+ * @returns Revision-one mutation request under the current lease.
+ */
+function createManagedApplyOperationCommand(
+  fixture: ManagedApplyOperationFixture,
+): WorkspaceSearchMigrationCommandInput<
+  WorkspaceSearchApplyOperationCommandEvent
+> {
+  return {
+    expectedRevision: 1,
+    lease: {
+      runId: fixture.currentAuthority.lease.runId,
+      ownerId: fixture.currentAuthority.lease.ownerId,
+      fenceToken: fixture.currentAuthority.lease.fenceToken,
+    },
+    event: {
+      kind: 'apply-operation-requested',
+      plannedOperation: structuredClone(fixture.plannedOperation),
+    },
   }
 }
 
@@ -9264,6 +9836,41 @@ function createManagedMaintenanceEvidenceBytes(at: string): Uint8Array {
       observedAt: drainCompletedAt,
     })),
   }))
+}
+
+/**
+ * Creates the exact mapped Team source row used by managed apply tests.
+ *
+ * @returns Canonical Project Directory Team item.
+ */
+function createManagedApplySourceItem(): DynamoAttributeMap {
+  return {
+    directoryId: { S: 'workspace-1' },
+    entryKey: { S: '000001#000000#TEAM#team-1' },
+    entryType: { S: 'team' },
+    teamId: { S: 'team-1' },
+    teamSortOrder: { N: '1' },
+    nameJa: { S: '' },
+    nameEn: { S: 'After team' },
+  }
+}
+
+/**
+ * Creates the exact pre-migration target row used by managed apply tests.
+ *
+ * @param mutate - Whether to return the pre-migration rather than current row.
+ * @returns Canonical Workspace Search Team document.
+ */
+function createManagedApplyTargetItem(
+  mutate: boolean,
+): DynamoAttributeMap {
+  return encodeWorkspaceSearchMigrationDocument(
+    createTeamWorkspaceSearchDocument({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      title: mutate ? 'Before team' : 'After team',
+    }),
+  )
 }
 
 /**

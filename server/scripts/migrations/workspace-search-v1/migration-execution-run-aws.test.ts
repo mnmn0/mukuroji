@@ -36,6 +36,8 @@ import {
 } from './migration-contract'
 import {
   createAwsWorkspaceSearchMigrationExecutionRunPort,
+  createWorkspaceSearchMigrationExecutionRunAdmissionConditionCheck,
+  createWorkspaceSearchMigrationExecutionRunAdmissionRecord,
   type WorkspaceSearchMigrationExecutionRunAwsPort,
   type WorkspaceSearchMigrationExecutionRunAwsTransport,
   workspaceSearchMigrationExecutionRunTransactionIndex,
@@ -146,6 +148,116 @@ describe('Workspace Search migration execution-run AWS adapter', () => {
     ).toBe(true)
     expect(command.input.ClientRequestToken).toHaveLength(36)
   })
+
+  test(
+    'binds every immutable admission attribute and rejects table or configuration drift',
+    async () => {
+      const fixture = createExecutionRunAwsFixture()
+      const transport = new RecordingExecutionRunTransport()
+      const port = createExecutionRunPort(fixture, transport)
+      const executionRun = await port.create(fixture.currentAuthority)
+      const transactionItems = requireTransactionItems(
+        requireTransaction(transport.transactions[0]),
+      )
+      const durableItem = requirePutItem(
+        requirePut(
+          transactionItems[
+            workspaceSearchMigrationExecutionRunTransactionIndex
+              .executionRun
+          ],
+        ),
+      )
+      const stateTable =
+        fixture.configuration.tables['migration-state']
+      const admissionRecord =
+        createWorkspaceSearchMigrationExecutionRunAdmissionRecord({
+          stateTable,
+          configurationHash: fixture.configurationHash,
+          executionRun,
+        })
+      expect(admissionRecord).toEqual(durableItem)
+      const condition = requireConditionCheck(
+        createWorkspaceSearchMigrationExecutionRunAdmissionConditionCheck({
+          stateTable,
+          configurationHash: fixture.configurationHash,
+          executionRun,
+        }),
+      )
+      const names = condition.ExpressionAttributeNames
+      const values = condition.ExpressionAttributeValues
+      if (names === undefined || values === undefined) {
+        throw new Error('Expected complete admission condition attributes.')
+      }
+      const expectedAttributes = [
+        'bindingDigest',
+        'configurationHash',
+        'executionRunBytes',
+        'executionRunDigest',
+        'kind',
+        'revision',
+        'runId',
+        'stateDigest',
+        'stateTableId',
+        'status',
+        'version',
+      ]
+      expect(condition.TableName).toBe(stateTable.tableName)
+      expect(condition.Key).toEqual({
+        migrationId: durableItem.migrationId,
+        recordKey: durableItem.recordKey,
+      })
+      expect(Object.values(names).sort()).toEqual(expectedAttributes)
+      expect(
+        condition.ConditionExpression?.split(' AND '),
+      ).toHaveLength(expectedAttributes.length)
+      for (let index = 0; index < expectedAttributes.length; index += 1) {
+        const nameToken = `#field${index}`
+        const valueToken = `:value${index}`
+        const attributeName = names[nameToken]
+        if (attributeName === undefined) {
+          throw new Error('Expected indexed admission attribute name.')
+        }
+        expect(values[valueToken]).toEqual(
+          durableItem[attributeName],
+        )
+      }
+      expect(condition.ReturnValuesOnConditionCheckFailure).toBe('NONE')
+
+      const invalidStateTables: readonly MigrationTableIdentity[] = [
+        {
+          ...stateTable,
+          role: 'workspace-search',
+        },
+        {
+          ...stateTable,
+          tableName: 'foreign-migration-state-table',
+        },
+        {
+          ...stateTable,
+          tableId: 'foreign-migration-state-table-id',
+        },
+      ]
+      for (const invalidStateTable of invalidStateTables) {
+        const failure = captureSynchronousMigrationFailure(() =>
+          createWorkspaceSearchMigrationExecutionRunAdmissionConditionCheck({
+            stateTable: invalidStateTable,
+            configurationHash: fixture.configurationHash,
+            executionRun,
+          })
+        )
+        expect(failure.code).toBe('CONFIGURATION_DRIFT')
+      }
+      const configurationFailure =
+        captureSynchronousMigrationFailure(() =>
+          createWorkspaceSearchMigrationExecutionRunAdmissionConditionCheck({
+            stateTable,
+            configurationHash: digest('foreign-configuration'),
+            executionRun,
+          })
+        )
+      expect(configurationFailure.code).toBe('CONFIGURATION_DRIFT')
+    },
+  )
 
   test('recovers exact response loss and rejects a foreign durable admission', async () => {
     const fixture = createExecutionRunAwsFixture()

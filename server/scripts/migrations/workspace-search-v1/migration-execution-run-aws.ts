@@ -110,6 +110,36 @@ export const workspaceSearchMigrationExecutionRunTransactionIndex =
   })
 
 /**
+ * Exact material used to build one immutable execution-run admission row.
+ */
+export type CreateWorkspaceSearchMigrationExecutionRunAdmissionRecordInput = {
+  /** Exact measured migration-state table identity. */
+  readonly stateTable: MigrationTableIdentity
+  /** Exact reviewed configuration digest. */
+  readonly configurationHash: string
+  /** Strict revision-one admission envelope read from durable storage. */
+  readonly executionRun: WorkspaceSearchMigrationExecutionRun
+}
+
+/**
+ * Exact immutable execution-run admission row required by later transactions.
+ */
+export type CreateWorkspaceSearchMigrationExecutionRunAdmissionConditionCheckInput =
+  CreateWorkspaceSearchMigrationExecutionRunAdmissionRecordInput
+
+/**
+ * Strict admission record plus the validated table material that owns it.
+ */
+type WorkspaceSearchMigrationExecutionRunAdmissionRecordMaterial = {
+  /** Exact measured migration-state table name. */
+  readonly stateTableName: string
+  /** Detached strict revision-one admission envelope. */
+  readonly executionRun: WorkspaceSearchMigrationExecutionRun
+  /** Complete canonical low-level admission row. */
+  readonly item: Readonly<Record<string, AttributeValue>>
+}
+
+/**
  * Adapter-owned source of trusted execution-run commit time.
  *
  * @returns Current trusted adapter time.
@@ -474,6 +504,163 @@ export function createAwsWorkspaceSearchMigrationExecutionRunPort(
     throw createExecutionRunAwsPublicFailure(
       readExecutionRunAwsFailureCode(error, true),
     )
+  }
+}
+
+/**
+ * Builds the complete canonical immutable execution-run admission row.
+ *
+ * The row builder is shared by the initial Put, later transaction conditions,
+ * apply-time strong reads, and tests so schema evolution has one source of
+ * truth.
+ *
+ * @param input - Exact state-table identity, configuration, and admission.
+ * @returns Complete canonical low-level admission row.
+ */
+export function createWorkspaceSearchMigrationExecutionRunAdmissionRecord(
+  input: CreateWorkspaceSearchMigrationExecutionRunAdmissionRecordInput,
+): Readonly<Record<string, AttributeValue>> {
+  try {
+    return prepareExecutionRunAdmissionRecord(input).item
+  } catch (error: unknown) {
+    throw createExecutionRunAwsPublicFailure(
+      readExecutionRunAwsFailureCode(error, true),
+    )
+  }
+}
+
+/**
+ * Creates the exact immutable admission-row check used by later execution work.
+ *
+ * The caller must supply an admission envelope obtained through the bound
+ * execution-run port. This helper snapshots it through the strict canonical
+ * codec and compares every durable admission attribute, including its bytes.
+ *
+ * @param input - Exact state-table identity, configuration, and admission.
+ * @returns One immutable execution-run admission ConditionCheck.
+ */
+export function createWorkspaceSearchMigrationExecutionRunAdmissionConditionCheck(
+  input:
+    CreateWorkspaceSearchMigrationExecutionRunAdmissionConditionCheckInput,
+): TransactWriteItem {
+  try {
+    const material = prepareExecutionRunAdmissionRecord(input)
+    const migrationId = material.item.migrationId
+    const recordKey = material.item.recordKey
+    if (migrationId === undefined || recordKey === undefined) {
+      return failExecutionRunAws('INVALID_STATE')
+    }
+    const names: Record<string, string> = {}
+    const values: Record<string, AttributeValue> = {}
+    const clauses: string[] = []
+    let index = 0
+    for (const [name, value] of Object.entries(material.item)) {
+      if (name === 'migrationId' || name === 'recordKey') continue
+      const nameToken = `#field${index}`
+      const valueToken = `:value${index}`
+      names[nameToken] = name
+      values[valueToken] = value
+      clauses.push(`${nameToken} = ${valueToken}`)
+      index += 1
+    }
+    return {
+      ConditionCheck: {
+        TableName: material.stateTableName,
+        Key: {
+          migrationId,
+          recordKey,
+        },
+        ConditionExpression: clauses.join(' AND '),
+        ExpressionAttributeNames: names,
+        ExpressionAttributeValues: values,
+        ReturnValuesOnConditionCheckFailure: 'NONE',
+      },
+    }
+  } catch (error: unknown) {
+    throw createExecutionRunAwsPublicFailure(
+      readExecutionRunAwsFailureCode(error, true),
+    )
+  }
+}
+
+/**
+ * Validates admission identity and constructs the single canonical row schema.
+ *
+ * @param input - Candidate exact state-table identity and execution admission.
+ * @returns Strict admission, table name, and complete canonical row.
+ */
+function prepareExecutionRunAdmissionRecord(
+  input: CreateWorkspaceSearchMigrationExecutionRunAdmissionRecordInput,
+): WorkspaceSearchMigrationExecutionRunAdmissionRecordMaterial {
+  const record = requireExecutionRunInputRecord(input)
+  requireExactExecutionRunInputKeys(record, [
+    'configurationHash',
+    'executionRun',
+    'stateTable',
+  ])
+  const bytes = serializeWorkspaceSearchMigrationExecutionRun(
+    input.executionRun,
+  )
+  const strict = parseWorkspaceSearchMigrationExecutionRun(bytes)
+  const stateTableValue = input.stateTable
+  if (
+    typeof stateTableValue !== 'object' ||
+    stateTableValue === null ||
+    nodeUtilTypes.isProxy(stateTableValue)
+  ) {
+    return failExecutionRunAws('INVALID_ARGUMENT')
+  }
+  const stateTableName = readExecutionRunOwnDataValue(
+    stateTableValue,
+    'tableName',
+    'INVALID_ARGUMENT',
+  )
+  const stateTableId = readExecutionRunOwnDataValue(
+    stateTableValue,
+    'tableId',
+    'INVALID_ARGUMENT',
+  )
+  const stateTableRole = readExecutionRunOwnDataValue(
+    stateTableValue,
+    'role',
+    'INVALID_ARGUMENT',
+  )
+  const expectedStateTable =
+    strict.runState.configuration.tables['migration-state']
+  if (
+    stateTableRole !== 'migration-state' ||
+    stateTableName !== expectedStateTable.tableName ||
+    stateTableId !== expectedStateTable.tableId ||
+    input.configurationHash !== strict.configurationHash
+  ) {
+    return failExecutionRunAws('CONFIGURATION_DRIFT')
+  }
+  const item: Readonly<Record<string, AttributeValue>> = {
+    migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
+    recordKey: {
+      S: createExecutionRunRecordKeyFromIdentity(
+        expectedStateTable.tableId,
+        strict.configurationHash,
+        strict.runId,
+      ),
+    },
+    kind: { S: executionRunRecordKind },
+    version: { N: String(executionRunRecordVersion) },
+    stateTableId: { S: expectedStateTable.tableId },
+    configurationHash: { S: strict.configurationHash },
+    runId: { S: strict.runId },
+    revision: { N: String(strict.revision) },
+    status: { S: strict.status },
+    bindingDigest: { S: strict.binding.bindingDigest },
+    stateDigest: { S: strict.stateDigest },
+    executionRunDigest: { S: strict.executionRunDigest },
+    executionRunBytes: { B: bytes },
+  }
+  validateDynamoDbItemSize(item)
+  return {
+    stateTableName,
+    executionRun: strict,
+    item,
   }
 }
 
@@ -977,29 +1164,13 @@ function createExecutionRunRecord(
   binding: ExecutionRunAdapterBinding,
   state: WorkspaceSearchMigrationExecutionRun,
 ): Readonly<Record<string, AttributeValue>> {
-  const bytes = serializeWorkspaceSearchMigrationExecutionRun(state)
-  const strict =
-    parseWorkspaceSearchMigrationExecutionRun(bytes)
-  requireExecutionRunStaticBinding(binding, strict)
-  const item: Readonly<Record<string, AttributeValue>> = {
-    migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
-    recordKey: {
-      S: createExecutionRunRecordKey(binding),
-    },
-    kind: { S: executionRunRecordKind },
-    version: { N: String(executionRunRecordVersion) },
-    stateTableId: { S: binding.stateTable.tableId },
-    configurationHash: { S: binding.configurationHash },
-    runId: { S: strict.runId },
-    revision: { N: String(strict.revision) },
-    status: { S: strict.status },
-    bindingDigest: { S: strict.binding.bindingDigest },
-    stateDigest: { S: strict.stateDigest },
-    executionRunDigest: { S: strict.executionRunDigest },
-    executionRunBytes: { B: bytes },
-  }
-  validateDynamoDbItemSize(item)
-  return item
+  const material = prepareExecutionRunAdmissionRecord({
+    stateTable: binding.stateTable,
+    configurationHash: binding.configurationHash,
+    executionRun: state,
+  })
+  requireExecutionRunStaticBinding(binding, material.executionRun)
+  return material.item
 }
 
 /**
@@ -1217,12 +1388,32 @@ function createExecutionRunReadCommand(
 function createExecutionRunRecordKey(
   binding: ExecutionRunAdapterBinding,
 ): string {
+  return createExecutionRunRecordKeyFromIdentity(
+    binding.stateTable.tableId,
+    binding.configurationHash,
+    binding.executionBoundary.runId,
+  )
+}
+
+/**
+ * Creates the deterministic admission-row key from exact immutable identity.
+ *
+ * @param stateTableId - Immutable migration-state TableId.
+ * @param configurationHash - Exact reviewed configuration digest.
+ * @param runId - Operator-selected migration run.
+ * @returns Deterministic run/configuration admission key.
+ */
+function createExecutionRunRecordKeyFromIdentity(
+  stateTableId: string,
+  configurationHash: string,
+  runId: string,
+): string {
   const digest = createMigrationDigest({
     kind: 'workspace-search-migration-execution-run-binding',
     version: executionRunRecordVersion,
-    stateTableId: binding.stateTable.tableId,
-    configurationHash: binding.configurationHash,
-    runId: binding.executionBoundary.runId,
+    stateTableId,
+    configurationHash,
+    runId,
   })
   return `${executionRunRecordKeyPrefix}/${digest}/state`
 }
