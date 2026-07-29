@@ -90,11 +90,16 @@ import {
 } from './migration-application-writer-fence-aws'
 import {
   createAwsWorkspaceSearchMigrationApplyOperationPort,
+  createAwsWorkspaceSearchMigrationApplyRunStateReader,
   type WorkspaceSearchMigrationApplyCheckpointScanner,
   type WorkspaceSearchMigrationApplyOperationAuthorityPort,
   type WorkspaceSearchMigrationApplyOperationAwsPort,
   type WorkspaceSearchMigrationApplyOperationAwsTransport,
+  type WorkspaceSearchMigrationApplyRunStateAwsTransport,
 } from './migration-apply-operation-aws'
+import {
+  createWorkspaceSearchMigrationApplyReceiptAwsBinding,
+} from './migration-apply-receipt-aws'
 import {
   createWorkspaceSearchMigrationAppliedRootStrongReadCommand,
   parseWorkspaceSearchMigrationAppliedRootStrongReadOutput,
@@ -232,6 +237,14 @@ import {
 import {
   createAwsWorkspaceSearchMigrationJournalGateway,
 } from './migration-journal-aws'
+import {
+  createAwsWorkspaceSearchMigrationRollbackOperationPort,
+  type WorkspaceSearchMigrationRollbackAppliedRootReader,
+  type WorkspaceSearchMigrationRollbackApplyRunStateReader,
+  type WorkspaceSearchMigrationRollbackOperationAuthorityReader,
+  type WorkspaceSearchMigrationRollbackOperationAwsPort,
+  type WorkspaceSearchMigrationRollbackOperationAwsTransport,
+} from './migration-rollback-operation-aws'
 import type {
   WorkspaceSearchMigrationPlanningJoinLimits,
   WorkspaceSearchMigrationPlanningMaterialReadLimits,
@@ -591,6 +604,12 @@ type ManagedApplyOperationAuthority =
  * Complete measured authority retained by one full-verification port.
  */
 type ManagedFullVerificationAuthority =
+  ManagedApplyOperationAuthority
+
+/**
+ * Complete measured authority retained by one rollback-operation port.
+ */
+type ManagedRollbackOperationAuthority =
   ManagedApplyOperationAuthority
 
 /**
@@ -969,6 +988,25 @@ export interface WorkspaceSearchMigrationManagedAwsSession
       WorkspaceSearchWriterFenceClosedRecord,
     executionRun: WorkspaceSearchMigrationExecutionRun,
   ): WorkspaceSearchMigrationFullVerificationAwsPort
+
+  /**
+   * Creates one generation-bound complete-root reverse rollback port.
+   *
+   * @param executionBoundary - Exact revision-two planning admission.
+   * @param sealedPlanningAuthority - Exact immutable sealed planning root.
+   * @param closedWriterFenceRecord - Exact closed fence fixed by the boundary.
+   * @param executionRun - Exact immutable execution admission.
+   * @returns Rollback progress/restoration port bound to the measurement.
+   */
+  createRollbackOperationPort(
+    executionBoundary:
+      WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary,
+    sealedPlanningAuthority:
+      WorkspaceSearchMigrationSealedPlanningAuthorityV2,
+    closedWriterFenceRecord:
+      WorkspaceSearchWriterFenceClosedRecord,
+    executionRun: WorkspaceSearchMigrationExecutionRun,
+  ): WorkspaceSearchMigrationRollbackOperationAwsPort
 }
 
 /** Narrow transport containing only managed identity reads. */
@@ -2377,6 +2415,242 @@ class AwsWorkspaceSearchMigrationIdentityPort
         this.runManagedFullVerificationOperation(
           authority,
           () => delegate.publishVerified(input),
+        ),
+    }
+  }
+
+  /**
+   * Creates one complete-applied-root reverse rollback port bound to the
+   * current measured generation, pinned DynamoDB/S3 clients, and all six table
+   * incarnations.
+   *
+   * Applied execution state is reconstructed through a dedicated read-only
+   * capability. Rollback state, apply receipts, target rows, apply seals, and
+   * immutable journal versions remain behind rollback-specific lifecycle and
+   * post-send quarantine guards.
+   *
+   * @param executionBoundary - Exact revision-two planning admission.
+   * @param sealedPlanningAuthority - Exact immutable sealed planning root.
+   * @param closedWriterFenceRecord - Exact closed fence fixed by the boundary.
+   * @param executionRun - Exact immutable execution admission.
+   * @returns Generation-guarded complete-root rollback capability.
+   */
+  createRollbackOperationPort(
+    executionBoundary:
+      WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary,
+    sealedPlanningAuthority:
+      WorkspaceSearchMigrationSealedPlanningAuthorityV2,
+    closedWriterFenceRecord:
+      WorkspaceSearchWriterFenceClosedRecord,
+    executionRun: WorkspaceSearchMigrationExecutionRun,
+  ): WorkspaceSearchMigrationRollbackOperationAwsPort {
+    try {
+      return this.createManagedRollbackOperationPort(
+        executionBoundary,
+        sealedPlanningAuthority,
+        closedWriterFenceRecord,
+        executionRun,
+      )
+    } catch (error: unknown) {
+      throw createManagedRollbackOperationFailure(
+        readManagedMigrationStateFailureCode(error),
+      )
+    }
+  }
+
+  /**
+   * Composes one rollback port from already captured managed capabilities.
+   *
+   * Construction remains private so the public factory can normalize every
+   * static binding or dependency failure to the rollback boundary.
+   *
+   * @param executionBoundary - Exact revision-two planning admission.
+   * @param sealedPlanningAuthority - Exact immutable sealed planning root.
+   * @param closedWriterFenceRecord - Exact closed fence fixed by the boundary.
+   * @param executionRun - Exact immutable execution admission.
+   * @returns Generation-guarded complete-root rollback capability.
+   */
+  private createManagedRollbackOperationPort(
+    executionBoundary:
+      WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary,
+    sealedPlanningAuthority:
+      WorkspaceSearchMigrationSealedPlanningAuthorityV2,
+    closedWriterFenceRecord:
+      WorkspaceSearchWriterFenceClosedRecord,
+    executionRun: WorkspaceSearchMigrationExecutionRun,
+  ): WorkspaceSearchMigrationRollbackOperationAwsPort {
+    const authority = this.captureManagedRollbackOperationAuthority()
+    let detachedExecutionRun: WorkspaceSearchMigrationExecutionRun
+    try {
+      detachedExecutionRun =
+        parseWorkspaceSearchMigrationExecutionRun(
+          serializeWorkspaceSearchMigrationExecutionRun(executionRun),
+        )
+    } catch {
+      return failManagedRollbackOperation()
+    }
+    const immutableArtifactPort =
+      this.createManagedRollbackImmutableArtifactPort(authority)
+    const journalGateway =
+      createAwsWorkspaceSearchMigrationJournalGateway({
+        configuration: authority.configuration,
+        configurationHash: authority.configurationHash,
+        runId: detachedExecutionRun.runId,
+        immutableArtifactPort,
+        clock: this.prePlanAuthorityClock,
+      })
+    const prePlanAuthorityAdapter =
+      this.createManagedPrePlanAuthorityAdapter(authority)
+    const authorityPort:
+      WorkspaceSearchMigrationRollbackOperationAuthorityReader = {
+        readAuthority: (claim) =>
+          this.runManagedRollbackOperationRead(
+            authority,
+            () => prePlanAuthorityAdapter.readAuthority(claim),
+          ),
+      }
+    let appliedRootDigest: string | undefined
+    const appliedRootReader:
+      WorkspaceSearchMigrationRollbackAppliedRootReader = {
+        readAppliedRoot: () =>
+          this.runManagedRollbackOperationRead(
+            authority,
+            async () => {
+              const root =
+                parseWorkspaceSearchMigrationAppliedRootStrongReadOutput({
+                  stateTable:
+                    authority.configuration.tables['migration-state'],
+                  configurationHash: authority.configurationHash,
+                  executionRun: detachedExecutionRun,
+                  output: await this.transport.getPrePlanAuthority(
+                    createWorkspaceSearchMigrationAppliedRootStrongReadCommand({
+                      stateTable:
+                        authority.configuration.tables['migration-state'],
+                      configurationHash: authority.configurationHash,
+                      executionRun: detachedExecutionRun,
+                    }),
+                  ),
+                })
+              if (root !== undefined) {
+                if (
+                  appliedRootDigest !== undefined &&
+                  appliedRootDigest !== root.rootDigest
+                ) {
+                  return failManagedRollbackOperation()
+                }
+                appliedRootDigest = root.rootDigest
+              }
+              return root
+            },
+          ),
+      }
+    const applySealReader =
+      createAwsWorkspaceSearchMigrationApplySealGateway({
+        configuration: authority.configuration,
+        configurationHash: authority.configurationHash,
+        runId: detachedExecutionRun.runId,
+        immutableArtifactPort,
+        clock: this.prePlanAuthorityClock,
+      })
+    const applyRunStateTransport:
+      WorkspaceSearchMigrationApplyRunStateAwsTransport = {
+        getApplyRunStateItem: (command) =>
+          this.runManagedRollbackOperationRead(
+            authority,
+            () => this.transport.getPrePlanAuthority(command),
+          ),
+        prepareApplyRunStateRead: async () => {
+          await this.requireCurrentRollbackOperationTableIncarnations(
+            authority,
+          )
+        },
+      }
+    const applyRunStateDelegate =
+      createAwsWorkspaceSearchMigrationApplyRunStateReader({
+        configuration: authority.configuration,
+        configurationHash: authority.configurationHash,
+        executionBoundary,
+        sealedPlanningAuthority,
+        closedWriterFenceRecord,
+        executionRun: detachedExecutionRun,
+        applySealReader,
+        transport: applyRunStateTransport,
+      })
+    const applyRunStateReader:
+      WorkspaceSearchMigrationRollbackApplyRunStateReader = {
+        readRunState: () => applyRunStateDelegate.readRunState(),
+      }
+    const applyReceiptBinding =
+      createWorkspaceSearchMigrationApplyReceiptAwsBinding({
+        stateTable:
+          authority.configuration.tables['migration-state'],
+        configurationHash: authority.configurationHash,
+        executionRun: detachedExecutionRun,
+      })
+    const transport:
+      WorkspaceSearchMigrationRollbackOperationAwsTransport = {
+        getRollbackItem: (command) =>
+          this.runManagedRollbackOperationRead(
+            authority,
+            () => this.transport.getPrePlanAuthority(command),
+          ),
+        prepareRollbackWrite: async () => {
+          await this.requireCurrentRollbackOperationTableIncarnations(
+            authority,
+          )
+        },
+        transactWriteRollback: (command) =>
+          this.runManagedPreparedRollbackOperationWrite(
+            authority,
+            () => this.transport.transactWritePrePlanAuthority(command),
+          ),
+      }
+    const delegate =
+      createAwsWorkspaceSearchMigrationRollbackOperationPort({
+        configuration: authority.configuration,
+        configurationHash: authority.configurationHash,
+        executionBoundary,
+        sealedPlanningAuthority,
+        closedWriterFenceRecord,
+        executionRun: detachedExecutionRun,
+        authorityPort,
+        appliedRootReader,
+        applyRunStateReader,
+        journalGateway,
+        applyReceiptBinding,
+        transport,
+        clock: this.prePlanAuthorityClock,
+      })
+    return {
+      readRollbackState: () =>
+        this.runManagedRollbackOperation(
+          authority,
+          () => delegate.readRollbackState(),
+        ),
+      readRollbackReceipt: (sequence) =>
+        this.runManagedRollbackOperation(
+          authority,
+          () => delegate.readRollbackReceipt(sequence),
+        ),
+      readRolledBackRoot: () =>
+        this.runManagedRollbackOperation(
+          authority,
+          () => delegate.readRolledBackRoot(),
+        ),
+      beginRollback: (input) =>
+        this.runManagedRollbackOperation(
+          authority,
+          () => delegate.beginRollback(input),
+        ),
+      commitRollbackOperation: (input) =>
+        this.runManagedRollbackOperation(
+          authority,
+          () => delegate.commitRollbackOperation(input),
+        ),
+      finishRollback: (input) =>
+        this.runManagedRollbackOperation(
+          authority,
+          () => delegate.finishRollback(input),
         ),
     }
   }
@@ -5263,6 +5537,234 @@ class AwsWorkspaceSearchMigrationIdentityPort
   }
 
   /**
+   * Captures complete measured authority for one rollback-operation port.
+   *
+   * @returns Detached generation, configuration, table identity, and private
+   * immutable-object port.
+   */
+  private captureManagedRollbackOperationAuthority():
+    ManagedRollbackOperationAuthority {
+    const generation = this.generation
+    const configurationHash = this.measuredConfigurationHash
+    const configuration = this.measuredConfiguration
+    const stateTable = this.measuredMigrationStateTable
+    const immutableArtifactPort = this.measuredPlanningArtifactPort
+    if (
+      configurationHash === undefined ||
+      configuration === undefined ||
+      stateTable === undefined ||
+      immutableArtifactPort === undefined ||
+      this.measuredExecutionControlQuarantined
+    ) {
+      return failManagedRollbackOperation()
+    }
+    const authority: ManagedRollbackOperationAuthority = {
+      generation,
+      configurationHash,
+      configuration: structuredClone(configuration),
+      stateTable: structuredClone(stateTable),
+      immutableArtifactPort,
+    }
+    this.requireManagedRollbackOperationAuthority(authority)
+    return authority
+  }
+
+  /**
+   * Guards one complete rollback operation against lifecycle invalidation.
+   *
+   * @param authority - Captured rollback-operation authority.
+   * @param operation - One standalone rollback operation.
+   * @returns Result only while the captured generation remains current.
+   */
+  private async runManagedRollbackOperation<Result>(
+    authority: ManagedRollbackOperationAuthority,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    this.requireManagedRollbackOperationAuthority(authority)
+    try {
+      const result = await operation()
+      this.requireManagedRollbackOperationAuthority(authority)
+      return result
+    } catch (error: unknown) {
+      if (
+        readManagedMigrationStateFailureCode(error) ===
+          'AMBIGUOUS_OPERATION_UNRESOLVED'
+      ) {
+        throw createManagedRollbackOperationFailure(
+          'AMBIGUOUS_OPERATION_UNRESOLVED',
+        )
+      }
+      if (
+        !this.isMeasurementGenerationCurrent(
+          authority.generation,
+          authority.configurationHash,
+        )
+      ) {
+        return failManagedRollbackOperation()
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Guards one rollback read with all six table-incarnation checks.
+   *
+   * @param authority - Captured rollback-operation authority.
+   * @param operation - Exact DynamoDB or immutable-object read.
+   * @returns Read result only while every measured table remains current.
+   */
+  private async runManagedRollbackOperationRead<Result>(
+    authority: ManagedRollbackOperationAuthority,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    this.requireManagedRollbackOperationAuthority(authority)
+    await this.requireCurrentRollbackOperationTableIncarnations(
+      authority,
+    )
+    let result: Result
+    try {
+      result = await operation()
+    } catch (error: unknown) {
+      this.requireManagedRollbackOperationAuthority(authority)
+      await this.requireCurrentRollbackOperationTableIncarnations(
+        authority,
+      )
+      throw error
+    }
+    this.requireManagedRollbackOperationAuthority(authority)
+    await this.requireCurrentRollbackOperationTableIncarnations(
+      authority,
+    )
+    this.requireManagedRollbackOperationAuthority(authority)
+    return result
+  }
+
+  /**
+   * Revalidates all six transaction-owned table incarnations for rollback.
+   *
+   * @param authority - Captured rollback-operation authority.
+   */
+  private async requireCurrentRollbackOperationTableIncarnations(
+    authority: ManagedRollbackOperationAuthority,
+  ): Promise<void> {
+    try {
+      await this.requireCurrentApplicationWriterFenceTableIncarnations(
+        authority,
+      )
+    } catch (error: unknown) {
+      throw createManagedRollbackOperationFailure(
+        readManagedMigrationStateFailureCode(error),
+      )
+    }
+  }
+
+  /**
+   * Sends one prepared rollback transaction and quarantines stale identity.
+   *
+   * Once transport begins, a failed post-send all-six guard makes the commit
+   * outcome unsafe to reconcile in this generation. The shared execution
+   * control is quarantined and ambiguity is surfaced directly.
+   *
+   * @param authority - Captured rollback-operation authority.
+   * @param operation - Exact prepared rollback transaction.
+   * @returns Raw transaction result after the post-send all-six guard.
+   */
+  private async runManagedPreparedRollbackOperationWrite<Result>(
+    authority: ManagedRollbackOperationAuthority,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    try {
+      this.requireManagedRollbackOperationAuthority(authority)
+    } catch (error: unknown) {
+      throw createManagedRollbackOperationFailure(
+        readManagedMigrationStateFailureCode(error),
+      )
+    }
+    let sent = false
+    let result: Result
+    try {
+      result = await this.runManagedMigrationStateIo(
+        authority,
+        () => {
+          sent = true
+          return operation()
+        },
+      )
+    } catch (error: unknown) {
+      if (!sent) {
+        throw createManagedRollbackOperationFailure(
+          readManagedMigrationStateFailureCode(error),
+        )
+      }
+      try {
+        await this.requireCurrentRollbackOperationTableIncarnations(
+          authority,
+        )
+      } catch {
+        this.quarantineManagedExecutionControl(authority)
+        throw createManagedRollbackOperationFailure(
+          'AMBIGUOUS_OPERATION_UNRESOLVED',
+        )
+      }
+      throw error
+    }
+    try {
+      await this.requireCurrentRollbackOperationTableIncarnations(
+        authority,
+      )
+    } catch {
+      this.quarantineManagedExecutionControl(authority)
+      throw createManagedRollbackOperationFailure(
+        'AMBIGUOUS_OPERATION_UNRESOLVED',
+      )
+    }
+    return result
+  }
+
+  /**
+   * Creates read-only immutable storage guarded by rollback measurement.
+   *
+   * @param authority - Captured rollback-operation authority.
+   * @returns Private immutable storage with guarded reads and no write path.
+   */
+  private createManagedRollbackImmutableArtifactPort(
+    authority: ManagedRollbackOperationAuthority,
+  ): WorkspaceSearchMigrationImmutableArtifactAwsPort {
+    const delegate = authority.immutableArtifactPort
+    return {
+      writeImmutableArtifact: async () =>
+        failManagedRollbackOperation(),
+      readImmutableArtifact: (input) =>
+        this.runManagedRollbackOperationRead(
+          authority,
+          () => delegate.readImmutableArtifact(input),
+        ),
+    }
+  }
+
+  /**
+   * Requires one rollback authority and its private storage to remain current.
+   *
+   * @param authority - Captured generation, configuration, and private port.
+   */
+  private requireManagedRollbackOperationAuthority(
+    authority: ManagedRollbackOperationAuthority,
+  ): void {
+    if (
+      !this.isMeasurementGenerationCurrent(
+        authority.generation,
+        authority.configurationHash,
+      ) ||
+      this.measuredConfiguration === undefined ||
+      this.measuredPlanningArtifactPort !==
+        authority.immutableArtifactPort ||
+      this.measuredExecutionControlQuarantined
+    ) {
+      return failManagedRollbackOperation()
+    }
+  }
+
+  /**
    * Captures all measured identities installed for writer-fence operations.
    *
    * @returns Detached generation, configuration, hash, and state identity.
@@ -7098,6 +7600,30 @@ function createManagedFullVerificationFailure(
   return new WorkspaceSearchMigrationFailure(
     code,
     'Workspace Search migration full verification failed.',
+  )
+}
+
+/**
+ * Raises one stable managed rollback-operation lifecycle failure.
+ *
+ * @returns Never returns.
+ */
+function failManagedRollbackOperation(): never {
+  throw createManagedRollbackOperationFailure('INVALID_STATE')
+}
+
+/**
+ * Creates one stable managed rollback-operation failure.
+ *
+ * @param code - Stable operator-safe lifecycle, drift, or ambiguity code.
+ * @returns Secret-free rollback-operation failure.
+ */
+function createManagedRollbackOperationFailure(
+  code: WorkspaceSearchMigrationFailureCode,
+): WorkspaceSearchMigrationFailure {
+  return new WorkspaceSearchMigrationFailure(
+    code,
+    'Workspace Search migration rollback operation failed.',
   )
 }
 

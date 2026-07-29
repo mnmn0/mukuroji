@@ -119,6 +119,12 @@ import {
   workspaceSearchMigrationFullVerificationPublishTransactionIndex,
   type WorkspaceSearchMigrationFullVerificationAwsPort,
 } from './migration-full-verification-aws'
+import {
+  workspaceSearchMigrationRollbackFinishTransactionIndex,
+  workspaceSearchMigrationRollbackOperationTransactionIndex,
+  workspaceSearchMigrationRollbackStartTransactionIndex,
+  type WorkspaceSearchMigrationRollbackOperationAwsPort,
+} from './migration-rollback-operation-aws'
 import type {
   PublishWorkspaceSearchMigrationSealedPlanningAuthorityV2Input,
 } from './migration-sealed-planning-authority-aws'
@@ -409,6 +415,18 @@ type ManagedFullVerificationFixture =
     /** Resumable full-verification port under the measured session. */
     readonly verification:
       WorkspaceSearchMigrationFullVerificationAwsPort
+  }
+
+/**
+ * Complete managed rollback fixture after immutable apply sealing.
+ */
+type ManagedRollbackOperationFixture =
+  ManagedApplyOperationFixture & {
+    /** Exact complete applied state consumed by rollback start. */
+    readonly appliedState: WorkspaceSearchMigrationRunState
+    /** Resumable rollback port under the measured session. */
+    readonly rollback:
+      WorkspaceSearchMigrationRollbackOperationAwsPort
   }
 
 /** Allowlisted command recorder used without AWS credentials or network access. */
@@ -6951,6 +6969,691 @@ describe('Workspace Search migration AWS identity adapter', () => {
   )
 
   test(
+    'reverses a complete applied root through pinned DynamoDB and S3 and restarts reads',
+    async () => {
+      const fixture =
+        await createManagedRollbackOperationFixture(
+          'rollback-reverse-restart',
+        )
+      const journalPutIndex =
+        fixture.transport.putImmutableArtifactCommands.findIndex(
+          (command) =>
+            command.input.Key?.includes(
+              '/apply-journal-segments/',
+            ) === true,
+        )
+      const journalPut =
+        fixture.transport.putImmutableArtifactCommands[
+          journalPutIndex
+        ]
+      if (
+        journalPutIndex < 0 ||
+        journalPut?.input.Key === undefined
+      ) {
+        throw new Error('Expected one managed apply journal object.')
+      }
+      const transactions =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+      const applyOutput =
+        fixture.transport.getPrePlanAuthorityApplyOutput
+      const targetBefore =
+        fixture.plannedOperation.operation.before
+      const targetAfter =
+        fixture.plannedOperation.operation.after
+      if (!targetBefore.exists || !targetAfter.exists) {
+        throw new Error('Expected managed before and after targets.')
+      }
+      let rollbackCommitted = false
+      fixture.transport.getPrePlanAuthorityApplyOutput = (command) =>
+        command.input.TableName ===
+          fixture.requested.tables['workspace-search']
+          ? {
+              $metadata: {},
+              Item: structuredClone(
+                rollbackCommitted
+                  ? targetBefore.item
+                  : targetAfter.item,
+              ),
+            }
+          : applyOutput?.(command)
+
+      const started = await fixture.rollback.beginRollback(
+        createManagedRollbackCommand(
+          fixture,
+          fixture.appliedState.revision,
+        ),
+      )
+
+      expect(started).toMatchObject({
+        status: 'rolling-back',
+        nextSequence: 1,
+      })
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands[
+            transactions
+          ]?.input.TransactItems,
+      ).toHaveLength(
+        workspaceSearchMigrationRollbackStartTransactionIndex.count,
+      )
+      fixture.transport
+        .transactWritePrePlanAuthorityPostCommitEffect = () => {
+          rollbackCommitted = true
+          fixture.transport
+            .transactWritePrePlanAuthorityPostCommitEffect =
+              undefined
+          throw new Error('redacted rollback response loss')
+        }
+      const journalReads =
+        fixture.transport.getImmutableArtifactCommands.length
+      const tableReads =
+        fixture.transport.describeTableCommands.length
+      const sourceScans =
+        fixture.transport.scanSourceCommands.length
+      const targetScans =
+        fixture.transport.scanTargetCommands.length
+      const immutablePuts =
+        fixture.transport.putImmutableArtifactCommands.length
+      const immutableHeads =
+        fixture.transport.headImmutableArtifactCommands.length
+
+      const reversed =
+        await fixture.rollback.commitRollbackOperation(
+          createManagedRollbackCommand(fixture, started.revision),
+        )
+
+      expect(reversed).toMatchObject({
+        status: 'rolling-back',
+        nextSequence: 0,
+      })
+      expect(rollbackCommitted).toBe(true)
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactions + 2)
+      expect(fixture.transport.scanSourceCommands)
+        .toHaveLength(sourceScans)
+      expect(fixture.transport.scanTargetCommands)
+        .toHaveLength(targetScans)
+      expect(
+        fixture.transport.putImmutableArtifactCommands,
+      ).toHaveLength(immutablePuts)
+      expect(
+        fixture.transport.headImmutableArtifactCommands,
+      ).toHaveLength(immutableHeads)
+      expect(
+        fixture.transport.getImmutableArtifactCommands,
+      ).toHaveLength(journalReads + 1)
+      expect(
+        fixture.transport.getImmutableArtifactCommands[
+          journalReads
+        ]?.input,
+      ).toMatchObject({
+        Bucket: TEST_BUCKET,
+        Key: journalPut.input.Key,
+        VersionId:
+          `immutable-artifact-version-${journalPutIndex + 1}`,
+      })
+      const reverseItems =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands[
+            transactions + 1
+          ]?.input.TransactItems
+      expect(reverseItems).toHaveLength(
+        workspaceSearchMigrationRollbackOperationTransactionIndex.count,
+      )
+      expect(
+        reverseItems?.[
+          workspaceSearchMigrationRollbackOperationTransactionIndex
+            .target
+        ]?.Put?.TableName,
+      ).toBe(fixture.requested.tables['workspace-search'])
+      const expectedTables = [
+        fixture.requested.tables['migration-state'],
+        fixture.requested.tables['project-directory'],
+        fixture.requested.tables['work-items'],
+        fixture.requested.tables.collaboration,
+        fixture.requested.tables.documents,
+        fixture.requested.tables['workspace-search'],
+      ]
+      const guardedTables =
+        fixture.transport.describeTableCommands
+          .slice(tableReads)
+          .map((command) => command.input.TableName)
+      for (const tableName of expectedTables) {
+        expect(guardedTables).toContain(tableName)
+      }
+
+      const restarted =
+        fixture.port.createRollbackOperationPort(
+          fixture.executionBoundary,
+          fixture.sealedPlanningAuthority,
+          fixture.closedWriterFenceRecord,
+          fixture.executionRun,
+        )
+      await expect(restarted.readRollbackState())
+        .resolves.toEqual(reversed)
+      await expect(restarted.readRollbackReceipt(1))
+        .resolves.toMatchObject({ sequence: 1 })
+      await expect(restarted.readRolledBackRoot())
+        .resolves.toBeUndefined()
+      const transactionsBeforeReverseRetry =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+      await expect(
+        restarted.commitRollbackOperation(
+          createManagedRollbackCommand(
+            fixture,
+            started.revision,
+          ),
+        ),
+      ).resolves.toEqual(reversed)
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactionsBeforeReverseRetry)
+      const transactionsBeforeFinish =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+      const finishCommand = createManagedRollbackCommand(
+        fixture,
+        reversed.revision,
+      )
+
+      const root = await restarted.finishRollback(finishCommand)
+
+      expect(root).toMatchObject({
+        terminalState: { status: 'rolled-back' },
+        terminalReceipt: { sequence: 1 },
+      })
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands[
+            transactionsBeforeFinish
+          ]?.input.TransactItems,
+      ).toHaveLength(
+        workspaceSearchMigrationRollbackFinishTransactionIndex.count,
+      )
+      await expect(restarted.readRolledBackRoot())
+        .resolves.toEqual(root)
+      const transactionsAfterFinish =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+
+      await expect(restarted.finishRollback(finishCommand))
+        .resolves.toEqual(root)
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactionsAfterFinish)
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'binds managed rollback writes to the exact fresh authority claim',
+    async () => {
+      const fixture =
+        await createManagedRollbackOperationFixture(
+          'rollback-authority-claim',
+        )
+      const command = createManagedRollbackCommand(
+        fixture,
+        fixture.appliedState.revision,
+      )
+      const transactions =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+
+      const failure =
+        await captureWorkspaceSearchMigrationFailure(
+          fixture.rollback.beginRollback({
+            ...command,
+            authority: {
+              ...command.authority,
+              maintenanceEvidenceReceiptDigest:
+                createMigrationDigest(
+                  'foreign-rollback-maintenance-receipt',
+                ),
+            },
+          }),
+        )
+
+      expect(failure).toMatchObject({
+        code: 'INVALID_MAINTENANCE_EVIDENCE',
+        message:
+          'Workspace Search migration rollback operation failed.',
+      })
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactions)
+      await expect(
+        fixture.rollback.beginRollback(command),
+      ).resolves.toMatchObject({
+        status: 'rolling-back',
+        nextSequence: 1,
+      })
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'invalidates stale managed rollback ports on remeasurement and close',
+    async () => {
+      const fixture =
+        await createManagedRollbackOperationFixture(
+          'rollback-lifecycle',
+        )
+      const expectedFailure =
+        new WorkspaceSearchMigrationFailure(
+          'INVALID_STATE',
+          'Workspace Search migration rollback operation failed.',
+        )
+
+      await fixture.port.measureConfiguration()
+      const readsAfterMeasurement =
+        fixture.transport.getPrePlanAuthorityCommands.length
+      await expect(fixture.rollback.readRollbackState())
+        .rejects.toEqual(expectedFailure)
+      expect(
+        fixture.transport.getPrePlanAuthorityCommands,
+      ).toHaveLength(readsAfterMeasurement)
+
+      const current =
+        fixture.port.createRollbackOperationPort(
+          fixture.executionBoundary,
+          fixture.sealedPlanningAuthority,
+          fixture.closedWriterFenceRecord,
+          fixture.executionRun,
+        )
+      await expect(current.readRollbackState())
+        .resolves.toBeUndefined()
+      const readsBeforeClose =
+        fixture.transport.getPrePlanAuthorityCommands.length
+      fixture.port.close()
+      await expect(current.readRollbackState())
+        .rejects.toEqual(expectedFailure)
+      expect(
+        fixture.transport.getPrePlanAuthorityCommands,
+      ).toHaveLength(readsBeforeClose)
+      expect(() =>
+        fixture.port.createRollbackOperationPort(
+          fixture.executionBoundary,
+          fixture.sealedPlanningAuthority,
+          fixture.closedWriterFenceRecord,
+          fixture.executionRun,
+        ),
+      ).toThrow(expectedFailure)
+    },
+  )
+
+  test(
+    'normalizes malformed managed rollback static binding failures',
+    async () => {
+      const fixture =
+        await createManagedRollbackOperationFixture(
+          'rollback-malformed-static-binding',
+        )
+      const malformedBoundary =
+        structuredClone(fixture.executionBoundary)
+      if (
+        !Reflect.set(
+          malformedBoundary,
+          'boundaryDigest',
+          createMigrationDigest(
+            'malformed-managed-rollback-boundary',
+          ),
+        )
+      ) {
+        throw new Error('Expected mutable rollback boundary fixture.')
+      }
+
+      expect(() =>
+        fixture.port.createRollbackOperationPort(
+          malformedBoundary,
+          fixture.sealedPlanningAuthority,
+          fixture.closedWriterFenceRecord,
+          fixture.executionRun,
+        ),
+      ).toThrow(
+        new WorkspaceSearchMigrationFailure(
+          'INVALID_ARGUMENT',
+          'Workspace Search migration rollback operation failed.',
+        ),
+      )
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'stops managed rollback before send when a measured table drifts',
+    async () => {
+      const fixture =
+        await createManagedRollbackOperationFixture(
+          'rollback-pre-send-drift',
+        )
+      const started = await fixture.rollback.beginRollback(
+        createManagedRollbackCommand(
+          fixture,
+          fixture.appliedState.revision,
+        ),
+      )
+      const sourceTableName =
+        fixture.requested.tables['work-items']
+      const targetTableName =
+        fixture.requested.tables['workspace-search']
+      const originalSource =
+        fixture.transport.describeTableOutputs.get(sourceTableName)
+      if (originalSource === undefined) {
+        throw new Error('Expected measured rollback source identity.')
+      }
+      const applyOutput =
+        fixture.transport.getPrePlanAuthorityApplyOutput
+      let driftInjected = false
+      fixture.transport.getPrePlanAuthorityApplyOutput = (command) => {
+        const output = applyOutput?.(command)
+        if (
+          !driftInjected &&
+          command.input.TableName === targetTableName
+        ) {
+          driftInjected = true
+          fixture.transport.describeTableOutputs.set(
+            sourceTableName,
+            createReplacementDescribeTableOutput(
+              'work-items',
+              sourceTableName,
+              fixture.requested,
+            ),
+          )
+        }
+        return output
+      }
+      const transactions =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+
+      const failure =
+        await captureWorkspaceSearchMigrationFailure(
+          fixture.rollback.commitRollbackOperation(
+            createManagedRollbackCommand(
+              fixture,
+              started.revision,
+            ),
+          ),
+        )
+
+      expect(failure).toMatchObject({
+        code: 'SOURCE_DRIFT',
+        message:
+          'Workspace Search migration rollback operation failed.',
+      })
+      expect(driftInjected).toBe(true)
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactions)
+      fixture.transport.getPrePlanAuthorityApplyOutput =
+        applyOutput
+      fixture.transport.describeTableOutputs.set(
+        sourceTableName,
+        originalSource,
+      )
+      await expect(fixture.rollback.readRollbackState())
+        .resolves.toEqual(started)
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'quarantines managed rollback after post-send table drift',
+    async () => {
+      const fixture =
+        await createManagedRollbackOperationFixture(
+          'rollback-post-send-drift',
+        )
+      const siblingApply =
+        fixture.port.createApplyOperationPort(
+          fixture.executionBoundary,
+          fixture.sealedPlanningAuthority,
+          fixture.closedWriterFenceRecord,
+          fixture.executionRun,
+        )
+      const siblingExecutionRun =
+        fixture.port.createExecutionRunPort(
+          fixture.executionBoundary,
+          fixture.sealedPlanningAuthority,
+          fixture.planSeal,
+          fixture.closedWriterFenceRecord,
+        )
+      const siblingVerification =
+        fixture.port.createFullVerificationPort(
+          fixture.executionBoundary,
+          fixture.sealedPlanningAuthority,
+          fixture.closedWriterFenceRecord,
+          fixture.executionRun,
+        )
+      const started = await fixture.rollback.beginRollback(
+        createManagedRollbackCommand(
+          fixture,
+          fixture.appliedState.revision,
+        ),
+      )
+      const targetTableName =
+        fixture.requested.tables['workspace-search']
+      const originalTarget =
+        fixture.transport.describeTableOutputs.get(targetTableName)
+      if (originalTarget === undefined) {
+        throw new Error('Expected measured rollback target identity.')
+      }
+      const transactions =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+      fixture.transport
+        .transactWritePrePlanAuthorityPostCommitEffect = () => {
+          fixture.transport.describeTableOutputs.set(
+            targetTableName,
+            createReplacementDescribeTableOutput(
+              'workspace-search',
+              targetTableName,
+              fixture.requested,
+            ),
+          )
+        }
+
+      const failure =
+        await captureWorkspaceSearchMigrationFailure(
+          fixture.rollback.commitRollbackOperation(
+            createManagedRollbackCommand(
+              fixture,
+              started.revision,
+            ),
+          ),
+        )
+
+      expect(failure).toEqual(
+        new WorkspaceSearchMigrationFailure(
+          'AMBIGUOUS_OPERATION_UNRESOLVED',
+          'Workspace Search migration rollback operation failed.',
+        ),
+      )
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactions + 1)
+      fixture.transport
+        .transactWritePrePlanAuthorityPostCommitEffect = undefined
+      fixture.transport.describeTableOutputs.set(
+        targetTableName,
+        originalTarget,
+      )
+      const expectedQuarantineFailure =
+        new WorkspaceSearchMigrationFailure(
+          'INVALID_STATE',
+          'Workspace Search migration rollback operation failed.',
+        )
+      const expectedApplyFailure =
+        new WorkspaceSearchMigrationFailure(
+          'INVALID_STATE',
+          'Workspace Search migration apply operation failed.',
+        )
+      const expectedExecutionRunFailure =
+        new WorkspaceSearchMigrationFailure(
+          'INVALID_STATE',
+          'Workspace Search migration execution run operation failed.',
+        )
+      const expectedVerificationFailure =
+        new WorkspaceSearchMigrationFailure(
+          'INVALID_STATE',
+          'Workspace Search migration full verification failed.',
+        )
+      const ioBeforeQuarantineChecks = {
+        tableDescriptions:
+          fixture.transport.describeTableCommands.length,
+        ttlDescriptions:
+          fixture.transport.describeTimeToLiveCommands.length,
+        authorityReads:
+          fixture.transport.getPrePlanAuthorityCommands.length,
+        transactions:
+          fixture.transport
+            .transactWritePrePlanAuthorityCommands.length,
+        sourceScans:
+          fixture.transport.scanSourceCommands.length,
+        targetScans:
+          fixture.transport.scanTargetCommands.length,
+        immutablePuts:
+          fixture.transport.putImmutableArtifactCommands.length,
+        immutableHeads:
+          fixture.transport.headImmutableArtifactCommands.length,
+        immutableGets:
+          fixture.transport.getImmutableArtifactCommands.length,
+      }
+      await expect(fixture.rollback.readRollbackState())
+        .rejects.toEqual(expectedQuarantineFailure)
+      await expect(siblingApply.readRunState())
+        .rejects.toEqual(expectedApplyFailure)
+      await expect(
+        siblingExecutionRun.read(
+          fixture.currentAuthority.lease.runId,
+        ),
+      ).rejects.toEqual(expectedExecutionRunFailure)
+      await expect(siblingVerification.readProgress())
+        .rejects.toEqual(expectedVerificationFailure)
+      expect(() =>
+        fixture.port.createRollbackOperationPort(
+          fixture.executionBoundary,
+          fixture.sealedPlanningAuthority,
+          fixture.closedWriterFenceRecord,
+          fixture.executionRun,
+        ),
+      ).toThrow(expectedQuarantineFailure)
+      expect({
+        tableDescriptions:
+          fixture.transport.describeTableCommands.length,
+        ttlDescriptions:
+          fixture.transport.describeTimeToLiveCommands.length,
+        authorityReads:
+          fixture.transport.getPrePlanAuthorityCommands.length,
+        transactions:
+          fixture.transport
+            .transactWritePrePlanAuthorityCommands.length,
+        sourceScans:
+          fixture.transport.scanSourceCommands.length,
+        targetScans:
+          fixture.transport.scanTargetCommands.length,
+        immutablePuts:
+          fixture.transport.putImmutableArtifactCommands.length,
+        immutableHeads:
+          fixture.transport.headImmutableArtifactCommands.length,
+        immutableGets:
+          fixture.transport.getImmutableArtifactCommands.length,
+      }).toEqual(ioBeforeQuarantineChecks)
+
+      await fixture.port.measureConfiguration()
+      const recovered =
+        fixture.port.createRollbackOperationPort(
+          fixture.executionBoundary,
+          fixture.sealedPlanningAuthority,
+          fixture.closedWriterFenceRecord,
+          fixture.executionRun,
+        )
+      await expect(recovered.readRollbackState())
+        .resolves.toMatchObject({
+          revision: started.revision + 1,
+          status: 'rolling-back',
+          nextSequence: 0,
+        })
+      fixture.port.close()
+    },
+  )
+
+  const lifecycleChanges:
+    readonly ('close' | 'remeasure')[] = [
+      'close',
+      'remeasure',
+    ]
+  for (const lifecycle of lifecycleChanges) {
+    test(
+      `preserves managed rollback ambiguity when ${lifecycle} follows a committed send`,
+      async () => {
+        const fixture =
+          await createManagedRollbackOperationFixture(
+            `rollback-post-send-${lifecycle}`,
+          )
+        const started = await fixture.rollback.beginRollback(
+          createManagedRollbackCommand(
+            fixture,
+            fixture.appliedState.revision,
+          ),
+        )
+        const transactions =
+          fixture.transport
+            .transactWritePrePlanAuthorityCommands.length
+        let replacementMeasurement:
+          Promise<WorkspaceSearchMigrationConfiguration> | undefined
+        fixture.transport
+          .transactWritePrePlanAuthorityPostCommitEffect = () => {
+            fixture.transport
+              .transactWritePrePlanAuthorityPostCommitEffect =
+                undefined
+            if (lifecycle === 'close') {
+              fixture.port.close()
+              return
+            }
+            replacementMeasurement =
+              fixture.port.measureConfiguration()
+          }
+
+        const failure =
+          await captureWorkspaceSearchMigrationFailure(
+            fixture.rollback.commitRollbackOperation(
+              createManagedRollbackCommand(
+                fixture,
+                started.revision,
+              ),
+            ),
+          )
+
+        expect(failure).toEqual(
+          new WorkspaceSearchMigrationFailure(
+            'AMBIGUOUS_OPERATION_UNRESOLVED',
+            'Workspace Search migration rollback operation failed.',
+          ),
+        )
+        expect(
+          fixture.transport
+            .transactWritePrePlanAuthorityCommands,
+        ).toHaveLength(transactions + 1)
+        if (replacementMeasurement !== undefined) {
+          await replacementMeasurement
+          fixture.port.close()
+        }
+      },
+    )
+  }
+
+  test(
     'strongly reads the exact applied root with all-six verification guards',
     async () => {
       const fixture =
@@ -11129,6 +11832,37 @@ async function createManagedApplyOperationFixture(
 }
 
 /**
+ * Builds one managed rollback port after completing a real target mutation.
+ *
+ * @param identifier - Unique complete-root rollback fixture suffix.
+ * @returns Measured rollback port and its durable apply predecessors.
+ */
+async function createManagedRollbackOperationFixture(
+  identifier: string,
+): Promise<ManagedRollbackOperationFixture> {
+  const fixture =
+    await createManagedApplyOperationFixture(identifier, true)
+  const apply = await createManagedApplyCheckpointPort(fixture)
+  const terminal = await completeManagedApplyTraversal(
+    fixture,
+    apply,
+  )
+  const appliedState = await apply.sealApply(
+    createManagedApplySealCommand(fixture, terminal.revision),
+  )
+  return {
+    ...fixture,
+    appliedState,
+    rollback: fixture.port.createRollbackOperationPort(
+      fixture.executionBoundary,
+      fixture.sealedPlanningAuthority,
+      fixture.closedWriterFenceRecord,
+      fixture.executionRun,
+    ),
+  }
+}
+
+/**
  * Builds one managed port after completing and sealing the exact apply phase.
  *
  * @param identifier - Unique full-verification fixture suffix.
@@ -11372,6 +12106,37 @@ function createManagedFullVerificationPageCommand(
       fenceToken: fixture.currentAuthority.lease.fenceToken,
     },
     location,
+  }
+}
+
+/**
+ * Creates one strict managed rollback command for the current authority.
+ *
+ * @param fixture - Exact complete applied rollback fixture.
+ * @param expectedRevision - Exact durable predecessor revision.
+ * @returns Detached rollback command under the fresh current authority.
+ */
+function createManagedRollbackCommand(
+  fixture: ManagedRollbackOperationFixture,
+  expectedRevision: number,
+): Parameters<
+  WorkspaceSearchMigrationRollbackOperationAwsPort[
+    'beginRollback'
+  ]
+>[0] {
+  return {
+    expectedRevision,
+    authority: {
+      lease: {
+        runId: fixture.currentAuthority.lease.runId,
+        ownerId: fixture.currentAuthority.lease.ownerId,
+        fenceToken: fixture.currentAuthority.lease.fenceToken,
+      },
+      maintenanceEvidenceReceiptDigest:
+        fixture.currentAuthority.maintenanceEvidenceReceiptDigest,
+      maintenanceEvidencePointerRevision:
+        fixture.currentAuthority.maintenanceEvidencePointerRevision,
+    },
   }
 }
 
