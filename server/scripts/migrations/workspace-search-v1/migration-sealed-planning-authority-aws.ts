@@ -78,6 +78,19 @@ export type PublishWorkspaceSearchMigrationSealedPlanningAuthorityV2Input =
   >
 
 /**
+ * Exact immutable sealed root fixed by a later execution transaction.
+ */
+export type CreateWorkspaceSearchMigrationSealedPlanningAuthorityV2ConditionCheckInput = {
+  /** Exact measured migration-state table containing the durable root. */
+  readonly stateTable: MigrationTableIdentity
+  /** Reviewed measured-configuration digest used in root addressing. */
+  readonly configurationHash: string
+  /** Exact immutable version-two root to condition-check. */
+  readonly authority:
+    WorkspaceSearchMigrationSealedPlanningAuthorityV2
+}
+
+/**
  * Narrow migration-state transport used by sealed-authority publication.
  */
 export interface WorkspaceSearchMigrationSealedPlanningAuthorityV2AwsTransport {
@@ -188,6 +201,21 @@ type PreparedPublicationRecord = {
   readonly item: Readonly<Record<string, AttributeValue>>
   /** Exact canonical root bytes retained by the item. */
   readonly rootBytes: Uint8Array
+}
+
+/**
+ * Descriptor-safe detached input for one sealed-root condition check.
+ */
+type PreparedSealedPlanningAuthorityConditionCheckInput = {
+  /** Exact physical migration-state table containing the durable root. */
+  readonly stateTableName: string
+  /** Immutable migration-state TableId used in root addressing. */
+  readonly stateTableId: string
+  /** Reviewed measured-configuration digest used in root addressing. */
+  readonly configurationHash: string
+  /** Exact immutable version-two root to condition-check. */
+  readonly authority:
+    WorkspaceSearchMigrationSealedPlanningAuthorityV2
 }
 
 /**
@@ -580,6 +608,155 @@ export function createAwsWorkspaceSearchMigrationSealedPlanningAuthorityV2Port(
     throw createSealedPlanningAuthorityPublicationBoundaryFailure(
       readSealedPlanningAuthorityPublicationFailureCode(error),
     )
+  }
+}
+
+/**
+ * Creates an exact immutable sealed-root condition check.
+ *
+ * The complete canonical root bytes and their independently indexed binding
+ * fields are fixed together so a later execution transaction cannot substitute
+ * another publication for the same run.
+ *
+ * @param input - Measured state table, configuration digest, and exact root.
+ * @returns One adapter-owned DynamoDB ConditionCheck transaction item.
+ */
+export function createWorkspaceSearchMigrationSealedPlanningAuthorityV2ConditionCheck(
+  input:
+    CreateWorkspaceSearchMigrationSealedPlanningAuthorityV2ConditionCheckInput,
+): TransactWriteItem {
+  try {
+    const snapshot = prepareSealedPlanningAuthorityConditionCheckInput(
+      input,
+    )
+    if (!isHexDigest(snapshot.configurationHash)) {
+      return failSealedPlanningAuthorityPublication('INVALID_ARGUMENT')
+    }
+    const rootBytes =
+      serializeWorkspaceSearchMigrationSealedPlanningAuthorityV2(
+        snapshot.authority,
+      )
+    const root =
+      parseWorkspaceSearchMigrationSealedPlanningAuthorityV2(rootBytes)
+    if (
+      root.configurationHash !== snapshot.configurationHash ||
+      root.tableIds['migration-state'] !== snapshot.stateTableId
+    ) {
+      return failSealedPlanningAuthorityPublication(
+        'CONFIGURATION_DRIFT',
+      )
+    }
+    const binding: SealedPlanningAuthorityPublicationBinding = {
+      stateTableName: snapshot.stateTableName,
+      stateTableId: snapshot.stateTableId,
+      configurationHash: snapshot.configurationHash,
+    }
+    const conditionCheck:
+      NonNullable<TransactWriteItem['ConditionCheck']> = {
+        TableName: binding.stateTableName,
+        Key: {
+          migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
+          recordKey: {
+            S: createPublicationRecordKey(binding, root.runId),
+          },
+        },
+        ConditionExpression: [
+          '#kind = :kind',
+          '#version = :version',
+          '#stateTableId = :stateTableId',
+          '#configurationHash = :configurationHash',
+          '#runId = :runId',
+          '#authorityDigest = :authorityDigest',
+          '#sealedAt = :sealedAt',
+          '#rootBytes = :rootBytes',
+        ].join(' AND '),
+        ExpressionAttributeNames: {
+          '#kind': 'kind',
+          '#version': 'version',
+          '#stateTableId': 'stateTableId',
+          '#configurationHash': 'configurationHash',
+          '#runId': 'runId',
+          '#authorityDigest': 'authorityDigest',
+          '#sealedAt': 'sealedAt',
+          '#rootBytes': 'rootBytes',
+        },
+        ExpressionAttributeValues: {
+          ':kind': { S: publicationRecordKind },
+          ':version': { N: String(publicationRecordVersion) },
+          ':stateTableId': { S: binding.stateTableId },
+          ':configurationHash': { S: binding.configurationHash },
+          ':runId': { S: root.runId },
+          ':authorityDigest': { S: root.authorityDigest },
+          ':sealedAt': { S: root.sealedAt },
+          ':rootBytes': { B: rootBytes },
+        },
+        ReturnValuesOnConditionCheckFailure: 'NONE',
+      }
+    return { ConditionCheck: conditionCheck }
+  } catch (error: unknown) {
+    throw createSealedPlanningAuthorityPublicationBoundaryFailure(
+      readSealedPlanningAuthorityPublicationFailureCode(error),
+    )
+  }
+}
+
+/**
+ * Rejects accessors, Proxies, extra fields, and later caller mutation.
+ *
+ * @param input - Candidate exported condition-check input.
+ * @returns Detached descriptor-safe condition-check material.
+ */
+function prepareSealedPlanningAuthorityConditionCheckInput(
+  input:
+    CreateWorkspaceSearchMigrationSealedPlanningAuthorityV2ConditionCheckInput,
+): PreparedSealedPlanningAuthorityConditionCheckInput {
+  if (
+    typeof input !== 'object' ||
+    input === null ||
+    nodeUtilTypes.isProxy(input)
+  ) {
+    return failSealedPlanningAuthorityPublication('INVALID_ARGUMENT')
+  }
+  const expected = [
+    'authority',
+    'configurationHash',
+    'stateTable',
+  ]
+  const ownKeys = Reflect.ownKeys(input)
+  if (
+    ownKeys.length !== expected.length ||
+    ownKeys.some((key) => typeof key !== 'string')
+  ) {
+    return failSealedPlanningAuthorityPublication('INVALID_ARGUMENT')
+  }
+  const actual = Object.keys(input).sort()
+  if (
+    actual.length !== expected.length ||
+    actual.some((key, index) => key !== expected[index])
+  ) {
+    return failSealedPlanningAuthorityPublication('INVALID_ARGUMENT')
+  }
+  const stateTable = readOwnDataProperty(input, 'stateTable')
+  requireMigrationStateTableIdentity(stateTable)
+  if (typeof stateTable !== 'object' || stateTable === null) {
+    return failSealedPlanningAuthorityPublication('INVALID_ARGUMENT')
+  }
+  const stateTableName = readOwnDataValue(stateTable, 'tableName')
+  const stateTableId = readOwnDataValue(stateTable, 'tableId')
+  if (
+    typeof stateTableName !== 'string' ||
+    typeof stateTableId !== 'string'
+  ) {
+    return failSealedPlanningAuthorityPublication('INVALID_ARGUMENT')
+  }
+  return {
+    authority: readOwnDataProperty(input, 'authority'),
+    configurationHash: readOwnDataProperty(
+      input,
+      'configurationHash',
+    ),
+    stateTableName,
+    stateTableId,
   }
 }
 

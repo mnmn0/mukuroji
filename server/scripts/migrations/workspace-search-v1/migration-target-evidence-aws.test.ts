@@ -35,6 +35,7 @@ import {
 } from './migration-pre-plan-authority-aws'
 import {
   createAwsWorkspaceSearchMigrationTargetEvidencePort,
+  createWorkspaceSearchMigrationTargetPlanningHeadAbsenceConditionCheck,
   createWorkspaceSearchMigrationTargetTerminalHeadConditionCheck,
   type WorkspaceSearchMigrationPlanningTargetArtifactCaptureInput,
   type WorkspaceSearchMigrationPlanningTargetArtifactCaptureResult,
@@ -1583,6 +1584,130 @@ function sourceKeyDescriptors(
 }
 
 describe('Workspace Search migration target evidence AWS adapter', () => {
+  test('creates an exact planning target-head absence condition check', () => {
+    const configuration = createConfiguration()
+    const request = createReadRequest(
+      configuration,
+      'run-target-head-absence',
+    )
+    const stateTable = configuration.tables['migration-state']
+    const targetTable = configuration.tables['workspace-search']
+    const identityDigest = createMigrationDigest({
+      kind: 'workspace-search-target-evidence-identity',
+      version: 1,
+      purpose: 'planning',
+      runId: request.runId,
+      configurationHash: request.configurationHash,
+      targetTableId: targetTable.tableId,
+      stateTableId: stateTable.tableId,
+    })
+
+    const item =
+      createWorkspaceSearchMigrationTargetPlanningHeadAbsenceConditionCheck({
+        stateTable,
+        request,
+      })
+
+    expect(requireConditionCheck(item)).toEqual({
+      TableName: stateTable.tableName,
+      Key: {
+        migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
+        recordKey: {
+          S: `target-evidence/v1/${identityDigest}/head`,
+        },
+      },
+      ConditionExpression:
+        'attribute_not_exists(#migrationId) AND attribute_not_exists(#recordKey)',
+      ExpressionAttributeNames: {
+        '#migrationId': 'migrationId',
+        '#recordKey': 'recordKey',
+      },
+    })
+  })
+
+  test('validates planning target-head absence inputs through read preparation', async () => {
+    const configuration = createConfiguration()
+    const request = createReadRequest(
+      configuration,
+      'run-target-head-absence-validation',
+    )
+    const stateTable = configuration.tables['migration-state']
+    const wrongStateTable: MigrationTableIdentity = {
+      ...stateTable,
+      tableId: 'table-id-replaced-migration-state',
+    }
+    const cases = [
+      {
+        input: {
+          stateTable,
+          request: {
+            ...request,
+            configurationHash: createMigrationDigest(
+              'wrong-target-head-absence-configuration',
+            ),
+          },
+        },
+      },
+      {
+        input: {
+          stateTable: wrongStateTable,
+          request,
+        },
+      },
+    ]
+    const observedCodes: string[] = []
+
+    for (const candidate of cases) {
+      const failure = await captureMigrationFailure(async () =>
+        createWorkspaceSearchMigrationTargetPlanningHeadAbsenceConditionCheck(
+          candidate.input,
+        )
+      )
+
+      observedCodes.push(failure.code)
+    }
+    expect(observedCodes).toEqual([
+      'CONFIGURATION_HASH_MISMATCH',
+      'IDENTITY_MISMATCH',
+    ])
+
+    let hostileInvocations = 0
+    const accessorConfiguration = structuredClone(configuration)
+    Object.defineProperty(accessorConfiguration, 'tables', {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        hostileInvocations += 1
+        return configuration.tables
+      },
+    })
+    expect(() =>
+      createWorkspaceSearchMigrationTargetPlanningHeadAbsenceConditionCheck({
+        stateTable,
+        request: {
+          ...request,
+          configuration: accessorConfiguration,
+        },
+      }),
+    ).toThrow(WorkspaceSearchMigrationFailure)
+
+    const proxyInput = new Proxy(
+      { stateTable, request },
+      {
+        ownKeys: (target) => {
+          hostileInvocations += 1
+          return Reflect.ownKeys(target)
+        },
+      },
+    )
+    expect(() =>
+      createWorkspaceSearchMigrationTargetPlanningHeadAbsenceConditionCheck(
+        proxyInput,
+      ),
+    ).toThrow(WorkspaceSearchMigrationFailure)
+    expect(hostileInvocations).toBe(0)
+  })
+
   test('creates an exact terminal planning-v1 target-head condition check', async () => {
     const configuration = createConfiguration()
     const transport = new InMemoryTargetEvidenceAwsTransport()

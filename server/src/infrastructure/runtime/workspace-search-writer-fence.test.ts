@@ -3,6 +3,7 @@ import { expect, test } from 'bun:test'
 import type { AttributeValue } from '@aws-sdk/client-dynamodb'
 import {
   createWorkspaceSearchWriterFenceBinding,
+  createWorkspaceSearchWriterFenceClosedConditionCheck,
   createWorkspaceSearchWriterFenceClosedSuccessor,
   createWorkspaceSearchWriterFenceGuardMaterial,
   createWorkspaceSearchWriterFenceInitialOpenRecord,
@@ -691,4 +692,110 @@ test('creates deterministic records and strict comparison-helper results', () =>
     createBindingFixture('replacement'),
     authority,
   )).toBeFalse()
+})
+
+test('creates an exact independently bound closed-row condition check', () => {
+  const binding = createBindingFixture()
+  const open = createWorkspaceSearchWriterFenceInitialOpenRecord(
+    binding,
+    new Date('2026-07-29T00:00:00.000Z'),
+  )
+  const closed = createWorkspaceSearchWriterFenceClosedSuccessor(
+    open,
+    createAuthorityFixture(),
+    new Date('2026-07-29T00:01:00.000Z'),
+  )
+
+  expect(
+    createWorkspaceSearchWriterFenceClosedConditionCheck(
+      closed,
+      binding,
+    ),
+  ).toEqual({
+    ConditionCheck: {
+      TableName: binding.stateTableName,
+      Key: {
+        migrationId: { S: 'workspace-search-maintenance' },
+        recordKey: { S: binding.recordKey },
+      },
+      ConditionExpression:
+        '#canonicalBytes = :canonicalBytes AND #recordDigest = :recordDigest',
+      ExpressionAttributeNames: {
+        '#canonicalBytes': 'canonicalBytes',
+        '#recordDigest': 'recordDigest',
+      },
+      ExpressionAttributeValues: {
+        ':canonicalBytes': { S: closed.canonicalBytes },
+        ':recordDigest': { S: closed.recordDigest },
+      },
+      ReturnValuesOnConditionCheckFailure: 'NONE',
+    },
+  })
+
+  expect(() =>
+    createWorkspaceSearchWriterFenceClosedConditionCheck(
+      closed,
+      createBindingFixture('replacement'),
+    ),
+  ).toThrow(WorkspaceSearchWriterFenceError)
+  const forgedClosed = structuredClone(closed)
+  Object.defineProperty(forgedClosed, 'mode', {
+    configurable: true,
+    enumerable: true,
+    value: 'open',
+    writable: true,
+  })
+  expect(() =>
+    createWorkspaceSearchWriterFenceClosedConditionCheck(
+      forgedClosed,
+      binding,
+    ),
+  ).toThrow(WorkspaceSearchWriterFenceError)
+
+  let accessorInvocations = 0
+  const hostileAuthority = structuredClone(closed.authority)
+  Object.defineProperty(hostileAuthority, 'runId', {
+    configurable: true,
+    enumerable: true,
+    get: () => {
+      accessorInvocations += 1
+      return closed.authority.runId
+    },
+  })
+  const accessorClosed = structuredClone(closed)
+  Object.defineProperty(accessorClosed, 'authority', {
+    configurable: true,
+    enumerable: true,
+    value: hostileAuthority,
+    writable: true,
+  })
+  expect(() =>
+    createWorkspaceSearchWriterFenceClosedConditionCheck(
+      accessorClosed,
+      binding,
+    ),
+  ).toThrow(WorkspaceSearchWriterFenceError)
+  expect(accessorInvocations).toBe(0)
+
+  let proxyTrapInvocations = 0
+  const proxiedBinding = new Proxy(closed.binding, {
+    getPrototypeOf: () => {
+      proxyTrapInvocations += 1
+      return Object.prototype
+    },
+  })
+  const proxyClosed = structuredClone(closed)
+  Object.defineProperty(proxyClosed, 'binding', {
+    configurable: true,
+    enumerable: true,
+    value: proxiedBinding,
+    writable: true,
+  })
+  expect(() =>
+    createWorkspaceSearchWriterFenceClosedConditionCheck(
+      proxyClosed,
+      binding,
+    ),
+  ).toThrow(WorkspaceSearchWriterFenceError)
+  expect(proxyTrapInvocations).toBe(0)
 })

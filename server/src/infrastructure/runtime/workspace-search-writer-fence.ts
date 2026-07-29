@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { types as nodeUtilTypes } from 'node:util'
 import type {
   AttributeValue,
   GetItemCommandInput,
@@ -453,6 +454,18 @@ export function parseWorkspaceSearchWriterFenceObservation(
 }
 
 /**
+ * Revalidates and detaches one exact closed writer-fence record.
+ *
+ * @param record - Candidate canonical closed record.
+ * @returns Detached strict closed record safe to retain across later work.
+ */
+export function readWorkspaceSearchWriterFenceClosedRecord(
+  record: WorkspaceSearchWriterFenceClosedRecord,
+): WorkspaceSearchWriterFenceClosedRecord {
+  return atFenceBoundary(() => readClosedRecord(record))
+}
+
+/**
  * Creates the exact strongly consistent GetItem input for one fence row.
  *
  * @param binding - Independently measured state and dataset binding.
@@ -582,6 +595,45 @@ export function createWorkspaceSearchWriterFenceGuardMaterial(
       writerEpoch: open.writerEpoch,
       controlRevision: open.controlRevision,
     }
+  })
+}
+
+/**
+ * Creates the exact closed-row check used by migration-control transactions.
+ *
+ * The caller must supply an independently measured binding. The returned
+ * condition fixes the complete canonical closed record rather than trusting
+ * only its epoch, revision, or authority fields.
+ *
+ * @param record - Exact strict closed row to keep current.
+ * @param expectedBinding - Independently measured current table identities.
+ * @returns One adapter-owned DynamoDB ConditionCheck transaction item.
+ */
+export function createWorkspaceSearchWriterFenceClosedConditionCheck(
+  record: WorkspaceSearchWriterFenceClosedRecord,
+  expectedBinding: WorkspaceSearchWriterFenceBinding,
+): TransactWriteItem {
+  return atFenceBoundary(() => {
+    const closed = readClosedRecord(record)
+    const expected = readBinding(expectedBinding)
+    requireSameBinding(expected, closed.binding)
+    const conditionCheck:
+      NonNullable<TransactWriteItem['ConditionCheck']> = {
+        TableName: expected.stateTableName,
+        Key: createFenceKey(expected),
+        ConditionExpression:
+          '#canonicalBytes = :canonicalBytes AND #recordDigest = :recordDigest',
+        ExpressionAttributeNames: {
+          '#canonicalBytes': 'canonicalBytes',
+          '#recordDigest': 'recordDigest',
+        },
+        ExpressionAttributeValues: {
+          ':canonicalBytes': { S: closed.canonicalBytes },
+          ':recordDigest': { S: closed.recordDigest },
+        },
+        ReturnValuesOnConditionCheckFailure: 'NONE',
+      }
+    return { ConditionCheck: conditionCheck }
   })
 }
 
@@ -1631,7 +1683,12 @@ function requireRecord(value: unknown): Record<string, unknown> {
  * @returns Whether the value has an ordinary or null object prototype.
  */
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    Array.isArray(value) ||
+    nodeUtilTypes.isProxy(value)
+  ) {
     return false
   }
   let prototype: unknown
@@ -1665,6 +1722,21 @@ function requireExactKeys(
   actual.sort()
   for (let index = 0; index < actual.length; index += 1) {
     if (actual[index] !== sortedExpected[index]) return failFence()
+  }
+  for (const key of sortedExpected) {
+    let descriptor: PropertyDescriptor | undefined
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(record, key)
+    } catch {
+      return failFence()
+    }
+    if (
+      descriptor === undefined ||
+      descriptor.enumerable !== true ||
+      !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+    ) {
+      return failFence()
+    }
   }
 }
 
