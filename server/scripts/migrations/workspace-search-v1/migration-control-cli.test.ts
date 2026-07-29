@@ -1024,31 +1024,38 @@ describe('Workspace Search migration maintenance evidence file', () => {
         oversizedPath,
         Buffer.alloc(MAINTENANCE_EVIDENCE_MAX_BYTES + 1, 0x61),
       )
-      const fifoProcess = Bun.spawn({
-        cmd: ['mkfifo', fifoPath],
-        stderr: 'pipe',
-        stdout: 'ignore',
-      })
-      const [fifoExitCode, fifoError] = await Promise.all([
-        fifoProcess.exited,
-        new Response(fifoProcess.stderr).text(),
-      ])
-      if (fifoExitCode !== 0) {
-        throw new Error(`mkfifo failed: ${fifoError}`)
-      }
 
       await expect(
         readMaintenanceEvidenceFile(regularPath),
       ).resolves.toEqual(regularBytes)
+      await expect(
+        readMaintenanceEvidenceFile(directory),
+      ).rejects.toThrow('INPUT_FILE_INVALID')
       await expect(
         readMaintenanceEvidenceFile(emptyPath),
       ).rejects.toThrow('INPUT_FILE_INVALID')
       await expect(
         readMaintenanceEvidenceFile(oversizedPath),
       ).rejects.toThrow('INPUT_FILE_INVALID')
-      await expect(
-        readMaintenanceEvidenceFile(fifoPath),
-      ).rejects.toThrow('INPUT_FILE_INVALID')
+
+      const mkfifoPath = Bun.which('mkfifo')
+      if (mkfifoPath !== null) {
+        const fifoProcess = Bun.spawn({
+          cmd: [mkfifoPath, fifoPath],
+          stderr: 'pipe',
+          stdout: 'ignore',
+        })
+        const [fifoExitCode, fifoError] = await Promise.all([
+          fifoProcess.exited,
+          new Response(fifoProcess.stderr).text(),
+        ])
+        if (fifoExitCode !== 0) {
+          throw new Error(`mkfifo failed: ${fifoError}`)
+        }
+        await expect(
+          readMaintenanceEvidenceFile(fifoPath),
+        ).rejects.toThrow('INPUT_FILE_INVALID')
+      }
     } finally {
       await rm(directory, { recursive: true, force: true })
     }

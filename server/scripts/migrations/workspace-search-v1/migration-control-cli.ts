@@ -1020,12 +1020,18 @@ if (import.meta.main) {
     Bun.argv.slice(2),
     defaultControlCliDependencies,
     controller.signal,
-  ).then((exitCode) => {
-    process.off('SIGINT', handleSigint)
-    process.off('SIGTERM', handleSigterm)
-    process.exitCode =
-      exitCode === 130 && signalExitCode !== undefined
-        ? signalExitCode
-        : exitCode
-  })
+  )
+    .then((exitCode) => {
+      process.off('SIGINT', handleSigint)
+      process.off('SIGTERM', handleSigterm)
+      process.exitCode =
+        exitCode === 130 && signalExitCode !== undefined
+          ? signalExitCode
+          : exitCode
+    })
+    .catch(() => {
+      process.off('SIGINT', handleSigint)
+      process.off('SIGTERM', handleSigterm)
+      process.exitCode = 1
+    })
 }

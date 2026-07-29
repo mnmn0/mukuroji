@@ -387,6 +387,7 @@ function detachLeaseClaim(
  *
  * @param successor - Durable heartbeat successor.
  * @param claim - Stable identity owned by the supervisor.
+ * @returns Detached successor lease retaining the exact fenced identity.
  */
 function requireHeartbeatSuccess(
   successor: WorkspaceSearchMigrationLease,

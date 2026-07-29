@@ -747,6 +747,9 @@ JSONLはschema/operation/status、stable code、configuration hash、receipt/rec
 revision、lease fence token、writer-fence status/mode/epoch/revisionだけを出します。Helpは固定commandと
 resource flag名だけを出します。いずれもraw AWS error、ARN/name、profile、evidence path/bytes、
 run/owner ID、cursor、tenant dataを出しません。
+Process exit statusは、成功を`0`、migration failureまたは`OPERATION_FAILED`を`1`、
+`INVALID_USAGE`/`INPUT_FILE_INVALID`/`INPUT_FILE_UNREADABLE`を`2`、`SIGINT`による
+`INTERRUPTED`を`130`、`SIGTERM`による`INTERRUPTED`を`143`として固定します。
 
 このCLIは意図的に`close`、apply、verify、rollback、releaseを公開しません。一方向のv1 writer-fenceを
 閉じる前に、close後の新run planning、condition-aware production state adapter、terminal
