@@ -15,6 +15,17 @@ import {
   isTransientError,
 } from '@smithy/core/retry'
 import {
+  createWorkspaceSearchMigrationApplyCheckpointCommandIdentity,
+  createWorkspaceSearchMigrationApplyCheckpointReceipt,
+  createWorkspaceSearchMigrationApplyCheckpointReceiptRecordKey,
+  createWorkspaceSearchMigrationApplyCheckpointSnapshot,
+  decodeWorkspaceSearchMigrationApplyCheckpointSnapshot,
+  parseWorkspaceSearchMigrationApplyCheckpointReceipt,
+  serializeWorkspaceSearchMigrationApplyCheckpointReceipt,
+  type WorkspaceSearchMigrationApplyCheckpointCommandIdentity,
+  type WorkspaceSearchMigrationApplyCheckpointReceipt,
+} from './migration-apply-checkpoint-receipt'
+import {
   createWorkspaceSearchWriterFenceBinding,
   createWorkspaceSearchWriterFenceClosedConditionCheck,
   createWorkspaceSearchWriterFenceStateIncarnationDigest,
@@ -36,6 +47,7 @@ import {
   isCanonicalTimestamp,
   isHexDigest,
   isWorkspaceSearchMigrationFailureCode,
+  type MigrationSourceCheckpoint,
   type MigrationItemSnapshot,
   type MigrationTableIdentity,
   type WorkspaceSearchJournalSegment,
@@ -72,6 +84,7 @@ import {
   type WorkspaceSearchMigrationExecutionRun,
 } from './migration-execution-run'
 import {
+  createWorkspaceSearchMigrationCheckpointExecutionState,
   createWorkspaceSearchMigrationExecutionState,
   parseWorkspaceSearchMigrationExecutionState,
   parseWorkspaceSearchMigrationOperationMarker,
@@ -113,6 +126,8 @@ import {
   validateWorkspaceSearchPlannedOperationForApply,
   WORKSPACE_SEARCH_MIGRATION_MINIMUM_COMMIT_WINDOW_MILLISECONDS,
   type WorkspaceSearchApplyOperationCommandEvent,
+  type WorkspaceSearchMigrationCheckpointCommandInput,
+  type WorkspaceSearchMigrationCheckpointLocation,
   type WorkspaceSearchMigrationCommandInput,
   type WorkspaceSearchMigrationAuthority,
   type WorkspaceSearchMigrationLeaseClaim,
@@ -126,6 +141,8 @@ const operationMarkerRecordKind =
   'workspace-search-migration-apply-operation-marker'
 const journalSequenceRecordKind =
   'workspace-search-migration-apply-journal-sequence'
+const checkpointReceiptRecordKind =
+  'workspace-search-migration-apply-checkpoint-receipt'
 const executionStateRecordKeyPrefix = 'execution-state/v1'
 const operationMarkerRecordKeyPrefix = 'apply-operation/v1'
 const journalSequenceRecordKeyPrefix = 'apply-journal-sequence/v1'
@@ -133,6 +150,7 @@ const transactionTimeoutMilliseconds = 5_000
 const retentionDayMilliseconds = 24 * 60 * 60 * 1_000
 const mutationTransactionItemCount = 12
 const noOpTransactionItemCount = 11
+const checkpointTransactionItemCount = 9
 
 /**
  * Fixed transaction and cancellation-reason positions for one apply operation.
@@ -170,6 +188,33 @@ export const workspaceSearchMigrationApplyOperationTransactionIndex =
   })
 
 /**
+ * Fixed transaction and cancellation-reason positions for one apply checkpoint.
+ */
+export const workspaceSearchMigrationApplyCheckpointTransactionIndex =
+  Object.freeze({
+    /** Current global lease condition. */
+    lease: 0,
+    /** Current maintenance pointer condition. */
+    pointer: 1,
+    /** Current immutable maintenance receipt condition. */
+    receipt: 2,
+    /** Exact closed application-writer fence condition. */
+    writerFence: 3,
+    /** Exact revision-two planning-admitted boundary condition. */
+    executionBoundary: 4,
+    /** Exact immutable sealed planning-authority root condition. */
+    sealedPlanningAuthority: 5,
+    /** Exact immutable revision-one execution admission condition. */
+    executionRun: 6,
+    /** Absent or exact-predecessor mutable execution-state Put. */
+    executionState: 7,
+    /** Absent immutable checkpoint receipt Put. */
+    checkpointReceipt: 8,
+    /** Fixed checkpoint transaction item count. */
+    count: checkpointTransactionItemCount,
+  })
+
+/**
  * Adapter-owned source of trusted apply preparation and commit time.
  *
  * @returns Current trusted adapter time.
@@ -199,7 +244,7 @@ export interface WorkspaceSearchMigrationApplyOperationAuthorityPort {
 }
 
 /**
- * Narrow strongly consistent and transactional transport for apply operations.
+ * Narrow strongly consistent and transactional transport for apply progress.
  */
 export interface WorkspaceSearchMigrationApplyOperationAwsTransport {
   /**
@@ -218,7 +263,7 @@ export interface WorkspaceSearchMigrationApplyOperationAwsTransport {
   prepareApplyWrite(): Promise<void>
 
   /**
-   * Sends one fixed-order eleven- or twelve-item apply transaction.
+   * Sends one fixed-order operation or checkpoint transaction.
    *
    * @param command - Adapter-owned TransactWriteItems command.
    * @returns Raw low-level DynamoDB response.
@@ -226,6 +271,26 @@ export interface WorkspaceSearchMigrationApplyOperationAwsTransport {
   transactWriteApply(
     command: TransactWriteItemsCommand,
   ): Promise<TransactWriteItemsCommandOutput>
+}
+
+/**
+ * Adapter-owned strongly consistent one-page checkpoint scanner.
+ */
+export interface WorkspaceSearchMigrationApplyCheckpointScanner {
+  /**
+   * Scans and reduces exactly one next source or target page.
+   *
+   * @param input - Exact measured location and durable predecessor checkpoint.
+   * @returns Complete cumulative checkpoint after exactly one bounded page.
+   */
+  scanApplyCheckpointPage(
+    input: {
+      /** Source or target table selected by the durable command. */
+      readonly location: WorkspaceSearchMigrationCheckpointLocation
+      /** Exact checkpoint read from the current durable run state. */
+      readonly previousCheckpoint: MigrationSourceCheckpoint
+    },
+  ): Promise<MigrationSourceCheckpoint>
 }
 
 /**
@@ -253,6 +318,9 @@ export type CreateWorkspaceSearchMigrationApplyOperationAwsPortInput = {
   /** Run-scoped immutable exact-version journal gateway. */
   readonly journalGateway:
     WorkspaceSearchMigrationJournalAwsGateway
+  /** Strongly consistent measured source and target checkpoint scanner. */
+  readonly checkpointScanner:
+    WorkspaceSearchMigrationApplyCheckpointScanner
   /** Narrow measured DynamoDB transport. */
   readonly transport:
     WorkspaceSearchMigrationApplyOperationAwsTransport
@@ -261,7 +329,7 @@ export type CreateWorkspaceSearchMigrationApplyOperationAwsPortInput = {
 }
 
 /**
- * One-operation atomic apply persistence capability.
+ * Atomic apply-operation and checkpoint persistence capability.
  */
 export interface WorkspaceSearchMigrationApplyOperationAwsPort {
   /**
@@ -304,6 +372,16 @@ export interface WorkspaceSearchMigrationApplyOperationAwsPort {
     input: WorkspaceSearchMigrationCommandInput<
       WorkspaceSearchApplyOperationCommandEvent
     >,
+  ): Promise<WorkspaceSearchMigrationRunState>
+
+  /**
+   * Strongly scans and atomically persists one next apply checkpoint page.
+   *
+   * @param input - Exact revision, lease claim, and source or target location.
+   * @returns Exact reconciled durable run state.
+   */
+  saveApplyCheckpoint(
+    input: WorkspaceSearchMigrationCheckpointCommandInput,
   ): Promise<WorkspaceSearchMigrationRunState>
 }
 
@@ -381,6 +459,16 @@ type PreparedApplyDependencies = {
     'readJournalSegment'
   ]
   /**
+   * Strongly scans and reduces one next apply checkpoint page.
+   *
+   * @param input - Exact location and durable predecessor checkpoint.
+   * @returns Complete cumulative checkpoint after one bounded page.
+   */
+  readonly scanCheckpoint:
+    WorkspaceSearchMigrationApplyCheckpointScanner[
+      'scanApplyCheckpointPage'
+    ]
+  /**
    * Strongly reads one adapter-owned DynamoDB item.
    *
    * @param command - Exact GetItem command.
@@ -417,6 +505,20 @@ type PreparedApplyCommand = {
 }
 
 /**
+ * Fully detached checkpoint command before the first asynchronous boundary.
+ */
+type PreparedApplyCheckpointCommand = {
+  /** Exact expected durable revision. */
+  readonly expectedRevision: number
+  /** Exact active lease identity. */
+  readonly lease: WorkspaceSearchMigrationLeaseClaim
+  /** Source or target traversal selected by the command. */
+  readonly location: WorkspaceSearchMigrationCheckpointLocation
+  /** Deterministic command identity used by the immutable receipt. */
+  readonly identity: WorkspaceSearchMigrationApplyCheckpointCommandIdentity
+}
+
+/**
  * Current effective state and its optional mutable durable envelope.
  */
 type EffectiveApplyState = {
@@ -448,7 +550,7 @@ type DurableApplyMarker = {
  * Constructs one measured atomic apply adapter.
  *
  * @param input - Measured identities, immutable authority, and narrow ports.
- * @returns One-operation apply persistence capability.
+ * @returns Atomic apply operation and checkpoint persistence capability.
  */
 export function createAwsWorkspaceSearchMigrationApplyOperationPort(
   input: CreateWorkspaceSearchMigrationApplyOperationAwsPortInput,
@@ -457,6 +559,7 @@ export function createAwsWorkspaceSearchMigrationApplyOperationPort(
     const record = requirePlainRecord(input, 'INVALID_ARGUMENT')
     requireExactKeys(record, [
       'authorityPort',
+      'checkpointScanner',
       'clock',
       'closedWriterFenceRecord',
       'configuration',
@@ -478,6 +581,7 @@ export function createAwsWorkspaceSearchMigrationApplyOperationPort(
     const dependencies = prepareApplyDependencies(
       readOwn(record, 'authorityPort', 'INVALID_ARGUMENT'),
       readOwn(record, 'journalGateway', 'INVALID_ARGUMENT'),
+      readOwn(record, 'checkpointScanner', 'INVALID_ARGUMENT'),
       readOwn(record, 'transport', 'INVALID_ARGUMENT'),
       readOwn(record, 'clock', 'INVALID_ARGUMENT'),
     )
@@ -493,7 +597,7 @@ export function createAwsWorkspaceSearchMigrationApplyOperationPort(
 }
 
 /**
- * Concrete one-operation atomic apply adapter.
+ * Concrete atomic apply operation and checkpoint adapter.
  */
 class AwsWorkspaceSearchMigrationApplyOperationPort
 implements WorkspaceSearchMigrationApplyOperationAwsPort {
@@ -791,13 +895,149 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
   }
 
   /**
+   * Strongly scans and atomically persists one next apply checkpoint page.
+   *
+   * @param input - Exact revision, lease claim, and source or target location.
+   * @returns Exact reconciled durable run state.
+   */
+  async saveApplyCheckpoint(
+    input: WorkspaceSearchMigrationCheckpointCommandInput,
+  ): Promise<WorkspaceSearchMigrationRunState> {
+    return runApplyBoundary(async () => {
+      const command = prepareApplyCheckpointCommand(
+        input,
+        this.binding,
+      )
+      const existing = await this.readCheckpointReceipt(
+        command.identity,
+      )
+      if (existing !== undefined) {
+        return this.reconcileCheckpointReceipt(command, existing)
+      }
+
+      const [initialAuthority, initial] = await Promise.all([
+        this.resolveAuthority(command),
+        this.readEffectiveState(),
+      ])
+      requireCheckpointCommandState(command, initial.runState)
+      requireLeaseClaimMatchesAuthority(
+        command.lease,
+        initialAuthority,
+      )
+      const previousCheckpoint = readApplyCheckpoint(
+        initial.runState,
+        command.location,
+      )
+      if (previousCheckpoint.completed) {
+        return initial.runState
+      }
+      const preflightAt = readClock(this.dependencies.clock)
+      requireProgressRetention(
+        this.binding,
+        initial.executionState,
+        preflightAt,
+      )
+      const checkpoint = await this.dependencies.scanCheckpoint({
+        location: command.location,
+        previousCheckpoint: structuredClone(previousCheckpoint),
+      })
+
+      const [authority, current] = await Promise.all([
+        this.resolveAuthority(command),
+        this.readEffectiveState(),
+      ])
+      requireCheckpointCommandState(command, current.runState)
+      requireSameEffectiveState(initial, current)
+      requireLeaseClaimMatchesAuthority(command.lease, authority)
+
+      await this.dependencies.prepare()
+      const commitAtMilliseconds = readClock(this.dependencies.clock)
+      if (commitAtMilliseconds < preflightAt) {
+        return failApply('INVALID_STATE')
+      }
+      requireCommitRetention(
+        this.binding,
+        current.executionState,
+        undefined,
+        commitAtMilliseconds,
+      )
+      const transitionAuthority: WorkspaceSearchMigrationAuthority = {
+        lease: authority.lease,
+        ownerId: authority.lease.ownerId,
+        at: new Date(commitAtMilliseconds).toISOString(),
+      }
+      const successorState =
+        createWorkspaceSearchMigrationCheckpointExecutionState({
+          admission: this.binding.executionRun,
+          ...(current.executionState === undefined
+            ? {}
+            : { predecessor: current.executionState }),
+          authority: transitionAuthority,
+          location: command.location,
+          checkpoint,
+        })
+      const successorRunState =
+        reconstructWorkspaceSearchMigrationRunState(
+          this.binding.executionRun,
+          successorState,
+        )
+      const successorCheckpoint = readApplyCheckpoint(
+        successorRunState,
+        command.location,
+      )
+      const receipt =
+        createWorkspaceSearchMigrationApplyCheckpointReceipt({
+          commandIdentity: command.identity,
+          predecessorKind: current.executionState === undefined
+            ? 'execution-run-admission'
+            : 'mutable-execution-state',
+          predecessorExecutionStateDigest:
+            current.executionState?.executionStateDigest ??
+              this.binding.executionRun.executionRunDigest,
+          successorRevision: successorState.revision,
+          successorExecutionStateDigest:
+            successorState.executionStateDigest,
+          successorRunStateDigest:
+            successorState.runStateDigest,
+          checkpoint: successorCheckpoint,
+          committedAt: transitionAuthority.at,
+        })
+      const transaction = createApplyCheckpointTransactionCommand({
+        binding: this.binding,
+        currentAuthority: authority,
+        commitAt: new Date(commitAtMilliseconds),
+        predecessorState: current.executionState,
+        predecessorStateRecord: current.executionStateRecord,
+        successorState,
+        receipt,
+      })
+      let transactionError: unknown
+      try {
+        await this.dependencies.transact(transaction)
+      } catch (error: unknown) {
+        const managedGuardCode = readPublicFailureCode(error)
+        if (managedGuardCode !== undefined) {
+          return failApply(managedGuardCode)
+        }
+        transactionError = error
+      }
+      return this.reconcileCheckpointAfterAttempt(
+        command,
+        transactionError,
+      )
+    })
+  }
+
+  /**
    * Resolves and detaches one fresh current authority.
    *
    * @param command - Detached exact caller command.
    * @returns Exact fresh current authority.
    */
   private async resolveAuthority(
-    command: PreparedApplyCommand,
+    command:
+      | PreparedApplyCheckpointCommand
+      | PreparedApplyCommand,
   ): Promise<WorkspaceSearchMigrationPrePlanAuthority> {
     const admissionAuthority =
       this.binding.executionRun.binding.currentAuthority
@@ -917,6 +1157,32 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
   }
 
   /**
+   * Strongly reads one deterministic immutable checkpoint receipt.
+   *
+   * @param identity - Exact command identity expected at the receipt key.
+   * @returns Exact strict receipt or undefined when it has not committed.
+   */
+  private async readCheckpointReceipt(
+    identity: WorkspaceSearchMigrationApplyCheckpointCommandIdentity,
+  ): Promise<WorkspaceSearchMigrationApplyCheckpointReceipt | undefined> {
+    const output = await this.dependencies.get(
+      new GetItemCommand({
+        TableName: this.binding.stateTable.tableName,
+        ConsistentRead: true,
+        Key: createCheckpointReceiptKey(identity),
+      }),
+    )
+    const record = readOutputItem(output)
+    return record === undefined
+      ? undefined
+      : parseCheckpointReceiptRecord(
+          this.binding,
+          identity,
+          record,
+        )
+  }
+
+  /**
    * Reconciles a marker observed before a duplicate request sends any write.
    *
    * @param command - Detached exact retry command.
@@ -988,6 +1254,95 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
     } catch (error: unknown) {
       return failApply(readReconciliationFailureCode(error))
     }
+  }
+
+  /**
+   * Reconciles one checkpoint transaction through its immutable receipt.
+   *
+   * @param command - Detached exact attempted command.
+   * @param transactionError - Raw transaction failure, when one occurred.
+   * @returns Exact durable state proving the checkpoint committed.
+   */
+  private async reconcileCheckpointAfterAttempt(
+    command: PreparedApplyCheckpointCommand,
+    transactionError: unknown,
+  ): Promise<WorkspaceSearchMigrationRunState> {
+    let receipt: WorkspaceSearchMigrationApplyCheckpointReceipt | undefined
+    try {
+      receipt = await this.readCheckpointReceipt(command.identity)
+    } catch (error: unknown) {
+      return failApply(readReconciliationFailureCode(error))
+    }
+    if (receipt === undefined) {
+      try {
+        const effective = await this.readEffectiveState()
+        if (effective.runState.revision > command.expectedRevision) {
+          return failApply('INVALID_STATE')
+        }
+      } catch (error: unknown) {
+        return failApply(readReconciliationFailureCode(error))
+      }
+      return failApply(
+        transactionError === undefined
+          ? 'AMBIGUOUS_OPERATION_UNRESOLVED'
+          : classifyCheckpointTransactionError(transactionError),
+      )
+    }
+    try {
+      return await this.reconcileCheckpointReceipt(
+        command,
+        receipt,
+      )
+    } catch (error: unknown) {
+      return failApply(readReconciliationFailureCode(error))
+    }
+  }
+
+  /**
+   * Cross-checks one immutable checkpoint receipt against current state.
+   *
+   * @param command - Detached attempted or retried checkpoint command.
+   * @param receipt - Exact immutable receipt read at its deterministic key.
+   * @returns Current durable state at or after the committed checkpoint.
+   */
+  private async reconcileCheckpointReceipt(
+    command: PreparedApplyCheckpointCommand,
+    receipt: WorkspaceSearchMigrationApplyCheckpointReceipt,
+  ): Promise<WorkspaceSearchMigrationRunState> {
+    requireCheckpointReceiptMatchesCommand(command, receipt)
+    const effective = await this.readEffectiveState()
+    if (effective.runState.revision < receipt.successorRevision) {
+      return failApply('INVALID_STATE')
+    }
+    const receiptCheckpoint =
+      decodeWorkspaceSearchMigrationApplyCheckpointSnapshot(
+        receipt.checkpoint,
+      )
+    const currentCheckpoint = readApplyCheckpoint(
+      effective.runState,
+      command.location,
+    )
+    if (effective.runState.revision === receipt.successorRevision) {
+      if (
+        effective.executionState?.executionStateDigest !==
+          receipt.successorExecutionStateDigest ||
+        effective.executionState.runStateDigest !==
+          receipt.successorRunStateDigest ||
+        createMigrationDigest(
+          createWorkspaceSearchMigrationApplyCheckpointSnapshot(
+            currentCheckpoint,
+          ),
+        ) !== receipt.checkpointDigest
+      ) {
+        return failApply('INVALID_STATE')
+      }
+    } else {
+      requireCheckpointDescendant(
+        currentCheckpoint,
+        receiptCheckpoint,
+      )
+    }
+    return effective.runState
   }
 
   /**
@@ -1308,6 +1663,7 @@ function createApplyTableIds(
  *
  * @param authorityPortValue - Candidate fresh-authority reader.
  * @param journalGatewayValue - Candidate immutable journal gateway.
+ * @param checkpointScannerValue - Candidate measured checkpoint scanner.
  * @param transportValue - Candidate narrow DynamoDB transport.
  * @param clockValue - Candidate adapter clock.
  * @returns Captured dependency methods.
@@ -1315,6 +1671,7 @@ function createApplyTableIds(
 function prepareApplyDependencies(
   authorityPortValue: unknown,
   journalGatewayValue: unknown,
+  checkpointScannerValue: unknown,
   transportValue: unknown,
   clockValue: unknown,
 ): PreparedApplyDependencies {
@@ -1323,6 +1680,9 @@ function prepareApplyDependencies(
   )
   const journalGateway = requireDependencyObject(
     journalGatewayValue,
+  )
+  const checkpointScanner = requireDependencyObject(
+    checkpointScannerValue,
   )
   const transport = requireDependencyObject(
     transportValue,
@@ -1338,6 +1698,10 @@ function prepareApplyDependencies(
   const readJournal = readCallableMethod(
     journalGateway,
     'readJournalSegment',
+  )
+  const scanCheckpoint = readCallableMethod(
+    checkpointScanner,
+    'scanApplyCheckpointPage',
   )
   const get = readCallableMethod(
     transport,
@@ -1355,6 +1719,7 @@ function prepareApplyDependencies(
     !isAuthorityReader(readAuthority) ||
     !isJournalWriter(writeJournal) ||
     !isJournalReader(readJournal) ||
+    !isCheckpointScanner(scanCheckpoint) ||
     !isApplyItemReader(get) ||
     !isApplyPreparer(prepare) ||
     !isApplyTransactor(transact) ||
@@ -1367,6 +1732,7 @@ function prepareApplyDependencies(
     readAuthority: readAuthority.bind(authorityPort),
     writeJournal: writeJournal.bind(journalGateway),
     readJournal: readJournal.bind(journalGateway),
+    scanCheckpoint: scanCheckpoint.bind(checkpointScanner),
     get: get.bind(transport),
     prepare: prepare.bind(transport),
     transact: transact.bind(transport),
@@ -1468,6 +1834,20 @@ function isJournalReader(
   value: unknown,
 ): value is WorkspaceSearchMigrationJournalAwsGateway[
   'readJournalSegment'
+] {
+  return typeof value === 'function' && !nodeUtilTypes.isProxy(value)
+}
+
+/**
+ * Narrows one measured apply checkpoint scanner method.
+ *
+ * @param value - Candidate callable.
+ * @returns Whether it may be invoked through the checkpoint boundary.
+ */
+function isCheckpointScanner(
+  value: unknown,
+): value is WorkspaceSearchMigrationApplyCheckpointScanner[
+  'scanApplyCheckpointPage'
 ] {
   return typeof value === 'function' && !nodeUtilTypes.isProxy(value)
 }
@@ -1617,6 +1997,75 @@ function prepareApplyCommand(
 }
 
 /**
+ * Detaches one caller checkpoint request before the first await.
+ *
+ * @param input - Candidate checkpoint command.
+ * @param binding - Exact admitted apply binding.
+ * @returns Strict detached checkpoint command and deterministic identity.
+ */
+function prepareApplyCheckpointCommand(
+  input: WorkspaceSearchMigrationCheckpointCommandInput,
+  binding: ApplyOperationBinding,
+): PreparedApplyCheckpointCommand {
+  const record = requirePlainRecord(input, 'INVALID_ARGUMENT')
+  requireExactKeys(
+    record,
+    ['expectedRevision', 'lease', 'location'],
+    'INVALID_ARGUMENT',
+  )
+  const expectedRevision = readPositiveSafeInteger(
+    readOwn(record, 'expectedRevision', 'INVALID_ARGUMENT'),
+    'INVALID_ARGUMENT',
+  )
+  const lease = readLeaseClaim(
+    readOwn(record, 'lease', 'INVALID_ARGUMENT'),
+  )
+  const location = readCheckpointLocation(
+    readOwn(record, 'location', 'INVALID_ARGUMENT'),
+  )
+  if (lease.runId !== binding.executionRun.runId) {
+    return failApply('INVALID_ARGUMENT')
+  }
+  const identity =
+    createWorkspaceSearchMigrationApplyCheckpointCommandIdentity({
+      stateTableId: binding.stateTable.tableId,
+      configurationHash: binding.configurationHash,
+      runId: binding.executionRun.runId,
+      executionRunDigest:
+        binding.executionRun.executionRunDigest,
+      location,
+      expectedRevision,
+    })
+  return {
+    expectedRevision,
+    lease,
+    location,
+    identity,
+  }
+}
+
+/**
+ * Reads one strict source or target checkpoint location.
+ *
+ * @param value - Candidate location.
+ * @returns Exact fixed-allowlist location.
+ */
+function readCheckpointLocation(
+  value: unknown,
+): WorkspaceSearchMigrationCheckpointLocation {
+  if (
+    value === 'project-directory' ||
+    value === 'work-items' ||
+    value === 'collaboration' ||
+    value === 'documents' ||
+    value === 'target'
+  ) {
+    return value
+  }
+  return failApply('INVALID_ARGUMENT')
+}
+
+/**
  * Reads one exact active lease identity.
  *
  * @param value - Candidate lease claim.
@@ -1667,6 +2116,158 @@ function requireLeaseClaimMatchesAuthority(
 }
 
 /**
+ * Requires one durable state to be the exact checkpoint predecessor.
+ *
+ * @param command - Exact checkpoint command.
+ * @param state - Strongly reconstructed current run state.
+ */
+function requireCheckpointCommandState(
+  command: PreparedApplyCheckpointCommand,
+  state: WorkspaceSearchMigrationRunState,
+): void {
+  if (
+    state.revision !== command.expectedRevision ||
+    state.status !== 'applying' ||
+    state.appliedOperationCount !== state.planOperationCount
+  ) {
+    return failApply('INVALID_STATE')
+  }
+}
+
+/**
+ * Selects one exact durable apply checkpoint from a run state.
+ *
+ * @param state - Strongly reconstructed current run state.
+ * @param location - Source or target traversal location.
+ * @returns Exact selected cumulative checkpoint.
+ */
+function readApplyCheckpoint(
+  state: WorkspaceSearchMigrationRunState,
+  location: WorkspaceSearchMigrationCheckpointLocation,
+): MigrationSourceCheckpoint {
+  return location === 'target'
+    ? state.apply.target
+    : state.apply.sources[location]
+}
+
+/**
+ * Requires a post-scan reread to retain the exact predecessor envelope.
+ *
+ * @param before - Effective state read before the bounded Scan.
+ * @param after - Effective state strongly reread after the bounded Scan.
+ */
+function requireSameEffectiveState(
+  before: EffectiveApplyState,
+  after: EffectiveApplyState,
+): void {
+  const beforeDigest =
+    before.executionState?.executionStateDigest
+  const afterDigest =
+    after.executionState?.executionStateDigest
+  if (
+    before.runState.revision !== after.runState.revision ||
+    beforeDigest !== afterDigest ||
+    (before.executionState === undefined) !==
+      (after.executionState === undefined)
+  ) {
+    return failApply('INVALID_STATE')
+  }
+}
+
+/**
+ * Requires one immutable receipt to identify the exact retried command.
+ *
+ * @param command - Exact detached checkpoint command.
+ * @param receipt - Strict durable checkpoint receipt.
+ */
+function requireCheckpointReceiptMatchesCommand(
+  command: PreparedApplyCheckpointCommand,
+  receipt: WorkspaceSearchMigrationApplyCheckpointReceipt,
+): void {
+  if (
+    receipt.commandDigest !== command.identity.commandDigest ||
+    receipt.location !== command.location ||
+    receipt.predecessorRevision !== command.expectedRevision ||
+    receipt.successorRevision !== command.expectedRevision + 1
+  ) {
+    return failApply('INVALID_STATE')
+  }
+}
+
+/**
+ * Requires current checkpoint progress to descend monotonically from a receipt.
+ *
+ * Later checkpoint transactions may advance this or another location. Version
+ * two execution-state revision arithmetic proves that every later revision is
+ * exactly one additional durable page transition.
+ *
+ * @param current - Checkpoint reconstructed from the latest mutable state.
+ * @param committed - Exact checkpoint captured by the earlier receipt.
+ */
+function requireCheckpointDescendant(
+  current: MigrationSourceCheckpoint,
+  committed: MigrationSourceCheckpoint,
+): void {
+  const currentSnapshot =
+    createWorkspaceSearchMigrationApplyCheckpointSnapshot(current)
+  const committedSnapshot =
+    createWorkspaceSearchMigrationApplyCheckpointSnapshot(committed)
+  if (
+    current.aggregate.pageCount ===
+      committed.aggregate.pageCount
+  ) {
+    if (
+      createMigrationDigest(currentSnapshot) !==
+        createMigrationDigest(committedSnapshot)
+    ) {
+      return failApply('INVALID_STATE')
+    }
+    return
+  }
+  if (
+    committed.completed ||
+    current.aggregate.pageCount <
+      committed.aggregate.pageCount ||
+    current.aggregate.scanned < committed.aggregate.scanned ||
+    current.aggregate.mapped < committed.aggregate.mapped ||
+    current.aggregate.ignored < committed.aggregate.ignored ||
+    current.aggregate.invalid < committed.aggregate.invalid ||
+    current.aggregate.projected < committed.aggregate.projected ||
+    current.aggregate.deleted < committed.aggregate.deleted ||
+    current.keyDigestState.count <
+      committed.keyDigestState.count ||
+    current.contentDigestState.count <
+      committed.contentDigestState.count
+  ) {
+    return failApply('INVALID_STATE')
+  }
+  if (
+    current.keyDigestState.count ===
+      committed.keyDigestState.count &&
+    (
+      current.keyDigestState.sumHex !==
+        committed.keyDigestState.sumHex ||
+      current.keyDigestState.xorHex !==
+        committed.keyDigestState.xorHex
+    )
+  ) {
+    return failApply('INVALID_STATE')
+  }
+  if (
+    current.contentDigestState.count ===
+      committed.contentDigestState.count &&
+    (
+      current.contentDigestState.sumHex !==
+        committed.contentDigestState.sumHex ||
+      current.contentDigestState.xorHex !==
+        committed.contentDigestState.xorHex
+    )
+  ) {
+    return failApply('INVALID_STATE')
+  }
+}
+
+/**
  * Complete material for one fixed-order apply transaction.
  */
 type CreateApplyTransactionCommandInput = {
@@ -1694,6 +2295,36 @@ type CreateApplyTransactionCommandInput = {
   /** Exact immutable marker written by the transaction. */
   readonly marker: WorkspaceSearchOperationMarker
 }
+
+/**
+ * Common mutable execution-state CAS material for apply progress.
+ */
+type ExecutionStateTransitionMaterial = {
+  /** Exact static apply binding. */
+  readonly binding: ApplyOperationBinding
+  /** Previous mutable envelope, absent at the admission root. */
+  readonly predecessorState?: WorkspaceSearchMigrationExecutionState
+  /** Previous complete durable row, absent at the admission root. */
+  readonly predecessorStateRecord?:
+    Readonly<Record<string, AttributeValue>>
+  /** Exact successor mutable envelope. */
+  readonly successorState: WorkspaceSearchMigrationExecutionState
+}
+
+/**
+ * Complete material for one fixed-order checkpoint transaction.
+ */
+type CreateApplyCheckpointTransactionCommandInput =
+  ExecutionStateTransitionMaterial & {
+    /** Fresh current lease, pointer, and receipt authority. */
+    readonly currentAuthority:
+      WorkspaceSearchMigrationPrePlanAuthority
+    /** Adapter-owned final transaction time. */
+    readonly commitAt: Date
+    /** Exact immutable checkpoint receipt committed with the state. */
+    readonly receipt:
+      WorkspaceSearchMigrationApplyCheckpointReceipt
+  }
 
 /**
  * Builds one fixed-order eleven- or twelve-item apply transaction.
@@ -1782,13 +2413,129 @@ function createApplyTransactionCommand(
 }
 
 /**
+ * Builds one fixed-order nine-item apply-checkpoint transaction.
+ *
+ * @param input - Exact authority, predecessor, successor, and receipt.
+ * @returns Adapter-owned idempotent checkpoint transaction command.
+ */
+function createApplyCheckpointTransactionCommand(
+  input: CreateApplyCheckpointTransactionCommandInput,
+): TransactWriteItemsCommand {
+  requireCheckpointTransactionBinding(input)
+  const authorityChecks =
+    createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks({
+      stateTable: input.binding.stateTable,
+      configurationHash: input.binding.configurationHash,
+      authority: input.currentAuthority,
+      commitAt: input.commitAt,
+    })
+  const items: TransactWriteItem[] = [
+    ...authorityChecks,
+    createWorkspaceSearchWriterFenceClosedConditionCheck(
+      input.binding.closedWriterFenceRecord,
+      input.binding.writerFence,
+    ),
+    createWorkspaceSearchMigrationPlanningAdmittedExecutionBoundaryConditionCheck(
+      {
+        stateTable: input.binding.stateTable,
+        configurationHash: input.binding.configurationHash,
+        boundary: input.binding.executionBoundary,
+      },
+    ),
+    createWorkspaceSearchMigrationSealedPlanningAuthorityV2ConditionCheck({
+      stateTable: input.binding.stateTable,
+      configurationHash: input.binding.configurationHash,
+      authority: input.binding.sealedPlanningAuthority,
+    }),
+    createWorkspaceSearchMigrationExecutionRunAdmissionConditionCheck({
+      stateTable: input.binding.stateTable,
+      configurationHash: input.binding.configurationHash,
+      executionRun: input.binding.executionRun,
+    }),
+    createExecutionStatePut(input),
+    createCheckpointReceiptPut(input),
+  ]
+  if (items.length !== checkpointTransactionItemCount) {
+    return failApply('INVALID_STATE')
+  }
+  return new TransactWriteItemsCommand({
+    ClientRequestToken: createMigrationDigest({
+      kind: 'workspace-search-apply-checkpoint-transaction',
+      version: applyRecordVersion,
+      executionStateDigest:
+        input.successorState.executionStateDigest,
+      receiptDigest: input.receipt.receiptDigest,
+    }).slice(0, 36),
+    TransactItems: items,
+    ReturnConsumedCapacity: 'NONE',
+    ReturnItemCollectionMetrics: 'NONE',
+  })
+}
+
+/**
+ * Cross-checks receipt links against the exact CAS predecessor and successor.
+ *
+ * @param input - Exact checkpoint transaction material.
+ */
+function requireCheckpointTransactionBinding(
+  input: CreateApplyCheckpointTransactionCommandInput,
+): void {
+  const predecessorRevision =
+    input.predecessorState?.revision ??
+      input.binding.executionRun.revision
+  const predecessorDigest =
+    input.predecessorState?.executionStateDigest ??
+      input.binding.executionRun.executionRunDigest
+  const predecessorKind =
+    input.predecessorState === undefined
+      ? 'execution-run-admission'
+      : 'mutable-execution-state'
+  const identity = requireCheckpointReceiptBinding(
+    input.binding,
+    input.receipt,
+  )
+  const successorRunState =
+    reconstructWorkspaceSearchMigrationRunState(
+      input.binding.executionRun,
+      input.successorState,
+    )
+  const successorCheckpoint = readApplyCheckpoint(
+    successorRunState,
+    input.receipt.location,
+  )
+  if (
+    input.receipt.predecessorRevision !==
+      predecessorRevision ||
+    input.receipt.predecessorKind !== predecessorKind ||
+    input.receipt.predecessorExecutionStateDigest !==
+      predecessorDigest ||
+    input.receipt.successorRevision !==
+      input.successorState.revision ||
+    input.receipt.successorExecutionStateDigest !==
+      input.successorState.executionStateDigest ||
+    input.receipt.successorRunStateDigest !==
+      input.successorState.runStateDigest ||
+    input.receipt.committedAt !==
+      input.successorState.updatedAt ||
+    input.receipt.checkpointDigest !== createMigrationDigest(
+      createWorkspaceSearchMigrationApplyCheckpointSnapshot(
+        successorCheckpoint,
+      ),
+    ) ||
+    identity.expectedRevision !== predecessorRevision
+  ) {
+    return failApply('INVALID_STATE')
+  }
+}
+
+/**
  * Creates the exact mutable execution-state Put and predecessor CAS.
  *
  * @param input - Exact apply transaction material.
  * @returns One absent-or-exact predecessor state Put.
  */
 function createExecutionStatePut(
-  input: CreateApplyTransactionCommandInput,
+  input: ExecutionStateTransitionMaterial,
 ): TransactWriteItem {
   const key = createStateKey(input.binding)
   const predecessorSnapshot = createStatePredecessorSnapshot(
@@ -1942,6 +2689,33 @@ function createConditionFields(
         ExpressionAttributeValues:
           material.ExpressionAttributeValues,
       }
+}
+
+/**
+ * Creates one deterministic immutable checkpoint-receipt absent Put.
+ *
+ * @param input - Exact checkpoint transaction material.
+ * @returns One absent receipt Put at the fixed final position.
+ */
+function createCheckpointReceiptPut(
+  input: CreateApplyCheckpointTransactionCommandInput,
+): TransactWriteItem {
+  return {
+    Put: {
+      TableName: input.binding.stateTable.tableName,
+      Item: createCheckpointReceiptRecord(
+        input.binding,
+        input.receipt,
+      ),
+      ConditionExpression:
+        'attribute_not_exists(#migrationId) AND attribute_not_exists(#recordKey)',
+      ExpressionAttributeNames: {
+        '#migrationId': 'migrationId',
+        '#recordKey': 'recordKey',
+      },
+      ReturnValuesOnConditionCheckFailure: 'NONE',
+    },
+  }
 }
 
 /**
@@ -2226,6 +3000,199 @@ function requireExecutionStateBinding(
   ) {
     return failApply('INVALID_STATE')
   }
+}
+
+/**
+ * Complete controlled field set for immutable checkpoint-receipt rows.
+ */
+const checkpointReceiptRecordAttributeNames = Object.freeze([
+  'checkpointDigest',
+  'commandDigest',
+  'configurationHash',
+  'executionRunDigest',
+  'kind',
+  'location',
+  'migrationId',
+  'phase',
+  'predecessorExecutionStateDigest',
+  'predecessorRevision',
+  'receiptBytes',
+  'receiptDigest',
+  'recordKey',
+  'recordVersion',
+  'runId',
+  'stateTableId',
+  'successorExecutionStateDigest',
+  'successorRevision',
+  'successorRunStateDigest',
+])
+
+/**
+ * Creates one complete immutable checkpoint-receipt row.
+ *
+ * @param binding - Exact admitted apply binding.
+ * @param receipt - Strict immutable checkpoint receipt.
+ * @returns Complete bounded low-level DynamoDB record.
+ */
+function createCheckpointReceiptRecord(
+  binding: ApplyOperationBinding,
+  receipt: WorkspaceSearchMigrationApplyCheckpointReceipt,
+): Readonly<Record<string, AttributeValue>> {
+  const bytes =
+    serializeWorkspaceSearchMigrationApplyCheckpointReceipt(receipt)
+  const strict =
+    parseWorkspaceSearchMigrationApplyCheckpointReceipt(bytes)
+  const identity = requireCheckpointReceiptBinding(binding, strict)
+  const item: Readonly<Record<string, AttributeValue>> = {
+    migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
+    recordKey: {
+      S: createWorkspaceSearchMigrationApplyCheckpointReceiptRecordKey(
+        identity,
+      ),
+    },
+    kind: { S: checkpointReceiptRecordKind },
+    recordVersion: { N: String(applyRecordVersion) },
+    stateTableId: { S: binding.stateTable.tableId },
+    configurationHash: { S: binding.configurationHash },
+    runId: { S: binding.executionRun.runId },
+    executionRunDigest: {
+      S: binding.executionRun.executionRunDigest,
+    },
+    phase: { S: strict.phase },
+    location: { S: strict.location },
+    commandDigest: { S: strict.commandDigest },
+    predecessorRevision: {
+      N: String(strict.predecessorRevision),
+    },
+    predecessorExecutionStateDigest: {
+      S: strict.predecessorExecutionStateDigest,
+    },
+    successorRevision: {
+      N: String(strict.successorRevision),
+    },
+    successorExecutionStateDigest: {
+      S: strict.successorExecutionStateDigest,
+    },
+    successorRunStateDigest: {
+      S: strict.successorRunStateDigest,
+    },
+    checkpointDigest: { S: strict.checkpointDigest },
+    receiptDigest: { S: strict.receiptDigest },
+    receiptBytes: { B: bytes },
+  }
+  validateDynamoDbItemSize(item)
+  return item
+}
+
+/**
+ * Strictly parses one complete immutable checkpoint-receipt row.
+ *
+ * @param binding - Exact admitted apply binding.
+ * @param identity - Deterministic command identity expected at this key.
+ * @param item - Raw low-level DynamoDB record.
+ * @returns Exact detached strict checkpoint receipt.
+ */
+function parseCheckpointReceiptRecord(
+  binding: ApplyOperationBinding,
+  identity: WorkspaceSearchMigrationApplyCheckpointCommandIdentity,
+  item: Readonly<Record<string, AttributeValue>>,
+): WorkspaceSearchMigrationApplyCheckpointReceipt {
+  requireExactAttributeKeys(
+    item,
+    checkpointReceiptRecordAttributeNames,
+    'INVALID_STATE',
+  )
+  if (
+    readStringAttribute(item, 'migrationId') !==
+      WORKSPACE_SEARCH_MIGRATION_ID ||
+    readStringAttribute(item, 'recordKey') !==
+      createWorkspaceSearchMigrationApplyCheckpointReceiptRecordKey(
+        identity,
+      ) ||
+    readStringAttribute(item, 'kind') !==
+      checkpointReceiptRecordKind ||
+    readNumberAttribute(item, 'recordVersion') !==
+      applyRecordVersion ||
+    readStringAttribute(item, 'stateTableId') !==
+      binding.stateTable.tableId ||
+    readStringAttribute(item, 'configurationHash') !==
+      binding.configurationHash ||
+    readStringAttribute(item, 'runId') !==
+      binding.executionRun.runId ||
+    readStringAttribute(item, 'executionRunDigest') !==
+      binding.executionRun.executionRunDigest ||
+    readStringAttribute(item, 'phase') !== 'apply' ||
+    readStringAttribute(item, 'location') !==
+      identity.location ||
+    readStringAttribute(item, 'commandDigest') !==
+      identity.commandDigest
+  ) {
+    return failApply('INVALID_STATE')
+  }
+  const receipt =
+    parseWorkspaceSearchMigrationApplyCheckpointReceipt(
+      readBinaryAttribute(item, 'receiptBytes'),
+    )
+  const receiptIdentity =
+    requireCheckpointReceiptBinding(binding, receipt)
+  if (
+    receiptIdentity.commandDigest !== identity.commandDigest ||
+    readNumberAttribute(item, 'predecessorRevision') !==
+      receipt.predecessorRevision ||
+    readStringAttribute(
+      item,
+      'predecessorExecutionStateDigest',
+    ) !== receipt.predecessorExecutionStateDigest ||
+    readNumberAttribute(item, 'successorRevision') !==
+      receipt.successorRevision ||
+    readStringAttribute(
+      item,
+      'successorExecutionStateDigest',
+    ) !== receipt.successorExecutionStateDigest ||
+    readStringAttribute(item, 'successorRunStateDigest') !==
+      receipt.successorRunStateDigest ||
+    readStringAttribute(item, 'checkpointDigest') !==
+      receipt.checkpointDigest ||
+    readStringAttribute(item, 'receiptDigest') !==
+      receipt.receiptDigest
+  ) {
+    return failApply('INVALID_STATE')
+  }
+  return receipt
+}
+
+/**
+ * Reconstructs and verifies the exact command identity bound by a receipt.
+ *
+ * @param binding - Exact admitted apply binding.
+ * @param receipt - Strict immutable checkpoint receipt.
+ * @returns Exact deterministic receipt command identity.
+ */
+function requireCheckpointReceiptBinding(
+  binding: ApplyOperationBinding,
+  receipt: WorkspaceSearchMigrationApplyCheckpointReceipt,
+): WorkspaceSearchMigrationApplyCheckpointCommandIdentity {
+  const identity =
+    createWorkspaceSearchMigrationApplyCheckpointCommandIdentity({
+      stateTableId: receipt.stateTableId,
+      configurationHash: receipt.configurationHash,
+      runId: receipt.runId,
+      executionRunDigest: receipt.executionRunDigest,
+      location: receipt.location,
+      expectedRevision: receipt.predecessorRevision,
+    })
+  if (
+    receipt.stateTableId !== binding.stateTable.tableId ||
+    receipt.configurationHash !== binding.configurationHash ||
+    receipt.runId !== binding.executionRun.runId ||
+    receipt.executionRunDigest !==
+      binding.executionRun.executionRunDigest ||
+    receipt.phase !== 'apply' ||
+    receipt.commandDigest !== identity.commandDigest
+  ) {
+    return failApply('INVALID_STATE')
+  }
+  return identity
 }
 
 /**
@@ -2600,6 +3567,25 @@ function createStateKey(
   return {
     migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
     recordKey: { S: createExecutionStateRecordKey(binding) },
+  }
+}
+
+/**
+ * Creates the deterministic immutable checkpoint-receipt primary key.
+ *
+ * @param identity - Exact content-addressed checkpoint command identity.
+ * @returns Low-level migration-state table primary key.
+ */
+function createCheckpointReceiptKey(
+  identity: WorkspaceSearchMigrationApplyCheckpointCommandIdentity,
+): Readonly<Record<string, AttributeValue>> {
+  return {
+    migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
+    recordKey: {
+      S: createWorkspaceSearchMigrationApplyCheckpointReceiptRecordKey(
+        identity,
+      ),
+    },
   }
 }
 
@@ -3683,6 +4669,81 @@ function isPlannedOperation(
     value !== null &&
     !Array.isArray(value) &&
     !nodeUtilTypes.isProxy(value)
+}
+
+/**
+ * Classifies one checkpoint transaction failure after an absent receipt reread.
+ *
+ * @param error - Raw transaction error.
+ * @returns Stable retry, authority, drift, or ambiguous code.
+ */
+function classifyCheckpointTransactionError(
+  error: unknown,
+): WorkspaceSearchMigrationFailureCode {
+  try {
+    if (isResourceNotFoundError(error)) {
+      return 'CONFIGURATION_DRIFT'
+    }
+    if (
+      error instanceof TransactionConflictException ||
+      readErrorName(error) === 'TransactionConflictException'
+    ) {
+      return 'TRANSIENT_INFRASTRUCTURE_FAILURE'
+    }
+    if (
+      error instanceof TransactionCanceledException ||
+      readErrorName(error) === 'TransactionCanceledException'
+    ) {
+      const index =
+        workspaceSearchMigrationApplyCheckpointTransactionIndex
+      if (
+        readCancellationReasonCode(error, index.lease) ===
+          'ConditionalCheckFailed'
+      ) {
+        return 'LEASE_LOST'
+      }
+      if (
+        readCancellationReasonCode(error, index.pointer) ===
+          'ConditionalCheckFailed' ||
+        readCancellationReasonCode(error, index.receipt) ===
+          'ConditionalCheckFailed'
+      ) {
+        return 'INVALID_MAINTENANCE_EVIDENCE'
+      }
+      for (
+        let conditionIndex = index.writerFence;
+        conditionIndex <= index.checkpointReceipt;
+        conditionIndex += 1
+      ) {
+        if (
+          readCancellationReasonCode(
+            error,
+            conditionIndex,
+          ) === 'ConditionalCheckFailed'
+        ) {
+          return 'INVALID_STATE'
+        }
+      }
+      return cancellationWasTransient(error)
+        ? 'TRANSIENT_INFRASTRUCTURE_FAILURE'
+        : 'INVALID_STATE'
+    }
+    if (!(error instanceof Error)) {
+      return 'AMBIGUOUS_OPERATION_UNRESOLVED'
+    }
+    if (readErrorName(error) === 'TransactionInProgressException') {
+      return 'AMBIGUOUS_OPERATION_UNRESOLVED'
+    }
+    const input = createAwsClassificationInput(error)
+    if (isThrottlingError(input)) {
+      return 'TRANSIENT_INFRASTRUCTURE_FAILURE'
+    }
+    return isTransientError(input)
+      ? 'AMBIGUOUS_OPERATION_UNRESOLVED'
+      : 'INVALID_STATE'
+  } catch {
+    return 'AMBIGUOUS_OPERATION_UNRESOLVED'
+  }
 }
 
 /**

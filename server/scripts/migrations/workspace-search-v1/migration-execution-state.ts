@@ -1,3 +1,8 @@
+import { types as nodeUtilTypes } from 'node:util'
+import {
+  decodeAttributeMap,
+  encodeUnknownAttributeMap,
+} from './dynamodb-attribute-codec'
 import {
   createMigrationDigest,
   isCanonicalTimestamp,
@@ -6,10 +11,14 @@ import {
   requireMigrationIdentifier,
   serializeCanonicalJson,
   type MigrationDigestState,
+  type MigrationScanAggregate,
+  type MigrationSourceCheckpoint,
   type WorkspaceSearchAlreadyCurrentOperationMarker,
+  type WorkspaceSearchMigrationTraversalProgress,
   type WorkspaceSearchMigrationRunState,
   type WorkspaceSearchOperationMarker,
   type WorkspaceSearchOperationReceipt,
+  workspaceSearchMigrationSourceNames,
   WORKSPACE_SEARCH_MIGRATION_ID,
   WORKSPACE_SEARCH_MIGRATION_VERSION,
   zeroHexDigest,
@@ -24,7 +33,11 @@ import {
 } from './migration-journal'
 import {
   createEmptyWorkspaceSearchMigrationTraversal,
+  reduceWorkspaceSearchMigrationRunState,
+  validateWorkspaceSearchMigrationCheckpoint,
   validateWorkspaceSearchMigrationRunState,
+  type WorkspaceSearchMigrationAuthority,
+  type WorkspaceSearchMigrationCheckpointLocation,
 } from './migration-state-machine'
 import {
   hasCanonicalDenseArrayShape,
@@ -53,14 +66,10 @@ export class WorkspaceSearchMigrationExecutionStateError extends Error {
   }
 }
 
-/**
- * Flat mutable operation-phase state rooted in one immutable admission row.
- */
-export type WorkspaceSearchMigrationExecutionState = {
+/** Shared flat mutable fields persisted by every execution-state version. */
+type WorkspaceSearchMigrationExecutionStateFields = {
   /** Mutable execution-state envelope discriminator. */
   readonly kind: 'workspace-search-migration-execution-state'
-  /** Mutable execution-state envelope schema version. */
-  readonly executionStateVersion: 1
   /** Stable migration identifier. */
   readonly migrationId: typeof WORKSPACE_SEARCH_MIGRATION_ID
   /** Migration behavior version. */
@@ -71,7 +80,7 @@ export type WorkspaceSearchMigrationExecutionState = {
   readonly runId: string
   /** Reviewed measured-configuration digest bound by admission. */
   readonly configurationHash: string
-  /** Positive optimistic-concurrency revision after this operation. */
+  /** Positive optimistic-concurrency revision after this durable progress. */
   readonly revision: number
   /** Operation-phase lifecycle status supported by this codec revision. */
   readonly status: 'applying'
@@ -87,13 +96,40 @@ export type WorkspaceSearchMigrationExecutionState = {
    * Earliest immutable journal retention deadline among committed mutations.
    */
   readonly minimumJournalRetainUntil?: string
-  /** Canonical UTC time of the operation represented by this state. */
+  /** Canonical UTC time of the durable progress represented by this state. */
   readonly updatedAt: string
-  /** Digest of the complete reconstructed state-machine value. */
+  /** Digest of the complete losslessly encoded reconstructed run state. */
   readonly runStateDigest: string
-  /** Digest of every preceding flat envelope field. */
+  /** Digest of every preceding canonical envelope field. */
   readonly executionStateDigest: string
 }
+
+/**
+ * Legacy operation-only mutable state rooted in one immutable admission row.
+ */
+export type WorkspaceSearchMigrationExecutionStateV1 =
+  WorkspaceSearchMigrationExecutionStateFields & {
+    /** Legacy operation-only envelope schema version. */
+    readonly executionStateVersion: 1
+  }
+
+/**
+ * Mutable applying state that durably retains complete apply traversal.
+ */
+export type WorkspaceSearchMigrationExecutionStateV2 =
+  WorkspaceSearchMigrationExecutionStateFields & {
+    /** Traversal-capable mutable envelope schema version. */
+    readonly executionStateVersion: 2
+    /** Complete durable source and target apply traversal. */
+    readonly apply: WorkspaceSearchMigrationTraversalProgress
+  }
+
+/**
+ * Supported legacy operation-only and traversal-capable mutable state.
+ */
+export type WorkspaceSearchMigrationExecutionState =
+  | WorkspaceSearchMigrationExecutionStateV1
+  | WorkspaceSearchMigrationExecutionStateV2
 
 /**
  * Exact material consumed by one pure mutable operation-state reduction.
@@ -110,6 +146,22 @@ export type CreateWorkspaceSearchMigrationExecutionStateInput = {
 }
 
 /**
+ * Exact material consumed by one pure apply-checkpoint reduction.
+ */
+export type CreateWorkspaceSearchMigrationCheckpointExecutionStateInput = {
+  /** Immutable revision-one admission row that roots the mutable state. */
+  readonly admission: WorkspaceSearchMigrationExecutionRun
+  /** Previous mutable state, absent only before the first durable progress. */
+  readonly predecessor?: WorkspaceSearchMigrationExecutionState
+  /** Active fenced lease and trusted checkpoint commit time. */
+  readonly authority: WorkspaceSearchMigrationAuthority
+  /** Source or target traversal advanced by the checkpoint. */
+  readonly location: WorkspaceSearchMigrationCheckpointLocation
+  /** Complete cumulative checkpoint produced after one bounded page. */
+  readonly checkpoint: MigrationSourceCheckpoint
+}
+
+/**
  * Reduces one immutable admission or mutable predecessor by exactly one marker.
  *
  * This operation accepts only the operation-phase fields changed by the
@@ -122,7 +174,7 @@ export type CreateWorkspaceSearchMigrationExecutionStateInput = {
  */
 export function createWorkspaceSearchMigrationExecutionState(
   input: CreateWorkspaceSearchMigrationExecutionStateInput,
-): WorkspaceSearchMigrationExecutionState {
+): WorkspaceSearchMigrationExecutionStateV1 {
   return atExecutionStateBoundary(() => {
     const inputRecord = requireRecord(input)
     const hasPredecessor = hasOwnDataProperty(
@@ -138,8 +190,14 @@ export function createWorkspaceSearchMigrationExecutionState(
 
     const admission = detachAdmission(input.admission)
     const predecessor = hasPredecessor
-      ? readExecutionState(input.predecessor)
+      ? readRuntimeExecutionState(input.predecessor)
       : undefined
+    if (
+      predecessor !== undefined &&
+      predecessor.executionStateVersion !== 1
+    ) {
+      return failExecutionState()
+    }
     const current = predecessor === undefined
       ? admission.runState
       : reconstructRunState(admission, predecessor)
@@ -184,11 +242,85 @@ export function createWorkspaceSearchMigrationExecutionState(
     validateWorkspaceSearchMigrationRunState(next)
 
     const runStateDigest = createMigrationDigest(next)
-    return createExecutionStateEnvelope(
+    return createV1ExecutionStateEnvelope(
       admission,
       next,
       minimumJournalRetainUntil,
       runStateDigest,
+    )
+  })
+}
+
+/**
+ * Reduces admission or one v1/v2 predecessor by one apply checkpoint.
+ *
+ * The state-machine reducer owns authority, lifecycle, operation durability,
+ * cursor-schema, and monotonic-progress validation. The expected revision and
+ * complete successor are derived internally rather than supplied by callers.
+ *
+ * @param input - Admission root, predecessor, authority, location, and page.
+ * @returns Detached canonical traversal-capable mutable state.
+ */
+export function createWorkspaceSearchMigrationCheckpointExecutionState(
+  input: CreateWorkspaceSearchMigrationCheckpointExecutionStateInput,
+): WorkspaceSearchMigrationExecutionStateV2 {
+  return atExecutionStateBoundary(() => {
+    const inputRecord = requireRecord(input)
+    const hasPredecessor = hasOwnDataProperty(
+      inputRecord,
+      'predecessor',
+    )
+    requireExactKeys(
+      inputRecord,
+      hasPredecessor
+        ? [
+            'admission',
+            'authority',
+            'checkpoint',
+            'location',
+            'predecessor',
+          ]
+        : ['admission', 'authority', 'checkpoint', 'location'],
+    )
+
+    const admission = detachAdmission(input.admission)
+    const predecessor = hasPredecessor
+      ? readRuntimeExecutionState(
+          readOwn(inputRecord, 'predecessor'),
+        )
+      : undefined
+    const current = predecessor === undefined
+      ? admission.runState
+      : reconstructRunState(admission, predecessor)
+    requireAdmissionBoundApplyingState(admission, current)
+
+    const authority = readAuthority(
+      readOwn(inputRecord, 'authority'),
+    )
+    const location = readCheckpointLocation(
+      readOwn(inputRecord, 'location'),
+    )
+    const checkpoint = readRuntimeCheckpoint(
+      readOwn(inputRecord, 'checkpoint'),
+    )
+    const next = reduceWorkspaceSearchMigrationRunState({
+      current,
+      expectedRevision: current.revision,
+      authority,
+      event: {
+        kind: 'apply-checkpoint-recorded',
+        location,
+        checkpoint,
+      },
+    })
+    requireAdmissionBoundApplyingState(admission, next)
+    requireV2RevisionShape(next)
+
+    return createV2ExecutionStateEnvelope(
+      admission,
+      next,
+      predecessor?.minimumJournalRetainUntil,
+      createV2RunStateDigest(next),
     )
   })
 }
@@ -206,7 +338,7 @@ export function reconstructWorkspaceSearchMigrationRunState(
 ): WorkspaceSearchMigrationRunState {
   return atExecutionStateBoundary(() => {
     const detachedAdmission = detachAdmission(admission)
-    const detachedState = readExecutionState(executionState)
+    const detachedState = readRuntimeExecutionState(executionState)
     return reconstructRunState(detachedAdmission, detachedState)
   })
 }
@@ -221,7 +353,7 @@ export function serializeWorkspaceSearchMigrationExecutionState(
   value: WorkspaceSearchMigrationExecutionState,
 ): Uint8Array {
   return atExecutionStateBoundary(() =>
-    encodeCanonicalExecutionState(readExecutionState(value))
+    encodeCanonicalExecutionState(readRuntimeExecutionState(value))
   )
 }
 
@@ -248,7 +380,7 @@ export function parseWorkspaceSearchMigrationExecutionState(
     } catch {
       return failExecutionState()
     }
-    const executionState = readExecutionState(parsed)
+    const executionState = readEncodedExecutionState(parsed)
     const canonical = encodeCanonicalExecutionState(executionState)
     if (!equalBytes(snapshot, canonical)) return failExecutionState()
     return executionState
@@ -343,14 +475,26 @@ function reconstructRunState(
       executionState.applyMarkerDigestState,
     journalSequence: executionState.journalSequence,
     journalHeadDigest: executionState.journalHeadDigest,
+    apply: executionState.executionStateVersion === 1
+      ? admission.runState.apply
+      : executionState.apply,
     updatedAt: executionState.updatedAt,
   }
-  requireOperationPhaseBase(admission, runState)
+  if (executionState.executionStateVersion === 1) {
+    requireOperationPhaseBase(admission, runState)
+  } else {
+    requireAdmissionBoundApplyingState(admission, runState)
+    requireV2RevisionShape(runState)
+  }
   if (
     executionState.appliedOperationCount >
       admission.runState.planOperationCount ||
     executionState.runStateDigest !==
-      createMigrationDigest(runState)
+      (
+        executionState.executionStateVersion === 1
+          ? createMigrationDigest(runState)
+          : createV2RunStateDigest(runState)
+      )
   ) {
     return failExecutionState()
   }
@@ -377,6 +521,20 @@ function requireOperationPhaseBase(
   ) {
     return failExecutionState()
   }
+  requireAdmissionBoundApplyingState(admission, state)
+}
+
+/**
+ * Requires every admission-immutable field to remain exactly bound.
+ *
+ * @param admission - Immutable revision-one admission.
+ * @param state - Complete candidate applying state.
+ */
+function requireAdmissionBoundApplyingState(
+  admission: WorkspaceSearchMigrationExecutionRun,
+  state: WorkspaceSearchMigrationRunState,
+): void {
+  if (state.status !== 'applying') return failExecutionState()
   const immutableExpected = {
     runId: admission.runState.runId,
     configurationHash:
@@ -395,7 +553,6 @@ function requireOperationPhaseBase(
       admission.runState.planOperationCount,
     planSealReference:
       admission.runState.planSealReference,
-    apply: admission.runState.apply,
     createdAt: admission.runState.createdAt,
   }
   const immutableActual = {
@@ -412,7 +569,6 @@ function requireOperationPhaseBase(
     planDigest: state.planDigest,
     planOperationCount: state.planOperationCount,
     planSealReference: state.planSealReference,
-    apply: state.apply,
     createdAt: state.createdAt,
   }
   if (
@@ -533,12 +689,12 @@ function nextMinimumJournalRetainUntil(
  * @param runStateDigest - Digest of the complete next state.
  * @returns Strict mutable execution-state envelope.
  */
-function createExecutionStateEnvelope(
+function createV1ExecutionStateEnvelope(
   admission: WorkspaceSearchMigrationExecutionRun,
   next: WorkspaceSearchMigrationRunState,
   minimumJournalRetainUntil: string | undefined,
   runStateDigest: string,
-): WorkspaceSearchMigrationExecutionState {
+): WorkspaceSearchMigrationExecutionStateV1 {
   if (minimumJournalRetainUntil === undefined) {
     const fields = {
       kind: 'workspace-search-migration-execution-state',
@@ -557,7 +713,7 @@ function createExecutionStateEnvelope(
       updatedAt: next.updatedAt,
       runStateDigest,
     } satisfies Omit<
-      WorkspaceSearchMigrationExecutionState,
+      WorkspaceSearchMigrationExecutionStateV1,
       'executionStateDigest'
     >
     const envelope = {
@@ -585,7 +741,7 @@ function createExecutionStateEnvelope(
     updatedAt: next.updatedAt,
     runStateDigest,
   } satisfies Omit<
-    WorkspaceSearchMigrationExecutionState,
+    WorkspaceSearchMigrationExecutionStateV1,
     'executionStateDigest'
   >
   const envelope = {
@@ -597,15 +753,127 @@ function createExecutionStateEnvelope(
 }
 
 /**
- * Reads and validates one strict flat mutable execution-state envelope.
+ * Creates one traversal-capable envelope and its final self-digest.
  *
- * @param value - Candidate runtime or parsed envelope.
- * @returns Detached strict mutable execution state.
+ * @param admission - Immutable admission root.
+ * @param next - Complete validated next applying state.
+ * @param minimumJournalRetainUntil - Cumulative journal deadline.
+ * @param runStateDigest - Digest of the losslessly encoded complete next state.
+ * @returns Strict traversal-capable mutable execution-state envelope.
  */
-function readExecutionState(
+function createV2ExecutionStateEnvelope(
+  admission: WorkspaceSearchMigrationExecutionRun,
+  next: WorkspaceSearchMigrationRunState,
+  minimumJournalRetainUntil: string | undefined,
+  runStateDigest: string,
+): WorkspaceSearchMigrationExecutionStateV2 {
+  const common = {
+    kind: 'workspace-search-migration-execution-state',
+    executionStateVersion: 2,
+    migrationId: WORKSPACE_SEARCH_MIGRATION_ID,
+    migrationVersion: WORKSPACE_SEARCH_MIGRATION_VERSION,
+    executionRunDigest: admission.executionRunDigest,
+    runId: admission.runId,
+    configurationHash: admission.configurationHash,
+    revision: next.revision,
+    status: 'applying',
+    appliedOperationCount: next.appliedOperationCount,
+    applyMarkerDigestState: next.applyMarkerDigestState,
+    journalSequence: next.journalSequence,
+    journalHeadDigest: next.journalHeadDigest,
+    apply: next.apply,
+  } satisfies Pick<
+    WorkspaceSearchMigrationExecutionStateV2,
+    | 'kind'
+    | 'executionStateVersion'
+    | 'migrationId'
+    | 'migrationVersion'
+    | 'executionRunDigest'
+    | 'runId'
+    | 'configurationHash'
+    | 'revision'
+    | 'status'
+    | 'appliedOperationCount'
+    | 'applyMarkerDigestState'
+    | 'journalSequence'
+    | 'journalHeadDigest'
+    | 'apply'
+  >
+  const tail = {
+    updatedAt: next.updatedAt,
+    runStateDigest,
+  }
+  const fields = minimumJournalRetainUntil === undefined
+    ? {
+        ...common,
+        ...tail,
+      }
+    : {
+        ...common,
+        minimumJournalRetainUntil,
+        ...tail,
+      }
+  const envelope: WorkspaceSearchMigrationExecutionStateV2 = {
+    ...fields,
+    executionStateDigest: createV2ExecutionStateDigest(fields),
+  }
+  void encodeCanonicalExecutionState(
+    readRuntimeExecutionState(envelope),
+  )
+  return envelope
+}
+
+/**
+ * Reads a runtime envelope whose v2 cursor uses raw AttributeValue maps.
+ *
+ * @param value - Candidate runtime execution state.
+ * @returns Detached strict supported execution state.
+ */
+function readRuntimeExecutionState(
   value: unknown,
 ): WorkspaceSearchMigrationExecutionState {
   const record = requireRecord(value)
+  const version = readOwn(record, 'executionStateVersion')
+  if (version === 1) return readV1ExecutionState(record)
+  if (version === 2) {
+    return readV2ExecutionState(
+      record,
+      readRuntimeTraversal(readOwn(record, 'apply')),
+    )
+  }
+  return failExecutionState()
+}
+
+/**
+ * Reads a canonical JSON document whose v2 cursor uses tagged attributes.
+ *
+ * @param value - Candidate parsed execution-state document.
+ * @returns Detached strict supported execution state.
+ */
+function readEncodedExecutionState(
+  value: unknown,
+): WorkspaceSearchMigrationExecutionState {
+  const record = requireRecord(value)
+  const version = readOwn(record, 'executionStateVersion')
+  if (version === 1) return readV1ExecutionState(record)
+  if (version === 2) {
+    return readV2ExecutionState(
+      record,
+      readEncodedTraversal(readOwn(record, 'apply')),
+    )
+  }
+  return failExecutionState()
+}
+
+/**
+ * Reads and validates one legacy operation-only mutable envelope.
+ *
+ * @param record - Candidate runtime or parsed legacy envelope.
+ * @returns Detached strict legacy mutable execution state.
+ */
+function readV1ExecutionState(
+  record: Readonly<Record<string, unknown>>,
+): WorkspaceSearchMigrationExecutionStateV1 {
   const hasMinimum = hasOwnDataProperty(
     record,
     'minimumJournalRetainUntil',
@@ -691,7 +959,7 @@ function readExecutionState(
     journalSequence,
     journalHeadDigest,
   } satisfies Pick<
-    WorkspaceSearchMigrationExecutionState,
+    WorkspaceSearchMigrationExecutionStateV1,
     | 'kind'
     | 'executionStateVersion'
     | 'migrationId'
@@ -728,7 +996,7 @@ function readExecutionState(
       ...common,
       ...tail,
     } satisfies Omit<
-      WorkspaceSearchMigrationExecutionState,
+      WorkspaceSearchMigrationExecutionStateV1,
       'executionStateDigest'
     >
     if (executionStateDigest !== createMigrationDigest(fields)) {
@@ -741,13 +1009,688 @@ function readExecutionState(
     minimumJournalRetainUntil,
     ...tail,
   } satisfies Omit<
-    WorkspaceSearchMigrationExecutionState,
+    WorkspaceSearchMigrationExecutionStateV1,
     'executionStateDigest'
   >
   if (executionStateDigest !== createMigrationDigest(fields)) {
     return failExecutionState()
   }
   return { ...fields, executionStateDigest }
+}
+
+/**
+ * Reads and validates one traversal-capable mutable envelope.
+ *
+ * @param record - Candidate runtime or parsed v2 envelope.
+ * @param apply - Detached traversal decoded for the source representation.
+ * @returns Detached strict traversal-capable mutable execution state.
+ */
+function readV2ExecutionState(
+  record: Readonly<Record<string, unknown>>,
+  apply: WorkspaceSearchMigrationTraversalProgress,
+): WorkspaceSearchMigrationExecutionStateV2 {
+  const hasMinimum = hasOwnDataProperty(
+    record,
+    'minimumJournalRetainUntil',
+  )
+  requireExactKeys(record, [
+    'appliedOperationCount',
+    'apply',
+    'applyMarkerDigestState',
+    'configurationHash',
+    'executionRunDigest',
+    'executionStateDigest',
+    'executionStateVersion',
+    'journalHeadDigest',
+    'journalSequence',
+    'kind',
+    'migrationId',
+    'migrationVersion',
+    ...(hasMinimum ? ['minimumJournalRetainUntil'] : []),
+    'revision',
+    'runId',
+    'runStateDigest',
+    'status',
+    'updatedAt',
+  ])
+  if (
+    readOwn(record, 'kind') !==
+      'workspace-search-migration-execution-state' ||
+    readOwn(record, 'executionStateVersion') !== 2 ||
+    readOwn(record, 'migrationId') !==
+      WORKSPACE_SEARCH_MIGRATION_ID ||
+    readOwn(record, 'migrationVersion') !==
+      WORKSPACE_SEARCH_MIGRATION_VERSION ||
+    readOwn(record, 'status') !== 'applying'
+  ) {
+    return failExecutionState()
+  }
+
+  const revision = readPositiveSafeInteger(
+    readOwn(record, 'revision'),
+  )
+  const appliedOperationCount = readNonNegativeSafeInteger(
+    readOwn(record, 'appliedOperationCount'),
+  )
+  const applyMarkerDigestState = readDigestState(
+    readOwn(record, 'applyMarkerDigestState'),
+  )
+  const journalSequence = readNonNegativeSafeInteger(
+    readOwn(record, 'journalSequence'),
+  )
+  const journalHeadDigest = readDigest(
+    readOwn(record, 'journalHeadDigest'),
+  )
+  const minimumJournalRetainUntil = hasMinimum
+    ? readTimestamp(
+        readOwn(record, 'minimumJournalRetainUntil'),
+      )
+    : undefined
+  const expectedRevision = calculateV2Revision(
+    appliedOperationCount,
+    apply,
+  )
+  if (
+    revision !== expectedRevision ||
+    expectedRevision <= appliedOperationCount + 1 ||
+    applyMarkerDigestState.count !== appliedOperationCount ||
+    journalSequence > appliedOperationCount ||
+    (journalSequence === 0) !==
+      (journalHeadDigest === zeroHexDigest()) ||
+    (journalSequence === 0) !==
+      (minimumJournalRetainUntil === undefined)
+  ) {
+    return failExecutionState()
+  }
+
+  const common = {
+    kind: 'workspace-search-migration-execution-state',
+    executionStateVersion: 2,
+    migrationId: WORKSPACE_SEARCH_MIGRATION_ID,
+    migrationVersion: WORKSPACE_SEARCH_MIGRATION_VERSION,
+    executionRunDigest: readDigest(
+      readOwn(record, 'executionRunDigest'),
+    ),
+    runId: readIdentifier(readOwn(record, 'runId')),
+    configurationHash: readDigest(
+      readOwn(record, 'configurationHash'),
+    ),
+    revision,
+    status: 'applying',
+    appliedOperationCount,
+    applyMarkerDigestState,
+    journalSequence,
+    journalHeadDigest,
+    apply,
+  } satisfies Pick<
+    WorkspaceSearchMigrationExecutionStateV2,
+    | 'kind'
+    | 'executionStateVersion'
+    | 'migrationId'
+    | 'migrationVersion'
+    | 'executionRunDigest'
+    | 'runId'
+    | 'configurationHash'
+    | 'revision'
+    | 'status'
+    | 'appliedOperationCount'
+    | 'applyMarkerDigestState'
+    | 'journalSequence'
+    | 'journalHeadDigest'
+    | 'apply'
+  >
+  const updatedAt = readTimestamp(readOwn(record, 'updatedAt'))
+  if (
+    minimumJournalRetainUntil !== undefined &&
+    Date.parse(minimumJournalRetainUntil) <=
+      Date.parse(updatedAt)
+  ) {
+    return failExecutionState()
+  }
+  const tail = {
+    updatedAt,
+    runStateDigest: readDigest(
+      readOwn(record, 'runStateDigest'),
+    ),
+  }
+  const executionStateDigest = readDigest(
+    readOwn(record, 'executionStateDigest'),
+  )
+  const fields = minimumJournalRetainUntil === undefined
+    ? {
+        ...common,
+        ...tail,
+      }
+    : {
+        ...common,
+        minimumJournalRetainUntil,
+        ...tail,
+      }
+  if (
+    executionStateDigest !==
+      createV2ExecutionStateDigest(fields)
+  ) {
+    return failExecutionState()
+  }
+  return { ...fields, executionStateDigest }
+}
+
+/**
+ * Reads one strict runtime traversal with raw DynamoDB cursors.
+ *
+ * @param value - Candidate runtime traversal.
+ * @returns Detached validated traversal.
+ */
+function readRuntimeTraversal(
+  value: unknown,
+): WorkspaceSearchMigrationTraversalProgress {
+  return readTraversal(value, false)
+}
+
+/**
+ * Reads one strict encoded traversal with tagged DynamoDB cursors.
+ *
+ * @param value - Candidate JSON-safe traversal.
+ * @returns Detached validated traversal.
+ */
+function readEncodedTraversal(
+  value: unknown,
+): WorkspaceSearchMigrationTraversalProgress {
+  return readTraversal(value, true)
+}
+
+/**
+ * Reads one complete exact-key source and target traversal.
+ *
+ * @param value - Candidate traversal.
+ * @param encoded - Whether cursor maps use the tagged JSON representation.
+ * @returns Detached validated traversal.
+ */
+function readTraversal(
+  value: unknown,
+  encoded: boolean,
+): WorkspaceSearchMigrationTraversalProgress {
+  const record = requireRecord(value)
+  requireExactKeys(record, ['sources', 'target'])
+  const sources = requireRecord(readOwn(record, 'sources'))
+  requireExactKeys(sources, workspaceSearchMigrationSourceNames)
+  const readCheckpoint = encoded
+    ? readEncodedCheckpoint
+    : readRuntimeCheckpoint
+  return {
+    sources: {
+      'project-directory': readCheckpoint(
+        readOwn(sources, 'project-directory'),
+      ),
+      'work-items': readCheckpoint(
+        readOwn(sources, 'work-items'),
+      ),
+      collaboration: readCheckpoint(
+        readOwn(sources, 'collaboration'),
+      ),
+      documents: readCheckpoint(
+        readOwn(sources, 'documents'),
+      ),
+    },
+    target: readCheckpoint(readOwn(record, 'target')),
+  }
+}
+
+/**
+ * Reads one strict checkpoint whose cursor is a raw AttributeValue map.
+ *
+ * @param value - Candidate runtime checkpoint.
+ * @returns Detached validated checkpoint.
+ */
+function readRuntimeCheckpoint(
+  value: unknown,
+): MigrationSourceCheckpoint {
+  return readCheckpoint(value, false)
+}
+
+/**
+ * Reads one strict checkpoint whose cursor is a tagged AttributeValue map.
+ *
+ * @param value - Candidate encoded checkpoint.
+ * @returns Detached validated checkpoint.
+ */
+function readEncodedCheckpoint(
+  value: unknown,
+): MigrationSourceCheckpoint {
+  return readCheckpoint(value, true)
+}
+
+/**
+ * Reads one strict cumulative checkpoint representation.
+ *
+ * @param value - Candidate checkpoint.
+ * @param encoded - Whether an optional cursor uses tagged attributes.
+ * @returns Detached validated raw checkpoint.
+ */
+function readCheckpoint(
+  value: unknown,
+  encoded: boolean,
+): MigrationSourceCheckpoint {
+  const record = requireRecord(value)
+  const hasCursor = hasOwnDataProperty(record, 'cursor')
+  requireExactKeys(
+    record,
+    hasCursor
+      ? [
+          'aggregate',
+          'completed',
+          'contentDigestState',
+          'cursor',
+          'keyDigestState',
+        ]
+      : [
+          'aggregate',
+          'completed',
+          'contentDigestState',
+          'keyDigestState',
+        ],
+  )
+  const completed = readBoolean(readOwn(record, 'completed'))
+  const cursor = hasCursor
+    ? readCheckpointCursor(
+        readOwn(record, 'cursor'),
+        encoded,
+      )
+    : undefined
+  const checkpoint: MigrationSourceCheckpoint = cursor === undefined
+    ? {
+        completed,
+        aggregate: readAggregate(readOwn(record, 'aggregate')),
+        keyDigestState: readDigestState(
+          readOwn(record, 'keyDigestState'),
+        ),
+        contentDigestState: readDigestState(
+          readOwn(record, 'contentDigestState'),
+        ),
+      }
+    : {
+        completed,
+        cursor,
+        aggregate: readAggregate(readOwn(record, 'aggregate')),
+        keyDigestState: readDigestState(
+          readOwn(record, 'keyDigestState'),
+        ),
+        contentDigestState: readDigestState(
+          readOwn(record, 'contentDigestState'),
+        ),
+      }
+  validateWorkspaceSearchMigrationCheckpoint(checkpoint)
+  return checkpoint
+}
+
+/**
+ * Reads and detaches one raw or tagged checkpoint cursor.
+ *
+ * @param value - Candidate cursor representation.
+ * @param encoded - Whether the cursor uses tagged attributes.
+ * @returns Detached raw low-level DynamoDB key.
+ */
+function readCheckpointCursor(
+  value: unknown,
+  encoded: boolean,
+): MigrationSourceCheckpoint['cursor'] {
+  requireCanonicalDataGraph(value, new WeakSet<object>())
+  if (encoded) return decodeAttributeMap(value)
+  return decodeAttributeMap(encodeUnknownAttributeMap(value))
+}
+
+/**
+ * Reads one strict cumulative scan aggregate.
+ *
+ * @param value - Candidate aggregate.
+ * @returns Detached validated aggregate.
+ */
+function readAggregate(value: unknown): MigrationScanAggregate {
+  const record = requireRecord(value)
+  requireExactKeys(record, [
+    'contentDigest',
+    'deleted',
+    'ignored',
+    'invalid',
+    'keyDigest',
+    'mapped',
+    'pageCount',
+    'projected',
+    'scanned',
+  ])
+  const aggregate: MigrationScanAggregate = {
+    scanned: readNonNegativeSafeInteger(
+      readOwn(record, 'scanned'),
+    ),
+    mapped: readNonNegativeSafeInteger(
+      readOwn(record, 'mapped'),
+    ),
+    ignored: readNonNegativeSafeInteger(
+      readOwn(record, 'ignored'),
+    ),
+    invalid: readNonNegativeSafeInteger(
+      readOwn(record, 'invalid'),
+    ),
+    projected: readNonNegativeSafeInteger(
+      readOwn(record, 'projected'),
+    ),
+    deleted: readNonNegativeSafeInteger(
+      readOwn(record, 'deleted'),
+    ),
+    keyDigest: readDigest(readOwn(record, 'keyDigest')),
+    contentDigest: readDigest(
+      readOwn(record, 'contentDigest'),
+    ),
+    pageCount: readNonNegativeSafeInteger(
+      readOwn(record, 'pageCount'),
+    ),
+  }
+  return aggregate
+}
+
+/**
+ * Reads one strict checkpoint transition authority.
+ *
+ * @param value - Candidate active authority.
+ * @returns Detached authority for the state-machine reducer.
+ */
+function readAuthority(
+  value: unknown,
+): WorkspaceSearchMigrationAuthority {
+  const record = requireRecord(value)
+  requireExactKeys(record, ['at', 'lease', 'ownerId'])
+  const leaseRecord = requireRecord(readOwn(record, 'lease'))
+  requireExactKeys(leaseRecord, [
+    'expiresAt',
+    'fenceToken',
+    'heartbeatAt',
+    'ownerId',
+    'runId',
+  ])
+  return {
+    lease: {
+      runId: readIdentifier(readOwn(leaseRecord, 'runId')),
+      ownerId: readIdentifier(readOwn(leaseRecord, 'ownerId')),
+      fenceToken: readPositiveSafeInteger(
+        readOwn(leaseRecord, 'fenceToken'),
+      ),
+      heartbeatAt: readTimestamp(
+        readOwn(leaseRecord, 'heartbeatAt'),
+      ),
+      expiresAt: readTimestamp(
+        readOwn(leaseRecord, 'expiresAt'),
+      ),
+    },
+    ownerId: readIdentifier(readOwn(record, 'ownerId')),
+    at: readTimestamp(readOwn(record, 'at')),
+  }
+}
+
+/**
+ * Reads one exact apply-checkpoint location.
+ *
+ * @param value - Candidate source or target location.
+ * @returns Valid checkpoint location.
+ */
+function readCheckpointLocation(
+  value: unknown,
+): WorkspaceSearchMigrationCheckpointLocation {
+  if (
+    value === 'project-directory' ||
+    value === 'work-items' ||
+    value === 'collaboration' ||
+    value === 'documents' ||
+    value === 'target'
+  ) {
+    return value
+  }
+  return failExecutionState()
+}
+
+/**
+ * Reads one exact Boolean.
+ *
+ * @param value - Candidate Boolean.
+ * @returns Validated Boolean.
+ */
+function readBoolean(value: unknown): boolean {
+  if (value !== true && value !== false) {
+    return failExecutionState()
+  }
+  return value
+}
+
+/**
+ * Calculates the only structurally valid v2 revision.
+ *
+ * @param appliedOperationCount - Exact durable operation count.
+ * @param apply - Complete five-location apply traversal.
+ * @returns One plus operations plus every durable checkpoint page.
+ */
+function calculateV2Revision(
+  appliedOperationCount: number,
+  apply: WorkspaceSearchMigrationTraversalProgress,
+): number {
+  let revision = addSafeCounts(1, appliedOperationCount)
+  for (const source of workspaceSearchMigrationSourceNames) {
+    revision = addSafeCounts(
+      revision,
+      apply.sources[source].aggregate.pageCount,
+    )
+  }
+  return addSafeCounts(
+    revision,
+    apply.target.aggregate.pageCount,
+  )
+}
+
+/**
+ * Requires a complete run state to satisfy the v2 revision formula.
+ *
+ * @param state - Candidate traversal-capable applying state.
+ */
+function requireV2RevisionShape(
+  state: WorkspaceSearchMigrationRunState,
+): void {
+  const expected = calculateV2Revision(
+    state.appliedOperationCount,
+    state.apply,
+  )
+  if (
+    state.revision !== expected ||
+    expected <= state.appliedOperationCount + 1
+  ) {
+    return failExecutionState()
+  }
+}
+
+/**
+ * Adds two nonnegative counts without exceeding the safe integer range.
+ *
+ * @param left - Existing nonnegative count.
+ * @param right - Additional nonnegative count.
+ * @returns Safe exact sum.
+ */
+function addSafeCounts(left: number, right: number): number {
+  const sum = left + right
+  if (!Number.isSafeInteger(sum) || sum < 0) {
+    return failExecutionState()
+  }
+  return sum
+}
+
+/**
+ * Creates the v2 digest of a complete reconstructed run state.
+ *
+ * @param state - Complete validated applying state.
+ * @returns Digest of the losslessly encoded state.
+ */
+function createV2RunStateDigest(
+  state: WorkspaceSearchMigrationRunState,
+): string {
+  return createMigrationDigest({
+    ...state,
+    apply: encodeTraversal(state.apply),
+  })
+}
+
+/**
+ * Creates one v2 envelope self-digest over its encoded preceding fields.
+ *
+ * @param fields - Every v2 envelope field except its self-digest.
+ * @returns Lowercase digest of the canonical lossless representation.
+ */
+function createV2ExecutionStateDigest(
+  fields: Omit<
+    WorkspaceSearchMigrationExecutionStateV2,
+    'executionStateDigest'
+  >,
+): string {
+  return createMigrationDigest({
+    ...fields,
+    apply: encodeTraversal(fields.apply),
+  })
+}
+
+/**
+ * Encodes one complete traversal with lossless tagged cursor maps.
+ *
+ * @param traversal - Validated raw traversal.
+ * @returns Canonical JSON-safe traversal representation.
+ */
+function encodeTraversal(
+  traversal: WorkspaceSearchMigrationTraversalProgress,
+) {
+  return {
+    sources: {
+      'project-directory': encodeCheckpoint(
+        traversal.sources['project-directory'],
+      ),
+      'work-items': encodeCheckpoint(
+        traversal.sources['work-items'],
+      ),
+      collaboration: encodeCheckpoint(
+        traversal.sources.collaboration,
+      ),
+      documents: encodeCheckpoint(
+        traversal.sources.documents,
+      ),
+    },
+    target: encodeCheckpoint(traversal.target),
+  }
+}
+
+/**
+ * Encodes one checkpoint with an optional lossless tagged cursor.
+ *
+ * @param checkpoint - Validated raw checkpoint.
+ * @returns Canonical JSON-safe checkpoint representation.
+ */
+function encodeCheckpoint(checkpoint: MigrationSourceCheckpoint) {
+  return {
+    completed: checkpoint.completed,
+    ...(checkpoint.cursor === undefined
+      ? {}
+      : {
+          cursor: encodeUnknownAttributeMap(
+            checkpoint.cursor,
+          ),
+        }),
+    aggregate: checkpoint.aggregate,
+    keyDigestState: checkpoint.keyDigestState,
+    contentDigestState: checkpoint.contentDigestState,
+  }
+}
+
+/**
+ * Rejects accessors, symbols, cycles, sparse arrays, and exotic prototypes.
+ *
+ * @param value - Candidate raw or tagged DynamoDB graph.
+ * @param active - Objects on the current traversal path.
+ */
+function requireCanonicalDataGraph(
+  value: unknown,
+  active: WeakSet<object>,
+): void {
+  if (
+    value === null ||
+    typeof value === 'boolean' ||
+    typeof value === 'number' ||
+    typeof value === 'string' ||
+    value === undefined
+  ) {
+    return
+  }
+  if (
+    typeof value !== 'object' ||
+    nodeUtilTypes.isProxy(value)
+  ) {
+    return failExecutionState()
+  }
+  if (active.has(value)) return failExecutionState()
+  if (Object.getOwnPropertySymbols(value).length !== 0) {
+    return failExecutionState()
+  }
+  if (value instanceof Uint8Array) {
+    const names = Object.getOwnPropertyNames(value)
+    if (
+      names.length !== value.byteLength ||
+      names.some((name, index) => name !== String(index))
+    ) {
+      return failExecutionState()
+    }
+    return
+  }
+  active.add(value)
+  try {
+    if (Array.isArray(value)) {
+      const names = Object.getOwnPropertyNames(value)
+      if (!hasCanonicalDenseArrayShape(value)) {
+        return failExecutionState()
+      }
+      if (
+        names.length !== value.length + 1 ||
+        names[value.length] !== 'length' ||
+        names.some(
+          (name, index) =>
+            index < value.length && name !== String(index),
+        )
+      ) {
+        return failExecutionState()
+      }
+      for (let index = 0; index < value.length; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(
+          value,
+          String(index),
+        )
+        if (
+          descriptor === undefined ||
+          descriptor.get !== undefined ||
+          descriptor.set !== undefined ||
+          descriptor.enumerable !== true
+        ) {
+          return failExecutionState()
+        }
+        requireCanonicalDataGraph(descriptor.value, active)
+      }
+      return
+    }
+    if (!isRecord(value)) return failExecutionState()
+    for (const key of Object.getOwnPropertyNames(value)) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)
+      if (
+        descriptor === undefined ||
+        descriptor.get !== undefined ||
+        descriptor.set !== undefined ||
+        descriptor.enumerable !== true
+      ) {
+        return failExecutionState()
+      }
+      requireCanonicalDataGraph(descriptor.value, active)
+    }
+  } finally {
+    active.delete(value)
+  }
 }
 
 /**
@@ -1003,6 +1946,13 @@ function requireExactJsonValue(
   expected: unknown,
 ): void {
   if (
+    typeof actual === 'object' &&
+    actual !== null &&
+    nodeUtilTypes.isProxy(actual)
+  ) {
+    return failExecutionState()
+  }
+  if (
     expected === null ||
     typeof expected === 'boolean' ||
     typeof expected === 'number' ||
@@ -1057,6 +2007,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   if (
     typeof value !== 'object' ||
     value === null ||
+    nodeUtilTypes.isProxy(value) ||
     Array.isArray(value)
   ) {
     return false
@@ -1075,7 +2026,10 @@ function requireExactKeys(
   record: Readonly<Record<string, unknown>>,
   expected: readonly string[],
 ): void {
-  const actual = Object.keys(record).sort()
+  if (Object.getOwnPropertySymbols(record).length !== 0) {
+    return failExecutionState()
+  }
+  const actual = Object.getOwnPropertyNames(record).sort()
   const wanted = [...expected].sort()
   if (
     actual.length !== wanted.length ||
@@ -1225,8 +2179,14 @@ function readNonNegativeSafeInteger(value: unknown): number {
 function encodeCanonicalExecutionState(
   value: WorkspaceSearchMigrationExecutionState,
 ): Uint8Array {
+  const document = value.executionStateVersion === 1
+    ? value
+    : {
+        ...value,
+        apply: encodeTraversal(value.apply),
+      }
   const bytes = new TextEncoder().encode(
-    serializeCanonicalJson(value),
+    serializeCanonicalJson(document),
   )
   if (
     bytes.byteLength === 0 ||
@@ -1268,6 +2228,7 @@ function encodeCanonicalOperationMarker(
  */
 function copyBoundedBytes(bytes: Uint8Array): Uint8Array {
   if (
+    nodeUtilTypes.isProxy(bytes) ||
     !(bytes instanceof Uint8Array) ||
     bytes.byteLength === 0 ||
     bytes.byteLength >

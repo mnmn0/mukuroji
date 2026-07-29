@@ -675,7 +675,7 @@ canonical bytes、長さ、digest、retention、run/configuration/sequenceを再
 target transactionより前に保存しますが、そのobjectはoperation markerへ原子的に参照されるまでは
 authoritativeなcommitted journalには数えません。
 
-One-operation apply AWS portは、lease/current pointer/receipt、closed writer fence、revision 2 boundary、
+Apply progress AWS portは、lease/current pointer/receipt、closed writer fence、revision 2 boundary、
 sealed authority v2、immutable revision 1 admission、mutable execution state、source、target、
 operation-id markerを固定順で扱います。No-opはtarget ConditionCheckだけを行う11 item transaction、
 mutationは同じ位置でconditional Put/Deleteし、さらにjournal-sequence indexを追加する12 item
@@ -688,6 +688,22 @@ Putします。応答消失または再起動後はmarkerを先に強整合read�
 successor、journal exact versionも相互検証して、同じcommitだけを成功として回収します。異なる内容で同じ
 operation IDまたはsequenceを再利用した場合はfail-closedにします。
 
+Apply checkpointを開始できるのは、sealed planの全operation markerがdurableになった後だけです。
+Mutable execution-state v2はv1をread-compatibleに保ったまま、4 sourceとtargetのlosslessな
+`LastEvaluatedKey`、累積counter/digest state、page countを保持します。Revisionはadmission、
+operation count、全5地点のdurable page countから再導出し、1 transitionでexactly 1 pageだけ進むことを
+検証します。Sourceは既存のmeasured strong Scan reducerを、targetは既存のowned/ignored/invalid
+classificationをapply用のmapped/projected/ignored/invalid checkpointへstrictに変換して再利用します。
+
+各checkpoint commitはcurrent authorityの3 ConditionCheck、closed writer fence、revision 2 execution
+boundary、sealed authority v2、immutable execution admission、mutable execution-stateの
+absent/exact-predecessor CAS、immutable checkpoint receiptを固定9 item transactionへ結合します。
+Receipt keyはrun/configuration/state TableId/execution admission/location/expected revisionから決定し、
+predecessor/successor state digest、successor run-state digest、canonical checkpoint、commit timeを
+自己digest付きで保存します。応答消失またはprocess再起動後はreceiptとmutable stateを強整合readし、
+exact successor、またはv2 revision arithmeticと単調checkpointが証明する後続stateだけを採用します。
+Completed locationへの再呼出しは追加Scan/transactionを行いません。
+
 DynamoDB ConditionExpressionには、itemの未知のtop-level属性名を列挙せずに「完全な属性集合」を比較する
 primitiveがありません。したがって、強整合read後からtransactionまでにplanned itemにもknown schemaにも
 ない属性を追加するwriterが存在すると、その追加を完全CASすることはできません。Application writer fence、
@@ -697,16 +713,25 @@ journal upload後かつtransaction前のall-six incarnation再検証を一体の
 使用しません。
 
 Managed resource-identity compositionは、同じmeasurement generation、pinned DynamoDB client、private
-immutable-artifact portからjournal gatewayとone-operation apply portを構築します。各strong readの前後と
+immutable-artifact portからjournal gatewayとapply operation/checkpoint portを構築します。各strong read、
+source/target checkpoint Scanの前後と
 transaction直前にall-six-table incarnationを再検証し、送信後の成功・error pathで再検証できない場合は
 shared execution-control generationをquarantineして`AMBIGUOUS_OPERATION_UNRESOLVED`を返します。この
 post-send quarantineをstandalone adapter内の通常のresponse-loss retryへ戻しません。ただし、現時点では
-このmanaged apply capabilityをcontrol CLIまたはpost-close orchestratorへ公開していません。Checkpoint、
-apply seal、full verify、reverse rollback、terminal outcomeへ
+このmanaged apply capabilityをcontrol CLIまたはpost-close orchestratorへ公開していません。Apply seal、
+full verify、reverse rollback、terminal outcomeへ
 束縛したwriter-fence release、close後のdrain/replanning orchestration、apply CLI、migration専用
-observability/alarm、restore/failover/DR drill、non-production実行evidenceも未完了です。One-operation
+observability/alarm、restore/failover/DR drill、non-production実行evidenceも未完了です。Operation/checkpoint
 transactionが存在してもcomplete apply/verify/rollback supervisorにはならないため、Production migration
 gateは閉じたままです。
+
+現行のmanaged compositionでは、成功する非終端checkpoint 1ページにつき論理上146回の
+`DescribeTable`を実行します。AWS SDK標準のthrottling retry/backoffだけではこの呼び出し量をrate制御
+しないため、Production migration gateを開く前に`DescribeTable`のthrottling metric/alarm、実行accountの
+rate budget、boundedなpage cadenceと停止条件を定義してnon-production evidenceを取得します。同一
+transition内でもstrong read、Scan、transactionの前後という時点保証をまたぐincarnation結果は再利用せず、
+呼び出しをまとめる場合は同等のreplacement-detection proofとpost-send quarantineを維持します。
+
 Pure execution-boundary contractは、exact closed fence digest/authorityと全6 TableIdを持つ`closed` revision 1、
 fresh current authority、exact raw maintenance evidence、close後15分以上のdrainを持つ
 `planning-admitted` revision 2だけをcanonical bytes/digestとして受け付けます。Source planning v3 と
@@ -717,8 +742,9 @@ authority v2 rootに加え、exact planning-admitted execution boundaryのcanoni
 ConditionCheck factoryもあります。Fixed 10 item transactionへcompositionするexecution-boundary AWS
 portと、lease/pointer/receipt、closed fence、revision 2 boundary、sealed root、未作成execution-run rowを
 固定順の7 item transactionへcompositionするinitial execution-run admission portは、いずれも
-managed-session capability gateに束縛しています。One-operation apply portはこれらのexact condition
-factoryを11/12 item transactionへ再利用し、managed resource-identity compositionにも接続済みですが、
+managed-session capability gateに束縛しています。Apply portはこれらのexact condition
+factoryをoperationの11/12 itemとcheckpointの9 item transactionへ再利用し、managed
+resource-identity compositionにも接続済みですが、
 operator CLIとpost-close planning/apply orchestratorへは未接続です。したがって、これらのadapterの存在だけを根拠に
 writer-fenceを閉じたりcomplete planning/applyを開始したりしてはいけません。
 
@@ -836,9 +862,10 @@ Process exit statusは、成功を`0`、migration failureまたは`OPERATION_FAI
    create/parse/commit直前に要求し、不足するsealed planは再planningします。
    Immutable rich journal reference、admission-rooted mutable execution state、source/targetの強整合readと
    known-attribute CAS、operation marker/sequence indexによるresponse-loss reconciliation、固定11/12項目の
-   one-operation apply transactionと、そのmanaged identity composition、all-six pre/post guard、
-   post-send quarantineも実装済みです。ただし、close/admission/run creation/applyの
-   CLI・orchestrator配線、checkpoint、apply seal、full verify、reverse rollback、
+   operation transactionに加え、v2 traversal state、source/targetのbounded strong Scan、immutable
+   checkpoint receipt、固定9項目checkpoint transaction、そのmanaged identity composition、
+   all-six pre/post guard、post-send quarantineも実装済みです。ただし、close/admission/run
+   creation/applyのCLI・orchestrator配線、apply seal、full verify、reverse rollback、
    terminal outcomeに束縛したrelease、observability/alarm、DR/non-production evidenceは未実装のため、
    migration全体のproduction gateはまだ実行可能とは扱いません。
 5. Online migration は writer fence/epoch または dual-write + high-watermark catch-up を有効化し、

@@ -2,9 +2,11 @@ import { describe, expect, test } from 'bun:test'
 import {
   createMigrationDigest,
   createWorkspaceSearchConfigurationHash,
+  type DynamoAttributeMap,
   MigrationDigestAccumulator,
   serializeCanonicalJson,
   type MigrationKeyAttribute,
+  type MigrationSourceCheckpoint,
   type MigrationTableIdentity,
   type WorkspaceSearchMaintenanceEvidenceReceipt,
   type WorkspaceSearchMigrationConfiguration,
@@ -21,6 +23,7 @@ import {
   serializeWorkspaceSearchMigrationExecutionRun,
 } from './migration-execution-run'
 import {
+  createWorkspaceSearchMigrationCheckpointExecutionState,
   createWorkspaceSearchMigrationExecutionState,
   parseWorkspaceSearchMigrationOperationMarker,
   parseWorkspaceSearchMigrationExecutionState,
@@ -28,6 +31,8 @@ import {
   serializeWorkspaceSearchMigrationOperationMarker,
   serializeWorkspaceSearchMigrationExecutionState,
   type WorkspaceSearchMigrationExecutionState,
+  type WorkspaceSearchMigrationExecutionStateV1,
+  type WorkspaceSearchMigrationExecutionStateV2,
   WORKSPACE_SEARCH_MIGRATION_EXECUTION_STATE_MAX_BYTES,
   WorkspaceSearchMigrationExecutionStateError,
 } from './migration-execution-state'
@@ -35,7 +40,10 @@ import {
   WORKSPACE_SEARCH_MIGRATION_PLAN_ARTIFACT_OBJECT_KEY_PREFIX,
 } from './migration-plan-artifact'
 import {
+  createEmptyWorkspaceSearchPlanDigest,
   createWorkspaceSearchMigrationRunState,
+  type WorkspaceSearchMigrationAuthority,
+  type WorkspaceSearchMigrationCheckpointLocation,
 } from './migration-state-machine'
 
 const runId = 'mutable-execution-state-test'
@@ -68,6 +76,8 @@ describe('Workspace Search migration mutable execution state', () => {
         executionState,
       )
 
+    expect(executionState.executionStateVersion).toBe(1)
+    expect(bytes).toEqual(encodeCanonicalJson(executionState))
     expect(
       parseWorkspaceSearchMigrationExecutionState(bytes),
     ).toEqual(executionState)
@@ -459,6 +469,339 @@ describe('Workspace Search migration mutable execution state', () => {
     )
   })
 
+  test('creates the first v2 checkpoint directly from a zero-operation admission', () => {
+    const admission = createAdmission(0)
+    const checkpoint = createCheckpoint(
+      'project-directory',
+      1,
+      false,
+    )
+    const state =
+      createWorkspaceSearchMigrationCheckpointExecutionState({
+        admission,
+        authority: createAuthority(
+          '2026-07-30T00:03:00.000Z',
+        ),
+        location: 'project-directory',
+        checkpoint,
+      })
+    const bytes =
+      serializeWorkspaceSearchMigrationExecutionState(state)
+    const parsed =
+      parseWorkspaceSearchMigrationExecutionState(bytes)
+    const reconstructed =
+      reconstructWorkspaceSearchMigrationRunState(
+        admission,
+        parsed,
+      )
+
+    expect(state.executionStateVersion).toBe(2)
+    expect(state.revision).toBe(2)
+    expect(state.appliedOperationCount).toBe(0)
+    expect(state.apply.sources['project-directory']).toEqual(
+      checkpoint,
+    )
+    expect(parsed).toEqual(state)
+    expect(reconstructed).toMatchObject({
+      revision: 2,
+      status: 'applying',
+      appliedOperationCount: 0,
+      updatedAt: '2026-07-30T00:03:00.000Z',
+    })
+    expect(reconstructed.apply).toEqual(state.apply)
+    expect(state.executionStateDigest).toBe(
+      digestSerializedExecutionState(state),
+    )
+  })
+
+  test('upgrades a complete v1 predecessor and preserves multi-page v2 traversal', () => {
+    const admission = createAdmission()
+    const applied = createFullyAppliedV1State(admission)
+    const firstCheckpoint = createCheckpoint(
+      'target',
+      1,
+      false,
+    )
+    const first =
+      createWorkspaceSearchMigrationCheckpointExecutionState({
+        admission,
+        predecessor: applied.state,
+        authority: createAuthority(
+          '2026-07-30T00:04:00.000Z',
+        ),
+        location: 'target',
+        checkpoint: firstCheckpoint,
+      })
+    const terminalCheckpoint = createCheckpoint(
+      'target',
+      2,
+      true,
+    )
+    const second =
+      createWorkspaceSearchMigrationCheckpointExecutionState({
+        admission,
+        predecessor: first,
+        authority: createAuthority(
+          '2026-07-30T00:04:30.000Z',
+        ),
+        location: 'target',
+        checkpoint: terminalCheckpoint,
+      })
+    const parsed = parseWorkspaceSearchMigrationExecutionState(
+      serializeWorkspaceSearchMigrationExecutionState(second),
+    )
+    const reconstructed =
+      reconstructWorkspaceSearchMigrationRunState(
+        admission,
+        parsed,
+      )
+
+    expect(applied.state.executionStateVersion).toBe(1)
+    expect(first).toMatchObject({
+      executionStateVersion: 2,
+      revision: 5,
+      appliedOperationCount: 3,
+    })
+    expect(second).toMatchObject({
+      executionStateVersion: 2,
+      revision: 6,
+      appliedOperationCount: 3,
+      journalSequence: 1,
+      journalHeadDigest: applied.state.journalHeadDigest,
+      minimumJournalRetainUntil:
+        applied.state.minimumJournalRetainUntil,
+    })
+    expect(second.apply.target).toEqual(terminalCheckpoint)
+    expect(
+      second.apply.sources['project-directory'].aggregate
+        .pageCount,
+    ).toBe(0)
+    expect(parsed).toEqual(second)
+    expect(reconstructed.apply).toEqual(second.apply)
+    expect(reconstructed.revision).toBe(
+      1 +
+        reconstructed.appliedOperationCount +
+        totalTraversalPageCount(reconstructed.apply),
+    )
+
+    const unsupportedMarker = createNoOpMarker(
+      admission,
+      4,
+      '2026-07-30T00:04:40.000Z',
+    )
+    expectExecutionStateFailure(() =>
+      createWorkspaceSearchMigrationExecutionState({
+        admission,
+        predecessor: second,
+        nextRunState: advanceRunState(
+          reconstructed,
+          unsupportedMarker,
+        ),
+        marker: unsupportedMarker,
+      })
+    )
+  })
+
+  test('rejects premature, stale, schema-invalid, and non-advancing checkpoints', () => {
+    const admission = createAdmission()
+    expectExecutionStateFailure(() =>
+      createWorkspaceSearchMigrationCheckpointExecutionState({
+        admission,
+        authority: createAuthority(
+          '2026-07-30T00:03:00.000Z',
+        ),
+        location: 'project-directory',
+        checkpoint: createCheckpoint(
+          'project-directory',
+          1,
+          false,
+        ),
+      })
+    )
+
+    const applied = createFullyAppliedV1State(admission)
+    expectExecutionStateFailure(() =>
+      createWorkspaceSearchMigrationCheckpointExecutionState({
+        admission,
+        predecessor: applied.state,
+        authority: createAuthority(
+          '2026-07-30T00:04:00.000Z',
+        ),
+        location: 'project-directory',
+        checkpoint: createCheckpoint('target', 1, false),
+      })
+    )
+
+    const checkpoint = createCheckpoint(
+      'project-directory',
+      1,
+      false,
+    )
+    const first =
+      createWorkspaceSearchMigrationCheckpointExecutionState({
+        admission,
+        predecessor: applied.state,
+        authority: createAuthority(
+          '2026-07-30T00:04:00.000Z',
+        ),
+        location: 'project-directory',
+        checkpoint,
+      })
+    expectExecutionStateFailure(() =>
+      createWorkspaceSearchMigrationCheckpointExecutionState({
+        admission,
+        predecessor: first,
+        authority: createAuthority(
+          '2026-07-30T00:04:30.000Z',
+        ),
+        location: 'project-directory',
+        checkpoint,
+      })
+    )
+    expectExecutionStateFailure(() =>
+      createWorkspaceSearchMigrationCheckpointExecutionState({
+        admission,
+        predecessor: first,
+        authority: createAuthority(
+          '2026-07-30T00:03:59.000Z',
+        ),
+        location: 'project-directory',
+        checkpoint: createCheckpoint(
+          'project-directory',
+          2,
+          true,
+        ),
+      })
+    )
+
+    const wrongOwner = createAuthority(
+      '2026-07-30T00:04:30.000Z',
+    )
+    Reflect.set(wrongOwner, 'ownerId', 'another-owner')
+    expectExecutionStateFailure(() =>
+      createWorkspaceSearchMigrationCheckpointExecutionState({
+        admission,
+        predecessor: first,
+        authority: wrongOwner,
+        location: 'project-directory',
+        checkpoint: createCheckpoint(
+          'project-directory',
+          2,
+          true,
+        ),
+      })
+    )
+    expectExecutionStateFailure(() =>
+      createWorkspaceSearchMigrationCheckpointExecutionState({
+        admission: createAdmission(0),
+        predecessor: first,
+        authority: createAuthority(
+          '2026-07-30T00:04:30.000Z',
+        ),
+        location: 'project-directory',
+        checkpoint: createCheckpoint(
+          'project-directory',
+          2,
+          true,
+        ),
+      })
+    )
+  })
+
+  test('rejects v2 digest, revision, extra-key, accessor, symbol, cycle, and proxy attacks', () => {
+    const admission = createAdmission(0)
+    const state =
+      createWorkspaceSearchMigrationCheckpointExecutionState({
+        admission,
+        authority: createAuthority(
+          '2026-07-30T00:03:00.000Z',
+        ),
+        location: 'target',
+        checkpoint: createCheckpoint('target', 1, false),
+      })
+    const document = parseJsonRecord(
+      serializeWorkspaceSearchMigrationExecutionState(state),
+    )
+    Reflect.set(document, 'revision', state.revision + 1)
+    Reflect.set(
+      document,
+      'executionStateDigest',
+      digestExecutionDocument(document),
+    )
+    expectExecutionStateFailure(() =>
+      parseWorkspaceSearchMigrationExecutionState(
+        encodeCanonicalJson(document),
+      )
+    )
+
+    const pageCountDocument = parseJsonRecord(
+      serializeWorkspaceSearchMigrationExecutionState(state),
+    )
+    const apply = readTestRecord(pageCountDocument.apply)
+    const target = readTestRecord(apply.target)
+    const aggregate = readTestRecord(target.aggregate)
+    Reflect.set(aggregate, 'pageCount', 2)
+    Reflect.set(
+      pageCountDocument,
+      'executionStateDigest',
+      digestExecutionDocument(pageCountDocument),
+    )
+    expectExecutionStateFailure(() =>
+      parseWorkspaceSearchMigrationExecutionState(
+        encodeCanonicalJson(pageCountDocument),
+      )
+    )
+
+    const extended = structuredClone(state)
+    Reflect.set(extended.apply, 'raw-extra-key', true)
+    expectExecutionStateFailure(() =>
+      serializeWorkspaceSearchMigrationExecutionState(extended)
+    )
+
+    const accessor = structuredClone(state)
+    let getterInvoked = false
+    Object.defineProperty(
+      accessor.apply.target.aggregate,
+      'pageCount',
+      {
+        enumerable: true,
+        get() {
+          getterInvoked = true
+          return 1
+        },
+      },
+    )
+    expectExecutionStateFailure(() =>
+      serializeWorkspaceSearchMigrationExecutionState(accessor)
+    )
+    expect(getterInvoked).toBe(false)
+
+    const symbolic = structuredClone(state)
+    Reflect.set(symbolic.apply.target, Symbol('raw-symbol'), true)
+    expectExecutionStateFailure(() =>
+      serializeWorkspaceSearchMigrationExecutionState(symbolic)
+    )
+
+    const cyclic = structuredClone(state)
+    const cursor = cyclic.apply.target.cursor
+    if (cursor === undefined) {
+      throw new Error('Expected checkpoint cursor fixture.')
+    }
+    Reflect.set(cursor, 'loop', { M: cursor })
+    expectExecutionStateFailure(() =>
+      serializeWorkspaceSearchMigrationExecutionState(cyclic)
+    )
+
+    const hostile = new Proxy(state, {
+      ownKeys() {
+        throw new Error('raw-v2-proxy-secret')
+      },
+    })
+    expectExecutionStateFailure(() =>
+      serializeWorkspaceSearchMigrationExecutionState(hostile)
+    )
+  })
+
   test('round-trips strict mutation and no-op operation markers', () => {
     const admission = createAdmission()
     const mutation = createMutationMarker(
@@ -547,11 +890,14 @@ describe('Workspace Search migration mutable execution state', () => {
 })
 
 /**
- * Creates one valid immutable admission with a three-operation sealed plan.
+ * Creates one valid immutable admission with a selected sealed-plan size.
  *
+ * @param planOperationCount - Exact number of durable plan operations.
  * @returns Strict revision-one execution admission.
  */
-function createAdmission(): WorkspaceSearchMigrationExecutionRun {
+function createAdmission(
+  planOperationCount = 3,
+): WorkspaceSearchMigrationExecutionRun {
   const configuration = createConfiguration()
   const configurationHash =
     createWorkspaceSearchConfigurationHash(configuration)
@@ -564,9 +910,11 @@ function createAdmission(): WorkspaceSearchMigrationExecutionRun {
     configurationHash,
     dryRunEvidenceDigest: digest('dry-run-evidence'),
     planningSnapshotDigest: digest('planning-snapshot'),
-    planDigest: digest('three-operation-plan'),
-    planOperationCount: 3,
-    sourceOperationCount: 3,
+    planDigest: planOperationCount === 0
+      ? createEmptyWorkspaceSearchPlanDigest()
+      : digest(`${planOperationCount}-operation-plan`),
+    planOperationCount,
+    sourceOperationCount: planOperationCount,
     orphanOperationCount: 0,
     createdAt: planCreatedAt,
   }
@@ -813,6 +1161,197 @@ function advanceRunState(
 }
 
 /**
+ * Creates a complete legacy operation predecessor for a positive-size plan.
+ *
+ * @param admission - Immutable admission with one or more operations.
+ * @returns Final v1 envelope and its complete reconstructed run state.
+ */
+function createFullyAppliedV1State(
+  admission: WorkspaceSearchMigrationExecutionRun,
+): {
+  /** Final legacy operation envelope. */
+  readonly state: WorkspaceSearchMigrationExecutionStateV1
+  /** Complete operation-only run state. */
+  readonly runState: WorkspaceSearchMigrationRunState
+} {
+  if (admission.runState.planOperationCount < 1) {
+    throw new Error('Expected a positive operation count fixture.')
+  }
+  const firstMarker = createMutationMarker(
+    admission,
+    1,
+    1,
+    operationTime(1),
+    '2026-09-05T00:00:00.000Z',
+  )
+  let runState = advanceRunState(
+    admission.runState,
+    firstMarker,
+  )
+  let state = createWorkspaceSearchMigrationExecutionState({
+    admission,
+    nextRunState: runState,
+    marker: firstMarker,
+  })
+  for (
+    let sequence = 2;
+    sequence <= admission.runState.planOperationCount;
+    sequence += 1
+  ) {
+    const marker = createNoOpMarker(
+      admission,
+      sequence,
+      operationTime(sequence),
+    )
+    runState = advanceRunState(runState, marker)
+    state = createWorkspaceSearchMigrationExecutionState({
+      admission,
+      predecessor: state,
+      nextRunState: runState,
+      marker,
+    })
+  }
+  return { state, runState }
+}
+
+/**
+ * Creates one canonical operation time before checkpoint fixtures begin.
+ *
+ * @param sequence - One-based operation sequence.
+ * @returns Canonical UTC marker time.
+ */
+function operationTime(sequence: number): string {
+  return new Date(
+    Date.parse('2026-07-30T00:03:00.000Z') +
+      sequence * 10_000,
+  ).toISOString()
+}
+
+/**
+ * Creates one active authority for a checkpoint transition.
+ *
+ * @param at - Trusted checkpoint commit time.
+ * @returns Exact active fence-seven authority.
+ */
+function createAuthority(
+  at: string,
+): WorkspaceSearchMigrationAuthority {
+  const atMilliseconds = Date.parse(at)
+  return {
+    lease: {
+      runId,
+      ownerId,
+      fenceToken: 7,
+      heartbeatAt: new Date(
+        atMilliseconds - 30_000,
+      ).toISOString(),
+      expiresAt: new Date(
+        atMilliseconds + 30_000,
+      ).toISOString(),
+    },
+    ownerId,
+    at,
+  }
+}
+
+/**
+ * Creates one cumulative valid checkpoint with one row per page.
+ *
+ * @param location - Table whose exact cursor schema is required.
+ * @param pageCount - Positive cumulative page and row count.
+ * @param completed - Whether the cumulative scan is terminal.
+ * @returns Valid cumulative checkpoint.
+ */
+function createCheckpoint(
+  location: WorkspaceSearchMigrationCheckpointLocation,
+  pageCount: number,
+  completed: boolean,
+): MigrationSourceCheckpoint {
+  const keyAccumulator = new MigrationDigestAccumulator()
+  const contentAccumulator = new MigrationDigestAccumulator()
+  for (let page = 1; page <= pageCount; page += 1) {
+    keyAccumulator.add(digest(`${location}:key:${page}`))
+    contentAccumulator.add(
+      digest(`${location}:content:${page}`),
+    )
+  }
+  const common = {
+    completed,
+    aggregate: {
+      scanned: pageCount,
+      mapped: pageCount,
+      ignored: 0,
+      invalid: 0,
+      projected: pageCount,
+      deleted: 0,
+      keyDigest: keyAccumulator.digest(),
+      contentDigest: contentAccumulator.digest(),
+      pageCount,
+    },
+    keyDigestState: keyAccumulator.exportState(),
+    contentDigestState: contentAccumulator.exportState(),
+  }
+  return completed
+    ? common
+    : {
+        ...common,
+        cursor: createCheckpointCursor(location, pageCount),
+      }
+}
+
+/**
+ * Creates one exact raw DynamoDB key for a traversal location.
+ *
+ * @param location - Source or target table role.
+ * @param pageCount - Cumulative page used to vary the cursor.
+ * @returns Exact low-level key matching the measured table schema.
+ */
+function createCheckpointCursor(
+  location: WorkspaceSearchMigrationCheckpointLocation,
+  pageCount: number,
+): DynamoAttributeMap {
+  if (location === 'project-directory') {
+    return {
+      directoryId: { S: `directory-${pageCount}` },
+      entryKey: { S: `entry-${pageCount}` },
+    }
+  }
+  if (location === 'work-items') {
+    return {
+      directoryTeamId: { S: `team-${pageCount}` },
+      issueId: { S: `issue-${pageCount}` },
+    }
+  }
+  if (location === 'collaboration') {
+    return {
+      entityKey: { S: `entity-${pageCount}` },
+      recordKey: { S: `record-${pageCount}` },
+    }
+  }
+  return {
+    workspaceId: { S: `workspace-${pageCount}` },
+    recordKey: { S: `record-${pageCount}` },
+  }
+}
+
+/**
+ * Sums all four source and one target traversal page counts.
+ *
+ * @param traversal - Complete apply traversal.
+ * @returns Exact five-location page total.
+ */
+function totalTraversalPageCount(
+  traversal: WorkspaceSearchMigrationRunState['apply'],
+): number {
+  return traversal.sources['project-directory'].aggregate
+    .pageCount +
+    traversal.sources['work-items'].aggregate.pageCount +
+    traversal.sources.collaboration.aggregate.pageCount +
+    traversal.sources.documents.aggregate.pageCount +
+    traversal.target.aggregate.pageCount
+}
+
+/**
  * Creates the common first mutation fixture.
  *
  * @returns Admission and its first mutable state.
@@ -1045,6 +1584,86 @@ function digest(label: string): string {
  */
 function encodeCanonicalJson(value: unknown): Uint8Array {
   return new TextEncoder().encode(serializeCanonicalJson(value))
+}
+
+/**
+ * Parses test-owned execution-state bytes into a mutable plain record.
+ *
+ * @param bytes - Canonical JSON fixture bytes.
+ * @returns Parsed plain record.
+ */
+function parseJsonRecord(
+  bytes: Uint8Array,
+): Record<string, unknown> {
+  const parsed: unknown = JSON.parse(
+    new TextDecoder().decode(bytes),
+  )
+  return readTestRecord(parsed)
+}
+
+/**
+ * Narrows one test fixture value to a plain record.
+ *
+ * @param value - Candidate fixture value.
+ * @returns Plain record.
+ */
+function readTestRecord(
+  value: unknown,
+): Record<string, unknown> {
+  if (!isTestRecord(value)) {
+    throw new Error('Expected a plain test record.')
+  }
+  return value
+}
+
+/**
+ * Checks whether one test fixture value is a plain record.
+ *
+ * @param value - Candidate fixture value.
+ * @returns Whether the value is a plain record.
+ */
+function isTestRecord(
+  value: unknown,
+): value is Record<string, unknown> {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    Array.isArray(value)
+  ) {
+    return false
+  }
+  const prototype: unknown = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+/**
+ * Recomputes a parsed v2 document self-digest after test tampering.
+ *
+ * @param document - Mutable encoded v2 document.
+ * @returns Digest of every encoded field except the self-digest.
+ */
+function digestExecutionDocument(
+  document: Readonly<Record<string, unknown>>,
+): string {
+  const fields = structuredClone(document)
+  Reflect.deleteProperty(fields, 'executionStateDigest')
+  return createMigrationDigest(fields)
+}
+
+/**
+ * Recomputes one valid v2 state self-digest from its serialized document.
+ *
+ * @param state - Strict traversal-capable runtime state.
+ * @returns Digest of every encoded field except the self-digest.
+ */
+function digestSerializedExecutionState(
+  state: WorkspaceSearchMigrationExecutionStateV2,
+): string {
+  return digestExecutionDocument(
+    parseJsonRecord(
+      serializeWorkspaceSearchMigrationExecutionState(state),
+    ),
+  )
 }
 
 /**

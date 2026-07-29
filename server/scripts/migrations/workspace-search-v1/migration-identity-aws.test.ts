@@ -108,6 +108,10 @@ import {
 import type {
   WorkspaceSearchMigrationExecutionRun,
 } from './migration-execution-run'
+import {
+  type WorkspaceSearchMigrationApplyOperationAwsPort,
+  workspaceSearchMigrationApplyCheckpointTransactionIndex,
+} from './migration-apply-operation-aws'
 import type {
   PublishWorkspaceSearchMigrationSealedPlanningAuthorityV2Input,
 } from './migration-sealed-planning-authority-aws'
@@ -136,6 +140,7 @@ import {
   createEmptyWorkspaceSearchPlanDigest,
   createWorkspaceSearchPlanLeafDigest,
   type WorkspaceSearchApplyOperationCommandEvent,
+  type WorkspaceSearchMigrationCheckpointCommandInput,
   type WorkspaceSearchMigrationCommandInput,
   type WorkspaceSearchPlannedOperation,
 } from './migration-state-machine'
@@ -5982,6 +5987,419 @@ describe('Workspace Search migration AWS identity adapter', () => {
   )
 
   test(
+    'scans and commits one managed source apply checkpoint with all-six guards',
+    async () => {
+      const fixture =
+        await createManagedApplyOperationFixture(
+          'apply-source-checkpoint',
+        )
+      const apply =
+        await createManagedApplyCheckpointPort(fixture)
+      fixture.transport.scanSourceOutput = {
+        $metadata: {},
+        Count: 1,
+        Items: [createManagedApplySourceItem()],
+        ScannedCount: 1,
+      }
+      const sourceScans =
+        fixture.transport.scanSourceCommands.length
+      const targetScans =
+        fixture.transport.scanTargetCommands.length
+      const transactions =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+      const trace: string[] = []
+      fixture.transport.describeTableEffect = (tableName) => {
+        trace.push(tableName)
+      }
+      fixture.transport.scanSourceEffect = () => {
+        trace.push('source-checkpoint-scan')
+      }
+      fixture.transport.transactWritePrePlanAuthorityEffect = () => {
+        trace.push('checkpoint-transaction')
+      }
+
+      const next = await apply.saveApplyCheckpoint(
+        createManagedApplyCheckpointCommand(
+          fixture,
+          'project-directory',
+          2,
+        ),
+      )
+
+      expect(next).toMatchObject({
+        revision: 3,
+        appliedOperationCount: 1,
+        status: 'applying',
+        apply: {
+          sources: {
+            'project-directory': {
+              completed: true,
+              aggregate: {
+                scanned: 1,
+                mapped: 1,
+                projected: 1,
+                deleted: 0,
+                pageCount: 1,
+              },
+            },
+          },
+        },
+      })
+      expect(fixture.transport.scanSourceCommands)
+        .toHaveLength(sourceScans + 1)
+      expect(fixture.transport.scanTargetCommands)
+        .toHaveLength(targetScans)
+      expect(
+        fixture.transport.scanSourceCommands[sourceScans]?.input,
+      ).toEqual({
+        TableName:
+          fixture.requested.tables['project-directory'],
+        ConsistentRead: true,
+        Limit: 100,
+      })
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactions + 1)
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands[
+            transactions
+          ]?.input.TransactItems,
+      ).toHaveLength(
+        workspaceSearchMigrationApplyCheckpointTransactionIndex.count,
+      )
+      expect(
+        workspaceSearchMigrationApplyCheckpointTransactionIndex.count,
+      ).toBe(9)
+
+      const scanIndex = trace.indexOf('source-checkpoint-scan')
+      const transactionIndex =
+        trace.indexOf('checkpoint-transaction')
+      expect(scanIndex).toBeGreaterThan(0)
+      expect(transactionIndex).toBeGreaterThan(scanIndex)
+      const guardsBeforeScan = trace.slice(0, scanIndex)
+      const guardsAfterScan =
+        trace.slice(scanIndex + 1, transactionIndex)
+      const expectedTables = [
+        fixture.requested.tables['migration-state'],
+        fixture.requested.tables['project-directory'],
+        fixture.requested.tables['work-items'],
+        fixture.requested.tables.collaboration,
+        fixture.requested.tables.documents,
+        fixture.requested.tables['workspace-search'],
+      ]
+      for (const tableName of expectedTables) {
+        expect(guardsBeforeScan).toContain(tableName)
+        expect(guardsAfterScan).toContain(tableName)
+      }
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'converts one managed target Scan page into projected apply progress',
+    async () => {
+      const fixture =
+        await createManagedApplyOperationFixture(
+          'apply-target-checkpoint',
+        )
+      const apply =
+        await createManagedApplyCheckpointPort(fixture)
+      fixture.transport.scanTargetOutput = {
+        $metadata: {},
+        Count: 1,
+        Items: [createManagedApplyTargetItem(false)],
+        ScannedCount: 1,
+      }
+      const sourceScans =
+        fixture.transport.scanSourceCommands.length
+      const targetScans =
+        fixture.transport.scanTargetCommands.length
+      const transactions =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+
+      const next = await apply.saveApplyCheckpoint(
+        createManagedApplyCheckpointCommand(
+          fixture,
+          'target',
+          2,
+        ),
+      )
+
+      expect(next).toMatchObject({
+        revision: 3,
+        apply: {
+          target: {
+            completed: true,
+            aggregate: {
+              scanned: 1,
+              mapped: 1,
+              ignored: 0,
+              invalid: 0,
+              projected: 1,
+              deleted: 0,
+              pageCount: 1,
+            },
+          },
+        },
+      })
+      expect(fixture.transport.scanSourceCommands)
+        .toHaveLength(sourceScans)
+      expect(fixture.transport.scanTargetCommands)
+        .toHaveLength(targetScans + 1)
+      expect(
+        fixture.transport.scanTargetCommands[targetScans]?.input,
+      ).toEqual({
+        TableName: fixture.requested.tables['workspace-search'],
+        ConsistentRead: true,
+        Limit: 100,
+      })
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands[
+            transactions
+          ]?.input.TransactItems,
+      ).toHaveLength(
+        workspaceSearchMigrationApplyCheckpointTransactionIndex.count,
+      )
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'invalidates pending managed checkpoint scans on close and remeasurement',
+    async () => {
+      const lifecycles:
+        readonly ('close' | 'remeasure')[] =
+          ['close', 'remeasure']
+      for (const lifecycle of lifecycles) {
+        const fixture =
+          await createManagedApplyOperationFixture(
+            `apply-checkpoint-${lifecycle}`,
+          )
+        const apply =
+          await createManagedApplyCheckpointPort(fixture)
+        const deferred = createDeferredScanOutput()
+        fixture.transport.scanSourceDeferred = deferred.promise
+        const sourceScans =
+          fixture.transport.scanSourceCommands.length
+        const transactions =
+          fixture.transport
+            .transactWritePrePlanAuthorityCommands.length
+        const pending = apply.saveApplyCheckpoint(
+          createManagedApplyCheckpointCommand(
+            fixture,
+            'project-directory',
+            2,
+          ),
+        )
+        await waitForRecordedScanCount(
+          fixture.transport,
+          sourceScans + 1,
+        )
+        let replacement:
+          Promise<WorkspaceSearchMigrationConfiguration> | undefined
+        if (lifecycle === 'close') {
+          fixture.port.close()
+        } else {
+          replacement = fixture.port.measureConfiguration()
+        }
+        fixture.transport.scanSourceDeferred = undefined
+        deferred.resolve(createEmptyScanOutput())
+
+        await expect(pending).rejects.toEqual(
+          new WorkspaceSearchMigrationFailure(
+            'INVALID_STATE',
+            'Workspace Search migration apply operation failed.',
+          ),
+        )
+        expect(
+          fixture.transport
+            .transactWritePrePlanAuthorityCommands,
+        ).toHaveLength(transactions)
+        expect(fixture.transport.scanSourceCommands)
+          .toHaveLength(sourceScans + 1)
+        if (replacement !== undefined) {
+          await replacement
+          fixture.port.close()
+        }
+      }
+    },
+  )
+
+  test(
+    'quarantines response-loss after a checkpoint send observes table drift',
+    async () => {
+      const fixture =
+        await createManagedApplyOperationFixture(
+          'apply-checkpoint-post-send-drift',
+        )
+      const apply =
+        await createManagedApplyCheckpointPort(fixture)
+      fixture.transport.scanSourceOutput = createEmptyScanOutput()
+      const targetTableName =
+        fixture.requested.tables['workspace-search']
+      const originalTarget =
+        fixture.transport.describeTableOutputs.get(targetTableName)
+      if (originalTarget === undefined) {
+        throw new Error('Expected measured apply target identity.')
+      }
+      const transactions =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+      const sourceScans =
+        fixture.transport.scanSourceCommands.length
+      fixture.transport
+        .transactWritePrePlanAuthorityPostCommitEffect = () => {
+          fixture.transport.describeTableOutputs.set(
+            targetTableName,
+            createReplacementDescribeTableOutput(
+              'workspace-search',
+              targetTableName,
+              fixture.requested,
+            ),
+          )
+        }
+
+      const failure =
+        await captureWorkspaceSearchMigrationFailure(
+          apply.saveApplyCheckpoint(
+            createManagedApplyCheckpointCommand(
+              fixture,
+              'project-directory',
+              2,
+            ),
+          ),
+        )
+
+      expect(failure).toEqual(
+        new WorkspaceSearchMigrationFailure(
+          'AMBIGUOUS_OPERATION_UNRESOLVED',
+          'Workspace Search migration apply operation failed.',
+        ),
+      )
+      expect(fixture.transport.scanSourceCommands)
+        .toHaveLength(sourceScans + 1)
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactions + 1)
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands[
+            transactions
+          ]?.input.TransactItems,
+      ).toHaveLength(
+        workspaceSearchMigrationApplyCheckpointTransactionIndex.count,
+      )
+
+      fixture.transport
+        .transactWritePrePlanAuthorityPostCommitEffect = undefined
+      fixture.transport.describeTableOutputs.set(
+        targetTableName,
+        originalTarget,
+      )
+      const scans = fixture.transport.scanSourceCommands.length
+      const reads =
+        fixture.transport.getPrePlanAuthorityCommands.length
+      const expectedQuarantineFailure =
+        new WorkspaceSearchMigrationFailure(
+          'INVALID_STATE',
+          'Workspace Search migration apply operation failed.',
+        )
+      await expect(apply.readRunState())
+        .rejects.toEqual(expectedQuarantineFailure)
+      expect(() =>
+        fixture.port.createApplyOperationPort(
+          fixture.executionBoundary,
+          fixture.sealedPlanningAuthority,
+          fixture.closedWriterFenceRecord,
+          fixture.executionRun,
+        ),
+      ).toThrow(expectedQuarantineFailure)
+      expect(fixture.transport.scanSourceCommands).toHaveLength(scans)
+      expect(
+        fixture.transport.getPrePlanAuthorityCommands,
+      ).toHaveLength(reads)
+
+      await fixture.port.measureConfiguration()
+      const recovered = fixture.port.createApplyOperationPort(
+        fixture.executionBoundary,
+        fixture.sealedPlanningAuthority,
+        fixture.closedWriterFenceRecord,
+        fixture.executionRun,
+      )
+      await expect(recovered.readRunState()).resolves.toMatchObject({
+        revision: 3,
+        apply: {
+          sources: {
+            'project-directory': {
+              completed: true,
+              aggregate: { pageCount: 1, scanned: 0 },
+            },
+          },
+        },
+      })
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'returns terminal checkpoint state without another Scan or transaction',
+    async () => {
+      const fixture =
+        await createManagedApplyOperationFixture(
+          'apply-terminal-checkpoint',
+        )
+      const apply =
+        await createManagedApplyCheckpointPort(fixture)
+      fixture.transport.scanSourceOutput = createEmptyScanOutput()
+      const command = createManagedApplyCheckpointCommand(
+        fixture,
+        'project-directory',
+        2,
+      )
+      const terminal = await apply.saveApplyCheckpoint(command)
+      const scans = fixture.transport.scanSourceCommands.length
+      const transactions =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+
+      const exactRetry = await apply.saveApplyCheckpoint(command)
+      const laterRevision = await apply.saveApplyCheckpoint(
+        createManagedApplyCheckpointCommand(
+          fixture,
+          'project-directory',
+          3,
+        ),
+      )
+
+      expect(terminal).toMatchObject({
+        revision: 3,
+        apply: {
+          sources: {
+            'project-directory': {
+              completed: true,
+              aggregate: { pageCount: 1, scanned: 0 },
+            },
+          },
+        },
+      })
+      expect(exactRetry).toEqual(terminal)
+      expect(laterRevision).toEqual(terminal)
+      expect(fixture.transport.scanSourceCommands).toHaveLength(scans)
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactions)
+      fixture.port.close()
+    },
+  )
+
+  test(
     'routes managed apply reads through all six pinned table guards',
     async () => {
       const fixture =
@@ -9782,6 +10200,33 @@ async function createManagedApplyOperationFixture(
 }
 
 /**
+ * Creates one managed apply port and durably completes its single plan item.
+ *
+ * @param fixture - Exact admitted managed apply fixture.
+ * @returns Apply port at revision two, ready for checkpoint traversal.
+ */
+async function createManagedApplyCheckpointPort(
+  fixture: ManagedApplyOperationFixture,
+): Promise<WorkspaceSearchMigrationApplyOperationAwsPort> {
+  const apply = fixture.port.createApplyOperationPort(
+    fixture.executionBoundary,
+    fixture.sealedPlanningAuthority,
+    fixture.closedWriterFenceRecord,
+    fixture.executionRun,
+  )
+  const applied = await apply.commitApplyOperation(
+    createManagedApplyOperationCommand(fixture),
+  )
+  if (
+    applied.revision !== 2 ||
+    applied.appliedOperationCount !== applied.planOperationCount
+  ) {
+    throw new Error('Expected complete managed apply operation progress.')
+  }
+  return apply
+}
+
+/**
  * Creates one strict managed apply command for the fixture's first revision.
  *
  * @param fixture - Exact admitted managed apply fixture.
@@ -9803,6 +10248,30 @@ function createManagedApplyOperationCommand(
       kind: 'apply-operation-requested',
       plannedOperation: structuredClone(fixture.plannedOperation),
     },
+  }
+}
+
+/**
+ * Creates one strict managed apply checkpoint command.
+ *
+ * @param fixture - Exact admitted managed apply fixture.
+ * @param location - Source or target traversal selected for one page.
+ * @param expectedRevision - Exact durable revision before the page.
+ * @returns Exact checkpoint command under the current lease.
+ */
+function createManagedApplyCheckpointCommand(
+  fixture: ManagedApplyOperationFixture,
+  location: WorkspaceSearchMigrationCheckpointCommandInput['location'],
+  expectedRevision: number,
+): WorkspaceSearchMigrationCheckpointCommandInput {
+  return {
+    expectedRevision,
+    lease: {
+      runId: fixture.currentAuthority.lease.runId,
+      ownerId: fixture.currentAuthority.lease.ownerId,
+      fenceToken: fixture.currentAuthority.lease.fenceToken,
+    },
+    location,
   }
 }
 
@@ -9990,7 +10459,7 @@ async function waitForRecordedScanCount(
   transport: RecordingIdentityAwsTransport,
   expectedCount: number,
 ): Promise<void> {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
     if (transport.scanSourceCommands.length >= expectedCount) return
     await Promise.resolve()
   }
