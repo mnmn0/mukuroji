@@ -916,7 +916,7 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
       }
 
       const [initialAuthority, initial] = await Promise.all([
-        this.resolveCheckpointAuthority(command),
+        this.resolveAuthority(command),
         this.readEffectiveState(),
       ])
       requireCheckpointCommandState(command, initial.runState)
@@ -943,7 +943,7 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
       })
 
       const [authority, current] = await Promise.all([
-        this.resolveCheckpointAuthority(command),
+        this.resolveAuthority(command),
         this.readEffectiveState(),
       ])
       requireCheckpointCommandState(command, current.runState)
@@ -1060,18 +1060,6 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
       return failApply('CONFIGURATION_DRIFT')
     }
     return detached
-  }
-
-  /**
-   * Resolves fresh current authority for one checkpoint command.
-   *
-   * @param command - Detached checkpoint command.
-   * @returns Exact fresh durable authority.
-   */
-  private async resolveCheckpointAuthority(
-    command: PreparedApplyCheckpointCommand,
-  ): Promise<WorkspaceSearchMigrationPrePlanAuthority> {
-    return this.resolveAuthority(command)
   }
 
   /**

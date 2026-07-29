@@ -1642,26 +1642,42 @@ function requireCanonicalDataGraph(
     return
   }
   active.add(value)
-  if (Array.isArray(value)) {
-    const names = Object.getOwnPropertyNames(value)
-    if (!hasCanonicalDenseArrayShape(value)) {
-      return failExecutionState()
+  try {
+    if (Array.isArray(value)) {
+      const names = Object.getOwnPropertyNames(value)
+      if (!hasCanonicalDenseArrayShape(value)) {
+        return failExecutionState()
+      }
+      if (
+        names.length !== value.length + 1 ||
+        names[value.length] !== 'length' ||
+        names.some(
+          (name, index) =>
+            index < value.length && name !== String(index),
+        )
+      ) {
+        return failExecutionState()
+      }
+      for (let index = 0; index < value.length; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(
+          value,
+          String(index),
+        )
+        if (
+          descriptor === undefined ||
+          descriptor.get !== undefined ||
+          descriptor.set !== undefined ||
+          descriptor.enumerable !== true
+        ) {
+          return failExecutionState()
+        }
+        requireCanonicalDataGraph(descriptor.value, active)
+      }
+      return
     }
-    if (
-      names.length !== value.length + 1 ||
-      names[value.length] !== 'length' ||
-      names.some(
-        (name, index) =>
-          index < value.length && name !== String(index),
-      )
-    ) {
-      return failExecutionState()
-    }
-    for (let index = 0; index < value.length; index += 1) {
-      const descriptor = Object.getOwnPropertyDescriptor(
-        value,
-        String(index),
-      )
+    if (!isRecord(value)) return failExecutionState()
+    for (const key of Object.getOwnPropertyNames(value)) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)
       if (
         descriptor === undefined ||
         descriptor.get !== undefined ||
@@ -1672,23 +1688,9 @@ function requireCanonicalDataGraph(
       }
       requireCanonicalDataGraph(descriptor.value, active)
     }
+  } finally {
     active.delete(value)
-    return
   }
-  if (!isRecord(value)) return failExecutionState()
-  for (const key of Object.getOwnPropertyNames(value)) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key)
-    if (
-      descriptor === undefined ||
-      descriptor.get !== undefined ||
-      descriptor.set !== undefined ||
-      descriptor.enumerable !== true
-    ) {
-      return failExecutionState()
-    }
-    requireCanonicalDataGraph(descriptor.value, active)
-  }
-  active.delete(value)
 }
 
 /**

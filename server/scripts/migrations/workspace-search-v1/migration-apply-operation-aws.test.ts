@@ -795,7 +795,7 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
       const revisionThree = await port.commitApplyOperation(
         createApplyCommand(
           fixture,
-          secondPlannedOperation,
+          1,
           2,
         ),
       )
@@ -2001,22 +2001,7 @@ function createApplyFixture(
       operation,
     } satisfies WorkspaceSearchPlannedOperation
   })
-  const fallbackOperation = createOperation(
-    configuration,
-    configurationHash,
-    variant,
-  )
-  const fallbackOperationDigest =
-    createWorkspaceSearchMigrationOperationDigest(fallbackOperation)
-  const plannedOperation = plannedOperations[0] ?? {
-    runId,
-    configurationHash,
-    planDigest,
-    planSequence: 1,
-    operationDigest: fallbackOperationDigest,
-    membershipProof: [],
-    operation: fallbackOperation,
-  }
+  const plannedOperation = plannedOperations[0]
   const planSeal = createPlanSeal(
     configurationHash,
     planDigest,
@@ -2126,7 +2111,14 @@ function createApplyFixture(
     sealedPlanningAuthority,
     executionRun,
     currentAuthority,
-    plannedOperation,
+    get plannedOperation() {
+      if (plannedOperation === undefined) {
+        throw new Error(
+          'Expected the fixture to contain a sealed-plan operation.',
+        )
+      }
+      return plannedOperation
+    },
     plannedOperations,
   }
 }
@@ -2161,18 +2153,25 @@ function createApplyPort(
  * Creates one detached caller command without journal evidence.
  *
  * @param fixture - Exact admitted operation and lease authority.
- * @param plannedOperation - Exact selected plan member.
+ * @param planOperationIndex - Zero-based index of the selected plan member.
  * @param expectedRevision - Exact predecessor run revision.
  * @returns Detached apply request.
  */
 function createApplyCommand(
   fixture: ApplyOperationFixture,
-  plannedOperation = fixture.plannedOperation,
+  planOperationIndex = 0,
   expectedRevision = 1,
 ): WorkspaceSearchMigrationCommandInput<
   WorkspaceSearchApplyOperationCommandEvent
 > {
   const authority = fixture.currentAuthority
+  const plannedOperation =
+    fixture.plannedOperations[planOperationIndex]
+  if (plannedOperation === undefined) {
+    throw new Error(
+      'Expected the apply command to select a sealed-plan operation.',
+    )
+  }
   return {
     expectedRevision,
     lease: {

@@ -724,6 +724,14 @@ full verify、reverse rollback、terminal outcomeへ
 observability/alarm、restore/failover/DR drill、non-production実行evidenceも未完了です。Operation/checkpoint
 transactionが存在してもcomplete apply/verify/rollback supervisorにはならないため、Production migration
 gateは閉じたままです。
+
+現行のmanaged compositionでは、成功する非終端checkpoint 1ページにつき論理上146回の
+`DescribeTable`を実行します。AWS SDK標準のthrottling retry/backoffだけではこの呼び出し量をrate制御
+しないため、Production migration gateを開く前に`DescribeTable`のthrottling metric/alarm、実行accountの
+rate budget、boundedなpage cadenceと停止条件を定義してnon-production evidenceを取得します。同一
+transition内でもstrong read、Scan、transactionの前後という時点保証をまたぐincarnation結果は再利用せず、
+呼び出しをまとめる場合は同等のreplacement-detection proofとpost-send quarantineを維持します。
+
 Pure execution-boundary contractは、exact closed fence digest/authorityと全6 TableIdを持つ`closed` revision 1、
 fresh current authority、exact raw maintenance evidence、close後15分以上のdrainを持つ
 `planning-admitted` revision 2だけをcanonical bytes/digestとして受け付けます。Source planning v3 と
