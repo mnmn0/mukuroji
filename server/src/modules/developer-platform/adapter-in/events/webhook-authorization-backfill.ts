@@ -365,13 +365,7 @@ export async function startWebhookAuthorizationBackfill(
       }
       return
     } catch (error) {
-      if (
-        !isConditionalCheckFailure(error) &&
-        (
-          !isRecord(error) ||
-          error.name !== 'TransactionCanceledException'
-        )
-      ) throw error
+      if (!isConditionalCheckFailure(error)) throw error
       lastConditionalFailure = error
     }
   }
@@ -1312,10 +1306,7 @@ async function completeWebhookActiveLocatorRollback(
     }))
     return true
   } catch (error) {
-    if (
-      !isRecord(error) ||
-      error.name !== 'TransactionCanceledException'
-    ) throw error
+    if (!isConditionalCheckFailure(error)) throw error
     const [marker, rollbackCheckpoint] = await Promise.all([
       documentClient.send(new GetCommand({
         TableName: developerPlatformTableName,
@@ -1668,13 +1659,7 @@ async function persistCheckpoint(
     }
     return true
   } catch (error) {
-    if (
-      isConditionalCheckFailure(error) ||
-      (
-        isRecord(error) &&
-        error.name === 'TransactionCanceledException'
-      )
-    ) return false
+    if (isConditionalCheckFailure(error)) return false
     throw error
   }
 }
@@ -1868,10 +1853,7 @@ async function reconcileWebhookActiveLocator(
           : 0,
     }
   } catch (error) {
-    if (
-      isRecord(error) &&
-      error.name === 'TransactionCanceledException'
-    ) {
+    if (isConditionalCheckFailure(error)) {
       return {
         status: 'retry' as const,
         reconciled: 0,
@@ -2629,11 +2611,18 @@ function isConditionalCheckFailure(error: unknown): boolean {
   if (error.name === 'ConditionalCheckFailedException') return true
   if (error.name !== 'TransactionCanceledException') return false
   const reasons = Reflect.get(error, 'CancellationReasons')
-  return Array.isArray(reasons) &&
-    reasons.some((reason) =>
-      isRecord(reason) &&
-      Reflect.get(reason, 'Code') === 'ConditionalCheckFailed'
-    )
+  if (!Array.isArray(reasons) || reasons.length === 0) return false
+  let hasConditionalFailure = false
+  for (const reason of reasons) {
+    if (!isRecord(reason)) return false
+    const code = Reflect.get(reason, 'Code')
+    if (code === 'ConditionalCheckFailed') {
+      hasConditionalFailure = true
+      continue
+    }
+    if (code !== 'None') return false
+  }
+  return hasConditionalFailure
 }
 
 function readMigrationVersion(event: WebhookAuthorizationBackfillEvent) {

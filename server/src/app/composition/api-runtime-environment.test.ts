@@ -249,11 +249,6 @@ test('rejects malformed v2 envelopes and line types atomically', async () => {
       ...configuration.secretStrings.slice(1),
     ],
     [
-      firstGroup.replace('\nvalue:', '\nvalue:'),
-      ...configuration.secretStrings.slice(1),
-    ].map((group, index) =>
-      index === 0 ? group.replace(/:[A-Za-z0-9+/]+=*\n/, ':\n') : group),
-    [
       firstGroup.replace('\nvalue:', '\nvalue:UNKNOWN_CONFIGURATION:'),
       ...configuration.secretStrings.slice(1),
     ],

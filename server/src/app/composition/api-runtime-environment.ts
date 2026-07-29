@@ -357,17 +357,21 @@ async function loadApiRuntimeSecrets(
   secretArns: readonly string[],
 ): Promise<readonly string[]> {
   const client = createSecretsManagerClient()
-  const responses = await Promise.all(
-    secretArns.map(async (secretArn) =>
-      await client.send(new GetSecretValueCommand({ SecretId: secretArn }))
-    ),
-  )
-  return responses.map((response) => {
-    if (typeof response.SecretString !== 'string') {
-      throw createInvalidApiRuntimeEnvironmentError()
-    }
-    return response.SecretString
-  })
+  try {
+    const responses = await Promise.all(
+      secretArns.map(async (secretArn) =>
+        await client.send(new GetSecretValueCommand({ SecretId: secretArn }))
+      ),
+    )
+    return responses.map((response) => {
+      if (typeof response.SecretString !== 'string') {
+        throw createInvalidApiRuntimeEnvironmentError()
+      }
+      return response.SecretString
+    })
+  } finally {
+    client.destroy()
+  }
 }
 
 /**

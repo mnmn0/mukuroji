@@ -5,6 +5,14 @@ import { AwsSolutionsChecks } from 'cdk-nag';
 import { acknowledgeKnownNagFindings } from '../lib/acknowledge-nag-findings';
 import { CdkStack } from '../lib/cdk-stack';
 
+/** Stable logical ID of the core API runtime-configuration secret. */
+export const API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID =
+  'ApiCoreRuntimeConfigurationSecret5550B12D';
+
+/** Stable logical ID of the data API runtime-configuration secret. */
+export const API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID =
+  'ApiDataRuntimeConfigurationSecret9AB65533';
+
 /**
  * Synthesizes the application stack for infrastructure assertions.
  *

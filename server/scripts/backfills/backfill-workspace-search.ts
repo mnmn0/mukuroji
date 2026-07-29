@@ -1,4 +1,4 @@
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import {
   DynamoDBDocumentClient,
   ScanCommand,
@@ -9,6 +9,12 @@ import {
   createWorkspaceSearchWriterDynamoDbDocumentClient,
   shouldBootstrapLocalDynamoDb,
 } from '../../src/infrastructure/aws/dynamodb-client'
+import {
+  loadServerConfig,
+  readServerEnvironment,
+  type ServerConfig,
+  type ServerEnvironment,
+} from '../../src/infrastructure/config/server-config'
 import {
   runWithWorkspaceSearchWriterFenceInvocation,
 } from '../../src/infrastructure/runtime/workspace-search-writer-fence-invocation'
@@ -189,22 +195,22 @@ async function main() {
     return
   }
 
-  const endpoint = readEnvironment('DYNAMODB_ENDPOINT') ??
-    readEnvironment('AWS_ENDPOINT_URL_DYNAMODB') ??
-    readEnvironment('AWS_ENDPOINT_URL')
-  const region = readEnvironment('AWS_REGION') ?? readEnvironment('AWS_DEFAULT_REGION') ?? 'us-east-1'
-  const tables = resolveTableNames(endpoint)
-  const dynamoDbClient = options.dryRun
-    ? createDynamoDbClient(endpoint, region)
-    : createConfiguredDynamoDbClient()
+  const config = loadWorkspaceSearchBackfillServerConfig()
+  const bootstrapLocalDynamoDb = shouldBootstrapLocalDynamoDb(config)
+  const tables = resolveTableNames(
+    config.environment,
+    bootstrapLocalDynamoDb,
+  )
+  const dynamoDbClient = createConfiguredDynamoDbClient(config)
   const documentClient = createDocumentClient(
     dynamoDbClient,
     !options.dryRun,
+    config,
   )
   const definitions = createSourceDefinitions(tables)
     .filter((definition) => options.source === undefined || definition.name === options.source)
 
-  if (!options.dryRun && shouldBootstrapLocalDynamoDb()) {
+  if (!options.dryRun && bootstrapLocalDynamoDb) {
     await ensureLocalWorkspaceSearchTable(tables.workspaceSearch, dynamoDbClient)
   }
 
@@ -317,16 +323,48 @@ function parsePositiveInteger(value: string, optionName: string) {
   return parsed
 }
 
-function resolveTableNames(endpoint: string | undefined): TableNames {
-  const allowLocalDefaults = endpoint !== undefined && isLocalEndpoint(endpoint)
+/**
+ * Loads the DynamoDB-only configuration used by the Workspace Search backfill.
+ *
+ * A shared AWS endpoint remains valid for DynamoDB, but must not be interpreted
+ * as a Secrets Manager endpoint by this CLI because the backfill never creates
+ * a Secrets Manager client.
+ *
+ * @param environment - Live or test environment values.
+ * @returns A validated configuration snapshot with no implicit Bun endpoint.
+ */
+export function loadWorkspaceSearchBackfillServerConfig(
+  environment: ServerEnvironment = readServerEnvironment(),
+): ServerConfig {
+  const dynamoDbEndpoint = [
+    environment.DYNAMODB_ENDPOINT,
+    environment.AWS_ENDPOINT_URL_DYNAMODB,
+    environment.AWS_ENDPOINT_URL,
+  ].find((value) => value?.trim())?.trim()
 
+  return loadServerConfig({
+    ...environment,
+    DYNAMODB_ENDPOINT: dynamoDbEndpoint,
+    AWS_ENDPOINT_URL: undefined,
+    SECRETS_MANAGER_ENDPOINT: undefined,
+    AWS_ENDPOINT_URL_SECRETS_MANAGER: undefined,
+    AWS_ENDPOINT_URL_SECRETSMANAGER: undefined,
+  }, { localBun: false })
+}
+
+function resolveTableNames(
+  environment: ServerEnvironment,
+  allowLocalDefaults: boolean,
+): TableNames {
   return {
     projectDirectory: resolveTableName(
+      environment,
       ['MUKUROJI_PROJECT_DIRECTORY_TABLE', 'PROJECT_DIRECTORY_TABLE_NAME'],
       'mukuroji-project-directory-local',
       allowLocalDefaults,
     ),
     workItems: resolveTableName(
+      environment,
       [
         'MUKUROJI_WORK_ITEMS_TABLE',
         'WORK_ITEMS_TABLE_NAME',
@@ -337,16 +375,19 @@ function resolveTableNames(endpoint: string | undefined): TableNames {
       allowLocalDefaults,
     ),
     collaboration: resolveTableName(
+      environment,
       ['MUKUROJI_COLLABORATION_TABLE', 'COLLABORATION_TABLE_NAME'],
       'mukuroji-collaboration-local',
       allowLocalDefaults,
     ),
     documents: resolveTableName(
+      environment,
       ['MUKUROJI_DOCUMENTS_TABLE', 'DOCUMENTS_TABLE_NAME'],
       'mukuroji-documents-local',
       allowLocalDefaults,
     ),
     workspaceSearch: resolveTableName(
+      environment,
       ['WORKSPACE_SEARCH_TABLE_NAME', 'MUKUROJI_WORKSPACE_SEARCH_TABLE'],
       'mukuroji-workspace-search-local',
       allowLocalDefaults,
@@ -355,12 +396,13 @@ function resolveTableNames(endpoint: string | undefined): TableNames {
 }
 
 function resolveTableName(
+  environment: ServerEnvironment,
   environmentNames: readonly string[],
   localDefault: string,
   allowLocalDefault: boolean,
 ) {
   for (const environmentName of environmentNames) {
-    const value = readEnvironment(environmentName)
+    const value = environment[environmentName]?.trim()
 
     if (value) {
       return value
@@ -376,27 +418,16 @@ function resolveTableName(
   )
 }
 
-function createDynamoDbClient(endpoint: string | undefined, region: string) {
-  return new DynamoDBClient({
-    region,
-    ...(endpoint ? { endpoint } : {}),
-    ...(endpoint
-      ? {
-          credentials: {
-            accessKeyId: readEnvironment('AWS_ACCESS_KEY_ID') ?? 'test',
-            secretAccessKey: readEnvironment('AWS_SECRET_ACCESS_KEY') ?? 'test',
-          },
-        }
-      : {}),
-  })
-}
-
 function createDocumentClient(
   baseClient: DynamoDBClient,
   guardWrites: boolean,
+  config: ServerConfig,
 ) {
   if (guardWrites) {
-    return createWorkspaceSearchWriterDynamoDbDocumentClient(baseClient)
+    return createWorkspaceSearchWriterDynamoDbDocumentClient(
+      baseClient,
+      config,
+    )
   }
   return DynamoDBDocumentClient.from(baseClient, {
     marshallOptions: {
@@ -985,26 +1016,12 @@ function isProjectTone(value: unknown) {
   return value === 'blue' || value === 'purple' || value === 'green' || value === 'yellow'
 }
 
-function readEnvironment(name: string) {
-  const value = process.env[name]?.trim()
-  return value || undefined
-}
-
 function isSourceName(value: string): value is SourceName {
   return sourceNames.includes(value as SourceName)
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
-}
-
-function isLocalEndpoint(endpoint: string) {
-  try {
-    const hostname = new URL(endpoint).hostname.toLowerCase()
-    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1'
-  } catch {
-    return false
-  }
 }
 
 if (import.meta.main) {

@@ -2,6 +2,8 @@
 import { Match } from 'aws-cdk-lib/assertions';
 import { expect, test } from '@jest/globals';
 import {
+  API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
   findApiRuntimeConfigurationSource,
   findCustomResource,
   serializeAwsSdkCall,
@@ -23,10 +25,10 @@ test('shared server handler is bundled as a Lambda asset with production environ
     Environment: {
       Variables: Match.objectLike({
         MUKUROJI_API_CORE_CONFIG_SECRET_ARN: {
-          Ref: 'ApiCoreRuntimeConfigurationSecret5550B12D',
+          Ref: API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
         },
         MUKUROJI_API_DATA_CONFIG_SECRET_ARN: {
-          Ref: 'ApiDataRuntimeConfigurationSecret9AB65533',
+          Ref: API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
         },
         MUKUROJI_API_IDENTITY_CONFIG_SECRET_ARN: {
           Ref: 'ApiIdentityRuntimeConfigurationSecret9BDC16DA',
@@ -131,12 +133,12 @@ test('public API delivery queues are retained with TLS-only access and worker-sa
 
 test('inbound automation webhook lifecycle uses a distinct public base URL and secret namespace', () => {
   const resources = synthesizedTemplate.toJSON().Resources;
-  const coreConfiguration = resources
-    .ApiCoreRuntimeConfigurationSecret5550B12D
-    .Properties.SecretString;
-  const dataConfiguration = resources
-    .ApiDataRuntimeConfigurationSecret9AB65533
-    .Properties.SecretString;
+  const coreConfiguration =
+    resources[API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID]
+      .Properties.SecretString;
+  const dataConfiguration =
+    resources[API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID]
+      .Properties.SecretString;
 
   expect(findApiRuntimeConfigurationSource(
     coreConfiguration,

@@ -466,13 +466,14 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       process.env.MUKUROJI_WORK_ITEMS_TABLE ??
       process.env.TEAM_ISSUES_TABLE_NAME ??
       'mukuroji-team-issues-local',
-    documentClient = createDocumentClient(),
+    documentClient?: DynamoDBDocumentClient,
     dynamoDbClient = createConfiguredDynamoDbClient(),
     bootstrapLocalTable = false,
   ) {
     this.tableName = tableName
     this.workItemsTableName = workItemsTableName
-    this.documentClient = documentClient
+    this.documentClient = documentClient ??
+      createDocumentClient(dynamoDbClient)
     this.dynamoDbClient = dynamoDbClient
     this.bootstrapLocalTable = bootstrapLocalTable
   }
@@ -1873,9 +1874,9 @@ function isConfigurationTableDescription(table: TableDescription | undefined) {
     keys.some((key) => key.AttributeName === 'recordKey' && key.KeyType === 'RANGE')
 }
 
-function createDocumentClient() {
+function createDocumentClient(dynamoDbClient: DynamoDBClient) {
   return createWorkspaceSearchWriterDynamoDbDocumentClient(
-    createConfiguredDynamoDbClient(),
+    dynamoDbClient,
   )
 }
 

@@ -2,6 +2,7 @@
 import { Match } from 'aws-cdk-lib/assertions';
 import { expect, test } from '@jest/globals';
 import {
+  API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
   expectQueueRequiresSsl,
   findApiRuntimeConfigurationSource,
   synthesizedTemplate,
@@ -1134,6 +1135,7 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
   expect(backfillEntry?.[1]).toEqual(expect.objectContaining({
     Type: 'AWS::CloudFormation::CustomResource',
     DependsOn: expect.arrayContaining([
+      'ApiLiveAlias3A796568',
       'CollaborationProjectionFunction1AAC5764',
       'ListProjectTasksFunction2134AF4A',
       'WebhookDeliveryFunctionEA305509',
@@ -1621,7 +1623,7 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
     },
   });
   const dataConfigurationSecretId =
-    'ApiDataRuntimeConfigurationSecret9AB65533';
+    API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID;
   const dataConfiguration = resources[dataConfigurationSecretId]
     .Properties.SecretString;
   expect(findApiRuntimeConfigurationSource(

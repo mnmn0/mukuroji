@@ -1,4 +1,8 @@
-import { Hono } from 'hono'
+import {
+  Hono,
+  type Context,
+  type ExecutionContext,
+} from 'hono'
 import type { LambdaContext, LambdaEvent } from 'hono/aws-lambda'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
 import {
@@ -88,9 +92,32 @@ export const app = new Hono()
 app.all('*', async (context) =>
   await runWithWorkspaceSearchWriterFenceInvocation(async () => {
     const runtime = await getProductionRuntime()
-    return await runtime.application.fetch(context.req.raw, context.env)
+    return await runtime.application.fetch(
+      context.req.raw,
+      context.env,
+      readOptionalExecutionContext(context),
+    )
   })
 )
+
+/**
+ * Reads the outer Hono execution context when the facade runtime supplies one.
+ *
+ * Hono's accessor intentionally throws for local `app.request()` calls, so the
+ * lazy facade must preserve that supported context-free path.
+ *
+ * @param context - Outer lazy-facade request context.
+ * @returns The runtime execution context, or undefined for local requests.
+ */
+function readOptionalExecutionContext(
+  context: Context,
+): ExecutionContext | undefined {
+  try {
+    return context.executionCtx
+  } catch {
+    return undefined
+  }
+}
 
 /**
  * Dispatches an HTTP event to the lazily configured production application.

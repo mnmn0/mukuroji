@@ -2,6 +2,7 @@
 import { Match } from 'aws-cdk-lib/assertions';
 import { expect, test } from '@jest/globals';
 import {
+  API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
   findApiRuntimeConfigurationSource,
   synthesizedTemplate,
 } from './test-support';
@@ -231,7 +232,7 @@ test('analytics state is retained with a due-delivery index and scoped API acces
 
   const resources = template.toJSON().Resources;
   const dataConfigurationSecretId =
-    'ApiDataRuntimeConfigurationSecret9AB65533';
+    API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID;
   const dataConfiguration = resources[dataConfigurationSecretId]
     .Properties.SecretString;
   expect(findApiRuntimeConfigurationSource(

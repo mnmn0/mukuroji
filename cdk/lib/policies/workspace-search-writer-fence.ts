@@ -14,7 +14,7 @@ export interface WorkspaceSearchWriterFenceResources {
   readonly migrationStateTable: dynamodb.ITable;
   /** Team and Project directory source table. */
   readonly projectDirectoryTable: dynamodb.ITable;
-  /** Explicit two-phase production rollout mode. */
+  /** CloudFormation-tokenized rollout mode constrained by the stack parameter. */
   readonly runtimeMode: string;
   /** Canonical Work Items source table. */
   readonly workItemsTable: dynamodb.ITable;
@@ -64,23 +64,16 @@ export function configureWorkspaceSearchWriterFence(
 }
 
 /**
- * Adds strict writer-fence configuration and least-privilege state access to
- * one Lambda that writes a fenced table.
+ * Grants least-privilege writer-fence state access to one Lambda.
  *
  * @param resources - Exact source, target, and migration-state tables.
  * @param target - Application writer Lambda that must acquire and enforce the fence.
- * @param injectEnvironment - Whether to add discrete writer configuration variables.
  * @returns Nothing.
  */
-export function bindWorkspaceSearchWriterFence(
+export function grantWorkspaceSearchWriterFenceAccess(
   resources: WorkspaceSearchWriterFenceResources,
   target: lambda.Function,
-  injectEnvironment = true,
 ): void {
-  if (injectEnvironment) {
-    configureWorkspaceSearchWriterFence(resources, target);
-  }
-
   const tableArns = [
     resources.projectDirectoryTable.tableArn,
     resources.workItemsTable.tableArn,
@@ -106,4 +99,20 @@ export function bindWorkspaceSearchWriterFence(
     },
     resources: [resources.migrationStateTable.tableArn],
   }));
+}
+
+/**
+ * Adds strict writer-fence configuration and least-privilege state access to
+ * one Lambda that writes a fenced table.
+ *
+ * @param resources - Exact source, target, and migration-state tables.
+ * @param target - Application writer Lambda that must acquire and enforce the fence.
+ * @returns Nothing.
+ */
+export function bindWorkspaceSearchWriterFence(
+  resources: WorkspaceSearchWriterFenceResources,
+  target: lambda.Function,
+): void {
+  configureWorkspaceSearchWriterFence(resources, target);
+  grantWorkspaceSearchWriterFenceAccess(resources, target);
 }

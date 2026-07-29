@@ -2,13 +2,13 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, test } from '@jest/globals';
-import { synthesizedTemplate } from './test-support';
+import {
+  API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  synthesizedTemplate,
+} from './test-support';
 
 const API_FUNCTION_LOGICAL_ID = 'ListProjectTasksFunction2134AF4A';
-const API_CORE_SECRET_LOGICAL_ID =
-  'ApiCoreRuntimeConfigurationSecret5550B12D';
-const API_DATA_SECRET_LOGICAL_ID =
-  'ApiDataRuntimeConfigurationSecret9AB65533';
 const API_IDENTITY_SECRET_LOGICAL_ID =
   'ApiIdentityRuntimeConfigurationSecret9BDC16DA';
 const API_WORKFLOW_SECRET_LOGICAL_ID =
@@ -296,16 +296,18 @@ const expectedWorkflowConfiguration = {
 };
 
 const expectedConfigurations = {
-  [API_CORE_SECRET_LOGICAL_ID]: expectedCoreConfiguration,
-  [API_DATA_SECRET_LOGICAL_ID]: expectedDataConfiguration,
+  [API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID]:
+    expectedCoreConfiguration,
+  [API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID]:
+    expectedDataConfiguration,
   [API_IDENTITY_SECRET_LOGICAL_ID]: expectedIdentityConfiguration,
   [API_WORKFLOW_SECRET_LOGICAL_ID]: expectedWorkflowConfiguration,
 };
 
 /** Exact group identity emitted by each configuration secret. */
 const expectedConfigurationGroups: Readonly<Record<string, string>> = {
-  [API_CORE_SECRET_LOGICAL_ID]: 'core',
-  [API_DATA_SECRET_LOGICAL_ID]: 'data',
+  [API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID]: 'core',
+  [API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID]: 'data',
   [API_IDENTITY_SECRET_LOGICAL_ID]: 'identity',
   [API_WORKFLOW_SECRET_LOGICAL_ID]: 'workflow',
 };
@@ -322,7 +324,7 @@ function createExpectedConfigurationEnvelope(
   group: string,
 ): Record<string, unknown> {
   const entries = Object.entries(configuration).sort(([left], [right]) =>
-    left.localeCompare(right));
+    left < right ? -1 : left > right ? 1 : 0);
   const parts: unknown[] = [
     `${API_CONFIGURATION_ENVELOPE_HEADER}group:${group}\nrevision:`,
     base64(ref('ApiRuntimeConfigurationRevision')),
@@ -345,10 +347,11 @@ function createExpectedConfigurationEnvelope(
 /**
  * Resolves the largest supported string represented by an intrinsic expression.
  *
- * All ordinary CloudFormation parameter references use the documented
- * 4,096-byte parameter-value maximum. Resource bounds intentionally exceed
- * the service's generated-name lengths where a smaller fixed bound is not
- * encoded in this stack.
+ * CloudFormation parameter references use their declared MaxLength when
+ * available and otherwise fall back to the documented 4,096-byte
+ * parameter-value maximum. Resource bounds intentionally exceed the service's
+ * generated-name lengths where a smaller fixed bound is not encoded in this
+ * stack.
  *
  * @param value - Literal or supported CloudFormation intrinsic.
  * @param parameters - Synthesized CloudFormation parameters.
@@ -389,7 +392,23 @@ function resolveMaximumString(
     if (pseudoLength !== undefined) {
       return 'X'.repeat(pseudoLength);
     }
-    if (parameters[logicalId] !== undefined) {
+    const parameter = parameters[logicalId];
+    if (parameter !== undefined) {
+      const definition = requireRecord(
+        parameter,
+        `Referenced parameter ${logicalId}`,
+      );
+      const maxLength = definition.MaxLength;
+      if (maxLength !== undefined) {
+        if (typeof maxLength !== 'number' ||
+            !Number.isInteger(maxLength) ||
+            maxLength < 0) {
+          throw new Error(
+            `Referenced parameter ${logicalId} has invalid MaxLength.`,
+          );
+        }
+        return 'X'.repeat(maxLength);
+      }
       return 'X'.repeat(CLOUDFORMATION_PARAMETER_LIMIT_BYTES);
     }
     const resource = requireRecord(
@@ -599,6 +618,26 @@ describe('API runtime configuration externalization', () => {
     }
   });
 
+  test('uses declared parameter string bounds before the CloudFormation fallback', () => {
+    const template = requireRecord(
+      synthesizedTemplate.toJSON(),
+      'CloudFormation template',
+    );
+    const parameters = requireRecordProperty(template, 'Parameters');
+    const resources = requireRecordProperty(template, 'Resources');
+
+    expect(resolveMaximumString(
+      ref('ApiRuntimeConfigurationRevision'),
+      parameters,
+      resources,
+    )).toHaveLength(32);
+    expect(resolveMaximumString(
+      ref('TaskApiAllowedOrigins'),
+      parameters,
+      resources,
+    )).toHaveLength(CLOUDFORMATION_PARAMETER_LIMIT_BYTES);
+  });
+
   test('keeps sensitive values outside processed configuration documents', () => {
     const template = requireRecord(
       synthesizedTemplate.toJSON(),
@@ -675,8 +714,8 @@ describe('API runtime configuration externalization', () => {
       throw new Error('API secret-read statement is missing.');
     }
     expect(secretReadStatement.Resource).toEqual(expect.arrayContaining([
-      ref(API_CORE_SECRET_LOGICAL_ID),
-      ref(API_DATA_SECRET_LOGICAL_ID),
+      ref(API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID),
+      ref(API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID),
       ref(API_IDENTITY_SECRET_LOGICAL_ID),
       ref(API_WORKFLOW_SECRET_LOGICAL_ID),
       ref(API_ENTERPRISE_IDENTITY_TOKEN_HASH_VALUE_SECRET_LOGICAL_ID),
@@ -705,9 +744,9 @@ describe('API runtime configuration externalization', () => {
     const variables = requireRecordProperty(environment, 'Variables');
     expect(variables).toEqual({
       MUKUROJI_API_CORE_CONFIG_SECRET_ARN:
-        ref(API_CORE_SECRET_LOGICAL_ID),
+        ref(API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID),
       MUKUROJI_API_DATA_CONFIG_SECRET_ARN:
-        ref(API_DATA_SECRET_LOGICAL_ID),
+        ref(API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID),
       MUKUROJI_API_IDENTITY_CONFIG_SECRET_ARN:
         ref(API_IDENTITY_SECRET_LOGICAL_ID),
       MUKUROJI_API_WORKFLOW_CONFIG_SECRET_ARN:

@@ -1,6 +1,8 @@
 /** Registers Workspace Search application writer-fence infrastructure tests. */
 import { expect, test } from '@jest/globals';
 import {
+  API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
   findApiRuntimeConfigurationSource,
   synthesizedTemplate,
 } from './test-support';
@@ -256,9 +258,9 @@ test('strict writer-client compositions receive canonical tables and the explici
   }
 
   const coreConfigurationSecretId =
-    'ApiCoreRuntimeConfigurationSecret5550B12D';
+    API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID;
   const dataConfigurationSecretId =
-    'ApiDataRuntimeConfigurationSecret9AB65533';
+    API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID;
   const coreConfiguration = resources[coreConfigurationSecretId]
     .Properties.SecretString;
   const dataConfiguration = resources[dataConfigurationSecretId]
@@ -306,6 +308,7 @@ test('strict writer-client compositions receive canonical tables and the explici
   }));
   expect(resources.WebhookAuthorizationBackfill.DependsOn).toEqual(
     expect.arrayContaining([
+      'ApiLiveAlias3A796568',
       'WebhookAuthorizationBackfillFunction5ABBA705',
       'WebhookAuthorizationBackfillProgressFunction1FF04FD2',
     ]),

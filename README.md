@@ -330,6 +330,8 @@ export MUKUROJI_REQUEST_TOKEN_HASH_SECRET=<different-at-least-32-random-characte
 export MUKUROJI_ALARM_PRIMARY_TOPIC_NAME=<primary-standard-sns-topic-name>
 export MUKUROJI_ALARM_SECONDARY_TOPIC_NAME=<secondary-standard-sns-topic-name>
 export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
+# 初回 writer-fence bootstrap 時のみ rollout-pending。
+# 既存環境の再 deploy では required を指定します（required からの巻き戻しは禁止）。
 export MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE=rollout-pending
 
 bash scripts/prepare-workspace-cognito.sh

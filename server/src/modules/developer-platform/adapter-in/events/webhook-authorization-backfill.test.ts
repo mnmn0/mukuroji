@@ -74,7 +74,7 @@ test('skips every pending rollout lifecycle before table access', async () => {
   }
 
   expect(fake.scanCalls()).toBe(0)
-  expect(fake.updateCalls()).toBe(0)
+  expect(fake.transactWriteCalls()).toBe(0)
   expect(rows.size).toBe(0)
   await withWriterFenceMode('rollout-pending', async () => {
     await expect(isCompleteHandler({
@@ -124,6 +124,157 @@ test('requires an explicit writer-fence mode before a v3 lifecycle write', async
       'Workspace Search writer-fence rollout mode is invalid.',
     )
   expect(rows.size).toBe(0)
+})
+
+test('propagates non-conditional and malformed transaction cancellations', async () => {
+  const invalidCancellationReasons: readonly unknown[] = [
+    undefined,
+    [],
+    [{ Code: 'None' }],
+    [{ Code: 'TransactionConflict' }],
+    [
+      { Code: 'ConditionalCheckFailed' },
+      { Code: 'ProvisionedThroughputExceeded' },
+    ],
+    [{ Code: 'ConditionalCheckFailed' }, null],
+    [{ Code: 'ConditionalCheckFailed' }, {}],
+    'malformed',
+  ]
+
+  for (const cancellationReasons of invalidCancellationReasons) {
+    const checkpoint = {
+      directoryId: 'WEBHOOK_AUTHORIZATION_BACKFILL#v3',
+      entryKey: 'CHECKPOINT',
+      entryType: 'webhook-authorization-backfill-checkpoint',
+      migrationVersion: 'v3',
+      writerDrainUntil: '2026-07-18T00:01:00.000Z',
+      phase: 'projection',
+      revision: 1,
+      sourceRowsUpdated: 0,
+      sourceRowsVerified: 0,
+      grantsWritten: 0,
+      grantsDeleted: 0,
+      cleanupLocatorsWritten: 0,
+      activeLocatorsReconciled: 0,
+      legacyLookupsRemoved: 0,
+    }
+    const team = {
+      directoryId: 'workspace-conditional-classifier',
+      entryKey: 'TEAM#conditional-classifier',
+      entryType: 'team',
+      teamId: 'conditional-classifier',
+    }
+    const rows = new Map<string, Record<string, unknown>>()
+    rows.set(createKey(checkpoint), checkpoint)
+    rows.set(createKey(team), team)
+    const fake = createDocumentClient(rows, 10)
+    const failure = Object.assign(new Error('Transaction was canceled.'), {
+      name: 'TransactionCanceledException',
+      ...(cancellationReasons === undefined
+        ? {}
+        : { CancellationReasons: cancellationReasons }),
+    })
+    fake.failNextTransaction(failure)
+
+    await expect(processWebhookAuthorizationBackfillPage(
+      fake.client,
+      'ProjectDirectory',
+      'WebhookAuthorizationIndex',
+      afterWriterDrain,
+      'DeveloperPlatform',
+    )).rejects.toBe(failure)
+  }
+})
+
+test('propagates mixed cancellation reasons from checkpoint persistence', async () => {
+  const checkpoint = {
+    directoryId: 'WEBHOOK_AUTHORIZATION_BACKFILL#v3',
+    entryKey: 'CHECKPOINT',
+    entryType: 'webhook-authorization-backfill-checkpoint',
+    migrationVersion: 'v3',
+    writerDrainUntil: '2026-07-18T00:01:00.000Z',
+    phase: 'projection',
+    revision: 1,
+    sourceRowsUpdated: 0,
+    sourceRowsVerified: 0,
+    grantsWritten: 0,
+    grantsDeleted: 0,
+    cleanupLocatorsWritten: 0,
+    activeLocatorsReconciled: 0,
+    legacyLookupsRemoved: 0,
+  }
+  const rows = new Map<string, Record<string, unknown>>()
+  rows.set(createKey(checkpoint), checkpoint)
+  const fake = createDocumentClient(rows, 10)
+  const failure = Object.assign(new Error('Checkpoint transaction failed.'), {
+    name: 'TransactionCanceledException',
+    CancellationReasons: [
+      { Code: 'ConditionalCheckFailed' },
+      { Code: 'TransactionConflict' },
+    ],
+  })
+  fake.failNextCheckpointTransaction(failure)
+
+  await expect(processWebhookAuthorizationBackfillPage(
+    fake.client,
+    'ProjectDirectory',
+    'WebhookAuthorizationIndex',
+    afterWriterDrain,
+    'DeveloperPlatform',
+  )).rejects.toBe(failure)
+})
+
+test('accepts conditional transaction cancellations with None placeholders', async () => {
+  const checkpoint = {
+    directoryId: 'WEBHOOK_AUTHORIZATION_BACKFILL#v3',
+    entryKey: 'CHECKPOINT',
+    entryType: 'webhook-authorization-backfill-checkpoint',
+    migrationVersion: 'v3',
+    writerDrainUntil: '2026-07-18T00:01:00.000Z',
+    phase: 'projection',
+    revision: 1,
+    sourceRowsUpdated: 0,
+    sourceRowsVerified: 0,
+    grantsWritten: 0,
+    grantsDeleted: 0,
+    cleanupLocatorsWritten: 0,
+    activeLocatorsReconciled: 0,
+    legacyLookupsRemoved: 0,
+  }
+  const team = {
+    directoryId: 'workspace-conditional-classifier',
+    entryKey: 'TEAM#conditional-classifier',
+    entryType: 'team',
+    teamId: 'conditional-classifier',
+  }
+  const rows = new Map<string, Record<string, unknown>>()
+  rows.set(createKey(checkpoint), checkpoint)
+  rows.set(createKey(team), team)
+  const fake = createDocumentClient(rows, 10)
+  fake.failNextTransaction(Object.assign(
+    new Error('Transaction condition failed.'),
+    {
+      name: 'TransactionCanceledException',
+      CancellationReasons: [
+        { Code: 'ConditionalCheckFailed' },
+        { Code: 'None' },
+      ],
+    },
+  ))
+
+  await expect(processWebhookAuthorizationBackfillPage(
+    fake.client,
+    'ProjectDirectory',
+    'WebhookAuthorizationIndex',
+    afterWriterDrain,
+    'DeveloperPlatform',
+  )).resolves.toMatchObject({
+    madeProgress: true,
+    checkpoint: {
+      revision: 2,
+      sourceRowsUpdated: 0,
+    },
+  })
 })
 
 test('deletes the replaced v1 checkpoint without changing its physical ID', async () => {
@@ -1056,6 +1207,9 @@ function createDocumentClient(
   let scans = 0
   const scanLimits: number[] = []
   let updates = 0
+  let transactWrites = 0
+  let nextTransactionFailure: { error: unknown } | undefined
+  let nextCheckpointTransactionFailure: { error: unknown } | undefined
   const client = {
     async send(command: {
       constructor: { name: string }
@@ -1252,6 +1406,12 @@ function createDocumentClient(
         return {}
       }
       if (command.constructor.name === 'TransactWriteCommand') {
+        transactWrites += 1
+        if (nextTransactionFailure) {
+          const failure = nextTransactionFailure.error
+          nextTransactionFailure = undefined
+          throw failure
+        }
         const transactItems = command.input.TransactItems as Array<{
           ConditionCheck?: {
             Key: Record<string, unknown>
@@ -1307,6 +1467,11 @@ function createDocumentClient(
           if (
             item.Put?.ConditionExpression?.includes('#revision')
           ) {
+            if (nextCheckpointTransactionFailure) {
+              const failure = nextCheckpointTransactionFailure.error
+              nextCheckpointTransactionFailure = undefined
+              throw failure
+            }
             if (checkpointWriteFailure) {
               checkpointWriteFailure = false
               throw new Error('interrupted after page writes')
@@ -1562,6 +1727,14 @@ function createDocumentClient(
     failNextCheckpointWrite() {
       checkpointWriteFailure = true
     },
+    /** Makes the next transaction fail with the exact supplied error. */
+    failNextTransaction(error: unknown) {
+      nextTransactionFailure = { error }
+    },
+    /** Makes the next checkpoint transaction fail with the supplied error. */
+    failNextCheckpointTransaction(error: unknown) {
+      nextCheckpointTransactionFailure = { error }
+    },
     advanceWebhookSubscriptionHealthBeforeNextReconcile() {
       advanceWebhookSubscriptionHealth = true
     },
@@ -1596,6 +1769,10 @@ function createDocumentClient(
     },
     updateCalls() {
       return updates
+    },
+    /** Returns the number of attempted transaction writes. */
+    transactWriteCalls() {
+      return transactWrites
     },
   }
 }

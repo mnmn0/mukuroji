@@ -1,6 +1,7 @@
 /** Registers AWS AppConfig runtime-control infrastructure tests. */
 import { expect, test } from '@jest/globals';
 import {
+  API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
   findApiRuntimeConfigurationSource,
   synthesizedTemplate,
 } from './test-support';
@@ -523,7 +524,7 @@ test('binds exact runtime-control settings through API config and thirteen direc
   }
 
   const coreConfigurationSecretId =
-    'ApiCoreRuntimeConfigurationSecret5550B12D';
+    API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID;
   const coreConfiguration = resources[coreConfigurationSecretId]
     .Properties.SecretString;
   expect(findApiRuntimeConfigurationSource(

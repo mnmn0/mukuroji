@@ -5,6 +5,7 @@ import {
   createWorkspaceSearchWriterDynamoDbDocumentClient,
   shouldBootstrapLocalDynamoDb,
 } from './dynamodb-client'
+import { loadServerConfig } from '../config/server-config'
 
 /**
  * Runs one test with isolated live server environment overrides.
@@ -71,12 +72,41 @@ const completeTableEnvironment: Readonly<
 > = {
   PROJECT_DIRECTORY_TABLE_NAME: 'ProjectDirectory',
   WORK_ITEMS_TABLE_NAME: 'WorkItems',
+  MUKUROJI_WORK_ITEMS_TABLE: undefined,
+  MUKUROJI_TEAM_ISSUES_TABLE: undefined,
+  TEAM_ISSUES_TABLE_NAME: undefined,
   COLLABORATION_TABLE_NAME: 'Collaboration',
   DOCUMENTS_TABLE_NAME: 'Documents',
   WORKSPACE_SEARCH_TABLE_NAME: 'WorkspaceSearch',
   WORKSPACE_SEARCH_MIGRATION_STATE_TABLE_NAME:
     'WorkspaceSearchMigrationState',
 }
+
+test('uses one supplied configuration snapshot for transport and bootstrap', async () => {
+  const config = loadServerConfig({
+    AWS_REGION: 'ap-northeast-1',
+    DYNAMODB_ENDPOINT: 'http://floci:8000',
+  }, { localBun: false })
+  const client = createDynamoDbClient(config)
+
+  try {
+    const endpoint = await client.config.endpoint?.()
+    expect(await client.config.region()).toBe('ap-northeast-1')
+    expect(endpoint).toMatchObject({
+      hostname: 'floci',
+      port: 8000,
+      protocol: 'http:',
+    })
+    expect(shouldBootstrapLocalDynamoDb(config)).toBe(true)
+    const documentClient =
+      createWorkspaceSearchWriterDynamoDbDocumentClient(client, config)
+    expect(documentClient.middlewareStack.identify()).not.toContain(
+      'mukurojiWorkspaceSearchWriterFence - initialize',
+    )
+  } finally {
+    client.destroy()
+  }
+})
 
 test('requires the writer-fence mode outside explicit local runtimes', async () => {
   await withServerEnvironment({
@@ -179,6 +209,54 @@ test('accepts a complete exact six-table configuration in required mode', async 
     )
     documentClient.destroy()
   })
+})
+
+test('accepts Work Items compatibility names only when they match the fence', async () => {
+  await withServerEnvironment({
+    ...runtimeEnvironment,
+    ...completeTableEnvironment,
+    NODE_ENV: 'production',
+    MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE: 'required',
+    MUKUROJI_WORK_ITEMS_TABLE: 'WorkItems',
+    MUKUROJI_TEAM_ISSUES_TABLE: 'WorkItems',
+    TEAM_ISSUES_TABLE_NAME: 'WorkItems',
+  }, () => {
+    const lowLevelClient = createDynamoDbClient()
+    const documentClient =
+      createWorkspaceSearchWriterDynamoDbDocumentClient(lowLevelClient)
+
+    expect(documentClient.middlewareStack.identify()).toContain(
+      'mukurojiWorkspaceSearchWriterFence - initialize',
+    )
+    documentClient.destroy()
+  })
+})
+
+test('rejects every mismatched Work Items compatibility name', async () => {
+  for (const aliasName of [
+    'MUKUROJI_WORK_ITEMS_TABLE',
+    'MUKUROJI_TEAM_ISSUES_TABLE',
+    'TEAM_ISSUES_TABLE_NAME',
+  ]) {
+    await withServerEnvironment({
+      ...runtimeEnvironment,
+      ...completeTableEnvironment,
+      NODE_ENV: 'production',
+      MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE: 'required',
+      [aliasName]: 'DifferentWorkItems',
+    }, () => {
+      const lowLevelClient = createOfflineDynamoDbClient()
+      try {
+        expect(() =>
+          createWorkspaceSearchWriterDynamoDbDocumentClient(lowLevelClient)
+        ).toThrow(
+          `${aliasName} must match WORK_ITEMS_TABLE_NAME for the Workspace Search writer fence.`,
+        )
+      } finally {
+        lowLevelClient.destroy()
+      }
+    })
+  }
 })
 
 test('rejects a local bypass for an unbound injected transport', async () => {

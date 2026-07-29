@@ -12,6 +12,7 @@ import {
   createWorkspaceSearchDocumentRecordKey,
 } from '../../src/modules/workspace-search'
 import {
+  loadWorkspaceSearchBackfillServerConfig,
   mapCollaborationItem,
   mapDocumentItem,
   mapProjectDirectoryItem,
@@ -19,6 +20,27 @@ import {
   parseWorkItemCollaborationEntityKey,
   runBackfill,
 } from './backfill-workspace-search'
+
+describe('Workspace search backfill configuration', () => {
+  test('does not invent a local endpoint for an AWS dry-run', () => {
+    const config = loadWorkspaceSearchBackfillServerConfig({
+      AWS_REGION: 'ap-northeast-1',
+    })
+
+    expect(config.dynamoDbEndpoint).toBeUndefined()
+  })
+
+  test('isolates the documented shared local endpoint to DynamoDB', () => {
+    const config = loadWorkspaceSearchBackfillServerConfig({
+      AWS_ENDPOINT_URL: 'http://localhost:4566',
+      AWS_REGION: 'us-east-1',
+    })
+
+    expect(config.dynamoDbEndpoint).toBe('http://localhost:4566')
+    expect(config.secretsManagerEndpoint).toBeUndefined()
+    expect(config.environment.AWS_ENDPOINT_URL).toBeUndefined()
+  })
+})
 
 function mapRunnerItem(item: Record<string, unknown>) {
   const id = typeof item.id === 'string' ? item.id : 'unknown'
@@ -430,6 +452,8 @@ describe('Workspace search backfill mapping', () => {
       updatedAt: '2026-07-12T00:00:00.000Z',
     }
 
+    // Explicit undefined still creates the own property that proves the source
+    // row participates in the TTL-managed schema and must fail closed.
     for (const expiresAt of [2_000_000_000, undefined]) {
       expect(() => mapCollaborationItem({
         ...comment,
@@ -500,6 +524,8 @@ describe('Workspace search backfill mapping', () => {
   })
 
   test('fails closed for TTL-managed attributes on Document target candidates', () => {
+    // Explicit undefined still creates the own property that proves the source
+    // row participates in the TTL-managed schema and must fail closed.
     for (const expiresAtEpoch of [2_000_000_000, undefined]) {
       expect(() => mapDocumentItem(createDocumentRow({}, {
         expiresAtEpoch,

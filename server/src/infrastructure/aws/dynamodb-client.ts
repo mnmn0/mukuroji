@@ -1,6 +1,9 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
-import { loadServerConfig } from '../config/server-config'
+import {
+  loadServerConfig,
+  type ServerConfig,
+} from '../config/server-config'
 import {
   createAwsWorkspaceSearchWriterFenceGuardSource,
   type WorkspaceSearchWriterFenceAwsTableNames,
@@ -22,6 +25,12 @@ const rolloutPendingWriterFenceMode = 'rollout-pending'
 const localFlociWriterFenceBypassMode = 'local-floci-bypass'
 /** Explicit marker used by the repository's Floci deployment. */
 const localFlociRuntimeMarker = 'floci'
+/** Compatibility names that some Work Item writers still resolve directly. */
+const workItemsTableCompatibilityEnvironmentNames = [
+  'MUKUROJI_WORK_ITEMS_TABLE',
+  'MUKUROJI_TEAM_ISSUES_TABLE',
+  'TEAM_ISSUES_TABLE_NAME',
+] as const
 
 /**
  * Exact endpoint used to construct each shared configured low-level client.
@@ -47,11 +56,12 @@ let defaultWorkspaceSearchWriterFence:
 /**
  * Creates a low-level DynamoDB client from the current server configuration.
  *
+ * @param config - One validated configuration snapshot retained by the client.
  * @returns A configured DynamoDB client.
  */
-export function createDynamoDbClient(): DynamoDBClient {
-  const config = loadServerConfig()
-
+export function createDynamoDbClient(
+  config: ServerConfig = loadServerConfig(),
+): DynamoDBClient {
   const client = new DynamoDBClient({
     region: config.awsRegion,
     ...(config.dynamoDbEndpoint
@@ -89,19 +99,26 @@ export function createDynamoDbDocumentClient(
  * Repository tests, local Bun development, and an explicitly marked Floci
  * Lambda runtime omit the guard because no production TableId-bound row exists.
  *
- * @param dynamoDbClient - Low-level client shared with table measurement.
+ * @param dynamoDbClient - Low-level client shared with table measurement and
+ * retained by the process-wide guard provider. Once it establishes that
+ * provider, callers must keep the transport usable for the process lifetime.
+ * @param config - Configuration snapshot shared with transport construction.
  * @returns A guarded or explicitly local-only DocumentClient.
  */
 export function createWorkspaceSearchWriterDynamoDbDocumentClient(
-  dynamoDbClient: DynamoDBClient = createDynamoDbClient(),
+  dynamoDbClient: DynamoDBClient | undefined = undefined,
+  config: ServerConfig = loadServerConfig(),
 ): DynamoDBDocumentClient {
-  const documentClient = createDynamoDbDocumentClient(dynamoDbClient)
-  const config = loadServerConfig()
+  const resolvedDynamoDbClient =
+    dynamoDbClient ?? createDynamoDbClient(config)
+  const documentClient = createDynamoDbDocumentClient(
+    resolvedDynamoDbClient,
+  )
   if (
     isRepositoryTestDynamoDbRuntime(
       config.environment,
       config.dynamoDbEndpoint,
-      dynamoDbClient,
+      resolvedDynamoDbClient,
     )
   ) {
     return documentClient
@@ -113,7 +130,7 @@ export function createWorkspaceSearchWriterDynamoDbDocumentClient(
     isLocalBunDynamoDbRuntime(
       config.environment,
       config.dynamoDbEndpoint,
-      dynamoDbClient,
+      resolvedDynamoDbClient,
     ) &&
     configuredMode === undefined
   ) {
@@ -125,7 +142,7 @@ export function createWorkspaceSearchWriterDynamoDbDocumentClient(
       config.environment.MUKUROJI_LOCAL_AWS_RUNTIME !==
         localFlociRuntimeMarker ||
       !isVerifiedLocalDynamoDbTransport(
-        dynamoDbClient,
+        resolvedDynamoDbClient,
         config.dynamoDbEndpoint,
       )
     ) {
@@ -162,7 +179,7 @@ export function createWorkspaceSearchWriterDynamoDbDocumentClient(
     config.environment,
   )
   const writerFence = resolveDefaultWorkspaceSearchWriterFence(
-    dynamoDbClient,
+    resolvedDynamoDbClient,
     tableNames,
   )
   return bindWorkspaceSearchWriterFenceDocumentClient(
@@ -198,18 +215,20 @@ function isExactAwsLambdaWriterFenceRolloutPendingRuntime(
 /**
  * Determines whether missing tables may be bootstrapped for the configured local endpoint.
  *
+ * @param config - One validated configuration snapshot used by the caller.
  * @returns Whether local DynamoDB table bootstrapping is enabled.
  */
-export function shouldBootstrapLocalDynamoDb(): boolean {
-  const endpoint = loadServerConfig().dynamoDbEndpoint
-
-  return isExplicitLocalDynamoDbEndpoint(endpoint)
+export function shouldBootstrapLocalDynamoDb(
+  config: ServerConfig = loadServerConfig(),
+): boolean {
+  return isExplicitLocalDynamoDbEndpoint(config.dynamoDbEndpoint)
 }
 
 /**
  * Resolves the one source identity shared by every client in this process.
  *
- * @param dynamoDbClient - Low-level transport captured by the first caller.
+ * @param dynamoDbClient - Low-level transport captured for the provider's
+ * process lifetime. It must not be destroyed while guarded clients remain.
  * @param tableNames - Exact canonical six-table names.
  * @returns Process-stable provider and table-name configuration.
  */
@@ -265,10 +284,7 @@ function readWorkspaceSearchWriterFenceTableNames(
       environment,
       'PROJECT_DIRECTORY_TABLE_NAME',
     ),
-    'work-items': readRequiredWriterFenceEnvironment(
-      environment,
-      'WORK_ITEMS_TABLE_NAME',
-    ),
+    'work-items': readWriterFenceWorkItemsTableName(environment),
     collaboration: readRequiredWriterFenceEnvironment(
       environment,
       'COLLABORATION_TABLE_NAME',
@@ -286,6 +302,34 @@ function readWorkspaceSearchWriterFenceTableNames(
       'WORKSPACE_SEARCH_MIGRATION_STATE_TABLE_NAME',
     ),
   })
+}
+
+/**
+ * Binds every supported Work Items compatibility name to the canonical table.
+ *
+ * Existing writers resolve these aliases in different orders. Rejecting any
+ * defined mismatch prevents one writer from addressing a table outside the
+ * canonical writer-fence table set.
+ *
+ * @param environment - Current server environment.
+ * @returns Exact canonical Work Items table name.
+ */
+function readWriterFenceWorkItemsTableName(
+  environment: Readonly<Record<string, string | undefined>>,
+): string {
+  const canonicalName = readRequiredWriterFenceEnvironment(
+    environment,
+    'WORK_ITEMS_TABLE_NAME',
+  )
+  for (const aliasName of workItemsTableCompatibilityEnvironmentNames) {
+    const aliasValue = environment[aliasName]
+    if (aliasValue !== undefined && aliasValue !== canonicalName) {
+      throw new TypeError(
+        `${aliasName} must match WORK_ITEMS_TABLE_NAME for the Workspace Search writer fence.`,
+      )
+    }
+  }
+  return canonicalName
 }
 
 /**

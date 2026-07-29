@@ -7,6 +7,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import type { IDependable } from 'constructs';
 import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
 import {
@@ -26,6 +27,8 @@ import type { WorkerChannels } from './channels';
  * Inputs required by Webhook authorization migration and delivery processing.
  */
 export interface WebhookDeliveryWorkerInput {
+  /** Live API alias that must finish shifting traffic before backfill starts. */
+  readonly apiLiveAlias: IDependable;
   /** Shared API runtime that must support compatibility reads before migration. */
   readonly apiRuntime: ApiRuntimeResources;
   /** Audit projection worker that must emit compatible Webhook delivery records. */
@@ -231,11 +234,6 @@ export function buildWebhookDeliveryWorkers(
       },
     },
   );
-  webhookAuthorizationBackfill.node.addDependency(
-    webhookAuthorizationBackfillFunction,
-    webhookAuthorizationBackfillProgressFunction,
-  );
-
   const webhookDeliveryLogGroup = new logs.LogGroup(
     scope,
     'WebhookDeliveryLogGroup',
@@ -295,8 +293,11 @@ export function buildWebhookDeliveryWorkers(
   // drains compatibility writes, and only then removes legacy lookup keys.
   // Its Delete path reverses the locator migration before dependency rollback.
   webhookAuthorizationBackfill.node.addDependency(
+    input.apiLiveAlias,
     apiFunction,
     collaborationProjectionFunction,
+    webhookAuthorizationBackfillFunction,
+    webhookAuthorizationBackfillProgressFunction,
     webhookDeliveryFunction,
   );
 

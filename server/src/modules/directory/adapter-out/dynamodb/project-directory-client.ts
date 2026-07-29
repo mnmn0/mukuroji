@@ -1262,15 +1262,11 @@ export class DynamoDbProjectDirectoryClient {
         metadata: { kind: 'team', teamId },
       })
 
-      if (auditPut) {
-        await this.documentClient.send(
-          new TransactWriteCommand({ TransactItems: [statePut, auditPut] }),
-        )
-      } else {
-        await this.documentClient.send(
-          new TransactWriteCommand({ TransactItems: [statePut] }),
-        )
-      }
+      await this.documentClient.send(
+        new TransactWriteCommand({
+          TransactItems: [statePut, ...(auditPut ? [auditPut] : [])],
+        }),
+      )
 
       return {
         team: {

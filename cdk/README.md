@@ -18,7 +18,7 @@
 | `CognitoEnterpriseIdpName` | yes | Cognito に接続した SAML/OIDC provider 名。 |
 | `WorkspaceDirectoryId` | yes | Cognito の両 custom attribute と DynamoDB partition に使う canonical ID。例: `workspace#production`。 |
 | `WorkspaceAuditPseudonymKey` | yes | Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。`openssl rand -hex 32` などで生成し、`NoEcho` で Lambda に渡してbackfillにも同じ値を設定します。 |
-| `ApiRuntimeConfigurationRevision` | yes | 1〜32文字のoperator管理revision。API code、または4分割runtime configuration secretへ入るparameter/resource値を変更するdeployごとに増分し、同じrevisionを異なる内容へ再利用しません。 |
+| `ApiRuntimeConfigurationRevision` | yes | 1〜32文字のoperator管理revision。先頭はASCII英数字、以降はASCII英数字と `.` `_` `-` だけを使えます（例: `2026-07-28-01`）。API code、または4分割runtime configuration secretへ入るparameter/resource値を変更するdeployごとに増分し、同じrevisionを異なる内容へ再利用しません。 |
 | `WorkspaceSearchWriterFenceMode` | yes | 初回bootstrap前の明示的な二段階rolloutでは`rollout-pending`、open row作成後の定常状態では`required`。既定値はなく、通常deployで`required`から戻しません。 |
 | `InitialOwnerEmail` | yes | lowercase の初期 owner email。Workspace/member/alias key に使います。 |
 | `InitialOwnerUsername` | yes | `AdminUpdateUserAttributes` に渡す Cognito username。email と異なる username も指定できます。 |
@@ -579,6 +579,12 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters TaskApiAllowedOrigins=https://app.example.com \
   --outputs-file /tmp/mukuroji-cdk-outputs.json
 ```
+
+`--outputs-file`はdeploy直後のoutput照合用スナップショットです。`/tmp`のファイルだけを
+永続的な変更証跡とはせず、stack ID、deploy時刻、change set、API runtime revision、
+writer-fence mode、outputファイルのSHA-256をアクセス制御されたchange recordへ保存します。
+outputにはSecret ARNなどのresource metadataが含まれるため、access tokenやsecret値を追記せず、
+照合後のローカルファイルは削除します。
 
 初回配線を`rollout-pending`でdeployすると、AppConfigの初期baselineは`disabled`でall-at-once
 deployされ、controlled Lambdaはその完了に依存します。Webhook authorization backfill custom

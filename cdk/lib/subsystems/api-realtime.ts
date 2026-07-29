@@ -12,7 +12,7 @@ import {
 } from '../config/lambda-build-paths';
 import type { StackParameters } from '../config/stack-parameters';
 import {
-  bindWorkspaceSearchWriterFence,
+  grantWorkspaceSearchWriterFenceAccess,
   type WorkspaceSearchWriterFenceResources,
 } from '../policies/workspace-search-writer-fence';
 import type { DataStoreResources } from './data-stores';
@@ -79,6 +79,8 @@ export interface ApiTransportsAndRealtimeInput {
  * Public API and realtime transport resources consumed by workers and outputs.
  */
 export type ApiTransportsAndRealtimeResources = Readonly<{
+  /** Live alias receiving all public API traffic. */
+  readonly apiLiveAlias: lambda.Alias;
   /** Public Lambda Function URL for the shared API handler. */
   readonly functionUrl: lambda.FunctionUrl;
   /** HTTP API Gateway backed by the shared API handler. */
@@ -229,7 +231,8 @@ function createApiRuntimeConfigurationSecret(
       createApiRuntimeConfigurationLine(name, 'value', value)),
     ...Object.entries(secretValues).map(([name, secret]) =>
       createApiRuntimeConfigurationLine(name, 'secret', secret.secretArn)),
-  ].sort(([leftName], [rightName]) => leftName.localeCompare(rightName));
+  ].sort(([leftName], [rightName]) =>
+    leftName < rightName ? -1 : leftName > rightName ? 1 : 0);
   if (lines.length === 0 ||
       lines.some(([name]) => !/^[A-Z][A-Z0-9_]*$/.test(name))) {
     throw new Error('API runtime configuration names are invalid.');
@@ -592,6 +595,12 @@ export function buildApiRuntime(
       timeout: cdk.Duration.seconds(15),
       memorySize: 512,
       description: 'Bundled shared Hono handler for the mukuroji Function URL and HTTP API.',
+      currentVersionOptions: {
+        description: cdk.Fn.join(' ', [
+          'API runtime configuration revision',
+          input.parameters.apiRuntimeConfigurationRevision.valueAsString,
+        ]),
+      },
       bundling: {
         bundleAwsSDK: true,
         minify: true,
@@ -600,10 +609,9 @@ export function buildApiRuntime(
       },
     },
   );
-  bindWorkspaceSearchWriterFence(
+  grantWorkspaceSearchWriterFenceAccess(
     input.workspaceSearchWriterFence,
     apiFunction,
-    false,
   );
   bindRuntimeControls(input.runtimeControls, apiFunction, 'api', false);
 
@@ -1173,14 +1181,6 @@ export function buildApiTransportsAndRealtime(
     realtimeWebSocketStage,
   );
   const apiVersion = apiFunction.currentVersion;
-  const cfnApiVersion = apiVersion.node.defaultChild;
-  if (!(cfnApiVersion instanceof lambda.CfnVersion)) {
-    throw new Error('API Lambda version resource was not created.');
-  }
-  cfnApiVersion.description = cdk.Fn.join(' ', [
-    'API runtime configuration revision',
-    input.parameters.apiRuntimeConfigurationRevision.valueAsString,
-  ]);
   const apiLiveAlias = new lambda.Alias(scope, 'ApiLiveAlias', {
     aliasName: 'live',
     version: apiVersion,
@@ -1220,6 +1220,7 @@ export function buildApiTransportsAndRealtime(
   });
 
   return {
+    apiLiveAlias,
     functionUrl,
     httpApi,
     realtimeWebSocketStage,

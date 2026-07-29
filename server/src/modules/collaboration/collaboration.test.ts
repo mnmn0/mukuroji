@@ -811,6 +811,7 @@ test('upserts and removes a presence lease with a normalized member key', async 
   expect(commands[0]).toMatchObject({
     TransactItems: [{
       Put: {
+        TableName: 'collaboration-table',
         Item: {
           entityKey,
           recordKey: 'PRESENCE#member@example.com#browser-tab-1',
