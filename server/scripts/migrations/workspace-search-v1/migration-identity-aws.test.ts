@@ -4660,7 +4660,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
   )
 
   test(
-    'bootstraps, reads, and closes the measured application writer fence',
+    'bootstraps the managed writer fence and closes through a fixed boundary',
     async () => {
       const requested = createRequestedResources()
       const transport = new RecordingIdentityAwsTransport()
@@ -4671,14 +4671,23 @@ describe('Workspace Search migration AWS identity adapter', () => {
         () => transport,
         () => new Date(clockAt),
       )
-      const expectedFailure = new WorkspaceSearchMigrationFailure(
-        'INVALID_STATE',
-        'Workspace Search application writer fence operation failed.',
-      )
+      const expectedWriterFenceFailure =
+        new WorkspaceSearchMigrationFailure(
+          'INVALID_STATE',
+          'Workspace Search application writer fence operation failed.',
+        )
+      const expectedExecutionBoundaryFailure =
+        new WorkspaceSearchMigrationFailure(
+          'INVALID_STATE',
+          'Workspace Search migration execution boundary operation failed.',
+        )
 
       expect(
         () => port.createApplicationWriterFencePort(),
-      ).toThrow(expectedFailure)
+      ).toThrow(expectedWriterFenceFailure)
+      expect(
+        () => port.createExecutionBoundaryPort(),
+      ).toThrow(expectedExecutionBoundaryFailure)
 
       const configuration = await port.measureConfiguration()
       configuration.tables['project-directory'].tableId =
@@ -4689,6 +4698,8 @@ describe('Workspace Search migration AWS identity adapter', () => {
         'managed-writer-fence',
       )
       const writerFence = port.createApplicationWriterFencePort()
+      const executionBoundary = port.createExecutionBoundaryPort()
+      expect(Reflect.get(writerFence, 'close')).toBeUndefined()
       const transactionCount =
         transport.transactWritePrePlanAuthorityCommands.length
       const guardTrace: string[] = []
@@ -4700,14 +4711,11 @@ describe('Workspace Search migration AWS identity adapter', () => {
       const read = await writerFence.read()
       const bootstrappedAgain =
         await writerFence.bootstrapOpen(authority)
-      const closed = await writerFence.close(authority)
-      if (
-        closed.status !== 'present' ||
-        closed.record.mode !== 'closed'
-      ) {
-        throw new Error('Expected one closed managed writer-fence row.')
-      }
-      const closedAgain = await writerFence.close(authority)
+      const closedBoundary =
+        await executionBoundary.close(authority)
+      const closedBoundaryAgain =
+        await executionBoundary.close(authority)
+      const closedFence = await writerFence.read()
 
       expect(bootstrapped).toMatchObject({
         status: 'present',
@@ -4725,7 +4733,22 @@ describe('Workspace Search migration AWS identity adapter', () => {
       })
       expect(read).toEqual(bootstrapped)
       expect(bootstrappedAgain).toEqual(bootstrapped)
-      expect(closed).toMatchObject({
+      expect(closedBoundary).toMatchObject({
+        runId: authority.lease.runId,
+        phase: 'closed',
+        revision: 1,
+        closeAuthority: {
+          runId: authority.lease.runId,
+          ownerId: authority.lease.ownerId,
+          leaseFenceToken: authority.lease.fenceToken,
+          maintenanceEvidenceReceiptDigest:
+            authority.maintenanceEvidenceReceiptDigest,
+          maintenanceEvidencePointerRevision:
+            authority.maintenanceEvidencePointerRevision,
+        },
+      })
+      expect(closedBoundaryAgain).toEqual(closedBoundary)
+      expect(closedFence).toMatchObject({
         status: 'present',
         record: {
           mode: 'closed',
@@ -4742,12 +4765,26 @@ describe('Workspace Search migration AWS identity adapter', () => {
           },
         },
       })
-      expect(closedAgain).toEqual(closed)
-      await expect(writerFence.read()).resolves.toEqual(closed)
+      await expect(
+        executionBoundary.read(authority.lease.runId),
+      ).resolves.toEqual(closedBoundary)
       expect(Reflect.get(writerFence, 'release')).toBeUndefined()
       expect(
         transport.transactWritePrePlanAuthorityCommands,
       ).toHaveLength(transactionCount + 2)
+      const closeItems =
+        transport.transactWritePrePlanAuthorityCommands[
+          transactionCount + 1
+        ]?.input.TransactItems
+      expect(closeItems).toHaveLength(10)
+      expect(closeItems?.[9]?.Put?.Item).toMatchObject({
+        kind: {
+          S: 'workspace-search-migration-execution-boundary-publication',
+        },
+        runId: { S: authority.lease.runId },
+        phase: { S: 'closed' },
+        revision: { N: '1' },
+      })
       const expectedGuardOrder = [
         requested.tables['migration-state'],
         requested.tables['project-directory'],
@@ -4767,6 +4804,103 @@ describe('Workspace Search migration AWS identity adapter', () => {
           guardTrace.slice(offset, offset + expectedGuardOrder.length),
         ).toEqual(expectedGuardOrder)
       }
+      port.close()
+    },
+  )
+
+  test(
+    'recovers managed planning admission after a post-commit response loss',
+    async () => {
+      const requested = createRequestedResources()
+      const transport = new RecordingIdentityAwsTransport()
+      seedValidMeasurementOutputs(transport, requested)
+      let clockAt = '2026-07-29T03:00:00.000Z'
+      const port = createAwsWorkspaceSearchMigrationIdentityPort(
+        requested,
+        () => transport,
+        () => new Date(clockAt),
+      )
+      await port.measureConfiguration()
+      const closeAuthority = await createManagedPlanningAuthority(
+        port,
+        clockAt,
+        'managed-execution-admission',
+      )
+      const writerFence = port.createApplicationWriterFencePort()
+      await writerFence.bootstrapOpen(closeAuthority)
+      const executionBoundary = port.createExecutionBoundaryPort()
+      const closed = await executionBoundary.close(closeAuthority)
+
+      expect(closed).toMatchObject({
+        phase: 'closed',
+        revision: 1,
+        closedAt: clockAt,
+      })
+
+      clockAt = '2026-07-29T03:16:00.000Z'
+      const admissionLease = await port.acquireLease({
+        runId: closeAuthority.lease.runId,
+        ownerId: 'managed-execution-admission-recovery-owner',
+      })
+      const maintenanceEvidenceBytes =
+        createManagedMaintenanceEvidenceBytes(clockAt)
+      const admissionAuthority =
+        await port.renewMaintenanceEvidence({
+          lease: {
+            runId: admissionLease.runId,
+            ownerId: admissionLease.ownerId,
+            fenceToken: admissionLease.fenceToken,
+          },
+          expectedPointer: null,
+          evidenceBytes: maintenanceEvidenceBytes,
+        })
+      const transactionCount =
+        transport.transactWritePrePlanAuthorityCommands.length
+      let responseLost = false
+      transport.transactWritePrePlanAuthorityPostCommitEffect = () => {
+        responseLost = true
+        transport.transactWritePrePlanAuthorityPostCommitEffect =
+          undefined
+        throw new Error('redacted managed admission response loss')
+      }
+
+      const admitted = await executionBoundary.admitPlanning({
+        currentAuthority: admissionAuthority,
+        maintenanceEvidenceBytes,
+      })
+
+      expect(responseLost).toBe(true)
+      expect(admitted).toMatchObject({
+        runId: closeAuthority.lease.runId,
+        phase: 'planning-admitted',
+        revision: 2,
+        planningAdmission: {
+          ownerId: admissionAuthority.lease.ownerId,
+          leaseFenceToken: admissionAuthority.lease.fenceToken,
+          admittedAt: clockAt,
+          drainStartedAt: closed.closedAt,
+        },
+      })
+      expect(
+        transport.transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactionCount + 1)
+      const admissionItems =
+        transport.transactWritePrePlanAuthorityCommands[
+          transactionCount
+        ]?.input.TransactItems
+      expect(admissionItems).toHaveLength(10)
+      expect(admissionItems?.[3]?.ConditionCheck).toBeDefined()
+      expect(admissionItems?.[9]?.Put?.Item).toMatchObject({
+        kind: {
+          S: 'workspace-search-migration-execution-boundary-publication',
+        },
+        runId: { S: closeAuthority.lease.runId },
+        phase: { S: 'planning-admitted' },
+        revision: { N: '2' },
+      })
+      await expect(
+        executionBoundary.read(closeAuthority.lease.runId),
+      ).resolves.toEqual(admitted)
       port.close()
     },
   )
@@ -4852,7 +4986,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
   }
 
   test(
-    'detaches writer-fence close input before managed guard I/O',
+    'detaches execution-boundary close input before managed guard I/O',
     async () => {
       const requested = createRequestedResources()
       const transport = new RecordingIdentityAwsTransport()
@@ -4871,6 +5005,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
       )
       const writerFence = port.createApplicationWriterFencePort()
       await writerFence.bootstrapOpen(authority)
+      const executionBoundary = port.createExecutionBoundaryPort()
       const mutableAuthority = structuredClone(authority)
       const expectedRunId = mutableAuthority.lease.runId
       const expectedOwnerId = mutableAuthority.lease.ownerId
@@ -4879,42 +5014,35 @@ describe('Workspace Search migration AWS identity adapter', () => {
         if (authorityMutated) return
         authorityMutated = true
         Object.defineProperty(mutableAuthority.lease, 'runId', {
-          value: 'caller-mutated-writer-fence-run',
+          value: 'caller-mutated-execution-boundary-run',
         })
         Object.defineProperty(mutableAuthority.lease, 'ownerId', {
-          value: 'caller-mutated-writer-fence-owner',
+          value: 'caller-mutated-execution-boundary-owner',
         })
       }
 
-      const closed = await writerFence.close(mutableAuthority)
+      const closed =
+        await executionBoundary.close(mutableAuthority)
 
-      if (
-        closed.status !== 'present' ||
-        closed.record.mode !== 'closed'
-      ) {
-        throw new Error('Expected one detached closed writer-fence row.')
-      }
-      expect(closed.record.authority).toMatchObject({
+      expect(closed).toMatchObject({
+        runId: expectedRunId,
+        phase: 'closed',
+        revision: 1,
+      })
+      expect(closed.closeAuthority).toMatchObject({
         runId: expectedRunId,
         ownerId: expectedOwnerId,
       })
-      await expect(writerFence.read()).resolves.toMatchObject({
-        status: 'present',
-        record: {
-          mode: 'closed',
-          authority: {
-            runId: expectedRunId,
-            ownerId: expectedOwnerId,
-          },
-        },
-      })
+      await expect(
+        executionBoundary.read(expectedRunId),
+      ).resolves.toEqual(closed)
       expect(authorityMutated).toBe(true)
       port.close()
     },
   )
 
   test(
-    'invalidates writer-fence ports across close and replacement measurement races',
+    'invalidates execution-boundary ports across lifecycle races',
     async () => {
       const closeRequested = createRequestedResources()
       const closeTransport = new RecordingIdentityAwsTransport()
@@ -4934,12 +5062,16 @@ describe('Workspace Search migration AWS identity adapter', () => {
       const closingWriterFence =
         closePort.createApplicationWriterFencePort()
       await closingWriterFence.bootstrapOpen(closeAuthority)
+      const closingExecutionBoundary =
+        closePort.createExecutionBoundaryPort()
       closeTransport.getPrePlanAuthorityEffect = () => closePort.close()
 
-      await expect(closingWriterFence.read()).rejects.toMatchObject({
+      await expect(
+        closingExecutionBoundary.read(closeAuthority.lease.runId),
+      ).rejects.toMatchObject({
         code: 'INVALID_STATE',
         message:
-          'Workspace Search application writer fence operation failed.',
+          'Workspace Search migration execution boundary operation failed.',
       })
       expect(closeTransport.closeCount).toBe(1)
 
@@ -4958,9 +5090,11 @@ describe('Workspace Search migration AWS identity adapter', () => {
         remeasureClockAt,
         'managed-writer-fence-remeasure-race',
       )
-      const staleWriterFence =
+      const bootstrapWriterFence =
         remeasurePort.createApplicationWriterFencePort()
-      await staleWriterFence.bootstrapOpen(remeasureAuthority)
+      await bootstrapWriterFence.bootstrapOpen(remeasureAuthority)
+      const staleExecutionBoundary =
+        remeasurePort.createExecutionBoundaryPort()
       let replacementMeasurement:
         Promise<WorkspaceSearchMigrationConfiguration> | undefined
       remeasureTransport.getPrePlanAuthorityEffect = () => {
@@ -4968,38 +5102,43 @@ describe('Workspace Search migration AWS identity adapter', () => {
         replacementMeasurement = remeasurePort.measureConfiguration()
       }
 
-      await expect(staleWriterFence.read()).rejects.toMatchObject({
+      await expect(
+        staleExecutionBoundary.read(remeasureAuthority.lease.runId),
+      ).rejects.toMatchObject({
         code: 'INVALID_STATE',
         message:
-          'Workspace Search application writer fence operation failed.',
+          'Workspace Search migration execution boundary operation failed.',
       })
       if (replacementMeasurement === undefined) {
-        throw new Error('Expected replacement writer-fence measurement.')
+        throw new Error(
+          'Expected replacement execution-boundary measurement.',
+        )
       }
       await replacementMeasurement
       const readCount =
         remeasureTransport.getPrePlanAuthorityCommands.length
-      await expect(staleWriterFence.read()).rejects.toMatchObject({
+      await expect(
+        staleExecutionBoundary.read(remeasureAuthority.lease.runId),
+      ).rejects.toMatchObject({
         code: 'INVALID_STATE',
         message:
-          'Workspace Search application writer fence operation failed.',
+          'Workspace Search migration execution boundary operation failed.',
       })
       expect(remeasureTransport.getPrePlanAuthorityCommands)
         .toHaveLength(readCount)
-      const replacementWriterFence =
-        remeasurePort.createApplicationWriterFencePort()
-      await expect(replacementWriterFence.read()).resolves.toMatchObject({
-        status: 'present',
-        record: {
-          mode: 'open',
-        },
-      })
+      const replacementExecutionBoundary =
+        remeasurePort.createExecutionBoundaryPort()
+      await expect(
+        replacementExecutionBoundary.read(
+          remeasureAuthority.lease.runId,
+        ),
+      ).resolves.toBeUndefined()
       remeasurePort.close()
     },
   )
 
   test(
-    'quarantines a writer-fence generation after post-commit identity drift',
+    'quarantines execution control after post-commit identity drift',
     async () => {
       const requested = createRequestedResources()
       const transport = new RecordingIdentityAwsTransport()
@@ -5018,6 +5157,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
       )
       const writerFence = port.createApplicationWriterFencePort()
       await writerFence.bootstrapOpen(authority)
+      const executionBoundary = port.createExecutionBoundaryPort()
       const transactionCount =
         transport.transactWritePrePlanAuthorityCommands.length
       const targetTableName = requested.tables['workspace-search']
@@ -5041,13 +5181,13 @@ describe('Workspace Search migration AWS identity adapter', () => {
       }
 
       const failure = await captureWorkspaceSearchMigrationFailure(
-        writerFence.close(authority),
+        executionBoundary.close(authority),
       )
 
       expect(failure).toMatchObject({
         code: 'TARGET_DRIFT',
         message:
-          'Workspace Search application writer fence operation failed.',
+          'Workspace Search migration execution boundary operation failed.',
       })
       expect(postCommitDriftInjected).toBe(true)
       expect(
@@ -5064,14 +5204,38 @@ describe('Workspace Search migration AWS identity adapter', () => {
           'Workspace Search application writer fence operation failed.',
         ),
       )
+      expect(
+        () => port.createExecutionBoundaryPort(),
+      ).toThrow(
+        new WorkspaceSearchMigrationFailure(
+          'INVALID_STATE',
+          'Workspace Search migration execution boundary operation failed.',
+        ),
+      )
       await expect(writerFence.read()).rejects.toMatchObject({
         code: 'INVALID_STATE',
         message:
           'Workspace Search application writer fence operation failed.',
       })
+      await expect(
+        executionBoundary.read(authority.lease.runId),
+      ).rejects.toMatchObject({
+        code: 'INVALID_STATE',
+        message:
+          'Workspace Search migration execution boundary operation failed.',
+      })
       expect(transport.getPrePlanAuthorityCommands).toHaveLength(readCount)
 
       await port.measureConfiguration()
+      const recoveredExecutionBoundary =
+        port.createExecutionBoundaryPort()
+      await expect(
+        recoveredExecutionBoundary.read(authority.lease.runId),
+      ).resolves.toMatchObject({
+        runId: authority.lease.runId,
+        phase: 'closed',
+        revision: 1,
+      })
       const recoveredWriterFence =
         port.createApplicationWriterFencePort()
       await expect(recoveredWriterFence.read()).resolves.toMatchObject({
@@ -5088,7 +5252,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
   )
 
   test(
-    'revalidates all six writer-fence tables immediately before a transition',
+    'revalidates all six tables before an execution-boundary transition',
     async () => {
       const requested = createRequestedResources()
       const transport = new RecordingIdentityAwsTransport()
@@ -5107,6 +5271,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
       )
       const writerFence = port.createApplicationWriterFencePort()
       await writerFence.bootstrapOpen(authority)
+      const executionBoundary = port.createExecutionBoundaryPort()
       const transactionCount =
         transport.transactWritePrePlanAuthorityCommands.length
       const sourceTableName = requested.tables['project-directory']
@@ -5116,12 +5281,12 @@ describe('Workspace Search migration AWS identity adapter', () => {
         throw new Error('Expected measured writer-fence source identity.')
       }
       let describeCount = 0
-      // Close first rechecks six tables before and after its initial read.
-      // Check 13 starts the pre-send guard; check 14 is project-directory.
+      // Close guards both paired reads before and after I/O (24 checks).
+      // Check 25 starts the pre-send guard; check 26 is project-directory.
       transport.describeTableEffect = (tableName) => {
         describeCount += 1
         if (
-          describeCount === 13 &&
+          describeCount === 25 &&
           tableName === requested.tables['migration-state']
         ) {
           transport.describeTableOutputs.set(
@@ -5135,27 +5300,35 @@ describe('Workspace Search migration AWS identity adapter', () => {
         }
       }
 
-      await expect(writerFence.close(authority)).rejects.toMatchObject({
+      await expect(
+        executionBoundary.close(authority),
+      ).rejects.toMatchObject({
         code: 'SOURCE_DRIFT',
         message:
-          'Workspace Search application writer fence operation failed.',
+          'Workspace Search migration execution boundary operation failed.',
       })
-      expect(describeCount).toBe(14)
+      expect(describeCount).toBe(26)
       expect(
         transport.transactWritePrePlanAuthorityCommands,
       ).toHaveLength(transactionCount)
 
       transport.describeTableEffect = undefined
       transport.describeTableOutputs.set(sourceTableName, originalSource)
-      await expect(writerFence.close(authority)).resolves.toMatchObject({
-        status: 'present',
-        record: {
-          mode: 'closed',
-        },
+      await expect(
+        executionBoundary.close(authority),
+      ).resolves.toMatchObject({
+        runId: authority.lease.runId,
+        phase: 'closed',
+        revision: 1,
       })
       expect(
         transport.transactWritePrePlanAuthorityCommands,
       ).toHaveLength(transactionCount + 1)
+      expect(
+        transport.transactWritePrePlanAuthorityCommands[
+          transactionCount
+        ]?.input.TransactItems,
+      ).toHaveLength(10)
       port.close()
     },
   )
