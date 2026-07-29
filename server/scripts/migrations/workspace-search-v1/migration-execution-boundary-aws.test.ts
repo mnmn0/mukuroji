@@ -218,6 +218,58 @@ describe('Workspace Search migration execution-boundary AWS adapter', () => {
     )
   })
 
+  test('stabilizes a boundary revision across concurrent planning admission', async () => {
+    const fixture = createExecutionBoundaryAwsFixture()
+    const transport = new RecordingExecutionBoundaryTransport(
+      fixture.openFence,
+    )
+    const port = createExecutionBoundaryPort(
+      fixture,
+      transport,
+      createSequencedClock([closedAt, admittedAt]),
+    )
+    await port.close(fixture.closeAuthority)
+    const closedBoundaryItem = structuredClone(
+      requirePutItem(
+        requirePut(
+          requireTransactionItems(
+            requireTransaction(transport.transactions[0]),
+          )[9],
+        ),
+      ),
+    )
+    const admitted = await port.admitPlanning(
+      fixture.admissionInput,
+    )
+    const admittedBoundaryItem = structuredClone(
+      requirePutItem(
+        requirePut(
+          requireTransactionItems(
+            requireTransaction(transport.transactions[1]),
+          )[9],
+        ),
+      ),
+    )
+    transport.installItem(closedBoundaryItem)
+    const readsBefore = transport.reads.length
+    let admissionInjected = false
+    transport.readEffect = (command) => {
+      if (
+        readCommandRecordKey(command) !==
+          fixture.openFence.recordKey
+      ) {
+        return
+      }
+      admissionInjected = true
+      transport.readEffect = undefined
+      transport.installItem(admittedBoundaryItem)
+    }
+
+    expect(await port.read(runId)).toEqual(admitted)
+    expect(admissionInjected).toBe(true)
+    expect(transport.reads).toHaveLength(readsBefore + 6)
+  })
+
   test('rejects a fresh retry whose stable admission projection changed', async () => {
     const fixture = createExecutionBoundaryAwsFixture()
     const transport = new RecordingExecutionBoundaryTransport(
@@ -320,7 +372,7 @@ describe('Workspace Search migration execution-boundary AWS adapter', () => {
       port.read(runId)
     )
     expect(failure.code).toBe('INVALID_STATE')
-    expect(transport.reads).toHaveLength(6)
+    expect(transport.reads).toHaveLength(9)
   })
 
   test('rejects caller proxies before I/O without exposing thrown values', async () => {
@@ -437,7 +489,7 @@ describe('Workspace Search migration execution-boundary AWS adapter', () => {
       'AMBIGUOUS_OPERATION_UNRESOLVED',
     )
     expect(transactionFailure.message).not.toContain('tenant-secret')
-    expect(transactionTransport.reads).toHaveLength(2)
+    expect(transactionTransport.reads).toHaveLength(3)
 
     const reconciliationTransport =
       new RecordingExecutionBoundaryTransport(fixture.openFence)
@@ -856,6 +908,9 @@ implements WorkspaceSearchMigrationExecutionBoundaryAwsTransport {
   /** One-shot public or raw read error armed after a transaction. */
   nextReadErrorAfterTransaction: unknown
 
+  /** Optional test-owned effect invoked immediately before each item lookup. */
+  readEffect: ((command: GetItemCommand) => void) | undefined
+
   /** Exact durable items indexed by their sort key. */
   private readonly items =
     new Map<string, Readonly<Record<string, AttributeValue>>>()
@@ -901,6 +956,7 @@ implements WorkspaceSearchMigrationExecutionBoundaryAwsTransport {
     command: GetItemCommand,
   ): Promise<GetItemCommandOutput> => {
     this.reads.push(command)
+    this.readEffect?.(command)
     const error = this.nextReadError
     this.nextReadError = undefined
     if (error !== undefined) {

@@ -5281,12 +5281,12 @@ describe('Workspace Search migration AWS identity adapter', () => {
         throw new Error('Expected measured writer-fence source identity.')
       }
       let describeCount = 0
-      // Close guards both paired reads before and after I/O (24 checks).
-      // Check 25 starts the pre-send guard; check 26 is project-directory.
+      // Close guards three stabilizing reads before and after I/O (36 checks).
+      // Check 37 starts the pre-send guard; check 38 is project-directory.
       transport.describeTableEffect = (tableName) => {
         describeCount += 1
         if (
-          describeCount === 25 &&
+          describeCount === 37 &&
           tableName === requested.tables['migration-state']
         ) {
           transport.describeTableOutputs.set(
@@ -5307,7 +5307,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
         message:
           'Workspace Search migration execution boundary operation failed.',
       })
-      expect(describeCount).toBe(26)
+      expect(describeCount).toBe(38)
       expect(
         transport.transactWritePrePlanAuthorityCommands,
       ).toHaveLength(transactionCount)

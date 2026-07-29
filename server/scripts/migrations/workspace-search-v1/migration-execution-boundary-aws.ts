@@ -577,9 +577,21 @@ implements WorkspaceSearchMigrationExecutionBoundaryAwsPort {
     runId: string,
   ): Promise<ExecutionBoundaryStatePair> {
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      const boundary = await this.readBoundary(runId)
+      const boundaryBeforeFence = await this.readBoundary(runId)
       const writerFence = await this.readWriterFence()
-      const pair = { boundary, writerFence }
+      const boundaryAfterFence = await this.readBoundary(runId)
+      if (
+        !executionBoundarySnapshotsEqual(
+          boundaryBeforeFence,
+          boundaryAfterFence,
+        )
+      ) {
+        continue
+      }
+      const pair = {
+        boundary: boundaryAfterFence,
+        writerFence,
+      }
       if (executionBoundaryPairIsInternallyConsistent(pair)) {
         return pair
       }
@@ -995,7 +1007,13 @@ function createExecutionBoundaryTransactionCommand(
     targetCheck,
     boundaryPut,
   ]
-  if (items.length !== executionBoundaryTransactionItemCount) {
+  const index =
+    workspaceSearchMigrationExecutionBoundaryTransactionIndex
+  if (
+    authorityChecks.length !== index.writerFence ||
+    sourceChecks.length !== index.target - index.projectDirectory ||
+    items.length !== executionBoundaryTransactionItemCount
+  ) {
     return failExecutionBoundaryAws('INVALID_STATE')
   }
   return new TransactWriteItemsCommand({
@@ -1540,6 +1558,25 @@ function executionBoundaryPairIsInternallyConsistent(
   } catch {
     return false
   }
+}
+
+/**
+ * Compares the same boundary row read on both sides of the writer fence.
+ *
+ * @param beforeFence - Boundary observed before the fence read.
+ * @param afterFence - Boundary observed after the fence read.
+ * @returns Whether both reads identify the same exact durable revision.
+ */
+function executionBoundarySnapshotsEqual(
+  beforeFence:
+    WorkspaceSearchMigrationExecutionBoundary | undefined,
+  afterFence:
+    WorkspaceSearchMigrationExecutionBoundary | undefined,
+): boolean {
+  if (beforeFence === undefined || afterFence === undefined) {
+    return beforeFence === undefined && afterFence === undefined
+  }
+  return executionBoundaryValuesEqual(beforeFence, afterFence)
 }
 
 /**
