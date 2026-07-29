@@ -23,9 +23,10 @@ const maximumDynamoDbAttributeNameBytes = 65_535
 const maximumDynamoDbDocumentDepth = 32
 
 /**
- * Drift failure selected by the source or target strong-read caller.
+ * Drift failure selected by an apply or rollback strong-read caller.
  */
 export type WorkspaceSearchMigrationItemDriftCode =
+  | 'ROLLBACK_TARGET_DRIFT'
   | 'SOURCE_DRIFT'
   | 'TARGET_DRIFT'
 
@@ -121,7 +122,7 @@ export function createWorkspaceSearchMigrationItemConditionMaterial(
  * @param key - Exact requested physical item key.
  * @param plannedSnapshot - Planned exact present or absent state.
  * @param output - Untrusted low-level GetItem output.
- * @param driftCode - Stable source or target drift classification.
+ * @param driftCode - Stable apply or rollback drift classification.
  * @returns Detached exact observed snapshot when it matches the plan.
  */
 export function verifyWorkspaceSearchMigrationItemStrongRead(
@@ -957,12 +958,16 @@ function readAttributeName(
  * Reads one allowed drift failure classification.
  *
  * @param value - Candidate caller-selected drift code.
- * @returns Validated source or target drift code.
+ * @returns Validated apply or rollback drift code.
  */
 function readMigrationItemDriftCode(
   value: unknown,
 ): WorkspaceSearchMigrationItemDriftCode {
-  if (value !== 'SOURCE_DRIFT' && value !== 'TARGET_DRIFT') {
+  if (
+    value !== 'ROLLBACK_TARGET_DRIFT' &&
+    value !== 'SOURCE_DRIFT' &&
+    value !== 'TARGET_DRIFT'
+  ) {
     return failItemCondition('INVALID_ARGUMENT')
   }
   return value
@@ -1109,6 +1114,12 @@ function mapVerifierFailure(error: unknown): never {
     throw new WorkspaceSearchMigrationFailure(
       code,
       'Workspace Search migration target item drifted.',
+    )
+  }
+  if (code === 'ROLLBACK_TARGET_DRIFT') {
+    throw new WorkspaceSearchMigrationFailure(
+      code,
+      'Workspace Search migration rollback target item drifted.',
     )
   }
   throw new WorkspaceSearchMigrationFailure(

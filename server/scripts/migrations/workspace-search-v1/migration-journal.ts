@@ -13,7 +13,9 @@ import {
   type EncodedMigrationItemSnapshot,
   isCanonicalTimestamp,
   isHexDigest,
+  type MigrationItemSnapshot,
   serializeCanonicalJson,
+  type DynamoAttributeMap,
   type WorkspaceSearchJournalSegment,
   WorkspaceSearchMigrationFailure,
   WORKSPACE_SEARCH_MIGRATION_ID,
@@ -22,6 +24,18 @@ import {
 
 /** Maximum exact UTF-8 size accepted for one single-request journal upload. */
 export const WORKSPACE_SEARCH_JOURNAL_SEGMENT_MAX_BYTES = 2 * 1024 * 1024
+
+/**
+ * Exact native DynamoDB material restored by one validated journal segment.
+ */
+export type WorkspaceSearchJournalRestorationMaterial = {
+  /** Exact physical Workspace Search primary key. */
+  readonly targetKey: DynamoAttributeMap
+  /** Exact target state restored by rollback. */
+  readonly before: MigrationItemSnapshot
+  /** Exact post-apply state required by rollback compare-and-swap. */
+  readonly after: MigrationItemSnapshot
+}
 
 /**
  * Creates the canonical digest used for an absent DynamoDB item snapshot.
@@ -90,6 +104,32 @@ export function parseWorkspaceSearchJournalSegment(
     }
     return segment
   } catch (error) {
+    return wrapJournalFailure(error)
+  }
+}
+
+/**
+ * Decodes exact native target material from one strict journal segment.
+ *
+ * The segment is revalidated before any native AttributeValue is returned, so
+ * callers cannot substitute a key, snapshot digest, or non-canonical encoded
+ * value at the rollback boundary.
+ *
+ * @param value - Candidate exact immutable journal segment.
+ * @returns Detached target key and exact before/after snapshots.
+ */
+export function decodeWorkspaceSearchJournalRestorationMaterial(
+  value: WorkspaceSearchJournalSegment,
+): WorkspaceSearchJournalRestorationMaterial {
+  try {
+    const segment = readWorkspaceSearchJournalSegment(value)
+    const targetKey = decodeAttributeMap(segment.targetKey)
+    return {
+      targetKey,
+      before: decodeRestorationSnapshot(segment.before),
+      after: decodeRestorationSnapshot(segment.after),
+    }
+  } catch (error: unknown) {
     return wrapJournalFailure(error)
   }
 }
@@ -367,6 +407,28 @@ function readSnapshot(
     exists: true,
     item: encodeAttributeMap(rawItem),
     digest,
+  }
+}
+
+/**
+ * Decodes one already validated encoded journal snapshot.
+ *
+ * @param snapshot - Exact canonical present or absent snapshot.
+ * @returns Detached native DynamoDB snapshot.
+ */
+function decodeRestorationSnapshot(
+  snapshot: EncodedMigrationItemSnapshot,
+): MigrationItemSnapshot {
+  if (!snapshot.exists) {
+    return {
+      exists: false,
+      digest: snapshot.digest,
+    }
+  }
+  return {
+    exists: true,
+    item: decodeAttributeMap(snapshot.item),
+    digest: snapshot.digest,
   }
 }
 
