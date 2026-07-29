@@ -40,12 +40,14 @@ import {
 } from './migration-contract'
 import {
   createAwsWorkspaceSearchMigrationExecutionBoundaryPort,
+  createWorkspaceSearchMigrationPlanningAdmittedExecutionBoundaryConditionCheck,
   type AdmitWorkspaceSearchMigrationExecutionBoundaryAwsPlanningInput,
   type WorkspaceSearchMigrationExecutionBoundaryAwsPort,
   type WorkspaceSearchMigrationExecutionBoundaryAwsTransport,
   workspaceSearchMigrationExecutionBoundaryTransactionIndex,
 } from './migration-execution-boundary-aws'
 import {
+  serializeWorkspaceSearchMigrationExecutionBoundary,
   WORKSPACE_SEARCH_MIGRATION_EXECUTION_BOUNDARY_MAX_BYTES,
 } from './migration-execution-boundary'
 import type {
@@ -62,6 +64,204 @@ const drainCompletedAt = '2026-07-29T01:16:00.000Z'
 const admittedAt = '2026-07-29T01:16:10.000Z'
 
 describe('Workspace Search migration execution-boundary AWS adapter', () => {
+  test('creates an exact planning-admitted boundary condition check', async () => {
+    const fixture = createExecutionBoundaryAwsFixture()
+    const transport = new RecordingExecutionBoundaryTransport(
+      fixture.openFence,
+    )
+    const port = createExecutionBoundaryPort(
+      fixture,
+      transport,
+      createSequencedClock([closedAt, admittedAt]),
+    )
+    await port.close(fixture.closeAuthority)
+    const admitted = await port.admitPlanning(
+      fixture.admissionInput,
+    )
+    const admittedItem = requirePutItem(
+      requirePut(
+        requireTransactionItems(
+          requireTransaction(transport.transactions[1]),
+        )[9],
+      ),
+    )
+    const stateTable = structuredClone(
+      fixture.configuration.tables['migration-state'],
+    )
+    const boundary = structuredClone(admitted)
+    const conditionItem =
+      createWorkspaceSearchMigrationPlanningAdmittedExecutionBoundaryConditionCheck({
+        stateTable,
+        configurationHash: fixture.configurationHash,
+        boundary,
+      })
+    const condition = requireConditionCheck(conditionItem)
+    const detachedCondition = structuredClone(conditionItem)
+
+    expect(condition.TableName).toBe(stateTable.tableName)
+    expect(condition.Key).toEqual({
+      migrationId: admittedItem.migrationId,
+      recordKey: admittedItem.recordKey,
+    })
+    expect(condition.ConditionExpression).toBe([
+      '#field0 = :field0',
+      '#field1 = :field1',
+      '#field2 = :field2',
+      '#field3 = :field3',
+      '#field4 = :field4',
+      '#field5 = :field5',
+      '#field6 = :field6',
+      '#field7 = :field7',
+      '#field8 = :field8',
+      '#field9 = :field9',
+      '#field10 = :field10',
+      '#field11 = :field11',
+    ].join(' AND '))
+    expect(condition.ExpressionAttributeNames).toEqual({
+      '#field0': 'migrationId',
+      '#field1': 'recordKey',
+      '#field2': 'kind',
+      '#field3': 'version',
+      '#field4': 'stateTableId',
+      '#field5': 'configurationHash',
+      '#field6': 'runId',
+      '#field7': 'phase',
+      '#field8': 'revision',
+      '#field9': 'closedWriterFenceRecordDigest',
+      '#field10': 'boundaryDigest',
+      '#field11': 'boundaryBytes',
+    })
+    expect(condition.ExpressionAttributeValues).toEqual({
+      ':field0': admittedItem.migrationId,
+      ':field1': admittedItem.recordKey,
+      ':field2': admittedItem.kind,
+      ':field3': admittedItem.version,
+      ':field4': admittedItem.stateTableId,
+      ':field5': admittedItem.configurationHash,
+      ':field6': admittedItem.runId,
+      ':field7': admittedItem.phase,
+      ':field8': admittedItem.revision,
+      ':field9': admittedItem.closedWriterFenceRecordDigest,
+      ':field10': admittedItem.boundaryDigest,
+      ':field11': admittedItem.boundaryBytes,
+    })
+    expect(
+      condition.ExpressionAttributeValues?.[':field11'],
+    ).toEqual({
+      B: serializeWorkspaceSearchMigrationExecutionBoundary(
+        admitted,
+      ),
+    })
+    expect(condition.ReturnValuesOnConditionCheckFailure).toBe('NONE')
+
+    Reflect.set(stateTable, 'tableName', 'mutated-state-table')
+    Reflect.set(
+      boundary.planningAdmission,
+      'admittedAt',
+      '2026-07-29T02:00:00.000Z',
+    )
+    expect(conditionItem).toEqual(detachedCondition)
+  })
+
+  test('rejects a valid closed revision-one boundary', async () => {
+    const fixture = createExecutionBoundaryAwsFixture()
+    const transport = new RecordingExecutionBoundaryTransport(
+      fixture.openFence,
+    )
+    const port = createExecutionBoundaryPort(
+      fixture,
+      transport,
+      createSequencedClock([closedAt, admittedAt]),
+    )
+    const closed = await port.close(fixture.closeAuthority)
+    const admitted = await port.admitPlanning(
+      fixture.admissionInput,
+    )
+    const wrongPhase = structuredClone(admitted)
+    Reflect.set(wrongPhase, 'phase', closed.phase)
+    Reflect.set(wrongPhase, 'revision', closed.revision)
+    Reflect.set(
+      wrongPhase,
+      'boundaryDigest',
+      closed.boundaryDigest,
+    )
+    Reflect.deleteProperty(wrongPhase, 'planningAdmission')
+
+    const failure = captureSynchronousMigrationFailure(() =>
+      createWorkspaceSearchMigrationPlanningAdmittedExecutionBoundaryConditionCheck({
+        stateTable:
+          fixture.configuration.tables['migration-state'],
+        configurationHash: fixture.configurationHash,
+        boundary: wrongPhase,
+      })
+    )
+
+    expect(failure.code).toBe('INVALID_STATE')
+    expect(failure.message).toBe(
+      'Workspace Search migration execution boundary operation failed.',
+    )
+  })
+
+  test('rejects configuration, state-table, and internal run drift', async () => {
+    const fixture = createExecutionBoundaryAwsFixture()
+    const transport = new RecordingExecutionBoundaryTransport(
+      fixture.openFence,
+    )
+    const port = createExecutionBoundaryPort(
+      fixture,
+      transport,
+      createSequencedClock([closedAt, admittedAt]),
+    )
+    await port.close(fixture.closeAuthority)
+    const admitted = await port.admitPlanning(
+      fixture.admissionInput,
+    )
+    const stateTable =
+      fixture.configuration.tables['migration-state']
+    const mismatchedStateTable = structuredClone(stateTable)
+    Reflect.set(
+      mismatchedStateTable,
+      'tableId',
+      'other-migration-state-table-id',
+    )
+
+    for (const input of [
+      {
+        stateTable,
+        configurationHash:
+          createMigrationDigest('other-configuration'),
+        boundary: admitted,
+      },
+      {
+        stateTable: mismatchedStateTable,
+        configurationHash: fixture.configurationHash,
+        boundary: admitted,
+      },
+    ]) {
+      const failure = captureSynchronousMigrationFailure(() =>
+        createWorkspaceSearchMigrationPlanningAdmittedExecutionBoundaryConditionCheck(
+          input,
+        )
+      )
+      expect(failure.code).toBe('CONFIGURATION_DRIFT')
+    }
+
+    const runMismatch = structuredClone(admitted)
+    Reflect.set(
+      runMismatch.closeAuthority,
+      'runId',
+      'other-execution-boundary-run',
+    )
+    const runFailure = captureSynchronousMigrationFailure(() =>
+      createWorkspaceSearchMigrationPlanningAdmittedExecutionBoundaryConditionCheck({
+        stateTable,
+        configurationHash: fixture.configurationHash,
+        boundary: runMismatch,
+      })
+    )
+    expect(runFailure.code).toBe('INVALID_ARGUMENT')
+  })
+
   test('commits close and admission in the same fixed ten-item order', async () => {
     const fixture = createExecutionBoundaryAwsFixture()
     const transport = new RecordingExecutionBoundaryTransport(
@@ -1222,6 +1422,24 @@ async function captureMigrationFailure(
 ): Promise<WorkspaceSearchMigrationFailure> {
   try {
     await operation()
+  } catch (error: unknown) {
+    if (error instanceof WorkspaceSearchMigrationFailure) return error
+    throw error
+  }
+  throw new Error('Expected migration failure.')
+}
+
+/**
+ * Captures one expected synchronous public migration failure.
+ *
+ * @param operation - Expected failing synchronous operation.
+ * @returns Public stable migration failure.
+ */
+function captureSynchronousMigrationFailure(
+  operation: () => unknown,
+): WorkspaceSearchMigrationFailure {
+  try {
+    operation()
   } catch (error: unknown) {
     if (error instanceof WorkspaceSearchMigrationFailure) return error
     throw error
