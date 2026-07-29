@@ -93,12 +93,15 @@ export function throwIfWorkspaceSearchWriterFenceTerminalError(
  * @param client - Document client used by one application writer.
  * @param provider - Process-stable provider shared by the invocation.
  * @param tableNames - Exact six-table configuration measured by the provider.
+ * @param additionalFencedMutationTableNames - Additional rollback-owned tables
+ * whose mutations must participate in the same durable guard.
  * @returns The same configured document client.
  */
 export function bindWorkspaceSearchWriterFenceDocumentClient(
   client: DynamoDBDocumentClient,
   provider: WorkspaceSearchWriterFenceGuardProvider,
   tableNames: WorkspaceSearchWriterFenceAwsTableNames,
+  additionalFencedMutationTableNames: readonly string[] = [],
 ): DynamoDBDocumentClient {
   const fencedMutationTableNames = new Set([
     tableNames['project-directory'],
@@ -107,6 +110,12 @@ export function bindWorkspaceSearchWriterFenceDocumentClient(
     tableNames.documents,
     tableNames['workspace-search'],
   ])
+  for (const tableName of additionalFencedMutationTableNames) {
+    if (tableName.length === 0 || tableName.trim() !== tableName) {
+      throw new WorkspaceSearchWriterFenceTransactionPreparationError()
+    }
+    fencedMutationTableNames.add(tableName)
+  }
 
   client.middlewareStack.add(
     (next, context) => async (arguments_) => {

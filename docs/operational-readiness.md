@@ -630,8 +630,11 @@ Deployは(1)明示的`rollout-pending`で配線/IAMと`disabled` AppConfig basel
 (4)parameterを`required`へ更新してguarded backfillと12個のstrict compositionすべての反映を確認し、
 (5)新しい`enabled` revisionで再開する二段階とします。Webhook authorization backfill custom
 resourceは両handler Lambdaへ明示依存し、event propertyとLambda環境のmode不一致をI/O前に拒否します。
-Pending中のCreate/Update/Deleteはtable access前に短絡し、requiredへのproperty更新で初めてguarded
-migrationを開始します。CloudFormation更新中はpending/required Lambdaが混在し得るため、
+Pending中のCreate/Updateはtable access前に短絡し、requiredへのproperty更新で初めてguarded
+migrationを開始します。Deleteはv3 markerと両checkpointを強整合readし、stateが空ならwriteなしで
+完了します。既存stateがあればdedicated rollback clientも通常のdurable open-row guardを要求し、
+marker遷移、checkpoint、locator復元をguard付きtransactionで完了するまでresource削除を成功させません。
+CloudFormation更新中はpending/required Lambdaが混在し得るため、
 Step 2からStep 5までwriterを再開しません。`required`から`rollout-pending`へのdowngradeは通常rollback
 として扱わず、state-table recoveryを含むowner承認の新しいmaintenance changeを必要とします。
 

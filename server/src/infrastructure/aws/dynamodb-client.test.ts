@@ -2,6 +2,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { expect, spyOn, test } from 'bun:test'
 import {
   createDynamoDbClient,
+  createWorkspaceSearchRollbackDynamoDbDocumentClient,
   createWorkspaceSearchWriterDynamoDbDocumentClient,
   shouldBootstrapLocalDynamoDb,
 } from './dynamodb-client'
@@ -70,6 +71,7 @@ const runtimeEnvironment: Readonly<Record<string, string | undefined>> = {
 const completeTableEnvironment: Readonly<
   Record<string, string | undefined>
 > = {
+  DEVELOPER_PLATFORM_TABLE_NAME: 'DeveloperPlatform',
   PROJECT_DIRECTORY_TABLE_NAME: 'ProjectDirectory',
   WORK_ITEMS_TABLE_NAME: 'WorkItems',
   MUKUROJI_WORK_ITEMS_TABLE: undefined,
@@ -326,6 +328,39 @@ test('accepts rollout-pending only for an explicit remote AWS Lambda runtime', a
       )
       expect(warning).toHaveBeenCalledWith(
         'WORKSPACE_SEARCH_WRITER_FENCE_ROLLOUT_PENDING',
+      )
+      documentClient.destroy()
+    } finally {
+      warning.mockRestore()
+      lowLevelClient.destroy()
+    }
+  })
+})
+
+test('keeps pending migration rollback behind the durable guard', async () => {
+  await withServerEnvironment({
+    ...runtimeEnvironment,
+    ...completeTableEnvironment,
+    NODE_ENV: 'production',
+    AWS_LAMBDA_FUNCTION_NAME:
+      'mukuroji-production-webhook-authorization-backfill',
+    AWS_EXECUTION_ENV: 'AWS_Lambda_nodejs22.x',
+    MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE: 'rollout-pending',
+  }, () => {
+    const warning = spyOn(console, 'warn').mockImplementation(() => {})
+    const lowLevelClient = createOfflineDynamoDbClient()
+    try {
+      const documentClient =
+        createWorkspaceSearchRollbackDynamoDbDocumentClient(lowLevelClient)
+
+      expect(documentClient.middlewareStack.identify()).toContain(
+        'mukurojiWorkspaceSearchWriterFence - initialize',
+      )
+      expect(documentClient.middlewareStack.identify()).not.toContain(
+        'mukurojiWorkspaceSearchWriterFenceRolloutPending - initialize',
+      )
+      expect(warning).toHaveBeenCalledWith(
+        'WORKSPACE_SEARCH_WRITER_FENCE_ROLLOUT_PENDING_ROLLBACK_GUARDED',
       )
       documentClient.destroy()
     } finally {

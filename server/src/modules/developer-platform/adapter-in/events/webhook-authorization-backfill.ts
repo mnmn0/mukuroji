@@ -5,9 +5,9 @@ import {
   QueryCommand,
   ScanCommand,
   TransactWriteCommand,
-  UpdateCommand,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  createWorkspaceSearchRollbackDynamoDbDocumentClient,
   createWorkspaceSearchWriterDynamoDbDocumentClient,
 } from '../../../../infrastructure/aws/dynamodb-client'
 import {
@@ -643,7 +643,7 @@ export async function handler(event: WebhookAuthorizationBackfillEvent) {
         readRequiredEnvironment('DEVELOPER_PLATFORM_TABLE_NAME')
       return await processWebhookAuthorizationBackfillEvent(
         runtimeBoundEvent,
-        createDocumentClient(),
+        createDocumentClient(runtimeBoundEvent),
         tableName,
         developerPlatformTableName,
       )
@@ -658,10 +658,7 @@ export async function processWebhookAuthorizationBackfillEvent(
   tableName: string,
   developerPlatformTableName = tableName,
 ) {
-  if (
-    event.ResourceProperties?.WorkspaceSearchWriterFenceMode ===
-      WEBHOOK_AUTHORIZATION_BACKFILL_ROLLOUT_PENDING_MODE
-  ) {
+  if (shouldSkipPendingWebhookAuthorizationBackfill(event)) {
     return {
       ...(event.PhysicalResourceId
         ? { PhysicalResourceId: event.PhysicalResourceId }
@@ -669,6 +666,21 @@ export async function processWebhookAuthorizationBackfillEvent(
             PhysicalResourceId:
               WEBHOOK_AUTHORIZATION_BACKFILL_PHYSICAL_ID,
           }),
+      SkipMigration: true,
+    }
+  }
+  if (
+    await shouldSkipEmptyPendingWebhookAuthorizationRollback(
+      event,
+      documentClient,
+      tableName,
+      developerPlatformTableName,
+    )
+  ) {
+    return {
+      ...(event.PhysicalResourceId
+        ? { PhysicalResourceId: event.PhysicalResourceId }
+        : {}),
       SkipMigration: true,
     }
   }
@@ -740,10 +752,7 @@ async function processWebhookAuthorizationBackfillCompletion(
   if (event.SkipMigration) {
     return { IsComplete: true }
   }
-  if (
-    event.ResourceProperties?.WorkspaceSearchWriterFenceMode ===
-      WEBHOOK_AUTHORIZATION_BACKFILL_ROLLOUT_PENDING_MODE
-  ) {
+  if (shouldSkipPendingWebhookAuthorizationBackfill(event)) {
     return { IsComplete: true }
   }
   if (event.RequestType === 'Delete') {
@@ -758,7 +767,7 @@ async function processWebhookAuthorizationBackfillCompletion(
     const developerPlatformTableName =
       readRequiredEnvironment('DEVELOPER_PLATFORM_TABLE_NAME')
     const result = await processWebhookActiveLocatorRollbackPages(
-      createDocumentClient(),
+      createDocumentClient(event),
       tableName,
       developerPlatformTableName,
       {
@@ -784,7 +793,7 @@ async function processWebhookAuthorizationBackfillCompletion(
   const tableName = readRequiredEnvironment('PROJECT_DIRECTORY_TABLE_NAME')
   const developerPlatformTableName =
     readRequiredEnvironment('DEVELOPER_PLATFORM_TABLE_NAME')
-  const documentClient = createDocumentClient()
+  const documentClient = createDocumentClient(event)
   await startWebhookAuthorizationBackfill(
     documentClient,
     tableName,
@@ -846,7 +855,20 @@ async function deleteCheckpoint(
   }))
 }
 
-/** v3 rollback の marker と durable checkpoint を冪等に初期化します。 */
+/**
+ * Idempotently starts the v3 active-locator rollback.
+ *
+ * The migration marker transition and initial checkpoint creation are atomic.
+ * An existing checkpoint must retain the exact marker-owned drain deadline;
+ * inconsistent state fails closed instead of shortening the writer drain.
+ *
+ * @param documentClient - Guarded client used for strongly consistent reads
+ * and transactional rollback mutations.
+ * @param tableName - Project directory table containing the checkpoint.
+ * @param developerPlatformTableName - Table containing the migration marker.
+ * @param now - Rollback start clock.
+ * @returns Whether durable migration state requires pagewise rollback.
+ */
 export async function startWebhookActiveLocatorRollback(
   documentClient: DynamoDBDocumentClient,
   tableName: string,
@@ -888,34 +910,41 @@ export async function startWebhookActiveLocatorRollback(
     attempt += 1
   ) {
     try {
-      await documentClient.send(new UpdateCommand({
-        TableName: developerPlatformTableName,
-        Key: markerKey,
-        UpdateExpression:
-          'SET #value.#state = :rollback, ' +
-          '#value.#rollbackDrainUntil = :rollbackDrainUntil, ' +
-          '#version = #version + :one',
-        ConditionExpression:
-          '#entryType = :entryType AND #version = :expectedVersion AND ' +
-          '#value.#migrationVersion = :migrationVersion AND ' +
-          '#value.#state = :expectedState',
-        ExpressionAttributeNames: {
-          '#entryType': 'entryType',
-          '#value': 'value',
-          '#state': 'state',
-          '#rollbackDrainUntil': 'rollbackDrainUntil',
-          '#migrationVersion': 'migrationVersion',
-          '#version': 'version',
-        },
-        ExpressionAttributeValues: {
-          ':entryType': WEBHOOK_ACTIVE_LOCATOR_MIGRATION_ENTRY_TYPE,
-          ':expectedVersion': migration.version,
-          ':migrationVersion': WEBHOOK_AUTHORIZATION_BACKFILL_VERSION,
-          ':expectedState': migration.state,
-          ':rollback': 'rollback',
-          ':rollbackDrainUntil': requestedRollbackDrainUntil,
-          ':one': 1,
-        },
+      await documentClient.send(new TransactWriteCommand({
+        TransactItems: [{
+          Update: {
+            TableName: developerPlatformTableName,
+            Key: markerKey,
+            UpdateExpression:
+              'SET #value.#state = :rollback, ' +
+              '#value.#rollbackDrainUntil = :rollbackDrainUntil, ' +
+              '#version = #version + :one',
+            ConditionExpression:
+              '#entryType = :entryType AND #version = :expectedVersion AND ' +
+              '#value.#migrationVersion = :migrationVersion AND ' +
+              '#value.#state = :expectedState',
+            ExpressionAttributeNames: {
+              '#entryType': 'entryType',
+              '#value': 'value',
+              '#state': 'state',
+              '#rollbackDrainUntil': 'rollbackDrainUntil',
+              '#migrationVersion': 'migrationVersion',
+              '#version': 'version',
+            },
+            ExpressionAttributeValues: {
+              ':entryType': WEBHOOK_ACTIVE_LOCATOR_MIGRATION_ENTRY_TYPE,
+              ':expectedVersion': migration.version,
+              ':migrationVersion': WEBHOOK_AUTHORIZATION_BACKFILL_VERSION,
+              ':expectedState': migration.state,
+              ':rollback': 'rollback',
+              ':rollbackDrainUntil': requestedRollbackDrainUntil,
+              ':one': 1,
+            },
+          },
+        }, createWebhookActiveLocatorRollbackCheckpointPut(
+          tableName,
+          requestedRollbackDrainUntil,
+        )],
       }))
       migration = {
         ...migration,
@@ -1155,25 +1184,56 @@ async function ensureWebhookActiveLocatorRollbackCheckpoint(
 ) {
   try {
     await documentClient.send(new TransactWriteCommand({
-      TransactItems: [{
-        Put: {
-          TableName: tableName,
-          Item: {
-            directoryId:
-              WEBHOOK_ACTIVE_LOCATOR_ROLLBACK_CHECKPOINT_DIRECTORY_ID,
-            entryKey: WEBHOOK_AUTHORIZATION_BACKFILL_CHECKPOINT_ENTRY_KEY,
-            entryType: 'webhook-active-locator-rollback-checkpoint',
-            migrationVersion: WEBHOOK_AUTHORIZATION_BACKFILL_VERSION,
-            writerDrainUntil,
-            revision: 0,
-            legacyLookupsReconciled: 0,
-          } satisfies WebhookActiveLocatorRollbackCheckpoint,
-          ConditionExpression: 'attribute_not_exists(directoryId)',
-        },
-      }],
+      TransactItems: [
+        createWebhookActiveLocatorRollbackCheckpointPut(
+          tableName,
+          writerDrainUntil,
+        ),
+      ],
     }))
   } catch (error) {
     if (!isConditionalCheckFailure(error)) throw error
+    const existing = await readOptionalWebhookActiveLocatorRollbackCheckpoint(
+      documentClient,
+      tableName,
+    )
+    if (
+      !existing ||
+      existing.writerDrainUntil !== writerDrainUntil
+    ) {
+      throw new TypeError(
+        'Webhook active locator rollback checkpoint is inconsistent.',
+      )
+    }
+  }
+}
+
+/**
+ * Builds the create-only rollback checkpoint written with the marker transition.
+ *
+ * @param tableName - Project directory table containing migration checkpoints.
+ * @param writerDrainUntil - Exact rollback writer-drain deadline.
+ * @returns One transactional rollback-checkpoint Put action.
+ */
+function createWebhookActiveLocatorRollbackCheckpointPut(
+  tableName: string,
+  writerDrainUntil: string,
+) {
+  return {
+    Put: {
+      TableName: tableName,
+      Item: {
+        directoryId:
+          WEBHOOK_ACTIVE_LOCATOR_ROLLBACK_CHECKPOINT_DIRECTORY_ID,
+        entryKey: WEBHOOK_AUTHORIZATION_BACKFILL_CHECKPOINT_ENTRY_KEY,
+        entryType: 'webhook-active-locator-rollback-checkpoint',
+        migrationVersion: WEBHOOK_AUTHORIZATION_BACKFILL_VERSION,
+        writerDrainUntil,
+        revision: 0,
+        legacyLookupsReconciled: 0,
+      } satisfies WebhookActiveLocatorRollbackCheckpoint,
+      ConditionExpression: 'attribute_not_exists(directoryId)',
+    },
   }
 }
 
@@ -1892,45 +1952,78 @@ async function reconcileWebhookLegacyActiveLocator(
       : 'expiresAt = :expiresAt',
   ]
   try {
-    await documentClient.send(new UpdateCommand({
-      TableName: tableName,
-      Key: {
-        workspaceId: row.workspaceId,
-        recordKey: row.recordKey,
-      },
-      UpdateExpression: active
-        ? 'SET lookupKey = :lookupKey, lookupSortKey = :lookupSortKey'
-        : 'REMOVE lookupKey, lookupSortKey',
-      ConditionExpression: conditionParts.join(' AND '),
-      ExpressionAttributeNames: {
-        '#entryType': 'entryType',
-        '#value': 'value',
-        '#id': 'id',
-        '#createdAt': 'createdAt',
-        '#status': 'status',
-      },
-      ExpressionAttributeValues: {
-        ':entryType': 'webhook-subscription',
-        ':id': row.value.id,
-        ':createdAt': row.value.createdAt,
-        ':status': row.value.status,
-        ...(row.lookupKey === undefined
-          ? {}
-          : { ':observedLookupKey': row.lookupKey }),
-        ...(row.lookupSortKey === undefined
-          ? {}
-          : { ':observedLookupSortKey': row.lookupSortKey }),
-        ...(row.expiresAt === undefined
-          ? {}
-          : { ':expiresAt': row.expiresAt }),
-        ...(active
-          ? {
-              ':lookupKey': `WEBHOOK#ACTIVE#${row.workspaceId}`,
-              ':lookupSortKey':
-                `${row.value.createdAt}#${row.value.id}`,
-            }
-          : {}),
-      },
+    await documentClient.send(new TransactWriteCommand({
+      TransactItems: [
+        {
+          ConditionCheck: {
+            TableName: tableName,
+            Key: {
+              workspaceId:
+                WEBHOOK_ACTIVE_LOCATOR_MIGRATION_WORKSPACE_ID,
+              recordKey: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_RECORD_KEY,
+            },
+            ConditionExpression:
+              '#entryType = :migrationEntryType AND ' +
+              '#value.#migrationVersion = :migrationVersion AND ' +
+              '#value.#state = :migrationState',
+            ExpressionAttributeNames: {
+              '#entryType': 'entryType',
+              '#value': 'value',
+              '#migrationVersion': 'migrationVersion',
+              '#state': 'state',
+            },
+            ExpressionAttributeValues: {
+              ':migrationEntryType':
+                WEBHOOK_ACTIVE_LOCATOR_MIGRATION_ENTRY_TYPE,
+              ':migrationVersion':
+                WEBHOOK_AUTHORIZATION_BACKFILL_VERSION,
+              ':migrationState': 'rollback',
+            },
+          },
+        },
+        {
+          Update: {
+            TableName: tableName,
+            Key: {
+              workspaceId: row.workspaceId,
+              recordKey: row.recordKey,
+            },
+            UpdateExpression: active
+              ? 'SET lookupKey = :lookupKey, lookupSortKey = :lookupSortKey'
+              : 'REMOVE lookupKey, lookupSortKey',
+            ConditionExpression: conditionParts.join(' AND '),
+            ExpressionAttributeNames: {
+              '#entryType': 'entryType',
+              '#value': 'value',
+              '#id': 'id',
+              '#createdAt': 'createdAt',
+              '#status': 'status',
+            },
+            ExpressionAttributeValues: {
+              ':entryType': 'webhook-subscription',
+              ':id': row.value.id,
+              ':createdAt': row.value.createdAt,
+              ':status': row.value.status,
+              ...(row.lookupKey === undefined
+                ? {}
+                : { ':observedLookupKey': row.lookupKey }),
+              ...(row.lookupSortKey === undefined
+                ? {}
+                : { ':observedLookupSortKey': row.lookupSortKey }),
+              ...(row.expiresAt === undefined
+                ? {}
+                : { ':expiresAt': row.expiresAt }),
+              ...(active
+                ? {
+                    ':lookupKey': `WEBHOOK#ACTIVE#${row.workspaceId}`,
+                    ':lookupSortKey':
+                      `${row.value.createdAt}#${row.value.id}`,
+                  }
+                : {}),
+            },
+          },
+        },
+      ],
     }))
     return 'reconciled' as const
   } catch (error) {
@@ -2658,6 +2751,84 @@ function readWorkspaceSearchWriterFenceMode(
 }
 
 /**
+ * Determines whether a pending rollout may skip this provider lifecycle.
+ *
+ * A v3 Delete must inspect durable migration state because the resource may
+ * have completed migration while its previous configuration required the
+ * writer fence. Legacy resource deletion retains its pre-fence no-op behavior.
+ *
+ * @param event - Candidate provider lifecycle event.
+ * @returns Whether the lifecycle is a non-destructive pending rollout event.
+ */
+function shouldSkipPendingWebhookAuthorizationBackfill(
+  event: WebhookAuthorizationBackfillEvent,
+): boolean {
+  if (
+    event.ResourceProperties?.WorkspaceSearchWriterFenceMode !==
+      WEBHOOK_AUTHORIZATION_BACKFILL_ROLLOUT_PENDING_MODE
+  ) {
+    return false
+  }
+  return event.RequestType !== 'Delete' ||
+    readKnownDeletingMigrationVersion(event) !==
+      WEBHOOK_AUTHORIZATION_BACKFILL_VERSION
+}
+
+/**
+ * Skips an initial pending v3 Delete only when no durable migration state exists.
+ *
+ * Reads remain permitted by the rollout-pending barrier. Any retained
+ * checkpoint without its migration marker is inconsistent and must not be
+ * hidden as successful cleanup.
+ *
+ * @param event - Candidate provider lifecycle event.
+ * @param documentClient - Read-capable rollback client.
+ * @param tableName - Project directory table containing checkpoints.
+ * @param developerPlatformTableName - Table containing the migration marker.
+ * @returns Whether the untouched initial deployment can finish without writes.
+ */
+async function shouldSkipEmptyPendingWebhookAuthorizationRollback(
+  event: WebhookAuthorizationBackfillEvent,
+  documentClient: DynamoDBDocumentClient,
+  tableName: string,
+  developerPlatformTableName: string,
+): Promise<boolean> {
+  if (
+    event.RequestType !== 'Delete' ||
+    event.ResourceProperties?.WorkspaceSearchWriterFenceMode !==
+      WEBHOOK_AUTHORIZATION_BACKFILL_ROLLOUT_PENDING_MODE ||
+    readKnownDeletingMigrationVersion(event) !==
+      WEBHOOK_AUTHORIZATION_BACKFILL_VERSION
+  ) {
+    return false
+  }
+
+  const marker = await documentClient.send(new GetCommand({
+    TableName: developerPlatformTableName,
+    Key: {
+      workspaceId: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_WORKSPACE_ID,
+      recordKey: WEBHOOK_ACTIVE_LOCATOR_MIGRATION_RECORD_KEY,
+    },
+    ConsistentRead: true,
+  }))
+  if (marker.Item) return false
+
+  const [forwardCheckpoint, rollbackCheckpoint] = await Promise.all([
+    readOptionalCheckpoint(documentClient, tableName),
+    readOptionalWebhookActiveLocatorRollbackCheckpoint(
+      documentClient,
+      tableName,
+    ),
+  ])
+  if (forwardCheckpoint || rollbackCheckpoint) {
+    throw new TypeError(
+      'Webhook authorization rollback state is inconsistent.',
+    )
+  }
+  return true
+}
+
+/**
  * Binds one provider event to the Lambda configuration that handles it.
  *
  * CloudFormation can update a custom resource property and its provider
@@ -2732,8 +2903,24 @@ function readKnownDeletingMigrationVersion(
     : undefined
 }
 
-function createDocumentClient() {
-  return createWorkspaceSearchWriterDynamoDbDocumentClient()
+/**
+ * Creates the exact client for one custom-resource lifecycle.
+ *
+ * A v3 Delete may need to reverse migration after CloudFormation has restored
+ * rollout-pending configuration. That path still requires the durable guard;
+ * every other lifecycle retains the normal pending mutation barrier.
+ *
+ * @param event - Runtime-bound provider lifecycle event.
+ * @returns Writer or rollback-specific DynamoDB DocumentClient.
+ */
+function createDocumentClient(
+  event: WebhookAuthorizationBackfillEvent,
+) {
+  return event.RequestType === 'Delete' &&
+      readKnownDeletingMigrationVersion(event) ===
+        WEBHOOK_AUTHORIZATION_BACKFILL_VERSION
+    ? createWorkspaceSearchRollbackDynamoDbDocumentClient()
+    : createWorkspaceSearchWriterDynamoDbDocumentClient()
 }
 
 function readRequiredEnvironment(name: string) {

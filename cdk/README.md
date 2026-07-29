@@ -589,7 +589,9 @@ outputにはSecret ARNなどのresource metadataが含まれるため、access t
 初回配線を`rollout-pending`でdeployすると、AppConfigの初期baselineは`disabled`でall-at-once
 deployされ、controlled Lambdaはその完了に依存します。Webhook authorization backfill custom
 resourceも両handler Lambdaの更新完了に依存し、event propertyとLambda環境のmodeが一致しない場合は
-I/O前に停止し、pending中はCreate/Update/Deleteのすべてをtable access前に短絡します。全writerの
+I/O前に停止します。pending中のCreate/Updateはtable access前に短絡します。Deleteはv3 markerと
+checkpointを強整合readし、stateが空ならwriteなしで完了し、既存stateがあればpending barrierを
+bypassせずdurable open-row guard付きtransactionでrollbackを完了するまで削除を成功させません。全writerの
 drainを確認してfresh authorityに束縛したopen rowをbootstrapし、続けて値を`required`へ変更します。
 Application clientもpending中はfenced mutationをnetwork I/O前に拒否し、AppConfig admissionの
 誤再開だけではunguarded writeへ戻りません。

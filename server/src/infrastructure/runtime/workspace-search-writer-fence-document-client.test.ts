@@ -92,9 +92,13 @@ function createGuardFixture(): WorkspaceSearchWriterFenceGuardMaterial {
 /**
  * Creates a real DocumentClient while capturing only the installed middleware.
  *
+ * @param additionalFencedMutationTableNames - Additional mutation tables to
+ * include in the durable fence.
  * @returns Isolated middleware invocation harness.
  */
-function createMiddlewareHarness() {
+function createMiddlewareHarness(
+  additionalFencedMutationTableNames: readonly string[] = [],
+) {
   const lowLevelClient = new DynamoDBClient({
     credentials: {
       accessKeyId: 'test-access-key',
@@ -126,6 +130,7 @@ function createMiddlewareHarness() {
     documentClient,
     provider,
     tableNames,
+    additionalFencedMutationTableNames,
   )
   addSpy.mockRestore()
 
@@ -301,6 +306,51 @@ test('prepends exactly one guard to all covered mutations', async () => {
     })
     expect(forwardedItems.slice(1)).toEqual(readTransactionItems(input))
     expect(input.TransactItems).toHaveLength(5)
+  } finally {
+    harness.destroy()
+  }
+})
+
+test('guards transactions that only mutate an additional rollback table', async () => {
+  const harness = createMiddlewareHarness(['DeveloperPlatform'])
+  const update = {
+    Update: {
+      TableName: 'DeveloperPlatform',
+      Key: {
+        workspaceId: 'WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3',
+        recordKey: 'STATE',
+      },
+      UpdateExpression: 'SET #value.#state = :rollback',
+      ExpressionAttributeNames: {
+        '#value': 'value',
+        '#state': 'state',
+      },
+      ExpressionAttributeValues: {
+        ':rollback': 'rollback',
+      },
+    },
+  }
+
+  try {
+    await harness.invoke({
+      TransactItems: [update],
+    } satisfies TransactWriteCommandInput)
+
+    expect(harness.getAcquisitionCount()).toBe(1)
+    expect(harness.forwardedInputs).toHaveLength(1)
+    const forwardedItems = readTransactionItems(
+      harness.forwardedInputs[0] ?? {},
+    )
+    expect(forwardedItems).toHaveLength(2)
+    expect(forwardedItems[0]).toMatchObject({
+      ConditionCheck: {
+        TableName: tableNames['migration-state'],
+        Key: {
+          migrationId: 'workspace-search-maintenance',
+        },
+      },
+    })
+    expect(forwardedItems[1]).toEqual(update)
   } finally {
     harness.destroy()
   }

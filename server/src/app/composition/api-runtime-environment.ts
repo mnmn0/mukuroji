@@ -348,10 +348,14 @@ function isFullSecretsManagerArn(value: string): boolean {
 }
 
 /**
- * Retrieves each configuration group once with a shared Secrets Manager client.
+ * Loads plaintext configuration groups only for the atomic cold-start
+ * hydration boundary and destroys the shared Secrets Manager client before
+ * returning. This helper neither logs nor persists the secret strings.
  *
  * @param secretArns - Complete secret ARNs in deterministic group or record order.
  * @returns Exact UTF-8 secret strings in the same order.
+ * @throws A `TypeError` when a response omits its string secret value, or the
+ * original Secrets Manager error when a requested secret cannot be retrieved.
  */
 async function loadApiRuntimeSecrets(
   secretArns: readonly string[],

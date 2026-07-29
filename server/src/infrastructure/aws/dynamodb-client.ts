@@ -109,6 +109,53 @@ export function createWorkspaceSearchWriterDynamoDbDocumentClient(
   dynamoDbClient: DynamoDBClient | undefined = undefined,
   config: ServerConfig = loadServerConfig(),
 ): DynamoDBDocumentClient {
+  return createWorkspaceSearchDynamoDbDocumentClient(
+    dynamoDbClient,
+    config,
+    false,
+  )
+}
+
+/**
+ * Creates the guarded client used only to reverse an existing migration.
+ *
+ * A CloudFormation Delete can arrive after a required deployment is rolled
+ * back to the temporary rollout-pending configuration. In remote Lambda
+ * runtimes this factory never bypasses the durable fence: pending mutations
+ * use the same open-row guard as required mode, while an initial deployment
+ * with no migration state can still perform read-only cleanup checks. Explicit
+ * local runtimes retain the repository's normal local-only bypass.
+ *
+ * @param dynamoDbClient - Low-level client shared with table measurement and
+ * retained by the process-wide guard provider.
+ * @param config - Configuration snapshot shared with transport construction.
+ * @returns A durably guarded or explicitly local-only rollback DocumentClient.
+ */
+export function createWorkspaceSearchRollbackDynamoDbDocumentClient(
+  dynamoDbClient: DynamoDBClient | undefined = undefined,
+  config: ServerConfig = loadServerConfig(),
+): DynamoDBDocumentClient {
+  return createWorkspaceSearchDynamoDbDocumentClient(
+    dynamoDbClient,
+    config,
+    true,
+  )
+}
+
+/**
+ * Creates one local, rollout-blocked, or durably guarded DocumentClient.
+ *
+ * @param dynamoDbClient - Optional caller-owned low-level transport.
+ * @param config - Immutable server configuration snapshot.
+ * @param guardRolloutPendingMutations - Whether the narrowly scoped rollback
+ * caller must use the durable guard instead of the pending mutation barrier.
+ * @returns Configured DocumentClient for the selected lifecycle.
+ */
+function createWorkspaceSearchDynamoDbDocumentClient(
+  dynamoDbClient: DynamoDBClient | undefined,
+  config: ServerConfig,
+  guardRolloutPendingMutations: boolean,
+): DynamoDBDocumentClient {
   const resolvedDynamoDbClient =
     dynamoDbClient ?? createDynamoDbClient(config)
   const documentClient = createDynamoDbDocumentClient(
@@ -163,13 +210,17 @@ export function createWorkspaceSearchWriterDynamoDbDocumentClient(
         'Workspace Search writer-fence rollout-pending configuration is invalid.',
       )
     }
-    console.warn('WORKSPACE_SEARCH_WRITER_FENCE_ROLLOUT_PENDING')
-    return bindWorkspaceSearchWriterFenceRolloutPendingDocumentClient(
-      documentClient,
-      readWorkspaceSearchWriterFenceTableNames(config.environment),
+    if (!guardRolloutPendingMutations) {
+      console.warn('WORKSPACE_SEARCH_WRITER_FENCE_ROLLOUT_PENDING')
+      return bindWorkspaceSearchWriterFenceRolloutPendingDocumentClient(
+        documentClient,
+        readWorkspaceSearchWriterFenceTableNames(config.environment),
+      )
+    }
+    console.warn(
+      'WORKSPACE_SEARCH_WRITER_FENCE_ROLLOUT_PENDING_ROLLBACK_GUARDED',
     )
-  }
-  if (configuredMode !== requiredWriterFenceMode) {
+  } else if (configuredMode !== requiredWriterFenceMode) {
     throw new TypeError(
       'MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE=required is required.',
     )
@@ -186,6 +237,14 @@ export function createWorkspaceSearchWriterDynamoDbDocumentClient(
     documentClient,
     writerFence.provider,
     writerFence.tableNames,
+    guardRolloutPendingMutations
+      ? [
+          readRequiredWriterFenceEnvironment(
+            config.environment,
+            'DEVELOPER_PLATFORM_TABLE_NAME',
+          ),
+        ]
+      : [],
   )
 }
 
