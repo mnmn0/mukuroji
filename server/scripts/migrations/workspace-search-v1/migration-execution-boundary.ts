@@ -185,6 +185,19 @@ export type AdmitWorkspaceSearchMigrationExecutionBoundaryPlanningInput = {
 }
 
 /**
+ * Input used to recover an already durable planning admission.
+ */
+export type RecoverWorkspaceSearchMigrationExecutionBoundaryPlanningAdmissionInput = {
+  /** Exact durable revision-two boundary being recovered. */
+  readonly current:
+    WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary
+  /** Fresh current authority evaluated at its own current instant. */
+  readonly currentAuthority: WorkspaceSearchMigrationPrePlanAuthority
+  /** Exact raw evidence bytes committed by the durable admission. */
+  readonly maintenanceEvidenceBytes: Uint8Array
+}
+
+/**
  * Creates the revision-one boundary for one exact closed writer fence.
  *
  * The function validates the complete writer-fence record before projecting
@@ -351,6 +364,97 @@ export function admitWorkspaceSearchMigrationExecutionBoundaryPlanning(
 }
 
 /**
+ * Recovers an already durable planning admission under fresh current authority.
+ *
+ * Recovery validates lease and receipt freshness at the authority's current
+ * `evaluatedAt`, while comparing only stable admission fields to the durable
+ * boundary. It never rewinds a newer heartbeat or evaluation time to the
+ * original `admittedAt`.
+ *
+ * @param input - Durable admission, fresh authority, and exact raw evidence.
+ * @returns Detached exact durable planning-admitted boundary.
+ */
+export function recoverWorkspaceSearchMigrationExecutionBoundaryPlanningAdmission(
+  input:
+    RecoverWorkspaceSearchMigrationExecutionBoundaryPlanningAdmissionInput,
+): WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary {
+  return atExecutionBoundary(() => {
+    requireExactKeys(requireRecord(input), [
+      'current',
+      'currentAuthority',
+      'maintenanceEvidenceBytes',
+    ])
+    const current = readExecutionBoundary(input.current)
+    if (current.phase !== 'planning-admitted') {
+      return failExecutionBoundary()
+    }
+    const currentAuthority = readPrePlanAuthority(
+      input.currentAuthority,
+    )
+    const evaluatedAt = readTimestamp(currentAuthority.evaluatedAt)
+    const admission = current.planningAdmission
+    if (
+      currentAuthority.configurationHash !== current.configurationHash ||
+      currentAuthority.stateTableId !==
+        current.tableIds['migration-state'] ||
+      currentAuthority.lease.runId !== current.runId
+    ) {
+      return failExecutionBoundary()
+    }
+    assertWorkspaceSearchMigrationLeaseAuthority(
+      current.runId,
+      {
+        lease: currentAuthority.lease,
+        ownerId: currentAuthority.lease.ownerId,
+        at: evaluatedAt,
+      },
+    )
+    const receipt = currentAuthority.maintenanceEvidenceReceipt
+    validateWorkspaceSearchMaintenanceEvidenceReceipt(
+      receipt,
+      current.runId,
+      currentAuthority.lease.fenceToken,
+      evaluatedAt,
+    )
+    const evidenceBytes = copyBoundedBytes(
+      input.maintenanceEvidenceBytes,
+      MAINTENANCE_EVIDENCE_MAX_BYTES,
+    )
+    const parsed = parseMaintenanceEvidence(evidenceBytes, {
+      now: new Date(evaluatedAt),
+    })
+    requireReceiptMatchesEvidence(
+      receipt,
+      parsed.evidence,
+      parsed.fileSha256,
+    )
+    const drainStartedAt = readTimestamp(
+      parsed.evidence.drainStartedAt,
+    )
+    const drainCompletedAt = readTimestamp(
+      parsed.evidence.drainCompletedAt,
+    )
+    if (
+      currentAuthority.lease.ownerId !== admission.ownerId ||
+      currentAuthority.lease.fenceToken !==
+        admission.leaseFenceToken ||
+      currentAuthority.maintenanceEvidenceReceiptDigest !==
+        admission.maintenanceEvidenceReceiptDigest ||
+      currentAuthority.maintenanceEvidencePointerRevision !==
+        admission.maintenanceEvidencePointerRevision ||
+      receipt.evidenceDigest !== admission.maintenanceEvidenceDigest ||
+      receipt.evidenceLocator !== admission.maintenanceEvidenceLocator ||
+      receipt.runtimeRevision !== admission.runtimeRevision ||
+      drainStartedAt !== admission.drainStartedAt ||
+      drainCompletedAt !== admission.drainCompletedAt
+    ) {
+      return failExecutionBoundary()
+    }
+    return current
+  })
+}
+
+/**
  * Serializes one strict execution boundary as canonical UTF-8 JSON.
  *
  * @param value - Candidate closed or planning-admitted boundary.
@@ -408,6 +512,57 @@ export function createWorkspaceSearchMigrationExecutionBoundaryDigest(
   return atExecutionBoundary(() =>
     readExecutionBoundary(value).boundaryDigest
   )
+}
+
+/**
+ * Detaches one exact current pre-plan authority through the descriptor-safe
+ * execution-boundary parser.
+ *
+ * This helper lets an AWS adapter snapshot caller-owned authority before its
+ * first asynchronous read without duplicating the pure boundary's validation.
+ *
+ * @param value - Candidate current lease, pointer, and receipt authority.
+ * @returns Detached internally correlated authority.
+ */
+export function detachWorkspaceSearchMigrationPrePlanAuthorityForExecutionBoundary(
+  value: unknown,
+): WorkspaceSearchMigrationPrePlanAuthority {
+  return atExecutionBoundary(() => readPrePlanAuthority(value))
+}
+
+/**
+ * Reconstructs the unique revision-one predecessor of a strict execution
+ * boundary.
+ *
+ * A planning-admitted boundary retains every close field, so response-loss
+ * recovery can reproduce its canonical closed predecessor without trusting
+ * adapter-owned duplicate state.
+ *
+ * @param value - Candidate closed or planning-admitted execution boundary.
+ * @returns Detached canonical closed predecessor.
+ */
+export function createWorkspaceSearchMigrationClosedExecutionBoundaryPredecessor(
+  value: WorkspaceSearchMigrationExecutionBoundary,
+): WorkspaceSearchMigrationClosedExecutionBoundary {
+  return atExecutionBoundary(() => {
+    const current = readExecutionBoundary(value)
+    if (current.phase === 'closed') return current
+    return finalizeClosedBoundary({
+      kind: current.kind,
+      boundaryVersion: current.boundaryVersion,
+      migrationId: current.migrationId,
+      migrationVersion: current.migrationVersion,
+      runId: current.runId,
+      configurationHash: current.configurationHash,
+      tableIds: current.tableIds,
+      closedWriterFenceRecordDigest:
+        current.closedWriterFenceRecordDigest,
+      closedAt: current.closedAt,
+      closeAuthority: current.closeAuthority,
+      phase: 'closed',
+      revision: 1,
+    })
+  })
 }
 
 /**

@@ -88,6 +88,11 @@ import {
   type WorkspaceSearchMigrationApplicationWriterFenceAwsPort,
 } from './migration-application-writer-fence-aws'
 import {
+  createAwsWorkspaceSearchMigrationExecutionBoundaryPort,
+  type WorkspaceSearchMigrationExecutionBoundaryAwsPort,
+  type WorkspaceSearchMigrationExecutionBoundaryAwsTransport,
+} from './migration-execution-boundary-aws'
+import {
   createAwsWorkspaceSearchMigrationPrePlanAuthorityPort,
   type RenewWorkspaceSearchMigrationPrePlanMaintenanceEvidenceInput,
   type WorkspaceSearchMigrationHistoricalMaintenanceEvidenceBinding,
@@ -503,6 +508,12 @@ type ManagedApplicationWriterFenceAuthority =
   }
 
 /**
+ * Complete measured configuration captured for one execution-boundary port.
+ */
+type ManagedExecutionBoundaryAuthority =
+  ManagedApplicationWriterFenceAuthority
+
+/**
  * Measurement authority captured for one complete source-evidence operation.
  */
 type ManagedSourceEvidenceAuthority<
@@ -665,6 +676,18 @@ export interface WorkspaceSearchMigrationManagedIdentityPort
 }
 
 /**
+ * Initial-bootstrap writer-fence capability exposed by a managed AWS session.
+ *
+ * The standalone writer-fence adapter retains its lower-level close operation
+ * for isolated adapter use, but managed callers must close only through the
+ * atomic execution-boundary port.
+ */
+export type WorkspaceSearchMigrationManagedApplicationWriterFencePort = Pick<
+  WorkspaceSearchMigrationApplicationWriterFenceAwsPort,
+  'bootstrapOpen' | 'read'
+>
+
+/**
  * Composite measured AWS session for identity, source/target reads, authority
  * I/O, and immutable planning artifact storage.
  */
@@ -792,12 +815,23 @@ export interface WorkspaceSearchMigrationManagedAwsSession
     WorkspaceSearchMigrationSealedPlanningAuthorityV2AwsPort
 
   /**
-   * Creates one generation-bound application writer-fence operator port.
+   * Creates one generation-bound initial writer-fence bootstrap/read port.
    *
-   * @returns Writer-fence operator port bound to the latest measurement.
+   * Closing is deliberately absent so managed callers cannot bypass the
+   * atomic execution-boundary record.
+   *
+   * @returns Bootstrap/read port bound to the latest measurement.
    */
   createApplicationWriterFencePort():
-    WorkspaceSearchMigrationApplicationWriterFenceAwsPort
+    WorkspaceSearchMigrationManagedApplicationWriterFencePort
+
+  /**
+   * Creates one generation-bound atomic execution-boundary operator port.
+   *
+   * @returns Close/admission port bound to the latest measured configuration.
+   */
+  createExecutionBoundaryPort():
+    WorkspaceSearchMigrationExecutionBoundaryAwsPort
 }
 
 /** Narrow transport containing only managed identity reads. */
@@ -1421,9 +1455,9 @@ class AwsWorkspaceSearchMigrationIdentityPort
   private measuredMigrationStateTable: MigrationTableIdentity | undefined
 
   /**
-   * Whether an uncertain writer-fence commit quarantined this measurement.
+   * Whether an uncertain execution-control commit quarantined this measurement.
    */
-  private measuredApplicationWriterFenceQuarantined = false
+  private measuredExecutionControlQuarantined = false
 
   /**
    * Creates a port bound to immutable copies of the reviewed resources.
@@ -1460,7 +1494,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.measuredConfiguration = undefined
     this.invalidateManagedPlanningArtifactPort()
     this.measuredMigrationStateTable = undefined
-    this.measuredApplicationWriterFenceQuarantined = false
+    this.measuredExecutionControlQuarantined = false
     try {
       this.transport.close()
     } catch {
@@ -1482,7 +1516,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.measuredConfiguration = undefined
     this.invalidateManagedPlanningArtifactPort()
     this.measuredMigrationStateTable = undefined
-    this.measuredApplicationWriterFenceQuarantined = false
+    this.measuredExecutionControlQuarantined = false
     const configuration = await measureWorkspaceSearchMigrationConfiguration({
       requested: this.requested,
       port: this,
@@ -1631,13 +1665,13 @@ class AwsWorkspaceSearchMigrationIdentityPort
   }
 
   /**
-   * Creates one application writer-fence operator port bound to the current
+   * Creates one initial writer-fence bootstrap/read port bound to the current
    * measured generation and all six physical table incarnations.
    *
-   * @returns Generation-guarded application writer-fence operator port.
+   * @returns Generation-guarded initial writer-fence capability.
    */
   createApplicationWriterFencePort():
-    WorkspaceSearchMigrationApplicationWriterFenceAwsPort {
+    WorkspaceSearchMigrationManagedApplicationWriterFencePort {
     const authority = this.captureManagedApplicationWriterFenceAuthority()
     const transport: WorkspaceSearchMigrationPrePlanAuthorityAwsTransport = {
       getPrePlanAuthority: (command) =>
@@ -1676,12 +1710,57 @@ class AwsWorkspaceSearchMigrationIdentityPort
           authority,
           delegate.read(),
         ),
-      close: (
-        currentAuthority: WorkspaceSearchMigrationPrePlanAuthority,
-      ) =>
-        this.runManagedApplicationWriterFenceOperation(
+    }
+  }
+
+  /**
+   * Creates one atomic execution-boundary port bound to the current measured
+   * generation and all six physical table incarnations.
+   *
+   * @returns Generation-guarded writer close and planning admission capability.
+   */
+  createExecutionBoundaryPort():
+    WorkspaceSearchMigrationExecutionBoundaryAwsPort {
+    const authority = this.captureManagedExecutionBoundaryAuthority()
+    const transport: WorkspaceSearchMigrationExecutionBoundaryAwsTransport = {
+      getExecutionBoundaryState: (command) =>
+        this.runManagedApplicationWriterFenceRead(
+          authority,
+          () => this.transport.getPrePlanAuthority(command),
+        ),
+      prepareExecutionBoundaryWrite: async () => {
+        await this.requireCurrentApplicationWriterFenceTableIncarnations(
+          authority,
+        )
+      },
+      transactWriteExecutionBoundary: (command) =>
+        this.runManagedPreparedApplicationWriterFenceWrite(
+          authority,
+          () => this.transport.transactWritePrePlanAuthority(command),
+        ),
+    }
+    const delegate =
+      createAwsWorkspaceSearchMigrationExecutionBoundaryPort(
+        authority.configuration,
+        authority.configurationHash,
+        transport,
+        this.prePlanAuthorityClock,
+      )
+    return {
+      read: (runId) =>
+        this.runManagedExecutionBoundaryOperation(
+          authority,
+          delegate.read(runId),
+        ),
+      close: (currentAuthority) =>
+        this.runManagedExecutionBoundaryOperation(
           authority,
           delegate.close(currentAuthority),
+        ),
+      admitPlanning: (input) =>
+        this.runManagedExecutionBoundaryOperation(
+          authority,
+          delegate.admitPlanning(input),
         ),
     }
   }
@@ -3774,6 +3853,81 @@ class AwsWorkspaceSearchMigrationIdentityPort
   }
 
   /**
+   * Captures all measured identities installed for execution-boundary work.
+   *
+   * @returns Detached generation, configuration, hash, and state identity.
+   */
+  private captureManagedExecutionBoundaryAuthority():
+    ManagedExecutionBoundaryAuthority {
+    const generation = this.generation
+    const configurationHash = this.measuredConfigurationHash
+    const configuration = this.measuredConfiguration
+    const stateTable = this.measuredMigrationStateTable
+    if (
+      configurationHash === undefined ||
+      configuration === undefined ||
+      stateTable === undefined ||
+      this.measuredExecutionControlQuarantined
+    ) {
+      return failManagedExecutionBoundary()
+    }
+    const authority: ManagedExecutionBoundaryAuthority = {
+      generation,
+      configurationHash,
+      configuration: structuredClone(configuration),
+      stateTable: structuredClone(stateTable),
+    }
+    if (
+      !this.isMeasurementGenerationCurrent(
+        authority.generation,
+        authority.configurationHash,
+      )
+    ) {
+      return failManagedExecutionBoundary()
+    }
+    return authority
+  }
+
+  /**
+   * Guards one execution-boundary operation against lifecycle invalidation.
+   *
+   * The operation promise starts first so the standalone adapter detaches all
+   * caller-owned input before its first managed transport await.
+   *
+   * @param authority - Captured measured execution-boundary authority.
+   * @param operation - Already-started standalone adapter operation.
+   * @returns Result only while the captured generation remains current.
+   */
+  private async runManagedExecutionBoundaryOperation<Result>(
+    authority: ManagedExecutionBoundaryAuthority,
+    operation: Promise<Result>,
+  ): Promise<Result> {
+    try {
+      const result = await operation
+      if (
+        !this.isMeasurementGenerationCurrent(
+          authority.generation,
+          authority.configurationHash,
+        ) ||
+        this.measuredExecutionControlQuarantined
+      ) {
+        return failManagedExecutionBoundary()
+      }
+      return result
+    } catch (error: unknown) {
+      if (
+        !this.isMeasurementGenerationCurrent(
+          authority.generation,
+          authority.configurationHash,
+        )
+      ) {
+        return failManagedExecutionBoundary()
+      }
+      throw error
+    }
+  }
+
+  /**
    * Captures all measured identities installed for writer-fence operations.
    *
    * @returns Detached generation, configuration, hash, and state identity.
@@ -3788,7 +3942,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
       configurationHash === undefined ||
       configuration === undefined ||
       stateTable === undefined ||
-      this.measuredApplicationWriterFenceQuarantined
+      this.measuredExecutionControlQuarantined
     ) {
       return failManagedApplicationWriterFence()
     }
@@ -3848,7 +4002,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
         authority.configurationHash,
       ) ||
       this.measuredConfiguration === undefined ||
-      this.measuredApplicationWriterFenceQuarantined
+      this.measuredExecutionControlQuarantined
     ) {
       return failManagedApplicationWriterFence()
     }
@@ -3944,7 +4098,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
           authority,
         )
       } catch (guardError: unknown) {
-        this.quarantineManagedApplicationWriterFence(authority)
+        this.quarantineManagedExecutionControl(authority)
         throw guardError
       }
       throw error
@@ -3954,18 +4108,18 @@ class AwsWorkspaceSearchMigrationIdentityPort
         authority,
       )
     } catch (error: unknown) {
-      this.quarantineManagedApplicationWriterFence(authority)
+      this.quarantineManagedExecutionControl(authority)
       throw error
     }
     return result
   }
 
   /**
-   * Permanently quarantines one still-current measured writer-fence generation.
+   * Permanently quarantines one still-current execution-control generation.
    *
    * @param authority - Generation whose commit outcome became uncertain.
    */
-  private quarantineManagedApplicationWriterFence(
+  private quarantineManagedExecutionControl(
     authority: ManagedApplicationWriterFenceAuthority,
   ): void {
     if (
@@ -3974,7 +4128,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
         authority.configurationHash,
       )
     ) {
-      this.measuredApplicationWriterFenceQuarantined = true
+      this.measuredExecutionControlQuarantined = true
     }
   }
 
@@ -5513,6 +5667,30 @@ function createManagedApplicationWriterFenceFailure(
   return new WorkspaceSearchMigrationFailure(
     code,
     'Workspace Search application writer fence operation failed.',
+  )
+}
+
+/**
+ * Raises one stable managed execution-boundary lifecycle failure.
+ *
+ * @returns Never returns.
+ */
+function failManagedExecutionBoundary(): never {
+  throw createManagedExecutionBoundaryFailure('INVALID_STATE')
+}
+
+/**
+ * Creates one stable managed execution-boundary failure.
+ *
+ * @param code - Stable operator-safe lifecycle or drift classification.
+ * @returns Secret-free execution-boundary failure.
+ */
+function createManagedExecutionBoundaryFailure(
+  code: WorkspaceSearchMigrationFailureCode,
+): WorkspaceSearchMigrationFailure {
+  return new WorkspaceSearchMigrationFailure(
+    code,
+    'Workspace Search migration execution boundary operation failed.',
   )
 }
 

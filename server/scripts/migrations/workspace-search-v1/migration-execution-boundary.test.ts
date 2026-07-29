@@ -19,6 +19,7 @@ import {
   createWorkspaceSearchMigrationExecutionBoundary,
   createWorkspaceSearchMigrationExecutionBoundaryDigest,
   parseWorkspaceSearchMigrationExecutionBoundary,
+  recoverWorkspaceSearchMigrationExecutionBoundaryPlanningAdmission,
   serializeWorkspaceSearchMigrationExecutionBoundary,
   type AdmitWorkspaceSearchMigrationExecutionBoundaryPlanningInput,
   type CreateWorkspaceSearchMigrationExecutionBoundaryInput,
@@ -417,6 +418,49 @@ describe('Workspace Search migration execution boundary', () => {
       parseWorkspaceSearchMigrationExecutionBoundary(
         encodeCandidate(wrongDigest),
       )
+    )
+  })
+
+  test('recovers durable admission under a newer same-projection authority', () => {
+    const closed = createClosedBoundary()
+    const input = createAdmissionInput(closed)
+    const admitted =
+      admitWorkspaceSearchMigrationExecutionBoundaryPlanning(input)
+    const heartbeatAt = new Date(
+      Date.parse(admitted.planningAdmission.admittedAt) + 10_000,
+    ).toISOString()
+    const freshAuthority = {
+      ...input.currentAuthority,
+      lease: {
+        ...input.currentAuthority.lease,
+        heartbeatAt,
+        expiresAt: new Date(
+          Date.parse(heartbeatAt) + 60_000,
+        ).toISOString(),
+      },
+      evaluatedAt: new Date(
+        Date.parse(heartbeatAt) + 10_000,
+      ).toISOString(),
+    }
+
+    expect(
+      recoverWorkspaceSearchMigrationExecutionBoundaryPlanningAdmission({
+        current: admitted,
+        currentAuthority: freshAuthority,
+        maintenanceEvidenceBytes: input.maintenanceEvidenceBytes,
+      }),
+    ).toEqual(admitted)
+
+    expectBoundaryFailure(() =>
+      recoverWorkspaceSearchMigrationExecutionBoundaryPlanningAdmission({
+        current: admitted,
+        currentAuthority: {
+          ...freshAuthority,
+          maintenanceEvidencePointerRevision:
+            freshAuthority.maintenanceEvidencePointerRevision + 1,
+        },
+        maintenanceEvidenceBytes: input.maintenanceEvidenceBytes,
+      })
     )
   })
 })
