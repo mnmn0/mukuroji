@@ -5626,6 +5626,89 @@ describe('Workspace Search migration AWS identity adapter', () => {
   )
 
   test(
+    'preserves a raw transient managed execution-run read failure',
+    async () => {
+      const fixture =
+        await createManagedExecutionRunFixture(
+          'managed-read-transient',
+        )
+      const executionRun = fixture.port.createExecutionRunPort(
+        fixture.executionBoundary,
+        fixture.sealedPlanningAuthority,
+        fixture.planSeal,
+        fixture.closedWriterFenceRecord,
+      )
+      const reads =
+        fixture.transport.getPrePlanAuthorityCommands.length
+      const canary =
+        'MANAGED-EXECUTION-RUN-READ-TRANSIENT-DO-NOT-LEAK'
+      const retryable = new Error(canary)
+      retryable.name = 'ThrottlingException'
+      fixture.transport.getPrePlanAuthorityEffect = () => {
+        throw retryable
+      }
+
+      const failure =
+        await captureWorkspaceSearchMigrationFailure(
+          executionRun.read(fixture.currentAuthority.lease.runId),
+        )
+
+      expect(failure).toMatchObject({
+        code: 'TRANSIENT_INFRASTRUCTURE_FAILURE',
+        message:
+          'Workspace Search migration execution run operation failed.',
+      })
+      expect(failure.message).not.toContain(canary)
+      expect(
+        fixture.transport.getPrePlanAuthorityCommands,
+      ).toHaveLength(reads + 1)
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'preserves a transient managed execution-run table guard failure',
+    async () => {
+      const fixture =
+        await createManagedExecutionRunFixture(
+          'managed-guard-transient',
+        )
+      const executionRun = fixture.port.createExecutionRunPort(
+        fixture.executionBoundary,
+        fixture.sealedPlanningAuthority,
+        fixture.planSeal,
+        fixture.closedWriterFenceRecord,
+      )
+      const reads =
+        fixture.transport.getPrePlanAuthorityCommands.length
+      const canary =
+        'MANAGED-EXECUTION-RUN-GUARD-TRANSIENT-DO-NOT-LEAK'
+      const retryable = new Error(canary)
+      retryable.name = 'TimeoutError'
+      fixture.transport.describeTableFailures.set(
+        fixture.requested.tables['migration-state'],
+        retryable,
+      )
+
+      const failure =
+        await captureWorkspaceSearchMigrationFailure(
+          executionRun.read(fixture.currentAuthority.lease.runId),
+        )
+
+      expect(failure).toMatchObject({
+        code: 'TRANSIENT_INFRASTRUCTURE_FAILURE',
+        message:
+          'Workspace Search migration execution run operation failed.',
+      })
+      expect(failure.message).not.toContain(canary)
+      expect(
+        fixture.transport.getPrePlanAuthorityCommands,
+      ).toHaveLength(reads)
+      fixture.port.close()
+    },
+  )
+
+  test(
     'gates execution-run factories and ports across managed lifecycle changes',
     async () => {
       const fixture =

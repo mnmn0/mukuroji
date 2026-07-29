@@ -376,19 +376,17 @@ implements WorkspaceSearchMigrationExecutionRunAwsPort {
         }
         transactionError = error
       }
-      return this.reconcileCreate(intended, transactionError)
+      return this.reconcileCreate(transactionError)
     })
   }
 
   /**
    * Reconciles one attempted create through an exact strong reread.
    *
-   * @param intended - Exact state sent in the transaction.
    * @param transactionError - Raw transaction failure, if one occurred.
    * @returns Exact durable intended state.
    */
   private async reconcileCreate(
-    intended: WorkspaceSearchMigrationExecutionRun,
     transactionError: unknown,
   ): Promise<WorkspaceSearchMigrationExecutionRun> {
     let durable: WorkspaceSearchMigrationExecutionRun | undefined
@@ -399,12 +397,8 @@ implements WorkspaceSearchMigrationExecutionRunAwsPort {
         readExecutionRunReconciliationFailureCode(error),
       )
     }
-    if (
-      durable !== undefined &&
-      durable.executionRunDigest === intended.executionRunDigest
-    ) {
-      return durable
-    }
+    // Static-material equality is enforced while parsing, so another fresh
+    // caller's durable row is the same admission even when createdAt differs.
     if (durable !== undefined) {
       return durable
     }
