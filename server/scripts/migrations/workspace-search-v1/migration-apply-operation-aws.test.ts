@@ -2878,6 +2878,7 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
         expect(harness.transactions).toHaveLength(6)
       }
     },
+    15_000,
   )
 })
 

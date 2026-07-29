@@ -127,6 +127,7 @@ import {
   type WorkspaceSearchMigrationFullVerificationAwsPort,
   type WorkspaceSearchMigrationFullVerificationAwsTransport,
   type WorkspaceSearchMigrationFullVerificationPageScanner,
+  type WorkspaceSearchMigrationFullVerificationPlanReplayGateway,
 } from './migration-full-verification-aws'
 import {
   reduceWorkspaceSearchMigrationFullVerificationSourcePage,
@@ -2166,15 +2167,9 @@ class AwsWorkspaceSearchMigrationIdentityPort
         immutableArtifactPort,
       })
     const planArtifactGateway:
-      WorkspaceSearchMigrationPlanningArtifactAwsGateway = {
-        writePlanArtifact: (input) =>
-          planArtifactDelegate.writePlanArtifact(input),
+      WorkspaceSearchMigrationFullVerificationPlanReplayGateway = {
         replayPlanArtifact: (input) =>
           planArtifactDelegate.replayPlanArtifact(input),
-        writePlanningProvenanceArtifact: (input) =>
-          planArtifactDelegate.writePlanningProvenanceArtifact(input),
-        replayPlanningProvenanceArtifact: (input) =>
-          planArtifactDelegate.replayPlanningProvenanceArtifact(input),
       }
     const applySealGateway =
       createAwsWorkspaceSearchMigrationApplySealGateway({
@@ -2321,6 +2316,18 @@ class AwsWorkspaceSearchMigrationIdentityPort
           this.runManagedFullVerificationRead(
             authority,
             () => this.transport.getPrePlanAuthority(command),
+          ),
+        runVerificationReceiptChainRead: (operation) =>
+          this.runManagedFullVerificationRead(
+            authority,
+            () =>
+              operation((command) =>
+                this.runManagedMigrationStateIo(
+                  authority,
+                  () =>
+                    this.transport.getPrePlanAuthority(command),
+                )
+              ),
           ),
         prepareVerificationWrite: async () => {
           await this.requireCurrentFullVerificationTableIncarnations(

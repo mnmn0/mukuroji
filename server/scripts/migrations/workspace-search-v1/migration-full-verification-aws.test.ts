@@ -4,6 +4,7 @@ import {
   TransactionCanceledException,
   type AttributeValue,
   type GetItemCommand,
+  type GetItemCommandOutput,
   type TransactWriteItem,
   type TransactWriteItemsCommand,
 } from '@aws-sdk/client-dynamodb'
@@ -152,6 +153,22 @@ type VerificationAwsFixture = {
   readonly appliedRoot: WorkspaceSearchMigrationAppliedRoot
 }
 
+/** Strong fake reader accepted by one receipt-chain operation. */
+type VerificationReceiptReader = (
+  command: GetItemCommand,
+) => Promise<GetItemCommandOutput>
+
+/** Complete receipt-chain operation supplied by the adapter. */
+type VerificationReceiptChainOperation = (
+  readItem: VerificationReceiptReader,
+) => Promise<void>
+
+/** Fake transport strategy for invoking one receipt-chain operation. */
+type VerificationReceiptChainRunner = (
+  operation: VerificationReceiptChainOperation,
+  readItem: VerificationReceiptReader,
+) => Promise<void>
+
 /** In-memory transport and gateway controls for one adapter. */
 type VerificationAwsHarness = {
   /** Adapter under test. */
@@ -181,6 +198,14 @@ type VerificationAwsHarness = {
   /** Replaces the exact plan replay returned before lazy initialization. */
   setPlanReplay(
     replay: WorkspaceSearchMigrationPlanArtifactReplayResult,
+  ): void
+  /**
+   * Replaces how the fake transport invokes receipt-chain operations.
+   *
+   * @param runner - Exact callback invocation strategy for later reads.
+   */
+  setReceiptChainRunner(
+    runner: VerificationReceiptChainRunner,
   ): void
   /** Replaces exact result replay output to test substitution rejection. */
   substituteResultArtifact(): void
@@ -490,6 +515,76 @@ describe('Workspace Search migration full-verification AWS adapter', () => {
       )
     )
     expect(publicationFailure.code).toBe('INVALID_STATE')
+  })
+
+  test('fails closed when receipt-chain transport skips or repeats validation', async () => {
+    for (const runner of [
+      async () => {},
+      async (
+        operation: VerificationReceiptChainOperation,
+        readItem: VerificationReceiptReader,
+      ) => {
+        await operation(readItem)
+        try {
+          await operation(readItem)
+        } catch {
+          // The adapter must still reject a swallowed repeated callback.
+        }
+      },
+    ] satisfies readonly VerificationReceiptChainRunner[]) {
+      const fixture = createFixture()
+      const harness = createHarness(fixture)
+      await harness.port.saveVerificationPage(
+        createPageCommand(fixture, 0, 'project-directory'),
+      )
+      harness.setReceiptChainRunner(runner)
+
+      const failure = await captureFailure(() =>
+        harness.port.readProgress()
+      )
+
+      expect(failure.code).toBe('INVALID_STATE')
+      expect(failure.message).toBe('INVALID_STATE')
+    }
+  })
+
+  test('fails closed when receipt-chain transport returns before validation completes', async () => {
+    const fixture = createFixture()
+    const harness = createHarness(fixture)
+    await harness.port.saveVerificationPage(
+      createPageCommand(fixture, 0, 'project-directory'),
+    )
+    let releaseRead: (() => void) | undefined
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve
+    })
+    let markReadStarted: (() => void) | undefined
+    const readStarted = new Promise<void>((resolve) => {
+      markReadStarted = resolve
+    })
+    let pendingValidation: Promise<void> | undefined
+    harness.setReceiptChainRunner(
+      async (operation, readItem) => {
+        pendingValidation = operation(async (command) => {
+          markReadStarted?.()
+          await readGate
+          return readItem(command)
+        })
+        await readStarted
+      },
+    )
+
+    const failure = await captureFailure(() =>
+      harness.port.readProgress()
+    )
+
+    expect(failure.code).toBe('INVALID_STATE')
+    expect(failure.message).toBe('INVALID_STATE')
+    releaseRead?.()
+    if (pendingValidation === undefined) {
+      throw new Error('Expected pending receipt-chain validation.')
+    }
+    await pendingValidation
   })
 
   test('rejects publication without the minimum shared retention headroom', async () => {
@@ -1011,6 +1106,10 @@ function createHarness(
   let replay = fixture.replay
   let replayCount = 0
   let targetPageCount = 0
+  let receiptChainRunner: VerificationReceiptChainRunner =
+    async (operation, readItem) => {
+      await operation(readItem)
+    }
   let transactionMode:
     | { readonly kind: 'success' }
     | { readonly kind: 'response-loss' }
@@ -1194,14 +1293,28 @@ function createHarness(
       return structuredClone(artifact)
     },
   }
+
+  /**
+   * Reads one fake strongly consistent adapter row.
+   *
+   * @param command - Exact adapter-owned point read.
+   * @returns Detached configured row or an empty response.
+   */
+  const getVerificationItem = async (command: GetItemCommand) => {
+    const key = command.input.Key?.recordKey?.S
+    if (key === undefined) throw new Error('Missing test record key.')
+    const item = rows.get(key)
+    return item === undefined
+      ? { $metadata: {} }
+      : { $metadata: {}, Item: structuredClone(item) }
+  }
   const transport = {
-    async getVerificationItem(command: GetItemCommand) {
-      const key = command.input.Key?.recordKey?.S
-      if (key === undefined) throw new Error('Missing test record key.')
-      const item = rows.get(key)
-      return item === undefined
-        ? { $metadata: {} }
-        : { $metadata: {}, Item: structuredClone(item) }
+    getVerificationItem,
+    /** Runs a complete fake receipt-chain read in one scope. */
+    async runVerificationReceiptChainRead(
+      operation: VerificationReceiptChainOperation,
+    ) {
+      await receiptChainRunner(operation, getVerificationItem)
     },
     async prepareVerificationWrite() {},
     async transactWriteVerification(
@@ -1267,6 +1380,9 @@ function createHarness(
     },
     setPlanReplay: (nextReplay) => {
       replay = nextReplay
+    },
+    setReceiptChainRunner: (runner) => {
+      receiptChainRunner = runner
     },
     substituteResultArtifact: () => {
       const artifact = resultArtifacts.values().next().value

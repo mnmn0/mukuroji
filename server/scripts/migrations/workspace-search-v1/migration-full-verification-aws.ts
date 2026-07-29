@@ -372,6 +372,20 @@ export interface WorkspaceSearchMigrationFullVerificationAwsTransport {
   ): Promise<GetItemCommandOutput>
 
   /**
+   * Runs one complete receipt-chain read inside a single measured guard scope.
+   *
+   * @param operation - Adapter-owned receipt reads to execute.
+   * @returns Completion after the guarded receipt-chain read.
+   */
+  runVerificationReceiptChainRead(
+    operation: (
+      readItem: (
+        command: GetItemCommand,
+      ) => Promise<GetItemCommandOutput>,
+    ) => Promise<void>,
+  ): Promise<void>
+
+  /**
    * Completes all-six-table measured-incarnation preparation before commit.
    */
   prepareVerificationWrite(): Promise<void>
@@ -550,6 +564,12 @@ type FullVerificationDependencies = {
   readonly scanPage: (input: unknown) => Promise<unknown>
   /** Strong adapter-row read. */
   readonly get: (command: unknown) => Promise<unknown>
+  /** Complete receipt-chain read under one measured guard scope. */
+  readonly readReceiptChain: (
+    operation: (
+      readItem: (command: unknown) => Promise<unknown>,
+    ) => Promise<void>,
+  ) => Promise<void>
   /** Measured-incarnation preparation. */
   readonly prepare: () => Promise<void>
   /** Fixed-order transaction write. */
@@ -1272,7 +1292,24 @@ implements WorkspaceSearchMigrationFullVerificationAwsPort {
   private async readReceipt(
     commandDigest: string,
   ): Promise<DurableVerificationReceipt | undefined> {
-    const output = await this.dependencies.get(
+    return this.readReceiptWith(
+      this.dependencies.get,
+      commandDigest,
+    )
+  }
+
+  /**
+   * Strongly reads one deterministic receipt through the selected read scope.
+   *
+   * @param readItem - Captured standalone or grouped strong reader.
+   * @param commandDigest - Exact page-command digest.
+   * @returns Strict durable receipt or undefined.
+   */
+  private async readReceiptWith(
+    readItem: (command: unknown) => Promise<unknown>,
+    commandDigest: string,
+  ): Promise<DurableVerificationReceipt | undefined> {
+    const output = await readItem(
       createStrongReadCommand(
         this.binding,
         createVerificationReceiptRecordKey(
@@ -1460,100 +1497,119 @@ implements WorkspaceSearchMigrationFullVerificationAwsPort {
       return
     }
 
-    const reverseReceipts:
-      WorkspaceSearchMigrationFullVerificationPageReceipt[] = []
-    let commandDigest: string | null = terminal.lastCommandDigest
-    let expectedSuccessorDigest = terminal.stateDigest
-    let remaining = terminal.revision
-    while (commandDigest !== null && remaining > 0) {
-      const durable = await this.readReceipt(commandDigest)
+    let chainReadCount = 0
+    let chainReadCompleted = false
+    await this.dependencies.readReceiptChain(async (readItem) => {
+      chainReadCount += 1
+      if (chainReadCount !== 1) {
+        return failVerification('INVALID_STATE')
+      }
+      const reverseReceipts:
+        WorkspaceSearchMigrationFullVerificationPageReceipt[] = []
+      let commandDigest: string | null = terminal.lastCommandDigest
+      let expectedSuccessorDigest = terminal.stateDigest
+      let remaining = terminal.revision
+      while (commandDigest !== null && remaining > 0) {
+        const durable = await this.readReceiptWith(
+          readItem,
+          commandDigest,
+        )
+        if (
+          durable === undefined ||
+          durable.receipt.successorStateDigest !==
+            expectedSuccessorDigest ||
+          durable.receipt.successorRevision !== remaining
+        ) {
+          return failVerification('INVALID_STATE')
+        }
+        reverseReceipts.push(durable.receipt)
+        expectedSuccessorDigest = durable.receipt.predecessorDigest
+        commandDigest = durable.receipt.predecessorCommandDigest
+        remaining -= 1
+      }
       if (
-        durable === undefined ||
-        durable.receipt.successorStateDigest !==
-          expectedSuccessorDigest ||
-        durable.receipt.successorRevision !== remaining
+        remaining !== 0 ||
+        commandDigest !== null ||
+        expectedSuccessorDigest !== appliedRoot.rootDigest ||
+        reverseReceipts.length !== terminal.revision
       ) {
         return failVerification('INVALID_STATE')
       }
-      reverseReceipts.push(durable.receipt)
-      expectedSuccessorDigest = durable.receipt.predecessorDigest
-      commandDigest = durable.receipt.predecessorCommandDigest
-      remaining -= 1
-    }
-    if (
-      remaining !== 0 ||
-      commandDigest !== null ||
-      expectedSuccessorDigest !== appliedRoot.rootDigest ||
-      reverseReceipts.length !== terminal.revision
-    ) {
-      return failVerification('INVALID_STATE')
-    }
 
-    let predecessor:
-      WorkspaceSearchMigrationFullVerificationPagePredecessor = {
-        kind: 'applied-root',
-        progress:
-          createEmptyWorkspaceSearchMigrationFullVerificationProgress(
-            preparedPlan.plan,
-          ),
-      }
-    let reconstructed:
-      WorkspaceSearchMigrationFullVerificationPersistenceState
-      | undefined
-    for (
-      let index = reverseReceipts.length - 1;
-      index >= 0;
-      index -= 1
-    ) {
-      const receipt = reverseReceipts[index]
-      if (receipt === undefined) {
-        return failVerification('INVALID_STATE')
-      }
-      const predecessorProgress = predecessor.kind === 'applied-root'
-        ? predecessor.progress
-        : decodeWorkspaceSearchMigrationFullVerificationProgressSnapshot(
-          predecessor.state.progress,
-        )
-      const identity =
-        createWorkspaceSearchMigrationFullVerificationPageCommandIdentity({
-          planArtifactBinding: preparedPlan.artifactBinding,
-          tableIds: this.binding.tableIds,
-          appliedRootDigest: appliedRoot.rootDigest,
-          location: receipt.location,
-          expectedRevision: receipt.predecessorRevision,
-          predecessorDigest: receipt.predecessorDigest,
-          predecessorProgress,
-        })
-      if (identity.commandDigest !== receipt.commandDigest) {
-        return failVerification('INVALID_STATE')
-      }
-      reconstructed =
-        createWorkspaceSearchMigrationFullVerificationPersistenceState({
-          planArtifactBinding: preparedPlan.artifactBinding,
-          tableIds: this.binding.tableIds,
-          appliedRootDigest: appliedRoot.rootDigest,
-          revision: receipt.successorRevision,
-          predecessorKind: receipt.predecessorKind,
-          predecessorDigest: receipt.predecessorDigest,
-          lastCommandDigest: receipt.commandDigest,
+      let predecessor:
+        WorkspaceSearchMigrationFullVerificationPagePredecessor = {
+          kind: 'applied-root',
           progress:
-            decodeWorkspaceSearchMigrationFullVerificationProgressSnapshot(
-              receipt.successorProgress,
+            createEmptyWorkspaceSearchMigrationFullVerificationProgress(
+              preparedPlan.plan,
             ),
-        })
-      validateWorkspaceSearchMigrationFullVerificationPageReceiptTransition(
-        receipt,
-        predecessor,
-        reconstructed,
-      )
-      predecessor = {
-        kind: 'verification-state',
-        state: reconstructed,
+        }
+      let reconstructed:
+        WorkspaceSearchMigrationFullVerificationPersistenceState
+        | undefined
+      for (
+        let index = reverseReceipts.length - 1;
+        index >= 0;
+        index -= 1
+      ) {
+        const receipt = reverseReceipts[index]
+        if (receipt === undefined) {
+          return failVerification('INVALID_STATE')
+        }
+        const predecessorProgress =
+          predecessor.kind === 'applied-root'
+            ? predecessor.progress
+            : decodeWorkspaceSearchMigrationFullVerificationProgressSnapshot(
+              predecessor.state.progress,
+            )
+        const identity =
+          createWorkspaceSearchMigrationFullVerificationPageCommandIdentity({
+            planArtifactBinding: preparedPlan.artifactBinding,
+            tableIds: this.binding.tableIds,
+            appliedRootDigest: appliedRoot.rootDigest,
+            location: receipt.location,
+            expectedRevision: receipt.predecessorRevision,
+            predecessorDigest: receipt.predecessorDigest,
+            predecessorProgress,
+          })
+        if (identity.commandDigest !== receipt.commandDigest) {
+          return failVerification('INVALID_STATE')
+        }
+        reconstructed =
+          createWorkspaceSearchMigrationFullVerificationPersistenceState({
+            planArtifactBinding: preparedPlan.artifactBinding,
+            tableIds: this.binding.tableIds,
+            appliedRootDigest: appliedRoot.rootDigest,
+            revision: receipt.successorRevision,
+            predecessorKind: receipt.predecessorKind,
+            predecessorDigest: receipt.predecessorDigest,
+            lastCommandDigest: receipt.commandDigest,
+            progress:
+              decodeWorkspaceSearchMigrationFullVerificationProgressSnapshot(
+                receipt.successorProgress,
+              ),
+          })
+        validateWorkspaceSearchMigrationFullVerificationPageReceiptTransition(
+          receipt,
+          predecessor,
+          reconstructed,
+        )
+        predecessor = {
+          kind: 'verification-state',
+          state: reconstructed,
+        }
       }
-    }
+      if (
+        reconstructed === undefined ||
+        reconstructed.stateDigest !== terminal.stateDigest
+      ) {
+        return failVerification('INVALID_STATE')
+      }
+      chainReadCompleted = true
+    })
     if (
-      reconstructed === undefined ||
-      reconstructed.stateDigest !== terminal.stateDigest
+      chainReadCount !== 1 ||
+      !chainReadCompleted
     ) {
       return failVerification('INVALID_STATE')
     }
@@ -1842,6 +1898,7 @@ function prepareDependencies(
       transport,
       'getVerificationItem',
     ),
+    readReceiptChain: captureReceiptChainReadMethod(transport),
     prepare: captureVoidMethod(
       transport,
       'prepareVerificationWrite',
@@ -1851,6 +1908,29 @@ function prepareDependencies(
       'transactWriteVerification',
     ),
     clock: snapshotClock(clock),
+  }
+}
+
+/**
+ * Captures the descriptor-safe guarded receipt-chain method.
+ *
+ * @param ownerValue - Candidate DynamoDB transport.
+ * @returns Captured receipt-chain invocation closure.
+ */
+function captureReceiptChainReadMethod(
+  ownerValue: unknown,
+): FullVerificationDependencies['readReceiptChain'] {
+  const owner = requirePlainRecord(ownerValue, 'INVALID_ARGUMENT')
+  const method = readOwn(
+    owner,
+    'runVerificationReceiptChainRead',
+    'INVALID_ARGUMENT',
+  )
+  if (typeof method !== 'function') {
+    return failVerification('INVALID_ARGUMENT')
+  }
+  return async (operation) => {
+    await Reflect.apply(method, owner, [operation])
   }
 }
 

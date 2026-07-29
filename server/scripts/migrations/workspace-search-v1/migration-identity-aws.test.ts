@@ -512,8 +512,11 @@ class RecordingIdentityAwsTransport
   /** Optional synchronous effect during authority write preparation. */
   preparePrePlanAuthorityWriteEffect: (() => void) | undefined
 
-  /** Optional synchronous effect after recording an authority point read. */
-  getPrePlanAuthorityEffect: (() => void) | undefined
+  /** Optional awaited effect after recording an authority point read. */
+  getPrePlanAuthorityEffect:
+    ((
+      command: GetItemCommand,
+    ) => void | Promise<void>) | undefined
 
   /** Optional apply-specific output selected before record-key lookup. */
   getPrePlanAuthorityApplyOutput:
@@ -995,7 +998,7 @@ class RecordingIdentityAwsTransport
     command: GetItemCommand,
   ): Promise<GetItemCommandOutput> {
     this.getPrePlanAuthorityCommands.push(command)
-    this.getPrePlanAuthorityEffect?.()
+    await this.getPrePlanAuthorityEffect?.(command)
     const applyOutput =
       this.getPrePlanAuthorityApplyOutput?.(command)
     if (applyOutput !== undefined) {
@@ -7216,6 +7219,134 @@ describe('Workspace Search migration AWS identity adapter', () => {
   )
 
   test(
+    'rejects target replacement after an authoritative receipt traversal',
+    async () => {
+      const fixture =
+        await createManagedFullVerificationFixture(
+          'verification-receipt-chain-drift',
+        )
+      const terminal =
+        await completeManagedFullVerificationTraversal(fixture)
+      const targetTableName =
+        fixture.requested.tables['workspace-search']
+      const originalTarget =
+        fixture.transport.describeTableOutputs.get(targetTableName)
+      if (originalTarget === undefined) {
+        throw new Error(
+          'Expected measured verification chain target identity.',
+        )
+      }
+      let receiptChainDriftInjected = false
+      fixture.transport.getPrePlanAuthorityEffect = (command) => {
+        const recordKey = command.input.Key?.recordKey?.S
+        if (
+          receiptChainDriftInjected ||
+          recordKey === undefined ||
+          !recordKey.startsWith(
+            'full-verification-page-receipt/v1/',
+          )
+        ) {
+          return
+        }
+        receiptChainDriftInjected = true
+        fixture.transport.describeTableOutputs.set(
+          targetTableName,
+          createReplacementDescribeTableOutput(
+            'workspace-search',
+            targetTableName,
+            fixture.requested,
+          ),
+        )
+      }
+      const receiptReadStart =
+        fixture.transport.getPrePlanAuthorityCommands.length
+      const driftFailure =
+        await captureWorkspaceSearchMigrationFailure(
+          fixture.verification.readProgress(),
+        )
+      expect(driftFailure.code).toBe('TARGET_DRIFT')
+      expect(driftFailure.message).toBe('TARGET_DRIFT')
+      expect(receiptChainDriftInjected).toBe(true)
+      expect(
+        fixture.transport.getPrePlanAuthorityCommands
+          .slice(receiptReadStart)
+          .filter((command) =>
+            command.input.Key?.recordKey?.S?.startsWith(
+              'full-verification-page-receipt/v1/',
+            ) === true
+          ),
+      ).toHaveLength(terminal.revision)
+      fixture.transport.getPrePlanAuthorityEffect = undefined
+      fixture.transport.describeTableOutputs.set(
+        targetTableName,
+        originalTarget,
+      )
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'stops authoritative receipt traversal on close or remeasurement',
+    async () => {
+      for (const lifecycle of [
+        'close',
+        'remeasure',
+      ] as const) {
+        const fixture =
+          await createManagedFullVerificationFixture(
+            `verification-receipt-chain-${lifecycle}`,
+          )
+        await completeManagedFullVerificationTraversal(fixture)
+        const receiptReadStart =
+          fixture.transport.getPrePlanAuthorityCommands.length
+        let receiptReadCount = 0
+        fixture.transport.getPrePlanAuthorityEffect =
+          async (command) => {
+            if (
+              command.input.Key?.recordKey?.S?.startsWith(
+                'full-verification-page-receipt/v1/',
+              ) !== true
+            ) {
+              return
+            }
+            receiptReadCount += 1
+            if (receiptReadCount !== 2) return
+            fixture.transport.getPrePlanAuthorityEffect = undefined
+            if (lifecycle === 'close') {
+              fixture.port.close()
+              return
+            }
+            await fixture.port.measureConfiguration()
+          }
+
+        const failure =
+          await captureWorkspaceSearchMigrationFailure(
+            fixture.verification.readProgress(),
+          )
+
+        expect(failure.code).toBe('INVALID_STATE')
+        const receiptReads =
+          fixture.transport.getPrePlanAuthorityCommands
+            .slice(receiptReadStart)
+            .filter((command) =>
+              command.input.Key?.recordKey?.S?.startsWith(
+                'full-verification-page-receipt/v1/',
+              ) === true
+            )
+        expect(receiptReads).toHaveLength(2)
+        for (const command of receiptReads) {
+          expect(command.input).toMatchObject({
+            TableName:
+              fixture.requested.tables['migration-state'],
+            ConsistentRead: true,
+          })
+        }
+        if (lifecycle === 'remeasure') fixture.port.close()
+      }
+    },
+  )
+
+  test(
     'publishes and rereads terminal verification through managed S3',
     async () => {
       const fixture =
@@ -7224,6 +7355,28 @@ describe('Workspace Search migration AWS identity adapter', () => {
         )
       const terminal =
         await completeManagedFullVerificationTraversal(fixture)
+
+      const receiptReadStart =
+        fixture.transport.getPrePlanAuthorityCommands.length
+      const describeStart =
+        fixture.transport.describeTableCommands.length
+      await expect(fixture.verification.readProgress())
+        .resolves.toEqual(terminal)
+      const authoritativeReads =
+        fixture.transport.getPrePlanAuthorityCommands.slice(
+          receiptReadStart,
+        )
+      expect(
+        authoritativeReads.filter((command) =>
+          command.input.Key?.recordKey?.S?.startsWith(
+            'full-verification-page-receipt/v1/',
+          ) === true
+        ),
+      ).toHaveLength(terminal.revision)
+      expect(
+        fixture.transport.describeTableCommands.length -
+          describeStart,
+      ).toBe(36)
       const puts =
         fixture.transport.putImmutableArtifactCommands.length
       const gets =
