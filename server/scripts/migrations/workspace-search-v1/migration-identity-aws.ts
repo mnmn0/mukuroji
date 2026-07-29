@@ -96,6 +96,10 @@ import {
   type WorkspaceSearchMigrationApplyOperationAwsTransport,
 } from './migration-apply-operation-aws'
 import {
+  createWorkspaceSearchMigrationAppliedRootStrongReadCommand,
+  parseWorkspaceSearchMigrationAppliedRootStrongReadOutput,
+} from './migration-applied-root-aws'
+import {
   createAwsWorkspaceSearchMigrationApplySealGateway,
 } from './migration-apply-seal-aws'
 import {
@@ -116,6 +120,18 @@ import {
   serializeWorkspaceSearchMigrationExecutionRun,
   type WorkspaceSearchMigrationExecutionRun,
 } from './migration-execution-run'
+import {
+  createAwsWorkspaceSearchMigrationFullVerificationPort,
+  type WorkspaceSearchMigrationFullVerificationAppliedRootReader,
+  type WorkspaceSearchMigrationFullVerificationAuthorityPort,
+  type WorkspaceSearchMigrationFullVerificationAwsPort,
+  type WorkspaceSearchMigrationFullVerificationAwsTransport,
+  type WorkspaceSearchMigrationFullVerificationPageScanner,
+} from './migration-full-verification-aws'
+import {
+  reduceWorkspaceSearchMigrationFullVerificationSourcePage,
+  reduceWorkspaceSearchMigrationFullVerificationTargetPage,
+} from './migration-full-verification'
 import {
   createAwsWorkspaceSearchMigrationPrePlanAuthorityPort,
   type RenewWorkspaceSearchMigrationPrePlanMaintenanceEvidenceInput,
@@ -234,6 +250,10 @@ import {
 import type {
   WorkspaceSearchMigrationSealedPlanningAuthorityV2,
 } from './migration-sealed-planning-authority-v2'
+import {
+  createAwsWorkspaceSearchMigrationVerificationResultGateway,
+  type WorkspaceSearchMigrationVerificationResultAwsGateway,
+} from './migration-verification-result-aws'
 import type {
   WorkspaceSearchWriterFenceClosedRecord,
 } from '../../../src/infrastructure/runtime/workspace-search-writer-fence'
@@ -565,6 +585,12 @@ type ManagedApplyOperationAuthority =
     readonly immutableArtifactPort:
       WorkspaceSearchMigrationImmutableArtifactAwsPort
   }
+
+/**
+ * Complete measured authority retained by one full-verification port.
+ */
+type ManagedFullVerificationAuthority =
+  ManagedApplyOperationAuthority
 
 /**
  * Measurement authority captured for one complete source-evidence operation.
@@ -923,6 +949,25 @@ export interface WorkspaceSearchMigrationManagedAwsSession
       WorkspaceSearchWriterFenceClosedRecord,
     executionRun: WorkspaceSearchMigrationExecutionRun,
   ): WorkspaceSearchMigrationApplyOperationAwsPort
+
+  /**
+   * Creates one generation-bound resumable full-verification port.
+   *
+   * @param executionBoundary - Exact revision-two planning admission.
+   * @param sealedPlanningAuthority - Exact immutable sealed planning root.
+   * @param closedWriterFenceRecord - Exact closed fence fixed by the boundary.
+   * @param executionRun - Exact immutable execution admission.
+   * @returns Verification progress/publication port bound to the measurement.
+   */
+  createFullVerificationPort(
+    executionBoundary:
+      WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary,
+    sealedPlanningAuthority:
+      WorkspaceSearchMigrationSealedPlanningAuthorityV2,
+    closedWriterFenceRecord:
+      WorkspaceSearchWriterFenceClosedRecord,
+    executionRun: WorkspaceSearchMigrationExecutionRun,
+  ): WorkspaceSearchMigrationFullVerificationAwsPort
 }
 
 /** Narrow transport containing only managed identity reads. */
@@ -2080,6 +2125,256 @@ class AwsWorkspaceSearchMigrationIdentityPort
   }
 
   /**
+   * Creates one independently scanned, resumable full-verification port bound
+   * to the current measured generation and every physical table incarnation.
+   *
+   * Exact plan, apply-seal, and verification-result objects all reuse the
+   * current private immutable-object port. Raw source and target pages remain
+   * private to this session and are reduced exactly once after one strong Scan.
+   *
+   * @param executionBoundary - Exact revision-two planning admission.
+   * @param sealedPlanningAuthority - Exact immutable sealed planning root.
+   * @param closedWriterFenceRecord - Exact closed fence fixed by the boundary.
+   * @param executionRun - Exact immutable execution admission.
+   * @returns Generation-guarded verification and publication capability.
+   */
+  createFullVerificationPort(
+    executionBoundary:
+      WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary,
+    sealedPlanningAuthority:
+      WorkspaceSearchMigrationSealedPlanningAuthorityV2,
+    closedWriterFenceRecord:
+      WorkspaceSearchWriterFenceClosedRecord,
+    executionRun: WorkspaceSearchMigrationExecutionRun,
+  ): WorkspaceSearchMigrationFullVerificationAwsPort {
+    const authority = this.captureManagedFullVerificationAuthority()
+    let detachedExecutionRun: WorkspaceSearchMigrationExecutionRun
+    try {
+      detachedExecutionRun =
+        parseWorkspaceSearchMigrationExecutionRun(
+          serializeWorkspaceSearchMigrationExecutionRun(executionRun),
+        )
+    } catch {
+      return failManagedFullVerification()
+    }
+    const immutableArtifactPort =
+      this.createManagedFullVerificationImmutableArtifactPort(authority)
+    const planArtifactDelegate =
+      createAwsWorkspaceSearchMigrationPlanningArtifactGateway({
+        runId: detachedExecutionRun.runId,
+        configurationHash: authority.configurationHash,
+        immutableArtifactPort,
+      })
+    const planArtifactGateway:
+      WorkspaceSearchMigrationPlanningArtifactAwsGateway = {
+        writePlanArtifact: (input) =>
+          planArtifactDelegate.writePlanArtifact(input),
+        replayPlanArtifact: (input) =>
+          planArtifactDelegate.replayPlanArtifact(input),
+        writePlanningProvenanceArtifact: (input) =>
+          planArtifactDelegate.writePlanningProvenanceArtifact(input),
+        replayPlanningProvenanceArtifact: (input) =>
+          planArtifactDelegate.replayPlanningProvenanceArtifact(input),
+      }
+    const applySealGateway =
+      createAwsWorkspaceSearchMigrationApplySealGateway({
+        configuration: authority.configuration,
+        configurationHash: authority.configurationHash,
+        runId: detachedExecutionRun.runId,
+        immutableArtifactPort,
+        clock: this.prePlanAuthorityClock,
+      })
+    const prePlanAuthorityAdapter =
+      this.createManagedPrePlanAuthorityAdapter(authority)
+    const authorityPort:
+      WorkspaceSearchMigrationFullVerificationAuthorityPort = {
+        readAuthority: (claim) =>
+          this.runManagedFullVerificationRead(
+            authority,
+            () => prePlanAuthorityAdapter.readAuthority({
+              lease: claim,
+              maintenanceEvidenceReceiptDigest:
+                detachedExecutionRun.binding.currentAuthority
+                  .maintenanceEvidenceReceiptDigest,
+              maintenanceEvidencePointerRevision:
+                detachedExecutionRun.binding.currentAuthority
+                  .maintenanceEvidencePointerRevision,
+            }),
+          ),
+      }
+    let appliedRootDigest: string | undefined
+    const appliedRootReader:
+      WorkspaceSearchMigrationFullVerificationAppliedRootReader = {
+        readAppliedRoot: () =>
+          this.runManagedFullVerificationRead(
+            authority,
+            async () => {
+              const root =
+                parseWorkspaceSearchMigrationAppliedRootStrongReadOutput({
+                  stateTable:
+                    authority.configuration.tables['migration-state'],
+                  configurationHash: authority.configurationHash,
+                  executionRun: detachedExecutionRun,
+                  output: await this.transport.getPrePlanAuthority(
+                    createWorkspaceSearchMigrationAppliedRootStrongReadCommand({
+                      stateTable:
+                        authority.configuration.tables['migration-state'],
+                      configurationHash: authority.configurationHash,
+                      executionRun: detachedExecutionRun,
+                    }),
+                  ),
+                })
+              if (root !== undefined) {
+                if (
+                  appliedRootDigest !== undefined &&
+                  appliedRootDigest !== root.rootDigest
+                ) {
+                  return failManagedFullVerification()
+                }
+                appliedRootDigest = root.rootDigest
+              }
+              return root
+            },
+          ),
+      }
+    const verificationResultGateway:
+      WorkspaceSearchMigrationVerificationResultAwsGateway = {
+        writeVerificationResultArtifact: (input) => {
+          this.requireManagedFullVerificationAuthority(authority)
+          if (appliedRootDigest === undefined) {
+            return failManagedFullVerification()
+          }
+          return createAwsWorkspaceSearchMigrationVerificationResultGateway({
+            runId: detachedExecutionRun.runId,
+            configurationHash: authority.configurationHash,
+            appliedRootDigest,
+            immutableArtifactPort,
+          }).writeVerificationResultArtifact(input)
+        },
+        replayVerificationResultArtifact: (reference) => {
+          this.requireManagedFullVerificationAuthority(authority)
+          if (appliedRootDigest === undefined) {
+            return failManagedFullVerification()
+          }
+          return createAwsWorkspaceSearchMigrationVerificationResultGateway({
+            runId: detachedExecutionRun.runId,
+            configurationHash: authority.configurationHash,
+            appliedRootDigest,
+            immutableArtifactPort,
+          }).replayVerificationResultArtifact(reference)
+        },
+      }
+    const pageScanner:
+      WorkspaceSearchMigrationFullVerificationPageScanner = {
+        scanVerificationPage: (input) => {
+          const plan = structuredClone(input.plan)
+          const previousProgress =
+            structuredClone(input.previousProgress)
+          const location = input.location
+          return this.runManagedFullVerificationRead(
+            authority,
+            async () => {
+              if (location === 'target') {
+                const reductionInput =
+                  await this.captureTargetReductionInput({
+                    configuration: authority.configuration,
+                    configurationHash: authority.configurationHash,
+                    previousCheckpoint:
+                      createWorkspaceSearchMigrationApplyTargetScanPredecessor({
+                        configuration: authority.configuration,
+                        configurationHash: authority.configurationHash,
+                        previousCheckpoint:
+                          previousProgress.traversal.target,
+                      }),
+                  })
+                return reduceWorkspaceSearchMigrationFullVerificationTargetPage({
+                  plan,
+                  progress: previousProgress,
+                  configuration: authority.configuration,
+                  configurationHash: authority.configurationHash,
+                  page: reductionInput.page,
+                })
+              }
+              const reductionInput =
+                await this.captureSourceReductionInput({
+                  configuration: authority.configuration,
+                  configurationHash: authority.configurationHash,
+                  source: location,
+                  previousCheckpoint:
+                    previousProgress.traversal.sources[location],
+                })
+              return reduceWorkspaceSearchMigrationFullVerificationSourcePage({
+                plan,
+                progress: previousProgress,
+                configuration: authority.configuration,
+                configurationHash: authority.configurationHash,
+                source: location,
+                page: reductionInput.page,
+              })
+            },
+          )
+        },
+      }
+    const transport:
+      WorkspaceSearchMigrationFullVerificationAwsTransport = {
+        getVerificationItem: (command) =>
+          this.runManagedFullVerificationRead(
+            authority,
+            () => this.transport.getPrePlanAuthority(command),
+          ),
+        prepareVerificationWrite: async () => {
+          await this.requireCurrentFullVerificationTableIncarnations(
+            authority,
+          )
+        },
+        transactWriteVerification: (command) =>
+          this.runManagedPreparedFullVerificationWrite(
+            authority,
+            () => this.transport.transactWritePrePlanAuthority(command),
+          ),
+      }
+    const delegate =
+      createAwsWorkspaceSearchMigrationFullVerificationPort({
+        configuration: authority.configuration,
+        configurationHash: authority.configurationHash,
+        executionBoundary,
+        sealedPlanningAuthority,
+        closedWriterFenceRecord,
+        executionRun: detachedExecutionRun,
+        authorityPort,
+        planArtifactGateway,
+        applySealGateway,
+        verificationResultGateway,
+        appliedRootReader,
+        pageScanner,
+        transport,
+        clock: this.prePlanAuthorityClock,
+      })
+    return {
+      readProgress: () =>
+        this.runManagedFullVerificationOperation(
+          authority,
+          () => delegate.readProgress(),
+        ),
+      readVerifiedRoot: () =>
+        this.runManagedFullVerificationOperation(
+          authority,
+          () => delegate.readVerifiedRoot(),
+        ),
+      saveVerificationPage: (input) =>
+        this.runManagedFullVerificationOperation(
+          authority,
+          () => delegate.saveVerificationPage(input),
+        ),
+      publishVerified: (input) =>
+        this.runManagedFullVerificationOperation(
+          authority,
+          () => delegate.publishVerified(input),
+        ),
+    }
+  }
+
+  /**
    * Reads and reduces one source page through the same pinned credentials and
    * DynamoDB client that performed identity measurement.
    *
@@ -2110,6 +2405,30 @@ class AwsWorkspaceSearchMigrationIdentityPort
   private async captureSourcePage(
     input: WorkspaceSearchMigrationSourceScanReadInput,
   ): Promise<CapturedManagedSourceScanPage> {
+    const reductionInput =
+      await this.captureSourceReductionInput(input)
+    return {
+      page: reductionInput.page,
+      pageResult:
+        reduceWorkspaceSearchMigrationSourceScanPage(
+          reductionInput,
+        ),
+    }
+  }
+
+  /**
+   * Captures one detached raw source reduction input after guarded I/O.
+   *
+   * The caller input is validated and detached before the first await. The
+   * returned reduction input alone survives the Scan boundary, preventing a
+   * caller from substituting configuration, predecessor, or raw page state.
+   *
+   * @param input - Measured source context and durable predecessor checkpoint.
+   * @returns Detached base-reducer input containing the exact normalized page.
+   */
+  private async captureSourceReductionInput(
+    input: WorkspaceSearchMigrationSourceScanReadInput,
+  ): Promise<ReduceWorkspaceSearchMigrationSourceScanPageInput> {
     const prepared = await runSourceScanAwsBoundary(async () => {
       this.requireOpen()
       const scanGeneration = this.generation
@@ -2212,12 +2531,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
     ) {
       throw createSourceScanAwsBoundaryFailure('INVALID_STATE')
     }
-    return {
-      page: prepared.reductionInput.page,
-      pageResult: reduceWorkspaceSearchMigrationSourceScanPage(
-        prepared.reductionInput,
-      ),
-    }
+    return prepared.reductionInput
   }
 
   /**
@@ -2250,6 +2564,29 @@ class AwsWorkspaceSearchMigrationIdentityPort
   private async captureTargetPage(
     input: WorkspaceSearchMigrationTargetScanReadInput,
   ): Promise<CapturedManagedTargetScanPage> {
+    const reductionInput =
+      await this.captureTargetReductionInput(input)
+    return {
+      page: reductionInput.page,
+      pageResult:
+        reduceWorkspaceSearchMigrationTargetScanPage(
+          reductionInput,
+        ),
+    }
+  }
+
+  /**
+   * Captures one detached raw target reduction input after guarded I/O.
+   *
+   * The caller input is validated and detached before the first await. Only
+   * the captured reduction input is returned after lifecycle revalidation.
+   *
+   * @param input - Measured target context and durable predecessor checkpoint.
+   * @returns Detached base-reducer input containing the exact normalized page.
+   */
+  private async captureTargetReductionInput(
+    input: WorkspaceSearchMigrationTargetScanReadInput,
+  ): Promise<ReduceWorkspaceSearchMigrationTargetScanPageInput> {
     const prepared = await runTargetScanAwsBoundary(async () => {
       this.requireOpen()
       const scanGeneration = this.generation
@@ -2351,12 +2688,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
     ) {
       throw createTargetScanAwsBoundaryFailure('INVALID_STATE')
     }
-    return {
-      page: prepared.reductionInput.page,
-      pageResult: reduceWorkspaceSearchMigrationTargetScanPage(
-        prepared.reductionInput,
-      ),
-    }
+    return prepared.reductionInput
   }
 
   /**
@@ -4659,6 +4991,271 @@ class AwsWorkspaceSearchMigrationIdentityPort
   }
 
   /**
+   * Captures complete measured authority for one full-verification port.
+   *
+   * @returns Detached generation, configuration, table identity, and private
+   * immutable-object port.
+   */
+  private captureManagedFullVerificationAuthority():
+    ManagedFullVerificationAuthority {
+    const generation = this.generation
+    const configurationHash = this.measuredConfigurationHash
+    const configuration = this.measuredConfiguration
+    const stateTable = this.measuredMigrationStateTable
+    const immutableArtifactPort = this.measuredPlanningArtifactPort
+    if (
+      configurationHash === undefined ||
+      configuration === undefined ||
+      stateTable === undefined ||
+      immutableArtifactPort === undefined ||
+      this.measuredExecutionControlQuarantined
+    ) {
+      return failManagedFullVerification()
+    }
+    const authority: ManagedFullVerificationAuthority = {
+      generation,
+      configurationHash,
+      configuration: structuredClone(configuration),
+      stateTable: structuredClone(stateTable),
+      immutableArtifactPort,
+    }
+    this.requireManagedFullVerificationAuthority(authority)
+    return authority
+  }
+
+  /**
+   * Guards one complete full-verification operation against invalidation.
+   *
+   * @param authority - Captured full-verification authority.
+   * @param operation - One standalone verification operation.
+   * @returns Result only while the captured generation remains current.
+   */
+  private async runManagedFullVerificationOperation<Result>(
+    authority: ManagedFullVerificationAuthority,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    this.requireManagedFullVerificationAuthority(authority)
+    try {
+      const result = await operation()
+      this.requireManagedFullVerificationAuthority(authority)
+      return result
+    } catch (error: unknown) {
+      if (
+        !this.isMeasurementGenerationCurrent(
+          authority.generation,
+          authority.configurationHash,
+        )
+      ) {
+        return failManagedFullVerification()
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Guards one verification read or Scan with all six table incarnations.
+   *
+   * @param authority - Captured full-verification authority.
+   * @param operation - Exact read-only operation.
+   * @returns Result only while every measured table remains current.
+   */
+  private async runManagedFullVerificationRead<Result>(
+    authority: ManagedFullVerificationAuthority,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    this.requireManagedFullVerificationAuthority(authority)
+    await this.requireCurrentFullVerificationTableIncarnations(authority)
+    let result: Result
+    try {
+      result = await operation()
+    } catch (error: unknown) {
+      this.requireManagedFullVerificationAuthority(authority)
+      await this.requireCurrentFullVerificationTableIncarnations(authority)
+      throw error
+    }
+    this.requireManagedFullVerificationAuthority(authority)
+    await this.requireCurrentFullVerificationTableIncarnations(authority)
+    this.requireManagedFullVerificationAuthority(authority)
+    return result
+  }
+
+  /**
+   * Revalidates all six transaction-owned table incarnations for verification.
+   *
+   * @param authority - Captured full-verification authority.
+   */
+  private async requireCurrentFullVerificationTableIncarnations(
+    authority: ManagedFullVerificationAuthority,
+  ): Promise<void> {
+    try {
+      await this.requireCurrentApplicationWriterFenceTableIncarnations(
+        authority,
+      )
+    } catch (error: unknown) {
+      throw createManagedFullVerificationFailure(
+        readManagedMigrationStateFailureCode(error),
+      )
+    }
+  }
+
+  /**
+   * Sends one prepared verification transaction and quarantines stale identity.
+   *
+   * Once transport begins, a failed post-send all-six guard makes the commit
+   * outcome unsafe to reconcile in this generation. The shared execution
+   * control is quarantined and ambiguity is surfaced directly.
+   *
+   * @param authority - Captured full-verification authority.
+   * @param operation - Exact prepared verification transaction.
+   * @returns Raw transaction result after the post-send all-six guard.
+   */
+  private async runManagedPreparedFullVerificationWrite<Result>(
+    authority: ManagedFullVerificationAuthority,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    try {
+      this.requireManagedFullVerificationAuthority(authority)
+    } catch (error: unknown) {
+      throw createManagedFullVerificationFailure(
+        readManagedMigrationStateFailureCode(error),
+      )
+    }
+    let sent = false
+    let result: Result
+    try {
+      result = await this.runManagedMigrationStateIo(
+        authority,
+        () => {
+          sent = true
+          return operation()
+        },
+      )
+    } catch (error: unknown) {
+      if (!sent) {
+        throw createManagedFullVerificationFailure(
+          readManagedMigrationStateFailureCode(error),
+        )
+      }
+      try {
+        await this.requireCurrentFullVerificationTableIncarnations(
+          authority,
+        )
+      } catch {
+        this.quarantineManagedExecutionControl(authority)
+        throw createManagedFullVerificationFailure(
+          'AMBIGUOUS_OPERATION_UNRESOLVED',
+        )
+      }
+      throw error
+    }
+    try {
+      await this.requireCurrentFullVerificationTableIncarnations(
+        authority,
+      )
+    } catch {
+      this.quarantineManagedExecutionControl(authority)
+      throw createManagedFullVerificationFailure(
+        'AMBIGUOUS_OPERATION_UNRESOLVED',
+      )
+    }
+    return result
+  }
+
+  /**
+   * Creates immutable storage guarded by full-verification measurement.
+   *
+   * @param authority - Captured full-verification authority.
+   * @returns Private immutable storage with guarded reads and writes.
+   */
+  private createManagedFullVerificationImmutableArtifactPort(
+    authority: ManagedFullVerificationAuthority,
+  ): WorkspaceSearchMigrationImmutableArtifactAwsPort {
+    const delegate = authority.immutableArtifactPort
+    return {
+      writeImmutableArtifact: (input) =>
+        this.runManagedFullVerificationImmutableArtifactWrite(
+          authority,
+          () => delegate.writeImmutableArtifact(input),
+        ),
+      readImmutableArtifact: (input) =>
+        this.runManagedFullVerificationRead(
+          authority,
+          () => delegate.readImmutableArtifact(input),
+        ),
+    }
+  }
+
+  /**
+   * Guards one immutable-object write and quarantines post-send table drift.
+   *
+   * @param authority - Captured full-verification authority.
+   * @param operation - Exact immutable-object write.
+   * @returns Storage result after all-six post-send validation.
+   */
+  private async runManagedFullVerificationImmutableArtifactWrite<Result>(
+    authority: ManagedFullVerificationAuthority,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    this.requireManagedFullVerificationAuthority(authority)
+    await this.requireCurrentFullVerificationTableIncarnations(authority)
+    let sent = false
+    let result: Result
+    try {
+      sent = true
+      result = await operation()
+    } catch (error: unknown) {
+      if (!sent) {
+        throw error
+      }
+      try {
+        await this.requireCurrentFullVerificationTableIncarnations(
+          authority,
+        )
+      } catch {
+        this.quarantineManagedExecutionControl(authority)
+        throw createManagedFullVerificationFailure(
+          'AMBIGUOUS_OPERATION_UNRESOLVED',
+        )
+      }
+      throw error
+    }
+    try {
+      await this.requireCurrentFullVerificationTableIncarnations(
+        authority,
+      )
+    } catch {
+      this.quarantineManagedExecutionControl(authority)
+      throw createManagedFullVerificationFailure(
+        'AMBIGUOUS_OPERATION_UNRESOLVED',
+      )
+    }
+    return result
+  }
+
+  /**
+   * Requires one full-verification authority and its private storage to remain
+   * current and outside the shared execution-control quarantine.
+   *
+   * @param authority - Captured generation, configuration, and private port.
+   */
+  private requireManagedFullVerificationAuthority(
+    authority: ManagedFullVerificationAuthority,
+  ): void {
+    if (
+      !this.isMeasurementGenerationCurrent(
+        authority.generation,
+        authority.configurationHash,
+      ) ||
+      this.measuredConfiguration === undefined ||
+      this.measuredPlanningArtifactPort !==
+        authority.immutableArtifactPort ||
+      this.measuredExecutionControlQuarantined
+    ) {
+      return failManagedFullVerification()
+    }
+  }
+
+  /**
    * Captures all measured identities installed for writer-fence operations.
    *
    * @returns Detached generation, configuration, hash, and state identity.
@@ -6470,6 +7067,30 @@ function createManagedApplyOperationFailure(
   return new WorkspaceSearchMigrationFailure(
     code,
     'Workspace Search migration apply operation failed.',
+  )
+}
+
+/**
+ * Raises one stable managed full-verification lifecycle failure.
+ *
+ * @returns Never returns.
+ */
+function failManagedFullVerification(): never {
+  throw createManagedFullVerificationFailure('INVALID_STATE')
+}
+
+/**
+ * Creates one stable managed full-verification failure.
+ *
+ * @param code - Stable operator-safe lifecycle, drift, or ambiguity code.
+ * @returns Secret-free full-verification failure.
+ */
+function createManagedFullVerificationFailure(
+  code: WorkspaceSearchMigrationFailureCode,
+): WorkspaceSearchMigrationFailure {
+  return new WorkspaceSearchMigrationFailure(
+    code,
+    'Workspace Search migration full verification failed.',
   )
 }
 

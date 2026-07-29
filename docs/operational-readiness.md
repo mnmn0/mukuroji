@@ -731,9 +731,15 @@ mapped/invalid classificationより先に拒否します。Unrelatedなrecognize
 apply後の増減は許容しますが、invalid row、pairの欠落・余剰・入替、stale targetは許容しません。Progressは
 verification-plan digestへ固定し、completionはsource/orphan/total operation count、plan-seal rich reference、
 complete apply seal、sealed planning authorityを相互検証します。このkernel result単体はimmutable applied
-rootへまだ束縛されておらず、authoritativeな`verified` publicationではありません。後続のAWS
-state/evidence adapterは`{appliedRootDigest, verificationResultDigest}`を同一のimmutable verified rootへ
-cross-bindし、response-loss reconciliationとreceiptを含めるまでProduction migration gateを開きません。
+rootへまだ束縛されておらず、authoritativeな`verified` publicationではありません。Concrete AWS
+state/evidence adapterはexact-version planを一度だけ再生し、applied rootを強整合readして、独立した
+source/target rescanの完全progressをmutable stateとimmutable page receiptへ固定9 item transactionで
+保存します。Stateはapplied rootからterminal revisionまでpredecessor state/command digestで連結し、
+再起動後のpublic readでも全receipt chainを再検証します。Terminal publicationはcomplete apply sealと
+semantic verification-result envelopeをexact versionで再読し、`{appliedRootDigest,
+verificationResultDigest}`、terminal state/receipt、sealed authority、current authorityをimmutable
+verified rootへcross-bindする固定9 item transactionです。応答消失時はstate/receiptまたはroot/result
+artifactの完全一致だけを成功として回収します。
 
 DynamoDB ConditionExpressionには、itemの未知のtop-level属性名を列挙せずに「完全な属性集合」を比較する
 primitiveがありません。したがって、強整合read後からtransactionまでにplanned itemにもknown schemaにも
@@ -748,10 +754,12 @@ immutable-artifact portからjournal/apply-seal gatewayとapply operation/checkp
 source/target checkpoint Scanの前後と
 transaction直前にall-six-table incarnationを再検証し、送信後の成功・error pathで再検証できない場合は
 shared execution-control generationをquarantineして`AMBIGUOUS_OPERATION_UNRESOLVED`を返します。この
-post-send quarantineをstandalone adapter内の通常のresponse-loss retryへ戻しません。ただし、現時点では
-このmanaged apply capabilityをcontrol CLIまたはpost-close orchestratorへ公開していません。Apply/seal
-CLIとorchestrator配線、full-verificationのAWS state/evidence/verified-root publication、
-reverse rollback、terminal outcomeへ
+post-send quarantineをstandalone adapter内の通常のresponse-loss retryへ戻しません。同じguardを持つ
+full-verification portもmanaged session内で、raw pageを1 Scanだけ取得するprivate source/target
+reducer、plan/apply-seal/result artifact gateway、applied-root strong read、
+state/receipt/verified-root transactionへcompositionします。ただし、現時点ではこれらのmanaged
+apply/verification capabilityをcontrol CLIまたはpost-close orchestratorへ公開していません。
+Apply/seal/verification CLIとorchestrator配線、reverse rollback、terminal outcomeへ
 束縛したwriter-fence release、close後のdrain/replanning orchestration、migration専用
 observability/alarm、restore/failover/DR drill、non-production実行evidenceも未完了です。Operation/checkpoint
 transactionが存在してもcomplete apply/verify/rollback supervisorにはならないため、Production migration
@@ -897,9 +905,11 @@ Process exit statusは、成功を`0`、migration failureまたは`OPERATION_FAI
    operation transactionに加え、v2 traversal state、source/targetのbounded strong Scan、immutable
    checkpoint receipt、固定9項目checkpoint transaction、terminal checkpoint/execution digest-bound
    complete-plan apply seal、固定9項目のimmutable applied-root transaction、そのmanaged identity
-   composition、all-six pre/post guard、post-send quarantineも実装済みです。ただし、close/admission/run
-   creation/apply/sealのCLI・orchestrator配線、full-verificationのAWS
-   state/evidence/verified-root publication、reverse rollback、
+   composition、all-six pre/post guard、post-send quarantineも実装済みです。さらに、exact plan replayと
+   applied-root strong read、独立rescanのresumable state/immutable receipt、semantic result artifact、
+   immutable verified root、固定9項目transaction、response-loss reconciliationを持つfull-verification
+   AWS portとmanaged identity compositionも実装済みです。ただし、close/admission/run
+   creation/apply/seal/verificationのCLI・orchestrator配線、reverse rollback、
    terminal outcomeに束縛したrelease、observability/alarm、DR/non-production evidenceは未実装のため、
    migration全体のproduction gateはまだ実行可能とは扱いません。
 5. Online migration は writer fence/epoch または dual-write + high-watermark catch-up を有効化し、

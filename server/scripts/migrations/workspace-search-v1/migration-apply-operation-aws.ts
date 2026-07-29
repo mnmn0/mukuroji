@@ -97,13 +97,17 @@ import {
 import {
   createWorkspaceSearchMigrationAppliedRoot,
   createWorkspaceSearchMigrationCompleteApplySeal,
-  parseWorkspaceSearchMigrationAppliedRoot,
   readWorkspaceSearchMigrationCompleteApplySealReference,
   requireWorkspaceSearchMigrationAppliedRootBinding,
-  serializeWorkspaceSearchMigrationAppliedRoot,
   serializeWorkspaceSearchMigrationCompleteApplySeal,
   type WorkspaceSearchMigrationAppliedRoot,
 } from './migration-apply-seal'
+import {
+  createWorkspaceSearchMigrationAppliedRootRecord,
+  createWorkspaceSearchMigrationAppliedRootStrongReadCommand,
+  createWorkspaceSearchMigrationApplyRunBindingDigest,
+  parseWorkspaceSearchMigrationAppliedRootStrongReadOutput,
+} from './migration-applied-root-aws'
 import {
   createWorkspaceSearchMigrationItemConditionMaterial,
   verifyWorkspaceSearchMigrationItemStrongRead,
@@ -158,12 +162,9 @@ const journalSequenceRecordKind =
   'workspace-search-migration-apply-journal-sequence'
 const checkpointReceiptRecordKind =
   'workspace-search-migration-apply-checkpoint-receipt'
-const appliedRootRecordKind =
-  'workspace-search-migration-applied-root-record'
 const executionStateRecordKeyPrefix = 'execution-state/v1'
 const operationMarkerRecordKeyPrefix = 'apply-operation/v1'
 const journalSequenceRecordKeyPrefix = 'apply-journal-sequence/v1'
-const appliedRootRecordKeyPrefix = 'apply-seal/v1'
 const transactionTimeoutMilliseconds = 5_000
 const retentionDayMilliseconds = 24 * 60 * 60 * 1_000
 const mutationTransactionItemCount = 12
@@ -1321,10 +1322,10 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
         }),
       ),
       this.dependencies.get(
-        new GetItemCommand({
-          TableName: this.binding.stateTable.tableName,
-          ConsistentRead: true,
-          Key: createAppliedRootKey(this.binding),
+        createWorkspaceSearchMigrationAppliedRootStrongReadCommand({
+          stateTable: this.binding.stateTable,
+          configurationHash: this.binding.configurationHash,
+          executionRun: this.binding.executionRun,
         }),
       ),
     ])
@@ -1340,20 +1341,24 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
       }),
     )
     const record = readOutputItem(stateOutput)
-    const appliedRootRecord = readOutputItem(appliedRootOutput)
-    if (appliedRootRecord !== undefined) {
+    const appliedRoot =
+      parseWorkspaceSearchMigrationAppliedRootStrongReadOutput({
+        stateTable: this.binding.stateTable,
+        configurationHash: this.binding.configurationHash,
+        executionRun: this.binding.executionRun,
+        output: appliedRootOutput,
+      })
+    if (appliedRoot !== undefined) {
       if (record === undefined) return failApply('INVALID_STATE')
       const executionState =
         parseExecutionStateRecord(this.binding, record)
       if (executionState.executionStateVersion !== 2) {
         return failApply('INVALID_STATE')
       }
-      const root = parseAppliedRootRecord(
-        this.binding,
-        appliedRootRecord,
-      )
       const storedSeal =
-        await this.dependencies.readApplySeal(root.sealReference)
+        await this.dependencies.readApplySeal(
+          appliedRoot.sealReference,
+        )
       if (
         Buffer.compare(
           Buffer.from(
@@ -1363,7 +1368,7 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
           ),
           Buffer.from(
             serializeWorkspaceSearchMigrationCompleteApplySeal(
-              root.seal,
+              appliedRoot.seal,
             ),
           ),
         ) !== 0
@@ -1377,13 +1382,13 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
           sealedPlanningAuthority:
             this.binding.sealedPlanningAuthority,
           seal: storedSeal,
-          sealReference: root.sealReference,
-          root,
+          sealReference: appliedRoot.sealReference,
+          root: appliedRoot,
         })
       await this.dependencies.prepare()
       return {
         runState,
-        appliedRoot: root,
+        appliedRoot,
         executionState,
         executionStateRecord: record,
       }
@@ -1958,14 +1963,12 @@ function createApplyOperationBinding(
     executionRun,
     executionRunKey,
     executionRunRecord,
-    bindingDigest: createMigrationDigest({
-      kind: 'workspace-search-apply-run-binding',
-      version: applyRecordVersion,
-      stateTableId: stateTable.tableId,
-      configurationHash,
-      runId: executionRun.runId,
-      executionRunDigest: executionRun.executionRunDigest,
-    }),
+    bindingDigest:
+      createWorkspaceSearchMigrationApplyRunBindingDigest({
+        stateTable,
+        configurationHash,
+        executionRun,
+      }),
   }
 }
 
@@ -3009,7 +3012,13 @@ function createApplyCheckpointTransactionCommand(
 function createApplySealTransactionCommand(
   input: CreateApplySealTransactionCommandInput,
 ): TransactWriteItemsCommand {
-  requireAppliedRootRecordBinding(input.binding, input.root)
+  const appliedRootRecord =
+    createWorkspaceSearchMigrationAppliedRootRecord({
+      stateTable: input.binding.stateTable,
+      configurationHash: input.binding.configurationHash,
+      executionRun: input.binding.executionRun,
+      root: input.root,
+    })
   if (
     input.root.predecessorRevision !==
       input.predecessorState.revision ||
@@ -3056,7 +3065,7 @@ function createApplySealTransactionCommand(
       input.predecessorState,
       input.predecessorStateRecord,
     ),
-    createAppliedRootPut(input.binding, input.root),
+    createAppliedRootPut(input.binding, appliedRootRecord),
   ]
   if (items.length !== applySealTransactionItemCount) {
     return failApply('INVALID_STATE')
@@ -3387,17 +3396,17 @@ function createCheckpointReceiptPut(
  * Creates one deterministic immutable applied-root absent Put.
  *
  * @param binding - Exact static admitted apply binding.
- * @param root - Exact immutable applied phase root.
+ * @param record - Exact complete canonical applied-root row.
  * @returns One absent root Put at the fixed final transaction position.
  */
 function createAppliedRootPut(
   binding: ApplyOperationBinding,
-  root: WorkspaceSearchMigrationAppliedRoot,
+  record: Readonly<Record<string, AttributeValue>>,
 ): TransactWriteItem {
   return {
     Put: {
       TableName: binding.stateTable.tableName,
-      Item: createAppliedRootRecord(binding, root),
+      Item: record,
       ConditionExpression:
         'attribute_not_exists(#migrationId) AND attribute_not_exists(#recordKey)',
       ExpressionAttributeNames: {
@@ -3523,30 +3532,6 @@ const executionStateRecordAttributeNames = Object.freeze([
   'runStateDigest',
   'stateTableId',
   'status',
-])
-
-/**
- * Complete controlled field set for immutable applied-root rows.
- */
-const appliedRootRecordAttributeNames = Object.freeze([
-  'committedAt',
-  'configurationHash',
-  'executionRunDigest',
-  'kind',
-  'migrationId',
-  'predecessorExecutionStateDigest',
-  'predecessorRevision',
-  'predecessorRunStateDigest',
-  'recordKey',
-  'recordVersion',
-  'rootBytes',
-  'rootDigest',
-  'runId',
-  'sealContentDigest',
-  'stateTableId',
-  'status',
-  'successorRevision',
-  'successorRunStateDigest',
 ])
 
 /**
@@ -3712,142 +3697,6 @@ function requireExecutionStateBinding(
     state.runId !== binding.executionRun.runId ||
     state.configurationHash !== binding.configurationHash ||
     state.revision <= binding.executionRun.revision
-  ) {
-    return failApply('INVALID_STATE')
-  }
-}
-
-/**
- * Creates one complete strict immutable applied-root record.
- *
- * @param binding - Exact static admitted apply binding.
- * @param root - Exact immutable applied phase root.
- * @returns Complete low-level DynamoDB record.
- */
-function createAppliedRootRecord(
-  binding: ApplyOperationBinding,
-  root: WorkspaceSearchMigrationAppliedRoot,
-): Readonly<Record<string, AttributeValue>> {
-  const bytes = serializeWorkspaceSearchMigrationAppliedRoot(root)
-  const strict = parseWorkspaceSearchMigrationAppliedRoot(bytes)
-  requireAppliedRootRecordBinding(binding, strict)
-  const item: Readonly<Record<string, AttributeValue>> = {
-    migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
-    recordKey: { S: createAppliedRootRecordKey(binding) },
-    kind: { S: appliedRootRecordKind },
-    recordVersion: { N: String(applyRecordVersion) },
-    stateTableId: { S: strict.stateTableId },
-    configurationHash: { S: strict.configurationHash },
-    runId: { S: strict.runId },
-    executionRunDigest: { S: strict.executionRunDigest },
-    predecessorRevision: {
-      N: String(strict.predecessorRevision),
-    },
-    predecessorExecutionStateDigest: {
-      S: strict.predecessorExecutionStateDigest,
-    },
-    predecessorRunStateDigest: {
-      S: strict.predecessorRunStateDigest,
-    },
-    successorRevision: {
-      N: String(strict.successorRevision),
-    },
-    status: { S: strict.status },
-    successorRunStateDigest: {
-      S: strict.successorRunStateDigest,
-    },
-    sealContentDigest: {
-      S: strict.sealReference.contentDigest,
-    },
-    committedAt: { S: strict.committedAt },
-    rootDigest: { S: strict.rootDigest },
-    rootBytes: { B: bytes },
-  }
-  validateDynamoDbItemSize(item)
-  return item
-}
-
-/**
- * Strictly parses one complete immutable applied-root record.
- *
- * @param binding - Exact static admitted apply binding.
- * @param item - Raw low-level DynamoDB record.
- * @returns Exact immutable applied phase root.
- */
-function parseAppliedRootRecord(
-  binding: ApplyOperationBinding,
-  item: Readonly<Record<string, AttributeValue>>,
-): WorkspaceSearchMigrationAppliedRoot {
-  requireExactAttributeKeys(
-    item,
-    appliedRootRecordAttributeNames,
-    'INVALID_STATE',
-  )
-  if (
-    readStringAttribute(item, 'migrationId') !==
-      WORKSPACE_SEARCH_MIGRATION_ID ||
-    readStringAttribute(item, 'recordKey') !==
-      createAppliedRootRecordKey(binding) ||
-    readStringAttribute(item, 'kind') !==
-      appliedRootRecordKind ||
-    readNumberAttribute(item, 'recordVersion') !==
-      applyRecordVersion ||
-    readStringAttribute(item, 'stateTableId') !==
-      binding.stateTable.tableId ||
-    readStringAttribute(item, 'configurationHash') !==
-      binding.configurationHash ||
-    readStringAttribute(item, 'runId') !==
-      binding.executionRun.runId ||
-    readStringAttribute(item, 'executionRunDigest') !==
-      binding.executionRun.executionRunDigest
-  ) {
-    return failApply('INVALID_STATE')
-  }
-  const root = parseWorkspaceSearchMigrationAppliedRoot(
-    readBinaryAttribute(item, 'rootBytes'),
-  )
-  requireAppliedRootRecordBinding(binding, root)
-  if (
-    readNumberAttribute(item, 'predecessorRevision') !==
-      root.predecessorRevision ||
-    readStringAttribute(
-      item,
-      'predecessorExecutionStateDigest',
-    ) !== root.predecessorExecutionStateDigest ||
-    readStringAttribute(item, 'predecessorRunStateDigest') !==
-      root.predecessorRunStateDigest ||
-    readNumberAttribute(item, 'successorRevision') !==
-      root.successorRevision ||
-    readStringAttribute(item, 'status') !== root.status ||
-    readStringAttribute(item, 'successorRunStateDigest') !==
-      root.successorRunStateDigest ||
-    readStringAttribute(item, 'sealContentDigest') !==
-      root.sealReference.contentDigest ||
-    readStringAttribute(item, 'committedAt') !==
-      root.committedAt ||
-    readStringAttribute(item, 'rootDigest') !== root.rootDigest
-  ) {
-    return failApply('INVALID_STATE')
-  }
-  return root
-}
-
-/**
- * Requires one applied root to stay in this admitted run and table.
- *
- * @param binding - Exact static admitted apply binding.
- * @param root - Candidate strict applied root.
- */
-function requireAppliedRootRecordBinding(
-  binding: ApplyOperationBinding,
-  root: WorkspaceSearchMigrationAppliedRoot,
-): void {
-  if (
-    root.stateTableId !== binding.stateTable.tableId ||
-    root.configurationHash !== binding.configurationHash ||
-    root.runId !== binding.executionRun.runId ||
-    root.executionRunDigest !==
-      binding.executionRun.executionRunDigest
   ) {
     return failApply('INVALID_STATE')
   }
@@ -4422,21 +4271,6 @@ function createStateKey(
 }
 
 /**
- * Creates the deterministic immutable applied-root primary key.
- *
- * @param binding - Exact static apply binding.
- * @returns Low-level migration-state table primary key.
- */
-function createAppliedRootKey(
-  binding: ApplyOperationBinding,
-): Readonly<Record<string, AttributeValue>> {
-  return {
-    migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
-    recordKey: { S: createAppliedRootRecordKey(binding) },
-  }
-}
-
-/**
  * Creates the deterministic immutable checkpoint-receipt primary key.
  *
  * @param identity - Exact content-addressed checkpoint command identity.
@@ -4503,18 +4337,6 @@ function createExecutionStateRecordKey(
   binding: ApplyOperationBinding,
 ): string {
   return `${executionStateRecordKeyPrefix}/${binding.bindingDigest}/state`
-}
-
-/**
- * Creates the content-independent complete-plan applied-root sort key.
- *
- * @param binding - Exact static apply binding.
- * @returns Bounded admitted-run root key.
- */
-function createAppliedRootRecordKey(
-  binding: ApplyOperationBinding,
-): string {
-  return `${appliedRootRecordKeyPrefix}/${binding.bindingDigest}/complete-plan`
 }
 
 /**
