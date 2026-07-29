@@ -460,20 +460,19 @@ describe('Workspace Search migration full verification', () => {
 /**
  * Creates the exact source-and-orphan plan used by full-verification tests.
  *
- * @param suffix - Optional entity suffix for a distinct compatible plan.
  * @returns Complete measured, source, target, and plan material.
  */
-function createFixture(suffix = ''): VerificationFixture {
+function createFixture(): VerificationFixture {
   const configuration = createConfiguration()
   const configurationHash =
     createWorkspaceSearchConfigurationHash(configuration)
-  const activeSourceItem = createTeamItem(`active${suffix}`)
+  const activeSourceItem = createTeamItem('active')
   const archivedSourceItem = createTeamItem(
-    `archived${suffix}`,
+    'archived',
     '2026-07-29T00:00:00.000Z',
   )
-  const residualSourceItem = createTeamItem(`archived${suffix}`)
-  const orphanIssueId = `orphan${suffix}`
+  const residualSourceItem = createTeamItem('archived')
+  const orphanIssueId = 'orphan'
   const orphanSourceItem = createWorkItemSourceItem(orphanIssueId)
   const orphanTargetItem = encodeWorkspaceSearchMigrationDocument(
     createWorkItemWorkspaceSearchDocument({
