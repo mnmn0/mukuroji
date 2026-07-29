@@ -1105,6 +1105,7 @@ function requireTerminalSealBinding(
   )
   const terminalTraversal = readTerminalTraversal(state.apply)
   let sourceOperationCount = 0
+  let sourceProjectedCount = 0
   for (const source of workspaceSearchMigrationSourceNames) {
     const checkpoint = terminalTraversal.sources[source]
     const evidenceHead = sealedPlanningAuthority.evidenceHeads.find(
@@ -1123,6 +1124,10 @@ function requireTerminalSealBinding(
     sourceOperationCount = addSafeCounts(
       sourceOperationCount,
       checkpoint.aggregate.mapped,
+    )
+    sourceProjectedCount = addSafeCounts(
+      sourceProjectedCount,
+      checkpoint.aggregate.projected,
     )
   }
   const targetCheckpoint = terminalTraversal.target
@@ -1151,8 +1156,8 @@ function requireTerminalSealBinding(
       sealedPlanningAuthority.planOperationCount ||
     sourceOperationCount !==
       sealedPlanningAuthority.sourceOperationCount ||
-    targetCheckpoint.aggregate.mapped !== sourceOperationCount ||
-    targetCheckpoint.aggregate.projected !== sourceOperationCount ||
+    targetCheckpoint.aggregate.mapped !== sourceProjectedCount ||
+    targetCheckpoint.aggregate.projected !== sourceProjectedCount ||
     targetCheckpoint.aggregate.deleted !== 0 ||
     state.applyMarkerDigestState.count !==
       state.appliedOperationCount ||

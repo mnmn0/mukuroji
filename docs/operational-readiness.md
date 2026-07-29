@@ -711,7 +711,7 @@ artifactへ固定します。Artifactはrun/configuration namespaceのObject Loc
 `objectKey`、exact `versionId`、`contentDigest`、`byteLength`、`retainUntil`を持つrich referenceを
 返します。SealのObject Lock期限はplan/provenance graphと同じshared retention horizonへ固定し、
 Journalを持つrunでは最短journal期限がそのhorizonより早い状態を受理しません。Terminal target
-checkpointのowned/projected件数はsealed source operation件数と一致しなければならず、exact
+checkpointのowned/projected件数はsealed source projected件数と一致しなければならず、exact
 key/content一致は後続のfull verificationで判定します。
 
 Apply完了transitionはmutable execution-stateを上書きせず、そのterminal v2 rowをexact predecessorとして

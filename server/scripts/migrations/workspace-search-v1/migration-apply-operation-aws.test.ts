@@ -2317,6 +2317,68 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
   )
 
   test(
+    'seals a source deletion after verifying that no owned target remains',
+    async () => {
+      const fixture = createApplyFixture('delete')
+      const harness = new ApplyOperationHarness(fixture)
+      harness.checkpointScanImplementation = async ({
+        location,
+        previousCheckpoint,
+      }) => {
+        if (location === 'project-directory') {
+          return createTerminalDeletedSourceCheckpoint(
+            previousCheckpoint,
+            location,
+          )
+        }
+        return createTerminalEmptyCheckpointPage(previousCheckpoint)
+      }
+      const port = createApplyPort(fixture, harness)
+      const applying = await port.commitApplyOperation(
+        createApplyCommand(fixture),
+      )
+      const terminal = await completeApplyCheckpoints(
+        fixture,
+        port,
+        applying.revision,
+      )
+
+      const applied = await port.sealApply(
+        createApplySealCommand(fixture, terminal.revision),
+      )
+
+      expect(applied).toMatchObject({
+        revision: 8,
+        status: 'applied',
+        appliedOperationCount: 1,
+        journalSequence: 1,
+      })
+      expect(harness.uploadedApplySeals).toHaveLength(1)
+      expect(harness.uploadedApplySeals[0]).toMatchObject({
+        sourceOperationCount: 1,
+        apply: {
+          sources: {
+            'project-directory': {
+              aggregate: {
+                mapped: 1,
+                projected: 0,
+                deleted: 1,
+              },
+            },
+          },
+          target: {
+            aggregate: {
+              mapped: 0,
+              projected: 0,
+              deleted: 0,
+            },
+          },
+        },
+      })
+    },
+  )
+
+  test(
     'preserves lease loss when authority expires after seal upload and all-six preparation',
     async () => {
       const fixture = createApplyFixture('no-op', 0)
@@ -2767,6 +2829,9 @@ function createApplyFixture(
     } satisfies WorkspaceSearchPlannedOperation
   })
   const plannedOperation = plannedOperations[0]
+  const sourceProjectedCount = operations.filter(
+    ({ after }) => after.exists,
+  ).length
   const planSeal = createPlanSeal(
     configurationHash,
     planDigest,
@@ -2841,6 +2906,7 @@ function createApplyFixture(
     writerFence.tableIds,
     planSeal,
     receiptDigest,
+    sourceProjectedCount,
   )
   const currentAuthority: WorkspaceSearchMigrationPrePlanAuthority = {
     configurationHash,
@@ -3292,6 +3358,7 @@ function createPlanSeal(
  * @param tableIds - All six exact measured TableIds.
  * @param planSeal - Exact referenced plan seal.
  * @param receiptDigest - Current immutable receipt digest.
+ * @param sourceProjectedCount - Source-backed targets remaining after apply.
  * @returns Exact version-two compact authority.
  */
 function createSealedAuthority(
@@ -3299,6 +3366,7 @@ function createSealedAuthority(
   tableIds: WorkspaceSearchMigrationSealedPlanningTableIds,
   planSeal: WorkspaceSearchPlanSeal,
   receiptDigest: string,
+  sourceProjectedCount: number,
 ): WorkspaceSearchMigrationSealedPlanningAuthorityV2 {
   const planSealBytes = serializeWorkspaceSearchPlanSeal(planSeal)
   const planSealDigest = digestBytes(planSealBytes)
@@ -3352,6 +3420,7 @@ function createSealedAuthority(
       createEvidenceHead(
         'project-directory',
         planSeal.sourceOperationCount,
+        sourceProjectedCount,
       ),
       createEvidenceHead('work-items'),
       createEvidenceHead('collaboration'),
@@ -3380,6 +3449,7 @@ function createSealedAuthority(
  *
  * @param chain - Canonical evidence-chain role.
  * @param mappedCount - Exact source-owned operation count for this chain.
+ * @param projectedCount - Exact source targets present after apply.
  * @returns Exact terminal head.
  */
 function createEvidenceHead(
@@ -3390,18 +3460,29 @@ function createEvidenceHead(
     | 'work-items'
     | 'workspace-search',
   mappedCount = 0,
+  projectedCount = mappedCount,
 ) {
   const empty = createEmptyWorkspaceSearchMigrationTraversal()
   const previous = chain === 'workspace-search'
     ? empty.target
     : empty.sources[chain]
-  const terminal = mappedCount === 0
+  const mappedTerminal = mappedCount === 0
     ? createTerminalEmptyCheckpointPage(previous)
     : createTerminalMappedCheckpoint(
         previous,
         chain === 'workspace-search' ? 'target' : chain,
         mappedCount,
       )
+  const terminal = projectedCount === mappedCount
+    ? mappedTerminal
+    : {
+        ...mappedTerminal,
+        aggregate: {
+          ...mappedTerminal.aggregate,
+          projected: projectedCount,
+          deleted: mappedCount - projectedCount,
+        },
+      }
   return {
     chain,
     progressDigest: digest(`progress:${chain}`),
@@ -3464,6 +3545,35 @@ function createTerminalMappedCheckpoint(
     },
     keyDigestState: keyAccumulator.exportState(),
     contentDigestState: contentAccumulator.exportState(),
+  }
+}
+
+/**
+ * Creates one terminal source page whose mapped row deletes its target.
+ *
+ * @param previous - Exact empty durable predecessor checkpoint.
+ * @param location - Source table selected by the scan.
+ * @returns Detached cumulative one-page terminal checkpoint.
+ */
+function createTerminalDeletedSourceCheckpoint(
+  previous: MigrationSourceCheckpoint,
+  location: Exclude<
+    WorkspaceSearchMigrationCheckpointLocation,
+    'target'
+  >,
+): MigrationSourceCheckpoint {
+  const checkpoint = createTerminalMappedCheckpoint(
+    previous,
+    location,
+    1,
+  )
+  return {
+    ...checkpoint,
+    aggregate: {
+      ...checkpoint.aggregate,
+      projected: previous.aggregate.projected,
+      deleted: previous.aggregate.deleted + 1,
+    },
   }
 }
 
