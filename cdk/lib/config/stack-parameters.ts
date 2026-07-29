@@ -28,6 +28,10 @@ export interface StackParameters {
   readonly connectorRuntimeConfiguration: cdk.CfnParameter;
   /** Stable HMAC key used to pseudonymize workspace audit identities. */
   readonly workspaceAuditPseudonymKey: cdk.CfnParameter;
+  /** Operator-incremented immutable API configuration revision. */
+  readonly apiRuntimeConfigurationRevision: cdk.CfnParameter;
+  /** Explicit two-phase production writer-fence rollout mode. */
+  readonly workspaceSearchWriterFenceMode: cdk.CfnParameter;
   /** Anonymous request submission limit per capability and hour. */
   readonly requestRateLimitPerHour: cdk.CfnParameter;
   /** Secret authenticating request intake email Webhooks. */
@@ -190,6 +194,30 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
         'WorkspaceAuditPseudonymKey must be exactly 64 lowercase hexadecimal characters.',
       description:
         'Stable 32-byte random HMAC key encoded as lowercase hexadecimal for non-PII Workspace member and invitation audit identifiers.',
+    },
+  );
+  const apiRuntimeConfigurationRevision = new cdk.CfnParameter(
+    stack,
+    'ApiRuntimeConfigurationRevision',
+    {
+      type: 'String',
+      minLength: 1,
+      maxLength: 32,
+      allowedPattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$',
+      constraintDescription:
+        'ApiRuntimeConfigurationRevision must be a 1-32 character deployment revision.',
+      description:
+        'Operator-incremented revision that replaces immutable API configuration secrets and publishes a matching Lambda version.',
+    },
+  );
+  const workspaceSearchWriterFenceMode = new cdk.CfnParameter(
+    stack,
+    'WorkspaceSearchWriterFenceMode',
+    {
+      type: 'String',
+      allowedValues: ['rollout-pending', 'required'],
+      description:
+        'Explicit writer-fence rollout phase. Use rollout-pending only while AppConfig is disabled and writers are drained before the first open-row bootstrap; use required after bootstrap.',
     },
   );
   const requestRateLimitPerHour = new cdk.CfnParameter(stack, 'RequestRateLimitPerHour', {
@@ -357,6 +385,8 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     auditRetentionDays,
     connectorRuntimeConfiguration,
     workspaceAuditPseudonymKey,
+    apiRuntimeConfigurationRevision,
+    workspaceSearchWriterFenceMode,
     requestRateLimitPerHour,
     requestEmailWebhookSecret,
     requestTokenHashSecret,

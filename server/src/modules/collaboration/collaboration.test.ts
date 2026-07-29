@@ -16,15 +16,24 @@ function readCommandInput(command: unknown) {
   return command.input as Record<string, unknown>
 }
 
+/**
+ * Creates a collaboration client with isolated DynamoDB transports.
+ *
+ * @param send - Document-client command implementation used by the test.
+ * @param auditTableName - Optional audit table included in mutation transactions.
+ * @param useConfiguredParentIssueTable - Whether the constructor should resolve its parent table from the environment.
+ * @returns An isolated collaboration client.
+ */
 function createClient(
   send: (command: unknown) => Promise<Record<string, unknown>>,
   auditTableName?: string,
+  useConfiguredParentIssueTable = false,
 ) {
   const documentClient = { send } as unknown as DynamoDBDocumentClient
   const lowLevelClient = { send } as unknown as DynamoDBClient
   return new DynamoDbCollaborationClient(
     'collaboration-table',
-    'issue-table',
+    useConfiguredParentIssueTable ? undefined : 'issue-table',
     auditTableName,
     documentClient,
     lowLevelClient,
@@ -39,6 +48,53 @@ test('creates stable collaboration keys for Work Item and project scopes', () =>
   expect(createProjectCollaborationEntityKey('workspace#one', 'project-a')).toBe(
     'workspace#one#project#project-a',
   )
+})
+
+test('prefers the canonical Work Items environment for parent mutation guards', async () => {
+  const originalWorkItemsTableName = Bun.env.WORK_ITEMS_TABLE_NAME
+  const originalLegacyTeamIssuesTableName = Bun.env.MUKUROJI_TEAM_ISSUES_TABLE
+  Bun.env.WORK_ITEMS_TABLE_NAME = 'canonical-work-items-table'
+  Bun.env.MUKUROJI_TEAM_ISSUES_TABLE = 'legacy-team-issues-table'
+  const transactions: Array<Record<string, unknown>> = []
+
+  try {
+    const client = createClient(async (command) => {
+      const input = readCommandInput(command)
+      if ('TransactItems' in input) transactions.push(input)
+      return {}
+    }, undefined, true)
+    await client.subscribe({
+      workspaceId: 'workspace#one',
+      entityKey: createWorkItemCollaborationEntityKey(
+        'workspace#one',
+        'team-a',
+        'issue-1',
+      ),
+      teamId: 'team-a',
+      issueId: 'issue-1',
+      memberKey: 'member@example.com',
+    })
+
+    expect(transactions[0]?.TransactItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        ConditionCheck: expect.objectContaining({
+          TableName: 'canonical-work-items-table',
+        }),
+      }),
+    ]))
+  } finally {
+    if (originalWorkItemsTableName === undefined) {
+      delete Bun.env.WORK_ITEMS_TABLE_NAME
+    } else {
+      Bun.env.WORK_ITEMS_TABLE_NAME = originalWorkItemsTableName
+    }
+    if (originalLegacyTeamIssuesTableName === undefined) {
+      delete Bun.env.MUKUROJI_TEAM_ISSUES_TABLE
+    } else {
+      Bun.env.MUKUROJI_TEAM_ISSUES_TABLE =
+        originalLegacyTeamIssuesTableName
+    }
+  }
 })
 
 test('reads soft-deleted comment snapshots consistently for search revalidation', async () => {
@@ -752,13 +808,26 @@ test('upserts and removes a presence lease with a normalized member key', async 
     clientId: 'browser-tab-1',
   })
 
-  expect(commands[0]?.Item).toEqual(expect.objectContaining({
-    entityKey,
-    recordKey: 'PRESENCE#member@example.com#browser-tab-1',
-    typing: true,
-  }))
-  expect(commands[1]?.Key).toEqual({
-    entityKey,
-    recordKey: 'PRESENCE#member@example.com#browser-tab-1',
+  expect(commands[0]).toMatchObject({
+    TransactItems: [{
+      Put: {
+        Item: {
+          entityKey,
+          recordKey: 'PRESENCE#member@example.com#browser-tab-1',
+          typing: true,
+        },
+      },
+    }],
+  })
+  expect(commands[1]).toMatchObject({
+    TransactItems: [{
+      Delete: {
+        TableName: 'collaboration-table',
+        Key: {
+          entityKey,
+          recordKey: 'PRESENCE#member@example.com#browser-tab-1',
+        },
+      },
+    }],
   })
 })

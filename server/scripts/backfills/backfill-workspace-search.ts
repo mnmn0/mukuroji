@@ -1,10 +1,17 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import {
-  DeleteCommand,
   DynamoDBDocumentClient,
-  PutCommand,
   ScanCommand,
+  TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb'
+import {
+  createDynamoDbClient as createConfiguredDynamoDbClient,
+  createWorkspaceSearchWriterDynamoDbDocumentClient,
+  shouldBootstrapLocalDynamoDb,
+} from '../../src/infrastructure/aws/dynamodb-client'
+import {
+  runWithWorkspaceSearchWriterFenceInvocation,
+} from '../../src/infrastructure/runtime/workspace-search-writer-fence-invocation'
 import {
   type DocumentDetail,
   type SearchCustomFieldValue,
@@ -187,12 +194,17 @@ async function main() {
     readEnvironment('AWS_ENDPOINT_URL')
   const region = readEnvironment('AWS_REGION') ?? readEnvironment('AWS_DEFAULT_REGION') ?? 'us-east-1'
   const tables = resolveTableNames(endpoint)
-  const dynamoDbClient = createDynamoDbClient(endpoint, region)
-  const documentClient = createDocumentClient(dynamoDbClient)
+  const dynamoDbClient = options.dryRun
+    ? createDynamoDbClient(endpoint, region)
+    : createConfiguredDynamoDbClient()
+  const documentClient = createDocumentClient(
+    dynamoDbClient,
+    !options.dryRun,
+  )
   const definitions = createSourceDefinitions(tables)
     .filter((definition) => options.source === undefined || definition.name === options.source)
 
-  if (!options.dryRun && endpoint && isLocalEndpoint(endpoint)) {
+  if (!options.dryRun && shouldBootstrapLocalDynamoDb()) {
     await ensureLocalWorkspaceSearchTable(tables.workspaceSearch, dynamoDbClient)
   }
 
@@ -201,11 +213,13 @@ async function main() {
     `dryRun=${options.dryRun} limit=${options.limit ?? 'unlimited'}`,
   )
 
-  const counters = await runBackfill(
-    documentClient,
-    definitions,
-    tables.workspaceSearch,
-    options,
+  const counters = await runWithWorkspaceSearchWriterFenceInvocation(
+    async () => await runBackfill(
+      documentClient,
+      definitions,
+      tables.workspaceSearch,
+      options,
+    ),
   )
 
   for (const definition of definitions) {
@@ -273,7 +287,9 @@ Options:
 
 Required production environment:
   PROJECT_DIRECTORY_TABLE_NAME, WORK_ITEMS_TABLE_NAME, COLLABORATION_TABLE_NAME,
-  DOCUMENTS_TABLE_NAME, WORKSPACE_SEARCH_TABLE_NAME
+  DOCUMENTS_TABLE_NAME, WORKSPACE_SEARCH_TABLE_NAME,
+  WORKSPACE_SEARCH_MIGRATION_STATE_TABLE_NAME,
+  MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE=required
 
 For a local endpoint, repository-local default table names are used when omitted.
 Write runs create the local Workspace search table when it is missing. Re-running
@@ -375,7 +391,13 @@ function createDynamoDbClient(endpoint: string | undefined, region: string) {
   })
 }
 
-function createDocumentClient(baseClient: DynamoDBClient) {
+function createDocumentClient(
+  baseClient: DynamoDBClient,
+  guardWrites: boolean,
+) {
+  if (guardWrites) {
+    return createWorkspaceSearchWriterDynamoDbDocumentClient(baseClient)
+  }
   return DynamoDBDocumentClient.from(baseClient, {
     marshallOptions: {
       removeUndefinedValues: true,
@@ -505,21 +527,29 @@ async function applyProjectionOperation(
 ) {
   if (operation.action === 'put') {
     await client.send(
-      new PutCommand({
-        TableName: tableName,
-        Item: operation.document,
+      new TransactWriteCommand({
+        TransactItems: [{
+          Put: {
+            TableName: tableName,
+            Item: operation.document,
+          },
+        }],
       }),
     )
     return
   }
 
   await client.send(
-    new DeleteCommand({
-      TableName: tableName,
-      Key: {
-        workspaceId: operation.workspaceId,
-        recordKey: operation.recordKey,
-      },
+    new TransactWriteCommand({
+      TransactItems: [{
+        Delete: {
+          TableName: tableName,
+          Key: {
+            workspaceId: operation.workspaceId,
+            recordKey: operation.recordKey,
+          },
+        },
+      }],
     }),
   )
 }
@@ -676,6 +706,15 @@ export function mapWorkItem(item: Record<string, unknown>): SearchProjectionOper
 export function mapCollaborationItem(
   item: Record<string, unknown>,
 ): SearchProjectionOperation | undefined {
+  if (
+    item.entryType === 'comment' &&
+    Object.prototype.hasOwnProperty.call(item, 'expiresAt')
+  ) {
+    throw new TypeError(
+      'Workspace search backfill cannot reconcile a Collaboration target candidate that carries the TTL-managed expiresAt attribute.',
+    )
+  }
+
   if (!isCanonicalCollaborationComment(item)) {
     return undefined
   }
@@ -727,6 +766,15 @@ export function mapCollaborationItem(
 export function mapDocumentItem(
   item: Record<string, unknown>,
 ): SearchProjectionOperation | undefined {
+  if (
+    item.entryType === 'document' &&
+    Object.prototype.hasOwnProperty.call(item, 'expiresAtEpoch')
+  ) {
+    throw new TypeError(
+      'Workspace search backfill cannot reconcile a Document target candidate that carries the TTL-managed expiresAtEpoch attribute.',
+    )
+  }
+
   const workspaceId = readRequiredString(item.workspaceId)
   const documentId = readRequiredString(item.documentId)
   const revision = readPositiveInteger(item.revision)

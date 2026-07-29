@@ -2,6 +2,14 @@ import {
   loadServerConfig,
 } from '../../../../infrastructure/config/server-config'
 import {
+  createDynamoDbClient as createConfiguredDynamoDbClient,
+  createWorkspaceSearchWriterDynamoDbDocumentClient,
+  shouldBootstrapLocalDynamoDb as shouldBootstrapConfiguredLocalDynamoDb,
+} from '../../../../infrastructure/aws/dynamodb-client'
+import {
+  throwIfWorkspaceSearchWriterFenceTerminalError,
+} from '../../../../infrastructure/runtime/workspace-search-writer-fence-document-client'
+import {
   createAuditFieldChanges,
   createMutationAuditEventPut,
   ensureLocalAuditEventsTable,
@@ -40,7 +48,6 @@ import type {
 import {
   DynamoDBDocumentClient,
   GetCommand,
-  PutCommand,
   QueryCommand,
   TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb'
@@ -648,8 +655,8 @@ export const projectRoleWeights = {
   manager: 3,
 } as const satisfies Record<ProjectRole, number>
 
-/** DynamoDB TransactWriteItems が受け付ける action 数の上限です。 */
-const DYNAMODB_TRANSACTION_MAX_ACTIONS = 100
+/** Writer-fence ConditionCheck を除く application action 数の上限です。 */
+const DYNAMODB_TRANSACTION_MAX_ACTIONS = 99
 
 function createOptionalAuditTransactItems(
   tableName: string | undefined,
@@ -1260,7 +1267,9 @@ export class DynamoDbProjectDirectoryClient {
           new TransactWriteCommand({ TransactItems: [statePut, auditPut] }),
         )
       } else {
-        await this.documentClient.send(new PutCommand(statePut.Put))
+        await this.documentClient.send(
+          new TransactWriteCommand({ TransactItems: [statePut] }),
+        )
       }
 
       return {
@@ -2259,28 +2268,11 @@ export class DynamoDbProjectDirectoryClient {
 }
 
 function createDynamoDbClient() {
-  const endpoint = getDynamoDbEndpoint()
-
-  return new DynamoDBClient({
-    region: getAwsRegion(),
-    ...(endpoint
-      ? {
-          endpoint,
-          credentials: {
-            accessKeyId: getEnv('AWS_ACCESS_KEY_ID') ?? 'test',
-            secretAccessKey: getEnv('AWS_SECRET_ACCESS_KEY') ?? 'test',
-          },
-        }
-      : {}),
-  })
+  return createConfiguredDynamoDbClient()
 }
 
 function createDynamoDbDocumentClient(dynamoDbClient = createDynamoDbClient()) {
-  return DynamoDBDocumentClient.from(dynamoDbClient, {
-    marshallOptions: {
-      removeUndefinedValues: true,
-    },
-  })
+  return createWorkspaceSearchWriterDynamoDbDocumentClient(dynamoDbClient)
 }
 
 const localDynamoDbTableInitializers = new Map<string, Promise<void>>()
@@ -2416,12 +2408,7 @@ function hasKeySchema(
 }
 
 function shouldBootstrapLocalDynamoDb() {
-  const endpoint = getDynamoDbEndpoint()
-
-  return Boolean(
-    endpoint &&
-    /^https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|floci)(?::|\/|$)/.test(endpoint),
-  )
+  return shouldBootstrapConfiguredLocalDynamoDb()
 }
 
 function isResourceNotFoundError(error: unknown) {
@@ -2532,6 +2519,7 @@ async function sleep(ms: number) {
 }
 
 function toProjectDataError(error: unknown) {
+  throwIfWorkspaceSearchWriterFenceTerminalError(error)
   const awsError = error as {
     $metadata?: {
       httpStatusCode?: number
@@ -3059,10 +3047,6 @@ function padSortOrder(value: number) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function getAwsRegion() {
-  return loadServerConfig().awsRegion
 }
 
 function getDynamoDbEndpoint() {

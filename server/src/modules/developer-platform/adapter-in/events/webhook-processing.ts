@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import {
   DeleteCommand,
   DynamoDBDocumentClient,
@@ -15,6 +14,10 @@ import type {
   WebhookEventType,
   WebhookSubscription,
 } from '@mukuroji/contracts'
+import {
+  createDynamoDbClient as createConfiguredDynamoDbClient,
+  createWorkspaceSearchWriterDynamoDbDocumentClient,
+} from '../../../../infrastructure/aws/dynamodb-client'
 import {
   getConfiguredAuditTableName,
   toAuditEventView,
@@ -1298,24 +1301,8 @@ function createSqsClient() {
 }
 
 function createWebhookDocumentClient() {
-  const endpoint = process.env.DYNAMODB_ENDPOINT ??
-    process.env.AWS_ENDPOINT_URL_DYNAMODB ??
-    process.env.AWS_ENDPOINT_URL
-  const client = new DynamoDBClient({
-    region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'ap-northeast-1',
-    ...(endpoint
-      ? {
-          endpoint,
-          credentials: {
-            accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? 'test',
-            secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? 'test',
-          },
-        }
-      : {}),
-  })
-  return DynamoDBDocumentClient.from(client, {
-    marshallOptions: { removeUndefinedValues: true },
-  })
+  const client = createConfiguredDynamoDbClient()
+  return createWorkspaceSearchWriterDynamoDbDocumentClient(client)
 }
 
 function readWebhookAuditTableName() {

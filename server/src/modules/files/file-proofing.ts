@@ -47,9 +47,13 @@ import {
 import {
   createMutationAuditEventPut,
   getConfiguredAuditTableName,
-  getConfiguredDynamoDbEndpoint,
   type MutationAuditContext,
 } from '../audit'
+import {
+  createDynamoDbClient as createConfiguredDynamoDbClient,
+  createWorkspaceSearchWriterDynamoDbDocumentClient,
+  shouldBootstrapLocalDynamoDb,
+} from '../../infrastructure/aws/dynamodb-client'
 import { isMissingFileObjectVersionError } from './file-object-errors'
 
 /** Browser から直接 upload できる既定の最大 byte 数です。 */
@@ -2367,11 +2371,9 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
 
 /** Production/local environment から標準 file proofing client を作成します。 */
 export function createDefaultFileProofingClient(): FileProofingClient {
-  const dynamoDbEndpoint = getConfiguredDynamoDbEndpoint()
-  const dynamoDbClient = new DynamoDBClient(createAwsClientConfiguration(dynamoDbEndpoint))
-  const documentClient = DynamoDBDocumentClient.from(dynamoDbClient, {
-    marshallOptions: { removeUndefinedValues: true },
-  })
+  const dynamoDbClient = createConfiguredDynamoDbClient()
+  const documentClient =
+    createWorkspaceSearchWriterDynamoDbDocumentClient(dynamoDbClient)
   const s3Endpoint = readEnvironment('AWS_ENDPOINT_URL_S3') ?? readEnvironment('AWS_ENDPOINT_URL')
   const s3Client = new S3Client({
     ...createAwsClientConfiguration(s3Endpoint),
@@ -2395,7 +2397,7 @@ export function createDefaultFileProofingClient(): FileProofingClient {
       workItemsTableName: readEnvironment('WORK_ITEMS_TABLE_NAME') ??
         readEnvironment('TEAM_ISSUES_TABLE_NAME'),
       dynamoDbClient,
-      bootstrapLocalTable: Boolean(dynamoDbEndpoint),
+      bootstrapLocalTable: shouldBootstrapLocalDynamoDb(),
     },
   )
 }

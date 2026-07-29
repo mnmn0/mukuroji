@@ -3,6 +3,8 @@ import './parameters-config.suite';
 import './data-storage.suite';
 import './migration-storage.suite';
 import './security-iam-api.suite';
+import './api-environment-budget.suite';
 import './workers-observability.suite';
 import './bootstrap.suite';
 import './runtime-controls.suite';
+import './workspace-search-writer-fence.suite';

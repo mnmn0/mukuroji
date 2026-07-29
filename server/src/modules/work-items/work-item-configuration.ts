@@ -27,6 +27,13 @@ import {
   type WorkItemRelationType,
 } from '@mukuroji/contracts'
 import {
+  createDynamoDbClient as createConfiguredDynamoDbClient,
+  createWorkspaceSearchWriterDynamoDbDocumentClient,
+} from '../../infrastructure/aws/dynamodb-client'
+import {
+  throwIfWorkspaceSearchWriterFenceTerminalError,
+} from '../../infrastructure/runtime/workspace-search-writer-fence-document-client'
+import {
   validateWorkflowDefinition as validateDomainWorkflowDefinition,
   WorkflowDefinitionValidationError,
 } from '../work-item-workflow'
@@ -460,7 +467,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       process.env.TEAM_ISSUES_TABLE_NAME ??
       'mukuroji-team-issues-local',
     documentClient = createDocumentClient(),
-    dynamoDbClient = new DynamoDBClient({}),
+    dynamoDbClient = createConfiguredDynamoDbClient(),
     bootstrapLocalTable = false,
   ) {
     this.tableName = tableName
@@ -1867,9 +1874,9 @@ function isConfigurationTableDescription(table: TableDescription | undefined) {
 }
 
 function createDocumentClient() {
-  return DynamoDBDocumentClient.from(new DynamoDBClient({}), {
-    marshallOptions: { removeUndefinedValues: true },
-  })
+  return createWorkspaceSearchWriterDynamoDbDocumentClient(
+    createConfiguredDynamoDbClient(),
+  )
 }
 
 function cloneCustomFieldValue(value: CustomFieldValue): CustomFieldValue {
@@ -2096,6 +2103,7 @@ function storedRelationInvalid() {
 }
 
 function toPersistenceError(error: unknown) {
+  throwIfWorkspaceSearchWriterFenceTerminalError(error)
   if (error instanceof WorkItemConfigurationError) {
     return error
   }

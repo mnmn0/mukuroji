@@ -3,6 +3,7 @@ import { Construct } from 'constructs';
 import { configureAlarmRouting } from './aspects/alarm-routing';
 import { buildLambdaBuildPaths } from './config/lambda-build-paths';
 import { buildStackParameters } from './config/stack-parameters';
+import type { WorkspaceSearchWriterFenceResources } from './policies/workspace-search-writer-fence';
 import {
   buildApiRuntime,
   buildApiTransportsAndRealtime,
@@ -56,6 +57,18 @@ export class CdkStack extends cdk.Stack {
       workItemsTable: dataStores.workItemsTable,
       workspaceSearchTable: dataStores.workspaceSearchTable,
     });
+    const workspaceSearchWriterFence:
+      WorkspaceSearchWriterFenceResources = {
+        collaborationTable: dataStores.collaborationTable,
+        documentsTable: dataStores.documentsTable,
+        migrationStateTable:
+          migrationStorage.workspaceSearchMigrationStateTable,
+        projectDirectoryTable: dataStores.projectDirectoryTable,
+        runtimeMode:
+          parameters.workspaceSearchWriterFenceMode.valueAsString,
+        workItemsTable: dataStores.workItemsTable,
+        workspaceSearchTable: dataStores.workspaceSearchTable,
+      };
     const fileStorage = buildFileStorage(this, {
       allowedOrigins: parameters.taskApiAllowedOriginList,
       fileProofingTable: dataStores.fileProofingTable,
@@ -73,6 +86,7 @@ export class CdkStack extends cdk.Stack {
       parameters,
       runtimeControls,
       workerChannels,
+      workspaceSearchWriterFence,
     });
     configureFileStorageApiBoundary(fileStorage, apiRuntime.apiFunction);
 
@@ -81,6 +95,7 @@ export class CdkStack extends cdk.Stack {
       lambdaBuildPaths,
       parameters,
       runtimeControls,
+      workspaceSearchWriterFence,
     });
     buildWorkItemImportWorker(this, {
       dataStores,
@@ -89,14 +104,18 @@ export class CdkStack extends cdk.Stack {
       parameters,
       runtimeControls,
       workerChannels,
+      workspaceSearchWriterFence,
     });
 
     const apiTransports = buildApiTransportsAndRealtime(this, {
       apiRuntime,
       dataStores,
+      fileStorage,
       lambdaBuildPaths,
       parameters,
       runtimeControls,
+      workerChannels,
+      workspaceSearchWriterFence,
     });
     const auditProjection = buildAuditProjectionWorker(this, {
       dataStores,
@@ -106,6 +125,7 @@ export class CdkStack extends cdk.Stack {
       realtimeWebSocketStage: apiTransports.realtimeWebSocketStage,
       runtimeControls,
       workerChannels,
+      workspaceSearchWriterFence,
     });
     const automationWorkers = buildAutomationWorkers(this, {
       dataStores,
@@ -113,6 +133,7 @@ export class CdkStack extends cdk.Stack {
       lambdaBuildPaths,
       parameters,
       runtimeControls,
+      workspaceSearchWriterFence,
     });
     buildWebhookDeliveryWorkers(this, {
       apiRuntime,
@@ -122,6 +143,7 @@ export class CdkStack extends cdk.Stack {
       parameters,
       runtimeControls,
       workerChannels,
+      workspaceSearchWriterFence,
     });
     buildConnectorWorkers(this, {
       dataStores,
@@ -129,12 +151,14 @@ export class CdkStack extends cdk.Stack {
       parameters,
       runtimeControls,
       workerChannels,
+      workspaceSearchWriterFence,
     });
     const scheduleWorkers = buildScheduleWorkers(this, {
       dataStores,
       lambdaBuildPaths,
       parameters,
       runtimeControls,
+      workspaceSearchWriterFence,
     });
     const requestEmailWorker = buildRequestEmailWorker(this, {
       dataStores,

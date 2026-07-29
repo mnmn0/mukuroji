@@ -8,6 +8,10 @@ import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
+import {
+  bindWorkspaceSearchWriterFence,
+  type WorkspaceSearchWriterFenceResources,
+} from '../../policies/workspace-search-writer-fence';
 import type { DataStoreResources } from '../data-stores';
 import type { FileStorageResources } from '../file-storage';
 import {
@@ -32,6 +36,8 @@ export interface WorkItemImportWorkerInput {
   readonly runtimeControls: RuntimeControlResources;
   /** Durable import queue and dead-letter queue. */
   readonly workerChannels: WorkerChannels;
+  /** Exact source, target, and state tables protected by the writer fence. */
+  readonly workspaceSearchWriterFence: WorkspaceSearchWriterFenceResources;
 }
 
 /**
@@ -124,6 +130,10 @@ export function buildWorkItemImportWorker(
         WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
       },
     },
+  );
+  bindWorkspaceSearchWriterFence(
+    input.workspaceSearchWriterFence,
+    workItemImportFunction,
   );
   bindRuntimeControls(
     input.runtimeControls,

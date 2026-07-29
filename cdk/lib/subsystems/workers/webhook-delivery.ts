@@ -9,6 +9,10 @@ import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
+import {
+  bindWorkspaceSearchWriterFence,
+  type WorkspaceSearchWriterFenceResources,
+} from '../../policies/workspace-search-writer-fence';
 import type { ApiRuntimeResources } from '../api-realtime';
 import type { DataStoreResources } from '../data-stores';
 import {
@@ -36,6 +40,8 @@ export interface WebhookDeliveryWorkerInput {
   readonly runtimeControls: RuntimeControlResources;
   /** Durable Webhook delivery queue and dead-letter queue. */
   readonly workerChannels: WorkerChannels;
+  /** Exact source, target, and state tables protected by the writer fence. */
+  readonly workspaceSearchWriterFence: WorkspaceSearchWriterFenceResources;
 }
 
 /**
@@ -131,6 +137,10 @@ export function buildWebhookDeliveryWorkers(
       },
     },
   );
+  bindWorkspaceSearchWriterFence(
+    input.workspaceSearchWriterFence,
+    webhookAuthorizationBackfillFunction,
+  );
   projectDirectoryTable.grants.readWriteData(webhookAuthorizationBackfillFunction);
   developerPlatformTable.grants.readWriteData(
     webhookAuthorizationBackfillFunction,
@@ -177,6 +187,10 @@ export function buildWebhookDeliveryWorkers(
         },
       },
     );
+  bindWorkspaceSearchWriterFence(
+    input.workspaceSearchWriterFence,
+    webhookAuthorizationBackfillProgressFunction,
+  );
   projectDirectoryTable.grants.readWriteData(
     webhookAuthorizationBackfillProgressFunction,
   );
@@ -212,8 +226,14 @@ export function buildWebhookDeliveryWorkers(
         DeveloperPlatformTableName: developerPlatformTable.tableName,
         MigrationVersion: 'v3',
         ProjectDirectoryTableName: projectDirectoryTable.tableName,
+        WorkspaceSearchWriterFenceMode:
+          input.workspaceSearchWriterFence.runtimeMode,
       },
     },
+  );
+  webhookAuthorizationBackfill.node.addDependency(
+    webhookAuthorizationBackfillFunction,
+    webhookAuthorizationBackfillProgressFunction,
   );
 
   const webhookDeliveryLogGroup = new logs.LogGroup(
@@ -260,6 +280,10 @@ export function buildWebhookDeliveryWorkers(
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
       },
     },
+  );
+  bindWorkspaceSearchWriterFence(
+    input.workspaceSearchWriterFence,
+    webhookDeliveryFunction,
   );
   bindRuntimeControls(
     input.runtimeControls,

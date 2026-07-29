@@ -4,6 +4,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import {
   createCanonicalWorkItemTransactItems,
   createIdempotentAwsCustomResourceProps,
+  createPreFenceBootstrapAwsCustomResourceProps,
   createProjectDirectoryTransactItems,
   createWorkspaceAccessTransactItems,
   createWorkspaceBootstrapTransactItems,
@@ -23,7 +24,8 @@ export interface BootstrapResourcesInput {
 }
 
 /**
- * Builds Cognito validation and idempotent workspace seed custom resources.
+ * Builds Cognito validation, create-only pre-fence table seeds, and idempotent
+ * workspace-access seed custom resources.
  *
  * @param scope Stack scope used directly to preserve existing construct paths.
  * @param input Shared parameters and data stores consumed by bootstrap operations.
@@ -113,9 +115,9 @@ export function buildBootstrapResources(
   const seedCanonicalWorkItems = new customResources.AwsCustomResource(
     scope,
     'SeedProjectTasks',
-    {
-      onCreate: seedCanonicalWorkItemsCall,
-      policy: customResources.AwsCustomResourcePolicy.fromStatements([
+    createPreFenceBootstrapAwsCustomResourceProps(
+      seedCanonicalWorkItemsCall,
+      customResources.AwsCustomResourcePolicy.fromStatements([
         new iam.PolicyStatement({
           actions: ['dynamodb:PutItem'],
           resources: [workItemsTable.tableArn],
@@ -126,8 +128,7 @@ export function buildBootstrapResources(
           },
         }),
       ]),
-      installLatestAwsSdk: false,
-    },
+    ),
   );
 
   seedCanonicalWorkItems.node.addDependency(workItemsTable);
@@ -146,9 +147,9 @@ export function buildBootstrapResources(
   const seedProjectDirectory = new customResources.AwsCustomResource(
     scope,
     'SeedProjectDirectory',
-    {
-      onCreate: seedProjectDirectoryCall,
-      policy: customResources.AwsCustomResourcePolicy.fromStatements([
+    createPreFenceBootstrapAwsCustomResourceProps(
+      seedProjectDirectoryCall,
+      customResources.AwsCustomResourcePolicy.fromStatements([
         new iam.PolicyStatement({
           actions: ['dynamodb:PutItem'],
           resources: [projectDirectoryTable.tableArn],
@@ -159,8 +160,7 @@ export function buildBootstrapResources(
           },
         }),
       ]),
-      installLatestAwsSdk: false,
-    },
+    ),
   );
 
   seedProjectDirectory.node.addDependency(projectDirectoryTable);
@@ -214,7 +214,7 @@ export function buildBootstrapResources(
   const bootstrapWorkspace = new customResources.AwsCustomResource(
     scope,
     'BootstrapWorkspace',
-    createIdempotentAwsCustomResourceProps(
+    createPreFenceBootstrapAwsCustomResourceProps(
       bootstrapWorkspaceCall,
       customResources.AwsCustomResourcePolicy.fromStatements([
         new iam.PolicyStatement({

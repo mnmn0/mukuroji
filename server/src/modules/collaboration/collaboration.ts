@@ -6,19 +6,24 @@ import {
   type TableDescription,
 } from '@aws-sdk/client-dynamodb'
 import {
-  DeleteCommand,
   DynamoDBDocumentClient,
   GetCommand,
-  PutCommand,
   QueryCommand,
   TransactWriteCommand,
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  createDynamoDbClient as createConfiguredDynamoDbClient,
+  createWorkspaceSearchWriterDynamoDbDocumentClient,
+  shouldBootstrapLocalDynamoDb as shouldBootstrapConfiguredLocalDynamoDb,
+} from '../../infrastructure/aws/dynamodb-client'
+import {
+  throwIfWorkspaceSearchWriterFenceTerminalError,
+} from '../../infrastructure/runtime/workspace-search-writer-fence-document-client'
+import {
   createAuditFieldChanges,
   createMutationAuditEventPut,
   getConfiguredAuditTableName,
-  getConfiguredDynamoDbEndpoint,
   type MutationAuditContext,
 } from '../audit'
 
@@ -476,7 +481,9 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     tableName = readEnvironment('MUKUROJI_COLLABORATION_TABLE') ??
       readEnvironment('COLLABORATION_TABLE_NAME') ??
       'mukuroji-collaboration-local',
-    parentIssueTableName = readEnvironment('MUKUROJI_TEAM_ISSUES_TABLE') ??
+    parentIssueTableName = readEnvironment('WORK_ITEMS_TABLE_NAME') ??
+      readEnvironment('MUKUROJI_WORK_ITEMS_TABLE') ??
+      readEnvironment('MUKUROJI_TEAM_ISSUES_TABLE') ??
       readEnvironment('TEAM_ISSUES_TABLE_NAME') ??
       'mukuroji-team-issues-local',
     auditTableName = getConfiguredAuditTableName(),
@@ -488,9 +495,8 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     this.parentIssueTableName = requireText(parentIssueTableName, 'Team issues table name')
     this.auditTableName = auditTableName
     this.dynamoDbClient = dynamoDbClient
-    this.documentClient = documentClient ?? DynamoDBDocumentClient.from(dynamoDbClient, {
-      marshallOptions: { removeUndefinedValues: true },
-    })
+    this.documentClient = documentClient ??
+      createWorkspaceSearchWriterDynamoDbDocumentClient(dynamoDbClient)
     this.bootstrapLocalTable = bootstrapLocalTable
   }
 
@@ -948,18 +954,35 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       lastSeenAt: now.toISOString(),
       expiresAt: Math.floor(now.getTime() / 1_000) + ttlSeconds,
     }
-    await this.documentClient.send(new PutCommand({ TableName: this.tableName, Item: item }))
+    await this.documentClient.send(new TransactWriteCommand({
+      TransactItems: [{
+        Put: {
+          TableName: this.tableName,
+          Item: item,
+        },
+      }],
+    }))
   }
 
   /** Browser tab の presence を削除します。 */
   async leavePresence(input: PresenceLeaveInput) {
     await this.ensureLocalTable()
-    await this.documentClient.send(new DeleteCommand({
-      TableName: this.tableName,
-      Key: {
-        entityKey: requireText(input.entityKey, 'Collaboration entity key'),
-        recordKey: presenceRecordKey(normalizeMemberKey(input.memberKey), requireClientId(input.clientId)),
-      },
+    await this.documentClient.send(new TransactWriteCommand({
+      TransactItems: [{
+        Delete: {
+          TableName: this.tableName,
+          Key: {
+            entityKey: requireText(
+              input.entityKey,
+              'Collaboration entity key',
+            ),
+            recordKey: presenceRecordKey(
+              normalizeMemberKey(input.memberKey),
+              requireClientId(input.clientId),
+            ),
+          },
+        },
+      }],
     }))
   }
 
@@ -1904,6 +1927,7 @@ function isConditionalFailure(error: unknown) {
 }
 
 function toCollaborationStoreError(error: unknown) {
+  throwIfWorkspaceSearchWriterFenceTerminalError(error)
   if (error instanceof CollaborationError) {
     return error
   }
@@ -1919,24 +1943,11 @@ function isDefined<T>(value: T | undefined): value is T {
 }
 
 function createDynamoDbClient() {
-  const endpoint = getConfiguredDynamoDbEndpoint()
-  return new DynamoDBClient({
-    region: readEnvironment('AWS_REGION') ?? readEnvironment('AWS_DEFAULT_REGION') ?? 'us-east-1',
-    ...(endpoint
-      ? {
-          endpoint,
-          credentials: {
-            accessKeyId: readEnvironment('AWS_ACCESS_KEY_ID') ?? 'test',
-            secretAccessKey: readEnvironment('AWS_SECRET_ACCESS_KEY') ?? 'test',
-          },
-        }
-      : {}),
-  })
+  return createConfiguredDynamoDbClient()
 }
 
 function shouldBootstrapLocalTable() {
-  const endpoint = getConfiguredDynamoDbEndpoint()
-  return Boolean(endpoint && /^https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|floci)(?::|\/|$)/.test(endpoint))
+  return shouldBootstrapConfiguredLocalDynamoDb()
 }
 
 function readEnvironment(name: string) {

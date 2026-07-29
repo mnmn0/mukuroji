@@ -82,16 +82,16 @@ const runtimeControlSchema = {
 };
 
 const initialRuntimeControl = {
-  mode: 'enabled',
+  mode: 'disabled',
   revision: 1,
   schemaVersion: 1,
 };
 
 /** AppConfig polling lower bound injected into controlled runtimes, in seconds. */
-const runtimeControlMinimumPollIntervalSeconds = 15;
+export const RUNTIME_CONTROL_MINIMUM_POLL_INTERVAL_SECONDS = 15;
 
 /** Last-known-good staleness limit injected into controlled runtimes, in seconds. */
-const runtimeControlMaximumStalenessSeconds = 60;
+export const RUNTIME_CONTROL_MAXIMUM_STALENESS_SECONDS = 60;
 
 /**
  * Builds the retained AWS AppConfig control plane without adding a nested construct scope.
@@ -318,8 +318,7 @@ export function buildRuntimeControls(
       content: JSON.stringify(initialRuntimeControl),
       contentType: 'application/json',
       description:
-        'Baseline v1 configuration that enables application processing.',
-      versionLabel: 'baseline-v1',
+        'Fail-closed baseline for explicit application processing rollout.',
     },
   );
   initialConfiguration.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
@@ -333,7 +332,7 @@ export function buildRuntimeControls(
       configurationVersion: initialConfiguration.ref,
       deploymentStrategyId: 'AppConfig.AllAtOnce',
       description:
-        'Bootstraps the validated enabled runtime-control configuration.',
+        'Bootstraps the validated disabled runtime-control configuration.',
       environmentId: environment.ref,
     },
   );
@@ -391,12 +390,14 @@ export function buildRuntimeControls(
  * @param resources Shared AppConfig resources and least-privilege read policy.
  * @param targetFunction Application Lambda that consumes runtime controls.
  * @param runtimeScope Stable application surface used by runtime policy evaluation.
+ * @param injectEnvironment Whether to add discrete environment variables.
  * @returns Nothing.
  */
 export function bindRuntimeControls(
   resources: RuntimeControlResources,
   targetFunction: lambdaNodejs.NodejsFunction,
   runtimeScope: RuntimeControlScope,
+  injectEnvironment = true,
 ): void {
   if (!targetFunction.role) {
     throw new Error('Runtime-controlled Lambda execution role was not created.');
@@ -411,28 +412,30 @@ export function bindRuntimeControls(
     resources.initialDeployment,
     resources.readPolicy,
   );
-  targetFunction.addEnvironment(
-    'MUKUROJI_RUNTIME_CONTROL_APPCONFIG_APPLICATION_ID',
-    resources.applicationId,
-  );
-  targetFunction.addEnvironment(
-    'MUKUROJI_RUNTIME_CONTROL_APPCONFIG_ENVIRONMENT_ID',
-    resources.environmentId,
-  );
-  targetFunction.addEnvironment(
-    'MUKUROJI_RUNTIME_CONTROL_APPCONFIG_CONFIGURATION_PROFILE_ID',
-    resources.configurationProfileId,
-  );
-  targetFunction.addEnvironment(
-    'MUKUROJI_RUNTIME_CONTROL_MIN_POLL_INTERVAL_SECONDS',
-    String(runtimeControlMinimumPollIntervalSeconds),
-  );
-  targetFunction.addEnvironment(
-    'MUKUROJI_RUNTIME_CONTROL_MAX_STALE_SECONDS',
-    String(runtimeControlMaximumStalenessSeconds),
-  );
-  targetFunction.addEnvironment(
-    'MUKUROJI_RUNTIME_CONTROL_SCOPE',
-    runtimeScope,
-  );
+  if (injectEnvironment) {
+    targetFunction.addEnvironment(
+      'MUKUROJI_RUNTIME_CONTROL_APPCONFIG_APPLICATION_ID',
+      resources.applicationId,
+    );
+    targetFunction.addEnvironment(
+      'MUKUROJI_RUNTIME_CONTROL_APPCONFIG_ENVIRONMENT_ID',
+      resources.environmentId,
+    );
+    targetFunction.addEnvironment(
+      'MUKUROJI_RUNTIME_CONTROL_APPCONFIG_CONFIGURATION_PROFILE_ID',
+      resources.configurationProfileId,
+    );
+    targetFunction.addEnvironment(
+      'MUKUROJI_RUNTIME_CONTROL_MIN_POLL_INTERVAL_SECONDS',
+      String(RUNTIME_CONTROL_MINIMUM_POLL_INTERVAL_SECONDS),
+    );
+    targetFunction.addEnvironment(
+      'MUKUROJI_RUNTIME_CONTROL_MAX_STALE_SECONDS',
+      String(RUNTIME_CONTROL_MAXIMUM_STALENESS_SECONDS),
+    );
+    targetFunction.addEnvironment(
+      'MUKUROJI_RUNTIME_CONTROL_SCOPE',
+      runtimeScope,
+    );
+  }
 }

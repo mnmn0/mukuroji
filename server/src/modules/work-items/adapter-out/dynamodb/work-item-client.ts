@@ -2,6 +2,14 @@ import {
   loadServerConfig,
 } from '../../../../infrastructure/config/server-config'
 import {
+  createDynamoDbClient as createConfiguredDynamoDbClient,
+  createWorkspaceSearchWriterDynamoDbDocumentClient,
+  shouldBootstrapLocalDynamoDb as shouldBootstrapConfiguredLocalDynamoDb,
+} from '../../../../infrastructure/aws/dynamodb-client'
+import {
+  throwIfWorkspaceSearchWriterFenceTerminalError,
+} from '../../../../infrastructure/runtime/workspace-search-writer-fence-document-client'
+import {
   createAuditFieldChanges,
   createMutationAuditEventPut,
   ensureLocalAuditEventsTable,
@@ -2619,28 +2627,11 @@ function isDefined<T>(value: T | undefined): value is T {
 }
 
 function createDynamoDbClient() {
-  const endpoint = getDynamoDbEndpoint()
-
-  return new DynamoDBClient({
-    region: getAwsRegion(),
-    ...(endpoint
-      ? {
-          endpoint,
-          credentials: {
-            accessKeyId: getEnv('AWS_ACCESS_KEY_ID') ?? 'test',
-            secretAccessKey: getEnv('AWS_SECRET_ACCESS_KEY') ?? 'test',
-          },
-        }
-      : {}),
-  })
+  return createConfiguredDynamoDbClient()
 }
 
 function createDynamoDbDocumentClient(dynamoDbClient = createDynamoDbClient()) {
-  return DynamoDBDocumentClient.from(dynamoDbClient, {
-    marshallOptions: {
-      removeUndefinedValues: true,
-    },
-  })
+  return createWorkspaceSearchWriterDynamoDbDocumentClient(dynamoDbClient)
 }
 
 const localDynamoDbTableInitializers = new Map<string, Promise<void>>()
@@ -2902,12 +2893,7 @@ function hasKeySchema(
 }
 
 function shouldBootstrapLocalDynamoDb() {
-  const endpoint = getDynamoDbEndpoint()
-
-  return Boolean(
-    endpoint &&
-    /^https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|floci)(?::|\/|$)/.test(endpoint),
-  )
+  return shouldBootstrapConfiguredLocalDynamoDb()
 }
 
 function isResourceNotFoundError(error: unknown) {
@@ -3026,6 +3012,7 @@ async function sleep(ms: number) {
 }
 
 function toProjectDataError(error: unknown) {
+  throwIfWorkspaceSearchWriterFenceTerminalError(error)
   const awsError = error as {
     $metadata?: {
       httpStatusCode?: number
@@ -3773,10 +3760,6 @@ function createTeamIssueAuditCommentId(teamId: string, issueId: string, commentI
 
 function createTeamIssueEventId(createdAt: string, eventType: TeamIssueActivityType) {
   return `${createdAt}#${eventType}#${Math.random().toString(36).slice(2, 10)}`
-}
-
-function getAwsRegion() {
-  return loadServerConfig().awsRegion
 }
 
 function getDynamoDbEndpoint() {

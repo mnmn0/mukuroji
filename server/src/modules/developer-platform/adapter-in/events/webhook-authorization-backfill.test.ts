@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
+  handler,
   isCompleteHandler,
   processWebhookActiveLocatorRollbackPage,
   processWebhookAuthorizationBackfillEvent,
@@ -14,11 +15,115 @@ const backfillStartedAt = new Date('2026-07-18T00:00:00.000Z')
 const afterWriterDrain = new Date('2026-07-18T00:01:01.000Z')
 const afterLocatorCleanupDrain = new Date('2026-07-18T00:02:02.000Z')
 
+/**
+ * Runs one assertion with an isolated Lambda writer-fence mode.
+ *
+ * @param mode - Exact runtime mode to expose.
+ * @param callback - Assertion body.
+ * @returns Assertion result.
+ */
+async function withWriterFenceMode<T>(
+  mode: 'rollout-pending' | 'required',
+  callback: () => T | Promise<T>,
+): Promise<T> {
+  const name = 'MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE'
+  const previous = Bun.env[name]
+  Bun.env[name] = mode
+  try {
+    return await callback()
+  } finally {
+    if (previous === undefined) {
+      delete Bun.env[name]
+    } else {
+      Bun.env[name] = previous
+    }
+  }
+}
+
 test('accepts the replaced v1 custom resource delete without v3 validation', async () => {
-  await expect(isCompleteHandler({
-    RequestType: 'Delete',
-    ResourceProperties: { MigrationVersion: 'v1' },
-  })).resolves.toEqual({ IsComplete: true })
+  await withWriterFenceMode('required', async () => {
+    await expect(isCompleteHandler({
+      RequestType: 'Delete',
+      ResourceProperties: { MigrationVersion: 'v1' },
+    })).resolves.toEqual({ IsComplete: true })
+  })
+})
+
+test('skips every pending rollout lifecycle before table access', async () => {
+  const rows = new Map<string, Record<string, unknown>>()
+  const fake = createDocumentClient(rows, 10)
+  const requestTypes: ReadonlyArray<'Create' | 'Update' | 'Delete'> = [
+    'Create',
+    'Update',
+    'Delete',
+  ]
+
+  for (const requestType of requestTypes) {
+    await expect(processWebhookAuthorizationBackfillEvent({
+      RequestType: requestType,
+      PhysicalResourceId: 'existing-backfill',
+      ResourceProperties: {
+        MigrationVersion: 'v3',
+        WorkspaceSearchWriterFenceMode: 'rollout-pending',
+      },
+    }, fake.client, 'ProjectDirectory', 'DeveloperPlatform'))
+      .resolves.toEqual({
+        PhysicalResourceId: 'existing-backfill',
+        SkipMigration: true,
+      })
+  }
+
+  expect(fake.scanCalls()).toBe(0)
+  expect(fake.updateCalls()).toBe(0)
+  expect(rows.size).toBe(0)
+  await withWriterFenceMode('rollout-pending', async () => {
+    await expect(isCompleteHandler({
+      RequestType: 'Create',
+      ResourceProperties: {
+        MigrationVersion: 'v3',
+        WorkspaceSearchWriterFenceMode: 'rollout-pending',
+      },
+    })).resolves.toEqual({ IsComplete: true })
+  })
+})
+
+test('rejects provider and Lambda rollout-phase mismatches before setup', async () => {
+  await withWriterFenceMode('rollout-pending', async () => {
+    await expect(handler({
+      RequestType: 'Update',
+      ResourceProperties: {
+        MigrationVersion: 'v3',
+        WorkspaceSearchWriterFenceMode: 'required',
+      },
+    })).rejects.toThrow(
+      'Workspace Search writer-fence rollout mode does not match the runtime.',
+    )
+  })
+  await withWriterFenceMode('required', async () => {
+    await expect(isCompleteHandler({
+      RequestType: 'Update',
+      ResourceProperties: {
+        MigrationVersion: 'v3',
+        WorkspaceSearchWriterFenceMode: 'rollout-pending',
+      },
+    })).rejects.toThrow(
+      'Workspace Search writer-fence rollout mode does not match the runtime.',
+    )
+  })
+})
+
+test('requires an explicit writer-fence mode before a v3 lifecycle write', async () => {
+  const rows = new Map<string, Record<string, unknown>>()
+  const fake = createDocumentClient(rows, 10)
+
+  await expect(processWebhookAuthorizationBackfillEvent({
+    RequestType: 'Create',
+    ResourceProperties: { MigrationVersion: 'v3' },
+  }, fake.client, 'ProjectDirectory', 'DeveloperPlatform'))
+    .rejects.toThrow(
+      'Workspace Search writer-fence rollout mode is invalid.',
+    )
+  expect(rows.size).toBe(0)
 })
 
 test('deletes the replaced v1 checkpoint without changing its physical ID', async () => {
@@ -44,13 +149,17 @@ test('deletes the replaced v1 checkpoint without changing its physical ID', asyn
     SkipMigration: true,
   })
   expect(commands).toHaveLength(1)
-  expect(commands[0]?.constructor.name).toBe('DeleteCommand')
+  expect(commands[0]?.constructor.name).toBe('TransactWriteCommand')
   expect(commands[0]?.input).toMatchObject({
-    TableName: 'ProjectDirectory',
-    Key: {
-      directoryId: 'WEBHOOK_AUTHORIZATION_BACKFILL#v1',
-      entryKey: 'CHECKPOINT',
-    },
+    TransactItems: [{
+      Delete: {
+        TableName: 'ProjectDirectory',
+        Key: {
+          directoryId: 'WEBHOOK_AUTHORIZATION_BACKFILL#v1',
+          entryKey: 'CHECKPOINT',
+        },
+      },
+    }],
   })
 })
 
@@ -813,7 +922,6 @@ test('resumes pagewise, waits for the GSI, and skips archived member grants', as
     cleanupLocatorsWritten: 1,
   })
   expect(fake.scanCalls()).toBeGreaterThan(6)
-  expect(fake.updateCalls()).toBeGreaterThan(6)
 
   expect(rows.get('workspace-1\0TEAM#active')).toMatchObject({
     webhookAuthorizationKey: 'WEBHOOK_ACL#RESOURCE#workspace-1',
@@ -1228,6 +1336,14 @@ function createDocumentClient(
               )
             ) throw transactionFailure()
           }
+          if (item.Update?.Key.directoryId !== undefined) {
+            const existing = rows.get(createKey(item.Update.Key))
+            const values = item.Update.ExpressionAttributeValues ?? {}
+            if (
+              !existing ||
+              existing.entryType !== values[':entryType']
+            ) throw transactionFailure()
+          }
           if (
             (item.Update ?? item.ConditionCheck)?.Key.workspaceId !== undefined &&
             (item.Update ?? item.ConditionCheck)!.Key.workspaceId !==
@@ -1418,6 +1534,14 @@ function createDocumentClient(
             }
             existing.version = Number(existing.version) + 1
           }
+          if (item.Update?.Key.directoryId !== undefined) {
+            const existing = rows.get(createKey(item.Update.Key))!
+            const values = item.Update.ExpressionAttributeValues ?? {}
+            existing.webhookAuthorizationKey =
+              values[':authorizationKey']
+            existing.webhookAuthorizationSortKey =
+              values[':authorizationSortKey']
+          }
           if (
             item.Update?.Key.workspaceId !== undefined &&
             item.Update.Key.workspaceId !==
@@ -1516,5 +1640,6 @@ function conditionalFailure() {
 function transactionFailure() {
   return Object.assign(new Error('Transaction condition failed.'), {
     name: 'TransactionCanceledException',
+    CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
   })
 }

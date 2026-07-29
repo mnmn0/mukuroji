@@ -14,6 +14,13 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import { PLANNING_SCHEMA_VERSION } from '@mukuroji/contracts'
 import {
+  createDynamoDbClient as createConfiguredDynamoDbClient,
+  createWorkspaceSearchWriterDynamoDbDocumentClient,
+} from '../../infrastructure/aws/dynamodb-client'
+import {
+  throwIfWorkspaceSearchWriterFenceTerminalError,
+} from '../../infrastructure/runtime/workspace-search-writer-fence-document-client'
+import {
   createAuditFieldChanges,
   createMutationAuditEventPut,
   createWorkspaceInvitationAuditEntityId,
@@ -563,9 +570,8 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
           ) ??
           'mukuroji-workspace-access-local'
     this.dynamoDbClient = dynamoDbClient
-    this.documentClient = documentClient ?? DynamoDBDocumentClient.from(dynamoDbClient, {
-      marshallOptions: { removeUndefinedValues: true },
-    })
+    this.documentClient = documentClient ??
+      createWorkspaceSearchWriterDynamoDbDocumentClient(dynamoDbClient)
     this.bootstrapLocalTable = bootstrapLocalTable
     this.clock = clock
     this.planningTableName = planningTableName
@@ -2676,20 +2682,7 @@ function readEnvironment(name: string) {
 }
 
 function createDynamoDbClient() {
-  const endpoint = readEnvironment('DYNAMODB_ENDPOINT') ?? readEnvironment('AWS_ENDPOINT_URL')
-
-  return new DynamoDBClient({
-    region: readEnvironment('AWS_REGION') ?? readEnvironment('AWS_DEFAULT_REGION') ?? 'us-east-1',
-    endpoint,
-    ...(endpoint
-      ? {
-          credentials: {
-            accessKeyId: readEnvironment('AWS_ACCESS_KEY_ID') ?? 'test',
-            secretAccessKey: readEnvironment('AWS_SECRET_ACCESS_KEY') ?? 'test',
-          },
-        }
-      : {}),
-  })
+  return createConfiguredDynamoDbClient()
 }
 
 function normalizeRequired(value: string, label: string) {
@@ -3180,6 +3173,7 @@ function isConditionalTransactionCancellation(error: unknown) {
 }
 
 function toWorkspaceAccessError(error: unknown) {
+  throwIfWorkspaceSearchWriterFenceTerminalError(error)
   if (error instanceof WorkspaceAccessError) {
     return error
   }

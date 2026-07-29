@@ -99,13 +99,18 @@ test('DynamoDB directory client validates and ignores workspace bootstrap rows f
     },
   })
   expect(sentInputs[2]).toMatchObject({
-    Item: {
-      directoryId: 'workspace#production',
-      entryType: 'team',
-      teamId: 'new-team',
-      webhookAuthorizationKey: 'WEBHOOK_ACL#RESOURCE#workspace#production',
-      webhookAuthorizationSortKey: 'TEAM#new-team',
-    },
+    TransactItems: [{
+      Put: {
+        Item: {
+          directoryId: 'workspace#production',
+          entryType: 'team',
+          teamId: 'new-team',
+          webhookAuthorizationKey:
+            'WEBHOOK_ACL#RESOURCE#workspace#production',
+          webhookAuthorizationSortKey: 'TEAM#new-team',
+        },
+      },
+    }],
   })
 })
 
@@ -176,17 +181,22 @@ test('DynamoDB directory client creates duplicate named teams with a unique id s
     },
   })
   expect(sentInputs[1]).toMatchObject({
-    TableName: 'DirectoryTable',
-    Item: {
-      directoryId: 'user#demo@example.com',
-      teamId: '新規チーム-2',
-      teamSortOrder: 20,
-      entryKey: '000020#000000#TEAM#新規チーム-2',
-      webhookAuthorizationKey:
-        'WEBHOOK_ACL#RESOURCE#user#demo@example.com',
-      webhookAuthorizationSortKey: 'TEAM#新規チーム-2',
-    },
-    ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+    TransactItems: [{
+      Put: {
+        TableName: 'DirectoryTable',
+        Item: {
+          directoryId: 'user#demo@example.com',
+          teamId: '新規チーム-2',
+          teamSortOrder: 20,
+          entryKey: '000020#000000#TEAM#新規チーム-2',
+          webhookAuthorizationKey:
+            'WEBHOOK_ACL#RESOURCE#user#demo@example.com',
+          webhookAuthorizationSortKey: 'TEAM#新規チーム-2',
+        },
+        ConditionExpression:
+          'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+      },
+    }],
   })
 })
 
@@ -542,11 +552,15 @@ test('DynamoDB directory client initializes a missing local table before creatin
     }),
   ])
   expect(documentInputs.at(-1)).toMatchObject({
-    TableName: 'MissingDirectoryTable',
-    Item: {
-      directoryId: 'user#demo@example.com',
-      teamId: '復旧チーム',
-    },
+    TransactItems: [{
+      Put: {
+        TableName: 'MissingDirectoryTable',
+        Item: {
+          directoryId: 'user#demo@example.com',
+          teamId: '復旧チーム',
+        },
+      },
+    }],
   })
 })
 

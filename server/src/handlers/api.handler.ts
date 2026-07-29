@@ -1,9 +1,4 @@
-import server, {
-  handler as apiHandler,
-  validateApiServerConfig,
-} from '../app/composition/api-runtime'
-
-validateApiServerConfig()
+import server, { handler as apiHandler } from '../app/composition/api-runtime'
 
 /**
  * Dispatches an API Gateway or Lambda Function URL event to the shared Hono app.
