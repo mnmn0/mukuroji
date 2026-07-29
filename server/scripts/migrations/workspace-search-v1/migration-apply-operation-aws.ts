@@ -64,6 +64,7 @@ import {
 } from './migration-execution-boundary'
 import {
   createWorkspaceSearchMigrationExecutionRunAdmissionConditionCheck,
+  createWorkspaceSearchMigrationExecutionRunAdmissionRecord,
 } from './migration-execution-run-aws'
 import {
   parseWorkspaceSearchMigrationExecutionRun,
@@ -1251,11 +1252,12 @@ function createApplyOperationBinding(
     executionRunCondition,
     stateTable.tableName,
   )
-  const executionRunRecord = createExecutionRunAdmissionRecord(
-    executionRunKey,
-    stateTable,
-    executionRun,
-  )
+  const executionRunRecord =
+    createWorkspaceSearchMigrationExecutionRunAdmissionRecord({
+      stateTable,
+      configurationHash,
+      executionRun,
+    })
   return {
     configuration,
     configurationHash,
@@ -2078,50 +2080,6 @@ function readConditionCheckKey(
     return failApply('INVALID_STATE')
   }
   return cloneAttributeMap(condition.Key, 'INVALID_STATE')
-}
-
-/**
- * Reconstructs the complete immutable admission row checked by transactions.
- *
- * @param key - Exact deterministic admission primary key.
- * @param stateTable - Exact measured migration-state table.
- * @param executionRun - Exact immutable revision-one admission.
- * @returns Complete expected durable admission record.
- */
-function createExecutionRunAdmissionRecord(
-  key: Readonly<Record<string, AttributeValue>>,
-  stateTable: MigrationTableIdentity,
-  executionRun: WorkspaceSearchMigrationExecutionRun,
-): Readonly<Record<string, AttributeValue>> {
-  const bytes =
-    serializeWorkspaceSearchMigrationExecutionRun(executionRun)
-  const recordKey = readStringAttribute(key, 'recordKey')
-  const migrationId = readStringAttribute(key, 'migrationId')
-  const item: Readonly<Record<string, AttributeValue>> = {
-    migrationId: { S: migrationId },
-    recordKey: { S: recordKey },
-    kind: {
-      S: 'workspace-search-migration-execution-run-state',
-    },
-    version: { N: '1' },
-    stateTableId: { S: stateTable.tableId },
-    configurationHash: {
-      S: executionRun.configurationHash,
-    },
-    runId: { S: executionRun.runId },
-    revision: { N: String(executionRun.revision) },
-    status: { S: executionRun.status },
-    bindingDigest: {
-      S: executionRun.binding.bindingDigest,
-    },
-    stateDigest: { S: executionRun.stateDigest },
-    executionRunDigest: {
-      S: executionRun.executionRunDigest,
-    },
-    executionRunBytes: { B: bytes },
-  }
-  validateDynamoDbItemSize(item)
-  return item
 }
 
 /**

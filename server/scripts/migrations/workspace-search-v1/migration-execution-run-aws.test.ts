@@ -37,6 +37,7 @@ import {
 import {
   createAwsWorkspaceSearchMigrationExecutionRunPort,
   createWorkspaceSearchMigrationExecutionRunAdmissionConditionCheck,
+  createWorkspaceSearchMigrationExecutionRunAdmissionRecord,
   type WorkspaceSearchMigrationExecutionRunAwsPort,
   type WorkspaceSearchMigrationExecutionRunAwsTransport,
   workspaceSearchMigrationExecutionRunTransactionIndex,
@@ -168,6 +169,13 @@ describe('Workspace Search migration execution-run AWS adapter', () => {
       )
       const stateTable =
         fixture.configuration.tables['migration-state']
+      const admissionRecord =
+        createWorkspaceSearchMigrationExecutionRunAdmissionRecord({
+          stateTable,
+          configurationHash: fixture.configurationHash,
+          executionRun,
+        })
+      expect(admissionRecord).toEqual(durableItem)
       const condition = requireConditionCheck(
         createWorkspaceSearchMigrationExecutionRunAdmissionConditionCheck({
           stateTable,

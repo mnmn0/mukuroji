@@ -57,11 +57,10 @@ import {
   type WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary,
 } from './migration-execution-boundary'
 import {
-  createWorkspaceSearchMigrationExecutionRunAdmissionConditionCheck,
+  createWorkspaceSearchMigrationExecutionRunAdmissionRecord,
 } from './migration-execution-run-aws'
 import {
   createWorkspaceSearchMigrationExecutionRun,
-  serializeWorkspaceSearchMigrationExecutionRun,
   type WorkspaceSearchMigrationExecutionRun,
 } from './migration-execution-run'
 import {
@@ -225,11 +224,11 @@ class ApplyOperationHarness {
     const stateTable =
       fixture.configuration.tables['migration-state']
     const executionRunRecord =
-      createExecutionRunAdmissionRecord(
+      createWorkspaceSearchMigrationExecutionRunAdmissionRecord({
         stateTable,
-        fixture.configurationHash,
-        fixture.executionRun,
-      )
+        configurationHash: fixture.configurationHash,
+        executionRun: fixture.executionRun,
+      })
     this.seedItem(
       stateTable,
       extractTableKey(stateTable, executionRunRecord),
@@ -340,11 +339,12 @@ class ApplyOperationHarness {
   ): void {
     const stateTable =
       this.fixture.configuration.tables['migration-state']
-    const expected = createExecutionRunAdmissionRecord(
-      stateTable,
-      this.fixture.configurationHash,
-      this.fixture.executionRun,
-    )
+    const expected =
+      createWorkspaceSearchMigrationExecutionRunAdmissionRecord({
+        stateTable,
+        configurationHash: this.fixture.configurationHash,
+        executionRun: this.fixture.executionRun,
+      })
     const key = extractTableKey(stateTable, expected)
     if (item === undefined) {
       this.items.delete(storageKey(stateTable.tableName, key))
@@ -1125,11 +1125,12 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
         new ApplyOperationHarness(tamperedFixture)
       const stateTable =
         tamperedFixture.configuration.tables['migration-state']
-      const admission = createExecutionRunAdmissionRecord(
-        stateTable,
-        tamperedFixture.configurationHash,
-        tamperedFixture.executionRun,
-      )
+      const admission =
+        createWorkspaceSearchMigrationExecutionRunAdmissionRecord({
+          stateTable,
+          configurationHash: tamperedFixture.configurationHash,
+          executionRun: tamperedFixture.executionRun,
+        })
       tamperedHarness.replaceExecutionRunAdmission({
         ...admission,
         unexpected: { S: 'redigested-foreign-field' },
@@ -1323,51 +1324,6 @@ function createApplyFixture(
     currentAuthority,
     plannedOperation,
     plannedOperations,
-  }
-}
-
-/**
- * Reconstructs the exact immutable execution-run row required by apply reads.
- *
- * @param stateTable - Exact measured migration-state table.
- * @param configurationHash - Reviewed configuration digest.
- * @param executionRun - Strict revision-one execution admission.
- * @returns Complete exact durable admission row.
- */
-function createExecutionRunAdmissionRecord(
-  stateTable: MigrationTableIdentity,
-  configurationHash: string,
-  executionRun: WorkspaceSearchMigrationExecutionRun,
-): Readonly<Record<string, AttributeValue>> {
-  const condition =
-    createWorkspaceSearchMigrationExecutionRunAdmissionConditionCheck({
-      stateTable,
-      configurationHash,
-      executionRun,
-    }).ConditionCheck
-  if (
-    condition === undefined ||
-    condition.Key === undefined
-  ) {
-    throw new Error('Expected a complete execution-run check.')
-  }
-  return {
-    ...structuredClone(condition.Key),
-    kind: {
-      S: 'workspace-search-migration-execution-run-state',
-    },
-    version: { N: '1' },
-    stateTableId: { S: stateTable.tableId },
-    configurationHash: { S: executionRun.configurationHash },
-    runId: { S: executionRun.runId },
-    revision: { N: String(executionRun.revision) },
-    status: { S: executionRun.status },
-    bindingDigest: { S: executionRun.binding.bindingDigest },
-    stateDigest: { S: executionRun.stateDigest },
-    executionRunDigest: { S: executionRun.executionRunDigest },
-    executionRunBytes: {
-      B: serializeWorkspaceSearchMigrationExecutionRun(executionRun),
-    },
   }
 }
 
