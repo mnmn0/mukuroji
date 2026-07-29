@@ -38,6 +38,7 @@ import {
   type WorkspaceSearchMigrationConfiguration,
   type WorkspaceSearchMigrationFailureCode,
   type WorkspaceSearchMigrationOperation,
+  type WorkspaceSearchMigrationRunState,
   type WorkspaceSearchMigrationSourceName,
   WorkspaceSearchMigrationFailure,
   type WorkspaceSearchPlanSeal,
@@ -56,8 +57,10 @@ import {
   type WorkspaceSearchMigrationApplyOperationAuthorityPort,
   type WorkspaceSearchMigrationApplyOperationAwsPort,
   type WorkspaceSearchMigrationApplyOperationAwsTransport,
+  type WorkspaceSearchMigrationApplySealCommandInput,
   workspaceSearchMigrationApplyCheckpointTransactionIndex,
   workspaceSearchMigrationApplyOperationTransactionIndex,
+  workspaceSearchMigrationApplySealTransactionIndex,
 } from './migration-apply-operation-aws'
 import {
   createWorkspaceSearchMigrationExecutionBoundary,
@@ -79,6 +82,15 @@ import {
 import type {
   WorkspaceSearchMigrationJournalAwsGateway,
 } from './migration-journal-aws'
+import type {
+  WorkspaceSearchMigrationApplySealAwsGateway,
+} from './migration-apply-seal-aws'
+import {
+  createAwsWorkspaceSearchMigrationApplySealGateway,
+} from './migration-apply-seal-aws'
+import type {
+  WorkspaceSearchMigrationImmutableArtifactAwsPort,
+} from './migration-immutable-artifact-aws'
 import {
   WORKSPACE_SEARCH_MIGRATION_PLAN_ARTIFACT_OBJECT_KEY_PREFIX,
 } from './migration-plan-artifact'
@@ -96,6 +108,7 @@ import type {
 } from './migration-sealed-planning-authority-v2'
 import {
   createEmptyWorkspaceSearchPlanDigest,
+  createEmptyWorkspaceSearchMigrationTraversal,
   createWorkspaceSearchMigrationOperationDigest,
   createWorkspaceSearchPlanLeafDigest,
   createWorkspaceSearchPlanNodeDigest,
@@ -106,9 +119,19 @@ import {
   type WorkspaceSearchPlannedOperation,
 } from './migration-state-machine'
 import {
+  createWorkspaceSearchMigrationSourceCheckpointDigest,
+} from './migration-source-evidence'
+import {
   createWorkspaceSearchMigrationAbsentSnapshot,
   createWorkspaceSearchMigrationDocumentSnapshot,
 } from './migration-target-snapshot'
+import {
+  createWorkspaceSearchMigrationCompleteApplySeal,
+  parseWorkspaceSearchMigrationAppliedRoot,
+  parseWorkspaceSearchMigrationCompleteApplySeal,
+  serializeWorkspaceSearchMigrationCompleteApplySeal,
+  type WorkspaceSearchMigrationCompleteApplySeal,
+} from './migration-apply-seal'
 
 const runId = 'apply-operation-aws-test'
 const ownerId = 'apply-operation-owner'
@@ -120,7 +143,7 @@ const planCreatedAt = '2026-07-29T01:17:00.000Z'
 const sealedAt = '2026-07-29T01:18:00.000Z'
 const evaluatedAt = '2026-07-29T01:19:00.000Z'
 const createdAt = '2026-07-29T01:19:30.000Z'
-const freshRetainUntil = '2026-08-30T00:00:00.000Z'
+const freshRetainUntil = '2026-08-29T00:00:00.000Z'
 
 /**
  * Target transition selected by one compact apply fixture.
@@ -181,6 +204,13 @@ class ApplyOperationHarness {
   /** Whether the checkpoint receipt row is omitted from fake durability. */
   omitCheckpointReceiptOnCommit = false
 
+  /** Whether the immutable applied-root row is omitted from fake durability. */
+  omitAppliedRootOnCommit = false
+
+  /** Optional valid concurrent applied-root row substituted at commit. */
+  appliedRootReplacementOnCommit:
+    Readonly<Record<string, AttributeValue>> | undefined
+
   /** Retention returned by the immutable journal gateway. */
   journalRetainUntil = freshRetainUntil
 
@@ -205,6 +235,14 @@ class ApplyOperationHarness {
   /** Canonical segments uploaded before a mutating transaction. */
   readonly uploadedJournalSegments: WorkspaceSearchJournalSegment[] = []
 
+  /** Canonical complete apply seals uploaded before root publication. */
+  readonly uploadedApplySeals:
+    WorkspaceSearchMigrationCompleteApplySeal[] = []
+
+  /** Optional exact-object read replacement used by corruption tests. */
+  applySealReadReplacement:
+    WorkspaceSearchMigrationCompleteApplySeal | undefined
+
   /** Detached checkpoint scan requests observed by the fake scanner. */
   readonly checkpointScans:
     Parameters<
@@ -222,6 +260,10 @@ class ApplyOperationHarness {
 
   /** Plain immutable journal dependency accepted by the adapter factory. */
   readonly journalGateway: WorkspaceSearchMigrationJournalAwsGateway
+
+  /** Plain immutable complete apply-seal dependency accepted by the factory. */
+  readonly applySealGateway:
+    WorkspaceSearchMigrationApplySealAwsGateway
 
   /** Plain one-page checkpoint scanner accepted by the adapter factory. */
   readonly checkpointScanner:
@@ -313,6 +355,44 @@ class ApplyOperationHarness {
           )
         }
         return structuredClone(segment)
+      },
+    }
+    this.applySealGateway = {
+      writeCompleteApplySeal: async (seal) => {
+        this.events.push('apply-seal-write')
+        const detached = structuredClone(seal)
+        this.uploadedApplySeals.push(detached)
+        const bytes =
+          serializeWorkspaceSearchMigrationCompleteApplySeal(detached)
+        const contentDigest = createMigrationDigest(detached)
+        return {
+          scope: 'complete-plan',
+          objectKey:
+            `workspace-search/v1/runs/${runId}/${this.fixture.configurationHash}/apply-seals/${contentDigest}.artifact`,
+          versionId:
+            `apply-seal-version-${this.uploadedApplySeals.length}`,
+          contentDigest,
+          byteLength: bytes.byteLength,
+          retainUntil: freshRetainUntil,
+        }
+      },
+      readCompleteApplySeal: async (reference) => {
+        this.events.push('apply-seal-read')
+        if (this.applySealReadReplacement !== undefined) {
+          return structuredClone(this.applySealReadReplacement)
+        }
+        const seal = this.uploadedApplySeals.find(
+          (candidate) =>
+            createMigrationDigest(candidate) ===
+              reference.contentDigest,
+        )
+        if (seal === undefined) {
+          throw new WorkspaceSearchMigrationFailure(
+            'INVALID_STATE',
+            'Missing test complete apply seal.',
+          )
+        }
+        return structuredClone(seal)
       },
     }
     this.checkpointScanner = {
@@ -556,14 +636,25 @@ class ApplyOperationHarness {
         ) {
           continue
         }
+        if (
+          this.omitAppliedRootOnCommit &&
+          kind === 'workspace-search-migration-applied-root-record'
+        ) {
+          continue
+        }
+        const durableItem =
+          kind === 'workspace-search-migration-applied-root-record' &&
+            this.appliedRootReplacementOnCommit !== undefined
+            ? this.appliedRootReplacementOnCommit
+            : put.Item
         const table = findTableByName(
           this.fixture.configuration,
           put.TableName,
         )
         this.seedItem(
           table,
-          extractTableKey(table, put.Item),
-          put.Item,
+          extractTableKey(table, durableItem),
+          durableItem,
         )
       }
       const deletion = item.Delete
@@ -785,7 +876,7 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
       const reconstructedRevisionTwo = await port.readRunState()
       expect(reconstructedRevisionTwo).toEqual(revisionTwo)
       const reconstructionReads = harness.reads.slice(readStart)
-      expect(reconstructionReads).toHaveLength(2)
+      expect(reconstructionReads).toHaveLength(3)
       expect(
         reconstructionReads.every(
           (command) => command.input.ConsistentRead === true,
@@ -1937,6 +2028,651 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
       expect(accessorHarness.transactions).toHaveLength(1)
     },
   )
+
+  test(
+    'publishes one fixed nine-item applied root and prefers it across restart and receipt retries',
+    async () => {
+      const fixture = createApplyFixture('put', 0)
+      const harness = new ApplyOperationHarness(fixture)
+      const port = createApplyPort(fixture, harness)
+      const terminal = await completeApplyCheckpoints(
+        fixture,
+        port,
+        1,
+      )
+      expect(terminal).toMatchObject({
+        revision: 6,
+        status: 'applying',
+        appliedOperationCount: 0,
+      })
+      const eventStart = harness.events.length
+
+      const applied = await port.sealApply(
+        createApplySealCommand(fixture, terminal.revision),
+      )
+
+      expect(applied).toMatchObject({
+        revision: 7,
+        status: 'applied',
+        applySeal: {
+          scope: 'complete-plan',
+          contentDigest:
+            harness.uploadedApplySeals[0] === undefined
+              ? undefined
+              : createMigrationDigest(
+                  harness.uploadedApplySeals[0],
+                ),
+        },
+      })
+      expect(harness.uploadedApplySeals).toHaveLength(1)
+      const uploadedSeal = harness.uploadedApplySeals[0]
+      if (uploadedSeal === undefined) {
+        throw new Error('Expected one uploaded production seal.')
+      }
+      let storedBytes: Uint8Array | undefined
+      let returnSharedBytes = false
+      const immutableArtifactPort:
+        WorkspaceSearchMigrationImmutableArtifactAwsPort = {
+          writeImmutableArtifact: async (input) => {
+            storedBytes = Uint8Array.from(input.bytes)
+            const contentDigest = createHash('sha256')
+              .update(input.bytes)
+              .digest('hex')
+            return {
+              objectKey:
+                `${input.objectKeyPrefix}/${input.role}/${contentDigest}.artifact`,
+              versionId: 'real-gateway-version',
+              contentDigest,
+              byteLength: input.bytes.byteLength,
+              retainUntil: input.retainUntil,
+            }
+          },
+          readImmutableArtifact: async () => {
+            if (storedBytes === undefined) {
+              throw new Error('Expected stored test seal bytes.')
+            }
+            if (returnSharedBytes) {
+              const shared = new Uint8Array(
+                new SharedArrayBuffer(storedBytes.byteLength),
+              )
+              shared.set(storedBytes)
+              return shared
+            }
+            return Uint8Array.from(storedBytes)
+          },
+        }
+      const realGateway =
+        createAwsWorkspaceSearchMigrationApplySealGateway({
+          configuration: fixture.configuration,
+          configurationHash: fixture.configurationHash,
+          runId,
+          immutableArtifactPort,
+          clock: () => new Date('2026-07-29T01:19:50.000Z'),
+        })
+      const realReference =
+        await realGateway.writeCompleteApplySeal(uploadedSeal)
+      expect(
+        await realGateway.readCompleteApplySeal(realReference),
+      ).toEqual(uploadedSeal)
+      const sharedSealBytes = new Uint8Array(
+        new SharedArrayBuffer(
+          serializeWorkspaceSearchMigrationCompleteApplySeal(
+            uploadedSeal,
+          ).byteLength,
+        ),
+      )
+      sharedSealBytes.set(
+        serializeWorkspaceSearchMigrationCompleteApplySeal(
+          uploadedSeal,
+        ),
+      )
+      expect(() =>
+        parseWorkspaceSearchMigrationCompleteApplySeal(
+          sharedSealBytes,
+        )
+      ).toThrow('INVALID_MIGRATION_APPLY_SEAL')
+      returnSharedBytes = true
+      await expect(
+        realGateway.readCompleteApplySeal(realReference),
+      ).rejects.toMatchObject({
+        code: 'INVALID_MIGRATION_APPLY_SEAL_STORAGE',
+      })
+      returnSharedBytes = false
+      await expect(
+        realGateway.readCompleteApplySeal({
+          ...realReference,
+          objectKey:
+            `workspace-search/v1/runs/${runId}/${fixture.configurationHash}/wrong/${realReference.contentDigest}.artifact`,
+        }),
+      ).rejects.toMatchObject({
+        code: 'INVALID_MIGRATION_APPLY_SEAL_STORAGE',
+      })
+      expect(harness.transactions).toHaveLength(6)
+      const transaction = requireTransaction(
+        harness.transactions[5],
+      )
+      const items = requireTransactionItems(transaction)
+      expect(items).toHaveLength(
+        workspaceSearchMigrationApplySealTransactionIndex.count,
+      )
+      for (let index = 0; index <= 7; index += 1) {
+        expect(items[index]?.ConditionCheck).toBeDefined()
+      }
+      const executionStateCondition = items[
+        workspaceSearchMigrationApplySealTransactionIndex
+          .executionState
+      ]?.ConditionCheck
+      const rootPut = items[
+        workspaceSearchMigrationApplySealTransactionIndex
+          .appliedRoot
+      ]?.Put
+      if (
+        executionStateCondition === undefined ||
+        rootPut?.Item === undefined
+      ) {
+        throw new Error(
+          'Expected exact terminal-state condition and applied-root Put.',
+        )
+      }
+      expect(
+        Object.values(
+          executionStateCondition.ExpressionAttributeNames ?? {},
+        ),
+      ).toContain('executionStateBytes')
+      expect(rootPut.ConditionExpression).toContain(
+        'attribute_not_exists',
+      )
+      expect(rootPut.Item).toMatchObject({
+        kind: {
+          S: 'workspace-search-migration-applied-root-record',
+        },
+        predecessorRevision: { N: '6' },
+        successorRevision: { N: '7' },
+        status: { S: 'applied' },
+      })
+      const root = parseWorkspaceSearchMigrationAppliedRoot(
+        requireBinaryAttribute(rootPut.Item, 'rootBytes'),
+      )
+      expect(root).toMatchObject({
+        predecessorRevision: 6,
+        predecessorExecutionStateDigest:
+          harness.findLastTransactionRecord(
+            'workspace-search-migration-execution-state-record',
+          )?.executionStateDigest?.S,
+        successorRevision: 7,
+        status: 'applied',
+      })
+      const sealEvents = harness.events.slice(eventStart)
+      expect(sealEvents.indexOf('apply-seal-write')).toBeLessThan(
+        sealEvents.indexOf('prepare'),
+      )
+      expect(sealEvents.indexOf('prepare')).toBeLessThan(
+        sealEvents.indexOf('transact'),
+      )
+
+      const transactionCount = harness.transactions.length
+      const restarted = createApplyPort(fixture, harness)
+      expect(
+        await restarted.sealApply(
+          createApplySealCommand(fixture, terminal.revision),
+        ),
+      ).toEqual(applied)
+      expect(harness.uploadedApplySeals).toHaveLength(1)
+      expect(harness.transactions).toHaveLength(transactionCount)
+
+      expect(
+        await restarted.saveApplyCheckpoint(
+          createCheckpointCommand(
+            fixture,
+            'project-directory',
+            1,
+          ),
+        ),
+      ).toEqual(applied)
+      const newCheckpointFailure =
+        await captureMigrationFailure(() =>
+          restarted.saveApplyCheckpoint(
+            createCheckpointCommand(
+              fixture,
+              'project-directory',
+              applied.revision,
+            ),
+          )
+        )
+      expect(newCheckpointFailure.code).toBe('INVALID_STATE')
+      expect(harness.transactions).toHaveLength(transactionCount)
+    },
+  )
+
+  test(
+    'seals one mutating run with marker, journal, target, and shared retention evidence',
+    async () => {
+      const fixture = createApplyFixture('put')
+      const harness = new ApplyOperationHarness(fixture)
+      harness.checkpointScanImplementation = async ({
+        location,
+        previousCheckpoint,
+      }) =>
+        location === 'project-directory' || location === 'target'
+          ? createTerminalMappedCheckpoint(
+              previousCheckpoint,
+              location,
+              1,
+            )
+          : createTerminalEmptyCheckpointPage(previousCheckpoint)
+      const port = createApplyPort(fixture, harness)
+      const applying = await port.commitApplyOperation(
+        createApplyCommand(fixture),
+      )
+      const terminal = await completeApplyCheckpoints(
+        fixture,
+        port,
+        applying.revision,
+      )
+
+      const applied = await port.sealApply(
+        createApplySealCommand(fixture, terminal.revision),
+      )
+
+      expect(applied).toMatchObject({
+        revision: 8,
+        status: 'applied',
+        appliedOperationCount: 1,
+        journalSequence: 1,
+      })
+      expect(harness.uploadedApplySeals).toHaveLength(1)
+      expect(harness.uploadedApplySeals[0]).toMatchObject({
+        markerCount: 1,
+        journalSequence: 1,
+        minimumJournalRetainUntil: freshRetainUntil,
+        apply: {
+          sources: {
+            'project-directory': {
+              aggregate: { mapped: 1, projected: 1 },
+            },
+          },
+          target: {
+            aggregate: { mapped: 1, projected: 1, deleted: 0 },
+          },
+        },
+      })
+      const rootRecord = harness.findLastTransactionRecord(
+        'workspace-search-migration-applied-root-record',
+      )
+      if (rootRecord === undefined) {
+        throw new Error('Expected one durable applied root.')
+      }
+      const root = parseWorkspaceSearchMigrationAppliedRoot(
+        requireBinaryAttribute(rootRecord, 'rootBytes'),
+      )
+      expect(root.sealReference.retainUntil).toBe(
+        fixture.sealedPlanningAuthority.planSealReference
+          .retainUntil,
+      )
+      expect(root.minimumJournalRetainUntil).toBe(
+        freshRetainUntil,
+      )
+      expect(harness.transactions).toHaveLength(7)
+    },
+  )
+
+  test(
+    'rejects a terminal target cardinality mismatch before seal upload',
+    async () => {
+      const fixture = createApplyFixture('put')
+      const harness = new ApplyOperationHarness(fixture)
+      harness.checkpointScanImplementation = async ({
+        location,
+        previousCheckpoint,
+      }) =>
+        location === 'project-directory'
+          ? createTerminalMappedCheckpoint(
+              previousCheckpoint,
+              location,
+              1,
+            )
+          : createTerminalEmptyCheckpointPage(previousCheckpoint)
+      const port = createApplyPort(fixture, harness)
+      const applying = await port.commitApplyOperation(
+        createApplyCommand(fixture),
+      )
+      const terminal = await completeApplyCheckpoints(
+        fixture,
+        port,
+        applying.revision,
+      )
+
+      const failure = await captureMigrationFailure(() =>
+        port.sealApply(
+          createApplySealCommand(fixture, terminal.revision),
+        )
+      )
+
+      expect(failure.code).toBe('INVALID_STATE')
+      expect(harness.uploadedApplySeals).toEqual([])
+      expect(harness.transactions).toHaveLength(6)
+    },
+  )
+
+  test(
+    'rejects publication when journal evidence expires before the shared horizon',
+    async () => {
+      const fixture = createApplyFixture('put')
+      const harness = new ApplyOperationHarness(fixture)
+      harness.journalRetainUntil = '2026-08-28T23:00:00.000Z'
+      harness.checkpointScanImplementation = async ({
+        location,
+        previousCheckpoint,
+      }) =>
+        location === 'project-directory' || location === 'target'
+          ? createTerminalMappedCheckpoint(
+              previousCheckpoint,
+              location,
+              1,
+            )
+          : createTerminalEmptyCheckpointPage(previousCheckpoint)
+      const port = createApplyPort(fixture, harness)
+      const applying = await port.commitApplyOperation(
+        createApplyCommand(fixture),
+      )
+      const terminal = await completeApplyCheckpoints(
+        fixture,
+        port,
+        applying.revision,
+      )
+
+      const failure = await captureMigrationFailure(() =>
+        port.sealApply(
+          createApplySealCommand(fixture, terminal.revision),
+        )
+      )
+
+      expect(failure.code).toBe('INVALID_STATE')
+      expect(harness.uploadedApplySeals).toHaveLength(1)
+      expect(harness.transactions).toHaveLength(6)
+    },
+  )
+
+  test(
+    'rejects complete sealing before every clean terminal checkpoint',
+    async () => {
+      const fixture = createApplyFixture('put', 0)
+      const harness = new ApplyOperationHarness(fixture)
+      const port = createApplyPort(fixture, harness)
+
+      const failure = await captureMigrationFailure(() =>
+        port.sealApply(createApplySealCommand(fixture, 1))
+      )
+
+      expect(failure.code).toBe('INVALID_STATE')
+      expect(harness.uploadedApplySeals).toEqual([])
+      expect(harness.transactions).toEqual([])
+    },
+  )
+
+  test(
+    'recovers a committed applied root after response loss and process restart',
+    async () => {
+      const fixture = createApplyFixture('put', 0)
+      const harness = new ApplyOperationHarness(fixture)
+      const port = createApplyPort(fixture, harness)
+      const terminal = await completeApplyCheckpoints(
+        fixture,
+        port,
+        1,
+      )
+      harness.nextTransactionError = createApplySealCancellation(
+        workspaceSearchMigrationApplySealTransactionIndex
+          .appliedRoot,
+      )
+      harness.commitBeforeTransactionError = true
+
+      const applied = await port.sealApply(
+        createApplySealCommand(fixture, terminal.revision),
+      )
+
+      expect(applied).toMatchObject({
+        revision: terminal.revision + 1,
+        status: 'applied',
+      })
+      expect(harness.uploadedApplySeals).toHaveLength(1)
+      const transactionCount = harness.transactions.length
+      const restarted = createApplyPort(fixture, harness)
+      expect(
+        await restarted.sealApply(
+          createApplySealCommand(fixture, terminal.revision),
+        ),
+      ).toEqual(applied)
+      expect(harness.uploadedApplySeals).toHaveLength(1)
+      expect(harness.transactions).toHaveLength(transactionCount)
+    },
+  )
+
+  test(
+    'returns ambiguous when an acknowledged seal transaction has no durable root',
+    async () => {
+      const fixture = createApplyFixture('put', 0)
+      const harness = new ApplyOperationHarness(fixture)
+      const port = createApplyPort(fixture, harness)
+      const terminal = await completeApplyCheckpoints(
+        fixture,
+        port,
+        1,
+      )
+      harness.omitAppliedRootOnCommit = true
+
+      const failure = await captureMigrationFailure(() =>
+        port.sealApply(
+          createApplySealCommand(fixture, terminal.revision),
+        )
+      )
+
+      expect(failure.code).toBe(
+        'AMBIGUOUS_OPERATION_UNRESOLVED',
+      )
+      expect(harness.uploadedApplySeals).toHaveLength(1)
+      expect(await port.readRunState()).toMatchObject({
+        revision: terminal.revision,
+        status: 'applying',
+      })
+    },
+  )
+
+  test(
+    'accepts a concurrent valid root winner with the exact same predecessor',
+    async () => {
+      const fixture = createApplyFixture('put', 0)
+      const winnerHarness = new ApplyOperationHarness(fixture)
+      const winnerPort = createApplyPort(fixture, winnerHarness)
+      const winnerTerminal = await completeApplyCheckpoints(
+        fixture,
+        winnerPort,
+        1,
+      )
+      winnerHarness.advanceClock(5_000)
+      const winnerState = await winnerPort.sealApply(
+        createApplySealCommand(
+          fixture,
+          winnerTerminal.revision,
+        ),
+      )
+      const winnerRootRecord =
+        winnerHarness.findLastTransactionRecord(
+          'workspace-search-migration-applied-root-record',
+        )
+      const winnerSeal = winnerHarness.uploadedApplySeals[0]
+      if (
+        winnerRootRecord === undefined ||
+        winnerSeal === undefined
+      ) {
+        throw new Error('Expected a concurrent valid root winner.')
+      }
+
+      const harness = new ApplyOperationHarness(fixture)
+      const port = createApplyPort(fixture, harness)
+      const terminal = await completeApplyCheckpoints(
+        fixture,
+        port,
+        1,
+      )
+      harness.appliedRootReplacementOnCommit = winnerRootRecord
+      harness.applySealReadReplacement = winnerSeal
+      harness.nextTransactionError = createApplySealCancellation(
+        workspaceSearchMigrationApplySealTransactionIndex
+          .appliedRoot,
+      )
+      harness.commitBeforeTransactionError = true
+
+      const reconciled = await port.sealApply(
+        createApplySealCommand(fixture, terminal.revision),
+      )
+
+      expect(reconciled).toEqual(winnerState)
+      expect(harness.uploadedApplySeals).toHaveLength(1)
+      expect(harness.transactions).toHaveLength(6)
+    },
+  )
+
+  test(
+    'rejects tampered applied-root rows and mismatched exact seal bytes',
+    async () => {
+      const rootFixture = createApplyFixture('put', 0)
+      const rootHarness = new ApplyOperationHarness(rootFixture)
+      const rootPort = createApplyPort(rootFixture, rootHarness)
+      const rootTerminal = await completeApplyCheckpoints(
+        rootFixture,
+        rootPort,
+        1,
+      )
+      await rootPort.sealApply(
+        createApplySealCommand(
+          rootFixture,
+          rootTerminal.revision,
+        ),
+      )
+      const rootRecord = rootHarness.findLastTransactionRecord(
+        'workspace-search-migration-applied-root-record',
+      )
+      if (rootRecord === undefined) {
+        throw new Error('Expected one durable applied-root row.')
+      }
+      rootHarness.seedStateRecord({
+        ...rootRecord,
+        rootDigest: { S: digest('tampered-applied-root') },
+      })
+      const rootFailure = await captureMigrationFailure(() =>
+        rootPort.readRunState()
+      )
+      expect(rootFailure.code).toBe('INVALID_STATE')
+
+      const sealFixture = createApplyFixture('put', 0)
+      const sealHarness = new ApplyOperationHarness(sealFixture)
+      const sealPort = createApplyPort(sealFixture, sealHarness)
+      const sealTerminal = await completeApplyCheckpoints(
+        sealFixture,
+        sealPort,
+        1,
+      )
+      await sealPort.sealApply(
+        createApplySealCommand(
+          sealFixture,
+          sealTerminal.revision,
+        ),
+      )
+      const predecessorRecord =
+        sealHarness.findLastTransactionRecord(
+          'workspace-search-migration-execution-state-record',
+        )
+      if (predecessorRecord === undefined) {
+        throw new Error('Expected one terminal predecessor row.')
+      }
+      const predecessor =
+        parseWorkspaceSearchMigrationExecutionState(
+          requireBinaryAttribute(
+            predecessorRecord,
+            'executionStateBytes',
+          ),
+        )
+      if (predecessor.executionStateVersion !== 2) {
+        throw new Error('Expected one terminal v2 predecessor.')
+      }
+      sealHarness.applySealReadReplacement =
+        createWorkspaceSearchMigrationCompleteApplySeal({
+          admission: sealFixture.executionRun,
+          predecessor,
+          sealedPlanningAuthority:
+            sealFixture.sealedPlanningAuthority,
+          createdAt: '2026-07-29T01:19:59.000Z',
+        })
+
+      const sealFailure = await captureMigrationFailure(() =>
+        sealPort.readRunState()
+      )
+
+      expect(sealFailure.code).toBe('INVALID_STATE')
+    },
+  )
+
+  test(
+    'maps every fixed complete apply-seal cancellation position',
+    async () => {
+      const index = workspaceSearchMigrationApplySealTransactionIndex
+      const cases: readonly {
+        /** Fixed complete apply-seal transaction index. */
+        readonly failedIndex: number
+        /** Stable expected public failure code. */
+        readonly code: WorkspaceSearchMigrationFailureCode
+      }[] = [
+        { failedIndex: index.lease, code: 'LEASE_LOST' },
+        {
+          failedIndex: index.pointer,
+          code: 'INVALID_MAINTENANCE_EVIDENCE',
+        },
+        {
+          failedIndex: index.receipt,
+          code: 'INVALID_MAINTENANCE_EVIDENCE',
+        },
+        { failedIndex: index.writerFence, code: 'INVALID_STATE' },
+        {
+          failedIndex: index.executionBoundary,
+          code: 'INVALID_STATE',
+        },
+        {
+          failedIndex: index.sealedPlanningAuthority,
+          code: 'INVALID_STATE',
+        },
+        { failedIndex: index.executionRun, code: 'INVALID_STATE' },
+        { failedIndex: index.executionState, code: 'INVALID_STATE' },
+        { failedIndex: index.appliedRoot, code: 'INVALID_STATE' },
+      ]
+      expect(cases).toHaveLength(index.count)
+      for (const entry of cases) {
+        const fixture = createApplyFixture('put', 0)
+        const harness = new ApplyOperationHarness(fixture)
+        const port = createApplyPort(fixture, harness)
+        const terminal = await completeApplyCheckpoints(
+          fixture,
+          port,
+          1,
+        )
+        harness.nextTransactionError =
+          createApplySealCancellation(entry.failedIndex)
+
+        const failure = await captureMigrationFailure(() =>
+          port.sealApply(
+            createApplySealCommand(
+              fixture,
+              terminal.revision,
+            ),
+          )
+        )
+
+        expect(failure.code).toBe(entry.code)
+        expect(harness.uploadedApplySeals).toHaveLength(1)
+        expect(harness.transactions).toHaveLength(6)
+      }
+    },
+  )
 })
 
 /**
@@ -2143,6 +2879,7 @@ function createApplyPort(
     executionRun: fixture.executionRun,
     authorityPort: harness.authorityPort,
     journalGateway: harness.journalGateway,
+    applySealGateway: harness.applySealGateway,
     checkpointScanner: harness.checkpointScanner,
     transport: harness.transport,
     clock: harness.clock,
@@ -2209,6 +2946,69 @@ function createCheckpointCommand(
     },
     location,
   }
+}
+
+/**
+ * Creates one detached complete apply-seal command under the fixture lease.
+ *
+ * @param fixture - Exact admitted run and active lease authority.
+ * @param expectedRevision - Exact terminal applying-state revision.
+ * @returns Detached complete apply-seal request.
+ */
+function createApplySealCommand(
+  fixture: ApplyOperationFixture,
+  expectedRevision: number,
+): WorkspaceSearchMigrationApplySealCommandInput {
+  return {
+    expectedRevision,
+    lease: {
+      runId: fixture.currentAuthority.lease.runId,
+      ownerId: fixture.currentAuthority.lease.ownerId,
+      fenceToken: fixture.currentAuthority.lease.fenceToken,
+    },
+  }
+}
+
+/**
+ * Persists terminal clean checkpoints for all four sources and the target.
+ *
+ * @param fixture - Exact admitted apply fixture.
+ * @param port - Apply adapter under test.
+ * @param initialRevision - Revision before the first checkpoint.
+ * @returns Exact terminal applying state.
+ */
+async function completeApplyCheckpoints(
+  fixture: ApplyOperationFixture,
+  port: WorkspaceSearchMigrationApplyOperationAwsPort,
+  initialRevision: number,
+): Promise<WorkspaceSearchMigrationRunState> {
+  const locations:
+    readonly WorkspaceSearchMigrationCheckpointLocation[] = [
+      'project-directory',
+      'work-items',
+      'collaboration',
+      'documents',
+      'target',
+    ]
+  let state = await port.readRunState()
+  for (
+    let index = 0;
+    index < locations.length;
+    index += 1
+  ) {
+    const location = locations[index]
+    if (location === undefined) {
+      throw new Error('Expected one checkpoint location.')
+    }
+    state = await port.saveApplyCheckpoint(
+      createCheckpointCommand(
+        fixture,
+        location,
+        initialRevision + index,
+      ),
+    )
+  }
+  return state
 }
 
 /**
@@ -2520,7 +3320,10 @@ function createSealedAuthority(
     historicalReceiptBindingDigest: digest('receipt-binding'),
     historicalReceiptCount: 1,
     evidenceHeads: [
-      createEvidenceHead('project-directory'),
+      createEvidenceHead(
+        'project-directory',
+        planSeal.sourceOperationCount,
+      ),
       createEvidenceHead('work-items'),
       createEvidenceHead('collaboration'),
       createEvidenceHead('documents'),
@@ -2547,6 +3350,7 @@ function createSealedAuthority(
  * Creates one compact terminal evidence head.
  *
  * @param chain - Canonical evidence-chain role.
+ * @param mappedCount - Exact source-owned operation count for this chain.
  * @returns Exact terminal head.
  */
 function createEvidenceHead(
@@ -2556,13 +3360,81 @@ function createEvidenceHead(
     | 'project-directory'
     | 'work-items'
     | 'workspace-search',
+  mappedCount = 0,
 ) {
+  const empty = createEmptyWorkspaceSearchMigrationTraversal()
+  const previous = chain === 'workspace-search'
+    ? empty.target
+    : empty.sources[chain]
+  const terminal = mappedCount === 0
+    ? createTerminalEmptyCheckpointPage(previous)
+    : createTerminalMappedCheckpoint(
+        previous,
+        chain === 'workspace-search' ? 'target' : chain,
+        mappedCount,
+      )
   return {
     chain,
     progressDigest: digest(`progress:${chain}`),
     pageCount: 1,
     terminalEvidenceDigest: digest(`evidence:${chain}`),
-    terminalCheckpointDigest: digest(`checkpoint:${chain}`),
+    terminalCheckpointDigest:
+      createWorkspaceSearchMigrationSourceCheckpointDigest(
+        terminal,
+      ),
+  }
+}
+
+/**
+ * Creates one terminal page containing an exact number of valid mapped rows.
+ *
+ * @param previous - Exact empty durable predecessor checkpoint.
+ * @param location - Source or target scan location.
+ * @param mappedCount - Positive number of valid owned rows in the page.
+ * @returns Detached cumulative one-page terminal checkpoint.
+ */
+function createTerminalMappedCheckpoint(
+  previous: MigrationSourceCheckpoint,
+  location: WorkspaceSearchMigrationCheckpointLocation,
+  mappedCount: number,
+): MigrationSourceCheckpoint {
+  if (
+    previous.completed ||
+    previous.aggregate.pageCount === Number.MAX_SAFE_INTEGER ||
+    !Number.isSafeInteger(mappedCount) ||
+    mappedCount <= 0
+  ) {
+    throw new Error('Expected a bounded mapped checkpoint page.')
+  }
+  const keyAccumulator = MigrationDigestAccumulator.fromState(
+    previous.keyDigestState,
+  )
+  const contentAccumulator = MigrationDigestAccumulator.fromState(
+    previous.contentDigestState,
+  )
+  for (let ordinal = 1; ordinal <= mappedCount; ordinal += 1) {
+    keyAccumulator.add(
+      digest(`checkpoint-key:${location}:${ordinal}`),
+    )
+    contentAccumulator.add(
+      digest(`checkpoint-content:${location}:${ordinal}`),
+    )
+  }
+  return {
+    completed: true,
+    aggregate: {
+      scanned: previous.aggregate.scanned + mappedCount,
+      mapped: previous.aggregate.mapped + mappedCount,
+      ignored: previous.aggregate.ignored,
+      invalid: previous.aggregate.invalid,
+      projected: previous.aggregate.projected + mappedCount,
+      deleted: previous.aggregate.deleted,
+      keyDigest: keyAccumulator.digest(),
+      contentDigest: contentAccumulator.digest(),
+      pageCount: previous.aggregate.pageCount + 1,
+    },
+    keyDigestState: keyAccumulator.exportState(),
+    contentDigestState: contentAccumulator.exportState(),
   }
 }
 
@@ -2896,6 +3768,32 @@ function createCheckpointCancellation(
       {
         length:
           workspaceSearchMigrationApplyCheckpointTransactionIndex.count,
+      },
+      (_, index) => ({
+        Code: index === failedIndex
+          ? 'ConditionalCheckFailed'
+          : 'None',
+      }),
+    ),
+  })
+}
+
+/**
+ * Creates one fixed-position complete apply-seal cancellation.
+ *
+ * @param failedIndex - ConditionCheck or Put index that failed.
+ * @returns Raw DynamoDB cancellation with all nine reason slots.
+ */
+function createApplySealCancellation(
+  failedIndex: number,
+): TransactionCanceledException {
+  return new TransactionCanceledException({
+    $metadata: {},
+    message: 'tenant-secret-apply-seal-cancellation',
+    CancellationReasons: Array.from(
+      {
+        length:
+          workspaceSearchMigrationApplySealTransactionIndex.count,
       },
       (_, index) => ({
         Code: index === failedIndex

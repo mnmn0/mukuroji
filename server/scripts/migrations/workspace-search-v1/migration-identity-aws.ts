@@ -96,6 +96,9 @@ import {
   type WorkspaceSearchMigrationApplyOperationAwsTransport,
 } from './migration-apply-operation-aws'
 import {
+  createAwsWorkspaceSearchMigrationApplySealGateway,
+} from './migration-apply-seal-aws'
+import {
   createAwsWorkspaceSearchMigrationExecutionBoundaryPort,
   type WorkspaceSearchMigrationExecutionBoundaryAwsPort,
   type WorkspaceSearchMigrationExecutionBoundaryAwsTransport,
@@ -1955,6 +1958,14 @@ class AwsWorkspaceSearchMigrationIdentityPort
         immutableArtifactPort,
         clock: this.prePlanAuthorityClock,
       })
+    const applySealGateway =
+      createAwsWorkspaceSearchMigrationApplySealGateway({
+        configuration: authority.configuration,
+        configurationHash: authority.configurationHash,
+        runId: detachedExecutionRun.runId,
+        immutableArtifactPort,
+        clock: this.prePlanAuthorityClock,
+      })
     const prePlanAuthorityAdapter =
       this.createManagedPrePlanAuthorityAdapter(authority)
     const authorityPort:
@@ -2029,6 +2040,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
         executionRun: detachedExecutionRun,
         authorityPort,
         journalGateway,
+        applySealGateway,
         checkpointScanner,
         transport,
         clock: this.prePlanAuthorityClock,
@@ -2058,6 +2070,11 @@ class AwsWorkspaceSearchMigrationIdentityPort
         this.runManagedApplyOperation(
           authority,
           () => delegate.saveApplyCheckpoint(input),
+        ),
+      sealApply: (input) =>
+        this.runManagedApplyOperation(
+          authority,
+          () => delegate.sealApply(input),
         ),
     }
   }
@@ -4572,7 +4589,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
   }
 
   /**
-   * Creates a journal-only immutable port bound to one apply generation.
+   * Creates an apply-artifact port bound to one measured generation.
    *
    * @param authority - Captured measured apply-operation authority.
    * @returns Immutable storage capability guarded around every S3 operation.

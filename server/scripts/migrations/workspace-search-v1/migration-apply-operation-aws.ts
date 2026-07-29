@@ -92,7 +92,18 @@ import {
   serializeWorkspaceSearchMigrationExecutionState,
   serializeWorkspaceSearchMigrationOperationMarker,
   type WorkspaceSearchMigrationExecutionState,
+  type WorkspaceSearchMigrationExecutionStateV2,
 } from './migration-execution-state'
+import {
+  createWorkspaceSearchMigrationAppliedRoot,
+  createWorkspaceSearchMigrationCompleteApplySeal,
+  parseWorkspaceSearchMigrationAppliedRoot,
+  readWorkspaceSearchMigrationCompleteApplySealReference,
+  requireWorkspaceSearchMigrationAppliedRootBinding,
+  serializeWorkspaceSearchMigrationAppliedRoot,
+  serializeWorkspaceSearchMigrationCompleteApplySeal,
+  type WorkspaceSearchMigrationAppliedRoot,
+} from './migration-apply-seal'
 import {
   createWorkspaceSearchMigrationItemConditionMaterial,
   verifyWorkspaceSearchMigrationItemStrongRead,
@@ -104,6 +115,9 @@ import {
 import {
   type WorkspaceSearchMigrationJournalAwsGateway,
 } from './migration-journal-aws'
+import {
+  type WorkspaceSearchMigrationApplySealAwsGateway,
+} from './migration-apply-seal-aws'
 import {
   detachWorkspaceSearchMigrationPlanningConfiguration,
 } from './migration-planning-join'
@@ -143,14 +157,18 @@ const journalSequenceRecordKind =
   'workspace-search-migration-apply-journal-sequence'
 const checkpointReceiptRecordKind =
   'workspace-search-migration-apply-checkpoint-receipt'
+const appliedRootRecordKind =
+  'workspace-search-migration-applied-root-record'
 const executionStateRecordKeyPrefix = 'execution-state/v1'
 const operationMarkerRecordKeyPrefix = 'apply-operation/v1'
 const journalSequenceRecordKeyPrefix = 'apply-journal-sequence/v1'
+const appliedRootRecordKeyPrefix = 'apply-seal/v1'
 const transactionTimeoutMilliseconds = 5_000
 const retentionDayMilliseconds = 24 * 60 * 60 * 1_000
 const mutationTransactionItemCount = 12
 const noOpTransactionItemCount = 11
 const checkpointTransactionItemCount = 9
+const applySealTransactionItemCount = 9
 
 /**
  * Fixed transaction and cancellation-reason positions for one apply operation.
@@ -212,6 +230,33 @@ export const workspaceSearchMigrationApplyCheckpointTransactionIndex =
     checkpointReceipt: 8,
     /** Fixed checkpoint transaction item count. */
     count: checkpointTransactionItemCount,
+  })
+
+/**
+ * Fixed transaction and cancellation-reason positions for complete apply seal.
+ */
+export const workspaceSearchMigrationApplySealTransactionIndex =
+  Object.freeze({
+    /** Current global lease condition. */
+    lease: 0,
+    /** Current maintenance pointer condition. */
+    pointer: 1,
+    /** Current immutable maintenance receipt condition. */
+    receipt: 2,
+    /** Exact closed application-writer fence condition. */
+    writerFence: 3,
+    /** Exact revision-two planning-admitted boundary condition. */
+    executionBoundary: 4,
+    /** Exact immutable sealed planning-authority root condition. */
+    sealedPlanningAuthority: 5,
+    /** Exact immutable revision-one execution admission condition. */
+    executionRun: 6,
+    /** Exact terminal mutable execution-state predecessor condition. */
+    executionState: 7,
+    /** Absent deterministic immutable applied-root Put. */
+    appliedRoot: 8,
+    /** Fixed complete apply-seal transaction item count. */
+    count: applySealTransactionItemCount,
   })
 
 /**
@@ -318,6 +363,9 @@ export type CreateWorkspaceSearchMigrationApplyOperationAwsPortInput = {
   /** Run-scoped immutable exact-version journal gateway. */
   readonly journalGateway:
     WorkspaceSearchMigrationJournalAwsGateway
+  /** Run-scoped immutable exact-version complete apply-seal gateway. */
+  readonly applySealGateway:
+    WorkspaceSearchMigrationApplySealAwsGateway
   /** Strongly consistent measured source and target checkpoint scanner. */
   readonly checkpointScanner:
     WorkspaceSearchMigrationApplyCheckpointScanner
@@ -326,6 +374,16 @@ export type CreateWorkspaceSearchMigrationApplyOperationAwsPortInput = {
     WorkspaceSearchMigrationApplyOperationAwsTransport
   /** Adapter-owned trusted clock. */
   readonly clock: WorkspaceSearchMigrationApplyOperationAwsClock
+}
+
+/**
+ * Caller command for adapter-owned complete apply sealing.
+ */
+export type WorkspaceSearchMigrationApplySealCommandInput = {
+  /** Exact terminal applying-state revision expected by the caller. */
+  readonly expectedRevision: number
+  /** Exact active lease identity authorizing the transition. */
+  readonly lease: WorkspaceSearchMigrationLeaseClaim
 }
 
 /**
@@ -382,6 +440,16 @@ export interface WorkspaceSearchMigrationApplyOperationAwsPort {
    */
   saveApplyCheckpoint(
     input: WorkspaceSearchMigrationCheckpointCommandInput,
+  ): Promise<WorkspaceSearchMigrationRunState>
+
+  /**
+   * Uploads the adapter-owned complete seal and atomically publishes applied.
+   *
+   * @param input - Exact terminal predecessor revision and active lease.
+   * @returns Exact reconciled durable applied run state.
+   */
+  sealApply(
+    input: WorkspaceSearchMigrationApplySealCommandInput,
   ): Promise<WorkspaceSearchMigrationRunState>
 }
 
@@ -459,6 +527,24 @@ type PreparedApplyDependencies = {
     'readJournalSegment'
   ]
   /**
+   * Writes one immutable complete-plan apply seal.
+   *
+   * @param seal - Exact adapter-owned complete seal document.
+   * @returns Rich exact-version complete-seal reference.
+   */
+  readonly writeApplySeal: WorkspaceSearchMigrationApplySealAwsGateway[
+    'writeCompleteApplySeal'
+  ]
+  /**
+   * Reads one exact immutable complete-plan apply seal version.
+   *
+   * @param reference - Rich exact-version complete-seal reference.
+   * @returns Strict detached complete seal document.
+   */
+  readonly readApplySeal: WorkspaceSearchMigrationApplySealAwsGateway[
+    'readCompleteApplySeal'
+  ]
+  /**
    * Strongly scans and reduces one next apply checkpoint page.
    *
    * @param input - Exact location and durable predecessor checkpoint.
@@ -519,15 +605,40 @@ type PreparedApplyCheckpointCommand = {
 }
 
 /**
+ * Fully detached complete apply-seal command before the first await.
+ */
+type PreparedApplySealCommand = {
+  /** Exact expected terminal applying-state revision. */
+  readonly expectedRevision: number
+  /** Exact active lease identity. */
+  readonly lease: WorkspaceSearchMigrationLeaseClaim
+}
+
+/**
  * Current effective state and its optional mutable durable envelope.
  */
 type EffectiveApplyState = {
   /** Complete reconstructed state-machine value. */
   readonly runState: WorkspaceSearchMigrationRunState
+  /** Immutable applied phase root, when the complete seal committed. */
+  readonly appliedRoot?: WorkspaceSearchMigrationAppliedRoot
   /** Mutable envelope, absent only before the first operation. */
   readonly executionState?: WorkspaceSearchMigrationExecutionState
   /** Exact mutable durable record, absent only before the first operation. */
   readonly executionStateRecord?: Readonly<Record<string, AttributeValue>>
+}
+
+/**
+ * Strongly read exact terminal v2 state required by root publication.
+ */
+type TerminalEffectiveApplyState = {
+  /** Complete reconstructed terminal applying state. */
+  readonly runState: WorkspaceSearchMigrationRunState
+  /** Exact terminal traversal-capable mutable envelope. */
+  readonly executionState: WorkspaceSearchMigrationExecutionStateV2
+  /** Complete durable terminal execution-state record. */
+  readonly executionStateRecord:
+    Readonly<Record<string, AttributeValue>>
 }
 
 /**
@@ -558,6 +669,7 @@ export function createAwsWorkspaceSearchMigrationApplyOperationPort(
   try {
     const record = requirePlainRecord(input, 'INVALID_ARGUMENT')
     requireExactKeys(record, [
+      'applySealGateway',
       'authorityPort',
       'checkpointScanner',
       'clock',
@@ -581,6 +693,7 @@ export function createAwsWorkspaceSearchMigrationApplyOperationPort(
     const dependencies = prepareApplyDependencies(
       readOwn(record, 'authorityPort', 'INVALID_ARGUMENT'),
       readOwn(record, 'journalGateway', 'INVALID_ARGUMENT'),
+      readOwn(record, 'applySealGateway', 'INVALID_ARGUMENT'),
       readOwn(record, 'checkpointScanner', 'INVALID_ARGUMENT'),
       readOwn(record, 'transport', 'INVALID_ARGUMENT'),
       readOwn(record, 'clock', 'INVALID_ARGUMENT'),
@@ -1029,6 +1142,127 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
   }
 
   /**
+   * Uploads the complete production seal and publishes one immutable root.
+   *
+   * @param input - Exact terminal predecessor revision and active lease.
+   * @returns Exact reconciled durable applied state.
+   */
+  async sealApply(
+    input: WorkspaceSearchMigrationApplySealCommandInput,
+  ): Promise<WorkspaceSearchMigrationRunState> {
+    return runApplyBoundary(async () => {
+      const command = prepareApplySealCommand(input, this.binding)
+      const initial = await this.readEffectiveState()
+      if (initial.appliedRoot !== undefined) {
+        return recoverAppliedRootForCommand(
+          command,
+          initial.appliedRoot,
+          initial.runState,
+          undefined,
+        )
+      }
+      const initialTerminal = requireTerminalEffectiveState(
+        command,
+        initial,
+      )
+      const initialAuthority = await this.resolveAuthority(command)
+      requireLeaseClaimMatchesAuthority(
+        command.lease,
+        initialAuthority,
+      )
+      const preflightAt = readClock(this.dependencies.clock)
+      requireProgressRetention(
+        this.binding,
+        initialTerminal.executionState,
+        preflightAt,
+      )
+      const seal =
+        createWorkspaceSearchMigrationCompleteApplySeal({
+          admission: this.binding.executionRun,
+          predecessor: initialTerminal.executionState,
+          sealedPlanningAuthority:
+            this.binding.sealedPlanningAuthority,
+          createdAt: new Date(preflightAt).toISOString(),
+        })
+      const sealReference =
+        readWorkspaceSearchMigrationCompleteApplySealReference(
+          await this.dependencies.writeApplySeal(seal),
+        )
+
+      const [authority, current] = await Promise.all([
+        this.resolveAuthority(command),
+        this.readEffectiveState(),
+      ])
+      if (current.appliedRoot !== undefined) {
+        requireAppliedRootPredecessor(
+          current.appliedRoot,
+          initialTerminal.executionState,
+        )
+        return recoverAppliedRootForCommand(
+          command,
+          current.appliedRoot,
+          current.runState,
+          undefined,
+        )
+      }
+      const currentTerminal = requireTerminalEffectiveState(
+        command,
+        current,
+      )
+      requireSameEffectiveState(initial, current)
+      requireLeaseClaimMatchesAuthority(command.lease, authority)
+
+      await this.dependencies.prepare()
+      const commitAtMilliseconds = readClock(this.dependencies.clock)
+      if (commitAtMilliseconds < preflightAt) {
+        return failApply('INVALID_STATE')
+      }
+      requireCommitRetention(
+        this.binding,
+        currentTerminal.executionState,
+        undefined,
+        commitAtMilliseconds,
+      )
+      const commitAt =
+        new Date(commitAtMilliseconds).toISOString()
+      const root = createWorkspaceSearchMigrationAppliedRoot({
+        admission: this.binding.executionRun,
+        predecessor: currentTerminal.executionState,
+        sealedPlanningAuthority:
+          this.binding.sealedPlanningAuthority,
+        seal,
+        sealReference,
+        currentAuthority: authority,
+        committedAt: commitAt,
+      })
+      const transaction = createApplySealTransactionCommand({
+        binding: this.binding,
+        currentAuthority: authority,
+        commitAt: new Date(commitAtMilliseconds),
+        predecessorState: currentTerminal.executionState,
+        predecessorStateRecord:
+          currentTerminal.executionStateRecord,
+        root,
+      })
+      let transactionError: unknown
+      try {
+        await this.dependencies.transact(transaction)
+      } catch (error: unknown) {
+        const managedGuardCode = readPublicFailureCode(error)
+        if (managedGuardCode !== undefined) {
+          return failApply(managedGuardCode)
+        }
+        transactionError = error
+      }
+      return this.reconcileApplySealAfterAttempt(
+        command,
+        root,
+        transactionError,
+      )
+    })
+  }
+
+  /**
    * Resolves and detaches one fresh current authority.
    *
    * @param command - Detached exact caller command.
@@ -1037,7 +1271,8 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
   private async resolveAuthority(
     command:
       | PreparedApplyCheckpointCommand
-      | PreparedApplyCommand,
+      | PreparedApplyCommand
+      | PreparedApplySealCommand,
   ): Promise<WorkspaceSearchMigrationPrePlanAuthority> {
     const admissionAuthority =
       this.binding.executionRun.binding.currentAuthority
@@ -1068,7 +1303,7 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
    * @returns Exact effective state and optional mutable envelope.
    */
   private async readEffectiveState(): Promise<EffectiveApplyState> {
-    const [admissionOutput, stateOutput] = await Promise.all([
+    const [admissionOutput, appliedRootOutput] = await Promise.all([
       this.dependencies.get(
         new GetItemCommand({
           TableName: this.binding.stateTable.tableName,
@@ -1080,7 +1315,7 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
         new GetItemCommand({
           TableName: this.binding.stateTable.tableName,
           ConsistentRead: true,
-          Key: createStateKey(this.binding),
+          Key: createAppliedRootKey(this.binding),
         }),
       ),
     ])
@@ -1088,7 +1323,62 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
       this.binding,
       admissionOutput,
     )
+    const stateOutput = await this.dependencies.get(
+      new GetItemCommand({
+        TableName: this.binding.stateTable.tableName,
+        ConsistentRead: true,
+        Key: createStateKey(this.binding),
+      }),
+    )
     const record = readOutputItem(stateOutput)
+    const appliedRootRecord = readOutputItem(appliedRootOutput)
+    if (appliedRootRecord !== undefined) {
+      if (record === undefined) return failApply('INVALID_STATE')
+      const executionState =
+        parseExecutionStateRecord(this.binding, record)
+      if (executionState.executionStateVersion !== 2) {
+        return failApply('INVALID_STATE')
+      }
+      const root = parseAppliedRootRecord(
+        this.binding,
+        appliedRootRecord,
+      )
+      const storedSeal =
+        await this.dependencies.readApplySeal(root.sealReference)
+      if (
+        Buffer.compare(
+          Buffer.from(
+            serializeWorkspaceSearchMigrationCompleteApplySeal(
+              storedSeal,
+            ),
+          ),
+          Buffer.from(
+            serializeWorkspaceSearchMigrationCompleteApplySeal(
+              root.seal,
+            ),
+          ),
+        ) !== 0
+      ) {
+        return failApply('INVALID_STATE')
+      }
+      const runState =
+        requireWorkspaceSearchMigrationAppliedRootBinding({
+          admission: this.binding.executionRun,
+          predecessor: executionState,
+          sealedPlanningAuthority:
+            this.binding.sealedPlanningAuthority,
+          seal: storedSeal,
+          sealReference: root.sealReference,
+          root,
+        })
+      await this.dependencies.prepare()
+      return {
+        runState,
+        appliedRoot: root,
+        executionState,
+        executionStateRecord: record,
+      }
+    }
     if (record === undefined) {
       return { runState: this.binding.executionRun.runState }
     }
@@ -1194,6 +1484,40 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
     marker: DurableApplyMarker,
   ): Promise<WorkspaceSearchMigrationRunState> {
     return this.reconcileMarkerAndState(command, marker)
+  }
+
+  /**
+   * Reconciles one apply-seal attempt through its immutable deterministic root.
+   *
+   * @param command - Detached exact attempted seal command.
+   * @param intended - Exact root intended by this attempt.
+   * @param transactionError - Raw transaction failure, when one occurred.
+   * @returns Exact durable applied state proving a valid publication.
+   */
+  private async reconcileApplySealAfterAttempt(
+    command: PreparedApplySealCommand,
+    intended: WorkspaceSearchMigrationAppliedRoot,
+    transactionError: unknown,
+  ): Promise<WorkspaceSearchMigrationRunState> {
+    let effective: EffectiveApplyState
+    try {
+      effective = await this.readEffectiveState()
+    } catch (error: unknown) {
+      return failApply(readReconciliationFailureCode(error))
+    }
+    if (effective.appliedRoot === undefined) {
+      return failApply(
+        transactionError === undefined
+          ? 'AMBIGUOUS_OPERATION_UNRESOLVED'
+          : classifyApplySealTransactionError(transactionError),
+      )
+    }
+    return recoverAppliedRootForCommand(
+      command,
+      effective.appliedRoot,
+      effective.runState,
+      intended,
+    )
   }
 
   /**
@@ -1663,6 +1987,7 @@ function createApplyTableIds(
  *
  * @param authorityPortValue - Candidate fresh-authority reader.
  * @param journalGatewayValue - Candidate immutable journal gateway.
+ * @param applySealGatewayValue - Candidate immutable apply-seal gateway.
  * @param checkpointScannerValue - Candidate measured checkpoint scanner.
  * @param transportValue - Candidate narrow DynamoDB transport.
  * @param clockValue - Candidate adapter clock.
@@ -1671,6 +1996,7 @@ function createApplyTableIds(
 function prepareApplyDependencies(
   authorityPortValue: unknown,
   journalGatewayValue: unknown,
+  applySealGatewayValue: unknown,
   checkpointScannerValue: unknown,
   transportValue: unknown,
   clockValue: unknown,
@@ -1680,6 +2006,9 @@ function prepareApplyDependencies(
   )
   const journalGateway = requireDependencyObject(
     journalGatewayValue,
+  )
+  const applySealGateway = requireDependencyObject(
+    applySealGatewayValue,
   )
   const checkpointScanner = requireDependencyObject(
     checkpointScannerValue,
@@ -1698,6 +2027,14 @@ function prepareApplyDependencies(
   const readJournal = readCallableMethod(
     journalGateway,
     'readJournalSegment',
+  )
+  const writeApplySeal = readCallableMethod(
+    applySealGateway,
+    'writeCompleteApplySeal',
+  )
+  const readApplySeal = readCallableMethod(
+    applySealGateway,
+    'readCompleteApplySeal',
   )
   const scanCheckpoint = readCallableMethod(
     checkpointScanner,
@@ -1719,6 +2056,8 @@ function prepareApplyDependencies(
     !isAuthorityReader(readAuthority) ||
     !isJournalWriter(writeJournal) ||
     !isJournalReader(readJournal) ||
+    !isApplySealWriter(writeApplySeal) ||
+    !isApplySealReader(readApplySeal) ||
     !isCheckpointScanner(scanCheckpoint) ||
     !isApplyItemReader(get) ||
     !isApplyPreparer(prepare) ||
@@ -1732,6 +2071,8 @@ function prepareApplyDependencies(
     readAuthority: readAuthority.bind(authorityPort),
     writeJournal: writeJournal.bind(journalGateway),
     readJournal: readJournal.bind(journalGateway),
+    writeApplySeal: writeApplySeal.bind(applySealGateway),
+    readApplySeal: readApplySeal.bind(applySealGateway),
     scanCheckpoint: scanCheckpoint.bind(checkpointScanner),
     get: get.bind(transport),
     prepare: prepare.bind(transport),
@@ -1834,6 +2175,34 @@ function isJournalReader(
   value: unknown,
 ): value is WorkspaceSearchMigrationJournalAwsGateway[
   'readJournalSegment'
+] {
+  return typeof value === 'function' && !nodeUtilTypes.isProxy(value)
+}
+
+/**
+ * Narrows one immutable complete apply-seal writer method.
+ *
+ * @param value - Candidate callable.
+ * @returns Whether it may be invoked through the typed seal boundary.
+ */
+function isApplySealWriter(
+  value: unknown,
+): value is WorkspaceSearchMigrationApplySealAwsGateway[
+  'writeCompleteApplySeal'
+] {
+  return typeof value === 'function' && !nodeUtilTypes.isProxy(value)
+}
+
+/**
+ * Narrows one immutable complete apply-seal reader method.
+ *
+ * @param value - Candidate callable.
+ * @returns Whether it may be invoked through the typed seal boundary.
+ */
+function isApplySealReader(
+  value: unknown,
+): value is WorkspaceSearchMigrationApplySealAwsGateway[
+  'readCompleteApplySeal'
 ] {
   return typeof value === 'function' && !nodeUtilTypes.isProxy(value)
 }
@@ -2045,6 +2414,36 @@ function prepareApplyCheckpointCommand(
 }
 
 /**
+ * Detaches one caller complete apply-seal request before the first await.
+ *
+ * @param input - Candidate seal command.
+ * @param binding - Exact admitted apply binding.
+ * @returns Strict detached terminal predecessor command.
+ */
+function prepareApplySealCommand(
+  input: WorkspaceSearchMigrationApplySealCommandInput,
+  binding: ApplyOperationBinding,
+): PreparedApplySealCommand {
+  const record = requirePlainRecord(input, 'INVALID_ARGUMENT')
+  requireExactKeys(
+    record,
+    ['expectedRevision', 'lease'],
+    'INVALID_ARGUMENT',
+  )
+  const expectedRevision = readPositiveSafeInteger(
+    readOwn(record, 'expectedRevision', 'INVALID_ARGUMENT'),
+    'INVALID_ARGUMENT',
+  )
+  const lease = readLeaseClaim(
+    readOwn(record, 'lease', 'INVALID_ARGUMENT'),
+  )
+  if (lease.runId !== binding.executionRun.runId) {
+    return failApply('INVALID_ARGUMENT')
+  }
+  return { expectedRevision, lease }
+}
+
+/**
  * Reads one strict source or target checkpoint location.
  *
  * @param value - Candidate location.
@@ -2129,6 +2528,105 @@ function requireCheckpointCommandState(
     state.revision !== command.expectedRevision ||
     state.status !== 'applying' ||
     state.appliedOperationCount !== state.planOperationCount
+  ) {
+    return failApply('INVALID_STATE')
+  }
+}
+
+/**
+ * Requires an exact terminal v2 predecessor for complete apply sealing.
+ *
+ * @param command - Detached complete seal command.
+ * @param effective - Strongly read current effective state.
+ * @returns Exact terminal mutable state and complete durable row.
+ */
+function requireTerminalEffectiveState(
+  command: PreparedApplySealCommand,
+  effective: EffectiveApplyState,
+): TerminalEffectiveApplyState {
+  const executionState = effective.executionState
+  const executionStateRecord = effective.executionStateRecord
+  if (
+    effective.appliedRoot !== undefined ||
+    effective.runState.revision !== command.expectedRevision ||
+    executionState?.executionStateVersion !== 2 ||
+    executionStateRecord === undefined
+  ) {
+    return failApply('INVALID_STATE')
+  }
+  requireCompleteApplyState(effective.runState, executionState)
+  return {
+    runState: effective.runState,
+    executionState,
+    executionStateRecord,
+  }
+}
+
+/**
+ * Accepts one durable root only for the exact retried terminal predecessor.
+ *
+ * Concurrent attempts may choose different trusted timestamps or immutable S3
+ * versions. The deterministic-key winner is accepted only when its
+ * predecessor identity is the same as this command and, after a send, the
+ * exact predecessor identity of the attempted root.
+ *
+ * @param command - Detached exact caller retry.
+ * @param durable - Strict fully cross-validated durable root.
+ * @param runState - Applied successor reconstructed from the durable root.
+ * @param intended - Exact attempted root, when a transaction was sent.
+ * @returns Exact reconstructed durable applied state.
+ */
+function recoverAppliedRootForCommand(
+  command: PreparedApplySealCommand,
+  durable: WorkspaceSearchMigrationAppliedRoot,
+  runState: WorkspaceSearchMigrationRunState,
+  intended: WorkspaceSearchMigrationAppliedRoot | undefined,
+): WorkspaceSearchMigrationRunState {
+  if (
+    durable.predecessorRevision !== command.expectedRevision ||
+    durable.runId !== command.lease.runId ||
+    durable.authority.ownerId !== command.lease.ownerId ||
+    durable.authority.fenceToken !== command.lease.fenceToken ||
+    durable.status !== 'applied' ||
+    durable.successorRevision !== command.expectedRevision + 1 ||
+    runState.status !== 'applied' ||
+    runState.revision !== durable.successorRevision ||
+    createMigrationDigest(runState) !==
+      durable.successorRunStateDigest
+  ) {
+    return failApply('INVALID_STATE')
+  }
+  if (
+    intended !== undefined &&
+    (
+      durable.predecessorRevision !==
+        intended.predecessorRevision ||
+      durable.predecessorExecutionStateDigest !==
+        intended.predecessorExecutionStateDigest ||
+      durable.predecessorRunStateDigest !==
+        intended.predecessorRunStateDigest
+    )
+  ) {
+    return failApply('INVALID_STATE')
+  }
+  return runState
+}
+
+/**
+ * Requires a concurrent durable root to use one exact terminal predecessor.
+ *
+ * @param root - Strict durable concurrent winner.
+ * @param predecessor - Exact terminal state observed before seal upload.
+ */
+function requireAppliedRootPredecessor(
+  root: WorkspaceSearchMigrationAppliedRoot,
+  predecessor: WorkspaceSearchMigrationExecutionStateV2,
+): void {
+  if (
+    root.predecessorRevision !== predecessor.revision ||
+    root.predecessorExecutionStateDigest !==
+      predecessor.executionStateDigest ||
+    root.predecessorRunStateDigest !== predecessor.runStateDigest
   ) {
     return failApply('INVALID_STATE')
   }
@@ -2327,6 +2825,27 @@ type CreateApplyCheckpointTransactionCommandInput =
   }
 
 /**
+ * Complete material for one fixed-order immutable apply-seal transaction.
+ */
+type CreateApplySealTransactionCommandInput = {
+  /** Exact static admitted apply binding. */
+  readonly binding: ApplyOperationBinding
+  /** Fresh current lease, pointer, and receipt authority. */
+  readonly currentAuthority:
+    WorkspaceSearchMigrationPrePlanAuthority
+  /** Adapter-owned final transaction time. */
+  readonly commitAt: Date
+  /** Exact terminal traversal-capable mutable predecessor. */
+  readonly predecessorState:
+    WorkspaceSearchMigrationExecutionStateV2
+  /** Complete exact durable terminal predecessor row. */
+  readonly predecessorStateRecord:
+    Readonly<Record<string, AttributeValue>>
+  /** Immutable applied root published by the transaction. */
+  readonly root: WorkspaceSearchMigrationAppliedRoot
+}
+
+/**
  * Builds one fixed-order eleven- or twelve-item apply transaction.
  *
  * @param input - Exact authority, CAS, predecessor, successor, and marker.
@@ -2473,6 +2992,79 @@ function createApplyCheckpointTransactionCommand(
 }
 
 /**
+ * Builds one fixed-order nine-item immutable applied-root transaction.
+ *
+ * @param input - Exact authority, terminal predecessor, and applied root.
+ * @returns Adapter-owned idempotent complete apply-seal transaction.
+ */
+function createApplySealTransactionCommand(
+  input: CreateApplySealTransactionCommandInput,
+): TransactWriteItemsCommand {
+  requireAppliedRootRecordBinding(input.binding, input.root)
+  if (
+    input.root.predecessorRevision !==
+      input.predecessorState.revision ||
+    input.root.predecessorExecutionStateDigest !==
+      input.predecessorState.executionStateDigest ||
+    input.root.predecessorRunStateDigest !==
+      input.predecessorState.runStateDigest ||
+    input.root.committedAt !== input.commitAt.toISOString()
+  ) {
+    return failApply('INVALID_STATE')
+  }
+  const authorityChecks =
+    createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks({
+      stateTable: input.binding.stateTable,
+      configurationHash: input.binding.configurationHash,
+      authority: input.currentAuthority,
+      commitAt: input.commitAt,
+    })
+  const items: TransactWriteItem[] = [
+    ...authorityChecks,
+    createWorkspaceSearchWriterFenceClosedConditionCheck(
+      input.binding.closedWriterFenceRecord,
+      input.binding.writerFence,
+    ),
+    createWorkspaceSearchMigrationPlanningAdmittedExecutionBoundaryConditionCheck(
+      {
+        stateTable: input.binding.stateTable,
+        configurationHash: input.binding.configurationHash,
+        boundary: input.binding.executionBoundary,
+      },
+    ),
+    createWorkspaceSearchMigrationSealedPlanningAuthorityV2ConditionCheck({
+      stateTable: input.binding.stateTable,
+      configurationHash: input.binding.configurationHash,
+      authority: input.binding.sealedPlanningAuthority,
+    }),
+    createWorkspaceSearchMigrationExecutionRunAdmissionConditionCheck({
+      stateTable: input.binding.stateTable,
+      configurationHash: input.binding.configurationHash,
+      executionRun: input.binding.executionRun,
+    }),
+    createTerminalExecutionStateConditionCheck(
+      input.binding,
+      input.predecessorState,
+      input.predecessorStateRecord,
+    ),
+    createAppliedRootPut(input.binding, input.root),
+  ]
+  if (items.length !== applySealTransactionItemCount) {
+    return failApply('INVALID_STATE')
+  }
+  return new TransactWriteItemsCommand({
+    ClientRequestToken: createMigrationDigest({
+      kind: 'workspace-search-apply-seal-transaction',
+      version: applyRecordVersion,
+      rootDigest: input.root.rootDigest,
+    }).slice(0, 36),
+    TransactItems: items,
+    ReturnConsumedCapacity: 'NONE',
+    ReturnItemCollectionMetrics: 'NONE',
+  })
+}
+
+/**
  * Cross-checks receipt links against the exact CAS predecessor and successor.
  *
  * @param input - Exact checkpoint transaction material.
@@ -2559,6 +3151,70 @@ function createExecutionStatePut(
       ...createConditionFields(condition),
       ReturnValuesOnConditionCheckFailure: 'NONE',
     },
+  }
+}
+
+/**
+ * Creates one exact terminal v2 execution-state predecessor condition.
+ *
+ * @param binding - Exact admitted apply binding.
+ * @param predecessor - Exact terminal mutable execution-state envelope.
+ * @param record - Complete strongly read durable predecessor row.
+ * @returns One exact full-record DynamoDB condition check.
+ */
+function createTerminalExecutionStateConditionCheck(
+  binding: ApplyOperationBinding,
+  predecessor: WorkspaceSearchMigrationExecutionState,
+  record: Readonly<Record<string, AttributeValue>>,
+): TransactWriteItem {
+  const runState = reconstructWorkspaceSearchMigrationRunState(
+    binding.executionRun,
+    predecessor,
+  )
+  requireCompleteApplyState(runState, predecessor)
+  const snapshot = createStatePredecessorSnapshot(
+    predecessor,
+    record,
+  )
+  return createConditionCheck(
+    binding.stateTable.tableName,
+    createWorkspaceSearchMigrationItemConditionMaterial(
+      binding.stateTable,
+      createStateKey(binding),
+      snapshot,
+      executionStateRecordAttributeNames,
+    ),
+  )
+}
+
+/**
+ * Requires a mutable v2 predecessor to represent all complete clean apply work.
+ *
+ * @param state - Reconstructed candidate applying state.
+ * @param executionState - Candidate mutable predecessor envelope.
+ */
+function requireCompleteApplyState(
+  state: WorkspaceSearchMigrationRunState,
+  executionState: WorkspaceSearchMigrationExecutionState,
+): void {
+  const checkpoints: readonly MigrationSourceCheckpoint[] = [
+    state.apply.sources['project-directory'],
+    state.apply.sources['work-items'],
+    state.apply.sources.collaboration,
+    state.apply.sources.documents,
+    state.apply.target,
+  ]
+  if (
+    executionState.executionStateVersion !== 2 ||
+    state.status !== 'applying' ||
+    state.appliedOperationCount !== state.planOperationCount ||
+    checkpoints.some((checkpoint) =>
+      !checkpoint.completed ||
+      checkpoint.cursor !== undefined ||
+      checkpoint.aggregate.invalid !== 0
+    )
+  ) {
+    return failApply('INVALID_STATE')
   }
 }
 
@@ -2719,6 +3375,32 @@ function createCheckpointReceiptPut(
 }
 
 /**
+ * Creates one deterministic immutable applied-root absent Put.
+ *
+ * @param binding - Exact static admitted apply binding.
+ * @param root - Exact immutable applied phase root.
+ * @returns One absent root Put at the fixed final transaction position.
+ */
+function createAppliedRootPut(
+  binding: ApplyOperationBinding,
+  root: WorkspaceSearchMigrationAppliedRoot,
+): TransactWriteItem {
+  return {
+    Put: {
+      TableName: binding.stateTable.tableName,
+      Item: createAppliedRootRecord(binding, root),
+      ConditionExpression:
+        'attribute_not_exists(#migrationId) AND attribute_not_exists(#recordKey)',
+      ExpressionAttributeNames: {
+        '#migrationId': 'migrationId',
+        '#recordKey': 'recordKey',
+      },
+      ReturnValuesOnConditionCheckFailure: 'NONE',
+    },
+  }
+}
+
+/**
  * Creates one immutable operation-id marker absent Put.
  *
  * @param input - Exact apply transaction material.
@@ -2832,6 +3514,30 @@ const executionStateRecordAttributeNames = Object.freeze([
   'runStateDigest',
   'stateTableId',
   'status',
+])
+
+/**
+ * Complete controlled field set for immutable applied-root rows.
+ */
+const appliedRootRecordAttributeNames = Object.freeze([
+  'committedAt',
+  'configurationHash',
+  'executionRunDigest',
+  'kind',
+  'migrationId',
+  'predecessorExecutionStateDigest',
+  'predecessorRevision',
+  'predecessorRunStateDigest',
+  'recordKey',
+  'recordVersion',
+  'rootBytes',
+  'rootDigest',
+  'runId',
+  'sealContentDigest',
+  'stateTableId',
+  'status',
+  'successorRevision',
+  'successorRunStateDigest',
 ])
 
 /**
@@ -2997,6 +3703,142 @@ function requireExecutionStateBinding(
     state.runId !== binding.executionRun.runId ||
     state.configurationHash !== binding.configurationHash ||
     state.revision <= binding.executionRun.revision
+  ) {
+    return failApply('INVALID_STATE')
+  }
+}
+
+/**
+ * Creates one complete strict immutable applied-root record.
+ *
+ * @param binding - Exact static admitted apply binding.
+ * @param root - Exact immutable applied phase root.
+ * @returns Complete low-level DynamoDB record.
+ */
+function createAppliedRootRecord(
+  binding: ApplyOperationBinding,
+  root: WorkspaceSearchMigrationAppliedRoot,
+): Readonly<Record<string, AttributeValue>> {
+  const bytes = serializeWorkspaceSearchMigrationAppliedRoot(root)
+  const strict = parseWorkspaceSearchMigrationAppliedRoot(bytes)
+  requireAppliedRootRecordBinding(binding, strict)
+  const item: Readonly<Record<string, AttributeValue>> = {
+    migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
+    recordKey: { S: createAppliedRootRecordKey(binding) },
+    kind: { S: appliedRootRecordKind },
+    recordVersion: { N: String(applyRecordVersion) },
+    stateTableId: { S: strict.stateTableId },
+    configurationHash: { S: strict.configurationHash },
+    runId: { S: strict.runId },
+    executionRunDigest: { S: strict.executionRunDigest },
+    predecessorRevision: {
+      N: String(strict.predecessorRevision),
+    },
+    predecessorExecutionStateDigest: {
+      S: strict.predecessorExecutionStateDigest,
+    },
+    predecessorRunStateDigest: {
+      S: strict.predecessorRunStateDigest,
+    },
+    successorRevision: {
+      N: String(strict.successorRevision),
+    },
+    status: { S: strict.status },
+    successorRunStateDigest: {
+      S: strict.successorRunStateDigest,
+    },
+    sealContentDigest: {
+      S: strict.sealReference.contentDigest,
+    },
+    committedAt: { S: strict.committedAt },
+    rootDigest: { S: strict.rootDigest },
+    rootBytes: { B: bytes },
+  }
+  validateDynamoDbItemSize(item)
+  return item
+}
+
+/**
+ * Strictly parses one complete immutable applied-root record.
+ *
+ * @param binding - Exact static admitted apply binding.
+ * @param item - Raw low-level DynamoDB record.
+ * @returns Exact immutable applied phase root.
+ */
+function parseAppliedRootRecord(
+  binding: ApplyOperationBinding,
+  item: Readonly<Record<string, AttributeValue>>,
+): WorkspaceSearchMigrationAppliedRoot {
+  requireExactAttributeKeys(
+    item,
+    appliedRootRecordAttributeNames,
+    'INVALID_STATE',
+  )
+  if (
+    readStringAttribute(item, 'migrationId') !==
+      WORKSPACE_SEARCH_MIGRATION_ID ||
+    readStringAttribute(item, 'recordKey') !==
+      createAppliedRootRecordKey(binding) ||
+    readStringAttribute(item, 'kind') !==
+      appliedRootRecordKind ||
+    readNumberAttribute(item, 'recordVersion') !==
+      applyRecordVersion ||
+    readStringAttribute(item, 'stateTableId') !==
+      binding.stateTable.tableId ||
+    readStringAttribute(item, 'configurationHash') !==
+      binding.configurationHash ||
+    readStringAttribute(item, 'runId') !==
+      binding.executionRun.runId ||
+    readStringAttribute(item, 'executionRunDigest') !==
+      binding.executionRun.executionRunDigest
+  ) {
+    return failApply('INVALID_STATE')
+  }
+  const root = parseWorkspaceSearchMigrationAppliedRoot(
+    readBinaryAttribute(item, 'rootBytes'),
+  )
+  requireAppliedRootRecordBinding(binding, root)
+  if (
+    readNumberAttribute(item, 'predecessorRevision') !==
+      root.predecessorRevision ||
+    readStringAttribute(
+      item,
+      'predecessorExecutionStateDigest',
+    ) !== root.predecessorExecutionStateDigest ||
+    readStringAttribute(item, 'predecessorRunStateDigest') !==
+      root.predecessorRunStateDigest ||
+    readNumberAttribute(item, 'successorRevision') !==
+      root.successorRevision ||
+    readStringAttribute(item, 'status') !== root.status ||
+    readStringAttribute(item, 'successorRunStateDigest') !==
+      root.successorRunStateDigest ||
+    readStringAttribute(item, 'sealContentDigest') !==
+      root.sealReference.contentDigest ||
+    readStringAttribute(item, 'committedAt') !==
+      root.committedAt ||
+    readStringAttribute(item, 'rootDigest') !== root.rootDigest
+  ) {
+    return failApply('INVALID_STATE')
+  }
+  return root
+}
+
+/**
+ * Requires one applied root to stay in this admitted run and table.
+ *
+ * @param binding - Exact static admitted apply binding.
+ * @param root - Candidate strict applied root.
+ */
+function requireAppliedRootRecordBinding(
+  binding: ApplyOperationBinding,
+  root: WorkspaceSearchMigrationAppliedRoot,
+): void {
+  if (
+    root.stateTableId !== binding.stateTable.tableId ||
+    root.configurationHash !== binding.configurationHash ||
+    root.runId !== binding.executionRun.runId ||
+    root.executionRunDigest !==
+      binding.executionRun.executionRunDigest
   ) {
     return failApply('INVALID_STATE')
   }
@@ -3571,6 +4413,21 @@ function createStateKey(
 }
 
 /**
+ * Creates the deterministic immutable applied-root primary key.
+ *
+ * @param binding - Exact static apply binding.
+ * @returns Low-level migration-state table primary key.
+ */
+function createAppliedRootKey(
+  binding: ApplyOperationBinding,
+): Readonly<Record<string, AttributeValue>> {
+  return {
+    migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
+    recordKey: { S: createAppliedRootRecordKey(binding) },
+  }
+}
+
+/**
  * Creates the deterministic immutable checkpoint-receipt primary key.
  *
  * @param identity - Exact content-addressed checkpoint command identity.
@@ -3637,6 +4494,18 @@ function createExecutionStateRecordKey(
   binding: ApplyOperationBinding,
 ): string {
   return `${executionStateRecordKeyPrefix}/${binding.bindingDigest}/state`
+}
+
+/**
+ * Creates the content-independent complete-plan applied-root sort key.
+ *
+ * @param binding - Exact static apply binding.
+ * @returns Bounded admitted-run root key.
+ */
+function createAppliedRootRecordKey(
+  binding: ApplyOperationBinding,
+): string {
+  return `${appliedRootRecordKeyPrefix}/${binding.bindingDigest}/complete-plan`
 }
 
 /**
@@ -4713,6 +5582,81 @@ function classifyCheckpointTransactionError(
       for (
         let conditionIndex = index.writerFence;
         conditionIndex <= index.checkpointReceipt;
+        conditionIndex += 1
+      ) {
+        if (
+          readCancellationReasonCode(
+            error,
+            conditionIndex,
+          ) === 'ConditionalCheckFailed'
+        ) {
+          return 'INVALID_STATE'
+        }
+      }
+      return cancellationWasTransient(error)
+        ? 'TRANSIENT_INFRASTRUCTURE_FAILURE'
+        : 'INVALID_STATE'
+    }
+    if (!(error instanceof Error)) {
+      return 'AMBIGUOUS_OPERATION_UNRESOLVED'
+    }
+    if (readErrorName(error) === 'TransactionInProgressException') {
+      return 'AMBIGUOUS_OPERATION_UNRESOLVED'
+    }
+    const input = createAwsClassificationInput(error)
+    if (isThrottlingError(input)) {
+      return 'TRANSIENT_INFRASTRUCTURE_FAILURE'
+    }
+    return isTransientError(input)
+      ? 'AMBIGUOUS_OPERATION_UNRESOLVED'
+      : 'INVALID_STATE'
+  } catch {
+    return 'AMBIGUOUS_OPERATION_UNRESOLVED'
+  }
+}
+
+/**
+ * Classifies one complete apply-seal transaction after an absent root reread.
+ *
+ * @param error - Raw transaction error.
+ * @returns Stable retry, authority, drift, or ambiguous code.
+ */
+function classifyApplySealTransactionError(
+  error: unknown,
+): WorkspaceSearchMigrationFailureCode {
+  try {
+    if (isResourceNotFoundError(error)) {
+      return 'CONFIGURATION_DRIFT'
+    }
+    if (
+      error instanceof TransactionConflictException ||
+      readErrorName(error) === 'TransactionConflictException'
+    ) {
+      return 'TRANSIENT_INFRASTRUCTURE_FAILURE'
+    }
+    if (
+      error instanceof TransactionCanceledException ||
+      readErrorName(error) === 'TransactionCanceledException'
+    ) {
+      const index =
+        workspaceSearchMigrationApplySealTransactionIndex
+      if (
+        readCancellationReasonCode(error, index.lease) ===
+          'ConditionalCheckFailed'
+      ) {
+        return 'LEASE_LOST'
+      }
+      if (
+        readCancellationReasonCode(error, index.pointer) ===
+          'ConditionalCheckFailed' ||
+        readCancellationReasonCode(error, index.receipt) ===
+          'ConditionalCheckFailed'
+      ) {
+        return 'INVALID_MAINTENANCE_EVIDENCE'
+      }
+      for (
+        let conditionIndex = index.writerFence;
+        conditionIndex <= index.appliedRoot;
         conditionIndex += 1
       ) {
         if (
