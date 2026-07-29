@@ -114,6 +114,11 @@ import {
   workspaceSearchMigrationApplyCheckpointTransactionIndex,
   workspaceSearchMigrationApplySealTransactionIndex,
 } from './migration-apply-operation-aws'
+import {
+  workspaceSearchMigrationFullVerificationPageTransactionIndex,
+  workspaceSearchMigrationFullVerificationPublishTransactionIndex,
+  type WorkspaceSearchMigrationFullVerificationAwsPort,
+} from './migration-full-verification-aws'
 import type {
   PublishWorkspaceSearchMigrationSealedPlanningAuthorityV2Input,
 } from './migration-sealed-planning-authority-aws'
@@ -396,6 +401,16 @@ type ManagedApplyOperationFixture = ManagedExecutionRunFixture & {
   readonly plannedOperation: WorkspaceSearchPlannedOperation
 }
 
+/**
+ * Complete managed full-verification fixture after immutable apply sealing.
+ */
+type ManagedFullVerificationFixture =
+  ManagedApplyOperationFixture & {
+    /** Resumable full-verification port under the measured session. */
+    readonly verification:
+      WorkspaceSearchMigrationFullVerificationAwsPort
+  }
+
 /** Allowlisted command recorder used without AWS credentials or network access. */
 class RecordingIdentityAwsTransport
   implements WorkspaceSearchMigrationManagedAwsTransport {
@@ -497,8 +512,11 @@ class RecordingIdentityAwsTransport
   /** Optional synchronous effect during authority write preparation. */
   preparePrePlanAuthorityWriteEffect: (() => void) | undefined
 
-  /** Optional synchronous effect after recording an authority point read. */
-  getPrePlanAuthorityEffect: (() => void) | undefined
+  /** Optional awaited effect after recording an authority point read. */
+  getPrePlanAuthorityEffect:
+    ((
+      command: GetItemCommand,
+    ) => void | Promise<void>) | undefined
 
   /** Optional apply-specific output selected before record-key lookup. */
   getPrePlanAuthorityApplyOutput:
@@ -980,7 +998,7 @@ class RecordingIdentityAwsTransport
     command: GetItemCommand,
   ): Promise<GetItemCommandOutput> {
     this.getPrePlanAuthorityCommands.push(command)
-    this.getPrePlanAuthorityEffect?.()
+    await this.getPrePlanAuthorityEffect?.(command)
     const applyOutput =
       this.getPrePlanAuthorityApplyOutput?.(command)
     if (applyOutput !== undefined) {
@@ -6932,6 +6950,702 @@ describe('Workspace Search migration AWS identity adapter', () => {
     },
   )
 
+  test(
+    'strongly reads the exact applied root with all-six verification guards',
+    async () => {
+      const fixture =
+        await createManagedFullVerificationFixture(
+          'verification-applied-root-read',
+        )
+      const appliedRootItem =
+        fixture.transport.transactWritePrePlanAuthorityCommands
+          .flatMap((command) => command.input.TransactItems ?? [])
+          .map((entry) => entry.Put?.Item)
+          .find((item) =>
+            item?.kind?.S ===
+              'workspace-search-migration-applied-root-record'
+          )
+      const appliedRootRecordKey = appliedRootItem?.recordKey?.S
+      if (appliedRootRecordKey === undefined) {
+        throw new Error('Expected one durable managed applied-root row.')
+      }
+      const reads =
+        fixture.transport.getPrePlanAuthorityCommands.length
+      const trace: string[] = []
+      fixture.transport.describeTableEffect = (tableName) => {
+        trace.push(tableName)
+      }
+
+      await expect(fixture.verification.readProgress())
+        .resolves.toBeUndefined()
+
+      const appliedRootRead =
+        fixture.transport.getPrePlanAuthorityCommands
+          .slice(reads)
+          .find((command) =>
+            command.input.Key?.recordKey?.S === appliedRootRecordKey
+          )
+      expect(appliedRootRead?.input).toMatchObject({
+        TableName: fixture.requested.tables['migration-state'],
+        ConsistentRead: true,
+      })
+      const expectedTables = [
+        fixture.requested.tables['migration-state'],
+        fixture.requested.tables['project-directory'],
+        fixture.requested.tables['work-items'],
+        fixture.requested.tables.collaboration,
+        fixture.requested.tables.documents,
+        fixture.requested.tables['workspace-search'],
+      ]
+      for (const tableName of expectedTables) {
+        expect(trace).toContain(tableName)
+      }
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'reduces one exact private source page after exactly one managed Scan',
+    async () => {
+      const fixture =
+        await createManagedFullVerificationFixture(
+          'verification-source-page',
+        )
+      fixture.transport.scanSourceOutput = {
+        $metadata: {},
+        Count: 1,
+        Items: [createManagedApplySourceItem()],
+        ScannedCount: 1,
+      }
+      const sourceScans =
+        fixture.transport.scanSourceCommands.length
+      const targetScans =
+        fixture.transport.scanTargetCommands.length
+      const transactions =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+      const trace: string[] = []
+      fixture.transport.describeTableEffect = (tableName) => {
+        trace.push(tableName)
+      }
+      fixture.transport.scanSourceEffect = () => {
+        trace.push('verification-source-scan')
+      }
+      fixture.transport.transactWritePrePlanAuthorityEffect = () => {
+        trace.push('verification-page-transaction')
+      }
+
+      const state = await fixture.verification.saveVerificationPage(
+        createManagedFullVerificationPageCommand(
+          fixture,
+          'project-directory',
+          0,
+        ),
+      )
+
+      expect(state).toMatchObject({
+        revision: 1,
+        progress: {
+          traversal: {
+            sources: {
+              'project-directory': {
+                aggregate: {
+                  scanned: 1,
+                  mapped: 1,
+                  projected: 1,
+                  pageCount: 1,
+                },
+                completed: true,
+              },
+            },
+          },
+          sourceBindings: {
+            'project-directory': {
+              count: 1,
+            },
+          },
+        },
+      })
+      expect(fixture.transport.scanSourceCommands)
+        .toHaveLength(sourceScans + 1)
+      expect(fixture.transport.scanTargetCommands)
+        .toHaveLength(targetScans)
+      expect(
+        fixture.transport.scanSourceCommands[sourceScans]?.input,
+      ).toEqual({
+        TableName:
+          fixture.requested.tables['project-directory'],
+        ConsistentRead: true,
+        Limit: 100,
+      })
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactions + 1)
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands[
+            transactions
+          ]?.input.TransactItems,
+      ).toHaveLength(
+        workspaceSearchMigrationFullVerificationPageTransactionIndex.count,
+      )
+      const scanIndex = trace.indexOf('verification-source-scan')
+      const transactionIndex =
+        trace.indexOf('verification-page-transaction')
+      expect(scanIndex).toBeGreaterThan(0)
+      expect(transactionIndex).toBeGreaterThan(scanIndex)
+      const expectedTables = [
+        fixture.requested.tables['migration-state'],
+        fixture.requested.tables['project-directory'],
+        fixture.requested.tables['work-items'],
+        fixture.requested.tables.collaboration,
+        fixture.requested.tables.documents,
+        fixture.requested.tables['workspace-search'],
+      ]
+      const guardsBeforeScan = trace.slice(0, scanIndex)
+      const guardsBeforeTransaction =
+        trace.slice(scanIndex + 1, transactionIndex)
+      for (const tableName of expectedTables) {
+        expect(guardsBeforeScan).toContain(tableName)
+        expect(guardsBeforeTransaction).toContain(tableName)
+      }
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'reconciles one managed verification page after transaction response loss',
+    async () => {
+      const fixture =
+        await createManagedFullVerificationFixture(
+          'verification-response-loss',
+        )
+      fixture.transport.scanSourceOutput = {
+        $metadata: {},
+        Count: 1,
+        Items: [createManagedApplySourceItem()],
+        ScannedCount: 1,
+      }
+      const transactions =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+      fixture.transport
+        .transactWritePrePlanAuthorityPostCommitEffect = () => {
+          throw new Error('redacted verification response loss')
+        }
+
+      const state = await fixture.verification.saveVerificationPage(
+        createManagedFullVerificationPageCommand(
+          fixture,
+          'project-directory',
+          0,
+        ),
+      )
+
+      fixture.transport
+        .transactWritePrePlanAuthorityPostCommitEffect = undefined
+      expect(state).toMatchObject({
+        revision: 1,
+        predecessorKind: 'applied-root',
+      })
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactions + 1)
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'reduces one exact private target page after exactly one managed Scan',
+    async () => {
+      const fixture =
+        await createManagedFullVerificationFixture(
+          'verification-target-page',
+        )
+      fixture.transport.scanTargetOutput = {
+        $metadata: {},
+        Count: 1,
+        Items: [createManagedApplyTargetItem(false)],
+        ScannedCount: 1,
+      }
+      const sourceScans =
+        fixture.transport.scanSourceCommands.length
+      const targetScans =
+        fixture.transport.scanTargetCommands.length
+
+      const state = await fixture.verification.saveVerificationPage(
+        createManagedFullVerificationPageCommand(
+          fixture,
+          'target',
+          0,
+        ),
+      )
+
+      expect(state).toMatchObject({
+        revision: 1,
+        progress: {
+          traversal: {
+            target: {
+              aggregate: {
+                scanned: 1,
+                mapped: 1,
+                projected: 1,
+                pageCount: 1,
+              },
+              completed: true,
+            },
+          },
+          targetPresentBindings: {
+            count: 1,
+          },
+        },
+      })
+      expect(fixture.transport.scanSourceCommands)
+        .toHaveLength(sourceScans)
+      expect(fixture.transport.scanTargetCommands)
+        .toHaveLength(targetScans + 1)
+      expect(
+        fixture.transport.scanTargetCommands[targetScans]?.input,
+      ).toEqual({
+        TableName:
+          fixture.requested.tables['workspace-search'],
+        ConsistentRead: true,
+        Limit: 100,
+      })
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'rejects target replacement after an authoritative receipt traversal',
+    async () => {
+      const fixture =
+        await createManagedFullVerificationFixture(
+          'verification-receipt-chain-drift',
+        )
+      const terminal =
+        await completeManagedFullVerificationTraversal(fixture)
+      const targetTableName =
+        fixture.requested.tables['workspace-search']
+      const originalTarget =
+        fixture.transport.describeTableOutputs.get(targetTableName)
+      if (originalTarget === undefined) {
+        throw new Error(
+          'Expected measured verification chain target identity.',
+        )
+      }
+      let receiptChainDriftInjected = false
+      fixture.transport.getPrePlanAuthorityEffect = (command) => {
+        const recordKey = command.input.Key?.recordKey?.S
+        if (
+          receiptChainDriftInjected ||
+          recordKey === undefined ||
+          !recordKey.startsWith(
+            'full-verification-page-receipt/v1/',
+          )
+        ) {
+          return
+        }
+        receiptChainDriftInjected = true
+        fixture.transport.describeTableOutputs.set(
+          targetTableName,
+          createReplacementDescribeTableOutput(
+            'workspace-search',
+            targetTableName,
+            fixture.requested,
+          ),
+        )
+      }
+      const receiptReadStart =
+        fixture.transport.getPrePlanAuthorityCommands.length
+      const driftFailure =
+        await captureWorkspaceSearchMigrationFailure(
+          fixture.verification.readProgress(),
+        )
+      expect(driftFailure.code).toBe('TARGET_DRIFT')
+      expect(driftFailure.message).toBe('TARGET_DRIFT')
+      expect(receiptChainDriftInjected).toBe(true)
+      expect(
+        fixture.transport.getPrePlanAuthorityCommands
+          .slice(receiptReadStart)
+          .filter((command) =>
+            command.input.Key?.recordKey?.S?.startsWith(
+              'full-verification-page-receipt/v1/',
+            ) === true
+          ),
+      ).toHaveLength(terminal.revision)
+      fixture.transport.getPrePlanAuthorityEffect = undefined
+      fixture.transport.describeTableOutputs.set(
+        targetTableName,
+        originalTarget,
+      )
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'stops authoritative receipt traversal on close or remeasurement',
+    async () => {
+      for (const lifecycle of [
+        'close',
+        'remeasure',
+      ] as const) {
+        const fixture =
+          await createManagedFullVerificationFixture(
+            `verification-receipt-chain-${lifecycle}`,
+          )
+        await completeManagedFullVerificationTraversal(fixture)
+        const receiptReadStart =
+          fixture.transport.getPrePlanAuthorityCommands.length
+        let receiptReadCount = 0
+        fixture.transport.getPrePlanAuthorityEffect =
+          async (command) => {
+            if (
+              command.input.Key?.recordKey?.S?.startsWith(
+                'full-verification-page-receipt/v1/',
+              ) !== true
+            ) {
+              return
+            }
+            receiptReadCount += 1
+            if (receiptReadCount !== 2) return
+            fixture.transport.getPrePlanAuthorityEffect = undefined
+            if (lifecycle === 'close') {
+              fixture.port.close()
+              return
+            }
+            await fixture.port.measureConfiguration()
+          }
+
+        const failure =
+          await captureWorkspaceSearchMigrationFailure(
+            fixture.verification.readProgress(),
+          )
+
+        expect(failure.code).toBe('INVALID_STATE')
+        const receiptReads =
+          fixture.transport.getPrePlanAuthorityCommands
+            .slice(receiptReadStart)
+            .filter((command) =>
+              command.input.Key?.recordKey?.S?.startsWith(
+                'full-verification-page-receipt/v1/',
+              ) === true
+            )
+        expect(receiptReads).toHaveLength(2)
+        for (const command of receiptReads) {
+          expect(command.input).toMatchObject({
+            TableName:
+              fixture.requested.tables['migration-state'],
+            ConsistentRead: true,
+          })
+        }
+        if (lifecycle === 'remeasure') fixture.port.close()
+      }
+    },
+  )
+
+  test(
+    'publishes and rereads terminal verification through managed S3',
+    async () => {
+      const fixture =
+        await createManagedFullVerificationFixture(
+          'verification-publish-read',
+        )
+      const terminal =
+        await completeManagedFullVerificationTraversal(fixture)
+
+      const receiptReadStart =
+        fixture.transport.getPrePlanAuthorityCommands.length
+      const describeStart =
+        fixture.transport.describeTableCommands.length
+      await expect(fixture.verification.readProgress())
+        .resolves.toEqual(terminal)
+      const authoritativeReads =
+        fixture.transport.getPrePlanAuthorityCommands.slice(
+          receiptReadStart,
+        )
+      expect(
+        authoritativeReads.filter((command) =>
+          command.input.Key?.recordKey?.S?.startsWith(
+            'full-verification-page-receipt/v1/',
+          ) === true
+        ),
+      ).toHaveLength(terminal.revision)
+      expect(
+        fixture.transport.describeTableCommands.length -
+          describeStart,
+      ).toBe(36)
+      const puts =
+        fixture.transport.putImmutableArtifactCommands.length
+      const gets =
+        fixture.transport.getImmutableArtifactCommands.length
+      const transactions =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+      const trace: string[] = []
+      fixture.transport.describeTableEffect = (tableName) => {
+        trace.push(tableName)
+      }
+      fixture.transport.putImmutableArtifactEffect = () => {
+        trace.push('verification-result-put')
+      }
+      fixture.transport.transactWritePrePlanAuthorityEffect = () => {
+        trace.push('verification-root-transaction')
+      }
+
+      const root = await fixture.verification.publishVerified({
+        expectedRevision: terminal.revision,
+        lease: {
+          runId: fixture.currentAuthority.lease.runId,
+          ownerId: fixture.currentAuthority.lease.ownerId,
+          fenceToken: fixture.currentAuthority.lease.fenceToken,
+        },
+      })
+      const reread =
+        await fixture.verification.readVerifiedRoot()
+
+      expect(reread).toEqual(root)
+      expect(root).toMatchObject({
+        runId: fixture.currentAuthority.lease.runId,
+        configurationHash:
+          fixture.currentAuthority.configurationHash,
+        terminalStateDigest: terminal.stateDigest,
+        verificationResultReference: {
+          kind:
+            'workspace-search-migration-verification-result-artifact-reference',
+        },
+      })
+      expect(
+        fixture.transport.putImmutableArtifactCommands,
+      ).toHaveLength(puts + 1)
+      expect(
+        fixture.transport.putImmutableArtifactCommands[puts]
+          ?.input.Key,
+      ).toContain('/verification-result-artifacts/v1/')
+      expect(
+        fixture.transport.getImmutableArtifactCommands.length,
+      ).toBeGreaterThan(gets)
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactions + 1)
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands[
+            transactions
+          ]?.input.TransactItems,
+      ).toHaveLength(
+        workspaceSearchMigrationFullVerificationPublishTransactionIndex.count,
+      )
+      const putIndex = trace.indexOf('verification-result-put')
+      const transactionIndex =
+        trace.indexOf('verification-root-transaction')
+      expect(putIndex).toBeGreaterThan(0)
+      expect(transactionIndex).toBeGreaterThan(putIndex)
+      const expectedTables = [
+        fixture.requested.tables['migration-state'],
+        fixture.requested.tables['project-directory'],
+        fixture.requested.tables['work-items'],
+        fixture.requested.tables.collaboration,
+        fixture.requested.tables.documents,
+        fixture.requested.tables['workspace-search'],
+      ]
+      const guardsBeforePut = trace.slice(0, putIndex)
+      const guardsBeforeTransaction =
+        trace.slice(putIndex + 1, transactionIndex)
+      for (const tableName of expectedTables) {
+        expect(guardsBeforePut).toContain(tableName)
+        expect(guardsBeforeTransaction).toContain(tableName)
+      }
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'quarantines verification-result S3 writes after table drift',
+    async () => {
+      const fixture =
+        await createManagedFullVerificationFixture(
+          'verification-result-s3-drift',
+        )
+      const terminal =
+        await completeManagedFullVerificationTraversal(fixture)
+      const targetTableName =
+        fixture.requested.tables['workspace-search']
+      const originalTarget =
+        fixture.transport.describeTableOutputs.get(targetTableName)
+      if (originalTarget === undefined) {
+        throw new Error('Expected measured result-write target identity.')
+      }
+      const puts =
+        fixture.transport.putImmutableArtifactCommands.length
+      const transactions =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+      fixture.transport.putImmutableArtifactEffect = () => {
+        fixture.transport.describeTableOutputs.set(
+          targetTableName,
+          createReplacementDescribeTableOutput(
+            'workspace-search',
+            targetTableName,
+            fixture.requested,
+          ),
+        )
+      }
+
+      const failure =
+        await captureWorkspaceSearchMigrationFailure(
+          fixture.verification.publishVerified({
+            expectedRevision: terminal.revision,
+            lease: {
+              runId: fixture.currentAuthority.lease.runId,
+              ownerId: fixture.currentAuthority.lease.ownerId,
+              fenceToken: fixture.currentAuthority.lease.fenceToken,
+            },
+          }),
+        )
+
+      expect(failure.code)
+        .toBe('AMBIGUOUS_OPERATION_UNRESOLVED')
+      expect(
+        fixture.transport.putImmutableArtifactCommands,
+      ).toHaveLength(puts + 1)
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactions)
+      fixture.transport.putImmutableArtifactEffect = undefined
+      fixture.transport.describeTableOutputs.set(
+        targetTableName,
+        originalTarget,
+      )
+      const reads =
+        fixture.transport.getPrePlanAuthorityCommands.length
+      await expect(fixture.verification.readProgress())
+        .rejects.toEqual(
+          new WorkspaceSearchMigrationFailure(
+            'INVALID_STATE',
+            'Workspace Search migration full verification failed.',
+          ),
+        )
+      expect(
+        fixture.transport.getPrePlanAuthorityCommands,
+      ).toHaveLength(reads)
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'quarantines managed verification after post-send table drift',
+    async () => {
+      const fixture =
+        await createManagedFullVerificationFixture(
+          'verification-post-send-drift',
+        )
+      fixture.transport.scanSourceOutput = {
+        $metadata: {},
+        Count: 1,
+        Items: [createManagedApplySourceItem()],
+        ScannedCount: 1,
+      }
+      const targetTableName =
+        fixture.requested.tables['workspace-search']
+      const originalTarget =
+        fixture.transport.describeTableOutputs.get(targetTableName)
+      if (originalTarget === undefined) {
+        throw new Error('Expected measured verification target identity.')
+      }
+      fixture.transport
+        .transactWritePrePlanAuthorityPostCommitEffect = () => {
+          fixture.transport.describeTableOutputs.set(
+            targetTableName,
+            createReplacementDescribeTableOutput(
+              'workspace-search',
+              targetTableName,
+              fixture.requested,
+            ),
+          )
+        }
+
+      const failure =
+        await captureWorkspaceSearchMigrationFailure(
+          fixture.verification.saveVerificationPage(
+            createManagedFullVerificationPageCommand(
+              fixture,
+              'project-directory',
+              0,
+            ),
+          ),
+        )
+
+      expect(failure.code)
+        .toBe('AMBIGUOUS_OPERATION_UNRESOLVED')
+      fixture.transport
+        .transactWritePrePlanAuthorityPostCommitEffect = undefined
+      fixture.transport.describeTableOutputs.set(
+        targetTableName,
+        originalTarget,
+      )
+      const reads =
+        fixture.transport.getPrePlanAuthorityCommands.length
+      await expect(fixture.verification.readProgress())
+        .rejects.toEqual(
+          new WorkspaceSearchMigrationFailure(
+            'INVALID_STATE',
+            'Workspace Search migration full verification failed.',
+          ),
+        )
+      expect(
+        fixture.transport.getPrePlanAuthorityCommands,
+      ).toHaveLength(reads)
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'invalidates stale full-verification ports on remeasurement and close',
+    async () => {
+      const fixture =
+        await createManagedFullVerificationFixture(
+          'verification-lifecycle',
+        )
+      const expectedFailure =
+        new WorkspaceSearchMigrationFailure(
+          'INVALID_STATE',
+          'Workspace Search migration full verification failed.',
+        )
+
+      await fixture.port.measureConfiguration()
+      const reads =
+        fixture.transport.getPrePlanAuthorityCommands.length
+      await expect(fixture.verification.readProgress())
+        .rejects.toEqual(expectedFailure)
+      expect(
+        fixture.transport.getPrePlanAuthorityCommands,
+      ).toHaveLength(reads)
+
+      const current = fixture.port.createFullVerificationPort(
+        fixture.executionBoundary,
+        fixture.sealedPlanningAuthority,
+        fixture.closedWriterFenceRecord,
+        fixture.executionRun,
+      )
+      fixture.port.close()
+      await expect(current.readProgress())
+        .rejects.toEqual(expectedFailure)
+      expect(() =>
+        fixture.port.createFullVerificationPort(
+          fixture.executionBoundary,
+          fixture.sealedPlanningAuthority,
+          fixture.closedWriterFenceRecord,
+          fixture.executionRun,
+        ),
+      ).toThrow(expectedFailure)
+    },
+  )
+
   test('stores and replays an empty plan through measured immutable S3', async () => {
     const requested = createRequestedResources()
     const transport = new RecordingIdentityAwsTransport()
@@ -10415,6 +11129,97 @@ async function createManagedApplyOperationFixture(
 }
 
 /**
+ * Builds one managed port after completing and sealing the exact apply phase.
+ *
+ * @param identifier - Unique full-verification fixture suffix.
+ * @returns Measured full-verification port and its durable predecessors.
+ */
+async function createManagedFullVerificationFixture(
+  identifier: string,
+): Promise<ManagedFullVerificationFixture> {
+  const fixture =
+    await createManagedApplyOperationFixture(identifier)
+  const apply = await createManagedApplyCheckpointPort(fixture)
+  const terminal = await completeManagedApplyTraversal(
+    fixture,
+    apply,
+  )
+  await apply.sealApply(
+    createManagedApplySealCommand(fixture, terminal.revision),
+  )
+  return {
+    ...fixture,
+    verification: fixture.port.createFullVerificationPort(
+      fixture.executionBoundary,
+      fixture.sealedPlanningAuthority,
+      fixture.closedWriterFenceRecord,
+      fixture.executionRun,
+    ),
+  }
+}
+
+/**
+ * Completes all four independent source rescans and the target rescan.
+ *
+ * @param fixture - Exact applied managed full-verification fixture.
+ * @returns Terminal persisted verification state ready for publication.
+ */
+async function completeManagedFullVerificationTraversal(
+  fixture: ManagedFullVerificationFixture,
+): Promise<
+  Awaited<
+    ReturnType<
+      WorkspaceSearchMigrationFullVerificationAwsPort[
+        'saveVerificationPage'
+      ]
+    >
+  >
+> {
+  let expectedRevision = 0
+  let state:
+    Awaited<
+      ReturnType<
+        WorkspaceSearchMigrationFullVerificationAwsPort[
+          'saveVerificationPage'
+        ]
+      >
+    > | undefined
+  for (const source of workspaceSearchMigrationSourceNames) {
+    fixture.transport.scanSourceOutput =
+      source === 'project-directory'
+        ? {
+            $metadata: {},
+            Count: 1,
+            Items: [createManagedApplySourceItem()],
+            ScannedCount: 1,
+          }
+        : createEmptyScanOutput()
+    state = await fixture.verification.saveVerificationPage(
+      createManagedFullVerificationPageCommand(
+        fixture,
+        source,
+        expectedRevision,
+      ),
+    )
+    expectedRevision = state.revision
+  }
+  fixture.transport.scanTargetOutput = {
+    $metadata: {},
+    Count: 1,
+    Items: [createManagedApplyTargetItem(false)],
+    ScannedCount: 1,
+  }
+  state = await fixture.verification.saveVerificationPage(
+    createManagedFullVerificationPageCommand(
+      fixture,
+      'target',
+      expectedRevision,
+    ),
+  )
+  return state
+}
+
+/**
  * Creates one managed apply port and durably completes its single plan item.
  *
  * @param fixture - Exact admitted managed apply fixture.
@@ -10527,6 +11332,38 @@ function createManagedApplyCheckpointCommand(
   location: WorkspaceSearchMigrationCheckpointCommandInput['location'],
   expectedRevision: number,
 ): WorkspaceSearchMigrationCheckpointCommandInput {
+  return {
+    expectedRevision,
+    lease: {
+      runId: fixture.currentAuthority.lease.runId,
+      ownerId: fixture.currentAuthority.lease.ownerId,
+      fenceToken: fixture.currentAuthority.lease.fenceToken,
+    },
+    location,
+  }
+}
+
+/**
+ * Creates one strict managed full-verification page command.
+ *
+ * @param fixture - Exact sealed apply and verification fixture.
+ * @param location - Source or target advanced by this one-page command.
+ * @param expectedRevision - Exact durable predecessor revision.
+ * @returns Exact verification page command under the admitted lease.
+ */
+function createManagedFullVerificationPageCommand(
+  fixture: ManagedFullVerificationFixture,
+  location: Parameters<
+    WorkspaceSearchMigrationFullVerificationAwsPort[
+      'saveVerificationPage'
+    ]
+  >[0]['location'],
+  expectedRevision: number,
+): Parameters<
+  WorkspaceSearchMigrationFullVerificationAwsPort[
+    'saveVerificationPage'
+  ]
+>[0] {
   return {
     expectedRevision,
     lease: {

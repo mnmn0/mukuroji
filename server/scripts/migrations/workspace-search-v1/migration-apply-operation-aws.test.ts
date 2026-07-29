@@ -132,6 +132,14 @@ import {
   serializeWorkspaceSearchMigrationCompleteApplySeal,
   type WorkspaceSearchMigrationCompleteApplySeal,
 } from './migration-apply-seal'
+import {
+  createWorkspaceSearchMigrationAppliedRootConditionCheck,
+  createWorkspaceSearchMigrationAppliedRootKey,
+  createWorkspaceSearchMigrationAppliedRootRecord,
+  createWorkspaceSearchMigrationAppliedRootStrongReadCommand,
+  parseWorkspaceSearchMigrationAppliedRootRecord,
+  parseWorkspaceSearchMigrationAppliedRootStrongReadOutput,
+} from './migration-applied-root-aws'
 
 const runId = 'apply-operation-aws-test'
 const ownerId = 'apply-operation-owner'
@@ -2202,6 +2210,113 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
         successorRevision: 7,
         status: 'applied',
       })
+      const appliedRootBinding = {
+        stateTable:
+          fixture.configuration.tables['migration-state'],
+        configurationHash: fixture.configurationHash,
+        executionRun: fixture.executionRun,
+      }
+      const appliedRootInput = {
+        ...appliedRootBinding,
+        root,
+      }
+      expect(
+        createWorkspaceSearchMigrationAppliedRootRecord(
+          appliedRootInput,
+        ),
+      ).toEqual(rootPut.Item)
+      const appliedRootKey =
+        createWorkspaceSearchMigrationAppliedRootKey(
+          appliedRootBinding,
+        )
+      const strongRead =
+        createWorkspaceSearchMigrationAppliedRootStrongReadCommand(
+          appliedRootBinding,
+        )
+      expect(strongRead.input).toEqual({
+        TableName:
+          fixture.configuration.tables['migration-state']
+            .tableName,
+        ConsistentRead: true,
+        Key: appliedRootKey,
+      })
+      expect(
+        parseWorkspaceSearchMigrationAppliedRootStrongReadOutput({
+          ...appliedRootBinding,
+          output: { Item: rootPut.Item },
+        }),
+      ).toEqual(root)
+      expect(
+        parseWorkspaceSearchMigrationAppliedRootStrongReadOutput({
+          ...appliedRootBinding,
+          output: {},
+        }),
+      ).toBeUndefined()
+      expect(
+        parseWorkspaceSearchMigrationAppliedRootRecord({
+          ...appliedRootBinding,
+          item: rootPut.Item,
+        }),
+      ).toEqual(root)
+      const appliedRootCondition =
+        createWorkspaceSearchMigrationAppliedRootConditionCheck(
+          appliedRootInput,
+        ).ConditionCheck
+      if (appliedRootCondition === undefined) {
+        throw new Error(
+          'Expected one exact applied-root condition check.',
+        )
+      }
+      const controlledAttributes = Object.keys(rootPut.Item)
+        .filter(
+          (name) =>
+            name !== 'migrationId' && name !== 'recordKey',
+        )
+        .sort()
+      expect(appliedRootCondition.TableName).toBe(
+        fixture.configuration.tables['migration-state']
+          .tableName,
+      )
+      expect(appliedRootCondition.Key).toEqual(appliedRootKey)
+      expect(
+        Object.values(
+          appliedRootCondition.ExpressionAttributeNames ?? {},
+        ).sort(),
+      ).toEqual(controlledAttributes)
+      expect(
+        Object.values(
+          appliedRootCondition.ExpressionAttributeNames ?? {},
+        ),
+      ).toContain('rootBytes')
+      expect(
+        Object.keys(
+          appliedRootCondition.ExpressionAttributeValues ?? {},
+        ),
+      ).toHaveLength(controlledAttributes.length)
+      const corruptedRootRecord = {
+        ...structuredClone(rootPut.Item),
+        rootDigest: { S: digest('corrupted-applied-root') },
+      }
+      expect(
+        captureSynchronousMigrationFailure(() =>
+          parseWorkspaceSearchMigrationAppliedRootRecord({
+            ...appliedRootBinding,
+            item: corruptedRootRecord,
+          })
+        ).code,
+      ).toBe('INVALID_STATE')
+      const extendedRootRecord = {
+        ...structuredClone(rootPut.Item),
+        unexpected: { S: 'forbidden' },
+      }
+      expect(
+        captureSynchronousMigrationFailure(() =>
+          parseWorkspaceSearchMigrationAppliedRootRecord({
+            ...appliedRootBinding,
+            item: extendedRootRecord,
+          })
+        ).code,
+      ).toBe('INVALID_STATE')
       const sealEvents = harness.events.slice(eventStart)
       expect(sealEvents.indexOf('apply-seal-write')).toBeLessThan(
         sealEvents.indexOf('prepare'),
@@ -2763,6 +2878,7 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
         expect(harness.transactions).toHaveLength(6)
       }
     },
+    15_000,
   )
 })
 
@@ -4003,6 +4119,24 @@ async function captureMigrationFailure(
 ): Promise<WorkspaceSearchMigrationFailure> {
   try {
     await operation()
+  } catch (error: unknown) {
+    if (error instanceof WorkspaceSearchMigrationFailure) return error
+    throw error
+  }
+  throw new Error('Expected a migration failure.')
+}
+
+/**
+ * Captures one synchronous migration failure.
+ *
+ * @param operation - Failing synchronous boundary operation.
+ * @returns Exact public migration failure.
+ */
+function captureSynchronousMigrationFailure(
+  operation: () => unknown,
+): WorkspaceSearchMigrationFailure {
+  try {
+    operation()
   } catch (error: unknown) {
     if (error instanceof WorkspaceSearchMigrationFailure) return error
     throw error
