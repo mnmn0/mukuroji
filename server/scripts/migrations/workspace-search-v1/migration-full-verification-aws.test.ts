@@ -260,6 +260,18 @@ describe('Workspace Search migration full-verification AWS adapter', () => {
           .verificationState
       ]?.Put?.ConditionExpression,
     ).toContain('attribute_not_exists')
+    const rollbackStartGuard = transactionItems(
+      harness.transactions[0],
+    )[
+      workspaceSearchMigrationFullVerificationPageTransactionIndex
+        .rollbackStart
+    ]?.ConditionCheck
+    expect(rollbackStartGuard?.ConditionExpression).toBe(
+      'attribute_not_exists(#migrationId) AND attribute_not_exists(#recordKey)',
+    )
+    expect(rollbackStartGuard?.Key?.recordKey?.S).toMatch(
+      /^rollback-start\/v1\/[0-9a-f]{64}$/u,
+    )
     const firstReceipt = harness.receipts[0]
     const firstAuthorityEvaluatedAt =
       harness.authorityEvaluatedAts[0]
@@ -315,6 +327,12 @@ describe('Workspace Search migration full-verification AWS adapter', () => {
       workspaceSearchMigrationFullVerificationPublishTransactionIndex
         .count,
     )
+    expect(
+      transactionItems(harness.transactions.at(-1))[
+        workspaceSearchMigrationFullVerificationPublishTransactionIndex
+          .rollbackStart
+      ]?.ConditionCheck?.Key?.recordKey?.S,
+    ).toBe(rollbackStartGuard?.Key?.recordKey?.S)
     expect(
       (await harness.port.readVerifiedRoot())?.verifiedRootDigest,
     ).toBe(root.verifiedRootDigest)
@@ -651,6 +669,12 @@ describe('Workspace Search migration full-verification AWS adapter', () => {
         index:
           workspaceSearchMigrationFullVerificationPageTransactionIndex
             .appliedRoot,
+        expected: 'INVALID_STATE',
+      },
+      {
+        index:
+          workspaceSearchMigrationFullVerificationPageTransactionIndex
+            .rollbackStart,
         expected: 'INVALID_STATE',
       },
       {

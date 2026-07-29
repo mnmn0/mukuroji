@@ -15,6 +15,7 @@ import {
 } from './migration-contract'
 import {
   createAbsentMigrationItemDigest,
+  decodeWorkspaceSearchJournalRestorationMaterial,
   parseWorkspaceSearchJournalSegment,
   serializeWorkspaceSearchJournalSegment,
   WORKSPACE_SEARCH_JOURNAL_SEGMENT_MAX_BYTES,
@@ -133,6 +134,25 @@ describe('Workspace Search migration journal', () => {
     )
 
     expect(parsed.before).toEqual(withPreimage.before)
+    expect(
+      decodeWorkspaceSearchJournalRestorationMaterial(parsed),
+    ).toEqual({
+      targetKey: decodeAttributeMap(parsed.targetKey),
+      before: {
+        exists: true,
+        item: parsed.before.exists
+          ? decodeAttributeMap(parsed.before.item)
+          : {},
+        digest: createAttributeMapDigest(rawBefore),
+      },
+      after: parsed.after.exists
+        ? {
+            exists: true,
+            item: decodeAttributeMap(parsed.after.item),
+            digest: parsed.after.digest,
+          }
+        : parsed.after,
+    })
   })
 
   test('rejects no-op segments before serialization', () => {

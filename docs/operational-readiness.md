@@ -733,13 +733,32 @@ verification-plan digestへ固定し、completionはsource/orphan/total operatio
 complete apply seal、sealed planning authorityを相互検証します。このkernel result単体はimmutable applied
 rootへまだ束縛されておらず、authoritativeな`verified` publicationではありません。Concrete AWS
 state/evidence adapterはexact-version planを一度だけ再生し、applied rootを強整合readして、独立した
-source/target rescanの完全progressをmutable stateとimmutable page receiptへ固定9 item transactionで
+source/target rescanの完全progressをmutable stateとimmutable page receiptへ固定10 item transactionで
 保存します。Stateはapplied rootからterminal revisionまでpredecessor state/command digestで連結し、
 再起動後のpublic readでも全receipt chainを再検証します。Terminal publicationはcomplete apply sealと
 semantic verification-result envelopeをexact versionで再読し、`{appliedRootDigest,
 verificationResultDigest}`、terminal state/receipt、sealed authority、current authorityをimmutable
-verified rootへcross-bindする固定9 item transactionです。応答消失時はstate/receiptまたはroot/result
-artifactの完全一致だけを成功として回収します。
+verified rootへcross-bindする固定10 item transactionです。両transactionはrollback-start sentinelの
+absenceも条件検査します。応答消失時はstate/receiptまたはroot/result artifactの完全一致だけを
+成功として回収します。
+
+Complete applied rootから開始するstandalone reverse-rollback AWS portは、immutable start root、
+restart可能な完全run-state、exact-predecessor CAS state、各reverse operationのimmutable receipt、
+terminal rolled-back rootをstrict canonical rowとして保存します。Rollback startはfull-verification
+state/rootのabsenceを、full verificationのpage/publicationはrollback-start sentinelのabsenceを同じ
+transactionで条件検査し、同一runのverify/rollback開始raceをfail-closedにします。各reverse stepは
+adapterが次のjournal sequenceとoperation identityを決定し、apply sequence receiptとoperation markerを
+強整合再読・完全行条件で固定して、Object Lock上のexact journal versionからnative DynamoDB
+key/preimage/postimageを再構成します。Start時の最短journal期限と各stepのexact `retainUntil` は、最終
+transaction時刻からminimum commit windowを超えて残っていなければなりません。Targetがpost-apply
+snapshotと完全一致する場合だけpreimageへCAS復元し、measured TTL属性を含むknown schemaの追加raceも
+拒否して、start/step/finishをそれぞれ固定12/13/10 item transactionでcommitします。個別の強整合read間に
+transactionが成立した場合はbounded coherent rereadで安定snapshotを取得します。応答消失、process再起動、
+旧revision retryはdeterministic command、immutable receiptとroot-boundなcurrent successorまたは後続state
+の一致だけを成功として回収し、同一commandの競合attemptが異なるtrusted timestampを選んでもlogical
+winnerを受理します。このportはcomplete applied rootだけを対象にし、writerを再openしません。部分apply
+prefixからのdurable start、managed measured session composition、実行supervisorとterminal releaseは
+別途必要です。
 
 DynamoDB ConditionExpressionには、itemの未知のtop-level属性名を列挙せずに「完全な属性集合」を比較する
 primitiveがありません。したがって、強整合read後からtransactionまでにplanned itemにもknown schemaにも
@@ -759,7 +778,7 @@ full-verification portもmanaged session内で、raw pageを1 Scanだけ取得�
 reducer、plan/apply-seal/result artifact gateway、applied-root strong read、
 state/receipt/verified-root transactionへcompositionします。ただし、現時点ではこれらのmanaged
 apply/verification capabilityをcontrol CLIまたはpost-close orchestratorへ公開していません。
-Apply/seal/verification CLIとorchestrator配線、reverse rollback、terminal outcomeへ
+Apply/seal/verification/rollback CLIとorchestrator配線、partial-prefix rollback、terminal outcomeへ
 束縛したwriter-fence release、close後のdrain/replanning orchestration、migration専用
 observability/alarm、restore/failover/DR drill、non-production実行evidenceも未完了です。Operation/checkpoint
 transactionが存在してもcomplete apply/verify/rollback supervisorにはならないため、Production migration
@@ -907,11 +926,13 @@ Process exit statusは、成功を`0`、migration failureまたは`OPERATION_FAI
    complete-plan apply seal、固定9項目のimmutable applied-root transaction、そのmanaged identity
    composition、all-six pre/post guard、post-send quarantineも実装済みです。さらに、exact plan replayと
    applied-root strong read、独立rescanのresumable state/immutable receipt、semantic result artifact、
-   immutable verified root、固定9項目transaction、response-loss reconciliationを持つfull-verification
-   AWS portとmanaged identity compositionも実装済みです。ただし、close/admission/run
-   creation/apply/seal/verificationのCLI・orchestrator配線、reverse rollback、
-   terminal outcomeに束縛したrelease、observability/alarm、DR/non-production evidenceは未実装のため、
-   migration全体のproduction gateはまだ実行可能とは扱いません。
+   immutable verified root、固定10項目transaction、response-loss reconciliationを持つfull-verification
+   AWS portとmanaged identity compositionも実装済みです。Complete applied rootを対象に、verifyとの
+   start排他、strict durable state/receipt/root、exact apply-receipt guard、journal preimageのreverse
+   target CAS、固定12/13/10項目transactionを持つstandalone rollback AWS portも実装済みです。ただし、
+   close/admission/run creation/apply/seal/verification/rollbackのCLI・orchestrator配線、partial-prefix
+   rollback、terminal outcomeに束縛したrelease、observability/alarm、DR/non-production evidenceは
+   未実装のため、migration全体のproduction gateはまだ実行可能とは扱いません。
 5. Online migration は writer fence/epoch または dual-write + high-watermark catch-up を有効化し、
    source scan と cutover の競合を閉じる。Workspace Search v1はmaintenance writer-fenceを選択する。
    Step 4のcurrent authorityで初回`bootstrapOpen`を行い、API、worker、connector、backfillを含む全継続

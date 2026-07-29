@@ -352,6 +352,20 @@ describe('Workspace Search migration item strong-read verifier', () => {
         )
       ).code,
     ).toBe('TARGET_DRIFT')
+    expect(
+      captureFailure(() =>
+        verifyWorkspaceSearchMigrationItemStrongRead(
+          createTableIdentity(),
+          createKey(),
+          createAbsentSnapshot(),
+          {
+            $metadata: {},
+            Item: createPresentItem(),
+          },
+          'ROLLBACK_TARGET_DRIFT',
+        )
+      ).code,
+    ).toBe('ROLLBACK_TARGET_DRIFT')
   })
 
   test('detects exact canonical value drift including number spelling', () => {

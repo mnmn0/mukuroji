@@ -115,6 +115,9 @@ import {
   type WorkspaceSearchMigrationSealedPlanningAuthorityV2,
 } from './migration-sealed-planning-authority-v2'
 import {
+  createWorkspaceSearchMigrationRollbackStartSentinelAbsentConditionCheck,
+} from './migration-rollback-operation-aws'
+import {
   type WorkspaceSearchMigrationCheckpointLocation,
   type WorkspaceSearchMigrationLeaseClaim,
   WORKSPACE_SEARCH_MIGRATION_MINIMUM_COMMIT_WINDOW_MILLISECONDS,
@@ -136,8 +139,8 @@ const verificationStateRecordKeyPrefix = 'full-verification-state/v1'
 const verificationReceiptRecordKeyPrefix =
   'full-verification-page-receipt/v1'
 const verifiedRootRecordKeyPrefix = 'full-verification-verified-root/v1'
-const pageTransactionItemCount = 9
-const publicationTransactionItemCount = 9
+const pageTransactionItemCount = 10
+const publicationTransactionItemCount = 10
 
 const tableRoles: readonly WorkspaceSearchMigrationTableRole[] = [
   ...workspaceSearchMigrationSourceNames,
@@ -224,10 +227,12 @@ export const workspaceSearchMigrationFullVerificationPageTransactionIndex =
     sealedPlanningAuthority: 5,
     /** Exact complete immutable applied-root condition. */
     appliedRoot: 6,
+    /** Absent rollback-start sentinel condition. */
+    rollbackStart: 7,
     /** Absent or exact-predecessor verification-state Put. */
-    verificationState: 7,
+    verificationState: 8,
     /** Absent immutable page-receipt Put. */
-    pageReceipt: 8,
+    pageReceipt: 9,
     /** Fixed page transaction item count. */
     count: pageTransactionItemCount,
   })
@@ -251,10 +256,12 @@ export const workspaceSearchMigrationFullVerificationPublishTransactionIndex =
     sealedPlanningAuthority: 5,
     /** Exact complete immutable applied-root condition. */
     appliedRoot: 6,
+    /** Absent rollback-start sentinel condition. */
+    rollbackStart: 7,
     /** Exact terminal verification-state condition. */
-    terminalState: 7,
+    terminalState: 8,
     /** Absent immutable verified-root Put. */
-    verifiedRoot: 8,
+    verifiedRoot: 9,
     /** Fixed verified publication transaction item count. */
     count: publicationTransactionItemCount,
   })
@@ -2395,7 +2402,7 @@ function requireExactApplySeal(
  * @param authority - Fresh current authority.
  * @param commitAt - Trusted transaction time.
  * @param transition - Exact page transition material.
- * @returns Fixed nine-item DynamoDB transaction.
+ * @returns Fixed ten-item DynamoDB transaction.
  */
 function createPageTransaction(
   binding: FullVerificationBinding,
@@ -2443,6 +2450,11 @@ function createPageTransaction(
       executionRun: binding.executionRun,
       root: appliedRoot,
     }),
+    createWorkspaceSearchMigrationRollbackStartSentinelAbsentConditionCheck({
+      stateTable: binding.stateTable,
+      configurationHash: binding.configurationHash,
+      executionRun: binding.executionRun,
+    }),
     createVerificationStatePut(
       binding,
       stateRecord,
@@ -2467,7 +2479,7 @@ function createPageTransaction(
  * @param commitAt - Trusted transaction time.
  * @param terminal - Exact terminal state and complete row.
  * @param root - Exact immutable verified root.
- * @returns Fixed nine-item DynamoDB transaction.
+ * @returns Fixed ten-item DynamoDB transaction.
  */
 function createPublishTransaction(
   binding: FullVerificationBinding,
@@ -2507,6 +2519,11 @@ function createPublishTransaction(
       configurationHash: binding.configurationHash,
       executionRun: binding.executionRun,
       root: appliedRoot,
+    }),
+    createWorkspaceSearchMigrationRollbackStartSentinelAbsentConditionCheck({
+      stateTable: binding.stateTable,
+      configurationHash: binding.configurationHash,
+      executionRun: binding.executionRun,
     }),
     createFullRecordConditionCheck(binding, terminal.record),
     createAbsentPut(
