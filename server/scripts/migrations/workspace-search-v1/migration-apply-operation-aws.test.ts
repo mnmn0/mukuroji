@@ -28,7 +28,9 @@ import {
   createMigrationDigest,
   createWorkspaceSearchConfigurationHash,
   createWorkspaceSearchOperationId,
+  MigrationDigestAccumulator,
   type MigrationItemSnapshot,
+  type MigrationSourceCheckpoint,
   type MigrationKeyAttribute,
   type MigrationTableIdentity,
   type WorkspaceSearchJournalSegment,
@@ -43,13 +45,18 @@ import {
   WORKSPACE_SEARCH_MIGRATION_VERSION,
 } from './migration-contract'
 import {
+  parseWorkspaceSearchMigrationApplyCheckpointReceipt,
+} from './migration-apply-checkpoint-receipt'
+import {
   serializeWorkspaceSearchPlanSeal,
 } from './migration-artifacts'
 import {
   createAwsWorkspaceSearchMigrationApplyOperationPort,
+  type WorkspaceSearchMigrationApplyCheckpointScanner,
   type WorkspaceSearchMigrationApplyOperationAuthorityPort,
   type WorkspaceSearchMigrationApplyOperationAwsPort,
   type WorkspaceSearchMigrationApplyOperationAwsTransport,
+  workspaceSearchMigrationApplyCheckpointTransactionIndex,
   workspaceSearchMigrationApplyOperationTransactionIndex,
 } from './migration-apply-operation-aws'
 import {
@@ -63,6 +70,9 @@ import {
   createWorkspaceSearchMigrationExecutionRun,
   type WorkspaceSearchMigrationExecutionRun,
 } from './migration-execution-run'
+import {
+  parseWorkspaceSearchMigrationExecutionState,
+} from './migration-execution-state'
 import {
   serializeWorkspaceSearchJournalSegment,
 } from './migration-journal'
@@ -85,10 +95,13 @@ import type {
   WorkspaceSearchMigrationSealedPlanningAuthorityV2,
 } from './migration-sealed-planning-authority-v2'
 import {
+  createEmptyWorkspaceSearchPlanDigest,
   createWorkspaceSearchMigrationOperationDigest,
   createWorkspaceSearchPlanLeafDigest,
   createWorkspaceSearchPlanNodeDigest,
   type WorkspaceSearchApplyOperationCommandEvent,
+  type WorkspaceSearchMigrationCheckpointCommandInput,
+  type WorkspaceSearchMigrationCheckpointLocation,
   type WorkspaceSearchMigrationCommandInput,
   type WorkspaceSearchPlannedOperation,
 } from './migration-state-machine'
@@ -165,11 +178,20 @@ class ApplyOperationHarness {
   /** Whether the mutation-only sequence row is omitted from fake durability. */
   omitSequenceOnCommit = false
 
+  /** Whether the checkpoint receipt row is omitted from fake durability. */
+  omitCheckpointReceiptOnCommit = false
+
   /** Retention returned by the immutable journal gateway. */
   journalRetainUntil = freshRetainUntil
 
   /** Optional synchronous effect during the final all-six preparation. */
   prepareEffect: (() => void) | undefined
+
+  /** Optional test-owned implementation behind the checkpoint scanner. */
+  checkpointScanImplementation:
+    WorkspaceSearchMigrationApplyCheckpointScanner[
+      'scanApplyCheckpointPage'
+    ] | undefined
 
   /** Ordered high-level dependency operations. */
   readonly events: string[] = []
@@ -183,6 +205,14 @@ class ApplyOperationHarness {
   /** Canonical segments uploaded before a mutating transaction. */
   readonly uploadedJournalSegments: WorkspaceSearchJournalSegment[] = []
 
+  /** Detached checkpoint scan requests observed by the fake scanner. */
+  readonly checkpointScans:
+    Parameters<
+      WorkspaceSearchMigrationApplyCheckpointScanner[
+        'scanApplyCheckpointPage'
+      ]
+    >[0][] = []
+
   /** Number of rejected caller accessors invoked. */
   callerAccessorReads = 0
 
@@ -192,6 +222,10 @@ class ApplyOperationHarness {
 
   /** Plain immutable journal dependency accepted by the adapter factory. */
   readonly journalGateway: WorkspaceSearchMigrationJournalAwsGateway
+
+  /** Plain one-page checkpoint scanner accepted by the adapter factory. */
+  readonly checkpointScanner:
+    WorkspaceSearchMigrationApplyCheckpointScanner
 
   /** Plain DynamoDB dependency accepted by the adapter factory. */
   readonly transport: WorkspaceSearchMigrationApplyOperationAwsTransport
@@ -279,6 +313,19 @@ class ApplyOperationHarness {
           )
         }
         return structuredClone(segment)
+      },
+    }
+    this.checkpointScanner = {
+      scanApplyCheckpointPage: async (input) => {
+        this.events.push('checkpoint-scan')
+        const detached = structuredClone(input)
+        this.checkpointScans.push(detached)
+        const implementation = this.checkpointScanImplementation
+        return implementation === undefined
+          ? createTerminalEmptyCheckpointPage(
+              detached.previousCheckpoint,
+            )
+          : implementation(detached)
       },
     }
     this.transport = {
@@ -405,6 +452,41 @@ class ApplyOperationHarness {
   }
 
   /**
+   * Finds the last transaction Put with one exact record kind.
+   *
+   * @param kind - Exact adapter-owned record kind.
+   * @returns Detached latest durable record or undefined.
+   */
+  findLastTransactionRecord(
+    kind: string,
+  ): Readonly<Record<string, AttributeValue>> | undefined {
+    for (
+      let transactionIndex = this.transactions.length - 1;
+      transactionIndex >= 0;
+      transactionIndex -= 1
+    ) {
+      const transaction = this.transactions[transactionIndex]
+      if (transaction === undefined) continue
+      const items = requireTransactionItems(transaction)
+      for (
+        let itemIndex = items.length - 1;
+        itemIndex >= 0;
+        itemIndex -= 1
+      ) {
+        const item = items[itemIndex]
+        const put = item?.Put
+        if (
+          put?.Item !== undefined &&
+          put.Item.kind?.S === kind
+        ) {
+          return structuredClone(put.Item)
+        }
+      }
+    }
+    return undefined
+  }
+
+  /**
    * Strongly reads one current low-level item.
    *
    * @param command - Adapter-owned strongly consistent GetItem.
@@ -464,6 +546,13 @@ class ApplyOperationHarness {
         if (
           this.omitSequenceOnCommit &&
           kind === 'workspace-search-migration-apply-journal-sequence'
+        ) {
+          continue
+        }
+        if (
+          this.omitCheckpointReceiptOnCommit &&
+          kind ===
+            'workspace-search-migration-apply-checkpoint-receipt'
         ) {
           continue
         }
@@ -1144,18 +1233,722 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
       expect(tamperedHarness.transactions).toEqual([])
     },
   )
+
+  test(
+    'persists a source checkpoint as fixed nine-item receipt and v2 state after every operation is durable',
+    async () => {
+      const fixture = createApplyFixture('put')
+      const harness = new ApplyOperationHarness(fixture)
+      const port = createApplyPort(fixture, harness)
+      await port.commitApplyOperation(createApplyCommand(fixture))
+      const checkpointEventStart = harness.events.length
+
+      const next = await port.saveApplyCheckpoint(
+        createCheckpointCommand(fixture, 'project-directory', 2),
+      )
+
+      expect(next).toMatchObject({
+        revision: 3,
+        appliedOperationCount: 1,
+        status: 'applying',
+      })
+      expect(
+        next.apply.sources['project-directory'],
+      ).toMatchObject({
+        completed: true,
+        aggregate: {
+          scanned: 0,
+          pageCount: 1,
+        },
+      })
+      expect(harness.checkpointScans).toEqual([
+        {
+          location: 'project-directory',
+          previousCheckpoint:
+            fixture.executionRun.runState.apply.sources[
+              'project-directory'
+            ],
+        },
+      ])
+      const transaction = requireTransaction(
+        harness.transactions[1],
+      )
+      const items = requireTransactionItems(transaction)
+      expect(items).toHaveLength(
+        workspaceSearchMigrationApplyCheckpointTransactionIndex.count,
+      )
+      for (let index = 0; index <= 6; index += 1) {
+        expect(items[index]?.ConditionCheck).toBeDefined()
+      }
+      const statePut = items[
+        workspaceSearchMigrationApplyCheckpointTransactionIndex
+          .executionState
+      ]?.Put
+      const receiptPut = items[
+        workspaceSearchMigrationApplyCheckpointTransactionIndex
+          .checkpointReceipt
+      ]?.Put
+      if (
+        statePut?.Item === undefined ||
+        receiptPut?.Item === undefined
+      ) {
+        throw new Error(
+          'Expected fixed-position checkpoint state and receipt Puts.',
+        )
+      }
+      expect(statePut.Item).toMatchObject({
+        kind: {
+          S: 'workspace-search-migration-execution-state-record',
+        },
+        revision: { N: '3' },
+      })
+      expect(statePut.ConditionExpression).toBeDefined()
+      const state = parseWorkspaceSearchMigrationExecutionState(
+        requireBinaryAttribute(statePut.Item, 'executionStateBytes'),
+      )
+      if (state.executionStateVersion !== 2) {
+        throw new Error('Expected traversal-capable execution state.')
+      }
+      expect(state.apply).toEqual(next.apply)
+      expect(receiptPut.Item).toMatchObject({
+        kind: {
+          S: 'workspace-search-migration-apply-checkpoint-receipt',
+        },
+        location: { S: 'project-directory' },
+        predecessorRevision: { N: '2' },
+        successorRevision: { N: '3' },
+      })
+      expect(receiptPut.ConditionExpression).toContain(
+        'attribute_not_exists',
+      )
+      const receipt =
+        parseWorkspaceSearchMigrationApplyCheckpointReceipt(
+          requireBinaryAttribute(receiptPut.Item, 'receiptBytes'),
+        )
+      expect(receipt).toMatchObject({
+        location: 'project-directory',
+        predecessorKind: 'mutable-execution-state',
+        predecessorRevision: 2,
+        successorRevision: 3,
+      })
+      expect(receipt.successorExecutionStateDigest).toBe(
+        state.executionStateDigest,
+      )
+      expect(receipt.successorRunStateDigest).toBe(
+        state.runStateDigest,
+      )
+      const checkpointEvents = harness.events.slice(
+        checkpointEventStart,
+      )
+      expect(
+        checkpointEvents.indexOf('checkpoint-scan'),
+      ).toBeLessThan(checkpointEvents.indexOf('prepare'))
+      expect(
+        checkpointEvents.indexOf('prepare'),
+      ).toBeLessThan(checkpointEvents.indexOf('transact'))
+    },
+  )
+
+  test(
+    'advances a zero-operation admission directly into v2 checkpoint state',
+    async () => {
+      const fixture = createApplyFixture('put', 0)
+      const harness = new ApplyOperationHarness(fixture)
+      const port = createApplyPort(fixture, harness)
+
+      const next = await port.saveApplyCheckpoint(
+        createCheckpointCommand(fixture, 'work-items', 1),
+      )
+
+      expect(next).toMatchObject({
+        revision: 2,
+        planOperationCount: 0,
+        appliedOperationCount: 0,
+        status: 'applying',
+      })
+      expect(harness.transactions).toHaveLength(1)
+      expect(harness.uploadedJournalSegments).toEqual([])
+      const items = requireTransactionItems(
+        requireTransaction(harness.transactions[0]),
+      )
+      expect(items).toHaveLength(
+        workspaceSearchMigrationApplyCheckpointTransactionIndex.count,
+      )
+      const statePut = items[
+        workspaceSearchMigrationApplyCheckpointTransactionIndex
+          .executionState
+      ]?.Put
+      const receiptPut = items[
+        workspaceSearchMigrationApplyCheckpointTransactionIndex
+          .checkpointReceipt
+      ]?.Put
+      if (
+        statePut?.Item === undefined ||
+        receiptPut?.Item === undefined
+      ) {
+        throw new Error('Expected zero-plan checkpoint transaction Puts.')
+      }
+      expect(statePut.ConditionExpression).toContain(
+        'attribute_not_exists',
+      )
+      const state = parseWorkspaceSearchMigrationExecutionState(
+        requireBinaryAttribute(statePut.Item, 'executionStateBytes'),
+      )
+      expect(state.executionStateVersion).toBe(2)
+      const receipt =
+        parseWorkspaceSearchMigrationApplyCheckpointReceipt(
+          requireBinaryAttribute(receiptPut.Item, 'receiptBytes'),
+        )
+      expect(receipt).toMatchObject({
+        location: 'work-items',
+        predecessorKind: 'execution-run-admission',
+        predecessorRevision: 1,
+        predecessorExecutionStateDigest:
+          fixture.executionRun.executionRunDigest,
+        successorRevision: 2,
+      })
+    },
+  )
+
+  test(
+    'continues v2 progress across locations and multiple pages',
+    async () => {
+      const fixture = createApplyFixture('put')
+      const harness = new ApplyOperationHarness(fixture)
+      const port = createApplyPort(fixture, harness)
+      await port.commitApplyOperation(createApplyCommand(fixture))
+      harness.checkpointScanImplementation = async ({
+        location,
+        previousCheckpoint,
+      }) => createCheckpointPage(
+        previousCheckpoint,
+        location,
+        previousCheckpoint.aggregate.pageCount + 1,
+        location === 'target' &&
+          previousCheckpoint.aggregate.pageCount === 1,
+      )
+
+      const documents = await port.saveApplyCheckpoint(
+        createCheckpointCommand(fixture, 'documents', 2),
+      )
+      const firstTarget = await port.saveApplyCheckpoint(
+        createCheckpointCommand(fixture, 'target', 3),
+      )
+      const terminalTarget = await port.saveApplyCheckpoint(
+        createCheckpointCommand(fixture, 'target', 4),
+      )
+
+      expect(documents).toMatchObject({
+        revision: 3,
+        apply: {
+          sources: {
+            documents: {
+              completed: false,
+              aggregate: { scanned: 1, pageCount: 1 },
+            },
+          },
+        },
+      })
+      expect(firstTarget).toMatchObject({
+        revision: 4,
+        apply: {
+          target: {
+            completed: false,
+            aggregate: { scanned: 1, pageCount: 1 },
+          },
+        },
+      })
+      expect(terminalTarget).toMatchObject({
+        revision: 5,
+        apply: {
+          sources: {
+            documents: {
+              completed: false,
+              aggregate: { scanned: 1, pageCount: 1 },
+            },
+          },
+          target: {
+            completed: true,
+            aggregate: { scanned: 2, pageCount: 2 },
+          },
+        },
+      })
+      expect(
+        harness.checkpointScans.map((scan) => scan.location),
+      ).toEqual(['documents', 'target', 'target'])
+      expect(harness.checkpointScans[2]?.previousCheckpoint).toEqual(
+        firstTarget.apply.target,
+      )
+      for (const transaction of harness.transactions.slice(1)) {
+        const stateItem = requireTransactionItems(transaction)[
+          workspaceSearchMigrationApplyCheckpointTransactionIndex
+            .executionState
+        ]?.Put?.Item
+        if (stateItem === undefined) {
+          throw new Error('Expected one v2 checkpoint state Put.')
+        }
+        expect(
+          parseWorkspaceSearchMigrationExecutionState(
+            requireBinaryAttribute(
+              stateItem,
+              'executionStateBytes',
+            ),
+          ).executionStateVersion,
+        ).toBe(2)
+      }
+    },
+  )
+
+  test(
+    'returns an already-terminal checkpoint without another scan or transaction',
+    async () => {
+      const fixture = createApplyFixture('put')
+      const harness = new ApplyOperationHarness(fixture)
+      const port = createApplyPort(fixture, harness)
+      await port.commitApplyOperation(createApplyCommand(fixture))
+      const terminal = await port.saveApplyCheckpoint(
+        createCheckpointCommand(fixture, 'collaboration', 2),
+      )
+      const scanCount = harness.checkpointScans.length
+      const transactionCount = harness.transactions.length
+
+      const unchanged = await port.saveApplyCheckpoint(
+        createCheckpointCommand(fixture, 'collaboration', 3),
+      )
+
+      expect(unchanged).toEqual(terminal)
+      expect(harness.checkpointScans).toHaveLength(scanCount)
+      expect(harness.transactions).toHaveLength(transactionCount)
+    },
+  )
+
+  test(
+    'rejects checkpoint progress until every planned operation is durable',
+    async () => {
+      const fixture = createApplyFixture('put', 2)
+      const harness = new ApplyOperationHarness(fixture)
+      const port = createApplyPort(fixture, harness)
+      await port.commitApplyOperation(createApplyCommand(fixture))
+
+      const failure = await captureMigrationFailure(() =>
+        port.saveApplyCheckpoint(
+          createCheckpointCommand(fixture, 'documents', 2),
+        )
+      )
+
+      expect(failure.code).toBe('INVALID_STATE')
+      expect(harness.checkpointScans).toEqual([])
+      expect(harness.transactions).toHaveLength(1)
+    },
+  )
+
+  test(
+    'reconciles an exact checkpoint receipt after response loss and a process retry',
+    async () => {
+      const fixture = createApplyFixture('put')
+      const harness = new ApplyOperationHarness(fixture)
+      const firstPort = createApplyPort(fixture, harness)
+      await firstPort.commitApplyOperation(
+        createApplyCommand(fixture),
+      )
+      harness.nextTransactionError =
+        new Error('tenant-secret-checkpoint-response-loss')
+      harness.commitBeforeTransactionError = true
+      const command = createCheckpointCommand(
+        fixture,
+        'project-directory',
+        2,
+      )
+
+      const reconciled = await firstPort.saveApplyCheckpoint(command)
+
+      expect(reconciled).toMatchObject({ revision: 3 })
+      expect(harness.transactions).toHaveLength(2)
+      expect(harness.checkpointScans).toHaveLength(1)
+      const receiptRecord = harness.findLastTransactionRecord(
+        'workspace-search-migration-apply-checkpoint-receipt',
+      )
+      if (receiptRecord === undefined) {
+        throw new Error('Expected one durable checkpoint receipt.')
+      }
+      const receipt =
+        parseWorkspaceSearchMigrationApplyCheckpointReceipt(
+          requireBinaryAttribute(receiptRecord, 'receiptBytes'),
+        )
+      expect(receipt).toMatchObject({
+        location: 'project-directory',
+        predecessorRevision: 2,
+        successorRevision: 3,
+      })
+
+      const restartedPort = createApplyPort(fixture, harness)
+      const retried = await restartedPort.saveApplyCheckpoint(
+        structuredClone(command),
+      )
+
+      expect(retried).toEqual(reconciled)
+      expect(harness.transactions).toHaveLength(2)
+      expect(harness.checkpointScans).toHaveLength(1)
+    },
+  )
+
+  test(
+    'reconciles an old checkpoint receipt against a later v2 state without another write',
+    async () => {
+      const fixture = createApplyFixture('put')
+      const harness = new ApplyOperationHarness(fixture)
+      const port = createApplyPort(fixture, harness)
+      await port.commitApplyOperation(createApplyCommand(fixture))
+      const oldCommand = createCheckpointCommand(
+        fixture,
+        'project-directory',
+        2,
+      )
+      const committed = await port.saveApplyCheckpoint(oldCommand)
+      expect(committed.revision).toBe(3)
+      const later = await port.saveApplyCheckpoint(
+        createCheckpointCommand(fixture, 'documents', 3),
+      )
+      expect(later.revision).toBe(4)
+      const scanCount = harness.checkpointScans.length
+      const transactionCount = harness.transactions.length
+
+      const reconciled = await port.saveApplyCheckpoint(
+        structuredClone(oldCommand),
+      )
+
+      expect(reconciled).toEqual(later)
+      expect(harness.checkpointScans).toHaveLength(scanCount)
+      expect(harness.transactions).toHaveLength(transactionCount)
+    },
+  )
+
+  test(
+    'fails closed for stale and concurrently superseded checkpoint state',
+    async () => {
+      const staleFixture = createApplyFixture('put')
+      const staleHarness = new ApplyOperationHarness(staleFixture)
+      const stalePort = createApplyPort(staleFixture, staleHarness)
+      await stalePort.commitApplyOperation(
+        createApplyCommand(staleFixture),
+      )
+      const staleFailure = await captureMigrationFailure(() =>
+        stalePort.saveApplyCheckpoint(
+          createCheckpointCommand(
+            staleFixture,
+            'project-directory',
+            1,
+          ),
+        )
+      )
+      expect(staleFailure.code).toBe('INVALID_STATE')
+      expect(staleHarness.checkpointScans).toEqual([])
+      expect(staleHarness.transactions).toHaveLength(1)
+
+      const concurrentFixture = createApplyFixture('put')
+      const concurrentHarness =
+        new ApplyOperationHarness(concurrentFixture)
+      const concurrentPort = createApplyPort(
+        concurrentFixture,
+        concurrentHarness,
+      )
+      await concurrentPort.commitApplyOperation(
+        createApplyCommand(concurrentFixture),
+      )
+      let nested = false
+      concurrentHarness.checkpointScanImplementation = async (
+        input,
+      ) => {
+        if (!nested) {
+          nested = true
+          const nestedState =
+            await concurrentPort.saveApplyCheckpoint(
+              createCheckpointCommand(
+                concurrentFixture,
+                'target',
+                2,
+              ),
+            )
+          expect(nestedState.revision).toBe(3)
+          return createCheckpointPage(
+            input.previousCheckpoint,
+            input.location,
+            1,
+            true,
+          )
+        }
+        return createTerminalEmptyCheckpointPage(
+          input.previousCheckpoint,
+        )
+      }
+
+      const concurrentFailure = await captureMigrationFailure(() =>
+        concurrentPort.saveApplyCheckpoint(
+          createCheckpointCommand(
+            concurrentFixture,
+            'documents',
+            2,
+          ),
+        )
+      )
+
+      expect(concurrentFailure.code).toBe('INVALID_STATE')
+      expect(
+        concurrentHarness.checkpointScans.map(
+          (scan) => scan.location,
+        ),
+      ).toEqual(['documents', 'target'])
+      expect(concurrentHarness.transactions).toHaveLength(2)
+      expect(await concurrentPort.readRunState()).toMatchObject({
+        revision: 3,
+        apply: { target: { completed: true } },
+      })
+    },
+  )
+
+  test(
+    'rejects corrupt and absent checkpoint receipts after apparent durability',
+    async () => {
+      const corruptFixture = createApplyFixture('put')
+      const corruptHarness =
+        new ApplyOperationHarness(corruptFixture)
+      const corruptPort = createApplyPort(
+        corruptFixture,
+        corruptHarness,
+      )
+      await corruptPort.commitApplyOperation(
+        createApplyCommand(corruptFixture),
+      )
+      const command = createCheckpointCommand(
+        corruptFixture,
+        'documents',
+        2,
+      )
+      await corruptPort.saveApplyCheckpoint(command)
+      const receiptRecord = corruptHarness.findLastTransactionRecord(
+        'workspace-search-migration-apply-checkpoint-receipt',
+      )
+      if (receiptRecord === undefined) {
+        throw new Error('Expected one checkpoint receipt to corrupt.')
+      }
+      corruptHarness.seedStateRecord({
+        ...receiptRecord,
+        receiptDigest: { S: digest('corrupt-checkpoint-receipt') },
+      })
+      const transactionCount = corruptHarness.transactions.length
+
+      const corruptFailure = await captureMigrationFailure(() =>
+        corruptPort.saveApplyCheckpoint(structuredClone(command))
+      )
+
+      expect(corruptFailure.code).toBe('INVALID_STATE')
+      expect(corruptHarness.transactions).toHaveLength(
+        transactionCount,
+      )
+
+      const absentFixture = createApplyFixture('put')
+      const absentHarness = new ApplyOperationHarness(absentFixture)
+      const absentPort = createApplyPort(absentFixture, absentHarness)
+      await absentPort.commitApplyOperation(
+        createApplyCommand(absentFixture),
+      )
+      absentHarness.omitCheckpointReceiptOnCommit = true
+
+      const absentFailure = await captureMigrationFailure(() =>
+        absentPort.saveApplyCheckpoint(
+          createCheckpointCommand(
+            absentFixture,
+            'collaboration',
+            2,
+          ),
+        )
+      )
+
+      expect(absentFailure.code).toBe('INVALID_STATE')
+      expect(absentHarness.transactions).toHaveLength(2)
+      expect(await absentPort.readRunState()).toMatchObject({
+        revision: 3,
+        apply: {
+          sources: {
+            collaboration: { completed: true },
+          },
+        },
+      })
+    },
+  )
+
+  test(
+    'maps all nine checkpoint cancellation positions',
+    async () => {
+      const index =
+        workspaceSearchMigrationApplyCheckpointTransactionIndex
+      const cases: readonly {
+        /** Fixed checkpoint transaction index selected by the test. */
+        readonly failedIndex: number
+        /** Stable expected public failure code. */
+        readonly code: WorkspaceSearchMigrationFailureCode
+      }[] = [
+        { failedIndex: index.lease, code: 'LEASE_LOST' },
+        {
+          failedIndex: index.pointer,
+          code: 'INVALID_MAINTENANCE_EVIDENCE',
+        },
+        {
+          failedIndex: index.receipt,
+          code: 'INVALID_MAINTENANCE_EVIDENCE',
+        },
+        { failedIndex: index.writerFence, code: 'INVALID_STATE' },
+        {
+          failedIndex: index.executionBoundary,
+          code: 'INVALID_STATE',
+        },
+        {
+          failedIndex: index.sealedPlanningAuthority,
+          code: 'INVALID_STATE',
+        },
+        { failedIndex: index.executionRun, code: 'INVALID_STATE' },
+        { failedIndex: index.executionState, code: 'INVALID_STATE' },
+        {
+          failedIndex: index.checkpointReceipt,
+          code: 'INVALID_STATE',
+        },
+      ]
+      expect(cases).toHaveLength(index.count)
+      for (const entry of cases) {
+        const fixture = createApplyFixture('put')
+        const harness = new ApplyOperationHarness(fixture)
+        const port = createApplyPort(fixture, harness)
+        await port.commitApplyOperation(createApplyCommand(fixture))
+        harness.nextTransactionError =
+          createCheckpointCancellation(entry.failedIndex)
+
+        const failure = await captureMigrationFailure(() =>
+          port.saveApplyCheckpoint(
+            createCheckpointCommand(
+              fixture,
+              'project-directory',
+              2,
+            ),
+          )
+        )
+
+        expect(failure.code).toBe(entry.code)
+        expect(harness.transactions).toHaveLength(2)
+      }
+    },
+  )
+
+  test(
+    'rejects hostile and invalid checkpoint scanner output before transaction send',
+    async () => {
+      const factories: readonly ((
+        previous: MigrationSourceCheckpoint,
+      ) => MigrationSourceCheckpoint)[] = [
+        (previous) =>
+          new Proxy(createTerminalEmptyCheckpointPage(previous), {}),
+        (previous) => {
+          const invalid = createTerminalEmptyCheckpointPage(previous)
+          return {
+            ...invalid,
+            aggregate: {
+              ...invalid.aggregate,
+              scanned: invalid.aggregate.scanned + 1,
+            },
+          }
+        },
+        (previous) => {
+          const invalid = createCheckpointPage(
+            previous,
+            'project-directory',
+            1,
+            false,
+          )
+          return {
+            ...invalid,
+            cursor: {
+              workspaceId: { S: 'wrong-key-schema' },
+              recordKey: { S: 'wrong-key-schema' },
+            },
+          }
+        },
+      ]
+      for (const factory of factories) {
+        const fixture = createApplyFixture('put')
+        const harness = new ApplyOperationHarness(fixture)
+        const port = createApplyPort(fixture, harness)
+        await port.commitApplyOperation(createApplyCommand(fixture))
+        harness.checkpointScanImplementation = async ({
+          previousCheckpoint,
+        }) => factory(previousCheckpoint)
+
+        const failure = await captureMigrationFailure(() =>
+          port.saveApplyCheckpoint(
+            createCheckpointCommand(
+              fixture,
+              'project-directory',
+              2,
+            ),
+          )
+        )
+
+        expect(failure.code).toBe('INVALID_STATE')
+        expect(harness.transactions).toHaveLength(1)
+      }
+
+      const accessorFixture = createApplyFixture('put')
+      const accessorHarness =
+        new ApplyOperationHarness(accessorFixture)
+      const accessorPort = createApplyPort(
+        accessorFixture,
+        accessorHarness,
+      )
+      await accessorPort.commitApplyOperation(
+        createApplyCommand(accessorFixture),
+      )
+      accessorHarness.checkpointScanImplementation = async ({
+        previousCheckpoint,
+      }) => {
+        const page = createTerminalEmptyCheckpointPage(
+          previousCheckpoint,
+        )
+        Object.defineProperty(page, 'completed', {
+          configurable: true,
+          enumerable: true,
+          get: () => {
+            accessorHarness.callerAccessorReads += 1
+            return true
+          },
+        })
+        return page
+      }
+
+      const accessorFailure = await captureMigrationFailure(() =>
+        accessorPort.saveApplyCheckpoint(
+          createCheckpointCommand(
+            accessorFixture,
+            'project-directory',
+            2,
+          ),
+        )
+      )
+
+      expect(accessorFailure.code).toBe('INVALID_STATE')
+      expect(accessorHarness.callerAccessorReads).toBe(0)
+      expect(accessorHarness.transactions).toHaveLength(1)
+    },
+  )
 })
 
 /**
  * Creates one compact internally correlated apply fixture.
  *
  * @param variant - Target Put, Delete, or true no-op behavior.
- * @param operationCount - One- or two-operation sealed plan size.
+ * @param operationCount - Zero-, one-, or two-operation sealed plan size.
  * @returns Complete exact static adapter material and plan entries.
  */
 function createApplyFixture(
   variant: ApplyOperationVariant,
-  operationCount: 1 | 2 = 1,
+  operationCount: 0 | 1 | 2 = 1,
 ): ApplyOperationFixture {
   const configuration = createConfiguration()
   const configurationHash =
@@ -1181,13 +1974,12 @@ function createApplyFixture(
       }),
   )
   const firstLeaf = leaves[0]
-  if (firstLeaf === undefined) {
-    throw new Error('Expected at least one plan leaf.')
-  }
   const secondLeaf = leaves[1]
-  const planDigest = secondLeaf === undefined
-    ? firstLeaf
-    : createWorkspaceSearchPlanNodeDigest(firstLeaf, secondLeaf)
+  const planDigest = firstLeaf === undefined
+    ? createEmptyWorkspaceSearchPlanDigest()
+    : secondLeaf === undefined
+      ? firstLeaf
+      : createWorkspaceSearchPlanNodeDigest(firstLeaf, secondLeaf)
   const plannedOperations = operations.map((operation, index) => {
     const operationDigest = operationDigests[index]
     if (operationDigest === undefined) {
@@ -1209,9 +2001,21 @@ function createApplyFixture(
       operation,
     } satisfies WorkspaceSearchPlannedOperation
   })
-  const plannedOperation = plannedOperations[0]
-  if (plannedOperation === undefined) {
-    throw new Error('Expected one primary planned operation.')
+  const fallbackOperation = createOperation(
+    configuration,
+    configurationHash,
+    variant,
+  )
+  const fallbackOperationDigest =
+    createWorkspaceSearchMigrationOperationDigest(fallbackOperation)
+  const plannedOperation = plannedOperations[0] ?? {
+    runId,
+    configurationHash,
+    planDigest,
+    planSequence: 1,
+    operationDigest: fallbackOperationDigest,
+    membershipProof: [],
+    operation: fallbackOperation,
   }
   const planSeal = createPlanSeal(
     configurationHash,
@@ -1347,6 +2151,7 @@ function createApplyPort(
     executionRun: fixture.executionRun,
     authorityPort: harness.authorityPort,
     journalGateway: harness.journalGateway,
+    checkpointScanner: harness.checkpointScanner,
     transport: harness.transport,
     clock: harness.clock,
   })
@@ -1379,6 +2184,149 @@ function createApplyCommand(
       kind: 'apply-operation-requested',
       plannedOperation: structuredClone(plannedOperation),
     },
+  }
+}
+
+/**
+ * Creates one detached checkpoint command under the fixture lease.
+ *
+ * @param fixture - Exact admitted run and active lease authority.
+ * @param location - Source or target traversal selected by the command.
+ * @param expectedRevision - Exact durable predecessor revision.
+ * @returns Detached checkpoint request.
+ */
+function createCheckpointCommand(
+  fixture: ApplyOperationFixture,
+  location: WorkspaceSearchMigrationCheckpointLocation,
+  expectedRevision: number,
+): WorkspaceSearchMigrationCheckpointCommandInput {
+  const authority = fixture.currentAuthority
+  return {
+    expectedRevision,
+    lease: {
+      runId: authority.lease.runId,
+      ownerId: authority.lease.ownerId,
+      fenceToken: authority.lease.fenceToken,
+    },
+    location,
+  }
+}
+
+/**
+ * Creates one zero-row terminal page after an exact predecessor checkpoint.
+ *
+ * @param previous - Exact durable predecessor supplied by the adapter.
+ * @returns Detached cumulative checkpoint after one bounded empty page.
+ */
+function createTerminalEmptyCheckpointPage(
+  previous: MigrationSourceCheckpoint,
+): MigrationSourceCheckpoint {
+  if (
+    previous.completed ||
+    previous.aggregate.pageCount === Number.MAX_SAFE_INTEGER
+  ) {
+    throw new Error('Expected an incomplete bounded checkpoint.')
+  }
+  return {
+    completed: true,
+    aggregate: {
+      ...structuredClone(previous.aggregate),
+      pageCount: previous.aggregate.pageCount + 1,
+    },
+    keyDigestState: structuredClone(previous.keyDigestState),
+    contentDigestState: structuredClone(
+      previous.contentDigestState,
+    ),
+  }
+}
+
+/**
+ * Creates one valid cumulative checkpoint after consuming one synthetic row.
+ *
+ * @param previous - Exact durable predecessor supplied by the adapter.
+ * @param location - Source or target table whose cursor schema is required.
+ * @param ordinal - Positive page identity used by digests and cursors.
+ * @param completed - Whether this synthetic page exhausts the scan.
+ * @returns Detached valid cumulative successor checkpoint.
+ */
+function createCheckpointPage(
+  previous: MigrationSourceCheckpoint,
+  location: WorkspaceSearchMigrationCheckpointLocation,
+  ordinal: number,
+  completed: boolean,
+): MigrationSourceCheckpoint {
+  if (
+    previous.completed ||
+    !Number.isSafeInteger(ordinal) ||
+    ordinal <= 0 ||
+    previous.aggregate.pageCount === Number.MAX_SAFE_INTEGER
+  ) {
+    throw new Error('Expected an incomplete bounded checkpoint page.')
+  }
+  const keyAccumulator = MigrationDigestAccumulator.fromState(
+    previous.keyDigestState,
+  )
+  const contentAccumulator = MigrationDigestAccumulator.fromState(
+    previous.contentDigestState,
+  )
+  keyAccumulator.add(digest(`checkpoint-key:${location}:${ordinal}`))
+  contentAccumulator.add(
+    digest(`checkpoint-content:${location}:${ordinal}`),
+  )
+  return {
+    completed,
+    ...(completed
+      ? {}
+      : { cursor: createCheckpointCursor(location, ordinal) }),
+    aggregate: {
+      scanned: previous.aggregate.scanned + 1,
+      mapped: previous.aggregate.mapped + 1,
+      ignored: previous.aggregate.ignored,
+      invalid: previous.aggregate.invalid,
+      projected: previous.aggregate.projected + 1,
+      deleted: previous.aggregate.deleted,
+      keyDigest: keyAccumulator.digest(),
+      contentDigest: contentAccumulator.digest(),
+      pageCount: previous.aggregate.pageCount + 1,
+    },
+    keyDigestState: keyAccumulator.exportState(),
+    contentDigestState: contentAccumulator.exportState(),
+  }
+}
+
+/**
+ * Creates one exact physical LastEvaluatedKey for a checkpoint location.
+ *
+ * @param location - Source or target table selected by the scan.
+ * @param ordinal - Positive page identity.
+ * @returns Exact key schema for the selected measured table.
+ */
+function createCheckpointCursor(
+  location: WorkspaceSearchMigrationCheckpointLocation,
+  ordinal: number,
+): Readonly<Record<string, AttributeValue>> {
+  const suffix = String(ordinal).padStart(6, '0')
+  if (location === 'project-directory') {
+    return {
+      directoryId: { S: 'workspace-1' },
+      entryKey: { S: `${suffix}#checkpoint` },
+    }
+  }
+  if (location === 'work-items') {
+    return {
+      directoryTeamId: { S: 'workspace-1#team-1' },
+      issueId: { S: `issue-${suffix}` },
+    }
+  }
+  if (location === 'collaboration') {
+    return {
+      entityKey: { S: 'workspace-1#team-1' },
+      recordKey: { S: `record-${suffix}` },
+    }
+  }
+  return {
+    workspaceId: { S: 'workspace-1' },
+    recordKey: { S: `record-${suffix}` },
   }
 }
 
@@ -1488,7 +2436,7 @@ function createOperation(
 function createPlanSeal(
   configurationHash: string,
   planDigest: string,
-  operationCount: 1 | 2,
+  operationCount: 0 | 1 | 2,
 ): WorkspaceSearchPlanSeal {
   const sourceOperationCount = operationCount
   const orphanOperationCount = 0
@@ -1934,6 +2882,32 @@ function createCancellation(
 }
 
 /**
+ * Creates one fixed-position checkpoint transaction cancellation.
+ *
+ * @param failedIndex - ConditionCheck or Put index that failed.
+ * @returns Raw DynamoDB cancellation with all nine reason slots.
+ */
+function createCheckpointCancellation(
+  failedIndex: number,
+): TransactionCanceledException {
+  return new TransactionCanceledException({
+    $metadata: {},
+    message: 'tenant-secret-checkpoint-cancellation',
+    CancellationReasons: Array.from(
+      {
+        length:
+          workspaceSearchMigrationApplyCheckpointTransactionIndex.count,
+      },
+      (_, index) => ({
+        Code: index === failedIndex
+          ? 'ConditionalCheckFailed'
+          : 'None',
+      }),
+    ),
+  })
+}
+
+/**
  * Requires one recorded transaction.
  *
  * @param command - Candidate command.
@@ -1962,6 +2936,24 @@ function requireTransactionItems(
     throw new Error('Expected complete transaction items.')
   }
   return items
+}
+
+/**
+ * Requires one exact binary attribute from a complete low-level record.
+ *
+ * @param item - Exact low-level item.
+ * @param attributeName - Required binary attribute name.
+ * @returns Exact binary payload.
+ */
+function requireBinaryAttribute(
+  item: Readonly<Record<string, AttributeValue>>,
+  attributeName: string,
+): Uint8Array {
+  const bytes = item[attributeName]?.B
+  if (!(bytes instanceof Uint8Array)) {
+    throw new Error('Expected one binary test record attribute.')
+  }
+  return bytes
 }
 
 /**

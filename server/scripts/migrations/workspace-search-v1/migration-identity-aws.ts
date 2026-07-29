@@ -90,6 +90,7 @@ import {
 } from './migration-application-writer-fence-aws'
 import {
   createAwsWorkspaceSearchMigrationApplyOperationPort,
+  type WorkspaceSearchMigrationApplyCheckpointScanner,
   type WorkspaceSearchMigrationApplyOperationAuthorityPort,
   type WorkspaceSearchMigrationApplyOperationAwsPort,
   type WorkspaceSearchMigrationApplyOperationAwsTransport,
@@ -186,6 +187,10 @@ import {
   type WorkspaceSearchMigrationTargetScanAwsTransport,
   type WorkspaceSearchMigrationTargetScanReadInput,
 } from './migration-target-scan-aws'
+import {
+  createWorkspaceSearchMigrationApplyTargetScanPredecessor,
+  reduceWorkspaceSearchMigrationApplyTargetScanPage,
+} from './migration-apply-target-scan-page'
 import {
   reduceWorkspaceSearchMigrationTargetScanPage,
   type ReduceWorkspaceSearchMigrationTargetScanPageInput,
@@ -898,13 +903,13 @@ export interface WorkspaceSearchMigrationManagedAwsSession
   ): WorkspaceSearchMigrationExecutionRunAwsPort
 
   /**
-   * Creates one generation-bound atomic apply-operation port.
+   * Creates one generation-bound atomic apply progress port.
    *
    * @param executionBoundary - Exact revision-two planning admission.
    * @param sealedPlanningAuthority - Exact immutable sealed planning root.
    * @param closedWriterFenceRecord - Exact closed fence fixed by the boundary.
    * @param executionRun - Exact immutable execution admission.
-   * @returns Apply port bound to the latest measured configuration.
+   * @returns Apply operation/checkpoint port bound to the latest measurement.
    */
   createApplyOperationPort(
     executionBoundary:
@@ -1911,15 +1916,15 @@ class AwsWorkspaceSearchMigrationIdentityPort
   }
 
   /**
-   * Creates one atomic apply-operation port bound to the current measured
-   * generation, all six physical table incarnations, and its private journal
-   * storage capability.
+   * Creates one atomic apply progress port bound to the current measured
+   * generation, all six physical table incarnations, private journal storage,
+   * and strongly consistent source/target checkpoint scans.
    *
    * @param executionBoundary - Exact revision-two planning admission.
    * @param sealedPlanningAuthority - Exact immutable sealed planning root.
    * @param closedWriterFenceRecord - Exact closed fence fixed by the boundary.
    * @param executionRun - Exact immutable execution admission.
-   * @returns Generation-guarded apply and reconciliation capability.
+   * @returns Generation-guarded apply/checkpoint reconciliation capability.
    */
   createApplyOperationPort(
     executionBoundary:
@@ -1960,6 +1965,42 @@ class AwsWorkspaceSearchMigrationIdentityPort
             () => prePlanAuthorityAdapter.readAuthority(claim),
           ),
       }
+    const checkpointScanner:
+      WorkspaceSearchMigrationApplyCheckpointScanner = {
+        scanApplyCheckpointPage: ({ location, previousCheckpoint }) =>
+          this.runManagedApplyOperationRead(
+            authority,
+            async () => {
+              if (location === 'target') {
+                const targetPredecessor =
+                  createWorkspaceSearchMigrationApplyTargetScanPredecessor({
+                    configuration: authority.configuration,
+                    configurationHash: authority.configurationHash,
+                    previousCheckpoint,
+                  })
+                const pageResult = await this.scanTargetPage({
+                  configuration: authority.configuration,
+                  configurationHash: authority.configurationHash,
+                  previousCheckpoint: targetPredecessor,
+                })
+                return reduceWorkspaceSearchMigrationApplyTargetScanPage({
+                  configuration: authority.configuration,
+                  configurationHash: authority.configurationHash,
+                  previousCheckpoint,
+                  pageResult,
+                }).checkpoint
+              }
+              return (
+                await this.scanSourcePage({
+                  configuration: authority.configuration,
+                  configurationHash: authority.configurationHash,
+                  source: location,
+                  previousCheckpoint,
+                })
+              ).checkpoint
+            },
+          ),
+      }
     const transport:
       WorkspaceSearchMigrationApplyOperationAwsTransport = {
         getApplyItem: (command) =>
@@ -1988,6 +2029,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
         executionRun: detachedExecutionRun,
         authorityPort,
         journalGateway,
+        checkpointScanner,
         transport,
         clock: this.prePlanAuthorityClock,
       })
@@ -2011,6 +2053,11 @@ class AwsWorkspaceSearchMigrationIdentityPort
         this.runManagedApplyOperation(
           authority,
           () => delegate.commitApplyOperation(input),
+        ),
+      saveApplyCheckpoint: (input) =>
+        this.runManagedApplyOperation(
+          authority,
+          () => delegate.saveApplyCheckpoint(input),
         ),
     }
   }
