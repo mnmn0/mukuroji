@@ -2317,6 +2317,35 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
   )
 
   test(
+    'preserves lease loss when authority expires after seal upload and all-six preparation',
+    async () => {
+      const fixture = createApplyFixture('no-op', 0)
+      const harness = new ApplyOperationHarness(fixture)
+      const port = createApplyPort(fixture, harness)
+      const terminal = await completeApplyCheckpoints(
+        fixture,
+        port,
+        1,
+      )
+      const transactionCount = harness.transactions.length
+      harness.prepareEffect = () => {
+        harness.advanceClock(30_000)
+      }
+
+      const failure = await captureMigrationFailure(() =>
+        port.sealApply(
+          createApplySealCommand(fixture, terminal.revision),
+        )
+      )
+
+      expect(failure.code).toBe('LEASE_LOST')
+      expect(harness.uploadedApplySeals).toHaveLength(1)
+      expect(harness.events).toContain('prepare')
+      expect(harness.transactions).toHaveLength(transactionCount)
+    },
+  )
+
+  test(
     'rejects a terminal target cardinality mismatch before seal upload',
     async () => {
       const fixture = createApplyFixture('put')

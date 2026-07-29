@@ -134,6 +134,7 @@ import {
   type WorkspaceSearchMigrationSealedPlanningAuthorityV2,
 } from './migration-sealed-planning-authority-v2'
 import {
+  assertWorkspaceSearchMigrationMutationAuthority,
   createWorkspaceSearchApplyJournalSegment,
   createWorkspaceSearchApplyOperationRecordedEvent,
   reduceWorkspaceSearchMigrationRunState,
@@ -1225,6 +1226,14 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
       )
       const commitAt =
         new Date(commitAtMilliseconds).toISOString()
+      assertWorkspaceSearchMigrationMutationAuthority(
+        currentTerminal.runState,
+        {
+          lease: authority.lease,
+          ownerId: authority.lease.ownerId,
+          at: commitAt,
+        },
+      )
       const root = createWorkspaceSearchMigrationAppliedRoot({
         admission: this.binding.executionRun,
         predecessor: currentTerminal.executionState,
