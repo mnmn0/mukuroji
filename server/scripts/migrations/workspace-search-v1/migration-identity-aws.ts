@@ -60,6 +60,7 @@ import {
   type WorkspaceSearchMigrationLease,
   type WorkspaceSearchMigrationConfiguration,
   type WorkspaceSearchMigrationSourceName,
+  type WorkspaceSearchPlanSeal,
   WorkspaceSearchMigrationFailure,
   workspaceSearchMigrationSourceNames,
   WORKSPACE_SEARCH_MIGRATION_PAGE_SIZE,
@@ -92,6 +93,14 @@ import {
   type WorkspaceSearchMigrationExecutionBoundaryAwsPort,
   type WorkspaceSearchMigrationExecutionBoundaryAwsTransport,
 } from './migration-execution-boundary-aws'
+import type {
+  WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary,
+} from './migration-execution-boundary'
+import {
+  createAwsWorkspaceSearchMigrationExecutionRunPort,
+  type WorkspaceSearchMigrationExecutionRunAwsPort,
+  type WorkspaceSearchMigrationExecutionRunAwsTransport,
+} from './migration-execution-run-aws'
 import {
   createAwsWorkspaceSearchMigrationPrePlanAuthorityPort,
   type RenewWorkspaceSearchMigrationPrePlanMaintenanceEvidenceInput,
@@ -200,6 +209,12 @@ import {
   type WorkspaceSearchMigrationSealedPlanningAuthorityV2AwsPort,
   type WorkspaceSearchMigrationSealedPlanningAuthorityV2AwsTransport,
 } from './migration-sealed-planning-authority-aws'
+import type {
+  WorkspaceSearchMigrationSealedPlanningAuthorityV2,
+} from './migration-sealed-planning-authority-v2'
+import type {
+  WorkspaceSearchWriterFenceClosedRecord,
+} from '../../../src/infrastructure/runtime/workspace-search-writer-fence'
 import type {
   AcquireWorkspaceSearchMigrationLeaseInput,
   HeartbeatWorkspaceSearchMigrationLeaseInput,
@@ -511,6 +526,12 @@ type ManagedApplicationWriterFenceAuthority =
  * Complete measured configuration captured for one execution-boundary port.
  */
 type ManagedExecutionBoundaryAuthority =
+  ManagedApplicationWriterFenceAuthority
+
+/**
+ * Complete measured configuration captured for one execution-run port.
+ */
+type ManagedExecutionRunAuthority =
   ManagedApplicationWriterFenceAuthority
 
 /**
@@ -832,6 +853,25 @@ export interface WorkspaceSearchMigrationManagedAwsSession
    */
   createExecutionBoundaryPort():
     WorkspaceSearchMigrationExecutionBoundaryAwsPort
+
+  /**
+   * Creates one generation-bound atomic execution-run admission port.
+   *
+   * @param executionBoundary - Exact revision-two planning admission.
+   * @param sealedPlanningAuthority - Exact immutable sealed planning root.
+   * @param planSeal - Exact canonical plan seal referenced by the root.
+   * @param closedWriterFenceRecord - Exact closed fence fixed by the boundary.
+   * @returns Create/read port bound to the latest measured configuration.
+   */
+  createExecutionRunPort(
+    executionBoundary:
+      WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary,
+    sealedPlanningAuthority:
+      WorkspaceSearchMigrationSealedPlanningAuthorityV2,
+    planSeal: WorkspaceSearchPlanSeal,
+    closedWriterFenceRecord:
+      WorkspaceSearchWriterFenceClosedRecord,
+  ): WorkspaceSearchMigrationExecutionRunAwsPort
 }
 
 /** Narrow transport containing only managed identity reads. */
@@ -1761,6 +1801,68 @@ class AwsWorkspaceSearchMigrationIdentityPort
         this.runManagedExecutionBoundaryOperation(
           authority,
           delegate.admitPlanning(input),
+      ),
+    }
+  }
+
+  /**
+   * Creates one atomic execution-run admission port bound to the current
+   * measured generation and all six physical table incarnations.
+   *
+   * @param executionBoundary - Exact revision-two planning admission.
+   * @param sealedPlanningAuthority - Exact immutable sealed planning root.
+   * @param planSeal - Exact canonical plan seal referenced by the root.
+   * @param closedWriterFenceRecord - Exact closed fence fixed by the boundary.
+   * @returns Generation-guarded execution-run create/read capability.
+   */
+  createExecutionRunPort(
+    executionBoundary:
+      WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary,
+    sealedPlanningAuthority:
+      WorkspaceSearchMigrationSealedPlanningAuthorityV2,
+    planSeal: WorkspaceSearchPlanSeal,
+    closedWriterFenceRecord:
+      WorkspaceSearchWriterFenceClosedRecord,
+  ): WorkspaceSearchMigrationExecutionRunAwsPort {
+    const authority = this.captureManagedExecutionRunAuthority()
+    const transport: WorkspaceSearchMigrationExecutionRunAwsTransport = {
+      getExecutionRunState: (command) =>
+        this.runManagedExecutionRunRead(
+          authority,
+          () => this.transport.getPrePlanAuthority(command),
+        ),
+      prepareExecutionRunWrite: async () => {
+        await this.requireCurrentExecutionRunTableIncarnations(
+          authority,
+        )
+      },
+      transactWriteExecutionRun: (command) =>
+        this.runManagedPreparedExecutionRunWrite(
+          authority,
+          () => this.transport.transactWritePrePlanAuthority(command),
+        ),
+    }
+    const delegate =
+      createAwsWorkspaceSearchMigrationExecutionRunPort({
+        configuration: authority.configuration,
+        configurationHash: authority.configurationHash,
+        executionBoundary,
+        sealedPlanningAuthority,
+        planSeal,
+        closedWriterFenceRecord,
+        transport,
+        clock: this.prePlanAuthorityClock,
+      })
+    return {
+      read: (runId) =>
+        this.runManagedExecutionRunOperation(
+          authority,
+          delegate.read(runId),
+        ),
+      create: (currentAuthority) =>
+        this.runManagedExecutionRunOperation(
+          authority,
+          delegate.create(currentAuthority),
         ),
     }
   }
@@ -3928,6 +4030,175 @@ class AwsWorkspaceSearchMigrationIdentityPort
   }
 
   /**
+   * Captures all measured identities installed for execution-run admission.
+   *
+   * @returns Detached generation, configuration, hash, and state identity.
+   */
+  private captureManagedExecutionRunAuthority():
+    ManagedExecutionRunAuthority {
+    const generation = this.generation
+    const configurationHash = this.measuredConfigurationHash
+    const configuration = this.measuredConfiguration
+    const stateTable = this.measuredMigrationStateTable
+    if (
+      configurationHash === undefined ||
+      configuration === undefined ||
+      stateTable === undefined ||
+      this.measuredExecutionControlQuarantined
+    ) {
+      return failManagedExecutionRun()
+    }
+    const authority: ManagedExecutionRunAuthority = {
+      generation,
+      configurationHash,
+      configuration: structuredClone(configuration),
+      stateTable: structuredClone(stateTable),
+    }
+    if (
+      !this.isMeasurementGenerationCurrent(
+        authority.generation,
+        authority.configurationHash,
+      )
+    ) {
+      return failManagedExecutionRun()
+    }
+    return authority
+  }
+
+  /**
+   * Guards one execution-run operation against lifecycle invalidation.
+   *
+   * The standalone operation starts first so every caller-owned dependency is
+   * detached before the first managed transport await.
+   *
+   * @param authority - Captured measured execution-run authority.
+   * @param operation - Already-started standalone adapter operation.
+   * @returns Result only while the measured generation remains current.
+   */
+  private async runManagedExecutionRunOperation<Result>(
+    authority: ManagedExecutionRunAuthority,
+    operation: Promise<Result>,
+  ): Promise<Result> {
+    try {
+      const result = await operation
+      if (
+        !this.isMeasurementGenerationCurrent(
+          authority.generation,
+          authority.configurationHash,
+        ) ||
+        this.measuredExecutionControlQuarantined
+      ) {
+        return failManagedExecutionRun()
+      }
+      return result
+    } catch (error: unknown) {
+      if (
+        !this.isMeasurementGenerationCurrent(
+          authority.generation,
+          authority.configurationHash,
+        )
+      ) {
+        return failManagedExecutionRun()
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Guards one execution-run read with all six incarnation checks.
+   *
+   * @param authority - Captured measured execution-run authority.
+   * @param operation - Exact strongly consistent execution-run state read.
+   * @returns Read result only while all six identities remain current.
+   */
+  private async runManagedExecutionRunRead<Result>(
+    authority: ManagedExecutionRunAuthority,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    try {
+      return await this.runManagedApplicationWriterFenceRead(
+        authority,
+        operation,
+      )
+    } catch (error: unknown) {
+      throw createManagedExecutionRunFailure(
+        error instanceof ResourceNotFoundException
+          ? 'CONFIGURATION_DRIFT'
+          : readManagedMigrationStateFailureCode(error),
+      )
+    }
+  }
+
+  /**
+   * Revalidates all six transaction-owned table incarnations before create.
+   *
+   * @param authority - Captured measured execution-run authority.
+   */
+  private async requireCurrentExecutionRunTableIncarnations(
+    authority: ManagedExecutionRunAuthority,
+  ): Promise<void> {
+    try {
+      await this.requireCurrentApplicationWriterFenceTableIncarnations(
+        authority,
+      )
+    } catch (error: unknown) {
+      throw createManagedExecutionRunFailure(
+        readManagedMigrationStateFailureCode(error),
+      )
+    }
+  }
+
+  /**
+   * Sends one prepared execution-run create and preserves shared quarantine.
+   *
+   * @param authority - Captured measured execution-run authority.
+   * @param operation - Exact prepared seven-item transaction.
+   * @returns Raw transaction result after the post-send all-six guard.
+   */
+  private async runManagedPreparedExecutionRunWrite<Result>(
+    authority: ManagedExecutionRunAuthority,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    try {
+      this.requireManagedApplicationWriterFenceAuthority(authority)
+    } catch (error: unknown) {
+      throw createManagedExecutionRunFailure(
+        readManagedMigrationStateFailureCode(error),
+      )
+    }
+    let result: Result
+    try {
+      result = await this.runManagedMigrationStateIo(
+        authority,
+        operation,
+      )
+    } catch (error: unknown) {
+      try {
+        await this.requireCurrentApplicationWriterFenceTableIncarnations(
+          authority,
+        )
+      } catch (guardError: unknown) {
+        this.quarantineManagedExecutionControl(authority)
+        throw createManagedExecutionRunFailure(
+          readManagedMigrationStateFailureCode(guardError),
+        )
+      }
+      throw error
+    }
+    try {
+      await this.requireCurrentApplicationWriterFenceTableIncarnations(
+        authority,
+      )
+    } catch (error: unknown) {
+      this.quarantineManagedExecutionControl(authority)
+      throw createManagedExecutionRunFailure(
+        readManagedMigrationStateFailureCode(error),
+      )
+    }
+    return result
+  }
+
+  /**
    * Captures all measured identities installed for writer-fence operations.
    *
    * @returns Detached generation, configuration, hash, and state identity.
@@ -5691,6 +5962,30 @@ function createManagedExecutionBoundaryFailure(
   return new WorkspaceSearchMigrationFailure(
     code,
     'Workspace Search migration execution boundary operation failed.',
+  )
+}
+
+/**
+ * Raises one stable managed execution-run lifecycle failure.
+ *
+ * @returns Never returns.
+ */
+function failManagedExecutionRun(): never {
+  throw createManagedExecutionRunFailure('INVALID_STATE')
+}
+
+/**
+ * Creates one stable managed execution-run failure.
+ *
+ * @param code - Stable operator-safe lifecycle or drift classification.
+ * @returns Secret-free execution-run failure.
+ */
+function createManagedExecutionRunFailure(
+  code: WorkspaceSearchMigrationFailureCode,
+): WorkspaceSearchMigrationFailure {
+  return new WorkspaceSearchMigrationFailure(
+    code,
+    'Workspace Search migration execution run operation failed.',
   )
 }
 

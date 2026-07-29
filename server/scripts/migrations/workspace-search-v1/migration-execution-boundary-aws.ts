@@ -119,6 +119,19 @@ export type AdmitWorkspaceSearchMigrationExecutionBoundaryAwsPlanningInput = {
 }
 
 /**
+ * Exact planning-admitted boundary fixed by a later execution transaction.
+ */
+export type CreateWorkspaceSearchMigrationPlanningAdmittedExecutionBoundaryConditionCheckInput = {
+  /** Exact measured migration-state table containing the durable boundary. */
+  readonly stateTable: MigrationTableIdentity
+  /** Reviewed measured-configuration digest used in boundary addressing. */
+  readonly configurationHash: string
+  /** Exact immutable revision-two planning-admitted boundary. */
+  readonly boundary:
+    WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary
+}
+
+/**
  * Narrow migration-state transport used by the atomic execution boundary.
  */
 export interface WorkspaceSearchMigrationExecutionBoundaryAwsTransport {
@@ -187,6 +200,28 @@ export interface WorkspaceSearchMigrationExecutionBoundaryAwsPort {
 }
 
 /**
+ * State-table identity required to address one durable boundary record.
+ */
+type ExecutionBoundaryRecordStateTable = {
+  /** Exact physical migration-state table name. */
+  readonly tableName: string
+  /** Immutable migration-state TableId. */
+  readonly tableId: string
+}
+
+/**
+ * Exact measured material required by the durable boundary row.
+ */
+type ExecutionBoundaryRecordBinding = {
+  /** Exact detached migration-state table identity used by the row. */
+  readonly stateTable: ExecutionBoundaryRecordStateTable
+  /** Reviewed digest of that exact configuration. */
+  readonly configurationHash: string
+  /** Shared exact writer-fence binding for all six TableIds. */
+  readonly writerFence: WorkspaceSearchWriterFenceBinding
+}
+
+/**
  * Detached measured material retained by one execution-boundary adapter.
  */
 type ExecutionBoundaryAdapterBinding = {
@@ -198,6 +233,23 @@ type ExecutionBoundaryAdapterBinding = {
   readonly stateTable: MigrationTableIdentity
   /** Shared exact writer-fence binding for all six TableIds. */
   readonly writerFence: WorkspaceSearchWriterFenceBinding
+}
+
+/**
+ * Descriptor-safe detached input for one exact boundary condition check.
+ */
+type PreparedExecutionBoundaryConditionCheckInput = {
+  /** Exact physical migration-state table name. */
+  readonly stateTableName: string
+  /** Immutable migration-state TableId. */
+  readonly stateTableId: string
+  /** Digest of the complete measured migration-state incarnation. */
+  readonly stateIncarnationDigest: string
+  /** Reviewed measured-configuration digest. */
+  readonly configurationHash: string
+  /** Detached strict revision-two planning-admitted boundary. */
+  readonly boundary:
+    WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary
 }
 
 /**
@@ -676,6 +728,208 @@ export function createAwsWorkspaceSearchMigrationExecutionBoundaryPort(
 }
 
 /**
+ * Creates an exact immutable planning-admitted boundary condition check.
+ *
+ * Every independently indexed durable field and the complete canonical
+ * boundary bytes are fixed together so an execution transaction cannot
+ * substitute another revision or run at the same deterministic key.
+ *
+ * @param input - Measured state table, configuration digest, and exact boundary.
+ * @returns One adapter-owned DynamoDB ConditionCheck transaction item.
+ */
+export function createWorkspaceSearchMigrationPlanningAdmittedExecutionBoundaryConditionCheck(
+  input:
+    CreateWorkspaceSearchMigrationPlanningAdmittedExecutionBoundaryConditionCheckInput,
+): TransactWriteItem {
+  try {
+    const snapshot =
+      prepareExecutionBoundaryConditionCheckInput(input)
+    const writerFence =
+      createWorkspaceSearchWriterFenceBinding({
+        stateTableName: snapshot.stateTableName,
+        stateTableId: snapshot.stateTableId,
+        stateIncarnationDigest: snapshot.stateIncarnationDigest,
+        tableIds: snapshot.boundary.tableIds,
+      })
+    const binding: ExecutionBoundaryRecordBinding = {
+      stateTable: {
+        tableName: snapshot.stateTableName,
+        tableId: snapshot.stateTableId,
+      },
+      configurationHash: snapshot.configurationHash,
+      writerFence,
+    }
+    const conditionCheck:
+      NonNullable<TransactWriteItem['ConditionCheck']> = {
+        TableName: binding.stateTable.tableName,
+        Key: {
+          migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
+          recordKey: {
+            S: createExecutionBoundaryRecordKey(
+              binding,
+              snapshot.boundary.runId,
+            ),
+          },
+        },
+        ...createExecutionBoundaryRecordCondition(
+          binding,
+          snapshot.boundary,
+        ),
+        ReturnValuesOnConditionCheckFailure: 'NONE',
+      }
+    return { ConditionCheck: conditionCheck }
+  } catch (error: unknown) {
+    throw createExecutionBoundaryAwsPublicFailure(
+      readExecutionBoundaryAwsFailureCode(error, true),
+    )
+  }
+}
+
+/**
+ * Rejects accessors, Proxies, extra fields, and non-admitted boundaries.
+ *
+ * @param input - Candidate exported condition-check input.
+ * @returns Detached descriptor-safe condition-check material.
+ */
+function prepareExecutionBoundaryConditionCheckInput(
+  input:
+    CreateWorkspaceSearchMigrationPlanningAdmittedExecutionBoundaryConditionCheckInput,
+): PreparedExecutionBoundaryConditionCheckInput {
+  requireExactExecutionBoundaryInputKeys(input, [
+    'boundary',
+    'configurationHash',
+    'stateTable',
+  ])
+  const configurationHash = readExecutionBoundaryOwnDataValue(
+    input,
+    'configurationHash',
+    'INVALID_ARGUMENT',
+  )
+  if (
+    typeof configurationHash !== 'string' ||
+    !/^[0-9a-f]{64}$/u.test(configurationHash)
+  ) {
+    return failExecutionBoundaryAws('INVALID_ARGUMENT')
+  }
+  const stateTable = prepareExecutionBoundaryConditionStateTable(
+    readExecutionBoundaryOwnDataValue(
+      input,
+      'stateTable',
+      'INVALID_ARGUMENT',
+    ),
+  )
+  const boundary =
+    cloneExecutionBoundaryPlanningAdmission(
+      input.boundary,
+    )
+  if (
+    boundary.configurationHash !== configurationHash ||
+    boundary.tableIds['migration-state'] !== stateTable.tableId
+  ) {
+    return failExecutionBoundaryAws('CONFIGURATION_DRIFT')
+  }
+  return {
+    stateTableName: stateTable.tableName,
+    stateTableId: stateTable.tableId,
+    stateIncarnationDigest: stateTable.stateIncarnationDigest,
+    configurationHash,
+    boundary,
+  }
+}
+
+/**
+ * Validates and projects the measured migration-state incarnation.
+ *
+ * @param value - Candidate complete measured migration-state identity.
+ * @returns Detached row-addressing fields and incarnation digest.
+ */
+function prepareExecutionBoundaryConditionStateTable(
+  value: unknown,
+): {
+  /** Exact physical migration-state table name. */
+  readonly tableName: string
+  /** Immutable migration-state TableId. */
+  readonly tableId: string
+  /** Digest of the complete measured migration-state incarnation. */
+  readonly stateIncarnationDigest: string
+} {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    Array.isArray(value) ||
+    nodeUtilTypes.isProxy(value)
+  ) {
+    return failExecutionBoundaryAws('INVALID_ARGUMENT')
+  }
+  const role = readExecutionBoundaryOwnDataValue(
+    value,
+    'role',
+    'INVALID_ARGUMENT',
+  )
+  const tableName = readExecutionBoundaryOwnDataValue(
+    value,
+    'tableName',
+    'INVALID_ARGUMENT',
+  )
+  const tableArn = readExecutionBoundaryOwnDataValue(
+    value,
+    'tableArn',
+    'INVALID_ARGUMENT',
+  )
+  const tableId = readExecutionBoundaryOwnDataValue(
+    value,
+    'tableId',
+    'INVALID_ARGUMENT',
+  )
+  const creationTime = readExecutionBoundaryOwnDataValue(
+    value,
+    'creationTime',
+    'INVALID_ARGUMENT',
+  )
+  const account = readExecutionBoundaryOwnDataValue(
+    value,
+    'account',
+    'INVALID_ARGUMENT',
+  )
+  const region = readExecutionBoundaryOwnDataValue(
+    value,
+    'region',
+    'INVALID_ARGUMENT',
+  )
+  if (
+    role !== 'migration-state' ||
+    typeof tableName !== 'string' ||
+    typeof tableArn !== 'string' ||
+    typeof tableId !== 'string' ||
+    typeof creationTime !== 'string' ||
+    typeof account !== 'string' ||
+    typeof region !== 'string'
+  ) {
+    return failExecutionBoundaryAws('INVALID_ARGUMENT')
+  }
+  let stateIncarnationDigest: string
+  try {
+    stateIncarnationDigest =
+      createWorkspaceSearchWriterFenceStateIncarnationDigest({
+        role,
+        tableName,
+        tableArn,
+        tableId,
+        creationTime,
+        account,
+        region,
+      })
+  } catch {
+    return failExecutionBoundaryAws('INVALID_ARGUMENT')
+  }
+  return {
+    tableName,
+    tableId,
+    stateIncarnationDigest,
+  }
+}
+
+/**
  * Constructs the complete detached six-table adapter binding.
  *
  * @param configuration - Candidate measured configuration.
@@ -1050,7 +1304,7 @@ function createExecutionBoundaryTransitionPut(
             '#recordKey': 'recordKey',
           },
         }
-      : createExecutionBoundaryPredecessorCondition(
+      : createExecutionBoundaryRecordCondition(
           binding,
           predecessor,
         )),
@@ -1060,22 +1314,24 @@ function createExecutionBoundaryTransitionPut(
 }
 
 /**
- * Creates an exact full-record predecessor condition.
+ * Creates an exact full-record durable boundary condition.
  *
  * @param binding - Exact adapter binding.
- * @param predecessor - Exact durable revision-one predecessor.
- * @returns Condition fields for a boundary successor Put.
+ * @param boundary - Exact durable revision-one or revision-two boundary.
+ * @returns Condition fields for a boundary Put or ConditionCheck.
  */
-function createExecutionBoundaryPredecessorCondition(
-  binding: ExecutionBoundaryAdapterBinding,
-  predecessor: WorkspaceSearchMigrationClosedExecutionBoundary,
-): Pick<
-  NonNullable<TransactWriteItem['Put']>,
-  | 'ConditionExpression'
-  | 'ExpressionAttributeNames'
-  | 'ExpressionAttributeValues'
+function createExecutionBoundaryRecordCondition(
+  binding: ExecutionBoundaryRecordBinding,
+  boundary: WorkspaceSearchMigrationExecutionBoundary,
+): Required<
+  Pick<
+    NonNullable<TransactWriteItem['Put']>,
+    | 'ConditionExpression'
+    | 'ExpressionAttributeNames'
+    | 'ExpressionAttributeValues'
+  >
 > {
-  const item = createExecutionBoundaryRecord(binding, predecessor)
+  const item = createExecutionBoundaryRecord(binding, boundary)
   const names: Record<string, string> = {}
   const values: Record<string, AttributeValue> = {}
   const clauses: string[] = []
@@ -1123,7 +1379,7 @@ function createExecutionBoundaryPredecessorCondition(
  * @returns Complete low-level DynamoDB item.
  */
 function createExecutionBoundaryRecord(
-  binding: ExecutionBoundaryAdapterBinding,
+  binding: ExecutionBoundaryRecordBinding,
   boundary: WorkspaceSearchMigrationExecutionBoundary,
 ): Readonly<Record<string, AttributeValue>> {
   const bytes =
@@ -1227,7 +1483,7 @@ function parseExecutionBoundaryRecord(
  * @param boundary - Exact strict boundary.
  */
 function requireExecutionBoundaryBinding(
-  binding: ExecutionBoundaryAdapterBinding,
+  binding: ExecutionBoundaryRecordBinding,
   boundary: WorkspaceSearchMigrationExecutionBoundary,
 ): void {
   if (
@@ -1278,7 +1534,7 @@ function createExecutionBoundaryReadCommand(
  * @returns Deterministic run/configuration boundary key.
  */
 function createExecutionBoundaryRecordKey(
-  binding: ExecutionBoundaryAdapterBinding,
+  binding: ExecutionBoundaryRecordBinding,
   runId: string,
 ): string {
   const validatedRunId = readMigrationRunId(runId)

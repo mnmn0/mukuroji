@@ -660,10 +660,13 @@ identityにTTL無効を要求します。このdisjointnessはmapped rowの論�
 
 Resource identityの`measure`、writer-fenceのread-only `status`、初回だけの`bootstrap-open`を行う
 control CLIと、single-flight heartbeat supervisorは実装済みです。Atomic close/planning admissionの
-execution-boundary AWS portとmanaged-session capability gateも実装済みですが、control CLIとorchestratorへは
-公開していません。Terminal outcomeに束縛したrelease、close後のdrainと再planning orchestration、
-apply/verify/rollback state adapter、migration専用observability/alarm、restore/failover/DR drill、
-non-production実行evidenceは未完了です。Sealed authority v2もapply authorityとして使用せず、
+execution-boundary AWS portとmanaged-session capability gateに加え、exact revision 2 boundary、closed
+writer-fence、sealed authority v2、fresh current authorityからrevision 1 `applying` stateを作る
+execution-run contractと、同じmeasured sessionでそのstateをstrong read/createするadmission portも
+実装済みです。これらはcontrol CLIとorchestratorへ公開していません。Target mutation、checkpoint、
+apply/verify/rollback transition、terminal outcomeに束縛したrelease、close後のdrainと再planning
+orchestration、migration専用observability/alarm、restore/failover/DR drill、non-production実行evidenceは
+未完了です。Sealed authority v2と作成済みinitial run stateだけをapply authorityとして使用せず、
 Production migration gateは閉じたままです。
 Pure execution-boundary contractは、exact closed fence digest/authorityと全6 TableIdを持つ`closed` revision 1、
 fresh current authority、exact raw maintenance evidence、close後15分以上のdrainを持つ
@@ -671,10 +674,13 @@ fresh current authority、exact raw maintenance evidence、close後15分以上�
 target planning v1 には、close/admission transactionで同じrun/configuration/TableIdのhead未作成を固定する
 ConditionCheck factoryがあり、terminal headには完全なidentity、chain version、checkpoint、recursive head
 digest、`completed=true`を比較するfactoryがあります。Exact closed writer-fence rowとsealed planning
-authority v2 rootを固定するConditionCheck factoryもあります。Fixed 10 item transactionへcompositionする
-execution-boundary AWS portとmanaged-session capability gateは実装済みです。ただし、operator CLI、
-post-close planning orchestrator、実行state adapterへは未接続です。したがって、このadapterの存在だけを
-根拠にwriter-fenceを閉じたりplanningを開始したりしてはいけません。
+authority v2 rootに加え、exact planning-admitted execution boundaryのcanonical bytesを固定する
+ConditionCheck factoryもあります。Fixed 10 item transactionへcompositionするexecution-boundary AWS
+portと、lease/pointer/receipt、closed fence、revision 2 boundary、sealed root、未作成execution-run rowを
+固定順の7 item transactionへcompositionするinitial execution-run admission portは、いずれも
+managed-session capability gateに束縛しています。ただし、operator CLI、post-close planning
+orchestrator、run state mutation adapterへは未接続です。したがって、これらのadapterの存在だけを根拠に
+writer-fenceを閉じたりplanning/applyを開始したりしてはいけません。
 
 ただし、sealed planning authority v2 の原子的publication、durable writer-fence row、application writer
 guardの存在だけでは、supervisedなclose/drain/replanningを完了しません。Historical receipt と current
@@ -784,7 +790,9 @@ Process exit statusは、成功を`0`、migration failureまたは`OPERATION_FAI
    Application writer guardの永続化境界、runtime配線、初回bootstrap用control CLIとheartbeatに加え、
    writer-fence closeとrevision 1 execution boundaryを同時commitし、post-close planning admissionを
    revision 2へ進める固定10項目AWS transactionとmanaged-session capability gateは実装済みです。
-   ただしclose/admissionのCLI・orchestrator配線、condition-aware production state adapter、
+   Exact revision 2 boundary、closed fence、sealed root、fresh authorityを固定したrevision 1
+   execution-run stateのstrong read/createと固定7項目admission transactionも実装済みです。ただし、
+   close/admission/run creationのCLI・orchestrator配線、run state mutation adapter、
    apply/verify/rollback supervisor、terminal outcomeに束縛したrelease、observability/alarm、
    DR/non-production evidenceは未実装のため、migration全体のproduction gateはまだ実行可能とは扱いません。
 5. Online migration は writer fence/epoch または dual-write + high-watermark catch-up を有効化し、

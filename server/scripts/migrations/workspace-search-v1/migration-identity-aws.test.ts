@@ -19,6 +19,7 @@ import {
   ScanCommand,
   type ScanCommandOutput,
   type TableDescription,
+  TransactionCanceledException,
   TransactWriteItemsCommand,
   type TransactWriteItemsCommandOutput,
 } from '@aws-sdk/client-dynamodb'
@@ -96,11 +97,21 @@ import type {
   WorkspaceSearchMigrationPrePlanAuthority,
 } from './migration-pre-plan-authority-aws'
 import type {
+  WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary,
+} from './migration-execution-boundary'
+import {
+  workspaceSearchMigrationExecutionRunTransactionIndex,
+} from './migration-execution-run-aws'
+import type {
   PublishWorkspaceSearchMigrationSealedPlanningAuthorityV2Input,
 } from './migration-sealed-planning-authority-aws'
 import {
   serializeWorkspaceSearchMigrationSealedPlanningAuthorityV2,
+  type WorkspaceSearchMigrationSealedPlanningAuthorityV2,
 } from './migration-sealed-planning-authority-v2'
+import type {
+  WorkspaceSearchWriterFenceClosedRecord,
+} from '../../../src/infrastructure/runtime/workspace-search-writer-fence'
 import type {
   WorkspaceSearchMigrationSourceScanReadInput,
 } from './migration-source-scan-aws'
@@ -301,6 +312,52 @@ type ManagedSealedPublicationFixture = {
   /** Strict publication input assembled from real committed evidence. */
   readonly publishInput:
     PublishWorkspaceSearchMigrationSealedPlanningAuthorityV2Input
+}
+
+/**
+ * Material exposed before managed planning evidence is committed.
+ */
+type ManagedPlanningAuthorityPreparationContext = {
+  /** Measured managed session owning planning and execution control. */
+  readonly port: WorkspaceSearchMigrationManagedAwsSession
+  /** Recording transport shared by the complete managed session. */
+  readonly transport: RecordingIdentityAwsTransport
+  /** Exact measured configuration used by later planning evidence. */
+  readonly configuration: WorkspaceSearchMigrationConfiguration
+  /** Initial fresh authority created before planning begins. */
+  readonly authority: WorkspaceSearchMigrationPrePlanAuthority
+}
+
+/**
+ * Optional execution-control preparation before planning evidence writes.
+ */
+type ManagedPlanningAuthorityPreparation = (
+  context: ManagedPlanningAuthorityPreparationContext,
+) => Promise<WorkspaceSearchMigrationPrePlanAuthority>
+
+/**
+ * Complete managed execution-run admission fixture.
+ */
+type ManagedExecutionRunFixture = {
+  /** Operator-requested physical resources measured by the session. */
+  readonly requested: WorkspaceSearchMigrationRequestedResources
+  /** Measured managed session owning execution admission. */
+  readonly port: WorkspaceSearchMigrationManagedAwsSession
+  /** Recording transport shared by every execution-control operation. */
+  readonly transport: RecordingIdentityAwsTransport
+  /** Fresh current authority used by execution-run creation. */
+  readonly currentAuthority: WorkspaceSearchMigrationPrePlanAuthority
+  /** Exact revision-two planning-admitted execution boundary. */
+  readonly executionBoundary:
+    WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary
+  /** Exact immutable sealed planning-authority root. */
+  readonly sealedPlanningAuthority:
+    WorkspaceSearchMigrationSealedPlanningAuthorityV2
+  /** Exact plan seal referenced by the sealed root. */
+  readonly planSeal: WorkspaceSearchPlanSeal
+  /** Exact closed writer-fence row fixed by the boundary. */
+  readonly closedWriterFenceRecord:
+    WorkspaceSearchWriterFenceClosedRecord
 }
 
 /** Allowlisted command recorder used without AWS credentials or network access. */
@@ -5333,6 +5390,412 @@ describe('Workspace Search migration AWS identity adapter', () => {
     },
   )
 
+  test(
+    'routes one fixed execution-run admission through the managed transport',
+    async () => {
+      const fixture =
+        await createManagedExecutionRunFixture('managed-success')
+      const executionRun = fixture.port.createExecutionRunPort(
+        fixture.executionBoundary,
+        fixture.sealedPlanningAuthority,
+        fixture.planSeal,
+        fixture.closedWriterFenceRecord,
+      )
+      const transactionCount =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+      const guardTrace: string[] = []
+      fixture.transport.describeTableEffect = (tableName) => {
+        guardTrace.push(tableName)
+      }
+
+      const created = await executionRun.create(
+        fixture.currentAuthority,
+      )
+
+      expect(created).toMatchObject({
+        runId: fixture.currentAuthority.lease.runId,
+        revision: 1,
+        status: 'applying',
+        binding: {
+          executionBoundaryDigest:
+            fixture.executionBoundary.boundaryDigest,
+          sealedPlanningAuthorityDigest:
+            fixture.sealedPlanningAuthority.authorityDigest,
+          closedWriterFenceRecordDigest:
+            fixture.closedWriterFenceRecord.recordDigest,
+        },
+      })
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactionCount + 1)
+      const command =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands[transactionCount]
+      const items = command?.input.TransactItems
+      expect(items).toHaveLength(7)
+      expect(
+        items?.slice(0, 6).every(
+          (item) => item.ConditionCheck !== undefined,
+        ),
+      ).toBe(true)
+      expect(items?.[6]?.Put?.Item).toMatchObject({
+        kind: {
+          S: 'workspace-search-migration-execution-run-state',
+        },
+        runId: { S: fixture.currentAuthority.lease.runId },
+        revision: { N: '1' },
+        status: { S: 'applying' },
+      })
+      const expectedGuardOrder = [
+        fixture.requested.tables['migration-state'],
+        fixture.requested.tables['project-directory'],
+        fixture.requested.tables['work-items'],
+        fixture.requested.tables.collaboration,
+        fixture.requested.tables.documents,
+        fixture.requested.tables['workspace-search'],
+      ]
+      expect(guardTrace.length).toBeGreaterThan(0)
+      expect(guardTrace.length % expectedGuardOrder.length).toBe(0)
+      for (
+        let offset = 0;
+        offset < guardTrace.length;
+        offset += expectedGuardOrder.length
+      ) {
+        expect(
+          guardTrace.slice(
+            offset,
+            offset + expectedGuardOrder.length,
+          ),
+        ).toEqual(expectedGuardOrder)
+      }
+      await expect(
+        executionRun.read(fixture.currentAuthority.lease.runId),
+      ).resolves.toEqual(created)
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'preserves managed execution-run reconciliation and cancellation mapping',
+    async () => {
+      const responseLoss =
+        await createManagedExecutionRunFixture(
+          'managed-response-loss',
+        )
+      const responseLossPort =
+        responseLoss.port.createExecutionRunPort(
+          responseLoss.executionBoundary,
+          responseLoss.sealedPlanningAuthority,
+          responseLoss.planSeal,
+          responseLoss.closedWriterFenceRecord,
+        )
+      const responseLossReads =
+        responseLoss.transport.getPrePlanAuthorityCommands.length
+      const responseLossTransactions =
+        responseLoss.transport
+          .transactWritePrePlanAuthorityCommands.length
+      responseLoss.transport
+        .transactWritePrePlanAuthorityPostCommitEffect = () => {
+          throw new Error(
+            'MANAGED-EXECUTION-RUN-RESPONSE-LOSS-DO-NOT-LEAK',
+          )
+        }
+
+      const recovered = await responseLossPort.create(
+        responseLoss.currentAuthority,
+      )
+
+      expect(recovered).toMatchObject({
+        runId: responseLoss.currentAuthority.lease.runId,
+        revision: 1,
+        status: 'applying',
+      })
+      expect(
+        responseLoss.transport.getPrePlanAuthorityCommands,
+      ).toHaveLength(responseLossReads + 2)
+      expect(
+        responseLoss.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(responseLossTransactions + 1)
+      responseLoss.port.close()
+
+      const cancellation =
+        await createManagedExecutionRunFixture(
+          'managed-cancellation',
+        )
+      const cancellationPort =
+        cancellation.port.createExecutionRunPort(
+          cancellation.executionBoundary,
+          cancellation.sealedPlanningAuthority,
+          cancellation.planSeal,
+          cancellation.closedWriterFenceRecord,
+        )
+      const cancellationReads =
+        cancellation.transport.getPrePlanAuthorityCommands.length
+      const cancellationTransactions =
+        cancellation.transport
+          .transactWritePrePlanAuthorityCommands.length
+      const canary =
+        'MANAGED-EXECUTION-RUN-CANCELLATION-DO-NOT-LEAK'
+      cancellation.transport.transactWritePrePlanAuthorityEffect =
+        () => {
+          throw new TransactionCanceledException({
+            $metadata: {},
+            message: canary,
+            CancellationReasons: Array.from(
+              {
+                length:
+                  workspaceSearchMigrationExecutionRunTransactionIndex
+                    .count,
+              },
+              (_, index) => ({
+                Code: index ===
+                    workspaceSearchMigrationExecutionRunTransactionIndex
+                      .lease
+                  ? 'ConditionalCheckFailed'
+                  : 'None',
+              }),
+            ),
+          })
+        }
+
+      const failure =
+        await captureWorkspaceSearchMigrationFailure(
+          cancellationPort.create(cancellation.currentAuthority),
+        )
+
+      expect(failure).toMatchObject({
+        code: 'LEASE_LOST',
+        message:
+          'Workspace Search migration execution run operation failed.',
+      })
+      expect(failure.message).not.toContain(canary)
+      expect(
+        cancellation.transport.getPrePlanAuthorityCommands,
+      ).toHaveLength(cancellationReads + 2)
+      expect(
+        cancellation.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(cancellationTransactions + 1)
+      cancellation.port.close()
+    },
+  )
+
+  test(
+    'classifies a missing managed execution-run state table safely',
+    async () => {
+      const fixture =
+        await createManagedExecutionRunFixture(
+          'managed-state-missing',
+        )
+      const executionRun = fixture.port.createExecutionRunPort(
+        fixture.executionBoundary,
+        fixture.sealedPlanningAuthority,
+        fixture.planSeal,
+        fixture.closedWriterFenceRecord,
+      )
+      const reads =
+        fixture.transport.getPrePlanAuthorityCommands.length
+      const canary =
+        'MANAGED-EXECUTION-RUN-STATE-MISSING-DO-NOT-LEAK'
+      fixture.transport.getPrePlanAuthorityEffect = () => {
+        throw new ResourceNotFoundException({
+          $metadata: {},
+          message: canary,
+        })
+      }
+
+      const failure =
+        await captureWorkspaceSearchMigrationFailure(
+          executionRun.read(fixture.currentAuthority.lease.runId),
+        )
+
+      expect(failure).toMatchObject({
+        code: 'CONFIGURATION_DRIFT',
+        message:
+          'Workspace Search migration execution run operation failed.',
+      })
+      expect(failure.message).not.toContain(canary)
+      expect(
+        fixture.transport.getPrePlanAuthorityCommands,
+      ).toHaveLength(reads + 1)
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'gates execution-run factories and ports across managed lifecycle changes',
+    async () => {
+      const fixture =
+        await createManagedExecutionRunFixture('managed-lifecycle')
+      const unmeasuredTransport =
+        new RecordingIdentityAwsTransport()
+      seedValidMeasurementOutputs(
+        unmeasuredTransport,
+        fixture.requested,
+      )
+      const unmeasured =
+        createAwsWorkspaceSearchMigrationIdentityPort(
+          fixture.requested,
+          () => unmeasuredTransport,
+          () => new Date('2026-07-28T07:16:30.000Z'),
+        )
+      const expectedFailure =
+        new WorkspaceSearchMigrationFailure(
+          'INVALID_STATE',
+          'Workspace Search migration execution run operation failed.',
+        )
+
+      expect(() =>
+        unmeasured.createExecutionRunPort(
+          fixture.executionBoundary,
+          fixture.sealedPlanningAuthority,
+          fixture.planSeal,
+          fixture.closedWriterFenceRecord,
+        ),
+      ).toThrow(expectedFailure)
+      unmeasured.close()
+
+      const stale = fixture.port.createExecutionRunPort(
+        fixture.executionBoundary,
+        fixture.sealedPlanningAuthority,
+        fixture.planSeal,
+        fixture.closedWriterFenceRecord,
+      )
+      await fixture.port.measureConfiguration()
+      const readsAfterMeasurement =
+        fixture.transport.getPrePlanAuthorityCommands.length
+      await expect(
+        stale.read(fixture.currentAuthority.lease.runId),
+      ).rejects.toEqual(expectedFailure)
+      expect(
+        fixture.transport.getPrePlanAuthorityCommands,
+      ).toHaveLength(readsAfterMeasurement)
+
+      const replacement = fixture.port.createExecutionRunPort(
+        fixture.executionBoundary,
+        fixture.sealedPlanningAuthority,
+        fixture.planSeal,
+        fixture.closedWriterFenceRecord,
+      )
+      await expect(
+        replacement.read(fixture.currentAuthority.lease.runId),
+      ).resolves.toBeUndefined()
+      const readsBeforeClose =
+        fixture.transport.getPrePlanAuthorityCommands.length
+      fixture.port.close()
+      await expect(
+        replacement.read(fixture.currentAuthority.lease.runId),
+      ).rejects.toEqual(expectedFailure)
+      expect(
+        fixture.transport.getPrePlanAuthorityCommands,
+      ).toHaveLength(readsBeforeClose)
+    },
+  )
+
+  test(
+    'quarantines execution-run admission after post-commit identity drift',
+    async () => {
+      const fixture =
+        await createManagedExecutionRunFixture('managed-quarantine')
+      const executionRun = fixture.port.createExecutionRunPort(
+        fixture.executionBoundary,
+        fixture.sealedPlanningAuthority,
+        fixture.planSeal,
+        fixture.closedWriterFenceRecord,
+      )
+      const transactionCount =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+      const targetTableName =
+        fixture.requested.tables['workspace-search']
+      const originalTarget =
+        fixture.transport.describeTableOutputs.get(targetTableName)
+      if (originalTarget === undefined) {
+        throw new Error('Expected measured execution-run target identity.')
+      }
+      let driftInjected = false
+      const readsBeforeCreate =
+        fixture.transport.getPrePlanAuthorityCommands.length
+      fixture.transport
+        .transactWritePrePlanAuthorityPostCommitEffect = () => {
+          driftInjected = true
+          fixture.transport.describeTableOutputs.set(
+            targetTableName,
+            createReplacementDescribeTableOutput(
+              'workspace-search',
+              targetTableName,
+              fixture.requested,
+            ),
+          )
+        }
+
+      const failure =
+        await captureWorkspaceSearchMigrationFailure(
+          executionRun.create(fixture.currentAuthority),
+        )
+
+      expect(failure).toMatchObject({
+        code: 'TARGET_DRIFT',
+        message:
+          'Workspace Search migration execution run operation failed.',
+      })
+      expect(driftInjected).toBe(true)
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactionCount + 1)
+      expect(
+        fixture.transport.getPrePlanAuthorityCommands,
+      ).toHaveLength(readsBeforeCreate + 1)
+      fixture.transport
+        .transactWritePrePlanAuthorityPostCommitEffect = undefined
+      fixture.transport.describeTableOutputs.set(
+        targetTableName,
+        originalTarget,
+      )
+      const expectedQuarantineFailure =
+        new WorkspaceSearchMigrationFailure(
+          'INVALID_STATE',
+          'Workspace Search migration execution run operation failed.',
+        )
+      expect(() =>
+        fixture.port.createExecutionRunPort(
+          fixture.executionBoundary,
+          fixture.sealedPlanningAuthority,
+          fixture.planSeal,
+          fixture.closedWriterFenceRecord,
+        ),
+      ).toThrow(expectedQuarantineFailure)
+      const readsWhileQuarantined =
+        fixture.transport.getPrePlanAuthorityCommands.length
+      await expect(
+        executionRun.read(fixture.currentAuthority.lease.runId),
+      ).rejects.toEqual(expectedQuarantineFailure)
+      expect(
+        fixture.transport.getPrePlanAuthorityCommands,
+      ).toHaveLength(readsWhileQuarantined)
+
+      await fixture.port.measureConfiguration()
+      const recovered = fixture.port.createExecutionRunPort(
+        fixture.executionBoundary,
+        fixture.sealedPlanningAuthority,
+        fixture.planSeal,
+        fixture.closedWriterFenceRecord,
+      )
+      await expect(
+        recovered.read(fixture.currentAuthority.lease.runId),
+      ).resolves.toMatchObject({
+        runId: fixture.currentAuthority.lease.runId,
+        revision: 1,
+        status: 'applying',
+      })
+      fixture.port.close()
+    },
+  )
+
   test('stores and replays an empty plan through measured immutable S3', async () => {
     const requested = createRequestedResources()
     const transport = new RecordingIdentityAwsTransport()
@@ -8318,6 +8781,7 @@ function createTargetEvidenceReadRequest(
  * @param runId - Exact run owning the immutable planning graph.
  * @param configurationHash - Exact measured-configuration digest.
  * @param planningSnapshotDigest - Exact provenance-derived snapshot digest.
+ * @param createdAt - Canonical plan-seal creation timestamp.
  * @returns Strict empty plan seal accepted by the planning gateway.
  */
 function createManagedPlanningArtifactEmptyPlanSeal(
@@ -8325,6 +8789,7 @@ function createManagedPlanningArtifactEmptyPlanSeal(
   configurationHash: string,
   planningSnapshotDigest =
     createMigrationDigest('managed-planning-snapshot'),
+  createdAt = '2026-07-28T00:00:00.000Z',
 ): WorkspaceSearchPlanSeal {
   return {
     kind: 'workspace-search-plan-seal',
@@ -8339,7 +8804,7 @@ function createManagedPlanningArtifactEmptyPlanSeal(
     planOperationCount: 0,
     sourceOperationCount: 0,
     orphanOperationCount: 0,
-    createdAt: '2026-07-28T00:00:00.000Z',
+    createdAt,
   }
 }
 
@@ -8394,11 +8859,13 @@ async function createManagedPlanningAuthority(
  *
  * @param identifier - Unique run and authority fixture suffix.
  * @param clock - Optional controllable clock shared by the managed session.
+ * @param prepareAuthority - Optional execution-control preparation before planning.
  * @returns Measured session, recording transport, and bounded join input.
  */
 async function createManagedCommittedPlanningFixture(
   identifier: string,
   clock?: () => Date,
+  prepareAuthority?: ManagedPlanningAuthorityPreparation,
 ): Promise<ManagedCommittedPlanningFixture> {
   const requested = createRequestedResources()
   const transport = new RecordingIdentityAwsTransport()
@@ -8415,6 +8882,14 @@ async function createManagedCommittedPlanningFixture(
     clockAt,
     `managed-join-${identifier}`,
   )
+  const planningAuthority = prepareAuthority === undefined
+    ? authority
+    : await prepareAuthority({
+        port,
+        transport,
+        configuration,
+        authority: structuredClone(authority),
+      })
   for (const source of workspaceSearchMigrationSourceNames) {
     const sourceItems = source === 'project-directory'
       ? [createIgnoredSourceItem(`${identifier}-source`)]
@@ -8428,7 +8903,7 @@ async function createManagedCommittedPlanningFixture(
     await port.commitNextSourceEvidencePage(
       createPlanningSourceEvidenceRequest(
         configuration,
-        structuredClone(authority),
+        structuredClone(planningAuthority),
         source,
       ),
     )
@@ -8445,16 +8920,16 @@ async function createManagedCommittedPlanningFixture(
   await port.commitNextTargetEvidencePage(
     createPlanningTargetEvidenceRequest(
       configuration,
-      structuredClone(authority),
+      structuredClone(planningAuthority),
     ),
   )
   return {
     requested,
     port,
     transport,
-    authority: structuredClone(authority),
+    authority: structuredClone(planningAuthority),
     input: {
-      runId: authority.lease.runId,
+      runId: planningAuthority.lease.runId,
       configuration,
       configurationHash:
         createWorkspaceSearchConfigurationHash(configuration),
@@ -8489,15 +8964,22 @@ function readManagedEvidencePageBytes(
  *
  * @param identifier - Unique run and immutable-object fixture suffix.
  * @param clock - Optional controllable clock shared by the managed session.
+ * @param prepareAuthority - Optional execution-control preparation before planning.
+ * @param planCreatedAt - Optional canonical plan-seal creation time.
+ * @param retainUntil - Optional immutable-artifact retention deadline.
  * @returns Complete measured publication fixture.
  */
 async function createManagedSealedPublicationFixture(
   identifier: string,
   clock?: () => Date,
+  prepareAuthority?: ManagedPlanningAuthorityPreparation,
+  planCreatedAt = '2026-07-28T00:00:00.000Z',
+  retainUntil = '2026-08-27T07:01:00.000Z',
 ): Promise<ManagedSealedPublicationFixture> {
   const fixture = await createManagedCommittedPlanningFixture(
     identifier,
     clock,
+    prepareAuthority,
   )
   const joined = await fixture.port.joinCommittedPlanningEvidence(
     fixture.input,
@@ -8517,7 +8999,6 @@ async function createManagedSealedPublicationFixture(
   const gateway = fixture.port.createPlanningArtifactGateway(
     fixture.input.runId,
   )
-  const retainUntil = '2026-08-27T07:01:00.000Z'
   const storedProvenance =
     await gateway.writePlanningProvenanceArtifact({
       sourceEvidencePageBytes: {
@@ -8544,6 +9025,7 @@ async function createManagedSealedPublicationFixture(
     fixture.input.runId,
     fixture.input.configurationHash,
     storedProvenance.manifestHead.summary.planningSnapshotDigest,
+    planCreatedAt,
   )
   const storedPlan = await gateway.writePlanArtifact({
     planSeal,
@@ -8571,6 +9053,101 @@ async function createManagedSealedPublicationFixture(
       targetProgress: joined.targetProgress,
       currentAuthority: fixture.authority,
     },
+  }
+}
+
+/**
+ * Builds one planning-admitted, sealed, and still-fresh execution-run fixture.
+ *
+ * @param identifier - Unique execution-control fixture suffix.
+ * @returns Complete measured execution-run admission material.
+ */
+async function createManagedExecutionRunFixture(
+  identifier: string,
+): Promise<ManagedExecutionRunFixture> {
+  let clockAt = '2026-07-28T07:00:00.000Z'
+  let executionBoundary:
+    WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary | undefined
+  let closedWriterFenceRecord:
+    WorkspaceSearchWriterFenceClosedRecord | undefined
+  const publication =
+    await createManagedSealedPublicationFixture(
+      identifier,
+      () => new Date(clockAt),
+      async (context) => {
+        const writerFence =
+          context.port.createApplicationWriterFencePort()
+        await writerFence.bootstrapOpen(context.authority)
+        const boundaryPort =
+          context.port.createExecutionBoundaryPort()
+        await boundaryPort.close(context.authority)
+        clockAt = '2026-07-28T07:16:00.000Z'
+        const admissionLease = await context.port.acquireLease({
+          runId: context.authority.lease.runId,
+          ownerId: `managed-execution-run-${identifier}-owner`,
+        })
+        const maintenanceEvidenceBytes =
+          createManagedMaintenanceEvidenceBytes(clockAt)
+        const admissionAuthority =
+          await context.port.renewMaintenanceEvidence({
+            lease: {
+              runId: admissionLease.runId,
+              ownerId: admissionLease.ownerId,
+              fenceToken: admissionLease.fenceToken,
+            },
+            expectedPointer: null,
+            evidenceBytes: maintenanceEvidenceBytes,
+          })
+        executionBoundary = await boundaryPort.admitPlanning({
+          currentAuthority: admissionAuthority,
+          maintenanceEvidenceBytes,
+        })
+        const fence = await writerFence.read()
+        if (
+          fence.status !== 'present' ||
+          fence.record.mode !== 'closed'
+        ) {
+          throw new Error('Expected one exact managed closed writer fence.')
+        }
+        closedWriterFenceRecord = fence.record
+        return admissionAuthority
+      },
+      '2026-07-28T07:16:10.000Z',
+      '2026-08-27T07:17:00.000Z',
+    )
+  if (
+    executionBoundary === undefined ||
+    closedWriterFenceRecord === undefined
+  ) {
+    throw new Error('Expected complete managed execution admission material.')
+  }
+  clockAt = '2026-07-28T07:16:20.000Z'
+  const sealedPlanningAuthority =
+    await publication.port
+      .createSealedPlanningAuthorityPort()
+      .publish(publication.publishInput)
+  clockAt = '2026-07-28T07:16:30.000Z'
+  const publishedAuthority = publication.publishInput.currentAuthority
+  const currentAuthority = await publication.port.readAuthority({
+    lease: {
+      runId: publishedAuthority.lease.runId,
+      ownerId: publishedAuthority.lease.ownerId,
+      fenceToken: publishedAuthority.lease.fenceToken,
+    },
+    maintenanceEvidenceReceiptDigest:
+      publishedAuthority.maintenanceEvidenceReceiptDigest,
+    maintenanceEvidencePointerRevision:
+      publishedAuthority.maintenanceEvidencePointerRevision,
+  })
+  return {
+    requested: publication.requested,
+    port: publication.port,
+    transport: publication.transport,
+    currentAuthority,
+    executionBoundary,
+    sealedPlanningAuthority,
+    planSeal: structuredClone(publication.publishInput.planSeal),
+    closedWriterFenceRecord,
   }
 }
 
