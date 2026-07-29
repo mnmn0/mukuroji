@@ -1,7 +1,11 @@
 /** Registers durable data and file storage tests. */
 import { Match } from 'aws-cdk-lib/assertions';
 import { expect, test } from '@jest/globals';
-import { synthesizedTemplate } from './test-support';
+import {
+  API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  findApiRuntimeConfigurationSource,
+  synthesizedTemplate,
+} from './test-support';
 
 test('upgrade keeps stateful resource logical IDs and enables retain with PITR', () => {
   const template = synthesizedTemplate;
@@ -226,10 +230,30 @@ test('analytics state is retained with a due-delivery index and scoped API acces
     }),
   }));
 
-  const apiFunction = template.toJSON().Resources.ListProjectTasksFunction2134AF4A;
-  expect(apiFunction.Properties.Environment.Variables).toEqual(expect.objectContaining({
-    ANALYTICS_SCHEDULE_INDEX_NAME: 'ScheduleDueIndex',
-    ANALYTICS_TABLE_NAME: { Ref: analyticsTableLogicalId },
+  const resources = template.toJSON().Resources;
+  const dataConfigurationSecretId =
+    API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID;
+  const dataConfiguration = resources[dataConfigurationSecretId]
+    .Properties.SecretString;
+  expect(findApiRuntimeConfigurationSource(
+    dataConfiguration,
+    'ANALYTICS_SCHEDULE_INDEX_NAME',
+  )).toEqual({
+    'Fn::Base64': 'ScheduleDueIndex',
+  });
+  expect(findApiRuntimeConfigurationSource(
+    dataConfiguration,
+    'ANALYTICS_TABLE_NAME',
+  )).toEqual({
+    'Fn::Base64': { Ref: analyticsTableLogicalId },
+  });
+  expect(
+    resources.ListProjectTasksFunction2134AF4A
+      .Properties.Environment.Variables,
+  ).toEqual(expect.objectContaining({
+    MUKUROJI_API_DATA_CONFIG_SECRET_ARN: {
+      Ref: dataConfigurationSecretId,
+    },
   }));
 
   const apiAnalyticsPolicy = Object.entries(template.toJSON().Resources)

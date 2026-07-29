@@ -2,7 +2,9 @@
 import { Match } from 'aws-cdk-lib/assertions';
 import { expect, test } from '@jest/globals';
 import {
+  API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
   expectQueueRequiresSsl,
+  findApiRuntimeConfigurationSource,
   synthesizedTemplate,
 } from './test-support';
 
@@ -203,20 +205,24 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
     'dynamodb:Query',
     'dynamodb:UpdateItem',
   ]);
-  for (const logicalId of [
-    'PlanningTable2A0D4CC5',
-    'DocumentsTable7E808EE5',
-  ]) {
-    expect(actionsForTable(logicalId)).toEqual([
-      'dynamodb:GetItem',
-      'dynamodb:PutItem',
-      'dynamodb:Query',
-    ]);
-  }
+  expect(actionsForTable('PlanningTable2A0D4CC5')).toEqual([
+    'dynamodb:GetItem',
+    'dynamodb:PutItem',
+    'dynamodb:Query',
+  ]);
+  expect(actionsForTable('DocumentsTable7E808EE5')).toEqual([
+    'dynamodb:DescribeTable',
+    'dynamodb:GetItem',
+    'dynamodb:PutItem',
+    'dynamodb:Query',
+  ]);
   expect(actionsForTable('AuditEventsTable0723963E')).toEqual([
     'dynamodb:PutItem',
   ]);
-  expect(serializedPolicies).not.toContain('dynamodb:ConditionCheckItem');
+  expect(actionsForTable('TeamIssuesTable189D851D')).toEqual([
+    'dynamodb:DescribeTable',
+  ]);
+  expect(serializedPolicies).toContain('dynamodb:ConditionCheckItem');
   expect(serializedPolicies).not.toContain('dynamodb:TransactWriteItems');
   expect(serializedPolicies).toContain('cognito-idp:AdminDisableUser');
   expect(serializedPolicies).toContain('cognito-idp:AdminEnableUser');
@@ -227,7 +233,6 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
   expect(serializedPolicies).toContain('AuditEventsTable');
   expect(serializedPolicies).toContain('ProjectDirectoryTable');
   expect(serializedPolicies).toContain('EnterpriseScimGroupJobDlq');
-  expect(serializedPolicies).not.toContain('TeamIssuesTable');
   expect(serializedPolicies).not.toContain('dynamodb:Scan');
   expect(serializedPolicies).not.toContain('secretsmanager:');
 
@@ -666,11 +671,17 @@ test('durable Work Item imports use retained versioned sources and an isolated r
       { 'Fn::GetAtt': [planningTableId, 'Arn'] },
       { 'Fn::GetAtt': [enterpriseIdentityTableId, 'Arn'] },
       { 'Fn::GetAtt': [workItemConfigurationTableId, 'Arn'] },
+      {
+        'Fn::GetAtt': [
+          'WorkspaceSearchMigrationStateTable34132530',
+          'Arn',
+        ],
+      },
     ]),
   });
   expect(
     (authorizationConditionStatement?.Resource as unknown[] | undefined),
-  ).toHaveLength(4);
+  ).toHaveLength(5);
   expect(authorizationReadStatement).toEqual(expect.objectContaining({
     Action: ['dynamodb:GetItem', 'dynamodb:Query'],
     Effect: 'Allow',
@@ -1124,6 +1135,7 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
   expect(backfillEntry?.[1]).toEqual(expect.objectContaining({
     Type: 'AWS::CloudFormation::CustomResource',
     DependsOn: expect.arrayContaining([
+      'ApiLiveAlias3A796568',
       'CollaborationProjectionFunction1AAC5764',
       'ListProjectTasksFunction2134AF4A',
       'WebhookDeliveryFunctionEA305509',
@@ -1300,8 +1312,14 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
     { 'Fn::GetAtt': [enterpriseIdentityTableId, 'Arn'] },
     { 'Fn::GetAtt': [projectDirectoryTableId, 'Arn'] },
     { 'Fn::GetAtt': [workspaceAccessTableId, 'Arn'] },
+    {
+      'Fn::GetAtt': [
+        'WorkspaceSearchMigrationStateTable34132530',
+        'Arn',
+      ],
+    },
   ]));
-  expect(getItemResources).toHaveLength(5);
+  expect(getItemResources).toHaveLength(6);
   expect(queryResources).toEqual(expect.arrayContaining([
     {
       'Fn::Join': [
@@ -1604,18 +1622,29 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
       }),
     },
   });
-  template.hasResourceProperties('AWS::Lambda::Function', {
-    Description: 'Bundled shared Hono handler for the mukuroji Function URL and HTTP API.',
-    Environment: {
-      Variables: Match.objectLike({
-        CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN: { Ref: secretId },
-      }),
-    },
-  });
+  const dataConfigurationSecretId =
+    API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID;
+  const dataConfiguration = resources[dataConfigurationSecretId]
+    .Properties.SecretString;
+  expect(findApiRuntimeConfigurationSource(
+    dataConfiguration,
+    'CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN',
+  )).toEqual({
+      'Fn::Base64': { Ref: secretId },
+    });
   const apiFunction = Object.values(resources).find((resource) =>
     (resource as { Properties?: { Description?: string } }).Properties?.Description ===
       'Bundled shared Hono handler for the mukuroji Function URL and HTTP API.'
   ) as { Properties: { Environment: { Variables: Record<string, unknown> } } };
+  expect(apiFunction.Properties.Environment.Variables).toEqual(
+    expect.objectContaining({
+      MUKUROJI_API_DATA_CONFIG_SECRET_ARN: {
+        Ref: dataConfigurationSecretId,
+      },
+    }),
+  );
+  expect(apiFunction.Properties.Environment.Variables)
+    .not.toHaveProperty('CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN');
   expect(apiFunction.Properties.Environment.Variables)
     .not.toHaveProperty('CONNECTOR_SYNC_QUEUE_URL');
 
@@ -1723,11 +1752,17 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
       { 'Fn::GetAtt': [planningTableId, 'Arn'] },
       { 'Fn::GetAtt': [enterpriseIdentityTableId, 'Arn'] },
       { 'Fn::GetAtt': [workItemConfigurationTableId, 'Arn'] },
+      {
+        'Fn::GetAtt': [
+          'WorkspaceSearchMigrationStateTable34132530',
+          'Arn',
+        ],
+      },
     ]),
   });
   expect(
     workerAuthorizationConditionStatement?.Resource as unknown[] | undefined,
-  ).toHaveLength(4);
+  ).toHaveLength(5);
   expect(workerAuthorizationReadStatement).toEqual(expect.objectContaining({
     Action: ['dynamodb:GetItem', 'dynamodb:Query'],
     Effect: 'Allow',
@@ -2224,9 +2259,14 @@ test('automation workers consume the audit outbox and run recurring schedules wi
       'cognito-idp:AdminListGroupsForUser',
     ]));
     expect(JSON.stringify(cognitoStatement?.Resource)).toContain('CognitoUserPoolId');
-    const workspaceSearchStatement = statements.find((statement) =>
-      JSON.stringify(statement.Resource).includes('WorkspaceSearchTable2575AD6B')
-    );
+    const workspaceSearchStatement = statements.find((statement) => {
+      const actions = Array.isArray(statement.Action)
+        ? statement.Action
+        : [statement.Action];
+      return actions.includes('dynamodb:GetItem') &&
+        JSON.stringify(statement.Resource)
+          .includes('WorkspaceSearchTable2575AD6B');
+    });
     expect(workspaceSearchStatement).toEqual(expect.objectContaining({
       Effect: 'Allow',
       Action: expect.arrayContaining([
@@ -2236,9 +2276,14 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         'dynamodb:DeleteItem',
       ]),
     }));
-    const projectDirectoryStatement = statements.find((statement) =>
-      JSON.stringify(statement.Resource).includes('ProjectDirectoryTable9ED01C01')
-    );
+    const projectDirectoryStatement = statements.find((statement) => {
+      const actions = Array.isArray(statement.Action)
+        ? statement.Action
+        : [statement.Action];
+      return actions.includes('dynamodb:GetItem') &&
+        JSON.stringify(statement.Resource)
+          .includes('ProjectDirectoryTable9ED01C01');
+    });
     expect(projectDirectoryStatement).toEqual(expect.objectContaining({
       Effect: 'Allow',
       Action: expect.arrayContaining([

@@ -6,10 +6,8 @@ import {
   type TableDescription,
 } from '@aws-sdk/client-dynamodb'
 import {
-  DeleteCommand,
   DynamoDBDocumentClient,
   GetCommand,
-  PutCommand,
   QueryCommand,
   TransactWriteCommand,
   type TransactWriteCommandInput,
@@ -35,6 +33,11 @@ import {
   type WorkspaceSearchResponse,
   type WorkspaceSearchResult,
 } from '@mukuroji/contracts'
+import {
+  createDynamoDbClient as createConfiguredDynamoDbClient,
+  createWorkspaceSearchWriterDynamoDbDocumentClient,
+  shouldBootstrapLocalDynamoDb as shouldBootstrapConfiguredLocalDynamoDb,
+} from '../../infrastructure/aws/dynamodb-client'
 
 /** Workspace search table の search document prefix です。 */
 export const WORKSPACE_SEARCH_DOCUMENT_PREFIX = 'DOCUMENT#'
@@ -885,9 +888,8 @@ export class DynamoDbWorkspaceSearchClient {
   ) {
     this.tableName = requireText(tableName, 'Workspace search table name')
     this.dynamoDbClient = dynamoDbClient
-    this.documentClient = documentClient ?? DynamoDBDocumentClient.from(dynamoDbClient, {
-      marshallOptions: { removeUndefinedValues: true },
-    })
+    this.documentClient = documentClient ??
+      createWorkspaceSearchWriterDynamoDbDocumentClient(dynamoDbClient)
     this.bootstrapLocalTable = bootstrapLocalTable
   }
 
@@ -897,9 +899,13 @@ export class DynamoDbWorkspaceSearchClient {
   ) {
     await this.ensureLocalTable()
     const document = createWorkspaceSearchDocument(input)
-    await this.documentClient.send(new PutCommand({
-      TableName: this.tableName,
-      Item: document,
+    await this.documentClient.send(new TransactWriteCommand({
+      TransactItems: [{
+        Put: {
+          TableName: this.tableName,
+          Item: document,
+        },
+      }],
     }))
     return document
   }
@@ -907,12 +913,19 @@ export class DynamoDbWorkspaceSearchClient {
   /** Search document を entity key で削除します。 */
   async deleteDocument(workspaceId: string, entityType: SearchEntityType, entityId: string) {
     await this.ensureLocalTable()
-    await this.documentClient.send(new DeleteCommand({
-      TableName: this.tableName,
-      Key: {
-        workspaceId: requireText(workspaceId, 'Search Workspace ID'),
-        recordKey: createWorkspaceSearchDocumentRecordKey(entityType, entityId),
-      },
+    await this.documentClient.send(new TransactWriteCommand({
+      TransactItems: [{
+        Delete: {
+          TableName: this.tableName,
+          Key: {
+            workspaceId: requireText(workspaceId, 'Search Workspace ID'),
+            recordKey: createWorkspaceSearchDocumentRecordKey(
+              entityType,
+              entityId,
+            ),
+          },
+        },
+      }],
     }))
   }
 
@@ -2657,32 +2670,11 @@ function isWorkspaceSearchTableDescription(table: TableDescription | undefined) 
 }
 
 function createDynamoDbClient() {
-  const endpoint = readEnvironment('DYNAMODB_ENDPOINT') ??
-    readEnvironment('AWS_ENDPOINT_URL_DYNAMODB') ??
-    readEnvironment('AWS_ENDPOINT_URL') ??
-    (typeof Bun !== 'undefined' && !readEnvironment('AWS_LAMBDA_FUNCTION_NAME')
-      ? 'http://localhost:4566'
-      : undefined)
-  return new DynamoDBClient({
-    region: readEnvironment('AWS_REGION') ?? readEnvironment('AWS_DEFAULT_REGION') ?? 'us-east-1',
-    ...(endpoint
-      ? {
-          endpoint,
-          credentials: {
-            accessKeyId: readEnvironment('AWS_ACCESS_KEY_ID') ?? 'test',
-            secretAccessKey: readEnvironment('AWS_SECRET_ACCESS_KEY') ?? 'test',
-          },
-        }
-      : {}),
-  })
+  return createConfiguredDynamoDbClient()
 }
 
 function shouldBootstrapLocalTable() {
-  return Boolean(
-    readEnvironment('DYNAMODB_ENDPOINT') ||
-    readEnvironment('AWS_ENDPOINT_URL_DYNAMODB') ||
-    (typeof Bun !== 'undefined' && !readEnvironment('AWS_LAMBDA_FUNCTION_NAME')),
-  )
+  return shouldBootstrapConfiguredLocalDynamoDb()
 }
 
 function readEnvironment(name: string) {

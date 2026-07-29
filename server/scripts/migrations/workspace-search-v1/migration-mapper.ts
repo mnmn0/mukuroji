@@ -20,6 +20,8 @@ const projectDirectoryIgnoredEntryTypes = new Set<string>([
   'email-alias',
   'planning-meta',
   'project-member',
+  'webhook-active-locator-rollback-checkpoint',
+  'webhook-authorization-backfill-checkpoint',
   'webhook-team-grant',
   'webhook-team-grant-cleanup',
   'workspace-member',
@@ -385,6 +387,9 @@ function mapCollaborationRow(
   if (entryType !== 'comment') {
     return invalidRow('UNRECOGNIZED_COLLABORATION_ROW')
   }
+  if (hasOwnAttribute(item, 'expiresAt')) {
+    return invalidRow('MALFORMED_COLLABORATION_TARGET')
+  }
 
   const entityKey = readNonBlankString(item.entityKey)
   const commentId = readNonBlankString(item.id)
@@ -478,6 +483,9 @@ function mapDocumentRow(
   }
   if (entryType !== 'document') {
     return invalidRow('UNRECOGNIZED_DOCUMENT_ROW')
+  }
+  if (hasOwnAttribute(item, 'expiresAtEpoch')) {
+    return invalidRow('MALFORMED_DOCUMENT_TARGET')
   }
 
   const workspaceId = readCanonicalWorkspaceId(item.workspaceId)
@@ -611,6 +619,26 @@ function hasRecordKeyPrefix(
 ): boolean {
   return typeof item.recordKey === 'string' &&
     item.recordKey.startsWith(prefix)
+}
+
+/**
+ * Checks whether a decoded row carries one physical table attribute.
+ *
+ * Collaboration and Documents target candidates must not carry their table's
+ * TTL attribute because DynamoDB service deletion cannot participate in the
+ * application writer fence. The measured migration identity separately
+ * requires TTL to be disabled for Project Directory, Work Items, and the
+ * Workspace Search target.
+ *
+ * @param item - Decoded single-table row.
+ * @param attributeName - Exact physical TTL attribute name.
+ * @returns Whether the attribute is present, without reading its value.
+ */
+function hasOwnAttribute(
+  item: Readonly<Record<string, unknown>>,
+  attributeName: string,
+): boolean {
+  return Object.prototype.hasOwnProperty.call(item, attributeName)
 }
 
 /**

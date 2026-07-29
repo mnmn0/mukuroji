@@ -7,8 +7,13 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import type { IDependable } from 'constructs';
 import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
+import {
+  bindWorkspaceSearchWriterFence,
+  type WorkspaceSearchWriterFenceResources,
+} from '../../policies/workspace-search-writer-fence';
 import type { ApiRuntimeResources } from '../api-realtime';
 import type { DataStoreResources } from '../data-stores';
 import {
@@ -22,6 +27,8 @@ import type { WorkerChannels } from './channels';
  * Inputs required by Webhook authorization migration and delivery processing.
  */
 export interface WebhookDeliveryWorkerInput {
+  /** Live API alias that must finish shifting traffic before backfill starts. */
+  readonly apiLiveAlias: IDependable;
   /** Shared API runtime that must support compatibility reads before migration. */
   readonly apiRuntime: ApiRuntimeResources;
   /** Audit projection worker that must emit compatible Webhook delivery records. */
@@ -36,6 +43,8 @@ export interface WebhookDeliveryWorkerInput {
   readonly runtimeControls: RuntimeControlResources;
   /** Durable Webhook delivery queue and dead-letter queue. */
   readonly workerChannels: WorkerChannels;
+  /** Exact source, target, and state tables protected by the writer fence. */
+  readonly workspaceSearchWriterFence: WorkspaceSearchWriterFenceResources;
 }
 
 /**
@@ -131,6 +140,10 @@ export function buildWebhookDeliveryWorkers(
       },
     },
   );
+  bindWorkspaceSearchWriterFence(
+    input.workspaceSearchWriterFence,
+    webhookAuthorizationBackfillFunction,
+  );
   projectDirectoryTable.grants.readWriteData(webhookAuthorizationBackfillFunction);
   developerPlatformTable.grants.readWriteData(
     webhookAuthorizationBackfillFunction,
@@ -177,6 +190,10 @@ export function buildWebhookDeliveryWorkers(
         },
       },
     );
+  bindWorkspaceSearchWriterFence(
+    input.workspaceSearchWriterFence,
+    webhookAuthorizationBackfillProgressFunction,
+  );
   projectDirectoryTable.grants.readWriteData(
     webhookAuthorizationBackfillProgressFunction,
   );
@@ -212,10 +229,11 @@ export function buildWebhookDeliveryWorkers(
         DeveloperPlatformTableName: developerPlatformTable.tableName,
         MigrationVersion: 'v3',
         ProjectDirectoryTableName: projectDirectoryTable.tableName,
+        WorkspaceSearchWriterFenceMode:
+          input.workspaceSearchWriterFence.runtimeMode,
       },
     },
   );
-
   const webhookDeliveryLogGroup = new logs.LogGroup(
     scope,
     'WebhookDeliveryLogGroup',
@@ -261,6 +279,10 @@ export function buildWebhookDeliveryWorkers(
       },
     },
   );
+  bindWorkspaceSearchWriterFence(
+    input.workspaceSearchWriterFence,
+    webhookDeliveryFunction,
+  );
   bindRuntimeControls(
     input.runtimeControls,
     webhookDeliveryFunction,
@@ -271,8 +293,11 @@ export function buildWebhookDeliveryWorkers(
   // drains compatibility writes, and only then removes legacy lookup keys.
   // Its Delete path reverses the locator migration before dependency rollback.
   webhookAuthorizationBackfill.node.addDependency(
+    input.apiLiveAlias,
     apiFunction,
     collaborationProjectionFunction,
+    webhookAuthorizationBackfillFunction,
+    webhookAuthorizationBackfillProgressFunction,
     webhookDeliveryFunction,
   );
 

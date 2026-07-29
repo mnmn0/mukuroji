@@ -22,9 +22,39 @@ esac
 
 endpoint_args=()
 DYNAMODB_ENDPOINT="${DYNAMODB_ENDPOINT:-${AWS_ENDPOINT_URL_DYNAMODB:-${AWS_ENDPOINT_URL:-}}}"
-if [[ -n "$DYNAMODB_ENDPOINT" ]]; then
-  endpoint_args=(--endpoint-url "$DYNAMODB_ENDPOINT")
+if ! MUKUROJI_SEED_DYNAMODB_ENDPOINT="$DYNAMODB_ENDPOINT" bun -e '
+  const value = process.env.MUKUROJI_SEED_DYNAMODB_ENDPOINT
+  try {
+    const endpoint = new URL(value ?? "")
+    const localHosts = new Set([
+      "localhost",
+      "127.0.0.1",
+      "[::1]",
+      "0.0.0.0",
+      "floci",
+      "localstack",
+    ])
+    if (
+      endpoint.protocol !== "http:" ||
+      endpoint.username !== "" ||
+      endpoint.password !== "" ||
+      endpoint.pathname !== "/" ||
+      endpoint.search !== "" ||
+      endpoint.hash !== "" ||
+      !localHosts.has(endpoint.hostname)
+    ) process.exit(1)
+  } catch {
+    process.exit(1)
+  }
+'; then
+  echo "This legacy seed is local-only and requires an explicit local HTTP DynamoDB endpoint." >&2
+  exit 2
 fi
+if [[ "${MUKUROJI_LOCAL_AWS_RUNTIME:-}" != "floci" ]]; then
+  echo "This legacy seed requires MUKUROJI_LOCAL_AWS_RUNTIME=floci." >&2
+  exit 2
+fi
+endpoint_args=(--endpoint-url "$DYNAMODB_ENDPOINT")
 
 auth_args=()
 if [[ "${AWS_NO_SIGN_REQUEST:-}" == "1" ]]; then

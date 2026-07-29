@@ -1,6 +1,10 @@
 /** Registers AWS AppConfig runtime-control infrastructure tests. */
 import { expect, test } from '@jest/globals';
-import { synthesizedTemplate } from './test-support';
+import {
+  API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  findApiRuntimeConfigurationSource,
+  synthesizedTemplate,
+} from './test-support';
 
 const runtimeControlEnvironmentKeys = [
   'MUKUROJI_RUNTIME_CONTROL_APPCONFIG_APPLICATION_ID',
@@ -30,6 +34,13 @@ const controlledFunctionScopes = new Map([
   ['WebhookDeliveryFunctionEA305509', 'webhook-delivery'],
   ['WorkItemImportFunction651B2883', 'work-item-import'],
 ]);
+
+const apiFunctionLogicalId = 'ListProjectTasksFunction2134AF4A';
+const directlyConfiguredFunctionScopes = new Map(
+  [...controlledFunctionScopes].filter(([logicalId]) =>
+    logicalId !== apiFunctionLogicalId
+  ),
+);
 
 const migrationFunctionIds = new Set([
   'WebhookAuthorizationBackfillFunction5ABBA705',
@@ -169,14 +180,16 @@ test('retains a validated hosted baseline and deploys it all at once', () => {
       Ref: 'RuntimeControlConfigurationProfile',
     },
     ContentType: 'application/json',
-    VersionLabel: 'baseline-v1',
+    Description:
+      'Fail-closed baseline for explicit application processing rollout.',
   }));
+  expect(initialConfiguration.VersionLabel).toBeUndefined();
   expect(typeof initialConfiguration.Content).toBe('string');
   if (typeof initialConfiguration.Content !== 'string') {
     throw new Error('Initial runtime-control configuration was not synthesized.');
   }
   expect(JSON.parse(initialConfiguration.Content)).toEqual({
-    mode: 'enabled',
+    mode: 'disabled',
     revision: 1,
     schemaVersion: 1,
   });
@@ -191,7 +204,7 @@ test('retains a validated hosted baseline and deploys it all at once', () => {
     },
     DeploymentStrategyId: 'AppConfig.AllAtOnce',
     Description:
-      'Bootstraps the validated enabled runtime-control configuration.',
+      'Bootstraps the validated disabled runtime-control configuration.',
     EnvironmentId: { Ref: 'RuntimeControlEnvironment' },
   });
 });
@@ -476,13 +489,13 @@ test('grants the fourteen data-plane roles only the exact configuration ARN', ()
   );
 });
 
-test('binds exact runtime-control settings only to the fourteen data planes', () => {
+test('binds exact runtime-control settings through API config and thirteen direct environments', () => {
   const resources = synthesizedTemplate.toJSON().Resources;
   const lambdaEntries = Object.entries(
     synthesizedTemplate.findResources('AWS::Lambda::Function'),
   );
 
-  expect(resources.ListProjectTasksFunction2134AF4A).toBeDefined();
+  expect(resources[apiFunctionLogicalId]).toBeDefined();
   for (const [logicalId, expectedScope] of controlledFunctionScopes) {
     expect(resources[logicalId].DependsOn).toEqual(
       expect.arrayContaining([
@@ -490,6 +503,9 @@ test('binds exact runtime-control settings only to the fourteen data planes', ()
         'RuntimeControlReadPolicyF2A31863',
       ]),
     );
+    if (logicalId === apiFunctionLogicalId) {
+      continue;
+    }
     const variables = resources[logicalId].Properties.Environment?.Variables;
     expect(variables).toEqual(expect.objectContaining({
       MUKUROJI_RUNTIME_CONTROL_APPCONFIG_APPLICATION_ID: {
@@ -507,12 +523,57 @@ test('binds exact runtime-control settings only to the fourteen data planes', ()
     }));
   }
 
+  const coreConfigurationSecretId =
+    API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID;
+  const coreConfiguration = resources[coreConfigurationSecretId]
+    .Properties.SecretString;
+  expect(findApiRuntimeConfigurationSource(
+    coreConfiguration,
+    'MUKUROJI_RUNTIME_CONTROL_APPCONFIG_APPLICATION_ID',
+  )).toEqual({
+      'Fn::Base64': { Ref: 'RuntimeControlApplication' },
+  });
+  expect(findApiRuntimeConfigurationSource(
+    coreConfiguration,
+    'MUKUROJI_RUNTIME_CONTROL_APPCONFIG_CONFIGURATION_PROFILE_ID',
+  )).toEqual({
+      'Fn::Base64': { Ref: 'RuntimeControlConfigurationProfile' },
+  });
+  expect(findApiRuntimeConfigurationSource(
+    coreConfiguration,
+    'MUKUROJI_RUNTIME_CONTROL_APPCONFIG_ENVIRONMENT_ID',
+  )).toEqual({
+      'Fn::Base64': { Ref: 'RuntimeControlEnvironment' },
+  });
+  expect(findApiRuntimeConfigurationSource(
+    coreConfiguration,
+    'MUKUROJI_RUNTIME_CONTROL_MAX_STALE_SECONDS',
+  )).toEqual({ 'Fn::Base64': '60' });
+  expect(findApiRuntimeConfigurationSource(
+    coreConfiguration,
+    'MUKUROJI_RUNTIME_CONTROL_MIN_POLL_INTERVAL_SECONDS',
+  )).toEqual({ 'Fn::Base64': '15' });
+  expect(findApiRuntimeConfigurationSource(
+    coreConfiguration,
+    'MUKUROJI_RUNTIME_CONTROL_SCOPE',
+  )).toEqual({ 'Fn::Base64': 'api' });
+  const apiVariables = resources[apiFunctionLogicalId]
+    .Properties.Environment.Variables;
+  expect(apiVariables).toEqual(expect.objectContaining({
+    MUKUROJI_API_CORE_CONFIG_SECRET_ARN: {
+      Ref: coreConfigurationSecretId,
+    },
+  }));
+  for (const environmentKey of runtimeControlEnvironmentKeys) {
+    expect(apiVariables[environmentKey]).toBeUndefined();
+  }
+
   const runtimeControlledEntries = lambdaEntries.filter(([, resource]) =>
     resource.Properties?.Environment?.Variables
       ?.MUKUROJI_RUNTIME_CONTROL_SCOPE !== undefined
   );
   expect(runtimeControlledEntries.map(([logicalId]) => logicalId).sort())
-    .toEqual([...controlledFunctionScopes.keys()].sort());
+    .toEqual([...directlyConfiguredFunctionScopes.keys()].sort());
 
   for (const [, resource] of lambdaEntries.filter(
     ([logicalId]) => !controlledFunctionScopes.has(logicalId),

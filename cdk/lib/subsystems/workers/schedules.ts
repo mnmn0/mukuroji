@@ -10,6 +10,10 @@ import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
+import {
+  configureWorkspaceSearchWriterFence,
+  type WorkspaceSearchWriterFenceResources,
+} from '../../policies/workspace-search-writer-fence';
 import type { DataStoreResources } from '../data-stores';
 import {
   bindRuntimeControls,
@@ -28,6 +32,8 @@ export interface ScheduleWorkerInput {
   readonly parameters: StackParameters;
   /** Dynamic operational controls shared by application runtimes. */
   readonly runtimeControls: RuntimeControlResources;
+  /** Exact writer-client table configuration without writer state permissions. */
+  readonly workspaceSearchWriterFence: WorkspaceSearchWriterFenceResources;
 }
 
 /**
@@ -107,6 +113,10 @@ export function buildScheduleWorkers(
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
       },
     },
+  );
+  configureWorkspaceSearchWriterFence(
+    input.workspaceSearchWriterFence,
+    analyticsScheduleFunction,
   );
   bindRuntimeControls(
     input.runtimeControls,

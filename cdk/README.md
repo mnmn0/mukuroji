@@ -18,6 +18,8 @@
 | `CognitoEnterpriseIdpName` | yes | Cognito に接続した SAML/OIDC provider 名。 |
 | `WorkspaceDirectoryId` | yes | Cognito の両 custom attribute と DynamoDB partition に使う canonical ID。例: `workspace#production`。 |
 | `WorkspaceAuditPseudonymKey` | yes | Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。`openssl rand -hex 32` などで生成し、`NoEcho` で Lambda に渡してbackfillにも同じ値を設定します。 |
+| `ApiRuntimeConfigurationRevision` | yes | 1〜32文字のoperator管理revision。先頭はASCII英数字、以降はASCII英数字と `.` `_` `-` だけを使えます（例: `2026-07-28-01`）。API code、または4分割runtime configuration secretへ入るparameter/resource値を変更するdeployごとに増分し、同じrevisionを異なる内容へ再利用しません。 |
+| `WorkspaceSearchWriterFenceMode` | yes | 初回bootstrap前の明示的な二段階rolloutでは`rollout-pending`、open row作成後の定常状態では`required`。既定値はなく、通常deployで`required`から戻しません。 |
 | `InitialOwnerEmail` | yes | lowercase の初期 owner email。Workspace/member/alias key に使います。 |
 | `InitialOwnerUsername` | yes | `AdminUpdateUserAttributes` に渡す Cognito username。email と異なる username も指定できます。 |
 | `TaskApiAllowedOrigins` | production では必須 | 空白なしの comma-separated CORS origin。既定値は local development 用です。 |
@@ -108,6 +110,23 @@ templateとdeployed configurationの両方で照合します。
 - `WorkspaceDirectoryId`
 
 Function URL と API Gateway は同じ Lambda を呼びます。いずれも `<base>/teams/projects` と `<base>/api/teams/projects` を同じ canonical `/api` route へ正規化します。
+
+Shared APIのproduction runtime configurationは4つのSecrets Manager secretへ分割し、Lambda
+environmentにはそのARNだけを渡します。各secret名は`ApiRuntimeConfigurationRevision`を含み、
+replacement時の旧secretは`Retain`されます。Retained secretはrollback/recovery evidenceであり、
+CloudFormationが旧resourceへ自動で再接続したり不要secretを削除したりはしません。
+各groupはCloudFormation transformを使わないv2 line envelopeで、固定group identity、同一revision、
+canonical Base64 valueまたはnested Secret ARNを保持します。NoEcho parameterの4値はprocessed
+templateへ展開させず、revision-boundな個別retained secretの`SecretString`へ直接`Ref`します。
+Document public-share secretを含む5つのnested secretはAPI roleだけが読みます。Loaderは4 groupの
+identity/revision、全canonical key、nested secretを検証し終えてから環境へ原子的に反映します。
+
+この仕組みを初めてdeployすると、既存の自動命名Lambdaから明示名末尾`-api-v2`のLambdaへ一度だけ
+置換されます。したがって`ProjectTasksFunctionUrl`と、その後方互換output
+`ProjectTasksApiUrl`は変わるため、Function URL consumerは新しいoutputへ計画的に切り替えてください。
+`ProjectTasksApiGatewayUrl`は同じHTTP API endpointを維持し、default routeだけを`live` Aliasへ
+切り替えます。以後は、新しいconfiguration secretとLambda Versionの準備完了後にAliasが新Versionへ
+切り替わるため、HTTP API trafficはcode/configurationが揃ったversion単位で切り替わります。
 
 ## Connector runtime configuration
 
@@ -513,6 +532,10 @@ bun run cdk:build
 bun run cdk:test
 bun run cdk:synth
 
+# 初回writer-fence bootstrap前だけ rollout-pending。bootstrap後は required。
+export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
+export MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE=rollout-pending
+
 bun --filter cdk cdk diff CdkStack \
   --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
   --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
@@ -530,6 +553,8 @@ bun --filter cdk cdk diff CdkStack \
   --parameters RequestTokenHashSecret="$MUKUROJI_REQUEST_TOKEN_HASH_SECRET" \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
+  --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
+  --parameters WorkspaceSearchWriterFenceMode="$MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE" \
   --parameters TaskApiAllowedOrigins=https://app.example.com
 
 bun --filter cdk cdk deploy CdkStack \
@@ -549,9 +574,37 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters RequestTokenHashSecret="$MUKUROJI_REQUEST_TOKEN_HASH_SECRET" \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
+  --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
+  --parameters WorkspaceSearchWriterFenceMode="$MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE" \
   --parameters TaskApiAllowedOrigins=https://app.example.com \
   --outputs-file /tmp/mukuroji-cdk-outputs.json
 ```
+
+`--outputs-file`はdeploy直後のoutput照合用スナップショットです。`/tmp`のファイルだけを
+永続的な変更証跡とはせず、stack ID、deploy時刻、change set、API runtime revision、
+writer-fence mode、outputファイルのSHA-256をアクセス制御されたchange recordへ保存します。
+outputにはSecret ARNなどのresource metadataが含まれるため、access tokenやsecret値を追記せず、
+照合後のローカルファイルは削除します。
+
+初回配線を`rollout-pending`でdeployすると、AppConfigの初期baselineは`disabled`でall-at-once
+deployされ、controlled Lambdaはその完了に依存します。Webhook authorization backfill custom
+resourceも両handler Lambdaの更新完了に依存し、event propertyとLambda環境のmodeが一致しない場合は
+I/O前に停止します。pending中のCreate/Updateはtable access前に短絡します。Deleteはv3 markerと
+checkpointを強整合readし、stateが空ならwriteなしで完了し、既存stateがあればpending barrierを
+bypassせずdurable open-row guard付きtransactionでrollbackを完了するまで削除を成功させません。全writerの
+drainを確認してfresh authorityに束縛したopen rowをbootstrapし、続けて値を`required`へ変更します。
+Application clientもpending中はfenced mutationをnetwork I/O前に拒否し、AppConfig admissionの
+誤再開だけではunguarded writeへ戻りません。
+Guarded backfillの完了とwriter clientを構築する全12 Lambdaへの反映を確認した後、新しい
+AppConfig `enabled` revisionをdeployしてwriterを再開します。CloudFormation更新中の
+pending/required混在を許容してwriterを再開したり、通常rollbackとして`required`から
+`rollout-pending`へ戻したりしないでください。
+
+`MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION`はAPIのcode、またはruntime configuration secretへ
+入るparameter/resource値が変わるdeployごとに新しい値へ進め、`cdk diff`とdeployへ同じ値を渡します。
+同じrevisionのsecret内容を更新するとimmutable rolloutの前提が崩れるため、revisionを再利用しません。
+初回`-api-v2`置換時はFunction URL outputの切替計画をchange recordに含めます。HTTP API endpointは
+維持され、以後のtraffic切替は`live` Alias更新で行われます。
 
 Bootstrap は次を同一 `WorkspaceDirectoryId` partition に冪等投入します。
 
@@ -729,7 +782,11 @@ Deploy前後に次を確認します。
 
 ## Rollback
 
-code / infrastructure rollback は、原則として直前に成功した revision を同じ必須 parameters（request intake 用の2 secretとalarm topic名を含む）で deploy します。現行 stack に存在する retained resource を rollback template から削除しないでください。DynamoDB table は `Retain` で、PITR も有効ですが、stack から外れた resource は自動で再接続されません。Cognito custom schema は rollback しても残ります。Alarm routing導入前のtemplateへ戻すと全alarm actionが外れるため、active incident中は使用せず、applicationだけを戻すforward-fixを優先します。
+code / infrastructure rollback は、原則として直前に成功したrevisionのcode/configurationを、
+review済みの新しい`ApiRuntimeConfigurationRevision`とその他の同じ必須parameters
+（request intake用の2 secretとalarm topic名を含む）でforward deployします。既にretainedされた
+旧API configuration secretは自動では再接続されないため、同じ物理名を再作成する目的で旧revisionを
+再利用しません。現行 stack に存在する retained resource を rollback template から削除しないでください。DynamoDB table は `Retain` で、PITR も有効ですが、stack から外れた resource は自動で再接続されません。Cognito custom schema は rollback しても残ります。Alarm routing導入前のtemplateへ戻すと全alarm actionが外れるため、active incident中は使用せず、applicationだけを戻すforward-fixを優先します。
 
 `RequestIntakeTable` または email DLQ を初めて追加した deploy から、それらを知らない旧 template へ直接 rollback しないでください。先に forward-fix revision で API/email ingestion を無効化し、retained resource と output を template に残したまま application code を戻します。どうしても旧 template を使う場合は resource import 用 template と logical ID を準備し、CloudFormation から外れた retained resource を放置した状態で同名 resource を再作成しません。
 

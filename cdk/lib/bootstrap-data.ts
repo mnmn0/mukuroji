@@ -674,3 +674,25 @@ export function createIdempotentAwsCustomResourceProps(
     installLatestAwsSdk: false,
   };
 }
+
+/**
+ * Creates a one-time pre-fence bootstrap custom resource.
+ *
+ * Fenced table seeds run only while CloudFormation creates their stable custom
+ * resource. Stack updates must not replay writes that predate the runtime
+ * writer-fence boundary.
+ *
+ * @param call - AWS SDK call executed only for the create lifecycle event.
+ * @param policy - Least-privilege policy authorizing the bootstrap call.
+ * @returns Create-only AWS custom resource properties.
+ */
+export function createPreFenceBootstrapAwsCustomResourceProps(
+  call: customResources.AwsSdkCall,
+  policy: customResources.AwsCustomResourcePolicy,
+): customResources.AwsCustomResourceProps {
+  return {
+    onCreate: call,
+    policy,
+    installLatestAwsSdk: false,
+  };
+}

@@ -27,10 +27,18 @@ import {
   type WorkItemRelationType,
 } from '@mukuroji/contracts'
 import {
+  createDynamoDbClient as createConfiguredDynamoDbClient,
+  createWorkspaceSearchWriterDynamoDbDocumentClient,
+} from '../../infrastructure/aws/dynamodb-client'
+import {
+  throwIfWorkspaceSearchWriterFenceTerminalError,
+} from '../../infrastructure/runtime/workspace-search-writer-fence-document-client'
+import {
   validateWorkflowDefinition as validateDomainWorkflowDefinition,
   WorkflowDefinitionValidationError,
 } from '../work-item-workflow'
 
+/** Re-exports the canonical relation identifier validator for consumers. */
 export { isCanonicalWorkItemRelationIds } from './canonical-work-item'
 
 const CONFIGURATION_RECORD_KEY = 'CONFIG'
@@ -459,13 +467,14 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       process.env.MUKUROJI_WORK_ITEMS_TABLE ??
       process.env.TEAM_ISSUES_TABLE_NAME ??
       'mukuroji-team-issues-local',
-    documentClient = createDocumentClient(),
-    dynamoDbClient = new DynamoDBClient({}),
+    documentClient?: DynamoDBDocumentClient,
+    dynamoDbClient = createConfiguredDynamoDbClient(),
     bootstrapLocalTable = false,
   ) {
     this.tableName = tableName
     this.workItemsTableName = workItemsTableName
-    this.documentClient = documentClient
+    this.documentClient = documentClient ??
+      createDocumentClient(dynamoDbClient)
     this.dynamoDbClient = dynamoDbClient
     this.bootstrapLocalTable = bootstrapLocalTable
   }
@@ -1866,10 +1875,10 @@ function isConfigurationTableDescription(table: TableDescription | undefined) {
     keys.some((key) => key.AttributeName === 'recordKey' && key.KeyType === 'RANGE')
 }
 
-function createDocumentClient() {
-  return DynamoDBDocumentClient.from(new DynamoDBClient({}), {
-    marshallOptions: { removeUndefinedValues: true },
-  })
+function createDocumentClient(dynamoDbClient: DynamoDBClient) {
+  return createWorkspaceSearchWriterDynamoDbDocumentClient(
+    dynamoDbClient,
+  )
 }
 
 function cloneCustomFieldValue(value: CustomFieldValue): CustomFieldValue {
@@ -2096,6 +2105,7 @@ function storedRelationInvalid() {
 }
 
 function toPersistenceError(error: unknown) {
+  throwIfWorkspaceSearchWriterFenceTerminalError(error)
   if (error instanceof WorkItemConfigurationError) {
     return error
   }

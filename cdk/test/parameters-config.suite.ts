@@ -30,6 +30,16 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
     ConstraintDescription:
       'WorkspaceAuditPseudonymKey must be exactly 64 lowercase hexadecimal characters.',
   }));
+  expect(parameters.ApiRuntimeConfigurationRevision).toEqual({
+    AllowedPattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$',
+    ConstraintDescription:
+      'ApiRuntimeConfigurationRevision must be a 1-32 character deployment revision.',
+    Description:
+      'Operator-incremented revision that replaces immutable API configuration secrets and publishes a matching Lambda version.',
+    MaxLength: 32,
+    MinLength: 1,
+    Type: 'String',
+  });
   expect(parameters.ConnectorRuntimeConfiguration).toEqual(expect.objectContaining({
     Type: 'String',
     Default: '{}',
@@ -111,6 +121,7 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
     'RequestTokenHashSecret',
     'AlarmPrimaryTopicName',
     'AlarmSecondaryTopicName',
+    'ApiRuntimeConfigurationRevision',
   ]) {
     expect(parameters[parameterName].Default).toBeUndefined();
   }

@@ -42,6 +42,13 @@ import {
   type DocumentVersionsResponse,
   type WhiteboardContent,
 } from '@mukuroji/contracts'
+import {
+  createDynamoDbClient as createConfiguredDynamoDbClient,
+  createWorkspaceSearchWriterDynamoDbDocumentClient,
+} from '../../../../infrastructure/aws/dynamodb-client'
+import {
+  throwIfWorkspaceSearchWriterFenceTerminalError,
+} from '../../../../infrastructure/runtime/workspace-search-writer-fence-document-client'
 import type {
   ApplyDocumentOperationsRequest,
   ChangeDocumentArchiveStateRequest,
@@ -788,13 +795,15 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       process.env.MUKUROJI_DOCUMENTS_TABLE ??
       'mukuroji-documents-local'
     this.dynamoClient = options.dynamoClient ?? (
-      options.documentClient === undefined ? new DynamoDBClient({}) : undefined
+      options.documentClient === undefined
+        ? createConfiguredDynamoDbClient()
+        : undefined
     )
     this.client =
       options.documentClient ??
-      DynamoDBDocumentClient.from(this.dynamoClient ?? new DynamoDBClient({}), {
-        marshallOptions: { removeUndefinedValues: true },
-      })
+      createWorkspaceSearchWriterDynamoDbDocumentClient(
+        this.dynamoClient ?? createConfiguredDynamoDbClient(),
+      )
     this.autoCreateLocal =
       options.autoCreateLocal ??
       Boolean(
@@ -7447,12 +7456,12 @@ function assertDocumentSearchBodyItemSize(
 function assertTransactionSize(
   actions: NonNullable<TransactWriteCommandInput['TransactItems']>,
 ): void {
-  if (actions.length > 100) {
+  if (actions.length > 99) {
     throw new DocumentError(
       413,
       'DocumentTransactionTooLarge',
       'The document mutation creates too many transactional writes.',
-      { actionCount: actions.length, maxActionCount: 100 },
+      { actionCount: actions.length, maxActionCount: 99 },
     )
   }
 }
@@ -8122,6 +8131,7 @@ function isResourceInUse(error: unknown): boolean {
 }
 
 function normalizeDynamoError(error: unknown): Error {
+  throwIfWorkspaceSearchWriterFenceTerminalError(error)
   if (error instanceof DocumentError) return error
   return new DocumentError(
     503,

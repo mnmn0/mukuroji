@@ -312,6 +312,8 @@ describe('Workspace Search production migration mapper', () => {
       'email-alias',
       'planning-meta',
       'project-member',
+      'webhook-active-locator-rollback-checkpoint',
+      'webhook-authorization-backfill-checkpoint',
       'webhook-team-grant',
       'webhook-team-grant-cleanup',
       'workspace-member',
@@ -550,6 +552,36 @@ describe('Workspace Search production migration mapper', () => {
     expect(deleted.targetKey).toEqual(active.targetKey)
   })
 
+  test('rejects TTL-managed attributes on Collaboration target candidates', () => {
+    for (const item of [
+      createCommentRow({ expiresAt: 2_000_000_000 }),
+      createCommentRow({
+        bodyMarkdown: '',
+        deletedAt: '2026-07-24T02:00:00.000Z',
+        expiresAt: 2_000_000_000,
+      }),
+      createCommentRow({ expiresAt: undefined }),
+    ]) {
+      expect(mapWorkspaceSearchMigrationRow('collaboration', item)).toEqual({
+        classification: 'invalid',
+        reasonCode: 'MALFORMED_COLLABORATION_TARGET',
+      })
+    }
+
+    expect(mapWorkspaceSearchMigrationRow(
+      'collaboration',
+      {
+        entityKey: 'workspace-1#presence',
+        recordKey: 'PRESENCE#member@example.com',
+        entryType: 'presence',
+        expiresAt: 2_000_000_000,
+      },
+    )).toEqual({
+      classification: 'ignored',
+      reasonCode: 'RECOGNIZED_NON_TARGET_ROW',
+    })
+  })
+
   test('ignores recognized Collaboration rows and rejects unknown discriminators', () => {
     for (const entryType of ['discussion', 'presence', 'reaction', 'watcher']) {
       expect(mapWorkspaceSearchMigrationRow(
@@ -643,6 +675,35 @@ describe('Workspace Search production migration mapper', () => {
     expect(archived.operation).toEqual({ action: 'delete' })
     expect(archived.entityType).toBe('document')
     expect(archived.targetKey).toEqual(active.targetKey)
+  })
+
+  test('rejects TTL-managed attributes on Documents target candidates', () => {
+    for (const item of [
+      createDocumentRow({}, { expiresAtEpoch: 2_000_000_000 }),
+      createDocumentRow(
+        { archivedAt: '2026-07-24T01:00:00.000Z' },
+        { expiresAtEpoch: 2_000_000_000 },
+      ),
+      createDocumentRow({}, { expiresAtEpoch: undefined }),
+    ]) {
+      expect(mapWorkspaceSearchMigrationRow('documents', item)).toEqual({
+        classification: 'invalid',
+        reasonCode: 'MALFORMED_DOCUMENT_TARGET',
+      })
+    }
+
+    expect(mapWorkspaceSearchMigrationRow(
+      'documents',
+      {
+        workspaceId: 'workspace-1',
+        recordKey: 'PRESENCE#document-1#member@example.com',
+        entryType: 'document-presence',
+        expiresAtEpoch: 2_000_000_000,
+      },
+    )).toEqual({
+      classification: 'ignored',
+      reasonCode: 'RECOGNIZED_NON_TARGET_ROW',
+    })
   })
 
   test('ignores every recognized Documents support row', () => {
