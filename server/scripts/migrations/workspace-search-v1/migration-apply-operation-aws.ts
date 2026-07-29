@@ -341,6 +341,63 @@ export interface WorkspaceSearchMigrationApplyCheckpointScanner {
 }
 
 /**
+ * Read-only measured DynamoDB transport for reconstructing apply run state.
+ */
+export interface WorkspaceSearchMigrationApplyRunStateAwsTransport {
+  /**
+   * Strongly reads one adapter-owned apply state item.
+   *
+   * @param command - Exact strongly consistent GetItem command.
+   * @returns Raw low-level DynamoDB response.
+   */
+  getApplyRunStateItem(
+    command: GetItemCommand,
+  ): Promise<GetItemCommandOutput>
+
+  /**
+   * Revalidates measured table incarnations after immutable seal reads.
+   */
+  prepareApplyRunStateRead(): Promise<void>
+}
+
+/**
+ * Static measured material and read-only dependencies for apply state reads.
+ */
+export type CreateWorkspaceSearchMigrationApplyRunStateAwsReaderInput = {
+  /** Complete independently measured migration configuration. */
+  readonly configuration: WorkspaceSearchMigrationConfiguration
+  /** Reviewed digest of the exact measured configuration. */
+  readonly configurationHash: string
+  /** Exact revision-two planning-admitted execution boundary. */
+  readonly executionBoundary:
+    WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary
+  /** Exact immutable sealed planning-authority version-two root. */
+  readonly sealedPlanningAuthority:
+    WorkspaceSearchMigrationSealedPlanningAuthorityV2
+  /** Exact canonical closed writer-fence row fixed by the boundary. */
+  readonly closedWriterFenceRecord:
+    WorkspaceSearchWriterFenceClosedRecord
+  /** Exact immutable revision-one execution admission row. */
+  readonly executionRun: WorkspaceSearchMigrationExecutionRun
+  /** Read-only exact-version complete apply-seal capability. */
+  readonly applySealReader: Pick<
+    WorkspaceSearchMigrationApplySealAwsGateway,
+    'readCompleteApplySeal'
+  >
+  /** Narrow measured read-only DynamoDB transport. */
+  readonly transport:
+    WorkspaceSearchMigrationApplyRunStateAwsTransport
+}
+
+/**
+ * Read-only strongly consistent apply run-state capability.
+ */
+export type WorkspaceSearchMigrationApplyRunStateAwsReader = Pick<
+  WorkspaceSearchMigrationApplyOperationAwsPort,
+  'readRunState'
+>
+
+/**
  * Static measured material and narrow dependencies for one apply adapter.
  */
 export type CreateWorkspaceSearchMigrationApplyOperationAwsPortInput = {
@@ -581,6 +638,32 @@ type PreparedApplyDependencies = {
 }
 
 /**
+ * Captured read-only dependencies for apply run-state reconstruction.
+ */
+type PreparedApplyRunStateDependencies = {
+  /**
+   * Reads one exact immutable complete-plan apply seal.
+   *
+   * @param reference - Exact immutable seal reference.
+   * @returns Strict detached complete apply seal.
+   */
+  readonly readApplySeal: WorkspaceSearchMigrationApplySealAwsGateway[
+    'readCompleteApplySeal'
+  ]
+  /**
+   * Strongly reads one adapter-owned DynamoDB item.
+   *
+   * @param command - Exact GetItem command.
+   * @returns Raw low-level response.
+   */
+  readonly get: (
+    command: GetItemCommand,
+  ) => Promise<GetItemCommandOutput>
+  /** Revalidates measured table incarnations after seal reads. */
+  readonly prepare: () => Promise<void>
+}
+
+/**
  * Fully detached caller command before the first asynchronous boundary.
  */
 type PreparedApplyCommand = {
@@ -704,6 +787,57 @@ export function createAwsWorkspaceSearchMigrationApplyOperationPort(
       binding,
       dependencies,
     )
+  } catch (error: unknown) {
+    throw createApplyPublicFailure(
+      readApplyFailureCode(error, true),
+    )
+  }
+}
+
+/**
+ * Constructs one measured read-only apply run-state reader.
+ *
+ * The returned capability captures only strong DynamoDB reads, exact-version
+ * apply-seal reads, and post-seal measurement validation. It cannot write
+ * journals or seals, scan checkpoints, or send apply transactions.
+ *
+ * @param input - Measured static binding and read-only dependencies.
+ * @returns Strongly consistent apply run-state reader.
+ */
+export function createAwsWorkspaceSearchMigrationApplyRunStateReader(
+  input: CreateWorkspaceSearchMigrationApplyRunStateAwsReaderInput,
+): WorkspaceSearchMigrationApplyRunStateAwsReader {
+  try {
+    const record = requirePlainRecord(input, 'INVALID_ARGUMENT')
+    requireExactKeys(record, [
+      'applySealReader',
+      'closedWriterFenceRecord',
+      'configuration',
+      'configurationHash',
+      'executionBoundary',
+      'executionRun',
+      'sealedPlanningAuthority',
+      'transport',
+    ], 'INVALID_ARGUMENT')
+    const binding = createApplyOperationBinding(
+      readOwn(record, 'configuration', 'INVALID_ARGUMENT'),
+      readOwn(record, 'configurationHash', 'INVALID_ARGUMENT'),
+      readOwn(record, 'executionBoundary', 'INVALID_ARGUMENT'),
+      readOwn(record, 'sealedPlanningAuthority', 'INVALID_ARGUMENT'),
+      readOwn(record, 'closedWriterFenceRecord', 'INVALID_ARGUMENT'),
+      readOwn(record, 'executionRun', 'INVALID_ARGUMENT'),
+    )
+    const dependencies = prepareApplyRunStateDependencies(
+      readOwn(record, 'applySealReader', 'INVALID_ARGUMENT'),
+      readOwn(record, 'transport', 'INVALID_ARGUMENT'),
+    )
+    return {
+      readRunState: () =>
+        runApplyBoundary(async () =>
+          (await readEffectiveApplyState(binding, dependencies))
+            .runState
+        ),
+    }
   } catch (error: unknown) {
     throw createApplyPublicFailure(
       readApplyFailureCode(error, true),
@@ -1313,99 +1447,10 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
    * @returns Exact effective state and optional mutable envelope.
    */
   private async readEffectiveState(): Promise<EffectiveApplyState> {
-    const [admissionOutput, appliedRootOutput] = await Promise.all([
-      this.dependencies.get(
-        new GetItemCommand({
-          TableName: this.binding.stateTable.tableName,
-          ConsistentRead: true,
-          Key: this.binding.executionRunKey,
-        }),
-      ),
-      this.dependencies.get(
-        createWorkspaceSearchMigrationAppliedRootStrongReadCommand({
-          stateTable: this.binding.stateTable,
-          configurationHash: this.binding.configurationHash,
-          executionRun: this.binding.executionRun,
-        }),
-      ),
-    ])
-    requireExecutionRunAdmissionStrongRead(
+    return readEffectiveApplyState(
       this.binding,
-      admissionOutput,
+      this.dependencies,
     )
-    const stateOutput = await this.dependencies.get(
-      new GetItemCommand({
-        TableName: this.binding.stateTable.tableName,
-        ConsistentRead: true,
-        Key: createStateKey(this.binding),
-      }),
-    )
-    const record = readOutputItem(stateOutput)
-    const appliedRoot =
-      parseWorkspaceSearchMigrationAppliedRootStrongReadOutput({
-        stateTable: this.binding.stateTable,
-        configurationHash: this.binding.configurationHash,
-        executionRun: this.binding.executionRun,
-        output: appliedRootOutput,
-      })
-    if (appliedRoot !== undefined) {
-      if (record === undefined) return failApply('INVALID_STATE')
-      const executionState =
-        parseExecutionStateRecord(this.binding, record)
-      if (executionState.executionStateVersion !== 2) {
-        return failApply('INVALID_STATE')
-      }
-      const storedSeal =
-        await this.dependencies.readApplySeal(
-          appliedRoot.sealReference,
-        )
-      if (
-        Buffer.compare(
-          Buffer.from(
-            serializeWorkspaceSearchMigrationCompleteApplySeal(
-              storedSeal,
-            ),
-          ),
-          Buffer.from(
-            serializeWorkspaceSearchMigrationCompleteApplySeal(
-              appliedRoot.seal,
-            ),
-          ),
-        ) !== 0
-      ) {
-        return failApply('INVALID_STATE')
-      }
-      const runState =
-        requireWorkspaceSearchMigrationAppliedRootBinding({
-          admission: this.binding.executionRun,
-          predecessor: executionState,
-          sealedPlanningAuthority:
-            this.binding.sealedPlanningAuthority,
-          seal: storedSeal,
-          sealReference: appliedRoot.sealReference,
-          root: appliedRoot,
-        })
-      await this.dependencies.prepare()
-      return {
-        runState,
-        appliedRoot,
-        executionState,
-        executionStateRecord: record,
-      }
-    }
-    if (record === undefined) {
-      return { runState: this.binding.executionRun.runState }
-    }
-    const executionState =
-      parseExecutionStateRecord(this.binding, record)
-    return {
-      runState: reconstructWorkspaceSearchMigrationRunState(
-        this.binding.executionRun,
-        executionState,
-      ),
-      executionState,
-      executionStateRecord: record,
-    }
   }
 
   /**
@@ -1806,6 +1851,112 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
 }
 
 /**
+ * Strongly reconstructs one admitted apply run through read-only dependencies.
+ *
+ * @param binding - Exact detached apply binding.
+ * @param dependencies - Captured strong reads and seal reader.
+ * @returns Effective immutable admission or mutable successor state.
+ */
+async function readEffectiveApplyState(
+  binding: ApplyOperationBinding,
+  dependencies: PreparedApplyRunStateDependencies,
+): Promise<EffectiveApplyState> {
+  const [admissionOutput, appliedRootOutput] = await Promise.all([
+    dependencies.get(
+      new GetItemCommand({
+        TableName: binding.stateTable.tableName,
+        ConsistentRead: true,
+        Key: binding.executionRunKey,
+      }),
+    ),
+    dependencies.get(
+      createWorkspaceSearchMigrationAppliedRootStrongReadCommand({
+        stateTable: binding.stateTable,
+        configurationHash: binding.configurationHash,
+        executionRun: binding.executionRun,
+      }),
+    ),
+  ])
+  requireExecutionRunAdmissionStrongRead(
+    binding,
+    admissionOutput,
+  )
+  const stateOutput = await dependencies.get(
+    new GetItemCommand({
+      TableName: binding.stateTable.tableName,
+      ConsistentRead: true,
+      Key: createStateKey(binding),
+    }),
+  )
+  const record = readOutputItem(stateOutput)
+  const appliedRoot =
+    parseWorkspaceSearchMigrationAppliedRootStrongReadOutput({
+      stateTable: binding.stateTable,
+      configurationHash: binding.configurationHash,
+      executionRun: binding.executionRun,
+      output: appliedRootOutput,
+    })
+  if (appliedRoot !== undefined) {
+    if (record === undefined) return failApply('INVALID_STATE')
+    const executionState =
+      parseExecutionStateRecord(binding, record)
+    if (executionState.executionStateVersion !== 2) {
+      return failApply('INVALID_STATE')
+    }
+    const storedSeal =
+      await dependencies.readApplySeal(
+        appliedRoot.sealReference,
+      )
+    if (
+      Buffer.compare(
+        Buffer.from(
+          serializeWorkspaceSearchMigrationCompleteApplySeal(
+            storedSeal,
+          ),
+        ),
+        Buffer.from(
+          serializeWorkspaceSearchMigrationCompleteApplySeal(
+            appliedRoot.seal,
+          ),
+        ),
+      ) !== 0
+    ) {
+      return failApply('INVALID_STATE')
+    }
+    const runState =
+      requireWorkspaceSearchMigrationAppliedRootBinding({
+        admission: binding.executionRun,
+        predecessor: executionState,
+        sealedPlanningAuthority:
+          binding.sealedPlanningAuthority,
+        seal: storedSeal,
+        sealReference: appliedRoot.sealReference,
+        root: appliedRoot,
+      })
+    await dependencies.prepare()
+    return {
+      runState,
+      appliedRoot,
+      executionState,
+      executionStateRecord: record,
+    }
+  }
+  if (record === undefined) {
+    return { runState: binding.executionRun.runState }
+  }
+  const executionState =
+    parseExecutionStateRecord(binding, record)
+  return {
+    runState: reconstructWorkspaceSearchMigrationRunState(
+      binding.executionRun,
+      executionState,
+    ),
+    executionState,
+    executionStateRecord: record,
+  }
+}
+
+/**
  * Detaches and cross-validates all construction-time apply authority.
  *
  * @param configurationValue - Candidate measured configuration.
@@ -2090,6 +2241,47 @@ function prepareApplyDependencies(
     prepare: prepare.bind(transport),
     transact: transact.bind(transport),
     clock: snapshotClock(clockValue),
+  }
+}
+
+/**
+ * Captures only the dependency methods needed for apply state reads.
+ *
+ * @param applySealReaderValue - Candidate exact-version seal reader.
+ * @param transportValue - Candidate read-only measured transport.
+ * @returns Captured read-only dependency methods.
+ */
+function prepareApplyRunStateDependencies(
+  applySealReaderValue: unknown,
+  transportValue: unknown,
+): PreparedApplyRunStateDependencies {
+  const applySealReader = requireDependencyObject(
+    applySealReaderValue,
+  )
+  const transport = requireDependencyObject(transportValue)
+  const readApplySeal = readCallableMethod(
+    applySealReader,
+    'readCompleteApplySeal',
+  )
+  const get = readCallableMethod(
+    transport,
+    'getApplyRunStateItem',
+  )
+  const prepare = readCallableMethod(
+    transport,
+    'prepareApplyRunStateRead',
+  )
+  if (
+    !isApplySealReader(readApplySeal) ||
+    !isApplyItemReader(get) ||
+    !isApplyPreparer(prepare)
+  ) {
+    return failApply('INVALID_ARGUMENT')
+  }
+  return {
+    readApplySeal: readApplySeal.bind(applySealReader),
+    get: get.bind(transport),
+    prepare: prepare.bind(transport),
   }
 }
 

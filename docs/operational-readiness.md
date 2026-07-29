@@ -757,8 +757,7 @@ transactionが成立した場合はbounded coherent rereadで安定snapshotを�
 旧revision retryはdeterministic command、immutable receiptとroot-boundなcurrent successorまたは後続state
 の一致だけを成功として回収し、同一commandの競合attemptが異なるtrusted timestampを選んでもlogical
 winnerを受理します。このportはcomplete applied rootだけを対象にし、writerを再openしません。部分apply
-prefixからのdurable start、managed measured session composition、実行supervisorとterminal releaseは
-別途必要です。
+prefixからのdurable start、実行supervisorとterminal releaseは別途必要です。
 
 DynamoDB ConditionExpressionには、itemの未知のtop-level属性名を列挙せずに「完全な属性集合」を比較する
 primitiveがありません。したがって、強整合read後からtransactionまでにplanned itemにもknown schemaにも
@@ -777,7 +776,11 @@ post-send quarantineをstandalone adapter内の通常のresponse-loss retryへ�
 full-verification portもmanaged session内で、raw pageを1 Scanだけ取得するprivate source/target
 reducer、plan/apply-seal/result artifact gateway、applied-root strong read、
 state/receipt/verified-root transactionへcompositionします。ただし、現時点ではこれらのmanaged
-apply/verification capabilityをcontrol CLIまたはpost-close orchestratorへ公開していません。
+apply/verification capabilityをcontrol CLIまたはpost-close orchestratorへ公開していません。同じ
+managed sessionはcomplete applied root向けrollback portもcompositionし、同じpinned DynamoDB/S3
+client、all-six table incarnationのread前後検証、transaction直前検証、post-send quarantineを適用します。
+Applied root、applied run state、apply sequence/marker、exact journal version、rollback state/receipt/root、
+target CASはsession外へraw transport capabilityを公開せずに結合します。
 Apply/seal/verification/rollback CLIとorchestrator配線、partial-prefix rollback、terminal outcomeへ
 束縛したwriter-fence release、close後のdrain/replanning orchestration、migration専用
 observability/alarm、restore/failover/DR drill、non-production実行evidenceも未完了です。Operation/checkpoint
@@ -929,7 +932,8 @@ Process exit statusは、成功を`0`、migration failureまたは`OPERATION_FAI
    immutable verified root、固定10項目transaction、response-loss reconciliationを持つfull-verification
    AWS portとmanaged identity compositionも実装済みです。Complete applied rootを対象に、verifyとの
    start排他、strict durable state/receipt/root、exact apply-receipt guard、journal preimageのreverse
-   target CAS、固定12/13/10項目transactionを持つstandalone rollback AWS portも実装済みです。ただし、
+   target CAS、固定12/13/10項目transactionを持つrollback AWS portと、pinned DynamoDB/S3 client、
+   all-six pre/post guard、post-send quarantineを持つmanaged identity compositionも実装済みです。ただし、
    close/admission/run creation/apply/seal/verification/rollbackのCLI・orchestrator配線、partial-prefix
    rollback、terminal outcomeに束縛したrelease、observability/alarm、DR/non-production evidenceは
    未実装のため、migration全体のproduction gateはまだ実行可能とは扱いません。
