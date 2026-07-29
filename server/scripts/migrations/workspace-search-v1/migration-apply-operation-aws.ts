@@ -123,6 +123,9 @@ import {
   type WorkspaceSearchMigrationApplySealAwsGateway,
 } from './migration-apply-seal-aws'
 import {
+  createWorkspaceSearchMigrationRollbackStartSentinelAbsentAwsConditionCheck,
+} from './migration-rollback-key-aws'
+import {
   detachWorkspaceSearchMigrationPlanningConfiguration,
 } from './migration-planning-join'
 import {
@@ -167,10 +170,10 @@ const operationMarkerRecordKeyPrefix = 'apply-operation/v1'
 const journalSequenceRecordKeyPrefix = 'apply-journal-sequence/v1'
 const transactionTimeoutMilliseconds = 5_000
 const retentionDayMilliseconds = 24 * 60 * 60 * 1_000
-const mutationTransactionItemCount = 12
-const noOpTransactionItemCount = 11
-const checkpointTransactionItemCount = 9
-const applySealTransactionItemCount = 9
+const mutationTransactionItemCount = 13
+const noOpTransactionItemCount = 12
+const checkpointTransactionItemCount = 10
+const applySealTransactionItemCount = 10
 
 /**
  * Fixed transaction and cancellation-reason positions for one apply operation.
@@ -191,16 +194,18 @@ export const workspaceSearchMigrationApplyOperationTransactionIndex =
     sealedPlanningAuthority: 5,
     /** Exact immutable revision-one execution admission condition. */
     executionRun: 6,
+    /** Absent immutable rollback-start sentinel condition. */
+    rollbackStart: 7,
     /** Absent or exact-predecessor mutable execution-state Put. */
-    executionState: 7,
+    executionState: 8,
     /** Exact source item condition. */
-    source: 8,
+    source: 9,
     /** Exact target condition and Put, Delete, or no-op check. */
-    target: 9,
+    target: 10,
     /** Absent operation-id marker Put. */
-    operationMarker: 10,
+    operationMarker: 11,
     /** Absent mutation-only journal-sequence index Put. */
-    journalSequence: 11,
+    journalSequence: 12,
     /** Fixed no-op transaction item count. */
     noOpCount: noOpTransactionItemCount,
     /** Fixed mutating transaction item count. */
@@ -226,10 +231,12 @@ export const workspaceSearchMigrationApplyCheckpointTransactionIndex =
     sealedPlanningAuthority: 5,
     /** Exact immutable revision-one execution admission condition. */
     executionRun: 6,
+    /** Absent immutable rollback-start sentinel condition. */
+    rollbackStart: 7,
     /** Absent or exact-predecessor mutable execution-state Put. */
-    executionState: 7,
+    executionState: 8,
     /** Absent immutable checkpoint receipt Put. */
-    checkpointReceipt: 8,
+    checkpointReceipt: 9,
     /** Fixed checkpoint transaction item count. */
     count: checkpointTransactionItemCount,
   })
@@ -253,10 +260,12 @@ export const workspaceSearchMigrationApplySealTransactionIndex =
     sealedPlanningAuthority: 5,
     /** Exact immutable revision-one execution admission condition. */
     executionRun: 6,
+    /** Absent immutable rollback-start sentinel condition. */
+    rollbackStart: 7,
     /** Exact terminal mutable execution-state predecessor condition. */
-    executionState: 7,
+    executionState: 8,
     /** Absent deterministic immutable applied-root Put. */
-    appliedRoot: 8,
+    appliedRoot: 9,
     /** Fixed complete apply-seal transaction item count. */
     count: applySealTransactionItemCount,
   })
@@ -3050,7 +3059,7 @@ type CreateApplySealTransactionCommandInput = {
 }
 
 /**
- * Builds one fixed-order eleven- or twelve-item apply transaction.
+ * Builds one fixed-order twelve- or thirteen-item apply transaction.
  *
  * @param input - Exact authority, CAS, predecessor, successor, and marker.
  * @returns Adapter-owned idempotent transaction command.
@@ -3090,6 +3099,8 @@ function createApplyTransactionCommand(
       configurationHash: input.binding.configurationHash,
       executionRun: input.binding.executionRun,
     })
+  const rollbackStart =
+    createRollbackStartSentinelAbsentConditionCheck(input.binding)
   const executionState = createExecutionStatePut(input)
   const source = createConditionCheck(
     input.binding.configuration.tables[
@@ -3109,6 +3120,7 @@ function createApplyTransactionCommand(
     executionBoundary,
     sealedPlanningAuthority,
     executionRun,
+    rollbackStart,
     executionState,
     source,
     target,
@@ -3136,7 +3148,7 @@ function createApplyTransactionCommand(
 }
 
 /**
- * Builds one fixed-order nine-item apply-checkpoint transaction.
+ * Builds one fixed-order ten-item apply-checkpoint transaction.
  *
  * @param input - Exact authority, predecessor, successor, and receipt.
  * @returns Adapter-owned idempotent checkpoint transaction command.
@@ -3175,6 +3187,7 @@ function createApplyCheckpointTransactionCommand(
       configurationHash: input.binding.configurationHash,
       executionRun: input.binding.executionRun,
     }),
+    createRollbackStartSentinelAbsentConditionCheck(input.binding),
     createExecutionStatePut(input),
     createCheckpointReceiptPut(input),
   ]
@@ -3196,7 +3209,7 @@ function createApplyCheckpointTransactionCommand(
 }
 
 /**
- * Builds one fixed-order nine-item immutable applied-root transaction.
+ * Builds one fixed-order ten-item immutable applied-root transaction.
  *
  * @param input - Exact authority, terminal predecessor, and applied root.
  * @returns Adapter-owned idempotent complete apply-seal transaction.
@@ -3252,6 +3265,7 @@ function createApplySealTransactionCommand(
       configurationHash: input.binding.configurationHash,
       executionRun: input.binding.executionRun,
     }),
+    createRollbackStartSentinelAbsentConditionCheck(input.binding),
     createTerminalExecutionStateConditionCheck(
       input.binding,
       input.predecessorState,
@@ -3555,6 +3569,31 @@ function createConditionFields(
         ExpressionAttributeValues:
           material.ExpressionAttributeValues,
       }
+}
+
+/**
+ * Creates the shared rollback-start sentinel absence guard.
+ *
+ * Once rollback commits its deterministic start root, every later operation,
+ * checkpoint, and complete-seal transaction must fail before changing apply
+ * progress.
+ *
+ * @param binding - Exact validated admitted apply binding.
+ * @returns Deterministic rollback-start sentinel ConditionCheck.
+ */
+function createRollbackStartSentinelAbsentConditionCheck(
+  binding: ApplyOperationBinding,
+): TransactWriteItem {
+  return createWorkspaceSearchMigrationRollbackStartSentinelAbsentAwsConditionCheck(
+    {
+      stateTableName: binding.stateTable.tableName,
+      stateTableId: binding.stateTable.tableId,
+      configurationHash: binding.configurationHash,
+      runId: binding.executionRun.runId,
+      executionRunDigest:
+        binding.executionRun.executionRunDigest,
+    },
+  )
 }
 
 /**

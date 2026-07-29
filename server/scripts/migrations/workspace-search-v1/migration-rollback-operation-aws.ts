@@ -87,6 +87,13 @@ import {
   createWorkspaceSearchMigrationFullVerificationConflictRecordKeys,
 } from './migration-full-verification-key'
 import {
+  createWorkspaceSearchMigrationRollbackConflictRecordKeys,
+  createWorkspaceSearchMigrationRollbackStartRecordKey,
+} from './migration-rollback-key'
+import {
+  createWorkspaceSearchMigrationRollbackStartSentinelAbsentAwsConditionCheck,
+} from './migration-rollback-key-aws'
+import {
   createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks,
   type WorkspaceSearchMigrationPrePlanAuthority,
 } from './migration-pre-plan-authority-aws'
@@ -134,7 +141,6 @@ const rollbackReceiptRecordKind =
   'workspace-search-migration-rollback-operation-receipt-record'
 const rolledBackRootRecordKind =
   'workspace-search-migration-rolled-back-root-record'
-const rollbackStartRecordKeyPrefix = 'rollback-start/v1'
 const rollbackStateRecordKeyPrefix = 'rollback-state/v1'
 const rollbackReceiptRecordKeyPrefix = 'rollback-receipt/v1'
 const rolledBackRootRecordKeyPrefix = 'rolled-back-root/v1'
@@ -249,11 +255,12 @@ export type WorkspaceSearchMigrationRollbackStartSentinelAwsBindingInput = {
 }
 
 /**
- * Creates the absent rollback-start sentinel guard used by verification.
+ * Validates external identity and creates the shared rollback-start guard.
  *
  * Full verification and rollback start condition-check each other's
  * deterministic root namespace, so neither phase can start concurrently under
- * the same still-valid lease owner.
+ * the same still-valid lease owner. The exact condition material is owned by
+ * the shared rollback-key AWS factory.
  *
  * @param input - Exact migration-state table, configuration, and admission.
  * @returns Absent deterministic rollback-start ConditionCheck.
@@ -290,16 +297,15 @@ export function createWorkspaceSearchMigrationRollbackStartSentinelAbsentConditi
     ) {
       return failRollback('INVALID_ARGUMENT')
     }
-    const bindingDigest = createRollbackBindingDigest(
-      stateTable,
-      configurationHash,
-      executionRun,
-    )
-    return createAbsentConditionCheck(
-      stateTable.tableName,
-      createStateKey(
-        `${rollbackStartRecordKeyPrefix}/${bindingDigest}`,
-      ),
+    return createWorkspaceSearchMigrationRollbackStartSentinelAbsentAwsConditionCheck(
+      {
+        stateTableName: stateTable.tableName,
+        stateTableId: stateTable.tableId,
+        configurationHash,
+        runId: executionRun.runId,
+        executionRunDigest:
+          executionRun.executionRunDigest,
+      },
     )
   } catch (error: unknown) {
     throw createRollbackPublicFailure(
@@ -2088,11 +2094,13 @@ function createRollbackOperationBinding(
     executionBoundary,
     sealedPlanningAuthority,
     executionRun,
-    bindingDigest: createRollbackBindingDigest(
-      stateTable,
-      configurationHash,
-      executionRun,
-    ),
+    bindingDigest:
+      createWorkspaceSearchMigrationRollbackConflictRecordKeys({
+        stateTableId: stateTable.tableId,
+        configurationHash,
+        runId: executionRun.runId,
+        executionRunDigest: executionRun.executionRunDigest,
+      }).bindingDigest,
   }
 }
 
@@ -2681,7 +2689,9 @@ function createStateKey(
 function createRollbackStartRecordKey(
   binding: RollbackOperationBinding,
 ): string {
-  return `${rollbackStartRecordKeyPrefix}/${binding.bindingDigest}`
+  return createWorkspaceSearchMigrationRollbackStartRecordKey(
+    binding.bindingDigest,
+  )
 }
 
 /**
@@ -4051,29 +4061,6 @@ function requireLeaseClaimMatchesAuthority(
   ) {
     return failRollback('LEASE_LOST')
   }
-}
-
-/**
- * Creates the stable rollback record namespace digest.
- *
- * @param stateTable - Exact measured migration-state table.
- * @param configurationHash - Reviewed measured-configuration digest.
- * @param executionRun - Exact immutable execution admission.
- * @returns Lowercase stable binding digest.
- */
-function createRollbackBindingDigest(
-  stateTable: MigrationTableIdentity,
-  configurationHash: string,
-  executionRun: WorkspaceSearchMigrationExecutionRun,
-): string {
-  return createMigrationDigest({
-    kind: 'workspace-search-migration-rollback-operation-binding',
-    version: rollbackRecordVersion,
-    stateTableId: stateTable.tableId,
-    configurationHash,
-    runId: executionRun.runId,
-    executionRunDigest: executionRun.executionRunDigest,
-  })
 }
 
 /**

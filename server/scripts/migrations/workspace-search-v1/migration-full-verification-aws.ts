@@ -119,8 +119,8 @@ import {
   type WorkspaceSearchMigrationSealedPlanningAuthorityV2,
 } from './migration-sealed-planning-authority-v2'
 import {
-  createWorkspaceSearchMigrationRollbackStartSentinelAbsentConditionCheck,
-} from './migration-rollback-operation-aws'
+  createWorkspaceSearchMigrationRollbackStartSentinelAbsentAwsConditionCheck,
+} from './migration-rollback-key-aws'
 import {
   type WorkspaceSearchMigrationCheckpointLocation,
   type WorkspaceSearchMigrationLeaseClaim,
@@ -2452,11 +2452,7 @@ function createPageTransaction(
       executionRun: binding.executionRun,
       root: appliedRoot,
     }),
-    createWorkspaceSearchMigrationRollbackStartSentinelAbsentConditionCheck({
-      stateTable: binding.stateTable,
-      configurationHash: binding.configurationHash,
-      executionRun: binding.executionRun,
-    }),
+    createRollbackStartSentinelAbsentConditionCheck(binding),
     createVerificationStatePut(
       binding,
       stateRecord,
@@ -2522,11 +2518,7 @@ function createPublishTransaction(
       executionRun: binding.executionRun,
       root: appliedRoot,
     }),
-    createWorkspaceSearchMigrationRollbackStartSentinelAbsentConditionCheck({
-      stateTable: binding.stateTable,
-      configurationHash: binding.configurationHash,
-      executionRun: binding.executionRun,
-    }),
+    createRollbackStartSentinelAbsentConditionCheck(binding),
     createFullRecordConditionCheck(binding, terminal.record),
     createAbsentPut(
       binding,
@@ -3006,6 +2998,27 @@ function createStrongReadCommand(
       recordKey: { S: recordKey },
     },
   })
+}
+
+/**
+ * Creates the absent rollback-start guard shared with apply writes.
+ *
+ * @param binding - Exact validated full-verification binding.
+ * @returns Deterministic rollback-start sentinel ConditionCheck.
+ */
+function createRollbackStartSentinelAbsentConditionCheck(
+  binding: FullVerificationBinding,
+): TransactWriteItem {
+  return createWorkspaceSearchMigrationRollbackStartSentinelAbsentAwsConditionCheck(
+    {
+      stateTableName: binding.stateTable.tableName,
+      stateTableId: binding.stateTable.tableId,
+      configurationHash: binding.configurationHash,
+      runId: binding.executionRun.runId,
+      executionRunDigest:
+        binding.executionRun.executionRunDigest,
+    },
+  )
 }
 
 /**

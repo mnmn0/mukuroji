@@ -88,6 +88,9 @@ import type {
 import {
   createAwsWorkspaceSearchMigrationApplySealGateway,
 } from './migration-apply-seal-aws'
+import {
+  createWorkspaceSearchMigrationRollbackConflictRecordKeys,
+} from './migration-rollback-key'
 import type {
   WorkspaceSearchMigrationImmutableArtifactAwsPort,
 } from './migration-immutable-artifact-aws'
@@ -224,6 +227,9 @@ class ApplyOperationHarness {
 
   /** Optional synchronous effect during the final all-six preparation. */
   prepareEffect: (() => void) | undefined
+
+  /** Whether a competing rollback-start sentinel exists at transaction time. */
+  private rollbackStartSentinelExists = false
 
   /** Optional test-owned implementation behind the checkpoint scanner. */
   checkpointScanImplementation:
@@ -498,6 +504,40 @@ class ApplyOperationHarness {
   }
 
   /**
+   * Makes the deterministic rollback-start sentinel win later transactions.
+   */
+  commitRollbackStartSentinel(): void {
+    this.rollbackStartSentinelExists = true
+  }
+
+  /**
+   * Returns whether one record kind is present in the durable fake store.
+   *
+   * @param kind - Exact adapter-owned record discriminator.
+   * @returns Whether a committed item with that kind exists.
+   */
+  hasDurableRecordKind(kind: string): boolean {
+    for (const item of this.items.values()) {
+      if (item.kind?.S === kind) return true
+    }
+    return false
+  }
+
+  /**
+   * Reads the current target item for the fixture's first operation.
+   *
+   * @returns Detached exact target item, or undefined when absent.
+   */
+  readTargetItem():
+    Readonly<Record<string, AttributeValue>> | undefined {
+    const table =
+      this.fixture.configuration.tables['workspace-search']
+    const key = this.fixture.plannedOperation.operation.targetKey
+    const item = this.items.get(storageKey(table.tableName, key))
+    return item === undefined ? undefined : structuredClone(item)
+  }
+
+  /**
    * Seeds one complete state-table record from a prior transaction.
    *
    * @param item - Exact durable state-table item.
@@ -607,6 +647,46 @@ class ApplyOperationHarness {
   ): Promise<TransactWriteItemsCommandOutput> {
     this.events.push('transact')
     this.transactions.push(command)
+    const items = requireTransactionItems(command)
+    const stateTable =
+      this.fixture.configuration.tables['migration-state']
+    const rollbackStartKey =
+      createWorkspaceSearchMigrationRollbackConflictRecordKeys({
+        stateTableId: stateTable.tableId,
+        configurationHash: this.fixture.configurationHash,
+        runId: this.fixture.executionRun.runId,
+        executionRunDigest:
+          this.fixture.executionRun.executionRunDigest,
+      }).start
+    const rollbackStartIndex = items.findIndex((item) =>
+      item.ConditionCheck?.Key?.recordKey?.S === rollbackStartKey
+    )
+    if (this.rollbackStartSentinelExists) {
+      const condition = items[rollbackStartIndex]?.ConditionCheck
+      const names = condition?.ExpressionAttributeNames
+      if (
+        rollbackStartIndex < 0 ||
+        condition === undefined ||
+        condition.TableName !== stateTable.tableName ||
+        condition.Key?.migrationId?.S !==
+          WORKSPACE_SEARCH_MIGRATION_ID ||
+        condition.Key?.recordKey?.S !== rollbackStartKey ||
+        condition.ConditionExpression !==
+          'attribute_not_exists(#migrationId) AND ' +
+            'attribute_not_exists(#recordKey)' ||
+        names?.['#migrationId'] !== 'migrationId' ||
+        names?.['#recordKey'] !== 'recordKey' ||
+        Object.keys(names).length !== 2
+      ) {
+        throw new Error(
+          'Expected an exact rollback-start absence condition.',
+        )
+      }
+      throw createConditionalCancellation(
+        rollbackStartIndex,
+        items.length,
+      )
+    }
     const error = this.nextTransactionError
     this.nextTransactionError = undefined
     if (error !== undefined && !this.commitBeforeTransactionError) {
@@ -717,7 +797,7 @@ class ApplyOperationHarness {
 
 describe('Workspace Search migration apply-operation AWS adapter', () => {
   test(
-    'uploads journals before fixed twelve-item Put and Delete transactions and reconciles exact durability',
+    'uploads journals before fixed thirteen-item Put and Delete transactions and reconciles exact durability',
     async () => {
       const variants: readonly ApplyOperationVariant[] = [
         'put',
@@ -752,35 +832,110 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
           workspaceSearchMigrationApplyOperationTransactionIndex
             .mutationCount,
         )
-        for (let index = 0; index <= 6; index += 1) {
+        for (let index = 0; index <= 7; index += 1) {
           expect(items[index]?.ConditionCheck).toBeDefined()
         }
-        expect(items[7]?.Put?.Item?.kind?.S).toBe(
+        const rollbackKeys =
+          createWorkspaceSearchMigrationRollbackConflictRecordKeys({
+            stateTableId:
+              fixture.configuration.tables['migration-state'].tableId,
+            configurationHash: fixture.configurationHash,
+            runId: fixture.executionRun.runId,
+            executionRunDigest:
+              fixture.executionRun.executionRunDigest,
+          })
+        expect(
+          items[
+            workspaceSearchMigrationApplyOperationTransactionIndex
+              .rollbackStart
+          ]?.ConditionCheck?.Key?.recordKey?.S,
+        ).toBe(rollbackKeys.start)
+        expect(
+          items[
+            workspaceSearchMigrationApplyOperationTransactionIndex
+              .executionState
+          ]?.Put?.Item?.kind?.S,
+        ).toBe(
           'workspace-search-migration-execution-state-record',
         )
-        expect(items[7]?.Put?.Item?.revision?.N).toBe('2')
-        expect(items[8]?.ConditionCheck?.TableName).toBe(
+        expect(
+          items[
+            workspaceSearchMigrationApplyOperationTransactionIndex
+              .executionState
+          ]?.Put?.Item?.revision?.N,
+        ).toBe('2')
+        expect(
+          items[
+            workspaceSearchMigrationApplyOperationTransactionIndex
+              .source
+          ]?.ConditionCheck?.TableName,
+        ).toBe(
           fixture.configuration.tables['project-directory'].tableName,
         )
-        expect(items[8]?.ConditionCheck?.ConditionExpression)
+        expect(
+          items[
+            workspaceSearchMigrationApplyOperationTransactionIndex
+              .source
+          ]?.ConditionCheck?.ConditionExpression,
+        )
           .toBeDefined()
         if (variant === 'put') {
-          expect(items[9]?.Put?.TableName).toBe(
+          expect(
+            items[
+              workspaceSearchMigrationApplyOperationTransactionIndex
+                .target
+            ]?.Put?.TableName,
+          ).toBe(
             fixture.configuration.tables['workspace-search'].tableName,
           )
-          expect(items[9]?.Put?.ConditionExpression).toBeDefined()
-          expect(items[9]?.Delete).toBeUndefined()
+          expect(
+            items[
+              workspaceSearchMigrationApplyOperationTransactionIndex
+                .target
+            ]?.Put?.ConditionExpression,
+          ).toBeDefined()
+          expect(
+            items[
+              workspaceSearchMigrationApplyOperationTransactionIndex
+                .target
+            ]?.Delete,
+          ).toBeUndefined()
         } else {
-          expect(items[9]?.Delete?.TableName).toBe(
+          expect(
+            items[
+              workspaceSearchMigrationApplyOperationTransactionIndex
+                .target
+            ]?.Delete?.TableName,
+          ).toBe(
             fixture.configuration.tables['workspace-search'].tableName,
           )
-          expect(items[9]?.Delete?.ConditionExpression).toBeDefined()
-          expect(items[9]?.Put).toBeUndefined()
+          expect(
+            items[
+              workspaceSearchMigrationApplyOperationTransactionIndex
+                .target
+            ]?.Delete?.ConditionExpression,
+          ).toBeDefined()
+          expect(
+            items[
+              workspaceSearchMigrationApplyOperationTransactionIndex
+                .target
+            ]?.Put,
+          ).toBeUndefined()
         }
-        expect(items[10]?.Put?.Item?.kind?.S).toBe(
+        expect(
+          items[
+            workspaceSearchMigrationApplyOperationTransactionIndex
+              .operationMarker
+          ]?.Put?.Item?.kind?.S,
+        ).toBe(
           'workspace-search-migration-apply-operation-marker',
         )
-        expect(items[11]?.Put?.Item?.kind?.S).toBe(
+        expect(
+          items[
+            workspaceSearchMigrationApplyOperationTransactionIndex
+              .journalSequence
+          ]?.Put?.Item?.kind?.S,
+        ).toBe(
           'workspace-search-migration-apply-journal-sequence',
         )
         expect(
@@ -806,7 +961,7 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
   )
 
   test(
-    'commits a true no-op as eleven items with a target check and no journal sequence',
+    'commits a true no-op as twelve items with a target check and no journal sequence',
     async () => {
       const fixture = createApplyFixture('no-op')
       const harness = new ApplyOperationHarness(fixture)
@@ -825,15 +980,40 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
       expect(items).toHaveLength(
         workspaceSearchMigrationApplyOperationTransactionIndex.noOpCount,
       )
-      expect(items[9]?.ConditionCheck?.TableName).toBe(
+      expect(
+        items[
+          workspaceSearchMigrationApplyOperationTransactionIndex
+            .target
+        ]?.ConditionCheck?.TableName,
+      ).toBe(
         fixture.configuration.tables['workspace-search'].tableName,
       )
-      expect(items[9]?.Put).toBeUndefined()
-      expect(items[9]?.Delete).toBeUndefined()
-      expect(items[10]?.Put?.Item?.kind?.S).toBe(
+      expect(
+        items[
+          workspaceSearchMigrationApplyOperationTransactionIndex
+            .target
+        ]?.Put,
+      ).toBeUndefined()
+      expect(
+        items[
+          workspaceSearchMigrationApplyOperationTransactionIndex
+            .target
+        ]?.Delete,
+      ).toBeUndefined()
+      expect(
+        items[
+          workspaceSearchMigrationApplyOperationTransactionIndex
+            .operationMarker
+        ]?.Put?.Item?.kind?.S,
+      ).toBe(
         'workspace-search-migration-apply-operation-marker',
       )
-      expect(items[11]).toBeUndefined()
+      expect(
+        items[
+          workspaceSearchMigrationApplyOperationTransactionIndex
+            .journalSequence
+        ],
+      ).toBeUndefined()
       expect(
         await port.readOperationMarker(
           fixture.plannedOperation.operation.operationId,
@@ -956,7 +1136,12 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
           `${nameToken} = ${valueToken}`,
         )
       }
-      expect(secondItems[11]?.Put?.Item?.sequence?.N).toBe('2')
+      expect(
+        secondItems[
+          workspaceSearchMigrationApplyOperationTransactionIndex
+            .journalSequence
+        ]?.Put?.Item?.sequence?.N,
+      ).toBe('2')
 
       const firstReceipt = await port.readApplyReceipt(1)
       const secondReceipt = await port.readApplyReceipt(2)
@@ -1080,6 +1265,12 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
         },
         {
           index:
+            workspaceSearchMigrationApplyOperationTransactionIndex
+              .rollbackStart,
+          code: 'INVALID_STATE',
+        },
+        {
+          index:
             workspaceSearchMigrationApplyOperationTransactionIndex.source,
           code: 'SOURCE_DRIFT',
         },
@@ -1107,6 +1298,10 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
           code: 'INVALID_STATE',
         },
       ]
+      expect(cases).toHaveLength(
+        workspaceSearchMigrationApplyOperationTransactionIndex
+          .mutationCount,
+      )
       for (const entry of cases) {
         const fixture = createApplyFixture('put')
         const harness = new ApplyOperationHarness(fixture)
@@ -1119,6 +1314,143 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
         expect(failure.code).toBe(entry.code)
       }
     },
+  )
+
+  test(
+    'stops mutating and no-op apply writes after rollback start wins the transaction race',
+    async () => {
+      const variants: readonly ApplyOperationVariant[] = [
+        'put',
+        'no-op',
+      ]
+      for (const variant of variants) {
+        const fixture = createApplyFixture(variant)
+        const harness = new ApplyOperationHarness(fixture)
+        const port = createApplyPort(fixture, harness)
+        const targetBefore = harness.readTargetItem()
+        harness.commitRollbackStartSentinel()
+
+        const firstFailure = await captureMigrationFailure(() =>
+          port.commitApplyOperation(createApplyCommand(fixture))
+        )
+        const retryFailure = await captureMigrationFailure(() =>
+          port.commitApplyOperation(createApplyCommand(fixture))
+        )
+
+        expect(firstFailure.code).toBe('INVALID_STATE')
+        expect(retryFailure.code).toBe('INVALID_STATE')
+        expect(await port.readRunState()).toMatchObject({
+          revision: 1,
+          status: 'applying',
+          appliedOperationCount: 0,
+        })
+        expect(harness.readTargetItem()).toEqual(targetBefore)
+        expect(
+          harness.hasDurableRecordKind(
+            'workspace-search-migration-execution-state-record',
+          ),
+        ).toBe(false)
+        expect(
+          harness.hasDurableRecordKind(
+            'workspace-search-migration-apply-operation-marker',
+          ),
+        ).toBe(false)
+        expect(
+          harness.hasDurableRecordKind(
+            'workspace-search-migration-apply-journal-sequence',
+          ),
+        ).toBe(false)
+        expect(harness.uploadedJournalSegments).toHaveLength(
+          variant === 'no-op' ? 0 : 2,
+        )
+      }
+    },
+  )
+
+  test(
+    'stops checkpoint and complete-seal publication after rollback start wins',
+    async () => {
+      const checkpointFixture = createApplyFixture('put')
+      const checkpointHarness =
+        new ApplyOperationHarness(checkpointFixture)
+      const checkpointPort = createApplyPort(
+        checkpointFixture,
+        checkpointHarness,
+      )
+      const operationState =
+        await checkpointPort.commitApplyOperation(
+          createApplyCommand(checkpointFixture),
+        )
+      checkpointHarness.commitRollbackStartSentinel()
+
+      const checkpointFailure = await captureMigrationFailure(() =>
+        checkpointPort.saveApplyCheckpoint(
+          createCheckpointCommand(
+            checkpointFixture,
+            'project-directory',
+            operationState.revision,
+          ),
+        )
+      )
+      const checkpointRetry = await captureMigrationFailure(() =>
+        checkpointPort.saveApplyCheckpoint(
+          createCheckpointCommand(
+            checkpointFixture,
+            'project-directory',
+            operationState.revision,
+          ),
+        )
+      )
+
+      expect(checkpointFailure.code).toBe('INVALID_STATE')
+      expect(checkpointRetry.code).toBe('INVALID_STATE')
+      expect(await checkpointPort.readRunState()).toEqual(
+        operationState,
+      )
+      expect(
+        checkpointHarness.hasDurableRecordKind(
+          'workspace-search-migration-apply-checkpoint-receipt',
+        ),
+      ).toBe(false)
+
+      const sealFixture = createApplyFixture('put', 0)
+      const sealHarness = new ApplyOperationHarness(sealFixture)
+      const sealPort = createApplyPort(sealFixture, sealHarness)
+      const terminal = await completeApplyCheckpoints(
+        sealFixture,
+        sealPort,
+        1,
+      )
+      sealHarness.commitRollbackStartSentinel()
+
+      const sealFailure = await captureMigrationFailure(() =>
+        sealPort.sealApply(
+          createApplySealCommand(
+            sealFixture,
+            terminal.revision,
+          ),
+        )
+      )
+      const sealRetry = await captureMigrationFailure(() =>
+        sealPort.sealApply(
+          createApplySealCommand(
+            sealFixture,
+            terminal.revision,
+          ),
+        )
+      )
+
+      expect(sealFailure.code).toBe('INVALID_STATE')
+      expect(sealRetry.code).toBe('INVALID_STATE')
+      expect(await sealPort.readRunState()).toEqual(terminal)
+      expect(
+        sealHarness.hasDurableRecordKind(
+          'workspace-search-migration-applied-root-record',
+        ),
+      ).toBe(false)
+      expect(sealHarness.uploadedApplySeals).toHaveLength(2)
+    },
+    15_000,
   )
 
   test(
@@ -1334,7 +1666,7 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
   )
 
   test(
-    'persists a source checkpoint as fixed nine-item receipt and v2 state after every operation is durable',
+    'persists a source checkpoint as fixed ten-item receipt and v2 state after every operation is durable',
     async () => {
       const fixture = createApplyFixture('put')
       const harness = new ApplyOperationHarness(fixture)
@@ -1376,7 +1708,7 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
       expect(items).toHaveLength(
         workspaceSearchMigrationApplyCheckpointTransactionIndex.count,
       )
-      for (let index = 0; index <= 6; index += 1) {
+      for (let index = 0; index <= 7; index += 1) {
         expect(items[index]?.ConditionCheck).toBeDefined()
       }
       const statePut = items[
@@ -1877,7 +2209,7 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
   )
 
   test(
-    'maps all nine checkpoint cancellation positions',
+    'maps all ten checkpoint cancellation positions',
     async () => {
       const index =
         workspaceSearchMigrationApplyCheckpointTransactionIndex
@@ -1906,6 +2238,7 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
           code: 'INVALID_STATE',
         },
         { failedIndex: index.executionRun, code: 'INVALID_STATE' },
+        { failedIndex: index.rollbackStart, code: 'INVALID_STATE' },
         { failedIndex: index.executionState, code: 'INVALID_STATE' },
         {
           failedIndex: index.checkpointReceipt,
@@ -2038,7 +2371,7 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
   )
 
   test(
-    'publishes one fixed nine-item applied root and prefers it across restart and receipt retries',
+    'publishes one fixed ten-item applied root and prefers it across restart and receipt retries',
     async () => {
       const fixture = createApplyFixture('put', 0)
       const harness = new ApplyOperationHarness(fixture)
@@ -2163,7 +2496,7 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
       expect(items).toHaveLength(
         workspaceSearchMigrationApplySealTransactionIndex.count,
       )
-      for (let index = 0; index <= 7; index += 1) {
+      for (let index = 0; index <= 8; index += 1) {
         expect(items[index]?.ConditionCheck).toBeDefined()
       }
       const executionStateCondition = items[
@@ -2848,6 +3181,7 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
           code: 'INVALID_STATE',
         },
         { failedIndex: index.executionRun, code: 'INVALID_STATE' },
+        { failedIndex: index.rollbackStart, code: 'INVALID_STATE' },
         { failedIndex: index.executionState, code: 'INVALID_STATE' },
         { failedIndex: index.appliedRoot, code: 'INVALID_STATE' },
       ]
@@ -3981,23 +4315,21 @@ function storageKey(
 }
 
 /**
- * Creates one fixed-position conditional transaction cancellation.
+ * Creates one fixed-position cancellation with an exact reason count.
  *
  * @param failedIndex - ConditionCheck or Put index that failed.
- * @returns Raw DynamoDB cancellation.
+ * @param itemCount - Exact attempted transaction item count.
+ * @returns Raw DynamoDB conditional cancellation.
  */
-function createCancellation(
+function createConditionalCancellation(
   failedIndex: number,
+  itemCount: number,
 ): TransactionCanceledException {
   return new TransactionCanceledException({
     $metadata: {},
     message: 'tenant-secret-cancellation',
     CancellationReasons: Array.from(
-      {
-        length:
-          workspaceSearchMigrationApplyOperationTransactionIndex
-            .mutationCount,
-      },
+      { length: itemCount },
       (_, index) => ({
         Code: index === failedIndex
           ? 'ConditionalCheckFailed'
@@ -4008,10 +4340,26 @@ function createCancellation(
 }
 
 /**
+ * Creates one fixed-position conditional transaction cancellation.
+ *
+ * @param failedIndex - ConditionCheck or Put index that failed.
+ * @returns Raw DynamoDB cancellation.
+ */
+function createCancellation(
+  failedIndex: number,
+): TransactionCanceledException {
+  return createConditionalCancellation(
+    failedIndex,
+    workspaceSearchMigrationApplyOperationTransactionIndex
+      .mutationCount,
+  )
+}
+
+/**
  * Creates one fixed-position checkpoint transaction cancellation.
  *
  * @param failedIndex - ConditionCheck or Put index that failed.
- * @returns Raw DynamoDB cancellation with all nine reason slots.
+ * @returns Raw DynamoDB cancellation with all ten reason slots.
  */
 function createCheckpointCancellation(
   failedIndex: number,
@@ -4037,7 +4385,7 @@ function createCheckpointCancellation(
  * Creates one fixed-position complete apply-seal cancellation.
  *
  * @param failedIndex - ConditionCheck or Put index that failed.
- * @returns Raw DynamoDB cancellation with all nine reason slots.
+ * @returns Raw DynamoDB cancellation with all ten reason slots.
  */
 function createApplySealCancellation(
   failedIndex: number,

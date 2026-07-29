@@ -112,6 +112,7 @@ import type {
 import {
   type WorkspaceSearchMigrationApplyOperationAwsPort,
   workspaceSearchMigrationApplyCheckpointTransactionIndex,
+  workspaceSearchMigrationApplyOperationTransactionIndex,
   workspaceSearchMigrationApplySealTransactionIndex,
 } from './migration-apply-operation-aws'
 import {
@@ -5967,7 +5968,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
   )
 
   test(
-    'commits one managed mutation through journal storage and twelve-item send',
+    'commits one managed mutation through journal storage and thirteen-item send',
     async () => {
       const fixture =
         await createManagedApplyOperationFixture(
@@ -6019,7 +6020,10 @@ describe('Workspace Search migration AWS identity adapter', () => {
           .transactWritePrePlanAuthorityCommands[
             transactions
           ]?.input.TransactItems,
-      ).toHaveLength(12)
+      ).toHaveLength(
+        workspaceSearchMigrationApplyOperationTransactionIndex
+          .mutationCount,
+      )
       fixture.port.close()
     },
   )
@@ -6104,7 +6108,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
       )
       expect(
         workspaceSearchMigrationApplySealTransactionIndex.count,
-      ).toBe(9)
+      ).toBe(10)
 
       const putsAfterSeal =
         fixture.transport.putImmutableArtifactCommands.length
@@ -6320,7 +6324,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
       )
       expect(
         workspaceSearchMigrationApplyCheckpointTransactionIndex.count,
-      ).toBe(9)
+      ).toBe(10)
 
       const scanIndex = trace.indexOf('source-checkpoint-scan')
       const transactionIndex =
