@@ -3,6 +3,7 @@ import { API_RUNTIME_ENVIRONMENT_VARIABLE_NAMES } from '@mukuroji/contracts'
 import { TextDecoder } from 'node:util'
 import { createSecretsManagerClient } from '../../infrastructure/aws/secrets-manager-client'
 
+/** Re-exports the canonical API runtime configuration names for consumers. */
 export { API_RUNTIME_ENVIRONMENT_VARIABLE_NAMES } from '@mukuroji/contracts'
 
 const API_RUNTIME_CONFIGURATION_HEADER =

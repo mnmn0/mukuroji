@@ -38,6 +38,7 @@ import {
   WorkflowDefinitionValidationError,
 } from '../work-item-workflow'
 
+/** Re-exports the canonical relation identifier validator for consumers. */
 export { isCanonicalWorkItemRelationIds } from './canonical-work-item'
 
 const CONFIGURATION_RECORD_KEY = 'CONFIG'
