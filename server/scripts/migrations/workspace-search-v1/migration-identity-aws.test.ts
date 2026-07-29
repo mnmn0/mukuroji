@@ -58,6 +58,7 @@ import {
   type DynamoAttributeMap,
   type MigrationSourceCheckpoint,
   type WorkspaceSearchMigrationConfiguration,
+  type WorkspaceSearchMigrationRunState,
   WorkspaceSearchMigrationFailure,
   type WorkspaceSearchPlanSeal,
   type WorkspaceSearchMigrationSourceName,
@@ -111,6 +112,7 @@ import type {
 import {
   type WorkspaceSearchMigrationApplyOperationAwsPort,
   workspaceSearchMigrationApplyCheckpointTransactionIndex,
+  workspaceSearchMigrationApplySealTransactionIndex,
 } from './migration-apply-operation-aws'
 import type {
   PublishWorkspaceSearchMigrationSealedPlanningAuthorityV2Input,
@@ -5987,6 +5989,216 @@ describe('Workspace Search migration AWS identity adapter', () => {
   )
 
   test(
+    'publishes and replays one managed complete apply seal through pinned S3',
+    async () => {
+      const fixture = await createManagedApplyOperationFixture(
+        'apply-seal-success',
+      )
+      const apply = await createManagedApplyCheckpointPort(fixture)
+      const terminal = await completeManagedApplyTraversal(
+        fixture,
+        apply,
+      )
+      const puts =
+        fixture.transport.putImmutableArtifactCommands.length
+      const heads =
+        fixture.transport.headImmutableArtifactCommands.length
+      const gets =
+        fixture.transport.getImmutableArtifactCommands.length
+      const transactions =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+
+      const applied = await apply.sealApply(
+        createManagedApplySealCommand(fixture, terminal.revision),
+      )
+
+      expect(applied).toMatchObject({
+        revision: 8,
+        appliedOperationCount: 1,
+        status: 'applied',
+        apply: {
+          sources: {
+            'project-directory': {
+              aggregate: { mapped: 1, projected: 1 },
+            },
+          },
+          target: {
+            aggregate: { mapped: 1, projected: 1, deleted: 0 },
+          },
+        },
+      })
+      expect(
+        fixture.transport.putImmutableArtifactCommands,
+      ).toHaveLength(puts + 1)
+      expect(
+        fixture.transport.headImmutableArtifactCommands.length,
+      ).toBeGreaterThan(heads)
+      expect(
+        fixture.transport.getImmutableArtifactCommands.length,
+      ).toBeGreaterThan(gets)
+      const sealPut =
+        fixture.transport.putImmutableArtifactCommands[puts]
+      expect(sealPut?.input.Key).toContain('/apply-seals/')
+      expect(sealPut?.input.Metadata).toMatchObject({
+        'mukuroji-apply-seal-kind':
+          'workspace-search-complete-apply-seal-v1',
+        'mukuroji-apply-seal-run-id':
+          fixture.currentAuthority.lease.runId,
+        'mukuroji-apply-seal-configuration-sha256':
+          fixture.currentAuthority.configurationHash,
+      })
+      expect(
+        sealPut?.input.ObjectLockRetainUntilDate?.toISOString(),
+      ).toBe(
+        fixture.sealedPlanningAuthority.planSealReference
+          .retainUntil,
+      )
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactions + 1)
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands[
+            transactions
+          ]?.input.TransactItems,
+      ).toHaveLength(
+        workspaceSearchMigrationApplySealTransactionIndex.count,
+      )
+      expect(
+        workspaceSearchMigrationApplySealTransactionIndex.count,
+      ).toBe(9)
+
+      const putsAfterSeal =
+        fixture.transport.putImmutableArtifactCommands.length
+      const transactionsAfterSeal =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+      const getsBeforeRestart =
+        fixture.transport.getImmutableArtifactCommands.length
+      const restarted = fixture.port.createApplyOperationPort(
+        fixture.executionBoundary,
+        fixture.sealedPlanningAuthority,
+        fixture.closedWriterFenceRecord,
+        fixture.executionRun,
+      )
+      await expect(
+        restarted.sealApply(
+          createManagedApplySealCommand(
+            fixture,
+            terminal.revision,
+          ),
+        ),
+      ).resolves.toEqual(applied)
+      expect(
+        fixture.transport.putImmutableArtifactCommands,
+      ).toHaveLength(putsAfterSeal)
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactionsAfterSeal)
+      expect(
+        fixture.transport.getImmutableArtifactCommands.length,
+      ).toBeGreaterThan(getsBeforeRestart)
+      const exactRead =
+        fixture.transport.getImmutableArtifactCommands.at(-1)
+      expect(exactRead?.input.Key).toBe(sealPut?.input.Key)
+      expect(exactRead?.input.VersionId).toBeDefined()
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'quarantines a managed apply-seal commit after post-send table drift',
+    async () => {
+      const fixture = await createManagedApplyOperationFixture(
+        'apply-seal-post-send-drift',
+      )
+      const apply = await createManagedApplyCheckpointPort(fixture)
+      const terminal = await completeManagedApplyTraversal(
+        fixture,
+        apply,
+      )
+      const targetTableName =
+        fixture.requested.tables['workspace-search']
+      const originalTarget =
+        fixture.transport.describeTableOutputs.get(targetTableName)
+      if (originalTarget === undefined) {
+        throw new Error('Expected measured apply-seal target identity.')
+      }
+      const transactions =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+      fixture.transport
+        .transactWritePrePlanAuthorityPostCommitEffect = () => {
+          fixture.transport.describeTableOutputs.set(
+            targetTableName,
+            createReplacementDescribeTableOutput(
+              'workspace-search',
+              targetTableName,
+              fixture.requested,
+            ),
+          )
+        }
+
+      const failure =
+        await captureWorkspaceSearchMigrationFailure(
+          apply.sealApply(
+            createManagedApplySealCommand(
+              fixture,
+              terminal.revision,
+            ),
+          ),
+        )
+
+      expect(failure).toEqual(
+        new WorkspaceSearchMigrationFailure(
+          'AMBIGUOUS_OPERATION_UNRESOLVED',
+          'Workspace Search migration apply operation failed.',
+        ),
+      )
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactions + 1)
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands[
+            transactions
+          ]?.input.TransactItems,
+      ).toHaveLength(
+        workspaceSearchMigrationApplySealTransactionIndex.count,
+      )
+      fixture.transport
+        .transactWritePrePlanAuthorityPostCommitEffect = undefined
+      fixture.transport.describeTableOutputs.set(
+        targetTableName,
+        originalTarget,
+      )
+      await expect(apply.readRunState()).rejects.toEqual(
+        new WorkspaceSearchMigrationFailure(
+          'INVALID_STATE',
+          'Workspace Search migration apply operation failed.',
+        ),
+      )
+
+      await fixture.port.measureConfiguration()
+      const recovered = fixture.port.createApplyOperationPort(
+        fixture.executionBoundary,
+        fixture.sealedPlanningAuthority,
+        fixture.closedWriterFenceRecord,
+        fixture.executionRun,
+      )
+      await expect(recovered.readRunState()).resolves.toMatchObject({
+        revision: 8,
+        status: 'applied',
+      })
+      fixture.port.close()
+    },
+  )
+
+  test(
     'scans and commits one managed source apply checkpoint with all-six guards',
     async () => {
       const fixture =
@@ -6094,6 +6306,9 @@ describe('Workspace Search migration AWS identity adapter', () => {
         expect(guardsBeforeScan).toContain(tableName)
         expect(guardsAfterScan).toContain(tableName)
       }
+      expect(
+        trace.filter((entry) => expectedTables.includes(entry)),
+      ).toHaveLength(182)
       fixture.port.close()
     },
   )
@@ -6425,7 +6640,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
 
       expect(
         fixture.transport.getPrePlanAuthorityCommands,
-      ).toHaveLength(reads + 2)
+      ).toHaveLength(reads + 3)
       const expectedTables = [
         fixture.requested.tables['migration-state'],
         fixture.requested.tables['project-directory'],
@@ -6437,7 +6652,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
       for (const tableName of expectedTables) {
         expect(
           guardTrace.filter((candidate) => candidate === tableName),
-        ).toHaveLength(4)
+        ).toHaveLength(6)
       }
       expect(new Set(guardTrace)).toEqual(new Set(expectedTables))
       fixture.port.close()
@@ -10227,6 +10442,54 @@ async function createManagedApplyCheckpointPort(
 }
 
 /**
+ * Completes all four source checkpoints and the post-apply target checkpoint.
+ *
+ * @param fixture - Exact admitted managed apply fixture.
+ * @param apply - Live measured apply port at revision two.
+ * @returns Exact terminal traversal-capable applying state.
+ */
+async function completeManagedApplyTraversal(
+  fixture: ManagedApplyOperationFixture,
+  apply: WorkspaceSearchMigrationApplyOperationAwsPort,
+): Promise<WorkspaceSearchMigrationRunState> {
+  let expectedRevision = 2
+  let state: WorkspaceSearchMigrationRunState | undefined
+  for (const source of workspaceSearchMigrationSourceNames) {
+    fixture.transport.scanSourceOutput =
+      source === 'project-directory'
+        ? {
+            $metadata: {},
+            Count: 1,
+            Items: [createManagedApplySourceItem()],
+            ScannedCount: 1,
+          }
+        : createEmptyScanOutput()
+    state = await apply.saveApplyCheckpoint(
+      createManagedApplyCheckpointCommand(
+        fixture,
+        source,
+        expectedRevision,
+      ),
+    )
+    expectedRevision = state.revision
+  }
+  fixture.transport.scanTargetOutput = {
+    $metadata: {},
+    Count: 1,
+    Items: [createManagedApplyTargetItem(false)],
+    ScannedCount: 1,
+  }
+  state = await apply.saveApplyCheckpoint(
+    createManagedApplyCheckpointCommand(
+      fixture,
+      'target',
+      expectedRevision,
+    ),
+  )
+  return state
+}
+
+/**
  * Creates one strict managed apply command for the fixture's first revision.
  *
  * @param fixture - Exact admitted managed apply fixture.
@@ -10272,6 +10535,29 @@ function createManagedApplyCheckpointCommand(
       fenceToken: fixture.currentAuthority.lease.fenceToken,
     },
     location,
+  }
+}
+
+/**
+ * Creates one strict managed complete apply-seal command.
+ *
+ * @param fixture - Exact admitted managed apply fixture.
+ * @param expectedRevision - Exact terminal applying-state revision.
+ * @returns Detached seal command under the current lease.
+ */
+function createManagedApplySealCommand(
+  fixture: ManagedApplyOperationFixture,
+  expectedRevision: number,
+): Parameters<
+  WorkspaceSearchMigrationApplyOperationAwsPort['sealApply']
+>[0] {
+  return {
+    expectedRevision,
+    lease: {
+      runId: fixture.currentAuthority.lease.runId,
+      ownerId: fixture.currentAuthority.lease.ownerId,
+      fenceToken: fixture.currentAuthority.lease.fenceToken,
+    },
   }
 }
 
