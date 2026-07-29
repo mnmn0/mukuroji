@@ -51,6 +51,7 @@ import {
 } from './migration-sealed-planning-authority'
 import {
   createAwsWorkspaceSearchMigrationSealedPlanningAuthorityV2Port,
+  createWorkspaceSearchMigrationSealedPlanningAuthorityV2ConditionCheck,
   type PublishWorkspaceSearchMigrationSealedPlanningAuthorityV2Input,
   type WorkspaceSearchMigrationSealedPlanningAuthorityV2AwsTransport,
   workspaceSearchMigrationSealedPlanningAuthorityV2TransactionIndex,
@@ -161,6 +162,110 @@ describe('Workspace Search sealed planning authority v2 AWS adapter', () => {
     expect(
       workspaceSearchMigrationSealedPlanningAuthorityV2TransactionIndex.count,
     ).toBe(9)
+  })
+
+  test('creates an exact immutable sealed-root condition check', () => {
+    const fixture = createPublicationFixture()
+    const authority =
+      createWorkspaceSearchMigrationSealedPlanningAuthorityV2({
+        ...fixture.publishInput,
+        sealedAt: commitTime,
+      })
+    const condition =
+      createWorkspaceSearchMigrationSealedPlanningAuthorityV2ConditionCheck({
+        stateTable: fixture.stateTable,
+        configurationHash: fixture.configurationHash,
+        authority,
+      }).ConditionCheck
+
+    expect(condition?.TableName).toBe(fixture.stateTable.tableName)
+    expect(condition?.ConditionExpression).toBe([
+      '#kind = :kind',
+      '#version = :version',
+      '#stateTableId = :stateTableId',
+      '#configurationHash = :configurationHash',
+      '#runId = :runId',
+      '#authorityDigest = :authorityDigest',
+      '#sealedAt = :sealedAt',
+      '#rootBytes = :rootBytes',
+    ].join(' AND '))
+    expect(
+      condition?.ExpressionAttributeValues?.[':rootBytes'],
+    ).toEqual({
+      B: serializeWorkspaceSearchMigrationSealedPlanningAuthorityV2(
+        authority,
+      ),
+    })
+    expect(condition?.ExpressionAttributeValues?.[':authorityDigest'])
+      .toEqual({ S: authority.authorityDigest })
+
+    const replacementState = structuredClone(fixture.stateTable)
+    replacementState.tableId = 'replacement-state-table-id'
+    expect(() =>
+      createWorkspaceSearchMigrationSealedPlanningAuthorityV2ConditionCheck({
+        stateTable: replacementState,
+        configurationHash: fixture.configurationHash,
+        authority,
+      }),
+    ).toThrow(WorkspaceSearchMigrationFailure)
+
+    let accessorInvocations = 0
+    const accessorInput = {
+      stateTable: fixture.stateTable,
+      configurationHash: fixture.configurationHash,
+      authority,
+    }
+    Object.defineProperty(accessorInput, 'authority', {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        accessorInvocations += 1
+        return authority
+      },
+    })
+    expect(() =>
+      createWorkspaceSearchMigrationSealedPlanningAuthorityV2ConditionCheck(
+        accessorInput,
+      ),
+    ).toThrow(WorkspaceSearchMigrationFailure)
+    expect(accessorInvocations).toBe(0)
+
+    let nestedAccessorInvocations = 0
+    const nestedAccessorAuthority = structuredClone(authority)
+    Object.defineProperty(nestedAccessorAuthority, 'tableIds', {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        nestedAccessorInvocations += 1
+        return authority.tableIds
+      },
+    })
+    expect(() =>
+      createWorkspaceSearchMigrationSealedPlanningAuthorityV2ConditionCheck({
+        stateTable: fixture.stateTable,
+        configurationHash: fixture.configurationHash,
+        authority: nestedAccessorAuthority,
+      }),
+    ).toThrow(WorkspaceSearchMigrationFailure)
+    expect(nestedAccessorInvocations).toBe(0)
+
+    const nestedAccessorStateTable = structuredClone(fixture.stateTable)
+    Object.defineProperty(nestedAccessorStateTable, 'tableId', {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        nestedAccessorInvocations += 1
+        return fixture.stateTable.tableId
+      },
+    })
+    expect(() =>
+      createWorkspaceSearchMigrationSealedPlanningAuthorityV2ConditionCheck({
+        stateTable: nestedAccessorStateTable,
+        configurationHash: fixture.configurationHash,
+        authority,
+      }),
+    ).toThrow(WorkspaceSearchMigrationFailure)
+    expect(nestedAccessorInvocations).toBe(0)
   })
 
   test('maps every fixed conditional cancellation position', async () => {

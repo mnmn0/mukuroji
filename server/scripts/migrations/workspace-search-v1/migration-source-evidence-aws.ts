@@ -13,6 +13,7 @@ import {
   isThrottlingError,
   isTransientError,
 } from '@smithy/core/retry'
+import { types as nodeUtilTypes } from 'node:util'
 import {
   decodeAttributeMap,
   encodeAttributeMap,
@@ -44,6 +45,9 @@ import type {
   WorkspaceSearchMigrationPlanningSourceChainMaterial,
   WorkspaceSearchMigrationPlanningSourcePageMaterial,
 } from './migration-planning-material'
+import {
+  detachWorkspaceSearchMigrationPlanningConfiguration,
+} from './migration-planning-join'
 import type {
   WorkspaceSearchMigrationSourceScanReadInput,
 } from './migration-source-scan-aws'
@@ -241,6 +245,25 @@ export type WorkspaceSearchMigrationSourceEvidenceAwsRequest = {
   readonly configurationHash: string
   /** Exact source table advanced by this evidence chain. */
   readonly source: WorkspaceSearchMigrationSourceName
+}
+
+/**
+ * Authority-free read request addressing one planning source-evidence head.
+ */
+export type WorkspaceSearchMigrationPlanningSourceEvidenceAwsRequest =
+  Omit<WorkspaceSearchMigrationSourceEvidenceAwsRequest, 'purpose'> & {
+    /** Authoritative planning chain whose head must not exist yet. */
+    readonly purpose: 'planning'
+  }
+
+/**
+ * Exact planning source-head absence fixed by a later bootstrap transaction.
+ */
+export type CreateWorkspaceSearchMigrationSourcePlanningHeadAbsenceConditionCheckInput = {
+  /** Exact measured migration-state table containing the addressed head. */
+  readonly stateTable: MigrationTableIdentity
+  /** Exact authority-free planning request used to derive the durable head key. */
+  readonly request: WorkspaceSearchMigrationPlanningSourceEvidenceAwsRequest
 }
 
 /**
@@ -1345,6 +1368,109 @@ export function createWorkspaceSearchMigrationSourceTerminalHeadConditionCheck(
           },
           ':headDigest': { S: progress.evidenceDigest },
           ':completed': { BOOL: true },
+        },
+      }
+    return { ConditionCheck: conditionCheck }
+  } catch (error: unknown) {
+    throw createSourceEvidenceAwsBoundaryFailure(
+      readSourceEvidenceAwsFailureCode(error),
+    )
+  }
+}
+
+/**
+ * Creates one exact planning source-head absence ConditionCheck.
+ *
+ * The request is validated through the same read preparation used by the
+ * source-evidence adapter, so configuration hashing, source identity, and the
+ * measured migration-state incarnation all contribute to the addressed key.
+ *
+ * @param input - Exact measured state table and planning read request.
+ * @returns One adapter-owned DynamoDB absence ConditionCheck transaction item.
+ */
+export function createWorkspaceSearchMigrationSourcePlanningHeadAbsenceConditionCheck(
+  input:
+    CreateWorkspaceSearchMigrationSourcePlanningHeadAbsenceConditionCheckInput,
+): TransactWriteItem {
+  try {
+    const inputRecord = requireSourceEvidenceInputRecord(input)
+    requireExactSourceEvidenceInputKeys(inputRecord, [
+      'request',
+      'stateTable',
+    ])
+    const requestRecord = requireSourceEvidenceInputRecord(
+      readSourceEvidenceOwnDataProperty(inputRecord, 'request'),
+    )
+    requireExactSourceEvidenceInputKeys(requestRecord, [
+      'configuration',
+      'configurationHash',
+      'purpose',
+      'runId',
+      'source',
+    ])
+    if (
+      readSourceEvidenceOwnDataProperty(requestRecord, 'purpose') !==
+        'planning'
+    ) {
+      return failSourceEvidenceAws('INVALID_ARGUMENT')
+    }
+    const configuration =
+      detachWorkspaceSearchMigrationPlanningConfiguration(
+        readSourceEvidenceOwnDataProperty(
+          requestRecord,
+          'configuration',
+        ),
+      )
+    const stateTableCandidate = readSourceEvidenceOwnDataProperty(
+      inputRecord,
+      'stateTable',
+    )
+    const stateConfiguration =
+      detachWorkspaceSearchMigrationPlanningConfiguration({
+        ...configuration,
+        tables: {
+          ...configuration.tables,
+          'migration-state': stateTableCandidate,
+        },
+      })
+    const stateTable = stateConfiguration.tables['migration-state']
+    requireMigrationStateTableIdentity(stateTable)
+    const planningRequest:
+      WorkspaceSearchMigrationPlanningSourceEvidenceAwsRequest = {
+        configuration,
+        configurationHash: readSourceEvidenceInputDigest(
+          readSourceEvidenceOwnDataProperty(
+            requestRecord,
+            'configurationHash',
+          ),
+        ),
+        purpose: 'planning',
+        runId: readSourceEvidenceMigrationIdentifier(
+          readSourceEvidenceOwnDataProperty(requestRecord, 'runId'),
+        ),
+        source: readSourceEvidenceSourceName(
+          readSourceEvidenceOwnDataProperty(requestRecord, 'source'),
+        ),
+      }
+    const request = prepareSourceEvidenceAwsRequest(
+      planningRequest,
+      stateTable,
+      'read',
+    )
+    const conditionCheck:
+      NonNullable<TransactWriteItem['ConditionCheck']> = {
+        TableName: stateTable.tableName,
+        Key: {
+          migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
+          recordKey: {
+            S: createSourceEvidenceHeadRecordKey(request.identity),
+          },
+        },
+        ConditionExpression:
+          'attribute_not_exists(#migrationId) AND attribute_not_exists(#recordKey)',
+        ExpressionAttributeNames: {
+          '#migrationId': 'migrationId',
+          '#recordKey': 'recordKey',
         },
       }
     return { ConditionCheck: conditionCheck }
@@ -2942,8 +3068,18 @@ function requireSourceEvidenceInputRecord(value: unknown): object {
   if (
     typeof value !== 'object' ||
     value === null ||
-    Array.isArray(value)
+    Array.isArray(value) ||
+    nodeUtilTypes.isProxy(value)
   ) {
+    return failSourceEvidenceAws('INVALID_ARGUMENT')
+  }
+  let prototype: unknown
+  try {
+    prototype = Object.getPrototypeOf(value)
+  } catch {
+    return failSourceEvidenceAws('INVALID_ARGUMENT')
+  }
+  if (prototype !== Object.prototype && prototype !== null) {
     return failSourceEvidenceAws('INVALID_ARGUMENT')
   }
   return value
@@ -2971,6 +3107,53 @@ function requireExactSourceEvidenceInputKeys(
     keys.some((key, index) => key !== sortedExpected[index])
   ) {
     return failSourceEvidenceAws('INVALID_ARGUMENT')
+  }
+}
+
+/**
+ * Reads one own enumerable input data property without invoking accessors.
+ *
+ * @param record - Exact plain input record.
+ * @param property - Required own property name.
+ * @returns Untrusted scalar or nested value.
+ */
+function readSourceEvidenceOwnDataProperty(
+  record: object,
+  property: PropertyKey,
+): unknown {
+  let descriptor: PropertyDescriptor | undefined
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(record, property)
+  } catch {
+    return failSourceEvidenceAws('INVALID_ARGUMENT')
+  }
+  if (
+    descriptor === undefined ||
+    descriptor.enumerable !== true ||
+    !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+  ) {
+    return failSourceEvidenceAws('INVALID_ARGUMENT')
+  }
+  return descriptor.value
+}
+
+/**
+ * Reads one exact supported source role from an untrusted property.
+ *
+ * @param value - Candidate source role.
+ * @returns Exact supported migration source.
+ */
+function readSourceEvidenceSourceName(
+  value: unknown,
+): WorkspaceSearchMigrationSourceName {
+  switch (value) {
+    case 'project-directory':
+    case 'work-items':
+    case 'collaboration':
+    case 'documents':
+      return value
+    default:
+      return failSourceEvidenceAws('INVALID_ARGUMENT')
   }
 }
 

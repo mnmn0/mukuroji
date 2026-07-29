@@ -659,9 +659,15 @@ control CLIと、single-flight heartbeat supervisorは実装済みです。一�
 terminal outcomeに束縛したrelease、close後のdrainと再planning orchestration、apply/verify/rollback
 state adapter、migration専用observability/alarm、restore/failover/DR drill、non-production実行evidenceは
 未完了です。Sealed authority v2もapply authorityとして使用せず、Production migration gateは閉じたままです。
-Source planning v3 と target planning v1 の terminal head には、完全な identity、chain version、
-checkpoint、recursive head digest、`completed=true` を比較する transaction 用 ConditionCheck factory
-があります。
+Pure execution-boundary contractは、exact closed fence digest/authorityと全6 TableIdを持つ`closed` revision 1、
+fresh current authority、exact raw maintenance evidence、close後15分以上のdrainを持つ
+`planning-admitted` revision 2だけをcanonical bytes/digestとして受け付けます。Source planning v3 と
+target planning v1 には、close/admission transactionで同じrun/configuration/TableIdのhead未作成を固定する
+ConditionCheck factoryがあり、terminal headには完全なidentity、chain version、checkpoint、recursive head
+digest、`completed=true`を比較するfactoryがあります。Exact closed writer-fence rowとsealed planning
+authority v2 rootを固定するConditionCheck factoryもあります。ただし、これらを固定10 item transactionへ
+compositionするexecution-boundary AWS portとmanaged-session capability gateは未実装です。したがって、この
+pure contractだけを根拠にwriter-fenceを閉じたりplanningを開始したりしてはいけません。
 
 ただし、sealed planning authority v2 の原子的publication、durable writer-fence row、application writer
 guardの存在だけでは、supervisedなclose/drain/replanningを完了しません。Historical receipt と current

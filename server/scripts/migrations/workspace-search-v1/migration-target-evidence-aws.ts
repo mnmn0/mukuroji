@@ -13,6 +13,7 @@ import {
   isThrottlingError,
   isTransientError,
 } from '@smithy/core/retry'
+import { types as nodeUtilTypes } from 'node:util'
 import {
   decodeAttributeMap,
   encodeAttributeMap,
@@ -41,6 +42,9 @@ import type {
   WorkspaceSearchMigrationPlanningTargetChainMaterial,
   WorkspaceSearchMigrationPlanningTargetPageMaterial,
 } from './migration-planning-material'
+import {
+  detachWorkspaceSearchMigrationPlanningConfiguration,
+} from './migration-planning-join'
 import type {
   WorkspaceSearchMigrationTargetScanReadInput,
 } from './migration-target-scan-aws'
@@ -231,6 +235,16 @@ export type WorkspaceSearchMigrationTargetEvidenceAwsRequest = {
   readonly configuration: WorkspaceSearchMigrationConfiguration
   /** Digest of the exact measured migration configuration. */
   readonly configurationHash: string
+}
+
+/**
+ * Exact planning target-head absence fixed by a later bootstrap transaction.
+ */
+export type CreateWorkspaceSearchMigrationTargetPlanningHeadAbsenceConditionCheckInput = {
+  /** Exact measured migration-state table containing the addressed head. */
+  readonly stateTable: MigrationTableIdentity
+  /** Exact authority-free planning request used to derive the durable head key. */
+  readonly request: WorkspaceSearchMigrationTargetEvidenceAwsRequest
 }
 
 /**
@@ -1279,6 +1293,105 @@ export function createWorkspaceSearchMigrationTargetTerminalHeadConditionCheck(
           },
           ':headDigest': { S: progress.evidenceDigest },
           ':completed': { BOOL: true },
+        },
+      }
+    return { ConditionCheck: conditionCheck }
+  } catch (error: unknown) {
+    throw createTargetEvidenceAwsBoundaryFailure(
+      readTargetEvidenceAwsFailureCode(error),
+    )
+  }
+}
+
+/**
+ * Creates one exact planning target-head absence ConditionCheck.
+ *
+ * The request is validated through the same read preparation used by the
+ * target-evidence adapter, so configuration hashing, target identity, and the
+ * measured migration-state incarnation all contribute to the addressed key.
+ *
+ * @param input - Exact measured state table and planning read request.
+ * @returns One adapter-owned DynamoDB absence ConditionCheck transaction item.
+ */
+export function createWorkspaceSearchMigrationTargetPlanningHeadAbsenceConditionCheck(
+  input:
+    CreateWorkspaceSearchMigrationTargetPlanningHeadAbsenceConditionCheckInput,
+): TransactWriteItem {
+  try {
+    const inputRecord = requireTargetEvidenceInputRecord(input)
+    requireExactTargetEvidenceInputKeys(inputRecord, [
+      'request',
+      'stateTable',
+    ])
+    const requestRecord = requireTargetEvidenceInputRecord(
+      readTargetEvidenceOwnDataProperty(inputRecord, 'request'),
+    )
+    requireExactTargetEvidenceInputKeys(requestRecord, [
+      'configuration',
+      'configurationHash',
+      'purpose',
+      'runId',
+    ])
+    if (
+      readTargetEvidenceOwnDataProperty(requestRecord, 'purpose') !==
+        'planning'
+    ) {
+      return failTargetEvidenceAws('INVALID_ARGUMENT')
+    }
+    const configuration =
+      detachWorkspaceSearchMigrationPlanningConfiguration(
+        readTargetEvidenceOwnDataProperty(
+          requestRecord,
+          'configuration',
+        ),
+      )
+    const stateTableCandidate = readTargetEvidenceOwnDataProperty(
+      inputRecord,
+      'stateTable',
+    )
+    const stateConfiguration =
+      detachWorkspaceSearchMigrationPlanningConfiguration({
+        ...configuration,
+        tables: {
+          ...configuration.tables,
+          'migration-state': stateTableCandidate,
+        },
+      })
+    const stateTable = stateConfiguration.tables['migration-state']
+    requireMigrationStateTableIdentity(stateTable)
+    const planningRequest:
+      WorkspaceSearchMigrationTargetEvidenceAwsRequest = {
+        configuration,
+        configurationHash: readTargetEvidenceInputDigest(
+          readTargetEvidenceOwnDataProperty(
+            requestRecord,
+            'configurationHash',
+          ),
+        ),
+        purpose: 'planning',
+        runId: readTargetEvidenceMigrationIdentifier(
+          readTargetEvidenceOwnDataProperty(requestRecord, 'runId'),
+        ),
+      }
+    const request = prepareTargetEvidenceAwsRequest(
+      planningRequest,
+      stateTable,
+      'read',
+    )
+    const conditionCheck:
+      NonNullable<TransactWriteItem['ConditionCheck']> = {
+        TableName: stateTable.tableName,
+        Key: {
+          migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
+          recordKey: {
+            S: createTargetEvidenceHeadRecordKey(request.identity),
+          },
+        },
+        ConditionExpression:
+          'attribute_not_exists(#migrationId) AND attribute_not_exists(#recordKey)',
+        ExpressionAttributeNames: {
+          '#migrationId': 'migrationId',
+          '#recordKey': 'recordKey',
         },
       }
     return { ConditionCheck: conditionCheck }
@@ -2818,8 +2931,18 @@ function requireTargetEvidenceInputRecord(value: unknown): object {
   if (
     typeof value !== 'object' ||
     value === null ||
-    Array.isArray(value)
+    Array.isArray(value) ||
+    nodeUtilTypes.isProxy(value)
   ) {
+    return failTargetEvidenceAws('INVALID_ARGUMENT')
+  }
+  let prototype: unknown
+  try {
+    prototype = Object.getPrototypeOf(value)
+  } catch {
+    return failTargetEvidenceAws('INVALID_ARGUMENT')
+  }
+  if (prototype !== Object.prototype && prototype !== null) {
     return failTargetEvidenceAws('INVALID_ARGUMENT')
   }
   return value
@@ -2848,6 +2971,33 @@ function requireExactTargetEvidenceInputKeys(
   ) {
     return failTargetEvidenceAws('INVALID_ARGUMENT')
   }
+}
+
+/**
+ * Reads one own enumerable input data property without invoking accessors.
+ *
+ * @param record - Exact plain input record.
+ * @param property - Required own property name.
+ * @returns Untrusted scalar or nested value.
+ */
+function readTargetEvidenceOwnDataProperty(
+  record: object,
+  property: PropertyKey,
+): unknown {
+  let descriptor: PropertyDescriptor | undefined
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(record, property)
+  } catch {
+    return failTargetEvidenceAws('INVALID_ARGUMENT')
+  }
+  if (
+    descriptor === undefined ||
+    descriptor.enumerable !== true ||
+    !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+  ) {
+    return failTargetEvidenceAws('INVALID_ARGUMENT')
+  }
+  return descriptor.value
 }
 
 /**
