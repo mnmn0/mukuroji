@@ -723,6 +723,18 @@ Applied rootはproduction sealとrich exact-version reference、predecessor dige
 再起動後はdeterministic root keyを強整合readし、embedded sealとexact S3 version、terminal predecessorを
 相互検証できる場合だけ成功として回収します。
 
+Pure full-verification kernelはexact replay済みplanから、present sourceの
+`{source key, source item, target key, put/delete}` pair、orphanのabsent source key、present targetの
+`{target key, target item}` pair、delete後のabsent target keyを導出します。独立した4 sourceとtargetの
+全5地点rescanは、page分割に依存しないpair accumulatorとterminal checkpointを保持し、計画上absentなkeyを
+mapped/invalid classificationより先に拒否します。Unrelatedなrecognized support rowやTTL-managed rowの
+apply後の増減は許容しますが、invalid row、pairの欠落・余剰・入替、stale targetは許容しません。Progressは
+verification-plan digestへ固定し、completionはsource/orphan/total operation count、plan-seal rich reference、
+complete apply seal、sealed planning authorityを相互検証します。このkernel result単体はimmutable applied
+rootへまだ束縛されておらず、authoritativeな`verified` publicationではありません。後続のAWS
+state/evidence adapterは`{appliedRootDigest, verificationResultDigest}`を同一のimmutable verified rootへ
+cross-bindし、response-loss reconciliationとreceiptを含めるまでProduction migration gateを開きません。
+
 DynamoDB ConditionExpressionには、itemの未知のtop-level属性名を列挙せずに「完全な属性集合」を比較する
 primitiveがありません。したがって、強整合read後からtransactionまでにplanned itemにもknown schemaにも
 ない属性を追加するwriterが存在すると、その追加を完全CASすることはできません。Application writer fence、
@@ -738,7 +750,8 @@ transaction直前にall-six-table incarnationを再検証し、送信後の成�
 shared execution-control generationをquarantineして`AMBIGUOUS_OPERATION_UNRESOLVED`を返します。この
 post-send quarantineをstandalone adapter内の通常のresponse-loss retryへ戻しません。ただし、現時点では
 このmanaged apply capabilityをcontrol CLIまたはpost-close orchestratorへ公開していません。Apply/seal
-CLIとorchestrator配線、full verify、reverse rollback、terminal outcomeへ
+CLIとorchestrator配線、full-verificationのAWS state/evidence/verified-root publication、
+reverse rollback、terminal outcomeへ
 束縛したwriter-fence release、close後のdrain/replanning orchestration、migration専用
 observability/alarm、restore/failover/DR drill、non-production実行evidenceも未完了です。Operation/checkpoint
 transactionが存在してもcomplete apply/verify/rollback supervisorにはならないため、Production migration
@@ -885,7 +898,8 @@ Process exit statusは、成功を`0`、migration failureまたは`OPERATION_FAI
    checkpoint receipt、固定9項目checkpoint transaction、terminal checkpoint/execution digest-bound
    complete-plan apply seal、固定9項目のimmutable applied-root transaction、そのmanaged identity
    composition、all-six pre/post guard、post-send quarantineも実装済みです。ただし、close/admission/run
-   creation/apply/sealのCLI・orchestrator配線、full verify、reverse rollback、
+   creation/apply/sealのCLI・orchestrator配線、full-verificationのAWS
+   state/evidence/verified-root publication、reverse rollback、
    terminal outcomeに束縛したrelease、observability/alarm、DR/non-production evidenceは未実装のため、
    migration全体のproduction gateはまだ実行可能とは扱いません。
 5. Online migration は writer fence/epoch または dual-write + high-watermark catch-up を有効化し、
