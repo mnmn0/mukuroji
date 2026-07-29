@@ -338,6 +338,15 @@ Source の更新と projection が競合すると古い scan 結果を一時的�
 書き込みを止めた maintenance window で実行し、API の live projection を有効化した後に
 もう一度 backfill を完走してから書き込みを再開してください。
 
+このlegacy backfillは、production-safe migrationのlease、lossless journal、checkpoint、rollback、
+writer-fence lifecycleを代替しません。Workspace Search migration v1のresource measurement、
+writer-fence status、初回guarded rolloutのopen-row bootstrapには、explicit named profileとCDK outputを
+受け取るcontrol CLIを使用します。完全なflagと安全境界は
+`bun run --silent search:migration:control -- help`および
+[`docs/operational-readiness.md`](../docs/operational-readiness.md)の
+「Migration control CLI foundation」を参照してください。このCLIは現時点でwriter-fence close、
+apply、verify、rollback、releaseを提供せず、production migration gateは閉じたままです。
+
 現時点では file の保存元は未導入のため、file は backfill 対象になりません。
 Work Item は canonical row の `creatorMemberKey`、`workflowStatusId`、`customFieldValues`、
 `relationIds` を検索文書の `creatorUserId`、`status`、`customFields`、`relationIds` へ投影します。
