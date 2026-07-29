@@ -360,6 +360,10 @@ describe('Workspace Search committed-prefix apply-seal AWS gateway', () => {
         },
         {
           ...validStorageReference,
+          objectKey: 'é'.repeat(513),
+        },
+        {
+          ...validStorageReference,
           versionId: 'null',
         },
         {

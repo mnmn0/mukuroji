@@ -112,6 +112,7 @@ import type {
 import {
   type WorkspaceSearchMigrationApplyOperationAwsPort,
   workspaceSearchMigrationApplyCheckpointTransactionIndex,
+  workspaceSearchMigrationApplyOperationTransactionIndex,
   workspaceSearchMigrationApplySealTransactionIndex,
 } from './migration-apply-operation-aws'
 import {
@@ -6019,7 +6020,10 @@ describe('Workspace Search migration AWS identity adapter', () => {
           .transactWritePrePlanAuthorityCommands[
             transactions
           ]?.input.TransactItems,
-      ).toHaveLength(13)
+      ).toHaveLength(
+        workspaceSearchMigrationApplyOperationTransactionIndex
+          .mutationCount,
+      )
       fixture.port.close()
     },
   )

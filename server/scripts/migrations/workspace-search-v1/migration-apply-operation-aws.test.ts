@@ -676,7 +676,6 @@ class ApplyOperationHarness {
             'attribute_not_exists(#recordKey)' ||
         names?.['#migrationId'] !== 'migrationId' ||
         names?.['#recordKey'] !== 'recordKey' ||
-        names === undefined ||
         Object.keys(names).length !== 2
       ) {
         throw new Error(

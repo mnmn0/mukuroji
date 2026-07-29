@@ -751,9 +751,12 @@ admission/state digest、marker accumulator、journal chain、planと全TableId�
 保存し、run/configuration-boundな`objectKey`、exact `versionId`、`contentDigest`、`byteLength`と
 seal作成時刻に固定したretention deadlineを相互検証します。Planが古くてもseal自身には新しい保持期間を
 与え、同じsealの応答消失retryは同じdeadlineとexact versionへ収束しますが、rollback startと各reverse
-stepでは元journal exact versionの残存期限を別途検証します。全apply
-operation/no-op/checkpoint/complete-seal transactionは共通rollback-start sentinelの
-absenceを検査するため、rollback startが先にcommitした後のforward progressは成立しません。
+stepでは元journal exact versionの残存期限を別途検証します。Immutable uploadがDynamoDB transactionへ
+参照される前に失敗したretryはretained orphanを増やし得るため、object locator/version/digest/期限と
+件数・費用を運用evidenceへ記録し、authorityへ採用せず保持期間満了後のcleanup対象として追跡します。
+全apply operation/no-op/checkpoint/complete-seal transactionに加え、full-verificationのpage progressと
+verified-root publication transactionも共通rollback-start sentinelのabsenceを検査するため、rollback
+startが先にcommitした後のforward progressは成立しません。
 ただし、このprefix sealをDynamoDBのdurable rollback start/stateへ原子的に参照するv2 persistence、
 partial start transaction、managed compositionは未実装であり、これらが揃うまではpartial-prefix
 rollbackをproduction capabilityとして扱いません。

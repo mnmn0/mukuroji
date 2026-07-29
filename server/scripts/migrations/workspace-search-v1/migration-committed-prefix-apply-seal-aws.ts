@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto'
 import { types as nodeUtilTypes } from 'node:util'
 import {
   createWorkspaceSearchConfigurationHash,
-  isCanonicalTimestamp,
   isWorkspaceSearchMigrationFailureCode,
   type WorkspaceSearchApplySeal,
   type WorkspaceSearchMigrationConfiguration,
@@ -28,8 +27,8 @@ import {
   WORKSPACE_SEARCH_MIGRATION_MINIMUM_COMMIT_WINDOW_MILLISECONDS,
 } from './migration-state-machine'
 import {
-  hasOnlyPairedSurrogates,
-} from './migration-value-guards'
+  WorkspaceSearchMigrationStrictRecordGuards,
+} from './migration-strict-record-guards'
 
 /** Immutable-object role reserved for committed-prefix apply seals. */
 export const WORKSPACE_SEARCH_MIGRATION_COMMITTED_PREFIX_APPLY_SEAL_ROLE =
@@ -37,8 +36,10 @@ export const WORKSPACE_SEARCH_MIGRATION_COMMITTED_PREFIX_APPLY_SEAL_ROLE =
 
 const retentionDayMilliseconds = 24 * 60 * 60 * 1_000
 const maximumAdditionalRetentionDays = 1
-const maximumTextLength = 8_192
-const maximumVersionIdLength = 1_024
+const strictGuards =
+  new WorkspaceSearchMigrationStrictRecordGuards(
+    failCommittedPrefixApplySealAws,
+  )
 
 /**
  * Stable raw-value-free failure for the committed-prefix seal storage boundary.
@@ -172,8 +173,8 @@ export function createAwsWorkspaceSearchMigrationCommittedPrefixApplySealGateway
     CreateAwsWorkspaceSearchMigrationCommittedPrefixApplySealGatewayInput,
 ): WorkspaceSearchMigrationCommittedPrefixApplySealAwsGateway {
   return runCommittedPrefixApplySealAwsBoundary(() => {
-    const record = requireRecord(input)
-    requireExactKeys(record, [
+    const record = strictGuards.requireRecord(input)
+    strictGuards.requireExactKeys(record, [
       'clock',
       'configuration',
       'configurationHash',
@@ -182,10 +183,10 @@ export function createAwsWorkspaceSearchMigrationCommittedPrefixApplySealGateway
     ])
     const configuration =
       detachWorkspaceSearchMigrationPlanningConfiguration(
-        readOwn(record, 'configuration'),
+        strictGuards.readOwn(record, 'configuration'),
       )
-    const configurationHash = readDigest(
-      readOwn(record, 'configurationHash'),
+    const configurationHash = strictGuards.readDigest(
+      strictGuards.readOwn(record, 'configurationHash'),
     )
     if (
       createWorkspaceSearchConfigurationHash(configuration) !==
@@ -196,11 +197,15 @@ export function createAwsWorkspaceSearchMigrationCommittedPrefixApplySealGateway
         'CONFIGURATION_HASH_MISMATCH',
       )
     }
-    const runId = readIdentifier(readOwn(record, 'runId'))
-    const immutableArtifactPort = snapshotImmutableArtifactPort(
-      readOwn(record, 'immutableArtifactPort'),
+    const runId = strictGuards.readIdentifier(
+      strictGuards.readOwn(record, 'runId'),
     )
-    const clock = snapshotClock(readOwn(record, 'clock'))
+    const immutableArtifactPort = snapshotImmutableArtifactPort(
+      strictGuards.readOwn(record, 'immutableArtifactPort'),
+    )
+    const clock = snapshotClock(
+      strictGuards.readOwn(record, 'clock'),
+    )
     const objectKeyPrefix =
       `${configuration.journalPrefix}/runs/${runId}/${configurationHash}`
     const metadata = Object.freeze({
@@ -297,9 +302,9 @@ function prepareCommittedPrefixSealWrite(
   configurationHash: string,
   clock: () => number,
 ): PreparedCommittedPrefixSealWrite {
-  const record = requireRecord(input)
-  requireExactKeys(record, ['seal'])
-  const sealValue = readOwn(record, 'seal')
+  const record = strictGuards.requireRecord(input)
+  strictGuards.requireExactKeys(record, ['seal'])
+  const sealValue = strictGuards.readOwn(record, 'seal')
   if (!isApplySealCandidate(sealValue)) {
     return failCommittedPrefixApplySealAws()
   }
@@ -369,8 +374,8 @@ function readStoredReference(
   value: unknown,
   expected: StoredReferenceExpectation,
 ): WorkspaceSearchMigrationImmutableArtifactReference {
-  const record = requireRecord(value)
-  requireExactKeys(record, [
+  const record = strictGuards.requireRecord(value)
+  strictGuards.requireExactKeys(record, [
     'byteLength',
     'contentDigest',
     'objectKey',
@@ -378,13 +383,21 @@ function readStoredReference(
     'versionId',
   ])
   const reference: WorkspaceSearchMigrationImmutableArtifactReference = {
-    objectKey: readText(readOwn(record, 'objectKey')),
-    versionId: readVersionId(readOwn(record, 'versionId')),
-    contentDigest: readDigest(readOwn(record, 'contentDigest')),
-    byteLength: readPositiveSafeInteger(
-      readOwn(record, 'byteLength'),
+    objectKey: strictGuards.readS3ObjectKey(
+      strictGuards.readOwn(record, 'objectKey'),
     ),
-    retainUntil: readTimestamp(readOwn(record, 'retainUntil')),
+    versionId: strictGuards.readVersionId(
+      strictGuards.readOwn(record, 'versionId'),
+    ),
+    contentDigest: strictGuards.readDigest(
+      strictGuards.readOwn(record, 'contentDigest'),
+    ),
+    byteLength: readPositiveSafeInteger(
+      strictGuards.readOwn(record, 'byteLength'),
+    ),
+    retainUntil: strictGuards.readTimestamp(
+      strictGuards.readOwn(record, 'retainUntil'),
+    ),
   }
   requireReferencePath(
     {
@@ -476,7 +489,7 @@ function createFreshRetentionDeadline(
   } catch {
     return failCommittedPrefixApplySealAws()
   }
-  return readTimestamp(retainUntil)
+  return strictGuards.readTimestamp(retainUntil)
 }
 
 /**
@@ -579,8 +592,8 @@ function snapshotBytes(value: unknown): Uint8Array {
   ) {
     return failCommittedPrefixApplySealAws()
   }
-  const buffer = readIntrinsicBuffer(value)
-  const byteLength = readIntrinsicByteLength(value)
+  const buffer = strictGuards.readIntrinsicBuffer(value)
+  const byteLength = strictGuards.readIntrinsicByteLength(value)
   if (
     nodeUtilTypes.isSharedArrayBuffer(buffer) ||
     byteLength <= 0 ||
@@ -599,72 +612,6 @@ function snapshotBytes(value: unknown): Uint8Array {
 }
 
 /**
- * Reads one Uint8Array's intrinsic backing buffer without own accessors.
- *
- * @param value - Valid non-proxy Uint8Array.
- * @returns Exact intrinsic ArrayBuffer or SharedArrayBuffer.
- */
-function readIntrinsicBuffer(value: Uint8Array): ArrayBufferLike {
-  const typedArrayPrototype = Object.getPrototypeOf(
-    Uint8Array.prototype,
-  )
-  const descriptor = typedArrayPrototype === null
-    ? undefined
-    : Object.getOwnPropertyDescriptor(
-        typedArrayPrototype,
-        'buffer',
-      )
-  if (descriptor?.get === undefined) {
-    return failCommittedPrefixApplySealAws()
-  }
-  try {
-    const result: unknown = Reflect.apply(descriptor.get, value, [])
-    if (
-      !nodeUtilTypes.isArrayBuffer(result) &&
-      !nodeUtilTypes.isSharedArrayBuffer(result)
-    ) {
-      return failCommittedPrefixApplySealAws()
-    }
-    return result
-  } catch {
-    return failCommittedPrefixApplySealAws()
-  }
-}
-
-/**
- * Reads one Uint8Array's intrinsic byte length without own accessors.
- *
- * @param value - Valid non-proxy Uint8Array.
- * @returns Exact intrinsic byte length.
- */
-function readIntrinsicByteLength(value: Uint8Array): number {
-  const typedArrayPrototype = Object.getPrototypeOf(
-    Uint8Array.prototype,
-  )
-  const descriptor = typedArrayPrototype === null
-    ? undefined
-    : Object.getOwnPropertyDescriptor(
-        typedArrayPrototype,
-        'byteLength',
-      )
-  if (descriptor?.get === undefined) {
-    return failCommittedPrefixApplySealAws()
-  }
-  try {
-    const result: unknown = Reflect.apply(descriptor.get, value, [])
-    if (
-      typeof result !== 'number' ||
-      !Number.isSafeInteger(result)
-    ) {
-      return failCommittedPrefixApplySealAws()
-    }
-    return result
-  } catch {
-    return failCommittedPrefixApplySealAws()
-  }
-}
-
-/**
  * Computes lowercase SHA-256 over exact canonical bytes.
  *
  * @param bytes - Exact immutable seal bytes.
@@ -672,144 +619,6 @@ function readIntrinsicByteLength(value: Uint8Array): number {
  */
 function digestBytes(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex')
-}
-
-/**
- * Requires one ordinary non-array, non-proxy record.
- *
- * @param value - Candidate record.
- * @returns Validated record.
- */
-function requireRecord(value: unknown): object {
-  if (
-    typeof value !== 'object' ||
-    value === null ||
-    Array.isArray(value) ||
-    nodeUtilTypes.isProxy(value)
-  ) {
-    return failCommittedPrefixApplySealAws()
-  }
-  return value
-}
-
-/**
- * Requires exactly the declared enumerable own data properties.
- *
- * @param value - Validated record.
- * @param expected - Exact key set.
- */
-function requireExactKeys(
-  value: object,
-  expected: readonly string[],
-): void {
-  const keys = Object.keys(value).sort()
-  const ownKeys = Reflect.ownKeys(value)
-  const expectedKeys = [...expected].sort()
-  if (
-    ownKeys.some((key) => typeof key !== 'string') ||
-    ownKeys.length !== keys.length ||
-    keys.length !== expectedKeys.length ||
-    keys.some((key, index) => key !== expectedKeys[index])
-  ) {
-    return failCommittedPrefixApplySealAws()
-  }
-  for (const key of keys) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key)
-    if (
-      descriptor === undefined ||
-      !descriptor.enumerable ||
-      !Object.hasOwn(descriptor, 'value')
-    ) {
-      return failCommittedPrefixApplySealAws()
-    }
-  }
-}
-
-/**
- * Reads one required enumerable own data property.
- *
- * @param value - Validated record.
- * @param key - Required property name.
- * @returns Exact untrusted value.
- */
-function readOwn(value: object, key: string): unknown {
-  const descriptor = Object.getOwnPropertyDescriptor(value, key)
-  if (
-    descriptor === undefined ||
-    !descriptor.enumerable ||
-    !Object.hasOwn(descriptor, 'value')
-  ) {
-    return failCommittedPrefixApplySealAws()
-  }
-  return descriptor.value
-}
-
-/**
- * Reads one lowercase SHA-256 digest.
- *
- * @param value - Candidate digest.
- * @returns Exact digest.
- */
-function readDigest(value: unknown): string {
-  if (
-    typeof value !== 'string' ||
-    !/^[0-9a-f]{64}$/u.test(value)
-  ) {
-    return failCommittedPrefixApplySealAws()
-  }
-  return value
-}
-
-/**
- * Reads one safe migration identifier.
- *
- * @param value - Candidate identifier.
- * @returns Exact identifier.
- */
-function readIdentifier(value: unknown): string {
-  if (
-    typeof value !== 'string' ||
-    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value)
-  ) {
-    return failCommittedPrefixApplySealAws()
-  }
-  return value
-}
-
-/**
- * Reads one bounded nonempty safe string.
- *
- * @param value - Candidate text.
- * @returns Exact text.
- */
-function readText(value: unknown): string {
-  if (
-    typeof value !== 'string' ||
-    value.length === 0 ||
-    value.length > maximumTextLength ||
-    value !== value.trim() ||
-    !hasOnlyPairedSurrogates(value)
-  ) {
-    return failCommittedPrefixApplySealAws()
-  }
-  return value
-}
-
-/**
- * Reads one bounded S3 version identifier.
- *
- * @param value - Candidate version identifier.
- * @returns Exact version identifier.
- */
-function readVersionId(value: unknown): string {
-  const versionId = readText(value)
-  if (
-    versionId.length > maximumVersionIdLength ||
-    versionId === 'null'
-  ) {
-    return failCommittedPrefixApplySealAws()
-  }
-  return versionId
 }
 
 /**
@@ -826,19 +635,6 @@ function readPositiveSafeInteger(value: unknown): number {
     value >
       WORKSPACE_SEARCH_MIGRATION_COMMITTED_PREFIX_APPLY_SEAL_MAX_BYTES
   ) {
-    return failCommittedPrefixApplySealAws()
-  }
-  return value
-}
-
-/**
- * Reads one canonical UTC millisecond timestamp.
- *
- * @param value - Candidate timestamp.
- * @returns Exact timestamp.
- */
-function readTimestamp(value: unknown): string {
-  if (!isCanonicalTimestamp(value)) {
     return failCommittedPrefixApplySealAws()
   }
   return value

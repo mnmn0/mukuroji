@@ -1,10 +1,7 @@
 import { types as nodeUtilTypes } from 'node:util'
 import {
   createMigrationDigest,
-  isCanonicalTimestamp,
-  isHexDigest,
   MigrationDigestAccumulator,
-  requireMigrationIdentifier,
   serializeCanonicalJson,
   type WorkspaceSearchApplySeal,
   workspaceSearchMigrationSourceNames,
@@ -32,8 +29,8 @@ import {
   WORKSPACE_SEARCH_MIGRATION_MINIMUM_COMMIT_WINDOW_MILLISECONDS,
 } from './migration-state-machine'
 import {
-  hasOnlyPairedSurrogates,
-} from './migration-value-guards'
+  WorkspaceSearchMigrationStrictRecordGuards,
+} from './migration-strict-record-guards'
 
 /**
  * Maximum canonical bytes accepted for one committed-prefix apply seal.
@@ -41,8 +38,10 @@ import {
 export const WORKSPACE_SEARCH_MIGRATION_COMMITTED_PREFIX_APPLY_SEAL_MAX_BYTES =
   64 * 1024
 
-const maximumTextLength = 8_192
-const maximumVersionIdLength = 1_024
+const strictGuards =
+  new WorkspaceSearchMigrationStrictRecordGuards(
+    failCommittedPrefixApplySeal,
+  )
 
 /**
  * Stable raw-value-free failure raised for an invalid committed-prefix seal.
@@ -243,8 +242,8 @@ export function readWorkspaceSearchMigrationCommittedPrefixApplySealReference(
   value: unknown,
 ): WorkspaceSearchMigrationCommittedPrefixApplySealReference {
   return atCommittedPrefixApplySealBoundary(() => {
-    const record = requireRecord(value)
-    requireExactKeys(record, [
+    const record = strictGuards.requireRecord(value)
+    strictGuards.requireExactKeys(record, [
       'byteLength',
       'contentDigest',
       'objectKey',
@@ -252,9 +251,9 @@ export function readWorkspaceSearchMigrationCommittedPrefixApplySealReference(
       'scope',
       'versionId',
     ])
-    const scope = readOwn(record, 'scope')
+    const scope = strictGuards.readOwn(record, 'scope')
     const byteLength = readPositiveSafeInteger(
-      readOwn(record, 'byteLength'),
+      strictGuards.readOwn(record, 'byteLength'),
     )
     if (
       scope !== 'committed-prefix' ||
@@ -265,11 +264,19 @@ export function readWorkspaceSearchMigrationCommittedPrefixApplySealReference(
     }
     return {
       scope,
-      objectKey: readText(readOwn(record, 'objectKey')),
-      versionId: readVersionId(readOwn(record, 'versionId')),
-      contentDigest: readDigest(readOwn(record, 'contentDigest')),
+      objectKey: strictGuards.readS3ObjectKey(
+        strictGuards.readOwn(record, 'objectKey'),
+      ),
+      versionId: strictGuards.readVersionId(
+        strictGuards.readOwn(record, 'versionId'),
+      ),
+      contentDigest: strictGuards.readDigest(
+        strictGuards.readOwn(record, 'contentDigest'),
+      ),
       byteLength,
-      retainUntil: readTimestamp(readOwn(record, 'retainUntil')),
+      retainUntil: strictGuards.readTimestamp(
+        strictGuards.readOwn(record, 'retainUntil'),
+      ),
     }
   })
 }
@@ -289,8 +296,8 @@ export function requireWorkspaceSearchMigrationCommittedPrefixApplySealBinding(
     RequireWorkspaceSearchMigrationCommittedPrefixApplySealBindingInput,
 ): WorkspaceSearchMigrationCommittedPrefixApplySealReference {
   return atCommittedPrefixApplySealBoundary(() => {
-    const record = requireRecord(input)
-    requireExactKeys(record, [
+    const record = strictGuards.requireRecord(input)
+    strictGuards.requireExactKeys(record, [
       'admission',
       'predecessor',
       'reference',
@@ -298,19 +305,22 @@ export function requireWorkspaceSearchMigrationCommittedPrefixApplySealBinding(
       'sealedPlanningAuthority',
     ])
     const seal = readCommittedPrefixApplySeal(
-      readOwn(record, 'seal'),
+      strictGuards.readOwn(record, 'seal'),
     )
     const expected =
       createWorkspaceSearchMigrationCommittedPrefixApplySeal({
         admission: readRequiredAdmission(
-          readOwn(record, 'admission'),
+          strictGuards.readOwn(record, 'admission'),
         ),
         predecessor: readPredecessor(
-          readOwn(record, 'predecessor'),
+          strictGuards.readOwn(record, 'predecessor'),
         ),
         sealedPlanningAuthority:
           readRequiredSealedPlanningAuthority(
-            readOwn(record, 'sealedPlanningAuthority'),
+            strictGuards.readOwn(
+              record,
+              'sealedPlanningAuthority',
+            ),
           ),
         createdAt: seal.createdAt,
       })
@@ -322,7 +332,7 @@ export function requireWorkspaceSearchMigrationCommittedPrefixApplySealBinding(
     }
     const reference =
       readWorkspaceSearchMigrationCommittedPrefixApplySealReference(
-        readOwn(record, 'reference'),
+        strictGuards.readOwn(record, 'reference'),
       )
     const bytes = encodeDocument(seal)
     if (
@@ -347,23 +357,25 @@ export function requireWorkspaceSearchMigrationCommittedPrefixApplySealBinding(
 function resolveCreationInput(
   input: CreateWorkspaceSearchMigrationCommittedPrefixApplySealInput,
 ) {
-  const record = requireRecord(input)
-  requireExactKeys(record, [
+  const record = strictGuards.requireRecord(input)
+  strictGuards.requireExactKeys(record, [
     'admission',
     'createdAt',
     'predecessor',
     'sealedPlanningAuthority',
   ])
   const admission = readRequiredAdmission(
-    readOwn(record, 'admission'),
+    strictGuards.readOwn(record, 'admission'),
   )
   const predecessorInput = readPredecessor(
-    readOwn(record, 'predecessor'),
+    strictGuards.readOwn(record, 'predecessor'),
   )
   const authority = readRequiredSealedPlanningAuthority(
-    readOwn(record, 'sealedPlanningAuthority'),
+    strictGuards.readOwn(record, 'sealedPlanningAuthority'),
   )
-  const createdAt = readTimestamp(readOwn(record, 'createdAt'))
+  const createdAt = strictGuards.readTimestamp(
+    strictGuards.readOwn(record, 'createdAt'),
+  )
   const predecessor = resolvePredecessor(
     admission,
     predecessorInput,
@@ -614,20 +626,20 @@ function requireRetentionInvariant(
 function readPredecessor(
   value: unknown,
 ): WorkspaceSearchMigrationCommittedPrefixApplySealPredecessor {
-  const record = requireRecord(value)
-  const kind = readOwn(record, 'kind')
+  const record = strictGuards.requireRecord(value)
+  const kind = strictGuards.readOwn(record, 'kind')
   if (kind === 'execution-run-admission') {
-    requireExactKeys(record, ['kind'])
+    strictGuards.requireExactKeys(record, ['kind'])
     return { kind }
   }
   if (kind !== 'mutable-execution-state') {
     return failCommittedPrefixApplySeal()
   }
-  requireExactKeys(record, ['executionState', 'kind'])
+  strictGuards.requireExactKeys(record, ['executionState', 'kind'])
   return {
     kind,
     executionState: readRequiredExecutionState(
-      readOwn(record, 'executionState'),
+      strictGuards.readOwn(record, 'executionState'),
     ),
   }
 }
@@ -658,7 +670,7 @@ function readRequiredAdmission(
 function isExecutionRun(
   value: unknown,
 ): value is WorkspaceSearchMigrationExecutionRun {
-  return isOrdinaryObject(value)
+  return strictGuards.isRecord(value)
 }
 
 /**
@@ -687,7 +699,7 @@ function readRequiredExecutionState(
 function isExecutionState(
   value: unknown,
 ): value is WorkspaceSearchMigrationExecutionState {
-  return isOrdinaryObject(value)
+  return strictGuards.isRecord(value)
 }
 
 /**
@@ -718,7 +730,7 @@ function readRequiredSealedPlanningAuthority(
 function isSealedPlanningAuthority(
   value: unknown,
 ): value is WorkspaceSearchMigrationSealedPlanningAuthorityV2 {
-  return isOrdinaryObject(value)
+  return strictGuards.isRecord(value)
 }
 
 /**
@@ -730,8 +742,8 @@ function isSealedPlanningAuthority(
 function readCommittedPrefixApplySeal(
   value: unknown,
 ): WorkspaceSearchApplySeal {
-  const record = requireRecord(value)
-  requireExactKeys(record, [
+  const record = strictGuards.requireRecord(value)
+  strictGuards.requireExactKeys(record, [
     'applyMarkerAggregateDigest',
     'configurationHash',
     'createdAt',
@@ -748,28 +760,28 @@ function readCommittedPrefixApplySeal(
     'sealVersion',
   ])
   if (
-    readOwn(record, 'kind') !==
+    strictGuards.readOwn(record, 'kind') !==
       'workspace-search-apply-seal' ||
-    readOwn(record, 'sealVersion') !== 1 ||
-    readOwn(record, 'migrationId') !==
+    strictGuards.readOwn(record, 'sealVersion') !== 1 ||
+    strictGuards.readOwn(record, 'migrationId') !==
       WORKSPACE_SEARCH_MIGRATION_ID ||
-    readOwn(record, 'migrationVersion') !==
+    strictGuards.readOwn(record, 'migrationVersion') !==
       WORKSPACE_SEARCH_MIGRATION_VERSION ||
-    readOwn(record, 'scope') !== 'committed-prefix'
+    strictGuards.readOwn(record, 'scope') !== 'committed-prefix'
   ) {
     return failCommittedPrefixApplySeal()
   }
   const markerCount = readNonNegativeSafeInteger(
-    readOwn(record, 'markerCount'),
+    strictGuards.readOwn(record, 'markerCount'),
   )
   const planOperationCount = readNonNegativeSafeInteger(
-    readOwn(record, 'planOperationCount'),
+    strictGuards.readOwn(record, 'planOperationCount'),
   )
   const journalSequence = readNonNegativeSafeInteger(
-    readOwn(record, 'journalSequence'),
+    strictGuards.readOwn(record, 'journalSequence'),
   )
-  const journalHeadDigest = readDigest(
-    readOwn(record, 'journalHeadDigest'),
+  const journalHeadDigest = strictGuards.readDigest(
+    strictGuards.readOwn(record, 'journalHeadDigest'),
   )
   if (
     markerCount > planOperationCount ||
@@ -784,20 +796,29 @@ function readCommittedPrefixApplySeal(
     sealVersion: 1,
     migrationId: WORKSPACE_SEARCH_MIGRATION_ID,
     migrationVersion: WORKSPACE_SEARCH_MIGRATION_VERSION,
-    runId: readIdentifier(readOwn(record, 'runId')),
-    configurationHash: readDigest(
-      readOwn(record, 'configurationHash'),
+    runId: strictGuards.readIdentifier(
+      strictGuards.readOwn(record, 'runId'),
+    ),
+    configurationHash: strictGuards.readDigest(
+      strictGuards.readOwn(record, 'configurationHash'),
     ),
     scope: 'committed-prefix',
-    planDigest: readDigest(readOwn(record, 'planDigest')),
+    planDigest: strictGuards.readDigest(
+      strictGuards.readOwn(record, 'planDigest'),
+    ),
     planOperationCount,
     journalSequence,
     journalHeadDigest,
     markerCount,
-    applyMarkerAggregateDigest: readDigest(
-      readOwn(record, 'applyMarkerAggregateDigest'),
+    applyMarkerAggregateDigest: strictGuards.readDigest(
+      strictGuards.readOwn(
+        record,
+        'applyMarkerAggregateDigest',
+      ),
     ),
-    createdAt: readTimestamp(readOwn(record, 'createdAt')),
+    createdAt: strictGuards.readTimestamp(
+      strictGuards.readOwn(record, 'createdAt'),
+    ),
   }
 }
 
@@ -869,8 +890,8 @@ function copyBoundedBytes(value: unknown): Uint8Array {
   ) {
     return failCommittedPrefixApplySeal()
   }
-  const buffer = readIntrinsicBuffer(value)
-  const byteLength = readIntrinsicByteLength(value)
+  const buffer = strictGuards.readIntrinsicBuffer(value)
+  const byteLength = strictGuards.readIntrinsicByteLength(value)
   if (
     nodeUtilTypes.isSharedArrayBuffer(buffer) ||
     byteLength <= 0 ||
@@ -889,72 +910,6 @@ function copyBoundedBytes(value: unknown): Uint8Array {
 }
 
 /**
- * Reads the intrinsic backing buffer of one Uint8Array.
- *
- * @param value - Valid non-proxy Uint8Array.
- * @returns Exact intrinsic ArrayBuffer or SharedArrayBuffer.
- */
-function readIntrinsicBuffer(value: Uint8Array): ArrayBufferLike {
-  const typedArrayPrototype = Object.getPrototypeOf(
-    Uint8Array.prototype,
-  )
-  const descriptor = typedArrayPrototype === null
-    ? undefined
-    : Object.getOwnPropertyDescriptor(
-        typedArrayPrototype,
-        'buffer',
-      )
-  if (descriptor?.get === undefined) {
-    return failCommittedPrefixApplySeal()
-  }
-  try {
-    const result: unknown = Reflect.apply(descriptor.get, value, [])
-    if (
-      !nodeUtilTypes.isArrayBuffer(result) &&
-      !nodeUtilTypes.isSharedArrayBuffer(result)
-    ) {
-      return failCommittedPrefixApplySeal()
-    }
-    return result
-  } catch {
-    return failCommittedPrefixApplySeal()
-  }
-}
-
-/**
- * Reads the intrinsic byte length of one Uint8Array.
- *
- * @param value - Valid non-proxy Uint8Array.
- * @returns Exact intrinsic byte length.
- */
-function readIntrinsicByteLength(value: Uint8Array): number {
-  const typedArrayPrototype = Object.getPrototypeOf(
-    Uint8Array.prototype,
-  )
-  const descriptor = typedArrayPrototype === null
-    ? undefined
-    : Object.getOwnPropertyDescriptor(
-        typedArrayPrototype,
-        'byteLength',
-      )
-  if (descriptor?.get === undefined) {
-    return failCommittedPrefixApplySeal()
-  }
-  try {
-    const result: unknown = Reflect.apply(descriptor.get, value, [])
-    if (
-      typeof result !== 'number' ||
-      !Number.isSafeInteger(result)
-    ) {
-      return failCommittedPrefixApplySeal()
-    }
-    return result
-  } catch {
-    return failCommittedPrefixApplySeal()
-  }
-}
-
-/**
  * Compares two byte arrays exactly.
  *
  * @param left - First byte array.
@@ -967,115 +922,6 @@ function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
     if (left[index] !== right[index]) return false
   }
   return true
-}
-
-/**
- * Requires one ordinary non-array, non-proxy record.
- *
- * @param value - Candidate record.
- * @returns Validated record.
- */
-function requireRecord(value: unknown): object {
-  if (!isOrdinaryObject(value)) {
-    return failCommittedPrefixApplySeal()
-  }
-  return value
-}
-
-/**
- * Checks whether one value is an ordinary data object.
- *
- * @param value - Candidate value.
- * @returns Whether the value is an ordinary non-proxy object.
- */
-function isOrdinaryObject(value: unknown): value is object {
-  return typeof value === 'object' &&
-    value !== null &&
-    !Array.isArray(value) &&
-    !nodeUtilTypes.isProxy(value)
-}
-
-/**
- * Requires exactly the declared enumerable own data properties.
- *
- * @param value - Validated record.
- * @param expected - Exact required key set.
- */
-function requireExactKeys(
-  value: object,
-  expected: readonly string[],
-): void {
-  const keys = Object.keys(value).sort()
-  const ownKeys = Reflect.ownKeys(value)
-  const expectedKeys = [...expected].sort()
-  if (
-    ownKeys.some((key) => typeof key !== 'string') ||
-    ownKeys.length !== keys.length ||
-    keys.length !== expectedKeys.length ||
-    keys.some((key, index) => key !== expectedKeys[index])
-  ) {
-    return failCommittedPrefixApplySeal()
-  }
-  for (const key of keys) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key)
-    if (
-      descriptor === undefined ||
-      !descriptor.enumerable ||
-      !Object.hasOwn(descriptor, 'value')
-    ) {
-      return failCommittedPrefixApplySeal()
-    }
-  }
-}
-
-/**
- * Reads one required enumerable own data property.
- *
- * @param value - Validated record.
- * @param key - Required property name.
- * @returns Exact untrusted value.
- */
-function readOwn(value: object, key: string): unknown {
-  const descriptor = Object.getOwnPropertyDescriptor(value, key)
-  if (
-    descriptor === undefined ||
-    !descriptor.enumerable ||
-    !Object.hasOwn(descriptor, 'value')
-  ) {
-    return failCommittedPrefixApplySeal()
-  }
-  return descriptor.value
-}
-
-/**
- * Reads one safe migration identifier.
- *
- * @param value - Candidate identifier.
- * @returns Exact identifier.
- */
-function readIdentifier(value: unknown): string {
-  if (typeof value !== 'string') {
-    return failCommittedPrefixApplySeal()
-  }
-  try {
-    requireMigrationIdentifier(value, 'Migration identifier')
-  } catch {
-    return failCommittedPrefixApplySeal()
-  }
-  return value
-}
-
-/**
- * Reads one lowercase SHA-256 digest.
- *
- * @param value - Candidate digest.
- * @returns Exact digest.
- */
-function readDigest(value: unknown): string {
-  if (!isHexDigest(value)) {
-    return failCommittedPrefixApplySeal()
-  }
-  return value
 }
 
 /**
@@ -1110,55 +956,6 @@ function readNonNegativeSafeInteger(value: unknown): number {
     return failCommittedPrefixApplySeal()
   }
   return value
-}
-
-/**
- * Reads one canonical UTC millisecond timestamp.
- *
- * @param value - Candidate timestamp.
- * @returns Exact timestamp.
- */
-function readTimestamp(value: unknown): string {
-  if (!isCanonicalTimestamp(value)) {
-    return failCommittedPrefixApplySeal()
-  }
-  return value
-}
-
-/**
- * Reads one bounded nonempty safe text value.
- *
- * @param value - Candidate text.
- * @returns Exact text.
- */
-function readText(value: unknown): string {
-  if (
-    typeof value !== 'string' ||
-    value.length === 0 ||
-    value.length > maximumTextLength ||
-    value !== value.trim() ||
-    !hasOnlyPairedSurrogates(value)
-  ) {
-    return failCommittedPrefixApplySeal()
-  }
-  return value
-}
-
-/**
- * Reads one bounded immutable object version identifier.
- *
- * @param value - Candidate version identifier.
- * @returns Exact version identifier.
- */
-function readVersionId(value: unknown): string {
-  const versionId = readText(value)
-  if (
-    versionId.length > maximumVersionIdLength ||
-    versionId === 'null'
-  ) {
-    return failCommittedPrefixApplySeal()
-  }
-  return versionId
 }
 
 /**

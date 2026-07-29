@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   createWorkspaceSearchMigrationRollbackConflictRecordKeys,
+  createWorkspaceSearchMigrationRollbackStartRecordKey,
 } from './migration-rollback-key'
 
 describe('workspace search rollback conflict record keys', () => {
@@ -19,5 +20,10 @@ describe('workspace search rollback conflict record keys', () => {
       bindingDigest: expectedBindingDigest,
       start: `rollback-start/v1/${expectedBindingDigest}`,
     })
+    expect(
+      createWorkspaceSearchMigrationRollbackStartRecordKey(
+        expectedBindingDigest,
+      ),
+    ).toBe(keys.start)
   })
 })

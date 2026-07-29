@@ -200,6 +200,30 @@ describe('Workspace Search committed-prefix apply seal', () => {
         retainUntil,
       })
     )
+    const maximumObjectKeyReference = {
+      scope: 'committed-prefix',
+      objectKey: 'é'.repeat(512),
+      versionId: 'committed-prefix-version-1',
+      contentDigest: digest('seal'),
+      byteLength: 1,
+      retainUntil,
+    } satisfies
+      WorkspaceSearchMigrationCommittedPrefixApplySealReference
+    expect(
+      readWorkspaceSearchMigrationCommittedPrefixApplySealReference(
+        maximumObjectKeyReference,
+      ),
+    ).toEqual(maximumObjectKeyReference)
+    expectFailure(() =>
+      readWorkspaceSearchMigrationCommittedPrefixApplySealReference({
+        scope: 'committed-prefix',
+        objectKey: 'é'.repeat(513),
+        versionId: 'committed-prefix-version-1',
+        contentDigest: digest('seal'),
+        byteLength: 1,
+        retainUntil,
+      })
+    )
     const seal =
       createWorkspaceSearchMigrationCommittedPrefixApplySeal({
         admission: fixture.admission,
@@ -281,19 +305,6 @@ describe('Workspace Search committed-prefix apply seal', () => {
       })
     const checkpoint = createCheckpoint()
     const authority = createAuthority(fixture.admission)
-    reduceWorkspaceSearchMigrationRunState({
-      current: advanceRunState(
-        fixture.admission.runState,
-        marker,
-      ),
-      expectedRevision: 2,
-      authority,
-      event: {
-        kind: 'apply-checkpoint-recorded',
-        location: 'project-directory',
-        checkpoint,
-      },
-    })
     const executionState =
       createWorkspaceSearchMigrationCheckpointExecutionState({
         admission: fixture.admission,
@@ -497,6 +508,7 @@ describe('Workspace Search committed-prefix apply seal', () => {
  * Creates one fully correlated strict fixture.
  *
  * @param authoritySalt - Optional value used to create a foreign authority.
+ * @param planOperationCount - Exact selected plan size; defaults to an empty plan.
  * @returns Exact immutable admission and planning authority.
  */
 function createFixture(

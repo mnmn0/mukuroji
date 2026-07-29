@@ -119,8 +119,8 @@ import {
   type WorkspaceSearchMigrationSealedPlanningAuthorityV2,
 } from './migration-sealed-planning-authority-v2'
 import {
-  createWorkspaceSearchMigrationRollbackConflictRecordKeys,
-} from './migration-rollback-key'
+  createWorkspaceSearchMigrationRollbackStartSentinelAbsentAwsConditionCheck,
+} from './migration-rollback-key-aws'
 import {
   type WorkspaceSearchMigrationCheckpointLocation,
   type WorkspaceSearchMigrationLeaseClaim,
@@ -3009,31 +3009,16 @@ function createStrongReadCommand(
 function createRollbackStartSentinelAbsentConditionCheck(
   binding: FullVerificationBinding,
 ): TransactWriteItem {
-  const keys =
-    createWorkspaceSearchMigrationRollbackConflictRecordKeys({
+  return createWorkspaceSearchMigrationRollbackStartSentinelAbsentAwsConditionCheck(
+    {
+      stateTableName: binding.stateTable.tableName,
       stateTableId: binding.stateTable.tableId,
       configurationHash: binding.configurationHash,
       runId: binding.executionRun.runId,
       executionRunDigest:
         binding.executionRun.executionRunDigest,
-    })
-  return {
-    ConditionCheck: {
-      TableName: binding.stateTable.tableName,
-      Key: {
-        migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
-        recordKey: { S: keys.start },
-      },
-      ConditionExpression:
-        'attribute_not_exists(#migrationId) AND ' +
-        'attribute_not_exists(#recordKey)',
-      ExpressionAttributeNames: {
-        '#migrationId': 'migrationId',
-        '#recordKey': 'recordKey',
-      },
-      ReturnValuesOnConditionCheckFailure: 'NONE',
     },
-  }
+  )
 }
 
 /**

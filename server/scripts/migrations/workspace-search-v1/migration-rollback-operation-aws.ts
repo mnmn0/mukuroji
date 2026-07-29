@@ -88,7 +88,11 @@ import {
 } from './migration-full-verification-key'
 import {
   createWorkspaceSearchMigrationRollbackConflictRecordKeys,
+  createWorkspaceSearchMigrationRollbackStartRecordKey,
 } from './migration-rollback-key'
+import {
+  createWorkspaceSearchMigrationRollbackStartSentinelAbsentAwsConditionCheck,
+} from './migration-rollback-key-aws'
 import {
   createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks,
   type WorkspaceSearchMigrationPrePlanAuthority,
@@ -251,11 +255,12 @@ export type WorkspaceSearchMigrationRollbackStartSentinelAwsBindingInput = {
 }
 
 /**
- * Creates the absent rollback-start sentinel guard used by verification.
+ * Validates external identity and creates the shared rollback-start guard.
  *
  * Full verification and rollback start condition-check each other's
  * deterministic root namespace, so neither phase can start concurrently under
- * the same still-valid lease owner.
+ * the same still-valid lease owner. The exact condition material is owned by
+ * the shared rollback-key AWS factory.
  *
  * @param input - Exact migration-state table, configuration, and admission.
  * @returns Absent deterministic rollback-start ConditionCheck.
@@ -292,16 +297,15 @@ export function createWorkspaceSearchMigrationRollbackStartSentinelAbsentConditi
     ) {
       return failRollback('INVALID_ARGUMENT')
     }
-    const keys =
-      createWorkspaceSearchMigrationRollbackConflictRecordKeys({
+    return createWorkspaceSearchMigrationRollbackStartSentinelAbsentAwsConditionCheck(
+      {
+        stateTableName: stateTable.tableName,
         stateTableId: stateTable.tableId,
         configurationHash,
         runId: executionRun.runId,
-        executionRunDigest: executionRun.executionRunDigest,
-      })
-    return createAbsentConditionCheck(
-      stateTable.tableName,
-      createStateKey(keys.start),
+        executionRunDigest:
+          executionRun.executionRunDigest,
+      },
     )
   } catch (error: unknown) {
     throw createRollbackPublicFailure(
@@ -2685,13 +2689,9 @@ function createStateKey(
 function createRollbackStartRecordKey(
   binding: RollbackOperationBinding,
 ): string {
-  return createWorkspaceSearchMigrationRollbackConflictRecordKeys({
-    stateTableId: binding.stateTable.tableId,
-    configurationHash: binding.configurationHash,
-    runId: binding.executionRun.runId,
-    executionRunDigest:
-      binding.executionRun.executionRunDigest,
-  }).start
+  return createWorkspaceSearchMigrationRollbackStartRecordKey(
+    binding.bindingDigest,
+  )
 }
 
 /**
