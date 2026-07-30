@@ -1,4 +1,9 @@
+import { createHash } from 'node:crypto'
 import { describe, expect, test } from 'bun:test'
+import {
+  createAttributeMapDigest,
+  encodeAttributeMap,
+} from './dynamodb-attribute-codec'
 import {
   serializeWorkspaceSearchPlanSeal,
   WORKSPACE_SEARCH_MIGRATION_PLAN_SEAL_MAX_BYTES,
@@ -13,6 +18,7 @@ import {
   type MigrationSourceCheckpoint,
   type MigrationTableIdentity,
   type WorkspaceSearchApplySeal,
+  type WorkspaceSearchJournalSegment,
   type WorkspaceSearchMaintenanceEvidenceReceipt,
   type WorkspaceSearchMigrationConfiguration,
   type WorkspaceSearchMigrationRunState,
@@ -23,6 +29,11 @@ import {
   WORKSPACE_SEARCH_MIGRATION_ID,
   WORKSPACE_SEARCH_MIGRATION_VERSION,
 } from './migration-contract'
+import {
+  createAbsentMigrationItemDigest,
+  serializeWorkspaceSearchJournalSegment,
+  WORKSPACE_SEARCH_JOURNAL_SEGMENT_MAX_BYTES,
+} from './migration-journal'
 import {
   createWorkspaceSearchMigrationCommittedPrefixApplySeal,
   serializeWorkspaceSearchMigrationCommittedPrefixApplySeal,
@@ -56,17 +67,32 @@ import type {
 } from './migration-sealed-planning-authority-v2'
 import {
   createWorkspaceSearchMigrationCommittedPrefixRollbackOriginV2,
+  createWorkspaceSearchMigrationRollbackOperationCommandIdentityV2,
+  createWorkspaceSearchMigrationRollbackOperationTransitionV2,
   createWorkspaceSearchMigrationRollbackStartRootV2,
+  decodeWorkspaceSearchMigrationRollbackRunStateV2,
+  finishWorkspaceSearchMigrationRollbackV2,
   parseWorkspaceSearchMigrationCommittedPrefixRollbackOriginV2,
+  parseWorkspaceSearchMigrationRollbackOperationCommandIdentityV2,
+  parseWorkspaceSearchMigrationRollbackOperationReceiptV2,
   parseWorkspaceSearchMigrationRollbackPersistenceStateV2,
   parseWorkspaceSearchMigrationRollbackStartRootV2,
+  parseWorkspaceSearchMigrationRolledBackRootV2,
   serializeWorkspaceSearchMigrationCommittedPrefixRollbackOriginV2,
+  serializeWorkspaceSearchMigrationRollbackOperationCommandIdentityV2,
+  serializeWorkspaceSearchMigrationRollbackOperationReceiptV2,
   serializeWorkspaceSearchMigrationRollbackPersistenceStateV2,
   serializeWorkspaceSearchMigrationRollbackStartRootV2,
+  serializeWorkspaceSearchMigrationRolledBackRootV2,
+  validateWorkspaceSearchMigrationRollbackAuthoritySuccessorV2,
+  validateWorkspaceSearchMigrationRollbackOperationReceiptTransitionV2,
   WorkspaceSearchMigrationRollbackPersistenceV2Error,
   type WorkspaceSearchMigrationCommittedPrefixRollbackOriginV2,
   type WorkspaceSearchMigrationRollbackStartRootV2,
 } from './migration-rollback-persistence-v2'
+import {
+  createWorkspaceSearchDocumentRecordKey,
+} from '../../../src/modules/workspace-search'
 import {
   createEmptyWorkspaceSearchPlanDigest,
   createWorkspaceSearchMigrationRunState,
@@ -86,6 +112,9 @@ const checkpointAt = '2026-07-30T00:03:00.000Z'
 const authorityEvaluatedAt = '2026-07-30T00:03:15.000Z'
 const sealCreatedAt = '2026-07-30T00:03:30.000Z'
 const startedAt = '2026-07-30T00:04:00.000Z'
+const secondRollbackAt = '2026-07-30T00:04:20.000Z'
+const firstRollbackAt = '2026-07-30T00:04:30.000Z'
+const finishedAt = '2026-07-30T00:04:40.000Z'
 const retainUntil = '2026-09-01T00:00:00.000Z'
 
 /**
@@ -111,6 +140,22 @@ type PrefixEvidence = {
   /** Rich exact-version reference to the canonical seal. */
   readonly sealReference:
     WorkspaceSearchMigrationCommittedPrefixApplySealReference
+}
+
+/**
+ * Correlated two-link forward journal evidence for reverse tests.
+ */
+type ReverseEvidence = {
+  /** Forward mutation receipts in increasing sequence order. */
+  readonly receipts: readonly [
+    WorkspaceSearchOperationReceipt,
+    WorkspaceSearchOperationReceipt,
+  ]
+  /** Immutable journal segments in increasing sequence order. */
+  readonly segments: readonly [
+    WorkspaceSearchJournalSegment,
+    WorkspaceSearchJournalSegment,
+  ]
 }
 
 describe('Workspace Search rollback persistence v2', () => {
@@ -254,6 +299,595 @@ describe('Workspace Search rollback persistence v2', () => {
     })
   })
 
+  test('reverses a two-link prefix across restart and publishes a terminal root', () => {
+    const context = createTwoMutationRollbackContext()
+    const startRoot =
+      parseWorkspaceSearchMigrationRollbackStartRootV2(
+        serializeWorkspaceSearchMigrationRollbackStartRootV2(
+          context.root,
+        ),
+      )
+    const secondCommand =
+      createWorkspaceSearchMigrationRollbackOperationCommandIdentityV2({
+        startRoot,
+        predecessorState: startRoot.initialState,
+        applyReceipt: context.evidence.receipts[1],
+      })
+    expect(
+      parseWorkspaceSearchMigrationRollbackOperationCommandIdentityV2(
+        serializeWorkspaceSearchMigrationRollbackOperationCommandIdentityV2(
+          secondCommand,
+        ),
+      ),
+    ).toEqual(secondCommand)
+
+    const second =
+      createWorkspaceSearchMigrationRollbackOperationTransitionV2({
+        startRoot,
+        predecessorState: startRoot.initialState,
+        currentAuthority: advanceAuthority(
+          context.fixture.currentAuthority,
+          secondRollbackAt,
+        ),
+        applyReceipt: context.evidence.receipts[1],
+        journalSegment: context.evidence.segments[1],
+        committedAt: secondRollbackAt,
+      })
+    expect(second.state).toMatchObject({
+      status: 'rolling-back',
+      predecessorKind: 'rollback-state',
+      nextSequence: 1,
+      restored: 1,
+    })
+    const restartedState =
+      parseWorkspaceSearchMigrationRollbackPersistenceStateV2(
+        serializeWorkspaceSearchMigrationRollbackPersistenceStateV2(
+          second.state,
+        ),
+      )
+    const restartedReceipt =
+      parseWorkspaceSearchMigrationRollbackOperationReceiptV2(
+        serializeWorkspaceSearchMigrationRollbackOperationReceiptV2(
+          second.receipt,
+        ),
+      )
+    expect(
+      decodeWorkspaceSearchMigrationRollbackRunStateV2(
+        restartedState,
+      ),
+    ).toEqual(second.runState)
+    validateWorkspaceSearchMigrationRollbackOperationReceiptTransitionV2({
+      startRoot,
+      receipt: restartedReceipt,
+      journalSegment: context.evidence.segments[1],
+      predecessorState: startRoot.initialState,
+      successorState: restartedState,
+    })
+    expectV2Failure(() =>
+      validateWorkspaceSearchMigrationRollbackOperationReceiptTransitionV2({
+        startRoot,
+        receipt: restartedReceipt,
+        journalSegment: context.evidence.segments[0],
+        predecessorState: startRoot.initialState,
+        successorState: restartedState,
+      })
+    )
+
+    const first =
+      createWorkspaceSearchMigrationRollbackOperationTransitionV2({
+        startRoot,
+        predecessorState: restartedState,
+        currentAuthority: advanceAuthority(
+          context.fixture.currentAuthority,
+          firstRollbackAt,
+        ),
+        applyReceipt: context.evidence.receipts[0],
+        journalSegment: context.evidence.segments[0],
+        committedAt: firstRollbackAt,
+      })
+    expect(first.state).toMatchObject({
+      status: 'rolling-back',
+      nextSequence: 0,
+      expectedHeadDigest: '0'.repeat(64),
+      restored: 2,
+    })
+    expect(first.state.lastRollbackReceiptDigest)
+      .toBe(first.receipt.rollbackReceiptDigest)
+    expect(first.state.lastRollbackReceiptDigest)
+      .not.toBe(first.receipt.receiptDigest)
+
+    const terminal = finishWorkspaceSearchMigrationRollbackV2({
+      startRoot,
+      predecessorState: first.state,
+      currentAuthority: advanceAuthority(
+        context.fixture.currentAuthority,
+        finishedAt,
+      ),
+      terminalReceipt: first.receipt,
+      finishedAt,
+    })
+    expect(terminal.state).toMatchObject({
+      status: 'rolled-back',
+      predecessorKind: 'rollback-state',
+      nextSequence: 0,
+      restored: 2,
+    })
+    expect(terminal.root.terminalReceipt?.sequence).toBe(1)
+    expect(
+      parseWorkspaceSearchMigrationRolledBackRootV2(
+        serializeWorkspaceSearchMigrationRolledBackRootV2(
+          terminal.root,
+        ),
+      ),
+    ).toEqual(terminal.root)
+  })
+
+  test('finishes a zero-mutation committed prefix without a receipt', () => {
+    const fixture = createFixture(0)
+    const predecessor = {
+      kind: 'execution-run-admission',
+    } satisfies
+      WorkspaceSearchMigrationCommittedPrefixApplySealPredecessor
+    const evidence = createPrefixEvidence(fixture, predecessor)
+    const root = createRoot(fixture, predecessor, evidence)
+
+    const terminal = finishWorkspaceSearchMigrationRollbackV2({
+      startRoot: root,
+      predecessorState: root.initialState,
+      currentAuthority: advanceAuthority(
+        fixture.currentAuthority,
+        finishedAt,
+      ),
+      terminalReceipt: null,
+      finishedAt,
+    })
+    expect(terminal.root.terminalReceipt).toBeNull()
+    expect(terminal.root.terminalReceiptDigest).toBeNull()
+    expect(terminal.state).toMatchObject({
+      status: 'rolled-back',
+      restored: 0,
+      lastRollbackReceiptDigest: null,
+    })
+    expect(
+      parseWorkspaceSearchMigrationRolledBackRootV2(
+        serializeWorkspaceSearchMigrationRolledBackRootV2(
+          terminal.root,
+        ),
+      ),
+    ).toEqual(terminal.root)
+  })
+
+  test('rejects out-of-order, prematurely finished, and expired reverse evidence', () => {
+    const context = createTwoMutationRollbackContext()
+    expectV2Failure(() =>
+      createWorkspaceSearchMigrationRollbackOperationCommandIdentityV2({
+        startRoot: context.root,
+        predecessorState: context.root.initialState,
+        applyReceipt: context.evidence.receipts[0],
+      })
+    )
+    expectV2Failure(() =>
+      finishWorkspaceSearchMigrationRollbackV2({
+        startRoot: context.root,
+        predecessorState: context.root.initialState,
+        currentAuthority: advanceAuthority(
+          context.fixture.currentAuthority,
+          finishedAt,
+        ),
+        terminalReceipt: null,
+        finishedAt,
+      })
+    )
+    const retentionBoundary = new Date(
+      Date.parse(secondRollbackAt) +
+        WORKSPACE_SEARCH_MIGRATION_MINIMUM_COMMIT_WINDOW_MILLISECONDS,
+    ).toISOString()
+    const expiringReceipt = {
+      ...context.evidence.receipts[1],
+      journal: {
+        ...context.evidence.receipts[1].journal,
+        retainUntil: retentionBoundary,
+      },
+    }
+    expectV2Failure(() =>
+      createWorkspaceSearchMigrationRollbackOperationTransitionV2({
+        startRoot: context.root,
+        predecessorState: context.root.initialState,
+        currentAuthority: advanceAuthority(
+          context.fixture.currentAuthority,
+          secondRollbackAt,
+        ),
+        applyReceipt: expiringReceipt,
+        journalSegment: context.evidence.segments[1],
+        committedAt: secondRollbackAt,
+      })
+    )
+  })
+
+  test('rejects a non-transitive maintenance-authority replay at finish', () => {
+    const context = createTwoMutationRollbackContext()
+    const progressedReceipt = createMaintenanceReceipt(
+      'progressed',
+      '2026-07-30T00:04:10.000Z',
+    )
+    const progressedAuthority = advanceAuthority(
+      {
+        ...context.fixture.currentAuthority,
+        maintenanceEvidencePointerRevision: 6,
+        maintenanceEvidenceReceiptDigest:
+          createMigrationDigest(progressedReceipt),
+        maintenanceEvidenceReceipt: progressedReceipt,
+      },
+      secondRollbackAt,
+    )
+    const second =
+      createWorkspaceSearchMigrationRollbackOperationTransitionV2({
+        startRoot: context.root,
+        predecessorState: context.root.initialState,
+        currentAuthority: progressedAuthority,
+        applyReceipt: context.evidence.receipts[1],
+        journalSegment: context.evidence.segments[1],
+        committedAt: secondRollbackAt,
+      })
+    const first =
+      createWorkspaceSearchMigrationRollbackOperationTransitionV2({
+        startRoot: context.root,
+        predecessorState: second.state,
+        currentAuthority: advanceAuthority(
+          progressedAuthority,
+          firstRollbackAt,
+        ),
+        applyReceipt: context.evidence.receipts[0],
+        journalSegment: context.evidence.segments[0],
+        committedAt: firstRollbackAt,
+      })
+    const replayedAuthority = advanceAuthority(
+      {
+        ...context.fixture.currentAuthority,
+        maintenanceEvidencePointerRevision: 7,
+      },
+      finishedAt,
+    )
+
+    expectV2Failure(() =>
+      finishWorkspaceSearchMigrationRollbackV2({
+        startRoot: context.root,
+        predecessorState: first.state,
+        currentAuthority: replayedAuthority,
+        terminalReceipt: first.receipt,
+        finishedAt,
+      })
+    )
+  })
+
+  test('validates direct authority successors and rejects every regression', () => {
+    const context = createTwoMutationRollbackContext()
+    const predecessor = context.root.initialState.currentAuthority
+    const advanced = {
+      ...predecessor,
+      maintenanceEvidencePointerRevision:
+        predecessor.maintenanceEvidencePointerRevision + 1,
+      maintenanceEvidenceReceiptDigest:
+        digest('advanced-authority-receipt'),
+      evaluatedAt: secondRollbackAt,
+    }
+    const takeover = {
+      ...advanced,
+      ownerId: 'rollback-persistence-v2-successor',
+      fenceToken: advanced.fenceToken + 1,
+    }
+
+    validateWorkspaceSearchMigrationRollbackAuthoritySuccessorV2(
+      predecessor,
+      predecessor,
+    )
+    validateWorkspaceSearchMigrationRollbackAuthoritySuccessorV2(
+      predecessor,
+      advanced,
+    )
+    validateWorkspaceSearchMigrationRollbackAuthoritySuccessorV2(
+      predecessor,
+      takeover,
+    )
+
+    expectV2Failure(() =>
+      validateWorkspaceSearchMigrationRollbackAuthoritySuccessorV2(
+        predecessor,
+        {
+          ...predecessor,
+          ownerId: 'same-fence-other-owner',
+        },
+      )
+    )
+    expectV2Failure(() =>
+      validateWorkspaceSearchMigrationRollbackAuthoritySuccessorV2(
+        predecessor,
+        {
+          ...predecessor,
+          fenceToken: predecessor.fenceToken - 1,
+        },
+      )
+    )
+    expectV2Failure(() =>
+      validateWorkspaceSearchMigrationRollbackAuthoritySuccessorV2(
+        predecessor,
+        {
+          ...predecessor,
+          maintenanceEvidencePointerRevision:
+            predecessor.maintenanceEvidencePointerRevision - 1,
+        },
+      )
+    )
+    expectV2Failure(() =>
+      validateWorkspaceSearchMigrationRollbackAuthoritySuccessorV2(
+        predecessor,
+        {
+          ...predecessor,
+          maintenanceEvidenceReceiptDigest:
+            digest('same-revision-other-receipt'),
+        },
+      )
+    )
+    expectV2Failure(() =>
+      validateWorkspaceSearchMigrationRollbackAuthoritySuccessorV2(
+        predecessor,
+        {
+          ...predecessor,
+          maintenanceEvidencePointerRevision:
+            predecessor.maintenanceEvidencePointerRevision + 1,
+        },
+      )
+    )
+    expectV2Failure(() =>
+      validateWorkspaceSearchMigrationRollbackAuthoritySuccessorV2(
+        predecessor,
+        {
+          ...predecessor,
+          evaluatedAt: '2026-07-30T00:03:14.000Z',
+        },
+      )
+    )
+  })
+
+  test('rejects self-redigested invalid reverse receipts and terminal roots', () => {
+    const context = createTwoMutationRollbackContext()
+    const second =
+      createWorkspaceSearchMigrationRollbackOperationTransitionV2({
+        startRoot: context.root,
+        predecessorState: context.root.initialState,
+        currentAuthority: advanceAuthority(
+          context.fixture.currentAuthority,
+          secondRollbackAt,
+        ),
+        applyReceipt: context.evidence.receipts[1],
+        journalSegment: context.evidence.segments[1],
+        committedAt: secondRollbackAt,
+      })
+    const first =
+      createWorkspaceSearchMigrationRollbackOperationTransitionV2({
+        startRoot: context.root,
+        predecessorState: second.state,
+        currentAuthority: advanceAuthority(
+          context.fixture.currentAuthority,
+          firstRollbackAt,
+        ),
+        applyReceipt: context.evidence.receipts[0],
+        journalSegment: context.evidence.segments[0],
+        committedAt: firstRollbackAt,
+      })
+    const terminal = finishWorkspaceSearchMigrationRollbackV2({
+      startRoot: context.root,
+      predecessorState: first.state,
+      currentAuthority: advanceAuthority(
+        context.fixture.currentAuthority,
+        finishedAt,
+      ),
+      terminalReceipt: first.receipt,
+      finishedAt,
+    })
+    const receiptMutations:
+      readonly (readonly [string, unknown])[] = [
+        [
+          'previousJournalHeadDigest',
+          digest('invalid-previous-journal-head'),
+        ],
+        [
+          'successorRevision',
+          first.receipt.predecessorRevision + 2,
+        ],
+        ['committedAt', secondMarkerAt],
+      ]
+    for (const [key, value] of receiptMutations) {
+      const receiptDocument = decodeCanonicalRecord(
+        serializeWorkspaceSearchMigrationRollbackOperationReceiptV2(
+          first.receipt,
+        ),
+      )
+      Reflect.set(receiptDocument, key, value)
+      expectV2Failure(() =>
+        parseWorkspaceSearchMigrationRollbackOperationReceiptV2(
+          redigestReceiptDocument(receiptDocument),
+        )
+      )
+    }
+
+    const lateStartDocument = decodeCanonicalRecord(
+      serializeWorkspaceSearchMigrationRolledBackRootV2(
+        terminal.root,
+      ),
+    )
+    Reflect.set(
+      lateStartDocument,
+      'rollbackStartedAt',
+      '2026-07-30T00:04:41.000Z',
+    )
+    expectV2Failure(() =>
+      parseWorkspaceSearchMigrationRolledBackRootV2(
+        redigestRolledBackRootDocument(lateStartDocument),
+      )
+    )
+
+    const missingReceiptDocument = decodeCanonicalRecord(
+      serializeWorkspaceSearchMigrationRolledBackRootV2(
+        terminal.root,
+      ),
+    )
+    Reflect.set(missingReceiptDocument, 'terminalReceipt', null)
+    Reflect.set(
+      missingReceiptDocument,
+      'terminalReceiptDigest',
+      null,
+    )
+    expectV2Failure(() =>
+      parseWorkspaceSearchMigrationRolledBackRootV2(
+        redigestRolledBackRootDocument(
+          missingReceiptDocument,
+        ),
+      )
+    )
+
+    const mismatchedStateDocument = decodeCanonicalRecord(
+      serializeWorkspaceSearchMigrationRolledBackRootV2(
+        terminal.root,
+      ),
+    )
+    const mismatchedTerminalState = readTestRecord(
+      Reflect.get(mismatchedStateDocument, 'terminalState'),
+    )
+    Reflect.set(
+      mismatchedTerminalState,
+      'predecessorDigest',
+      digest('invalid-terminal-predecessor'),
+    )
+    expectV2Failure(() =>
+      parseWorkspaceSearchMigrationRolledBackRootV2(
+        redigestTerminalStateInRolledBackRootDocument(
+          mismatchedStateDocument,
+        ),
+      )
+    )
+  })
+
+  test('bounds hostile caller-owned reverse-journal graphs', () => {
+    const context = createTwoMutationRollbackContext()
+    const wideRecord: Record<string, boolean> = {}
+    for (let index = 0; index < 1_025; index += 1) {
+      wideRecord[`field${index}`] = true
+    }
+    let sharedAttribute: unknown = {
+      type: 'S',
+      value: 'leaf',
+    }
+    for (let depth = 0; depth < 20; depth += 1) {
+      sharedAttribute = {
+        type: 'M',
+        value: {
+          left: sharedAttribute,
+          right: sharedAttribute,
+        },
+      }
+    }
+    const oversizedBinary = new Uint8Array(
+      WORKSPACE_SEARCH_JOURNAL_SEGMENT_MAX_BYTES + 1,
+    )
+    const oversizedString = 's'.repeat(
+      WORKSPACE_SEARCH_JOURNAL_SEGMENT_MAX_BYTES + 1,
+    )
+    const oversizedKeyRecord = {
+      [
+        'k'.repeat(
+          WORKSPACE_SEARCH_JOURNAL_SEGMENT_MAX_BYTES + 1,
+        )
+      ]: true,
+    }
+    const aggregateOversizedText = {
+      first: 'a'.repeat(1_100_000),
+      second: 'b'.repeat(1_100_000),
+    }
+    const aggregateOversizedBinary = [
+      new Uint8Array(1_048_577),
+      new Uint8Array(1_048_577),
+    ]
+    const sharedBinary = new Uint8Array(
+      new SharedArrayBuffer(1),
+    )
+    let binaryAccessorInvoked = false
+    const accessorBinary = Uint8Array.of(1)
+    Object.defineProperty(accessorBinary, 'byteLength', {
+      enumerable: true,
+      get() {
+        binaryAccessorInvoked = true
+        return 1
+      },
+    })
+
+    const aliasedJournalSegment = structuredClone(
+      context.evidence.segments[1],
+    )
+    const aliasedAfter = readTestRecord(
+      aliasedJournalSegment.after,
+    )
+    const aliasedItem = readTestRecord(
+      Reflect.get(aliasedAfter, 'item'),
+    )
+    Reflect.set(
+      aliasedItem,
+      'hostileGraph',
+      sharedAttribute,
+    )
+    expectV2Failure(() =>
+      Reflect.apply(
+        createWorkspaceSearchMigrationRollbackOperationTransitionV2,
+        undefined,
+        [{
+          startRoot: context.root,
+          predecessorState: context.root.initialState,
+          currentAuthority: advanceAuthority(
+            context.fixture.currentAuthority,
+            secondRollbackAt,
+          ),
+          applyReceipt: context.evidence.receipts[1],
+          journalSegment: aliasedJournalSegment,
+          committedAt: secondRollbackAt,
+        }],
+      )
+    )
+
+    for (const hostileGraph of [
+      wideRecord,
+      oversizedBinary,
+      oversizedString,
+      oversizedKeyRecord,
+      aggregateOversizedText,
+      aggregateOversizedBinary,
+      sharedBinary,
+      accessorBinary,
+    ]) {
+      const hostileJournalSegment = {
+        ...context.evidence.segments[1],
+        hostileGraph,
+      }
+      expectV2Failure(() =>
+        Reflect.apply(
+          createWorkspaceSearchMigrationRollbackOperationTransitionV2,
+          undefined,
+          [{
+            startRoot: context.root,
+            predecessorState: context.root.initialState,
+            currentAuthority: advanceAuthority(
+              context.fixture.currentAuthority,
+              secondRollbackAt,
+            ),
+            applyReceipt: context.evidence.receipts[1],
+            journalSegment: hostileJournalSegment,
+            committedAt: secondRollbackAt,
+          }],
+        )
+      )
+    }
+    expect(binaryAccessorInvoked).toBeFalse()
+  })
+
   test('accepts a v2 checkpoint and round-trips a binary cursor losslessly', () => {
     const fixture = createFixture(1)
     const marker = createNoOpMarker(
@@ -301,6 +935,27 @@ describe('Workspace Search rollback persistence v2', () => {
     expect(
       serializeWorkspaceSearchMigrationRollbackStartRootV2(parsed),
     ).toEqual(bytes)
+    const terminal = finishWorkspaceSearchMigrationRollbackV2({
+      startRoot: parsed,
+      predecessorState: parsed.initialState,
+      currentAuthority: advanceAuthority(
+        fixture.currentAuthority,
+        finishedAt,
+      ),
+      terminalReceipt: null,
+      finishedAt,
+    })
+    const restartedTerminal =
+      parseWorkspaceSearchMigrationRolledBackRootV2(
+        serializeWorkspaceSearchMigrationRolledBackRootV2(
+          terminal.root,
+        ),
+      )
+    expect(
+      restartedTerminal.terminalState.runState.apply.sources[
+        'project-directory'
+      ].cursor,
+    ).toEqual(createBinaryCheckpoint().cursor)
   })
 
   test('rejects start-window retention at the exact boundary', () => {
@@ -440,6 +1095,47 @@ describe('Workspace Search rollback persistence v2', () => {
       'originalJournalSequence',
       1,
       parseWorkspaceSearchMigrationRollbackStartRootV2,
+    )
+  })
+
+  test('keeps the embedded start state initial-only after lifecycle parsing broadens', () => {
+    const fixture = createFixture(0)
+    const predecessor = {
+      kind: 'execution-run-admission',
+    } satisfies
+      WorkspaceSearchMigrationCommittedPrefixApplySealPredecessor
+    const evidence = createPrefixEvidence(fixture, predecessor)
+    const root = createRoot(fixture, predecessor, evidence)
+
+    const advancedDocument = decodeCanonicalRecord(
+      serializeWorkspaceSearchMigrationRollbackStartRootV2(root),
+    )
+    const advancedState = readTestRecord(
+      Reflect.get(advancedDocument, 'initialState'),
+    )
+    Reflect.set(advancedState, 'predecessorKind', 'rollback-state')
+    expectV2Failure(() =>
+      parseWorkspaceSearchMigrationRollbackStartRootV2(
+        redigestRootDocument(advancedDocument),
+      )
+    )
+
+    const terminalDocument = decodeCanonicalRecord(
+      serializeWorkspaceSearchMigrationRollbackStartRootV2(root),
+    )
+    const terminalState = readTestRecord(
+      Reflect.get(terminalDocument, 'initialState'),
+    )
+    const terminalRunState = readTestRecord(
+      Reflect.get(terminalState, 'runState'),
+    )
+    Reflect.set(terminalState, 'status', 'rolled-back')
+    Reflect.set(terminalState, 'predecessorKind', 'rollback-state')
+    Reflect.set(terminalRunState, 'status', 'rolled-back')
+    expectV2Failure(() =>
+      parseWorkspaceSearchMigrationRollbackStartRootV2(
+        redigestRootDocument(terminalDocument),
+      )
     )
   })
 
@@ -642,6 +1338,199 @@ describe('Workspace Search rollback persistence v2', () => {
     )
   })
 })
+
+/**
+ * Creates one correlated two-mutation committed-prefix rollback context.
+ *
+ * @returns Exact root, forward evidence, and fresh authority fixture.
+ */
+function createTwoMutationRollbackContext() {
+  const fixture = createFixture(2)
+  const evidence = createReverseEvidence(fixture.admission)
+  const firstState =
+    createWorkspaceSearchMigrationExecutionState({
+      admission: fixture.admission,
+      nextRunState: advanceRunState(
+        fixture.admission.runState,
+        evidence.receipts[0],
+      ),
+      marker: evidence.receipts[0],
+    })
+  const secondRunState = advanceRunState(
+    reconstructWorkspaceSearchMigrationRunState(
+      fixture.admission,
+      firstState,
+    ),
+    evidence.receipts[1],
+  )
+  const secondState =
+    createWorkspaceSearchMigrationExecutionState({
+      admission: fixture.admission,
+      predecessor: firstState,
+      nextRunState: secondRunState,
+      marker: evidence.receipts[1],
+    })
+  const predecessor = {
+    kind: 'mutable-execution-state',
+    executionState: secondState,
+  } satisfies
+    WorkspaceSearchMigrationCommittedPrefixApplySealPredecessor
+  const prefixEvidence = createPrefixEvidence(
+    fixture,
+    predecessor,
+  )
+  return {
+    fixture,
+    evidence,
+    root: createRoot(fixture, predecessor, prefixEvidence),
+  }
+}
+
+/**
+ * Creates two exact forward journal links in increasing sequence order.
+ *
+ * @param admission - Immutable execution admission owning both mutations.
+ * @returns Two linked journal segments and matching forward receipts.
+ */
+function createReverseEvidence(
+  admission: WorkspaceSearchMigrationExecutionRun,
+): ReverseEvidence {
+  const first = createJournalLink(
+    admission,
+    1,
+    1,
+    'document-1',
+    '0'.repeat(64),
+    '2026-07-30T00:02:25.000Z',
+    firstMarkerAt,
+  )
+  const second = createJournalLink(
+    admission,
+    2,
+    2,
+    'document-2',
+    first.receipt.journal.headDigest,
+    '2026-07-30T00:02:40.000Z',
+    secondMarkerAt,
+  )
+  return {
+    receipts: [first.receipt, second.receipt],
+    segments: [first.segment, second.segment],
+  }
+}
+
+/**
+ * Creates one exact immutable journal segment and matching apply receipt.
+ *
+ * @param admission - Immutable execution admission owning the operation.
+ * @param planSequence - One-based immutable plan position.
+ * @param sequence - One-based mutation-only journal sequence.
+ * @param entityId - Stable target search-document entity identifier.
+ * @param previousHeadDigest - Exact preceding journal-chain head.
+ * @param journalCreatedAt - Canonical immutable journal creation time.
+ * @param committedAt - Canonical forward mutation commit time.
+ * @returns Exact linked journal segment and durable apply receipt.
+ */
+function createJournalLink(
+  admission: WorkspaceSearchMigrationExecutionRun,
+  planSequence: number,
+  sequence: number,
+  entityId: string,
+  previousHeadDigest: string,
+  journalCreatedAt: string,
+  committedAt: string,
+) {
+  const recordKey = createWorkspaceSearchDocumentRecordKey(
+    'document',
+    entityId,
+  )
+  const targetKey = {
+    workspaceId: { S: 'workspace-1' },
+    recordKey: { S: recordKey },
+  }
+  const afterItem = {
+    ...targetKey,
+    entryType: { S: 'search-document' },
+    entityType: { S: 'document' },
+    entityId: { S: entityId },
+    title: { S: `Title ${entityId}` },
+  }
+  const targetKeyDigest = createAttributeMapDigest(targetKey)
+  const beforeDigest = createAbsentMigrationItemDigest()
+  const afterDigest = createAttributeMapDigest(afterItem)
+  const operationId = digest(`mutation:${planSequence}`)
+  const sourceDigest = digest(`source:${planSequence}`)
+  const segment: WorkspaceSearchJournalSegment = {
+    kind: 'workspace-search-preimage-segment',
+    segmentVersion: 1,
+    migrationId: WORKSPACE_SEARCH_MIGRATION_ID,
+    migrationVersion: WORKSPACE_SEARCH_MIGRATION_VERSION,
+    runId,
+    configurationHash: admission.configurationHash,
+    sequence,
+    preparedFenceToken: 7,
+    operationId,
+    sourceDigest,
+    previousHeadDigest,
+    targetKey: encodeAttributeMap(targetKey),
+    targetKeyDigest,
+    before: {
+      exists: false,
+      digest: beforeDigest,
+    },
+    after: {
+      exists: true,
+      item: encodeAttributeMap(afterItem),
+      digest: afterDigest,
+    },
+    createdAt: journalCreatedAt,
+  }
+  const journalText =
+    serializeWorkspaceSearchJournalSegment(segment)
+  const contentDigest = createHash('sha256')
+    .update(journalText, 'utf8')
+    .digest('hex')
+  const versionId = `journal-version-${sequence}`
+  const headDigest = createJournalHeadDigest({
+    previousHeadDigest,
+    sequence,
+    operationId,
+    contentDigest,
+    versionId,
+  })
+  const receipt: WorkspaceSearchOperationReceipt = {
+    kind: 'workspace-search-operation-applied',
+    markerVersion: 1,
+    runId,
+    configurationHash: admission.configurationHash,
+    operationId,
+    planSequence,
+    planOperationDigest:
+      digest(`plan-operation:${planSequence}`),
+    sequence,
+    targetKeyDigest,
+    sourceDigest,
+    beforeDigest,
+    afterDigest,
+    fenceToken: 7,
+    maintenanceEvidenceReceiptDigest:
+      createMigrationDigest(
+        admission.runState.maintenanceEvidenceReceipt,
+      ),
+    journal: {
+      objectKey:
+        `workspace-search/v1/runs/${runId}/segments/` +
+        `${String(sequence).padStart(12, '0')}.json`,
+      versionId,
+      contentDigest,
+      byteLength: new TextEncoder().encode(journalText).byteLength,
+      retainUntil,
+      headDigest,
+    },
+    committedAt,
+  }
+  return { segment, receipt }
+}
 
 /**
  * Creates one strict immutable origin from correlated evidence.
@@ -917,6 +1806,32 @@ function withCurrentAuthority(
       maintenanceEvidenceReceipt: receipt,
       evaluatedAt,
     },
+  }
+}
+
+/**
+ * Advances one current authority to a fresh fixed-duration lease window.
+ *
+ * @param authority - Existing identity and maintenance evidence.
+ * @param at - Transaction time that must have commit headroom.
+ * @returns Exact authority with a one-minute lease around the transaction.
+ */
+function advanceAuthority(
+  authority: WorkspaceSearchMigrationPrePlanAuthority,
+  at: string,
+): WorkspaceSearchMigrationPrePlanAuthority {
+  const atMilliseconds = Date.parse(at)
+  return {
+    ...authority,
+    lease: {
+      ...authority.lease,
+      heartbeatAt:
+        new Date(atMilliseconds - 30_000).toISOString(),
+      expiresAt:
+        new Date(atMilliseconds + 30_000).toISOString(),
+    },
+    evaluatedAt:
+      new Date(atMilliseconds - 1_000).toISOString(),
   }
 }
 
@@ -1606,6 +2521,65 @@ function redigestOriginDocument(
 ): Uint8Array {
   redigestOriginRecord(origin)
   return new TextEncoder().encode(serializeCanonicalJson(origin))
+}
+
+/**
+ * Recomputes one reverse-receipt self digest after a test mutation.
+ *
+ * @param receipt - Mutable canonical reverse-receipt document.
+ * @returns Canonical bytes carrying the replacement receipt digest.
+ */
+function redigestReceiptDocument(
+  receipt: Record<string, unknown>,
+): Uint8Array {
+  const common = copyRecordWithout(
+    receipt,
+    new Set(['receiptDigest']),
+  )
+  Reflect.set(
+    receipt,
+    'receiptDigest',
+    createMigrationDigest(common),
+  )
+  return new TextEncoder().encode(
+    serializeCanonicalJson(receipt),
+  )
+}
+
+/**
+ * Recomputes one terminal-root self digest after a test mutation.
+ *
+ * @param root - Mutable canonical terminal-root document.
+ * @returns Canonical bytes carrying the replacement root digest.
+ */
+function redigestRolledBackRootDocument(
+  root: Record<string, unknown>,
+): Uint8Array {
+  const common = copyRecordWithout(root, new Set(['rootDigest']))
+  Reflect.set(root, 'rootDigest', createMigrationDigest(common))
+  return new TextEncoder().encode(serializeCanonicalJson(root))
+}
+
+/**
+ * Recomputes a mutated terminal state and its enclosing root digest.
+ *
+ * @param root - Mutable canonical terminal-root document.
+ * @returns Canonical bytes carrying coherent state and root self digests.
+ */
+function redigestTerminalStateInRolledBackRootDocument(
+  root: Record<string, unknown>,
+): Uint8Array {
+  const state = readTestRecord(
+    Reflect.get(root, 'terminalState'),
+  )
+  const stateCommon = copyRecordWithout(
+    state,
+    new Set(['stateDigest']),
+  )
+  const stateDigest = createMigrationDigest(stateCommon)
+  Reflect.set(state, 'stateDigest', stateDigest)
+  Reflect.set(root, 'terminalStateDigest', stateDigest)
+  return redigestRolledBackRootDocument(root)
 }
 
 /**
