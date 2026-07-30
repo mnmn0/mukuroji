@@ -21,8 +21,10 @@ import {
   zeroHexDigest,
 } from './migration-contract'
 import {
+  createWorkspaceSearchMigrationAppliedRootAbsentConditionCheck,
   createWorkspaceSearchMigrationAppliedRootConditionCheck,
   createWorkspaceSearchMigrationAppliedRootRecord,
+  createWorkspaceSearchMigrationApplyRunBindingDigest,
   parseWorkspaceSearchMigrationAppliedRootRecord,
   parseWorkspaceSearchMigrationAppliedRootStrongReadOutput,
   type WorkspaceSearchMigrationAppliedRootAwsBindingInput,
@@ -127,6 +129,44 @@ describe('Workspace Search applied-root AWS persistence boundary', () => {
           condition.ExpressionAttributeValues[`:value${index}`],
         ).toEqual(value)
       }
+    },
+  )
+
+  test(
+    'creates the exact absent applied-root race guard',
+    () => {
+      const fixture = createFixture()
+      const binding = createBinding(fixture)
+      const condition =
+        createWorkspaceSearchMigrationAppliedRootAbsentConditionCheck(
+          binding,
+        ).ConditionCheck
+      if (condition === undefined) {
+        throw new Error('Expected one absent applied-root condition.')
+      }
+
+      expect(condition).toEqual({
+        TableName: binding.stateTable.tableName,
+        Key: {
+          migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
+          recordKey: {
+            S:
+              'apply-seal/v1/' +
+              createWorkspaceSearchMigrationApplyRunBindingDigest(
+                binding,
+              ) +
+              '/complete-plan',
+          },
+        },
+        ConditionExpression:
+          'attribute_not_exists(#migrationId) AND ' +
+          'attribute_not_exists(#recordKey)',
+        ExpressionAttributeNames: {
+          '#migrationId': 'migrationId',
+          '#recordKey': 'recordKey',
+        },
+        ReturnValuesOnConditionCheckFailure: 'NONE',
+      })
     },
   )
 

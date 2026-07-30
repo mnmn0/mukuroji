@@ -757,9 +757,14 @@ stepでは元journal exact versionの残存期限を別途検証します。Immu
 全apply operation/no-op/checkpoint/complete-seal transactionに加え、full-verificationのpage progressと
 verified-root publication transactionも共通rollback-start sentinelのabsenceを検査するため、rollback
 startが先にcommitした後のforward progressは成立しません。
-ただし、このprefix sealをDynamoDBのdurable rollback start/stateへ原子的に参照するv2 persistence、
-partial start transaction、managed compositionは未実装であり、これらが揃うまではpartial-prefix
-rollbackをproduction capabilityとして扱いません。
+Committed-prefix専用のv2 pure persistenceは、admissionまたはmutable v1/v2 predecessor、rich plan/seal
+reference、最短journal retention、immutable origin、rollback start root、losslessな初期rolling-back
+stateをstrict canonical codecへ固定します。Apply-owned predecessor capabilityはmutable execution-stateと
+applied rootを強整合readし、admissionならstate row absence、mutable v1/v2ならcanonical controlled
+full-row equalityのConditionCheckを生成します。Partial start側のapplied-root absence条件も共通factoryで
+定義済みです。ただし、これらを同じshared sentinelへcommitする固定13 item partial-start transaction、
+v2 reverse/finish chain、managed compositionは未実装であり、すべてが揃うまではpartial-prefix rollbackを
+production capabilityとして扱いません。
 
 Complete applied rootから開始するstandalone reverse-rollback AWS portは、immutable start root、
 restart可能な完全run-state、exact-predecessor CAS state、各reverse operationのimmutable receipt、
@@ -954,10 +959,13 @@ Process exit statusは、成功を`0`、migration failureまたは`OPERATION_FAI
    AWS portとmanaged identity compositionも実装済みです。Complete applied rootを対象に、verifyとの
    start排他、strict durable state/receipt/root、exact apply-receipt guard、journal preimageのreverse
    target CAS、固定12/13/10項目transactionを持つrollback AWS portと、pinned DynamoDB/S3 client、
-   all-six pre/post guard、post-send quarantineを持つmanaged identity compositionも実装済みです。ただし、
+   all-six pre/post guard、post-send quarantineを持つmanaged identity compositionも実装済みです。
+   Committed-prefix向けにはstrict v2 origin/start/initial-state codec、apply-owned exact predecessor guard、
+   complete applied-root absence guardまで実装済みです。ただし、
    close/admission/run creation/apply/seal/verification/rollbackのCLI・orchestrator配線、partial-prefix
-   rollback、terminal outcomeに束縛したrelease、observability/alarm、DR/non-production evidenceは
-   未実装のため、migration全体のproduction gateはまだ実行可能とは扱いません。
+   rollbackの13項目start transactionとv2 reverse/finish/managed composition、terminal outcomeに束縛した
+   release、observability/alarm、DR/non-production evidenceは未実装のため、migration全体のproduction
+   gateはまだ実行可能とは扱いません。
 5. Online migration は writer fence/epoch または dual-write + high-watermark catch-up を有効化し、
    source scan と cutover の競合を閉じる。Workspace Search v1はmaintenance writer-fenceを選択する。
    Step 4のcurrent authorityで初回`bootstrapOpen`を行い、API、worker、connector、backfillを含む全継続

@@ -407,6 +407,98 @@ export type WorkspaceSearchMigrationApplyRunStateAwsReader = Pick<
 >
 
 /**
+ * Exact admitted-run material used to read and guard one apply predecessor.
+ */
+export type WorkspaceSearchMigrationApplyPredecessorAwsBindingInput = {
+  /** Exact measured migration-state table incarnation. */
+  readonly stateTable: MigrationTableIdentity
+  /** Reviewed digest of the exact measured migration configuration. */
+  readonly configurationHash: string
+  /** Exact immutable revision-one execution admission. */
+  readonly executionRun: WorkspaceSearchMigrationExecutionRun
+}
+
+/**
+ * Immutable admission selected when no mutable execution-state row exists.
+ */
+export type WorkspaceSearchMigrationApplyAdmissionPredecessorAwsValue = {
+  /** Direct immutable admission predecessor discriminator. */
+  readonly kind: 'execution-run-admission'
+}
+
+/**
+ * Exact mutable execution state selected as the current predecessor.
+ */
+export type WorkspaceSearchMigrationApplyMutablePredecessorAwsValue = {
+  /** Mutable execution-state predecessor discriminator. */
+  readonly kind: 'mutable-execution-state'
+  /** Exact detached legacy-v1 or traversal-capable-v2 envelope. */
+  readonly executionState: WorkspaceSearchMigrationExecutionState
+}
+
+/**
+ * Explicit admission-only or mutable current apply predecessor.
+ */
+export type WorkspaceSearchMigrationApplyPredecessorAwsValue =
+  | WorkspaceSearchMigrationApplyAdmissionPredecessorAwsValue
+  | WorkspaceSearchMigrationApplyMutablePredecessorAwsValue
+
+/**
+ * Correlated detached predecessor and reconstructed effective run state.
+ */
+export type WorkspaceSearchMigrationApplyPredecessorAwsProjection = {
+  /** Exact admission-only or mutable predecessor selected by the strong read. */
+  readonly predecessor: WorkspaceSearchMigrationApplyPredecessorAwsValue
+  /** Complete run state reconstructed from the selected predecessor. */
+  readonly runState: WorkspaceSearchMigrationRunState
+}
+
+/**
+ * Apply-owned strong-read and exact execution-state guard capability.
+ */
+export interface WorkspaceSearchMigrationApplyPredecessorAwsBinding {
+  /**
+   * Creates a strong read for the deterministic mutable execution-state row.
+   *
+   * @returns Adapter-owned strongly consistent point-read command.
+   */
+  createExecutionStateStrongReadCommand(): GetItemCommand
+
+  /**
+   * Creates a strong read for the deterministic complete applied root.
+   *
+   * @returns Adapter-owned strongly consistent point-read command.
+   */
+  createAppliedRootStrongReadCommand(): GetItemCommand
+
+  /**
+   * Correlates mutable-state and applied-root strong-read responses.
+   *
+   * A present applied root is rejected because it is no longer a partial
+   * predecessor. An absent mutable state selects the immutable admission;
+   * otherwise the exact legacy-v1 or traversal-capable-v2 state is returned.
+   *
+   * @param executionStateOutput - Untrusted mutable-state GetItem response.
+   * @param appliedRootOutput - Untrusted applied-root GetItem response.
+   * @returns Detached exact predecessor and reconstructed run state.
+   */
+  parseStrongReadOutputs(
+    executionStateOutput: unknown,
+    appliedRootOutput: unknown,
+  ): WorkspaceSearchMigrationApplyPredecessorAwsProjection
+
+  /**
+   * Creates an absent-or-exact controlled-row execution-state condition.
+   *
+   * @param predecessor - Exact predecessor returned by this capability.
+   * @returns DynamoDB ConditionCheck for the deterministic state row.
+   */
+  createExecutionStateConditionCheck(
+    predecessor: WorkspaceSearchMigrationApplyPredecessorAwsValue,
+  ): TransactWriteItem
+}
+
+/**
  * Static measured material and narrow dependencies for one apply adapter.
  */
 export type CreateWorkspaceSearchMigrationApplyOperationAwsPortInput = {
@@ -522,15 +614,25 @@ export interface WorkspaceSearchMigrationApplyOperationAwsPort {
 }
 
 /**
- * Detached construction-time binding retained by the adapter.
+ * Detached admitted-run binding required by the execution-state row codec.
  */
-type ApplyOperationBinding = {
-  /** Complete detached measured configuration. */
-  readonly configuration: WorkspaceSearchMigrationConfiguration
+type ApplyExecutionStateBinding = {
   /** Reviewed exact configuration digest. */
   readonly configurationHash: string
   /** Exact measured migration-state table. */
   readonly stateTable: MigrationTableIdentity
+  /** Exact immutable revision-one execution admission. */
+  readonly executionRun: WorkspaceSearchMigrationExecutionRun
+  /** Stable digest used by every deterministic apply-state key. */
+  readonly bindingDigest: string
+}
+
+/**
+ * Detached construction-time binding retained by the adapter.
+ */
+type ApplyOperationBinding = ApplyExecutionStateBinding & {
+  /** Complete detached measured configuration. */
+  readonly configuration: WorkspaceSearchMigrationConfiguration
   /** Exact measured Workspace Search target table. */
   readonly targetTable: MigrationTableIdentity
   /** Independently reconstructed writer-fence binding. */
@@ -544,16 +646,12 @@ type ApplyOperationBinding = {
   /** Exact immutable sealed planning-authority root. */
   readonly sealedPlanningAuthority:
     WorkspaceSearchMigrationSealedPlanningAuthorityV2
-  /** Exact immutable revision-one execution admission. */
-  readonly executionRun: WorkspaceSearchMigrationExecutionRun
   /** Exact deterministic durable admission-row key. */
   readonly executionRunKey:
     Readonly<Record<string, AttributeValue>>
   /** Exact complete immutable durable admission row. */
   readonly executionRunRecord:
     Readonly<Record<string, AttributeValue>>
-  /** Stable digest used by every deterministic apply-state key. */
-  readonly bindingDigest: string
 }
 
 /**
@@ -852,6 +950,62 @@ export function createAwsWorkspaceSearchMigrationApplyRunStateReader(
       readApplyFailureCode(error, true),
     )
   }
+}
+
+/**
+ * Creates one admitted-run-bound exact apply predecessor capability.
+ *
+ * The capability owns both strong-read keys and the mutable execution-state
+ * row codec. Callers receive only a detached domain predecessor and can create
+ * only the corresponding absent-or-exact controlled-row ConditionCheck.
+ *
+ * @param input - Exact migration-state table, configuration, and admission.
+ * @returns Frozen strong-read and execution-state guard capability.
+ */
+export function createWorkspaceSearchMigrationApplyPredecessorAwsBinding(
+  input: WorkspaceSearchMigrationApplyPredecessorAwsBindingInput,
+): WorkspaceSearchMigrationApplyPredecessorAwsBinding {
+  return runApplySynchronousBoundary(() => {
+    const binding = prepareApplyPredecessorBinding(input)
+    return Object.freeze({
+      createExecutionStateStrongReadCommand: (): GetItemCommand =>
+        new GetItemCommand({
+          TableName: binding.stateTable.tableName,
+          ConsistentRead: true,
+          Key: createStateKey(binding),
+        }),
+      createAppliedRootStrongReadCommand: (): GetItemCommand =>
+        createWorkspaceSearchMigrationAppliedRootStrongReadCommand({
+          stateTable: binding.stateTable,
+          configurationHash: binding.configurationHash,
+          executionRun: binding.executionRun,
+        }),
+      parseStrongReadOutputs: (
+        executionStateOutput: unknown,
+        appliedRootOutput: unknown,
+      ): WorkspaceSearchMigrationApplyPredecessorAwsProjection =>
+        runApplySynchronousBoundary(
+          () =>
+            parseApplyPredecessorStrongReadOutputs(
+              binding,
+              executionStateOutput,
+              appliedRootOutput,
+            ),
+          false,
+        ),
+      createExecutionStateConditionCheck: (
+        predecessor: WorkspaceSearchMigrationApplyPredecessorAwsValue,
+      ): TransactWriteItem =>
+        runApplySynchronousBoundary(
+          () =>
+            createApplyPredecessorExecutionStateConditionCheck(
+              binding,
+              predecessor,
+            ),
+          true,
+        ),
+    })
+  }, true)
 }
 
 /**
@@ -1962,6 +2116,192 @@ async function readEffectiveApplyState(
     ),
     executionState,
     executionStateRecord: record,
+  }
+}
+
+/**
+ * Validates and detaches one exported apply predecessor binding.
+ *
+ * @param input - Candidate admitted-run and migration-state-table material.
+ * @returns Exact detached execution-state binding.
+ */
+function prepareApplyPredecessorBinding(
+  input: unknown,
+): ApplyExecutionStateBinding {
+  const record = requirePlainRecord(input, 'INVALID_ARGUMENT')
+  requireExactKeys(record, [
+    'configurationHash',
+    'executionRun',
+    'stateTable',
+  ], 'INVALID_ARGUMENT')
+  const configurationHash = readDigest(
+    readOwn(record, 'configurationHash', 'INVALID_ARGUMENT'),
+    'INVALID_ARGUMENT',
+  )
+  const executionRun =
+    parseWorkspaceSearchMigrationExecutionRun(
+      serializeWorkspaceSearchMigrationExecutionRun(
+        requireExecutionRun(
+          readOwn(record, 'executionRun', 'INVALID_ARGUMENT'),
+        ),
+      ),
+    )
+  const expectedStateTable =
+    executionRun.runState.configuration.tables['migration-state']
+  const suppliedStateTable = requireMigrationTableIdentityValue(
+    readOwn(record, 'stateTable', 'INVALID_ARGUMENT'),
+  )
+  const expectedBindingDigest =
+    createWorkspaceSearchMigrationApplyRunBindingDigest({
+      stateTable: expectedStateTable,
+      configurationHash,
+      executionRun,
+    })
+  const suppliedBindingDigest =
+    createWorkspaceSearchMigrationApplyRunBindingDigest({
+      stateTable: suppliedStateTable,
+      configurationHash,
+      executionRun,
+    })
+  if (
+    suppliedBindingDigest !== expectedBindingDigest ||
+    configurationHash !== executionRun.configurationHash ||
+    executionRun.binding.tableIds['migration-state'] !==
+      expectedStateTable.tableId
+  ) {
+    return failApply('CONFIGURATION_DRIFT')
+  }
+  const stateTable = structuredClone(expectedStateTable)
+  return {
+    configurationHash,
+    stateTable,
+    executionRun,
+    bindingDigest: expectedBindingDigest,
+  }
+}
+
+/**
+ * Parses one correlated pair of apply predecessor strong reads.
+ *
+ * @param binding - Exact admitted-run execution-state binding.
+ * @param executionStateOutput - Untrusted mutable-state GetItem response.
+ * @param appliedRootOutput - Untrusted applied-root GetItem response.
+ * @returns Detached admission-only or mutable predecessor projection.
+ */
+function parseApplyPredecessorStrongReadOutputs(
+  binding: ApplyExecutionStateBinding,
+  executionStateOutput: unknown,
+  appliedRootOutput: unknown,
+): WorkspaceSearchMigrationApplyPredecessorAwsProjection {
+  const appliedRoot =
+    parseWorkspaceSearchMigrationAppliedRootStrongReadOutput({
+      stateTable: binding.stateTable,
+      configurationHash: binding.configurationHash,
+      executionRun: binding.executionRun,
+      output: appliedRootOutput,
+    })
+  if (appliedRoot !== undefined) {
+    return failApply('INVALID_STATE')
+  }
+  const record = readOutputItem(executionStateOutput)
+  if (record === undefined) {
+    return Object.freeze({
+      predecessor: Object.freeze({
+        kind: 'execution-run-admission',
+      }),
+      runState: structuredClone(binding.executionRun.runState),
+    })
+  }
+  const executionState =
+    parseExecutionStateRecord(binding, record)
+  const runState =
+    reconstructWorkspaceSearchMigrationRunState(
+      binding.executionRun,
+      executionState,
+    )
+  return Object.freeze({
+    predecessor: Object.freeze({
+      kind: 'mutable-execution-state',
+      executionState: structuredClone(executionState),
+    }),
+    runState: structuredClone(runState),
+  })
+}
+
+/**
+ * Creates one exact mutable execution-state predecessor ConditionCheck.
+ *
+ * @param binding - Exact admitted-run execution-state binding.
+ * @param predecessorValue - Candidate admission-only or mutable predecessor.
+ * @returns Absent or exact controlled-row DynamoDB condition.
+ */
+function createApplyPredecessorExecutionStateConditionCheck(
+  binding: ApplyExecutionStateBinding,
+  predecessorValue: unknown,
+): TransactWriteItem {
+  const predecessor =
+    prepareApplyPredecessorValue(binding, predecessorValue)
+  const executionState =
+    predecessor.kind === 'mutable-execution-state'
+      ? predecessor.executionState
+      : undefined
+  const stateRecord = executionState === undefined
+    ? undefined
+    : createExecutionStateRecord(binding, executionState)
+  return createConditionCheck(
+    binding.stateTable.tableName,
+    createWorkspaceSearchMigrationItemConditionMaterial(
+      binding.stateTable,
+      createStateKey(binding),
+      createStatePredecessorSnapshot(
+        executionState,
+        stateRecord,
+      ),
+      executionStateRecordAttributeNames,
+    ),
+  )
+}
+
+/**
+ * Validates and detaches one caller-returned predecessor value.
+ *
+ * @param binding - Exact admitted-run execution-state binding.
+ * @param value - Candidate predecessor supplied to the guard factory.
+ * @returns Exact detached admission-only or mutable predecessor.
+ */
+function prepareApplyPredecessorValue(
+  binding: ApplyExecutionStateBinding,
+  value: unknown,
+): WorkspaceSearchMigrationApplyPredecessorAwsValue {
+  const record = requirePlainRecord(value, 'INVALID_ARGUMENT')
+  const kind = readOwn(record, 'kind', 'INVALID_ARGUMENT')
+  if (kind === 'execution-run-admission') {
+    requireExactKeys(record, ['kind'], 'INVALID_ARGUMENT')
+    return { kind }
+  }
+  if (kind !== 'mutable-execution-state') {
+    return failApply('INVALID_ARGUMENT')
+  }
+  requireExactKeys(record, [
+    'executionState',
+    'kind',
+  ], 'INVALID_ARGUMENT')
+  const executionState =
+    parseWorkspaceSearchMigrationExecutionState(
+      serializeWorkspaceSearchMigrationExecutionState(
+        requireExecutionStateValue(
+          readOwn(record, 'executionState', 'INVALID_ARGUMENT'),
+        ),
+      ),
+    )
+  requireExecutionStateBinding(binding, executionState)
+  reconstructWorkspaceSearchMigrationRunState(
+    binding.executionRun,
+    executionState,
+  )
+  return {
+    kind,
+    executionState,
   }
 }
 
@@ -3826,7 +4166,7 @@ function requireExecutionRunAdmissionStrongRead(
  * @returns Complete low-level DynamoDB record.
  */
 function createExecutionStateRecord(
-  binding: ApplyOperationBinding,
+  binding: ApplyExecutionStateBinding,
   state: WorkspaceSearchMigrationExecutionState,
 ): Readonly<Record<string, AttributeValue>> {
   const bytes =
@@ -3867,7 +4207,7 @@ function createExecutionStateRecord(
  * @returns Exact mutable execution-state envelope.
  */
 function parseExecutionStateRecord(
-  binding: ApplyOperationBinding,
+  binding: ApplyExecutionStateBinding,
   item: Readonly<Record<string, AttributeValue>>,
 ): WorkspaceSearchMigrationExecutionState {
   requireExactAttributeKeys(
@@ -3919,7 +4259,7 @@ function parseExecutionStateRecord(
  * @param state - Candidate strict mutable state.
  */
 function requireExecutionStateBinding(
-  binding: ApplyOperationBinding,
+  binding: ApplyExecutionStateBinding,
   state: WorkspaceSearchMigrationExecutionState,
 ): void {
   if (
@@ -4493,7 +4833,7 @@ function requireMarkerBinding(
  * @returns Low-level state-table primary key.
  */
 function createStateKey(
-  binding: ApplyOperationBinding,
+  binding: ApplyExecutionStateBinding,
 ): Readonly<Record<string, AttributeValue>> {
   return {
     migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
@@ -4565,7 +4905,7 @@ function createSequenceKey(
  * @returns Bounded mutable-state record key.
  */
 function createExecutionStateRecordKey(
-  binding: ApplyOperationBinding,
+  binding: ApplyExecutionStateBinding,
 ): string {
   return `${executionStateRecordKeyPrefix}/${binding.bindingDigest}/state`
 }
@@ -5543,6 +5883,69 @@ function isExecutionRun(
 }
 
 /**
+ * Structurally narrows a mutable execution-state envelope.
+ *
+ * @param value - Candidate legacy-v1 or traversal-capable-v2 state.
+ * @returns Typed value after a minimal ordinary-record check.
+ */
+function requireExecutionStateValue(
+  value: unknown,
+): WorkspaceSearchMigrationExecutionState {
+  if (!isExecutionStateValue(value)) {
+    return failApply('INVALID_ARGUMENT')
+  }
+  return value
+}
+
+/**
+ * Minimally narrows a candidate mutable execution-state envelope.
+ *
+ * @param value - Candidate value.
+ * @returns Whether it can be passed to the strict canonical codec.
+ */
+function isExecutionStateValue(
+  value: unknown,
+): value is WorkspaceSearchMigrationExecutionState {
+  return typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    !nodeUtilTypes.isProxy(value)
+}
+
+/**
+ * Structurally narrows one measured table for an official binding validator.
+ *
+ * The applied-root binding factory performs descriptor-safe field reads and
+ * validates the migration-state role, table name, and immutable TableId.
+ *
+ * @param value - Candidate measured migration-state table identity.
+ * @returns Ordinary record passed only to the strict official validator.
+ */
+function requireMigrationTableIdentityValue(
+  value: unknown,
+): MigrationTableIdentity {
+  if (!isMigrationTableIdentityValue(value)) {
+    return failApply('INVALID_ARGUMENT')
+  }
+  return value
+}
+
+/**
+ * Minimally narrows a candidate measured table without reading its fields.
+ *
+ * @param value - Candidate value.
+ * @returns Whether it is a non-proxy ordinary record.
+ */
+function isMigrationTableIdentityValue(
+  value: unknown,
+): value is MigrationTableIdentity {
+  return typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    !nodeUtilTypes.isProxy(value)
+}
+
+/**
  * Structurally narrows one closed writer-fence row.
  *
  * @param value - Candidate closed writer-fence record.
@@ -6126,6 +6529,26 @@ async function runApplyBoundary<Result>(
   } catch (error: unknown) {
     throw createApplyPublicFailure(
       readApplyFailureCode(error, false),
+    )
+  }
+}
+
+/**
+ * Runs one synchronous public apply capability behind a stable boundary.
+ *
+ * @param operation - Exact synchronous capability operation.
+ * @param duringConstruction - Whether malformed material is caller input.
+ * @returns Successful operation result.
+ */
+function runApplySynchronousBoundary<Result>(
+  operation: () => Result,
+  duringConstruction: boolean,
+): Result {
+  try {
+    return operation()
+  } catch (error: unknown) {
+    throw createApplyPublicFailure(
+      readApplyFailureCode(error, duringConstruction),
     )
   }
 }
