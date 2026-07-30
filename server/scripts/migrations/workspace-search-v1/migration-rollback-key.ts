@@ -3,6 +3,7 @@ import { createMigrationDigest } from './migration-contract'
 const rollbackRecordKeyVersion = 1
 const rollbackStartRecordKeyPrefix =
   `rollback-start/v${rollbackRecordKeyVersion}`
+const rollbackStateV2RecordKeyPrefix = 'rollback-state/v2'
 
 /**
  * Exact immutable identity used to address one rollback chain.
@@ -38,6 +39,18 @@ export function createWorkspaceSearchMigrationRollbackStartRecordKey(
   bindingDigest: string,
 ): string {
   return `${rollbackStartRecordKeyPrefix}/${bindingDigest}`
+}
+
+/**
+ * Creates one deterministic version-two mutable rollback-state record key.
+ *
+ * @param bindingDigest - Stable digest shared by the rollback key namespace.
+ * @returns Deterministic version-two rollback-state record key.
+ */
+export function createWorkspaceSearchMigrationRollbackStateV2RecordKey(
+  bindingDigest: string,
+): string {
+  return `${rollbackStateV2RecordKeyPrefix}/${bindingDigest}`
 }
 
 /**
