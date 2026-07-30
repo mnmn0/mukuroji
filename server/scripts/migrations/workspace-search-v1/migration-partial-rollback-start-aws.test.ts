@@ -92,6 +92,7 @@ import {
 } from './migration-pre-plan-authority-aws'
 import {
   createWorkspaceSearchMigrationRollbackConflictRecordKeys,
+  createWorkspaceSearchMigrationRollbackStateV2RecordKey,
 } from './migration-rollback-key'
 import {
   parseWorkspaceSearchMigrationRollbackStartRootV2,
@@ -296,6 +297,7 @@ class PartialRollbackStartHarness {
       getPartialRollbackStartItem: async (
         command: GetItemCommand,
       ): Promise<GetItemCommandOutput> => {
+        expect(command.input.ConsistentRead).toBe(true)
         const item = this.items.get(readCommandRecordKey(command))
         return item === undefined
           ? { $metadata: {} }
@@ -663,7 +665,20 @@ test('fails closed when only the shared start row remains durable', async () => 
     expectedRevision: 1,
     authority: createAuthorityClaim(fixture.currentAuthority),
   })
-  harness.deleteRowsByPrefix('rollback-state/v2/')
+  const rollback =
+    createWorkspaceSearchMigrationRollbackConflictRecordKeys({
+      stateTableId:
+        fixture.configuration.tables['migration-state'].tableId,
+      configurationHash: fixture.configurationHash,
+      runId: fixture.executionRun.runId,
+      executionRunDigest:
+        fixture.executionRun.executionRunDigest,
+    })
+  harness.deleteRowsByPrefix(
+    createWorkspaceSearchMigrationRollbackStateV2RecordKey(
+      rollback.bindingDigest,
+    ),
+  )
 
   await expectFailureCode(
     port.readRollbackState(),
@@ -947,7 +962,11 @@ function requireExpectedTransactionGuards(
   ).toBe(rollback.start)
   expect(
     items[index.rollbackState]?.Put?.Item?.recordKey?.S,
-  ).toBe(`rollback-state/v2/${rollback.bindingDigest}`)
+  ).toBe(
+    createWorkspaceSearchMigrationRollbackStateV2RecordKey(
+      rollback.bindingDigest,
+    ),
+  )
 }
 
 /**

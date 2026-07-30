@@ -83,6 +83,7 @@ import {
 } from './migration-pre-plan-authority-aws'
 import {
   createWorkspaceSearchMigrationRollbackConflictRecordKeys,
+  createWorkspaceSearchMigrationRollbackStateV2RecordKey,
   createWorkspaceSearchMigrationRollbackStartRecordKey,
 } from './migration-rollback-key'
 import type {
@@ -117,7 +118,6 @@ const rollbackStartRecordKind =
   'workspace-search-migration-rollback-start-root-record'
 const rollbackStateRecordKind =
   'workspace-search-migration-rollback-state-record'
-const rollbackStateRecordKeyPrefix = 'rollback-state/v2'
 
 /**
  * Fixed item positions for one atomic committed-prefix rollback start.
@@ -216,7 +216,7 @@ export type CreateWorkspaceSearchMigrationPartialRollbackStartAwsPortInput = {
   /** Narrow measured DynamoDB partial-start transport. */
   readonly transport:
     WorkspaceSearchMigrationPartialRollbackStartAwsTransport
-  /** Adapter-owned trusted clock. */
+  /** Adapter-owned receiver-independent trusted clock function. */
   readonly clock: WorkspaceSearchMigrationRollbackOperationAwsClock
 }
 
@@ -315,6 +315,16 @@ type PreparedPartialRollbackStartCommand = {
   readonly expectedRevision: number
   /** Detached exact current authority claim. */
   readonly authority: WorkspaceSearchMigrationRollbackAuthorityClaim
+}
+
+/**
+ * Coherent absent or atomically present partial-start snapshot.
+ */
+type PartialRollbackStartSnapshot = {
+  /** Strict immutable v2 start root when present. */
+  readonly startRoot?: WorkspaceSearchMigrationRollbackStartRootV2
+  /** Strict initial v2 rollback state when present. */
+  readonly state?: WorkspaceSearchMigrationRollbackPersistenceStateV2
 }
 
 /**
@@ -636,14 +646,8 @@ implements WorkspaceSearchMigrationPartialRollbackStartAwsPort {
    *
    * @returns Coherent absent or atomically present partial-start snapshot.
    */
-  private async readCoherentStartSnapshot(): Promise<{
-    /** Strict immutable v2 start root when present. */
-    readonly startRoot?:
-      WorkspaceSearchMigrationRollbackStartRootV2
-    /** Strict initial v2 rollback state when present. */
-    readonly state?:
-      WorkspaceSearchMigrationRollbackPersistenceStateV2
-  }> {
+  private async readCoherentStartSnapshot():
+    Promise<PartialRollbackStartSnapshot> {
     return readCoherentPartialRollbackStartSnapshot(
       async () => {
         const [startRoot, state] = await Promise.all([
@@ -755,12 +759,7 @@ implements WorkspaceSearchMigrationPartialRollbackStartAwsPort {
     intendedStart: WorkspaceSearchMigrationRollbackStartRootV2,
     transactionError: unknown,
   ): Promise<WorkspaceSearchMigrationRollbackPersistenceStateV2> {
-    let snapshot: {
-      readonly startRoot?:
-        WorkspaceSearchMigrationRollbackStartRootV2
-      readonly state?:
-        WorkspaceSearchMigrationRollbackPersistenceStateV2
-    }
+    let snapshot: PartialRollbackStartSnapshot
     try {
       snapshot = await this.readCoherentStartSnapshot()
     } catch (error: unknown) {
@@ -1419,7 +1418,9 @@ function createRollbackStartRecordKey(
 function createRollbackStateRecordKey(
   binding: PartialRollbackStartBinding,
 ): string {
-  return `${rollbackStateRecordKeyPrefix}/${binding.bindingDigest}`
+  return createWorkspaceSearchMigrationRollbackStateV2RecordKey(
+    binding.bindingDigest,
+  )
 }
 
 /**
@@ -1836,9 +1837,10 @@ function readLeaseClaim(
 }
 
 /**
- * Captures one Date-returning clock behind a strict runtime check.
+ * Captures one receiver-independent Date-returning clock behind a strict
+ * runtime check.
  *
- * @param value - Candidate trusted clock.
+ * @param value - Candidate trusted clock that does not depend on `this`.
  * @returns Captured detached clock.
  */
 function snapshotClock(value: unknown): () => Date {
