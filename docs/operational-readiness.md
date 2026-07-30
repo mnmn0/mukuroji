@@ -777,9 +777,11 @@ execution run、start full row、state exact-predecessor CAS、apply sequence/ma
 immutable receiptを固定13 item transactionへ結合します。Finishは同じcontrol root、zero-head state CAS、
 immutable rolled-back rootを固定10 item transactionへ結合します。Receipt/lifecycleのtorn read、
 transaction応答消失、同一targetの後続rollback、target read直前のwinnerをbounded rereadで回収し、
-terminal rootとsequence 1 receiptをcanonical bytesまで相関します。ただし、partial-startと
-v2 reverse/finishを同一managed sessionへ束縛するcompositionは未実装であり、それが揃うまでは
-partial-prefix rollbackをproduction capabilityとして扱いません。
+terminal rootとsequence 1 receiptをcanonical bytesまで相関します。Partial-startとv2 reverse/finishを
+同一managed sessionへ束縛するcompositionも実装済みで、同じpinned DynamoDB/S3 client、
+all-six table incarnation guard、S3 sealとDynamoDB transactionのpost-send quarantineを共有します。
+ただし、control CLI・orchestrator配線、terminal release、observability、DRとnon-production evidenceが
+揃うまではpartial-prefix rollbackをproduction capabilityとして扱いません。
 
 Complete applied rootから開始するstandalone reverse-rollback AWS portは、immutable start root、
 restart可能な完全run-state、exact-predecessor CAS state、各reverse operationのimmutable receipt、
@@ -820,7 +822,11 @@ managed sessionはcomplete applied root向けrollback portもcompositionし、�
 client、all-six table incarnationのread前後検証、transaction直前検証、post-send quarantineを適用します。
 Applied root、applied run state、apply sequence/marker、exact journal version、rollback state/receipt/root、
 target CASはsession外へraw transport capabilityを公開せずに結合します。
-Apply/seal/verification/rollback CLIとorchestrator配線、partial-prefix rollback、terminal outcomeへ
+Committed-prefix向けrollback portも同じmanaged session内でpartial-start、reverse、finishをcompositionし、
+committed-prefix sealのS3 write前後、exact journal read前後、各DynamoDB read前後とtransaction直前に
+all-six guardを適用します。Sealまたはtransaction送信後にtable identityを再確認できない場合はshared
+execution-control generationをquarantineし、standalone adapterのresponse-loss回収へ戻しません。
+Apply/seal/verification/rollback CLIとorchestrator配線、terminal outcomeへ
 束縛したwriter-fence release、close後のdrain/replanning orchestration、migration専用
 observability/alarm、restore/failover/DR drill、non-production実行evidenceも未完了です。Operation/checkpoint
 transactionが存在してもcomplete apply/verify/rollback supervisorにはならないため、Production migration
@@ -979,9 +985,11 @@ Process exit statusは、成功を`0`、migration failureまたは`OPERATION_FAI
    pure reverse/finish transition、apply-owned exact predecessor guard、complete applied-root absence guard、
    shared rollback-start sentinelとv2 stateを同時commitする固定13項目のstandalone partial-start
    transaction、advanced/terminal lifecycleのcoherent retry、固定13項目のstandalone reverse transaction、
-   固定10項目のstandalone finish transactionまで実装済みです。ただし、
-   close/admission/run creation/apply/seal/verification/rollbackのCLI・orchestrator配線、partial-prefix
-   rollbackのmanaged composition、terminal outcomeに束縛したrelease、observability/alarm、
+   固定10項目のstandalone finish transactionに加え、同じpinned DynamoDB/S3 client、all-six
+   pre/post guard、S3 sealとDynamoDB transactionのpost-send quarantineを共有するmanaged identity
+   compositionまで実装済みです。ただし、
+   close/admission/run creation/apply/seal/verification/rollbackのCLI・orchestrator配線、
+   terminal outcomeに束縛したrelease、observability/alarm、
    DR/non-production evidenceは未実装のため、migration全体のproduction gateはまだ実行可能とは
    扱いません。
 5. Online migration は writer fence/epoch または dual-write + high-watermark catch-up を有効化し、
