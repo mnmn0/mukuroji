@@ -53,6 +53,7 @@ import {
 } from './migration-artifacts'
 import {
   createAwsWorkspaceSearchMigrationApplyOperationPort,
+  createWorkspaceSearchMigrationApplyPredecessorAwsBinding,
   type WorkspaceSearchMigrationApplyCheckpointScanner,
   type WorkspaceSearchMigrationApplyOperationAuthorityPort,
   type WorkspaceSearchMigrationApplyOperationAwsPort,
@@ -140,6 +141,7 @@ import {
   createWorkspaceSearchMigrationAppliedRootKey,
   createWorkspaceSearchMigrationAppliedRootRecord,
   createWorkspaceSearchMigrationAppliedRootStrongReadCommand,
+  createWorkspaceSearchMigrationApplyRunBindingDigest,
   parseWorkspaceSearchMigrationAppliedRootRecord,
   parseWorkspaceSearchMigrationAppliedRootStrongReadOutput,
 } from './migration-applied-root-aws'
@@ -3216,6 +3218,346 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
   )
 })
 
+describe('Workspace Search apply predecessor AWS binding', () => {
+  test('projects admission from exact absent strong reads and creates the absent state guard', () => {
+    const fixture = createApplyFixture('put')
+    const stateTable =
+      fixture.configuration.tables['migration-state']
+    const binding =
+      createWorkspaceSearchMigrationApplyPredecessorAwsBinding({
+        stateTable,
+        configurationHash: fixture.configurationHash,
+        executionRun: fixture.executionRun,
+      })
+
+    const executionStateRead =
+      binding.createExecutionStateStrongReadCommand()
+    const appliedRootRead =
+      binding.createAppliedRootStrongReadCommand()
+    expect(executionStateRead.input).toEqual({
+      TableName: stateTable.tableName,
+      ConsistentRead: true,
+      Key: {
+        migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
+        recordKey: {
+          S:
+            `execution-state/v1/${
+              createWorkspaceSearchMigrationApplyRunBindingDigest({
+                stateTable,
+                configurationHash: fixture.configurationHash,
+                executionRun: fixture.executionRun,
+              })
+            }/state`,
+        },
+      },
+    })
+    expect(appliedRootRead.input).toEqual(
+      createWorkspaceSearchMigrationAppliedRootStrongReadCommand({
+        stateTable,
+        configurationHash: fixture.configurationHash,
+        executionRun: fixture.executionRun,
+      }).input,
+    )
+
+    const projection = binding.parseStrongReadOutputs(
+      { $metadata: {} },
+      { $metadata: {} },
+    )
+    expect(projection).toEqual({
+      predecessor: { kind: 'execution-run-admission' },
+      runState: fixture.executionRun.runState,
+    })
+    if (!Reflect.set(projection.runState, 'revision', 99)) {
+      throw new Error('Expected a mutable detached run-state fixture.')
+    }
+    expect(
+      binding.parseStrongReadOutputs({}, {}).runState.revision,
+    ).toBe(fixture.executionRun.runState.revision)
+
+    const condition =
+      binding.createExecutionStateConditionCheck(
+        projection.predecessor,
+      ).ConditionCheck
+    if (condition === undefined) {
+      throw new Error('Expected one absent execution-state condition.')
+    }
+    expect(condition.TableName).toBe(stateTable.tableName)
+    expect(condition.Key).toEqual(executionStateRead.input.Key)
+    expect(condition.ConditionExpression).toBe(
+      'attribute_not_exists(#a0) AND attribute_not_exists(#a1)',
+    )
+    expect(condition.ExpressionAttributeNames).toEqual({
+      '#a0': 'migrationId',
+      '#a1': 'recordKey',
+    })
+    expect(condition.ExpressionAttributeValues).toBeUndefined()
+  })
+
+  test('rejects malformed predecessor guard inputs without reading a Proxy', () => {
+    const fixture = createApplyFixture('put')
+    const binding =
+      createWorkspaceSearchMigrationApplyPredecessorAwsBinding({
+        stateTable:
+          fixture.configuration.tables['migration-state'],
+        configurationHash: fixture.configurationHash,
+        executionRun: fixture.executionRun,
+      })
+    let proxyReads = 0
+    const hostileProxy = new Proxy({}, {
+      get: () => {
+        proxyReads += 1
+        return 'tenant-secret'
+      },
+      getOwnPropertyDescriptor: () => {
+        proxyReads += 1
+        return undefined
+      },
+      ownKeys: () => {
+        proxyReads += 1
+        return []
+      },
+    })
+    const malformedPredecessors: readonly unknown[] = [
+      { kind: 'unknown-predecessor' },
+      {
+        kind: 'execution-run-admission',
+        unexpected: true,
+      },
+      null,
+      [],
+      hostileProxy,
+    ]
+
+    for (const predecessor of malformedPredecessors) {
+      expect(
+        captureSynchronousMigrationFailure(() =>
+          Reflect.apply(
+            binding.createExecutionStateConditionCheck,
+            binding,
+            [predecessor],
+          )
+        ).code,
+      ).toBe('INVALID_ARGUMENT')
+    }
+    expect(proxyReads).toBe(0)
+  })
+
+  test('projects legacy v1 and recreates the exact complete controlled row guard', async () => {
+    const fixture = createApplyFixture('put')
+    const harness = new ApplyOperationHarness(fixture)
+    const successor = await createApplyPort(
+      fixture,
+      harness,
+    ).commitApplyOperation(createApplyCommand(fixture))
+    const stateRecord = harness.findLastTransactionRecord(
+      'workspace-search-migration-execution-state-record',
+    )
+    if (stateRecord === undefined) {
+      throw new Error('Expected one durable legacy execution-state row.')
+    }
+    const binding =
+      createWorkspaceSearchMigrationApplyPredecessorAwsBinding({
+        stateTable:
+          fixture.configuration.tables['migration-state'],
+        configurationHash: fixture.configurationHash,
+        executionRun: fixture.executionRun,
+      })
+
+    const projection = binding.parseStrongReadOutputs(
+      { $metadata: {}, Item: stateRecord },
+      { $metadata: {} },
+    )
+    expect(projection.runState).toEqual(successor)
+    if (
+      projection.predecessor.kind !==
+        'mutable-execution-state'
+    ) {
+      throw new Error('Expected one mutable execution predecessor.')
+    }
+    expect(
+      projection.predecessor.executionState.executionStateVersion,
+    ).toBe(1)
+
+    const condition =
+      binding.createExecutionStateConditionCheck(
+        projection.predecessor,
+      )
+    expect(reconstructConditionCheckedItem(condition)).toEqual(
+      stateRecord,
+    )
+
+    const mismatchedDigestRecord = {
+      ...structuredClone(stateRecord),
+      runStateDigest: {
+        S: digest('tampered-predecessor-run-state'),
+      },
+    }
+    expect(
+      captureSynchronousMigrationFailure(() =>
+        binding.parseStrongReadOutputs(
+          { Item: mismatchedDigestRecord },
+          {},
+        )
+      ).code,
+    ).toBe('INVALID_STATE')
+    const extendedRecord = {
+      ...structuredClone(stateRecord),
+      unexpected: { S: 'forbidden' },
+    }
+    expect(
+      captureSynchronousMigrationFailure(() =>
+        binding.parseStrongReadOutputs(
+          { Item: extendedRecord },
+          {},
+        )
+      ).code,
+    ).toBe('INVALID_STATE')
+
+    const tamperedExecutionState = structuredClone(
+      projection.predecessor.executionState,
+    )
+    if (
+      !Reflect.set(
+        tamperedExecutionState,
+        'revision',
+        tamperedExecutionState.revision + 1,
+      )
+    ) {
+      throw new Error('Expected a mutable execution-state fixture.')
+    }
+    expect(
+      captureSynchronousMigrationFailure(() =>
+        binding.createExecutionStateConditionCheck({
+          kind: 'mutable-execution-state',
+          executionState: tamperedExecutionState,
+        })
+      ).code,
+    ).toBe('INVALID_ARGUMENT')
+  })
+
+  test('projects traversal-capable v2 and preserves its canonical state row', async () => {
+    const fixture = createApplyFixture('put', 0)
+    const harness = new ApplyOperationHarness(fixture)
+    harness.checkpointScanImplementation = async ({
+      location,
+      previousCheckpoint,
+    }) => createCheckpointPage(
+      previousCheckpoint,
+      location,
+      1,
+      false,
+    )
+    const successor = await createApplyPort(
+      fixture,
+      harness,
+    ).saveApplyCheckpoint(
+      createCheckpointCommand(
+        fixture,
+        'project-directory',
+        1,
+      ),
+    )
+    const stateRecord = harness.findLastTransactionRecord(
+      'workspace-search-migration-execution-state-record',
+    )
+    if (stateRecord === undefined) {
+      throw new Error('Expected one durable v2 execution-state row.')
+    }
+    const binding =
+      createWorkspaceSearchMigrationApplyPredecessorAwsBinding({
+        stateTable:
+          fixture.configuration.tables['migration-state'],
+        configurationHash: fixture.configurationHash,
+        executionRun: fixture.executionRun,
+      })
+
+    const projection = binding.parseStrongReadOutputs(
+      { Item: stateRecord },
+      {},
+    )
+    expect(projection.runState).toEqual(successor)
+    if (
+      projection.predecessor.kind !==
+        'mutable-execution-state'
+    ) {
+      throw new Error('Expected one mutable v2 predecessor.')
+    }
+    const executionState =
+      projection.predecessor.executionState
+    if (executionState.executionStateVersion !== 2) {
+      throw new Error('Expected traversal-capable execution state.')
+    }
+    expect(
+      executionState.apply.sources['project-directory'].cursor,
+    ).toEqual(
+      successor.apply.sources['project-directory'].cursor,
+    )
+    expect(
+      reconstructConditionCheckedItem(
+        binding.createExecutionStateConditionCheck(
+          projection.predecessor,
+        ),
+      ),
+    ).toEqual(stateRecord)
+  })
+
+  test('rejects an existing applied root and hostile table accessors', async () => {
+    const fixture = createApplyFixture('put', 0)
+    const harness = new ApplyOperationHarness(fixture)
+    const port = createApplyPort(fixture, harness)
+    const terminal = await completeApplyCheckpoints(
+      fixture,
+      port,
+      1,
+    )
+    await port.sealApply(
+      createApplySealCommand(fixture, terminal.revision),
+    )
+    const rootRecord = harness.findLastTransactionRecord(
+      'workspace-search-migration-applied-root-record',
+    )
+    if (rootRecord === undefined) {
+      throw new Error('Expected one complete applied-root row.')
+    }
+    const stateTable =
+      fixture.configuration.tables['migration-state']
+    const binding =
+      createWorkspaceSearchMigrationApplyPredecessorAwsBinding({
+        stateTable,
+        configurationHash: fixture.configurationHash,
+        executionRun: fixture.executionRun,
+      })
+    expect(
+      captureSynchronousMigrationFailure(() =>
+        binding.parseStrongReadOutputs(
+          {},
+          { Item: rootRecord },
+        )
+      ).code,
+    ).toBe('INVALID_STATE')
+
+    let accessorReads = 0
+    const accessorTable = structuredClone(stateTable)
+    Object.defineProperty(accessorTable, 'tableName', {
+      enumerable: true,
+      get: () => {
+        accessorReads += 1
+        return stateTable.tableName
+      },
+    })
+    expect(
+      captureSynchronousMigrationFailure(() =>
+        createWorkspaceSearchMigrationApplyPredecessorAwsBinding({
+          stateTable: accessorTable,
+          configurationHash: fixture.configurationHash,
+          executionRun: fixture.executionRun,
+        })
+      ).code,
+    ).toBe('INVALID_ARGUMENT')
+    expect(accessorReads).toBe(0)
+  }, 15_000)
+})
+
 /**
  * Creates one compact internally correlated apply fixture.
  *
@@ -4436,6 +4778,53 @@ function requireTransactionItems(
     throw new Error('Expected complete transaction items.')
   }
   return items
+}
+
+/**
+ * Reconstructs the complete item equality-bound by one present-row condition.
+ *
+ * @param item - Exact ConditionCheck produced by the predecessor capability.
+ * @returns Complete detached row represented by every name/value equality.
+ */
+function reconstructConditionCheckedItem(
+  item: TransactWriteItem,
+): Readonly<Record<string, AttributeValue>> {
+  const condition = item.ConditionCheck
+  if (
+    condition === undefined ||
+    condition.ExpressionAttributeNames === undefined ||
+    condition.ExpressionAttributeValues === undefined
+  ) {
+    throw new Error('Expected one exact present-row condition.')
+  }
+  const reconstructed: Record<string, AttributeValue> = {}
+  const nameEntries = Object.entries(
+    condition.ExpressionAttributeNames,
+  )
+  const expectedComparisons: string[] = []
+  for (const [index, entry] of nameEntries.entries()) {
+    const [nameToken, attributeName] = entry
+    const expectedNameToken = `#a${index}`
+    const valueToken = `:v${index}`
+    if (nameToken !== expectedNameToken) {
+      throw new Error('Expected canonical ordered condition names.')
+    }
+    const value = condition.ExpressionAttributeValues[valueToken]
+    if (value === undefined) {
+      throw new Error('Expected one value per controlled attribute.')
+    }
+    reconstructed[attributeName] = structuredClone(value)
+    expectedComparisons.push(`${nameToken} = ${valueToken}`)
+  }
+  if (
+    Object.keys(condition.ExpressionAttributeValues).length !==
+      nameEntries.length ||
+    condition.ConditionExpression !==
+      expectedComparisons.join(' AND ')
+  ) {
+    throw new Error('Expected exact full-row equality comparisons.')
+  }
+  return reconstructed
 }
 
 /**

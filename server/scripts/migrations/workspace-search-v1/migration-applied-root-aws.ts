@@ -210,6 +210,37 @@ export function createWorkspaceSearchMigrationAppliedRootKey(
 }
 
 /**
+ * Creates the deterministic absent immutable applied-root condition.
+ *
+ * Partial-prefix rollback start uses this guard to lose atomically when
+ * complete apply sealing has already published the immutable applied root.
+ *
+ * @param input - Exact state-table, configuration, and execution admission.
+ * @returns One absent-item DynamoDB ConditionCheck for the applied-root key.
+ */
+export function createWorkspaceSearchMigrationAppliedRootAbsentConditionCheck(
+  input: WorkspaceSearchMigrationAppliedRootAwsBindingInput,
+): TransactWriteItem {
+  return atAppliedRootAwsBoundary(() => {
+    const binding = prepareAppliedRootBinding(input)
+    return {
+      ConditionCheck: {
+        TableName: binding.stateTableName,
+        Key: createAppliedRootKeyFromBinding(binding),
+        ConditionExpression:
+          'attribute_not_exists(#migrationId) AND ' +
+          'attribute_not_exists(#recordKey)',
+        ExpressionAttributeNames: {
+          '#migrationId': 'migrationId',
+          '#recordKey': 'recordKey',
+        },
+        ReturnValuesOnConditionCheckFailure: 'NONE',
+      },
+    }
+  }, 'INVALID_ARGUMENT')
+}
+
+/**
  * Creates the adapter-owned strongly consistent applied-root GetItem command.
  *
  * @param input - Exact state-table, configuration, and execution admission.
