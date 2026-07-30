@@ -19,6 +19,13 @@ import {
   type WorkspaceSearchWriterFenceClosedRecord,
 } from '../../../src/infrastructure/runtime/workspace-search-writer-fence'
 import {
+  createWorkspaceSearchDocumentRecordKey,
+} from '../../../src/modules/workspace-search'
+import {
+  createAttributeMapDigest,
+  encodeAttributeMap,
+} from './dynamodb-attribute-codec'
+import {
   serializeWorkspaceSearchPlanSeal,
 } from './migration-artifacts'
 import {
@@ -37,6 +44,7 @@ import {
   type MigrationSourceCheckpoint,
   type MigrationTableIdentity,
   type WorkspaceSearchApplySeal,
+  type WorkspaceSearchJournalSegment,
   type WorkspaceSearchMaintenanceEvidenceReceipt,
   type WorkspaceSearchMigrationConfiguration,
   type WorkspaceSearchMigrationFailureCode,
@@ -46,6 +54,10 @@ import {
   WORKSPACE_SEARCH_MIGRATION_ID,
   WORKSPACE_SEARCH_MIGRATION_VERSION,
 } from './migration-contract'
+import {
+  createAbsentMigrationItemDigest,
+  serializeWorkspaceSearchJournalSegment,
+} from './migration-journal'
 import type {
   WorkspaceSearchMigrationCommittedPrefixApplySealReference,
 } from './migration-committed-prefix-apply-seal'
@@ -92,10 +104,17 @@ import {
 } from './migration-pre-plan-authority-aws'
 import {
   createWorkspaceSearchMigrationRollbackConflictRecordKeys,
+  createWorkspaceSearchMigrationRolledBackRootV2RecordKey,
   createWorkspaceSearchMigrationRollbackStateV2RecordKey,
 } from './migration-rollback-key'
 import {
+  createWorkspaceSearchMigrationRollbackOperationTransitionV2,
+  finishWorkspaceSearchMigrationRollbackV2,
   parseWorkspaceSearchMigrationRollbackStartRootV2,
+  serializeWorkspaceSearchMigrationRolledBackRootV2,
+  serializeWorkspaceSearchMigrationRollbackPersistenceStateV2,
+  type WorkspaceSearchMigrationRolledBackRootV2,
+  type WorkspaceSearchMigrationRollbackPersistenceStateV2,
 } from './migration-rollback-persistence-v2'
 import type {
   WorkspaceSearchMigrationRollbackAuthorityClaim,
@@ -128,7 +147,39 @@ const executionCreatedAt = '2026-07-29T01:19:30.000Z'
 const authorityEvaluatedAt = '2026-07-29T01:20:59.000Z'
 const sealCreatedAt = '2026-07-29T01:21:00.000Z'
 const commitAt = '2026-07-29T01:21:01.000Z'
+const rollbackAt = '2026-07-29T01:21:02.000Z'
+const finishedAt = '2026-07-29T01:21:03.000Z'
 const retainUntil = '2026-08-30T01:00:00.000Z'
+
+/** Exact production insertion order for controlled start-root fields. */
+const rollbackStartControlledFieldNames = Object.freeze([
+  'recordVersion',
+  'kind',
+  'stateTableId',
+  'configurationHash',
+  'runId',
+  'executionRunDigest',
+  'originDigest',
+  'predecessorRevision',
+  'startRootDigest',
+  'startRootBytes',
+])
+
+/** Exact production insertion order for controlled rollback-state fields. */
+const rollbackStateControlledFieldNames = Object.freeze([
+  'recordVersion',
+  'kind',
+  'stateTableId',
+  'configurationHash',
+  'runId',
+  'executionRunDigest',
+  'originDigest',
+  'startRootDigest',
+  'revision',
+  'status',
+  'stateDigest',
+  'stateBytes',
+])
 
 /**
  * Correlated static and fresh material for one partial rollback start.
@@ -198,6 +249,16 @@ class PartialRollbackStartHarness {
 
   /** Optional raw failure raised before transaction effects are stored. */
   transactionErrorBeforeCommit: unknown
+
+  /** Optional complete row maps returned for consecutive lifecycle observations. */
+  private lifecycleObservations:
+    readonly ReadonlyMap<
+      string,
+      Readonly<Record<string, AttributeValue>>
+    >[] | undefined
+
+  /** Number of lifecycle observation row reads served so far. */
+  private lifecycleObservationReadCount = 0
 
   /**
    * Creates one empty durable harness.
@@ -298,7 +359,21 @@ class PartialRollbackStartHarness {
         command: GetItemCommand,
       ): Promise<GetItemCommandOutput> => {
         expect(command.input.ConsistentRead).toBe(true)
-        const item = this.items.get(readCommandRecordKey(command))
+        const recordKey = readCommandRecordKey(command)
+        const observations = this.lifecycleObservations
+        const item = observations === undefined
+          ? this.items.get(recordKey)
+          : observations[
+              Math.min(
+                Math.floor(
+                  this.lifecycleObservationReadCount / 3,
+                ),
+                observations.length - 1,
+              )
+            ]?.get(recordKey)
+        if (observations !== undefined) {
+          this.lifecycleObservationReadCount += 1
+        }
         return item === undefined
           ? { $metadata: {} }
           : {
@@ -374,6 +449,54 @@ class PartialRollbackStartHarness {
       readRawItemRecordKey(item),
       structuredClone(item),
     )
+  }
+
+  /**
+   * Returns a detached snapshot of every current migration-state row.
+   *
+   * @returns Exact cloned row map keyed by deterministic record key.
+   */
+  snapshotStateRecords(): ReadonlyMap<
+    string,
+    Readonly<Record<string, AttributeValue>>
+  > {
+    const snapshot =
+      new Map<
+        string,
+        Readonly<Record<string, AttributeValue>>
+      >()
+    for (const [recordKey, item] of this.items) {
+      snapshot.set(recordKey, structuredClone(item))
+    }
+    return snapshot
+  }
+
+  /**
+   * Overrides consecutive lifecycle observations with exact row maps.
+   *
+   * @param observations - One complete three-row map per observation.
+   */
+  setLifecycleObservations(
+    observations: readonly ReadonlyMap<
+      string,
+      Readonly<Record<string, AttributeValue>>
+    >[],
+  ): void {
+    if (observations.length === 0) {
+      throw new Error('Expected at least one lifecycle observation.')
+    }
+    this.lifecycleObservations = observations.map((observation) => {
+      const snapshot =
+        new Map<
+          string,
+          Readonly<Record<string, AttributeValue>>
+        >()
+      for (const [recordKey, item] of observation) {
+        snapshot.set(recordKey, structuredClone(item))
+      }
+      return snapshot
+    })
+    this.lifecycleObservationReadCount = 0
   }
 
   /**
@@ -462,6 +585,31 @@ test('commits an admission-only partial rollback start as fixed thirteen items',
         .rollbackState
     ]?.Put?.Item?.recordKey?.S,
   ).toMatch(/^rollback-state\/v2\/[0-9a-f]{64}$/u)
+  const startItem = requirePutItem(
+    requireValue(
+      items[
+        workspaceSearchMigrationPartialRollbackStartTransactionIndex
+          .startRoot
+      ],
+      'Expected the rollback-start Put.',
+    ),
+  )
+  const startRootBytes = startItem.startRootBytes?.B
+  if (!(startRootBytes instanceof Uint8Array)) {
+    throw new Error('Expected canonical rollback-start bytes.')
+  }
+  const startRoot =
+    parseWorkspaceSearchMigrationRollbackStartRootV2(
+      startRootBytes,
+    )
+  expect(
+    port.createStartRootConditionCheck(startRoot),
+  ).toEqual(
+    createExpectedFullRowConditionCheck(
+      fixture.configuration.tables['migration-state'].tableName,
+      startItem,
+    ),
+  )
   expect(
     await port.readRollbackState(),
   ).toEqual(state)
@@ -475,7 +623,8 @@ test('commits an admission-only partial rollback start as fixed thirteen items',
 
 test('starts from a nonempty mutable v2 committed prefix', async () => {
   const fixture = createFixture(1)
-  const predecessor = createMutableV2Predecessor(fixture)
+  const predecessor =
+    createMutableV2Predecessor(fixture).state
   const predecessorRecord =
     createMutableExecutionStateRecord(fixture, predecessor)
   const harness = new PartialRollbackStartHarness(fixture)
@@ -596,6 +745,354 @@ test('recovers response loss and retries without another seal or transaction', a
   expect(
     harness.events.filter((event) => event === 'transact'),
   ).toHaveLength(1)
+})
+
+test('reads and retries from an advanced rolling-back state', async () => {
+  const fixture = createFixture(1)
+  const predecessor = createMutableV2Predecessor(fixture)
+  const harness = new PartialRollbackStartHarness(fixture)
+  harness.seedStateRecord(
+    createMutableExecutionStateRecord(
+      fixture,
+      predecessor.state,
+    ),
+  )
+  const port = createPort(fixture, harness)
+  const command = {
+    expectedRevision: predecessor.state.revision,
+    authority: createAuthorityClaim(fixture.currentAuthority),
+  }
+  await port.beginRollback(command)
+  const initialRows = harness.snapshotStateRecords()
+  const initialLifecycle =
+    requireValue(
+      await port.readRollbackLifecycle(),
+      'Expected an initial rollback lifecycle.',
+    )
+  const advanced =
+    createWorkspaceSearchMigrationRollbackOperationTransitionV2({
+      startRoot: initialLifecycle.startRoot,
+      predecessorState: initialLifecycle.state,
+      currentAuthority: fixture.currentAuthority,
+      applyReceipt: predecessor.receipt,
+      journalSegment: predecessor.journalSegment,
+      committedAt: rollbackAt,
+    })
+  const transitionPut =
+    port.createRollbackStateTransitionPut(
+      initialLifecycle.state,
+      advanced.state,
+    )
+  const identity = port.readBindingIdentity()
+  const stateRecordKey =
+    createWorkspaceSearchMigrationRollbackStateV2RecordKey(
+      identity.bindingDigest,
+    )
+  const initialStateItem = requireValue(
+    initialRows.get(stateRecordKey),
+    'Expected the initial rollback-state row.',
+  )
+  const expectedSuccessorItem =
+    createExpectedRollbackStateRecord(
+      fixture,
+      identity.bindingDigest,
+      advanced.state,
+    )
+  expect(transitionPut).toEqual(
+    createExpectedExactPredecessorPut(
+      fixture.configuration.tables['migration-state'].tableName,
+      initialStateItem,
+      expectedSuccessorItem,
+    ),
+  )
+  harness.seedStateRecord(requirePutItem(transitionPut))
+  const advancedRows = harness.snapshotStateRecords()
+  harness.setLifecycleObservations([
+    initialRows,
+    advancedRows,
+    advancedRows,
+  ])
+
+  const lifecycle = await port.readRollbackLifecycle()
+  const retried = await port.beginRollback(command)
+
+  expect(lifecycle).toEqual({
+    startRoot: initialLifecycle.startRoot,
+    state: advanced.state,
+  })
+  expect(retried).toEqual(advanced.state)
+  expect(
+    harness.events.filter((event) => event === 'seal-write'),
+  ).toHaveLength(1)
+  expect(
+    harness.events.filter((event) => event === 'transact'),
+  ).toHaveLength(1)
+})
+
+test('reads and retries from an exact terminal lifecycle', async () => {
+  const fixture = createFixture()
+  const harness = new PartialRollbackStartHarness(fixture)
+  const port = createPort(fixture, harness)
+  const command = {
+    expectedRevision: 1,
+    authority: createAuthorityClaim(fixture.currentAuthority),
+  }
+  await port.beginRollback(command)
+  const initialLifecycle =
+    requireValue(
+      await port.readRollbackLifecycle(),
+      'Expected an initial rollback lifecycle.',
+    )
+  const terminal = finishWorkspaceSearchMigrationRollbackV2({
+    startRoot: initialLifecycle.startRoot,
+    predecessorState: initialLifecycle.state,
+    currentAuthority: fixture.currentAuthority,
+    terminalReceipt: null,
+    finishedAt,
+  })
+  const terminalStatePut =
+    port.createRollbackStateTransitionPut(
+      initialLifecycle.state,
+      terminal.state,
+    )
+  const terminalRootPut =
+    port.createRolledBackRootAbsentPut(terminal.root)
+  const identity = port.readBindingIdentity()
+  const currentRows = harness.snapshotStateRecords()
+  const predecessorItem = requireValue(
+    currentRows.get(
+      createWorkspaceSearchMigrationRollbackStateV2RecordKey(
+        identity.bindingDigest,
+      ),
+    ),
+    'Expected the terminal predecessor state row.',
+  )
+  expect(terminalStatePut).toEqual(
+    createExpectedExactPredecessorPut(
+      fixture.configuration.tables['migration-state'].tableName,
+      predecessorItem,
+      createExpectedRollbackStateRecord(
+        fixture,
+        identity.bindingDigest,
+        terminal.state,
+      ),
+    ),
+  )
+  expect(terminalRootPut).toEqual(
+    createExpectedAbsentPut(
+      fixture.configuration.tables['migration-state'].tableName,
+      createExpectedRolledBackRootRecord(
+        fixture,
+        identity.bindingDigest,
+        terminal.root,
+      ),
+    ),
+  )
+  harness.seedStateRecord(
+    requirePutItem(terminalStatePut),
+  )
+  harness.seedStateRecord(
+    requirePutItem(terminalRootPut),
+  )
+
+  expect(await port.readRollbackLifecycle()).toEqual({
+    startRoot: initialLifecycle.startRoot,
+    state: terminal.state,
+    rolledBackRoot: terminal.root,
+  })
+  expect(await port.readRollbackState()).toEqual(terminal.state)
+  expect(await port.beginRollback(command)).toEqual(terminal.state)
+  expect(
+    harness.events.filter((event) => event === 'seal-write'),
+  ).toHaveLength(1)
+  expect(
+    harness.events.filter((event) => event === 'transact'),
+  ).toHaveLength(1)
+})
+
+test('classifies hostile transaction-factory input as invalid arguments', async () => {
+  const fixture = createFixture()
+  const harness = new PartialRollbackStartHarness(fixture)
+  const port = createPort(fixture, harness)
+  await port.beginRollback({
+    expectedRevision: 1,
+    authority: createAuthorityClaim(fixture.currentAuthority),
+  })
+  const lifecycle = requireValue(
+    await port.readRollbackLifecycle(),
+    'Expected a rollback lifecycle for hostile input tests.',
+  )
+  const terminal = finishWorkspaceSearchMigrationRollbackV2({
+    startRoot: lifecycle.startRoot,
+    predecessorState: lifecycle.state,
+    currentAuthority: fixture.currentAuthority,
+    terminalReceipt: null,
+    finishedAt,
+  })
+  const hostileStartRoot = new Proxy(
+    lifecycle.startRoot,
+    {
+      ownKeys: () => {
+        throw new Error('tenant-secret-start-root')
+      },
+    },
+  )
+  const foreignPredecessor = structuredClone(lifecycle.state)
+  Object.defineProperty(
+    foreignPredecessor,
+    'configurationHash',
+    {
+      value: digest('foreign-configuration'),
+      enumerable: true,
+    },
+  )
+  const hostileTerminalRoot = new Proxy(
+    terminal.root,
+    {
+      getOwnPropertyDescriptor: () => {
+        throw new Error('tenant-secret-terminal-root')
+      },
+    },
+  )
+
+  expectSynchronousFailureCode(
+    () => port.createStartRootConditionCheck(hostileStartRoot),
+    'INVALID_ARGUMENT',
+  )
+  expectSynchronousFailureCode(
+    () =>
+      port.createRollbackStateTransitionPut(
+        foreignPredecessor,
+        terminal.state,
+      ),
+    'INVALID_ARGUMENT',
+  )
+  expectSynchronousFailureCode(
+    () =>
+      port.createRollbackStateTransitionPut(
+        terminal.state,
+        terminal.state,
+      ),
+    'INVALID_ARGUMENT',
+  )
+  expectSynchronousFailureCode(
+    () =>
+      port.createRolledBackRootAbsentPut(
+        hostileTerminalRoot,
+      ),
+    'INVALID_ARGUMENT',
+  )
+})
+
+test('rejects torn and mismatched terminal lifecycle rows', async () => {
+  const fixture = createFixture()
+  const harness = new PartialRollbackStartHarness(fixture)
+  const port = createPort(fixture, harness)
+  await port.beginRollback({
+    expectedRevision: 1,
+    authority: createAuthorityClaim(fixture.currentAuthority),
+  })
+  const initialLifecycle =
+    requireValue(
+      await port.readRollbackLifecycle(),
+      'Expected an initial rollback lifecycle.',
+    )
+  const initialRows = harness.snapshotStateRecords()
+  const firstTerminal =
+    finishWorkspaceSearchMigrationRollbackV2({
+      startRoot: initialLifecycle.startRoot,
+      predecessorState: initialLifecycle.state,
+      currentAuthority: fixture.currentAuthority,
+      terminalReceipt: null,
+      finishedAt,
+    })
+  const secondTerminal =
+    finishWorkspaceSearchMigrationRollbackV2({
+      startRoot: initialLifecycle.startRoot,
+      predecessorState: initialLifecycle.state,
+      currentAuthority: fixture.currentAuthority,
+      terminalReceipt: null,
+      finishedAt: '2026-07-29T01:21:04.000Z',
+    })
+  const firstStateItem = requirePutItem(
+    port.createRollbackStateTransitionPut(
+      initialLifecycle.state,
+      firstTerminal.state,
+    ),
+  )
+  const firstRootItem = requirePutItem(
+    port.createRolledBackRootAbsentPut(firstTerminal.root),
+  )
+  const secondRootItem = requirePutItem(
+    port.createRolledBackRootAbsentPut(secondTerminal.root),
+  )
+  const identity = port.readBindingIdentity()
+  expect(Object.isFrozen(identity)).toBe(true)
+  expect(identity).toMatchObject({
+    stateTableId:
+      fixture.configuration.tables['migration-state'].tableId,
+    configurationHash: fixture.configurationHash,
+    runId,
+    executionRunDigest:
+      fixture.executionRun.executionRunDigest,
+  })
+  const stateKey =
+    createWorkspaceSearchMigrationRollbackStateV2RecordKey(
+      identity.bindingDigest,
+    )
+  const rootKey =
+    createWorkspaceSearchMigrationRolledBackRootV2RecordKey(
+      identity.bindingDigest,
+    )
+  const rollingWithRoot = new Map(initialRows)
+  rollingWithRoot.set(rootKey, firstRootItem)
+  const terminalWithoutRoot = new Map(initialRows)
+  terminalWithoutRoot.set(stateKey, firstStateItem)
+  const rootWithoutTerminal = new Map(initialRows)
+  rootWithoutTerminal.delete(stateKey)
+  rootWithoutTerminal.set(rootKey, firstRootItem)
+  const mismatchedTerminalRoot = new Map(initialRows)
+  mismatchedTerminalRoot.set(stateKey, firstStateItem)
+  mismatchedTerminalRoot.set(rootKey, secondRootItem)
+
+  for (const rows of [
+    rollingWithRoot,
+    terminalWithoutRoot,
+    rootWithoutTerminal,
+    mismatchedTerminalRoot,
+  ]) {
+    harness.setLifecycleObservations([rows, rows])
+    await expectFailureCode(
+      port.readRollbackLifecycle(),
+      'INVALID_STATE',
+    )
+  }
+})
+
+test('fails after three non-coherent lifecycle observations', async () => {
+  const fixture = createFixture()
+  const harness = new PartialRollbackStartHarness(fixture)
+  const port = createPort(fixture, harness)
+  await port.beginRollback({
+    expectedRevision: 1,
+    authority: createAuthorityClaim(fixture.currentAuthority),
+  })
+  const present = harness.snapshotStateRecords()
+  const absent =
+    new Map<
+      string,
+      Readonly<Record<string, AttributeValue>>
+    >()
+  harness.setLifecycleObservations([
+    present,
+    absent,
+    present,
+  ])
+
+  await expectFailureCode(
+    port.readRollbackLifecycle(),
+    'AMBIGUOUS_OPERATION_UNRESOLVED',
+  )
 })
 
 test('isolates the caller claim from authority-reader mutation', async () => {
@@ -830,6 +1327,28 @@ async function expectFailureCode(
 }
 
 /**
+ * Requires one synchronous operation to fail with an exact migration code.
+ *
+ * @param operation - Candidate throwing operation.
+ * @param expectedCode - Exact stable public failure code.
+ */
+function expectSynchronousFailureCode(
+  operation: () => unknown,
+  expectedCode: WorkspaceSearchMigrationFailureCode,
+): void {
+  try {
+    operation()
+  } catch (error: unknown) {
+    expect(error).toMatchObject({ code: expectedCode })
+    if (error instanceof Error) {
+      expect(error.message).not.toContain('tenant-secret')
+    }
+    return
+  }
+  throw new Error(`Expected migration failure ${expectedCode}.`)
+}
+
+/**
  * Creates one fixed-position conditional transaction cancellation.
  *
  * @param failedIndex - Exact failed item position.
@@ -970,6 +1489,240 @@ function requireExpectedTransactionGuards(
 }
 
 /**
+ * Creates the exact expected full-row start-root ConditionCheck.
+ *
+ * @param tableName - Exact measured migration-state table name.
+ * @param item - Complete expected controlled start-root row.
+ * @returns Exact expected condition-only transaction item.
+ */
+function createExpectedFullRowConditionCheck(
+  tableName: string,
+  item: Readonly<Record<string, AttributeValue>>,
+): TransactWriteItem {
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: createExpectedItemKey(item),
+      ...createExpectedFullRowConditionFields(
+        item,
+        rollbackStartControlledFieldNames,
+      ),
+      ReturnValuesOnConditionCheckFailure: 'NONE',
+    },
+  }
+}
+
+/**
+ * Creates the exact expected full-row predecessor CAS Put.
+ *
+ * @param tableName - Exact measured migration-state table name.
+ * @param predecessor - Complete expected controlled predecessor row.
+ * @param successor - Complete expected controlled successor row.
+ * @returns Exact expected successor Put with full predecessor conditions.
+ */
+function createExpectedExactPredecessorPut(
+  tableName: string,
+  predecessor: Readonly<Record<string, AttributeValue>>,
+  successor: Readonly<Record<string, AttributeValue>>,
+): TransactWriteItem {
+  expect(createExpectedItemKey(predecessor)).toEqual(
+    createExpectedItemKey(successor),
+  )
+  return {
+    Put: {
+      TableName: tableName,
+      Item: successor,
+      ...createExpectedFullRowConditionFields(
+        predecessor,
+        rollbackStateControlledFieldNames,
+      ),
+      ReturnValuesOnConditionCheckFailure: 'NONE',
+    },
+  }
+}
+
+/**
+ * Creates expected equality fields for every controlled non-key attribute.
+ *
+ * @param item - Complete expected controlled predecessor row.
+ * @param fieldNames - Exact controlled-field token order.
+ * @returns Exact expected condition expression substitutions.
+ */
+function createExpectedFullRowConditionFields(
+  item: Readonly<Record<string, AttributeValue>>,
+  fieldNames: readonly string[],
+): {
+  /** Exact conjunction of every controlled non-key field. */
+  readonly ConditionExpression: string
+  /** Exact attribute-name substitutions. */
+  readonly ExpressionAttributeNames:
+    Readonly<Record<string, string>>
+  /** Exact attribute-value substitutions. */
+  readonly ExpressionAttributeValues:
+    Readonly<Record<string, AttributeValue>>
+} {
+  const names: Record<string, string> = {}
+  const values: Record<string, AttributeValue> = {}
+  const clauses: string[] = []
+  let index = 0
+  for (const name of fieldNames) {
+    const value = requireValue(
+      item[name],
+      `Expected controlled field ${name}.`,
+    )
+    const nameToken = `#field${index}`
+    const valueToken = `:value${index}`
+    names[nameToken] = name
+    values[valueToken] = value
+    clauses.push(`${nameToken} = ${valueToken}`)
+    index += 1
+  }
+  if (clauses.length === 0) {
+    throw new Error('Expected controlled non-key fields.')
+  }
+  return {
+    ConditionExpression: clauses.join(' AND '),
+    ExpressionAttributeNames: names,
+    ExpressionAttributeValues: values,
+  }
+}
+
+/**
+ * Creates the exact expected absent-only Put.
+ *
+ * @param tableName - Exact measured migration-state table name.
+ * @param item - Complete expected immutable row.
+ * @returns Exact expected absent-row conditional Put.
+ */
+function createExpectedAbsentPut(
+  tableName: string,
+  item: Readonly<Record<string, AttributeValue>>,
+): TransactWriteItem {
+  return {
+    Put: {
+      TableName: tableName,
+      Item: item,
+      ConditionExpression:
+        'attribute_not_exists(#migrationId) AND ' +
+        'attribute_not_exists(#recordKey)',
+      ExpressionAttributeNames: {
+        '#migrationId': 'migrationId',
+        '#recordKey': 'recordKey',
+      },
+      ReturnValuesOnConditionCheckFailure: 'NONE',
+    },
+  }
+}
+
+/**
+ * Creates the exact expected v2 rollback-state envelope.
+ *
+ * @param fixture - Exact admitted lifecycle fixture.
+ * @param bindingDigest - Stable rollback persistence namespace digest.
+ * @param state - Exact current lifecycle state.
+ * @returns Complete expected low-level state row.
+ */
+function createExpectedRollbackStateRecord(
+  fixture: PartialRollbackStartFixture,
+  bindingDigest: string,
+  state: WorkspaceSearchMigrationRollbackPersistenceStateV2,
+): Readonly<Record<string, AttributeValue>> {
+  return {
+    migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
+    recordKey: {
+      S: createWorkspaceSearchMigrationRollbackStateV2RecordKey(
+        bindingDigest,
+      ),
+    },
+    recordVersion: { N: '2' },
+    kind: {
+      S: 'workspace-search-migration-rollback-state-record',
+    },
+    stateTableId: {
+      S: fixture.configuration.tables['migration-state'].tableId,
+    },
+    configurationHash: { S: fixture.configurationHash },
+    runId: { S: fixture.executionRun.runId },
+    executionRunDigest: {
+      S: fixture.executionRun.executionRunDigest,
+    },
+    originDigest: { S: state.originDigest },
+    startRootDigest: { S: state.startRootDigest },
+    revision: { N: String(state.revision) },
+    status: { S: state.status },
+    stateDigest: { S: state.stateDigest },
+    stateBytes: {
+      B: serializeWorkspaceSearchMigrationRollbackPersistenceStateV2(
+        state,
+      ),
+    },
+  }
+}
+
+/**
+ * Creates the exact expected v2 rolled-back-root envelope.
+ *
+ * @param fixture - Exact admitted lifecycle fixture.
+ * @param bindingDigest - Stable rollback persistence namespace digest.
+ * @param root - Exact immutable terminal root.
+ * @returns Complete expected low-level terminal-root row.
+ */
+function createExpectedRolledBackRootRecord(
+  fixture: PartialRollbackStartFixture,
+  bindingDigest: string,
+  root: WorkspaceSearchMigrationRolledBackRootV2,
+): Readonly<Record<string, AttributeValue>> {
+  return {
+    migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
+    recordKey: {
+      S: createWorkspaceSearchMigrationRolledBackRootV2RecordKey(
+        bindingDigest,
+      ),
+    },
+    recordVersion: { N: '2' },
+    kind: {
+      S: 'workspace-search-migration-rolled-back-root-record',
+    },
+    stateTableId: {
+      S: fixture.configuration.tables['migration-state'].tableId,
+    },
+    configurationHash: { S: fixture.configurationHash },
+    runId: { S: fixture.executionRun.runId },
+    executionRunDigest: {
+      S: fixture.executionRun.executionRunDigest,
+    },
+    originDigest: { S: root.originDigest },
+    startRootDigest: { S: root.startRootDigest },
+    terminalStateDigest: { S: root.terminalStateDigest },
+    rootDigest: { S: root.rootDigest },
+    rootBytes: {
+      B: serializeWorkspaceSearchMigrationRolledBackRootV2(root),
+    },
+  }
+}
+
+/**
+ * Creates the exact expected migration-state compound key.
+ *
+ * @param item - Complete expected controlled row.
+ * @returns Exact partition and sort key.
+ */
+function createExpectedItemKey(
+  item: Readonly<Record<string, AttributeValue>>,
+): Readonly<Record<string, AttributeValue>> {
+  return {
+    migrationId: requireValue(
+      item.migrationId,
+      'Expected a migrationId key attribute.',
+    ),
+    recordKey: requireValue(
+      item.recordKey,
+      'Expected a recordKey key attribute.',
+    ),
+  }
+}
+
+/**
  * Creates one fully correlated partial-start fixture.
  *
  * @param planOperationCount - Zero or one admitted plan operation.
@@ -1062,17 +1815,79 @@ function createFixture(
 }
 
 /**
+ * Journal-bearing mutable predecessor and exact reverse evidence.
+ */
+type MutableV2PredecessorFixture = {
+  /** Strict traversal-capable mutable execution-state predecessor. */
+  readonly state: WorkspaceSearchMigrationExecutionStateV2
+  /** Exact durable apply receipt for the sole mutation. */
+  readonly receipt: WorkspaceSearchOperationReceipt
+  /** Exact immutable preimage segment for the sole mutation. */
+  readonly journalSegment: WorkspaceSearchJournalSegment
+}
+
+/**
  * Creates a journal-bearing traversal-capable mutable predecessor.
  *
  * @param fixture - Exact admitted nonempty-plan fixture.
- * @returns Strict mutable version-two apply predecessor.
+ * @returns Strict mutable predecessor and exact reverse evidence.
  */
 function createMutableV2Predecessor(
   fixture: PartialRollbackStartFixture,
-): WorkspaceSearchMigrationExecutionStateV2 {
+): MutableV2PredecessorFixture {
   const current = fixture.executionRun.runState
   const operationId = digest('partial-prefix-operation')
-  const contentDigest = digest('partial-prefix-journal')
+  const sourceDigest = digest('partial-prefix-source')
+  const targetKey = {
+    workspaceId: { S: 'workspace-1' },
+    recordKey: {
+      S: createWorkspaceSearchDocumentRecordKey(
+        'document',
+        'document-1',
+      ),
+    },
+  }
+  const afterItem = {
+    ...targetKey,
+    entryType: { S: 'search-document' },
+    entityType: { S: 'document' },
+    entityId: { S: 'document-1' },
+    title: { S: 'Partial prefix document' },
+  }
+  const targetKeyDigest = createAttributeMapDigest(targetKey)
+  const beforeDigest = createAbsentMigrationItemDigest()
+  const afterDigest = createAttributeMapDigest(afterItem)
+  const journalSegment: WorkspaceSearchJournalSegment = {
+    kind: 'workspace-search-preimage-segment',
+    segmentVersion: 1,
+    migrationId: WORKSPACE_SEARCH_MIGRATION_ID,
+    migrationVersion: WORKSPACE_SEARCH_MIGRATION_VERSION,
+    runId,
+    configurationHash: fixture.configurationHash,
+    sequence: 1,
+    preparedFenceToken:
+      current.maintenanceEvidenceReceipt.fenceToken,
+    operationId,
+    sourceDigest,
+    previousHeadDigest: current.journalHeadDigest,
+    targetKey: encodeAttributeMap(targetKey),
+    targetKeyDigest,
+    before: {
+      exists: false,
+      digest: beforeDigest,
+    },
+    after: {
+      exists: true,
+      item: encodeAttributeMap(afterItem),
+      digest: afterDigest,
+    },
+    createdAt: '2026-07-29T01:19:30.500Z',
+  }
+  const journalText =
+    serializeWorkspaceSearchJournalSegment(journalSegment)
+  const contentDigest = createHash('sha256')
+    .update(journalText, 'utf8')
+    .digest('hex')
   const versionId = 'partial-prefix-journal-version'
   const journalHeadDigest = createJournalHeadDigest({
     previousHeadDigest: current.journalHeadDigest,
@@ -1090,9 +1905,10 @@ function createMutableV2Predecessor(
     planSequence: 1,
     planOperationDigest: createSinglePlanOperationDigest(),
     sequence: 1,
-    targetKeyDigest: digest('partial-prefix-target-key'),
-    beforeDigest: digest('partial-prefix-before'),
-    afterDigest: digest('partial-prefix-after'),
+    targetKeyDigest,
+    sourceDigest,
+    beforeDigest,
+    afterDigest,
     fenceToken: current.maintenanceEvidenceReceipt.fenceToken,
     maintenanceEvidenceReceiptDigest:
       createMigrationDigest(current.maintenanceEvidenceReceipt),
@@ -1102,7 +1918,8 @@ function createMutableV2Predecessor(
         `${contentDigest}.artifact`,
       versionId,
       contentDigest,
-      byteLength: 1,
+      byteLength:
+        new TextEncoder().encode(journalText).byteLength,
       retainUntil,
       headDigest: journalHeadDigest,
     },
@@ -1129,17 +1946,23 @@ function createMutableV2Predecessor(
     })
   const previousCheckpoint =
     current.apply.sources['project-directory']
-  return createWorkspaceSearchMigrationCheckpointExecutionState({
-    admission: fixture.executionRun,
-    predecessor: mutationState,
-    authority: {
-      lease: structuredClone(fixture.currentAuthority.lease),
-      ownerId: fixture.currentAuthority.lease.ownerId,
-      at: authorityEvaluatedAt,
-    },
-    location: 'project-directory',
-    checkpoint: createTerminalEmptyCheckpoint(previousCheckpoint),
-  })
+  return {
+    state:
+      createWorkspaceSearchMigrationCheckpointExecutionState({
+        admission: fixture.executionRun,
+        predecessor: mutationState,
+        authority: {
+          lease: structuredClone(fixture.currentAuthority.lease),
+          ownerId: fixture.currentAuthority.lease.ownerId,
+          at: authorityEvaluatedAt,
+        },
+        location: 'project-directory',
+        checkpoint:
+          createTerminalEmptyCheckpoint(previousCheckpoint),
+      }),
+    receipt: marker,
+    journalSegment,
+  }
 }
 
 /**
@@ -1752,6 +2575,22 @@ function requireTransactionItems(
     throw new Error('Expected transaction items.')
   }
   return items
+}
+
+/**
+ * Requires one transaction item to contain a complete Put row.
+ *
+ * @param item - Candidate transaction item.
+ * @returns Complete low-level Put item.
+ */
+function requirePutItem(
+  item: TransactWriteItem,
+): Readonly<Record<string, AttributeValue>> {
+  const value = item.Put?.Item
+  if (value === undefined) {
+    throw new Error('Expected one transaction Put item.')
+  }
+  return value
 }
 
 /**
