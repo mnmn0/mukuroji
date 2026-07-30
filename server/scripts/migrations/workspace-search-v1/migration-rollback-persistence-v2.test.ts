@@ -739,12 +739,10 @@ function createPrefixEvidence(
  * Creates one fully correlated strict persistence fixture.
  *
  * @param planOperationCount - Exact selected plan size.
- * @param planRetainUntil - Optional exact plan-artifact retention deadline.
  * @returns Immutable admission, planning root, and fresh authority.
  */
 function createFixture(
   planOperationCount: number,
-  planRetainUntil = retainUntil,
 ): RollbackPersistenceFixture {
   const configuration = createConfiguration()
   const configurationHash =
@@ -758,7 +756,7 @@ function createFixture(
     configurationHash,
     tableIds,
     planSeal,
-    planRetainUntil,
+    retainUntil,
   )
   const admittedReceipt = createMaintenanceReceipt(
     'admitted',

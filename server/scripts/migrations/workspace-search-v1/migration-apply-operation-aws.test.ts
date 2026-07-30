@@ -3293,6 +3293,55 @@ describe('Workspace Search apply predecessor AWS binding', () => {
     expect(condition.ExpressionAttributeValues).toBeUndefined()
   })
 
+  test('rejects malformed predecessor guard inputs without reading a Proxy', () => {
+    const fixture = createApplyFixture('put')
+    const binding =
+      createWorkspaceSearchMigrationApplyPredecessorAwsBinding({
+        stateTable:
+          fixture.configuration.tables['migration-state'],
+        configurationHash: fixture.configurationHash,
+        executionRun: fixture.executionRun,
+      })
+    let proxyReads = 0
+    const hostileProxy = new Proxy({}, {
+      get: () => {
+        proxyReads += 1
+        return 'tenant-secret'
+      },
+      getOwnPropertyDescriptor: () => {
+        proxyReads += 1
+        return undefined
+      },
+      ownKeys: () => {
+        proxyReads += 1
+        return []
+      },
+    })
+    const malformedPredecessors: readonly unknown[] = [
+      { kind: 'unknown-predecessor' },
+      {
+        kind: 'execution-run-admission',
+        unexpected: true,
+      },
+      null,
+      [],
+      hostileProxy,
+    ]
+
+    for (const predecessor of malformedPredecessors) {
+      expect(
+        captureSynchronousMigrationFailure(() =>
+          Reflect.apply(
+            binding.createExecutionStateConditionCheck,
+            binding,
+            [predecessor],
+          )
+        ).code,
+      ).toBe('INVALID_ARGUMENT')
+    }
+    expect(proxyReads).toBe(0)
+  })
+
   test('projects legacy v1 and recreates the exact complete controlled row guard', async () => {
     const fixture = createApplyFixture('put')
     const harness = new ApplyOperationHarness(fixture)
@@ -4749,22 +4798,31 @@ function reconstructConditionCheckedItem(
     throw new Error('Expected one exact present-row condition.')
   }
   const reconstructed: Record<string, AttributeValue> = {}
-  for (
-    const [nameToken, attributeName] of Object.entries(
-      condition.ExpressionAttributeNames,
-    )
-  ) {
-    if (!nameToken.startsWith('#a')) {
-      throw new Error('Expected one canonical condition name token.')
+  const nameEntries = Object.entries(
+    condition.ExpressionAttributeNames,
+  )
+  const expectedComparisons: string[] = []
+  for (const [index, entry] of nameEntries.entries()) {
+    const [nameToken, attributeName] = entry
+    const expectedNameToken = `#a${index}`
+    const valueToken = `:v${index}`
+    if (nameToken !== expectedNameToken) {
+      throw new Error('Expected canonical ordered condition names.')
     }
-    const value =
-      condition.ExpressionAttributeValues[
-        `:v${nameToken.slice(2)}`
-      ]
+    const value = condition.ExpressionAttributeValues[valueToken]
     if (value === undefined) {
       throw new Error('Expected one value per controlled attribute.')
     }
     reconstructed[attributeName] = structuredClone(value)
+    expectedComparisons.push(`${nameToken} = ${valueToken}`)
+  }
+  if (
+    Object.keys(condition.ExpressionAttributeValues).length !==
+      nameEntries.length ||
+    condition.ConditionExpression !==
+      expectedComparisons.join(' AND ')
+  ) {
+    throw new Error('Expected exact full-row equality comparisons.')
   }
   return reconstructed
 }

@@ -477,6 +477,9 @@ export interface WorkspaceSearchMigrationApplyPredecessorAwsBinding {
    * A present applied root is rejected because it is no longer a partial
    * predecessor. An absent mutable state selects the immutable admission;
    * otherwise the exact legacy-v1 or traversal-capable-v2 state is returned.
+   * These reads are not atomic, so the projection authorizes no write by
+   * itself. A consumer must combine the applied-root absence guard and this
+   * predecessor's absent-or-exact execution-state guard in one transaction.
    *
    * @param executionStateOutput - Untrusted mutable-state GetItem response.
    * @param appliedRootOutput - Untrusted applied-root GetItem response.
