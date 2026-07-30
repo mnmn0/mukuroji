@@ -97,6 +97,7 @@ import {
 } from './migration-pre-plan-authority-aws'
 import {
   createWorkspaceSearchMigrationRollbackConflictRecordKeys,
+  createWorkspaceSearchMigrationRollbackReceiptV2RecordKey,
   createWorkspaceSearchMigrationRolledBackRootV2RecordKey,
   createWorkspaceSearchMigrationRollbackStateV2RecordKey,
   createWorkspaceSearchMigrationRollbackStartRecordKey,
@@ -331,6 +332,10 @@ class PartialRollbackOperationHarness {
   /** Fresh authority returned by the authority reader. */
   authority: WorkspaceSearchMigrationPrePlanAuthority
 
+  /** Optional caller claim expected independently from the returned authority. */
+  expectedAuthorityClaim:
+    WorkspaceSearchMigrationRollbackAuthorityClaim | undefined
+
   /** Exact apply receipts indexed by mutating journal sequence. */
   private readonly applyReceiptsBySequence =
     new Map<number, WorkspaceSearchOperationReceipt>()
@@ -359,6 +364,13 @@ class PartialRollbackOperationHarness {
 
   /** Optional raw transaction failure after effects are applied. */
   transactionErrorAfterCommit: unknown
+
+  /** Optional response loss whose durable effects land on the next target read. */
+  transactionErrorBeforeDeferredCommit: unknown
+
+  /** Transaction whose durable effects are delayed until reconciliation. */
+  private deferredTransaction:
+    TransactWriteItemsCommand | undefined
 
   /** Winner transition installed immediately before the next target response. */
   private winnerOnTargetRead:
@@ -437,7 +449,10 @@ class PartialRollbackOperationHarness {
       readAuthority: async (
         claim: WorkspaceSearchMigrationRollbackAuthorityClaim,
       ): Promise<WorkspaceSearchMigrationPrePlanAuthority> => {
-        expect(claim).toEqual(createAuthorityClaim(this.authority))
+        expect(claim).toEqual(
+          this.expectedAuthorityClaim ??
+            createAuthorityClaim(this.authority),
+        )
         return structuredClone(this.authority)
       },
     }
@@ -652,6 +667,18 @@ class PartialRollbackOperationHarness {
             this.fixture.configuration.tables['workspace-search']
               .tableName
         ) {
+          const deferredTransaction = this.deferredTransaction
+          if (deferredTransaction !== undefined) {
+            const output = this.targetItem === undefined
+              ? { $metadata: {} }
+              : {
+                  $metadata: {},
+                  Item: structuredClone(this.targetItem),
+                }
+            this.deferredTransaction = undefined
+            this.applyTransaction(deferredTransaction)
+            return output
+          }
           const delayedWinner =
             this.winnerAfterTransactionTargetRead
           const lifecycleReadThreshold =
@@ -660,9 +687,16 @@ class PartialRollbackOperationHarness {
             delayedWinner !== undefined &&
             lifecycleReadThreshold !== undefined
           ) {
-            while (
-              this.lifecycleReadCount < lifecycleReadThreshold
+            for (
+              let spin = 0;
+              this.lifecycleReadCount < lifecycleReadThreshold;
+              spin += 1
             ) {
+              if (spin >= 1_000) {
+                throw new Error(
+                  'Expected lifecycle reads before the target response.',
+                )
+              }
               await Promise.resolve()
             }
             this.installWinner(
@@ -704,6 +738,14 @@ class PartialRollbackOperationHarness {
         this.transactions.push(command)
         if (this.transactionErrorBeforeCommit !== undefined) {
           throw this.transactionErrorBeforeCommit
+        }
+        if (
+          this.transactionErrorBeforeDeferredCommit !== undefined
+        ) {
+          const error = this.transactionErrorBeforeDeferredCommit
+          this.transactionErrorBeforeDeferredCommit = undefined
+          this.deferredTransaction = command
+          throw error
         }
         this.applyTransaction(command)
         if (this.transactionErrorAfterCommit !== undefined) {
@@ -794,7 +836,10 @@ class PartialRollbackOperationHarness {
   deleteReceipt(sequence: number): void {
     const identity = this.lifecycleBinding.readBindingIdentity()
     this.receiptItems.delete(
-      `rollback-receipt/v2/${identity.bindingDigest}/${sequence}`,
+      createWorkspaceSearchMigrationRollbackReceiptV2RecordKey(
+        identity.bindingDigest,
+        sequence,
+      ),
     )
   }
 
@@ -2595,7 +2640,10 @@ function createRollbackReceiptRecord(
   return {
     migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
     recordKey: {
-      S: `rollback-receipt/v2/${bindingDigest}/${receipt.sequence}`,
+      S: createWorkspaceSearchMigrationRollbackReceiptV2RecordKey(
+        bindingDigest,
+        receipt.sequence,
+      ),
     },
     recordVersion: { N: '2' },
     kind: {
@@ -2932,6 +2980,37 @@ test('commits one reverse step as fixed thirteen items and recovers response los
   ).toEqual(root.terminalState)
 })
 
+test('recovers when the target read precedes a delayed response-loss commit', async () => {
+  const mutation = createMutationRollbackFixture()
+  const harness = new PartialRollbackOperationHarness(
+    mutation.fixture,
+    mutation.startRoot,
+    mutation.afterItem,
+    mutation.applyReceipt,
+    mutation.journalSegment,
+  )
+  harness.transactionErrorBeforeDeferredCommit =
+    new Error('simulated delayed reverse commit')
+  const port = createPort(mutation.fixture, harness)
+
+  const state = await port.commitRollbackOperation({
+    expectedRevision: mutation.startRoot.initialState.revision,
+    authority:
+      createAuthorityClaim(mutation.fixture.operationAuthority),
+  })
+
+  expect(state).toMatchObject({
+    status: 'rolling-back',
+    nextSequence: 0,
+    restored: 1,
+    revision: mutation.startRoot.initialState.revision + 1,
+  })
+  expect(harness.transactions).toHaveLength(1)
+  expect(
+    (await port.readRollbackReceipt(1))?.successorStateDigest,
+  ).toBe(state.stateDigest)
+})
+
 test('accepts a later same-target rollback during response reconciliation', async () => {
   const sequential = createSequentialMutationRollbackFixture()
   const harness = new PartialRollbackOperationHarness(
@@ -3164,11 +3243,12 @@ test('rejects a terminal receipt row that contradicts the terminal root', async 
   const state = await port.commitRollbackOperation(reverseCommand)
   harness.authority = mutation.fixture.finishAuthority
   harness.clockTime = finishCommittedAt
-  await port.finishRollback({
+  const finishCommand = {
     expectedRevision: state.revision,
     authority:
       createAuthorityClaim(mutation.fixture.finishAuthority),
-  })
+  }
+  await port.finishRollback(finishCommand)
   const substituted =
     createWorkspaceSearchMigrationRollbackOperationTransitionV2({
       startRoot: mutation.startRoot,
@@ -3186,6 +3266,15 @@ test('rejects a terminal receipt row that contradicts the terminal root', async 
   )
   await expectRejectedCode(
     () => port.commitRollbackOperation(reverseCommand),
+    'INVALID_STATE',
+  )
+  await expectRejectedCode(
+    () => port.finishRollback(finishCommand),
+    'INVALID_STATE',
+  )
+  harness.deleteReceipt(1)
+  await expectRejectedCode(
+    () => port.finishRollback(finishCommand),
     'INVALID_STATE',
   )
 })
@@ -3513,6 +3602,73 @@ test('rejects a lifecycle capability from another rollback namespace', () => {
     error = caught
   }
   expect(readFailureCode(error)).toBe('INVALID_ARGUMENT')
+})
+
+test('rejects authority mismatches before the rollback transaction', async () => {
+  const mutation = createMutationRollbackFixture()
+  const claim =
+    createAuthorityClaim(mutation.fixture.operationAuthority)
+  const current = mutation.fixture.operationAuthority
+  const differentMaintenanceReceipt = {
+    ...createMaintenanceReceipt(),
+    evidenceDigest: digest('different-maintenance-evidence'),
+  }
+  const scenarios = [
+    {
+      expectedCode: 'LEASE_LOST',
+      authority: {
+        ...structuredClone(current),
+        lease: {
+          ...structuredClone(current.lease),
+          ownerId: 'different-owner',
+        },
+      },
+    },
+    {
+      expectedCode: 'INVALID_MAINTENANCE_EVIDENCE',
+      authority: createCurrentAuthority(
+        mutation.fixture.configuration,
+        mutation.fixture.configurationHash,
+        differentMaintenanceReceipt,
+        operationAuthorityEvaluatedAt,
+      ),
+    },
+    {
+      expectedCode: 'CONFIGURATION_DRIFT',
+      authority: createCurrentAuthority(
+        mutation.fixture.configuration,
+        digest('different-configuration'),
+        createMaintenanceReceipt(),
+        operationAuthorityEvaluatedAt,
+      ),
+    },
+  ]
+
+  for (const scenario of scenarios) {
+    const harness = new PartialRollbackOperationHarness(
+      mutation.fixture,
+      mutation.startRoot,
+      mutation.afterItem,
+      mutation.applyReceipt,
+      mutation.journalSegment,
+    )
+    harness.expectedAuthorityClaim = claim
+    harness.authority = scenario.authority
+
+    await expectRejectedCode(
+      () =>
+        createPort(
+          mutation.fixture,
+          harness,
+        ).commitRollbackOperation({
+          expectedRevision:
+            mutation.startRoot.initialState.revision,
+          authority: claim,
+        }),
+      scenario.expectedCode,
+    )
+    expect(harness.transactions).toHaveLength(0)
+  }
 })
 
 test('prioritizes reverse integrity cancellations over transient pressure', async () => {

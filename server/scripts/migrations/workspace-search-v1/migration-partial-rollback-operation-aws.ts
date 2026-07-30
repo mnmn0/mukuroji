@@ -746,7 +746,12 @@ implements WorkspaceSearchMigrationPartialRollbackOperationAwsPort {
   ): Promise<WorkspaceSearchMigrationRolledBackRootV2> {
     return runPartialRollbackOperationBoundary(async () => {
       const command = preparePartialRollbackOperationCommand(input)
-      const lifecycle = await this.requireLifecycle()
+      const {
+        receipt: observedTerminalReceipt,
+        lifecycle: lifecycleValue,
+      } = await this.readOperationSnapshot(1)
+      const lifecycle = lifecycleValue ??
+        failPartialRollbackOperation('INVALID_STATE')
       if (lifecycle.rolledBackRoot !== undefined) {
         requireRootMatchesFinishCommand(
           lifecycle.rolledBackRoot,
@@ -765,10 +770,16 @@ implements WorkspaceSearchMigrationPartialRollbackOperationAwsPort {
         command.authority,
         authority,
       )
-      const terminalReceipt =
-        startRoot.originalJournalSequence === 0
-          ? null
-          : await this.requireReceipt(1)
+      const terminalReceipt = startRoot.originalJournalSequence === 0
+        ? null
+        : observedTerminalReceipt ??
+          failPartialRollbackOperation('INVALID_STATE')
+      if (
+        startRoot.originalJournalSequence === 0 &&
+        observedTerminalReceipt !== undefined
+      ) {
+        return failPartialRollbackOperation('INVALID_STATE')
+      }
       if (terminalReceipt !== null) {
         requireReceiptBelongsToStart(startRoot, terminalReceipt)
         requireStateAtOrAfterReceipt(
@@ -884,20 +895,6 @@ implements WorkspaceSearchMigrationPartialRollbackOperationAwsPort {
           sequence,
           item,
         )
-  }
-
-  /**
-   * Requires one immutable reverse receipt row.
-   *
-   * @param sequence - Exact positive sequence.
-   * @returns Strict receipt.
-   */
-  private async requireReceipt(
-    sequence: number,
-  ): Promise<WorkspaceSearchMigrationRollbackOperationReceiptV2> {
-    const receipt = await this.readReceipt(sequence)
-    return receipt ??
-      failPartialRollbackOperation('INVALID_STATE')
   }
 
   /**
@@ -1105,7 +1102,7 @@ implements WorkspaceSearchMigrationPartialRollbackOperationAwsPort {
           targetOutput,
           'ROLLBACK_TARGET_DRIFT',
         )
-      } catch (error: unknown) {
+      } catch {
         const refreshed =
           await this.readOperationSnapshot(receipt.sequence)
         if (
@@ -1135,7 +1132,74 @@ implements WorkspaceSearchMigrationPartialRollbackOperationAwsPort {
         ) {
           return refreshed.lifecycle.state
         }
-        throw error
+        let refreshedTargetOutput: GetItemCommandOutput
+        try {
+          refreshedTargetOutput = await this.dependencies.get(
+            createStrongReadCommand(
+              this.binding.targetTable,
+              targetKey,
+            ),
+          )
+        } catch (error: unknown) {
+          return failPartialRollbackOperation(
+            readPartialRollbackReconciliationFailureCode(error),
+          )
+        }
+        try {
+          verifyWorkspaceSearchMigrationItemStrongRead(
+            this.binding.targetTable,
+            targetKey,
+            restoredSnapshot,
+            refreshedTargetOutput,
+            'ROLLBACK_TARGET_DRIFT',
+          )
+        } catch (error: unknown) {
+          let latest:
+            Awaited<ReturnType<
+              AwsWorkspaceSearchMigrationPartialRollbackOperationPort[
+                'readOperationSnapshot'
+              ]
+            >>
+          try {
+            latest =
+              await this.readOperationSnapshot(receipt.sequence)
+          } catch (snapshotError: unknown) {
+            return failPartialRollbackOperation(
+              readPartialRollbackReconciliationFailureCode(
+                snapshotError,
+              ),
+            )
+          }
+          if (
+            latest.receipt === undefined ||
+            latest.lifecycle === undefined
+          ) {
+            return failPartialRollbackOperation('INVALID_STATE')
+          }
+          requireReceiptIsLogicalWinner(
+            intendedReceipt,
+            intendedState,
+            latest.receipt,
+          )
+          requireReceiptMatchesCommand(
+            command,
+            startRoot,
+            latest.receipt,
+          )
+          requireStateAtOrAfterReceipt(
+            startRoot,
+            latest.lifecycle.state,
+            latest.receipt,
+          )
+          if (
+            latest.lifecycle.state.revision >
+              latest.receipt.successorRevision
+          ) {
+            return latest.lifecycle.state
+          }
+          throw error
+        }
+        return refreshed.lifecycle.state
       }
     } else {
       readOutputItem(targetOutput)
@@ -2958,46 +3022,11 @@ function requireLifecycleBindingIdentity(
   binding: PartialRollbackOperationBinding,
   value: unknown,
 ): void {
-  const record = requirePlainRecord(value, 'INVALID_ARGUMENT')
-  requireExactKeys(record, [
-    'bindingDigest',
-    'configurationHash',
-    'executionRunDigest',
-    'runId',
-    'stateTableId',
-  ], 'INVALID_ARGUMENT')
-  if (
-    readIdentifier(
-      readOwn(record, 'stateTableId', 'INVALID_ARGUMENT'),
-      'INVALID_ARGUMENT',
-    ) !== binding.stateTable.tableId ||
-    readDigest(
-      readOwn(
-        record,
-        'configurationHash',
-        'INVALID_ARGUMENT',
-      ),
-      'INVALID_ARGUMENT',
-    ) !== binding.configurationHash ||
-    readIdentifier(
-      readOwn(record, 'runId', 'INVALID_ARGUMENT'),
-      'INVALID_ARGUMENT',
-    ) !== binding.executionRun.runId ||
-    readDigest(
-      readOwn(
-        record,
-        'executionRunDigest',
-        'INVALID_ARGUMENT',
-      ),
-      'INVALID_ARGUMENT',
-    ) !== binding.executionRun.executionRunDigest ||
-    readDigest(
-      readOwn(record, 'bindingDigest', 'INVALID_ARGUMENT'),
-      'INVALID_ARGUMENT',
-    ) !== binding.bindingDigest
-  ) {
-    return failPartialRollbackOperation('INVALID_ARGUMENT')
-  }
+  requireCapabilityBindingIdentity(
+    binding,
+    value,
+    binding.bindingDigest,
+  )
 }
 
 /**
@@ -3009,6 +3038,29 @@ function requireLifecycleBindingIdentity(
 function requireApplyReceiptBindingIdentity(
   binding: PartialRollbackOperationBinding,
   value: unknown,
+): void {
+  requireCapabilityBindingIdentity(
+    binding,
+    value,
+    createWorkspaceSearchMigrationApplyRunBindingDigest({
+      stateTable: binding.stateTable,
+      configurationHash: binding.configurationHash,
+      executionRun: binding.executionRun,
+    }),
+  )
+}
+
+/**
+ * Requires one capability identity to share the admitted run namespace.
+ *
+ * @param binding - Exact static rollback binding.
+ * @param value - Candidate capability identity.
+ * @param expectedBindingDigest - Exact expected capability namespace.
+ */
+function requireCapabilityBindingIdentity(
+  binding: PartialRollbackOperationBinding,
+  value: unknown,
+  expectedBindingDigest: string,
 ): void {
   const record = requirePlainRecord(value, 'INVALID_ARGUMENT')
   requireExactKeys(record, [
@@ -3046,11 +3098,7 @@ function requireApplyReceiptBindingIdentity(
     readDigest(
       readOwn(record, 'bindingDigest', 'INVALID_ARGUMENT'),
       'INVALID_ARGUMENT',
-    ) !== createWorkspaceSearchMigrationApplyRunBindingDigest({
-      stateTable: binding.stateTable,
-      configurationHash: binding.configurationHash,
-      executionRun: binding.executionRun,
-    })
+    ) !== expectedBindingDigest
   ) {
     return failPartialRollbackOperation('INVALID_ARGUMENT')
   }
