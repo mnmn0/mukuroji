@@ -71,6 +71,7 @@ import {
   type WorkspaceSearchMigrationIdentityAwsSdkConfigurations,
   type WorkspaceSearchMigrationManagedAwsTransport,
   type WorkspaceSearchMigrationManagedAwsSession,
+  type WorkspaceSearchMigrationManagedPartialRollbackAwsPort,
   WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_CANONICAL_BYTES,
   WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_OPERATIONS,
   WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_TOTAL_ROWS,
@@ -120,6 +121,13 @@ import {
   workspaceSearchMigrationFullVerificationPublishTransactionIndex,
   type WorkspaceSearchMigrationFullVerificationAwsPort,
 } from './migration-full-verification-aws'
+import {
+  workspaceSearchMigrationPartialRollbackFinishTransactionIndex,
+  workspaceSearchMigrationPartialRollbackOperationTransactionIndex,
+} from './migration-partial-rollback-operation-aws'
+import {
+  workspaceSearchMigrationPartialRollbackStartTransactionIndex,
+} from './migration-partial-rollback-start-aws'
 import {
   workspaceSearchMigrationRollbackFinishTransactionIndex,
   workspaceSearchMigrationRollbackOperationTransactionIndex,
@@ -416,6 +424,18 @@ type ManagedFullVerificationFixture =
     /** Resumable full-verification port under the measured session. */
     readonly verification:
       WorkspaceSearchMigrationFullVerificationAwsPort
+  }
+
+/**
+ * Managed committed-prefix rollback fixture after one durable apply mutation.
+ */
+type ManagedPartialRollbackOperationFixture =
+  ManagedApplyOperationFixture & {
+    /** Exact mutable apply prefix consumed by partial rollback start. */
+    readonly applyingState: WorkspaceSearchMigrationRunState
+    /** Managed partial-start, reverse, and finish capability. */
+    readonly rollback:
+      WorkspaceSearchMigrationManagedPartialRollbackAwsPort
   }
 
 /**
@@ -6973,6 +6993,598 @@ describe('Workspace Search migration AWS identity adapter', () => {
   )
 
   test(
+    'reverses a committed prefix through pinned DynamoDB and S3 with all-six guards',
+    async () => {
+      const fixture =
+        await createManagedPartialRollbackOperationFixture(
+          'partial-rollback-reverse-restart',
+        )
+      const journalPutIndex =
+        fixture.transport.putImmutableArtifactCommands.findIndex(
+          (command) =>
+            command.input.Key?.includes(
+              '/apply-journal-segments/',
+            ) === true,
+        )
+      const journalPut =
+        fixture.transport.putImmutableArtifactCommands[
+          journalPutIndex
+        ]
+      if (
+        journalPutIndex < 0 ||
+        journalPut?.input.Key === undefined
+      ) {
+        throw new Error('Expected one managed apply journal object.')
+      }
+      const targetBefore =
+        fixture.plannedOperation.operation.before
+      const targetAfter =
+        fixture.plannedOperation.operation.after
+      if (!targetBefore.exists || !targetAfter.exists) {
+        throw new Error('Expected managed before and after targets.')
+      }
+      const transactions =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+      const immutablePuts =
+        fixture.transport.putImmutableArtifactCommands.length
+      const immutableHeads =
+        fixture.transport.headImmutableArtifactCommands.length
+      const immutableGets =
+        fixture.transport.getImmutableArtifactCommands.length
+      const sourceScans =
+        fixture.transport.scanSourceCommands.length
+      const targetScans =
+        fixture.transport.scanTargetCommands.length
+      const expectedTables = [
+        fixture.requested.tables['migration-state'],
+        fixture.requested.tables['project-directory'],
+        fixture.requested.tables['work-items'],
+        fixture.requested.tables.collaboration,
+        fixture.requested.tables.documents,
+        fixture.requested.tables['workspace-search'],
+      ]
+      const guardTrace: string[] = []
+      let transactionStage = 'start'
+      fixture.transport.describeTableEffect = (tableName) => {
+        guardTrace.push(tableName)
+      }
+      fixture.transport.putImmutableArtifactEffect = () => {
+        guardTrace.push('partial-seal-put')
+      }
+      fixture.transport.transactWritePrePlanAuthorityEffect = () => {
+        guardTrace.push(`${transactionStage}-transaction`)
+      }
+      const startCommand = createManagedPartialRollbackCommand(
+        fixture,
+        fixture.applyingState.revision,
+      )
+
+      const started =
+        await fixture.rollback.beginRollback(startCommand)
+
+      expect(started).toMatchObject({
+        persistenceVersion: 2,
+        status: 'rolling-back',
+        revision: fixture.applyingState.revision + 1,
+        upperBoundSequence: 1,
+        nextSequence: 1,
+      })
+      expect(
+        fixture.transport.putImmutableArtifactCommands,
+      ).toHaveLength(immutablePuts + 1)
+      expect(
+        fixture.transport.headImmutableArtifactCommands,
+      ).toHaveLength(immutableHeads + 1)
+      const sealPut =
+        fixture.transport.putImmutableArtifactCommands[
+          immutablePuts
+        ]
+      expect(sealPut?.input.Key).toContain(
+        '/committed-prefix-apply-seals/',
+      )
+      const sealRead =
+        fixture.transport.getImmutableArtifactCommands
+          .slice(immutableGets)
+          .find(
+            (command) =>
+              command.input.Key === sealPut?.input.Key,
+          )
+      expect(sealRead?.input).toMatchObject({
+        Bucket: TEST_BUCKET,
+        VersionId:
+          `immutable-artifact-version-${immutablePuts + 1}`,
+      })
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands[
+            transactions
+          ]?.input.TransactItems,
+      ).toHaveLength(
+        workspaceSearchMigrationPartialRollbackStartTransactionIndex
+          .count,
+      )
+
+      const applyOutput =
+        fixture.transport.getPrePlanAuthorityApplyOutput
+      let rollbackCommitted = false
+      fixture.transport.getPrePlanAuthorityApplyOutput = (command) =>
+        command.input.TableName ===
+          fixture.requested.tables['workspace-search']
+          ? {
+              $metadata: {},
+              Item: structuredClone(
+                rollbackCommitted
+                  ? targetBefore.item
+                  : targetAfter.item,
+              ),
+            }
+          : applyOutput?.(command)
+      transactionStage = 'reverse'
+      fixture.transport
+        .transactWritePrePlanAuthorityPostCommitEffect = () => {
+          rollbackCommitted = true
+        }
+      const journalReads =
+        fixture.transport.getImmutableArtifactCommands.length
+      const reverseCommand =
+        createManagedPartialRollbackCommand(
+          fixture,
+          started.revision,
+        )
+
+      const reversed =
+        await fixture.rollback.commitRollbackOperation(
+          reverseCommand,
+        )
+
+      fixture.transport
+        .transactWritePrePlanAuthorityPostCommitEffect = undefined
+      expect(reversed).toMatchObject({
+        status: 'rolling-back',
+        revision: started.revision + 1,
+        nextSequence: 0,
+        restored: 1,
+      })
+      expect(rollbackCommitted).toBe(true)
+      const exactJournalReads =
+        fixture.transport.getImmutableArtifactCommands
+          .slice(journalReads)
+          .filter(
+            (command) =>
+              command.input.Key === journalPut.input.Key,
+          )
+      expect(exactJournalReads).toHaveLength(1)
+      expect(exactJournalReads[0]?.input).toMatchObject({
+        Bucket: TEST_BUCKET,
+        Key: journalPut.input.Key,
+        VersionId:
+          `immutable-artifact-version-${journalPutIndex + 1}`,
+      })
+      const reverseItems =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands[
+            transactions + 1
+          ]?.input.TransactItems
+      expect(reverseItems).toHaveLength(
+        workspaceSearchMigrationPartialRollbackOperationTransactionIndex
+          .count,
+      )
+      expect(
+        reverseItems?.[
+          workspaceSearchMigrationPartialRollbackOperationTransactionIndex
+            .target
+        ]?.Put,
+      ).toMatchObject({
+        TableName: fixture.requested.tables['workspace-search'],
+        Item: targetBefore.item,
+      })
+      expect(fixture.transport.scanSourceCommands)
+        .toHaveLength(sourceScans)
+      expect(fixture.transport.scanTargetCommands)
+        .toHaveLength(targetScans)
+      expect(
+        fixture.transport.putImmutableArtifactCommands,
+      ).toHaveLength(immutablePuts + 1)
+
+      const restarted =
+        fixture.port.createPartialRollbackOperationPort(
+          fixture.executionBoundary,
+          fixture.sealedPlanningAuthority,
+          fixture.closedWriterFenceRecord,
+          fixture.executionRun,
+        )
+      await expect(restarted.readRollbackState())
+        .resolves.toEqual(reversed)
+      await expect(restarted.readRollbackReceipt(1))
+        .resolves.toMatchObject({ sequence: 1 })
+      const transactionsBeforeRetries =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+      const immutablePutsBeforeRetries =
+        fixture.transport.putImmutableArtifactCommands.length
+      await expect(restarted.beginRollback(startCommand))
+        .resolves.toEqual(reversed)
+      await expect(
+        restarted.commitRollbackOperation(reverseCommand),
+      ).resolves.toEqual(reversed)
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactionsBeforeRetries)
+      expect(
+        fixture.transport.putImmutableArtifactCommands,
+      ).toHaveLength(immutablePutsBeforeRetries)
+
+      transactionStage = 'finish'
+      const finishCommand =
+        createManagedPartialRollbackCommand(
+          fixture,
+          reversed.revision,
+        )
+      const root = await restarted.finishRollback(finishCommand)
+
+      expect(root).toMatchObject({
+        terminalState: {
+          persistenceVersion: 2,
+          status: 'rolled-back',
+          revision: reversed.revision + 1,
+          nextSequence: 0,
+        },
+        terminalReceipt: { sequence: 1 },
+      })
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands[
+            transactions + 2
+          ]?.input.TransactItems,
+      ).toHaveLength(
+        workspaceSearchMigrationPartialRollbackFinishTransactionIndex
+          .count,
+      )
+      await expect(restarted.readRollbackState())
+        .resolves.toEqual(root.terminalState)
+      await expect(restarted.readRollbackReceipt(1))
+        .resolves.toEqual(root.terminalReceipt ?? undefined)
+      await expect(restarted.readRollbackLifecycle())
+        .resolves.toMatchObject({
+          state: root.terminalState,
+          rolledBackRoot: root,
+        })
+      const transactionsAfterFinish =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+      await expect(restarted.finishRollback(finishCommand))
+        .resolves.toEqual(root)
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactionsAfterFinish)
+
+      for (const marker of [
+        'partial-seal-put',
+        'start-transaction',
+        'reverse-transaction',
+        'finish-transaction',
+      ]) {
+        const markerIndex = guardTrace.indexOf(marker)
+        expect(markerIndex).toBeGreaterThanOrEqual(
+          expectedTables.length,
+        )
+        expect(
+          guardTrace.slice(
+            markerIndex - expectedTables.length,
+            markerIndex,
+          ),
+        ).toEqual(expectedTables)
+        expect(
+          guardTrace.slice(
+            markerIndex + 1,
+            markerIndex + 1 + expectedTables.length,
+          ),
+        ).toEqual(expectedTables)
+      }
+      fixture.port.close()
+    },
+    20_000,
+  )
+
+  test(
+    'normalizes managed partial-start failures at the rollback boundary',
+    async () => {
+      const fixture =
+        await createManagedPartialRollbackOperationFixture(
+          'partial-rollback-error-boundary',
+        )
+      const command = createManagedPartialRollbackCommand(
+        fixture,
+        fixture.applyingState.revision,
+      )
+      const transactions =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+      const immutablePuts =
+        fixture.transport.putImmutableArtifactCommands.length
+
+      const failure =
+        await captureWorkspaceSearchMigrationFailure(
+          fixture.rollback.beginRollback({
+            ...command,
+            authority: {
+              ...command.authority,
+              maintenanceEvidenceReceiptDigest:
+                createMigrationDigest(
+                  'foreign-partial-rollback-maintenance-receipt',
+                ),
+            },
+          }),
+        )
+
+      expect(failure).toEqual(
+        new WorkspaceSearchMigrationFailure(
+          'INVALID_MAINTENANCE_EVIDENCE',
+          'Workspace Search migration rollback operation failed.',
+        ),
+      )
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactions)
+      expect(
+        fixture.transport.putImmutableArtifactCommands,
+      ).toHaveLength(immutablePuts)
+      fixture.port.close()
+    },
+  )
+
+  test(
+    'quarantines managed partial rollback after post-send seal drift',
+    async () => {
+      const fixture =
+        await createManagedPartialRollbackOperationFixture(
+          'partial-rollback-seal-post-send-drift',
+        )
+      const siblingApply =
+        fixture.port.createApplyOperationPort(
+          fixture.executionBoundary,
+          fixture.sealedPlanningAuthority,
+          fixture.closedWriterFenceRecord,
+          fixture.executionRun,
+        )
+      const targetTableName =
+        fixture.requested.tables['workspace-search']
+      const originalTarget =
+        fixture.transport.describeTableOutputs.get(targetTableName)
+      if (originalTarget === undefined) {
+        throw new Error(
+          'Expected measured partial rollback target identity.',
+        )
+      }
+      const transactions =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+      const immutablePuts =
+        fixture.transport.putImmutableArtifactCommands.length
+      const immutableHeads =
+        fixture.transport.headImmutableArtifactCommands.length
+      fixture.transport.putImmutableArtifactEffect = () => {
+        fixture.transport.describeTableOutputs.set(
+          targetTableName,
+          createReplacementDescribeTableOutput(
+            'workspace-search',
+            targetTableName,
+            fixture.requested,
+          ),
+        )
+      }
+
+      const failure =
+        await captureWorkspaceSearchMigrationFailure(
+          fixture.rollback.beginRollback(
+            createManagedPartialRollbackCommand(
+              fixture,
+              fixture.applyingState.revision,
+            ),
+          ),
+        )
+
+      expect(failure).toEqual(
+        new WorkspaceSearchMigrationFailure(
+          'AMBIGUOUS_OPERATION_UNRESOLVED',
+          'Workspace Search migration rollback operation failed.',
+        ),
+      )
+      expect(
+        fixture.transport.putImmutableArtifactCommands,
+      ).toHaveLength(immutablePuts + 1)
+      expect(
+        fixture.transport.headImmutableArtifactCommands,
+      ).toHaveLength(immutableHeads + 1)
+      expect(
+        fixture.transport.putImmutableArtifactCommands[
+          immutablePuts
+        ]?.input.Key,
+      ).toContain('/committed-prefix-apply-seals/')
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactions)
+
+      fixture.transport.putImmutableArtifactEffect = undefined
+      fixture.transport.describeTableOutputs.set(
+        targetTableName,
+        originalTarget,
+      )
+      const expectedPartialFailure =
+        new WorkspaceSearchMigrationFailure(
+          'INVALID_STATE',
+          'Workspace Search migration rollback operation failed.',
+        )
+      const expectedApplyFailure =
+        new WorkspaceSearchMigrationFailure(
+          'INVALID_STATE',
+          'Workspace Search migration apply operation failed.',
+        )
+      const ioBeforeQuarantineChecks = {
+        tableDescriptions:
+          fixture.transport.describeTableCommands.length,
+        authorityReads:
+          fixture.transport.getPrePlanAuthorityCommands.length,
+        transactions:
+          fixture.transport
+            .transactWritePrePlanAuthorityCommands.length,
+        immutablePuts:
+          fixture.transport.putImmutableArtifactCommands.length,
+        immutableHeads:
+          fixture.transport.headImmutableArtifactCommands.length,
+        immutableGets:
+          fixture.transport.getImmutableArtifactCommands.length,
+      }
+      await expect(fixture.rollback.readRollbackState())
+        .rejects.toEqual(expectedPartialFailure)
+      await expect(siblingApply.readRunState())
+        .rejects.toEqual(expectedApplyFailure)
+      expect(() =>
+        fixture.port.createPartialRollbackOperationPort(
+          fixture.executionBoundary,
+          fixture.sealedPlanningAuthority,
+          fixture.closedWriterFenceRecord,
+          fixture.executionRun,
+        ),
+      ).toThrow(expectedPartialFailure)
+      expect({
+        tableDescriptions:
+          fixture.transport.describeTableCommands.length,
+        authorityReads:
+          fixture.transport.getPrePlanAuthorityCommands.length,
+        transactions:
+          fixture.transport
+            .transactWritePrePlanAuthorityCommands.length,
+        immutablePuts:
+          fixture.transport.putImmutableArtifactCommands.length,
+        immutableHeads:
+          fixture.transport.headImmutableArtifactCommands.length,
+        immutableGets:
+          fixture.transport.getImmutableArtifactCommands.length,
+      }).toEqual(ioBeforeQuarantineChecks)
+
+      await fixture.port.measureConfiguration()
+      const recovered =
+        fixture.port.createPartialRollbackOperationPort(
+          fixture.executionBoundary,
+          fixture.sealedPlanningAuthority,
+          fixture.closedWriterFenceRecord,
+          fixture.executionRun,
+        )
+      await expect(recovered.readRollbackState())
+        .resolves.toBeUndefined()
+      fixture.port.close()
+    },
+    15_000,
+  )
+
+  test(
+    'invalidates stale managed partial rollback ports on remeasurement and close',
+    async () => {
+      const fixture =
+        await createManagedPartialRollbackOperationFixture(
+          'partial-rollback-lifecycle',
+        )
+      const expectedFailure =
+        new WorkspaceSearchMigrationFailure(
+          'INVALID_STATE',
+          'Workspace Search migration rollback operation failed.',
+        )
+
+      await fixture.port.measureConfiguration()
+      const ioAfterMeasurement = {
+        tableDescriptions:
+          fixture.transport.describeTableCommands.length,
+        authorityReads:
+          fixture.transport.getPrePlanAuthorityCommands.length,
+        transactions:
+          fixture.transport
+            .transactWritePrePlanAuthorityCommands.length,
+        immutablePuts:
+          fixture.transport.putImmutableArtifactCommands.length,
+        immutableHeads:
+          fixture.transport.headImmutableArtifactCommands.length,
+        immutableGets:
+          fixture.transport.getImmutableArtifactCommands.length,
+      }
+      await expect(fixture.rollback.readRollbackState())
+        .rejects.toEqual(expectedFailure)
+      expect({
+        tableDescriptions:
+          fixture.transport.describeTableCommands.length,
+        authorityReads:
+          fixture.transport.getPrePlanAuthorityCommands.length,
+        transactions:
+          fixture.transport
+            .transactWritePrePlanAuthorityCommands.length,
+        immutablePuts:
+          fixture.transport.putImmutableArtifactCommands.length,
+        immutableHeads:
+          fixture.transport.headImmutableArtifactCommands.length,
+        immutableGets:
+          fixture.transport.getImmutableArtifactCommands.length,
+      }).toEqual(ioAfterMeasurement)
+
+      const current =
+        fixture.port.createPartialRollbackOperationPort(
+          fixture.executionBoundary,
+          fixture.sealedPlanningAuthority,
+          fixture.closedWriterFenceRecord,
+          fixture.executionRun,
+        )
+      await expect(current.readRollbackState())
+        .resolves.toBeUndefined()
+      const ioBeforeClose = {
+        tableDescriptions:
+          fixture.transport.describeTableCommands.length,
+        authorityReads:
+          fixture.transport.getPrePlanAuthorityCommands.length,
+        transactions:
+          fixture.transport
+            .transactWritePrePlanAuthorityCommands.length,
+        immutablePuts:
+          fixture.transport.putImmutableArtifactCommands.length,
+        immutableHeads:
+          fixture.transport.headImmutableArtifactCommands.length,
+        immutableGets:
+          fixture.transport.getImmutableArtifactCommands.length,
+      }
+      fixture.port.close()
+      await expect(current.readRollbackState())
+        .rejects.toEqual(expectedFailure)
+      expect(() =>
+        fixture.port.createPartialRollbackOperationPort(
+          fixture.executionBoundary,
+          fixture.sealedPlanningAuthority,
+          fixture.closedWriterFenceRecord,
+          fixture.executionRun,
+        ),
+      ).toThrow(expectedFailure)
+      expect({
+        tableDescriptions:
+          fixture.transport.describeTableCommands.length,
+        authorityReads:
+          fixture.transport.getPrePlanAuthorityCommands.length,
+        transactions:
+          fixture.transport
+            .transactWritePrePlanAuthorityCommands.length,
+        immutablePuts:
+          fixture.transport.putImmutableArtifactCommands.length,
+        immutableHeads:
+          fixture.transport.headImmutableArtifactCommands.length,
+        immutableGets:
+          fixture.transport.getImmutableArtifactCommands.length,
+      }).toEqual(ioBeforeClose)
+    },
+    15_000,
+  )
+
+  test(
     'reverses a complete applied root through pinned DynamoDB and S3 and restarts reads',
     async () => {
       const fixture =
@@ -11836,6 +12448,42 @@ async function createManagedApplyOperationFixture(
 }
 
 /**
+ * Builds one managed partial rollback port after one durable apply mutation.
+ *
+ * The apply phase intentionally remains mutable and unsealed so rollback start
+ * must capture a committed-prefix seal rather than consume an applied root.
+ *
+ * @param identifier - Unique committed-prefix rollback fixture suffix.
+ * @returns Measured partial rollback port and its mutable apply predecessor.
+ */
+async function createManagedPartialRollbackOperationFixture(
+  identifier: string,
+): Promise<ManagedPartialRollbackOperationFixture> {
+  const fixture =
+    await createManagedApplyOperationFixture(identifier, true)
+  const apply = fixture.port.createApplyOperationPort(
+    fixture.executionBoundary,
+    fixture.sealedPlanningAuthority,
+    fixture.closedWriterFenceRecord,
+    fixture.executionRun,
+  )
+  const applyingState = await apply.commitApplyOperation(
+    createManagedApplyOperationCommand(fixture),
+  )
+  return {
+    ...fixture,
+    applyingState,
+    rollback:
+      fixture.port.createPartialRollbackOperationPort(
+        fixture.executionBoundary,
+        fixture.sealedPlanningAuthority,
+        fixture.closedWriterFenceRecord,
+        fixture.executionRun,
+      ),
+  }
+}
+
+/**
  * Builds one managed rollback port after completing a real target mutation.
  *
  * @param identifier - Unique complete-root rollback fixture suffix.
@@ -12125,6 +12773,37 @@ function createManagedRollbackCommand(
   expectedRevision: number,
 ): Parameters<
   WorkspaceSearchMigrationRollbackOperationAwsPort[
+    'beginRollback'
+  ]
+>[0] {
+  return {
+    expectedRevision,
+    authority: {
+      lease: {
+        runId: fixture.currentAuthority.lease.runId,
+        ownerId: fixture.currentAuthority.lease.ownerId,
+        fenceToken: fixture.currentAuthority.lease.fenceToken,
+      },
+      maintenanceEvidenceReceiptDigest:
+        fixture.currentAuthority.maintenanceEvidenceReceiptDigest,
+      maintenanceEvidencePointerRevision:
+        fixture.currentAuthority.maintenanceEvidencePointerRevision,
+    },
+  }
+}
+
+/**
+ * Creates one strict managed committed-prefix rollback command.
+ *
+ * @param fixture - Exact mutable-prefix rollback fixture.
+ * @param expectedRevision - Exact durable predecessor revision.
+ * @returns Detached partial rollback command under current authority.
+ */
+function createManagedPartialRollbackCommand(
+  fixture: ManagedPartialRollbackOperationFixture,
+  expectedRevision: number,
+): Parameters<
+  WorkspaceSearchMigrationManagedPartialRollbackAwsPort[
     'beginRollback'
   ]
 >[0] {
