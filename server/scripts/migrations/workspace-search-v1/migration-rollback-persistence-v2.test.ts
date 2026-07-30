@@ -457,7 +457,7 @@ describe('Workspace Search rollback persistence v2', () => {
     ).toEqual(terminal.root)
   })
 
-  test('rejects out-of-order, prematurely finished, and expired reverse evidence', () => {
+  test('rejects out-of-order reverse evidence', () => {
     const context = createTwoMutationRollbackContext()
     expectV2Failure(() =>
       createWorkspaceSearchMigrationRollbackOperationCommandIdentityV2({
@@ -466,6 +466,10 @@ describe('Workspace Search rollback persistence v2', () => {
         applyReceipt: context.evidence.receipts[0],
       })
     )
+  })
+
+  test('rejects a prematurely finished rollback', () => {
+    const context = createTwoMutationRollbackContext()
     expectV2Failure(() =>
       finishWorkspaceSearchMigrationRollbackV2({
         startRoot: context.root,
@@ -478,6 +482,11 @@ describe('Workspace Search rollback persistence v2', () => {
         finishedAt,
       })
     )
+  })
+
+  test('rejects reverse evidence at the inclusive retention boundary', () => {
+    const context = createTwoMutationRollbackContext()
+    // Equality leaves no time beyond the minimum commit window, so it fails.
     const retentionBoundary = new Date(
       Date.parse(secondRollbackAt) +
         WORKSPACE_SEARCH_MIGRATION_MINIMUM_COMMIT_WINDOW_MILLISECONDS,
@@ -863,10 +872,16 @@ describe('Workspace Search rollback persistence v2', () => {
       sharedBinary,
       accessorBinary,
     ]) {
-      const hostileJournalSegment = {
-        ...context.evidence.segments[1],
-        hostileGraph,
-      }
+      const hostileJournalSegment = structuredClone(
+        context.evidence.segments[1],
+      )
+      const hostileAfter = readTestRecord(
+        hostileJournalSegment.after,
+      )
+      const hostileItem = readTestRecord(
+        Reflect.get(hostileAfter, 'item'),
+      )
+      Reflect.set(hostileItem, 'hostileGraph', hostileGraph)
       expectV2Failure(() =>
         Reflect.apply(
           createWorkspaceSearchMigrationRollbackOperationTransitionV2,
@@ -1395,24 +1410,24 @@ function createTwoMutationRollbackContext() {
 function createReverseEvidence(
   admission: WorkspaceSearchMigrationExecutionRun,
 ): ReverseEvidence {
-  const first = createJournalLink(
+  const first = createJournalLink({
     admission,
-    1,
-    1,
-    'document-1',
-    '0'.repeat(64),
-    '2026-07-30T00:02:25.000Z',
-    firstMarkerAt,
-  )
-  const second = createJournalLink(
+    planSequence: 1,
+    sequence: 1,
+    entityId: 'document-1',
+    previousHeadDigest: '0'.repeat(64),
+    journalCreatedAt: '2026-07-30T00:02:25.000Z',
+    committedAt: firstMarkerAt,
+  })
+  const second = createJournalLink({
     admission,
-    2,
-    2,
-    'document-2',
-    first.receipt.journal.headDigest,
-    '2026-07-30T00:02:40.000Z',
-    secondMarkerAt,
-  )
+    planSequence: 2,
+    sequence: 2,
+    entityId: 'document-2',
+    previousHeadDigest: first.receipt.journal.headDigest,
+    journalCreatedAt: '2026-07-30T00:02:40.000Z',
+    committedAt: secondMarkerAt,
+  })
   return {
     receipts: [first.receipt, second.receipt],
     segments: [first.segment, second.segment],
@@ -1420,26 +1435,41 @@ function createReverseEvidence(
 }
 
 /**
+ * Inputs for one exact immutable journal link fixture.
+ */
+type CreateJournalLinkInput = {
+  /** Immutable execution admission owning the operation. */
+  readonly admission: WorkspaceSearchMigrationExecutionRun
+  /** One-based immutable plan position. */
+  readonly planSequence: number
+  /** One-based mutation-only journal sequence. */
+  readonly sequence: number
+  /** Stable target search-document entity identifier. */
+  readonly entityId: string
+  /** Exact preceding journal-chain head. */
+  readonly previousHeadDigest: string
+  /** Canonical immutable journal creation time. */
+  readonly journalCreatedAt: string
+  /** Canonical forward mutation commit time. */
+  readonly committedAt: string
+}
+
+/**
  * Creates one exact immutable journal segment and matching apply receipt.
  *
- * @param admission - Immutable execution admission owning the operation.
- * @param planSequence - One-based immutable plan position.
- * @param sequence - One-based mutation-only journal sequence.
- * @param entityId - Stable target search-document entity identifier.
- * @param previousHeadDigest - Exact preceding journal-chain head.
- * @param journalCreatedAt - Canonical immutable journal creation time.
- * @param committedAt - Canonical forward mutation commit time.
+ * @param input - Named immutable journal-link fixture values.
  * @returns Exact linked journal segment and durable apply receipt.
  */
-function createJournalLink(
-  admission: WorkspaceSearchMigrationExecutionRun,
-  planSequence: number,
-  sequence: number,
-  entityId: string,
-  previousHeadDigest: string,
-  journalCreatedAt: string,
-  committedAt: string,
-) {
+function createJournalLink(input: CreateJournalLinkInput) {
+  const {
+    admission,
+    planSequence,
+    sequence,
+    entityId,
+    previousHeadDigest,
+    journalCreatedAt,
+    committedAt,
+  } = input
   const recordKey = createWorkspaceSearchDocumentRecordKey(
     'document',
     entityId,
