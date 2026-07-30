@@ -83,6 +83,7 @@ import {
 } from './migration-pre-plan-authority-aws'
 import {
   createWorkspaceSearchMigrationRollbackConflictRecordKeys,
+  createWorkspaceSearchMigrationRolledBackRootV2RecordKey,
   createWorkspaceSearchMigrationRollbackStateV2RecordKey,
   createWorkspaceSearchMigrationRollbackStartRecordKey,
 } from './migration-rollback-key'
@@ -94,12 +95,16 @@ import type {
 } from './migration-rollback-operation-aws'
 import {
   createWorkspaceSearchMigrationRollbackStartRootV2,
+  parseWorkspaceSearchMigrationRolledBackRootV2,
   parseWorkspaceSearchMigrationRollbackPersistenceStateV2,
   parseWorkspaceSearchMigrationRollbackStartRootV2,
+  serializeWorkspaceSearchMigrationRolledBackRootV2,
   serializeWorkspaceSearchMigrationRollbackPersistenceStateV2,
   serializeWorkspaceSearchMigrationRollbackStartRootV2,
   type WorkspaceSearchMigrationRollbackPersistenceStateV2,
   type WorkspaceSearchMigrationRollbackStartRootV2,
+  type WorkspaceSearchMigrationRolledBackRootV2,
+  validateWorkspaceSearchMigrationRollbackAuthoritySuccessorV2,
 } from './migration-rollback-persistence-v2'
 import {
   createWorkspaceSearchMigrationSealedPlanningAuthorityV2ConditionCheck,
@@ -118,6 +123,8 @@ const rollbackStartRecordKind =
   'workspace-search-migration-rollback-start-root-record'
 const rollbackStateRecordKind =
   'workspace-search-migration-rollback-state-record'
+const rolledBackRootRecordKind =
+  'workspace-search-migration-rolled-back-root-record'
 
 /**
  * Fixed item positions for one atomic committed-prefix rollback start.
@@ -225,22 +232,100 @@ export type CreateWorkspaceSearchMigrationPartialRollbackStartAwsPortInput = {
  */
 export interface WorkspaceSearchMigrationPartialRollbackStartAwsPort {
   /**
-   * Strongly reads the initial v2 rollback state.
+   * Reads the immutable identity owned by this lifecycle capability.
    *
-   * @returns Strict durable state, or undefined before rollback starts.
+   * @returns Fresh frozen binding identity.
+   */
+  readBindingIdentity():
+    WorkspaceSearchMigrationPartialRollbackLifecycleBindingIdentity
+
+  /**
+   * Strongly reads the current validated v2 rollback lifecycle.
+   *
+   * @returns Coherent durable lifecycle, or undefined before rollback starts.
+   */
+  readRollbackLifecycle():
+    Promise<
+      WorkspaceSearchMigrationPartialRollbackLifecycleSnapshot | undefined
+    >
+
+  /**
+   * Strongly reads the current v2 rollback state.
+   *
+   * @returns Strict current durable state, or undefined before rollback starts.
    */
   readRollbackState():
     Promise<WorkspaceSearchMigrationRollbackPersistenceStateV2 | undefined>
 
   /**
+   * Creates one exact full-row condition for the immutable start root.
+   *
+   * @param startRoot - Exact immutable start root.
+   * @returns Full-row equality ConditionCheck.
+   */
+  createStartRootConditionCheck(
+    startRoot: WorkspaceSearchMigrationRollbackStartRootV2,
+  ): TransactWriteItem
+
+  /**
+   * Creates one exact predecessor-state CAS Put.
+   *
+   * @param predecessor - Exact current rollback state.
+   * @param successor - Exact direct lifecycle successor.
+   * @returns Full-row predecessor CAS Put of the successor state.
+   */
+  createRollbackStateTransitionPut(
+    predecessor: WorkspaceSearchMigrationRollbackPersistenceStateV2,
+    successor: WorkspaceSearchMigrationRollbackPersistenceStateV2,
+  ): TransactWriteItem
+
+  /**
+   * Creates one absent-only immutable terminal-root Put.
+   *
+   * @param rolledBackRoot - Exact immutable terminal root.
+   * @returns Absent-row conditional Put.
+   */
+  createRolledBackRootAbsentPut(
+    rolledBackRoot: WorkspaceSearchMigrationRolledBackRootV2,
+  ): TransactWriteItem
+
+  /**
    * Uploads a committed-prefix seal and atomically enters v2 rollback.
    *
    * @param input - Exact predecessor revision and current authority claim.
-   * @returns Exact durable initial rolling-back state.
+   * @returns Exact current durable rollback lifecycle state.
    */
   beginRollback(
     input: WorkspaceSearchMigrationRollbackCommandInput,
   ): Promise<WorkspaceSearchMigrationRollbackPersistenceStateV2>
+}
+
+/**
+ * Immutable identity of one v2 rollback lifecycle capability.
+ */
+export type WorkspaceSearchMigrationPartialRollbackLifecycleBindingIdentity = {
+  /** Immutable physical migration-state table identifier. */
+  readonly stateTableId: string
+  /** Reviewed measured-configuration digest. */
+  readonly configurationHash: string
+  /** Operator-selected migration run. */
+  readonly runId: string
+  /** Digest of the immutable execution admission. */
+  readonly executionRunDigest: string
+  /** Stable digest shared by every rollback persistence record key. */
+  readonly bindingDigest: string
+}
+
+/**
+ * Coherent durable v2 rollback lifecycle validated against one start root.
+ */
+export type WorkspaceSearchMigrationPartialRollbackLifecycleSnapshot = {
+  /** Exact immutable committed-prefix rollback-start root. */
+  readonly startRoot: WorkspaceSearchMigrationRollbackStartRootV2
+  /** Exact current rolling-back or terminal rollback state. */
+  readonly state: WorkspaceSearchMigrationRollbackPersistenceStateV2
+  /** Exact terminal root, present only with a terminal state. */
+  readonly rolledBackRoot?: WorkspaceSearchMigrationRolledBackRootV2
 }
 
 /**
@@ -323,8 +408,10 @@ type PreparedPartialRollbackStartCommand = {
 type PartialRollbackStartSnapshot = {
   /** Strict immutable v2 start root when present. */
   readonly startRoot?: WorkspaceSearchMigrationRollbackStartRootV2
-  /** Strict initial v2 rollback state when present. */
+  /** Strict current v2 rollback state when present. */
   readonly state?: WorkspaceSearchMigrationRollbackPersistenceStateV2
+  /** Strict immutable v2 terminal root when present. */
+  readonly rolledBackRoot?: WorkspaceSearchMigrationRolledBackRootV2
 }
 
 /**
@@ -387,6 +474,10 @@ implements WorkspaceSearchMigrationPartialRollbackStartAwsPort {
   /** Detached exact static binding. */
   private readonly binding: PartialRollbackStartBinding
 
+  /** Frozen immutable identity exposed to composing operation adapters. */
+  private readonly lifecycleBindingIdentity:
+    WorkspaceSearchMigrationPartialRollbackLifecycleBindingIdentity
+
   /** Captured narrow dependencies. */
   private readonly dependencies:
     PreparedPartialRollbackStartDependencies
@@ -402,37 +493,164 @@ implements WorkspaceSearchMigrationPartialRollbackStartAwsPort {
     dependencies: PreparedPartialRollbackStartDependencies,
   ) {
     this.binding = binding
+    this.lifecycleBindingIdentity = Object.freeze({
+      stateTableId: binding.stateTable.tableId,
+      configurationHash: binding.configurationHash,
+      runId: binding.executionRun.runId,
+      executionRunDigest:
+        binding.executionRun.executionRunDigest,
+      bindingDigest: binding.bindingDigest,
+    })
     this.dependencies = dependencies
   }
 
   /**
-   * Strongly reads the initial v2 rollback state.
+   * Reads the immutable identity owned by this lifecycle capability.
+   *
+   * @returns Fresh frozen binding identity.
+   */
+  readBindingIdentity():
+    WorkspaceSearchMigrationPartialRollbackLifecycleBindingIdentity {
+    return Object.freeze({
+      ...this.lifecycleBindingIdentity,
+    })
+  }
+
+  /**
+   * Strongly reads the current validated v2 rollback lifecycle.
+   *
+   * @returns Coherent durable lifecycle or undefined.
+   */
+  async readRollbackLifecycle():
+    Promise<
+      WorkspaceSearchMigrationPartialRollbackLifecycleSnapshot | undefined
+    > {
+    return runPartialRollbackStartBoundary(async () =>
+      this.readValidatedLifecycle()
+    )
+  }
+
+  /**
+   * Strongly reads the current v2 rollback state.
    *
    * @returns Strict durable state or undefined.
    */
   async readRollbackState():
     Promise<WorkspaceSearchMigrationRollbackPersistenceStateV2 | undefined> {
-    return runPartialRollbackStartBoundary(async () => {
-      const snapshot = await this.readCoherentStartSnapshot()
-      if (
-        snapshot.startRoot === undefined &&
-        snapshot.state === undefined
-      ) {
-        return undefined
-      }
-      if (
-        snapshot.startRoot === undefined ||
-        snapshot.state === undefined
-      ) {
-        return failPartialRollbackStart('INVALID_STATE')
-      }
-      requireStartAndInitialState(
-        this.binding,
-        snapshot.startRoot,
-        snapshot.state,
+    return runPartialRollbackStartBoundary(async () =>
+      (await this.readValidatedLifecycle())?.state
+    )
+  }
+
+  /**
+   * Creates one exact full-row start-root condition.
+   *
+   * @param startRoot - Exact immutable start root.
+   * @returns Full-row equality ConditionCheck.
+   */
+  createStartRootConditionCheck(
+    startRoot: WorkspaceSearchMigrationRollbackStartRootV2,
+  ): TransactWriteItem {
+    return runPartialRollbackStartSynchronousBoundary(() => {
+      const strictStartRoot =
+        readPartialRollbackStartFactoryInput(() => {
+          const parsed =
+            parseWorkspaceSearchMigrationRollbackStartRootV2(
+              serializeWorkspaceSearchMigrationRollbackStartRootV2(
+                startRoot,
+              ),
+            )
+          requireStartRootBinding(this.binding, parsed)
+          return parsed
+        })
+      return createFullRowConditionCheck(
+        this.binding.stateTable.tableName,
+        createRollbackStartRecord(
+          this.binding,
+          strictStartRoot,
+        ),
       )
-      await this.requireStoredSeal(snapshot.startRoot)
-      return snapshot.state
+    })
+  }
+
+  /**
+   * Creates one exact predecessor-state CAS Put.
+   *
+   * @param predecessor - Exact current rollback state.
+   * @param successor - Exact direct lifecycle successor.
+   * @returns Full-row predecessor CAS Put of the successor state.
+   */
+  createRollbackStateTransitionPut(
+    predecessor: WorkspaceSearchMigrationRollbackPersistenceStateV2,
+    successor: WorkspaceSearchMigrationRollbackPersistenceStateV2,
+  ): TransactWriteItem {
+    return runPartialRollbackStartSynchronousBoundary(() => {
+      const strictTransition =
+        readPartialRollbackStartFactoryInput(() => {
+          const parsedPredecessor =
+            parseWorkspaceSearchMigrationRollbackPersistenceStateV2(
+              serializeWorkspaceSearchMigrationRollbackPersistenceStateV2(
+                predecessor,
+              ),
+            )
+          const parsedSuccessor =
+            parseWorkspaceSearchMigrationRollbackPersistenceStateV2(
+              serializeWorkspaceSearchMigrationRollbackPersistenceStateV2(
+                successor,
+              ),
+            )
+          requireDirectRollbackStateTransition(
+            this.binding,
+            parsedPredecessor,
+            parsedSuccessor,
+          )
+          return {
+            predecessor: parsedPredecessor,
+            successor: parsedSuccessor,
+          }
+        })
+      return createExactPredecessorPut(
+        this.binding.stateTable.tableName,
+        createRollbackStateRecord(
+          this.binding,
+          strictTransition.predecessor,
+        ),
+        createRollbackStateRecord(
+          this.binding,
+          strictTransition.successor,
+        ),
+      )
+    })
+  }
+
+  /**
+   * Creates one absent-only immutable terminal-root Put.
+   *
+   * @param rolledBackRoot - Exact immutable terminal root.
+   * @returns Absent-row conditional Put.
+   */
+  createRolledBackRootAbsentPut(
+    rolledBackRoot: WorkspaceSearchMigrationRolledBackRootV2,
+  ): TransactWriteItem {
+    return runPartialRollbackStartSynchronousBoundary(() => {
+      const strictRoot =
+        readPartialRollbackStartFactoryInput(() => {
+          const parsed =
+            parseWorkspaceSearchMigrationRolledBackRootV2(
+              serializeWorkspaceSearchMigrationRolledBackRootV2(
+                rolledBackRoot,
+              ),
+            )
+          requireRolledBackRootBinding(this.binding, parsed)
+          return parsed
+        })
+      return createAbsentPut(
+        this.binding.stateTable.tableName,
+        createRolledBackRootRecord(
+          this.binding,
+          strictRoot,
+        ),
+      )
     })
   }
 
@@ -440,7 +658,7 @@ implements WorkspaceSearchMigrationPartialRollbackStartAwsPort {
    * Uploads the current committed-prefix seal and atomically starts rollback.
    *
    * @param input - Exact apply predecessor revision and authority claim.
-   * @returns Exact committed v2 initial rollback state.
+   * @returns Exact current durable rollback lifecycle state.
    */
   async beginRollback(
     input: WorkspaceSearchMigrationRollbackCommandInput,
@@ -448,21 +666,18 @@ implements WorkspaceSearchMigrationPartialRollbackStartAwsPort {
     return runPartialRollbackStartBoundary(async () => {
       const command = preparePartialRollbackStartCommand(input)
       const existing = await this.readCoherentStartSnapshot()
-      if (existing.startRoot !== undefined) {
-        if (existing.state === undefined) {
-          return failPartialRollbackStart('INVALID_STATE')
-        }
-        requireStartMatchesCommand(existing.startRoot, command)
-        requireStartAndInitialState(
-          this.binding,
-          existing.startRoot,
-          existing.state,
+      if (
+        existing.startRoot !== undefined ||
+        existing.state !== undefined ||
+        existing.rolledBackRoot !== undefined
+      ) {
+        const lifecycle =
+          await this.requireValidLifecycle(existing)
+        requireStartMatchesCommand(
+          lifecycle.startRoot,
+          command,
         )
-        await this.requireStoredSeal(existing.startRoot)
-        return existing.state
-      }
-      if (existing.state !== undefined) {
-        return failPartialRollbackStart('INVALID_STATE')
+        return lifecycle.state
       }
       if (await this.hasFullVerificationConflict()) {
         return failPartialRollbackStart('INVALID_STATE')
@@ -650,17 +865,82 @@ implements WorkspaceSearchMigrationPartialRollbackStartAwsPort {
     Promise<PartialRollbackStartSnapshot> {
     return readCoherentPartialRollbackStartSnapshot(
       async () => {
-        const [startRoot, state] = await Promise.all([
+        const [startRoot, state, rolledBackRoot] = await Promise.all([
           this.readStart(),
           this.readState(),
+          this.readRolledBackRoot(),
         ])
-        return { startRoot, state }
+        return { startRoot, state, rolledBackRoot }
       },
       (left, right) =>
         left.startRoot?.startRootDigest ===
           right.startRoot?.startRootDigest &&
-        left.state?.stateDigest === right.state?.stateDigest,
+        left.state?.stateDigest === right.state?.stateDigest &&
+        left.rolledBackRoot?.rootDigest ===
+          right.rolledBackRoot?.rootDigest,
     )
+  }
+
+  /**
+   * Reads and validates one complete lifecycle or coherent absence.
+   *
+   * @returns Exact validated lifecycle or undefined before rollback starts.
+   */
+  private async readValidatedLifecycle():
+    Promise<
+      WorkspaceSearchMigrationPartialRollbackLifecycleSnapshot | undefined
+    > {
+    const snapshot = await this.readCoherentStartSnapshot()
+    if (
+      snapshot.startRoot === undefined &&
+      snapshot.state === undefined &&
+      snapshot.rolledBackRoot === undefined
+    ) {
+      return undefined
+    }
+    return this.requireValidLifecycle(snapshot)
+  }
+
+  /**
+   * Validates one present start, mutable state, and optional terminal root.
+   *
+   * @param snapshot - Coherent present lifecycle rows.
+   * @returns Exact validated lifecycle.
+   */
+  private async requireValidLifecycle(
+    snapshot: PartialRollbackStartSnapshot,
+  ): Promise<WorkspaceSearchMigrationPartialRollbackLifecycleSnapshot> {
+    const startRoot = snapshot.startRoot
+    const state = snapshot.state
+    const rolledBackRoot = snapshot.rolledBackRoot
+    if (startRoot === undefined || state === undefined) {
+      return failPartialRollbackStart('INVALID_STATE')
+    }
+    requireStartAndLifecycleState(
+      this.binding,
+      startRoot,
+      state,
+    )
+    if (
+      (state.status === 'rolling-back' &&
+        rolledBackRoot !== undefined) ||
+      (state.status === 'rolled-back' &&
+        rolledBackRoot === undefined)
+    ) {
+      return failPartialRollbackStart('INVALID_STATE')
+    }
+    if (rolledBackRoot !== undefined) {
+      requireTerminalRootMatchesLifecycle(
+        this.binding,
+        startRoot,
+        state,
+        rolledBackRoot,
+      )
+    }
+    await this.requireStoredSeal(startRoot)
+    return rolledBackRoot === undefined
+      ? { startRoot, state }
+      : { startRoot, state, rolledBackRoot }
   }
 
   /**
@@ -685,7 +965,7 @@ implements WorkspaceSearchMigrationPartialRollbackStartAwsPort {
   /**
    * Strongly reads the v2 rollback-state row.
    *
-   * @returns Strict v2 initial state or undefined.
+   * @returns Strict current v2 lifecycle state or undefined.
    */
   private async readState():
     Promise<WorkspaceSearchMigrationRollbackPersistenceStateV2 | undefined> {
@@ -699,6 +979,25 @@ implements WorkspaceSearchMigrationPartialRollbackStartAwsPort {
     return item === undefined
       ? undefined
       : parseRollbackStateRecord(this.binding, item)
+  }
+
+  /**
+   * Strongly reads the immutable v2 rolled-back root row.
+   *
+   * @returns Strict v2 terminal root or undefined.
+   */
+  private async readRolledBackRoot():
+    Promise<WorkspaceSearchMigrationRolledBackRootV2 | undefined> {
+    const output = await this.dependencies.get(
+      createStrongStateReadCommand(
+        this.binding,
+        createRolledBackRootRecordKey(this.binding),
+      ),
+    )
+    const item = readOutputItem(output)
+    return item === undefined
+      ? undefined
+      : parseRolledBackRootRecord(this.binding, item)
   }
 
   /**
@@ -752,7 +1051,7 @@ implements WorkspaceSearchMigrationPartialRollbackStartAwsPort {
    * @param command - Detached attempted command.
    * @param intendedStart - Locally constructed intended start root.
    * @param transactionError - Raw transaction failure when present.
-   * @returns Exact committed initial state.
+   * @returns Exact current committed lifecycle state.
    */
   private async reconcileBeginAfterAttempt(
     command: PreparedPartialRollbackStartCommand,
@@ -773,7 +1072,8 @@ implements WorkspaceSearchMigrationPartialRollbackStartAwsPort {
     ) {
       if (
         snapshot.startRoot !== undefined ||
-        snapshot.state !== undefined
+        snapshot.state !== undefined ||
+        snapshot.rolledBackRoot !== undefined
       ) {
         return failPartialRollbackStart('INVALID_STATE')
       }
@@ -790,13 +1090,9 @@ implements WorkspaceSearchMigrationPartialRollbackStartAwsPort {
       intendedStart,
       snapshot.startRoot,
     )
-    requireStartAndInitialState(
-      this.binding,
-      snapshot.startRoot,
-      snapshot.state,
-    )
-    await this.requireStoredSeal(snapshot.startRoot)
-    return snapshot.state
+    return (
+      await this.requireValidLifecycle(snapshot)
+    ).state
   }
 }
 
@@ -836,6 +1132,25 @@ const rollbackStateRecordAttributeNames = Object.freeze([
   'stateDigest',
   'stateTableId',
   'status',
+])
+
+/**
+ * Complete controlled attribute set for the v2 rolled-back root row.
+ */
+const rolledBackRootRecordAttributeNames = Object.freeze([
+  'configurationHash',
+  'executionRunDigest',
+  'kind',
+  'migrationId',
+  'originDigest',
+  'recordKey',
+  'recordVersion',
+  'rootBytes',
+  'rootDigest',
+  'runId',
+  'startRootDigest',
+  'stateTableId',
+  'terminalStateDigest',
 ])
 
 /**
@@ -1178,10 +1493,10 @@ function parseRollbackStartRecord(
 }
 
 /**
- * Creates the complete initial v2 rollback-state DynamoDB row.
+ * Creates the complete current v2 rollback-state DynamoDB row.
  *
  * @param binding - Exact static partial-start binding.
- * @param state - Strict initial v2 rollback state.
+ * @param state - Strict current v2 rollback lifecycle state.
  * @returns Complete bounded low-level row.
  */
 function createRollbackStateRecord(
@@ -1216,7 +1531,7 @@ function createRollbackStateRecord(
 }
 
 /**
- * Strictly parses one initial v2 rollback-state DynamoDB row.
+ * Strictly parses one current v2 rollback-state DynamoDB row.
  *
  * @param binding - Exact static partial-start binding.
  * @param value - Untrusted low-level row.
@@ -1261,6 +1576,87 @@ function parseRollbackStateRecord(
     createRollbackStateRecord(binding, state),
   )
   return state
+}
+
+/**
+ * Creates the complete immutable v2 rolled-back root DynamoDB row.
+ *
+ * @param binding - Exact static partial-start binding.
+ * @param root - Strict immutable v2 terminal root.
+ * @returns Complete bounded low-level row.
+ */
+function createRolledBackRootRecord(
+  binding: PartialRollbackStartBinding,
+  root: WorkspaceSearchMigrationRolledBackRootV2,
+): Readonly<Record<string, AttributeValue>> {
+  requireRolledBackRootBinding(binding, root)
+  const item = {
+    migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
+    recordKey: { S: createRolledBackRootRecordKey(binding) },
+    recordVersion: { N: String(partialRollbackRecordVersion) },
+    kind: { S: rolledBackRootRecordKind },
+    stateTableId: { S: binding.stateTable.tableId },
+    configurationHash: { S: binding.configurationHash },
+    runId: { S: binding.executionRun.runId },
+    executionRunDigest: {
+      S: binding.executionRun.executionRunDigest,
+    },
+    originDigest: { S: root.originDigest },
+    startRootDigest: { S: root.startRootDigest },
+    terminalStateDigest: { S: root.terminalStateDigest },
+    rootDigest: { S: root.rootDigest },
+    rootBytes: {
+      B: serializeWorkspaceSearchMigrationRolledBackRootV2(root),
+    },
+  } satisfies Readonly<Record<string, AttributeValue>>
+  validateDynamoDbItemSize(item)
+  return item
+}
+
+/**
+ * Strictly parses one immutable v2 rolled-back root DynamoDB row.
+ *
+ * @param binding - Exact static partial-start binding.
+ * @param value - Untrusted low-level row.
+ * @returns Strict detached v2 terminal root.
+ */
+function parseRolledBackRootRecord(
+  binding: PartialRollbackStartBinding,
+  value: unknown,
+): WorkspaceSearchMigrationRolledBackRootV2 {
+  const item = cloneLowLevelMap(value, 'INVALID_STATE')
+  requireExactAttributeKeys(
+    item,
+    rolledBackRootRecordAttributeNames,
+    'INVALID_STATE',
+  )
+  requireCommonRecordBinding(
+    binding,
+    item,
+    rolledBackRootRecordKind,
+    createRolledBackRootRecordKey(binding),
+  )
+  const root = parseWorkspaceSearchMigrationRolledBackRootV2(
+    readBinaryAttribute(item, 'rootBytes'),
+  )
+  if (
+    readDigestAttribute(item, 'rootDigest') !==
+      root.rootDigest ||
+    readDigestAttribute(item, 'originDigest') !==
+      root.originDigest ||
+    readDigestAttribute(item, 'startRootDigest') !==
+      root.startRootDigest ||
+    readDigestAttribute(item, 'terminalStateDigest') !==
+      root.terminalStateDigest
+  ) {
+    return failPartialRollbackStart('INVALID_STATE')
+  }
+  requireRolledBackRootBinding(binding, root)
+  requireAttributeMapsEqual(
+    item,
+    createRolledBackRootRecord(binding, root),
+  )
+  return root
 }
 
 /**
@@ -1424,6 +1820,20 @@ function createRollbackStateRecordKey(
 }
 
 /**
+ * Creates the v2-only immutable rolled-back root record key.
+ *
+ * @param binding - Exact static partial-start binding.
+ * @returns Stable rolled-back-root/v2 key.
+ */
+function createRolledBackRootRecordKey(
+  binding: PartialRollbackStartBinding,
+): string {
+  return createWorkspaceSearchMigrationRolledBackRootV2RecordKey(
+    binding.bindingDigest,
+  )
+}
+
+/**
  * Creates one strongly consistent migration-state row read.
  *
  * @param binding - Exact static partial-start binding.
@@ -1512,6 +1922,117 @@ function createAbsentPut(
 }
 
 /**
+ * Creates one complete controlled-row equality ConditionCheck.
+ *
+ * @param tableName - Exact measured state table name.
+ * @param item - Complete strict predecessor row.
+ * @returns Full-controlled-row ConditionCheck.
+ */
+function createFullRowConditionCheck(
+  tableName: string,
+  item: Readonly<Record<string, AttributeValue>>,
+): TransactWriteItem {
+  const fields = createFullRowConditionFields(item)
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: readItemKey(item),
+      ...fields,
+      ReturnValuesOnConditionCheckFailure: 'NONE',
+    },
+  }
+}
+
+/**
+ * Creates one exact-predecessor mutable-state CAS Put.
+ *
+ * @param tableName - Exact measured state table name.
+ * @param predecessor - Complete strict predecessor row.
+ * @param successor - Complete strict successor row.
+ * @returns Full-row predecessor CAS Put.
+ */
+function createExactPredecessorPut(
+  tableName: string,
+  predecessor: Readonly<Record<string, AttributeValue>>,
+  successor: Readonly<Record<string, AttributeValue>>,
+): TransactWriteItem {
+  const predecessorKey = readItemKey(predecessor)
+  const successorKey = readItemKey(successor)
+  requireAttributeMapsEqual(predecessorKey, successorKey)
+  validateDynamoDbItemSize(successor)
+  return {
+    Put: {
+      TableName: tableName,
+      Item: cloneLowLevelMap(successor, 'INVALID_STATE'),
+      ...createFullRowConditionFields(predecessor),
+      ReturnValuesOnConditionCheckFailure: 'NONE',
+    },
+  }
+}
+
+/**
+ * Creates complete non-key equality expressions for one controlled row.
+ *
+ * @param item - Complete strict adapter-owned row.
+ * @returns Exact condition expression operands.
+ */
+function createFullRowConditionFields(
+  item: Readonly<Record<string, AttributeValue>>,
+): {
+  /** Exact conjunction of every controlled non-key field. */
+  readonly ConditionExpression: string
+  /** Attribute-name substitutions. */
+  readonly ExpressionAttributeNames:
+    Readonly<Record<string, string>>
+  /** Attribute-value substitutions. */
+  readonly ExpressionAttributeValues:
+    Readonly<Record<string, AttributeValue>>
+} {
+  const names: Record<string, string> = {}
+  const values: Record<string, AttributeValue> = {}
+  const clauses: string[] = []
+  let index = 0
+  for (const [name, value] of Object.entries(item)) {
+    if (name === 'migrationId' || name === 'recordKey') continue
+    const nameToken = `#field${index}`
+    const valueToken = `:value${index}`
+    names[nameToken] = name
+    values[valueToken] = value
+    clauses.push(`${nameToken} = ${valueToken}`)
+    index += 1
+  }
+  if (clauses.length === 0) {
+    return failPartialRollbackStart('INVALID_STATE')
+  }
+  return {
+    ConditionExpression: clauses.join(' AND '),
+    ExpressionAttributeNames: names,
+    ExpressionAttributeValues:
+      cloneLowLevelMap(values, 'INVALID_STATE'),
+  }
+}
+
+/**
+ * Reads the compound key from a complete migration-state row.
+ *
+ * @param item - Complete adapter-owned row.
+ * @returns Detached exact compound key.
+ */
+function readItemKey(
+  item: Readonly<Record<string, AttributeValue>>,
+): Readonly<Record<string, AttributeValue>> {
+  const migrationId = item.migrationId
+  const recordKey = item.recordKey
+  if (migrationId === undefined || recordKey === undefined) {
+    return failPartialRollbackStart('INVALID_STATE')
+  }
+  return cloneLowLevelMap(
+    { migrationId, recordKey },
+    'INVALID_STATE',
+  )
+}
+
+/**
  * Requires one start root to share the exact admitted static binding.
  *
  * @param binding - Exact static partial-start binding.
@@ -1557,7 +2078,7 @@ function requireStartRootBinding(
 }
 
 /**
- * Requires one initial state to share the exact admitted static binding.
+ * Requires one lifecycle state to share the exact admitted static binding.
  *
  * @param binding - Exact static partial-start binding.
  * @param state - Candidate strict v2 rollback state.
@@ -1573,15 +2094,45 @@ function requireStateBinding(
     state.executionRunDigest !==
       binding.executionRun.executionRunDigest ||
     state.sealedPlanningAuthorityDigest !==
-      binding.sealedPlanningAuthority.authorityDigest ||
-    state.status !== 'rolling-back' ||
-    state.predecessorKind !== 'committed-prefix-origin'
+      binding.sealedPlanningAuthority.authorityDigest
   ) {
     return failPartialRollbackStart('INVALID_STATE')
   }
   for (const role of workspaceSearchWriterFenceTableRoles) {
     if (
       state.tableIds[role] !==
+        binding.executionRun.binding.tableIds[role]
+    ) {
+      return failPartialRollbackStart('INVALID_STATE')
+    }
+  }
+}
+
+/**
+ * Requires one terminal root to share the exact admitted static binding.
+ *
+ * @param binding - Exact static partial-start binding.
+ * @param root - Candidate strict v2 rolled-back root.
+ */
+function requireRolledBackRootBinding(
+  binding: PartialRollbackStartBinding,
+  root: WorkspaceSearchMigrationRolledBackRootV2,
+): void {
+  if (
+    root.persistenceVersion !== partialRollbackRecordVersion ||
+    root.configurationHash !== binding.configurationHash ||
+    root.runId !== binding.executionRun.runId ||
+    root.executionRunDigest !==
+      binding.executionRun.executionRunDigest ||
+    root.sealedPlanningAuthorityDigest !==
+      binding.sealedPlanningAuthority.authorityDigest ||
+    root.terminalState.status !== 'rolled-back'
+  ) {
+    return failPartialRollbackStart('INVALID_STATE')
+  }
+  for (const role of workspaceSearchWriterFenceTableRoles) {
+    if (
+      root.tableIds[role] !==
         binding.executionRun.binding.tableIds[role]
     ) {
       return failPartialRollbackStart('INVALID_STATE')
@@ -1626,6 +2177,149 @@ function requireStartAndInitialState(
       Buffer.from(rootStateBytes),
       Buffer.from(stateBytes),
     ) !== 0
+  ) {
+    return failPartialRollbackStart('INVALID_STATE')
+  }
+}
+
+/**
+ * Requires one current lifecycle state to descend from the exact start root.
+ *
+ * @param binding - Exact static partial-start binding.
+ * @param root - Strict immutable v2 start root.
+ * @param state - Strict current v2 rollback lifecycle state.
+ */
+function requireStartAndLifecycleState(
+  binding: PartialRollbackStartBinding,
+  root: WorkspaceSearchMigrationRollbackStartRootV2,
+  state: WorkspaceSearchMigrationRollbackPersistenceStateV2,
+): void {
+  requireStartAndInitialState(
+    binding,
+    root,
+    root.initialState,
+  )
+  requireStateBinding(binding, state)
+  validateWorkspaceSearchMigrationRollbackAuthoritySuccessorV2(
+    root.currentAuthority,
+    state.currentAuthority,
+  )
+  const rollingRevision =
+    root.predecessorRevision + 1 + state.restored
+  const expectedRevision = state.status === 'rolled-back'
+    ? rollingRevision + 1
+    : rollingRevision
+  if (
+    !Number.isSafeInteger(rollingRevision) ||
+    !Number.isSafeInteger(expectedRevision) ||
+    state.originDigest !== root.originDigest ||
+    state.startRootDigest !== root.startRootDigest ||
+    state.upperBoundSequence !== root.originalJournalSequence ||
+    state.revision !== expectedRevision ||
+    (
+      state.status === 'rolling-back' &&
+      state.restored === 0 &&
+      state.stateDigest !== root.initialState.stateDigest
+    ) ||
+    (
+      (state.status !== 'rolling-back' || state.restored !== 0) &&
+      state.predecessorKind !== 'rollback-state'
+    )
+  ) {
+    return failPartialRollbackStart('INVALID_STATE')
+  }
+}
+
+/**
+ * Requires a terminal root to exactly publish the current terminal state.
+ *
+ * @param binding - Exact static partial-start binding.
+ * @param startRoot - Strict immutable v2 start root.
+ * @param state - Strict current terminal state.
+ * @param rolledBackRoot - Strict immutable v2 terminal root.
+ */
+function requireTerminalRootMatchesLifecycle(
+  binding: PartialRollbackStartBinding,
+  startRoot: WorkspaceSearchMigrationRollbackStartRootV2,
+  state: WorkspaceSearchMigrationRollbackPersistenceStateV2,
+  rolledBackRoot: WorkspaceSearchMigrationRolledBackRootV2,
+): void {
+  requireRolledBackRootBinding(binding, rolledBackRoot)
+  if (
+    state.status !== 'rolled-back' ||
+    rolledBackRoot.originDigest !== startRoot.originDigest ||
+    rolledBackRoot.startRootDigest !== startRoot.startRootDigest ||
+    rolledBackRoot.rollbackStartedAt !== startRoot.startedAt ||
+    rolledBackRoot.terminalStateDigest !== state.stateDigest
+  ) {
+    return failPartialRollbackStart('INVALID_STATE')
+  }
+  const stateBytes =
+    serializeWorkspaceSearchMigrationRollbackPersistenceStateV2(
+      state,
+    )
+  const terminalStateBytes =
+    serializeWorkspaceSearchMigrationRollbackPersistenceStateV2(
+      rolledBackRoot.terminalState,
+    )
+  if (
+    Buffer.compare(
+      Buffer.from(stateBytes),
+      Buffer.from(terminalStateBytes),
+    ) !== 0
+  ) {
+    return failPartialRollbackStart('INVALID_STATE')
+  }
+}
+
+/**
+ * Requires a direct rolling or terminal lifecycle-state successor.
+ *
+ * @param binding - Exact static partial-start binding.
+ * @param predecessor - Exact current rolling state.
+ * @param successor - Candidate direct rolling or terminal successor.
+ */
+function requireDirectRollbackStateTransition(
+  binding: PartialRollbackStartBinding,
+  predecessor: WorkspaceSearchMigrationRollbackPersistenceStateV2,
+  successor: WorkspaceSearchMigrationRollbackPersistenceStateV2,
+): void {
+  requireStateBinding(binding, predecessor)
+  requireStateBinding(binding, successor)
+  validateWorkspaceSearchMigrationRollbackAuthoritySuccessorV2(
+    predecessor.currentAuthority,
+    successor.currentAuthority,
+  )
+  const commonInvalid =
+    predecessor.status !== 'rolling-back' ||
+    successor.predecessorKind !== 'rollback-state' ||
+    successor.predecessorDigest !== predecessor.stateDigest ||
+    successor.revision !== predecessor.revision + 1 ||
+    successor.originDigest !== predecessor.originDigest ||
+    successor.startRootDigest !== predecessor.startRootDigest ||
+    successor.upperBoundSequence !==
+      predecessor.upperBoundSequence
+  if (commonInvalid) {
+    return failPartialRollbackStart('INVALID_STATE')
+  }
+  if (successor.status === 'rolling-back') {
+    if (
+      predecessor.nextSequence < 1 ||
+      successor.nextSequence !== predecessor.nextSequence - 1 ||
+      successor.restored !== predecessor.restored + 1
+    ) {
+      return failPartialRollbackStart('INVALID_STATE')
+    }
+    return
+  }
+  if (
+    predecessor.nextSequence !== 0 ||
+    successor.nextSequence !== predecessor.nextSequence ||
+    successor.expectedHeadDigest !==
+      predecessor.expectedHeadDigest ||
+    successor.restored !== predecessor.restored ||
+    successor.lastRollbackReceiptDigest !==
+      predecessor.lastRollbackReceiptDigest
   ) {
     return failPartialRollbackStart('INVALID_STATE')
   }
@@ -2826,6 +3520,43 @@ async function runPartialRollbackStartBoundary<Result>(
     throw createPartialRollbackStartPublicFailure(
       readPartialRollbackStartFailureCode(error, false),
     )
+  }
+}
+
+/**
+ * Runs one synchronous public factory behind a stable failure boundary.
+ *
+ * @param operation - Exact synchronous operation.
+ * @returns Successful operation result.
+ */
+function runPartialRollbackStartSynchronousBoundary<Result>(
+  operation: () => Result,
+): Result {
+  try {
+    return operation()
+  } catch (error: unknown) {
+    throw createPartialRollbackStartPublicFailure(
+      readPartialRollbackStartFailureCode(error, false),
+    )
+  }
+}
+
+/**
+ * Validates and detaches caller-owned transaction-factory input.
+ *
+ * Malformed, hostile, or foreign material is an argument failure even when a
+ * lower-level canonical codec reports that the supplied state is invalid.
+ *
+ * @param operation - Exact synchronous input validation and detachment.
+ * @returns Strict detached factory input.
+ */
+function readPartialRollbackStartFactoryInput<Result>(
+  operation: () => Result,
+): Result {
+  try {
+    return operation()
+  } catch {
+    return failPartialRollbackStart('INVALID_ARGUMENT')
   }
 }
 

@@ -770,8 +770,16 @@ full-row equalityのConditionCheckを生成します。Partial start側のapplie
 同じshared sentinelへexact predecessor、applied-root absence、full-verification state/root absence、
 v2 start/stateを固定13 item transactionでcommitします。応答消失と再起動時はstrictなstart/stateの
 coherent reread、論理winner照合、winnerが固定したsealのexact-version再読とcanonical bytes照合で
-成功を回収します。ただし、v2 reverse/finishのAWS transactionとmanaged compositionは未実装であり、すべてが
-揃うまではpartial-prefix rollbackをproduction capabilityとして扱いません。
+成功を回収します。開始後のread/retryはstart/state/rolled-back rootを強整合point readで最大3回観測し、
+連続2回一致したadvanced rollingまたはterminal lifecycleだけを返します。Standalone v2 reverse portは
+lease/pointer/maintenance receipt、closed writer fence、planning boundary、sealed authority、
+execution run、start full row、state exact-predecessor CAS、apply sequence/marker、target preimage CAS、
+immutable receiptを固定13 item transactionへ結合します。Finishは同じcontrol root、zero-head state CAS、
+immutable rolled-back rootを固定10 item transactionへ結合します。Receipt/lifecycleのtorn read、
+transaction応答消失、同一targetの後続rollback、target read直前のwinnerをbounded rereadで回収し、
+terminal rootとsequence 1 receiptをcanonical bytesまで相関します。ただし、partial-startと
+v2 reverse/finishを同一managed sessionへ束縛するcompositionは未実装であり、それが揃うまでは
+partial-prefix rollbackをproduction capabilityとして扱いません。
 
 Complete applied rootから開始するstandalone reverse-rollback AWS portは、immutable start root、
 restart可能な完全run-state、exact-predecessor CAS state、各reverse operationのimmutable receipt、
@@ -970,11 +978,12 @@ Process exit statusは、成功を`0`、migration failureまたは`OPERATION_FAI
    Committed-prefix向けにはstrict v2 origin/start/lifecycle-state/command/receipt/rolled-back-root codec、
    pure reverse/finish transition、apply-owned exact predecessor guard、complete applied-root absence guard、
    shared rollback-start sentinelとv2 stateを同時commitする固定13項目のstandalone partial-start
-   transactionまで実装済みです。ただし、
+   transaction、advanced/terminal lifecycleのcoherent retry、固定13項目のstandalone reverse transaction、
+   固定10項目のstandalone finish transactionまで実装済みです。ただし、
    close/admission/run creation/apply/seal/verification/rollbackのCLI・orchestrator配線、partial-prefix
-   rollbackのv2 reverse/finish AWS transactionとmanaged composition、terminal outcomeに束縛した
-   release、observability/alarm、DR/non-production evidenceは未実装のため、migration全体のproduction
-   gateはまだ実行可能とは扱いません。
+   rollbackのmanaged composition、terminal outcomeに束縛したrelease、observability/alarm、
+   DR/non-production evidenceは未実装のため、migration全体のproduction gateはまだ実行可能とは
+   扱いません。
 5. Online migration は writer fence/epoch または dual-write + high-watermark catch-up を有効化し、
    source scan と cutover の競合を閉じる。Workspace Search v1はmaintenance writer-fenceを選択する。
    Step 4のcurrent authorityで初回`bootstrapOpen`を行い、API、worker、connector、backfillを含む全継続

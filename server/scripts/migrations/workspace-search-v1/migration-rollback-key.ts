@@ -1,9 +1,14 @@
-import { createMigrationDigest } from './migration-contract'
+import {
+  createMigrationDigest,
+  WorkspaceSearchMigrationFailure,
+} from './migration-contract'
 
 const rollbackRecordKeyVersion = 1
 const rollbackStartRecordKeyPrefix =
   `rollback-start/v${rollbackRecordKeyVersion}`
 const rollbackStateV2RecordKeyPrefix = 'rollback-state/v2'
+const rollbackReceiptV2RecordKeyPrefix = 'rollback-receipt/v2'
+const rolledBackRootV2RecordKeyPrefix = 'rolled-back-root/v2'
 
 /**
  * Exact immutable identity used to address one rollback chain.
@@ -51,6 +56,38 @@ export function createWorkspaceSearchMigrationRollbackStateV2RecordKey(
   bindingDigest: string,
 ): string {
   return `${rollbackStateV2RecordKeyPrefix}/${bindingDigest}`
+}
+
+/**
+ * Creates one deterministic version-two immutable rollback receipt key.
+ *
+ * @param bindingDigest - Stable digest shared by the rollback key namespace.
+ * @param sequence - Positive forward mutation sequence restored by the receipt.
+ * @returns Deterministic version-two rollback receipt record key.
+ */
+export function createWorkspaceSearchMigrationRollbackReceiptV2RecordKey(
+  bindingDigest: string,
+  sequence: number,
+): string {
+  if (!Number.isSafeInteger(sequence) || sequence < 1) {
+    throw new WorkspaceSearchMigrationFailure(
+      'INVALID_ARGUMENT',
+      'Rollback receipt sequence must be a positive safe integer.',
+    )
+  }
+  return `${rollbackReceiptV2RecordKeyPrefix}/${bindingDigest}/${sequence}`
+}
+
+/**
+ * Creates one deterministic version-two immutable rolled-back root key.
+ *
+ * @param bindingDigest - Stable digest shared by the rollback key namespace.
+ * @returns Deterministic version-two terminal rolled-back root record key.
+ */
+export function createWorkspaceSearchMigrationRolledBackRootV2RecordKey(
+  bindingDigest: string,
+): string {
+  return `${rolledBackRootV2RecordKeyPrefix}/${bindingDigest}`
 }
 
 /**
