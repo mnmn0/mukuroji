@@ -465,7 +465,7 @@ export type WorkspaceSearchPlanSeal = {
   sourceOperationCount: number
   /** Exact number of target-orphan deletion operations. */
   orphanOperationCount: number
-  /** Canonical UTC plan sealing time. */
+  /** Restart-stable plan epoch no earlier than reviewed dry-run completion. */
   createdAt: string
 }
 

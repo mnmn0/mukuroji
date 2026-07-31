@@ -771,6 +771,85 @@ describe('AWS Workspace Search pre-plan authority adapter', () => {
     ).toEqual(firstAuthority.maintenanceEvidenceReceipt)
   })
 
+  test('strongly restores a same-fence pointer and ignores an older-fence predecessor', async () => {
+    const context = createAuthorityContext()
+    const lease = await context.port.acquireLease({
+      runId: 'run-pointer-resume',
+      ownerId: 'owner-pointer-resume',
+    })
+
+    expect(
+      await context.port.readMaintenanceEvidencePointer(
+        createLeaseClaim(lease),
+      ),
+    ).toBeNull()
+    const authority = await context.port.renewMaintenanceEvidence({
+      lease: createLeaseClaim(lease),
+      expectedPointer: null,
+      evidenceBytes: createMaintenanceEvidenceBytes(initialTime),
+    })
+    context.transport.clearHistory()
+
+    expect(
+      await context.port.readMaintenanceEvidencePointer(
+        createLeaseClaim(lease),
+      ),
+    ).toEqual(createPointerClaim(authority))
+    expect(context.transport.getCommands).toHaveLength(4)
+    for (const command of context.transport.getCommands) {
+      expect(command.input.TableName).toBe(context.stateTable.tableName)
+      expect(command.input.ConsistentRead).toBe(true)
+    }
+    const keys = context.transport.getCommands.map(readCommandRecordKey)
+    expect(keys[0]).toBe(keys[2])
+    expect(keys[1]).toBe(keys[3])
+    expect(new Set(keys).size).toBe(2)
+
+    let latestLease = lease
+    for (const offsetSeconds of [50, 100, 150, 200, 239]) {
+      context.clock.set(
+        new Date(
+          Date.parse(initialTime) + offsetSeconds * 1_000,
+        ).toISOString(),
+      )
+      latestLease = await context.port.heartbeatLease({
+        lease: createLeaseClaim(lease),
+      })
+    }
+    context.clock.set(
+      authority.maintenanceEvidenceReceipt.validUntil,
+    )
+    expect(
+      await context.port.readMaintenanceEvidencePointer(
+        createLeaseClaim(lease),
+      ),
+    ).toEqual(createPointerClaim(authority))
+    const expiredAuthorityFailure = await captureMigrationFailure(
+      () => context.port.readAuthority({
+        lease: createLeaseClaim(lease),
+        maintenanceEvidenceReceiptDigest:
+          authority.maintenanceEvidenceReceiptDigest,
+        maintenanceEvidencePointerRevision:
+          authority.maintenanceEvidencePointerRevision,
+      }),
+    )
+    expectMigrationFailure(
+      expiredAuthorityFailure,
+      'INVALID_MAINTENANCE_EVIDENCE',
+    )
+
+    context.clock.set(latestLease.expiresAt)
+    const successor = await context.port.acquireLease({
+      runId: lease.runId,
+      ownerId: 'owner-pointer-successor',
+    })
+    expect(
+      await context.port.readMaintenanceEvidencePointer(
+        createLeaseClaim(successor),
+      ),
+    ).toBeNull()
+  })
+
   test('reads an expired historical receipt with its exact durable binding', async () => {
     const context = createAuthorityContext()
     const lease = await context.port.acquireLease({

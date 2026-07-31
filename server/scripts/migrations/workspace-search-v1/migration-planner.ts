@@ -222,7 +222,7 @@ export type SealWorkspaceSearchMigrationPlanInput = {
     WorkspaceSearchMigrationTargetOwnershipEvidence
   /** Complete set of source and orphan operation candidates. */
   readonly candidates: readonly WorkspaceSearchMigrationPlanCandidate[]
-  /** Canonical adapter-owned time at which plan construction completed. */
+  /** Restart-stable plan epoch no earlier than reviewed dry-run completion. */
   readonly createdAt: string
 }
 

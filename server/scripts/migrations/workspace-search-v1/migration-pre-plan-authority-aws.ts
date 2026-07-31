@@ -219,6 +219,23 @@ export interface WorkspaceSearchMigrationPrePlanAuthorityAwsPort {
   ): Promise<WorkspaceSearchMigrationLease>
 
   /**
+   * Strongly reads the current maintenance-evidence pointer predecessor.
+   *
+   * The read deliberately does not require the selected receipt to remain
+   * fresh. A restarted same-fence supervisor needs the exact predecessor to
+   * advance the pointer with newly collected evidence after the old receipt
+   * expires.
+   *
+   * @param lease - Exact active lease identity.
+   * @returns Same-fence pointer, or null when no current-fence pointer exists.
+   */
+  readMaintenanceEvidencePointer(
+    lease: WorkspaceSearchMigrationLeaseClaim,
+  ): Promise<
+    WorkspaceSearchMigrationPrePlanMaintenancePointerClaim | null
+  >
+
+  /**
    * Persists one immutable fresh receipt and advances its current pointer.
    *
    * @param input - Exact lease and untrusted evidence bytes.
@@ -532,6 +549,48 @@ class AwsWorkspaceSearchMigrationPrePlanAuthorityPort
         )
       }
       return cloneLease(successor.lease)
+    })
+  }
+
+  /**
+   * Strongly reads the same-fence predecessor without requiring receipt freshness.
+   *
+   * @param lease - Exact active lease identity.
+   * @returns Same-fence current pointer, or null after first acquire/takeover.
+   */
+  async readMaintenanceEvidencePointer(
+    lease: WorkspaceSearchMigrationLeaseClaim,
+  ): Promise<
+    WorkspaceSearchMigrationPrePlanMaintenancePointerClaim | null
+  > {
+    return runPrePlanAuthorityAwsBoundary(async () => {
+      const claim = readLeaseClaim(lease)
+      await this.requireClaimedLease(claim)
+      const firstPointer = await this.readPointer(claim.runId)
+      const finalLease = await this.requireClaimedLease(claim)
+      const finalPointer = await this.readPointer(claim.runId)
+      const clock = readClock(this.clock)
+      requireActiveLease(finalLease, claim, clock.at)
+      if (!samePointerRecord(firstPointer, finalPointer)) {
+        return failPrePlanAuthorityAws('INVALID_MAINTENANCE_EVIDENCE')
+      }
+      if (
+        finalPointer === undefined ||
+        finalPointer.fenceToken < claim.fenceToken
+      ) {
+        return null
+      }
+      if (
+        finalPointer.ownerId !== claim.ownerId ||
+        finalPointer.fenceToken !== claim.fenceToken
+      ) {
+        return failPrePlanAuthorityAws('INVALID_MAINTENANCE_EVIDENCE')
+      }
+      return {
+        fenceToken: finalPointer.fenceToken,
+        revision: finalPointer.revision,
+        receiptDigest: finalPointer.receiptDigest,
+      }
     })
   }
 

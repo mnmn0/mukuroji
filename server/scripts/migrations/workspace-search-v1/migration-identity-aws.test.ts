@@ -72,6 +72,7 @@ import {
   type WorkspaceSearchMigrationManagedAwsTransport,
   type WorkspaceSearchMigrationManagedAwsSession,
   type WorkspaceSearchMigrationManagedPartialRollbackAwsPort,
+  WORKSPACE_SEARCH_MIGRATION_MANAGED_ARTIFACT_REQUEST_TIMEOUT_MILLISECONDS,
   WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_CANONICAL_BYTES,
   WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_OPERATIONS,
   WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_TOTAL_ROWS,
@@ -137,6 +138,9 @@ import {
 import type {
   PublishWorkspaceSearchMigrationSealedPlanningAuthorityV2Input,
 } from './migration-sealed-planning-authority-aws'
+import {
+  createWorkspaceSearchMigrationPlanningProvenanceArtifact,
+} from './migration-sealed-planning-authority'
 import {
   serializeWorkspaceSearchMigrationSealedPlanningAuthorityV2,
   type WorkspaceSearchMigrationSealedPlanningAuthorityV2,
@@ -1768,6 +1772,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
         ownerId: leaseClaim.ownerId,
       }),
       () => port.heartbeatLease({ lease: leaseClaim }),
+      () => port.readMaintenanceEvidencePointer(leaseClaim),
       () => port.renewMaintenanceEvidence({
         lease: leaseClaim,
         expectedPointer: null,
@@ -1835,6 +1840,20 @@ describe('Workspace Search migration AWS identity adapter', () => {
         fenceToken: acquired.fenceToken,
       },
     })
+    let pointerOwnerId = heartbeated.ownerId
+    const pendingPointerRead = port.readMaintenanceEvidencePointer({
+      get runId() {
+        return heartbeated.runId
+      },
+      get ownerId() {
+        return pointerOwnerId
+      },
+      get fenceToken() {
+        return heartbeated.fenceToken
+      },
+    })
+    pointerOwnerId = 'mutated-pointer-owner'
+    expect(await pendingPointerRead).toBeNull()
 
     expect(acquired).toEqual({
       runId: 'managed-authority-run',
@@ -1848,7 +1867,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
       heartbeatAt: '2026-07-28T03:00:59.999Z',
       expiresAt: '2026-07-28T03:01:59.999Z',
     })
-    expect(transport.getPrePlanAuthorityCommands).toHaveLength(2)
+    expect(transport.getPrePlanAuthorityCommands).toHaveLength(6)
     for (const command of transport.getPrePlanAuthorityCommands) {
       expect(command.input).toMatchObject({
         TableName: requested.tables['migration-state'],
@@ -4204,6 +4223,160 @@ describe('Workspace Search migration AWS identity adapter', () => {
     fixture.port.close()
   })
 
+  test(
+    'prepares the existing join and stores exact session-owned provenance',
+    async () => {
+      const fixture =
+        await createManagedCommittedPlanningFixture('prepared')
+      const expectedResult =
+        await fixture.port.joinCommittedPlanningEvidence(fixture.input)
+
+      const prepared =
+        await fixture.port.prepareCommittedPlanningEvidence(
+          fixture.input,
+        )
+
+      expect(prepared.result).toEqual(expectedResult)
+      let hostileRetentionReads = 0
+      await expect(
+        prepared.writePlanningProvenanceArtifact({
+          get retainUntil(): string {
+            hostileRetentionReads += 1
+            throw new Error('OPAQUE-PROVENANCE-INPUT-CANARY')
+          },
+        }),
+      ).rejects.toMatchObject({
+        code: 'INVALID_ARGUMENT',
+        message:
+          'Workspace Search planning material join stopped safely (INVALID_ARGUMENT).',
+      })
+      expect(hostileRetentionReads).toBe(0)
+      expect(
+        fixture.transport.putImmutableArtifactCommands,
+      ).toHaveLength(0)
+      const stored =
+        await prepared.writePlanningProvenanceArtifact({
+          retainUntil: '2026-08-27T07:01:00.000Z',
+        })
+      const replayed =
+        await fixture.port.createPlanningArtifactGateway(
+          fixture.input.runId,
+        ).replayPlanningProvenanceArtifact({
+          manifestHeadReference: stored.manifestHeadReference,
+        })
+      const sourceCommands =
+        fixture.transport.transactWriteSourceEvidenceCommands
+      const expectedProvenance =
+        createWorkspaceSearchMigrationPlanningProvenanceArtifact({
+          sourceEvidencePageBytes: {
+            'project-directory': [
+              readManagedEvidencePageBytes(sourceCommands[0]),
+            ],
+            'work-items': [
+              readManagedEvidencePageBytes(sourceCommands[1]),
+            ],
+            collaboration: [
+              readManagedEvidencePageBytes(sourceCommands[2]),
+            ],
+            documents: [
+              readManagedEvidencePageBytes(sourceCommands[3]),
+            ],
+          },
+          targetEvidencePageBytes: [
+            readManagedEvidencePageBytes(
+              fixture.transport
+                .transactWriteTargetEvidenceCommands[0],
+            ),
+          ],
+          historicalReceiptBindings: [{
+            configurationHash: fixture.input.configurationHash,
+            stateTableId:
+              fixture.input.configuration.tables['migration-state']
+                .tableId,
+            ownerId: fixture.authority.lease.ownerId,
+            receiptDigest:
+              fixture.authority.maintenanceEvidenceReceiptDigest,
+            receipt: fixture.authority.maintenanceEvidenceReceipt,
+          }],
+        })
+
+      expect(replayed).toEqual(expectedProvenance)
+      expect(stored.planningAuthorityProvenance).toEqual(
+        prepared.result.planningAuthorityProvenance,
+      )
+      fixture.port.close()
+    },
+  )
+
+  for (const lifecycle of ['remeasure', 'close']) {
+    test(
+      `fails the opaque provenance writer after managed session ${lifecycle}`,
+      async () => {
+        const fixture =
+          await createManagedCommittedPlanningFixture(
+            `prepared-${lifecycle}`,
+          )
+        const prepared =
+          await fixture.port.prepareCommittedPlanningEvidence(
+            fixture.input,
+          )
+        const puts =
+          fixture.transport.putImmutableArtifactCommands.length
+
+        if (lifecycle === 'remeasure') {
+          await fixture.port.measureConfiguration()
+        } else {
+          fixture.port.close()
+        }
+
+        await expect(
+          prepared.writePlanningProvenanceArtifact({
+            retainUntil: '2026-08-27T07:01:00.000Z',
+          }),
+        ).rejects.toMatchObject({
+          code: 'INVALID_STATE',
+          message:
+            'Workspace Search planning artifact storage stopped safely (INVALID_STATE).',
+        })
+        expect(
+          fixture.transport.putImmutableArtifactCommands,
+        ).toHaveLength(puts)
+        if (lifecycle === 'remeasure') fixture.port.close()
+      },
+    )
+  }
+
+  test('rejects preparation when a historical receipt binding is missing', async () => {
+    const fixture =
+      await createManagedCommittedPlanningFixture(
+        'prepared-missing-binding',
+      )
+    const receiptSuffix =
+      `/receipt/${fixture.authority.maintenanceEvidenceReceiptDigest}`
+    fixture.transport.getPrePlanAuthorityApplyOutput = (command) =>
+      command.input.Key?.recordKey?.S?.endsWith(receiptSuffix) === true
+        ? { $metadata: {} }
+        : undefined
+
+    const failure = await captureWorkspaceSearchMigrationFailure(
+      fixture.port.prepareCommittedPlanningEvidence(fixture.input),
+    )
+
+    expect(failure).toMatchObject({
+      code: 'INVALID_STATE',
+      message:
+        'Workspace Search planning material join stopped safely (INVALID_STATE).',
+    })
+    expect(
+      fixture.transport.getPrePlanAuthorityCommands.at(-1)
+        ?.input.Key?.recordKey?.S,
+    ).toEndWith(receiptSuffix)
+    expect(
+      fixture.transport.putImmutableArtifactCommands,
+    ).toHaveLength(0)
+    fixture.port.close()
+  })
+
   test('rejects changed evidence heads after the pure planning join', async () => {
     const fixture = await createManagedCommittedPlanningFixture(
       'head-race',
@@ -4358,6 +4531,122 @@ describe('Workspace Search migration AWS identity adapter', () => {
     expect(transport.headImmutableArtifactCommands).toHaveLength(0)
     expect(transport.getImmutableArtifactCommands).toHaveLength(0)
     port.close()
+  })
+
+  test('validates measured artifact time and retention without AWS I/O', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const clockTime = new Date('2026-07-28T03:00:00.000Z')
+    let clockFails = false
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => {
+        if (clockFails) throw new Error('raw clock failure')
+        return new Date(clockTime)
+      },
+    )
+    const additionalHeadroomMilliseconds = 15 * 60_000
+    const retentionDayMilliseconds = 24 * 60 * 60 * 1_000
+    const reviewedDryRunCompletedAt =
+      new Date(clockTime.getTime() - 1).toISOString()
+    const preflightBase = {
+      minimumAdditionalHeadroomMilliseconds:
+        additionalHeadroomMilliseconds,
+      reviewedDryRunCompletedAt,
+    }
+    const invalidStateFailure = new WorkspaceSearchMigrationFailure(
+      'INVALID_STATE',
+      'Workspace Search planning artifact preflight stopped safely (INVALID_STATE).',
+    )
+    const invalidArgumentFailure = new WorkspaceSearchMigrationFailure(
+      'INVALID_ARGUMENT',
+      'Workspace Search planning artifact preflight stopped safely (INVALID_ARGUMENT).',
+    )
+    const invalidDryRunFailure = new WorkspaceSearchMigrationFailure(
+      'DRY_RUN_INVALID_ROWS',
+      'Workspace Search planning artifact preflight stopped safely (DRY_RUN_INVALID_ROWS).',
+    )
+
+    expect(
+      () => port.validatePlanningArtifactPreflight({
+        ...preflightBase,
+        retainUntil: '2026-08-28T03:15:10.000Z',
+      }),
+    ).toThrow(invalidStateFailure)
+
+    const configuration = await port.measureConfiguration()
+    const minimumRetentionEpochMilliseconds =
+      clockTime.getTime() +
+      configuration.journal.defaultRetentionDays *
+        retentionDayMilliseconds +
+      additionalHeadroomMilliseconds +
+      WORKSPACE_SEARCH_MIGRATION_MANAGED_ARTIFACT_REQUEST_TIMEOUT_MILLISECONDS
+    const maximumRetentionEpochMilliseconds =
+      clockTime.getTime() +
+      (configuration.journal.defaultRetentionDays + 1) *
+        retentionDayMilliseconds
+    const minimumRetention =
+      new Date(minimumRetentionEpochMilliseconds).toISOString()
+    const maximumRetention =
+      new Date(maximumRetentionEpochMilliseconds).toISOString()
+
+    expect(
+      port.validatePlanningArtifactPreflight({
+        ...preflightBase,
+        retainUntil: minimumRetention,
+      }),
+    ).toBe(minimumRetention)
+    expect(
+      port.validatePlanningArtifactPreflight({
+        ...preflightBase,
+        retainUntil: maximumRetention,
+      }),
+    ).toBe(maximumRetention)
+    expect(
+      () => port.validatePlanningArtifactPreflight({
+        ...preflightBase,
+        retainUntil: new Date(
+          minimumRetentionEpochMilliseconds - 1,
+        ).toISOString(),
+      }),
+    ).toThrow(invalidArgumentFailure)
+    expect(
+      () => port.validatePlanningArtifactPreflight({
+        ...preflightBase,
+        retainUntil: new Date(
+          maximumRetentionEpochMilliseconds + 1,
+        ).toISOString(),
+      }),
+    ).toThrow(invalidArgumentFailure)
+    expect(
+      () => port.validatePlanningArtifactPreflight({
+        ...preflightBase,
+        retainUntil: minimumRetention,
+        reviewedDryRunCompletedAt:
+          new Date(clockTime.getTime() + 1).toISOString(),
+      }),
+    ).toThrow(invalidDryRunFailure)
+    expect(transport.putImmutableArtifactCommands).toHaveLength(0)
+    expect(transport.headImmutableArtifactCommands).toHaveLength(0)
+    expect(transport.getImmutableArtifactCommands).toHaveLength(0)
+
+    clockFails = true
+    expect(
+      () => port.validatePlanningArtifactPreflight({
+        ...preflightBase,
+        retainUntil: minimumRetention,
+      }),
+    ).toThrow(invalidStateFailure)
+    clockFails = false
+    port.close()
+    expect(
+      () => port.validatePlanningArtifactPreflight({
+        ...preflightBase,
+        retainUntil: minimumRetention,
+      }),
+    ).toThrow(invalidStateFailure)
   })
 
   test(
@@ -12165,46 +12454,18 @@ async function createManagedSealedPublicationFixture(
     includeApplyOperation,
     mutateApplyTarget,
   )
-  const joined = await fixture.port.joinCommittedPlanningEvidence(
-    fixture.input,
-  )
-  const historical =
-    await fixture.port.readHistoricalMaintenanceEvidenceBinding(
-      fixture.authority.lease.runId,
-      fixture.authority.maintenanceEvidenceReceiptDigest,
+  const prepared =
+    await fixture.port.prepareCommittedPlanningEvidence(
+      fixture.input,
     )
-  if (historical === undefined) {
-    throw new Error('Expected historical maintenance evidence binding.')
-  }
-  const sourceCommands =
-    fixture.transport.transactWriteSourceEvidenceCommands
-  const targetCommand =
-    fixture.transport.transactWriteTargetEvidenceCommands[0]
+  const joined = prepared.result
+  const storedProvenance =
+    await prepared.writePlanningProvenanceArtifact({
+      retainUntil,
+    })
   const gateway = fixture.port.createPlanningArtifactGateway(
     fixture.input.runId,
   )
-  const storedProvenance =
-    await gateway.writePlanningProvenanceArtifact({
-      sourceEvidencePageBytes: {
-        'project-directory': [
-          readManagedEvidencePageBytes(sourceCommands[0]),
-        ],
-        'work-items': [
-          readManagedEvidencePageBytes(sourceCommands[1]),
-        ],
-        collaboration: [
-          readManagedEvidencePageBytes(sourceCommands[2]),
-        ],
-        documents: [
-          readManagedEvidencePageBytes(sourceCommands[3]),
-        ],
-      },
-      targetEvidencePageBytes: [
-        readManagedEvidencePageBytes(targetCommand),
-      ],
-      historicalReceiptBindings: [historical],
-      retainUntil,
-    })
   const emptyPlanSeal = createManagedPlanningArtifactEmptyPlanSeal(
     fixture.input.runId,
     fixture.input.configurationHash,
