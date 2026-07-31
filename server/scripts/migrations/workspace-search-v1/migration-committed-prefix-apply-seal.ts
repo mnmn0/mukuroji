@@ -529,6 +529,19 @@ function requireMutablePredecessorInvariant(
   ) {
     return failCommittedPrefixApplySeal()
   }
+  if (
+    executionState.executionStateVersion === 3 &&
+    executionState.revision !==
+      addSafeCounts(
+        addSafeCounts(
+          addSafeCounts(1, state.appliedOperationCount),
+          pageCount,
+        ),
+        executionState.maintenanceEvidenceRenewalCount,
+      )
+  ) {
+    return failCommittedPrefixApplySeal()
+  }
 }
 
 /**

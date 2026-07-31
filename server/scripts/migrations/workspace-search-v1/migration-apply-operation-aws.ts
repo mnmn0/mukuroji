@@ -79,20 +79,31 @@ import {
   createWorkspaceSearchMigrationExecutionRunAdmissionRecord,
 } from './migration-execution-run-aws'
 import {
+  createWorkspaceSearchMigrationExecutionAuthorityAdoptionCommandIdentity,
+  createWorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt,
+  createWorkspaceSearchMigrationExecutionAuthorityAdoptionReceiptRecordKey,
+  parseWorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt,
+  serializeWorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt,
+  type WorkspaceSearchMigrationExecutionAuthorityAdoptionCommandIdentity,
+  type WorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt,
+} from './migration-execution-authority-adoption'
+import {
   parseWorkspaceSearchMigrationExecutionRun,
   serializeWorkspaceSearchMigrationExecutionRun,
   type WorkspaceSearchMigrationExecutionRun,
+  type WorkspaceSearchMigrationExecutionRunAuthorityBinding,
 } from './migration-execution-run'
 import {
   createWorkspaceSearchMigrationCheckpointExecutionState,
   createWorkspaceSearchMigrationExecutionState,
+  createWorkspaceSearchMigrationRenewedExecutionState,
   parseWorkspaceSearchMigrationExecutionState,
   parseWorkspaceSearchMigrationOperationMarker,
   reconstructWorkspaceSearchMigrationRunState,
   serializeWorkspaceSearchMigrationExecutionState,
   serializeWorkspaceSearchMigrationOperationMarker,
   type WorkspaceSearchMigrationExecutionState,
-  type WorkspaceSearchMigrationExecutionStateV2,
+  type WorkspaceSearchMigrationTraversalExecutionState,
 } from './migration-execution-state'
 import {
   createWorkspaceSearchMigrationAppliedRoot,
@@ -103,6 +114,7 @@ import {
   type WorkspaceSearchMigrationAppliedRoot,
 } from './migration-apply-seal'
 import {
+  createWorkspaceSearchMigrationAppliedRootAbsentConditionCheck,
   createWorkspaceSearchMigrationAppliedRootRecord,
   createWorkspaceSearchMigrationAppliedRootStrongReadCommand,
   createWorkspaceSearchMigrationApplyRunBindingDigest,
@@ -131,6 +143,7 @@ import {
 import {
   createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks,
   type WorkspaceSearchMigrationPrePlanAuthority,
+  type WorkspaceSearchMigrationPrePlanAuthorityClaim,
 } from './migration-pre-plan-authority-aws'
 import {
   createWorkspaceSearchMigrationSealedPlanningAuthorityV2ConditionCheck,
@@ -165,6 +178,8 @@ const journalSequenceRecordKind =
   'workspace-search-migration-apply-journal-sequence'
 const checkpointReceiptRecordKind =
   'workspace-search-migration-apply-checkpoint-receipt'
+const authorityAdoptionReceiptRecordKind =
+  'workspace-search-migration-execution-authority-adoption-receipt'
 const executionStateRecordKeyPrefix = 'execution-state/v1'
 const operationMarkerRecordKeyPrefix = 'apply-operation/v1'
 const journalSequenceRecordKeyPrefix = 'apply-journal-sequence/v1'
@@ -173,6 +188,7 @@ const retentionDayMilliseconds = 24 * 60 * 60 * 1_000
 const mutationTransactionItemCount = 13
 const noOpTransactionItemCount = 12
 const checkpointTransactionItemCount = 10
+const authorityAdoptionTransactionItemCount = 11
 const applySealTransactionItemCount = 10
 
 /**
@@ -239,6 +255,37 @@ export const workspaceSearchMigrationApplyCheckpointTransactionIndex =
     checkpointReceipt: 9,
     /** Fixed checkpoint transaction item count. */
     count: checkpointTransactionItemCount,
+  })
+
+/**
+ * Fixed transaction positions for one execution-authority adoption.
+ */
+export const workspaceSearchMigrationApplyAuthorityAdoptionTransactionIndex =
+  Object.freeze({
+    /** Current global lease condition. */
+    lease: 0,
+    /** Current maintenance pointer condition. */
+    pointer: 1,
+    /** Current immutable maintenance receipt condition. */
+    receipt: 2,
+    /** Exact closed application-writer fence condition. */
+    writerFence: 3,
+    /** Exact revision-two planning-admitted boundary condition. */
+    executionBoundary: 4,
+    /** Exact immutable sealed planning-authority root condition. */
+    sealedPlanningAuthority: 5,
+    /** Exact immutable revision-one execution admission condition. */
+    executionRun: 6,
+    /** Absent immutable rollback-start sentinel condition. */
+    rollbackStart: 7,
+    /** Absent immutable applied root condition. */
+    appliedRoot: 8,
+    /** Absent or exact-predecessor mutable execution-state Put. */
+    executionState: 9,
+    /** Absent immutable authority-adoption receipt Put. */
+    authorityAdoptionReceipt: 10,
+    /** Fixed authority-adoption transaction item count. */
+    count: authorityAdoptionTransactionItemCount,
   })
 
 /**
@@ -550,6 +597,16 @@ export type WorkspaceSearchMigrationApplySealCommandInput = {
 }
 
 /**
+ * Caller command that durably adopts one freshly resolved current authority.
+ */
+export type WorkspaceSearchMigrationApplyAuthorityAdoptionCommandInput = {
+  /** Exact current applying-state revision expected by the caller. */
+  readonly expectedRevision: number
+  /** Exact lease, maintenance pointer, and receipt to adopt. */
+  readonly authority: WorkspaceSearchMigrationPrePlanAuthorityClaim
+}
+
+/**
  * Atomic apply-operation and checkpoint persistence capability.
  */
 export interface WorkspaceSearchMigrationApplyOperationAwsPort {
@@ -579,6 +636,21 @@ export interface WorkspaceSearchMigrationApplyOperationAwsPort {
   readApplyReceipt(
     sequence: number,
   ): Promise<WorkspaceSearchOperationReceipt | undefined>
+
+  /**
+   * Atomically adopts fresh maintenance authority into mutable execution.
+   *
+   * When the resolved durable lease, pointer, and receipt selection already
+   * matches execution, this is a read-only no-op: it advances no revision and
+   * writes no adoption receipt. The next durable apply write still rechecks
+   * current authority and rollback exclusion in its own transaction.
+   *
+   * @param input - Exact predecessor revision and current authority claim.
+   * @returns Exact reconciled authority-renewable applying run state.
+   */
+  adoptExecutionAuthority(
+    input: WorkspaceSearchMigrationApplyAuthorityAdoptionCommandInput,
+  ): Promise<WorkspaceSearchMigrationRunState>
 
   /**
    * Uploads a mutation preimage and atomically commits one strict next plan item.
@@ -810,6 +882,19 @@ type PreparedApplySealCommand = {
 }
 
 /**
+ * Fully detached execution-authority adoption before the first await.
+ */
+type PreparedApplyAuthorityAdoptionCommand = {
+  /** Exact expected applying-state revision. */
+  readonly expectedRevision: number
+  /** Exact current authority claim selected by the caller. */
+  readonly authority: WorkspaceSearchMigrationPrePlanAuthorityClaim
+  /** Deterministic immutable receipt identity for this exact command. */
+  readonly identity:
+    WorkspaceSearchMigrationExecutionAuthorityAdoptionCommandIdentity
+}
+
+/**
  * Current effective state and its optional mutable durable envelope.
  */
 type EffectiveApplyState = {
@@ -830,7 +915,8 @@ type TerminalEffectiveApplyState = {
   /** Complete reconstructed terminal applying state. */
   readonly runState: WorkspaceSearchMigrationRunState
   /** Exact terminal traversal-capable mutable envelope. */
-  readonly executionState: WorkspaceSearchMigrationExecutionStateV2
+  readonly executionState:
+    WorkspaceSearchMigrationTraversalExecutionState
   /** Complete durable terminal execution-state record. */
   readonly executionStateRecord:
     Readonly<Record<string, AttributeValue>>
@@ -1101,6 +1187,164 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
   }
 
   /**
+   * Atomically adopts one fresh current authority into applying execution.
+   *
+   * When the resolved durable lease, pointer, and receipt selection already
+   * matches execution, this is a read-only no-op: it advances no revision and
+   * writes no adoption receipt. The next durable apply write still rechecks
+   * current authority and rollback exclusion in its own transaction.
+   *
+   * @param input - Exact predecessor revision and current authority claim.
+   * @returns Exact reconciled authority-renewable applying state.
+   */
+  async adoptExecutionAuthority(
+    input: WorkspaceSearchMigrationApplyAuthorityAdoptionCommandInput,
+  ): Promise<WorkspaceSearchMigrationRunState> {
+    return runApplyBoundary(async () => {
+      const command = prepareApplyAuthorityAdoptionCommand(
+        input,
+        this.binding,
+      )
+      const existing = await this.readAuthorityAdoptionReceipt(
+        command.identity,
+      )
+      if (existing !== undefined) {
+        return this.reconcileAuthorityAdoptionReceipt(
+          command,
+          existing,
+        )
+      }
+
+      const current = await this.readEffectiveState()
+      if (
+        current.appliedRoot !== undefined ||
+        current.runState.status !== 'applying' ||
+        current.runState.revision !== command.expectedRevision
+      ) {
+        if (
+          current.runState.revision >
+            command.expectedRevision
+        ) {
+          return this.reconcileAuthorityAdoptionAfterObservedProgress(
+            command,
+          )
+        }
+        return failApply('INVALID_STATE')
+      }
+      const authority = await this.resolveClaimAuthority(
+        command.authority,
+      )
+      const currentAuthority = createExecutionAuthorityBinding(
+        authority,
+      )
+      const predecessorAuthority =
+        current.executionState?.executionStateVersion === 3
+          ? current.executionState.currentAuthority
+          : this.binding.executionRun.binding.currentAuthority
+      if (
+        sameExecutionAuthoritySelection(
+          predecessorAuthority,
+          currentAuthority,
+        )
+      ) {
+        return current.runState
+      }
+
+      const preflightAt = readClock(this.dependencies.clock)
+      requireProgressRetention(
+        this.binding,
+        current.executionState,
+        preflightAt,
+      )
+      await this.dependencies.prepare()
+      const commitAtMilliseconds = readClock(this.dependencies.clock)
+      if (commitAtMilliseconds < preflightAt) {
+        return failApply('INVALID_STATE')
+      }
+      requireCommitRetention(
+        this.binding,
+        current.executionState,
+        undefined,
+        commitAtMilliseconds,
+      )
+      const commitAt = new Date(commitAtMilliseconds)
+      const transitionAuthority: WorkspaceSearchMigrationAuthority = {
+        lease: authority.lease,
+        ownerId: authority.lease.ownerId,
+        at: commitAt.toISOString(),
+      }
+      const successorState =
+        createWorkspaceSearchMigrationRenewedExecutionState({
+          admission: this.binding.executionRun,
+          ...(current.executionState === undefined
+            ? {}
+            : { predecessor: current.executionState }),
+          authority: transitionAuthority,
+          receipt: authority.maintenanceEvidenceReceipt,
+          currentAuthority,
+        })
+      const receipt =
+        createWorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt({
+          commandIdentity: command.identity,
+          predecessorKind: current.executionState === undefined
+            ? 'execution-run-admission'
+            : 'mutable-execution-state',
+          ...(current.executionState === undefined
+            ? {}
+            : {
+                predecessorExecutionStateVersion:
+                  current.executionState.executionStateVersion,
+              }),
+          ...(current.executionState?.executionStateVersion === 3
+            ? {
+                predecessorMaintenanceEvidenceRenewalCount:
+                  current.executionState
+                    .maintenanceEvidenceRenewalCount,
+              }
+            : {}),
+          predecessorExecutionStateDigest:
+            current.executionState?.executionStateDigest ??
+              this.binding.executionRun.executionRunDigest,
+          predecessorRunStateDigest:
+            current.executionState?.runStateDigest ??
+              this.binding.executionRun.stateDigest,
+          successorRevision: successorState.revision,
+          successorExecutionStateDigest:
+            successorState.executionStateDigest,
+          successorRunStateDigest: successorState.runStateDigest,
+          maintenanceEvidenceRenewalCount:
+            successorState.maintenanceEvidenceRenewalCount,
+          currentAuthority,
+          committedAt: transitionAuthority.at,
+        })
+      const transaction =
+        createApplyAuthorityAdoptionTransactionCommand({
+          binding: this.binding,
+          currentAuthority: authority,
+          commitAt,
+          predecessorState: current.executionState,
+          predecessorStateRecord: current.executionStateRecord,
+          successorState,
+          receipt,
+        })
+      let transactionError: unknown
+      try {
+        await this.dependencies.transact(transaction)
+      } catch (error: unknown) {
+        const managedGuardCode = readPublicFailureCode(error)
+        if (managedGuardCode !== undefined) {
+          return failApply(managedGuardCode)
+        }
+        transactionError = error
+      }
+      return this.reconcileAuthorityAdoptionAfterAttempt(
+        command,
+        transactionError,
+      )
+    })
+  }
+
+  /**
    * Uploads and atomically commits one strict next plan operation.
    *
    * @param input - Expected revision, lease claim, and adapter request.
@@ -1119,10 +1363,11 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
       if (existing !== undefined) {
         return this.reconcileCommittedOperation(command, existing)
       }
-      const [authority, current] = await Promise.all([
-        this.resolveAuthority(command),
-        this.readEffectiveState(),
-      ])
+      const current = await this.readEffectiveState()
+      const authority = await this.resolveAuthority(
+        command,
+        current,
+      )
       if (
         current.runState.revision !== command.expectedRevision
       ) {
@@ -1330,10 +1575,11 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
         return this.reconcileCheckpointReceipt(command, existing)
       }
 
-      const [initialAuthority, initial] = await Promise.all([
-        this.resolveAuthority(command),
-        this.readEffectiveState(),
-      ])
+      const initial = await this.readEffectiveState()
+      const initialAuthority = await this.resolveAuthority(
+        command,
+        initial,
+      )
       requireCheckpointCommandState(command, initial.runState)
       requireLeaseClaimMatchesAuthority(
         command.lease,
@@ -1357,10 +1603,11 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
         previousCheckpoint: structuredClone(previousCheckpoint),
       })
 
-      const [authority, current] = await Promise.all([
-        this.resolveAuthority(command),
-        this.readEffectiveState(),
-      ])
+      const current = await this.readEffectiveState()
+      const authority = await this.resolveAuthority(
+        command,
+        current,
+      )
       requireCheckpointCommandState(command, current.runState)
       requireSameEffectiveState(initial, current)
       requireLeaseClaimMatchesAuthority(command.lease, authority)
@@ -1467,7 +1714,10 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
         command,
         initial,
       )
-      const initialAuthority = await this.resolveAuthority(command)
+      const initialAuthority = await this.resolveAuthority(
+        command,
+        initial,
+      )
       requireLeaseClaimMatchesAuthority(
         command.lease,
         initialAuthority,
@@ -1491,10 +1741,11 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
           await this.dependencies.writeApplySeal(seal),
         )
 
-      const [authority, current] = await Promise.all([
-        this.resolveAuthority(command),
-        this.readEffectiveState(),
-      ])
+      const current = await this.readEffectiveState()
+      const authority = await this.resolveAuthority(
+        command,
+        current,
+      )
       if (current.appliedRoot !== undefined) {
         requireAppliedRootPredecessor(
           current.appliedRoot,
@@ -1576,6 +1827,7 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
    * Resolves and detaches one fresh current authority.
    *
    * @param command - Detached exact caller command.
+   * @param effective - Strongly reconstructed current execution state.
    * @returns Exact fresh current authority.
    */
   private async resolveAuthority(
@@ -1583,16 +1835,31 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
       | PreparedApplyCheckpointCommand
       | PreparedApplyCommand
       | PreparedApplySealCommand,
+    effective: EffectiveApplyState,
   ): Promise<WorkspaceSearchMigrationPrePlanAuthority> {
-    const admissionAuthority =
-      this.binding.executionRun.binding.currentAuthority
-    const candidate = await this.dependencies.readAuthority({
+    const adoptedAuthority =
+      effective.executionState?.executionStateVersion === 3
+        ? effective.executionState.currentAuthority
+        : this.binding.executionRun.binding.currentAuthority
+    return this.resolveClaimAuthority({
       lease: command.lease,
       maintenanceEvidenceReceiptDigest:
-        admissionAuthority.maintenanceEvidenceReceiptDigest,
+        adoptedAuthority.maintenanceEvidenceReceiptDigest,
       maintenanceEvidencePointerRevision:
-        admissionAuthority.maintenanceEvidencePointerRevision,
+        adoptedAuthority.maintenanceEvidencePointerRevision,
     })
+  }
+
+  /**
+   * Resolves and cross-validates one explicit current-authority claim.
+   *
+   * @param claim - Exact lease, pointer, and receipt selected by the caller.
+   * @returns Exact detached current pre-plan authority.
+   */
+  private async resolveClaimAuthority(
+    claim: WorkspaceSearchMigrationPrePlanAuthorityClaim,
+  ): Promise<WorkspaceSearchMigrationPrePlanAuthority> {
+    const candidate = await this.dependencies.readAuthority(claim)
     const detached =
       detachWorkspaceSearchMigrationPrePlanAuthorityForExecutionBoundary(
         candidate,
@@ -1600,10 +1867,15 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
     if (
       detached.configurationHash !== this.binding.configurationHash ||
       detached.stateTableId !== this.binding.stateTable.tableId ||
-      detached.lease.runId !== this.binding.executionRun.runId
+      detached.lease.runId !== this.binding.executionRun.runId ||
+      detached.maintenanceEvidencePointerRevision !==
+        claim.maintenanceEvidencePointerRevision ||
+      detached.maintenanceEvidenceReceiptDigest !==
+        claim.maintenanceEvidenceReceiptDigest
     ) {
       return failApply('CONFIGURATION_DRIFT')
     }
+    requireLeaseClaimMatchesAuthority(claim.lease, detached)
     return detached
   }
 
@@ -1691,6 +1963,35 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
     return record === undefined
       ? undefined
       : parseCheckpointReceiptRecord(
+          this.binding,
+          identity,
+          record,
+        )
+  }
+
+  /**
+   * Strongly reads one deterministic immutable authority-adoption receipt.
+   *
+   * @param identity - Exact command identity expected at the receipt key.
+   * @returns Exact strict receipt or undefined when it has not committed.
+   */
+  private async readAuthorityAdoptionReceipt(
+    identity:
+      WorkspaceSearchMigrationExecutionAuthorityAdoptionCommandIdentity,
+  ): Promise<
+    WorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt | undefined
+  > {
+    const output = await this.dependencies.get(
+      new GetItemCommand({
+        TableName: this.binding.stateTable.tableName,
+        ConsistentRead: true,
+        Key: createAuthorityAdoptionReceiptKey(identity),
+      }),
+    )
+    const record = readOutputItem(output)
+    return record === undefined
+      ? undefined
+      : parseAuthorityAdoptionReceiptRecord(
           this.binding,
           identity,
           record,
@@ -1845,6 +2146,154 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
     } catch (error: unknown) {
       return failApply(readReconciliationFailureCode(error))
     }
+  }
+
+  /**
+   * Reconciles one authority-adoption attempt through its immutable receipt.
+   *
+   * @param command - Detached exact attempted adoption.
+   * @param transactionError - Raw transaction failure, when one occurred.
+   * @returns Exact durable state proving the adoption committed.
+   */
+  private async reconcileAuthorityAdoptionAfterAttempt(
+    command: PreparedApplyAuthorityAdoptionCommand,
+    transactionError: unknown,
+  ): Promise<WorkspaceSearchMigrationRunState> {
+    let receipt:
+      | WorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt
+      | undefined
+    try {
+      receipt = await this.readAuthorityAdoptionReceipt(
+        command.identity,
+      )
+    } catch (error: unknown) {
+      return failApply(readReconciliationFailureCode(error))
+    }
+    if (receipt === undefined) {
+      try {
+        const effective = await this.readEffectiveState()
+        if (effective.runState.revision > command.expectedRevision) {
+          return this.reconcileAuthorityAdoptionAfterObservedProgress(
+            command,
+          )
+        }
+      } catch (error: unknown) {
+        return failApply(readReconciliationFailureCode(error))
+      }
+      return failApply(
+        transactionError === undefined
+          ? 'AMBIGUOUS_OPERATION_UNRESOLVED'
+          : classifyAuthorityAdoptionTransactionError(
+              transactionError,
+            ),
+      )
+    }
+    try {
+      return await this.reconcileAuthorityAdoptionReceipt(
+        command,
+        receipt,
+      )
+    } catch (error: unknown) {
+      return failApply(readReconciliationFailureCode(error))
+    }
+  }
+
+  /**
+   * Re-reads an adoption receipt after durable state advanced concurrently.
+   *
+   * @param command - Detached adoption whose successor revision was observed.
+   * @returns Exact current state when the deterministic receipt proves commit.
+   */
+  private async reconcileAuthorityAdoptionAfterObservedProgress(
+    command: PreparedApplyAuthorityAdoptionCommand,
+  ): Promise<WorkspaceSearchMigrationRunState> {
+    let receipt:
+      | WorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt
+      | undefined
+    try {
+      receipt = await this.readAuthorityAdoptionReceipt(
+        command.identity,
+      )
+    } catch (error: unknown) {
+      return failApply(readReconciliationFailureCode(error))
+    }
+    if (receipt === undefined) {
+      return failApply('INVALID_STATE')
+    }
+    try {
+      return await this.reconcileAuthorityAdoptionReceipt(
+        command,
+        receipt,
+      )
+    } catch (error: unknown) {
+      return failApply(readReconciliationFailureCode(error))
+    }
+  }
+
+  /**
+   * Cross-checks one authority-adoption receipt against current execution.
+   *
+   * @param command - Detached attempted or retried adoption command.
+   * @param receipt - Exact immutable receipt read at its deterministic key.
+   * @returns Current durable state at or after the committed adoption.
+   */
+  private async reconcileAuthorityAdoptionReceipt(
+    command: PreparedApplyAuthorityAdoptionCommand,
+    receipt:
+      WorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt,
+  ): Promise<WorkspaceSearchMigrationRunState> {
+    if (
+      receipt.commandDigest !== command.identity.commandDigest ||
+      receipt.predecessorRevision !== command.expectedRevision ||
+      receipt.successorRevision !== command.expectedRevision + 1
+    ) {
+      return failApply('INVALID_STATE')
+    }
+    const effective = await this.readEffectiveState()
+    const executionState = effective.executionState
+    if (
+      executionState === undefined ||
+      executionState.executionStateVersion !== 3 ||
+      executionState.revision < receipt.successorRevision ||
+      executionState.maintenanceEvidenceRenewalCount <
+        receipt.maintenanceEvidenceRenewalCount
+    ) {
+      return failApply('INVALID_STATE')
+    }
+    if (executionState.revision === receipt.successorRevision) {
+      if (
+        executionState.executionStateDigest !==
+          receipt.successorExecutionStateDigest ||
+        executionState.runStateDigest !==
+          receipt.successorRunStateDigest ||
+        executionState.maintenanceEvidenceRenewalCount !==
+          receipt.maintenanceEvidenceRenewalCount ||
+        !sameExecutionAuthority(
+          executionState.currentAuthority,
+          receipt.currentAuthority,
+        )
+      ) {
+        return failApply('INVALID_STATE')
+      }
+    } else if (
+      executionState.maintenanceEvidenceRenewalCount ===
+        receipt.maintenanceEvidenceRenewalCount
+    ) {
+      if (
+        !sameExecutionAuthority(
+          receipt.currentAuthority,
+          executionState.currentAuthority,
+        )
+      ) {
+        return failApply('INVALID_STATE')
+      }
+    } else {
+      requireExecutionAuthoritySuccessor(
+        receipt.currentAuthority,
+        executionState.currentAuthority,
+      )
+    }
+    return effective.runState
   }
 
   /**
@@ -2066,7 +2515,10 @@ async function readEffectiveApplyState(
     if (record === undefined) return failApply('INVALID_STATE')
     const executionState =
       parseExecutionStateRecord(binding, record)
-    if (executionState.executionStateVersion !== 2) {
+    if (
+      executionState.executionStateVersion !== 2 &&
+      executionState.executionStateVersion !== 3
+    ) {
       return failApply('INVALID_STATE')
     }
     const storedSeal =
@@ -3000,6 +3452,89 @@ function prepareApplySealCommand(
 }
 
 /**
+ * Detaches one caller execution-authority adoption before the first await.
+ *
+ * @param input - Candidate authority-adoption command.
+ * @param binding - Exact admitted apply binding.
+ * @returns Strict detached authority-adoption command.
+ */
+function prepareApplyAuthorityAdoptionCommand(
+  input: WorkspaceSearchMigrationApplyAuthorityAdoptionCommandInput,
+  binding: ApplyOperationBinding,
+): PreparedApplyAuthorityAdoptionCommand {
+  const record = requirePlainRecord(input, 'INVALID_ARGUMENT')
+  requireExactKeys(
+    record,
+    ['authority', 'expectedRevision'],
+    'INVALID_ARGUMENT',
+  )
+  const expectedRevision = readPositiveSafeInteger(
+    readOwn(record, 'expectedRevision', 'INVALID_ARGUMENT'),
+    'INVALID_ARGUMENT',
+  )
+  const authority = readPrePlanAuthorityClaim(
+    readOwn(record, 'authority', 'INVALID_ARGUMENT'),
+  )
+  if (authority.lease.runId !== binding.executionRun.runId) {
+    return failApply('INVALID_ARGUMENT')
+  }
+  const identity =
+    createWorkspaceSearchMigrationExecutionAuthorityAdoptionCommandIdentity({
+      stateTableId: binding.stateTable.tableId,
+      configurationHash: binding.configurationHash,
+      runId: binding.executionRun.runId,
+      executionRunDigest:
+        binding.executionRun.executionRunDigest,
+      expectedRevision,
+      authorityClaim: authority,
+    })
+  return { expectedRevision, authority, identity }
+}
+
+/**
+ * Reads one exact pre-plan authority claim.
+ *
+ * @param value - Candidate lease, pointer, and receipt claim.
+ * @returns Detached strict current-authority claim.
+ */
+function readPrePlanAuthorityClaim(
+  value: unknown,
+): WorkspaceSearchMigrationPrePlanAuthorityClaim {
+  const record = requirePlainRecord(value, 'INVALID_ARGUMENT')
+  requireExactKeys(
+    record,
+    [
+      'lease',
+      'maintenanceEvidencePointerRevision',
+      'maintenanceEvidenceReceiptDigest',
+    ],
+    'INVALID_ARGUMENT',
+  )
+  return {
+    lease: readLeaseClaim(
+      readOwn(record, 'lease', 'INVALID_ARGUMENT'),
+    ),
+    maintenanceEvidencePointerRevision:
+      readPositiveSafeInteger(
+        readOwn(
+          record,
+          'maintenanceEvidencePointerRevision',
+          'INVALID_ARGUMENT',
+        ),
+        'INVALID_ARGUMENT',
+      ),
+    maintenanceEvidenceReceiptDigest: readDigest(
+      readOwn(
+        record,
+        'maintenanceEvidenceReceiptDigest',
+        'INVALID_ARGUMENT',
+      ),
+      'INVALID_ARGUMENT',
+    ),
+  }
+}
+
+/**
  * Reads one strict source or target checkpoint location.
  *
  * @param value - Candidate location.
@@ -3071,6 +3606,103 @@ function requireLeaseClaimMatchesAuthority(
 }
 
 /**
+ * Projects one rich current authority into its durable compact binding.
+ *
+ * @param authority - Fresh strongly resolved current authority.
+ * @returns Compact detached authority used by execution state and receipts.
+ */
+function createExecutionAuthorityBinding(
+  authority: WorkspaceSearchMigrationPrePlanAuthority,
+): WorkspaceSearchMigrationExecutionRunAuthorityBinding {
+  return {
+    ownerId: authority.lease.ownerId,
+    fenceToken: authority.lease.fenceToken,
+    maintenanceEvidencePointerRevision:
+      authority.maintenanceEvidencePointerRevision,
+    maintenanceEvidenceReceiptDigest:
+      authority.maintenanceEvidenceReceiptDigest,
+    evaluatedAt: authority.evaluatedAt,
+  }
+}
+
+/**
+ * Compares two compact execution-authority tuples exactly.
+ *
+ * @param left - First compact authority.
+ * @param right - Second compact authority.
+ * @returns Whether every authority field is identical.
+ */
+function sameExecutionAuthority(
+  left: WorkspaceSearchMigrationExecutionRunAuthorityBinding,
+  right: WorkspaceSearchMigrationExecutionRunAuthorityBinding,
+): boolean {
+  return left.ownerId === right.ownerId &&
+    left.fenceToken === right.fenceToken &&
+    left.maintenanceEvidencePointerRevision ===
+      right.maintenanceEvidencePointerRevision &&
+    left.maintenanceEvidenceReceiptDigest ===
+      right.maintenanceEvidenceReceiptDigest &&
+    left.evaluatedAt === right.evaluatedAt
+}
+
+/**
+ * Compares the durable lease, pointer, and receipt selected by two bindings.
+ *
+ * @param left - First compact authority.
+ * @param right - Second compact authority.
+ * @returns Whether both bindings select the same mutation authority.
+ */
+function sameExecutionAuthoritySelection(
+  left: WorkspaceSearchMigrationExecutionRunAuthorityBinding,
+  right: WorkspaceSearchMigrationExecutionRunAuthorityBinding,
+): boolean {
+  return left.ownerId === right.ownerId &&
+    left.fenceToken === right.fenceToken &&
+    left.maintenanceEvidencePointerRevision ===
+      right.maintenanceEvidencePointerRevision &&
+    left.maintenanceEvidenceReceiptDigest ===
+      right.maintenanceEvidenceReceiptDigest
+}
+
+/**
+ * Requires current authority to be a strict successor of a receipt.
+ *
+ * @param predecessor - Authority proven by an earlier immutable receipt.
+ * @param current - Authority retained by the current durable execution state.
+ */
+function requireExecutionAuthoritySuccessor(
+  predecessor: WorkspaceSearchMigrationExecutionRunAuthorityBinding,
+  current: WorkspaceSearchMigrationExecutionRunAuthorityBinding,
+): void {
+  if (
+    Date.parse(current.evaluatedAt) <
+      Date.parse(predecessor.evaluatedAt) ||
+    current.fenceToken < predecessor.fenceToken ||
+    current.maintenanceEvidencePointerRevision <
+      predecessor.maintenanceEvidencePointerRevision ||
+    (
+      current.maintenanceEvidencePointerRevision ===
+        predecessor.maintenanceEvidencePointerRevision &&
+      current.maintenanceEvidenceReceiptDigest !==
+        predecessor.maintenanceEvidenceReceiptDigest
+    ) ||
+    (
+      current.maintenanceEvidencePointerRevision >
+        predecessor.maintenanceEvidencePointerRevision &&
+      current.maintenanceEvidenceReceiptDigest ===
+        predecessor.maintenanceEvidenceReceiptDigest
+    ) ||
+    (
+      current.fenceToken === predecessor.fenceToken &&
+      current.ownerId !== predecessor.ownerId
+    ) ||
+    sameExecutionAuthoritySelection(predecessor, current)
+  ) {
+    return failApply('INVALID_STATE')
+  }
+}
+
+/**
  * Requires one durable state to be the exact checkpoint predecessor.
  *
  * @param command - Exact checkpoint command.
@@ -3105,7 +3737,10 @@ function requireTerminalEffectiveState(
   if (
     effective.appliedRoot !== undefined ||
     effective.runState.revision !== command.expectedRevision ||
-    executionState?.executionStateVersion !== 2 ||
+    (
+      executionState?.executionStateVersion !== 2 &&
+      executionState?.executionStateVersion !== 3
+    ) ||
     executionStateRecord === undefined
   ) {
     return failApply('INVALID_STATE')
@@ -3176,7 +3811,7 @@ function recoverAppliedRootForCommand(
  */
 function requireAppliedRootPredecessor(
   root: WorkspaceSearchMigrationAppliedRoot,
-  predecessor: WorkspaceSearchMigrationExecutionStateV2,
+  predecessor: WorkspaceSearchMigrationTraversalExecutionState,
 ): void {
   if (
     root.predecessorRevision !== predecessor.revision ||
@@ -3381,6 +4016,21 @@ type CreateApplyCheckpointTransactionCommandInput =
   }
 
 /**
+ * Complete material for one fixed-order authority-adoption transaction.
+ */
+type CreateApplyAuthorityAdoptionTransactionCommandInput =
+  ExecutionStateTransitionMaterial & {
+    /** Fresh current lease, pointer, and receipt authority. */
+    readonly currentAuthority:
+      WorkspaceSearchMigrationPrePlanAuthority
+    /** Adapter-owned final transaction time. */
+    readonly commitAt: Date
+    /** Exact immutable adoption receipt committed with the state. */
+    readonly receipt:
+      WorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt
+  }
+
+/**
  * Complete material for one fixed-order immutable apply-seal transaction.
  */
 type CreateApplySealTransactionCommandInput = {
@@ -3393,7 +4043,7 @@ type CreateApplySealTransactionCommandInput = {
   readonly commitAt: Date
   /** Exact terminal traversal-capable mutable predecessor. */
   readonly predecessorState:
-    WorkspaceSearchMigrationExecutionStateV2
+    WorkspaceSearchMigrationTraversalExecutionState
   /** Complete exact durable terminal predecessor row. */
   readonly predecessorStateRecord:
     Readonly<Record<string, AttributeValue>>
@@ -3552,6 +4202,73 @@ function createApplyCheckpointTransactionCommand(
 }
 
 /**
+ * Builds one fixed-order eleven-item execution-authority transaction.
+ *
+ * @param input - Exact authority, predecessor, successor, and receipt.
+ * @returns Adapter-owned idempotent authority-adoption transaction.
+ */
+function createApplyAuthorityAdoptionTransactionCommand(
+  input: CreateApplyAuthorityAdoptionTransactionCommandInput,
+): TransactWriteItemsCommand {
+  requireAuthorityAdoptionTransactionBinding(input)
+  const authorityChecks =
+    createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks({
+      stateTable: input.binding.stateTable,
+      configurationHash: input.binding.configurationHash,
+      authority: input.currentAuthority,
+      commitAt: input.commitAt,
+    })
+  const items: TransactWriteItem[] = [
+    ...authorityChecks,
+    createWorkspaceSearchWriterFenceClosedConditionCheck(
+      input.binding.closedWriterFenceRecord,
+      input.binding.writerFence,
+    ),
+    createWorkspaceSearchMigrationPlanningAdmittedExecutionBoundaryConditionCheck(
+      {
+        stateTable: input.binding.stateTable,
+        configurationHash: input.binding.configurationHash,
+        boundary: input.binding.executionBoundary,
+      },
+    ),
+    createWorkspaceSearchMigrationSealedPlanningAuthorityV2ConditionCheck({
+      stateTable: input.binding.stateTable,
+      configurationHash: input.binding.configurationHash,
+      authority: input.binding.sealedPlanningAuthority,
+    }),
+    createWorkspaceSearchMigrationExecutionRunAdmissionConditionCheck({
+      stateTable: input.binding.stateTable,
+      configurationHash: input.binding.configurationHash,
+      executionRun: input.binding.executionRun,
+    }),
+    createRollbackStartSentinelAbsentConditionCheck(input.binding),
+    createWorkspaceSearchMigrationAppliedRootAbsentConditionCheck({
+      stateTable: input.binding.stateTable,
+      configurationHash: input.binding.configurationHash,
+      executionRun: input.binding.executionRun,
+    }),
+    createExecutionStatePut(input),
+    createAuthorityAdoptionReceiptPut(input),
+  ]
+  if (items.length !== authorityAdoptionTransactionItemCount) {
+    return failApply('INVALID_STATE')
+  }
+  return new TransactWriteItemsCommand({
+    ClientRequestToken: createMigrationDigest({
+      kind:
+        'workspace-search-migration-execution-authority-adoption-transaction',
+      version: applyRecordVersion,
+      executionStateDigest:
+        input.successorState.executionStateDigest,
+      receiptDigest: input.receipt.receiptDigest,
+    }).slice(0, 36),
+    TransactItems: items,
+    ReturnConsumedCapacity: 'NONE',
+    ReturnItemCollectionMetrics: 'NONE',
+  })
+}
+
+/**
  * Builds one fixed-order ten-item immutable applied-root transaction.
  *
  * @param input - Exact authority, terminal predecessor, and applied root.
@@ -3688,6 +4405,70 @@ function requireCheckpointTransactionBinding(
 }
 
 /**
+ * Cross-checks one adoption receipt against its exact CAS transition.
+ *
+ * @param input - Exact authority-adoption transaction material.
+ */
+function requireAuthorityAdoptionTransactionBinding(
+  input: CreateApplyAuthorityAdoptionTransactionCommandInput,
+): void {
+  const predecessorRevision =
+    input.predecessorState?.revision ??
+      input.binding.executionRun.revision
+  const predecessorKind =
+    input.predecessorState === undefined
+      ? 'execution-run-admission'
+      : 'mutable-execution-state'
+  const predecessorExecutionStateDigest =
+    input.predecessorState?.executionStateDigest ??
+      input.binding.executionRun.executionRunDigest
+  const predecessorRunStateDigest =
+    input.predecessorState?.runStateDigest ??
+      input.binding.executionRun.stateDigest
+  const successor = input.successorState
+  const transactionAuthority =
+    createExecutionAuthorityBinding(input.currentAuthority)
+  const committedAt = input.commitAt.toISOString()
+  if (
+    successor.executionStateVersion !== 3 ||
+    input.receipt.predecessorKind !== predecessorKind ||
+    input.receipt.predecessorRevision !== predecessorRevision ||
+    input.receipt.predecessorExecutionStateDigest !==
+      predecessorExecutionStateDigest ||
+    input.receipt.predecessorRunStateDigest !==
+      predecessorRunStateDigest ||
+    input.receipt.predecessorExecutionStateVersion !==
+      input.predecessorState?.executionStateVersion ||
+    input.receipt.predecessorMaintenanceEvidenceRenewalCount !==
+      (
+        input.predecessorState?.executionStateVersion === 3
+          ? input.predecessorState
+              .maintenanceEvidenceRenewalCount
+          : undefined
+      ) ||
+    input.receipt.successorRevision !== successor.revision ||
+    input.receipt.successorExecutionStateDigest !==
+      successor.executionStateDigest ||
+    input.receipt.successorRunStateDigest !==
+      successor.runStateDigest ||
+    input.receipt.maintenanceEvidenceRenewalCount !==
+      successor.maintenanceEvidenceRenewalCount ||
+    !sameExecutionAuthority(
+      input.receipt.currentAuthority,
+      successor.currentAuthority,
+    ) ||
+    !sameExecutionAuthority(
+      transactionAuthority,
+      successor.currentAuthority,
+    ) ||
+    input.receipt.committedAt !== successor.updatedAt ||
+    committedAt !== successor.updatedAt
+  ) {
+    return failApply('INVALID_STATE')
+  }
+}
+
+/**
  * Creates the exact mutable execution-state Put and predecessor CAS.
  *
  * @param input - Exact apply transaction material.
@@ -3772,7 +4553,10 @@ function requireCompleteApplyState(
     state.apply.target,
   ]
   if (
-    executionState.executionStateVersion !== 2 ||
+    (
+      executionState.executionStateVersion !== 2 &&
+      executionState.executionStateVersion !== 3
+    ) ||
     state.status !== 'applying' ||
     state.appliedOperationCount !== state.planOperationCount ||
     checkpoints.some((checkpoint) =>
@@ -3952,6 +4736,33 @@ function createCheckpointReceiptPut(
     Put: {
       TableName: input.binding.stateTable.tableName,
       Item: createCheckpointReceiptRecord(
+        input.binding,
+        input.receipt,
+      ),
+      ConditionExpression:
+        'attribute_not_exists(#migrationId) AND attribute_not_exists(#recordKey)',
+      ExpressionAttributeNames: {
+        '#migrationId': 'migrationId',
+        '#recordKey': 'recordKey',
+      },
+      ReturnValuesOnConditionCheckFailure: 'NONE',
+    },
+  }
+}
+
+/**
+ * Creates one deterministic immutable authority-adoption receipt Put.
+ *
+ * @param input - Exact authority-adoption transaction material.
+ * @returns One absent receipt Put at the fixed final position.
+ */
+function createAuthorityAdoptionReceiptPut(
+  input: CreateApplyAuthorityAdoptionTransactionCommandInput,
+): TransactWriteItem {
+  return {
+    Put: {
+      TableName: input.binding.stateTable.tableName,
+      Item: createAuthorityAdoptionReceiptRecord(
         input.binding,
         input.receipt,
       ),
@@ -4470,6 +5281,215 @@ function requireCheckpointReceiptBinding(
 }
 
 /**
+ * Complete controlled field set for immutable authority-adoption rows.
+ */
+const authorityAdoptionReceiptRecordAttributeNames = Object.freeze([
+  'commandDigest',
+  'configurationHash',
+  'currentAuthorityDigest',
+  'executionRunDigest',
+  'kind',
+  'maintenanceEvidenceRenewalCount',
+  'migrationId',
+  'predecessorRevision',
+  'receiptBytes',
+  'receiptDigest',
+  'recordKey',
+  'recordVersion',
+  'runId',
+  'stateTableId',
+  'successorExecutionStateDigest',
+  'successorRevision',
+  'successorRunStateDigest',
+])
+
+/**
+ * Creates one complete immutable authority-adoption receipt row.
+ *
+ * @param binding - Exact admitted apply binding.
+ * @param receipt - Strict immutable authority-adoption receipt.
+ * @returns Complete bounded low-level DynamoDB record.
+ */
+function createAuthorityAdoptionReceiptRecord(
+  binding: ApplyOperationBinding,
+  receipt:
+    WorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt,
+): Readonly<Record<string, AttributeValue>> {
+  const bytes =
+    serializeWorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt(
+      receipt,
+    )
+  const strict =
+    parseWorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt(
+      bytes,
+    )
+  const identity = requireAuthorityAdoptionReceiptBinding(
+    binding,
+    strict,
+  )
+  const item: Readonly<Record<string, AttributeValue>> = {
+    migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
+    recordKey: {
+      S: createWorkspaceSearchMigrationExecutionAuthorityAdoptionReceiptRecordKey(
+        identity,
+      ),
+    },
+    kind: { S: authorityAdoptionReceiptRecordKind },
+    recordVersion: { N: String(applyRecordVersion) },
+    stateTableId: { S: binding.stateTable.tableId },
+    configurationHash: { S: binding.configurationHash },
+    runId: { S: binding.executionRun.runId },
+    executionRunDigest: {
+      S: binding.executionRun.executionRunDigest,
+    },
+    commandDigest: { S: strict.commandDigest },
+    predecessorRevision: {
+      N: String(strict.predecessorRevision),
+    },
+    successorRevision: {
+      N: String(strict.successorRevision),
+    },
+    successorExecutionStateDigest: {
+      S: strict.successorExecutionStateDigest,
+    },
+    successorRunStateDigest: {
+      S: strict.successorRunStateDigest,
+    },
+    maintenanceEvidenceRenewalCount: {
+      N: String(strict.maintenanceEvidenceRenewalCount),
+    },
+    currentAuthorityDigest: {
+      S: createMigrationDigest(strict.currentAuthority),
+    },
+    receiptDigest: { S: strict.receiptDigest },
+    receiptBytes: { B: bytes },
+  }
+  validateDynamoDbItemSize(item)
+  return item
+}
+
+/**
+ * Strictly parses one complete immutable authority-adoption receipt row.
+ *
+ * @param binding - Exact admitted apply binding.
+ * @param identity - Deterministic command identity expected at this key.
+ * @param item - Raw low-level DynamoDB record.
+ * @returns Exact detached strict authority-adoption receipt.
+ */
+function parseAuthorityAdoptionReceiptRecord(
+  binding: ApplyOperationBinding,
+  identity:
+    WorkspaceSearchMigrationExecutionAuthorityAdoptionCommandIdentity,
+  item: Readonly<Record<string, AttributeValue>>,
+): WorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt {
+  requireExactAttributeKeys(
+    item,
+    authorityAdoptionReceiptRecordAttributeNames,
+    'INVALID_STATE',
+  )
+  if (
+    readStringAttribute(item, 'migrationId') !==
+      WORKSPACE_SEARCH_MIGRATION_ID ||
+    readStringAttribute(item, 'recordKey') !==
+      createWorkspaceSearchMigrationExecutionAuthorityAdoptionReceiptRecordKey(
+        identity,
+      ) ||
+    readStringAttribute(item, 'kind') !==
+      authorityAdoptionReceiptRecordKind ||
+    readNumberAttribute(item, 'recordVersion') !==
+      applyRecordVersion ||
+    readStringAttribute(item, 'stateTableId') !==
+      binding.stateTable.tableId ||
+    readStringAttribute(item, 'configurationHash') !==
+      binding.configurationHash ||
+    readStringAttribute(item, 'runId') !==
+      binding.executionRun.runId ||
+    readStringAttribute(item, 'executionRunDigest') !==
+      binding.executionRun.executionRunDigest ||
+    readStringAttribute(item, 'commandDigest') !==
+      identity.commandDigest
+  ) {
+    return failApply('INVALID_STATE')
+  }
+  const receipt =
+    parseWorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt(
+      readBinaryAttribute(item, 'receiptBytes'),
+    )
+  const receiptIdentity =
+    requireAuthorityAdoptionReceiptBinding(binding, receipt)
+  if (
+    receiptIdentity.commandDigest !== identity.commandDigest ||
+    readNumberAttribute(item, 'predecessorRevision') !==
+      receipt.predecessorRevision ||
+    readNumberAttribute(item, 'successorRevision') !==
+      receipt.successorRevision ||
+    readStringAttribute(
+      item,
+      'successorExecutionStateDigest',
+    ) !== receipt.successorExecutionStateDigest ||
+    readStringAttribute(item, 'successorRunStateDigest') !==
+      receipt.successorRunStateDigest ||
+    readNumberAttribute(
+      item,
+      'maintenanceEvidenceRenewalCount',
+    ) !== receipt.maintenanceEvidenceRenewalCount ||
+    readStringAttribute(item, 'currentAuthorityDigest') !==
+      createMigrationDigest(receipt.currentAuthority) ||
+    readStringAttribute(item, 'receiptDigest') !==
+      receipt.receiptDigest
+  ) {
+    return failApply('INVALID_STATE')
+  }
+  return receipt
+}
+
+/**
+ * Reconstructs the exact command identity bound by an adoption receipt.
+ *
+ * @param binding - Exact admitted apply binding.
+ * @param receipt - Strict immutable authority-adoption receipt.
+ * @returns Exact deterministic receipt command identity.
+ */
+function requireAuthorityAdoptionReceiptBinding(
+  binding: ApplyOperationBinding,
+  receipt:
+    WorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt,
+): WorkspaceSearchMigrationExecutionAuthorityAdoptionCommandIdentity {
+  const identity =
+    createWorkspaceSearchMigrationExecutionAuthorityAdoptionCommandIdentity({
+      stateTableId: receipt.stateTableId,
+      configurationHash: receipt.configurationHash,
+      runId: receipt.runId,
+      executionRunDigest: receipt.executionRunDigest,
+      expectedRevision: receipt.predecessorRevision,
+      authorityClaim: {
+        lease: {
+          runId: receipt.runId,
+          ownerId: receipt.currentAuthority.ownerId,
+          fenceToken: receipt.currentAuthority.fenceToken,
+        },
+        maintenanceEvidencePointerRevision:
+          receipt.currentAuthority
+            .maintenanceEvidencePointerRevision,
+        maintenanceEvidenceReceiptDigest:
+          receipt.currentAuthority
+            .maintenanceEvidenceReceiptDigest,
+      },
+    })
+  if (
+    identity.commandDigest !== receipt.commandDigest ||
+    receipt.stateTableId !== binding.stateTable.tableId ||
+    receipt.configurationHash !== binding.configurationHash ||
+    receipt.runId !== binding.executionRun.runId ||
+    receipt.executionRunDigest !==
+      binding.executionRun.executionRunDigest
+  ) {
+    return failApply('INVALID_STATE')
+  }
+  return identity
+}
+
+/**
  * Creates one complete immutable operation marker record.
  *
  * @param binding - Exact static apply binding.
@@ -4857,6 +5877,26 @@ function createCheckpointReceiptKey(
     migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
     recordKey: {
       S: createWorkspaceSearchMigrationApplyCheckpointReceiptRecordKey(
+        identity,
+      ),
+    },
+  }
+}
+
+/**
+ * Creates the deterministic authority-adoption receipt primary key.
+ *
+ * @param identity - Exact deterministic adoption command identity.
+ * @returns Low-level state-table primary key.
+ */
+function createAuthorityAdoptionReceiptKey(
+  identity:
+    WorkspaceSearchMigrationExecutionAuthorityAdoptionCommandIdentity,
+): Readonly<Record<string, AttributeValue>> {
+  return {
+    migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
+    recordKey: {
+      S: createWorkspaceSearchMigrationExecutionAuthorityAdoptionReceiptRecordKey(
         identity,
       ),
     },
@@ -6009,6 +7049,81 @@ function isPlannedOperation(
 }
 
 /**
+ * Classifies one authority-adoption failure after an absent receipt reread.
+ *
+ * @param error - Raw transaction error.
+ * @returns Stable retry, authority, drift, or ambiguous code.
+ */
+function classifyAuthorityAdoptionTransactionError(
+  error: unknown,
+): WorkspaceSearchMigrationFailureCode {
+  try {
+    if (isResourceNotFoundError(error)) {
+      return 'CONFIGURATION_DRIFT'
+    }
+    if (
+      error instanceof TransactionConflictException ||
+      readErrorName(error) === 'TransactionConflictException'
+    ) {
+      return 'TRANSIENT_INFRASTRUCTURE_FAILURE'
+    }
+    if (
+      error instanceof TransactionCanceledException ||
+      readErrorName(error) === 'TransactionCanceledException'
+    ) {
+      const index =
+        workspaceSearchMigrationApplyAuthorityAdoptionTransactionIndex
+      if (
+        readCancellationReasonCode(error, index.lease) ===
+          'ConditionalCheckFailed'
+      ) {
+        return 'LEASE_LOST'
+      }
+      if (
+        readCancellationReasonCode(error, index.pointer) ===
+          'ConditionalCheckFailed' ||
+        readCancellationReasonCode(error, index.receipt) ===
+          'ConditionalCheckFailed'
+      ) {
+        return 'INVALID_MAINTENANCE_EVIDENCE'
+      }
+      for (
+        let conditionIndex = index.writerFence;
+        conditionIndex <= index.authorityAdoptionReceipt;
+        conditionIndex += 1
+      ) {
+        if (
+          readCancellationReasonCode(
+            error,
+            conditionIndex,
+          ) === 'ConditionalCheckFailed'
+        ) {
+          return 'INVALID_STATE'
+        }
+      }
+      return cancellationWasTransient(error, index.count)
+        ? 'TRANSIENT_INFRASTRUCTURE_FAILURE'
+        : 'INVALID_STATE'
+    }
+    if (!(error instanceof Error)) {
+      return 'AMBIGUOUS_OPERATION_UNRESOLVED'
+    }
+    if (readErrorName(error) === 'TransactionInProgressException') {
+      return 'AMBIGUOUS_OPERATION_UNRESOLVED'
+    }
+    const input = createAwsClassificationInput(error)
+    if (isThrottlingError(input)) {
+      return 'TRANSIENT_INFRASTRUCTURE_FAILURE'
+    }
+    return isTransientError(input)
+      ? 'AMBIGUOUS_OPERATION_UNRESOLVED'
+      : 'INVALID_STATE'
+  } catch {
+    return 'AMBIGUOUS_OPERATION_UNRESOLVED'
+  }
+}
+
+/**
  * Classifies one checkpoint transaction failure after an absent receipt reread.
  *
  * @param error - Raw transaction error.
@@ -6309,12 +7424,16 @@ function readCancellationReasonCode(
  * Detects any explicitly retry-safe transaction cancellation reason.
  *
  * @param error - Raw DynamoDB cancellation.
+ * @param count - Exact fixed transaction item count to inspect.
  * @returns Whether infrastructure rejected the transaction retry-safely.
  */
-function cancellationWasTransient(error: unknown): boolean {
+function cancellationWasTransient(
+  error: unknown,
+  count = mutationTransactionItemCount,
+): boolean {
   for (
     let index = 0;
-    index < mutationTransactionItemCount;
+    index < count;
     index += 1
   ) {
     const code = readCancellationReasonCode(error, index)

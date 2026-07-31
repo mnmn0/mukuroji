@@ -2344,6 +2344,11 @@ class AwsWorkspaceSearchMigrationIdentityPort
           authority,
           () => delegate.readApplyReceipt(sequence),
         ),
+      adoptExecutionAuthority: (input) =>
+        this.runManagedApplyOperation(
+          authority,
+          () => delegate.adoptExecutionAuthority(input),
+        ),
       commitApplyOperation: (input) =>
         this.runManagedApplyOperation(
           authority,
@@ -2423,15 +2428,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
         readAuthority: (claim) =>
           this.runManagedFullVerificationRead(
             authority,
-            () => prePlanAuthorityAdapter.readAuthority({
-              lease: claim,
-              maintenanceEvidenceReceiptDigest:
-                detachedExecutionRun.binding.currentAuthority
-                  .maintenanceEvidenceReceiptDigest,
-              maintenanceEvidencePointerRevision:
-                detachedExecutionRun.binding.currentAuthority
-                  .maintenanceEvidencePointerRevision,
-            }),
+            () => prePlanAuthorityAdapter.readAuthority(claim),
           ),
       }
     let appliedRootDigest: string | undefined

@@ -173,6 +173,9 @@ type VerificationReceiptChainRunner = (
 type VerificationAwsHarness = {
   /** Adapter under test. */
   readonly port: WorkspaceSearchMigrationFullVerificationAwsPort
+  /** Harness-local current authority used by fake reads and commands. */
+  readonly currentAuthority:
+    WorkspaceSearchMigrationPrePlanAuthority
   /** Durable migration-state rows keyed by physical sort key. */
   readonly rows: Map<string, Readonly<Record<string, AttributeValue>>>
   /** Fixed-order transactions observed by the fake transport. */
@@ -233,6 +236,13 @@ type VerificationAwsHarnessOptions = {
   readonly renewAuthorityAtClock?: boolean
   /** Optional raw failure thrown by lazy plan replay. */
   readonly planReplayError?: unknown
+}
+
+/** Minimal source of the current authority used by command fixtures. */
+type VerificationAuthoritySource = {
+  /** Exact fresh current authority. */
+  readonly currentAuthority:
+    WorkspaceSearchMigrationPrePlanAuthority
 }
 
 describe('Workspace Search migration full-verification AWS adapter', () => {
@@ -611,6 +621,8 @@ describe('Workspace Search migration full-verification AWS adapter', () => {
       WORKSPACE_SEARCH_MIGRATION_MINIMUM_COMMIT_WINDOW_MILLISECONDS +
       1
     const fixture = createFixture()
+    const originalAuthority =
+      structuredClone(fixture.currentAuthority)
     const harness = createHarness(
       fixture,
       true,
@@ -621,6 +633,19 @@ describe('Workspace Search migration full-verification AWS adapter', () => {
         ).toISOString(),
         renewAuthorityAtClock: true,
       },
+    )
+    expect(fixture.currentAuthority).toEqual(originalAuthority)
+    expect(
+      harness.currentAuthority
+        .maintenanceEvidencePointerRevision,
+    ).toBe(
+      originalAuthority.maintenanceEvidencePointerRevision + 1,
+    )
+    expect(
+      harness.currentAuthority
+        .maintenanceEvidenceReceiptDigest,
+    ).not.toBe(
+      originalAuthority.maintenanceEvidenceReceiptDigest,
     )
     let state:
       WorkspaceSearchMigrationFullVerificationPersistenceState
@@ -634,14 +659,18 @@ describe('Workspace Search migration full-verification AWS adapter', () => {
       'target',
     ] satisfies readonly WorkspaceSearchMigrationCheckpointLocation[]) {
       state = await harness.port.saveVerificationPage(
-        createPageCommand(fixture, state?.revision ?? 0, location),
+        createPageCommand(
+          harness,
+          state?.revision ?? 0,
+          location,
+        ),
       )
     }
     if (state === undefined) throw new Error('Expected terminal state.')
 
     const failure = await captureFailure(() =>
       harness.port.publishVerified(
-        createPublishCommand(fixture, state.revision),
+        createPublishCommand(harness, state.revision),
       )
     )
     expect(failure.code).toBe('INVALID_STATE')
@@ -1147,6 +1176,50 @@ function createHarness(
     options.initialClockAt ??
       '2026-07-29T01:19:40.000Z',
   )
+  let currentAuthority:
+    WorkspaceSearchMigrationPrePlanAuthority =
+      structuredClone(fixture.currentAuthority)
+  if (options.renewAuthorityAtClock === true) {
+    const current = currentAuthority
+    const previousValidityWindow =
+      Date.parse(current.maintenanceEvidenceReceipt.validUntil) -
+      Date.parse(
+        current.maintenanceEvidenceReceipt.oldestObservationAt,
+      )
+    const evaluatedAt =
+      new Date(clockMilliseconds).toISOString()
+    const oldestObservationAt = new Date(
+      clockMilliseconds - 60_000,
+    ).toISOString()
+    const maintenanceEvidenceReceipt = {
+      ...current.maintenanceEvidenceReceipt,
+      evidenceDigest: digest(`renewed:${evaluatedAt}`),
+      runtimeRevision:
+        current.maintenanceEvidenceReceipt.runtimeRevision + 1,
+      validatedAt: evaluatedAt,
+      oldestObservationAt,
+      validUntil: new Date(
+        Date.parse(oldestObservationAt) +
+          previousValidityWindow,
+      ).toISOString(),
+    }
+    currentAuthority = {
+      ...current,
+      lease: {
+        ...current.lease,
+        heartbeatAt: evaluatedAt,
+        expiresAt: new Date(
+          clockMilliseconds + 60_000,
+        ).toISOString(),
+      },
+      maintenanceEvidenceReceiptDigest:
+        createMigrationDigest(maintenanceEvidenceReceipt),
+      maintenanceEvidencePointerRevision:
+        current.maintenanceEvidencePointerRevision + 1,
+      maintenanceEvidenceReceipt,
+      evaluatedAt,
+    }
+  }
 
   const planArtifactGateway = {
     async replayPlanArtifact() {
@@ -1167,47 +1240,7 @@ function createHarness(
       const evaluatedAt =
         new Date(clockMilliseconds).toISOString()
       authorityEvaluatedAts.push(evaluatedAt)
-      const current = structuredClone(fixture.currentAuthority)
-      if (options.renewAuthorityAtClock === true) {
-        const previousValidityWindow =
-          Date.parse(
-            current.maintenanceEvidenceReceipt.validUntil,
-          ) -
-          Date.parse(
-            current.maintenanceEvidenceReceipt.oldestObservationAt,
-          )
-        const oldestObservationAt = new Date(
-          clockMilliseconds - 60_000,
-        ).toISOString()
-        const maintenanceEvidenceReceipt = {
-          ...current.maintenanceEvidenceReceipt,
-          evidenceDigest: digest(`renewed:${evaluatedAt}`),
-          runtimeRevision:
-            current.maintenanceEvidenceReceipt.runtimeRevision + 1,
-          validatedAt: evaluatedAt,
-          oldestObservationAt,
-          validUntil: new Date(
-            Date.parse(oldestObservationAt) +
-              previousValidityWindow,
-          ).toISOString(),
-        }
-        return {
-          ...current,
-          lease: {
-            ...current.lease,
-            heartbeatAt: evaluatedAt,
-            expiresAt: new Date(
-              clockMilliseconds + 60_000,
-            ).toISOString(),
-          },
-          maintenanceEvidenceReceiptDigest:
-            createMigrationDigest(maintenanceEvidenceReceipt),
-          maintenanceEvidencePointerRevision:
-            current.maintenanceEvidencePointerRevision + 1,
-          maintenanceEvidenceReceipt,
-          evaluatedAt,
-        }
-      }
+      const current = structuredClone(currentAuthority)
       return {
         ...current,
         evaluatedAt,
@@ -1394,6 +1427,7 @@ function createHarness(
     })
   return {
     port,
+    currentAuthority: structuredClone(currentAuthority),
     rows,
     transactions,
     planReplayCount: () => replayCount,
@@ -1920,16 +1954,22 @@ function requireBinary(
  * @returns Detached caller command.
  */
 function createPageCommand(
-  fixture: VerificationAwsFixture,
+  fixture: VerificationAuthoritySource,
   expectedRevision: number,
   location: WorkspaceSearchMigrationCheckpointLocation,
 ) {
   return {
     expectedRevision,
-    lease: {
-      runId: fixture.currentAuthority.lease.runId,
-      ownerId: fixture.currentAuthority.lease.ownerId,
-      fenceToken: fixture.currentAuthority.lease.fenceToken,
+    authority: {
+      lease: {
+        runId: fixture.currentAuthority.lease.runId,
+        ownerId: fixture.currentAuthority.lease.ownerId,
+        fenceToken: fixture.currentAuthority.lease.fenceToken,
+      },
+      maintenanceEvidenceReceiptDigest:
+        fixture.currentAuthority.maintenanceEvidenceReceiptDigest,
+      maintenanceEvidencePointerRevision:
+        fixture.currentAuthority.maintenanceEvidencePointerRevision,
     },
     location,
   }
@@ -1943,15 +1983,21 @@ function createPageCommand(
  * @returns Detached caller command.
  */
 function createPublishCommand(
-  fixture: VerificationAwsFixture,
+  fixture: VerificationAuthoritySource,
   expectedRevision: number,
 ) {
   return {
     expectedRevision,
-    lease: {
-      runId: fixture.currentAuthority.lease.runId,
-      ownerId: fixture.currentAuthority.lease.ownerId,
-      fenceToken: fixture.currentAuthority.lease.fenceToken,
+    authority: {
+      lease: {
+        runId: fixture.currentAuthority.lease.runId,
+        ownerId: fixture.currentAuthority.lease.ownerId,
+        fenceToken: fixture.currentAuthority.lease.fenceToken,
+      },
+      maintenanceEvidenceReceiptDigest:
+        fixture.currentAuthority.maintenanceEvidenceReceiptDigest,
+      maintenanceEvidencePointerRevision:
+        fixture.currentAuthority.maintenanceEvidencePointerRevision,
     },
   }
 }

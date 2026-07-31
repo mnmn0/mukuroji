@@ -167,7 +167,7 @@ export type WorkspaceSearchMigrationRollbackMutablePredecessorV2 = {
   /** Mutable execution-state predecessor discriminator. */
   readonly kind: 'mutable-execution-state'
   /** Exact mutable envelope schema version. */
-  readonly executionStateVersion: 1 | 2
+  readonly executionStateVersion: 1 | 2 | 3
   /** Exact optimistic-concurrency revision represented by the state. */
   readonly revision: number
   /** Digest of the exact mutable execution-state envelope. */
@@ -635,6 +635,9 @@ type ResolvedOrigin = {
     WorkspaceSearchMigrationCommittedPrefixRollbackOriginV2
   /** Exact applying pure run state represented by the predecessor. */
   readonly predecessorRunState: WorkspaceSearchMigrationRunState
+  /** Exact current authority adopted by the applying predecessor. */
+  readonly predecessorAuthority:
+    WorkspaceSearchMigrationRollbackAuthorityBindingV2
 }
 
 /**
@@ -844,6 +847,7 @@ export function createWorkspaceSearchMigrationRollbackStartRootV2(
       resolved.origin,
       predecessor,
       admission,
+      resolved.predecessorAuthority,
       currentAuthority,
       startedAt,
     )
@@ -1761,6 +1765,12 @@ function resolveOrigin(
   return {
     origin,
     predecessorRunState: readApplyingRunState(predecessorRunState),
+    predecessorAuthority: readAuthorityBinding(
+      predecessor.kind === 'mutable-execution-state' &&
+        predecessor.executionState.executionStateVersion === 3
+        ? predecessor.executionState.currentAuthority
+        : admission.binding.currentAuthority,
+    ),
   }
 }
 
@@ -1940,6 +1950,7 @@ function createPersistenceState(
  * @param origin - Exact committed-prefix origin.
  * @param predecessor - Exact applying predecessor run state.
  * @param admission - Immutable execution admission owning the prefix.
+ * @param predecessorAuthority - Authority adopted by the exact predecessor.
  * @param authority - Fresh strongly resolved current authority.
  * @param startedAt - Adapter-owned transaction time.
  */
@@ -1947,17 +1958,16 @@ function requireStartAuthority(
   origin: WorkspaceSearchMigrationCommittedPrefixRollbackOriginV2,
   predecessor: WorkspaceSearchMigrationRunState,
   admission: WorkspaceSearchMigrationExecutionRun,
+  predecessorAuthority:
+    WorkspaceSearchMigrationRollbackAuthorityBindingV2,
   authority: WorkspaceSearchMigrationPrePlanAuthority,
   startedAt: string,
 ): void {
   const predecessorFence =
     predecessor.maintenanceEvidenceReceipt.fenceToken
-  const admittedAuthority = readAuthorityBinding(
-    admission.binding.currentAuthority,
-  )
   const currentAuthority = createAuthorityBinding(authority)
   requireAuthorityBindingSuccessor(
-    admittedAuthority,
+    predecessorAuthority,
     currentAuthority,
   )
   if (
@@ -1970,8 +1980,8 @@ function requireStartAuthority(
     authority.lease.ownerId.length === 0 ||
     authority.lease.fenceToken <
       predecessorFence ||
-    admittedAuthority.fenceToken !== predecessorFence ||
-    admittedAuthority.maintenanceEvidenceReceiptDigest !==
+    predecessorAuthority.fenceToken !== predecessorFence ||
+    predecessorAuthority.maintenanceEvidenceReceiptDigest !==
       createMigrationDigest(
         predecessor.maintenanceEvidenceReceipt,
       ) ||
@@ -1991,9 +2001,9 @@ function requireStartAuthority(
 }
 
 /**
- * Requires a current authority tuple to succeed an admitted tuple.
+ * Requires a current authority tuple to succeed the exact predecessor tuple.
  *
- * @param predecessor - Authority fixed by immutable execution admission.
+ * @param predecessor - Authority fixed by the exact applying predecessor.
  * @param current - Fresh authority consumed by rollback start.
  */
 function requireAuthorityBindingSuccessor(
@@ -2533,7 +2543,8 @@ function readPredecessorIdentity(
   )
   if (
     executionStateVersion !== 1 &&
-    executionStateVersion !== 2
+    executionStateVersion !== 2 &&
+    executionStateVersion !== 3
   ) {
     return failRollbackPersistenceV2()
   }

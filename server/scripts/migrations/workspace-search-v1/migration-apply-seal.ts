@@ -29,7 +29,7 @@ import {
   parseWorkspaceSearchMigrationExecutionState,
   reconstructWorkspaceSearchMigrationRunState,
   serializeWorkspaceSearchMigrationExecutionState,
-  type WorkspaceSearchMigrationExecutionStateV2,
+  type WorkspaceSearchMigrationTraversalExecutionState,
 } from './migration-execution-state'
 import type {
   WorkspaceSearchMigrationImmutableArtifactReference,
@@ -82,13 +82,11 @@ export class WorkspaceSearchMigrationApplySealError extends Error {
 }
 
 /**
- * Production complete-plan seal rooted in terminal execution evidence.
+ * Fields shared by every production complete-plan seal schema.
  */
-export type WorkspaceSearchMigrationCompleteApplySeal = {
+type WorkspaceSearchMigrationCompleteApplySealFields = {
   /** Complete apply-seal discriminator. */
   readonly kind: 'workspace-search-migration-complete-apply-seal'
-  /** Complete apply-seal schema version. */
-  readonly sealVersion: 1
   /** Stable migration identifier. */
   readonly migrationId: typeof WORKSPACE_SEARCH_MIGRATION_ID
   /** Migration behavior version. */
@@ -145,6 +143,33 @@ export type WorkspaceSearchMigrationCompleteApplySeal = {
   /** Digest of every preceding canonical seal field. */
   readonly sealDigest: string
 }
+
+/**
+ * Legacy complete-plan seal rooted in a version-two execution predecessor.
+ */
+export type WorkspaceSearchMigrationCompleteApplySealV1 =
+  WorkspaceSearchMigrationCompleteApplySealFields & {
+    /** Legacy complete apply-seal schema version. */
+    readonly sealVersion: 1
+  }
+
+/**
+ * Authority-renewable complete-plan seal rooted in a version-three predecessor.
+ */
+export type WorkspaceSearchMigrationCompleteApplySealV2 =
+  WorkspaceSearchMigrationCompleteApplySealFields & {
+    /** Authority-renewable complete apply-seal schema version. */
+    readonly sealVersion: 2
+    /** Durable authority renewals included in the predecessor revision. */
+    readonly maintenanceEvidenceRenewalCount: number
+  }
+
+/**
+ * Supported legacy and authority-renewable production complete-plan seals.
+ */
+export type WorkspaceSearchMigrationCompleteApplySeal =
+  | WorkspaceSearchMigrationCompleteApplySealV1
+  | WorkspaceSearchMigrationCompleteApplySealV2
 
 /**
  * Rich exact-version reference to a production complete apply seal.
@@ -234,7 +259,7 @@ export type CreateWorkspaceSearchMigrationCompleteApplySealInput = {
   /** Immutable revision-one execution admission. */
   readonly admission: WorkspaceSearchMigrationExecutionRun
   /** Exact terminal traversal-capable mutable state. */
-  readonly predecessor: WorkspaceSearchMigrationExecutionStateV2
+  readonly predecessor: WorkspaceSearchMigrationTraversalExecutionState
   /** Exact immutable version-two planning authority. */
   readonly sealedPlanningAuthority:
     WorkspaceSearchMigrationSealedPlanningAuthorityV2
@@ -249,7 +274,7 @@ export type CreateWorkspaceSearchMigrationAppliedRootInput = {
   /** Immutable revision-one execution admission. */
   readonly admission: WorkspaceSearchMigrationExecutionRun
   /** Exact terminal traversal-capable mutable state. */
-  readonly predecessor: WorkspaceSearchMigrationExecutionStateV2
+  readonly predecessor: WorkspaceSearchMigrationTraversalExecutionState
   /** Exact immutable version-two planning authority. */
   readonly sealedPlanningAuthority:
     WorkspaceSearchMigrationSealedPlanningAuthorityV2
@@ -271,7 +296,7 @@ export type RequireWorkspaceSearchMigrationAppliedRootBindingInput = {
   /** Immutable revision-one execution admission. */
   readonly admission: WorkspaceSearchMigrationExecutionRun
   /** Exact terminal traversal-capable mutable state. */
-  readonly predecessor: WorkspaceSearchMigrationExecutionStateV2
+  readonly predecessor: WorkspaceSearchMigrationTraversalExecutionState
   /** Exact immutable version-two planning authority. */
   readonly sealedPlanningAuthority:
     WorkspaceSearchMigrationSealedPlanningAuthorityV2
@@ -302,7 +327,7 @@ export function createWorkspaceSearchMigrationCompleteApplySeal(
       'sealedPlanningAuthority',
     ])
     const admission = detachAdmission(readOwn(record, 'admission'))
-    const predecessor = detachV2ExecutionState(
+    const predecessor = detachTraversalExecutionState(
       readOwn(record, 'predecessor'),
     )
     const sealedPlanningAuthority = detachSealedPlanningAuthority(
@@ -320,9 +345,8 @@ export function createWorkspaceSearchMigrationCompleteApplySeal(
     const accumulator = MigrationDigestAccumulator.fromState(
       state.applyMarkerDigestState,
     )
-    const common = {
+    const shared = {
       kind: 'workspace-search-migration-complete-apply-seal',
-      sealVersion: 1,
       migrationId: WORKSPACE_SEARCH_MIGRATION_ID,
       migrationVersion: WORKSPACE_SEARCH_MIGRATION_VERSION,
       scope: 'complete-plan',
@@ -363,9 +387,26 @@ export function createWorkspaceSearchMigrationCompleteApplySeal(
       applyTraversalDigest: createMigrationDigest(state.apply),
       createdAt,
     } satisfies Omit<
-      WorkspaceSearchMigrationCompleteApplySeal,
+      WorkspaceSearchMigrationCompleteApplySealFields,
       'sealDigest'
     >
+    const common = predecessor.executionStateVersion === 3
+      ? {
+          ...shared,
+          sealVersion: 2,
+          maintenanceEvidenceRenewalCount:
+            predecessor.maintenanceEvidenceRenewalCount,
+        } satisfies Omit<
+          WorkspaceSearchMigrationCompleteApplySealV2,
+          'sealDigest'
+        >
+      : {
+          ...shared,
+          sealVersion: 1,
+        } satisfies Omit<
+          WorkspaceSearchMigrationCompleteApplySealV1,
+          'sealDigest'
+        >
     return readCompleteApplySeal({
       ...common,
       sealDigest: createMigrationDigest(common),
@@ -469,7 +510,7 @@ export function createWorkspaceSearchMigrationAppliedRoot(
       'sealedPlanningAuthority',
     ])
     const admission = detachAdmission(readOwn(record, 'admission'))
-    const predecessor = detachV2ExecutionState(
+    const predecessor = detachTraversalExecutionState(
       readOwn(record, 'predecessor'),
     )
     const sealedPlanningAuthority = detachSealedPlanningAuthority(
@@ -502,6 +543,10 @@ export function createWorkspaceSearchMigrationAppliedRoot(
       predecessor.minimumJournalRetainUntil,
       committedAt,
     )
+    const predecessorAuthority =
+      predecessor.executionStateVersion === 3
+        ? predecessor.currentAuthority
+        : admission.binding.currentAuthority
     if (
       currentAuthority.configurationHash !==
         admission.configurationHash ||
@@ -509,15 +554,13 @@ export function createWorkspaceSearchMigrationAppliedRoot(
         admission.binding.tableIds['migration-state'] ||
       currentAuthority.lease.runId !== admission.runId ||
       currentAuthority.lease.ownerId !==
-        admission.binding.currentAuthority.ownerId ||
+        predecessorAuthority.ownerId ||
       currentAuthority.lease.fenceToken !==
-        admission.binding.currentAuthority.fenceToken ||
+        predecessorAuthority.fenceToken ||
       currentAuthority.maintenanceEvidencePointerRevision !==
-        admission.binding.currentAuthority
-          .maintenanceEvidencePointerRevision ||
+        predecessorAuthority.maintenanceEvidencePointerRevision ||
       currentAuthority.maintenanceEvidenceReceiptDigest !==
-        admission.binding.currentAuthority
-          .maintenanceEvidenceReceiptDigest ||
+        predecessorAuthority.maintenanceEvidenceReceiptDigest ||
       currentAuthority.maintenanceEvidenceReceiptDigest !==
         createMigrationDigest(
           predecessorState.maintenanceEvidenceReceipt,
@@ -648,7 +691,7 @@ export function requireWorkspaceSearchMigrationAppliedRootBinding(
       'sealedPlanningAuthority',
     ])
     const admission = detachAdmission(readOwn(record, 'admission'))
-    const predecessor = detachV2ExecutionState(
+    const predecessor = detachTraversalExecutionState(
       readOwn(record, 'predecessor'),
     )
     const sealedPlanningAuthority = detachSealedPlanningAuthority(
@@ -677,6 +720,10 @@ export function requireWorkspaceSearchMigrationAppliedRootBinding(
       predecessor.minimumJournalRetainUntil,
       root.committedAt,
     )
+    const predecessorAuthority =
+      predecessor.executionStateVersion === 3
+        ? predecessor.currentAuthority
+        : admission.binding.currentAuthority
     if (
       root.stateTableId !==
         admission.binding.tableIds['migration-state'] ||
@@ -693,15 +740,13 @@ export function requireWorkspaceSearchMigrationAppliedRootBinding(
       serializeCanonicalJson(root.sealReference) !==
         serializeCanonicalJson(sealReference) ||
       root.authority.ownerId !==
-        admission.binding.currentAuthority.ownerId ||
+        predecessorAuthority.ownerId ||
       root.authority.fenceToken !==
-        admission.binding.currentAuthority.fenceToken ||
+        predecessorAuthority.fenceToken ||
       root.authority.maintenanceEvidencePointerRevision !==
-        admission.binding.currentAuthority
-          .maintenanceEvidencePointerRevision ||
+        predecessorAuthority.maintenanceEvidencePointerRevision ||
       root.authority.maintenanceEvidenceReceiptDigest !==
-        admission.binding.currentAuthority
-          .maintenanceEvidenceReceiptDigest ||
+        predecessorAuthority.maintenanceEvidenceReceiptDigest ||
       root.authority.maintenanceEvidenceReceiptDigest !==
         createMigrationDigest(
           predecessorState.maintenanceEvidenceReceipt,
@@ -737,10 +782,15 @@ function readCompleteApplySeal(
   value: unknown,
 ): WorkspaceSearchMigrationCompleteApplySeal {
   const record = requireRecord(value)
+  const sealVersion = readOwn(record, 'sealVersion')
+  if (sealVersion !== 1 && sealVersion !== 2) {
+    return failApplySeal()
+  }
   const hasMinimum = hasOwnDataProperty(
     record,
     'minimumJournalRetainUntil',
   )
+  const hasRenewalCount = sealVersion === 2
   requireExactKeys(record, [
     'apply',
     'applyMarkerAggregateDigest',
@@ -754,6 +804,9 @@ function readCompleteApplySeal(
     'journalSequence',
     'kind',
     'markerCount',
+    ...(hasRenewalCount
+      ? ['maintenanceEvidenceRenewalCount']
+      : []),
     'migrationId',
     'migrationVersion',
     'orphanOperationCount',
@@ -775,7 +828,6 @@ function readCompleteApplySeal(
   if (
     readOwn(record, 'kind') !==
       'workspace-search-migration-complete-apply-seal' ||
-    readOwn(record, 'sealVersion') !== 1 ||
     readOwn(record, 'migrationId') !==
       WORKSPACE_SEARCH_MIGRATION_ID ||
     readOwn(record, 'migrationVersion') !==
@@ -814,6 +866,11 @@ function readCompleteApplySeal(
   const predecessorRevision = readPositiveSafeInteger(
     readOwn(record, 'predecessorRevision'),
   )
+  const maintenanceEvidenceRenewalCount = hasRenewalCount
+    ? readPositiveSafeInteger(
+        readOwn(record, 'maintenanceEvidenceRenewalCount'),
+      )
+    : 0
   const predecessorExecutionStateDigest = readDigest(
     readOwn(record, 'predecessorExecutionStateDigest'),
   )
@@ -860,14 +917,16 @@ function readCompleteApplySeal(
     (journalSequence === 0) !==
       (minimumJournalRetainUntil === undefined) ||
     createMigrationDigest(apply) !== applyTraversalDigest ||
-    calculateTerminalRevision(markerCount, apply) !==
+    addSafeCounts(
+      calculateTerminalRevision(markerCount, apply),
+      maintenanceEvidenceRenewalCount,
+    ) !==
       predecessorRevision
   ) {
     return failApplySeal()
   }
-  const common = {
+  const shared = {
     kind: 'workspace-search-migration-complete-apply-seal',
-    sealVersion: 1,
     migrationId: WORKSPACE_SEARCH_MIGRATION_ID,
     migrationVersion: WORKSPACE_SEARCH_MIGRATION_VERSION,
     scope: 'complete-plan',
@@ -897,9 +956,25 @@ function readCompleteApplySeal(
     applyTraversalDigest,
     createdAt,
   } satisfies Omit<
-    WorkspaceSearchMigrationCompleteApplySeal,
+    WorkspaceSearchMigrationCompleteApplySealFields,
     'sealDigest'
   >
+  const common = sealVersion === 2
+    ? {
+        ...shared,
+        sealVersion,
+        maintenanceEvidenceRenewalCount,
+      } satisfies Omit<
+        WorkspaceSearchMigrationCompleteApplySealV2,
+        'sealDigest'
+      >
+    : {
+        ...shared,
+        sealVersion,
+      } satisfies Omit<
+        WorkspaceSearchMigrationCompleteApplySealV1,
+        'sealDigest'
+      >
   const sealDigest = readDigest(readOwn(record, 'sealDigest'))
   if (sealDigest !== createMigrationDigest(common)) {
     return failApplySeal()
@@ -1095,7 +1170,7 @@ function readAppliedRootAuthority(
  */
 function requireTerminalSealBinding(
   admission: WorkspaceSearchMigrationExecutionRun,
-  predecessor: WorkspaceSearchMigrationExecutionStateV2,
+  predecessor: WorkspaceSearchMigrationTraversalExecutionState,
   sealedPlanningAuthority:
     WorkspaceSearchMigrationSealedPlanningAuthorityV2,
 ): WorkspaceSearchMigrationRunState {
@@ -1132,7 +1207,10 @@ function requireTerminalSealBinding(
   }
   const targetCheckpoint = terminalTraversal.target
   if (
-    predecessor.executionStateVersion !== 2 ||
+    (
+      predecessor.executionStateVersion !== 2 &&
+      predecessor.executionStateVersion !== 3
+    ) ||
     predecessor.status !== 'applying' ||
     predecessor.executionRunDigest !== admission.executionRunDigest ||
     admission.binding.sealedPlanningAuthorityDigest !==
@@ -1161,9 +1239,14 @@ function requireTerminalSealBinding(
     targetCheckpoint.aggregate.deleted !== 0 ||
     state.applyMarkerDigestState.count !==
       state.appliedOperationCount ||
-    calculateTerminalRevision(
-      state.appliedOperationCount,
-      terminalTraversal,
+    addSafeCounts(
+      calculateTerminalRevision(
+        state.appliedOperationCount,
+        terminalTraversal,
+      ),
+      predecessor.executionStateVersion === 3
+        ? predecessor.maintenanceEvidenceRenewalCount
+        : 0,
     ) !== state.revision ||
     state.revision !== predecessor.revision
   ) {
@@ -1183,7 +1266,7 @@ function requireTerminalSealBinding(
 function requireSealMatchesTerminal(
   seal: WorkspaceSearchMigrationCompleteApplySeal,
   admission: WorkspaceSearchMigrationExecutionRun,
-  predecessor: WorkspaceSearchMigrationExecutionStateV2,
+  predecessor: WorkspaceSearchMigrationTraversalExecutionState,
   sealedPlanningAuthority:
     WorkspaceSearchMigrationSealedPlanningAuthorityV2,
 ): void {
@@ -1312,28 +1395,31 @@ function isExecutionRun(
  * @param value - Candidate mutable execution state.
  * @returns Detached strict version-two mutable state.
  */
-function detachV2ExecutionState(
+function detachTraversalExecutionState(
   value: unknown,
-): WorkspaceSearchMigrationExecutionStateV2 {
-  if (!isV2ExecutionState(value)) return failApplySeal()
+): WorkspaceSearchMigrationTraversalExecutionState {
+  if (!isTraversalExecutionState(value)) return failApplySeal()
   const detached = parseWorkspaceSearchMigrationExecutionState(
     serializeWorkspaceSearchMigrationExecutionState(value),
   )
-  if (detached.executionStateVersion !== 2) {
+  if (
+    detached.executionStateVersion !== 2 &&
+    detached.executionStateVersion !== 3
+  ) {
     return failApplySeal()
   }
   return detached
 }
 
 /**
- * Minimally narrows a candidate version-two state for strict serialization.
+ * Minimally narrows a candidate traversal state for strict serialization.
  *
  * @param value - Candidate execution state.
  * @returns Whether the strict execution-state codec may consume it.
  */
-function isV2ExecutionState(
+function isTraversalExecutionState(
   value: unknown,
-): value is WorkspaceSearchMigrationExecutionStateV2 {
+): value is WorkspaceSearchMigrationTraversalExecutionState {
   return isOrdinaryObject(value)
 }
 

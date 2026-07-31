@@ -43,6 +43,7 @@ import {
 import {
   createWorkspaceSearchMigrationCheckpointExecutionState,
   createWorkspaceSearchMigrationExecutionState,
+  createWorkspaceSearchMigrationRenewedExecutionState,
   reconstructWorkspaceSearchMigrationRunState,
 } from './migration-execution-state'
 import {
@@ -971,6 +972,185 @@ describe('Workspace Search rollback persistence v2', () => {
         'project-directory'
       ].cursor,
     ).toEqual(createBinaryCheckpoint().cursor)
+  })
+
+  test('round-trips v3 origin and starts from same or higher current authority', () => {
+    const fixture = createFixture(1)
+    const marker = createNoOpMarker(
+      fixture.admission,
+      1,
+      firstMarkerAt,
+    )
+    const v1State =
+      createWorkspaceSearchMigrationExecutionState({
+        admission: fixture.admission,
+        nextRunState: advanceRunState(
+          fixture.admission.runState,
+          marker,
+        ),
+        marker,
+      })
+    const currentAuthorityBinding = {
+      ownerId: fixture.currentAuthority.lease.ownerId,
+      fenceToken: fixture.currentAuthority.lease.fenceToken,
+      maintenanceEvidencePointerRevision:
+        fixture.currentAuthority
+          .maintenanceEvidencePointerRevision,
+      maintenanceEvidenceReceiptDigest:
+        fixture.currentAuthority
+          .maintenanceEvidenceReceiptDigest,
+      evaluatedAt: fixture.currentAuthority.evaluatedAt,
+    }
+    const v3State =
+      createWorkspaceSearchMigrationRenewedExecutionState({
+        admission: fixture.admission,
+        predecessor: v1State,
+        authority: {
+          lease: fixture.currentAuthority.lease,
+          ownerId: fixture.currentAuthority.lease.ownerId,
+          at: fixture.currentAuthority.evaluatedAt,
+        },
+        receipt:
+          fixture.currentAuthority.maintenanceEvidenceReceipt,
+        currentAuthority: currentAuthorityBinding,
+      })
+    const predecessor = {
+      kind: 'mutable-execution-state',
+      executionState: v3State,
+    } satisfies
+      WorkspaceSearchMigrationCommittedPrefixApplySealPredecessor
+    const evidence = createPrefixEvidence(fixture, predecessor)
+    const origin = createOrigin(fixture, predecessor, evidence)
+    const originBytes =
+      serializeWorkspaceSearchMigrationCommittedPrefixRollbackOriginV2(
+        origin,
+      )
+    const parsedOrigin =
+      parseWorkspaceSearchMigrationCommittedPrefixRollbackOriginV2(
+        originBytes,
+      )
+
+    expect(parsedOrigin).toEqual(origin)
+    expect(parsedOrigin.predecessor).toMatchObject({
+      kind: 'mutable-execution-state',
+      executionStateVersion: 3,
+      revision: v3State.revision,
+    })
+    expect(
+      serializeWorkspaceSearchMigrationCommittedPrefixRollbackOriginV2(
+        parsedOrigin,
+      ),
+    ).toEqual(originBytes)
+
+    const sameFenceRoot = createRoot(
+      fixture,
+      predecessor,
+      evidence,
+    )
+    expect(sameFenceRoot).toMatchObject({
+      predecessorRevision: v3State.revision,
+      currentAuthority: currentAuthorityBinding,
+      initialState: {
+        revision: v3State.revision + 1,
+        currentAuthority: currentAuthorityBinding,
+      },
+    })
+
+    const admissionReceipt =
+      fixture.admission.runState.maintenanceEvidenceReceipt
+    const admissionReceiptDigest =
+      createMigrationDigest(admissionReceipt)
+    expectV2Failure(() =>
+      createRoot(
+        {
+          ...fixture,
+          currentAuthority: {
+            ...fixture.currentAuthority,
+            maintenanceEvidencePointerRevision:
+              fixture.admission.binding.currentAuthority
+                .maintenanceEvidencePointerRevision,
+            maintenanceEvidenceReceiptDigest:
+              admissionReceiptDigest,
+            maintenanceEvidenceReceipt: admissionReceipt,
+          },
+        },
+        predecessor,
+        evidence,
+      )
+    )
+    expectV2Failure(() =>
+      createRoot(
+        {
+          ...fixture,
+          currentAuthority: {
+            ...fixture.currentAuthority,
+            maintenanceEvidenceReceiptDigest:
+              admissionReceiptDigest,
+            maintenanceEvidenceReceipt: admissionReceipt,
+          },
+        },
+        predecessor,
+        evidence,
+      )
+    )
+
+    const takeoverReceipt:
+      WorkspaceSearchMaintenanceEvidenceReceipt = {
+        runId,
+        evidenceDigest: digest('takeover-maintenance-evidence'),
+        evidenceLocator:
+          'workspace-search/v1/maintenance/takeover.json',
+        runtimeRevision: 13,
+        fenceToken: 8,
+        validatedAt: '2026-07-30T00:03:10.000Z',
+        oldestObservationAt: configurationTime,
+        validUntil: '2026-07-30T00:05:00.001Z',
+      }
+    const takeoverAuthority:
+      WorkspaceSearchMigrationPrePlanAuthority = {
+        configurationHash: fixture.admission.configurationHash,
+        stateTableId:
+          fixture.admission.binding.tableIds['migration-state'],
+        lease: {
+          runId,
+          ownerId: 'rollback-persistence-v2-takeover',
+          fenceToken: 8,
+          heartbeatAt: '2026-07-30T00:03:20.000Z',
+          expiresAt: '2026-07-30T00:04:20.000Z',
+        },
+        maintenanceEvidenceReceiptDigest:
+          createMigrationDigest(takeoverReceipt),
+        maintenanceEvidencePointerRevision: 6,
+        maintenanceEvidenceReceipt: takeoverReceipt,
+        evaluatedAt: '2026-07-30T00:03:20.000Z',
+      }
+    validateWorkspaceSearchMigrationRollbackAuthoritySuccessorV2(
+      currentAuthorityBinding,
+      {
+        ownerId: takeoverAuthority.lease.ownerId,
+        fenceToken: takeoverAuthority.lease.fenceToken,
+        maintenanceEvidencePointerRevision:
+          takeoverAuthority.maintenanceEvidencePointerRevision,
+        maintenanceEvidenceReceiptDigest:
+          takeoverAuthority.maintenanceEvidenceReceiptDigest,
+        evaluatedAt: takeoverAuthority.evaluatedAt,
+      },
+    )
+    const takeoverRoot = createRoot(
+      {
+        ...fixture,
+        currentAuthority: takeoverAuthority,
+      },
+      predecessor,
+      evidence,
+    )
+    expect(takeoverRoot.currentAuthority).toMatchObject({
+      ownerId: takeoverAuthority.lease.ownerId,
+      fenceToken: 8,
+      maintenanceEvidencePointerRevision: 6,
+      maintenanceEvidenceReceiptDigest:
+        takeoverAuthority.maintenanceEvidenceReceiptDigest,
+    })
   })
 
   test('rejects start-window retention at the exact boundary', () => {

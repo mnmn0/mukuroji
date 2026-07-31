@@ -13,6 +13,7 @@ import {
   type MigrationDigestState,
   type MigrationScanAggregate,
   type MigrationSourceCheckpoint,
+  type WorkspaceSearchMaintenanceEvidenceReceipt,
   type WorkspaceSearchAlreadyCurrentOperationMarker,
   type WorkspaceSearchMigrationTraversalProgress,
   type WorkspaceSearchMigrationRunState,
@@ -27,6 +28,7 @@ import {
   parseWorkspaceSearchMigrationExecutionRun,
   serializeWorkspaceSearchMigrationExecutionRun,
   type WorkspaceSearchMigrationExecutionRun,
+  type WorkspaceSearchMigrationExecutionRunAuthorityBinding,
 } from './migration-execution-run'
 import {
   WORKSPACE_SEARCH_JOURNAL_SEGMENT_MAX_BYTES,
@@ -35,6 +37,7 @@ import {
   createEmptyWorkspaceSearchMigrationTraversal,
   reduceWorkspaceSearchMigrationRunState,
   validateWorkspaceSearchMigrationCheckpoint,
+  validateWorkspaceSearchMaintenanceEvidenceReceipt,
   validateWorkspaceSearchMigrationRunState,
   type WorkspaceSearchMigrationAuthority,
   type WorkspaceSearchMigrationCheckpointLocation,
@@ -51,6 +54,11 @@ export const WORKSPACE_SEARCH_MIGRATION_EXECUTION_STATE_MAX_BYTES =
   64 * 1024
 
 const maximumTextLength = 1_024
+const intrinsicTypedArrayByteLengthGetter =
+  Object.getOwnPropertyDescriptor(
+    Object.getPrototypeOf(Uint8Array.prototype),
+    'byteLength',
+  )?.get
 
 /**
  * Stable raw-value-free failure raised for an invalid mutable execution state.
@@ -125,11 +133,42 @@ export type WorkspaceSearchMigrationExecutionStateV2 =
   }
 
 /**
- * Supported legacy operation-only and traversal-capable mutable state.
+ * Authority-renewable mutable applying state with complete traversal.
+ */
+export type WorkspaceSearchMigrationExecutionStateV3 =
+  WorkspaceSearchMigrationExecutionStateFields & {
+    /** Authority-renewable mutable envelope schema version. */
+    readonly executionStateVersion: 3
+    /** Complete durable source and target apply traversal. */
+    readonly apply: WorkspaceSearchMigrationTraversalProgress
+    /** Number of durable maintenance-evidence authority renewals. */
+    readonly maintenanceEvidenceRenewalCount: number
+    /** Digest of the currently adopted maintenance evidence. */
+    readonly maintenanceEvidenceDigest: string
+    /** Secret-free locator of the currently adopted maintenance evidence. */
+    readonly maintenanceEvidenceLocator: string
+    /** Exact currently adopted maintenance-evidence receipt. */
+    readonly maintenanceEvidenceReceipt:
+      WorkspaceSearchMaintenanceEvidenceReceipt
+    /** Compact current authority required to resolve later mutations. */
+    readonly currentAuthority:
+      WorkspaceSearchMigrationExecutionRunAuthorityBinding
+  }
+
+/**
+ * Supported operation-only, traversal-capable, and authority-renewable state.
  */
 export type WorkspaceSearchMigrationExecutionState =
   | WorkspaceSearchMigrationExecutionStateV1
   | WorkspaceSearchMigrationExecutionStateV2
+  | WorkspaceSearchMigrationExecutionStateV3
+
+/**
+ * Mutable execution state that durably retains complete apply traversal.
+ */
+export type WorkspaceSearchMigrationTraversalExecutionState =
+  | WorkspaceSearchMigrationExecutionStateV2
+  | WorkspaceSearchMigrationExecutionStateV3
 
 /**
  * Exact material consumed by one pure mutable operation-state reduction.
@@ -162,6 +201,23 @@ export type CreateWorkspaceSearchMigrationCheckpointExecutionStateInput = {
 }
 
 /**
+ * Exact material consumed by one durable execution-authority renewal.
+ */
+export type CreateWorkspaceSearchMigrationRenewedExecutionStateInput = {
+  /** Immutable revision-one admission row that roots mutable execution. */
+  readonly admission: WorkspaceSearchMigrationExecutionRun
+  /** Previous mutable state, absent only before the first durable progress. */
+  readonly predecessor?: WorkspaceSearchMigrationExecutionState
+  /** Active successor lease and trusted authority-adoption time. */
+  readonly authority: WorkspaceSearchMigrationAuthority
+  /** Fresh maintenance receipt bound to the successor lease fence. */
+  readonly receipt: WorkspaceSearchMaintenanceEvidenceReceipt
+  /** Compact exact current authority durably adopted by the transition. */
+  readonly currentAuthority:
+    WorkspaceSearchMigrationExecutionRunAuthorityBinding
+}
+
+/**
  * Reduces one immutable admission or mutable predecessor by exactly one marker.
  *
  * This operation accepts only the operation-phase fields changed by the
@@ -173,8 +229,31 @@ export type CreateWorkspaceSearchMigrationCheckpointExecutionStateInput = {
  * @returns Detached canonical mutable execution-state envelope.
  */
 export function createWorkspaceSearchMigrationExecutionState(
+  input: Omit<
+    CreateWorkspaceSearchMigrationExecutionStateInput,
+    'predecessor'
+  > & {
+    readonly predecessor: WorkspaceSearchMigrationExecutionStateV3
+  },
+): WorkspaceSearchMigrationExecutionStateV3
+export function createWorkspaceSearchMigrationExecutionState(
+  input: Omit<
+    CreateWorkspaceSearchMigrationExecutionStateInput,
+    'predecessor'
+  > & {
+    readonly predecessor?: WorkspaceSearchMigrationExecutionStateV1
+  },
+): WorkspaceSearchMigrationExecutionStateV1
+export function createWorkspaceSearchMigrationExecutionState(
   input: CreateWorkspaceSearchMigrationExecutionStateInput,
-): WorkspaceSearchMigrationExecutionStateV1 {
+):
+  | WorkspaceSearchMigrationExecutionStateV1
+  | WorkspaceSearchMigrationExecutionStateV3
+export function createWorkspaceSearchMigrationExecutionState(
+  input: CreateWorkspaceSearchMigrationExecutionStateInput,
+):
+  | WorkspaceSearchMigrationExecutionStateV1
+  | WorkspaceSearchMigrationExecutionStateV3 {
   return atExecutionStateBoundary(() => {
     const inputRecord = requireRecord(input)
     const hasPredecessor = hasOwnDataProperty(
@@ -194,14 +273,20 @@ export function createWorkspaceSearchMigrationExecutionState(
       : undefined
     if (
       predecessor !== undefined &&
-      predecessor.executionStateVersion !== 1
+      predecessor.executionStateVersion !== 1 &&
+      predecessor.executionStateVersion !== 3
     ) {
       return failExecutionState()
     }
     const current = predecessor === undefined
       ? admission.runState
       : reconstructRunState(admission, predecessor)
-    requireOperationPhaseBase(admission, current)
+    if (predecessor?.executionStateVersion === 3) {
+      requireExecutionBoundApplyingState(admission, current)
+      requireEmptyApplyTraversal(current)
+    } else {
+      requireOperationPhaseBase(admission, current)
+    }
 
     const marker = readOperationMarker(input.marker)
     requireMarkerTransition(current, marker)
@@ -242,12 +327,21 @@ export function createWorkspaceSearchMigrationExecutionState(
     validateWorkspaceSearchMigrationRunState(next)
 
     const runStateDigest = createMigrationDigest(next)
-    return createV1ExecutionStateEnvelope(
-      admission,
-      next,
-      minimumJournalRetainUntil,
-      runStateDigest,
-    )
+    return predecessor?.executionStateVersion === 3
+      ? createV3ExecutionStateEnvelope(
+          admission,
+          next,
+          minimumJournalRetainUntil,
+          predecessor.maintenanceEvidenceRenewalCount,
+          predecessor.currentAuthority,
+          createV3RunStateDigest(next),
+        )
+      : createV1ExecutionStateEnvelope(
+          admission,
+          next,
+          minimumJournalRetainUntil,
+          runStateDigest,
+        )
   })
 }
 
@@ -262,8 +356,31 @@ export function createWorkspaceSearchMigrationExecutionState(
  * @returns Detached canonical traversal-capable mutable state.
  */
 export function createWorkspaceSearchMigrationCheckpointExecutionState(
+  input: Omit<
+    CreateWorkspaceSearchMigrationCheckpointExecutionStateInput,
+    'predecessor'
+  > & {
+    readonly predecessor: WorkspaceSearchMigrationExecutionStateV3
+  },
+): WorkspaceSearchMigrationExecutionStateV3
+export function createWorkspaceSearchMigrationCheckpointExecutionState(
+  input: Omit<
+    CreateWorkspaceSearchMigrationCheckpointExecutionStateInput,
+    'predecessor'
+  > & {
+    readonly predecessor?:
+      | WorkspaceSearchMigrationExecutionStateV1
+      | WorkspaceSearchMigrationExecutionStateV2
+  },
+): WorkspaceSearchMigrationExecutionStateV2
+export function createWorkspaceSearchMigrationCheckpointExecutionState(
   input: CreateWorkspaceSearchMigrationCheckpointExecutionStateInput,
-): WorkspaceSearchMigrationExecutionStateV2 {
+): WorkspaceSearchMigrationTraversalExecutionState
+export function createWorkspaceSearchMigrationCheckpointExecutionState(
+  input: CreateWorkspaceSearchMigrationCheckpointExecutionStateInput,
+):
+  | WorkspaceSearchMigrationExecutionStateV2
+  | WorkspaceSearchMigrationExecutionStateV3 {
   return atExecutionStateBoundary(() => {
     const inputRecord = requireRecord(input)
     const hasPredecessor = hasOwnDataProperty(
@@ -292,7 +409,11 @@ export function createWorkspaceSearchMigrationCheckpointExecutionState(
     const current = predecessor === undefined
       ? admission.runState
       : reconstructRunState(admission, predecessor)
-    requireAdmissionBoundApplyingState(admission, current)
+    if (predecessor?.executionStateVersion === 3) {
+      requireExecutionBoundApplyingState(admission, current)
+    } else {
+      requireAdmissionBoundApplyingState(admission, current)
+    }
 
     const authority = readAuthority(
       readOwn(inputRecord, 'authority'),
@@ -313,14 +434,123 @@ export function createWorkspaceSearchMigrationCheckpointExecutionState(
         checkpoint,
       },
     })
+    if (predecessor?.executionStateVersion === 3) {
+      requireExecutionBoundApplyingState(admission, next)
+      requireV3RevisionShape(
+        next,
+        predecessor.maintenanceEvidenceRenewalCount,
+      )
+      return createV3ExecutionStateEnvelope(
+        admission,
+        next,
+        predecessor.minimumJournalRetainUntil,
+        predecessor.maintenanceEvidenceRenewalCount,
+        predecessor.currentAuthority,
+        createV3RunStateDigest(next),
+      )
+    }
     requireAdmissionBoundApplyingState(admission, next)
     requireV2RevisionShape(next)
-
     return createV2ExecutionStateEnvelope(
       admission,
       next,
       predecessor?.minimumJournalRetainUntil,
       createV2RunStateDigest(next),
+    )
+  })
+}
+
+/**
+ * Adopts one fresh maintenance-evidence receipt under successor authority.
+ *
+ * The transition preserves all apply progress while advancing the optimistic
+ * revision exactly once. Version-three state remains backward-readable from
+ * version-one and version-two predecessors and carries the current receipt
+ * required for same-fence refresh or expired-lease takeover.
+ *
+ * @param input - Admission, predecessor, successor authority, and fresh receipt.
+ * @returns Detached authority-renewable mutable execution state.
+ */
+export function createWorkspaceSearchMigrationRenewedExecutionState(
+  input: CreateWorkspaceSearchMigrationRenewedExecutionStateInput,
+): WorkspaceSearchMigrationExecutionStateV3 {
+  return atExecutionStateBoundary(() => {
+    const inputRecord = requireRecord(input)
+    const hasPredecessor = hasOwnDataProperty(
+      inputRecord,
+      'predecessor',
+    )
+    requireExactKeys(
+      inputRecord,
+      hasPredecessor
+        ? [
+            'admission',
+            'authority',
+            'currentAuthority',
+            'predecessor',
+            'receipt',
+          ]
+        : ['admission', 'authority', 'currentAuthority', 'receipt'],
+    )
+    const admission = detachAdmission(input.admission)
+    const predecessor = hasPredecessor
+      ? readRuntimeExecutionState(
+          readOwn(inputRecord, 'predecessor'),
+        )
+      : undefined
+    const current = predecessor === undefined
+      ? admission.runState
+      : reconstructRunState(admission, predecessor)
+    requireExecutionBoundApplyingState(admission, current)
+    const authority = readAuthority(
+      readOwn(inputRecord, 'authority'),
+    )
+    const receipt = readMaintenanceEvidenceReceipt(
+      readOwn(inputRecord, 'receipt'),
+    )
+    const currentAuthority = readAuthorityBinding(
+      readOwn(inputRecord, 'currentAuthority'),
+    )
+    const predecessorAuthority =
+      predecessor?.executionStateVersion === 3
+        ? predecessor.currentAuthority
+        : admission.binding.currentAuthority
+    requireAuthorityBindingSuccessor(
+      predecessorAuthority,
+      currentAuthority,
+    )
+    requireAuthorityBindingForTransition(
+      authority,
+      receipt,
+      currentAuthority,
+    )
+    const next = reduceWorkspaceSearchMigrationRunState({
+      current,
+      expectedRevision: current.revision,
+      authority,
+      event: {
+        kind: 'maintenance-evidence-renewed',
+        receipt,
+      },
+    })
+    requireExecutionBoundApplyingState(admission, next)
+    const maintenanceEvidenceRenewalCount = addSafeCounts(
+      predecessor?.executionStateVersion === 3
+        ? predecessor.maintenanceEvidenceRenewalCount
+        : 0,
+      1,
+    )
+    requireV3RevisionShape(
+      next,
+      maintenanceEvidenceRenewalCount,
+    )
+    return createV3ExecutionStateEnvelope(
+      admission,
+      next,
+      predecessor?.minimumJournalRetainUntil,
+      maintenanceEvidenceRenewalCount,
+      currentAuthority,
+      createV3RunStateDigest(next),
     )
   })
 }
@@ -465,8 +695,26 @@ function reconstructRunState(
   ) {
     return failExecutionState()
   }
+  const maintenanceEvidence = executionState.executionStateVersion === 3
+    ? {
+        maintenanceEvidenceDigest:
+          executionState.maintenanceEvidenceDigest,
+        maintenanceEvidenceLocator:
+          executionState.maintenanceEvidenceLocator,
+        maintenanceEvidenceReceipt:
+          executionState.maintenanceEvidenceReceipt,
+      }
+    : {
+        maintenanceEvidenceDigest:
+          admission.runState.maintenanceEvidenceDigest,
+        maintenanceEvidenceLocator:
+          admission.runState.maintenanceEvidenceLocator,
+        maintenanceEvidenceReceipt:
+          admission.runState.maintenanceEvidenceReceipt,
+      }
   const runState: WorkspaceSearchMigrationRunState = {
     ...admission.runState,
+    ...maintenanceEvidence,
     revision: executionState.revision,
     status: executionState.status,
     appliedOperationCount:
@@ -482,9 +730,19 @@ function reconstructRunState(
   }
   if (executionState.executionStateVersion === 1) {
     requireOperationPhaseBase(admission, runState)
-  } else {
+  } else if (executionState.executionStateVersion === 2) {
     requireAdmissionBoundApplyingState(admission, runState)
     requireV2RevisionShape(runState)
+  } else {
+    requireExecutionBoundApplyingState(admission, runState)
+    requireAuthorityBindingSuccessor(
+      admission.binding.currentAuthority,
+      executionState.currentAuthority,
+    )
+    requireV3RevisionShape(
+      runState,
+      executionState.maintenanceEvidenceRenewalCount,
+    )
   }
   if (
     executionState.appliedOperationCount >
@@ -493,7 +751,9 @@ function reconstructRunState(
       (
         executionState.executionStateVersion === 1
           ? createMigrationDigest(runState)
-          : createV2RunStateDigest(runState)
+          : executionState.executionStateVersion === 2
+            ? createV2RunStateDigest(runState)
+            : createV3RunStateDigest(runState)
       )
   ) {
     return failExecutionState()
@@ -512,6 +772,18 @@ function requireOperationPhaseBase(
   admission: WorkspaceSearchMigrationExecutionRun,
   state: WorkspaceSearchMigrationRunState,
 ): void {
+  requireEmptyApplyTraversal(state)
+  requireAdmissionBoundApplyingState(admission, state)
+}
+
+/**
+ * Requires one applying state to retain canonical-empty apply traversal.
+ *
+ * @param state - Candidate operation-phase state.
+ */
+function requireEmptyApplyTraversal(
+  state: WorkspaceSearchMigrationRunState,
+): void {
   if (
     state.status !== 'applying' ||
     serializeCanonicalJson(state.apply) !==
@@ -521,16 +793,15 @@ function requireOperationPhaseBase(
   ) {
     return failExecutionState()
   }
-  requireAdmissionBoundApplyingState(admission, state)
 }
 
 /**
- * Requires every admission-immutable field to remain exactly bound.
+ * Requires every execution-immutable field to remain exactly bound.
  *
  * @param admission - Immutable revision-one admission.
  * @param state - Complete candidate applying state.
  */
-function requireAdmissionBoundApplyingState(
+function requireExecutionBoundApplyingState(
   admission: WorkspaceSearchMigrationExecutionRun,
   state: WorkspaceSearchMigrationRunState,
 ): void {
@@ -540,12 +811,6 @@ function requireAdmissionBoundApplyingState(
     configurationHash:
       admission.runState.configurationHash,
     configuration: admission.runState.configuration,
-    maintenanceEvidenceDigest:
-      admission.runState.maintenanceEvidenceDigest,
-    maintenanceEvidenceLocator:
-      admission.runState.maintenanceEvidenceLocator,
-    maintenanceEvidenceReceipt:
-      admission.runState.maintenanceEvidenceReceipt,
     dryRunEvidenceDigest:
       admission.runState.dryRunEvidenceDigest,
     planDigest: admission.runState.planDigest,
@@ -559,12 +824,6 @@ function requireAdmissionBoundApplyingState(
     runId: state.runId,
     configurationHash: state.configurationHash,
     configuration: state.configuration,
-    maintenanceEvidenceDigest:
-      state.maintenanceEvidenceDigest,
-    maintenanceEvidenceLocator:
-      state.maintenanceEvidenceLocator,
-    maintenanceEvidenceReceipt:
-      state.maintenanceEvidenceReceipt,
     dryRunEvidenceDigest: state.dryRunEvidenceDigest,
     planDigest: state.planDigest,
     planOperationCount: state.planOperationCount,
@@ -574,6 +833,38 @@ function requireAdmissionBoundApplyingState(
   if (
     serializeCanonicalJson(immutableActual) !==
       serializeCanonicalJson(immutableExpected)
+  ) {
+    return failExecutionState()
+  }
+}
+
+/**
+ * Requires every admission field, including initial authority, to stay bound.
+ *
+ * @param admission - Immutable revision-one admission.
+ * @param state - Complete candidate applying state.
+ */
+function requireAdmissionBoundApplyingState(
+  admission: WorkspaceSearchMigrationExecutionRun,
+  state: WorkspaceSearchMigrationRunState,
+): void {
+  requireExecutionBoundApplyingState(admission, state)
+  const expected = {
+    maintenanceEvidenceDigest:
+      admission.runState.maintenanceEvidenceDigest,
+    maintenanceEvidenceLocator:
+      admission.runState.maintenanceEvidenceLocator,
+    maintenanceEvidenceReceipt:
+      admission.runState.maintenanceEvidenceReceipt,
+  }
+  const actual = {
+    maintenanceEvidenceDigest: state.maintenanceEvidenceDigest,
+    maintenanceEvidenceLocator: state.maintenanceEvidenceLocator,
+    maintenanceEvidenceReceipt: state.maintenanceEvidenceReceipt,
+  }
+  if (
+    serializeCanonicalJson(actual) !==
+      serializeCanonicalJson(expected)
   ) {
     return failExecutionState()
   }
@@ -824,7 +1115,92 @@ function createV2ExecutionStateEnvelope(
 }
 
 /**
- * Reads a runtime envelope whose v2 cursor uses raw AttributeValue maps.
+ * Creates one authority-renewable envelope and its final self-digest.
+ *
+ * @param admission - Immutable admission root.
+ * @param next - Complete validated next applying state.
+ * @param minimumJournalRetainUntil - Cumulative journal deadline.
+ * @param maintenanceEvidenceRenewalCount - Durable renewal count.
+ * @param currentAuthority - Compact currently adopted authority.
+ * @param runStateDigest - Digest of the losslessly encoded complete next state.
+ * @returns Strict authority-renewable mutable execution-state envelope.
+ */
+function createV3ExecutionStateEnvelope(
+  admission: WorkspaceSearchMigrationExecutionRun,
+  next: WorkspaceSearchMigrationRunState,
+  minimumJournalRetainUntil: string | undefined,
+  maintenanceEvidenceRenewalCount: number,
+  currentAuthority: WorkspaceSearchMigrationExecutionRunAuthorityBinding,
+  runStateDigest: string,
+): WorkspaceSearchMigrationExecutionStateV3 {
+  const common = {
+    kind: 'workspace-search-migration-execution-state',
+    executionStateVersion: 3,
+    migrationId: WORKSPACE_SEARCH_MIGRATION_ID,
+    migrationVersion: WORKSPACE_SEARCH_MIGRATION_VERSION,
+    executionRunDigest: admission.executionRunDigest,
+    runId: admission.runId,
+    configurationHash: admission.configurationHash,
+    revision: next.revision,
+    status: 'applying',
+    appliedOperationCount: next.appliedOperationCount,
+    applyMarkerDigestState: next.applyMarkerDigestState,
+    journalSequence: next.journalSequence,
+    journalHeadDigest: next.journalHeadDigest,
+    apply: next.apply,
+    maintenanceEvidenceRenewalCount,
+    maintenanceEvidenceDigest: next.maintenanceEvidenceDigest,
+    maintenanceEvidenceLocator: next.maintenanceEvidenceLocator,
+    maintenanceEvidenceReceipt: next.maintenanceEvidenceReceipt,
+    currentAuthority,
+  } satisfies Pick<
+    WorkspaceSearchMigrationExecutionStateV3,
+    | 'kind'
+    | 'executionStateVersion'
+    | 'migrationId'
+    | 'migrationVersion'
+    | 'executionRunDigest'
+    | 'runId'
+    | 'configurationHash'
+    | 'revision'
+    | 'status'
+    | 'appliedOperationCount'
+    | 'applyMarkerDigestState'
+    | 'journalSequence'
+    | 'journalHeadDigest'
+    | 'apply'
+    | 'maintenanceEvidenceRenewalCount'
+    | 'maintenanceEvidenceDigest'
+    | 'maintenanceEvidenceLocator'
+    | 'maintenanceEvidenceReceipt'
+    | 'currentAuthority'
+  >
+  const tail = {
+    updatedAt: next.updatedAt,
+    runStateDigest,
+  }
+  const fields = minimumJournalRetainUntil === undefined
+    ? {
+        ...common,
+        ...tail,
+      }
+    : {
+        ...common,
+        minimumJournalRetainUntil,
+        ...tail,
+      }
+  const envelope: WorkspaceSearchMigrationExecutionStateV3 = {
+    ...fields,
+    executionStateDigest: createV3ExecutionStateDigest(fields),
+  }
+  void encodeCanonicalExecutionState(
+    readRuntimeExecutionState(envelope),
+  )
+  return envelope
+}
+
+/**
+ * Reads a runtime envelope whose traversal cursor uses raw AttributeValue maps.
  *
  * @param value - Candidate runtime execution state.
  * @returns Detached strict supported execution state.
@@ -841,11 +1217,17 @@ function readRuntimeExecutionState(
       readRuntimeTraversal(readOwn(record, 'apply')),
     )
   }
+  if (version === 3) {
+    return readV3ExecutionState(
+      record,
+      readRuntimeTraversal(readOwn(record, 'apply')),
+    )
+  }
   return failExecutionState()
 }
 
 /**
- * Reads a canonical JSON document whose v2 cursor uses tagged attributes.
+ * Reads a canonical document whose traversal cursor uses tagged attributes.
  *
  * @param value - Candidate parsed execution-state document.
  * @returns Detached strict supported execution state.
@@ -858,6 +1240,12 @@ function readEncodedExecutionState(
   if (version === 1) return readV1ExecutionState(record)
   if (version === 2) {
     return readV2ExecutionState(
+      record,
+      readEncodedTraversal(readOwn(record, 'apply')),
+    )
+  }
+  if (version === 3) {
+    return readV3ExecutionState(
       record,
       readEncodedTraversal(readOwn(record, 'apply')),
     )
@@ -1176,6 +1564,220 @@ function readV2ExecutionState(
 }
 
 /**
+ * Reads and validates one authority-renewable mutable envelope.
+ *
+ * @param record - Candidate runtime or parsed v3 envelope.
+ * @param apply - Detached traversal decoded for the source representation.
+ * @returns Detached strict authority-renewable mutable execution state.
+ */
+function readV3ExecutionState(
+  record: Readonly<Record<string, unknown>>,
+  apply: WorkspaceSearchMigrationTraversalProgress,
+): WorkspaceSearchMigrationExecutionStateV3 {
+  const hasMinimum = hasOwnDataProperty(
+    record,
+    'minimumJournalRetainUntil',
+  )
+  requireExactKeys(record, [
+    'appliedOperationCount',
+    'apply',
+    'applyMarkerDigestState',
+    'configurationHash',
+    'currentAuthority',
+    'executionRunDigest',
+    'executionStateDigest',
+    'executionStateVersion',
+    'journalHeadDigest',
+    'journalSequence',
+    'kind',
+    'maintenanceEvidenceDigest',
+    'maintenanceEvidenceLocator',
+    'maintenanceEvidenceReceipt',
+    'maintenanceEvidenceRenewalCount',
+    'migrationId',
+    'migrationVersion',
+    ...(hasMinimum ? ['minimumJournalRetainUntil'] : []),
+    'revision',
+    'runId',
+    'runStateDigest',
+    'status',
+    'updatedAt',
+  ])
+  if (
+    readOwn(record, 'kind') !==
+      'workspace-search-migration-execution-state' ||
+    readOwn(record, 'executionStateVersion') !== 3 ||
+    readOwn(record, 'migrationId') !==
+      WORKSPACE_SEARCH_MIGRATION_ID ||
+    readOwn(record, 'migrationVersion') !==
+      WORKSPACE_SEARCH_MIGRATION_VERSION ||
+    readOwn(record, 'status') !== 'applying'
+  ) {
+    return failExecutionState()
+  }
+
+  const revision = readPositiveSafeInteger(
+    readOwn(record, 'revision'),
+  )
+  const appliedOperationCount = readNonNegativeSafeInteger(
+    readOwn(record, 'appliedOperationCount'),
+  )
+  const applyMarkerDigestState = readDigestState(
+    readOwn(record, 'applyMarkerDigestState'),
+  )
+  const journalSequence = readNonNegativeSafeInteger(
+    readOwn(record, 'journalSequence'),
+  )
+  const journalHeadDigest = readDigest(
+    readOwn(record, 'journalHeadDigest'),
+  )
+  const maintenanceEvidenceRenewalCount =
+    readPositiveSafeInteger(
+      readOwn(record, 'maintenanceEvidenceRenewalCount'),
+    )
+  const maintenanceEvidenceDigest = readDigest(
+    readOwn(record, 'maintenanceEvidenceDigest'),
+  )
+  const maintenanceEvidenceLocator = readBoundedText(
+    readOwn(record, 'maintenanceEvidenceLocator'),
+  )
+  const maintenanceEvidenceReceipt =
+    readMaintenanceEvidenceReceipt(
+      readOwn(record, 'maintenanceEvidenceReceipt'),
+    )
+  const currentAuthority = readAuthorityBinding(
+    readOwn(record, 'currentAuthority'),
+  )
+  const minimumJournalRetainUntil = hasMinimum
+    ? readTimestamp(
+        readOwn(record, 'minimumJournalRetainUntil'),
+      )
+    : undefined
+  const expectedRevision = calculateV3Revision(
+    appliedOperationCount,
+    apply,
+    maintenanceEvidenceRenewalCount,
+  )
+  if (
+    revision !== expectedRevision ||
+    applyMarkerDigestState.count !== appliedOperationCount ||
+    journalSequence > appliedOperationCount ||
+    (journalSequence === 0) !==
+      (journalHeadDigest === zeroHexDigest()) ||
+    (journalSequence === 0) !==
+      (minimumJournalRetainUntil === undefined) ||
+    maintenanceEvidenceDigest !==
+      maintenanceEvidenceReceipt.evidenceDigest ||
+    maintenanceEvidenceLocator !==
+      maintenanceEvidenceReceipt.evidenceLocator ||
+    currentAuthority.fenceToken !==
+      maintenanceEvidenceReceipt.fenceToken ||
+    currentAuthority.maintenanceEvidenceReceiptDigest !==
+      createMigrationDigest(maintenanceEvidenceReceipt)
+  ) {
+    return failExecutionState()
+  }
+
+  const runId = readIdentifier(readOwn(record, 'runId'))
+  validateWorkspaceSearchMaintenanceEvidenceReceipt(
+    maintenanceEvidenceReceipt,
+    runId,
+    currentAuthority.fenceToken,
+    currentAuthority.evaluatedAt,
+  )
+  const common = {
+    kind: 'workspace-search-migration-execution-state',
+    executionStateVersion: 3,
+    migrationId: WORKSPACE_SEARCH_MIGRATION_ID,
+    migrationVersion: WORKSPACE_SEARCH_MIGRATION_VERSION,
+    executionRunDigest: readDigest(
+      readOwn(record, 'executionRunDigest'),
+    ),
+    runId,
+    configurationHash: readDigest(
+      readOwn(record, 'configurationHash'),
+    ),
+    revision,
+    status: 'applying',
+    appliedOperationCount,
+    applyMarkerDigestState,
+    journalSequence,
+    journalHeadDigest,
+    apply,
+    maintenanceEvidenceRenewalCount,
+    maintenanceEvidenceDigest,
+    maintenanceEvidenceLocator,
+    maintenanceEvidenceReceipt,
+    currentAuthority,
+  } satisfies Pick<
+    WorkspaceSearchMigrationExecutionStateV3,
+    | 'kind'
+    | 'executionStateVersion'
+    | 'migrationId'
+    | 'migrationVersion'
+    | 'executionRunDigest'
+    | 'runId'
+    | 'configurationHash'
+    | 'revision'
+    | 'status'
+    | 'appliedOperationCount'
+    | 'applyMarkerDigestState'
+    | 'journalSequence'
+    | 'journalHeadDigest'
+    | 'apply'
+    | 'maintenanceEvidenceRenewalCount'
+    | 'maintenanceEvidenceDigest'
+    | 'maintenanceEvidenceLocator'
+    | 'maintenanceEvidenceReceipt'
+    | 'currentAuthority'
+  >
+  const updatedAt = readTimestamp(readOwn(record, 'updatedAt'))
+  if (
+    (
+      minimumJournalRetainUntil !== undefined &&
+      Date.parse(minimumJournalRetainUntil) <=
+        Date.parse(updatedAt)
+    ) ||
+    Date.parse(currentAuthority.evaluatedAt) >
+      Date.parse(updatedAt)
+  ) {
+    return failExecutionState()
+  }
+  validateWorkspaceSearchMaintenanceEvidenceReceipt(
+    maintenanceEvidenceReceipt,
+    runId,
+    currentAuthority.fenceToken,
+    updatedAt,
+  )
+  const tail = {
+    updatedAt,
+    runStateDigest: readDigest(
+      readOwn(record, 'runStateDigest'),
+    ),
+  }
+  const executionStateDigest = readDigest(
+    readOwn(record, 'executionStateDigest'),
+  )
+  const fields = minimumJournalRetainUntil === undefined
+    ? {
+        ...common,
+        ...tail,
+      }
+    : {
+        ...common,
+        minimumJournalRetainUntil,
+        ...tail,
+      }
+  if (
+    executionStateDigest !==
+      createV3ExecutionStateDigest(fields)
+  ) {
+    return failExecutionState()
+  }
+  return { ...fields, executionStateDigest }
+}
+
+/**
  * Reads one strict runtime traversal with raw DynamoDB cursors.
  *
  * @param value - Candidate runtime traversal.
@@ -1427,6 +2029,154 @@ function readAuthority(
 }
 
 /**
+ * Reads one compact current-authority binding.
+ *
+ * @param value - Candidate compact authority tuple.
+ * @returns Detached strict authority binding.
+ */
+function readAuthorityBinding(
+  value: unknown,
+): WorkspaceSearchMigrationExecutionRunAuthorityBinding {
+  const record = requireRecord(value)
+  requireExactKeys(record, [
+    'evaluatedAt',
+    'fenceToken',
+    'maintenanceEvidencePointerRevision',
+    'maintenanceEvidenceReceiptDigest',
+    'ownerId',
+  ])
+  return {
+    ownerId: readIdentifier(readOwn(record, 'ownerId')),
+    fenceToken: readPositiveSafeInteger(
+      readOwn(record, 'fenceToken'),
+    ),
+    maintenanceEvidencePointerRevision:
+      readPositiveSafeInteger(
+        readOwn(record, 'maintenanceEvidencePointerRevision'),
+      ),
+    maintenanceEvidenceReceiptDigest: readDigest(
+      readOwn(record, 'maintenanceEvidenceReceiptDigest'),
+    ),
+    evaluatedAt: readTimestamp(readOwn(record, 'evaluatedAt')),
+  }
+}
+
+/**
+ * Requires one compact authority tuple to succeed its durable predecessor.
+ *
+ * @param predecessor - Previously adopted compact authority.
+ * @param current - Candidate current compact authority.
+ */
+function requireAuthorityBindingSuccessor(
+  predecessor: WorkspaceSearchMigrationExecutionRunAuthorityBinding,
+  current: WorkspaceSearchMigrationExecutionRunAuthorityBinding,
+): void {
+  if (
+    Date.parse(current.evaluatedAt) <
+      Date.parse(predecessor.evaluatedAt) ||
+    current.fenceToken < predecessor.fenceToken ||
+    current.maintenanceEvidencePointerRevision <
+      predecessor.maintenanceEvidencePointerRevision ||
+    (
+      current.maintenanceEvidencePointerRevision ===
+        predecessor.maintenanceEvidencePointerRevision &&
+      current.maintenanceEvidenceReceiptDigest !==
+        predecessor.maintenanceEvidenceReceiptDigest
+    ) ||
+    (
+      current.maintenanceEvidencePointerRevision >
+        predecessor.maintenanceEvidencePointerRevision &&
+      current.maintenanceEvidenceReceiptDigest ===
+        predecessor.maintenanceEvidenceReceiptDigest
+    ) ||
+    (
+      current.fenceToken === predecessor.fenceToken &&
+      current.ownerId !== predecessor.ownerId
+    ) ||
+    (
+      current.fenceToken === predecessor.fenceToken &&
+      current.maintenanceEvidencePointerRevision ===
+        predecessor.maintenanceEvidencePointerRevision &&
+      current.maintenanceEvidenceReceiptDigest ===
+        predecessor.maintenanceEvidenceReceiptDigest
+    )
+  ) {
+    return failExecutionState()
+  }
+}
+
+/**
+ * Requires a compact binding and receipt to match transition authority.
+ *
+ * @param authority - Active lease and trusted transition time.
+ * @param receipt - Fresh receipt adopted by the transition.
+ * @param binding - Compact current authority persisted in v3 state.
+ */
+function requireAuthorityBindingForTransition(
+  authority: WorkspaceSearchMigrationAuthority,
+  receipt: WorkspaceSearchMaintenanceEvidenceReceipt,
+  binding: WorkspaceSearchMigrationExecutionRunAuthorityBinding,
+): void {
+  validateWorkspaceSearchMaintenanceEvidenceReceipt(
+    receipt,
+    authority.lease.runId,
+    binding.fenceToken,
+    binding.evaluatedAt,
+  )
+  if (
+    binding.ownerId !== authority.ownerId ||
+    binding.ownerId !== authority.lease.ownerId ||
+    binding.fenceToken !== authority.lease.fenceToken ||
+    binding.fenceToken !== receipt.fenceToken ||
+    binding.maintenanceEvidenceReceiptDigest !==
+      createMigrationDigest(receipt) ||
+    Date.parse(binding.evaluatedAt) > Date.parse(authority.at)
+  ) {
+    return failExecutionState()
+  }
+}
+
+/**
+ * Reads one strict maintenance-evidence receipt.
+ *
+ * @param value - Candidate receipt.
+ * @returns Detached receipt.
+ */
+function readMaintenanceEvidenceReceipt(
+  value: unknown,
+): WorkspaceSearchMaintenanceEvidenceReceipt {
+  const record = requireRecord(value)
+  requireExactKeys(record, [
+    'evidenceDigest',
+    'evidenceLocator',
+    'fenceToken',
+    'oldestObservationAt',
+    'runId',
+    'runtimeRevision',
+    'validatedAt',
+    'validUntil',
+  ])
+  return {
+    runId: readIdentifier(readOwn(record, 'runId')),
+    evidenceDigest: readDigest(readOwn(record, 'evidenceDigest')),
+    evidenceLocator: readBoundedText(
+      readOwn(record, 'evidenceLocator'),
+    ),
+    runtimeRevision: readPositiveSafeInteger(
+      readOwn(record, 'runtimeRevision'),
+    ),
+    fenceToken: readPositiveSafeInteger(
+      readOwn(record, 'fenceToken'),
+    ),
+    validatedAt: readTimestamp(readOwn(record, 'validatedAt')),
+    oldestObservationAt: readTimestamp(
+      readOwn(record, 'oldestObservationAt'),
+    ),
+    validUntil: readTimestamp(readOwn(record, 'validUntil')),
+  }
+}
+
+/**
  * Reads one exact apply-checkpoint location.
  *
  * @param value - Candidate source or target location.
@@ -1485,6 +2235,25 @@ function calculateV2Revision(
 }
 
 /**
+ * Calculates the only structurally valid v3 revision.
+ *
+ * @param appliedOperationCount - Exact durable operation count.
+ * @param apply - Complete five-location apply traversal.
+ * @param maintenanceEvidenceRenewalCount - Durable authority renewal count.
+ * @returns Admission plus operations, checkpoints, and authority renewals.
+ */
+function calculateV3Revision(
+  appliedOperationCount: number,
+  apply: WorkspaceSearchMigrationTraversalProgress,
+  maintenanceEvidenceRenewalCount: number,
+): number {
+  return addSafeCounts(
+    calculateV2Revision(appliedOperationCount, apply),
+    maintenanceEvidenceRenewalCount,
+  )
+}
+
+/**
  * Requires a complete run state to satisfy the v2 revision formula.
  *
  * @param state - Candidate traversal-capable applying state.
@@ -1499,6 +2268,29 @@ function requireV2RevisionShape(
   if (
     state.revision !== expected ||
     expected <= state.appliedOperationCount + 1
+  ) {
+    return failExecutionState()
+  }
+}
+
+/**
+ * Requires a complete run state to satisfy the v3 revision formula.
+ *
+ * @param state - Candidate authority-renewable applying state.
+ * @param maintenanceEvidenceRenewalCount - Durable authority renewal count.
+ */
+function requireV3RevisionShape(
+  state: WorkspaceSearchMigrationRunState,
+  maintenanceEvidenceRenewalCount: number,
+): void {
+  const expected = calculateV3Revision(
+    state.appliedOperationCount,
+    state.apply,
+    maintenanceEvidenceRenewalCount,
+  )
+  if (
+    state.revision !== expected ||
+    maintenanceEvidenceRenewalCount <= 0
   ) {
     return failExecutionState()
   }
@@ -1535,6 +2327,21 @@ function createV2RunStateDigest(
 }
 
 /**
+ * Creates the v3 digest of a complete reconstructed run state.
+ *
+ * @param state - Complete validated authority-renewable applying state.
+ * @returns Digest of the losslessly encoded state.
+ */
+function createV3RunStateDigest(
+  state: WorkspaceSearchMigrationRunState,
+): string {
+  return createMigrationDigest({
+    ...state,
+    apply: encodeTraversal(state.apply),
+  })
+}
+
+/**
  * Creates one v2 envelope self-digest over its encoded preceding fields.
  *
  * @param fields - Every v2 envelope field except its self-digest.
@@ -1543,6 +2350,24 @@ function createV2RunStateDigest(
 function createV2ExecutionStateDigest(
   fields: Omit<
     WorkspaceSearchMigrationExecutionStateV2,
+    'executionStateDigest'
+  >,
+): string {
+  return createMigrationDigest({
+    ...fields,
+    apply: encodeTraversal(fields.apply),
+  })
+}
+
+/**
+ * Creates one v3 envelope self-digest over its encoded preceding fields.
+ *
+ * @param fields - Every v3 envelope field except its self-digest.
+ * @returns Lowercase digest of the canonical lossless representation.
+ */
+function createV3ExecutionStateDigest(
+  fields: Omit<
+    WorkspaceSearchMigrationExecutionStateV3,
     'executionStateDigest'
   >,
 ): string {
@@ -2229,14 +3054,32 @@ function encodeCanonicalOperationMarker(
 function copyBoundedBytes(bytes: Uint8Array): Uint8Array {
   if (
     nodeUtilTypes.isProxy(bytes) ||
-    !(bytes instanceof Uint8Array) ||
-    bytes.byteLength === 0 ||
-    bytes.byteLength >
+    !(bytes instanceof Uint8Array)
+  ) {
+    return failExecutionState()
+  }
+  if (intrinsicTypedArrayByteLengthGetter === undefined) {
+    return failExecutionState()
+  }
+  const byteLength: unknown = Reflect.apply(
+    intrinsicTypedArrayByteLengthGetter,
+    bytes,
+    [],
+  )
+  if (
+    typeof byteLength !== 'number' ||
+    !Number.isSafeInteger(byteLength) ||
+    byteLength === 0 ||
+    byteLength >
       WORKSPACE_SEARCH_MIGRATION_EXECUTION_STATE_MAX_BYTES
   ) {
     return failExecutionState()
   }
-  return new Uint8Array(bytes)
+  const snapshot = new Uint8Array(bytes)
+  if (snapshot.byteLength !== byteLength) {
+    return failExecutionState()
+  }
+  return snapshot
 }
 
 /**
@@ -2265,13 +3108,7 @@ function atExecutionStateBoundary<Result>(
 ): Result {
   try {
     return operation()
-  } catch (error: unknown) {
-    if (
-      error instanceof
-        WorkspaceSearchMigrationExecutionStateError
-    ) {
-      throw error
-    }
+  } catch {
     throw new WorkspaceSearchMigrationExecutionStateError()
   }
 }

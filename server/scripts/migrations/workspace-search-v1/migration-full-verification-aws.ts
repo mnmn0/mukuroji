@@ -109,6 +109,7 @@ import {
 import {
   createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks,
   type WorkspaceSearchMigrationPrePlanAuthority,
+  type WorkspaceSearchMigrationPrePlanAuthorityClaim,
 } from './migration-pre-plan-authority-aws'
 import {
   createWorkspaceSearchMigrationSealedPlanningAuthorityV2ConditionCheck,
@@ -283,11 +284,11 @@ export interface WorkspaceSearchMigrationFullVerificationAuthorityPort {
   /**
    * Resolves the current lease, pointer, and immutable receipt.
    *
-   * @param lease - Exact caller lease identity.
+   * @param claim - Exact caller lease, pointer, and receipt identity.
    * @returns Fresh strongly resolved durable authority.
    */
   readAuthority(
-    lease: WorkspaceSearchMigrationLeaseClaim,
+    claim: WorkspaceSearchMigrationPrePlanAuthorityClaim,
   ): Promise<WorkspaceSearchMigrationPrePlanAuthority>
 }
 
@@ -460,8 +461,8 @@ export type CreateWorkspaceSearchMigrationFullVerificationAwsPortInput = {
 export type SaveWorkspaceSearchMigrationFullVerificationPageInput = {
   /** Exact current verification revision, zero before the first page. */
   readonly expectedRevision: number
-  /** Exact active lease identity authorizing the transaction. */
-  readonly lease: WorkspaceSearchMigrationLeaseClaim
+  /** Exact current lease, pointer, and receipt authorizing the transaction. */
+  readonly authority: WorkspaceSearchMigrationPrePlanAuthorityClaim
   /** Source or target traversal advanced by this command. */
   readonly location: WorkspaceSearchMigrationCheckpointLocation
 }
@@ -472,8 +473,8 @@ export type SaveWorkspaceSearchMigrationFullVerificationPageInput = {
 export type PublishWorkspaceSearchMigrationFullVerificationInput = {
   /** Exact terminal verification-state revision. */
   readonly expectedRevision: number
-  /** Exact active lease identity authorizing publication. */
-  readonly lease: WorkspaceSearchMigrationLeaseClaim
+  /** Exact current lease, pointer, and receipt authorizing publication. */
+  readonly authority: WorkspaceSearchMigrationPrePlanAuthorityClaim
 }
 
 /**
@@ -607,6 +608,8 @@ type PreparedVerificationPlan = {
 type PreparedPageCommand = {
   /** Exact predecessor revision. */
   readonly expectedRevision: number
+  /** Exact current authority claim. */
+  readonly authority: WorkspaceSearchMigrationPrePlanAuthorityClaim
   /** Exact active lease identity. */
   readonly lease: WorkspaceSearchMigrationLeaseClaim
   /** Exact location advanced by this command. */
@@ -619,6 +622,8 @@ type PreparedPageCommand = {
 type PreparedPublishCommand = {
   /** Exact terminal verification revision. */
   readonly expectedRevision: number
+  /** Exact current authority claim. */
+  readonly authority: WorkspaceSearchMigrationPrePlanAuthorityClaim
   /** Exact active lease identity. */
   readonly lease: WorkspaceSearchMigrationLeaseClaim
 }
@@ -982,9 +987,9 @@ implements WorkspaceSearchMigrationFullVerificationAwsPort {
 
       await this.dependencies.prepare()
       const authority = readAuthorityCandidate(
-        await this.dependencies.readAuthority(command.lease),
+        await this.dependencies.readAuthority(command.authority),
       )
-      requireAuthority(this.binding, command.lease, authority)
+      requireAuthority(this.binding, command.authority, authority)
       const transactionAt = readClock(this.dependencies.clock)
       if (transactionAt < Date.parse(authority.evaluatedAt)) {
         return failVerification('INVALID_STATE')
@@ -1110,9 +1115,9 @@ implements WorkspaceSearchMigrationFullVerificationAwsPort {
         appliedRoot.rootDigest,
       )
       const authority = readAuthorityCandidate(
-        await this.dependencies.readAuthority(command.lease),
+        await this.dependencies.readAuthority(command.authority),
       )
-      requireAuthority(this.binding, command.lease, authority)
+      requireAuthority(this.binding, command.authority, authority)
       await this.dependencies.prepare()
       const verifiedAtMilliseconds = readClock(this.dependencies.clock)
       if (verifiedAtMilliseconds < Date.parse(authority.evaluatedAt)) {
@@ -2193,18 +2198,20 @@ function preparePageCommand(
 ): PreparedPageCommand {
   const record = requirePlainRecord(value, 'INVALID_ARGUMENT')
   requireExactKeys(record, [
+    'authority',
     'expectedRevision',
-    'lease',
     'location',
   ], 'INVALID_ARGUMENT')
+  const authority = readPrePlanAuthorityClaim(
+    readOwn(record, 'authority', 'INVALID_ARGUMENT'),
+  )
   return {
     expectedRevision: readNonNegativeSafeInteger(
       readOwn(record, 'expectedRevision', 'INVALID_ARGUMENT'),
       'INVALID_ARGUMENT',
     ),
-    lease: readLeaseClaim(
-      readOwn(record, 'lease', 'INVALID_ARGUMENT'),
-    ),
+    authority,
+    lease: authority.lease,
     location: readLocation(
       readOwn(record, 'location', 'INVALID_ARGUMENT'),
     ),
@@ -2222,16 +2229,57 @@ function preparePublishCommand(
 ): PreparedPublishCommand {
   const record = requirePlainRecord(value, 'INVALID_ARGUMENT')
   requireExactKeys(record, [
+    'authority',
     'expectedRevision',
-    'lease',
   ], 'INVALID_ARGUMENT')
+  const authority = readPrePlanAuthorityClaim(
+    readOwn(record, 'authority', 'INVALID_ARGUMENT'),
+  )
   return {
     expectedRevision: readPositiveSafeInteger(
       readOwn(record, 'expectedRevision', 'INVALID_ARGUMENT'),
       'INVALID_ARGUMENT',
     ),
+    authority,
+    lease: authority.lease,
+  }
+}
+
+/**
+ * Detaches one exact current pre-plan authority claim.
+ *
+ * @param value - Candidate lease, pointer, and receipt claim.
+ * @returns Strict detached current-authority identity.
+ */
+function readPrePlanAuthorityClaim(
+  value: unknown,
+): WorkspaceSearchMigrationPrePlanAuthorityClaim {
+  const record = requirePlainRecord(value, 'INVALID_ARGUMENT')
+  requireExactKeys(record, [
+    'lease',
+    'maintenanceEvidencePointerRevision',
+    'maintenanceEvidenceReceiptDigest',
+  ], 'INVALID_ARGUMENT')
+  return {
     lease: readLeaseClaim(
       readOwn(record, 'lease', 'INVALID_ARGUMENT'),
+    ),
+    maintenanceEvidencePointerRevision:
+      readPositiveSafeInteger(
+        readOwn(
+          record,
+          'maintenanceEvidencePointerRevision',
+          'INVALID_ARGUMENT',
+        ),
+        'INVALID_ARGUMENT',
+      ),
+    maintenanceEvidenceReceiptDigest: readDigest(
+      readOwn(
+        record,
+        'maintenanceEvidenceReceiptDigest',
+        'INVALID_ARGUMENT',
+      ),
+      'INVALID_ARGUMENT',
     ),
   }
 }
@@ -2362,18 +2410,26 @@ function requireAppliedRootBinding(
  */
 function requireAuthority(
   binding: FullVerificationBinding,
-  claim: WorkspaceSearchMigrationLeaseClaim,
+  claim: WorkspaceSearchMigrationPrePlanAuthorityClaim,
   authority: WorkspaceSearchMigrationPrePlanAuthority,
 ): void {
   if (
     authority.configurationHash !== binding.configurationHash ||
     authority.stateTableId !== binding.stateTable.tableId ||
     authority.lease.runId !== binding.executionRun.runId ||
-    authority.lease.runId !== claim.runId ||
-    authority.lease.ownerId !== claim.ownerId ||
-    authority.lease.fenceToken !== claim.fenceToken
+    authority.lease.runId !== claim.lease.runId ||
+    authority.lease.ownerId !== claim.lease.ownerId ||
+    authority.lease.fenceToken !== claim.lease.fenceToken
   ) {
     return failVerification('LEASE_LOST')
+  }
+  if (
+    authority.maintenanceEvidencePointerRevision !==
+      claim.maintenanceEvidencePointerRevision ||
+    authority.maintenanceEvidenceReceiptDigest !==
+      claim.maintenanceEvidenceReceiptDigest
+  ) {
+    return failVerification('INVALID_MAINTENANCE_EVIDENCE')
   }
 }
 

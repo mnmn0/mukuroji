@@ -9005,10 +9005,16 @@ describe('Workspace Search migration AWS identity adapter', () => {
 
       const root = await fixture.verification.publishVerified({
         expectedRevision: terminal.revision,
-        lease: {
-          runId: fixture.currentAuthority.lease.runId,
-          ownerId: fixture.currentAuthority.lease.ownerId,
-          fenceToken: fixture.currentAuthority.lease.fenceToken,
+        authority: {
+          lease: {
+            runId: fixture.currentAuthority.lease.runId,
+            ownerId: fixture.currentAuthority.lease.ownerId,
+            fenceToken: fixture.currentAuthority.lease.fenceToken,
+          },
+          maintenanceEvidenceReceiptDigest:
+            fixture.currentAuthority.maintenanceEvidenceReceiptDigest,
+          maintenanceEvidencePointerRevision:
+            fixture.currentAuthority.maintenanceEvidencePointerRevision,
         },
       })
       const reread =
@@ -9107,10 +9113,18 @@ describe('Workspace Search migration AWS identity adapter', () => {
         await captureWorkspaceSearchMigrationFailure(
           fixture.verification.publishVerified({
             expectedRevision: terminal.revision,
-            lease: {
-              runId: fixture.currentAuthority.lease.runId,
-              ownerId: fixture.currentAuthority.lease.ownerId,
-              fenceToken: fixture.currentAuthority.lease.fenceToken,
+            authority: {
+              lease: {
+                runId: fixture.currentAuthority.lease.runId,
+                ownerId: fixture.currentAuthority.lease.ownerId,
+                fenceToken: fixture.currentAuthority.lease.fenceToken,
+              },
+              maintenanceEvidenceReceiptDigest:
+                fixture.currentAuthority
+                  .maintenanceEvidenceReceiptDigest,
+              maintenanceEvidencePointerRevision:
+                fixture.currentAuthority
+                  .maintenanceEvidencePointerRevision,
             },
           }),
         )
@@ -13013,10 +13027,16 @@ function createManagedFullVerificationPageCommand(
 >[0] {
   return {
     expectedRevision,
-    lease: {
-      runId: fixture.currentAuthority.lease.runId,
-      ownerId: fixture.currentAuthority.lease.ownerId,
-      fenceToken: fixture.currentAuthority.lease.fenceToken,
+    authority: {
+      lease: {
+        runId: fixture.currentAuthority.lease.runId,
+        ownerId: fixture.currentAuthority.lease.ownerId,
+        fenceToken: fixture.currentAuthority.lease.fenceToken,
+      },
+      maintenanceEvidenceReceiptDigest:
+        fixture.currentAuthority.maintenanceEvidenceReceiptDigest,
+      maintenanceEvidencePointerRevision:
+        fixture.currentAuthority.maintenanceEvidencePointerRevision,
     },
     location,
   }
