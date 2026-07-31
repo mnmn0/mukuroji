@@ -915,11 +915,12 @@ async function advanceApply(
   guard: ExecutionOperationGuard,
 ): Promise<void> {
   const currentAuthority = await authority.resolve()
+  const claim = createAuthorityClaim(currentAuthority)
   const adopted = await runGuardedOperation(
     guard,
     () => port.adoptExecutionAuthority({
       expectedRevision: state.revision,
-      authority: createAuthorityClaim(currentAuthority),
+      authority: claim,
     }),
   )
   if (adopted.status !== 'applying') {
@@ -943,7 +944,7 @@ async function advanceApply(
       guard,
       () => port.commitApplyOperation({
         expectedRevision: adopted.revision,
-        lease: createAuthorityClaim(currentAuthority).lease,
+        lease: claim.lease,
         event: {
           kind: 'apply-operation-requested',
           plannedOperation,
@@ -958,7 +959,7 @@ async function advanceApply(
       guard,
       () => port.saveApplyCheckpoint({
         expectedRevision: adopted.revision,
-        lease: createAuthorityClaim(currentAuthority).lease,
+        lease: claim.lease,
         location,
       }),
     )
@@ -968,7 +969,7 @@ async function advanceApply(
     guard,
     () => port.sealApply({
       expectedRevision: adopted.revision,
-      lease: createAuthorityClaim(currentAuthority).lease,
+      lease: claim.lease,
     }),
   )
 }

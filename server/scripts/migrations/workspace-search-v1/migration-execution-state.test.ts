@@ -1451,8 +1451,10 @@ describe('Workspace Search migration mutable execution state', () => {
     )
 
     const hostileBytes = new Uint8Array(1)
+    let hostileByteLengthInvoked = false
     Object.defineProperty(hostileBytes, 'byteLength', {
       get() {
+        hostileByteLengthInvoked = true
         const failure =
           new WorkspaceSearchMigrationExecutionStateError()
         failure.message = 'raw-byte-length-secret'
@@ -1464,6 +1466,7 @@ describe('Workspace Search migration mutable execution state', () => {
         hostileBytes,
       )
     )
+    expect(hostileByteLengthInvoked).toBe(false)
   })
 })
 

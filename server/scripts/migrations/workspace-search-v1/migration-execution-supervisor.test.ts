@@ -84,7 +84,6 @@ import type {
 } from './migration-pre-plan-authority-aws'
 import type {
   WorkspaceSearchMigrationRollbackPersistenceState,
-  WorkspaceSearchMigrationRollbackStartRoot,
   WorkspaceSearchMigrationRolledBackRoot,
 } from './migration-rollback-persistence'
 import {
@@ -2507,50 +2506,6 @@ function createCompleteRollbackState(
 }
 
 /**
- * Creates the immutable complete-plan rollback start root.
- *
- * @param fixture - Static supervisor fixture.
- * @param state - Initial rollback state.
- * @returns Complete typed start root.
- */
-function createCompleteRollbackStartRoot(
-  fixture: SupervisorFixture,
-  state: WorkspaceSearchMigrationRollbackPersistenceState,
-): WorkspaceSearchMigrationRollbackStartRoot {
-  return {
-    kind: 'workspace-search-migration-rollback-start-root',
-    persistenceVersion:
-      WORKSPACE_SEARCH_MIGRATION_ROLLBACK_PERSISTENCE_VERSION,
-    migrationId: WORKSPACE_SEARCH_MIGRATION_ID,
-    migrationVersion: WORKSPACE_SEARCH_MIGRATION_VERSION,
-    runId,
-    configurationHash: fixture.configurationHash,
-    tableIds:
-      structuredClone(
-        fixture.sealedPlanningAuthority.tableIds,
-      ),
-    executionRunDigest:
-      fixture.executionRun.executionRunDigest,
-    appliedRootDigest: digest('applied-root'),
-    sealedPlanningAuthorityDigest:
-      fixture.sealedPlanningAuthority.authorityDigest,
-    predecessorRevision: 8,
-    predecessorRunStateDigest:
-      createMigrationDigest(state.runState),
-    originalJournalSequence: 1,
-    originalJournalHeadDigest: digest('journal-head'),
-    currentAuthority: createRollbackAuthority(
-      fixture.initialAuthority,
-    ),
-    startedAt: evaluatedAt,
-    initialState: state,
-    initialStateDigest: state.stateDigest,
-    initialRunStateDigest: state.runStateDigest,
-    startRootDigest: digest('complete-start-root'),
-  }
-}
-
-/**
  * Creates one immutable complete-plan rollback terminal root.
  *
  * @param fixture - Static supervisor fixture.
@@ -2561,7 +2516,6 @@ function createCompleteRolledBackRoot(
   fixture: SupervisorFixture,
   state: WorkspaceSearchMigrationRollbackPersistenceState,
 ): WorkspaceSearchMigrationRolledBackRoot {
-  createCompleteRollbackStartRoot(fixture, state)
   return {
     kind: 'workspace-search-migration-rolled-back-root',
     persistenceVersion:

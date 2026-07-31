@@ -748,6 +748,7 @@ class ApplyOperationHarness {
       )
       const condition =
         items[appliedRootIndex]?.ConditionCheck
+      const names = condition?.ExpressionAttributeNames
       if (
         appliedRootIndex < 0 ||
         condition === undefined ||
@@ -755,7 +756,13 @@ class ApplyOperationHarness {
         condition.Key?.migrationId?.S !==
           appliedRootKey.migrationId.S ||
         condition.Key?.recordKey?.S !==
-          appliedRootKey.recordKey.S
+          appliedRootKey.recordKey.S ||
+        condition.ConditionExpression !==
+          'attribute_not_exists(#migrationId) AND ' +
+            'attribute_not_exists(#recordKey)' ||
+        names?.['#migrationId'] !== 'migrationId' ||
+        names?.['#recordKey'] !== 'recordKey' ||
+        Object.keys(names).length !== 2
       ) {
         throw new Error(
           'Expected an exact applied-root absence condition.',
