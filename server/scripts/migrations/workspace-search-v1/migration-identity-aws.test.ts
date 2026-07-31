@@ -66,6 +66,9 @@ import {
   workspaceSearchMigrationSourceNames,
 } from './migration-contract'
 import {
+  WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_PAGE_BASELINE_ATTEMPTS,
+} from './migration-describe-table-rate-budget'
+import {
   createAwsWorkspaceSearchMigrationIdentityPort,
   type JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput,
   type WorkspaceSearchMigrationIdentityAwsSdkConfigurations,
@@ -6661,7 +6664,9 @@ describe('Workspace Search migration AWS identity adapter', () => {
       }
       expect(
         trace.filter((entry) => expectedTables.includes(entry)),
-      ).toHaveLength(182)
+      ).toHaveLength(
+        WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_PAGE_BASELINE_ATTEMPTS,
+      )
       fixture.port.close()
     },
   )

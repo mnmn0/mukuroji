@@ -850,11 +850,68 @@ transactionが存在してもcomplete apply/verify/rollback supervisorにはな�
 gateは閉じたままです。
 
 現行のmanaged compositionでは、成功する非終端checkpoint 1ページにつき論理上182回の
-`DescribeTable`を実行します。AWS SDK標準のthrottling retry/backoffだけではこの呼び出し量をrate制御
-しないため、Production migration gateを開く前に`DescribeTable`のthrottling metric/alarm、実行accountの
-rate budget、boundedなpage cadenceと停止条件を定義してnon-production evidenceを取得します。同一
-transition内でもstrong read、Scan、transactionの前後という時点保証をまたぐincarnation結果は再利用せず、
-呼び出しをまとめる場合は同等のreplacement-detection proofとpost-send quarantineを維持します。
+`DescribeTable`を実行します。Managed `DescribeTable` rate-policy registryはaccount＋regionをscopeとし、
+review済みpolicy version、window/lifecycleごとのcall capacity、182回以上の固定page reservation、
+さらにall-six cleanup recovery専用の6回分を要求します。したがってlifecycle capacityは
+`page reservation + 6`以上でなければならず、通常page/attemptは最後の6回を消費できません。
+boundedなattempt/page cadence、jitter/backoff上限、budget stop条件も明示値として要求します。同一scopeの
+callはsingle-flightでaccountingし、barrier、FIFO predecessor、durable checkpoint CAS、cadenceを含む
+total admission deadline内に次のdata I/Oまたはpageを予約できなければfail-closedで停止します。
+[AWS公式のread-only control-plane上限](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Constraints.html)
+である2,500 requests/secondはservice側の上限であってdefault policyではありません。実行環境ごとに
+reviewした明示値がないpolicyを受理しません。SDK内の見えないretryでbudgetを超過しないよう、`DescribeTable`は専用の
+`maxAttempts=1` transportだけを使い、throttle後のjitter/backoffと再attemptはregistryが管理します。
+Transportはcaller指定endpointを受け付けず、regionからpartition-awareな公式DynamoDB endpointを内部導出します。
+Credentials providerやambient default chainは受け付けず、upstreamのmanaged identityで実測し、Issue #164の
+coordinatorから渡すaccountと同じ`accountId`を宣言したstatic credentialsだけを受け付けます。
+このmoduleは宣言値の一致とallowlist済みscalarのsnapshotを検証し、STS measurement自体は行いません。
+各callはaccount/regionと固定transport descriptorへ結合したnominal one-shot capabilityとして渡し、
+任意callback内の複数SDK callや、別scopeのtransportを1 permitとして実行できない形にします。
+
+Write-ahead CAS前のqueued admissionは消費しません。CASでchargedになったattemptまたはpage reservationは、
+deadline/interruptionによりphysical callbackが始まらなくても保守的に消費・保持し、明示recoveryまたは
+takeover時のforfeit対象にします。Physical callbackが始まったattemptはresponseの成否にかかわらず
+消費済みです。Registryはcaller指定digestを受け付けず、account/regionからpolicy非依存のcanonical scope-binding
+digestを内部導出します。Checkpointにはこのdigest、完全なpolicy、公式endpoint/operation/`maxAttempts=1`の
+transport-binding digestを結合し、明示bootstrap時だけabsent predecessorを作成します。Page callback前に
+review済みpage capacity（現行baselineは182回）をwrite-ahead予約し、各one-shot transport実行前にも
+reservation-to-attempt遷移と
+`attemptInFlight=true`をCAS保存し、完了後に別CASでfalseへ戻します。
+Attempt/page cadenceの開始時刻はadmission判定時ではなく、対応するwrite-ahead CAS成功後、
+物理transportまたはpage callbackの直前にmonotonic clockから取得します。CAS待ち時間をintervalへ
+先取りせず、CAS遅延後に連続送信または連続page開始できる扱いにはしません。
+Process restart/takeoverで残ったpage reservationは解放せずlifecycle capacityへ保守的にforfeitし、
+window、attempt/page interval、最大throttle backoffの最大値を、新processのmonotonic clockから全量待ちます。
+CheckpointのUTC時刻はmetadataだけに使い、clock skewを根拠にこの待機を短縮しません。CAS response lossは
+各CAS固有の暗号学的write nonceを含むexact checkpointを再読できた場合だけ成功扱いとし、別writerが
+同じrevision/counterを書いた競合を自分の応答欠落として回収しません。競合・不一致・不明な結果はtransportを
+呼ばずquarantineします。Page reservation、mandatory cleanup要回復marker、in-flight attempt markerは
+checkpointで直交して保持します。失敗したcleanup、またはcleanup中に中断したprocessはmarkerを消さず、
+権限付きclaim後も専用recovery callbackの成功CASまで通常page/attemptを拒否します。完了不明attemptも
+権限付きrecovery callbackが旧owner停止を確認してmarkerをclearするまで新規transportを拒否します。
+物理attempt完了後のclear CASを開始してから成功確認するまで、同一processで既にqueue済みのcall、page、
+checkpoint readも拒否します。Clear CASの作成・保存・応答確認が失敗した場合はin-flight markerを保守的に
+復元し、より高いfenceの明示recoveryを要求します。
+Mandatory cleanup中のtakeover/interruption免除はtaskへ渡すcleanup専用capabilityだけに限定し、同じpageや
+lifecycleから並行して開始した無関係なcallには継承しません。元のpage内cleanupはpage reservationから
+最大6回、restart後のcleanup recoveryは保護した6回分から実行します。いずれもcallback開始前に6回分を
+一括preflightし、callbackがsuccess/rejectionのどちらでsettleしても、それ以前に許可済みの子attemptを
+合流してからmarkerとbarrierを処理します。Recoveryがcold-start horizon、window、backoffで物理送信前に
+停止した場合は同じfenceで再試行できます。一度でも送信したattemptはthrottleを含めて消費済みでrefundせず、
+そのrecovery callbackが失敗した場合はquarantineします。
+Lifecycle/page/cleanup capabilityのaccounting stateとauthority tokenはECMAScript private stateに保持し、
+instance/class/prototypeを固定し、constructorはmodule-private construction keyを要求します。
+Controllerはmodule内でcaptureしたexact methodだけを使い、
+callbackからのreflectionやprototype差し替えでbudget、page reservation、cleanup 6回上限を変更できません。
+
+Resume、lease takeover、replacement measurementでも同じscopeの消費を初期化せず、session quarantine後は
+新しい予約を拒否します。同一transition内でもstrong read、Scan、transactionの前後という時点保証をまたぐ
+incarnation結果はcacheまたは再利用せず、all-six replacement detectionとpost-send quarantineを維持します。
+今回、実AWS accountでrateを実測したevidenceは取得していません。
+Coordinator integrationは#164、telemetry/alarmは#165、承認済みnon-production rehearsalは#167へ
+引き継ぎます。現時点のrecorder eventと`readEvidence()`はsecret-freeなattempt/throttle/wait/stopおよび
+lifecycle aggregateを取得できますが、configuration hash、UTC window、永続artifact、scope相関を自動で
+構成しません。これらのreview済みevidenceが揃うまでProduction migration gateを閉じたままにします。
 
 Pure execution-boundary contractは、exact closed fence digest/authorityと全6 TableIdを持つ`closed` revision 1、
 fresh current authority、exact raw maintenance evidence、close後15分以上のdrainを持つ
@@ -972,6 +1029,11 @@ supervisorが揃うまでCLIから直接呼び出しません。
 
 1. STS と `DescribeTable` から実測した source/target account、region、table ARN/ID、作成時刻、
    対象 scope、migration version、実行 commit を固定し、configuration hash を保存する。
+   承認済みnon-production accountで、実行commit、rate-policy version、UTC window、page phaseごとの
+   attempt/throttle/cadence wait/budget stop、最大同時in-flight数、observed rateを同じconfiguration hashへ
+   結合して記録する。この記録は今回まだ取得しておらず、#164のcoordinator integration、#165の
+   telemetry/alarm、#167のrehearsalで取得・reviewする。Contractにより取得可能であることを取得済みの
+   evidenceとして扱わず、review完了までProduction migration gateを開かない。
 2. PITR/backup、earliest/latest restorable time、source 件数、代表 key/checksum を保存する。
 3. Dry-run の scanned/projected/deleted/skipped/invalid 件数を review する。Dry-run evidence は
    lease/fenceを持たないため、planning source evidenceとして再利用しない。
@@ -1061,6 +1123,16 @@ resource を skip して `continue-update-rollback` しません。
 ### Migration evidence
 
 - Migration ID/version/configuration hash、実測した account/table identity、journal の secret-free locator
+- `DescribeTable` rate evidence artifactはschema version、rate-policy version、configuration hash、
+  outer UTC window、boundedなpage phaseとevent kind（attempt、throttle、cadence wait、budget stop）、
+  monotonic event offset、attempt/forfeited-reservation count、wait/backoff milliseconds、remaining
+  normal-admission/window/page capacity、current/max in-flight、observed rateだけを記録する。
+  Aggregateのattempt countとmax in-flightはwrite-ahead markerに基づく保守的なcharged値であり、
+  実際のphysical start時刻とobserved rateは`attempt` eventから算出する。Cadence wait millisecondsは
+  waiterへ要求したdelayであり、早期cancel時の実経過時間とは区別する。
+  Physical table名/ARN、account ID、profile、run/owner ID、cursor、tenant data、secret、raw AWS error、
+  exception message/stackはeventへ含めない。Approved account/regionと実行commitはconfiguration hashを使って
+  access-controlled change record側で結合し、telemetry eventへ複製しない
 - Source-evidence の purpose/schema version。`dry-run` v1 は S3 reference/upload なし、legacy
   planning v2 は digest-only かつ append/promote 不可、planning v3 は lossless artifact-bound と
   区別し、v1/v2 を v3 planning input として記録しない
@@ -1552,6 +1624,9 @@ DR を要件とする場合、secondary region、replication、secret/key、Cogn
 - [ ] Correlation ID を request → log → event → actor/tenant へ追える sample
 - [ ] Required CI checks と repository ruleset / branch protection の確認
 - [ ] Migration interruption/resume/verify/rollback の non-production evidence
+- [ ] `DescribeTable` account/region budget、single-flight、bounded cadence、throttle stopの承認済み
+  non-production rehearsal evidence（commit/policy version、UTC window、page phase、attempt/throttle/wait/
+  stop、max in-flight、observed rate）
 - [ ] Deploy/rollback rehearsal と previous artifact/parameter inventory
 - [ ] Runtime control の canary/emergency disable、fail-closed、re-enable、DLQ redrive の drill
 - [ ] 90日以内の PITR restore drill、RPO/RTO、integrity evidence
