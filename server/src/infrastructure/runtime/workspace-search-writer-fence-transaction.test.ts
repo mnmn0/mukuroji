@@ -7,10 +7,12 @@ import {
   createWorkspaceSearchWriterFenceClosedSuccessor,
   createWorkspaceSearchWriterFenceGuardMaterial,
   createWorkspaceSearchWriterFenceInitialOpenRecord,
+  createWorkspaceSearchWriterFenceReleasedOpenSuccessor,
   createWorkspaceSearchWriterFenceStateIncarnationDigest,
   encodeWorkspaceSearchWriterFenceRecord,
   parseWorkspaceSearchWriterFenceObservation,
   type WorkspaceSearchWriterFenceGuardMaterial,
+  type WorkspaceSearchWriterFenceReleaseBinding,
   type WorkspaceSearchWriterFenceStateIdentity,
 } from './workspace-search-writer-fence'
 import {
@@ -127,6 +129,87 @@ function createGuardFixture(): WorkspaceSearchWriterFenceGuardMaterial {
   return createWorkspaceSearchWriterFenceGuardMaterial(
     parseWorkspaceSearchWriterFenceObservation(
       encodeWorkspaceSearchWriterFenceRecord(open),
+      binding,
+    ),
+    binding,
+    stateTableIdentity,
+  )
+}
+
+/**
+ * Creates deterministic released-open guard material for transaction tests.
+ *
+ * @returns Exact valid version-two guard material at epoch and revision three.
+ */
+function createReleasedGuardFixture():
+  WorkspaceSearchWriterFenceGuardMaterial {
+  const stateTableIdentity = createStateIdentityFixture('released')
+  const configurationHash = createHash('sha256')
+    .update('released-configuration')
+    .digest('hex')
+  const binding = createWorkspaceSearchWriterFenceBinding({
+    stateTableName: stateTableIdentity.tableName,
+    stateTableId: stateTableIdentity.tableId,
+    stateIncarnationDigest:
+      createWorkspaceSearchWriterFenceStateIncarnationDigest(
+        stateTableIdentity,
+      ),
+    tableIds: {
+      'project-directory': 'project-directory-released',
+      'work-items': 'work-items-released',
+      collaboration: 'collaboration-released',
+      documents: 'documents-released',
+      'workspace-search': 'workspace-search-released',
+      'migration-state': stateTableIdentity.tableId,
+    },
+  })
+  const initialOpen = createWorkspaceSearchWriterFenceInitialOpenRecord(
+    binding,
+    new Date('2026-07-29T00:00:00.000Z'),
+  )
+  const closed = createWorkspaceSearchWriterFenceClosedSuccessor(
+    initialOpen,
+    {
+      configurationHash,
+      runId: 'released-migration-run',
+      ownerId: 'released-migration-owner',
+      leaseFenceToken: 3,
+      maintenanceEvidenceReceiptDigest: createHash('sha256')
+        .update('released-maintenance-receipt')
+        .digest('hex'),
+      maintenanceEvidencePointerRevision: 2,
+    },
+    new Date('2026-07-29T00:05:00.000Z'),
+  )
+  const release: WorkspaceSearchWriterFenceReleaseBinding = {
+    releaseVersion: 1,
+    configurationHash,
+    runId: 'released-migration-run',
+    executionBoundaryDigest: createHash('sha256')
+      .update('released-execution-boundary')
+      .digest('hex'),
+    sealedPlanningAuthorityDigest: createHash('sha256')
+      .update('released-sealed-planning-authority')
+      .digest('hex'),
+    executionRunDigest: createHash('sha256')
+      .update('released-execution-run')
+      .digest('hex'),
+    terminal: {
+      kind: 'verified',
+      persistenceVersion: 1,
+      rootDigest: createHash('sha256')
+        .update('released-verified-root')
+        .digest('hex'),
+    },
+  }
+  const released = createWorkspaceSearchWriterFenceReleasedOpenSuccessor(
+    closed,
+    release,
+    new Date('2026-07-29T00:10:00.000Z'),
+  )
+  return createWorkspaceSearchWriterFenceGuardMaterial(
+    parseWorkspaceSearchWriterFenceObservation(
+      encodeWorkspaceSearchWriterFenceRecord(released),
       binding,
     ),
     binding,
@@ -270,6 +353,49 @@ test('prepends a native-value guard and detaches application items', () => {
   expect(Object.isFrozen(guarded.transactItems[0])).toBe(true)
   expect(() => guarded.transactItems.shift()).toThrow(TypeError)
   expect(guarded.transactItems).toHaveLength(2)
+})
+
+test('prepends a released version-two open guard without narrowing its epoch', () => {
+  const material = createReleasedGuardFixture()
+
+  const guarded = prependWorkspaceSearchWriterFenceGuard(
+    material,
+    [{
+      Put: {
+        TableName: 'WorkspaceSearch',
+        Item: { workspaceId: 'workspace-1', recordKey: 'released/item-1' },
+      },
+    }],
+  )
+
+  expect(material.writerEpoch).toBe(3)
+  expect(material.controlRevision).toBe(3)
+  expect(guarded.writerEpoch).toBe(3)
+  expect(guarded.controlRevision).toBe(3)
+  expect(guarded.materialFingerprint).toBe(material.materialFingerprint)
+  expect(guarded.transactItems[0]?.ConditionCheck).toEqual({
+    TableName: material.conditionCheck.ConditionCheck?.TableName,
+    Key: {
+      migrationId: 'workspace-search-maintenance',
+      recordKey:
+        material.conditionCheck.ConditionCheck?.Key?.recordKey?.S,
+    },
+    ConditionExpression:
+      '#canonicalBytes = :canonicalBytes AND #recordDigest = :recordDigest',
+    ExpressionAttributeNames: {
+      '#canonicalBytes': 'canonicalBytes',
+      '#recordDigest': 'recordDigest',
+    },
+    ExpressionAttributeValues: {
+      ':canonicalBytes':
+        material.conditionCheck.ConditionCheck
+          ?.ExpressionAttributeValues?.[':canonicalBytes']?.S,
+      ':recordDigest':
+        material.conditionCheck.ConditionCheck
+          ?.ExpressionAttributeValues?.[':recordDigest']?.S,
+    },
+    ReturnValuesOnConditionCheckFailure: 'NONE',
+  })
 })
 
 test('accepts ninety-nine application actions after reserving the guard', () => {

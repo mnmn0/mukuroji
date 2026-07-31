@@ -114,9 +114,7 @@ export function prependWorkspaceSearchWriterFenceGuard(
     if (
       applicationItems.length >
         workspaceSearchWriterFenceMaximumApplicationTransactionItems ||
-      !/^[0-9a-f]{64}$/u.test(strictMaterial.materialFingerprint) ||
-      strictMaterial.writerEpoch !== 1 ||
-      strictMaterial.controlRevision !== 1
+      !/^[0-9a-f]{64}$/u.test(strictMaterial.materialFingerprint)
     ) {
       return failTransactionPreparation()
     }

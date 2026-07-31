@@ -28,8 +28,8 @@ import {
   type WorkspaceSearchWriterFenceAuthority,
   type WorkspaceSearchWriterFenceBinding,
   type WorkspaceSearchWriterFenceClosedRecord,
+  type WorkspaceSearchWriterFenceInitialOpenRecordV1,
   type WorkspaceSearchWriterFenceObservation,
-  type WorkspaceSearchWriterFenceOpenRecord,
   type WorkspaceSearchWriterFenceTableIds,
 } from '../../../src/infrastructure/runtime/workspace-search-writer-fence'
 import {
@@ -310,7 +310,7 @@ type ExecutionBoundaryCloseCommit = {
   /** Stable authority projected into the closed fence. */
   readonly closeAuthority: WorkspaceSearchWriterFenceAuthority
   /** Exact open writer-fence predecessor. */
-  readonly predecessorFence: WorkspaceSearchWriterFenceOpenRecord
+  readonly predecessorFence: WorkspaceSearchWriterFenceInitialOpenRecordV1
   /** Exact intended closed writer-fence successor. */
   readonly successorFence: WorkspaceSearchWriterFenceClosedRecord
   /** Exact intended revision-one boundary. */
@@ -452,7 +452,8 @@ implements WorkspaceSearchMigrationExecutionBoundaryAwsPort {
       }
       if (
         predecessor.writerFence.status !== 'present' ||
-        predecessor.writerFence.record.mode !== 'open'
+        predecessor.writerFence.record.mode !== 'open' ||
+        predecessor.writerFence.record.version !== 1
       ) {
         return failExecutionBoundaryAws('INVALID_STATE')
       }
@@ -1776,8 +1777,10 @@ function readExecutionBoundaryAttributeDataValue(
 /**
  * Determines whether a strongly read boundary/fence pair can coexist.
  *
- * Absence is accepted only with a missing or open fence. Every present
- * boundary must reconstruct exactly from the same closed fence row.
+ * Absence is accepted only with a missing or initial open fence. Every
+ * present boundary must either reconstruct exactly from the same closed fence
+ * row or match the complete historical identity retained by its released
+ * successor.
  *
  * @param pair - Candidate strongly read pair.
  * @returns Whether the pair is internally complete and cross-bound.
@@ -1787,13 +1790,31 @@ function executionBoundaryPairIsInternallyConsistent(
 ): boolean {
   if (pair.boundary === undefined) {
     return pair.writerFence.status === 'missing' ||
-      pair.writerFence.record.mode === 'open'
+      (
+        pair.writerFence.record.mode === 'open' &&
+        pair.writerFence.record.version === 1
+      )
   }
   if (
-    pair.writerFence.status !== 'present' ||
-    pair.writerFence.record.mode !== 'closed'
+    pair.writerFence.status !== 'present'
   ) {
     return false
+  }
+  const writerFence = pair.writerFence.record
+  if (writerFence.mode === 'open') {
+    if (
+      writerFence.version !== 2 ||
+      pair.boundary.phase !== 'planning-admitted'
+    ) {
+      return false
+    }
+    return writerFence.previousClosedRecordDigest ===
+      pair.boundary.closedWriterFenceRecordDigest &&
+      writerFence.release.executionBoundaryDigest ===
+        pair.boundary.boundaryDigest &&
+      writerFence.release.runId === pair.boundary.runId &&
+      writerFence.release.configurationHash ===
+        pair.boundary.configurationHash
   }
   try {
     const reconstructed =
@@ -1801,7 +1822,7 @@ function executionBoundaryPairIsInternallyConsistent(
         runId: pair.boundary.runId,
         configurationHash: pair.boundary.configurationHash,
         tableIds: pair.boundary.tableIds,
-        closedWriterFenceRecord: pair.writerFence.record,
+        closedWriterFenceRecord: writerFence,
       })
     const predecessor =
       createWorkspaceSearchMigrationClosedExecutionBoundaryPredecessor(

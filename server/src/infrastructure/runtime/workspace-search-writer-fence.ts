@@ -7,7 +7,9 @@ import type {
 } from '@aws-sdk/client-dynamodb'
 
 const writerFenceKind = 'workspace-search-application-writer-fence'
-const writerFenceVersion = 1
+const writerFenceInitialVersion = 1
+const writerFenceReleasedVersion = 2
+const writerFenceReleaseVersion = 1
 const stateIncarnationDigestVersion = 1
 const writerFenceMigrationId = 'workspace-search-maintenance'
 const writerFenceRecordKeyPrefix = 'application-writer-fence/v1'
@@ -126,14 +128,16 @@ type WorkspaceSearchWriterFenceRecordBase = {
   /** Stable row discriminator. */
   readonly kind: typeof writerFenceKind
   /** Version of the canonical durable row schema. */
-  readonly version: typeof writerFenceVersion
+  readonly version:
+    | typeof writerFenceInitialVersion
+    | typeof writerFenceReleasedVersion
   /** Stable migration identifier stored inside canonical bytes. */
   readonly migrationId: typeof writerFenceMigrationId
   /** Deterministic sort key stored inside canonical bytes. */
   readonly recordKey: string
   /** Measured state and dataset binding expected by this record. */
   readonly binding: WorkspaceSearchWriterFenceBinding
-  /** Epoch changed by the one-way v1 close transition. */
+  /** Epoch changed by every supported writer-fence transition. */
   readonly writerEpoch: number
   /** Revision changed for every durable control-row transition. */
   readonly controlRevision: number
@@ -144,10 +148,53 @@ type WorkspaceSearchWriterFenceRecordBase = {
 }
 
 /**
+ * Exact terminal migration outcome that permits one writer-fence release.
+ */
+export type WorkspaceSearchWriterFenceTerminalOutcome =
+  | {
+      /** A successful immutable full-verification root authorizes release. */
+      readonly kind: 'verified'
+      /** Supported full-verification persistence schema version. */
+      readonly persistenceVersion: 1
+      /** Digest of the exact immutable verified root. */
+      readonly rootDigest: string
+    }
+  | {
+      /** A complete immutable rollback root authorizes release. */
+      readonly kind: 'rolled-back'
+      /** Supported complete or committed-prefix rollback schema version. */
+      readonly persistenceVersion: 1 | 2
+      /** Digest of the exact immutable rolled-back root. */
+      readonly rootDigest: string
+    }
+
+/**
+ * Immutable terminal evidence retained by one released writer epoch.
+ */
+export type WorkspaceSearchWriterFenceReleaseBinding = {
+  /** Release-binding schema version. */
+  readonly releaseVersion: typeof writerFenceReleaseVersion
+  /** Exact reviewed migration configuration digest. */
+  readonly configurationHash: string
+  /** Operator-selected migration run that owned the closed interval. */
+  readonly runId: string
+  /** Digest of the exact planning-admitted execution boundary. */
+  readonly executionBoundaryDigest: string
+  /** Digest of the exact immutable sealed planning authority. */
+  readonly sealedPlanningAuthorityDigest: string
+  /** Digest of the exact immutable execution admission. */
+  readonly executionRunDigest: string
+  /** Exact immutable terminal outcome authorizing the release. */
+  readonly terminal: WorkspaceSearchWriterFenceTerminalOutcome
+}
+
+/**
  * Durable row permitting application writers at one exact epoch.
  */
-export type WorkspaceSearchWriterFenceOpenRecord =
+export type WorkspaceSearchWriterFenceInitialOpenRecordV1 =
   WorkspaceSearchWriterFenceRecordBase & {
+    /** Initial open rows use the original durable schema. */
+    readonly version: typeof writerFenceInitialVersion
     /** Open rows permit guarded application transactions. */
     readonly mode: 'open'
     /** Writer-fence v1 has one bootstrap writer epoch. */
@@ -161,15 +208,45 @@ export type WorkspaceSearchWriterFenceOpenRecord =
   }
 
 /**
+ * Durable version-two row permitting writers after a terminal migration.
+ */
+export type WorkspaceSearchWriterFenceReleasedOpenRecordV2 =
+  WorkspaceSearchWriterFenceRecordBase & {
+    /** Released open rows use the terminal-bound durable schema. */
+    readonly version: typeof writerFenceReleasedVersion
+    /** Released rows permit newly acquired guarded application transactions. */
+    readonly mode: 'open'
+    /** Release advances the closed writer epoch exactly once. */
+    readonly writerEpoch: 3
+    /** Release advances the closed control revision exactly once. */
+    readonly controlRevision: 3
+    /** Canonical UTC time when the terminal-bound release was committed. */
+    readonly openedAt: string
+    /** Digest of the exact version-one closed predecessor. */
+    readonly previousClosedRecordDigest: string
+    /** Terminal evidence and execution identity authorizing the release. */
+    readonly release: WorkspaceSearchWriterFenceReleaseBinding
+  }
+
+/**
+ * Durable row permitting application writers at one exact supported epoch.
+ */
+export type WorkspaceSearchWriterFenceOpenRecord =
+  | WorkspaceSearchWriterFenceInitialOpenRecordV1
+  | WorkspaceSearchWriterFenceReleasedOpenRecordV2
+
+/**
  * Durable row rejecting application writers during one maintenance interval.
  */
 export type WorkspaceSearchWriterFenceClosedRecord =
   WorkspaceSearchWriterFenceRecordBase & {
+    /** Closed rows use the original durable schema. */
+    readonly version: typeof writerFenceInitialVersion
     /** Closed rows reject every normal application transaction. */
     readonly mode: 'closed'
-    /** Writer-fence v1 has one terminal closed writer epoch. */
+    /** Writer-fence v1 has one closed writer epoch. */
     readonly writerEpoch: 2
-    /** Writer-fence v1 has one terminal closed revision. */
+    /** Writer-fence v1 has one closed revision. */
     readonly controlRevision: 2
     /** Canonical UTC time when this maintenance epoch was committed. */
     readonly closedAt: string
@@ -185,10 +262,18 @@ export type WorkspaceSearchWriterFenceRecord =
   | WorkspaceSearchWriterFenceOpenRecord
 
 /**
- * Canonical open-row fields before storage identity is attached.
+ * Canonical initial open-row fields before storage identity is attached.
  */
-type WorkspaceSearchWriterFenceOpenRecordDraft = Omit<
-  WorkspaceSearchWriterFenceOpenRecord,
+type WorkspaceSearchWriterFenceInitialOpenRecordDraft = Omit<
+  WorkspaceSearchWriterFenceInitialOpenRecordV1,
+  'canonicalBytes' | 'recordDigest'
+>
+
+/**
+ * Canonical released open-row fields before storage identity is attached.
+ */
+type WorkspaceSearchWriterFenceReleasedOpenRecordDraft = Omit<
+  WorkspaceSearchWriterFenceReleasedOpenRecordV2,
   'canonicalBytes' | 'recordDigest'
 >
 
@@ -205,7 +290,8 @@ type WorkspaceSearchWriterFenceClosedRecordDraft = Omit<
  */
 type WorkspaceSearchWriterFenceRecordDraft =
   | WorkspaceSearchWriterFenceClosedRecordDraft
-  | WorkspaceSearchWriterFenceOpenRecordDraft
+  | WorkspaceSearchWriterFenceInitialOpenRecordDraft
+  | WorkspaceSearchWriterFenceReleasedOpenRecordDraft
 
 /**
  * Strongly read writer-fence state for one exact measured binding.
@@ -351,7 +437,7 @@ export function createWorkspaceSearchWriterFenceBinding(
 export function createWorkspaceSearchWriterFenceInitialOpenRecord(
   binding: WorkspaceSearchWriterFenceBinding,
   openedAt: Date,
-): WorkspaceSearchWriterFenceOpenRecord {
+): WorkspaceSearchWriterFenceInitialOpenRecordV1 {
   return atFenceBoundary(() =>
     finalizeOpenRecord({
       binding: readBinding(binding),
@@ -369,16 +455,50 @@ export function createWorkspaceSearchWriterFenceInitialOpenRecord(
  * @returns Canonical closed successor with both counters incremented once.
  */
 export function createWorkspaceSearchWriterFenceClosedSuccessor(
-  predecessor: WorkspaceSearchWriterFenceOpenRecord,
+  predecessor: WorkspaceSearchWriterFenceInitialOpenRecordV1,
   authority: WorkspaceSearchWriterFenceAuthority,
   closedAt: Date,
 ): WorkspaceSearchWriterFenceClosedRecord {
   return atFenceBoundary(() => {
-    const open = readOpenRecord(predecessor)
+    const open = readInitialOpenRecord(predecessor)
     return finalizeClosedRecord({
       authority: readAuthority(authority),
       binding: open.binding,
       closedAt: readDate(closedAt),
+    })
+  })
+}
+
+/**
+ * Releases one exact version-one closed epoch after a terminal migration.
+ *
+ * @param predecessor - Exact closed row consumed by the release transition.
+ * @param release - Terminal root and immutable execution identities.
+ * @param openedAt - Trusted release commit time.
+ * @returns Canonical version-two open successor at epoch and revision three.
+ */
+export function createWorkspaceSearchWriterFenceReleasedOpenSuccessor(
+  predecessor: WorkspaceSearchWriterFenceClosedRecord,
+  release: WorkspaceSearchWriterFenceReleaseBinding,
+  openedAt: Date,
+): WorkspaceSearchWriterFenceReleasedOpenRecordV2 {
+  return atFenceBoundary(() => {
+    const closed = readClosedRecord(predecessor)
+    const strictRelease = readReleaseBinding(release)
+    const openedTimestamp = readDate(openedAt)
+    if (
+      strictRelease.configurationHash !==
+        closed.authority.configurationHash ||
+      strictRelease.runId !== closed.authority.runId ||
+      Date.parse(openedTimestamp) < Date.parse(closed.closedAt)
+    ) {
+      return failFence()
+    }
+    return finalizeReleasedOpenRecord({
+      binding: closed.binding,
+      openedAt: openedTimestamp,
+      previousClosedRecordDigest: closed.recordDigest,
+      release: strictRelease,
     })
   })
 }
@@ -485,7 +605,7 @@ export function createWorkspaceSearchWriterFenceReadMaterial(
 }
 
 /**
- * Creates the conditional Put used for bootstrap or close.
+ * Creates the conditional Put used for bootstrap, close, or release.
  *
  * @param predecessor - Exact missing or present state read before the write.
  * @param successor - Exact canonical successor being committed.
@@ -797,6 +917,33 @@ export function workspaceSearchWriterFenceClosedRecordMatchesAuthority(
 }
 
 /**
+ * Determines whether one released open row represents the same logical release.
+ *
+ * The release timestamp is intentionally excluded so concurrent callers and a
+ * restarted process can recover the single durable successor committed first.
+ *
+ * @param record - Durable strict version-two released open row.
+ * @param binding - Independently measured current table identities.
+ * @param release - Stable terminal and execution release identity.
+ * @returns Whether the durable row is the same logical release.
+ */
+export function workspaceSearchWriterFenceReleasedOpenRecordMatchesRelease(
+  record: WorkspaceSearchWriterFenceReleasedOpenRecordV2,
+  binding: WorkspaceSearchWriterFenceBinding,
+  release: WorkspaceSearchWriterFenceReleaseBinding,
+): boolean {
+  try {
+    const released = readReleasedOpenRecord(record)
+    const expectedBinding = readBinding(binding)
+    const expectedRelease = readReleaseBinding(release)
+    requireSameBinding(released.binding, expectedBinding)
+    return equalReleaseBinding(released.release, expectedRelease)
+  } catch {
+    return false
+  }
+}
+
+/**
  * Input fields used to finalize one open row.
  */
 type FinalizeOpenRecordInput = {
@@ -804,6 +951,20 @@ type FinalizeOpenRecordInput = {
   readonly binding: WorkspaceSearchWriterFenceBinding
   /** Canonical open time. */
   readonly openedAt: string
+}
+
+/**
+ * Input fields used to finalize one released open row.
+ */
+type FinalizeReleasedOpenRecordInput = {
+  /** Exact measured table binding. */
+  readonly binding: WorkspaceSearchWriterFenceBinding
+  /** Canonical release-open time. */
+  readonly openedAt: string
+  /** Digest of the exact closed predecessor. */
+  readonly previousClosedRecordDigest: string
+  /** Exact terminal and execution release identity. */
+  readonly release: WorkspaceSearchWriterFenceReleaseBinding
 }
 
 /**
@@ -826,10 +987,10 @@ type FinalizeClosedRecordInput = {
  */
 function finalizeOpenRecord(
   input: FinalizeOpenRecordInput,
-): WorkspaceSearchWriterFenceOpenRecord {
-  const draft: WorkspaceSearchWriterFenceOpenRecordDraft = {
+): WorkspaceSearchWriterFenceInitialOpenRecordV1 {
+  const draft: WorkspaceSearchWriterFenceInitialOpenRecordDraft = {
     kind: writerFenceKind,
-    version: writerFenceVersion,
+    version: writerFenceInitialVersion,
     migrationId: writerFenceMigrationId,
     recordKey: input.binding.recordKey,
     binding: readBinding(input.binding),
@@ -838,6 +999,38 @@ function finalizeOpenRecord(
     controlRevision: 1,
     openedAt: requireTimestamp(input.openedAt),
     previousClosedRecordDigest: null,
+  }
+  const canonicalBytes = createCanonicalBytes(draft)
+  return {
+    ...draft,
+    canonicalBytes,
+    recordDigest: digestText(canonicalBytes),
+  }
+}
+
+/**
+ * Creates one canonical released open record and its exact digest.
+ *
+ * @param input - Validated released-open fields.
+ * @returns Detached canonical version-two open record.
+ */
+function finalizeReleasedOpenRecord(
+  input: FinalizeReleasedOpenRecordInput,
+): WorkspaceSearchWriterFenceReleasedOpenRecordV2 {
+  const draft: WorkspaceSearchWriterFenceReleasedOpenRecordDraft = {
+    kind: writerFenceKind,
+    version: writerFenceReleasedVersion,
+    migrationId: writerFenceMigrationId,
+    recordKey: input.binding.recordKey,
+    binding: readBinding(input.binding),
+    mode: 'open',
+    writerEpoch: 3,
+    controlRevision: 3,
+    openedAt: requireTimestamp(input.openedAt),
+    previousClosedRecordDigest: requireDigest(
+      input.previousClosedRecordDigest,
+    ),
+    release: readReleaseBinding(input.release),
   }
   const canonicalBytes = createCanonicalBytes(draft)
   return {
@@ -858,7 +1051,7 @@ function finalizeClosedRecord(
 ): WorkspaceSearchWriterFenceClosedRecord {
   const draft: WorkspaceSearchWriterFenceClosedRecordDraft = {
     kind: writerFenceKind,
-    version: writerFenceVersion,
+    version: writerFenceInitialVersion,
     migrationId: writerFenceMigrationId,
     recordKey: input.binding.recordKey,
     binding: readBinding(input.binding),
@@ -898,6 +1091,26 @@ function readFenceRecord(value: unknown): WorkspaceSearchWriterFenceRecord {
  */
 function readOpenRecord(value: unknown): WorkspaceSearchWriterFenceOpenRecord {
   const record = requireRecord(value)
+  const version = Reflect.get(record, 'version')
+  if (version === writerFenceInitialVersion) {
+    return readInitialOpenRecord(record)
+  }
+  if (version === writerFenceReleasedVersion) {
+    return readReleasedOpenRecord(record)
+  }
+  return failFence()
+}
+
+/**
+ * Rebuilds one strict version-one initial open runtime object.
+ *
+ * @param value - Candidate initial open record.
+ * @returns Detached strict version-one initial open record.
+ */
+function readInitialOpenRecord(
+  value: unknown,
+): WorkspaceSearchWriterFenceInitialOpenRecordV1 {
+  const record = requireRecord(value)
   requireExactKeys(record, [
     'binding',
     'canonicalBytes',
@@ -914,7 +1127,7 @@ function readOpenRecord(value: unknown): WorkspaceSearchWriterFenceOpenRecord {
   ])
   if (
     Reflect.get(record, 'kind') !== writerFenceKind ||
-    Reflect.get(record, 'version') !== writerFenceVersion ||
+    Reflect.get(record, 'version') !== writerFenceInitialVersion ||
     Reflect.get(record, 'migrationId') !== writerFenceMigrationId ||
     Reflect.get(record, 'mode') !== 'open'
   ) {
@@ -950,6 +1163,57 @@ function readOpenRecord(value: unknown): WorkspaceSearchWriterFenceOpenRecord {
 }
 
 /**
+ * Rebuilds one strict version-two released open runtime object.
+ *
+ * @param value - Candidate released open record.
+ * @returns Detached strict version-two released open record.
+ */
+function readReleasedOpenRecord(
+  value: unknown,
+): WorkspaceSearchWriterFenceReleasedOpenRecordV2 {
+  const record = requireRecord(value)
+  requireExactKeys(record, [
+    'binding',
+    'canonicalBytes',
+    'controlRevision',
+    'kind',
+    'migrationId',
+    'mode',
+    'openedAt',
+    'previousClosedRecordDigest',
+    'recordDigest',
+    'recordKey',
+    'release',
+    'version',
+    'writerEpoch',
+  ])
+  if (
+    Reflect.get(record, 'kind') !== writerFenceKind ||
+    Reflect.get(record, 'version') !== writerFenceReleasedVersion ||
+    Reflect.get(record, 'migrationId') !== writerFenceMigrationId ||
+    Reflect.get(record, 'mode') !== 'open' ||
+    Reflect.get(record, 'controlRevision') !== 3 ||
+    Reflect.get(record, 'writerEpoch') !== 3
+  ) {
+    return failFence()
+  }
+  const binding = readBinding(Reflect.get(record, 'binding'))
+  if (Reflect.get(record, 'recordKey') !== binding.recordKey) {
+    return failFence()
+  }
+  const rebuilt = finalizeReleasedOpenRecord({
+    binding,
+    openedAt: requireTimestamp(Reflect.get(record, 'openedAt')),
+    previousClosedRecordDigest: requireDigest(
+      Reflect.get(record, 'previousClosedRecordDigest'),
+    ),
+    release: readReleaseBinding(Reflect.get(record, 'release')),
+  })
+  requireStoredCanonicalIdentity(record, rebuilt)
+  return rebuilt
+}
+
+/**
  * Rebuilds one strict closed runtime object.
  *
  * @param value - Candidate closed record.
@@ -975,7 +1239,7 @@ function readClosedRecord(
   ])
   if (
     Reflect.get(record, 'kind') !== writerFenceKind ||
-    Reflect.get(record, 'version') !== writerFenceVersion ||
+    Reflect.get(record, 'version') !== writerFenceInitialVersion ||
     Reflect.get(record, 'migrationId') !== writerFenceMigrationId ||
     Reflect.get(record, 'mode') !== 'closed'
   ) {
@@ -1152,6 +1416,73 @@ function readAuthority(value: unknown): WorkspaceSearchWriterFenceAuthority {
 }
 
 /**
+ * Reads and detaches one exact terminal release binding.
+ *
+ * @param value - Candidate release binding.
+ * @returns Strict detached terminal and execution identity.
+ */
+function readReleaseBinding(
+  value: unknown,
+): WorkspaceSearchWriterFenceReleaseBinding {
+  const record = requireRecord(value)
+  requireExactKeys(record, [
+    'configurationHash',
+    'executionBoundaryDigest',
+    'executionRunDigest',
+    'releaseVersion',
+    'runId',
+    'sealedPlanningAuthorityDigest',
+    'terminal',
+  ])
+  if (Reflect.get(record, 'releaseVersion') !== writerFenceReleaseVersion) {
+    return failFence()
+  }
+  return {
+    releaseVersion: writerFenceReleaseVersion,
+    configurationHash: requireDigest(
+      Reflect.get(record, 'configurationHash'),
+    ),
+    runId: requireIdentifier(Reflect.get(record, 'runId')),
+    executionBoundaryDigest: requireDigest(
+      Reflect.get(record, 'executionBoundaryDigest'),
+    ),
+    sealedPlanningAuthorityDigest: requireDigest(
+      Reflect.get(record, 'sealedPlanningAuthorityDigest'),
+    ),
+    executionRunDigest: requireDigest(
+      Reflect.get(record, 'executionRunDigest'),
+    ),
+    terminal: readTerminalOutcome(Reflect.get(record, 'terminal')),
+  }
+}
+
+/**
+ * Reads one strict verified or completely rolled-back terminal identity.
+ *
+ * @param value - Candidate terminal outcome.
+ * @returns Detached supported terminal outcome.
+ */
+function readTerminalOutcome(
+  value: unknown,
+): WorkspaceSearchWriterFenceTerminalOutcome {
+  const record = requireRecord(value)
+  requireExactKeys(record, ['kind', 'persistenceVersion', 'rootDigest'])
+  const kind = Reflect.get(record, 'kind')
+  const persistenceVersion = Reflect.get(record, 'persistenceVersion')
+  const rootDigest = requireDigest(Reflect.get(record, 'rootDigest'))
+  if (kind === 'verified' && persistenceVersion === 1) {
+    return { kind, persistenceVersion, rootDigest }
+  }
+  if (
+    kind === 'rolled-back' &&
+    (persistenceVersion === 1 || persistenceVersion === 2)
+  ) {
+    return { kind, persistenceVersion, rootDigest }
+  }
+  return failFence()
+}
+
+/**
  * Reads all six TableIds with an exact role allowlist.
  *
  * @param value - Candidate TableId record.
@@ -1211,51 +1542,24 @@ function readPayloadRecord(
 ): WorkspaceSearchWriterFenceRecord {
   const mode = Reflect.get(payload, 'mode')
   if (mode === 'open') {
-    requireExactKeys(payload, [
-      'binding',
-      'controlRevision',
-      'kind',
-      'migrationId',
-      'mode',
-      'openedAt',
-      'previousClosedRecordDigest',
-      'recordKey',
-      'version',
-      'writerEpoch',
-    ])
-    const payloadBinding = readCanonicalBinding(
-      Reflect.get(payload, 'binding'),
-      binding,
-    )
-    const controlRevision = requirePositiveSafeInteger(
-      Reflect.get(payload, 'controlRevision'),
-    )
-    const previousClosedRecordDigest = Reflect.get(
-      payload,
-      'previousClosedRecordDigest',
-    )
-    const writerEpoch = requirePositiveSafeInteger(
-      Reflect.get(payload, 'writerEpoch'),
-    )
-    if (
-      controlRevision !== 1 ||
-      previousClosedRecordDigest !== null ||
-      writerEpoch !== 1
-    ) {
-      return failFence()
+    const version = Reflect.get(payload, 'version')
+    if (version === writerFenceInitialVersion) {
+      return readInitialOpenPayloadRecord(
+        payload,
+        binding,
+        canonicalBytes,
+        recordDigest,
+      )
     }
-    const record = finalizeOpenRecord({
-      binding: payloadBinding,
-      openedAt: requireTimestamp(Reflect.get(payload, 'openedAt')),
-    })
-    requirePayloadIdentity(payload, record)
-    if (
-      record.canonicalBytes !== canonicalBytes ||
-      record.recordDigest !== recordDigest
-    ) {
-      return failFence()
+    if (version === writerFenceReleasedVersion) {
+      return readReleasedOpenPayloadRecord(
+        payload,
+        binding,
+        canonicalBytes,
+        recordDigest,
+      )
     }
-    return record
+    return failFence()
   }
   if (mode === 'closed') {
     requireExactKeys(payload, [
@@ -1295,6 +1599,117 @@ function readPayloadRecord(
     return record
   }
   return failFence()
+}
+
+/**
+ * Rebuilds one version-one initial open record from canonical payload bytes.
+ *
+ * @param payload - Parsed canonical payload.
+ * @param binding - Independently measured expected binding.
+ * @param canonicalBytes - Exact stored canonical JSON.
+ * @param recordDigest - Exact stored SHA-256 digest.
+ * @returns Detached strict version-one initial open record.
+ */
+function readInitialOpenPayloadRecord(
+  payload: Readonly<Record<string, unknown>>,
+  binding: WorkspaceSearchWriterFenceBinding,
+  canonicalBytes: string,
+  recordDigest: string,
+): WorkspaceSearchWriterFenceInitialOpenRecordV1 {
+  requireExactKeys(payload, [
+    'binding',
+    'controlRevision',
+    'kind',
+    'migrationId',
+    'mode',
+    'openedAt',
+    'previousClosedRecordDigest',
+    'recordKey',
+    'version',
+    'writerEpoch',
+  ])
+  if (
+    Reflect.get(payload, 'controlRevision') !== 1 ||
+    Reflect.get(payload, 'previousClosedRecordDigest') !== null ||
+    Reflect.get(payload, 'writerEpoch') !== 1
+  ) {
+    return failFence()
+  }
+  const record = finalizeOpenRecord({
+    binding: readCanonicalBinding(Reflect.get(payload, 'binding'), binding),
+    openedAt: requireTimestamp(Reflect.get(payload, 'openedAt')),
+  })
+  requirePayloadStorageIdentity(payload, record, canonicalBytes, recordDigest)
+  return record
+}
+
+/**
+ * Rebuilds one version-two released open record from canonical payload bytes.
+ *
+ * @param payload - Parsed canonical payload.
+ * @param binding - Independently measured expected binding.
+ * @param canonicalBytes - Exact stored canonical JSON.
+ * @param recordDigest - Exact stored SHA-256 digest.
+ * @returns Detached strict version-two released open record.
+ */
+function readReleasedOpenPayloadRecord(
+  payload: Readonly<Record<string, unknown>>,
+  binding: WorkspaceSearchWriterFenceBinding,
+  canonicalBytes: string,
+  recordDigest: string,
+): WorkspaceSearchWriterFenceReleasedOpenRecordV2 {
+  requireExactKeys(payload, [
+    'binding',
+    'controlRevision',
+    'kind',
+    'migrationId',
+    'mode',
+    'openedAt',
+    'previousClosedRecordDigest',
+    'recordKey',
+    'release',
+    'version',
+    'writerEpoch',
+  ])
+  if (
+    Reflect.get(payload, 'controlRevision') !== 3 ||
+    Reflect.get(payload, 'writerEpoch') !== 3
+  ) {
+    return failFence()
+  }
+  const record = finalizeReleasedOpenRecord({
+    binding: readCanonicalBinding(Reflect.get(payload, 'binding'), binding),
+    openedAt: requireTimestamp(Reflect.get(payload, 'openedAt')),
+    previousClosedRecordDigest: requireDigest(
+      Reflect.get(payload, 'previousClosedRecordDigest'),
+    ),
+    release: readReleaseBinding(Reflect.get(payload, 'release')),
+  })
+  requirePayloadStorageIdentity(payload, record, canonicalBytes, recordDigest)
+  return record
+}
+
+/**
+ * Verifies canonical payload discriminators, bytes, and digest together.
+ *
+ * @param payload - Parsed semantic payload.
+ * @param record - Strict record rebuilt from the payload.
+ * @param canonicalBytes - Exact stored canonical JSON.
+ * @param recordDigest - Exact stored canonical digest.
+ */
+function requirePayloadStorageIdentity(
+  payload: Readonly<Record<string, unknown>>,
+  record: WorkspaceSearchWriterFenceRecord,
+  canonicalBytes: string,
+  recordDigest: string,
+): void {
+  requirePayloadIdentity(payload, record)
+  if (
+    record.canonicalBytes !== canonicalBytes ||
+    record.recordDigest !== recordDigest
+  ) {
+    return failFence()
+  }
 }
 
 /**
@@ -1345,7 +1760,7 @@ function requirePayloadIdentity(
 ): void {
   if (
     Reflect.get(payload, 'kind') !== writerFenceKind ||
-    Reflect.get(payload, 'version') !== writerFenceVersion ||
+    Reflect.get(payload, 'version') !== record.version ||
     Reflect.get(payload, 'migrationId') !== writerFenceMigrationId ||
     Reflect.get(payload, 'recordKey') !== record.recordKey
   ) {
@@ -1376,9 +1791,39 @@ function createCanonicalBytes(
     },
   }
   if (record.mode === 'open') {
+    if (record.version === writerFenceReleasedVersion) {
+      return JSON.stringify({
+        kind: writerFenceKind,
+        version: writerFenceReleasedVersion,
+        migrationId: writerFenceMigrationId,
+        recordKey: record.recordKey,
+        binding,
+        mode: 'open',
+        writerEpoch: record.writerEpoch,
+        controlRevision: record.controlRevision,
+        openedAt: record.openedAt,
+        previousClosedRecordDigest: record.previousClosedRecordDigest,
+        release: {
+          releaseVersion: writerFenceReleaseVersion,
+          configurationHash: record.release.configurationHash,
+          runId: record.release.runId,
+          executionBoundaryDigest:
+            record.release.executionBoundaryDigest,
+          sealedPlanningAuthorityDigest:
+            record.release.sealedPlanningAuthorityDigest,
+          executionRunDigest: record.release.executionRunDigest,
+          terminal: {
+            kind: record.release.terminal.kind,
+            persistenceVersion:
+              record.release.terminal.persistenceVersion,
+            rootDigest: record.release.terminal.rootDigest,
+          },
+        },
+      })
+    }
     return JSON.stringify({
       kind: writerFenceKind,
-      version: writerFenceVersion,
+      version: writerFenceInitialVersion,
       migrationId: writerFenceMigrationId,
       recordKey: record.recordKey,
       binding,
@@ -1391,7 +1836,7 @@ function createCanonicalBytes(
   }
   return JSON.stringify({
     kind: writerFenceKind,
-    version: writerFenceVersion,
+    version: writerFenceInitialVersion,
     migrationId: writerFenceMigrationId,
     recordKey: record.recordKey,
     binding,
@@ -1413,7 +1858,7 @@ function createCanonicalBytes(
 }
 
 /**
- * Requires one valid bootstrap or one-way open-to-closed transition.
+ * Requires one valid bootstrap, close, or terminal-bound release transition.
  *
  * @param predecessor - Exact state observed before commit.
  * @param successor - Exact proposed successor.
@@ -1425,6 +1870,7 @@ function requireValidTransition(
   if (predecessor.status === 'missing') {
     if (
       successor.mode !== 'open' ||
+      successor.version !== writerFenceInitialVersion ||
       successor.writerEpoch !== 1 ||
       successor.controlRevision !== 1 ||
       successor.previousClosedRecordDigest !== null
@@ -1441,7 +1887,24 @@ function requireValidTransition(
   ) {
     return failFence()
   }
-  if (current.mode === 'open' && successor.mode === 'closed') return
+  if (
+    current.mode === 'open' &&
+    current.version === writerFenceInitialVersion &&
+    successor.mode === 'closed'
+  ) {
+    return
+  }
+  if (
+    current.mode === 'closed' &&
+    successor.mode === 'open' &&
+    successor.version === writerFenceReleasedVersion &&
+    successor.previousClosedRecordDigest === current.recordDigest &&
+    successor.release.configurationHash ===
+      current.authority.configurationHash &&
+    successor.release.runId === current.authority.runId
+  ) {
+    return
+  }
   return failFence()
 }
 
@@ -1508,6 +1971,29 @@ function equalAuthority(
       right.maintenanceEvidenceReceiptDigest &&
     left.maintenanceEvidencePointerRevision ===
       right.maintenanceEvidencePointerRevision
+}
+
+/**
+ * Compares two strict terminal release bindings.
+ *
+ * @param left - First release binding.
+ * @param right - Second release binding.
+ * @returns Whether every durable release identity field matches.
+ */
+function equalReleaseBinding(
+  left: WorkspaceSearchWriterFenceReleaseBinding,
+  right: WorkspaceSearchWriterFenceReleaseBinding,
+): boolean {
+  return left.releaseVersion === right.releaseVersion &&
+    left.configurationHash === right.configurationHash &&
+    left.runId === right.runId &&
+    left.executionBoundaryDigest === right.executionBoundaryDigest &&
+    left.sealedPlanningAuthorityDigest ===
+      right.sealedPlanningAuthorityDigest &&
+    left.executionRunDigest === right.executionRunDigest &&
+    left.terminal.kind === right.terminal.kind &&
+    left.terminal.persistenceVersion === right.terminal.persistenceVersion &&
+    left.terminal.rootDigest === right.terminal.rootDigest
 }
 
 /**

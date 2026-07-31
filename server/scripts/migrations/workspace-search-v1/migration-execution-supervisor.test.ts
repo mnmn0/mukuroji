@@ -591,6 +591,8 @@ class ExecutionSupervisorHarness {
       createApplicationWriterFencePort: () => ({
         bootstrapOpen: () =>
           unexpectedOperation('writer-fence bootstrap'),
+        release: () =>
+          unexpectedOperation('writer-fence release'),
         read: async () => {
           this.events.push('writer-fence:read')
           return {

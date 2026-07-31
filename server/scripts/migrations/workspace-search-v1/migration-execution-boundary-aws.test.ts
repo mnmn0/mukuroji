@@ -12,12 +12,15 @@ import {
   createWorkspaceSearchWriterFenceBinding,
   createWorkspaceSearchWriterFenceClosedSuccessor,
   createWorkspaceSearchWriterFenceInitialOpenRecord,
+  createWorkspaceSearchWriterFenceReleasedOpenSuccessor,
   createWorkspaceSearchWriterFenceStateIncarnationDigest,
   encodeWorkspaceSearchWriterFenceRecord,
   type WorkspaceSearchWriterFenceBinding,
   type WorkspaceSearchWriterFenceAuthority,
   type WorkspaceSearchWriterFenceClosedRecord,
+  type WorkspaceSearchWriterFenceInitialOpenRecordV1,
   type WorkspaceSearchWriterFenceOpenRecord,
+  type WorkspaceSearchWriterFenceReleaseBinding,
 } from '../../../src/infrastructure/runtime/workspace-search-writer-fence'
 import {
   createMaintenanceEvidenceFileDigest,
@@ -62,6 +65,7 @@ const closedAt = '2026-07-29T01:01:00.000Z'
 const drainStartedAt = closedAt
 const drainCompletedAt = '2026-07-29T01:16:00.000Z'
 const admittedAt = '2026-07-29T01:16:10.000Z'
+const releasedAt = '2026-07-29T02:00:00.000Z'
 
 describe('Workspace Search migration execution-boundary AWS adapter', () => {
   test('creates an exact planning-admitted boundary condition check', async () => {
@@ -418,6 +422,186 @@ describe('Workspace Search migration execution-boundary AWS adapter', () => {
     )
   })
 
+  test('reads the historical boundary after release and rejects another close', async () => {
+    const fixture = createExecutionBoundaryAwsFixture()
+    const transport = new RecordingExecutionBoundaryTransport(
+      fixture.openFence,
+    )
+    const port = createExecutionBoundaryPort(
+      fixture,
+      transport,
+      createSequencedClock([closedAt, admittedAt]),
+    )
+    await port.close(fixture.closeAuthority)
+    const admitted = await port.admitPlanning(
+      fixture.admissionInput,
+    )
+    const closedFence =
+      createWorkspaceSearchWriterFenceClosedSuccessor(
+        fixture.openFence,
+        createCloseFenceAuthority(fixture.closeAuthority),
+        new Date(closedAt),
+      )
+    const releasedFence =
+      createWorkspaceSearchWriterFenceReleasedOpenSuccessor(
+        closedFence,
+        {
+          releaseVersion: 1,
+          configurationHash: fixture.configurationHash,
+          runId,
+          executionBoundaryDigest: admitted.boundaryDigest,
+          sealedPlanningAuthorityDigest:
+            digest('released-sealed-planning-authority'),
+          executionRunDigest: digest('released-execution-run'),
+          terminal: {
+            kind: 'verified',
+            persistenceVersion: 1,
+            rootDigest: digest('released-verification-root'),
+          },
+        },
+        new Date(releasedAt),
+      )
+    transport.installItem(
+      encodeWorkspaceSearchWriterFenceRecord(releasedFence),
+    )
+    const restarted = createExecutionBoundaryPort(
+      fixture,
+      transport,
+      createThrowingClock(),
+    )
+    const readsBefore = transport.reads.length
+    const transactionsBefore = transport.transactions.length
+
+    expect(await restarted.read(runId)).toEqual(admitted)
+    expect(transport.reads).toHaveLength(readsBefore + 3)
+    const closeFailure = await captureMigrationFailure(() =>
+      restarted.close(fixture.closeAuthority)
+    )
+    expect(closeFailure.code).toBe('INVALID_STATE')
+    expect(transport.transactions).toHaveLength(
+      transactionsBefore,
+    )
+  })
+
+  test('rejects released rows for another predecessor or boundary', async () => {
+    const fixture = createExecutionBoundaryAwsFixture()
+    const transport = new RecordingExecutionBoundaryTransport(
+      fixture.openFence,
+    )
+    const port = createExecutionBoundaryPort(
+      fixture,
+      transport,
+      createSequencedClock([closedAt, admittedAt]),
+    )
+    await port.close(fixture.closeAuthority)
+    const admitted = await port.admitPlanning(
+      fixture.admissionInput,
+    )
+    const closeAuthority =
+      createCloseFenceAuthority(fixture.closeAuthority)
+    const closedFence =
+      createWorkspaceSearchWriterFenceClosedSuccessor(
+        fixture.openFence,
+        closeAuthority,
+        new Date(closedAt),
+      )
+    const alternateClosedFence =
+      createWorkspaceSearchWriterFenceClosedSuccessor(
+        fixture.openFence,
+        {
+          ...closeAuthority,
+          ownerId: 'another-execution-boundary-owner',
+        },
+        new Date(closedAt),
+      )
+    const release: WorkspaceSearchWriterFenceReleaseBinding = {
+      releaseVersion: 1,
+      configurationHash: fixture.configurationHash,
+      runId,
+      executionBoundaryDigest: admitted.boundaryDigest,
+      sealedPlanningAuthorityDigest:
+        digest('released-sealed-planning-authority'),
+      executionRunDigest: digest('released-execution-run'),
+      terminal: {
+        kind: 'verified',
+        persistenceVersion: 1,
+        rootDigest: digest('released-verification-root'),
+      },
+    }
+    const mismatchedReleasedFences = [
+      createWorkspaceSearchWriterFenceReleasedOpenSuccessor(
+        alternateClosedFence,
+        release,
+        new Date(releasedAt),
+      ),
+      createWorkspaceSearchWriterFenceReleasedOpenSuccessor(
+        closedFence,
+        {
+          ...release,
+          executionBoundaryDigest:
+            digest('another-execution-boundary'),
+        },
+        new Date(releasedAt),
+      ),
+    ]
+
+    for (const releasedFence of mismatchedReleasedFences) {
+      transport.installItem(
+        encodeWorkspaceSearchWriterFenceRecord(releasedFence),
+      )
+      const readsBefore = transport.reads.length
+      const failure = await captureMigrationFailure(() =>
+        port.read(runId)
+      )
+      expect(failure.code).toBe('INVALID_STATE')
+      expect(transport.reads).toHaveLength(readsBefore + 9)
+    }
+  })
+
+  test('rejects a released fence whose historical boundary is missing', async () => {
+    const fixture = createExecutionBoundaryAwsFixture()
+    const closedFence =
+      createWorkspaceSearchWriterFenceClosedSuccessor(
+        fixture.openFence,
+        createCloseFenceAuthority(fixture.closeAuthority),
+        new Date(closedAt),
+      )
+    const releasedFence =
+      createWorkspaceSearchWriterFenceReleasedOpenSuccessor(
+        closedFence,
+        {
+          releaseVersion: 1,
+          configurationHash: fixture.configurationHash,
+          runId,
+          executionBoundaryDigest:
+            digest('missing-execution-boundary'),
+          sealedPlanningAuthorityDigest:
+            digest('released-sealed-planning-authority'),
+          executionRunDigest: digest('released-execution-run'),
+          terminal: {
+            kind: 'verified',
+            persistenceVersion: 1,
+            rootDigest: digest('released-verification-root'),
+          },
+        },
+        new Date(releasedAt),
+      )
+    const transport = new RecordingExecutionBoundaryTransport(
+      releasedFence,
+    )
+    const port = createExecutionBoundaryPort(
+      fixture,
+      transport,
+      createThrowingClock(),
+    )
+
+    const failure = await captureMigrationFailure(() =>
+      port.read(runId)
+    )
+    expect(failure.code).toBe('INVALID_STATE')
+    expect(transport.reads).toHaveLength(9)
+  })
+
   test('stabilizes a boundary revision across concurrent planning admission', async () => {
     const fixture = createExecutionBoundaryAwsFixture()
     const transport = new RecordingExecutionBoundaryTransport(
@@ -727,7 +911,7 @@ type ExecutionBoundaryAwsFixture = {
   /** Fresh authority used for the atomic close. */
   readonly closeAuthority: WorkspaceSearchMigrationPrePlanAuthority
   /** Exact initial open writer-fence row. */
-  readonly openFence: WorkspaceSearchWriterFenceOpenRecord
+  readonly openFence: WorkspaceSearchWriterFenceInitialOpenRecordV1
   /** Fresh authority and bytes used for planning admission. */
   readonly admissionInput:
     AdmitWorkspaceSearchMigrationExecutionBoundaryAwsPlanningInput

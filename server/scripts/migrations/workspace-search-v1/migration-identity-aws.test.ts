@@ -102,6 +102,10 @@ import {
 import type {
   WorkspaceSearchMigrationPrePlanAuthority,
 } from './migration-pre-plan-authority-aws'
+import {
+  workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex,
+  type ReleaseWorkspaceSearchMigrationApplicationWriterFenceInput,
+} from './migration-application-writer-fence-aws'
 import type {
   WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary,
 } from './migration-execution-boundary'
@@ -5222,7 +5226,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
       await expect(
         executionBoundary.read(authority.lease.runId),
       ).resolves.toEqual(closedBoundary)
-      expect(Reflect.get(writerFence, 'release')).toBeUndefined()
+      expect(typeof writerFence.release).toBe('function')
       expect(
         transport.transactWritePrePlanAuthorityCommands,
       ).toHaveLength(transactionCount + 2)
@@ -7550,11 +7554,42 @@ describe('Workspace Search migration AWS identity adapter', () => {
           .transactWritePrePlanAuthorityCommands,
       ).toHaveLength(transactionsAfterFinish)
 
+      transactionStage = 'release'
+      const released = await fixture.port
+        .createApplicationWriterFencePort()
+        .release({
+          executionBoundary: fixture.executionBoundary,
+          sealedPlanningAuthority: fixture.sealedPlanningAuthority,
+          executionRun: fixture.executionRun,
+          terminal: { kind: 'rolled-back-v2', root },
+        })
+      expect(released).toMatchObject({
+        status: 'present',
+        record: {
+          version: 2,
+          mode: 'open',
+          writerEpoch: 3,
+          controlRevision: 3,
+          release: {
+            terminal: {
+              kind: 'rolled-back',
+              persistenceVersion: 2,
+              rootDigest: root.rootDigest,
+            },
+          },
+        },
+      })
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactionsAfterFinish + 1)
+
       for (const marker of [
         'partial-seal-put',
         'start-transaction',
         'reverse-transaction',
         'finish-transaction',
+        'release-transaction',
       ]) {
         const markerIndex = guardTrace.indexOf(marker)
         expect(markerIndex).toBeGreaterThanOrEqual(
@@ -8092,6 +8127,34 @@ describe('Workspace Search migration AWS identity adapter', () => {
         fixture.transport
           .transactWritePrePlanAuthorityCommands,
       ).toHaveLength(transactionsAfterFinish)
+      const released = await fixture.port
+        .createApplicationWriterFencePort()
+        .release({
+          executionBoundary: fixture.executionBoundary,
+          sealedPlanningAuthority: fixture.sealedPlanningAuthority,
+          executionRun: fixture.executionRun,
+          terminal: { kind: 'rolled-back-v1', root },
+        })
+      expect(released).toMatchObject({
+        status: 'present',
+        record: {
+          version: 2,
+          mode: 'open',
+          writerEpoch: 3,
+          controlRevision: 3,
+          release: {
+            terminal: {
+              kind: 'rolled-back',
+              persistenceVersion: 1,
+              rootDigest: root.rootDigest,
+            },
+          },
+        },
+      })
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactionsAfterFinish + 1)
       fixture.port.close()
     },
   )
@@ -9075,6 +9138,195 @@ describe('Workspace Search migration AWS identity adapter', () => {
       }
       fixture.port.close()
     },
+  )
+
+  test(
+    'releases a verified terminal fence through managed guards and recovers response loss',
+    async () => {
+      const fixture =
+        await createManagedFullVerificationFixture(
+          'verified-writer-fence-release',
+        )
+      const terminal =
+        await completeManagedFullVerificationTraversal(fixture)
+      const root = await fixture.verification.publishVerified({
+        expectedRevision: terminal.revision,
+        authority: {
+          lease: {
+            runId: fixture.currentAuthority.lease.runId,
+            ownerId: fixture.currentAuthority.lease.ownerId,
+            fenceToken: fixture.currentAuthority.lease.fenceToken,
+          },
+          maintenanceEvidenceReceiptDigest:
+            fixture.currentAuthority.maintenanceEvidenceReceiptDigest,
+          maintenanceEvidencePointerRevision:
+            fixture.currentAuthority.maintenanceEvidencePointerRevision,
+        },
+      })
+      const writerFence =
+        fixture.port.createApplicationWriterFencePort()
+      const releaseInput:
+        ReleaseWorkspaceSearchMigrationApplicationWriterFenceInput = {
+        executionBoundary: fixture.executionBoundary,
+        sealedPlanningAuthority: fixture.sealedPlanningAuthority,
+        executionRun: fixture.executionRun,
+        terminal: { kind: 'verified', root },
+      }
+      const transactions =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+      const expectedTables = [
+        fixture.requested.tables['migration-state'],
+        fixture.requested.tables['project-directory'],
+        fixture.requested.tables['work-items'],
+        fixture.requested.tables.collaboration,
+        fixture.requested.tables.documents,
+        fixture.requested.tables['workspace-search'],
+      ]
+      const trace: string[] = []
+      let responseLost = false
+      fixture.transport.describeTableEffect = (tableName) => {
+        trace.push(tableName)
+      }
+      fixture.transport.transactWritePrePlanAuthorityEffect = () => {
+        trace.push('writer-fence-release-transaction')
+      }
+      fixture.transport
+        .transactWritePrePlanAuthorityPostCommitEffect = () => {
+          responseLost = true
+          fixture.transport
+            .transactWritePrePlanAuthorityPostCommitEffect = undefined
+          throw new Error('redacted writer-fence release response loss')
+        }
+
+      const released = await writerFence.release(releaseInput)
+
+      expect(responseLost).toBe(true)
+      expect(released).toMatchObject({
+        status: 'present',
+        record: {
+          version: 2,
+          mode: 'open',
+          writerEpoch: 3,
+          controlRevision: 3,
+          previousClosedRecordDigest:
+            fixture.closedWriterFenceRecord.recordDigest,
+          release: {
+            releaseVersion: 1,
+            configurationHash:
+              fixture.currentAuthority.configurationHash,
+            runId: fixture.currentAuthority.lease.runId,
+            executionBoundaryDigest:
+              fixture.executionBoundary.boundaryDigest,
+            sealedPlanningAuthorityDigest:
+              fixture.sealedPlanningAuthority.authorityDigest,
+            executionRunDigest: fixture.executionRun.executionRunDigest,
+            terminal: {
+              kind: 'verified',
+              persistenceVersion: 1,
+              rootDigest: root.verifiedRootDigest,
+            },
+          },
+        },
+      })
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactions + 1)
+      const releaseItems =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands[
+            transactions
+          ]?.input.TransactItems
+      expect(releaseItems).toHaveLength(
+        workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+          .count,
+      )
+      expect(
+        releaseItems?.[
+          workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+            .executionBoundary
+        ]?.ConditionCheck,
+      ).toBeDefined()
+      expect(
+        releaseItems?.[
+          workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+            .sealedPlanningAuthority
+        ]?.ConditionCheck,
+      ).toBeDefined()
+      expect(
+        releaseItems?.[
+          workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+            .executionRun
+        ]?.ConditionCheck,
+      ).toBeDefined()
+      const terminalRootAction =
+        releaseItems?.[
+          workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+            .terminalRoot
+        ]
+      expect(terminalRootAction?.ConditionCheck).toBeUndefined()
+      expect(terminalRootAction?.Put).toMatchObject({
+        TableName: fixture.requested.tables['migration-state'],
+        Item: {
+          verifiedRootDigest: { S: root.verifiedRootDigest },
+        },
+        ReturnValuesOnConditionCheckFailure: 'NONE',
+      })
+      expect(
+        Object.values(
+          terminalRootAction?.Put?.ExpressionAttributeValues ?? {},
+        ),
+      ).toContainEqual({ S: root.verifiedRootDigest })
+      expect(
+        releaseItems?.[
+          workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+            .writerFence
+        ]?.Put,
+      ).toBeDefined()
+      await expect(writerFence.read()).resolves.toEqual(released)
+
+      const transactionIndex = trace.indexOf(
+        'writer-fence-release-transaction',
+      )
+      expect(transactionIndex).toBeGreaterThanOrEqual(
+        expectedTables.length,
+      )
+      expect(
+        trace.slice(
+          transactionIndex - expectedTables.length,
+          transactionIndex,
+        ),
+      ).toEqual(expectedTables)
+      expect(
+        trace.slice(
+          transactionIndex + 1,
+          transactionIndex + 1 + expectedTables.length,
+        ),
+      ).toEqual(expectedTables)
+
+      await fixture.port.measureConfiguration()
+      const readsAfterMeasurement =
+        fixture.transport.getPrePlanAuthorityCommands.length
+      const transactionsAfterMeasurement =
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands.length
+      await expect(writerFence.release(releaseInput)).rejects.toEqual(
+        new WorkspaceSearchMigrationFailure(
+          'INVALID_STATE',
+          'Workspace Search application writer fence operation failed.',
+        ),
+      )
+      expect(
+        fixture.transport.getPrePlanAuthorityCommands,
+      ).toHaveLength(readsAfterMeasurement)
+      expect(
+        fixture.transport
+          .transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(transactionsAfterMeasurement)
+      fixture.port.close()
+    },
+    20_000,
   )
 
   test(

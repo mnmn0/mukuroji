@@ -4,6 +4,7 @@ import {
   TransactionCanceledException,
   TransactionConflictException,
   TransactWriteItemsCommand,
+  type AttributeValue,
   type GetItemCommandOutput,
   type TransactWriteItem,
   type TransactWriteItemsCommandOutput,
@@ -17,20 +18,57 @@ import {
   createWorkspaceSearchWriterFenceClosedSuccessor,
   createWorkspaceSearchWriterFenceInitialOpenRecord,
   createWorkspaceSearchWriterFenceReadMaterial,
+  createWorkspaceSearchWriterFenceReleasedOpenSuccessor,
   createWorkspaceSearchWriterFenceStateIncarnationDigest,
   createWorkspaceSearchWriterFenceTransitionPut,
   encodeWorkspaceSearchWriterFenceRecord,
   parseWorkspaceSearchWriterFenceObservation,
   workspaceSearchWriterFenceClosedRecordMatchesAuthority,
+  workspaceSearchWriterFenceReleasedOpenRecordMatchesRelease,
   WorkspaceSearchWriterFenceError,
   workspaceSearchWriterFenceTableRoles,
   type WorkspaceSearchWriterFenceAuthority,
   type WorkspaceSearchWriterFenceBinding,
+  type WorkspaceSearchWriterFenceClosedRecord,
+  type WorkspaceSearchWriterFenceInitialOpenRecordV1,
   type WorkspaceSearchWriterFenceObservation,
-  type WorkspaceSearchWriterFenceOpenRecord,
   type WorkspaceSearchWriterFenceRecord,
+  type WorkspaceSearchWriterFenceReleaseBinding,
+  type WorkspaceSearchWriterFenceReleasedOpenRecordV2,
   type WorkspaceSearchWriterFenceTableIds,
+  type WorkspaceSearchWriterFenceTerminalOutcome,
 } from '../../../src/infrastructure/runtime/workspace-search-writer-fence'
+import {
+  decodeAttributeMap,
+  encodeUnknownAttributeMap,
+} from './dynamodb-attribute-codec'
+import {
+  createWorkspaceSearchMigrationPlanningAdmittedExecutionBoundaryConditionCheck,
+} from './migration-execution-boundary-aws'
+import {
+  parseWorkspaceSearchMigrationExecutionBoundary,
+  serializeWorkspaceSearchMigrationExecutionBoundary,
+  type WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary,
+} from './migration-execution-boundary'
+import {
+  createWorkspaceSearchMigrationExecutionRunAdmissionConditionCheck,
+} from './migration-execution-run-aws'
+import {
+  parseWorkspaceSearchMigrationExecutionRun,
+  serializeWorkspaceSearchMigrationExecutionRun,
+  type WorkspaceSearchMigrationExecutionRun,
+} from './migration-execution-run'
+import {
+  createWorkspaceSearchMigrationFullVerificationVerifiedRootConditionCheck,
+} from './migration-full-verification-aws'
+import {
+  parseWorkspaceSearchMigrationFullVerificationVerifiedRoot,
+  serializeWorkspaceSearchMigrationFullVerificationVerifiedRoot,
+  type WorkspaceSearchMigrationFullVerificationVerifiedRoot,
+} from './migration-full-verification-persistence'
+import {
+  createWorkspaceSearchMigrationRolledBackRootV2ConditionCheck,
+} from './migration-partial-rollback-start-aws'
 import {
   createMigrationDigest,
   createWorkspaceSearchConfigurationHash,
@@ -45,6 +83,27 @@ import {
   type WorkspaceSearchMigrationPrePlanAuthority,
   type WorkspaceSearchMigrationPrePlanAuthorityAwsTransport,
 } from './migration-pre-plan-authority-aws'
+import {
+  createWorkspaceSearchMigrationRolledBackRootConditionCheck,
+} from './migration-rollback-operation-aws'
+import {
+  parseWorkspaceSearchMigrationRolledBackRoot,
+  serializeWorkspaceSearchMigrationRolledBackRoot,
+  type WorkspaceSearchMigrationRolledBackRoot,
+} from './migration-rollback-persistence'
+import {
+  parseWorkspaceSearchMigrationRolledBackRootV2,
+  serializeWorkspaceSearchMigrationRolledBackRootV2,
+  type WorkspaceSearchMigrationRolledBackRootV2,
+} from './migration-rollback-persistence-v2'
+import {
+  createWorkspaceSearchMigrationSealedPlanningAuthorityV2ConditionCheck,
+} from './migration-sealed-planning-authority-aws'
+import {
+  parseWorkspaceSearchMigrationSealedPlanningAuthorityV2,
+  serializeWorkspaceSearchMigrationSealedPlanningAuthorityV2,
+  type WorkspaceSearchMigrationSealedPlanningAuthorityV2,
+} from './migration-sealed-planning-authority-v2'
 
 /**
  * Fixed transaction positions for an authority-bound writer-fence transition.
@@ -59,10 +118,70 @@ export const workspaceSearchMigrationApplicationWriterFenceAuthorityTransitionIn
   })
 
 /**
+ * Fixed transaction positions for terminal-outcome writer-fence release.
+ */
+export const workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex =
+  Object.freeze({
+    /** Exact revision-two planning-admitted execution boundary. */
+    executionBoundary: 0,
+    /** Exact immutable version-two sealed planning authority. */
+    sealedPlanningAuthority: 1,
+    /** Exact immutable execution admission. */
+    executionRun: 2,
+    /** Conditional exact-row replacement of the immutable terminal root. */
+    terminalRoot: 3,
+    /** Exact closed-row predecessor CAS and released-open successor Put. */
+    writerFence: 4,
+    /** Fixed release transaction item count. */
+    count: 5,
+  })
+
+/**
  * Adapter-owned source of trusted writer-fence transition time.
  */
 export type WorkspaceSearchMigrationApplicationWriterFenceClock =
   () => Date
+
+/**
+ * Exact immutable terminal outcome permitted to release application writers.
+ */
+export type WorkspaceSearchMigrationApplicationWriterFenceTerminalOutcome =
+  | {
+      /** Successful full-verification terminal outcome. */
+      readonly kind: 'verified'
+      /** Exact immutable successful verification root. */
+      readonly root:
+        WorkspaceSearchMigrationFullVerificationVerifiedRoot
+    }
+  | {
+      /** Complete-applied-root rollback terminal outcome. */
+      readonly kind: 'rolled-back-v1'
+      /** Exact immutable version-one fully rolled-back root. */
+      readonly root: WorkspaceSearchMigrationRolledBackRoot
+    }
+  | {
+      /** Committed-prefix rollback terminal outcome. */
+      readonly kind: 'rolled-back-v2'
+      /** Exact immutable version-two fully rolled-back root. */
+      readonly root: WorkspaceSearchMigrationRolledBackRootV2
+    }
+
+/**
+ * Exact immutable execution graph required for one writer-fence release.
+ */
+export type ReleaseWorkspaceSearchMigrationApplicationWriterFenceInput = {
+  /** Exact revision-two planning-admitted execution boundary. */
+  readonly executionBoundary:
+    WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary
+  /** Exact immutable version-two sealed planning authority. */
+  readonly sealedPlanningAuthority:
+    WorkspaceSearchMigrationSealedPlanningAuthorityV2
+  /** Exact immutable revision-one execution admission. */
+  readonly executionRun: WorkspaceSearchMigrationExecutionRun
+  /** Exact verified or fully rolled-back terminal outcome. */
+  readonly terminal:
+    WorkspaceSearchMigrationApplicationWriterFenceTerminalOutcome
+}
 
 /**
  * Durable operator transitions for the global application-writer fence.
@@ -108,6 +227,23 @@ export interface WorkspaceSearchMigrationApplicationWriterFenceAwsPort {
   close(
     currentAuthority: WorkspaceSearchMigrationPrePlanAuthority,
   ): Promise<WorkspaceSearchWriterFenceObservation>
+
+  /**
+   * Releases one exact closed interval after immutable terminal success.
+   *
+   * The release does not trust lease expiry or process failure. It atomically
+   * fixes the planning boundary, sealed authority, execution admission, exact
+   * terminal root, and closed-row predecessor before opening epoch three.
+   *
+   * Recovering an already-identical released row is read-only and proves the
+   * original durable transaction without re-evaluating a live lease.
+   *
+   * @param input - Exact immutable execution graph and terminal root.
+   * @returns Exact strongly reread version-two released-open observation.
+   */
+  release(
+    input: ReleaseWorkspaceSearchMigrationApplicationWriterFenceInput,
+  ): Promise<WorkspaceSearchWriterFenceObservation>
 }
 
 /**
@@ -151,7 +287,10 @@ type PreparedApplicationWriterFenceTransport = {
 /**
  * Supported durable writer-fence transition.
  */
-type ApplicationWriterFenceTransition = 'bootstrap' | 'close'
+type ApplicationWriterFenceTransition =
+  | 'bootstrap'
+  | 'close'
+  | 'release'
 
 /**
  * Stable transition material retained across transaction reconciliation.
@@ -163,6 +302,52 @@ type ApplicationWriterFenceCommit = {
   readonly predecessor: WorkspaceSearchWriterFenceObservation
   /** Exact timestamped successor sent to DynamoDB. */
   readonly successor: WorkspaceSearchWriterFenceRecord
+}
+
+/**
+ * Strict detached release graph retained across every release await.
+ */
+type ApplicationWriterFenceReleaseSnapshot = {
+  /** Exact revision-two planning-admitted execution boundary. */
+  readonly executionBoundary:
+    WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary
+  /** Exact immutable version-two sealed planning authority. */
+  readonly sealedPlanningAuthority:
+    WorkspaceSearchMigrationSealedPlanningAuthorityV2
+  /** Exact immutable revision-one execution admission. */
+  readonly executionRun: WorkspaceSearchMigrationExecutionRun
+  /** Exact detached terminal outcome. */
+  readonly terminal:
+    WorkspaceSearchMigrationApplicationWriterFenceTerminalOutcome
+  /** Canonical terminal publication or completion time. */
+  readonly terminalAt: string
+  /** Compact release identity persisted in the version-two open row. */
+  readonly release: WorkspaceSearchWriterFenceReleaseBinding
+}
+
+/**
+ * Exact terminal-root material retained through release linearization.
+ */
+type ApplicationWriterFenceTerminalRootReleaseMaterial = {
+  /** Strongly consistent read for the transaction's terminal-root key. */
+  readonly command: GetItemCommand
+  /** Complete canonical low-level row expected at that key. */
+  readonly expectedItem: Readonly<Record<string, AttributeValue>>
+  /** Conditional exact-row replacement used at release linearization. */
+  readonly canonicalizingPut: TransactWriteItem
+}
+
+/**
+ * Strict terminal outcome projected into the shared release contract.
+ */
+type DetachedApplicationWriterFenceTerminalOutcome = {
+  /** Exact detached migration terminal root. */
+  readonly terminal:
+    WorkspaceSearchMigrationApplicationWriterFenceTerminalOutcome
+  /** Canonical publication or rollback completion time. */
+  readonly terminalAt: string
+  /** Compact terminal identity persisted in the released-open row. */
+  readonly releaseTerminal: WorkspaceSearchWriterFenceTerminalOutcome
 }
 
 /**
@@ -318,7 +503,8 @@ implements WorkspaceSearchMigrationApplicationWriterFenceAwsPort {
       }
       if (
         predecessor.status !== 'present' ||
-        predecessor.record.mode !== 'open'
+        predecessor.record.mode !== 'open' ||
+        predecessor.record.version !== 1
       ) {
         return failApplicationWriterFenceAws('INVALID_STATE')
       }
@@ -349,6 +535,104 @@ implements WorkspaceSearchMigrationApplicationWriterFenceAwsPort {
   }
 
   /**
+   * Releases one closed interval after an immutable terminal outcome.
+   *
+   * Every caller-owned artifact is synchronously detached before the first
+   * read. A durable version-two open row is recoverable only when it records
+   * the same closed predecessor and complete logical release identity.
+   *
+   * @param input - Exact immutable execution graph and terminal outcome.
+   * @returns Exact durable released-open observation.
+   */
+  async release(
+    input: ReleaseWorkspaceSearchMigrationApplicationWriterFenceInput,
+  ): Promise<WorkspaceSearchWriterFenceObservation> {
+    return runApplicationWriterFenceAwsBoundary(async () => {
+      const snapshot = readApplicationWriterFenceReleaseSnapshot(
+        input,
+        this.binding,
+      )
+      const predecessor = await this.readFence()
+      if (
+        predecessor.status === 'present' &&
+        predecessor.record.mode === 'open' &&
+        predecessor.record.version === 2
+      ) {
+        if (
+          !releasedOpenMatchesSnapshot(
+            predecessor.record,
+            snapshot,
+            this.binding.fence,
+          )
+        ) {
+          return failApplicationWriterFenceAws('INVALID_STATE')
+        }
+        return cloneObservation(predecessor, this.binding.fence)
+      }
+      if (
+        predecessor.status !== 'present' ||
+        predecessor.record.mode !== 'closed'
+      ) {
+        return failApplicationWriterFenceAws('INVALID_STATE')
+      }
+      requireReleasePredecessor(predecessor.record, snapshot)
+      const predecessorChecks =
+        createApplicationWriterFenceReleaseConditionChecks(
+          snapshot,
+          this.binding,
+        )
+      const terminalRootMaterial =
+        createApplicationWriterFenceTerminalRootReleaseMaterial(
+          predecessorChecks[
+            workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+              .terminalRoot
+          ],
+          this.binding,
+        )
+      await this.requireExactTerminalRoot(terminalRootMaterial)
+      const releasePredecessorItems: readonly [
+        TransactWriteItem,
+        TransactWriteItem,
+        TransactWriteItem,
+        TransactWriteItem,
+      ] = [
+        predecessorChecks[
+          workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+            .executionBoundary
+        ],
+        predecessorChecks[
+          workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+            .sealedPlanningAuthority
+        ],
+        predecessorChecks[
+          workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+            .executionRun
+        ],
+        terminalRootMaterial.canonicalizingPut,
+      ]
+      await this.transport.prepare()
+      const commitAt = readApplicationWriterFenceClock(this.clock)
+      if (commitAt.getTime() < Date.parse(snapshot.terminalAt)) {
+        return failApplicationWriterFenceAws('INVALID_STATE')
+      }
+      const successor =
+        createWorkspaceSearchWriterFenceReleasedOpenSuccessor(
+          predecessor.record,
+          snapshot.release,
+          commitAt,
+        )
+      return this.commitAndReconcile(
+        {
+          operation: 'release',
+          predecessor,
+          successor,
+        },
+        releasePredecessorItems,
+      )
+    })
+  }
+
+  /**
    * Commits one exact transition and always strongly rereads its durable row.
    *
    * Stable managed transport failures are not reconciled through a potentially
@@ -356,26 +640,31 @@ implements WorkspaceSearchMigrationApplicationWriterFenceAwsPort {
    * incarnation-bound key and succeeds only for the exact logical successor.
    *
    * @param commit - Exact predecessor, successor, and logical operation.
-   * @param authorityChecks - Three pre-plan authority checks.
+   * @param predecessorChecks - Exact authority or immutable graph checks.
    * @returns Exact durable successor observation.
    */
   private async commitAndReconcile(
     commit: ApplicationWriterFenceCommit,
-    authorityChecks: readonly [
-      TransactWriteItem,
-      TransactWriteItem,
-      TransactWriteItem,
-    ],
+    predecessorChecks: readonly TransactWriteItem[],
   ): Promise<WorkspaceSearchWriterFenceObservation> {
     const transitionPut =
       createWorkspaceSearchWriterFenceTransitionPut(
         commit.predecessor,
         commit.successor,
       )
+    const transactItems = [...predecessorChecks, transitionPut]
+    const expectedItemCount = commit.operation === 'release'
+      ? workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+        .count
+      : workspaceSearchMigrationApplicationWriterFenceAuthorityTransitionIndex
+        .count
+    if (transactItems.length !== expectedItemCount) {
+      return failApplicationWriterFenceAws('INVALID_STATE')
+    }
     const command = new TransactWriteItemsCommand({
       ClientRequestToken:
         createApplicationWriterFenceTransactionToken(commit),
-      TransactItems: [...authorityChecks, transitionPut],
+      TransactItems: transactItems,
     })
     let transactionError: unknown
     try {
@@ -436,6 +725,7 @@ implements WorkspaceSearchMigrationApplicationWriterFenceAwsPort {
           ? 'AMBIGUOUS_OPERATION_UNRESOLVED'
           : classifyApplicationWriterFenceTransactionError(
               transactionError,
+              commit.operation,
             ),
       )
     }
@@ -459,6 +749,30 @@ implements WorkspaceSearchMigrationApplicationWriterFenceAwsPort {
       output.Item,
       this.binding.fence,
     )
+  }
+
+  /**
+   * Strongly reads and validates the complete terminal-root attribute set.
+   *
+   * The preflight rejects an already malformed row. The release transaction
+   * then conditionally replaces that row with the exact canonical item, so an
+   * unknown attribute introduced after this read is removed atomically when
+   * the closed-row transition linearizes.
+   *
+   * @param material - Exact read and canonical replacement material.
+   */
+  private async requireExactTerminalRoot(
+    material: ApplicationWriterFenceTerminalRootReleaseMaterial,
+  ): Promise<void> {
+    const output = await this.transport.get(material.command)
+    if (
+      !applicationWriterFenceAttributeMapEquals(
+        output.Item,
+        material.expectedItem,
+      )
+    ) {
+      return failApplicationWriterFenceAws('INVALID_STATE')
+    }
   }
 }
 
@@ -667,6 +981,476 @@ function createWriterFenceAuthority(
 }
 
 /**
+ * Detaches and cross-validates one complete terminal release graph.
+ *
+ * @param input - Candidate execution graph and terminal root.
+ * @param binding - Exact measured adapter binding.
+ * @returns Strict detached release snapshot.
+ */
+function readApplicationWriterFenceReleaseSnapshot(
+  input: ReleaseWorkspaceSearchMigrationApplicationWriterFenceInput,
+  binding: ApplicationWriterFenceAdapterBinding,
+): ApplicationWriterFenceReleaseSnapshot {
+  let executionBoundary:
+    WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary
+  let sealedPlanningAuthority:
+    WorkspaceSearchMigrationSealedPlanningAuthorityV2
+  let executionRun: WorkspaceSearchMigrationExecutionRun
+  let detachedTerminal: DetachedApplicationWriterFenceTerminalOutcome
+  try {
+    const snapshot = structuredClone(input)
+    const parsedBoundary =
+      parseWorkspaceSearchMigrationExecutionBoundary(
+        serializeWorkspaceSearchMigrationExecutionBoundary(
+          snapshot.executionBoundary,
+        ),
+      )
+    if (parsedBoundary.phase !== 'planning-admitted') {
+      return failApplicationWriterFenceAws('INVALID_ARGUMENT')
+    }
+    executionBoundary = parsedBoundary
+    sealedPlanningAuthority =
+      parseWorkspaceSearchMigrationSealedPlanningAuthorityV2(
+        serializeWorkspaceSearchMigrationSealedPlanningAuthorityV2(
+          snapshot.sealedPlanningAuthority,
+        ),
+      )
+    executionRun = parseWorkspaceSearchMigrationExecutionRun(
+      serializeWorkspaceSearchMigrationExecutionRun(
+        snapshot.executionRun,
+      ),
+    )
+    detachedTerminal =
+      readApplicationWriterFenceTerminalOutcome(snapshot.terminal)
+  } catch {
+    return failApplicationWriterFenceAws('INVALID_ARGUMENT')
+  }
+  if (
+    executionBoundary.runId !== executionRun.runId ||
+    executionBoundary.configurationHash !== binding.configurationHash ||
+    executionBoundary.configurationHash !==
+      sealedPlanningAuthority.configurationHash ||
+    executionBoundary.configurationHash !==
+      executionRun.configurationHash ||
+    executionRun.binding.executionBoundaryDigest !==
+      executionBoundary.boundaryDigest ||
+    executionRun.binding.closedWriterFenceRecordDigest !==
+      executionBoundary.closedWriterFenceRecordDigest ||
+    executionRun.binding.sealedPlanningAuthorityDigest !==
+      sealedPlanningAuthority.authorityDigest ||
+    executionRun.binding.planDigest !==
+      sealedPlanningAuthority.planDigest ||
+    executionRun.binding.planOperationCount !==
+      sealedPlanningAuthority.planOperationCount ||
+    executionRun.runId !== sealedPlanningAuthority.runId
+  ) {
+    return failApplicationWriterFenceAws('INVALID_ARGUMENT')
+  }
+  requireReleaseTableIds(
+    binding.fence.tableIds,
+    executionBoundary.tableIds,
+  )
+  requireReleaseTableIds(
+    binding.fence.tableIds,
+    sealedPlanningAuthority.tableIds,
+  )
+  requireReleaseTableIds(
+    binding.fence.tableIds,
+    executionRun.binding.tableIds,
+  )
+  requireApplicationWriterFenceTerminalBinding(
+    detachedTerminal.terminal,
+    binding,
+    sealedPlanningAuthority,
+    executionRun,
+  )
+  return {
+    executionBoundary,
+    sealedPlanningAuthority,
+    executionRun,
+    terminal: detachedTerminal.terminal,
+    terminalAt: detachedTerminal.terminalAt,
+    release: {
+      releaseVersion: 1,
+      configurationHash: binding.configurationHash,
+      runId: executionRun.runId,
+      executionBoundaryDigest: executionBoundary.boundaryDigest,
+      sealedPlanningAuthorityDigest:
+        sealedPlanningAuthority.authorityDigest,
+      executionRunDigest: executionRun.executionRunDigest,
+      terminal: detachedTerminal.releaseTerminal,
+    },
+  }
+}
+
+/**
+ * Detaches one strict verified or rolled-back terminal outcome.
+ *
+ * @param terminal - Candidate caller-owned terminal outcome.
+ * @returns Strict terminal root, time, and compact release identity.
+ */
+function readApplicationWriterFenceTerminalOutcome(
+  terminal: WorkspaceSearchMigrationApplicationWriterFenceTerminalOutcome,
+): DetachedApplicationWriterFenceTerminalOutcome {
+  if (terminal.kind === 'verified') {
+    const root =
+      parseWorkspaceSearchMigrationFullVerificationVerifiedRoot(
+        serializeWorkspaceSearchMigrationFullVerificationVerifiedRoot(
+          terminal.root,
+        ),
+      )
+    return {
+      terminal: { kind: 'verified', root },
+      terminalAt: root.verifiedAt,
+      releaseTerminal: {
+        kind: 'verified',
+        persistenceVersion: 1,
+        rootDigest: root.verifiedRootDigest,
+      },
+    }
+  }
+  if (terminal.kind === 'rolled-back-v1') {
+    const root = parseWorkspaceSearchMigrationRolledBackRoot(
+      serializeWorkspaceSearchMigrationRolledBackRoot(terminal.root),
+    )
+    return {
+      terminal: { kind: 'rolled-back-v1', root },
+      terminalAt: root.finishedAt,
+      releaseTerminal: {
+        kind: 'rolled-back',
+        persistenceVersion: 1,
+        rootDigest: root.rootDigest,
+      },
+    }
+  }
+  if (terminal.kind === 'rolled-back-v2') {
+    const root = parseWorkspaceSearchMigrationRolledBackRootV2(
+      serializeWorkspaceSearchMigrationRolledBackRootV2(terminal.root),
+    )
+    return {
+      terminal: { kind: 'rolled-back-v2', root },
+      terminalAt: root.finishedAt,
+      releaseTerminal: {
+        kind: 'rolled-back',
+        persistenceVersion: 2,
+        rootDigest: root.rootDigest,
+      },
+    }
+  }
+  return failApplicationWriterFenceAws('INVALID_ARGUMENT')
+}
+
+/**
+ * Requires one terminal root to match the exact admitted execution graph.
+ *
+ * @param terminal - Strict detached terminal root.
+ * @param binding - Exact measured adapter binding.
+ * @param sealedPlanningAuthority - Exact immutable sealed authority.
+ * @param executionRun - Exact immutable execution admission.
+ */
+function requireApplicationWriterFenceTerminalBinding(
+  terminal: WorkspaceSearchMigrationApplicationWriterFenceTerminalOutcome,
+  binding: ApplicationWriterFenceAdapterBinding,
+  sealedPlanningAuthority:
+    WorkspaceSearchMigrationSealedPlanningAuthorityV2,
+  executionRun: WorkspaceSearchMigrationExecutionRun,
+): void {
+  if (terminal.kind === 'verified') {
+    const root = terminal.root
+    if (
+      root.runId !== executionRun.runId ||
+      root.configurationHash !== binding.configurationHash ||
+      root.sealedPlanningAuthorityDigest !==
+        sealedPlanningAuthority.authorityDigest ||
+      root.planDigest !== sealedPlanningAuthority.planDigest ||
+      root.planArtifactBinding.planDigest !==
+        sealedPlanningAuthority.planDigest ||
+      root.planArtifactBinding.sealedPlanningAuthorityDigest !==
+        sealedPlanningAuthority.authorityDigest
+    ) {
+      return failApplicationWriterFenceAws('INVALID_ARGUMENT')
+    }
+    requireReleaseTableIds(binding.fence.tableIds, root.tableIds)
+    return
+  }
+  const root = terminal.root
+  if (
+    root.runId !== executionRun.runId ||
+    root.configurationHash !== binding.configurationHash ||
+    root.sealedPlanningAuthorityDigest !==
+      sealedPlanningAuthority.authorityDigest ||
+    root.executionRunDigest !== executionRun.executionRunDigest
+  ) {
+    return failApplicationWriterFenceAws('INVALID_ARGUMENT')
+  }
+  requireReleaseTableIds(binding.fence.tableIds, root.tableIds)
+}
+
+/**
+ * Requires exact role-by-role equality for all six physical TableIds.
+ *
+ * @param expected - Independently measured adapter TableIds.
+ * @param candidate - Candidate immutable artifact TableIds.
+ */
+function requireReleaseTableIds(
+  expected: WorkspaceSearchWriterFenceTableIds,
+  candidate: WorkspaceSearchWriterFenceTableIds,
+): void {
+  for (const role of workspaceSearchWriterFenceTableRoles) {
+    if (candidate[role] !== expected[role]) {
+      return failApplicationWriterFenceAws('CONFIGURATION_DRIFT')
+    }
+  }
+}
+
+/**
+ * Requires the current closed row to be the execution graph predecessor.
+ *
+ * @param predecessor - Exact strongly read closed writer-fence row.
+ * @param snapshot - Strict detached release graph.
+ */
+function requireReleasePredecessor(
+  predecessor: WorkspaceSearchWriterFenceClosedRecord,
+  snapshot: ApplicationWriterFenceReleaseSnapshot,
+): void {
+  if (
+    predecessor.recordDigest !==
+      snapshot.executionBoundary.closedWriterFenceRecordDigest ||
+    predecessor.recordDigest !==
+      snapshot.executionRun.binding.closedWriterFenceRecordDigest ||
+    predecessor.closedAt !== snapshot.executionBoundary.closedAt
+  ) {
+    return failApplicationWriterFenceAws('INVALID_STATE')
+  }
+}
+
+/**
+ * Determines whether a durable released row proves one restart input.
+ *
+ * @param record - Exact durable version-two released-open row.
+ * @param snapshot - Strict detached release graph.
+ * @param binding - Independently measured writer-fence binding.
+ * @returns Whether the durable row is the same logical release.
+ */
+function releasedOpenMatchesSnapshot(
+  record: WorkspaceSearchWriterFenceReleasedOpenRecordV2,
+  snapshot: ApplicationWriterFenceReleaseSnapshot,
+  binding: WorkspaceSearchWriterFenceBinding,
+): boolean {
+  return record.previousClosedRecordDigest ===
+      snapshot.executionRun.binding.closedWriterFenceRecordDigest &&
+    record.previousClosedRecordDigest ===
+      snapshot.executionBoundary.closedWriterFenceRecordDigest &&
+    workspaceSearchWriterFenceReleasedOpenRecordMatchesRelease(
+      record,
+      binding,
+      snapshot.release,
+    )
+}
+
+/**
+ * Creates four exact immutable predecessor checks for one release.
+ *
+ * @param snapshot - Strict detached release graph.
+ * @param binding - Exact measured adapter binding.
+ * @returns Fixed-order boundary, authority, admission, and terminal checks.
+ */
+function createApplicationWriterFenceReleaseConditionChecks(
+  snapshot: ApplicationWriterFenceReleaseSnapshot,
+  binding: ApplicationWriterFenceAdapterBinding,
+): readonly [
+  TransactWriteItem,
+  TransactWriteItem,
+  TransactWriteItem,
+  TransactWriteItem,
+] {
+  const common = {
+    stateTable: binding.stateTable,
+    configurationHash: binding.configurationHash,
+  }
+  const executionBoundary =
+    createWorkspaceSearchMigrationPlanningAdmittedExecutionBoundaryConditionCheck(
+      {
+        ...common,
+        boundary: snapshot.executionBoundary,
+      },
+    )
+  const sealedPlanningAuthority =
+    createWorkspaceSearchMigrationSealedPlanningAuthorityV2ConditionCheck({
+      ...common,
+      authority: snapshot.sealedPlanningAuthority,
+    })
+  const executionRun =
+    createWorkspaceSearchMigrationExecutionRunAdmissionConditionCheck({
+      ...common,
+      executionRun: snapshot.executionRun,
+    })
+  let terminalRoot: TransactWriteItem
+  if (snapshot.terminal.kind === 'verified') {
+    terminalRoot =
+      createWorkspaceSearchMigrationFullVerificationVerifiedRootConditionCheck(
+        {
+          ...common,
+          executionRun: snapshot.executionRun,
+          root: snapshot.terminal.root,
+        },
+      )
+  } else if (snapshot.terminal.kind === 'rolled-back-v1') {
+    terminalRoot =
+      createWorkspaceSearchMigrationRolledBackRootConditionCheck({
+        ...common,
+        executionRun: snapshot.executionRun,
+        root: snapshot.terminal.root,
+      })
+  } else {
+    terminalRoot =
+      createWorkspaceSearchMigrationRolledBackRootV2ConditionCheck({
+        ...common,
+        executionRun: snapshot.executionRun,
+        root: snapshot.terminal.root,
+      })
+  }
+  return [
+    executionBoundary,
+    sealedPlanningAuthority,
+    executionRun,
+    terminalRoot,
+  ]
+}
+
+/**
+ * Reconstructs the complete canonical row named by a generated condition.
+ *
+ * The three terminal-root adapters emit one indexed equality clause for every
+ * non-key attribute. Reconstructing that row lets the release adapter reject
+ * missing, extra, or malformed attributes with a full strong read. The
+ * returned conditional Put also replaces the row with those exact attributes
+ * inside the fixed release transaction, closing additions that race after the
+ * preflight.
+ *
+ * @param terminalRootCheck - Exact generated terminal-root condition.
+ * @param binding - Exact measured adapter binding.
+ * @returns Strong read, expected row, and conditional canonical replacement.
+ */
+function createApplicationWriterFenceTerminalRootReleaseMaterial(
+  terminalRootCheck: TransactWriteItem,
+  binding: ApplicationWriterFenceAdapterBinding,
+): ApplicationWriterFenceTerminalRootReleaseMaterial {
+  const condition = terminalRootCheck.ConditionCheck
+  if (
+    condition === undefined ||
+    condition.TableName !== binding.stateTable.tableName ||
+    condition.Key === undefined ||
+    condition.ExpressionAttributeNames === undefined ||
+    condition.ExpressionAttributeValues === undefined ||
+    typeof condition.ConditionExpression !== 'string' ||
+    condition.ReturnValuesOnConditionCheckFailure !== 'NONE'
+  ) {
+    return failApplicationWriterFenceAws('INVALID_STATE')
+  }
+  const key = cloneApplicationWriterFenceAttributeMap(condition.Key)
+  const keyNames = Object.keys(key).sort()
+  if (
+    keyNames.length !== 2 ||
+    keyNames[0] !== 'migrationId' ||
+    keyNames[1] !== 'recordKey'
+  ) {
+    return failApplicationWriterFenceAws('INVALID_STATE')
+  }
+  const names = condition.ExpressionAttributeNames
+  const values = condition.ExpressionAttributeValues
+  const fieldCount = Object.keys(names).length
+  if (
+    fieldCount === 0 ||
+    Object.keys(values).length !== fieldCount
+  ) {
+    return failApplicationWriterFenceAws('INVALID_STATE')
+  }
+  const expectedItem: Record<string, AttributeValue> = { ...key }
+  const clauses: string[] = []
+  for (let index = 0; index < fieldCount; index += 1) {
+    const nameToken = `#field${index}`
+    const valueToken = `:value${index}`
+    const attributeName = names[nameToken]
+    const attributeValue = values[valueToken]
+    if (
+      typeof attributeName !== 'string' ||
+      attributeName.length === 0 ||
+      attributeValue === undefined ||
+      Object.hasOwn(expectedItem, attributeName)
+    ) {
+      return failApplicationWriterFenceAws('INVALID_STATE')
+    }
+    expectedItem[attributeName] = attributeValue
+    clauses.push(`${nameToken} = ${valueToken}`)
+  }
+  if (
+    condition.ConditionExpression !== clauses.join(' AND ')
+  ) {
+    return failApplicationWriterFenceAws('INVALID_STATE')
+  }
+  const detachedExpectedItem =
+    cloneApplicationWriterFenceAttributeMap(expectedItem)
+  const detachedValues =
+    cloneApplicationWriterFenceAttributeMap(values)
+  return {
+    command: new GetItemCommand({
+      TableName: binding.stateTable.tableName,
+      ConsistentRead: true,
+      Key: key,
+    }),
+    expectedItem: detachedExpectedItem,
+    canonicalizingPut: {
+      Put: {
+        TableName: binding.stateTable.tableName,
+        Item: cloneApplicationWriterFenceAttributeMap(
+          detachedExpectedItem,
+        ),
+        ConditionExpression: condition.ConditionExpression,
+        ExpressionAttributeNames: { ...names },
+        ExpressionAttributeValues: detachedValues,
+        ReturnValuesOnConditionCheckFailure: 'NONE',
+      },
+    },
+  }
+}
+
+/**
+ * Losslessly detaches one low-level DynamoDB attribute map.
+ *
+ * @param value - Candidate item or key.
+ * @returns Exact detached low-level attribute map.
+ */
+function cloneApplicationWriterFenceAttributeMap(
+  value: unknown,
+): Readonly<Record<string, AttributeValue>> {
+  try {
+    return decodeAttributeMap(encodeUnknownAttributeMap(value))
+  } catch {
+    return failApplicationWriterFenceAws('INVALID_STATE')
+  }
+}
+
+/**
+ * Compares complete low-level rows including their exact attribute sets.
+ *
+ * @param candidate - Untrusted full row returned by DynamoDB.
+ * @param expected - Complete canonical row reconstructed from the condition.
+ * @returns Whether both lossless attribute maps are byte-equivalent.
+ */
+function applicationWriterFenceAttributeMapEquals(
+  candidate: unknown,
+  expected: Readonly<Record<string, AttributeValue>>,
+): boolean {
+  try {
+    return JSON.stringify(encodeUnknownAttributeMap(candidate)) ===
+      JSON.stringify(encodeUnknownAttributeMap(expected))
+  } catch {
+    return false
+  }
+}
+
+/**
  * Returns a detached observation through the strict shared codec.
  *
  * @param observation - Candidate strict observation.
@@ -693,8 +1477,9 @@ function cloneObservation(
  */
 function isInitialOpenRecord(
   record: WorkspaceSearchWriterFenceRecord,
-): record is WorkspaceSearchWriterFenceOpenRecord {
+): record is WorkspaceSearchWriterFenceInitialOpenRecordV1 {
   return record.mode === 'open' &&
+    record.version === 1 &&
     record.writerEpoch === 1 &&
     record.controlRevision === 1 &&
     record.previousClosedRecordDigest === null &&
@@ -728,6 +1513,7 @@ function durableMatchesCommit(
     commit.operation === 'close' &&
     commit.predecessor.status === 'present' &&
     commit.predecessor.record.mode === 'open' &&
+    commit.predecessor.record.version === 1 &&
     record.mode === 'closed' &&
     commit.successor.mode === 'closed'
   ) {
@@ -745,6 +1531,25 @@ function durableMatchesCommit(
       commit.successor.authority,
       new Date(record.closedAt),
     ).recordDigest === record.recordDigest
+  }
+  if (
+    commit.operation === 'release' &&
+    commit.predecessor.status === 'present' &&
+    commit.predecessor.record.mode === 'closed' &&
+    record.mode === 'open' &&
+    record.version === 2 &&
+    commit.successor.mode === 'open' &&
+    commit.successor.version === 2
+  ) {
+    return record.previousClosedRecordDigest ===
+        commit.predecessor.record.recordDigest &&
+      record.previousClosedRecordDigest ===
+        commit.successor.previousClosedRecordDigest &&
+      workspaceSearchWriterFenceReleasedOpenRecordMatchesRelease(
+        record,
+        commit.successor.binding,
+        commit.successor.release,
+      )
   }
   return false
 }
@@ -820,6 +1625,7 @@ function readApplicationWriterFenceClock(
  */
 function classifyApplicationWriterFenceTransactionError(
   error: unknown,
+  operation: ApplicationWriterFenceTransition,
 ): WorkspaceSearchMigrationFailureCode {
   try {
     if (isResourceNotFoundError(error)) return 'CONFIGURATION_DRIFT'
@@ -830,6 +1636,28 @@ function classifyApplicationWriterFenceTransactionError(
       return 'TRANSIENT_INFRASTRUCTURE_FAILURE'
     }
     if (error instanceof TransactionCanceledException) {
+      if (operation === 'release') {
+        const index =
+          workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+        if (
+          [
+            index.executionBoundary,
+            index.sealedPlanningAuthority,
+            index.executionRun,
+            index.terminalRoot,
+            index.writerFence,
+          ].some((position) =>
+            readCancellationReasonCode(error, position) ===
+              'ConditionalCheckFailed'
+          )
+        ) {
+          return 'INVALID_STATE'
+        }
+        if (transactionCancellationWasTransient(error)) {
+          return 'TRANSIENT_INFRASTRUCTURE_FAILURE'
+        }
+        return 'INVALID_STATE'
+      }
       const index =
         workspaceSearchMigrationApplicationWriterFenceAuthorityTransitionIndex
       if (
