@@ -538,10 +538,7 @@ class ExecutionAuthorityController {
    */
   async resolve(): Promise<WorkspaceSearchMigrationPrePlanAuthority> {
     const current = this.authority
-    if (
-      current !== undefined &&
-      hasAuthorityCommitHeadroom(current, this.clock)
-    ) {
+    if (current !== undefined) {
       let refreshed: WorkspaceSearchMigrationPrePlanAuthority
       try {
         refreshed = await runGuardedOperation(

@@ -336,6 +336,9 @@ class ExecutionSupervisorHarness {
   private rejectedAuthorityReceipt:
     WorkspaceSearchMaintenanceEvidenceReceipt | undefined
 
+  /** Whether post-adoption reads expose the heartbeat-extended lease. */
+  private exposeHeartbeatExtendedAuthority = false
+
   /** Optional operator signal aborted during authority adoption. */
   private abortDuringAdoption: AbortController | undefined
 
@@ -481,6 +484,24 @@ class ExecutionSupervisorHarness {
   }
 
   /**
+   * Makes later authority reads expose a heartbeat-extended lease.
+   */
+  exposeHeartbeatExtensionAfterAdoption(): void {
+    this.exposeHeartbeatExtendedAuthority = true
+  }
+
+  /**
+   * Reads a clock that advances after the first authority adoption.
+   *
+   * @returns Fixed pre-adoption time or a later post-heartbeat time.
+   */
+  readHeartbeatAwareClock(): Date {
+    return this.events.some((event) => event.startsWith('adopt:'))
+      ? new Date('2026-07-29T01:20:25.000Z')
+      : new Date(fixedNow.getTime())
+  }
+
+  /**
    * Restores the admitted revision-one apply state.
    */
   resetToInitialApplyingState(): void {
@@ -622,6 +643,13 @@ class ExecutionSupervisorHarness {
           this.events.push(
             `adopt:${input.expectedRevision}:${input.authority.lease.fenceToken}`,
           )
+          if (
+            this.exposeHeartbeatExtendedAuthority &&
+            this.heartbeatCount === 1
+          ) {
+            this.scheduler.runNext()
+            await Promise.resolve()
+          }
           if (
             input.authority.lease.fenceToken !==
               this.adoptedFenceToken
@@ -806,10 +834,20 @@ class ExecutionSupervisorHarness {
             'LEASE_LOST',
           )
         }
-        return createLease(
+        const lease = createLease(
           this.acquiredFenceToken,
           this.currentAuthority.lease.ownerId,
         )
+        return (
+            this.exposeHeartbeatExtendedAuthority &&
+            this.events.some((event) => event.startsWith('adopt:'))
+          )
+          ? {
+              ...lease,
+              heartbeatAt: '2026-07-29T01:20:20.000Z',
+              expiresAt: '2026-07-29T01:21:20.000Z',
+            }
+          : lease
       },
       readMaintenanceEvidencePointer: async () => {
         this.events.push('authority:read-pointer')
@@ -824,7 +862,21 @@ class ExecutionSupervisorHarness {
             'INVALID_MAINTENANCE_EVIDENCE',
           )
         }
-        return structuredClone(this.currentAuthority)
+        const authority = structuredClone(this.currentAuthority)
+        if (
+          this.exposeHeartbeatExtendedAuthority &&
+          this.events.some((event) => event.startsWith('adopt:'))
+        ) {
+          return {
+            ...authority,
+            lease: {
+              ...authority.lease,
+              heartbeatAt: '2026-07-29T01:20:20.000Z',
+              expiresAt: '2026-07-29T01:21:20.000Z',
+            },
+          }
+        }
+        return authority
       },
       readMaintenanceEvidenceReceipt: async () => {
         this.events.push('authority:read-receipt')
@@ -1432,6 +1484,55 @@ describe('Workspace Search migration execution supervisor', () => {
         fenceToken: 8,
       },
     })
+  })
+
+  test('refreshes a heartbeat-extended lease before deciding to renew evidence', async () => {
+    const harness =
+      new ExecutionSupervisorHarness('applying')
+    harness.exposeHeartbeatExtensionAfterAdoption()
+
+    const status =
+      await superviseWorkspaceSearchMigrationExecution({
+        session: harness.session,
+        maintenanceEvidenceProvider:
+          harness.maintenanceEvidenceProvider,
+        runId,
+        ownerId,
+        expectedConfigurationHash:
+          harness.fixture.configurationHash,
+        mode: 'apply',
+        heartbeatScheduler: harness.scheduler,
+        clock: () => harness.readHeartbeatAwareClock(),
+      })
+
+    expect(status.phase).toBe('applied')
+    const firstAdoptionIndex =
+      harness.events.indexOf('adopt:2:7')
+    expect(
+      harness.events
+        .slice(firstAdoptionIndex)
+        .filter((event) =>
+          event.startsWith('adopt:') ||
+          event === 'lease:heartbeat:2' ||
+          event === 'checkpoint:2:project-directory' ||
+          event === 'authority:read' ||
+          event === 'evidence:collect' ||
+          event === 'authority:renew'
+        )
+        .slice(0, 5),
+    ).toEqual([
+      'adopt:2:7',
+      'lease:heartbeat:2',
+      'checkpoint:2:project-directory',
+      'authority:read',
+      'adopt:3:7',
+    ])
+    expect(
+      harness.events.filter((event) => event === 'authority:read')
+        .length,
+    ).toBeGreaterThan(1)
+    expect(harness.events).not.toContain('evidence:collect')
+    expect(harness.events).not.toContain('authority:renew')
   })
 
   test('renews after an expired pointer receipt fails closed, then continues', async () => {

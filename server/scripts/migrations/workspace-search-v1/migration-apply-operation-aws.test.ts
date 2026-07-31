@@ -29,6 +29,7 @@ import {
   createWorkspaceSearchConfigurationHash,
   createWorkspaceSearchOperationId,
   MigrationDigestAccumulator,
+  serializeCanonicalJson,
   type MigrationItemSnapshot,
   type MigrationSourceCheckpoint,
   type MigrationKeyAttribute,
@@ -94,6 +95,8 @@ import type {
 } from './migration-apply-seal-aws'
 import {
   createAwsWorkspaceSearchMigrationApplySealGateway,
+  WORKSPACE_SEARCH_MIGRATION_COMPLETE_APPLY_SEAL_ROLE,
+  WORKSPACE_SEARCH_MIGRATION_COMPLETE_APPLY_SEAL_V2_ROLE,
 } from './migration-apply-seal-aws'
 import {
   createWorkspaceSearchMigrationRollbackConflictRecordKeys,
@@ -1678,6 +1681,122 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
       expect(applied).toMatchObject({
         revision: terminal.revision + 1,
         status: 'applied',
+      })
+      expect(harness.uploadedApplySeals).toHaveLength(1)
+      const uploadedSeal = harness.uploadedApplySeals[0]
+      if (uploadedSeal === undefined) {
+        throw new Error('Expected one uploaded V2 apply seal.')
+      }
+      expect(uploadedSeal).toMatchObject({
+        sealVersion: 2,
+        maintenanceEvidenceRenewalCount: 1,
+      })
+      const mislabeledV1 = structuredClone(uploadedSeal)
+      Reflect.set(mislabeledV1, 'sealVersion', 1)
+      const mislabeledV1Fields = structuredClone(mislabeledV1)
+      Reflect.deleteProperty(mislabeledV1Fields, 'sealDigest')
+      Reflect.set(
+        mislabeledV1,
+        'sealDigest',
+        createMigrationDigest(mislabeledV1Fields),
+      )
+      expect(() =>
+        parseWorkspaceSearchMigrationCompleteApplySeal(
+          new TextEncoder().encode(
+            serializeCanonicalJson(mislabeledV1),
+          ),
+        )
+      ).toThrow('INVALID_MIGRATION_APPLY_SEAL')
+      const missingRenewalCount = structuredClone(uploadedSeal)
+      Reflect.deleteProperty(
+        missingRenewalCount,
+        'maintenanceEvidenceRenewalCount',
+      )
+      const missingRenewalCountFields =
+        structuredClone(missingRenewalCount)
+      Reflect.deleteProperty(
+        missingRenewalCountFields,
+        'sealDigest',
+      )
+      Reflect.set(
+        missingRenewalCount,
+        'sealDigest',
+        createMigrationDigest(missingRenewalCountFields),
+      )
+      expect(() =>
+        parseWorkspaceSearchMigrationCompleteApplySeal(
+          new TextEncoder().encode(
+            serializeCanonicalJson(missingRenewalCount),
+          ),
+        )
+      ).toThrow('INVALID_MIGRATION_APPLY_SEAL')
+      let storedBytes: Uint8Array | undefined
+      let writeRole: string | undefined
+      let writeMetadata:
+        Readonly<Record<string, string>> | undefined
+      let readRole: string | undefined
+      const immutableArtifactPort:
+        WorkspaceSearchMigrationImmutableArtifactAwsPort = {
+          writeImmutableArtifact: async (input) => {
+            storedBytes = Uint8Array.from(input.bytes)
+            writeRole = input.role
+            writeMetadata = structuredClone(input.metadata)
+            const contentDigest = createHash('sha256')
+              .update(input.bytes)
+              .digest('hex')
+            return {
+              objectKey:
+                `${input.objectKeyPrefix}/${input.role}/${contentDigest}.artifact`,
+              versionId: 'v2-gateway-version',
+              contentDigest,
+              byteLength: input.bytes.byteLength,
+              retainUntil: input.retainUntil,
+            }
+          },
+          readImmutableArtifact: async (input) => {
+            readRole = input.role
+            if (storedBytes === undefined) {
+              throw new Error('Expected stored V2 apply-seal bytes.')
+            }
+            return Uint8Array.from(storedBytes)
+          },
+        }
+      const gateway =
+        createAwsWorkspaceSearchMigrationApplySealGateway({
+          configuration: fixture.configuration,
+          configurationHash: fixture.configurationHash,
+          runId,
+          immutableArtifactPort,
+          clock: () => new Date('2026-07-29T01:19:50.000Z'),
+        })
+      const reference =
+        await gateway.writeCompleteApplySeal(uploadedSeal)
+      expect(reference.objectKey).toContain(
+        `/${WORKSPACE_SEARCH_MIGRATION_COMPLETE_APPLY_SEAL_V2_ROLE}/`,
+      )
+      expect(writeRole).toBe(
+        WORKSPACE_SEARCH_MIGRATION_COMPLETE_APPLY_SEAL_V2_ROLE,
+      )
+      expect(writeMetadata).toMatchObject({
+        'mukuroji-apply-seal-kind':
+          'workspace-search-complete-apply-seal-v2',
+      })
+      expect(
+        await gateway.readCompleteApplySeal(reference),
+      ).toEqual(uploadedSeal)
+      expect(readRole).toBe(
+        WORKSPACE_SEARCH_MIGRATION_COMPLETE_APPLY_SEAL_V2_ROLE,
+      )
+      await expect(
+        gateway.readCompleteApplySeal({
+          ...reference,
+          objectKey: reference.objectKey.replace(
+            `/${WORKSPACE_SEARCH_MIGRATION_COMPLETE_APPLY_SEAL_V2_ROLE}/`,
+            `/${WORKSPACE_SEARCH_MIGRATION_COMPLETE_APPLY_SEAL_ROLE}/`,
+          ),
+        }),
+      ).rejects.toMatchObject({
+        code: 'INVALID_MIGRATION_APPLY_SEAL_STORAGE',
       })
       const claims =
         harness.authorityClaims.slice(authorityClaimStart)
@@ -3440,6 +3559,7 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
       if (uploadedSeal === undefined) {
         throw new Error('Expected one uploaded production seal.')
       }
+      expect(uploadedSeal.sealVersion).toBe(1)
       let storedBytes: Uint8Array | undefined
       let returnSharedBytes = false
       const immutableArtifactPort:
@@ -3482,9 +3602,23 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
         })
       const realReference =
         await realGateway.writeCompleteApplySeal(uploadedSeal)
+      expect(realReference.objectKey).toContain(
+        `/${WORKSPACE_SEARCH_MIGRATION_COMPLETE_APPLY_SEAL_ROLE}/`,
+      )
       expect(
         await realGateway.readCompleteApplySeal(realReference),
       ).toEqual(uploadedSeal)
+      await expect(
+        realGateway.readCompleteApplySeal({
+          ...realReference,
+          objectKey: realReference.objectKey.replace(
+            `/${WORKSPACE_SEARCH_MIGRATION_COMPLETE_APPLY_SEAL_ROLE}/`,
+            `/${WORKSPACE_SEARCH_MIGRATION_COMPLETE_APPLY_SEAL_V2_ROLE}/`,
+          ),
+        }),
+      ).rejects.toMatchObject({
+        code: 'INVALID_MIGRATION_APPLY_SEAL_STORAGE',
+      })
       const sharedSealBytes = new Uint8Array(
         new SharedArrayBuffer(
           serializeWorkspaceSearchMigrationCompleteApplySeal(

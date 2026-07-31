@@ -82,13 +82,11 @@ export class WorkspaceSearchMigrationApplySealError extends Error {
 }
 
 /**
- * Production complete-plan seal rooted in terminal execution evidence.
+ * Fields shared by every production complete-plan seal schema.
  */
-export type WorkspaceSearchMigrationCompleteApplySeal = {
+type WorkspaceSearchMigrationCompleteApplySealFields = {
   /** Complete apply-seal discriminator. */
   readonly kind: 'workspace-search-migration-complete-apply-seal'
-  /** Complete apply-seal schema version. */
-  readonly sealVersion: 1
   /** Stable migration identifier. */
   readonly migrationId: typeof WORKSPACE_SEARCH_MIGRATION_ID
   /** Migration behavior version. */
@@ -120,8 +118,6 @@ export type WorkspaceSearchMigrationCompleteApplySeal = {
   readonly planOperationCount: number
   /** Exact terminal applying-state revision. */
   readonly predecessorRevision: number
-  /** Durable authority renewals included in a version-three predecessor. */
-  readonly maintenanceEvidenceRenewalCount?: number
   /** Self digest of the exact terminal mutable execution state. */
   readonly predecessorExecutionStateDigest: string
   /** Digest of the exact terminal reconstructed run state. */
@@ -147,6 +143,33 @@ export type WorkspaceSearchMigrationCompleteApplySeal = {
   /** Digest of every preceding canonical seal field. */
   readonly sealDigest: string
 }
+
+/**
+ * Legacy complete-plan seal rooted in a version-two execution predecessor.
+ */
+export type WorkspaceSearchMigrationCompleteApplySealV1 =
+  WorkspaceSearchMigrationCompleteApplySealFields & {
+    /** Legacy complete apply-seal schema version. */
+    readonly sealVersion: 1
+  }
+
+/**
+ * Authority-renewable complete-plan seal rooted in a version-three predecessor.
+ */
+export type WorkspaceSearchMigrationCompleteApplySealV2 =
+  WorkspaceSearchMigrationCompleteApplySealFields & {
+    /** Authority-renewable complete apply-seal schema version. */
+    readonly sealVersion: 2
+    /** Durable authority renewals included in the predecessor revision. */
+    readonly maintenanceEvidenceRenewalCount: number
+  }
+
+/**
+ * Supported legacy and authority-renewable production complete-plan seals.
+ */
+export type WorkspaceSearchMigrationCompleteApplySeal =
+  | WorkspaceSearchMigrationCompleteApplySealV1
+  | WorkspaceSearchMigrationCompleteApplySealV2
 
 /**
  * Rich exact-version reference to a production complete apply seal.
@@ -322,9 +345,8 @@ export function createWorkspaceSearchMigrationCompleteApplySeal(
     const accumulator = MigrationDigestAccumulator.fromState(
       state.applyMarkerDigestState,
     )
-    const common = {
+    const shared = {
       kind: 'workspace-search-migration-complete-apply-seal',
-      sealVersion: 1,
       migrationId: WORKSPACE_SEARCH_MIGRATION_ID,
       migrationVersion: WORKSPACE_SEARCH_MIGRATION_VERSION,
       scope: 'complete-plan',
@@ -345,12 +367,6 @@ export function createWorkspaceSearchMigrationCompleteApplySeal(
         sealedPlanningAuthority.orphanOperationCount,
       planOperationCount: state.planOperationCount,
       predecessorRevision: predecessor.revision,
-      ...(predecessor.executionStateVersion === 3
-        ? {
-            maintenanceEvidenceRenewalCount:
-              predecessor.maintenanceEvidenceRenewalCount,
-          }
-        : {}),
       predecessorExecutionStateDigest:
         predecessor.executionStateDigest,
       predecessorRunStateDigest: predecessor.runStateDigest,
@@ -371,9 +387,26 @@ export function createWorkspaceSearchMigrationCompleteApplySeal(
       applyTraversalDigest: createMigrationDigest(state.apply),
       createdAt,
     } satisfies Omit<
-      WorkspaceSearchMigrationCompleteApplySeal,
+      WorkspaceSearchMigrationCompleteApplySealFields,
       'sealDigest'
     >
+    const common = predecessor.executionStateVersion === 3
+      ? {
+          ...shared,
+          sealVersion: 2,
+          maintenanceEvidenceRenewalCount:
+            predecessor.maintenanceEvidenceRenewalCount,
+        } satisfies Omit<
+          WorkspaceSearchMigrationCompleteApplySealV2,
+          'sealDigest'
+        >
+      : {
+          ...shared,
+          sealVersion: 1,
+        } satisfies Omit<
+          WorkspaceSearchMigrationCompleteApplySealV1,
+          'sealDigest'
+        >
     return readCompleteApplySeal({
       ...common,
       sealDigest: createMigrationDigest(common),
@@ -749,14 +782,15 @@ function readCompleteApplySeal(
   value: unknown,
 ): WorkspaceSearchMigrationCompleteApplySeal {
   const record = requireRecord(value)
+  const sealVersion = readOwn(record, 'sealVersion')
+  if (sealVersion !== 1 && sealVersion !== 2) {
+    return failApplySeal()
+  }
   const hasMinimum = hasOwnDataProperty(
     record,
     'minimumJournalRetainUntil',
   )
-  const hasRenewalCount = hasOwnDataProperty(
-    record,
-    'maintenanceEvidenceRenewalCount',
-  )
+  const hasRenewalCount = sealVersion === 2
   requireExactKeys(record, [
     'apply',
     'applyMarkerAggregateDigest',
@@ -794,7 +828,6 @@ function readCompleteApplySeal(
   if (
     readOwn(record, 'kind') !==
       'workspace-search-migration-complete-apply-seal' ||
-    readOwn(record, 'sealVersion') !== 1 ||
     readOwn(record, 'migrationId') !==
       WORKSPACE_SEARCH_MIGRATION_ID ||
     readOwn(record, 'migrationVersion') !==
@@ -892,9 +925,8 @@ function readCompleteApplySeal(
   ) {
     return failApplySeal()
   }
-  const common = {
+  const shared = {
     kind: 'workspace-search-migration-complete-apply-seal',
-    sealVersion: 1,
     migrationId: WORKSPACE_SEARCH_MIGRATION_ID,
     migrationVersion: WORKSPACE_SEARCH_MIGRATION_VERSION,
     scope: 'complete-plan',
@@ -910,9 +942,6 @@ function readCompleteApplySeal(
     orphanOperationCount,
     planOperationCount,
     predecessorRevision,
-    ...(hasRenewalCount
-      ? { maintenanceEvidenceRenewalCount }
-      : {}),
     predecessorExecutionStateDigest,
     predecessorRunStateDigest,
     markerCount,
@@ -927,9 +956,25 @@ function readCompleteApplySeal(
     applyTraversalDigest,
     createdAt,
   } satisfies Omit<
-    WorkspaceSearchMigrationCompleteApplySeal,
+    WorkspaceSearchMigrationCompleteApplySealFields,
     'sealDigest'
   >
+  const common = sealVersion === 2
+    ? {
+        ...shared,
+        sealVersion,
+        maintenanceEvidenceRenewalCount,
+      } satisfies Omit<
+        WorkspaceSearchMigrationCompleteApplySealV2,
+        'sealDigest'
+      >
+    : {
+        ...shared,
+        sealVersion,
+      } satisfies Omit<
+        WorkspaceSearchMigrationCompleteApplySealV1,
+        'sealDigest'
+      >
   const sealDigest = readDigest(readOwn(record, 'sealDigest'))
   if (sealDigest !== createMigrationDigest(common)) {
     return failApplySeal()

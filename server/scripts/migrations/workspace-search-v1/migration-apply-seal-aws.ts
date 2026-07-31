@@ -22,9 +22,13 @@ import {
   detachWorkspaceSearchMigrationPlanningConfiguration,
 } from './migration-planning-join'
 
-/** Immutable-object role reserved for complete apply seals. */
+/** Legacy immutable-object role reserved for version-one apply seals. */
 export const WORKSPACE_SEARCH_MIGRATION_COMPLETE_APPLY_SEAL_ROLE =
   'apply-seals'
+
+/** Immutable-object role reserved for version-two complete apply seals. */
+export const WORKSPACE_SEARCH_MIGRATION_COMPLETE_APPLY_SEAL_V2_ROLE =
+  'apply-seals-v2'
 
 /** Maximum canonical bytes accepted for one complete apply seal. */
 export const WORKSPACE_SEARCH_MIGRATION_COMPLETE_APPLY_SEAL_MAX_BYTES =
@@ -120,6 +124,19 @@ type PreparedImmutableArtifactPort = {
 }
 
 /**
+ * Version-specific immutable storage route for one complete apply seal.
+ */
+type ApplySealStorageBinding = {
+  /** Complete apply-seal schema accepted by this route. */
+  readonly sealVersion:
+    WorkspaceSearchMigrationCompleteApplySeal['sealVersion']
+  /** Immutable artifact role embedded in the object key. */
+  readonly role: string
+  /** Exact object metadata required on writes and reads. */
+  readonly metadata: Readonly<Record<string, string>>
+}
+
+/**
  * Creates one gateway bound to a measured run and immutable object port.
  *
  * @param input - Measured configuration, run, storage, and clock.
@@ -160,14 +177,6 @@ export function createAwsWorkspaceSearchMigrationApplySealGateway(
     const clock = snapshotClock(readOwn(record, 'clock'))
     const objectKeyPrefix =
       `${configuration.journalPrefix}/runs/${runId}/${configurationHash}`
-    const metadata = Object.freeze({
-      'mukuroji-apply-seal-kind':
-        'workspace-search-complete-apply-seal-v1',
-      'mukuroji-apply-seal-run-id': runId,
-      'mukuroji-apply-seal-configuration-sha256':
-        configurationHash,
-    })
-
     return {
       writeCompleteApplySeal: (seal) =>
         runApplySealAwsAsyncBoundary(async () => {
@@ -176,6 +185,11 @@ export function createAwsWorkspaceSearchMigrationApplySealGateway(
           const detached =
             parseWorkspaceSearchMigrationCompleteApplySeal(bytes)
           requireSealIdentity(detached, runId, configurationHash)
+          const storage = createApplySealStorageBinding(
+            detached.sealVersion,
+            runId,
+            configurationHash,
+          )
           const contentDigest = digestBytes(bytes)
           const retainUntil = requireSharedRetentionDeadline(
             configuration,
@@ -183,14 +197,15 @@ export function createAwsWorkspaceSearchMigrationApplySealGateway(
             clock,
           )
           const stored = await immutableArtifactPort.write({
-            role: WORKSPACE_SEARCH_MIGRATION_COMPLETE_APPLY_SEAL_ROLE,
+            role: storage.role,
             objectKeyPrefix,
             bytes,
-            metadata,
+            metadata: storage.metadata,
             retainUntil,
           })
           const reference = readStoredReference(stored, {
             objectKeyPrefix,
+            role: storage.role,
             contentDigest,
             byteLength: bytes.byteLength,
             retainUntil,
@@ -206,9 +221,14 @@ export function createAwsWorkspaceSearchMigrationApplySealGateway(
             readWorkspaceSearchMigrationCompleteApplySealReference(
               reference,
             )
-          requireReferencePath(expected, objectKeyPrefix)
+          const storage = readApplySealStorageBinding(
+            expected,
+            objectKeyPrefix,
+            runId,
+            configurationHash,
+          )
           const candidate = await immutableArtifactPort.read({
-            role: WORKSPACE_SEARCH_MIGRATION_COMPLETE_APPLY_SEAL_ROLE,
+            role: storage.role,
             objectKeyPrefix,
             reference: {
               objectKey: expected.objectKey,
@@ -217,7 +237,7 @@ export function createAwsWorkspaceSearchMigrationApplySealGateway(
               byteLength: expected.byteLength,
               retainUntil: expected.retainUntil,
             },
-            metadata,
+            metadata: storage.metadata,
           })
           const bytes = snapshotBytes(candidate)
           if (
@@ -228,11 +248,78 @@ export function createAwsWorkspaceSearchMigrationApplySealGateway(
           }
           const seal =
             parseWorkspaceSearchMigrationCompleteApplySeal(bytes)
+          if (seal.sealVersion !== storage.sealVersion) {
+            return failApplySealAws()
+          }
           requireSealIdentity(seal, runId, configurationHash)
           return seal
         }),
     }
   })
+}
+
+/**
+ * Creates the immutable storage route for one strict seal schema.
+ *
+ * @param sealVersion - Complete apply-seal schema version.
+ * @param runId - Gateway-bound run identifier.
+ * @param configurationHash - Gateway-bound configuration digest.
+ * @returns Exact role and metadata for the selected schema.
+ */
+function createApplySealStorageBinding(
+  sealVersion:
+    WorkspaceSearchMigrationCompleteApplySeal['sealVersion'],
+  runId: string,
+  configurationHash: string,
+): ApplySealStorageBinding {
+  const role = sealVersion === 1
+    ? WORKSPACE_SEARCH_MIGRATION_COMPLETE_APPLY_SEAL_ROLE
+    : WORKSPACE_SEARCH_MIGRATION_COMPLETE_APPLY_SEAL_V2_ROLE
+  return {
+    sealVersion,
+    role,
+    metadata: Object.freeze({
+      'mukuroji-apply-seal-kind':
+        `workspace-search-complete-apply-seal-v${sealVersion}`,
+      'mukuroji-apply-seal-run-id': runId,
+      'mukuroji-apply-seal-configuration-sha256':
+        configurationHash,
+    }),
+  }
+}
+
+/**
+ * Selects a legacy or version-two route from one exact object key.
+ *
+ * @param reference - Exact rich complete-plan reference.
+ * @param objectKeyPrefix - Gateway-bound run/configuration prefix.
+ * @param runId - Gateway-bound run identifier.
+ * @param configurationHash - Gateway-bound configuration digest.
+ * @returns Storage route encoded by the content-addressed object key.
+ */
+function readApplySealStorageBinding(
+  reference: WorkspaceSearchMigrationCompleteApplySealReference,
+  objectKeyPrefix: string,
+  runId: string,
+  configurationHash: string,
+): ApplySealStorageBinding {
+  const legacy = createApplySealStorageBinding(
+    1,
+    runId,
+    configurationHash,
+  )
+  if (hasReferencePath(reference, objectKeyPrefix, legacy.role)) {
+    return legacy
+  }
+  const current = createApplySealStorageBinding(
+    2,
+    runId,
+    configurationHash,
+  )
+  if (hasReferencePath(reference, objectKeyPrefix, current.role)) {
+    return current
+  }
+  return failApplySealAws()
 }
 
 /**
@@ -261,6 +348,8 @@ function requireSealIdentity(
 type StoredReferenceExpectation = {
   /** Expected run-scoped object-key prefix. */
   readonly objectKeyPrefix: string
+  /** Expected version-specific immutable artifact role. */
+  readonly role: string
   /** Expected exact content digest. */
   readonly contentDigest: string
   /** Expected exact body length. */
@@ -303,6 +392,7 @@ function readStoredReference(
       ...reference,
     },
     expected.objectKeyPrefix,
+    expected.role,
   )
   if (
     reference.contentDigest !== expected.contentDigest ||
@@ -319,17 +409,36 @@ function readStoredReference(
  *
  * @param reference - Exact rich complete-plan reference.
  * @param objectKeyPrefix - Gateway-bound run/configuration prefix.
+ * @param role - Version-specific immutable artifact role.
  */
 function requireReferencePath(
   reference: WorkspaceSearchMigrationCompleteApplySealReference,
   objectKeyPrefix: string,
+  role: string,
 ): void {
   if (
     reference.objectKey !==
-      `${objectKeyPrefix}/${WORKSPACE_SEARCH_MIGRATION_COMPLETE_APPLY_SEAL_ROLE}/${reference.contentDigest}.artifact`
+      `${objectKeyPrefix}/${role}/${reference.contentDigest}.artifact`
   ) {
     return failApplySealAws()
   }
+}
+
+/**
+ * Checks one exact content-addressed reference path without throwing.
+ *
+ * @param reference - Exact rich complete-plan reference.
+ * @param objectKeyPrefix - Gateway-bound run/configuration prefix.
+ * @param role - Candidate version-specific immutable artifact role.
+ * @returns Whether the object key selects the candidate route.
+ */
+function hasReferencePath(
+  reference: WorkspaceSearchMigrationCompleteApplySealReference,
+  objectKeyPrefix: string,
+  role: string,
+): boolean {
+  return reference.objectKey ===
+    `${objectKeyPrefix}/${role}/${reference.contentDigest}.artifact`
 }
 
 /**
