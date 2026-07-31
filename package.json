@@ -38,6 +38,7 @@
     "server:build:lambda": "bun --filter server build:lambda",
     "server:test": "bun --filter server test",
     "work-items:integrity": "bun server/scripts/data-integrity/verify-work-items-integrity.ts",
+    "cross-domain:integrity": "bun server/scripts/data-integrity/verify-cross-domain-integrity.ts",
     "floci:deploy-backend": "bun --env-file=.env run sh floci/deploy-backend.sh",
     "work-items:seed-dynamodb": "bash scripts/seed-work-items-dynamodb.sh",
     "tasks:check-dynamodb": "bash scripts/check-project-tasks-dynamodb.sh",
