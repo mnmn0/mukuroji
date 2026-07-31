@@ -862,8 +862,8 @@ total admission deadline内に次のdata I/Oまたはpageを予約できなけ�
 reviewした明示値がないpolicyを受理しません。SDK内の見えないretryでbudgetを超過しないよう、`DescribeTable`は専用の
 `maxAttempts=1` transportだけを使い、throttle後のjitter/backoffと再attemptはregistryが管理します。
 Transportはcaller指定endpointを受け付けず、regionからpartition-awareな公式DynamoDB endpointを内部導出します。
-Credentials providerやambient default chainは受け付けず、upstreamのmanaged identityで実測して
-#164のcoordinatorから渡すaccountと同じ`accountId`を宣言したstatic credentialsだけを受け付けます。
+Credentials providerやambient default chainは受け付けず、upstreamのmanaged identityで実測し、Issue #164の
+coordinatorから渡すaccountと同じ`accountId`を宣言したstatic credentialsだけを受け付けます。
 このmoduleは宣言値の一致とallowlist済みscalarのsnapshotを検証し、STS measurement自体は行いません。
 各callはaccount/regionと固定transport descriptorへ結合したnominal one-shot capabilityとして渡し、
 任意callback内の複数SDK callや、別scopeのtransportを1 permitとして実行できない形にします。

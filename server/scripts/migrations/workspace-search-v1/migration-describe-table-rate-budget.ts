@@ -1338,6 +1338,8 @@ type RateScopeState = {
   readonly evidence: RateEvidenceState
   /** Promise tail serializing every physical attempt for this scope. */
   tail: Promise<void>
+  /** Process-local generation invalidating detached operation continuations. */
+  operationGeneration: number
   /** Promise tail serializing every durable checkpoint mutation. */
   checkpointTail: Promise<void>
   /** Queued or active attempt operations, used by quiescent snapshots. */
@@ -1740,6 +1742,9 @@ class DescribeTableRateLifecycle
   /** Shared validated registry dependencies. */
   readonly #dependencies: RateRegistryDependencies
 
+  /** Process-local operation generation owned by this lifecycle. */
+  #operationGeneration: number
+
   /** Current lifecycle state. */
   #status:
     | 'active'
@@ -1800,6 +1805,7 @@ class DescribeTableRateLifecycle
     this.#fenceToken = fenceToken
     this.#scope = scope
     this.#dependencies = dependencies
+    this.#operationGeneration = scope.operationGeneration
     this.#recoveryAuthority = recoveryAuthority
     Object.freeze(this)
   }
@@ -2124,7 +2130,12 @@ class DescribeTableRateLifecycle
       deadline.cancel()
       linkedSignal.dispose()
       this.#pageAdmissionPending = false
-      this.#scope.pendingPageAdmissionCount -= 1
+      if (
+        this.#operationGeneration ===
+          this.#scope.operationGeneration
+      ) {
+        this.#scope.pendingPageAdmissionCount -= 1
+      }
       if (page !== undefined) {
         const unusedAttempts =
           releaseDescribeTableCheckpointPageUnusedAttempts(
@@ -2144,20 +2155,28 @@ class DescribeTableRateLifecycle
           pageCallbackSettledWithPendingAttempts ||
           !pageReservationPersisted ||
           !ownsReservation
-        if (!retainDurableReservation && ownsReservation) {
+        const releasedUnusedAttempts =
+          !retainDurableReservation &&
+          ownsReservation &&
+          unusedAttempts > 0
+        if (releasedUnusedAttempts) {
           this.#scope.reservedAttempts -= unusedAttempts
         }
+        let unusedReleaseConfirmed = false
         try {
-          if (
-            pageReservationPersisted &&
-            unusedAttempts > 0 &&
-            !retainDurableReservation
-          ) {
+          if (releasedUnusedAttempts) {
             await this.#persistRateCheckpointWithNewDeadline(
               'checkpoint-page',
             )
+            unusedReleaseConfirmed = true
           }
         } finally {
+          if (
+            releasedUnusedAttempts &&
+            !unusedReleaseConfirmed
+          ) {
+            this.#scope.reservedAttempts += unusedAttempts
+          }
           this.#pageActive = false
           this.#releasePageBarrier()
         }
@@ -2527,6 +2546,7 @@ class DescribeTableRateLifecycle
           this.#record(attemptObservation)
           result = await execution
         } catch (error: unknown) {
+          this.#requireCurrentOperationGeneration()
           if (isSafeThrottlingError(error)) {
             this.#scope.evidence.throttleCount += 1
             this.#scope.consecutiveThrottles += 1
@@ -2578,6 +2598,7 @@ class DescribeTableRateLifecycle
           this.#scope.consecutiveThrottles = 0
           throw error
         }
+        this.#requireCurrentOperationGeneration()
         await this.#persistAttemptEpisodeCompletion(
           request.phase,
           attemptInFlightNonce,
@@ -2594,7 +2615,12 @@ class DescribeTableRateLifecycle
         return result
       }, linkedSignal.signal, request.phase, deadline, cleanupToken)
     } finally {
-      this.#scope.pendingAttemptCount -= 1
+      if (
+        this.#operationGeneration ===
+          this.#scope.operationGeneration
+      ) {
+        this.#scope.pendingAttemptCount -= 1
+      }
       deadline.cancel()
       linkedSignal.dispose()
     }
@@ -2768,6 +2794,7 @@ class DescribeTableRateLifecycle
           0,
         )
       }
+      this.#detachRecoveredOperationGeneration()
       await this.#persistAttemptEpisodeCompletion(
         'reconciliation',
         attemptInFlightNonce,
@@ -3686,6 +3713,7 @@ class DescribeTableRateLifecycle
     phase: WorkspaceSearchMigrationDescribeTablePhase,
     cleanupToken: object | undefined = undefined,
   ): void {
+    this.#requireCurrentOperationGeneration()
     if (this.#durabilityFailed) {
       return this.#stop(phase, 'quarantined', 0, 0)
     }
@@ -3714,6 +3742,37 @@ class DescribeTableRateLifecycle
             ? 'taken-over'
             : 'invalid-lifecycle'
     return this.#stop(phase, reason, 0, 0)
+  }
+
+  /**
+   * Rejects a continuation detached by authorized interrupted-attempt recovery.
+   */
+  #requireCurrentOperationGeneration(): void {
+    if (
+      this.#operationGeneration !==
+        this.#scope.operationGeneration
+    ) {
+      throw new WorkspaceSearchMigrationDescribeTableRateError(
+        'taken-over',
+      )
+    }
+  }
+
+  /**
+   * Detaches every obsolete operation continuation after recovery proves safety.
+   */
+  #detachRecoveredOperationGeneration(): void {
+    const nextGeneration = this.#scope.operationGeneration + 1
+    if (!Number.isSafeInteger(nextGeneration)) {
+      throw new WorkspaceSearchMigrationDescribeTableRateError(
+        'invalid-lifecycle',
+      )
+    }
+    this.#scope.operationGeneration = nextGeneration
+    this.#operationGeneration = nextGeneration
+    this.#scope.tail = Promise.resolve()
+    this.#scope.pendingAttemptCount = 0
+    this.#scope.pendingPageAdmissionCount = 0
   }
 
   /**
@@ -3791,33 +3850,41 @@ class DescribeTableRateLifecycle
     cleanupToken: object | undefined = undefined,
   ): Promise<void> {
     const observedAtMilliseconds = this.#readClock()
-    this.#scope.evidence.cadenceWaitCount += 1
-    this.#scope.evidence.cadenceWaitMilliseconds += delayMilliseconds
-    this.#record({
-      version:
-        WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
-      kind: 'cadence-wait',
-      phase,
-      observedAtMilliseconds,
-      delayMilliseconds,
-    })
     const waiterSignal = createLinkedAbortSignal(
       signal,
       deadline.signal,
     )
+    let completedAtMilliseconds = observedAtMilliseconds
     try {
-      const waiting = this.#dependencies.waiter.wait(
-        delayMilliseconds,
-        waiterSignal.signal,
-      )
-      await this.#waitForAdmissionBoundary(
-        waiting,
-        signal,
-        phase,
-        deadline,
-        requiredAttempts,
-        cleanupToken,
-      )
+      for (let waitIndex = 0; waitIndex < 2; waitIndex += 1) {
+        const boundedDelayMilliseconds =
+          waitIndex === 0 ? delayMilliseconds : 1
+        this.#scope.evidence.cadenceWaitCount += 1
+        this.#scope.evidence.cadenceWaitMilliseconds +=
+          boundedDelayMilliseconds
+        this.#record({
+          version:
+            WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
+          kind: 'cadence-wait',
+          phase,
+          observedAtMilliseconds: completedAtMilliseconds,
+          delayMilliseconds: boundedDelayMilliseconds,
+        })
+        const waiting = this.#dependencies.waiter.wait(
+          boundedDelayMilliseconds,
+          waiterSignal.signal,
+        )
+        await this.#waitForAdmissionBoundary(
+          waiting,
+          signal,
+          phase,
+          deadline,
+          requiredAttempts,
+          cleanupToken,
+        )
+        completedAtMilliseconds = this.#readClock()
+        if (completedAtMilliseconds > observedAtMilliseconds) return
+      }
     } catch {
       this.#requireActive(phase, cleanupToken)
       return this.#stop(
@@ -3833,9 +3900,17 @@ class DescribeTableRateLifecycle
     } finally {
       waiterSignal.dispose()
     }
-    if (this.#readClock() <= observedAtMilliseconds) {
-      return this.#stop(phase, 'invalid-lifecycle', 0, 0)
-    }
+    this.#requireActive(phase, cleanupToken)
+    return this.#stop(
+      phase,
+      signal.aborted
+        ? 'interrupted'
+        : deadline.signal.aborted
+          ? 'cadence-bound'
+          : 'invalid-lifecycle',
+      0,
+      0,
+    )
   }
 
   /**
@@ -3943,6 +4018,7 @@ class DescribeTableRateLifecycle
     requiredAttempts: number,
     retryAfterMilliseconds: number,
   ): never {
+    this.#requireCurrentOperationGeneration()
     const observedAtMilliseconds = this.#readClock()
     const safeRetryAfterMilliseconds =
       Number.isSafeInteger(retryAfterMilliseconds) &&
@@ -5223,6 +5299,7 @@ function createFreshRateScopeState(
       maximumInFlight: 0,
     },
     tail: Promise.resolve(),
+    operationGeneration: 0,
     checkpointTail: Promise.resolve(),
     pendingAttemptCount: 0,
     pendingPageAdmissionCount: 0,
@@ -5347,6 +5424,7 @@ function createRestoredRateScopeState(
       maximumInFlight: checkpoint.maximumInFlight,
     },
     tail: Promise.resolve(),
+    operationGeneration: 0,
     checkpointTail: Promise.resolve(),
     pendingAttemptCount: 0,
     pendingPageAdmissionCount: 0,

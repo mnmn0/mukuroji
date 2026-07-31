@@ -1310,6 +1310,156 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
     expect(pageHarness.waits).toEqual([100])
   })
 
+  test('accepts an equal integer clock sample after a valid cadence wait', async () => {
+    const harness = new DeterministicRateHarness()
+    const waits: number[] = []
+    const lifecycle = await
+      createWorkspaceSearchMigrationDescribeTableRateRegistry({
+        policy: createPolicy(),
+        checkpointStore: harness,
+        clock: harness.clock,
+        epochClock: harness.clock,
+        waiter: {
+          /**
+           * Keeps the first completed timer within the same integer clock tick.
+           *
+           * @param delayMilliseconds - Requested cadence delay.
+           * @param signal - Cancellation signal for pending admission.
+           */
+          async wait(
+            delayMilliseconds: number,
+            signal: AbortSignal,
+          ): Promise<void> {
+            waits.push(delayMilliseconds)
+            if (waits.length > 1) {
+              await harness.wait(delayMilliseconds, signal)
+            }
+          },
+        },
+        recorder: harness,
+        random: () => 0,
+      }).claim(createClaim())
+    let attemptCallbacks = 0
+    await lifecycle.runDescribeTableAttempt(
+      { phase: 'measurement' },
+      createAttempt(async () => {
+        attemptCallbacks += 1
+      }),
+    )
+    await lifecycle.runDescribeTableAttempt(
+      { phase: 'measurement' },
+      createAttempt(async () => {
+        attemptCallbacks += 1
+      }),
+    )
+
+    expect(attemptCallbacks).toBe(2)
+    expect(waits).toEqual([1, 1])
+  })
+
+  test('bounds a waiter that repeatedly completes within one integer clock tick', async () => {
+    const harness = new DeterministicRateHarness()
+    const waits: number[] = []
+    const lifecycle = await
+      createWorkspaceSearchMigrationDescribeTableRateRegistry({
+        policy: createPolicy(),
+        checkpointStore: harness,
+        clock: harness.clock,
+        epochClock: harness.clock,
+        waiter: {
+          /**
+           * Completes without advancing the injected integer clock.
+           *
+           * @param delayMilliseconds - Requested cadence delay.
+           */
+          async wait(delayMilliseconds: number): Promise<void> {
+            waits.push(delayMilliseconds)
+          },
+        },
+        recorder: harness,
+        random: () => 0,
+      }).claim(createClaim())
+    let attemptCallbacks = 0
+    await lifecycle.runDescribeTableAttempt(
+      { phase: 'measurement' },
+      createAttempt(async () => {
+        attemptCallbacks += 1
+      }),
+    )
+    const sameTickError = await captureRateError(() =>
+      lifecycle.runDescribeTableAttempt(
+        { phase: 'measurement' },
+        createAttempt(async () => {
+          attemptCallbacks += 1
+        }),
+      ))
+
+    expect(sameTickError.reason).toBe('invalid-lifecycle')
+    expect(attemptCallbacks).toBe(1)
+    expect(waits).toEqual([1, 1])
+    expect(lifecycle.readCheckpoint()).toMatchObject({
+      attemptCount: 1,
+      attemptInFlight: false,
+    })
+  })
+
+  test('bounds the extra integer-clock wait by the admission deadline', async () => {
+    const harness = new DeterministicRateHarness()
+    const deadlineScheduler =
+      new DeterministicDeadlineScheduler(harness)
+    const extraWaitStarted = createDeferred<void>()
+    const waits: number[] = []
+    const lifecycle = await
+      createWorkspaceSearchMigrationDescribeTableRateRegistry({
+        policy: createPolicy(),
+        checkpointStore: harness,
+        clock: harness.clock,
+        epochClock: harness.clock,
+        waiter: {
+          /**
+           * Leaves the extra clock-quantum wait unresolved for deadline expiry.
+           *
+           * @param delayMilliseconds - Requested cadence delay.
+           */
+          async wait(delayMilliseconds: number): Promise<void> {
+            waits.push(delayMilliseconds)
+            if (waits.length > 1) {
+              extraWaitStarted.resolve(undefined)
+              await new Promise<never>(() => {})
+            }
+          },
+        },
+        deadlineScheduler,
+        recorder: harness,
+        random: () => 0,
+      }).claim(createClaim())
+    let attemptCallbacks = 0
+    await lifecycle.runDescribeTableAttempt(
+      { phase: 'measurement' },
+      createAttempt(async () => {
+        attemptCallbacks += 1
+      }),
+    )
+    const boundedAttempt = captureRateError(() =>
+      lifecycle.runDescribeTableAttempt(
+        { phase: 'measurement' },
+        createAttempt(async () => {
+          attemptCallbacks += 1
+        }),
+      ))
+    await extraWaitStarted.promise
+    deadlineScheduler.fireNextActive()
+    const deadlineError = await boundedAttempt
+
+    expect(deadlineError.reason).toBe('cadence-bound')
+    expect(attemptCallbacks).toBe(1)
+    expect(waits).toEqual([1, 1])
+    expect(lifecycle.readCheckpoint()).toMatchObject({
+      attemptCount: 1,
+      attemptInFlight: false,
+    })
+  })
+
   test('records a charged physical attempt before a synchronous transport failure', async () => {
     const harness = new DeterministicRateHarness()
     const lifecycle = await
@@ -3012,6 +3162,68 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
     expect(overlappingCallbacks).toBe(1)
   })
 
+  test('detaches an obsolete single-flight tail after authorized attempt recovery', async () => {
+    const harness = new DeterministicRateHarness()
+    const registry =
+      createWorkspaceSearchMigrationDescribeTableRateRegistry({
+        policy: createPolicy(),
+        checkpointStore: harness,
+        clock: harness.clock,
+        epochClock: harness.clock,
+        waiter: harness,
+        recorder: harness,
+        random: () => 0,
+      })
+    const original = await registry.claim(createClaim())
+    const attemptStarted = createDeferred<void>()
+    const releaseObsoleteAttempt = createDeferred<void>()
+    const throttlingError = new Error(
+      'RAW-OBSOLETE-THROTTLE-CANARY',
+    )
+    throttlingError.name = 'ThrottlingException'
+    const obsoleteAttempt = captureRateError(() =>
+      original.runDescribeTableAttempt(
+        { phase: 'measurement' },
+        createAttempt(async () => {
+          attemptStarted.resolve(undefined)
+          await releaseObsoleteAttempt.promise
+          throw throttlingError
+        }),
+      ))
+    await attemptStarted.promise
+
+    const recovered = await registry.claim(createClaim({
+      fenceToken: 2,
+      bootstrap: false,
+      recoverInterruptedAttempt: true,
+    }))
+    await recovered.recoverInterruptedAttempt(
+      async () => 'old-owner-confirmed-stopped',
+    )
+    let recoveredCallbacks = 0
+    await recovered.runDescribeTableAttempt(
+      { phase: 'measurement' },
+      createAttempt(async () => {
+        recoveredCallbacks += 1
+      }),
+    )
+    releaseObsoleteAttempt.resolve(undefined)
+    expect((await obsoleteAttempt).reason).toBe('taken-over')
+
+    expect(recoveredCallbacks).toBe(1)
+    expect(harness.waits).toEqual([1_000])
+    expect(recovered.readEvidence()).toMatchObject({
+      attemptCount: 2,
+      throttleCount: 0,
+      maximumInFlight: 1,
+    })
+    expect(recovered.readCheckpoint()).toMatchObject({
+      attemptCount: 2,
+      attemptInFlight: false,
+      throttleCount: 0,
+    })
+  })
+
   test('rejects normal work until an interrupted-attempt clear CAS is confirmed', async () => {
     const harness = new DeterministicRateHarness()
     const registry =
@@ -3169,6 +3381,64 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
       attemptCount: 2,
       attemptInFlight: false,
     })
+  })
+
+  test('forfeits unused page permits after their release checkpoint fails', async () => {
+    const harness = new DeterministicRateHarness()
+    const policy = createPolicy({
+      maximumAttemptsPerLifecycle:
+        WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_PAGE_BASELINE_ATTEMPTS +
+        WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_CLEANUP_RECOVERY_ATTEMPTS,
+    })
+    const registry =
+      createWorkspaceSearchMigrationDescribeTableRateRegistry({
+        policy,
+        checkpointStore: harness,
+        clock: harness.clock,
+        epochClock: harness.clock,
+        waiter: harness,
+        recorder: harness,
+        random: () => 0,
+      })
+    const original = await registry.claim(createClaim())
+
+    const releaseError = await captureRateError(() =>
+      original.runCheckpointPage(
+        {},
+        async () => {
+          harness.rejectNextWrite()
+        },
+      ))
+    expect(releaseError.reason).toBe('quarantined')
+    expect(harness.readCheckpoint()).toMatchObject({
+      attemptCount: 0,
+      forfeitedAttemptCount: 0,
+      reservedAttempts:
+        WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_PAGE_BASELINE_ATTEMPTS,
+      reservationKind: 'checkpoint-page',
+    })
+
+    const recovered = await registry.claim(createClaim({
+      fenceToken: 2,
+      bootstrap: false,
+    }))
+    expect(recovered.readCheckpoint()).toMatchObject({
+      attemptCount: 0,
+      forfeitedAttemptCount:
+        WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_PAGE_BASELINE_ATTEMPTS,
+      reservedAttempts: 0,
+      reservationKind: 'none',
+    })
+    let pageCallbacks = 0
+    const pageError = await captureRateError(() =>
+      recovered.runCheckpointPage(
+        {},
+        async () => {
+          pageCallbacks += 1
+        },
+      ))
+    expect(pageError.reason).toBe('budget-capacity')
+    expect(pageCallbacks).toBe(0)
   })
 
   test('blocks a queued attempt when predecessor completion staging fails', async () => {
