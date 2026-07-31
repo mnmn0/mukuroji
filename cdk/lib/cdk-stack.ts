@@ -9,6 +9,7 @@ import {
   buildApiTransportsAndRealtime,
 } from './subsystems/api-realtime';
 import { buildBootstrapResources } from './subsystems/bootstrap-resources';
+import { buildCrossDomainIntegrityAccess } from './subsystems/cross-domain-integrity';
 import {
   buildDataStores,
   configureRealtimeSessionIndexes,
@@ -75,6 +76,15 @@ export class CdkStack extends cdk.Stack {
       retentionDays: parameters.fileRetentionDays,
       downloadUrlTtlSeconds: parameters.fileDownloadUrlTtlSeconds,
       uploadUrlTtlSeconds: parameters.fileUploadUrlTtlSeconds,
+    });
+    const crossDomainIntegrity = buildCrossDomainIntegrityAccess(this, {
+      auditEventsTable: dataStores.auditEventsTable,
+      fileProofingTable: dataStores.fileProofingTable,
+      fileBucket: fileStorage.fileBucket,
+      projectDirectoryTable: dataStores.projectDirectoryTable,
+      workItemsTable: dataStores.workItemsTable,
+      workItemConfigurationTable: dataStores.workItemConfigurationTable,
+      workspaceAccessTable: dataStores.workspaceAccessTable,
     });
     configureRealtimeSessionIndexes(dataStores);
 
@@ -178,6 +188,7 @@ export class CdkStack extends cdk.Stack {
     buildStackOutputs(this, {
       ...dataStores,
       ...fileStorage,
+      ...crossDomainIntegrity,
       ...migrationStorage,
       ...workerChannels,
       ...apiTransports,

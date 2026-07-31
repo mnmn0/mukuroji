@@ -57,6 +57,8 @@ export type StackOutputResources = {
   readonly workspaceSearchMigrationJournalKey: kms.IKey;
   /** Least-privilege policy attached explicitly to an approved migration operator. */
   readonly workspaceSearchMigrationOperatorPolicy: iam.IManagedPolicy;
+  /** Read-only policy attached explicitly to an approved integrity-check operator. */
+  readonly crossDomainIntegrityOperatorPolicy: iam.IManagedPolicy;
   /** Durable notification table. */
   readonly notificationsTable: dynamodb.ITable;
   /** Realtime connection and session table. */
@@ -211,6 +213,9 @@ export function buildStackOutputs(
   });
   new cdk.CfnOutput(scope, 'WorkspaceSearchMigrationOperatorPolicyArn', {
     value: resources.workspaceSearchMigrationOperatorPolicy.managedPolicyArn,
+  });
+  new cdk.CfnOutput(scope, 'CrossDomainIntegrityOperatorPolicyArn', {
+    value: resources.crossDomainIntegrityOperatorPolicy.managedPolicyArn,
   });
   new cdk.CfnOutput(scope, 'NotificationsTableName', {
     value: resources.notificationsTable.tableName,

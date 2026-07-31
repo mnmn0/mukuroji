@@ -14,6 +14,7 @@ import {
   createMutationAuditContext,
   createWorkspaceInvitationAuditEntityId,
   createWorkspaceMemberAuditEntityId,
+  createWorkspaceMemberAuditEntityIdFromKeyBytes,
   DynamoDbAuditEventsClient,
   ensureLocalAuditEventsTable,
   getConfiguredAuditRetentionDays,
@@ -205,6 +206,35 @@ test('creates stable keyed Workspace access IDs without exposing private identif
   expect(readWorkspaceAuditPseudonymKey({
     MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: key,
   })).toBe(key)
+})
+
+test('creates the exact Workspace member pseudonym contract from caller-owned key bytes', () => {
+  const keyHex = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+  const storage = Buffer.alloc(34, 0x7f)
+  Buffer.from(keyHex, 'hex').copy(storage, 1)
+  const key = storage.subarray(1, 33)
+  const before = Buffer.from(storage)
+
+  expect(createWorkspaceMemberAuditEntityIdFromKeyBytes(
+    'user#owner@example.com',
+    'member@example.com',
+    key,
+  )).toBe(createWorkspaceMemberAuditEntityId(
+    'user#owner@example.com',
+    'member@example.com',
+    keyHex,
+  ))
+  expect(storage).toEqual(before)
+  expect(() => createWorkspaceMemberAuditEntityIdFromKeyBytes(
+    'workspace-1',
+    'member@example.com',
+    new Uint8Array(31),
+  )).toThrow('exactly 32 bytes')
+  expect(() => createWorkspaceMemberAuditEntityIdFromKeyBytes(
+    'workspace-1',
+    'member@example.com',
+    new Uint8Array(33),
+  )).toThrow('exactly 32 bytes')
 })
 
 test('uses the local audit table default for shared AWS endpoint variables', () => {

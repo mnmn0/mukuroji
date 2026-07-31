@@ -1463,6 +1463,12 @@ rollback evidence に残します。
 recovery table まで `RTO <= 4時間` です。これは運用目標であり、drill evidence がなければ
 達成済みとみなしません。
 
+DynamoDB、Configuration、Relation Graph、Audit、Workspace Access、File Proofing metadata、
+exact S3 version の横断検査契約と非対象は
+[Cross-domain data integrity](./data-integrity.md) を参照してください。Source と隔離 restore は
+同じ versioned checker contract を使用し、incomplete/fail result は restore、migration、deploy の
+terminal evidence として受理しません。
+
 最低でも90日ごと、key schema/GSI/critical migration の変更後に、Work Items、Workspace Access、
 Audit Events のいずれかを交代で restore します。現時点では定期実行 automation がないため、
 environment owner が schedule、対象、evidence location を登録しなければなりません。

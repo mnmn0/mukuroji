@@ -1,6 +1,18 @@
 /** Files module public application and domain surface. */
 export { isMissingFileObjectVersionError } from './file-object-errors'
 export {
+  FileIntegrityFailure,
+  checkFileMetadataIntegrity,
+  parseFileIntegrityReferences,
+  type FileIntegrityFailureCode,
+  type FileIntegrityObjectObservation,
+  type FileIntegrityReference,
+  type FileIntegrityUploadState,
+  type FileMetadataIntegrityCheckInput,
+  type FileMetadataIntegrityFailureCode,
+  type FileMetadataIntegrityResult,
+} from './file-integrity'
+export {
   FileProofingError,
   S3FileObjectClient,
   createApprovalSummary,

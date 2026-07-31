@@ -55,6 +55,7 @@ import {
   shouldBootstrapLocalDynamoDb,
 } from '../../infrastructure/aws/dynamodb-client'
 import { isMissingFileObjectVersionError } from './file-object-errors'
+import { isAllowedFileContentType, normalizeFileContentType } from './file-content-type'
 
 /** Browser から直接 upload できる既定の最大 byte 数です。 */
 export const FILE_UPLOAD_MAX_SIZE_BYTES = 2 * 1024 * 1024 * 1024
@@ -2606,23 +2607,7 @@ function normalizeFileName(value: unknown) {
 
 /** MIME type parameter を除去して小文字化します。 */
 function normalizeContentType(value: unknown) {
-  return requireText(value, 'File media type').split(';')[0]!.trim().toLowerCase()
-}
-
-/** Upload を許可する MIME type かどうかを判定します。 */
-function isAllowedFileContentType(contentType: string) {
-  return contentType.startsWith('image/') ||
-    contentType === 'application/pdf' ||
-    contentType === 'video/mp4' ||
-    contentType === 'video/webm' ||
-    contentType === 'video/quicktime' ||
-    contentType === 'text/plain' ||
-    contentType === 'text/csv' ||
-    contentType === 'application/json' ||
-    contentType === 'application/zip' ||
-    contentType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
-    contentType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
-    contentType === 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+  return normalizeFileContentType(requireText(value, 'File media type'))
 }
 
 /** MIME type を browser preview 種別へ変換します。 */
