@@ -206,7 +206,11 @@ Consumers parse and authenticate each stored result before calling
 `compareCrossDomainIntegrityResults` with the same in-memory key. The
 comparison rejects different timestamps or bounds, a changed logical binding,
 reused physical resource identity, failed source/restore checks, or any
-per-domain aggregate difference.
+per-domain aggregate difference. S3 `VersionId` values remain mandatory,
+dataset-local inputs to every exact metadata/object/tag read and invariant, but
+are normalized out of the paired File aggregate because an isolated S3 copy
+receives new system-generated Version IDs. Every other raw File row attribute
+and logical object observation remains comparison-bound.
 
 Changing any resource, role, bound, evaluation timestamp, or evidence version
 requires a fresh check. A `fail` result, an unavailable checker, an

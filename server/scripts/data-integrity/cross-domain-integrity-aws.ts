@@ -1254,7 +1254,7 @@ function createFileRowDigest(
       deleted: reference.deleted,
       fileId: reference.fileId,
       objectKey: reference.objectKey,
-      objectVersionId: reference.objectVersionId ?? null,
+      objectVersionPresent: reference.objectVersionId !== undefined,
       parentTargetId: reference.parentTargetId,
       parentTargetType: reference.parentTargetType,
       retentionUntil: reference.retentionUntil ?? null,
@@ -1266,11 +1266,18 @@ function createFileRowDigest(
     }))
     .sort(compareCanonicalJson)
   const normalizedObservations = observations
-    .map((observation) => ({ ...observation }))
+    .map((observation) => ({
+      contentType: observation.contentType,
+      deleted: observation.deleted,
+      objectKey: observation.objectKey,
+      scanStatus: observation.scanStatus,
+      sizeBytes: observation.sizeBytes,
+      uploadState: observation.uploadState,
+    }))
     .sort(compareCanonicalJson)
   const hmac = createHmac('sha256', digestKey)
   hmac.update('mukuroji-cross-domain-file-row/v1\0', 'utf8')
-  hmac.update(serializeCanonicalAttributeMap(rawItem), 'utf8')
+  hmac.update(serializeRestorePortableFileAttributeMap(rawItem), 'utf8')
   hmac.update('\0', 'utf8')
   hmac.update(JSON.stringify(normalizedReferences), 'utf8')
   hmac.update('\0', 'utf8')
@@ -1278,6 +1285,38 @@ function createFileRowDigest(
   hmac.update('\0', 'utf8')
   hmac.update(JSON.stringify([...failureCodes].sort()), 'utf8')
   return hmac.digest('hex')
+}
+
+/**
+ * Serializes a File row while replacing only system-generated S3 Version IDs.
+ *
+ * Isolated S3 copies receive new physical Version IDs, so paired source/restore
+ * evidence compares every other raw File attribute while local validation still
+ * binds each metadata row to its exact immutable object version.
+ *
+ * @param rawItem - Strictly decoded low-level File row.
+ * @returns Canonical row text with physical object-version values normalized.
+ */
+function serializeRestorePortableFileAttributeMap(
+  rawItem: Readonly<Record<string, AttributeValue>>,
+): string {
+  const versions = rawItem.versions?.L
+  if (!versions) return serializeCanonicalAttributeMap(rawItem)
+  const normalizedVersions = versions.map((version) => {
+    if (!version.M) return version
+    const normalizedVersion: Record<string, AttributeValue> = {}
+    for (const [name, value] of Object.entries(version.M)) {
+      normalizedVersion[name] = name === 'objectVersionId'
+        ? { S: 'restore-portable-object-version' }
+        : value
+    }
+    return { M: normalizedVersion }
+  })
+  const normalizedItem: Record<string, AttributeValue> = {}
+  for (const [name, value] of Object.entries(rawItem)) {
+    normalizedItem[name] = name === 'versions' ? { L: normalizedVersions } : value
+  }
+  return serializeCanonicalAttributeMap(normalizedItem)
 }
 
 /** Compares two constructed JSON values by canonical serialization. */

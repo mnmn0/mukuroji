@@ -23,6 +23,8 @@ import {
 } from './cross-domain-integrity-aws'
 import {
   calculateCrossDomainIntegrityResourceIdentityDigest,
+  compareCrossDomainIntegrityResults,
+  CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
   CROSS_DOMAIN_INTEGRITY_RESOURCE_TARGETS,
   verifyCrossDomainIntegrityResult,
   type CrossDomainIntegrityResourceIdentity,
@@ -54,6 +56,16 @@ const RESOURCE_IDENTITIES: CrossDomainIntegrityResourceIdentity[] =
 const RESOURCE_IDENTITY_DIGEST =
   calculateCrossDomainIntegrityResourceIdentityDigest(
     RESOURCE_IDENTITIES,
+    DIGEST_KEY,
+  )
+const RESTORE_RESOURCE_IDENTITIES: CrossDomainIntegrityResourceIdentity[] =
+  CROSS_DOMAIN_INTEGRITY_RESOURCE_TARGETS.map((target, index) => ({
+    target,
+    identityDigest: ((index + 8) % 16).toString(16).repeat(64),
+  }))
+const RESTORE_RESOURCE_IDENTITY_DIGEST =
+  calculateCrossDomainIntegrityResourceIdentityDigest(
+    RESTORE_RESOURCE_IDENTITIES,
     DIGEST_KEY,
   )
 
@@ -103,6 +115,12 @@ type RunBridgeOptions = {
   readonly maxPages?: number
   /** Fixed page size shared with the pure checker. */
   readonly pageSize?: number
+  /** Complete physical resource identities for this dataset. */
+  readonly resourceIdentities?: readonly CrossDomainIntegrityResourceIdentity[]
+  /** Keyed digest of the complete physical resource identity vector. */
+  readonly resourceIdentityDigest?: string
+  /** Dataset role represented by this invocation. */
+  readonly role?: 'restore' | 'source'
 }
 
 /** Optional fields for one immutable File version fixture. */
@@ -111,6 +129,8 @@ type FileVersionOptions = {
   readonly id?: string
   /** Monotonic File-domain version number. */
   readonly number?: number
+  /** Dataset-local immutable object-store version ID. */
+  readonly objectVersionId?: string
   /** Stored scan status. */
   readonly scanStatus?: 'available' | 'blocked' | 'failed' | 'pending' | 'scanning'
 }
@@ -436,7 +456,8 @@ function createFileVersion(options: FileVersionOptions = {}): object {
     createdAt: `2026-08-01T00:0${number}:00.000Z`,
     verifiedAt: `2026-08-01T00:1${number}:00.000Z`,
     objectKey: `workspaces/${WORKSPACE_ID}/files/${FILE_ID}/${id}/design.pdf`,
-    objectVersionId: number === 1 ? OBJECT_VERSION_ID : `${OBJECT_VERSION_ID}-${number}`,
+    objectVersionId: options.objectVersionId ??
+      (number === 1 ? OBJECT_VERSION_ID : `${OBJECT_VERSION_ID}-${number}`),
   }
 }
 
@@ -567,9 +588,10 @@ function runBridge(
     pageSize: options.pageSize ?? 100,
     reader,
     resourceBindingDigest: 'b'.repeat(64),
-    resourceIdentities: RESOURCE_IDENTITIES,
-    resourceIdentityDigest: RESOURCE_IDENTITY_DIGEST,
-    role: 'source',
+    resourceIdentities: options.resourceIdentities ?? RESOURCE_IDENTITIES,
+    resourceIdentityDigest: options.resourceIdentityDigest ??
+      RESOURCE_IDENTITY_DIGEST,
+    role: options.role ?? 'source',
   })
 }
 
@@ -1012,6 +1034,85 @@ describe('cross-domain integrity AWS composition bridge', () => {
     const pendingUploadReader = new FixtureAwsReader(pages, { uploadState: 'pending' })
     const pendingUploadResult = await runBridge(pendingUploadReader)
     expect(pendingUploadResult.failureCodes).toContain('FILE_METADATA_OBJECT_MISMATCH')
+  })
+
+  test('compares isolated S3 copies without requiring physical Version ID reuse', async () => {
+    const secondVersionId = 'version-two-private-canary'
+    const sourceVersions = [
+      createFileVersion(),
+      createFileVersion({
+        id: secondVersionId,
+        number: 2,
+        objectVersionId: 'source-object-version-two-private-canary',
+      }),
+    ]
+    const source = await runBridge(new FixtureAwsReader(
+      createPagesFromNativeRows(createHealthyNativeRows({
+        fileRows: [createFileRow({}, sourceVersions)],
+      })),
+    ))
+    const restoredObjectVersionId = 'isolated-restore-object-version-private-canary'
+    const restoredVersions = [
+      createFileVersion({ objectVersionId: restoredObjectVersionId }),
+      createFileVersion({
+        id: secondVersionId,
+        number: 2,
+        objectVersionId: 'isolated-restore-object-version-two-private-canary',
+      }),
+    ]
+    const restoredRows = createHealthyNativeRows({
+      fileRows: [createFileRow({}, restoredVersions)],
+    })
+    const restoreReader = new FixtureAwsReader(
+      createPagesFromNativeRows(restoredRows),
+    )
+    const restore = await runBridge(restoreReader, {
+      resourceIdentities: RESTORE_RESOURCE_IDENTITIES,
+      resourceIdentityDigest: RESTORE_RESOURCE_IDENTITY_DIGEST,
+      role: 'restore',
+    })
+
+    const restoredReferences: CrossDomainIntegrityObjectVersionReference[] = [
+      {
+        bucket: 'file',
+        key: OBJECT_KEY,
+        versionId: restoredObjectVersionId,
+      },
+      {
+        bucket: 'file',
+        key:
+          `workspaces/${WORKSPACE_ID}/files/${FILE_ID}/${secondVersionId}/design.pdf`,
+        versionId: 'isolated-restore-object-version-two-private-canary',
+      },
+    ]
+    expect(restoreReader.headReferences).toEqual(restoredReferences)
+    expect(restoreReader.attributeReferences).toEqual(restoredReferences)
+    expect(restoreReader.taggingReferences).toEqual(restoredReferences)
+    expect(compareCrossDomainIntegrityResults(source, restore, DIGEST_KEY)).toEqual({
+      kind: 'mukuroji-cross-domain-integrity-comparison',
+      contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+      status: 'pass',
+      failureCodes: [],
+    })
+
+    const changedRows = createHealthyNativeRows({
+      fileRows: [createFileRow(
+        { name: 'changed-logical-metadata.pdf' },
+        restoredVersions,
+      )],
+    })
+    const changedRestore = await runBridge(new FixtureAwsReader(
+      createPagesFromNativeRows(changedRows),
+    ), {
+      resourceIdentities: RESTORE_RESOURCE_IDENTITIES,
+      resourceIdentityDigest: RESTORE_RESOURCE_IDENTITY_DIGEST,
+      role: 'restore',
+    })
+    expect(compareCrossDomainIntegrityResults(
+      source,
+      changedRestore,
+      DIGEST_KEY,
+    ).failureCodes).toEqual(['RESTORE_FILE_DIFFERENCE'])
   })
 
   test('signs a stable missing-object failure for a HeadObject NotFound', async () => {

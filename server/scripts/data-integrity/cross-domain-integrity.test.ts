@@ -411,6 +411,37 @@ test('compares source and restore by stable aggregate domains', async () => {
   ])
 })
 
+test('treats exact object-store Version IDs as dataset-local restore identities', async () => {
+  const source = await run(createHealthyItems(), 'source')
+  const restoreItems = createHealthyItems()
+  for (const item of restoreItems) {
+    if (item.kind === 'file-metadata' || item.kind === 'file-object') {
+      item.objectVersionId = 'isolated-restore-object-version'
+    }
+  }
+  const restore = await run(restoreItems, 'restore')
+
+  expect(compareCrossDomainIntegrityResults(source, restore, digestKey)).toEqual({
+    kind: 'mukuroji-cross-domain-integrity-comparison',
+    contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+    status: 'pass',
+    failureCodes: [],
+  })
+
+  const changedRestoreItems = createHealthyItems()
+  for (const item of changedRestoreItems) {
+    if (item.kind === 'file-metadata' || item.kind === 'file-object') {
+      item.objectVersionId = 'isolated-restore-object-version'
+      item.sizeBytes += 1
+    }
+  }
+  expect(compareCrossDomainIntegrityResults(
+    source,
+    await run(changedRestoreItems, 'restore'),
+    digestKey,
+  ).failureCodes).toEqual(['RESTORE_FILE_DIFFERENCE'])
+})
+
 test('binds evidence and source/restore comparison to the intended logical resources', async () => {
   const source = await run(createHealthyItems(), 'source')
   const differentlyBoundRestore = await run(createHealthyItems(), 'restore', 'c'.repeat(64))

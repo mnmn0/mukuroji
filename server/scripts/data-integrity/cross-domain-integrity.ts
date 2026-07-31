@@ -1737,7 +1737,13 @@ function createEvidence(
   for (const item of items) {
     const domain = itemDomain(item)
     const digests = digestsByDomain.get(domain)
-    if (digests) digests.push(keyedDigest(digestKey, `item-${domain}-v1`, canonicalizeItem(item)))
+    if (digests) {
+      digests.push(keyedDigest(
+        digestKey,
+        `item-${domain}-v1`,
+        canonicalizeItemForEvidence(item),
+      ))
+    }
     itemCountsByDomain.set(domain, (itemCountsByDomain.get(domain) ?? 0) + 1)
   }
   if (externalFileEvidence) {
@@ -1941,6 +1947,43 @@ function canonicalizeItem(item: CrossDomainIntegrityItem): string {
     String(item.sizeBytes),
     item.scanStatus,
   ])
+}
+
+/**
+ * Produces restore-portable aggregate input while preserving exact local joins.
+ *
+ * @param item - One normalized integrity item.
+ * @returns Canonical evidence text with physical object Version IDs normalized.
+ */
+function canonicalizeItemForEvidence(item: CrossDomainIntegrityItem): string {
+  if (item.kind === 'file-metadata') {
+    return canonicalFields([
+      item.kind,
+      item.workspaceId,
+      item.teamId,
+      item.fileId,
+      item.versionId,
+      item.targetType,
+      item.targetId,
+      item.objectKey,
+      item.contentType,
+      String(item.sizeBytes),
+      item.scanStatus,
+    ])
+  }
+  if (item.kind === 'file-object') {
+    return canonicalFields([
+      item.kind,
+      item.objectKey,
+      item.workspaceId,
+      item.fileId,
+      item.versionId,
+      item.contentType,
+      String(item.sizeBytes),
+      item.scanStatus,
+    ])
+  }
+  return canonicalizeItem(item)
 }
 
 /** Encodes strings without delimiter ambiguity. */
