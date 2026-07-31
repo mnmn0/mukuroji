@@ -857,7 +857,9 @@ function createAuditCandidates(
   referencedWorkspaceId: string,
   workspaceMembersByAuditEntityId: ReadonlyMap<string, WorkspaceMemberAuditIdentity>,
 ): PendingAuditReference[] {
-  const targetHistorical = auditEventIsHistorical(event)
+  const sourceHistorical = auditEventSourceIsHistorical(event)
+  const targetHistorical = sourceHistorical ||
+    auditEventTargetIsHistorical(event)
   const entityIsTarget = event.entity.type === event.target.type &&
     event.entity.id === event.target.id
   const candidates = [
@@ -865,7 +867,7 @@ function createAuditCandidates(
       event,
       event.entity,
       referencedWorkspaceId,
-      entityIsTarget && targetHistorical,
+      sourceHistorical || (entityIsTarget && targetHistorical),
       workspaceMembersByAuditEntityId,
     ),
     createAuditCandidate(
@@ -1019,9 +1021,13 @@ function readAuditMetadataText(
   return isText(value) ? value : undefined
 }
 
-/** Classifies explicit historical Audit semantics. */
-function auditEventIsHistorical(event: AuditEventV1): boolean {
-  if (event.source === 'backfill' || event.source === 'migration') return true
+/** Classifies an Audit source whose complete resource snapshot is historical. */
+function auditEventSourceIsHistorical(event: AuditEventV1): boolean {
+  return event.source === 'backfill' || event.source === 'migration'
+}
+
+/** Classifies lifecycle semantics that make only an event target historical. */
+function auditEventTargetIsHistorical(event: AuditEventV1): boolean {
   const lifecycle = `${event.eventType}.${event.action}`.toLowerCase()
   return ['archiv', 'deactivat', 'delet', 'expir', 'remov', 'revok']
     .some((marker) => lifecycle.includes(marker))

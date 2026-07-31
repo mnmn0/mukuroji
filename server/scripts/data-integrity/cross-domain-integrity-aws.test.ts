@@ -44,6 +44,10 @@ const MEMBER_KEY = 'directory-member-private-canary'
 const FILE_ID = 'file-private-canary'
 const VERSION_ID = 'version-private-canary'
 const OBJECT_VERSION_ID = 'object-version-private-canary'
+const HISTORICAL_AUDIT_SOURCES: readonly ('backfill' | 'migration')[] = [
+  'backfill',
+  'migration',
+]
 const OBJECT_KEY =
   `workspaces/${WORKSPACE_ID}/files/${FILE_ID}/${VERSION_ID}/design.pdf`
 const DIGEST_KEY = new Uint8Array(32).fill(31)
@@ -374,6 +378,42 @@ function createWorkItemAuditRow(
     entity: { type: 'work-item', id: `team/${TEAM_ID}/issue/${workItemId}` },
     action,
     metadata: { teamId: TEAM_ID, issueId: workItemId },
+  })
+}
+
+/**
+ * Creates an Audit event whose Work Item entity differs from its Comment target.
+ *
+ * @param source - Snapshot backfill or ordinary system-event provenance.
+ * @param action - Backfill or target-deletion lifecycle action.
+ * @returns Stored current-schema Audit event.
+ */
+function createCommentTargetAuditRow(
+  source: 'backfill' | 'migration' | 'system',
+  action: 'backfilled' | 'deleted',
+): object {
+  const context = createMutationAuditContext({
+    workspaceId: WORKSPACE_ID,
+    actor: { id: 'system:bridge-test', kind: 'system' },
+    idempotencyKey: `bridge-comment-${source}-${action}`,
+    occurredAt: '2026-08-01T00:07:00.000Z',
+    request: { method: 'CHECK', path: '/internal/data-integrity' },
+    source: { kind: source },
+  })
+  return createAuditEvent({
+    context,
+    expiresAt: 2_000_000_000,
+    eventType: `comment.${action}`,
+    entity: {
+      type: 'work-item',
+      id: `team/${TEAM_ID}/issue/${WORK_ITEM_ID}`,
+    },
+    target: {
+      type: 'comment',
+      id: `team/${TEAM_ID}/issue/${WORK_ITEM_ID}/comment/historical`,
+    },
+    action,
+    metadata: { teamId: TEAM_ID, issueId: WORK_ITEM_ID },
   })
 }
 
@@ -1172,6 +1212,36 @@ describe('cross-domain integrity AWS composition bridge', () => {
     expect(result.status).toBe('pass')
     expect(result.failureCodes).not.toContain('AUDIT_RESOURCE_MISSING')
     expect(JSON.stringify(result)).not.toContain(historicalWorkItemId)
+  })
+
+  test('treats every resource candidate from backfill or migration as historical', async () => {
+    for (const source of HISTORICAL_AUDIT_SOURCES) {
+      const rows = createHealthyNativeRows({
+        auditRows: [createCommentTargetAuditRow(source, 'backfilled')],
+        fileRows: [],
+      })
+      rows['work-items'] = []
+      const reader = new FixtureAwsReader(createPagesFromNativeRows(rows))
+
+      const result = await runBridge(reader)
+
+      expect(result.status).toBe('pass')
+      expect(result.failureCodes).not.toContain('AUDIT_RESOURCE_MISSING')
+    }
+  })
+
+  test('still requires a current entity when only an Audit target was deleted', async () => {
+    const rows = createHealthyNativeRows({
+      auditRows: [createCommentTargetAuditRow('system', 'deleted')],
+      fileRows: [],
+    })
+    rows['work-items'] = []
+    const reader = new FixtureAwsReader(createPagesFromNativeRows(rows))
+
+    const result = await runBridge(reader)
+
+    expect(result.status).toBe('fail')
+    expect(result.failureCodes).toContain('AUDIT_RESOURCE_MISSING')
   })
 
   test('detects tenant mismatch when a real Workspace equals the primary sentinel', async () => {
