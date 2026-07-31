@@ -72,6 +72,7 @@ import {
   type WorkspaceSearchMigrationManagedAwsTransport,
   type WorkspaceSearchMigrationManagedAwsSession,
   type WorkspaceSearchMigrationManagedPartialRollbackAwsPort,
+  WORKSPACE_SEARCH_MIGRATION_MANAGED_ARTIFACT_REQUEST_TIMEOUT_MILLISECONDS,
   WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_CANONICAL_BYTES,
   WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_OPERATIONS,
   WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_TOTAL_ROWS,
@@ -4530,6 +4531,122 @@ describe('Workspace Search migration AWS identity adapter', () => {
     expect(transport.headImmutableArtifactCommands).toHaveLength(0)
     expect(transport.getImmutableArtifactCommands).toHaveLength(0)
     port.close()
+  })
+
+  test('validates measured artifact time and retention without AWS I/O', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const clockTime = new Date('2026-07-28T03:00:00.000Z')
+    let clockFails = false
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => {
+        if (clockFails) throw new Error('raw clock failure')
+        return new Date(clockTime)
+      },
+    )
+    const additionalHeadroomMilliseconds = 15 * 60_000
+    const retentionDayMilliseconds = 24 * 60 * 60 * 1_000
+    const reviewedDryRunCompletedAt =
+      new Date(clockTime.getTime() - 1).toISOString()
+    const preflightBase = {
+      minimumAdditionalHeadroomMilliseconds:
+        additionalHeadroomMilliseconds,
+      reviewedDryRunCompletedAt,
+    }
+    const invalidStateFailure = new WorkspaceSearchMigrationFailure(
+      'INVALID_STATE',
+      'Workspace Search planning artifact preflight stopped safely (INVALID_STATE).',
+    )
+    const invalidArgumentFailure = new WorkspaceSearchMigrationFailure(
+      'INVALID_ARGUMENT',
+      'Workspace Search planning artifact preflight stopped safely (INVALID_ARGUMENT).',
+    )
+    const invalidDryRunFailure = new WorkspaceSearchMigrationFailure(
+      'DRY_RUN_INVALID_ROWS',
+      'Workspace Search planning artifact preflight stopped safely (DRY_RUN_INVALID_ROWS).',
+    )
+
+    expect(
+      () => port.validatePlanningArtifactPreflight({
+        ...preflightBase,
+        retainUntil: '2026-08-28T03:15:10.000Z',
+      }),
+    ).toThrow(invalidStateFailure)
+
+    const configuration = await port.measureConfiguration()
+    const minimumRetentionEpochMilliseconds =
+      clockTime.getTime() +
+      configuration.journal.defaultRetentionDays *
+        retentionDayMilliseconds +
+      additionalHeadroomMilliseconds +
+      WORKSPACE_SEARCH_MIGRATION_MANAGED_ARTIFACT_REQUEST_TIMEOUT_MILLISECONDS
+    const maximumRetentionEpochMilliseconds =
+      clockTime.getTime() +
+      (configuration.journal.defaultRetentionDays + 1) *
+        retentionDayMilliseconds
+    const minimumRetention =
+      new Date(minimumRetentionEpochMilliseconds).toISOString()
+    const maximumRetention =
+      new Date(maximumRetentionEpochMilliseconds).toISOString()
+
+    expect(
+      port.validatePlanningArtifactPreflight({
+        ...preflightBase,
+        retainUntil: minimumRetention,
+      }),
+    ).toBe(minimumRetention)
+    expect(
+      port.validatePlanningArtifactPreflight({
+        ...preflightBase,
+        retainUntil: maximumRetention,
+      }),
+    ).toBe(maximumRetention)
+    expect(
+      () => port.validatePlanningArtifactPreflight({
+        ...preflightBase,
+        retainUntil: new Date(
+          minimumRetentionEpochMilliseconds - 1,
+        ).toISOString(),
+      }),
+    ).toThrow(invalidArgumentFailure)
+    expect(
+      () => port.validatePlanningArtifactPreflight({
+        ...preflightBase,
+        retainUntil: new Date(
+          maximumRetentionEpochMilliseconds + 1,
+        ).toISOString(),
+      }),
+    ).toThrow(invalidArgumentFailure)
+    expect(
+      () => port.validatePlanningArtifactPreflight({
+        ...preflightBase,
+        retainUntil: minimumRetention,
+        reviewedDryRunCompletedAt:
+          new Date(clockTime.getTime() + 1).toISOString(),
+      }),
+    ).toThrow(invalidDryRunFailure)
+    expect(transport.putImmutableArtifactCommands).toHaveLength(0)
+    expect(transport.headImmutableArtifactCommands).toHaveLength(0)
+    expect(transport.getImmutableArtifactCommands).toHaveLength(0)
+
+    clockFails = true
+    expect(
+      () => port.validatePlanningArtifactPreflight({
+        ...preflightBase,
+        retainUntil: minimumRetention,
+      }),
+    ).toThrow(invalidStateFailure)
+    clockFails = false
+    port.close()
+    expect(
+      () => port.validatePlanningArtifactPreflight({
+        ...preflightBase,
+        retainUntil: minimumRetention,
+      }),
+    ).toThrow(invalidStateFailure)
   })
 
   test(

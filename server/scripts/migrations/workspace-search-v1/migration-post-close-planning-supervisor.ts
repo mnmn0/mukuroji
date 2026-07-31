@@ -1,8 +1,8 @@
 import {
   createMigrationDigest,
   createWorkspaceSearchConfigurationHash,
-  isCanonicalTimestamp,
   isHexDigest,
+  MINIMUM_MAINTENANCE_DRAIN_SECONDS,
   requireMigrationIdentifier,
   type WorkspaceSearchMigrationConfiguration,
   WorkspaceSearchMigrationFailure,
@@ -77,6 +77,10 @@ import {
   parseMaintenanceEvidence,
 } from './maintenance-evidence'
 
+/** Mandatory post-close drain reserved before the irreversible close. */
+const postCloseMinimumDrainMilliseconds =
+  MINIMUM_MAINTENANCE_DRAIN_SECONDS * 1_000
+
 /**
  * Managed session surface required by the post-close planning supervisor.
  */
@@ -96,6 +100,7 @@ export type WorkspaceSearchMigrationPostClosePlanningSession = Pick<
   | 'readSourceEvidenceProgress'
   | 'readTargetEvidenceProgress'
   | 'renewMaintenanceEvidence'
+  | 'validatePlanningArtifactPreflight'
 >
 
 /**
@@ -623,10 +628,6 @@ export async function superviseWorkspaceSearchMigrationPostClosePlanning(
   )
   const clock = request.clock ?? defaultPlanningClock
   const planningJoinLimits = request.planningJoinLimits
-  const retainUntil = readPlanningRetention(
-    request.retainUntil,
-    clock,
-  )
   const initialGuard = createSignalGuard(request.signal)
   const configuration = await runGuardedOperation(
     initialGuard,
@@ -662,6 +663,14 @@ export async function superviseWorkspaceSearchMigrationPostClosePlanning(
   )
   if (completed !== undefined) return completed
 
+  const retainUntil = readPlanningArtifactPreflight(
+    request.session,
+    request.retainUntil,
+    reviewedDryRunEvidence.completedAt,
+    initialState.boundary === undefined
+      ? postCloseMinimumDrainMilliseconds
+      : 0,
+  )
   const lease = await runGuardedOperation(
     initialGuard,
     () => request.session.acquireLease({ runId, ownerId }),
@@ -684,6 +693,8 @@ export async function superviseWorkspaceSearchMigrationPostClosePlanning(
       rootPort,
       planningGateway,
       reviewedDryRunEvidenceBytes,
+      reviewedDryRunCompletedAt:
+        reviewedDryRunEvidence.completedAt,
       dryRunEvidenceDigest,
       planningJoinLimits,
       retainUntil,
@@ -718,6 +729,8 @@ type RunPostClosePlanningInput = {
     WorkspaceSearchMigrationPlanningArtifactAwsGateway
   /** Exact canonical operator-reviewed dry-run bytes. */
   readonly reviewedDryRunEvidenceBytes: Uint8Array
+  /** Canonical completion time carried by the reviewed dry-run artifact. */
+  readonly reviewedDryRunCompletedAt: string
   /** Digest of the exact reviewed dry-run artifact. */
   readonly dryRunEvidenceDigest: string
   /** Bounded-process planning join limits. */
@@ -777,6 +790,12 @@ async function runPostClosePlanning(
   let boundary = state.boundary
   if (boundary === undefined) {
     const closeAuthority = await authorityController.renewForClose()
+    void readPlanningArtifactPreflight(
+      input.session,
+      input.retainUntil,
+      input.reviewedDryRunCompletedAt,
+      postCloseMinimumDrainMilliseconds,
+    )
     boundary = await runGuardedOperation(
       input.context,
       () => input.boundaryPort.close(closeAuthority),
@@ -843,7 +862,10 @@ async function runPostClosePlanning(
     targetOwnershipEvidence:
       prepared.result.targetOwnershipEvidence,
     candidates: prepared.result.candidates,
-    createdAt: admittedBoundary.planningAdmission.admittedAt,
+    createdAt: selectPlanningCreatedAt(
+      admittedBoundary.planningAdmission.admittedAt,
+      input.reviewedDryRunCompletedAt,
+    ),
   })
   input.context.assertActive()
   const storedProvenance = await writePreparedPlanningProvenance(
@@ -1554,26 +1576,41 @@ function readPlanningJoinLimits(
 }
 
 /**
- * Validates the shared retention deadline before writer-fence close.
+ * Validates reviewed time and retention before writer-fence close.
  *
+ * @param session - Current measured managed-session capability.
  * @param retainUntil - Caller-selected canonical retention timestamp.
- * @param clock - Trusted supervisor clock.
- * @returns Exact canonical future retention deadline.
+ * @param reviewedDryRunCompletedAt - Reviewed dry-run completion time.
+ * @param minimumAdditionalHeadroomMilliseconds - Required pre-write runway.
+ * @returns Exact deadline with the complete immutable-write headroom.
  */
-function readPlanningRetention(
+function readPlanningArtifactPreflight(
+  session: WorkspaceSearchMigrationPostClosePlanningSession,
   retainUntil: string,
-  clock: WorkspaceSearchMigrationHeartbeatClock,
+  reviewedDryRunCompletedAt: string,
+  minimumAdditionalHeadroomMilliseconds: number,
 ): string {
-  if (
-    !isCanonicalTimestamp(retainUntil) ||
-    Date.parse(retainUntil) <= readPlanningClock(clock).getTime()
-  ) {
-    return failPlanningSupervisor(
-      'INVALID_ARGUMENT',
-      'Planning artifact retention deadline is not in the future.',
-    )
-  }
-  return retainUntil
+  return session.validatePlanningArtifactPreflight({
+    retainUntil,
+    minimumAdditionalHeadroomMilliseconds,
+    reviewedDryRunCompletedAt,
+  })
+}
+
+/**
+ * Selects one restart-stable plan epoch from durable and reviewed timestamps.
+ *
+ * @param admittedAt - Canonical durable revision-two admission time.
+ * @param dryRunCompletedAt - Canonical reviewed dry-run completion time.
+ * @returns The later original canonical timestamp.
+ */
+function selectPlanningCreatedAt(
+  admittedAt: string,
+  dryRunCompletedAt: string,
+): string {
+  return Date.parse(admittedAt) >= Date.parse(dryRunCompletedAt)
+    ? admittedAt
+    : dryRunCompletedAt
 }
 
 /**

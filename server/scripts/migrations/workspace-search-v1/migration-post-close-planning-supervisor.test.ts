@@ -43,14 +43,17 @@ import type {
   WorkspaceSearchMigrationHeartbeatScheduler,
   WorkspaceSearchMigrationHeartbeatTimerHandle,
 } from './migration-heartbeat-supervisor'
-import type {
-  WorkspaceSearchMigrationPreparedCommittedPlanningEvidence,
+import {
+  type ValidateWorkspaceSearchMigrationPlanningArtifactPreflightInput,
+  WORKSPACE_SEARCH_MIGRATION_MANAGED_ARTIFACT_REQUEST_TIMEOUT_MILLISECONDS,
+  type WorkspaceSearchMigrationPreparedCommittedPlanningEvidence,
 } from './migration-identity-aws'
-import type {
-  ReadWorkspaceSearchMigrationImmutableArtifactInput,
-  WorkspaceSearchMigrationImmutableArtifactAwsPort,
-  WorkspaceSearchMigrationImmutableArtifactReference,
-  WriteWorkspaceSearchMigrationImmutableArtifactInput,
+import {
+  hasWorkspaceSearchMigrationImmutableArtifactRetentionHeadroom,
+  type ReadWorkspaceSearchMigrationImmutableArtifactInput,
+  type WorkspaceSearchMigrationImmutableArtifactAwsPort,
+  type WorkspaceSearchMigrationImmutableArtifactReference,
+  type WriteWorkspaceSearchMigrationImmutableArtifactInput,
 } from './migration-immutable-artifact-aws'
 import {
   createAwsWorkspaceSearchMigrationPlanningArtifactGateway,
@@ -134,7 +137,8 @@ const ownerId = 'post-close-planning-owner'
 const now = new Date('2026-07-31T01:36:00.000Z')
 const closedAt = '2026-07-31T01:20:00.000Z'
 const drainCompletedAt = '2026-07-31T01:35:00.000Z'
-const retainUntil = '2026-09-01T00:00:00.000Z'
+const retainUntil = '2026-08-31T00:00:00.000Z'
+const retentionDayMilliseconds = 24 * 60 * 60 * 1_000
 const planningJoinLimits: WorkspaceSearchMigrationPlanningJoinLimits = {
   maxTotalRows: 100,
   maxTotalCanonicalItemBytes: 1024 * 1024,
@@ -199,6 +203,12 @@ type DurableSupervisorState = {
 type RecordingSessionBehavior = {
   /** Fails the first periodic heartbeat after the initial heartbeat succeeds. */
   readonly failPeriodicHeartbeat?: boolean
+  /** Optional artifact-preflight clock advanced by a focused test. */
+  readonly artifactPreflightClock?: () => Date
+  /** Optional sealed-root publication clock advanced by a focused test. */
+  readonly sealedRootClock?: () => Date
+  /** Fails planning after durable post-close evidence is complete. */
+  readonly failPlanningPreparation?: boolean
   /** Optional barrier entered by a selected source page commit. */
   readonly beforeSourceCommit?: (
     source: WorkspaceSearchMigrationSourceName,
@@ -464,6 +474,45 @@ implements WorkspaceSearchMigrationPostClosePlanningSession {
     Promise<WorkspaceSearchMigrationConfiguration> {
     this.events.push('session:measure')
     return structuredClone(this.configuration)
+  }
+
+  /**
+   * Validates one deadline with the measured immutable-port clock and timeout.
+   *
+   * @param input - Exact deadline and additional pre-write runway.
+   * @returns Exact accepted canonical retention deadline.
+   */
+  validatePlanningArtifactPreflight(
+    input:
+      ValidateWorkspaceSearchMigrationPlanningArtifactPreflightInput,
+  ): string {
+    this.events.push('artifacts:retention:validate')
+    const currentTime =
+      this.behavior.artifactPreflightClock?.() ?? now
+    if (
+      !hasWorkspaceSearchMigrationImmutableArtifactRetentionHeadroom(
+        input.retainUntil,
+        this.configuration,
+        WORKSPACE_SEARCH_MIGRATION_MANAGED_ARTIFACT_REQUEST_TIMEOUT_MILLISECONDS,
+        currentTime,
+        input.minimumAdditionalHeadroomMilliseconds,
+      )
+    ) {
+      throw new WorkspaceSearchMigrationFailure(
+        'INVALID_ARGUMENT',
+        'Fixture planning retention is unsafe.',
+      )
+    }
+    if (
+      Date.parse(input.reviewedDryRunCompletedAt) >
+        currentTime.getTime()
+    ) {
+      throw new WorkspaceSearchMigrationFailure(
+        'DRY_RUN_INVALID_ROWS',
+        'Fixture reviewed dry-run completes in the future.',
+      )
+    }
+    return input.retainUntil
   }
 
   /**
@@ -823,6 +872,12 @@ implements WorkspaceSearchMigrationPostClosePlanningSession {
     >[0],
   ): Promise<WorkspaceSearchMigrationPreparedCommittedPlanningEvidence> {
     this.events.push('planning:prepare')
+    if (this.behavior.failPlanningPreparation === true) {
+      throw new WorkspaceSearchMigrationFailure(
+        'DRY_RUN_INVALID_ROWS',
+        'Injected stale reviewed dry-run failure.',
+      )
+    }
     const sourcePages = {
       'project-directory': [
         createSourcePlanningMaterial(
@@ -937,7 +992,8 @@ implements WorkspaceSearchMigrationPostClosePlanningSession {
         const root =
           createWorkspaceSearchMigrationSealedPlanningAuthorityV2({
             ...input,
-            sealedAt: now.toISOString(),
+            sealedAt:
+              (this.behavior.sealedRootClock?.() ?? now).toISOString(),
           })
         this.state.root = root
         if (
@@ -1106,6 +1162,160 @@ describe('Workspace Search post-close planning supervisor', () => {
     expect(clockReads).toBe(1)
   })
 
+  test('rejects unsafe retention windows before lease acquisition or writer close', async () => {
+    const invalidRetentions = [
+      new Date(
+        now.getTime() +
+          30 * retentionDayMilliseconds +
+          15 * 60_000 +
+          9_999,
+      ).toISOString(),
+      new Date(
+        now.getTime() +
+          31 * retentionDayMilliseconds +
+          1,
+      ).toISOString(),
+    ]
+
+    for (const invalidRetention of invalidRetentions) {
+      const fixture = createSupervisorFixture()
+      const session = fixture.createSession()
+      const failure = await captureFailure(
+        superviseWorkspaceSearchMigrationPostClosePlanning({
+          ...createSupervisorInput(fixture, session),
+          retainUntil: invalidRetention,
+        }),
+      )
+
+      expect(readFailureCode(failure)).toBe('INVALID_ARGUMENT')
+      expect(session.acquireCount).toBe(0)
+      expect(fixture.state.boundary).toBeUndefined()
+      expect(fixture.provider.requests).toEqual([])
+      expect(fixture.events).not.toContain('boundary:close')
+    }
+  })
+
+  test('revalidates retention after close-authority renewal before writer close', async () => {
+    const fixture = createSupervisorFixture()
+    let artifactPreflightClockReads = 0
+    const session = fixture.createSession({
+      artifactPreflightClock: () => {
+        const elapsedMilliseconds =
+          artifactPreflightClockReads
+        artifactPreflightClockReads += 1
+        return new Date(now.getTime() + elapsedMilliseconds)
+      },
+    })
+    const minimumSafeRetention = new Date(
+      now.getTime() +
+        30 * retentionDayMilliseconds +
+        15 * 60_000 +
+        WORKSPACE_SEARCH_MIGRATION_MANAGED_ARTIFACT_REQUEST_TIMEOUT_MILLISECONDS,
+    ).toISOString()
+
+    const failure = await captureFailure(
+      superviseWorkspaceSearchMigrationPostClosePlanning({
+        ...createSupervisorInput(fixture, session),
+        retainUntil: minimumSafeRetention,
+      }),
+    )
+
+    expect(readFailureCode(failure)).toBe('INVALID_ARGUMENT')
+    expect(artifactPreflightClockReads).toBe(2)
+    expect(
+      fixture.events.filter(
+        (event) => event === 'artifacts:retention:validate',
+      ),
+    ).toHaveLength(2)
+    expect(
+      fixture.events.filter((event) =>
+        event.startsWith('authority:renew:')),
+    ).toEqual(['authority:renew:1'])
+    expect(fixture.provider.requests.map(({ phase }) => phase))
+      .toEqual(['close'])
+    expect(fixture.state.boundary).toBeUndefined()
+    expect(fixture.events).not.toContain('boundary:close')
+  })
+
+  test('rejects a dry run newer than the measured publication clock before lease acquisition', async () => {
+    const fixture = createSupervisorFixture()
+    const session = fixture.createSession()
+    const futureDryRunEvidenceBytes =
+      createReviewedDryRunEvidenceBytes(
+        fixture.configurationHash,
+        new Date(now.getTime() + 1).toISOString(),
+      )
+
+    const failure = await captureFailure(
+      superviseWorkspaceSearchMigrationPostClosePlanning({
+        ...createSupervisorInput(fixture, session),
+        reviewedDryRunEvidenceBytes: futureDryRunEvidenceBytes,
+        clock: () => new Date(now.getTime() + 2),
+      }),
+    )
+
+    expect(readFailureCode(failure)).toBe('DRY_RUN_INVALID_ROWS')
+    expect(session.acquireCount).toBe(0)
+    expect(fixture.events).toContain('session:measure')
+    expect(fixture.events).toContain('artifacts:retention:validate')
+    expect(fixture.events).not.toContain('boundary:close')
+    expect(fixture.events).not.toContain('planning:prepare')
+  })
+
+  test('uses a later replacement dry-run completion as the restart-stable plan epoch', async () => {
+    const fixture = createSupervisorFixture()
+    const firstFailure = await captureFailure(
+      superviseWorkspaceSearchMigrationPostClosePlanning(
+        createSupervisorInput(
+          fixture,
+          fixture.createSession({
+            failPlanningPreparation: true,
+          }),
+        ),
+      ),
+    )
+    expect(readFailureCode(firstFailure))
+      .toBe('DRY_RUN_INVALID_ROWS')
+    const admittedBoundary = requireAdmittedBoundary(fixture.state)
+    expect(fixture.state.root).toBeUndefined()
+    fixture.events.length = 0
+    fixture.provider.requests.length = 0
+    const replacementCompletedAt =
+      new Date(now.getTime() + 1_000).toISOString()
+    const replacementDryRunEvidenceBytes =
+      createReviewedDryRunEvidenceBytes(
+        fixture.configurationHash,
+        replacementCompletedAt,
+      )
+
+    const resumed =
+      await superviseWorkspaceSearchMigrationPostClosePlanning({
+        ...createSupervisorInput(
+          fixture,
+          fixture.createSession({
+            artifactPreflightClock: () =>
+              new Date(now.getTime() + 2_000),
+            sealedRootClock: () =>
+              new Date(now.getTime() + 2_000),
+          }),
+        ),
+        reviewedDryRunEvidenceBytes:
+          replacementDryRunEvidenceBytes,
+        clock: () => new Date(now.getTime() + 2_000),
+      })
+
+    expect(admittedBoundary.planningAdmission.admittedAt)
+      .toBe(now.toISOString())
+    expect(Date.parse(replacementCompletedAt)).toBeGreaterThan(
+      Date.parse(admittedBoundary.planningAdmission.admittedAt),
+    )
+    expect(resumed.planSeal.createdAt).toBe(replacementCompletedAt)
+    expect(resumed.executionBoundary.boundaryDigest)
+      .toBe(admittedBoundary.boundaryDigest)
+    expect(fixture.events).not.toContain('boundary:close')
+    expect(fixture.events).not.toContain('boundary:admit')
+  })
+
   test('recovers a same-fence revision-one pointer before renewing admission evidence', async () => {
     const fixture = createSupervisorFixture()
     fixture.provider.invalidPostCloseStart = true
@@ -1180,7 +1390,11 @@ describe('Workspace Search post-close planning supervisor', () => {
 
     fixture.events.length = 0
     fixture.provider.requests.length = 0
-    const recoverySession = fixture.createSession()
+    const recoverySession = fixture.createSession({
+      artifactPreflightClock: () => {
+        throw new Error('read-only recovery must not read the clock')
+      },
+    })
     const recovered =
       await superviseWorkspaceSearchMigrationPostClosePlanning(
         createSupervisorInput(fixture, recoverySession),
@@ -1537,10 +1751,12 @@ function createMaintenanceEvidenceBytes(
  * Creates reviewed empty scan evidence matching five one-page chains.
  *
  * @param configurationHash - Exact measured configuration digest.
+ * @param completedAt - Canonical reviewed completion timestamp.
  * @returns Canonical passing dry-run bytes.
  */
 function createReviewedDryRunEvidenceBytes(
   configurationHash: string,
+  completedAt = '2026-07-31T00:30:00.000Z',
 ): Uint8Array {
   const scanSnapshot = createEmptyScanSnapshot(configurationHash)
   const evidence: WorkspaceSearchDryRunEvidence = {
@@ -1550,7 +1766,7 @@ function createReviewedDryRunEvidenceBytes(
     migrationVersion: WORKSPACE_SEARCH_MIGRATION_VERSION,
     configurationHash,
     startedAt: '2026-07-31T00:00:00.000Z',
-    completedAt: '2026-07-31T00:30:00.000Z',
+    completedAt,
     sources: scanSnapshot.sources,
     target: scanSnapshot.target,
     status: 'pass',

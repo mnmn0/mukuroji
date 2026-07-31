@@ -829,7 +829,14 @@ execution-control generationをquarantineし、standalone adapterのresponse-los
 Close後planning supervisorは、同じheartbeat leaseの下でrevision 1 close、close時刻以後に始まる
 15分以上のzero-mutation drain、revision 2 admission、durable headからの4 source＋target再取得、
 private cursor witnessからのprovenance保存、plan保存、fresh current authority付きsealed root publicationを
-順に実行します。Crash時はsame-fence maintenance pointerとrevision 1/2、5 head、sealed rootから再開し、
+順に実行します。
+初回close前のartifact retentionはmeasured default retention、S3 request timeout 10秒、必須drain 15分を
+含む下限からdefault retention＋1日までに制限し、close authority更新後かつwriter close直前にも同じ
+条件を再検証します。各immutable Put直前の通常のretention再検証も維持します。Plan epochはrevision 2の
+`admittedAt`とreviewed dry-runの`completedAt`の遅い方から決定し、同じdurable inputでは再起動後も固定し
+つつ、fence後に再作成したdry-runを受け付けます。sealed root publicationと同じmanaged clockより未来の
+dry-run完了時刻はread-only root recoveryの後、lease取得とcloseより前に拒否します。
+Crash時はsame-fence maintenance pointerとrevision 1/2、5 head、sealed rootから再開し、
 signal、heartbeat failure、回収不能なresponse loss、session quarantine後に次のtop-level operationを
 開始しません。Apply/seal/verification/rollback
 CLIとorchestrator配線、terminal outcomeへ束縛したwriter-fence release、migration専用

@@ -98,6 +98,55 @@ export interface WorkspaceSearchMigrationImmutableArtifactAwsTransport {
 export type WorkspaceSearchMigrationImmutableArtifactClock = () => Date
 
 /**
+ * Reports whether one fixed deadline has the complete immutable-write window.
+ *
+ * The accepted interval starts at the measured default retention plus one
+ * complete request timeout and ends at the configured one-day extension cap.
+ *
+ * @param retainUntil - Candidate canonical Object Lock deadline.
+ * @param configuration - Exact measured migration configuration.
+ * @param requestTimeoutMilliseconds - Maximum duration of one S3 request.
+ * @param currentTime - Detached trusted current time.
+ * @param minimumAdditionalHeadroomMilliseconds - Extra preflight-only runway.
+ * @returns Whether the deadline has the requested headroom at this instant.
+ */
+export function hasWorkspaceSearchMigrationImmutableArtifactRetentionHeadroom(
+  retainUntil: string,
+  configuration: WorkspaceSearchMigrationConfiguration,
+  requestTimeoutMilliseconds: number,
+  currentTime: Date,
+  minimumAdditionalHeadroomMilliseconds = 0,
+): boolean {
+  try {
+    const currentTimeEpochMilliseconds =
+      Date.prototype.getTime.call(currentTime)
+    if (
+      !isCanonicalTimestamp(retainUntil) ||
+      nodeUtilTypes.isProxy(currentTime) ||
+      !(currentTime instanceof Date) ||
+      !Number.isSafeInteger(currentTimeEpochMilliseconds) ||
+      currentTimeEpochMilliseconds < 0 ||
+      !Number.isSafeInteger(requestTimeoutMilliseconds) ||
+      requestTimeoutMilliseconds <= 0 ||
+      requestTimeoutMilliseconds > maximumTimeoutMilliseconds ||
+      !Number.isSafeInteger(minimumAdditionalHeadroomMilliseconds) ||
+      minimumAdditionalHeadroomMilliseconds < 0
+    ) {
+      return false
+    }
+    return hasImmutableArtifactRetentionHeadroom(
+      Date.parse(retainUntil),
+      configuration,
+      requestTimeoutMilliseconds,
+      currentTimeEpochMilliseconds,
+      minimumAdditionalHeadroomMilliseconds,
+    )
+  } catch {
+    return false
+  }
+}
+
+/**
  * Dependencies and finite limits for one immutable object port.
  */
 export type CreateWorkspaceSearchMigrationImmutableArtifactAwsPortInput = {
@@ -896,6 +945,36 @@ function requireImmutableArtifactRetentionHeadroom(
   failureCode: ImmutableArtifactFailureCode,
 ): void {
   const nowEpochMilliseconds = readImmutableArtifactClock(clock)
+  if (
+    !hasImmutableArtifactRetentionHeadroom(
+      retainUntilEpochMilliseconds,
+      configuration,
+      requestTimeoutMilliseconds,
+      nowEpochMilliseconds,
+      0,
+    )
+  ) {
+    return failImmutableArtifact(failureCode)
+  }
+}
+
+/**
+ * Checks one already parsed retention deadline against the bounded window.
+ *
+ * @param retainUntilEpochMilliseconds - Exact parsed retention deadline.
+ * @param configuration - Adapter-bound measured journal configuration.
+ * @param requestTimeoutMilliseconds - Maximum time one Put may consume.
+ * @param nowEpochMilliseconds - Exact detached current time.
+ * @param minimumAdditionalHeadroomMilliseconds - Extra preflight-only runway.
+ * @returns Whether the deadline preserves the complete configured window.
+ */
+function hasImmutableArtifactRetentionHeadroom(
+  retainUntilEpochMilliseconds: number,
+  configuration: WorkspaceSearchMigrationConfiguration,
+  requestTimeoutMilliseconds: number,
+  nowEpochMilliseconds: number,
+  minimumAdditionalHeadroomMilliseconds: number,
+): boolean {
   const minimumRetentionMilliseconds =
     configuration.journal.defaultRetentionDays *
     retentionDayMilliseconds
@@ -904,10 +983,14 @@ function requireImmutableArtifactRetentionHeadroom(
       maximumAdditionalRetentionDays) *
     retentionDayMilliseconds
   const minimumHeadroomMilliseconds =
-    minimumRetentionMilliseconds + requestTimeoutMilliseconds
+    minimumRetentionMilliseconds +
+    requestTimeoutMilliseconds +
+    minimumAdditionalHeadroomMilliseconds
   const retentionHeadroomMilliseconds =
     retainUntilEpochMilliseconds - nowEpochMilliseconds
-  if (
+  return !(
+    !Number.isFinite(retainUntilEpochMilliseconds) ||
+    !Number.isFinite(nowEpochMilliseconds) ||
     !Number.isSafeInteger(minimumRetentionMilliseconds) ||
     minimumRetentionMilliseconds <= 0 ||
     !Number.isSafeInteger(maximumRetentionMilliseconds) ||
@@ -916,9 +999,7 @@ function requireImmutableArtifactRetentionHeadroom(
     minimumHeadroomMilliseconds > maximumRetentionMilliseconds ||
     retentionHeadroomMilliseconds < minimumHeadroomMilliseconds ||
     retentionHeadroomMilliseconds > maximumRetentionMilliseconds
-  ) {
-    return failImmutableArtifact(failureCode)
-  }
+  )
 }
 
 /**

@@ -51,6 +51,7 @@ import {
 } from '@aws-sdk/client-sts'
 import {
   createWorkspaceSearchConfigurationHash,
+  isCanonicalTimestamp,
   isWorkspaceSearchMigrationFailureCode,
   requireMigrationIdentifier,
   type DynamoAttributeMap,
@@ -233,6 +234,7 @@ import {
 } from './migration-planning-join'
 import {
   createAwsWorkspaceSearchMigrationImmutableArtifactPort,
+  hasWorkspaceSearchMigrationImmutableArtifactRetentionHeadroom,
   type WorkspaceSearchMigrationImmutableArtifactAwsPort,
   type WorkspaceSearchMigrationImmutableArtifactAwsTransport,
 } from './migration-immutable-artifact-aws'
@@ -381,8 +383,9 @@ const MAXIMUM_PROFILE_ROLE_CHAIN_DEPTH = 8
 /** Hard deadline for one migration-state transaction SDK request. */
 const MIGRATION_STATE_TRANSACTION_TIMEOUT_MILLISECONDS = 5_000
 
-/** Hard deadline for one immutable migration-artifact S3 SDK request. */
-const MIGRATION_ARTIFACT_TIMEOUT_MILLISECONDS = 10_000
+/** Hard deadline for one managed immutable migration-artifact S3 request. */
+export const WORKSPACE_SEARCH_MIGRATION_MANAGED_ARTIFACT_REQUEST_TIMEOUT_MILLISECONDS =
+  10_000
 
 /** Maximum rows one managed five-chain planning join may retain. */
 export const WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_TOTAL_ROWS =
@@ -578,6 +581,15 @@ type ManagedPlanningArtifactAuthority =
   }
 
 /**
+ * Measured configuration retained by one zero-I/O artifact preflight.
+ */
+type ManagedPlanningArtifactPreflightAuthority =
+  ManagedPlanningArtifactGenerationAuthority & {
+    /** Detached measured configuration owning immutable artifact retention. */
+    readonly configuration: WorkspaceSearchMigrationConfiguration
+  }
+
+/**
  * Complete measured configuration captured by one sealed publication port.
  */
 type ManagedSealedPlanningAuthority = ManagedMigrationStateAuthority & {
@@ -753,6 +765,18 @@ export type JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput = {
   readonly configurationHash: string
   /** Explicit total row, canonical-byte, and operation limits. */
   readonly limits: WorkspaceSearchMigrationPlanningJoinLimits
+}
+
+/**
+ * Input for one zero-I/O measured planning-artifact preflight.
+ */
+export type ValidateWorkspaceSearchMigrationPlanningArtifactPreflightInput = {
+  /** Shared canonical COMPLIANCE retention deadline to validate. */
+  readonly retainUntil: string
+  /** Additional lower-bound runway required before the first artifact write. */
+  readonly minimumAdditionalHeadroomMilliseconds: number
+  /** Canonical completion time of the exact reviewed dry-run artifact. */
+  readonly reviewedDryRunCompletedAt: string
 }
 
 /**
@@ -974,6 +998,20 @@ export interface WorkspaceSearchMigrationManagedAwsSession
   prepareCommittedPlanningEvidence(
     input: JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput,
   ): Promise<WorkspaceSearchMigrationPreparedCommittedPlanningEvidence>
+
+  /**
+   * Validates one artifact epoch and deadline against measured contracts.
+   *
+   * This preflight performs no AWS I/O and uses the same configuration, clock,
+   * and request timeout as immutable storage and sealed-root publication.
+   *
+   * @param input - Reviewed epoch, fixed deadline, and pre-write runway.
+   * @returns Exact accepted canonical retention deadline.
+   */
+  validatePlanningArtifactPreflight(
+    input:
+      ValidateWorkspaceSearchMigrationPlanningArtifactPreflightInput,
+  ): string
 
   /**
    * Creates one run-scoped immutable planning storage gateway.
@@ -1608,7 +1646,7 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
     const abortController = new AbortController()
     const timeout = setTimeout(
       () => abortController.abort(),
-      MIGRATION_ARTIFACT_TIMEOUT_MILLISECONDS,
+      WORKSPACE_SEARCH_MIGRATION_MANAGED_ARTIFACT_REQUEST_TIMEOUT_MILLISECONDS,
     )
     try {
       return await operation(abortController.signal)
@@ -1827,6 +1865,61 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.measuredConfiguration = measuredConfiguration
     this.measuredConfigurationHash = configurationHash
     return configuration
+  }
+
+  /**
+   * Validates one planning epoch and deadline in the measured generation.
+   *
+   * @param input - Reviewed epoch, exact deadline, and pre-write runway.
+   * @returns Exact accepted canonical retention deadline.
+   */
+  validatePlanningArtifactPreflight(
+    input:
+      ValidateWorkspaceSearchMigrationPlanningArtifactPreflightInput,
+  ): string {
+    const request =
+      detachManagedPlanningArtifactPreflightInput(input)
+    const authority =
+      this.captureManagedPlanningArtifactPreflightAuthority()
+    if (
+      !this.isMeasurementGenerationCurrent(
+        authority.generation,
+        authority.configurationHash,
+      )
+    ) {
+      return failManagedPlanningArtifactPreflight('INVALID_STATE')
+    }
+    const currentTime = readManagedPlanningArtifactPreflightClock(
+      this.prePlanAuthorityClock,
+    )
+    const accepted =
+      hasWorkspaceSearchMigrationImmutableArtifactRetentionHeadroom(
+        request.retainUntil,
+        authority.configuration,
+        WORKSPACE_SEARCH_MIGRATION_MANAGED_ARTIFACT_REQUEST_TIMEOUT_MILLISECONDS,
+        currentTime,
+        request.minimumAdditionalHeadroomMilliseconds,
+      )
+    if (
+      !this.isMeasurementGenerationCurrent(
+        authority.generation,
+        authority.configurationHash,
+      )
+    ) {
+      return failManagedPlanningArtifactPreflight('INVALID_STATE')
+    }
+    if (!accepted) {
+      return failManagedPlanningArtifactPreflight('INVALID_ARGUMENT')
+    }
+    if (
+      Date.parse(request.reviewedDryRunCompletedAt) >
+        Date.prototype.getTime.call(currentTime)
+    ) {
+      return failManagedPlanningArtifactPreflight(
+        'DRY_RUN_INVALID_ROWS',
+      )
+    }
+    return request.retainUntil
   }
 
   /**
@@ -5005,9 +5098,9 @@ class AwsWorkspaceSearchMigrationIdentityPort
       maximumObjectBytes:
         WORKSPACE_SEARCH_MIGRATION_PLANNING_ARTIFACT_MAX_OBJECT_BYTES,
       requestTimeoutMilliseconds:
-        MIGRATION_ARTIFACT_TIMEOUT_MILLISECONDS,
+        WORKSPACE_SEARCH_MIGRATION_MANAGED_ARTIFACT_REQUEST_TIMEOUT_MILLISECONDS,
       bodyTimeoutMilliseconds:
-        MIGRATION_ARTIFACT_TIMEOUT_MILLISECONDS,
+        WORKSPACE_SEARCH_MIGRATION_MANAGED_ARTIFACT_REQUEST_TIMEOUT_MILLISECONDS,
       lifecycleSignal,
       clock: this.prePlanAuthorityClock,
       transport,
@@ -6502,6 +6595,40 @@ class AwsWorkspaceSearchMigrationIdentityPort
   }
 
   /**
+   * Captures measured configuration for one synchronous artifact preflight.
+   *
+   * @returns Current generation, configuration hash, and detached configuration.
+   */
+  private captureManagedPlanningArtifactPreflightAuthority():
+    ManagedPlanningArtifactPreflightAuthority {
+    if (this.closed) {
+      return failManagedPlanningArtifactPreflight('INVALID_STATE')
+    }
+    const configurationHash = this.measuredConfigurationHash
+    const configuration = this.measuredConfiguration
+    if (
+      configurationHash === undefined ||
+      configuration === undefined
+    ) {
+      return failManagedPlanningArtifactPreflight('INVALID_STATE')
+    }
+    const authority: ManagedPlanningArtifactPreflightAuthority = {
+      generation: this.generation,
+      configurationHash,
+      configuration: structuredClone(configuration),
+    }
+    if (
+      !this.isMeasurementGenerationCurrent(
+        authority.generation,
+        authority.configurationHash,
+      )
+    ) {
+      return failManagedPlanningArtifactPreflight('INVALID_STATE')
+    }
+    return authority
+  }
+
+  /**
    * Guards one planning storage step against session lifecycle changes.
    *
    * The callback is invoked synchronously before the first await so the
@@ -7802,6 +7929,93 @@ function detachManagedPlanningJoinInput(
 }
 
 /**
+ * Detaches one planning-artifact preflight without accessors.
+ *
+ * @param input - Caller-owned reviewed time, deadline, and runway.
+ * @returns Exact scalar preflight request.
+ */
+function detachManagedPlanningArtifactPreflightInput(
+  input:
+    ValidateWorkspaceSearchMigrationPlanningArtifactPreflightInput,
+): ValidateWorkspaceSearchMigrationPlanningArtifactPreflightInput {
+  try {
+    requireExactManagedPlanningOwnDataKeys(input, [
+      'minimumAdditionalHeadroomMilliseconds',
+      'retainUntil',
+      'reviewedDryRunCompletedAt',
+    ])
+    const retainUntil = readManagedPlanningOwnDataProperty(
+      input,
+      'retainUntil',
+    )
+    const minimumAdditionalHeadroomMilliseconds =
+      readManagedPlanningOwnDataProperty(
+        input,
+        'minimumAdditionalHeadroomMilliseconds',
+      )
+    const reviewedDryRunCompletedAt =
+      readManagedPlanningOwnDataProperty(
+        input,
+        'reviewedDryRunCompletedAt',
+      )
+    if (
+      typeof retainUntil !== 'string' ||
+      typeof reviewedDryRunCompletedAt !== 'string' ||
+      !isCanonicalTimestamp(reviewedDryRunCompletedAt) ||
+      typeof minimumAdditionalHeadroomMilliseconds !== 'number' ||
+      !Number.isSafeInteger(minimumAdditionalHeadroomMilliseconds) ||
+      minimumAdditionalHeadroomMilliseconds < 0
+    ) {
+      return failManagedPlanningArtifactPreflight('INVALID_ARGUMENT')
+    }
+    return {
+      retainUntil,
+      minimumAdditionalHeadroomMilliseconds,
+      reviewedDryRunCompletedAt,
+    }
+  } catch {
+    return failManagedPlanningArtifactPreflight('INVALID_ARGUMENT')
+  }
+}
+
+/**
+ * Reads one trusted clock instant for a measured artifact preflight.
+ *
+ * @param clock - Managed session clock shared with immutable artifact writes.
+ * @returns Detached finite nonnegative Date.
+ */
+function readManagedPlanningArtifactPreflightClock(
+  clock: WorkspaceSearchMigrationPrePlanAuthorityClock,
+): Date {
+  let currentTime: unknown
+  try {
+    currentTime = clock()
+  } catch {
+    return failManagedPlanningArtifactPreflight('INVALID_STATE')
+  }
+  if (
+    nodeUtilTypes.isProxy(currentTime) ||
+    !(currentTime instanceof Date)
+  ) {
+    return failManagedPlanningArtifactPreflight('INVALID_STATE')
+  }
+  let currentTimeEpochMilliseconds: number
+  try {
+    currentTimeEpochMilliseconds =
+      Date.prototype.getTime.call(currentTime)
+  } catch {
+    return failManagedPlanningArtifactPreflight('INVALID_STATE')
+  }
+  if (
+    !Number.isSafeInteger(currentTimeEpochMilliseconds) ||
+    currentTimeEpochMilliseconds < 0
+  ) {
+    return failManagedPlanningArtifactPreflight('INVALID_STATE')
+  }
+  return new Date(currentTimeEpochMilliseconds)
+}
+
+/**
  * Detaches one opaque provenance-write input without invoking accessors.
  *
  * @param input - Caller-owned retention request.
@@ -7987,6 +8201,24 @@ function failManagedPlanningArtifact(): never {
   throw new WorkspaceSearchMigrationFailure(
     'INVALID_STATE',
     'Workspace Search planning artifact storage stopped safely (INVALID_STATE).',
+  )
+}
+
+/**
+ * Raises one stable measured artifact-preflight failure.
+ *
+ * @param code - Invalid artifact time, deadline, or measurement state.
+ * @returns Never returns.
+ */
+function failManagedPlanningArtifactPreflight(
+  code:
+    | 'DRY_RUN_INVALID_ROWS'
+    | 'INVALID_ARGUMENT'
+    | 'INVALID_STATE',
+): never {
+  throw new WorkspaceSearchMigrationFailure(
+    code,
+    `Workspace Search planning artifact preflight stopped safely (${code}).`,
   )
 }
 
