@@ -168,6 +168,7 @@ import {
 } from './migration-source-artifact'
 import {
   createWorkspaceSearchMigrationSourceEvidenceProgressDigest,
+  serializeWorkspaceSearchMigrationSourceEvidencePage,
   type WorkspaceSearchMigrationSourceEvidenceProgress,
   type WorkspaceSearchMigrationSourceEvidenceReplayResult,
 } from './migration-source-evidence'
@@ -196,6 +197,7 @@ import {
 } from './migration-target-artifact'
 import {
   createWorkspaceSearchMigrationTargetEvidenceProgressDigest,
+  serializeWorkspaceSearchMigrationTargetEvidencePage,
   type WorkspaceSearchMigrationTargetEvidenceProgress,
   type WorkspaceSearchMigrationTargetEvidenceReplayResult,
 } from './migration-target-evidence'
@@ -267,6 +269,7 @@ import type {
 import {
   createAwsWorkspaceSearchMigrationPlanningArtifactGateway,
   type WorkspaceSearchMigrationPlanningArtifactAwsGateway,
+  type WorkspaceSearchMigrationStoredPlanningProvenanceArtifact,
   WORKSPACE_SEARCH_MIGRATION_PLANNING_ARTIFACT_MAX_OBJECT_BYTES,
 } from './migration-planning-artifact-aws'
 import {
@@ -727,6 +730,18 @@ type ManagedPlanningEvidenceMaterial = {
 }
 
 /**
+ * Join result and private raw material retained until provenance preparation.
+ */
+type ManagedPlanningJoinPreparation = {
+  /** Measured generation and detached join request owning the material. */
+  readonly authority: ManagedPlanningJoinAuthority
+  /** Fully revalidated caller-safe planning join result. */
+  readonly result: WorkspaceSearchMigrationPlanningJoinResult
+  /** Exact private evidence material used to derive the join result. */
+  readonly material: ManagedPlanningEvidenceMaterial
+}
+
+/**
  * Read-only managed composition input without caller-supplied raw material.
  */
 export type JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput = {
@@ -738,6 +753,31 @@ export type JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput = {
   readonly configurationHash: string
   /** Explicit total row, canonical-byte, and operation limits. */
   readonly limits: WorkspaceSearchMigrationPlanningJoinLimits
+}
+
+/**
+ * Input for one generation-bound write of already prepared provenance.
+ */
+export type WriteWorkspaceSearchMigrationPreparedPlanningProvenanceInput = {
+  /** Shared canonical COMPLIANCE retention deadline for the provenance graph. */
+  readonly retainUntil: string
+}
+
+/**
+ * Opaque prepared planning evidence that keeps restricted page bytes private.
+ */
+export type WorkspaceSearchMigrationPreparedCommittedPlanningEvidence = {
+  /** Fully revalidated planning snapshot, ownership, and plan candidates. */
+  readonly result: WorkspaceSearchMigrationPlanningJoinResult
+  /**
+   * Persists the exact provenance graph prepared from the joined evidence.
+   *
+   * @param input - Shared immutable retention deadline.
+   * @returns Exact stored provenance roots.
+   */
+  writePlanningProvenanceArtifact(
+    input: WriteWorkspaceSearchMigrationPreparedPlanningProvenanceInput,
+  ): Promise<WorkspaceSearchMigrationStoredPlanningProvenanceArtifact>
 }
 
 /** Explicit AWS SDK client configuration retained for construction tests. */
@@ -920,6 +960,20 @@ export interface WorkspaceSearchMigrationManagedAwsSession
   joinCommittedPlanningEvidence(
     input: JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput,
   ): Promise<WorkspaceSearchMigrationPlanningJoinResult>
+
+  /**
+   * Prepares a joined result and an opaque provenance writer in one generation.
+   *
+   * Restricted evidence-page cursor bytes and historical receipt bindings stay
+   * inside the managed session. The returned writer is generation-bound and
+   * may only persist the exact evidence fixed by this preparation.
+   *
+   * @param input - Run, measured identity, and bounded join limits.
+   * @returns Revalidated planning result and its opaque provenance writer.
+   */
+  prepareCommittedPlanningEvidence(
+    input: JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput,
+  ): Promise<WorkspaceSearchMigrationPreparedCommittedPlanningEvidence>
 
   /**
    * Creates one run-scoped immutable planning storage gateway.
@@ -3261,6 +3315,25 @@ class AwsWorkspaceSearchMigrationIdentityPort
   }
 
   /**
+   * Resolves the current same-fence maintenance-pointer predecessor.
+   *
+   * @param lease - Exact active run, owner, and fence identity.
+   * @returns Same-fence pointer, or null after first acquire/takeover.
+   */
+  async readMaintenanceEvidencePointer(
+    lease: WorkspaceSearchMigrationLeaseClaim,
+  ): Promise<
+    WorkspaceSearchMigrationPrePlanMaintenancePointerClaim | null
+  > {
+    return runManagedPrePlanAuthorityAwsBoundary(async () => {
+      const request = this.snapshotPrePlanLeaseClaim(lease)
+      return this.runPrePlanAuthorityOperation(
+        (adapter) => adapter.readMaintenanceEvidencePointer(request),
+      )
+    })
+  }
+
+  /**
    * Persists one immutable fresh pre-plan maintenance receipt.
    *
    * @param input - Exact lease claim and untrusted evidence bytes.
@@ -4183,56 +4256,94 @@ class AwsWorkspaceSearchMigrationIdentityPort
   async joinCommittedPlanningEvidence(
     input: JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput,
   ): Promise<WorkspaceSearchMigrationPlanningJoinResult> {
+    return runManagedPlanningJoinAwsBoundary(async () =>
+      (await this.prepareManagedPlanningJoin(input)).result
+    )
+  }
+
+  /**
+   * Prepares one exact planning join and an opaque provenance writer.
+   *
+   * @param input - Run, measured identity, and bounded material limits.
+   * @returns Joined planning evidence with a generation-bound writer.
+   */
+  async prepareCommittedPlanningEvidence(
+    input: JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput,
+  ): Promise<WorkspaceSearchMigrationPreparedCommittedPlanningEvidence> {
     return runManagedPlanningJoinAwsBoundary(async () => {
-      const authority = this.captureManagedPlanningJoinAuthority(input)
-      const sourceContexts =
-        this.createManagedPlanningSourceEvidenceContexts(authority)
-      const targetContext =
-        this.createManagedPlanningTargetEvidenceContext(authority)
+      const preparation = await this.prepareManagedPlanningJoin(input)
+      const { authority, material, result } = preparation
       try {
-        await this.requireCurrentPlanningJoinTableIncarnations(authority)
-        const capturedHeads = await this.readManagedPlanningEvidenceHeads(
-          sourceContexts,
-          targetContext,
+        const sourceEvidencePageBytes = {
+          'project-directory':
+            material.sources['project-directory'].materials.map(
+              (entry) =>
+                serializeWorkspaceSearchMigrationSourceEvidencePage(
+                  entry.page,
+                ),
+            ),
+          'work-items': material.sources['work-items'].materials.map(
+            (entry) =>
+              serializeWorkspaceSearchMigrationSourceEvidencePage(
+                entry.page,
+              ),
+          ),
+          collaboration: material.sources.collaboration.materials.map(
+            (entry) =>
+              serializeWorkspaceSearchMigrationSourceEvidencePage(
+                entry.page,
+              ),
+          ),
+          documents: material.sources.documents.materials.map(
+            (entry) =>
+              serializeWorkspaceSearchMigrationSourceEvidencePage(
+                entry.page,
+              ),
+          ),
+        }
+        const targetEvidencePageBytes = material.target.materials.map(
+          (entry) =>
+            serializeWorkspaceSearchMigrationTargetEvidencePage(entry.page),
         )
-        this.requireManagedPlanningEvidenceHeadPreflight(
-          capturedHeads,
-          authority.request.limits,
-        )
-        const material = await this.readManagedPlanningEvidenceMaterial(
-          sourceContexts,
-          targetContext,
-          capturedHeads,
-          authority.request.limits,
-        )
-        const result = joinWorkspaceSearchMigrationPlanningEvidence({
-          runId: authority.request.runId,
-          configuration: authority.request.configuration,
-          configurationHash: authority.request.configurationHash,
-          limits: authority.request.limits,
-          sourcePages: {
-            'project-directory':
-              material.sources['project-directory'].materials,
-            'work-items': material.sources['work-items'].materials,
-            collaboration: material.sources.collaboration.materials,
-            documents: material.sources.documents.materials,
-          },
-          targetPages: material.target.materials,
-        })
-        const confirmedHeads = await this.readManagedPlanningEvidenceHeads(
-          sourceContexts,
-          targetContext,
-        )
-        this.requireManagedPlanningEvidenceHeadsEqual(
-          capturedHeads,
-          confirmedHeads,
-        )
+        const historicalReceiptBindings:
+          WorkspaceSearchMigrationHistoricalMaintenanceEvidenceBinding[] = []
+        for (
+          const transition of
+          result.planningAuthorityProvenance.authorityTransitions
+        ) {
+          const binding =
+            await this.readHistoricalMaintenanceEvidenceBinding(
+              authority.request.runId,
+              transition.maintenanceEvidenceReceiptDigest,
+            )
+          if (binding === undefined) {
+            return failManagedPlanningJoin('INVALID_STATE')
+          }
+          historicalReceiptBindings.push(binding)
+        }
         await this.requireCurrentPlanningJoinTableIncarnations(authority)
         this.requireMeasurementGeneration(
           authority.generation,
           authority.configurationHash,
         )
-        return result
+        const gateway = this.createPlanningArtifactGateway(
+          authority.request.runId,
+        )
+        return {
+          result,
+          writePlanningProvenanceArtifact: async (writeInput) => {
+            const retainUntil = await runManagedPlanningJoinAwsBoundary(
+              async () =>
+                detachPreparedPlanningProvenanceWriteInput(writeInput),
+            )
+            return gateway.writePlanningProvenanceArtifact({
+              sourceEvidencePageBytes,
+              targetEvidencePageBytes,
+              historicalReceiptBindings,
+              retainUntil,
+            })
+          },
+        }
       } catch (error: unknown) {
         this.requireMeasurementGeneration(
           authority.generation,
@@ -4246,6 +4357,78 @@ class AwsWorkspaceSearchMigrationIdentityPort
         throw error
       }
     })
+  }
+
+  /**
+   * Fixes five heads, reads exact material, and joins it under one generation.
+   *
+   * @param input - Caller-owned run, configuration, hash, and limits.
+   * @returns Private material paired with its fully revalidated join result.
+   */
+  private async prepareManagedPlanningJoin(
+    input: JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput,
+  ): Promise<ManagedPlanningJoinPreparation> {
+    const authority = this.captureManagedPlanningJoinAuthority(input)
+    const sourceContexts =
+      this.createManagedPlanningSourceEvidenceContexts(authority)
+    const targetContext =
+      this.createManagedPlanningTargetEvidenceContext(authority)
+    try {
+      await this.requireCurrentPlanningJoinTableIncarnations(authority)
+      const capturedHeads = await this.readManagedPlanningEvidenceHeads(
+        sourceContexts,
+        targetContext,
+      )
+      this.requireManagedPlanningEvidenceHeadPreflight(
+        capturedHeads,
+        authority.request.limits,
+      )
+      const material = await this.readManagedPlanningEvidenceMaterial(
+        sourceContexts,
+        targetContext,
+        capturedHeads,
+        authority.request.limits,
+      )
+      const result = joinWorkspaceSearchMigrationPlanningEvidence({
+        runId: authority.request.runId,
+        configuration: authority.request.configuration,
+        configurationHash: authority.request.configurationHash,
+        limits: authority.request.limits,
+        sourcePages: {
+          'project-directory':
+            material.sources['project-directory'].materials,
+          'work-items': material.sources['work-items'].materials,
+          collaboration: material.sources.collaboration.materials,
+          documents: material.sources.documents.materials,
+        },
+        targetPages: material.target.materials,
+      })
+      const confirmedHeads = await this.readManagedPlanningEvidenceHeads(
+        sourceContexts,
+        targetContext,
+      )
+      this.requireManagedPlanningEvidenceHeadsEqual(
+        capturedHeads,
+        confirmedHeads,
+      )
+      await this.requireCurrentPlanningJoinTableIncarnations(authority)
+      this.requireMeasurementGeneration(
+        authority.generation,
+        authority.configurationHash,
+      )
+      return { authority, material, result }
+    } catch (error: unknown) {
+      this.requireMeasurementGeneration(
+        authority.generation,
+        authority.configurationHash,
+      )
+      await this.requireCurrentPlanningJoinTableIncarnations(authority)
+      this.requireMeasurementGeneration(
+        authority.generation,
+        authority.configurationHash,
+      )
+      throw error
+    }
   }
 
   /**
@@ -7613,6 +7796,30 @@ function detachManagedPlanningJoinInput(
         maxPlanOperations: snapshot.limits.maxPlanOperations,
       },
     }
+  } catch {
+    return failSourceScanAws('INVALID_ARGUMENT')
+  }
+}
+
+/**
+ * Detaches one opaque provenance-write input without invoking accessors.
+ *
+ * @param input - Caller-owned retention request.
+ * @returns Exact caller-selected canonical retention timestamp.
+ */
+function detachPreparedPlanningProvenanceWriteInput(
+  input: WriteWorkspaceSearchMigrationPreparedPlanningProvenanceInput,
+): string {
+  try {
+    requireExactManagedPlanningOwnDataKeys(input, ['retainUntil'])
+    const retainUntil = readManagedPlanningOwnDataProperty(
+      input,
+      'retainUntil',
+    )
+    if (typeof retainUntil !== 'string') {
+      return failSourceScanAws('INVALID_ARGUMENT')
+    }
+    return retainUntil
   } catch {
     return failSourceScanAws('INVALID_ARGUMENT')
   }
