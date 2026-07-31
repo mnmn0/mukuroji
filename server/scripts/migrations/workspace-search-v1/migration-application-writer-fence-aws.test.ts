@@ -1517,18 +1517,22 @@ implements WorkspaceSearchMigrationPrePlanAuthorityAwsTransport {
     const requestedMigrationId = command.input.Key?.migrationId?.S
     const requestedRecordKey = command.input.Key?.recordKey?.S
     const currentItem = this.item
-    const item =
-      requestedMigrationId !== undefined &&
-        requestedRecordKey !== undefined &&
-        currentItem?.migrationId?.S === requestedMigrationId &&
-        currentItem.recordKey?.S === requestedRecordKey
-        ? currentItem
-        : requestedMigrationId === undefined ||
-            requestedRecordKey === undefined
-          ? undefined
-          : this.terminalItems
-            .get(requestedMigrationId)
-            ?.get(requestedRecordKey)
+    let item: Readonly<Record<string, AttributeValue>> | undefined
+    if (
+      requestedMigrationId === undefined ||
+      requestedRecordKey === undefined
+    ) {
+      item = undefined
+    } else if (
+      currentItem?.migrationId?.S === requestedMigrationId &&
+      currentItem.recordKey?.S === requestedRecordKey
+    ) {
+      item = currentItem
+    } else {
+      item = this.terminalItems
+        .get(requestedMigrationId)
+        ?.get(requestedRecordKey)
+    }
     return item === undefined
       ? { $metadata: {} }
       : { $metadata: {}, Item: structuredClone(item) }
