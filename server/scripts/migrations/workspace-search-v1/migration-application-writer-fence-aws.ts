@@ -128,7 +128,7 @@ export const workspaceSearchMigrationApplicationWriterFenceReleaseTransactionInd
     sealedPlanningAuthority: 1,
     /** Exact immutable execution admission. */
     executionRun: 2,
-    /** Exact immutable verified or fully rolled-back terminal root. */
+    /** Conditional exact-row replacement of the immutable terminal root. */
     terminalRoot: 3,
     /** Exact closed-row predecessor CAS and released-open successor Put. */
     writerFence: 4,
@@ -326,13 +326,15 @@ type ApplicationWriterFenceReleaseSnapshot = {
 }
 
 /**
- * Exact full terminal-root row retained across its strong preflight read.
+ * Exact terminal-root material retained through release linearization.
  */
-type ApplicationWriterFenceTerminalRootReadMaterial = {
+type ApplicationWriterFenceTerminalRootReleaseMaterial = {
   /** Strongly consistent read for the transaction's terminal-root key. */
   readonly command: GetItemCommand
   /** Complete canonical low-level row expected at that key. */
   readonly expectedItem: Readonly<Record<string, AttributeValue>>
+  /** Conditional exact-row replacement used at release linearization. */
+  readonly canonicalizingPut: TransactWriteItem
 }
 
 /**
@@ -579,12 +581,35 @@ implements WorkspaceSearchMigrationApplicationWriterFenceAwsPort {
           snapshot,
           this.binding,
         )
-      await this.requireExactTerminalRoot(
+      const terminalRootMaterial =
+        createApplicationWriterFenceTerminalRootReleaseMaterial(
+          predecessorChecks[
+            workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+              .terminalRoot
+          ],
+          this.binding,
+        )
+      await this.requireExactTerminalRoot(terminalRootMaterial)
+      const releasePredecessorItems: readonly [
+        TransactWriteItem,
+        TransactWriteItem,
+        TransactWriteItem,
+        TransactWriteItem,
+      ] = [
         predecessorChecks[
           workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
-            .terminalRoot
+            .executionBoundary
         ],
-      )
+        predecessorChecks[
+          workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+            .sealedPlanningAuthority
+        ],
+        predecessorChecks[
+          workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+            .executionRun
+        ],
+        terminalRootMaterial.canonicalizingPut,
+      ]
       await this.transport.prepare()
       const commitAt = readApplicationWriterFenceClock(this.clock)
       if (commitAt.getTime() < Date.parse(snapshot.terminalAt)) {
@@ -602,7 +627,7 @@ implements WorkspaceSearchMigrationApplicationWriterFenceAwsPort {
           predecessor,
           successor,
         },
-        predecessorChecks,
+        releasePredecessorItems,
       )
     })
   }
@@ -729,21 +754,16 @@ implements WorkspaceSearchMigrationApplicationWriterFenceAwsPort {
   /**
    * Strongly reads and validates the complete terminal-root attribute set.
    *
-   * Immutable-root transaction conditions compare every controlled field, but
-   * DynamoDB expressions cannot quantify unknown top-level attributes. This
-   * preflight rejects malformed rows before the fixed five-item release
-   * transaction is allowed to linearize the closed-row transition.
+   * The preflight rejects an already malformed row. The release transaction
+   * then conditionally replaces that row with the exact canonical item, so an
+   * unknown attribute introduced after this read is removed atomically when
+   * the closed-row transition linearizes.
    *
-   * @param terminalRootCheck - Exact generated terminal-root condition.
+   * @param material - Exact read and canonical replacement material.
    */
   private async requireExactTerminalRoot(
-    terminalRootCheck: TransactWriteItem,
+    material: ApplicationWriterFenceTerminalRootReleaseMaterial,
   ): Promise<void> {
-    const material =
-      createApplicationWriterFenceTerminalRootReadMaterial(
-        terminalRootCheck,
-        this.binding,
-      )
     const output = await this.transport.get(material.command)
     if (
       !applicationWriterFenceAttributeMapEquals(
@@ -1303,17 +1323,19 @@ function createApplicationWriterFenceReleaseConditionChecks(
  *
  * The three terminal-root adapters emit one indexed equality clause for every
  * non-key attribute. Reconstructing that row lets the release adapter reject
- * missing, extra, or malformed attributes with a full strong read before the
- * condition participates in the fixed release transaction.
+ * missing, extra, or malformed attributes with a full strong read. The
+ * returned conditional Put also replaces the row with those exact attributes
+ * inside the fixed release transaction, closing additions that race after the
+ * preflight.
  *
  * @param terminalRootCheck - Exact generated terminal-root condition.
  * @param binding - Exact measured adapter binding.
- * @returns Strong read command and complete expected low-level row.
+ * @returns Strong read, expected row, and conditional canonical replacement.
  */
-function createApplicationWriterFenceTerminalRootReadMaterial(
+function createApplicationWriterFenceTerminalRootReleaseMaterial(
   terminalRootCheck: TransactWriteItem,
   binding: ApplicationWriterFenceAdapterBinding,
-): ApplicationWriterFenceTerminalRootReadMaterial {
+): ApplicationWriterFenceTerminalRootReleaseMaterial {
   const condition = terminalRootCheck.ConditionCheck
   if (
     condition === undefined ||
@@ -1369,6 +1391,8 @@ function createApplicationWriterFenceTerminalRootReadMaterial(
   }
   const detachedExpectedItem =
     cloneApplicationWriterFenceAttributeMap(expectedItem)
+  const detachedValues =
+    cloneApplicationWriterFenceAttributeMap(values)
   return {
     command: new GetItemCommand({
       TableName: binding.stateTable.tableName,
@@ -1376,6 +1400,18 @@ function createApplicationWriterFenceTerminalRootReadMaterial(
       Key: key,
     }),
     expectedItem: detachedExpectedItem,
+    canonicalizingPut: {
+      Put: {
+        TableName: binding.stateTable.tableName,
+        Item: cloneApplicationWriterFenceAttributeMap(
+          detachedExpectedItem,
+        ),
+        ConditionExpression: condition.ConditionExpression,
+        ExpressionAttributeNames: { ...names },
+        ExpressionAttributeValues: detachedValues,
+        ReturnValuesOnConditionCheckFailure: 'NONE',
+      },
+    },
   }
 }
 

@@ -668,16 +668,44 @@ describe('Workspace Search application writer fence AWS adapter', () => {
     const writerFenceIndex =
       workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
         .writerFence
-    for (let index = 0; index < writerFenceIndex; index += 1) {
+    const terminalRootIndex =
+      workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+        .terminalRoot
+    for (let index = 0; index < terminalRootIndex; index += 1) {
       expect(items[index]?.ConditionCheck).toBeDefined()
       expect(items[index]?.Put).toBeUndefined()
     }
-    const writerFencePut = requirePut(
-      items[
-        workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
-          .writerFence
-      ],
+    const terminalRootPut = requirePut(items[terminalRootIndex])
+    const expectedTerminalRootCheck =
+      createWorkspaceSearchMigrationFullVerificationVerifiedRootConditionCheck(
+        {
+          stateTable:
+            fixture.configuration.tables['migration-state'],
+          configurationHash: fixture.configurationHash,
+          executionRun: fixture.executionRun,
+          root: fixture.verifiedRoot,
+        },
+      ).ConditionCheck
+    if (expectedTerminalRootCheck === undefined) {
+      throw new Error('Expected terminal-root condition material.')
+    }
+    expect(items[terminalRootIndex]?.ConditionCheck).toBeUndefined()
+    expect(terminalRootPut.Item).toEqual(
+      createVerifiedTerminalRootItem(fixture),
     )
+    expect(terminalRootPut.ConditionExpression).toBe(
+      expectedTerminalRootCheck.ConditionExpression,
+    )
+    expect(terminalRootPut.ExpressionAttributeNames).toEqual(
+      expectedTerminalRootCheck.ExpressionAttributeNames,
+    )
+    expect(terminalRootPut.ExpressionAttributeValues).toEqual(
+      expectedTerminalRootCheck.ExpressionAttributeValues,
+    )
+    expect(terminalRootPut.ReturnValuesOnConditionCheckFailure).toBe(
+      'NONE',
+    )
+    const writerFencePut = requirePut(items[writerFenceIndex])
     expect(writerFencePut.ConditionExpression).toBe(
       '#canonicalBytes = :canonicalBytes AND #recordDigest = :recordDigest',
     )
@@ -698,7 +726,7 @@ describe('Workspace Search application writer fence AWS adapter', () => {
         items[
           workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
             .terminalRoot
-        ]?.ConditionCheck?.ExpressionAttributeValues ?? {},
+        ]?.Put?.ExpressionAttributeValues ?? {},
       ),
     ).toContainEqual({ S: fixture.verifiedRoot.verifiedRootDigest })
   })
@@ -726,6 +754,88 @@ describe('Workspace Search application writer fence AWS adapter', () => {
     expect(failure.code).toBe('INVALID_STATE')
     expect(transport.reads).toHaveLength(2)
     expect(transport.transactions).toHaveLength(0)
+  })
+
+  test('atomically removes an unexpected terminal-root attribute added after preflight', async () => {
+    const fixture = createReleaseFixture()
+    const transport = new RecordingFenceTransport()
+    const port = createPort(
+      fixture,
+      transport,
+      createSequencedClock([], [
+        initialOpenTime,
+        closeTime,
+        releaseTime,
+      ]),
+    )
+    await port.bootstrapOpen(fixture.authority)
+    await port.close(fixture.authority)
+    transport.clearHistory()
+    const canonicalTerminalItem =
+      createVerifiedTerminalRootItem(fixture)
+    transport.nextTerminalItemBeforeTransaction = {
+      ...canonicalTerminalItem,
+      unexpected: { S: 'racing-schema-mismatch' },
+    }
+
+    const released = requireReleasedOpen(
+      requirePresent(await port.release(fixture.releaseInput)),
+    )
+
+    expect(released.release.terminal.rootDigest).toBe(
+      fixture.verifiedRoot.verifiedRootDigest,
+    )
+    expect(transport.reads).toHaveLength(3)
+    expect(transport.transactions).toHaveLength(1)
+    expect(transport.committedTransactionCount).toBe(1)
+    expect(
+      transport.readTerminalItem(canonicalTerminalItem),
+    ).toEqual(canonicalTerminalItem)
+    expect(
+      transport.readTerminalItem(canonicalTerminalItem)?.unexpected,
+    ).toBeUndefined()
+  })
+
+  test('rejects a controlled terminal-root change added after preflight', async () => {
+    const fixture = createReleaseFixture()
+    const transport = new RecordingFenceTransport()
+    const port = createPort(
+      fixture,
+      transport,
+      createSequencedClock([], [
+        initialOpenTime,
+        closeTime,
+        releaseTime,
+      ]),
+    )
+    await port.bootstrapOpen(fixture.authority)
+    await port.close(fixture.authority)
+    transport.clearHistory()
+    const canonicalTerminalItem =
+      createVerifiedTerminalRootItem(fixture)
+    const racedTerminalItem = {
+      ...canonicalTerminalItem,
+      verifiedRootDigest: {
+        S: digest('racing-controlled-terminal-root-change'),
+      },
+    }
+    transport.nextTerminalItemBeforeTransaction = racedTerminalItem
+
+    const failure = await captureMigrationFailure(
+      () => port.release(fixture.releaseInput),
+    )
+
+    expect(failure.code).toBe('INVALID_STATE')
+    expect(transport.reads).toHaveLength(3)
+    expect(transport.transactions).toHaveLength(1)
+    expect(transport.committedTransactionCount).toBe(0)
+    expect(
+      transport.readTerminalItem(canonicalTerminalItem),
+    ).toEqual(racedTerminalItem)
+    const durable = requireClosed(requirePresent(await port.read()))
+    expect(durable.recordDigest).toBe(
+      fixture.closedWriterFenceRecord.recordDigest,
+    )
   })
 
   test('recovers the exact verified release after transaction response loss', async () => {
@@ -1332,11 +1442,15 @@ implements WorkspaceSearchMigrationPrePlanAuthorityAwsTransport {
   nextCommittedItem:
     Readonly<Record<string, AttributeValue>> | undefined
 
+  /** One-shot terminal row installed after preflight and before transaction guards. */
+  nextTerminalItemBeforeTransaction:
+    Readonly<Record<string, AttributeValue>> | undefined
+
   /** Current exact durable item. */
   private item:
     Readonly<Record<string, AttributeValue>> | undefined
 
-  /** Immutable terminal rows keyed by migration id, then deterministic record key. */
+  /** Terminal rows keyed by migration id, then deterministic record key. */
   private readonly terminalItems =
     new Map<
       string,
@@ -1441,13 +1555,40 @@ implements WorkspaceSearchMigrationPrePlanAuthorityAwsTransport {
   ): Promise<TransactWriteItemsCommandOutput> => {
     this.events.push('transact')
     this.transactions.push(command)
-    let error = this.nextTransactionError
+    const pendingTerminalItem =
+      this.nextTerminalItemBeforeTransaction
+    this.nextTerminalItemBeforeTransaction = undefined
+    if (pendingTerminalItem !== undefined) {
+      this.setTerminalItem(pendingTerminalItem)
+    }
+    const items = command.input.TransactItems
+    const terminalRootPut = readTerminalRootTransactionPut(items)
+    const responseError = this.nextTransactionError
+    let guardFailure: TransactionCanceledException | undefined
+    if (responseError === undefined && terminalRootPut !== undefined) {
+      const terminalRootItem = requirePutItem(terminalRootPut)
+      const currentTerminalItem =
+        this.readTerminalItem(terminalRootItem)
+      if (
+        currentTerminalItem === undefined ||
+        !terminalRootPutMatchesPredecessor(
+          terminalRootPut,
+          currentTerminalItem,
+        )
+      ) {
+        guardFailure = createCancellation(
+          workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+            .terminalRoot,
+          items?.length ?? 0,
+        )
+      }
+    }
     if (
-      error === undefined &&
+      responseError === undefined &&
+      guardFailure === undefined &&
       this.enforceWriterFenceCas &&
       this.item !== undefined
     ) {
-      const items = command.input.TransactItems
       const writerFenceIndex =
         readWriterFenceTransactionIndex(items)
       const writerFenceItem = items?.[writerFenceIndex]
@@ -1457,26 +1598,38 @@ implements WorkspaceSearchMigrationPrePlanAuthorityAwsTransport {
           this.item,
         )
       ) {
-        error = createCancellation(
+        guardFailure = createCancellation(
           writerFenceIndex,
           items?.length ?? 0,
         )
       }
     }
     const shouldCommit =
-      error === undefined || this.commitBeforeTransactionError
+      guardFailure === undefined &&
+      (
+        responseError === undefined ||
+        this.commitBeforeTransactionError
+      )
     if (shouldCommit) {
-      const items = command.input.TransactItems
       const writerFenceItem =
         items?.[readWriterFenceTransactionIndex(items)]
       const put = requirePut(writerFenceItem)
-      this.item = this.nextCommittedItem === undefined
+      const committedWriterFenceItem =
+        this.nextCommittedItem === undefined
         ? structuredClone(requirePutItem(put))
         : structuredClone(this.nextCommittedItem)
+      const committedTerminalItem = terminalRootPut === undefined
+        ? undefined
+        : structuredClone(requirePutItem(terminalRootPut))
+      if (committedTerminalItem !== undefined) {
+        this.setTerminalItem(committedTerminalItem)
+      }
+      this.item = committedWriterFenceItem
       this.committedTransactionCount += 1
     }
     this.nextCommittedItem = undefined
     this.nextTransactionError = undefined
+    const error = guardFailure ?? responseError
     if (error !== undefined) {
       this.nextReadError = this.nextReadErrorAfterTransaction
       this.nextReadErrorAfterTransaction = undefined
@@ -1504,7 +1657,27 @@ implements WorkspaceSearchMigrationPrePlanAuthorityAwsTransport {
   }
 
   /**
-   * Installs one immutable terminal-root row at its deterministic key.
+   * Reads one detached terminal row using its composite key attributes.
+   *
+   * @param key - Item or key containing the terminal composite key.
+   * @returns Detached terminal row or absence.
+   */
+  readTerminalItem(
+    key: Readonly<Record<string, AttributeValue>>,
+  ): Readonly<Record<string, AttributeValue>> | undefined {
+    const migrationId = key.migrationId?.S
+    const recordKey = key.recordKey?.S
+    if (migrationId === undefined || recordKey === undefined) {
+      throw new Error('Expected terminal-root composite key.')
+    }
+    const item = this.terminalItems
+      .get(migrationId)
+      ?.get(recordKey)
+    return item === undefined ? undefined : structuredClone(item)
+  }
+
+  /**
+   * Installs one terminal-root row at its deterministic key.
    *
    * @param item - Exact or deliberately malformed terminal row.
    */
@@ -3141,6 +3314,81 @@ function readWriterFenceTransactionIndex(
       .writerFence
   }
   throw new Error('Expected a known writer-fence transaction layout.')
+}
+
+/**
+ * Reads the conditional terminal-root Put from a release transaction.
+ *
+ * @param items - Candidate authority or release transaction items.
+ * @returns Exact terminal-root Put, or absence for authority transitions.
+ */
+function readTerminalRootTransactionPut(
+  items: readonly TransactWriteItem[] | undefined,
+): NonNullable<TransactWriteItem['Put']> | undefined {
+  if (
+    items?.length !==
+      workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+        .count
+  ) {
+    return undefined
+  }
+  return requirePut(
+    items[
+      workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+        .terminalRoot
+    ],
+  )
+}
+
+/**
+ * Evaluates the indexed controlled-field predicate on a terminal-root Put.
+ *
+ * Unknown attributes intentionally do not affect the predicate because the
+ * successful Put replaces the complete row with its canonical item.
+ *
+ * @param put - Exact conditional terminal-root Put.
+ * @param current - Current complete terminal-root row.
+ * @returns Whether every controlled field still has its expected value.
+ */
+function terminalRootPutMatchesPredecessor(
+  put: NonNullable<TransactWriteItem['Put']>,
+  current: Readonly<Record<string, AttributeValue>>,
+): boolean {
+  const names = put.ExpressionAttributeNames
+  const values = put.ExpressionAttributeValues
+  const expression = put.ConditionExpression
+  if (
+    names === undefined ||
+    values === undefined ||
+    typeof expression !== 'string'
+  ) {
+    return false
+  }
+  const fieldCount = Object.keys(names).length
+  if (
+    fieldCount === 0 ||
+    Object.keys(values).length !== fieldCount
+  ) {
+    return false
+  }
+  const clauses: string[] = []
+  for (let index = 0; index < fieldCount; index += 1) {
+    const nameToken = `#field${index}`
+    const valueToken = `:value${index}`
+    const name = names[nameToken]
+    const expected = values[valueToken]
+    const actual = name === undefined ? undefined : current[name]
+    if (
+      typeof name !== 'string' ||
+      expected === undefined ||
+      actual === undefined ||
+      JSON.stringify(actual) !== JSON.stringify(expected)
+    ) {
+      return false
+    }
+    clauses.push(`${nameToken} = ${valueToken}`)
+  }
+  return expression === clauses.join(' AND ')
 }
 
 /**

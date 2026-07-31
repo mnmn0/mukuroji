@@ -9260,12 +9260,24 @@ describe('Workspace Search migration AWS identity adapter', () => {
             .executionRun
         ]?.ConditionCheck,
       ).toBeDefined()
-      expect(
+      const terminalRootAction =
         releaseItems?.[
           workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
             .terminalRoot
-        ]?.ConditionCheck,
-      ).toBeDefined()
+        ]
+      expect(terminalRootAction?.ConditionCheck).toBeUndefined()
+      expect(terminalRootAction?.Put).toMatchObject({
+        TableName: fixture.requested.tables['migration-state'],
+        Item: {
+          verifiedRootDigest: { S: root.verifiedRootDigest },
+        },
+        ReturnValuesOnConditionCheckFailure: 'NONE',
+      })
+      expect(
+        Object.values(
+          terminalRootAction?.Put?.ExpressionAttributeValues ?? {},
+        ),
+      ).toContainEqual({ S: root.verifiedRootDigest })
       expect(
         releaseItems?.[
           workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
