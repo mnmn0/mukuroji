@@ -2646,6 +2646,7 @@ function prepareRolledBackRootConditionCheckInput(
   const root = detachRolledBackRoot(
     readOwn(record, 'root', 'INVALID_ARGUMENT'),
   )
+  // Intentionally discard the condition: its strict builder validates admission.
   createWorkspaceSearchMigrationExecutionRunAdmissionConditionCheck({
     stateTable,
     configurationHash,

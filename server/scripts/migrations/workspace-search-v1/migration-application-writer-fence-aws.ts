@@ -4,6 +4,7 @@ import {
   TransactionCanceledException,
   TransactionConflictException,
   TransactWriteItemsCommand,
+  type AttributeValue,
   type GetItemCommandOutput,
   type TransactWriteItem,
   type TransactWriteItemsCommandOutput,
@@ -37,6 +38,10 @@ import {
   type WorkspaceSearchWriterFenceTableIds,
   type WorkspaceSearchWriterFenceTerminalOutcome,
 } from '../../../src/infrastructure/runtime/workspace-search-writer-fence'
+import {
+  decodeAttributeMap,
+  encodeUnknownAttributeMap,
+} from './dynamodb-attribute-codec'
 import {
   createWorkspaceSearchMigrationPlanningAdmittedExecutionBoundaryConditionCheck,
 } from './migration-execution-boundary-aws'
@@ -321,6 +326,16 @@ type ApplicationWriterFenceReleaseSnapshot = {
 }
 
 /**
+ * Exact full terminal-root row retained across its strong preflight read.
+ */
+type ApplicationWriterFenceTerminalRootReadMaterial = {
+  /** Strongly consistent read for the transaction's terminal-root key. */
+  readonly command: GetItemCommand
+  /** Complete canonical low-level row expected at that key. */
+  readonly expectedItem: Readonly<Record<string, AttributeValue>>
+}
+
+/**
  * Strict terminal outcome projected into the shared release contract.
  */
 type DetachedApplicationWriterFenceTerminalOutcome = {
@@ -559,6 +574,17 @@ implements WorkspaceSearchMigrationApplicationWriterFenceAwsPort {
         return failApplicationWriterFenceAws('INVALID_STATE')
       }
       requireReleasePredecessor(predecessor.record, snapshot)
+      const predecessorChecks =
+        createApplicationWriterFenceReleaseConditionChecks(
+          snapshot,
+          this.binding,
+        )
+      await this.requireExactTerminalRoot(
+        predecessorChecks[
+          workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+            .terminalRoot
+        ],
+      )
       await this.transport.prepare()
       const commitAt = readApplicationWriterFenceClock(this.clock)
       if (commitAt.getTime() < Date.parse(snapshot.terminalAt)) {
@@ -576,10 +602,7 @@ implements WorkspaceSearchMigrationApplicationWriterFenceAwsPort {
           predecessor,
           successor,
         },
-        createApplicationWriterFenceReleaseConditionChecks(
-          snapshot,
-          this.binding,
-        ),
+        predecessorChecks,
       )
     })
   }
@@ -604,10 +627,19 @@ implements WorkspaceSearchMigrationApplicationWriterFenceAwsPort {
         commit.predecessor,
         commit.successor,
       )
+    const transactItems = [...predecessorChecks, transitionPut]
+    const expectedItemCount = commit.operation === 'release'
+      ? workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+        .count
+      : workspaceSearchMigrationApplicationWriterFenceAuthorityTransitionIndex
+        .count
+    if (transactItems.length !== expectedItemCount) {
+      return failApplicationWriterFenceAws('INVALID_STATE')
+    }
     const command = new TransactWriteItemsCommand({
       ClientRequestToken:
         createApplicationWriterFenceTransactionToken(commit),
-      TransactItems: [...predecessorChecks, transitionPut],
+      TransactItems: transactItems,
     })
     let transactionError: unknown
     try {
@@ -692,6 +724,35 @@ implements WorkspaceSearchMigrationApplicationWriterFenceAwsPort {
       output.Item,
       this.binding.fence,
     )
+  }
+
+  /**
+   * Strongly reads and validates the complete terminal-root attribute set.
+   *
+   * Immutable-root transaction conditions compare every controlled field, but
+   * DynamoDB expressions cannot quantify unknown top-level attributes. This
+   * preflight rejects malformed rows before the fixed five-item release
+   * transaction is allowed to linearize the closed-row transition.
+   *
+   * @param terminalRootCheck - Exact generated terminal-root condition.
+   */
+  private async requireExactTerminalRoot(
+    terminalRootCheck: TransactWriteItem,
+  ): Promise<void> {
+    const material =
+      createApplicationWriterFenceTerminalRootReadMaterial(
+        terminalRootCheck,
+        this.binding,
+      )
+    const output = await this.transport.get(material.command)
+    if (
+      !applicationWriterFenceAttributeMapEquals(
+        output.Item,
+        material.expectedItem,
+      )
+    ) {
+      return failApplicationWriterFenceAws('INVALID_STATE')
+    }
   }
 }
 
@@ -1235,6 +1296,122 @@ function createApplicationWriterFenceReleaseConditionChecks(
     executionRun,
     terminalRoot,
   ]
+}
+
+/**
+ * Reconstructs the complete canonical row named by a generated condition.
+ *
+ * The three terminal-root adapters emit one indexed equality clause for every
+ * non-key attribute. Reconstructing that row lets the release adapter reject
+ * missing, extra, or malformed attributes with a full strong read before the
+ * condition participates in the fixed release transaction.
+ *
+ * @param terminalRootCheck - Exact generated terminal-root condition.
+ * @param binding - Exact measured adapter binding.
+ * @returns Strong read command and complete expected low-level row.
+ */
+function createApplicationWriterFenceTerminalRootReadMaterial(
+  terminalRootCheck: TransactWriteItem,
+  binding: ApplicationWriterFenceAdapterBinding,
+): ApplicationWriterFenceTerminalRootReadMaterial {
+  const condition = terminalRootCheck.ConditionCheck
+  if (
+    condition === undefined ||
+    condition.TableName !== binding.stateTable.tableName ||
+    condition.Key === undefined ||
+    condition.ExpressionAttributeNames === undefined ||
+    condition.ExpressionAttributeValues === undefined ||
+    typeof condition.ConditionExpression !== 'string' ||
+    condition.ReturnValuesOnConditionCheckFailure !== 'NONE'
+  ) {
+    return failApplicationWriterFenceAws('INVALID_STATE')
+  }
+  const key = cloneApplicationWriterFenceAttributeMap(condition.Key)
+  const keyNames = Object.keys(key).sort()
+  if (
+    keyNames.length !== 2 ||
+    keyNames[0] !== 'migrationId' ||
+    keyNames[1] !== 'recordKey'
+  ) {
+    return failApplicationWriterFenceAws('INVALID_STATE')
+  }
+  const names = condition.ExpressionAttributeNames
+  const values = condition.ExpressionAttributeValues
+  const fieldCount = Object.keys(names).length
+  if (
+    fieldCount === 0 ||
+    Object.keys(values).length !== fieldCount
+  ) {
+    return failApplicationWriterFenceAws('INVALID_STATE')
+  }
+  const expectedItem: Record<string, AttributeValue> = { ...key }
+  const clauses: string[] = []
+  for (let index = 0; index < fieldCount; index += 1) {
+    const nameToken = `#field${index}`
+    const valueToken = `:value${index}`
+    const attributeName = names[nameToken]
+    const attributeValue = values[valueToken]
+    if (
+      typeof attributeName !== 'string' ||
+      attributeName.length === 0 ||
+      attributeValue === undefined ||
+      Object.hasOwn(expectedItem, attributeName)
+    ) {
+      return failApplicationWriterFenceAws('INVALID_STATE')
+    }
+    expectedItem[attributeName] = attributeValue
+    clauses.push(`${nameToken} = ${valueToken}`)
+  }
+  if (
+    condition.ConditionExpression !== clauses.join(' AND ')
+  ) {
+    return failApplicationWriterFenceAws('INVALID_STATE')
+  }
+  const detachedExpectedItem =
+    cloneApplicationWriterFenceAttributeMap(expectedItem)
+  return {
+    command: new GetItemCommand({
+      TableName: binding.stateTable.tableName,
+      ConsistentRead: true,
+      Key: key,
+    }),
+    expectedItem: detachedExpectedItem,
+  }
+}
+
+/**
+ * Losslessly detaches one low-level DynamoDB attribute map.
+ *
+ * @param value - Candidate item or key.
+ * @returns Exact detached low-level attribute map.
+ */
+function cloneApplicationWriterFenceAttributeMap(
+  value: unknown,
+): Readonly<Record<string, AttributeValue>> {
+  try {
+    return decodeAttributeMap(encodeUnknownAttributeMap(value))
+  } catch {
+    return failApplicationWriterFenceAws('INVALID_STATE')
+  }
+}
+
+/**
+ * Compares complete low-level rows including their exact attribute sets.
+ *
+ * @param candidate - Untrusted full row returned by DynamoDB.
+ * @param expected - Complete canonical row reconstructed from the condition.
+ * @returns Whether both lossless attribute maps are byte-equivalent.
+ */
+function applicationWriterFenceAttributeMapEquals(
+  candidate: unknown,
+  expected: Readonly<Record<string, AttributeValue>>,
+): boolean {
+  try {
+    return JSON.stringify(encodeUnknownAttributeMap(candidate)) ===
+      JSON.stringify(encodeUnknownAttributeMap(expected))
+  } catch {
+    return false
+  }
 }
 
 /**

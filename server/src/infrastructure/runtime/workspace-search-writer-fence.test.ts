@@ -864,7 +864,7 @@ test('rejects extra, malformed, noncanonical, and digest-tampered items', () => 
     '"kind":"verified","persistenceVersion":1',
     '"kind":"verified","persistenceVersion":2',
   )
-  const releasedExtraBindingBytes = released.canonicalBytes.replace(
+  const releasedExtraReleaseKeyBytes = released.canonicalBytes.replace(
     '"terminal":{',
     '"unexpected":true,"terminal":{',
   )
@@ -920,8 +920,8 @@ test('rejects extra, malformed, noncanonical, and digest-tampered items', () => 
       binding.recordKey,
     ),
     createRawItem(
-      releasedExtraBindingBytes,
-      digestFixture(releasedExtraBindingBytes),
+      releasedExtraReleaseKeyBytes,
+      digestFixture(releasedExtraReleaseKeyBytes),
       binding.recordKey,
     ),
     createRawItem(

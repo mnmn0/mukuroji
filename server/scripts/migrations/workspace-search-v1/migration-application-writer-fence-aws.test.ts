@@ -73,6 +73,9 @@ import {
   WORKSPACE_SEARCH_MIGRATION_FULL_VERIFICATION_VERSION,
 } from './migration-full-verification'
 import {
+  createWorkspaceSearchMigrationFullVerificationVerifiedRootConditionCheck,
+} from './migration-full-verification-aws'
+import {
   createWorkspaceSearchMigrationFullVerificationPageCommandIdentity,
   createWorkspaceSearchMigrationFullVerificationPageReceipt,
   createWorkspaceSearchMigrationFullVerificationPersistenceState,
@@ -93,6 +96,9 @@ import {
   finishWorkspaceSearchMigrationRollback,
   type WorkspaceSearchMigrationRolledBackRoot,
 } from './migration-rollback-persistence'
+import {
+  createWorkspaceSearchMigrationRolledBackRootConditionCheck,
+} from './migration-rollback-operation-aws'
 import {
   parseWorkspaceSearchMigrationSealedPlanningAuthorityV2,
   serializeWorkspaceSearchMigrationSealedPlanningAuthorityV2,
@@ -649,6 +655,7 @@ describe('Workspace Search application writer fence AWS adapter', () => {
 
     expect(events).toEqual([
       'read',
+      'read',
       'prepare',
       'clock',
       'transact',
@@ -658,7 +665,10 @@ describe('Workspace Search application writer fence AWS adapter', () => {
       workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
         .count,
     )
-    for (let index = 0; index < 4; index += 1) {
+    const writerFenceIndex =
+      workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+        .writerFence
+    for (let index = 0; index < writerFenceIndex; index += 1) {
       expect(items[index]?.ConditionCheck).toBeDefined()
       expect(items[index]?.Put).toBeUndefined()
     }
@@ -693,6 +703,31 @@ describe('Workspace Search application writer fence AWS adapter', () => {
     ).toContainEqual({ S: fixture.verifiedRoot.verifiedRootDigest })
   })
 
+  test('rejects a terminal root with unexpected durable attributes before release', async () => {
+    const fixture = createReleaseFixture()
+    const transport = new RecordingFenceTransport()
+    const port = createPort(
+      fixture,
+      transport,
+      createSequencedClock([], [initialOpenTime, closeTime]),
+    )
+    await port.bootstrapOpen(fixture.authority)
+    await port.close(fixture.authority)
+    transport.setTerminalItem({
+      ...createVerifiedTerminalRootItem(fixture),
+      unexpected: { S: 'schema-mismatch' },
+    })
+    transport.clearHistory()
+
+    const failure = await captureMigrationFailure(
+      () => port.release(fixture.releaseInput),
+    )
+
+    expect(failure.code).toBe('INVALID_STATE')
+    expect(transport.reads).toHaveLength(2)
+    expect(transport.transactions).toHaveLength(0)
+  })
+
   test('recovers the exact verified release after transaction response loss', async () => {
     const fixture = createReleaseFixture()
     const transport = new RecordingFenceTransport()
@@ -719,7 +754,7 @@ describe('Workspace Search application writer fence AWS adapter', () => {
       fixture.verifiedRoot.verifiedRootDigest,
     )
     expect(transport.transactions).toHaveLength(1)
-    expect(transport.reads).toHaveLength(2)
+    expect(transport.reads).toHaveLength(3)
   })
 
   test('recovers a durable verified release read-only after restart', async () => {
@@ -887,7 +922,7 @@ describe('Workspace Search application writer fence AWS adapter', () => {
         code: 'INVALID_STATE',
       })
       expect(transport.transactions).toHaveLength(1)
-      expect(transport.reads).toHaveLength(2)
+      expect(transport.reads).toHaveLength(3)
     }
   })
 
@@ -928,7 +963,7 @@ describe('Workspace Search application writer fence AWS adapter', () => {
     )
     expect(transport.transactions).toHaveLength(2)
     expect(transport.committedTransactionCount).toBe(1)
-    expect(transport.reads).toHaveLength(4)
+    expect(transport.reads).toHaveLength(6)
   })
 
   test('permits only one terminal kind to win concurrent verified and rolled-back releases', async () => {
@@ -949,6 +984,9 @@ describe('Workspace Search application writer fence AWS adapter', () => {
     )
     await setupPort.bootstrapOpen(fixture.authority)
     await setupPort.close(fixture.authority)
+    transport.setTerminalItem(
+      createRolledBackTerminalRootItem(fixture, rolledBackRoot),
+    )
     transport.clearHistory()
     transport.enforceWriterFenceCas = true
     transport.blockNextReadsUntil(2)
@@ -990,7 +1028,7 @@ describe('Workspace Search application writer fence AWS adapter', () => {
     ]).toContain(durable.release.terminal.rootDigest)
     expect(transport.transactions).toHaveLength(2)
     expect(transport.committedTransactionCount).toBe(1)
-    expect(transport.reads).toHaveLength(4)
+    expect(transport.reads).toHaveLength(6)
   })
 
   test('rejects an unknown runtime terminal discriminant before reading durable state', async () => {
@@ -1122,9 +1160,14 @@ describe('Workspace Search application writer fence AWS adapter', () => {
         },
         new Date(closeTime),
       )
-    transport.setItem(
-      encodeWorkspaceSearchWriterFenceRecord(foreignClosed),
-    )
+    transport.setItem({
+      ...encodeWorkspaceSearchWriterFenceRecord(foreignClosed),
+      recordKey: {
+        S: createBindingForConfiguration(
+          fixture.configuration,
+        ).recordKey,
+      },
+    })
 
     const foreignFailure = await captureMigrationFailure(
       () => port.read(),
@@ -1293,6 +1336,13 @@ implements WorkspaceSearchMigrationPrePlanAuthorityAwsTransport {
   private item:
     Readonly<Record<string, AttributeValue>> | undefined
 
+  /** Immutable terminal rows keyed by migration id, then deterministic record key. */
+  private readonly terminalItems =
+    new Map<
+      string,
+      Map<string, Readonly<Record<string, AttributeValue>>>
+    >()
+
   /** Pending one-shot read gate. */
   private readGate: Promise<void> | undefined
 
@@ -1350,9 +1400,24 @@ implements WorkspaceSearchMigrationPrePlanAuthorityAwsTransport {
       this.nextReadError = undefined
       throw error
     }
-    return this.item === undefined
+    const requestedMigrationId = command.input.Key?.migrationId?.S
+    const requestedRecordKey = command.input.Key?.recordKey?.S
+    const currentItem = this.item
+    const item =
+      requestedMigrationId !== undefined &&
+        requestedRecordKey !== undefined &&
+        currentItem?.migrationId?.S === requestedMigrationId &&
+        currentItem.recordKey?.S === requestedRecordKey
+        ? currentItem
+        : requestedMigrationId === undefined ||
+            requestedRecordKey === undefined
+          ? undefined
+          : this.terminalItems
+            .get(requestedMigrationId)
+            ?.get(requestedRecordKey)
+    return item === undefined
       ? { $metadata: {} }
-      : { $metadata: {}, Item: structuredClone(this.item) }
+      : { $metadata: {}, Item: structuredClone(item) }
   }
 
   /**
@@ -1383,18 +1448,28 @@ implements WorkspaceSearchMigrationPrePlanAuthorityAwsTransport {
       this.item !== undefined
     ) {
       const items = command.input.TransactItems
-      const lastIndex = (items?.length ?? 0) - 1
-      const last = items?.[lastIndex]
-      if (!writerFencePutMatchesPredecessor(last, this.item)) {
-        error = createCancellation(lastIndex, items?.length ?? 0)
+      const writerFenceIndex =
+        readWriterFenceTransactionIndex(items)
+      const writerFenceItem = items?.[writerFenceIndex]
+      if (
+        !writerFencePutMatchesPredecessor(
+          writerFenceItem,
+          this.item,
+        )
+      ) {
+        error = createCancellation(
+          writerFenceIndex,
+          items?.length ?? 0,
+        )
       }
     }
     const shouldCommit =
       error === undefined || this.commitBeforeTransactionError
     if (shouldCommit) {
       const items = command.input.TransactItems
-      const last = items?.[items.length - 1]
-      const put = requirePut(last)
+      const writerFenceItem =
+        items?.[readWriterFenceTransactionIndex(items)]
+      const put = requirePut(writerFenceItem)
       this.item = this.nextCommittedItem === undefined
         ? structuredClone(requirePutItem(put))
         : structuredClone(this.nextCommittedItem)
@@ -1426,6 +1501,26 @@ implements WorkspaceSearchMigrationPrePlanAuthorityAwsTransport {
    */
   setItem(item: Readonly<Record<string, AttributeValue>>): void {
     this.item = structuredClone(item)
+  }
+
+  /**
+   * Installs one immutable terminal-root row at its deterministic key.
+   *
+   * @param item - Exact or deliberately malformed terminal row.
+   */
+  setTerminalItem(
+    item: Readonly<Record<string, AttributeValue>>,
+  ): void {
+    const migrationId = item.migrationId?.S
+    const recordKey = item.recordKey?.S
+    if (migrationId === undefined || recordKey === undefined) {
+      throw new Error('Expected terminal-root composite key.')
+    }
+    const migrationItems =
+      this.terminalItems.get(migrationId) ??
+      new Map<string, Readonly<Record<string, AttributeValue>>>()
+    migrationItems.set(recordKey, structuredClone(item))
+    this.terminalItems.set(migrationId, migrationItems)
   }
 
   /**
@@ -1534,6 +1629,109 @@ type ReleaseGraphFixture = FenceFixture & {
   readonly executionRun: ReturnType<
     typeof createWorkspaceSearchMigrationExecutionRun
   >
+}
+
+/**
+ * Detects a complete release fixture without unsafe type assertions.
+ *
+ * @param fixture - Candidate base fence fixture.
+ * @returns Whether release graph material is present.
+ */
+function isReleaseFixture(
+  fixture: FenceFixture,
+): fixture is ReleaseFixture {
+  return Object.hasOwn(fixture, 'closedWriterFenceRecord') &&
+    Object.hasOwn(fixture, 'executionBoundary') &&
+    Object.hasOwn(fixture, 'sealedPlanningAuthority') &&
+    Object.hasOwn(fixture, 'executionRun') &&
+    Object.hasOwn(fixture, 'verifiedRoot') &&
+    Object.hasOwn(fixture, 'releaseInput')
+}
+
+/**
+ * Reconstructs the exact verified terminal row used by release preflight.
+ *
+ * @param fixture - Complete verified release fixture.
+ * @returns Complete canonical low-level root row.
+ */
+function createVerifiedTerminalRootItem(
+  fixture: ReleaseFixture,
+): Readonly<Record<string, AttributeValue>> {
+  return createItemFromFullRowConditionCheck(
+    createWorkspaceSearchMigrationFullVerificationVerifiedRootConditionCheck({
+      stateTable: fixture.configuration.tables['migration-state'],
+      configurationHash: fixture.configurationHash,
+      executionRun: fixture.executionRun,
+      root: fixture.verifiedRoot,
+    }),
+  )
+}
+
+/**
+ * Reconstructs the exact v1 rolled-back row used by release preflight.
+ *
+ * @param fixture - Complete release graph fixture.
+ * @param root - Exact complete-rollback terminal root.
+ * @returns Complete canonical low-level root row.
+ */
+function createRolledBackTerminalRootItem(
+  fixture: ReleaseFixture,
+  root: WorkspaceSearchMigrationRolledBackRoot,
+): Readonly<Record<string, AttributeValue>> {
+  return createItemFromFullRowConditionCheck(
+    createWorkspaceSearchMigrationRolledBackRootConditionCheck({
+      stateTable: fixture.configuration.tables['migration-state'],
+      configurationHash: fixture.configurationHash,
+      executionRun: fixture.executionRun,
+      root,
+    }),
+  )
+}
+
+/**
+ * Rebuilds one canonical item from a generated full-row ConditionCheck.
+ *
+ * @param transactionItem - Exact terminal-root condition item.
+ * @returns Complete canonical key and controlled attributes.
+ */
+function createItemFromFullRowConditionCheck(
+  transactionItem: TransactWriteItem,
+): Readonly<Record<string, AttributeValue>> {
+  const condition = transactionItem.ConditionCheck
+  const key = condition?.Key
+  const names = condition?.ExpressionAttributeNames
+  const values = condition?.ExpressionAttributeValues
+  if (
+    condition === undefined ||
+    key === undefined ||
+    names === undefined ||
+    values === undefined ||
+    typeof condition.ConditionExpression !== 'string'
+  ) {
+    throw new Error('Expected one complete terminal-root condition.')
+  }
+  const item: Record<string, AttributeValue> = structuredClone(key)
+  const fieldCount = Object.keys(names).length
+  const clauses: string[] = []
+  for (let index = 0; index < fieldCount; index += 1) {
+    const nameToken = `#field${index}`
+    const valueToken = `:value${index}`
+    const name = names[nameToken]
+    const value = values[valueToken]
+    if (
+      name === undefined ||
+      value === undefined ||
+      Object.hasOwn(item, name)
+    ) {
+      throw new Error('Expected indexed terminal-root condition fields.')
+    }
+    item[name] = structuredClone(value)
+    clauses.push(`${nameToken} = ${valueToken}`)
+  }
+  if (condition.ConditionExpression !== clauses.join(' AND ')) {
+    throw new Error('Expected canonical terminal-root condition clauses.')
+  }
+  return item
 }
 
 /**
@@ -2688,6 +2886,14 @@ function createPort(
   transport: WorkspaceSearchMigrationPrePlanAuthorityAwsTransport,
   clock: () => Date,
 ): WorkspaceSearchMigrationApplicationWriterFenceAwsPort {
+  if (
+    transport instanceof RecordingFenceTransport &&
+    isReleaseFixture(fixture)
+  ) {
+    transport.setTerminalItem(
+      createVerifiedTerminalRootItem(fixture),
+    )
+  }
   return createAwsWorkspaceSearchMigrationApplicationWriterFencePort(
     fixture.configuration,
     fixture.configurationHash,
@@ -2907,6 +3113,34 @@ function requirePutItem(
     throw new Error('Expected writer-fence item.')
   }
   return put.Item
+}
+
+/**
+ * Resolves the writer-fence action through the exported transaction layouts.
+ *
+ * @param items - Candidate authority or release transaction items.
+ * @returns Exact fixed writer-fence position.
+ */
+function readWriterFenceTransactionIndex(
+  items: readonly TransactWriteItem[] | undefined,
+): number {
+  if (
+    items?.length ===
+      workspaceSearchMigrationApplicationWriterFenceAuthorityTransitionIndex
+        .count
+  ) {
+    return workspaceSearchMigrationApplicationWriterFenceAuthorityTransitionIndex
+      .writerFence
+  }
+  if (
+    items?.length ===
+      workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+        .count
+  ) {
+    return workspaceSearchMigrationApplicationWriterFenceReleaseTransactionIndex
+      .writerFence
+  }
+  throw new Error('Expected a known writer-fence transaction layout.')
 }
 
 /**
