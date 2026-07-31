@@ -28,8 +28,8 @@ import {
   type WorkspaceSearchWriterFenceAuthority,
   type WorkspaceSearchWriterFenceBinding,
   type WorkspaceSearchWriterFenceClosedRecord,
+  type WorkspaceSearchWriterFenceInitialOpenRecordV1,
   type WorkspaceSearchWriterFenceObservation,
-  type WorkspaceSearchWriterFenceOpenRecord,
   type WorkspaceSearchWriterFenceTableIds,
 } from '../../../src/infrastructure/runtime/workspace-search-writer-fence'
 import {
@@ -310,7 +310,7 @@ type ExecutionBoundaryCloseCommit = {
   /** Stable authority projected into the closed fence. */
   readonly closeAuthority: WorkspaceSearchWriterFenceAuthority
   /** Exact open writer-fence predecessor. */
-  readonly predecessorFence: WorkspaceSearchWriterFenceOpenRecord
+  readonly predecessorFence: WorkspaceSearchWriterFenceInitialOpenRecordV1
   /** Exact intended closed writer-fence successor. */
   readonly successorFence: WorkspaceSearchWriterFenceClosedRecord
   /** Exact intended revision-one boundary. */
@@ -452,7 +452,8 @@ implements WorkspaceSearchMigrationExecutionBoundaryAwsPort {
       }
       if (
         predecessor.writerFence.status !== 'present' ||
-        predecessor.writerFence.record.mode !== 'open'
+        predecessor.writerFence.record.mode !== 'open' ||
+        predecessor.writerFence.record.version !== 1
       ) {
         return failExecutionBoundaryAws('INVALID_STATE')
       }

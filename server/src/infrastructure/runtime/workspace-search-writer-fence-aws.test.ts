@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { describe, expect, test } from 'bun:test'
 import type {
   DescribeTableCommand,
@@ -12,10 +13,12 @@ import {
   createWorkspaceSearchWriterFenceGuardMaterial,
   createWorkspaceSearchWriterFenceInitialOpenRecord,
   createWorkspaceSearchWriterFenceReadMaterial,
+  createWorkspaceSearchWriterFenceReleasedOpenSuccessor,
   createWorkspaceSearchWriterFenceStateIncarnationDigest,
   encodeWorkspaceSearchWriterFenceRecord,
   type WorkspaceSearchWriterFenceBinding,
-  type WorkspaceSearchWriterFenceOpenRecord,
+  type WorkspaceSearchWriterFenceInitialOpenRecordV1,
+  type WorkspaceSearchWriterFenceReleaseBinding,
   type WorkspaceSearchWriterFenceStateIdentity,
   type WorkspaceSearchWriterFenceTableIds,
 } from './workspace-search-writer-fence'
@@ -51,7 +54,7 @@ type WorkspaceSearchWriterFenceAwsFixture = {
   /** Binding derived from the fixture's six immutable identities. */
   readonly binding: WorkspaceSearchWriterFenceBinding
   /** Durable open row returned by the initial fake GetItem response. */
-  readonly openRecord: WorkspaceSearchWriterFenceOpenRecord
+  readonly openRecord: WorkspaceSearchWriterFenceInitialOpenRecordV1
   /** Exact migration-state identity expected by guard construction. */
   readonly stateTableIdentity: WorkspaceSearchWriterFenceStateIdentity
 }
@@ -435,6 +438,85 @@ describe('Workspace Search writer-fence AWS source', () => {
           'WorkspaceSearchMigrationState',
       ),
     ).toHaveLength(2)
+  })
+
+  test('rejects a closed interval and remeasures a released version-two open epoch', async () => {
+    const fixture = createFixture()
+    const configurationHash = createHash('sha256')
+      .update('aws-released-configuration')
+      .digest('hex')
+    const closed = createWorkspaceSearchWriterFenceClosedSuccessor(
+      fixture.openRecord,
+      {
+        configurationHash,
+        runId: 'aws-released-run',
+        ownerId: 'aws-released-owner',
+        leaseFenceToken: 7,
+        maintenanceEvidenceReceiptDigest: createHash('sha256')
+          .update('aws-released-maintenance-receipt')
+          .digest('hex'),
+        maintenanceEvidencePointerRevision: 4,
+      },
+      new Date('2026-07-29T00:05:00.000Z'),
+    )
+    const release: WorkspaceSearchWriterFenceReleaseBinding = {
+      releaseVersion: 1,
+      configurationHash,
+      runId: 'aws-released-run',
+      executionBoundaryDigest: createHash('sha256')
+        .update('aws-released-execution-boundary')
+        .digest('hex'),
+      sealedPlanningAuthorityDigest: createHash('sha256')
+        .update('aws-released-sealed-planning-authority')
+        .digest('hex'),
+      executionRunDigest: createHash('sha256')
+        .update('aws-released-execution-run')
+        .digest('hex'),
+      terminal: {
+        kind: 'rolled-back',
+        persistenceVersion: 2,
+        rootDigest: createHash('sha256')
+          .update('aws-released-rolled-back-root')
+          .digest('hex'),
+      },
+    }
+    const released = createWorkspaceSearchWriterFenceReleasedOpenSuccessor(
+      closed,
+      release,
+      new Date('2026-07-29T00:10:00.000Z'),
+    )
+    const source = createAwsWorkspaceSearchWriterFenceGuardSource(
+      fixture.tableNames,
+      fixture.transport,
+      silentDiagnostics,
+    )
+
+    const initial = await source.acquire()
+    fixture.transport.setGetOutput({
+      $metadata: {},
+      Item: encodeWorkspaceSearchWriterFenceRecord(closed),
+    })
+    await expectUnavailable(() => source.acquire())
+    fixture.transport.setGetOutput({
+      $metadata: {},
+      Item: encodeWorkspaceSearchWriterFenceRecord(released),
+    })
+    const acquired = await source.acquire()
+
+    expect(initial.writerEpoch).toBe(1)
+    expect(initial.controlRevision).toBe(1)
+    expect(acquired).toEqual(createWorkspaceSearchWriterFenceGuardMaterial(
+      { status: 'present', record: released },
+      fixture.binding,
+      fixture.stateTableIdentity,
+    ))
+    expect(acquired.writerEpoch).toBe(3)
+    expect(acquired.controlRevision).toBe(3)
+    expect(acquired.materialFingerprint).not.toBe(
+      initial.materialFingerprint,
+    )
+    expect(fixture.transport.describeCommands).toHaveLength(18)
+    expect(fixture.transport.getCommands).toHaveLength(3)
   })
 
   test('collapses missing, closed, and malformed rows to unavailable', async () => {

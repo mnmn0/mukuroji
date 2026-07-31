@@ -478,6 +478,22 @@ export type PublishWorkspaceSearchMigrationFullVerificationInput = {
 }
 
 /**
+ * Exact immutable verified-root material fixed by a later transaction.
+ */
+export type CreateWorkspaceSearchMigrationFullVerificationVerifiedRootConditionCheckInput =
+  {
+    /** Independently measured migration-state table identity. */
+    readonly stateTable: MigrationTableIdentity
+    /** Reviewed digest of the exact measured configuration. */
+    readonly configurationHash: string
+    /** Immutable execution admission owning the verification chain. */
+    readonly executionRun: WorkspaceSearchMigrationExecutionRun
+    /** Exact immutable terminal verified root. */
+    readonly root:
+      WorkspaceSearchMigrationFullVerificationVerifiedRoot
+  }
+
+/**
  * Atomic resumable verification and immutable publication capability.
  */
 export interface WorkspaceSearchMigrationFullVerificationAwsPort {
@@ -552,6 +568,32 @@ type FullVerificationBinding = {
   /** Stable deterministic binding and conflict row keys. */
   readonly recordKeys:
     WorkspaceSearchMigrationFullVerificationConflictRecordKeys
+}
+
+/**
+ * Narrow immutable-row binding shared by publication and later conditions.
+ */
+type VerifiedRootRecordBinding = {
+  /** Exact measured migration-state table. */
+  readonly stateTable: MigrationTableIdentity
+  /** Reviewed measured-configuration digest. */
+  readonly configurationHash: string
+  /** Immutable execution admission owning the terminal root. */
+  readonly executionRun: WorkspaceSearchMigrationExecutionRun
+  /** Deterministic verified-root key namespace. */
+  readonly recordKeys:
+    WorkspaceSearchMigrationFullVerificationConflictRecordKeys
+}
+
+/**
+ * Strict detached input prepared for one verified-root condition.
+ */
+type PreparedVerifiedRootConditionCheckInput = {
+  /** Narrow canonical durable-row binding. */
+  readonly binding: VerifiedRootRecordBinding
+  /** Strict detached immutable verified root. */
+  readonly root:
+    WorkspaceSearchMigrationFullVerificationVerifiedRoot
 }
 
 /**
@@ -749,6 +791,32 @@ export function createAwsWorkspaceSearchMigrationFullVerificationPort(
     return new AwsWorkspaceSearchMigrationFullVerificationPort(
       binding,
       dependencies,
+    )
+  } catch (error: unknown) {
+    throw createPublicFailure(readFailureCode(error, true))
+  }
+}
+
+/**
+ * Creates an exact full-row condition for one immutable verified root.
+ *
+ * The root and execution admission are synchronously detached through their
+ * canonical codecs before the durable row is reconstructed. The returned
+ * condition fixes every non-key attribute, including the canonical root
+ * bytes, rather than trusting only the indexed root digest.
+ *
+ * @param input - Measured state table, admission, configuration, and root.
+ * @returns Exact immutable verified-root ConditionCheck.
+ */
+export function createWorkspaceSearchMigrationFullVerificationVerifiedRootConditionCheck(
+  input:
+    CreateWorkspaceSearchMigrationFullVerificationVerifiedRootConditionCheckInput,
+): TransactWriteItem {
+  try {
+    const prepared = prepareVerifiedRootConditionCheckInput(input)
+    return createFullRecordConditionCheck(
+      prepared.binding,
+      createVerifiedRootRecord(prepared.binding, prepared.root),
     )
   } catch (error: unknown) {
     throw createPublicFailure(readFailureCode(error, true))
@@ -2806,6 +2874,139 @@ function parseVerificationReceiptRecord(
 }
 
 /**
+ * Synchronously detaches and correlates one verified-root condition input.
+ *
+ * @param input - Candidate measured table, admission, and terminal root.
+ * @returns Strict narrow durable-row binding and immutable root.
+ */
+function prepareVerifiedRootConditionCheckInput(
+  input: unknown,
+): PreparedVerifiedRootConditionCheckInput {
+  const record = requirePlainRecord(input, 'INVALID_ARGUMENT')
+  requireExactKeys(record, [
+    'configurationHash',
+    'executionRun',
+    'root',
+    'stateTable',
+  ], 'INVALID_ARGUMENT')
+  const configurationHash = readDigest(
+    readOwn(record, 'configurationHash', 'INVALID_ARGUMENT'),
+    'INVALID_ARGUMENT',
+  )
+  const stateTable = detachVerifiedRootStateTable(
+    readOwn(record, 'stateTable', 'INVALID_ARGUMENT'),
+  )
+  const executionRun = detachExecutionRun(
+    readOwn(record, 'executionRun', 'INVALID_ARGUMENT'),
+  )
+  const root = detachVerifiedRoot(
+    readOwn(record, 'root', 'INVALID_ARGUMENT'),
+  )
+  if (
+    root.runId !== executionRun.runId ||
+    root.configurationHash !== configurationHash ||
+    executionRun.configurationHash !== configurationHash ||
+    root.sealedPlanningAuthorityDigest !==
+      executionRun.binding.sealedPlanningAuthorityDigest ||
+    root.planDigest !== executionRun.binding.planDigest ||
+    root.tableIds['migration-state'] !== stateTable.tableId
+  ) {
+    return failVerification('INVALID_ARGUMENT')
+  }
+  requireTableIds(executionRun.binding.tableIds, root.tableIds)
+  return {
+    binding: {
+      stateTable,
+      configurationHash,
+      executionRun,
+      recordKeys:
+        createWorkspaceSearchMigrationFullVerificationConflictRecordKeys({
+          stateTableId: stateTable.tableId,
+          configurationHash,
+          runId: executionRun.runId,
+          executionRunDigest: executionRun.executionRunDigest,
+          sealedPlanningAuthorityDigest:
+            executionRun.binding.sealedPlanningAuthorityDigest,
+        }),
+    },
+    root,
+  }
+}
+
+/**
+ * Detaches one migration-state table without retaining caller-owned fields.
+ *
+ * @param value - Candidate measured migration-state table.
+ * @returns Detached minimally narrowed table identity.
+ */
+function detachVerifiedRootStateTable(
+  value: unknown,
+): MigrationTableIdentity {
+  if (!isMigrationStateTableIdentityCandidate(value)) {
+    return failVerification('INVALID_ARGUMENT')
+  }
+  let detached: unknown
+  try {
+    detached = structuredClone(value)
+  } catch {
+    return failVerification('INVALID_ARGUMENT')
+  }
+  if (!isMigrationStateTableIdentityCandidate(detached)) {
+    return failVerification('INVALID_ARGUMENT')
+  }
+  return detached
+}
+
+/**
+ * Detects the data fields required by immutable state-row addressing.
+ *
+ * @param value - Candidate measured table identity.
+ * @returns Whether it is a descriptor-safe migration-state table.
+ */
+function isMigrationStateTableIdentityCandidate(
+  value: unknown,
+): value is MigrationTableIdentity {
+  if (!isPlainRecord(value)) return false
+  const role = Object.getOwnPropertyDescriptor(value, 'role')
+  const tableName = Object.getOwnPropertyDescriptor(value, 'tableName')
+  const tableId = Object.getOwnPropertyDescriptor(value, 'tableId')
+  return role?.value === 'migration-state' &&
+    typeof tableName?.value === 'string' &&
+    tableName.value.length > 0 &&
+    typeof tableId?.value === 'string' &&
+    tableId.value.length > 0
+}
+
+/**
+ * Detaches one strict immutable verified root through its canonical codec.
+ *
+ * @param value - Candidate terminal root.
+ * @returns Strict detached verified root.
+ */
+function detachVerifiedRoot(
+  value: unknown,
+): WorkspaceSearchMigrationFullVerificationVerifiedRoot {
+  if (!isVerifiedRootCandidate(value)) {
+    return failVerification('INVALID_ARGUMENT')
+  }
+  return parseWorkspaceSearchMigrationFullVerificationVerifiedRoot(
+    serializeWorkspaceSearchMigrationFullVerificationVerifiedRoot(value),
+  )
+}
+
+/**
+ * Minimally narrows a verified root for its strict canonical codec.
+ *
+ * @param value - Candidate runtime root.
+ * @returns Whether the strict verified-root codec may inspect it.
+ */
+function isVerifiedRootCandidate(
+  value: unknown,
+): value is WorkspaceSearchMigrationFullVerificationVerifiedRoot {
+  return isPlainRecord(value)
+}
+
+/**
  * Creates the canonical immutable verified-root row.
  *
  * @param binding - Exact static adapter binding.
@@ -2813,10 +3014,10 @@ function parseVerificationReceiptRecord(
  * @returns Complete bounded low-level DynamoDB item.
  */
 function createVerifiedRootRecord(
-  binding: FullVerificationBinding,
+  binding: VerifiedRootRecordBinding,
   root: WorkspaceSearchMigrationFullVerificationVerifiedRoot,
 ): Readonly<Record<string, AttributeValue>> {
-  requireRootBinding(binding, root)
+  requireVerifiedRootRecordBinding(binding, root)
   const bytes =
     serializeWorkspaceSearchMigrationFullVerificationVerifiedRoot(root)
   const item = {
@@ -2953,15 +3154,30 @@ function requireRootBinding(
   binding: FullVerificationBinding,
   root: WorkspaceSearchMigrationFullVerificationVerifiedRoot,
 ): void {
+  requireVerifiedRootRecordBinding(binding, root)
+}
+
+/**
+ * Requires one verified root to match its immutable row namespace.
+ *
+ * @param binding - Narrow measured row binding.
+ * @param root - Candidate strict immutable root.
+ */
+function requireVerifiedRootRecordBinding(
+  binding: VerifiedRootRecordBinding,
+  root: WorkspaceSearchMigrationFullVerificationVerifiedRoot,
+): void {
   if (
     root.runId !== binding.executionRun.runId ||
     root.configurationHash !== binding.configurationHash ||
     root.sealedPlanningAuthorityDigest !==
-      binding.sealedPlanningAuthority.authorityDigest
+      binding.executionRun.binding.sealedPlanningAuthorityDigest ||
+    root.planDigest !== binding.executionRun.binding.planDigest ||
+    root.tableIds['migration-state'] !== binding.stateTable.tableId
   ) {
     return failVerification('INVALID_STATE')
   }
-  requireTableIds(binding.tableIds, root.tableIds)
+  requireTableIds(binding.executionRun.binding.tableIds, root.tableIds)
 }
 
 /**
@@ -3030,7 +3246,7 @@ function createVerificationReceiptRecordKey(
  * @returns Run-scoped immutable verified-root sort key.
  */
 function createVerifiedRootRecordKey(
-  binding: FullVerificationBinding,
+  binding: Pick<VerifiedRootRecordBinding, 'recordKeys'>,
 ): string {
   return binding.recordKeys.root
 }
@@ -3139,7 +3355,7 @@ function createVerificationStatePut(
  * @returns Exact controlled-attribute condition check.
  */
 function createFullRecordConditionCheck(
-  binding: FullVerificationBinding,
+  binding: Pick<VerifiedRootRecordBinding, 'stateTable'>,
   record: Readonly<Record<string, AttributeValue>>,
 ): TransactWriteItem {
   const migrationId = record.migrationId

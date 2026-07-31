@@ -87,6 +87,7 @@ import {
 } from './maintenance-evidence'
 import {
   createAwsWorkspaceSearchMigrationApplicationWriterFencePort,
+  type ReleaseWorkspaceSearchMigrationApplicationWriterFenceInput,
   type WorkspaceSearchMigrationApplicationWriterFenceAwsPort,
 } from './migration-application-writer-fence-aws'
 import {
@@ -852,15 +853,16 @@ export interface WorkspaceSearchMigrationManagedIdentityPort
 }
 
 /**
- * Initial-bootstrap writer-fence capability exposed by a managed AWS session.
+ * Writer-fence lifecycle capability exposed by a managed AWS session.
  *
  * The standalone writer-fence adapter retains its lower-level close operation
  * for isolated adapter use, but managed callers must close only through the
- * atomic execution-boundary port.
+ * atomic execution-boundary port. Terminal-bound release remains available
+ * here because it atomically fixes the immutable execution graph.
  */
 export type WorkspaceSearchMigrationManagedApplicationWriterFencePort = Pick<
   WorkspaceSearchMigrationApplicationWriterFenceAwsPort,
-  'bootstrapOpen' | 'read'
+  'bootstrapOpen' | 'read' | 'release'
 >
 
 /**
@@ -1035,12 +1037,12 @@ export interface WorkspaceSearchMigrationManagedAwsSession
     WorkspaceSearchMigrationSealedPlanningAuthorityV2AwsPort
 
   /**
-   * Creates one generation-bound initial writer-fence bootstrap/read port.
+   * Creates one generation-bound writer-fence lifecycle port.
    *
    * Closing is deliberately absent so managed callers cannot bypass the
-   * atomic execution-boundary record.
+   * atomic execution-boundary record. Release is terminal-root-bound.
    *
-   * @returns Bootstrap/read port bound to the latest measurement.
+   * @returns Bootstrap, read, and release port bound to the measurement.
    */
   createApplicationWriterFencePort():
     WorkspaceSearchMigrationManagedApplicationWriterFencePort
@@ -2039,10 +2041,10 @@ class AwsWorkspaceSearchMigrationIdentityPort
   }
 
   /**
-   * Creates one initial writer-fence bootstrap/read port bound to the current
-   * measured generation and all six physical table incarnations.
+   * Creates one writer-fence lifecycle port bound to the current measured
+   * generation and all six physical table incarnations.
    *
-   * @returns Generation-guarded initial writer-fence capability.
+   * @returns Generation-guarded bootstrap, read, and release capability.
    */
   createApplicationWriterFencePort():
     WorkspaceSearchMigrationManagedApplicationWriterFencePort {
@@ -2083,6 +2085,14 @@ class AwsWorkspaceSearchMigrationIdentityPort
         this.runManagedApplicationWriterFenceOperation(
           authority,
           delegate.read(),
+        ),
+      release: (
+        input:
+          ReleaseWorkspaceSearchMigrationApplicationWriterFenceInput,
+      ) =>
+        this.runManagedApplicationWriterFenceOperation(
+          authority,
+          delegate.release(input),
         ),
     }
   }

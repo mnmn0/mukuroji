@@ -17,6 +17,7 @@ import {
   type WorkspaceSearchWriterFenceBinding,
   type WorkspaceSearchWriterFenceAuthority,
   type WorkspaceSearchWriterFenceClosedRecord,
+  type WorkspaceSearchWriterFenceInitialOpenRecordV1,
   type WorkspaceSearchWriterFenceOpenRecord,
 } from '../../../src/infrastructure/runtime/workspace-search-writer-fence'
 import {
@@ -727,7 +728,7 @@ type ExecutionBoundaryAwsFixture = {
   /** Fresh authority used for the atomic close. */
   readonly closeAuthority: WorkspaceSearchMigrationPrePlanAuthority
   /** Exact initial open writer-fence row. */
-  readonly openFence: WorkspaceSearchWriterFenceOpenRecord
+  readonly openFence: WorkspaceSearchWriterFenceInitialOpenRecordV1
   /** Fresh authority and bytes used for planning admission. */
   readonly admissionInput:
     AdmitWorkspaceSearchMigrationExecutionBoundaryAwsPlanningInput

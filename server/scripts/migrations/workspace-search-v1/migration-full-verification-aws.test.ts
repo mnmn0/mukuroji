@@ -65,6 +65,7 @@ import {
 } from './migration-full-verification'
 import {
   createAwsWorkspaceSearchMigrationFullVerificationPort,
+  createWorkspaceSearchMigrationFullVerificationVerifiedRootConditionCheck,
   workspaceSearchMigrationFullVerificationPageTransactionIndex,
   workspaceSearchMigrationFullVerificationPublishTransactionIndex,
   type WorkspaceSearchMigrationFullVerificationAwsPort,
@@ -343,9 +344,83 @@ describe('Workspace Search migration full-verification AWS adapter', () => {
           .rollbackStart
       ]?.ConditionCheck?.Key?.recordKey?.S,
     ).toBe(rollbackStartGuard?.Key?.recordKey?.S)
-    expect(
-      (await harness.port.readVerifiedRoot())?.verifiedRootDigest,
-    ).toBe(root.verifiedRootDigest)
+    const conditionRoot = await harness.port.readVerifiedRoot()
+    if (conditionRoot === undefined) {
+      throw new Error('Expected strict verified root reread.')
+    }
+    expect(conditionRoot.verifiedRootDigest).toBe(root.verifiedRootDigest)
+
+    const rootItem = transactionItems(harness.transactions.at(-1))[
+      workspaceSearchMigrationFullVerificationPublishTransactionIndex
+        .verifiedRoot
+    ]?.Put?.Item
+    if (rootItem === undefined) {
+      throw new Error('Expected immutable verified-root item.')
+    }
+    expect(conditionRoot.runId).toBe(fixture.executionRun.runId)
+    expect(conditionRoot.configurationHash).toBe(fixture.configurationHash)
+    expect(conditionRoot.sealedPlanningAuthorityDigest).toBe(
+      fixture.executionRun.binding.sealedPlanningAuthorityDigest,
+    )
+    expect(conditionRoot.planDigest).toBe(
+      fixture.executionRun.binding.planDigest,
+    )
+    expect(conditionRoot.tableIds).toEqual(
+      fixture.executionRun.binding.tableIds,
+    )
+    const condition =
+      createWorkspaceSearchMigrationFullVerificationVerifiedRootConditionCheck({
+        stateTable: fixture.configuration.tables['migration-state'],
+        configurationHash: fixture.configurationHash,
+        executionRun: fixture.executionRun,
+        root: conditionRoot,
+      })
+    expect(condition).toEqual(
+      createExpectedFullRowCondition(
+        fixture.configuration.tables['migration-state'].tableName,
+        rootItem,
+      ),
+    )
+
+    const foreign = createFixture('foreign-verified-root-condition')
+    expect(() =>
+      createWorkspaceSearchMigrationFullVerificationVerifiedRootConditionCheck({
+        stateTable: fixture.configuration.tables['migration-state'],
+        configurationHash: fixture.configurationHash,
+        executionRun: foreign.executionRun,
+        root: conditionRoot,
+      })
+    ).toThrow()
+    expect(() =>
+      createWorkspaceSearchMigrationFullVerificationVerifiedRootConditionCheck({
+        stateTable: fixture.configuration.tables['migration-state'],
+        configurationHash: digest('foreign-configuration'),
+        executionRun: fixture.executionRun,
+        root: conditionRoot,
+      })
+    ).toThrow()
+    expect(() =>
+      createWorkspaceSearchMigrationFullVerificationVerifiedRootConditionCheck({
+        stateTable: {
+          ...fixture.configuration.tables['migration-state'],
+          tableId: 'foreign-state-table-id',
+        },
+        configurationHash: fixture.configurationHash,
+        executionRun: fixture.executionRun,
+        root: conditionRoot,
+      })
+    ).toThrow()
+    expect(() =>
+      createWorkspaceSearchMigrationFullVerificationVerifiedRootConditionCheck({
+        stateTable: fixture.configuration.tables['migration-state'],
+        configurationHash: fixture.configurationHash,
+        executionRun: fixture.executionRun,
+        root: {
+          ...conditionRoot,
+          verifiedRootDigest: digest('tampered-verified-root'),
+        },
+      })
+    ).toThrow()
   })
 
   test('recovers exact state and receipt after response loss but rejects partial durability', async () => {
@@ -1925,6 +2000,45 @@ function transactionItems(
     throw new Error('Expected captured transaction items.')
   }
   return items
+}
+
+/**
+ * Reconstructs the exact full-row equality condition for a canonical item.
+ *
+ * @param tableName - Exact measured state-table name.
+ * @param item - Complete canonical immutable row.
+ * @returns Expected full controlled-row ConditionCheck.
+ */
+function createExpectedFullRowCondition(
+  tableName: string,
+  item: Readonly<Record<string, AttributeValue>>,
+): TransactWriteItem {
+  const migrationId = item.migrationId
+  const recordKey = item.recordKey
+  if (migrationId === undefined || recordKey === undefined) {
+    throw new Error('Expected canonical row key attributes.')
+  }
+  const names: Record<string, string> = {}
+  const values: Record<string, AttributeValue> = {}
+  const clauses: string[] = []
+  let index = 0
+  for (const [name, value] of Object.entries(item)) {
+    if (name === 'migrationId' || name === 'recordKey') continue
+    names[`#field${index}`] = name
+    values[`:value${index}`] = value
+    clauses.push(`#field${index} = :value${index}`)
+    index += 1
+  }
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: { migrationId, recordKey },
+      ConditionExpression: clauses.join(' AND '),
+      ExpressionAttributeNames: names,
+      ExpressionAttributeValues: values,
+      ReturnValuesOnConditionCheckFailure: 'NONE',
+    },
+  }
 }
 
 /**

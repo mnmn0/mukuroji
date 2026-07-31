@@ -95,6 +95,7 @@ import {
 } from './migration-plan-artifact'
 import {
   createAwsWorkspaceSearchMigrationPartialRollbackStartPort,
+  createWorkspaceSearchMigrationRolledBackRootV2ConditionCheck,
   type WorkspaceSearchMigrationPartialRollbackStartAwsTransport,
   workspaceSearchMigrationPartialRollbackStartTransactionIndex,
 } from './migration-partial-rollback-start-aws'
@@ -179,6 +180,21 @@ const rollbackStateControlledFieldNames = Object.freeze([
   'status',
   'stateDigest',
   'stateBytes',
+])
+
+/** Exact production insertion order for controlled v2 terminal-root fields. */
+const rolledBackRootControlledFieldNames = Object.freeze([
+  'recordVersion',
+  'kind',
+  'stateTableId',
+  'configurationHash',
+  'runId',
+  'executionRunDigest',
+  'originDigest',
+  'startRootDigest',
+  'terminalStateDigest',
+  'rootDigest',
+  'rootBytes',
 ])
 
 /**
@@ -888,6 +904,66 @@ test('reads and retries from an exact terminal lifecycle', async () => {
       ),
     ),
   )
+  const terminalRootRecord = createExpectedRolledBackRootRecord(
+    fixture,
+    identity.bindingDigest,
+    terminal.root,
+  )
+  expect(
+    createWorkspaceSearchMigrationRolledBackRootV2ConditionCheck({
+      stateTable: fixture.configuration.tables['migration-state'],
+      configurationHash: fixture.configurationHash,
+      executionRun: fixture.executionRun,
+      root: terminal.root,
+    }),
+  ).toEqual(
+    createExpectedFullRowConditionCheckWithFields(
+      fixture.configuration.tables['migration-state'].tableName,
+      terminalRootRecord,
+      rolledBackRootControlledFieldNames,
+    ),
+  )
+  expect(() =>
+    createWorkspaceSearchMigrationRolledBackRootV2ConditionCheck({
+      stateTable: fixture.configuration.tables['migration-state'],
+      configurationHash: fixture.configurationHash,
+      executionRun: {
+        ...fixture.executionRun,
+        runId: 'foreign-v2-root-run',
+      },
+      root: terminal.root,
+    })
+  ).toThrow()
+  expect(() =>
+    createWorkspaceSearchMigrationRolledBackRootV2ConditionCheck({
+      stateTable: fixture.configuration.tables['migration-state'],
+      configurationHash: digest('foreign-v2-root-configuration'),
+      executionRun: fixture.executionRun,
+      root: terminal.root,
+    })
+  ).toThrow()
+  expect(() =>
+    createWorkspaceSearchMigrationRolledBackRootV2ConditionCheck({
+      stateTable: {
+        ...fixture.configuration.tables['migration-state'],
+        tableId: 'foreign-v2-root-state-table',
+      },
+      configurationHash: fixture.configurationHash,
+      executionRun: fixture.executionRun,
+      root: terminal.root,
+    })
+  ).toThrow()
+  expect(() =>
+    createWorkspaceSearchMigrationRolledBackRootV2ConditionCheck({
+      stateTable: fixture.configuration.tables['migration-state'],
+      configurationHash: fixture.configurationHash,
+      executionRun: fixture.executionRun,
+      root: {
+        ...terminal.root,
+        rootDigest: digest('tampered-v2-rolled-back-root'),
+      },
+    })
+  ).toThrow()
   harness.seedStateRecord(
     requirePutItem(terminalStatePut),
   )
@@ -1499,13 +1575,33 @@ function createExpectedFullRowConditionCheck(
   tableName: string,
   item: Readonly<Record<string, AttributeValue>>,
 ): TransactWriteItem {
+  return createExpectedFullRowConditionCheckWithFields(
+    tableName,
+    item,
+    rollbackStartControlledFieldNames,
+  )
+}
+
+/**
+ * Creates one exact full-row ConditionCheck with an explicit field order.
+ *
+ * @param tableName - Exact measured migration-state table name.
+ * @param item - Complete expected controlled immutable row.
+ * @param fieldNames - Exact canonical non-key insertion order.
+ * @returns Exact expected condition-only transaction item.
+ */
+function createExpectedFullRowConditionCheckWithFields(
+  tableName: string,
+  item: Readonly<Record<string, AttributeValue>>,
+  fieldNames: readonly string[],
+): TransactWriteItem {
   return {
     ConditionCheck: {
       TableName: tableName,
       Key: createExpectedItemKey(item),
       ...createExpectedFullRowConditionFields(
         item,
-        rollbackStartControlledFieldNames,
+        fieldNames,
       ),
       ReturnValuesOnConditionCheckFailure: 'NONE',
     },

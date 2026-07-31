@@ -1,12 +1,16 @@
+import { createHash } from 'node:crypto'
 import { expect, test } from 'bun:test'
 import {
   createWorkspaceSearchWriterFenceBinding,
+  createWorkspaceSearchWriterFenceClosedSuccessor,
   createWorkspaceSearchWriterFenceGuardMaterial,
   createWorkspaceSearchWriterFenceInitialOpenRecord,
+  createWorkspaceSearchWriterFenceReleasedOpenSuccessor,
   createWorkspaceSearchWriterFenceStateIncarnationDigest,
   encodeWorkspaceSearchWriterFenceRecord,
   parseWorkspaceSearchWriterFenceObservation,
   type WorkspaceSearchWriterFenceGuardMaterial,
+  type WorkspaceSearchWriterFenceReleaseBinding,
   type WorkspaceSearchWriterFenceStateIdentity,
 } from './workspace-search-writer-fence'
 import {
@@ -67,6 +71,116 @@ function createGuardFixture(
   )
 }
 
+/**
+ * Exact old and released guard pair sharing one durable fence binding.
+ */
+type WorkspaceSearchWriterFenceReleaseInvocationFixture = {
+  /** Guard acquired from the initial version-one open row. */
+  readonly initial: WorkspaceSearchWriterFenceGuardMaterial
+  /** Guard acquired from its released version-two open successor. */
+  readonly released: WorkspaceSearchWriterFenceGuardMaterial
+}
+
+/**
+ * Creates one initial-open, closed, and released-open invocation fixture.
+ *
+ * @returns Exact guards before close and after terminal release.
+ */
+function createReleaseInvocationFixture():
+  WorkspaceSearchWriterFenceReleaseInvocationFixture {
+  const stateTableIdentity: WorkspaceSearchWriterFenceStateIdentity = {
+    role: 'migration-state',
+    tableName: 'WorkspaceSearchMigrationState',
+    tableArn:
+      'arn:aws:dynamodb:ap-northeast-1:123456789012:table/WorkspaceSearchMigrationState',
+    tableId: 'migration-state-release-invocation',
+    creationTime: '2026-07-29T00:00:00.000Z',
+    account: '123456789012',
+    region: 'ap-northeast-1',
+  }
+  const configurationHash = createHash('sha256')
+    .update('invocation-release-configuration')
+    .digest('hex')
+  const binding = createWorkspaceSearchWriterFenceBinding({
+    stateTableName: stateTableIdentity.tableName,
+    stateTableId: stateTableIdentity.tableId,
+    stateIncarnationDigest:
+      createWorkspaceSearchWriterFenceStateIncarnationDigest(
+        stateTableIdentity,
+      ),
+    tableIds: {
+      'project-directory': 'project-directory-release-invocation',
+      'work-items': 'work-items-release-invocation',
+      collaboration: 'collaboration-release-invocation',
+      documents: 'documents-release-invocation',
+      'workspace-search': 'workspace-search-release-invocation',
+      'migration-state': stateTableIdentity.tableId,
+    },
+  })
+  const initialOpen = createWorkspaceSearchWriterFenceInitialOpenRecord(
+    binding,
+    new Date('2026-07-29T00:00:00.000Z'),
+  )
+  const closed = createWorkspaceSearchWriterFenceClosedSuccessor(
+    initialOpen,
+    {
+      configurationHash,
+      runId: 'invocation-release-run',
+      ownerId: 'invocation-release-owner',
+      leaseFenceToken: 5,
+      maintenanceEvidenceReceiptDigest: createHash('sha256')
+        .update('invocation-release-maintenance-receipt')
+        .digest('hex'),
+      maintenanceEvidencePointerRevision: 3,
+    },
+    new Date('2026-07-29T00:05:00.000Z'),
+  )
+  const release: WorkspaceSearchWriterFenceReleaseBinding = {
+    releaseVersion: 1,
+    configurationHash,
+    runId: 'invocation-release-run',
+    executionBoundaryDigest: createHash('sha256')
+      .update('invocation-release-execution-boundary')
+      .digest('hex'),
+    sealedPlanningAuthorityDigest: createHash('sha256')
+      .update('invocation-release-sealed-planning-authority')
+      .digest('hex'),
+    executionRunDigest: createHash('sha256')
+      .update('invocation-release-execution-run')
+      .digest('hex'),
+    terminal: {
+      kind: 'verified',
+      persistenceVersion: 1,
+      rootDigest: createHash('sha256')
+        .update('invocation-release-verified-root')
+        .digest('hex'),
+    },
+  }
+  const releasedOpen = createWorkspaceSearchWriterFenceReleasedOpenSuccessor(
+    closed,
+    release,
+    new Date('2026-07-29T00:10:00.000Z'),
+  )
+  return {
+    initial: createWorkspaceSearchWriterFenceGuardMaterial(
+      parseWorkspaceSearchWriterFenceObservation(
+        encodeWorkspaceSearchWriterFenceRecord(initialOpen),
+        binding,
+      ),
+      binding,
+      stateTableIdentity,
+    ),
+    released: createWorkspaceSearchWriterFenceGuardMaterial(
+      parseWorkspaceSearchWriterFenceObservation(
+        encodeWorkspaceSearchWriterFenceRecord(releasedOpen),
+        binding,
+      ),
+      binding,
+      stateTableIdentity,
+    ),
+  }
+}
+
 test('requires an explicit application invocation scope', async () => {
   const provider = createWorkspaceSearchWriterFenceGuardProvider({
     async acquire() {
@@ -125,6 +239,70 @@ test('retains the first rejection and never refreshes in one invocation', async 
   })
 
   expect(acquisitionCount).toBe(1)
+})
+
+test('retains pre-release tokens and closed failures while new invocations acquire epoch three', async () => {
+  const fixture = createReleaseInvocationFixture()
+  const closedFailure = new Error('fixture closed writer fence')
+  let current: WorkspaceSearchWriterFenceGuardMaterial | Error =
+    fixture.initial
+  let acquisitionCount = 0
+  const provider = createWorkspaceSearchWriterFenceGuardProvider({
+    async acquire() {
+      acquisitionCount += 1
+      if (current instanceof Error) throw current
+      return current
+    },
+  })
+
+  await runWithWorkspaceSearchWriterFenceInvocation(async () => {
+    const initial = await provider.get()
+    current = fixture.released
+
+    const retained = await provider.get()
+
+    expect(retained).toBe(initial)
+    expect(retained.writerEpoch).toBe(1)
+    expect(retained.controlRevision).toBe(1)
+  })
+
+  current = closedFailure
+  await runWithWorkspaceSearchWriterFenceInvocation(async () => {
+    const first = provider.get()
+    await expect(first).rejects.toBe(closedFailure)
+    current = fixture.released
+
+    const retained = provider.get()
+
+    expect(retained).toBe(first)
+    await expect(retained).rejects.toBe(closedFailure)
+  })
+
+  const released = await runWithWorkspaceSearchWriterFenceInvocation(
+    () => provider.get(),
+  )
+  const initialCondition =
+    fixture.initial.conditionCheck.ConditionCheck
+  const releasedCondition =
+    released.conditionCheck.ConditionCheck
+  const initialCanonicalBytes =
+    initialCondition?.ExpressionAttributeValues?.[':canonicalBytes']?.S
+  const releasedCanonicalBytes =
+    releasedCondition?.ExpressionAttributeValues?.[':canonicalBytes']?.S
+  const initialRecordDigest =
+    initialCondition?.ExpressionAttributeValues?.[':recordDigest']?.S
+  const releasedRecordDigest =
+    releasedCondition?.ExpressionAttributeValues?.[':recordDigest']?.S
+
+  expect(released).toEqual(fixture.released)
+  expect(released.writerEpoch).toBe(3)
+  expect(released.controlRevision).toBe(3)
+  expect(released.materialFingerprint).not.toBe(
+    fixture.initial.materialFingerprint,
+  )
+  expect(releasedCanonicalBytes).not.toBe(initialCanonicalBytes)
+  expect(releasedRecordDigest).not.toBe(initialRecordDigest)
+  expect(acquisitionCount).toBe(3)
 })
 
 test('acquires independently for separate and concurrent invocations', async () => {

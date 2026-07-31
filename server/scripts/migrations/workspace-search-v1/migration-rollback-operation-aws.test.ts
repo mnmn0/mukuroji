@@ -96,6 +96,7 @@ import {
 } from './migration-pre-plan-authority-aws'
 import {
   createAwsWorkspaceSearchMigrationRollbackOperationPort,
+  createWorkspaceSearchMigrationRolledBackRootConditionCheck,
   createWorkspaceSearchMigrationRollbackStartSentinelAbsentConditionCheck,
   type WorkspaceSearchMigrationRollbackAuthorityClaim,
   type WorkspaceSearchMigrationRollbackOperationAwsPort,
@@ -127,6 +128,19 @@ const createdAt = '2026-07-29T01:19:30.000Z'
 const appliedAt = '2026-07-29T01:20:00.000Z'
 const rollbackClockStart = '2026-07-29T01:21:00.000Z'
 const retainUntil = '2026-08-30T01:00:00.000Z'
+
+/** Exact production insertion order for v1 terminal-root non-key fields. */
+const rolledBackRootControlledFieldNames = Object.freeze([
+  'recordVersion',
+  'kind',
+  'stateTableId',
+  'configurationHash',
+  'runId',
+  'executionRunDigest',
+  'startRootDigest',
+  'rootDigest',
+  'rootBytes',
+])
 
 /**
  * One forward apply receipt and its exact immutable journal bytes.
@@ -907,6 +921,73 @@ describe('Workspace Search rollback AWS operation adapter', () => {
             .rollbackState
         ]?.Put,
       ).toBeDefined()
+      const rootItem = finishItems[
+        workspaceSearchMigrationRollbackFinishTransactionIndex
+          .rolledBackRoot
+      ]?.Put?.Item
+      if (rootItem === undefined) {
+        throw new Error('Expected immutable rolled-back-root item.')
+      }
+      expect(
+        createWorkspaceSearchMigrationRolledBackRootConditionCheck({
+          stateTable:
+            context.fixture.configuration.tables['migration-state'],
+          configurationHash: context.fixture.configurationHash,
+          executionRun: context.fixture.executionRun,
+          root,
+        }),
+      ).toEqual(
+        createExpectedFullRowCondition(
+          context.fixture.configuration.tables['migration-state']
+            .tableName,
+          rootItem,
+        ),
+      )
+
+      const foreign = createRollbackFixture(3, retainUntil, {
+        runId: 'foreign-root-condition-run',
+      })
+      expect(() =>
+        createWorkspaceSearchMigrationRolledBackRootConditionCheck({
+          stateTable:
+            context.fixture.configuration.tables['migration-state'],
+          configurationHash: context.fixture.configurationHash,
+          executionRun: foreign.executionRun,
+          root,
+        })
+      ).toThrow()
+      expect(() =>
+        createWorkspaceSearchMigrationRolledBackRootConditionCheck({
+          stateTable:
+            context.fixture.configuration.tables['migration-state'],
+          configurationHash: digest('foreign-root-configuration'),
+          executionRun: context.fixture.executionRun,
+          root,
+        })
+      ).toThrow()
+      expect(() =>
+        createWorkspaceSearchMigrationRolledBackRootConditionCheck({
+          stateTable: {
+            ...context.fixture.configuration.tables['migration-state'],
+            tableId: 'foreign-root-state-table',
+          },
+          configurationHash: context.fixture.configurationHash,
+          executionRun: context.fixture.executionRun,
+          root,
+        })
+      ).toThrow()
+      expect(() =>
+        createWorkspaceSearchMigrationRolledBackRootConditionCheck({
+          stateTable:
+            context.fixture.configuration.tables['migration-state'],
+          configurationHash: context.fixture.configurationHash,
+          executionRun: context.fixture.executionRun,
+          root: {
+            ...root,
+            rootDigest: digest('tampered-rolled-back-root'),
+          },
+        })
+      ).toThrow()
     },
     15_000,
   )
@@ -3452,6 +3533,48 @@ function requireTransactionItems(
     throw new Error('Missing rollback transaction items.')
   }
   return items
+}
+
+/**
+ * Reconstructs the exact full-row equality condition for a canonical item.
+ *
+ * @param tableName - Exact measured state-table name.
+ * @param item - Complete canonical immutable row.
+ * @returns Expected full controlled-row ConditionCheck.
+ */
+function createExpectedFullRowCondition(
+  tableName: string,
+  item: Readonly<Record<string, AttributeValue>>,
+): TransactWriteItem {
+  const migrationId = item.migrationId
+  const recordKey = item.recordKey
+  if (migrationId === undefined || recordKey === undefined) {
+    throw new Error('Expected canonical row key attributes.')
+  }
+  const names: Record<string, string> = {}
+  const values: Record<string, AttributeValue> = {}
+  const clauses: string[] = []
+  let index = 0
+  for (const name of rolledBackRootControlledFieldNames) {
+    const value = item[name]
+    if (value === undefined) {
+      throw new Error(`Expected controlled root field ${name}.`)
+    }
+    names[`#field${index}`] = name
+    values[`:value${index}`] = value
+    clauses.push(`#field${index} = :value${index}`)
+    index += 1
+  }
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: { migrationId, recordKey },
+      ConditionExpression: clauses.join(' AND '),
+      ExpressionAttributeNames: names,
+      ExpressionAttributeValues: values,
+      ReturnValuesOnConditionCheckFailure: 'NONE',
+    },
+  }
 }
 
 /**

@@ -228,6 +228,21 @@ export type CreateWorkspaceSearchMigrationPartialRollbackStartAwsPortInput = {
 }
 
 /**
+ * Exact immutable committed-prefix terminal root fixed by a later transaction.
+ */
+export type CreateWorkspaceSearchMigrationRolledBackRootV2ConditionCheckInput =
+  {
+    /** Independently measured migration-state table identity. */
+    readonly stateTable: MigrationTableIdentity
+    /** Reviewed digest of the exact measured configuration. */
+    readonly configurationHash: string
+    /** Immutable execution admission owning the rollback chain. */
+    readonly executionRun: WorkspaceSearchMigrationExecutionRun
+    /** Exact immutable committed-prefix terminal root. */
+    readonly root: WorkspaceSearchMigrationRolledBackRootV2
+  }
+
+/**
  * Durable standalone committed-prefix rollback-start capability.
  */
 export interface WorkspaceSearchMigrationPartialRollbackStartAwsPort {
@@ -357,6 +372,30 @@ type PartialRollbackStartBinding = {
 }
 
 /**
+ * Narrow v2 terminal-row binding shared by publication and conditions.
+ */
+type RolledBackRootV2RecordBinding = {
+  /** Reviewed measured-configuration digest. */
+  readonly configurationHash: string
+  /** Exact measured migration-state table. */
+  readonly stateTable: MigrationTableIdentity
+  /** Exact immutable execution admission. */
+  readonly executionRun: WorkspaceSearchMigrationExecutionRun
+  /** Stable rollback-chain key namespace digest. */
+  readonly bindingDigest: string
+}
+
+/**
+ * Strict detached input prepared for a v2 terminal-root condition.
+ */
+type PreparedRolledBackRootV2ConditionCheckInput = {
+  /** Narrow canonical durable-row binding. */
+  readonly binding: RolledBackRootV2RecordBinding
+  /** Strict detached immutable v2 terminal root. */
+  readonly root: WorkspaceSearchMigrationRolledBackRootV2
+}
+
+/**
  * Captured dependency methods immune to later property replacement.
  */
 type PreparedPartialRollbackStartDependencies = {
@@ -458,6 +497,33 @@ export function createAwsWorkspaceSearchMigrationPartialRollbackStartPort(
     return new AwsWorkspaceSearchMigrationPartialRollbackStartPort(
       binding,
       dependencies,
+    )
+  } catch (error: unknown) {
+    throw createPartialRollbackStartPublicFailure(
+      readPartialRollbackStartFailureCode(error, true),
+    )
+  }
+}
+
+/**
+ * Creates an exact full-row condition for one immutable v2 rolled-back root.
+ *
+ * The admission and root are synchronously detached through their canonical
+ * codecs. Every non-key durable attribute, including the canonical root bytes,
+ * is compared by the returned condition.
+ *
+ * @param input - Measured state table, admission, configuration, and root.
+ * @returns Exact immutable committed-prefix-root ConditionCheck.
+ */
+export function createWorkspaceSearchMigrationRolledBackRootV2ConditionCheck(
+  input:
+    CreateWorkspaceSearchMigrationRolledBackRootV2ConditionCheckInput,
+): TransactWriteItem {
+  try {
+    const prepared = prepareRolledBackRootV2ConditionCheckInput(input)
+    return createFullRowConditionCheck(
+      prepared.binding.stateTable.tableName,
+      createRolledBackRootRecord(prepared.binding, prepared.root),
     )
   } catch (error: unknown) {
     throw createPartialRollbackStartPublicFailure(
@@ -1579,6 +1645,148 @@ function parseRollbackStateRecord(
 }
 
 /**
+ * Synchronously detaches and correlates one v2 terminal-root condition input.
+ *
+ * @param input - Candidate measured table, admission, and terminal root.
+ * @returns Strict narrow durable-row binding and immutable root.
+ */
+function prepareRolledBackRootV2ConditionCheckInput(
+  input: unknown,
+): PreparedRolledBackRootV2ConditionCheckInput {
+  const record = requirePlainRecord(input, 'INVALID_ARGUMENT')
+  requireExactKeys(record, [
+    'configurationHash',
+    'executionRun',
+    'root',
+    'stateTable',
+  ], 'INVALID_ARGUMENT')
+  const configurationHash = readDigest(
+    readOwn(record, 'configurationHash', 'INVALID_ARGUMENT'),
+    'INVALID_ARGUMENT',
+  )
+  const stateTable = detachRolledBackRootV2StateTable(
+    readOwn(record, 'stateTable', 'INVALID_ARGUMENT'),
+  )
+  const executionRun = detachRolledBackRootV2ExecutionRun(
+    readOwn(record, 'executionRun', 'INVALID_ARGUMENT'),
+  )
+  const root = detachRolledBackRootV2(
+    readOwn(record, 'root', 'INVALID_ARGUMENT'),
+  )
+  createWorkspaceSearchMigrationExecutionRunAdmissionConditionCheck({
+    stateTable,
+    configurationHash,
+    executionRun,
+  })
+  const binding: RolledBackRootV2RecordBinding = {
+    stateTable,
+    configurationHash,
+    executionRun,
+    bindingDigest:
+      createWorkspaceSearchMigrationRollbackConflictRecordKeys({
+        stateTableId: stateTable.tableId,
+        configurationHash,
+        runId: executionRun.runId,
+        executionRunDigest: executionRun.executionRunDigest,
+      }).bindingDigest,
+  }
+  requireRolledBackRootV2RecordBinding(
+    binding,
+    root,
+    'INVALID_ARGUMENT',
+  )
+  return { binding, root }
+}
+
+/**
+ * Detaches one migration-state identity used for v2 root addressing.
+ *
+ * @param value - Candidate measured migration-state table.
+ * @returns Detached minimally narrowed table identity.
+ */
+function detachRolledBackRootV2StateTable(
+  value: unknown,
+): MigrationTableIdentity {
+  if (!isMigrationStateTableIdentityCandidate(value)) {
+    return failPartialRollbackStart('INVALID_ARGUMENT')
+  }
+  let detached: unknown
+  try {
+    detached = structuredClone(value)
+  } catch {
+    return failPartialRollbackStart('INVALID_ARGUMENT')
+  }
+  if (!isMigrationStateTableIdentityCandidate(detached)) {
+    return failPartialRollbackStart('INVALID_ARGUMENT')
+  }
+  return detached
+}
+
+/**
+ * Detects the data fields required by immutable state-row addressing.
+ *
+ * @param value - Candidate measured table identity.
+ * @returns Whether it is a descriptor-safe migration-state table.
+ */
+function isMigrationStateTableIdentityCandidate(
+  value: unknown,
+): value is MigrationTableIdentity {
+  if (!isOrdinaryObject(value)) return false
+  const role = Object.getOwnPropertyDescriptor(value, 'role')
+  const tableName = Object.getOwnPropertyDescriptor(value, 'tableName')
+  const tableId = Object.getOwnPropertyDescriptor(value, 'tableId')
+  return role?.value === 'migration-state' &&
+    typeof tableName?.value === 'string' &&
+    tableName.value.length > 0 &&
+    typeof tableId?.value === 'string' &&
+    tableId.value.length > 0
+}
+
+/**
+ * Detaches one immutable execution admission through its canonical codec.
+ *
+ * @param value - Candidate immutable admission.
+ * @returns Strict detached admission.
+ */
+function detachRolledBackRootV2ExecutionRun(
+  value: unknown,
+): WorkspaceSearchMigrationExecutionRun {
+  const candidate = requireExecutionRun(value)
+  return parseWorkspaceSearchMigrationExecutionRun(
+    serializeWorkspaceSearchMigrationExecutionRun(candidate),
+  )
+}
+
+/**
+ * Detaches one immutable v2 terminal root through its canonical codec.
+ *
+ * @param value - Candidate terminal root.
+ * @returns Strict detached rolled-back root.
+ */
+function detachRolledBackRootV2(
+  value: unknown,
+): WorkspaceSearchMigrationRolledBackRootV2 {
+  if (!isRolledBackRootV2Candidate(value)) {
+    return failPartialRollbackStart('INVALID_ARGUMENT')
+  }
+  return parseWorkspaceSearchMigrationRolledBackRootV2(
+    serializeWorkspaceSearchMigrationRolledBackRootV2(value),
+  )
+}
+
+/**
+ * Minimally narrows a v2 terminal root for its strict codec.
+ *
+ * @param value - Candidate runtime root.
+ * @returns Whether the strict v2 root codec may inspect it.
+ */
+function isRolledBackRootV2Candidate(
+  value: unknown,
+): value is WorkspaceSearchMigrationRolledBackRootV2 {
+  return isOrdinaryObject(value)
+}
+
+/**
  * Creates the complete immutable v2 rolled-back root DynamoDB row.
  *
  * @param binding - Exact static partial-start binding.
@@ -1586,10 +1794,14 @@ function parseRollbackStateRecord(
  * @returns Complete bounded low-level row.
  */
 function createRolledBackRootRecord(
-  binding: PartialRollbackStartBinding,
+  binding: RolledBackRootV2RecordBinding,
   root: WorkspaceSearchMigrationRolledBackRootV2,
 ): Readonly<Record<string, AttributeValue>> {
-  requireRolledBackRootBinding(binding, root)
+  requireRolledBackRootV2RecordBinding(
+    binding,
+    root,
+    'INVALID_STATE',
+  )
   const item = {
     migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
     recordKey: { S: createRolledBackRootRecordKey(binding) },
@@ -1826,7 +2038,7 @@ function createRollbackStateRecordKey(
  * @returns Stable rolled-back-root/v2 key.
  */
 function createRolledBackRootRecordKey(
-  binding: PartialRollbackStartBinding,
+  binding: Pick<RolledBackRootV2RecordBinding, 'bindingDigest'>,
 ): string {
   return createWorkspaceSearchMigrationRolledBackRootV2RecordKey(
     binding.bindingDigest,
@@ -2118,6 +2330,21 @@ function requireRolledBackRootBinding(
   binding: PartialRollbackStartBinding,
   root: WorkspaceSearchMigrationRolledBackRootV2,
 ): void {
+  requireRolledBackRootV2RecordBinding(binding, root, 'INVALID_STATE')
+}
+
+/**
+ * Requires one v2 terminal root to match its immutable row namespace.
+ *
+ * @param binding - Narrow measured root-row binding.
+ * @param root - Candidate strict v2 terminal root.
+ * @param code - Stable failure classification for the calling boundary.
+ */
+function requireRolledBackRootV2RecordBinding(
+  binding: RolledBackRootV2RecordBinding,
+  root: WorkspaceSearchMigrationRolledBackRootV2,
+  code: WorkspaceSearchMigrationFailureCode,
+): void {
   if (
     root.persistenceVersion !== partialRollbackRecordVersion ||
     root.configurationHash !== binding.configurationHash ||
@@ -2125,17 +2352,18 @@ function requireRolledBackRootBinding(
     root.executionRunDigest !==
       binding.executionRun.executionRunDigest ||
     root.sealedPlanningAuthorityDigest !==
-      binding.sealedPlanningAuthority.authorityDigest ||
-    root.terminalState.status !== 'rolled-back'
+      binding.executionRun.binding.sealedPlanningAuthorityDigest ||
+    root.terminalState.status !== 'rolled-back' ||
+    root.tableIds['migration-state'] !== binding.stateTable.tableId
   ) {
-    return failPartialRollbackStart('INVALID_STATE')
+    return failPartialRollbackStart(code)
   }
   for (const role of workspaceSearchWriterFenceTableRoles) {
     if (
       root.tableIds[role] !==
         binding.executionRun.binding.tableIds[role]
     ) {
-      return failPartialRollbackStart('INVALID_STATE')
+      return failPartialRollbackStart(code)
     }
   }
 }

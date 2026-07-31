@@ -414,6 +414,20 @@ export type WorkspaceSearchMigrationRollbackCommandInput = {
 }
 
 /**
+ * Exact immutable complete-rollback root material fixed by a later transaction.
+ */
+export type CreateWorkspaceSearchMigrationRolledBackRootConditionCheckInput = {
+  /** Independently measured migration-state table identity. */
+  readonly stateTable: MigrationTableIdentity
+  /** Reviewed digest of the exact measured configuration. */
+  readonly configurationHash: string
+  /** Immutable execution admission owning the rollback chain. */
+  readonly executionRun: WorkspaceSearchMigrationExecutionRun
+  /** Exact immutable complete-rollback terminal root. */
+  readonly root: WorkspaceSearchMigrationRolledBackRoot
+}
+
+/**
  * Static measured material and narrow capabilities for one rollback adapter.
  */
 export type CreateWorkspaceSearchMigrationRollbackOperationAwsPortInput = {
@@ -542,6 +556,30 @@ type RollbackOperationBinding = {
   readonly executionRun: WorkspaceSearchMigrationExecutionRun
   /** Stable key namespace digest. */
   readonly bindingDigest: string
+}
+
+/**
+ * Narrow immutable terminal-row binding shared by publication and conditions.
+ */
+type RolledBackRootRecordBinding = {
+  /** Exact measured migration-state table. */
+  readonly stateTable: MigrationTableIdentity
+  /** Reviewed measured-configuration digest. */
+  readonly configurationHash: string
+  /** Immutable execution admission owning the rollback chain. */
+  readonly executionRun: WorkspaceSearchMigrationExecutionRun
+  /** Stable rollback key namespace digest. */
+  readonly bindingDigest: string
+}
+
+/**
+ * Strict detached input prepared for a terminal-root condition.
+ */
+type PreparedRolledBackRootConditionCheckInput = {
+  /** Narrow canonical durable-row binding. */
+  readonly binding: RolledBackRootRecordBinding
+  /** Strict detached immutable terminal root. */
+  readonly root: WorkspaceSearchMigrationRolledBackRoot
 }
 
 /**
@@ -688,6 +726,32 @@ export function createAwsWorkspaceSearchMigrationRollbackOperationPort(
     return new AwsWorkspaceSearchMigrationRollbackOperationPort(
       binding,
       dependencies,
+    )
+  } catch (error: unknown) {
+    throw createRollbackPublicFailure(
+      readRollbackFailureCode(error, true),
+    )
+  }
+}
+
+/**
+ * Creates an exact full-row condition for one immutable v1 rolled-back root.
+ *
+ * The admission and root are synchronously detached through their canonical
+ * codecs. Every non-key durable attribute, including the canonical root bytes,
+ * is compared by the returned condition.
+ *
+ * @param input - Measured state table, admission, configuration, and root.
+ * @returns Exact immutable complete-rollback-root ConditionCheck.
+ */
+export function createWorkspaceSearchMigrationRolledBackRootConditionCheck(
+  input: CreateWorkspaceSearchMigrationRolledBackRootConditionCheckInput,
+): TransactWriteItem {
+  try {
+    const prepared = prepareRolledBackRootConditionCheckInput(input)
+    return createFullRowConditionCheck(
+      prepared.binding.stateTable.tableName,
+      createRolledBackRootRecord(prepared.binding, prepared.root),
     )
   } catch (error: unknown) {
     throw createRollbackPublicFailure(
@@ -2554,6 +2618,119 @@ function parseRollbackReceiptRecord(
 }
 
 /**
+ * Synchronously detaches and correlates one v1 terminal-root condition input.
+ *
+ * @param input - Candidate measured table, admission, and terminal root.
+ * @returns Strict narrow durable-row binding and immutable root.
+ */
+function prepareRolledBackRootConditionCheckInput(
+  input: unknown,
+): PreparedRolledBackRootConditionCheckInput {
+  const record = requirePlainRecord(input, 'INVALID_ARGUMENT')
+  requireExactKeys(record, [
+    'configurationHash',
+    'executionRun',
+    'root',
+    'stateTable',
+  ], 'INVALID_ARGUMENT')
+  const configurationHash = readDigest(
+    readOwn(record, 'configurationHash', 'INVALID_ARGUMENT'),
+    'INVALID_ARGUMENT',
+  )
+  const stateTable = detachRolledBackRootStateTable(
+    readOwn(record, 'stateTable', 'INVALID_ARGUMENT'),
+  )
+  const executionRun = detachRolledBackRootExecutionRun(
+    readOwn(record, 'executionRun', 'INVALID_ARGUMENT'),
+  )
+  const root = detachRolledBackRoot(
+    readOwn(record, 'root', 'INVALID_ARGUMENT'),
+  )
+  createWorkspaceSearchMigrationExecutionRunAdmissionConditionCheck({
+    stateTable,
+    configurationHash,
+    executionRun,
+  })
+  const binding: RolledBackRootRecordBinding = {
+    stateTable,
+    configurationHash,
+    executionRun,
+    bindingDigest:
+      createWorkspaceSearchMigrationRollbackConflictRecordKeys({
+        stateTableId: stateTable.tableId,
+        configurationHash,
+        runId: executionRun.runId,
+        executionRunDigest: executionRun.executionRunDigest,
+      }).bindingDigest,
+  }
+  requireRolledBackRootRecordBinding(binding, root, 'INVALID_ARGUMENT')
+  return { binding, root }
+}
+
+/**
+ * Detaches one migration-state identity used for terminal-root addressing.
+ *
+ * @param value - Candidate measured migration-state table.
+ * @returns Detached minimally narrowed table identity.
+ */
+function detachRolledBackRootStateTable(
+  value: unknown,
+): MigrationTableIdentity {
+  const candidate = requireTableIdentity(value)
+  let detached: unknown
+  try {
+    detached = structuredClone(candidate)
+  } catch {
+    return failRollback('INVALID_ARGUMENT')
+  }
+  return requireTableIdentity(detached)
+}
+
+/**
+ * Detaches one immutable execution admission through its canonical codec.
+ *
+ * @param value - Candidate immutable admission.
+ * @returns Strict detached admission.
+ */
+function detachRolledBackRootExecutionRun(
+  value: unknown,
+): WorkspaceSearchMigrationExecutionRun {
+  const candidate = requireExecutionRun(value)
+  return parseWorkspaceSearchMigrationExecutionRun(
+    serializeWorkspaceSearchMigrationExecutionRun(candidate),
+  )
+}
+
+/**
+ * Detaches one immutable v1 terminal root through its canonical codec.
+ *
+ * @param value - Candidate terminal root.
+ * @returns Strict detached rolled-back root.
+ */
+function detachRolledBackRoot(
+  value: unknown,
+): WorkspaceSearchMigrationRolledBackRoot {
+  if (!isRolledBackRootCandidate(value)) {
+    return failRollback('INVALID_ARGUMENT')
+  }
+  return parseWorkspaceSearchMigrationRolledBackRoot(
+    serializeWorkspaceSearchMigrationRolledBackRoot(value),
+  )
+}
+
+/**
+ * Minimally narrows a v1 terminal root for its strict codec.
+ *
+ * @param value - Candidate runtime root.
+ * @returns Whether the strict rolled-back-root codec may inspect it.
+ */
+function isRolledBackRootCandidate(
+  value: unknown,
+): value is WorkspaceSearchMigrationRolledBackRoot {
+  return isOrdinaryObject(value)
+}
+
+/**
  * Creates the complete immutable terminal-root DynamoDB row.
  *
  * @param binding - Exact static rollback binding.
@@ -2561,10 +2738,10 @@ function parseRollbackReceiptRecord(
  * @returns Complete bounded low-level row.
  */
 function createRolledBackRootRecord(
-  binding: RollbackOperationBinding,
+  binding: RolledBackRootRecordBinding,
   root: WorkspaceSearchMigrationRolledBackRoot,
 ): Readonly<Record<string, AttributeValue>> {
-  requireRolledBackRootBinding(binding, root)
+  requireRolledBackRootRecordBinding(binding, root, 'INVALID_STATE')
   const item = {
     migrationId: { S: WORKSPACE_SEARCH_MIGRATION_ID },
     recordKey: {
@@ -2727,7 +2904,7 @@ function createRollbackReceiptRecordKey(
  * @returns Stable deterministic key.
  */
 function createRolledBackRootRecordKey(
-  binding: RollbackOperationBinding,
+  binding: Pick<RolledBackRootRecordBinding, 'bindingDigest'>,
 ): string {
   return `${rolledBackRootRecordKeyPrefix}/${binding.bindingDigest}`
 }
@@ -3905,22 +4082,42 @@ function requireRolledBackRootBinding(
   binding: RollbackOperationBinding,
   root: WorkspaceSearchMigrationRolledBackRoot,
 ): void {
+  requireRolledBackRootRecordBinding(binding, root, 'INVALID_STATE')
+  requireStateBinding(binding, root.terminalState)
+}
+
+/**
+ * Requires one terminal root to match its immutable durable-row namespace.
+ *
+ * @param binding - Narrow measured root-row binding.
+ * @param root - Candidate strict terminal root.
+ * @param code - Stable failure classification for the calling boundary.
+ */
+function requireRolledBackRootRecordBinding(
+  binding: RolledBackRootRecordBinding,
+  root: WorkspaceSearchMigrationRolledBackRoot,
+  code: WorkspaceSearchMigrationFailureCode,
+): void {
   if (
     root.runId !== binding.executionRun.runId ||
     root.configurationHash !== binding.configurationHash ||
     root.executionRunDigest !==
       binding.executionRun.executionRunDigest ||
     root.sealedPlanningAuthorityDigest !==
-      binding.sealedPlanningAuthority.authorityDigest ||
-    root.terminalState.startRootDigest !== root.startRootDigest
+      binding.executionRun.binding.sealedPlanningAuthorityDigest ||
+    root.terminalState.startRootDigest !== root.startRootDigest ||
+    root.tableIds['migration-state'] !== binding.stateTable.tableId
   ) {
-    return failRollback('INVALID_STATE')
+    return failRollback(code)
   }
-  requireTableIdsEqual(
-    binding.executionRun.binding.tableIds,
-    root.tableIds,
-  )
-  requireStateBinding(binding, root.terminalState)
+  for (const role of workspaceSearchWriterFenceTableRoles) {
+    if (
+      binding.executionRun.binding.tableIds[role] !==
+        root.tableIds[role]
+    ) {
+      return failRollback(code)
+    }
+  }
 }
 
 /**
