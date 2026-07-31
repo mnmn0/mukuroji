@@ -9,7 +9,6 @@ import type {
   HeadObjectCommandOutput,
 } from '@aws-sdk/client-s3'
 import {
-  PLANNING_SCHEMA_VERSION,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
@@ -278,7 +277,7 @@ function createProjectDirectoryRows(): readonly object[] {
       entryType: 'team',
       teamId: TEAM_ID,
       teamSortOrder: 10,
-      nameJa: 'チーム',
+      nameJa: '',
       nameEn: 'Team',
       expanded: true,
     },
@@ -290,14 +289,14 @@ function createProjectDirectoryRows(): readonly object[] {
       projectId: PROJECT_ID,
       teamSortOrder: 10,
       projectSortOrder: 10,
-      nameJa: 'プロジェクト',
-      nameEn: 'Project',
+      nameJa: ' プロジェクト ',
+      nameEn: '',
       tone: 'blue',
     },
   ]
 }
 
-/** Creates Workspace metadata, member, and planning revision rows. */
+/** Creates Workspace metadata and member rows. */
 function createWorkspaceAccessRows(): readonly object[] {
   return [
     {
@@ -320,14 +319,6 @@ function createWorkspaceAccessRows(): readonly object[] {
       status: 'active',
       version: 1,
       createdAt: '2026-08-01T00:00:00.000Z',
-      updatedAt: '2026-08-01T00:01:00.000Z',
-    },
-    {
-      workspaceId: WORKSPACE_ID,
-      recordKey: 'META',
-      entryType: 'planning-meta',
-      schemaVersion: PLANNING_SCHEMA_VERSION,
-      revision: 1,
       updatedAt: '2026-08-01T00:01:00.000Z',
     },
   ]
@@ -626,6 +617,180 @@ describe('cross-domain integrity AWS composition bridge', () => {
     ]) {
       expect(evidence).not.toContain(privateValue)
     }
+  })
+
+  test('recognizes existing Project Directory migration and Webhook rows as auxiliary', async () => {
+    const rows = createHealthyNativeRows()
+    rows['project-directory'] = [
+      ...rows['project-directory'],
+      {
+        directoryId: 'WEBHOOK_AUTHORIZATION_BACKFILL',
+        entryKey: 'CHECKPOINT',
+        entryType: 'webhook-authorization-backfill-checkpoint',
+      },
+      {
+        directoryId: 'WEBHOOK_ACTIVE_LOCATOR_ROLLBACK',
+        entryKey: 'CHECKPOINT',
+        entryType: 'webhook-active-locator-rollback-checkpoint',
+      },
+      {
+        directoryId: `WEBHOOK_TEAM_GRANT#${WORKSPACE_ID}#${MEMBER_KEY}`,
+        entryKey: `TEAM#${TEAM_ID}#PROJECT#${PROJECT_ID}`,
+        entryType: 'webhook-team-grant',
+        workspaceId: WORKSPACE_ID,
+        teamId: TEAM_ID,
+        projectId: PROJECT_ID,
+        memberKey: MEMBER_KEY,
+      },
+      {
+        directoryId: `WEBHOOK_GRANT_CLEANUP#${WORKSPACE_ID}#${TEAM_ID}`,
+        entryKey: `PROJECT#${PROJECT_ID}#MEMBER#${MEMBER_KEY}`,
+        entryType: 'webhook-team-grant-cleanup',
+        workspaceId: WORKSPACE_ID,
+        teamId: TEAM_ID,
+        projectId: PROJECT_ID,
+        memberKey: MEMBER_KEY,
+      },
+    ]
+    const reader = new FixtureAwsReader(createPagesFromNativeRows(rows))
+
+    const result = await runBridge(reader)
+
+    expect(result.status).toBe('pass')
+    expect(result.failureCodes).toEqual([])
+  })
+
+  test('rejects Project Directory target rows outside the canonical mapper contract', async () => {
+    const [teamValue, projectValue] = createProjectDirectoryRows()
+    if (!isRecord(teamValue) || !isRecord(projectValue)) {
+      throw new Error('Expected canonical Project Directory fixtures.')
+    }
+    const oversizedTeamId = 't'.repeat(257)
+    const oversizedProjectId = 'p'.repeat(257)
+    const invalidRows: readonly object[] = [
+      {
+        ...teamValue,
+        teamSortOrder: 0,
+        entryKey: `000000#000000#TEAM#${TEAM_ID}`,
+      },
+      {
+        ...teamValue,
+        teamId: 'team/invalid',
+        entryKey: '000010#000000#TEAM#team/invalid',
+      },
+      {
+        ...teamValue,
+        teamId: oversizedTeamId,
+        entryKey: `000010#000000#TEAM#${oversizedTeamId}`,
+      },
+      {
+        ...teamValue,
+        directoryId: 'w'.repeat(1_025),
+      },
+      {
+        ...teamValue,
+        nameJa: '名'.repeat(501),
+        nameEn: 'Team',
+      },
+      {
+        ...teamValue,
+        createdAt: 'not-a-timestamp',
+      },
+      {
+        ...teamValue,
+        createdAt: '2026-08-01T00:02:00.000Z',
+        updatedAt: '2026-08-01T00:01:00.000Z',
+      },
+      {
+        ...teamValue,
+        createdAt: '2026-08-01T00:01:00.000Z',
+        updatedAt: '2026-08-01T00:03:00.000Z',
+        archivedAt: '2026-08-01T00:00:00.000Z',
+      },
+      {
+        ...projectValue,
+        tone: undefined,
+      },
+      {
+        ...projectValue,
+        projectId: 'project/invalid',
+        entryKey: '000010#000010#PROJECT#project/invalid',
+      },
+      {
+        ...projectValue,
+        projectId: oversizedProjectId,
+        entryKey: `000010#000010#PROJECT#${oversizedProjectId}`,
+      },
+      {
+        directoryId: WORKSPACE_ID,
+        entryKey: '000010#000000#TEAM#spoofed-target',
+        entryType: 'planning-meta',
+      },
+    ]
+
+    for (const invalidRow of invalidRows) {
+      const rows = createHealthyNativeRows()
+      rows['project-directory'] = [
+        ...rows['project-directory'],
+        invalidRow,
+      ]
+      const reader = new FixtureAwsReader(createPagesFromNativeRows(rows))
+
+      await expect(runBridge(reader)).rejects.toMatchObject({
+        code: 'NORMALIZATION_FAILED',
+      })
+    }
+  })
+
+  test('excludes a valid retained legacy Work Item tombstone from live joins', async () => {
+    const rows = createHealthyNativeRows({ auditRows: [], fileRows: [] })
+    rows['work-items'] = [{
+      ...createWorkItemRow(),
+      deletedAt: '2026-08-01T00:00:30.000Z',
+    }]
+    const reader = new FixtureAwsReader(createPagesFromNativeRows(rows))
+
+    const result = await runBridge(reader)
+
+    expect(result.status).toBe('pass')
+    expect(result.evidence.domains.find((domain) => domain.domain === 'work-item'))
+      .toMatchObject({ itemCount: 0 })
+  })
+
+  test('rejects a malformed retained legacy Work Item deletion clock', async () => {
+    for (const deletedAt of [
+      'not-a-timestamp',
+      '2026-07-31T23:59:59.999Z',
+      '2026-08-01T00:01:00.001Z',
+    ]) {
+      const rows = createHealthyNativeRows({ auditRows: [], fileRows: [] })
+      rows['work-items'] = [{ ...createWorkItemRow(), deletedAt }]
+      const reader = new FixtureAwsReader(createPagesFromNativeRows(rows))
+
+      await expect(runBridge(reader)).rejects.toMatchObject({
+        code: 'NORMALIZATION_FAILED',
+      })
+    }
+  })
+
+  test('rejects a Planning row misplaced in Workspace Access', async () => {
+    const rows = createHealthyNativeRows()
+    rows['workspace-access'] = [
+      ...rows['workspace-access'],
+      {
+        workspaceId: WORKSPACE_ID,
+        recordKey: 'META',
+        entryType: 'planning-meta',
+        schemaVersion: 1,
+        revision: 1,
+        updatedAt: '2026-08-01T00:01:00.000Z',
+      },
+    ]
+    const reader = new FixtureAwsReader(createPagesFromNativeRows(rows))
+
+    await expect(runBridge(reader)).rejects.toMatchObject({
+      code: 'NORMALIZATION_FAILED',
+    })
   })
 
   test('joins canonical Workspace and Project-member Audit events to Workspace Access', async () => {

@@ -6,10 +6,7 @@ import type {
   HeadObjectCommandOutput,
   Tag,
 } from '@aws-sdk/client-s3'
-import {
-  PLANNING_SCHEMA_VERSION,
-  WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
-} from '@mukuroji/contracts'
+import { WORK_ITEM_CONFIGURATION_SCHEMA_VERSION } from '@mukuroji/contracts'
 import {
   createAuditActorKey,
   createAuditEntityKey,
@@ -73,6 +70,8 @@ const knownProjectDirectoryAuxiliaryEntryTypes = new Set([
   'email-alias',
   'planning-meta',
   'project-member',
+  'webhook-active-locator-rollback-checkpoint',
+  'webhook-authorization-backfill-checkpoint',
   'webhook-team-grant',
   'webhook-team-grant-cleanup',
   'workspace-member',
@@ -404,6 +403,13 @@ function normalizeWorkItem(row: Record<string, unknown>): CrossDomainIntegrityIt
   if (!isCanonicalWorkItemRecord(row)) {
     throw new CrossDomainIntegrityAwsBridgeFailure('NORMALIZATION_FAILED')
   }
+  if (row.deletedAt !== undefined) {
+    const deletedAt = requireCanonicalTimestamp(row.deletedAt)
+    if (deletedAt < row.createdAt || deletedAt > row.updatedAt) {
+      return normalizationFailure()
+    }
+    return []
+  }
   return [{
     kind: 'work-item',
     workspaceId: row.directoryId,
@@ -530,11 +536,12 @@ function normalizeProjectDirectoryRow(row: Record<string, unknown>): CrossDomain
   const workspaceId = requireText(row.directoryId)
   const entryKey = requireText(row.entryKey)
   if (row.entryType === 'team') {
-    const teamId = requireText(row.teamId)
-    const teamSortOrder = requireNonNegativeSafeInteger(row.teamSortOrder)
-    requireText(row.nameJa)
-    requireText(row.nameEn)
-    requireOptionalCanonicalTimestamp(row.archivedAt)
+    if (workspaceId.length > 1_024) return normalizationFailure()
+    const teamId = requireProjectDirectoryIdentifier(row.teamId)
+    if (!isPositiveSafeInteger(row.teamSortOrder)) return normalizationFailure()
+    const teamSortOrder = row.teamSortOrder
+    validateProjectDirectoryLocalizedNames(row.nameJa, row.nameEn)
+    validateProjectDirectoryLifecycle(row)
     if (row.expanded !== undefined && typeof row.expanded !== 'boolean') return normalizationFailure()
     if (entryKey !== `${padSortOrder(teamSortOrder)}#000000#TEAM#${teamId}`) {
       return normalizationFailure()
@@ -542,14 +549,18 @@ function normalizeProjectDirectoryRow(row: Record<string, unknown>): CrossDomain
     return [{ kind: 'team', workspaceId, teamId }]
   }
   if (row.entryType === 'project') {
-    const teamId = requireText(row.teamId)
-    const projectId = requireText(row.projectId)
-    const teamSortOrder = requireNonNegativeSafeInteger(row.teamSortOrder)
-    const projectSortOrder = requireNonNegativeSafeInteger(row.projectSortOrder)
-    requireText(row.nameJa)
-    requireText(row.nameEn)
-    requireOptionalCanonicalTimestamp(row.archivedAt)
-    if (row.tone !== undefined && !isProjectTone(row.tone)) return normalizationFailure()
+    if (workspaceId.length > 1_024) return normalizationFailure()
+    const teamId = requireProjectDirectoryIdentifier(row.teamId)
+    const projectId = requireProjectDirectoryIdentifier(row.projectId)
+    if (
+      !isPositiveSafeInteger(row.teamSortOrder) ||
+      !isPositiveSafeInteger(row.projectSortOrder)
+    ) return normalizationFailure()
+    const teamSortOrder = row.teamSortOrder
+    const projectSortOrder = row.projectSortOrder
+    validateProjectDirectoryLocalizedNames(row.nameJa, row.nameEn)
+    validateProjectDirectoryLifecycle(row)
+    if (!isProjectTone(row.tone)) return normalizationFailure()
     if (
       entryKey !== `${padSortOrder(teamSortOrder)}#${padSortOrder(projectSortOrder)}#PROJECT#${projectId}`
     ) return normalizationFailure()
@@ -562,16 +573,85 @@ function normalizeProjectDirectoryRow(row: Record<string, unknown>): CrossDomain
   return []
 }
 
+/** Reads one canonical Team or Project identifier used by Workspace Search. */
+function requireProjectDirectoryIdentifier(value: unknown): string {
+  const identifier = requireText(value)
+  if (identifier.length > 256 || identifier.includes('/')) {
+    return normalizationFailure()
+  }
+  return identifier
+}
+
+/** Validates the localized-name fallback and Workspace Search length contract. */
+function validateProjectDirectoryLocalizedNames(
+  nameJa: unknown,
+  nameEn: unknown,
+): void {
+  if (typeof nameJa !== 'string' || typeof nameEn !== 'string') {
+    return normalizationFailure()
+  }
+  const visibleNames = [nameJa.trim(), nameEn.trim()].filter(
+    (name) => name.length > 0,
+  )
+  if (
+    visibleNames.length === 0 ||
+    visibleNames.some((name) => name.length > 500)
+  ) normalizationFailure()
+}
+
+/** Validates optional Team or Project lifecycle timestamps and their ordering. */
+function validateProjectDirectoryLifecycle(
+  row: Readonly<Record<string, unknown>>,
+): void {
+  const archivedAt = requireOptionalCanonicalTimestamp(row.archivedAt)
+  const createdAt = requireOptionalCanonicalTimestamp(row.createdAt)
+  const updatedAt = requireOptionalCanonicalTimestamp(row.updatedAt)
+  if (
+    (createdAt !== undefined && updatedAt !== undefined && createdAt > updatedAt) ||
+    (archivedAt !== undefined && createdAt !== undefined && archivedAt < createdAt) ||
+    (archivedAt !== undefined && updatedAt !== undefined && archivedAt > updatedAt)
+  ) normalizationFailure()
+}
+
 /** Validates primary identity fields for non-target Project Directory rows. */
 function validateProjectDirectoryAuxiliaryRow(
   row: Record<string, unknown>,
-  workspaceId: string,
+  directoryId: string,
   entryKey: string,
 ): void {
+  if (row.entryType === 'webhook-team-grant') {
+    const workspaceId = requireText(row.workspaceId)
+    const teamId = requireText(row.teamId)
+    const projectId = requireText(row.projectId)
+    const memberKey = requireText(row.memberKey)
+    if (
+      directoryId !== `WEBHOOK_TEAM_GRANT#${workspaceId}#${memberKey}` ||
+      entryKey !== `TEAM#${teamId}#PROJECT#${projectId}`
+    ) normalizationFailure()
+    return
+  }
+  if (row.entryType === 'webhook-team-grant-cleanup') {
+    const workspaceId = requireText(row.workspaceId)
+    const teamId = requireText(row.teamId)
+    const projectId = requireText(row.projectId)
+    const memberKey = requireText(row.memberKey)
+    if (
+      directoryId !== `WEBHOOK_GRANT_CLEANUP#${workspaceId}#${teamId}` ||
+      entryKey !== `PROJECT#${projectId}#MEMBER#${memberKey}`
+    ) normalizationFailure()
+    return
+  }
   if (
-    (row.workspaceId !== undefined && row.workspaceId !== workspaceId) ||
+    isProjectDirectoryTargetEntryKey(entryKey) ||
+    (row.workspaceId !== undefined && row.workspaceId !== directoryId) ||
     !isText(row.entryType) || !isText(entryKey)
   ) normalizationFailure()
+}
+
+/** Detects an auxiliary discriminator occupying a Team or Project target key. */
+function isProjectDirectoryTargetEntryKey(entryKey: string): boolean {
+  return /^[0-9]{6,}#000000#TEAM#[^#]+$/u.test(entryKey) ||
+    /^[0-9]{6,}#[0-9]{6,}#PROJECT#[^#]+$/u.test(entryKey)
 }
 
 /** Recreates the Project Directory's canonical six-character sort prefix. */
@@ -614,14 +694,6 @@ function normalizeWorkspaceAccessRow(row: Record<string, unknown>): CrossDomainI
     const createdAt = requireCanonicalTimestamp(row.createdAt)
     const updatedAt = requireCanonicalTimestamp(row.updatedAt)
     if (updatedAt < createdAt) return normalizationFailure()
-    return []
-  }
-  if (row.entryType === 'planning-meta') {
-    if (
-      recordKey !== 'META' || row.schemaVersion !== PLANNING_SCHEMA_VERSION ||
-      !isPositiveSafeInteger(row.revision)
-    ) return normalizationFailure()
-    requireCanonicalTimestamp(row.updatedAt)
     return []
   }
   return normalizationFailure()
@@ -1357,9 +1429,14 @@ function requireCanonicalTimestamp(value: unknown): string {
   return value
 }
 
-/** Validates an optional canonical timestamp. */
-function requireOptionalCanonicalTimestamp(value: unknown): void {
-  if (value !== undefined) requireCanonicalTimestamp(value)
+/**
+ * Validates an optional canonical timestamp.
+ *
+ * @param value - Optional untrusted timestamp.
+ * @returns The canonical timestamp when present.
+ */
+function requireOptionalCanonicalTimestamp(value: unknown): string | undefined {
+  return value === undefined ? undefined : requireCanonicalTimestamp(value)
 }
 
 /** Reads one supported relation type. */

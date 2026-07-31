@@ -30,6 +30,8 @@ Version one checks:
 - each Work Item is a canonical storage record;
 - each Work Item workflow status and category exist in its effective Team or
   Workspace configuration;
+- a retained legacy Work Item `deletedAt` tombstone has a canonical deletion
+  clock within its row lifetime and is excluded from live cross-table joins;
 - each assigned Team and Project exists in the same Workspace, and a Project
   belongs to the Work Item Team;
 - each Work Item creator resolves to an active or historically retained
