@@ -34,6 +34,7 @@ import {
 import {
   createWorkspaceSearchMigrationCheckpointExecutionState,
   createWorkspaceSearchMigrationExecutionState,
+  createWorkspaceSearchMigrationRenewedExecutionState,
   reconstructWorkspaceSearchMigrationRunState,
 } from './migration-execution-state'
 import {
@@ -342,6 +343,124 @@ describe('Workspace Search committed-prefix apply seal', () => {
         createdAt: sealCreatedAt,
       })
     )
+  })
+
+  test('accepts a v3 authority renewal and rejects revision-shape tampering', () => {
+    const fixture = createFixture('v3-authority', 1)
+    const marker = createNoOpMarker(
+      fixture.admission,
+      '2026-07-30T00:02:30.000Z',
+    )
+    const v1State =
+      createWorkspaceSearchMigrationExecutionState({
+        admission: fixture.admission,
+        nextRunState: advanceRunState(
+          fixture.admission.runState,
+          marker,
+        ),
+        marker,
+      })
+    const renewalReceipt:
+      WorkspaceSearchMaintenanceEvidenceReceipt = {
+        runId,
+        evidenceDigest: digest('renewed-maintenance-evidence'),
+        evidenceLocator:
+          'workspace-search/v1/maintenance/fence-7-pointer-5.json',
+        runtimeRevision: 12,
+        fenceToken: 7,
+        validatedAt: '2026-07-30T00:02:35.000Z',
+        oldestObservationAt: '2026-07-30T00:00:00.000Z',
+        validUntil: '2026-07-30T00:05:00.001Z',
+      }
+    const currentAuthority = {
+      ownerId,
+      fenceToken: 7,
+      maintenanceEvidencePointerRevision: 5,
+      maintenanceEvidenceReceiptDigest:
+        createMigrationDigest(renewalReceipt),
+      evaluatedAt: '2026-07-30T00:02:45.000Z',
+    }
+    const executionState =
+      createWorkspaceSearchMigrationRenewedExecutionState({
+        admission: fixture.admission,
+        predecessor: v1State,
+        authority: {
+          lease: {
+            runId,
+            ownerId,
+            fenceToken: 7,
+            heartbeatAt: '2026-07-30T00:02:30.000Z',
+            expiresAt: '2026-07-30T00:03:30.000Z',
+          },
+          ownerId,
+          at: currentAuthority.evaluatedAt,
+        },
+        receipt: renewalReceipt,
+        currentAuthority,
+      })
+    const predecessor = {
+      kind: 'mutable-execution-state',
+      executionState,
+    } satisfies
+      WorkspaceSearchMigrationCommittedPrefixApplySealPredecessor
+    const seal =
+      createWorkspaceSearchMigrationCommittedPrefixApplySeal({
+        admission: fixture.admission,
+        predecessor,
+        sealedPlanningAuthority: fixture.authority,
+        createdAt: sealCreatedAt,
+      })
+    const reference = createCommittedPrefixReference(seal)
+
+    expect(executionState).toMatchObject({
+      executionStateVersion: 3,
+      revision: 3,
+      appliedOperationCount: 1,
+      maintenanceEvidenceRenewalCount: 1,
+      currentAuthority,
+    })
+    expect(
+      parseWorkspaceSearchMigrationCommittedPrefixApplySeal(
+        serializeWorkspaceSearchMigrationCommittedPrefixApplySeal(
+          seal,
+        ),
+      ),
+    ).toEqual(seal)
+    expect(
+      requireWorkspaceSearchMigrationCommittedPrefixApplySealBinding({
+        admission: fixture.admission,
+        predecessor,
+        sealedPlanningAuthority: fixture.authority,
+        seal,
+        reference,
+      }),
+    ).toEqual(reference)
+
+    for (const { field, value } of [
+      {
+        field: 'revision',
+        value: executionState.revision + 1,
+      },
+      {
+        field: 'maintenanceEvidenceRenewalCount',
+        value:
+          executionState.maintenanceEvidenceRenewalCount + 1,
+      },
+    ]) {
+      const tampered = structuredClone(executionState)
+      Reflect.set(tampered, field, value)
+      expectFailure(() =>
+        createWorkspaceSearchMigrationCommittedPrefixApplySeal({
+          admission: fixture.admission,
+          predecessor: {
+            kind: 'mutable-execution-state',
+            executionState: tampered,
+          },
+          sealedPlanningAuthority: fixture.authority,
+          createdAt: sealCreatedAt,
+        })
+      )
+    }
   })
 
   test('binds mutation-backed v1 journal evidence and rejects unsafe variants', () => {

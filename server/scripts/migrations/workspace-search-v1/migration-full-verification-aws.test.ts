@@ -1147,6 +1147,46 @@ function createHarness(
     options.initialClockAt ??
       '2026-07-29T01:19:40.000Z',
   )
+  if (options.renewAuthorityAtClock === true) {
+    const current = fixture.currentAuthority
+    const previousValidityWindow =
+      Date.parse(current.maintenanceEvidenceReceipt.validUntil) -
+      Date.parse(
+        current.maintenanceEvidenceReceipt.oldestObservationAt,
+      )
+    const evaluatedAt =
+      new Date(clockMilliseconds).toISOString()
+    const oldestObservationAt = new Date(
+      clockMilliseconds - 60_000,
+    ).toISOString()
+    const maintenanceEvidenceReceipt = {
+      ...current.maintenanceEvidenceReceipt,
+      evidenceDigest: digest(`renewed:${evaluatedAt}`),
+      runtimeRevision:
+        current.maintenanceEvidenceReceipt.runtimeRevision + 1,
+      validatedAt: evaluatedAt,
+      oldestObservationAt,
+      validUntil: new Date(
+        Date.parse(oldestObservationAt) +
+          previousValidityWindow,
+      ).toISOString(),
+    }
+    Object.assign(current, {
+      lease: {
+        ...current.lease,
+        heartbeatAt: evaluatedAt,
+        expiresAt: new Date(
+          clockMilliseconds + 60_000,
+        ).toISOString(),
+      },
+      maintenanceEvidenceReceiptDigest:
+        createMigrationDigest(maintenanceEvidenceReceipt),
+      maintenanceEvidencePointerRevision:
+        current.maintenanceEvidencePointerRevision + 1,
+      maintenanceEvidenceReceipt,
+      evaluatedAt,
+    })
+  }
 
   const planArtifactGateway = {
     async replayPlanArtifact() {
@@ -1168,46 +1208,6 @@ function createHarness(
         new Date(clockMilliseconds).toISOString()
       authorityEvaluatedAts.push(evaluatedAt)
       const current = structuredClone(fixture.currentAuthority)
-      if (options.renewAuthorityAtClock === true) {
-        const previousValidityWindow =
-          Date.parse(
-            current.maintenanceEvidenceReceipt.validUntil,
-          ) -
-          Date.parse(
-            current.maintenanceEvidenceReceipt.oldestObservationAt,
-          )
-        const oldestObservationAt = new Date(
-          clockMilliseconds - 60_000,
-        ).toISOString()
-        const maintenanceEvidenceReceipt = {
-          ...current.maintenanceEvidenceReceipt,
-          evidenceDigest: digest(`renewed:${evaluatedAt}`),
-          runtimeRevision:
-            current.maintenanceEvidenceReceipt.runtimeRevision + 1,
-          validatedAt: evaluatedAt,
-          oldestObservationAt,
-          validUntil: new Date(
-            Date.parse(oldestObservationAt) +
-              previousValidityWindow,
-          ).toISOString(),
-        }
-        return {
-          ...current,
-          lease: {
-            ...current.lease,
-            heartbeatAt: evaluatedAt,
-            expiresAt: new Date(
-              clockMilliseconds + 60_000,
-            ).toISOString(),
-          },
-          maintenanceEvidenceReceiptDigest:
-            createMigrationDigest(maintenanceEvidenceReceipt),
-          maintenanceEvidencePointerRevision:
-            current.maintenanceEvidencePointerRevision + 1,
-          maintenanceEvidenceReceipt,
-          evaluatedAt,
-        }
-      }
       return {
         ...current,
         evaluatedAt,
@@ -1926,10 +1926,16 @@ function createPageCommand(
 ) {
   return {
     expectedRevision,
-    lease: {
-      runId: fixture.currentAuthority.lease.runId,
-      ownerId: fixture.currentAuthority.lease.ownerId,
-      fenceToken: fixture.currentAuthority.lease.fenceToken,
+    authority: {
+      lease: {
+        runId: fixture.currentAuthority.lease.runId,
+        ownerId: fixture.currentAuthority.lease.ownerId,
+        fenceToken: fixture.currentAuthority.lease.fenceToken,
+      },
+      maintenanceEvidenceReceiptDigest:
+        fixture.currentAuthority.maintenanceEvidenceReceiptDigest,
+      maintenanceEvidencePointerRevision:
+        fixture.currentAuthority.maintenanceEvidencePointerRevision,
     },
     location,
   }
@@ -1948,10 +1954,16 @@ function createPublishCommand(
 ) {
   return {
     expectedRevision,
-    lease: {
-      runId: fixture.currentAuthority.lease.runId,
-      ownerId: fixture.currentAuthority.lease.ownerId,
-      fenceToken: fixture.currentAuthority.lease.fenceToken,
+    authority: {
+      lease: {
+        runId: fixture.currentAuthority.lease.runId,
+        ownerId: fixture.currentAuthority.lease.ownerId,
+        fenceToken: fixture.currentAuthority.lease.fenceToken,
+      },
+      maintenanceEvidenceReceiptDigest:
+        fixture.currentAuthority.maintenanceEvidenceReceiptDigest,
+      maintenanceEvidencePointerRevision:
+        fixture.currentAuthority.maintenanceEvidencePointerRevision,
     },
   }
 }

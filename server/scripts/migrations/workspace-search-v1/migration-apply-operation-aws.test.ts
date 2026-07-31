@@ -54,11 +54,13 @@ import {
 import {
   createAwsWorkspaceSearchMigrationApplyOperationPort,
   createWorkspaceSearchMigrationApplyPredecessorAwsBinding,
+  type WorkspaceSearchMigrationApplyAuthorityAdoptionCommandInput,
   type WorkspaceSearchMigrationApplyCheckpointScanner,
   type WorkspaceSearchMigrationApplyOperationAuthorityPort,
   type WorkspaceSearchMigrationApplyOperationAwsPort,
   type WorkspaceSearchMigrationApplyOperationAwsTransport,
   type WorkspaceSearchMigrationApplySealCommandInput,
+  workspaceSearchMigrationApplyAuthorityAdoptionTransactionIndex,
   workspaceSearchMigrationApplyCheckpointTransactionIndex,
   workspaceSearchMigrationApplyOperationTransactionIndex,
   workspaceSearchMigrationApplySealTransactionIndex,
@@ -74,6 +76,10 @@ import {
   createWorkspaceSearchMigrationExecutionRun,
   type WorkspaceSearchMigrationExecutionRun,
 } from './migration-execution-run'
+import {
+  parseWorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt,
+  serializeWorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt,
+} from './migration-execution-authority-adoption'
 import {
   parseWorkspaceSearchMigrationExecutionState,
 } from './migration-execution-state'
@@ -103,6 +109,7 @@ import {
 } from './migration-planning-provenance-manifest'
 import type {
   WorkspaceSearchMigrationPrePlanAuthority,
+  WorkspaceSearchMigrationPrePlanAuthorityClaim,
 } from './migration-pre-plan-authority-aws'
 import type {
   WorkspaceSearchMigrationSealedPlanningTableIds,
@@ -198,6 +205,9 @@ class ApplyOperationHarness {
   /** Exact static fixture whose table identities route all reads and writes. */
   private readonly fixture: ApplyOperationFixture
 
+  /** Current authority returned by the fake strong authority reader. */
+  private currentAuthority: WorkspaceSearchMigrationPrePlanAuthority
+
   /** Current low-level items indexed by measured table and canonical key. */
   private readonly items =
     new Map<string, Readonly<Record<string, AttributeValue>>>()
@@ -230,8 +240,15 @@ class ApplyOperationHarness {
   /** Optional synchronous effect during the final all-six preparation. */
   prepareEffect: (() => void) | undefined
 
+  /** Optional effect run before one strong-read lookup in the fake store. */
+  beforeStrongRead:
+    ((command: GetItemCommand) => Promise<void> | void) | undefined
+
   /** Whether a competing rollback-start sentinel exists at transaction time. */
   private rollbackStartSentinelExists = false
+
+  /** Whether a competing applied-root sentinel exists at transaction time. */
+  private appliedRootSentinelExists = false
 
   /** Optional test-owned implementation behind the checkpoint scanner. */
   checkpointScanImplementation:
@@ -241,6 +258,10 @@ class ApplyOperationHarness {
 
   /** Ordered high-level dependency operations. */
   readonly events: string[] = []
+
+  /** Exact authority claims received by the fake strong authority reader. */
+  readonly authorityClaims:
+    WorkspaceSearchMigrationPrePlanAuthorityClaim[] = []
 
   /** Strong read commands observed by the fake transport. */
   readonly reads: GetItemCommand[] = []
@@ -298,6 +319,8 @@ class ApplyOperationHarness {
    */
   constructor(fixture: ApplyOperationFixture) {
     this.fixture = fixture
+    this.currentAuthority =
+      structuredClone(fixture.currentAuthority)
     for (const plannedOperation of fixture.plannedOperations) {
       const operation = plannedOperation.operation
       this.seedSnapshot(
@@ -327,9 +350,10 @@ class ApplyOperationHarness {
       executionRunRecord,
     )
     this.authorityPort = {
-      readAuthority: async () => {
+      readAuthority: async (claim) => {
         this.events.push('authority')
-        return structuredClone(this.fixture.currentAuthority)
+        this.authorityClaims.push(structuredClone(claim))
+        return structuredClone(this.currentAuthority)
       },
     }
     this.journalGateway = {
@@ -497,6 +521,17 @@ class ApplyOperationHarness {
   }
 
   /**
+   * Replaces the exact authority returned by later strong authority reads.
+   *
+   * @param authority - Fresh same-fence or takeover authority.
+   */
+  replaceCurrentAuthority(
+    authority: WorkspaceSearchMigrationPrePlanAuthority,
+  ): void {
+    this.currentAuthority = structuredClone(authority)
+  }
+
+  /**
    * Advances the trusted adapter clock without performing dependency I/O.
    *
    * @param milliseconds - Positive test-only clock increment.
@@ -510,6 +545,13 @@ class ApplyOperationHarness {
    */
   commitRollbackStartSentinel(): void {
     this.rollbackStartSentinelExists = true
+  }
+
+  /**
+   * Makes the deterministic applied-root sentinel win later transactions.
+   */
+  commitAppliedRootSentinel(): void {
+    this.appliedRootSentinelExists = true
   }
 
   /**
@@ -632,6 +674,7 @@ class ApplyOperationHarness {
     if (tableName === undefined || key === undefined) {
       throw new Error('Expected a complete strong read command.')
     }
+    await this.beforeStrongRead?.(command)
     const item = this.items.get(storageKey(tableName, key))
     return item === undefined
       ? { $metadata: {} }
@@ -686,6 +729,37 @@ class ApplyOperationHarness {
       }
       throw createConditionalCancellation(
         rollbackStartIndex,
+        items.length,
+      )
+    }
+    if (this.appliedRootSentinelExists) {
+      const appliedRootKey =
+        createWorkspaceSearchMigrationAppliedRootKey({
+          stateTable,
+          configurationHash: this.fixture.configurationHash,
+          executionRun: this.fixture.executionRun,
+        })
+      const appliedRootIndex = items.findIndex((item) =>
+        item.ConditionCheck?.Key?.recordKey?.S ===
+          appliedRootKey.recordKey.S
+      )
+      const condition =
+        items[appliedRootIndex]?.ConditionCheck
+      if (
+        appliedRootIndex < 0 ||
+        condition === undefined ||
+        condition.TableName !== stateTable.tableName ||
+        condition.Key?.migrationId?.S !==
+          appliedRootKey.migrationId.S ||
+        condition.Key?.recordKey?.S !==
+          appliedRootKey.recordKey.S
+      ) {
+        throw new Error(
+          'Expected an exact applied-root absence condition.',
+        )
+      }
+      throw createConditionalCancellation(
+        appliedRootIndex,
         items.length,
       )
     }
@@ -1024,6 +1098,960 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
         kind: 'workspace-search-operation-already-current',
       })
       expect(await port.readApplyReceipt(1)).toBeUndefined()
+    },
+  )
+
+  test(
+    'adopts a same-fence refresh from admission in fixed eleven-item exact order',
+    async () => {
+      const fixture = createApplyFixture('put', 0)
+      const harness = new ApplyOperationHarness(fixture)
+      const authority = createRenewedAuthority(
+        fixture,
+        7,
+        13,
+        ownerId,
+      )
+      harness.replaceCurrentAuthority(authority)
+      const port = createApplyPort(fixture, harness)
+      const command = createAuthorityAdoptionCommand(
+        authority,
+        1,
+      )
+
+      const next = await port.adoptExecutionAuthority(command)
+
+      expect(next).toMatchObject({
+        revision: 2,
+        status: 'applying',
+        appliedOperationCount: 0,
+        maintenanceEvidenceReceipt:
+          authority.maintenanceEvidenceReceipt,
+      })
+      expect(harness.authorityClaims).toEqual([
+        createAuthorityClaim(authority),
+      ])
+      expect(harness.transactions).toHaveLength(1)
+      const items = requireTransactionItems(
+        requireTransaction(harness.transactions[0]),
+      )
+      const index =
+        workspaceSearchMigrationApplyAuthorityAdoptionTransactionIndex
+      expect(items).toHaveLength(index.count)
+      for (
+        let conditionIndex = index.lease;
+        conditionIndex <= index.appliedRoot;
+        conditionIndex += 1
+      ) {
+        expect(
+          items[conditionIndex]?.ConditionCheck,
+        ).toBeDefined()
+      }
+      expect(
+        items[index.appliedRoot]?.ConditionCheck?.Key,
+      ).toEqual(
+        createWorkspaceSearchMigrationAppliedRootKey({
+          stateTable:
+            fixture.configuration.tables['migration-state'],
+          configurationHash: fixture.configurationHash,
+          executionRun: fixture.executionRun,
+        }),
+      )
+
+      const statePut = items[index.executionState]?.Put
+      const receiptPut =
+        items[index.authorityAdoptionReceipt]?.Put
+      if (
+        statePut?.Item === undefined ||
+        receiptPut?.Item === undefined
+      ) {
+        throw new Error(
+          'Expected exact authority-adoption state and receipt Puts.',
+        )
+      }
+      expect(statePut.ConditionExpression).toContain(
+        'attribute_not_exists',
+      )
+      expect(receiptPut.ConditionExpression).toContain(
+        'attribute_not_exists',
+      )
+      expect(receiptPut.Item.kind?.S).toBe(
+        'workspace-search-migration-execution-authority-adoption-receipt',
+      )
+      const state = parseWorkspaceSearchMigrationExecutionState(
+        requireBinaryAttribute(
+          statePut.Item,
+          'executionStateBytes',
+        ),
+      )
+      if (state.executionStateVersion !== 3) {
+        throw new Error('Expected authority-renewable V3 state.')
+      }
+      expect(state).toMatchObject({
+        revision: 2,
+        maintenanceEvidenceRenewalCount: 1,
+        maintenanceEvidenceReceipt:
+          authority.maintenanceEvidenceReceipt,
+        currentAuthority: {
+          ownerId,
+          fenceToken: 7,
+          maintenanceEvidencePointerRevision: 13,
+          maintenanceEvidenceReceiptDigest:
+            authority.maintenanceEvidenceReceiptDigest,
+          evaluatedAt: authority.evaluatedAt,
+        },
+      })
+      const receipt =
+        parseWorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt(
+          requireBinaryAttribute(
+            receiptPut.Item,
+            'receiptBytes',
+          ),
+        )
+      expect(receipt).toMatchObject({
+        predecessorKind: 'execution-run-admission',
+        predecessorRevision: 1,
+        successorRevision: 2,
+        maintenanceEvidenceRenewalCount: 1,
+        currentAuthority: state.currentAuthority,
+      })
+      expect(receipt.successorExecutionStateDigest).toBe(
+        state.executionStateDigest,
+      )
+      expect(receipt.successorRunStateDigest).toBe(
+        state.runStateDigest,
+      )
+    },
+  )
+
+  test(
+    'adopts a higher-fence takeover from an exact mutable predecessor',
+    async () => {
+      const fixture = createApplyFixture('put', 2)
+      const harness = new ApplyOperationHarness(fixture)
+      const port = createApplyPort(fixture, harness)
+      const predecessor = await port.commitApplyOperation(
+        createApplyCommand(fixture),
+      )
+      const predecessorItems = requireTransactionItems(
+        requireTransaction(harness.transactions[0]),
+      )
+      const predecessorRecord = predecessorItems[
+        workspaceSearchMigrationApplyOperationTransactionIndex
+          .executionState
+      ]?.Put?.Item
+      if (predecessorRecord === undefined) {
+        throw new Error('Expected one durable V1 predecessor.')
+      }
+      const takeoverOwner = 'apply-operation-takeover-owner'
+      const authority = createRenewedAuthority(
+        fixture,
+        8,
+        13,
+        takeoverOwner,
+      )
+      harness.replaceCurrentAuthority(authority)
+
+      const next = await port.adoptExecutionAuthority(
+        createAuthorityAdoptionCommand(
+          authority,
+          predecessor.revision,
+        ),
+      )
+
+      expect(next).toMatchObject({
+        revision: 3,
+        appliedOperationCount: 1,
+        journalSequence: 1,
+        journalHeadDigest: predecessor.journalHeadDigest,
+        maintenanceEvidenceReceipt:
+          authority.maintenanceEvidenceReceipt,
+      })
+      const items = requireTransactionItems(
+        requireTransaction(harness.transactions[1]),
+      )
+      const statePut = items[
+        workspaceSearchMigrationApplyAuthorityAdoptionTransactionIndex
+          .executionState
+      ]?.Put
+      if (
+        statePut?.Item === undefined ||
+        statePut.ConditionExpression === undefined ||
+        statePut.ExpressionAttributeNames === undefined ||
+        statePut.ExpressionAttributeValues === undefined
+      ) {
+        throw new Error(
+          'Expected a complete takeover state Put and predecessor CAS.',
+        )
+      }
+      expect(
+        Object.values(
+          statePut.ExpressionAttributeNames,
+        ).sort(),
+      ).toEqual(Object.keys(predecessorRecord).sort())
+      for (
+        const [nameToken, attributeName] of
+        Object.entries(statePut.ExpressionAttributeNames)
+      ) {
+        const tokenIndex = nameToken.slice(2)
+        const valueToken = `:v${tokenIndex}`
+        expect(
+          statePut.ExpressionAttributeValues[valueToken],
+        ).toEqual(predecessorRecord[attributeName])
+        expect(statePut.ConditionExpression).toContain(
+          `${nameToken} = ${valueToken}`,
+        )
+      }
+      const state = parseWorkspaceSearchMigrationExecutionState(
+        requireBinaryAttribute(
+          statePut.Item,
+          'executionStateBytes',
+        ),
+      )
+      if (state.executionStateVersion !== 3) {
+        throw new Error('Expected takeover to produce V3 state.')
+      }
+      expect(state).toMatchObject({
+        appliedOperationCount: 1,
+        journalSequence: 1,
+        minimumJournalRetainUntil:
+          freshRetainUntil,
+        maintenanceEvidenceRenewalCount: 1,
+        currentAuthority: {
+          ownerId: takeoverOwner,
+          fenceToken: 8,
+          maintenanceEvidencePointerRevision: 13,
+        },
+      })
+    },
+  )
+
+  test(
+    'reconciles authority-adoption response loss and restart without another transaction',
+    async () => {
+      const fixture = createApplyFixture('put', 0)
+      const harness = new ApplyOperationHarness(fixture)
+      const authority = createRenewedAuthority(
+        fixture,
+        7,
+        13,
+        ownerId,
+      )
+      harness.replaceCurrentAuthority(authority)
+      harness.nextTransactionError =
+        new Error('tenant-secret-adoption-response-loss')
+      harness.commitBeforeTransactionError = true
+      const command = createAuthorityAdoptionCommand(
+        authority,
+        1,
+      )
+      const firstPort = createApplyPort(fixture, harness)
+
+      const reconciled =
+        await firstPort.adoptExecutionAuthority(command)
+
+      expect(reconciled).toMatchObject({
+        revision: 2,
+        maintenanceEvidenceReceipt:
+          authority.maintenanceEvidenceReceipt,
+      })
+      expect(harness.transactions).toHaveLength(1)
+      const receiptRecord = harness.findLastTransactionRecord(
+        'workspace-search-migration-execution-authority-adoption-receipt',
+      )
+      if (receiptRecord === undefined) {
+        throw new Error(
+          'Expected one durable authority-adoption receipt.',
+        )
+      }
+      const receipt =
+        parseWorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt(
+          requireBinaryAttribute(
+            receiptRecord,
+            'receiptBytes',
+          ),
+        )
+      expect(receipt).toMatchObject({
+        predecessorRevision: 1,
+        successorRevision: 2,
+        maintenanceEvidenceRenewalCount: 1,
+      })
+
+      const restarted = createApplyPort(fixture, harness)
+      const retried = await restarted.adoptExecutionAuthority(
+        structuredClone(command),
+      )
+
+      expect(retried).toEqual(reconciled)
+      expect(harness.transactions).toHaveLength(1)
+    },
+  )
+
+  test(
+    'reconciles an identical adoption committed between the preflight receipt and state reads',
+    async () => {
+      const fixture = createApplyFixture('put', 0)
+      const authority = createRenewedAuthority(
+        fixture,
+        7,
+        13,
+        ownerId,
+      )
+      const command = createAuthorityAdoptionCommand(
+        authority,
+        1,
+      )
+      const donorHarness = new ApplyOperationHarness(fixture)
+      donorHarness.replaceCurrentAuthority(authority)
+      const donorState =
+        await createApplyPort(
+          fixture,
+          donorHarness,
+        ).adoptExecutionAuthority(command)
+      const stateRecord = donorHarness.findLastTransactionRecord(
+        'workspace-search-migration-execution-state-record',
+      )
+      const receiptRecord =
+        donorHarness.findLastTransactionRecord(
+          'workspace-search-migration-execution-authority-adoption-receipt',
+        )
+      if (
+        stateRecord === undefined ||
+        receiptRecord === undefined
+      ) {
+        throw new Error(
+          'Expected a complete donor adoption transaction.',
+        )
+      }
+
+      const harness = new ApplyOperationHarness(fixture)
+      harness.replaceCurrentAuthority(authority)
+      let committedDuringPreflight = false
+      harness.beforeStrongRead = (read) => {
+        if (
+          committedDuringPreflight ||
+          read.input.Key?.recordKey?.S?.startsWith(
+            'execution-state/v1/',
+          ) !== true
+        ) {
+          return
+        }
+        committedDuringPreflight = true
+        harness.beforeStrongRead = undefined
+        harness.seedStateRecord(stateRecord)
+        harness.seedStateRecord(receiptRecord)
+      }
+
+      const reconciled =
+        await createApplyPort(
+          fixture,
+          harness,
+        ).adoptExecutionAuthority(command)
+
+      expect(committedDuringPreflight).toBe(true)
+      expect(reconciled).toEqual(donorState)
+      expect(harness.transactions).toHaveLength(0)
+    },
+  )
+
+  test(
+    're-reads the receipt when a concurrent adoption commits during response-loss reconciliation',
+    async () => {
+      const fixture = createApplyFixture('put', 0)
+      const harness = new ApplyOperationHarness(fixture)
+      const authority = createRenewedAuthority(
+        fixture,
+        7,
+        13,
+        ownerId,
+      )
+      harness.replaceCurrentAuthority(authority)
+      harness.nextTransactionError =
+        new Error('tenant-secret-adoption-response-loss')
+      let committedDuringReconciliation = false
+      harness.beforeStrongRead = (read) => {
+        if (
+          committedDuringReconciliation ||
+          harness.transactions.length !== 1 ||
+          read.input.Key?.recordKey?.S?.startsWith(
+            'execution-state/v1/',
+          ) !== true
+        ) {
+          return
+        }
+        const stateRecord = harness.findLastTransactionRecord(
+          'workspace-search-migration-execution-state-record',
+        )
+        const receiptRecord =
+          harness.findLastTransactionRecord(
+            'workspace-search-migration-execution-authority-adoption-receipt',
+          )
+        if (
+          stateRecord === undefined ||
+          receiptRecord === undefined
+        ) {
+          throw new Error(
+            'Expected one pending adoption transaction.',
+          )
+        }
+        committedDuringReconciliation = true
+        harness.beforeStrongRead = undefined
+        harness.seedStateRecord(stateRecord)
+        harness.seedStateRecord(receiptRecord)
+      }
+
+      const reconciled =
+        await createApplyPort(
+          fixture,
+          harness,
+        ).adoptExecutionAuthority(
+          createAuthorityAdoptionCommand(
+            authority,
+            1,
+          ),
+        )
+
+      expect(committedDuringReconciliation).toBe(true)
+      expect(reconciled).toMatchObject({
+        revision: 2,
+        maintenanceEvidenceReceipt:
+          authority.maintenanceEvidenceReceipt,
+      })
+      expect(harness.transactions).toHaveLength(1)
+      expect(
+        harness.hasDurableRecordKind(
+          'workspace-search-migration-execution-authority-adoption-receipt',
+        ),
+      ).toBe(true)
+    },
+  )
+
+  test(
+    'maps all eleven authority-adoption cancellation positions without durable branch progress',
+    async () => {
+      const index =
+        workspaceSearchMigrationApplyAuthorityAdoptionTransactionIndex
+      const cases: readonly {
+        /** Fixed authority-adoption transaction index selected by the test. */
+        readonly failedIndex: number
+        /** Stable expected public failure code. */
+        readonly code: WorkspaceSearchMigrationFailureCode
+      }[] = [
+        { failedIndex: index.lease, code: 'LEASE_LOST' },
+        {
+          failedIndex: index.pointer,
+          code: 'INVALID_MAINTENANCE_EVIDENCE',
+        },
+        {
+          failedIndex: index.receipt,
+          code: 'INVALID_MAINTENANCE_EVIDENCE',
+        },
+        { failedIndex: index.writerFence, code: 'INVALID_STATE' },
+        {
+          failedIndex: index.executionBoundary,
+          code: 'INVALID_STATE',
+        },
+        {
+          failedIndex: index.sealedPlanningAuthority,
+          code: 'INVALID_STATE',
+        },
+        { failedIndex: index.executionRun, code: 'INVALID_STATE' },
+        { failedIndex: index.rollbackStart, code: 'INVALID_STATE' },
+        { failedIndex: index.appliedRoot, code: 'INVALID_STATE' },
+        { failedIndex: index.executionState, code: 'INVALID_STATE' },
+        {
+          failedIndex: index.authorityAdoptionReceipt,
+          code: 'INVALID_STATE',
+        },
+      ]
+      expect(cases).toHaveLength(index.count)
+      expect(
+        new Set(cases.map((entry) => entry.failedIndex)).size,
+      ).toBe(index.count)
+
+      for (const entry of cases) {
+        const fixture = createApplyFixture('put', 0)
+        const harness = new ApplyOperationHarness(fixture)
+        const authority = createRenewedAuthority(
+          fixture,
+          7,
+          13,
+          ownerId,
+        )
+        harness.replaceCurrentAuthority(authority)
+        harness.nextTransactionError =
+          createConditionalCancellation(
+            entry.failedIndex,
+            index.count,
+          )
+        const port = createApplyPort(fixture, harness)
+
+        const failure = await captureMigrationFailure(() =>
+          port.adoptExecutionAuthority(
+            createAuthorityAdoptionCommand(authority, 1),
+          )
+        )
+
+        expect(failure.code).toBe(entry.code)
+        expect(harness.transactions).toHaveLength(1)
+        expect(
+          requireTransactionItems(
+            requireTransaction(harness.transactions[0]),
+          ),
+        ).toHaveLength(index.count)
+        expect(
+          harness.hasDurableRecordKind(
+            'workspace-search-migration-execution-authority-adoption-receipt',
+          ),
+        ).toBe(false)
+        expect(await port.readRunState()).toEqual(
+          fixture.executionRun.runState,
+        )
+      }
+    },
+  )
+
+  test(
+    'uses adopted v3 authority for later operation, checkpoints, and complete sealing',
+    async () => {
+      const fixture = createApplyFixture('put')
+      const harness = new ApplyOperationHarness(fixture)
+      const takeoverOwner = 'apply-operation-v3-owner'
+      const authority = createRenewedAuthority(
+        fixture,
+        8,
+        13,
+        takeoverOwner,
+      )
+      harness.replaceCurrentAuthority(authority)
+      harness.checkpointScanImplementation = async ({
+        location,
+        previousCheckpoint,
+      }) =>
+        location === 'project-directory' || location === 'target'
+          ? createTerminalMappedCheckpoint(
+              previousCheckpoint,
+              location,
+              1,
+            )
+          : createTerminalEmptyCheckpointPage(previousCheckpoint)
+      const port = createApplyPort(fixture, harness)
+      const adopted = await port.adoptExecutionAuthority(
+        createAuthorityAdoptionCommand(authority, 1),
+      )
+      const authorityClaimStart =
+        harness.authorityClaims.length
+
+      const operated = await port.commitApplyOperation(
+        createApplyCommand(fixture, 0, adopted.revision, authority),
+      )
+      expect(operated).toMatchObject({
+        revision: 3,
+        appliedOperationCount: 1,
+        maintenanceEvidenceReceipt:
+          authority.maintenanceEvidenceReceipt,
+      })
+      expect(
+        await port.readOperationMarker(
+          fixture.plannedOperation.operation.operationId,
+        ),
+      ).toMatchObject({
+        fenceToken: 8,
+        maintenanceEvidenceReceiptDigest:
+          authority.maintenanceEvidenceReceiptDigest,
+      })
+
+      const terminal = await completeApplyCheckpoints(
+        fixture,
+        port,
+        operated.revision,
+        authority,
+      )
+      const applied = await port.sealApply(
+        createApplySealCommand(
+          fixture,
+          terminal.revision,
+          authority,
+        ),
+      )
+
+      expect(applied).toMatchObject({
+        revision: terminal.revision + 1,
+        status: 'applied',
+      })
+      const claims =
+        harness.authorityClaims.slice(authorityClaimStart)
+      expect(claims.length).toBeGreaterThan(0)
+      for (const claim of claims) {
+        expect(claim).toEqual(createAuthorityClaim(authority))
+      }
+      const stateRecord = harness.findLastTransactionRecord(
+        'workspace-search-migration-execution-state-record',
+      )
+      if (stateRecord === undefined) {
+        throw new Error('Expected terminal mutable V3 state.')
+      }
+      const state = parseWorkspaceSearchMigrationExecutionState(
+        requireBinaryAttribute(
+          stateRecord,
+          'executionStateBytes',
+        ),
+      )
+      if (state.executionStateVersion !== 3) {
+        throw new Error('Expected later apply work to preserve V3.')
+      }
+      expect(state).toMatchObject({
+        appliedOperationCount: 1,
+        maintenanceEvidenceRenewalCount: 1,
+        currentAuthority: {
+          ownerId: takeoverOwner,
+          fenceToken: 8,
+          maintenanceEvidencePointerRevision: 13,
+          maintenanceEvidenceReceiptDigest:
+            authority.maintenanceEvidenceReceiptDigest,
+        },
+      })
+      expect(state.apply.target.completed).toBe(true)
+    },
+  )
+
+  test(
+    'validates an adoption receipt against the mutable successor after applied-root projection',
+    async () => {
+      const fixture = createApplyFixture('put')
+      const harness = new ApplyOperationHarness(fixture)
+      const owner = 'apply-operation-terminal-renewal-owner'
+      const firstAuthority = createRenewedAuthority(
+        fixture,
+        8,
+        13,
+        owner,
+      )
+      harness.replaceCurrentAuthority(firstAuthority)
+      harness.checkpointScanImplementation = async ({
+        location,
+        previousCheckpoint,
+      }) =>
+        location === 'project-directory' || location === 'target'
+          ? createTerminalMappedCheckpoint(
+              previousCheckpoint,
+              location,
+              1,
+            )
+          : createTerminalEmptyCheckpointPage(previousCheckpoint)
+      const port = createApplyPort(fixture, harness)
+      const firstAdoption = await port.adoptExecutionAuthority(
+        createAuthorityAdoptionCommand(firstAuthority, 1),
+      )
+      const operated = await port.commitApplyOperation(
+        createApplyCommand(
+          fixture,
+          0,
+          firstAdoption.revision,
+          firstAuthority,
+        ),
+      )
+      const terminal = await completeApplyCheckpoints(
+        fixture,
+        port,
+        operated.revision,
+        firstAuthority,
+      )
+      const terminalAuthority = createRenewedAuthority(
+        fixture,
+        8,
+        14,
+        owner,
+      )
+      harness.replaceCurrentAuthority(terminalAuthority)
+      const terminalCommand = createAuthorityAdoptionCommand(
+        terminalAuthority,
+        terminal.revision,
+      )
+      const terminalAdoption =
+        await port.adoptExecutionAuthority(terminalCommand)
+      await port.sealApply(
+        createApplySealCommand(
+          fixture,
+          terminalAdoption.revision,
+          terminalAuthority,
+        ),
+      )
+      const receiptRecord = harness.findLastTransactionRecord(
+        'workspace-search-migration-execution-authority-adoption-receipt',
+      )
+      if (receiptRecord === undefined) {
+        throw new Error(
+          'Expected the terminal authority-adoption receipt.',
+        )
+      }
+      const receipt =
+        parseWorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt(
+          requireBinaryAttribute(
+            receiptRecord,
+            'receiptBytes',
+          ),
+        )
+      const tampered = structuredClone(receipt)
+      Reflect.set(
+        tampered,
+        'successorExecutionStateDigest',
+        digest('tampered-terminal-adoption-successor'),
+      )
+      const receiptFields = structuredClone(tampered)
+      Reflect.deleteProperty(receiptFields, 'receiptDigest')
+      Reflect.set(
+        tampered,
+        'receiptDigest',
+        createMigrationDigest(receiptFields),
+      )
+      const tamperedBytes =
+        serializeWorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt(
+          tampered,
+        )
+      harness.seedStateRecord({
+        ...receiptRecord,
+        successorExecutionStateDigest: {
+          S: tampered.successorExecutionStateDigest,
+        },
+        receiptDigest: { S: tampered.receiptDigest },
+        receiptBytes: { B: tamperedBytes },
+      })
+
+      const failure = await captureMigrationFailure(() =>
+        port.adoptExecutionAuthority(
+          structuredClone(terminalCommand),
+        )
+      )
+
+      expect(failure.code).toBe('INVALID_STATE')
+    },
+  )
+
+  test(
+    'pairs descendant renewal counts with exact or strict authority lineage',
+    async () => {
+      const fixture = createApplyFixture('put')
+      const lineageOwner =
+        'apply-operation-descendant-lineage-owner'
+      const firstAuthority = createRenewedAuthority(
+        fixture,
+        8,
+        13,
+        lineageOwner,
+      )
+      const secondAuthority = createRenewedAuthority(
+        fixture,
+        8,
+        14,
+        lineageOwner,
+      )
+      const firstCommand = createAuthorityAdoptionCommand(
+        firstAuthority,
+        1,
+      )
+
+      const receiptHarness = new ApplyOperationHarness(fixture)
+      receiptHarness.replaceCurrentAuthority(firstAuthority)
+      const receiptPort = createApplyPort(
+        fixture,
+        receiptHarness,
+      )
+      await receiptPort.adoptExecutionAuthority(firstCommand)
+
+      const sameCountHarness =
+        new ApplyOperationHarness(fixture)
+      sameCountHarness.replaceCurrentAuthority(secondAuthority)
+      const sameCountPort = createApplyPort(
+        fixture,
+        sameCountHarness,
+      )
+      const secondDirect =
+        await sameCountPort.adoptExecutionAuthority(
+          createAuthorityAdoptionCommand(secondAuthority, 1),
+        )
+      await sameCountPort.commitApplyOperation(
+        createApplyCommand(
+          fixture,
+          0,
+          secondDirect.revision,
+          secondAuthority,
+        ),
+      )
+      const sameCountState =
+        sameCountHarness.findLastTransactionRecord(
+          'workspace-search-migration-execution-state-record',
+        )
+      if (sameCountState === undefined) {
+        throw new Error(
+          'Expected a later same-count execution state.',
+        )
+      }
+      receiptHarness.seedStateRecord(sameCountState)
+
+      const sameCountFailure =
+        await captureMigrationFailure(() =>
+          receiptPort.adoptExecutionAuthority(
+            structuredClone(firstCommand),
+          )
+        )
+
+      expect(sameCountFailure.code).toBe('INVALID_STATE')
+
+      const increasedCountHarness =
+        new ApplyOperationHarness(fixture)
+      increasedCountHarness.replaceCurrentAuthority(
+        firstAuthority,
+      )
+      const increasedCountPort = createApplyPort(
+        fixture,
+        increasedCountHarness,
+      )
+      const first =
+        await increasedCountPort.adoptExecutionAuthority(
+          firstCommand,
+        )
+      increasedCountHarness.replaceCurrentAuthority(
+        secondAuthority,
+      )
+      await increasedCountPort.adoptExecutionAuthority(
+        createAuthorityAdoptionCommand(
+          secondAuthority,
+          first.revision,
+        ),
+      )
+      const directSecondReceipt =
+        sameCountHarness.findLastTransactionRecord(
+          'workspace-search-migration-execution-authority-adoption-receipt',
+        )
+      if (directSecondReceipt === undefined) {
+        throw new Error(
+          'Expected a direct second-authority receipt.',
+        )
+      }
+      increasedCountHarness.seedStateRecord(
+        directSecondReceipt,
+      )
+
+      const increasedCountFailure =
+        await captureMigrationFailure(() =>
+          increasedCountPort.adoptExecutionAuthority(
+            createAuthorityAdoptionCommand(
+              secondAuthority,
+              1,
+            ),
+          )
+        )
+
+      expect(increasedCountFailure.code).toBe('INVALID_STATE')
+    },
+  )
+
+  test(
+    'rejects stale adoption and rollback-start or applied-root races',
+    async () => {
+      const staleFixture = createApplyFixture('put', 0)
+      const staleHarness =
+        new ApplyOperationHarness(staleFixture)
+      const staleAuthority = createRenewedAuthority(
+        staleFixture,
+        7,
+        13,
+        ownerId,
+      )
+      const stalePort = createApplyPort(
+        staleFixture,
+        staleHarness,
+      )
+      const staleFailure = await captureMigrationFailure(() =>
+        stalePort.adoptExecutionAuthority(
+          createAuthorityAdoptionCommand(staleAuthority, 1),
+        )
+      )
+      expect(staleFailure.code).toBe('CONFIGURATION_DRIFT')
+      expect(staleHarness.transactions).toEqual([])
+
+      const revisionFixture = createApplyFixture('put', 0)
+      const revisionHarness =
+        new ApplyOperationHarness(revisionFixture)
+      const revisionAuthority = createRenewedAuthority(
+        revisionFixture,
+        7,
+        13,
+        ownerId,
+      )
+      revisionHarness.replaceCurrentAuthority(
+        revisionAuthority,
+      )
+      const revisionFailure = await captureMigrationFailure(() =>
+        createApplyPort(
+          revisionFixture,
+          revisionHarness,
+        ).adoptExecutionAuthority(
+          createAuthorityAdoptionCommand(
+            revisionAuthority,
+            2,
+          ),
+        )
+      )
+      expect(revisionFailure.code).toBe('INVALID_STATE')
+      expect(revisionHarness.transactions).toEqual([])
+
+      const rollbackFixture = createApplyFixture('put', 0)
+      const rollbackHarness =
+        new ApplyOperationHarness(rollbackFixture)
+      const rollbackAuthority = createRenewedAuthority(
+        rollbackFixture,
+        7,
+        13,
+        ownerId,
+      )
+      rollbackHarness.replaceCurrentAuthority(
+        rollbackAuthority,
+      )
+      rollbackHarness.commitRollbackStartSentinel()
+      const rollbackFailure = await captureMigrationFailure(() =>
+        createApplyPort(
+          rollbackFixture,
+          rollbackHarness,
+        ).adoptExecutionAuthority(
+          createAuthorityAdoptionCommand(
+            rollbackAuthority,
+            1,
+          ),
+        )
+      )
+      expect(rollbackFailure.code).toBe('INVALID_STATE')
+      expect(
+        rollbackHarness.hasDurableRecordKind(
+          'workspace-search-migration-execution-authority-adoption-receipt',
+        ),
+      ).toBe(false)
+
+      const rootFixture = createApplyFixture('put', 0)
+      const rootHarness = new ApplyOperationHarness(rootFixture)
+      const rootAuthority = createRenewedAuthority(
+        rootFixture,
+        7,
+        13,
+        ownerId,
+      )
+      rootHarness.replaceCurrentAuthority(rootAuthority)
+      rootHarness.commitAppliedRootSentinel()
+      const rootFailure = await captureMigrationFailure(() =>
+        createApplyPort(
+          rootFixture,
+          rootHarness,
+        ).adoptExecutionAuthority(
+          createAuthorityAdoptionCommand(rootAuthority, 1),
+        )
+      )
+      expect(rootFailure.code).toBe('INVALID_STATE')
+      expect(
+        rootHarness.hasDurableRecordKind(
+          'workspace-search-migration-execution-authority-adoption-receipt',
+        ),
+      ).toBe(false)
     },
   )
 
@@ -3774,21 +4802,108 @@ function createApplyPort(
 }
 
 /**
+ * Projects one exact lease, pointer, and receipt claim from current authority.
+ *
+ * @param authority - Exact fresh pre-plan authority.
+ * @returns Detached authority claim accepted by apply commands.
+ */
+function createAuthorityClaim(
+  authority: WorkspaceSearchMigrationPrePlanAuthority,
+): WorkspaceSearchMigrationPrePlanAuthorityClaim {
+  return {
+    lease: {
+      runId: authority.lease.runId,
+      ownerId: authority.lease.ownerId,
+      fenceToken: authority.lease.fenceToken,
+    },
+    maintenanceEvidenceReceiptDigest:
+      authority.maintenanceEvidenceReceiptDigest,
+    maintenanceEvidencePointerRevision:
+      authority.maintenanceEvidencePointerRevision,
+  }
+}
+
+/**
+ * Creates one fresh same-run authority for refresh or lease takeover tests.
+ *
+ * @param fixture - Exact admitted run and measured state table.
+ * @param fenceToken - Exact current lease fence.
+ * @param pointerRevision - Exact current maintenance pointer revision.
+ * @param authorityOwnerId - Exact current lease owner.
+ * @returns Fully correlated current pre-plan authority.
+ */
+function createRenewedAuthority(
+  fixture: ApplyOperationFixture,
+  fenceToken: number,
+  pointerRevision: number,
+  authorityOwnerId: string,
+): WorkspaceSearchMigrationPrePlanAuthority {
+  const receipt: WorkspaceSearchMaintenanceEvidenceReceipt = {
+    runId,
+    evidenceDigest: digest(
+      `renewed-maintenance:${fenceToken}:${pointerRevision}`,
+    ),
+    evidenceLocator:
+      `workspace-search/v1/maintenance/fence-${fenceToken}-pointer-${pointerRevision}.json`,
+    runtimeRevision: 100 + pointerRevision,
+    fenceToken,
+    validatedAt: '2026-07-29T01:19:20.000Z',
+    oldestObservationAt: '2026-07-29T01:16:30.000Z',
+    validUntil: '2026-07-29T01:21:30.001Z',
+  }
+  return {
+    configurationHash: fixture.configurationHash,
+    stateTableId:
+      fixture.configuration.tables['migration-state'].tableId,
+    lease: {
+      runId,
+      ownerId: authorityOwnerId,
+      fenceToken,
+      heartbeatAt: '2026-07-29T01:19:30.000Z',
+      expiresAt: '2026-07-29T01:20:30.000Z',
+    },
+    maintenanceEvidenceReceiptDigest:
+      createMigrationDigest(receipt),
+    maintenanceEvidencePointerRevision: pointerRevision,
+    maintenanceEvidenceReceipt: receipt,
+    evaluatedAt: '2026-07-29T01:19:30.000Z',
+  }
+}
+
+/**
+ * Creates one detached execution-authority adoption command.
+ *
+ * @param authority - Exact fresh authority selected for adoption.
+ * @param expectedRevision - Exact current applying-state revision.
+ * @returns Strict adoption command.
+ */
+function createAuthorityAdoptionCommand(
+  authority: WorkspaceSearchMigrationPrePlanAuthority,
+  expectedRevision: number,
+): WorkspaceSearchMigrationApplyAuthorityAdoptionCommandInput {
+  return {
+    expectedRevision,
+    authority: createAuthorityClaim(authority),
+  }
+}
+
+/**
  * Creates one detached caller command without journal evidence.
  *
  * @param fixture - Exact admitted operation and lease authority.
  * @param planOperationIndex - Zero-based index of the selected plan member.
  * @param expectedRevision - Exact predecessor run revision.
+ * @param authority - Exact current authority whose lease owns the command.
  * @returns Detached apply request.
  */
 function createApplyCommand(
   fixture: ApplyOperationFixture,
   planOperationIndex = 0,
   expectedRevision = 1,
+  authority = fixture.currentAuthority,
 ): WorkspaceSearchMigrationCommandInput<
   WorkspaceSearchApplyOperationCommandEvent
 > {
-  const authority = fixture.currentAuthority
   const plannedOperation =
     fixture.plannedOperations[planOperationIndex]
   if (plannedOperation === undefined) {
@@ -3816,14 +4931,15 @@ function createApplyCommand(
  * @param fixture - Exact admitted run and active lease authority.
  * @param location - Source or target traversal selected by the command.
  * @param expectedRevision - Exact durable predecessor revision.
+ * @param authority - Exact current authority whose lease owns the command.
  * @returns Detached checkpoint request.
  */
 function createCheckpointCommand(
   fixture: ApplyOperationFixture,
   location: WorkspaceSearchMigrationCheckpointLocation,
   expectedRevision: number,
+  authority = fixture.currentAuthority,
 ): WorkspaceSearchMigrationCheckpointCommandInput {
-  const authority = fixture.currentAuthority
   return {
     expectedRevision,
     lease: {
@@ -3840,18 +4956,20 @@ function createCheckpointCommand(
  *
  * @param fixture - Exact admitted run and active lease authority.
  * @param expectedRevision - Exact terminal applying-state revision.
+ * @param authority - Exact current authority whose lease owns the command.
  * @returns Detached complete apply-seal request.
  */
 function createApplySealCommand(
   fixture: ApplyOperationFixture,
   expectedRevision: number,
+  authority = fixture.currentAuthority,
 ): WorkspaceSearchMigrationApplySealCommandInput {
   return {
     expectedRevision,
     lease: {
-      runId: fixture.currentAuthority.lease.runId,
-      ownerId: fixture.currentAuthority.lease.ownerId,
-      fenceToken: fixture.currentAuthority.lease.fenceToken,
+      runId: authority.lease.runId,
+      ownerId: authority.lease.ownerId,
+      fenceToken: authority.lease.fenceToken,
     },
   }
 }
@@ -3862,12 +4980,14 @@ function createApplySealCommand(
  * @param fixture - Exact admitted apply fixture.
  * @param port - Apply adapter under test.
  * @param initialRevision - Revision before the first checkpoint.
+ * @param authority - Exact current authority whose lease owns every page.
  * @returns Exact terminal applying state.
  */
 async function completeApplyCheckpoints(
   fixture: ApplyOperationFixture,
   port: WorkspaceSearchMigrationApplyOperationAwsPort,
   initialRevision: number,
+  authority = fixture.currentAuthority,
 ): Promise<WorkspaceSearchMigrationRunState> {
   const locations:
     readonly WorkspaceSearchMigrationCheckpointLocation[] = [
@@ -3892,6 +5012,7 @@ async function completeApplyCheckpoints(
         fixture,
         location,
         initialRevision + index,
+        authority,
       ),
     )
   }

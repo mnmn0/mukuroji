@@ -19,12 +19,14 @@ import {
 } from './migration-contract'
 import {
   type WorkspaceSearchMigrationExecutionRun,
+  type WorkspaceSearchMigrationExecutionRunAuthorityBinding,
   type WorkspaceSearchMigrationExecutionRunBinding,
   serializeWorkspaceSearchMigrationExecutionRun,
 } from './migration-execution-run'
 import {
   createWorkspaceSearchMigrationCheckpointExecutionState,
   createWorkspaceSearchMigrationExecutionState,
+  createWorkspaceSearchMigrationRenewedExecutionState,
   parseWorkspaceSearchMigrationOperationMarker,
   parseWorkspaceSearchMigrationExecutionState,
   reconstructWorkspaceSearchMigrationRunState,
@@ -33,6 +35,7 @@ import {
   type WorkspaceSearchMigrationExecutionState,
   type WorkspaceSearchMigrationExecutionStateV1,
   type WorkspaceSearchMigrationExecutionStateV2,
+  type WorkspaceSearchMigrationExecutionStateV3,
   WORKSPACE_SEARCH_MIGRATION_EXECUTION_STATE_MAX_BYTES,
   WorkspaceSearchMigrationExecutionStateError,
 } from './migration-execution-state'
@@ -602,6 +605,566 @@ describe('Workspace Search migration mutable execution state', () => {
     )
   })
 
+  test('renews admission, v1, and v2 predecessors into canonical v3 without losing progress', () => {
+    const directAdmission = createAdmission(0)
+    const direct = createRenewalFixture(
+      directAdmission,
+      undefined,
+      '2026-07-30T00:03:00.000Z',
+      7,
+      5,
+      ownerId,
+    )
+
+    expect(direct.state).toMatchObject({
+      executionStateVersion: 3,
+      revision: 2,
+      appliedOperationCount: 0,
+      maintenanceEvidenceRenewalCount: 1,
+      maintenanceEvidenceReceipt: direct.receipt,
+      currentAuthority: direct.currentAuthority,
+    })
+    expect(direct.state.apply).toEqual(
+      directAdmission.runState.apply,
+    )
+
+    const v1Admission = createAdmission(3)
+    const applied = createFullyAppliedV1State(v1Admission)
+    const fromV1 = createRenewalFixture(
+      v1Admission,
+      applied.state,
+      '2026-07-30T00:04:00.000Z',
+      7,
+      5,
+      ownerId,
+    )
+
+    expect(fromV1.state).toMatchObject({
+      executionStateVersion: 3,
+      revision: applied.state.revision + 1,
+      appliedOperationCount:
+        applied.state.appliedOperationCount,
+      applyMarkerDigestState:
+        applied.state.applyMarkerDigestState,
+      journalSequence: applied.state.journalSequence,
+      journalHeadDigest: applied.state.journalHeadDigest,
+      minimumJournalRetainUntil:
+        applied.state.minimumJournalRetainUntil,
+      maintenanceEvidenceRenewalCount: 1,
+    })
+    expect(fromV1.state.apply).toEqual(
+      v1Admission.runState.apply,
+    )
+
+    const v2Admission = createAdmission()
+    const v2Applied = createFullyAppliedV1State(v2Admission)
+    const checkpoint = createCheckpoint(
+      'project-directory',
+      1,
+      false,
+    )
+    const v2 =
+      createWorkspaceSearchMigrationCheckpointExecutionState({
+        admission: v2Admission,
+        predecessor: v2Applied.state,
+        authority: createAuthority(
+          '2026-07-30T00:04:00.000Z',
+        ),
+        location: 'project-directory',
+        checkpoint,
+      })
+    const fromV2 = createRenewalFixture(
+      v2Admission,
+      v2,
+      '2026-07-30T00:04:30.000Z',
+      7,
+      5,
+      ownerId,
+    )
+
+    expect(fromV2.state).toMatchObject({
+      executionStateVersion: 3,
+      revision: v2.revision + 1,
+      appliedOperationCount: v2.appliedOperationCount,
+      applyMarkerDigestState: v2.applyMarkerDigestState,
+      journalSequence: v2.journalSequence,
+      journalHeadDigest: v2.journalHeadDigest,
+      minimumJournalRetainUntil:
+        v2.minimumJournalRetainUntil,
+      maintenanceEvidenceRenewalCount: 1,
+    })
+    expect(fromV2.state.apply).toEqual(v2.apply)
+
+    for (
+      const candidate of [
+        {
+          admission: directAdmission,
+          state: direct.state,
+          runState: direct.runState,
+        },
+        {
+          admission: v1Admission,
+          state: fromV1.state,
+          runState: fromV1.runState,
+        },
+        {
+          admission: v2Admission,
+          state: fromV2.state,
+          runState: fromV2.runState,
+        },
+      ]
+    ) {
+      const bytes =
+        serializeWorkspaceSearchMigrationExecutionState(
+          candidate.state,
+        )
+      const parsed =
+        parseWorkspaceSearchMigrationExecutionState(bytes)
+
+      expect(parsed).toEqual(candidate.state)
+      expect(
+        reconstructWorkspaceSearchMigrationRunState(
+          candidate.admission,
+          parsed,
+        ),
+      ).toEqual(candidate.runState)
+      expect(candidate.state.executionStateDigest).toBe(
+        digestSerializedExecutionState(candidate.state),
+      )
+    }
+  })
+
+  test('keeps v3 across operation, checkpoint, and repeated authority renewal', () => {
+    const admission = createAdmission(2)
+    const firstMarker = createMutationMarker(
+      admission,
+      1,
+      1,
+      '2026-07-30T00:03:00.000Z',
+      '2026-09-05T00:00:00.000Z',
+    )
+    const firstRunState = advanceRunState(
+      admission.runState,
+      firstMarker,
+    )
+    const first =
+      createWorkspaceSearchMigrationExecutionState({
+        admission,
+        nextRunState: firstRunState,
+        marker: firstMarker,
+      })
+    const takeoverOwner = 'mutable-state-takeover-owner'
+    const renewed = createRenewalFixture(
+      admission,
+      first,
+      '2026-07-30T00:03:30.000Z',
+      8,
+      5,
+      takeoverOwner,
+    )
+    const staleMarker = createNoOpMarker(
+      admission,
+      2,
+      '2026-07-30T00:04:00.000Z',
+    )
+    expectExecutionStateFailure(() =>
+      createWorkspaceSearchMigrationExecutionState({
+        admission,
+        predecessor: renewed.state,
+        nextRunState: advanceRunState(
+          renewed.runState,
+          staleMarker,
+        ),
+        marker: staleMarker,
+      })
+    )
+
+    const secondMarker = createNoOpMarker(
+      admission,
+      2,
+      '2026-07-30T00:04:00.000Z',
+      renewed.runState,
+    )
+    const secondRunState = advanceRunState(
+      renewed.runState,
+      secondMarker,
+    )
+    const second =
+      createWorkspaceSearchMigrationExecutionState({
+        admission,
+        predecessor: renewed.state,
+        nextRunState: secondRunState,
+        marker: secondMarker,
+      })
+
+    expect(secondMarker).toMatchObject({
+      fenceToken: 8,
+      maintenanceEvidenceReceiptDigest:
+        createMigrationDigest(renewed.receipt),
+    })
+    expect(second).toMatchObject({
+      executionStateVersion: 3,
+      maintenanceEvidenceRenewalCount: 1,
+      currentAuthority: renewed.currentAuthority,
+      appliedOperationCount: 2,
+    })
+
+    const checkpoint =
+      createWorkspaceSearchMigrationCheckpointExecutionState({
+        admission,
+        predecessor: second,
+        authority: createAuthority(
+          '2026-07-30T00:04:30.000Z',
+          8,
+          takeoverOwner,
+        ),
+        location: 'target',
+        checkpoint: createCheckpoint('target', 1, false),
+      })
+
+    expect(checkpoint).toMatchObject({
+      executionStateVersion: 3,
+      maintenanceEvidenceRenewalCount: 1,
+      currentAuthority: renewed.currentAuthority,
+    })
+
+    const repeated = createRenewalFixture(
+      admission,
+      checkpoint,
+      '2026-07-30T00:05:00.000Z',
+      8,
+      6,
+      takeoverOwner,
+    )
+    expect(repeated.state).toMatchObject({
+      executionStateVersion: 3,
+      revision: checkpoint.revision + 1,
+      appliedOperationCount: 2,
+      maintenanceEvidenceRenewalCount: 2,
+      currentAuthority: repeated.currentAuthority,
+    })
+    expect(repeated.state.apply).toEqual(checkpoint.apply)
+
+    for (const state of [second, checkpoint, repeated.state]) {
+      expect(state.revision).toBe(
+        1 +
+          state.appliedOperationCount +
+          totalTraversalPageCount(state.apply) +
+          state.maintenanceEvidenceRenewalCount,
+      )
+      expect(
+        parseWorkspaceSearchMigrationExecutionState(
+          serializeWorkspaceSearchMigrationExecutionState(
+            state,
+          ),
+        ),
+      ).toEqual(state)
+    }
+  })
+
+  test('rejects stale, wrong-fence, and nonmonotonic authority renewal material', () => {
+    const admission = createAdmission()
+    const repeatedSelectionAt =
+      '2026-07-30T00:02:10.000Z'
+    expectExecutionStateFailure(() =>
+      createWorkspaceSearchMigrationRenewedExecutionState({
+        admission,
+        authority: createAuthority(repeatedSelectionAt),
+        receipt: structuredClone(
+          admission.runState.maintenanceEvidenceReceipt,
+        ),
+        currentAuthority: {
+          ...admission.binding.currentAuthority,
+          evaluatedAt: repeatedSelectionAt,
+        },
+      })
+    )
+    const applied = createFullyAppliedV1State(admission)
+    const stale = createRenewalMaterial(
+      '2026-07-30T00:03:00.000Z',
+      7,
+      5,
+      ownerId,
+    )
+    expectExecutionStateFailure(() =>
+      createWorkspaceSearchMigrationRenewedExecutionState({
+        admission,
+        predecessor: applied.state,
+        ...stale,
+      })
+    )
+
+    const takeoverOwner = 'invalid-takeover-owner'
+    const takeover = createRenewalMaterial(
+      '2026-07-30T00:04:00.000Z',
+      8,
+      5,
+      takeoverOwner,
+    )
+    const wrongFenceReceipt = {
+      ...takeover.receipt,
+      fenceToken: 7,
+    }
+    expectExecutionStateFailure(() =>
+      createWorkspaceSearchMigrationRenewedExecutionState({
+        admission,
+        predecessor: applied.state,
+        authority: takeover.authority,
+        receipt: wrongFenceReceipt,
+        currentAuthority: {
+          ...takeover.currentAuthority,
+          maintenanceEvidenceReceiptDigest:
+            createMigrationDigest(wrongFenceReceipt),
+        },
+      })
+    )
+
+    const sameFenceOwnerChange = createRenewalMaterial(
+      '2026-07-30T00:04:00.000Z',
+      7,
+      5,
+      'same-fence-foreign-owner',
+    )
+    expectExecutionStateFailure(() =>
+      createWorkspaceSearchMigrationRenewedExecutionState({
+        admission,
+        predecessor: applied.state,
+        ...sameFenceOwnerChange,
+      })
+    )
+
+    const samePointerDifferentReceipt = createRenewalMaterial(
+      '2026-07-30T00:04:00.000Z',
+      7,
+      4,
+      ownerId,
+    )
+    expectExecutionStateFailure(() =>
+      createWorkspaceSearchMigrationRenewedExecutionState({
+        admission,
+        predecessor: applied.state,
+        ...samePointerDifferentReceipt,
+      })
+    )
+
+    const valid = createRenewalMaterial(
+      '2026-07-30T00:04:00.000Z',
+      7,
+      5,
+      ownerId,
+    )
+    expectExecutionStateFailure(() =>
+      createWorkspaceSearchMigrationRenewedExecutionState({
+        admission,
+        predecessor: applied.state,
+        authority: valid.authority,
+        receipt: valid.receipt,
+        currentAuthority: {
+          ...valid.currentAuthority,
+          evaluatedAt: '2026-07-30T00:03:49.999Z',
+        },
+      })
+    )
+    expectExecutionStateFailure(() =>
+      createWorkspaceSearchMigrationRenewedExecutionState({
+        admission,
+        predecessor: applied.state,
+        authority: valid.authority,
+        receipt: valid.receipt,
+        currentAuthority: {
+          ...valid.currentAuthority,
+          evaluatedAt: '2026-07-30T00:04:00.001Z',
+        },
+      })
+    )
+    expectExecutionStateFailure(() =>
+      createWorkspaceSearchMigrationRenewedExecutionState({
+        admission,
+        predecessor: applied.state,
+        authority: valid.authority,
+        receipt: valid.receipt,
+        currentAuthority: {
+          ...valid.currentAuthority,
+          maintenanceEvidenceReceiptDigest:
+            digest('wrong-renewed-receipt'),
+        },
+      })
+    )
+  })
+
+  test('rejects self-redigested v3 count, receipt, revision, and authority tampering', () => {
+    const admission = createAdmission(0)
+    const renewed = createRenewalFixture(
+      admission,
+      undefined,
+      '2026-07-30T00:03:00.000Z',
+      7,
+      5,
+      ownerId,
+    )
+    const countDocument = parseJsonRecord(
+      serializeWorkspaceSearchMigrationExecutionState(
+        renewed.state,
+      ),
+    )
+    Reflect.set(
+      countDocument,
+      'maintenanceEvidenceRenewalCount',
+      renewed.state.maintenanceEvidenceRenewalCount + 1,
+    )
+    Reflect.set(
+      countDocument,
+      'executionStateDigest',
+      digestExecutionDocument(countDocument),
+    )
+    expectExecutionStateFailure(() =>
+      parseWorkspaceSearchMigrationExecutionState(
+        encodeCanonicalJson(countDocument),
+      )
+    )
+
+    const revisionDocument = parseJsonRecord(
+      serializeWorkspaceSearchMigrationExecutionState(
+        renewed.state,
+      ),
+    )
+    Reflect.set(
+      revisionDocument,
+      'revision',
+      renewed.state.revision + 1,
+    )
+    Reflect.set(
+      revisionDocument,
+      'executionStateDigest',
+      digestExecutionDocument(revisionDocument),
+    )
+    expectExecutionStateFailure(() =>
+      parseWorkspaceSearchMigrationExecutionState(
+        encodeCanonicalJson(revisionDocument),
+      )
+    )
+
+    const receiptDocument = parseJsonRecord(
+      serializeWorkspaceSearchMigrationExecutionState(
+        renewed.state,
+      ),
+    )
+    Reflect.set(
+      receiptDocument,
+      'maintenanceEvidenceDigest',
+      digest('tampered-renewed-evidence'),
+    )
+    Reflect.set(
+      receiptDocument,
+      'executionStateDigest',
+      digestExecutionDocument(receiptDocument),
+    )
+    expectExecutionStateFailure(() =>
+      parseWorkspaceSearchMigrationExecutionState(
+        encodeCanonicalJson(receiptDocument),
+      )
+    )
+
+    const authorityDocument = parseJsonRecord(
+      serializeWorkspaceSearchMigrationExecutionState(
+        renewed.state,
+      ),
+    )
+    const authority = readTestRecord(
+      authorityDocument.currentAuthority,
+    )
+    Reflect.set(
+      authority,
+      'maintenanceEvidenceReceiptDigest',
+      digest('tampered-current-authority-receipt'),
+    )
+    Reflect.set(
+      authorityDocument,
+      'executionStateDigest',
+      digestExecutionDocument(authorityDocument),
+    )
+    expectExecutionStateFailure(() =>
+      parseWorkspaceSearchMigrationExecutionState(
+        encodeCanonicalJson(authorityDocument),
+      )
+    )
+
+    const prematureAuthorityDocument = parseJsonRecord(
+      serializeWorkspaceSearchMigrationExecutionState(
+        renewed.state,
+      ),
+    )
+    const prematureAuthority = readTestRecord(
+      prematureAuthorityDocument.currentAuthority,
+    )
+    Reflect.set(
+      prematureAuthority,
+      'evaluatedAt',
+      '2026-07-30T00:02:49.999Z',
+    )
+    Reflect.set(
+      prematureAuthorityDocument,
+      'executionStateDigest',
+      digestExecutionDocument(prematureAuthorityDocument),
+    )
+    expectExecutionStateFailure(() =>
+      parseWorkspaceSearchMigrationExecutionState(
+        encodeCanonicalJson(prematureAuthorityDocument),
+      )
+    )
+
+    const expiredProgressDocument = parseJsonRecord(
+      serializeWorkspaceSearchMigrationExecutionState(
+        renewed.state,
+      ),
+    )
+    Reflect.set(
+      expiredProgressDocument,
+      'updatedAt',
+      renewed.receipt.validUntil,
+    )
+    Reflect.set(
+      expiredProgressDocument,
+      'executionStateDigest',
+      digestExecutionDocument(expiredProgressDocument),
+    )
+    expectExecutionStateFailure(() =>
+      parseWorkspaceSearchMigrationExecutionState(
+        encodeCanonicalJson(expiredProgressDocument),
+      )
+    )
+
+    const predecessorDocument = parseJsonRecord(
+      serializeWorkspaceSearchMigrationExecutionState(
+        renewed.state,
+      ),
+    )
+    const predecessorAuthority = readTestRecord(
+      predecessorDocument.currentAuthority,
+    )
+    Reflect.set(
+      predecessorAuthority,
+      'maintenanceEvidencePointerRevision',
+      admission.binding.currentAuthority
+        .maintenanceEvidencePointerRevision,
+    )
+    Reflect.set(
+      predecessorDocument,
+      'executionStateDigest',
+      digestExecutionDocument(predecessorDocument),
+    )
+    const parsed =
+      parseWorkspaceSearchMigrationExecutionState(
+        encodeCanonicalJson(predecessorDocument),
+      )
+    expectExecutionStateFailure(() =>
+      reconstructWorkspaceSearchMigrationRunState(
+        admission,
+        parsed,
+      )
+    )
+  })
+
   test('rejects premature, stale, schema-invalid, and non-advancing checkpoints', () => {
     const admission = createAdmission()
     expectExecutionStateFailure(() =>
@@ -886,6 +1449,21 @@ describe('Workspace Search migration mutable execution state', () => {
         ),
       )
     )
+
+    const hostileBytes = new Uint8Array(1)
+    Object.defineProperty(hostileBytes, 'byteLength', {
+      get() {
+        const failure =
+          new WorkspaceSearchMigrationExecutionStateError()
+        failure.message = 'raw-byte-length-secret'
+        throw failure
+      },
+    })
+    expectExecutionStateFailure(() =>
+      parseWorkspaceSearchMigrationOperationMarker(
+        hostileBytes,
+      )
+    )
   })
 })
 
@@ -1036,6 +1614,107 @@ WorkspaceSearchMaintenanceEvidenceReceipt {
 }
 
 /**
+ * Creates one internally consistent renewal authority, receipt, and binding.
+ *
+ * @param at - Trusted authority-adoption time.
+ * @param fenceToken - Exact active successor lease fence.
+ * @param pointerRevision - Exact successor maintenance pointer revision.
+ * @param authorityOwnerId - Exact active successor lease owner.
+ * @returns Correlated renewal transition material.
+ */
+function createRenewalMaterial(
+  at: string,
+  fenceToken: number,
+  pointerRevision: number,
+  authorityOwnerId: string,
+) {
+  const atMilliseconds = Date.parse(at)
+  if (!Number.isSafeInteger(atMilliseconds)) {
+    throw new Error('Expected a valid renewal authority time.')
+  }
+  const validatedAt = new Date(
+    atMilliseconds - 10_000,
+  ).toISOString()
+  const oldestObservationAt = new Date(
+    atMilliseconds - 60_000,
+  ).toISOString()
+  const receipt: WorkspaceSearchMaintenanceEvidenceReceipt = {
+    runId,
+    evidenceDigest: digest(
+      `renewed-maintenance-evidence:${fenceToken}:${pointerRevision}`,
+    ),
+    evidenceLocator:
+      `workspace-search/v1/maintenance/fence-${fenceToken}-pointer-${pointerRevision}.json`,
+    runtimeRevision: pointerRevision + 100,
+    fenceToken,
+    validatedAt,
+    oldestObservationAt,
+    validUntil: new Date(
+      Date.parse(oldestObservationAt) + 5 * 60 * 1_000 + 1,
+    ).toISOString(),
+  }
+  const currentAuthority:
+    WorkspaceSearchMigrationExecutionRunAuthorityBinding = {
+      ownerId: authorityOwnerId,
+      fenceToken,
+      maintenanceEvidencePointerRevision: pointerRevision,
+      maintenanceEvidenceReceiptDigest:
+        createMigrationDigest(receipt),
+      evaluatedAt: at,
+    }
+  return {
+    authority: createAuthority(
+      at,
+      fenceToken,
+      authorityOwnerId,
+    ),
+    receipt,
+    currentAuthority,
+  }
+}
+
+/**
+ * Creates and reconstructs one strict authority-renewal successor.
+ *
+ * @param admission - Immutable execution admission root.
+ * @param predecessor - Optional current mutable execution state.
+ * @param at - Trusted authority-adoption time.
+ * @param fenceToken - Exact active successor lease fence.
+ * @param pointerRevision - Exact successor maintenance pointer revision.
+ * @param authorityOwnerId - Exact active successor lease owner.
+ * @returns V3 envelope, reconstructed run state, and correlated input material.
+ */
+function createRenewalFixture(
+  admission: WorkspaceSearchMigrationExecutionRun,
+  predecessor: WorkspaceSearchMigrationExecutionState | undefined,
+  at: string,
+  fenceToken: number,
+  pointerRevision: number,
+  authorityOwnerId: string,
+) {
+  const material = createRenewalMaterial(
+    at,
+    fenceToken,
+    pointerRevision,
+    authorityOwnerId,
+  )
+  const state =
+    createWorkspaceSearchMigrationRenewedExecutionState({
+      admission,
+      ...(predecessor === undefined ? {} : { predecessor }),
+      ...material,
+    })
+  return {
+    ...material,
+    state,
+    runState: reconstructWorkspaceSearchMigrationRunState(
+      admission,
+      state,
+    ),
+  }
+}
+
+/**
  * Creates one strict mutating marker for the selected plan position.
  *
  * @param admission - Immutable admission owning the marker.
@@ -1043,6 +1722,7 @@ WorkspaceSearchMaintenanceEvidenceReceipt {
  * @param sequence - One-based mutating journal sequence.
  * @param committedAt - Canonical operation commit time.
  * @param retainUntil - Canonical immutable journal retention deadline.
+ * @param current - Current execution state whose authority binds the marker.
  * @returns Exact mutating operation marker.
  */
 function createMutationMarker(
@@ -1051,6 +1731,8 @@ function createMutationMarker(
   sequence: number,
   committedAt: string,
   retainUntil: string,
+  current: WorkspaceSearchMigrationRunState =
+    admission.runState,
 ): Extract<
   WorkspaceSearchOperationMarker,
   { readonly kind: 'workspace-search-operation-applied' }
@@ -1067,10 +1749,11 @@ function createMutationMarker(
     targetKeyDigest: digest(`target-key:${planSequence}`),
     beforeDigest: digest(`before:${planSequence}`),
     afterDigest: digest(`after:${planSequence}`),
-    fenceToken: 7,
+    fenceToken:
+      current.maintenanceEvidenceReceipt.fenceToken,
     maintenanceEvidenceReceiptDigest:
       createMigrationDigest(
-        admission.runState.maintenanceEvidenceReceipt,
+        current.maintenanceEvidenceReceipt,
       ),
     journal: {
       objectKey:
@@ -1091,12 +1774,15 @@ function createMutationMarker(
  * @param admission - Immutable admission owning the marker.
  * @param planSequence - One-based sealed-plan position.
  * @param recordedAt - Canonical no-op record time.
+ * @param current - Current execution state whose authority binds the marker.
  * @returns Exact no-op operation marker.
  */
 function createNoOpMarker(
   admission: WorkspaceSearchMigrationExecutionRun,
   planSequence: number,
   recordedAt: string,
+  current: WorkspaceSearchMigrationRunState =
+    admission.runState,
 ): Extract<
   WorkspaceSearchOperationMarker,
   {
@@ -1114,10 +1800,11 @@ function createNoOpMarker(
     planOperationDigest: digest(`plan-operation:${planSequence}`),
     targetKeyDigest: digest(`target-key:${planSequence}`),
     afterDigest: digest(`after:${planSequence}`),
-    fenceToken: 7,
+    fenceToken:
+      current.maintenanceEvidenceReceipt.fenceToken,
     maintenanceEvidenceReceiptDigest:
       createMigrationDigest(
-        admission.runState.maintenanceEvidenceReceipt,
+        current.maintenanceEvidenceReceipt,
       ),
     recordedAt,
   }
@@ -1231,17 +1918,21 @@ function operationTime(sequence: number): string {
  * Creates one active authority for a checkpoint transition.
  *
  * @param at - Trusted checkpoint commit time.
- * @returns Exact active fence-seven authority.
+ * @param fenceToken - Exact active lease fence.
+ * @param authorityOwnerId - Exact active lease owner.
+ * @returns Exact active authority.
  */
 function createAuthority(
   at: string,
+  fenceToken = 7,
+  authorityOwnerId = ownerId,
 ): WorkspaceSearchMigrationAuthority {
   const atMilliseconds = Date.parse(at)
   return {
     lease: {
       runId,
-      ownerId,
-      fenceToken: 7,
+      ownerId: authorityOwnerId,
+      fenceToken,
       heartbeatAt: new Date(
         atMilliseconds - 30_000,
       ).toISOString(),
@@ -1249,7 +1940,7 @@ function createAuthority(
         atMilliseconds + 30_000,
       ).toISOString(),
     },
-    ownerId,
+    ownerId: authorityOwnerId,
     at,
   }
 }
@@ -1651,13 +2342,15 @@ function digestExecutionDocument(
 }
 
 /**
- * Recomputes one valid v2 state self-digest from its serialized document.
+ * Recomputes one valid traversal state digest from its serialized document.
  *
  * @param state - Strict traversal-capable runtime state.
  * @returns Digest of every encoded field except the self-digest.
  */
 function digestSerializedExecutionState(
-  state: WorkspaceSearchMigrationExecutionStateV2,
+  state:
+    | WorkspaceSearchMigrationExecutionStateV2
+    | WorkspaceSearchMigrationExecutionStateV3,
 ): string {
   return digestExecutionDocument(
     parseJsonRecord(

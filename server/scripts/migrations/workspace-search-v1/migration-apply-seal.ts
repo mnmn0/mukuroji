@@ -29,7 +29,7 @@ import {
   parseWorkspaceSearchMigrationExecutionState,
   reconstructWorkspaceSearchMigrationRunState,
   serializeWorkspaceSearchMigrationExecutionState,
-  type WorkspaceSearchMigrationExecutionStateV2,
+  type WorkspaceSearchMigrationTraversalExecutionState,
 } from './migration-execution-state'
 import type {
   WorkspaceSearchMigrationImmutableArtifactReference,
@@ -120,6 +120,8 @@ export type WorkspaceSearchMigrationCompleteApplySeal = {
   readonly planOperationCount: number
   /** Exact terminal applying-state revision. */
   readonly predecessorRevision: number
+  /** Durable authority renewals included in a version-three predecessor. */
+  readonly maintenanceEvidenceRenewalCount?: number
   /** Self digest of the exact terminal mutable execution state. */
   readonly predecessorExecutionStateDigest: string
   /** Digest of the exact terminal reconstructed run state. */
@@ -234,7 +236,7 @@ export type CreateWorkspaceSearchMigrationCompleteApplySealInput = {
   /** Immutable revision-one execution admission. */
   readonly admission: WorkspaceSearchMigrationExecutionRun
   /** Exact terminal traversal-capable mutable state. */
-  readonly predecessor: WorkspaceSearchMigrationExecutionStateV2
+  readonly predecessor: WorkspaceSearchMigrationTraversalExecutionState
   /** Exact immutable version-two planning authority. */
   readonly sealedPlanningAuthority:
     WorkspaceSearchMigrationSealedPlanningAuthorityV2
@@ -249,7 +251,7 @@ export type CreateWorkspaceSearchMigrationAppliedRootInput = {
   /** Immutable revision-one execution admission. */
   readonly admission: WorkspaceSearchMigrationExecutionRun
   /** Exact terminal traversal-capable mutable state. */
-  readonly predecessor: WorkspaceSearchMigrationExecutionStateV2
+  readonly predecessor: WorkspaceSearchMigrationTraversalExecutionState
   /** Exact immutable version-two planning authority. */
   readonly sealedPlanningAuthority:
     WorkspaceSearchMigrationSealedPlanningAuthorityV2
@@ -271,7 +273,7 @@ export type RequireWorkspaceSearchMigrationAppliedRootBindingInput = {
   /** Immutable revision-one execution admission. */
   readonly admission: WorkspaceSearchMigrationExecutionRun
   /** Exact terminal traversal-capable mutable state. */
-  readonly predecessor: WorkspaceSearchMigrationExecutionStateV2
+  readonly predecessor: WorkspaceSearchMigrationTraversalExecutionState
   /** Exact immutable version-two planning authority. */
   readonly sealedPlanningAuthority:
     WorkspaceSearchMigrationSealedPlanningAuthorityV2
@@ -302,7 +304,7 @@ export function createWorkspaceSearchMigrationCompleteApplySeal(
       'sealedPlanningAuthority',
     ])
     const admission = detachAdmission(readOwn(record, 'admission'))
-    const predecessor = detachV2ExecutionState(
+    const predecessor = detachTraversalExecutionState(
       readOwn(record, 'predecessor'),
     )
     const sealedPlanningAuthority = detachSealedPlanningAuthority(
@@ -343,6 +345,12 @@ export function createWorkspaceSearchMigrationCompleteApplySeal(
         sealedPlanningAuthority.orphanOperationCount,
       planOperationCount: state.planOperationCount,
       predecessorRevision: predecessor.revision,
+      ...(predecessor.executionStateVersion === 3
+        ? {
+            maintenanceEvidenceRenewalCount:
+              predecessor.maintenanceEvidenceRenewalCount,
+          }
+        : {}),
       predecessorExecutionStateDigest:
         predecessor.executionStateDigest,
       predecessorRunStateDigest: predecessor.runStateDigest,
@@ -469,7 +477,7 @@ export function createWorkspaceSearchMigrationAppliedRoot(
       'sealedPlanningAuthority',
     ])
     const admission = detachAdmission(readOwn(record, 'admission'))
-    const predecessor = detachV2ExecutionState(
+    const predecessor = detachTraversalExecutionState(
       readOwn(record, 'predecessor'),
     )
     const sealedPlanningAuthority = detachSealedPlanningAuthority(
@@ -502,6 +510,10 @@ export function createWorkspaceSearchMigrationAppliedRoot(
       predecessor.minimumJournalRetainUntil,
       committedAt,
     )
+    const predecessorAuthority =
+      predecessor.executionStateVersion === 3
+        ? predecessor.currentAuthority
+        : admission.binding.currentAuthority
     if (
       currentAuthority.configurationHash !==
         admission.configurationHash ||
@@ -509,15 +521,13 @@ export function createWorkspaceSearchMigrationAppliedRoot(
         admission.binding.tableIds['migration-state'] ||
       currentAuthority.lease.runId !== admission.runId ||
       currentAuthority.lease.ownerId !==
-        admission.binding.currentAuthority.ownerId ||
+        predecessorAuthority.ownerId ||
       currentAuthority.lease.fenceToken !==
-        admission.binding.currentAuthority.fenceToken ||
+        predecessorAuthority.fenceToken ||
       currentAuthority.maintenanceEvidencePointerRevision !==
-        admission.binding.currentAuthority
-          .maintenanceEvidencePointerRevision ||
+        predecessorAuthority.maintenanceEvidencePointerRevision ||
       currentAuthority.maintenanceEvidenceReceiptDigest !==
-        admission.binding.currentAuthority
-          .maintenanceEvidenceReceiptDigest ||
+        predecessorAuthority.maintenanceEvidenceReceiptDigest ||
       currentAuthority.maintenanceEvidenceReceiptDigest !==
         createMigrationDigest(
           predecessorState.maintenanceEvidenceReceipt,
@@ -648,7 +658,7 @@ export function requireWorkspaceSearchMigrationAppliedRootBinding(
       'sealedPlanningAuthority',
     ])
     const admission = detachAdmission(readOwn(record, 'admission'))
-    const predecessor = detachV2ExecutionState(
+    const predecessor = detachTraversalExecutionState(
       readOwn(record, 'predecessor'),
     )
     const sealedPlanningAuthority = detachSealedPlanningAuthority(
@@ -677,6 +687,10 @@ export function requireWorkspaceSearchMigrationAppliedRootBinding(
       predecessor.minimumJournalRetainUntil,
       root.committedAt,
     )
+    const predecessorAuthority =
+      predecessor.executionStateVersion === 3
+        ? predecessor.currentAuthority
+        : admission.binding.currentAuthority
     if (
       root.stateTableId !==
         admission.binding.tableIds['migration-state'] ||
@@ -693,15 +707,13 @@ export function requireWorkspaceSearchMigrationAppliedRootBinding(
       serializeCanonicalJson(root.sealReference) !==
         serializeCanonicalJson(sealReference) ||
       root.authority.ownerId !==
-        admission.binding.currentAuthority.ownerId ||
+        predecessorAuthority.ownerId ||
       root.authority.fenceToken !==
-        admission.binding.currentAuthority.fenceToken ||
+        predecessorAuthority.fenceToken ||
       root.authority.maintenanceEvidencePointerRevision !==
-        admission.binding.currentAuthority
-          .maintenanceEvidencePointerRevision ||
+        predecessorAuthority.maintenanceEvidencePointerRevision ||
       root.authority.maintenanceEvidenceReceiptDigest !==
-        admission.binding.currentAuthority
-          .maintenanceEvidenceReceiptDigest ||
+        predecessorAuthority.maintenanceEvidenceReceiptDigest ||
       root.authority.maintenanceEvidenceReceiptDigest !==
         createMigrationDigest(
           predecessorState.maintenanceEvidenceReceipt,
@@ -741,6 +753,10 @@ function readCompleteApplySeal(
     record,
     'minimumJournalRetainUntil',
   )
+  const hasRenewalCount = hasOwnDataProperty(
+    record,
+    'maintenanceEvidenceRenewalCount',
+  )
   requireExactKeys(record, [
     'apply',
     'applyMarkerAggregateDigest',
@@ -754,6 +770,9 @@ function readCompleteApplySeal(
     'journalSequence',
     'kind',
     'markerCount',
+    ...(hasRenewalCount
+      ? ['maintenanceEvidenceRenewalCount']
+      : []),
     'migrationId',
     'migrationVersion',
     'orphanOperationCount',
@@ -814,6 +833,11 @@ function readCompleteApplySeal(
   const predecessorRevision = readPositiveSafeInteger(
     readOwn(record, 'predecessorRevision'),
   )
+  const maintenanceEvidenceRenewalCount = hasRenewalCount
+    ? readPositiveSafeInteger(
+        readOwn(record, 'maintenanceEvidenceRenewalCount'),
+      )
+    : 0
   const predecessorExecutionStateDigest = readDigest(
     readOwn(record, 'predecessorExecutionStateDigest'),
   )
@@ -860,7 +884,10 @@ function readCompleteApplySeal(
     (journalSequence === 0) !==
       (minimumJournalRetainUntil === undefined) ||
     createMigrationDigest(apply) !== applyTraversalDigest ||
-    calculateTerminalRevision(markerCount, apply) !==
+    addSafeCounts(
+      calculateTerminalRevision(markerCount, apply),
+      maintenanceEvidenceRenewalCount,
+    ) !==
       predecessorRevision
   ) {
     return failApplySeal()
@@ -883,6 +910,9 @@ function readCompleteApplySeal(
     orphanOperationCount,
     planOperationCount,
     predecessorRevision,
+    ...(hasRenewalCount
+      ? { maintenanceEvidenceRenewalCount }
+      : {}),
     predecessorExecutionStateDigest,
     predecessorRunStateDigest,
     markerCount,
@@ -1095,7 +1125,7 @@ function readAppliedRootAuthority(
  */
 function requireTerminalSealBinding(
   admission: WorkspaceSearchMigrationExecutionRun,
-  predecessor: WorkspaceSearchMigrationExecutionStateV2,
+  predecessor: WorkspaceSearchMigrationTraversalExecutionState,
   sealedPlanningAuthority:
     WorkspaceSearchMigrationSealedPlanningAuthorityV2,
 ): WorkspaceSearchMigrationRunState {
@@ -1132,7 +1162,10 @@ function requireTerminalSealBinding(
   }
   const targetCheckpoint = terminalTraversal.target
   if (
-    predecessor.executionStateVersion !== 2 ||
+    (
+      predecessor.executionStateVersion !== 2 &&
+      predecessor.executionStateVersion !== 3
+    ) ||
     predecessor.status !== 'applying' ||
     predecessor.executionRunDigest !== admission.executionRunDigest ||
     admission.binding.sealedPlanningAuthorityDigest !==
@@ -1161,9 +1194,14 @@ function requireTerminalSealBinding(
     targetCheckpoint.aggregate.deleted !== 0 ||
     state.applyMarkerDigestState.count !==
       state.appliedOperationCount ||
-    calculateTerminalRevision(
-      state.appliedOperationCount,
-      terminalTraversal,
+    addSafeCounts(
+      calculateTerminalRevision(
+        state.appliedOperationCount,
+        terminalTraversal,
+      ),
+      predecessor.executionStateVersion === 3
+        ? predecessor.maintenanceEvidenceRenewalCount
+        : 0,
     ) !== state.revision ||
     state.revision !== predecessor.revision
   ) {
@@ -1183,7 +1221,7 @@ function requireTerminalSealBinding(
 function requireSealMatchesTerminal(
   seal: WorkspaceSearchMigrationCompleteApplySeal,
   admission: WorkspaceSearchMigrationExecutionRun,
-  predecessor: WorkspaceSearchMigrationExecutionStateV2,
+  predecessor: WorkspaceSearchMigrationTraversalExecutionState,
   sealedPlanningAuthority:
     WorkspaceSearchMigrationSealedPlanningAuthorityV2,
 ): void {
@@ -1312,28 +1350,31 @@ function isExecutionRun(
  * @param value - Candidate mutable execution state.
  * @returns Detached strict version-two mutable state.
  */
-function detachV2ExecutionState(
+function detachTraversalExecutionState(
   value: unknown,
-): WorkspaceSearchMigrationExecutionStateV2 {
-  if (!isV2ExecutionState(value)) return failApplySeal()
+): WorkspaceSearchMigrationTraversalExecutionState {
+  if (!isTraversalExecutionState(value)) return failApplySeal()
   const detached = parseWorkspaceSearchMigrationExecutionState(
     serializeWorkspaceSearchMigrationExecutionState(value),
   )
-  if (detached.executionStateVersion !== 2) {
+  if (
+    detached.executionStateVersion !== 2 &&
+    detached.executionStateVersion !== 3
+  ) {
     return failApplySeal()
   }
   return detached
 }
 
 /**
- * Minimally narrows a candidate version-two state for strict serialization.
+ * Minimally narrows a candidate traversal state for strict serialization.
  *
  * @param value - Candidate execution state.
  * @returns Whether the strict execution-state codec may consume it.
  */
-function isV2ExecutionState(
+function isTraversalExecutionState(
   value: unknown,
-): value is WorkspaceSearchMigrationExecutionStateV2 {
+): value is WorkspaceSearchMigrationTraversalExecutionState {
   return isOrdinaryObject(value)
 }
 
