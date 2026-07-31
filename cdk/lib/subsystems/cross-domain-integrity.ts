@@ -69,6 +69,11 @@ export function buildCrossDomainIntegrityAccess(
         }),
         new iam.PolicyStatement({
           actions: ['s3:ListBucket'],
+          conditions: {
+            StringLike: {
+              's3:prefix': ['workspaces/*'],
+            },
+          },
           resources: [input.fileBucket.bucketArn],
         }),
         new iam.PolicyStatement({

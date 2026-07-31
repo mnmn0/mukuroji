@@ -61,6 +61,11 @@ test('cross-domain integrity access is unattached, bounded, and read-only', () =
     },
     {
       Action: 's3:ListBucket',
+      Condition: {
+        StringLike: {
+          's3:prefix': ['workspaces/*'],
+        },
+      },
       Effect: 'Allow',
       Resource: {
         'Fn::GetAtt': [fileBucketLogicalId, 'Arn'],

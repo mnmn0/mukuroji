@@ -56,6 +56,11 @@ import type {
 const AUDIT_TENANT_MISMATCH_SENTINEL = 'audit-tenant-boundary-mismatch'
 const AUDIT_TENANT_MISMATCH_ALTERNATE_SENTINEL = 'audit-tenant-boundary-mismatch-alternate'
 const UNVERIFIED_OBJECT_VERSION_PREFIX = 'unverified:'
+/** Exact writer-owned lifecycle tuples whose target may no longer be current. */
+const historicalAuditTargetLifecycles = Object.freeze([
+  { eventType: 'file.deleted', action: 'deleted', targetType: 'file' },
+  { eventType: 'work-item.deleted', action: 'deleted', targetType: 'work-item' },
+])
 
 const tableScanOrder: readonly CrossDomainIntegrityTableTarget[] = [
   'work-items',
@@ -1028,12 +1033,23 @@ function auditEventSourceIsHistorical(event: AuditEventV1): boolean {
 
 /** Classifies lifecycle semantics that make only an event target historical. */
 function auditEventTargetIsHistorical(event: AuditEventV1): boolean {
-  const lifecycle = `${event.eventType}.${event.action}`.toLowerCase()
-  return ['archiv', 'deactivat', 'delet', 'expir', 'remov', 'revok']
-    .some((marker) => lifecycle.includes(marker))
+  const lifecycle = historicalAuditTargetLifecycles.find(
+    (lifecycle) =>
+      lifecycle.eventType === event.eventType &&
+      lifecycle.action === event.action &&
+      lifecycle.targetType === event.target.type,
+  )
+  if (!lifecycle) return false
+  if (event.target.type === 'work-item') {
+    return event.entity.type === 'work-item' &&
+      event.entity.id === event.target.id
+  }
+  return event.target.type === 'file' &&
+    (event.entity.type === 'work-item' || event.entity.type === 'project') &&
+    readAuditMetadataText(event.metadata, 'fileId') === event.target.id
 }
 
-/** Strictly normalizes retained Workspace member rows and recognizes invitations. */
+/** Strictly normalizes one File Proofing row and observes its exact object versions. */
 async function normalizeFileRow(
   input: FileRowNormalizationInput,
 ): Promise<CrossDomainIntegrityItem[]> {

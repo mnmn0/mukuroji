@@ -41,9 +41,11 @@ Version one checks:
 - each canonical Audit Event keeps all duplicated workspace, entity, target,
   and index keys in the same tenant boundary;
 - current-resource Audit Events resolve when their event semantics require a
-  current row, while delete, archive, backfill, and other historical events
-  are not treated as corruption only because their resource is no longer
-  live; canonical Workspace member Audit pseudonyms are joined to Workspace
+  current row, while exact Work Item deletion, TTL-expired File deletion, and
+  backfill or migration snapshots are not treated as corruption only because
+  their resource is no longer live; deactivated Workspace members and archived
+  Teams or Projects remain current joins because their canonical rows are
+  retained; canonical Workspace member Audit pseudonyms are joined to Workspace
   Access with the existing environment-specific Audit pseudonym key;
 - each File Proofing row is internally canonical and remains in the same
   Workspace, Team, Work Item, or Project boundary as its parent scope;
@@ -131,15 +133,22 @@ protected source table or bucket.
 ## Operator boundary
 
 `CrossDomainIntegrityOperatorPolicyArn` is an unattached stack output. An
-environment owner may attach it temporarily to a reviewed operator principal.
-It allows only `dynamodb:Scan` on the six deployed application tables and the
-exact-version S3 permissions needed for HEAD, object attributes, and tags
-under `workspaces/*`. A `s3:ListBucket` grant is restricted to the exact file
-bucket and is present only so S3 can distinguish a missing key from denied
-access; the checker does not issue list requests or read object bodies. The
-policy grants no restore, write, delete, cleanup, application traffic, or
-runtime role permissions. Restore automation must create an equivalently
-narrow temporary policy for its separately named isolated resources.
+environment owner must attach it only temporarily to a reviewed operator
+principal used through a short-lived session, audit that attachment and
+invocation, and remove the attachment immediately after the bounded check. It
+allows only `dynamodb:Scan` on the six deployed application tables and the
+exact-version S3 permissions needed for HEAD, object attributes, and tags under
+`workspaces/*`. S3 authorizes an exact-version HEAD request with
+`s3:GetObjectVersion`; that IAM action also technically permits downloading
+the body of the named object version. The checker issues HEAD, attributes,
+and tag requests only and never downloads object bodies, so the short-lived,
+reviewed, and audited operator boundary is mandatory. A `s3:ListBucket` grant
+is restricted to the exact file bucket and the `workspaces/*` prefix and is
+present only so S3 can distinguish a missing key from denied access; the
+checker does not issue list requests. The policy grants no restore, write,
+delete, cleanup, application traffic, or runtime role permissions. Restore
+automation must create an equivalently narrow temporary policy for its
+separately named isolated resources.
 
 The operator must select explicit account, Region, named credential profile,
 dataset role, shared `checkedAt`, all six physical table names, the file

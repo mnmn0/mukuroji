@@ -359,7 +359,7 @@ function createWorkspaceAccessRows(): readonly object[] {
  */
 function createWorkItemAuditRow(
   occurredAt: string,
-  action: 'created' | 'deleted' | 'updated',
+  action: 'created' | 'deleted' | 'deleted-label' | 'updated',
   workItemId = WORK_ITEM_ID,
   workspaceId = WORKSPACE_ID,
 ): object {
@@ -414,6 +414,63 @@ function createCommentTargetAuditRow(
     },
     action,
     metadata: { teamId: TEAM_ID, issueId: WORK_ITEM_ID },
+  })
+}
+
+/**
+ * Creates the production File deletion Audit shape whose metadata tombstone may later expire.
+ *
+ * @returns Stored current-schema File deletion event.
+ */
+function createFileDeletedAuditRow(): object {
+  const context = createMutationAuditContext({
+    workspaceId: WORKSPACE_ID,
+    actor: { id: 'system:bridge-test', kind: 'system' },
+    idempotencyKey: 'bridge-file-deleted',
+    occurredAt: '2026-08-01T00:07:30.000Z',
+    request: { method: 'CHECK', path: '/internal/data-integrity' },
+    source: { kind: 'system' },
+  })
+  return createAuditEvent({
+    context,
+    expiresAt: 2_000_000_000,
+    eventType: 'file.deleted',
+    entity: {
+      type: 'work-item',
+      id: `team/${TEAM_ID}/issue/${WORK_ITEM_ID}`,
+    },
+    target: { type: 'file', id: FILE_ID },
+    action: 'deleted',
+    metadata: {
+      teamId: TEAM_ID,
+      issueId: WORK_ITEM_ID,
+      fileId: FILE_ID,
+      versionId: VERSION_ID,
+    },
+  })
+}
+
+/**
+ * Creates the production Project archive Audit shape whose directory row remains retained.
+ *
+ * @returns Stored current-schema Project archive event.
+ */
+function createProjectArchivedAuditRow(): object {
+  const context = createMutationAuditContext({
+    workspaceId: WORKSPACE_ID,
+    actor: { id: 'system:bridge-test', kind: 'system' },
+    idempotencyKey: 'bridge-project-archived',
+    occurredAt: '2026-08-01T00:07:45.000Z',
+    request: { method: 'CHECK', path: '/internal/data-integrity' },
+    source: { kind: 'system' },
+  })
+  return createAuditEvent({
+    context,
+    expiresAt: 2_000_000_000,
+    eventType: 'project.archived',
+    entity: { type: 'project', id: PROJECT_ID },
+    action: 'archived',
+    metadata: { kind: 'project', projectId: PROJECT_ID, teamId: TEAM_ID },
   })
 }
 
@@ -890,17 +947,17 @@ describe('cross-domain integrity AWS composition bridge', () => {
     expect(JSON.stringify(result)).not.toContain(missingMemberKey)
   })
 
-  test('keeps a missing member historical when a later deactivation event exists', async () => {
-    const removedMemberKey = 'removed-member-private-canary@example.test'
+  test('reports a retained Workspace member missing after deactivation', async () => {
+    const deactivatedMemberKey = 'deactivated-member-private-canary@example.test'
     const reader = new FixtureAwsReader(createPagesFromNativeRows(createHealthyNativeRows({
       auditRows: [
         createWorkspaceMemberAuditRow(
           '2026-08-01T00:08:00.000Z',
-          removedMemberKey,
+          deactivatedMemberKey,
         ),
         createWorkspaceMemberAuditRow(
           '2026-08-01T00:09:00.000Z',
-          removedMemberKey,
+          deactivatedMemberKey,
           'deactivated',
         ),
       ],
@@ -908,8 +965,23 @@ describe('cross-domain integrity AWS composition bridge', () => {
 
     const result = await runBridge(reader)
 
-    expect(result.failureCodes).not.toContain('AUDIT_RESOURCE_MISSING')
-    expect(JSON.stringify(result)).not.toContain(removedMemberKey)
+    expect(result.failureCodes).toContain('AUDIT_RESOURCE_MISSING')
+    expect(JSON.stringify(result)).not.toContain(deactivatedMemberKey)
+  })
+
+  test('reports a retained Project missing after archive', async () => {
+    const rows = createHealthyNativeRows({
+      auditRows: [createProjectArchivedAuditRow()],
+      fileRows: [],
+    })
+    rows['work-items'] = []
+    rows['project-directory'] = []
+    const reader = new FixtureAwsReader(createPagesFromNativeRows(rows))
+
+    const result = await runBridge(reader)
+
+    expect(result.status).toBe('fail')
+    expect(result.failureCodes).toContain('AUDIT_RESOURCE_MISSING')
   })
 
   test('rejects malformed relevant rows without reflecting raw canaries', async () => {
@@ -1214,6 +1286,18 @@ describe('cross-domain integrity AWS composition bridge', () => {
     expect(JSON.stringify(result)).not.toContain(historicalWorkItemId)
   })
 
+  test('accepts a deleted File event after its TTL-managed metadata is gone', async () => {
+    const reader = new FixtureAwsReader(createPagesFromNativeRows(createHealthyNativeRows({
+      auditRows: [createFileDeletedAuditRow()],
+      fileRows: [],
+    })))
+
+    const result = await runBridge(reader)
+
+    expect(result.status).toBe('pass')
+    expect(result.failureCodes).not.toContain('AUDIT_RESOURCE_MISSING')
+  })
+
   test('treats every resource candidate from backfill or migration as historical', async () => {
     for (const source of HISTORICAL_AUDIT_SOURCES) {
       const rows = createHealthyNativeRows({
@@ -1233,6 +1317,24 @@ describe('cross-domain integrity AWS composition bridge', () => {
   test('still requires a current entity when only an Audit target was deleted', async () => {
     const rows = createHealthyNativeRows({
       auditRows: [createCommentTargetAuditRow('system', 'deleted')],
+      fileRows: [],
+    })
+    rows['work-items'] = []
+    const reader = new FixtureAwsReader(createPagesFromNativeRows(rows))
+
+    const result = await runBridge(reader)
+
+    expect(result.status).toBe('fail')
+    expect(result.failureCodes).toContain('AUDIT_RESOURCE_MISSING')
+  })
+
+  test('does not treat lifecycle-marker substrings as resource deletion', async () => {
+    const rows = createHealthyNativeRows({
+      auditRows: [createWorkItemAuditRow(
+        '2026-08-01T00:08:00.000Z',
+        'deleted-label',
+        'missing-work-item-private-canary',
+      )],
       fileRows: [],
     })
     rows['work-items'] = []

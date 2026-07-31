@@ -559,6 +559,8 @@ type CrossDomainIndexes = {
   relations: Set<string>
   /** All relation projection rows. */
   relationItems: CrossDomainRelation[]
+  /** Sorted relation projection values by exact source Work Item identity. */
+  relationProjectionsBySource: Map<string, string[]>
   /** All audit references. */
   auditReferences: CrossDomainAuditReference[]
   /** File metadata by exact object identity. */
@@ -1378,6 +1380,7 @@ function buildIndexes(
     projectsById: new Map(),
     relations: new Set(),
     relationItems: [],
+    relationProjectionsBySource: new Map(),
     auditReferences: [],
     fileMetadata: new Map(),
     fileMetadataItems: [],
@@ -1389,6 +1392,9 @@ function buildIndexes(
     compareUtf8Ordinal(canonicalizeItem(left), canonicalizeItem(right))
   )
   for (const item of sortedItems) indexItem(indexes, item, failures)
+  for (const projections of indexes.relationProjectionsBySource.values()) {
+    projections.sort(compareUtf8Ordinal)
+  }
   return indexes
 }
 
@@ -1435,6 +1441,11 @@ function indexItem(
     if (indexes.relations.has(key)) failures.add('DUPLICATE_RECORD')
     indexes.relations.add(key)
     indexes.relationItems.push(item)
+    appendGrouped(
+      indexes.relationProjectionsBySource,
+      workItemKey(item.workspaceId, item.teamId, item.sourceWorkItemId),
+      `${item.relationType}:${item.targetWorkItemId}`,
+    )
     return
   }
   if (item.kind === 'audit-reference') {
@@ -1501,14 +1512,9 @@ function checkWorkItems(
       )
     }
     checkWorkItemOwnership(indexes, item, failures)
-    const expectedRelations = indexes.relationItems
-      .filter((relation) =>
-        relation.workspaceId === item.workspaceId &&
-        relation.teamId === item.teamId &&
-        relation.sourceWorkItemId === item.workItemId
-      )
-      .map((relation) => `${relation.relationType}:${relation.targetWorkItemId}`)
-      .sort(compareUtf8Ordinal)
+    const expectedRelations = indexes.relationProjectionsBySource.get(
+      workItemKey(item.workspaceId, item.teamId, item.workItemId),
+    ) ?? []
     const projectedRelations = [...item.relationIds].sort(compareUtf8Ordinal)
     if (!sameStrings(expectedRelations, projectedRelations)) {
       failures.add('WORK_ITEM_RELATION_PROJECTION_MISMATCH')

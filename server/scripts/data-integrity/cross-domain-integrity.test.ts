@@ -709,7 +709,7 @@ test('includes external file evidence in the configured total item bound', async
 })
 
 test('rejects invalid bounds, digest keys, and row-level external evidence shapes', async () => {
-  expect(runCrossDomainIntegrityCheck({
+  await expect(runCrossDomainIntegrityCheck({
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
     role: 'source',
     checkedAt,
@@ -720,7 +720,7 @@ test('rejects invalid bounds, digest keys, and row-level external evidence shape
     limits: { pageSize: 1, maxPages: 1, maxItems: 1 },
     reader: createPageReader([[]]),
   })).rejects.toThrow('exactly 32 bytes')
-  expect(runCrossDomainIntegrityCheck({
+  await expect(runCrossDomainIntegrityCheck({
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
     role: 'source',
     checkedAt,
@@ -731,7 +731,7 @@ test('rejects invalid bounds, digest keys, and row-level external evidence shape
     limits: { pageSize: 0, maxPages: 1, maxItems: 1 },
     reader: createPageReader([[]]),
   })).rejects.toThrow('pageSize')
-  expect(runCrossDomainIntegrityCheck({
+  await expect(runCrossDomainIntegrityCheck({
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
     role: 'source',
     checkedAt,
@@ -742,7 +742,7 @@ test('rejects invalid bounds, digest keys, and row-level external evidence shape
     limits: { pageSize: 1, maxPages: 1, maxItems: 2 },
     reader: createPageReader([[]]),
   })).rejects.toThrow('page capacity')
-  expect(runCrossDomainIntegrityCheck({
+  await expect(runCrossDomainIntegrityCheck({
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
     role: 'source',
     checkedAt,
@@ -753,7 +753,7 @@ test('rejects invalid bounds, digest keys, and row-level external evidence shape
     limits: { pageSize: 1, maxPages: 1, maxItems: 1 },
     reader: createPageReader([[]]),
   })).rejects.toThrow('resource binding digest')
-  expect(runCrossDomainIntegrityCheck({
+  await expect(runCrossDomainIntegrityCheck({
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
     role: 'source',
     checkedAt: '2026-08-01T00:00:00Z',
@@ -764,7 +764,7 @@ test('rejects invalid bounds, digest keys, and row-level external evidence shape
     limits: { pageSize: 1, maxPages: 1, maxItems: 1 },
     reader: createPageReader([[]]),
   })).rejects.toThrow('canonical UTC timestamp')
-  expect(runCrossDomainIntegrityCheck({
+  await expect(runCrossDomainIntegrityCheck({
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
     role: 'source',
     checkedAt,
@@ -775,7 +775,7 @@ test('rejects invalid bounds, digest keys, and row-level external evidence shape
     limits: { pageSize: 1, maxPages: 1, maxItems: 1 },
     reader: createPageReader([[]]),
   })).rejects.toThrow('resource identity digest')
-  expect(runCrossDomainIntegrityCheck({
+  await expect(runCrossDomainIntegrityCheck({
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
     role: 'source',
     checkedAt,
