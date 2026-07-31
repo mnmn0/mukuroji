@@ -558,6 +558,50 @@ describe('Workspace Search migration execution-boundary AWS adapter', () => {
     }
   })
 
+  test('rejects a released fence whose historical boundary is missing', async () => {
+    const fixture = createExecutionBoundaryAwsFixture()
+    const closedFence =
+      createWorkspaceSearchWriterFenceClosedSuccessor(
+        fixture.openFence,
+        createCloseFenceAuthority(fixture.closeAuthority),
+        new Date(closedAt),
+      )
+    const releasedFence =
+      createWorkspaceSearchWriterFenceReleasedOpenSuccessor(
+        closedFence,
+        {
+          releaseVersion: 1,
+          configurationHash: fixture.configurationHash,
+          runId,
+          executionBoundaryDigest:
+            digest('missing-execution-boundary'),
+          sealedPlanningAuthorityDigest:
+            digest('released-sealed-planning-authority'),
+          executionRunDigest: digest('released-execution-run'),
+          terminal: {
+            kind: 'verified',
+            persistenceVersion: 1,
+            rootDigest: digest('released-verification-root'),
+          },
+        },
+        new Date(releasedAt),
+      )
+    const transport = new RecordingExecutionBoundaryTransport(
+      releasedFence,
+    )
+    const port = createExecutionBoundaryPort(
+      fixture,
+      transport,
+      createThrowingClock(),
+    )
+
+    const failure = await captureMigrationFailure(() =>
+      port.read(runId)
+    )
+    expect(failure.code).toBe('INVALID_STATE')
+    expect(transport.reads).toHaveLength(9)
+  })
+
   test('stabilizes a boundary revision across concurrent planning admission', async () => {
     const fixture = createExecutionBoundaryAwsFixture()
     const transport = new RecordingExecutionBoundaryTransport(

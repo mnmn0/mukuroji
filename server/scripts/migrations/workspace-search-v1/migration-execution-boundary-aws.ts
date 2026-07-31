@@ -1777,9 +1777,10 @@ function readExecutionBoundaryAttributeDataValue(
 /**
  * Determines whether a strongly read boundary/fence pair can coexist.
  *
- * Absence is accepted only with a missing or open fence. Every present
- * boundary must either reconstruct exactly from the same closed fence row or
- * match the complete historical identity retained by its released successor.
+ * Absence is accepted only with a missing or initial open fence. Every
+ * present boundary must either reconstruct exactly from the same closed fence
+ * row or match the complete historical identity retained by its released
+ * successor.
  *
  * @param pair - Candidate strongly read pair.
  * @returns Whether the pair is internally complete and cross-bound.
@@ -1789,7 +1790,10 @@ function executionBoundaryPairIsInternallyConsistent(
 ): boolean {
   if (pair.boundary === undefined) {
     return pair.writerFence.status === 'missing' ||
-      pair.writerFence.record.mode === 'open'
+      (
+        pair.writerFence.record.mode === 'open' &&
+        pair.writerFence.record.version === 1
+      )
   }
   if (
     pair.writerFence.status !== 'present'
