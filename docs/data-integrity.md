@@ -78,12 +78,13 @@ Version one does not:
   version, DynamoDB cursor, or per-row digest values;
 - repair, delete, quarantine, or otherwise mutate data.
 
-Restore automation must supply isolated resources and combine this result with
-its restore-point, RPO/RTO, descriptor, S3-copy, and cleanup evidence.
+The [isolated restore drill](./restore-drill.md) supplies those resources and
+combines this result with its restore-point, point-in-time export baseline,
+RPO/RTO, descriptor, S3-copy, and cleanup evidence.
 Migration rehearsal must supply its own writer-fence and checkpoint provenance.
 Neither caller may convert an incomplete or failed checker result into a
-successful terminal receipt. This issue provides the callable contract; wiring
-it into each restore, migration, or deployment workflow remains caller-owned.
+successful terminal receipt. Wiring the contract into migration or deployment
+workflows remains caller-owned.
 
 ## Bounded execution and evidence
 
@@ -102,6 +103,32 @@ Every DynamoDB page is strongly consistent, every `LastEvaluatedKey` is
 consumed exactly once, and reaching a ceiling with more data remaining is a
 failure. S3 reads are pinned to the object key and immutable `VersionId`
 obtained from strictly parsed File Proofing metadata.
+
+The automated restore caller uses the same strict row normalizers and semantic
+invariants through a durable page adapter. Each logical Scan step requests at
+most 25 raw rows and, before returning, converts process-local identifiers into
+domain-separated HMAC facts, uniqueness claims, Audit lifecycle candidates,
+and deferred requirements. A response-loss retry may replay the same claims but
+cannot silently replace a different origin. Exact `LastEvaluatedKey` values may
+exist only as restricted operational resume state; raw rows and identifiers are
+not persisted as semantic claims or copied into immutable evidence. The run
+pins the exact Secrets Manager version of the Audit pseudonym key before its
+first semantic page. Across all six isolated tables it accepts at most 10,000
+raw pages, 1,000,000 retained opaque units, and 150,000 claims from one
+normalized page. That claim ceiling covers the physical 1 MiB DynamoDB page:
+at least 95 item bytes per canonical pending File version allows no more than
+11,037 versions, each expands to at most 13 claims, and a page can add only four
+stable external File failures. Requirement and Audit lifecycle reduction handle
+at most 100 durable
+records per logical step, and the latter chooses the latest current candidate
+independently of Scan page order. The restore runtime may batch up to 50 eligible
+logical verification steps in one Lambda invocation, subject to an eight-minute
+elapsed-time guard. Once every page is exhausted, these bounded reducers produce
+the secret-free cross-domain status. Any page, item, claim-capacity, execution
+budget, or recovery-objective breach is a failed restore verification, never a
+partial success. Generic Lambda, AWS service, KMS, or durable-state failures use
+the separate non-integrity `WORKFLOW_TASK_FAILED` evidence code; they are not
+reported as an observed cross-domain or File-copy mismatch.
 
 Evidence contains only:
 
@@ -146,11 +173,15 @@ reviewed, and audited operator boundary is mandatory. A `s3:ListBucket` grant
 is restricted to the exact file bucket and the `workspaces/*` prefix and is
 present only so S3 can distinguish a missing key from denied access; the
 checker does not issue list requests. The policy grants no restore, write,
-delete, cleanup, application traffic, or runtime role permissions. Restore
-automation must create an equivalently narrow temporary policy for its
-separately named isolated resources.
+delete, cleanup, application traffic, or runtime role permissions. The
+automated restore does not attach this operator policy. Its dedicated runner
+role is separately scoped to the six source-table PITR/export operations,
+exact-version source File reads, isolated recovery-table prefix, and scratch
+bucket required for copy/range verification; it has no source-table/object
+write or delete permission and is not an application runtime role.
 
-The operator must select explicit account, Region, named credential profile,
+For a standalone check, the operator must select an explicit account, Region,
+named credential profile,
 dataset role, shared `checkedAt`, all six physical table names, the file
 bucket, the existing Workspace Audit pseudonym-key file, a separate dedicated
 evidence digest-key file, finite bounds, and a new evidence path.
@@ -192,10 +223,13 @@ every success or failure path.
 
 ## Hook contract
 
-Deploy, migration, restore, and rehearsal code can call the exported checker
-with the same versioned request and read port used by the CLI. These callers
-are not wired by this issue; once integrated, a terminal caller must bind all
-of the following from the result:
+Deploy, migration, and rehearsal code can call the exported full-result checker
+with the same versioned request and read port used by the CLI. The isolated
+restore drill instead uses the bounded normalized-page bridge and durable opaque
+claim reducer described above, preserving the same invariant/failure-code
+semantics without retaining a whole six-table normalized dataset in one Lambda
+invocation. Other callers remain responsible for their own wiring. A caller
+that consumes the exported full result must bind all of the following:
 
 - checker schema/digest version, dataset role, `checkedAt`, and configured
   bounds;
@@ -220,6 +254,14 @@ dataset-local inputs to every exact metadata/object/tag read and invariant, but
 are normalized out of the paired File aggregate because an isolated S3 copy
 receives new system-generated Version IDs. Every other raw File row attribute
 and logical object observation remains comparison-bound.
+
+The automated restore drill does not compare a live source scan with a
+historical restore. It uses DynamoDB point-in-time exports at the admitted
+restore point for exact row aggregates, then applies the incremental semantic
+gate to the isolated six-table/S3 dataset. Exact File body equality is verified
+separately by the restore runtime's 16 MiB range chain; the semantic gate checks
+the normalized File metadata/object relationship. This avoids treating
+legitimate writes after the restore point as corruption.
 
 Changing any resource, role, bound, evaluation timestamp, or evidence version
 requires a fresh check. A `fail` result, an unavailable checker, an

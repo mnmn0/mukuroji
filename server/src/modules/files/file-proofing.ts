@@ -54,11 +54,12 @@ import {
   createWorkspaceSearchWriterDynamoDbDocumentClient,
   shouldBootstrapLocalDynamoDb,
 } from '../../infrastructure/aws/dynamodb-client'
+import { FILE_UPLOAD_MAX_SIZE_BYTES } from '../file-upload-policy'
 import { isMissingFileObjectVersionError } from './file-object-errors'
 import { isAllowedFileContentType, normalizeFileContentType } from './file-content-type'
 
-/** Browser から直接 upload できる既定の最大 byte 数です。 */
-export const FILE_UPLOAD_MAX_SIZE_BYTES = 2 * 1024 * 1024 * 1024
+/** Re-exports the production File upload ceiling for existing Files consumers. */
+export { FILE_UPLOAD_MAX_SIZE_BYTES } from '../file-upload-policy'
 
 /** 一つの approval request に指定できる reviewer 上限です。 */
 export const FILE_APPROVAL_MAX_REVIEWERS = APPROVAL_MAX_REVIEWERS

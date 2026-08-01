@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { link, open, unlink } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import {
@@ -24,6 +24,7 @@ import {
   type GetCallerIdentityCommandOutput,
 } from '@aws-sdk/client-sts'
 import {
+  calculateCrossDomainIntegrityResourceBindingDigest,
   calculateCrossDomainIntegrityResourceIdentityDigest,
   CROSS_DOMAIN_INTEGRITY_RESOURCE_TARGETS,
   parseCrossDomainIntegrityResult,
@@ -634,12 +635,7 @@ function parseCrossDomainIntegrityHexadecimalKey(
  * @returns Lowercase SHA-256 digest of the versioned logical allowlist.
  */
 export function createCrossDomainIntegrityResourceBindingDigest(): string {
-  const binding = [
-    'mukuroji-cross-domain-integrity-resource-binding/v1',
-    'bucket:file',
-    ...requiredTableTargets.map((target) => `table:${target}`),
-  ].join('\n')
-  return createHash('sha256').update(`${binding}\n`, 'utf8').digest('hex')
+  return calculateCrossDomainIntegrityResourceBindingDigest()
 }
 
 /**

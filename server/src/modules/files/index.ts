@@ -1,5 +1,7 @@
 /** Files module public application and domain surface. */
 export { isMissingFileObjectVersionError } from './file-object-errors'
+/** Re-exports the shared production File upload ceiling. */
+export { FILE_UPLOAD_MAX_SIZE_BYTES } from '../file-upload-policy'
 export {
   FileIntegrityFailure,
   checkFileMetadataIntegrity,

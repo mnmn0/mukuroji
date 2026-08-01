@@ -52,6 +52,11 @@ const runtimeControlPlaneFunctionIds = new Set([
   'RuntimeControlAlarmReadinessPollFunctionCD017060',
 ]);
 
+const restoreDrillFunctionIds = new Set([
+  'RestoreDrillCleanupFunctionAB0B8AED',
+  'RestoreDrillRunnerFunction5F951D72',
+]);
+
 /**
  * Narrows an unknown synthesized value to a string-keyed record.
  *
@@ -588,6 +593,7 @@ test('binds exact runtime-control settings through API config and thirteen direc
     .filter(([logicalId, resource]) => {
       const description = resource.Properties?.Description;
       return runtimeControlPlaneFunctionIds.has(logicalId) ||
+        restoreDrillFunctionIds.has(logicalId) ||
         logicalId.startsWith('AWS679f53fac002430cb0da5b7982bd2287') ||
         (
           typeof description === 'string' &&

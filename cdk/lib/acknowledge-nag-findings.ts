@@ -1,6 +1,7 @@
 import { Validations } from 'aws-cdk-lib';
 import type { Stack } from 'aws-cdk-lib';
 import type { IConstruct } from 'constructs';
+import { createRestoreDrillCleanupWorkflowName } from './subsystems/restore-drill';
 
 const secretPaths = [
   'ConnectorRuntimeSecret/Resource',
@@ -254,6 +255,70 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     'AwsSolutions-IAM5[Resource::<WebhookAuthorizationBackfillProviderframeworkonTimeoutB47F77F4.Arn>:*]',
     ['WebhookAuthorizationBackfillProvider/waiter-state-machine/Role/DefaultPolicy/Resource'],
   ],
+  ...[
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<AuditEventsTable0723963E>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<FileProofingTable81DA272F>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<ProjectDirectoryTable9ED01C01>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<TeamIssuesTable189D851D>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<WorkItemConfigurationTable35E94558>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<WorkspaceAccessTableD7C8D2C7>/export/*]',
+  ].map((id) => [
+    id,
+    ['RestoreDrillRunnerRole/DefaultPolicy/Resource'],
+  ] as const),
+  [
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/mukuroji-restore-drill-*]',
+    [
+      'RestoreDrillRunnerRole/DefaultPolicy/Resource',
+      'RestoreDrillCleanupRole/DefaultPolicy/Resource',
+    ],
+  ],
+  ...[
+    'AwsSolutions-IAM5[Resource::<RestoreDrillScratchBucketFA7353CB.Arn>/restore-drill/*]',
+    'AwsSolutions-IAM5[Resource::<RestoreDrillScratchBucketFA7353CB.Arn>/workspaces/*]',
+    'AwsSolutions-IAM5[Action::kms:GenerateDataKey*]',
+    'AwsSolutions-IAM5[Action::kms:ReEncrypt*]',
+  ].map((id) => [
+    id,
+    [
+      'RestoreDrillRunnerRole/DefaultPolicy/Resource',
+      'RestoreDrillCleanupRole/DefaultPolicy/Resource',
+    ],
+  ] as const),
+  [
+    'AwsSolutions-IAM5[Resource::<RestoreDrillEvidenceBucketE764D707.Arn>/evidence/v1/runs/*/result.json]',
+    [
+      'RestoreDrillRunnerRole/DefaultPolicy/Resource',
+      'RestoreDrillCleanupRole/DefaultPolicy/Resource',
+    ],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<RestoreDrillEvidenceBucketE764D707.Arn>/evidence/v1/runs/*/cleanup.json]',
+    ['RestoreDrillCleanupRole/DefaultPolicy/Resource'],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<RestoreDrillEvidenceBucketE764D707.Arn>/approvals/v1/runs/*]',
+    [
+      'RestoreDrillCleanupRole/DefaultPolicy/Resource',
+      'RestoreDrillCleanupApprovalPolicy/Resource',
+    ],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<RestoreDrillRunnerFunction5F951D72.Arn>:*]',
+    ['RestoreDrillWorkflow/Role/DefaultPolicy/Resource'],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<RestoreDrillCleanupFunctionAB0B8AED.Arn>:*]',
+    ['RestoreDrillCleanupWorkflow/Role/DefaultPolicy/Resource'],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<RestoreDrillEvidenceBucketE764D707.Arn>/evidence/v1/runs/*]',
+    ['RestoreDrillCleanupApprovalPolicy/Resource'],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:states:<AWS::Region>:<AWS::AccountId>:execution:<RestoreDrillCleanupWorkflowBC990746.Name>:*]',
+    ['RestoreDrillCleanupApprovalPolicy/Resource'],
+  ],
 ]);
 
 const acknowledgedFindings = [
@@ -328,9 +393,27 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::<WebhookAuthorizationBackfillProgressFunction1FF04FD2.Arn>:*]',
     'AwsSolutions-IAM5[Resource::<WebhookAuthorizationBackfillProviderframeworkisComplete0B745C37.Arn>:*]',
     'AwsSolutions-IAM5[Resource::<WebhookAuthorizationBackfillProviderframeworkonTimeoutB47F77F4.Arn>:*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<AuditEventsTable0723963E>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<FileProofingTable81DA272F>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<ProjectDirectoryTable9ED01C01>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<TeamIssuesTable189D851D>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<WorkItemConfigurationTable35E94558>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<WorkspaceAccessTableD7C8D2C7>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/mukuroji-restore-drill-*]',
+    'AwsSolutions-IAM5[Resource::<RestoreDrillScratchBucketFA7353CB.Arn>/restore-drill/*]',
+    'AwsSolutions-IAM5[Resource::<RestoreDrillScratchBucketFA7353CB.Arn>/workspaces/*]',
+    'AwsSolutions-IAM5[Action::kms:GenerateDataKey*]',
+    'AwsSolutions-IAM5[Action::kms:ReEncrypt*]',
+    'AwsSolutions-IAM5[Resource::<RestoreDrillEvidenceBucketE764D707.Arn>/evidence/v1/runs/*/result.json]',
+    'AwsSolutions-IAM5[Resource::<RestoreDrillEvidenceBucketE764D707.Arn>/evidence/v1/runs/*/cleanup.json]',
+    'AwsSolutions-IAM5[Resource::<RestoreDrillEvidenceBucketE764D707.Arn>/approvals/v1/runs/*]',
+    'AwsSolutions-IAM5[Resource::<RestoreDrillRunnerFunction5F951D72.Arn>:*]',
+    'AwsSolutions-IAM5[Resource::<RestoreDrillCleanupFunctionAB0B8AED.Arn>:*]',
+    'AwsSolutions-IAM5[Resource::<RestoreDrillEvidenceBucketE764D707.Arn>/evidence/v1/runs/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:states:<AWS::Region>:<AWS::AccountId>:execution:<RestoreDrillCleanupWorkflowBC990746.Name>:*]',
   ].map((id) => ({
     id,
-    reason: 'The wildcard is constrained to the required S3 prefix, DynamoDB index, Secrets Manager namespace, API Gateway connection, GuardDuty rule, CDK custom-resource provider resource, or CloudWatch DescribeAlarms action required for AppConfig alarm monitoring.',
+    reason: 'The wildcard is constrained to a reviewed S3 prefix, DynamoDB index/export or reserved restore-table namespace, Step Functions execution namespace, Secrets Manager namespace, API Gateway connection, GuardDuty rule, CDK provider resource, KMS grant action family, or CloudWatch DescribeAlarms action.',
     scopePaths: iam5FindingScopePaths.get(id),
   })),
 ] as const;
@@ -361,6 +444,19 @@ export function acknowledgeKnownNagFindings(stack: Stack): void {
       Validations.of(scope).acknowledge({ ...finding, id });
     }
   }
+
+  const cleanupExecutionFinding =
+    'AwsSolutions::AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:' +
+    'states:<AWS::Region>:<AWS::AccountId>:execution:' +
+    `${createRestoreDrillCleanupWorkflowName(stack)}:restore-cleanup-*]`;
+  const cleanupRolePolicy = findConstruct(
+    stack,
+    'RestoreDrillCleanupRole/DefaultPolicy/Resource',
+  );
+  cleanupRolePolicy.node.addMetadata(Validations.ACKNOWLEDGED_RULES_METADATA_KEY, {
+    [cleanupExecutionFinding]:
+      'The wildcard is restricted to approval-gated execution names on the one exact cleanup state machine.',
+  });
 }
 
 function findConstruct(stack: Stack, relativePath: string): IConstruct {
