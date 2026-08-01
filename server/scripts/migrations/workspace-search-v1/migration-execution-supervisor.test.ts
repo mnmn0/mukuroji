@@ -47,6 +47,7 @@ import {
   readWorkspaceSearchMigrationExecutionStatus,
   readWorkspaceSearchMigrationExecutionTerminalRelease,
   superviseWorkspaceSearchMigrationExecution,
+  type SuperviseWorkspaceSearchMigrationExecutionInput,
   type WorkspaceSearchMigrationExecutionStatus,
   type WorkspaceSearchMigrationExecutionSupervisorMode,
   type WorkspaceSearchMigrationExecutionSupervisorSession,
@@ -123,6 +124,11 @@ import {
   maintenanceRuntimeControlSurfaces,
   type WorkspaceSearchMaintenanceEvidence,
 } from './maintenance-evidence'
+import {
+  WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+  type WorkspaceSearchMigrationCheckpointStallSchedule,
+  type WorkspaceSearchMigrationTelemetryRecorder,
+} from './migration-telemetry'
 
 const runId = 'execution-supervisor-test'
 const ownerId = 'execution-supervisor-owner'
@@ -247,6 +253,16 @@ type DeferredRunState = {
 }
 
 /**
+ * Externally released promise used to hold one asynchronous fixture boundary.
+ */
+type DeferredCompletion = {
+  /** Promise held until the test releases the boundary. */
+  readonly promise: Promise<void>
+  /** Releases the asynchronous fixture boundary. */
+  readonly resolve: () => void
+}
+
+/**
  * Creates one externally controlled run-state promise.
  *
  * @returns Promise and its exact resolver.
@@ -267,6 +283,27 @@ function createDeferredRunState(): DeferredRunState {
         throw new Error('Expected one deferred resolver.')
       }
       resolvePromise(state)
+    },
+  }
+}
+
+/**
+ * Creates one externally controlled completion promise.
+ *
+ * @returns Pending completion and its resolver.
+ */
+function createDeferredCompletion(): DeferredCompletion {
+  let resolvePromise: (() => void) | undefined
+  const promise = new Promise<void>((resolve) => {
+    resolvePromise = resolve
+  })
+  return {
+    promise,
+    resolve: (): void => {
+      if (resolvePromise === undefined) {
+        throw new Error('Expected one deferred completion resolver.')
+      }
+      resolvePromise()
     },
   }
 }
@@ -377,6 +414,17 @@ class ExecutionSupervisorHarness {
   /** Optional deferred operation result held across a heartbeat race. */
   private deferredOperation: DeferredRunState | undefined
 
+  /** Optional intentional maintenance evidence collection barrier. */
+  private maintenanceEvidenceCollectionBarrier:
+    Promise<void> | undefined
+
+  /** Optional durable maintenance receipt transaction barrier. */
+  private maintenanceEvidenceRenewalBarrier:
+    Promise<void> | undefined
+
+  /** Whether maintenance evidence collection should fail after waiting. */
+  private failMaintenanceEvidenceCollection = false
+
   /**
    * Creates one durable scenario and all fake managed ports.
    *
@@ -456,6 +504,10 @@ class ExecutionSupervisorHarness {
     this.maintenanceEvidenceProvider = {
       collect: async () => {
         this.events.push('evidence:collect')
+        await this.maintenanceEvidenceCollectionBarrier
+        if (this.failMaintenanceEvidenceCollection) {
+          throw new Error('Injected maintenance evidence failure.')
+        }
         return {
           configurationHash: this.fixture.configurationHash,
           tableIds:
@@ -549,6 +601,33 @@ class ExecutionSupervisorHarness {
     }
     this.rejectedAuthorityReceipt = expiredReceipt
     this.rejectNextAuthorityRead = true
+  }
+
+  /**
+   * Holds the intentional provider collection until explicitly released.
+   *
+   * @returns Pending provider completion controlled by the test.
+   */
+  blockMaintenanceEvidenceCollection(): DeferredCompletion {
+    const deferred = createDeferredCompletion()
+    this.maintenanceEvidenceCollectionBarrier = deferred.promise
+    return deferred
+  }
+
+  /**
+   * Holds the durable receipt transaction until explicitly released.
+   *
+   * @returns Pending durable transaction completion controlled by the test.
+   */
+  blockMaintenanceEvidenceRenewal(): DeferredCompletion {
+    const deferred = createDeferredCompletion()
+    this.maintenanceEvidenceRenewalBarrier = deferred.promise
+    return deferred
+  }
+
+  /** Makes the next maintenance evidence collection fail. */
+  failMaintenanceEvidenceRenewalCollection(): void {
+    this.failMaintenanceEvidenceCollection = true
   }
 
   /** Makes the closed writer-fence time non-finite at the session boundary. */
@@ -1040,6 +1119,7 @@ class ExecutionSupervisorHarness {
       },
       renewMaintenanceEvidence: async (input) => {
         this.events.push('authority:renew')
+        await this.maintenanceEvidenceRenewalBarrier
         const revision =
           (input.expectedPointer?.revision ?? 0) + 1
         this.currentAuthority = createAuthority(
@@ -1147,6 +1227,104 @@ class ExecutionSupervisorHarness {
       },
     }
   }
+}
+
+/**
+ * Creates a complete recorder double for checkpoint-watchdog integration.
+ *
+ * @param observations - Captured raw watchdog observations.
+ * @param failOnRecord - Whether the observer should throw on every record.
+ * @returns Fully typed best-effort telemetry recorder double.
+ */
+function createTestTelemetryRecorder(
+  observations: unknown[],
+  failOnRecord = false,
+): WorkspaceSearchMigrationTelemetryRecorder {
+  return {
+    correlationId: undefined,
+    describeTableRateRecorder: {
+      record: () => {},
+    },
+    record: (observation) => {
+      if (failOnRecord) {
+        throw new Error('Injected telemetry observer failure.')
+      }
+      observations.push(observation)
+    },
+    bindConfigurationHash: () => true,
+    readEvidenceLocator: () => undefined,
+    snapshot: () => undefined,
+    finalize: () => {},
+  }
+}
+
+/**
+ * Creates one complete deterministic supervised-execution request.
+ *
+ * @param harness - Stateful execution supervisor fixture.
+ * @param mode - Explicit branch selected by the test.
+ * @returns Complete request without optional checkpoint telemetry.
+ */
+function createExecutionSupervisorInput(
+  harness: ExecutionSupervisorHarness,
+  mode: WorkspaceSearchMigrationExecutionSupervisorMode,
+): SuperviseWorkspaceSearchMigrationExecutionInput {
+  return {
+    session: harness.session,
+    maintenanceEvidenceProvider:
+      harness.maintenanceEvidenceProvider,
+    runId,
+    ownerId,
+    expectedConfigurationHash: harness.fixture.configurationHash,
+    mode,
+    heartbeatScheduler: harness.scheduler,
+    clock: fixedClock,
+  }
+}
+
+/**
+ * Runs one mode and checks every durable successor observation and rearm.
+ *
+ * @param scenario - Starting durable graph for the selected branch.
+ * @param mode - Explicit branch selected by the test.
+ * @param phase - Expected finite telemetry phase.
+ * @param expectedProgressCount - Exact durable successors reached.
+ * @returns Completion after exact progress and cancellation assertions.
+ */
+async function expectExecutionCheckpointProgress(
+  scenario: SupervisorScenario,
+  mode: WorkspaceSearchMigrationExecutionSupervisorMode,
+  phase: 'apply' | 'verification' | 'rollback',
+  expectedProgressCount: number,
+): Promise<void> {
+  const harness = new ExecutionSupervisorHarness(scenario)
+  const observations: unknown[] = []
+  const delays: number[] = []
+  let cancellationCount = 0
+  await superviseWorkspaceSearchMigrationExecution({
+    ...createExecutionSupervisorInput(harness, mode),
+    telemetryRecorder: createTestTelemetryRecorder(observations),
+    checkpointStallClock: () => 1_000,
+    checkpointStallSchedule: (delayMilliseconds) => {
+      delays.push(delayMilliseconds)
+      return () => {
+        cancellationCount += 1
+      }
+    },
+  })
+
+  expect(observations).toHaveLength(expectedProgressCount)
+  for (const observation of observations) {
+    expect(observation).toEqual({
+      version: WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+      kind: 'checkpoint-progress',
+      phase,
+      progressUnits: 1,
+    })
+  }
+  expect(delays).toHaveLength(expectedProgressCount + 1)
+  expect(delays.every((delay) => delay === 300_000)).toBe(true)
+  expect(cancellationCount).toBe(expectedProgressCount + 1)
 }
 
 describe('Workspace Search migration execution supervisor', () => {
@@ -1454,6 +1632,230 @@ describe('Workspace Search migration execution supervisor', () => {
     expect(
       harness.events.some(isLeaseOrAuthorityMutation),
     ).toBe(false)
+  })
+
+  test('snapshots optional checkpoint telemetry collaborators once', async () => {
+    const harness = new ExecutionSupervisorHarness('ready')
+    const base = createExecutionSupervisorInput(harness, 'apply')
+    const recorder = createTestTelemetryRecorder([])
+    const schedule: WorkspaceSearchMigrationCheckpointStallSchedule =
+      () => () => {}
+    let recorderReads = 0
+    let checkpointStallClockReads = 0
+    let checkpointStallScheduleReads = 0
+
+    const status = await superviseWorkspaceSearchMigrationExecution({
+      ...base,
+      get telemetryRecorder() {
+        recorderReads += 1
+        return recorder
+      },
+      get checkpointStallClock() {
+        checkpointStallClockReads += 1
+        return () => 1_000
+      },
+      get checkpointStallSchedule() {
+        checkpointStallScheduleReads += 1
+        return schedule
+      },
+    })
+
+    expect(status.phase).toBe('applied')
+    expect(recorderReads).toBe(1)
+    expect(checkpointStallClockReads).toBe(1)
+    expect(checkpointStallScheduleReads).toBe(1)
+  })
+
+  test('records and stops every mode-specific durable execution successor', async () => {
+    await expectExecutionCheckpointProgress(
+      'ready',
+      'apply',
+      'apply',
+      8,
+    )
+    await expectExecutionCheckpointProgress(
+      'applied',
+      'verify',
+      'verification',
+      6,
+    )
+    await expectExecutionCheckpointProgress(
+      'applying',
+      'partial-rollback',
+      'rollback',
+      3,
+    )
+    await expectExecutionCheckpointProgress(
+      'applied',
+      'complete-rollback',
+      'rollback',
+      3,
+    )
+  })
+
+  test('records a deterministic live execution stall and resumes on progress', async () => {
+    const harness = new ExecutionSupervisorHarness('ready')
+    harness.blockOperationForHeartbeatLoss()
+    const observations: unknown[] = []
+    const callbacks: (() => void)[] = []
+    const canceled: boolean[] = []
+    let telemetryNow = 10_000
+    const supervised = superviseWorkspaceSearchMigrationExecution({
+      ...createExecutionSupervisorInput(harness, 'apply'),
+      telemetryRecorder: createTestTelemetryRecorder(observations),
+      checkpointStallClock: () => telemetryNow,
+      checkpointStallSchedule: (_delayMilliseconds, callback) => {
+        const index = callbacks.push(callback) - 1
+        canceled.push(false)
+        return () => {
+          canceled[index] = true
+        }
+      },
+    })
+    await waitForEvent(harness.events, 'operation:1:1')
+
+    const activeIndex = canceled.findIndex((isCanceled) => !isCanceled)
+    const stallCallback = callbacks[activeIndex]
+    if (stallCallback === undefined) {
+      throw new Error('Expected one active execution watchdog callback.')
+    }
+    telemetryNow += 300_000
+    stallCallback()
+    expect(observations).toContainEqual({
+      version: WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+      kind: 'checkpoint-stall',
+      phase: 'apply',
+      stalledForMilliseconds: 300_000,
+    })
+
+    harness.releaseOperation()
+    const status = await supervised
+    expect(status.phase).toBe('applied')
+    expect(observations).toContainEqual({
+      version: WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+      kind: 'checkpoint-progress',
+      phase: 'apply',
+      progressUnits: 1,
+    })
+  })
+
+  test('excludes a long evidence collection but monitors its durable renewal', async () => {
+    const harness = new ExecutionSupervisorHarness('ready')
+    harness.rejectPointerAuthorityOnce()
+    const collectionBarrier =
+      harness.blockMaintenanceEvidenceCollection()
+    const durableRenewalBarrier =
+      harness.blockMaintenanceEvidenceRenewal()
+    const observations: unknown[] = []
+    const callbacks: (() => void)[] = []
+    const canceled: boolean[] = []
+    let telemetryNow = 30_000
+    const supervised = superviseWorkspaceSearchMigrationExecution({
+      ...createExecutionSupervisorInput(harness, 'apply'),
+      telemetryRecorder: createTestTelemetryRecorder(observations),
+      checkpointStallClock: () => telemetryNow,
+      checkpointStallSchedule: (_delayMilliseconds, callback) => {
+        const index = callbacks.push(callback) - 1
+        canceled.push(false)
+        return () => {
+          canceled[index] = true
+        }
+      },
+    })
+
+    await waitForEvent(harness.events, 'evidence:collect')
+    const pausedCallback = callbacks.at(-1)
+    if (pausedCallback === undefined) {
+      throw new Error('Expected one paused execution watchdog callback.')
+    }
+    telemetryNow += 20 * 60_000
+    pausedCallback()
+    expect(
+      observations.some((observation) =>
+        typeof observation === 'object' &&
+        observation !== null &&
+        'kind' in observation &&
+        observation.kind === 'checkpoint-stall'
+      ),
+    ).toBe(false)
+
+    collectionBarrier.resolve()
+    await waitForEvent(harness.events, 'authority:renew')
+    const activeIndex = canceled.findIndex((isCanceled) => !isCanceled)
+    const activeCallback = callbacks[activeIndex]
+    if (activeCallback === undefined) {
+      throw new Error('Expected monitoring during durable renewal.')
+    }
+    telemetryNow += 300_000
+    activeCallback()
+    expect(observations).toContainEqual({
+      version: WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+      kind: 'checkpoint-stall',
+      phase: 'apply',
+      stalledForMilliseconds: 300_000,
+    })
+
+    durableRenewalBarrier.resolve()
+    const status = await supervised
+    expect(status.phase).toBe('applied')
+  })
+
+  test('stops after evidence collection failure', async () => {
+    const harness = new ExecutionSupervisorHarness('ready')
+    harness.rejectPointerAuthorityOnce()
+    harness.failMaintenanceEvidenceRenewalCollection()
+    const canceled: boolean[] = []
+    const failure = await captureMigrationFailure(() =>
+      superviseWorkspaceSearchMigrationExecution({
+        ...createExecutionSupervisorInput(harness, 'apply'),
+        telemetryRecorder: createTestTelemetryRecorder([]),
+        checkpointStallClock: () => 1_000,
+        checkpointStallSchedule: (_delayMilliseconds, _callback) => {
+          const index = canceled.push(false) - 1
+          return () => {
+            canceled[index] = true
+          }
+        },
+      })
+    )
+
+    expect(failure.code).toBe('TRANSIENT_INFRASTRUCTURE_FAILURE')
+    expect(canceled.length).toBeGreaterThan(0)
+    expect(canceled.every(Boolean)).toBe(true)
+  })
+
+  test('isolates observer or scheduler failures and stops after execution failure', async () => {
+    const isolatedHarness = new ExecutionSupervisorHarness('ready')
+    const isolatedStatus =
+      await superviseWorkspaceSearchMigrationExecution({
+        ...createExecutionSupervisorInput(isolatedHarness, 'apply'),
+        telemetryRecorder: createTestTelemetryRecorder([], true),
+        checkpointStallClock: () => 1_000,
+        checkpointStallSchedule: () => {
+          throw new Error('Injected checkpoint scheduler failure.')
+        },
+      })
+    expect(isolatedStatus.phase).toBe('applied')
+
+    const failingHarness = new ExecutionSupervisorHarness('ready')
+    const controller = new AbortController()
+    failingHarness.abortAfterOperation(controller)
+    let cancellationCount = 0
+    const error = await captureError(() =>
+      superviseWorkspaceSearchMigrationExecution({
+        ...createExecutionSupervisorInput(failingHarness, 'apply'),
+        signal: controller.signal,
+        telemetryRecorder: createTestTelemetryRecorder([]),
+        checkpointStallClock: () => 1_000,
+        checkpointStallSchedule: () => () => {
+          cancellationCount += 1
+        },
+      })
+    )
+    expect(error.name).toBe(
+      'WorkspaceSearchMigrationHeartbeatInterruptedError',
+    )
+    expect(cancellationCount).toBe(2)
   })
 
   test('creates admission then applies one operation, five checkpoints, and the seal at exact revisions', async () => {

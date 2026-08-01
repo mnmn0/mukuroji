@@ -97,6 +97,10 @@ import {
   type WorkspaceSearchMigrationManagedDescribeTableRate,
 } from './migration-describe-table-rate-managed-session'
 import {
+  WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+  type WorkspaceSearchMigrationTelemetryRecorder,
+} from './migration-telemetry'
+import {
   type WorkspaceSearchMigrationSharedProfiles,
   loadWorkspaceSearchMigrationSharedProfiles,
 } from './migration-shared-profile-loader'
@@ -1242,11 +1246,19 @@ export type CreateAwsWorkspaceSearchMigrationRateManagedSessionInput = {
   readonly recoverInterruptedAttempt: boolean
   /** Optional best-effort secret-free observation sink. */
   readonly rateRecorder?: WorkspaceSearchMigrationDescribeTableRateRecorder
+  /** Optional best-effort migration telemetry observer. */
+  readonly telemetryRecorder?: WorkspaceSearchMigrationTelemetryRecorder
   /** Optional trusted clock captured by pre-plan authority commits. */
   readonly prePlanAuthorityClock?:
     WorkspaceSearchMigrationPrePlanAuthorityClock
   /** Optional cancellation stopping not-yet-started checkpoint mutation. */
   readonly signal?: AbortSignal
+}
+
+/** Quarantine-only observer captured before production composition awaits. */
+type WorkspaceSearchMigrationQuarantineTelemetryRecorder = {
+  /** Records one already bounded migration quarantine observation. */
+  readonly record: WorkspaceSearchMigrationTelemetryRecorder['record']
 }
 
 /** Detached production composition input captured before the STS await. */
@@ -1263,6 +1275,9 @@ type RateManagedAwsSessionConstructionSnapshot = {
   readonly recoverInterruptedAttempt: boolean
   /** Optional captured secret-free observation sink. */
   readonly rateRecorder?: WorkspaceSearchMigrationDescribeTableRateRecorder
+  /** Optional captured quarantine-only migration observer. */
+  readonly telemetryRecorder?:
+    WorkspaceSearchMigrationQuarantineTelemetryRecorder
   /** Captured trusted pre-plan clock. */
   readonly prePlanAuthorityClock:
     WorkspaceSearchMigrationPrePlanAuthorityClock
@@ -1900,6 +1915,10 @@ class AwsWorkspaceSearchMigrationIdentityPort
   private readonly describeTableRate:
     WorkspaceSearchMigrationManagedDescribeTableRate | undefined
 
+  /** Optional observer for exact-once managed quarantine transitions. */
+  private readonly telemetryRecorder:
+    WorkspaceSearchMigrationQuarantineTelemetryRecorder | undefined
+
   /** Whether this session owns final closure of the shared rate controller. */
   private readonly ownsDescribeTableRate: boolean
 
@@ -1953,6 +1972,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
    * @param requested - Validated operator-selected resources.
    * @param transport - Allowlisted AWS command transport.
    * @param prePlanAuthorityClock - Trusted clock captured by authority commits.
+   * @param telemetryRecorder - Optional captured quarantine-only observer.
    * @param describeTableRate - Optional durable DescribeTable controller.
    * @param ownsDescribeTableRate - Whether close drains the shared controller.
    * @param measurementSessionFactory - Optional shared-controller child factory.
@@ -1962,6 +1982,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
     transport: WorkspaceSearchMigrationManagedAwsTransport,
     prePlanAuthorityClock:
       WorkspaceSearchMigrationPrePlanAuthorityClock,
+    telemetryRecorder?: WorkspaceSearchMigrationQuarantineTelemetryRecorder,
     describeTableRate?: WorkspaceSearchMigrationManagedDescribeTableRate,
     ownsDescribeTableRate = false,
     measurementSessionFactory?:
@@ -1976,6 +1997,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.tableNames = new Set(Object.values(requested.tables))
     this.transport = transport
     this.prePlanAuthorityClock = prePlanAuthorityClock
+    this.telemetryRecorder = telemetryRecorder
     this.describeTableRate = describeTableRate
     this.ownsDescribeTableRate = ownsDescribeTableRate
     this.rateManagedMeasurementSessionFactory = measurementSessionFactory
@@ -7264,10 +7286,29 @@ class AwsWorkspaceSearchMigrationIdentityPort
       this.isMeasurementGenerationCurrent(
         authority.generation,
         authority.configurationHash,
-      )
+      ) &&
+      !this.measuredExecutionControlQuarantined
     ) {
       this.measuredExecutionControlQuarantined = true
-      this.describeTableRate?.quarantine()
+      try {
+        this.describeTableRate?.quarantine()
+      } finally {
+        this.recordManagedExecutionControlQuarantineSafely()
+      }
+    }
+  }
+
+  /** Records one bounded quarantine event without changing primary control flow. */
+  private recordManagedExecutionControlQuarantineSafely(): void {
+    try {
+      this.telemetryRecorder?.record({
+        version: WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+        kind: 'quarantine',
+        phase: 'post-send-guard',
+        reason: 'configuration-mismatch',
+      })
+    } catch {
+      // Quarantine remains authoritative when optional observation fails.
     }
   }
 
@@ -8091,6 +8132,7 @@ export async function createAwsWorkspaceSearchMigrationRateManagedSession(
       resources,
       createDefaultAwsTransport(configurations),
       prePlanAuthorityClock,
+      snapshot.telemetryRecorder,
       rate,
     )
     try {
@@ -8107,6 +8149,7 @@ export async function createAwsWorkspaceSearchMigrationRateManagedSession(
       resources,
       transport,
       prePlanAuthorityClock,
+      snapshot.telemetryRecorder,
       rate,
       true,
       createMeasurementSession,
@@ -8232,6 +8275,7 @@ function detachRateManagedAwsSessionConstructionInput(
   let recoverInterruptedCleanup: boolean
   let recoverInterruptedAttempt: boolean
   let rateRecorder: WorkspaceSearchMigrationDescribeTableRateRecorder | undefined
+  let telemetryRecorder: WorkspaceSearchMigrationTelemetryRecorder | undefined
   let prePlanAuthorityClock:
     WorkspaceSearchMigrationPrePlanAuthorityClock | undefined
   let signal: AbortSignal | undefined
@@ -8242,6 +8286,7 @@ function detachRateManagedAwsSessionConstructionInput(
     recoverInterruptedCleanup = input.recoverInterruptedCleanup
     recoverInterruptedAttempt = input.recoverInterruptedAttempt
     rateRecorder = input.rateRecorder
+    telemetryRecorder = input.telemetryRecorder
     prePlanAuthorityClock = input.prePlanAuthorityClock
     signal = input.signal
   } catch {
@@ -8251,10 +8296,48 @@ function detachRateManagedAwsSessionConstructionInput(
     typeof bootstrapRateCheckpoint !== 'boolean' ||
     typeof recoverInterruptedCleanup !== 'boolean' ||
     typeof recoverInterruptedAttempt !== 'boolean' ||
-    (signal !== undefined && !(signal instanceof AbortSignal))
+    (signal !== undefined && !(signal instanceof AbortSignal)) ||
+    (
+      telemetryRecorder !== undefined &&
+      (typeof telemetryRecorder !== 'object' || telemetryRecorder === null)
+    )
   ) {
     throw new WorkspaceSearchMigrationManagedDescribeTableRateError()
   }
+  let telemetryRecord:
+    WorkspaceSearchMigrationTelemetryRecorder['record'] | undefined
+  try {
+    telemetryRecord = telemetryRecorder?.record
+  } catch {
+    throw new WorkspaceSearchMigrationManagedDescribeTableRateError()
+  }
+  if (
+    telemetryRecorder !== undefined &&
+    typeof telemetryRecord !== 'function'
+  ) {
+    throw new WorkspaceSearchMigrationManagedDescribeTableRateError()
+  }
+  const capturedTelemetryRecorder:
+    WorkspaceSearchMigrationQuarantineTelemetryRecorder | undefined =
+      telemetryRecorder === undefined || telemetryRecord === undefined
+        ? undefined
+        : Object.freeze({
+          /**
+           * Forwards one quarantine observation through the captured recorder.
+           *
+           * @param observation - Candidate secret-free quarantine observation.
+           */
+          record: (observation: unknown): void => {
+            const result: unknown = Reflect.apply(
+              telemetryRecord,
+              telemetryRecorder,
+              [observation],
+            )
+            if (result !== undefined) {
+              consumeIdentityTelemetryNativePromise(result)
+            }
+          },
+        })
   return Object.freeze({
     resources:
       createWorkspaceSearchMigrationRequestedResourcesSnapshot(requested),
@@ -8263,10 +8346,35 @@ function detachRateManagedAwsSessionConstructionInput(
     recoverInterruptedCleanup,
     recoverInterruptedAttempt,
     ...(rateRecorder === undefined ? {} : { rateRecorder }),
+    ...(capturedTelemetryRecorder === undefined
+      ? {}
+      : { telemetryRecorder: capturedTelemetryRecorder }),
     prePlanAuthorityClock: prePlanAuthorityClock ??
       createWorkspaceSearchMigrationPrePlanAuthoritySystemTime,
     ...(signal === undefined ? {} : { signal }),
   })
+}
+
+/**
+ * Consumes an exact native Promise returned across a synchronous telemetry port.
+ * Opaque objects, Proxies, and thenables are never inspected or assimilated.
+ *
+ * @param value - Runtime return from the captured telemetry recorder.
+ * @returns Whether the value was an exact native Promise.
+ */
+function consumeIdentityTelemetryNativePromise(value: unknown): boolean {
+  if (
+    !nodeUtilTypes.isPromise(value) ||
+    Object.getPrototypeOf(value) !== Promise.prototype ||
+    Object.hasOwn(value, 'constructor')
+  ) {
+    return false
+  }
+  void Reflect.apply(Promise.prototype.then, value, [
+    undefined,
+    () => undefined,
+  ])
+  return true
 }
 
 /** Stops composition before another durable rate mutation may start. */

@@ -23,6 +23,10 @@ import type {
 import type {
   WorkspaceSearchMigrationDescribeTableRatePolicy,
 } from './migration-describe-table-rate-budget'
+import {
+  createWorkspaceSearchMigrationTelemetryRecorder,
+  WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+} from './migration-telemetry'
 
 const requestedAccount = '123456789012'
 
@@ -381,6 +385,106 @@ describe('production rate-managed AWS identity composition', () => {
     }
   })
 
+  test('consumes rejected Promise returns from captured quarantine telemetry', async () => {
+    const originalStsSend = STSClient.prototype.send
+    const originalDynamoDbSend = DynamoDBClient.prototype.send
+    let checkpointItem:
+      Readonly<Record<string, AttributeValue>> | undefined
+    Reflect.set(
+      STSClient.prototype,
+      'send',
+      function (): unknown {
+        return Promise.resolve({
+          $metadata: {},
+          Account: requestedAccount,
+          Arn:
+            `arn:aws:sts::${requestedAccount}:` +
+            'assumed-role/migration-role/rate-managed-test',
+          UserId: 'AROA12345678901234567:rate-managed-test',
+        })
+      },
+    )
+    Reflect.set(
+      DynamoDBClient.prototype,
+      'send',
+      function (...callArguments: unknown[]): unknown {
+        const command = callArguments[0]
+        if (command instanceof GetItemCommand) {
+          return Promise.resolve({
+            $metadata: {},
+            ...(checkpointItem === undefined
+              ? {}
+              : { Item: structuredClone(checkpointItem) }),
+          })
+        }
+        if (command instanceof TransactWriteItemsCommand) {
+          const item = command.input.TransactItems?.[0]?.Put?.Item
+          if (item === undefined) {
+            return Promise.reject(
+              new Error('expected-rate-checkpoint-put'),
+            )
+          }
+          checkpointItem = structuredClone(item)
+          return Promise.resolve({ $metadata: {} })
+        }
+        return Promise.reject(new Error('unexpected-dynamodb-command'))
+      },
+    )
+    try {
+      await withStaticProductionProfile(async () => {
+        let telemetryRecordCount = 0
+        const telemetryRecorder = {
+          ...createWorkspaceSearchMigrationTelemetryRecorder(
+            {
+              version: WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+              operation: 'measure',
+              policyVersion: ratePolicy.policyVersion,
+            },
+            { sink: () => undefined },
+          ),
+          /** Returns one rejected native Promise across the synchronous seam. */
+          record: (): Promise<never> => {
+            telemetryRecordCount += 1
+            return Promise.reject(
+              new Error('raw-async-quarantine-canary'),
+            )
+          },
+        }
+        const session =
+          await createAwsWorkspaceSearchMigrationRateManagedSession({
+            requested: requestedResources,
+            ratePolicy,
+            bootstrapRateCheckpoint: true,
+            recoverInterruptedCleanup: false,
+            recoverInterruptedAttempt: false,
+            telemetryRecorder,
+          })
+        try {
+          const recordQuarantine = Reflect.get(
+            session,
+            'recordManagedExecutionControlQuarantineSafely',
+          )
+          if (typeof recordQuarantine !== 'function') {
+            throw new Error('Expected the private quarantine recorder seam.')
+          }
+          Reflect.apply(recordQuarantine, session, [])
+          await Promise.resolve()
+          await Promise.resolve()
+          expect(telemetryRecordCount).toBe(1)
+        } finally {
+          await session.close()
+        }
+      })
+    } finally {
+      Reflect.set(STSClient.prototype, 'send', originalStsSend)
+      Reflect.set(
+        DynamoDBClient.prototype,
+        'send',
+        originalDynamoDbSend,
+      )
+    }
+  })
+
   test('refreshes temporary credentials used by the rate-owned client', async () => {
     const originalStsSend = STSClient.prototype.send
     const originalDynamoDbSend = DynamoDBClient.prototype.send
@@ -532,6 +636,10 @@ describe('production rate-managed AWS identity composition', () => {
         recordRead('rateRecorder')
         return undefined
       },
+      get telemetryRecorder() {
+        recordRead('telemetryRecorder')
+        return undefined
+      },
       get prePlanAuthorityClock() {
         recordRead('prePlanAuthorityClock')
         return undefined
@@ -575,7 +683,7 @@ describe('production rate-managed AWS identity composition', () => {
       await expect(creating).rejects.toMatchObject({
         code: 'IDENTITY_MISMATCH',
       })
-      expect(readCounts.size).toBe(8)
+      expect(readCounts.size).toBe(9)
       expect([...readCounts.values()]).toEqual(
         Array.from({ length: readCounts.size }, () => 1),
       )

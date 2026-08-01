@@ -3,6 +3,7 @@ import {
   type BigIntStats,
 } from 'node:fs'
 import { open } from 'node:fs/promises'
+import { types as nodeUtilTypes } from 'node:util'
 import {
   advanceWorkspaceSearchMigrationControlStage,
   readWorkspaceSearchMigrationControlExecutionStatus,
@@ -19,7 +20,9 @@ import {
 } from './migration-contract'
 import type {
   WorkspaceSearchMigrationDescribeTableRateEvidence,
+  WorkspaceSearchMigrationDescribeTableRateObservation,
   WorkspaceSearchMigrationDescribeTableRatePolicy,
+  WorkspaceSearchMigrationDescribeTableRateRecorder,
 } from './migration-describe-table-rate-budget'
 import {
   parseWorkspaceSearchMigrationDescribeTableRatePolicyDocument,
@@ -69,6 +72,17 @@ import type {
 import type {
   WorkspaceSearchWriterFenceObservation,
 } from '../../../src/infrastructure/runtime/workspace-search-writer-fence'
+import {
+  createWorkspaceSearchMigrationTelemetryRecorder,
+  WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+  type WorkspaceSearchMigrationTelemetryContext,
+  type WorkspaceSearchMigrationTelemetryFinalOutcome,
+  type WorkspaceSearchMigrationTelemetryOperation,
+  type WorkspaceSearchMigrationTelemetryPhase,
+  type WorkspaceSearchMigrationTelemetryRecorder,
+  type WorkspaceSearchMigrationTelemetrySink,
+  type WorkspaceSearchMigrationTelemetryTerminalFailureReason,
+} from './migration-telemetry'
 
 const initialBootstrapApproval = 'initial-writer-fence-bootstrap'
 
@@ -557,6 +571,10 @@ export type CreateWorkspaceSearchMigrationControlCliReadSessionInput = {
   readonly rateRecoverInterruptedCleanup: boolean
   /** Whether this invocation may recover an interrupted physical attempt. */
   readonly rateRecoverInterruptedAttempt: boolean
+  /** Optional #158 rate events collected by migration telemetry. */
+  readonly rateRecorder?: WorkspaceSearchMigrationDescribeTableRateRecorder
+  /** Optional best-effort migration telemetry observer. */
+  readonly telemetryRecorder?: WorkspaceSearchMigrationTelemetryRecorder
   /** Optional cooperative cancellation propagated through initial rate claim. */
   readonly signal?: AbortSignal
 }
@@ -580,18 +598,23 @@ export type WorkspaceSearchMigrationControlCliDependencies = {
     path: string,
     maximumBytes: number,
   ) => Promise<Uint8Array>
+  /** Creates an optional trusted recorder with synchronous method returns. */
+  readonly createTelemetryRecorder?: (
+    context: WorkspaceSearchMigrationTelemetryContext,
+    sink: WorkspaceSearchMigrationTelemetrySink,
+  ) => WorkspaceSearchMigrationTelemetryRecorder
 }
 
 /** Capability-minimized dependencies retained by a read-only command. */
 type WorkspaceSearchMigrationControlCliReadDependencies = Pick<
   WorkspaceSearchMigrationControlCliDependencies,
-  'createReadSession'
+  'createReadSession' | 'createTelemetryRecorder'
 >
 
 /** Capability-minimized dependencies retained by a mutating command. */
 type WorkspaceSearchMigrationControlCliMutationDependencies = Pick<
   WorkspaceSearchMigrationControlCliDependencies,
-  'createMutationSession' | 'readInputFile'
+  'createMutationSession' | 'createTelemetryRecorder' | 'readInputFile'
 >
 
 /** File and read-session capabilities captured before the first CLI await. */
@@ -602,6 +625,14 @@ type WorkspaceSearchMigrationControlCliCapturedReadDependencies =
 /** File and mutation-session capabilities captured before the first CLI await. */
 type WorkspaceSearchMigrationControlCliCapturedMutationDependencies =
   WorkspaceSearchMigrationControlCliMutationDependencies
+
+/** One invocation-local recorder and its captured serialized EMF output. */
+type WorkspaceSearchMigrationControlCliTelemetryInvocation = {
+  /** Best-effort recorder shared with rate and migration boundaries. */
+  readonly recorder: WorkspaceSearchMigrationTelemetryRecorder
+  /** Reads the only valid serialized EMF record produced at finalization. */
+  readonly readSerializedRecord: () => string | undefined
+}
 
 /** Result of one initial writer-fence bootstrap. */
 type BootstrapOpenResult = {
@@ -639,6 +670,17 @@ const defaultControlCliDependencies:
     createReadSession: createDefaultControlCliReadSession,
     createMutationSession: createDefaultControlCliMutationSession,
     readInputFile: readBoundedInputFile,
+    createTelemetryRecorder: (context, sink) =>
+      createWorkspaceSearchMigrationTelemetryRecorder(
+        context,
+        {
+          /** Captures finalized telemetry for the CLI's terminal stdout/stderr line. */
+          sink,
+          /** Writes only an immediate checkpoint-stall line while work is hung. */
+          liveSink: (serializedRecord: string) =>
+            console.error(serializedRecord),
+        },
+      ),
   }
 
 /**
@@ -743,6 +785,8 @@ export async function runWorkspaceSearchMigrationControlCli(
   signal?: AbortSignal,
 ): Promise<WorkspaceSearchMigrationControlCliExitCode> {
   let operation: WorkspaceSearchMigrationControlCliOperation = 'unknown'
+  let telemetry:
+    WorkspaceSearchMigrationControlCliTelemetryInvocation | undefined
   try {
     const argumentsSnapshot = snapshotControlCliArguments(arguments_)
     operation = identifyOperation(argumentsSnapshot[0])
@@ -762,10 +806,20 @@ export async function runWorkspaceSearchMigrationControlCli(
         capturedDependencies,
         signal,
       )
+      telemetry = createControlCliTelemetryInvocation(
+        configuration.command,
+        ratePolicy.policyVersion,
+        capturedDependencies,
+      )
+      bindKnownControlCliTelemetryConfiguration(
+        configuration,
+        telemetry?.recorder,
+      )
       result = await runReadOnlyCommand(
         configuration,
         ratePolicy,
         capturedDependencies,
+        telemetry?.recorder,
         signal,
       )
     } else {
@@ -776,23 +830,56 @@ export async function runWorkspaceSearchMigrationControlCli(
         capturedDependencies,
         signal,
       )
+      telemetry = createControlCliTelemetryInvocation(
+        configuration.command,
+        ratePolicy.policyVersion,
+        capturedDependencies,
+      )
+      bindKnownControlCliTelemetryConfiguration(
+        configuration,
+        telemetry?.recorder,
+      )
       result = await runMutatingCommand(
         configuration,
         ratePolicy,
         capturedDependencies,
+        telemetry?.recorder,
         signal,
       )
     }
-    writeJsonLine(console.log, result)
+    finalizeControlCliTelemetry(
+      telemetry?.recorder,
+      telemetryPhaseForOperation(operation),
+      'succeeded',
+    )
+    writeJsonLine(
+      console.log,
+      result,
+      telemetry?.readSerializedRecord(),
+    )
     return 0
   } catch (error: unknown) {
     const failure = classifyControlCliFailure(error)
-    writeJsonLine(console.error, {
-      schemaVersion: 1,
+    recordControlCliTerminalFailure(
+      telemetry?.recorder,
       operation,
-      status: 'error',
-      code: failure.code,
-    })
+      failure,
+    )
+    finalizeControlCliTelemetry(
+      telemetry?.recorder,
+      telemetryPhaseForOperation(operation),
+      failure.code === 'INTERRUPTED' ? 'interrupted' : 'failed',
+    )
+    writeJsonLine(
+      console.error,
+      {
+        schemaVersion: 1,
+        operation,
+        status: 'error',
+        code: failure.code,
+      },
+      telemetry?.readSerializedRecord(),
+    )
     return failure.exitCode
   }
 }
@@ -846,16 +933,25 @@ function snapshotControlCliReadDependencies(
 ): WorkspaceSearchMigrationControlCliCapturedReadDependencies {
   let createReadSession:
     WorkspaceSearchMigrationControlCliDependencies['createReadSession']
+  let createTelemetryRecorder:
+    WorkspaceSearchMigrationControlCliDependencies[
+      'createTelemetryRecorder'
+    ]
   let readInputFile:
     WorkspaceSearchMigrationControlCliDependencies['readInputFile']
   try {
     createReadSession = dependencies.createReadSession
+    createTelemetryRecorder = dependencies.createTelemetryRecorder
     readInputFile = dependencies.readInputFile
   } catch {
     throw operationFailed()
   }
   if (
     typeof createReadSession !== 'function' ||
+    (
+      createTelemetryRecorder !== undefined &&
+      typeof createTelemetryRecorder !== 'function'
+    ) ||
     typeof readInputFile !== 'function'
   ) {
     throw operationFailed()
@@ -863,6 +959,16 @@ function snapshotControlCliReadDependencies(
   return Object.freeze({
     /** Invokes the captured read-session factory without retaining its owner. */
     createReadSession: (input) => createReadSession(input),
+    ...(createTelemetryRecorder === undefined
+      ? {}
+      : {
+          /** Creates one recorder through the captured trusted factory. */
+          createTelemetryRecorder: (
+            context: WorkspaceSearchMigrationTelemetryContext,
+            sink: WorkspaceSearchMigrationTelemetrySink,
+          ) =>
+            createTelemetryRecorder(context, sink),
+        }),
     /** Invokes the captured file reader without retaining its owner. */
     readInputFile: (path, maximumBytes) =>
       readInputFile(path, maximumBytes),
@@ -880,16 +986,25 @@ function snapshotControlCliMutationDependencies(
 ): WorkspaceSearchMigrationControlCliCapturedMutationDependencies {
   let createMutationSession:
     WorkspaceSearchMigrationControlCliDependencies['createMutationSession']
+  let createTelemetryRecorder:
+    WorkspaceSearchMigrationControlCliDependencies[
+      'createTelemetryRecorder'
+    ]
   let readInputFile:
     WorkspaceSearchMigrationControlCliDependencies['readInputFile']
   try {
     createMutationSession = dependencies.createMutationSession
+    createTelemetryRecorder = dependencies.createTelemetryRecorder
     readInputFile = dependencies.readInputFile
   } catch {
     throw operationFailed()
   }
   if (
     typeof createMutationSession !== 'function' ||
+    (
+      createTelemetryRecorder !== undefined &&
+      typeof createTelemetryRecorder !== 'function'
+    ) ||
     typeof readInputFile !== 'function'
   ) {
     throw operationFailed()
@@ -897,10 +1012,568 @@ function snapshotControlCliMutationDependencies(
   return Object.freeze({
     /** Invokes the captured mutation factory without retaining its owner. */
     createMutationSession: (input) => createMutationSession(input),
+    ...(createTelemetryRecorder === undefined
+      ? {}
+      : {
+          /** Creates one recorder through the captured trusted factory. */
+          createTelemetryRecorder: (
+            context: WorkspaceSearchMigrationTelemetryContext,
+            sink: WorkspaceSearchMigrationTelemetrySink,
+          ) =>
+            createTelemetryRecorder(context, sink),
+        }),
     /** Invokes the captured file reader without retaining its owner. */
     readInputFile: (path, maximumBytes) =>
       readInputFile(path, maximumBytes),
   })
+}
+
+/**
+ * Creates one optional recorder and captures its single serialized final line.
+ * Factory, recorder, and sink failures disable telemetry without changing the
+ * migration command.
+ *
+ * @param operation - Finite non-help migration operation.
+ * @param policyVersion - Reviewed DescribeTable policy digest.
+ * @param dependencies - Already captured optional telemetry factory.
+ * @returns Invocation-local recorder and output reader, or undefined.
+ */
+function createControlCliTelemetryInvocation(
+  operation: WorkspaceSearchMigrationTelemetryOperation,
+  policyVersion: string,
+  dependencies: Pick<
+    WorkspaceSearchMigrationControlCliDependencies,
+    'createTelemetryRecorder'
+  >,
+): WorkspaceSearchMigrationControlCliTelemetryInvocation | undefined {
+  const factory = dependencies.createTelemetryRecorder
+  if (factory === undefined) return undefined
+  const serializedRecords: string[] = []
+  const sink = (serializedRecord: string): void => {
+    if (
+      typeof serializedRecord !== 'string' ||
+      serializedRecord.length === 0 ||
+      serializedRecord.length > 65_536 ||
+      serializedRecord.includes('\n') ||
+      serializedRecord.includes('\r')
+    ) {
+      serializedRecords.push('')
+      return
+    }
+    serializedRecords.push(serializedRecord)
+  }
+  try {
+    const candidate = factory({
+      version: WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+      operation,
+      policyVersion,
+    }, sink)
+    if (consumeControlCliNativePromise(candidate)) return undefined
+    const recorder = createSafeControlCliTelemetryRecorder(candidate)
+    if (recorder === undefined) return undefined
+    return Object.freeze({
+      recorder,
+      readSerializedRecord: (): string | undefined =>
+        serializedRecords.length === 1 && serializedRecords[0] !== ''
+          ? serializedRecords[0]
+          : undefined,
+    })
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Captures a failure-isolated recorder facade before retaining an observer.
+ *
+ * @param candidate - Recorder returned by the optional factory.
+ * @returns Safe best-effort facade, or undefined for an unreadable surface.
+ */
+function createSafeControlCliTelemetryRecorder(
+  candidate: WorkspaceSearchMigrationTelemetryRecorder,
+): WorkspaceSearchMigrationTelemetryRecorder | undefined {
+  if (nodeUtilTypes.isProxy(candidate)) return undefined
+  let correlationId: string | undefined
+  let rateRecorder: WorkspaceSearchMigrationDescribeTableRateRecorder
+  let rateRecord:
+    WorkspaceSearchMigrationDescribeTableRateRecorder['record']
+  let bindConfigurationHash:
+    WorkspaceSearchMigrationTelemetryRecorder['bindConfigurationHash']
+  let finalize: WorkspaceSearchMigrationTelemetryRecorder['finalize']
+  let readEvidenceLocator:
+    WorkspaceSearchMigrationTelemetryRecorder['readEvidenceLocator']
+  let record: WorkspaceSearchMigrationTelemetryRecorder['record']
+  let snapshot: WorkspaceSearchMigrationTelemetryRecorder['snapshot']
+  try {
+    correlationId = candidate.correlationId
+    rateRecorder = candidate.describeTableRateRecorder
+    rateRecord = rateRecorder.record
+    bindConfigurationHash = candidate.bindConfigurationHash
+    finalize = candidate.finalize
+    readEvidenceLocator = candidate.readEvidenceLocator
+    record = candidate.record
+    snapshot = candidate.snapshot
+  } catch {
+    return undefined
+  }
+  if (
+    (
+      correlationId !== undefined &&
+      typeof correlationId !== 'string'
+    ) ||
+    typeof rateRecorder !== 'object' ||
+    rateRecorder === null ||
+    typeof rateRecord !== 'function' ||
+    typeof bindConfigurationHash !== 'function' ||
+    typeof finalize !== 'function' ||
+    typeof readEvidenceLocator !== 'function' ||
+    typeof record !== 'function' ||
+    typeof snapshot !== 'function'
+  ) {
+    return undefined
+  }
+  const safeRateRecorder:
+    WorkspaceSearchMigrationDescribeTableRateRecorder = Object.freeze({
+      /**
+       * Forwards one rate observation through the isolated recorder method.
+       *
+       * @param observation - Sanitized #158 rate observation.
+       */
+      record(
+        observation: WorkspaceSearchMigrationDescribeTableRateObservation,
+      ): void {
+        try {
+          const result: unknown = Reflect.apply(
+            rateRecord,
+            rateRecorder,
+            [observation],
+          )
+          if (result !== undefined) {
+            consumeControlCliNativePromise(result)
+          }
+        } catch {
+          // Optional rate observation must not affect migration work.
+        }
+      },
+    })
+  return Object.freeze({
+    correlationId,
+    describeTableRateRecorder: safeRateRecorder,
+    /**
+     * Forwards one migration observation without exposing observer failures.
+     *
+     * @param observation - Candidate migration telemetry observation.
+     */
+    record(observation: unknown): void {
+      try {
+        const result: unknown = Reflect.apply(
+          record,
+          candidate,
+          [observation],
+        )
+        if (result !== undefined) {
+          consumeControlCliNativePromise(result)
+        }
+      } catch {
+        // Optional telemetry must not affect migration work.
+      }
+    },
+    /**
+     * Forwards one reviewed configuration binding.
+     *
+     * @param configurationHash - Candidate reviewed digest.
+     * @returns Whether the wrapped recorder accepted the binding.
+     */
+    bindConfigurationHash(configurationHash: unknown): boolean {
+      try {
+        const result: unknown = Reflect.apply(
+          bindConfigurationHash,
+          candidate,
+          [configurationHash],
+        )
+        if (result === true) return true
+        if (result !== false) consumeControlCliNativePromise(result)
+        return false
+      } catch {
+        return false
+      }
+    },
+    /** @returns Safe evidence locator from the wrapped recorder. */
+    readEvidenceLocator(): string | undefined {
+      try {
+        const locator: unknown = Reflect.apply(
+          readEvidenceLocator,
+          candidate,
+          [],
+        )
+        if (typeof locator !== 'string' && locator !== undefined) {
+          consumeControlCliNativePromise(locator)
+        }
+        return typeof locator === 'string' ? locator : undefined
+      } catch {
+        return undefined
+      }
+    },
+    /** @returns Validated detached aggregate from the wrapped recorder. */
+    snapshot() {
+      try {
+        const result = Reflect.apply(snapshot, candidate, [])
+        if (
+          result !== undefined &&
+          !isSafeControlCliTelemetrySnapshot(result)
+        ) {
+          consumeControlCliNativePromise(result)
+          return undefined
+        }
+        return result
+      } catch {
+        return undefined
+      }
+    },
+    /**
+     * Forwards terminal metadata without exposing observer failures.
+     *
+     * @param finalization - Candidate terminal metadata.
+     */
+    finalize(finalization: unknown): void {
+      try {
+        const result: unknown = Reflect.apply(
+          finalize,
+          candidate,
+          [finalization],
+        )
+        if (result !== undefined) {
+          consumeControlCliNativePromise(result)
+        }
+      } catch {
+        // Optional finalization must not affect migration work.
+      }
+    },
+  })
+}
+
+/**
+ * Validates the detached snapshot shape needed by terminal classification
+ * without invoking accessors or Proxy traps.
+ *
+ * @param value - Runtime return from an injected snapshot method.
+ * @returns Whether the value is a strict plain secret-free snapshot.
+ */
+function isSafeControlCliTelemetrySnapshot(value: unknown): boolean {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    Array.isArray(value) ||
+    nodeUtilTypes.isProxy(value)
+  ) {
+    return false
+  }
+  try {
+    const prototype = Object.getPrototypeOf(value)
+    if (prototype !== Object.prototype && prototype !== null) return false
+    const snapshot = new Map<string, unknown>()
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== 'string') return false
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)
+      if (
+        descriptor === undefined ||
+        !descriptor.enumerable ||
+        !Object.hasOwn(descriptor, 'value')
+      ) {
+        return false
+      }
+      snapshot.set(key, descriptor.value)
+    }
+    const configurationBinding = snapshot.get('configurationBinding')
+    const observationCount = snapshot.get('observationCount')
+    const expectedKeys = configurationBinding === 'bound'
+      ? [
+        'configurationBinding',
+        'configurationHash',
+        'correlationId',
+        'evidenceLocator',
+        'lastReason',
+        'lastTrigger',
+        'metrics',
+        'observationCount',
+        'version',
+      ]
+      : [
+        'configurationBinding',
+        'correlationId',
+        'evidenceLocator',
+        'lastReason',
+        'lastTrigger',
+        'metrics',
+        'observationCount',
+        'version',
+      ]
+    if (
+      (configurationBinding !== 'bound' &&
+        configurationBinding !== 'unbound') ||
+      snapshot.size !== expectedKeys.length ||
+      !expectedKeys.every((key) => snapshot.has(key)) ||
+      snapshot.get('version') !==
+        WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION ||
+      typeof snapshot.get('correlationId') !== 'string' ||
+      typeof snapshot.get('evidenceLocator') !== 'string' ||
+      typeof snapshot.get('lastTrigger') !== 'string' ||
+      (
+        snapshot.get('lastReason') !== undefined &&
+        typeof snapshot.get('lastReason') !== 'string'
+      ) ||
+      typeof observationCount !== 'number' ||
+      !Number.isSafeInteger(observationCount) ||
+      observationCount < 0 ||
+      (
+        configurationBinding === 'bound' &&
+        typeof snapshot.get('configurationHash') !== 'string'
+      )
+    ) {
+      return false
+    }
+    const metrics = snapshot.get('metrics')
+    if (
+      typeof metrics !== 'object' ||
+      metrics === null ||
+      Array.isArray(metrics) ||
+      nodeUtilTypes.isProxy(metrics)
+    ) {
+      return false
+    }
+    const metricNames = [
+      'CheckpointProgressCount',
+      'CheckpointProgressUnits',
+      'CheckpointStallCount',
+      'CheckpointStallMilliseconds',
+      'DescribeTableAttemptCount',
+      'DescribeTableBudgetExhaustionCount',
+      'DescribeTableBudgetStopCount',
+      'DescribeTableCadenceWaitCount',
+      'DescribeTableCadenceWaitMilliseconds',
+      'DescribeTableThrottleBackoffMilliseconds',
+      'DescribeTableThrottleCount',
+      'OperationCount',
+      'QuarantineCount',
+      'TerminalFailureCount',
+    ]
+    const metricKeys = Reflect.ownKeys(metrics)
+    if (
+      metricKeys.length !== metricNames.length ||
+      metricKeys.some((key) =>
+        typeof key !== 'string' || !metricNames.includes(key)
+      )
+    ) {
+      return false
+    }
+    for (const metricName of metricNames) {
+      const descriptor = Object.getOwnPropertyDescriptor(metrics, metricName)
+      if (
+        descriptor === undefined ||
+        !descriptor.enumerable ||
+        !Object.hasOwn(descriptor, 'value') ||
+        typeof descriptor.value !== 'number' ||
+        !Number.isFinite(descriptor.value) ||
+        descriptor.value < 0 ||
+        descriptor.value > Number.MAX_SAFE_INTEGER
+      ) {
+        return false
+      }
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Consumes an exact native Promise returned across a synchronous telemetry port.
+ * Opaque objects, Proxies, and thenables are never inspected; callers reject
+ * them according to the exact synchronous method contract.
+ *
+ * @param value - Runtime return from an injected synchronous method.
+ * @returns Whether the value was an exact native Promise.
+ */
+function consumeControlCliNativePromise(value: unknown): boolean {
+  if (
+    !nodeUtilTypes.isPromise(value) ||
+    Object.getPrototypeOf(value) !== Promise.prototype ||
+    Object.hasOwn(value, 'constructor')
+  ) {
+    return false
+  }
+  void Reflect.apply(Promise.prototype.then, value, [
+    undefined,
+    () => undefined,
+  ])
+  return true
+}
+
+/**
+ * Binds commands that already carry a separately reviewed expected digest.
+ * This correlation binding does not prove fresh measurement or a matching
+ * runtime configuration. Measure remains deferred until measurement succeeds.
+ *
+ * @param configuration - Strict non-help command configuration.
+ * @param recorder - Optional best-effort telemetry recorder.
+ */
+function bindKnownControlCliTelemetryConfiguration(
+  configuration: Exclude<
+    WorkspaceSearchMigrationControlCliArguments,
+    WorkspaceSearchMigrationControlHelpCliArguments
+  >,
+  recorder?: WorkspaceSearchMigrationTelemetryRecorder,
+): void {
+  if (recorder === undefined || configuration.command === 'measure') return
+  try {
+    recorder.bindConfigurationHash(
+      configuration.expectedConfigurationHash,
+    )
+  } catch {
+    // Telemetry binding never changes the migration command.
+  }
+}
+
+/**
+ * Emits one terminal telemetry record without letting observer failures escape.
+ *
+ * @param recorder - Optional best-effort telemetry recorder.
+ * @param phase - Finite phase reached by the command.
+ * @param outcome - Finite successful, interrupted, or failed outcome.
+ */
+function finalizeControlCliTelemetry(
+  recorder: WorkspaceSearchMigrationTelemetryRecorder | undefined,
+  phase: WorkspaceSearchMigrationTelemetryPhase,
+  outcome: WorkspaceSearchMigrationTelemetryFinalOutcome,
+): void {
+  try {
+    recorder?.finalize({
+      version: WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+      phase,
+      outcome,
+    })
+  } catch {
+    // Telemetry finalization is intentionally best-effort.
+  }
+}
+
+/**
+ * Records one fixed terminal failure classification at the CLI boundary.
+ *
+ * @param recorder - Optional best-effort telemetry recorder.
+ * @param operation - Stable operation selected before asynchronous work.
+ * @param failure - Raw-value-free classified failure.
+ */
+function recordControlCliTerminalFailure(
+  recorder: WorkspaceSearchMigrationTelemetryRecorder | undefined,
+  operation: WorkspaceSearchMigrationControlCliOperation,
+  failure: ClassifiedControlCliFailure,
+): void {
+  if (recorder === undefined) return
+  try {
+    recorder.record({
+      version: WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+      kind: 'terminal-failure',
+      phase: telemetryPhaseForOperation(operation),
+      reason: classifyControlCliTelemetryFailureReason(
+        recorder,
+        operation,
+        failure,
+      ),
+    })
+  } catch {
+    // Failure reporting never replaces the command's primary failure.
+  }
+}
+
+/**
+ * Maps one safe command failure to a finite telemetry classification.
+ *
+ * @param recorder - Recorder whose rate aggregate may prove exhaustion.
+ * @param operation - Stable operation label.
+ * @param failure - Stable CLI or migration failure.
+ * @returns Fixed raw-error-free terminal failure reason.
+ */
+function classifyControlCliTelemetryFailureReason(
+  recorder: WorkspaceSearchMigrationTelemetryRecorder,
+  operation: WorkspaceSearchMigrationControlCliOperation,
+  failure: ClassifiedControlCliFailure,
+): WorkspaceSearchMigrationTelemetryTerminalFailureReason {
+  try {
+    if (
+      (recorder.snapshot()?.metrics
+        .DescribeTableBudgetExhaustionCount ?? 0) > 0
+    ) {
+      return 'rate-budget-exhausted'
+    }
+  } catch {
+    // Fall through to the stable failure-code mapping.
+  }
+  if (failure.code === 'INTERRUPTED') return 'interrupted'
+  if (failure.code === 'LEASE_LOST') return 'lease-lost'
+  if (
+    failure.code === 'LEASE_CONFLICT' ||
+    failure.code === 'INVALID_MAINTENANCE_EVIDENCE'
+  ) {
+    return 'authority-lost'
+  }
+  if (
+    failure.code === 'CONFIGURATION_DRIFT' ||
+    failure.code === 'CONFIGURATION_HASH_MISMATCH' ||
+    failure.code === 'IDENTITY_MISMATCH' ||
+    failure.code === 'TABLE_SCHEMA_MISMATCH'
+  ) {
+    return 'configuration-mismatch'
+  }
+  if (
+    failure.code === 'DRY_RUN_INVALID_ROWS' ||
+    failure.code === 'INVALID_JOURNAL' ||
+    failure.code === 'INVALID_SOURCE_ARTIFACT' ||
+    failure.code === 'INVALID_TARGET_ARTIFACT' ||
+    failure.code === 'PITR_NOT_READY' ||
+    failure.code === 'ROLLBACK_TARGET_DRIFT' ||
+    failure.code === 'SOURCE_DRIFT' ||
+    failure.code === 'TARGET_DRIFT'
+  ) {
+    return 'data-integrity'
+  }
+  if (failure.code === 'VERIFY_FAILED' || operation === 'verify') {
+    return 'verification-failed'
+  }
+  return 'operation-failed'
+}
+
+/**
+ * Selects the finite telemetry phase owned by one stable CLI operation.
+ *
+ * @param operation - Stable operation selected before parser or I/O failure.
+ * @returns Finite phase used for finalization and terminal failure records.
+ */
+function telemetryPhaseForOperation(
+  operation: WorkspaceSearchMigrationControlCliOperation,
+): WorkspaceSearchMigrationTelemetryPhase {
+  switch (operation) {
+    case 'apply':
+      return 'apply'
+    case 'bootstrap-open':
+    case 'status':
+      return 'writer-fence'
+    case 'close-replan':
+      return 'planning'
+    case 'measure':
+    case 'execution-status':
+      return 'measurement'
+    case 'release':
+      return 'release'
+    case 'rollback-complete':
+    case 'rollback-partial':
+      return 'rollback'
+    case 'verify':
+      return 'verification'
+    case 'help':
+    case 'unknown':
+      return 'admission'
+  }
 }
 
 /**
@@ -939,6 +1612,7 @@ async function readControlCliRatePolicy(
  * @param configuration - Strict read-only command.
  * @param ratePolicy - Reviewed strict rate policy.
  * @param dependencies - Capability-minimized session factory.
+ * @param telemetryRecorder - Optional best-effort invocation telemetry.
  * @param signal - Optional cooperative interruption signal.
  * @returns One secret-free success payload.
  */
@@ -949,6 +1623,7 @@ async function runReadOnlyCommand(
     | WorkspaceSearchMigrationStatusCliArguments,
   ratePolicy: WorkspaceSearchMigrationDescribeTableRatePolicy,
   dependencies: WorkspaceSearchMigrationControlCliReadDependencies,
+  telemetryRecorder?: WorkspaceSearchMigrationTelemetryRecorder,
   signal?: AbortSignal,
 ): Promise<unknown> {
   requireNotInterrupted(signal)
@@ -962,6 +1637,12 @@ async function runReadOnlyCommand(
         configuration.rateRecoverInterruptedCleanup,
       rateRecoverInterruptedAttempt:
         configuration.rateRecoverInterruptedAttempt,
+      ...(telemetryRecorder === undefined
+        ? {}
+        : {
+            rateRecorder: telemetryRecorder.describeTableRateRecorder,
+            telemetryRecorder,
+          }),
       ...(signal === undefined ? {} : { signal }),
     })
   } catch (error: unknown) {
@@ -990,6 +1671,9 @@ async function runReadOnlyCommand(
 
     const configurationHash = await session.measureConfigurationHash()
     requireNotInterrupted(signal)
+    if (configuration.command === 'measure') {
+      telemetryRecorder?.bindConfigurationHash(configurationHash)
+    }
     if (configuration.command === 'measure') {
       return {
         schemaVersion: 1,
@@ -1025,6 +1709,7 @@ async function runReadOnlyCommand(
  * @param configuration - Strict mutating command and approval.
  * @param ratePolicy - Reviewed strict rate policy.
  * @param dependencies - File, evidence-provider, and mutating factories.
+ * @param telemetryRecorder - Optional best-effort invocation telemetry.
  * @param signal - Optional cooperative interruption signal.
  * @returns One secret-free success payload.
  */
@@ -1034,6 +1719,7 @@ async function runMutatingCommand(
     | WorkspaceSearchMigrationCoordinatorCliArguments,
   ratePolicy: WorkspaceSearchMigrationDescribeTableRatePolicy,
   dependencies: WorkspaceSearchMigrationControlCliMutationDependencies,
+  telemetryRecorder?: WorkspaceSearchMigrationTelemetryRecorder,
   signal?: AbortSignal,
 ): Promise<unknown> {
   const bootstrapEvidence = configuration.command === 'bootstrap-open'
@@ -1061,6 +1747,12 @@ async function runMutatingCommand(
         configuration.rateRecoverInterruptedCleanup,
       rateRecoverInterruptedAttempt:
         configuration.rateRecoverInterruptedAttempt,
+      ...(telemetryRecorder === undefined
+        ? {}
+        : {
+            rateRecorder: telemetryRecorder.describeTableRateRecorder,
+            telemetryRecorder,
+          }),
       ...(signal === undefined ? {} : { signal }),
     })
   } catch (error: unknown) {
@@ -1306,6 +1998,12 @@ async function createDefaultControlCliReadSession(
     bootstrapRateCheckpoint: input.rateBootstrap,
     recoverInterruptedCleanup: input.rateRecoverInterruptedCleanup,
     recoverInterruptedAttempt: input.rateRecoverInterruptedAttempt,
+    ...(input.rateRecorder === undefined
+      ? {}
+      : { rateRecorder: input.rateRecorder }),
+    ...(input.telemetryRecorder === undefined
+      ? {}
+      : { telemetryRecorder: input.telemetryRecorder }),
     ...(input.signal === undefined ? {} : { signal: input.signal }),
   })
   return createControlCliReadSession(managed)
@@ -1326,9 +2024,19 @@ async function createDefaultControlCliMutationSession(
     bootstrapRateCheckpoint: input.rateBootstrap,
     recoverInterruptedCleanup: input.rateRecoverInterruptedCleanup,
     recoverInterruptedAttempt: input.rateRecoverInterruptedAttempt,
+    ...(input.rateRecorder === undefined
+      ? {}
+      : { rateRecorder: input.rateRecorder }),
+    ...(input.telemetryRecorder === undefined
+      ? {}
+      : { telemetryRecorder: input.telemetryRecorder }),
     ...(input.signal === undefined ? {} : { signal: input.signal }),
   })
-  return createControlCliMutationSession(managed, input.resources)
+  return createControlCliMutationSession(
+    managed,
+    input.resources,
+    input.telemetryRecorder,
+  )
 }
 
 /**
@@ -1368,11 +2076,13 @@ function createControlCliReadSession(
  *
  * @param managed - Complete rate-managed migration session.
  * @param resources - Immutable resources rebound by subordinate measurements.
+ * @param telemetryRecorder - Optional best-effort invocation telemetry.
  * @returns Explicit mutating control surface.
  */
 function createControlCliMutationSession(
   managed: WorkspaceSearchMigrationRateManagedAwsSession,
   resources: WorkspaceSearchMigrationRequestedResources,
+  telemetryRecorder?: WorkspaceSearchMigrationTelemetryRecorder,
 ): WorkspaceSearchMigrationControlCliMutationSession {
   return {
     measureConfigurationHash: async (): Promise<string> =>
@@ -1390,7 +2100,11 @@ function createControlCliMutationSession(
         .bootstrapOpen(authority),
     ),
     advanceStage: async (input) =>
-      await advanceDefaultCoordinatorStage(managed, input),
+      await advanceDefaultCoordinatorStage(
+        managed,
+        input,
+        telemetryRecorder,
+      ),
     createMaintenanceEvidenceProvider: (maintenanceEvidenceFile) =>
       createWorkspaceSearchMigrationFileEvidenceProvider({
         resources,
@@ -1414,16 +2128,19 @@ function createControlCliMutationSession(
  *
  * @param managed - Rate-managed session retained by the composition closure.
  * @param input - Capability-safe request supplied by CLI orchestration.
+ * @param telemetryRecorder - Optional best-effort invocation telemetry.
  * @returns Secret-free coordinator summary.
  */
 async function advanceDefaultCoordinatorStage(
   managed: WorkspaceSearchMigrationRateManagedAwsSession,
   input: WorkspaceSearchMigrationControlCliStageRequest,
+  telemetryRecorder?: WorkspaceSearchMigrationTelemetryRecorder,
 ): Promise<WorkspaceSearchMigrationControlCoordinatorSummary> {
   if (input.mode === 'close-replan') {
     return await advanceWorkspaceSearchMigrationControlStage({
       ...input,
       session: managed,
+      ...(telemetryRecorder === undefined ? {} : { telemetryRecorder }),
     })
   }
   if (input.mode === 'release') {
@@ -1435,6 +2152,7 @@ async function advanceDefaultCoordinatorStage(
   return await advanceWorkspaceSearchMigrationControlStage({
     ...input,
     session: managed,
+    ...(telemetryRecorder === undefined ? {} : { telemetryRecorder }),
   })
 }
 
@@ -2109,12 +2827,55 @@ function identifyOperation(
  *
  * @param writer - Console writer.
  * @param value - Raw-value-free payload.
+ * @param telemetryRecord - Optional serialized EMF fields for the same line.
  */
 function writeJsonLine(
   writer: (value: string) => void,
   value: unknown,
+  telemetryRecord?: string,
 ): void {
-  writer(JSON.stringify(value))
+  writer(JSON.stringify(
+    mergeControlCliTelemetryRecord(value, telemetryRecord),
+  ))
+}
+
+/**
+ * Adds trusted serialized EMF fields without creating a second CLI line.
+ * Invalid or non-object telemetry falls back to the original control payload.
+ *
+ * @param value - Raw-value-free control payload.
+ * @param telemetryRecord - Optional serialized aggregate EMF object.
+ * @returns One top-level object preserving all control result fields.
+ */
+function mergeControlCliTelemetryRecord(
+  value: unknown,
+  telemetryRecord?: string,
+): unknown {
+  if (telemetryRecord === undefined) return value
+  try {
+    const telemetryValue: unknown = JSON.parse(telemetryRecord)
+    if (
+      !isControlCliJsonRecord(value) ||
+      !isControlCliJsonRecord(telemetryValue)
+    ) {
+      return value
+    }
+    return Object.assign({}, telemetryValue, value)
+  } catch {
+    return value
+  }
+}
+
+/**
+ * Checks one plain JSON object used only for final line composition.
+ *
+ * @param value - Candidate parsed telemetry or internal control payload.
+ * @returns Whether the candidate is a non-array object.
+ */
+function isControlCliJsonRecord(
+  value: unknown,
+): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 if (import.meta.main) {

@@ -10,7 +10,10 @@ import {
 } from './migration-contract'
 import {
   WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_PAGE_BASELINE_ATTEMPTS,
+  WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
   type WorkspaceSearchMigrationDescribeTableRateEvidence,
+  type WorkspaceSearchMigrationDescribeTableRateObservation,
+  type WorkspaceSearchMigrationDescribeTableRateRecorder,
 } from './migration-describe-table-rate-budget'
 import {
   parseWorkspaceSearchMigrationControlCliArguments,
@@ -36,6 +39,11 @@ import {
 import type {
   WorkspaceSearchMigrationMaintenanceEvidenceProvider,
 } from './migration-post-close-planning-supervisor'
+import {
+  createWorkspaceSearchMigrationTelemetryRecorder,
+  type WorkspaceSearchMigrationTelemetryContext,
+  type WorkspaceSearchMigrationTelemetrySink,
+} from './migration-telemetry'
 import type {
   RenewWorkspaceSearchMigrationPrePlanMaintenanceEvidenceInput,
   WorkspaceSearchMigrationPrePlanAuthority,
@@ -119,6 +127,11 @@ type RecordingSessionOptions = {
   readonly writerFence?: WorkspaceSearchMigrationWriterFenceSummary
   /** Optional gate holding one coordinator stage in flight. */
   readonly stageGate?: Promise<void>
+  /** Optional trusted rate observation emitted during session creation. */
+  readonly rateObservation?:
+    WorkspaceSearchMigrationDescribeTableRateObservation
+  /** Whether to install deterministic migration telemetry. */
+  readonly telemetry?: boolean
 }
 
 /** Shared exact-close and identifier-free rate recording behavior. */
@@ -511,12 +524,18 @@ function createDependencies(
       createReadSession: async (input) => {
         events.push('create-read-session')
         readInputs.push(input)
+        if (options.rateObservation !== undefined) {
+          input.rateRecorder?.record(options.rateObservation)
+        }
         if (options.factoryGate !== undefined) await options.factoryGate
         return new RecordingReadSession(events, options)
       },
       createMutationSession: async (input) => {
         events.push('create-mutation-session')
         mutationInputs.push(input)
+        if (options.rateObservation !== undefined) {
+          input.rateRecorder?.record(options.rateObservation)
+        }
         if (options.factoryGate !== undefined) await options.factoryGate
         return new RecordingMutationSession(events, options)
       },
@@ -525,6 +544,20 @@ function createDependencies(
         if (path === ratePolicyPath) return Uint8Array.from(ratePolicyBytes)
         return Uint8Array.of(1, 2, 3)
       },
+      ...(options.telemetry !== true
+        ? {}
+        : {
+            createTelemetryRecorder: (context, sink) =>
+              createWorkspaceSearchMigrationTelemetryRecorder(
+                context,
+                {
+                  clock: () => 1_800_000_000_000,
+                  sequence: () => 7,
+                  correlationSource: () => 'a'.repeat(32),
+                  sink,
+                },
+              ),
+          }),
     },
   }
 }
@@ -1023,6 +1056,452 @@ describe('Workspace Search migration control CLI capabilities', () => {
 })
 
 describe('Workspace Search migration control CLI output and lifecycle', () => {
+  test('merges deferred-bound rate telemetry into the single measure line', async () => {
+    const harness = createDependencies({
+      telemetry: true,
+      rateObservation: {
+        version:
+          WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
+        kind: 'attempt',
+        phase: 'measurement',
+        sequence: 1,
+        observedAtMilliseconds: 25,
+        remainingNormalAdmissionAttempts: 9,
+        remainingWindowAttempts: 8,
+        remainingPageAttempts: 0,
+        inFlight: 1,
+      },
+    })
+
+    const result = await captureCliRun(
+      createMeasureArguments(),
+      harness.dependencies,
+    )
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toEqual([])
+    expect(result.stdout).toHaveLength(1)
+    const record: unknown = JSON.parse(result.stdout[0] ?? '')
+    expect(record).toMatchObject({
+      _aws: {
+        Timestamp: 1_800_000_000_000,
+        CloudWatchMetrics: [{
+          Namespace: 'Mukuroji/WorkspaceSearchMigration',
+          Dimensions: [['Service']],
+        }],
+      },
+      schemaVersion: 1,
+      event: 'workspace-search-migration.finalized',
+      Service: 'mukuroji-workspace-search-migration',
+      operation: 'measure',
+      phase: 'measurement',
+      outcome: 'succeeded',
+      status: 'pass',
+      configurationHash: expectedConfigurationHash,
+      policyVersion,
+      OperationCount: 1,
+      DescribeTableAttemptCount: 1,
+      DescribeTableThrottleCount: 0,
+      DescribeTableBudgetExhaustionCount: 0,
+      CheckpointStallCount: 0,
+      QuarantineCount: 0,
+      TerminalFailureCount: 0,
+    })
+    expect(harness.readInputs[0]?.rateRecorder).toBe(
+      harness.readInputs[0]?.telemetryRecorder
+        ?.describeTableRateRecorder,
+    )
+    const serialized = result.stdout[0] ?? ''
+    for (const forbidden of [
+      '123456789012',
+      'migration-state-table',
+      ratePolicyPath,
+      'owner-process-01',
+    ]) {
+      expect(serialized).not.toContain(forbidden)
+    }
+  })
+
+  test('emits rate exhaustion when measurement fails before configuration binding', async () => {
+    const harness = createDependencies({
+      telemetry: true,
+      failure: new Error('private-measurement-failure'),
+      rateObservation: {
+        version:
+          WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
+        kind: 'budget-stop',
+        phase: 'measurement',
+        reason: 'budget-capacity',
+        observedAtMilliseconds: 25,
+        requiredAttempts: 1,
+        remainingNormalAdmissionAttempts: 0,
+        remainingWindowAttempts: 0,
+        retryAfterMilliseconds: 1_000,
+      },
+    })
+
+    const result = await captureCliRun(
+      createMeasureArguments(),
+      harness.dependencies,
+    )
+
+    expect(result.exitCode).toBe(1)
+    expect(result.stdout).toEqual([])
+    expect(result.stderr).toHaveLength(1)
+    const record: unknown = JSON.parse(result.stderr[0] ?? '')
+    expect(record).toMatchObject({
+      event: 'workspace-search-migration.finalized',
+      operation: 'measure',
+      phase: 'measurement',
+      outcome: 'failed',
+      status: 'error',
+      code: 'OPERATION_FAILED',
+      configurationBinding: 'unbound',
+      lastReason: 'rate-budget-exhausted',
+      DescribeTableBudgetExhaustionCount: 1,
+      DescribeTableBudgetStopCount: 1,
+      OperationCount: 1,
+      TerminalFailureCount: 1,
+    })
+    expect(record).not.toHaveProperty('configurationHash')
+    expect(result.stderr[0]).not.toContain('private-measurement-failure')
+    expect(result.stderr[0]).not.toContain('migration-state-table')
+  })
+
+  test('isolates hostile telemetry methods from a successful measurement', async () => {
+    for (const createTelemetryRecorder of [
+      (
+        context: WorkspaceSearchMigrationTelemetryContext,
+        sink: WorkspaceSearchMigrationTelemetrySink,
+      ) => ({
+        ...createWorkspaceSearchMigrationTelemetryRecorder(
+          context,
+          { sink },
+        ),
+        bindConfigurationHash(): boolean {
+          throw new Error('private-bind-failure')
+        },
+      }),
+      (
+        context: WorkspaceSearchMigrationTelemetryContext,
+        sink: WorkspaceSearchMigrationTelemetrySink,
+      ) => {
+        const recorder = createWorkspaceSearchMigrationTelemetryRecorder(
+          context,
+          { sink },
+        )
+        return {
+          ...recorder,
+          get describeTableRateRecorder():
+            WorkspaceSearchMigrationDescribeTableRateRecorder {
+            throw new Error('private-rate-recorder-failure')
+          },
+        }
+      },
+    ]) {
+      const harness = createDependencies()
+      const result = await captureCliRun(
+        createMeasureArguments(),
+        {
+          ...harness.dependencies,
+          createTelemetryRecorder,
+        },
+      )
+
+      expect(result.exitCode).toBe(0)
+      expect(result.stderr).toEqual([])
+      expect(result.stdout).toHaveLength(1)
+      expect(JSON.parse(result.stdout[0] ?? '')).toMatchObject({
+        operation: 'measure',
+        status: 'pass',
+        configurationHash: expectedConfigurationHash,
+      })
+      expect(result.stdout[0]).not.toContain('private-')
+    }
+  })
+
+  test('consumes rejected Promise returns from synchronous telemetry ports', async () => {
+    const harness = createDependencies({
+      failure: new Error('private-primary-measurement-failure'),
+      rateObservation: {
+        version:
+          WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
+        kind: 'attempt',
+        phase: 'measurement',
+        sequence: 1,
+        observedAtMilliseconds: 25,
+        remainingNormalAdmissionAttempts: 9,
+        remainingWindowAttempts: 8,
+        remainingPageAttempts: 0,
+        inFlight: 1,
+      },
+    })
+    const createTelemetryRecorder = (
+      context: WorkspaceSearchMigrationTelemetryContext,
+      sink: WorkspaceSearchMigrationTelemetrySink,
+    ) => {
+      const recorder = createWorkspaceSearchMigrationTelemetryRecorder(
+        context,
+        { sink },
+      )
+      const hostileRecorder = {
+        ...recorder,
+        describeTableRateRecorder: {
+          ...recorder.describeTableRateRecorder,
+        },
+      }
+      Object.defineProperties(hostileRecorder.describeTableRateRecorder, {
+        record: {
+          value: () =>
+            Promise.reject(new Error('raw-async-rate-canary')),
+        },
+      })
+      Object.defineProperties(hostileRecorder, {
+        record: {
+          value: () =>
+            Promise.reject(new Error('raw-async-record-canary')),
+        },
+        snapshot: {
+          value: () =>
+            Promise.reject(new Error('raw-async-snapshot-canary')),
+        },
+        finalize: {
+          value: () =>
+            Promise.reject(new Error('raw-async-finalize-canary')),
+        },
+      })
+      return hostileRecorder
+    }
+
+    const result = await captureCliRun(
+      createMeasureArguments(),
+      {
+        ...harness.dependencies,
+        createTelemetryRecorder,
+      },
+    )
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(result.exitCode).toBe(1)
+    expect(result.stdout).toEqual([])
+    expect(result.stderr).toHaveLength(1)
+    expect(JSON.parse(result.stderr[0] ?? '')).toMatchObject({
+      operation: 'measure',
+      status: 'error',
+      code: 'OPERATION_FAILED',
+    })
+    for (const privateCanary of [
+      'private-primary-measurement-failure',
+      'raw-async-rate-canary',
+      'raw-async-record-canary',
+      'raw-async-snapshot-canary',
+      'raw-async-finalize-canary',
+    ]) {
+      expect(JSON.stringify(result)).not.toContain(privateCanary)
+    }
+  })
+
+  test('consumes a rejected Promise returned by telemetry binding', async () => {
+    const harness = createDependencies()
+    const createTelemetryRecorder = (
+      context: WorkspaceSearchMigrationTelemetryContext,
+      sink: WorkspaceSearchMigrationTelemetrySink,
+    ) => {
+      const hostileRecorder = {
+        ...createWorkspaceSearchMigrationTelemetryRecorder(
+          context,
+          { sink },
+        ),
+      }
+      Object.defineProperty(hostileRecorder, 'bindConfigurationHash', {
+        value: () =>
+          Promise.reject(new Error('raw-async-bind-canary')),
+      })
+      return hostileRecorder
+    }
+
+    const result = await captureCliRun(
+      createMeasureArguments(),
+      {
+        ...harness.dependencies,
+        createTelemetryRecorder,
+      },
+    )
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toEqual([])
+    expect(result.stdout).toHaveLength(1)
+    expect(JSON.parse(result.stdout[0] ?? '')).toMatchObject({
+      operation: 'measure',
+      status: 'pass',
+      configurationHash: expectedConfigurationHash,
+    })
+    expect(JSON.stringify(result)).not.toContain('raw-async-bind-canary')
+  })
+
+  test('disables telemetry when its factory returns a rejected Promise', async () => {
+    const harness = createDependencies()
+    const dependencies = { ...harness.dependencies }
+    Object.defineProperty(dependencies, 'createTelemetryRecorder', {
+      enumerable: true,
+      value: () =>
+        Promise.reject(new Error('raw-async-factory-canary')),
+    })
+
+    const result = await captureCliRun(
+      createMeasureArguments(),
+      dependencies,
+    )
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toEqual([])
+    expect(result.stdout).toHaveLength(1)
+    expect(JSON.parse(result.stdout[0] ?? '')).toMatchObject({
+      operation: 'measure',
+      status: 'pass',
+      configurationHash: expectedConfigurationHash,
+    })
+    expect(JSON.stringify(result)).not.toContain('raw-async-factory-canary')
+  })
+
+  test('rejects Proxy and accessor telemetry snapshots without traps', async () => {
+    let accessorReads = 0
+    let proxyTrapCalls = 0
+    const accessorSnapshot = Object.defineProperty({}, 'metrics', {
+      enumerable: true,
+      get(): unknown {
+        accessorReads += 1
+        return {}
+      },
+    })
+    const proxySnapshot = new Proxy({}, {
+      ownKeys(): never {
+        proxyTrapCalls += 1
+        throw new Error('raw-snapshot-proxy-canary')
+      },
+    })
+
+    for (const hostileSnapshot of [accessorSnapshot, proxySnapshot]) {
+      const harness = createDependencies({
+        failure: new Error('private-snapshot-primary-failure'),
+      })
+      const createTelemetryRecorder = (
+        context: WorkspaceSearchMigrationTelemetryContext,
+        sink: WorkspaceSearchMigrationTelemetrySink,
+      ) => {
+        const hostileRecorder = {
+          ...createWorkspaceSearchMigrationTelemetryRecorder(
+            context,
+            { sink },
+          ),
+        }
+        Object.defineProperty(hostileRecorder, 'snapshot', {
+          value: () => hostileSnapshot,
+        })
+        return hostileRecorder
+      }
+
+      const result = await captureCliRun(
+        createMeasureArguments(),
+        {
+          ...harness.dependencies,
+          createTelemetryRecorder,
+        },
+      )
+
+      expect(result.exitCode).toBe(1)
+      expect(result.stdout).toEqual([])
+      expect(result.stderr).toHaveLength(1)
+      expect(JSON.parse(result.stderr[0] ?? '')).toMatchObject({
+        operation: 'measure',
+        status: 'error',
+        code: 'OPERATION_FAILED',
+        lastReason: 'operation-failed',
+      })
+      expect(JSON.stringify(result)).not.toContain('private-')
+      expect(JSON.stringify(result)).not.toContain('raw-snapshot-proxy-canary')
+    }
+    expect(accessorReads).toBe(0)
+    expect(proxyTrapCalls).toBe(0)
+  })
+
+  test('emits a fixed terminal telemetry reason on a reviewed hash mismatch', async () => {
+    const harness = createDependencies({
+      telemetry: true,
+      measuredConfigurationHash: differentConfigurationHash,
+    })
+
+    const result = await captureCliRun(
+      createMutationArguments(
+        'bootstrap-open',
+        'initial-writer-fence-bootstrap',
+      ),
+      harness.dependencies,
+    )
+
+    expect(result.exitCode).toBe(1)
+    expect(result.stdout).toEqual([])
+    expect(result.stderr).toHaveLength(1)
+    const record: unknown = JSON.parse(result.stderr[0] ?? '')
+    expect(record).toMatchObject({
+      _aws: {
+        CloudWatchMetrics: [{
+          Namespace: 'Mukuroji/WorkspaceSearchMigration',
+          Dimensions: [['Service']],
+        }],
+      },
+      operation: 'bootstrap-open',
+      phase: 'writer-fence',
+      outcome: 'failed',
+      status: 'error',
+      code: 'CONFIGURATION_HASH_MISMATCH',
+      configurationBinding: 'bound',
+      configurationHash: expectedConfigurationHash,
+      lastReason: 'configuration-mismatch',
+      OperationCount: 1,
+      TerminalFailureCount: 1,
+    })
+    expect(result.stderr[0]).not.toContain(differentConfigurationHash)
+    expect(result.stderr[0]).not.toContain('migration-state-table')
+  })
+
+  test('binds a reviewed hash before a non-measure session factory fails', async () => {
+    const harness = createDependencies({ telemetry: true })
+    const result = await captureCliRun(
+      createMutationArguments(
+        'bootstrap-open',
+        'initial-writer-fence-bootstrap',
+      ),
+      {
+        ...harness.dependencies,
+        createMutationSession: async () => {
+          throw new Error('private-session-factory-failure')
+        },
+      },
+    )
+
+    expect(result.exitCode).toBe(1)
+    expect(result.stdout).toEqual([])
+    expect(result.stderr).toHaveLength(1)
+    expect(JSON.parse(result.stderr[0] ?? '')).toMatchObject({
+      operation: 'bootstrap-open',
+      phase: 'writer-fence',
+      outcome: 'failed',
+      status: 'error',
+      code: 'OPERATION_FAILED',
+      configurationBinding: 'bound',
+      configurationHash: expectedConfigurationHash,
+      lastReason: 'operation-failed',
+    })
+    expect(result.stderr[0]).not.toContain('private-session-factory-failure')
+    expect(result.stderr[0]).not.toContain('migration-state-table')
+  })
+
   test('emits one policy-bound identifier-free line for execution status', async () => {
     const harness = createDependencies()
     const result = await captureCliRun(

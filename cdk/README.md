@@ -45,7 +45,8 @@ trace/telemetry write action だけを追加します。API Lambda は readiness
 持つ独立 policy を使います。
 
 Stack は API Lambda の `Errors`、`Throttles`、p95 `Duration`（12秒）、HTTP API の 5xx、
-application EMF の `ServerErrorCount` を CloudWatch alarm として作成します。38 metric alarmと
+application EMF の `ServerErrorCount` を CloudWatch alarm として作成します。Workspace Search
+migration専用の5 alarmを含む43 metric alarmと
 1 composite alarmの
 `AlarmActions` は、必須parameterで指定した既存のprimary/secondary SNS topicへ接続します。
 Stackはtopic、subscription、Incident Manager escalation planを作成・変更しません。Topic ownerは
@@ -74,9 +75,28 @@ environment evidenceへ保存します。
 
 Operator自身の`sns:Publish`だけではCloudWatch principalとKMS経路を検証できません。Deploy後は
 同じ両topic actionを持つcontrolled test alarmを実際に`OK → ALARM`へ遷移させ、CloudWatch alarm
-history、両subscriptionの受信時刻/message ID、`ALARM → OK`への復帰を保存します。全39 alarmの
+history、両subscriptionの受信時刻/message ID、`ALARM → OK`への復帰を保存します。全44 alarmの
 `AlarmActions`がprimary/secondaryの2 ARNを含み、inventory済みの既存actionも保持していることを
 templateとdeployed configurationの両方で照合します。
+
+### Workspace Search migration alarms
+
+`Mukuroji/WorkspaceSearchMigration` namespaceには、
+`Service=mukuroji-workspace-search-migration`だけをdimensionとする次の5 alarmがあります。
+
+- `WorkspaceSearchMigrationDescribeTableThrottleAlarm`
+- `WorkspaceSearchMigrationRateBudgetExhaustionAlarm`
+- `WorkspaceSearchMigrationCheckpointStallAlarm`
+- `WorkspaceSearchMigrationQuarantineAlarm`
+- `WorkspaceSearchMigrationTerminalFailureAlarm`
+
+すべて5分`Sum >= 1`、evaluation/datapoints 1/1、`TreatMissingData=notBreaching`です。
+Run ID、table、tenant、operation、phase、outcome、correlationはdimensionにしません。既存のalarm routing
+aspectがprimary/secondaryの両SNS actionを付与し、stackは追加topic、subscription、migration用
+`PutMetricData`権限を作成しません。CLIのterminal EMFと即時live-stall EMFをmetric化する実行surfaceは、
+そのstdout/stderrの両方をCloudWatch Logsへingestする必要があります。Alarm response、secret-free correlation、非本番の
+real metricによる`OK → ALARM → OK`と両receiptの手順は
+[`docs/operational-readiness.md`](../docs/operational-readiness.md)を参照してください。
 
 ## Outputs
 
@@ -680,7 +700,7 @@ VITE_API_BASE_URL="$FUNCTION_URL" bun run web:dev
 
 Alarm routingを初めて追加するupgradeでは、同一account/regionに異なる2つのstandard SNS topicを
 先に作成し、上記policy、KMS、subscription、controlled alarm testの契約を満たします。既存環境で
-monitoring stack、custom resource、または手動操作が`AlarmActions`を管理している場合は、全39 alarmの
+monitoring stack、custom resource、または手動操作が`AlarmActions`を管理している場合は、全44 alarmの
 現行actionとownerをinventory化し、必要なdestinationを新topic側へ移行してから旧reconcilerを停止します。
 複数ownerが同じalarm propertyを更新する状態でdeployしません。`cdk diff`では
 2つの必須parameter、相異rule、既存alarmの`AlarmActions`以外にalarm resourceの置換や

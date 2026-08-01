@@ -118,6 +118,10 @@ import {
   parseMaintenanceEvidence,
   type WorkspaceSearchMaintenanceEvidence,
 } from './maintenance-evidence'
+import {
+  WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+  type WorkspaceSearchMigrationTelemetryRecorder,
+} from './migration-telemetry'
 import type {
   AcquireWorkspaceSearchMigrationLeaseInput,
   HeartbeatWorkspaceSearchMigrationLeaseInput,
@@ -212,6 +216,10 @@ type RecordingSessionBehavior = {
   /** Optional barrier entered by a selected source page commit. */
   readonly beforeSourceCommit?: (
     source: WorkspaceSearchMigrationSourceName,
+  ) => Promise<void>
+  /** Optional barrier entered before one maintenance receipt transaction. */
+  readonly beforeMaintenanceEvidenceRenewal?: (
+    nextPointerRevision: number,
   ) => Promise<void>
   /** Source whose first durable page response is lost after commit. */
   readonly loseSourceCommitResponse?:
@@ -353,6 +361,9 @@ implements WorkspaceSearchMigrationMaintenanceEvidenceProvider {
   /** Whether post-close evidence should begin just before close. */
   invalidPostCloseStart = false
 
+  /** Whether post-close collection should fail after any configured wait. */
+  failPostCloseCollection = false
+
   /** Exact measured TableIds returned with every evidence file. */
   private readonly tableIds:
     WorkspaceSearchMigrationSealedPlanningTableIds
@@ -384,6 +395,9 @@ implements WorkspaceSearchMigrationMaintenanceEvidenceProvider {
     this.requests.push(request)
     if (request.phase === 'post-close') {
       await this.postCloseBarrier
+      if (this.failPostCloseCollection) {
+        throw new Error('Injected post-close evidence failure.')
+      }
     }
     const drainStartedAt =
       request.phase === 'post-close' && this.invalidPostCloseStart
@@ -584,6 +598,10 @@ implements WorkspaceSearchMigrationPostClosePlanningSession {
         'Fixture maintenance pointer CAS failed.',
       )
     }
+    const nextPointerRevision = this.state.pointerRevision + 1
+    await this.behavior.beforeMaintenanceEvidenceRenewal?.(
+      nextPointerRevision,
+    )
     this.state.pointerRevision += 1
     this.events.push(`authority:renew:${this.state.pointerRevision}`)
     const parsed = parseMaintenanceEvidence(input.evidenceBytes, { now })
@@ -1133,6 +1151,9 @@ describe('Workspace Search post-close planning supervisor', () => {
     let providerReads = 0
     let schedulerReads = 0
     let clockReads = 0
+    let telemetryRecorderReads = 0
+    let checkpointStallClockReads = 0
+    let checkpointStallScheduleReads = 0
 
     const result =
       await superviseWorkspaceSearchMigrationPostClosePlanning({
@@ -1153,6 +1174,18 @@ describe('Workspace Search post-close planning supervisor', () => {
           clockReads += 1
           return base.clock
         },
+        get telemetryRecorder() {
+          telemetryRecorderReads += 1
+          return undefined
+        },
+        get checkpointStallClock() {
+          checkpointStallClockReads += 1
+          return undefined
+        },
+        get checkpointStallSchedule() {
+          checkpointStallScheduleReads += 1
+          return undefined
+        },
       })
 
     expect(result.executionBoundary.phase).toBe('planning-admitted')
@@ -1160,6 +1193,253 @@ describe('Workspace Search post-close planning supervisor', () => {
     expect(providerReads).toBe(1)
     expect(schedulerReads).toBe(1)
     expect(clockReads).toBe(1)
+    expect(telemetryRecorderReads).toBe(1)
+    expect(checkpointStallClockReads).toBe(1)
+    expect(checkpointStallScheduleReads).toBe(1)
+  })
+
+  test('arms only after intentional drain, records every planning page, and stops', async () => {
+    const fixture = createSupervisorFixture()
+    const drainBarrier = createDeferred<void>()
+    fixture.provider.postCloseBarrier = drainBarrier.promise
+    const observations: unknown[] = []
+    const recorder = createTestTelemetryRecorder(observations)
+    const delays: number[] = []
+    const scheduledCallbacks: (() => void)[] = []
+    const canceled: boolean[] = []
+    let cancellationCount = 0
+
+    const supervision =
+      superviseWorkspaceSearchMigrationPostClosePlanning({
+        ...createSupervisorInput(fixture, fixture.createSession()),
+        telemetryRecorder: recorder,
+        checkpointStallClock: () => 1_000,
+        checkpointStallSchedule: (delayMilliseconds, callback) => {
+          delays.push(delayMilliseconds)
+          const index = scheduledCallbacks.push(callback) - 1
+          canceled.push(false)
+          return () => {
+            canceled[index] = true
+            cancellationCount += 1
+          }
+        },
+      })
+
+    await waitForPostCloseEvidenceCollection(fixture.provider)
+    expect(delays).toEqual([])
+    expect(observations).toEqual([])
+
+    drainBarrier.resolve()
+    await supervision
+
+    expect(delays).toHaveLength(6)
+    expect(delays.every((delay) => delay === 300_000)).toBe(true)
+    expect(cancellationCount).toBe(6)
+    expect(canceled.every(Boolean)).toBe(true)
+    expect(observations).toHaveLength(5)
+    for (const observation of observations) {
+      expect(observation).toEqual({
+        version: WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+        kind: 'checkpoint-progress',
+        phase: 'planning',
+        progressUnits: 1,
+      })
+    }
+  })
+
+  test('records a deterministic live planning stall and resumes on progress', async () => {
+    const fixture = createSupervisorFixture()
+    const pageBarrier = createDeferred<void>()
+    const session = fixture.createSession({
+      beforeSourceCommit: async (source) => {
+        if (source === 'project-directory') await pageBarrier.promise
+      },
+    })
+    const observations: unknown[] = []
+    const scheduledCallbacks: (() => void)[] = []
+    let telemetryNow = 5_000
+    const supervision =
+      superviseWorkspaceSearchMigrationPostClosePlanning({
+        ...createSupervisorInput(fixture, session),
+        telemetryRecorder: createTestTelemetryRecorder(observations),
+        checkpointStallClock: () => telemetryNow,
+        checkpointStallSchedule: (_delayMilliseconds, callback) => {
+          scheduledCallbacks.push(callback)
+          return () => {}
+        },
+      })
+
+    await waitForEvent(
+      fixture.events,
+      'source:commit:project-directory',
+    )
+    const stallCallback = scheduledCallbacks.at(-1)
+    if (stallCallback === undefined) {
+      throw new Error('Expected one live planning watchdog callback.')
+    }
+    telemetryNow += 300_000
+    stallCallback()
+    expect(observations).toContainEqual({
+      version: WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+      kind: 'checkpoint-stall',
+      phase: 'planning',
+      stalledForMilliseconds: 300_000,
+    })
+
+    pageBarrier.resolve()
+    await supervision
+    expect(observations).toContainEqual({
+      version: WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+      kind: 'checkpoint-progress',
+      phase: 'planning',
+      progressUnits: 1,
+    })
+  })
+
+  test('excludes a long evidence renewal but rearms for a durable planning hang', async () => {
+    const fixture = createSupervisorFixture()
+    const renewalBarrier = createDeferred<void>()
+    const durableRenewalBarrier = createDeferred<void>()
+    const durableRenewalStarted = createDeferred<void>()
+    const session = fixture.createSession({
+      beforeSourceCommit: async (source) => {
+        if (source === 'project-directory') {
+          expireCurrentMaintenanceReceipt(fixture.state)
+          fixture.provider.postCloseBarrier = renewalBarrier.promise
+        }
+      },
+      beforeMaintenanceEvidenceRenewal: async (
+        nextPointerRevision,
+      ) => {
+        if (nextPointerRevision !== 3) return
+        durableRenewalStarted.resolve()
+        await durableRenewalBarrier.promise
+      },
+    })
+    const observations: unknown[] = []
+    const callbacks: (() => void)[] = []
+    const canceled: boolean[] = []
+    let telemetryNow = 20_000
+    const supervision =
+      superviseWorkspaceSearchMigrationPostClosePlanning({
+        ...createSupervisorInput(fixture, session),
+        telemetryRecorder: createTestTelemetryRecorder(observations),
+        checkpointStallClock: () => telemetryNow,
+        checkpointStallSchedule: (_delayMilliseconds, callback) => {
+          const index = callbacks.push(callback) - 1
+          canceled.push(false)
+          return () => {
+            canceled[index] = true
+          }
+        },
+      })
+
+    await waitForPostCloseEvidenceCollectionCount(
+      fixture.provider,
+      2,
+    )
+    const pausedCallback = callbacks.at(-1)
+    if (pausedCallback === undefined) {
+      throw new Error('Expected one paused planning watchdog callback.')
+    }
+    telemetryNow += 20 * 60_000
+    pausedCallback()
+    expect(
+      observations.some((observation) =>
+        typeof observation === 'object' &&
+        observation !== null &&
+        'kind' in observation &&
+        observation.kind === 'checkpoint-stall'
+      ),
+    ).toBe(false)
+
+    renewalBarrier.resolve()
+    await durableRenewalStarted.promise
+    const activeIndex = canceled.findIndex((isCanceled) => !isCanceled)
+    const activeCallback = callbacks[activeIndex]
+    if (activeCallback === undefined) {
+      throw new Error('Expected monitoring during durable renewal.')
+    }
+    telemetryNow += 300_000
+    activeCallback()
+    expect(observations).toContainEqual({
+      version: WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+      kind: 'checkpoint-stall',
+      phase: 'planning',
+      stalledForMilliseconds: 300_000,
+    })
+
+    durableRenewalBarrier.resolve()
+    await supervision
+  })
+
+  test('stops after renewal failure while isolating the observer', async () => {
+    const fixture = createSupervisorFixture()
+    const session = fixture.createSession({
+      beforeSourceCommit: async (source) => {
+        if (source !== 'project-directory') return
+        expireCurrentMaintenanceReceipt(fixture.state)
+        fixture.provider.failPostCloseCollection = true
+      },
+    })
+    const canceled: boolean[] = []
+    const failure = await captureFailure(
+      superviseWorkspaceSearchMigrationPostClosePlanning({
+        ...createSupervisorInput(fixture, session),
+        telemetryRecorder: createTestTelemetryRecorder([], true),
+        checkpointStallClock: () => 1_000,
+        checkpointStallSchedule: (_delayMilliseconds, _callback) => {
+          const index = canceled.push(false) - 1
+          return () => {
+            canceled[index] = true
+          }
+        },
+      }),
+    )
+
+    expect(readFailureCode(failure))
+      .toBe('TRANSIENT_INFRASTRUCTURE_FAILURE')
+    expect(canceled.length).toBeGreaterThan(0)
+    expect(canceled.every(Boolean)).toBe(true)
+  })
+
+  test('stops on page failure and isolates observer or scheduler failures', async () => {
+    const failingFixture = createSupervisorFixture()
+    let cancellationCount = 0
+    const failure = await captureFailure(
+      superviseWorkspaceSearchMigrationPostClosePlanning({
+        ...createSupervisorInput(
+          failingFixture,
+          failingFixture.createSession({
+            loseSourceCommitResponse: 'project-directory',
+          }),
+        ),
+        telemetryRecorder: createTestTelemetryRecorder([]),
+        checkpointStallClock: () => 1_000,
+        checkpointStallSchedule: () => () => {
+          cancellationCount += 1
+        },
+      }),
+    )
+    expect(readFailureCode(failure))
+      .toBe('TRANSIENT_INFRASTRUCTURE_FAILURE')
+    expect(cancellationCount).toBe(1)
+
+    const isolatedFixture = createSupervisorFixture()
+    const isolatedResult =
+      await superviseWorkspaceSearchMigrationPostClosePlanning({
+        ...createSupervisorInput(
+          isolatedFixture,
+          isolatedFixture.createSession(),
+        ),
+        telemetryRecorder: createTestTelemetryRecorder([], true),
+        checkpointStallClock: () => 1_000,
+        checkpointStallSchedule: () => {
+          throw new Error('Injected checkpoint scheduler failure.')
+        },
+      })
+    expect(isolatedResult.executionBoundary.phase)
+      .toBe('planning-admitted')
   })
 
   test('rejects unsafe retention windows before lease acquisition or writer close', async () => {
@@ -2242,6 +2522,24 @@ function requireCurrentAuthority(
 }
 
 /**
+ * Makes the selected durable receipt require post-close renewal.
+ *
+ * @param state - Shared durable state whose current receipt should expire.
+ */
+function expireCurrentMaintenanceReceipt(
+  state: DurableSupervisorState,
+): void {
+  const current = requireCurrentAuthority(state)
+  state.currentAuthority = {
+    ...structuredClone(current),
+    maintenanceEvidenceReceipt: {
+      ...structuredClone(current.maintenanceEvidenceReceipt),
+      validUntil: now.toISOString(),
+    },
+  }
+}
+
+/**
  * Projects the durable fake pointer independently from a session controller.
  *
  * @param state - Shared durable state.
@@ -2393,6 +2691,35 @@ function createDeferred<Value>(): Deferred<Value> {
 }
 
 /**
+ * Creates a complete recorder double for checkpoint-watchdog integration.
+ *
+ * @param observations - Captured raw watchdog observations.
+ * @param failOnRecord - Whether the observer should throw on every record.
+ * @returns Fully typed best-effort telemetry recorder double.
+ */
+function createTestTelemetryRecorder(
+  observations: unknown[],
+  failOnRecord = false,
+): WorkspaceSearchMigrationTelemetryRecorder {
+  return {
+    correlationId: undefined,
+    describeTableRateRecorder: {
+      record: () => {},
+    },
+    record: (observation) => {
+      if (failOnRecord) {
+        throw new Error('Injected telemetry observer failure.')
+      }
+      observations.push(observation)
+    },
+    bindConfigurationHash: () => true,
+    readEvidenceLocator: () => undefined,
+    snapshot: () => undefined,
+    finalize: () => {},
+  }
+}
+
+/**
  * Waits until one high-level operation has started.
  *
  * @param events - Shared operation trace.
@@ -2407,6 +2734,37 @@ async function waitForEvent(
     await flushMicrotasks()
   }
   throw new Error(`Timed out waiting for fixture event: ${expected}`)
+}
+
+/**
+ * Waits until the provider has entered the intentional post-close drain.
+ *
+ * @param provider - Recording evidence provider held by the drain barrier.
+ */
+async function waitForPostCloseEvidenceCollection(
+  provider: RecordingMaintenanceEvidenceProvider,
+): Promise<void> {
+  await waitForPostCloseEvidenceCollectionCount(provider, 1)
+}
+
+/**
+ * Waits until the provider has entered a selected post-close collection.
+ *
+ * @param provider - Recording evidence provider held by a test barrier.
+ * @param expectedCount - Minimum number of post-close requests expected.
+ */
+async function waitForPostCloseEvidenceCollectionCount(
+  provider: RecordingMaintenanceEvidenceProvider,
+  expectedCount: number,
+): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (
+      provider.requests.filter(({ phase }) => phase === 'post-close')
+        .length >= expectedCount
+    ) return
+    await flushMicrotasks()
+  }
+  throw new Error('Timed out waiting for post-close evidence collection.')
 }
 
 /**
