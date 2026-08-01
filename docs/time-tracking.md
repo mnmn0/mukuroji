@@ -1,0 +1,30 @@
+# Time tracking, timesheets, and budgets
+
+Time tracking is scoped by Workspace and Team. A time entry references a canonical Work Item and may optionally reference a Project. Manual entries and timer-generated entries share the same lifecycle:
+
+`draft → submitted → approved → locked`
+
+Rejected entries return to `rejected` and can be edited and submitted again. Every create, edit, submit, approve, reject, and lock operation writes an immutable history record. Entry revisions are checked with optimistic concurrency, and timer stop atomically removes the running timer while creating the entry and its history.
+
+## HTTP surface
+
+- `POST /api/teams/:teamId/time-entries` creates a manual draft.
+- `GET /api/teams/:teamId/time-entries` lists entries in the caller's Project allowlist.
+- `PATCH /api/teams/:teamId/time-entries/:entryId` edits a draft or rejected entry.
+- `POST /api/teams/:teamId/time-entries/:entryId/{submit,approve,reject,lock}` changes one lifecycle state.
+- `POST /api/teams/:teamId/timesheet/{submit,approve,reject,lock}` applies a lifecycle operation to all eligible entries in a period.
+- `POST /api/teams/:teamId/timers` starts the caller's timer; `GET /api/time-tracking/timers/active` supports offline recovery; `POST /api/time-tracking/timers/:timerId/stop` creates a draft from the timer.
+- `GET /api/teams/:teamId/timesheet` returns daily and Monday-based weekly rows using the requested IANA timezone.
+- `GET /api/teams/:teamId/time-tracking/summary` groups actual minutes by day, week, user, Project, or Work Item.
+- `GET /api/teams/:teamId/time-tracking/export` exports the same ACL-filtered summary as CSV.
+- `PUT /api/teams/:teamId/work-items/:workItemId/time-estimate` stores a Work Item estimate in minutes.
+- `GET /api/teams/:teamId/work-items/:workItemId/time-estimate` reads the estimate for an authorized Work Item.
+- `PUT /api/teams/:teamId/time-budget` and `PUT /api/teams/:teamId/projects/:projectId/time-budget` store optimistic-concurrency-protected budgets.
+
+All period endpoints require `from`, `to`, and accept `timeZone` plus `groupBy`. Date-only ranges are interpreted as local dates and converted to UTC before querying. Intervals crossing midnight are split at timezone-aware local boundaries, including daylight-saving transitions.
+
+## Confidential cost fields
+
+Members can record billable status and duration but cannot set or read `hourlyRateMinor` or `actualCostMinor`. The API resolves the caller's Project access before listing or aggregating entries. Managers can maintain rates, budgets, and approval state; only authorized managers receive money fields in entry, summary, and export responses.
+
+Production persistence uses the existing analytics DynamoDB table with distinct `TIME_*` sort-key prefixes. The API role grants transaction access for the timer-stop and entry-history transactions, while the existing Analytics rows remain unchanged.

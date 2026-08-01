@@ -823,6 +823,7 @@ export function buildApiRuntime(
         'dynamodb:GetItem',
         'dynamodb:PutItem',
         'dynamodb:Query',
+        'dynamodb:TransactWriteItems',
         'dynamodb:UpdateItem',
       ],
       resources: [analyticsTable.tableArn],

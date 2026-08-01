@@ -451,6 +451,8 @@ import {
   normalizeAnalyticsQueryInput,
   queryAnalyticsEvidence,
 } from '../modules/analytics/analytics'
+import { createTimeTrackingRouter } from '../modules/time-tracking/adapter-in/http/time-tracking-router'
+import { TimeTrackingError } from '../modules/time-tracking'
 
 /**
  * Workspace access の永続化 client と API error です。
@@ -1031,6 +1033,11 @@ const automationDependencies: AutomationDependencies = {
   },
   get automationInboundWebhookSecrets() {
     return requireAppDependencies().automation.automationInboundWebhookSecrets
+  },
+}
+const timeTrackingDependencies = {
+  get service() {
+    return requireAppDependencies().timeTracking.service
   },
 }
 const developerPlatformDependencies: DeveloperPlatformDependencies = {
@@ -4328,6 +4335,54 @@ routeApp.route('/', createAnalyticsRouter({
   listSnapshots: listAnalyticsHttpSnapshots,
   createSnapshot: createAnalyticsHttpSnapshot,
   mapError: toAnalyticsErrorResponse,
+}))
+
+routeApp.route('/', createTimeTrackingRouter({
+  readBearerAccessToken,
+  authenticate: async (accessToken, context) =>
+    await authenticateWorkspacePrincipal(accessToken, undefined, context),
+  requireTeamPermission: async (principal, teamId, minimum) => {
+    await requireTeamPermission(principal, teamId, minimum)
+  },
+  canManageRates: async (principal, teamId) => {
+    try {
+      await requireTeamPermission(principal, teamId, 'manager')
+      return true
+    } catch (error) {
+      if (error instanceof ProjectDataError && error.status === 403) return false
+      throw error
+    }
+  },
+  getAccessibleProjectIds: async (principal, teamId) => {
+    const context = await requireTeamPermission(principal, teamId, 'viewer')
+    if (principal.isSystemAdmin) return undefined
+    return new Set(
+      (context.projectAccesses ?? [])
+        .filter((access) => projectAccessAllows(access, 'viewer'))
+        .map((access) => access.projectId),
+    )
+  },
+  verifyProject: async (principal, teamId, projectId, minimum) => {
+    const context = await requireTeamPermission(principal, teamId, minimum)
+    if (
+      !principal.isSystemAdmin &&
+      !(context.projectAccesses ?? []).some((access) =>
+        access.projectId === projectId && projectAccessAllows(access, minimum)
+      )
+    ) {
+      throw new ProjectDataError(
+        403,
+        'ProjectAccessDenied',
+        `User "${principal.userKey}" cannot access project "${projectId}".`,
+      )
+    }
+  },
+  verifyWorkItem: async (principal, teamId, workItemId) => {
+    await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+  },
+  getTimeTracking: () => timeTrackingDependencies.service,
+  readJson,
+  mapError: toTimeTrackingErrorResponse,
 }))
 
 routeApp.route('/', createNotificationRouter({
@@ -15286,6 +15341,31 @@ function toAnalyticsErrorResponse(c: Context, error: unknown) {
       error.status === 413 ||
       error.status === 422 ||
       error.status === 503
+    ? error.status
+    : 502
+  return c.json({ code: error.code, message: error.message }, status)
+}
+
+/** Converts time tracking domain failures to safe API responses. */
+function toTimeTrackingErrorResponse(c: Context, error: unknown) {
+  if (error instanceof CognitoServiceError) return toCognitoDirectoryErrorResponse(c, error)
+  if (error instanceof WorkspaceAccessError) return toWorkspaceAccessErrorResponse(c, error)
+  if (error instanceof ProjectDataError || isTeamIssueNotFoundError(error)) {
+    return toProjectDataErrorResponse(c, error)
+  }
+  if (!(error instanceof TimeTrackingError)) {
+    console.error(error)
+    return c.json({ code: 'TimeTrackingUnavailable', message: 'Time tracking is unavailable.' }, 502)
+  }
+  if (error.status >= 500) console.error(error)
+  const status = error.status === 400 ||
+    error.status === 401 ||
+    error.status === 403 ||
+    error.status === 404 ||
+    error.status === 409 ||
+    error.status === 413 ||
+    error.status === 422 ||
+    error.status === 503
     ? error.status
     : 502
   return c.json({ code: error.code, message: error.message }, status)

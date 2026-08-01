@@ -848,7 +848,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   expect(JSON.stringify(transactionConditionCheckStatement))
     .not.toContain('ProjectTasksTableE21F6637');
   expect(JSON.stringify(transactionConditionCheckStatement)).toContain('FileProofingTable');
-  expect(serializedApiPolicies).not.toContain('dynamodb:TransactWriteItems');
+  expect(serializedApiPolicies).toContain('dynamodb:TransactWriteItems');
   expect(fileObjectStatements).not.toHaveLength(0);
   expect(fileObjectStatements).toEqual(expect.arrayContaining([
     expect.objectContaining({ Effect: 'Allow' }),

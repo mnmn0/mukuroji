@@ -96,6 +96,11 @@ import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
 import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'
 import { DynamoDbWorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
 import { createProductionQueueWebhookDeliveryMessage } from './webhook'
+import {
+  DynamoDbTimeTrackingRepository,
+  InMemoryTimeTrackingRepository,
+  TimeTrackingService,
+} from '../../modules/time-tracking'
 
 /**
  * Creates the configured immutable audit event adapter.
@@ -211,6 +216,18 @@ export function createAnalyticsRepository(): DynamoDbAnalyticsRepository {
       scheduleDueIndexName:
         config.environment.ANALYTICS_SCHEDULE_INDEX_NAME ?? 'ScheduleDueIndex',
     },
+  )
+}
+
+/** Creates the configured durable time tracking service. */
+export function createTimeTrackingService(): TimeTrackingService {
+  const config = loadServerConfig()
+  const dynamoDbClient = createDynamoDbClient()
+  return new TimeTrackingService(
+    new DynamoDbTimeTrackingRepository(
+      config.environment.ANALYTICS_TABLE_NAME ?? 'mukuroji-analytics-local',
+      createDynamoDbDocumentClient(dynamoDbClient),
+    ),
   )
 }
 
@@ -500,6 +517,7 @@ export function createProductionConnectorAppDependencies(): AppDependencies {
     workspace: createProductionWorkspaceDependencies(),
     workItems: createProductionWorkItemDependencies(),
     automation: createProductionAutomationDependencies(),
+    timeTracking: { service: createTimeTrackingService() },
     developerPlatform: {
       ...adapters,
       publicWorkItems: createCanonicalPublicWorkItemService(),
@@ -523,6 +541,7 @@ export function createProductionAppDependencies(): AppDependencies {
     workspace: createProductionWorkspaceDependencies(),
     workItems: createProductionWorkItemDependencies(),
     automation: createProductionAutomationDependencies(),
+    timeTracking: { service: createTimeTrackingService() },
     developerPlatform: createProductionDeveloperPlatformDependencies(),
   }
 }
@@ -542,6 +561,9 @@ export function createTestAppDependencies(): AppDependencies {
       workItemConfigurations: createDefaultWorkItemConfigurationClient(),
       planning: new InMemoryPlanningClient(),
       analytics: new InMemoryAnalyticsRepository(),
+    },
+    timeTracking: {
+      service: new TimeTrackingService(new InMemoryTimeTrackingRepository()),
     },
   }
 }
@@ -656,6 +678,10 @@ export function overrideAppDependencies(
               overrides.automationInboundWebhookSecrets,
           }
         : {}),
+    },
+    timeTracking: {
+      ...dependencies.timeTracking,
+      ...(overrides.service ? { service: overrides.service } : {}),
     },
     developerPlatform: {
       ...dependencies.developerPlatform,
