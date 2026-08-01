@@ -339,6 +339,50 @@ describe('Workspace Search migration heartbeat supervisor', () => {
     await expect(result).resolves.toBe('completed')
   })
 
+  test('captures and installs the mutation guard wrapper exactly once', async () => {
+    const scheduler = new ManualHeartbeatScheduler()
+    const events: string[] = []
+    let wrapperGetterReads = 0
+    let replaceWrapper = false
+    const port: WorkspaceSearchMigrationHeartbeatPort = {
+      heartbeatLease: async () => createLease(),
+      get runWithMutationAdmissionGuard() {
+        wrapperGetterReads += 1
+        const rejected = replaceWrapper
+        return async function <Result>(
+          this: WorkspaceSearchMigrationHeartbeatPort,
+          guard: () => void,
+          task: () => Promise<Result>,
+        ): Promise<Result> {
+          expect(this).toBe(port)
+          events.push(rejected ? 'replacement-wrapper' : 'captured-wrapper')
+          guard()
+          events.push('guard-active')
+          return await task()
+        }
+      },
+    }
+    const result = runWithWorkspaceSearchMigrationHeartbeat({
+      lease: createLease(),
+      port,
+      scheduler,
+      clock: () => new Date(fixtureNow),
+      task: async () => {
+        events.push('task')
+        return 'completed'
+      },
+    })
+    replaceWrapper = true
+
+    await expect(result).resolves.toBe('completed')
+    expect(wrapperGetterReads).toBe(1)
+    expect(events).toEqual([
+      'captured-wrapper',
+      'guard-active',
+      'task',
+    ])
+  })
+
   test('never overlaps heartbeats and waits for an in-flight heartbeat', async () => {
     const scheduler = new ManualHeartbeatScheduler()
     const task = createDeferred<string>()
@@ -407,6 +451,170 @@ describe('Workspace Search migration heartbeat supervisor', () => {
     expect(error.code).toBe('TRANSIENT_INFRASTRUCTURE_FAILURE')
     expect(error.message).not.toContain(canary)
     expect(scheduler.countPending()).toBe(0)
+  })
+
+  test('stops mutation admission before task abort after heartbeat failure', async () => {
+    const scheduler = new ManualHeartbeatScheduler()
+    const events: string[] = []
+    let heartbeatCount = 0
+    const recordingPort = new RecordingHeartbeatPort(async () => {
+      heartbeatCount += 1
+      if (heartbeatCount === 1) return createLease()
+      throw new Error('heartbeat-failure-canary')
+    })
+    const port: WorkspaceSearchMigrationHeartbeatPort = {
+      heartbeatLease: async (input) =>
+        await recordingPort.heartbeatLease(input),
+      interruptMutationAdmission: (): void => {
+        events.push('interrupt-mutation-admission')
+      },
+    }
+    const result = runWithWorkspaceSearchMigrationHeartbeat({
+      lease: createLease(),
+      port,
+      scheduler,
+      clock: () => new Date(fixtureNow),
+      task: async (context) => {
+        context.signal.addEventListener(
+          'abort',
+          () => events.push('task-abort'),
+          { once: true },
+        )
+        await waitForAbort(context.signal)
+        context.assertActive()
+        return 'must-not-return'
+      },
+    })
+
+    await flushMicrotasks()
+    scheduler.runNext()
+    const error = await captureFailure(result)
+    expect(error).toBeInstanceOf(WorkspaceSearchMigrationFailure)
+    expect(events).toEqual([
+      'interrupt-mutation-admission',
+      'task-abort',
+    ])
+  })
+
+  test('stops mutation admission before task abort on operator interruption', async () => {
+    const scheduler = new ManualHeartbeatScheduler()
+    const controller = new AbortController()
+    const events: string[] = []
+    const port: WorkspaceSearchMigrationHeartbeatPort = {
+      heartbeatLease: async () => createLease(),
+      interruptMutationAdmission: (): void => {
+        events.push('interrupt-mutation-admission')
+      },
+    }
+    const result = runWithWorkspaceSearchMigrationHeartbeat({
+      lease: createLease(),
+      port,
+      scheduler,
+      signal: controller.signal,
+      clock: () => new Date(fixtureNow),
+      task: async (context) => {
+        context.signal.addEventListener(
+          'abort',
+          () => events.push('task-abort'),
+          { once: true },
+        )
+        await waitForAbort(context.signal)
+        context.assertActive()
+        return 'must-not-return'
+      },
+    })
+
+    await flushMicrotasks()
+    controller.abort()
+    controller.abort()
+    const error = await captureFailure(result)
+    expect(error).toBeInstanceOf(
+      WorkspaceSearchMigrationHeartbeatInterruptedError,
+    )
+    expect(events).toEqual([
+      'interrupt-mutation-admission',
+      'task-abort',
+    ])
+  })
+
+  test('rechecks abort after listener registration without starting work', async () => {
+    const controller = new AbortController()
+    const targetSignal = controller.signal
+    let firstAbortedRead = true
+    const signal = new Proxy(targetSignal, {
+      get: (target, property): unknown => {
+        if (property === 'aborted' && firstAbortedRead) {
+          firstAbortedRead = false
+          const wasAborted = target.aborted
+          controller.abort()
+          return wasAborted
+        }
+        const value = Reflect.get(target, property, target)
+        return typeof value === 'function'
+          ? value.bind(target)
+          : value
+      },
+    })
+    let interruptionCount = 0
+    let taskStarted = false
+    const port: WorkspaceSearchMigrationHeartbeatPort = {
+      heartbeatLease: async () => createLease(),
+      interruptMutationAdmission: (): void => {
+        interruptionCount += 1
+      },
+    }
+    const result = runWithWorkspaceSearchMigrationHeartbeat({
+      lease: createLease(),
+      port,
+      signal,
+      clock: () => new Date(fixtureNow),
+      task: async () => {
+        taskStarted = true
+        return 'must-not-return'
+      },
+    })
+
+    const error = await captureFailure(result)
+    expect(error).toBeInstanceOf(
+      WorkspaceSearchMigrationHeartbeatInterruptedError,
+    )
+    expect(interruptionCount).toBe(1)
+    expect(taskStarted).toBe(false)
+  })
+
+  test('redacts a mutation-admission hook failure while still aborting the task', async () => {
+    const scheduler = new ManualHeartbeatScheduler()
+    const controller = new AbortController()
+    const canary = 'mutation-admission-hook-secret-canary'
+    let taskObservedAbort = false
+    const port: WorkspaceSearchMigrationHeartbeatPort = {
+      heartbeatLease: async () => createLease(),
+      interruptMutationAdmission: (): void => {
+        throw new Error(canary)
+      },
+    }
+    const result = runWithWorkspaceSearchMigrationHeartbeat({
+      lease: createLease(),
+      port,
+      scheduler,
+      signal: controller.signal,
+      clock: () => new Date(fixtureNow),
+      task: async (context) => {
+        await waitForAbort(context.signal)
+        taskObservedAbort = true
+        return 'must-not-return'
+      },
+    })
+
+    await flushMicrotasks()
+    controller.abort()
+    const error = await captureFailure(result)
+    if (!(error instanceof WorkspaceSearchMigrationFailure)) {
+      throw new Error('Expected a migration failure.')
+    }
+    expect(error.code).toBe('TRANSIENT_INFRASTRUCTURE_FAILURE')
+    expect(error.message).not.toContain(canary)
+    expect(taskObservedAbort).toBe(true)
   })
 
   test('preserves a trusted terminal heartbeat failure', async () => {

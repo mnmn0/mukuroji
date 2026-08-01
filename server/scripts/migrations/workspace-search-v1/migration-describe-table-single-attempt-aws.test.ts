@@ -104,7 +104,11 @@ describe('Workspace Search migration single-attempt DescribeTable transport', ()
     Reflect.set(configuration, 'account', '999999999999')
     Reflect.set(configuration, 'region', 'us-east-1')
 
-    expect(clientConfiguration.credentials).toEqual({
+    const clientCredentials = clientConfiguration.credentials
+    if (typeof clientCredentials === 'function') {
+      throw new Error('Expected detached static credentials.')
+    }
+    expect(clientCredentials).toEqual({
       accountId: '123456789012',
       accessKeyId: 'source-access-key',
       credentialScope: 'source-scope',
@@ -112,12 +116,12 @@ describe('Workspace Search migration single-attempt DescribeTable transport', ()
       secretAccessKey: 'source-secret-key',
       sessionToken: 'source-session-token',
     })
-    expect(clientConfiguration.credentials).not.toBe(sourceCredentials)
-    expect(clientConfiguration.credentials.expiration).not.toBe(
+    expect(clientCredentials).not.toBe(sourceCredentials)
+    expect(clientCredentials.expiration).not.toBe(
       sourceExpiration,
     )
     expect(
-      Object.isFrozen(clientConfiguration.credentials.expiration),
+      Object.isFrozen(clientCredentials.expiration),
     ).toBeTrue()
     expect(transport.createAttempt('workspace-search-table')).toBeInstanceOf(
       WorkspaceSearchMigrationDescribeTableSingleAttempt,
@@ -125,10 +129,49 @@ describe('Workspace Search migration single-attempt DescribeTable transport', ()
     transport.close()
   })
 
-  test('rejects dynamic, absent, invalid, and cross-account credentials', () => {
+  test('retains a refresh provider and validates every resolved identity', async () => {
+    let credentialGeneration = 0
+    let accountId = '123456789012'
+    const sourceProvider = async () => {
+      credentialGeneration += 1
+      return {
+        accountId,
+        accessKeyId: `test-access-key-${credentialGeneration}`,
+        secretAccessKey: `test-secret-key-${credentialGeneration}`,
+      }
+    }
+    const clientConfiguration =
+      createWorkspaceSearchMigrationDescribeTableAwsSdkClientConfiguration({
+        account: '123456789012',
+        credentials: sourceProvider,
+        region: 'ap-northeast-1',
+      })
+    const capturedProvider = clientConfiguration.credentials
+    if (typeof capturedProvider !== 'function') {
+      throw new Error('Expected a refresh-capable credentials provider.')
+    }
+
+    await expect(capturedProvider()).resolves.toMatchObject({
+      accountId: '123456789012',
+      accessKeyId: 'test-access-key-1',
+      secretAccessKey: 'test-secret-key-1',
+    })
+    await expect(capturedProvider()).resolves.toMatchObject({
+      accountId: '123456789012',
+      accessKeyId: 'test-access-key-2',
+      secretAccessKey: 'test-secret-key-2',
+    })
+    accountId = '999999999999'
+    await expect(capturedProvider()).rejects.toThrow(
+      'Invalid DescribeTable transport credentials.',
+    )
+    expect(capturedProvider).not.toBe(sourceProvider)
+    expect(Object.isFrozen(capturedProvider)).toBeTrue()
+  })
+
+  test('rejects absent, invalid, and cross-account credentials', () => {
     const invalidCredentials: readonly unknown[] = [
       undefined,
-      (): Promise<typeof credentials> => Promise.resolve(credentials),
       {
         ...credentials,
         accountId: '999999999999',

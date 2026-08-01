@@ -4,8 +4,10 @@ import {
   createWorkspaceSearchWriterFenceBinding,
   createWorkspaceSearchWriterFenceClosedSuccessor,
   createWorkspaceSearchWriterFenceInitialOpenRecord,
+  createWorkspaceSearchWriterFenceReleasedOpenSuccessor,
   createWorkspaceSearchWriterFenceStateIncarnationDigest,
   type WorkspaceSearchWriterFenceClosedRecord,
+  type WorkspaceSearchWriterFenceRecord,
 } from '../../../src/infrastructure/runtime/workspace-search-writer-fence'
 import {
   createMigrationDigest,
@@ -41,7 +43,9 @@ import {
   type WorkspaceSearchMigrationExecutionRun,
 } from './migration-execution-run'
 import {
+  readMeasuredWorkspaceSearchMigrationExecutionTerminalRelease,
   readWorkspaceSearchMigrationExecutionStatus,
+  readWorkspaceSearchMigrationExecutionTerminalRelease,
   superviseWorkspaceSearchMigrationExecution,
   type WorkspaceSearchMigrationExecutionStatus,
   type WorkspaceSearchMigrationExecutionSupervisorMode,
@@ -287,6 +291,9 @@ class ExecutionSupervisorHarness {
   readonly maintenanceEvidenceProvider:
     WorkspaceSearchMigrationMaintenanceEvidenceProvider
 
+  /** Current closed or terminal-released application writer-fence row. */
+  private writerFenceRecord: WorkspaceSearchWriterFenceRecord
+
   /** Current immutable execution admission, absent only in ready. */
   private executionRun:
     WorkspaceSearchMigrationExecutionRun | undefined
@@ -313,6 +320,23 @@ class ExecutionSupervisorHarness {
   /** Immutable complete-plan rollback root, when published. */
   private completeRolledBackRoot:
     WorkspaceSearchMigrationRolledBackRoot | undefined
+
+  /** Scripted complete rollback states used to model a transition race. */
+  private completeRollbackStateObservations:
+    readonly WorkspaceSearchMigrationRollbackPersistenceState[] |
+    undefined
+
+  /** Scripted complete rollback roots used to model a transition race. */
+  private completeRollbackRootObservations:
+    readonly (
+      WorkspaceSearchMigrationRolledBackRoot | undefined
+    )[] | undefined
+
+  /** Next scripted complete rollback state observation. */
+  private completeRollbackStateObservationIndex = 0
+
+  /** Next scripted complete rollback root observation. */
+  private completeRollbackRootObservationIndex = 0
 
   /** Current lease generation acquired by the supervisor. */
   private acquiredFenceToken = 7
@@ -359,6 +383,9 @@ class ExecutionSupervisorHarness {
    * @param scenario - Durable graph exposed by strong reads.
    */
   constructor(scenario: SupervisorScenario) {
+    this.writerFenceRecord = structuredClone(
+      this.fixture.closedWriterFenceRecord,
+    )
     this.currentAuthority =
       structuredClone(this.fixture.initialAuthority)
     this.pointer = {
@@ -417,7 +444,14 @@ class ExecutionSupervisorHarness {
             scenario === 'complete-rolled-back' ? 3 : 1,
           )
         : undefined
-    this.completeRolledBackRoot = undefined
+    this.completeRolledBackRoot =
+      scenario === 'complete-rolled-back' &&
+        this.completeRollbackState !== undefined
+        ? createCompleteRolledBackRoot(
+            this.fixture,
+            this.completeRollbackState,
+          )
+        : undefined
 
     this.maintenanceEvidenceProvider = {
       collect: async () => {
@@ -433,6 +467,41 @@ class ExecutionSupervisorHarness {
       },
     }
     this.session = this.createSession()
+  }
+
+  /**
+   * Installs one canonical released-open row for read-only status recovery.
+   *
+   * @param executionBoundaryDigest - Boundary digest retained by the release.
+   * @param openedAt - Canonical writer reopen time retained by the release.
+   */
+  releaseVerifiedWriterFenceForStatus(
+    executionBoundaryDigest = this.fixture.boundary.boundaryDigest,
+    openedAt = '2026-07-29T01:20:00.000Z',
+  ): void {
+    this.writerFenceRecord =
+      createWorkspaceSearchWriterFenceReleasedOpenSuccessor(
+        this.fixture.closedWriterFenceRecord,
+        {
+          releaseVersion: 1,
+          configurationHash: this.fixture.configurationHash,
+          runId,
+          executionBoundaryDigest,
+          sealedPlanningAuthorityDigest:
+            this.fixture.sealedPlanningAuthority.authorityDigest,
+          executionRunDigest:
+            this.fixture.executionRun.executionRunDigest,
+          terminal: {
+            kind: 'verified',
+            persistenceVersion: 1,
+            rootDigest: createVerifiedRoot(
+              this.fixture,
+              createVerificationState(this.fixture, 5, true),
+            ).verifiedRootDigest,
+          },
+        },
+        new Date(openedAt),
+      )
   }
 
   /**
@@ -480,6 +549,17 @@ class ExecutionSupervisorHarness {
     }
     this.rejectedAuthorityReceipt = expiredReceipt
     this.rejectNextAuthorityRead = true
+  }
+
+  /** Makes the closed writer-fence time non-finite at the session boundary. */
+  exposeInvalidClosedAt(): void {
+    if (this.writerFenceRecord.mode !== 'closed') {
+      throw new Error('Expected one closed writer fence.')
+    }
+    this.writerFenceRecord = {
+      ...this.writerFenceRecord,
+      closedAt: 'invalid-closed-at',
+    }
   }
 
   /**
@@ -557,6 +637,42 @@ class ExecutionSupervisorHarness {
     return structuredClone(this.runState)
   }
 
+  /** Scripts predecessor, torn, and two equal terminal observations. */
+  scheduleCompleteRollbackTransitionRace(): void {
+    const rolling = createCompleteRollbackState(
+      this.fixture,
+      this.runState,
+      'rolling-back',
+      0,
+      2,
+    )
+    const terminal = createCompleteRollbackState(
+      this.fixture,
+      this.runState,
+      'rolled-back',
+      0,
+      3,
+    )
+    const root = createCompleteRolledBackRoot(
+      this.fixture,
+      terminal,
+    )
+    this.completeRollbackStateObservations = [
+      rolling,
+      rolling,
+      terminal,
+      terminal,
+    ]
+    this.completeRollbackRootObservations = [
+      undefined,
+      root,
+      root,
+      root,
+    ]
+    this.completeRollbackStateObservationIndex = 0
+    this.completeRollbackRootObservationIndex = 0
+  }
+
   /**
    * Creates the fully typed fake managed session.
    *
@@ -598,7 +714,7 @@ class ExecutionSupervisorHarness {
           return {
             status: 'present',
             record: structuredClone(
-              this.fixture.closedWriterFenceRecord,
+              this.writerFenceRecord,
             ),
           }
         },
@@ -751,11 +867,37 @@ class ExecutionSupervisorHarness {
       createRollbackOperationPort: () => ({
         readRollbackState: async () => {
           this.events.push('complete-rollback:read-state')
+          const observations =
+            this.completeRollbackStateObservations
+          if (
+            observations !== undefined &&
+            this.completeRollbackStateObservationIndex <
+              observations.length
+          ) {
+            const value = observations[
+              this.completeRollbackStateObservationIndex
+            ]
+            this.completeRollbackStateObservationIndex += 1
+            return structuredClone(value)
+          }
           return structuredClone(this.completeRollbackState)
         },
         readRollbackReceipt: async () => undefined,
         readRolledBackRoot: async () => {
           this.events.push('complete-rollback:read-root')
+          const observations =
+            this.completeRollbackRootObservations
+          if (
+            observations !== undefined &&
+            this.completeRollbackRootObservationIndex <
+              observations.length
+          ) {
+            const value = observations[
+              this.completeRollbackRootObservationIndex
+            ]
+            this.completeRollbackRootObservationIndex += 1
+            return structuredClone(value)
+          }
           return structuredClone(
             this.completeRolledBackRoot,
           )
@@ -849,6 +991,16 @@ class ExecutionSupervisorHarness {
               expiresAt: '2026-07-29T01:21:20.000Z',
             }
           : lease
+      },
+      /** Installs the heartbeat mutation assertion around the task. */
+      runWithMutationAdmissionGuard: async (guard, task) => {
+        this.events.push('mutation-admission:guard')
+        guard()
+        return await task()
+      },
+      /** Records one mutation-admission interruption. */
+      interruptMutationAdmission: () => {
+        this.events.push('mutation-admission:interrupt')
       },
       readMaintenanceEvidencePointer: async () => {
         this.events.push('authority:read-pointer')
@@ -1105,6 +1257,205 @@ describe('Workspace Search migration execution supervisor', () => {
     }
   })
 
+  test('reconstructs released status only from an exactly bound open row', async () => {
+    const mismatched = new ExecutionSupervisorHarness('verified')
+    mismatched.releaseVerifiedWriterFenceForStatus(
+      digest('different-boundary'),
+    )
+    const failure = await captureMigrationFailure(
+      async () => await readWorkspaceSearchMigrationExecutionStatus({
+        session: mismatched.session,
+        runId,
+        expectedConfigurationHash:
+          mismatched.fixture.configurationHash,
+      }),
+    )
+    expect(failure.code).toBe('INVALID_STATE')
+
+    const premature = new ExecutionSupervisorHarness('verified')
+    premature.releaseVerifiedWriterFenceForStatus(
+      premature.fixture.boundary.boundaryDigest,
+      '2026-07-29T01:19:00.000Z',
+    )
+    const prematureFailure = await captureMigrationFailure(
+      async () => await readWorkspaceSearchMigrationExecutionStatus({
+        session: premature.session,
+        runId,
+        expectedConfigurationHash:
+          premature.fixture.configurationHash,
+      }),
+    )
+    expect(prematureFailure.code).toBe('INVALID_STATE')
+
+    const harness = new ExecutionSupervisorHarness('verified')
+    harness.releaseVerifiedWriterFenceForStatus()
+    const status =
+      await readWorkspaceSearchMigrationExecutionStatus({
+        session: harness.session,
+        runId,
+        expectedConfigurationHash:
+          harness.fixture.configurationHash,
+      })
+
+    expect(status).toEqual({
+      phase: 'verified',
+      nextAction: { kind: 'none' },
+    })
+    expect(harness.events).toEqual([
+      'configuration:read',
+      'boundary:read',
+      'sealed-authority:read',
+      'writer-fence:read',
+      'plan:replay',
+      'execution-run:read',
+      'apply:read',
+      'verification:read-progress',
+      'verification:read-root',
+      'complete-rollback:read-state',
+      'complete-rollback:read-root',
+      'complete-rollback:read-state',
+      'complete-rollback:read-root',
+    ])
+    expect(
+      harness.events.some(isLeaseOrAuthorityMutation),
+    ).toBe(false)
+  })
+
+  test('returns exact terminal material only for immutable verified or rolled-back roots', async () => {
+    const verifiedHarness =
+      new ExecutionSupervisorHarness('verified')
+    const verified =
+      await readWorkspaceSearchMigrationExecutionTerminalRelease({
+        session: verifiedHarness.session,
+        runId,
+        expectedConfigurationHash:
+          verifiedHarness.fixture.configurationHash,
+      })
+    expect(verified?.executionBoundary).toEqual(
+      verifiedHarness.fixture.boundary,
+    )
+    expect(verified?.sealedPlanningAuthority).toEqual(
+      verifiedHarness.fixture.sealedPlanningAuthority,
+    )
+    expect(verified?.executionRun).toEqual(
+      verifiedHarness.fixture.executionRun,
+    )
+    expect(verified?.terminal.kind).toBe('verified')
+    if (verified?.terminal.kind !== 'verified') {
+      throw new Error('Expected exact verified release material.')
+    }
+    expect(verified.terminal.root.verifiedRootDigest).toBe(
+      digest('verified-root'),
+    )
+
+    const partialHarness =
+      new ExecutionSupervisorHarness('partial-rolled-back')
+    const partial =
+      await readWorkspaceSearchMigrationExecutionTerminalRelease({
+        session: partialHarness.session,
+        runId,
+        expectedConfigurationHash:
+          partialHarness.fixture.configurationHash,
+      })
+    expect(partial?.terminal.kind).toBe('rolled-back-v2')
+    if (partial?.terminal.kind !== 'rolled-back-v2') {
+      throw new Error(
+        'Expected exact committed-prefix rollback release material.',
+      )
+    }
+    expect(partial.terminal.root.rootDigest).toBe(
+      digest('partial-rolled-back-root'),
+    )
+
+    const completeHarness =
+      new ExecutionSupervisorHarness('complete-rolled-back')
+    const complete =
+      await readWorkspaceSearchMigrationExecutionTerminalRelease({
+        session: completeHarness.session,
+        runId,
+        expectedConfigurationHash:
+          completeHarness.fixture.configurationHash,
+      })
+    expect(complete?.terminal.kind).toBe('rolled-back-v1')
+    if (complete?.terminal.kind !== 'rolled-back-v1') {
+      throw new Error(
+        'Expected exact complete-plan rollback release material.',
+      )
+    }
+    expect(complete.terminal.root.rootDigest).toBe(
+      digest('complete-rolled-back-root'),
+    )
+
+    const applyingHarness =
+      new ExecutionSupervisorHarness('applying')
+    expect(
+      await readWorkspaceSearchMigrationExecutionTerminalRelease({
+        session: applyingHarness.session,
+        runId,
+        expectedConfigurationHash:
+          applyingHarness.fixture.configurationHash,
+      }),
+    ).toBeUndefined()
+    for (const harness of [
+      verifiedHarness,
+      partialHarness,
+      completeHarness,
+      applyingHarness,
+    ]) {
+      expect(
+        harness.events.some(isLeaseOrAuthorityMutation),
+      ).toBe(false)
+    }
+  })
+
+  test('stabilizes a complete rollback transition that lands between state and root reads', async () => {
+    const harness = new ExecutionSupervisorHarness('applied')
+    harness.scheduleCompleteRollbackTransitionRace()
+
+    expect(await readWorkspaceSearchMigrationExecutionStatus({
+      session: harness.session,
+      runId,
+      expectedConfigurationHash:
+        harness.fixture.configurationHash,
+    })).toEqual({
+      phase: 'rolled-back',
+      nextAction: { kind: 'none' },
+    })
+    expect(
+      harness.events.filter(
+        (event) => event === 'complete-rollback:read-state',
+      ),
+    ).toHaveLength(4)
+    expect(
+      harness.events.filter(
+        (event) => event === 'complete-rollback:read-root',
+      ),
+    ).toHaveLength(4)
+  })
+
+  test('rereads terminal material from the current measured generation without replacing it', async () => {
+    const harness = new ExecutionSupervisorHarness('verified')
+    const configuration = await harness.session.measureConfiguration()
+    harness.events.length = 0
+
+    const terminal =
+      await readMeasuredWorkspaceSearchMigrationExecutionTerminalRelease({
+        session: harness.session,
+        configuration,
+        runId,
+        expectedConfigurationHash:
+          harness.fixture.configurationHash,
+      })
+
+    expect(terminal?.terminal.kind).toBe('verified')
+    expect(harness.events).not.toContain('configuration:read')
+    expect(harness.events).toContain('boundary:read')
+    expect(harness.events).toContain('verification:read-root')
+    expect(
+      harness.events.some(isLeaseOrAuthorityMutation),
+    ).toBe(false)
+  })
+
   test('creates admission then applies one operation, five checkpoints, and the seal at exact revisions', async () => {
     const harness = new ExecutionSupervisorHarness('ready')
 
@@ -1151,6 +1502,8 @@ describe('Workspace Search migration execution supervisor', () => {
       status: 'applied',
       appliedOperationCount: 1,
     })
+    expect(harness.events).toContain('mutation-admission:guard')
+    expect(harness.events).not.toContain('mutation-admission:interrupt')
   })
 
   test('advances legal verify and scope-specific rollback branches while rejecting drift before lease acquisition', async () => {
@@ -1205,6 +1558,7 @@ describe('Workspace Search migration execution supervisor', () => {
       phase: 'rolled-back',
       nextAction: { kind: 'none' },
     })
+    expect(partialHarness.events).toContain('mutation-admission:guard')
     expect(
       partialHarness.events.filter((event) =>
         event.startsWith('partial-rollback:') &&
@@ -1235,6 +1589,7 @@ describe('Workspace Search migration execution supervisor', () => {
       phase: 'rolled-back',
       nextAction: { kind: 'none' },
     })
+    expect(completeHarness.events).toContain('mutation-admission:guard')
     expect(
       completeHarness.events.filter((event) =>
         event.startsWith('complete-rollback:') &&
@@ -1365,6 +1720,8 @@ describe('Workspace Search migration execution supervisor', () => {
       'operation:1:1',
     ])
     expect(harness.readCurrentRunState().revision).toBe(2)
+    expect(harness.events).toContain('mutation-admission:guard')
+    expect(harness.events).toContain('mutation-admission:interrupt')
   })
 
   test('does not start another mutation after heartbeat loss while operation reconciliation is in flight', async () => {
@@ -1399,6 +1756,8 @@ describe('Workspace Search migration execution supervisor', () => {
       'operation:1:1',
     ])
     expect(harness.readCurrentRunState().revision).toBe(2)
+    expect(harness.events).toContain('mutation-admission:guard')
+    expect(harness.events).toContain('mutation-admission:interrupt')
   })
 
   test('adopts a higher-fence takeover before continuing apply', async () => {
@@ -1572,6 +1931,31 @@ describe('Workspace Search migration execution supervisor', () => {
       'authority:renew',
       'execution-create:7',
     ])
+  })
+
+  test('rejects a non-finite writer-fence close time before evidence renewal', async () => {
+    const harness = new ExecutionSupervisorHarness('ready')
+    harness.rejectPointerAuthorityOnce()
+    harness.exposeInvalidClosedAt()
+
+    const failure = await captureMigrationFailure(() =>
+      superviseWorkspaceSearchMigrationExecution({
+        session: harness.session,
+        maintenanceEvidenceProvider:
+          harness.maintenanceEvidenceProvider,
+        runId,
+        ownerId,
+        expectedConfigurationHash:
+          harness.fixture.configurationHash,
+        mode: 'apply',
+        heartbeatScheduler: harness.scheduler,
+        clock: fixedClock,
+      })
+    )
+
+    expect(failure.code).toBe('INVALID_MAINTENANCE_EVIDENCE')
+    expect(harness.events).toContain('evidence:collect')
+    expect(harness.events).not.toContain('authority:renew')
   })
 })
 

@@ -66,8 +66,15 @@ import {
   workspaceSearchMigrationSourceNames,
 } from './migration-contract'
 import {
+  WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
   WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_PAGE_BASELINE_ATTEMPTS,
 } from './migration-describe-table-rate-budget'
+import type {
+  WorkspaceSearchMigrationManagedDescribeTableRate,
+} from './migration-describe-table-rate-managed-session'
+import {
+  WorkspaceSearchMigrationManagedDescribeTableRateError,
+} from './migration-describe-table-rate-managed-session'
 import {
   createAwsWorkspaceSearchMigrationIdentityPort,
   type JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput,
@@ -1600,6 +1607,132 @@ class RecordingIdentityAwsTransport
   }
 }
 
+/** Recording rate seam installed only on one test-owned managed session. */
+type RecordingManagedRateHarness = {
+  /** Structurally complete controller injected into the private managed port. */
+  readonly rate: WorkspaceSearchMigrationManagedDescribeTableRate
+  /** Reads the number of logical checkpoint callbacks admitted so far. */
+  readonly readCheckpointPageEntryCount: () => number
+  /** Arms one interruption at the next exact mutation-send assertion. */
+  readonly interruptBeforeNextMutation: () => void
+  /** Reads whether a mandatory-cleanup callback remains active. */
+  readonly readMandatoryCleanupDepth: () => number
+  /** Reads the DescribeTable count at the rejected mutation assertion. */
+  readonly readInterruptedMutationDescribeTableCount: () =>
+    number | undefined
+}
+
+/**
+ * Creates a transparent rate seam that records logical page admission.
+ *
+ * @param transport - Existing fake transport retaining valid table outputs.
+ * @returns Controller and exact logical checkpoint-page entry count.
+ */
+function createRecordingManagedRateHarness(
+  transport: RecordingIdentityAwsTransport,
+): RecordingManagedRateHarness {
+  let checkpointPageEntryCount = 0
+  let accepting = true
+  let mandatoryCleanupDepth = 0
+  let interruptAtNextMutation = false
+  let mutationAdmissionGuard: (() => void) | undefined
+  let interruptedMutationDescribeTableCount: number | undefined
+  const rate:
+    WorkspaceSearchMigrationManagedDescribeTableRate = {
+      describeTable: async (tableName) => {
+        if (!accepting && mandatoryCleanupDepth === 0) {
+          throw new WorkspaceSearchMigrationManagedDescribeTableRateError()
+        }
+        return await transport.describeTable(
+          new DescribeTableCommand({ TableName: tableName }),
+        )
+      },
+      runCheckpointPage: async (_input, task) => {
+        if (!accepting) {
+          throw new WorkspaceSearchMigrationManagedDescribeTableRateError()
+        }
+        checkpointPageEntryCount += 1
+        return await task()
+      },
+      runMandatoryCleanup: async (task) => {
+        mandatoryCleanupDepth += 1
+        try {
+          return await task()
+        } finally {
+          mandatoryCleanupDepth -= 1
+        }
+      },
+      runNonPageOperation: async (task) => await task(),
+      runWithMutationAdmissionGuard: async (guard, task) => {
+        if (mutationAdmissionGuard !== undefined) {
+          throw new WorkspaceSearchMigrationManagedDescribeTableRateError()
+        }
+        mutationAdmissionGuard = guard
+        try {
+          return await task()
+        } finally {
+          mutationAdmissionGuard = undefined
+        }
+      },
+      assertNewDataIoAllowed: (): void => {
+        mutationAdmissionGuard?.()
+        if (interruptAtNextMutation) {
+          interruptAtNextMutation = false
+          interruptedMutationDescribeTableCount =
+            transport.describeTableCommands.length
+          accepting = false
+        }
+        if (!accepting) {
+          throw new WorkspaceSearchMigrationManagedDescribeTableRateError()
+        }
+      },
+      claimAfterLease: async () => {},
+      interrupt: (): void => {
+        accepting = false
+      },
+      quarantine: (): void => {
+        accepting = false
+      },
+      readEvidence: () => ({
+        version:
+          WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
+        policyVersion: '0'.repeat(64),
+        attemptCount: 0,
+        forfeitedAttemptCount: 0,
+        throttleCount: 0,
+        budgetStopCount: 0,
+        cadenceWaitCount: 0,
+        cadenceWaitMilliseconds: 0,
+        maximumInFlight: 0,
+      }),
+      close: async () => {
+        accepting = false
+      },
+    }
+  return {
+    rate,
+    readCheckpointPageEntryCount: () => checkpointPageEntryCount,
+    interruptBeforeNextMutation: (): void => {
+      interruptAtNextMutation = true
+    },
+    readMandatoryCleanupDepth: () => mandatoryCleanupDepth,
+    readInterruptedMutationDescribeTableCount: () =>
+      interruptedMutationDescribeTableCount,
+  }
+}
+
+/** Installs one test-only rate seam into a private managed port. */
+function installRecordingManagedRateHarness(
+  port: WorkspaceSearchMigrationManagedAwsSession,
+  transport: RecordingIdentityAwsTransport,
+): RecordingManagedRateHarness {
+  const harness = createRecordingManagedRateHarness(transport)
+  if (!Reflect.set(port, 'describeTableRate', harness.rate)) {
+    throw new Error('Expected the test-owned managed rate seam to install.')
+  }
+  return harness
+}
+
 describe('Workspace Search migration AWS identity adapter', () => {
   test('constructs only exact allowlisted reads and closes its transport', async () => {
     const requested = createRequestedResources()
@@ -2418,7 +2551,22 @@ describe('Workspace Search migration AWS identity adapter', () => {
       stateTableName,
       requested,
     )
+    const writerFence = port.createApplicationWriterFencePort()
+    const expectedGuardOrder = [
+      requested.tables['migration-state'],
+      requested.tables['project-directory'],
+      requested.tables['work-items'],
+      requested.tables.collaboration,
+      requested.tables.documents,
+      requested.tables['workspace-search'],
+    ]
+    const guardTrace: string[] = []
+    let postSendGuardStart = 0
+    transport.describeTableEffect = (tableName) => {
+      guardTrace.push(tableName)
+    }
     transport.transactWriteSourceEvidenceEffect = () => {
+      postSendGuardStart = guardTrace.length
       transport.describeTableOutputs.set(stateTableName, replacement)
     }
 
@@ -2434,8 +2582,674 @@ describe('Workspace Search migration AWS identity adapter', () => {
     expect(transport.getSourceEvidenceCommands.length).toBeGreaterThan(0)
     expect(transport.scanSourceCommands).toHaveLength(1)
     expect(transport.transactWriteSourceEvidenceCommands).toHaveLength(1)
+    expect(guardTrace.slice(postSendGuardStart)).toEqual(
+      expectedGuardOrder,
+    )
+    await expect(writerFence.read()).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+    })
     port.close()
   })
+
+  test('preserves a planning tx error after a successful all-six guard', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+    )
+    const configuration = await port.measureConfiguration()
+    const managedRate = installRecordingManagedRateHarness(
+      port,
+      transport,
+    )
+    const expectedGuardOrder = [
+      requested.tables['migration-state'],
+      requested.tables['project-directory'],
+      requested.tables['work-items'],
+      requested.tables.collaboration,
+      requested.tables.documents,
+      requested.tables['workspace-search'],
+    ]
+    const guardTrace: string[] = []
+    let postSendGuardStart = 0
+    const canary = 'PLANNING-TX-ERROR-CANARY-DO-NOT-LEAK'
+    const transactionError = new Error(canary)
+    transactionError.name = 'TransactionConflictException'
+    transport.describeTableEffect = (tableName) => {
+      guardTrace.push(tableName)
+    }
+    transport.transactWriteSourceEvidenceEffect = () => {
+      postSendGuardStart = guardTrace.length
+      managedRate.rate.interrupt()
+      throw transactionError
+    }
+
+    const failure = await captureWorkspaceSearchMigrationFailure(
+      port.commitNextSourceEvidencePage(
+        createSourceEvidenceRequest(configuration),
+      ),
+    )
+
+    expect(failure.code).toBe('TRANSIENT_INFRASTRUCTURE_FAILURE')
+    expect(failure.message).not.toContain(canary)
+    expect(guardTrace.slice(postSendGuardStart)).toEqual(
+      expectedGuardOrder,
+    )
+    expect(managedRate.readCheckpointPageEntryCount()).toBe(1)
+    expect(managedRate.readMandatoryCleanupDepth()).toBe(0)
+    port.close()
+  })
+
+  test('quarantines a target transaction after post-send target drift', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const clockAt = '2026-07-28T06:30:00.000Z'
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => new Date(clockAt),
+    )
+    const configuration = await port.measureConfiguration()
+    const authority = await createManagedPlanningAuthority(
+      port,
+      clockAt,
+      'target-post-send-drift',
+    )
+    const targetTableName = requested.tables['workspace-search']
+    const replacement = createReplacementDescribeTableOutput(
+      'workspace-search',
+      targetTableName,
+      requested,
+    )
+    const writerFence = port.createApplicationWriterFencePort()
+    const expectedGuardOrder = [
+      requested.tables['migration-state'],
+      requested.tables['project-directory'],
+      requested.tables['work-items'],
+      requested.tables.collaboration,
+      requested.tables.documents,
+      targetTableName,
+    ]
+    const guardTrace: string[] = []
+    let postSendGuardStart = 0
+    transport.describeTableEffect = (tableName) => {
+      guardTrace.push(tableName)
+    }
+    transport.transactWriteTargetEvidenceEffect = () => {
+      postSendGuardStart = guardTrace.length
+      transport.describeTableOutputs.set(targetTableName, replacement)
+    }
+
+    await expect(
+      port.commitNextTargetEvidencePage(
+        createPlanningTargetEvidenceRequest(
+          configuration,
+          structuredClone(authority),
+        ),
+      ),
+    ).rejects.toMatchObject({
+      code: 'TARGET_DRIFT',
+      message:
+        'Workspace Search target evidence stopped safely (TARGET_DRIFT).',
+    })
+    expect(transport.scanTargetCommands).toHaveLength(1)
+    expect(transport.transactWriteTargetEvidenceCommands).toHaveLength(1)
+    expect(guardTrace.slice(postSendGuardStart)).toEqual(
+      expectedGuardOrder,
+    )
+    await expect(writerFence.read()).rejects.toMatchObject({
+      code: 'INVALID_STATE',
+    })
+    port.close()
+  })
+
+  test('starts no planning artifact mutation after scan-time interruption', async () => {
+    const evidenceKinds: readonly ('source' | 'target')[] = [
+      'source',
+      'target',
+    ]
+    for (const evidenceKind of evidenceKinds) {
+      const requested = createRequestedResources()
+      const transport = new RecordingIdentityAwsTransport()
+      seedValidMeasurementOutputs(transport, requested)
+      const clockAt = '2026-07-28T06:40:00.000Z'
+      const port = createAwsWorkspaceSearchMigrationIdentityPort(
+        requested,
+        () => transport,
+        () => new Date(clockAt),
+      )
+      const configuration = await port.measureConfiguration()
+      const authority = await createManagedPlanningAuthority(
+        port,
+        clockAt,
+        `${evidenceKind}-scan-interrupt`,
+      )
+      const managedRate = installRecordingManagedRateHarness(
+        port,
+        transport,
+      )
+      if (evidenceKind === 'source') {
+        transport.scanSourceEffect = () => managedRate.rate.interrupt()
+      } else {
+        transport.scanTargetEffect = () => managedRate.rate.interrupt()
+      }
+
+      const operation = evidenceKind === 'source'
+        ? port.commitNextSourceEvidencePage(
+          createPlanningSourceEvidenceRequest(
+            configuration,
+            structuredClone(authority),
+          ),
+        )
+        : port.commitNextTargetEvidencePage(
+          createPlanningTargetEvidenceRequest(
+            configuration,
+            structuredClone(authority),
+          ),
+        )
+      await expect(operation).rejects.toBeDefined()
+
+      expect(managedRate.readCheckpointPageEntryCount()).toBe(1)
+      expect(transport.putSourceArtifactCommands).toHaveLength(0)
+      expect(transport.putTargetArtifactCommands).toHaveLength(0)
+      expect(transport.transactWriteSourceEvidenceCommands).toHaveLength(0)
+      expect(transport.transactWriteTargetEvidenceCommands).toHaveLength(0)
+      port.close()
+    }
+  })
+
+  test('rechecks heartbeat headroom after Scan before artifact Put', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const clockAt = '2026-07-28T06:42:00.000Z'
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => new Date(clockAt),
+    )
+    const configuration = await port.measureConfiguration()
+    const authority = await createManagedPlanningAuthority(
+      port,
+      clockAt,
+      'source-heartbeat-headroom',
+    )
+    const managedRate = installRecordingManagedRateHarness(port, transport)
+    let headroomCurrent = true
+    let guardCallCount = 0
+    transport.scanSourceEffect = () => {
+      headroomCurrent = false
+    }
+
+    const operation = port.runWithMutationAdmissionGuard(
+      () => {
+        guardCallCount += 1
+        if (!headroomCurrent) {
+          managedRate.rate.interrupt()
+          throw new Error('expired-heartbeat-headroom')
+        }
+      },
+      async () => await port.commitNextSourceEvidencePage(
+        createPlanningSourceEvidenceRequest(
+          configuration,
+          structuredClone(authority),
+        ),
+      ),
+    )
+    await expect(operation).rejects.toBeDefined()
+
+    expect(guardCallCount).toBe(1)
+    expect(transport.putSourceArtifactCommands).toHaveLength(0)
+    expect(transport.transactWriteSourceEvidenceCommands).toHaveLength(0)
+    port.close()
+  })
+
+  test('clears cleanup without sending when interruption wins before tx', async () => {
+    const evidenceKinds: readonly ('source' | 'target')[] = [
+      'source',
+      'target',
+    ]
+    for (const evidenceKind of evidenceKinds) {
+      const requested = createRequestedResources()
+      const transport = new RecordingIdentityAwsTransport()
+      seedValidMeasurementOutputs(transport, requested)
+      const clockAt = '2026-07-28T06:45:00.000Z'
+      const port = createAwsWorkspaceSearchMigrationIdentityPort(
+        requested,
+        () => transport,
+        () => new Date(clockAt),
+      )
+      const configuration = await port.measureConfiguration()
+      const authority = await createManagedPlanningAuthority(
+        port,
+        clockAt,
+        `${evidenceKind}-pre-tx-interrupt`,
+      )
+      const managedRate = installRecordingManagedRateHarness(
+        port,
+        transport,
+      )
+      if (evidenceKind === 'source') {
+        transport.headSourceArtifactEffect = () => {
+          managedRate.interruptBeforeNextMutation()
+        }
+      } else {
+        transport.headTargetArtifactEffect = () => {
+          managedRate.interruptBeforeNextMutation()
+        }
+      }
+
+      const operation = evidenceKind === 'source'
+        ? port.commitNextSourceEvidencePage(
+          createPlanningSourceEvidenceRequest(
+            configuration,
+            structuredClone(authority),
+          ),
+        )
+        : port.commitNextTargetEvidencePage(
+          createPlanningTargetEvidenceRequest(
+            configuration,
+            structuredClone(authority),
+          ),
+        )
+      await expect(operation).rejects.toBeDefined()
+
+      expect(managedRate.readCheckpointPageEntryCount()).toBe(1)
+      expect(managedRate.readMandatoryCleanupDepth()).toBe(0)
+      expect(transport.putSourceArtifactCommands.length).toBe(
+        evidenceKind === 'source' ? 1 : 0,
+      )
+      expect(transport.putTargetArtifactCommands.length).toBe(
+        evidenceKind === 'target' ? 1 : 0,
+      )
+      expect(transport.transactWriteSourceEvidenceCommands).toHaveLength(0)
+      expect(transport.transactWriteTargetEvidenceCommands).toHaveLength(0)
+      port.close()
+    }
+  })
+
+  test(
+    'skips post-send guards when control transactions are rejected pre-send',
+    async () => {
+      const publication = await createManagedSealedPublicationFixture(
+        'sealed-publication-pre-send-interrupt',
+      )
+      const sealedPort =
+        publication.port.createSealedPlanningAuthorityPort()
+      const publicationRate = installRecordingManagedRateHarness(
+        publication.port,
+        publication.transport,
+      )
+      const publicationTransactions =
+        publication.transport.transactWritePrePlanAuthorityCommands.length
+      publicationRate.interruptBeforeNextMutation()
+      await expect(
+        sealedPort.publish(publication.publishInput),
+      ).rejects.toBeDefined()
+      expect(
+        publication.transport.transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(publicationTransactions)
+      expect(publication.transport.describeTableCommands).toHaveLength(
+        publicationRate.readInterruptedMutationDescribeTableCount() ?? -1,
+      )
+      expect(publicationRate.readMandatoryCleanupDepth()).toBe(0)
+      publication.port.close()
+
+      const execution = await createManagedExecutionRunFixture(
+        'execution-run-pre-send-interrupt',
+      )
+      const executionPort = execution.port.createExecutionRunPort(
+        execution.executionBoundary,
+        execution.sealedPlanningAuthority,
+        execution.planSeal,
+        execution.closedWriterFenceRecord,
+      )
+      const executionRate = installRecordingManagedRateHarness(
+        execution.port,
+        execution.transport,
+      )
+      const executionTransactions =
+        execution.transport.transactWritePrePlanAuthorityCommands.length
+      executionRate.interruptBeforeNextMutation()
+      await expect(
+        executionPort.create(execution.currentAuthority),
+      ).rejects.toBeDefined()
+      expect(
+        execution.transport.transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(executionTransactions)
+      expect(execution.transport.describeTableCommands).toHaveLength(
+        executionRate.readInterruptedMutationDescribeTableCount() ?? -1,
+      )
+      expect(executionRate.readMandatoryCleanupDepth()).toBe(0)
+      execution.port.close()
+
+      const requested = createRequestedResources()
+      const transport = new RecordingIdentityAwsTransport()
+      seedValidMeasurementOutputs(transport, requested)
+      const clockAt = '2026-07-28T07:00:00.000Z'
+      const fenceSession = createAwsWorkspaceSearchMigrationIdentityPort(
+        requested,
+        () => transport,
+        () => new Date(clockAt),
+      )
+      await fenceSession.measureConfiguration()
+      const fenceAuthority = await createManagedPlanningAuthority(
+        fenceSession,
+        clockAt,
+        'writer-fence-pre-send-interrupt',
+      )
+      const writerFence =
+        fenceSession.createApplicationWriterFencePort()
+      const fenceRate = installRecordingManagedRateHarness(
+        fenceSession,
+        transport,
+      )
+      const fenceTransactions =
+        transport.transactWritePrePlanAuthorityCommands.length
+      fenceRate.interruptBeforeNextMutation()
+      await expect(
+        writerFence.bootstrapOpen(fenceAuthority),
+      ).rejects.toBeDefined()
+      expect(
+        transport.transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(fenceTransactions)
+      expect(transport.describeTableCommands).toHaveLength(
+        fenceRate.readInterruptedMutationDescribeTableCount() ?? -1,
+      )
+      expect(fenceRate.readMandatoryCleanupDepth()).toBe(0)
+      fenceSession.close()
+    },
+    30_000,
+  )
+
+  test(
+    'skips immutable post-send guards when Put is rejected pre-send',
+    async () => {
+      const partial =
+        await createManagedPartialRollbackOperationFixture(
+          'partial-seal-pre-send-interrupt',
+        )
+      const partialRate = installRecordingManagedRateHarness(
+        partial.port,
+        partial.transport,
+      )
+      const partialPuts =
+        partial.transport.putImmutableArtifactCommands.length
+      const partialTransactions =
+        partial.transport.transactWritePrePlanAuthorityCommands.length
+      partialRate.interruptBeforeNextMutation()
+
+      await expect(partial.rollback.beginRollback(
+        createManagedPartialRollbackCommand(
+          partial,
+          partial.applyingState.revision,
+        ),
+      )).rejects.toBeDefined()
+
+      expect(
+        partial.transport.putImmutableArtifactCommands,
+      ).toHaveLength(partialPuts)
+      expect(
+        partial.transport.transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(partialTransactions)
+      expect(partial.transport.describeTableCommands).toHaveLength(
+        partialRate.readInterruptedMutationDescribeTableCount() ?? -1,
+      )
+      expect(partialRate.readMandatoryCleanupDepth()).toBe(0)
+      partial.port.close()
+
+      const full = await createManagedFullVerificationFixture(
+        'verification-result-pre-send-interrupt',
+      )
+      const terminal =
+        await completeManagedFullVerificationTraversal(full)
+      const fullRate = installRecordingManagedRateHarness(
+        full.port,
+        full.transport,
+      )
+      const fullPuts = full.transport.putImmutableArtifactCommands.length
+      const fullTransactions =
+        full.transport.transactWritePrePlanAuthorityCommands.length
+      fullRate.interruptBeforeNextMutation()
+
+      await expect(full.verification.publishVerified({
+        expectedRevision: terminal.revision,
+        authority: {
+          lease: {
+            runId: full.currentAuthority.lease.runId,
+            ownerId: full.currentAuthority.lease.ownerId,
+            fenceToken: full.currentAuthority.lease.fenceToken,
+          },
+          maintenanceEvidenceReceiptDigest:
+            full.currentAuthority.maintenanceEvidenceReceiptDigest,
+          maintenanceEvidencePointerRevision:
+            full.currentAuthority.maintenanceEvidencePointerRevision,
+        },
+      })).rejects.toBeDefined()
+
+      expect(full.transport.putImmutableArtifactCommands).toHaveLength(
+        fullPuts,
+      )
+      expect(
+        full.transport.transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(fullTransactions)
+      expect(full.transport.describeTableCommands).toHaveLength(
+        fullRate.readInterruptedMutationDescribeTableCount() ?? -1,
+      )
+      expect(fullRate.readMandatoryCleanupDepth()).toBe(0)
+      full.port.close()
+    },
+    30_000,
+  )
+
+  test(
+    'admits each of the six logical page entrypoints exactly once',
+    async () => {
+      const planningRequested = createRequestedResources()
+      const planningTransport = new RecordingIdentityAwsTransport()
+      seedValidMeasurementOutputs(planningTransport, planningRequested)
+      const planningPort = createAwsWorkspaceSearchMigrationIdentityPort(
+        planningRequested,
+        () => planningTransport,
+        () => new Date('2026-07-28T07:00:00.000Z'),
+      )
+      const planningConfiguration =
+        await planningPort.measureConfiguration()
+      const planningAuthority = await createManagedPlanningAuthority(
+        planningPort,
+        '2026-07-28T07:00:00.000Z',
+        'logical-page-planning',
+      )
+      const planningRate = installRecordingManagedRateHarness(
+        planningPort,
+        planningTransport,
+      )
+      planningTransport.scanSourceOutput = createEmptyScanOutput()
+      await planningPort.commitNextSourceEvidencePage(
+        createPlanningSourceEvidenceRequest(
+          planningConfiguration,
+          structuredClone(planningAuthority),
+        ),
+      )
+      const sourcePageEntries =
+        planningRate.readCheckpointPageEntryCount()
+      planningTransport.scanTargetOutput = createEmptyScanOutput()
+      await planningPort.commitNextTargetEvidencePage(
+        createPlanningTargetEvidenceRequest(
+          planningConfiguration,
+          structuredClone(planningAuthority),
+        ),
+      )
+      const targetPageEntries =
+        planningRate.readCheckpointPageEntryCount() - sourcePageEntries
+      planningPort.close()
+
+      const applyFixture = await createManagedApplyOperationFixture(
+        'logical-page-apply',
+      )
+      const apply = await createManagedApplyCheckpointPort(applyFixture)
+      const applyRate = installRecordingManagedRateHarness(
+        applyFixture.port,
+        applyFixture.transport,
+      )
+      applyFixture.transport.scanSourceOutput = {
+        $metadata: {},
+        Count: 1,
+        Items: [createManagedApplySourceItem()],
+        ScannedCount: 1,
+      }
+      await apply.saveApplyCheckpoint(
+        createManagedApplyCheckpointCommand(
+          applyFixture,
+          'project-directory',
+          2,
+        ),
+      )
+      const applyPageEntries = applyRate.readCheckpointPageEntryCount()
+      applyFixture.port.close()
+
+      const verificationFixture =
+        await createManagedFullVerificationFixture(
+          'logical-page-verification',
+        )
+      const verificationRate = installRecordingManagedRateHarness(
+        verificationFixture.port,
+        verificationFixture.transport,
+      )
+      verificationFixture.transport.scanSourceOutput = {
+        $metadata: {},
+        Count: 1,
+        Items: [createManagedApplySourceItem()],
+        ScannedCount: 1,
+      }
+      await verificationFixture.verification.saveVerificationPage(
+        createManagedFullVerificationPageCommand(
+          verificationFixture,
+          'project-directory',
+          0,
+        ),
+      )
+      const verificationPageEntries =
+        verificationRate.readCheckpointPageEntryCount()
+      verificationFixture.port.close()
+
+      const partialFixture =
+        await createManagedPartialRollbackOperationFixture(
+          'logical-page-partial-rollback',
+        )
+      const partialStarted = await partialFixture.rollback.beginRollback(
+        createManagedPartialRollbackCommand(
+          partialFixture,
+          partialFixture.applyingState.revision,
+        ),
+      )
+      const partialOriginalRead =
+        partialFixture.transport.getPrePlanAuthorityApplyOutput
+      const partialBefore = partialFixture.plannedOperation.operation.before
+      const partialAfter = partialFixture.plannedOperation.operation.after
+      if (!partialBefore.exists || !partialAfter.exists) {
+        throw new Error('Expected complete partial rollback targets.')
+      }
+      let partialRollbackCommitted = false
+      partialFixture.transport.getPrePlanAuthorityApplyOutput = (command) =>
+        command.input.TableName ===
+            partialFixture.requested.tables['workspace-search']
+          ? {
+              $metadata: {},
+              Item: structuredClone(
+                partialRollbackCommitted
+                  ? partialBefore.item
+                  : partialAfter.item,
+              ),
+            }
+          : partialOriginalRead?.(command)
+      partialFixture.transport
+        .transactWritePrePlanAuthorityPostCommitEffect = () => {
+          partialRollbackCommitted = true
+        }
+      const partialRate = installRecordingManagedRateHarness(
+        partialFixture.port,
+        partialFixture.transport,
+      )
+      await partialFixture.rollback.commitRollbackOperation(
+        createManagedPartialRollbackCommand(
+          partialFixture,
+          partialStarted.revision,
+        ),
+      )
+      const partialRollbackPageEntries =
+        partialRate.readCheckpointPageEntryCount()
+      partialFixture.port.close()
+
+      const rollbackFixture = await createManagedRollbackOperationFixture(
+        'logical-page-complete-rollback',
+      )
+      const rollbackStarted = await rollbackFixture.rollback.beginRollback(
+        createManagedRollbackCommand(
+          rollbackFixture,
+          rollbackFixture.appliedState.revision,
+        ),
+      )
+      const rollbackOriginalRead =
+        rollbackFixture.transport.getPrePlanAuthorityApplyOutput
+      const rollbackBefore =
+        rollbackFixture.plannedOperation.operation.before
+      const rollbackAfter = rollbackFixture.plannedOperation.operation.after
+      if (!rollbackBefore.exists || !rollbackAfter.exists) {
+        throw new Error('Expected complete rollback targets.')
+      }
+      let rollbackCommitted = false
+      rollbackFixture.transport.getPrePlanAuthorityApplyOutput = (command) =>
+        command.input.TableName ===
+            rollbackFixture.requested.tables['workspace-search']
+          ? {
+              $metadata: {},
+              Item: structuredClone(
+                rollbackCommitted
+                  ? rollbackBefore.item
+                  : rollbackAfter.item,
+              ),
+            }
+          : rollbackOriginalRead?.(command)
+      rollbackFixture.transport
+        .transactWritePrePlanAuthorityPostCommitEffect = () => {
+          rollbackCommitted = true
+        }
+      const rollbackRate = installRecordingManagedRateHarness(
+        rollbackFixture.port,
+        rollbackFixture.transport,
+      )
+      await rollbackFixture.rollback.commitRollbackOperation(
+        createManagedRollbackCommand(
+          rollbackFixture,
+          rollbackStarted.revision,
+        ),
+      )
+      const rollbackPageEntries =
+        rollbackRate.readCheckpointPageEntryCount()
+      rollbackFixture.port.close()
+
+      expect({
+        source: sourcePageEntries,
+        target: targetPageEntries,
+        apply: applyPageEntries,
+        verification: verificationPageEntries,
+        partialRollback: partialRollbackPageEntries,
+        rollback: rollbackPageEntries,
+      }).toEqual({
+        source: 1,
+        target: 1,
+        apply: 1,
+        verification: 1,
+        partialRollback: 1,
+        rollback: 1,
+      })
+    },
+    30_000,
+  )
 
   test('measures identity before issuing and reducing one exact source Scan', async () => {
     const requested = createRequestedResources()

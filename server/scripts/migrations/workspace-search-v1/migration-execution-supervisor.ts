@@ -6,6 +6,7 @@ import {
   type MigrationSourceCheckpoint,
   type WorkspaceSearchMigrationConfiguration,
   type WorkspaceSearchMigrationFailureCode,
+  type WorkspaceSearchPlanSeal,
   WorkspaceSearchMigrationFailure,
 } from './migration-contract'
 import type {
@@ -21,10 +22,14 @@ import {
 import type {
   WorkspaceSearchMigrationManagedAwsSession,
   WorkspaceSearchMigrationManagedPartialRollbackAwsPort,
+  WorkspaceSearchMigrationRateManagedAwsSession,
 } from './migration-identity-aws'
 import type {
   WorkspaceSearchMigrationPlanArtifactReplayResult,
 } from './migration-plan-artifact'
+import type {
+  WorkspaceSearchMigrationPlanningArtifactAwsGateway,
+} from './migration-planning-artifact-aws'
 import type {
   WorkspaceSearchMigrationPrePlanAuthority,
   WorkspaceSearchMigrationPrePlanAuthorityClaim,
@@ -50,6 +55,9 @@ import type {
   WorkspaceSearchMigrationExecutionRun,
 } from './migration-execution-run'
 import type {
+  WorkspaceSearchMigrationExecutionRunAwsPort,
+} from './migration-execution-run-aws'
+import type {
   WorkspaceSearchMigrationApplyOperationAwsPort,
 } from './migration-apply-operation-aws'
 import type {
@@ -59,7 +67,23 @@ import type {
   WorkspaceSearchMigrationRollbackOperationAwsPort,
 } from './migration-rollback-operation-aws'
 import type {
-  WorkspaceSearchWriterFenceClosedRecord,
+  ReleaseWorkspaceSearchMigrationApplicationWriterFenceInput,
+  WorkspaceSearchMigrationApplicationWriterFenceAwsPort,
+  WorkspaceSearchMigrationApplicationWriterFenceTerminalOutcome,
+} from './migration-application-writer-fence-aws'
+import type {
+  WorkspaceSearchMigrationExecutionBoundaryAwsPort,
+} from './migration-execution-boundary-aws'
+import type {
+  WorkspaceSearchMigrationSealedPlanningAuthorityV2AwsPort,
+} from './migration-sealed-planning-authority-aws'
+import {
+  createWorkspaceSearchWriterFenceClosedSuccessor,
+  createWorkspaceSearchWriterFenceInitialOpenRecord,
+  createWorkspaceSearchWriterFenceReleasedOpenSuccessor,
+  type WorkspaceSearchWriterFenceClosedRecord,
+  type WorkspaceSearchWriterFenceOpenRecord,
+  type WorkspaceSearchWriterFenceReleasedOpenRecordV2,
 } from '../../../src/infrastructure/runtime/workspace-search-writer-fence'
 
 const checkpointLocations: readonly WorkspaceSearchMigrationCheckpointLocation[] = [
@@ -124,10 +148,215 @@ export type WorkspaceSearchMigrationExecutionStatus = {
 }
 
 /**
- * Managed session surface needed by read-only execution status.
+ * Exact immutable terminal graph passed only to the writer-fence release port.
+ *
+ * This value contains operator and resource bindings and must never be emitted
+ * by a CLI or log surface. Public status remains the separate secret-free
+ * `WorkspaceSearchMigrationExecutionStatus` projection.
  */
-export type WorkspaceSearchMigrationExecutionStatusSession = Pick<
+export type WorkspaceSearchMigrationExecutionTerminalRelease =
+  ReleaseWorkspaceSearchMigrationApplicationWriterFenceInput
+
+/** Read-only writer-fence capability used during graph reconstruction. */
+type WorkspaceSearchMigrationExecutionWriterFenceReadPort = Pick<
+  WorkspaceSearchMigrationApplicationWriterFenceAwsPort,
+  'read'
+>
+
+/** Read-only execution-boundary capability. */
+type WorkspaceSearchMigrationExecutionBoundaryReadPort = Pick<
+  WorkspaceSearchMigrationExecutionBoundaryAwsPort,
+  'read'
+>
+
+/** Read-only sealed-planning-authority capability. */
+type WorkspaceSearchMigrationSealedPlanningAuthorityReadPort = Pick<
+  WorkspaceSearchMigrationSealedPlanningAuthorityV2AwsPort,
+  'read'
+>
+
+/** Read-only immutable plan replay capability. */
+type WorkspaceSearchMigrationPlanningArtifactReadGateway = Pick<
+  WorkspaceSearchMigrationPlanningArtifactAwsGateway,
+  'replayPlanArtifact'
+>
+
+/** Read-only execution-admission capability. */
+type WorkspaceSearchMigrationExecutionRunReadPort = Pick<
+  WorkspaceSearchMigrationExecutionRunAwsPort,
+  'read'
+>
+
+/** Read-only apply-state capability. */
+type WorkspaceSearchMigrationApplyReadPort = Pick<
+  WorkspaceSearchMigrationApplyOperationAwsPort,
+  'readRunState'
+>
+
+/** Read-only verification-state capability. */
+type WorkspaceSearchMigrationVerificationReadPort = Pick<
+  WorkspaceSearchMigrationFullVerificationAwsPort,
+  'readProgress' | 'readVerifiedRoot'
+>
+
+/** Read-only committed-prefix rollback capability. */
+type WorkspaceSearchMigrationPartialRollbackReadPort = Pick<
+  WorkspaceSearchMigrationManagedPartialRollbackAwsPort,
+  'readRollbackLifecycle'
+>
+
+/** Read-only complete-plan rollback capability. */
+type WorkspaceSearchMigrationCompleteRollbackReadPort = Pick<
+  WorkspaceSearchMigrationRollbackOperationAwsPort,
+  'readRollbackState' | 'readRolledBackRoot'
+>
+
+/**
+ * Capability-minimized session used only for execution graph reads.
+ *
+ * Every factory returns a read-only Pick rather than the managed mutation
+ * port, so status consumers cannot acquire a write capability through this
+ * interface.
+ */
+export interface WorkspaceSearchMigrationExecutionStatusSession {
+  /**
+   * Freshly measures the selected resource incarnation.
+   *
+   * @returns Exact measured migration configuration.
+   */
+  measureConfiguration(): Promise<WorkspaceSearchMigrationConfiguration>
+
+  /**
+   * Creates the read-only execution-boundary port.
+   *
+   * @returns Boundary read capability only.
+   */
+  createExecutionBoundaryPort():
+    WorkspaceSearchMigrationExecutionBoundaryReadPort
+
+  /**
+   * Creates the read-only sealed-root port.
+   *
+   * @returns Sealed-root read capability only.
+   */
+  createSealedPlanningAuthorityPort():
+    WorkspaceSearchMigrationSealedPlanningAuthorityReadPort
+
+  /**
+   * Creates the read-only application-writer-fence port.
+   *
+   * @returns Writer-fence read capability only.
+   */
+  createApplicationWriterFencePort():
+    WorkspaceSearchMigrationExecutionWriterFenceReadPort
+
+  /**
+   * Creates one run-bound immutable plan replay gateway.
+   *
+   * @param runId - Exact operator-selected run.
+   * @returns Plan replay capability only.
+   */
+  createPlanningArtifactGateway(
+    runId: string,
+  ): WorkspaceSearchMigrationPlanningArtifactReadGateway
+
+  /**
+   * Creates the read-only execution-admission port.
+   *
+   * @param executionBoundary - Exact planning-admitted boundary.
+   * @param sealedPlanningAuthority - Exact immutable sealed planning root.
+   * @param planSeal - Exact canonical plan seal referenced by the root.
+   * @param closedWriterFenceRecord - Exact closed fence fixed by the boundary.
+   * @returns Execution-run read capability only.
+   */
+  createExecutionRunPort(
+    executionBoundary:
+      WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary,
+    sealedPlanningAuthority:
+      WorkspaceSearchMigrationSealedPlanningAuthorityV2,
+    planSeal: WorkspaceSearchPlanSeal,
+    closedWriterFenceRecord: WorkspaceSearchWriterFenceClosedRecord,
+  ): WorkspaceSearchMigrationExecutionRunReadPort
+
+  /**
+   * Creates the read-only apply-state port.
+   *
+   * @param executionBoundary - Exact planning-admitted boundary.
+   * @param sealedPlanningAuthority - Exact immutable sealed planning root.
+   * @param closedWriterFenceRecord - Exact closed fence fixed by the boundary.
+   * @param executionRun - Exact immutable execution admission.
+   * @returns Apply-state read capability only.
+   */
+  createApplyOperationPort(
+    executionBoundary:
+      WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary,
+    sealedPlanningAuthority:
+      WorkspaceSearchMigrationSealedPlanningAuthorityV2,
+    closedWriterFenceRecord: WorkspaceSearchWriterFenceClosedRecord,
+    executionRun: WorkspaceSearchMigrationExecutionRun,
+  ): WorkspaceSearchMigrationApplyReadPort
+
+  /**
+   * Creates the read-only full-verification port.
+   *
+   * @param executionBoundary - Exact planning-admitted boundary.
+   * @param sealedPlanningAuthority - Exact immutable sealed planning root.
+   * @param closedWriterFenceRecord - Exact closed fence fixed by the boundary.
+   * @param executionRun - Exact immutable execution admission.
+   * @returns Verification-state read capability only.
+   */
+  createFullVerificationPort(
+    executionBoundary:
+      WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary,
+    sealedPlanningAuthority:
+      WorkspaceSearchMigrationSealedPlanningAuthorityV2,
+    closedWriterFenceRecord: WorkspaceSearchWriterFenceClosedRecord,
+    executionRun: WorkspaceSearchMigrationExecutionRun,
+  ): WorkspaceSearchMigrationVerificationReadPort
+
+  /**
+   * Creates the read-only committed-prefix rollback port.
+   *
+   * @param executionBoundary - Exact planning-admitted boundary.
+   * @param sealedPlanningAuthority - Exact immutable sealed planning root.
+   * @param closedWriterFenceRecord - Exact closed fence fixed by the boundary.
+   * @param executionRun - Exact immutable execution admission.
+   * @returns Committed-prefix rollback read capability only.
+   */
+  createPartialRollbackOperationPort(
+    executionBoundary:
+      WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary,
+    sealedPlanningAuthority:
+      WorkspaceSearchMigrationSealedPlanningAuthorityV2,
+    closedWriterFenceRecord: WorkspaceSearchWriterFenceClosedRecord,
+    executionRun: WorkspaceSearchMigrationExecutionRun,
+  ): WorkspaceSearchMigrationPartialRollbackReadPort
+
+  /**
+   * Creates the read-only complete-plan rollback port.
+   *
+   * @param executionBoundary - Exact planning-admitted boundary.
+   * @param sealedPlanningAuthority - Exact immutable sealed planning root.
+   * @param closedWriterFenceRecord - Exact closed fence fixed by the boundary.
+   * @param executionRun - Exact immutable execution admission.
+   * @returns Complete-plan rollback read capability only.
+   */
+  createRollbackOperationPort(
+    executionBoundary:
+      WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary,
+    sealedPlanningAuthority:
+      WorkspaceSearchMigrationSealedPlanningAuthorityV2,
+    closedWriterFenceRecord: WorkspaceSearchWriterFenceClosedRecord,
+    executionRun: WorkspaceSearchMigrationExecutionRun,
+  ): WorkspaceSearchMigrationCompleteRollbackReadPort
+}
+
+/**
+ * Managed session surface needed by mutating execution supervision.
+ */
+export type WorkspaceSearchMigrationExecutionSupervisorSession = Pick<
   WorkspaceSearchMigrationManagedAwsSession,
+  | 'acquireLease'
   | 'createApplicationWriterFencePort'
   | 'createApplyOperationPort'
   | 'createExecutionBoundaryPort'
@@ -137,23 +366,17 @@ export type WorkspaceSearchMigrationExecutionStatusSession = Pick<
   | 'createPlanningArtifactGateway'
   | 'createRollbackOperationPort'
   | 'createSealedPlanningAuthorityPort'
+  | 'heartbeatLease'
   | 'measureConfiguration'
+  | 'readAuthority'
+  | 'readMaintenanceEvidenceReceipt'
+  | 'readMaintenanceEvidencePointer'
+  | 'renewMaintenanceEvidence'
+  | 'runWithMutationAdmissionGuard'
+> & Pick<
+  WorkspaceSearchMigrationRateManagedAwsSession,
+  'interruptMutationAdmission'
 >
-
-/**
- * Managed session surface needed by mutating execution supervision.
- */
-export type WorkspaceSearchMigrationExecutionSupervisorSession =
-  WorkspaceSearchMigrationExecutionStatusSession &
-  Pick<
-    WorkspaceSearchMigrationManagedAwsSession,
-    | 'acquireLease'
-    | 'heartbeatLease'
-    | 'readAuthority'
-    | 'readMaintenanceEvidenceReceipt'
-    | 'readMaintenanceEvidencePointer'
-    | 'renewMaintenanceEvidence'
-  >
 
 /**
  * Input for one secret-free read-only execution status reconstruction.
@@ -165,6 +388,22 @@ export type ReadWorkspaceSearchMigrationExecutionStatusInput = {
   readonly runId: string
   /** Reviewed configuration digest expected from fresh measurement. */
   readonly expectedConfigurationHash: string
+}
+
+/**
+ * Read-only terminal reconstruction over an already current measurement.
+ */
+export type ReadMeasuredWorkspaceSearchMigrationExecutionTerminalInput = {
+  /** Session whose latest generation produced `configuration`. */
+  readonly session: WorkspaceSearchMigrationExecutionStatusSession
+  /** Detached exact configuration from the current measured generation. */
+  readonly configuration: WorkspaceSearchMigrationConfiguration
+  /** Operator-selected migration run to inspect. */
+  readonly runId: string
+  /** Reviewed digest expected from the supplied fresh measurement. */
+  readonly expectedConfigurationHash: string
+  /** Optional heartbeat-owned cancellation signal for guarded rereads. */
+  readonly signal?: AbortSignal
 }
 
 /**
@@ -213,7 +452,7 @@ type ExecutionOperationGuard = {
 /**
  * Static execution roots and exact replayed plan for one measured generation.
  */
-type LoadedExecutionContext = {
+type LoadedExecutionContextBase = {
   /** Fresh measured configuration. */
   readonly configuration: WorkspaceSearchMigrationConfiguration
   /** Reviewed digest of the measured configuration. */
@@ -224,14 +463,36 @@ type LoadedExecutionContext = {
   /** Exact immutable version-two sealed planning root. */
   readonly sealedPlanningAuthority:
     WorkspaceSearchMigrationSealedPlanningAuthorityV2
+  /** Exact-version replayed plan artifacts and operations. */
+  readonly replay: WorkspaceSearchMigrationPlanArtifactReplayResult
+}
+
+/** Execution graph retained while application writers remain closed. */
+type LoadedClosedExecutionContext = LoadedExecutionContextBase & {
+  /** Closed graph may still admit an explicit execution mutation. */
+  readonly kind: 'closed'
   /** Exact closed application-writer fence row. */
   readonly closedWriterFenceRecord:
     WorkspaceSearchWriterFenceClosedRecord
-  /** Exact-version replayed plan artifacts and operations. */
-  readonly replay: WorkspaceSearchMigrationPlanArtifactReplayResult
   /** Existing immutable execution admission, when created. */
   readonly executionRun: WorkspaceSearchMigrationExecutionRun | undefined
 }
+
+/** Terminal graph fixed by an already committed writer-fence release. */
+type LoadedReleasedExecutionContext = LoadedExecutionContextBase & {
+  /** Released graph is permanently read-only. */
+  readonly kind: 'released'
+  /** Exact canonical version-two open row fixing the terminal outcome. */
+  readonly releasedWriterFenceRecord:
+    WorkspaceSearchWriterFenceReleasedOpenRecordV2
+  /** Terminal status independently reread from the released execution graph. */
+  readonly status: WorkspaceSearchMigrationExecutionStatus
+}
+
+/** Closed mutable graph or exact already-released terminal evidence. */
+type LoadedExecutionContext =
+  | LoadedClosedExecutionContext
+  | LoadedReleasedExecutionContext
 
 /**
  * Ports bound to one immutable execution admission.
@@ -247,6 +508,44 @@ type ExecutionPhasePorts = {
   /** Complete applied-root rollback. */
   readonly completeRollback:
     WorkspaceSearchMigrationRollbackOperationAwsPort
+}
+
+/**
+ * Read-only ports bound to one immutable execution admission.
+ */
+type ExecutionPhaseReadPorts = {
+  /** Read-only forward apply state. */
+  readonly apply: WorkspaceSearchMigrationApplyReadPort
+  /** Read-only independent verification state and terminal root. */
+  readonly verification: WorkspaceSearchMigrationVerificationReadPort
+  /** Read-only committed-prefix rollback lifecycle. */
+  readonly partialRollback:
+    WorkspaceSearchMigrationPartialRollbackReadPort
+  /** Read-only complete-plan rollback state and terminal root. */
+  readonly completeRollback:
+    WorkspaceSearchMigrationCompleteRollbackReadPort
+}
+
+/**
+ * One cross-item complete-rollback state and terminal-root observation.
+ */
+type CompleteRollbackObservation = {
+  /** Strong mutable rollback-state observation. */
+  readonly state: Awaited<
+    ReturnType<
+      WorkspaceSearchMigrationCompleteRollbackReadPort[
+        'readRollbackState'
+      ]
+    >
+  >
+  /** Strong immutable terminal-root observation. */
+  readonly root: Awaited<
+    ReturnType<
+      WorkspaceSearchMigrationCompleteRollbackReadPort[
+        'readRolledBackRoot'
+      ]
+    >
+  >
 }
 
 /**
@@ -300,6 +599,9 @@ type DurableExecutionSnapshot =
   | {
       /** Immutable verified root is authoritative. */
       readonly kind: 'verified'
+      /** Exact terminal root accepted by writer-fence release. */
+      readonly terminal:
+        WorkspaceSearchMigrationApplicationWriterFenceTerminalOutcome
       /** Public secret-free status. */
       readonly status: WorkspaceSearchMigrationExecutionStatus
     }
@@ -340,6 +642,9 @@ type DurableExecutionSnapshot =
       readonly kind: 'rolled-back'
       /** Durable terminal rollback scope. */
       readonly scope: 'committed-prefix' | 'complete-plan'
+      /** Exact terminal root accepted by writer-fence release. */
+      readonly terminal:
+        WorkspaceSearchMigrationApplicationWriterFenceTerminalOutcome
       /** Public secret-free status. */
       readonly status: WorkspaceSearchMigrationExecutionStatus
     }
@@ -363,17 +668,111 @@ export async function readWorkspaceSearchMigrationExecutionStatus(
     request.expectedConfigurationHash,
     guard,
   )
-  if (loaded.executionRun === undefined) {
-    return readyStatus()
-  }
-  const ports = createExecutionPhasePorts(
+  return await readExecutionStatusFromLoadedContext(
     request.session,
     loaded,
-    loaded.executionRun,
+    guard,
   )
-  return (
-    await readDurableExecutionSnapshot(ports, guard)
-  ).status
+}
+
+/**
+ * Reconstructs read-only status from the current measured generation.
+ *
+ * This entrypoint is used by terminal-release recovery after the coordinator
+ * has already measured and hash-checked the session. It never acquires a lease
+ * or exposes a mutation port.
+ *
+ * @param input - Current measured session, detached configuration, and signal.
+ * @returns Secret-free closed or already-released durable execution status.
+ */
+export async function readMeasuredWorkspaceSearchMigrationExecutionStatus(
+  input: ReadMeasuredWorkspaceSearchMigrationExecutionTerminalInput,
+): Promise<WorkspaceSearchMigrationExecutionStatus> {
+  const request = snapshotMeasuredExecutionTerminalInput(input)
+  const runId = requireMigrationIdentifier(request.runId, 'Run ID')
+  requireExpectedConfigurationHash(request.expectedConfigurationHash)
+  const guard = createSignalGuard(request.signal)
+  const loaded = await loadMeasuredExecutionContext(
+    request.session,
+    runId,
+    request.expectedConfigurationHash,
+    request.configuration,
+    guard,
+  )
+  return await readExecutionStatusFromLoadedContext(
+    request.session,
+    loaded,
+    guard,
+  )
+}
+
+/**
+ * Reconstructs the exact immutable terminal graph for writer-fence release.
+ *
+ * This is an internal control-plane handoff, not an operator response shape.
+ * It performs only strongly consistent reads and returns no candidate until an
+ * exact verified or fully rolled-back root is authoritative.
+ *
+ * @param input - Managed session, run identity, and reviewed configuration.
+ * @returns Exact terminal release graph, or undefined before terminal state.
+ */
+export async function readWorkspaceSearchMigrationExecutionTerminalRelease(
+  input: ReadWorkspaceSearchMigrationExecutionStatusInput,
+): Promise<WorkspaceSearchMigrationExecutionTerminalRelease | undefined> {
+  const request = snapshotExecutionStatusInput(input)
+  const runId = requireMigrationIdentifier(request.runId, 'Run ID')
+  requireExpectedConfigurationHash(request.expectedConfigurationHash)
+  const guard = createSignalGuard()
+  const loaded = await loadExecutionContext(
+    request.session,
+    runId,
+    request.expectedConfigurationHash,
+    guard,
+  )
+  if (loaded.kind === 'released') {
+    return failExecutionSupervisor('INVALID_STATE')
+  }
+  return readTerminalReleaseFromLoadedContext(
+    request.session,
+    loaded,
+    guard,
+  )
+}
+
+/**
+ * Reconstructs terminal release material without replacing the current
+ * measured session generation.
+ *
+ * This entrypoint is intended for a heartbeat-supervised coordinator that has
+ * already measured and hash-checked the session. Every factory operation still
+ * enforces that exact current generation; this function adds no mutation
+ * capability and never calls `measureConfiguration` itself.
+ *
+ * @param input - Current measured session, detached configuration, and signal.
+ * @returns Exact terminal release graph, or undefined before terminal state.
+ */
+export async function readMeasuredWorkspaceSearchMigrationExecutionTerminalRelease(
+  input: ReadMeasuredWorkspaceSearchMigrationExecutionTerminalInput,
+): Promise<WorkspaceSearchMigrationExecutionTerminalRelease | undefined> {
+  const request = snapshotMeasuredExecutionTerminalInput(input)
+  const runId = requireMigrationIdentifier(request.runId, 'Run ID')
+  requireExpectedConfigurationHash(request.expectedConfigurationHash)
+  const guard = createSignalGuard(request.signal)
+  const loaded = await loadMeasuredExecutionContext(
+    request.session,
+    runId,
+    request.expectedConfigurationHash,
+    request.configuration,
+    guard,
+  )
+  if (loaded.kind === 'released') {
+    return failExecutionSupervisor('INVALID_STATE')
+  }
+  return readTerminalReleaseFromLoadedContext(
+    request.session,
+    loaded,
+    guard,
+  )
 }
 
 /**
@@ -403,6 +802,9 @@ export async function superviseWorkspaceSearchMigrationExecution(
     request.expectedConfigurationHash,
     initialGuard,
   )
+  if (loaded.kind === 'released') {
+    return failExecutionSupervisor('INVALID_STATE')
+  }
   if (loaded.executionRun === undefined) {
     if (mode !== 'apply') {
       return failExecutionSupervisor('INVALID_STATE')
@@ -691,7 +1093,13 @@ class ExecutionAuthorityController {
         'INVALID_MAINTENANCE_EVIDENCE',
       )
     }
-    if (Date.parse(drainStartedAt) < Date.parse(this.closedAt)) {
+    const drainStartedMilliseconds = Date.parse(drainStartedAt)
+    const closedMilliseconds = Date.parse(this.closedAt)
+    if (
+      !Number.isFinite(drainStartedMilliseconds) ||
+      !Number.isFinite(closedMilliseconds) ||
+      drainStartedMilliseconds < closedMilliseconds
+    ) {
       return failExecutionSupervisor(
         'INVALID_MAINTENANCE_EVIDENCE',
       )
@@ -746,7 +1154,7 @@ class ExecutionAuthorityController {
  */
 async function runExecutionMode(
   session: WorkspaceSearchMigrationExecutionSupervisorSession,
-  loaded: LoadedExecutionContext,
+  loaded: LoadedClosedExecutionContext,
   authority: ExecutionAuthorityController,
   guard: WorkspaceSearchMigrationHeartbeatTaskContext,
   mode: WorkspaceSearchMigrationExecutionSupervisorMode,
@@ -906,7 +1314,7 @@ function requireExecutionModeSnapshot(
  * @param guard - Heartbeat activity guard.
  */
 async function advanceApply(
-  loaded: LoadedExecutionContext,
+  loaded: LoadedClosedExecutionContext,
   port: WorkspaceSearchMigrationApplyOperationAwsPort,
   state: Awaited<
     ReturnType<WorkspaceSearchMigrationApplyOperationAwsPort['readRunState']>
@@ -1123,6 +1531,33 @@ async function loadExecutionContext(
     guard,
     () => session.measureConfiguration(),
   )
+  return loadMeasuredExecutionContext(
+    session,
+    runId,
+    expectedConfigurationHash,
+    configuration,
+    guard,
+  )
+}
+
+/**
+ * Loads and cross-validates execution prerequisites from the current measured
+ * generation without starting a replacement measurement.
+ *
+ * @param session - Read-only current measured session.
+ * @param runId - Exact operator-selected run.
+ * @param expectedConfigurationHash - Reviewed configuration digest.
+ * @param configuration - Detached configuration from the current generation.
+ * @param guard - Read activity guard.
+ * @returns Static execution roots, exact plan, and optional admission.
+ */
+async function loadMeasuredExecutionContext(
+  session: WorkspaceSearchMigrationExecutionStatusSession,
+  runId: string,
+  expectedConfigurationHash: string,
+  configuration: WorkspaceSearchMigrationConfiguration,
+  guard: ExecutionOperationGuard,
+): Promise<LoadedExecutionContext> {
   const configurationHash =
     createWorkspaceSearchConfigurationHash(configuration)
   if (configurationHash !== expectedConfigurationHash) {
@@ -1152,15 +1587,39 @@ async function loadExecutionContext(
     boundaryValue?.phase !== 'planning-admitted' ||
     sealedPlanningAuthority === undefined ||
     fence.status !== 'present' ||
-    fence.record.mode !== 'closed' ||
     boundaryValue.runId !== runId ||
     sealedPlanningAuthority.runId !== runId ||
     boundaryValue.configurationHash !== configurationHash ||
-    sealedPlanningAuthority.configurationHash !== configurationHash ||
-    boundaryValue.closedWriterFenceRecordDigest !==
-      fence.record.recordDigest
+    sealedPlanningAuthority.configurationHash !== configurationHash
   ) {
     return failExecutionSupervisor('INVALID_STATE')
+  }
+  const fenceRecord = fence.record
+  let closedWriterFenceRecord: WorkspaceSearchWriterFenceClosedRecord
+  let releasedWriterFenceRecord:
+    WorkspaceSearchWriterFenceReleasedOpenRecordV2 | undefined
+  if (fenceRecord.mode === 'closed') {
+    if (
+      boundaryValue.closedWriterFenceRecordDigest !==
+        fenceRecord.recordDigest
+    ) {
+      return failExecutionSupervisor('INVALID_STATE')
+    }
+    closedWriterFenceRecord = fenceRecord
+  } else {
+    requireReleasedExecutionGraphBinding(
+      fenceRecord,
+      boundaryValue,
+      sealedPlanningAuthority,
+      runId,
+      configurationHash,
+    )
+    releasedWriterFenceRecord = fenceRecord
+    closedWriterFenceRecord =
+      reconstructReleasedClosedWriterFence(
+        fenceRecord,
+        boundaryValue,
+      )
   }
   const planning = session.createPlanningArtifactGateway(runId)
   const replay = await runGuardedOperation(
@@ -1180,24 +1639,276 @@ async function loadExecutionContext(
   ) {
     return failExecutionSupervisor('INVALID_STATE')
   }
+  const common = {
+    configuration,
+    configurationHash,
+    boundary: boundaryValue,
+    sealedPlanningAuthority,
+    replay,
+  }
   const executionRunPort = session.createExecutionRunPort(
     boundaryValue,
     sealedPlanningAuthority,
     replay.planSeal,
-    fence.record,
+    closedWriterFenceRecord,
   )
   const executionRun = await runGuardedOperation(
     guard,
     () => executionRunPort.read(runId),
   )
-  return {
-    configuration,
-    configurationHash,
-    boundary: boundaryValue,
-    sealedPlanningAuthority,
-    closedWriterFenceRecord: fence.record,
-    replay,
+  const closedContext: LoadedClosedExecutionContext = {
+    ...common,
+    kind: 'closed',
+    closedWriterFenceRecord,
     executionRun,
+  }
+  if (releasedWriterFenceRecord === undefined) return closedContext
+  if (
+    executionRun === undefined ||
+    executionRun.executionRunDigest !==
+      releasedWriterFenceRecord.release.executionRunDigest
+  ) {
+    return failExecutionSupervisor('INVALID_STATE')
+  }
+  const terminalSnapshot = await readDurableExecutionSnapshot(
+    createExecutionPhaseReadPorts(
+      session,
+      closedContext,
+      executionRun,
+    ),
+    guard,
+  )
+  requireReleasedTerminalSnapshot(
+    releasedWriterFenceRecord,
+    terminalSnapshot,
+  )
+  return {
+    ...common,
+    kind: 'released',
+    releasedWriterFenceRecord,
+    status: terminalSnapshot.status,
+  }
+}
+
+/**
+ * Requires one released-open row to match every independently readable root.
+ *
+ * The canonical release row is the durable proof of its transaction-fixed
+ * execution admission and terminal root. Boundary, sealed authority, closed
+ * predecessor, configuration, run, and all six table incarnations are still
+ * independently cross-checked before it can drive read-only recovery.
+ *
+ * @param record - Current measured open writer-fence row.
+ * @param boundary - Exact planning-admitted boundary read by run.
+ * @param sealedPlanningAuthority - Exact immutable sealed root read by run.
+ * @param runId - Operator-selected run.
+ * @param configurationHash - Current reviewed measurement digest.
+ */
+function requireReleasedExecutionGraphBinding(
+  record: WorkspaceSearchWriterFenceOpenRecord,
+  boundary: WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary,
+  sealedPlanningAuthority:
+    WorkspaceSearchMigrationSealedPlanningAuthorityV2,
+  runId: string,
+  configurationHash: string,
+): asserts record is WorkspaceSearchWriterFenceReleasedOpenRecordV2 {
+  if (
+    record.version !== 2 ||
+    record.release.runId !== runId ||
+    record.release.configurationHash !== configurationHash ||
+    record.release.executionBoundaryDigest !==
+      boundary.boundaryDigest ||
+    record.release.sealedPlanningAuthorityDigest !==
+      sealedPlanningAuthority.authorityDigest ||
+    record.previousClosedRecordDigest !==
+      boundary.closedWriterFenceRecordDigest ||
+    !sameExecutionTableIds(
+      record.binding.tableIds,
+      sealedPlanningAuthority.tableIds,
+    )
+  ) {
+    return failExecutionSupervisor('INVALID_STATE')
+  }
+}
+
+/**
+ * Rebuilds the exact canonical closed predecessor retained by a release.
+ *
+ * A closed row's canonical identity depends only on its measured binding,
+ * close authority, and close timestamp. The prior open timestamp is not part
+ * of that successor, so a temporary same-time initial row can safely feed the
+ * pure constructor before both stored predecessor digests are checked.
+ *
+ * @param record - Exact measured released-open row.
+ * @param boundary - Exact boundary retaining close authority and time.
+ * @returns Canonical closed predecessor accepted by read-only phase ports.
+ */
+function reconstructReleasedClosedWriterFence(
+  record: WorkspaceSearchWriterFenceReleasedOpenRecordV2,
+  boundary: WorkspaceSearchMigrationPlanningAdmittedExecutionBoundary,
+): WorkspaceSearchWriterFenceClosedRecord {
+  let closed: WorkspaceSearchWriterFenceClosedRecord
+  try {
+    const closedAt = new Date(boundary.closedAt)
+    const initial = createWorkspaceSearchWriterFenceInitialOpenRecord(
+      record.binding,
+      closedAt,
+    )
+    closed = createWorkspaceSearchWriterFenceClosedSuccessor(
+      initial,
+      boundary.closeAuthority,
+      closedAt,
+    )
+  } catch {
+    return failExecutionSupervisor('INVALID_STATE')
+  }
+  if (
+    closed.recordDigest !==
+      boundary.closedWriterFenceRecordDigest ||
+    closed.recordDigest !== record.previousClosedRecordDigest
+  ) {
+    return failExecutionSupervisor('INVALID_STATE')
+  }
+  let released: WorkspaceSearchWriterFenceReleasedOpenRecordV2
+  try {
+    released = createWorkspaceSearchWriterFenceReleasedOpenSuccessor(
+      closed,
+      record.release,
+      new Date(record.openedAt),
+    )
+  } catch {
+    return failExecutionSupervisor('INVALID_STATE')
+  }
+  if (
+    released.recordDigest !== record.recordDigest ||
+    released.canonicalBytes !== record.canonicalBytes
+  ) {
+    return failExecutionSupervisor('INVALID_STATE')
+  }
+  return closed
+}
+
+/**
+ * Requires the independently reread terminal to match the release identity.
+ *
+ * @param record - Canonical released-open writer-fence row.
+ * @param snapshot - Current execution graph reconstructed through read ports.
+ */
+function requireReleasedTerminalSnapshot(
+  record: WorkspaceSearchWriterFenceReleasedOpenRecordV2,
+  snapshot: DurableExecutionSnapshot,
+): void {
+  const expected = record.release.terminal
+  if (snapshot.kind === 'verified') {
+    const terminal = snapshot.terminal
+    if (terminal.kind !== 'verified') {
+      return failExecutionSupervisor('INVALID_STATE')
+    }
+    if (
+      expected.kind !== 'verified' ||
+      expected.persistenceVersion !== 1 ||
+      expected.rootDigest !==
+        terminal.root.verifiedRootDigest ||
+      Date.parse(record.openedAt) <
+        Date.parse(terminal.root.verifiedAt)
+    ) {
+      return failExecutionSupervisor('INVALID_STATE')
+    }
+    return
+  }
+  if (snapshot.kind !== 'rolled-back') {
+    return failExecutionSupervisor('INVALID_STATE')
+  }
+  const terminal = snapshot.terminal
+  if (terminal.kind === 'verified') {
+    return failExecutionSupervisor('INVALID_STATE')
+  }
+  const persistenceVersion = terminal.kind === 'rolled-back-v1'
+    ? 1
+    : 2
+  if (
+    expected.kind !== 'rolled-back' ||
+    expected.persistenceVersion !== persistenceVersion ||
+    expected.rootDigest !== terminal.root.rootDigest ||
+    Date.parse(record.openedAt) < Date.parse(terminal.root.finishedAt)
+  ) {
+    return failExecutionSupervisor('INVALID_STATE')
+  }
+}
+
+/**
+ * Compares every measured table role fixed by release and sealed planning.
+ *
+ * @param left - Writer-fence release binding.
+ * @param right - Sealed-planning binding.
+ * @returns Whether all six physical table incarnations match exactly.
+ */
+function sameExecutionTableIds(
+  left: WorkspaceSearchMigrationSealedPlanningTableIds,
+  right: WorkspaceSearchMigrationSealedPlanningTableIds,
+): boolean {
+  return left['project-directory'] === right['project-directory'] &&
+    left['work-items'] === right['work-items'] &&
+    left.collaboration === right.collaboration &&
+    left.documents === right.documents &&
+    left['workspace-search'] === right['workspace-search'] &&
+    left['migration-state'] === right['migration-state']
+}
+
+/**
+ * Projects closed or already-released state from one validated loaded graph.
+ *
+ * @param session - Read-only current measured session.
+ * @param loaded - Cross-validated closed or released graph.
+ * @param guard - Current read activity guard.
+ * @returns Secret-free authoritative execution status.
+ */
+async function readExecutionStatusFromLoadedContext(
+  session: WorkspaceSearchMigrationExecutionStatusSession,
+  loaded: LoadedExecutionContext,
+  guard: ExecutionOperationGuard,
+): Promise<WorkspaceSearchMigrationExecutionStatus> {
+  if (loaded.kind === 'released') {
+    return loaded.status
+  }
+  if (loaded.executionRun === undefined) return readyStatus()
+  const ports = createExecutionPhaseReadPorts(
+    session,
+    loaded,
+    loaded.executionRun,
+  )
+  return (
+    await readDurableExecutionSnapshot(ports, guard)
+  ).status
+}
+
+/**
+ * Reads one exact immutable terminal from already cross-validated roots.
+ *
+ * @param session - Read-only current measured session.
+ * @param loaded - Cross-validated boundary, root, plan, and admission.
+ * @param guard - Current signal or heartbeat activity guard.
+ * @returns Exact terminal release graph, or undefined before terminal state.
+ */
+async function readTerminalReleaseFromLoadedContext(
+  session: WorkspaceSearchMigrationExecutionStatusSession,
+  loaded: LoadedClosedExecutionContext,
+  guard: ExecutionOperationGuard,
+): Promise<WorkspaceSearchMigrationExecutionTerminalRelease | undefined> {
+  const executionRun = loaded.executionRun
+  if (executionRun === undefined) return undefined
+  const snapshot = await readDurableExecutionSnapshot(
+    createExecutionPhaseReadPorts(session, loaded, executionRun),
+    guard,
+  )
+  if (snapshot.kind !== 'verified' && snapshot.kind !== 'rolled-back') {
+    return undefined
+  }
+  return {
+    executionBoundary: loaded.boundary,
+    sealedPlanningAuthority: loaded.sealedPlanningAuthority,
+    executionRun,
+    terminal: snapshot.terminal,
   }
 }
 
@@ -1210,10 +1921,51 @@ async function loadExecutionContext(
  * @returns Admission-bound forward, verify, and rollback ports.
  */
 function createExecutionPhasePorts(
-  session: WorkspaceSearchMigrationExecutionStatusSession,
-  loaded: LoadedExecutionContext,
+  session: WorkspaceSearchMigrationExecutionSupervisorSession,
+  loaded: LoadedClosedExecutionContext,
   executionRun: WorkspaceSearchMigrationExecutionRun,
 ): ExecutionPhasePorts {
+  return {
+    apply: session.createApplyOperationPort(
+      loaded.boundary,
+      loaded.sealedPlanningAuthority,
+      loaded.closedWriterFenceRecord,
+      executionRun,
+    ),
+    verification: session.createFullVerificationPort(
+      loaded.boundary,
+      loaded.sealedPlanningAuthority,
+      loaded.closedWriterFenceRecord,
+      executionRun,
+    ),
+    partialRollback: session.createPartialRollbackOperationPort(
+      loaded.boundary,
+      loaded.sealedPlanningAuthority,
+      loaded.closedWriterFenceRecord,
+      executionRun,
+    ),
+    completeRollback: session.createRollbackOperationPort(
+      loaded.boundary,
+      loaded.sealedPlanningAuthority,
+      loaded.closedWriterFenceRecord,
+      executionRun,
+    ),
+  }
+}
+
+/**
+ * Creates only read capabilities from one immutable execution admission.
+ *
+ * @param session - Capability-minimized read-only measured session.
+ * @param loaded - Static execution roots.
+ * @param executionRun - Exact immutable execution admission.
+ * @returns Admission-bound read-only execution ports.
+ */
+function createExecutionPhaseReadPorts(
+  session: WorkspaceSearchMigrationExecutionStatusSession,
+  loaded: LoadedClosedExecutionContext,
+  executionRun: WorkspaceSearchMigrationExecutionRun,
+): ExecutionPhaseReadPorts {
   return {
     apply: session.createApplyOperationPort(
       loaded.boundary,
@@ -1250,7 +2002,7 @@ function createExecutionPhasePorts(
  * @returns Private durable snapshot and secret-free public status.
  */
 async function readDurableExecutionSnapshot(
-  ports: ExecutionPhasePorts,
+  ports: ExecutionPhaseReadPorts,
   guard: ExecutionOperationGuard,
 ): Promise<DurableExecutionSnapshot> {
   const runState = await runGuardedOperation(
@@ -1276,6 +2028,10 @@ async function readDurableExecutionSnapshot(
       return {
         kind: 'rolled-back',
         scope: 'committed-prefix',
+        terminal: {
+          kind: 'rolled-back-v2',
+          root: lifecycle.rolledBackRoot,
+        },
         status: rolledBackStatus(),
       }
     }
@@ -1294,7 +2050,7 @@ async function readDurableExecutionSnapshot(
   const [
     verificationProgress,
     verifiedRoot,
-    rollbackState,
+    completeRollback,
   ] = await Promise.all([
     runGuardedOperation(
       guard,
@@ -1304,22 +2060,25 @@ async function readDurableExecutionSnapshot(
       guard,
       () => ports.verification.readVerifiedRoot(),
     ),
-    runGuardedOperation(
+    readCoherentCompleteRollbackObservation(
+      ports.completeRollback,
       guard,
-      () => ports.completeRollback.readRollbackState(),
     ),
   ])
+  const rollbackState = completeRollback.state
+  const rolledBackRoot = completeRollback.root
   const hasVerification =
     verificationProgress !== undefined ||
     verifiedRoot !== undefined
   const hasRollback =
-    rollbackState !== undefined
+    rollbackState !== undefined || rolledBackRoot !== undefined
   if (hasVerification && hasRollback) {
     return failExecutionSupervisor('INVALID_STATE')
   }
   if (verifiedRoot !== undefined) {
     return {
       kind: 'verified',
+      terminal: { kind: 'verified', root: verifiedRoot },
       status: verifiedStatus(),
     }
   }
@@ -1332,11 +2091,18 @@ async function readDurableExecutionSnapshot(
     }
   }
   if (rollbackState?.status === 'rolled-back') {
+    if (rolledBackRoot === undefined) {
+      return failExecutionSupervisor('INVALID_STATE')
+    }
     return {
       kind: 'rolled-back',
       scope: 'complete-plan',
+      terminal: { kind: 'rolled-back-v1', root: rolledBackRoot },
       status: rolledBackStatus(),
     }
+  }
+  if (rolledBackRoot !== undefined) {
+    return failExecutionSupervisor('INVALID_STATE')
   }
   if (rollbackState !== undefined) {
     return {
@@ -1350,6 +2116,80 @@ async function readDurableExecutionSnapshot(
     runState,
     status: appliedStatus(),
   }
+}
+
+/**
+ * Reads complete rollback rows until two consecutive observations agree.
+ *
+ * Each DynamoDB point read is strongly consistent but the mutable state and
+ * immutable root occupy distinct items. Four bounded observations tolerate
+ * one stable predecessor, one pair torn by the atomic publication, and two
+ * identical post-transaction pairs. Continued churn remains ambiguous rather
+ * than being misclassified as durable corruption.
+ *
+ * @param port - Read-only complete rollback state and terminal-root port.
+ * @param guard - Current signal or heartbeat activity guard.
+ * @returns Latest of two consecutive equal complete observations.
+ */
+async function readCoherentCompleteRollbackObservation(
+  port: WorkspaceSearchMigrationCompleteRollbackReadPort,
+  guard: ExecutionOperationGuard,
+): Promise<CompleteRollbackObservation> {
+  let previous = await readCompleteRollbackObservation(port, guard)
+  for (let index = 1; index < 4; index += 1) {
+    const current = await readCompleteRollbackObservation(port, guard)
+    if (sameCompleteRollbackObservation(previous, current)) {
+      return current
+    }
+    previous = current
+  }
+  return failExecutionSupervisor('AMBIGUOUS_OPERATION_UNRESOLVED')
+}
+
+/**
+ * Reads one pair of individually strong complete rollback rows.
+ *
+ * @param port - Read-only complete rollback capability.
+ * @param guard - Current operation activity guard.
+ * @returns One potentially torn cross-item observation.
+ */
+async function readCompleteRollbackObservation(
+  port: WorkspaceSearchMigrationCompleteRollbackReadPort,
+  guard: ExecutionOperationGuard,
+): Promise<CompleteRollbackObservation> {
+  const [state, root] = await Promise.all([
+    runGuardedOperation(
+      guard,
+      () => port.readRollbackState(),
+    ),
+    runGuardedOperation(
+      guard,
+      () => port.readRolledBackRoot(),
+    ),
+  ])
+  return { state, root }
+}
+
+/**
+ * Compares complete rollback observations by exact presence and self-digests.
+ *
+ * @param left - Earlier complete cross-item observation.
+ * @param right - Later complete cross-item observation.
+ * @returns Whether both observations identify the same validated rows.
+ */
+function sameCompleteRollbackObservation(
+  left: CompleteRollbackObservation,
+  right: CompleteRollbackObservation,
+): boolean {
+  const sameState = left.state === undefined
+    ? right.state === undefined
+    : right.state !== undefined &&
+      left.state.stateDigest === right.state.stateDigest
+  const sameRoot = left.root === undefined
+    ? right.root === undefined
+    : right.root !== undefined &&
+      left.root.rootDigest === right.root.rootDigest
+  return sameState && sameRoot
 }
 
 /**
@@ -1530,6 +2370,42 @@ function snapshotExecutionStatusInput(
     session,
     runId,
     expectedConfigurationHash,
+  }
+}
+
+/**
+ * Detaches one already measured terminal-read request before external I/O.
+ *
+ * The session and signal retain collaborator identity. The measured
+ * configuration is cloned so caller mutation cannot redirect later factory
+ * bindings while the current managed generation remains fixed.
+ *
+ * @param input - Caller-owned measured terminal-read request.
+ * @returns Stable current-generation terminal-read snapshot.
+ */
+function snapshotMeasuredExecutionTerminalInput(
+  input: ReadMeasuredWorkspaceSearchMigrationExecutionTerminalInput,
+): ReadMeasuredWorkspaceSearchMigrationExecutionTerminalInput {
+  let session: WorkspaceSearchMigrationExecutionStatusSession
+  let configuration: WorkspaceSearchMigrationConfiguration
+  let runId: string
+  let expectedConfigurationHash: string
+  let signal: AbortSignal | undefined
+  try {
+    session = input.session
+    configuration = structuredClone(input.configuration)
+    runId = input.runId
+    expectedConfigurationHash = input.expectedConfigurationHash
+    signal = input.signal
+  } catch {
+    return failExecutionSupervisor('INVALID_ARGUMENT')
+  }
+  return {
+    session,
+    configuration,
+    runId,
+    expectedConfigurationHash,
+    ...(signal === undefined ? {} : { signal }),
   }
 }
 
