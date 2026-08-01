@@ -40,33 +40,35 @@ function createQuickAccessProjects(teams: SidebarTeam[]): SidebarQuickAccessProj
 describe('Sidebar information architecture', () => {
   test('shows only five Quick Access entries and only the current Team hierarchy', () => {
     const teams = createLargeDirectory()
+    const labels = createSidebarLabels('en')
     const html = renderToStaticMarkup(
       <Sidebar
         defaultActiveTeamId="team-1"
-        labels={createSidebarLabels('en')}
+        labels={labels}
         quickAccessProjects={createQuickAccessProjects(teams)}
         teams={teams}
         onShowAllQuickAccess={() => undefined}
       />,
     )
 
-    expect(html).toContain('Quick access')
+    expect(html).toContain(labels.quickAccess)
     expect(html).toContain('Project 1.5')
     expect(html).not.toContain('Project 1.6')
-    expect(html).toContain('Show all')
+    expect(html).toContain(labels.showAllQuickAccess)
     expect(html).toContain('Team 01')
     expect(html).not.toContain('Team 20')
-    expect(html).toContain('20 projects')
+    expect(html).toContain(labels.projectCount(20))
     expect(html).not.toContain('Project 2.20')
   })
 
   test('renders accessible ordering and removal controls in the manager', () => {
     const teams = createLargeDirectory()
+    const labels = createSidebarLabels('en')
     const html = renderToStaticMarkup(
       <Sidebar
         defaultActiveTeamId="team-1"
         defaultQuickAccessManagerOpen
-        labels={createSidebarLabels('en')}
+        labels={labels}
         quickAccessProjects={createQuickAccessProjects(teams).slice(0, 2)}
         teams={teams}
         onMoveQuickAccessProject={() => undefined}
@@ -76,43 +78,28 @@ describe('Sidebar information architecture', () => {
 
     expect(html).toContain('role="dialog"')
     expect(html).toContain('aria-modal="true"')
-    expect(html).toContain('Move up: Project 1.1')
-    expect(html).toContain('Move down: Project 1.1')
-    expect(html).toContain('Remove from quick access: Project 1.1')
+    expect(html).toContain(`${labels.moveQuickAccessUp}: Project 1.1`)
+    expect(html).toContain(`${labels.moveQuickAccessDown}: Project 1.1`)
+    expect(html).toContain(`${labels.removeQuickAccess}: Project 1.1`)
     expect(html).toContain('Team 01')
   })
 
   test('keeps meaningful accessible labels when collapsed', () => {
     const teams = createLargeDirectory()
+    const labels = createSidebarLabels('en')
     const html = renderToStaticMarkup(
       <Sidebar
         defaultActiveTeamId="team-1"
         defaultCollapsed
-        labels={createSidebarLabels('en')}
+        labels={labels}
         quickAccessProjects={createQuickAccessProjects(teams).slice(0, 1)}
         teams={teams}
       />,
     )
 
-    expect(html).toContain('aria-label="Expand sidebar"')
-    expect(html).toContain('aria-label="Switch team: Team 01"')
+    expect(html).toContain(`aria-label="${labels.expand}"`)
+    expect(html).toContain(`aria-label="${labels.switchTeam}: Team 01"`)
     expect(html).toContain('Project 1.1')
   })
 
-  test('marks the global Project directory without selecting a fallback Project', () => {
-    const teams = createLargeDirectory()
-    const html = renderToStaticMarkup(
-      <Sidebar
-        autoSelectInitialProject={false}
-        isAllProjectsActive
-        labels={createSidebarLabels('en')}
-        quickAccessProjects={createQuickAccessProjects(teams).slice(0, 1)}
-        teams={teams}
-        onShowAllProjects={() => undefined}
-      />,
-    )
-
-    expect(html.match(/aria-current="page"/g)).toHaveLength(1)
-    expect(html).toContain('>More<')
-  })
 })

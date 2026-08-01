@@ -7,7 +7,6 @@ import type {
   Tag,
 } from '@aws-sdk/client-s3'
 import {
-  PROJECT_QUICK_ACCESS_MAX_ITEMS,
   PROJECT_QUICK_ACCESS_MAX_REVISION,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
@@ -32,6 +31,9 @@ import {
   isCanonicalWorkItemRecord,
   validateWorkItemConfiguration,
 } from '../work-items'
+import {
+  isProjectQuickAccessItems,
+} from '../directory'
 import {
   decodeAttributeMap,
   decodeAttributeMapToNativeRecord,
@@ -844,18 +846,10 @@ function validateProjectDirectoryAuxiliaryRow(
     if (
       revision === 0 ||
       revision > PROJECT_QUICK_ACCESS_MAX_REVISION ||
-      items.length > PROJECT_QUICK_ACCESS_MAX_ITEMS ||
+      !isProjectQuickAccessItems(items) ||
       directoryId !== `PROJECT_QUICK_ACCESS#${encodeURIComponent(workspaceId)}#${encodeURIComponent(memberKey)}` ||
       entryKey !== 'PREFERENCE'
     ) normalizationFailure()
-    const projectIds = new Set<string>()
-    for (const item of items) {
-      const itemRecord = requireRecord(item)
-      requireProjectDirectoryIdentifier(itemRecord.teamId)
-      const projectId = requireProjectDirectoryIdentifier(itemRecord.projectId)
-      if (projectIds.has(projectId)) normalizationFailure()
-      projectIds.add(projectId)
-    }
     return
   }
   if (row.entryType === 'webhook-team-grant') {

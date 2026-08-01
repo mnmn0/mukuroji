@@ -19,6 +19,8 @@ import type {
   TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  PROJECT_QUICK_ACCESS_IDENTIFIER_MAX_LENGTH,
+  PROJECT_QUICK_ACCESS_MAX_ITEMS,
   PROJECT_QUICK_ACCESS_MAX_REVISION,
   type ProjectQuickAccessItem,
 } from '@mukuroji/contracts'
@@ -97,8 +99,8 @@ test('DynamoDB directory client returns the revision-zero quick-access default',
 test('DynamoDB directory client round-trips ordered quick-access preferences', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   const items = [
-    { projectId: 'mobile-app', teamId: 'product' },
-    { projectId: 'refero', teamId: 'core-team' },
+    { projectId: 'shared-project', teamId: 'core-team' },
+    { projectId: 'shared-project', teamId: 'design-team' },
   ]
   let stored = false
   const documentClient = {
@@ -223,6 +225,45 @@ test('DynamoDB directory client rejects a terminal quick-access revision before 
   expect(sentInputs).toEqual([])
 })
 
+test('DynamoDB directory client rejects malformed quick-access items before persistence', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+  const invalidItems = [
+    Array.from({ length: PROJECT_QUICK_ACCESS_MAX_ITEMS + 1 }, (_, index) => ({
+      projectId: `project-${index}`,
+      teamId: 'core-team',
+    })),
+    [{ projectId: 'refero', teamId: ' core-team' }],
+    [{ projectId: 'refero/child', teamId: 'core-team' }],
+    [{
+      projectId: 'p'.repeat(PROJECT_QUICK_ACCESS_IDENTIFIER_MAX_LENGTH + 1),
+      teamId: 'core-team',
+    }],
+    [
+      { projectId: 'shared-project', teamId: 'core-team' },
+      { projectId: 'shared-project', teamId: 'core-team' },
+    ],
+  ]
+
+  for (const items of invalidItems) {
+    await expect(client.replaceProjectQuickAccess(
+      'workspace-1',
+      'demo@example.com',
+      { items, revision: 0 },
+    )).rejects.toMatchObject({
+      code: 'InvalidProjectQuickAccessInput',
+      status: 400,
+    })
+  }
+  expect(sentInputs).toEqual([])
+})
+
 test('DynamoDB directory client fails closed when quick-access CAS finds an invalid bound row', async () => {
   const validItem = createProjectQuickAccessStoredItem(
     'workspace-1',
@@ -317,7 +358,6 @@ test('DynamoDB directory client isolates each quick-access preference in a sidec
       entryKey: 'PREFERENCE',
     },
   ])
-  expect(sentInputs.every((input) => input.Key !== 'workspace-1')).toBe(true)
 })
 
 test('DynamoDB directory client fails closed on a malformed quick-access sidecar row', async () => {
@@ -343,14 +383,14 @@ test('DynamoDB directory client fails closed on a malformed quick-access sidecar
   })
 })
 
-test('DynamoDB directory client rejects one Project repeated in multiple Team contexts', async () => {
+test('DynamoDB directory client rejects one canonical quick-access identity repeated', async () => {
   const malformedItem = createProjectQuickAccessStoredItem(
     'workspace-1',
     'demo@example.com',
     1,
     [
       { projectId: 'shared-project', teamId: 'core-team' },
-      { projectId: 'shared-project', teamId: 'design-team' },
+      { projectId: 'shared-project', teamId: 'core-team' },
     ],
   )
   const documentClient = {

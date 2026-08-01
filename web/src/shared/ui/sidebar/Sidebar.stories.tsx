@@ -154,6 +154,42 @@ export const QuickAccessManager: Story = {
   },
 }
 
+/** Saving state keeps move controls focusable while exposing aria-disabled. */
+export const QuickAccessManagerSaving: Story = {
+  args: {
+    defaultQuickAccessManagerOpen: true,
+    isQuickAccessSaving: true,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const moveDownButton = canvas.getByRole('button', { name: '下へ移動: Refero' })
+
+    await expect(moveDownButton).toHaveAttribute('aria-disabled', 'true')
+    await expect(moveDownButton).toBeEnabled()
+    await userEvent.click(moveDownButton)
+    await expect(moveDownButton).toHaveFocus()
+  },
+}
+
+/** Global Project directory state exposes one current destination inside More. */
+export const AllProjectsActive: Story = {
+  args: {
+    autoSelectInitialProject: false,
+    isAllProjectsActive: true,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const moreTrigger = canvas.getByRole('button', { name: 'その他' })
+
+    await expect(moreTrigger).not.toHaveAttribute('aria-current')
+    await expect(moreTrigger).toHaveAttribute('aria-haspopup', 'true')
+    await userEvent.click(moreTrigger)
+    await expect(canvas.getByRole('button', {
+      name: 'すべてのプロジェクト',
+    })).toHaveAttribute('aria-current', 'page')
+  },
+}
+
 /** Twenty Teams with twenty Projects each remain discoverable through the switcher. */
 export const LargeDirectory20By20: Story = {
   args: {
@@ -176,11 +212,17 @@ export const TeamSearch: Story = {
     await userEvent.click(canvas.getByRole('button', { name: 'Team 01' }))
     const input = canvas.getByPlaceholderText('チームを検索')
     await userEvent.type(input, 'Team 18')
-    await expect(canvas.getByRole('button', { name: 'Team 18' })).toBeVisible()
+    const teamOption = canvas.getByRole('button', { name: 'Team 18' })
+    await expect(teamOption).toBeVisible()
     await expect(canvas.queryByRole('button', { name: 'Team 02' })).not.toBeInTheDocument()
+    await userEvent.click(teamOption)
+    const teamTrigger = canvas.getByRole('button', { name: 'Team 18' })
+    await expect(teamTrigger).toHaveFocus()
+    await expect(teamTrigger).toHaveAttribute('aria-expanded', 'false')
+    await userEvent.click(teamTrigger)
     await userEvent.keyboard('{Escape}')
-    await expect(canvas.getByRole('button', { name: 'Team 01' })).toHaveFocus()
-    await expect(canvas.getByRole('button', { name: 'Team 01' })).toHaveAttribute(
+    await expect(teamTrigger).toHaveFocus()
+    await expect(teamTrigger).toHaveAttribute(
       'aria-expanded',
       'false',
     )

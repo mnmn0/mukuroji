@@ -1,4 +1,5 @@
 import {
+  PROJECT_QUICK_ACCESS_IDENTIFIER_MAX_LENGTH,
   PROJECT_QUICK_ACCESS_MAX_ITEMS,
   PROJECT_QUICK_ACCESS_MAX_REVISION,
   type ProjectQuickAccessItem,
@@ -36,7 +37,11 @@ export async function getProjectQuickAccess(
   const data = await readJson(response)
 
   if (!response.ok) {
-    throw createQuickAccessApiError(response.status, data)
+    throw createQuickAccessApiError(
+      response.status,
+      data,
+      'projects.quickAccess.error.loading',
+    )
   }
   if (!isProjectQuickAccessPreferences(data)) {
     throw new ProjectDirectoryApiError(
@@ -72,7 +77,11 @@ export async function replaceProjectQuickAccess(
   const data = await readJson(response)
 
   if (!response.ok) {
-    throw createQuickAccessApiError(response.status, data)
+    throw createQuickAccessApiError(
+      response.status,
+      data,
+      'projects.quickAccess.error.saving',
+    )
   }
   if (!isProjectQuickAccessPreferences(data)) {
     throw new ProjectDirectoryApiError(
@@ -104,12 +113,14 @@ function isProjectQuickAccessPreferences(
     items.length > PROJECT_QUICK_ACCESS_MAX_ITEMS
   ) return false
 
-  const projectIds = new Set<string>()
+  const projectKeys = new Set<string>()
   for (const item of items) {
-    if (!isProjectQuickAccessItem(item) || projectIds.has(item.projectId)) {
+    if (!isProjectQuickAccessItem(item)) {
       return false
     }
-    projectIds.add(item.projectId)
+    const projectKey = createProjectQuickAccessKey(item)
+    if (projectKeys.has(projectKey)) return false
+    projectKeys.add(projectKey)
   }
   return true
 }
@@ -135,7 +146,7 @@ function isProjectQuickAccessItem(value: unknown): value is ProjectQuickAccessIt
 function isProjectQuickAccessIdentifier(value: unknown): value is string {
   return typeof value === 'string' &&
     value.length > 0 &&
-    value.length <= 256 &&
+    value.length <= PROJECT_QUICK_ACCESS_IDENTIFIER_MAX_LENGTH &&
     value.trim() === value &&
     !value.includes('/')
 }
@@ -145,18 +156,33 @@ function isProjectQuickAccessIdentifier(value: unknown): value is string {
  *
  * @param status - HTTP response status.
  * @param value - Unknown decoded error payload.
+ * @param fallbackMessage - Message key used when the payload has no safe message.
  * @returns A safe Project directory API error.
  */
-function createQuickAccessApiError(status: number, value: unknown) {
+function createQuickAccessApiError(
+  status: number,
+  value: unknown,
+  fallbackMessage: string,
+) {
   const message = isRecord(value) && typeof value.message === 'string'
     ? value.message
     : status === 409
       ? 'projects.quickAccess.error.conflict'
-      : 'projects.quickAccess.error.saving'
+      : fallbackMessage
   const code = isRecord(value) && typeof value.code === 'string'
     ? value.code
     : undefined
   return new ProjectDirectoryApiError(status, message, code)
+}
+
+/**
+ * Creates a collision-safe identity for one Team-owned Project reference.
+ *
+ * @param item - Canonical Team and Project reference.
+ * @returns Composite key used only for response validation.
+ */
+function createProjectQuickAccessKey(item: ProjectQuickAccessItem) {
+  return `${item.teamId}\0${item.projectId}`
 }
 
 /**

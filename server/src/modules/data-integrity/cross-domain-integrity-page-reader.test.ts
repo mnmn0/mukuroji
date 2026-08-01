@@ -342,7 +342,14 @@ describe('cross-domain normalized page reader boundary', () => {
 
   test('accepts a canonical Project quick-access sidecar row as auxiliary data', async () => {
     const fixture = new FixtureRawReader({
-      pages: [rawItemPage(quickAccessRawItem())],
+      pages: [rawItemPage(quickAccessRawItem({
+        items: {
+          L: [
+            quickAccessProjectReference('core-team', 'shared-project'),
+            quickAccessProjectReference('design-team', 'shared-project'),
+          ],
+        },
+      }))],
     })
     const reader = createCrossDomainIntegrityNormalizedPageReader(
       readerConfiguration(),
@@ -374,17 +381,19 @@ describe('cross-domain normalized page reader boundary', () => {
       }),
       quickAccessRawItem({
         items: {
-          L: [
-            quickAccessProjectReference('core-team', 'refero'),
-            quickAccessProjectReference('core-team', 'refero'),
-          ],
+          L: [quickAccessProjectReference(' core-team', 'refero')],
+        },
+      }),
+      quickAccessRawItem({
+        items: {
+          L: [quickAccessProjectReference('core-team', 'refero ')],
         },
       }),
       quickAccessRawItem({
         items: {
           L: [
-            quickAccessProjectReference('core-team', 'shared-project'),
-            quickAccessProjectReference('design-team', 'shared-project'),
+            quickAccessProjectReference('core-team', 'refero'),
+            quickAccessProjectReference('core-team', 'refero'),
           ],
         },
       }),

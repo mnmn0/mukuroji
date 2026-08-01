@@ -26,4 +26,9 @@ export {
   type WorkspaceMemberAuthorizationGeneration,
 } from './adapter-out/dynamodb/project-directory-client'
 export { createDirectoryProjectId } from './domain/project-key'
+export {
+  createProjectQuickAccessIdentity,
+  isProjectQuickAccessIdentifier,
+  isProjectQuickAccessItems,
+} from './domain/project-quick-access'
 export { ProjectDataError } from './project-data-error'

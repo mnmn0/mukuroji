@@ -5,6 +5,7 @@ import {
   createProjectDirectoryAssigneeOptions,
   createProjectDirectoryRows,
   filterProjectDirectoryRows,
+  parseProjectDirectoryStatusFilter,
   paginateProjectDirectoryRows,
   parseProjectDirectoryPage,
 } from '../src/projects/model/projectDirectoryView'
@@ -72,7 +73,9 @@ describe('Project directory model', () => {
     const rows = createProjectDirectoryRows(
       projectDirectoryFixtures,
       [coreCompleted, designAttention],
-      (projectId) => projectId === 'brand-refresh',
+      (item) => item.projectId === 'brand-refresh' || (
+        item.projectId === 'shared-launch' && item.teamId === 'design-team'
+      ),
     )
     const coreRow = rows.find((row) =>
       row.teamId === 'core-team' && row.projectId === 'shared-launch')
@@ -86,9 +89,11 @@ describe('Project directory model', () => {
     })
     expect(designRow).toMatchObject({
       assignees: [{ id: 'ren', label: 'ren@example.com' }],
+      isQuickAccess: true,
       progress: 0,
       status: 'attention',
     })
+    expect(coreRow?.isQuickAccess).toBe(false)
     expect(rows.find((row) => row.projectId === 'brand-refresh')?.isQuickAccess).toBe(true)
   })
 
@@ -106,7 +111,7 @@ describe('Project directory model', () => {
           teamId: 'design-team',
         }),
       ],
-      (projectId) => projectId === 'brand-refresh',
+      (item) => item.projectId === 'brand-refresh' && item.teamId === 'design-team',
     )
 
     expect(filterProjectDirectoryRows(rows, {
@@ -167,5 +172,11 @@ describe('Project directory model', () => {
     expect(parseProjectDirectoryPage('-2')).toBe(1)
     expect(parseProjectDirectoryPage('not-a-page')).toBe(1)
     expect(parseProjectDirectoryPage(undefined)).toBe(1)
+  })
+
+  test('parses status filters through the exhaustive lookup', () => {
+    expect(parseProjectDirectoryStatusFilter('attention')).toBe('attention')
+    expect(parseProjectDirectoryStatusFilter('unsupported')).toBe('all')
+    expect(parseProjectDirectoryStatusFilter(null)).toBe('all')
   })
 })

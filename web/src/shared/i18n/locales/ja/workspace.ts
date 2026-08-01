@@ -506,7 +506,6 @@ export const workspaceMessages = {
   'sidebar.teamOverview': 'チーム概要',
   'sidebar.issues': 'Issues',
   'sidebar.members': 'メンバー',
-  'sidebar.projects': 'プロジェクト',
   'sidebar.projectCount': 'プロジェクト {count}',
   'sidebar.projectGroup': 'プロジェクト',
   'sidebar.unreadCount': '{count}件の未読',

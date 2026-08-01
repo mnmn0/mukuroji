@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
+import { PROJECT_QUICK_ACCESS_IDENTIFIER_MAX_LENGTH } from '@mukuroji/contracts'
 import {
   getProjectQuickAccess,
   ProjectDirectoryApiError,
@@ -39,7 +40,7 @@ describe('Project quick-access API', () => {
     )
   })
 
-  test('rejects duplicate Project identities and noncanonical identifiers', async () => {
+  test('accepts duplicate Project IDs owned by different Teams', async () => {
     installFetchResponse({
       items: [
         { projectId: 'shared-project', teamId: 'core-team' },
@@ -47,11 +48,27 @@ describe('Project quick-access API', () => {
       ],
       revision: 1,
     })
+    await expect(getProjectQuickAccess('access-token')).resolves.toMatchObject({ revision: 1 })
+  })
+
+  test('rejects duplicate Team and Project identities', async () => {
+    installFetchResponse({
+      items: [
+        { projectId: 'shared-project', teamId: 'core-team' },
+        { projectId: 'shared-project', teamId: 'core-team' },
+      ],
+      revision: 1,
+    })
     const duplicateError = await getProjectQuickAccess('access-token')
       .catch((reason: unknown) => reason)
 
     expect(duplicateError).toBeInstanceOf(ProjectDirectoryApiError)
+    expect(duplicateError).toMatchObject({
+      message: 'projects.quickAccess.error.loading',
+    })
+  })
 
+  test('rejects noncanonical Team and Project identifiers', async () => {
     installFetchResponse({
       items: [{ projectId: ' project ', teamId: 'core/team' }],
       revision: 1,
@@ -60,12 +77,59 @@ describe('Project quick-access API', () => {
       .catch((reason: unknown) => reason)
 
     expect(identifierError).toBeInstanceOf(ProjectDirectoryApiError)
+    expect(identifierError).toMatchObject({
+      message: 'projects.quickAccess.error.loading',
+    })
+  })
 
+  test('rejects identifiers beyond the shared maximum length', async () => {
+    installFetchResponse({
+      items: [{
+        projectId: 'p'.repeat(PROJECT_QUICK_ACCESS_IDENTIFIER_MAX_LENGTH + 1),
+        teamId: 'core-team',
+      }],
+      revision: 1,
+    })
+    const identifierError = await getProjectQuickAccess('access-token')
+      .catch((reason: unknown) => reason)
+
+    expect(identifierError).toBeInstanceOf(ProjectDirectoryApiError)
+    expect(identifierError).toMatchObject({
+      message: 'projects.quickAccess.error.loading',
+    })
+  })
+
+  test('rejects the terminal preference revision', async () => {
     installFetchResponse({ items: [], revision: Number.MAX_SAFE_INTEGER })
     const terminalRevisionError = await getProjectQuickAccess('access-token')
       .catch((reason: unknown) => reason)
 
     expect(terminalRevisionError).toBeInstanceOf(ProjectDirectoryApiError)
+    expect(terminalRevisionError).toMatchObject({
+      message: 'projects.quickAccess.error.loading',
+    })
+  })
+
+  test('uses operation-specific fallback keys for unstructured API failures', async () => {
+    installFetchResponse({}, 500)
+    const loadingError = await getProjectQuickAccess('access-token')
+      .catch((reason: unknown) => reason)
+
+    expect(loadingError).toMatchObject({
+      message: 'projects.quickAccess.error.loading',
+      status: 500,
+    })
+
+    installFetchResponse({}, 500)
+    const savingError = await replaceProjectQuickAccess('access-token', {
+      items: [],
+      revision: 0,
+    }, mutationContext).catch((reason: unknown) => reason)
+
+    expect(savingError).toMatchObject({
+      message: 'projects.quickAccess.error.saving',
+      status: 500,
+    })
   })
 
   test('replaces the complete order with stable mutation headers', async () => {

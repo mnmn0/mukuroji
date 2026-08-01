@@ -82,14 +82,14 @@ export function resolveProjectQuickAccessItems(
  * Tests whether a Project is present in quick access.
  *
  * @param items - Current ordered preference.
- * @param projectId - Project ID to test.
- * @returns Whether the Project is starred in any Team context.
+ * @param target - Team-owned Project identity to test.
+ * @returns Whether the exact Team and Project pair is starred.
  */
 export function isProjectInQuickAccess(
   items: readonly ProjectQuickAccessItem[],
-  projectId: string,
+  target: ProjectQuickAccessItem,
 ) {
-  return items.some((item) => item.projectId === projectId)
+  return items.some((item) => projectQuickAccessItemsMatch(item, target))
 }
 
 /**
@@ -103,11 +103,11 @@ export function toggleProjectQuickAccess(
   items: readonly ProjectQuickAccessItem[],
   target: ProjectQuickAccessItem,
 ): ProjectQuickAccessToggleResult {
-  if (isProjectInQuickAccess(items, target.projectId)) {
+  if (isProjectInQuickAccess(items, target)) {
     return {
       added: false,
       items: items
-        .filter((item) => item.projectId !== target.projectId)
+        .filter((item) => !projectQuickAccessItemsMatch(item, target))
         .map((item) => ({ ...item })),
     }
   }
@@ -121,17 +121,17 @@ export function toggleProjectQuickAccess(
  * Moves one quick-access Project by one position.
  *
  * @param items - Current ordered preference.
- * @param projectId - Project to move.
+ * @param target - Team-owned Project to move.
  * @param direction - Relative movement direction.
  * @returns A detached collection with the requested stable order.
  */
 export function moveProjectQuickAccessItem(
   items: readonly ProjectQuickAccessItem[],
-  projectId: string,
+  target: ProjectQuickAccessItem,
   direction: 'up' | 'down',
 ) {
   const next = items.map((item) => ({ ...item }))
-  const currentIndex = next.findIndex((item) => item.projectId === projectId)
+  const currentIndex = next.findIndex((item) => projectQuickAccessItemsMatch(item, target))
   const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1
   if (
     currentIndex < 0 ||
@@ -140,9 +140,23 @@ export function moveProjectQuickAccessItem(
   ) return next
 
   const current = next[currentIndex]
-  const target = next[targetIndex]
-  if (!current || !target) return next
-  next[currentIndex] = target
+  const targetItem = next[targetIndex]
+  if (!current || !targetItem) return next
+  next[currentIndex] = targetItem
   next[targetIndex] = current
   return next
+}
+
+/**
+ * Compares two Team-owned Project references without relying on object identity.
+ *
+ * @param first - First Team and Project reference.
+ * @param second - Second Team and Project reference.
+ * @returns Whether both references identify the same Team-owned Project.
+ */
+function projectQuickAccessItemsMatch(
+  first: ProjectQuickAccessItem,
+  second: ProjectQuickAccessItem,
+) {
+  return first.teamId === second.teamId && first.projectId === second.projectId
 }

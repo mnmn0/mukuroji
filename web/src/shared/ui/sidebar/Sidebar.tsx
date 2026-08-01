@@ -312,8 +312,6 @@ export type SidebarLabels = {
    * メンバービューの文言です。
    */
   members: string
-  /** Project index view label. */
-  projects: string
   /** Project index view label including the Team Project count. */
   projectCount: (count: number) => string
   /**
@@ -461,10 +459,6 @@ export type SidebarProps = {
    */
   onSelectTeamView?: (teamId: string, viewId: SidebarTeamViewId) => void
   /**
-   * チームが選択されたときに呼ばれます。
-   */
-  onSelectTeam?: (teamId: string) => void
-  /**
    * プロジェクトが選択されたときに呼ばれます。
    */
   onSelectProject?: (projectId: string, teamId: string) => void
@@ -474,7 +468,7 @@ export type SidebarProps = {
   onShowAllProjects?: () => void
   /** Moves a quick-access Project by one position. */
   onMoveQuickAccessProject?: (
-    projectId: string,
+    project: SidebarQuickAccessProject,
     direction: 'up' | 'down',
   ) => void | Promise<void>
   /** Removes a Project from Quick Access. */
@@ -616,7 +610,6 @@ const defaultLabels: SidebarLabels = {
   teamOverview: 'チーム概要',
   issues: 'Issues',
   members: 'メンバー',
-  projects: 'プロジェクト',
   projectCount: (count) => `プロジェクト ${count}`,
   projectGroup: 'プロジェクト',
   unreadCount: (count) => `${count}件の未読`,
@@ -1029,7 +1022,7 @@ export function Sidebar({
             <div className="mt-1 space-y-1">
               {visibleQuickAccessProjects.map((project) => (
                 <QuickAccessProjectButton
-                  key={project.projectId}
+                  key={`${project.teamId}\u0000${project.projectId}`}
                   active={
                     activeProjectId === project.projectId &&
                     (activeProjectTeamId === undefined || activeProjectTeamId === project.teamId)
@@ -1127,6 +1120,9 @@ export function Sidebar({
                             updateActiveTeamView(team.id, 'overview')
                             setIsTeamSwitcherOpen(false)
                             setTeamSearchQuery('')
+                            window.requestAnimationFrame(() => {
+                              teamSwitcherButtonRef.current?.focus()
+                            })
                           }}
                           title={team.name}
                           type="button"
@@ -1178,8 +1174,8 @@ export function Sidebar({
         >
           <button
             ref={moreButtonRef}
-            aria-current={isAllProjectsActive ? 'page' : undefined}
             aria-expanded={isMoreOpen}
+            aria-haspopup="true"
             className={`flex h-9 w-full items-center gap-3 rounded-lg text-left text-app-body font-medium text-slate-100 transition hover:bg-white/10 hover:text-white ${isCollapsed ? 'justify-center px-0' : 'px-2'} ${secondaryItems.some((item) => item.id === activeNavId) || isAllProjectsActive ? 'bg-teal-500/20 text-white' : ''}`}
             onClick={() => {
               setIsTeamSwitcherOpen(false)
@@ -1341,7 +1337,10 @@ type SidebarQuickAccessManagerModalProps = {
   /** Trigger that regains focus after the dialog closes. */
   returnFocusRef: RefObject<HTMLButtonElement | null>
   /** Moves one Project by one stable-order position. */
-  onMove?: (projectId: string, direction: 'up' | 'down') => void | Promise<void>
+  onMove?: (
+    project: SidebarQuickAccessProject,
+    direction: 'up' | 'down',
+  ) => void | Promise<void>
   /** Removes one Project shortcut. */
   onRemove?: (
     projectId: string,
@@ -1421,10 +1420,12 @@ function SidebarQuickAccessManagerModal({
           <ol className="mt-5 max-h-[min(52vh,420px)] space-y-2 overflow-y-auto pr-1">
             {projects.map((project, index) => {
               const tone = project.tone ?? 'blue'
+              const isMoveUpDisabled = isBusy || index === 0 || !onMove
+              const isMoveDownDisabled = isBusy || index === projects.length - 1 || !onMove
               return (
                 <li
                   className="flex min-h-14 items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-sm"
-                  key={project.projectId}
+                  key={`${project.teamId}\u0000${project.projectId}`}
                 >
                   <ProjectGlyph tone={tone} />
                   <span className="min-w-0 flex-1">
@@ -1434,18 +1435,22 @@ function SidebarQuickAccessManagerModal({
                   <span className="flex flex-none items-center gap-1">
                     <button
                       aria-label={`${labels.moveQuickAccessUp}: ${project.name}`}
-                      className="grid h-8 w-8 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 disabled:opacity-30"
-                      disabled={isBusy || index === 0 || !onMove}
-                      onClick={() => void onMove?.(project.projectId, 'up')}
+                      aria-disabled={isMoveUpDisabled}
+                      className="grid h-8 w-8 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 aria-disabled:cursor-not-allowed aria-disabled:opacity-30"
+                      onClick={() => {
+                        if (!isMoveUpDisabled) void onMove?.(project, 'up')
+                      }}
                       type="button"
                     >
                       <ChevronDownIcon className="h-4 w-4 rotate-180" />
                     </button>
                     <button
                       aria-label={`${labels.moveQuickAccessDown}: ${project.name}`}
-                      className="grid h-8 w-8 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 disabled:opacity-30"
-                      disabled={isBusy || index === projects.length - 1 || !onMove}
-                      onClick={() => void onMove?.(project.projectId, 'down')}
+                      aria-disabled={isMoveDownDisabled}
+                      className="grid h-8 w-8 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 aria-disabled:cursor-not-allowed aria-disabled:opacity-30"
+                      onClick={() => {
+                        if (!isMoveDownDisabled) void onMove?.(project, 'down')
+                      }}
                       type="button"
                     >
                       <ChevronDownIcon className="h-4 w-4" />
@@ -2273,19 +2278,28 @@ function ProjectGlyph({ tone }: { /** Visual tone assigned to the Project. */ to
   )
 }
 
+/** Props accepted by one compact Team sub-navigation control. */
+type SubNavButtonProps = {
+  /** Whether this sub-navigation destination is current. */
+  active: boolean
+  /** Whether only the icon should remain visually exposed. */
+  collapsed: boolean
+  /** Icon rendered before the destination label. */
+  icon: ComponentType<SidebarIconProps>
+  /** Visible and accessible destination label. */
+  label: string
+  /** Selects the destination. */
+  onClick: () => void
+}
+
+/** Renders one compact destination inside the current Team navigation. */
 function SubNavButton({
   active,
   collapsed,
   icon: Icon,
   label,
   onClick,
-}: {
-  active: boolean
-  collapsed: boolean
-  icon: ComponentType<SidebarIconProps>
-  label: string
-  onClick: () => void
-}) {
+}: SubNavButtonProps) {
   return (
     <button
       aria-label={collapsed ? label : undefined}
@@ -2503,6 +2517,7 @@ function PanelIcon({ className }: SidebarIconProps) {
   )
 }
 
+/** Renders the grid-shaped icon used for Project directory destinations. */
 function ProjectGridIcon({ className }: SidebarIconProps) {
   return (
     <SvgBase className={className}>

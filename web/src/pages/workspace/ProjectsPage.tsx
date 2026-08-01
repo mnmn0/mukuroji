@@ -4,29 +4,19 @@ import {
   createProjectDirectoryAssigneeOptions,
   createProjectDirectoryRows,
   filterProjectDirectoryRows,
+  parseProjectDirectoryStatusFilter,
   paginateProjectDirectoryRows,
   parseProjectDirectoryPage,
-  type ProjectDirectoryStatusFilter,
 } from '../../projects/model/projectDirectoryView'
 import { ProjectDirectoryView } from '../../projects/ui/ProjectDirectoryView'
+import { useWorkspaceWorkItems } from '../../issues/queries/useWorkItems'
 import { createTranslator } from '../../shared/i18n/i18n'
 import {
   MobileSidebarButton,
   useWorkspaceSidebarController,
 } from '../../shared/ui/sidebar'
-import { useWorkspaceWorkItemData } from '../../workspace/queries/useWorkspaceWorkItemData'
-import { WorkspaceTaskLoadNotice } from '../../workspace/ui/WorkspaceDataNotices'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
-
-/** Supported Project status values persisted in the route query string. */
-const projectDirectoryStatusFilters: readonly ProjectDirectoryStatusFilter[] = [
-  'all',
-  'active',
-  'attention',
-  'completed',
-  'not-started',
-]
 
 /**
  * Renders the searchable Project directory for the Workspace or one selected Team.
@@ -39,14 +29,13 @@ export function ProjectsPage() {
   const { teamId: routeTeamId } = useParams()
   const [searchParams, setSearchParams] = useSearchParams()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
-  const workItems = useWorkspaceWorkItemData(
+  const workItems = useWorkspaceWorkItems(
     workspace.accessToken,
     workspace.canLoadWorkspaceData,
-    workspace.teams,
   )
   const routeTeam = workspace.teams.find((team) => team.id === routeTeamId)
   const selectedTeamId = routeTeamId ?? searchParams.get('teamId') ?? undefined
-  const status = parseProjectDirectoryStatus(searchParams.get('status'))
+  const status = parseProjectDirectoryStatusFilter(searchParams.get('status'))
   const assigneeId = searchParams.get('assignee') ?? undefined
   const query = searchParams.get('q') ?? ''
   const quickAccessValue = searchParams.get('quickAccess')
@@ -59,13 +48,15 @@ export function ProjectsPage() {
     teamId: selectedTeamId,
   }), [assigneeId, query, quickAccessOnly, selectedTeamId, status])
   const rows = useMemo(
-    () => createProjectDirectoryRows(
-      workspace.teams,
-      workItems.tasks,
-      workspace.isProjectQuickAccess,
-    ),
+    () => workItems.data
+      ? createProjectDirectoryRows(
+          workspace.teams,
+          workItems.data,
+          workspace.isProjectQuickAccess,
+        )
+      : [],
     [
-      workItems.tasks,
+      workItems.data,
       workspace.isProjectQuickAccess,
       workspace.teams,
     ],
@@ -153,74 +144,72 @@ export function ProjectsPage() {
       </header>
 
       <WorkspaceRouteContent
-        isLoading={workItems.isLoading}
-        sessionErrors={[
-          workItems.workItemsError,
-          workItems.configurationsError,
-          ...workItems.configurationErrors,
-        ]}
+        isLoading={Boolean(workItems.key && workItems.isLoading)}
+        sessionErrors={[workItems.error]}
       >
         <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
-          <WorkspaceTaskLoadNotice
-            failedProjectCount={workItems.failedProjectCount}
-            t={t}
-          />
-          <ProjectDirectoryView
-            assignees={assigneeOptions.assignees}
-            filteredCount={filteredRows.length}
-            filters={filters}
-            hasUnassignedProjects={assigneeOptions.hasUnassignedProjects}
-            isQuickAccessSaving={workspace.isQuickAccessSaving}
-            isQuickAccessUnavailable={workspace.hasQuickAccessLoadError}
-            isTeamFilterLocked={routeTeamId !== undefined}
-            page={page.page}
-            pageCount={page.pageCount}
-            rows={page.rows}
-            t={t}
-            teams={routeTeamId
-              ? routeTeam
-                ? [routeTeam]
-                : []
-              : workspace.teams}
-            totalCount={routeRows.length}
-            onArchiveProject={workspace.onArchiveProject
-              ? async (project) => workspace.onArchiveProject?.(
-                  project.teamId,
-                  project.projectId,
-                )
-              : undefined}
-            onAssigneeChange={(assigneeId) => replaceFilter('assignee', assigneeId)}
-            onClearFilters={clearFilters}
-            onOpenProject={(project) => workspace.onSelectProject(
-              project.projectId,
-              project.teamId,
-            )}
-            onPageChange={replacePage}
-            onQuickAccessOnlyChange={(quickAccessOnly) =>
-              replaceFilter('quickAccess', quickAccessOnly ? 'true' : undefined)}
-            onSearchChange={(query) => replaceFilter('q', query)}
-            onStatusChange={(nextStatus) =>
-              replaceFilter('status', nextStatus === 'all' ? undefined : nextStatus)}
-            onTeamChange={(teamId) => replaceFilter('teamId', teamId)}
-            onToggleQuickAccess={(project) => workspace.onToggleProjectQuickAccess(
-              { projectId: project.projectId, teamId: project.teamId },
-              project.projectName,
-            )}
-          />
+          {workItems.error ? (
+            <div
+              className="grid justify-items-start gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700"
+              data-testid="project-directory-work-items-error"
+            >
+              <p role="alert">{t('tasks.error.loading')}</p>
+              <button
+                className="workbench-button-secondary min-h-10 px-4"
+                onClick={() => void workItems.mutate()}
+                type="button"
+              >
+                {t('workspace.error.retry')}
+              </button>
+            </div>
+          ) : (
+            <ProjectDirectoryView
+              assignees={assigneeOptions.assignees}
+              filteredCount={filteredRows.length}
+              filters={filters}
+              hasUnassignedProjects={assigneeOptions.hasUnassignedProjects}
+              isQuickAccessSaving={workspace.isQuickAccessSaving}
+              isQuickAccessUnavailable={
+                workspace.hasQuickAccessLoadError || workspace.isQuickAccessLoading
+              }
+              isTeamFilterLocked={routeTeamId !== undefined}
+              page={page.page}
+              pageCount={page.pageCount}
+              rows={page.rows}
+              t={t}
+              teams={routeTeamId
+                ? routeTeam
+                  ? [routeTeam]
+                  : []
+                : workspace.teams}
+              totalCount={routeRows.length}
+              onArchiveProject={workspace.onArchiveProject
+                ? async (project) => workspace.onArchiveProject?.(
+                    project.teamId,
+                    project.projectId,
+                  )
+                : undefined}
+              onAssigneeChange={(assigneeId) => replaceFilter('assignee', assigneeId)}
+              onClearFilters={clearFilters}
+              onOpenProject={(project) => workspace.onSelectProject(
+                project.projectId,
+                project.teamId,
+              )}
+              onPageChange={replacePage}
+              onQuickAccessOnlyChange={(quickAccessOnly) =>
+                replaceFilter('quickAccess', quickAccessOnly ? 'true' : undefined)}
+              onSearchChange={(query) => replaceFilter('q', query)}
+              onStatusChange={(nextStatus) =>
+                replaceFilter('status', nextStatus === 'all' ? undefined : nextStatus)}
+              onTeamChange={(teamId) => replaceFilter('teamId', teamId)}
+              onToggleQuickAccess={(project) => workspace.onToggleProjectQuickAccess(
+                { projectId: project.projectId, teamId: project.teamId },
+                project.projectName,
+              )}
+            />
+          )}
         </div>
       </WorkspaceRouteContent>
     </>
   )
-}
-
-/**
- * Parses a raw status query value while ignoring unsupported deep-link values.
- *
- * @param value - Raw status query value.
- * @returns A supported status filter, or the unfiltered value.
- */
-function parseProjectDirectoryStatus(
-  value: string | null,
-): ProjectDirectoryStatusFilter {
-  return projectDirectoryStatusFilters.find((status) => status === value) ?? 'all'
 }

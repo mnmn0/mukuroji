@@ -28,10 +28,22 @@ const teams: ProjectDirectoryTeam[] = [
   },
 ]
 
+const projectAItem: ProjectQuickAccessItem = {
+  projectId: 'project-a',
+  teamId: 'team-a',
+}
+const projectBItem: ProjectQuickAccessItem = {
+  projectId: 'project-b',
+  teamId: 'team-b',
+}
+const teamASharedProject: ProjectQuickAccessItem = {
+  projectId: 'shared-project',
+  teamId: 'team-a',
+}
 const orderedItems: ProjectQuickAccessItem[] = [
-  { projectId: 'project-a', teamId: 'team-a' },
-  { projectId: 'project-b', teamId: 'team-b' },
-  { projectId: 'shared-project', teamId: 'team-a' },
+  projectAItem,
+  projectBItem,
+  teamASharedProject,
 ]
 
 describe('Project quick access model', () => {
@@ -81,31 +93,48 @@ describe('Project quick access model', () => {
     expect(current).toEqual(orderedItems.slice(0, 2))
   })
 
-  test('treats a Project star as global across Team deep-link contexts', () => {
-    const result = toggleProjectQuickAccess(orderedItems, {
+  test('keeps duplicate Project IDs independently starred by Team context', () => {
+    const teamBSharedProject = {
       projectId: 'shared-project',
       teamId: 'team-b',
-    })
+    }
+    const added = toggleProjectQuickAccess(orderedItems, teamBSharedProject)
+    const removed = toggleProjectQuickAccess(added.items, teamASharedProject)
 
-    expect(isProjectInQuickAccess(orderedItems, 'shared-project')).toBe(true)
-    expect(result.added).toBe(false)
-    expect(result.items).toEqual(orderedItems.slice(0, 2))
+    expect(isProjectInQuickAccess(orderedItems, teamASharedProject)).toBe(true)
+    expect(isProjectInQuickAccess(orderedItems, teamBSharedProject)).toBe(false)
+    expect(added).toEqual({
+      added: true,
+      items: [...orderedItems, teamBSharedProject],
+    })
+    expect(removed).toEqual({
+      added: false,
+      items: [orderedItems[0], orderedItems[1], teamBSharedProject],
+    })
   })
 
   test('moves one position while preserving stable order and safe boundaries', () => {
-    expect(moveProjectQuickAccessItem(orderedItems, 'project-b', 'up')).toEqual([
-      orderedItems[1],
-      orderedItems[0],
-      orderedItems[2],
+    expect(moveProjectQuickAccessItem(orderedItems, projectBItem, 'up')).toEqual([
+      projectBItem,
+      projectAItem,
+      teamASharedProject,
     ])
-    expect(moveProjectQuickAccessItem(orderedItems, 'project-b', 'down')).toEqual([
-      orderedItems[0],
-      orderedItems[2],
-      orderedItems[1],
+    expect(moveProjectQuickAccessItem(orderedItems, projectBItem, 'down')).toEqual([
+      projectAItem,
+      teamASharedProject,
+      projectBItem,
     ])
-    expect(moveProjectQuickAccessItem(orderedItems, 'project-a', 'up')).toEqual(orderedItems)
-    expect(moveProjectQuickAccessItem(orderedItems, 'missing', 'down')).toEqual(orderedItems)
-    expect(moveProjectQuickAccessItem(orderedItems, 'shared-project', 'down')).toEqual(orderedItems)
+    expect(moveProjectQuickAccessItem(orderedItems, projectAItem, 'up')).toEqual(orderedItems)
+    expect(moveProjectQuickAccessItem(
+      orderedItems,
+      { projectId: 'missing', teamId: 'team-a' },
+      'down',
+    )).toEqual(orderedItems)
+    expect(moveProjectQuickAccessItem(
+      orderedItems,
+      teamASharedProject,
+      'down',
+    )).toEqual(orderedItems)
   })
 
   test('allows Undo only while the committed revision is still current', () => {

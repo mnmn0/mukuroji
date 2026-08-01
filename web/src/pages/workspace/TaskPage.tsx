@@ -148,6 +148,7 @@ export function TaskPage() {
   const {
     hasQuickAccessLoadError,
     isProjectQuickAccess,
+    isQuickAccessLoading,
     isQuickAccessSaving,
     onToggleProjectQuickAccess,
   } = useWorkspaceRouteContext()
@@ -805,8 +806,10 @@ export function TaskPage() {
       configurationErrorMessage={configurationErrorMessage}
       accessToken={accessToken}
       isLoading={isLoading}
-      isProjectQuickAccess={isProjectQuickAccess(projectId)}
-      isProjectQuickAccessSaving={isQuickAccessSaving}
+      isProjectQuickAccess={interactionTeamId
+        ? isProjectQuickAccess({ projectId, teamId: interactionTeamId })
+        : false}
+      isProjectQuickAccessSaving={isQuickAccessLoading || isQuickAccessSaving}
       isRelationCandidatesLoading={Boolean(relationCandidatesKey && isRelationCandidatesLoading)}
       locale={locale}
       activeProjectTeamId={interactionTeamId}

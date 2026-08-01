@@ -56,7 +56,10 @@ export function createTranslator(locale: Locale) {
 }
 
 /**
- * Sidebar コンポーネントへ渡す i18n 済みラベルを生成します。
+ * Creates the localized labels consumed by the shared sidebar.
+ *
+ * @param locale - Locale used to resolve every sidebar message.
+ * @returns A complete set of localized sidebar labels.
  */
 export function createSidebarLabels(locale: Locale): SidebarLabels {
   const t = createTranslator(locale)
@@ -141,7 +144,6 @@ export function createSidebarLabels(locale: Locale): SidebarLabels {
     teamOverview: t('sidebar.teamOverview'),
     issues: t('sidebar.issues'),
     members: t('sidebar.members'),
-    projects: t('sidebar.projects'),
     projectCount: (count) =>
       t('sidebar.projectCount').replace('{count}', String(count)),
     projectGroup: t('sidebar.projectGroup'),

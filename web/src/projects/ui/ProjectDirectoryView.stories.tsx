@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import type { ProjectQuickAccessItem } from '@mukuroji/contracts'
 import { useMemo, useState } from 'react'
 import type { ProjectDirectoryTeam } from '../api/directory'
 import { projectDirectoryFixtures } from '../fixtures'
@@ -9,6 +10,10 @@ import {
   paginateProjectDirectoryRows,
   type ProjectDirectoryFilters,
 } from '../model/projectDirectoryView'
+import {
+  isProjectInQuickAccess,
+  toggleProjectQuickAccess,
+} from '../model/projectQuickAccess'
 import { referoTaskFixtures } from '../../tasks/fixtures'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { ProjectDirectoryView } from './ProjectDirectoryView'
@@ -16,7 +21,7 @@ import { ProjectDirectoryView } from './ProjectDirectoryView'
 const defaultRows = createProjectDirectoryRows(
   projectDirectoryFixtures,
   referoTaskFixtures,
-  (projectId) => projectId === 'refero' || projectId === 'brand-refresh',
+  (item) => item.projectId === 'refero' || item.projectId === 'brand-refresh',
 )
 const defaultAssigneeOptions = createProjectDirectoryAssigneeOptions(defaultRows)
 
@@ -113,10 +118,10 @@ export const LargeWorkspace20By20: Story = {
  */
 function LargeProjectDirectoryStory() {
   const teams = useMemo(() => createLargeProjectDirectory(), [])
-  const [quickAccessIds, setQuickAccessIds] = useState([
-    'project-1-1',
-    'project-2-3',
-    'project-10-10',
+  const [quickAccessItems, setQuickAccessItems] = useState<ProjectQuickAccessItem[]>([
+    { projectId: 'project-1-1', teamId: 'team-1' },
+    { projectId: 'project-2-3', teamId: 'team-2' },
+    { projectId: 'project-10-10', teamId: 'team-10' },
   ])
   const [filters, setFilters] = useState<ProjectDirectoryFilters>({
     query: '',
@@ -128,9 +133,9 @@ function LargeProjectDirectoryStory() {
     () => createProjectDirectoryRows(
       teams,
       [],
-      (projectId) => quickAccessIds.includes(projectId),
+      (item) => isProjectInQuickAccess(quickAccessItems, item),
     ),
-    [quickAccessIds, teams],
+    [quickAccessItems, teams],
   )
   const filteredRows = filterProjectDirectoryRows(rows, filters)
   const currentPage = paginateProjectDirectoryRows(filteredRows, page)
@@ -169,9 +174,10 @@ function LargeProjectDirectoryStory() {
       onStatusChange={(status) => updateFilters({ status })}
       onTeamChange={(teamId) => updateFilters({ teamId })}
       onToggleQuickAccess={(project) => {
-        setQuickAccessIds((current) => current.includes(project.projectId)
-          ? current.filter((projectId) => projectId !== project.projectId)
-          : [...current, project.projectId])
+        setQuickAccessItems((current) => toggleProjectQuickAccess(current, {
+          projectId: project.projectId,
+          teamId: project.teamId,
+        }).items)
       }}
     />
   )

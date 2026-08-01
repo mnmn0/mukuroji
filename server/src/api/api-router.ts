@@ -48,9 +48,7 @@ import {
   type PlanningStatusUpdateInput,
   type PlanningWorkItemLinkInput,
   type PlanningWorkItemSummary,
-  PROJECT_QUICK_ACCESS_MAX_ITEMS,
   PROJECT_QUICK_ACCESS_MAX_REVISION,
-  type ProjectQuickAccessItem,
   type ProjectQuickAccessPreferences,
   type ResolvedWorkItemConfiguration,
   type ImportDryRunReport,
@@ -141,6 +139,8 @@ export {
   FlociCognitoClient,
 } from '../modules/authentication'
 import {
+  createProjectQuickAccessIdentity,
+  isProjectQuickAccessItems,
   normalizeProjectMemberKey,
   ProjectDataError,
   projectRoleWeights,
@@ -4989,7 +4989,7 @@ routeApp.get('/api/projects/quick-access', async (c) => {
     return c.json({
       ...preference,
       items: preference.items.filter((item) =>
-        authorizedProjectKeys.has(createProjectQuickAccessKey(item))
+        authorizedProjectKeys.has(createProjectQuickAccessIdentity(item))
       ),
     } satisfies ProjectQuickAccessPreferences)
   } catch (error) {
@@ -5015,7 +5015,7 @@ routeApp.put('/api/projects/quick-access', async (c) => {
     const authorizedProjectKeys = await getAuthorizedProjectQuickAccessKeys(principal)
 
     if (input.items.some((item) =>
-      !authorizedProjectKeys.has(createProjectQuickAccessKey(item))
+      !authorizedProjectKeys.has(createProjectQuickAccessIdentity(item))
     )) {
       throw new ProjectDataError(
         403,
@@ -7950,40 +7950,15 @@ function readProjectQuickAccessInput(
     !Number.isSafeInteger(revision) ||
     revision < 0 ||
     revision >= PROJECT_QUICK_ACCESS_MAX_REVISION ||
-    !Array.isArray(candidateItems) ||
-    candidateItems.length > PROJECT_QUICK_ACCESS_MAX_ITEMS
+    !isProjectQuickAccessItems(candidateItems)
   ) {
     throw createInvalidProjectQuickAccessInputError()
   }
 
-  const items: ProjectQuickAccessItem[] = []
-  const projectIds = new Set<string>()
-  for (const candidate of candidateItems) {
-    if (!isRecord(candidate)) {
-      throw createInvalidProjectQuickAccessInputError()
-    }
-    const teamId = candidate.teamId
-    const projectId = candidate.projectId
-    if (
-      typeof teamId !== 'string' ||
-      typeof projectId !== 'string' ||
-      teamId.length === 0 ||
-      projectId.length === 0 ||
-      teamId.trim() !== teamId ||
-      projectId.trim() !== projectId ||
-      teamId.length > 256 ||
-      projectId.length > 256 ||
-      teamId.includes('/') ||
-      projectId.includes('/') ||
-      projectIds.has(projectId)
-    ) {
-      throw createInvalidProjectQuickAccessInputError()
-    }
-    projectIds.add(projectId)
-    items.push({ projectId, teamId })
+  return {
+    items: candidateItems.map(({ projectId, teamId }) => ({ projectId, teamId })),
+    revision,
   }
-
-  return { items, revision }
 }
 
 /** Creates the safe 400 response error for malformed quick-access input. */
@@ -8004,36 +7979,46 @@ function createInvalidProjectQuickAccessInputError() {
 async function getAuthorizedProjectQuickAccessKeys(
   principal: ProjectPrincipal,
 ) {
-  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
-    principal.directoryId,
-    'ja',
-    true,
-  )
-  const readableProjectIds = principal.isSystemAdmin
+  const [directory, directProjectAccesses] = await Promise.all([
+    workspaceDependencies.projectDirectory.getProjectDirectory(
+      principal.directoryId,
+      'ja',
+      true,
+    ),
+    principal.isSystemAdmin || principal.enterpriseLegacyProjectAccessSuppressed
+      ? Promise.resolve([])
+      : workspaceDependencies.projectDirectory.getProjectAccessList(
+          principal.directoryId,
+          principal.userKey,
+        ),
+  ])
+  const readableProjectAccesses = principal.isSystemAdmin
     ? undefined
-    : new Set(
-        (await getEffectiveProjectAccessList(principal))
-          .filter((access) => projectAccessAllows(access, 'viewer'))
-          .map((access) => access.projectId),
+    : [...directProjectAccesses, ...(principal.enterpriseProjectAccesses ?? [])]
+      .filter((access) => projectAccessAllows(access, 'viewer'))
+  const projectTeamCounts = new Map<string, number>()
+  for (const team of directory.teams) {
+    for (const project of team.projects) {
+      projectTeamCounts.set(
+        project.id,
+        (projectTeamCounts.get(project.id) ?? 0) + 1,
       )
+    }
+  }
 
   return new Set(directory.teams.flatMap((team) =>
     team.projects.flatMap((project) =>
-      readableProjectIds === undefined || readableProjectIds.has(project.id)
-        ? [createProjectQuickAccessKey({ projectId: project.id, teamId: team.id })]
+      readableProjectAccesses === undefined || readableProjectAccesses.some((access) =>
+        access.projectId === project.id &&
+        (
+          access.teamId === team.id ||
+          access.teamId === undefined && projectTeamCounts.get(project.id) === 1
+        )
+      )
+        ? [createProjectQuickAccessIdentity({ projectId: project.id, teamId: team.id })]
         : [],
     )
   ))
-}
-
-/**
- * Creates a collision-safe identity for a Team-owned Project reference.
- *
- * @param item - Team and Project reference.
- * @returns Composite identity used only within the current request.
- */
-function createProjectQuickAccessKey(item: ProjectQuickAccessItem) {
-  return `${item.teamId}\0${item.projectId}`
 }
 
 /** Analytics route の JSON object body を検証します。 */
@@ -12401,6 +12386,7 @@ async function evaluateEnterpriseRequestAccess(
       projectAccesses.push({
         projectId: project.projectId,
         role: resolveEnterpriseProjectRole([scoped.granted.permission]),
+        teamId: project.teamId,
       })
     }
   }

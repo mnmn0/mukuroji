@@ -8,7 +8,10 @@ import {
 import { matchPath, Outlet, useLocation, useNavigate } from 'react-router'
 import { useWorkspaceCommandMenu } from '../../commands/ui/WorkspaceCommandMenuContext'
 import type { ProjectDirectoryTeam } from '../../projects/api'
-import { createProjectsPath } from '../../shared/routing/paths'
+import {
+  createProjectsPath,
+  createQuickAccessProjectsPath,
+} from '../../shared/routing/paths'
 import {
   createSidebarLabels,
   createTranslator,
@@ -388,7 +391,9 @@ function WorkspaceRouteShell({
           closeMobileOnSelect={metadata?.closeMobileOnSelect}
           inboxCount={workspace.inboxCount}
           isAllProjectsActive={location.pathname === createProjectsPath()}
-          isQuickAccessSaving={workspace.isQuickAccessSaving}
+          isQuickAccessSaving={
+            workspace.isQuickAccessLoading || workspace.isQuickAccessSaving
+          }
           isMobileOpen={isMobileSidebarOpen}
           labels={sidebarLabels}
           mobileCloseLabel={t('sidebar.mobileClose')}
@@ -404,7 +409,10 @@ function WorkspaceRouteShell({
           }}
           onMoveQuickAccessProject={workspace.hasQuickAccessLoadError
             ? undefined
-            : workspace.onMoveProjectQuickAccess}
+            : (project, direction) => workspace.onMoveProjectQuickAccess(
+                { projectId: project.projectId, teamId: project.teamId },
+                direction,
+              )}
           onRemoveQuickAccessProject={workspace.hasQuickAccessLoadError
             ? undefined
             : (projectId, teamId, projectName) =>
@@ -415,7 +423,7 @@ function WorkspaceRouteShell({
           onSelectNav={workspace.onSelectNav}
           onSelectProject={workspace.onSelectProject}
           onSelectTeamView={workspace.onSelectTeamView}
-          onShowAllQuickAccess={() => navigate(`${createProjectsPath()}?quickAccess=1`)}
+          onShowAllQuickAccess={() => navigate(createQuickAccessProjectsPath())}
           onShowAllProjects={() => navigate(createProjectsPath())}
           quickAccessProjects={workspace.quickAccessProjects}
           teams={workspace.teams}
@@ -517,7 +525,6 @@ function WorkspaceRouteShell({
         </section>
         {quickAccessFeedbackMessage ? (
           <div
-            aria-live="polite"
             className="fixed bottom-5 right-5 z-[90] flex max-w-[min(420px,calc(100vw-40px))] items-center gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-[var(--workbench-text)] shadow-[0_18px_50px_rgba(15,23,42,0.22)]"
             role={workspace.quickAccessFeedback?.kind === 'error' ? 'alert' : 'status'}
           >
@@ -526,7 +533,7 @@ function WorkspaceRouteShell({
               <button
                 autoFocus={workspace.quickAccessFeedback.focusUndo}
                 className="min-h-8 flex-none rounded-lg px-2 text-[var(--workbench-primary)] transition hover:bg-teal-50 disabled:opacity-50"
-                disabled={workspace.isQuickAccessSaving}
+                disabled={workspace.isQuickAccessLoading || workspace.isQuickAccessSaving}
                 onClick={() => void workspace.onUndoProjectQuickAccess()}
                 type="button"
               >

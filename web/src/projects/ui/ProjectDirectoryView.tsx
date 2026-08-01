@@ -2,6 +2,7 @@ import { useCallback, useId, useRef, useState } from 'react'
 import type { ProjectDirectoryTeam } from '../api/directory'
 import {
   PROJECT_DIRECTORY_UNASSIGNED_ID,
+  isProjectDirectoryStatusFilter,
   type ProjectDirectoryAssignee,
   type ProjectDirectoryFilters,
   type ProjectDirectoryRow,
@@ -36,7 +37,7 @@ export type ProjectDirectoryViewProps = {
   isTeamFilterLocked?: boolean
   /** Whether a quick-access replacement is currently being persisted. */
   isQuickAccessSaving?: boolean
-  /** Whether Quick Access failed to load and star controls are unavailable. */
+  /** Whether Quick Access is loading or failed to load, making star controls unavailable. */
   isQuickAccessUnavailable?: boolean
   /** Translator used for all Project directory labels. */
   t: (key: MessageKey) => string
@@ -167,6 +168,10 @@ export function ProjectDirectoryView({
   const resultCountLabel = formatProjectDirectoryMessage(
     t('projects.directory.resultCount'),
     { filtered: filteredCount, total: totalCount },
+  )
+  const paginationLabel = formatProjectDirectoryMessage(
+    t('projects.directory.pagination.label'),
+    { page, pages: pageCount },
   )
 
   return (
@@ -329,9 +334,7 @@ export function ProjectDirectoryView({
 
         {filteredCount > 0 && pageCount > 1 ? (
           <nav
-            aria-label={t('projects.directory.pagination.label')
-              .replace('{page}', String(page))
-              .replace('{pages}', String(pageCount))}
+            aria-label={paginationLabel}
             className="flex items-center justify-between gap-3 border-t border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-4 py-3"
           >
             <button
@@ -343,9 +346,7 @@ export function ProjectDirectoryView({
               {t('projects.directory.pagination.previous')}
             </button>
             <span className="text-sm font-semibold text-[var(--workbench-muted)]">
-              {t('projects.directory.pagination.label')
-                .replace('{page}', String(page))
-                .replace('{pages}', String(pageCount))}
+              {paginationLabel}
             </span>
             <button
               className="workbench-button-secondary min-h-10 px-4 disabled:cursor-not-allowed disabled:opacity-50"
@@ -379,7 +380,7 @@ type ProjectDirectoryListRowProps = {
   project: ProjectDirectoryRow
   /** Whether a quick-access request is currently being persisted. */
   isQuickAccessSaving: boolean
-  /** Whether Quick Access failed to load and the star cannot be changed. */
+  /** Whether Quick Access is not ready and the star cannot be changed. */
   isQuickAccessUnavailable: boolean
   /** Translator used for row labels. */
   t: (key: MessageKey) => string
@@ -417,7 +418,7 @@ function ProjectDirectoryListRow({
 
   return (
     <div
-      className="grid grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_minmax(130px,0.9fr)_140px_120px_48px] items-center gap-3 border-b border-[var(--workbench-border)] px-4 py-3 transition-colors last:border-b-0 hover:bg-[var(--workbench-surface-muted)] max-[1100px]:grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_140px_48px max-[760px]:grid-cols-[44px_minmax(0,1fr)_44px] max-[760px]:items-start"
+      className="grid grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_minmax(130px,0.9fr)_140px_120px_48px] items-center gap-3 border-b border-[var(--workbench-border)] px-4 py-3 transition-colors last:border-b-0 hover:bg-[var(--workbench-surface-muted)] max-[1100px]:grid-cols-[44px_minmax(190px,1.5fr)_minmax(130px,0.8fr)_130px_140px_48px] max-[760px]:grid-cols-[44px_minmax(0,1fr)_44px] max-[760px]:items-start"
       role="listitem"
     >
       <button
@@ -701,18 +702,6 @@ function ProjectArchiveDialog({
       </section>
     </div>
   )
-}
-
-/**
- * Tests whether a raw select value is a supported Project status filter.
- *
- * @param value - Raw value emitted by the status select.
- * @returns Whether the value is safe to pass to the typed route action.
- */
-function isProjectDirectoryStatusFilter(
-  value: string,
-): value is ProjectDirectoryStatusFilter {
-  return statusFilters.some((status) => status === value)
 }
 
 /**

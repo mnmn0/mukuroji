@@ -109,6 +109,7 @@ const storyWorkspaceRouteContext: WorkspaceRouteContextValue = {
   inboxCount: 3,
   isProjectQuickAccess: () => false,
   isLoading: false,
+  isQuickAccessLoading: false,
   isQuickAccessSaving: false,
   locale: 'ja',
   onArchiveProject: () => Promise.resolve(),

@@ -38,6 +38,9 @@ import {
   ProjectDataError,
 } from '../../project-data-error'
 import {
+  isProjectQuickAccessItems,
+} from '../../domain/project-quick-access'
+import {
   CreateTableCommand,
   DescribeTableCommand,
   DynamoDBClient,
@@ -56,7 +59,6 @@ import type {
 } from '@aws-sdk/lib-dynamodb'
 import {
   PLANNING_SCHEMA_VERSION,
-  PROJECT_QUICK_ACCESS_MAX_ITEMS,
   PROJECT_QUICK_ACCESS_MAX_REVISION,
   type ProjectQuickAccessItem,
   type ProjectQuickAccessPreferences,
@@ -72,6 +74,10 @@ export type ProjectRole = 'manager' | 'member' | 'viewer'
  * active project と現在ユーザーの role を 1 directory read で返す行です。
  */
 export type ProjectAccessEntry = {
+  /**
+   * Canonical owner Team when the access source can identify it.
+   */
+  teamId?: string
   /**
    * active project ID です。
    */
@@ -871,7 +877,8 @@ export class DynamoDbProjectDirectoryClient {
     if (
       !Number.isSafeInteger(input.revision) ||
       input.revision < 0 ||
-      input.revision >= PROJECT_QUICK_ACCESS_MAX_REVISION
+      input.revision >= PROJECT_QUICK_ACCESS_MAX_REVISION ||
+      !isProjectQuickAccessItems(input.items)
     ) {
       throw new ProjectDataError(
         400,
@@ -2794,36 +2801,8 @@ function isProjectQuickAccessPreferencesItem(
     value.revision <= PROJECT_QUICK_ACCESS_MAX_REVISION &&
     typeof value.updatedAt === 'string' &&
     Array.isArray(value.items) &&
-    value.items.length <= PROJECT_QUICK_ACCESS_MAX_ITEMS &&
-    value.items.every(isProjectQuickAccessItem) &&
-    new Set(value.items.map((item) => item.projectId)).size === value.items.length
+    isProjectQuickAccessItems(value.items)
   )
-}
-
-/**
- * Validates one stored quick-access Project reference.
- *
- * @param value - Candidate Project reference.
- * @returns Whether both identifiers are non-empty strings.
- */
-function isProjectQuickAccessItem(value: unknown): value is ProjectQuickAccessItem {
-  return isRecord(value) &&
-    isProjectQuickAccessIdentifier(value.teamId) &&
-    isProjectQuickAccessIdentifier(value.projectId)
-}
-
-/**
- * Validates an identifier retained in a quick-access sidecar row.
- *
- * @param value - Candidate Team or Project identifier.
- * @returns Whether the identifier satisfies the canonical directory boundary.
- */
-function isProjectQuickAccessIdentifier(value: unknown): value is string {
-  return typeof value === 'string' &&
-    value.length > 0 &&
-    value.length <= 256 &&
-    value.trim() === value &&
-    !value.includes('/')
 }
 
 /**

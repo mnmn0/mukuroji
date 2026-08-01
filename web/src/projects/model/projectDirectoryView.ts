@@ -1,3 +1,4 @@
+import type { ProjectQuickAccessItem } from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../api/directory'
 import type { ProjectTask } from '../../tasks/api/tasks'
 import {
@@ -31,6 +32,14 @@ export type ProjectDirectoryStatus =
 
 /** Project lifecycle filter values including the unfiltered state. */
 export type ProjectDirectoryStatusFilter = 'all' | ProjectDirectoryStatus
+
+const projectDirectoryStatusFilterLookup: Readonly<Record<string, true>> = {
+  active: true,
+  all: true,
+  attention: true,
+  completed: true,
+  'not-started': true,
+} satisfies Record<ProjectDirectoryStatusFilter, true>
 
 /** Assignee identity displayed and filtered in the Project directory. */
 export type ProjectDirectoryAssignee = {
@@ -97,13 +106,13 @@ export function createProjectDirectoryRowKey(teamId: string, projectId: string) 
  *
  * @param teams - Permission-filtered Team and Project directory.
  * @param tasks - Canonical Work Items loaded for the Workspace.
- * @param isProjectQuickAccess - Predicate that recognizes starred Project IDs.
+ * @param isProjectQuickAccess - Predicate that recognizes starred Team/Project pairs.
  * @returns Project rows in the stable Team and Project order supplied by the directory.
  */
 export function createProjectDirectoryRows(
   teams: readonly ProjectDirectoryTeam[],
   tasks: readonly ProjectTask[],
-  isProjectQuickAccess: (projectId: string) => boolean = () => false,
+  isProjectQuickAccess: (item: ProjectQuickAccessItem) => boolean = () => false,
 ): ProjectDirectoryRow[] {
   const tasksByProject = new Map<string, ProjectTask[]>()
 
@@ -133,7 +142,10 @@ export function createProjectDirectoryRows(
 
       return {
         assignees: createProjectAssignees(projectTasks),
-        isQuickAccess: isProjectQuickAccess(project.id),
+        isQuickAccess: isProjectQuickAccess({
+          projectId: project.id,
+          teamId: team.id,
+        }),
         key: createProjectDirectoryRowKey(team.id, project.id),
         openWorkItemCount,
         progress: projectTasks.length === 0
@@ -294,6 +306,30 @@ export function parseProjectDirectoryPage(value: string | null | undefined) {
 
   const page = Number(value)
   return Number.isSafeInteger(page) && page > 0 ? page : 1
+}
+
+/**
+ * Tests whether a raw value is a supported Project directory status filter.
+ *
+ * @param value - Raw URL or select value.
+ * @returns Whether the value is a complete supported status-filter key.
+ */
+export function isProjectDirectoryStatusFilter(
+  value: string | null,
+): value is ProjectDirectoryStatusFilter {
+  return value !== null && projectDirectoryStatusFilterLookup[value] === true
+}
+
+/**
+ * Parses a raw status query while ignoring unsupported deep-link values.
+ *
+ * @param value - Raw status query value.
+ * @returns A supported status filter, or the unfiltered value.
+ */
+export function parseProjectDirectoryStatusFilter(
+  value: string | null,
+): ProjectDirectoryStatusFilter {
+  return isProjectDirectoryStatusFilter(value) ? value : 'all'
 }
 
 /**

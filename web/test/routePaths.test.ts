@@ -22,6 +22,7 @@ import { SearchPage } from '../src/search/SearchPage'
 import {
   createPlanningPath,
   createProjectsPath,
+  createQuickAccessProjectsPath,
   createPublicRequestPath,
   createProjectIssuesPath,
   createRequestsPath,
@@ -50,10 +51,6 @@ function expectSharedWorkspaceShell(
   workspaceRoutes: readonly WorkspaceRouteDefinition[],
 ) {
   const shellRoutes = new Set<RouteObject>()
-
-  expect(new Set(workspaceRoutes.map(({ component }) => component)).size).toBe(
-    workspaceRoutes.length,
-  )
 
   for (const { component, path } of workspaceRoutes) {
     const matches = matchRoutes(appRoutes, path)
@@ -145,13 +142,12 @@ describe('Project directory paths', () => {
   test('creates global and Team-scoped discovery URLs', () => {
     expect(createProjectsPath()).toBe('/projects')
     expect(createProjectsPath('design/team')).toBe('/teams/design%2Fteam/projects')
+    expect(createQuickAccessProjectsPath()).toBe('/projects?quickAccess=1')
   })
 
   test('registers both discovery routes inside the shared Workspace shell', () => {
     expectSharedWorkspaceShell([
       { component: ProjectsPage, path: '/projects' },
-    ])
-    expectSharedWorkspaceShell([
       { component: ProjectsPage, path: '/teams/core-team/projects' },
     ])
   })

@@ -1245,7 +1245,14 @@ function configureFakeProjectClients(
     passwordMfaChallenge?: 'SOFTWARE_TOKEN_MFA' | 'SMS_MFA' | 'SMS_OTP' | 'EMAIL_OTP'
     passwordAuthChallenge?: boolean
     passwordAuthTokens?: boolean
-    projectAccesses?: Array<{ projectId: string; role?: ProjectRole }>
+    projectAccesses?: Array<{
+      /** Project identifier returned by the fake access directory. */
+      projectId: string
+      /** Optional role granted to the authenticated member. */
+      role?: ProjectRole
+      /** Canonical owner Team when the test exercises duplicate Project IDs. */
+      teamId?: string
+    }>
     role?: ProjectRole
     /** Cognito current group membership fake が返す group 名です。 */
     cognitoUserGroups?: string[]

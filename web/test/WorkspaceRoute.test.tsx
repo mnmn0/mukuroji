@@ -18,6 +18,7 @@ const routeContext: WorkspaceRouteContextValue = {
   inboxCount: 0,
   isProjectQuickAccess: () => false,
   isLoading: false,
+  isQuickAccessLoading: false,
   isQuickAccessSaving: false,
   locale: 'en',
   onFontSizePreferenceChange: () => undefined,
@@ -138,5 +139,27 @@ describe('WorkspaceRoute', () => {
     expect(html).toContain('Quick access could not be loaded')
     expect(html).toContain('Retry quick access')
     expect(html).toContain('Route content')
+  })
+
+  test('uses the feedback role as the sole live-region contract', () => {
+    const context: WorkspaceRouteContextValue = {
+      ...routeContext,
+      commonErrorKey: undefined,
+      quickAccessFeedback: { kind: 'error' },
+    }
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={['/home']}>
+        <Routes>
+          <Route element={<WorkspaceContextOutlet context={context} />}>
+            <Route element={<WorkspaceRoute />}>
+              <Route element={<p>Route content</p>} path="/home" />
+            </Route>
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    )
+
+    expect(html).toContain('role="alert"')
+    expect(html).not.toContain('aria-live="polite"')
   })
 })

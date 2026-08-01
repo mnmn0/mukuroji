@@ -1,6 +1,9 @@
 /** Maximum number of projects retained in one viewer's quick-access preference. */
 export const PROJECT_QUICK_ACCESS_MAX_ITEMS = 100
 
+/** Maximum length accepted for a Team or Project identifier in quick access. */
+export const PROJECT_QUICK_ACCESS_IDENTIFIER_MAX_LENGTH = 256
+
 /** Largest revision that may be retained in a quick-access preference. */
 export const PROJECT_QUICK_ACCESS_MAX_REVISION = Number.MAX_SAFE_INTEGER - 1
 

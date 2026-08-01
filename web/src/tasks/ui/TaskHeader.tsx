@@ -412,14 +412,17 @@ function StarIcon({ isFilled }: StarIconProps) {
     <svg
       aria-hidden="true"
       className="h-5 w-5"
-      fill={isFilled ? 'currentColor' : 'none'}
+      fill="none"
       stroke="currentColor"
       strokeLinecap="round"
       strokeLinejoin="round"
       strokeWidth="2"
       viewBox="0 0 24 24"
     >
-      <path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.2 6.4 20.2 7.5 14 3 9.6l6.2-.9L12 3Z" />
+      <path
+        d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.2 6.4 20.2 7.5 14 3 9.6l6.2-.9L12 3Z"
+        fill={isFilled ? 'currentColor' : 'none'}
+      />
     </svg>
   )
 }

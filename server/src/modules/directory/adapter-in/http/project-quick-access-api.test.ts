@@ -105,13 +105,6 @@ test('rejects malformed complete quick-access replacements before persistence', 
       revision: 0,
     },
     {
-      items: [
-        { projectId: 'shared-project', teamId: 'core-team' },
-        { projectId: 'shared-project', teamId: 'design-team' },
-      ],
-      revision: 0,
-    },
-    {
       items: Array.from({ length: PROJECT_QUICK_ACCESS_MAX_ITEMS + 1 }, (_, index) => ({
         projectId: `project-${index}`,
         teamId: 'core-team',
@@ -156,6 +149,110 @@ test('rejects quick-access references outside the authenticated Project access l
   expect(response.status).toBe(403)
   expect(await response.json()).toEqual({ message: 'Project access is denied.' })
   expect(calls.projectQuickAccessReplacements).toEqual([])
+})
+
+test('binds duplicated Project IDs to their owner Team despite ambiguous bare access', async () => {
+  const calls = configureFakeProjectClients(true, {
+    additionalTeams: [{
+      id: 'design-team',
+      name: 'Design Team',
+      projects: [{ id: 'shared-project', name: 'Shared design', tone: 'purple' }],
+    }],
+    projectAccesses: [
+      {
+        projectId: 'shared-project',
+        role: 'viewer',
+        teamId: 'core-team',
+      },
+      {
+        projectId: 'shared-project',
+        role: 'viewer',
+      },
+    ],
+    projectQuickAccessPreference: {
+      items: [{ projectId: 'shared-project', teamId: 'design-team' }],
+      revision: 4,
+    },
+    teamProjects: [{ id: 'shared-project', name: 'Shared core', tone: 'blue' }],
+  })
+
+  const readResponse = await app.request('/api/projects/quick-access', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  const deniedReplaceResponse = await app.request('/api/projects/quick-access', {
+    method: 'PUT',
+    headers: authenticatedJsonHeaders(),
+    body: JSON.stringify({
+      items: [{ projectId: 'shared-project', teamId: 'design-team' }],
+      revision: 4,
+    }),
+  })
+  const allowedReplaceResponse = await app.request('/api/projects/quick-access', {
+    method: 'PUT',
+    headers: authenticatedJsonHeaders(),
+    body: JSON.stringify({
+      items: [{ projectId: 'shared-project', teamId: 'core-team' }],
+      revision: 4,
+    }),
+  })
+
+  expect(readResponse.status).toBe(200)
+  expect(await readResponse.json()).toEqual({ items: [], revision: 4 })
+  expect(deniedReplaceResponse.status).toBe(403)
+  expect(allowedReplaceResponse.status).toBe(200)
+  expect(await allowedReplaceResponse.json()).toEqual({
+    items: [{ projectId: 'shared-project', teamId: 'core-team' }],
+    revision: 5,
+  })
+  expect(calls.projectQuickAccessReplacements).toEqual([{
+    directoryId: 'user#demo@example.com',
+    input: {
+      items: [{ projectId: 'shared-project', teamId: 'core-team' }],
+      revision: 4,
+    },
+    memberKey: 'demo@example.com',
+  }])
+})
+
+test('accepts the same Project ID from distinct authorized Teams', async () => {
+  const calls = configureFakeProjectClients(true, {
+    additionalTeams: [{
+      id: 'design-team',
+      name: 'Design Team',
+      projects: [{ id: 'shared-project', name: 'Shared design', tone: 'purple' }],
+    }],
+    projectAccesses: [
+      {
+        projectId: 'shared-project',
+        role: 'viewer',
+        teamId: 'core-team',
+      },
+      {
+        projectId: 'shared-project',
+        role: 'viewer',
+        teamId: 'design-team',
+      },
+    ],
+    teamProjects: [{ id: 'shared-project', name: 'Shared core', tone: 'blue' }],
+  })
+  const items = [
+    { projectId: 'shared-project', teamId: 'core-team' },
+    { projectId: 'shared-project', teamId: 'design-team' },
+  ]
+
+  const response = await app.request('/api/projects/quick-access', {
+    method: 'PUT',
+    headers: authenticatedJsonHeaders(),
+    body: JSON.stringify({ items, revision: 0 }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ items, revision: 1 })
+  expect(calls.projectQuickAccessReplacements).toEqual([{
+    directoryId: 'user#demo@example.com',
+    input: { items, revision: 0 },
+    memberKey: 'demo@example.com',
+  }])
 })
 
 test('replaces and returns the complete quick-access order for the authenticated member', async () => {
