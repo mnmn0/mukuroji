@@ -15,12 +15,18 @@ import { createTaskTabId, taskTabPanelId } from './taskTabAccessibility'
 export type TaskHeaderProps = {
   /** Currently active task view. */
   activeTab: TaskTab
+  /** Whether the displayed Project is currently available from quick access. */
+  isProjectQuickAccess: boolean
+  /** Whether a quick-access change is currently being persisted. */
+  isProjectQuickAccessSaving?: boolean
   /** Whether the inline create form is currently open. */
   isCreateTaskOpen: boolean
   /** Changes the inline create form visibility when creation is permitted. */
   onCreateTaskOpenChange?: (isOpen: boolean) => void
   /** Opens the mobile workspace sidebar. */
   onMobileSidebarOpen: () => void
+  /** Adds or removes the displayed Project from quick access. */
+  onProjectQuickAccessToggle?: () => void
   /** Selects a task view. */
   onTabChange: (tab: TaskTab) => void
   /** Project name shown in the breadcrumb and heading. */
@@ -43,9 +49,12 @@ export type TaskHeaderProps = {
  */
 export function TaskHeader({
   activeTab,
+  isProjectQuickAccess,
+  isProjectQuickAccessSaving = false,
   isCreateTaskOpen,
   onCreateTaskOpenChange,
   onMobileSidebarOpen,
+  onProjectQuickAccessToggle,
   onTabChange,
   projectName,
   t,
@@ -54,6 +63,11 @@ export function TaskHeader({
   userInitial,
 }: TaskHeaderProps) {
   const taskSummary = createTaskSummary(tasks)
+  const quickAccessLabel = t(
+    isProjectQuickAccess
+      ? 'tasks.action.quickAccessRemove'
+      : 'tasks.action.quickAccessAdd',
+  )
   const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, tab: TaskTab) => {
     const tabIndex = taskTabs.indexOf(tab)
     let nextTabIndex: number | undefined
@@ -117,10 +131,16 @@ export function TaskHeader({
         </div>
 
         <div className="flex flex-none items-center gap-2">
+          <IconButton
+            isBusy={isProjectQuickAccessSaving}
+            isDisabled={!onProjectQuickAccessToggle || isProjectQuickAccessSaving}
+            isPressed={isProjectQuickAccess}
+            label={quickAccessLabel}
+            onClick={onProjectQuickAccessToggle}
+          >
+            <StarIcon isFilled={isProjectQuickAccess} />
+          </IconButton>
           <span className="contents max-[860px]:hidden">
-            <IconButton label={t('tasks.action.favorite')}>
-              <StarIcon />
-            </IconButton>
             <IconButton label={t('tasks.action.more')}>
               <MoreIcon />
             </IconButton>
@@ -279,23 +299,47 @@ function SummaryCard({ summary, t }: SummaryCardProps) {
 type IconButtonProps = {
   /** Icon rendered inside the button. */
   children: ReactNode
+  /** Whether the action is waiting for a persisted result. */
+  isBusy?: boolean
+  /** Whether the action is currently unavailable. */
+  isDisabled?: boolean
+  /** Pressed state used by toggle buttons. */
+  isPressed?: boolean
   /** Accessible button label. */
   label: string
+  /** Runs the action represented by the icon. */
+  onClick?: () => void
   /** Whether to use a circular shape. */
   rounded?: boolean
 }
 
 /** Renders a compact header icon button. */
-function IconButton({ children, label, rounded = false }: IconButtonProps) {
+function IconButton({
+  children,
+  isBusy = false,
+  isDisabled = false,
+  isPressed,
+  label,
+  onClick,
+  rounded = false,
+}: IconButtonProps) {
   return (
     <button
+      aria-busy={isBusy || undefined}
       aria-label={label}
-      className={`grid h-9 w-9 place-items-center text-[#505967] transition hover:bg-[#f3f4f6] hover:text-[#1c1d1f] focus:outline-none focus:ring-4 focus:ring-[#2563eb]/10 ${
+      aria-pressed={isPressed}
+      className={`grid h-9 w-9 place-items-center transition focus:outline-none focus:ring-4 focus:ring-[#2563eb]/10 disabled:cursor-not-allowed disabled:opacity-50 ${
+        isPressed
+          ? 'bg-amber-50 text-amber-600 hover:bg-amber-100 hover:text-amber-700'
+          : 'text-[#505967] hover:bg-[#f3f4f6] hover:text-[#1c1d1f]'
+      } ${
         rounded ? 'rounded-full' : 'rounded-md'
       }`}
+      disabled={isDisabled}
+      onClick={onClick}
       type="button"
     >
-      {children}
+      <span className={isBusy ? 'animate-pulse' : undefined}>{children}</span>
     </button>
   )
 }
@@ -356,9 +400,28 @@ function IconShell({ children, className = '' }: IconShellProps) {
   )
 }
 
-/** Renders the favorite action icon. */
-function StarIcon() {
-  return <IconShell><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.2 6.4 20.2 7.5 14 3 9.6l6.2-.9L12 3Z" /></IconShell>
+/** Props accepted by the project quick-access star icon. */
+type StarIconProps = {
+  /** Whether the star uses a filled treatment. */
+  isFilled: boolean
+}
+
+/** Renders the outline or filled Project quick-access star. */
+function StarIcon({ isFilled }: StarIconProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-5 w-5"
+      fill={isFilled ? 'currentColor' : 'none'}
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="2"
+      viewBox="0 0 24 24"
+    >
+      <path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.2 6.4 20.2 7.5 14 3 9.6l6.2-.9L12 3Z" />
+    </svg>
+  )
 }
 
 /** Renders the more-actions icon. */

@@ -579,6 +579,37 @@ test('applies a directory-mapped custom role to only its assigned Project APIs',
   const directoryResponse = await app.request('/api/teams/projects', {
     headers: { Authorization: authorization },
   })
+  const quickAccessResponse = await app.request('/api/projects/quick-access', {
+    headers: { Authorization: authorization },
+  })
+  const deniedQuickAccessReplaceResponse = await app.request(
+    '/api/projects/quick-access',
+    {
+      method: 'PUT',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        items: [{ projectId: 'private-project', teamId: 'core-team' }],
+        revision: 0,
+      }),
+    },
+  )
+  const quickAccessReplaceResponse = await app.request(
+    '/api/projects/quick-access',
+    {
+      method: 'PUT',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        items: [{ projectId: 'refero', teamId: 'core-team' }],
+        revision: 0,
+      }),
+    },
+  )
   const projectCreateResponse = await app.request('/api/teams/core-team/projects', {
     method: 'POST',
     headers: {
@@ -820,6 +851,14 @@ test('applies a directory-mapped custom role to only its assigned Project APIs',
       expanded: true,
       projects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
     }],
+  })
+  expect(quickAccessResponse.status).toBe(200)
+  expect(await quickAccessResponse.json()).toEqual({ items: [], revision: 0 })
+  expect(deniedQuickAccessReplaceResponse.status).toBe(403)
+  expect(quickAccessReplaceResponse.status).toBe(200)
+  expect(await quickAccessReplaceResponse.json()).toEqual({
+    items: [{ projectId: 'refero', teamId: 'core-team' }],
+    revision: 1,
   })
   expect(analyticsEvidenceResponse.status).toBe(200)
   expect(await analyticsEvidenceResponse.json()).toMatchObject({
@@ -1755,6 +1794,34 @@ test('enforces service-account Project scope before recording successful use', a
         kind: 'api',
         route: '/api/projects/refero/tasks',
       },
+    })
+    const quickAccessResponse = await app.request(
+      '/api/projects/quick-access',
+      { headers },
+    )
+    const quickAccessReplaceResponse = await app.request(
+      '/api/projects/quick-access',
+      {
+        method: 'PUT',
+        headers: {
+          ...headers,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          items: [{ projectId: 'refero', teamId: 'core-team' }],
+          revision: 0,
+        }),
+      },
+    )
+    expect(quickAccessResponse.status).toBe(200)
+    expect(await quickAccessResponse.json()).toEqual({
+      items: [],
+      revision: 0,
+    })
+    expect(quickAccessReplaceResponse.status).toBe(200)
+    expect(await quickAccessReplaceResponse.json()).toEqual({
+      items: [{ projectId: 'refero', teamId: 'core-team' }],
+      revision: 1,
     })
   })
 })

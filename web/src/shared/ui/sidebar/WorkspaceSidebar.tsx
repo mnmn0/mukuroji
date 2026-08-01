@@ -100,5 +100,17 @@ function createMobileSidebarProps(
       ? wrapSelection(sidebarProps.onSelectTeam)
       : undefined,
     onSelectProject: wrapSelection(sidebarProps.onSelectProject),
+    onShowAllQuickAccess: sidebarProps.onShowAllQuickAccess
+      ? () => {
+          onMobileSelect?.()
+          sidebarProps.onShowAllQuickAccess?.()
+        }
+      : undefined,
+    onShowAllProjects: sidebarProps.onShowAllProjects
+      ? () => {
+          onMobileSelect?.()
+          sidebarProps.onShowAllProjects?.()
+        }
+      : undefined,
   }
 }

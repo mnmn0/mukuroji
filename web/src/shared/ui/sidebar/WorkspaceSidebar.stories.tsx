@@ -2,7 +2,7 @@ import { useState } from 'react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, within } from 'storybook/test'
 import { createSidebarLabels } from '../../i18n/i18n'
-import type { SidebarTeam } from './Sidebar'
+import type { SidebarQuickAccessProject, SidebarTeam } from './Sidebar'
 import { WorkspaceSidebar, type WorkspaceSidebarProps } from './WorkspaceSidebar'
 
 const teams: SidebarTeam[] = [
@@ -22,6 +22,16 @@ const teams: SidebarTeam[] = [
   },
 ]
 
+const quickAccessProjects: SidebarQuickAccessProject[] = [
+  {
+    name: 'Refero',
+    projectId: 'refero',
+    teamId: 'johns-first-team',
+    teamName: "John's First Team",
+    tone: 'blue',
+  },
+]
+
 const meta = {
   title: 'Application/Navigation/WorkspaceSidebar',
   component: WorkspaceSidebar,
@@ -30,6 +40,7 @@ const meta = {
   },
   args: {
     teams,
+    quickAccessProjects,
     labels: createSidebarLabels('ja'),
     defaultActiveTeamId: 'johns-first-team',
     defaultActiveProjectId: 'refero',
@@ -42,6 +53,7 @@ const meta = {
     onSelectNav: () => undefined,
     onSelectProject: () => undefined,
     onSelectTeamView: () => undefined,
+    onShowAllQuickAccess: () => undefined,
   },
   render: (args) => <WorkspaceSidebarStory {...args} />,
   decorators: [
@@ -78,9 +90,9 @@ export const MobileOpen: Story = {
     const dialogCanvas = within(dialog)
     const teamButton = dialogCanvas.getByRole('button', { name: "John's First Team" })
 
-    await expect(teamButton).toHaveAttribute('aria-expanded', 'true')
-    await userEvent.click(teamButton)
     await expect(teamButton).toHaveAttribute('aria-expanded', 'false')
+    await userEvent.click(teamButton)
+    await expect(teamButton).toHaveAttribute('aria-expanded', 'true')
     await expect(canvas.getByRole('dialog', { name: 'モバイルサイドバー' })).toBeInTheDocument()
 
     await userEvent.click(dialogCanvas.getByRole('button', { name: 'サイドバーを閉じる' }))

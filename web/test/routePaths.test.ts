@@ -9,6 +9,7 @@ import { HomePage } from '../src/pages/workspace/HomePage'
 import { InboxPage } from '../src/pages/workspace/InboxPage'
 import { MyTasksPage } from '../src/pages/workspace/MyTasksPage'
 import { PlanningPage } from '../src/pages/workspace/PlanningPage'
+import { ProjectsPage } from '../src/pages/workspace/ProjectsPage'
 import { ReportsPage } from '../src/pages/workspace/ReportsPage'
 import { SettingsPage } from '../src/pages/workspace/SettingsPage'
 import { TaskPage } from '../src/pages/workspace/TaskPage'
@@ -20,6 +21,7 @@ import { RequestIntakePage } from '../src/requests/RequestIntakePage'
 import { SearchPage } from '../src/search/SearchPage'
 import {
   createPlanningPath,
+  createProjectsPath,
   createPublicRequestPath,
   createProjectIssuesPath,
   createRequestsPath,
@@ -136,6 +138,22 @@ describe('Planning paths', () => {
     }
 
     expect(matchRoutes(appRoutes, '/planning/invalid')?.at(-1)?.route.path).toBe('*')
+  })
+})
+
+describe('Project directory paths', () => {
+  test('creates global and Team-scoped discovery URLs', () => {
+    expect(createProjectsPath()).toBe('/projects')
+    expect(createProjectsPath('design/team')).toBe('/teams/design%2Fteam/projects')
+  })
+
+  test('registers both discovery routes inside the shared Workspace shell', () => {
+    expectSharedWorkspaceShell([
+      { component: ProjectsPage, path: '/projects' },
+    ])
+    expectSharedWorkspaceShell([
+      { component: ProjectsPage, path: '/teams/core-team/projects' },
+    ])
   })
 })
 

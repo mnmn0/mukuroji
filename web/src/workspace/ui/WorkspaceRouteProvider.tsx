@@ -1,4 +1,9 @@
 import {
+  PROJECT_QUICK_ACCESS_MAX_ITEMS,
+  type ProjectQuickAccessItem,
+  type ProjectQuickAccessPreferences,
+} from '@mukuroji/contracts'
+import {
   useCallback,
   useMemo,
   useRef,
@@ -34,11 +39,23 @@ import {
   archiveProjectDirectoryTeam,
   createProjectDirectoryProject,
   createProjectDirectoryTeam,
+  ProjectDirectoryApiError,
   type CreateProjectDirectoryProjectInput,
   type CreateProjectDirectoryTeamInput,
   type ProjectDirectoryTeam,
+  replaceProjectQuickAccess,
 } from '../../projects/api'
+import {
+  canUndoProjectQuickAccess,
+  isProjectInQuickAccess,
+  moveProjectQuickAccessItem,
+  resolveProjectQuickAccessItems,
+  toggleProjectQuickAccess,
+  type ProjectQuickAccessFeedback,
+  type ResolvedProjectQuickAccessItem,
+} from '../../projects/model/projectQuickAccess'
 import { useProjectDirectory } from '../../projects/queries/useProjectDirectory'
+import { useProjectQuickAccess } from '../../projects/queries/useProjectQuickAccess'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import {
   createTranslator,
@@ -83,6 +100,16 @@ export type WorkspaceRouteContextValue = {
   userInitial: string
   /** The team and project directory displayed by the shared sidebar. */
   teams: ProjectDirectoryTeam[]
+  /** Stored Team/Project references in the viewer's stable quick-access order. */
+  quickAccessItems: ProjectQuickAccessItem[]
+  /** Quick-access references resolved against the current readable directory. */
+  quickAccessProjects: ResolvedProjectQuickAccessItem[]
+  /** Whether a quick-access replacement is currently being saved. */
+  isQuickAccessSaving: boolean
+  /** Whether quick access could not be loaded and mutations are unavailable. */
+  hasQuickAccessLoadError: boolean
+  /** Latest quick-access mutation feedback shown by the shared shell. */
+  quickAccessFeedback?: ProjectQuickAccessFeedback
   /** The current user's unread notification count. */
   inboxCount: number
   /** Whether the current user may create or archive workspace structure. */
@@ -107,6 +134,8 @@ export type WorkspaceRouteContextValue = {
   onSessionErrorAction: (action: EnterpriseSessionErrorAction) => void
   /** Retries the common query that produced the shared error boundary. */
   onRetryCommonData: () => Promise<void>
+  /** Retries the non-blocking quick-access query after a load failure. */
+  onRetryProjectQuickAccess: () => Promise<void>
   /** Persists and applies a new font-size preference. */
   onFontSizePreferenceChange: (preference: FontSizePreference) => void
   /** Persists and applies a new workspace locale. */
@@ -119,6 +148,27 @@ export type WorkspaceRouteContextValue = {
   onSelectTeamView: (teamId: string, viewId: SidebarTeamViewId) => void
   /** Navigates to a project's issue route within its owning team. */
   onSelectProject: (projectId: string, teamId: string) => void
+  /** Tests whether a Project is currently starred. */
+  isProjectQuickAccess: (projectId: string) => boolean
+  /** Adds or removes one Team-owned Project from quick access. */
+  onToggleProjectQuickAccess: (
+    item: ProjectQuickAccessItem,
+    projectName: string,
+  ) => Promise<void>
+  /** Moves one starred Project by one stable-order position. */
+  onMoveProjectQuickAccess: (
+    projectId: string,
+    direction: 'up' | 'down',
+  ) => Promise<void>
+  /** Removes one Project from quick access and exposes Undo feedback. */
+  onRemoveProjectQuickAccess: (
+    item: ProjectQuickAccessItem,
+    projectName: string,
+  ) => Promise<void>
+  /** Restores the quick-access order captured by the latest feedback. */
+  onUndoProjectQuickAccess: () => Promise<void>
+  /** Dismisses the current quick-access feedback surface. */
+  onDismissProjectQuickAccessFeedback: () => void
   /** Navigates to the issue route represented by a workspace task. */
   onOpenTask: (task: ProjectTask) => void
   /** Navigates to the supported workspace destination represented by a notification. */
@@ -138,6 +188,10 @@ export type WorkspaceRouteContextValue = {
 
 const emptyProjectDirectory: ProjectDirectoryTeam[] = []
 const emptySessionErrors: readonly unknown[] = []
+const emptyProjectQuickAccess: ProjectQuickAccessPreferences = {
+  items: [],
+  revision: 0,
+}
 
 /**
  * Provides authentication, common workspace data, and shared actions to pathless child routes.
@@ -157,6 +211,10 @@ export function WorkspaceRouteProvider() {
     useState<AuthenticatedApiErrorReports>({
       guardedSessionErrors: [],
     })
+  const [isQuickAccessSaving, setIsQuickAccessSaving] = useState(false)
+  const quickAccessSaveInFlightRef = useRef(false)
+  const [quickAccessFeedback, setQuickAccessFeedback] =
+    useState<ProjectQuickAccessFeedback>()
   const t = useMemo(() => createTranslator(locale), [locale])
   const accessToken = session?.accessToken
   const {
@@ -174,6 +232,15 @@ export function WorkspaceRouteProvider() {
     accessToken,
     enabled: Boolean(user && !currentUserError),
     locale,
+  })
+  const {
+    data: quickAccessPreference = emptyProjectQuickAccess,
+    error: quickAccessError,
+    isLoading: isQuickAccessLoading,
+    mutate: mutateProjectQuickAccess,
+  } = useProjectQuickAccess({
+    accessToken,
+    enabled: Boolean(user && !currentUserError),
   })
   const {
     data: inboxCount = 0,
@@ -196,6 +263,11 @@ export function WorkspaceRouteProvider() {
   const canLoadWorkspaceData = Boolean(user && !currentUserError)
   const canManageWorkspaceConfiguration = canManageWorkspaceStructure(user)
   const canMutateTeamConfiguration = canMutateWorkspaceContent(user)
+  const hasQuickAccessLoadError = Boolean(quickAccessError)
+  const quickAccessProjects = useMemo(
+    () => resolveProjectQuickAccessItems(quickAccessPreference.items, teams),
+    [quickAccessPreference.items, teams],
+  )
   const currentPath = `${location.pathname}${location.search}${location.hash}`
 
   /** Records a notification-preference result without clearing guarded mutation failures. */
@@ -239,6 +311,7 @@ export function WorkspaceRouteProvider() {
     [
       projectDirectoryError,
       notificationUnreadCountError,
+      quickAccessError,
       ...listAuthenticatedApiErrors(authenticatedApiErrorReports),
       ...routeSessionErrors,
     ],
@@ -249,6 +322,7 @@ export function WorkspaceRouteProvider() {
     currentUserError,
     notificationUnreadCountError,
     projectDirectoryError,
+    quickAccessError,
   ])
 
   const commonSessionErrorAction = resolveSessionErrors()
@@ -263,7 +337,7 @@ export function WorkspaceRouteProvider() {
     Boolean(
       currentUserError && commonSessionErrorAction?.kind !== 'stay',
     ) ||
-    Boolean(user && isProjectDirectoryLoading)
+    Boolean(user && (isProjectDirectoryLoading || isQuickAccessLoading))
 
   /** Clears the current session and replaces browser history with the public entry route. */
   const handleLogout = useCallback(() => {
@@ -293,13 +367,25 @@ export function WorkspaceRouteProvider() {
 
     if (projectDirectoryError) {
       await mutateProjectDirectory()
+      return
+    }
+
+    if (quickAccessError) {
+      await mutateProjectQuickAccess()
     }
   }, [
     currentUserError,
     mutateCurrentUser,
     mutateProjectDirectory,
+    mutateProjectQuickAccess,
     projectDirectoryError,
+    quickAccessError,
   ])
+
+  /** Retries the viewer's quick-access preference without blocking other workspace data. */
+  const handleRetryProjectQuickAccess = useCallback(async () => {
+    await mutateProjectQuickAccess()
+  }, [mutateProjectQuickAccess])
 
   /** Saves a font preference and updates provider state for the active route. */
   const handleFontSizePreferenceChange = useCallback((preference: FontSizePreference) => {
@@ -311,6 +397,138 @@ export function WorkspaceRouteProvider() {
   const handleLocaleChange = useCallback((nextLocale: Locale) => {
     setLocale(nextLocale)
     setLocalePreference(nextLocale)
+  }, [])
+
+  /** Replaces the complete quick-access order with optimistic rollback semantics. */
+  const persistProjectQuickAccess = useCallback(async (
+    nextItems: ProjectQuickAccessItem[],
+    feedback?: ProjectQuickAccessFeedback,
+  ) => {
+    if (!accessToken || quickAccessError || quickAccessSaveInFlightRef.current) {
+      return false
+    }
+
+    const previous = quickAccessPreference
+    if (projectQuickAccessItemsEqual(previous.items, nextItems)) {
+      return true
+    }
+
+    quickAccessSaveInFlightRef.current = true
+    setIsQuickAccessSaving(true)
+    setQuickAccessFeedback(undefined)
+    await mutateProjectQuickAccess(
+      { items: nextItems, revision: previous.revision },
+      { revalidate: false },
+    )
+
+    try {
+      const input = { items: nextItems, revision: previous.revision }
+      const committed = await guardEnterpriseSession(mutationRequestRunner.run(
+        `project-quick-access:${previous.revision}`,
+        JSON.stringify(input),
+        (context) => replaceProjectQuickAccess(accessToken, input, context),
+      ))
+      await mutateProjectQuickAccess(committed, { revalidate: false })
+      if (feedback) {
+        setQuickAccessFeedback({
+          ...feedback,
+          undoItems: previous.items.map((item) => ({ ...item })),
+          undoRevision: committed.revision,
+        })
+      }
+      return true
+    } catch (error) {
+      await mutateProjectQuickAccess(previous, { revalidate: false })
+      if (
+        error instanceof ProjectDirectoryApiError &&
+        (error.status === 409 || error.code === 'ProjectQuickAccessConflict')
+      ) {
+        await mutateProjectQuickAccess()
+      }
+      setQuickAccessFeedback({ kind: 'error' })
+      return false
+    } finally {
+      quickAccessSaveInFlightRef.current = false
+      setIsQuickAccessSaving(false)
+    }
+  }, [
+    accessToken,
+    guardEnterpriseSession,
+    mutateProjectQuickAccess,
+    mutationRequestRunner,
+    quickAccessPreference,
+    quickAccessError,
+  ])
+
+  /** Adds or removes one Project from quick access. */
+  const handleToggleProjectQuickAccess = useCallback(async (
+    item: ProjectQuickAccessItem,
+    projectName: string,
+  ) => {
+    const result = toggleProjectQuickAccess(quickAccessPreference.items, item)
+    if (result.added && result.items.length > PROJECT_QUICK_ACCESS_MAX_ITEMS) {
+      setQuickAccessFeedback({ kind: 'error' })
+      return
+    }
+    await persistProjectQuickAccess(result.items, {
+      kind: result.added ? 'added' : 'removed',
+      projectName,
+    })
+  }, [persistProjectQuickAccess, quickAccessPreference.items])
+
+  /** Removes one starred Project while preserving successful Undo feedback. */
+  const handleRemoveProjectQuickAccess = useCallback(async (
+    item: ProjectQuickAccessItem,
+    projectName: string,
+  ) => {
+    if (!isProjectInQuickAccess(quickAccessPreference.items, item.projectId)) {
+      return
+    }
+    const result = toggleProjectQuickAccess(quickAccessPreference.items, item)
+    await persistProjectQuickAccess(result.items, {
+      focusUndo: true,
+      kind: 'removed',
+      projectName,
+    })
+  }, [persistProjectQuickAccess, quickAccessPreference.items])
+
+  /** Moves one Project by a single position in the saved stable order. */
+  const handleMoveProjectQuickAccess = useCallback(async (
+    projectId: string,
+    direction: 'up' | 'down',
+  ) => {
+    await persistProjectQuickAccess(moveProjectQuickAccessItem(
+      quickAccessPreference.items,
+      projectId,
+      direction,
+    ))
+  }, [persistProjectQuickAccess, quickAccessPreference.items])
+
+  /** Restores the quick-access order captured by the latest add/remove feedback. */
+  const handleUndoProjectQuickAccess = useCallback(async () => {
+    const undoItems = quickAccessFeedback?.undoItems
+    if (
+      !canUndoProjectQuickAccess(
+        quickAccessFeedback,
+        quickAccessPreference.revision,
+      ) || !undoItems
+    ) {
+      setQuickAccessFeedback({ kind: 'error' })
+      return
+    }
+    if (await persistProjectQuickAccess(undoItems)) {
+      setQuickAccessFeedback(undefined)
+    }
+  }, [persistProjectQuickAccess, quickAccessFeedback, quickAccessPreference.revision])
+
+  /** Returns whether a Project is currently present in quick access. */
+  const handleIsProjectQuickAccess = useCallback((projectId: string) =>
+    isProjectInQuickAccess(quickAccessPreference.items, projectId),
+  [quickAccessPreference.items])
+
+  /** Dismisses the shell-level quick-access feedback. */
+  const handleDismissProjectQuickAccessFeedback = useCallback(() => {
+    setQuickAccessFeedback(undefined)
   }, [])
 
   /** Creates a team and refreshes the shared project directory cache. */
@@ -372,7 +590,10 @@ export function WorkspaceRouteProvider() {
       teamId,
       (context) => archiveProjectDirectoryTeam(accessToken, teamId, context),
     ))
-    await mutateProjectDirectory()
+    await Promise.all([
+      mutateProjectDirectory(),
+      mutateProjectQuickAccess(),
+    ])
 
     if (activeTeamMatch?.params.teamId === teamId) {
       navigate(workspaceNavPaths.home)
@@ -382,6 +603,7 @@ export function WorkspaceRouteProvider() {
     activeTeamMatch?.params.teamId,
     guardEnterpriseSession,
     mutateProjectDirectory,
+    mutateProjectQuickAccess,
     mutationRequestRunner,
     navigate,
   ])
@@ -405,11 +627,15 @@ export function WorkspaceRouteProvider() {
         context,
       ),
     ))
-    await mutateProjectDirectory()
+    await Promise.all([
+      mutateProjectDirectory(),
+      mutateProjectQuickAccess(),
+    ])
   }, [
     accessToken,
     guardEnterpriseSession,
     mutateProjectDirectory,
+    mutateProjectQuickAccess,
     mutationRequestRunner,
   ])
 
@@ -462,7 +688,10 @@ export function WorkspaceRouteProvider() {
     fontSizePreference,
     guardEnterpriseSession,
     inboxCount,
+    hasQuickAccessLoadError,
+    isProjectQuickAccess: handleIsProjectQuickAccess,
     isLoading,
+    isQuickAccessSaving,
     locale,
     onArchiveProject: canManageWorkspaceConfiguration
       ? handleArchiveProject
@@ -476,16 +705,25 @@ export function WorkspaceRouteProvider() {
     onCreateTeam: canManageWorkspaceConfiguration
       ? handleCreateTeam
       : undefined,
+    onDismissProjectQuickAccessFeedback: handleDismissProjectQuickAccessFeedback,
     onFontSizePreferenceChange: handleFontSizePreferenceChange,
     onLocaleChange: handleLocaleChange,
     onLogout: handleLogout,
     onOpenNotification: handleOpenNotification,
     onOpenTask: handleOpenTask,
+    onMoveProjectQuickAccess: handleMoveProjectQuickAccess,
+    onRemoveProjectQuickAccess: handleRemoveProjectQuickAccess,
     onRetryCommonData: handleRetryCommonData,
+    onRetryProjectQuickAccess: handleRetryProjectQuickAccess,
     onSelectNav: handleSelectNav,
     onSelectProject: handleSelectProject,
     onSelectTeamView: handleSelectTeamView,
     onSessionErrorAction: handleSessionErrorAction,
+    onToggleProjectQuickAccess: handleToggleProjectQuickAccess,
+    onUndoProjectQuickAccess: handleUndoProjectQuickAccess,
+    quickAccessFeedback,
+    quickAccessItems: quickAccessPreference.items,
+    quickAccessProjects,
     reportNotificationPreferencesError,
     resolveSessionErrors,
     teams,
@@ -504,19 +742,31 @@ export function WorkspaceRouteProvider() {
     handleArchiveTeam,
     handleCreateProject,
     handleCreateTeam,
+    handleDismissProjectQuickAccessFeedback,
     handleFontSizePreferenceChange,
+    handleIsProjectQuickAccess,
     handleLocaleChange,
     handleLogout,
     handleOpenNotification,
     handleOpenTask,
+    handleMoveProjectQuickAccess,
+    handleRemoveProjectQuickAccess,
     handleRetryCommonData,
+    handleRetryProjectQuickAccess,
     handleSelectNav,
     handleSelectProject,
     handleSelectTeamView,
     handleSessionErrorAction,
+    handleToggleProjectQuickAccess,
+    handleUndoProjectQuickAccess,
     inboxCount,
+    hasQuickAccessLoadError,
     isLoading,
+    isQuickAccessSaving,
     locale,
+    quickAccessFeedback,
+    quickAccessPreference.items,
+    quickAccessProjects,
     reportNotificationPreferencesError,
     resolveSessionErrors,
     teams,
@@ -557,4 +807,21 @@ export function useWorkspaceRouteContext() {
  */
 function isNonEmptyString(value: string | undefined): value is string {
   return typeof value === 'string' && value.length > 0
+}
+
+/**
+ * Compares ordered quick-access references without depending on object identity.
+ *
+ * @param first - First ordered preference.
+ * @param second - Second ordered preference.
+ * @returns Whether the same Project references appear in the same order.
+ */
+function projectQuickAccessItemsEqual(
+  first: readonly ProjectQuickAccessItem[],
+  second: readonly ProjectQuickAccessItem[],
+) {
+  return first.length === second.length && first.every((item, index) => {
+    const candidate = second[index]
+    return candidate?.projectId === item.projectId && candidate.teamId === item.teamId
+  })
 }

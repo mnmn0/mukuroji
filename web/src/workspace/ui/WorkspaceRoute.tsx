@@ -5,9 +5,10 @@ import {
   useState,
   type ReactNode,
 } from 'react'
-import { matchPath, Outlet, useLocation } from 'react-router'
+import { matchPath, Outlet, useLocation, useNavigate } from 'react-router'
 import { useWorkspaceCommandMenu } from '../../commands/ui/WorkspaceCommandMenuContext'
 import type { ProjectDirectoryTeam } from '../../projects/api'
+import { createProjectsPath } from '../../shared/routing/paths'
 import {
   createSidebarLabels,
   createTranslator,
@@ -110,6 +111,16 @@ const teamMembersRouteMetadata: WorkspaceRouteMetadata = {
   eyebrowKey: 'workspace.teamMembers.eyebrow',
   titleKey: 'workspace.teamMembers.title',
   descriptionKey: 'workspace.teamMembers.description',
+}
+const projectsRouteMetadata: WorkspaceRouteMetadata = {
+  customHeader: true,
+  eyebrowKey: 'projects.directory.eyebrow',
+  titleKey: 'projects.directory.title',
+  descriptionKey: 'projects.directory.description',
+}
+const teamProjectsRouteMetadata: WorkspaceRouteMetadata = {
+  ...projectsRouteMetadata,
+  activeTeamViewId: 'projects',
 }
 const requestRouteMetadata: WorkspaceRouteMetadata = {
   activeNavId: 'requests',
@@ -230,6 +241,7 @@ function WorkspaceRouteShell({
 }: WorkspaceRouteShellProps) {
   const workspace = useWorkspaceRouteContext()
   const location = useLocation()
+  const navigate = useNavigate()
   const commandMenu = useWorkspaceCommandMenu()
   const routeState = useWorkspaceSidebarRouteState()
   const t = useMemo(
@@ -320,6 +332,19 @@ function WorkspaceRouteShell({
     !isCommonSessionRedirecting
     ? t(workspace.commonErrorKey)
     : undefined
+  const quickAccessFeedbackMessage = workspace.quickAccessFeedback?.kind === 'error'
+    ? t('projects.quickAccess.feedback.error')
+    : workspace.quickAccessFeedback?.kind === 'added'
+      ? t('projects.quickAccess.feedback.added').replace(
+          '{name}',
+          workspace.quickAccessFeedback.projectName ?? '',
+        )
+      : workspace.quickAccessFeedback?.kind === 'removed'
+        ? t('projects.quickAccess.feedback.removed').replace(
+            '{name}',
+            workspace.quickAccessFeedback.projectName ?? '',
+          )
+        : undefined
 
   useEffect(() => {
     document.documentElement.lang = workspace.locale
@@ -352,6 +377,7 @@ function WorkspaceRouteShell({
   return (
       <main className="workbench-shell flex h-svh min-h-0 overflow-hidden">
         <WorkspaceSidebar
+          autoSelectInitialProject={false}
           activeNavId={metadata?.activeNavId}
           activeTeamId={metadata?.activeTeamViewId ? activeTeam?.id : undefined}
           activeTeamViewId={metadata?.activeTeamViewId}
@@ -361,6 +387,8 @@ function WorkspaceRouteShell({
             : undefined}
           closeMobileOnSelect={metadata?.closeMobileOnSelect}
           inboxCount={workspace.inboxCount}
+          isAllProjectsActive={location.pathname === createProjectsPath()}
+          isQuickAccessSaving={workspace.isQuickAccessSaving}
           isMobileOpen={isMobileSidebarOpen}
           labels={sidebarLabels}
           mobileCloseLabel={t('sidebar.mobileClose')}
@@ -374,9 +402,22 @@ function WorkspaceRouteShell({
             closeMobileSidebar()
             commandMenu.open?.()
           }}
+          onMoveQuickAccessProject={workspace.hasQuickAccessLoadError
+            ? undefined
+            : workspace.onMoveProjectQuickAccess}
+          onRemoveQuickAccessProject={workspace.hasQuickAccessLoadError
+            ? undefined
+            : (projectId, teamId, projectName) =>
+                workspace.onRemoveProjectQuickAccess(
+                  { projectId, teamId },
+                  projectName,
+                )}
           onSelectNav={workspace.onSelectNav}
           onSelectProject={workspace.onSelectProject}
           onSelectTeamView={workspace.onSelectTeamView}
+          onShowAllQuickAccess={() => navigate(`${createProjectsPath()}?quickAccess=1`)}
+          onShowAllProjects={() => navigate(createProjectsPath())}
+          quickAccessProjects={workspace.quickAccessProjects}
           teams={workspace.teams}
         />
 
@@ -429,6 +470,23 @@ function WorkspaceRouteShell({
             </header>
           ) : null}
 
+        {workspace.hasQuickAccessLoadError && !isCommonSessionRedirecting ? (
+          <div
+            className="mx-[clamp(20px,3vw,34px)] mt-4 flex flex-none flex-wrap items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-900"
+            data-testid="quick-access-load-error"
+            role="alert"
+          >
+            <p className="min-w-0 flex-1">{t('projects.quickAccess.loadError')}</p>
+            <button
+              className="workbench-button-secondary min-h-10 px-4"
+              onClick={() => void workspace.onRetryProjectQuickAccess()}
+              type="button"
+            >
+              {t('projects.quickAccess.retry')}
+            </button>
+          </div>
+        ) : null}
+
         {commonErrorMessage ? (
           <div className="min-h-0 flex-1 overflow-auto overscroll-contain px-[clamp(20px,3vw,34px)] py-7">
             <div
@@ -457,6 +515,34 @@ function WorkspaceRouteShell({
           </div>
         )}
         </section>
+        {quickAccessFeedbackMessage ? (
+          <div
+            aria-live="polite"
+            className="fixed bottom-5 right-5 z-[90] flex max-w-[min(420px,calc(100vw-40px))] items-center gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-[var(--workbench-text)] shadow-[0_18px_50px_rgba(15,23,42,0.22)]"
+            role={workspace.quickAccessFeedback?.kind === 'error' ? 'alert' : 'status'}
+          >
+            <span className="min-w-0 flex-1">{quickAccessFeedbackMessage}</span>
+            {workspace.quickAccessFeedback?.undoItems ? (
+              <button
+                autoFocus={workspace.quickAccessFeedback.focusUndo}
+                className="min-h-8 flex-none rounded-lg px-2 text-[var(--workbench-primary)] transition hover:bg-teal-50 disabled:opacity-50"
+                disabled={workspace.isQuickAccessSaving}
+                onClick={() => void workspace.onUndoProjectQuickAccess()}
+                type="button"
+              >
+                {t('projects.quickAccess.feedback.undo')}
+              </button>
+            ) : null}
+            <button
+              aria-label={t('projects.quickAccess.feedback.dismiss')}
+              className="grid h-8 w-8 flex-none place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-800"
+              onClick={workspace.onDismissProjectQuickAccessFeedback}
+              type="button"
+            >
+              ×
+            </button>
+          </div>
+        ) : null}
       </main>
   )
 }
@@ -581,6 +667,19 @@ function resolveWorkspaceRouteMetadata(
 
   if (matchPath('/reports', pathname)) {
     return reportsRouteMetadata
+  }
+
+  if (matchPath('/projects', pathname)) {
+    return projectsRouteMetadata
+  }
+
+  const teamProjectsMatch = matchPath('/teams/:teamId/projects', pathname)
+
+  if (teamProjectsMatch?.params.teamId) {
+    return {
+      ...teamProjectsRouteMetadata,
+      activeTeamId: decodeWorkspaceRouteParameter(teamProjectsMatch.params.teamId),
+    }
   }
 
   const teamIssuesMatch = matchPath('/teams/:teamId/issues', pathname)

@@ -168,6 +168,18 @@ export function createProjectSearchPath(projectId: string) {
 }
 
 /**
+ * Creates the global or Team-scoped searchable Project directory path.
+ *
+ * @param teamId - Optional Team whose Project directory should open.
+ * @returns A canonical Project directory path.
+ */
+export function createProjectsPath(teamId?: string) {
+  return teamId
+    ? `/teams/${encodeURIComponent(teamId)}/projects`
+    : '/projects'
+}
+
+/**
  * Goal と関連 Documents を開く URL を生成します。
  */
 export function createGoalDocumentsPath(goalId: string) {

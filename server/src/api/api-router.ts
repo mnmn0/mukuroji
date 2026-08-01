@@ -48,6 +48,9 @@ import {
   type PlanningStatusUpdateInput,
   type PlanningWorkItemLinkInput,
   type PlanningWorkItemSummary,
+  PROJECT_QUICK_ACCESS_MAX_ITEMS,
+  type ProjectQuickAccessItem,
+  type ProjectQuickAccessPreferences,
   type ResolvedWorkItemConfiguration,
   type ImportDryRunReport,
   type ImportJob,
@@ -58,6 +61,7 @@ import {
   type UpdateAnalyticsReportInput,
   type UpdateRecurringWorkInput,
   type UpdatePlanningEntityInput,
+  type UpdateProjectQuickAccessPreferencesInput,
   type UpdateSavedWorkspaceViewInput,
   type WorkItemConfiguration,
   type WorkItemRelation,
@@ -1488,6 +1492,11 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/teams/projects',
     permission: 'teams.read',
     alternativePermissions: ['projects.read'],
+  },
+  {
+    method: '*',
+    pathPattern: '/api/projects/quick-access',
+    permission: 'projects.read',
   },
   { method: 'GET', pathPattern: '/api/teams*', permission: 'teams.read' },
   { method: '*', pathPattern: '/api/teams*', permission: 'teams.write' },
@@ -4957,6 +4966,77 @@ routeApp.get('/api/teams/projects', async (c) => {
   }
 })
 
+/** Returns the authenticated viewer's accessible ordered Project shortcuts. */
+routeApp.get('/api/projects/quick-access', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const [preference, authorizedProjectKeys] = await Promise.all([
+      workspaceDependencies.projectDirectory.getProjectQuickAccess(
+        principal.directoryId,
+        principal.userKey,
+        true,
+      ),
+      getAuthorizedProjectQuickAccessKeys(principal),
+    ])
+
+    return c.json({
+      ...preference,
+      items: preference.items.filter((item) =>
+        authorizedProjectKeys.has(createProjectQuickAccessKey(item))
+      ),
+    } satisfies ProjectQuickAccessPreferences)
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toAuthErrorResponse(c, error)
+    }
+
+    return toProjectDataErrorResponse(c, error)
+  }
+})
+
+/** Replaces the authenticated viewer's complete ordered Project shortcuts. */
+routeApp.put('/api/projects/quick-access', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const input = readProjectQuickAccessInput(await readJson<unknown>(c.req))
+    const authorizedProjectKeys = await getAuthorizedProjectQuickAccessKeys(principal)
+
+    if (input.items.some((item) =>
+      !authorizedProjectKeys.has(createProjectQuickAccessKey(item))
+    )) {
+      throw new ProjectDataError(
+        403,
+        'ProjectAccessDenied',
+        'One or more Project quick-access references are unavailable.',
+      )
+    }
+
+    return c.json(await workspaceDependencies.projectDirectory.replaceProjectQuickAccess(
+      principal.directoryId,
+      principal.userKey,
+      input,
+    ))
+  } catch (error) {
+    if (error instanceof CognitoServiceError) {
+      return toAuthErrorResponse(c, error)
+    }
+
+    return toProjectDataErrorResponse(c, error)
+  }
+})
+
 /**
  * DynamoDB にチームを新規作成する endpoint です。
  */
@@ -7847,6 +7927,112 @@ async function readJson<T>(request: { json: () => Promise<T> }) {
   } catch {
     return undefined
   }
+}
+
+/**
+ * Parses and validates a complete quick-access replacement request.
+ *
+ * @param value - Unknown JSON request body.
+ * @returns A normalized versioned replacement input.
+ */
+function readProjectQuickAccessInput(
+  value: unknown,
+): UpdateProjectQuickAccessPreferencesInput {
+  if (!isRecord(value)) {
+    throw createInvalidProjectQuickAccessInputError()
+  }
+
+  const revision = value.revision
+  const candidateItems = value.items
+  if (
+    typeof revision !== 'number' ||
+    !Number.isSafeInteger(revision) ||
+    revision < 0 ||
+    revision >= Number.MAX_SAFE_INTEGER ||
+    !Array.isArray(candidateItems) ||
+    candidateItems.length > PROJECT_QUICK_ACCESS_MAX_ITEMS
+  ) {
+    throw createInvalidProjectQuickAccessInputError()
+  }
+
+  const items: ProjectQuickAccessItem[] = []
+  const projectIds = new Set<string>()
+  for (const candidate of candidateItems) {
+    if (!isRecord(candidate)) {
+      throw createInvalidProjectQuickAccessInputError()
+    }
+    const teamId = candidate.teamId
+    const projectId = candidate.projectId
+    if (
+      typeof teamId !== 'string' ||
+      typeof projectId !== 'string' ||
+      teamId.length === 0 ||
+      projectId.length === 0 ||
+      teamId.trim() !== teamId ||
+      projectId.trim() !== projectId ||
+      teamId.length > 256 ||
+      projectId.length > 256 ||
+      teamId.includes('/') ||
+      projectId.includes('/') ||
+      projectIds.has(projectId)
+    ) {
+      throw createInvalidProjectQuickAccessInputError()
+    }
+    projectIds.add(projectId)
+    items.push({ projectId, teamId })
+  }
+
+  return { items, revision }
+}
+
+/** Creates the safe 400 response error for malformed quick-access input. */
+function createInvalidProjectQuickAccessInputError() {
+  return new ProjectDataError(
+    400,
+    'InvalidProjectQuickAccessInput',
+    'Project quick-access input is invalid.',
+  )
+}
+
+/**
+ * Lists active Team/Project identities visible to the current principal.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @returns Composite keys permitted in the viewer preference.
+ */
+async function getAuthorizedProjectQuickAccessKeys(
+  principal: ProjectPrincipal,
+) {
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
+    principal.directoryId,
+    'ja',
+    true,
+  )
+  const readableProjectIds = principal.isSystemAdmin
+    ? undefined
+    : new Set(
+        (await getEffectiveProjectAccessList(principal))
+          .filter((access) => projectAccessAllows(access, 'viewer'))
+          .map((access) => access.projectId),
+      )
+
+  return new Set(directory.teams.flatMap((team) =>
+    team.projects.flatMap((project) =>
+      readableProjectIds === undefined || readableProjectIds.has(project.id)
+        ? [createProjectQuickAccessKey({ projectId: project.id, teamId: team.id })]
+        : [],
+    )
+  ))
+}
+
+/**
+ * Creates a collision-safe identity for a Team-owned Project reference.
+ *
+ * @param item - Team and Project reference.
+ * @returns Composite identity used only within the current request.
+ */
+function createProjectQuickAccessKey(item: ProjectQuickAccessItem) {
+  return `${item.teamId}\0${item.projectId}`
 }
 
 /** Analytics route の JSON object body を検証します。 */
@@ -12411,6 +12597,9 @@ async function resolveEnterpriseAuthorizationResource(
       return { workspaceId, kind: 'team', targetId: cycle.teamId }
     }
   }
+  if (path === '/api/projects/quick-access') {
+    return { workspaceId, kind: 'workspace' as const }
+  }
   const projectId = path?.match(/\/projects\/([^/]+)/u)?.[1]
   if (projectId) {
     const decodedProjectId = decodeURIComponent(projectId)
@@ -16419,6 +16608,10 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ code: error.code, message: error.message }, 400)
   }
 
+  if (error.code === 'InvalidProjectQuickAccessInput') {
+    return c.json({ code: error.code, message: error.message }, 400)
+  }
+
   if (error.code === 'InvalidWorkItemArchiveUpdate') {
     return c.json({ code: error.code, message: error.message }, 400)
   }
@@ -16475,6 +16668,10 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ code: error.code, message: error.message }, 409)
   }
 
+  if (error.code === 'ProjectQuickAccessConflict') {
+    return c.json({ code: error.code, message: error.message }, 409)
+  }
+
   if (
     error.code === 'AmbiguousProjectOwnerTeam' ||
     error.code === 'AmbiguousProjectWorkItem'
@@ -16502,6 +16699,7 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
   if (
     error.code === 'InvalidProjectTask' ||
     error.code === 'InvalidProjectDirectory' ||
+    error.code === 'InvalidProjectQuickAccess' ||
     error.code === 'InvalidTeamIssue'
   ) {
     console.error(error)

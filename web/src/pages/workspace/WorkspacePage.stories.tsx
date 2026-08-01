@@ -105,23 +105,34 @@ const storyWorkspaceRouteContext: WorkspaceRouteContextValue = {
   canMutateTeamConfiguration: true,
   fontSizePreference: 'standard',
   guardEnterpriseSession: (request) => request,
+  hasQuickAccessLoadError: false,
   inboxCount: 3,
+  isProjectQuickAccess: () => false,
   isLoading: false,
+  isQuickAccessSaving: false,
   locale: 'ja',
   onArchiveProject: () => Promise.resolve(),
   onArchiveTeam: () => Promise.resolve(),
   onCreateProject: () => Promise.resolve(),
   onCreateTeam: () => Promise.resolve(),
+  onDismissProjectQuickAccessFeedback: () => undefined,
   onFontSizePreferenceChange: () => undefined,
   onLocaleChange: () => undefined,
   onLogout: () => undefined,
   onOpenNotification: () => undefined,
   onOpenTask: () => undefined,
+  onMoveProjectQuickAccess: () => Promise.resolve(),
+  onRemoveProjectQuickAccess: () => Promise.resolve(),
   onRetryCommonData: () => Promise.resolve(),
+  onRetryProjectQuickAccess: () => Promise.resolve(),
   onSelectNav: () => undefined,
   onSelectProject: () => undefined,
   onSelectTeamView: () => undefined,
   onSessionErrorAction: () => undefined,
+  onToggleProjectQuickAccess: () => Promise.resolve(),
+  onUndoProjectQuickAccess: () => Promise.resolve(),
+  quickAccessItems: [],
+  quickAccessProjects: [],
   reportNotificationPreferencesError: () => undefined,
   resolveSessionErrors: () => undefined,
   teams: projectDirectoryFixtures,
@@ -362,6 +373,27 @@ export const SettingsRoute: Story = {
 /** The shared `/home` shell with its actual common error and retry boundary. */
 export const CommonDataErrorShell: Story = {
   render: () => <WorkspaceCommonErrorShellStory />,
+}
+
+/** The shared shell keeps route content usable while Quick Access is unavailable. */
+export const QuickAccessErrorShell: Story = {
+  render: () => (
+    <WorkspaceRouteStoryHarness
+      context={{
+        ...storyWorkspaceRouteContext,
+        hasQuickAccessLoadError: true,
+      }}
+      path="/home"
+    >
+      <WorkspaceRouteContent>
+        <div className="px-[clamp(20px,3vw,34px)] py-5">
+          <p className="text-sm text-[var(--workbench-muted)]">
+            Route content remains available.
+          </p>
+        </div>
+      </WorkspaceRouteContent>
+    </WorkspaceRouteStoryHarness>
+  ),
 }
 
 /** The `/settings/security` feature inside the real Workspace sidebar and header shell. */

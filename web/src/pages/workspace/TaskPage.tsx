@@ -83,6 +83,7 @@ import {
   refreshRelationDetailAfterConflict,
 } from '../../work-items/model/workItemDisplay'
 import type { WorkItemRelationEditorInput } from '../../work-items/ui/WorkItemRelationsEditor'
+import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
 /** Aggregated resolved configuration result for every Team represented by a Project. */
 type ProjectWorkItemConfigurationLoadResult = {
@@ -144,6 +145,12 @@ export function TaskPage() {
   const location = useLocation()
   const navigate = useNavigate()
   const params = useParams()
+  const {
+    hasQuickAccessLoadError,
+    isProjectQuickAccess,
+    isQuickAccessSaving,
+    onToggleProjectQuickAccess,
+  } = useWorkspaceRouteContext()
   const mutationRequestRunner = useRef(createMutationRequestRunner()).current
   const [searchParams, setSearchParams] = useSearchParams()
   const projectId = params.projectId ?? 'refero'
@@ -341,6 +348,15 @@ export function TaskPage() {
     : undefined
   const projectName =
     activeProject?.name ?? (projectId === 'refero' ? t('tasks.project.refero') : projectId)
+  /** Toggles the routed Project in quick access when its Team context is unambiguous. */
+  const handleProjectQuickAccessToggle = interactionTeamId && !hasQuickAccessLoadError
+    ? () => {
+        void onToggleProjectQuickAccess(
+          { projectId, teamId: interactionTeamId },
+          projectName,
+        )
+      }
+    : undefined
   const projectMembersErrorMessage = useMemo(() => {
     if (!projectMembersError) {
       return undefined
@@ -789,6 +805,8 @@ export function TaskPage() {
       configurationErrorMessage={configurationErrorMessage}
       accessToken={accessToken}
       isLoading={isLoading}
+      isProjectQuickAccess={isProjectQuickAccess(projectId)}
+      isProjectQuickAccessSaving={isQuickAccessSaving}
       isRelationCandidatesLoading={Boolean(relationCandidatesKey && isRelationCandidatesLoading)}
       locale={locale}
       activeProjectTeamId={interactionTeamId}
@@ -814,6 +832,7 @@ export function TaskPage() {
       isSystemAdmin={user?.isSystemAdmin}
       onLoadMoreProjectUsers={canManageProjectMembers ? handleLoadMoreProjectUsers : undefined}
       onProjectUserQueryChange={canManageProjectMembers ? setProjectUserQuery : undefined}
+      onProjectQuickAccessToggle={handleProjectQuickAccessToggle}
       onRemoveProjectMember={canManageProjectMembers ? handleRemoveProjectMember : undefined}
       onDeleteRelation={canMutateContent ? handleDeleteRelation : undefined}
       onSelectedIssueChange={handleSelectedIssueChange}
