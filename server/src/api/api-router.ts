@@ -49,6 +49,7 @@ import {
   type PlanningWorkItemLinkInput,
   type PlanningWorkItemSummary,
   PROJECT_QUICK_ACCESS_MAX_ITEMS,
+  PROJECT_QUICK_ACCESS_MAX_REVISION,
   type ProjectQuickAccessItem,
   type ProjectQuickAccessPreferences,
   type ResolvedWorkItemConfiguration,
@@ -7948,7 +7949,7 @@ function readProjectQuickAccessInput(
     typeof revision !== 'number' ||
     !Number.isSafeInteger(revision) ||
     revision < 0 ||
-    revision >= Number.MAX_SAFE_INTEGER ||
+    revision >= PROJECT_QUICK_ACCESS_MAX_REVISION ||
     !Array.isArray(candidateItems) ||
     candidateItems.length > PROJECT_QUICK_ACCESS_MAX_ITEMS
   ) {

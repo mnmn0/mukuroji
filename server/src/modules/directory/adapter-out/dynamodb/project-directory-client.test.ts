@@ -18,7 +18,10 @@ import type {
   DynamoDBDocumentClient,
   TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
-import type { ProjectQuickAccessItem } from '@mukuroji/contracts'
+import {
+  PROJECT_QUICK_ACCESS_MAX_REVISION,
+  type ProjectQuickAccessItem,
+} from '@mukuroji/contracts'
 import {
   afterEach,
   expect,
@@ -194,6 +197,30 @@ test('DynamoDB directory client rejects a stale quick-access replacement', async
     }],
   })
   expect(sentInputs[1]).toMatchObject({ ConsistentRead: true })
+})
+
+test('DynamoDB directory client rejects a terminal quick-access revision before persistence', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(client.replaceProjectQuickAccess(
+    'workspace-1',
+    'demo@example.com',
+    {
+      items: [{ projectId: 'refero', teamId: 'core-team' }],
+      revision: PROJECT_QUICK_ACCESS_MAX_REVISION,
+    },
+  )).rejects.toMatchObject({
+    code: 'InvalidProjectQuickAccessInput',
+    status: 400,
+  })
+  expect(sentInputs).toEqual([])
 })
 
 test('DynamoDB directory client fails closed when quick-access CAS finds an invalid bound row', async () => {

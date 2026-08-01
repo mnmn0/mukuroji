@@ -8,6 +8,7 @@ import type {
 } from '@aws-sdk/client-s3'
 import {
   PROJECT_QUICK_ACCESS_MAX_ITEMS,
+  PROJECT_QUICK_ACCESS_MAX_REVISION,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
 import {
@@ -842,7 +843,7 @@ function validateProjectDirectoryAuxiliaryRow(
     requireCanonicalTimestamp(row.updatedAt)
     if (
       revision === 0 ||
-      revision >= Number.MAX_SAFE_INTEGER ||
+      revision > PROJECT_QUICK_ACCESS_MAX_REVISION ||
       items.length > PROJECT_QUICK_ACCESS_MAX_ITEMS ||
       directoryId !== `PROJECT_QUICK_ACCESS#${encodeURIComponent(workspaceId)}#${encodeURIComponent(memberKey)}` ||
       entryKey !== 'PREFERENCE'

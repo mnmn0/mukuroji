@@ -11,7 +11,10 @@ import {
   expect,
   test,
 } from 'bun:test'
-import { PROJECT_QUICK_ACCESS_MAX_ITEMS } from '@mukuroji/contracts'
+import {
+  PROJECT_QUICK_ACCESS_MAX_ITEMS,
+  PROJECT_QUICK_ACCESS_MAX_REVISION,
+} from '@mukuroji/contracts'
 
 afterEach(() => {
   resetTestApp()
@@ -84,6 +87,7 @@ test('rejects malformed complete quick-access replacements before persistence', 
   const calls = configureFakeProjectClients(true)
   const invalidBodies = [
     { items: [], revision: -1 },
+    { items: [], revision: PROJECT_QUICK_ACCESS_MAX_REVISION },
     { items: [], revision: Number.MAX_SAFE_INTEGER },
     {
       items: [{ projectId: 'project/with/slash', teamId: 'core-team' }],

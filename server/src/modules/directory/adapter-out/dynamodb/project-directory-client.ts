@@ -57,6 +57,7 @@ import type {
 import {
   PLANNING_SCHEMA_VERSION,
   PROJECT_QUICK_ACCESS_MAX_ITEMS,
+  PROJECT_QUICK_ACCESS_MAX_REVISION,
   type ProjectQuickAccessItem,
   type ProjectQuickAccessPreferences,
   type UpdateProjectQuickAccessPreferencesInput,
@@ -867,6 +868,17 @@ export class DynamoDbProjectDirectoryClient {
     memberKey: string,
     input: UpdateProjectQuickAccessPreferencesInput,
   ): Promise<ProjectQuickAccessPreferences> {
+    if (
+      !Number.isSafeInteger(input.revision) ||
+      input.revision < 0 ||
+      input.revision >= PROJECT_QUICK_ACCESS_MAX_REVISION
+    ) {
+      throw new ProjectDataError(
+        400,
+        'InvalidProjectQuickAccessInput',
+        'Project quick-access input is invalid.',
+      )
+    }
     const preferenceDirectoryId = createProjectQuickAccessDirectoryId(directoryId, memberKey)
     const nextItem: ProjectQuickAccessPreferencesItem = {
       directoryId: preferenceDirectoryId,
@@ -2779,7 +2791,7 @@ function isProjectQuickAccessPreferencesItem(
     Number.isSafeInteger(value.revision) &&
     typeof value.revision === 'number' &&
     value.revision > 0 &&
-    value.revision < Number.MAX_SAFE_INTEGER &&
+    value.revision <= PROJECT_QUICK_ACCESS_MAX_REVISION &&
     typeof value.updatedAt === 'string' &&
     Array.isArray(value.items) &&
     value.items.length <= PROJECT_QUICK_ACCESS_MAX_ITEMS &&

@@ -1,5 +1,6 @@
 import {
   PROJECT_QUICK_ACCESS_MAX_ITEMS,
+  PROJECT_QUICK_ACCESS_MAX_REVISION,
   type ProjectQuickAccessItem,
   type ProjectQuickAccessPreferences,
   type UpdateProjectQuickAccessPreferencesInput,
@@ -98,7 +99,7 @@ function isProjectQuickAccessPreferences(
     typeof revision !== 'number' ||
     !Number.isSafeInteger(revision) ||
     revision < 0 ||
-    revision >= Number.MAX_SAFE_INTEGER ||
+    revision > PROJECT_QUICK_ACCESS_MAX_REVISION ||
     !Array.isArray(items) ||
     items.length > PROJECT_QUICK_ACCESS_MAX_ITEMS
   ) return false
