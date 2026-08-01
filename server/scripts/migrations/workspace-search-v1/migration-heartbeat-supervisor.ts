@@ -32,6 +32,31 @@ export interface WorkspaceSearchMigrationHeartbeatPort {
   heartbeatLease(
     input: HeartbeatWorkspaceSearchMigrationLeaseInput,
   ): Promise<WorkspaceSearchMigrationLease>
+
+  /**
+   * Synchronously stops admission of every not-yet-started data mutation.
+   *
+   * Ports without a data-mutation surface may omit this hook. When present,
+   * the supervisor invokes its captured method exactly once before aborting
+   * the task signal after lease loss or operator interruption.
+   */
+  interruptMutationAdmission?(): void
+
+  /**
+   * Installs the supervisor assertion around every nested data mutation.
+   *
+   * Ports without a data-mutation surface may omit this wrapper. A managed
+   * data port uses it to recheck lease headroom synchronously after each
+   * awaited read and immediately before any irreversible send.
+   *
+   * @param guard - Exact synchronous supervision assertion.
+   * @param task - Supervised operation inheriting the guard.
+   * @returns Exact operation result.
+   */
+  runWithMutationAdmissionGuard?<Result>(
+    guard: () => void,
+    task: () => Promise<Result>,
+  ): Promise<Result>
 }
 
 /**
@@ -145,16 +170,40 @@ export class WorkspaceSearchMigrationHeartbeatInterruptedError extends Error {
 export async function runWithWorkspaceSearchMigrationHeartbeat<Result>(
   input: RunWithWorkspaceSearchMigrationHeartbeatInput<Result>,
 ): Promise<Result> {
-  const lease = createLeaseClaim(input.lease)
-  const scheduler = input.scheduler ?? defaultHeartbeatScheduler
-  const clock = input.clock ?? defaultHeartbeatClock
+  let rawInitialLease: WorkspaceSearchMigrationLease
+  let rawPort: WorkspaceSearchMigrationHeartbeatPort
+  let task: RunWithWorkspaceSearchMigrationHeartbeatInput<Result>['task']
+  let operatorSignal: AbortSignal | undefined
+  let rawScheduler:
+    WorkspaceSearchMigrationHeartbeatScheduler | undefined
+  let rawClock: WorkspaceSearchMigrationHeartbeatClock | undefined
+  try {
+    rawInitialLease = input.lease
+    rawPort = input.port
+    task = input.task
+    operatorSignal = input.signal
+    rawScheduler = input.scheduler
+    rawClock = input.clock
+  } catch {
+    throw createHeartbeatFailure()
+  }
+  if (typeof task !== 'function') throw createHeartbeatFailure()
+  const initialLease = snapshotHeartbeatLease(rawInitialLease)
+  const port = snapshotHeartbeatPort(rawPort)
+  const scheduler = snapshotHeartbeatScheduler(
+    rawScheduler ?? defaultHeartbeatScheduler,
+  )
+  const clock = rawClock ?? defaultHeartbeatClock
+  if (typeof clock !== 'function') throw createHeartbeatFailure()
+  const lease = createLeaseClaim(initialLease)
   const taskAbortController = new AbortController()
-  let latestLease = detachLease(input.lease)
+  let latestLease = detachLease(initialLease)
   let scheduledHeartbeat:
     WorkspaceSearchMigrationHeartbeatTimerHandle | undefined
   let inFlightHeartbeat: Promise<void> | undefined
   let heartbeatFailure: WorkspaceSearchMigrationFailure | undefined
-  let interrupted = input.signal?.aborted === true
+  let interrupted = operatorSignal?.aborted === true
+  let mutationAdmissionInterrupted = false
   let heartbeatEstablished = false
   let stopped = false
 
@@ -174,9 +223,28 @@ export async function runWithWorkspaceSearchMigrationHeartbeat<Result>(
   }
 
   /**
-   * Aborts the task signal exactly once.
+   * Stops admission of every new data mutation exactly once.
+   *
+   * A hook failure is converted to the same closed heartbeat-failure
+   * vocabulary while task cancellation still proceeds.
+   */
+  const interruptMutationAdmission = (): void => {
+    if (mutationAdmissionInterrupted) return
+    mutationAdmissionInterrupted = true
+    const interrupt = port.interruptMutationAdmission
+    if (interrupt === undefined) return
+    try {
+      interrupt()
+    } catch {
+      heartbeatFailure ??= createHeartbeatFailure()
+    }
+  }
+
+  /**
+   * Stops mutation admission before aborting the task signal exactly once.
    */
   const abortTask = (): void => {
+    interruptMutationAdmission()
     if (!taskAbortController.signal.aborted) {
       taskAbortController.abort()
     }
@@ -251,9 +319,11 @@ export async function runWithWorkspaceSearchMigrationHeartbeat<Result>(
     scheduleFollowingHeartbeat = true,
   ): Promise<void> => {
     try {
-      const successor = await input.port.heartbeatLease({
-        lease: detachLeaseClaim(lease),
-      })
+      const successor = snapshotHeartbeatLease(
+        await port.heartbeatLease({
+          lease: detachLeaseClaim(lease),
+        }),
+      )
       const validatedSuccessor =
         requireHeartbeatSuccess(successor, lease)
       requireLeaseCommitHeadroom(validatedSuccessor, clock)
@@ -269,11 +339,18 @@ export async function runWithWorkspaceSearchMigrationHeartbeat<Result>(
     }
   }
 
-  if (input.signal !== undefined) {
-    input.signal.addEventListener('abort', handleInterruption, {
-      once: true,
-    })
+  if (operatorSignal !== undefined) {
+    try {
+      operatorSignal.addEventListener('abort', handleInterruption, {
+        once: true,
+      })
+      if (operatorSignal.aborted) handleInterruption()
+    } catch {
+      heartbeatFailure ??= createHeartbeatFailure()
+      abortTask()
+    }
   }
+  if (interrupted) abortTask()
 
   let outcome:
     | { readonly status: 'success'; readonly value: Result }
@@ -290,13 +367,22 @@ export async function runWithWorkspaceSearchMigrationHeartbeat<Result>(
     scheduleNextHeartbeat()
     assertActive()
     try {
+      const taskContext = Object.freeze({
+        lease,
+        signal: taskAbortController.signal,
+        assertActive,
+      })
+      /** Runs the caller task with its detached supervision context. */
+      const runTask = async (): Promise<Result> => await task(taskContext)
+      const runWithMutationAdmissionGuard =
+        port.runWithMutationAdmissionGuard
       outcome = {
         status: 'success',
-        value: await input.task({
-          lease,
-          signal: taskAbortController.signal,
-          assertActive,
-        }),
+        value: await (
+          runWithMutationAdmissionGuard === undefined
+            ? runTask()
+            : runWithMutationAdmissionGuard(assertActive, runTask)
+        ),
       }
     } catch (error: unknown) {
       outcome = { status: 'failure', error }
@@ -308,7 +394,14 @@ export async function runWithWorkspaceSearchMigrationHeartbeat<Result>(
     if (heartbeat !== undefined) {
       await heartbeat
     }
-    input.signal?.removeEventListener('abort', handleInterruption)
+    if (operatorSignal !== undefined) {
+      try {
+        operatorSignal.removeEventListener('abort', handleInterruption)
+      } catch {
+        heartbeatFailure ??= createHeartbeatFailure()
+        abortTask()
+      }
+    }
   }
 
   if (heartbeatFailure !== undefined) {
@@ -321,6 +414,184 @@ export async function runWithWorkspaceSearchMigrationHeartbeat<Result>(
     throw outcome.error
   }
   return outcome.value
+}
+
+/**
+ * Captures heartbeat capabilities before the first asynchronous boundary.
+ *
+ * The frozen wrapper retains the original receiver and method identities, so
+ * a mutable accessor cannot redirect heartbeats or the fail-closed mutation
+ * interruption hook after supervision begins.
+ *
+ * @param port - Caller-supplied narrow heartbeat capability.
+ * @returns Frozen receiver-preserving heartbeat capability.
+ */
+function snapshotHeartbeatPort(
+  port: WorkspaceSearchMigrationHeartbeatPort,
+): WorkspaceSearchMigrationHeartbeatPort {
+  if (port === null || typeof port !== 'object') {
+    throw createHeartbeatFailure()
+  }
+  let heartbeatLease:
+    WorkspaceSearchMigrationHeartbeatPort['heartbeatLease']
+  let interruptMutationAdmission:
+    WorkspaceSearchMigrationHeartbeatPort['interruptMutationAdmission']
+  let runWithMutationAdmissionGuard:
+    WorkspaceSearchMigrationHeartbeatPort[
+      'runWithMutationAdmissionGuard'
+    ]
+  try {
+    heartbeatLease = port.heartbeatLease
+    interruptMutationAdmission = port.interruptMutationAdmission
+    runWithMutationAdmissionGuard =
+      port.runWithMutationAdmissionGuard
+  } catch {
+    throw createHeartbeatFailure()
+  }
+  if (
+    typeof heartbeatLease !== 'function' ||
+    (
+      interruptMutationAdmission !== undefined &&
+      typeof interruptMutationAdmission !== 'function'
+    ) ||
+    (
+      runWithMutationAdmissionGuard !== undefined &&
+      typeof runWithMutationAdmissionGuard !== 'function'
+    )
+  ) {
+    throw createHeartbeatFailure()
+  }
+  if (
+    interruptMutationAdmission === undefined &&
+    runWithMutationAdmissionGuard === undefined
+  ) {
+    return Object.freeze({
+      /** Invokes the captured heartbeat method on its original receiver. */
+      heartbeatLease(
+        input: HeartbeatWorkspaceSearchMigrationLeaseInput,
+      ): Promise<WorkspaceSearchMigrationLease> {
+        return heartbeatLease.call(port, input)
+      },
+    })
+  }
+  if (interruptMutationAdmission === undefined) {
+    if (runWithMutationAdmissionGuard === undefined) {
+      throw createHeartbeatFailure()
+    }
+    const invokeMutationAdmissionGuard =
+      runWithMutationAdmissionGuard.bind(port)
+    return Object.freeze({
+      /** Invokes the captured heartbeat method on its original receiver. */
+      heartbeatLease(
+        input: HeartbeatWorkspaceSearchMigrationLeaseInput,
+      ): Promise<WorkspaceSearchMigrationLease> {
+        return heartbeatLease.call(port, input)
+      },
+      /** Installs the captured guard wrapper on its original receiver. */
+      runWithMutationAdmissionGuard<Result>(
+        guard: () => void,
+        task: () => Promise<Result>,
+      ): Promise<Result> {
+        return invokeMutationAdmissionGuard(guard, task)
+      },
+    })
+  }
+  if (runWithMutationAdmissionGuard === undefined) {
+    return Object.freeze({
+      /** Invokes the captured heartbeat method on its original receiver. */
+      heartbeatLease(
+        input: HeartbeatWorkspaceSearchMigrationLeaseInput,
+      ): Promise<WorkspaceSearchMigrationLease> {
+        return heartbeatLease.call(port, input)
+      },
+      /** Invokes the captured interruption hook on its original receiver. */
+      interruptMutationAdmission(): void {
+        interruptMutationAdmission.call(port)
+      },
+    })
+  }
+  const invokeMutationAdmissionGuard =
+    runWithMutationAdmissionGuard.bind(port)
+  return Object.freeze({
+    /** Invokes the captured heartbeat method on its original receiver. */
+    heartbeatLease(
+      input: HeartbeatWorkspaceSearchMigrationLeaseInput,
+    ): Promise<WorkspaceSearchMigrationLease> {
+      return heartbeatLease.call(port, input)
+    },
+    /** Invokes the captured interruption hook on its original receiver. */
+    interruptMutationAdmission(): void {
+      interruptMutationAdmission.call(port)
+    },
+    /** Installs the captured guard wrapper on its original receiver. */
+    runWithMutationAdmissionGuard<Result>(
+      guard: () => void,
+      task: () => Promise<Result>,
+    ): Promise<Result> {
+      return invokeMutationAdmissionGuard(guard, task)
+    },
+  })
+}
+
+/**
+ * Captures one scheduler method and each returned cancel method exactly once.
+ *
+ * @param scheduler - Caller-supplied or default one-shot scheduler.
+ * @returns Frozen receiver-preserving scheduler.
+ */
+function snapshotHeartbeatScheduler(
+  scheduler: WorkspaceSearchMigrationHeartbeatScheduler,
+): WorkspaceSearchMigrationHeartbeatScheduler {
+  if (scheduler === null || typeof scheduler !== 'object') {
+    throw createHeartbeatFailure()
+  }
+  let schedule: WorkspaceSearchMigrationHeartbeatScheduler['schedule']
+  try {
+    schedule = scheduler.schedule
+  } catch {
+    throw createHeartbeatFailure()
+  }
+  if (typeof schedule !== 'function') throw createHeartbeatFailure()
+  return Object.freeze({
+    /** Invokes the captured scheduler and freezes its returned cancel handle. */
+    schedule(
+      callback: () => void,
+      delayMilliseconds: number,
+    ): WorkspaceSearchMigrationHeartbeatTimerHandle {
+      const handle = Reflect.apply(schedule, scheduler, [
+        callback,
+        delayMilliseconds,
+      ])
+      return snapshotHeartbeatTimerHandle(handle)
+    },
+  })
+}
+
+/**
+ * Captures one timer cancellation capability when its timer is created.
+ *
+ * @param handle - Scheduler-owned cancellation handle.
+ * @returns Frozen receiver-preserving cancellation handle.
+ */
+function snapshotHeartbeatTimerHandle(
+  handle: WorkspaceSearchMigrationHeartbeatTimerHandle,
+): WorkspaceSearchMigrationHeartbeatTimerHandle {
+  if (handle === null || typeof handle !== 'object') {
+    throw createHeartbeatFailure()
+  }
+  let cancel: WorkspaceSearchMigrationHeartbeatTimerHandle['cancel']
+  try {
+    cancel = handle.cancel
+  } catch {
+    throw createHeartbeatFailure()
+  }
+  if (typeof cancel !== 'function') throw createHeartbeatFailure()
+  return Object.freeze({
+    /** Invokes the captured cancellation method on its original receiver. */
+    cancel(): void {
+      Reflect.apply(cancel, handle, [])
+    },
+  })
 }
 
 /**
@@ -348,6 +619,40 @@ const defaultHeartbeatScheduler:
  */
 const defaultHeartbeatClock: WorkspaceSearchMigrationHeartbeatClock =
   (): Date => new Date()
+
+/**
+ * Reads one lease field set exactly once before validating a plain copy.
+ *
+ * @param lease - Potentially accessor-backed durable lease boundary.
+ * @returns Frozen validated lease without caller-owned accessors.
+ */
+function snapshotHeartbeatLease(
+  lease: WorkspaceSearchMigrationLease,
+): WorkspaceSearchMigrationLease {
+  let runId: string
+  let ownerId: string
+  let fenceToken: number
+  let expiresAt: string
+  let heartbeatAt: string
+  try {
+    runId = lease.runId
+    ownerId = lease.ownerId
+    fenceToken = lease.fenceToken
+    expiresAt = lease.expiresAt
+    heartbeatAt = lease.heartbeatAt
+  } catch {
+    throw createHeartbeatFailure()
+  }
+  const snapshot = {
+    runId,
+    ownerId,
+    fenceToken,
+    expiresAt,
+    heartbeatAt,
+  }
+  validateWorkspaceSearchMigrationLease(snapshot)
+  return Object.freeze(snapshot)
+}
 
 /**
  * Validates and detaches one stable lease claim.
