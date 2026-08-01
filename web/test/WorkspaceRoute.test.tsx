@@ -14,19 +14,31 @@ const routeContext: WorkspaceRouteContextValue = {
   commonErrorKey: 'projects.error.loading',
   fontSizePreference: 'standard',
   guardEnterpriseSession: (request) => request,
+  hasQuickAccessLoadError: false,
   inboxCount: 0,
+  isProjectQuickAccess: () => false,
   isLoading: false,
+  isQuickAccessLoading: false,
+  isQuickAccessSaving: false,
   locale: 'en',
   onFontSizePreferenceChange: () => undefined,
   onLocaleChange: () => undefined,
   onLogout: () => undefined,
   onOpenNotification: () => undefined,
   onOpenTask: () => undefined,
+  onDismissProjectQuickAccessFeedback: () => undefined,
+  onMoveProjectQuickAccess: async () => undefined,
+  onRemoveProjectQuickAccess: async () => undefined,
   onRetryCommonData: async () => undefined,
+  onRetryProjectQuickAccess: async () => undefined,
   onSelectNav: () => undefined,
   onSelectProject: () => undefined,
   onSelectTeamView: () => undefined,
   onSessionErrorAction: () => undefined,
+  onToggleProjectQuickAccess: async () => undefined,
+  onUndoProjectQuickAccess: async () => undefined,
+  quickAccessItems: [],
+  quickAccessProjects: [],
   reportNotificationPreferencesError: () => undefined,
   resolveSessionErrors: () => undefined,
   teams: [],
@@ -103,5 +115,51 @@ describe('WorkspaceRoute', () => {
     expect(html).toContain('Route content')
     expect(html).toContain('Home')
     expect(html).not.toContain('data-testid="workspace-common-error"')
+  })
+
+  test('keeps route content available while exposing a retryable Quick Access error', () => {
+    const context: WorkspaceRouteContextValue = {
+      ...routeContext,
+      commonErrorKey: undefined,
+      hasQuickAccessLoadError: true,
+    }
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={['/home']}>
+        <Routes>
+          <Route element={<WorkspaceContextOutlet context={context} />}>
+            <Route element={<WorkspaceRoute />}>
+              <Route element={<p>Route content</p>} path="/home" />
+            </Route>
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    )
+
+    expect(html).toContain('data-testid="quick-access-load-error"')
+    expect(html).toContain('Quick access could not be loaded')
+    expect(html).toContain('Retry quick access')
+    expect(html).toContain('Route content')
+  })
+
+  test('uses the feedback role as the sole live-region contract', () => {
+    const context: WorkspaceRouteContextValue = {
+      ...routeContext,
+      commonErrorKey: undefined,
+      quickAccessFeedback: { kind: 'error' },
+    }
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={['/home']}>
+        <Routes>
+          <Route element={<WorkspaceContextOutlet context={context} />}>
+            <Route element={<WorkspaceRoute />}>
+              <Route element={<p>Route content</p>} path="/home" />
+            </Route>
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    )
+
+    expect(html).toContain('role="alert"')
+    expect(html).not.toContain('aria-live="polite"')
   })
 })

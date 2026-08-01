@@ -13,6 +13,7 @@ import { HomePage } from '../pages/workspace/HomePage'
 import { InboxPage } from '../pages/workspace/InboxPage'
 import { MyTasksPage } from '../pages/workspace/MyTasksPage'
 import { PlanningPage } from '../pages/workspace/PlanningPage'
+import { ProjectsPage } from '../pages/workspace/ProjectsPage'
 import { ReportsPage } from '../pages/workspace/ReportsPage'
 import { SettingsPage } from '../pages/workspace/SettingsPage'
 import { TaskPage } from '../pages/workspace/TaskPage'
@@ -95,6 +96,14 @@ export const appRoutes: RouteObject[] = [
               {
                 path: '/teams/:teamId/members',
                 element: <TeamMembersPage />,
+              },
+              {
+                path: '/teams/:teamId/projects',
+                element: <ProjectsPage />,
+              },
+              {
+                path: '/projects',
+                element: <ProjectsPage />,
               },
               {
                 path: '/requests',

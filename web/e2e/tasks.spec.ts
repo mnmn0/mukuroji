@@ -10,6 +10,7 @@ import {
   type FileAnnotation,
   type FileAttachment,
   type FileVersion,
+  type ProjectQuickAccessPreferences,
   type WorkItemConfiguration,
   type WorkItemRelation,
   type WorkItemRelationType,
@@ -311,6 +312,16 @@ async function mockAuthenticatedTaskPage(
     expanded: options.teamExpandedById?.[team.id] ?? team.expanded,
     projects: team.projects.map((project) => ({ ...project })),
   }))
+  let projectQuickAccess: ProjectQuickAccessPreferences = {
+    items: [
+      { projectId: 'refero', teamId: 'core-team' },
+      { projectId: 'product-roadmap', teamId: 'core-team' },
+      { projectId: 'shared-launch', teamId: 'core-team' },
+      { projectId: 'brand-refresh', teamId: 'design-team' },
+      { projectId: 'shared-launch', teamId: 'design-team' },
+    ],
+    revision: 1,
+  }
   for (const [teamId, projectNames] of Object.entries(options.projectNamesByTeam ?? {})) {
     const team = projectDirectory.find((candidate) => candidate.id === teamId)
 
@@ -551,6 +562,12 @@ async function mockAuthenticatedTaskPage(
     await route.fulfill({ json: workspaceAccess })
   })
 
+  await page.route('**/api/projects/quick-access', async (route) => {
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+    expect(route.request().method()).toBe('GET')
+    await route.fulfill({ json: projectQuickAccess })
+  })
+
   await page.route('**/api/work-item-configuration', async (route) => {
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
 
@@ -719,6 +736,10 @@ async function mockAuthenticatedTaskPage(
 
     if (teamIndex >= 0) {
       projectDirectory.splice(teamIndex, 1)
+      projectQuickAccess = {
+        items: projectQuickAccess.items.filter((item) => item.teamId !== teamId),
+        revision: projectQuickAccess.revision + 1,
+      }
     }
 
     await route.fulfill({
@@ -745,6 +766,12 @@ async function mockAuthenticatedTaskPage(
 
     if (team) {
       team.projects = team.projects.filter((project) => project.id !== projectId)
+      projectQuickAccess = {
+        items: projectQuickAccess.items.filter((item) =>
+          item.teamId !== teamId || item.projectId !== projectId,
+        ),
+        revision: projectQuickAccess.revision + 1,
+      }
     }
 
     await new Promise((resolve) => setTimeout(resolve, 150))
@@ -1739,12 +1766,25 @@ async function mockAnalyticsReportsPage(
 }
 
 /**
- * サイドバーの新規登録パネルを開きます。
+ * Opens the Team or Project registration panel from the sidebar's More menu.
+ *
+ * @param page - Playwright page containing the authenticated Workspace shell.
+ * @param mode - Registration form to display.
+ * @returns A promise that resolves once the selected name field is visible.
  */
-async function openSidebarCreatePanel(page: Page) {
+async function openSidebarCreatePanel(
+  page: Page,
+  mode: 'team' | 'project' = 'team',
+) {
+  await page.getByRole('button', { name: 'その他', exact: true }).click()
   await page.getByRole('button', { name: '新規登録' }).click()
-  await page.getByRole('button', { name: 'チーム', exact: true }).click()
-  await expect(page.getByLabel('チーム名')).toBeVisible()
+  await page.getByRole('button', {
+    name: mode === 'team' ? 'チーム' : 'プロジェクト',
+    exact: true,
+  }).click()
+  await expect(page.getByLabel(
+    mode === 'team' ? 'チーム名' : 'プロジェクト名',
+  )).toBeVisible()
 }
 
 function recordProjectTaskRequest(requestCounts: MockRequestCounts, projectId: string) {
@@ -2754,28 +2794,21 @@ test.describe('authenticated task page', () => {
     expect(Math.abs(drawerState.height - drawerState.viewportHeight)).toBeLessThanOrEqual(1)
     expect(drawerState.width).toBeLessThanOrEqual(drawerState.viewportWidth - 32)
 
-    const archiveButton = page.getByRole('button', { name: 'Refero をアーカイブ' })
+    const manageQuickAccessButton = sidebar.getByRole('button', {
+      name: 'クイックアクセスを管理',
+    })
 
-    await archiveButton.click()
-    const archiveDialog = page.getByRole('dialog', { name: 'アーカイブの確認' })
-    const archiveConfirmButton = archiveDialog.getByRole('button', { name: 'アーカイブ' })
+    await manageQuickAccessButton.click()
+    const quickAccessDialog = page.getByRole('dialog', {
+      name: 'クイックアクセスを管理',
+    })
 
-    await expect(archiveDialog).toContainText('現在この画面からは復元できません')
-    await expect(archiveDialog.getByRole('button', { name: 'キャンセル' })).toBeFocused()
-    await page.keyboard.press('Shift+Tab')
-    await expect(archiveConfirmButton).toBeFocused()
-    await page.keyboard.press('Escape')
-    await expect(archiveDialog).toHaveCount(0)
+    await expect(quickAccessDialog).toBeVisible()
+    await expect(quickAccessDialog.getByRole('button', { name: '閉じる' })).toBeFocused()
+    await quickAccessDialog.getByRole('button', { name: '閉じる' }).click()
+    await expect(quickAccessDialog).toHaveCount(0)
     await expect(drawer).toBeVisible()
-    await expect(archiveButton).toBeFocused()
-
-    await archiveButton.click()
-    await archiveDialog.getByRole('button', { name: 'アーカイブ' }).click()
-    await expect(archiveDialog).toHaveCount(0)
-    await expect(drawer).toBeVisible()
-    await expect(sidebar).toBeFocused()
-    await page.keyboard.press('Tab')
-    await expect(sidebar.getByRole('button', { name: 'サイドバーを折りたたむ' })).toBeFocused()
+    await expect(manageQuickAccessButton).toBeFocused()
 
     await page.mouse.move(180, 620)
     await page.mouse.wheel(0, 700)
@@ -2805,14 +2838,14 @@ test.describe('authenticated task page', () => {
     expect(hasDocumentOverflow).toBe(false)
   })
 
-  test('DB のチーム別プロジェクトをサイドバーに表示し、選択したプロジェクトのタスクへ遷移する', async ({
+  test('DB の Quick Access と現在の Team をサイドバーに表示し、選択したプロジェクトのタスクへ遷移する', async ({
     page,
   }) => {
     await page.goto('/dashboard')
     const requestCounts = getMockRequestCounts(page)
 
     await expect(page.getByRole('button', { name: 'コアチーム', exact: true })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'デザインチーム', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'デザインチーム', exact: true })).toHaveCount(0)
     await expect(page.getByRole('button', { name: '共通ローンチ', exact: true })).toHaveCount(2)
     expect(requestCounts.projectDirectory).toBe(1)
     await expect.poll(() => requestCounts.workspaceWorkItems).toBe(1)
@@ -3629,18 +3662,19 @@ test.describe('authenticated task page', () => {
     await page.getByLabel('チーム名').fill('新規チーム')
     await page.getByRole('button', { name: 'チームを登録' }).click()
 
+    await page.getByRole('button', { name: 'コアチーム', exact: true }).click()
     await expect(page.getByRole('button', { name: '新規チーム', exact: true })).toBeVisible()
+    await page.keyboard.press('Escape')
     expect(requestCounts.teamCreates).toBe(1)
 
-    await page.getByRole('button', { name: '新規登録' }).click()
-    await page.getByRole('button', { name: 'プロジェクト', exact: true }).click()
+    await openSidebarCreatePanel(page, 'project')
     await page.getByLabel('プロジェクト名').fill('新規プロジェクト')
     await page.getByRole('button', { name: 'プロジェクトを登録' }).click()
 
-    await expect(page.getByRole('button', { name: '新規プロジェクト', exact: true })).toBeVisible()
     expect(requestCounts.projectCreates).toBe(1)
 
-    await page.getByRole('button', { name: '新規プロジェクト', exact: true }).click()
+    await page.getByRole('button', { name: 'プロジェクト 4', exact: true }).click()
+    await page.getByRole('button', { name: '新規プロジェクトを開く' }).click()
     await expect(page).toHaveURL('/projects/new-project/issues?teamId=core-team')
     await page.getByRole('tab', { name: /権限/ }).click()
     await expect(page.getByTestId('permission-member-row-demo-example-com')).toBeVisible()
@@ -3650,24 +3684,24 @@ test.describe('authenticated task page', () => {
   })
 
   test('ダッシュボードからプロジェクトをアーカイブできる', async ({ page }) => {
-    await page.goto('/dashboard')
+    await page.goto('/projects')
     const requestCounts = getMockRequestCounts(page)
 
-    await page.getByRole('button', { name: 'Refero をアーカイブ' }).click()
-    await expect(page.getByRole('dialog', { name: 'アーカイブの確認' })).toBeVisible()
+    await page.getByRole('button', { name: 'Referoをアーカイブ' }).click()
+    await expect(page.getByRole('dialog', { name: 'プロジェクトをアーカイブ' })).toBeVisible()
     expect(requestCounts.projectArchives).toBe(0)
 
     await page.getByRole('button', { name: 'キャンセル', exact: true }).click()
-    await expect(page.getByRole('button', { name: 'Refero', exact: true })).toHaveCount(1)
+    await expect(page.getByRole('button', { name: 'Referoを開く' })).toHaveCount(1)
 
-    await page.getByRole('button', { name: 'Refero をアーカイブ' }).click()
-    const archiveDialog = page.getByRole('dialog', { name: 'アーカイブの確認' })
+    await page.getByRole('button', { name: 'Referoをアーカイブ' }).click()
+    const archiveDialog = page.getByRole('dialog', { name: 'プロジェクトをアーカイブ' })
 
     await archiveDialog.getByRole('button', { name: 'アーカイブ', exact: true }).click()
     await expect(archiveDialog).toHaveAttribute('aria-busy', 'true')
-    await expect(archiveDialog).toBeFocused()
+    await expect(archiveDialog.getByRole('button', { name: 'キャンセル' })).toBeDisabled()
 
-    await expect(page.getByRole('button', { name: 'Refero', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Referoを開く' })).toHaveCount(0)
     expect(requestCounts.projectArchives).toBe(1)
   })
 
@@ -3677,11 +3711,13 @@ test.describe('authenticated task page', () => {
 
     await expect(page.getByRole('button', { name: '共通ローンチ', exact: true })).toHaveCount(2)
 
+    await page.getByRole('button', { name: 'コアチーム', exact: true }).click()
+    await page.getByRole('button', { name: 'デザインチーム', exact: true }).click()
+    await page.getByRole('button', { name: 'その他', exact: true }).click()
     await page.getByRole('button', { name: 'デザインチーム をアーカイブ' }).click()
     await page.getByRole('button', { name: 'アーカイブ', exact: true }).click()
 
     await expect(page.getByRole('button', { name: 'デザインチーム', exact: true })).toHaveCount(0)
-    await expect(page.getByRole('button', { name: '共通ローンチ', exact: true })).toHaveCount(1)
     expect(requestCounts.teamArchives).toBe(1)
   })
 
@@ -3877,26 +3913,14 @@ test.describe('authenticated task page', () => {
       'コアチーム',
     )
     const coreTeamGroup = page.getByTestId('sidebar-team-core-team').first()
-    const designTeamGroup = page.getByTestId('sidebar-team-design-team').first()
-    const coreTeamButton = coreTeamGroup.getByRole('button', {
+
+    await expect(coreTeamGroup).toBeVisible()
+    await expect(page.getByTestId('sidebar-team-design-team')).toHaveCount(0)
+    await expect(coreTeamGroup.locator('[aria-current="page"]')).toHaveCount(0)
+    await expect(page.getByRole('button', {
       name: 'コアチーム',
       exact: true,
-    })
-    const designTeamButton = designTeamGroup.getByRole('button', {
-      name: 'デザインチーム',
-      exact: true,
-    })
-
-    await expect(coreTeamGroup).toHaveAttribute('data-project-ancestor', 'false')
-    await expect(coreTeamGroup).toHaveAttribute('data-team-active', 'false')
-    await expect(designTeamGroup).toHaveAttribute('data-project-ancestor', 'false')
-    await expect(designTeamGroup).toHaveAttribute('data-team-active', 'false')
-    await expect(coreTeamButton).toHaveAttribute('aria-expanded', 'false')
-    await expect(designTeamButton).toHaveAttribute('aria-expanded', 'false')
-    await expect(coreTeamButton).not.toHaveClass(/bg-white\/8|bg-teal-500\/20/)
-    await expect(designTeamButton).not.toHaveClass(/bg-white\/8|bg-teal-500\/20/)
-    await expect(coreTeamGroup.locator(':scope > div.relative > span.absolute')).toHaveCount(0)
-    await expect(designTeamGroup.locator(':scope > div.relative > span.absolute')).toHaveCount(0)
+    })).toHaveAttribute('aria-expanded', 'false')
     await expect(page.getByRole('button', { name: '新規タスク' })).toHaveCount(0)
     await expect.poll(() => [...new Set(requestedConfigurationTeamIds)].sort()).toEqual([
       'core-team',
@@ -4183,20 +4207,12 @@ test.describe('authenticated task page', () => {
 
     await expect(breadcrumb).toContainText('デザインチーム')
     await expect(breadcrumb).toContainText('Design shared launch')
-    await expect(page.getByTestId('sidebar-team-core-team').first()).toHaveAttribute(
-      'data-project-ancestor',
-      'false',
-    )
-    await expect(page.getByTestId('sidebar-team-design-team').first()).toHaveAttribute(
-      'data-project-ancestor',
-      'true',
-    )
-    await expect(
-      page.getByTestId('sidebar-team-design-team').first().getByRole('button', {
-        name: 'デザインチーム',
-        exact: true,
-      }),
-    ).toHaveAttribute('aria-expanded', 'true')
+    await expect(page.getByTestId('sidebar-team-core-team')).toHaveCount(0)
+    await expect(page.getByTestId('sidebar-team-design-team').first()).toBeVisible()
+    await expect(page.getByRole('button', {
+      name: 'デザインチーム',
+      exact: true,
+    })).toHaveAttribute('aria-expanded', 'false')
     await expect(coreRow).toContainText('Core configured')
     await expect(designRow).toContainText('Design configured')
     await expect(detailPane.locator('textarea[name="description"]')).toHaveValue(
@@ -4296,33 +4312,25 @@ test.describe('authenticated task page', () => {
     await expect(page.locator('aside textarea[name="description"]')).toHaveValue(issueDescription)
   })
 
-  test('Workspace 直下ルート間の遷移でサイドバーの手動状態を保持する', async ({ page }) => {
+  test('Workspace 直下ルート間の遷移でサイドバーの折りたたみ状態を保持する', async ({ page }) => {
     await page.goto('/home')
     const homeSidebar = await expectWorkspaceRouteShell(page, 'ホーム')
-    const coreTeamButton = homeSidebar
-      .getByTestId('sidebar-team-core-team')
-      .getByRole('button', { name: 'コアチーム', exact: true })
-
-    await expect(coreTeamButton).toHaveAttribute('aria-expanded', 'true')
-    await coreTeamButton.click()
-    await expect(coreTeamButton).toHaveAttribute('aria-expanded', 'false')
 
     await homeSidebar.getByRole('button', { name: 'サイドバーを折りたたむ' }).click()
     await expect(homeSidebar).toHaveAttribute('data-collapsed', 'true')
 
-    await homeSidebar.getByRole('button', { name: 'ダッシュボード', exact: true }).click()
-    await expect(page).toHaveURL('/dashboard')
+    await homeSidebar.getByRole('button', { name: 'マイタスク', exact: true }).click()
+    await expect(page).toHaveURL('/my-tasks')
 
-    const dashboardSidebar = await expectWorkspaceRouteShell(page, 'ダッシュボード')
+    const myTasksSidebar = await expectWorkspaceRouteShell(page, 'マイタスク')
 
-    await expect(dashboardSidebar).toHaveAttribute('data-collapsed', 'true')
-    await dashboardSidebar.getByRole('button', { name: 'サイドバーを展開する' }).click()
-    await expect(dashboardSidebar).toHaveAttribute('data-collapsed', 'false')
-    await expect(
-      dashboardSidebar
-        .getByTestId('sidebar-team-core-team')
-        .getByRole('button', { name: 'コアチーム', exact: true }),
-    ).toHaveAttribute('aria-expanded', 'false')
+    await expect(myTasksSidebar).toHaveAttribute('data-collapsed', 'true')
+    await myTasksSidebar.getByRole('button', { name: 'サイドバーを展開する' }).click()
+    await expect(myTasksSidebar).toHaveAttribute('data-collapsed', 'false')
+    await expect(myTasksSidebar.getByRole('button', {
+      name: 'コアチーム',
+      exact: true,
+    })).toBeVisible()
   })
 
   test('チーム概要では選択チームのプロジェクトタスクだけを集計する', async ({ page }) => {

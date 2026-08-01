@@ -3,7 +3,7 @@ import {
   WORK_ITEM_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, userEvent, within } from 'storybook/test'
+import { expect, fn, userEvent, within } from 'storybook/test'
 import { TaskScreen } from './TaskScreen'
 import type { TeamIssueDetail } from '../../issues/api'
 import {
@@ -145,6 +145,8 @@ const selectedIssueDetail: TeamIssueDetail = {
   },
 }
 
+const onProjectQuickAccessToggle = fn()
+
 const meta = {
   title: 'Application/Projects/Task Screen',
   component: TaskScreen,
@@ -166,6 +168,7 @@ const meta = {
     projectUserQuery: '',
     projectUsers,
     onCreateTask: async () => undefined,
+    onProjectQuickAccessToggle,
     onUpdateIssue: async () => undefined,
     resolvedConfiguration: { configuration: teamWorkItemConfigurationFixture },
     tasks: storyTasks,
@@ -192,6 +195,14 @@ type Story = StoryObj<typeof meta>
 export const Default: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
+    const quickAccessButton = canvas.getByRole('button', {
+      name: 'プロジェクトをクイックアクセスに追加',
+    })
+    onProjectQuickAccessToggle.mockClear()
+
+    await expect(quickAccessButton).toHaveAttribute('aria-pressed', 'false')
+    await userEvent.click(quickAccessButton)
+    await expect(onProjectQuickAccessToggle).toHaveBeenCalledTimes(1)
     const statusButton = canvas.getByRole('button', { name: 'ステータス' })
 
     await userEvent.click(statusButton)
@@ -238,6 +249,65 @@ export const Default: Story = {
     }))
     await expect(statusButton).toHaveAttribute('aria-expanded', 'false')
     await expect(canvas.queryByRole('menu')).not.toBeInTheDocument()
+  },
+}
+
+/**
+ * クイックアクセスへ追加済みの Project header です。
+ */
+export const QuickAccess: Story = {
+  args: {
+    isProjectQuickAccess: true,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const quickAccessButton = canvas.getByRole('button', {
+      name: 'プロジェクトをクイックアクセスから削除',
+    })
+
+    await expect(quickAccessButton).toHaveAttribute('aria-pressed', 'true')
+    await expect(quickAccessButton).toBeEnabled()
+  },
+}
+
+/**
+ * モバイル幅でも Project のクイックアクセス操作へ到達できる状態です。
+ */
+export const MobileQuickAccess: Story = {
+  args: {
+    isProjectQuickAccess: true,
+  },
+  globals: {
+    viewport: {
+      value: 'mobile1',
+      isRotated: false,
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await expect(canvas.getByRole('button', {
+      name: 'プロジェクトをクイックアクセスから削除',
+    })).toBeVisible()
+  },
+}
+
+/**
+ * クイックアクセス設定の保存中に重複操作を防ぐ状態です。
+ */
+export const QuickAccessSaving: Story = {
+  args: {
+    isProjectQuickAccess: true,
+    isProjectQuickAccessSaving: true,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const quickAccessButton = canvas.getByRole('button', {
+      name: 'プロジェクトをクイックアクセスから削除',
+    })
+
+    await expect(quickAccessButton).toBeDisabled()
+    await expect(quickAccessButton).toHaveAttribute('aria-busy', 'true')
   },
 }
 

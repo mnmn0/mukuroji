@@ -35,6 +35,20 @@ export type SidebarProject = {
   tone?: SidebarProjectTone
 }
 
+/** Project shortcut resolved with the Team context required for a stable deep link. */
+export type SidebarQuickAccessProject = {
+  /** Project ID represented by this shortcut. */
+  projectId: string
+  /** Current Project display name. */
+  name: string
+  /** Current Project display tone. */
+  tone?: SidebarProjectTone
+  /** ID of the Team used when opening the Project. */
+  teamId: string
+  /** Team label shown when managing shortcuts. */
+  teamName: string
+}
+
 /**
  * サイドバーに表示するチームです。
  */
@@ -75,7 +89,7 @@ export type SidebarNavId =
 /**
  * チーム配下で選択できる固定ビューです。
  */
-export type SidebarTeamViewId = 'overview' | 'issues' | 'members'
+export type SidebarTeamViewId = 'overview' | 'issues' | 'projects' | 'members'
 
 /**
  * 新規作成モーダルで選択できる作成対象です。
@@ -238,6 +252,38 @@ export type SidebarLabels = {
    * Workspace search の keyboard shortcut 表示です。
    */
   searchShortcut: string
+  /** Quick Access section heading. */
+  quickAccess: string
+  /** Accessible label for opening Quick Access management. */
+  manageQuickAccess: string
+  /** Empty state shown before any Project is starred. */
+  quickAccessEmpty: string
+  /** Link label used when more than five shortcuts exist. */
+  showAllQuickAccess: string
+  /** Heading for the Quick Access management dialog. */
+  quickAccessDialogTitle: string
+  /** Supporting copy for the Quick Access management dialog. */
+  quickAccessDialogDescription: string
+  /** Accessible label for closing the Quick Access management dialog. */
+  closeQuickAccessDialog: string
+  /** Moves a shortcut one position earlier. */
+  moveQuickAccessUp: string
+  /** Moves a shortcut one position later. */
+  moveQuickAccessDown: string
+  /** Removes a shortcut from Quick Access. */
+  removeQuickAccess: string
+  /** Current Team section heading. */
+  currentTeam: string
+  /** Accessible label for opening the Team switcher. */
+  switchTeam: string
+  /** Placeholder and label for Team filtering. */
+  searchTeams: string
+  /** Empty state for a Team search with no results. */
+  noTeamsFound: string
+  /** Label for the less frequently used navigation menu. */
+  more: string
+  /** Label for opening the Workspace-wide Project directory. */
+  allProjects: string
   /**
    * チーム / プロジェクト見出しの文言です。
    */
@@ -266,6 +312,8 @@ export type SidebarLabels = {
    * メンバービューの文言です。
    */
   members: string
+  /** Project index view label including the Team Project count. */
+  projectCount: (count: number) => string
   /**
    * プロジェクト一覧見出しの文言です。
    */
@@ -353,6 +401,10 @@ export type SidebarProps = {
    * 非制御時に初期表示で新規登録モーダルを開くかどうかです。
    */
   defaultCreatePanelOpen?: boolean
+  /** Non-controlled initial state for the Quick Access management dialog. */
+  defaultQuickAccessManagerOpen?: boolean
+  /** Whether an uncontrolled sidebar should select its first Project initially. */
+  autoSelectInitialProject?: boolean
   /**
    * 受信箱の未読件数です。
    */
@@ -361,6 +413,12 @@ export type SidebarProps = {
    * サイドバーに表示するチーム一覧です。
    */
   teams: SidebarTeam[]
+  /** Ordered Project shortcuts already resolved against the readable directory. */
+  quickAccessProjects?: SidebarQuickAccessProject[]
+  /** Whether a Quick Access preference replacement is in progress. */
+  isQuickAccessSaving?: boolean
+  /** Whether the Workspace-wide Project directory is the current route. */
+  isAllProjectsActive?: boolean
   /**
    * ルート要素へ追加する CSS class です。
    */
@@ -401,13 +459,24 @@ export type SidebarProps = {
    */
   onSelectTeamView?: (teamId: string, viewId: SidebarTeamViewId) => void
   /**
-   * チームが選択されたときに呼ばれます。
-   */
-  onSelectTeam?: (teamId: string) => void
-  /**
    * プロジェクトが選択されたときに呼ばれます。
    */
   onSelectProject?: (projectId: string, teamId: string) => void
+  /** Opens the complete Project index limited to Quick Access. */
+  onShowAllQuickAccess?: () => void
+  /** Opens the complete Workspace-wide Project directory. */
+  onShowAllProjects?: () => void
+  /** Moves a quick-access Project by one position. */
+  onMoveQuickAccessProject?: (
+    project: SidebarQuickAccessProject,
+    direction: 'up' | 'down',
+  ) => void | Promise<void>
+  /** Removes a Project from Quick Access. */
+  onRemoveQuickAccessProject?: (
+    projectId: string,
+    teamId: string,
+    projectName: string,
+  ) => void | Promise<void>
   /**
    * 展開中チーム ID 一覧が変わったときに呼ばれます。
    */
@@ -454,11 +523,14 @@ type SidebarArchiveTarget = {
   projectId?: string
 }
 
-const mainNavItems: MainNavItem[] = [
+const primaryNavItems: MainNavItem[] = [
   { id: 'home', icon: HomeIcon },
   { id: 'my-tasks', icon: CheckCircleIcon },
   { id: 'inbox', icon: BellIcon },
   { id: 'requests', icon: PanelIcon },
+]
+
+const secondaryNavItems: MainNavItem[] = [
   { id: 'documents', icon: DocumentIcon },
   { id: 'dashboard', icon: DashboardIcon },
   { id: 'planning', icon: PlanningIcon },
@@ -478,6 +550,22 @@ const defaultLabels: SidebarLabels = {
   expand: 'サイドバーを展開する',
   search: 'Workspace を検索',
   searchShortcut: 'Ctrl/⌘ K',
+  quickAccess: 'クイックアクセス',
+  manageQuickAccess: 'クイックアクセスを管理',
+  quickAccessEmpty: 'プロジェクトの星から追加できます',
+  showAllQuickAccess: 'すべて表示',
+  quickAccessDialogTitle: 'クイックアクセスを管理',
+  quickAccessDialogDescription: '表示順の変更や削除ができます。',
+  closeQuickAccessDialog: '閉じる',
+  moveQuickAccessUp: '上へ移動',
+  moveQuickAccessDown: '下へ移動',
+  removeQuickAccess: 'クイックアクセスから削除',
+  currentTeam: '現在のチーム',
+  switchTeam: 'チームを切り替える',
+  searchTeams: 'チームを検索',
+  noTeamsFound: '一致するチームがありません',
+  more: 'その他',
+  allProjects: 'すべてのプロジェクト',
   teamProjects: 'チーム / プロジェクト',
   createTeam: 'チームを追加',
   create: {
@@ -522,6 +610,7 @@ const defaultLabels: SidebarLabels = {
   teamOverview: 'チーム概要',
   issues: 'Issues',
   members: 'メンバー',
+  projectCount: (count) => `プロジェクト ${count}`,
   projectGroup: 'プロジェクト',
   unreadCount: (count) => `${count}件の未読`,
   nav: {
@@ -619,8 +708,13 @@ export function Sidebar({
   collapsed: controlledCollapsed,
   defaultCollapsed = false,
   defaultCreatePanelOpen = false,
+  defaultQuickAccessManagerOpen = false,
+  autoSelectInitialProject = true,
   inboxCount = 0,
   teams,
+  quickAccessProjects = [],
+  isQuickAccessSaving = false,
+  isAllProjectsActive = false,
   className = '',
   onCollapsedChange,
   onOpenSearch,
@@ -630,8 +724,11 @@ export function Sidebar({
   onArchiveProject,
   onSelectNav,
   onSelectTeamView,
-  onSelectTeam,
   onSelectProject,
+  onShowAllQuickAccess,
+  onShowAllProjects,
+  onMoveQuickAccessProject,
+  onRemoveQuickAccessProject,
   onExpandedTeamIdsChange,
 }: SidebarProps) {
   const resolvedLabels = resolveLabels(labels)
@@ -639,7 +736,13 @@ export function Sidebar({
     ? defaultActiveProjectTeamId ?? findProjectTeamId(teams, defaultActiveProjectId)
     : undefined
   const shouldSelectInitialProject =
-    controlledActiveNavId === undefined && defaultActiveNavId === undefined
+    autoSelectInitialProject &&
+    controlledActiveNavId === undefined &&
+    controlledActiveTeamId === undefined &&
+    controlledActiveTeamViewId === undefined &&
+    controlledActiveProjectId === undefined &&
+    controlledActiveProjectTeamId === undefined &&
+    defaultActiveNavId === undefined
   const initialTeamId =
     defaultActiveTeamId ?? defaultProjectTeamId ?? (shouldSelectInitialProject ? teams[0]?.id : undefined)
   const initialTeam = teams.find((team) => team.id === initialTeamId) ?? teams[0]
@@ -654,6 +757,11 @@ export function Sidebar({
     resolveDefaultCreateMode(teams, onCreateTeam, onCreateProject),
   )
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(defaultCreatePanelOpen)
+  const [isQuickAccessManagerOpen, setIsQuickAccessManagerOpen] =
+    useState(defaultQuickAccessManagerOpen)
+  const [isTeamSwitcherOpen, setIsTeamSwitcherOpen] = useState(false)
+  const [isMoreOpen, setIsMoreOpen] = useState(false)
+  const [teamSearchQuery, setTeamSearchQuery] = useState('')
   const [internalActiveNavId, setInternalActiveNavId] = useState<SidebarNavId | undefined>(
     defaultActiveNavId,
   )
@@ -676,7 +784,10 @@ export function Sidebar({
   const [archiveTarget, setArchiveTarget] = useState<SidebarArchiveTarget | undefined>()
   const archiveReturnFocusElementRef = useRef<HTMLElement | null>(null)
   const createButtonRef = useRef<HTMLButtonElement>(null)
+  const moreButtonRef = useRef<HTMLButtonElement>(null)
+  const quickAccessManageButtonRef = useRef<HTMLButtonElement>(null)
   const sidebarRef = useRef<HTMLElement>(null)
+  const teamSwitcherButtonRef = useRef<HTMLButtonElement>(null)
 
   const isCollapsed = controlledCollapsed ?? internalCollapsed
   const activeProjectId = controlledActiveProjectId ?? internalActiveProjectId
@@ -704,9 +815,18 @@ export function Sidebar({
     ? ensureIncludes(controlledExpandedTeamIds ?? uncontrolledExpandedTeamIds, projectTeamId)
     : controlledExpandedTeamIds ?? uncontrolledExpandedTeamIds
 
-  const navItems = mainNavItems.map((item) =>
+  const navItems = primaryNavItems.map((item) =>
     item.id === 'inbox' ? { ...item, badge: inboxCount } : item,
   )
+  const secondaryItems = secondaryNavItems
+  const currentTeam = teams.find((team) => team.id === activeTeamId) ?? teams[0]
+  const normalizedTeamSearchQuery = teamSearchQuery.trim().toLocaleLowerCase()
+  const filteredTeams = normalizedTeamSearchQuery
+    ? teams.filter((team) =>
+        team.name.toLocaleLowerCase().includes(normalizedTeamSearchQuery)
+      )
+    : teams
+  const visibleQuickAccessProjects = quickAccessProjects.slice(0, 5)
   const canCreate = Boolean(onCreateTeam || onCreateProject)
   const createDialogId = useId()
 
@@ -723,21 +843,6 @@ export function Sidebar({
     setArchiveTarget({ kind: 'team', name: team.name, teamId })
   }
 
-  const requestArchiveProject = (teamId: string, projectId: string) => {
-    const project = teams
-      .find((candidate) => candidate.id === teamId)
-      ?.projects?.find((candidate) => candidate.id === projectId)
-
-    if (!onArchiveProject || !project || archivingItemKey) {
-      return
-    }
-
-    archiveReturnFocusElementRef.current =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null
-    setArchiveErrorMessage(undefined)
-    setArchiveTarget({ kind: 'project', name: project.name, projectId, teamId })
-  }
-
   const confirmArchive = async () => {
     if (!archiveTarget || archivingItemKey) {
       return
@@ -745,7 +850,7 @@ export function Sidebar({
 
     const itemKey = archiveTarget.kind === 'team'
       ? createTeamArchiveKey(archiveTarget.teamId)
-      : createProjectArchiveKey(archiveTarget.teamId, archiveTarget.projectId ?? '')
+      : `project:${archiveTarget.teamId}:${archiveTarget.projectId ?? ''}`
 
     setArchiveErrorMessage(undefined)
     setArchivingItemKey(itemKey)
@@ -772,84 +877,35 @@ export function Sidebar({
   }
 
   const updateActiveNav = (navId: SidebarNavId) => {
-    if (controlledActiveNavId === undefined) {
-      setInternalActiveNavId(navId)
-    }
-    if (controlledActiveTeamId === undefined) {
-      setInternalActiveTeamId(undefined)
-    }
-    if (controlledActiveTeamViewId === undefined) {
-      setInternalActiveTeamViewId(undefined)
-    }
-    if (controlledActiveProjectId === undefined) {
-      setInternalActiveProjectId(undefined)
-    }
-    if (controlledActiveProjectTeamId === undefined) {
-      setInternalActiveProjectTeamId(undefined)
-    }
+    setInternalActiveNavId(navId)
+    setInternalActiveTeamId(undefined)
+    setInternalActiveTeamViewId(undefined)
+    setInternalActiveProjectId(undefined)
+    setInternalActiveProjectTeamId(undefined)
     onSelectNav?.(navId)
-  }
-
-  const updateActiveTeam = (teamId: string) => {
-    if (controlledActiveNavId === undefined) {
-      setInternalActiveNavId(undefined)
-    }
-    if (controlledActiveTeamId === undefined) {
-      setInternalActiveTeamId(teamId)
-    }
-    if (controlledActiveTeamViewId === undefined) {
-      setInternalActiveTeamViewId(undefined)
-    }
-    if (controlledActiveProjectId === undefined) {
-      setInternalActiveProjectId(undefined)
-    }
-    if (controlledActiveProjectTeamId === undefined) {
-      setInternalActiveProjectTeamId(undefined)
-    }
-    onSelectTeam?.(teamId)
   }
 
   const updateActiveProject = (projectId: string, teamId: string) => {
     const team = teams.find((candidate) => candidate.id === teamId)
 
     if (team) {
-      if (controlledActiveTeamId === undefined) {
-        setInternalActiveTeamId(team.id)
-      }
+      setInternalActiveTeamId(team.id)
       updateExpandedTeamIds(ensureIncludes(expandedTeamIds, team.id))
     }
 
-    if (controlledActiveNavId === undefined) {
-      setInternalActiveNavId(undefined)
-    }
-    if (controlledActiveTeamViewId === undefined) {
-      setInternalActiveTeamViewId(undefined)
-    }
-    if (controlledActiveProjectId === undefined) {
-      setInternalActiveProjectId(projectId)
-    }
-    if (controlledActiveProjectTeamId === undefined) {
-      setInternalActiveProjectTeamId(teamId)
-    }
+    setInternalActiveNavId(undefined)
+    setInternalActiveTeamViewId(undefined)
+    setInternalActiveProjectId(projectId)
+    setInternalActiveProjectTeamId(teamId)
     onSelectProject?.(projectId, teamId)
   }
 
   const updateActiveTeamView = (teamId: string, viewId: SidebarTeamViewId) => {
-    if (controlledActiveNavId === undefined) {
-      setInternalActiveNavId(undefined)
-    }
-    if (controlledActiveTeamId === undefined) {
-      setInternalActiveTeamId(teamId)
-    }
-    if (controlledActiveTeamViewId === undefined) {
-      setInternalActiveTeamViewId(viewId)
-    }
-    if (controlledActiveProjectId === undefined) {
-      setInternalActiveProjectId(undefined)
-    }
-    if (controlledActiveProjectTeamId === undefined) {
-      setInternalActiveProjectTeamId(undefined)
-    }
+    setInternalActiveNavId(undefined)
+    setInternalActiveTeamId(teamId)
+    setInternalActiveTeamViewId(viewId)
+    setInternalActiveProjectId(undefined)
+    setInternalActiveProjectTeamId(undefined)
     updateExpandedTeamIds(ensureIncludes(expandedTeamIds, teamId))
     onSelectTeamView?.(teamId, viewId)
   }
@@ -864,24 +920,6 @@ export function Sidebar({
     onExpandedTeamIdsChange?.(nextTeamIds)
   }
 
-  const toggleTeam = (teamId: string) => {
-    const isExpanded = expandedTeamIds.includes(teamId)
-    const nextTeamIds = isExpanded
-      ? expandedTeamIds.filter((expandedTeamId) => expandedTeamId !== teamId)
-      : [...expandedTeamIds, teamId]
-
-    if (controlledExpandedTeamIds === undefined) {
-      setInternalCollapsedTeamIds((currentTeamIds) =>
-        isExpanded
-          ? ensureIncludes(currentTeamIds, teamId)
-          : currentTeamIds.filter((expandedTeamId) => expandedTeamId !== teamId),
-      )
-    }
-
-    updateActiveTeam(teamId)
-    updateExpandedTeamIds(nextTeamIds)
-  }
-
   const openCreateModal = () => {
     setCreateModalDefaultMode(resolveDefaultCreateMode(teams, onCreateTeam, onCreateProject))
     setIsCreateModalOpen(true)
@@ -890,10 +928,10 @@ export function Sidebar({
   return (
     <>
       <aside
-        className={`flex h-dvh max-h-dvh min-h-0 flex-none flex-col overflow-hidden bg-[var(--workbench-sidebar)] py-4 text-white shadow-[1px_0_0_rgba(255,255,255,0.08)] transition-[width,padding] duration-200 min-[981px]:h-svh min-[981px]:max-h-svh ${isCollapsed ? 'w-[76px] px-3' : 'w-[292px] max-w-[calc(100vw-32px)] px-4'} ${className}`}
+        className={`relative flex h-dvh max-h-dvh min-h-0 flex-none flex-col overflow-hidden bg-[var(--workbench-sidebar)] py-4 text-white shadow-[1px_0_0_rgba(255,255,255,0.08)] transition-[width,padding] duration-200 min-[981px]:h-svh min-[981px]:max-h-svh ${isCollapsed ? 'w-[76px] px-3' : 'w-[292px] max-w-[calc(100vw-32px)] px-4'} ${className}`}
         aria-label={resolvedLabels.ariaLabel}
         data-collapsed={isCollapsed}
-        inert={isCreateModalOpen || archiveTarget ? true : undefined}
+        inert={isCreateModalOpen || isQuickAccessManagerOpen || archiveTarget ? true : undefined}
         ref={sidebarRef}
         tabIndex={-1}
       >
@@ -962,50 +1000,161 @@ export function Sidebar({
           ))}
         </nav>
 
-        {!isCollapsed ? (
-          <div className="mt-6 flex flex-none items-center justify-between px-1 text-app-meta font-semibold text-slate-200">
-            <span className="truncate">{resolvedLabels.teamProjects}</span>
-            {canCreate ? (
-              <button
-                ref={createButtonRef}
-                className={`grid h-8 w-8 place-items-center rounded-lg text-slate-100 transition hover:bg-white/10 ${isCreateModalOpen ? 'bg-white/10 text-white' : ''}`}
-                type="button"
-                aria-controls={isCreateModalOpen ? createDialogId : undefined}
-                aria-expanded={isCreateModalOpen}
-                aria-haspopup="dialog"
-                aria-label={resolvedLabels.create.title}
-                title={resolvedLabels.create.title}
-                onClick={openCreateModal}
-              >
-                <PlusIcon className="h-5 w-5" />
-              </button>
+        <div className="mt-5 min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1">
+          <section aria-label={resolvedLabels.quickAccess}>
+            {!isCollapsed ? (
+              <div className="flex h-8 items-center justify-between px-1 text-app-meta font-semibold uppercase tracking-[0.08em] text-slate-300">
+                <span className="truncate">{resolvedLabels.quickAccess}</span>
+                <button
+                  ref={quickAccessManageButtonRef}
+                  aria-expanded={isQuickAccessManagerOpen}
+                  aria-haspopup="dialog"
+                  aria-label={resolvedLabels.manageQuickAccess}
+                  className="grid h-8 w-8 place-items-center rounded-lg text-slate-200 transition hover:bg-white/10 hover:text-white"
+                  onClick={() => setIsQuickAccessManagerOpen(true)}
+                  title={resolvedLabels.manageQuickAccess}
+                  type="button"
+                >
+                  <MoreHorizontalIcon className="h-5 w-5" />
+                </button>
+              </div>
             ) : null}
-          </div>
-        ) : null}
+            <div className="mt-1 space-y-1">
+              {visibleQuickAccessProjects.map((project) => (
+                <QuickAccessProjectButton
+                  key={`${project.teamId}\u0000${project.projectId}`}
+                  active={
+                    activeProjectId === project.projectId &&
+                    (activeProjectTeamId === undefined || activeProjectTeamId === project.teamId)
+                  }
+                  collapsed={isCollapsed}
+                  project={project}
+                  onSelect={updateActiveProject}
+                />
+              ))}
+              {quickAccessProjects.length === 0 && !isCollapsed ? (
+                <p className="px-2 py-1.5 text-app-caption leading-5 text-slate-400">
+                  {resolvedLabels.quickAccessEmpty}
+                </p>
+              ) : null}
+              {quickAccessProjects.length > 5 && !isCollapsed && onShowAllQuickAccess ? (
+                <button
+                  className="min-h-8 w-full rounded-lg px-2 text-left text-app-meta font-semibold text-teal-200 transition hover:bg-white/10 hover:text-teal-100"
+                  onClick={onShowAllQuickAccess}
+                  type="button"
+                >
+                  {resolvedLabels.showAllQuickAccess}
+                </button>
+              ) : null}
+            </div>
+          </section>
 
-        <div className="mt-2 min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1">
-          <div className={isCollapsed ? 'space-y-1' : 'space-y-2'}>
-            {teams.map((team) => (
-              <TeamGroup
-                key={team.id}
-                team={team}
-                activeTeamId={activeTeamId}
-                activeTeamViewId={activeTeamViewId}
-                activeProjectId={activeProjectId}
-                activeProjectTeamId={activeProjectTeamId}
-                projectTeamId={projectTeamId}
-                labels={resolvedLabels}
-                collapsed={isCollapsed}
-                expanded={expandedTeamIds.includes(team.id)}
-                archivingItemKey={archivingItemKey}
-                onArchiveProject={onArchiveProject ? requestArchiveProject : undefined}
-                onArchiveTeam={onArchiveTeam ? requestArchiveTeam : undefined}
-                onToggleTeam={toggleTeam}
-                onSelectTeamView={updateActiveTeamView}
-                onSelectProject={updateActiveProject}
-              />
-            ))}
-          </div>
+          <section aria-label={resolvedLabels.currentTeam} className="mt-5">
+            {!isCollapsed ? (
+              <p className="px-1 text-app-meta font-semibold uppercase tracking-[0.08em] text-slate-300">
+                {resolvedLabels.currentTeam}
+              </p>
+            ) : null}
+            {currentTeam ? (
+              <div className="relative mt-1">
+                <button
+                  ref={teamSwitcherButtonRef}
+                  aria-expanded={isTeamSwitcherOpen}
+                  aria-haspopup="dialog"
+                  aria-label={isCollapsed ? `${resolvedLabels.switchTeam}: ${currentTeam.name}` : undefined}
+                  className={`flex h-10 w-full items-center gap-3 rounded-lg text-left font-semibold text-white transition hover:bg-white/10 ${isCollapsed ? 'justify-center px-0' : 'px-2'}`}
+                  onClick={() => {
+                    setIsMoreOpen(false)
+                    if (isCollapsed && !isTeamSwitcherOpen) {
+                      updateCollapsed(false)
+                    }
+                    setIsTeamSwitcherOpen((value) => !value)
+                  }}
+                  title={isCollapsed ? currentTeam.name : resolvedLabels.switchTeam}
+                  type="button"
+                >
+                  <TeamAvatar name={currentTeam.name} />
+                  <span className={isCollapsed ? 'sr-only' : 'min-w-0 flex-1 truncate'}>
+                    {currentTeam.name}
+                  </span>
+                  {isCollapsed ? null : <ChevronDownIcon className="h-4 w-4 flex-none" />}
+                </button>
+                {isTeamSwitcherOpen ? (
+                  <div
+                    aria-label={resolvedLabels.switchTeam}
+                    className="mt-1 rounded-xl border border-white/10 bg-[#21302c] p-2 shadow-xl"
+                    onKeyDown={(event) => {
+                      if (event.key === 'Escape') {
+                        event.preventDefault()
+                        setIsTeamSwitcherOpen(false)
+                        setTeamSearchQuery('')
+                        window.requestAnimationFrame(() => {
+                          teamSwitcherButtonRef.current?.focus()
+                        })
+                      } else if (event.key === 'Tab') {
+                        trapFocus(event.nativeEvent, event.currentTarget)
+                      }
+                    }}
+                    role="dialog"
+                  >
+                    <label className={isCollapsed ? 'sr-only' : 'block'}>
+                      <span className="sr-only">{resolvedLabels.searchTeams}</span>
+                      <span className="relative block">
+                        <SearchIcon className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-slate-400" />
+                        <input
+                          autoFocus
+                          className="h-9 w-full rounded-lg border border-white/10 bg-black/15 pl-8 pr-2 text-sm text-white outline-none placeholder:text-slate-400 focus:border-teal-400"
+                          onChange={(event) => setTeamSearchQuery(event.currentTarget.value)}
+                          placeholder={resolvedLabels.searchTeams}
+                          value={teamSearchQuery}
+                        />
+                      </span>
+                    </label>
+                    <div className={`mt-1 max-h-48 overflow-y-auto ${isCollapsed ? 'min-w-0' : ''}`}>
+                      {filteredTeams.map((team) => (
+                        <button
+                          aria-current={team.id === currentTeam.id ? 'true' : undefined}
+                          className={`flex min-h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-sm transition hover:bg-white/10 ${team.id === currentTeam.id ? 'bg-teal-500/20 text-white' : 'text-slate-200'}`}
+                          key={team.id}
+                          onClick={() => {
+                            updateActiveTeamView(team.id, 'overview')
+                            setIsTeamSwitcherOpen(false)
+                            setTeamSearchQuery('')
+                            window.requestAnimationFrame(() => {
+                              teamSwitcherButtonRef.current?.focus()
+                            })
+                          }}
+                          title={team.name}
+                          type="button"
+                        >
+                          <TeamAvatar name={team.name} />
+                          <span className={isCollapsed ? 'sr-only' : 'truncate'}>{team.name}</span>
+                        </button>
+                      ))}
+                      {filteredTeams.length === 0 && !isCollapsed ? (
+                        <p className="px-2 py-3 text-app-caption text-slate-400">
+                          {resolvedLabels.noTeamsFound}
+                        </p>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
+                <CurrentTeamNavigation
+                  activeTeamId={activeTeamId}
+                  activeTeamViewId={activeTeamViewId}
+                  collapsed={isCollapsed}
+                  labels={resolvedLabels}
+                  team={currentTeam}
+                  onSelectTeamView={updateActiveTeamView}
+                />
+              </div>
+            ) : !isCollapsed ? (
+              <p className="px-2 py-2 text-app-caption text-slate-400">
+                {resolvedLabels.create.noTeams}
+              </p>
+            ) : null}
+          </section>
+
           {archiveErrorMessage && !isCollapsed ? (
             <p className="mt-3 rounded-lg border border-red-300/20 bg-red-500/12 px-3 py-2 text-app-caption font-bold leading-5 text-red-100" role="alert">
               {archiveErrorMessage}
@@ -1013,7 +1162,106 @@ export function Sidebar({
           ) : null}
         </div>
 
-        <nav className="mt-3 flex-none space-y-1 border-t border-white/10 pt-3" aria-label={resolvedLabels.utilityNavigation}>
+        <div
+          className="relative mt-3 flex-none border-t border-white/10 pt-3"
+          onKeyDown={(event) => {
+            if (event.key === 'Escape' && isMoreOpen) {
+              event.preventDefault()
+              setIsMoreOpen(false)
+              window.requestAnimationFrame(() => moreButtonRef.current?.focus())
+            }
+          }}
+        >
+          <button
+            ref={moreButtonRef}
+            aria-expanded={isMoreOpen}
+            aria-haspopup="true"
+            className={`flex h-9 w-full items-center gap-3 rounded-lg text-left text-app-body font-medium text-slate-100 transition hover:bg-white/10 hover:text-white ${isCollapsed ? 'justify-center px-0' : 'px-2'} ${secondaryItems.some((item) => item.id === activeNavId) || isAllProjectsActive ? 'bg-teal-500/20 text-white' : ''}`}
+            onClick={() => {
+              setIsTeamSwitcherOpen(false)
+              if (isCollapsed && !isMoreOpen) {
+                updateCollapsed(false)
+              }
+              setIsMoreOpen((value) => !value)
+            }}
+            title={resolvedLabels.more}
+            type="button"
+          >
+            <MoreHorizontalIcon className="h-5 w-5 flex-none" />
+            <span className={isCollapsed ? 'sr-only' : 'truncate'}>{resolvedLabels.more}</span>
+            {isCollapsed ? null : <ChevronDownIcon className="ml-auto h-4 w-4" />}
+          </button>
+          {isMoreOpen ? (
+            <div
+              className="mt-1 space-y-1 rounded-xl border border-white/10 bg-[#21302c] p-1.5 shadow-xl"
+            >
+              {onShowAllProjects ? (
+                <button
+                  aria-current={isAllProjectsActive ? 'page' : undefined}
+                  className={`flex h-9 w-full items-center gap-3 rounded-lg px-2 text-left text-app-body font-medium text-slate-100 transition hover:bg-white/10 ${isAllProjectsActive ? 'bg-teal-500/20 text-white' : ''}`}
+                  onClick={() => {
+                    setIsMoreOpen(false)
+                    onShowAllProjects()
+                  }}
+                  type="button"
+                >
+                  <ProjectGridIcon className="h-5 w-5 flex-none" />
+                  <span className="truncate">{resolvedLabels.allProjects}</span>
+                </button>
+              ) : null}
+              {secondaryItems.map((item) => (
+                <NavButton
+                  key={item.id}
+                  active={activeNavId === item.id}
+                  collapsed={isCollapsed}
+                  id={item.id}
+                  icon={item.icon}
+                  label={resolvedLabels.nav[item.id]}
+                  unreadCount={resolvedLabels.unreadCount}
+                  onSelect={(navId) => {
+                    setIsMoreOpen(false)
+                    updateActiveNav(navId)
+                  }}
+                />
+              ))}
+              {canCreate ? (
+                <button
+                  ref={createButtonRef}
+                  aria-controls={isCreateModalOpen ? createDialogId : undefined}
+                  aria-haspopup="dialog"
+                  className={`flex h-9 w-full items-center gap-3 rounded-lg text-left text-app-body font-medium text-slate-100 transition hover:bg-white/10 ${isCollapsed ? 'justify-center px-0' : 'px-2'}`}
+                  onClick={() => {
+                    setIsMoreOpen(false)
+                    openCreateModal()
+                  }}
+                  title={resolvedLabels.create.title}
+                  type="button"
+                >
+                  <PlusIcon className="h-5 w-5 flex-none" />
+                  <span className={isCollapsed ? 'sr-only' : 'truncate'}>{resolvedLabels.create.title}</span>
+                </button>
+              ) : null}
+              {currentTeam && onArchiveTeam ? (
+                <button
+                  className={`flex h-9 w-full items-center gap-3 rounded-lg text-left text-app-body font-medium text-slate-300 transition hover:bg-red-500/15 hover:text-red-100 ${isCollapsed ? 'justify-center px-0' : 'px-2'}`}
+                  onClick={() => {
+                    setIsMoreOpen(false)
+                    requestArchiveTeam(currentTeam.id)
+                  }}
+                  title={resolvedLabels.archive.team(currentTeam.name)}
+                  type="button"
+                >
+                  <ArchiveIcon className="h-5 w-5 flex-none" />
+                  <span className={isCollapsed ? 'sr-only' : 'truncate'}>
+                    {resolvedLabels.archive.team(currentTeam.name)}
+                  </span>
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+
+        <nav className="mt-2 flex-none space-y-1" aria-label={resolvedLabels.utilityNavigation}>
           {utilityNavItems.map((item) => (
             <NavButton
               key={item.id}
@@ -1028,6 +1276,22 @@ export function Sidebar({
           ))}
         </nav>
       </aside>
+      {isQuickAccessManagerOpen ? (
+        <SidebarQuickAccessManagerModal
+          isBusy={isQuickAccessSaving}
+          labels={resolvedLabels}
+          projects={quickAccessProjects}
+          returnFocusRef={quickAccessManageButtonRef}
+          onMove={onMoveQuickAccessProject}
+          onRemove={onRemoveQuickAccessProject
+            ? async (projectId, teamId, projectName) => {
+                setIsQuickAccessManagerOpen(false)
+                await onRemoveQuickAccessProject(projectId, teamId, projectName)
+              }
+            : undefined}
+          onRequestClose={() => setIsQuickAccessManagerOpen(false)}
+        />
+      ) : null}
       {canCreate && isCreateModalOpen ? (
         <SidebarRegistrationModal
           defaultMode={createModalDefaultMode}
@@ -1059,6 +1323,159 @@ export function Sidebar({
         />
       ) : null}
     </>
+  )
+}
+
+/** Props accepted by the Quick Access ordering and removal dialog. */
+type SidebarQuickAccessManagerModalProps = {
+  /** Whether a preference replacement is currently in progress. */
+  isBusy: boolean
+  /** Resolved sidebar labels. */
+  labels: SidebarLabels
+  /** Complete ordered shortcut collection. */
+  projects: SidebarQuickAccessProject[]
+  /** Trigger that regains focus after the dialog closes. */
+  returnFocusRef: RefObject<HTMLButtonElement | null>
+  /** Moves one Project by one stable-order position. */
+  onMove?: (
+    project: SidebarQuickAccessProject,
+    direction: 'up' | 'down',
+  ) => void | Promise<void>
+  /** Removes one Project shortcut. */
+  onRemove?: (
+    projectId: string,
+    teamId: string,
+    projectName: string,
+  ) => void | Promise<void>
+  /** Requests that the modal close. */
+  onRequestClose: () => void
+}
+
+/** Renders accessible Quick Access ordering and removal controls. */
+function SidebarQuickAccessManagerModal({
+  isBusy,
+  labels,
+  projects,
+  returnFocusRef,
+  onMove,
+  onRemove,
+  onRequestClose,
+}: SidebarQuickAccessManagerModalProps) {
+  const dialogRef = useRef<HTMLElement>(null)
+  const titleId = useId()
+
+  useEffect(() => {
+    const returnFocusElement = returnFocusRef.current
+    findInitialFocusableElement(dialogRef.current)?.focus()
+    return () => returnFocusElement?.focus()
+  }, [returnFocusRef])
+
+  return (
+    <div
+      className="fixed inset-0 z-[80] grid place-items-center bg-slate-950/55 p-4 backdrop-blur-[2px]"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !isBusy) onRequestClose()
+      }}
+    >
+      <section
+        aria-busy={isBusy}
+        aria-labelledby={titleId}
+        aria-modal="true"
+        className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-5 text-[var(--workbench-text)] shadow-[0_24px_80px_rgba(15,23,42,0.28)]"
+        onKeyDown={(event) => {
+          if (event.key === 'Escape' && !isBusy) {
+            event.preventDefault()
+            onRequestClose()
+          } else if (event.key === 'Tab') {
+            trapFocus(event.nativeEvent, dialogRef.current ?? event.currentTarget)
+          }
+        }}
+        ref={dialogRef}
+        role="dialog"
+      >
+        <header className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-bold" id={titleId}>{labels.quickAccessDialogTitle}</h2>
+            <p className="mt-1 text-sm leading-6 text-[var(--workbench-muted)]">
+              {labels.quickAccessDialogDescription}
+            </p>
+          </div>
+          <button
+            aria-label={labels.closeQuickAccessDialog}
+            className="grid h-9 w-9 flex-none place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 disabled:opacity-50"
+            data-autofocus
+            disabled={isBusy}
+            onClick={onRequestClose}
+            type="button"
+          >
+            <XIcon className="h-5 w-5" />
+          </button>
+        </header>
+
+        {projects.length === 0 ? (
+          <p className="mt-5 rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">
+            {labels.quickAccessEmpty}
+          </p>
+        ) : (
+          <ol className="mt-5 max-h-[min(52vh,420px)] space-y-2 overflow-y-auto pr-1">
+            {projects.map((project, index) => {
+              const tone = project.tone ?? 'blue'
+              const isMoveUpDisabled = isBusy || index === 0 || !onMove
+              const isMoveDownDisabled = isBusy || index === projects.length - 1 || !onMove
+              return (
+                <li
+                  className="flex min-h-14 items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-sm"
+                  key={`${project.teamId}\u0000${project.projectId}`}
+                >
+                  <ProjectGlyph tone={tone} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-semibold">{project.name}</span>
+                    <span className="block truncate text-xs text-slate-500">{project.teamName}</span>
+                  </span>
+                  <span className="flex flex-none items-center gap-1">
+                    <button
+                      aria-label={`${labels.moveQuickAccessUp}: ${project.name}`}
+                      aria-disabled={isMoveUpDisabled}
+                      className="grid h-8 w-8 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 aria-disabled:cursor-not-allowed aria-disabled:opacity-30"
+                      onClick={() => {
+                        if (!isMoveUpDisabled) void onMove?.(project, 'up')
+                      }}
+                      type="button"
+                    >
+                      <ChevronDownIcon className="h-4 w-4 rotate-180" />
+                    </button>
+                    <button
+                      aria-label={`${labels.moveQuickAccessDown}: ${project.name}`}
+                      aria-disabled={isMoveDownDisabled}
+                      className="grid h-8 w-8 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 aria-disabled:cursor-not-allowed aria-disabled:opacity-30"
+                      onClick={() => {
+                        if (!isMoveDownDisabled) void onMove?.(project, 'down')
+                      }}
+                      type="button"
+                    >
+                      <ChevronDownIcon className="h-4 w-4" />
+                    </button>
+                    <button
+                      aria-label={`${labels.removeQuickAccess}: ${project.name}`}
+                      className="grid h-8 w-8 place-items-center rounded-lg text-slate-500 transition hover:bg-red-50 hover:text-red-700 disabled:opacity-30"
+                      disabled={isBusy || !onRemove}
+                      onClick={() => void onRemove?.(
+                        project.projectId,
+                        project.teamId,
+                        project.name,
+                      )}
+                      type="button"
+                    >
+                      <XIcon className="h-4 w-4" />
+                    </button>
+                  </span>
+                </li>
+              )
+            })}
+          </ol>
+        )}
+      </section>
+    </div>
   )
 }
 
@@ -1744,257 +2161,167 @@ function NavButton({
   )
 }
 
-function TeamGroup({
-  team,
+/** Renders the four stable views owned by the single current Team. */
+function CurrentTeamNavigation({
   activeTeamId,
   activeTeamViewId,
-  activeProjectId,
-  activeProjectTeamId,
-  projectTeamId,
-  labels,
   collapsed,
-  expanded,
-  archivingItemKey,
-  onArchiveTeam,
-  onArchiveProject,
-  onToggleTeam,
+  labels,
+  team,
   onSelectTeamView,
-  onSelectProject,
 }: {
-  team: SidebarTeam
+  /** Team ID highlighted by the current route. */
   activeTeamId?: string
+  /** Team view highlighted by the current route. */
   activeTeamViewId?: SidebarTeamViewId
-  activeProjectId?: string
-  activeProjectTeamId?: string | null
-  projectTeamId?: string
-  labels: SidebarLabels
+  /** Whether only icons are visible. */
   collapsed: boolean
-  expanded: boolean
-  archivingItemKey?: string
-  onArchiveTeam?: (teamId: string) => void
-  onArchiveProject?: (teamId: string, projectId: string) => void
-  onToggleTeam: (teamId: string) => void
+  /** Resolved sidebar labels. */
+  labels: SidebarLabels
+  /** Current Team whose views are displayed. */
+  team: SidebarTeam
+  /** Navigates to one current-Team view. */
   onSelectTeamView: (teamId: string, viewId: SidebarTeamViewId) => void
-  onSelectProject?: (projectId: string, teamId: string) => void
 }) {
   const isTeamActive = activeTeamId === team.id
-  const isProjectAncestor = projectTeamId === team.id && activeProjectId !== undefined
-  const isCurrentTeam = isTeamActive && !activeProjectId && !activeTeamViewId
 
   return (
-    <div
-      data-project-ancestor={isProjectAncestor ? 'true' : 'false'}
-      data-team-active={isTeamActive ? 'true' : 'false'}
-      data-testid={`sidebar-team-${team.id}`}
-    >
-      <div className="relative">
-        {isTeamActive || isProjectAncestor ? (
-          <span className="absolute inset-y-0 left-0 w-1 rounded-full bg-teal-400" aria-hidden="true" />
-        ) : null}
-        <div className={`flex items-center gap-1 ${collapsed ? 'justify-center' : ''}`}>
-          <button
-            className={`group flex h-9 min-w-0 flex-1 items-center gap-3 rounded-lg py-2 text-left text-app-body font-medium transition ${collapsed ? 'justify-center px-0' : 'pl-3 pr-2'} ${
-              isCurrentTeam
-                ? 'bg-teal-500/20 text-white shadow-[inset_0_0_0_1px_rgba(45,212,191,0.14)]'
-                : isTeamActive || isProjectAncestor
-                  ? 'bg-white/8 text-white'
-                  : 'text-slate-100 hover:bg-white/10 hover:text-white'
-            }`}
-            type="button"
-            aria-current={isCurrentTeam ? 'page' : undefined}
-            aria-expanded={collapsed ? undefined : expanded}
-            aria-label={collapsed ? team.name : undefined}
-            title={collapsed ? team.name : undefined}
-            onClick={() => onToggleTeam(team.id)}
-          >
-            <UsersIcon className="h-5 w-5 flex-none text-slate-100" />
-            <span className={collapsed ? 'sr-only' : 'min-w-0 flex-1 truncate'}>{team.name}</span>
-            {collapsed ? null : isCurrentTeam ? (
-              <MoreHorizontalIcon className="h-5 w-5 flex-none text-slate-200" />
-            ) : (
-              <ChevronDownIcon
-                className={`h-4 w-4 flex-none text-slate-200 transition-transform ${expanded ? 'rotate-0' : '-rotate-90'}`}
-              />
-            )}
-          </button>
-          {!collapsed && onArchiveTeam ? (
-            <ArchiveButton
-              disabled={Boolean(archivingItemKey)}
-              isArchiving={archivingItemKey === createTeamArchiveKey(team.id)}
-              label={labels.archive.team(team.name)}
-              loadingLabel={labels.archive.archiving}
-              onClick={() => onArchiveTeam(team.id)}
-            />
-          ) : null}
-        </div>
-      </div>
-
-      {!collapsed && expanded ? (
-        <div className="mt-1.5 space-y-0.5 pl-8">
-          <SubNavButton
-            active={isTeamActive && activeTeamViewId === 'overview'}
-            icon={PanelIcon}
-            label={labels.teamOverview}
-            onClick={() => onSelectTeamView(team.id, 'overview')}
-          />
-          <SubNavButton
-            active={isTeamActive && activeTeamViewId === 'issues'}
-            icon={CheckCircleIcon}
-            label={labels.issues}
-            onClick={() => onSelectTeamView(team.id, 'issues')}
-          />
-          <SubNavButton
-            active={isTeamActive && activeTeamViewId === 'members'}
-            icon={UsersIcon}
-            label={labels.members}
-            onClick={() => onSelectTeamView(team.id, 'members')}
-          />
-          <div className="flex h-7 items-center gap-2 px-1 text-app-meta font-medium text-slate-100">
-            <ChevronDownIcon className="h-4 w-4 flex-none" />
-            <span className="truncate">{labels.projectGroup}</span>
-          </div>
-          <div className="space-y-1 pl-5">
-            {team.projects?.map((project) => (
-              <ProjectButton
-                key={project.id}
-                project={project}
-                active={
-                  project.id === activeProjectId &&
-                  (activeProjectTeamId === undefined || activeProjectTeamId === team.id)
-                }
-                archivingItemKey={archivingItemKey}
-                archiveLabels={labels.archive}
-                teamId={team.id}
-                onArchiveProject={onArchiveProject}
-                onSelectProject={(projectId) => onSelectProject?.(projectId, team.id)}
-              />
-            ))}
-          </div>
-        </div>
-      ) : null}
+    <div className={`mt-1 space-y-0.5 ${collapsed ? '' : 'pl-3'}`} data-testid={`sidebar-team-${team.id}`}>
+      <SubNavButton
+        active={isTeamActive && activeTeamViewId === 'overview'}
+        collapsed={collapsed}
+        icon={PanelIcon}
+        label={labels.teamOverview}
+        onClick={() => onSelectTeamView(team.id, 'overview')}
+      />
+      <SubNavButton
+        active={isTeamActive && activeTeamViewId === 'issues'}
+        collapsed={collapsed}
+        icon={CheckCircleIcon}
+        label={labels.issues}
+        onClick={() => onSelectTeamView(team.id, 'issues')}
+      />
+      <SubNavButton
+        active={isTeamActive && activeTeamViewId === 'projects'}
+        collapsed={collapsed}
+        icon={ProjectGridIcon}
+        label={labels.projectCount(team.projects?.length ?? 0)}
+        onClick={() => onSelectTeamView(team.id, 'projects')}
+      />
+      <SubNavButton
+        active={isTeamActive && activeTeamViewId === 'members'}
+        collapsed={collapsed}
+        icon={UsersIcon}
+        label={labels.members}
+        onClick={() => onSelectTeamView(team.id, 'members')}
+      />
     </div>
   )
 }
 
+/** Renders one ordered quick-access shortcut in expanded and collapsed modes. */
+function QuickAccessProjectButton({
+  active,
+  collapsed,
+  project,
+  onSelect,
+}: {
+  /** Whether the shortcut represents the current route. */
+  active: boolean
+  /** Whether only the Project glyph is visible. */
+  collapsed: boolean
+  /** Resolved Team-owned Project shortcut. */
+  project: SidebarQuickAccessProject
+  /** Opens the Project within its saved Team context. */
+  onSelect: (projectId: string, teamId: string) => void
+}) {
+  const tone = project.tone ?? 'blue'
+  const accessibleLabel = `${project.name} · ${project.teamName}`
+
+  return (
+    <button
+      aria-current={active ? 'page' : undefined}
+      aria-label={collapsed ? accessibleLabel : undefined}
+      className={`relative flex h-9 w-full items-center gap-3 rounded-lg text-left text-app-body font-medium transition hover:bg-white/10 hover:text-white ${collapsed ? 'justify-center px-0' : 'px-2'} ${active ? 'bg-teal-500/20 text-white' : 'text-slate-100'}`}
+      onClick={() => onSelect(project.projectId, project.teamId)}
+      title={collapsed ? accessibleLabel : project.teamName}
+      type="button"
+    >
+      {active ? (
+        <span aria-hidden="true" className="absolute inset-y-1 left-0 w-1 rounded-full bg-teal-400" />
+      ) : null}
+      <ProjectGlyph tone={tone} />
+      <span className={collapsed ? 'sr-only' : 'min-w-0 flex-1 truncate'}>{project.name}</span>
+    </button>
+  )
+}
+
+/** Renders a compact Team avatar with a meaningful text initial. */
+function TeamAvatar({ name }: { /** Team name used to derive the initial. */ name: string }) {
+  const initial = name.trim().charAt(0).toUpperCase() || 'T'
+  return (
+    <span aria-hidden="true" className="grid h-6 w-6 flex-none place-items-center rounded-md bg-teal-400/15 text-[11px] font-bold text-teal-100 ring-1 ring-inset ring-teal-300/30">
+      {initial}
+    </span>
+  )
+}
+
+/** Renders the shared Project glyph used by sidebar shortcuts. */
+function ProjectGlyph({ tone }: { /** Visual tone assigned to the Project. */ tone: SidebarProjectTone }) {
+  return (
+    <span
+      aria-hidden="true"
+      className={`grid h-[18px] w-[18px] flex-none place-items-center rounded-[5px] border ${projectToneClasses[tone]}`}
+    >
+      <span className="h-[7px] w-[8px] rounded-[2px] border border-current" />
+    </span>
+  )
+}
+
+/** Props accepted by one compact Team sub-navigation control. */
+type SubNavButtonProps = {
+  /** Whether this sub-navigation destination is current. */
+  active: boolean
+  /** Whether only the icon should remain visually exposed. */
+  collapsed: boolean
+  /** Icon rendered before the destination label. */
+  icon: ComponentType<SidebarIconProps>
+  /** Visible and accessible destination label. */
+  label: string
+  /** Selects the destination. */
+  onClick: () => void
+}
+
+/** Renders one compact destination inside the current Team navigation. */
 function SubNavButton({
   active,
+  collapsed,
   icon: Icon,
   label,
   onClick,
-}: {
-  active: boolean
-  icon: ComponentType<SidebarIconProps>
-  label: string
-  onClick: () => void
-}) {
+}: SubNavButtonProps) {
   return (
     <button
-      className={`relative flex h-7 w-full items-center gap-3 rounded-lg px-1 text-left text-app-meta font-medium transition hover:bg-white/10 hover:text-white ${
+      aria-label={collapsed ? label : undefined}
+      className={`relative flex h-8 w-full items-center gap-3 rounded-lg text-left text-app-meta font-medium transition hover:bg-white/10 hover:text-white ${collapsed ? 'justify-center px-0' : 'px-2'} ${
         active ? 'bg-teal-500/20 text-white' : 'text-slate-100'
       }`}
       type="button"
       aria-current={active ? 'page' : undefined}
+      title={collapsed ? label : undefined}
       onClick={onClick}
     >
       {active ? (
         <span className="absolute inset-y-1 left-0 w-1 rounded-full bg-teal-400" aria-hidden="true" />
       ) : null}
       <Icon className="h-[18px] w-[18px] flex-none text-slate-100" />
-      <span className="min-w-0 truncate">{label}</span>
-    </button>
-  )
-}
-
-function ProjectButton({
-  project,
-  active,
-  archivingItemKey,
-  archiveLabels,
-  teamId,
-  onArchiveProject,
-  onSelectProject,
-}: {
-  project: SidebarProject
-  active: boolean
-  archivingItemKey?: string
-  archiveLabels: SidebarArchiveLabels
-  teamId: string
-  onArchiveProject?: (teamId: string, projectId: string) => void
-  onSelectProject?: (projectId: string) => void
-}) {
-  const tone = project.tone ?? 'blue'
-
-  return (
-    <div className="flex items-center gap-1">
-      <button
-        className={`relative flex h-8 min-w-0 flex-1 items-center gap-3 rounded-lg py-2 pl-3 pr-2 text-left text-app-meta font-medium transition ${
-          active
-            ? 'bg-teal-500/20 text-white shadow-[inset_0_0_0_1px_rgba(45,212,191,0.14)]'
-            : 'text-slate-100 hover:bg-white/10 hover:text-white'
-        }`}
-        type="button"
-        onClick={() => onSelectProject?.(project.id)}
-        aria-current={active ? 'page' : undefined}
-      >
-        {active ? (
-          <span className="absolute inset-y-1 left-0 w-1 rounded-full bg-teal-400" aria-hidden="true" />
-        ) : null}
-        <span
-          className={`grid h-[17px] w-[17px] flex-none place-items-center rounded-[4px] border ${projectToneClasses[tone]}`}
-          aria-hidden="true"
-        >
-          <span className="h-[7px] w-[8px] rounded-[2px] border border-current" />
-        </span>
-        <span className="min-w-0 truncate">{project.name}</span>
-      </button>
-      {onArchiveProject ? (
-        <ArchiveButton
-          disabled={Boolean(archivingItemKey)}
-          isArchiving={archivingItemKey === createProjectArchiveKey(teamId, project.id)}
-          label={archiveLabels.project(project.name)}
-          loadingLabel={archiveLabels.archiving}
-          onClick={() => onArchiveProject(teamId, project.id)}
-        />
-      ) : null}
-    </div>
-  )
-}
-
-function ArchiveButton({
-  disabled,
-  isArchiving,
-  label,
-  loadingLabel,
-  onClick,
-}: {
-  disabled: boolean
-  isArchiving: boolean
-  label: string
-  loadingLabel: string
-  onClick: () => void
-}) {
-  const accessibleLabel = isArchiving ? loadingLabel : label
-
-  return (
-    <button
-      className="grid h-8 w-8 flex-none place-items-center rounded-lg text-slate-300 transition hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:text-slate-500"
-      type="button"
-      aria-label={accessibleLabel}
-      title={accessibleLabel}
-      disabled={disabled}
-      onClick={onClick}
-    >
-      <ArchiveIcon className={`h-4 w-4 ${isArchiving ? 'animate-pulse' : ''}`} />
+      <span className={collapsed ? 'sr-only' : 'min-w-0 truncate'}>{label}</span>
     </button>
   )
 }
 
 function createTeamArchiveKey(teamId: string) {
   return `team:${teamId}`
-}
-
-function createProjectArchiveKey(teamId: string, projectId: string) {
-  return `project:${teamId}:${projectId}`
 }
 
 function ensureIncludes(values: string[], value: string) {
@@ -2186,6 +2513,18 @@ function PanelIcon({ className }: SidebarIconProps) {
       <path d="M8 9h8" />
       <path d="M8 13h5" />
       <path d="M8 17h8" />
+    </SvgBase>
+  )
+}
+
+/** Renders the grid-shaped icon used for Project directory destinations. */
+function ProjectGridIcon({ className }: SidebarIconProps) {
+  return (
+    <SvgBase className={className}>
+      <rect x="4" y="4" width="6" height="6" rx="1.5" />
+      <rect x="14" y="4" width="6" height="6" rx="1.5" />
+      <rect x="4" y="14" width="6" height="6" rx="1.5" />
+      <rect x="14" y="14" width="6" height="6" rx="1.5" />
     </SvgBase>
   )
 }

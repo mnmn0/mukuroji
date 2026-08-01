@@ -8,6 +8,9 @@ import {
   type BulkOperation,
   type ApprovalRequest,
   type CustomFieldValue,
+  type ProjectQuickAccessItem,
+  type ProjectQuickAccessPreferences,
+  type UpdateProjectQuickAccessPreferencesInput,
   type WorkItemConfiguration,
   type CanonicalWorkItem,
 } from '@mukuroji/contracts'
@@ -1161,6 +1164,51 @@ function createHeadlessWorkItem(
   })
 }
 
+/**
+ * Detaches a quick-access preference returned by the shared HTTP fixture.
+ *
+ * @param preference - Versioned preference to copy.
+ * @returns A preference whose item collection shares no mutable references.
+ */
+function cloneProjectQuickAccessPreferences(
+  preference: ProjectQuickAccessPreferences,
+): ProjectQuickAccessPreferences {
+  return {
+    items: cloneProjectQuickAccessItems(preference.items),
+    revision: preference.revision,
+  }
+}
+
+/**
+ * Detaches a complete quick-access replacement input for call assertions.
+ *
+ * @param input - Replacement input supplied to the fake client.
+ * @returns An input whose item collection shares no mutable references.
+ */
+function cloneProjectQuickAccessInput(
+  input: UpdateProjectQuickAccessPreferencesInput,
+): UpdateProjectQuickAccessPreferencesInput {
+  return {
+    items: cloneProjectQuickAccessItems(input.items),
+    revision: input.revision,
+  }
+}
+
+/**
+ * Copies ordered Team-owned Project identities.
+ *
+ * @param items - Ordered identities to detach.
+ * @returns New identity objects in the same order.
+ */
+function cloneProjectQuickAccessItems(
+  items: readonly ProjectQuickAccessItem[],
+): ProjectQuickAccessItem[] {
+  return items.map((item) => ({
+    projectId: item.projectId,
+    teamId: item.teamId,
+  }))
+}
+
 function configureFakeProjectClients(
   state: ApiTestHarnessState,
   hasProjectAccess: boolean,
@@ -1197,7 +1245,14 @@ function configureFakeProjectClients(
     passwordMfaChallenge?: 'SOFTWARE_TOKEN_MFA' | 'SMS_MFA' | 'SMS_OTP' | 'EMAIL_OTP'
     passwordAuthChallenge?: boolean
     passwordAuthTokens?: boolean
-    projectAccesses?: Array<{ projectId: string; role?: ProjectRole }>
+    projectAccesses?: Array<{
+      /** Project identifier returned by the fake access directory. */
+      projectId: string
+      /** Optional role granted to the authenticated member. */
+      role?: ProjectRole
+      /** Canonical owner Team when the test exercises duplicate Project IDs. */
+      teamId?: string
+    }>
     role?: ProjectRole
     /** Cognito current group membership fake が返す group 名です。 */
     cognitoUserGroups?: string[]
@@ -1268,6 +1323,8 @@ function configureFakeProjectClients(
     }>
     /** Project 別 canonical Work Item fake が返す Issue ID です。 */
     canonicalProjectIssueIds?: string[]
+    /** Project quick access fake が最初に返す viewer preference です。 */
+    projectQuickAccessPreference?: ProjectQuickAccessPreferences
     /** Team Issue fake が返す canonical Work Item 数です。 */
     teamIssueCount?: number
     /** Team Issue fake の先頭に置く閲覧不可 Work Item 数です。 */
@@ -1286,6 +1343,9 @@ function configureFakeProjectClients(
   const workspaceRole = options.workspaceRole ?? 'owner'
   const workspaceStatus = options.workspaceStatus ?? 'active'
   let workspaceReconcileFailures = options.workspaceReconcileFailures ?? 0
+  let projectQuickAccessPreference = options.projectQuickAccessPreference === undefined
+    ? { items: [], revision: 0 }
+    : cloneProjectQuickAccessPreferences(options.projectQuickAccessPreference)
   const calls = {
     accessChecks: [] as Array<{ directoryId: string; projectId: string }>,
     cognitoIdentityProviderDescriptions: [] as string[],
@@ -1370,6 +1430,16 @@ function configureFakeProjectClients(
       teamId: string
     }>,
     projectIssueReads: [] as Array<{ directoryId: string; limit?: number; projectId: string }>,
+    projectQuickAccessReads: [] as Array<{
+      consistentRead?: boolean
+      directoryId: string
+      memberKey: string
+    }>,
+    projectQuickAccessReplacements: [] as Array<{
+      directoryId: string
+      input: UpdateProjectQuickAccessPreferencesInput
+      memberKey: string
+    }>,
     taskReads: [] as Array<{ directoryId: string; limit?: number; projectId: string }>,
     userLists: [] as Array<{
       directoryId?: string
@@ -1700,6 +1770,27 @@ function configureFakeProjectClients(
             })),
           ],
         }
+      },
+      async getProjectQuickAccess(directoryId, memberKey, consistentRead) {
+        calls.projectQuickAccessReads.push({
+          directoryId,
+          memberKey,
+          ...(consistentRead === undefined ? {} : { consistentRead }),
+        })
+        return cloneProjectQuickAccessPreferences(projectQuickAccessPreference)
+      },
+      async replaceProjectQuickAccess(directoryId, memberKey, input) {
+        const detachedInput = cloneProjectQuickAccessInput(input)
+        calls.projectQuickAccessReplacements.push({
+          directoryId,
+          input: detachedInput,
+          memberKey,
+        })
+        projectQuickAccessPreference = {
+          items: detachedInput.items,
+          revision: detachedInput.revision + 1,
+        }
+        return cloneProjectQuickAccessPreferences(projectQuickAccessPreference)
       },
       async getProjectAccess(directoryId, projectId, memberKey = 'demo@example.com') {
         calls.accessChecks.push({ directoryId, projectId })

@@ -91,6 +91,10 @@ async function mockAuthenticatedSearchPage(page: Page) {
     await route.fulfill({ json: { teams: projectDirectoryFixtures } })
   })
 
+  await page.route('**/api/projects/quick-access', async (route) => {
+    await route.fulfill({ json: { items: [], revision: 0 } })
+  })
+
   await page.route('**/api/teams/*/work-item-configuration', async (route) => {
     const teamId = decodeURIComponent(
       new URL(route.request().url()).pathname.split('/')[3] ?? '',
