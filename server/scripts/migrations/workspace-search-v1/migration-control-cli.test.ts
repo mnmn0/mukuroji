@@ -1,27 +1,41 @@
+import { createHash } from 'node:crypto'
 import { describe, expect, spyOn, test } from 'bun:test'
-import {
-  mkdtemp,
-  rm,
-  writeFile,
-} from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import {
+  serializeCanonicalJson,
   WorkspaceSearchMigrationFailure,
   type WorkspaceSearchMigrationLease,
 } from './migration-contract'
 import {
+  WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_PAGE_BASELINE_ATTEMPTS,
+  type WorkspaceSearchMigrationDescribeTableRateEvidence,
+} from './migration-describe-table-rate-budget'
+import {
   parseWorkspaceSearchMigrationControlCliArguments,
-  readMaintenanceEvidenceFile,
+  readBoundedInputFile,
   runWorkspaceSearchMigrationControlCli,
+  type CreateWorkspaceSearchMigrationControlCliMutationSessionInput,
+  type CreateWorkspaceSearchMigrationControlCliReadSessionInput,
   type WorkspaceSearchMigrationControlCliDependencies,
   type WorkspaceSearchMigrationControlCliExitCode,
-  type WorkspaceSearchMigrationControlCliSession,
+  type WorkspaceSearchMigrationControlCliMutationSession,
+  type WorkspaceSearchMigrationControlCliReadSession,
   type WorkspaceSearchMigrationWriterFenceSummary,
 } from './migration-control-cli'
+import type {
+  WorkspaceSearchMigrationControlCoordinatorSummary,
+} from './migration-control-coordinator'
+import type {
+  WorkspaceSearchMigrationExecutionStatus,
+} from './migration-execution-supervisor'
 import {
   MAINTENANCE_EVIDENCE_MAX_BYTES,
 } from './maintenance-evidence'
+import type {
+  WorkspaceSearchMigrationMaintenanceEvidenceProvider,
+} from './migration-post-close-planning-supervisor'
 import type {
   RenewWorkspaceSearchMigrationPrePlanMaintenanceEvidenceInput,
   WorkspaceSearchMigrationPrePlanAuthority,
@@ -38,6 +52,9 @@ const evidenceReceiptDigest = '3'.repeat(64)
 const refreshedEvidenceReceiptDigest = '4'.repeat(64)
 const writerFenceRecordDigest = '5'.repeat(64)
 const rootDirectory = resolve(import.meta.dir, '../../../..')
+const ratePolicyPath = '/operator/rate-policy.json'
+const maintenanceEvidencePath = '/operator/maintenance-evidence.json'
+const reviewedDryRunPath = '/operator/reviewed-dry-run.json'
 
 const resourceFlagArguments: readonly string[] = [
   '--account',
@@ -66,131 +83,232 @@ const resourceFlagArguments: readonly string[] = [
   'arn:aws:kms:ap-northeast-1:123456789012:key/12345678-1234-1234-1234-123456789012',
 ]
 
-/**
- * Optional behavior installed on one recording CLI session.
- */
-type RecordingControlCliSessionOptions = {
-  /** Failure raised by resource measurement, when supplied. */
-  readonly measureFailure?: unknown
-  /** Configuration hash returned by resource measurement. */
+const ratePolicyDocument = {
+  schemaVersion: 1,
+  maximumAttemptsPerWindow: 400,
+  maximumAttemptsPerLifecycle: 400,
+  checkpointPageAttemptCapacity:
+    WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_PAGE_BASELINE_ATTEMPTS,
+  windowMilliseconds: 1_000,
+  minimumAttemptIntervalMilliseconds: 20,
+  minimumPageIntervalMilliseconds: 1_000,
+  maximumAdmissionWaitMilliseconds: 30_000,
+  throttleBackoffInitialMilliseconds: 100,
+  throttleBackoffMaximumMilliseconds: 2_000,
+}
+const ratePolicyBytes = new TextEncoder().encode(
+  serializeCanonicalJson(ratePolicyDocument),
+)
+const policyVersion = createHash('sha256')
+  .update(ratePolicyBytes)
+  .digest('hex')
+
+/** Options installed on recording CLI sessions. */
+type RecordingSessionOptions = {
+  /** Optional asynchronous close failure. */
+  readonly closeFailure?: unknown
+  /** Optional gate holding session close in flight. */
+  readonly closeGate?: Promise<void>
+  /** Optional gate holding one session factory in flight. */
+  readonly factoryGate?: Promise<void>
+  /** Optional failure raised by measurement or stage dispatch. */
+  readonly failure?: unknown
+  /** Configuration hash returned by measurement. */
   readonly measuredConfigurationHash?: string
-  /** Optional gate that holds maintenance evidence renewal in flight. */
-  readonly renewalGate?: Promise<void>
-  /** Summary returned by a writer-fence status read. */
+  /** Writer-fence summary returned by read status. */
   readonly writerFence?: WorkspaceSearchMigrationWriterFenceSummary
-  /** Summary returned by initial writer-fence bootstrap. */
-  readonly bootstrapWriterFence?: WorkspaceSearchMigrationWriterFenceSummary
-  /** Authority returned by immutable evidence renewal. */
-  readonly renewedAuthority?: WorkspaceSearchMigrationPrePlanAuthority
-  /** Authority returned by the mandatory current-authority reread. */
-  readonly refreshedAuthority?: WorkspaceSearchMigrationPrePlanAuthority
+  /** Optional gate holding one coordinator stage in flight. */
+  readonly stageGate?: Promise<void>
 }
 
-/**
- * Narrow fake that records every externally visible CLI session operation.
- */
-class RecordingControlCliSession
-implements WorkspaceSearchMigrationControlCliSession {
-  /** Ordered session calls shared with dependency-level events. */
+/** Shared exact-close and identifier-free rate recording behavior. */
+class RecordingSessionBase {
+  /** Ordered externally visible operations. */
   readonly events: string[]
 
   /** Number of lifecycle close calls. */
   closeCount = 0
 
-  /** Last immutable evidence renewal input. */
-  renewalInput:
-    RenewWorkspaceSearchMigrationPrePlanMaintenanceEvidenceInput | undefined
+  /** Optional configured failure. */
+  protected readonly failure: unknown
 
-  /** Last exact current-authority claim. */
-  authorityClaim:
-    WorkspaceSearchMigrationPrePlanAuthorityClaim | undefined
+  /** Optional asynchronous close failure. */
+  protected readonly closeFailure: unknown
 
-  /** Authority passed to the initial writer-fence transition. */
-  bootstrapAuthority:
-    WorkspaceSearchMigrationPrePlanAuthority | undefined
-
-  /** Failure raised by measurement, when configured. */
-  private readonly measureFailure: unknown
+  /** Optional gate holding session close in flight. */
+  protected readonly closeGate: Promise<void> | undefined
 
   /** Configuration hash returned by measurement. */
-  private readonly measuredConfigurationHash: string
+  protected readonly measuredConfigurationHash: string
 
-  /** Writer-fence status returned by the read operation. */
-  private readonly writerFence:
-    WorkspaceSearchMigrationWriterFenceSummary
+  /** Writer-fence status returned by read operations. */
+  protected readonly writerFence: WorkspaceSearchMigrationWriterFenceSummary
 
-  /** Writer-fence summary returned by bootstrap. */
-  private readonly bootstrapWriterFenceSummary:
-    WorkspaceSearchMigrationWriterFenceSummary
-
-  /** Authority returned by evidence renewal. */
-  private readonly renewedAuthority:
-    WorkspaceSearchMigrationPrePlanAuthority
-
-  /** Optional gate that holds evidence renewal in flight. */
-  private readonly renewalGate: Promise<void> | undefined
-
-  /** Authority returned after a strong refresh. */
-  private readonly refreshedAuthority:
-    WorkspaceSearchMigrationPrePlanAuthority
+  /** Optional gate holding one coordinator stage in flight. */
+  protected readonly stageGate: Promise<void> | undefined
 
   /**
-   * Creates one deterministic recording session.
+   * Creates one deterministic recording base.
    *
-   * @param events - Ordered shared event recorder.
-   * @param options - Optional method results and failure behavior.
+   * @param events - Shared ordered event list.
+   * @param options - Optional failure and result behavior.
    */
-  constructor(
-    events: string[],
-    options: RecordingControlCliSessionOptions = {},
-  ) {
+  constructor(events: string[], options: RecordingSessionOptions = {}) {
     this.events = events
-    this.measureFailure = options.measureFailure
+    this.closeFailure = options.closeFailure
+    this.closeGate = options.closeGate
+    this.failure = options.failure
     this.measuredConfigurationHash =
       options.measuredConfigurationHash ?? expectedConfigurationHash
     this.writerFence = options.writerFence ?? { status: 'missing' }
-    this.bootstrapWriterFenceSummary =
-      options.bootstrapWriterFence ?? createOpenWriterFenceSummary()
-    this.renewedAuthority =
-      options.renewedAuthority ??
-      createAuthority(evidenceReceiptDigest, 7)
-    this.renewalGate = options.renewalGate
-    this.refreshedAuthority =
-      options.refreshedAuthority ??
-      createAuthority(refreshedEvidenceReceiptDigest, 8)
+    this.stageGate = options.stageGate
   }
 
   /**
-   * Records measured identity resolution.
+   * Returns one identifier-free rate aggregate.
    *
-   * @returns Configured reviewed configuration hash.
+   * @returns Fixed policy-bound aggregate.
+   */
+  readRateAggregate(): WorkspaceSearchMigrationDescribeTableRateEvidence {
+    this.events.push('read-rate')
+    return {
+      version: 1,
+      policyVersion,
+      attemptCount: 6,
+      forfeitedAttemptCount: 0,
+      throttleCount: 0,
+      budgetStopCount: 0,
+      cadenceWaitCount: 5,
+      cadenceWaitMilliseconds: 100,
+      maximumInFlight: 0,
+    }
+  }
+
+  /** Records immediate cancellation of every unsent rate-managed operation. */
+  interrupt(): void {
+    this.events.push('interrupt-rate')
+  }
+
+  /**
+   * Records exact asynchronous lifecycle cleanup.
+   *
+   * @returns Completion or the configured close failure.
+   */
+  async close(): Promise<void> {
+    this.events.push('close')
+    this.closeCount += 1
+    if (this.closeGate !== undefined) await this.closeGate
+    if (this.closeFailure !== undefined) throw this.closeFailure
+  }
+}
+
+/** Read-only fake that deliberately has no mutation methods. */
+class RecordingReadSession
+  extends RecordingSessionBase
+  implements WorkspaceSearchMigrationControlCliReadSession {
+  /**
+   * Records configuration measurement.
+   *
+   * @returns Configured hash.
    */
   async measureConfigurationHash(): Promise<string> {
     this.events.push('measure')
-    if (this.measureFailure !== undefined) {
-      throw this.measureFailure
-    }
+    if (this.failure !== undefined) throw this.failure
+    return this.measuredConfigurationHash
+  }
+
+  /**
+   * Records writer-fence status.
+   *
+   * @returns Configured safe summary.
+   */
+  async readWriterFence(): Promise<WorkspaceSearchMigrationWriterFenceSummary> {
+    this.events.push('read-writer-fence')
+    return this.writerFence
+  }
+
+  /**
+   * Records durable execution-status reconstruction.
+   *
+   * @param _runId - Exact durable run.
+   * @param _expectedConfigurationHash - Reviewed digest.
+   * @returns Fixed safe execution projection.
+   */
+  async readExecutionStatus(
+    _runId: string,
+    _expectedConfigurationHash: string,
+  ): Promise<WorkspaceSearchMigrationExecutionStatus> {
+    this.events.push('read-execution-status')
+    if (this.failure !== undefined) throw this.failure
+    return { phase: 'ready', nextAction: { kind: 'apply' } }
+  }
+}
+
+/** Explicit mutating fake used only after mutation-factory selection. */
+class RecordingMutationSession
+  extends RecordingSessionBase
+  implements WorkspaceSearchMigrationControlCliMutationSession {
+  /** Last stage mode requested by the CLI. */
+  stageMode: string | undefined
+
+  /** Last maintenance renewal input. */
+  renewalInput:
+    RenewWorkspaceSearchMigrationPrePlanMaintenanceEvidenceInput | undefined
+
+  /** Last current-authority claim. */
+  authorityClaim:
+    WorkspaceSearchMigrationPrePlanAuthorityClaim | undefined
+
+  /**
+   * Records installation of one nested mutation guard.
+   *
+   * @param guard - Supervisor assertion inherited by the task.
+   * @param task - Exact task to execute.
+   * @returns Exact task result.
+   */
+  async runWithMutationAdmissionGuard<Result>(
+    guard: () => void,
+    task: () => Promise<Result>,
+  ): Promise<Result> {
+    this.events.push('install-mutation-admission-guard')
+    guard()
+    return await task()
+  }
+
+  /** Records fail-closed admission interruption from lease supervision. */
+  interruptMutationAdmission(): void {
+    this.events.push('interrupt-mutation-admission')
+  }
+
+  /**
+   * Records configuration measurement.
+   *
+   * @returns Configured hash.
+   */
+  async measureConfigurationHash(): Promise<string> {
+    this.events.push('measure')
+    if (this.failure !== undefined) throw this.failure
     return this.measuredConfigurationHash
   }
 
   /**
    * Records lease acquisition.
    *
-   * @param input - Exact requested run and owner.
-   * @returns Fresh fixed-duration lease.
+   * @param input - Exact run and owner.
+   * @returns Fixed fresh lease.
    */
   async acquireLease(
     input: AcquireWorkspaceSearchMigrationLeaseInput,
   ): Promise<WorkspaceSearchMigrationLease> {
     this.events.push('acquire')
-    return createLease(input.runId, input.ownerId, 7)
+    return createLease(input.runId, input.ownerId)
   }
 
   /**
-   * Records the supervisor's exact initial or periodic heartbeat.
+   * Records heartbeat renewal.
    *
-   * @param input - Stable lease identity.
-   * @returns Fresh fixed-duration successor.
+   * @param input - Current exact lease.
+   * @returns Fixed fresh successor.
    */
   async heartbeatLease(
     input: HeartbeatWorkspaceSearchMigrationLeaseInput,
@@ -204,73 +322,98 @@ implements WorkspaceSearchMigrationControlCliSession {
   }
 
   /**
-   * Records immutable maintenance-evidence renewal.
+   * Records evidence renewal.
    *
-   * @param input - Exact claim, predecessor, and evidence bytes.
-   * @returns Configured renewed authority.
+   * @param input - Exact authority request.
+   * @returns Fixed renewed authority.
    */
   async renewMaintenanceEvidence(
     input: RenewWorkspaceSearchMigrationPrePlanMaintenanceEvidenceInput,
   ): Promise<WorkspaceSearchMigrationPrePlanAuthority> {
     this.events.push('renew')
     this.renewalInput = input
-    if (this.renewalGate !== undefined) {
-      await this.renewalGate
-    }
-    return this.renewedAuthority
+    return createAuthority(evidenceReceiptDigest, 7)
   }
 
   /**
-   * Records the mandatory current-authority reread.
+   * Records strong authority refresh.
    *
-   * @param claim - Exact lease and receipt pointer claim.
-   * @returns Configured refreshed authority.
+   * @param claim - Exact renewed claim.
+   * @returns Fixed refreshed authority.
    */
   async readAuthority(
     claim: WorkspaceSearchMigrationPrePlanAuthorityClaim,
   ): Promise<WorkspaceSearchMigrationPrePlanAuthority> {
     this.events.push('read-authority')
     this.authorityClaim = claim
-    return this.refreshedAuthority
-  }
-
-  /**
-   * Records a writer-fence status read.
-   *
-   * @returns Configured safe summary.
-   */
-  async readWriterFence():
-    Promise<WorkspaceSearchMigrationWriterFenceSummary> {
-    this.events.push('read-writer-fence')
-    return this.writerFence
+    return createAuthority(refreshedEvidenceReceiptDigest, 8)
   }
 
   /**
    * Records initial writer-fence bootstrap.
    *
-   * @param authority - Fresh authority supplied by CLI orchestration.
-   * @returns Configured bootstrap summary.
+   * @param _authority - Fresh current authority.
+   * @returns Open writer-fence summary.
    */
   async bootstrapWriterFence(
-    authority: WorkspaceSearchMigrationPrePlanAuthority,
+    _authority: WorkspaceSearchMigrationPrePlanAuthority,
   ): Promise<WorkspaceSearchMigrationWriterFenceSummary> {
     this.events.push('bootstrap-writer-fence')
-    this.bootstrapAuthority = authority
-    return this.bootstrapWriterFenceSummary
+    return createOpenWriterFenceSummary()
   }
 
   /**
-   * Records exact session cleanup.
+   * Records exactly one coordinator stage.
+   *
+   * @param input - Exact stage request.
+   * @returns Matching secret-free summary.
    */
-  close(): void {
-    this.events.push('close')
-    this.closeCount += 1
+  async advanceStage(
+    input: Parameters<
+      WorkspaceSearchMigrationControlCliMutationSession['advanceStage']
+    >[0],
+  ): Promise<WorkspaceSearchMigrationControlCoordinatorSummary> {
+    this.events.push(`advance:${input.mode}`)
+    this.stageMode = input.mode
+    if (this.stageGate !== undefined) await this.stageGate
+    if (this.failure !== undefined) throw this.failure
+    if (input.mode === 'close-replan') {
+      return { mode: input.mode, phase: 'planning-admitted' }
+    }
+    if (input.mode === 'release') {
+      return { mode: input.mode, phase: 'released' }
+    }
+    return {
+      mode: input.mode,
+      execution: {
+        phase: 'applying',
+        nextAction: {
+          kind: 'choose',
+          options: ['apply', 'partial-rollback'],
+        },
+      },
+    }
+  }
+
+  /**
+   * Records construction of one same-rate-gate evidence provider.
+   *
+   * @param _maintenanceEvidenceFile - Private evidence path.
+   * @returns Provider retained only by the stage request.
+   */
+  createMaintenanceEvidenceProvider(
+    _maintenanceEvidenceFile: string,
+  ): WorkspaceSearchMigrationMaintenanceEvidenceProvider {
+    this.events.push('create-evidence-provider')
+    return {
+      collect: async () => {
+        throw new Error('Provider use belongs to coordinator tests.')
+      },
+    }
   }
 }
 
-/**
- * Captured JSON lines and status from one in-process CLI invocation.
- */
+/** Captured JSON lines and status from one in-process invocation. */
 type CapturedCliRun = {
   /** Stable process exit status. */
   readonly exitCode: WorkspaceSearchMigrationControlCliExitCode
@@ -280,9 +423,7 @@ type CapturedCliRun = {
   readonly stderr: readonly string[]
 }
 
-/**
- * Captured result from the documented root-package command.
- */
+/** Captured result from the documented root-package command. */
 type RootCliRun = {
   /** Process exit status. */
   readonly exitCode: number
@@ -292,9 +433,7 @@ type RootCliRun = {
   readonly stdout: string
 }
 
-/**
- * Externally resolved promise used to hold one CLI operation in flight.
- */
+/** Externally resolved promise used to hold one operation in flight. */
 type Deferred<Value> = {
   /** Pending promise. */
   readonly promise: Promise<Value>
@@ -309,27 +448,25 @@ type Deferred<Value> = {
  */
 function createDeferred<Value>(): Deferred<Value> {
   let resolver: ((value: Value) => void) | undefined
-  const promise = new Promise<Value>((resolve) => {
-    resolver = resolve
+  const promise = new Promise<Value>((resolvePromise) => {
+    resolver = resolvePromise
   })
   return {
     promise,
     resolve: (value: Value): void => {
-      if (resolver === undefined) {
-        throw new Error('Deferred resolver is unavailable.')
-      }
+      if (resolver === undefined) throw new Error('Missing resolver.')
       resolver(value)
     },
   }
 }
 
 /**
- * Waits for one deterministic fake-session event.
+ * Waits until a recording event has occurred.
  *
- * @param events - Ordered fake-session events.
- * @param expected - Event that must be reached.
+ * @param events - Ordered event list.
+ * @param expected - Exact event to await.
  */
-async function waitForRecordedEvent(
+async function waitForEvent(
   events: readonly string[],
   expected: string,
 ): Promise<void> {
@@ -337,122 +474,79 @@ async function waitForRecordedEvent(
     if (events.includes(expected)) return
     await Promise.resolve()
   }
-  throw new Error('Expected CLI event was not reached.')
+  throw new Error('Expected event was not reached.')
+}
+
+/** Recorded factories and files for one isolated CLI invocation. */
+type RecordingDependencyHarness = {
+  /** Injectable CLI dependencies. */
+  readonly dependencies: WorkspaceSearchMigrationControlCliDependencies
+  /** Ordered dependency and session events. */
+  readonly events: string[]
+  /** Explicit mutation factory inputs. */
+  readonly mutationInputs:
+    CreateWorkspaceSearchMigrationControlCliMutationSessionInput[]
+  /** Explicit read-only factory inputs. */
+  readonly readInputs: CreateWorkspaceSearchMigrationControlCliReadSessionInput[]
 }
 
 /**
- * Runs the exact documented silent root-package command.
+ * Creates strict CLI dependencies with separately typed factories.
  *
- * @param arguments_ - CLI arguments after the script separator.
- * @returns Captured process result.
- */
-async function runRootCli(
-  arguments_: readonly string[],
-): Promise<RootCliRun> {
-  const process_ = Bun.spawn({
-    cmd: [
-      process.execPath,
-      'run',
-      '--silent',
-      'search:migration:control',
-      '--',
-      ...arguments_,
-    ],
-    cwd: rootDirectory,
-    stderr: 'pipe',
-    stdout: 'pipe',
-  })
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(process_.stdout).text(),
-    new Response(process_.stderr).text(),
-    process_.exited,
-  ])
-  return { exitCode, stderr, stdout }
-}
-
-/**
- * Builds one strict measure command.
- *
- * @returns Complete explicit measure arguments.
- */
-function createMeasureArguments(): string[] {
-  return ['measure', ...resourceFlagArguments]
-}
-
-/**
- * Builds one strict status command.
- *
- * @param configurationHash - Separately reviewed expected hash.
- * @returns Complete explicit status arguments.
- */
-function createStatusArguments(
-  configurationHash = expectedConfigurationHash,
-): string[] {
-  return [
-    'status',
-    ...resourceFlagArguments,
-    '--expected-configuration-hash',
-    configurationHash,
-  ]
-}
-
-/**
- * Builds one strict initial-bootstrap command.
- *
- * @param configurationHash - Separately reviewed expected hash.
- * @param approval - Explicit initial-only approval phrase.
- * @returns Complete explicit bootstrap arguments.
- */
-function createBootstrapArguments(
-  configurationHash = expectedConfigurationHash,
-  approval = 'initial-writer-fence-bootstrap',
-): string[] {
-  return [
-    'bootstrap-open',
-    ...resourceFlagArguments,
-    '--expected-configuration-hash',
-    configurationHash,
-    '--run-id',
-    'run-2026-07-29-01',
-    '--owner-id',
-    'owner-process-01',
-    '--maintenance-evidence-file',
-    '/operator/evidence.json',
-    '--approval',
-    approval,
-  ]
-}
-
-/**
- * Creates CLI dependencies over one injected recording session.
- *
- * @param session - Session returned to the CLI.
- * @param events - Ordered dependency-level event recorder.
- * @param evidenceBytes - Exact file bytes returned to bootstrap.
- * @returns Deterministic CLI dependencies.
+ * @param options - Optional session behavior.
+ * @returns Recording dependency harness.
  */
 function createDependencies(
-  session: RecordingControlCliSession,
-  events: string[],
-  evidenceBytes: Uint8Array = Uint8Array.of(1, 2, 3),
-): WorkspaceSearchMigrationControlCliDependencies {
+  options: RecordingSessionOptions = {},
+): RecordingDependencyHarness {
+  const events: string[] = []
+  const mutationInputs:
+    CreateWorkspaceSearchMigrationControlCliMutationSessionInput[] = []
+  const readInputs: CreateWorkspaceSearchMigrationControlCliReadSessionInput[] = []
   return {
-    createSession: () => {
-      events.push('create-session')
-      return session
-    },
-    readMaintenanceEvidenceFile: async () => {
-      events.push('read-evidence')
-      return new Uint8Array(evidenceBytes)
+    events,
+    mutationInputs,
+    readInputs,
+    dependencies: {
+      createReadSession: async (input) => {
+        events.push('create-read-session')
+        readInputs.push(input)
+        if (options.factoryGate !== undefined) await options.factoryGate
+        return new RecordingReadSession(events, options)
+      },
+      createMutationSession: async (input) => {
+        events.push('create-mutation-session')
+        mutationInputs.push(input)
+        if (options.factoryGate !== undefined) await options.factoryGate
+        return new RecordingMutationSession(events, options)
+      },
+      readInputFile: async (path) => {
+        events.push(`read-file:${classifyPath(path)}`)
+        if (path === ratePolicyPath) return Uint8Array.from(ratePolicyBytes)
+        return Uint8Array.of(1, 2, 3)
+      },
     },
   }
 }
 
 /**
+ * Classifies a private test path without recording it.
+ *
+ * @param path - Exact private path.
+ * @returns Stable file role.
+ */
+function classifyPath(path: string): string {
+  if (path === ratePolicyPath) return 'rate-policy'
+  if (path === maintenanceEvidencePath) return 'maintenance-evidence'
+  if (path === reviewedDryRunPath) return 'reviewed-dry-run'
+  return 'unknown'
+}
+
+/**
  * Runs one CLI invocation while capturing both JSON output channels.
  *
- * @param arguments_ - Strict or deliberately malformed CLI arguments.
- * @param dependencies - Injected session and file dependencies.
+ * @param arguments_ - Strict or deliberately malformed arguments.
+ * @param dependencies - Injected capability factories.
  * @param signal - Optional cooperative interruption signal.
  * @returns Exit status and complete emitted lines.
  */
@@ -487,7 +581,109 @@ async function captureCliRun(
 }
 
 /**
- * Creates one fresh fixed-duration lease around the process clock.
+ * Runs the exact documented silent root-package command.
+ *
+ * @param arguments_ - CLI arguments after the script separator.
+ * @returns Captured process result.
+ */
+async function runRootCli(arguments_: readonly string[]): Promise<RootCliRun> {
+  const process_ = Bun.spawn({
+    cmd: [
+      process.execPath,
+      'run',
+      '--silent',
+      'search:migration:control',
+      '--',
+      ...arguments_,
+    ],
+    cwd: rootDirectory,
+    stderr: 'pipe',
+    stdout: 'pipe',
+  })
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(process_.stdout).text(),
+    new Response(process_.stderr).text(),
+    process_.exited,
+  ])
+  return { exitCode, stderr, stdout }
+}
+
+/** Builds common resources and the required rate-policy file. */
+function createCommonArguments(): string[] {
+  return [
+    ...resourceFlagArguments,
+    '--rate-policy-file',
+    ratePolicyPath,
+  ]
+}
+
+/** Builds one strict measure command. */
+function createMeasureArguments(): string[] {
+  return ['measure', ...createCommonArguments()]
+}
+
+/** Builds one strict writer-fence status command. */
+function createStatusArguments(): string[] {
+  return [
+    'status',
+    ...createCommonArguments(),
+    '--expected-configuration-hash',
+    expectedConfigurationHash,
+  ]
+}
+
+/** Builds one strict execution-status command. */
+function createExecutionStatusArguments(): string[] {
+  return [
+    'execution-status',
+    ...createCommonArguments(),
+    '--expected-configuration-hash',
+    expectedConfigurationHash,
+    '--run-id',
+    'run-2026-08-01-01',
+  ]
+}
+
+/**
+ * Builds one strict mutation command.
+ *
+ * @param command - Explicit mutation stage.
+ * @param approval - Exact stage approval.
+ * @returns Complete strict arguments.
+ */
+function createMutationArguments(command: string, approval: string): string[] {
+  const common = [
+    command,
+    ...createCommonArguments(),
+    '--expected-configuration-hash',
+    expectedConfigurationHash,
+    '--run-id',
+    'run-2026-08-01-01',
+    '--owner-id',
+    'owner-process-01',
+    '--maintenance-evidence-file',
+    maintenanceEvidencePath,
+    '--approval',
+    approval,
+  ]
+  if (command !== 'close-replan') return common
+  return [
+    ...common,
+    '--reviewed-dry-run-file',
+    reviewedDryRunPath,
+    '--retain-until',
+    '2027-08-01T00:00:00.000Z',
+    '--max-total-rows',
+    '100000',
+    '--max-total-canonical-item-bytes',
+    '100000000',
+    '--max-plan-operations',
+    '100000',
+  ]
+}
+
+/**
+ * Creates one fresh fixed-duration lease.
  *
  * @param runId - Stable run identity.
  * @param ownerId - Stable process owner.
@@ -495,7 +691,7 @@ async function captureCliRun(
  * @returns Valid sixty-second lease.
  */
 function createLease(
-  runId = 'run-2026-07-29-01',
+  runId = 'run-2026-08-01-01',
   ownerId = 'owner-process-01',
   fenceToken = 7,
 ): WorkspaceSearchMigrationLease {
@@ -531,7 +727,7 @@ function createAuthority(
     maintenanceEvidenceReceipt: {
       runId: lease.runId,
       evidenceDigest: '6'.repeat(64),
-      evidenceLocator: 'change:OPS-2026-07-29',
+      evidenceLocator: 'change:OPS-2026-08-01',
       runtimeRevision: 42,
       fenceToken: lease.fenceToken,
       validatedAt: evaluatedAt.toISOString(),
@@ -546,13 +742,8 @@ function createAuthority(
   }
 }
 
-/**
- * Creates the exact safe open-row summary expected after bootstrap.
- *
- * @returns Present open writer-fence summary.
- */
-function createOpenWriterFenceSummary():
-  WorkspaceSearchMigrationWriterFenceSummary {
+/** Creates the exact safe open-row summary expected after bootstrap. */
+function createOpenWriterFenceSummary(): WorkspaceSearchMigrationWriterFenceSummary {
   return {
     status: 'present',
     mode: 'open',
@@ -563,417 +754,543 @@ function createOpenWriterFenceSummary():
 }
 
 describe('Workspace Search migration control CLI parser', () => {
-  test('accepts a complete explicit resource selection', () => {
-    expect(
-      parseWorkspaceSearchMigrationControlCliArguments(
-        createMeasureArguments(),
-      ),
-    ).toEqual({
+  test('requires a strict rate policy for every non-help command', () => {
+    const parsed = parseWorkspaceSearchMigrationControlCliArguments(
+      createMeasureArguments(),
+    )
+    expect(parsed).toMatchObject({
       command: 'measure',
-      resources: {
-        account: '123456789012',
-        region: 'ap-northeast-1',
-        profile: 'migration-operator',
-        commit: 'a'.repeat(40),
-        tables: {
-          'project-directory': 'project-directory-table',
-          'work-items': 'work-items-table',
-          collaboration: 'collaboration-table',
-          documents: 'documents-table',
-          'workspace-search': 'workspace-search-table',
-          'migration-state': 'migration-state-table',
-        },
-        journalBucket: 'mukuroji-migration-journal',
-        journalKeyArn:
-          'arn:aws:kms:ap-northeast-1:123456789012:key/12345678-1234-1234-1234-123456789012',
-      },
+      ratePolicyFile: ratePolicyPath,
+      rateBootstrap: false,
+      rateRecoverInterruptedCleanup: false,
+      rateRecoverInterruptedAttempt: false,
     })
+    expect(() =>
+      parseWorkspaceSearchMigrationControlCliArguments([
+        'measure',
+        ...resourceFlagArguments,
+      ]),
+    ).toThrow('INVALID_USAGE')
   })
 
-  test('rejects unknown, duplicate, and missing flags', () => {
-    const complete = createMeasureArguments()
-    const malformedCases: readonly (readonly string[])[] = [
-      [...complete, '--unknown-resource', 'private-value'],
-      [...complete, '--account', '123456789012'],
-      complete.slice(0, -2),
-    ]
+  test('accepts combined exact recovery and keeps bootstrap exclusive', () => {
+    const bootstrap = parseWorkspaceSearchMigrationControlCliArguments([
+      ...createMeasureArguments(),
+      '--rate-bootstrap',
+      'true',
+    ])
+    expect(bootstrap).toMatchObject({ rateBootstrap: true })
 
-    for (const arguments_ of malformedCases) {
-      expect(
-        () => parseWorkspaceSearchMigrationControlCliArguments(arguments_),
+    const combinedRecovery =
+      parseWorkspaceSearchMigrationControlCliArguments([
+        ...createMeasureArguments(),
+        '--rate-recover-interrupted-cleanup',
+        'true',
+        '--rate-recover-interrupted-attempt',
+        'true',
+      ])
+    expect(combinedRecovery).toMatchObject({
+      rateBootstrap: false,
+      rateRecoverInterruptedCleanup: true,
+      rateRecoverInterruptedAttempt: true,
+    })
+
+    for (const invalid of [
+      [...createMeasureArguments(), '--rate-bootstrap', 'false'],
+      [
+        ...createMeasureArguments(),
+        '--rate-bootstrap',
+        'true',
+        '--rate-recover-interrupted-attempt',
+        'true',
+      ],
+    ]) {
+      expect(() =>
+        parseWorkspaceSearchMigrationControlCliArguments(invalid),
+      ).toThrow('INVALID_USAGE')
+    }
+  })
+
+  test('requires exact stage approvals and all positive planning limits', () => {
+    const close = parseWorkspaceSearchMigrationControlCliArguments(
+      createMutationArguments(
+        'close-replan',
+        'close-writers-and-replan',
+      ),
+    )
+    expect(close).toMatchObject({
+      command: 'close-replan',
+      planningJoinLimits: {
+        maxTotalRows: 100_000,
+        maxTotalCanonicalItemBytes: 100_000_000,
+        maxPlanOperations: 100_000,
+      },
+    })
+
+    expect(() =>
+      parseWorkspaceSearchMigrationControlCliArguments(
+        createMutationArguments('apply', 'approve-anything'),
+      ),
+    ).toThrow('INVALID_USAGE')
+    expect(() =>
+      parseWorkspaceSearchMigrationControlCliArguments(
+        createMutationArguments(
+          'close-replan',
+          'close-writers-and-replan',
+        ).map((value) => value === '100000000' ? '0' : value),
+      ),
+    ).toThrow('INVALID_USAGE')
+
+    for (const command of [
+      'bootstrap-open',
+      'close-replan',
+      'apply',
+      'verify',
+      'rollback-partial',
+      'rollback-complete',
+      'release',
+    ]) {
+      expect(() =>
+        parseWorkspaceSearchMigrationControlCliArguments(
+          createMutationArguments(command, 'wrong-stage-approval'),
+        ),
       ).toThrow('INVALID_USAGE')
     }
   })
 })
 
-describe('Workspace Search migration control CLI execution', () => {
-  test('returns machine-readable help without touching files or AWS', async () => {
-    const events: string[] = []
-    const session = new RecordingControlCliSession(events)
+describe('Workspace Search migration control CLI capabilities', () => {
+  test('snapshots accessor-backed argv before identifying and parsing it', async () => {
+    const harness = createDependencies()
+    let firstArgumentReads = 0
+    const arguments_ = new Proxy(createMeasureArguments(), {
+      get: (target, property) => {
+        if (property === '0') {
+          firstArgumentReads += 1
+          return firstArgumentReads === 1 ? 'measure' : 'apply'
+        }
+        return Reflect.get(target, property)
+      },
+    })
+
+    const result = await captureCliRun(arguments_, harness.dependencies)
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toEqual([])
+    expect(firstArgumentReads).toBe(1)
+    expect(harness.events).toContain('create-read-session')
+    expect(harness.events).not.toContain('create-mutation-session')
+  })
+
+  test('captures read dependencies before the policy file await', async () => {
+    const harness = createDependencies()
+    let policyRead = false
+    let redirectedFactories = 0
+    let readFactoryGetterCalls = 0
+    let fileReaderGetterCalls = 0
+    const dependencies: WorkspaceSearchMigrationControlCliDependencies = {
+      get createReadSession() {
+        readFactoryGetterCalls += 1
+        if (!policyRead) return harness.dependencies.createReadSession
+        return async () => {
+          redirectedFactories += 1
+          return new RecordingReadSession(harness.events)
+        }
+      },
+      createMutationSession: harness.dependencies.createMutationSession,
+      get readInputFile() {
+        fileReaderGetterCalls += 1
+        return async (): Promise<Uint8Array> => {
+          policyRead = true
+          return Uint8Array.from(ratePolicyBytes)
+        }
+      },
+    }
+
     const result = await captureCliRun(
-      ['help'],
-      createDependencies(session, events),
+      createMeasureArguments(),
+      dependencies,
     )
+
+    expect(result.exitCode).toBe(0)
+    expect(redirectedFactories).toBe(0)
+    expect(readFactoryGetterCalls).toBe(1)
+    expect(fileReaderGetterCalls).toBe(1)
+    expect(harness.events).toContain('create-read-session')
+  })
+
+  test('does not retain the mutation factory on a read-only path', async () => {
+    const harness = createDependencies()
+    let mutationFactoryReadCount = 0
+    const dependencies: WorkspaceSearchMigrationControlCliDependencies = {
+      createReadSession: harness.dependencies.createReadSession,
+      get createMutationSession() {
+        mutationFactoryReadCount += 1
+        return harness.dependencies.createMutationSession
+      },
+      readInputFile: harness.dependencies.readInputFile,
+    }
+
+    const result = await captureCliRun(
+      createMeasureArguments(),
+      dependencies,
+    )
+
+    expect(result.exitCode).toBe(0)
+    expect(mutationFactoryReadCount).toBe(0)
+  })
+
+  test('help touches neither files nor session factories', async () => {
+    const harness = createDependencies()
+    const result = await captureCliRun(['help'], harness.dependencies)
 
     expect(result.exitCode).toBe(0)
     expect(result.stderr).toEqual([])
     expect(result.stdout).toHaveLength(1)
-    expect(result.stdout[0]).toContain('"status":"help"')
-    expect(result.stdout[0]).toContain('bootstrap-open')
-    expect(events).toEqual([])
-    expect(session.closeCount).toBe(0)
+    expect(result.stdout[0]).toContain('execution-status')
+    expect(result.stdout[0]).toContain('rollback-partial')
+    expect(result.stdout[0]).toContain('--rate-bootstrap')
+    expect(harness.events).toEqual([])
   })
 
-  test('measures identity successfully and closes the session exactly once', async () => {
-    const events: string[] = []
-    const session = new RecordingControlCliSession(events)
-    const result = await captureCliRun(
+  test('measure, status, and execution-status never request a mutation session', async () => {
+    for (const arguments_ of [
       createMeasureArguments(),
-      createDependencies(session, events),
-    )
-
-    expect(result).toEqual({
-      exitCode: 0,
-      stdout: [
-        JSON.stringify({
-          schemaVersion: 1,
-          operation: 'measure',
-          status: 'pass',
-          configurationHash: expectedConfigurationHash,
-        }),
-      ],
-      stderr: [],
-    })
-    expect(events).toEqual([
-      'create-session',
-      'measure',
-      'close',
-    ])
-    expect(session.closeCount).toBe(1)
-  })
-
-  test('rejects a hash mismatch before acquiring a lease', async () => {
-    const events: string[] = []
-    const session = new RecordingControlCliSession(events)
-    const result = await captureCliRun(
-      createBootstrapArguments(differentConfigurationHash),
-      createDependencies(session, events),
-    )
-
-    expect(result.exitCode).toBe(1)
-    expect(result.stdout).toEqual([])
-    expect(result.stderr).toEqual([
-      JSON.stringify({
-        schemaVersion: 1,
-        operation: 'bootstrap-open',
-        status: 'error',
-        code: 'CONFIGURATION_HASH_MISMATCH',
-      }),
-    ])
-    expect(events).toEqual([
-      'read-evidence',
-      'create-session',
-      'measure',
-      'close',
-    ])
-    expect(session.closeCount).toBe(1)
-  })
-
-  test('reports missing and present writer-fence states without physical identifiers', async () => {
-    const missingEvents: string[] = []
-    const missingSession = new RecordingControlCliSession(
-      missingEvents,
-      { writerFence: { status: 'missing' } },
-    )
-    const missing = await captureCliRun(
       createStatusArguments(),
-      createDependencies(missingSession, missingEvents),
-    )
+      createExecutionStatusArguments(),
+    ]) {
+      const harness = createDependencies()
+      const result = await captureCliRun(arguments_, harness.dependencies)
 
-    const presentEvents: string[] = []
-    const presentSummary:
-      WorkspaceSearchMigrationWriterFenceSummary = {
-        status: 'present',
-        mode: 'closed',
-        writerEpoch: 2,
-        controlRevision: 2,
-        recordDigest: writerFenceRecordDigest,
+      expect(result.exitCode).toBe(0)
+      expect(harness.events).toContain('create-read-session')
+      expect(harness.events).not.toContain('create-mutation-session')
+      expect(harness.mutationInputs).toEqual([])
+      expect(harness.readInputs).toHaveLength(1)
+    }
+  })
+
+  test('every mutation requires only the explicit mutation factory', async () => {
+    const stages: readonly [string, string][] = [
+      ['bootstrap-open', 'initial-writer-fence-bootstrap'],
+      ['close-replan', 'close-writers-and-replan'],
+      ['apply', 'apply-sealed-migration-plan'],
+      ['verify', 'verify-complete-applied-root'],
+      ['rollback-partial', 'rollback-committed-apply-prefix'],
+      ['rollback-complete', 'rollback-complete-applied-root'],
+      ['release', 'release-application-writers'],
+    ]
+    for (const [command, approval] of stages) {
+      const harness = createDependencies()
+      const result = await captureCliRun(
+        createMutationArguments(command, approval),
+        harness.dependencies,
+      )
+
+      expect(result.exitCode).toBe(0)
+      expect(harness.events).toContain('create-mutation-session')
+      expect(harness.events).not.toContain('create-read-session')
+      expect(harness.readInputs).toEqual([])
+      expect(harness.mutationInputs).toHaveLength(1)
+      if (command === 'bootstrap-open') {
+        expect(harness.events).toContain('heartbeat')
+      } else {
+        expect(harness.events).toContain(`advance:${command}`)
+        expect(harness.events).toContain('create-evidence-provider')
       }
-    const presentSession = new RecordingControlCliSession(
-      presentEvents,
-      { writerFence: presentSummary },
-    )
-    const present = await captureCliRun(
-      createStatusArguments(),
-      createDependencies(presentSession, presentEvents),
-    )
-
-    expect(missing.stdout).toEqual([
-      JSON.stringify({
-        schemaVersion: 1,
-        operation: 'status',
-        status: 'pass',
-        configurationHash: expectedConfigurationHash,
-        writerFence: { status: 'missing' },
-      }),
-    ])
-    expect(present.stdout).toEqual([
-      JSON.stringify({
-        schemaVersion: 1,
-        operation: 'status',
-        status: 'pass',
-        configurationHash: expectedConfigurationHash,
-        writerFence: presentSummary,
-      }),
-    ])
-    expect(JSON.stringify([missing, present])).not.toContain(
-      'migration-state-table',
-    )
-    expect(missingEvents).toEqual([
-      'create-session',
-      'measure',
-      'read-writer-fence',
-      'close',
-    ])
-    expect(presentEvents).toEqual([
-      'create-session',
-      'measure',
-      'read-writer-fence',
-      'close',
-    ])
+      expect(harness.events.filter((event) => event === 'close')).toHaveLength(1)
+    }
   })
 
-  test('bootstraps only after initial heartbeat and refreshed authority', async () => {
-    const events: string[] = []
-    const evidenceBytes = Uint8Array.of(9, 8, 7, 6)
-    const renewedAuthority =
-      createAuthority(evidenceReceiptDigest, 7)
-    const refreshedAuthority =
-      createAuthority(refreshedEvidenceReceiptDigest, 8)
-    const session = new RecordingControlCliSession(events, {
-      renewedAuthority,
-      refreshedAuthority,
-    })
+  test('forwards only one explicit rate recovery authority', async () => {
+    const harness = createDependencies()
     const result = await captureCliRun(
-      createBootstrapArguments(),
-      createDependencies(session, events, evidenceBytes),
+      [
+        ...createStatusArguments(),
+        '--rate-recover-interrupted-cleanup',
+        'true',
+      ],
+      harness.dependencies,
     )
 
     expect(result.exitCode).toBe(0)
+    expect(harness.readInputs[0]).toMatchObject({
+      rateBootstrap: false,
+      rateRecoverInterruptedCleanup: true,
+      rateRecoverInterruptedAttempt: false,
+    })
+  })
+})
+
+describe('Workspace Search migration control CLI output and lifecycle', () => {
+  test('emits one policy-bound identifier-free line for execution status', async () => {
+    const harness = createDependencies()
+    const result = await captureCliRun(
+      createExecutionStatusArguments(),
+      harness.dependencies,
+    )
+
     expect(result.stderr).toEqual([])
-    expect(events).toEqual([
-      'read-evidence',
-      'create-session',
-      'measure',
-      'acquire',
-      'heartbeat',
-      'renew',
-      'read-authority',
-      'bootstrap-writer-fence',
-      'close',
-    ])
-    expect(session.renewalInput).toEqual({
-      lease: {
-        runId: 'run-2026-07-29-01',
-        ownerId: 'owner-process-01',
-        fenceToken: 7,
-      },
-      expectedPointer: null,
-      evidenceBytes,
-    })
-    expect(session.authorityClaim).toEqual({
-      lease: {
-        runId: 'run-2026-07-29-01',
-        ownerId: 'owner-process-01',
-        fenceToken: 7,
-      },
-      maintenanceEvidenceReceiptDigest: evidenceReceiptDigest,
-      maintenanceEvidencePointerRevision: 7,
-    })
-    expect(session.bootstrapAuthority).toBe(refreshedAuthority)
     expect(result.stdout).toEqual([
       JSON.stringify({
         schemaVersion: 1,
-        operation: 'bootstrap-open',
+        operation: 'execution-status',
         status: 'pass',
         configurationHash: expectedConfigurationHash,
-        authority: {
-          fenceToken: 7,
-          maintenanceEvidencePointerRevision: 8,
-          maintenanceEvidenceReceiptDigest:
-            refreshedEvidenceReceiptDigest,
+        policyVersion,
+        execution: { phase: 'ready', nextAction: { kind: 'apply' } },
+        rateAggregate: {
+          version: 1,
+          policyVersion,
+          attemptCount: 6,
+          forfeitedAttemptCount: 0,
+          throttleCount: 0,
+          budgetStopCount: 0,
+          cadenceWaitCount: 5,
+          cadenceWaitMilliseconds: 100,
+          maximumInFlight: 0,
         },
-        writerFence: createOpenWriterFenceSummary(),
       }),
     ])
-    expect(session.closeCount).toBe(1)
+    const serialized = JSON.stringify(result)
+    for (const forbidden of [
+      '123456789012',
+      'migration-state-table',
+      'run-2026-08-01-01',
+      'owner-process-01',
+      ratePolicyPath,
+    ]) {
+      expect(serialized).not.toContain(forbidden)
+    }
   })
 
-  test('rejects bootstrap without the exact approval phrase', async () => {
-    const events: string[] = []
-    const session = new RecordingControlCliSession(events)
+  test('bootstraps only after measurement, heartbeat, and current authority', async () => {
+    const harness = createDependencies()
     const result = await captureCliRun(
-      createBootstrapArguments(
-        expectedConfigurationHash,
-        'approve-any-bootstrap',
+      createMutationArguments(
+        'bootstrap-open',
+        'initial-writer-fence-bootstrap',
       ),
-      createDependencies(session, events),
+      harness.dependencies,
     )
 
-    expect(result).toEqual({
-      exitCode: 2,
-      stdout: [],
-      stderr: [
-        JSON.stringify({
-          schemaVersion: 1,
-          operation: 'bootstrap-open',
-          status: 'error',
-          code: 'INVALID_USAGE',
-        }),
-      ],
-    })
-    expect(events).toEqual([])
-    expect(session.closeCount).toBe(0)
-  })
-
-  test('stops before creating a session when the signal is already aborted', async () => {
-    const events: string[] = []
-    const session = new RecordingControlCliSession(events)
-    const controller = new AbortController()
-    controller.abort()
-
-    const result = await captureCliRun(
-      createMeasureArguments(),
-      createDependencies(session, events),
-      controller.signal,
-    )
-
-    expect(result).toEqual({
-      exitCode: 130,
-      stdout: [],
-      stderr: [
-        JSON.stringify({
-          schemaVersion: 1,
-          operation: 'measure',
-          status: 'error',
-          code: 'INTERRUPTED',
-        }),
-      ],
-    })
-    expect(events).toEqual([])
-    expect(session.closeCount).toBe(0)
-  })
-
-  test('waits for an interrupted operation before closing exactly once', async () => {
-    const events: string[] = []
-    const renewal = createDeferred<void>()
-    const session = new RecordingControlCliSession(events, {
-      renewalGate: renewal.promise,
-    })
-    const controller = new AbortController()
-    let settled = false
-    const resultPromise = captureCliRun(
-      createBootstrapArguments(),
-      createDependencies(session, events),
-      controller.signal,
-    ).finally(() => {
-      settled = true
-    })
-
-    await waitForRecordedEvent(events, 'renew')
-    controller.abort()
-    await Promise.resolve()
-    expect(settled).toBe(false)
-    expect(session.closeCount).toBe(0)
-    expect(events).not.toContain('read-authority')
-    expect(events).not.toContain('bootstrap-writer-fence')
-
-    renewal.resolve(undefined)
-    const result = await resultPromise
-    expect(result).toEqual({
-      exitCode: 130,
-      stdout: [],
-      stderr: [
-        JSON.stringify({
-          schemaVersion: 1,
-          operation: 'bootstrap-open',
-          status: 'error',
-          code: 'INTERRUPTED',
-        }),
-      ],
-    })
-    expect(events).toEqual([
-      'read-evidence',
-      'create-session',
+    expect(result.exitCode).toBe(0)
+    expect(harness.events).toEqual([
+      'read-file:rate-policy',
+      'read-file:maintenance-evidence',
+      'create-mutation-session',
       'measure',
       'acquire',
       'heartbeat',
+      'install-mutation-admission-guard',
       'renew',
+      'read-authority',
+      'bootstrap-writer-fence',
+      'read-rate',
       'close',
     ])
-    expect(session.closeCount).toBe(1)
+    expect(result.stdout[0]).toContain('"writerFence"')
+    expect(result.stdout[0]).not.toContain('owner-process-01')
+    expect(result.stdout[0]).not.toContain('maintenanceEvidenceReceiptDigest')
   })
 
-  test('redacts an unknown raw failure and still closes exactly once', async () => {
-    const canary = 'raw-aws-secret-canary'
-    const events: string[] = []
-    const session = new RecordingControlCliSession(events, {
-      measureFailure: new Error(canary),
+  test('rejects a hash mismatch before lease acquisition and closes once', async () => {
+    const harness = createDependencies({
+      measuredConfigurationHash: differentConfigurationHash,
     })
     const result = await captureCliRun(
-      createMeasureArguments(),
-      createDependencies(session, events),
+      createMutationArguments(
+        'bootstrap-open',
+        'initial-writer-fence-bootstrap',
+      ),
+      harness.dependencies,
     )
+
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr[0]).toContain('CONFIGURATION_HASH_MISMATCH')
+    expect(harness.events).not.toContain('acquire')
+    expect(harness.events.filter((event) => event === 'close')).toHaveLength(1)
+  })
+
+  test('redacts raw failures, resources, paths, run, and owner', async () => {
+    const rawCanary = 'raw-aws-error-secret-canary'
+    const harness = createDependencies({ failure: new Error(rawCanary) })
+    const arguments_ = createMutationArguments(
+      'apply',
+      'apply-sealed-migration-plan',
+    )
+    const result = await captureCliRun(arguments_, harness.dependencies)
 
     expect(result).toEqual({
       exitCode: 1,
       stdout: [],
-      stderr: [
-        JSON.stringify({
-          schemaVersion: 1,
-          operation: 'measure',
-          status: 'error',
-          code: 'OPERATION_FAILED',
-        }),
-      ],
+      stderr: [JSON.stringify({
+        schemaVersion: 1,
+        operation: 'apply',
+        status: 'error',
+        code: 'OPERATION_FAILED',
+      })],
     })
-    expect(JSON.stringify(result)).not.toContain(canary)
-    expect(events).toEqual([
-      'create-session',
-      'measure',
-      'close',
-    ])
-    expect(session.closeCount).toBe(1)
+    const output = JSON.stringify(result)
+    for (const forbidden of [
+      rawCanary,
+      'migration-state-table',
+      'run-2026-08-01-01',
+      'owner-process-01',
+      maintenanceEvidencePath,
+    ]) {
+      expect(output).not.toContain(forbidden)
+    }
+    expect(harness.events.filter((event) => event === 'close')).toHaveLength(1)
   })
 
-  test('preserves a trusted migration failure code without its message', async () => {
+  test('preserves trusted failure code without its raw message', async () => {
     const canary = 'trusted-message-canary'
-    const events: string[] = []
-    const session = new RecordingControlCliSession(events, {
-      measureFailure: new WorkspaceSearchMigrationFailure(
+    const harness = createDependencies({
+      failure: new WorkspaceSearchMigrationFailure(
         'PITR_NOT_READY',
         canary,
       ),
     })
     const result = await captureCliRun(
       createMeasureArguments(),
-      createDependencies(session, events),
+      harness.dependencies,
     )
 
-    expect(result).toEqual({
-      exitCode: 1,
-      stdout: [],
-      stderr: [
-        JSON.stringify({
-          schemaVersion: 1,
-          operation: 'measure',
-          status: 'error',
-          code: 'PITR_NOT_READY',
-        }),
-      ],
-    })
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr[0]).toContain('PITR_NOT_READY')
     expect(JSON.stringify(result)).not.toContain(canary)
-    expect(session.closeCount).toBe(1)
+    expect(harness.events.filter((event) => event === 'close')).toHaveLength(1)
+  })
+
+  test('keeps the task failure primary over an asynchronous close failure', async () => {
+    const taskCanary = 'primary-task-message-canary'
+    const closeCanary = 'secondary-close-message-canary'
+    const harness = createDependencies({
+      failure: new WorkspaceSearchMigrationFailure(
+        'PITR_NOT_READY',
+        taskCanary,
+      ),
+      closeFailure: new Error(closeCanary),
+    })
+    const result = await captureCliRun(
+      createMeasureArguments(),
+      harness.dependencies,
+    )
+
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr[0]).toContain('PITR_NOT_READY')
+    expect(JSON.stringify(result)).not.toContain(taskCanary)
+    expect(JSON.stringify(result)).not.toContain(closeCanary)
+    expect(harness.events.filter((event) => event === 'close')).toHaveLength(1)
+  })
+
+  test('does not create a session when already interrupted', async () => {
+    const harness = createDependencies()
+    const controller = new AbortController()
+    controller.abort()
+    const result = await captureCliRun(
+      createMeasureArguments(),
+      harness.dependencies,
+      controller.signal,
+    )
+
+    expect(result.exitCode).toBe(130)
+    expect(result.stderr[0]).toContain('INTERRUPTED')
+    expect(harness.events).toEqual([])
+  })
+
+  test('waits for an interrupted stage before closing exactly once', async () => {
+    const stage = createDeferred<void>()
+    const harness = createDependencies({ stageGate: stage.promise })
+    const controller = new AbortController()
+    let settled = false
+    const resultPromise = captureCliRun(
+      createMutationArguments('apply', 'apply-sealed-migration-plan'),
+      harness.dependencies,
+      controller.signal,
+    ).finally(() => {
+      settled = true
+    })
+
+    await waitForEvent(harness.events, 'advance:apply')
+    controller.abort()
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    expect(harness.events).toContain('interrupt-rate')
+    expect(harness.events).not.toContain('close')
+
+    stage.resolve(undefined)
+    const result = await resultPromise
+    expect(result.exitCode).toBe(130)
+    expect(result.stderr[0]).toContain('INTERRUPTED')
+    expect(harness.events.filter((event) => event === 'close')).toHaveLength(1)
+  })
+
+  test('reports interruption that arrives while session close is draining', async () => {
+    const closeGate = createDeferred<void>()
+    const controller = new AbortController()
+    const harness = createDependencies({ closeGate: closeGate.promise })
+    const pending = captureCliRun(
+      createMeasureArguments(),
+      harness.dependencies,
+      controller.signal,
+    )
+    await waitForEvent(harness.events, 'close')
+
+    controller.abort(new Error('close-interruption-canary'))
+    closeGate.resolve()
+    const result = await pending
+
+    expect(result.exitCode).toBe(130)
+    expect(result.stdout).toEqual([])
+    expect(result.stderr).toHaveLength(1)
+    expect(result.stderr[0]).toContain('"code":"INTERRUPTED"')
+    expect(result.stderr[0]).not.toContain('close-interruption-canary')
+    expect(harness.events.filter((event) => event === 'close')).toHaveLength(1)
+    expect(harness.events).toContain('interrupt-rate')
+  })
+
+  test('starts no coordinator stage after abort during session creation', async () => {
+    const factory = createDeferred<void>()
+    const harness = createDependencies({ factoryGate: factory.promise })
+    const controller = new AbortController()
+    const resultPromise = captureCliRun(
+      createMutationArguments('apply', 'apply-sealed-migration-plan'),
+      harness.dependencies,
+      controller.signal,
+    )
+
+    await waitForEvent(harness.events, 'create-mutation-session')
+    expect(harness.mutationInputs[0]?.signal).toBe(controller.signal)
+    controller.abort()
+    factory.resolve(undefined)
+    const result = await resultPromise
+
+    expect(result.exitCode).toBe(130)
+    expect(harness.events).toContain('interrupt-rate')
+    expect(harness.events).not.toContain('advance:apply')
+    expect(harness.events.filter((event) => event === 'close')).toHaveLength(1)
+  })
+
+  test('rejects noncanonical rate policy before any session factory', async () => {
+    const harness = createDependencies()
+    const dependencies: WorkspaceSearchMigrationControlCliDependencies = {
+      ...harness.dependencies,
+      readInputFile: async () => new TextEncoder().encode(
+        JSON.stringify(ratePolicyDocument, null, 2),
+      ),
+    }
+    const result = await captureCliRun(
+      createMeasureArguments(),
+      dependencies,
+    )
+
+    expect(result.exitCode).toBe(2)
+    expect(result.stderr[0]).toContain(
+      'INVALID_DESCRIBE_TABLE_RATE_POLICY',
+    )
+    expect(harness.events).toEqual([])
   })
 })
 
@@ -993,71 +1310,45 @@ describe('Workspace Search migration documented root command', () => {
     const canary = 'unknown-secret-argument-canary'
     const result = await runRootCli([canary])
 
-    expect(result).toEqual({
-      exitCode: 2,
-      stdout: '',
-      stderr: `${JSON.stringify({
-        schemaVersion: 1,
-        operation: 'unknown',
-        status: 'error',
-        code: 'INVALID_USAGE',
-      })}\n`,
-    })
+    expect(result.exitCode).toBe(2)
+    expect(result.stdout).toBe('')
+    expect(result.stderr).toContain('"operation":"unknown"')
     expect(`${result.stdout}${result.stderr}`).not.toContain(canary)
   })
 })
 
-describe('Workspace Search migration maintenance evidence file', () => {
-  test('accepts a bounded regular file and rejects invalid file kinds or sizes', async () => {
-    const directory = await mkdtemp(
-      join(tmpdir(), 'mukuroji-migration-control-'),
-    )
+describe('Workspace Search migration bounded input file', () => {
+  test('accepts a bounded regular file and rejects invalid kinds or sizes', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'mukuroji-control-'))
     const regularPath = join(directory, 'regular.json')
     const emptyPath = join(directory, 'empty.json')
     const oversizedPath = join(directory, 'oversized.json')
-    const fifoPath = join(directory, 'evidence.fifo')
-    const regularBytes = Uint8Array.of(0x7b, 0x7d, 0x0a)
+    const regularBytes = Uint8Array.of(0x7b, 0x7d)
     try {
       await writeFile(regularPath, regularBytes)
       await writeFile(emptyPath, new Uint8Array())
-      await writeFile(
-        oversizedPath,
-        Buffer.alloc(MAINTENANCE_EVIDENCE_MAX_BYTES + 1, 0x61),
-      )
+      await writeFile(oversizedPath, Buffer.alloc(5, 0x61))
 
+      await expect(readBoundedInputFile(regularPath, 4)).resolves.toEqual(
+        regularBytes,
+      )
+      await expect(readBoundedInputFile(directory, 4)).rejects.toThrow(
+        'INPUT_FILE_INVALID',
+      )
+      await expect(readBoundedInputFile(emptyPath, 4)).rejects.toThrow(
+        'INPUT_FILE_INVALID',
+      )
+      await expect(readBoundedInputFile(oversizedPath, 4)).rejects.toThrow(
+        'INPUT_FILE_INVALID',
+      )
       await expect(
-        readMaintenanceEvidenceFile(regularPath),
+        readBoundedInputFile(regularPath, MAINTENANCE_EVIDENCE_MAX_BYTES),
       ).resolves.toEqual(regularBytes)
       await expect(
-        readMaintenanceEvidenceFile(directory),
+        readBoundedInputFile(regularPath, Number.MAX_SAFE_INTEGER),
       ).rejects.toThrow('INPUT_FILE_INVALID')
-      await expect(
-        readMaintenanceEvidenceFile(emptyPath),
-      ).rejects.toThrow('INPUT_FILE_INVALID')
-      await expect(
-        readMaintenanceEvidenceFile(oversizedPath),
-      ).rejects.toThrow('INPUT_FILE_INVALID')
-
-      const mkfifoPath = Bun.which('mkfifo')
-      if (mkfifoPath !== null) {
-        const fifoProcess = Bun.spawn({
-          cmd: [mkfifoPath, fifoPath],
-          stderr: 'pipe',
-          stdout: 'ignore',
-        })
-        const [fifoExitCode, fifoError] = await Promise.all([
-          fifoProcess.exited,
-          new Response(fifoProcess.stderr).text(),
-        ])
-        if (fifoExitCode !== 0) {
-          throw new Error(`mkfifo failed: ${fifoError}`)
-        }
-        await expect(
-          readMaintenanceEvidenceFile(fifoPath),
-        ).rejects.toThrow('INPUT_FILE_INVALID')
-      }
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
-  }, 2_000)
+  })
 })

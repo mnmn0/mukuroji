@@ -935,6 +935,8 @@ export type ClaimWorkspaceSearchMigrationDescribeTableRateLifecycleInput = {
   readonly recoverInterruptedCleanup: boolean
   /** Explicit authority to reconcile an attempt with unknown completion. */
   readonly recoverInterruptedAttempt: boolean
+  /** Optional cancellation that stops a not-yet-started fence mutation. */
+  readonly signal?: AbortSignal
 }
 
 /**
@@ -1125,6 +1127,22 @@ export interface WorkspaceSearchMigrationDescribeTableCheckpointPage {
  * Cleanup-only execution surface immune to a deferred lifecycle transition.
  */
 export interface WorkspaceSearchMigrationDescribeTableMandatoryCleanup {
+  /**
+   * Records that an outer synchronous guard rejected before data mutation.
+   *
+   * This boundary is used only when a stronger lease or supervision guard
+   * throws before `beginDataMutation` can authorize the irreversible send.
+   */
+  rejectDataMutationBeforeStart(): void
+
+  /**
+   * Marks the exact synchronous boundary immediately before one data mutation.
+   *
+   * A lifecycle transition deferred while the cleanup marker was being stored
+   * rejects here and allows the untouched marker to be cleared safely.
+   */
+  beginDataMutation(): void
+
   /**
    * Runs one exact physical attempt already required by mandatory cleanup.
    *
@@ -1569,6 +1587,7 @@ async function claimDescribeTableRateLifecycle(
   scopes: Map<string, RateScopeState>,
   dependencies: RateRegistryDependencies,
 ): Promise<WorkspaceSearchMigrationDescribeTableRateLifecycle> {
+  requireRateClaimSignalActive(claim.signal)
   let scope = scopes.get(key)
   if (scope === undefined) {
     let stored: unknown | undefined
@@ -1590,6 +1609,7 @@ async function claimDescribeTableRateLifecycle(
         'invalid-lifecycle',
       )
     }
+    requireRateClaimSignalActive(claim.signal)
     if (stored === undefined) {
       if (!claim.bootstrap) {
         throw new WorkspaceSearchMigrationDescribeTableRateError(
@@ -1643,6 +1663,7 @@ async function claimDescribeTableRateLifecycle(
         scope.checkpointTail,
         dependencies,
       )
+      requireRateClaimSignalActive(claim.signal)
       if (scope.attemptCompletionPendingNonce !== null) {
         throw new WorkspaceSearchMigrationDescribeTableRateError(
           'invalid-lifecycle',
@@ -1673,12 +1694,14 @@ async function claimDescribeTableRateLifecycle(
         scope.cleanupBarrier,
         dependencies,
       )
+      requireRateClaimSignalActive(claim.signal)
     }
     if (scope.pageOwner !== undefined) {
       await waitForRateRegistryBoundary(
         scope.pageBarrier,
         dependencies,
       )
+      requireRateClaimSignalActive(claim.signal)
     }
     if (
       scope.mandatoryCleanupRequired !==
@@ -1704,6 +1727,7 @@ async function claimDescribeTableRateLifecycle(
       )
     }
   }
+  requireRateClaimSignalActive(claim.signal)
   const lifecycle = new DescribeTableRateLifecycle(
     describeTableCapabilityConstructionKey,
     claim.fenceToken,
@@ -1719,6 +1743,7 @@ async function claimDescribeTableRateLifecycle(
     await persistDescribeTableRateLifecycleFenceClaim(
       describeTableRateControllerAuthority,
       lifecycle,
+      claim.signal,
     )
   } catch (error: unknown) {
     scopes.delete(key)
@@ -1844,17 +1869,19 @@ class DescribeTableRateLifecycle
    *
    * @param authority - Module-private rate-controller authority.
    * @param lifecycle - Exact lifecycle persisted without dynamic dispatch.
+   * @param signal - Optional cancellation before the claim CAS starts.
    */
   static async controllerPersistFenceClaim(
     authority: unknown,
     lifecycle: DescribeTableRateLifecycle,
+    signal: AbortSignal | undefined,
   ): Promise<void> {
     requireDescribeTableRateControllerAuthority(authority)
     const deadline = lifecycle.#createAdmissionDeadline()
     try {
       await lifecycle.#persistRateCheckpoint(
         'measurement',
-        new AbortController().signal,
+        signal ?? new AbortController().signal,
         deadline,
       )
     } finally {
@@ -1913,6 +1940,43 @@ class DescribeTableRateLifecycle
   ): Promise<Result> {
     requireDescribeTableRateControllerAuthority(authority)
     return lifecycle.#runMandatoryCleanup(task, page)
+  }
+
+  /**
+   * Authorizes the exact synchronous boundary before cleanup data mutation.
+   *
+   * @param authority - Module-private rate-controller authority.
+   * @param lifecycle - Exact lifecycle retaining the cleanup barrier.
+   * @param cleanupToken - Exact active cleanup authorization.
+   */
+  static controllerBeginCleanupDataMutation(
+    authority: unknown,
+    lifecycle: DescribeTableRateLifecycle,
+    cleanupToken: object,
+  ): void {
+    requireDescribeTableRateControllerAuthority(authority)
+    lifecycle.#requireCurrentOperationGeneration()
+    if (
+      lifecycle.#cleanupDepth <= 0 ||
+      lifecycle.#activeCleanupToken !== cleanupToken
+    ) {
+      throw new WorkspaceSearchMigrationDescribeTableRateError(
+        'invalid-lifecycle',
+      )
+    }
+    const deferredStatus = lifecycle.#deferredStatus
+    if (deferredStatus !== undefined) {
+      const reason: WorkspaceSearchMigrationDescribeTableRateStopReason =
+        deferredStatus === 'interrupted'
+          ? 'interrupted'
+          : deferredStatus === 'quarantined'
+            ? 'quarantined'
+            : deferredStatus === 'taken-over'
+              ? 'taken-over'
+              : 'invalid-lifecycle'
+      return lifecycle.#stop('post-send-guard', reason, 0, 0)
+    }
+    lifecycle.#requireActive('post-send-guard', cleanupToken)
   }
 
   /**
@@ -2167,6 +2231,7 @@ class DescribeTableRateLifecycle
           if (releasedUnusedAttempts) {
             await this.#persistRateCheckpointWithNewDeadline(
               'checkpoint-page',
+              this.#scope.pageReservationToken,
             )
             unusedReleaseConfirmed = true
           }
@@ -2932,6 +2997,35 @@ class DescribeTableRateLifecycle
       }
       return result
     } catch (error: unknown) {
+      const canClearBeforeDataMutation =
+        !markerAlreadyPersisted &&
+        canClearDescribeTableMandatoryCleanupBeforeDataMutation(
+          describeTableRateControllerAuthority,
+          cleanup,
+        ) &&
+        readDescribeTableMandatoryCleanupConsumedAttempts(
+          describeTableRateControllerAuthority,
+          cleanup,
+        ) === 0 &&
+        !this.#scope.attemptInFlight
+      if (canClearBeforeDataMutation) {
+        releaseDescribeTableMandatoryCleanup(
+          describeTableRateControllerAuthority,
+          cleanup,
+        )
+        this.#scope.mandatoryCleanupRequired = false
+        try {
+          await this.#persistRateCheckpointWithNewDeadline(
+            'post-send-guard',
+            cleanupToken,
+          )
+        } catch (clearError: unknown) {
+          this.#scope.mandatoryCleanupRequired = true
+          this.#transitionTo('quarantined')
+          throw clearError
+        }
+        throw error
+      }
       this.#scope.mandatoryCleanupRequired = true
       if (
         !markerAlreadyPersisted ||
@@ -3279,7 +3373,7 @@ class DescribeTableRateLifecycle
    * @param signal - Cancellation applying before the mutation begins.
    * @param phase - Safe phase used by a fail-closed stop.
    * @param deadline - Total admission deadline.
-   * @param cleanupToken - Exact cleanup-only capability token, when applicable.
+   * @param cleanupToken - Internal cleanup or page-release authorization.
    * @returns Mutation result.
    */
   async #withCheckpointMutation<Result>(
@@ -3325,6 +3419,7 @@ class DescribeTableRateLifecycle
    * @param phase - Safe phase used by fail-closed observations.
    * @param signal - Cancellation applying before protected external I/O.
    * @param deadline - Total admission deadline.
+   * @param cleanupToken - Internal cleanup or page-release authorization.
    */
   async #persistRateCheckpoint(
     phase: WorkspaceSearchMigrationDescribeTablePhase,
@@ -3353,7 +3448,7 @@ class DescribeTableRateLifecycle
    * @param phase - Safe phase used by fail-closed observations.
    * @param signal - Cancellation applying before protected external I/O.
    * @param deadline - Total admission deadline.
-   * @param cleanupToken - Exact cleanup-only capability token, when applicable.
+   * @param cleanupToken - Internal cleanup or page-release authorization.
    */
   async #persistRateCheckpointUnlocked(
     phase: WorkspaceSearchMigrationDescribeTablePhase,
@@ -3423,6 +3518,7 @@ class DescribeTableRateLifecycle
    * Persists a post-admission transition under a fresh bounded deadline.
    *
    * @param phase - Safe phase used by fail-closed observations.
+   * @param cleanupToken - Internal cleanup or page-release authorization.
    */
   async #persistRateCheckpointWithNewDeadline(
     phase: WorkspaceSearchMigrationDescribeTablePhase,
@@ -3602,7 +3698,7 @@ class DescribeTableRateLifecycle
    * @param phase - Safe phase used by a fail-closed stop.
    * @param deadline - Deadline created before the first admission wait.
    * @param requiredAttempts - Permits requested by the stopped operation.
-   * @param cleanupToken - Exact cleanup-only capability token, when applicable.
+   * @param cleanupToken - Internal cleanup or page-release authorization.
    */
   async #waitForAdmissionBoundary(
     boundary: Promise<void>,
@@ -3694,10 +3790,14 @@ class DescribeTableRateLifecycle
   }
 
   /**
-   * Applies a transition deferred by mandatory cleanup.
+   * Applies a transition after cleanup and its owning page have released.
    */
   #applyDeferredStatus(): void {
-    if (this.#cleanupDepth > 0 || this.#deferredStatus === undefined) {
+    if (
+      this.#cleanupDepth > 0 ||
+      this.#pageActive ||
+      this.#deferredStatus === undefined
+    ) {
       return
     }
     const status = this.#deferredStatus
@@ -3707,7 +3807,10 @@ class DescribeTableRateLifecycle
   }
 
   /**
-   * Rejects new work for any inactive lifecycle.
+   * Rejects new work for any inactive or transition-pending lifecycle.
+   *
+   * @param phase - Safe phase used by a fail-closed stop.
+   * @param cleanupToken - Internal cleanup or page-release authorization.
    */
   #requireActive(
     phase: WorkspaceSearchMigrationDescribeTablePhase,
@@ -3720,6 +3823,27 @@ class DescribeTableRateLifecycle
     const cleanupAuthorized =
       cleanupToken !== undefined &&
       cleanupToken === this.#activeCleanupToken
+    const pageReleaseAuthorized =
+      cleanupToken !== undefined &&
+      this.#pageActive &&
+      this.#cleanupDepth === 0 &&
+      cleanupToken === this.#scope.pageReservationToken
+    if (
+      this.#deferredStatus !== undefined &&
+      this.#cleanupDepth === 0 &&
+      !cleanupAuthorized &&
+      !pageReleaseAuthorized
+    ) {
+      const reason: WorkspaceSearchMigrationDescribeTableRateStopReason =
+        this.#deferredStatus === 'interrupted'
+          ? 'interrupted'
+          : this.#deferredStatus === 'quarantined'
+            ? 'quarantined'
+            : this.#deferredStatus === 'taken-over'
+              ? 'taken-over'
+              : 'invalid-lifecycle'
+      return this.#stop(phase, reason, 0, 0)
+    }
     if (
       this.#status === 'active' &&
       (
@@ -4069,6 +4193,10 @@ const runDescribeTableRateLifecycleAttempt =
 const runDescribeTableRateLifecycleMandatoryCleanup =
   DescribeTableRateLifecycle.controllerRunMandatoryCleanup
 
+/** Exact cleanup mutation gate captured before callers observe a lifecycle. */
+const beginDescribeTableMandatoryCleanupDataMutation =
+  DescribeTableRateLifecycle.controllerBeginCleanupDataMutation
+
 Object.freeze(DescribeTableRateLifecycle.prototype)
 Object.freeze(DescribeTableRateLifecycle)
 
@@ -4387,6 +4515,12 @@ class DescribeTableMandatoryCleanup
   /** Physical cleanup attempts consumed by this exact callback. */
   #consumedAttempts = 0
 
+  /** Whether one irreversible data mutation was authorized in this cleanup. */
+  #dataMutationStarted = false
+
+  /** Whether deferred interruption rejected the first mutation boundary. */
+  #dataMutationRejectedBeforeStart = false
+
   /**
    * Creates one cleanup-only attempt surface.
    *
@@ -4406,6 +4540,32 @@ class DescribeTableMandatoryCleanup
     this.#cleanupToken = cleanupToken
     this.#page = page
     Object.freeze(this)
+  }
+
+  /** Marks or rejects the exact boundary before one data mutation starts. */
+  beginDataMutation(): void {
+    this.#requireAcceptingAttempts()
+    try {
+      beginDescribeTableMandatoryCleanupDataMutation(
+        describeTableRateControllerAuthority,
+        this.#lifecycle,
+        this.#cleanupToken,
+      )
+    } catch (error: unknown) {
+      if (!this.#dataMutationStarted) {
+        this.#dataMutationRejectedBeforeStart = true
+      }
+      throw error
+    }
+    this.#dataMutationStarted = true
+  }
+
+  /** Records an outer guard rejection before any data mutation started. */
+  rejectDataMutationBeforeStart(): void {
+    this.#requireAcceptingAttempts()
+    if (!this.#dataMutationStarted) {
+      this.#dataMutationRejectedBeforeStart = true
+    }
   }
 
   /**
@@ -4526,6 +4686,22 @@ class DescribeTableMandatoryCleanup
   }
 
   /**
+   * Checks whether interruption rejected cleanup before any mutation started.
+   *
+   * @param authority - Module-private rate-controller authority.
+   * @param cleanup - Exact cleanup capability inspected by the controller.
+   * @returns Whether the durable marker can be cleared without reconciliation.
+   */
+  static controllerCanClearBeforeDataMutation(
+    authority: unknown,
+    cleanup: DescribeTableMandatoryCleanup,
+  ): boolean {
+    requireDescribeTableRateControllerAuthority(authority)
+    return cleanup.#dataMutationRejectedBeforeStart &&
+      !cleanup.#dataMutationStarted
+  }
+
+  /**
    * Permanently invalidates one cleanup capability.
    *
    * @param authority - Module-private rate-controller authority.
@@ -4575,6 +4751,10 @@ const consumeDescribeTableMandatoryCleanupAttempt =
 const readDescribeTableMandatoryCleanupConsumedAttempts =
   DescribeTableMandatoryCleanup.controllerReadConsumedAttempts
 
+/** Exact pre-mutation clearability check captured before caller observation. */
+const canClearDescribeTableMandatoryCleanupBeforeDataMutation =
+  DescribeTableMandatoryCleanup.controllerCanClearBeforeDataMutation
+
 /** Exact cleanup release captured before callers observe cleanup. */
 const releaseDescribeTableMandatoryCleanup =
   DescribeTableMandatoryCleanup.controllerRelease
@@ -4613,27 +4793,131 @@ function createRegistryDependencies(
       'invalid-lifecycle',
     )
   }
+  const selectedWaiter = waiter ?? defaultRateWaiter
+  const selectedDeadlineScheduler =
+    deadlineScheduler ?? defaultRateDeadlineScheduler
   if (
     typeof checkpointStore !== 'object' ||
     checkpointStore === null ||
-    typeof checkpointStore.load !== 'function' ||
-    typeof checkpointStore.compareAndSwap !== 'function'
+    typeof selectedWaiter !== 'object' ||
+    selectedWaiter === null ||
+    typeof selectedDeadlineScheduler !== 'object' ||
+    selectedDeadlineScheduler === null ||
+    (
+      recorder !== undefined &&
+      (typeof recorder !== 'object' || recorder === null)
+    )
   ) {
     throw new WorkspaceSearchMigrationDescribeTableRateError(
       'invalid-lifecycle',
     )
   }
-  return {
+  let load: WorkspaceSearchMigrationDescribeTableRateCheckpointStore['load']
+  let compareAndSwap:
+    WorkspaceSearchMigrationDescribeTableRateCheckpointStore['compareAndSwap']
+  let wait: WorkspaceSearchMigrationDescribeTableRateWaiter['wait']
+  let schedule:
+    WorkspaceSearchMigrationDescribeTableRateDeadlineScheduler['schedule']
+  let record:
+    WorkspaceSearchMigrationDescribeTableRateRecorder['record'] | undefined
+  try {
+    load = checkpointStore.load
+    compareAndSwap = checkpointStore.compareAndSwap
+    wait = selectedWaiter.wait
+    schedule = selectedDeadlineScheduler.schedule
+    record = recorder?.record
+  } catch {
+    throw new WorkspaceSearchMigrationDescribeTableRateError(
+      'invalid-lifecycle',
+    )
+  }
+  if (
+    typeof load !== 'function' ||
+    typeof compareAndSwap !== 'function' ||
+    typeof wait !== 'function' ||
+    typeof schedule !== 'function' ||
+    (recorder !== undefined && typeof record !== 'function')
+  ) {
+    throw new WorkspaceSearchMigrationDescribeTableRateError(
+      'invalid-lifecycle',
+    )
+  }
+  const capturedCheckpointStore:
+    WorkspaceSearchMigrationDescribeTableRateCheckpointStore =
+      Object.freeze({
+        load: (scopeBindingDigest: string) =>
+          Reflect.apply(load, checkpointStore, [scopeBindingDigest]),
+        compareAndSwap: (
+          write: WorkspaceSearchMigrationDescribeTableRateCheckpointWrite,
+        ) =>
+          Reflect.apply(compareAndSwap, checkpointStore, [write]),
+      })
+  const capturedWaiter:
+    WorkspaceSearchMigrationDescribeTableRateWaiter = Object.freeze({
+      wait: (delayMilliseconds: number, signal: AbortSignal) =>
+        Reflect.apply(wait, selectedWaiter, [delayMilliseconds, signal]),
+    })
+  const capturedDeadlineScheduler:
+    WorkspaceSearchMigrationDescribeTableRateDeadlineScheduler =
+      Object.freeze({
+        schedule: (
+          delayMilliseconds: number,
+          callback: () => void,
+        ) => {
+          const handle = Reflect.apply(
+            schedule,
+            selectedDeadlineScheduler,
+            [delayMilliseconds, callback],
+          )
+          if (
+            typeof handle !== 'object' ||
+            handle === null
+          ) {
+            throw new WorkspaceSearchMigrationDescribeTableRateError(
+              'invalid-lifecycle',
+            )
+          }
+          let cancel:
+            WorkspaceSearchMigrationDescribeTableRateDeadlineHandle['cancel']
+          try {
+            cancel = handle.cancel
+          } catch {
+            throw new WorkspaceSearchMigrationDescribeTableRateError(
+              'invalid-lifecycle',
+            )
+          }
+          if (typeof cancel !== 'function') {
+            throw new WorkspaceSearchMigrationDescribeTableRateError(
+              'invalid-lifecycle',
+            )
+          }
+          return Object.freeze({
+            cancel: (): void => Reflect.apply(cancel, handle, []),
+          })
+        },
+      })
+  const capturedRecorder:
+    WorkspaceSearchMigrationDescribeTableRateRecorder | undefined =
+      recorder === undefined || record === undefined
+        ? undefined
+        : Object.freeze({
+          record: (
+            observation:
+              WorkspaceSearchMigrationDescribeTableRateObservation,
+          ): void => {
+            Reflect.apply(record, recorder, [observation])
+          },
+        })
+  return Object.freeze({
     policy,
-    checkpointStore,
+    checkpointStore: capturedCheckpointStore,
     clock: clock ?? defaultRateClock,
     epochClock: epochClock ?? Date.now,
-    waiter: waiter ?? defaultRateWaiter,
-    deadlineScheduler:
-      deadlineScheduler ?? defaultRateDeadlineScheduler,
+    waiter: capturedWaiter,
+    deadlineScheduler: capturedDeadlineScheduler,
     random: random ?? Math.random,
-    recorder,
-  }
+    recorder: capturedRecorder,
+  })
 }
 
 /**
@@ -5137,6 +5421,7 @@ function detachAndValidateClaim(
   let bootstrap: boolean
   let recoverInterruptedCleanup: boolean
   let recoverInterruptedAttempt: boolean
+  let signal: AbortSignal | undefined
   try {
     account = input.account
     region = input.region
@@ -5144,11 +5429,13 @@ function detachAndValidateClaim(
     bootstrap = input.bootstrap
     recoverInterruptedCleanup = input.recoverInterruptedCleanup
     recoverInterruptedAttempt = input.recoverInterruptedAttempt
+    signal = input.signal
   } catch {
     throw new WorkspaceSearchMigrationDescribeTableRateError(
       'invalid-lifecycle',
     )
   }
+  requireAbortSignal(signal)
   if (
     typeof account !== 'string' ||
     typeof region !== 'string' ||
@@ -5190,7 +5477,17 @@ function detachAndValidateClaim(
     bootstrap,
     recoverInterruptedCleanup,
     recoverInterruptedAttempt,
+    ...(signal === undefined ? {} : { signal }),
   })
+}
+
+/** Stops a lifecycle claim before its next durable mutation can start. */
+function requireRateClaimSignalActive(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) {
+    throw new WorkspaceSearchMigrationDescribeTableRateError(
+      'interrupted',
+    )
+  }
 }
 
 /**

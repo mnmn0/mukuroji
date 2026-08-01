@@ -767,6 +767,147 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
 
   })
 
+  test('captures collaborator methods once before durable work', async () => {
+    const harness = new DeterministicRateHarness()
+    const scheduler = new DeterministicDeadlineScheduler(harness)
+    let changed = false
+    let physicalAttemptCount = 0
+    let maliciousCallCount = 0
+    let scheduleCallCount = 0
+    let cancelMethodReadCount = 0
+    const methodReads = new Map<string, number>()
+    const recordMethodRead = (methodName: string): void => {
+      methodReads.set(
+        methodName,
+        (methodReads.get(methodName) ?? 0) + 1,
+      )
+    }
+    const checkpointStore:
+      WorkspaceSearchMigrationDescribeTableRateCheckpointStore = {
+        get load() {
+          recordMethodRead('load')
+          return changed
+            ? async (): Promise<undefined> => {
+              maliciousCallCount += 1
+              return undefined
+            }
+            : (scopeBindingDigest: string) =>
+              harness.load(scopeBindingDigest)
+        },
+        get compareAndSwap() {
+          recordMethodRead('compareAndSwap')
+          return changed
+            ? async (): Promise<'stored'> => {
+              maliciousCallCount += 1
+              return 'stored'
+            }
+            : (
+              write:
+                WorkspaceSearchMigrationDescribeTableRateCheckpointWrite,
+            ) => harness.compareAndSwap(write)
+        },
+      }
+    const waiter: WorkspaceSearchMigrationDescribeTableRateWaiter = {
+      get wait() {
+        recordMethodRead('wait')
+        return changed
+          ? async (): Promise<void> => {
+            maliciousCallCount += 1
+          }
+          : (delayMilliseconds: number, signal: AbortSignal) =>
+            harness.wait(delayMilliseconds, signal)
+      },
+    }
+    const deadlineScheduler:
+      WorkspaceSearchMigrationDescribeTableRateDeadlineScheduler = {
+        get schedule() {
+          recordMethodRead('schedule')
+          return changed
+            ? (): WorkspaceSearchMigrationDescribeTableRateDeadlineHandle => {
+              maliciousCallCount += 1
+              return { cancel: (): void => {} }
+            }
+            : (
+              delayMilliseconds: number,
+              callback: () => void,
+            ) => {
+              scheduleCallCount += 1
+              const handle = scheduler.schedule(
+                delayMilliseconds,
+                callback,
+              )
+              let handleReadCount = 0
+              return {
+                get cancel() {
+                  cancelMethodReadCount += 1
+                  handleReadCount += 1
+                  return handleReadCount === 1
+                    ? (): void => handle.cancel()
+                    : (): void => {
+                      maliciousCallCount += 1
+                    }
+                },
+              }
+            }
+        },
+      }
+    const recorder: WorkspaceSearchMigrationDescribeTableRateRecorder = {
+      get record() {
+        recordMethodRead('record')
+        return changed
+          ? (): void => {
+            maliciousCallCount += 1
+          }
+          : (
+            observation:
+              WorkspaceSearchMigrationDescribeTableRateObservation,
+          ) => harness.record(observation)
+      },
+    }
+    const registry =
+      createWorkspaceSearchMigrationDescribeTableRateRegistry({
+        policy: createPolicy(),
+        checkpointStore,
+        clock: harness.clock,
+        epochClock: harness.epochClock,
+        waiter,
+        deadlineScheduler,
+        recorder,
+        random: () => 0,
+      })
+    changed = true
+
+    const lifecycle = await registry.claim(createClaim())
+    for (let attemptIndex = 0; attemptIndex < 2; attemptIndex += 1) {
+      await lifecycle.runDescribeTableAttempt(
+        { phase: 'measurement' },
+        createAttempt(async () => {
+          physicalAttemptCount += 1
+        }),
+      )
+    }
+
+    expect([...methodReads.entries()].sort()).toEqual([
+      ['compareAndSwap', 1],
+      ['load', 1],
+      ['record', 1],
+      ['schedule', 1],
+      ['wait', 1],
+    ])
+    expect(maliciousCallCount).toBe(0)
+    expect(physicalAttemptCount).toBe(2)
+    expect(harness.readCheckpoint()).toMatchObject({
+      attemptCount: 2,
+      attemptInFlight: false,
+      revision: 4,
+    })
+    expect(harness.waits).toEqual([1])
+    expect(harness.observations.length).toBeGreaterThan(0)
+    expect(scheduleCallCount).toBeGreaterThan(0)
+    expect(cancelMethodReadCount).toBe(scheduleCallCount)
+    lifecycle.close()
+  })
+
   test('requires explicit bootstrap and persists write-ahead reservations before callbacks', async () => {
     const harness = new DeterministicRateHarness()
     const registry =

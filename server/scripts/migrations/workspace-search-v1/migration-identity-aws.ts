@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { types as nodeUtilTypes } from 'node:util'
 import {
   DescribeContinuousBackupsCommand,
@@ -78,6 +79,22 @@ import {
   isWorkspaceSearchMigrationIdentityAdapterFailure,
   measureWorkspaceSearchMigrationConfiguration,
 } from './migration-identity'
+import {
+  createWorkspaceSearchMigrationDescribeTableRateCheckpointAwsStore,
+  type WorkspaceSearchMigrationDescribeTableRateCheckpointAwsTransport,
+} from './migration-describe-table-rate-budget-aws'
+import type {
+  WorkspaceSearchMigrationDescribeTablePhase,
+  WorkspaceSearchMigrationDescribeTablePinnedAwsCredentials,
+  WorkspaceSearchMigrationDescribeTableRateEvidence,
+  WorkspaceSearchMigrationDescribeTableRatePolicy,
+  WorkspaceSearchMigrationDescribeTableRateRecorder,
+} from './migration-describe-table-rate-budget'
+import {
+  createWorkspaceSearchMigrationManagedDescribeTableRate,
+  WorkspaceSearchMigrationManagedDescribeTableRateError,
+  type WorkspaceSearchMigrationManagedDescribeTableRate,
+} from './migration-describe-table-rate-managed-session'
 import {
   type WorkspaceSearchMigrationSharedProfiles,
   loadWorkspaceSearchMigrationSharedProfiles,
@@ -663,6 +680,14 @@ type ManagedTargetEvidenceAuthority<
   readonly request: Request
 }
 
+/** Operation-local marker proving an authoritative tx received its post-guard. */
+type ManagedPlanningEvidencePostSendGuardState = {
+  /** Whether the final tx result was already classified by a fresh all-six guard. */
+  finalized: boolean
+  /** Stable guard failure retained across the adapter's tx reconciliation. */
+  failure?: WorkspaceSearchMigrationFailure
+}
+
 /**
  * One complete managed planning-join request fixed to a measured generation.
  */
@@ -889,6 +914,18 @@ export interface WorkspaceSearchMigrationManagedAwsSession
   extends
     WorkspaceSearchMigrationManagedIdentityPort,
     WorkspaceSearchMigrationPrePlanAuthorityAwsPort {
+  /**
+   * Installs one heartbeat-owned guard at every nested data mutation boundary.
+   *
+   * @param guard - Synchronous lease and commit-headroom assertion.
+   * @param task - Complete supervised operation using this session.
+   * @returns Exact task result while the guard remains current.
+   */
+  runWithMutationAdmissionGuard<Result>(
+    guard: () => void,
+    task: () => Promise<Result>,
+  ): Promise<Result>
+
   /**
    * Reads and reduces one bounded source page through the measured AWS session.
    *
@@ -1155,6 +1192,83 @@ export interface WorkspaceSearchMigrationManagedAwsSession
   ): WorkspaceSearchMigrationRollbackOperationAwsPort
 }
 
+/**
+ * Complete production session whose DescribeTable access is durably budgeted.
+ */
+export interface WorkspaceSearchMigrationRateManagedAwsSession
+  extends WorkspaceSearchMigrationManagedAwsSession {
+  /**
+   * Stops admission and waits for already-started mandatory cleanup to drain.
+   *
+   * @returns Completion after every owned AWS transport is closed.
+   */
+  close(): Promise<void>
+
+  /**
+   * Creates a fresh identity port sharing this session's rate lifecycle.
+   *
+   * The child owns independent AWS identity clients but cannot claim or close
+   * the shared rate fence. Its fresh all-six measurement is serialized with
+   * the parent session's checkpoint pages.
+   *
+   * @returns Fresh independently closeable measurement port.
+   */
+  createRateManagedMeasurementSession():
+    Promise<WorkspaceSearchMigrationManagedIdentityPort>
+
+  /** Stops admission of every new AWS data mutation for this invocation. */
+  interruptMutationAdmission(): void
+
+  /** Stops every new rate-managed call for this invocation. */
+  interruptDescribeTableRate(): void
+
+  /** Returns only the secret-free durable rate aggregate. */
+  readDescribeTableRateEvidence():
+    WorkspaceSearchMigrationDescribeTableRateEvidence
+}
+
+/** Input for the production durably rate-managed AWS composition root. */
+export type CreateAwsWorkspaceSearchMigrationRateManagedSessionInput = {
+  /** Complete explicit operator-selected resources. */
+  readonly requested: WorkspaceSearchMigrationRequestedResources
+  /** Exact reviewed and digest-bound DescribeTable policy. */
+  readonly ratePolicy: WorkspaceSearchMigrationDescribeTableRatePolicy
+  /** Explicit authority to create the first absent rate checkpoint. */
+  readonly bootstrapRateCheckpoint: boolean
+  /** Explicit authority to recover a retained cleanup marker. */
+  readonly recoverInterruptedCleanup: boolean
+  /** Explicit authority to recover one uncertain physical attempt. */
+  readonly recoverInterruptedAttempt: boolean
+  /** Optional best-effort secret-free observation sink. */
+  readonly rateRecorder?: WorkspaceSearchMigrationDescribeTableRateRecorder
+  /** Optional trusted clock captured by pre-plan authority commits. */
+  readonly prePlanAuthorityClock?:
+    WorkspaceSearchMigrationPrePlanAuthorityClock
+  /** Optional cancellation stopping not-yet-started checkpoint mutation. */
+  readonly signal?: AbortSignal
+}
+
+/** Detached production composition input captured before the STS await. */
+type RateManagedAwsSessionConstructionSnapshot = {
+  /** Validated immutable requested resource snapshot. */
+  readonly resources: WorkspaceSearchMigrationRequestedResourcesSnapshot
+  /** Detached reviewed DescribeTable rate policy. */
+  readonly ratePolicy: WorkspaceSearchMigrationDescribeTableRatePolicy
+  /** Explicit initial checkpoint bootstrap authority. */
+  readonly bootstrapRateCheckpoint: boolean
+  /** Explicit interrupted-cleanup recovery authority. */
+  readonly recoverInterruptedCleanup: boolean
+  /** Explicit uncertain-attempt recovery authority. */
+  readonly recoverInterruptedAttempt: boolean
+  /** Optional captured secret-free observation sink. */
+  readonly rateRecorder?: WorkspaceSearchMigrationDescribeTableRateRecorder
+  /** Captured trusted pre-plan clock. */
+  readonly prePlanAuthorityClock:
+    WorkspaceSearchMigrationPrePlanAuthorityClock
+  /** Optional captured composition cancellation. */
+  readonly signal?: AbortSignal
+}
+
 /** Narrow transport containing only managed identity reads. */
 export interface WorkspaceSearchMigrationIdentityAwsTransport {
   /**
@@ -1267,7 +1381,9 @@ export type WorkspaceSearchMigrationIdentityAwsTransportConstructor = (
 
 /** AWS SDK transport exposing only allowlisted measured migration operations. */
 class AwsSdkWorkspaceSearchMigrationIdentityTransport
-  implements WorkspaceSearchMigrationManagedAwsTransport {
+  implements
+    WorkspaceSearchMigrationManagedAwsTransport,
+    WorkspaceSearchMigrationDescribeTableRateCheckpointAwsTransport {
   /** DynamoDB client bound to the explicit profile and region. */
   private readonly dynamodbClient: DynamoDBClient
 
@@ -1340,6 +1456,30 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
    */
   describeTable(command: DescribeTableCommand): Promise<DescribeTableCommandOutput> {
     return this.dynamodbClient.send(command)
+  }
+
+  /**
+   * Strongly reads one pre-measurement DescribeTable rate checkpoint.
+   *
+   * @param command - Exact adapter-owned GetItem command.
+   * @returns Raw low-level checkpoint item response.
+   */
+  getRateCheckpoint(
+    command: GetItemCommand,
+  ): Promise<GetItemCommandOutput> {
+    return this.dynamodbClient.send(command)
+  }
+
+  /**
+   * Transactionally replaces one pre-measurement rate checkpoint.
+   *
+   * @param command - Exact adapter-owned single-item transaction.
+   * @returns Raw low-level transaction response.
+   */
+  transactWriteRateCheckpoint(
+    command: TransactWriteItemsCommand,
+  ): Promise<TransactWriteItemsCommandOutput> {
+    return this.sendMigrationStateTransaction(command)
   }
 
   /**
@@ -1723,6 +1863,14 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
   }
 }
 
+/** Exact actual-send state inherited by one managed immutable write. */
+type ManagedImmutableArtifactWriteSendState = {
+  /** Whether the owning write callback may still reach the transport. */
+  active: boolean
+  /** Whether an actual immutable Put transport invocation has begun. */
+  sent: boolean
+}
+
 /** Managed AWS adapter bound to one validated resource selection. */
 class AwsWorkspaceSearchMigrationIdentityPort
   implements WorkspaceSearchMigrationManagedAwsSession {
@@ -1747,12 +1895,26 @@ class AwsWorkspaceSearchMigrationIdentityPort
   /** Allowlisted AWS command transport. */
   private readonly transport: WorkspaceSearchMigrationManagedAwsTransport
 
+  /** Optional durable controller owning every production DescribeTable call. */
+  private readonly describeTableRate:
+    WorkspaceSearchMigrationManagedDescribeTableRate | undefined
+
+  /** Whether this session owns final closure of the shared rate controller. */
+  private readonly ownsDescribeTableRate: boolean
+
+  /** Factory for a fresh child that shares the parent's rate lifecycle. */
+  private readonly rateManagedMeasurementSessionFactory:
+    (() => Promise<WorkspaceSearchMigrationManagedIdentityPort>) | undefined
+
   /** Adapter-owned trusted clock for pre-plan authority transitions. */
   private readonly prePlanAuthorityClock:
     WorkspaceSearchMigrationPrePlanAuthorityClock
 
   /** Whether this managed session has permanently released its clients. */
   private closed = false
+
+  /** Exact-once completion for asynchronous owned transport drainage. */
+  private closeCompletion: Promise<void> | undefined
 
   /** Generation invalidated by close and every replacement measurement. */
   private generation = 0
@@ -1780,18 +1942,29 @@ class AwsWorkspaceSearchMigrationIdentityPort
    */
   private measuredExecutionControlQuarantined = false
 
+  /** Operation-local actual-send latch for managed immutable writes. */
+  private readonly immutableArtifactWriteSendState =
+    new AsyncLocalStorage<ManagedImmutableArtifactWriteSendState>()
+
   /**
    * Creates a port bound to immutable copies of the reviewed resources.
    *
    * @param requested - Validated operator-selected resources.
    * @param transport - Allowlisted AWS command transport.
    * @param prePlanAuthorityClock - Trusted clock captured by authority commits.
+   * @param describeTableRate - Optional durable DescribeTable controller.
+   * @param ownsDescribeTableRate - Whether close drains the shared controller.
+   * @param measurementSessionFactory - Optional shared-controller child factory.
    */
   constructor(
     requested: WorkspaceSearchMigrationRequestedResourcesSnapshot,
     transport: WorkspaceSearchMigrationManagedAwsTransport,
     prePlanAuthorityClock:
       WorkspaceSearchMigrationPrePlanAuthorityClock,
+    describeTableRate?: WorkspaceSearchMigrationManagedDescribeTableRate,
+    ownsDescribeTableRate = false,
+    measurementSessionFactory?:
+      () => Promise<WorkspaceSearchMigrationManagedIdentityPort>,
   ) {
     this.requested = requested
     this.requestedResourcesBinding =
@@ -1802,13 +1975,18 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.tableNames = new Set(Object.values(requested.tables))
     this.transport = transport
     this.prePlanAuthorityClock = prePlanAuthorityClock
+    this.describeTableRate = describeTableRate
+    this.ownsDescribeTableRate = ownsDescribeTableRate
+    this.rateManagedMeasurementSessionFactory = measurementSessionFactory
   }
 
   /**
    * Releases every AWS SDK client owned by the transport.
    */
-  close(): void {
-    if (this.closed) return
+  close(): Promise<void> {
+    const existing = this.closeCompletion
+    if (existing !== undefined) return existing
+    if (this.closed) return Promise.resolve()
     this.closed = true
     this.generation += 1
     this.measuredConfigurationHash = undefined
@@ -1816,11 +1994,70 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.invalidateManagedPlanningArtifactPort()
     this.measuredMigrationStateTable = undefined
     this.measuredExecutionControlQuarantined = false
-    try {
-      this.transport.close()
-    } catch {
-      // The session remains closed even if an injected transport cannot clean up.
+    const closeTransport = (): void => {
+      try {
+        this.transport.close()
+      } catch {
+        // The session stays closed even when injected cleanup fails.
+      }
     }
+    if (this.describeTableRate !== undefined && this.ownsDescribeTableRate) {
+      const completion = this.describeTableRate.close().then(
+        closeTransport,
+        closeTransport,
+      )
+      this.closeCompletion = completion
+      return completion
+    }
+    closeTransport()
+    const completion = Promise.resolve()
+    this.closeCompletion = completion
+    return completion
+  }
+
+  /** Creates an independent identity port sharing this exact rate lifecycle. */
+  async createRateManagedMeasurementSession():
+    Promise<WorkspaceSearchMigrationManagedIdentityPort> {
+    this.requireOpen()
+    const factory = this.rateManagedMeasurementSessionFactory
+    if (factory === undefined) throw invalidIdentityLookup()
+    return await factory()
+  }
+
+  /** Installs one synchronous heartbeat guard on the shared rate controller. */
+  async runWithMutationAdmissionGuard<Result>(
+    guard: () => void,
+    task: () => Promise<Result>,
+  ): Promise<Result> {
+    this.requireOpen()
+    if (typeof guard !== 'function' || typeof task !== 'function') {
+      throw invalidIdentityLookup()
+    }
+    const rate = this.describeTableRate
+    if (rate === undefined) {
+      guard()
+      return await task()
+    }
+    return await rate.runWithMutationAdmissionGuard(guard, task)
+  }
+
+  /** Stops every new AWS data mutation while preserving active cleanup. */
+  interruptMutationAdmission(): void {
+    this.describeTableRate?.interrupt()
+  }
+
+  /** Stops every new rate-managed DescribeTable operation. */
+  interruptDescribeTableRate(): void {
+    this.interruptMutationAdmission()
+  }
+
+  /** Returns the current secret-free DescribeTable rate aggregate. */
+  readDescribeTableRateEvidence():
+    WorkspaceSearchMigrationDescribeTableRateEvidence {
+    this.requireOpen()
+    const rate = this.describeTableRate
+    if (rate === undefined) throw invalidIdentityLookup()
+    return rate.readEvidence()
   }
 
   /**
@@ -1830,6 +2067,18 @@ class AwsWorkspaceSearchMigrationIdentityPort
    * @returns Exact measured migration configuration.
    */
   async measureConfiguration(): Promise<WorkspaceSearchMigrationConfiguration> {
+    const rate = this.describeTableRate
+    if (rate === undefined) {
+      return await this.measureConfigurationWithinRateGate()
+    }
+    return await rate.runNonPageOperation(
+      async () => await this.measureConfigurationWithinRateGate(),
+    )
+  }
+
+  /** Measures all six identities while the caller owns any configured gate. */
+  private async measureConfigurationWithinRateGate():
+    Promise<WorkspaceSearchMigrationConfiguration> {
     this.requireOpen()
     this.generation += 1
     const measurementGeneration = this.generation
@@ -2364,11 +2613,18 @@ class AwsWorkspaceSearchMigrationIdentityPort
           authority,
           () => delegate.commitApplyOperation(input),
         ),
-      saveApplyCheckpoint: (input) =>
-        this.runManagedApplyOperation(
-          authority,
-          () => delegate.saveApplyCheckpoint(input),
-        ),
+      saveApplyCheckpoint: async (input) => {
+        const snapshot = snapshotManagedRateGateInput(
+          input,
+          () => createManagedApplyOperationFailure('INVALID_ARGUMENT'),
+        )
+        return await this.runManagedDescribeTableCheckpointPage(
+          () => this.runManagedApplyOperation(
+            authority,
+            () => delegate.saveApplyCheckpoint(snapshot),
+          ),
+        )
+      },
       sealApply: (input) =>
         this.runManagedApplyOperation(
           authority,
@@ -2612,11 +2868,18 @@ class AwsWorkspaceSearchMigrationIdentityPort
           authority,
           () => delegate.readVerifiedRoot(),
         ),
-      saveVerificationPage: (input) =>
-        this.runManagedFullVerificationOperation(
-          authority,
-          () => delegate.saveVerificationPage(input),
-        ),
+      saveVerificationPage: async (input) => {
+        const snapshot = snapshotManagedRateGateInput(
+          input,
+          () => createManagedFullVerificationFailure('INVALID_ARGUMENT'),
+        )
+        return await this.runManagedDescribeTableCheckpointPage(
+          () => this.runManagedFullVerificationOperation(
+            authority,
+            () => delegate.saveVerificationPage(snapshot),
+          ),
+        )
+      },
       publishVerified: (input) =>
         this.runManagedFullVerificationOperation(
           authority,
@@ -2809,11 +3072,18 @@ class AwsWorkspaceSearchMigrationIdentityPort
           authority,
           () => lifecycle.beginRollback(input),
         ),
-      commitRollbackOperation: (input) =>
-        this.runManagedRollbackOperation(
-          authority,
-          () => operation.commitRollbackOperation(input),
-        ),
+      commitRollbackOperation: async (input) => {
+        const snapshot = snapshotManagedRateGateInput(
+          input,
+          () => createManagedRollbackOperationFailure('INVALID_ARGUMENT'),
+        )
+        return await this.runManagedDescribeTableCheckpointPage(
+          () => this.runManagedRollbackOperation(
+            authority,
+            () => operation.commitRollbackOperation(snapshot),
+          ),
+        )
+      },
       finishRollback: (input) =>
         this.runManagedRollbackOperation(
           authority,
@@ -3045,11 +3315,18 @@ class AwsWorkspaceSearchMigrationIdentityPort
           authority,
           () => delegate.beginRollback(input),
         ),
-      commitRollbackOperation: (input) =>
-        this.runManagedRollbackOperation(
-          authority,
-          () => delegate.commitRollbackOperation(input),
-        ),
+      commitRollbackOperation: async (input) => {
+        const snapshot = snapshotManagedRateGateInput(
+          input,
+          () => createManagedRollbackOperationFailure('INVALID_ARGUMENT'),
+        )
+        return await this.runManagedDescribeTableCheckpointPage(
+          () => this.runManagedRollbackOperation(
+            authority,
+            () => delegate.commitRollbackOperation(snapshot),
+          ),
+        )
+      },
       finishRollback: (input) =>
         this.runManagedRollbackOperation(
           authority,
@@ -3384,14 +3661,26 @@ class AwsWorkspaceSearchMigrationIdentityPort
   async acquireLease(
     input: AcquireWorkspaceSearchMigrationLeaseInput,
   ): Promise<WorkspaceSearchMigrationLease> {
-    return runManagedPrePlanAuthorityAwsBoundary(async () => {
-      const request: AcquireWorkspaceSearchMigrationLeaseInput = {
-        runId: input.runId,
-        ownerId: input.ownerId,
-      }
-      return this.runPrePlanAuthorityOperation(
-        (adapter) => adapter.acquireLease(request),
-      )
+    const snapshot = snapshotManagedRateGateInput(
+      input,
+      createManagedPrePlanSnapshotFailure,
+    )
+    const request: AcquireWorkspaceSearchMigrationLeaseInput = {
+      runId: snapshot.runId,
+      ownerId: snapshot.ownerId,
+    }
+    const operation = async (): Promise<WorkspaceSearchMigrationLease> =>
+      await runManagedPrePlanAuthorityAwsBoundary(async () => {
+        return this.runPrePlanAuthorityOperation(
+          (adapter) => adapter.acquireLease(request),
+        )
+      })
+    const rate = this.describeTableRate
+    if (rate === undefined) return await operation()
+    return await rate.runNonPageOperation(async () => {
+      const lease = await operation()
+      await rate.claimAfterLease(lease.fenceToken)
+      return lease
     })
   }
 
@@ -3404,14 +3693,26 @@ class AwsWorkspaceSearchMigrationIdentityPort
   async heartbeatLease(
     input: HeartbeatWorkspaceSearchMigrationLeaseInput,
   ): Promise<WorkspaceSearchMigrationLease> {
-    return runManagedPrePlanAuthorityAwsBoundary(async () => {
-      const request: HeartbeatWorkspaceSearchMigrationLeaseInput = {
-        lease: this.snapshotPrePlanLeaseClaim(input.lease),
-      }
-      return this.runPrePlanAuthorityOperation(
-        (adapter) => adapter.heartbeatLease(request),
-      )
-    })
+    const snapshot = snapshotManagedRateGateInput(
+      input,
+      createManagedPrePlanSnapshotFailure,
+    )
+    const request = snapshotManagedRateGateOperation(
+      () => ({
+        lease: this.snapshotPrePlanLeaseClaim(snapshot.lease),
+      }),
+      createManagedPrePlanSnapshotFailure,
+    )
+    const operation = async (): Promise<WorkspaceSearchMigrationLease> =>
+      await runManagedPrePlanAuthorityAwsBoundary(async () => {
+        return this.runPrePlanAuthorityOperation(
+          (adapter) => adapter.heartbeatLease(request),
+        )
+      })
+    const rate = this.describeTableRate
+    return rate === undefined
+      ? await operation()
+      : await rate.runNonPageOperation(operation)
   }
 
   /**
@@ -3689,9 +3990,17 @@ class AwsWorkspaceSearchMigrationIdentityPort
   async commitNextSourceEvidencePage(
     input: WorkspaceSearchMigrationSourceEvidenceAwsCommitRequest,
   ): Promise<WorkspaceSearchMigrationSourceEvidenceProgress> {
-    return this.runSourceEvidenceOperation(
+    const snapshot = snapshotManagedRateGateInput(
       input,
-      (adapter, request) => adapter.commitNextPage(request),
+      () => createManagedSourceEvidencePreparationFailure(
+        'INVALID_ARGUMENT',
+      ),
+    )
+    return await this.runManagedDescribeTableCheckpointPage(
+      () => this.runSourceEvidenceOperation(
+        snapshot,
+        (adapter, request) => adapter.commitNextPage(request),
+      ),
     )
   }
 
@@ -3716,17 +4025,33 @@ class AwsWorkspaceSearchMigrationIdentityPort
     return runManagedSourceEvidenceAwsBoundary(async () => {
       const authority = this.captureSourceEvidenceAuthority(input)
       await this.requireCurrentMigrationStateTableIncarnation(authority)
-      const adapter = this.createManagedSourceEvidenceAdapter(authority)
+      const postSendGuard: ManagedPlanningEvidencePostSendGuardState = {
+        finalized: false,
+      }
+      const adapter = this.createManagedSourceEvidenceAdapter(
+        authority,
+        postSendGuard,
+      )
       let result: Result
       try {
         result = await operation(adapter, authority.request)
       } catch (error: unknown) {
+        if (postSendGuard.finalized) {
+          const failure = postSendGuard.failure
+          if (failure !== undefined) throw failure
+          throw error
+        }
         this.requireMeasurementGeneration(
           authority.generation,
           authority.configurationHash,
         )
         await this.requireCurrentMigrationStateTableIncarnation(authority)
         throw error
+      }
+      if (postSendGuard.finalized) {
+        const failure = postSendGuard.failure
+        if (failure !== undefined) throw failure
+        return result
       }
       this.requireMeasurementGeneration(
         authority.generation,
@@ -3791,10 +4116,12 @@ class AwsWorkspaceSearchMigrationIdentityPort
    * Creates one ephemeral evidence adapter guarded by captured authority.
    *
    * @param authority - Current generation and configuration authorization.
+   * @param postSendGuard - Operation-local final transaction guard marker.
    * @returns Adapter composed from this session's scanner and DynamoDB client.
    */
   private createManagedSourceEvidenceAdapter(
     authority: ManagedSourceEvidenceAuthority,
+    postSendGuard: ManagedPlanningEvidencePostSendGuardState,
   ): WorkspaceSearchMigrationSourceEvidenceAwsPort {
     let writePrepared = false
     const sourceArtifactTransport:
@@ -3802,7 +4129,10 @@ class AwsWorkspaceSearchMigrationIdentityPort
         putSourceArtifact: (command) =>
           this.runManagedMigrationStateIo(
             authority,
-            () => this.transport.putSourceArtifact(command),
+            () => {
+              this.assertNewManagedDataIoAllowed()
+              return this.transport.putSourceArtifact(command)
+            },
           ),
         headSourceArtifact: (command) =>
           this.runManagedMigrationStateIo(
@@ -3990,8 +4320,9 @@ class AwsWorkspaceSearchMigrationIdentityPort
       transactWriteSourceEvidence: (command) => {
         if (!writePrepared) return failSourceScanAws('INVALID_STATE')
         writePrepared = false
-        return this.runManagedPreparedMigrationStateWrite(
+        return this.runManagedPreparedSourceEvidenceWrite(
           authority,
+          postSendGuard,
           () => this.transport.transactWriteSourceEvidence(command),
         )
       },
@@ -4044,9 +4375,15 @@ class AwsWorkspaceSearchMigrationIdentityPort
   async commitNextTargetEvidencePage(
     input: WorkspaceSearchMigrationTargetEvidenceAwsCommitRequest,
   ): Promise<WorkspaceSearchMigrationTargetEvidenceProgress> {
-    return this.runTargetEvidenceOperation(
+    const snapshot = snapshotManagedRateGateInput(
       input,
-      (adapter, request) => adapter.commitNextPage(request),
+      () => createManagedTargetEvidenceFailure('INVALID_ARGUMENT'),
+    )
+    return await this.runManagedDescribeTableCheckpointPage(
+      () => this.runTargetEvidenceOperation(
+        snapshot,
+        (adapter, request) => adapter.commitNextPage(request),
+      ),
     )
   }
 
@@ -4071,17 +4408,33 @@ class AwsWorkspaceSearchMigrationIdentityPort
     return runManagedTargetEvidenceAwsBoundary(async () => {
       const authority = this.captureTargetEvidenceAuthority(input)
       await this.requireCurrentMigrationStateTableIncarnation(authority)
-      const adapter = this.createManagedTargetEvidenceAdapter(authority)
+      const postSendGuard: ManagedPlanningEvidencePostSendGuardState = {
+        finalized: false,
+      }
+      const adapter = this.createManagedTargetEvidenceAdapter(
+        authority,
+        postSendGuard,
+      )
       let result: Result
       try {
         result = await operation(adapter, authority.request)
       } catch (error: unknown) {
+        if (postSendGuard.finalized) {
+          const failure = postSendGuard.failure
+          if (failure !== undefined) throw failure
+          throw error
+        }
         this.requireMeasurementGeneration(
           authority.generation,
           authority.configurationHash,
         )
         await this.requireCurrentMigrationStateTableIncarnation(authority)
         throw error
+      }
+      if (postSendGuard.finalized) {
+        const failure = postSendGuard.failure
+        if (failure !== undefined) throw failure
+        return result
       }
       this.requireMeasurementGeneration(
         authority.generation,
@@ -4126,10 +4479,12 @@ class AwsWorkspaceSearchMigrationIdentityPort
    * Creates one ephemeral target-evidence adapter guarded by captured authority.
    *
    * @param authority - Current generation and configuration authorization.
+   * @param postSendGuard - Operation-local final transaction guard marker.
    * @returns Adapter composed from one private raw-page gateway and AWS clients.
    */
   private createManagedTargetEvidenceAdapter(
     authority: ManagedTargetEvidenceAuthority,
+    postSendGuard: ManagedPlanningEvidencePostSendGuardState,
   ): WorkspaceSearchMigrationTargetEvidenceAwsPort {
     let writePrepared = false
     const targetArtifactTransport:
@@ -4137,7 +4492,10 @@ class AwsWorkspaceSearchMigrationIdentityPort
         putTargetArtifact: (command) =>
           this.runManagedMigrationStateIo(
             authority,
-            () => this.transport.putTargetArtifact(command),
+            () => {
+              this.assertNewManagedDataIoAllowed()
+              return this.transport.putTargetArtifact(command)
+            },
           ),
         headTargetArtifact: (command) =>
           this.runManagedMigrationStateIo(
@@ -4324,8 +4682,9 @@ class AwsWorkspaceSearchMigrationIdentityPort
           throw createManagedTargetEvidenceFailure('INVALID_STATE')
         }
         writePrepared = false
-        return this.runManagedPreparedMigrationStateWrite(
+        return this.runManagedPreparedTargetEvidenceWrite(
           authority,
+          postSendGuard,
           () => this.transport.transactWriteTargetEvidence(command),
         )
       },
@@ -4637,12 +4996,15 @@ class AwsWorkspaceSearchMigrationIdentityPort
       configurationHash: authority.request.configurationHash,
       source,
     }
-    const adapter = this.createManagedSourceEvidenceAdapter({
-      generation: authority.generation,
-      configurationHash: authority.configurationHash,
-      stateTable: authority.stateTable,
-      request,
-    })
+    const adapter = this.createManagedSourceEvidenceAdapter(
+      {
+        generation: authority.generation,
+        configurationHash: authority.configurationHash,
+        stateTable: authority.stateTable,
+        request,
+      },
+      { finalized: false },
+    )
     return { request, adapter }
   }
 
@@ -4661,12 +5023,15 @@ class AwsWorkspaceSearchMigrationIdentityPort
       configuration: authority.request.configuration,
       configurationHash: authority.request.configurationHash,
     }
-    const adapter = this.createManagedTargetEvidenceAdapter({
-      generation: authority.generation,
-      configurationHash: authority.configurationHash,
-      stateTable: authority.stateTable,
-      request,
-    })
+    const adapter = this.createManagedTargetEvidenceAdapter(
+      {
+        generation: authority.generation,
+        configurationHash: authority.configurationHash,
+        stateTable: authority.stateTable,
+        request,
+      },
+      { finalized: false },
+    )
     return { request, adapter }
   }
 
@@ -5015,23 +5380,39 @@ class AwsWorkspaceSearchMigrationIdentityPort
   private async requireCurrentPlanningJoinTableIncarnations(
     authority: ManagedPlanningJoinAuthority,
   ): Promise<void> {
-    await this.requireCurrentMigrationStateTableIncarnation(authority)
-    for (const source of workspaceSearchMigrationSourceNames) {
-      await this.requireCurrentSourceTableIncarnation(
-        authority.request.configuration.tables[source],
+    await this.runManagedDescribeTableNonPageOperation(async () => {
+      await this.requireCurrentMigrationStateTableIncarnation(authority)
+      for (const source of workspaceSearchMigrationSourceNames) {
+        await this.requireCurrentSourceTableIncarnation(
+          authority.request.configuration.tables[source],
+          authority.generation,
+          authority.configurationHash,
+        )
+      }
+      await this.requireCurrentTargetTableIncarnation(
+        authority.request.configuration.tables['workspace-search'],
         authority.generation,
         authority.configurationHash,
       )
-    }
-    await this.requireCurrentTargetTableIncarnation(
-      authority.request.configuration.tables['workspace-search'],
-      authority.generation,
-      authority.configurationHash,
-    )
-    this.requireMeasurementGeneration(
-      authority.generation,
-      authority.configurationHash,
-    )
+      this.requireMeasurementGeneration(
+        authority.generation,
+        authority.configurationHash,
+      )
+    })
+  }
+
+  /**
+   * Marks the exact point where a managed immutable Put reaches its transport.
+   *
+   * Writes outside a full-verification or partial-rollback cleanup have no
+   * operation-local latch. A descendant that outlives its owning callback is
+   * rejected before it can reuse the retained send capability.
+   */
+  private markManagedImmutableArtifactWriteSent(): void {
+    const sendState = this.immutableArtifactWriteSendState.getStore()
+    if (sendState === undefined) return
+    if (!sendState.active) throw invalidIdentityLookup()
+    sendState.sent = true
   }
 
   /**
@@ -5061,10 +5442,14 @@ class AwsWorkspaceSearchMigrationIdentityPort
       putImmutableArtifact: (command, abortSignal) =>
         this.runManagedPlanningArtifactOperation(
           authority,
-          () => this.transport.putImmutableArtifact(
-            command,
-            abortSignal,
-          ),
+          () => {
+            this.assertNewManagedDataIoAllowed()
+            this.markManagedImmutableArtifactWriteSent()
+            return this.transport.putImmutableArtifact(
+              command,
+              abortSignal,
+            )
+          },
         ),
 
       /**
@@ -5237,26 +5622,28 @@ class AwsWorkspaceSearchMigrationIdentityPort
   private async requireCurrentSealedPlanningAuthorityTableIncarnations(
     authority: ManagedSealedPlanningAuthority,
   ): Promise<void> {
-    try {
-      await this.requireCurrentMigrationStateTableIncarnation(authority)
-      for (const source of workspaceSearchMigrationSourceNames) {
-        await this.requireCurrentSourceTableIncarnation(
-          authority.configuration.tables[source],
+    await this.runManagedDescribeTableNonPageOperation(async () => {
+      try {
+        await this.requireCurrentMigrationStateTableIncarnation(authority)
+        for (const source of workspaceSearchMigrationSourceNames) {
+          await this.requireCurrentSourceTableIncarnation(
+            authority.configuration.tables[source],
+            authority.generation,
+            authority.configurationHash,
+          )
+        }
+        await this.requireCurrentTargetTableIncarnation(
+          authority.configuration.tables['workspace-search'],
           authority.generation,
           authority.configurationHash,
         )
+      } catch (error: unknown) {
+        throw createManagedSealedPlanningAuthorityFailure(
+          readManagedMigrationStateFailureCode(error),
+        )
       }
-      await this.requireCurrentTargetTableIncarnation(
-        authority.configuration.tables['workspace-search'],
-        authority.generation,
-        authority.configurationHash,
-      )
-    } catch (error: unknown) {
-      throw createManagedSealedPlanningAuthorityFailure(
-        readManagedMigrationStateFailureCode(error),
-      )
-    }
-    this.requireManagedSealedPlanningAuthority(authority)
+      this.requireManagedSealedPlanningAuthority(authority)
+    })
   }
 
   /**
@@ -5277,6 +5664,240 @@ class AwsWorkspaceSearchMigrationIdentityPort
   }
 
   /**
+   * Protects one irreversible send and its required post-send all-six guards.
+   *
+   * @param task - Send and reconciliation sequence entered immediately before I/O.
+   * @returns Exact task result after protected accounting is durably released.
+   */
+  private async runManagedDescribeTableMandatoryCleanup<Result>(
+    task: () => Promise<Result>,
+  ): Promise<Result> {
+    const rate = this.describeTableRate
+    return rate === undefined
+      ? await task()
+      : await rate.runMandatoryCleanup(task)
+  }
+
+  /** Rejects a new AWS data mutation after shared admission has stopped. */
+  private assertNewManagedDataIoAllowed(): void {
+    this.describeTableRate?.assertNewDataIoAllowed()
+  }
+
+  /**
+   * Serializes one complete all-six read against checkpoint-page admission.
+   *
+   * @param task - Complete pre-send guard or measurement sequence.
+   * @returns Exact task result without borrowing another call chain's page.
+   */
+  private async runManagedDescribeTableNonPageOperation<Result>(
+    task: () => Promise<Result>,
+  ): Promise<Result> {
+    const rate = this.describeTableRate
+    return rate === undefined
+      ? await task()
+      : await rate.runNonPageOperation(task)
+  }
+
+  /**
+   * Reserves the exact reviewed page capacity before logical page data I/O.
+   *
+   * @param task - Complete apply, verification, or rollback page operation.
+   * @returns Exact page result after unused permits are durably released.
+   */
+  private async runManagedDescribeTableCheckpointPage<Result>(
+    task: () => Promise<Result>,
+  ): Promise<Result> {
+    const rate = this.describeTableRate
+    return rate === undefined
+      ? await task()
+      : await rate.runCheckpointPage({}, task)
+  }
+
+  /**
+   * Protects the source planning page's final authoritative transaction.
+   *
+   * @param authority - Captured source evidence generation and configuration.
+   * @param postSendGuard - Operation-local final guard state.
+   * @param operation - Exact prepared source evidence transaction.
+   * @returns Raw transaction result after a fresh all-six post-guard.
+   */
+  private async runManagedPreparedSourceEvidenceWrite<Result>(
+    authority: ManagedSourceEvidenceAuthority,
+    postSendGuard: ManagedPlanningEvidencePostSendGuardState,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    return await this.runManagedPreparedPlanningEvidenceWrite(
+      authority,
+      authority.request.configuration,
+      postSendGuard,
+      createManagedSourceEvidencePreparationFailure,
+      operation,
+    )
+  }
+
+  /**
+   * Protects the target planning page's final authoritative transaction.
+   *
+   * @param authority - Captured target evidence generation and configuration.
+   * @param postSendGuard - Operation-local final guard state.
+   * @param operation - Exact prepared target evidence transaction.
+   * @returns Raw transaction result after a fresh all-six post-guard.
+   */
+  private async runManagedPreparedTargetEvidenceWrite<Result>(
+    authority: ManagedTargetEvidenceAuthority,
+    postSendGuard: ManagedPlanningEvidencePostSendGuardState,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    return await this.runManagedPreparedPlanningEvidenceWrite(
+      authority,
+      authority.request.configuration,
+      postSendGuard,
+      createManagedTargetEvidenceFailure,
+      operation,
+    )
+  }
+
+  /**
+   * Runs one planning evidence tx and classifies its exact post-send identity.
+   *
+   * A transport failure is preserved when every fresh table guard succeeds.
+   * A failed guard quarantines both the rate controller and this generation.
+   * A failure before the transport callback starts remains non-ambiguous.
+   *
+   * @param authority - Captured measured migration-state authority.
+   * @param configuration - Detached configuration owning all six tables.
+   * @param postSendGuard - Operation-local final guard state.
+   * @param createFailure - Source- or target-specific safe failure factory.
+   * @param operation - Exact prepared authoritative transaction.
+   * @returns Raw transaction result after final table revalidation.
+   */
+  private async runManagedPreparedPlanningEvidenceWrite<Result>(
+    authority: ManagedMigrationStateAuthority,
+    configuration: WorkspaceSearchMigrationConfiguration,
+    postSendGuard: ManagedPlanningEvidencePostSendGuardState,
+    createFailure: (
+      code: WorkspaceSearchMigrationFailureCode,
+    ) => WorkspaceSearchMigrationFailure,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    return await this.runManagedDescribeTableMandatoryCleanup(async () => {
+      let sent = false
+      let result: Result
+      try {
+        result = await this.runManagedMigrationStateIo(
+          authority,
+          () => {
+            this.assertNewManagedDataIoAllowed()
+            sent = true
+            return operation()
+          },
+        )
+      } catch (error: unknown) {
+        if (!sent) throw error
+        try {
+          await this.requireCurrentPlanningEvidenceTableIncarnations(
+            authority,
+            configuration,
+            createFailure,
+          )
+        } catch (guardError: unknown) {
+          this.quarantineManagedExecutionControl(authority)
+          postSendGuard.failure =
+            guardError instanceof WorkspaceSearchMigrationFailure
+              ? guardError
+              : createFailure('INVALID_STATE')
+        } finally {
+          postSendGuard.finalized = true
+        }
+        throw error
+      }
+      try {
+        await this.requireCurrentPlanningEvidenceTableIncarnations(
+          authority,
+          configuration,
+          createFailure,
+        )
+      } catch (error: unknown) {
+        this.quarantineManagedExecutionControl(authority)
+        postSendGuard.failure =
+          error instanceof WorkspaceSearchMigrationFailure
+            ? error
+            : createFailure('INVALID_STATE')
+      } finally {
+        postSendGuard.finalized = true
+      }
+      return result
+    })
+  }
+
+  /**
+   * Revalidates state, all four sources, and target after a planning tx.
+   *
+   * @param authority - Captured measured generation and state table.
+   * @param configuration - Detached exact six-table configuration.
+   * @param createFailure - Source- or target-specific safe failure factory.
+   */
+  private async requireCurrentPlanningEvidenceTableIncarnations(
+    authority: ManagedMigrationStateAuthority,
+    configuration: WorkspaceSearchMigrationConfiguration,
+    createFailure: (
+      code: WorkspaceSearchMigrationFailureCode,
+    ) => WorkspaceSearchMigrationFailure,
+  ): Promise<void> {
+    await this.runManagedDescribeTableNonPageOperation(async () => {
+      let guardFailure: WorkspaceSearchMigrationFailure | undefined
+      try {
+        await this.requireCurrentMigrationStateTableIncarnation(authority)
+      } catch (error: unknown) {
+        guardFailure = createFailure(
+          readManagedMigrationStateFailureCode(error),
+        )
+      }
+      for (const source of workspaceSearchMigrationSourceNames) {
+        try {
+          await this.requireCurrentSourceTableIncarnation(
+            configuration.tables[source],
+            authority.generation,
+            authority.configurationHash,
+          )
+        } catch (error: unknown) {
+          if (guardFailure === undefined) {
+            guardFailure = createFailure(
+              readManagedMigrationStateFailureCode(error),
+            )
+          }
+        }
+      }
+      try {
+        await this.requireCurrentTargetTableIncarnation(
+          configuration.tables['workspace-search'],
+          authority.generation,
+          authority.configurationHash,
+        )
+      } catch (error: unknown) {
+        if (guardFailure === undefined) {
+          guardFailure = createFailure(
+            readManagedMigrationStateFailureCode(error),
+          )
+        }
+      }
+      try {
+        this.requireMeasurementGeneration(
+          authority.generation,
+          authority.configurationHash,
+        )
+      } catch (error: unknown) {
+        if (guardFailure === undefined) {
+          guardFailure = createFailure(
+            readManagedMigrationStateFailureCode(error),
+          )
+        }
+      }
+      if (guardFailure !== undefined) throw guardFailure
+    })
+  }
+
+  /**
    * Sends one prepared publication and revalidates all six table incarnations.
    *
    * The pre-send preparation closes drift detected before transaction
@@ -5292,23 +5913,32 @@ class AwsWorkspaceSearchMigrationIdentityPort
     authority: ManagedSealedPlanningAuthority,
     operation: () => Promise<Result>,
   ): Promise<Result> {
-    let result: Result
-    try {
-      result = await this.runManagedMigrationStateIo(
-        authority,
-        operation,
-      )
-    } catch (error: unknown) {
+    return await this.runManagedDescribeTableMandatoryCleanup(async () => {
       this.requireManagedSealedPlanningAuthority(authority)
+      let sent = false
+      let result: Result
+      try {
+        result = await this.runManagedMigrationStateIo(
+          authority,
+          () => {
+            this.assertNewManagedDataIoAllowed()
+            sent = true
+            return operation()
+          },
+        )
+      } catch (error: unknown) {
+        if (!sent) throw error
+        this.requireManagedSealedPlanningAuthority(authority)
+        await this.requireCurrentSealedPlanningAuthorityTableIncarnations(
+          authority,
+        )
+        throw error
+      }
       await this.requireCurrentSealedPlanningAuthorityTableIncarnations(
         authority,
       )
-      throw error
-    }
-    await this.requireCurrentSealedPlanningAuthorityTableIncarnations(
-      authority,
-    )
-    return result
+      return result
+    })
   }
 
   /**
@@ -5516,43 +6146,51 @@ class AwsWorkspaceSearchMigrationIdentityPort
     authority: ManagedExecutionRunAuthority,
     operation: () => Promise<Result>,
   ): Promise<Result> {
-    try {
-      this.requireManagedApplicationWriterFenceAuthority(authority)
-    } catch (error: unknown) {
-      throw createManagedExecutionRunFailure(
-        readManagedMigrationStateFailureCode(error),
-      )
-    }
-    let result: Result
-    try {
-      result = await this.runManagedMigrationStateIo(
-        authority,
-        operation,
-      )
-    } catch (error: unknown) {
+    return await this.runManagedDescribeTableMandatoryCleanup(async () => {
+      try {
+        this.requireManagedApplicationWriterFenceAuthority(authority)
+      } catch (error: unknown) {
+        throw createManagedExecutionRunFailure(
+          readManagedMigrationStateFailureCode(error),
+        )
+      }
+      let sent = false
+      let result: Result
+      try {
+        result = await this.runManagedMigrationStateIo(
+          authority,
+          () => {
+            this.assertNewManagedDataIoAllowed()
+            sent = true
+            return operation()
+          },
+        )
+      } catch (error: unknown) {
+        if (!sent) throw error
+        try {
+          await this.requireCurrentApplicationWriterFenceTableIncarnations(
+            authority,
+          )
+        } catch (guardError: unknown) {
+          this.quarantineManagedExecutionControl(authority)
+          throw createManagedExecutionRunFailure(
+            readManagedMigrationStateFailureCode(guardError),
+          )
+        }
+        throw error
+      }
       try {
         await this.requireCurrentApplicationWriterFenceTableIncarnations(
           authority,
         )
-      } catch (guardError: unknown) {
+      } catch (error: unknown) {
         this.quarantineManagedExecutionControl(authority)
         throw createManagedExecutionRunFailure(
-          readManagedMigrationStateFailureCode(guardError),
+          readManagedMigrationStateFailureCode(error),
         )
       }
-      throw error
-    }
-    try {
-      await this.requireCurrentApplicationWriterFenceTableIncarnations(
-        authority,
-      )
-    } catch (error: unknown) {
-      this.quarantineManagedExecutionControl(authority)
-      throw createManagedExecutionRunFailure(
-        readManagedMigrationStateFailureCode(error),
-      )
-    }
-    return result
+      return result
+    })
   }
 
   /**
@@ -5686,28 +6324,42 @@ class AwsWorkspaceSearchMigrationIdentityPort
     authority: ManagedApplyOperationAuthority,
     operation: () => Promise<Result>,
   ): Promise<Result> {
-    try {
-      this.requireManagedApplyOperationAuthority(authority)
-    } catch (error: unknown) {
-      throw createManagedApplyOperationFailure(
-        readManagedMigrationStateFailureCode(error),
-      )
-    }
-    let sent = false
-    let result: Result
-    try {
-      result = await this.runManagedMigrationStateIo(
-        authority,
-        () => {
-          sent = true
-          return operation()
-        },
-      )
-    } catch (error: unknown) {
-      if (!sent) {
+    return await this.runManagedDescribeTableMandatoryCleanup(async () => {
+      try {
+        this.requireManagedApplyOperationAuthority(authority)
+      } catch (error: unknown) {
         throw createManagedApplyOperationFailure(
           readManagedMigrationStateFailureCode(error),
         )
+      }
+      let sent = false
+      let result: Result
+      try {
+        result = await this.runManagedMigrationStateIo(
+          authority,
+          () => {
+            this.assertNewManagedDataIoAllowed()
+            sent = true
+            return operation()
+          },
+        )
+      } catch (error: unknown) {
+        if (!sent) {
+          throw createManagedApplyOperationFailure(
+            readManagedMigrationStateFailureCode(error),
+          )
+        }
+        try {
+          await this.requireCurrentApplyOperationTableIncarnations(
+            authority,
+          )
+        } catch {
+          this.quarantineManagedExecutionControl(authority)
+          throw createManagedApplyOperationFailure(
+            'AMBIGUOUS_OPERATION_UNRESOLVED',
+          )
+        }
+        throw error
       }
       try {
         await this.requireCurrentApplyOperationTableIncarnations(
@@ -5719,19 +6371,8 @@ class AwsWorkspaceSearchMigrationIdentityPort
           'AMBIGUOUS_OPERATION_UNRESOLVED',
         )
       }
-      throw error
-    }
-    try {
-      await this.requireCurrentApplyOperationTableIncarnations(
-        authority,
-      )
-    } catch {
-      this.quarantineManagedExecutionControl(authority)
-      throw createManagedApplyOperationFailure(
-        'AMBIGUOUS_OPERATION_UNRESOLVED',
-      )
-    }
-    return result
+      return result
+    })
   }
 
   /**
@@ -5928,28 +6569,42 @@ class AwsWorkspaceSearchMigrationIdentityPort
     authority: ManagedFullVerificationAuthority,
     operation: () => Promise<Result>,
   ): Promise<Result> {
-    try {
-      this.requireManagedFullVerificationAuthority(authority)
-    } catch (error: unknown) {
-      throw createManagedFullVerificationFailure(
-        readManagedMigrationStateFailureCode(error),
-      )
-    }
-    let sent = false
-    let result: Result
-    try {
-      result = await this.runManagedMigrationStateIo(
-        authority,
-        () => {
-          sent = true
-          return operation()
-        },
-      )
-    } catch (error: unknown) {
-      if (!sent) {
+    return await this.runManagedDescribeTableMandatoryCleanup(async () => {
+      try {
+        this.requireManagedFullVerificationAuthority(authority)
+      } catch (error: unknown) {
         throw createManagedFullVerificationFailure(
           readManagedMigrationStateFailureCode(error),
         )
+      }
+      let sent = false
+      let result: Result
+      try {
+        result = await this.runManagedMigrationStateIo(
+          authority,
+          () => {
+            this.assertNewManagedDataIoAllowed()
+            sent = true
+            return operation()
+          },
+        )
+      } catch (error: unknown) {
+        if (!sent) {
+          throw createManagedFullVerificationFailure(
+            readManagedMigrationStateFailureCode(error),
+          )
+        }
+        try {
+          await this.requireCurrentFullVerificationTableIncarnations(
+            authority,
+          )
+        } catch {
+          this.quarantineManagedExecutionControl(authority)
+          throw createManagedFullVerificationFailure(
+            'AMBIGUOUS_OPERATION_UNRESOLVED',
+          )
+        }
+        throw error
       }
       try {
         await this.requireCurrentFullVerificationTableIncarnations(
@@ -5961,19 +6616,8 @@ class AwsWorkspaceSearchMigrationIdentityPort
           'AMBIGUOUS_OPERATION_UNRESOLVED',
         )
       }
-      throw error
-    }
-    try {
-      await this.requireCurrentFullVerificationTableIncarnations(
-        authority,
-      )
-    } catch {
-      this.quarantineManagedExecutionControl(authority)
-      throw createManagedFullVerificationFailure(
-        'AMBIGUOUS_OPERATION_UNRESOLVED',
-      )
-    }
-    return result
+      return result
+    })
   }
 
   /**
@@ -6014,14 +6658,40 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.requireManagedFullVerificationAuthority(authority)
     await this.requireCurrentFullVerificationTableIncarnations(authority)
     this.requireManagedFullVerificationAuthority(authority)
-    let sent = false
-    let result: Result
-    try {
-      sent = true
-      result = await operation()
-    } catch (error: unknown) {
-      if (!sent) {
+    return await this.runManagedDescribeTableMandatoryCleanup(async () => {
+      this.requireManagedFullVerificationAuthority(authority)
+      const sendState: ManagedImmutableArtifactWriteSendState = {
+        active: true,
+        sent: false,
+      }
+      let result: Result
+      try {
+        try {
+          result = await this.immutableArtifactWriteSendState.run(
+            sendState,
+            operation,
+          )
+        } finally {
+          sendState.active = false
+        }
+      } catch (error: unknown) {
+        if (!sendState.sent) {
+          throw error
+        }
+        try {
+          await this.requireCurrentFullVerificationTableIncarnations(
+            authority,
+          )
+        } catch {
+          this.quarantineManagedExecutionControl(authority)
+          throw createManagedFullVerificationFailure(
+            'AMBIGUOUS_OPERATION_UNRESOLVED',
+          )
+        }
         throw error
+      }
+      if (!sendState.sent) {
+        throw createManagedFullVerificationFailure('INVALID_STATE')
       }
       try {
         await this.requireCurrentFullVerificationTableIncarnations(
@@ -6033,19 +6703,8 @@ class AwsWorkspaceSearchMigrationIdentityPort
           'AMBIGUOUS_OPERATION_UNRESOLVED',
         )
       }
-      throw error
-    }
-    try {
-      await this.requireCurrentFullVerificationTableIncarnations(
-        authority,
-      )
-    } catch {
-      this.quarantineManagedExecutionControl(authority)
-      throw createManagedFullVerificationFailure(
-        'AMBIGUOUS_OPERATION_UNRESOLVED',
-      )
-    }
-    return result
+      return result
+    })
   }
 
   /**
@@ -6205,28 +6864,42 @@ class AwsWorkspaceSearchMigrationIdentityPort
     authority: ManagedRollbackOperationAuthority,
     operation: () => Promise<Result>,
   ): Promise<Result> {
-    try {
-      this.requireManagedRollbackOperationAuthority(authority)
-    } catch (error: unknown) {
-      throw createManagedRollbackOperationFailure(
-        readManagedMigrationStateFailureCode(error),
-      )
-    }
-    let sent = false
-    let result: Result
-    try {
-      result = await this.runManagedMigrationStateIo(
-        authority,
-        () => {
-          sent = true
-          return operation()
-        },
-      )
-    } catch (error: unknown) {
-      if (!sent) {
+    return await this.runManagedDescribeTableMandatoryCleanup(async () => {
+      try {
+        this.requireManagedRollbackOperationAuthority(authority)
+      } catch (error: unknown) {
         throw createManagedRollbackOperationFailure(
           readManagedMigrationStateFailureCode(error),
         )
+      }
+      let sent = false
+      let result: Result
+      try {
+        result = await this.runManagedMigrationStateIo(
+          authority,
+          () => {
+            this.assertNewManagedDataIoAllowed()
+            sent = true
+            return operation()
+          },
+        )
+      } catch (error: unknown) {
+        if (!sent) {
+          throw createManagedRollbackOperationFailure(
+            readManagedMigrationStateFailureCode(error),
+          )
+        }
+        try {
+          await this.requireCurrentRollbackOperationTableIncarnations(
+            authority,
+          )
+        } catch {
+          this.quarantineManagedExecutionControl(authority)
+          throw createManagedRollbackOperationFailure(
+            'AMBIGUOUS_OPERATION_UNRESOLVED',
+          )
+        }
+        throw error
       }
       try {
         await this.requireCurrentRollbackOperationTableIncarnations(
@@ -6238,19 +6911,8 @@ class AwsWorkspaceSearchMigrationIdentityPort
           'AMBIGUOUS_OPERATION_UNRESOLVED',
         )
       }
-      throw error
-    }
-    try {
-      await this.requireCurrentRollbackOperationTableIncarnations(
-        authority,
-      )
-    } catch {
-      this.quarantineManagedExecutionControl(authority)
-      throw createManagedRollbackOperationFailure(
-        'AMBIGUOUS_OPERATION_UNRESOLVED',
-      )
-    }
-    return result
+      return result
+    })
   }
 
   /**
@@ -6298,10 +6960,39 @@ class AwsWorkspaceSearchMigrationIdentityPort
       authority,
     )
     this.requireManagedRollbackOperationAuthority(authority)
-    let result: Result
-    try {
-      result = await operation()
-    } catch (error: unknown) {
+    return await this.runManagedDescribeTableMandatoryCleanup(async () => {
+      this.requireManagedRollbackOperationAuthority(authority)
+      const sendState: ManagedImmutableArtifactWriteSendState = {
+        active: true,
+        sent: false,
+      }
+      let result: Result
+      try {
+        try {
+          result = await this.immutableArtifactWriteSendState.run(
+            sendState,
+            operation,
+          )
+        } finally {
+          sendState.active = false
+        }
+      } catch (error: unknown) {
+        if (!sendState.sent) throw error
+        try {
+          await this.requireCurrentRollbackOperationTableIncarnations(
+            authority,
+          )
+        } catch {
+          this.quarantineManagedExecutionControl(authority)
+          throw createManagedRollbackOperationFailure(
+            'AMBIGUOUS_OPERATION_UNRESOLVED',
+          )
+        }
+        throw error
+      }
+      if (!sendState.sent) {
+        throw createManagedRollbackOperationFailure('INVALID_STATE')
+      }
       try {
         await this.requireCurrentRollbackOperationTableIncarnations(
           authority,
@@ -6312,19 +7003,8 @@ class AwsWorkspaceSearchMigrationIdentityPort
           'AMBIGUOUS_OPERATION_UNRESOLVED',
         )
       }
-      throw error
-    }
-    try {
-      await this.requireCurrentRollbackOperationTableIncarnations(
-        authority,
-      )
-    } catch {
-      this.quarantineManagedExecutionControl(authority)
-      throw createManagedRollbackOperationFailure(
-        'AMBIGUOUS_OPERATION_UNRESOLVED',
-      )
-    }
-    return result
+      return result
+    })
   }
 
   /**
@@ -6493,27 +7173,29 @@ class AwsWorkspaceSearchMigrationIdentityPort
   private async requireCurrentApplicationWriterFenceTableIncarnations(
     authority: ManagedApplicationWriterFenceAuthority,
   ): Promise<void> {
-    this.requireManagedApplicationWriterFenceAuthority(authority)
-    try {
-      await this.requireCurrentMigrationStateTableIncarnation(authority)
-      for (const source of workspaceSearchMigrationSourceNames) {
-        await this.requireCurrentSourceTableIncarnation(
-          authority.configuration.tables[source],
+    await this.runManagedDescribeTableNonPageOperation(async () => {
+      this.requireManagedApplicationWriterFenceAuthority(authority)
+      try {
+        await this.requireCurrentMigrationStateTableIncarnation(authority)
+        for (const source of workspaceSearchMigrationSourceNames) {
+          await this.requireCurrentSourceTableIncarnation(
+            authority.configuration.tables[source],
+            authority.generation,
+            authority.configurationHash,
+          )
+        }
+        await this.requireCurrentTargetTableIncarnation(
+          authority.configuration.tables['workspace-search'],
           authority.generation,
           authority.configurationHash,
         )
+      } catch (error: unknown) {
+        throw createManagedApplicationWriterFenceFailure(
+          readManagedMigrationStateFailureCode(error),
+        )
       }
-      await this.requireCurrentTargetTableIncarnation(
-        authority.configuration.tables['workspace-search'],
-        authority.generation,
-        authority.configurationHash,
-      )
-    } catch (error: unknown) {
-      throw createManagedApplicationWriterFenceFailure(
-        readManagedMigrationStateFailureCode(error),
-      )
-    }
-    this.requireManagedApplicationWriterFenceAuthority(authority)
+      this.requireManagedApplicationWriterFenceAuthority(authority)
+    })
   }
 
   /**
@@ -6532,30 +7214,41 @@ class AwsWorkspaceSearchMigrationIdentityPort
     authority: ManagedApplicationWriterFenceAuthority,
     operation: () => Promise<Result>,
   ): Promise<Result> {
-    this.requireManagedApplicationWriterFenceAuthority(authority)
-    let result: Result
-    try {
-      result = await this.runManagedMigrationStateIo(authority, operation)
-    } catch (error: unknown) {
+    return await this.runManagedDescribeTableMandatoryCleanup(async () => {
+      this.requireManagedApplicationWriterFenceAuthority(authority)
+      let sent = false
+      let result: Result
+      try {
+        result = await this.runManagedMigrationStateIo(
+          authority,
+          () => {
+            this.assertNewManagedDataIoAllowed()
+            sent = true
+            return operation()
+          },
+        )
+      } catch (error: unknown) {
+        if (!sent) throw error
+        try {
+          await this.requireCurrentApplicationWriterFenceTableIncarnations(
+            authority,
+          )
+        } catch (guardError: unknown) {
+          this.quarantineManagedExecutionControl(authority)
+          throw guardError
+        }
+        throw error
+      }
       try {
         await this.requireCurrentApplicationWriterFenceTableIncarnations(
           authority,
         )
-      } catch (guardError: unknown) {
+      } catch (error: unknown) {
         this.quarantineManagedExecutionControl(authority)
-        throw guardError
+        throw error
       }
-      throw error
-    }
-    try {
-      await this.requireCurrentApplicationWriterFenceTableIncarnations(
-        authority,
-      )
-    } catch (error: unknown) {
-      this.quarantineManagedExecutionControl(authority)
-      throw error
-    }
-    return result
+      return result
+    })
   }
 
   /**
@@ -6564,7 +7257,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
    * @param authority - Generation whose commit outcome became uncertain.
    */
   private quarantineManagedExecutionControl(
-    authority: ManagedApplicationWriterFenceAuthority,
+    authority: ManagedMigrationStateAuthority,
   ): void {
     if (
       this.isMeasurementGenerationCurrent(
@@ -6573,6 +7266,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
       )
     ) {
       this.measuredExecutionControlQuarantined = true
+      this.describeTableRate?.quarantine()
     }
   }
 
@@ -6766,7 +7460,10 @@ class AwsWorkspaceSearchMigrationIdentityPort
     try {
       const result = await this.runManagedMigrationStateIo(
         authority,
-        operation,
+        () => {
+          this.assertNewManagedDataIoAllowed()
+          return operation()
+        },
       )
       await this.requireCurrentMigrationStateTableIncarnation(authority)
       return result
@@ -6794,10 +7491,9 @@ class AwsWorkspaceSearchMigrationIdentityPort
     )
     let output: DescribeTableCommandOutput
     try {
-      output = await this.transport.describeTable(
-        new DescribeTableCommand({
-          TableName: authority.stateTable.tableName,
-        }),
+      output = await this.runManagedDescribeTable(
+        authority.stateTable.tableName,
+        'pre-send-guard',
       )
     } catch (error: unknown) {
       this.requireMeasurementGeneration(
@@ -6877,8 +7573,9 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.requireMeasurementGeneration(generation, configurationHash)
     let output: DescribeTableCommandOutput
     try {
-      output = await this.transport.describeTable(
-        new DescribeTableCommand({ TableName: table.tableName }),
+      output = await this.runManagedDescribeTable(
+        table.tableName,
+        'pre-send-guard',
       )
     } catch (error: unknown) {
       this.requireMeasurementGeneration(generation, configurationHash)
@@ -6924,8 +7621,9 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.requireMeasurementGeneration(generation, configurationHash)
     let output: DescribeTableCommandOutput
     try {
-      output = await this.transport.describeTable(
-        new DescribeTableCommand({ TableName: table.tableName }),
+      output = await this.runManagedDescribeTable(
+        table.tableName,
+        'pre-send-guard',
       )
     } catch (error: unknown) {
       this.requireMeasurementGeneration(generation, configurationHash)
@@ -7061,6 +7759,26 @@ class AwsWorkspaceSearchMigrationIdentityPort
   }
 
   /**
+   * Routes one table metadata read through the durable production controller.
+   *
+   * @param tableName - Exact already allowlisted physical table name.
+   * @param phase - Secret-free accounting phase for non-cleanup admission.
+   * @returns Raw table metadata retained inside the identity boundary.
+   */
+  private runManagedDescribeTable(
+    tableName: string,
+    phase: WorkspaceSearchMigrationDescribeTablePhase,
+  ): Promise<DescribeTableCommandOutput> {
+    const rate = this.describeTableRate
+    if (rate !== undefined) {
+      return rate.describeTable(tableName, phase)
+    }
+    return this.transport.describeTable(
+      new DescribeTableCommand({ TableName: tableName }),
+    )
+  }
+
+  /**
    * Reads the exact selected table's physical metadata.
    *
    * @param tableName - Operator-selected physical table name.
@@ -7069,9 +7787,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
   async describeTable(tableName: string): Promise<DescribeTableCommandOutput> {
     this.requireOpen()
     this.validateTableName(tableName)
-    return this.transport.describeTable(
-      new DescribeTableCommand({ TableName: tableName }),
-    )
+    return this.runManagedDescribeTable(tableName, 'measurement')
   }
 
   /**
@@ -7269,12 +7985,311 @@ export function createAwsWorkspaceSearchMigrationIdentityPort(
   const resources =
     createWorkspaceSearchMigrationRequestedResourcesSnapshot(requested)
   const credentials = createPinnedProfileCredentials(resources)
-  /**
-   * Creates one official-endpoint SDK client configuration.
-   *
-   * @param service - Allowlisted AWS service.
-   * @returns Client configuration bound to the resource snapshot.
-   */
+  const configurations = createIdentityAwsSdkConfigurations(
+    resources,
+    credentials,
+  )
+  return new AwsWorkspaceSearchMigrationIdentityPort(
+    resources,
+    transportConstructor(configurations),
+    prePlanAuthorityClock,
+  )
+}
+
+/**
+ * Creates the only production session allowed to issue DescribeTable calls.
+ *
+ * STS validates the actual signing identity before the requested migration-
+ * state table can be read or mutated for rate checkpointing. An absent rate
+ * row, cleanup recovery, and uncertain-attempt recovery are controlled only
+ * by the three explicit booleans supplied by the caller.
+ *
+ * @param input - Explicit resources, reviewed policy, and recovery authority.
+ * @returns Fully claimed rate-managed session with a subordinate measurement factory.
+ */
+export async function createAwsWorkspaceSearchMigrationRateManagedSession(
+  input: CreateAwsWorkspaceSearchMigrationRateManagedSessionInput,
+): Promise<WorkspaceSearchMigrationRateManagedAwsSession> {
+  const snapshot = detachRateManagedAwsSessionConstructionInput(input)
+  const signal = snapshot.signal
+  requireRateManagedSessionSignalActive(signal)
+  const resources = snapshot.resources
+  const credentialsProvider = createPinnedProfileCredentials(resources)
+  const configurations = createIdentityAwsSdkConfigurations(
+    resources,
+    credentialsProvider,
+  )
+  const transport = createDefaultAwsTransport(configurations)
+  let resolvedCredentials: WorkspaceSearchMigrationProfileCredentials
+  try {
+    requireRateManagedSessionSignalActive(signal)
+    const caller = await transport.getCallerIdentity(
+      new GetCallerIdentityCommand({}),
+    )
+    requireRateManagedSessionSignalActive(signal)
+    requirePreMeasurementCallerIdentity(caller, resources.account)
+    resolvedCredentials = await credentialsProvider()
+    requireRateManagedSessionSignalActive(signal)
+  } catch {
+    transport.close()
+    requireRateManagedSessionSignalActive(signal)
+    throw preMeasurementCallerIdentityFailure()
+  }
+
+  const checkpointStore =
+    createWorkspaceSearchMigrationDescribeTableRateCheckpointAwsStore({
+      binding: {
+        account: resources.account,
+        region: resources.region,
+        tableName: resources.tables['migration-state'],
+      },
+      transport,
+    })
+  let rate: WorkspaceSearchMigrationManagedDescribeTableRate
+  try {
+    rate = await createWorkspaceSearchMigrationManagedDescribeTableRate({
+      account: resources.account,
+      region: resources.region,
+      tableNames: Object.values(resources.tables),
+      policy: snapshot.ratePolicy,
+      checkpointStore,
+      credentials: createPinnedDescribeTableCredentials(
+        resolvedCredentials,
+        resources.account,
+      ),
+      bootstrap: snapshot.bootstrapRateCheckpoint,
+      recoverInterruptedCleanup: snapshot.recoverInterruptedCleanup,
+      recoverInterruptedAttempt: snapshot.recoverInterruptedAttempt,
+      ...(snapshot.rateRecorder === undefined
+        ? {}
+        : { recorder: snapshot.rateRecorder }),
+      ...(signal === undefined ? {} : { signal }),
+    })
+  } catch (error: unknown) {
+    transport.close()
+    throw error
+  }
+  try {
+    requireRateManagedSessionSignalActive(signal)
+  } catch (error: unknown) {
+    try {
+      await rate.close()
+    } catch {
+      // Preserve cancellation while still draining the owned rate lifecycle.
+    }
+    try {
+      transport.close()
+    } catch {
+      // Preserve cancellation after attempting every owned transport close.
+    }
+    throw error
+  }
+
+  const prePlanAuthorityClock = snapshot.prePlanAuthorityClock
+  const createMeasurementSession = () => {
+    const child = new AwsWorkspaceSearchMigrationIdentityPort(
+      resources,
+      createDefaultAwsTransport(configurations),
+      prePlanAuthorityClock,
+      rate,
+    )
+    try {
+      return Promise.resolve(
+        createRateManagedMeasurementPortProjection(child),
+      )
+    } catch (error: unknown) {
+      void child.close()
+      throw error
+    }
+  }
+  try {
+    return new AwsWorkspaceSearchMigrationIdentityPort(
+      resources,
+      transport,
+      prePlanAuthorityClock,
+      rate,
+      true,
+      createMeasurementSession,
+    )
+  } catch (error: unknown) {
+    try {
+      await rate.close()
+    } catch {
+      // Preserve the composition failure while still draining owned I/O.
+    }
+    transport.close()
+    throw error
+  }
+}
+
+/**
+ * Projects one full internal child onto the exact runtime identity capability.
+ *
+ * @param child - Fresh child owning only its independent AWS transport.
+ * @returns Frozen receiver-preserving identity and measurement surface.
+ */
+function createRateManagedMeasurementPortProjection(
+  child: WorkspaceSearchMigrationManagedIdentityPort,
+): WorkspaceSearchMigrationManagedIdentityPort {
+  let readRequestedResourcesBinding:
+    WorkspaceSearchMigrationManagedIdentityPort[
+      'readRequestedResourcesBinding'
+    ]
+  let readCallerIdentity:
+    WorkspaceSearchMigrationManagedIdentityPort['readCallerIdentity']
+  let describeTable:
+    WorkspaceSearchMigrationManagedIdentityPort['describeTable']
+  let describeContinuousBackups:
+    WorkspaceSearchMigrationManagedIdentityPort[
+      'describeContinuousBackups'
+    ]
+  let describeTimeToLive:
+    WorkspaceSearchMigrationManagedIdentityPort['describeTimeToLive']
+  let describeJournalKey:
+    WorkspaceSearchMigrationManagedIdentityPort['describeJournalKey']
+  let getBucketVersioning:
+    WorkspaceSearchMigrationManagedIdentityPort['getBucketVersioning']
+  let getObjectLockConfiguration:
+    WorkspaceSearchMigrationManagedIdentityPort[
+      'getObjectLockConfiguration'
+    ]
+  let getBucketEncryption:
+    WorkspaceSearchMigrationManagedIdentityPort['getBucketEncryption']
+  let getBucketLogging:
+    WorkspaceSearchMigrationManagedIdentityPort['getBucketLogging']
+  let measureConfiguration:
+    WorkspaceSearchMigrationManagedIdentityPort['measureConfiguration']
+  let close: WorkspaceSearchMigrationManagedIdentityPort['close']
+  try {
+    readRequestedResourcesBinding = child.readRequestedResourcesBinding
+    readCallerIdentity = child.readCallerIdentity
+    describeTable = child.describeTable
+    describeContinuousBackups = child.describeContinuousBackups
+    describeTimeToLive = child.describeTimeToLive
+    describeJournalKey = child.describeJournalKey
+    getBucketVersioning = child.getBucketVersioning
+    getObjectLockConfiguration = child.getObjectLockConfiguration
+    getBucketEncryption = child.getBucketEncryption
+    getBucketLogging = child.getBucketLogging
+    measureConfiguration = child.measureConfiguration
+    close = child.close
+  } catch {
+    throw invalidIdentityLookup()
+  }
+  if (
+    typeof readRequestedResourcesBinding !== 'function' ||
+    typeof readCallerIdentity !== 'function' ||
+    typeof describeTable !== 'function' ||
+    typeof describeContinuousBackups !== 'function' ||
+    typeof describeTimeToLive !== 'function' ||
+    typeof describeJournalKey !== 'function' ||
+    typeof getBucketVersioning !== 'function' ||
+    typeof getObjectLockConfiguration !== 'function' ||
+    typeof getBucketEncryption !== 'function' ||
+    typeof getBucketLogging !== 'function' ||
+    typeof measureConfiguration !== 'function' ||
+    typeof close !== 'function'
+  ) {
+    throw invalidIdentityLookup()
+  }
+  const projection: WorkspaceSearchMigrationManagedIdentityPort = {
+    readRequestedResourcesBinding: () =>
+      Reflect.apply(readRequestedResourcesBinding, child, []),
+    readCallerIdentity: async () =>
+      await Reflect.apply(readCallerIdentity, child, []),
+    describeTable: async (tableName) =>
+      await Reflect.apply(describeTable, child, [tableName]),
+    describeContinuousBackups: async (tableName) =>
+      await Reflect.apply(describeContinuousBackups, child, [tableName]),
+    describeTimeToLive: async (tableName) =>
+      await Reflect.apply(describeTimeToLive, child, [tableName]),
+    describeJournalKey: async (keyArn) =>
+      await Reflect.apply(describeJournalKey, child, [keyArn]),
+    getBucketVersioning: async (lookup) =>
+      await Reflect.apply(getBucketVersioning, child, [lookup]),
+    getObjectLockConfiguration: async (lookup) =>
+      await Reflect.apply(getObjectLockConfiguration, child, [lookup]),
+    getBucketEncryption: async (lookup) =>
+      await Reflect.apply(getBucketEncryption, child, [lookup]),
+    getBucketLogging: async (lookup) =>
+      await Reflect.apply(getBucketLogging, child, [lookup]),
+    measureConfiguration: async () =>
+      await Reflect.apply(measureConfiguration, child, []),
+    close: () => {
+      Reflect.apply(close, child, [])
+    },
+  }
+  return Object.freeze(projection)
+}
+
+/** Reads and detaches every production input before the first STS await. */
+function detachRateManagedAwsSessionConstructionInput(
+  input: CreateAwsWorkspaceSearchMigrationRateManagedSessionInput,
+): RateManagedAwsSessionConstructionSnapshot {
+  let requested: WorkspaceSearchMigrationRequestedResources
+  let ratePolicy: WorkspaceSearchMigrationDescribeTableRatePolicy
+  let bootstrapRateCheckpoint: boolean
+  let recoverInterruptedCleanup: boolean
+  let recoverInterruptedAttempt: boolean
+  let rateRecorder: WorkspaceSearchMigrationDescribeTableRateRecorder | undefined
+  let prePlanAuthorityClock:
+    WorkspaceSearchMigrationPrePlanAuthorityClock | undefined
+  let signal: AbortSignal | undefined
+  try {
+    requested = input.requested
+    ratePolicy = structuredClone(input.ratePolicy)
+    bootstrapRateCheckpoint = input.bootstrapRateCheckpoint
+    recoverInterruptedCleanup = input.recoverInterruptedCleanup
+    recoverInterruptedAttempt = input.recoverInterruptedAttempt
+    rateRecorder = input.rateRecorder
+    prePlanAuthorityClock = input.prePlanAuthorityClock
+    signal = input.signal
+  } catch {
+    throw new WorkspaceSearchMigrationManagedDescribeTableRateError()
+  }
+  if (
+    typeof bootstrapRateCheckpoint !== 'boolean' ||
+    typeof recoverInterruptedCleanup !== 'boolean' ||
+    typeof recoverInterruptedAttempt !== 'boolean' ||
+    (signal !== undefined && !(signal instanceof AbortSignal))
+  ) {
+    throw new WorkspaceSearchMigrationManagedDescribeTableRateError()
+  }
+  return Object.freeze({
+    resources:
+      createWorkspaceSearchMigrationRequestedResourcesSnapshot(requested),
+    ratePolicy: Object.freeze(ratePolicy),
+    bootstrapRateCheckpoint,
+    recoverInterruptedCleanup,
+    recoverInterruptedAttempt,
+    ...(rateRecorder === undefined ? {} : { rateRecorder }),
+    prePlanAuthorityClock: prePlanAuthorityClock ??
+      createWorkspaceSearchMigrationPrePlanAuthoritySystemTime,
+    ...(signal === undefined ? {} : { signal }),
+  })
+}
+
+/** Stops composition before another durable rate mutation may start. */
+function requireRateManagedSessionSignalActive(
+  signal: AbortSignal | undefined,
+): void {
+  if (signal?.aborted === true) {
+    throw new WorkspaceSearchMigrationManagedDescribeTableRateError()
+  }
+}
+
+/**
+ * Builds one immutable official-endpoint configuration set.
+ *
+ * @param resources - Validated requested resource snapshot.
+ * @param credentials - Pinned shared-profile credential provider.
+ * @returns Exact four-service SDK configuration.
+ */
+function createIdentityAwsSdkConfigurations(
+  resources: WorkspaceSearchMigrationRequestedResourcesSnapshot,
+  credentials: ReturnType<typeof fromIni>,
+): WorkspaceSearchMigrationIdentityAwsSdkConfigurations {
+  /** Builds one official-endpoint service configuration. */
   const createConfiguration = (
     service: WorkspaceSearchMigrationIdentityAwsService,
   ): WorkspaceSearchMigrationIdentityAwsSdkClientConfiguration => ({
@@ -7283,7 +8298,7 @@ export function createAwsWorkspaceSearchMigrationIdentityPort(
     profile: resources.profile,
     region: resources.region,
   })
-  const configurations: WorkspaceSearchMigrationIdentityAwsSdkConfigurations = {
+  return {
     dynamodb: createConfiguration('dynamodb'),
     kms: createConfiguration('kms'),
     s3: {
@@ -7292,10 +8307,94 @@ export function createAwsWorkspaceSearchMigrationIdentityPort(
     },
     sts: createConfiguration('sts'),
   }
-  return new AwsWorkspaceSearchMigrationIdentityPort(
-    resources,
-    transportConstructor(configurations),
-    prePlanAuthorityClock,
+}
+
+/**
+ * Detaches credentials only after STS proved their requested account.
+ *
+ * @param credentials - Exact resolved shared-profile identity.
+ * @param accountId - STS-verified requested account.
+ * @returns Static credentials accepted by the one-attempt transport.
+ */
+function createPinnedDescribeTableCredentials(
+  credentials: WorkspaceSearchMigrationProfileCredentials,
+  accountId: string,
+): WorkspaceSearchMigrationDescribeTablePinnedAwsCredentials {
+  const expiration = credentials.expiration
+  return {
+    accessKeyId: credentials.accessKeyId,
+    secretAccessKey: credentials.secretAccessKey,
+    accountId,
+    ...(credentials.sessionToken === undefined
+      ? {}
+      : { sessionToken: credentials.sessionToken }),
+    ...(credentials.credentialScope === undefined
+      ? {}
+      : { credentialScope: credentials.credentialScope }),
+    ...(expiration === undefined
+      ? {}
+      : {
+          expiration: new Date(Date.prototype.getTime.call(expiration)),
+        }),
+  }
+}
+
+/**
+ * Requires the same assumed-role identity constraints as full measurement.
+ *
+ * @param output - Untrusted STS GetCallerIdentity response.
+ * @param expectedAccount - Exact requested twelve-digit account.
+ */
+function requirePreMeasurementCallerIdentity(
+  output: GetCallerIdentityCommandOutput,
+  expectedAccount: string,
+): void {
+  const account = output.Account
+  const arn = output.Arn
+  const userId = output.UserId
+  if (
+    account !== expectedAccount ||
+    typeof arn !== 'string' ||
+    typeof userId !== 'string'
+  ) {
+    throw preMeasurementCallerIdentityFailure()
+  }
+  const arnParts = arn.split(':')
+  const resource = arnParts[5]
+  if (
+    arnParts.length !== 6 ||
+    arnParts[0] !== 'arn' ||
+    !/^aws(?:-[a-z0-9-]+)?$/u.test(arnParts[1] ?? '') ||
+    arnParts[2] !== 'sts' ||
+    arnParts[3] !== '' ||
+    arnParts[4] !== expectedAccount ||
+    typeof resource !== 'string'
+  ) {
+    throw preMeasurementCallerIdentityFailure()
+  }
+  const resourceParts = resource.split('/')
+  const roleName = resourceParts[1]
+  const sessionName = resourceParts[2]
+  const userIdParts = userId.split(':')
+  if (
+    resourceParts.length !== 3 ||
+    resourceParts[0] !== 'assumed-role' ||
+    typeof roleName !== 'string' ||
+    !/^[A-Za-z0-9+=,.@_-]{1,64}$/u.test(roleName) ||
+    !isRoleSessionName(sessionName) ||
+    userIdParts.length !== 2 ||
+    !/^AROA[A-Z0-9]{17}$/u.test(userIdParts[0] ?? '') ||
+    userIdParts[1] !== sessionName
+  ) {
+    throw preMeasurementCallerIdentityFailure()
+  }
+}
+
+/** Returns one stable raw-value-free pre-measurement identity failure. */
+function preMeasurementCallerIdentityFailure(): WorkspaceSearchMigrationFailure {
+  return new WorkspaceSearchMigrationFailure(
+    'IDENTITY_MISMATCH',
+    'Workspace Search migration caller identity could not be verified.',
   )
 }
 
@@ -7730,7 +8829,8 @@ function readAssumedCredentials(
  */
 function createDefaultAwsTransport(
   configurations: WorkspaceSearchMigrationIdentityAwsSdkConfigurations,
-): WorkspaceSearchMigrationManagedAwsTransport {
+): WorkspaceSearchMigrationManagedAwsTransport &
+  WorkspaceSearchMigrationDescribeTableRateCheckpointAwsTransport {
   return new AwsSdkWorkspaceSearchMigrationIdentityTransport(configurations)
 }
 
@@ -8563,6 +9663,50 @@ function createManagedSourceEvidencePreparationFailure(
     code,
     `Workspace Search source evidence stopped safely (${code}).`,
   )
+}
+
+/** Creates one stable invalid pre-plan input failure before rate admission. */
+function createManagedPrePlanSnapshotFailure():
+  WorkspaceSearchMigrationFailure {
+  return new WorkspaceSearchMigrationFailure(
+    'INVALID_ARGUMENT',
+    'Workspace Search pre-plan authority input is invalid.',
+  )
+}
+
+/**
+ * Detaches caller input before an asynchronous rate-gate admission wait.
+ *
+ * @param input - Caller-owned value that must not remain live while queued.
+ * @param createFailure - Stable phase-specific invalid-input failure factory.
+ * @returns Deep detached snapshot used after admission.
+ */
+function snapshotManagedRateGateInput<Input>(
+  input: Input,
+  createFailure: () => WorkspaceSearchMigrationFailure,
+): Input {
+  return snapshotManagedRateGateOperation(
+    () => structuredClone(input),
+    createFailure,
+  )
+}
+
+/**
+ * Runs synchronous input preparation behind a raw-value-free failure boundary.
+ *
+ * @param operation - Synchronous snapshot or validation operation.
+ * @param createFailure - Stable phase-specific invalid-input failure factory.
+ * @returns Exact synchronously prepared value.
+ */
+function snapshotManagedRateGateOperation<Result>(
+  operation: () => Result,
+  createFailure: () => WorkspaceSearchMigrationFailure,
+): Result {
+  try {
+    return operation()
+  } catch {
+    throw createFailure()
+  }
 }
 
 /**
