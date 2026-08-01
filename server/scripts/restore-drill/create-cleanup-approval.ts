@@ -185,6 +185,7 @@ export type RestoreDrillCleanupApprovalCliFailureCode =
   | 'RUN_NOT_APPROVABLE'
   | 'RUN_NOT_FOUND'
   | 'RUN_READ_FAILED'
+  | 'UNEXPECTED_FAILURE'
 
 /** Process exit statuses exposed by the cleanup-approval CLI. */
 export type RestoreDrillCleanupApprovalCliExitCode = 0 | 1 | 2
@@ -490,6 +491,9 @@ type AwsArnIdentity = {
   readonly service: string
 }
 
+/** AWS partitions supported by the restore-drill deployment contract. */
+type RestoreDrillCleanupApprovalAwsPartition = 'aws' | 'aws-cn' | 'aws-us-gov'
+
 /** Official AWS SDK v3 session shared by one approval invocation. */
 class OfficialRestoreDrillCleanupApprovalAwsSession
 implements RestoreDrillCleanupApprovalAwsSession {
@@ -726,7 +730,22 @@ export async function runRestoreDrillCleanupApprovalCli(
     })
     return failure.exitCode
   } finally {
+    closeSessionWithoutOverwritingResult(session)
+  }
+}
+
+/**
+ * Releases one AWS session without replacing the CLI's determined result.
+ *
+ * @param session - Optional session created after successful argument parsing.
+ */
+function closeSessionWithoutOverwritingResult(
+  session: RestoreDrillCleanupApprovalAwsSession | undefined,
+): void {
+  try {
     session?.close()
+  } catch {
+    // SDK client destruction must not replace the already classified CLI result.
   }
 }
 
@@ -1404,10 +1423,12 @@ function parseCleanupExecutionArn(
   const stateMachineName = parts[6]
   const actualExecutionName = parts[7]
   const kmsIdentity = parseKmsKeyArn(kmsKeyArn, expectedRegion, 'RUN_INVALID')
+  const expectedPartition = resolveRestoreDrillCleanupApprovalPartition(expectedRegion)
   if (
     parts.length !== 8 ||
     parts[0] !== 'arn' ||
-    (partition !== 'aws' && partition !== 'aws-us-gov') ||
+    expectedPartition === undefined ||
+    partition !== expectedPartition ||
     partition !== kmsIdentity.partition ||
     service !== 'states' ||
     region !== expectedRegion ||
@@ -1876,7 +1897,10 @@ function parseKmsKeyArn(
   const identity = parseAwsArn(value, failureCode)
   const parts = value.split(':')
   const region = parts[3]
+  const partition = resolveRestoreDrillCleanupApprovalPartition(expectedRegion)
   if (
+    partition === undefined ||
+    identity.partition !== partition ||
     identity.service !== 'kms' ||
     region !== expectedRegion ||
     !/^key\/[A-Za-z0-9-]{1,256}$/u.test(identity.resource)
@@ -1884,6 +1908,21 @@ function parseKmsKeyArn(
     throw new RestoreDrillCleanupApprovalCliFailure(failureCode, 1)
   }
   return identity
+}
+
+/**
+ * Resolves the supported AWS ARN partition for one canonical Region.
+ *
+ * @param region - Candidate explicit CLI Region.
+ * @returns Canonical partition, or undefined for malformed and unsupported Regions.
+ */
+function resolveRestoreDrillCleanupApprovalPartition(
+  region: string,
+): RestoreDrillCleanupApprovalAwsPartition | undefined {
+  if (/^us-gov-[a-z]+-\d$/u.test(region)) return 'aws-us-gov'
+  if (/^cn-[a-z]+-\d$/u.test(region)) return 'aws-cn'
+  if (/^[a-z]{2}-[a-z]+-\d$/u.test(region)) return 'aws'
+  return undefined
 }
 
 /**
@@ -2029,7 +2068,7 @@ function invalidUsage(): RestoreDrillCleanupApprovalCliFailure {
  */
 function classifyCliFailure(error: unknown): RestoreDrillCleanupApprovalCliFailure {
   if (error instanceof RestoreDrillCleanupApprovalCliFailure) return error
-  return new RestoreDrillCleanupApprovalCliFailure('APPROVAL_BINDING_INVALID', 1)
+  return new RestoreDrillCleanupApprovalCliFailure('UNEXPECTED_FAILURE', 1)
 }
 
 /**
@@ -2045,5 +2084,7 @@ function writeJsonLine(writer: (line: string) => void, value: unknown): void {
 if (import.meta.main) {
   void runRestoreDrillCleanupApprovalCli(Bun.argv.slice(2)).then((exitCode) => {
     process.exitCode = exitCode
+  }).catch(() => {
+    process.exitCode = 1
   })
 }

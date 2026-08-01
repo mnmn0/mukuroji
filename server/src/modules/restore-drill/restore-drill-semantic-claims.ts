@@ -3,7 +3,7 @@ import type {
   CrossDomainIntegrityFailureCode,
   CrossDomainIntegrityItem,
   CrossDomainRelationType,
-} from '../../../scripts/data-integrity/cross-domain-integrity'
+} from '../data-integrity'
 
 /** One fallback fact whose presence selects a more specific stable failure. */
 export type RestoreDrillSemanticFallback = {
@@ -35,6 +35,31 @@ export type RestoreDrillSemanticRequirement = {
   readonly kind: 'requirement'
   /** Opaque deterministic identity for this source-row requirement. */
   readonly requirementToken: string
+}
+
+/**
+ * Evaluates one ordered semantic requirement against an exact fact reader.
+ *
+ * @param requirement - Deferred requirement whose branches are checked in priority order.
+ * @param hasFact - Reader for one opaque fact token; asynchronous readers remain sequential.
+ * @returns The selected stable failure code, or undefined when the requirement is satisfied.
+ */
+export async function evaluateRestoreDrillSemanticRequirement(
+  requirement: RestoreDrillSemanticRequirement,
+  hasFact: (factToken: string) => boolean | Promise<boolean>,
+): Promise<CrossDomainIntegrityFailureCode | undefined> {
+  for (const branch of requirement.branches) {
+    if (branch.guardToken !== undefined && !(await hasFact(branch.guardToken))) continue
+    if (branch.satisfied) return undefined
+    for (const successToken of branch.successTokens) {
+      if (await hasFact(successToken)) return undefined
+    }
+    for (const fallback of branch.fallbacks) {
+      if (await hasFact(fallback.factToken)) return fallback.failureCode
+    }
+    return branch.defaultFailureCode
+  }
+  throw new TypeError('RESTORE_DRILL_SEMANTIC_REQUIREMENT_INVALID')
 }
 
 /** Process-local Audit candidate whose raw ordering value must never be persisted. */

@@ -117,6 +117,49 @@ describe('normalized page global capacity boundary', () => {
       target: 'work-items',
     })).rejects.toEqual(new CrossDomainIntegrityAwsBridgeFailure('LIMIT_EXCEEDED'))
   })
+
+  test('preflights the combined File-row budget before exact-version reads', async () => {
+    const reader = new FixtureAwsReader({
+      'file-proofing': [createScanPage([
+        toRawItem(createFileRow()),
+        toRawItem(createFileRow()),
+      ])],
+    })
+
+    await expect(readCrossDomainIntegrityAwsNormalizedPage({
+      auditPseudonymKey: AUDIT_PSEUDONYM_KEY,
+      checkedAt: CHECKED_AT,
+      digestKey: DIGEST_KEY,
+      pageSize: 2,
+      reader,
+      remainingItemCapacity: 5,
+      target: 'file-proofing',
+    })).rejects.toEqual(new CrossDomainIntegrityAwsBridgeFailure('LIMIT_EXCEEDED'))
+    expect(exactS3OperationCount(reader)).toBe(0)
+  })
+
+  test('validates every File Proofing row before exact-version reads', async () => {
+    const reader = new FixtureAwsReader({
+      'file-proofing': [createScanPage([
+        toRawItem(createFileRow()),
+        toRawItem({
+          entryType: 'annotation',
+          recordKey: 'ANNOTATION#private-canary',
+        }),
+      ])],
+    })
+
+    await expect(readCrossDomainIntegrityAwsNormalizedPage({
+      auditPseudonymKey: AUDIT_PSEUDONYM_KEY,
+      checkedAt: CHECKED_AT,
+      digestKey: DIGEST_KEY,
+      pageSize: 2,
+      reader,
+      remainingItemCapacity: 6,
+      target: 'file-proofing',
+    })).rejects.toEqual(new CrossDomainIntegrityAwsBridgeFailure('NORMALIZATION_FAILED'))
+    expect(exactS3OperationCount(reader)).toBe(0)
+  })
 })
 
 /** Native rows keyed by the six logical table targets. */

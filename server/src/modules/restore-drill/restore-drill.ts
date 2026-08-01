@@ -435,7 +435,7 @@ export class RestoreDrillKeyedMultisetDigestAccumulator {
       checkpoint.itemCount,
       checkpoint.modularSum,
     )
-    if (checkpoint.checkpointMac !== expectedMac) {
+    if (!safeHexEqual(checkpoint.checkpointMac, expectedMac)) {
       throw new RestoreDrillFailure('AGGREGATE_INVALID')
     }
     const sum = Buffer.from(checkpoint.modularSum, 'hex')

@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'bun:test'
-import type { CrossDomainIntegrityItem } from '../../../scripts/data-integrity/cross-domain-integrity'
+import type { CrossDomainIntegrityItem } from '../data-integrity'
 import {
   createRestoreDrillSemanticAuditCandidateClaims,
   createRestoreDrillSemanticAuditMemberAliasClaim,
   createRestoreDrillSemanticItemClaims,
+  evaluateRestoreDrillSemanticRequirement,
   type RestoreDrillSemanticClaim,
   type RestoreDrillSemanticRequirement,
 } from './restore-drill-semantic-claims'
@@ -14,22 +15,6 @@ const ORIGIN = 'a'.repeat(64)
 /** Collects opaque facts from independently normalized rows. */
 function collectFacts(claims: readonly RestoreDrillSemanticClaim[]): Set<string> {
   return new Set(claims.flatMap((claim) => claim.kind === 'fact' ? [claim.factToken] : []))
-}
-
-/** Evaluates the production ordered-branch contract against an in-memory fact set. */
-function evaluateRequirement(
-  requirement: RestoreDrillSemanticRequirement,
-  facts: ReadonlySet<string>,
-): string | undefined {
-  for (const branch of requirement.branches) {
-    if (branch.guardToken !== undefined && !facts.has(branch.guardToken)) continue
-    if (branch.satisfied || branch.successTokens.some((token) => facts.has(token))) {
-      return undefined
-    }
-    return branch.fallbacks.find((fallback) => facts.has(fallback.factToken))?.failureCode ??
-      branch.defaultFailureCode
-  }
-  throw new Error('missing unguarded semantic branch')
 }
 
 /** Returns the unique status-precedence requirement emitted for one Work Item. */
@@ -64,7 +49,7 @@ function workItem(
 }
 
 describe('restore drill opaque semantic claims', () => {
-  test('selects Team configuration before Workspace configuration and built-ins', () => {
+  test('selects Team configuration before Workspace configuration and built-ins', async () => {
     const itemClaims = createRestoreDrillSemanticItemClaims(
       workItem('todo', 'unstarted'),
       DIGEST_KEY,
@@ -82,13 +67,14 @@ describe('restore drill opaque semantic claims', () => {
       workflowStatuses: [],
       workspaceId: 'workspace-1',
     }, DIGEST_KEY, 'c'.repeat(64))
-    expect(evaluateRequirement(
+    const facts = collectFacts([...workspaceClaims, ...teamClaims])
+    expect(await evaluateRestoreDrillSemanticRequirement(
       statusRequirement(itemClaims),
-      collectFacts([...workspaceClaims, ...teamClaims]),
+      (factToken) => facts.has(factToken),
     )).toBe('WORK_ITEM_WORKFLOW_STATUS_UNKNOWN')
   })
 
-  test('classifies a Team category mismatch without falling through to Workspace', () => {
+  test('classifies a Team category mismatch without falling through to Workspace', async () => {
     const itemClaims = createRestoreDrillSemanticItemClaims(
       workItem('custom', 'completed'),
       DIGEST_KEY,
@@ -106,22 +92,26 @@ describe('restore drill opaque semantic claims', () => {
       workflowStatuses: [{ category: 'started', statusId: 'custom' }],
       workspaceId: 'workspace-1',
     }, DIGEST_KEY, 'c'.repeat(64))
-    expect(evaluateRequirement(
+    const facts = collectFacts([...workspaceClaims, ...teamClaims])
+    expect(await evaluateRestoreDrillSemanticRequirement(
       statusRequirement(itemClaims),
-      collectFacts([...workspaceClaims, ...teamClaims]),
+      (factToken) => facts.has(factToken),
     )).toBe('WORK_ITEM_STATUS_CATEGORY_MISMATCH')
   })
 
-  test('uses a built-in status only when neither configuration scope exists', () => {
+  test('uses a built-in status only when neither configuration scope exists', async () => {
     const claims = createRestoreDrillSemanticItemClaims(
       workItem('todo', 'unstarted'),
       DIGEST_KEY,
       ORIGIN,
     )
-    expect(evaluateRequirement(statusRequirement(claims), new Set())).toBeUndefined()
+    expect(await evaluateRestoreDrillSemanticRequirement(
+      statusRequirement(claims),
+      () => false,
+    )).toBeUndefined()
   })
 
-  test('guards relation Project checks with actual relation endpoint facts', () => {
+  test('guards relation Project checks with actual relation endpoint facts', async () => {
     const itemClaims = createRestoreDrillSemanticItemClaims(
       workItem('todo', 'unstarted', 'project-missing'),
       DIGEST_KEY,
@@ -141,12 +131,19 @@ describe('restore drill opaque semantic claims', () => {
         claim.branches[0]?.defaultFailureCode === 'RELATION_PROJECT_MISSING',
     )
     if (!relationProject) throw new Error('relation Project requirement missing')
-    expect(evaluateRequirement(relationProject, collectFacts(relationClaims)))
+    const relationFacts = collectFacts(relationClaims)
+    expect(await evaluateRestoreDrillSemanticRequirement(
+      relationProject,
+      (factToken) => relationFacts.has(factToken),
+    ))
       .toBe('RELATION_PROJECT_MISSING')
-    expect(evaluateRequirement(relationProject, new Set())).toBeUndefined()
+    expect(await evaluateRestoreDrillSemanticRequirement(
+      relationProject,
+      () => false,
+    )).toBeUndefined()
   })
 
-  test('classifies a File target that exists only in another Workspace as cross-tenant', () => {
+  test('classifies a File target that exists only in another Workspace as cross-tenant', async () => {
     const metadataClaims = createRestoreDrillSemanticItemClaims({
       contentType: 'text/plain',
       fileId: 'file-1',
@@ -170,11 +167,15 @@ describe('restore drill opaque semantic claims', () => {
         claim.kind === 'requirement' && claim.branches[0]?.fallbacks.length === 2,
     )
     if (!targetRequirement) throw new Error('File target requirement missing')
-    expect(evaluateRequirement(targetRequirement, collectFacts(otherWorkspaceClaims)))
+    const otherWorkspaceFacts = collectFacts(otherWorkspaceClaims)
+    expect(await evaluateRestoreDrillSemanticRequirement(
+      targetRequirement,
+      (factToken) => otherWorkspaceFacts.has(factToken),
+    ))
       .toBe('FILE_METADATA_TENANT_MISMATCH')
   })
 
-  test('joins an unresolved Audit member pseudonym through an opaque alias fact', () => {
+  test('joins an unresolved Audit member pseudonym through an opaque alias fact', async () => {
     const alias = createRestoreDrillSemanticAuditMemberAliasClaim(
       'workspace-1',
       'audit-pseudonym-1',
@@ -194,7 +195,29 @@ describe('restore drill opaque semantic claims', () => {
         claim.kind === 'audit-candidate',
     )
     if (!candidate || alias.kind !== 'fact') throw new Error('Audit alias claim missing')
-    expect(evaluateRequirement(candidate.requirement, new Set([alias.factToken])))
+    expect(await evaluateRestoreDrillSemanticRequirement(
+      candidate.requirement,
+      (factToken) => factToken === alias.factToken,
+    ))
       .toBeUndefined()
+  })
+
+  test('rejects a requirement without a selectable terminal branch', async () => {
+    const invalidRequirement: RestoreDrillSemanticRequirement = {
+      branches: [{
+        defaultFailureCode: 'WORK_ITEM_TEAM_MISSING',
+        fallbacks: [],
+        guardToken: 'b'.repeat(64),
+        satisfied: false,
+        successTokens: [],
+      }],
+      kind: 'requirement',
+      requirementToken: 'c'.repeat(64),
+    }
+
+    await expect(evaluateRestoreDrillSemanticRequirement(
+      invalidRequirement,
+      () => false,
+    )).rejects.toThrow('RESTORE_DRILL_SEMANTIC_REQUIREMENT_INVALID')
   })
 })

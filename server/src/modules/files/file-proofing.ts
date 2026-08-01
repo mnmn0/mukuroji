@@ -58,6 +58,7 @@ import { FILE_UPLOAD_MAX_SIZE_BYTES } from '../file-upload-policy'
 import { isMissingFileObjectVersionError } from './file-object-errors'
 import { isAllowedFileContentType, normalizeFileContentType } from './file-content-type'
 
+/** Re-exports the production File upload ceiling for existing Files consumers. */
 export { FILE_UPLOAD_MAX_SIZE_BYTES } from '../file-upload-policy'
 
 /** 一つの approval request に指定できる reviewer 上限です。 */

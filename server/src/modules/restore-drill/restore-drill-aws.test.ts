@@ -480,7 +480,13 @@ class FixtureS3Transport implements RestoreDrillS3Transport {
     | 'source-only' = 'both'
 
   /** Controls malformed or failing object-body streams returned by GetObject. */
-  objectBodyMode: 'empty' | 'error' | 'normal' | 'oversized' | 'truncated' = 'normal'
+  objectBodyMode:
+    | 'empty'
+    | 'error'
+    | 'normal'
+    | 'oversized'
+    | 'truncated'
+    | 'zero-chunk' = 'normal'
 
   /** Exact complete object size echoed by HEAD and ranged GET responses. */
   objectSizeBytes = 7
@@ -580,13 +586,16 @@ class FixtureS3Transport implements RestoreDrillS3Transport {
           : destination && this.destinationBodyMismatch
             ? 'tampered'
             : 'payload'
+    const rangedBytes = this.objectBodyMode === 'oversized'
+      ? Buffer.from(bytes, 'utf8')
+      : Buffer.from(bytes, 'utf8').subarray(range.start, range.end + 1)
     return {
       VersionId: this.rangedVersionIdOverride ?? command.input.VersionId,
       ContentLength: range.length + this.rangeContentLengthAdjustment,
       ContentRange: this.contentRangeOverride ?? range.contentRange,
-      Body: Readable.from([this.objectBodyMode === 'oversized'
-        ? Buffer.from(bytes, 'utf8')
-        : Buffer.from(bytes, 'utf8').subarray(range.start, range.end + 1)]),
+      Body: this.objectBodyMode === 'zero-chunk'
+        ? createZeroPrefixedByteStream(rangedBytes)
+        : Readable.from([rangedBytes]),
     }
   }
 
@@ -776,6 +785,19 @@ function createRepeatedByteStream(
         yield length === chunk.byteLength ? chunk : chunk.subarray(0, length)
         remaining -= length
       }
+    },
+  }
+}
+
+/** Creates a valid byte stream containing a transport-level empty chunk. */
+function createZeroPrefixedByteStream(
+  bytes: Uint8Array,
+): AsyncIterable<Uint8Array> {
+  return {
+    /** Yields one empty transport chunk before the exact fixture bytes. */
+    async *[Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+      yield new Uint8Array()
+      yield bytes
     },
   }
 }
@@ -982,6 +1004,77 @@ function createFixture(): {
 }
 
 describe('restore drill AWS primitives', () => {
+  test('supports GovCloud and China only with Region-matched ARN partitions', async () => {
+    for (const { partition, region } of [
+      { partition: 'aws-us-gov', region: 'us-gov-west-1' },
+      { partition: 'aws-cn', region: 'cn-north-1' },
+    ]) {
+      const fixture = createFixture()
+      fixture.dynamodb.restoreMissing = true
+      const configuration: RestoreDrillAwsConfiguration = {
+        ...CONFIGURATION,
+        region,
+        auditPseudonymSecretArn:
+          `arn:${partition}:secretsmanager:${region}:${ACCOUNT_ID}:secret:audit-key`,
+        evidenceKmsKeyArn:
+          `arn:${partition}:kms:${region}:${ACCOUNT_ID}:key/evidence-key`,
+        scratchKmsKeyArn:
+          `arn:${partition}:kms:${region}:${ACCOUNT_ID}:key/scratch-key`,
+      }
+      const operations = createRestoreDrillAwsOperations({
+        configuration,
+        dynamodb: fixture.dynamodb,
+        kms: fixture.kms,
+        s3: fixture.s3,
+      })
+      const tableName = createRestoreDrillTargetTableName(
+        configuration.restoreTablePrefix,
+        DRILL_ID,
+        'table:work-items',
+      )
+      const table: RestoreDrillRecordedRestoreTable = {
+        kind: 'restore-table',
+        restorePoint: RESTORE_POINT,
+        sourceTableArn:
+          `arn:${partition}:dynamodb:${region}:${ACCOUNT_ID}:table/work-items`,
+        tableArn:
+          `arn:${partition}:dynamodb:${region}:${ACCOUNT_ID}:table/${tableName}`,
+        tableId: 'restore-table-id',
+        tableName,
+        target: 'table:work-items',
+      }
+      await expect(operations.deleteRecordedRestoreTable(
+        table,
+        DRILL_ID,
+      )).resolves.toEqual({ status: 'completed' })
+      await expect(operations.deleteRecordedRestoreTable({
+        ...table,
+        tableArn: `arn:aws:dynamodb:${region}:${ACCOUNT_ID}:table/${tableName}`,
+      }, DRILL_ID)).rejects.toMatchObject({ code: 'CLEANUP_IDENTITY_MISMATCH' })
+
+      expect(readRestoreDrillAwsCleanupConfiguration({
+        AWS_REGION: region,
+        EVIDENCE_BUCKET_NAME: configuration.evidenceBucketName,
+        EVIDENCE_KEY_ARN: configuration.evidenceKmsKeyArn,
+        METRIC_NAMESPACE: configuration.metricNamespace,
+        SCRATCH_BUCKET_NAME: configuration.scratchBucketName,
+        STATE_TABLE_NAME: configuration.stateTableName,
+        TARGET_TABLE_PREFIX: configuration.restoreTablePrefix,
+      })).toMatchObject({ accountId: ACCOUNT_ID, region })
+
+      const mismatchedConfiguration: RestoreDrillAwsConfiguration = {
+        ...configuration,
+        evidenceKmsKeyArn: `arn:aws:kms:${region}:${ACCOUNT_ID}:key/evidence-key`,
+      }
+      expect(() => createRestoreDrillAwsOperations({
+        configuration: mismatchedConfiguration,
+        dynamodb: fixture.dynamodb,
+        kms: fixture.kms,
+        s3: fixture.s3,
+      })).toThrow(new RestoreDrillAwsFailure('CONFIGURATION_INVALID'))
+    }
+  })
+
   test('collects exactly the six allowlisted PITR windows and descriptors', async () => {
     const fixture = createFixture()
     const observations = await fixture.operations.collectSourceTableObservations()
@@ -1261,6 +1354,47 @@ describe('restore drill AWS primitives', () => {
     } finally {
       accumulator.dispose()
     }
+  })
+
+  test('decodes only finite numbers before strict File integer validation', async () => {
+    const finiteFixture = createFixture()
+    finiteFixture.dynamodb.scanPages.push({
+      $metadata: {},
+      Count: 1,
+      Items: [{
+        entryType: { S: 'annotation' },
+        finiteDecimal: { N: '1.5' },
+      }],
+      ScannedCount: 1,
+    })
+    await expect(finiteFixture.operations.scanFileProofingPage(
+      createFileRestoreTable(),
+    )).resolves.toEqual({})
+
+    const nonFiniteFixture = createFixture()
+    nonFiniteFixture.dynamodb.scanPages.push({
+      $metadata: {},
+      Count: 1,
+      Items: [{
+        entryType: { S: 'annotation' },
+        nonFiniteNumber: { N: '1e999' },
+      }],
+      ScannedCount: 1,
+    })
+    await expect(nonFiniteFixture.operations.scanFileProofingPage(
+      createFileRestoreTable(),
+    )).rejects.toMatchObject({ code: 'FILE_ROW_INVALID' })
+
+    const fractionalRevisionFixture = createFixture()
+    fractionalRevisionFixture.dynamodb.scanPages.push({
+      $metadata: {},
+      Count: 1,
+      Items: [{ ...createRawFileRow(), revision: { N: '1.5' } }],
+      ScannedCount: 1,
+    })
+    await expect(fractionalRevisionFixture.operations.scanFileProofingPage(
+      createFileRestoreTable(),
+    )).rejects.toMatchObject({ code: 'FILE_ROW_INVALID' })
   })
 
   test('adopts an exact File remap after losing the conditional update response', async () => {
@@ -1626,6 +1760,20 @@ describe('restore drill AWS primitives', () => {
       drillId: DRILL_ID,
       source: createSourceFileVersion(),
     })).rejects.toMatchObject({ code: 'UNEXPECTED_AWS_FAILURE' })
+
+    const zeroChunkFixture = createFixture()
+    zeroChunkFixture.s3.objectBodyMode = 'zero-chunk'
+    const zeroChunkCopy = (await zeroChunkFixture.operations.createOrAdoptFileVersion({
+      drillId: DRILL_ID,
+      source: createSourceFileVersion(),
+      preexistingScratchVersionIds: [],
+    })).selectedCopy
+    await expect(zeroChunkFixture.operations.verifyCreatedFileVersion({
+      copy: zeroChunkCopy,
+      digestKey: FILE_PROOF_KEY,
+      drillId: DRILL_ID,
+      source: createSourceFileVersion(),
+    })).resolves.toMatchObject({ status: 'completed' })
   })
 
   test('requires exact copied expiration and checksum metadata presence', async () => {
@@ -1855,7 +2003,7 @@ describe('restore drill AWS primitives', () => {
         L: [{ M: { id: { S: 'v1' }, objectVersionId: { S: 'destination' } } }],
       },
     })
-    expect(restoreAggregate.finalize()).toEqual(sourceAggregate.finalize())
+    expect(restoreAggregate.finalize(1)).toEqual(sourceAggregate.finalize(1))
 
     const wrongMd5 = Buffer.alloc(16, 7).toString('base64')
     const rejectedAggregate = new RestoreDrillDynamoAggregateAccumulator(
@@ -1939,7 +2087,7 @@ describe('restore drill AWS primitives', () => {
       emptyBinary: { B: new Uint8Array() },
       scopeKey: { S: 'scope-1' },
     })
-    expect(exportAggregate.finalize()).toEqual(restoreAggregate.finalize())
+    expect(exportAggregate.finalize(1)).toEqual(restoreAggregate.finalize(1))
 
     const specialItem: Record<string, AttributeValue> = {
       scopeKey: { S: 'scope-2' },
@@ -1962,8 +2110,8 @@ describe('restore drill AWS primitives', () => {
       10,
     )
     withoutSpecialAttribute.add({ scopeKey: { S: 'scope-2' } })
-    expect(withSpecialAttribute.finalize().content).not.toEqual(
-      withoutSpecialAttribute.finalize().content,
+    expect(withSpecialAttribute.finalize(1).content).not.toEqual(
+      withoutSpecialAttribute.finalize(1).content,
     )
 
     const firstPrototypeKey: Record<string, AttributeValue> = {}
@@ -1990,9 +2138,73 @@ describe('restore drill AWS primitives', () => {
       10,
     )
     secondKeyAggregate.add(secondPrototypeKey)
-    expect(firstKeyAggregate.finalize().keys).not.toEqual(
-      secondKeyAggregate.finalize().keys,
+    expect(firstKeyAggregate.finalize(1).keys).not.toEqual(
+      secondKeyAggregate.finalize(1).keys,
     )
+  })
+
+  test('finalizes with the durable partition count after digest drains', async () => {
+    const key = new Uint8Array(32).fill(31)
+    const accumulator = new RestoreDrillDynamoAggregateAccumulator(
+      key,
+      'table:work-items',
+      [{ attributeName: 'scopeKey', keyType: 'HASH' }],
+      30,
+    )
+    const lines = Array.from({ length: 26 }, (_, index) => JSON.stringify({
+      Item: {
+        recordKey: { S: `record-${index}` },
+        scopeKey: { S: `scope-${index % 2}` },
+      },
+    }))
+    const data = gzipSync(`${lines.join('\n')}\n`)
+    const durablePartitionDigests = new Set<string>()
+    const sinkBatchSizes: number[] = []
+
+    const itemCount = await consumeRestoreDrillExportData(
+      Readable.from([data]),
+      { maxBytes: 100_000, maxRecords: 30 },
+      accumulator,
+      createHash('md5').update(data).digest('base64'),
+      async (digests) => {
+        sinkBatchSizes.push(digests.length)
+        for (const digest of digests) durablePartitionDigests.add(digest)
+      },
+    )
+
+    expect(itemCount).toBe(26)
+    expect(sinkBatchSizes).toEqual([2, 1])
+    expect(accumulator.finalize(durablePartitionDigests.size)).toMatchObject({
+      logicalPartitionCount: 2,
+      recordCount: 26,
+    })
+  })
+
+  test('rejects malformed or substituted aggregate checkpoint MACs', () => {
+    const key = new Uint8Array(32).fill(37)
+    const producer = new RestoreDrillDynamoAggregateAccumulator(
+      key,
+      'table:work-items',
+      [{ attributeName: 'scopeKey', keyType: 'HASH' }],
+      10,
+    )
+    producer.add({ scopeKey: { S: 'scope-1' } })
+    const checkpoint = producer.checkpoint()
+    producer.dispose()
+
+    for (const checkpointMac of ['not-hex', 'f'.repeat(64)]) {
+      const consumer = new RestoreDrillDynamoAggregateAccumulator(
+        key,
+        'table:work-items',
+        [{ attributeName: 'scopeKey', keyType: 'HASH' }],
+        10,
+      )
+      expect(() => consumer.mergeCheckpoint({
+        ...checkpoint,
+        checkpointMac,
+      })).toThrow(new RestoreDrillAwsFailure('CHECKPOINT_INVALID'))
+      consumer.dispose()
+    }
   })
 
   test('enumerates and deletes exact versions created below one export prefix', async () => {

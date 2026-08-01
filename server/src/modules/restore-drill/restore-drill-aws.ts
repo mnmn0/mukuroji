@@ -76,7 +76,11 @@ import {
   type RestoreDrillFileRangeWindow,
 } from './restore-drill-file-range'
 
+/** Re-exported durable checkpoint for callers that persist File range progress. */
 export type { RestoreDrillFileRangeCheckpoint } from './restore-drill-file-range'
+
+/** AWS ARN partitions supported by the restore-drill infrastructure contract. */
+export type RestoreDrillAwsPartition = 'aws' | 'aws-cn' | 'aws-us-gov'
 
 /** Auxiliary File Proofing row kinds that do not own immutable object versions. */
 const FILE_PROOFING_AUXILIARY_ENTRY_TYPES = new Set([
@@ -2663,7 +2667,7 @@ export function readRestoreDrillAwsCleanupConfiguration(
     restoreTablePrefix: readEnvironmentValue(environment, 'TARGET_TABLE_PREFIX'),
   }
   if (
-    !/^[a-z]{2}(?:-gov)?-[a-z]+-\d$/.test(configuration.region) ||
+    resolveRestoreDrillAwsPartition(configuration.region) === undefined ||
     !isBucketName(configuration.evidenceBucketName) ||
     !isBucketName(configuration.scratchBucketName) ||
     configuration.evidenceBucketName === configuration.scratchBucketName ||
@@ -2693,10 +2697,14 @@ export function readRestoreDrillAwsCleanupConfiguration(
 function createCleanupRestrictedFullConfiguration(
   cleanup: RestoreDrillAwsCleanupConfiguration,
 ): RestoreDrillAwsConfiguration {
+  const partition = resolveRestoreDrillAwsPartition(cleanup.region)
+  if (partition === undefined) {
+    throw new RestoreDrillAwsFailure('CONFIGURATION_INVALID')
+  }
   return {
     ...cleanup,
     auditPseudonymSecretArn:
-      `arn:aws:secretsmanager:${cleanup.region}:${cleanup.accountId}:secret:cleanup-not-authorized`,
+      `arn:${partition}:secretsmanager:${cleanup.region}:${cleanup.accountId}:secret:cleanup-not-authorized`,
     sourceFileBucketName: 'cleanup-source-not-authorized',
     scratchKmsKeyArn: cleanup.evidenceKmsKeyArn,
     sourceTables: {
@@ -2737,7 +2745,13 @@ function readEnvironmentValue(
 function readAccountIdFromArn(arn: string): string {
   const parts = arn.split(':')
   const accountId = parts[4]
-  if (parts[0] !== 'arn' || parts[1] !== 'aws' || !accountId || !/^\d{12}$/.test(accountId)) {
+  const partition = parts[1]
+  if (
+    parts[0] !== 'arn' ||
+    (partition !== 'aws' && partition !== 'aws-cn' && partition !== 'aws-us-gov') ||
+    !accountId ||
+    !/^\d{12}$/.test(accountId)
+  ) {
     throw new RestoreDrillAwsFailure('CONFIGURATION_INVALID')
   }
   return accountId
@@ -2755,7 +2769,7 @@ function validateConfiguration(configuration: RestoreDrillAwsConfiguration): voi
   const uniqueTableNames = new Set(tableNames)
   if (
     !/^\d{12}$/.test(configuration.accountId) ||
-    !/^[a-z]{2}(?:-gov)?-[a-z]+-\d$/.test(configuration.region) ||
+    resolveRestoreDrillAwsPartition(configuration.region) === undefined ||
     !/^[A-Za-z0-9_.-]{3,80}$/.test(configuration.restoreTablePrefix) ||
     uniqueTableNames.size !== RESTORE_DRILL_AWS_TABLE_TARGETS.length ||
     tableNames.some((name) => !isDynamoDbTableName(name)) ||
@@ -2778,6 +2792,21 @@ function validateConfiguration(configuration: RestoreDrillAwsConfiguration): voi
   ) {
     throw new RestoreDrillAwsFailure('CONFIGURATION_INVALID')
   }
+}
+
+/**
+ * Resolves a supported ARN partition from one canonical AWS Region.
+ *
+ * @param value - Candidate AWS Region.
+ * @returns Matching supported partition, or undefined for malformed and unsupported Regions.
+ */
+export function resolveRestoreDrillAwsPartition(
+  value: string,
+): RestoreDrillAwsPartition | undefined {
+  if (/^us-gov-[a-z]+-\d$/.test(value)) return 'aws-us-gov'
+  if (/^cn-[a-z]+-\d$/.test(value)) return 'aws-cn'
+  if (/^[a-z]{2}-[a-z]+-\d$/.test(value)) return 'aws'
+  return undefined
 }
 
 /**
@@ -2811,8 +2840,10 @@ function isBucketName(value: string): boolean {
  * @returns Whether the ARN selects a key in the expected account and Region.
  */
 function isKmsArn(value: string, region: string, accountId: string): boolean {
-  return value.startsWith(`arn:aws:kms:${region}:${accountId}:key/`) &&
-    value.length > `arn:aws:kms:${region}:${accountId}:key/`.length
+  const partition = resolveRestoreDrillAwsPartition(region)
+  if (partition === undefined) return false
+  const prefix = `arn:${partition}:kms:${region}:${accountId}:key/`
+  return value.startsWith(prefix) && value.length > prefix.length
 }
 
 /**
@@ -2824,8 +2855,10 @@ function isKmsArn(value: string, region: string, accountId: string): boolean {
  * @returns Whether the ARN selects a secret in the expected account and Region.
  */
 function isSecretArn(value: string, region: string, accountId: string): boolean {
-  return value.startsWith(`arn:aws:secretsmanager:${region}:${accountId}:secret:`) &&
-    value.length > `arn:aws:secretsmanager:${region}:${accountId}:secret:`.length
+  const partition = resolveRestoreDrillAwsPartition(region)
+  if (partition === undefined) return false
+  const prefix = `arn:${partition}:secretsmanager:${region}:${accountId}:secret:`
+  return value.startsWith(prefix) && value.length > prefix.length
 }
 
 /**
@@ -3314,7 +3347,24 @@ export function verifyRestoreDrillFileVersionProof(
 ): boolean {
   if (digestKey.byteLength !== 32 || !isFileVersionProof(proof, proof.role)) return false
   const expected = calculateFileVersionProofMac(proof, digestKey)
-  return timingSafeEqual(Buffer.from(proof.proofMac, 'hex'), Buffer.from(expected, 'hex'))
+  return safeSha256HexEqual(proof.proofMac, expected)
+}
+
+/**
+ * Compares two validated lowercase SHA-256 hex values without an early-exit string comparison.
+ *
+ * @param left - First candidate digest.
+ * @param right - Second candidate digest.
+ * @returns Whether both candidates are canonical and contain the same bytes.
+ */
+function safeSha256HexEqual(left: unknown, right: unknown): boolean {
+  if (
+    typeof left !== 'string' ||
+    typeof right !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(left) ||
+    !/^[a-f0-9]{64}$/.test(right)
+  ) return false
+  return timingSafeEqual(Buffer.from(left, 'hex'), Buffer.from(right, 'hex'))
 }
 
 /** Calculates the role-separated MAC over every retained File proof field. */
@@ -3500,9 +3550,10 @@ async function hashByteStream(
   let observedBytes = 0
   try {
     for await (const chunk of stream) {
-      if (!(chunk instanceof Uint8Array) || chunk.byteLength === 0) {
+      if (!(chunk instanceof Uint8Array)) {
         throw new RestoreDrillAwsFailure('FILE_COPY_CHECKSUM_MISMATCH')
       }
+      if (chunk.byteLength === 0) continue
       observedBytes += chunk.byteLength
       if (observedBytes > expectedBytes) {
         throw new RestoreDrillAwsFailure('FILE_COPY_CHECKSUM_MISMATCH')
@@ -3817,15 +3868,17 @@ function requireCleanupRestoreTable(
   drillId: string,
   configuration: RestoreDrillAwsConfiguration,
 ): void {
+  const partition = resolveRestoreDrillAwsPartition(configuration.region)
   const expectedName = createRestoreDrillTargetTableName(
     configuration.restoreTablePrefix,
     drillId,
     table.target,
   )
   if (
+    partition === undefined ||
     table.tableName !== expectedName ||
     table.tableArn !==
-      `arn:aws:dynamodb:${configuration.region}:${configuration.accountId}:table/${expectedName}`
+      `arn:${partition}:dynamodb:${configuration.region}:${configuration.accountId}:table/${expectedName}`
   ) {
     throw new RestoreDrillAwsFailure('CLEANUP_IDENTITY_MISMATCH')
   }
@@ -4070,7 +4123,10 @@ export class RestoreDrillDynamoAggregateAccumulator {
       checkpoint.partitionDigests.length > checkpoint.recordCount ||
       checkpoint.partitionDigests.some((digest) => !/^[a-f0-9]{64}$/.test(digest)) ||
       !isSortedUniqueStrings(checkpoint.partitionDigests) ||
-      checkpoint.checkpointMac !== this.calculateCheckpointMac(checkpoint)
+      !safeSha256HexEqual(
+        checkpoint.checkpointMac,
+        this.calculateCheckpointMac(checkpoint),
+      )
     ) {
       throw new RestoreDrillAwsFailure('CHECKPOINT_INVALID')
     }
@@ -4130,9 +4186,10 @@ export class RestoreDrillDynamoAggregateAccumulator {
   /**
    * Returns secret-free evidence without exposing raw keys or items.
    *
+   * @param logicalPartitionCount - Durable unique partition count after all digest drains.
    * @returns Current exact aggregate.
    */
-  finalize(logicalPartitionCount = this.partitionDigests.size): RestoreDrillDynamoAggregateEvidence {
+  finalize(logicalPartitionCount: number): RestoreDrillDynamoAggregateEvidence {
     if (this.finalizedEvidence) return cloneAggregateEvidence(this.finalizedEvidence)
     if (
       this.disposed ||
@@ -4977,7 +5034,9 @@ function decodeAttributeValue(value: AttributeValue): unknown {
   if (cloned.S !== undefined) return cloned.S
   if (cloned.N !== undefined) {
     const number = Number(cloned.N)
-    if (!Number.isSafeInteger(number) && !Number.isFinite(number)) {
+    // This transport boundary rejects non-finite conversion only. Strict File parsers below
+    // retain ownership of domain-specific safe-integer and range constraints.
+    if (!Number.isFinite(number)) {
       throw new RestoreDrillAwsFailure('FILE_ROW_INVALID')
     }
     return number
@@ -5199,7 +5258,7 @@ function requireExactRestoreIdentity(
  * Validates a structurally supplied restore table before it can reach cleanup.
  *
  * @param table - Candidate recorded restore table.
- * @param prefix - Configured deterministic target prefix.
+ * @param configuration - Fixed account, Region, and deterministic target prefix.
  */
 function requireRecordedRestoreTable(
   table: RestoreDrillRecordedRestoreTable,
@@ -5336,12 +5395,17 @@ type ParsedDynamoDbTableArn = {
 function parseDynamoDbTableArn(value: string): ParsedDynamoDbTableArn {
   const parts = value.split(':')
   const resource = parts[5]
+  const region = parts[3]
+  const partition = typeof region === 'string'
+    ? resolveRestoreDrillAwsPartition(region)
+    : undefined
   if (
     parts.length !== 6 ||
     parts[0] !== 'arn' ||
-    parts[1] !== 'aws' ||
+    partition === undefined ||
+    parts[1] !== partition ||
     parts[2] !== 'dynamodb' ||
-    !parts[3] ||
+    !region ||
     !parts[4] ||
     !/^\d{12}$/.test(parts[4]) ||
     !resource ||
@@ -5353,7 +5417,7 @@ function parseDynamoDbTableArn(value: string): ParsedDynamoDbTableArn {
   if (!isDynamoDbTableName(tableName) || tableName.includes('/')) {
     throw new RestoreDrillAwsFailure('RESTORE_IDENTITY_MISMATCH')
   }
-  return { accountId: parts[4], region: parts[3], tableName }
+  return { accountId: parts[4], region, tableName }
 }
 
 /**

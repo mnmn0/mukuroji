@@ -45,6 +45,7 @@ import {
   RESTORE_DRILL_CLEANUP_POLICY_VERSION,
   RESTORE_DRILL_DUE_DAYS,
   RESTORE_DRILL_OVERDUE_DAYS,
+  AwsRestoreDrillApprovalStore,
   AwsRestoreDrillCleanupExecutionStore,
   AwsRestoreDrillEvidenceStore,
   AwsRestoreDrillStateStore,
@@ -1072,6 +1073,54 @@ describe('restore drill orchestrator request boundary', () => {
       runnerExecutionArn: RUNNER_EXECUTION_ARN,
     })
   })
+
+  test.each([
+    { partition: 'aws-us-gov', region: 'us-gov-west-1' },
+    { partition: 'aws-cn', region: 'cn-north-1' },
+  ])('accepts Region-bound $partition runner and cleanup execution ARNs', ({
+    partition,
+    region,
+  }) => {
+    const runnerExecutionArn =
+      `arn:${partition}:states:${region}:${ACCOUNT_ID}:execution:restore-drill:runner-1`
+    const cleanupExecutionName = `restore-cleanup-${'d'.repeat(64)}`
+    const cleanupExecutionArn =
+      `arn:${partition}:states:${region}:${ACCOUNT_ID}:execution:cleanup:${cleanupExecutionName}`
+
+    expect(parseRestoreDrillHandlerRequest({
+      action: 'advance',
+      drillId: DRILL_ID,
+      runnerExecutionArn,
+    })).toEqual({ action: 'advance', drillId: DRILL_ID, runnerExecutionArn })
+    expect(parseRestoreDrillHandlerRequest({
+      action: 'cleanup',
+      cleanupExecutionArn,
+      cleanupExecutionName,
+      drillId: DRILL_ID,
+    })).toEqual({
+      action: 'cleanup',
+      cleanupExecutionArn,
+      cleanupExecutionName,
+      drillId: DRILL_ID,
+    })
+  })
+
+  test('rejects Step Functions ARNs whose partition disagrees with their Region', () => {
+    expect(() => parseRestoreDrillHandlerRequest({
+      action: 'advance',
+      drillId: DRILL_ID,
+      runnerExecutionArn:
+        `arn:aws:states:cn-north-1:${ACCOUNT_ID}:execution:restore-drill:runner-1`,
+    })).toThrow(new RestoreDrillOrchestratorFailure('REQUEST_INVALID'))
+    const cleanupExecutionName = `restore-cleanup-${'d'.repeat(64)}`
+    expect(() => parseRestoreDrillHandlerRequest({
+      action: 'cleanup',
+      cleanupExecutionArn:
+        `arn:aws-cn:states:us-gov-west-1:${ACCOUNT_ID}:execution:cleanup:${cleanupExecutionName}`,
+      cleanupExecutionName,
+      drillId: DRILL_ID,
+    })).toThrow(new RestoreDrillOrchestratorFailure('REQUEST_INVALID'))
+  })
 })
 
 describe('restore drill cadence and replay', () => {
@@ -1399,6 +1448,91 @@ describe('restore drill cadence and replay', () => {
       })
     })
   }
+
+  test('classifies a verification inventory limit as an operational failure', async () => {
+    const source: RestoreDrillSourceTableObservation = {
+      descriptor: tableDescriptor(),
+      earliestRestorableAt: '2026-07-01T00:00:00.000Z',
+      latestRestorableAt: STARTED_AT,
+      sourceTableArn:
+        `arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/audit-events`,
+      target: 'table:audit-events',
+    }
+    const exportRecord: RestoreDrillRecordedExport = {
+      clientToken: createHash('sha256')
+        .update(`export\0${DRILL_ID}\0${source.target}\0${STARTED_AT}`, 'utf8')
+        .digest('hex'),
+      exportArn: `${source.sourceTableArn}/export/01693685827463-2d8752fd`,
+      exportPoint: STARTED_AT,
+      kind: 'table-export',
+      scratchPrefix: `restore-drill/${DRILL_DIGEST}/${source.target}/export`,
+      sourceTableArn: source.sourceTableArn,
+      sourceTableId: source.descriptor.tableId,
+      target: source.target,
+    }
+    const model = createStateModel({
+      cleanupScope: {
+        complete: true,
+        exportObjectCount: 0,
+        fileObjectCount: 0,
+        ledgerCount: 0,
+        ledgerRevision: 0,
+        multipartUploadCount: 0,
+        resourceDigest: DIGEST,
+        rollingDigest: DIGEST,
+        started: true,
+        tableCount: 0,
+      },
+      exportListings: new Map([[
+        source.target,
+        { complete: true, objectCount: 0, pageCount: 11, started: true },
+      ]]),
+      resourceCheckpoint: {
+        exports: [exportRecord],
+        restoredDescriptors: [],
+        restores: [],
+        sources: [source],
+      },
+      run: {
+        ...failureSealingRun('verifying'),
+        restorePoint: STARTED_AT,
+      },
+    })
+    const operations: RestoreDrillAwsOperations = {
+      ...createOperations(),
+      /** Returns one completed export whose manifest violates the logical limits. */
+      async pollTableExport() {
+        return {
+          itemCount: 0,
+          manifestKey:
+            `${exportRecord.scratchPrefix}/AWSDynamoDB/01693685827463-2d8752fd/manifest-summary.json`,
+          status: 'completed',
+        }
+      },
+    }
+    const fixture = createOrchestratorFixture({
+      model,
+      now: () => new Date('2026-08-01T00:30:00.000Z'),
+    })
+
+    const result = await fixture.orchestrator.advance(
+      { drillId: DRILL_ID },
+      operations,
+      RUNNER_EXECUTION_ARN,
+    )
+
+    expect(result.status).toBe('awaiting-cleanup-approval')
+    expect(model.run?.failureCodes).toEqual(['WORKFLOW_TASK_FAILED'])
+    expect(fixture.evidenceArtifacts).toContainEqual(expect.objectContaining({
+      failureCode: 'WORKFLOW_TASK_FAILED',
+      kind: 'mukuroji-restore-drill-operational-failure',
+      phase: 'verifying',
+    }))
+    expect(fixture.metrics).toContainEqual({
+      name: 'IntegrityFailureCount',
+      value: 0,
+    })
+  })
 
   test('preserves the first durable failure when finalization itself is retried', async () => {
     let envelopeAttempts = 0
@@ -3374,6 +3508,26 @@ describe('restore drill table descriptor gate', () => {
 })
 
 describe('restore drill approval Object Lock policy', () => {
+  test('binds the trusted approver role ARN to the configured Region partition', () => {
+    const configuration = {
+      accountId: ACCOUNT_ID,
+      evidenceBucketName: 'restore-drill-evidence',
+      evidenceKmsKeyArn:
+        `arn:aws-cn:kms:cn-north-1:${ACCOUNT_ID}:key/evidence`,
+      region: 'cn-north-1',
+    }
+    const store = new AwsRestoreDrillApprovalStore(
+      configuration,
+      `arn:aws-cn:iam::${ACCOUNT_ID}:role/restore-owner`,
+    )
+    store.close()
+
+    expect(() => new AwsRestoreDrillApprovalStore(
+      configuration,
+      `arn:aws:iam::${ACCOUNT_ID}:role/restore-owner`,
+    )).toThrow(new RestoreDrillOrchestratorFailure('CONFIGURATION_INVALID'))
+  })
+
   test('rejects governance mode and a retention deadline shorter than 400 days', () => {
     const exactMinimum = new Date(
       Date.parse(STARTED_AT) + 400 * 86_400_000,
@@ -3577,6 +3731,53 @@ describe('restore drill terminal evidence Object Lock policy', () => {
 })
 
 describe('restore drill cleanup execution identity', () => {
+  test.each([
+    { partition: 'aws-us-gov', region: 'us-gov-west-1' },
+    { partition: 'aws-cn', region: 'cn-north-1' },
+  ])('reads a Region-bound $partition cleanup execution', async ({
+    partition,
+    region,
+  }) => {
+    const executionName = `restore-cleanup-${'d'.repeat(64)}`
+    const executionArn =
+      `arn:${partition}:states:${region}:${ACCOUNT_ID}:execution:cleanup:${executionName}`
+    const store = new AwsRestoreDrillCleanupExecutionStore(
+      region,
+      ACCOUNT_ID,
+      'cleanup',
+    )
+    Object.defineProperty(store, 'sfn', {
+      value: {
+        /** Releases no resources for the in-memory Step Functions fixture. */
+        destroy() {},
+        /** Returns the Region-bound cleanup execution observation. */
+        async send(command: unknown) {
+          if (!(command instanceof DescribeExecutionCommand)) {
+            throw new Error('unexpected command')
+          }
+          return {
+            $metadata: {},
+            executionArn,
+            name: executionName,
+            startDate: new Date(STARTED_AT),
+            stateMachineArn:
+              `arn:${partition}:states:${region}:${ACCOUNT_ID}:stateMachine:cleanup`,
+            status: 'RUNNING',
+            redriveCount: 0,
+          }
+        },
+      },
+    })
+    try {
+      await expect(store.readStatus(executionArn)).resolves.toEqual({
+        redriveCount: 0,
+        status: 'RUNNING',
+      })
+    } finally {
+      store.close()
+    }
+  })
+
   test('requires DescribeExecution to echo the configured workflow identity', async () => {
     const approval = createApproval()
     const store = new AwsRestoreDrillCleanupExecutionStore(
@@ -3741,6 +3942,70 @@ describe('restore drill export inventory bounds', () => {
 })
 
 describe('restore drill checkpoint query bounds', () => {
+  test.each([
+    { partition: 'aws-us-gov', region: 'us-gov-west-1' },
+    { partition: 'aws-cn', region: 'cn-north-1' },
+  ])('round-trips a durable $partition RUN with its native KMS envelope', async ({
+    partition,
+    region,
+  }) => {
+    const run: RestoreDrillDurableRun = {
+      ...awaitingApprovalRun(emptyCleanupScopeDigest()),
+      digestKeyEnvelope: {
+        ciphertextBase64: ENVELOPE.ciphertextBase64,
+        kind: 'restore-drill-digest-key',
+        kmsKeyArn: `arn:${partition}:kms:${region}:${ACCOUNT_ID}:key/evidence`,
+      },
+      runnerExecutionArn:
+        `arn:${partition}:states:${region}:${ACCOUNT_ID}:execution:restore-drill:runner-1`,
+    }
+    const state = new AwsRestoreDrillStateStore('restore-drill-state', region)
+    Object.defineProperty(state, 'document', {
+      value: {
+        /** Returns the partition-native durable RUN fixture. */
+        async send(command: unknown) {
+          if (!(command instanceof GetCommand)) throw new Error('unexpected command')
+          return { Item: stateRunItem(run) }
+        },
+      },
+    })
+    try {
+      await expect(state.readRun(DRILL_ID)).resolves.toEqual(run)
+    } finally {
+      state.close()
+    }
+  })
+
+  test('rejects a durable KMS envelope whose partition disagrees with its Region', async () => {
+    const run: RestoreDrillDurableRun = {
+      ...awaitingApprovalRun(emptyCleanupScopeDigest()),
+      digestKeyEnvelope: {
+        ciphertextBase64: ENVELOPE.ciphertextBase64,
+        kind: 'restore-drill-digest-key',
+        kmsKeyArn: `arn:aws:kms:cn-north-1:${ACCOUNT_ID}:key/evidence`,
+      },
+      runnerExecutionArn:
+        `arn:aws-cn:states:cn-north-1:${ACCOUNT_ID}:execution:restore-drill:runner-1`,
+    }
+    const state = new AwsRestoreDrillStateStore('restore-drill-state', 'cn-north-1')
+    Object.defineProperty(state, 'document', {
+      value: {
+        /** Returns the deliberately partition-mismatched durable RUN fixture. */
+        async send(command: unknown) {
+          if (!(command instanceof GetCommand)) throw new Error('unexpected command')
+          return { Item: stateRunItem(run) }
+        },
+      },
+    })
+    try {
+      await expect(state.readRun(DRILL_ID)).rejects.toEqual(
+        new RestoreDrillOrchestratorFailure('RUN_STATE_INVALID'),
+      )
+    } finally {
+      state.close()
+    }
+  })
+
   test('accepts a fallback intent that retains a known RPO miss', async () => {
     const failedAt = '2026-08-01T00:30:00.000Z'
     const artifact: RestoreDrillEvidenceArtifact = {

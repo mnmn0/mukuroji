@@ -183,12 +183,15 @@ Semantic Scanは1 logical stepでraw rowを最大25件、requirement/Audit reduc
 elapsed-time guardでもdurable checkpointへ戻ります。これらのlogical data上限は最大値を同時処理できる
 というcapacity保証ではありません。
 
-Stable failure code、aggregate count/digest、RPO/RTO、cross-domain resultだけをappend-only evidenceへ
-渡し、raw locator/cursorはrestricted operational stateだけに保持します。Durable local progressは0秒、
-AWS収束/copy claimはbounded waitでStandard workflowを再駆動し、task error/timeoutはdurable finalizer
-loopでevidence sealingを再開します。Generic Lambda/AWS/KMS/state-store failureは非integrityの
-`WORKFLOW_TASK_FAILED`とし、明示的に検出したdata/descriptor/File-copy差分だけをintegrity failureに
-分類します。0秒redriveを含むmain-loop `pending`はexecution全体で最大1,200回の
+Append-only `result.json`はevidence version、drill ID、開始/完了時刻、共通restore point、RPO/RTO、
+source-export/isolated-restore aggregate digest、exact cleanup resource digest、aggregate comparison、
+cross-domain/Work Items schema status、sorted failure codes、terminal outcomeを保持し、artifact全体を
+`resultDigest`で認証します。Raw resource locator、cursor、個別row、HMAC keyは含めず、restricted
+operational stateだけに保持します。Durable local progressは0秒、AWS収束/copy claimはbounded waitで
+Standard workflowを再駆動し、task error/timeoutはdurable finalizer loopでevidence sealingを再開します。
+Generic Lambda/AWS/KMS/state-store failureは非integrityの`WORKFLOW_TASK_FAILED`とし、明示的に検出した
+data/descriptor/File-copy差分だけをintegrity failureに分類します。0秒redriveを含むmain-loop
+`pending`はexecution全体で最大1,200回の
 fuseを共有し、なお継続が必要なら専用finalizerで非integrityの
 `WORKFLOW_POLL_BUDGET_EXCEEDED`をsealしてfailed evidence/alarm/remediation対象に
 します。

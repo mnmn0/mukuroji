@@ -91,6 +91,8 @@ const argumentVector: readonly string[] = [
 
 /** Failures and responses installed on one recording AWS session. */
 type RecordingSessionOptions = {
+  /** Optional session close failure. */
+  readonly closeFailure?: unknown
   /** Optional Step Functions execution read failure. */
   readonly describeFailure?: unknown
   /** Optional Step Functions execution response override. */
@@ -159,10 +161,13 @@ class RecordingSession implements RestoreDrillCleanupApprovalAwsSession {
     this.options = options
   }
 
-  /** Records session closure. */
+  /** Records session closure and throws the configured failure. */
   close(): void {
     this.closeCount += 1
     this.events.push('close')
+    if (this.options.closeFailure !== undefined) {
+      throw this.options.closeFailure
+    }
   }
 
   /** Records and resolves one KMS decrypt. */
@@ -739,6 +744,69 @@ describe('createRestoreDrillCleanupApproval', () => {
   })
 
   test.each([
+    { partition: 'aws-us-gov', region: 'us-gov-west-1' },
+    { partition: 'aws-cn', region: 'cn-north-1' },
+  ])('creates a replacement approval in the Region-bound $partition partition', async ({
+    partition,
+    region,
+  }) => {
+    const approver =
+      `arn:${partition}:sts::${ACCOUNT_ID}:assumed-role/RestoreDrillCleanupApprover/operator-session`
+    const kmsKeyArn =
+      `arn:${partition}:kms:${region}:${ACCOUNT_ID}:key/12345678-1234-1234-1234-123456789012`
+    const cleanupStateMachineArn =
+      `arn:${partition}:states:${region}:${ACCOUNT_ID}:stateMachine:mukuroji-restore-drill-cleanup`
+    const cleanupExecutionArn =
+      `arn:${partition}:states:${region}:${ACCOUNT_ID}:execution:mukuroji-restore-drill-cleanup:${CLEANUP_EXECUTION_NAME}`
+    const session = new RecordingSession({
+      decryptOutput: {
+        $metadata: {},
+        EncryptionAlgorithm: 'SYMMETRIC_DEFAULT',
+        KeyId: kmsKeyArn,
+        Plaintext: DIGEST_KEY.slice(),
+      },
+      describeOutput: createDescribeExecutionOutput({
+        executionArn: cleanupExecutionArn,
+        stateMachineArn: cleanupStateMachineArn,
+      }),
+      identityOutput: {
+        $metadata: {},
+        Account: ACCOUNT_ID,
+        Arn: approver,
+        UserId: 'ARO123456789EXAMPLE:operator-session',
+      },
+      runOutput: {
+        $metadata: {},
+        Item: createCleaningRunItem({
+          cleanupExecutionArn: { S: cleanupExecutionArn },
+          digestKeyEnvelope: {
+            M: {
+              ciphertextBase64: { S: CIPHERTEXT_BASE64 },
+              kind: { S: 'restore-drill-digest-key' },
+              kmsKeyArn: { S: kmsKeyArn },
+            },
+          },
+        }),
+      },
+    })
+    const configuration = parseRestoreDrillCleanupApprovalCliArguments(
+      replaceFlag(
+        replaceFlag(argumentVector, '--region', region),
+        '--approver',
+        approver,
+      ),
+    )
+
+    await expect(createRestoreDrillCleanupApproval(
+      configuration,
+      session,
+      new Date(APPROVED_AT),
+    )).resolves.toMatchObject({ status: 'approval-created' })
+    expect(session.describeCommands[0]?.input.executionArn).toBe(cleanupExecutionArn)
+    expect(session.decryptCommands[0]?.input.KeyId).toBe(kmsKeyArn)
+  })
+
+  test.each([
     { status: 'ABORTED', output: createDescribeExecutionOutput({ status: 'ABORTED' }) },
     { status: 'TIMED_OUT', output: createDescribeExecutionOutput({ status: 'TIMED_OUT' }) },
   ])('allows replacement approval after terminal $status', async ({ output }) => {
@@ -1300,6 +1368,49 @@ describe('runRestoreDrillCleanupApprovalCli', () => {
     expect(capture.errors).toEqual([
       JSON.stringify({
         code: 'RUN_READ_FAILED',
+        operation: 'create-cleanup-approval',
+        status: 'error',
+      }),
+    ])
+    expect(capture.errors.join('\n')).not.toContain(canary)
+    expect(session.closeCount).toBe(1)
+  })
+
+  test('preserves the determined result when closing the session fails', async () => {
+    const session = new RecordingSession({
+      closeFailure: new Error('RAW_CLOSE_SECRET_CANARY'),
+    })
+    const capture = createDependencies(session)
+    const exitCode = await runRestoreDrillCleanupApprovalCli(
+      argumentVector,
+      capture.dependencies,
+    )
+
+    expect(exitCode).toBe(0)
+    expect(capture.errors).toEqual([])
+    expect(capture.outputs).toHaveLength(1)
+    expect(session.closeCount).toBe(1)
+  })
+
+  test('classifies unknown exceptions without blaming approval binding', async () => {
+    const canary = 'RAW_UNEXPECTED_SECRET_CANARY'
+    const session = new RecordingSession()
+    const capture = createDependencies(session)
+    const exitCode = await runRestoreDrillCleanupApprovalCli(
+      argumentVector,
+      {
+        ...capture.dependencies,
+        now: () => {
+          throw new Error(canary)
+        },
+      },
+    )
+
+    expect(exitCode).toBe(1)
+    expect(capture.outputs).toEqual([])
+    expect(capture.errors).toEqual([
+      JSON.stringify({
+        code: 'UNEXPECTED_FAILURE',
         operation: 'create-cleanup-approval',
         status: 'error',
       }),

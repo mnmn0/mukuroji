@@ -1,4 +1,12 @@
 import {
+  createRestoreDrillAwsCleanupOperationsFromEnvironment,
+  createRestoreDrillAwsOperationsFromEnvironment,
+  type RestoreDrillAwsOperations,
+  type RestoreDrillDynamoAggregateCheckpoint,
+  type RestoreDrillExportDataFile,
+  type RestoreDrillExportManifest,
+} from '../../modules/restore-drill/restore-drill-aws'
+import {
   AwsRestoreDrillApprovalStore,
   AwsRestoreDrillCleanupExecutionStore,
   AwsRestoreDrillEvidenceStore,
@@ -6,18 +14,12 @@ import {
   AwsRestoreDrillStateStore,
   AwsRestoreDrillVerifier,
   RestoreDrillOrchestratorFailure,
-  createRestoreDrillAwsCleanupOperationsFromEnvironment,
-  createRestoreDrillAwsOperationsFromEnvironment,
   createRestoreDrillOrchestrator,
   type RestoreDrillApprovalReadResult,
   type RestoreDrillApprovalStore,
-  type RestoreDrillAwsOperations,
   type RestoreDrillCleanupExecutionObservation,
   type RestoreDrillCleanupExecutionStore,
   type RestoreDrillCleanupOperations,
-  type RestoreDrillDynamoAggregateCheckpoint,
-  type RestoreDrillExportDataFile,
-  type RestoreDrillExportManifest,
   type RestoreDrillExportVersionReader,
   type RestoreDrillFileVerificationEvidence,
   type RestoreDrillFileVerificationResources,
@@ -176,10 +178,11 @@ export function getRestoreDrillRunnerRuntime(): RestoreDrillRunnerRuntime {
  */
 export function getRestoreDrillCleanupRuntime(): RestoreDrillCleanupRuntime {
   if (cleanupRuntime) return cleanupRuntime
-  const aws = createRestoreDrillAwsCleanupOperationsFromEnvironment()
   const authorizedApproverRoleArn = readRequiredEnvironment(
     'AUTHORIZED_APPROVER_ROLE_ARN',
   )
+  const cleanupWorkflowName = readRequiredEnvironment('CLEANUP_WORKFLOW_NAME')
+  const aws = createRestoreDrillAwsCleanupOperationsFromEnvironment()
   const state = new AwsRestoreDrillStateStore(
     aws.configuration.stateTableName,
     aws.configuration.region,
@@ -200,7 +203,7 @@ export function getRestoreDrillCleanupRuntime(): RestoreDrillCleanupRuntime {
       executions: new AwsRestoreDrillCleanupExecutionStore(
         aws.configuration.region,
         aws.configuration.accountId,
-        readRequiredEnvironment('CLEANUP_WORKFLOW_NAME'),
+        cleanupWorkflowName,
       ),
       metrics,
       state,

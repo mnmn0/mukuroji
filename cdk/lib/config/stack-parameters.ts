@@ -1,4 +1,47 @@
 import * as cdk from 'aws-cdk-lib';
+import { RegionInfo } from 'aws-cdk-lib/region-info';
+
+const restoreDrillApproverRoleArnSuffix =
+  'iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$';
+
+/**
+ * Resolves a literal stack partition when CDK has a concrete deployment identity.
+ *
+ * Environment-agnostic stacks intentionally retain the deploy-time `AWS::Partition`
+ * token, which cannot be embedded in a CloudFormation parameter regex.
+ *
+ * @param stack Stack owning the restore-drill parameter.
+ * @returns Literal partition for a concrete stack, otherwise undefined.
+ */
+function resolveLiteralStackPartition(stack: cdk.Stack): string | undefined {
+  const identity = cdk.Stack.of(stack);
+  if (!cdk.Token.isUnresolved(identity.partition)) return identity.partition;
+  if (cdk.Token.isUnresolved(identity.region)) return undefined;
+  const partition = RegionInfo.get(identity.region).partition;
+  if (partition === undefined) {
+    throw new Error(
+      `Unable to resolve an AWS partition for concrete Region ${identity.region}.`,
+    );
+  }
+  return partition;
+}
+
+/**
+ * Builds an IAM role ARN pattern consistent with the stack deployment identity.
+ *
+ * @param stack Stack owning the restore-drill parameter.
+ * @returns Exact concrete-partition pattern or the supported agnostic partition set.
+ */
+function buildRestoreDrillApproverRoleArnPattern(stack: cdk.Stack): string {
+  const partition = resolveLiteralStackPartition(stack);
+  if (partition === undefined) {
+    return `^arn:(?:aws|aws-us-gov|aws-cn):${restoreDrillApproverRoleArnSuffix}`;
+  }
+  if (partition !== 'aws' && partition !== 'aws-us-gov' && partition !== 'aws-cn') {
+    throw new Error(`Restore drill does not support the ${partition} AWS partition.`);
+  }
+  return `^arn:${partition}:${restoreDrillApproverRoleArnSuffix}`;
+}
 
 /**
  * CloudFormation parameters and derived values shared by stack subsystems.
@@ -203,10 +246,9 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     'RestoreDrillCleanupApproverRoleArn',
     {
       type: 'String',
-      allowedPattern:
-        '^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$',
+      allowedPattern: buildRestoreDrillApproverRoleArnPattern(stack),
       constraintDescription:
-        'RestoreDrillCleanupApproverRoleArn must be an explicit IAM role ARN.',
+        'RestoreDrillCleanupApproverRoleArn must be an explicit IAM role ARN in the supported deployment partition.',
       description:
         'Existing data-owner IAM role exclusively authorized to create and admit immutable restore-drill cleanup approvals.',
     },

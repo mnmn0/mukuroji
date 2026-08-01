@@ -4,6 +4,7 @@ const serverModules = [
   'authentication',
   'automation',
   'collaboration',
+  'data-integrity',
   'developer-platform',
   'directory',
   'documents',
@@ -56,6 +57,13 @@ module.exports = {
       severity: 'error',
       from: { path: '^server/' },
       to: { path: '^cdk/' },
+    },
+    {
+      name: 'no-server-runtime-to-scripts',
+      comment: 'Production server code must own reusable logic instead of importing CLI or migration scripts.',
+      severity: 'error',
+      from: { path: '^server/src/' },
+      to: { path: '^server/scripts/' },
     },
     {
       name: 'no-web-to-server',

@@ -7,7 +7,6 @@ import {
 import {
   DynamoDBClient,
   GetItemCommand,
-  ScanCommand,
   TransactWriteItemsCommand,
   type AttributeValue,
 } from '@aws-sdk/client-dynamodb'
@@ -23,11 +22,7 @@ import {
   GetBucketEncryptionCommand,
   GetBucketVersioningCommand,
   GetObjectCommand,
-  GetObjectAttributesCommand,
   GetObjectRetentionCommand,
-  GetObjectTaggingCommand,
-  HeadObjectCommand,
-  ObjectAttributes,
   PutObjectCommand,
   S3Client,
   type GetObjectCommandOutput,
@@ -42,21 +37,15 @@ import {
   SFNClient,
 } from '@aws-sdk/client-sfn'
 import {
-  GetCallerIdentityCommand,
-  STSClient,
-} from '@aws-sdk/client-sts'
-import {
   CROSS_DOMAIN_INTEGRITY_RESOURCE_TARGETS,
+  createCrossDomainIntegrityNormalizedPageReader,
   type CrossDomainIntegrityFailureCode,
+  type CrossDomainIntegrityNormalizedPageReader,
+  type CrossDomainIntegrityNormalizedPageReaderConfiguration,
   type CrossDomainIntegrityResourceIdentity,
-} from '../../../scripts/data-integrity/cross-domain-integrity'
-import { readCrossDomainIntegrityAwsNormalizedPage } from '../../../scripts/data-integrity/cross-domain-integrity-aws'
-import type {
-  CrossDomainIntegrityManagedAwsReadPort,
-  CrossDomainIntegrityObjectVersionReference,
-  CrossDomainIntegrityTableNames,
-  CrossDomainIntegrityTableTarget,
-} from '../../../scripts/data-integrity/cross-domain-integrity-aws-types'
+  type CrossDomainIntegrityTableNames,
+  type CrossDomainIntegrityTableTarget,
+} from '../data-integrity'
 import { createWorkspaceMemberAuditEntityIdFromKeyBytes } from '../audit'
 import {
   RESTORE_DRILL_RESOURCE_TARGETS,
@@ -87,6 +76,7 @@ import {
   type RestoreDrillAwsActionResult,
   type RestoreDrillAwsConfiguration,
   type RestoreDrillAwsOperations,
+  type RestoreDrillAwsPartition,
   RestoreDrillAwsFailure,
   RestoreDrillDynamoAggregateAccumulator,
   type RestoreDrillDynamoAggregateCheckpoint,
@@ -110,6 +100,7 @@ import {
   consumeRestoreDrillExportData,
   parseRestoreDrillExportFilesManifest,
   parseRestoreDrillExportSummary,
+  resolveRestoreDrillAwsPartition,
   verifyRestoreDrillExportManifestChecksum,
   verifyRestoreDrillFileVersionProof,
 } from './restore-drill-aws'
@@ -119,6 +110,7 @@ import {
   createRestoreDrillSemanticFailureClaim,
   createRestoreDrillSemanticItemClaims,
   createRestoreDrillSemanticToken,
+  evaluateRestoreDrillSemanticRequirement,
   type RestoreDrillSemanticAuditCandidate,
   type RestoreDrillSemanticClaim,
   type RestoreDrillSemanticFallback,
@@ -665,8 +657,8 @@ export type RestoreDrillSemanticRequirementPage = {
 export type RestoreDrillSemanticClaimPage = {
   /** Opaque facts, uniqueness guards, requirements, failures, and Audit candidates. */
   readonly claims: readonly RestoreDrillSemanticClaim[]
-  /** Exact low-level table cursor absent after the terminal page. */
-  readonly nextKey?: Readonly<Record<string, AttributeValue>>
+  /** Opaque normalized-reader cursor absent after the terminal page. */
+  readonly nextCursor?: string
   /** Exact canonical units charged to the global six-table capacity. */
   readonly retainedUnitCount: number
 }
@@ -711,8 +703,8 @@ export type RestoreDrillVerificationProgress = {
   readonly revision: number
   /** Cumulative exact canonical semantic units across all six isolated tables. */
   readonly semanticItemCount: number
-  /** Exact low-level cursor for the active semantic table target. */
-  readonly semanticNextKey?: Readonly<Record<string, AttributeValue>>
+  /** Opaque normalized-reader cursor for the active semantic table target. */
+  readonly semanticNextCursor?: string
   /** Cumulative raw Scan pages across all six isolated semantic targets. */
   readonly semanticPageCount: number
   /** Opaque cursor for the active regular or Audit-latest requirement ledger. */
@@ -1327,18 +1319,14 @@ export type RestoreDrillPartitionDigestSink = (
 /** Factory isolating the generic semantic AWS reader from verifier orchestration. */
 export interface RestoreDrillSemanticReaderFactory {
   /**
-   * Creates one isolated reader with an exact raw Scan page limit.
+   * Creates one isolated normalized reader from an SDK-independent allowlist.
    *
-   * @param configuration - Validated production resource allowlist.
-   * @param tableNames - Exact six isolated table names.
-   * @param scanLimit - Raw Scan limit equal to the generic parser page size.
-   * @returns Narrow managed reader for table and exact File-version reads.
+   * @param configuration - Exact account, Region, resources, and page bound.
+   * @returns SDK-independent normalized page reader.
    */
   create(
-    configuration: RestoreDrillAwsConfiguration,
-    tableNames: CrossDomainIntegrityTableNames,
-    scanLimit: number,
-  ): CrossDomainIntegrityManagedAwsReadPort
+    configuration: CrossDomainIntegrityNormalizedPageReaderConfiguration,
+  ): CrossDomainIntegrityNormalizedPageReader
 }
 
 /** Aggregate and semantic verification boundary. */
@@ -1358,7 +1346,7 @@ export interface RestoreDrillVerifier {
    * @param target - Canonical isolated table target.
    * @param auditPseudonymSecretVersionId - Exact secret VersionId pinned before scanning.
    * @param remainingItemCapacity - Remaining global canonical semantic-unit capacity.
-   * @param nextKey - Exact low-level Scan cursor for this target.
+   * @param nextCursor - Opaque normalized-reader cursor for this target.
    * @returns Tenant-data-free claims, exact capacity charge, and continuation.
    */
   readSemanticClaimPage(
@@ -1366,7 +1354,7 @@ export interface RestoreDrillVerifier {
     target: RestoreDrillTableTarget,
     auditPseudonymSecretVersionId: string,
     remainingItemCapacity: number,
-    nextKey?: Readonly<Record<string, AttributeValue>>,
+    nextCursor?: string,
   ): Promise<RestoreDrillSemanticClaimPage>
 
   /**
@@ -1732,7 +1720,7 @@ export function createRestoreDrillOrchestrator(
         input,
         operations,
         await requireRun(input.state, run.drillId),
-        failureCodeForCaughtError(run.phase, error),
+        failureCodeForCaughtError(error),
         now,
       )
     }
@@ -2963,14 +2951,16 @@ async function advanceFileProofVerification(
     const tokens = new Set<string>()
     for (const entry of page.entries) {
       const copy = entry.intent.completedCopy
+      if (!copy) {
+        throw new RestoreDrillOrchestratorFailure('VERIFICATION_FAILED')
+      }
       if (
-        !copy ||
         !verifyRestoreDrillFileVersionProof(copy.sourceProof, verifierInput.digestKey) ||
         !verifyRestoreDrillFileVersionProof(copy.destinationProof, verifierInput.digestKey) ||
         copy.sourceProof.contentDigest !== copy.destinationProof.contentDigest ||
         copy.sourceProof.metadataDigest !== copy.destinationProof.metadataDigest ||
         copy.sourceProof.tagsDigest !== copy.destinationProof.tagsDigest
-      ) throw new RestoreDrillOrchestratorFailure('VERIFICATION_FAILED')
+      ) throw new RestoreDrillFailure('S3_VERSION_RESTORE_FAILED')
       accumulators.sourceContent.add(copy.sourceProof.contentDigest)
       accumulators.destinationContent.add(copy.destinationProof.contentDigest)
       accumulators.sourceMetadata.add(stableJson({
@@ -3270,7 +3260,7 @@ async function advanceSourceDataVerification(
   if (
     aggregateCheckpoint.recordCount > progress.manifestItemCount ||
     (complete && aggregateCheckpoint.recordCount !== progress.manifestItemCount)
-  ) throw new RestoreDrillOrchestratorFailure('VERIFICATION_FAILED')
+  ) throw new RestoreDrillFailure('AGGREGATE_RECORD_COUNT_MISMATCH')
   await writeVerificationProgressOrThrow(input.state, run.drillId, progress, {
     ...retainVerificationProgressFields(progress),
     aggregateCheckpoint,
@@ -3526,7 +3516,7 @@ async function advanceSemanticClaims(
     target,
     progress.auditPseudonymSecretVersionId,
     MAX_VERIFICATION_SEMANTIC_UNITS - progress.semanticItemCount,
-    progress.semanticNextKey,
+    progress.semanticNextCursor,
   )
   if (
     !isNonNegativeInteger(page.retainedUnitCount) ||
@@ -3540,12 +3530,12 @@ async function advanceSemanticClaims(
   )
   const semanticItemCount = progress.semanticItemCount + page.retainedUnitCount
   const semanticPageCount = progress.semanticPageCount + 1
-  const nextTargetIndex = page.nextKey
+  const nextTargetIndex = page.nextCursor
     ? progress.targetIndex
     : progress.targetIndex + 1
   await writeVerificationProgressOrThrow(input.state, run.drillId, progress, {
     ...retainVerificationProgressFields(progress),
-    ...(page.nextKey ? { semanticNextKey: page.nextKey } : {}),
+    ...(page.nextCursor ? { semanticNextCursor: page.nextCursor } : {}),
     pageCount: 0,
     partitionCount: 0,
     restoreResources: progress.restoreResources,
@@ -4199,14 +4189,12 @@ function requireRunnerExecutionArn(value: unknown): string {
 
 /** Checks the strict runner Standard Step Functions execution ARN shape. */
 function isRunnerExecutionArn(value: string): boolean {
-  return /^arn:aws(?:-us-gov)?:states:[a-z]{2}(?:-gov)?-[a-z]+-\d:\d{12}:execution:[A-Za-z0-9_-]{1,80}:[A-Za-z0-9_-]{1,80}$/.test(value)
+  return parseCleanupExecutionArn(value) !== undefined
 }
 
 /** Checks an execution ARN against one exact deterministic execution name. */
 function cleanupExecutionArnHasName(value: string, executionName: string): boolean {
-  return new RegExp(
-    `^arn:aws(?:-us-gov)?:states:[a-z]{2}(?:-gov)?-[a-z]+-\\d:\\d{12}:execution:[A-Za-z0-9_-]{1,80}:${escapeRegularExpression(executionName)}$`,
-  ).test(value)
+  return parseCleanupExecutionArn(value)?.executionName === executionName
 }
 
 /** Parsed exact Standard cleanup execution identity. */
@@ -4216,7 +4204,7 @@ type RestoreDrillCleanupExecutionArnIdentity = {
   /** Exact execution name. */
   readonly executionName: string
   /** AWS ARN partition. */
-  readonly partition: 'aws' | 'aws-us-gov'
+  readonly partition: RestoreDrillAwsPartition
   /** AWS Region containing the state machine. */
   readonly region: string
   /** Physical state-machine name embedded in the execution ARN. */
@@ -4227,14 +4215,18 @@ type RestoreDrillCleanupExecutionArnIdentity = {
 function parseCleanupExecutionArn(
   value: string,
 ): RestoreDrillCleanupExecutionArnIdentity | undefined {
-  const match = /^arn:(aws(?:-us-gov)?):states:([a-z]{2}(?:-gov)?-[a-z]+-\d):(\d{12}):execution:([A-Za-z0-9_-]{1,80}):([A-Za-z0-9_-]{1,80})$/.exec(value)
+  const match = /^arn:(aws|aws-cn|aws-us-gov):states:([^:]+):(\d{12}):execution:([A-Za-z0-9_-]{1,80}):([A-Za-z0-9_-]{1,80})$/.exec(value)
   const partition = match?.[1]
   const region = match?.[2]
   const accountId = match?.[3]
   const stateMachineName = match?.[4]
   const executionName = match?.[5]
+  const expectedPartition = region === undefined
+    ? undefined
+    : resolveRestoreDrillAwsPartition(region)
   if (
-    (partition !== 'aws' && partition !== 'aws-us-gov') ||
+    (partition !== 'aws' && partition !== 'aws-cn' && partition !== 'aws-us-gov') ||
+    expectedPartition !== partition ||
     !region ||
     !accountId ||
     !stateMachineName ||
@@ -4456,11 +4448,8 @@ function awaitingApprovalResult(run: RestoreDrillDurableRun): RestoreDrillAwsAct
   return { drillId: run.drillId, status: 'awaiting-cleanup-approval' }
 }
 
-/** Maps the last durable phase to a stable terminal failure category. */
-function failureCodeForCaughtError(
-  phase: RestoreDrillRunPhase,
-  error: unknown,
-): RestoreDrillFailureCode {
+/** Maps an explicitly categorized caught error to a stable terminal failure category. */
+function failureCodeForCaughtError(error: unknown): RestoreDrillFailureCode {
   if (error instanceof RestoreDrillFailure) return error.code
   if (error instanceof RestoreDrillAwsFailure) {
     switch (error.code) {
@@ -4492,34 +4481,7 @@ function failureCodeForCaughtError(
         return assertUnreachable(error.code)
     }
   }
-  if (
-    error instanceof RestoreDrillOrchestratorFailure &&
-    error.code === 'VERIFICATION_FAILED' &&
-    (phase === 'copying-file-versions' || phase === 'verifying')
-  ) return failureCodeForPhase(phase)
   return 'WORKFLOW_TASK_FAILED'
-}
-
-/** Maps an explicitly detected data mismatch to its stable integrity category. */
-function failureCodeForPhase(phase: RestoreDrillRunPhase): RestoreDrillFailureCode {
-  switch (phase) {
-    case 'scheduled':
-    case 'discovering-pitr-windows':
-    case 'restoring-tables':
-      return 'WORKFLOW_TASK_FAILED'
-    case 'copying-file-versions':
-      return 'S3_VERSION_RESTORE_FAILED'
-    case 'verifying':
-      return 'CROSS_DOMAIN_INTEGRITY_FAILED'
-    case 'cleaning-up':
-      return 'WORKFLOW_TASK_FAILED'
-    case 'awaiting-cleanup-approval':
-    case 'completed':
-    case 'failed':
-      return 'RUN_STATE_INVALID'
-    default:
-      return assertUnreachable(phase)
-  }
 }
 
 /** Recognizes the local stable optimistic-concurrency failure. */
@@ -5788,6 +5750,9 @@ export class AwsRestoreDrillApprovalStore implements RestoreDrillApprovalStore {
   /** Expected owner account for the protected evidence bucket. */
   private readonly accountId: string
 
+  /** ARN partition fixed by the protected evidence bucket Region. */
+  private readonly authorizedApproverPartition: RestoreDrillAwsPartition
+
   /** Role name whose STS sessions alone may sign cleanup approval receipts. */
   private readonly authorizedApproverRoleName: string
 
@@ -5810,11 +5775,17 @@ export class AwsRestoreDrillApprovalStore implements RestoreDrillApprovalStore {
     RestoreDrillAwsConfiguration,
     'accountId' | 'evidenceBucketName' | 'evidenceKmsKeyArn' | 'region'
   >, authorizedApproverRoleArn: string) {
+    const partition = resolveRestoreDrillAwsPartition(configuration.region)
+    if (partition === undefined) {
+      throw new RestoreDrillOrchestratorFailure('CONFIGURATION_INVALID')
+    }
     const roleName = readAuthorizedApproverRoleName(
       authorizedApproverRoleArn,
       configuration.accountId,
+      partition,
     )
     this.accountId = configuration.accountId
+    this.authorizedApproverPartition = partition
     this.authorizedApproverRoleName = roleName
     this.bucketName = configuration.evidenceBucketName
     this.kmsKeyArn = configuration.evidenceKmsKeyArn
@@ -5885,6 +5856,7 @@ export class AwsRestoreDrillApprovalStore implements RestoreDrillApprovalStore {
         !isAuthorizedApproverSession(
           receipt.approver,
           this.accountId,
+          this.authorizedApproverPartition,
           this.authorizedApproverRoleName,
         )
       ) {
@@ -6067,12 +6039,9 @@ export class AwsRestoreDrillVerifier implements RestoreDrillVerifier {
   constructor(
     configuration: RestoreDrillAwsConfiguration,
     semanticReaderFactory: RestoreDrillSemanticReaderFactory = {
-      create(readerConfiguration, tableNames, scanLimit) {
-        return new RestoreDrillCrossDomainAwsReader(
-          readerConfiguration,
-          tableNames,
-          scanLimit,
-        )
+      /** Creates the module-owned concrete normalized AWS page reader. */
+      create(readerConfiguration) {
+        return createCrossDomainIntegrityNormalizedPageReader(readerConfiguration)
       },
     },
   ) {
@@ -6108,7 +6077,7 @@ export class AwsRestoreDrillVerifier implements RestoreDrillVerifier {
     target: RestoreDrillTableTarget,
     auditPseudonymSecretVersionId: string,
     remainingItemCapacity: number,
-    nextKey?: Readonly<Record<string, AttributeValue>>,
+    nextCursor?: string,
   ): Promise<RestoreDrillSemanticClaimPage> {
     validateVerifierInput(input)
     if (
@@ -6116,28 +6085,33 @@ export class AwsRestoreDrillVerifier implements RestoreDrillVerifier {
       !isNonNegativeInteger(remainingItemCapacity) ||
       remainingItemCapacity > MAX_VERIFICATION_SEMANTIC_UNITS
     ) throw new RestoreDrillOrchestratorFailure('VERIFICATION_FAILED')
-    const output = await this.secrets.send(new GetSecretValueCommand({
-      SecretId: this.configuration.auditPseudonymSecretArn,
-      VersionId: auditPseudonymSecretVersionId,
-    }))
-    const secret = parseAuditPseudonymSecret(
-      output,
-      input.digestKey,
-      auditPseudonymSecretVersionId,
-    )
-    const reader = this.semanticReaderFactory.create(
-      this.configuration,
-      createCrossDomainTableNames(input.checkpoint),
-      25,
-    )
+    let reader: CrossDomainIntegrityNormalizedPageReader | undefined
+    let result: RestoreDrillSemanticClaimPage | undefined
+    let secret: RestoreDrillAuditPseudonymSecret | undefined
     try {
-      const normalized = await readCrossDomainIntegrityAwsNormalizedPage({
+      reader = this.semanticReaderFactory.create(
+        {
+          accountId: this.configuration.accountId,
+          bucketName: this.configuration.scratchBucketName,
+          pageSize: 25,
+          region: this.configuration.region,
+          tableNames: createCrossDomainTableNames(input.checkpoint),
+        },
+      )
+      const output = await this.secrets.send(new GetSecretValueCommand({
+        SecretId: this.configuration.auditPseudonymSecretArn,
+        VersionId: auditPseudonymSecretVersionId,
+      }))
+      secret = parseAuditPseudonymSecret(
+        output,
+        input.digestKey,
+        auditPseudonymSecretVersionId,
+      )
+      const normalized = await reader.readPage({
         auditPseudonymKey: secret.key,
         checkedAt: input.restorePoint,
+        ...(nextCursor ? { cursor: nextCursor } : {}),
         digestKey: input.digestKey,
-        ...(nextKey ? { exclusiveStartKey: nextKey } : {}),
-        pageSize: 25,
-        reader,
         remainingItemCapacity,
         target: toCrossDomainTableTarget(target),
       })
@@ -6194,17 +6168,34 @@ export class AwsRestoreDrillVerifier implements RestoreDrillVerifier {
       if (claims.length > MAX_VERIFICATION_SEMANTIC_CLAIMS_PER_PAGE) {
         throw new RestoreDrillOrchestratorFailure('VERIFICATION_FAILED')
       }
-      return normalized.nextKey
+      result = normalized.nextCursor
         ? {
             claims,
-            nextKey: normalized.nextKey,
+            nextCursor: normalized.nextCursor,
             retainedUnitCount: normalized.retainedUnitCount,
           }
         : { claims, retainedUnitCount: normalized.retainedUnitCount }
-    } finally {
-      secret.key.fill(0)
-      reader.close()
+    } catch (error) {
+      secret?.key.fill(0)
+      if (reader) {
+        try {
+          reader.close()
+        } catch {
+          // Preserve the primary verification failure.
+        }
+      }
+      throw error
     }
+    secret?.key.fill(0)
+    if (!reader || !result || !secret) {
+      throw new RestoreDrillOrchestratorFailure('VERIFICATION_FAILED')
+    }
+    try {
+      reader.close()
+    } catch {
+      throw new RestoreDrillOrchestratorFailure('VERIFICATION_FAILED')
+    }
+    return result
   }
 
   /** @inheritdoc */
@@ -6276,8 +6267,6 @@ export class AwsRestoreDrillVerifier implements RestoreDrillVerifier {
     )
     if (
       manifest.dataFiles.length < 1 ||
-      manifest.itemCount !== summary.itemCount ||
-      summary.itemCount !== completion.itemCount ||
       manifest.itemCount > MAX_VERIFICATION_RECORDS_PER_TARGET ||
       manifest.dataFiles.some(
         (dataFile) => dataFile.itemCount > MAX_VERIFICATION_RECORDS_PER_SOURCE_FILE,
@@ -6285,6 +6274,10 @@ export class AwsRestoreDrillVerifier implements RestoreDrillVerifier {
     ) {
       throw new RestoreDrillOrchestratorFailure('VERIFICATION_FAILED')
     }
+    if (
+      manifest.itemCount !== summary.itemCount ||
+      summary.itemCount !== completion.itemCount
+    ) throw new RestoreDrillFailure('AGGREGATE_RECORD_COUNT_MISMATCH')
     return manifest
   }
 
@@ -6334,7 +6327,7 @@ export class AwsRestoreDrillVerifier implements RestoreDrillVerifier {
         partitionSink,
       )
       if (consumed !== exactDataFile.itemCount) {
-        throw new RestoreDrillOrchestratorFailure('VERIFICATION_FAILED')
+        throw new RestoreDrillFailure('AGGREGATE_RECORD_COUNT_MISMATCH')
       }
       return accumulator.checkpoint(false)
     } finally {
@@ -6696,10 +6689,12 @@ function validateFileVerificationEvidence(
       digest.itemCount !== evidence.recordCount ||
       !isHexDigest(digest.aggregateDigest) ||
       !isHexDigest(digest.keyFingerprint)
-    ) ||
+    )
+  ) throw new RestoreDrillOrchestratorFailure('VERIFICATION_FAILED')
+  if (
     evidence.sourceContent.aggregateDigest !== evidence.destinationContent.aggregateDigest ||
     evidence.sourceMetadata.aggregateDigest !== evidence.destinationMetadata.aggregateDigest
-  ) throw new RestoreDrillOrchestratorFailure('VERIFICATION_FAILED')
+  ) throw new RestoreDrillFailure('S3_VERSION_RESTORE_FAILED')
 }
 
 /** Validates one completed File resource before final dataset assembly. */
@@ -6914,151 +6909,6 @@ function createCrossDomainTableNames(
   }
 }
 
-/** Raw AWS reader constrained to the isolated restore resource allowlist. */
-class RestoreDrillCrossDomainAwsReader implements CrossDomainIntegrityManagedAwsReadPort {
-  /** Expected account for every raw read. */
-  private readonly accountId: string
-
-  /** Isolated File bucket. */
-  private readonly bucketName: string
-
-  /** Low-level DynamoDB client. */
-  private readonly dynamodb: DynamoDBClient
-
-  /** S3 client. */
-  private readonly s3: S3Client
-
-  /** STS client. */
-  private readonly sts: STSClient
-
-  /** Complete logical-to-physical table allowlist. */
-  private readonly tableNames: CrossDomainIntegrityTableNames
-
-  /** Exact Scan limit shared with the generic page parser. */
-  private readonly scanLimit: number
-
-  /**
-   * Creates one raw cross-domain reader over isolated resources only.
-   *
-   * @param configuration - Validated runner configuration.
-   * @param tableNames - Exact isolated table names.
-   * @param scanLimit - Exact bounded raw Scan page size.
-   */
-  constructor(
-    configuration: RestoreDrillAwsConfiguration,
-    tableNames: CrossDomainIntegrityTableNames,
-    scanLimit: number,
-  ) {
-    if (!isPositiveInteger(scanLimit) || scanLimit > 100) {
-      throw new RestoreDrillOrchestratorFailure('CONFIGURATION_INVALID')
-    }
-    this.accountId = configuration.accountId
-    this.bucketName = configuration.scratchBucketName
-    this.tableNames = tableNames
-    this.scanLimit = scanLimit
-    this.dynamodb = new DynamoDBClient({ region: configuration.region })
-    this.s3 = new S3Client({ region: configuration.region })
-    this.sts = new STSClient({ region: configuration.region })
-  }
-
-  /** @inheritdoc */
-  close(): void {
-    this.dynamodb.destroy()
-    this.s3.destroy()
-    this.sts.destroy()
-  }
-
-  /** @inheritdoc */
-  getObjectAttributes(reference: CrossDomainIntegrityObjectVersionReference) {
-    const target = this.requireFileReference(reference)
-    return this.s3.send(new GetObjectAttributesCommand({
-      Bucket: this.bucketName,
-      ExpectedBucketOwner: this.accountId,
-      Key: target.key,
-      ObjectAttributes: [ObjectAttributes.CHECKSUM, ObjectAttributes.OBJECT_SIZE],
-      VersionId: target.versionId,
-    }))
-  }
-
-  /** @inheritdoc */
-  getObjectTagging(reference: CrossDomainIntegrityObjectVersionReference) {
-    const target = this.requireFileReference(reference)
-    return this.s3.send(new GetObjectTaggingCommand({
-      Bucket: this.bucketName,
-      ExpectedBucketOwner: this.accountId,
-      Key: target.key,
-      VersionId: target.versionId,
-    }))
-  }
-
-  /** @inheritdoc */
-  headObject(reference: CrossDomainIntegrityObjectVersionReference) {
-    const target = this.requireFileReference(reference)
-    return this.s3.send(new HeadObjectCommand({
-      Bucket: this.bucketName,
-      ExpectedBucketOwner: this.accountId,
-      Key: target.key,
-      VersionId: target.versionId,
-    }))
-  }
-
-  /** @inheritdoc */
-  async readCallerAccount(): Promise<string> {
-    const output = await this.sts.send(new GetCallerIdentityCommand({}))
-    if (output.Account !== this.accountId) {
-      throw new RestoreDrillOrchestratorFailure('VERIFICATION_FAILED')
-    }
-    return output.Account
-  }
-
-  /** @inheritdoc */
-  scanPage(
-    target: CrossDomainIntegrityTableTarget,
-    exclusiveStartKey?: Record<string, AttributeValue>,
-  ) {
-    return this.dynamodb.send(new ScanCommand({
-      ConsistentRead: true,
-      ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
-      Limit: this.scanLimit,
-      TableName: this.resolveTableName(target),
-    }))
-  }
-
-  /** Validates one exact isolated File object-version reference. */
-  private requireFileReference(
-    reference: CrossDomainIntegrityObjectVersionReference,
-  ): CrossDomainIntegrityObjectVersionReference {
-    if (
-      reference.bucket !== 'file' ||
-      !isNonEmptyString(reference.key, 1_024) ||
-      !isNonEmptyString(reference.versionId, 1_024)
-    ) {
-      throw new RestoreDrillOrchestratorFailure('VERIFICATION_FAILED')
-    }
-    return reference
-  }
-
-  /** Resolves one cross-domain target through the fixed isolated allowlist. */
-  private resolveTableName(target: CrossDomainIntegrityTableTarget): string {
-    switch (target) {
-      case 'audit-events':
-        return this.tableNames['audit-events']
-      case 'file-proofing':
-        return this.tableNames['file-proofing']
-      case 'project-directory':
-        return this.tableNames['project-directory']
-      case 'work-item-configuration':
-        return this.tableNames['work-item-configuration']
-      case 'work-items':
-        return this.tableNames['work-items']
-      case 'workspace-access':
-        return this.tableNames['workspace-access']
-      default:
-        return assertUnreachable(target)
-    }
-  }
-}
-
 /** Exposes an exact SDK object body as a byte-only async stream. */
 async function* streamObjectBody(output: GetObjectCommandOutput): AsyncIterable<Uint8Array> {
   const body: unknown = output.Body
@@ -7114,24 +6964,44 @@ export function isRestoreDrillObjectKeyPathSafe(value: string): boolean {
     value.split('/').every((segment) => segment !== '.' && segment !== '..')
 }
 
-/** Parses an exact same-account IAM role ARN and returns its terminal role name. */
-function readAuthorizedApproverRoleName(roleArn: string, accountId: string): string {
+/**
+ * Parses an exact same-account, same-partition IAM role ARN.
+ *
+ * @param roleArn - Candidate trusted IAM role ARN.
+ * @param accountId - Expected twelve-digit owner account.
+ * @param partition - Partition derived from the configured Region.
+ * @returns Terminal IAM role name.
+ */
+function readAuthorizedApproverRoleName(
+  roleArn: string,
+  accountId: string,
+  partition: RestoreDrillAwsPartition,
+): string {
   const match = new RegExp(
-    `^arn:aws(?:-us-gov)?:iam::${accountId}:role/(?:[A-Za-z0-9+=,.@_-]+/)*([A-Za-z0-9+=,.@_-]{1,64})$`,
+    `^arn:${partition}:iam::${accountId}:role/(?:[A-Za-z0-9+=,.@_-]+/)*([A-Za-z0-9+=,.@_-]{1,64})$`,
   ).exec(roleArn)
   const roleName = match?.[1]
   if (!roleName) throw new RestoreDrillOrchestratorFailure('CONFIGURATION_INVALID')
   return roleName
 }
 
-/** Checks whether an approver ARN is an STS session of the configured data-owner role. */
+/**
+ * Checks whether an approver ARN is an STS session of the configured data-owner role.
+ *
+ * @param approverArn - Candidate approval signer session ARN.
+ * @param accountId - Expected twelve-digit owner account.
+ * @param partition - Partition derived from the configured Region.
+ * @param roleName - Exact trusted terminal IAM role name.
+ * @returns Whether the signer is a session of the configured role in the same partition.
+ */
 function isAuthorizedApproverSession(
   approverArn: string,
   accountId: string,
+  partition: RestoreDrillAwsPartition,
   roleName: string,
 ): boolean {
   return new RegExp(
-    `^arn:aws(?:-us-gov)?:sts::${accountId}:assumed-role/${escapeRegularExpression(roleName)}/[A-Za-z0-9+=,.@_-]{2,64}$`,
+    `^arn:${partition}:sts::${accountId}:assumed-role/${escapeRegularExpression(roleName)}/[A-Za-z0-9+=,.@_-]{2,64}$`,
   ).test(approverArn)
 }
 
@@ -8436,7 +8306,10 @@ export class AwsRestoreDrillStateStore implements RestoreDrillStateStore {
     }
     for (const value of requirements) {
       const requirement = parseSemanticRequirement(value)
-      const failureCode = await this.evaluateSemanticRequirement(drillId, requirement)
+      const failureCode = await evaluateRestoreDrillSemanticRequirement(
+        requirement,
+        (factToken) => this.hasSemanticFact(drillId, factToken),
+      )
       if (!failureCode) continue
       const failure: Extract<
         RestoreDrillSemanticClaim,
@@ -8595,30 +8468,6 @@ export class AwsRestoreDrillStateStore implements RestoreDrillStateStore {
       )) return
     }
     throw new RestoreDrillOrchestratorFailure('CONCURRENT_UPDATE')
-  }
-
-  /** Evaluates the first selected requirement branch and returns its stable failure. */
-  private async evaluateSemanticRequirement(
-    drillId: string,
-    requirement: RestoreDrillSemanticRequirement,
-  ): Promise<CrossDomainIntegrityFailureCode | undefined> {
-    for (const branch of requirement.branches) {
-      if (
-        branch.guardToken !== undefined &&
-        !(await this.hasSemanticFact(drillId, branch.guardToken))
-      ) continue
-      if (branch.satisfied) return undefined
-      for (const successToken of branch.successTokens) {
-        if (await this.hasSemanticFact(drillId, successToken)) return undefined
-      }
-      for (const fallback of branch.fallbacks) {
-        if (await this.hasSemanticFact(drillId, fallback.factToken)) {
-          return fallback.failureCode
-        }
-      }
-      return branch.defaultFailureCode
-    }
-    throw new RestoreDrillOrchestratorFailure('RUN_STATE_INVALID')
   }
 
   /** Checks one opaque fact prefix with a strongly consistent bounded query. */
@@ -9923,8 +9772,7 @@ function parseDigestKeyEnvelope(value: unknown): RestoreDrillDigestKeyEnvelope {
       ['ciphertextBase64', 'kind', 'kmsKeyArn'],
     ) ||
     record.kind !== 'restore-drill-digest-key' ||
-    typeof record.kmsKeyArn !== 'string' ||
-    !record.kmsKeyArn.startsWith('arn:aws:kms:') ||
+    !isRestoreDrillKmsKeyArn(record.kmsKeyArn) ||
     typeof record.ciphertextBase64 !== 'string' ||
     !/^[A-Za-z0-9+/]+={0,2}$/.test(record.ciphertextBase64) ||
     record.ciphertextBase64.length > 16_384
@@ -9936,6 +9784,32 @@ function parseDigestKeyEnvelope(value: unknown): RestoreDrillDigestKeyEnvelope {
     kind: 'restore-drill-digest-key',
     kmsKeyArn: record.kmsKeyArn,
   }
+}
+
+/**
+ * Checks one account-bound KMS key ARN in a supported Region partition.
+ *
+ * @param value - Candidate persisted KMS key ARN.
+ * @returns Whether the ARN's partition is canonical for its Region.
+ */
+function isRestoreDrillKmsKeyArn(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  const parts = value.split(':')
+  const region = parts[3]
+  const resource = parts[5]
+  const partition = region === undefined
+    ? undefined
+    : resolveRestoreDrillAwsPartition(region)
+  return parts.length === 6 &&
+    parts[0] === 'arn' &&
+    partition !== undefined &&
+    parts[1] === partition &&
+    parts[2] === 'kms' &&
+    typeof parts[4] === 'string' &&
+    /^\d{12}$/.test(parts[4]) &&
+    typeof resource === 'string' &&
+    resource.startsWith('key/') &&
+    resource.length > 'key/'.length
 }
 
 /** Reads an optional lower-case SHA-256 digest. */
@@ -11785,7 +11659,7 @@ function parseVerificationProgress(value: unknown): RestoreDrillVerificationProg
     'restoreFileResource',
     'revision',
     'semanticItemCount',
-    'semanticNextKey',
+    'semanticNextCursor',
     'semanticPageCount',
     'semanticRequirementCursor',
     'sourceResources',
@@ -11858,9 +11732,11 @@ function parseVerificationProgress(value: unknown): RestoreDrillVerificationProg
   const partitionCursor = record.partitionCursor === undefined
     ? undefined
     : parseVerificationPartitionCursor(record.partitionCursor)
-  const semanticNextKey = record.semanticNextKey === undefined
+  const semanticNextCursor = record.semanticNextCursor === undefined
     ? undefined
-    : cloneStrictAttributeMap(requireAttributeMap(record.semanticNextKey))
+    : isNonEmptyString(record.semanticNextCursor, 16_384)
+      ? record.semanticNextCursor
+      : invalidRunState()
   const semanticRequirementCursor = record.semanticRequirementCursor === undefined
     ? undefined
     : parseSemanticRequirementCursor(record.semanticRequirementCursor)
@@ -11894,7 +11770,7 @@ function parseVerificationProgress(value: unknown): RestoreDrillVerificationProg
     (aggregateCheckpoint !== undefined &&
       aggregateCheckpoint.target !== RESTORE_DRILL_TABLE_TARGETS[record.targetIndex]) ||
     (nextKey !== undefined && record.stage !== 'restore-data') ||
-    (semanticNextKey !== undefined && record.stage !== 'semantic-claims') ||
+    (semanticNextCursor !== undefined && record.stage !== 'semantic-claims') ||
     (semanticRequirementCursor !== undefined &&
       record.stage !== 'semantic-audit' && record.stage !== 'semantic-requirements') ||
     ((record.stage === 'semantic-claims' ||
@@ -11934,7 +11810,7 @@ function parseVerificationProgress(value: unknown): RestoreDrillVerificationProg
     ...(restoreFileResource ? { restoreFileResource } : {}),
     revision: record.revision,
     semanticItemCount: record.semanticItemCount,
-    ...(semanticNextKey ? { semanticNextKey } : {}),
+    ...(semanticNextCursor ? { semanticNextCursor } : {}),
     semanticPageCount: record.semanticPageCount,
     ...(semanticRequirementCursor ? { semanticRequirementCursor } : {}),
     sourceResources,

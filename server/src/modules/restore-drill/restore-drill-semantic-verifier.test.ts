@@ -1,6 +1,7 @@
 import { GetSecretValueCommand } from '@aws-sdk/client-secrets-manager'
 import type { AttributeValue } from '@aws-sdk/client-dynamodb'
 import { describe, expect, test } from 'bun:test'
+import type { CrossDomainIntegrityNormalizedItem } from '../data-integrity'
 import {
   RESTORE_DRILL_TABLE_TARGETS,
 } from './restore-drill'
@@ -183,26 +184,25 @@ describe('production semantic verifier adapter', () => {
   test('pins the exact secret VersionId and matches the reader Scan limit to page size', async () => {
     let createdScanLimit: number | undefined
     let scanned = false
+    let receivedCursor: string | undefined
     const factory: RestoreDrillSemanticReaderFactory = {
-      create(_configuration, _tableNames, scanLimit) {
-        createdScanLimit = scanLimit
+      /** Creates one deterministic normalized reader fixture. */
+      create(readerConfiguration) {
+        createdScanLimit = readerConfiguration.pageSize
         return {
+          /** Releases no resources for this fixture. */
           close() {},
-          async getObjectAttributes() {
-            throw new Error('unexpected File read')
-          },
-          async getObjectTagging() {
-            throw new Error('unexpected File read')
-          },
-          async headObject() {
-            throw new Error('unexpected File read')
-          },
-          async readCallerAccount() {
-            return ACCOUNT_ID
-          },
-          async scanPage() {
+          /** Returns one empty normalized page and a deterministic cursor. */
+          async readPage(request) {
             scanned = true
-            return { $metadata: {}, Count: 0, Items: [], ScannedCount: 0 }
+            receivedCursor = request.cursor
+            return {
+              auditCandidates: [],
+              externalFileFailureCodes: [],
+              items: [],
+              nextCursor: 'opaque-next-cursor',
+              retainedUnitCount: 0,
+            }
           },
         }
       },
@@ -235,9 +235,15 @@ describe('production semantic verifier adapter', () => {
         'table:work-items',
         SECRET_VERSION_ID,
         1_000_000,
-      )).resolves.toEqual({ claims: [], retainedUnitCount: 0 })
+        'opaque-current-cursor',
+      )).resolves.toEqual({
+        claims: [],
+        nextCursor: 'opaque-next-cursor',
+        retainedUnitCount: 0,
+      })
       expect(createdScanLimit).toBe(25)
       expect(scanned).toBe(true)
+      expect(receivedCursor).toBe('opaque-current-cursor')
       expect(secretRequests).toEqual([
         { versionStage: 'AWSCURRENT' },
         { versionId: SECRET_VERSION_ID },
@@ -247,29 +253,112 @@ describe('production semantic verifier adapter', () => {
     }
   })
 
-  test('accepts and deterministically replays a near-limit raw File page above the old claim cap', async () => {
+  test('does not fetch the secret when reader creation fails', async () => {
+    const factoryFailure = new Error('reader factory failed')
+    const factory: RestoreDrillSemanticReaderFactory = {
+      /** Rejects reader construction before secret material is fetched. */
+      create() {
+        throw factoryFailure
+      },
+    }
+    const verifier = new AwsRestoreDrillVerifier(configuration(), factory)
+    let secretReadCount = 0
+    Object.defineProperty(verifier, 'secrets', {
+      value: {
+        /** Releases no resources for this fixture. */
+        destroy() {},
+        /** Captures any unexpected secret request. */
+        async send() {
+          secretReadCount += 1
+          return {
+            SecretString: AUDIT_KEY_HEX,
+            VersionId: SECRET_VERSION_ID,
+          }
+        },
+      },
+    })
+    try {
+      await expect(verifier.readSemanticClaimPage(
+        verifierInput(),
+        'table:work-items',
+        SECRET_VERSION_ID,
+        1_000_000,
+      )).rejects.toBe(factoryFailure)
+      expect(secretReadCount).toBe(0)
+    } finally {
+      verifier.close()
+    }
+  })
+
+  test('zeroizes the pseudonym key and preserves a primary reader failure', async () => {
+    const readerFailure = new Error('normalized reader failed')
+    let capturedKey: Uint8Array | undefined
+    let closeCount = 0
+    const factory: RestoreDrillSemanticReaderFactory = {
+      /** Creates a reader that fails after observing the invocation-local key. */
+      create() {
+        return {
+          /** Simulates a secondary cleanup failure. */
+          close() {
+            closeCount += 1
+            throw new Error('reader close failed')
+          },
+          /** Captures the key reference before raising the primary failure. */
+          async readPage(request) {
+            capturedKey = request.auditPseudonymKey
+            throw readerFailure
+          },
+        }
+      },
+    }
+    const verifier = new AwsRestoreDrillVerifier(configuration(), factory)
+    Object.defineProperty(verifier, 'secrets', {
+      value: {
+        /** Releases no resources for this fixture. */
+        destroy() {},
+        /** Returns the exact pinned pseudonym key fixture. */
+        async send() {
+          return {
+            SecretString: AUDIT_KEY_HEX,
+            VersionId: SECRET_VERSION_ID,
+          }
+        },
+      },
+    })
+    try {
+      await expect(verifier.readSemanticClaimPage(
+        verifierInput(),
+        'table:work-items',
+        SECRET_VERSION_ID,
+        1_000_000,
+      )).rejects.toBe(readerFailure)
+      expect(capturedKey?.every((byte) => byte === 0)).toBe(true)
+      expect(closeCount).toBe(1)
+    } finally {
+      verifier.close()
+    }
+  })
+
+  test('accepts and deterministically replays a near-limit normalized File page above the old claim cap', async () => {
     const rawItem = createLargePendingFileItem(2_000)
     const serializedBytes = new TextEncoder().encode(JSON.stringify(rawItem)).byteLength
     expect(serializedBytes).toBeGreaterThan(380_000)
     expect(serializedBytes).toBeLessThan(400 * 1_024)
+    const items = createPendingNormalizedItems(2_000)
     const factory: RestoreDrillSemanticReaderFactory = {
+      /** Creates one deterministic large normalized page fixture. */
       create() {
         return {
+          /** Releases no resources for this fixture. */
           close() {},
-          async getObjectAttributes() {
-            throw new Error('unexpected pending File read')
-          },
-          async getObjectTagging() {
-            throw new Error('unexpected pending File read')
-          },
-          async headObject() {
-            throw new Error('unexpected pending File read')
-          },
-          async readCallerAccount() {
-            return ACCOUNT_ID
-          },
-          async scanPage() {
-            return { $metadata: {}, Count: 1, Items: [rawItem], ScannedCount: 1 }
+          /** Returns the complete large normalized File page. */
+          async readPage() {
+            return {
+              auditCandidates: [],
+              externalFileFailureCodes: [],
+              items,
+              retainedUnitCount: 6_000,
+            }
           },
         }
       },
@@ -311,3 +400,48 @@ describe('production semantic verifier adapter', () => {
     }
   })
 })
+
+/** Creates the normalized records produced by one large pending File row. */
+function createPendingNormalizedItems(
+  versionCount: number,
+): CrossDomainIntegrityNormalizedItem[] {
+  const items: CrossDomainIntegrityNormalizedItem[] = []
+  for (let index = 0; index < versionCount; index += 1) {
+    const versionId = index.toString(36)
+    const objectKey = `workspaces/w/files/f/${versionId}/x`
+    const objectVersionId = `unverified:${versionId}`
+    const originDigest = index.toString(16).padStart(64, '0')
+    items.push({
+      item: {
+        contentType: 'image/png',
+        fileId: 'f',
+        kind: 'file-metadata',
+        objectKey,
+        objectVersionId,
+        scanStatus: 'pending',
+        sizeBytes: 1,
+        targetId: 'i',
+        targetType: 'work-item',
+        teamId: 't',
+        versionId,
+        workspaceId: 'w',
+      },
+      originDigest,
+    })
+    items.push({
+      item: {
+        contentType: 'image/png',
+        fileId: 'f',
+        kind: 'file-object',
+        objectKey,
+        objectVersionId,
+        scanStatus: 'pending',
+        sizeBytes: 1,
+        versionId,
+        workspaceId: 'w',
+      },
+      originDigest,
+    })
+  }
+  return items
+}
