@@ -6,10 +6,7 @@ import type {
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
-import {
-  canManageWorkspaceStructure,
-  canMutateWorkspaceContent,
-} from '../../auth/api'
+import { canMutateWorkspaceContent } from '../../auth/api'
 import { useCurrentUser } from '../../auth/queries/useCurrentUser'
 import { resolveEnterpriseSessionErrorsAction } from '../../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession } from '../../auth/session'
@@ -23,7 +20,6 @@ import {
   getInitialLocale,
   type Locale,
 } from '../../shared/i18n/i18n'
-import { useUnreadNotificationCount } from '../../notifications/mutations/useNotifications'
 import {
   applyBulkOperation,
   previewBulkOperation,
@@ -31,12 +27,6 @@ import {
   undoBulkOperation,
 } from '../../bulk-operations/api'
 import {
-  archiveProjectDirectoryProject,
-  archiveProjectDirectoryTeam,
-  createProjectDirectoryProject,
-  createProjectDirectoryTeam,
-  type CreateProjectDirectoryProjectInput,
-  type CreateProjectDirectoryTeamInput,
   getProjectUsers,
   isActiveProjectAssignmentCandidate,
   type ProjectMember,
@@ -65,8 +55,6 @@ import {
 import { useIssueCollaboration } from '../../issues/mutations/useIssueCollaboration'
 import {
   createProjectIssuesPath,
-  createTeamViewPath,
-  workspaceNavPaths,
 } from '../../shared/routing/paths'
 import {
   type CreateProjectTaskInput,
@@ -178,10 +166,6 @@ export function TaskPage() {
     error: currentUserError,
     isLoading: isCurrentUserLoading,
   } = useCurrentUser(accessToken)
-  const inboxCount = useUnreadNotificationCount(
-    accessToken,
-    Boolean(user && !currentUserError),
-  )
   const { data: workspaceAccess, error: workspaceAccessError } = useWorkspaceAccess(
     accessToken,
     Boolean(user && !currentUserError),
@@ -189,7 +173,6 @@ export function TaskPage() {
   const {
     data: teams = [],
     error: projectDirectoryError,
-    mutate: mutateProjectDirectory,
   } = useProjectDirectory({
     accessToken,
     enabled: Boolean(user && !currentUserError),
@@ -223,7 +206,6 @@ export function TaskPage() {
     [projectMembers],
   )
   const currentUserProjectKey = resolveCurrentUserProjectKey(user)
-  const canManageStructure = canManageWorkspaceStructure(user)
   const canMutateContent = canMutateWorkspaceContent(user)
   const canManageProjectMembers =
     canMutateContent && (
@@ -534,82 +516,6 @@ export function TaskPage() {
     navigate(createProjectIssuesPath(projectId, creationTeam.id, issue.id))
   }
 
-  const handleCreateTeam = async (input: CreateProjectDirectoryTeamInput) => {
-    if (!accessToken) {
-      return
-    }
-
-    try {
-      await mutationRequestRunner.run('team:create', JSON.stringify(input), (context) =>
-        createProjectDirectoryTeam(accessToken, input, context),
-      )
-      await mutateProjectDirectory()
-    } catch (error) {
-      redirectEnterpriseSessionError(error)
-      console.error('Failed to create team:', error)
-      throw error
-    }
-  }
-
-  const handleCreateProject = async (
-    teamId: string,
-    input: CreateProjectDirectoryProjectInput,
-  ) => {
-    if (!accessToken) {
-      return
-    }
-
-    try {
-      await mutationRequestRunner.run(
-        'project:create',
-        JSON.stringify([teamId, input]),
-        (context) => createProjectDirectoryProject(accessToken, teamId, input, context),
-      )
-      await mutateProjectDirectory()
-    } catch (error) {
-      redirectEnterpriseSessionError(error)
-      console.error('Failed to create project:', error)
-      throw error
-    }
-  }
-
-  const handleArchiveTeam = async (teamId: string) => {
-    if (!accessToken) {
-      return
-    }
-
-    await guardEnterpriseSession(mutationRequestRunner.run('team:archive', teamId, (context) =>
-      archiveProjectDirectoryTeam(accessToken, teamId, context),
-    ))
-    await mutateProjectDirectory()
-
-    if (activeTeam?.id === teamId) {
-      navigate(workspaceNavPaths.dashboard)
-    }
-  }
-
-  const handleArchiveProject = async (teamId: string, archivedProjectId: string) => {
-    if (!accessToken) {
-      return
-    }
-
-    await guardEnterpriseSession(mutationRequestRunner.run(
-      'project:archive',
-      JSON.stringify([teamId, archivedProjectId]),
-      (context) => archiveProjectDirectoryProject(
-        accessToken,
-        teamId,
-        archivedProjectId,
-        context,
-      ),
-    ))
-    await mutateProjectDirectory()
-
-    if (projectId === archivedProjectId && activeTeam?.id === teamId) {
-      navigate(workspaceNavPaths.dashboard)
-    }
-  }
-
   const handleUpdateProjectMember = async (
     currentProjectId: string,
     memberKey: string,
@@ -876,17 +782,6 @@ export function TaskPage() {
       isRelationCandidatesLoading={Boolean(relationCandidatesKey && isRelationCandidatesLoading)}
       locale={locale}
       activeProjectTeamId={interactionTeamId}
-      onSelectProject={(nextProjectId, teamId) =>
-        navigate(createProjectIssuesPath(nextProjectId, teamId))
-      }
-      onSelectNav={(navId) => navigate(workspaceNavPaths[navId])}
-      onSelectTeamView={(teamId, viewId) =>
-        navigate(createTeamViewPath(teamId, viewId))
-      }
-      onCreateProject={canManageStructure ? handleCreateProject : undefined}
-      onCreateTeam={canManageStructure ? handleCreateTeam : undefined}
-      onArchiveProject={canManageStructure ? handleArchiveProject : undefined}
-      onArchiveTeam={canManageStructure ? handleArchiveTeam : undefined}
       onCreateTask={canMutateContent && creationTeam &&
         Boolean(workItemConfigurationLoadResult.configurationsByTeam[creationTeam.id])
         ? handleCreateTask
@@ -902,7 +797,6 @@ export function TaskPage() {
       defaultCreateTaskOpen={isCreateTaskRequested}
       focusedCommentId={focusedCommentId}
       focusedRootCommentId={focusedRootCommentId}
-      inboxCount={inboxCount}
       initialSelectedTaskId={resolvedSelectedIssue?.id}
       isAssigneeOptionsLoading={Boolean(projectMembersKey && isProjectMembersLoading)}
       isProjectUsersLoading={Boolean(projectUsersKey && isProjectUsersLoading)}

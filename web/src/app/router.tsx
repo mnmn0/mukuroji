@@ -96,61 +96,61 @@ export const appRoutes: RouteObject[] = [
                 path: '/teams/:teamId/members',
                 element: <TeamMembersPage />,
               },
+              {
+                path: '/requests',
+                element: <RequestIntakePage />,
+              },
+              {
+                path: '/search',
+                element: <SearchPage />,
+              },
+              {
+                path: '/planning',
+                element: <Navigate replace to="/planning/timeline" />,
+              },
+              {
+                path: '/planning/timeline',
+                element: <PlanningPage />,
+              },
+              {
+                path: '/planning/roadmap',
+                element: <PlanningPage />,
+              },
+              {
+                path: '/planning/portfolio',
+                element: <PlanningPage />,
+              },
+              {
+                path: '/documents',
+                element: <DocumentPage />,
+              },
+              {
+                path: '/documents/:documentId',
+                element: <DocumentPage />,
+              },
+              {
+                path: '/goals/:goalId/documents',
+                element: <GoalDocumentsPage />,
+              },
+              {
+                path: '/reports',
+                element: <ReportsPage />,
+              },
+              {
+                path: '/teams/:teamId/issues',
+                element: <TeamIssuePage />,
+              },
+              {
+                path: '/projects/:projectId/issues',
+                element: <TaskPage />,
+              },
+              {
+                path: '/projects/:projectId/tasks',
+                element: <ProjectTasksRedirect />,
+              },
             ],
           },
         ],
-      },
-      {
-        path: '/requests',
-        element: <RequestIntakePage />,
-      },
-      {
-        path: '/search',
-        element: <SearchPage />,
-      },
-      {
-        path: '/planning',
-        element: <Navigate replace to="/planning/timeline" />,
-      },
-      {
-        path: '/planning/timeline',
-        element: <PlanningPage />,
-      },
-      {
-        path: '/planning/roadmap',
-        element: <PlanningPage />,
-      },
-      {
-        path: '/planning/portfolio',
-        element: <PlanningPage />,
-      },
-      {
-        path: '/documents',
-        element: <DocumentPage />,
-      },
-      {
-        path: '/documents/:documentId',
-        element: <DocumentPage />,
-      },
-      {
-        path: '/goals/:goalId/documents',
-        element: <GoalDocumentsPage />,
-      },
-      {
-        path: '/reports',
-        element: <ReportsPage />,
-      },
-      {
-        path: '/teams/:teamId/issues',
-        element: <TeamIssuePage />,
-      },
-      {
-        path: '/projects/:projectId/issues',
-        element: <TaskPage />,
-      },
-      {
-        path: '/projects/:projectId/tasks',
-        element: <ProjectTasksRedirect />,
       },
     ],
   },

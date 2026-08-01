@@ -16,25 +16,17 @@ import type { FileArtifactsController } from '../../files/mutations/useFileArtif
 import type { IssueCollaborationController } from '../../issues/mutations/useIssueCollaboration'
 import type { TeamIssue, TeamIssueDetail, UpdateTeamIssueInput } from '../../issues/api'
 import type {
-  CreateProjectDirectoryProjectInput,
-  CreateProjectDirectoryTeamInput,
   ProjectDirectoryTeam,
   ProjectMember,
   ProjectUser,
   UpdateProjectMemberInput,
 } from '../../projects/api'
 import {
-  createSidebarLabels,
   createTranslator,
   type Locale,
 } from '../../shared/i18n/i18n'
-import {
-  WorkspaceSidebar,
-  type SidebarNavId,
-  type SidebarTeamViewId,
-} from '../../shared/ui/sidebar'
 import type { WorkspaceMember } from '../../workspace/api'
-import { useWorkspaceCommandMenu } from '../../commands/ui/WorkspaceCommandMenuContext'
+import { useWorkspaceSidebarController } from '../../workspace/ui/WorkspaceRoute'
 import type { WorkItemDefinitionFilter } from '../../work-items/model/workItemFilters'
 import { resolveWorkItemPersonOptions } from '../../work-items/model/workItemDisplay'
 import type { WorkItemRelationEditorInput } from '../../work-items/ui/WorkItemRelationsEditor'
@@ -103,8 +95,6 @@ export type TaskScreenProps = {
   isLoading?: boolean
   /** Project tasks loaded from the API. */
   tasks?: ProjectTask[]
-  /** Unread notification count shown by the sidebar. */
-  inboxCount?: number
   /** Project members available as task assignees. */
   assigneeOptions?: ProjectMember[]
   /** Whether assignee candidates are being loaded. */
@@ -185,25 +175,8 @@ export type TaskScreenProps = {
   onAddRelation?: (issueId: string, input: WorkItemRelationEditorInput) => Promise<void>
   /** Deletes a relation from the selected Work Item. */
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
-  /** Selects a Project from the workspace sidebar. */
-  onSelectProject?: (projectId: string, teamId: string) => void
-  /** Selects a fixed navigation destination from the workspace sidebar. */
-  onSelectNav?: (navId: SidebarNavId) => void
-  /** Selects a fixed Team view from the workspace sidebar. */
-  onSelectTeamView?: (teamId: string, viewId: SidebarTeamViewId) => void
   /** Creates a Project task from the inline form. */
   onCreateTask?: (input: CreateProjectTaskInput) => Promise<void>
-  /** Creates a Team from the workspace sidebar. */
-  onCreateTeam?: (input: CreateProjectDirectoryTeamInput) => Promise<void>
-  /** Creates a Project from the workspace sidebar. */
-  onCreateProject?: (
-    teamId: string,
-    input: CreateProjectDirectoryProjectInput,
-  ) => Promise<void>
-  /** Archives a Team from the workspace sidebar. */
-  onArchiveTeam?: (teamId: string) => Promise<void>
-  /** Archives a Project from the workspace sidebar. */
-  onArchiveProject?: (teamId: string, projectId: string) => Promise<void>
   /** Loads the next page of Project user candidates. */
   onLoadMoreProjectUsers?: () => Promise<void>
   /** Changes the Project user search query. */
@@ -256,7 +229,6 @@ export function TaskScreen({
   detailErrorMessage,
   focusedCommentId,
   focusedRootCommentId,
-  inboxCount = 0,
   initialSelectedTaskId,
   initialTab = 'table',
   isAssigneeOptionsLoading = false,
@@ -286,13 +258,6 @@ export function TaskScreen({
   onProjectUserQueryChange,
   onRemoveProjectMember,
   onSelectedIssueChange,
-  onSelectProject,
-  onSelectNav,
-  onSelectTeamView,
-  onCreateProject,
-  onCreateTeam,
-  onArchiveProject,
-  onArchiveTeam,
   onCreateTask,
   onRetryConfigurations,
   onUpdateIssue,
@@ -304,7 +269,7 @@ export function TaskScreen({
   workspaceMembers = emptyWorkspaceMembers,
 }: TaskScreenProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
-  const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
+  const { openMobileSidebar } = useWorkspaceSidebarController()
   const [activeTab, setActiveTab] = useState<TaskTab>(initialTab)
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
@@ -321,12 +286,9 @@ export function TaskScreen({
     projectId,
   })
   const [localSelectedDetailTaskKey, setLocalSelectedDetailTaskKey] = useState<string>()
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
   const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(defaultCreateTaskOpen)
   const [createTaskError, setCreateTaskError] = useState<string>()
   const [isCreatingTask, setIsCreatingTask] = useState(false)
-  const commandMenu = useWorkspaceCommandMenu()
   const taskContentRef = useRef<HTMLDivElement>(null)
   const resolvedProjectName = projectName ?? projectId
   const resolvedActiveTeam = activeProjectTeamId
@@ -336,7 +298,6 @@ export function TaskScreen({
       )
     : undefined
   const resolvedActiveTeamId = activeProjectTeamId
-  const sidebarActiveProjectTeamId = resolvedActiveTeamId ?? null
   const resolvedTeamName = teamName ?? resolvedActiveTeam?.name ?? ''
   const activeTeamProjects = resolvedActiveTeam?.projects ?? []
   const configuration = resolvedConfiguration?.configuration
@@ -505,38 +466,12 @@ export function TaskScreen({
   }
 
   return (
-    <main className="workbench-shell flex h-svh min-h-0 overflow-hidden">
-      <WorkspaceSidebar
-        activeProjectId={projectId}
-        activeProjectTeamId={sidebarActiveProjectTeamId}
-        collapsed={sidebarCollapsed}
-        inboxCount={inboxCount}
-        isMobileOpen={isMobileSidebarOpen}
-        labels={sidebarLabels}
-        mobileCloseLabel={t('sidebar.mobileClose')}
-        mobileDialogLabel={t('sidebar.mobileDialog')}
-        onArchiveProject={onArchiveProject}
-        onArchiveTeam={onArchiveTeam}
-        onCreateProject={onCreateProject}
-        onCreateTeam={onCreateTeam}
-        onMobileClose={() => setIsMobileSidebarOpen(false)}
-        onOpenSearch={commandMenu.open}
-        onSelectNav={onSelectNav}
-        onCollapsedChange={setSidebarCollapsed}
-        onSelectProject={onSelectProject}
-        onSelectTeamView={onSelectTeamView}
-        teams={teams}
-      />
-
-      <section
-        aria-busy={isLoading}
-        className="workbench-main flex min-w-0 flex-1 flex-col overflow-hidden"
-      >
+    <section aria-busy={isLoading} className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <TaskHeader
           activeTab={activeTab}
           isCreateTaskOpen={isCreateTaskOpen}
           onCreateTaskOpenChange={onCreateTask ? setIsCreateTaskOpen : undefined}
-          onMobileSidebarOpen={() => setIsMobileSidebarOpen(true)}
+          onMobileSidebarOpen={openMobileSidebar}
           onTabChange={setActiveTab}
           projectName={resolvedProjectName}
           t={t}
@@ -722,7 +657,6 @@ export function TaskScreen({
             </div>
           </div>
         )}
-      </section>
-    </main>
+    </section>
   )
 }

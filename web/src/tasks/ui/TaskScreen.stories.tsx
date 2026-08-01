@@ -165,8 +165,6 @@ const meta = {
     projectName: 'Refero',
     projectUserQuery: '',
     projectUsers,
-    onCreateProject: async () => undefined,
-    onCreateTeam: async () => undefined,
     onCreateTask: async () => undefined,
     onUpdateIssue: async () => undefined,
     resolvedConfiguration: { configuration: teamWorkItemConfigurationFixture },

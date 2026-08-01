@@ -108,8 +108,6 @@ const meta = {
     resolvedConfiguration: { configuration: teamWorkItemConfigurationFixture },
     onAddRelation: async () => undefined,
     onCreateIssue: async () => undefined,
-    onCreateProject: async () => undefined,
-    onCreateTeam: async () => undefined,
     onDeleteRelation: async () => undefined,
     onUpdateIssue: async () => undefined,
     selectedIssueId: 'onboarding-friction',

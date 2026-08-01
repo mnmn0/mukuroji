@@ -30,27 +30,17 @@ import { useCurrentUser } from '../auth/queries/useCurrentUser'
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import {
   MobileSidebarButton,
-  WorkspaceSidebar,
-  type SidebarNavId,
-  type SidebarTeamViewId,
 } from '../shared/ui/sidebar'
-import { useWorkspaceCommandMenu } from '../commands/ui/WorkspaceCommandMenuContext'
+import { useWorkspaceSidebarController } from '../workspace/ui/WorkspaceRoute'
 import {
-  createSidebarLabels,
   createTranslator,
   getInitialLocale,
   type Locale,
   type MessageKey,
 } from '../shared/i18n/i18n'
-import { useUnreadNotificationCount } from '../notifications/mutations/useNotifications'
 import type { ProjectDirectoryTeam } from '../projects/api'
 import { useProjectDirectory } from '../projects/queries/useProjectDirectory'
-import {
-  createDocumentPath,
-  createProjectIssuesPath,
-  createTeamViewPath,
-  workspaceNavPaths,
-} from '../shared/routing/paths'
+import { createDocumentPath } from '../shared/routing/paths'
 import {
   applyDocumentOperations,
   applyDocumentOperationsWithConflictAwareness,
@@ -362,18 +352,6 @@ export type DocumentScreenActions = {
    */
   setActiveAnchor?: (anchorId?: string) => void
   /**
-   * Sidebar 固定 nav 選択 action です。
-   */
-  selectNav?: (navId: SidebarNavId) => void
-  /**
-   * Sidebar Team view 選択 action です。
-   */
-  selectTeamView?: (teamId: string, viewId: SidebarTeamViewId) => void
-  /**
-   * Sidebar Project 選択 action です。
-   */
-  selectProject?: (projectId: string, teamId: string) => void
-  /**
    * Backlink/Whiteboard link navigation action です。
    */
   navigate?: (path: string) => void
@@ -399,10 +377,6 @@ export type DocumentScreenProps = {
    * User avatar の頭文字です。
    */
   userInitial: string
-  /**
-   * Sidebar unread notification count です。
-   */
-  inboxCount?: number
   /**
    * API-backed screen data です。
    */
@@ -695,10 +669,6 @@ export function DocumentPage() {
       { revalidate: false },
     )
   }
-  const inboxCount = useUnreadNotificationCount(
-    accessToken,
-    Boolean(user && !currentUserError),
-  )
   const userLabel =
     user?.attributes.email ??
     user?.attributes.name ??
@@ -1376,11 +1346,6 @@ export function DocumentPage() {
         resolveComment: handleResolveComment,
         selectDocument: (selectedId) =>
           navigate(createDocumentPath(selectedId)),
-        selectNav: (navId) => navigate(workspaceNavPaths[navId]),
-        selectProject: (selectedProjectId, teamId) =>
-          navigate(createProjectIssuesPath(selectedProjectId, teamId)),
-        selectTeamView: (teamId, viewId) =>
-          navigate(createTeamViewPath(teamId, viewId)),
         setActiveAnchor: setActiveAnchorId,
         setFavorite: handleSetFavorite,
         updateDocument: handleUpdateDocument,
@@ -1413,7 +1378,6 @@ export function DocumentPage() {
         versions,
       }}
       errorMessage={errorMessage}
-      inboxCount={inboxCount}
       initialContextTab={
         initialContextTab
       }
@@ -1446,7 +1410,6 @@ export function DocumentScreen({
   actions,
   data,
   errorMessage,
-  inboxCount = 0,
   initialContextTab,
   initialShareDialogOpen = false,
   isContextLoading = false,
@@ -1458,9 +1421,7 @@ export function DocumentScreen({
   userLabel,
 }: DocumentScreenProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
-  const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
-  const commandMenu = useWorkspaceCommandMenu()
-  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
+  const { openMobileSidebar } = useWorkspaceSidebarController()
   const [isTreeDrawerOpen, setIsTreeDrawerOpen] = useState(false)
   const treeDrawerRef = useRef<HTMLDivElement>(null)
   const treeDrawerPreviousFocusRef =
@@ -1607,44 +1568,9 @@ export function DocumentScreen({
   const selectDocument = (selectedId: string) =>
     runGuardedAction(() => actions.selectDocument(selectedId))
 
-  const runSidebarSelection = (action: () => void | Promise<void>) => {
-    void runGuardedAction(action).then((completed) => {
-      if (completed) setIsMobileSidebarOpen(false)
-    })
-  }
-
-  const selectNavFromSidebar = (navId: SidebarNavId) => {
-    runSidebarSelection(() => actions.selectNav?.(navId))
-  }
-  const selectProjectFromSidebar = (projectId: string, teamId: string) => {
-    runSidebarSelection(() => actions.selectProject?.(projectId, teamId))
-  }
-  const selectTeamViewFromSidebar = (teamId: string, viewId: SidebarTeamViewId) => {
-    runSidebarSelection(() => actions.selectTeamView?.(teamId, viewId))
-  }
-
   return (
-    <main className="workbench-shell flex h-svh min-h-0 overflow-hidden">
-      <WorkspaceSidebar
-        activeNavId="documents"
-        closeMobileOnSelect={false}
-        inboxCount={inboxCount}
-        isMobileOpen={isMobileSidebarOpen}
-        labels={sidebarLabels}
-        mobileCloseLabel={t('sidebar.mobileClose')}
-        mobileDialogLabel={t('sidebar.mobileDialog')}
-        onMobileClose={() => setIsMobileSidebarOpen(false)}
-        onOpenSearch={() => {
-          setIsMobileSidebarOpen(false)
-          commandMenu.open?.()
-        }}
-        onSelectNav={selectNavFromSidebar}
-        onSelectProject={selectProjectFromSidebar}
-        onSelectTeamView={selectTeamViewFromSidebar}
-        teams={data.teams}
-      />
-
-      <section className="workbench-main flex min-w-0 flex-1 flex-col overflow-hidden">
+    <>
+      <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <DocumentHeader
           contextTab={contextTab}
           isExportMenuOpen={isExportMenuOpen}
@@ -1691,7 +1617,7 @@ export function DocumentScreen({
                 }
               : undefined
           }
-          onMobileSidebarOpen={() => setIsMobileSidebarOpen(true)}
+          onMobileSidebarOpen={openMobileSidebar}
           onRestore={
             selectedDocument?.capabilities.canRestore &&
             actions.restoreDocument
@@ -2068,7 +1994,7 @@ export function DocumentScreen({
           }
         />
       ) : null}
-    </main>
+    </>
   )
 }
 

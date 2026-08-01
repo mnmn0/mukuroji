@@ -11,15 +11,10 @@ import {
 import { useCurrentUser } from '../auth/queries/useCurrentUser'
 import { resolveEnterpriseSessionErrorsAction } from '../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession } from '../auth/session'
-import { useWorkspaceCommandMenu } from '../commands/ui/WorkspaceCommandMenuContext'
 import {
   MobileSidebarButton,
-  WorkspaceSidebar,
-  type SidebarNavId,
-  type SidebarTeamViewId,
 } from '../shared/ui/sidebar'
 import {
-  createSidebarLabels,
   createTranslator,
   getInitialLocale,
   type Locale,
@@ -29,11 +24,9 @@ import {
 } from '../projects/api'
 import { useProjectDirectory } from '../projects/queries/useProjectDirectory'
 import {
-  createProjectIssuesPath,
-  createTeamViewPath,
-  workspaceNavPaths,
   type RequestsView,
 } from '../shared/routing/paths'
+import { useWorkspaceSidebarController } from '../workspace/ui/WorkspaceRoute'
 import {
   useWorkItemConfiguration,
 } from '../work-items/queries/useWorkItemConfigurations'
@@ -80,15 +73,13 @@ export function RequestIntakePage() {
   const mutationRunner = useRef(createMutationRequestRunner()).current
   const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
-  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
   const [actionErrorMessage, setActionErrorMessage] = useState<string>()
   const [authenticatedApiError, setAuthenticatedApiError] = useState<unknown>()
   const handleAuthenticatedApiError = useCallback((error: unknown) => {
     setAuthenticatedApiError(() => error)
   }, [])
-  const commandMenu = useWorkspaceCommandMenu()
   const t = useMemo(() => createTranslator(locale), [locale])
-  const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
+  const { openMobileSidebar } = useWorkspaceSidebarController()
   const accessToken = session?.accessToken
   const requestedView = searchParams.get('view') === 'forms' ? 'forms' : 'queue'
   const {
@@ -208,11 +199,6 @@ export function RequestIntakePage() {
   const selectView = (view: RequestsView) => {
     setSearchParams(view === 'forms' ? { view: 'forms' } : {}, { replace: true })
   }
-  const selectNav = (navId: SidebarNavId) => navigate(workspaceNavPaths[navId])
-  const selectTeamView = (teamId: string, viewId: SidebarTeamViewId) =>
-    navigate(createTeamViewPath(teamId, viewId))
-  const selectProject = (projectId: string, teamId: string) =>
-    navigate(createProjectIssuesPath(projectId, teamId))
   const selectSubmission = (submissionId: string) =>
     setSearchParams({ submissionId }, { replace: true })
   const selectForm = (formId: string) =>
@@ -269,26 +255,11 @@ export function RequestIntakePage() {
   }
 
   return (
-    <main className="workbench-shell flex h-svh min-h-0 overflow-hidden">
-      <WorkspaceSidebar
-        activeNavId="requests"
-        isMobileOpen={isMobileSidebarOpen}
-        labels={sidebarLabels}
-        mobileCloseLabel={t('sidebar.mobileClose')}
-        mobileDialogLabel={t('sidebar.mobileDialog')}
-        onMobileClose={() => setIsMobileSidebarOpen(false)}
-        onOpenSearch={commandMenu.open}
-        onSelectNav={selectNav}
-        onSelectProject={selectProject}
-        onSelectTeamView={selectTeamView}
-        teams={teams}
-      />
-
-      <section className="workbench-main flex min-w-0 flex-1 flex-col overflow-hidden">
+    <>
         <header className="workbench-header flex-none px-[clamp(20px,3vw,34px)] py-4">
           <div className="flex min-w-0 flex-wrap items-start justify-between gap-4">
             <div className="flex min-w-0 items-start gap-3">
-              <MobileSidebarButton label={t('sidebar.mobileOpen')} onClick={() => setIsMobileSidebarOpen(true)} />
+              <MobileSidebarButton label={t('sidebar.mobileOpen')} onClick={openMobileSidebar} />
               <div className="min-w-0">
                 <p className="workbench-eyebrow">{t('requests.eyebrow')}</p>
                 <h1 className="workbench-title mt-2 text-page-title">{t('requests.title')}</h1>
@@ -397,8 +368,7 @@ export function RequestIntakePage() {
             )}
           </div>
         )}
-      </section>
-    </main>
+    </>
   )
 }
 

@@ -20,13 +20,8 @@ import { resolveEnterpriseSessionErrorsAction } from '../auth/enterpriseSessionE
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import {
   MobileSidebarButton,
-  WorkspaceSidebar,
-  type SidebarNavId,
-  type SidebarTeamViewId,
 } from '../shared/ui/sidebar'
-import { useWorkspaceCommandMenu } from '../commands/ui/WorkspaceCommandMenuContext'
 import {
-  createSidebarLabels,
   createTranslator,
   getInitialLocale,
   type Locale,
@@ -34,11 +29,7 @@ import {
 } from '../shared/i18n/i18n'
 import type { ProjectDirectoryTeam } from '../projects/api'
 import { useProjectDirectory } from '../projects/queries/useProjectDirectory'
-import {
-  createProjectIssuesPath,
-  createTeamViewPath,
-  workspaceNavPaths,
-} from '../shared/routing/paths'
+import { useWorkspaceSidebarController } from '../workspace/ui/WorkspaceRoute'
 import {
   useTeamWorkItemConfigurations,
 } from '../work-items/queries/useWorkItemConfigurations'
@@ -122,7 +113,6 @@ export function SearchPage() {
   const mutationRequestRunner = useRef(createMutationRequestRunner()).current
   const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
-  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
   const [results, setResults] = useState<WorkspaceSearchResult[]>([])
   const [nextCursor, setNextCursor] = useState<string | undefined>()
   const [isSearchLoading, setIsSearchLoading] = useState(false)
@@ -140,9 +130,8 @@ export function SearchPage() {
   const [deleteConfirmationViewId, setDeleteConfirmationViewId] = useState<string | undefined>()
   const activeRouteSignatureRef = useRef('')
   const nextPageAbortControllerRef = useRef<AbortController | undefined>(undefined)
-  const commandMenu = useWorkspaceCommandMenu()
   const t = useMemo(() => createTranslator(locale), [locale])
-  const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
+  const { openMobileSidebar } = useWorkspaceSidebarController()
   const accessToken = session?.accessToken
   const {
     data: user,
@@ -479,30 +468,12 @@ export function SearchPage() {
     })
   }
 
-  const selectNav = (navId: SidebarNavId) => navigate(workspaceNavPaths[navId])
-  const selectTeamView = (teamId: string, viewId: SidebarTeamViewId) => navigate(createTeamViewPath(teamId, viewId))
-
   return (
-    <main className="workbench-shell flex h-svh min-h-0 overflow-hidden">
-      <WorkspaceSidebar
-        inboxCount={0}
-        isMobileOpen={isMobileSidebarOpen}
-        labels={sidebarLabels}
-        mobileCloseLabel={t('sidebar.mobileClose')}
-        mobileDialogLabel={t('sidebar.mobileDialog')}
-        onMobileClose={() => setIsMobileSidebarOpen(false)}
-        onOpenSearch={commandMenu.open}
-        onSelectNav={selectNav}
-        onSelectProject={(projectId, teamId) => navigate(createProjectIssuesPath(projectId, teamId))}
-        onSelectTeamView={selectTeamView}
-        teams={teams}
-      />
-
-      <section className="workbench-main flex min-w-0 flex-1 flex-col overflow-hidden">
+    <>
         <header className="workbench-header flex-none px-[clamp(20px,3vw,34px)] py-4">
           <div className="flex min-w-0 flex-wrap items-start justify-between gap-4">
             <div className="flex min-w-0 items-start gap-3">
-              <MobileSidebarButton label={t('sidebar.mobileOpen')} onClick={() => setIsMobileSidebarOpen(true)} />
+              <MobileSidebarButton label={t('sidebar.mobileOpen')} onClick={openMobileSidebar} />
               <div className="min-w-0">
                 <p className="workbench-eyebrow">{t('search.eyebrow')}</p>
                 <h1 className="workbench-title mt-2 text-page-title">{t('search.title')}</h1>
@@ -634,8 +605,7 @@ export function SearchPage() {
             </div>
           </div>
         )}
-      </section>
-    </main>
+    </>
   )
 }
 
