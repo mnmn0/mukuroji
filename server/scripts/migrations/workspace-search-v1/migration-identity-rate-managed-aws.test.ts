@@ -9,7 +9,10 @@ import {
   GetItemCommand,
   TransactWriteItemsCommand,
 } from '@aws-sdk/client-dynamodb'
-import { STSClient } from '@aws-sdk/client-sts'
+import {
+  AssumeRoleCommand,
+  STSClient,
+} from '@aws-sdk/client-sts'
 import {
   createAwsWorkspaceSearchMigrationRateManagedSession,
   type CreateAwsWorkspaceSearchMigrationRateManagedSessionInput,
@@ -79,6 +82,60 @@ async function withStaticProductionProfile<Result>(
     { mode: 0o600 },
   )
   await writeFile(configFile, '', { mode: 0o600 })
+  const previousCredentialsFile =
+    process.env.AWS_SHARED_CREDENTIALS_FILE
+  const previousConfigFile = process.env.AWS_CONFIG_FILE
+  process.env.AWS_SHARED_CREDENTIALS_FILE = credentialsFile
+  process.env.AWS_CONFIG_FILE = configFile
+  try {
+    return await task()
+  } finally {
+    if (previousCredentialsFile === undefined) {
+      delete process.env.AWS_SHARED_CREDENTIALS_FILE
+    } else {
+      process.env.AWS_SHARED_CREDENTIALS_FILE = previousCredentialsFile
+    }
+    if (previousConfigFile === undefined) {
+      delete process.env.AWS_CONFIG_FILE
+    } else {
+      process.env.AWS_CONFIG_FILE = previousConfigFile
+    }
+    await rm(directory, { recursive: true, force: true })
+  }
+}
+
+/**
+ * Runs one production factory test with an isolated assume-role profile.
+ *
+ * @param task - Test operation that resolves refreshable temporary credentials.
+ * @returns Exact task result after restoring process-level file selection.
+ */
+async function withAssumeRoleProductionProfile<Result>(
+  task: () => Promise<Result>,
+): Promise<Result> {
+  const directory = await mkdtemp(
+    join(tmpdir(), 'mukuroji-rate-assume-role-profile-'),
+  )
+  const credentialsFile = join(directory, 'credentials')
+  const configFile = join(directory, 'config')
+  const sourceProfile = 'rate-managed-production-source'
+  await writeFile(
+    credentialsFile,
+    `[${sourceProfile}]\n` +
+      'aws_access_key_id = rate-managed-source-access-key\n' +
+      'aws_secret_access_key = rate-managed-source-secret-key\n',
+    { mode: 0o600 },
+  )
+  await writeFile(
+    configFile,
+    `[profile ${requestedResources.profile}]\n` +
+      `role_arn = arn:aws:iam::${requestedAccount}:` +
+      'role/rate-managed-migration\n' +
+      `source_profile = ${sourceProfile}\n` +
+      'role_session_name = rate-managed-refresh-test\n' +
+      'duration_seconds = 900\n',
+    { mode: 0o600 },
+  )
   const previousCredentialsFile =
     process.env.AWS_SHARED_CREDENTIALS_FILE
   const previousConfigFile = process.env.AWS_CONFIG_FILE
@@ -314,6 +371,110 @@ describe('production rate-managed AWS identity composition', () => {
       })
       expect(describeTableCount).toBe(2)
       expect(checkpointTransactionCount).toBe(5)
+    } finally {
+      Reflect.set(STSClient.prototype, 'send', originalStsSend)
+      Reflect.set(
+        DynamoDBClient.prototype,
+        'send',
+        originalDynamoDbSend,
+      )
+    }
+  })
+
+  test('refreshes temporary credentials used by the rate-owned client', async () => {
+    const originalStsSend = STSClient.prototype.send
+    const originalDynamoDbSend = DynamoDBClient.prototype.send
+    let assumeRoleCount = 0
+    const describeAccessKeyIds: string[] = []
+    let checkpointItem:
+      Readonly<Record<string, AttributeValue>> | undefined
+    Reflect.set(
+      STSClient.prototype,
+      'send',
+      function (...callArguments: unknown[]): unknown {
+        const command = callArguments[0]
+        if (command instanceof AssumeRoleCommand) {
+          assumeRoleCount += 1
+          return Promise.resolve({
+            $metadata: {},
+            Credentials: {
+              AccessKeyId: `temporary-access-key-${assumeRoleCount}`,
+              SecretAccessKey:
+                `temporary-secret-key-${assumeRoleCount}`,
+              SessionToken: `temporary-session-token-${assumeRoleCount}`,
+              Expiration: new Date(Date.now() + 1_000),
+            },
+          })
+        }
+        return Promise.resolve({
+          $metadata: {},
+          Account: requestedAccount,
+          Arn:
+            `arn:aws:sts::${requestedAccount}:` +
+            'assumed-role/migration-role/rate-managed-test',
+          UserId: 'AROA12345678901234567:rate-managed-test',
+        })
+      },
+    )
+    Reflect.set(
+      DynamoDBClient.prototype,
+      'send',
+      async function (
+        this: DynamoDBClient,
+        ...callArguments: unknown[]
+      ): Promise<unknown> {
+        const command = callArguments[0]
+        if (command instanceof GetItemCommand) {
+          return {
+            $metadata: {},
+            ...(checkpointItem === undefined
+              ? {}
+              : { Item: structuredClone(checkpointItem) }),
+          }
+        }
+        if (command instanceof TransactWriteItemsCommand) {
+          const item = command.input.TransactItems?.[0]?.Put?.Item
+          if (item === undefined) {
+            throw new Error('expected-rate-checkpoint-put')
+          }
+          checkpointItem = structuredClone(item)
+          return { $metadata: {} }
+        }
+        if (command instanceof DescribeTableCommand) {
+          const signingCredentials = await this.config.credentials()
+          describeAccessKeyIds.push(signingCredentials.accessKeyId)
+          return { $metadata: {} }
+        }
+        throw new Error('unexpected-dynamodb-command')
+      },
+    )
+    try {
+      await withAssumeRoleProductionProfile(async () => {
+        const session =
+          await createAwsWorkspaceSearchMigrationRateManagedSession({
+            requested: requestedResources,
+            ratePolicy: {
+              ...ratePolicy,
+              windowMilliseconds: 1,
+            },
+            bootstrapRateCheckpoint: true,
+            recoverInterruptedCleanup: false,
+            recoverInterruptedAttempt: false,
+          })
+        try {
+          await session.describeTable(
+            requestedResources.tables['project-directory'],
+          )
+          await session.describeTable(
+            requestedResources.tables['work-items'],
+          )
+        } finally {
+          await session.close()
+        }
+      })
+      expect(describeAccessKeyIds).toHaveLength(2)
+      expect(new Set(describeAccessKeyIds).size).toBe(2)
+      expect(assumeRoleCount).toBeGreaterThanOrEqual(3)
     } finally {
       Reflect.set(STSClient.prototype, 'send', originalStsSend)
       Reflect.set(

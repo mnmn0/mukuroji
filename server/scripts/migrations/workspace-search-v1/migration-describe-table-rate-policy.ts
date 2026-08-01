@@ -177,6 +177,12 @@ function readPolicyDocument(
       readOwnDataProperty(value, 'throttleBackoffMaximumMilliseconds'),
     ),
   }
+  const restartSafetyHorizonMilliseconds = Math.max(
+    document.windowMilliseconds,
+    document.minimumAttemptIntervalMilliseconds,
+    document.minimumPageIntervalMilliseconds,
+    document.throttleBackoffMaximumMilliseconds,
+  )
   if (
     document.maximumAttemptsPerLifecycle <
       WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_PAGE_BASELINE_ATTEMPTS ||
@@ -190,7 +196,9 @@ function readPolicyDocument(
     document.checkpointPageAttemptCapacity >
       document.maximumAttemptsPerWindow ||
     document.throttleBackoffInitialMilliseconds >
-      document.throttleBackoffMaximumMilliseconds
+      document.throttleBackoffMaximumMilliseconds ||
+    document.maximumAdmissionWaitMilliseconds <=
+      restartSafetyHorizonMilliseconds
   ) {
     return failPolicy()
   }

@@ -91,6 +91,38 @@ describe('Workspace Search migration DescribeTable rate policy', () => {
     ).toThrow(WorkspaceSearchMigrationDescribeTableRatePolicyError)
   })
 
+  test('requires admission time beyond the full restart safety horizon', () => {
+    const document = createPolicyDocument()
+    const restartSafetyHorizonMilliseconds = Math.max(
+      document.windowMilliseconds,
+      document.minimumAttemptIntervalMilliseconds,
+      document.minimumPageIntervalMilliseconds,
+      document.throttleBackoffMaximumMilliseconds,
+    )
+
+    for (const maximumAdmissionWaitMilliseconds of [
+      restartSafetyHorizonMilliseconds - 1,
+      restartSafetyHorizonMilliseconds,
+    ]) {
+      expect(() =>
+        parseWorkspaceSearchMigrationDescribeTableRatePolicyDocument(
+          encodePolicy({
+            ...document,
+            maximumAdmissionWaitMilliseconds,
+          }),
+        )).toThrow(WorkspaceSearchMigrationDescribeTableRatePolicyError)
+    }
+
+    expect(() =>
+      parseWorkspaceSearchMigrationDescribeTableRatePolicyDocument(
+        encodePolicy({
+          ...document,
+          maximumAdmissionWaitMilliseconds:
+            restartSafetyHorizonMilliseconds + 1,
+        }),
+      )).not.toThrow()
+  })
+
   test('binds any reviewed scalar change to a different policy version', () => {
     const first = parseWorkspaceSearchMigrationDescribeTableRatePolicyDocument(
       encodePolicy(createPolicyDocument()),

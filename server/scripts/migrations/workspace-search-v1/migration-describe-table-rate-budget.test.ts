@@ -901,14 +901,14 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
       attemptInFlight: false,
       revision: 4,
     })
-    expect(harness.waits).toEqual([1])
+    expect(harness.waits).toEqual([1_000, 1])
     expect(harness.observations.length).toBeGreaterThan(0)
     expect(scheduleCallCount).toBeGreaterThan(0)
     expect(cancelMethodReadCount).toBe(scheduleCallCount)
     lifecycle.close()
   })
 
-  test('requires explicit bootstrap and persists write-ahead reservations before callbacks', async () => {
+  test('requires explicit bootstrap, waits a safety horizon, and persists write-ahead reservations', async () => {
     const harness = new DeterministicRateHarness()
     const registry =
       createWorkspaceSearchMigrationDescribeTableRateRegistry({
@@ -942,6 +942,7 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
         })
       }),
     )
+    expect(harness.waits).toEqual([1_000])
     await lifecycle.runCheckpointPage(
       {},
       async () => {
@@ -1240,7 +1241,7 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
       }),
     )
     expect(recoveredCallbacks).toBe(1)
-    expect(harness.waits).toEqual([1_000])
+    expect(harness.waits).toEqual([1_000, 1_000])
     expect(recovered.readEvidence()).toMatchObject({
       attemptCount: 1,
       forfeitedAttemptCount:
@@ -1310,6 +1311,7 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
         recorder: attemptHarness,
         random: () => 0,
       }).claim(createClaim())
+    attemptHarness.advance(1_000)
     attemptHarness.elapseDuringNextWrite(100)
     let attemptCallbacks = 0
     const attemptError = await captureRateError(() =>
@@ -1349,6 +1351,7 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
         random: () => 0,
       })
     const pageLifecycle = await pageRegistry.claim(createClaim())
+    pageHarness.advance(1_000)
     pageHarness.elapseDuringNextWrite(100)
     let pageCallbacks = 0
     const pageError = await captureRateError(() =>
@@ -1397,6 +1400,8 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
         recorder: attemptHarness,
         random: () => 0,
       }).claim(createClaim())
+    attemptHarness.advance(1_000)
+    const attemptClockBase = attemptHarness.readNow()
     const attemptStarts: number[] = []
     attemptHarness.elapseDuringNextWrite(90)
     await attemptLifecycle.runDescribeTableAttempt(
@@ -1411,13 +1416,19 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
         attemptStarts.push(attemptHarness.readNow())
       }),
     )
-    expect(attemptStarts).toEqual([90, 190])
+    expect(attemptStarts).toEqual([
+      attemptClockBase + 90,
+      attemptClockBase + 190,
+    ])
     expect(attemptHarness.waits).toEqual([100])
     expect(
       attemptHarness.observations
         .filter((observation) => observation.kind === 'attempt')
         .map((observation) => observation.observedAtMilliseconds),
-    ).toEqual([90, 190])
+    ).toEqual([
+      attemptClockBase + 90,
+      attemptClockBase + 190,
+    ])
 
     const pageHarness = new DeterministicRateHarness()
     const pageLifecycle = await
@@ -1433,6 +1444,8 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
         recorder: pageHarness,
         random: () => 0,
       }).claim(createClaim())
+    pageHarness.advance(1_000)
+    const pageClockBase = pageHarness.readNow()
     const pageStarts: number[] = []
     pageHarness.elapseDuringNextWrite(90)
     await pageLifecycle.runCheckpointPage(
@@ -1447,7 +1460,10 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
         pageStarts.push(pageHarness.readNow())
       },
     )
-    expect(pageStarts).toEqual([90, 190])
+    expect(pageStarts).toEqual([
+      pageClockBase + 90,
+      pageClockBase + 190,
+    ])
     expect(pageHarness.waits).toEqual([100])
   })
 
@@ -1480,6 +1496,7 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
         recorder: harness,
         random: () => 0,
       }).claim(createClaim())
+    harness.advance(1_000)
     let attemptCallbacks = 0
     await lifecycle.runDescribeTableAttempt(
       { phase: 'measurement' },
@@ -1520,6 +1537,7 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
         recorder: harness,
         random: () => 0,
       }).claim(createClaim())
+    harness.advance(1_000)
     let attemptCallbacks = 0
     await lifecycle.runDescribeTableAttempt(
       { phase: 'measurement' },
@@ -1574,6 +1592,7 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
         recorder: harness,
         random: () => 0,
       }).claim(createClaim())
+    harness.advance(1_000)
     let attemptCallbacks = 0
     await lifecycle.runDescribeTableAttempt(
       { phase: 'measurement' },
@@ -1801,6 +1820,7 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
         recorder: harness,
         random: () => 0,
       }).claim(createClaim())
+    harness.advance(1_000)
     const firstStarted = createDeferred<void>()
     const releaseFirst = createDeferred<void>()
     let expiredCallbacks = 0
@@ -2038,6 +2058,7 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
         random: () => 0,
       })
     const original = await registry.claim(createClaim())
+    harness.advance(policy.windowMilliseconds)
     const cleanupStarted = createDeferred<void>()
     const releaseCleanup = createDeferred<void>()
     let successorCallbacks = 0
@@ -2189,6 +2210,7 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
         recorder: harness,
         random: () => 0,
       }).claim(createClaim())
+    harness.advance(1_000)
 
     await lifecycle.runCheckpointPage(
       {},
@@ -2236,6 +2258,7 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
         recorder: constrainedHarness,
         random: () => 0,
       }).claim(createClaim())
+    constrainedHarness.advance(1_000)
     await constrainedLifecycle.runDescribeTableAttempt(
       { phase: 'measurement' },
       createAttempt(async () => 'consumed'),
@@ -2328,7 +2351,7 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
     releaseWait.resolve(undefined)
     await pageResult
     expect(pageCallbacks).toBe(1)
-    expect(harness.readNow()).toBe(1_181)
+    expect(harness.readNow()).toBe(2_181)
   })
 
   test('uses the injected clock and waiter for page cadence and rolling-window refill', async () => {
@@ -2352,8 +2375,8 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
       {},
       async () => undefined,
     )
-    expect(harness.waits).toEqual([10])
-    expect(harness.readNow()).toBe(10)
+    expect(harness.waits).toEqual([1_000, 10])
+    expect(harness.readNow()).toBe(1_010)
 
     for (
       let index = 0;
@@ -2372,15 +2395,15 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
     )
 
     expect(harness.waits.at(-1)).toBe(819)
-    expect(harness.readNow()).toBe(1_010)
+    expect(harness.readNow()).toBe(2_010)
     expect(lifecycle.readEvidence()).toMatchObject({
       attemptCount:
         WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_PAGE_BASELINE_ATTEMPTS +
         1,
       cadenceWaitCount:
         WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_PAGE_BASELINE_ATTEMPTS +
-        1,
-      cadenceWaitMilliseconds: 1_010,
+        2,
+      cadenceWaitMilliseconds: 2_010,
       maximumInFlight: 1,
     })
   })
@@ -2430,7 +2453,7 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
         .filter((observation) => observation.kind === 'throttle')
         .map((observation) => observation.backoffMilliseconds),
     ).toEqual([50, 100, 200])
-    expect(harness.waits).toEqual([50, 100, 200])
+    expect(harness.waits).toEqual([1_000, 50, 100, 200])
     expect(lifecycle.readEvidence()).toMatchObject({
       attemptCount: 4,
       throttleCount: 3,
@@ -3122,6 +3145,7 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
         recorder: harness,
         random: () => 0,
       }).claim(createClaim())
+    harness.advance(policy.windowMilliseconds)
     const cleanupFailure = new Error('DETERMINISTIC-CLEANUP-CRASH')
     await expect(
       original.runCheckpointPage(
@@ -3352,7 +3376,7 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
     expect((await obsoleteAttempt).reason).toBe('taken-over')
 
     expect(recoveredCallbacks).toBe(1)
-    expect(harness.waits).toEqual([1_000])
+    expect(harness.waits).toEqual([1_000, 1_000])
     expect(recovered.readEvidence()).toMatchObject({
       attemptCount: 2,
       throttleCount: 0,
@@ -4023,6 +4047,7 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
         recorder: harness,
         random: () => 0,
       }).claim(createClaim())
+    harness.advance(1_000)
     const rawCanary = 'RAW-EVENT-CANARY'
     const throttlingError = new Error(rawCanary)
     throttlingError.name = 'ThrottlingException'

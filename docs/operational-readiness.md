@@ -864,9 +864,11 @@ total admission deadline内に次のdata I/Oまたはpageを予約できなけ�
 reviewした明示値がないpolicyを受理しません。SDK内の見えないretryでbudgetを超過しないよう、`DescribeTable`は専用の
 `maxAttempts=1` transportだけを使い、throttle後のjitter/backoffと再attemptはregistryが管理します。
 Transportはcaller指定endpointを受け付けず、regionからpartition-awareな公式DynamoDB endpointを内部導出します。
-Credentials providerやambient default chainは受け付けず、upstreamのmanaged identityで実測し、
-coordinatorから渡すaccountと同じ`accountId`を宣言したstatic credentialsだけを受け付けます。
-このmoduleは宣言値の一致とallowlist済みscalarのsnapshotを検証し、STS measurement自体は行いません。
+Ambient default chainは受け付けず、upstreamのmanaged identityで実測したstatic credentials、または
+refresh-capableな固定providerだけを受け付けます。Providerはconstruction時にcaptureし、解決のたびに
+allowlist済みscalarをsnapshotして、coordinatorから渡すaccountと同じ`accountId`を要求します。
+このmoduleは宣言値の一致を検証しますが、STS measurement自体は行いません。Production compositionだけが
+選択済みnamed profileのimmutableなstatic/AssumeRole planを保持し、refresh前後で同じ実測accountへ束縛します。
 各callはaccount/regionと固定transport descriptorへ結合したnominal one-shot capabilityとして渡し、
 任意callback内の複数SDK callや、別scopeのtransportを1 permitとして実行できない形にします。
 
@@ -879,6 +881,10 @@ transport-binding digestを結合し、明示bootstrap時だけabsent predecesso
 review済みpage capacity（現行baselineは182回）をwrite-ahead予約し、各one-shot transport実行前にも
 reservation-to-attempt遷移と
 `attemptInFlight=true`をCAS保存し、完了後に別CASでfalseへ戻します。
+Absent ledgerは初回作成とstate table消失・差替えを識別できないため、明示bootstrapでも最初の物理送信前に
+window、attempt/page interval、最大throttle backoffの最大値を全量待ちます。Reviewed policy parserは
+total admission deadlineがこのsafety horizon以下のpolicyを拒否し、bootstrap直後に必ずcadence-boundとなる
+設定を永続化させません。
 Attempt/page cadenceの開始時刻はadmission判定時ではなく、対応するwrite-ahead CAS成功後、
 物理transportまたはpage callbackの直前にmonotonic clockから取得します。CAS待ち時間をintervalへ
 先取りせず、CAS遅延後に連続送信または連続page開始できる扱いにはしません。
@@ -907,7 +913,9 @@ Controllerはmodule内でcaptureしたexact methodだけを使い、
 callbackからのreflectionやprototype差し替えでbudget、page reservation、cleanup 6回上限を変更できません。
 
 Production compositionは公式STS `GetCallerIdentity`で実accountを確認してから初めてrate checkpointを
-load/write/claimし、専用`maxAttempts=1` transportへstatic credentialsを渡します。同じrate lifecycleと
+load/write/claimし、専用`maxAttempts=1` transportへ同じ固定profile providerを渡します。Static profileは
+detached credentialsを再利用し、一時credentialsはimmutableな選択済みAssumeRole planから期限前にrefreshして、
+各解決結果を実測accountへ再束縛します。同じrate lifecycleと
 FIFO gateをmain sessionとfresh subordinate measurementで共有し、child closeはledgerをclaim/closeしません。
 Source planning page、target planning page、apply checkpoint、verification page、partial rollback step、
 complete rollback stepは、各delegateの最初のdata I/Oより前にexact 182回を予約します。

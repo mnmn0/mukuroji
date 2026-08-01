@@ -443,6 +443,9 @@ class RealCoordinatorDurableHarness {
   /** Number of provider collections, used to prove restart short-circuiting. */
   private evidenceCollectionCount = 0
 
+  /** Optional non-finite boundary close time exposed by a focused test. */
+  private executionBoundaryClosedAtOverride: string | undefined
+
   /**
    * Publishes the close/replan prerequisites consumed by real execution.
    *
@@ -472,6 +475,29 @@ class RealCoordinatorDurableHarness {
    */
   loseNextTerminalReleaseResponse(): void {
     this.loseNextReleaseResponse = true
+  }
+
+  /** Prepares the exact already-verified durable graph for a release-only test. */
+  prepareVerifiedTerminal(): void {
+    this.planningAdmitted = true
+    this.executionRunCreated = true
+    this.applyPhase = 'applied'
+    for (const location of [
+      'project-directory',
+      'work-items',
+      'collaboration',
+      'documents',
+      'target',
+    ]) {
+      this.applyLocations.add(location)
+      this.verifiedLocations.add(location)
+    }
+    this.verified = true
+  }
+
+  /** Makes the terminal boundary expose a non-finite close time. */
+  exposeInvalidExecutionBoundaryClosedAt(): void {
+    this.executionBoundaryClosedAtOverride = 'invalid-closed-at'
   }
 
   /**
@@ -676,6 +702,19 @@ class RealCoordinatorDurableHarness {
         this.record(processId, 'lease:heartbeat')
         return this.createLease()
       },
+      /** Installs the process-local heartbeat mutation assertion. */
+      runWithMutationAdmissionGuard: async <Result>(
+        guard: () => void,
+        task: () => Promise<Result>,
+      ): Promise<Result> => {
+        this.record(processId, 'mutation-admission:guard')
+        guard()
+        return await task()
+      },
+      /** Records one process-local mutation-admission interruption. */
+      interruptMutationAdmission: (): void => {
+        this.record(processId, 'mutation-admission:interrupt')
+      },
       readMaintenanceEvidencePointer: async () => {
         this.record(processId, 'authority:read-pointer')
         return {
@@ -786,7 +825,8 @@ class RealCoordinatorDurableHarness {
       tableIds: this.createTableIds(),
       closedWriterFenceRecordDigest: this.closedFence.recordDigest,
       boundaryDigest: digest('real-boundary'),
-      closedAt: this.closedFence.closedAt,
+      closedAt: this.executionBoundaryClosedAtOverride ??
+        this.closedFence.closedAt,
       closeAuthority: structuredClone(this.closedFence.authority),
     }
   }
@@ -1483,6 +1523,39 @@ describe('Workspace Search migration control coordinator', () => {
     expect(harness.readPhase()).toBe('released')
   })
 
+  test('rejects a non-finite terminal close time before release evidence renewal', async () => {
+    const harness = new RealCoordinatorDurableHarness()
+    harness.prepareVerifiedTerminal()
+    harness.exposeInvalidExecutionBoundaryClosedAt()
+
+    const failure = await captureError(() => invokeCoordinator({
+      session: harness.createSession(1),
+      maintenanceEvidenceProvider:
+        harness.createMaintenanceEvidenceProvider(1),
+      runId,
+      ownerId: `${ownerId}-invalid-close`,
+      expectedConfigurationHash: harness.configurationHash,
+      mode: 'release',
+      approval:
+        workspaceSearchMigrationControlApprovalLiterals.release,
+      heartbeatScheduler: harness.createHeartbeatScheduler(1),
+      clock: readCoordinatorHarnessClock,
+    }))
+
+    expect(failure).toMatchObject({
+      code: 'INVALID_MAINTENANCE_EVIDENCE',
+    })
+    expect(harness.events).toContain('process-1:evidence:collect')
+    expect(harness.events).not.toContain('process-1:authority:renew')
+    expect(harness.events).not.toContain('process-1:writer-fence:release')
+    expect(harness.events).toContain(
+      'process-1:mutation-admission:guard',
+    )
+    expect(harness.events).not.toContain(
+      'process-1:mutation-admission:interrupt',
+    )
+  })
+
   test('uses real default execution and release supervisors across fresh durable sessions', async () => {
     const harness = new RealCoordinatorDurableHarness()
     const dependencies =
@@ -1644,6 +1717,12 @@ describe('Workspace Search migration control coordinator', () => {
       ),
     ).toHaveLength(1)
     expect(harness.readEvidenceCollectionCount()).toBe(1)
+    expect(harness.events).toContain(
+      'process-5:mutation-admission:guard',
+    )
+    expect(harness.events).not.toContain(
+      'process-5:mutation-admission:interrupt',
+    )
 
     const eventsBeforeRecovery = harness.events.length
     expect(await invokeCoordinator({

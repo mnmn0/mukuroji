@@ -86,6 +86,7 @@ import {
 import type {
   WorkspaceSearchMigrationDescribeTablePhase,
   WorkspaceSearchMigrationDescribeTablePinnedAwsCredentials,
+  WorkspaceSearchMigrationDescribeTablePinnedAwsCredentialsProvider,
   WorkspaceSearchMigrationDescribeTableRateEvidence,
   WorkspaceSearchMigrationDescribeTableRatePolicy,
   WorkspaceSearchMigrationDescribeTableRateRecorder,
@@ -8020,7 +8021,6 @@ export async function createAwsWorkspaceSearchMigrationRateManagedSession(
     credentialsProvider,
   )
   const transport = createDefaultAwsTransport(configurations)
-  let resolvedCredentials: WorkspaceSearchMigrationProfileCredentials
   try {
     requireRateManagedSessionSignalActive(signal)
     const caller = await transport.getCallerIdentity(
@@ -8028,7 +8028,7 @@ export async function createAwsWorkspaceSearchMigrationRateManagedSession(
     )
     requireRateManagedSessionSignalActive(signal)
     requirePreMeasurementCallerIdentity(caller, resources.account)
-    resolvedCredentials = await credentialsProvider()
+    await credentialsProvider()
     requireRateManagedSessionSignalActive(signal)
   } catch {
     transport.close()
@@ -8053,8 +8053,8 @@ export async function createAwsWorkspaceSearchMigrationRateManagedSession(
       tableNames: Object.values(resources.tables),
       policy: snapshot.ratePolicy,
       checkpointStore,
-      credentials: createPinnedDescribeTableCredentials(
-        resolvedCredentials,
+      credentials: createPinnedDescribeTableCredentialsProvider(
+        credentialsProvider,
         resources.account,
       ),
       bootstrap: snapshot.bootstrapRateCheckpoint,
@@ -8337,6 +8337,27 @@ function createPinnedDescribeTableCredentials(
           expiration: new Date(Date.prototype.getTime.call(expiration)),
         }),
   }
+}
+
+/**
+ * Preserves the pinned profile's refresh path for the dedicated DescribeTable
+ * client while declaring every detached result for the measured account.
+ *
+ * @param credentialsProvider - Refresh-capable fixed-profile provider.
+ * @param accountId - STS-verified requested account.
+ * @returns Account-declaring provider for the one-attempt transport.
+ */
+function createPinnedDescribeTableCredentialsProvider(
+  credentialsProvider: ReturnType<typeof fromIni>,
+  accountId: string,
+): WorkspaceSearchMigrationDescribeTablePinnedAwsCredentialsProvider {
+  const provider:
+    WorkspaceSearchMigrationDescribeTablePinnedAwsCredentialsProvider =
+      async () => createPinnedDescribeTableCredentials(
+        await credentialsProvider(),
+        accountId,
+      )
+  return Object.freeze(provider)
 }
 
 /**

@@ -195,9 +195,11 @@ export type WorkspaceSearchMigrationControlReleaseSession = Omit<
   WorkspaceSearchMigrationExecutionSupervisorSession,
   | 'acquireLease'
   | 'heartbeatLease'
+  | 'interruptMutationAdmission'
   | 'readAuthority'
   | 'readMaintenanceEvidencePointer'
   | 'renewMaintenanceEvidence'
+  | 'runWithMutationAdmissionGuard'
 > & {
   /**
    * Creates the only mutation capability available to terminal release.
@@ -1026,7 +1028,13 @@ async function renewReleaseAuthority(
   } catch {
     return failCoordinator('INVALID_MAINTENANCE_EVIDENCE')
   }
-  if (Date.parse(drainStartedAt) < Date.parse(input.closedAt)) {
+  const drainStartedMilliseconds = Date.parse(drainStartedAt)
+  const closedMilliseconds = Date.parse(input.closedAt)
+  if (
+    !Number.isFinite(drainStartedMilliseconds) ||
+    !Number.isFinite(closedMilliseconds) ||
+    drainStartedMilliseconds < closedMilliseconds
+  ) {
     return failCoordinator('INVALID_MAINTENANCE_EVIDENCE')
   }
   const authority = await runCoordinatorOperation(

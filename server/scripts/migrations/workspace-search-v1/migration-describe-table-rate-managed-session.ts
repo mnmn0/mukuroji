@@ -74,7 +74,7 @@ export type CreateWorkspaceSearchMigrationManagedDescribeTableRateInput = {
   /** Durable pre-measurement checkpoint store. */
   readonly checkpointStore:
     WorkspaceSearchMigrationDescribeTableRateCheckpointStore
-  /** Static credentials resolved from the pinned managed profile. */
+  /** Static credentials or refreshable provider from the pinned profile. */
   readonly credentials:
     WorkspaceSearchMigrationDescribeTableAwsSdkConfiguration['credentials']
   /** Explicit authority to create the first absent account/region ledger. */
@@ -102,7 +102,7 @@ type ManagedDescribeTableRateConstructionSnapshot = {
   /** Captured durable checkpoint store capability. */
   readonly checkpointStore:
     WorkspaceSearchMigrationDescribeTableRateCheckpointStore
-  /** Captured static credentials validated by transport construction. */
+  /** Captured credentials or provider validated by transport construction. */
   readonly credentials:
     WorkspaceSearchMigrationDescribeTableAwsSdkConfiguration['credentials']
   /** Explicit first-checkpoint bootstrap authority. */
@@ -647,7 +647,7 @@ class ManagedDescribeTableRate
  * later process loads the durable fence and claims its strict successor, so a
  * restarted measurement never reuses fence zero.
  *
- * @param input - Reviewed policy, static credentials, and durable store.
+ * @param input - Reviewed policy, pinned credentials, and durable store.
  * @returns Claimed controller ready for the first measured DescribeTable.
  */
 export async function createWorkspaceSearchMigrationManagedDescribeTableRate(

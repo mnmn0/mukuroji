@@ -22,6 +22,7 @@ import {
 import type {
   WorkspaceSearchMigrationManagedAwsSession,
   WorkspaceSearchMigrationManagedPartialRollbackAwsPort,
+  WorkspaceSearchMigrationRateManagedAwsSession,
 } from './migration-identity-aws'
 import type {
   WorkspaceSearchMigrationPlanArtifactReplayResult,
@@ -371,6 +372,10 @@ export type WorkspaceSearchMigrationExecutionSupervisorSession = Pick<
   | 'readMaintenanceEvidenceReceipt'
   | 'readMaintenanceEvidencePointer'
   | 'renewMaintenanceEvidence'
+  | 'runWithMutationAdmissionGuard'
+> & Pick<
+  WorkspaceSearchMigrationRateManagedAwsSession,
+  'interruptMutationAdmission'
 >
 
 /**
@@ -1088,7 +1093,13 @@ class ExecutionAuthorityController {
         'INVALID_MAINTENANCE_EVIDENCE',
       )
     }
-    if (Date.parse(drainStartedAt) < Date.parse(this.closedAt)) {
+    const drainStartedMilliseconds = Date.parse(drainStartedAt)
+    const closedMilliseconds = Date.parse(this.closedAt)
+    if (
+      !Number.isFinite(drainStartedMilliseconds) ||
+      !Number.isFinite(closedMilliseconds) ||
+      drainStartedMilliseconds < closedMilliseconds
+    ) {
       return failExecutionSupervisor(
         'INVALID_MAINTENANCE_EVIDENCE',
       )

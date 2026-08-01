@@ -12,5 +12,6 @@ export {
   type WorkspaceSearchMigrationDescribeTableAwsSdkClientConfiguration,
   type WorkspaceSearchMigrationDescribeTableAwsSdkConfiguration,
   type WorkspaceSearchMigrationDescribeTablePinnedAwsCredentials,
+  type WorkspaceSearchMigrationDescribeTablePinnedAwsCredentialsProvider,
   type WorkspaceSearchMigrationDescribeTableSingleAttemptAwsTransport,
 } from './migration-describe-table-rate-budget'

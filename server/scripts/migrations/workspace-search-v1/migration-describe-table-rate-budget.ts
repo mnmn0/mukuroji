@@ -93,13 +93,23 @@ export type WorkspaceSearchMigrationDescribeTablePinnedAwsCredentials = {
 }
 
 /**
+ * Refresh-capable provider pinned to one measured AWS account.
+ *
+ * @returns Fresh detached credentials declared for the measured account.
+ */
+export type WorkspaceSearchMigrationDescribeTablePinnedAwsCredentialsProvider =
+  () => Promise<WorkspaceSearchMigrationDescribeTablePinnedAwsCredentials>
+
+/**
  * Explicit pinned configuration accepted by the dedicated DescribeTable client.
  */
 export type WorkspaceSearchMigrationDescribeTableAwsSdkConfiguration = {
   /** Upstream-measured account that must equal the credential declaration. */
   readonly account: string
-  /** Static credentials pinned to the same measured AWS account. */
-  readonly credentials: WorkspaceSearchMigrationDescribeTablePinnedAwsCredentials
+  /** Static credentials or a refreshable provider pinned to the measured account. */
+  readonly credentials:
+    | WorkspaceSearchMigrationDescribeTablePinnedAwsCredentials
+    | WorkspaceSearchMigrationDescribeTablePinnedAwsCredentialsProvider
   /** Explicit AWS region measured for the migration session. */
   readonly region: string
 }
@@ -107,12 +117,15 @@ export type WorkspaceSearchMigrationDescribeTableAwsSdkConfiguration = {
 /**
  * Shallow-frozen detached configuration for one dedicated DynamoDB client.
  *
- * The nested credential copy remains SDK-compatible and extensible because
- * the AWS SDK attaches identity metadata. It is never shared with caller input.
+ * A static credential copy remains SDK-compatible and extensible because the
+ * AWS SDK attaches identity metadata. A provider remains captured behind an
+ * account-validating wrapper. Neither form is shared with caller input.
  */
 export type WorkspaceSearchMigrationDescribeTableAwsSdkClientConfiguration = {
-  /** SDK-owned detached credentials matching the declared measured account. */
-  readonly credentials: WorkspaceSearchMigrationDescribeTablePinnedAwsCredentials
+  /** SDK-owned credentials or provider matching the declared measured account. */
+  readonly credentials:
+    | WorkspaceSearchMigrationDescribeTablePinnedAwsCredentials
+    | WorkspaceSearchMigrationDescribeTablePinnedAwsCredentialsProvider
   /** Internally derived partition-aware official DynamoDB endpoint. */
   readonly endpoint: string
   /** Transport-owned single-attempt limit. */
@@ -449,9 +462,11 @@ function createDescribeTableAwsSdkClientConfigurationFromSnapshot(
   snapshot: WorkspaceSearchMigrationDescribeTableAwsSdkConfiguration,
 ): WorkspaceSearchMigrationDescribeTableAwsSdkClientConfiguration {
   const { credentials: pinnedCredentials, region } = snapshot
-  const credentials = createDescribeTableAwsSdkCredentialsFromSnapshot(
-    pinnedCredentials,
-  )
+  const credentials = typeof pinnedCredentials === 'function'
+    ? pinnedCredentials
+    : createDescribeTableAwsSdkCredentialsFromSnapshot(
+      pinnedCredentials,
+    )
   return Object.freeze({
     credentials,
     endpoint:
@@ -561,11 +576,54 @@ function detachAndValidateDescribeTableAwsSdkConfiguration(
   } catch {
     throw new Error('Invalid DescribeTable transport credentials.')
   }
-  const credentials = detachAndValidateDescribeTablePinnedAwsCredentials(
+  const credentials = detachAndValidateDescribeTableAwsCredentials(
     credentialInput,
     account,
   )
   return Object.freeze({ account, credentials, region })
+}
+
+/**
+ * Captures static credentials or a refresh-capable provider and validates
+ * every provider result against the measured account.
+ *
+ * @param credentials - Untrusted static credentials or provider.
+ * @param expectedAccount - Account selected for the shared rate ledger.
+ * @returns Detached static credentials or an account-validating provider.
+ */
+function detachAndValidateDescribeTableAwsCredentials(
+  credentials: unknown,
+  expectedAccount: string,
+):
+  | WorkspaceSearchMigrationDescribeTablePinnedAwsCredentials
+  | WorkspaceSearchMigrationDescribeTablePinnedAwsCredentialsProvider {
+  if (typeof credentials !== 'function') {
+    return detachAndValidateDescribeTablePinnedAwsCredentials(
+      credentials,
+      expectedAccount,
+    )
+  }
+  const provider = credentials
+  const capturedProvider:
+    WorkspaceSearchMigrationDescribeTablePinnedAwsCredentialsProvider =
+      async () => {
+        try {
+          const resolved: unknown = await Reflect.apply(
+            provider,
+            undefined,
+            [],
+          )
+          return createDescribeTableAwsSdkCredentialsFromSnapshot(
+            detachAndValidateDescribeTablePinnedAwsCredentials(
+              resolved,
+              expectedAccount,
+            ),
+          )
+        } catch {
+          throw new Error('Invalid DescribeTable transport credentials.')
+        }
+      }
+  return Object.freeze(capturedProvider)
 }
 
 /**
@@ -1619,6 +1677,7 @@ async function claimDescribeTableRateLifecycle(
       scope = createFreshRateScopeState(
         claim.scopeBindingDigest,
         claim.transportBindingDigest,
+        dependencies,
       )
     } else {
       if (claim.bootstrap) {
@@ -5560,12 +5619,27 @@ function requireAbortSignal(
  *
  * @param scopeBindingDigest - Opaque durable scope binding.
  * @param transportBindingDigest - Fixed transport contract binding.
+ * @param dependencies - Validated clocks and safety policy.
  * @returns Empty process-local scope awaiting its bootstrap CAS.
  */
 function createFreshRateScopeState(
   scopeBindingDigest: string,
   transportBindingDigest: string,
+  dependencies: RateRegistryDependencies,
 ): RateScopeState {
+  const now = readInitialRateClock(dependencies.clock)
+  const safetyHorizon = Math.max(
+    dependencies.policy.windowMilliseconds,
+    dependencies.policy.minimumAttemptIntervalMilliseconds,
+    dependencies.policy.minimumPageIntervalMilliseconds,
+    dependencies.policy.throttleBackoffMaximumMilliseconds,
+  )
+  const coldStartNotBefore = now + safetyHorizon
+  if (!Number.isSafeInteger(coldStartNotBefore)) {
+    throw new WorkspaceSearchMigrationDescribeTableRateError(
+      'invalid-lifecycle',
+    )
+  }
   return {
     scopeBindingDigest,
     transportBindingDigest,
@@ -5581,10 +5655,10 @@ function createFreshRateScopeState(
     lastAttemptStartedAt: undefined,
     lastPageStartedAt: undefined,
     resumeNotBefore: 0,
-    coldStartNotBefore: 0,
+    coldStartNotBefore,
     consecutiveThrottles: 0,
     sequence: 0,
-    lastObservedAt: undefined,
+    lastObservedAt: now,
     lastBudgetStopSignature: undefined,
     evidence: {
       attemptCount: 0,

@@ -551,6 +551,17 @@ class ExecutionSupervisorHarness {
     this.rejectNextAuthorityRead = true
   }
 
+  /** Makes the closed writer-fence time non-finite at the session boundary. */
+  exposeInvalidClosedAt(): void {
+    if (this.writerFenceRecord.mode !== 'closed') {
+      throw new Error('Expected one closed writer fence.')
+    }
+    this.writerFenceRecord = {
+      ...this.writerFenceRecord,
+      closedAt: 'invalid-closed-at',
+    }
+  }
+
   /**
    * Makes later authority reads expose a heartbeat-extended lease.
    */
@@ -980,6 +991,16 @@ class ExecutionSupervisorHarness {
               expiresAt: '2026-07-29T01:21:20.000Z',
             }
           : lease
+      },
+      /** Installs the heartbeat mutation assertion around the task. */
+      runWithMutationAdmissionGuard: async (guard, task) => {
+        this.events.push('mutation-admission:guard')
+        guard()
+        return await task()
+      },
+      /** Records one mutation-admission interruption. */
+      interruptMutationAdmission: () => {
+        this.events.push('mutation-admission:interrupt')
       },
       readMaintenanceEvidencePointer: async () => {
         this.events.push('authority:read-pointer')
@@ -1481,6 +1502,8 @@ describe('Workspace Search migration execution supervisor', () => {
       status: 'applied',
       appliedOperationCount: 1,
     })
+    expect(harness.events).toContain('mutation-admission:guard')
+    expect(harness.events).not.toContain('mutation-admission:interrupt')
   })
 
   test('advances legal verify and scope-specific rollback branches while rejecting drift before lease acquisition', async () => {
@@ -1535,6 +1558,7 @@ describe('Workspace Search migration execution supervisor', () => {
       phase: 'rolled-back',
       nextAction: { kind: 'none' },
     })
+    expect(partialHarness.events).toContain('mutation-admission:guard')
     expect(
       partialHarness.events.filter((event) =>
         event.startsWith('partial-rollback:') &&
@@ -1565,6 +1589,7 @@ describe('Workspace Search migration execution supervisor', () => {
       phase: 'rolled-back',
       nextAction: { kind: 'none' },
     })
+    expect(completeHarness.events).toContain('mutation-admission:guard')
     expect(
       completeHarness.events.filter((event) =>
         event.startsWith('complete-rollback:') &&
@@ -1695,6 +1720,8 @@ describe('Workspace Search migration execution supervisor', () => {
       'operation:1:1',
     ])
     expect(harness.readCurrentRunState().revision).toBe(2)
+    expect(harness.events).toContain('mutation-admission:guard')
+    expect(harness.events).toContain('mutation-admission:interrupt')
   })
 
   test('does not start another mutation after heartbeat loss while operation reconciliation is in flight', async () => {
@@ -1729,6 +1756,8 @@ describe('Workspace Search migration execution supervisor', () => {
       'operation:1:1',
     ])
     expect(harness.readCurrentRunState().revision).toBe(2)
+    expect(harness.events).toContain('mutation-admission:guard')
+    expect(harness.events).toContain('mutation-admission:interrupt')
   })
 
   test('adopts a higher-fence takeover before continuing apply', async () => {
@@ -1902,6 +1931,31 @@ describe('Workspace Search migration execution supervisor', () => {
       'authority:renew',
       'execution-create:7',
     ])
+  })
+
+  test('rejects a non-finite writer-fence close time before evidence renewal', async () => {
+    const harness = new ExecutionSupervisorHarness('ready')
+    harness.rejectPointerAuthorityOnce()
+    harness.exposeInvalidClosedAt()
+
+    const failure = await captureMigrationFailure(() =>
+      superviseWorkspaceSearchMigrationExecution({
+        session: harness.session,
+        maintenanceEvidenceProvider:
+          harness.maintenanceEvidenceProvider,
+        runId,
+        ownerId,
+        expectedConfigurationHash:
+          harness.fixture.configurationHash,
+        mode: 'apply',
+        heartbeatScheduler: harness.scheduler,
+        clock: fixedClock,
+      })
+    )
+
+    expect(failure.code).toBe('INVALID_MAINTENANCE_EVIDENCE')
+    expect(harness.events).toContain('evidence:collect')
+    expect(harness.events).not.toContain('authority:renew')
   })
 })
 
