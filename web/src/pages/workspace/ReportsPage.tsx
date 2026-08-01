@@ -76,7 +76,7 @@ import { useProjectDirectory } from '../../projects/queries/useProjectDirectory'
 import {
   createTeamIssuesPath,
 } from '../../shared/routing/paths'
-import { useWorkspaceSidebarController } from '../../workspace/ui/WorkspaceRoute'
+import { useWorkspaceSidebarController } from '../../shared/ui/sidebar'
 
 const emptyReports: AnalyticsReport[] = []
 const emptyTeams: ProjectDirectoryTeam[] = []
@@ -666,7 +666,7 @@ export function ReportsPage() {
   }
 
   return (
-    <div className="relative min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain">
+    <div className="relative min-h-0 min-w-0 flex-1">
         <div className="absolute left-4 top-4 z-30 min-[981px]:hidden">
           <MobileSidebarButton
             label={t('sidebar.mobileOpen')}

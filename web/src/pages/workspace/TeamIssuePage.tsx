@@ -58,7 +58,7 @@ import {
 import type { TaskPriority } from '../../tasks/api'
 import type { WorkspaceMember } from '../../workspace/api'
 import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
-import { useWorkspaceSidebarController } from '../../workspace/ui/WorkspaceRoute'
+import { useWorkspaceSidebarController } from '../../shared/ui/sidebar'
 import {
   createWorkItemRelation,
   deleteWorkItemRelation,
@@ -754,7 +754,7 @@ export function TeamIssueScreen({
             {t('issues.loading')}
           </div>
         ) : (
-          <div className="min-h-0 flex-1 overflow-auto overscroll-contain">
+          <div className="min-h-0 flex-1">
             <div className="grid min-h-full grid-cols-[minmax(0,1fr)_minmax(360px,440px)] gap-0 max-[1080px]:grid-cols-1">
               <section className="min-w-0 px-[clamp(20px,3vw,34px)] py-5">
                 {configurationErrorMessage ? (

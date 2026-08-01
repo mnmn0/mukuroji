@@ -59,7 +59,7 @@ import {
   createTeamIssuesPath,
   type PlanningViewId,
 } from '../../shared/routing/paths'
-import { useWorkspaceSidebarController } from '../../workspace/ui/WorkspaceRoute'
+import { useWorkspaceSidebarController } from '../../shared/ui/sidebar'
 
 const emptyTeams: ProjectDirectoryTeam[] = []
 const emptyProjectRoles: Readonly<Record<string, ProjectMemberRole>> = {}
@@ -219,7 +219,7 @@ export function PlanningPage() {
   }
 
   return (
-    <div className="relative min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain">
+    <div className="relative min-h-0 min-w-0 flex-1">
         <div className="absolute left-4 top-4 z-20 min-[981px]:hidden">
           <MobileSidebarButton label={t('sidebar.mobileOpen')} onClick={openMobileSidebar} />
         </div>

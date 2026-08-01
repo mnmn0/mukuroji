@@ -7,6 +7,7 @@ import {
 import { RelatedDocuments } from '../../documents/ui/RelatedDocuments'
 import {
   MobileSidebarButton,
+  useWorkspaceSidebarController,
 } from '../../shared/ui/sidebar'
 import {
   createTranslator,
@@ -14,7 +15,6 @@ import {
   type Locale,
 } from '../../shared/i18n/i18n'
 import { workspaceNavPaths } from '../../shared/routing/paths'
-import { useWorkspaceSidebarController } from '../../workspace/ui/WorkspaceRoute'
 
 /**
  * Goal から関連 Documents へ戻る軽量 context page です。

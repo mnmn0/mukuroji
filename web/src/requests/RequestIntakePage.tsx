@@ -13,6 +13,7 @@ import { resolveEnterpriseSessionErrorsAction } from '../auth/enterpriseSessionE
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import {
   MobileSidebarButton,
+  useWorkspaceSidebarController,
 } from '../shared/ui/sidebar'
 import {
   createTranslator,
@@ -26,7 +27,6 @@ import { useProjectDirectory } from '../projects/queries/useProjectDirectory'
 import {
   type RequestsView,
 } from '../shared/routing/paths'
-import { useWorkspaceSidebarController } from '../workspace/ui/WorkspaceRoute'
 import {
   useWorkItemConfiguration,
 } from '../work-items/queries/useWorkItemConfigurations'
@@ -283,7 +283,7 @@ export function RequestIntakePage() {
         {isLoading ? (
           <div className="grid min-h-0 flex-1 place-items-center text-sm font-semibold text-[var(--workbench-muted)]">{t('requests.loading')}</div>
         ) : currentUserErrorAction?.kind === 'stay' ? (
-          <div className="min-h-0 flex-1 overflow-auto overscroll-contain px-[clamp(20px,3vw,34px)] py-5">
+          <div className="min-h-0 flex-1 px-[clamp(20px,3vw,34px)] py-5">
             <p
               className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700"
               role="alert"
@@ -292,7 +292,7 @@ export function RequestIntakePage() {
             </p>
           </div>
         ) : (
-          <div className="min-h-0 flex-1 overflow-auto overscroll-contain px-[clamp(20px,3vw,34px)] py-5">
+          <div className="min-h-0 flex-1 px-[clamp(20px,3vw,34px)] py-5">
             <div className="mb-5 flex flex-wrap gap-2 border-b border-[var(--workbench-border)] pb-3" role="tablist">
               <TabButton active={activeView === 'queue'} label={t('requests.tab.queue')} onClick={() => selectView('queue')} />
               {canManageForms ? <TabButton active={activeView === 'forms'} label={t('requests.tab.forms')} onClick={() => selectView('forms')} /> : null}

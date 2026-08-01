@@ -30,6 +30,56 @@ import { appRoutes } from '../src/app/router'
 import { WorkspaceRoute } from '../src/workspace/ui/WorkspaceRoute'
 import { WorkspaceRouteProvider } from '../src/workspace/ui/WorkspaceRouteProvider'
 
+/** A route path and the page component expected at the end of its match. */
+type WorkspaceRouteDefinition = {
+  /** Page component expected to render for the route. */
+  component: unknown
+  /** URL path used to resolve the route. */
+  path: string
+}
+
+/**
+ * Asserts that every supplied path renders through one shared Workspace shell.
+ *
+ * @param workspaceRoutes - Route/component pairs to verify.
+ * @returns Nothing; throws through the test assertions when a mapping is invalid.
+ */
+function expectSharedWorkspaceShell(
+  workspaceRoutes: readonly WorkspaceRouteDefinition[],
+) {
+  const shellRoutes = new Set<RouteObject>()
+
+  expect(new Set(workspaceRoutes.map(({ component }) => component)).size).toBe(
+    workspaceRoutes.length,
+  )
+
+  for (const { component, path } of workspaceRoutes) {
+    const matches = matchRoutes(appRoutes, path)
+    const providerMatch = matches?.find((match) =>
+      isValidElement(match.route.element) &&
+      match.route.element.type === WorkspaceRouteProvider
+    )
+    const shellMatch = matches?.find((match) =>
+      isValidElement(match.route.element) &&
+      match.route.element.type === WorkspaceRoute
+    )
+    const pageElement = matches?.at(-1)?.route.element
+
+    expect(providerMatch).toBeDefined()
+    expect(shellMatch).toBeDefined()
+    expect(isValidElement(pageElement)).toBe(true)
+
+    if (!shellMatch || !isValidElement(pageElement)) {
+      throw new Error(`Expected ${path} to render through the Workspace shell.`)
+    }
+
+    shellRoutes.add(shellMatch.route)
+    expect(pageElement.type).toBe(component)
+  }
+
+  expect(shellRoutes.size).toBe(1)
+}
+
 describe('Work Item detail paths', () => {
   test('keeps assigned Work Items scoped by project, team, and issue', () => {
     expect(createProjectIssuesPath('shared launch', 'design/team', 'issue/1')).toBe(
@@ -111,7 +161,7 @@ describe('Request intake paths', () => {
 
 describe('Workspace route pages', () => {
   test('maps each split URL through one persistent shell to its direct page', () => {
-    const workspaceRoutes = [
+    expectSharedWorkspaceShell([
       { component: DashboardPage, path: '/dashboard' },
       { component: HomePage, path: '/home' },
       { component: MyTasksPage, path: '/my-tasks' },
@@ -121,40 +171,11 @@ describe('Workspace route pages', () => {
       { component: EnterpriseSecurityPage, path: '/settings/security' },
       { component: TeamOverviewPage, path: '/teams/core-team/overview' },
       { component: TeamMembersPage, path: '/teams/core-team/members' },
-    ]
-    const shellRoutes = new Set<RouteObject>()
-
-    expect(new Set(workspaceRoutes.map(({ component }) => component)).size).toBe(9)
-
-    for (const { component, path } of workspaceRoutes) {
-      const matches = matchRoutes(appRoutes, path)
-      const providerMatch = matches?.find((match) =>
-        isValidElement(match.route.element) &&
-        match.route.element.type === WorkspaceRouteProvider
-      )
-      const shellMatch = matches?.find((match) =>
-        isValidElement(match.route.element) &&
-        match.route.element.type === WorkspaceRoute
-      )
-      const pageElement = matches?.at(-1)?.route.element
-
-      expect(providerMatch).toBeDefined()
-      expect(shellMatch).toBeDefined()
-      expect(isValidElement(pageElement)).toBe(true)
-
-      if (!shellMatch || !isValidElement(pageElement)) {
-        throw new Error(`Expected ${path} to render through the Workspace shell.`)
-      }
-
-      shellRoutes.add(shellMatch.route)
-      expect(pageElement.type).toBe(component)
-    }
-
-    expect(shellRoutes.size).toBe(1)
+    ])
   })
 
   test('maps every authenticated workspace screen through the same persistent shell', () => {
-    const workspaceRoutes = [
+    expectSharedWorkspaceShell([
       { component: RequestIntakePage, path: '/requests' },
       { component: SearchPage, path: '/search' },
       { component: PlanningPage, path: '/planning/timeline' },
@@ -166,34 +187,7 @@ describe('Workspace route pages', () => {
         component: TaskPage,
         path: '/projects/refero/issues?teamId=core-team',
       },
-    ]
-    const shellRoutes = new Set<RouteObject>()
-
-    for (const { component, path } of workspaceRoutes) {
-      const matches = matchRoutes(appRoutes, path)
-      const providerMatch = matches?.find((match) =>
-        isValidElement(match.route.element) &&
-        match.route.element.type === WorkspaceRouteProvider
-      )
-      const shellMatch = matches?.find((match) =>
-        isValidElement(match.route.element) &&
-        match.route.element.type === WorkspaceRoute
-      )
-      const pageElement = matches?.at(-1)?.route.element
-
-      expect(providerMatch).toBeDefined()
-      expect(shellMatch).toBeDefined()
-      expect(isValidElement(pageElement)).toBe(true)
-
-      if (!shellMatch || !isValidElement(pageElement)) {
-        throw new Error(`Expected ${path} to render through the Workspace shell.`)
-      }
-
-      shellRoutes.add(shellMatch.route)
-      expect(pageElement.type).toBe(component)
-    }
-
-    expect(shellRoutes.size).toBe(1)
+    ])
   })
 })
 

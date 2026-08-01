@@ -56,6 +56,7 @@ import { useIssueCollaboration } from '../../issues/mutations/useIssueCollaborat
 import {
   createProjectIssuesPath,
 } from '../../shared/routing/paths'
+import { useReportWorkspaceSidebarRouteState } from '../../shared/ui/sidebar'
 import {
   type CreateProjectTaskInput,
   type ProjectTask,
@@ -428,6 +429,15 @@ export function TaskPage() {
     Boolean(currentUserError && currentUserErrorAction?.kind !== 'stay') ||
     Boolean(user && isProjectTasksLoading) ||
     Boolean(workItemConfigurationKey && isWorkItemConfigurationLoading)
+  const sidebarRouteState = useMemo(
+    () => ({
+      activeProjectTeamId: interactionTeamId,
+      isBusy: isLoading,
+    }),
+    [interactionTeamId, isLoading],
+  )
+
+  useReportWorkspaceSidebarRouteState(sidebarRouteState)
 
   useEffect(() => {
     document.documentElement.lang = locale

@@ -30,8 +30,8 @@ import { useCurrentUser } from '../auth/queries/useCurrentUser'
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import {
   MobileSidebarButton,
+  useWorkspaceSidebarController,
 } from '../shared/ui/sidebar'
-import { useWorkspaceSidebarController } from '../workspace/ui/WorkspaceRoute'
 import {
   createTranslator,
   getInitialLocale,
@@ -422,6 +422,7 @@ export type DocumentScreenProps = {
  */
 export function DocumentPage() {
   const navigate = useNavigate()
+  const { closeMobileSidebar } = useWorkspaceSidebarController()
   const params = useParams()
   const [searchParams] = useSearchParams()
   const [session] = useState(() => getAuthSession())
@@ -703,14 +704,18 @@ export function DocumentPage() {
       () => undefined,
     )
       .then((saved) => {
-        if (saved) blocker.proceed()
-        else blocker.reset()
+        if (saved) {
+          closeMobileSidebar()
+          blocker.proceed()
+        } else {
+          blocker.reset()
+        }
       })
       .catch(() => blocker.reset())
       .finally(() => {
         isResolvingBlockedNavigationRef.current = false
       })
-  }, [blocker])
+  }, [blocker, closeMobileSidebar])
 
   useEffect(() => {
     activeAnchorRef.current = activeAnchorId

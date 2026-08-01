@@ -1,7 +1,5 @@
 import {
-  createContext,
   useCallback,
-  useContext,
   useEffect,
   useMemo,
   useState,
@@ -18,6 +16,8 @@ import {
 import {
   MobileSidebarButton,
   WorkspaceSidebar,
+  WorkspaceSidebarProvider,
+  useWorkspaceSidebarRouteState,
   type SidebarNavId,
   type SidebarTeamViewId,
 } from '../../shared/ui/sidebar'
@@ -45,14 +45,6 @@ export type WorkspaceRouteMetadata = {
   titleKey: MessageKey
   /** The translation key for the route header's supporting description. */
   descriptionKey: MessageKey
-}
-
-/** Controls the shared sidebar from route-specific headers and screens. */
-export type WorkspaceSidebarController = {
-  /** Opens the shared mobile sidebar drawer. */
-  openMobileSidebar: () => void
-  /** Closes the shared mobile sidebar drawer. */
-  closeMobileSidebar: () => void
 }
 
 /** Props accepted by content rendered inside the persistent Workspace route shell. */
@@ -175,12 +167,6 @@ const projectIssuesRouteMetadata: WorkspaceRouteMetadata = {
   descriptionKey: 'workspace.myTasks.description',
 }
 const emptySessionErrors: readonly unknown[] = []
-const workspaceSidebarControllerContext =
-  createContext<WorkspaceSidebarController | undefined>(undefined)
-const emptyWorkspaceSidebarController: WorkspaceSidebarController = {
-  closeMobileSidebar: () => undefined,
-  openMobileSidebar: () => undefined,
-}
 
 /**
  * Renders the persistent authenticated sidebar, header, common boundary, and route outlet.
@@ -188,10 +174,64 @@ const emptyWorkspaceSidebarController: WorkspaceSidebarController = {
  * @returns The shared Workspace shell used by all authenticated Workspace routes.
  */
 export function WorkspaceRoute() {
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
+  /**
+   * Opens the persistent mobile sidebar drawer.
+   *
+   * @returns Nothing.
+   */
+  const openMobileSidebar = useCallback(() => {
+    setIsMobileSidebarOpen(true)
+  }, [])
+  /**
+   * Closes the persistent mobile sidebar drawer.
+   *
+   * @returns Nothing.
+   */
+  const closeMobileSidebar = useCallback(() => {
+    setIsMobileSidebarOpen(false)
+  }, [])
+  const sidebarController = useMemo(
+    () => ({ closeMobileSidebar, openMobileSidebar }),
+    [closeMobileSidebar, openMobileSidebar],
+  )
+
+  return (
+    <WorkspaceSidebarProvider controller={sidebarController}>
+      <WorkspaceRouteShell
+        closeMobileSidebar={closeMobileSidebar}
+        isMobileSidebarOpen={isMobileSidebarOpen}
+        openMobileSidebar={openMobileSidebar}
+      />
+    </WorkspaceSidebarProvider>
+  )
+}
+
+/** Props accepted by the persistent Workspace shell implementation. */
+type WorkspaceRouteShellProps = {
+  /** Closes the shared mobile sidebar drawer. */
+  closeMobileSidebar: () => void
+  /** Whether the shared mobile sidebar drawer is open. */
+  isMobileSidebarOpen: boolean
+  /** Opens the shared mobile sidebar drawer. */
+  openMobileSidebar: () => void
+}
+
+/**
+ * Renders the Workspace shell after its shared sidebar context is available.
+ *
+ * @param props - Mobile sidebar state and controls owned by the shell.
+ * @returns The persistent sidebar, route header, boundaries, and outlet.
+ */
+function WorkspaceRouteShell({
+  closeMobileSidebar,
+  isMobileSidebarOpen,
+  openMobileSidebar,
+}: WorkspaceRouteShellProps) {
   const workspace = useWorkspaceRouteContext()
   const location = useLocation()
   const commandMenu = useWorkspaceCommandMenu()
-  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
+  const routeState = useWorkspaceSidebarRouteState()
   const t = useMemo(
     () => createTranslator(workspace.locale),
     [workspace.locale],
@@ -204,16 +244,6 @@ export function WorkspaceRoute() {
     location.pathname,
     location.search,
   )
-  const openMobileSidebar = useCallback(() => {
-    setIsMobileSidebarOpen(true)
-  }, [])
-  const closeMobileSidebar = useCallback(() => {
-    setIsMobileSidebarOpen(false)
-  }, [])
-  const sidebarController = useMemo<WorkspaceSidebarController>(
-    () => ({ closeMobileSidebar, openMobileSidebar }),
-    [closeMobileSidebar, openMobileSidebar],
-  )
   const activeTeam = resolveWorkspaceRouteActiveTeam(
     workspace.teams,
     metadata?.activeTeamId,
@@ -222,10 +252,16 @@ export function WorkspaceRoute() {
     workspace.teams,
     metadata?.activeProjectId,
     metadata?.activeProjectTeamId,
-  )
+  ) ?? routeState.activeProjectTeamId
   const onArchiveTeam = workspace.onArchiveTeam
   const onArchiveProject = workspace.onArchiveProject
   const onSelectNav = workspace.onSelectNav
+  /**
+   * Archives a Team and leaves the route when the archived Team is visible.
+   *
+   * @param teamId - The Team ID to archive.
+   * @returns A promise that resolves after the archive operation completes.
+   */
   const handleArchiveTeam = async (teamId: string) => {
     if (!onArchiveTeam) {
       return
@@ -233,13 +269,22 @@ export function WorkspaceRoute() {
 
     await onArchiveTeam(teamId)
 
-    if (
-      metadata?.activeProjectId &&
-      activeProjectTeamId === teamId
-    ) {
+    const isActiveTeamArchived =
+      metadata?.activeTeamId === teamId ||
+      (metadata?.activeProjectId !== undefined &&
+        activeProjectTeamId === teamId)
+
+    if (isActiveTeamArchived) {
       onSelectNav('dashboard')
     }
   }
+  /**
+   * Archives a Project and leaves the route when the archived Project is visible.
+   *
+   * @param teamId - The owning Team ID.
+   * @param projectId - The Project ID to archive.
+   * @returns A promise that resolves after the archive operation completes.
+   */
   const handleArchiveProject = async (
     teamId: string,
     projectId: string,
@@ -278,6 +323,10 @@ export function WorkspaceRoute() {
 
   useEffect(() => {
     document.documentElement.lang = workspace.locale
+    if (metadata?.customHeader) {
+      return
+    }
+
     document.title = metadata
       ? `${title} | ${t('app.title')}`
       : t('app.title')
@@ -301,7 +350,6 @@ export function WorkspaceRoute() {
   ])
 
   return (
-    <workspaceSidebarControllerContext.Provider value={sidebarController}>
       <main className="workbench-shell flex h-svh min-h-0 overflow-hidden">
         <WorkspaceSidebar
           activeNavId={metadata?.activeNavId}
@@ -332,7 +380,10 @@ export function WorkspaceRoute() {
           teams={workspace.teams}
         />
 
-        <section className="workbench-main flex min-w-0 flex-1 flex-col overflow-hidden">
+        <section
+          aria-busy={routeState.isBusy}
+          className="workbench-main flex min-w-0 flex-1 flex-col overflow-hidden"
+        >
           {metadata && !metadata.customHeader ? (
             <header className="workbench-header flex-none px-[clamp(20px,3vw,34px)] py-4">
               <div className="flex min-w-0 flex-wrap items-start justify-between gap-4">
@@ -401,24 +452,13 @@ export function WorkspaceRoute() {
           </div>
         ) : (
           <div className="flex min-h-0 flex-1 flex-col overflow-auto overscroll-contain">
+            {/* Child screens use this shell-owned container as their sole page scroller. */}
             <Outlet context={workspace} />
           </div>
         )}
         </section>
       </main>
-    </workspaceSidebarControllerContext.Provider>
   )
-}
-
-/**
- * Reads the controller for the sidebar shared by all authenticated workspace screens.
- *
- * @returns Controls for opening and closing the shared mobile sidebar. Standalone
- * component stories receive no-op controls until they are mounted in the shell.
- */
-// eslint-disable-next-line react-refresh/only-export-components
-export function useWorkspaceSidebarController() {
-  return useContext(workspaceSidebarControllerContext) ?? emptyWorkspaceSidebarController
 }
 
 /**

@@ -26,7 +26,7 @@ import {
   type Locale,
 } from '../../shared/i18n/i18n'
 import type { WorkspaceMember } from '../../workspace/api'
-import { useWorkspaceSidebarController } from '../../workspace/ui/WorkspaceRoute'
+import { useWorkspaceSidebarController } from '../../shared/ui/sidebar'
 import type { WorkItemDefinitionFilter } from '../../work-items/model/workItemFilters'
 import { resolveWorkItemPersonOptions } from '../../work-items/model/workItemDisplay'
 import type { WorkItemRelationEditorInput } from '../../work-items/ui/WorkItemRelationsEditor'

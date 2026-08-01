@@ -20,6 +20,7 @@ import { resolveEnterpriseSessionErrorsAction } from '../auth/enterpriseSessionE
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import {
   MobileSidebarButton,
+  useWorkspaceSidebarController,
 } from '../shared/ui/sidebar'
 import {
   createTranslator,
@@ -29,7 +30,6 @@ import {
 } from '../shared/i18n/i18n'
 import type { ProjectDirectoryTeam } from '../projects/api'
 import { useProjectDirectory } from '../projects/queries/useProjectDirectory'
-import { useWorkspaceSidebarController } from '../workspace/ui/WorkspaceRoute'
 import {
   useTeamWorkItemConfigurations,
 } from '../work-items/queries/useWorkItemConfigurations'
@@ -506,7 +506,7 @@ export function SearchPage() {
             {t('workspace.loading')}
           </div>
         ) : (
-          <div className="min-h-0 flex-1 overflow-auto overscroll-contain">
+          <div className="min-h-0 flex-1">
             <div className="grid grid-cols-[250px_minmax(0,1fr)] gap-5 px-[clamp(20px,3vw,34px)] py-5 max-[1080px]:grid-cols-1">
               <SavedViewsPanel
                 canManageShared={canManageSharedViews}
