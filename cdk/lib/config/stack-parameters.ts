@@ -28,6 +28,8 @@ export interface StackParameters {
   readonly connectorRuntimeConfiguration: cdk.CfnParameter;
   /** Stable HMAC key used to pseudonymize workspace audit identities. */
   readonly workspaceAuditPseudonymKey: cdk.CfnParameter;
+  /** Existing IAM role exclusively authorized to approve restore-drill cleanup. */
+  readonly restoreDrillCleanupApproverRoleArn: cdk.CfnParameter;
   /** Operator-incremented immutable API configuration revision. */
   readonly apiRuntimeConfigurationRevision: cdk.CfnParameter;
   /** Explicit two-phase production writer-fence rollout mode. */
@@ -194,6 +196,19 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
         'WorkspaceAuditPseudonymKey must be exactly 64 lowercase hexadecimal characters.',
       description:
         'Stable 32-byte random HMAC key encoded as lowercase hexadecimal for non-PII Workspace member and invitation audit identifiers.',
+    },
+  );
+  const restoreDrillCleanupApproverRoleArn = new cdk.CfnParameter(
+    stack,
+    'RestoreDrillCleanupApproverRoleArn',
+    {
+      type: 'String',
+      allowedPattern:
+        '^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$',
+      constraintDescription:
+        'RestoreDrillCleanupApproverRoleArn must be an explicit IAM role ARN.',
+      description:
+        'Existing data-owner IAM role exclusively authorized to create and admit immutable restore-drill cleanup approvals.',
     },
   );
   const apiRuntimeConfigurationRevision = new cdk.CfnParameter(
@@ -385,6 +400,7 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     auditRetentionDays,
     connectorRuntimeConfiguration,
     workspaceAuditPseudonymKey,
+    restoreDrillCleanupApproverRoleArn,
     apiRuntimeConfigurationRevision,
     workspaceSearchWriterFenceMode,
     requestRateLimitPerHour,

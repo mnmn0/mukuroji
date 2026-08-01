@@ -293,13 +293,15 @@ test('developer platform and connector runtime secrets use rotated purpose-speci
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
 
-  template.resourceCountIs('AWS::KMS::Key', 5);
+  template.resourceCountIs('AWS::KMS::Key', 7);
   for (const description of [
     'Envelope key for developer platform Webhook signing secrets.',
     'Envelope key for developer platform connector credentials.',
     'Envelope key for developer platform cursors and idempotency state.',
     'Encryption key for connector provider runtime configuration.',
     'Encrypts lossless Workspace Search migration preimage journal segments.',
+    'Encrypts isolated restore-drill exports and exact-version file copies.',
+    'Encrypts immutable secret-free restore-drill evidence.',
   ]) {
     template.hasResourceProperties('AWS::KMS::Key', {
       Description: description,
@@ -309,7 +311,7 @@ test('developer platform and connector runtime secrets use rotated purpose-speci
   const protectedKmsKeys = Object.values(resources).filter((resource) =>
     (resource as { Type?: string }).Type === 'AWS::KMS::Key'
   ) as Array<{ DeletionPolicy?: string; UpdateReplacePolicy?: string }>;
-  expect(protectedKmsKeys).toHaveLength(5);
+  expect(protectedKmsKeys).toHaveLength(7);
   expect(protectedKmsKeys.every((resource) =>
     resource.DeletionPolicy === 'Retain' &&
     resource.UpdateReplacePolicy === 'Retain'

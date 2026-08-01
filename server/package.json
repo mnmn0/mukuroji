@@ -9,7 +9,8 @@
     "search:backfill": "bun run scripts/backfills/backfill-workspace-search.ts",
     "search:migration:control": "bun run scripts/migrations/workspace-search-v1/migration-control-cli.ts",
     "work-items:integrity": "bun run scripts/data-integrity/verify-work-items-integrity.ts",
-    "cross-domain:integrity": "bun run scripts/data-integrity/verify-cross-domain-integrity.ts"
+    "cross-domain:integrity": "bun run scripts/data-integrity/verify-cross-domain-integrity.ts",
+    "restore-drill:approve-cleanup": "bun run scripts/restore-drill/create-cleanup-approval.ts"
   },
   "dependencies": {
     "@aws-sdk/client-apigatewaymanagementapi": "^3.1057.0",
@@ -20,6 +21,7 @@
     "@aws-sdk/client-kms": "3.1057.0",
     "@aws-sdk/client-s3": "^3.1057.0",
     "@aws-sdk/client-secrets-manager": "^3.1057.0",
+    "@aws-sdk/client-sfn": "3.1057.0",
     "@aws-sdk/client-sqs": "^3.1057.0",
     "@aws-sdk/client-sts": "3.1057.0",
     "@aws-sdk/credential-provider-ini": "3.973.1",

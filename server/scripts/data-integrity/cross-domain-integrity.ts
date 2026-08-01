@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 
 /** Current cross-domain checker contract version. */
 export const CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION = 1
@@ -98,6 +98,29 @@ export const CROSS_DOMAIN_INTEGRITY_RESOURCE_TARGETS:
     'table:work-items',
     'table:workspace-access',
   ])
+
+/**
+ * Calculates the versioned logical-resource binding shared by source and
+ * isolated-restore checks.
+ *
+ * Physical names are deliberately excluded so differently named isolated
+ * resources remain comparable.
+ *
+ * @returns Lowercase SHA-256 digest of the fixed logical allowlist.
+ */
+export function calculateCrossDomainIntegrityResourceBindingDigest(): string {
+  const binding = [
+    'mukuroji-cross-domain-integrity-resource-binding/v1',
+    'bucket:file',
+    'table:work-items',
+    'table:work-item-configuration',
+    'table:project-directory',
+    'table:workspace-access',
+    'table:audit-events',
+    'table:file-proofing',
+  ].join('\n')
+  return createHash('sha256').update(`${binding}\n`, 'utf8').digest('hex')
+}
 
 /** Identifies the protected source or an isolated restore dataset. */
 export type CrossDomainIntegrityRole = 'source' | 'restore'

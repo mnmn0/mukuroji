@@ -20,6 +20,7 @@ import {
 } from './subsystems/file-storage';
 import { buildMigrationStorage } from './subsystems/migration-storage';
 import { buildStackOutputs } from './subsystems/outputs';
+import { buildRestoreDrill } from './subsystems/restore-drill';
 import { buildRuntimeControls } from './subsystems/runtime-controls';
 import { buildAuditProjectionWorker } from './subsystems/workers/audit-projection';
 import { buildAutomationWorkers } from './subsystems/workers/automation';
@@ -86,6 +87,16 @@ export class CdkStack extends cdk.Stack {
       workItemConfigurationTable: dataStores.workItemConfigurationTable,
       workspaceAccessTable: dataStores.workspaceAccessTable,
     });
+    const restoreDrill = buildRestoreDrill(this, {
+      apiRuntimeConfigurationRevision:
+        parameters.apiRuntimeConfigurationRevision,
+      dataStores,
+      fileStorage,
+      lambdaBuildPaths,
+      cleanupApproverRoleArn:
+        parameters.restoreDrillCleanupApproverRoleArn,
+      workspaceAuditPseudonymKey: parameters.workspaceAuditPseudonymKey,
+    });
     configureRealtimeSessionIndexes(dataStores);
 
     const workerChannels = buildWorkerChannels(this);
@@ -98,7 +109,11 @@ export class CdkStack extends cdk.Stack {
       workerChannels,
       workspaceSearchWriterFence,
     });
-    configureFileStorageApiBoundary(fileStorage, apiRuntime.apiFunction);
+    configureFileStorageApiBoundary(
+      fileStorage,
+      apiRuntime.apiFunction,
+      restoreDrill.runnerRole,
+    );
 
     const enterpriseIdentityWorkers = buildEnterpriseIdentityWorkers(this, {
       dataStores,
@@ -190,6 +205,7 @@ export class CdkStack extends cdk.Stack {
       ...fileStorage,
       ...crossDomainIntegrity,
       ...migrationStorage,
+      ...restoreDrill,
       ...workerChannels,
       ...apiTransports,
       ...enterpriseIdentityWorkers,

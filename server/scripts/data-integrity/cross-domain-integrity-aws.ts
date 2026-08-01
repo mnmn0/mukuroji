@@ -142,8 +142,14 @@ type FileRowNormalizationInput = {
   readonly row: Record<string, unknown>
 }
 
+/** Minimal bridge fields consumed while normalizing one raw row. */
+type RowNormalizationBridgeInput = Pick<
+  CrossDomainIntegrityCheckBridgeInput,
+  'auditPseudonymKey' | 'checkedAt' | 'digestKey' | 'reader'
+>
+
 /** Process-local audit candidate before the latest-resource lifecycle is resolved. */
-type PendingAuditReference = {
+export type CrossDomainIntegrityAwsAuditCandidate = {
   /** Stable event ordering key. */
   readonly eventOrder: string
   /** Event ID retained only inside aggregate HMAC input. */
@@ -155,6 +161,9 @@ type PendingAuditReference = {
   /** Joinable normalized reference. */
   readonly reference: Omit<CrossDomainAuditReference, 'resourceState'>
 }
+
+/** Internal concise alias for the public normalized Audit candidate. */
+type PendingAuditReference = CrossDomainIntegrityAwsAuditCandidate
 
 /** Private in-process join target for one Workspace member Audit pseudonym. */
 type WorkspaceMemberAuditIdentity = {
@@ -182,6 +191,7 @@ export class CrossDomainIntegrityAwsBridgeFailure extends Error {
   readonly code:
     | 'AWS_PAGE_INVALID'
     | 'KEY_CONFIGURATION_INVALID'
+    | 'LIMIT_EXCEEDED'
     | 'NORMALIZATION_FAILED'
 
   /**
@@ -193,12 +203,152 @@ export class CrossDomainIntegrityAwsBridgeFailure extends Error {
     code:
       | 'AWS_PAGE_INVALID'
       | 'KEY_CONFIGURATION_INVALID'
+      | 'LIMIT_EXCEEDED'
       | 'NORMALIZATION_FAILED',
   ) {
     super(code)
     this.name = 'CrossDomainIntegrityAwsBridgeFailure'
     this.code = code
   }
+}
+
+/** One normalized item associated with an opaque digest of its exact physical row. */
+export type CrossDomainIntegrityAwsNormalizedItem = {
+  /** Strict process-local normalized item. */
+  readonly item: CrossDomainIntegrityItem
+  /** HMAC of the exact low-level row and logical table target. */
+  readonly originDigest: string
+}
+
+/** One normalized Audit candidate associated with its exact physical row. */
+export type CrossDomainIntegrityAwsNormalizedAuditCandidate = {
+  /** Lifecycle candidate retained for page-order-independent reduction by the caller. */
+  readonly candidate: CrossDomainIntegrityAwsAuditCandidate
+  /** HMAC of the exact low-level row and logical table target. */
+  readonly originDigest: string
+}
+
+/** Input for one bounded raw-AWS normalization page. */
+export type CrossDomainIntegrityAwsNormalizedPageInput = {
+  /** Existing Workspace Audit pseudonym key retained only in memory. */
+  readonly auditPseudonymKey: Uint8Array
+  /** Canonical restore point shared by the complete drill. */
+  readonly checkedAt: string
+  /** Invocation-local restore-drill HMAC key. */
+  readonly digestKey: Uint8Array
+  /** Opaque preceding low-level Scan key. */
+  readonly exclusiveStartKey?: Readonly<Record<string, AttributeValue>>
+  /** Maximum raw rows accepted from the scan response. */
+  readonly pageSize: number
+  /** Remaining global normalized/evidence-unit capacity before this page. */
+  readonly remainingItemCapacity: number
+  /** Narrow isolated AWS reader. */
+  readonly reader: CrossDomainIntegrityCheckBridgeInput['reader']
+  /** Canonical isolated table target. */
+  readonly target: CrossDomainIntegrityTableTarget
+}
+
+/** One bounded normalized AWS page retained only inside one caller invocation. */
+export type CrossDomainIntegrityAwsNormalizedPage = {
+  /** Strict normalized Audit candidates with exact row digests. */
+  readonly auditCandidates: readonly CrossDomainIntegrityAwsNormalizedAuditCandidate[]
+  /** Stable failures emitted by the independent exact-version File checker. */
+  readonly externalFileFailureCodes: readonly FileMetadataIntegrityFailureCode[]
+  /** Strict normalized non-Audit items with exact row digests. */
+  readonly items: readonly CrossDomainIntegrityAwsNormalizedItem[]
+  /** Exact next low-level Scan key, absent on the terminal page. */
+  readonly nextKey?: Readonly<Record<string, AttributeValue>>
+  /** Exact canonical retained-unit charge applied to the global run budget. */
+  readonly retainedUnitCount: number
+}
+
+/**
+ * Reads and normalizes one isolated table page for immediate in-process consumption.
+ *
+ * This generic bridge owns AWS/schema normalization only. Callers must transform the
+ * returned tenant-bearing values before any durable write or diagnostic output.
+ *
+ * @param input - Exact target, cursor, keys, limits, timestamp, and isolated reader.
+ * @returns Bounded normalized values, stable File failures, and an exact continuation key.
+ */
+export async function readCrossDomainIntegrityAwsNormalizedPage(
+  input: CrossDomainIntegrityAwsNormalizedPageInput,
+): Promise<CrossDomainIntegrityAwsNormalizedPage> {
+  requireCanonicalTimestamp(input.checkedAt)
+  validateBridgeKeys(input.digestKey, input.auditPseudonymKey)
+  if (!Number.isSafeInteger(input.pageSize) || input.pageSize < 1 || input.pageSize > 100) {
+    throw new CrossDomainIntegrityAwsBridgeFailure('AWS_PAGE_INVALID')
+  }
+  if (
+    !Number.isSafeInteger(input.remainingItemCapacity) ||
+    input.remainingItemCapacity < 0 ||
+    input.remainingItemCapacity > 1_000_000
+  ) throw new CrossDomainIntegrityAwsBridgeFailure('LIMIT_EXCEEDED')
+  const output = await input.reader.scanPage(
+    input.target,
+    input.exclusiveStartKey === undefined
+      ? undefined
+      : parseRawAttributeMap(input.exclusiveStartKey),
+  )
+  const page = parseRawScanPage(output, input.pageSize)
+  if (
+    input.exclusiveStartKey !== undefined &&
+    page.nextKey !== undefined &&
+    serializeCanonicalAttributeMap(input.exclusiveStartKey) ===
+      serializeCanonicalAttributeMap(page.nextKey)
+  ) throw new CrossDomainIntegrityAwsBridgeFailure('AWS_PAGE_INVALID')
+  const decodedRows = page.items.map((rawItem) =>
+    runNormalizationBoundary(() => decodeAttributeMapToNativeRecord(rawItem))
+  )
+  if (input.target === 'file-proofing') {
+    let requiredItemBudget = 0
+    for (const row of decodedRows) {
+      requiredItemBudget += fileRowRequiredItemBudget(row, input.checkedAt)
+      if (requiredItemBudget > input.remainingItemCapacity) {
+        throw new CrossDomainIntegrityAwsBridgeFailure('LIMIT_EXCEEDED')
+      }
+    }
+  }
+  const collection = createBridgeCollection(input.remainingItemCapacity, 1)
+  const items: CrossDomainIntegrityAwsNormalizedItem[] = []
+  const auditCandidates: CrossDomainIntegrityAwsNormalizedAuditCandidate[] = []
+  for (let rowIndex = 0; rowIndex < page.items.length; rowIndex += 1) {
+    const rawItem = page.items[rowIndex]
+    const row = decodedRows[rowIndex]
+    if (!rawItem || !row) throw new CrossDomainIntegrityAwsBridgeFailure('AWS_PAGE_INVALID')
+    const originDigest = calculateCrossDomainIntegrityAwsPageOriginDigest(
+      input.digestKey,
+      input.target,
+      rawItem,
+    )
+    if (input.target === 'audit-events') {
+      const candidates = normalizeAuditRow(row, new Map())
+      for (const candidate of candidates) {
+        if (auditCandidates.length >= input.remainingItemCapacity) {
+          throw new CrossDomainIntegrityAwsBridgeFailure('LIMIT_EXCEEDED')
+        }
+        auditCandidates.push({ candidate, originDigest })
+      }
+      continue
+    }
+    const normalized = await normalizeRow(input.target, row, rawItem, input, collection)
+    appendNormalizedItems(collection, normalized)
+    if (collection.limitReached) {
+      throw new CrossDomainIntegrityAwsBridgeFailure('LIMIT_EXCEEDED')
+    }
+    for (const item of normalized) {
+      items.push({ item, originDigest })
+    }
+  }
+  const normalizedPage = {
+    auditCandidates,
+    externalFileFailureCodes: [...collection.fileFailureCodes].sort(compareUtf8Ordinal),
+    items,
+    retainedUnitCount: input.target === 'audit-events'
+      ? auditCandidates.length
+      : retainedEvidenceItemCount(collection),
+  }
+  return page.nextKey ? { ...normalizedPage, nextKey: page.nextKey } : normalizedPage
 }
 
 /**
@@ -261,6 +411,30 @@ function validateBridgeKeys(
       'KEY_CONFIGURATION_INVALID',
     )
   }
+}
+
+/**
+ * Creates an opaque digest for one exact low-level row without retaining raw fields.
+ *
+ * @param digestKey - Dedicated 32-byte evidence HMAC key.
+ * @param target - Canonical logical table target.
+ * @param rawItem - Strict low-level DynamoDB row of any bounded serialized size.
+ * @returns Lower-case HMAC safe for immediate claim construction.
+ */
+export function calculateCrossDomainIntegrityAwsPageOriginDigest(
+  digestKey: Uint8Array,
+  target: CrossDomainIntegrityTableTarget,
+  rawItem: Readonly<Record<string, AttributeValue>>,
+): string {
+  if (digestKey.byteLength !== 32 || !tableScanOrder.includes(target)) {
+    throw new CrossDomainIntegrityAwsBridgeFailure('KEY_CONFIGURATION_INVALID')
+  }
+  return createHmac('sha256', digestKey)
+    .update('mukuroji-cross-domain-integrity-aws-page-origin-v1\0', 'utf8')
+    .update(target, 'utf8')
+    .update('\0', 'utf8')
+    .update(serializeCanonicalAttributeMap(rawItem), 'utf8')
+    .digest('hex')
 }
 
 /**
@@ -371,7 +545,7 @@ async function normalizeRow(
   target: CrossDomainIntegrityTableTarget,
   row: Record<string, unknown>,
   rawItem: Readonly<Record<string, AttributeValue>>,
-  input: CrossDomainIntegrityCheckBridgeInput,
+  input: RowNormalizationBridgeInput,
   collection: BridgeCollection,
 ): Promise<CrossDomainIntegrityItem[]> {
   if (target === 'work-items') return normalizeWorkItem(row)
@@ -1047,6 +1221,30 @@ function auditEventTargetIsHistorical(event: AuditEventV1): boolean {
   return event.target.type === 'file' &&
     (event.entity.type === 'work-item' || event.entity.type === 'project') &&
     readAuditMetadataText(event.metadata, 'fileId') === event.target.id
+}
+
+/** Calculates the existing fail-before-I/O File capacity reservation for one raw row. */
+function fileRowRequiredItemBudget(
+  row: Record<string, unknown>,
+  checkedAt: string,
+): number {
+  const entryType = requireText(row.entryType)
+  requireText(row.scopeKey)
+  requireText(row.recordKey)
+  if (entryType !== 'file') {
+    if (!knownFileProofingAuxiliaryEntryTypes.has(entryType)) return normalizationFailure()
+    return 0
+  }
+  let references: FileIntegrityReference[] = []
+  try {
+    references = parseFileIntegrityReferences(row)
+  } catch {
+    // The independent checker converts strict parse failures to evidence-safe codes.
+  }
+  const nonExpiredCount = references.filter((reference) =>
+    !isExpiredFileTombstone(reference, checkedAt)
+  ).length
+  return references.length + nonExpiredCount * 2
 }
 
 /** Strictly normalizes one File Proofing row and observes its exact object versions. */

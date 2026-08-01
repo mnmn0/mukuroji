@@ -154,6 +154,58 @@ restore drillを完了扱いにしないでください。完全な手順とevid
 [`docs/operational-readiness.md`](../docs/operational-readiness.md#work-items-integrity-verifier-v1)
 を参照してください。
 
+## Isolated restore drill runtime
+
+`src/handlers/restore-drill-handler.ts`はpublic HTTP routeを持たないStep Functions task
+entrypointです。Daily scheduleからの`advance`と、承認済みresourceだけを対象にする`cleanup`を
+別export/roleで実行します。Durable phase、cursor、exact resource locator、operation receiptは
+専用state tableに保持し、Step Functions execution dataやlogへraw row/object keyを返しません。
+
+通常runは6表の共通PITR pointを選び、同じpointのDynamoDB exportをexact baselineとして別名table
+のrestoreと比較します。稼働中sourceのScanをhistorical baselineにしません。File Proofing rowが
+参照するexact source S3 VersionIdは専用scratch bucketへcopyし、range-chainによるbody一致、size、
+content type、metadata、upload/deletion/malware tagを検証します。Production uploadと共通の
+2 GiB上限まで、sourceとdestinationをexact `VersionId`付きの最大16 MiB `Range`で別々に読み、
+各range SHA-256と
+`Content-Range`/length/totalを検証してauthenticated chainをCAS更新します。Copy retry/応答消失で
+生じた全new VersionIdをcleanup scopeへ記録し、決定的に選んだ1件だけを隔離済みrowへremapします。
+
+Handlerはsource table/objectを更新・削除せず、API/workerのcompositionにもrestore resourceを公開
+しません。Export file、restore Scan page、File proof page/range、cross-domain semantic claimを
+invocation単位でincrementalに処理し、authenticated checkpoint、opaque HMAC claim、exact cursorだけを
+専用state tableへ保存します。上限到達をpartial successにせずfailed evidence/alarmへ進め、cleanup
+inventoryは検証上限で打ち切りません。Descriptor gateが比較するのはattribute definitions、base key、
+GSI key/projection、billing、SSE/KMS、source TTL contractとrestore TTL disabledです。Stream、alarm、
+resource tag、IAM/application binding、traffic routingはこのdata verifierの検査対象ではありません。
+
+Semantic Scanは1 logical stepでraw rowを最大25件、requirement/Audit reducerは最大100 durable recordを
+処理します。Eligibleなverification stageは1 Lambda invocationで最大50 logical stepをbatchし、8分の
+elapsed-time guardでもdurable checkpointへ戻ります。これらのlogical data上限は最大値を同時処理できる
+というcapacity保証ではありません。
+
+Stable failure code、aggregate count/digest、RPO/RTO、cross-domain resultだけをappend-only evidenceへ
+渡し、raw locator/cursorはrestricted operational stateだけに保持します。Durable local progressは0秒、
+AWS収束/copy claimはbounded waitでStandard workflowを再駆動し、task error/timeoutはdurable finalizer
+loopでevidence sealingを再開します。Generic Lambda/AWS/KMS/state-store failureは非integrityの
+`WORKFLOW_TASK_FAILED`とし、明示的に検出したdata/descriptor/File-copy差分だけをintegrity failureに
+分類します。0秒redriveを含むmain-loop `pending`はexecution全体で最大1,200回の
+fuseを共有し、なお継続が必要なら専用finalizerで非integrityの
+`WORKFLOW_POLL_BUDGET_EXCEEDED`をsealしてfailed evidence/alarm/remediation対象に
+します。
+Pass/failどちらもcleanup approvalを待ち、runnerは`result.json`、cleanup roleは`cleanup.json`だけを
+書きます。Cleanup entrypointはreceiptに束縛されたrestore table、scratch object VersionId、
+DynamoDB export prefixesのincomplete multipart upload以外を拒否し、1 logical step最大25件、
+1 invocation最大50 zero-wait stepまたは8分まで処理します。各step前にRUNとpinned cleanup executionを
+再検証し、executionが`RUNNING`かつ`redriveCount=0`でなければ拒否します。external waitが必要なら
+batchを終了します。
+全targetはmutable run stateと別のappend-only ledger partitionへ記録し、CopyObject inventoryを16分の
+quiet windowを挟む2 passで一致確認してからsealします。Cleanup roleはledgerをread-onlyで参照し、
+専用cleanup-progress partitionとrun/cadenceのcleanup-owned属性だけを更新します。
+
+詳細は[`docs/restore-drill.md`](../docs/restore-drill.md)を参照してください。Production AWS上で
+manual invoke、cleanup、deployを行う場合は、対象account/region、change record、data owner承認を
+先に確認してください。
+
 ## API path contract
 
 Hono app 内の canonical path は `/api` prefix 付きです。Lambda adapter は Function URL / API Gateway から届く prefix なしの path を canonical path へ正規化するため、次の 2 つは同じ route を呼びます。

@@ -312,14 +312,17 @@ export function buildFileStorage(
 }
 
 /**
- * Adds file quarantine policies that depend on the API execution role.
+ * Adds file quarantine policies that depend on trusted read-only roles.
  *
  * @param resources File resources that own the bucket policy.
  * @param apiFunction API Lambda whose role may read verified files.
+ * @param restoreDrillRunnerRole Isolated drill role that must read exact
+ * quarantined or deleted versions without receiving source write access.
  */
 export function configureFileStorageApiBoundary(
   resources: FileStorageResources,
   apiFunction: lambdaNodejs.NodejsFunction,
+  restoreDrillRunnerRole: iam.IRole,
 ): void {
   resources.fileBucket.addToResourcePolicy(new iam.PolicyStatement({
     sid: 'NoReadUnlessGuardDutyClean',
@@ -332,6 +335,7 @@ export function configureFileStorageApiBoundary(
         'aws:PrincipalArn': [
           resources.malwareProtectionRole.roleArn,
           apiFunction.role!.roleArn,
+          restoreDrillRunnerRole.roleArn,
         ],
       },
       StringNotEquals: {
@@ -346,6 +350,9 @@ export function configureFileStorageApiBoundary(
     actions: ['s3:GetObject', 's3:GetObjectVersion'],
     resources: [resources.fileBucket.arnForObjects('workspaces/*')],
     conditions: {
+      ArnNotEquals: {
+        'aws:PrincipalArn': restoreDrillRunnerRole.roleArn,
+      },
       StringEquals: {
         's3:ExistingObjectTag/mukuroji-deleted': 'true',
       },

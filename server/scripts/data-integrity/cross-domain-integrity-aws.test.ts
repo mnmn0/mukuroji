@@ -18,7 +18,9 @@ import {
   createWorkspaceMemberAuditEntityIdFromKeyBytes,
 } from '../../src/modules/audit'
 import {
+  calculateCrossDomainIntegrityAwsPageOriginDigest,
   CrossDomainIntegrityAwsBridgeFailure,
+  readCrossDomainIntegrityAwsNormalizedPage,
   runCrossDomainIntegrityAwsCheck,
 } from './cross-domain-integrity-aws'
 import {
@@ -72,6 +74,50 @@ const RESTORE_RESOURCE_IDENTITY_DIGEST =
     RESTORE_RESOURCE_IDENTITIES,
     DIGEST_KEY,
   )
+
+describe('bounded normalized page origin digests', () => {
+  test('prehashes a near-DynamoDB-limit row without a semantic token length cap', () => {
+    const rawItem: Record<string, AttributeValue> = {
+      payload: { S: 'x'.repeat(390_000) },
+    }
+    expect(calculateCrossDomainIntegrityAwsPageOriginDigest(
+      DIGEST_KEY,
+      'work-items',
+      rawItem,
+    )).toMatch(/^[a-f0-9]{64}$/u)
+  })
+})
+
+describe('normalized page global capacity boundary', () => {
+  test('allows an empty page at exact capacity and rejects the next retained unit', async () => {
+    const emptyReader = new FixtureAwsReader({
+      'work-items': [createScanPage([])],
+    })
+    await expect(readCrossDomainIntegrityAwsNormalizedPage({
+      auditPseudonymKey: AUDIT_PSEUDONYM_KEY,
+      checkedAt: CHECKED_AT,
+      digestKey: DIGEST_KEY,
+      pageSize: 25,
+      reader: emptyReader,
+      remainingItemCapacity: 0,
+      target: 'work-items',
+    })).resolves.toMatchObject({ retainedUnitCount: 0 })
+
+    const rows = createHealthyNativeRows()
+    const fullReader = new FixtureAwsReader({
+      'work-items': [createScanPage(rows['work-items'].map(toRawItem))],
+    })
+    await expect(readCrossDomainIntegrityAwsNormalizedPage({
+      auditPseudonymKey: AUDIT_PSEUDONYM_KEY,
+      checkedAt: CHECKED_AT,
+      digestKey: DIGEST_KEY,
+      pageSize: 25,
+      reader: fullReader,
+      remainingItemCapacity: 0,
+      target: 'work-items',
+    })).rejects.toEqual(new CrossDomainIntegrityAwsBridgeFailure('LIMIT_EXCEEDED'))
+  })
+})
 
 /** Native rows keyed by the six logical table targets. */
 type NativeRowsByTarget = Record<CrossDomainIntegrityTableTarget, readonly object[]>

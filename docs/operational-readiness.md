@@ -12,13 +12,13 @@ repository に固定せず、各実行の evidence record に残します。
 | Request correlation | `/api/*` で client header を信頼せず server が correlation/request ID を生成し、内部 route、response、CORS exposed header へ渡す | 信頼済み service 間で parent correlation を継承する認証済み protocol は未実装 |
 | API log / metric | Secret-safe な JSON completion/error log と CloudWatch EMF `Mukuroji/API` を出力する | Log retention、dashboard、30日 SLO 集計を environment owner が有効化すること |
 | Health | `/api/health` の liveness と、current-enabled runtime controlを先に確認してからDynamoDBを検証する `/api/ready` を分離し、readiness responseを`no-store`にする | Trusted probe と edge-level throttle を設定し、readiness の `503` を rollout 停止へ接続すること |
-| Trace | CDK が管理する全18個の Node.js Lambda で X-Ray active tracing を有効にし、API log に runtime-controlled invocation ID と X-Ray root trace ID を記録する | Correlation ID 自体の X-Ray annotation は未実装 |
-| Alarm | API、queue、DLQ、async destination、runtime control の24 metric alarmと1 composite alarmを定義し、同一account/regionの必須primary/secondary SNS topicへ全alarm actionを接続する。Fast-burn component 2件はnotification無効 | SNS subscription、Incident Manager、rosterは環境側の責務。Compositeを含む通知有効な23件のtest evidenceを確認するまで unattended production とみなさないこと |
+| Trace | CDK が管理する全20個の Node.js Lambda で X-Ray active tracing を有効にし、API log に runtime-controlled invocation ID と X-Ray root trace ID を記録する | Correlation ID 自体の X-Ray annotation は未実装 |
+| Alarm | API、queue、DLQ、async destination、runtime control、restore drill の38 metric alarmと1 composite alarmを定義し、同一account/regionの必須primary/secondary SNS topicへ全alarm actionを接続する。Fast-burn component 2件はnotification無効 | SNS subscription、Incident Manager、rosterは環境側の責務。Compositeを含む通知有効な37件のtest evidenceを確認するまで unattended production とみなさないこと |
 | Release | PR/push workflow が Server test を含む全 source/build config の strict typecheck、static analysis、unit/integration、Web E2E、CDK test/nag/synth を実行し、main ruleset が6つの必須 check を強制する | Path-filtered local runtime と外部 reviewer は常時 required にせず、対象変更ごとの release evidence で結果または rate limit を確認すること |
 | Web journey quality | Required Playwright gate が主要 Work Item 画面の keyboard/focus、390px viewport、screen-reader-facing ARIA tree、低速 API 中の status と復帰を検証する | Chromium と mock API による回帰 proxy であり、実 screen reader、visual regression、performance budget は未実装 |
 | Runtime control / rollout | AWS AppConfig の schema 検証済み `enabled` / `disabled` document を API、WebSocket、worker の entrypoint で fail-closed に評価し、operator 用 canary strategy と configuration failure alarm を定義する。Shared API は revision-bound な Lambda Version と `live` Alias で code/configuration を揃えて切り替える | `read-only` mode、route/effect registry、weighted alias routing、CodeDeploy による code canary は未実装。AppConfig の停止制御を code/schema rollout の互換性検証や writer fence の代用にしないこと |
 | Migration | Production-safe migration contract と entry/verification/rollback evidence を定義する。Workspace Search migration 専用の retained/PITR state table、Object Lock COMPLIANCE の segmented journal、transaction 限定 operator policy、物理 table/PITR/journal identity と maintenance drain evidence の strict validator、sealed plan/lease/fence/OCC/checkpoint/apply/verify/部分 apply からの reverse rollback を検証する永続 state-machine kernel を持つ。同じ measured AWS session に identity-bound な source Scan 1 page と exact digest/checkpoint reducer を持ち、複数 page の row evidence と累積 checkpoint を conditional transaction で保存して、commit 後の response loss から再開できる。Migration-state table には全 run/configuration で競合する global lease/heartbeat と、fresh maintenance evidence の immutable receipt/current pointer を永続化する。Source-evidence schema は S3 を使わない `dry-run` v1、read-only legacy planning v2、lossless artifact reference を必須にする planning v3 を分離する。Planning v3 は同じ measured AWS session の concrete S3 adapter で全 raw item を strict/lossless な DynamoDB AttributeValue segment（最大16 MiB）として Object Lock COMPLIANCE bucket へ保存し、順序付きの exact `{objectKey, versionId, contentDigest}` を lease/fence/current receipt と固定5 item transaction に結合する。Target raw page にも lossless codec と measured configuration-bound S3 adapter があり、exact object version を再読検証できる。Concrete managed AWS session は planning-only target evidence v1 を composition し、1 page ごとに raw target Scan を1回だけ行って lossless target artifact を upload する。Commit 前には target、続いて migration-state table の incarnation を再検証する。Exact-version artifact replay を可能にする順序付き reference、累積 checkpoint、authority の3 condition check、immutable page、predecessor-CAS head を固定5 item transaction に結合し、response loss を strict に照合できる。Pure planning join は planning v3 の4 source と target evidence v1 の raw page material を exact replayし、per-chain terminal identity/bounds、同一 run で実現可能な単調 authority 履歴と canonical provenance digest、target preimage、expected/observed/orphan set、candidate、target projected/deleted を決定的に構築する。Managed composition は同じ measured generation で state/source/target incarnation を前後検証し、5 head を強整合で固定して remaining budget 内の exact-version material を順次取得し、pure join 後に5 head を再確認する。同じ session は planning-artifact gateway も同一の pinned S3 client、measured configuration、generation 上へ composition し、caller は `runId` だけを指定する。Manifest-aware sealed authority v2 は、plan seal、plan/provenance manifest head、compact authority provenance、全6 TableId、5 terminal head、fresh current authority を結合し、authority 3条件、source 4 head、target head、未作成rootを固定9 item transactionで原子的に公開する。応答消失時は同一canonical rootの強整合再読だけを成功として回収する。Complete-plan apply sealはterminal 5 checkpoint、execution admission/state digest chain、journal/marker aggregate、全6 TableIdをexact-version Object Lock artifactとimmutable applied rootへ束縛し、rollback-start sentinelのabsenceを含む固定10 item transactionと強整合reconciliationで`applied` phaseを公開する。Application writer-fence v1 は全6 TableId と migration-state incarnation に束縛した strict canonical row、単調 epoch/revision、強整合 read、exact predecessor CAS、current authority 3条件付きinitial bootstrap、response-loss reconciliation、measured session quarantine を持つ。Execution-boundary AWS portはwriter-fence closeとrevision 1 boundary、post-close planning admissionとrevision 2 boundaryを、current authorityと未作成planning headへ束縛した固定10 item transactionとしてcommitする。Production API、worker、connector、backfill の fenced-table mutation は invocation-stable な open-row ConditionCheck 付き transaction へ統合し、TTL-managed support row と mapped migration row の disjointness を fail-closed に検証する。Terminal-outcome releaseはv1 closed row、revision 2 boundary、sealed authority、execution admission、verifiedまたは完全rolled-back rootを固定5 item transactionでexact CASし、全6 TableIdとterminal digestを保持するversion 2 open epoch/revisionへ進める。Resource measurement、writer-fence status、初回open-row bootstrapを行うcontrol CLIとsingle-flight heartbeat supervisorを持つ。Close、15分以上のpost-close drain、同一runでの4 source＋target再取得、plan/provenance保存、fresh authority付きsealed root publicationをdurable headから再開するplanning supervisorを持つ | Planning supervisorを呼び出すmutating CLI/coordinatorと、apply/verify/rollback/releaseを順序付ける完全なexecution supervisorは未実装であり、end-to-end migration lifecycleは未成立。Migration 専用 observability/alarm、restore/failover/DR drill、non-production 実行 evidence も未実装。Legacy planning v2 は digest-only のまま append/promote できない。Production migration gate は閉じたままにすること |
-| Data durability | Stateful DynamoDB table は `Retain` + PITR、file bucket は `Retain` + versioning を使う。Work Items には read-only の manifest/compare verifier があり、production application writer は durable writer guard を共有する | Restore、定期実行、regional replication/failover、AWS Backup plan は未実装。verifier やwriter guardの導入だけでdrill、snapshot isolation、regional DRを完了扱いにしないこと |
+| Data durability | Stateful DynamoDB table は `Retain` + PITR、file bucket は `Retain` + versioning を使う。6表の同一時点PITR restore、同時点exportとのexact aggregate比較、exact S3 version copy、RPO/RTO測定、90日cadence、immutable evidence、承認付きcleanupを隔離workflowで自動化する | Regional replication/failover と AWS Backup plan は未実装。成功したsame-Region drillをregional DR完了扱いにしないこと |
 
 Migration 行の「同一canonical root」には、同じtransaction attemptのbyte-identicalなrootに加え、
 同じstable caller inputを既存root自身の`sealedAt`で再構築してcanonical bytesが一致するdurable retryを
@@ -296,16 +296,16 @@ DLQ alarm の共通初動は次です。
 6. Queue が空、system of record が期待状態、重複 side effect がないことを確認して閉じる。
 
 CDK deploy は、異なる既存standard SNS topic名を `AlarmPrimaryTopicName` と
-`AlarmSecondaryTopicName` に必須指定し、同一account/regionのARNへ変換して全25 alarmの
+`AlarmSecondaryTopicName` に必須指定し、同一account/regionのARNへ変換して全39 alarmの
 `AlarmActions`へ設定します。Stackはtopic、subscription、Incident Manager、rosterを所有しません。
-Fast-burn component 2件は`ActionsEnabled=false`で、残る22 metric alarmと1 composite alarmの
+Fast-burn component 2件は`ActionsEnabled=false`で、残る36 metric alarmと1 composite alarmの
 遷移が両topicへ同時通知されます。Ack target未達時の段階escalationはsubscription先が管理します。
 Topic policyは`cloudwatch.amazonaws.com`の`sns:Publish`を同一account/regionのalarm ARNと
 SourceAccountで制限して許可します。SSEを使う場合はcustomer-managed KMS keyにも同principalの
 `kms:GenerateDataKey*`/`kms:Decrypt`と同じconfused-deputy条件を設定します。Operatorによる直接
 SNS publishだけをdelivery evidenceにせず、controlled CloudWatch alarmの実state transition、
 alarm history、両subscription receipt、OK復帰まで確認します。
-全25 alarmのARN、primary/secondary destination、subscription/roster revision、通知有効な23件の
+全39 alarmのARN、primary/secondary destination、subscription/roster revision、通知有効な37件の
 test notificationとfast-burn両component/compositeのstate history、UTC timestamp、受信者を
 environment evidenceに残すまで、上記ack targetは実効性を持ちません。
 
@@ -1465,13 +1465,73 @@ recovery table まで `RTO <= 4時間` です。これは運用目標であり�
 
 DynamoDB、Configuration、Relation Graph、Audit、Workspace Access、File Proofing metadata、
 exact S3 version の横断検査契約と非対象は
-[Cross-domain data integrity](./data-integrity.md) を参照してください。Source と隔離 restore は
-同じ versioned checker contract を使用し、incomplete/fail result は restore、migration、deploy の
-terminal evidence として受理しません。
+[Cross-domain data integrity](./data-integrity.md) を参照してください。Standalone checkerはsource/
+restore共通のfull-result contractを持ちます。自動drillは同じnormalizer/invariantをdurable opaque-claim
+adapter経由で隔離restoreへ適用し、sourceとのexact row比較は同時点export aggregateで行います。
+Incomplete/fail statusはrestore、migration、deployのterminal successとして受理しません。
 
-最低でも90日ごと、key schema/GSI/critical migration の変更後に、Work Items、Workspace Access、
-Audit Events のいずれかを交代で restore します。現時点では定期実行 automation がないため、
-environment owner が schedule、対象、evidence location を登録しなければなりません。
+通常runは [Isolated restore drill](./restore-drill.md) の契約に従います。Daily due scannerは直近の
+成功済みverificationから89日で次runをadmitし、90日でoverdue alarmを発火します。1回のrunで
+Work Items、Work Item Configuration、Project Directory、Workspace Access、Audit Events、
+File Proofingの6表を同じrestore pointへ復元し、同時点のDynamoDB exportをexact baselineにします。
+稼働中sourceのlive Scanをhistorical restoreとの完全比較に使いません。Active runが4時間の
+deadlineを超えた場合は、Step Functions status eventが欠落していても次のdaily scannerがrun revisionと
+runner execution ARNをCAS更新してownerを引き継ぎ、stale executionを拒否してfailure evidenceを
+sealします。
+
+File Proofing snapshotが参照するexact S3 versionはapplicationから見えないKMS暗号化済みscratch
+bucketへcopyします。Copy retry/応答消失で生じた全destination VersionIdをcleanup scopeへ記録し、
+決定的に選んだ1件だけを検証して隔離済みFile Proofing rowへ反映します。Production upload policyと
+同じ2 GiBまで、source/destinationをexact VersionId付きの最大16 MiB Rangeで独立streamし、range
+SHA-256、Content-Range/Length/total、ordered HMAC chainをinvocationごとに検証・checkpointします。
+
+Export data file、restore Scan page、File proof page/range、cross-domain normalized page/opaque semantic
+claimをincrementalに処理します。Current verifier limitsは1表あたりexport-object listing 10 page/
+10,000 object、export data file 256、1 export file 100,000 rowかつuncompressed 1 GiB、
+1表1,000,000 rowか10,000 restore page、File version 10,000です。
+Semantic stageはAudit pseudonym Secretのexact VersionIdを先にpinし、6表全体でraw page 10,000、
+retained opaque unit 1,000,000、1 normalized pageあたりclaim 150,000を上限にします。このclaim上限は
+DynamoDBの物理1 MiB page、canonical pending File versionの最小95 item byte、1 versionあたり最大13 claim、
+pageあたり最大4件のstable external File failureから得る最大143,485件を切り上げた値です。1 logical Scan stepは
+raw rowを最大25件、requirement/Audit reducerは1 logical stepあたりdurable recordを最大100件処理し、
+Audit current-resource判定はScan page順に依存せず最新eventをreduceします。Eligibleなpage-like stageは
+1 Lambda invocationで最大50 logical stepをbatchしますが、8分のelapsed-time guardでもbatchを終了して
+durable checkpointから再駆動します。
+上限到達や追加page/claimの存在を成功に切り詰めず、failed evidence、alarm、remediationへ進めます。
+Failure finalizerはこれらのverification limitとは独立して全created resourceをinventoryし、cleanup
+approval scopeを部分集合にしません。
+
+これらの件数/page上限はfail-closedなlogical ceilingであり、全上限を同時に満たすdatasetが1 runで
+RTO内に完了することを保証しません。Main loopの`pending`は0秒のlocal-state redriveも含めてexecution
+全体で数え、1,200 poll-loop iterationのfuse到達後も継続が必要ならpartial successにはせずfailure
+finalizerへ移ります。専用finalizerは非integrityのstable code
+`WORKFLOW_POLL_BUDGET_EXCEEDED`を記録します。Failure finalizerは1 invocationあたり最大50件の
+zero-wait logical stepまたは8分までRUN ownerを各step前に再検証し、全created resourceをinventoryして
+failed evidenceをsealし、
+last-successful cadenceを更新せず`awaiting-cleanup-approval`へ進めます。全sealed failureを示す
+`DrillFailureCount`、Workflow failure、RTO/timeout alarmをremediation対象として扱います。
+
+自動descriptor gateが比較するのはattribute definitions、base key schema、GSI key/projection/ACTIVE、
+billing、SSE/KMS、source TTL contractで、restore TTLはdisabledを要求します。DynamoDB Streams、
+CloudWatch alarm、resource tag、IAM/application binding、traffic routingは自動data verifierの対象では
+ありません。これらは別のIaC drift/recovery-plan evidenceで確認します。
+
+通常runはStandard Step Functions、retained/PITR state table、Object Lock COMPLIANCE evidence bucketを
+使用します。Raw exact locator/cursorはrestricted operational stateだけに保持し、immutable evidenceや
+Step Functions logへ出しません。Semantic join stateはraw tenant IDではなくopaque HMAC claimです。
+State tableはTTL/DeleteItemによるper-run retirementを実装しておらず、cleanup後も期限なく保持するため、
+capacity/costを監視し、将来janitorを導入する場合は独立したdata-lifecycle reviewを必須にします。
+Durable local progressはdynamic wait 0秒で再駆動し、AWS収束/copy claimだけを待機します。Main task
+errorとworkflowの`FAILED`/270分`TIMED_OUT` statusは、`awaiting-cleanup-approval`へ到達するまで
+durable failure-finalizer loopでevidence sealingを再開します。Pass/failのどちらもcleanupを
+自動実行せずdata-owner承認待ちで停止します。
+Generic Lambda/AWS/KMS/state-store failureは非integrityの`WORKFLOW_TASK_FAILED`として記録し、
+全sealed failureを`DrillFailureCount`へ加算します。明示的なdescriptor/aggregate/cross-domain/
+File-copy mismatchだけを追加でintegrity alarmへ加算します。
+Result/cleanup artifactはObject Lock write前にcanonical bytesとordered effectをdurable CASでpinし、
+response loss、別finalizer、daily takeover、replacement approvalも同じbytesとeffect progressを再生します。
+Cleanup完了時刻とその時点のapproval-bound artifact snapshotは同じprogress CASで固定し、既にpin済みの
+artifactをreplacement executionが再生してもRUNの`updatedAt`を過去へ戻しません。
 
 ### Work Items integrity verifier v1
 
@@ -1556,7 +1616,8 @@ v1 は aggregate を primary-key digest 順にsortするため、走査中に最
 `1,000,000` item分の固定長digestをメモリに保持します。上限を超えた場合は部分結果を出さず
 fail-closedで停止します。これは大規模table向けexternal sortを未実装とする明示的な制限です。
 
-v1 の非目標は、DynamoDB restoreの実行/自動化、writer fenceの実装、90日scheduleとRPO/RTOの
+このstandalone CLI v1 の非目標は、DynamoDB restoreの実行/自動化、writer fenceの実装、
+90日scheduleとRPO/RTOの
 自動測定、Work Item Configuration/Relation Graph/Audit Eventsをまたぐ関係・設定・監査不変条件、
 S3 object restore、regional DRです。特に下記手順はproduction writerを止めないため、手順中の
 live source scanだけでは特定restore pointとの完全一致を証明できません。Exact comparisonには、
@@ -1564,17 +1625,20 @@ live source scanだけでは特定restore pointとの完全一致を証明でき
 Verifierが単独で成功しても、90日 PITR drillのRPO/RTO、cross-table invariants、cleanup evidenceが
 揃わない限りdrill完了とはみなしません。
 
-### Drill procedure
+### Manual recovery / diagnostic procedure
+
+通常の定期drillにはこの手順を使わず、自動workflowとimmutable evidenceを確認します。以下は
+incident時のmanual recovery、または自動runの失敗箇所を診断するためのbreak-glass手順です。
 
 1. Change record と drill ID を作り、account/region/source table、responsible data/infrastructure
    owner、開始 UTC を記録する。Production writer は止めず、restore table を application traffic
    へ接続しない。
 2. `describe-continuous-backups` で PITR status、earliest/latest restorable time を保存し、
    latest restorable time が開始時刻から5分以内であることを確認する。
-3. Restore point を選び、その時点の key schema/GSI/TTL/encryption を保存する。Work Items の
-   exact compare を行う場合は、restore point に対応する、外部 writer fence 証拠付きの
-   `writer-fenced` source manifest を用意する。現在の writer 継続手順でその場から得られる
-   `live-observation` manifest を exact baseline にしない。
+3. Restore point を選び、その時点の key schema/GSI/TTL/encryption を保存する。Exact compare
+   には同じpointのDynamoDB export、またはそのpointに対応する外部writer fence証拠付きの
+   `writer-fenced` source manifestを用意する。現在のwriter継続手順でその場から得られる
+   `live-observation` manifestをexact baselineにしない。
 4. Source と異なる一意な recovery table 名へ restore し、table exists/active まで待つ。
 
 ```sh
@@ -1589,13 +1653,15 @@ aws dynamodb wait table-exists \
   --table-name <source-table>-recovery-<drill-id>
 ```
 
-5. 完了 UTC を記録し、descriptor を source/manifest と比較する。Restore 後に自動復元されない
-   runtime setting がある前提で、TTL、PITR、stream、alarm、tags、IAM/application binding を
-   個別に確認する。
+5. 完了 UTC を記録し、descriptor を source/manifest と比較する。自動drillのdescriptor gateは
+   attribute definitions、base key、GSI、billing、SSE/KMS、TTLだけに限定されるため、PITR、stream、
+   alarm、resource tag、IAM/application binding、routingは自動検証済みとみなさず、このmanual手順の
+   外部IaC/運用evidenceで個別に確認する。
 6. Recovery table を隔離して追加書き込みを禁止し、Work Items integrity verifier で canonical
    row、exact item/logical partition count、key-set/content aggregate、descriptorを確認する。
-   Sourceとのexact比較には手順3の`writer-fenced` manifestを使う。Relation Graph、configuration、
-   auditのcross-table invariantは別のread-only検査で確認し、raw tenant dataをevidenceへ出さない。
+   Sourceとのexact比較には手順3のexportまたは`writer-fenced` manifestを使う。Relation Graph、
+   configuration、audit、Workspace Access、File Proofingとexact S3 copyのcross-domain invariantを
+   read-only検査で確認し、raw tenant dataをevidenceへ出さない。
 7. `latest restorable time` と選択 point から RPO、開始から verified までの RTO を計算し、
    目標の pass/fail と差分を記録する。
 8. Source table は削除/置換しない。実 incident の切替は reviewed conditional repair または
@@ -1606,15 +1672,31 @@ aws dynamodb wait table-exists \
 
 - Drill ID、owner、account/region、source/recovery table ARN、開始/完了 UTC
 - PITR status、earliest/latest restorable time、選択 restore point、measured RPO/RTO
-- Source/recovery の key schema、GSI、TTL、encryption、item/partition count、HMAC aggregate、
-  manifest MAC、source writer fence evidence
-- Work Items verifierが対象外とするrelation/configuration/audit invariantの別検査による
+- Source export/recovery のattribute definitions、base key schema、GSI key/projection/ACTIVE、billing、
+  SSE/KMS、source TTL contract/restore TTL disabled、item/partition count、HMAC aggregate、manifest MAC、
+  同一restore pointへのbinding。Immutable resultはraw ARN/nameや設定値ではなくkeyed identity/
+  descriptor digestとstable pass/failを保持する
+- Relation/configuration/audit/access/file invariant、S3 body/metadata/tag copy、malware tagの
   secret-free pass/fail
 - CloudTrail/command output、approvals、cleanup ticket、gap と remediation due date
 
-File bucket は versioning/Retain により object version を保持しますが、この DynamoDB drill だけでは
-file restore を検証しません。S3 object/version、malware tag、metadata table の整合 restore を
-別 drill に含めます。
+Terminal evidenceはrunnerが`evidence/v1/runs/<drill-id>/result.json`へ、cleanup evidenceは別IAM roleが
+同runの`cleanup.json`へ書き、writer権限を分離します。Cleanup approvalはterminal result/evidence
+digest、隔離resource vector、DynamoDB export prefixes配下のincomplete multipart upload、approver、
+change locator、有効期限をresource digestへ束縛します。Cleanupは1 logical stepあたり最大25 targetを処理し、
+1 invocationで最大50件のzero-wait stepまたは8分までRUNとpinned cleanup execution identityを各step前に
+再検証してbatchし、executionが`RUNNING`かつ`redriveCount=0`でなければ拒否します。external waitが
+必要ならその時点でinvocationを終了します。
+各restore table、scratch object VersionId、multipart uploadのidentity-bound absence receiptと最終prefix
+不在確認まで保存します。Source table、source object、evidence objectはcleanup対象に含めません。
+
+全cleanup targetはmutable run stateと別の`RESTORE_DRILL_LEDGER#<drill-id>`へappend-onlyで記録し、
+atomic count/revisionとscope sealで固定します。CopyObject versionsはrunner停止後、16分のquiet windowを
+挟む2 complete passのdigest/cursor一致を要求してからsealします。Cleanup roleはsealed ledgerを
+read-onlyで参照し、progressは`RESTORE_DRILL_CLEANUP#<drill-id>`、RUN/CADENCEはcleanup-owned属性だけを
+conditional updateします。Cleanup Standard workflowの明示physical identityはapproval policyの
+Start/List/Describe permissionとcleanup roleのDescribe permissionで共通に固定し、timeout finalizerとは
+分離します。
 
 Regional replication、cross-region backup copy、DNS/traffic failover、standby stack は未実装です。
 Regional outage は SEV1 とし、現状は regional RTO/RPO を保証しません。Production で regional
@@ -1623,7 +1705,7 @@ DR を要件とする場合、secondary region、replication、secret/key、Cogn
 
 ## Production readiness evidence checklist
 
-- [ ] Role/roster、primary/secondary notification、通知有効な23 alarmのtest delivery、
+- [ ] Role/roster、primary/secondary notification、通知有効な37 alarmのtest delivery、
   fast-burn両component/compositeのstate history
 - [ ] 30日 availability/latency report、transport failure coverage、burn alert test
 - [ ] External liveness/readiness probe と rollout stop の test

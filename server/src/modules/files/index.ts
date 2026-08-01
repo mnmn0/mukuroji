@@ -1,5 +1,6 @@
 /** Files module public application and domain surface. */
 export { isMissingFileObjectVersionError } from './file-object-errors'
+export { FILE_UPLOAD_MAX_SIZE_BYTES } from '../file-upload-policy'
 export {
   FileIntegrityFailure,
   checkFileMetadataIntegrity,
