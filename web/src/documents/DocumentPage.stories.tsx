@@ -72,7 +72,6 @@ const meta = {
   args: {
     actions: screenActions,
     data: screenData,
-    inboxCount: 3,
     locale: 'ja',
     userInitial: 'D',
     userLabel: 'demo@example.com',

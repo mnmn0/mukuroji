@@ -13,10 +13,8 @@ import {
 } from '../../shared/api/mutationHeaders'
 import {
   MobileSidebarButton,
-  WorkspaceSidebar,
 } from '../../shared/ui/sidebar'
 import {
-  createSidebarLabels,
   createTranslator,
   getInitialLocale,
   type Locale,
@@ -59,10 +57,9 @@ import {
   createPlanningPath,
   createProjectIssuesPath,
   createTeamIssuesPath,
-  createTeamViewPath,
   type PlanningViewId,
-  workspaceNavPaths,
 } from '../../shared/routing/paths'
+import { useWorkspaceSidebarController } from '../../shared/ui/sidebar'
 
 const emptyTeams: ProjectDirectoryTeam[] = []
 const emptyProjectRoles: Readonly<Record<string, ProjectMemberRole>> = {}
@@ -78,10 +75,9 @@ export function PlanningPage() {
   const [session] = useState<AuthSession | null>(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
   const [mutationErrorMessage, setMutationErrorMessage] = useState<string>()
-  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
   const t = useMemo(() => createTranslator(locale), [locale])
   const labels = useMemo(() => createPlanningLabels(locale), [locale])
-  const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
+  const { openMobileSidebar } = useWorkspaceSidebarController()
   const accessToken = session?.accessToken
   const {
     data: user,
@@ -223,22 +219,9 @@ export function PlanningPage() {
   }
 
   return (
-    <main className="workbench-shell flex h-svh min-h-0 overflow-hidden">
-      <WorkspaceSidebar
-        activeNavId="planning"
-        isMobileOpen={isMobileSidebarOpen}
-        labels={sidebarLabels}
-        mobileCloseLabel={t('sidebar.mobileClose')}
-        mobileDialogLabel={t('sidebar.mobileDialog')}
-        onMobileClose={() => setIsMobileSidebarOpen(false)}
-        onSelectNav={(navId) => navigate(workspaceNavPaths[navId])}
-        onSelectProject={(projectId, teamId) => navigate(createProjectIssuesPath(projectId, teamId))}
-        onSelectTeamView={(teamId, viewId) => navigate(createTeamViewPath(teamId, viewId))}
-        teams={teams}
-      />
-      <div className="relative min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain">
+    <div className="relative min-h-0 min-w-0 flex-1">
         <div className="absolute left-4 top-4 z-20 min-[981px]:hidden">
-          <MobileSidebarButton label={t('sidebar.mobileOpen')} onClick={() => setIsMobileSidebarOpen(true)} />
+          <MobileSidebarButton label={t('sidebar.mobileOpen')} onClick={openMobileSidebar} />
         </div>
         <PlanningScreen
           activeView={activeView}
@@ -414,8 +397,7 @@ export function PlanningPage() {
               )
             : undefined}
         />
-      </div>
-    </main>
+    </div>
   )
 }
 

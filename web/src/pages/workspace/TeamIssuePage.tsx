@@ -22,18 +22,13 @@ import {
 } from '../../files/mutations/useFileArtifacts'
 import {
   MobileSidebarButton,
-  WorkspaceSidebar,
-  type SidebarNavId,
-  type SidebarTeamViewId,
 } from '../../shared/ui/sidebar'
 import {
-  createSidebarLabels,
   createTranslator,
   getInitialLocale,
   type Locale,
   type MessageKey,
 } from '../../shared/i18n/i18n'
-import { useUnreadNotificationCount } from '../../notifications/mutations/useNotifications'
 import {
   createTeamIssue,
   TeamIssuesApiError,
@@ -52,27 +47,18 @@ import {
   useIssueCollaboration,
 } from '../../issues/mutations/useIssueCollaboration'
 import {
-  archiveProjectDirectoryProject,
-  archiveProjectDirectoryTeam,
-  createProjectDirectoryProject,
-  createProjectDirectoryTeam,
-  type CreateProjectDirectoryProjectInput,
-  type CreateProjectDirectoryTeamInput,
   type ProjectDirectoryTeam,
   type ProjectMember,
 } from '../../projects/api'
 import { useProjectDirectory } from '../../projects/queries/useProjectDirectory'
 import { useActiveProjectMembers } from '../../projects/queries/useProjectMembers'
 import {
-  createProjectIssuesPath,
   createTeamIssuesPath,
-  createTeamViewPath,
-  workspaceNavPaths,
 } from '../../shared/routing/paths'
 import type { TaskPriority } from '../../tasks/api'
 import type { WorkspaceMember } from '../../workspace/api'
 import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
-import { useWorkspaceCommandMenu } from '../../commands/ui/WorkspaceCommandMenuContext'
+import { useWorkspaceSidebarController } from '../../shared/ui/sidebar'
 import {
   createWorkItemRelation,
   deleteWorkItemRelation,
@@ -159,10 +145,6 @@ type TeamIssueScreenProps = {
    * Issue 一覧です。
    */
   issues?: TeamIssue[]
-  /**
-   * サイドバーに表示する通知の実未読件数です。
-   */
-  inboxCount?: number
   /**
    * Team / Workspace から解決した workflow と custom field configuration です。
    */
@@ -263,34 +245,6 @@ type TeamIssueScreenProps = {
    * 選択中 Work Item の relation を解除する callback です。
    */
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
-  /**
-   * サイドバーからプロジェクトを選択したときの callback です。
-   */
-  onSelectProject?: (projectId: string, teamId: string) => void
-  /**
-   * サイドバーの固定ナビを選択したときの callback です。
-   */
-  onSelectNav?: (navId: SidebarNavId) => void
-  /**
-   * サイドバーのチーム固定ビューを選択したときの callback です。
-   */
-  onSelectTeamView?: (teamId: string, viewId: SidebarTeamViewId) => void
-  /**
-   * チーム新規登録時の callback です。
-   */
-  onCreateTeam?: (input: CreateProjectDirectoryTeamInput) => Promise<void>
-  /**
-   * プロジェクト新規登録時の callback です。
-   */
-  onCreateProject?: (teamId: string, input: CreateProjectDirectoryProjectInput) => Promise<void>
-  /**
-   * チームアーカイブ時の callback です。
-   */
-  onArchiveTeam?: (teamId: string) => Promise<void>
-  /**
-   * プロジェクトアーカイブ時の callback です。
-   */
-  onArchiveProject?: (teamId: string, projectId: string) => Promise<void>
 }
 
 /**
@@ -317,10 +271,6 @@ export function TeamIssuePage() {
     error: currentUserError,
     isLoading: isCurrentUserLoading,
   } = useCurrentUser(accessToken)
-  const inboxCount = useUnreadNotificationCount(
-    accessToken,
-    Boolean(user && !currentUserError),
-  )
   const { data: workspaceAccess, error: workspaceAccessError } = useWorkspaceAccess(
     accessToken,
     Boolean(user && !currentUserError),
@@ -329,7 +279,6 @@ export function TeamIssuePage() {
     data: teams = emptyTeams,
     error: projectDirectoryError,
     isLoading: isProjectDirectoryLoading,
-    mutate: mutateProjectDirectory,
   } = useProjectDirectory({
     accessToken,
     enabled: Boolean(user && !currentUserError),
@@ -586,61 +535,6 @@ export function TeamIssuePage() {
     }
   }
 
-  const handleCreateTeam = async (input: CreateProjectDirectoryTeamInput) => {
-    if (!accessToken) {
-      return
-    }
-
-    await guardEnterpriseSession(mutationRequestRunner.run('team:create', JSON.stringify(input), (context) =>
-      createProjectDirectoryTeam(accessToken, input, context),
-    ))
-    await mutateProjectDirectory()
-  }
-
-  const handleCreateProject = async (
-    nextTeamId: string,
-    input: CreateProjectDirectoryProjectInput,
-  ) => {
-    if (!accessToken) {
-      return
-    }
-
-    await guardEnterpriseSession(mutationRequestRunner.run(
-      'project:create',
-      JSON.stringify([nextTeamId, input]),
-      (context) => createProjectDirectoryProject(accessToken, nextTeamId, input, context),
-    ))
-    await mutateProjectDirectory()
-  }
-
-  const handleArchiveTeam = async (nextTeamId: string) => {
-    if (!accessToken) {
-      return
-    }
-
-    await guardEnterpriseSession(mutationRequestRunner.run('team:archive', nextTeamId, (context) =>
-      archiveProjectDirectoryTeam(accessToken, nextTeamId, context),
-    ))
-    await mutateProjectDirectory()
-
-    if (nextTeamId === teamId) {
-      navigate(workspaceNavPaths.home)
-    }
-  }
-
-  const handleArchiveProject = async (nextTeamId: string, projectId: string) => {
-    if (!accessToken) {
-      return
-    }
-
-    await guardEnterpriseSession(mutationRequestRunner.run(
-      'project:archive',
-      JSON.stringify([nextTeamId, projectId]),
-      (context) => archiveProjectDirectoryProject(accessToken, nextTeamId, projectId, context),
-    ))
-    await mutateProjectDirectory()
-  }
-
   return (
     <TeamIssueScreen
       accessToken={accessToken}
@@ -655,7 +549,6 @@ export function TeamIssuePage() {
       defaultCreateIssueOpen={isCreateIssueRequested}
       focusedCommentId={focusedCommentId}
       focusedRootCommentId={focusedRootCommentId}
-      inboxCount={inboxCount}
       issueErrorMessage={issueErrorMessage}
       issues={screenIssues}
       isLoading={isLoading}
@@ -663,16 +556,9 @@ export function TeamIssuePage() {
       key={teamId}
       locale={locale}
       onAddRelation={canMutateContent ? handleAddRelation : undefined}
-      onArchiveProject={canManageStructure ? handleArchiveProject : undefined}
-      onArchiveTeam={canManageStructure ? handleArchiveTeam : undefined}
       onCreateIssue={canMutateContent && !workItemConfigurationError ? handleCreateIssue : undefined}
-      onCreateProject={canManageStructure ? handleCreateProject : undefined}
-      onCreateTeam={canManageStructure ? handleCreateTeam : undefined}
       onDeleteRelation={canMutateContent ? handleDeleteRelation : undefined}
       onSelectIssue={(issueId) => navigate(createTeamIssuesPath(teamId, issueId))}
-      onSelectNav={(navId) => navigate(workspaceNavPaths[navId])}
-      onSelectProject={(projectId, nextTeamId) => navigate(createProjectIssuesPath(projectId, nextTeamId))}
-      onSelectTeamView={(nextTeamId, viewId) => navigate(createTeamViewPath(nextTeamId, viewId))}
       onUpdateIssue={canMutateContent && !workItemConfigurationError ? handleUpdateIssue : undefined}
       selectedIssueId={resolvedSelectedIssueId}
       relations={issueDetail && issueDetail.issue.id === resolvedSelectedIssueId
@@ -704,7 +590,6 @@ export function TeamIssueScreen({
   externalLinksAccessToken,
   focusedCommentId,
   focusedRootCommentId,
-  inboxCount = 0,
   initialViewMode = 'table',
   issueErrorMessage,
   issues = [],
@@ -712,16 +597,9 @@ export function TeamIssueScreen({
   isRelationsLoading = false,
   locale,
   onAddRelation,
-  onArchiveProject,
-  onArchiveTeam,
   onCreateIssue,
-  onCreateProject,
-  onCreateTeam,
   onDeleteRelation,
   onSelectIssue,
-  onSelectNav,
-  onSelectProject,
-  onSelectTeamView,
   onUpdateIssue,
   relations = [],
   resolvedConfiguration,
@@ -733,8 +611,7 @@ export function TeamIssueScreen({
   workspaceMembers = emptyWorkspaceMembers,
 }: TeamIssueScreenProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
-  const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
-  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
+  const { openMobileSidebar } = useWorkspaceSidebarController()
   const [viewMode, setViewMode] = useState<IssueViewMode>(initialViewMode)
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<string>('all')
@@ -745,7 +622,6 @@ export function TeamIssueScreen({
   const [isCreateOpen, setIsCreateOpen] = useState(defaultCreateIssueOpen)
   const [createErrorMessage, setCreateErrorMessage] = useState<string | undefined>()
   const [detailUpdateError, setDetailUpdateError] = useState<readonly [string, string] | undefined>()
-  const commandMenu = useWorkspaceCommandMenu()
   const activeTeam = teams.find((team) => team.id === teamId)
   const selectedIssue = issues.find((issue) => issue.id === selectedIssueId)
 
@@ -832,34 +708,13 @@ export function TeamIssueScreen({
   )
 
   return (
-    <main className="workbench-shell flex h-svh min-h-0 overflow-hidden">
-      <WorkspaceSidebar
-        activeTeamId={teamId}
-        activeTeamViewId="issues"
-        inboxCount={inboxCount}
-        isMobileOpen={isMobileSidebarOpen}
-        labels={sidebarLabels}
-        mobileCloseLabel={t('sidebar.mobileClose')}
-        mobileDialogLabel={t('sidebar.mobileDialog')}
-        onArchiveProject={onArchiveProject}
-        onArchiveTeam={onArchiveTeam}
-        onCreateProject={onCreateProject}
-        onCreateTeam={onCreateTeam}
-        onMobileClose={() => setIsMobileSidebarOpen(false)}
-        onOpenSearch={commandMenu.open}
-        onSelectNav={onSelectNav}
-        onSelectProject={onSelectProject}
-        onSelectTeamView={onSelectTeamView}
-        teams={teams}
-      />
-
-      <section className="workbench-main flex min-w-0 flex-1 flex-col overflow-hidden">
+    <>
         <header className="workbench-header flex-none px-[clamp(20px,3vw,34px)] py-4">
           <div className="flex min-w-0 flex-wrap items-start justify-between gap-4">
             <div className="flex min-w-0 items-start gap-3">
               <MobileSidebarButton
                 label={t('sidebar.mobileOpen')}
-                onClick={() => setIsMobileSidebarOpen(true)}
+                onClick={openMobileSidebar}
               />
               <div className="min-w-0">
                 <p className="workbench-eyebrow">
@@ -899,7 +754,7 @@ export function TeamIssueScreen({
             {t('issues.loading')}
           </div>
         ) : (
-          <div className="min-h-0 flex-1 overflow-auto overscroll-contain">
+          <div className="min-h-0 flex-1">
             <div className="grid min-h-full grid-cols-[minmax(0,1fr)_minmax(360px,440px)] gap-0 max-[1080px]:grid-cols-1">
               <section className="min-w-0 px-[clamp(20px,3vw,34px)] py-5">
                 {configurationErrorMessage ? (
@@ -1041,8 +896,7 @@ export function TeamIssueScreen({
             </div>
           </div>
         )}
-      </section>
-    </main>
+    </>
   )
 }
 
