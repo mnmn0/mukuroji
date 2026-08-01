@@ -639,26 +639,30 @@ const terminalFailureReasons = new Set<string>([
   'verification-failed',
 ])
 
-/** Fixed allowed DescribeTable phases copied from the #158 contract. */
-const describeTablePhases = new Set<string>([
-  'checkpoint-page',
-  'measurement',
-  'post-send-guard',
-  'pre-send-guard',
-  'reconciliation',
-])
+/** Exhaustive runtime catalog synchronized by typecheck with #158 phases. */
+const describeTablePhaseCatalog: Readonly<
+  Record<WorkspaceSearchMigrationDescribeTablePhase, true>
+> = Object.freeze({
+  'checkpoint-page': true,
+  measurement: true,
+  'post-send-guard': true,
+  'pre-send-guard': true,
+  reconciliation: true,
+})
 
-/** Fixed allowed DescribeTable budget-stop reasons copied from #158. */
-const describeTableStopReasons = new Set<string>([
-  'budget-capacity',
-  'cadence-bound',
-  'interrupted',
-  'invalid-lifecycle',
-  'page-capacity',
-  'quarantined',
-  'throttled',
-  'taken-over',
-])
+/** Exhaustive runtime catalog synchronized by typecheck with #158 reasons. */
+const describeTableStopReasonCatalog: Readonly<
+  Record<WorkspaceSearchMigrationDescribeTableRateStopReason, true>
+> = Object.freeze({
+  'budget-capacity': true,
+  'cadence-bound': true,
+  interrupted: true,
+  'invalid-lifecycle': true,
+  'page-capacity': true,
+  quarantined: true,
+  throttled: true,
+  'taken-over': true,
+})
 
 /** Complete zero-emitting alarm metric schema. */
 const telemetryMetricDefinitions: readonly WorkspaceSearchMigrationTelemetryMetricDefinition[] =
@@ -738,6 +742,11 @@ const telemetryMetricDefinitions: readonly WorkspaceSearchMigrationTelemetryMetr
 /** Frozen no-op rate adapter used when telemetry initialization is invalid. */
 const noOpDescribeTableRateRecorder:
   WorkspaceSearchMigrationDescribeTableRateRecorder = Object.freeze({
+    /**
+     * Drops one rate observation while telemetry is disabled.
+     *
+     * @param _observation - Ignored sanitized rate observation.
+     */
     record(_observation: WorkspaceSearchMigrationDescribeTableRateObservation): void {
       // A disabled best-effort observer intentionally performs no work.
     },
@@ -748,18 +757,36 @@ const noOpTelemetryRecorder: WorkspaceSearchMigrationTelemetryRecorder =
   Object.freeze({
     correlationId: undefined,
     describeTableRateRecorder: noOpDescribeTableRateRecorder,
+    /**
+     * Drops one migration observation while telemetry is disabled.
+     *
+     * @param _observation - Ignored runtime observation.
+     */
     record(_observation: unknown): void {
       // A disabled best-effort observer intentionally performs no work.
     },
+    /**
+     * Rejects configuration binding while telemetry is disabled.
+     *
+     * @param _configurationHash - Ignored candidate digest.
+     * @returns Always false.
+     */
     bindConfigurationHash(_configurationHash: unknown): false {
       return false
     },
+    /** @returns No evidence locator while telemetry is disabled. */
     readEvidenceLocator(): undefined {
       return undefined
     },
+    /** @returns No snapshot while telemetry is disabled. */
     snapshot(): undefined {
       return undefined
     },
+    /**
+     * Drops terminal metadata while telemetry is disabled.
+     *
+     * @param _finalization - Ignored terminal metadata.
+     */
     finalize(_finalization: unknown): void {
       // A disabled best-effort observer intentionally performs no work.
     },
@@ -768,15 +795,23 @@ const noOpTelemetryRecorder: WorkspaceSearchMigrationTelemetryRecorder =
 /** Frozen no-op checkpoint watchdog used for invalid construction input. */
 const noOpCheckpointStallWatchdog:
   WorkspaceSearchMigrationCheckpointStallWatchdog = Object.freeze({
+    /**
+     * Drops progress while checkpoint monitoring is disabled.
+     *
+     * @param _progressUnits - Ignored positive progress units.
+     */
     recordProgress(_progressUnits: number): void {
       // A disabled best-effort watchdog intentionally performs no work.
     },
+    /** Leaves the disabled watchdog unchanged. */
     pause(): void {
       // A disabled best-effort watchdog intentionally performs no work.
     },
+    /** Leaves the disabled watchdog unchanged. */
     resume(): void {
       // A disabled best-effort watchdog intentionally performs no work.
     },
+    /** Leaves the disabled watchdog unchanged. */
     stop(): void {
       // A disabled best-effort watchdog intentionally performs no work.
     },
@@ -1033,6 +1068,11 @@ export function createWorkspaceSearchMigrationTelemetryRecorder(
 
     const describeTableRateRecorder:
       WorkspaceSearchMigrationDescribeTableRateRecorder = Object.freeze({
+        /**
+         * Sanitizes and aggregates one #158 rate observation.
+         *
+         * @param observation - Candidate sanitized rate observation.
+         */
         record(
           observation: WorkspaceSearchMigrationDescribeTableRateObservation,
         ): void {
@@ -1048,6 +1088,11 @@ export function createWorkspaceSearchMigrationTelemetryRecorder(
     return Object.freeze({
       correlationId,
       describeTableRateRecorder,
+      /**
+       * Sanitizes and aggregates one migration observation.
+       *
+       * @param observation - Candidate runtime observation.
+       */
       record(observation: unknown): void {
         try {
           const event = sanitizeTelemetryObservation(observation)
@@ -1057,6 +1102,7 @@ export function createWorkspaceSearchMigrationTelemetryRecorder(
         }
       },
       bindConfigurationHash,
+      /** @returns Current secret-free evidence locator. */
       readEvidenceLocator(): string | undefined {
         return evidenceLocator
       },
@@ -1239,6 +1285,11 @@ export function createWorkspaceSearchMigrationCheckpointStallWatchdog(
     }
 
     return Object.freeze({
+      /**
+       * Records durable progress and rearms live checkpoint monitoring.
+       *
+       * @param progressUnits - Positive bounded progress units.
+       */
       recordProgress(progressUnits: number): void {
         try {
           if (stopped || !isPositiveTelemetryNumber(progressUnits)) return
@@ -1266,6 +1317,7 @@ export function createWorkspaceSearchMigrationCheckpointStallWatchdog(
           // Watchdog telemetry must never alter checkpoint progress.
         }
       },
+      /** Pauses live checkpoint timing. */
       pause(): void {
         if (
           validatedMode !== 'monitor-progress' ||
@@ -1275,6 +1327,7 @@ export function createWorkspaceSearchMigrationCheckpointStallWatchdog(
         paused = true
         cancelCurrent()
       },
+      /** Resumes live checkpoint timing from a fresh baseline. */
       resume(): void {
         if (
           validatedMode !== 'monitor-progress' ||
@@ -1292,6 +1345,7 @@ export function createWorkspaceSearchMigrationCheckpointStallWatchdog(
           // A failed resume clock leaves the watchdog safely paused.
         }
       },
+      /** Permanently stops live checkpoint timing. */
       stop(): void {
         if (stopped) return
         stopped = true
@@ -1356,6 +1410,7 @@ function scheduleDefaultCheckpointStall(
   callback: () => void,
 ): WorkspaceSearchMigrationCheckpointStallCancellation {
   const timeout = setTimeout(callback, delayMilliseconds)
+  timeout.unref?.()
   return () => clearTimeout(timeout)
 }
 
@@ -2539,7 +2594,8 @@ function isCheckpointStallWatchdogMode(
 function isDescribeTablePhase(
   value: unknown,
 ): value is WorkspaceSearchMigrationDescribeTablePhase {
-  return typeof value === 'string' && describeTablePhases.has(value)
+  return typeof value === 'string' &&
+    Object.hasOwn(describeTablePhaseCatalog, value)
 }
 
 /**
@@ -2551,7 +2607,8 @@ function isDescribeTablePhase(
 function isDescribeTableStopReason(
   value: unknown,
 ): value is WorkspaceSearchMigrationDescribeTableRateStopReason {
-  return typeof value === 'string' && describeTableStopReasons.has(value)
+  return typeof value === 'string' &&
+    Object.hasOwn(describeTableStopReasonCatalog, value)
 }
 
 /**

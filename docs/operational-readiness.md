@@ -363,11 +363,14 @@ rehearsal後に失効させます。Production migration operator policyへこ�
 CloudWatch Logsへstdoutを1行単位で取り込む隔離runnerでは、対象alarmに対応する`--signal`を
 `describe-table-throttle`、`rate-budget-exhaustion`、`checkpoint-stall`、`quarantine`、
 `terminal-failure`から選び、次のstrict commandを実行します。Configuration hashとpolicy versionは
-review済みのlowercase SHA-256 digestだけを指定します。このcommand自身はAWS APIを呼びません。
+review済みのlowercase SHA-256 digestだけを指定します。承認文字列とは別にexact
+`--stage non-production`を必須とし、他のstageはrecorder作成とEMF出力より前に拒否します。
+このcommand自身はAWS APIを呼びません。
 
 ```sh
 bun run --silent search:migration:telemetry-rehearsal -- \
   --approval acknowledge-non-production-alarm-delivery-rehearsal \
+  --stage non-production \
   --signal describe-table-throttle \
   --configuration-hash "$MIGRATION_CONFIGURATION_HASH" \
   --policy-version "$MIGRATION_RATE_POLICY_VERSION"
@@ -1012,7 +1015,7 @@ incarnation結果はcacheまたは再利用せず、all-six replacement detectio
 attempt/throttle/cadence wait/budget stopをconfiguration hash、policy version、UTC window、
 correlation/evidence locatorへ集約し、5 alarmがthrottle、budget exhaustion、checkpoint stall、
 quarantine、terminal failureを検知します。承認済みnon-production rehearsalと両SNS delivery receiptは
-#167へ引き継ぎます。これらのreview済みevidenceが揃うまでProduction migration gateを閉じたままにします。
+Issue 167へ引き継ぎます。これらのreview済みevidenceが揃うまでProduction migration gateを閉じたままにします。
 
 Pure execution-boundary contractは、exact closed fence digest/authorityと全6 TableIdを持つ`closed` revision 1、
 fresh current authority、exact raw maintenance evidence、close後15分以上のdrainを持つ
@@ -1193,7 +1196,7 @@ capabilityです。CLIの`release`はfresh evidence、同じgenerationのtermina
    承認済みnon-production accountで、実行commit、rate-policy version、UTC window、page phaseごとの
    attempt/throttle/cadence wait/budget stop、最大同時in-flight数、observed rateを同じconfiguration hashへ
    結合して記録する。Telemetry/alarm contractは実装済みですが、この記録は今回まだ取得しておらず、
-   #167のrehearsalで取得・reviewする。Contractにより取得可能であることを取得済みの
+   Issue 167のrehearsalで取得・reviewする。Contractにより取得可能であることを取得済みの
    evidenceとして扱わず、review完了までProduction migration gateを開かない。
 2. PITR/backup、earliest/latest restorable time、source 件数、代表 key/checksum を保存する。
 3. Dry-run の scanned/projected/deleted/skipped/invalid 件数を review する。Dry-run evidence は

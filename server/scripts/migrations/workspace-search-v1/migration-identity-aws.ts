@@ -96,8 +96,9 @@ import {
   WorkspaceSearchMigrationManagedDescribeTableRateError,
   type WorkspaceSearchMigrationManagedDescribeTableRate,
 } from './migration-describe-table-rate-managed-session'
-import type {
-  WorkspaceSearchMigrationTelemetryRecorder,
+import {
+  WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+  type WorkspaceSearchMigrationTelemetryRecorder,
 } from './migration-telemetry'
 import {
   type WorkspaceSearchMigrationSharedProfiles,
@@ -7301,7 +7302,7 @@ class AwsWorkspaceSearchMigrationIdentityPort
   private recordManagedExecutionControlQuarantineSafely(): void {
     try {
       this.telemetryRecorder?.record({
-        version: 1,
+        version: WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
         kind: 'quarantine',
         phase: 'post-send-guard',
         reason: 'configuration-mismatch',
@@ -8321,8 +8322,20 @@ function detachRateManagedAwsSessionConstructionInput(
       telemetryRecorder === undefined || telemetryRecord === undefined
         ? undefined
         : Object.freeze({
+          /**
+           * Forwards one quarantine observation through the captured recorder.
+           *
+           * @param observation - Candidate secret-free quarantine observation.
+           */
           record: (observation: unknown): void => {
-            Reflect.apply(telemetryRecord, telemetryRecorder, [observation])
+            const result: unknown = Reflect.apply(
+              telemetryRecord,
+              telemetryRecorder,
+              [observation],
+            )
+            if (result !== undefined) {
+              consumeIdentityTelemetryNativePromise(result)
+            }
           },
         })
   return Object.freeze({
@@ -8340,6 +8353,28 @@ function detachRateManagedAwsSessionConstructionInput(
       createWorkspaceSearchMigrationPrePlanAuthoritySystemTime,
     ...(signal === undefined ? {} : { signal }),
   })
+}
+
+/**
+ * Consumes an exact native Promise returned across a synchronous telemetry port.
+ * Opaque objects, Proxies, and thenables are never inspected or assimilated.
+ *
+ * @param value - Runtime return from the captured telemetry recorder.
+ * @returns Whether the value was an exact native Promise.
+ */
+function consumeIdentityTelemetryNativePromise(value: unknown): boolean {
+  if (
+    !nodeUtilTypes.isPromise(value) ||
+    Object.getPrototypeOf(value) !== Promise.prototype ||
+    Object.hasOwn(value, 'constructor')
+  ) {
+    return false
+  }
+  void Reflect.apply(Promise.prototype.then, value, [
+    undefined,
+    () => undefined,
+  ])
+  return true
 }
 
 /** Stops composition before another durable rate mutation may start. */

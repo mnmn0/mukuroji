@@ -8,6 +8,7 @@ import {
   parseWorkspaceSearchMigrationTelemetryRehearsalArguments,
   runWorkspaceSearchMigrationTelemetryRehearsal,
   WORKSPACE_SEARCH_MIGRATION_TELEMETRY_REHEARSAL_APPROVAL,
+  WORKSPACE_SEARCH_MIGRATION_TELEMETRY_REHEARSAL_STAGE,
   type WorkspaceSearchMigrationTelemetryRehearsalDependencies,
   type WorkspaceSearchMigrationTelemetryRehearsalSignal,
 } from './migration-telemetry-rehearsal'
@@ -44,7 +45,7 @@ const signals: readonly WorkspaceSearchMigrationTelemetryRehearsalSignal[] = [
 ]
 
 /**
- * Creates the exact four required flag/value pairs.
+ * Creates the exact five required flag/value pairs.
  *
  * @param signal - Controlled signal value.
  * @returns Fresh strict argv array.
@@ -55,6 +56,8 @@ function createArguments(
   return [
     '--approval',
     WORKSPACE_SEARCH_MIGRATION_TELEMETRY_REHEARSAL_APPROVAL,
+    '--stage',
+    WORKSPACE_SEARCH_MIGRATION_TELEMETRY_REHEARSAL_STAGE,
     '--signal',
     signal,
     '--configuration-hash',
@@ -134,12 +137,15 @@ describe('Workspace Search migration telemetry rehearsal parser', () => {
       policyVersion,
       '--approval',
       WORKSPACE_SEARCH_MIGRATION_TELEMETRY_REHEARSAL_APPROVAL,
+      '--stage',
+      WORKSPACE_SEARCH_MIGRATION_TELEMETRY_REHEARSAL_STAGE,
       '--configuration-hash',
       configurationHash,
       '--signal',
       'recovery',
     ])).toEqual({
       approval: WORKSPACE_SEARCH_MIGRATION_TELEMETRY_REHEARSAL_APPROVAL,
+      stage: WORKSPACE_SEARCH_MIGRATION_TELEMETRY_REHEARSAL_STAGE,
       signal: 'recovery',
       configurationHash,
       policyVersion,
@@ -156,6 +162,11 @@ describe('Workspace Search migration telemetry rehearsal parser', () => {
       valid.map((value) =>
         value === WORKSPACE_SEARCH_MIGRATION_TELEMETRY_REHEARSAL_APPROVAL
           ? 'tenant-approval-canary'
+          : value
+      ),
+      valid.map((value) =>
+        value === WORKSPACE_SEARCH_MIGRATION_TELEMETRY_REHEARSAL_STAGE
+          ? 'production'
           : value
       ),
       valid.map((value) =>
@@ -313,6 +324,32 @@ describe('Workspace Search migration telemetry rehearsal execution', () => {
     expect(requireOnlyLine(standardError)).not.toContain(
       'tenant-profile-secret',
     )
+  })
+
+  test('rejects a production stage before recorder creation or EMF output', () => {
+    const standardOutput: string[] = []
+    const standardError: string[] = []
+    const arguments_ = createArguments('terminal-failure').map((value) =>
+      value === WORKSPACE_SEARCH_MIGRATION_TELEMETRY_REHEARSAL_STAGE
+        ? 'production'
+        : value
+    )
+    const dependencies = createDependencies(
+      standardOutput,
+      standardError,
+    )
+
+    expect(runWorkspaceSearchMigrationTelemetryRehearsal(
+      arguments_,
+      {
+        ...dependencies,
+        createRecorder: () => {
+          throw new Error('production stage must fail before recorder creation')
+        },
+      },
+    )).toBe(2)
+    expect(standardOutput).toEqual([])
+    expect(standardError).toEqual([invalidUsageLine])
   })
 
   test('recorder and output failures emit only a stable internal failure', () => {

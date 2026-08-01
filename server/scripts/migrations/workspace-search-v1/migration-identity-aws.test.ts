@@ -76,6 +76,9 @@ import {
   WorkspaceSearchMigrationManagedDescribeTableRateError,
 } from './migration-describe-table-rate-managed-session'
 import {
+  WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+} from './migration-telemetry'
+import {
   createAwsWorkspaceSearchMigrationIdentityPort,
   type JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput,
   type WorkspaceSearchMigrationIdentityAwsSdkConfigurations,
@@ -6493,7 +6496,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
       quarantineManagedExecutionControlForTest(port, firstAuthority)
 
       const expectedObservation = {
-        version: 1,
+        version: WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
         kind: 'quarantine',
         phase: 'post-send-guard',
         reason: 'configuration-mismatch',
@@ -6590,7 +6593,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
       })
       expect(telemetryRecordCount).toBe(1)
       expect(telemetryObservation).toEqual({
-        version: 1,
+        version: WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
         kind: 'quarantine',
         phase: 'post-send-guard',
         reason: 'configuration-mismatch',

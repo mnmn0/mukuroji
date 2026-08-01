@@ -674,7 +674,9 @@ const defaultControlCliDependencies:
       createWorkspaceSearchMigrationTelemetryRecorder(
         context,
         {
+          /** Captures finalized telemetry for the CLI's terminal stdout/stderr line. */
           sink,
+          /** Writes only an immediate checkpoint-stall line while work is hung. */
           liveSink: (serializedRecord: string) =>
             console.error(serializedRecord),
         },
@@ -1132,6 +1134,11 @@ function createSafeControlCliTelemetryRecorder(
   }
   const safeRateRecorder:
     WorkspaceSearchMigrationDescribeTableRateRecorder = Object.freeze({
+      /**
+       * Forwards one rate observation through the isolated recorder method.
+       *
+       * @param observation - Sanitized #158 rate observation.
+       */
       record(
         observation: WorkspaceSearchMigrationDescribeTableRateObservation,
       ): void {
@@ -1152,6 +1159,11 @@ function createSafeControlCliTelemetryRecorder(
   return Object.freeze({
     correlationId,
     describeTableRateRecorder: safeRateRecorder,
+    /**
+     * Forwards one migration observation without exposing observer failures.
+     *
+     * @param observation - Candidate migration telemetry observation.
+     */
     record(observation: unknown): void {
       try {
         const result: unknown = Reflect.apply(
@@ -1166,6 +1178,12 @@ function createSafeControlCliTelemetryRecorder(
         // Optional telemetry must not affect migration work.
       }
     },
+    /**
+     * Forwards one reviewed configuration binding.
+     *
+     * @param configurationHash - Candidate reviewed digest.
+     * @returns Whether the wrapped recorder accepted the binding.
+     */
     bindConfigurationHash(configurationHash: unknown): boolean {
       try {
         const result: unknown = Reflect.apply(
@@ -1180,6 +1198,7 @@ function createSafeControlCliTelemetryRecorder(
         return false
       }
     },
+    /** @returns Safe evidence locator from the wrapped recorder. */
     readEvidenceLocator(): string | undefined {
       try {
         const locator: unknown = Reflect.apply(
@@ -1195,6 +1214,7 @@ function createSafeControlCliTelemetryRecorder(
         return undefined
       }
     },
+    /** @returns Validated detached aggregate from the wrapped recorder. */
     snapshot() {
       try {
         const result = Reflect.apply(snapshot, candidate, [])
@@ -1210,6 +1230,11 @@ function createSafeControlCliTelemetryRecorder(
         return undefined
       }
     },
+    /**
+     * Forwards terminal metadata without exposing observer failures.
+     *
+     * @param finalization - Candidate terminal metadata.
+     */
     finalize(finalization: unknown): void {
       try {
         const result: unknown = Reflect.apply(

@@ -17,6 +17,10 @@ import {
 export const WORKSPACE_SEARCH_MIGRATION_TELEMETRY_REHEARSAL_APPROVAL =
   'acknowledge-non-production-alarm-delivery-rehearsal'
 
+/** Exact non-production stage required before a rehearsal may emit EMF. */
+export const WORKSPACE_SEARCH_MIGRATION_TELEMETRY_REHEARSAL_STAGE =
+  'non-production'
+
 /**
  * Controlled aggregate signals available to a non-production rehearsal.
  */
@@ -35,6 +39,9 @@ export type WorkspaceSearchMigrationTelemetryRehearsalInput = {
   /** Exact acknowledgement preventing accidental execution. */
   readonly approval:
     typeof WORKSPACE_SEARCH_MIGRATION_TELEMETRY_REHEARSAL_APPROVAL
+  /** Exact stage guard that rejects production rehearsal invocations. */
+  readonly stage:
+    typeof WORKSPACE_SEARCH_MIGRATION_TELEMETRY_REHEARSAL_STAGE
   /** Controlled alarm or recovery signal to emit. */
   readonly signal: WorkspaceSearchMigrationTelemetryRehearsalSignal
   /** Reviewed resource-configuration digest used only as safe evidence binding. */
@@ -77,6 +84,7 @@ const rehearsalFlagNames = new Set<string>([
   '--configuration-hash',
   '--policy-version',
   '--signal',
+  '--stage',
 ])
 
 /** Allowed finite rehearsal signal values. */
@@ -135,7 +143,7 @@ const defaultRehearsalDependencies:
   })
 
 /**
- * Parses exactly four required flag/value pairs for a controlled rehearsal.
+ * Parses exactly five required flag/value pairs for a controlled rehearsal.
  *
  * @param arguments_ - Arguments following the script path.
  * @returns Strict reviewed digest bindings and finite signal.
@@ -144,7 +152,7 @@ export function parseWorkspaceSearchMigrationTelemetryRehearsalArguments(
   arguments_: readonly string[],
 ): WorkspaceSearchMigrationTelemetryRehearsalInput {
   const snapshot = snapshotRehearsalArguments(arguments_)
-  if (snapshot.length !== 8) throw invalidUsage()
+  if (snapshot.length !== 10) throw invalidUsage()
   const flags = new Map<string, string>()
   for (let index = 0; index < snapshot.length; index += 2) {
     const name = snapshot[index]
@@ -162,11 +170,13 @@ export function parseWorkspaceSearchMigrationTelemetryRehearsalArguments(
     flags.set(name, value)
   }
   const approval = flags.get('--approval')
+  const stage = flags.get('--stage')
   const signal = flags.get('--signal')
   const configurationHash = flags.get('--configuration-hash')
   const policyVersion = flags.get('--policy-version')
   if (
     approval !== WORKSPACE_SEARCH_MIGRATION_TELEMETRY_REHEARSAL_APPROVAL ||
+    stage !== WORKSPACE_SEARCH_MIGRATION_TELEMETRY_REHEARSAL_STAGE ||
     !isRehearsalSignal(signal) ||
     !isHexDigest(configurationHash) ||
     !isHexDigest(policyVersion)
@@ -175,6 +185,7 @@ export function parseWorkspaceSearchMigrationTelemetryRehearsalArguments(
   }
   return Object.freeze({
     approval,
+    stage,
     signal,
     configurationHash,
     policyVersion,
