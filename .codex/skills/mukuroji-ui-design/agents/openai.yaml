@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mukuroji UI Design"
+  short_description: "Research-led UI design for Mukuroji"
+  default_prompt: "Use $mukuroji-ui-design to research, design, implement, and verify a Mukuroji UI screen."
