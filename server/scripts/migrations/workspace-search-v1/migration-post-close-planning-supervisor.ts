@@ -76,6 +76,14 @@ import type {
 import {
   parseMaintenanceEvidence,
 } from './maintenance-evidence'
+import {
+  createWorkspaceSearchMigrationCheckpointStallWatchdog,
+  WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+  type WorkspaceSearchMigrationCheckpointStallSchedule,
+  type WorkspaceSearchMigrationCheckpointStallWatchdog,
+  type WorkspaceSearchMigrationTelemetryClock,
+  type WorkspaceSearchMigrationTelemetryRecorder,
+} from './migration-telemetry'
 
 /** Mandatory post-close drain reserved before the irreversible close. */
 const postCloseMinimumDrainMilliseconds =
@@ -202,6 +210,13 @@ export type SuperviseWorkspaceSearchMigrationPostClosePlanningInput = {
     WorkspaceSearchMigrationHeartbeatScheduler
   /** Optional trusted clock shared by evidence checks and heartbeat scheduling. */
   readonly clock?: WorkspaceSearchMigrationHeartbeatClock
+  /** Optional best-effort observer for durable planning page progress. */
+  readonly telemetryRecorder?: WorkspaceSearchMigrationTelemetryRecorder
+  /** Optional deterministic checkpoint-stall clock used by tests. */
+  readonly checkpointStallClock?: WorkspaceSearchMigrationTelemetryClock
+  /** Optional deterministic checkpoint-stall scheduler used by tests. */
+  readonly checkpointStallSchedule?:
+    WorkspaceSearchMigrationCheckpointStallSchedule
 }
 
 /**
@@ -378,14 +393,21 @@ class PostClosePlanningAuthorityController {
   /**
    * Forces a new post-close receipt and returns its exact evidence bytes.
    *
+   * @param checkpointStallWatchdog - Optional live planning-page watchdog.
    * @returns Fresh authority and evidence eligible for planning admission.
    */
-  async renewForPostClose(): Promise<RenewedPostCloseAuthority> {
+  async renewForPostClose(
+    checkpointStallWatchdog?:
+      WorkspaceSearchMigrationCheckpointStallWatchdog,
+  ): Promise<RenewedPostCloseAuthority> {
     const closedAt = this.requireClosedAt()
-    const evidenceBytes = await this.collectEvidence({
-      phase: 'post-close',
-      closedAt,
-    })
+    const evidenceBytes = await this.collectEvidence(
+      {
+        phase: 'post-close',
+        closedAt,
+      },
+      checkpointStallWatchdog,
+    )
     const authority = await this.renew(evidenceBytes)
     return { authority, evidenceBytes }
   }
@@ -393,9 +415,13 @@ class PostClosePlanningAuthorityController {
   /**
    * Resolves current authority or refreshes post-close evidence near expiry.
    *
+   * @param checkpointStallWatchdog - Optional live planning-page watchdog.
    * @returns Exact authority with commit headroom under the stable lease.
    */
-  async resolveForPlanning():
+  async resolveForPlanning(
+    checkpointStallWatchdog?:
+      WorkspaceSearchMigrationCheckpointStallWatchdog,
+  ):
     Promise<WorkspaceSearchMigrationPrePlanAuthority> {
     const current = this.currentAuthority
     if (
@@ -418,21 +444,27 @@ class PostClosePlanningAuthorityController {
         return refreshed
       }
     }
-    return (await this.renewForPostClose()).authority
+    return (
+      await this.renewForPostClose(checkpointStallWatchdog)
+    ).authority
   }
 
   /**
    * Collects and validates phase-specific evidence without leaking provider data.
    *
    * @param phase - Close or exact post-close collection request.
+   * @param checkpointStallWatchdog - Optional live planning-page watchdog.
    * @returns Detached exact canonical evidence bytes.
    */
   private async collectEvidence(
     phase:
       | { readonly phase: 'close' }
       | { readonly phase: 'post-close'; readonly closedAt: string },
+    checkpointStallWatchdog?:
+      WorkspaceSearchMigrationCheckpointStallWatchdog,
   ): Promise<Uint8Array> {
     let collected: WorkspaceSearchMigrationCollectedMaintenanceEvidence
+    checkpointStallWatchdog?.pause()
     try {
       collected = await runGuardedOperation(
         this.context,
@@ -461,6 +493,8 @@ class PostClosePlanningAuthorityController {
         'TRANSIENT_INFRASTRUCTURE_FAILURE',
         'Maintenance evidence collection did not complete.',
       )
+    } finally {
+      checkpointStallWatchdog?.resume()
     }
     let evidenceBytes: Uint8Array
     try {
@@ -699,6 +733,9 @@ export async function superviseWorkspaceSearchMigrationPostClosePlanning(
       planningJoinLimits,
       retainUntil,
       clock,
+      telemetryRecorder: request.telemetryRecorder,
+      checkpointStallClock: request.checkpointStallClock,
+      checkpointStallSchedule: request.checkpointStallSchedule,
     }),
   })
 }
@@ -739,6 +776,13 @@ type RunPostClosePlanningInput = {
   readonly retainUntil: string
   /** Trusted supervisor wall clock. */
   readonly clock: WorkspaceSearchMigrationHeartbeatClock
+  /** Optional best-effort observer for durable planning page progress. */
+  readonly telemetryRecorder?: WorkspaceSearchMigrationTelemetryRecorder
+  /** Optional deterministic checkpoint-stall clock. */
+  readonly checkpointStallClock?: WorkspaceSearchMigrationTelemetryClock
+  /** Optional deterministic checkpoint-stall scheduler. */
+  readonly checkpointStallSchedule?:
+    WorkspaceSearchMigrationCheckpointStallSchedule
 }
 
 /**
@@ -829,18 +873,26 @@ async function runPostClosePlanning(
 
   const capturedHeads = await readPlanningEvidenceHeads(input)
   const pageBudget = createPlanningEvidencePageBudget(capturedHeads)
-  await completePlanningSourceEvidence(
-    input,
-    authorityController,
-    capturedHeads.sources,
-    pageBudget,
-  )
-  await completePlanningTargetEvidence(
-    input,
-    authorityController,
-    capturedHeads.target,
-    pageBudget,
-  )
+  const checkpointStallWatchdog =
+    createPlanningCheckpointStallWatchdog(input, capturedHeads)
+  try {
+    await completePlanningSourceEvidence(
+      input,
+      authorityController,
+      capturedHeads.sources,
+      pageBudget,
+      checkpointStallWatchdog,
+    )
+    await completePlanningTargetEvidence(
+      input,
+      authorityController,
+      capturedHeads.target,
+      pageBudget,
+      checkpointStallWatchdog,
+    )
+  } finally {
+    checkpointStallWatchdog?.stop()
+  }
   const prepared = await runGuardedOperation(
     input.context,
     () => input.session.prepareCommittedPlanningEvidence({
@@ -1097,12 +1149,15 @@ function createPlanningEvidencePageBudget(
  * @param authorityController - Fresh post-close authority controller.
  * @param captured - Four source heads fixed before any new page commit.
  * @param budget - Shared combined durable-page budget.
+ * @param checkpointStallWatchdog - Optional live planning-page watchdog.
  */
 async function completePlanningSourceEvidence(
   input: RunPostClosePlanningInput,
   authorityController: PostClosePlanningAuthorityController,
   captured: PlanningEvidenceProgressHeads['sources'],
   budget: PlanningEvidencePageBudget,
+  checkpointStallWatchdog?:
+    WorkspaceSearchMigrationCheckpointStallWatchdog,
 ): Promise<void> {
   for (const source of workspaceSearchMigrationSourceNames) {
     const request:
@@ -1118,7 +1173,9 @@ async function completePlanningSourceEvidence(
       requirePlanningEvidencePageCapacity(budget)
       const previousPageSequence = progress.pageSequence
       const authority =
-        await authorityController.resolveForPlanning()
+        await authorityController.resolveForPlanning(
+          checkpointStallWatchdog,
+        )
       progress = await runGuardedOperation(
         input.context,
         () => input.session.commitNextSourceEvidencePage({
@@ -1139,6 +1196,9 @@ async function completePlanningSourceEvidence(
         previousPageSequence,
         progress.pageSequence,
       )
+      checkpointStallWatchdog?.recordProgress(
+        progress.pageSequence - previousPageSequence,
+      )
     }
   }
 }
@@ -1150,12 +1210,15 @@ async function completePlanningSourceEvidence(
  * @param authorityController - Fresh post-close authority controller.
  * @param captured - Target head fixed before any new page commit.
  * @param budget - Shared combined durable-page budget.
+ * @param checkpointStallWatchdog - Optional live planning-page watchdog.
  */
 async function completePlanningTargetEvidence(
   input: RunPostClosePlanningInput,
   authorityController: PostClosePlanningAuthorityController,
   captured: WorkspaceSearchMigrationTargetEvidenceProgress,
   budget: PlanningEvidencePageBudget,
+  checkpointStallWatchdog?:
+    WorkspaceSearchMigrationCheckpointStallWatchdog,
 ): Promise<void> {
   const request: WorkspaceSearchMigrationTargetEvidenceAwsRequest = {
     runId: input.context.lease.runId,
@@ -1168,7 +1231,9 @@ async function completePlanningTargetEvidence(
     requirePlanningEvidencePageCapacity(budget)
     const previousPageSequence = progress.pageSequence
     const authority =
-      await authorityController.resolveForPlanning()
+      await authorityController.resolveForPlanning(
+        checkpointStallWatchdog,
+      )
     progress = await runGuardedOperation(
       input.context,
       () => input.session.commitNextTargetEvidencePage({
@@ -1188,7 +1253,56 @@ async function completePlanningTargetEvidence(
       previousPageSequence,
       progress.pageSequence,
     )
+    checkpointStallWatchdog?.recordProgress(
+      progress.pageSequence - previousPageSequence,
+    )
   }
+}
+
+/**
+ * Arms live planning monitoring only after the intentional post-close drain.
+ *
+ * @param input - Fixed supervised planning input and optional telemetry.
+ * @param captured - Durable source and target heads fixed after admission.
+ * @returns Live watchdog for pending page work, or undefined when unnecessary.
+ */
+function createPlanningCheckpointStallWatchdog(
+  input: RunPostClosePlanningInput,
+  captured: PlanningEvidenceProgressHeads,
+): WorkspaceSearchMigrationCheckpointStallWatchdog | undefined {
+  if (
+    input.telemetryRecorder === undefined ||
+    !hasIncompletePlanningEvidence(captured)
+  ) {
+    return undefined
+  }
+  return createWorkspaceSearchMigrationCheckpointStallWatchdog({
+    version: WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+    mode: 'monitor-progress',
+    phase: 'planning',
+    recorder: input.telemetryRecorder,
+    ...(input.checkpointStallClock === undefined
+      ? {}
+      : { clock: input.checkpointStallClock }),
+    ...(input.checkpointStallSchedule === undefined
+      ? {}
+      : { schedule: input.checkpointStallSchedule }),
+  })
+}
+
+/**
+ * Returns whether any captured planning chain still requires a durable page.
+ *
+ * @param captured - Durable source and target heads fixed after admission.
+ * @returns Whether live planning-page monitoring has work to observe.
+ */
+function hasIncompletePlanningEvidence(
+  captured: PlanningEvidenceProgressHeads,
+): boolean {
+  if (!captured.target.checkpoint.completed) return true
+  return workspaceSearchMigrationSourceNames.some(
+    (source) => !captured.sources[source].checkpoint.completed,
+  )
 }
 
 /**
@@ -1488,6 +1602,12 @@ function snapshotPostClosePlanningInput(
   let heartbeatScheduler:
     WorkspaceSearchMigrationHeartbeatScheduler | undefined
   let clock: WorkspaceSearchMigrationHeartbeatClock | undefined
+  let telemetryRecorder:
+    WorkspaceSearchMigrationTelemetryRecorder | undefined
+  let checkpointStallClock:
+    WorkspaceSearchMigrationTelemetryClock | undefined
+  let checkpointStallSchedule:
+    WorkspaceSearchMigrationCheckpointStallSchedule | undefined
   try {
     session = input.session
     maintenanceEvidenceProvider = input.maintenanceEvidenceProvider
@@ -1500,6 +1620,9 @@ function snapshotPostClosePlanningInput(
     signal = input.signal
     heartbeatScheduler = input.heartbeatScheduler
     clock = input.clock
+    telemetryRecorder = input.telemetryRecorder
+    checkpointStallClock = input.checkpointStallClock
+    checkpointStallSchedule = input.checkpointStallSchedule
   } catch {
     return failPlanningSupervisor(
       'INVALID_ARGUMENT',
@@ -1524,6 +1647,15 @@ function snapshotPostClosePlanningInput(
       ? {}
       : { heartbeatScheduler }),
     ...(clock === undefined ? {} : { clock }),
+    ...(telemetryRecorder === undefined
+      ? {}
+      : { telemetryRecorder }),
+    ...(checkpointStallClock === undefined
+      ? {}
+      : { checkpointStallClock }),
+    ...(checkpointStallSchedule === undefined
+      ? {}
+      : { checkpointStallSchedule }),
   }
 }
 

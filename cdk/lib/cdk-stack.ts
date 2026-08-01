@@ -18,6 +18,7 @@ import {
   buildFileStorage,
   configureFileStorageApiBoundary,
 } from './subsystems/file-storage';
+import { buildMigrationObservability } from './subsystems/migration-observability';
 import { buildMigrationStorage } from './subsystems/migration-storage';
 import { buildStackOutputs } from './subsystems/outputs';
 import { buildRestoreDrill } from './subsystems/restore-drill';
@@ -59,6 +60,7 @@ export class CdkStack extends cdk.Stack {
       workItemsTable: dataStores.workItemsTable,
       workspaceSearchTable: dataStores.workspaceSearchTable,
     });
+    buildMigrationObservability(this);
     const workspaceSearchWriterFence:
       WorkspaceSearchWriterFenceResources = {
         collaborationTable: dataStores.collaborationTable,

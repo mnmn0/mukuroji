@@ -1138,6 +1138,72 @@ describe('Workspace Search migration control coordinator', () => {
     ])
   })
 
+  test('preserves optional telemetry and stall-watchdog capabilities through dispatch', async () => {
+    const telemetryRecorder = { capability: 'telemetry-recorder' }
+    const checkpointStallClock = (): number => 25
+    const checkpointStallSchedule = (): (() => void) => (): void => {}
+    let capturedPlanning: unknown
+    let capturedExecution: unknown
+    const dependencies = createRecordingDependencies([])
+    const recordingDependencies:
+      WorkspaceSearchMigrationControlCoordinatorDependencies = {
+        ...dependencies,
+        supervisePostClosePlanning: async (input): Promise<void> => {
+          capturedPlanning = input
+        },
+        superviseExecution: async (input) => {
+          capturedExecution = input
+          return {
+            phase: 'applied',
+            nextAction: {
+              kind: 'choose',
+              options: ['verify', 'complete-rollback'],
+            },
+          }
+        },
+      }
+    const common = {
+      session: { capability: 'stage-session' },
+      maintenanceEvidenceProvider: { capability: 'fresh-evidence' },
+      runId,
+      ownerId,
+      expectedConfigurationHash: '1'.repeat(64),
+      telemetryRecorder,
+      checkpointStallClock,
+      checkpointStallSchedule,
+    }
+
+    await invokeCoordinator({
+      ...common,
+      reviewedDryRunEvidenceBytes: new Uint8Array([1]),
+      planningJoinLimits: {
+        maxTotalRows: 100,
+        maxTotalCanonicalItemBytes: 1_024,
+        maxPlanOperations: 100,
+      },
+      retainUntil: retainedUntil,
+      mode: 'close-replan',
+      approval:
+        workspaceSearchMigrationControlApprovalLiterals['close-replan'],
+    }, recordingDependencies)
+    await invokeCoordinator({
+      ...common,
+      mode: 'apply',
+      approval: workspaceSearchMigrationControlApprovalLiterals.apply,
+    }, recordingDependencies)
+
+    expect(capturedPlanning).toMatchObject({
+      telemetryRecorder,
+      checkpointStallClock,
+      checkpointStallSchedule,
+    })
+    expect(capturedExecution).toMatchObject({
+      telemetryRecorder,
+      checkpointStallClock,
+      checkpointStallSchedule,
+    })
+  })
+
   test('status accepts a dedicated read dependency without touching mutation capabilities', async () => {
     let mutationGetterReads = 0
     const dependencies = {

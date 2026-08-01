@@ -48,6 +48,14 @@ import {
 import {
   parseMaintenanceEvidence,
 } from './maintenance-evidence'
+import {
+  createWorkspaceSearchMigrationCheckpointStallWatchdog,
+  WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+  type WorkspaceSearchMigrationCheckpointStallSchedule,
+  type WorkspaceSearchMigrationCheckpointStallWatchdog,
+  type WorkspaceSearchMigrationTelemetryClock,
+  type WorkspaceSearchMigrationTelemetryRecorder,
+} from './migration-telemetry'
 import type {
   WorkspaceSearchMigrationMaintenanceEvidenceProvider,
 } from './migration-post-close-planning-supervisor'
@@ -439,6 +447,25 @@ export type SuperviseWorkspaceSearchMigrationExecutionInput = {
     WorkspaceSearchMigrationHeartbeatScheduler
   /** Optional trusted clock shared by evidence and heartbeat checks. */
   readonly clock?: WorkspaceSearchMigrationHeartbeatClock
+  /** Optional best-effort observer for durable execution progress. */
+  readonly telemetryRecorder?: WorkspaceSearchMigrationTelemetryRecorder
+  /** Optional deterministic checkpoint-stall clock used by tests. */
+  readonly checkpointStallClock?: WorkspaceSearchMigrationTelemetryClock
+  /** Optional deterministic checkpoint-stall scheduler used by tests. */
+  readonly checkpointStallSchedule?:
+    WorkspaceSearchMigrationCheckpointStallSchedule
+}
+
+/**
+ * Optional runtime dependencies for one execution checkpoint watchdog.
+ */
+type ExecutionCheckpointStallDependencies = {
+  /** Best-effort observer for durable execution progress. */
+  readonly recorder?: WorkspaceSearchMigrationTelemetryRecorder
+  /** Deterministic checkpoint-stall clock. */
+  readonly clock?: WorkspaceSearchMigrationTelemetryClock
+  /** Deterministic checkpoint-stall scheduler. */
+  readonly schedule?: WorkspaceSearchMigrationCheckpointStallSchedule
 }
 
 /**
@@ -853,6 +880,11 @@ export async function superviseWorkspaceSearchMigrationExecution(
         authority,
         context,
         mode,
+        {
+          recorder: request.telemetryRecorder,
+          clock: request.checkpointStallClock,
+          schedule: request.checkpointStallSchedule,
+        },
       )
     },
   })
@@ -936,9 +968,13 @@ class ExecutionAuthorityController {
   /**
    * Resolves current authority or renews post-close evidence near expiry.
    *
+   * @param checkpointStallWatchdog - Optional live execution watchdog.
    * @returns Exact fresh authority with minimum commit headroom.
    */
-  async resolve(): Promise<WorkspaceSearchMigrationPrePlanAuthority> {
+  async resolve(
+    checkpointStallWatchdog?:
+      WorkspaceSearchMigrationCheckpointStallWatchdog,
+  ): Promise<WorkspaceSearchMigrationPrePlanAuthority> {
     const current = this.authority
     if (current !== undefined) {
       let refreshed: WorkspaceSearchMigrationPrePlanAuthority
@@ -959,6 +995,7 @@ class ExecutionAuthorityController {
             receiptDigest:
               current.maintenanceEvidenceReceiptDigest,
           },
+          checkpointStallWatchdog,
         )
       }
       this.requireAuthorityBinding(refreshed)
@@ -983,6 +1020,7 @@ class ExecutionAuthorityController {
         return this.renewAfterExpiredAuthorityFailure(
           error,
           pointer,
+          checkpointStallWatchdog,
         )
       }
       this.requireAuthorityBinding(restored)
@@ -991,7 +1029,7 @@ class ExecutionAuthorityController {
         return restored
       }
     }
-    return this.renew()
+    return this.renew(checkpointStallWatchdog)
   }
 
   /**
@@ -1002,11 +1040,14 @@ class ExecutionAuthorityController {
    *
    * @param error - Failure raised while resolving the selected pointer.
    * @param pointer - Exact durable pointer selected by the failed read.
+   * @param checkpointStallWatchdog - Optional live execution watchdog.
    * @returns Fresh renewed authority after proving ordinary expiry.
    */
   private async renewAfterExpiredAuthorityFailure(
     error: unknown,
     pointer: WorkspaceSearchMigrationPrePlanMaintenancePointerClaim,
+    checkpointStallWatchdog?:
+      WorkspaceSearchMigrationCheckpointStallWatchdog,
   ): Promise<WorkspaceSearchMigrationPrePlanAuthority> {
     this.context.assertActive()
     if (
@@ -1033,21 +1074,26 @@ class ExecutionAuthorityController {
     ) {
       throw error
     }
-    return this.renew()
+    return this.renew(checkpointStallWatchdog)
   }
 
   /**
-   * Collects and durably selects one fresh post-close evidence receipt.
+   * Excludes only intentional provider collection from live checkpoint timing.
    *
+   * @param checkpointStallWatchdog - Optional live execution watchdog.
    * @returns Exact renewed pre-plan authority.
    */
-  private async renew():
+  private async renew(
+    checkpointStallWatchdog?:
+      WorkspaceSearchMigrationCheckpointStallWatchdog,
+  ):
     Promise<WorkspaceSearchMigrationPrePlanAuthority> {
     let collected: Awaited<
       ReturnType<
         WorkspaceSearchMigrationMaintenanceEvidenceProvider['collect']
       >
     >
+    checkpointStallWatchdog?.pause()
     try {
       collected = await runGuardedOperation(
         this.context,
@@ -1065,6 +1111,8 @@ class ExecutionAuthorityController {
       return failExecutionSupervisor(
         'TRANSIENT_INFRASTRUCTURE_FAILURE',
       )
+    } finally {
+      checkpointStallWatchdog?.resume()
     }
     let evidenceBytes: Uint8Array
     try {
@@ -1150,6 +1198,7 @@ class ExecutionAuthorityController {
  * @param authority - Heartbeat-scoped current-authority controller.
  * @param guard - Heartbeat operation guard.
  * @param mode - Explicit operator branch.
+ * @param checkpointStall - Optional live checkpoint observer dependencies.
  * @returns Secret-free durable phase reached by the branch.
  */
 async function runExecutionMode(
@@ -1158,70 +1207,97 @@ async function runExecutionMode(
   authority: ExecutionAuthorityController,
   guard: WorkspaceSearchMigrationHeartbeatTaskContext,
   mode: WorkspaceSearchMigrationExecutionSupervisorMode,
+  checkpointStall: ExecutionCheckpointStallDependencies,
 ): Promise<WorkspaceSearchMigrationExecutionStatus> {
-  let executionRun = loaded.executionRun
-  if (executionRun === undefined) {
-    if (mode !== 'apply') {
-      return failExecutionSupervisor('INVALID_STATE')
-    }
-    const currentAuthority = await authority.resolve()
-    const port = session.createExecutionRunPort(
-      loaded.boundary,
-      loaded.sealedPlanningAuthority,
-      loaded.replay.planSeal,
-      loaded.closedWriterFenceRecord,
-    )
-    executionRun = await runGuardedOperation(
-      guard,
-      () => port.create(currentAuthority),
-    )
-  }
-  const ports = createExecutionPhasePorts(
-    session,
-    loaded,
-    executionRun,
-  )
-  while (true) {
-    const snapshot = await readDurableExecutionSnapshot(
-      ports,
-      guard,
-    )
-    const completed = requireExecutionModeSnapshot(
-      snapshot,
-      mode,
-    )
-    if (completed !== undefined) return completed
-    if (mode === 'apply') {
-      if (snapshot.kind !== 'applying') {
+  const checkpointStallWatchdog =
+    createExecutionCheckpointStallWatchdog(mode, checkpointStall)
+  try {
+    let executionRun = loaded.executionRun
+    if (executionRun === undefined) {
+      if (mode !== 'apply') {
         return failExecutionSupervisor('INVALID_STATE')
       }
-      await advanceApply(
-        loaded,
-        ports.apply,
-        snapshot.runState,
-        authority,
+      const currentAuthority = await authority.resolve(
+        checkpointStallWatchdog,
+      )
+      const port = session.createExecutionRunPort(
+        loaded.boundary,
+        loaded.sealedPlanningAuthority,
+        loaded.replay.planSeal,
+        loaded.closedWriterFenceRecord,
+      )
+      executionRun = await runGuardedOperation(
+        guard,
+        () => port.create(currentAuthority),
+      )
+      checkpointStallWatchdog?.recordProgress(1)
+    }
+    const ports = createExecutionPhasePorts(
+      session,
+      loaded,
+      executionRun,
+    )
+    while (true) {
+      const snapshot = await readDurableExecutionSnapshot(
+        ports,
         guard,
       )
-      continue
-    }
-    if (mode === 'verify') {
-      if (snapshot.kind !== 'applied' && snapshot.kind !== 'verifying') {
-        return failExecutionSupervisor('INVALID_STATE')
+      const completed = requireExecutionModeSnapshot(
+        snapshot,
+        mode,
+      )
+      if (completed !== undefined) return completed
+      if (mode === 'apply') {
+        if (snapshot.kind !== 'applying') {
+          return failExecutionSupervisor('INVALID_STATE')
+        }
+        await advanceApply(
+          loaded,
+          ports.apply,
+          snapshot.runState,
+          authority,
+          guard,
+          checkpointStallWatchdog,
+        )
+        checkpointStallWatchdog?.recordProgress(1)
+        continue
       }
-      await advanceVerification(
-        ports.verification,
-        snapshot.kind === 'verifying'
-          ? snapshot.progress
-          : undefined,
-        authority,
-        guard,
-      )
-      continue
-    }
-    if (mode === 'partial-rollback') {
+      if (mode === 'verify') {
+        if (snapshot.kind !== 'applied' && snapshot.kind !== 'verifying') {
+          return failExecutionSupervisor('INVALID_STATE')
+        }
+        await advanceVerification(
+          ports.verification,
+          snapshot.kind === 'verifying'
+            ? snapshot.progress
+            : undefined,
+          authority,
+          guard,
+          checkpointStallWatchdog,
+        )
+        checkpointStallWatchdog?.recordProgress(1)
+        continue
+      }
+      if (mode === 'partial-rollback') {
+        if (
+          snapshot.kind !== 'applying' &&
+          snapshot.kind !== 'partial-rollback'
+        ) {
+          return failExecutionSupervisor('INVALID_STATE')
+        }
+        await advanceRollback(
+          ports,
+          snapshot,
+          authority,
+          guard,
+          checkpointStallWatchdog,
+        )
+        checkpointStallWatchdog?.recordProgress(1)
+        continue
+      }
       if (
-        snapshot.kind !== 'applying' &&
-        snapshot.kind !== 'partial-rollback'
+        snapshot.kind !== 'applied' &&
+        snapshot.kind !== 'complete-rollback'
       ) {
         return failExecutionSupervisor('INVALID_STATE')
       }
@@ -1230,22 +1306,44 @@ async function runExecutionMode(
         snapshot,
         authority,
         guard,
+        checkpointStallWatchdog,
       )
-      continue
+      checkpointStallWatchdog?.recordProgress(1)
     }
-    if (
-      snapshot.kind !== 'applied' &&
-      snapshot.kind !== 'complete-rollback'
-    ) {
-      return failExecutionSupervisor('INVALID_STATE')
-    }
-    await advanceRollback(
-      ports,
-      snapshot,
-      authority,
-      guard,
-    )
+  } finally {
+    checkpointStallWatchdog?.stop()
   }
+}
+
+/**
+ * Creates one mode-specific live execution checkpoint watchdog.
+ *
+ * @param mode - Explicit operator execution branch.
+ * @param dependencies - Optional recorder and deterministic test dependencies.
+ * @returns Live watchdog, or undefined when telemetry is not configured.
+ */
+function createExecutionCheckpointStallWatchdog(
+  mode: WorkspaceSearchMigrationExecutionSupervisorMode,
+  dependencies: ExecutionCheckpointStallDependencies,
+): WorkspaceSearchMigrationCheckpointStallWatchdog | undefined {
+  if (dependencies.recorder === undefined) return undefined
+  const phase = mode === 'apply'
+    ? 'apply'
+    : mode === 'verify'
+      ? 'verification'
+      : 'rollback'
+  return createWorkspaceSearchMigrationCheckpointStallWatchdog({
+    version: WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
+    mode: 'monitor-progress',
+    phase,
+    recorder: dependencies.recorder,
+    ...(dependencies.clock === undefined
+      ? {}
+      : { clock: dependencies.clock }),
+    ...(dependencies.schedule === undefined
+      ? {}
+      : { schedule: dependencies.schedule }),
+  })
 }
 
 /**
@@ -1312,6 +1410,7 @@ function requireExecutionModeSnapshot(
  * @param state - Current authoritative applying run state.
  * @param authority - Current-authority controller.
  * @param guard - Heartbeat activity guard.
+ * @param checkpointStallWatchdog - Optional live execution watchdog.
  */
 async function advanceApply(
   loaded: LoadedClosedExecutionContext,
@@ -1321,8 +1420,12 @@ async function advanceApply(
   >,
   authority: ExecutionAuthorityController,
   guard: ExecutionOperationGuard,
+  checkpointStallWatchdog?:
+    WorkspaceSearchMigrationCheckpointStallWatchdog,
 ): Promise<void> {
-  const currentAuthority = await authority.resolve()
+  const currentAuthority = await authority.resolve(
+    checkpointStallWatchdog,
+  )
   const claim = createAuthorityClaim(currentAuthority)
   const adopted = await runGuardedOperation(
     guard,
@@ -1389,6 +1492,7 @@ async function advanceApply(
  * @param progress - Current progress, absent before the first page.
  * @param authority - Current-authority controller.
  * @param guard - Heartbeat activity guard.
+ * @param checkpointStallWatchdog - Optional live execution watchdog.
  */
 async function advanceVerification(
   port: WorkspaceSearchMigrationFullVerificationAwsPort,
@@ -1399,8 +1503,12 @@ async function advanceVerification(
   >,
   authority: ExecutionAuthorityController,
   guard: ExecutionOperationGuard,
+  checkpointStallWatchdog?:
+    WorkspaceSearchMigrationCheckpointStallWatchdog,
 ): Promise<void> {
-  const currentAuthority = await authority.resolve()
+  const currentAuthority = await authority.resolve(
+    checkpointStallWatchdog,
+  )
   const claim = createAuthorityClaim(currentAuthority)
   const location = nextVerificationLocation(progress)
   if (location !== undefined) {
@@ -1433,14 +1541,19 @@ async function advanceVerification(
  * @param snapshot - Current authoritative durable graph.
  * @param authority - Current-authority controller.
  * @param guard - Heartbeat activity guard.
+ * @param checkpointStallWatchdog - Optional live execution watchdog.
  */
 async function advanceRollback(
   ports: ExecutionPhasePorts,
   snapshot: DurableExecutionSnapshot,
   authority: ExecutionAuthorityController,
   guard: ExecutionOperationGuard,
+  checkpointStallWatchdog?:
+    WorkspaceSearchMigrationCheckpointStallWatchdog,
 ): Promise<void> {
-  const claim = createAuthorityClaim(await authority.resolve())
+  const claim = createAuthorityClaim(
+    await authority.resolve(checkpointStallWatchdog),
+  )
   if (snapshot.kind === 'applying') {
     await runGuardedOperation(
       guard,
@@ -2432,6 +2545,12 @@ function snapshotExecutionSupervisorInput(
   let heartbeatScheduler:
     WorkspaceSearchMigrationHeartbeatScheduler | undefined
   let clock: WorkspaceSearchMigrationHeartbeatClock | undefined
+  let telemetryRecorder:
+    WorkspaceSearchMigrationTelemetryRecorder | undefined
+  let checkpointStallClock:
+    WorkspaceSearchMigrationTelemetryClock | undefined
+  let checkpointStallSchedule:
+    WorkspaceSearchMigrationCheckpointStallSchedule | undefined
   try {
     session = input.session
     maintenanceEvidenceProvider = input.maintenanceEvidenceProvider
@@ -2442,6 +2561,9 @@ function snapshotExecutionSupervisorInput(
     signal = input.signal
     heartbeatScheduler = input.heartbeatScheduler
     clock = input.clock
+    telemetryRecorder = input.telemetryRecorder
+    checkpointStallClock = input.checkpointStallClock
+    checkpointStallSchedule = input.checkpointStallSchedule
   } catch {
     return failExecutionSupervisor('INVALID_ARGUMENT')
   }
@@ -2457,6 +2579,15 @@ function snapshotExecutionSupervisorInput(
       ? {}
       : { heartbeatScheduler }),
     ...(clock === undefined ? {} : { clock }),
+    ...(telemetryRecorder === undefined
+      ? {}
+      : { telemetryRecorder }),
+    ...(checkpointStallClock === undefined
+      ? {}
+      : { checkpointStallClock }),
+    ...(checkpointStallSchedule === undefined
+      ? {}
+      : { checkpointStallSchedule }),
   }
 }
 

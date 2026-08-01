@@ -1733,6 +1733,62 @@ function installRecordingManagedRateHarness(
   return harness
 }
 
+/**
+ * Installs one test-owned quarantine observer into a private managed port.
+ *
+ * @param port - Managed session owned exclusively by the current test.
+ * @param record - Observation callback to install.
+ */
+function installManagedQuarantineTelemetryRecorder(
+  port: WorkspaceSearchMigrationManagedAwsSession,
+  record: (observation: unknown) => void,
+): void {
+  if (!Reflect.set(port, 'telemetryRecorder', Object.freeze({ record }))) {
+    throw new Error(
+      'Expected the test-owned quarantine observer to install.',
+    )
+  }
+}
+
+/**
+ * Captures one private current-generation authority for quarantine testing.
+ *
+ * @param port - Measured managed session owned by the current test.
+ * @returns Opaque authority accepted only by the private quarantine seam.
+ */
+function captureManagedMigrationStateAuthorityForTest(
+  port: WorkspaceSearchMigrationManagedAwsSession,
+): unknown {
+  const capture = Reflect.get(
+    port,
+    'captureManagedMigrationStateAuthority',
+  )
+  if (typeof capture !== 'function') {
+    throw new Error('Expected the private authority capture seam.')
+  }
+  return Reflect.apply(capture, port, [])
+}
+
+/**
+ * Invokes the private quarantine transition for one opaque authority.
+ *
+ * @param port - Managed session owning the authority.
+ * @param authority - Opaque authority captured from that session.
+ */
+function quarantineManagedExecutionControlForTest(
+  port: WorkspaceSearchMigrationManagedAwsSession,
+  authority: unknown,
+): void {
+  const quarantine = Reflect.get(
+    port,
+    'quarantineManagedExecutionControl',
+  )
+  if (typeof quarantine !== 'function') {
+    throw new Error('Expected the private managed quarantine seam.')
+  }
+  Reflect.apply(quarantine, port, [authority])
+}
+
 describe('Workspace Search migration AWS identity adapter', () => {
   test('constructs only exact allowlisted reads and closes its transport', async () => {
     const requested = createRequestedResources()
@@ -6413,6 +6469,64 @@ describe('Workspace Search migration AWS identity adapter', () => {
   )
 
   test(
+    'records quarantine telemetry once for each current open generation',
+    async () => {
+      const requested = createRequestedResources()
+      const transport = new RecordingIdentityAwsTransport()
+      seedValidMeasurementOutputs(transport, requested)
+      const port = createAwsWorkspaceSearchMigrationIdentityPort(
+        requested,
+        () => transport,
+      )
+      const observations: unknown[] = []
+      installManagedQuarantineTelemetryRecorder(
+        port,
+        (observation): void => {
+          observations.push(observation)
+        },
+      )
+      await port.measureConfiguration()
+      const firstAuthority =
+        captureManagedMigrationStateAuthorityForTest(port)
+
+      quarantineManagedExecutionControlForTest(port, firstAuthority)
+      quarantineManagedExecutionControlForTest(port, firstAuthority)
+
+      const expectedObservation = {
+        version: 1,
+        kind: 'quarantine',
+        phase: 'post-send-guard',
+        reason: 'configuration-mismatch',
+      }
+      expect(observations).toEqual([expectedObservation])
+
+      await port.measureConfiguration()
+      quarantineManagedExecutionControlForTest(port, firstAuthority)
+      expect(observations).toEqual([expectedObservation])
+      const replacementAuthority =
+        captureManagedMigrationStateAuthorityForTest(port)
+      quarantineManagedExecutionControlForTest(
+        port,
+        replacementAuthority,
+      )
+      expect(observations).toEqual([
+        expectedObservation,
+        expectedObservation,
+      ])
+
+      await port.close()
+      quarantineManagedExecutionControlForTest(
+        port,
+        replacementAuthority,
+      )
+      expect(observations).toEqual([
+        expectedObservation,
+        expectedObservation,
+      ])
+    },
+  )
+
+  test(
     'quarantines execution control after post-commit identity drift',
     async () => {
       const requested = createRequestedResources()
@@ -6423,6 +6537,16 @@ describe('Workspace Search migration AWS identity adapter', () => {
         requested,
         () => transport,
         () => new Date(clockAt),
+      )
+      let telemetryRecordCount = 0
+      let telemetryObservation: unknown
+      installManagedQuarantineTelemetryRecorder(
+        port,
+        (observation): void => {
+          telemetryRecordCount += 1
+          telemetryObservation = observation
+          throw new Error('expected-quarantine-observer-failure')
+        },
       )
       await port.measureConfiguration()
       const authority = await createManagedPlanningAuthority(
@@ -6463,6 +6587,13 @@ describe('Workspace Search migration AWS identity adapter', () => {
         code: 'TARGET_DRIFT',
         message:
           'Workspace Search migration execution boundary operation failed.',
+      })
+      expect(telemetryRecordCount).toBe(1)
+      expect(telemetryObservation).toEqual({
+        version: 1,
+        kind: 'quarantine',
+        phase: 'post-send-guard',
+        reason: 'configuration-mismatch',
       })
       expect(postCommitDriftInjected).toBe(true)
       expect(

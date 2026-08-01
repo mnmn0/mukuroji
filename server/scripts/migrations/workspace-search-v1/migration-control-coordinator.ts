@@ -389,6 +389,15 @@ export async function advanceWorkspaceSearchMigrationControlStage(
         ? {}
         : { heartbeatScheduler: request.heartbeatScheduler }),
       ...(request.clock === undefined ? {} : { clock: request.clock }),
+      ...(request.telemetryRecorder === undefined
+        ? {}
+        : { telemetryRecorder: request.telemetryRecorder }),
+      ...(request.checkpointStallClock === undefined
+        ? {}
+        : { checkpointStallClock: request.checkpointStallClock }),
+      ...(request.checkpointStallSchedule === undefined
+        ? {}
+        : { checkpointStallSchedule: request.checkpointStallSchedule }),
     })
     return { mode: 'close-replan', phase: 'planning-admitted' }
   }
@@ -410,6 +419,15 @@ export async function advanceWorkspaceSearchMigrationControlStage(
       ? {}
       : { heartbeatScheduler: request.heartbeatScheduler }),
     ...(request.clock === undefined ? {} : { clock: request.clock }),
+    ...(request.telemetryRecorder === undefined
+      ? {}
+      : { telemetryRecorder: request.telemetryRecorder }),
+    ...(request.checkpointStallClock === undefined
+      ? {}
+      : { checkpointStallClock: request.checkpointStallClock }),
+    ...(request.checkpointStallSchedule === undefined
+      ? {}
+      : { checkpointStallSchedule: request.checkpointStallSchedule }),
   })
   return { mode: request.mode, execution }
 }
@@ -528,6 +546,16 @@ function snapshotCloseReplanInput(
   let scheduler:
     WorkspaceSearchMigrationHeartbeatScheduler | undefined
   let clock: WorkspaceSearchMigrationHeartbeatClock | undefined
+  let telemetryRecorder:
+    WorkspaceSearchMigrationControlCloseReplanInput['telemetryRecorder']
+  let checkpointStallClock:
+    WorkspaceSearchMigrationControlCloseReplanInput[
+      'checkpointStallClock'
+    ]
+  let checkpointStallSchedule:
+    WorkspaceSearchMigrationControlCloseReplanInput[
+      'checkpointStallSchedule'
+    ]
   try {
     session = input.session
     provider = input.maintenanceEvidenceProvider
@@ -540,6 +568,9 @@ function snapshotCloseReplanInput(
     signal = input.signal
     scheduler = input.heartbeatScheduler
     clock = input.clock
+    telemetryRecorder = input.telemetryRecorder
+    checkpointStallClock = input.checkpointStallClock
+    checkpointStallSchedule = input.checkpointStallSchedule
   } catch {
     return failCoordinator('INVALID_ARGUMENT')
   }
@@ -570,6 +601,13 @@ function snapshotCloseReplanInput(
       ? {}
       : { heartbeatScheduler: scheduler }),
     ...(clock === undefined ? {} : { clock }),
+    ...(telemetryRecorder === undefined ? {} : { telemetryRecorder }),
+    ...(checkpointStallClock === undefined
+      ? {}
+      : { checkpointStallClock }),
+    ...(checkpointStallSchedule === undefined
+      ? {}
+      : { checkpointStallSchedule }),
   }
 }
 
@@ -597,6 +635,16 @@ function snapshotExecutionInput(
   let scheduler:
     WorkspaceSearchMigrationHeartbeatScheduler | undefined
   let clock: WorkspaceSearchMigrationHeartbeatClock | undefined
+  let telemetryRecorder:
+    WorkspaceSearchMigrationControlExecutionInput['telemetryRecorder']
+  let checkpointStallClock:
+    WorkspaceSearchMigrationControlExecutionInput[
+      'checkpointStallClock'
+    ]
+  let checkpointStallSchedule:
+    WorkspaceSearchMigrationControlExecutionInput[
+      'checkpointStallSchedule'
+    ]
   try {
     session = input.session
     provider = input.maintenanceEvidenceProvider
@@ -606,6 +654,9 @@ function snapshotExecutionInput(
     signal = input.signal
     scheduler = input.heartbeatScheduler
     clock = input.clock
+    telemetryRecorder = input.telemetryRecorder
+    checkpointStallClock = input.checkpointStallClock
+    checkpointStallSchedule = input.checkpointStallSchedule
   } catch {
     return failCoordinator('INVALID_ARGUMENT')
   }
@@ -621,6 +672,13 @@ function snapshotExecutionInput(
       ? {}
       : { heartbeatScheduler: scheduler }),
     ...(clock === undefined ? {} : { clock }),
+    ...(telemetryRecorder === undefined ? {} : { telemetryRecorder }),
+    ...(checkpointStallClock === undefined
+      ? {}
+      : { checkpointStallClock }),
+    ...(checkpointStallSchedule === undefined
+      ? {}
+      : { checkpointStallSchedule }),
   }
   if (mode === 'apply') {
     return {
