@@ -14,6 +14,7 @@ import {
   GetCallerIdentityCommand,
   STSClient,
 } from '@aws-sdk/client-sts'
+import { NodeHttpHandler } from '@smithy/node-http-handler'
 import {
   parseCanonicalAttributeMap,
   serializeCanonicalAttributeMap,
@@ -50,6 +51,9 @@ export type {
 const CURSOR_PREFIX = 'dynamodb-key-v1.'
 const MAX_CURSOR_LENGTH = 16_384
 const MAX_OBJECT_REFERENCE_BYTES = 1_024
+const AWS_CONNECTION_TIMEOUT_MILLISECONDS = 5_000
+const AWS_MAX_ATTEMPTS = 3
+const AWS_REQUEST_TIMEOUT_MILLISECONDS = 30_000
 const REQUIRED_TABLE_TARGETS: readonly CrossDomainIntegrityTableTarget[] = [
   'work-items',
   'work-item-configuration',
@@ -58,6 +62,24 @@ const REQUIRED_TABLE_TARGETS: readonly CrossDomainIntegrityTableTarget[] = [
   'audit-events',
   'file-proofing',
 ]
+
+/**
+ * Creates an isolated, bounded AWS client configuration for one reader client.
+ *
+ * @param region - Exact AWS Region containing the isolated restore resources.
+ * @returns Client configuration with finite connection, request, and retry budgets.
+ */
+function createBoundedAwsClientConfiguration(region: string) {
+  return {
+    maxAttempts: AWS_MAX_ATTEMPTS,
+    region,
+    requestHandler: new NodeHttpHandler({
+      connectionTimeout: AWS_CONNECTION_TIMEOUT_MILLISECONDS,
+      requestTimeout: AWS_REQUEST_TIMEOUT_MILLISECONDS,
+      throwOnRequestTimeout: true,
+    }),
+  }
+}
 
 /** Stable failure emitted by the SDK-independent normalized reader boundary. */
 export class CrossDomainIntegrityNormalizedPageReaderFailure extends Error {
@@ -200,9 +222,15 @@ class RawAwsReadPort implements CrossDomainIntegrityManagedAwsReadPort {
     this.bucketName = configuration.bucketName
     this.pageSize = configuration.pageSize
     this.tableNames = { ...configuration.tableNames }
-    this.dynamodb = new DynamoDBClient({ region: configuration.region })
-    this.s3 = new S3Client({ region: configuration.region })
-    this.sts = new STSClient({ region: configuration.region })
+    this.dynamodb = new DynamoDBClient(
+      createBoundedAwsClientConfiguration(configuration.region),
+    )
+    this.s3 = new S3Client(
+      createBoundedAwsClientConfiguration(configuration.region),
+    )
+    this.sts = new STSClient(
+      createBoundedAwsClientConfiguration(configuration.region),
+    )
   }
 
   /** @inheritdoc */

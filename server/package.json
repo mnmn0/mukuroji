@@ -29,6 +29,7 @@
     "@aws-sdk/s3-request-presigner": "^3.1057.0",
     "@mukuroji/contracts": "workspace:*",
     "@smithy/core": "3.30.0",
+    "@smithy/node-http-handler": "4.9.5",
     "hono": "^4.12.21"
   },
   "devDependencies": {
