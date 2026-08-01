@@ -167,6 +167,19 @@ describe('TimeTrackingService', () => {
       hourlyRateMinor: 5_000,
       source: 'manual',
     }, true)
+    await service.createEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      projectId: 'project-1',
+      workItemId: 'work-item-1',
+      userId: 'member-1',
+      startAt: '2026-08-02T10:00:00.000Z',
+      endAt: '2026-08-02T10:30:00.000Z',
+      billable: true,
+      currency: 'USD',
+      hourlyRateMinor: 5_000,
+      source: 'manual',
+    }, true)
     const summary = await service.createSummary({
       workspaceId: 'workspace-1',
       teamId: 'team-1',
@@ -178,11 +191,11 @@ describe('TimeTrackingService', () => {
     })
     expect(summary.groups[0]).toMatchObject({
       key: 'project-1',
-      minutes: 60,
+      minutes: 90,
       estimateMinutes: 120,
-      actualCostMinor: 5_000,
+      actualCostMinor: 7_500,
     })
-    expect(summary.totalActualCostMinor).toBe(5_000)
+    expect(summary.totalActualCostMinor).toBe(7_500)
 
     const workItemSummary = await service.createSummary({
       workspaceId: 'workspace-1',
@@ -195,7 +208,7 @@ describe('TimeTrackingService', () => {
     })
     expect(workItemSummary.groups[0]).toMatchObject({
       key: 'work-item-1',
-      minutes: 60,
+      minutes: 90,
       estimateMinutes: 120,
     })
     expect(await service.getEstimate('workspace-1', 'team-1', 'work-item-1')).toMatchObject({

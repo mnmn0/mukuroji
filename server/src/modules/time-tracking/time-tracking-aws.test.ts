@@ -2,7 +2,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { describe, expect, test } from 'bun:test'
 import type { TimeEntry, TimeEntryHistory } from '@mukuroji/contracts'
-import { DynamoDbTimeTrackingRepository } from './time-tracking'
+import { DynamoDbTimeTrackingRepository, TimeTrackingService } from './time-tracking'
 
 type CommandWithInput = {
   input: Record<string, unknown>
@@ -94,5 +94,47 @@ describe('DynamoDbTimeTrackingRepository', () => {
     await repository.saveEntryWithHistory(visibleEntry, createHistory(visibleEntry))
     expect(commands).toHaveLength(3)
     expect(commands[2]?.input.TransactItems).toHaveLength(2)
+  })
+
+  test('adds one redacted shared audit event to the entry transaction', async () => {
+    const commands: CommandWithInput[] = []
+    const service = new TimeTrackingService(
+      new DynamoDbTimeTrackingRepository(
+        'analytics-table',
+        createDocumentClient([{}], commands),
+      ),
+      {
+        now: () => new Date('2026-08-02T12:00:00.000Z'),
+        createId: (() => {
+          let sequence = 0
+          return () => `id-${++sequence}`
+        })(),
+        audit: {
+          tableName: 'audit-table',
+          retentionDays: 30,
+        },
+      },
+    )
+
+    await service.createEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      projectId: 'project-1',
+      workItemId: 'work-item-1',
+      userId: 'member-1',
+      startAt: '2026-08-02T09:00:00.000Z',
+      endAt: '2026-08-02T10:00:00.000Z',
+      billable: true,
+      currency: 'USD',
+      hourlyRateMinor: 4_000,
+      source: 'manual',
+    }, true)
+
+    expect(commands[0]?.input.TransactItems).toHaveLength(3)
+    const transactionItems = commands[0]?.input.TransactItems
+    expect(Array.isArray(transactionItems)).toBe(true)
+    if (!Array.isArray(transactionItems)) throw new Error('Expected transaction items.')
+    expect(JSON.stringify(transactionItems[2])).not.toContain('hourlyRateMinor')
+    expect(JSON.stringify(transactionItems[2])).toContain('audit-table')
   })
 })

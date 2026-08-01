@@ -19,6 +19,13 @@ import type {
   TimeTrackingGroupBy,
   TimeTrackingSummary,
 } from '@mukuroji/contracts'
+import {
+  calculateAuditExpiresAt,
+  createAuditEvent,
+  createAuditEventTransactPut,
+  createMutationAuditContext,
+  type AuditTransactWriteItem,
+} from '../audit'
 
 const ENTRY_PREFIX = 'TIME_ENTRY#'
 const HISTORY_PREFIX = 'TIME_HISTORY#'
@@ -31,6 +38,20 @@ const CURRENCY_PATTERN = /^[A-Z]{3}$/u
 const MAX_DESCRIPTION_LENGTH = 4_000
 const MAX_ENTRY_DURATION_MINUTES = 24 * 60 * 7
 const MAX_LIST_LIMIT = 500
+const TIME_ENTRY_AUDIT_FIELDS = [
+  'status',
+  'revision',
+  'startAt',
+  'endAt',
+  'durationMinutes',
+  'description',
+  'billable',
+  'currency',
+  'projectId',
+  'workItemId',
+  'userId',
+  'source',
+] as const
 
 /** A validated time entry creation request. */
 export type CreateTimeEntryInput = {
@@ -186,6 +207,14 @@ export type SaveTimeBudgetInput = {
   updatedBy: string
 }
 
+/** Configuration for appending time-entry mutations to the shared audit table. */
+export type TimeTrackingAuditOptions = {
+  /** Shared audit events table name. */
+  tableName: string
+  /** Retention period used to calculate the audit event TTL. */
+  retentionDays: number
+}
+
 /** Query options for a Team's time entries. */
 export type ListTimeEntriesInput = {
   /** Workspace identifier. */
@@ -235,7 +264,12 @@ export interface TimeTrackingRepository {
   /** Saves an entry with an optional optimistic concurrency condition. */
   saveEntry(entry: TimeEntry, expectedRevision?: number): Promise<void>
   /** Saves an entry and its immutable history in one operation. */
-  saveEntryWithHistory(entry: TimeEntry, history: TimeEntryHistory, expectedRevision?: number): Promise<void>
+  saveEntryWithHistory(
+    entry: TimeEntry,
+    history: TimeEntryHistory,
+    expectedRevision?: number,
+    auditPut?: AuditTransactWriteItem,
+  ): Promise<void>
   /** Saves an immutable lifecycle history record. */
   saveHistory(workspaceId: string, teamId: string, history: TimeEntryHistory): Promise<void>
   /** Lists immutable lifecycle history for an entry. */
@@ -249,6 +283,7 @@ export interface TimeTrackingRepository {
     timer: RunningTimer,
     entry: TimeEntry,
     history: TimeEntryHistory,
+    auditPut?: AuditTransactWriteItem,
   ): Promise<void>
   /** Reads a Work Item estimate. */
   getEstimate(workspaceId: string, teamId: string, workItemId: string): Promise<TimeEstimate | undefined>
@@ -286,15 +321,22 @@ export class TimeTrackingService {
   private readonly now: () => Date
   /** Identifier factory used for entries, timers, and history. */
   private readonly createId: () => string
+  /** Shared audit event configuration. */
+  private readonly audit?: TimeTrackingAuditOptions
 
   /** Creates a time tracking service. */
   constructor(
     repository: TimeTrackingRepository,
-    options: { now?: () => Date; createId?: () => string } = {},
+    options: {
+      now?: () => Date
+      createId?: () => string
+      audit?: TimeTrackingAuditOptions
+    } = {},
   ) {
     this.repository = repository
     this.now = options.now ?? (() => new Date())
     this.createId = options.createId ?? (() => crypto.randomUUID())
+    this.audit = options.audit
   }
 
   /** Creates a manual time entry in draft state. */
@@ -326,7 +368,7 @@ export class TimeTrackingService {
       updatedAt: now.toISOString(),
     }
     const history = createHistory(this.createId, entry, 'created', normalized.userId, now)
-    await this.repository.saveEntryWithHistory(entry, history)
+    await this.repository.saveEntryWithHistory(entry, history, undefined, this.createAuditPut(entry, history))
     return entry
   }
 
@@ -372,7 +414,12 @@ export class TimeTrackingService {
       updatedAt: now,
     }
     const history = createHistory(this.createId, next, 'updated', input.actorUserId, new Date(now), current.status, current.status)
-    await this.repository.saveEntryWithHistory(next, history, current.revision)
+    await this.repository.saveEntryWithHistory(
+      next,
+      history,
+      current.revision,
+      this.createAuditPut(next, history, current),
+    )
     return next
   }
 
@@ -422,7 +469,12 @@ export class TimeTrackingService {
       transition.toStatus,
       input.reason,
     )
-    await this.repository.saveEntryWithHistory(next, history, current.revision)
+    await this.repository.saveEntryWithHistory(
+      next,
+      history,
+      current.revision,
+      this.createAuditPut(next, history, current),
+    )
     return next
   }
 
@@ -495,7 +547,7 @@ export class TimeTrackingService {
       updatedAt: now,
     }
     const history = createHistory(this.createId, entry, 'created', input.userId, new Date(now))
-    await this.repository.finishTimer(timer, entry, history)
+    await this.repository.finishTimer(timer, entry, history, this.createAuditPut(entry, history))
     return entry
   }
 
@@ -677,6 +729,49 @@ export class TimeTrackingService {
     }
     throw new TimeTrackingError(400, 'TeamRequired', 'A Team is required to resolve a time entry.')
   }
+
+  /** Creates the shared immutable audit event for one time-entry mutation. */
+  private createAuditPut(
+    entry: TimeEntry,
+    history: TimeEntryHistory,
+    before?: TimeEntry,
+  ): AuditTransactWriteItem | undefined {
+    if (!this.audit) return undefined
+    const context = createMutationAuditContext({
+      workspaceId: entry.workspaceId,
+      actor: { id: history.actorUserId, kind: 'user' },
+      idempotencyKey: history.id,
+      request: {
+        method: 'TIME_TRACKING',
+        path: `/api/teams/${entry.teamId}/time-entries/${entry.id}`,
+        body: { action: history.action, entryId: entry.id, revision: entry.revision },
+      },
+      source: { kind: 'api', route: 'time-tracking' },
+      occurredAt: history.occurredAt,
+    })
+    const event = createAuditEvent({
+      context,
+      eventType: `time-entry.${history.action}`,
+      entity: { type: 'time-entry', id: entry.id },
+      action: history.action,
+      before: before ? toAuditEntrySnapshot(before) : undefined,
+      after: toAuditEntrySnapshot(entry),
+      diff: {
+        includeFields: TIME_ENTRY_AUDIT_FIELDS,
+        redactFields: ['hourlyRateMinor', 'actualCostMinor'],
+      },
+      summary: `Time entry ${history.action}`,
+      metadata: {
+        teamId: entry.teamId,
+        workItemId: entry.workItemId,
+        status: entry.status,
+        ...(entry.projectId ? { projectId: entry.projectId } : {}),
+        ...(history.reason ? { reason: history.reason } : {}),
+      },
+      expiresAt: calculateAuditExpiresAt(history.occurredAt, this.audit.retentionDays),
+    })
+    return createAuditEventTransactPut(this.audit.tableName, event)
+  }
 }
 
 /** In-memory repository for isolated application tests and local development. */
@@ -725,7 +820,12 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Saves an entry and history in one in-memory operation. */
-  async saveEntryWithHistory(entry: TimeEntry, history: TimeEntryHistory, expectedRevision?: number) {
+  async saveEntryWithHistory(
+    entry: TimeEntry,
+    history: TimeEntryHistory,
+    expectedRevision?: number,
+    _auditPut?: AuditTransactWriteItem,
+  ) {
     await this.saveEntry(entry, expectedRevision)
     await this.saveHistory(entry.workspaceId, entry.teamId, history)
   }
@@ -757,7 +857,12 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Atomically replaces an active timer with its entry in this in-memory transaction. */
-  async finishTimer(timer: RunningTimer, entry: TimeEntry, history: TimeEntryHistory) {
+  async finishTimer(
+    timer: RunningTimer,
+    entry: TimeEntry,
+    history: TimeEntryHistory,
+    _auditPut?: AuditTransactWriteItem,
+  ) {
     const key = timerKey(timer.workspaceId, timer.userId)
     const current = this.timers.get(key)
     if (!current || current.id !== timer.id || current.revision !== timer.revision) {
@@ -882,7 +987,12 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Saves an entry and history in one DynamoDB transaction. */
-  async saveEntryWithHistory(entry: TimeEntry, history: TimeEntryHistory, expectedRevision?: number) {
+  async saveEntryWithHistory(
+    entry: TimeEntry,
+    history: TimeEntryHistory,
+    expectedRevision?: number,
+    auditPut?: AuditTransactWriteItem,
+  ) {
     try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
@@ -909,6 +1019,7 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
               ConditionExpression: 'attribute_not_exists(recordKey)',
             },
           },
+          ...(auditPut ? [auditPut] : []),
         ],
       }))
     } catch (error) {
@@ -968,7 +1079,12 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Deletes the active timer and creates its entry/history in one transaction. */
-  async finishTimer(timer: RunningTimer, entry: TimeEntry, history: TimeEntryHistory) {
+  async finishTimer(
+    timer: RunningTimer,
+    entry: TimeEntry,
+    history: TimeEntryHistory,
+    auditPut?: AuditTransactWriteItem,
+  ) {
     try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
@@ -1001,6 +1117,7 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
               ConditionExpression: 'attribute_not_exists(recordKey)',
             },
           },
+          ...(auditPut ? [auditPut] : []),
         ],
       }))
     } catch (error) {
@@ -1158,7 +1275,10 @@ function aggregateEntries(
     group.minutes += entry.durationMinutes
     group.billableMinutes += entry.billable ? entry.durationMinutes : 0
     group.entryCount += 1
-    group.estimateMinutes += estimateByWorkItem.get(entry.workItemId) ?? 0
+    if (!group.estimateWorkItemIds.has(entry.workItemId)) {
+      group.estimateMinutes += estimateByWorkItem.get(entry.workItemId) ?? 0
+      group.estimateWorkItemIds.add(entry.workItemId)
+    }
     if (includeCosts) group.actualCostMinor += entry.actualCostMinor ?? 0
     grouped.set(key, group)
   }
@@ -1178,19 +1298,33 @@ function aggregateCalendarEntries(
   includeCosts: boolean,
 ): TimeSummaryGroup[] {
   const grouped = new Map<string, MutableSummaryGroup>()
-  for (const entry of entries) {
-    for (const segment of splitEntryByLocalDate(entry, timeZone, from, to)) {
-      const key = groupBy === 'day' ? segment.date : mondayOfWeek(segment.date)
-      const group = grouped.get(key) ?? createMutableSummaryGroup(key)
-      group.minutes += segment.minutes
-      group.billableMinutes += entry.billable ? segment.minutes : 0
-      group.entryCount += 1
-      group.estimateMinutes += Math.round((estimateByWorkItem.get(entry.workItemId) ?? 0) * segment.ratio)
-      if (includeCosts) {
-        group.actualCostMinor += Math.round((entry.actualCostMinor ?? 0) * segment.ratio)
-      }
-      grouped.set(key, group)
+  const segments = entries.flatMap((entry) => splitEntryByLocalDate(entry, timeZone, from, to)
+    .map((segment) => ({ entry, segment })))
+  const actualMillisecondsByWorkItem = new Map<string, number>()
+  for (const { entry, segment } of segments) {
+    const entryDurationMilliseconds = Date.parse(entry.endAt) - Date.parse(entry.startAt)
+    const actualMilliseconds = entryDurationMilliseconds * segment.ratio
+    actualMillisecondsByWorkItem.set(
+      entry.workItemId,
+      (actualMillisecondsByWorkItem.get(entry.workItemId) ?? 0) + actualMilliseconds,
+    )
+  }
+  for (const { entry, segment } of segments) {
+    const key = groupBy === 'day' ? segment.date : mondayOfWeek(segment.date)
+    const group = grouped.get(key) ?? createMutableSummaryGroup(key)
+    group.minutes += segment.minutes
+    group.billableMinutes += entry.billable ? segment.minutes : 0
+    group.entryCount += 1
+    const entryDurationMilliseconds = Date.parse(entry.endAt) - Date.parse(entry.startAt)
+    const actualMilliseconds = entryDurationMilliseconds * segment.ratio
+    const workItemActualMilliseconds = actualMillisecondsByWorkItem.get(entry.workItemId) ?? 0
+    group.estimateMinutes += workItemActualMilliseconds > 0
+      ? Math.round((estimateByWorkItem.get(entry.workItemId) ?? 0) * actualMilliseconds / workItemActualMilliseconds)
+      : 0
+    if (includeCosts) {
+      group.actualCostMinor += Math.round((entry.actualCostMinor ?? 0) * segment.ratio)
     }
+    grouped.set(key, group)
   }
   return [...grouped.values()]
     .sort((left, right) => left.key.localeCompare(right.key))
@@ -1225,17 +1359,33 @@ function splitEntryByLocalDate(entry: TimeEntry, timeZone: string, from: string,
 
 /** Mutable aggregation row used internally. */
 type MutableSummaryGroup = {
+  /** Group identifier exposed to summary consumers. */
   key: string
+  /** Total recorded minutes in the group. */
   minutes: number
+  /** Total billable minutes in the group. */
   billableMinutes: number
+  /** Number of entry contributions in the group. */
   entryCount: number
+  /** Sum of unique Work Item estimates in the group. */
   estimateMinutes: number
+  /** Work Items whose estimates have already been included. */
+  estimateWorkItemIds: Set<string>
+  /** Total actual cost in minor currency units. */
   actualCostMinor: number
 }
 
 /** Creates an empty aggregation row. */
 function createMutableSummaryGroup(key: string): MutableSummaryGroup {
-  return { key, minutes: 0, billableMinutes: 0, entryCount: 0, estimateMinutes: 0, actualCostMinor: 0 }
+  return {
+    key,
+    minutes: 0,
+    billableMinutes: 0,
+    entryCount: 0,
+    estimateMinutes: 0,
+    estimateWorkItemIds: new Set<string>(),
+    actualCostMinor: 0,
+  }
 }
 
 /** Converts an internal aggregation row to its public shape. */
@@ -1254,6 +1404,24 @@ function toSummaryGroup(group: MutableSummaryGroup, includeCosts: boolean): Time
 /** Computes total cost for a set of entries. */
 function sumCosts(entries: readonly TimeEntry[]): number {
   return entries.reduce((sum, entry) => sum + (entry.actualCostMinor ?? 0), 0)
+}
+
+/** Removes confidential money fields before a time-entry snapshot enters audit. */
+function toAuditEntrySnapshot(entry: TimeEntry): Record<string, unknown> {
+  return {
+    status: entry.status,
+    revision: entry.revision,
+    startAt: entry.startAt,
+    endAt: entry.endAt,
+    durationMinutes: entry.durationMinutes,
+    ...(entry.description ? { description: entry.description } : {}),
+    billable: entry.billable,
+    currency: entry.currency,
+    ...(entry.projectId ? { projectId: entry.projectId } : {}),
+    workItemId: entry.workItemId,
+    userId: entry.userId,
+    source: entry.source,
+  }
 }
 
 /** Computes chargeable cost fields. */

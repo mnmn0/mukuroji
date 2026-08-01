@@ -829,12 +829,23 @@ export function buildApiRuntime(
       resources: [analyticsTable.tableArn],
     })],
   });
+  const apiAuditTransactionDataPolicy = new iam.Policy(
+    scope,
+    'ApiAuditTransactionDataPolicy',
+    {
+      statements: [new iam.PolicyStatement({
+        actions: ['dynamodb:TransactWriteItems'],
+        resources: [auditEventsTable.tableArn],
+      })],
+    },
+  );
   apiFunction.role.attachInlinePolicy(apiAutomationDataPolicy);
   apiFunction.role.attachInlinePolicy(apiEnterpriseIdentityDataPolicy);
   apiFunction.role.attachInlinePolicy(apiWorkItemConfigurationDataPolicy);
   apiFunction.role.attachInlinePolicy(apiDeveloperPlatformDataPolicy);
   apiFunction.role.attachInlinePolicy(apiPlanningDataPolicy);
   apiFunction.role.attachInlinePolicy(apiAnalyticsDataPolicy);
+  apiFunction.role.attachInlinePolicy(apiAuditTransactionDataPolicy);
   apiFunction.role.attachInlinePolicy(apiRequestIntakeDataPolicy);
   apiFunction.role.attachInlinePolicy(apiTransactionConditionCheckPolicy);
   connectorRuntimeSecret.grantRead(apiFunction);

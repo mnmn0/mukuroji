@@ -4,7 +4,7 @@ Time tracking is scoped by Workspace and Team. A time entry references a canonic
 
 `draft → submitted → approved → locked`
 
-Rejected entries return to `rejected` and can be edited and submitted again. Every create, edit, submit, approve, reject, and lock operation writes an immutable history record. Entry revisions are checked with optimistic concurrency, and timer stop atomically removes the running timer while creating the entry and its history.
+Rejected entries return to `rejected` and can be edited and submitted again. Every create, edit, submit, approve, reject, and lock operation writes an immutable history record and a shared audit event in the same transaction. Entry revisions are checked with optimistic concurrency, and timer stop atomically removes the running timer while creating the entry, its history, and its audit event.
 
 ## HTTP surface
 
@@ -27,4 +27,4 @@ All period endpoints require `from`, `to`, and accept `timeZone` plus `groupBy`.
 
 Members can record billable status and duration but cannot set or read `hourlyRateMinor` or `actualCostMinor`. The API resolves the caller's Project access before listing or aggregating entries. Managers can maintain rates, budgets, and approval state; only authorized managers receive money fields in entry, summary, and export responses.
 
-Production persistence uses the existing analytics DynamoDB table with distinct `TIME_*` sort-key prefixes. The API role grants transaction access for the timer-stop and entry-history transactions, while the existing Analytics rows remain unchanged.
+Production time-entry persistence uses the existing analytics DynamoDB table with distinct `TIME_*` sort-key prefixes, while lifecycle audit events use the shared audit events table. The API role grants transaction access to both tables, while existing Analytics rows remain unchanged. Money fields are never copied into audit snapshots.

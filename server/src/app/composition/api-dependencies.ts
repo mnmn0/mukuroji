@@ -48,6 +48,7 @@ import {
 } from '../../modules/analytics/analytics'
 import {
   DynamoDbAuditEventsClient,
+  getConfiguredAuditRetentionDays,
   getConfiguredAuditTableName,
 } from '../../modules/audit/audit'
 import { DynamoDbAutomationRepository } from '../../modules/automation'
@@ -228,6 +229,12 @@ export function createTimeTrackingService(): TimeTrackingService {
       config.environment.ANALYTICS_TABLE_NAME ?? 'mukuroji-analytics-local',
       createDynamoDbDocumentClient(dynamoDbClient),
     ),
+    {
+      audit: {
+        tableName: getConfiguredAuditTableName() ?? 'mukuroji-audit-events',
+        retentionDays: getConfiguredAuditRetentionDays(),
+      },
+    },
   )
 }
 
