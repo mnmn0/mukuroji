@@ -157,6 +157,8 @@ export type StartTimerInput = {
   billable: boolean
   /** Timestamp at which the client believes the timer started. */
   startedAt?: string
+  /** Optional client key used to make audit writes idempotent across retries. */
+  idempotencyKey?: string
 }
 
 /** A timer stop request. */
@@ -327,7 +329,7 @@ export interface TimeTrackingRepository {
   /** Reads the active timer for one Workspace member. */
   getActiveTimer(workspaceId: string, userId: string): Promise<RunningTimer | undefined>
   /** Creates an active timer and rejects a duplicate active timer. */
-  createTimer(timer: RunningTimer): Promise<void>
+  createTimer(timer: RunningTimer, auditPut?: AuditTransactWriteItem): Promise<void>
   /** Stops a timer and persists its resulting entry atomically where supported. */
   finishTimer(
     timer: RunningTimer,
@@ -556,7 +558,22 @@ export class TimeTrackingService {
       revision: 1,
       updatedAt: readNow(this.now).toISOString(),
     }
-    await this.repository.createTimer(timer)
+    await this.repository.createTimer(timer, this.createAuditEventPut({
+      workspaceId: timer.workspaceId,
+      teamId: timer.teamId,
+      actorUserId: timer.userId,
+      eventType: 'timer.started',
+      entityType: 'timer',
+      entityId: timer.id,
+      action: 'started',
+      idempotencyKey: input.idempotencyKey ?? timer.id,
+      requestBody: { action: 'timer.started', timerId: timer.id, workItemId: timer.workItemId },
+      after: toAuditTimerSnapshot(timer),
+      includeFields: ['teamId', 'workItemId', 'userId', 'startedAt', 'description', 'billable', 'revision'],
+      metadata: { teamId: timer.teamId, workItemId: timer.workItemId, userId: timer.userId },
+      path: `/api/teams/${timer.teamId}/timers`,
+      occurredAt: timer.updatedAt,
+    }))
     return timer
   }
 
@@ -1003,7 +1020,7 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Creates an active timer and rejects duplicates. */
-  async createTimer(timer: RunningTimer) {
+  async createTimer(timer: RunningTimer, _auditPut?: AuditTransactWriteItem) {
     const key = timerKey(timer.workspaceId, timer.userId)
     if (this.timers.has(key)) throw new TimeTrackingError(409, 'RunningTimerAlreadyExists', 'Only one running timer is allowed per member.')
     this.timers.set(key, clone(timer))
@@ -1223,13 +1240,20 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Creates an active timer with a conditional put. */
-  async createTimer(timer: RunningTimer) {
+  async createTimer(timer: RunningTimer, auditPut?: AuditTransactWriteItem) {
     try {
-      await this.documentClient.send(new PutCommand({
-        TableName: this.tableName,
-        Item: { ...timer, recordKey: `${TIMER_PREFIX}${timer.userId}` },
-        ConditionExpression: 'attribute_not_exists(recordKey)',
-      }))
+      const put = {
+        Put: {
+          TableName: this.tableName,
+          Item: { ...timer, recordKey: `${TIMER_PREFIX}${timer.userId}` },
+          ConditionExpression: 'attribute_not_exists(recordKey)',
+        },
+      }
+      if (auditPut) {
+        await this.documentClient.send(new TransactWriteCommand({ TransactItems: [put, auditPut] }))
+      } else {
+        await this.documentClient.send(new PutCommand(put.Put))
+      }
     } catch (error) {
       throw mapConditionalWriteError(error, 'RunningTimerAlreadyExists', 'Only one running timer is allowed per member.')
     }
@@ -1599,6 +1623,19 @@ function toAuditEntrySnapshot(entry: TimeEntry): Record<string, unknown> {
     workItemId: entry.workItemId,
     userId: entry.userId,
     source: entry.source,
+  }
+}
+
+/** Removes non-audit fields before a running timer snapshot enters audit. */
+function toAuditTimerSnapshot(timer: RunningTimer): Record<string, unknown> {
+  return {
+    teamId: timer.teamId,
+    workItemId: timer.workItemId,
+    userId: timer.userId,
+    startedAt: timer.startedAt,
+    ...(timer.description ? { description: timer.description } : {}),
+    billable: timer.billable,
+    revision: timer.revision,
   }
 }
 

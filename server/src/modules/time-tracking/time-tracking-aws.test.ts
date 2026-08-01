@@ -188,4 +188,35 @@ describe('DynamoDbTimeTrackingRepository', () => {
     expect(JSON.stringify(commands[1]?.input.TransactItems)).toContain('audit-table')
     expect(JSON.stringify(commands[3]?.input.TransactItems)).toContain('audit-table')
   })
+
+  test('writes timer start and its audit event in one transaction', async () => {
+    const commands: CommandWithInput[] = []
+    const service = new TimeTrackingService(
+      new DynamoDbTimeTrackingRepository(
+        'analytics-table',
+        createDocumentClient([{}], commands),
+      ),
+      {
+        now: () => new Date('2026-08-02T12:00:00.000Z'),
+        createId: () => 'timer-1',
+        audit: {
+          tableName: 'audit-table',
+          retentionDays: 30,
+        },
+      },
+    )
+
+    await service.startTimer({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      workItemId: 'work-item-1',
+      userId: 'member-1',
+      billable: true,
+      idempotencyKey: 'timer-start-1',
+    })
+
+    expect(commands).toHaveLength(1)
+    expect(commands[0]?.input.TransactItems).toHaveLength(2)
+    expect(JSON.stringify(commands[0]?.input.TransactItems)).toContain('audit-table')
+  })
 })

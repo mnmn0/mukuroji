@@ -235,6 +235,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         ...(readOptionalString(body.description) ? { description: readOptionalString(body.description) } : {}),
         billable: readRequiredBoolean(body.billable, 'Billable'),
         ...(body.startedAt === undefined ? {} : { startedAt: readRequiredString(body.startedAt, 'Start time') }),
+        ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
       })
       return context.json({ timer }, 201)
     })
