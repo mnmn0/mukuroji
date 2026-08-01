@@ -26,6 +26,7 @@ import {
 } from '../../infrastructure/aws/dynamodb-client'
 import { createSecretsManagerClient } from '../../infrastructure/aws/secrets-manager-client'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
+import { loadServerDynamoDbResourceConfig } from '../../infrastructure/config/server-resource-config'
 import {
   recordApiAccess,
   recordApiError,
@@ -47,6 +48,11 @@ import {
   InMemoryAnalyticsRepository,
 } from '../../modules/analytics/analytics'
 import {
+  calculateAuditExpiresAt,
+  createAuditFieldDiff,
+  createAuditEvent,
+  createMutationAuditContext,
+  createAuditTransactPut,
   DynamoDbAuditEventsClient,
   getConfiguredAuditTableName,
 } from '../../modules/audit/audit'
@@ -94,6 +100,10 @@ import {
 } from '../../modules/work-items'
 import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
 import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'
+import {
+  DynamoDbTenantAdministrationClient,
+  type TenantAdministrationAuditWriter,
+} from '../../modules/tenant-administration'
 import { DynamoDbWorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
 import { createProductionQueueWebhookDeliveryMessage } from './webhook'
 
@@ -322,6 +332,8 @@ export function createProductionAuthenticationDependencies(): AuthenticationDepe
  */
 export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
   const enterpriseIdentityClient = createEnterpriseIdentityClient()
+  const resourceConfig = loadServerDynamoDbResourceConfig()
+  const dynamoDbClient = createDynamoDbClient()
   return {
     dashboardSummary: new DynamoDbDashboardSummaryClient(),
     projectDirectory: new DynamoDbProjectDirectoryClient(),
@@ -333,6 +345,49 @@ export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
     enterpriseIdentity: createEnterpriseIdentityCapabilities(enterpriseIdentityClient),
     enterpriseSessionActivity: createEnterpriseSessionActivityClient(),
     enterpriseIdentityProviderConnectionTester: testEnterpriseIdentityProviderConnection,
+    tenantAdministration: new DynamoDbTenantAdministrationClient(
+      resourceConfig.tenantAdministrationTableName,
+      createDynamoDbDocumentClient(dynamoDbClient),
+      undefined,
+      createTenantAdministrationAuditWriter(),
+    ),
+  }
+}
+
+/** Creates the audit transaction builder used by tenant administration mutations. */
+function createTenantAdministrationAuditWriter(): TenantAdministrationAuditWriter {
+  const auditTableName = getConfiguredAuditTableName() ?? 'mukuroji-audit-events'
+  return {
+    createTransactionItem(event) {
+      const actorKind = event.actorMemberKey.startsWith('meter:') ? 'service' : 'user'
+      const context = createMutationAuditContext({
+        workspaceId: event.workspaceId,
+        actor: { id: event.actorMemberKey, kind: actorKind },
+        idempotencyKey: event.idempotencyKey,
+        occurredAt: event.occurredAt,
+        request: {
+          method: event.path.startsWith('/api/') ? 'PATCH' : 'INTERNAL',
+          path: event.path,
+          ...(event.after ? { body: event.after } : {}),
+        },
+        source: {
+          kind: event.path.startsWith('/api/') ? 'api' : 'system',
+          route: event.path,
+        },
+      })
+      const auditEvent = createAuditEvent({
+        context,
+        eventType: event.eventType,
+        entity: { type: 'tenant', id: event.entityId },
+        action: event.action,
+        changes: createAuditFieldDiff(event.before, event.after),
+        ...(event.legalHold
+          ? { retentionSuspended: true }
+          : { expiresAt: calculateAuditExpiresAt(event.occurredAt, event.retentionDays) }),
+        ...(event.metadata ? { metadata: event.metadata } : {}),
+      })
+      return createAuditTransactPut(auditTableName, auditEvent)
+    },
   }
 }
 
@@ -603,6 +658,9 @@ export function overrideAppDependencies(
             enterpriseIdentityProviderConnectionTester:
               overrides.enterpriseIdentityProviderConnectionTester,
           }
+        : {}),
+      ...(overrides.tenantAdministration
+        ? { tenantAdministration: overrides.tenantAdministration }
         : {}),
     },
     workItems: {

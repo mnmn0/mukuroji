@@ -548,6 +548,10 @@ export type CreateAuditEventInput = {
    */
   expiresAt?: number
   /**
+   * legal hold により DynamoDB TTL を一時停止するかどうかです。
+   */
+  retentionSuspended?: boolean
+  /**
    * schema の必須項目に含めない付加情報です。
    */
   metadata?: Readonly<Record<string, unknown>>
@@ -1038,8 +1042,13 @@ export function createAuditEvent(input: CreateAuditEventInput): AuditEventV1 {
     throw new RangeError('Audit expiresAt must be a positive integer epoch timestamp.')
   }
 
+  if (input.retentionSuspended === true && input.expiresAt !== undefined) {
+    throw new TypeError('Audit retention cannot be suspended while expiresAt is set.')
+  }
+
   if (
     input.expiresAt === undefined &&
+    input.retentionSuspended !== true &&
     !(
       input.context.source.kind === 'backfill' &&
       occurredAt === AUDIT_UNKNOWN_OCCURRED_AT &&

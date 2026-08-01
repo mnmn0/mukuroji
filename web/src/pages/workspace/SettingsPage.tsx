@@ -9,6 +9,7 @@ import { WorkspaceAccessPanelContainer } from '../../workspace/ui/WorkspaceAcces
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 import { WorkspaceSettingsView } from '../../workspace/ui/WorkspaceSettingsView'
+import { TenantAdministrationPanelContainer } from '../../workspace/ui/TenantAdministrationPanel'
 
 /**
  * Renders the URL-specific Workspace settings route.
@@ -31,6 +32,10 @@ export function SettingsPage() {
           configurationSections={workspace.accessToken ? (
             <>
               <WorkspaceAccessPanelContainer
+                accessToken={workspace.accessToken}
+                locale={workspace.locale}
+              />
+              <TenantAdministrationPanelContainer
                 accessToken={workspace.accessToken}
                 locale={workspace.locale}
               />

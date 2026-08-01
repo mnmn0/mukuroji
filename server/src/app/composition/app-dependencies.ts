@@ -58,6 +58,7 @@ import type {
 } from '../../modules/work-items/work-item-import'
 import type { WorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'
 import type { WorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
+import type { TenantAdministrationClient } from '../../modules/tenant-administration'
 import type {
   ApiAccessObservation,
   ApiErrorObservation,
@@ -122,6 +123,8 @@ export interface WorkspaceDependencies {
   enterpriseSessionActivity: EnterpriseSessionActivityClient
   /** Validates Enterprise Identity provider metadata and connectivity. */
   enterpriseIdentityProviderConnectionTester: EnterpriseIdentityProviderConnectionTester
+  /** Provides tenant profile, entitlement, governance, and lifecycle state. */
+  tenantAdministration: TenantAdministrationClient
 }
 
 /** Dependencies required by Work Item and collaboration routes. */

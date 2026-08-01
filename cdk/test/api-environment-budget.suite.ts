@@ -241,6 +241,9 @@ const expectedDataConfiguration = {
   PROJECT_DIRECTORY_TABLE_NAME: base64(
     ref('ProjectDirectoryTable9ED01C01'),
   ),
+  TENANT_ADMINISTRATION_TABLE_NAME: base64(
+    ref('TenantAdministrationTable621D59EB'),
+  ),
   WORKSPACE_ACCESS_TABLE_NAME: base64(ref('WorkspaceAccessTableD7C8D2C7')),
   WORKSPACE_SEARCH_MIGRATION_STATE_TABLE_NAME: base64(
     ref('WorkspaceSearchMigrationStateTable34132530'),

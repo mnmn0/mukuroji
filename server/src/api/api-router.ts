@@ -115,6 +115,8 @@ import type { DashboardSummaryResponse } from '../modules/analytics'
 
 export { DynamoDbDashboardSummaryClient } from '../modules/analytics'
 import { createAuditRouter } from '../modules/audit/adapter-in/http/audit-router'
+import { createTenantAdministrationRouter } from '../modules/tenant-administration/adapter-in/http/tenant-administration-router'
+import { TenantAdministrationError } from '../modules/tenant-administration'
 import { loadServerConfig } from '../infrastructure/config/server-config'
 import {
   clampCognitoPageLimit,
@@ -971,6 +973,9 @@ const workspaceDependencies: WorkspaceDependencies = {
   get enterpriseIdentityProviderConnectionTester() {
     return requireAppDependencies().workspace.enterpriseIdentityProviderConnectionTester
   },
+  get tenantAdministration() {
+    return requireAppDependencies().workspace.tenantAdministration
+  },
 }
 const workItemDependencies: WorkItemDependencies = {
   get projectTasks() {
@@ -1356,6 +1361,7 @@ const enterpriseRoutePermissionRules = [
   },
   { method: 'GET', pathPattern: '/api/workspace/*', permission: 'members.read' },
   { method: '*', pathPattern: '/api/workspace/*', permission: 'members.manage' },
+  { method: '*', pathPattern: '/api/tenant/*', permission: 'workspace.manage' },
   { method: 'GET', pathPattern: '/api/automation/*', permission: 'automation.read' },
   { method: '*', pathPattern: '/api/automation/*', permission: 'automation.manage' },
   { method: 'GET', pathPattern: '/api/recurring-work*', permission: 'automation.read' },
@@ -4312,6 +4318,19 @@ routeApp.route('/', createDashboardRouter<
   mapProjectDataError: toProjectDataErrorResponse,
 }))
 routeApp.route('/', createAuditRouter(handleWorkspaceAuditRequest))
+routeApp.route('/', createTenantAdministrationRouter({
+  authenticate: async (accessToken, context) =>
+    await authenticateWorkspacePrincipal(accessToken, undefined, context),
+  requireAdministration: requireWorkspaceAdministration,
+  get client() {
+    return workspaceDependencies.tenantAdministration
+  },
+  readJson,
+  mapError: (context, error) => {
+    if (error instanceof CognitoServiceError) return toAuthErrorResponse(context, error)
+    return toTenantAdministrationErrorResponse(context, error)
+  },
+}))
 
 routeApp.route('/', createAnalyticsRouter({
   readBearerAccessToken,
@@ -12434,7 +12453,8 @@ function shouldDeferEnterpriseContentAuthorization(path: string) {
     !path.startsWith('/api/audit/') &&
     path !== '/api/audit' &&
     !path.startsWith('/api/workspace/') &&
-    path !== '/api/workspace'
+    path !== '/api/workspace' &&
+    !path.startsWith('/api/tenant/')
 }
 
 /**
@@ -15222,6 +15242,26 @@ function toWorkspaceAccessErrorResponse(c: Context, error: unknown) {
     ? error.status
     : 502
 
+  return c.json({ code: error.code, message: error.message }, status)
+}
+
+function toTenantAdministrationErrorResponse(c: Context, error: unknown) {
+  if (!(error instanceof TenantAdministrationError)) {
+    console.error(error)
+    return c.json({ message: 'Tenant administration is unavailable.' }, 502)
+  }
+  if (error.status >= 500) {
+    console.error(error)
+  }
+  const status = error.status === 400 ||
+    error.status === 401 ||
+    error.status === 403 ||
+    error.status === 404 ||
+    error.status === 409 ||
+    error.status === 429 ||
+    error.status === 503
+    ? error.status
+    : 502
   return c.json({ code: error.code, message: error.message }, status)
 }
 

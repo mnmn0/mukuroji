@@ -44,6 +44,8 @@ export type StackOutputResources = {
   readonly workspaceAccessTable: dynamodb.ITable;
   /** Enterprise identity and security state table. */
   readonly enterpriseIdentityTable: dynamodb.ITable;
+  /** Tenant profile, entitlement, governance, and lifecycle table. */
+  readonly tenantAdministrationTable: dynamodb.ITable;
   /** Collaborative documents table. */
   readonly documentsTable: dynamodb.ITable;
   /** Work Item collaboration projection table. */
@@ -207,6 +209,9 @@ export function buildStackOutputs(
   });
   new cdk.CfnOutput(scope, 'EnterpriseIdentityTableName', {
     value: resources.enterpriseIdentityTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'TenantAdministrationTableName', {
+    value: resources.tenantAdministrationTable.tableName,
   });
   new cdk.CfnOutput(scope, 'DocumentsTableName', {
     value: resources.documentsTable.tableName,

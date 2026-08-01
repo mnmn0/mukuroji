@@ -1,0 +1,37 @@
+/** Tenant administration public application and domain surface. */
+export {
+  TENANT_CLOSURE_STEPS,
+  TENANT_EXPORT_STEPS,
+  TENANT_MAX_AUDIT_RETENTION_DAYS,
+  TENANT_MAX_SEAT_LIMIT,
+  TENANT_MAX_USAGE_QUOTA,
+  TENANT_MIN_AUDIT_RETENTION_DAYS,
+  TenantAdministrationError,
+  advanceTenantOperation,
+  assertTenantFeatureEnabled,
+  assertTenantSeatAvailable,
+  createDefaultTenantAdministrationSnapshot,
+  createDefaultTenantEntitlement,
+  createDefaultTenantGovernance,
+  createDefaultTenantPolicy,
+  createDefaultTenantProfile,
+  createDefaultTenantUsage,
+  isTenantOperationActive,
+  pauseTenantOperation,
+  reserveTenantUsage,
+  resumeTenantOperation,
+  validateTenantBoolean,
+  validateTenantFeatures,
+  validateTenantInteger,
+  validateTenantLocale,
+  validateTenantPlan,
+  validateTenantRegion,
+  verifyTenantClosure,
+} from './domain/tenant-administration'
+export type {
+  TenantAdministrationAuditEvent,
+  TenantAdministrationAuditWriter,
+  TenantAdministrationClient,
+  TenantAdministrationTransactionItem,
+} from './application/ports/tenant-administration-port'
+export { DynamoDbTenantAdministrationClient } from './adapter-out/dynamodb/tenant-administration-client'

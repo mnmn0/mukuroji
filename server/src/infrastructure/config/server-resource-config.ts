@@ -13,6 +13,8 @@ export interface ServerDynamoDbResourceConfig {
   readonly auditEventsTableName: string
   /** Enterprise Identity control table name. */
   readonly enterpriseIdentityTableName: string
+  /** Tenant administration and data-governance table name. */
+  readonly tenantAdministrationTableName: string
 }
 
 /**
@@ -34,5 +36,8 @@ export function loadServerDynamoDbResourceConfig(
     enterpriseIdentityTableName:
       environment.ENTERPRISE_IDENTITY_TABLE_NAME ??
         'mukuroji-enterprise-identity',
+    tenantAdministrationTableName:
+      environment.TENANT_ADMINISTRATION_TABLE_NAME ??
+        'mukuroji-tenant-administration',
   })
 }

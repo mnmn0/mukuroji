@@ -293,6 +293,7 @@ function bindApiRuntimeConfiguration(
     documentPublicShareTokenSecret,
     documentsTable,
     enterpriseIdentityTable,
+    tenantAdministrationTable,
     legacyTasksTable,
     notificationsTable,
     planningTable,
@@ -448,6 +449,7 @@ function bindApiRuntimeConfiguration(
         developerPlatformWebhookKey.keyArn,
       DOCUMENTS_TABLE_NAME: documentsTable.tableName,
       ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
+      TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,
       MUKUROJI_PROJECT_TASKS_TABLE: legacyTasksTable.tableName,
       MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: teamIssueEventsTable.tableName,
       PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
@@ -547,6 +549,7 @@ export function buildApiRuntime(
     developerPlatformWebhookKey,
     documentsTable,
     enterpriseIdentityTable,
+    tenantAdministrationTable,
     legacyTasksTable,
     notificationsTable,
     planningTable,
@@ -621,6 +624,7 @@ export function buildApiRuntime(
   projectDirectoryTable.grants.readWriteData(apiFunction);
   auditEventsTable.grants.readWriteData(apiFunction);
   workspaceAccessTable.grants.readWriteData(apiFunction);
+  tenantAdministrationTable.grants.readWriteData(apiFunction);
   documentsTable.grants.readWriteData(apiFunction);
   collaborationTable.grants.readWriteData(apiFunction);
   fileProofingTable.grants.readWriteData(apiFunction);
