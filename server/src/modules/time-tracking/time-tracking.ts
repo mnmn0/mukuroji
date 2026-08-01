@@ -384,8 +384,12 @@ export class TimeTrackingService {
     if (current.revision !== input.expectedRevision) {
       throw new TimeTrackingError(409, 'TimeEntryRevisionConflict', 'The time entry was changed by another request.')
     }
-    const startAt = input.startAt ?? current.startAt
-    const endAt = input.endAt ?? current.endAt
+    const startAt = input.startAt === undefined
+      ? current.startAt
+      : validateInstant(input.startAt, 'Entry start')
+    const endAt = input.endAt === undefined
+      ? current.endAt
+      : validateInstant(input.endAt, 'Entry end')
     validateInterval(startAt, endAt)
     const currency = input.currency ?? current.currency
     validateCurrency(currency)
@@ -480,8 +484,9 @@ export class TimeTrackingService {
 
   /** Starts the member's one allowed running timer. */
   async startTimer(input: StartTimerInput): Promise<RunningTimer> {
-    const startedAt = input.startedAt ?? readNow(this.now).toISOString()
-    validateInstant(startedAt, 'Timer start')
+    const startedAt = input.startedAt === undefined
+      ? readNow(this.now).toISOString()
+      : validateInstant(input.startedAt, 'Timer start')
     const timer: RunningTimer = {
       schemaVersion: 1,
       id: this.createId(),
@@ -514,7 +519,9 @@ export class TimeTrackingService {
     if (!timer || timer.id !== input.timerId) {
       throw new TimeTrackingError(404, 'RunningTimerNotFound', 'The running timer was not found or has already been stopped.')
     }
-    const endedAt = input.endedAt ?? readNow(this.now).toISOString()
+    const endedAt = input.endedAt === undefined
+      ? readNow(this.now).toISOString()
+      : validateInstant(input.endedAt, 'Timer end')
     validateInterval(timer.startedAt, endedAt)
     const normalizedCurrency = validateCurrency(input.currency)
     if (input.hourlyRateMinor !== undefined && !input.canManageRates) {
@@ -655,9 +662,8 @@ export class TimeTrackingService {
     const budget = input.groupBy === 'project' && groups.length === 1
       ? await this.repository.getBudget(input.workspaceId, 'project', groups[0]!.key)
       : await this.repository.getBudget(input.workspaceId, 'team', input.teamId)
-    const totalEstimateMinutes = input.groupBy === 'project' || input.groupBy === 'work-item'
-      ? groups.reduce((sum, group) => sum + (group.estimateMinutes ?? 0), 0)
-      : entries.reduce((sum, entry) => sum + (estimateByWorkItem.get(entry.workItemId) ?? 0), 0)
+    const totalEstimateMinutes = [...new Set(entries.map((entry) => entry.workItemId))]
+      .reduce((sum, workItemId) => sum + (estimateByWorkItem.get(workItemId) ?? 0), 0)
     const totalActualCostMinor = input.includeCosts
       ? sumCosts(entries)
       : undefined

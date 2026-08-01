@@ -196,6 +196,7 @@ describe('TimeTrackingService', () => {
       actualCostMinor: 7_500,
     })
     expect(summary.totalActualCostMinor).toBe(7_500)
+    expect(summary.totalEstimateMinutes).toBe(120)
 
     const workItemSummary = await service.createSummary({
       workspaceId: 'workspace-1',
@@ -211,6 +212,16 @@ describe('TimeTrackingService', () => {
       minutes: 90,
       estimateMinutes: 120,
     })
+    const userSummary = await service.createSummary({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      from: '2026-08-02',
+      to: '2026-08-02',
+      timeZone: 'UTC',
+      groupBy: 'user',
+      includeCosts: false,
+    })
+    expect(userSummary.totalEstimateMinutes).toBe(120)
     expect(await service.getEstimate('workspace-1', 'team-1', 'work-item-1')).toMatchObject({
       estimateMinutes: 120,
     })
