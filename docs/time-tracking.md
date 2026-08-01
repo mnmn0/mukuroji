@@ -4,7 +4,7 @@ Time tracking is scoped by Workspace and Team. A time entry references a canonic
 
 `draft → submitted → approved → locked`
 
-Rejected entries return to `rejected` and can be edited and submitted again. Every create, edit, submit, approve, reject, and lock operation writes an immutable history record and a shared audit event in the same transaction. Entry revisions are checked with optimistic concurrency, and timer stop atomically removes the running timer while creating the entry, its history, and its audit event.
+Rejected entries return to `rejected` and can be edited and submitted again. Every create, edit, submit, approve, reject, and lock operation writes an immutable history record and a shared audit event in the same transaction. Estimate and budget changes also append a shared audit event in the same transaction. Entry revisions are checked with optimistic concurrency, and timer stop atomically removes the running timer while creating the entry, its history, and its audit event.
 
 ## HTTP surface
 
@@ -22,6 +22,8 @@ Rejected entries return to `rejected` and can be edited and submitted again. Eve
 - `PUT /api/teams/:teamId/time-budget` and `PUT /api/teams/:teamId/projects/:projectId/time-budget` store optimistic-concurrency-protected budgets.
 
 All period endpoints require `from`, `to`, and accept `timeZone` plus `groupBy`. Date-only ranges are interpreted as local dates and converted to UTC before querying. Intervals crossing midnight are split at timezone-aware local boundaries, including daylight-saving transitions.
+
+Mutation endpoints accept an optional `Idempotency-Key`; when supplied, it is included in the shared audit event identity so a retried transaction cannot append a second state or audit record.
 
 ## Confidential cost fields
 

@@ -79,6 +79,8 @@ export type CreateTimeEntryInput = {
   hourlyRateMinor?: number
   /** Origin of the entry. */
   source: TimeEntrySource
+  /** Optional client key used to make audit writes idempotent across retries. */
+  idempotencyKey?: string
 }
 
 /** A time entry update request. */
@@ -111,6 +113,8 @@ export type UpdateTimeEntryInput = {
   currency?: string
   /** Optional new hourly rate. */
   hourlyRateMinor?: number | null
+  /** Optional client key used to make audit writes idempotent across retries. */
+  idempotencyKey?: string
 }
 
 /** An entry lifecycle transition request. */
@@ -131,6 +135,8 @@ export type TransitionTimeEntryInput = {
   action: 'submit' | 'approve' | 'reject' | 'lock'
   /** Optional rejection reason. */
   reason?: string
+  /** Optional client key used to make audit writes idempotent across retries. */
+  idempotencyKey?: string
 }
 
 /** A durable timer start request. */
@@ -169,6 +175,8 @@ export type StopTimerInput = {
   currency: string
   /** Whether the caller may set confidential fields. */
   canManageRates: boolean
+  /** Optional client key used to make audit writes idempotent across retries. */
+  idempotencyKey?: string
 }
 
 /** An estimate update request. */
@@ -183,12 +191,16 @@ export type SaveTimeEstimateInput = {
   estimateMinutes: number
   /** Actor changing the estimate. */
   updatedBy: string
+  /** Optional client key used to make audit writes idempotent across retries. */
+  idempotencyKey?: string
 }
 
 /** A budget update request. */
 export type SaveTimeBudgetInput = {
   /** Workspace identifier. */
   workspaceId: string
+  /** Team containing the budget scope, when the scope is a Project. */
+  teamId?: string
   /** Budget scope. */
   scopeType: 'team' | 'project'
   /** Team or Project identifier. */
@@ -205,14 +217,52 @@ export type SaveTimeBudgetInput = {
   expectedRevision: number
   /** Actor changing the budget. */
   updatedBy: string
+  /** Optional client key used to make audit writes idempotent across retries. */
+  idempotencyKey?: string
 }
 
-/** Configuration for appending time-entry mutations to the shared audit table. */
+/** Configuration for appending time-tracking mutations to the shared audit table. */
 export type TimeTrackingAuditOptions = {
   /** Shared audit events table name. */
   tableName: string
   /** Retention period used to calculate the audit event TTL. */
   retentionDays: number
+}
+
+/** Input used to create a shared audit event for a time-tracking mutation. */
+type TimeTrackingAuditMutation = {
+  /** Workspace containing the mutation. */
+  workspaceId: string
+  /** Team containing the mutation. */
+  teamId: string
+  /** User who performed the mutation. */
+  actorUserId: string
+  /** Shared audit event type. */
+  eventType: string
+  /** Entity type recorded by the audit event. */
+  entityType: string
+  /** Entity identifier recorded by the audit event. */
+  entityId: string
+  /** Action recorded by the audit event. */
+  action: string
+  /** Idempotency key for retries of the same mutation. */
+  idempotencyKey: string
+  /** Request body used to fingerprint the mutation. */
+  requestBody: Readonly<Record<string, unknown>>
+  /** State before the mutation, when one existed. */
+  before?: Readonly<Record<string, unknown>>
+  /** State after the mutation, when one exists. */
+  after?: Readonly<Record<string, unknown>>
+  /** Fields included in the before/after diff. */
+  includeFields: readonly string[]
+  /** Fields redacted from the before/after diff. */
+  redactFields?: readonly string[]
+  /** Additional searchable audit metadata. */
+  metadata: Readonly<Record<string, unknown>>
+  /** Resource path used in the audit request snapshot. */
+  path: string
+  /** Optional event timestamp. */
+  occurredAt?: string
 }
 
 /** Query options for a Team's time entries. */
@@ -289,12 +339,12 @@ export interface TimeTrackingRepository {
   getEstimate(workspaceId: string, teamId: string, workItemId: string): Promise<TimeEstimate | undefined>
   /** Lists estimates in a Team. */
   listEstimates(workspaceId: string, teamId: string): Promise<TimeEstimate[]>
-  /** Saves a Work Item estimate. */
-  saveEstimate(estimate: TimeEstimate): Promise<void>
+  /** Saves a Work Item estimate, optionally with its audit event. */
+  saveEstimate(estimate: TimeEstimate, auditPut?: AuditTransactWriteItem): Promise<void>
   /** Reads a Team or Project budget. */
   getBudget(workspaceId: string, scopeType: 'team' | 'project', scopeId: string): Promise<TimeBudget | undefined>
-  /** Saves a Team or Project budget with optimistic concurrency. */
-  saveBudget(budget: TimeBudget, expectedRevision: number): Promise<void>
+  /** Saves a Team or Project budget with optimistic concurrency and optional audit. */
+  saveBudget(budget: TimeBudget, expectedRevision: number, auditPut?: AuditTransactWriteItem): Promise<void>
 }
 
 /** Stable error raised by time tracking validation, authorization, or persistence. */
@@ -368,7 +418,12 @@ export class TimeTrackingService {
       updatedAt: now.toISOString(),
     }
     const history = createHistory(this.createId, entry, 'created', normalized.userId, now)
-    await this.repository.saveEntryWithHistory(entry, history, undefined, this.createAuditPut(entry, history))
+    await this.repository.saveEntryWithHistory(
+      entry,
+      history,
+      undefined,
+      this.createAuditPut(entry, history, undefined, input.idempotencyKey),
+    )
     return entry
   }
 
@@ -422,7 +477,7 @@ export class TimeTrackingService {
       next,
       history,
       current.revision,
-      this.createAuditPut(next, history, current),
+      this.createAuditPut(next, history, current, input.idempotencyKey),
     )
     return next
   }
@@ -477,7 +532,7 @@ export class TimeTrackingService {
       next,
       history,
       current.revision,
-      this.createAuditPut(next, history, current),
+      this.createAuditPut(next, history, current, input.idempotencyKey),
     )
     return next
   }
@@ -554,7 +609,12 @@ export class TimeTrackingService {
       updatedAt: now,
     }
     const history = createHistory(this.createId, entry, 'created', input.userId, new Date(now))
-    await this.repository.finishTimer(timer, entry, history, this.createAuditPut(entry, history))
+    await this.repository.finishTimer(
+      timer,
+      entry,
+      history,
+      this.createAuditPut(entry, history, undefined, input.idempotencyKey),
+    )
     return entry
   }
 
@@ -589,17 +649,40 @@ export class TimeTrackingService {
 
   /** Saves a Work Item estimate. */
   async saveEstimate(input: SaveTimeEstimateInput): Promise<TimeEstimate> {
+    const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
+    const teamId = readIdentifier(input.teamId, 'Team ID')
+    const workItemId = readIdentifier(input.workItemId, 'Work Item ID')
     const estimateMinutes = requireInteger(input.estimateMinutes, 'Estimate minutes', 0, MAX_ENTRY_DURATION_MINUTES * 365)
+    const current = await this.repository.getEstimate(workspaceId, teamId, workItemId)
     const estimate: TimeEstimate = {
       schemaVersion: 1,
-      workspaceId: readIdentifier(input.workspaceId, 'Workspace ID'),
-      teamId: readIdentifier(input.teamId, 'Team ID'),
-      workItemId: readIdentifier(input.workItemId, 'Work Item ID'),
+      workspaceId,
+      teamId,
+      workItemId,
       estimateMinutes,
       updatedBy: readIdentifier(input.updatedBy, 'User ID'),
       updatedAt: readNow(this.now).toISOString(),
     }
-    await this.repository.saveEstimate(estimate)
+    await this.repository.saveEstimate(
+      estimate,
+      this.createAuditEventPut({
+        workspaceId,
+        teamId,
+        actorUserId: estimate.updatedBy,
+        eventType: 'time-estimate.updated',
+        entityType: 'work-item',
+        entityId: workItemId,
+        action: 'updated',
+        idempotencyKey: input.idempotencyKey ?? this.createId(),
+        requestBody: { action: 'estimate.updated', workItemId, estimateMinutes },
+        before: current ? toAuditEstimateSnapshot(current) : undefined,
+        after: toAuditEstimateSnapshot(estimate),
+        includeFields: ['teamId', 'workItemId', 'estimateMinutes', 'updatedBy'],
+        metadata: { teamId, workItemId },
+        path: `/api/teams/${teamId}/work-items/${workItemId}/time-estimate`,
+        occurredAt: estimate.updatedAt,
+      }),
+    )
     return estimate
   }
 
@@ -614,15 +697,22 @@ export class TimeTrackingService {
 
   /** Saves a Team or Project budget. */
   async saveBudget(input: SaveTimeBudgetInput): Promise<TimeBudget> {
+    const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
+    const scopeId = readIdentifier(input.scopeId, 'Budget scope ID')
+    const teamId = input.teamId
+      ? readIdentifier(input.teamId, 'Team ID')
+      : input.scopeType === 'team'
+        ? scopeId
+        : 'project-scope'
     const amountMinor = requireMoney(input.amountMinor, 'Budget amount')
     const currency = validateCurrency(input.currency)
+    const expectedRevision = requireInteger(input.expectedRevision, 'Budget revision', 0, Number.MAX_SAFE_INTEGER)
     validateOptionalDate(input.periodFrom, 'Budget period start')
     validateOptionalDate(input.periodTo, 'Budget period end')
     if (input.periodFrom && input.periodTo && input.periodFrom > input.periodTo) {
       throw new TimeTrackingError(400, 'InvalidBudgetPeriod', 'Budget period start must not be after its end.')
     }
-    const current = await this.repository.getBudget(input.workspaceId, input.scopeType, input.scopeId)
-    const expectedRevision = input.expectedRevision
+    const current = await this.repository.getBudget(workspaceId, input.scopeType, scopeId)
     if (current && current.revision !== expectedRevision) {
       throw new TimeTrackingError(409, 'TimeBudgetRevisionConflict', 'The budget was changed by another request.')
     }
@@ -631,9 +721,9 @@ export class TimeTrackingService {
     }
     const budget: TimeBudget = {
       schemaVersion: 1,
-      workspaceId: readIdentifier(input.workspaceId, 'Workspace ID'),
+      workspaceId,
       scopeType: input.scopeType,
-      scopeId: readIdentifier(input.scopeId, 'Budget scope ID'),
+      scopeId,
       amountMinor,
       currency,
       ...(input.periodFrom ? { periodFrom: input.periodFrom } : {}),
@@ -641,7 +731,39 @@ export class TimeTrackingService {
       revision: expectedRevision + 1,
       updatedAt: readNow(this.now).toISOString(),
     }
-    await this.repository.saveBudget(budget, expectedRevision)
+    await this.repository.saveBudget(
+      budget,
+      expectedRevision,
+      this.createAuditEventPut({
+        workspaceId,
+        teamId,
+        actorUserId: input.updatedBy,
+        eventType: 'time-budget.updated',
+        entityType: 'time-budget',
+        entityId: `${input.scopeType}:${scopeId}`,
+        action: 'updated',
+        idempotencyKey: input.idempotencyKey ?? this.createId(),
+        requestBody: {
+          action: 'budget.updated',
+          scopeType: input.scopeType,
+          scopeId,
+          revision: budget.revision,
+        },
+        before: current ? toAuditBudgetSnapshot(current) : undefined,
+        after: toAuditBudgetSnapshot(budget),
+        includeFields: ['scopeType', 'scopeId', 'amountMinor', 'currency', 'periodFrom', 'periodTo', 'revision'],
+        redactFields: ['amountMinor'],
+        metadata: {
+          scopeType: input.scopeType,
+          scopeId,
+          ...(input.scopeType === 'team' ? { teamId: scopeId } : { projectId: scopeId }),
+        },
+        path: input.scopeType === 'team'
+          ? `/api/teams/${scopeId}/time-budget`
+          : `/api/teams/${teamId}/projects/${scopeId}/time-budget`,
+        occurredAt: budget.updatedAt,
+      }),
+    )
     return budget
   }
 
@@ -741,32 +863,22 @@ export class TimeTrackingService {
     entry: TimeEntry,
     history: TimeEntryHistory,
     before?: TimeEntry,
+    idempotencyKey = history.id,
   ): AuditTransactWriteItem | undefined {
-    if (!this.audit) return undefined
-    const context = createMutationAuditContext({
+    return this.createAuditEventPut({
       workspaceId: entry.workspaceId,
-      actor: { id: history.actorUserId, kind: 'user' },
-      idempotencyKey: history.id,
-      request: {
-        method: 'TIME_TRACKING',
-        path: `/api/teams/${entry.teamId}/time-entries/${entry.id}`,
-        body: { action: history.action, entryId: entry.id, revision: entry.revision },
-      },
-      source: { kind: 'api', route: 'time-tracking' },
-      occurredAt: history.occurredAt,
-    })
-    const event = createAuditEvent({
-      context,
+      teamId: entry.teamId,
+      actorUserId: history.actorUserId,
       eventType: `time-entry.${history.action}`,
-      entity: { type: 'time-entry', id: entry.id },
+      entityType: 'time-entry',
+      entityId: entry.id,
       action: history.action,
+      idempotencyKey,
+      requestBody: { action: history.action, entryId: entry.id, revision: entry.revision },
       before: before ? toAuditEntrySnapshot(before) : undefined,
       after: toAuditEntrySnapshot(entry),
-      diff: {
-        includeFields: TIME_ENTRY_AUDIT_FIELDS,
-        redactFields: ['hourlyRateMinor', 'actualCostMinor'],
-      },
-      summary: `Time entry ${history.action}`,
+      includeFields: TIME_ENTRY_AUDIT_FIELDS,
+      redactFields: ['hourlyRateMinor', 'actualCostMinor'],
       metadata: {
         teamId: entry.teamId,
         workItemId: entry.workItemId,
@@ -774,7 +886,42 @@ export class TimeTrackingService {
         ...(entry.projectId ? { projectId: entry.projectId } : {}),
         ...(history.reason ? { reason: history.reason } : {}),
       },
-      expiresAt: calculateAuditExpiresAt(history.occurredAt, this.audit.retentionDays),
+      path: `/api/teams/${entry.teamId}/time-entries/${entry.id}`,
+      occurredAt: history.occurredAt,
+    })
+  }
+
+  /** Creates a shared immutable audit event and transaction item. */
+  private createAuditEventPut(
+    input: TimeTrackingAuditMutation,
+  ): AuditTransactWriteItem | undefined {
+    if (!this.audit) return undefined
+    const context = createMutationAuditContext({
+      workspaceId: input.workspaceId,
+      actor: { id: input.actorUserId, kind: 'user' },
+      idempotencyKey: input.idempotencyKey,
+      request: {
+        method: 'TIME_TRACKING',
+        path: input.path,
+        body: input.requestBody,
+      },
+      source: { kind: 'api', route: 'time-tracking' },
+      ...(input.occurredAt ? { occurredAt: input.occurredAt } : {}),
+    })
+    const event = createAuditEvent({
+      context,
+      eventType: input.eventType,
+      entity: { type: input.entityType, id: input.entityId },
+      action: input.action,
+      before: input.before,
+      after: input.after,
+      diff: {
+        includeFields: input.includeFields,
+        ...(input.redactFields ? { redactFields: input.redactFields } : {}),
+      },
+      summary: `Time tracking ${input.action}`,
+      metadata: input.metadata,
+      expiresAt: calculateAuditExpiresAt(context.occurredAt, this.audit.retentionDays),
     })
     return createAuditEventTransactPut(this.audit.tableName, event)
   }
@@ -893,7 +1040,7 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Saves an estimate. */
-  async saveEstimate(estimate: TimeEstimate) {
+  async saveEstimate(estimate: TimeEstimate, _auditPut?: AuditTransactWriteItem) {
     this.estimates.set(
       estimateKey(estimate.workspaceId, estimate.teamId, estimate.workItemId),
       clone(estimate),
@@ -907,7 +1054,11 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Saves a budget. */
-  async saveBudget(budget: TimeBudget, expectedRevision: number) {
+  async saveBudget(
+    budget: TimeBudget,
+    expectedRevision: number,
+    _auditPut?: AuditTransactWriteItem,
+  ) {
     const key = budgetKey(budget.workspaceId, budget.scopeType, budget.scopeId)
     const current = this.budgets.get(key)
     if ((current?.revision ?? 0) !== expectedRevision) throw new TimeTrackingError(409, 'TimeBudgetRevisionConflict', 'The budget was changed by another request.')
@@ -1156,14 +1307,28 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Saves an estimate using a single-owner key. */
-  async saveEstimate(estimate: TimeEstimate) {
-    await this.documentClient.send(new PutCommand({
-      TableName: this.tableName,
-      Item: {
-        ...estimate,
-        recordKey: `${ESTIMATE_PREFIX}${estimate.teamId}#${estimate.workItemId}`,
-      },
-    }))
+  async saveEstimate(estimate: TimeEstimate, auditPut?: AuditTransactWriteItem) {
+    const item = {
+      ...estimate,
+      recordKey: `${ESTIMATE_PREFIX}${estimate.teamId}#${estimate.workItemId}`,
+    }
+    if (!auditPut) {
+      await this.documentClient.send(new PutCommand({
+        TableName: this.tableName,
+        Item: item,
+      }))
+      return
+    }
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          { Put: { TableName: this.tableName, Item: item } },
+          auditPut,
+        ],
+      }))
+    } catch (error) {
+      throw mapConditionalWriteError(error, 'TimeEstimateIdempotencyConflict', 'The estimate mutation was already processed with a different request.')
+    }
   }
 
   /** Reads a Team or Project budget. */
@@ -1177,18 +1342,25 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Saves a budget with optimistic concurrency. */
-  async saveBudget(budget: TimeBudget, expectedRevision: number) {
+  async saveBudget(budget: TimeBudget, expectedRevision: number, auditPut?: AuditTransactWriteItem) {
     try {
-      await this.documentClient.send(new PutCommand({
-        TableName: this.tableName,
-        Item: { ...budget, recordKey: `${BUDGET_PREFIX}${budget.scopeType}#${budget.scopeId}` },
-        ...(expectedRevision === 0
-          ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
-          : {
-              ConditionExpression: 'revision = :expectedRevision',
-              ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
-            }),
-      }))
+      const put = {
+        Put: {
+          TableName: this.tableName,
+          Item: { ...budget, recordKey: `${BUDGET_PREFIX}${budget.scopeType}#${budget.scopeId}` },
+          ...(expectedRevision === 0
+            ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
+            : {
+                ConditionExpression: 'revision = :expectedRevision',
+                ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+              }),
+        },
+      }
+      if (auditPut) {
+        await this.documentClient.send(new TransactWriteCommand({ TransactItems: [put, auditPut] }))
+      } else {
+        await this.documentClient.send(new PutCommand(put.Put))
+      }
     } catch (error) {
       throw mapConditionalWriteError(error, 'TimeBudgetRevisionConflict', 'The budget was changed by another request.')
     }
@@ -1427,6 +1599,29 @@ function toAuditEntrySnapshot(entry: TimeEntry): Record<string, unknown> {
     workItemId: entry.workItemId,
     userId: entry.userId,
     source: entry.source,
+  }
+}
+
+/** Removes non-audit fields before an estimate snapshot enters audit. */
+function toAuditEstimateSnapshot(estimate: TimeEstimate): Record<string, unknown> {
+  return {
+    teamId: estimate.teamId,
+    workItemId: estimate.workItemId,
+    estimateMinutes: estimate.estimateMinutes,
+    updatedBy: estimate.updatedBy,
+  }
+}
+
+/** Creates a budget snapshot with the amount available for field-level redaction. */
+function toAuditBudgetSnapshot(budget: TimeBudget): Record<string, unknown> {
+  return {
+    scopeType: budget.scopeType,
+    scopeId: budget.scopeId,
+    amountMinor: budget.amountMinor,
+    currency: budget.currency,
+    ...(budget.periodFrom ? { periodFrom: budget.periodFrom } : {}),
+    ...(budget.periodTo ? { periodTo: budget.periodTo } : {}),
+    revision: budget.revision,
   }
 }
 

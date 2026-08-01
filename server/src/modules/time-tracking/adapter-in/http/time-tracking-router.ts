@@ -69,6 +69,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         currency: readOptionalString(body.currency) ?? 'USD',
         ...(body.hourlyRateMinor === undefined ? {} : { hourlyRateMinor: readRequiredNumber(body.hourlyRateMinor, 'Hourly rate') }),
         source: 'manual',
+        ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
       }, canManage)
       return context.json({ entry: redactEntry(entry, canManage) }, 201)
     })
@@ -124,6 +125,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         ...(body.billable === undefined ? {} : { billable: readRequiredBoolean(body.billable, 'Billable') }),
         ...(body.currency === undefined ? {} : { currency: readRequiredString(body.currency, 'Currency') }),
         ...(body.hourlyRateMinor === null ? { hourlyRateMinor: null } : body.hourlyRateMinor === undefined ? {} : { hourlyRateMinor: readRequiredNumber(body.hourlyRateMinor, 'Hourly rate') }),
+        ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
       })
       return context.json({ entry: redactEntry(entry, canManage) })
     })
@@ -150,6 +152,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
           expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
           action,
           ...(body.reason === undefined ? {} : { reason: readRequiredString(body.reason, 'Reason') }),
+          ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
         })
         return context.json({ entry: redactEntry(entry, canManage) })
       })
@@ -262,6 +265,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         currency: readOptionalString(body.currency) ?? 'USD',
         ...(body.hourlyRateMinor === undefined ? {} : { hourlyRateMinor: readRequiredNumber(body.hourlyRateMinor, 'Hourly rate') }),
         canManageRates: canManage,
+        ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
       })
       return context.json({ entry: redactEntry(entry, canManage) })
     })
@@ -304,6 +308,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
       const body = asRecord(await dependencies.readJson(context.req))
       const budget = await dependencies.getTimeTracking().saveBudget({
         workspaceId: principal.directoryId,
+        teamId,
         scopeType: 'team',
         scopeId: teamId,
         amountMinor: readRequiredNumber(body.amountMinor, 'Budget amount'),
@@ -312,6 +317,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         ...(body.periodTo === undefined ? {} : { periodTo: readRequiredString(body.periodTo, 'Budget period end') }),
         expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
         updatedBy: principal.userKey,
+        ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
       })
       return context.json({ budget })
     })
@@ -328,6 +334,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
       const body = asRecord(await dependencies.readJson(context.req))
       const budget = await dependencies.getTimeTracking().saveBudget({
         workspaceId: principal.directoryId,
+        teamId: _teamId,
         scopeType: 'project',
         scopeId: readRequiredString(context.req.param('projectId'), 'Project ID'),
         amountMinor: readRequiredNumber(body.amountMinor, 'Budget amount'),
@@ -336,6 +343,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         ...(body.periodTo === undefined ? {} : { periodTo: readRequiredString(body.periodTo, 'Budget period end') }),
         expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
         updatedBy: principal.userKey,
+        ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
       })
       return context.json({ budget })
     })
@@ -352,6 +360,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         workItemId,
         estimateMinutes: readRequiredNumber(body.estimateMinutes, 'Estimate minutes'),
         updatedBy: principal.userKey,
+        ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
       })
       return context.json({ estimate })
     })
@@ -455,6 +464,16 @@ function readRequiredString(value: unknown, label: string): string {
 /** Reads an optional string. */
 function readOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
+}
+
+/** Reads an optional bounded idempotency key from a mutation request. */
+function readOptionalIdempotencyKey(context: Context): string | undefined {
+  const value = context.req.header('Idempotency-Key')?.trim()
+  if (!value) return undefined
+  if (value.length > 256) {
+    throw new TimeTrackingError(400, 'InvalidRequest', 'Idempotency-Key must be at most 256 characters.')
+  }
+  return value
 }
 
 /** Reads a required number. */
