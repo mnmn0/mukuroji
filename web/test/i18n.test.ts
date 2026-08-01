@@ -61,6 +61,36 @@ describe('sidebar shortcut labels', () => {
     expect(createSidebarLabels('en').nav.planning).toBe('Planning')
   })
 
+  test('localizes Quick Access and current Team navigation', () => {
+    const ja = createSidebarLabels('ja')
+    const en = createSidebarLabels('en')
+
+    expect(ja.quickAccess).toBe('クイックアクセス')
+    expect(en.quickAccess).toBe('Quick access')
+    expect(ja.showAllQuickAccess).toBe('すべて表示')
+    expect(en.showAllQuickAccess).toBe('Show all')
+    expect(ja.allProjects).toBe('すべてのプロジェクト')
+    expect(en.allProjects).toBe('All projects')
+    expect(ja.currentTeam).toBe('現在のチーム')
+    expect(en.currentTeam).toBe('Current team')
+    expect(ja.more).toBe('その他')
+    expect(en.more).toBe('More')
+  })
+
+  test('localizes optimistic Quick Access feedback', () => {
+    const ja = createTranslator('ja')
+    const en = createTranslator('en')
+
+    expect(ja('projects.quickAccess.feedback.added').replace('{name}', 'Refero')).toBe(
+      'Referoをクイックアクセスに追加しました',
+    )
+    expect(en('projects.quickAccess.feedback.removed').replace('{name}', 'Refero')).toBe(
+      'Removed Refero from quick access',
+    )
+    expect(ja('projects.quickAccess.retry')).toBe('クイックアクセスを再読み込み')
+    expect(en('projects.quickAccess.retry')).toBe('Retry quick access')
+  })
+
   test('localizes Planning slack and entity type labels independently', () => {
     const ja = createPlanningLabels('ja')
     const en = createPlanningLabels('en')

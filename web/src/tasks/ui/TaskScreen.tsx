@@ -81,6 +81,10 @@ export type TaskScreenProps = {
   locale: Locale
   /** Project currently displayed by the screen. */
   projectId: string
+  /** Whether the displayed Project is currently available from quick access. */
+  isProjectQuickAccess?: boolean
+  /** Whether a quick-access change is currently being persisted. */
+  isProjectQuickAccessSaving?: boolean
   /** Initial displayed in the current-user avatar. */
   userInitial: string
   /** Team and Project hierarchy shown by the sidebar. */
@@ -165,6 +169,8 @@ export type TaskScreenProps = {
   detailErrorMessage?: string
   /** Changes the Work Item selected by the detail pane. */
   onSelectedIssueChange?: (task: ProjectTask) => void
+  /** Adds or removes the displayed Project from quick access. */
+  onProjectQuickAccessToggle?: () => void
   /** Updates editable fields on the selected Work Item. */
   onUpdateIssue?: (
     teamId: string,
@@ -213,6 +219,8 @@ export function TaskScreen({
   accessToken,
   locale,
   projectId,
+  isProjectQuickAccess = false,
+  isProjectQuickAccessSaving = false,
   userInitial,
   teams,
   projectName,
@@ -258,6 +266,7 @@ export function TaskScreen({
   onProjectUserQueryChange,
   onRemoveProjectMember,
   onSelectedIssueChange,
+  onProjectQuickAccessToggle,
   onCreateTask,
   onRetryConfigurations,
   onUpdateIssue,
@@ -469,9 +478,12 @@ export function TaskScreen({
     <section aria-busy={isLoading} className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <TaskHeader
           activeTab={activeTab}
+          isProjectQuickAccess={isProjectQuickAccess}
+          isProjectQuickAccessSaving={isProjectQuickAccessSaving}
           isCreateTaskOpen={isCreateTaskOpen}
           onCreateTaskOpenChange={onCreateTask ? setIsCreateTaskOpen : undefined}
           onMobileSidebarOpen={openMobileSidebar}
+          onProjectQuickAccessToggle={onProjectQuickAccessToggle}
           onTabChange={setActiveTab}
           projectName={resolvedProjectName}
           t={t}

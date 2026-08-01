@@ -6,7 +6,10 @@ import type {
   HeadObjectCommandOutput,
   Tag,
 } from '@aws-sdk/client-s3'
-import { WORK_ITEM_CONFIGURATION_SCHEMA_VERSION } from '@mukuroji/contracts'
+import {
+  PROJECT_QUICK_ACCESS_MAX_REVISION,
+  WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+} from '@mukuroji/contracts'
 import {
   createAuditActorKey,
   createAuditEntityKey,
@@ -28,6 +31,9 @@ import {
   isCanonicalWorkItemRecord,
   validateWorkItemConfiguration,
 } from '../work-items'
+import {
+  isProjectQuickAccessItems,
+} from '../directory'
 import {
   decodeAttributeMap,
   decodeAttributeMapToNativeRecord,
@@ -75,6 +81,7 @@ const knownProjectDirectoryAuxiliaryEntryTypes = new Set([
   'email-alias',
   'planning-meta',
   'project-member',
+  'project-quick-access',
   'webhook-active-locator-rollback-checkpoint',
   'webhook-authorization-backfill-checkpoint',
   'webhook-team-grant',
@@ -830,6 +837,21 @@ function validateProjectDirectoryAuxiliaryRow(
   directoryId: string,
   entryKey: string,
 ): void {
+  if (row.entryType === 'project-quick-access') {
+    const workspaceId = requireText(row.workspaceId)
+    const memberKey = requireText(row.memberKey)
+    const revision = requireNonNegativeSafeInteger(row.revision)
+    const items = requireArray(row.items)
+    requireCanonicalTimestamp(row.updatedAt)
+    if (
+      revision === 0 ||
+      revision > PROJECT_QUICK_ACCESS_MAX_REVISION ||
+      !isProjectQuickAccessItems(items) ||
+      directoryId !== `PROJECT_QUICK_ACCESS#${encodeURIComponent(workspaceId)}#${encodeURIComponent(memberKey)}` ||
+      entryKey !== 'PREFERENCE'
+    ) normalizationFailure()
+    return
+  }
   if (row.entryType === 'webhook-team-grant') {
     const workspaceId = requireText(row.workspaceId)
     const teamId = requireText(row.teamId)

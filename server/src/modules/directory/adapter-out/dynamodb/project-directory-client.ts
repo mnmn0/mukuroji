@@ -38,6 +38,9 @@ import {
   ProjectDataError,
 } from '../../project-data-error'
 import {
+  isProjectQuickAccessItems,
+} from '../../domain/project-quick-access'
+import {
   CreateTableCommand,
   DescribeTableCommand,
   DynamoDBClient,
@@ -56,6 +59,10 @@ import type {
 } from '@aws-sdk/lib-dynamodb'
 import {
   PLANNING_SCHEMA_VERSION,
+  PROJECT_QUICK_ACCESS_MAX_REVISION,
+  type ProjectQuickAccessItem,
+  type ProjectQuickAccessPreferences,
+  type UpdateProjectQuickAccessPreferencesInput,
 } from '@mukuroji/contracts'
 
 /**
@@ -67,6 +74,10 @@ export type ProjectRole = 'manager' | 'member' | 'viewer'
  * active project と現在ユーザーの role を 1 directory read で返す行です。
  */
 export type ProjectAccessEntry = {
+  /**
+   * Canonical owner Team when the access source can identify it.
+   */
+  teamId?: string
   /**
    * active project ID です。
    */
@@ -281,6 +292,26 @@ type ProjectMemberItem = {
  * DynamoDB に保存する team/project/member directory item です。
  */
 type ProjectDirectoryItem = ProjectDirectoryTeamItem | ProjectDirectoryProjectItem | ProjectMemberItem
+
+/** Viewer-owned ordered Project shortcuts stored beside the canonical directory rows. */
+type ProjectQuickAccessPreferencesItem = {
+  /** Synthetic viewer-specific partition key. */
+  directoryId: string
+  /** Quick-access preference sort key. */
+  entryKey: string
+  /** Sidecar row discriminator. */
+  entryType: 'project-quick-access'
+  /** Authenticated member key that owns this preference. */
+  memberKey: string
+  /** Workspace that contains the referenced Projects. */
+  workspaceId: string
+  /** Projects in the viewer's stable preferred order. */
+  items: ProjectQuickAccessItem[]
+  /** Compare-and-swap revision. */
+  revision: number
+  /** ISO 8601 timestamp of the latest successful replacement. */
+  updatedAt: string
+}
 
 /** Webhook grant から強整合確認する Team / Project source locator です。 */
 type ProjectWebhookGrantSource = {
@@ -555,6 +586,32 @@ export type ProjectDirectoryClient = {
     consistentRead?: boolean,
   ): Promise<ProjectDirectoryResponse>
   /**
+   * Reads the authenticated member's ordered Project quick-access preference.
+   *
+   * @param directoryId - Authenticated Workspace directory ID.
+   * @param memberKey - Authenticated member key that owns the preference.
+   * @param consistentRead - Whether DynamoDB must return the latest committed value.
+   * @returns The stored preference or the revision-zero default.
+   */
+  getProjectQuickAccess(
+    directoryId: string,
+    memberKey: string,
+    consistentRead?: boolean,
+  ): Promise<ProjectQuickAccessPreferences>
+  /**
+   * Replaces the authenticated member's complete Project quick-access order.
+   *
+   * @param directoryId - Authenticated Workspace directory ID.
+   * @param memberKey - Authenticated member key that owns the preference.
+   * @param input - Complete next order and its expected revision.
+   * @returns The committed preference with its incremented revision.
+   */
+  replaceProjectQuickAccess(
+    directoryId: string,
+    memberKey: string,
+    input: UpdateProjectQuickAccessPreferencesInput,
+  ): Promise<ProjectQuickAccessPreferences>
+  /**
    * active project と指定 member の role を 1 directory read で取得します。
    */
   getProjectAccess(
@@ -750,6 +807,149 @@ export class DynamoDbProjectDirectoryClient {
         teams: toProjectDirectoryResponse(items, locale, directoryId),
       } satisfies ProjectDirectoryResponse
     } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Reads one viewer's ordered quick-access preference.
+   *
+   * @param directoryId - Authenticated Workspace directory ID.
+   * @param memberKey - Authenticated member key.
+   * @param consistentRead - Whether DynamoDB must return the latest committed value.
+   * @returns The stored preference or the revision-zero default.
+   */
+  async getProjectQuickAccess(
+    directoryId: string,
+    memberKey: string,
+    consistentRead = false,
+  ): Promise<ProjectQuickAccessPreferences> {
+    try {
+      const preferenceDirectoryId = createProjectQuickAccessDirectoryId(directoryId, memberKey)
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        ConsistentRead: consistentRead,
+        Key: {
+          directoryId: preferenceDirectoryId,
+          entryKey: projectQuickAccessEntryKey,
+        },
+      }))
+
+      if (response.Item === undefined) {
+        return { items: [], revision: 0 }
+      }
+
+      if (!isProjectQuickAccessPreferencesItem(response.Item, directoryId, memberKey)) {
+        throw new ProjectDataError(
+          503,
+          'InvalidProjectQuickAccess',
+          'Project quick-access preference is missing or invalid.',
+        )
+      }
+
+      return toProjectQuickAccessPreferences(response.Item)
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Replaces one viewer's complete quick-access order with compare-and-swap protection.
+   *
+   * @param directoryId - Authenticated Workspace directory ID.
+   * @param memberKey - Authenticated member key.
+   * @param input - Complete next order and its expected revision.
+   * @returns The committed preference with its incremented revision.
+   */
+  async replaceProjectQuickAccess(
+    directoryId: string,
+    memberKey: string,
+    input: UpdateProjectQuickAccessPreferencesInput,
+  ): Promise<ProjectQuickAccessPreferences> {
+    if (
+      !Number.isSafeInteger(input.revision) ||
+      input.revision < 0 ||
+      input.revision >= PROJECT_QUICK_ACCESS_MAX_REVISION ||
+      !isProjectQuickAccessItems(input.items)
+    ) {
+      throw new ProjectDataError(
+        400,
+        'InvalidProjectQuickAccessInput',
+        'Project quick-access input is invalid.',
+      )
+    }
+    const preferenceDirectoryId = createProjectQuickAccessDirectoryId(directoryId, memberKey)
+    const nextItem: ProjectQuickAccessPreferencesItem = {
+      directoryId: preferenceDirectoryId,
+      entryKey: projectQuickAccessEntryKey,
+      entryType: 'project-quick-access',
+      items: input.items.map((item) => ({ ...item })),
+      memberKey,
+      revision: input.revision + 1,
+      updatedAt: new Date().toISOString(),
+      workspaceId: directoryId,
+    }
+    const conditionExpression = input.revision === 0
+      ? 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)'
+      : '#revision = :expectedRevision AND #entryType = :entryType AND #workspaceId = :workspaceId AND #memberKey = :memberKey'
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: nextItem,
+              ConditionExpression: conditionExpression,
+              ExpressionAttributeNames: input.revision === 0
+                ? undefined
+                : {
+                    '#entryType': 'entryType',
+                    '#memberKey': 'memberKey',
+                    '#revision': 'revision',
+                    '#workspaceId': 'workspaceId',
+                  },
+              ExpressionAttributeValues: input.revision === 0
+                ? undefined
+                : {
+                    ':entryType': 'project-quick-access',
+                    ':expectedRevision': input.revision,
+                    ':memberKey': memberKey,
+                    ':workspaceId': directoryId,
+                  },
+            },
+          },
+        ],
+      }))
+      return toProjectQuickAccessPreferences(nextItem)
+    } catch (error) {
+      throwIfWorkspaceSearchWriterFenceTerminalError(error)
+
+      if (hasTransactionConditionalFailure(error)) {
+        const current = await this.getProjectQuickAccess(directoryId, memberKey, true)
+
+        if (
+          current.revision === nextItem.revision &&
+          projectQuickAccessItemsEqual(current.items, nextItem.items)
+        ) {
+          return current
+        }
+
+        throw new ProjectDataError(
+          409,
+          'ProjectQuickAccessConflict',
+          'Project quick access changed before this update was saved.',
+        )
+      }
+
       if (error instanceof ProjectDataError) {
         throw error
       }
@@ -2552,6 +2752,89 @@ function readProjectDirectoryItems(values: unknown[], directoryId: string) {
   }
 
   return directoryItems
+}
+
+/**
+ * Creates the isolated partition key for one authenticated member's preference.
+ *
+ * @param workspaceId - Workspace that owns the preference.
+ * @param memberKey - Authenticated member key.
+ * @returns A sidecar partition key that cannot overlap canonical directory rows.
+ */
+function createProjectQuickAccessDirectoryId(workspaceId: string, memberKey: string) {
+  return `PROJECT_QUICK_ACCESS#${encodeURIComponent(workspaceId)}#${encodeURIComponent(memberKey)}`
+}
+
+const projectQuickAccessEntryKey = 'PREFERENCE'
+
+/**
+ * Validates a stored quick-access sidecar row.
+ *
+ * @param value - Candidate DynamoDB value.
+ * @param directoryId - Expected Workspace partition key.
+ * @param memberKey - Optional expected preference owner.
+ * @returns Whether the value is a valid quick-access row.
+ */
+function isProjectQuickAccessPreferencesItem(
+  value: unknown,
+  directoryId: string,
+  memberKey?: string,
+): value is ProjectQuickAccessPreferencesItem {
+  if (!isRecord(value)) {
+    return false
+  }
+
+  const storedMemberKey = value.memberKey
+  if (typeof storedMemberKey !== 'string') {
+    return false
+  }
+
+  return (
+    value.directoryId === createProjectQuickAccessDirectoryId(directoryId, storedMemberKey) &&
+    value.workspaceId === directoryId &&
+    value.entryType === 'project-quick-access' &&
+    value.entryKey === projectQuickAccessEntryKey &&
+    (memberKey === undefined || storedMemberKey === memberKey) &&
+    Number.isSafeInteger(value.revision) &&
+    typeof value.revision === 'number' &&
+    value.revision > 0 &&
+    value.revision <= PROJECT_QUICK_ACCESS_MAX_REVISION &&
+    typeof value.updatedAt === 'string' &&
+    Array.isArray(value.items) &&
+    isProjectQuickAccessItems(value.items)
+  )
+}
+
+/**
+ * Copies a storage row into the public preference contract.
+ *
+ * @param item - Valid stored preference row.
+ * @returns A detached public preference value.
+ */
+function toProjectQuickAccessPreferences(
+  item: ProjectQuickAccessPreferencesItem,
+): ProjectQuickAccessPreferences {
+  return {
+    items: item.items.map((value) => ({ ...value })),
+    revision: item.revision,
+  }
+}
+
+/**
+ * Compares two ordered quick-access collections.
+ *
+ * @param first - First ordered collection.
+ * @param second - Second ordered collection.
+ * @returns Whether both collections contain the same identities in the same order.
+ */
+function projectQuickAccessItemsEqual(
+  first: readonly ProjectQuickAccessItem[],
+  second: readonly ProjectQuickAccessItem[],
+) {
+  return first.length === second.length && first.every((item, index) => {
+    const candidate = second[index]
+    return candidate?.projectId === item.projectId && candidate.teamId === item.teamId
+  })
 }
 
 function toProjectDirectoryResponse(

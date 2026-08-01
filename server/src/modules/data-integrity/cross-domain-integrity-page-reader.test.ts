@@ -7,6 +7,7 @@ import {
 import { S3Client } from '@aws-sdk/client-s3'
 import { STSClient } from '@aws-sdk/client-sts'
 import { NodeHttpHandler } from '@smithy/node-http-handler'
+import { PROJECT_QUICK_ACCESS_MAX_ITEMS } from '@mukuroji/contracts'
 import type { CrossDomainIntegrityManagedAwsReadPort } from './cross-domain-integrity-aws-types'
 import * as dataIntegrityPublic from './index'
 import {
@@ -178,15 +179,84 @@ function readerConfiguration(): CrossDomainIntegrityNormalizedPageReaderConfigur
   }
 }
 
-/** Creates the common high-level page request. */
-function pageRequest(cursor?: string): CrossDomainIntegrityNormalizedPageRequest {
+/**
+ * Creates the common high-level page request.
+ *
+ * @param cursor - Optional opaque DynamoDB continuation cursor.
+ * @param target - Logical table whose raw rows are normalized.
+ * @returns A complete deterministic normalized-page request.
+ */
+function pageRequest(
+  cursor?: string,
+  target: CrossDomainIntegrityTableTarget = 'work-items',
+): CrossDomainIntegrityNormalizedPageRequest {
   return {
     auditPseudonymKey: AUDIT_KEY,
     checkedAt: CHECKED_AT,
     ...(cursor === undefined ? {} : { cursor }),
     digestKey: DIGEST_KEY,
     remainingItemCapacity: 1_000,
-    target: 'work-items',
+    target,
+  }
+}
+
+/**
+ * Creates one low-level Team-owned Project reference.
+ *
+ * @param teamId - Team identifier stored in the preference.
+ * @param projectId - Project identifier stored in the preference.
+ * @returns A DynamoDB map attribute for the ordered item list.
+ */
+function quickAccessProjectReference(
+  teamId: string,
+  projectId: string,
+): AttributeValue {
+  return {
+    M: {
+      projectId: { S: projectId },
+      teamId: { S: teamId },
+    },
+  }
+}
+
+/**
+ * Creates a valid low-level Project quick-access sidecar row.
+ *
+ * @param overrides - Exact attributes that should replace valid defaults.
+ * @returns One raw DynamoDB item suitable for the normalization boundary.
+ */
+function quickAccessRawItem(
+  overrides: Readonly<Record<string, AttributeValue>> = {},
+): Record<string, AttributeValue> {
+  return {
+    directoryId: {
+      S: 'PROJECT_QUICK_ACCESS#workspace%231#demo%40example.com',
+    },
+    entryKey: { S: 'PREFERENCE' },
+    entryType: { S: 'project-quick-access' },
+    items: {
+      L: [quickAccessProjectReference('core-team', 'refero')],
+    },
+    memberKey: { S: 'demo@example.com' },
+    revision: { N: '1' },
+    updatedAt: { S: CHECKED_AT },
+    workspaceId: { S: 'workspace#1' },
+    ...overrides,
+  }
+}
+
+/**
+ * Wraps one raw row in a complete single-page DynamoDB response.
+ *
+ * @param item - Raw DynamoDB item returned by Scan.
+ * @returns A terminal single-row Scan page.
+ */
+function rawItemPage(item: Record<string, AttributeValue>): ScanCommandOutput {
+  return {
+    $metadata: {},
+    Count: 1,
+    Items: [item],
+    ScannedCount: 1,
   }
 }
 
@@ -267,6 +337,91 @@ describe('cross-domain normalized page reader boundary', () => {
       ])
     } finally {
       reader.close()
+    }
+  })
+
+  test('accepts a canonical Project quick-access sidecar row as auxiliary data', async () => {
+    const fixture = new FixtureRawReader({
+      pages: [rawItemPage(quickAccessRawItem({
+        items: {
+          L: [
+            quickAccessProjectReference('core-team', 'shared-project'),
+            quickAccessProjectReference('design-team', 'shared-project'),
+          ],
+        },
+      }))],
+    })
+    const reader = createCrossDomainIntegrityNormalizedPageReader(
+      readerConfiguration(),
+    )
+    installFixtureRawReader(reader, fixture)
+    try {
+      await expect(reader.readPage(pageRequest(undefined, 'project-directory')))
+        .resolves.toMatchObject({
+          auditCandidates: [],
+          externalFileFailureCodes: [],
+          items: [],
+          retainedUnitCount: 0,
+        })
+      expect(fixture.scanRequests).toEqual([{ target: 'project-directory' }])
+    } finally {
+      reader.close()
+    }
+  })
+
+  test('fails closed on malformed Project quick-access sidecar rows', async () => {
+    const malformedRows = [
+      quickAccessRawItem({ directoryId: { S: 'workspace#1' } }),
+      quickAccessRawItem({ revision: { N: '0' } }),
+      quickAccessRawItem({ revision: { N: String(Number.MAX_SAFE_INTEGER) } }),
+      quickAccessRawItem({
+        items: {
+          L: [quickAccessProjectReference('core/team', 'refero')],
+        },
+      }),
+      quickAccessRawItem({
+        items: {
+          L: [quickAccessProjectReference(' core-team', 'refero')],
+        },
+      }),
+      quickAccessRawItem({
+        items: {
+          L: [quickAccessProjectReference('core-team', 'refero ')],
+        },
+      }),
+      quickAccessRawItem({
+        items: {
+          L: [
+            quickAccessProjectReference('core-team', 'refero'),
+            quickAccessProjectReference('core-team', 'refero'),
+          ],
+        },
+      }),
+      quickAccessRawItem({
+        items: {
+          L: Array.from({ length: PROJECT_QUICK_ACCESS_MAX_ITEMS + 1 }, (_, index) =>
+            quickAccessProjectReference('core-team', `project-${index}`)
+          ),
+        },
+      }),
+    ]
+
+    for (const row of malformedRows) {
+      const fixture = new FixtureRawReader({ pages: [rawItemPage(row)] })
+      const reader = createCrossDomainIntegrityNormalizedPageReader(
+        readerConfiguration(),
+      )
+      installFixtureRawReader(reader, fixture)
+      try {
+        await expect(reader.readPage(pageRequest(undefined, 'project-directory')))
+          .rejects.toEqual(
+            new CrossDomainIntegrityNormalizedPageReaderFailure(
+              'AWS_RESPONSE_INVALID',
+            ),
+          )
+      } finally {
+        reader.close()
+      }
     }
   })
 

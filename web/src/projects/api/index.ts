@@ -1,4 +1,5 @@
 export * from './errors'
 export * from './directory'
+export * from './quickAccess'
 export * from './members'
 export * from './users'

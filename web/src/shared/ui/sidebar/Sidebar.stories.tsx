@@ -1,7 +1,12 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { expect, userEvent, within } from 'storybook/test'
 import { createSidebarLabels } from '../../i18n/i18n'
 import { Sidebar } from './Sidebar'
-import type { SidebarTeam } from './Sidebar'
+import type {
+  SidebarQuickAccessProject,
+  SidebarProjectTone,
+  SidebarTeam,
+} from './Sidebar'
 
 const teams: SidebarTeam[] = [
   {
@@ -25,6 +30,50 @@ const teams: SidebarTeam[] = [
   },
 ]
 
+const quickAccessProjects: SidebarQuickAccessProject[] = [
+  {
+    name: 'Refero',
+    projectId: 'refero',
+    teamId: 'johns-first-team',
+    teamName: "John's First Team",
+    tone: 'blue',
+  },
+  {
+    name: 'Customer Stories',
+    projectId: 'customer-stories',
+    teamId: 'johns-first-team',
+    teamName: "John's First Team",
+    tone: 'green',
+  },
+]
+
+const projectTones: readonly SidebarProjectTone[] = [
+  'blue',
+  'purple',
+  'green',
+  'yellow',
+]
+
+const largeTeams: SidebarTeam[] = Array.from({ length: 20 }, (_, teamIndex) => ({
+  id: `team-${teamIndex + 1}`,
+  name: `Team ${String(teamIndex + 1).padStart(2, '0')}`,
+  projects: Array.from({ length: 20 }, (_, projectIndex) => ({
+    id: `team-${teamIndex + 1}-project-${projectIndex + 1}`,
+    name: `Project ${String(projectIndex + 1).padStart(2, '0')}`,
+    tone: projectTones[projectIndex % projectTones.length],
+  })),
+}))
+
+const largeQuickAccessProjects: SidebarQuickAccessProject[] = largeTeams[0]?.projects
+  ?.slice(0, 8)
+  .map((project) => ({
+    name: project.name,
+    projectId: project.id,
+    teamId: largeTeams[0]?.id ?? '',
+    teamName: largeTeams[0]?.name ?? '',
+    tone: project.tone,
+  })) ?? []
+
 const meta = {
   title: 'Application/Navigation/Sidebar',
   component: Sidebar,
@@ -33,6 +82,7 @@ const meta = {
   },
   args: {
     teams,
+    quickAccessProjects,
     labels: createSidebarLabels('ja'),
     defaultActiveTeamId: 'johns-first-team',
     defaultActiveProjectId: 'refero',
@@ -42,6 +92,10 @@ const meta = {
     onCreateProject: async () => undefined,
     onCreateTeam: async () => undefined,
     onOpenSearch: () => undefined,
+    onMoveQuickAccessProject: async () => undefined,
+    onRemoveQuickAccessProject: async () => undefined,
+    onShowAllQuickAccess: () => undefined,
+    onShowAllProjects: () => undefined,
   },
   decorators: [
     (Story) => (
@@ -61,10 +115,21 @@ type Story = StoryObj<typeof meta>
 /** Default expanded sidebar state. */
 export const Default: Story = {}
 
-/** Collapsed sidebar state. */
+/** Collapsed sidebar expands before exposing the searchable Team switcher. */
 export const Collapsed: Story = {
   args: {
     defaultCollapsed: true,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', {
+      name: "チームを切り替える: John's First Team",
+    }))
+    await expect(canvas.getByRole('complementary')).toHaveAttribute(
+      'data-collapsed',
+      'false',
+    )
+    await expect(canvas.getByPlaceholderText('チームを検索')).toBeVisible()
   },
 }
 
@@ -82,28 +147,84 @@ export const CreateModalOpen: Story = {
   },
 }
 
-/** Sidebar with enough projects to exercise list scrolling. */
-export const ProjectListScrolled: Story = {
+/** Sidebar manager with explicit ordering and removal controls. */
+export const QuickAccessManager: Story = {
   args: {
-    labels: createSidebarLabels('ja'),
-    defaultActiveTeamId: 'johns-first-team',
-    defaultActiveProjectId: 'refero',
-    teams: [
-      {
-        id: 'johns-first-team',
-        name: "John's First Team",
-        expanded: true,
-        projects: [
-          { id: 'refero', name: 'Refero', tone: 'blue' },
-          { id: 'marketing', name: 'Marketing', tone: 'purple' },
-          { id: 'customer-stories', name: 'Customer Stories', tone: 'green' },
-          { id: 'product-roadmap', name: 'Product Roadmap', tone: 'yellow' },
-          { id: 'launch-plan', name: 'Launch Plan', tone: 'blue' },
-          { id: 'brand-refresh', name: 'Brand Refresh', tone: 'purple' },
-          { id: 'analytics', name: 'Analytics', tone: 'green' },
-        ],
-      },
-      ...teams.slice(1),
-    ],
+    defaultQuickAccessManagerOpen: true,
+  },
+}
+
+/** Saving state keeps move controls focusable while exposing aria-disabled. */
+export const QuickAccessManagerSaving: Story = {
+  args: {
+    defaultQuickAccessManagerOpen: true,
+    isQuickAccessSaving: true,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const moveDownButton = canvas.getByRole('button', { name: '下へ移動: Refero' })
+
+    await expect(moveDownButton).toHaveAttribute('aria-disabled', 'true')
+    await expect(moveDownButton).toBeEnabled()
+    await userEvent.click(moveDownButton)
+    await expect(moveDownButton).toHaveFocus()
+  },
+}
+
+/** Global Project directory state exposes one current destination inside More. */
+export const AllProjectsActive: Story = {
+  args: {
+    autoSelectInitialProject: false,
+    isAllProjectsActive: true,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const moreTrigger = canvas.getByRole('button', { name: 'その他' })
+
+    await expect(moreTrigger).not.toHaveAttribute('aria-current')
+    await expect(moreTrigger).toHaveAttribute('aria-haspopup', 'true')
+    await userEvent.click(moreTrigger)
+    await expect(canvas.getByRole('button', {
+      name: 'すべてのプロジェクト',
+    })).toHaveAttribute('aria-current', 'page')
+  },
+}
+
+/** Twenty Teams with twenty Projects each remain discoverable through the switcher. */
+export const LargeDirectory20By20: Story = {
+  args: {
+    defaultActiveTeamId: 'team-1',
+    defaultActiveProjectId: 'team-1-project-1',
+    quickAccessProjects: largeQuickAccessProjects,
+    teams: largeTeams,
+  },
+}
+
+/** Searchable Team switcher narrows a large directory without expanding a tree. */
+export const TeamSearch: Story = {
+  args: {
+    defaultActiveTeamId: 'team-1',
+    quickAccessProjects: largeQuickAccessProjects,
+    teams: largeTeams,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: 'Team 01' }))
+    const input = canvas.getByPlaceholderText('チームを検索')
+    await userEvent.type(input, 'Team 18')
+    const teamOption = canvas.getByRole('button', { name: 'Team 18' })
+    await expect(teamOption).toBeVisible()
+    await expect(canvas.queryByRole('button', { name: 'Team 02' })).not.toBeInTheDocument()
+    await userEvent.click(teamOption)
+    const teamTrigger = canvas.getByRole('button', { name: 'Team 18' })
+    await expect(teamTrigger).toHaveFocus()
+    await expect(teamTrigger).toHaveAttribute('aria-expanded', 'false')
+    await userEvent.click(teamTrigger)
+    await userEvent.keyboard('{Escape}')
+    await expect(teamTrigger).toHaveFocus()
+    await expect(teamTrigger).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    )
   },
 }
