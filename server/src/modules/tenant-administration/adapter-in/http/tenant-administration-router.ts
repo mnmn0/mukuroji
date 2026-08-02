@@ -17,7 +17,10 @@ import {
   validateTenantPlan,
   validateTenantRegion,
 } from '../../domain/tenant-administration'
-import type { TenantAdministrationClient } from '../../application/ports/tenant-administration-port'
+import type {
+  TenantAdministrationClient,
+  TenantExportDownloadPort,
+} from '../../application/ports/tenant-administration-port'
 
 /** Minimal authenticated principal required by tenant administration routes. */
 export type TenantAdministrationPrincipal = {
@@ -47,6 +50,8 @@ export type TenantAdministrationRouterDependencies<
   requireEntitlementAdministration(principal: Principal): void
   /** Provides the tenant administration application port. */
   client: TenantAdministrationClient
+  /** Provides authorized access to completed export artifacts. */
+  tenantExportDownload: TenantExportDownloadPort
   /** Resolves authoritative owner and seat state for first-time initialization. */
   resolveInitialization(
     principal: Principal,
@@ -181,6 +186,22 @@ export function createTenantAdministrationRouter<
           principal.directoryId,
           readOperationId(context.req.param('operationId')),
         ),
+      })
+    } catch (error) {
+      return dependencies.mapError(context, error)
+    }
+  })
+
+  router.get('/api/tenant/operations/:operationId/download', async (context) => {
+    try {
+      const principal = await requirePrincipal(context, dependencies)
+      dependencies.requireAdministration(principal)
+      const operation = await dependencies.client.getOperation(
+        principal.directoryId,
+        readOperationId(context.req.param('operationId')),
+      )
+      return context.json({
+        download: await dependencies.tenantExportDownload.createDownload(operation),
       })
     } catch (error) {
       return dependencies.mapError(context, error)

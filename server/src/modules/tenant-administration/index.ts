@@ -40,12 +40,17 @@ export type {
   TenantAdministrationAuditEvent,
   TenantAdministrationAuditWriter,
   TenantAdministrationClient,
+  TenantExportDownloadPort,
   TenantAuditRetentionProcessor,
   TenantEntitlementEnforcement,
   TenantSeatMeter,
   TenantSeatMutationInput,
 } from './application/ports/tenant-administration-port'
 export { DynamoDbTenantAdministrationClient } from './adapter-out/dynamodb/tenant-administration-client'
+export {
+  createProductionTenantExportDownloadClient,
+  S3TenantExportDownloadClient,
+} from './adapter-out/s3/tenant-export-download'
 export {
   createDynamoDbTenantAdministrationAuditWriter,
 } from './adapter-out/audit/tenant-administration-audit-writer'

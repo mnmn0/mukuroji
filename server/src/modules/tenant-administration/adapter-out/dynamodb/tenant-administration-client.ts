@@ -1483,8 +1483,9 @@ export class DynamoDbTenantAdministrationClient implements
       operationId,
       (operation) => verifyTenantClosure(operation, this.now()),
       {
-        acceptReplay: (operation) => operation.status === 'verified' &&
-          operation.updatedBy === actorMemberKey,
+        // The terminal transition pseudonymizes updatedBy. HTTP authorization
+        // still proves the caller is the retained administrator membership.
+        acceptReplay: (operation) => operation.status === 'verified',
         closeTenant: true,
         requireInactiveLegalHold: true,
       },
@@ -1983,29 +1984,9 @@ export class DynamoDbTenantAdministrationClient implements
         },
       })
     }
-    if (closedProfile) {
-      if (!this.workspaceAccessTableName) {
-        throw new TenantAdministrationError(
-          503,
-          'TenantClosureVerificationUnavailable',
-          'Tenant closure verification cannot seal Workspace access.',
-        )
-      }
-      const requesterMemberKey = normalizeClosureMemberKey(current.requestedBy)
-      items.push({
-        Delete: {
-          TableName: this.workspaceAccessTableName,
-          Key: {
-            workspaceId,
-            recordKey: `MEMBER#${requesterMemberKey}`,
-          },
-          ConditionExpression: 'memberKey = :requesterMemberKey',
-          ExpressionAttributeValues: {
-            ':requesterMemberKey': requesterMemberKey,
-          },
-        },
-      })
-    }
+    // Keep the requesting administrator's membership until the terminal result has
+    // been observed. This is the narrowly scoped replay path for a lost verify
+    // response; normal data-plane access is still blocked by the closed profile.
     const auditPut = this.createAuditPut({
       workspaceId,
       actorMemberKey,
@@ -2451,22 +2432,6 @@ function createBillingPeriodRecordKey(periodStart: string): string {
  */
 function createOperationHistoryRecordKey(operation: TenantOperation): string {
   return `${OPERATION_HISTORY_RECORD_PREFIX}${operation.requestedAt}#${operation.operationId}`
-}
-
-/**
- * Normalizes the retained closure requester to the Workspace membership key format.
- *
- * @param value - Requester identity stored on the closure operation.
- * @returns Lowercase member key used by Workspace access storage.
- */
-function normalizeClosureMemberKey(value: string): string {
-  const normalized = value.trim().toLowerCase()
-  if (!normalized) {
-    throw tenantAdministrationCorrupt(
-      'Tenant closure requester identity is invalid.',
-    )
-  }
-  return normalized
 }
 
 function createStateItem<T extends object>(

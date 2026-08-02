@@ -107,6 +107,11 @@ test('initializes tenant state from authoritative owner and active-seat membersh
     },
     requireEntitlementAdministration() {},
     client,
+    tenantExportDownload: {
+      async createDownload() {
+        return { expiresAt: '2026-08-02T00:05:00.000Z', files: [] }
+      },
+    },
     async resolveInitialization() {
       return { ownerMemberKey: 'owner-1', activeSeats: 4 }
     },
@@ -156,6 +161,11 @@ test('returns a closing tenant snapshot without requiring an active owner', asyn
     requireAdministration() {},
     requireEntitlementAdministration() {},
     client: createClient(snapshot, ensureCalls),
+    tenantExportDownload: {
+      async createDownload() {
+        return { expiresAt: '2026-08-02T00:05:00.000Z', files: [] }
+      },
+    },
     async resolveInitialization() {
       initializationCalls += 1
       throw new TenantAdministrationError(
@@ -206,6 +216,11 @@ test('creates export operations without exposing the trusted advance boundary', 
     requireAdministration() {},
     requireEntitlementAdministration() {},
     client,
+    tenantExportDownload: {
+      async createDownload() {
+        return { expiresAt: '2026-08-02T00:05:00.000Z', files: [] }
+      },
+    },
     async resolveInitialization() {
       return { ownerMemberKey: 'owner-1', activeSeats: 1 }
     },
@@ -269,6 +284,11 @@ test('rejects entitlement changes outside the trusted system control plane', asy
       )
     },
     client,
+    tenantExportDownload: {
+      async createDownload() {
+        return { expiresAt: '2026-08-02T00:05:00.000Z', files: [] }
+      },
+    },
     async resolveInitialization() {
       return { ownerMemberKey: 'owner-1', activeSeats: 1 }
     },
@@ -304,4 +324,59 @@ test('rejects entitlement changes outside the trusted system control plane', asy
     code: 'TenantEntitlementAdministrationRequired',
   })
   expect(updateCalls).toBe(0)
+})
+
+test('returns short-lived download locations for a completed export', async () => {
+  const snapshot = createDefaultTenantAdministrationSnapshot(
+    'workspace-1',
+    'owner-1',
+    '2026-08-02T00:00:00.000Z',
+  )
+  const client = createClient(snapshot, [])
+  client.getOperation = async () => ({
+    ...createOperation(),
+    status: 'completed',
+  })
+  const router = createTenantAdministrationRouter({
+    async authenticate() {
+      return { directoryId: 'workspace-1', userKey: 'owner-1' }
+    },
+    requireAdministration() {},
+    requireEntitlementAdministration() {},
+    client,
+    tenantExportDownload: {
+      async createDownload(operation) {
+        expect(operation.status).toBe('completed')
+        return {
+          expiresAt: '2026-08-02T00:05:00.000Z',
+          files: [{ name: 'manifest.json', url: 'https://signed.example/export' }],
+        }
+      },
+    },
+    async resolveInitialization() {
+      return { ownerMemberKey: 'owner-1', activeSeats: 1 }
+    },
+    async readJson(request) {
+      return await request.json()
+    },
+    mapError(_context, error) {
+      if (error instanceof TenantAdministrationError) {
+        return Response.json({ code: error.code }, { status: error.status })
+      }
+      return Response.json({ code: 'UnknownError' }, { status: 500 })
+    },
+  })
+
+  const response = await router.request(
+    '/api/tenant/operations/operation-1/download',
+    { headers: { Authorization: 'Bearer token-1' } },
+  )
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    download: {
+      expiresAt: '2026-08-02T00:05:00.000Z',
+      files: [{ name: 'manifest.json', url: 'https://signed.example/export' }],
+    },
+  })
 })

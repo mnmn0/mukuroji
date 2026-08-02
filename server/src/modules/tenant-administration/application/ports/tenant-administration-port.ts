@@ -2,6 +2,7 @@ import type {
   RequestTenantClosureInput,
   RequestTenantExportInput,
   TenantAdministrationSnapshot,
+  TenantExportDownload,
   TenantEntitlement,
   TenantGovernancePolicy,
   TenantOperation,
@@ -197,4 +198,10 @@ export interface TenantAdministrationClient extends TenantEntitlementEnforcement
     actorMemberKey: string,
     operationId: string,
   ): Promise<TenantOperation>
+}
+
+/** Application port for authorized access to completed tenant export artifacts. */
+export interface TenantExportDownloadPort {
+  /** Creates short-lived object URLs for one completed export operation. */
+  createDownload(operation: TenantOperation): Promise<TenantExportDownload>
 }

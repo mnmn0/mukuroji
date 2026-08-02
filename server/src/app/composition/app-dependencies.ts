@@ -62,6 +62,7 @@ import type { WorkspaceSearchClient } from '../../modules/workspace-search/works
 import type {
   TenantAdministrationClient,
   TenantEntitlementEnforcement,
+  TenantExportDownloadPort,
 } from '../../modules/tenant-administration'
 import type { TimeTrackingService } from '../../modules/time-tracking'
 import type {
@@ -130,6 +131,8 @@ export interface WorkspaceDependencies {
   enterpriseIdentityProviderConnectionTester: EnterpriseIdentityProviderConnectionTester
   /** Provides tenant profile, entitlement, governance, and lifecycle state. */
   tenantAdministration: TenantAdministrationClient
+  /** Provides authorized access to completed tenant export artifacts. */
+  tenantExportDownload: TenantExportDownloadPort
   /** Enforces tenant feature and usage policy at authenticated route boundaries. */
   tenantEntitlementEnforcement: TenantEntitlementEnforcement
 }

@@ -154,9 +154,9 @@ export function createProductionTenantMeteredWorkspaceAccess():
 /**
  * Creates a fail-closed feature gate for a trusted background worker.
  *
- * Deliberately disabled, unavailable, and not-yet-initialized tenant features return `false`.
- * Authenticated API access owns legacy initialization from authoritative Workspace
- * membership; persistence and configuration failures remain errors for retry.
+ * Disabled tenant features return `false`; missing legacy tenant state is initialized
+ * from authoritative Workspace membership before the feature is evaluated.
+ * Persistence and configuration failures remain errors for retry.
  *
  * @param feature - Commercial feature executed by the worker.
  * @returns A tenant-scoped feature availability gate.
@@ -165,6 +165,10 @@ export function createProductionTenantFeatureGate(
   feature: TenantFeature,
 ): ProductionTenantFeatureGate {
   const tenantAdministration = createProductionTenantAdministrationClient()
+  const workspaceAccess = new DynamoDbWorkspaceAccessClient({
+    documentAuthorizationRevisionMutationPort:
+      new DynamoDbDocumentAuthorizationRevisionMutationAdapter(),
+  })
 
   return {
     async isEnabled(workspaceId) {
@@ -174,9 +178,16 @@ export function createProductionTenantFeatureGate(
       } catch (error) {
         if (
           error instanceof TenantAdministrationError &&
+          error.code === 'TenantAdministrationNotInitialized'
+        ) {
+          await initializeLegacyTenant(tenantAdministration, workspaceAccess, workspaceId)
+          await tenantAdministration.assertFeature(workspaceId, feature)
+          return true
+        }
+        if (
+          error instanceof TenantAdministrationError &&
           (
             error.code === 'TenantFeatureNotEntitled' ||
-            error.code === 'TenantAdministrationNotInitialized' ||
             error.code === 'TenantClosing' ||
             error.code === 'TenantClosed'
           )
@@ -196,12 +207,24 @@ export function createProductionTenantFeatureGate(
  */
 export function createProductionTenantAvailability(): ProductionTenantAvailability {
   const tenantAdministration = createProductionTenantAdministrationClient()
+  const workspaceAccess = new DynamoDbWorkspaceAccessClient({
+    documentAuthorizationRevisionMutationPort:
+      new DynamoDbDocumentAuthorizationRevisionMutationAdapter(),
+  })
   return {
     async isActive(workspaceId) {
       try {
         await tenantAdministration.assertActive(workspaceId)
         return true
       } catch (error) {
+        if (
+          error instanceof TenantAdministrationError &&
+          error.code === 'TenantAdministrationNotInitialized'
+        ) {
+          await initializeLegacyTenant(tenantAdministration, workspaceAccess, workspaceId)
+          await tenantAdministration.assertActive(workspaceId)
+          return true
+        }
         if (
           error instanceof TenantAdministrationError &&
           (error.code === 'TenantClosing' || error.code === 'TenantClosed')
@@ -214,4 +237,26 @@ export function createProductionTenantAvailability(): ProductionTenantAvailabili
     createActiveWriteCondition: (workspaceId) =>
       tenantAdministration.createActiveWriteCondition(workspaceId),
   }
+}
+
+/** Initializes one legacy tenant from the authoritative active membership table. */
+async function initializeLegacyTenant(
+  tenantAdministration: DynamoDbTenantAdministrationClient,
+  workspaceAccess: DynamoDbWorkspaceAccessClient,
+  workspaceId: string,
+): Promise<void> {
+  const activeMembers = await workspaceAccess.listActiveMembers(workspaceId)
+  const owner = activeMembers.find((member) => member.role === 'owner')
+  if (!owner) {
+    throw new TenantAdministrationError(
+      503,
+      'TenantOwnerUnavailable',
+      'The Workspace owner required for tenant initialization is unavailable.',
+    )
+  }
+  await tenantAdministration.ensureSnapshot(
+    workspaceId,
+    owner.memberKey,
+    activeMembers.length,
+  )
 }

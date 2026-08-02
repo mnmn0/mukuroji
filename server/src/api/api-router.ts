@@ -981,6 +981,9 @@ const workspaceDependencies: WorkspaceDependencies = {
   get tenantAdministration() {
     return requireAppDependencies().workspace.tenantAdministration
   },
+  get tenantExportDownload() {
+    return requireAppDependencies().workspace.tenantExportDownload
+  },
   get tenantEntitlementEnforcement() {
     return requireAppDependencies().workspace.tenantEntitlementEnforcement
   },
@@ -4370,6 +4373,9 @@ routeApp.route('/', createTenantAdministrationRouter({
   requireEntitlementAdministration: requireTenantEntitlementAdministration,
   get client() {
     return workspaceDependencies.tenantAdministration
+  },
+  get tenantExportDownload() {
+    return workspaceDependencies.tenantExportDownload
   },
   async resolveInitialization(principal) {
     const activeMembers = await workspaceDependencies.workspaceAccess.listActiveMembers(
@@ -11929,7 +11935,11 @@ function resolveTenantFeatureForPath(path: string): TenantFeature | undefined {
     return 'documents'
   }
   if (path.startsWith('/api/analytics')) return 'analytics'
-  if (path.startsWith('/api/automation') || path.startsWith('/api/recurring-work')) {
+  if (
+    path.startsWith('/api/automation') ||
+    path.startsWith('/api/recurring-work') ||
+    path.startsWith('/api/bulk-operations')
+  ) {
     return 'automation'
   }
   if (path.startsWith('/api/developer')) return 'developer-platform'
@@ -12114,26 +12124,31 @@ async function enforceTenantFeatureForWorkspace(
     ) {
       throw toTenantEntitlementBoundaryError(error)
     }
-    const activeMembers = await workspaceDependencies.workspaceAccess.listActiveMembers(workspaceId)
-    const owner = activeMembers.find((member) => member.role === 'owner')
-    if (!owner) {
-      throw toTenantEntitlementBoundaryError(new TenantAdministrationError(
-        503,
-        'TenantOwnerUnavailable',
-        'The Workspace owner required for tenant initialization is unavailable.',
-      ))
-    }
-    await workspaceDependencies.tenantAdministration.ensureSnapshot(
-      workspaceId,
-      owner.memberKey,
-      activeMembers.length,
-    )
+    await initializeLegacyTenantAdministration(workspaceId)
     try {
       await applyTenantFeaturePolicy(workspaceId, feature, method, idempotencyKey)
     } catch (retryError) {
       throw toTenantEntitlementBoundaryError(retryError)
     }
   }
+}
+
+/** Initializes a legacy tenant once from the authoritative active membership table. */
+async function initializeLegacyTenantAdministration(workspaceId: string): Promise<void> {
+  const activeMembers = await workspaceDependencies.workspaceAccess.listActiveMembers(workspaceId)
+  const owner = activeMembers.find((member) => member.role === 'owner')
+  if (!owner) {
+    throw toTenantEntitlementBoundaryError(new TenantAdministrationError(
+      503,
+      'TenantOwnerUnavailable',
+      'The Workspace owner required for tenant initialization is unavailable.',
+    ))
+  }
+  await workspaceDependencies.tenantAdministration.ensureSnapshot(
+    workspaceId,
+    owner.memberKey,
+    activeMembers.length,
+  )
 }
 
 /**
@@ -12481,6 +12496,20 @@ async function enforceActiveTenantForRequest(
       workspaceId,
     )
   } catch (error) {
+    if (
+      error instanceof TenantAdministrationError &&
+      error.code === 'TenantAdministrationNotInitialized'
+    ) {
+      await initializeLegacyTenantAdministration(workspaceId)
+      try {
+        await workspaceDependencies.tenantEntitlementEnforcement.assertActive(
+          workspaceId,
+        )
+        return
+      } catch (retryError) {
+        throw toTenantEntitlementBoundaryError(retryError)
+      }
+    }
     throw toTenantEntitlementBoundaryError(error)
   }
 }
@@ -21575,9 +21604,46 @@ export function createWorkItemImportWorkerDependencies(): WorkItemImportWorkerDe
       } catch (error) {
         if (
           error instanceof TenantAdministrationError &&
+          error.code === 'TenantAdministrationNotInitialized'
+        ) {
+          await initializeLegacyTenantAdministration(execution.workspaceId)
+          try {
+            await workspaceDependencies.tenantEntitlementEnforcement.assertFeature(
+              execution.workspaceId,
+              'developer-platform',
+            )
+            return
+          } catch (retryError) {
+            if (
+              retryError instanceof TenantAdministrationError &&
+              retryError.code === 'TenantAdministrationNotInitialized'
+            ) {
+              throw new WorkItemImportError(
+                'ImportTenantUnavailable',
+                'Tenant administration is still initializing; the import can be retried.',
+                true,
+              )
+            }
+            if (
+              retryError instanceof TenantAdministrationError &&
+              (
+                retryError.code === 'TenantFeatureNotEntitled' ||
+                retryError.code === 'TenantClosing' ||
+                retryError.code === 'TenantClosed'
+              )
+            ) {
+              throw new WorkItemImportError(
+                'ImportTenantUnavailable',
+                'The tenant can no longer execute Developer Platform imports.',
+              )
+            }
+            throw retryError
+          }
+        }
+        if (
+          error instanceof TenantAdministrationError &&
           (
             error.code === 'TenantFeatureNotEntitled' ||
-            error.code === 'TenantAdministrationNotInitialized' ||
             error.code === 'TenantClosing' ||
             error.code === 'TenantClosed'
           )
@@ -21586,6 +21652,9 @@ export function createWorkItemImportWorkerDependencies(): WorkItemImportWorkerDe
             'ImportTenantUnavailable',
             'The tenant can no longer execute Developer Platform imports.',
           )
+        }
+        if (error instanceof TenantAdministrationError) {
+          throw error
         }
         throw error
       }

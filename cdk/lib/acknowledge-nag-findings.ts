@@ -91,7 +91,10 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
   ],
   [
     'AwsSolutions-IAM5[Resource::<TenantExportBucket06599E71.Arn>/tenant-exports/*]',
-    ['TenantExportCapabilityFunction/ServiceRole/DefaultPolicy/Resource'],
+    [
+      'ListProjectTasksFunction/ServiceRole/DefaultPolicy/Resource',
+      'TenantExportCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
+    ],
   ],
   [
     'AwsSolutions-IAM5[Resource::<ProjectTasksTableE21F6637.Arn>/index/*]',

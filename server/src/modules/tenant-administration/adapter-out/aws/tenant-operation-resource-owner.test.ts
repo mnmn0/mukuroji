@@ -289,6 +289,66 @@ describe('AwsTenantOperationResourceOwner', () => {
     }
   })
 
+  test('selects credential-auth locator partitions by nested target Workspace', async () => {
+    const requests: unknown[] = []
+    const lowLevelClient = new DynamoDBClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          requests.push(readJsonRequestBody(request))
+          return {
+            response: {
+              body: new TextEncoder().encode('{"Items":[]}'),
+              headers: {},
+              statusCode: 200,
+            },
+          }
+        },
+      },
+    })
+    const documentClient = DynamoDBDocumentClient.from(lowLevelClient)
+    const s3Client = new S3Client({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const cognitoClient = new CognitoIdentityProviderClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const owner = new AwsTenantOperationResourceOwner({
+      owner: 'secrets',
+      documentClient,
+      s3Client,
+      cognitoClient,
+      secretsManagerClient: inertSecretsManagerClient,
+      config: createConfig(),
+      pseudonymKey: testPseudonymKey,
+    })
+
+    try {
+      await owner.execute({
+        ...createDataJob(0),
+        step: 'delete-secrets',
+      }, {
+        ...createOperation(),
+        currentStep: 'delete-secrets',
+      })
+      expect(requests[0]).toMatchObject({
+        TableName: 'developer-platform',
+        FilterExpression: '(#tenant0 = :tenant0 OR #tenant1.#tenant1_1 = :tenant1)',
+        ExpressionAttributeValues: {
+          ':tenant0': { S: 'workspace/one' },
+          ':tenant1': { S: 'workspace/one' },
+        },
+      })
+    } finally {
+      documentClient.destroy()
+      s3Client.destroy()
+      cognitoClient.destroy()
+    }
+  })
+
   test('encrypts scan cursors and rejects tampering or cross-operation replay', async () => {
     const requests: unknown[] = []
     let requestCount = 0

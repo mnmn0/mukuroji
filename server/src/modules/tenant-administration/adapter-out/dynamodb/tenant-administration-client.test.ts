@@ -1194,18 +1194,9 @@ describe('DynamoDbTenantAdministrationClient', () => {
             ConditionExpression: 'operationId = :operationId',
           },
         },
-        {
-          Delete: {
-            TableName: 'WorkspaceAccessTable',
-            Key: {
-              workspaceId: 'workspace-1',
-              recordKey: 'MEMBER#owner-1',
-            },
-            ConditionExpression: 'memberKey = :requesterMemberKey',
-          },
-        },
       ],
     })
+    expect(JSON.stringify(transactions[1])).not.toContain('WorkspaceAccessTable')
     expect(verified.requestedBy)
       .toMatch(/^deleted\+[a-f0-9]{16}\.[a-f0-9]{24}@invalid\.example$/u)
     expect(verified.updatedBy).toBe(verified.requestedBy)
@@ -1215,6 +1206,14 @@ describe('DynamoDbTenantAdministrationClient', () => {
     expect(JSON.stringify(transactions[1])).toContain(
       '\\"closedByOperationId\\":\\"closure-1\\"',
     )
+
+    items.set('OPERATION#closure-1', verified)
+    await expect(client.verifyClosure(
+      'workspace-1',
+      'owner-1',
+      'closure-1',
+    )).resolves.toEqual(verified)
+    expect(transactions).toHaveLength(2)
   })
 
   test('persists a verified residual repair as a valid cleanup-step prefix', async () => {

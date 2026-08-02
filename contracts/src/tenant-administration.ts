@@ -262,6 +262,22 @@ export type TenantOperation = {
   revision: number
 }
 
+/** One short-lived URL for a generated tenant export artifact object. */
+export type TenantExportDownloadFile = {
+  /** Relative artifact path shown to the requesting administrator. */
+  name: string
+  /** Short-lived URL authorized for this artifact object only. */
+  url: string
+}
+
+/** Authorized artifact locations returned for a completed tenant export. */
+export type TenantExportDownload = {
+  /** Timestamp at which all returned URLs expire. */
+  expiresAt: string
+  /** Every generated artifact object available for download. */
+  files: TenantExportDownloadFile[]
+}
+
 /**
  * Tenant administration aggregate returned to the management UI.
  */

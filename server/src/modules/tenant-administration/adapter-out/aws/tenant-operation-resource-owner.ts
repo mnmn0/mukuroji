@@ -133,8 +133,8 @@ export type TenantOperationAwsResourceOwnerInput = {
 
 /** One exact or delimiter-safe tenant locator used by a table target. */
 type TenantSelector = {
-  /** DynamoDB attribute containing the tenant locator. */
-  readonly attribute: string
+  /** DynamoDB attribute path containing the tenant locator. */
+  readonly path: readonly string[]
   /** Comparison applied by the generated query or filter expression. */
   readonly mode: 'equals' | 'prefix'
   /** Builds the canonical tenant locator for one Workspace. */
@@ -340,6 +340,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
       ),
       attributeTarget('developer-platform', this.config.developerPlatformTableName, 'workspaceId', 'recordKey', [
         workspaceSelector('workspaceId', 'equals'),
+        nestedWorkspaceSelector(['value', 'targetWorkspaceId'], 'equals'),
       ]),
       exactTarget('analytics', this.config.analyticsTableName, 'workspaceId', 'recordKey'),
       attributeTarget(
@@ -1418,7 +1419,8 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     limit = RESOURCE_PAGE_SIZE,
   ): Promise<DynamoPage> {
     const directSelector = target.selectors.length === 1 &&
-      target.selectors[0]?.attribute === target.partitionKey &&
+      target.selectors[0]?.path.length === 1 &&
+      target.selectors[0]?.path[0] === target.partitionKey &&
       target.selectors[0]?.mode === 'equals'
       ? target.selectors[0]
       : undefined
@@ -1451,13 +1453,19 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     const names: Record<string, string> = { ...projection?.names }
     const values: Record<string, unknown> = {}
     const filters = target.selectors.map((tenantSelector, index) => {
-      const name = `#tenant${String(index)}`
+      const namesForPath = tenantSelector.path.map((segment, segmentIndex) => {
+        const name = segmentIndex === 0
+          ? `#tenant${String(index)}`
+          : `#tenant${String(index)}_${String(segmentIndex)}`
+        names[name] = segment
+        return name
+      })
       const value = `:tenant${String(index)}`
-      names[name] = tenantSelector.attribute
       values[value] = tenantSelector.value(workspaceId)
+      const path = namesForPath.join('.')
       return tenantSelector.mode === 'equals'
-        ? `${name} = ${value}`
-        : `begins_with(${name}, ${value})`
+        ? `${path} = ${value}`
+        : `begins_with(${path}, ${value})`
     })
     const response = await this.documentClient.send(new ScanCommand({
       TableName: target.tableName,
@@ -1584,9 +1592,21 @@ function workspaceSelector(
   suffix = '',
 ): TenantSelector {
   return {
-    attribute,
+    path: [attribute],
     mode,
     value: (workspaceId) => `${prefix}${workspaceId}${suffix}`,
+  }
+}
+
+/** Creates a selector for a nested tenant locator in a DynamoDB document value. */
+function nestedWorkspaceSelector(
+  path: readonly string[],
+  mode: TenantSelector['mode'],
+): TenantSelector {
+  return {
+    path,
+    mode,
+    value: (workspaceId) => workspaceId,
   }
 }
 
@@ -1598,7 +1618,7 @@ function encodedWorkspaceSelector(
   suffix = '',
 ): TenantSelector {
   return {
-    attribute,
+    path: [attribute],
     mode,
     value: (workspaceId) => `${prefix}${encodeURIComponent(workspaceId)}${suffix}`,
   }

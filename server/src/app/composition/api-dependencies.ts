@@ -93,7 +93,10 @@ import {
   type WorkItemImportSourceStore,
 } from '../../modules/work-items'
 import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
-import type { TenantEntitlementEnforcement } from '../../modules/tenant-administration'
+import {
+  createProductionTenantExportDownloadClient,
+  type TenantEntitlementEnforcement,
+} from '../../modules/tenant-administration'
 import { DynamoDbWorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
 import { createProductionQueueWebhookDeliveryMessage } from './webhook'
 import {
@@ -453,6 +456,7 @@ export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
     enterpriseSessionActivity: createEnterpriseSessionActivityClient(),
     enterpriseIdentityProviderConnectionTester: testEnterpriseIdentityProviderConnection,
     tenantAdministration,
+    tenantExportDownload: createProductionTenantExportDownloadClient(),
     tenantEntitlementEnforcement: tenantAdministration,
   }
 }
