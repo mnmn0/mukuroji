@@ -445,6 +445,8 @@ function buildTenantOperationCapabilityFunction(
         input.dataStores.workspaceSearchTable.tableName,
       WORK_ITEM_CONFIGURATION_TABLE_NAME:
         input.dataStores.workItemConfigurationTable.tableName,
+      WORK_ITEM_IMPORT_BUCKET_NAME:
+        input.fileStorage.workItemImportBucket.bucketName,
       WORK_ITEMS_TABLE_NAME: input.dataStores.workItemsTable.tableName,
     },
   });
@@ -516,6 +518,10 @@ function grantTenantResourceOwner(
     stores.auditEventsTable,
     stores.workspaceAccessTable,
   ];
+  const workspaceFilePrefixes = [
+    'workspaces/*/files/*',
+    'workspaces/*/request-submissions/*',
+  ];
   if (owner === 'export') {
     for (const table of exportTables) grantTableRead(target, table);
     target.addToRolePolicy(new iam.PolicyStatement({
@@ -523,13 +529,28 @@ function grantTenantResourceOwner(
       resources: [input.fileStorage.fileBucket.bucketArn],
       conditions: {
         StringLike: {
-          's3:prefix': ['workspaces/*'],
+          's3:prefix': workspaceFilePrefixes,
         },
       },
     }));
     target.addToRolePolicy(new iam.PolicyStatement({
       actions: ['s3:GetObject', 's3:GetObjectVersion'],
       resources: [input.fileStorage.fileBucket.arnForObjects('workspaces/*')],
+    }));
+    target.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['s3:ListBucket'],
+      resources: [input.fileStorage.workItemImportBucket.bucketArn],
+      conditions: {
+        StringLike: {
+          's3:prefix': ['work-item-imports/*'],
+        },
+      },
+    }));
+    target.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['s3:GetObject', 's3:GetObjectVersion'],
+      resources: [
+        input.fileStorage.workItemImportBucket.arnForObjects('work-item-imports/*'),
+      ],
     }));
     target.addToRolePolicy(new iam.PolicyStatement({
       actions: ['s3:GetObject', 's3:PutObject'],
@@ -557,13 +578,28 @@ function grantTenantResourceOwner(
       resources: [input.fileStorage.fileBucket.bucketArn],
       conditions: {
         StringLike: {
-          's3:prefix': ['workspaces/*'],
+          's3:prefix': workspaceFilePrefixes,
         },
       },
     }));
     target.addToRolePolicy(new iam.PolicyStatement({
       actions: ['s3:DeleteObject', 's3:DeleteObjectVersion'],
       resources: [input.fileStorage.fileBucket.arnForObjects('workspaces/*')],
+    }));
+    target.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['s3:ListBucket', 's3:ListBucketVersions'],
+      resources: [input.fileStorage.workItemImportBucket.bucketArn],
+      conditions: {
+        StringLike: {
+          's3:prefix': ['work-item-imports/*'],
+        },
+      },
+    }));
+    target.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['s3:DeleteObject', 's3:DeleteObjectVersion'],
+      resources: [
+        input.fileStorage.workItemImportBucket.arnForObjects('work-item-imports/*'),
+      ],
     }));
     return;
   }
@@ -594,7 +630,16 @@ function grantTenantResourceOwner(
     resources: [input.fileStorage.fileBucket.bucketArn],
     conditions: {
       StringLike: {
-        's3:prefix': ['workspaces/*'],
+        's3:prefix': workspaceFilePrefixes,
+      },
+    },
+  }));
+  target.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['s3:ListBucket', 's3:ListBucketVersions'],
+    resources: [input.fileStorage.workItemImportBucket.bucketArn],
+    conditions: {
+      StringLike: {
+        's3:prefix': ['work-item-imports/*'],
       },
     },
   }));

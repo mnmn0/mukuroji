@@ -2211,6 +2211,9 @@ test('tenant lifecycle execution is split into queued environment-bound resource
             TENANT_OPERATION_PSEUDONYM_SECRET_ARN: {
               Ref: 'ApiWorkspaceAuditPseudonymValueSecretC16FD0F8',
             },
+            WORK_ITEM_IMPORT_BUCKET_NAME: {
+              Ref: 'WorkItemImportBucket14068778',
+            },
           }),
         }),
       }),
@@ -2247,12 +2250,20 @@ test('tenant lifecycle execution is split into queued environment-bound resource
     if (specification.owner === 'export' || specification.owner === 'data') {
       expect(serializedPolicy).toContain('s3:');
       expect(serializedPolicy).toContain(String(capacityPlanningTableId));
+      expect(serializedPolicy).toContain('WorkItemImportBucket14068778');
+      if (specification.owner === 'export') {
+        expect(serializedPolicy).toContain('s3:GetObjectVersion');
+      } else {
+        expect(serializedPolicy).toContain('s3:DeleteObjectVersion');
+      }
     } else if (specification.owner === 'verification') {
       expect(serializedPolicy).toContain('s3:ListBucketVersions');
       expect(serializedPolicy).not.toContain('s3:DeleteObject');
       expect(serializedPolicy).toContain(String(capacityPlanningTableId));
+      expect(serializedPolicy).toContain('WorkItemImportBucket14068778');
     } else {
       expect(serializedPolicy).not.toContain('s3:');
+      expect(serializedPolicy).not.toContain('WorkItemImportBucket14068778');
     }
     const queueId = Object.keys(resources).find((logicalId) =>
       logicalId.startsWith(specification.queuePrefix) &&

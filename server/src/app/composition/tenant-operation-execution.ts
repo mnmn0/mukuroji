@@ -244,6 +244,7 @@ function readTenantOperationResourceOwnerConfig(): TenantOperationResourceOwnerC
     tenantAdministrationTableName: requireEnvironment('TENANT_ADMINISTRATION_TABLE_NAME'),
     tenantExportBucketName: requireEnvironment('TENANT_EXPORT_BUCKET_NAME'),
     fileBucketName: requireEnvironment('FILE_BUCKET_NAME'),
+    workItemImportBucketName: requireEnvironment('WORK_ITEM_IMPORT_BUCKET_NAME'),
     cognitoUserPoolId: requireEnvironment('COGNITO_USER_POOL_ID'),
     legacyTasksTableName: requireEnvironment('MUKUROJI_PROJECT_TASKS_TABLE'),
     workItemsTableName: requireEnvironment('WORK_ITEMS_TABLE_NAME'),

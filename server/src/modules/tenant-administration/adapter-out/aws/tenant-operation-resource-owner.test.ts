@@ -31,6 +31,7 @@ function createConfig(): TenantOperationResourceOwnerConfig {
     tenantAdministrationTableName: 'tenant-administration',
     tenantExportBucketName: 'tenant-export',
     fileBucketName: 'tenant-files',
+    workItemImportBucketName: 'work-item-imports',
     cognitoUserPoolId: 'user-pool-1',
     legacyTasksTableName: 'legacy-tasks',
     workItemsTableName: 'work-items',
@@ -111,6 +112,43 @@ function readTextRequestBody(request: unknown): string {
   if (typeof body === 'string') return body
   if (body instanceof Uint8Array) return new TextDecoder().decode(body)
   throw new Error('Expected a text request body.')
+}
+
+/** Reads one serialized Smithy HTTP query value. */
+function readHttpQueryValue(
+  request: unknown,
+  name: string,
+): string | undefined {
+  if (!isRecord(request)) throw new Error('Expected a serialized AWS request.')
+  const query = Reflect.get(request, 'query')
+  if (!isRecord(query)) return undefined
+  const value = Reflect.get(query, name)
+  if (typeof value === 'string') return value
+  if (Array.isArray(value) && typeof value[0] === 'string') return value[0]
+  return undefined
+}
+
+/** Reads one serialized Smithy HTTP header value. */
+function readHttpHeader(
+  request: unknown,
+  name: string,
+): string | undefined {
+  if (!isRecord(request)) throw new Error('Expected a serialized AWS request.')
+  const headers = Reflect.get(request, 'headers')
+  if (!isRecord(headers)) return undefined
+  const value = Reflect.get(headers, name.toLowerCase())
+  return typeof value === 'string' ? value : undefined
+}
+
+/** Creates one successful XML response for the AWS SDK test transport. */
+function createS3XmlResponse(body: string) {
+  return {
+    response: {
+      body: new TextEncoder().encode(body),
+      headers: { 'content-type': 'application/xml' },
+      statusCode: 200,
+    },
+  }
 }
 
 /** Returns true for a non-array object. */
@@ -574,6 +612,352 @@ describe('AwsTenantOperationResourceOwner', () => {
       documentClient.destroy()
       s3Client.destroy()
       cognitoClient.destroy()
+    }
+  })
+
+  test('exports regular, Request Intake, and Work Item import objects', async () => {
+    const workspaceId = 'workspace/one'
+    const requestWorkspaceDigest = createHash('sha256')
+      .update(workspaceId)
+      .digest('hex')
+      .slice(0, 32)
+    const requestObjectKey =
+      `workspaces/${requestWorkspaceDigest}/request-submissions/attachment-1/content`
+    const importWorkspaceDigest = createHash('sha256')
+      .update(workspaceId)
+      .digest('hex')
+    const importObjectKey =
+      `work-item-imports/${importWorkspaceDigest}/job-1/source.source`
+    const listedPrefixes: string[] = []
+    const copiedSources: string[] = []
+    const copiedPaths: string[] = []
+    const s3Client = new S3Client({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          const listedPrefix = readHttpQueryValue(request, 'prefix')
+          if (readHttpQueryValue(request, 'list-type') === '2' && listedPrefix) {
+            listedPrefixes.push(listedPrefix)
+            const objectKey = listedPrefixes.length === 2
+              ? requestObjectKey
+              : listedPrefixes.length === 3
+                ? importObjectKey
+                : undefined
+            const contents = objectKey
+              ? `<Contents><Key>${objectKey}</Key><Size>7</Size></Contents>`
+              : ''
+            return createS3XmlResponse(
+              `<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">` +
+              `<Name>tenant-files</Name><Prefix>${listedPrefix}</Prefix>` +
+              `<KeyCount>${contents ? '1' : '0'}</KeyCount><MaxKeys>20</MaxKeys>` +
+              `<IsTruncated>false</IsTruncated>${contents}</ListBucketResult>`,
+            )
+          }
+          const copySource = readHttpHeader(request, 'x-amz-copy-source')
+          if (copySource) {
+            copiedSources.push(copySource)
+            if (isRecord(request)) {
+              const path = Reflect.get(request, 'path')
+              if (typeof path === 'string') copiedPaths.push(path)
+            }
+            return createS3XmlResponse(
+              '<CopyObjectResult><ETag>"etag-1"</ETag></CopyObjectResult>',
+            )
+          }
+          throw new Error('Unexpected S3 export request.')
+        },
+      },
+    })
+    const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    }))
+    const cognitoClient = new CognitoIdentityProviderClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const owner = new AwsTenantOperationResourceOwner({
+      owner: 'export',
+      documentClient,
+      s3Client,
+      cognitoClient,
+      secretsManagerClient: inertSecretsManagerClient,
+      config: createConfig(),
+      pseudonymKey: testPseudonymKey,
+    })
+    const operation: TenantOperation = {
+      ...createOperation(workspaceId),
+      kind: 'export',
+      currentStep: 'snapshot',
+      completedSteps: [],
+      exportFormat: 'jsonl',
+      revision: 1,
+    }
+    const job: TenantOperationExecutionJob = {
+      version: TENANT_OPERATION_EXECUTION_JOB_VERSION,
+      workspaceId,
+      operationId: operation.operationId,
+      step: 'snapshot',
+      cursor: {
+        targetIndex: 21,
+        phase: 'snapshot',
+        processedCount: 0,
+      },
+    }
+
+    try {
+      const regularFiles = await owner.execute(job, operation)
+      if (regularFiles.status !== 'continuing') {
+        throw new Error('Expected the Request Intake namespace continuation.')
+      }
+      const requestAttachments = await owner.execute(
+        regularFiles.nextJob,
+        operation,
+      )
+      if (requestAttachments.status !== 'continuing') {
+        throw new Error('Expected the Work Item import namespace continuation.')
+      }
+      const importSources = await owner.execute(
+        requestAttachments.nextJob,
+        operation,
+      )
+      if (importSources.status !== 'continuing') {
+        throw new Error('Expected the export snapshot completion continuation.')
+      }
+
+      expect(listedPrefixes).toEqual([
+        `workspaces/${encodeURIComponent(workspaceId)}/files/`,
+        `workspaces/${requestWorkspaceDigest}/request-submissions/`,
+        `work-item-imports/${importWorkspaceDigest}/`,
+      ])
+      expect(copiedSources).toHaveLength(2)
+      expect(copiedSources[0]).toContain(requestWorkspaceDigest)
+      expect(copiedSources[1]).toContain(importObjectKey)
+      expect(copiedPaths).toHaveLength(2)
+      expect(copiedPaths[0]).toContain(
+        '/snapshot/request-intake-attachments/attachment-1/content',
+      )
+      expect(copiedPaths[1]).toContain(
+        '/snapshot/work-item-import-sources/job-1/source.source',
+      )
+      expect(importSources.nextJob.cursor?.targetIndex).toBe(24)
+    } finally {
+      documentClient.destroy()
+      s3Client.destroy()
+      cognitoClient.destroy()
+    }
+  })
+
+  test('deletes every version from all tenant object namespaces', async () => {
+    const workspaceId = 'workspace-1'
+    const requestWorkspaceDigest = createHash('sha256')
+      .update(workspaceId)
+      .digest('hex')
+      .slice(0, 32)
+    const requestObjectKey =
+      `workspaces/${requestWorkspaceDigest}/request-submissions/attachment-1/content`
+    const importWorkspaceDigest = createHash('sha256')
+      .update(workspaceId)
+      .digest('hex')
+    const importObjectKey =
+      `work-item-imports/${importWorkspaceDigest}/job-1/source.source`
+    const listedPrefixes: string[] = []
+    const deletionBodies: string[] = []
+    const s3Client = new S3Client({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          const listedPrefix = readHttpQueryValue(request, 'prefix')
+          if (listedPrefix) {
+            listedPrefixes.push(listedPrefix)
+            const objectKey = listedPrefixes.length === 2
+              ? requestObjectKey
+              : listedPrefixes.length === 3
+                ? importObjectKey
+                : undefined
+            const version = objectKey
+              ? `<Version><Key>${objectKey}</Key>` +
+                `<VersionId>version-${listedPrefixes.length}</VersionId>` +
+                '<IsLatest>true</IsLatest><Size>7</Size></Version>'
+              : ''
+            return createS3XmlResponse(
+              `<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">` +
+              `<Name>tenant-files</Name><Prefix>${listedPrefix}</Prefix>` +
+              `<MaxKeys>20</MaxKeys><IsTruncated>false</IsTruncated>` +
+              `${version}</ListVersionsResult>`,
+            )
+          }
+          const body = readTextRequestBody(request)
+          deletionBodies.push(body)
+          return createS3XmlResponse(
+            '<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>',
+          )
+        },
+      },
+    })
+    const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    }))
+    const cognitoClient = new CognitoIdentityProviderClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const owner = new AwsTenantOperationResourceOwner({
+      owner: 'data',
+      documentClient,
+      s3Client,
+      cognitoClient,
+      secretsManagerClient: inertSecretsManagerClient,
+      config: createConfig(),
+      pseudonymKey: testPseudonymKey,
+    })
+    const operation = createOperation(workspaceId)
+
+    try {
+      const regularFiles = await owner.execute(
+        createDataJob(16, workspaceId),
+        operation,
+      )
+      if (regularFiles.status !== 'continuing') {
+        throw new Error('Expected the Request Intake deletion continuation.')
+      }
+      const requestAttachments = await owner.execute(
+        regularFiles.nextJob,
+        operation,
+      )
+      if (requestAttachments.status !== 'continuing') {
+        throw new Error('Expected the Work Item import deletion continuation.')
+      }
+      const importSources = await owner.execute(
+        requestAttachments.nextJob,
+        operation,
+      )
+      if (importSources.status !== 'continuing') {
+        throw new Error('Expected the data-deletion evidence continuation.')
+      }
+
+      expect(listedPrefixes).toEqual([
+        `workspaces/${workspaceId}/files/`,
+        `workspaces/${requestWorkspaceDigest}/request-submissions/`,
+        `work-item-imports/${importWorkspaceDigest}/`,
+      ])
+      expect(deletionBodies).toHaveLength(2)
+      expect(deletionBodies[0]).toContain(requestObjectKey)
+      expect(deletionBodies[0]).toContain('version-2')
+      expect(deletionBodies[1]).toContain(importObjectKey)
+      expect(deletionBodies[1]).toContain('version-3')
+      expect(importSources.nextJob.cursor?.targetIndex).toBe(19)
+    } finally {
+      documentClient.destroy()
+      s3Client.destroy()
+      cognitoClient.destroy()
+    }
+  })
+
+  test('repairs closure when a Work Item import source version remains', async () => {
+    const workspaceId = 'workspace-1'
+    const requestWorkspaceDigest = createHash('sha256')
+      .update(workspaceId)
+      .digest('hex')
+      .slice(0, 32)
+    const importWorkspaceDigest = createHash('sha256')
+      .update(workspaceId)
+      .digest('hex')
+    const importObjectKey =
+      `work-item-imports/${importWorkspaceDigest}/job-1/source.source`
+    const listedPrefixes: string[] = []
+    const secretsManagerClient = new SecretsManagerClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle() {
+          return {
+            response: {
+              body: new TextEncoder().encode('{"SecretList":[]}'),
+              headers: {},
+              statusCode: 200,
+            },
+          }
+        },
+      },
+    })
+    const s3Client = new S3Client({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          const listedPrefix = readHttpQueryValue(request, 'prefix')
+          if (!listedPrefix) throw new Error('Expected an S3 list request.')
+          listedPrefixes.push(listedPrefix)
+          const version = listedPrefixes.length === 3
+            ? `<Version><Key>${importObjectKey}</Key>` +
+              '<VersionId>version-1</VersionId><IsLatest>true</IsLatest>' +
+              '<Size>7</Size></Version>'
+            : ''
+          return createS3XmlResponse(
+            `<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">` +
+            `<Name>tenant-files</Name><Prefix>${listedPrefix}</Prefix>` +
+            `<MaxKeys>1</MaxKeys><IsTruncated>false</IsTruncated>` +
+            `${version}</ListVersionsResult>`,
+          )
+        },
+      },
+    })
+    const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    }))
+    const cognitoClient = new CognitoIdentityProviderClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const owner = new AwsTenantOperationResourceOwner({
+      owner: 'verification',
+      documentClient,
+      s3Client,
+      cognitoClient,
+      secretsManagerClient,
+      config: createConfig(),
+      pseudonymKey: testPseudonymKey,
+    })
+    const operation: TenantOperation = {
+      ...createOperation(workspaceId),
+      currentStep: 'verify',
+      completedSteps: [
+        'export',
+        'revoke-access',
+        'anonymize-members',
+        'delete-data',
+        'delete-secrets',
+      ],
+      revision: 6,
+    }
+    const job: TenantOperationExecutionJob = {
+      version: TENANT_OPERATION_EXECUTION_JOB_VERSION,
+      workspaceId,
+      operationId: operation.operationId,
+      step: 'verify',
+      cursor: { targetIndex: 18, processedCount: 18 },
+    }
+
+    try {
+      expect(await owner.execute(job, operation)).toEqual({
+        status: 'repair',
+        step: 'delete-data',
+      })
+      expect(listedPrefixes).toEqual([
+        `workspaces/${workspaceId}/files/`,
+        `workspaces/${requestWorkspaceDigest}/request-submissions/`,
+        `work-item-imports/${importWorkspaceDigest}/`,
+      ])
+    } finally {
+      documentClient.destroy()
+      s3Client.destroy()
+      cognitoClient.destroy()
+      secretsManagerClient.destroy()
     }
   })
 

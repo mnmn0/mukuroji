@@ -61,6 +61,8 @@ export type TenantOperationResourceOwnerConfig = {
   tenantExportBucketName: string
   /** Versioned tenant file bucket. */
   fileBucketName: string
+  /** Versioned bucket containing transient Work Item import sources. */
+  workItemImportBucketName: string
   /** Cognito user pool whose tenant sessions are revoked. */
   cognitoUserPoolId: string
   /** Legacy project-task table. */
@@ -193,6 +195,18 @@ type TenantSecretNamespace = {
   readonly id: string
   /** Exact hashed Workspace prefix including its trailing delimiter. */
   readonly prefix: string
+}
+
+/** One deterministic tenant-owned S3 namespace. */
+type TenantFileNamespace = {
+  /** Stable resource identifier stored in export and closure evidence. */
+  readonly id: string
+  /** Exact source bucket containing this namespace. */
+  readonly bucketName: string
+  /** Exact source-bucket prefix including its trailing delimiter. */
+  readonly prefix: string
+  /** Relative directory used when copying current objects into an export. */
+  readonly exportDirectory: string
 }
 
 /** Every resource cursor accepted by a lifecycle resource owner. */
@@ -422,6 +436,37 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     ]
   }
 
+  /** Returns every file namespace used by tenant-owned object storage. */
+  private fileNamespaces(workspaceId: string): TenantFileNamespace[] {
+    const requestIntakeWorkspaceDigest = createHash('sha256')
+      .update(workspaceId)
+      .digest('hex')
+      .slice(0, 32)
+    const workItemImportWorkspaceDigest = createHash('sha256')
+      .update(workspaceId)
+      .digest('hex')
+    return [
+      {
+        id: 'workspace-files',
+        bucketName: this.config.fileBucketName,
+        prefix: `workspaces/${encodeURIComponent(workspaceId)}/files/`,
+        exportDirectory: 'files',
+      },
+      {
+        id: 'request-intake-attachments',
+        bucketName: this.config.fileBucketName,
+        prefix: `workspaces/${requestIntakeWorkspaceDigest}/request-submissions/`,
+        exportDirectory: 'request-intake-attachments',
+      },
+      {
+        id: 'work-item-import-sources',
+        bucketName: this.config.workItemImportBucketName,
+        prefix: `work-item-imports/${workItemImportWorkspaceDigest}/`,
+        exportDirectory: 'work-item-import-sources',
+      },
+    ]
+  }
+
   /** Processes export snapshot, manifest, and verification phases. */
   private async executeExport(
     job: TenantOperationExecutionJob,
@@ -562,6 +607,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     operation: TenantOperation,
   ): Promise<TenantOperationResourceOwnerResult | number> {
     const targets = this.exportTargets()
+    const fileNamespaces = this.fileNamespaces(operation.workspaceId)
     const cursor = job.cursor ?? {
       targetIndex: 0,
       phase: 'snapshot',
@@ -615,31 +661,46 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         }),
       }
     }
-    if (cursor.targetIndex > targets.length) return cursor.processedCount
+    const namespaceIndex = cursor.targetIndex - targets.length
+    if (namespaceIndex > fileNamespaces.length) {
+      return { status: 'failed', failureCode: 'EXPORT_FILE_CURSOR_INVALID' }
+    }
+    if (namespaceIndex === fileNamespaces.length) return cursor.processedCount
+    const namespace = fileNamespaces[namespaceIndex]
+    if (!namespace) {
+      return { status: 'failed', failureCode: 'EXPORT_FILE_NAMESPACE_INVALID' }
+    }
     const objectCursor = this.decodeObjectPosition(job, cursor.position)
     const response = await this.s3Client.send(new ListObjectsV2Command({
-      Bucket: this.config.fileBucketName,
-      Prefix: `workspaces/${operation.workspaceId}/`,
+      Bucket: namespace.bucketName,
+      Prefix: namespace.prefix,
       ContinuationToken: objectCursor?.continuationToken,
       MaxKeys: RESOURCE_PAGE_SIZE,
     }))
     let copied = 0
     for (const object of response.Contents ?? []) {
-      if (!object.Key) continue
-      const relativeKey = object.Key.slice(`workspaces/${operation.workspaceId}/`.length)
+      const objectKey = requireTenantFileKey(namespace, object.Key)
+      const relativeKey = objectKey.slice(namespace.prefix.length)
       await this.s3Client.send(new CopyObjectCommand({
         Bucket: this.config.tenantExportBucketName,
-        Key: `${createExportPrefix(operation)}/snapshot/files/${relativeKey}`,
-        CopySource: encodeCopySource(this.config.fileBucketName, object.Key),
+        Key: `${createExportPrefix(operation)}/snapshot/${namespace.exportDirectory}/${relativeKey}`,
+        CopySource: encodeCopySource(namespace.bucketName, objectKey),
         MetadataDirective: 'COPY',
       }))
       copied += 1
+    }
+    if (response.IsTruncated && !response.NextContinuationToken) {
+      throw new TenantAdministrationError(
+        503,
+        'TenantFilePaginationInvalid',
+        'Tenant file pagination did not provide a continuation token.',
+      )
     }
     if (response.IsTruncated && response.NextContinuationToken) {
       return {
         status: 'continuing',
         nextJob: createContinuation(job, {
-          targetIndex: targets.length,
+          targetIndex: cursor.targetIndex,
           position: this.encodeCursor(job, {
             kind: 'objects',
             continuationToken: response.NextContinuationToken,
@@ -649,7 +710,14 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         }),
       }
     }
-    return cursor.processedCount + copied
+    return {
+      status: 'continuing',
+      nextJob: createContinuation(job, {
+        targetIndex: cursor.targetIndex + 1,
+        phase: 'snapshot',
+        processedCount: cursor.processedCount + copied,
+      }),
+    }
   }
 
   /** Writes the durable marker consumed by artifact preparation and verification. */
@@ -946,6 +1014,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     operation: TenantOperation,
   ): Promise<TenantOperationResourceOwnerResult> {
     const targets = this.dataDeletionTargets()
+    const fileNamespaces = this.fileNamespaces(operation.workspaceId)
     const cursor = job.cursor ?? { targetIndex: 0, processedCount: 0 }
     if (cursor.targetIndex < targets.length) {
       const target = targets[cursor.targetIndex]
@@ -970,26 +1039,38 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         }),
       }
     }
-    if (cursor.targetIndex === targets.length) {
+    const namespaceIndex = cursor.targetIndex - targets.length
+    if (namespaceIndex < fileNamespaces.length) {
+      const namespace = fileNamespaces[namespaceIndex]
+      if (!namespace) {
+        return { status: 'failed', failureCode: 'DATA_FILE_NAMESPACE_INVALID' }
+      }
       const versionCursor = this.decodeVersionPosition(job, cursor.position)
       const response = await this.s3Client.send(new ListObjectVersionsCommand({
-        Bucket: this.config.fileBucketName,
-        Prefix: `workspaces/${operation.workspaceId}/`,
+        Bucket: namespace.bucketName,
+        Prefix: namespace.prefix,
         KeyMarker: versionCursor?.keyMarker,
         VersionIdMarker: versionCursor?.versionIdMarker,
         MaxKeys: RESOURCE_PAGE_SIZE,
       }))
-      const objects = [
+      const objects: Array<{ Key: string; VersionId: string }> = []
+      for (const version of [
         ...(response.Versions ?? []),
         ...(response.DeleteMarkers ?? []),
-      ].flatMap((version) =>
-        version.Key && version.VersionId
-          ? [{ Key: version.Key, VersionId: version.VersionId }]
-          : []
-      )
+      ]) {
+        const objectKey = requireTenantFileKey(namespace, version.Key)
+        if (!version.VersionId) {
+          throw new TenantAdministrationError(
+            503,
+            'TenantFileResponseInvalid',
+            'Tenant file version response is incomplete.',
+          )
+        }
+        objects.push({ Key: objectKey, VersionId: version.VersionId })
+      }
       if (objects.length > 0) {
         const deletion = await this.s3Client.send(new DeleteObjectsCommand({
-          Bucket: this.config.fileBucketName,
+          Bucket: namespace.bucketName,
           Delete: { Objects: objects, Quiet: true },
         }))
         if ((deletion.Errors?.length ?? 0) > 0) {
@@ -1004,7 +1085,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         return {
           status: 'continuing',
           nextJob: createContinuation(job, {
-            targetIndex: targets.length,
+            targetIndex: cursor.targetIndex,
             position: this.encodeCursor(job, {
               kind: 'versions',
               keyMarker: response.NextKeyMarker,
@@ -1016,9 +1097,25 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
           }),
         }
       }
+      if (response.IsTruncated) {
+        throw new TenantAdministrationError(
+          503,
+          'TenantFilePaginationInvalid',
+          'Tenant file version pagination did not provide a key marker.',
+        )
+      }
+      return {
+        status: 'continuing',
+        nextJob: createContinuation(job, {
+          targetIndex: cursor.targetIndex + 1,
+          processedCount: cursor.processedCount + objects.length,
+        }),
+      }
+    }
+    if (namespaceIndex === fileNamespaces.length) {
       return await this.completeWithEvidence(job, {
-        deletedResources: cursor.processedCount + objects.length,
-        versionedFilesDeleted: objects.length,
+        deletedResources: cursor.processedCount,
+        fileNamespaces: fileNamespaces.map((namespace) => namespace.id),
       }, operation.revision)
     }
     return { status: 'failed', failureCode: 'DATA_DELETION_CURSOR_INVALID' }
@@ -1113,7 +1210,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     }, operation.revision)
   }
 
-  /** Verifies that every data and secret target plus the file prefix is empty. */
+  /** Verifies that every data, secret, and object namespace is empty. */
   private async executeVerification(
     job: TenantOperationExecutionJob,
     operation: TenantOperation,
@@ -1184,23 +1281,31 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         return { status: 'repair', step: 'delete-secrets' }
       }
     }
-    const files = await this.s3Client.send(new ListObjectVersionsCommand({
-      Bucket: this.config.fileBucketName,
-      Prefix: `workspaces/${operation.workspaceId}/`,
-      MaxKeys: 1,
-    }))
-    if (
-      (files.Versions?.length ?? 0) > 0 ||
-      (files.DeleteMarkers?.length ?? 0) > 0
-    ) {
-      return { status: 'repair', step: 'delete-data' }
+    const fileNamespaces = this.fileNamespaces(operation.workspaceId)
+    for (const namespace of fileNamespaces) {
+      const files = await this.s3Client.send(new ListObjectVersionsCommand({
+        Bucket: namespace.bucketName,
+        Prefix: namespace.prefix,
+        MaxKeys: 1,
+      }))
+      for (const file of [
+        ...(files.Versions ?? []),
+        ...(files.DeleteMarkers ?? []),
+      ]) {
+        requireTenantFileKey(namespace, file.Key)
+        return { status: 'repair', step: 'delete-data' }
+      }
+      if (files.IsTruncated) {
+        return { status: 'repair', step: 'delete-data' }
+      }
     }
     return await this.completeWithEvidence(job, {
       checkedTargets: [
         ...targets.map((target) => target.id),
         ...secretNamespaces.map((namespace) => namespace.id),
+        ...fileNamespaces.map((namespace) => namespace.id),
       ],
-      versionedFilePrefixEmpty: true,
+      versionedFileNamespacesEmpty: true,
     }, operation.revision)
   }
 
@@ -1724,6 +1829,36 @@ function createTenantSecretNamespacePrefix(
     .update(workspaceId.trim())
     .digest('hex')
   return `${normalizedRoot}/${workspaceHash}/`
+}
+
+/** Rejects an S3 response that escapes the selected tenant file namespace. */
+function assertTenantFileKey(
+  namespace: TenantFileNamespace,
+  key: string,
+): void {
+  if (!key.startsWith(namespace.prefix)) {
+    throw new TenantAdministrationError(
+      503,
+      'TenantFileScopeMismatch',
+      'Tenant file operation returned an object outside its Workspace namespace.',
+    )
+  }
+}
+
+/** Reads one required S3 key and preserves the selected tenant namespace. */
+function requireTenantFileKey(
+  namespace: TenantFileNamespace,
+  key: string | undefined,
+): string {
+  if (!key) {
+    throw new TenantAdministrationError(
+      503,
+      'TenantFileResponseInvalid',
+      'Tenant file operation returned an incomplete object record.',
+    )
+  }
+  assertTenantFileKey(namespace, key)
+  return key
 }
 
 /** Tests an unknown provider error name without retaining its payload. */
