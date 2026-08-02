@@ -39,6 +39,7 @@ const meta = {
 } satisfies Meta<typeof TeamWorkloadView>
 
 export default meta
+/** Story object type for the Team workload view stories. */
 type Story = StoryObj<typeof meta>
 
 /** Displays the day-level workload heatmap with mixed utilization states. */

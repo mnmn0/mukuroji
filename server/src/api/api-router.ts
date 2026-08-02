@@ -4407,43 +4407,50 @@ routeApp.route('/', createCapacityPlanningRouter({
   authenticate: async (accessToken, context) =>
     await authenticateWorkspacePrincipal(accessToken, undefined, context),
   requireTeamPermission: async (principal, teamId, minimum) => {
-    await requireTeamPermission(principal, teamId, minimum)
-  },
-  canViewConfidential: async (principal, teamId) => {
-    try {
-      await requireTeamPermission(principal, teamId, 'manager')
-      return true
-    } catch (error) {
-      if (error instanceof ProjectDataError && error.status === 403) return false
-      throw error
+    if (principal.workspaceRole === 'guest') {
+      throw new ProjectDataError(403, 'ProjectAccessDenied', 'Guests cannot access workload planning.')
+    }
+    const context = await requireTeamPermission(principal, teamId, minimum)
+    const isPrivileged = principal.isSystemAdmin || principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin'
+    return {
+      ...(isPrivileged ? {} : {
+        visibleProjectIds: new Set(
+          (context.projectAccesses ?? [])
+            .filter((access) => projectAccessAllows(access, 'viewer'))
+            .map((access) => access.projectId),
+        ),
+      }),
+      teamProjectIds: context.team.projects.map((project) => project.id),
+      canViewConfidential: isPrivileged || (context.projectAccesses ?? []).some((access) => projectAccessAllows(access, 'manager')),
     }
   },
-  getVisibleMemberIds: async (principal, teamId) => {
-    if (principal.isSystemAdmin || principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') {
-      return undefined
+  getWorkloadVisibility: async (principal, _teamId, permission) => {
+    if (permission.visibleProjectIds === undefined) {
+      return { canViewConfidential: permission.canViewConfidential ?? false }
     }
-    const context = await requireTeamPermission(principal, teamId, 'viewer')
-    const projectIds = (context.projectAccesses ?? [])
-      .filter((access) => projectAccessAllows(access, 'viewer'))
-      .map((access) => access.projectId)
-    const members = await Promise.all(projectIds.map((projectId) =>
-      workspaceDependencies.projectDirectory.getProjectMembers(principal.directoryId, projectId),
-    ))
-    return new Set([
-      principal.userKey,
-      ...members.flatMap((response) => response.members.map((member) => member.id)),
-    ])
-  },
-  getVisibleProjectIds: async (principal, teamId) => {
-    if (principal.isSystemAdmin || principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') {
-      return undefined
-    }
-    const context = await requireTeamPermission(principal, teamId, 'viewer')
-    return new Set(
-      (context.projectAccesses ?? [])
-        .filter((access) => projectAccessAllows(access, 'viewer'))
-        .map((access) => access.projectId),
+    const visibleMemberIds = await readWorkloadProjectMemberIds(
+      principal,
+      [...permission.visibleProjectIds],
     )
+    visibleMemberIds.add(principal.userKey)
+    return {
+      visibleMemberIds,
+      visibleProjectIds: permission.visibleProjectIds,
+      canViewConfidential: permission.canViewConfidential ?? false,
+    }
+  },
+  verifyMember: async (principal, _teamId, memberId, permission) => {
+    const projectIds = permission.visibleProjectIds === undefined
+      ? permission.teamProjectIds ?? []
+      : [...permission.visibleProjectIds]
+    const visibleMemberIds = await readWorkloadProjectMemberIds(principal, projectIds)
+    if (!visibleMemberIds.has(memberId)) {
+      throw new ProjectDataError(
+        403,
+        'ProjectAccessDenied',
+        `User "${principal.userKey}" cannot manage workload member "${memberId}".`,
+      )
+    }
   },
   canManageMember: async (principal, teamId, memberId) => {
     if (principal.isSystemAdmin || principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') return true
@@ -4460,6 +4467,8 @@ routeApp.route('/', createCapacityPlanningRouter({
     const context = await requireTeamPermission(principal, teamId, minimum)
     if (
       !principal.isSystemAdmin &&
+      principal.workspaceRole !== 'owner' &&
+      principal.workspaceRole !== 'admin' &&
       !(context.projectAccesses ?? []).some((access) =>
         access.projectId === projectId && projectAccessAllows(access, minimum)
       )
@@ -4477,6 +4486,26 @@ routeApp.route('/', createCapacityPlanningRouter({
   readJson,
   mapError: toCapacityPlanningErrorResponse,
 }))
+
+const WORKLOAD_PROJECT_MEMBER_BATCH_SIZE = 20
+
+/** Reads canonical members for workload visibility using bounded directory batches. */
+async function readWorkloadProjectMemberIds(
+  principal: WorkspacePrincipal,
+  projectIds: readonly string[],
+): Promise<Set<string>> {
+  const memberIds = new Set<string>()
+  for (let index = 0; index < projectIds.length; index += WORKLOAD_PROJECT_MEMBER_BATCH_SIZE) {
+    const batch = projectIds.slice(index, index + WORKLOAD_PROJECT_MEMBER_BATCH_SIZE)
+    const responses = await Promise.all(batch.map((projectId) =>
+      workspaceDependencies.projectDirectory.getProjectMembers(principal.directoryId, projectId),
+    ))
+    for (const response of responses) {
+      for (const member of response.members) memberIds.add(member.id)
+    }
+  }
+  return memberIds
+}
 
 routeApp.route('/', createNotificationRouter({
   getNotifications: () => workItemDependencies.notifications,

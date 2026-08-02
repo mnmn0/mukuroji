@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import type { WorkloadHoliday, WorkloadSnapshot, WorkingSchedule } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import {
@@ -7,6 +7,7 @@ import {
   previewWorkloadAssignment,
   saveWorkloadProfile,
   saveWorkloadTimeOff,
+  WorkloadApiError,
   type CreateWorkloadAssignmentRequest,
   type CreateWorkloadRequestRequest,
   type SaveWorkloadProfileRequest,
@@ -75,12 +76,6 @@ export function WorkloadPlanningControls({
 }: WorkloadPlanningControlsProps) {
   const defaultMemberId = members[0]?.id ?? ''
   const [memberId, setMemberId] = useState(defaultMemberId)
-  const [profileTimeZone, setProfileTimeZone] = useState('UTC')
-  const [profileRole, setProfileRole] = useState('')
-  const [profileSkills, setProfileSkills] = useState('')
-  const [profileHours, setProfileHours] = useState('8')
-  const [profileHolidayDates, setProfileHolidayDates] = useState('')
-  const [profileSchedule, setProfileSchedule] = useState<WorkingSchedule>(defaultWorkingSchedule)
   const [timeOffFrom, setTimeOffFrom] = useState(() => todayDate())
   const [timeOffTo, setTimeOffTo] = useState(() => todayDate())
   const [timeOffMinutes, setTimeOffMinutes] = useState('')
@@ -115,24 +110,6 @@ export function WorkloadPlanningControls({
     [members, selectedMemberId],
   )
 
-  useEffect(() => {
-    if (!selectedMemberProfile) {
-      setProfileTimeZone('UTC')
-      setProfileRole('')
-      setProfileSkills('')
-      setProfileHours('8')
-      setProfileHolidayDates('')
-      setProfileSchedule(defaultWorkingSchedule)
-      return
-    }
-    setProfileTimeZone(selectedMemberProfile.timeZone)
-    setProfileRole(selectedMemberProfile.role ?? '')
-    setProfileSkills(selectedMemberProfile.skills.join(', '))
-    setProfileHours(String(selectedMemberProfile.schedule.monday.minutes / 60))
-    setProfileHolidayDates(selectedMemberProfile.holidays.map((holiday) => holiday.date).join(', '))
-    setProfileSchedule(selectedMemberProfile.schedule)
-  }, [selectedMemberId, selectedMemberProfile?.profileRevision])
-
   if (members.length === 0) return null
 
   /** Runs one planning mutation and refreshes the authoritative snapshot. */
@@ -144,34 +121,23 @@ export function WorkloadPlanningControls({
       setPreview(undefined)
       await onSaved()
     } catch (cause) {
+      if (cause instanceof WorkloadApiError && cause.status === 409) {
+        try {
+          await onSaved()
+        } catch {
+          // Preserve the original conflict so the user can retry with the refreshed form.
+        }
+      }
       setError(cause instanceof Error ? cause : new Error(t('workload.controls.error')))
     } finally {
       setIsSaving(false)
     }
   }
 
-  /** Saves the selected member's recurring availability profile. */
-  const saveProfile = () => {
-    if (!accessToken || !teamId) return
-    const input: SaveWorkloadProfileRequest = {
-      displayName: selectedMemberLabel,
-      ...(profileRole.trim() ? { role: profileRole.trim() } : {}),
-      skills: splitList(profileSkills),
-      timeZone: profileTimeZone.trim() || 'UTC',
-      schedule: selectedMemberProfile && Number(profileHours) === selectedMemberProfile.schedule.monday.minutes / 60
-        ? profileSchedule
-        : createSchedule(profileHours),
-      holidays: createHolidays(profileHolidayDates, selectedMemberProfile?.holidays ?? []),
-      expectedRevision: profileRevision,
-      expectedTeamRevision: teamRevision,
-    }
-    void runMutation(() => saveWorkloadProfile(accessToken, teamId, selectedMemberId, input))
-  }
-
   /** Saves a full-day or partial-day absence for the selected member. */
   const saveTimeOff = () => {
     if (!accessToken || !teamId) return
-    void runMutation(() => saveWorkloadTimeOff(accessToken, teamId, selectedMemberId, `time-off-${Date.now()}`, {
+    void runMutation(() => saveWorkloadTimeOff(accessToken, teamId, selectedMemberId, createTimeOffId(), {
       fromDate: timeOffFrom,
       toDate: timeOffTo,
       ...(timeOffMinutes.trim() ? { minutesPerDay: Number(timeOffMinutes) } : {}),
@@ -255,16 +221,19 @@ export function WorkloadPlanningControls({
       </label>
 
       <div className="grid grid-cols-2 gap-5 max-[820px]:grid-cols-1">
-        <ControlCard title={t('workload.controls.profile.title')} description={t('workload.controls.profile.description')}>
-          <div className="grid gap-3">
-            <Field label={t('workload.controls.profile.timezone')} value={profileTimeZone} onChange={setProfileTimeZone} placeholder="Asia/Tokyo" />
-            <Field label={t('workload.controls.profile.hours')} value={profileHours} onChange={setProfileHours} type="number" min="0" max="24" step="0.5" />
-            <Field label={t('workload.controls.profile.role')} value={profileRole} onChange={setProfileRole} />
-            <Field label={t('workload.controls.profile.skills')} value={profileSkills} onChange={setProfileSkills} placeholder={t('workload.controls.profile.skillsPlaceholder')} />
-            <Field label={t('workload.controls.profile.holidays')} value={profileHolidayDates} onChange={setProfileHolidayDates} placeholder={t('workload.controls.profile.holidaysPlaceholder')} />
-            <button className={buttonClass} disabled={isSaving} type="button" onClick={saveProfile}>{t('workload.controls.profile.save')}</button>
-          </div>
-        </ControlCard>
+        <ProfileForm
+          key={`${selectedMemberId}:${profileRevision}`}
+          accessToken={accessToken}
+          isSaving={isSaving}
+          memberId={selectedMemberId}
+          memberLabel={selectedMemberLabel}
+          onMutation={runMutation}
+          profile={selectedMemberProfile}
+          profileRevision={profileRevision}
+          t={t}
+          teamId={teamId}
+          teamRevision={teamRevision}
+        />
 
         <ControlCard title={t('workload.controls.timeOff.title')} description={t('workload.controls.timeOff.description')}>
           <div className="grid gap-3">
@@ -327,6 +296,81 @@ export function WorkloadPlanningControls({
   )
 }
 
+/** Props for the keyed recurring availability profile form. */
+type ProfileFormProps = {
+  /** Authenticated API token. */
+  accessToken?: string
+  /** Current Team identifier. */
+  teamId?: string
+  /** Selected member identifier. */
+  memberId: string
+  /** Selected member display name. */
+  memberLabel: string
+  /** Current persisted profile, if one exists. */
+  profile?: WorkloadSnapshot['members'][number]
+  /** Current profile revision. */
+  profileRevision: number
+  /** Current Team revision. */
+  teamRevision: number
+  /** Whether any planning mutation is in flight. */
+  isSaving: boolean
+  /** Runs a mutation and refreshes the authoritative snapshot. */
+  onMutation: (operation: () => Promise<unknown>) => Promise<void>
+  /** Resolves localized labels. */
+  t: (key: MessageKey) => string
+}
+
+/** Renders a profile form whose initial state follows the selected snapshot revision. */
+function ProfileForm({
+  accessToken,
+  isSaving,
+  memberId,
+  memberLabel,
+  onMutation,
+  profile,
+  profileRevision,
+  t,
+  teamId,
+  teamRevision,
+}: ProfileFormProps) {
+  const [timeZone, setTimeZone] = useState(() => profile?.timeZone ?? 'UTC')
+  const [role, setRole] = useState(() => profile?.role ?? '')
+  const [skills, setSkills] = useState(() => profile?.skills.join(', ') ?? '')
+  const [hours, setHours] = useState(() => String((profile?.schedule.monday.minutes ?? 480) / 60))
+  const [holidayDates, setHolidayDates] = useState(() => profile?.holidays.map((holiday) => holiday.date).join(', ') ?? '')
+
+  /** Saves the selected member's recurring availability profile. */
+  const saveProfile = () => {
+    if (!accessToken || !teamId) return
+    const input: SaveWorkloadProfileRequest = {
+      displayName: memberLabel,
+      ...(role.trim() ? { role: role.trim() } : {}),
+      skills: splitList(skills),
+      timeZone: timeZone.trim() || 'UTC',
+      schedule: profile && Number(hours) === profile.schedule.monday.minutes / 60
+        ? profile.schedule
+        : createSchedule(hours),
+      holidays: createHolidays(holidayDates, profile?.holidays ?? []),
+      expectedRevision: profileRevision,
+      expectedTeamRevision: teamRevision,
+    }
+    void onMutation(() => saveWorkloadProfile(accessToken, teamId, memberId, input))
+  }
+
+  return (
+    <ControlCard title={t('workload.controls.profile.title')} description={t('workload.controls.profile.description')}>
+      <div className="grid gap-3">
+        <Field label={t('workload.controls.profile.timezone')} value={timeZone} onChange={setTimeZone} placeholder="Asia/Tokyo" />
+        <Field label={t('workload.controls.profile.hours')} value={hours} onChange={setHours} type="number" min="0" max="24" step="0.5" />
+        <Field label={t('workload.controls.profile.role')} value={role} onChange={setRole} />
+        <Field label={t('workload.controls.profile.skills')} value={skills} onChange={setSkills} placeholder={t('workload.controls.profile.skillsPlaceholder')} />
+        <Field label={t('workload.controls.profile.holidays')} value={holidayDates} onChange={setHolidayDates} placeholder={t('workload.controls.profile.holidaysPlaceholder')} />
+        <button className={buttonClass} disabled={isSaving} type="button" onClick={saveProfile}>{t('workload.controls.profile.save')}</button>
+      </div>
+    </ControlCard>
+  )
+}
+
 /** Renders a compact form card. */
 function ControlCard({ children, description, title }: { children: ReactNode; description: string; title: string }) {
   return <div className="grid gap-3 rounded-lg border border-slate-200 bg-[#fbfcfd] p-4"><div><h3 className="text-sm font-bold text-[#0d1833]">{title}</h3><p className="mt-1 text-xs font-medium leading-5 text-[var(--workbench-muted)]">{description}</p></div>{children}</div>
@@ -346,7 +390,10 @@ function PreviewSummary({ memberId, memberLabel, snapshot, t }: { memberId: stri
 
 /** Creates a weekday schedule from the submitted daily hours. */
 function createSchedule(hoursValue: string): WorkingSchedule {
-  const minutes = Math.max(0, Math.min(1_440, Math.round(Number(hoursValue) * 60)))
+  const hours = Number(hoursValue)
+  const minutes = Number.isFinite(hours)
+    ? Math.max(0, Math.min(1_440, Math.round(hours * 60)))
+    : 0
   return {
     monday: { ...defaultWorkingSchedule.monday, minutes },
     tuesday: { ...defaultWorkingSchedule.tuesday, minutes },
@@ -356,6 +403,17 @@ function createSchedule(hoursValue: string): WorkingSchedule {
     saturday: { ...defaultWorkingSchedule.saturday },
     sunday: { ...defaultWorkingSchedule.sunday },
   }
+}
+
+let timeOffSequence = 0
+
+/** Creates a collision-resistant client identifier for a new time-off record. */
+function createTimeOffId(): string {
+  timeOffSequence += 1
+  if (typeof globalThis.crypto?.randomUUID === 'function') {
+    return `time-off-${globalThis.crypto.randomUUID()}`
+  }
+  return `time-off-${Date.now()}-${timeOffSequence}`
 }
 
 /** Reconciles submitted holiday dates with existing labels while preserving known holidays. */

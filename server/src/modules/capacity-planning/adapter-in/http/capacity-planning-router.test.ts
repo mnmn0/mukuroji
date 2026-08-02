@@ -10,6 +10,7 @@ import {
   type CapacityPlanningRouterDependencies,
 } from './capacity-planning-router'
 
+/** Minimal principal used by the capacity-planning router tests. */
 type TestPrincipal = {
   /** Canonical Workspace identifier. */
   directoryId: string
@@ -43,10 +44,10 @@ function createFixture(options: { allowManager?: boolean } = {}) {
       if (minimum === 'manager' && options.allowManager === false) {
         throw new CapacityPlanningError(403, 'PermissionDenied', 'manager required')
       }
+      return {}
     },
-    canViewConfidential: async () => false,
-    getVisibleMemberIds: async () => undefined,
-    getVisibleProjectIds: async () => undefined,
+    getWorkloadVisibility: async () => ({ canViewConfidential: false }),
+    verifyMember: async () => undefined,
     canManageMember: async (_value, _teamId, memberId) => memberId === principal.userKey,
     verifyProject: async () => undefined,
     verifyWorkItem: async () => undefined,

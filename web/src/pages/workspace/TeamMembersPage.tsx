@@ -12,8 +12,7 @@ import { WorkspaceTaskLoadNotice } from '../../workspace/ui/WorkspaceDataNotices
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 import { useTeamWorkload } from '../../workload/queries/useTeamWorkload'
-import { updateWorkloadAssignment } from '../../workload/api'
-import { addWorkloadCalendarDays, countWorkloadCalendarDays } from '../../workload/model/dateRange'
+import { useMoveWorkloadAssignment } from '../../workload/mutations/useMoveWorkloadAssignment'
 import {
   WorkloadPlanningControls,
   type WorkloadPlanningMemberOption,
@@ -46,14 +45,18 @@ export function TeamMembersPage() {
     workspace.canLoadWorkspaceData && Boolean(activeTeam),
   )
   const [granularity, setGranularity] = useState<CapacityPlanningGranularity>('day')
-  const [workloadMutationError, setWorkloadMutationError] = useState<Error>()
-  const [isAssignmentMutationPending, setIsAssignmentMutationPending] = useState(false)
   const workload = useTeamWorkload(
     workspace.accessToken,
     activeTeam?.id,
     granularity,
     workspace.canLoadWorkspaceData && Boolean(activeTeam),
   )
+  const assignmentMutation = useMoveWorkloadAssignment({
+    accessToken: workspace.accessToken,
+    refresh: async () => { await workload.mutate() },
+    snapshot: workload.data,
+    teamId: activeTeam?.id,
+  })
   const workloadMembers = useMemo<WorkloadPlanningMemberOption[]>(() => {
     const members = new Map<string, WorkloadPlanningMemberOption>()
     for (const access of projectMembers.data?.members ?? []) {
@@ -103,7 +106,6 @@ export function TeamMembersPage() {
           accessToken={workspace.accessToken}
           members={workloadMembers}
           onSaved={async () => {
-            setWorkloadMutationError(undefined)
             await workload.mutate()
           }}
           projects={workloadProjects}
@@ -112,29 +114,12 @@ export function TeamMembersPage() {
           teamId={activeTeam?.id}
         />
         <TeamWorkloadView
-          error={workload.error ?? workloadMutationError}
+          error={workload.error ?? assignmentMutation.error}
           granularity={granularity}
           isLoading={Boolean(workload.key && workload.isLoading)}
-          isAssignmentMutationPending={isAssignmentMutationPending}
+          isAssignmentMutationPending={assignmentMutation.isPending}
           onGranularityChange={setGranularity}
-          onMoveAssignment={(assignmentId, memberId, targetDate) => {
-            const assignment = workload.data?.assignments.find((candidate) => candidate.id === assignmentId)
-            if (!assignment || !workspace.accessToken || !activeTeam) return
-            setWorkloadMutationError(undefined)
-            setIsAssignmentMutationPending(true)
-            const durationDays = countWorkloadCalendarDays(assignment.fromDate, assignment.toDate)
-            void updateWorkloadAssignment(workspace.accessToken, activeTeam.id, assignment.id, {
-              memberId,
-              fromDate: targetDate,
-              toDate: addWorkloadCalendarDays(targetDate, durationDays - 1),
-              expectedRevision: assignment.revision,
-              expectedTeamRevision: workload.data?.revision ?? 0,
-            }).then(async () => {
-              await workload.mutate()
-            }).catch((cause: unknown) => {
-              setWorkloadMutationError(cause instanceof Error ? cause : new Error(t('workload.controls.error')))
-            }).finally(() => setIsAssignmentMutationPending(false))
-          }}
+          onMoveAssignment={assignmentMutation.move}
           onRetry={() => { void workload.mutate() }}
           snapshot={workload.data}
           t={t}

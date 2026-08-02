@@ -19,6 +19,26 @@ export type CapacityPlanningPrincipal = {
   userKey: string
 }
 
+/** Team authorization context reused by all workload operations in one request. */
+export type CapacityPlanningTeamPermission = {
+  /** Project IDs visible to the principal, or undefined for the whole Team. */
+  visibleProjectIds?: ReadonlySet<string>
+  /** All Project IDs belonging to the Team. */
+  teamProjectIds?: readonly string[]
+  /** Whether confidential workload records may be returned. */
+  canViewConfidential?: boolean
+}
+
+/** Visibility derived from one request-scoped Team authorization context. */
+export type CapacityPlanningVisibility = {
+  /** Member IDs visible to the principal, or undefined for the whole Team. */
+  visibleMemberIds?: ReadonlySet<string>
+  /** Project IDs visible to the principal, or undefined for the whole Team. */
+  visibleProjectIds?: ReadonlySet<string>
+  /** Whether confidential workload records may be returned. */
+  canViewConfidential: boolean
+}
+
 /** Dependencies injected into the capacity planning HTTP adapter. */
 export type CapacityPlanningRouterDependencies<Principal extends CapacityPlanningPrincipal> = {
   /** Reads the bearer token from a request. */
@@ -26,13 +46,11 @@ export type CapacityPlanningRouterDependencies<Principal extends CapacityPlannin
   /** Resolves a bearer token to an authenticated Workspace principal. */
   authenticate(accessToken: string, context: Context): Promise<Principal>
   /** Verifies Team access for the requested operation. */
-  requireTeamPermission(principal: Principal, teamId: string, minimum: 'viewer' | 'member' | 'manager'): Promise<void>
-  /** Returns whether the principal may view confidential allocations. */
-  canViewConfidential(principal: Principal, teamId: string): Promise<boolean>
-  /** Returns member IDs visible to the principal, or undefined for the whole Team. */
-  getVisibleMemberIds(principal: Principal, teamId: string): Promise<ReadonlySet<string> | undefined>
-  /** Returns Project IDs visible to the principal, or undefined for the whole Team. */
-  getVisibleProjectIds(principal: Principal, teamId: string): Promise<ReadonlySet<string> | undefined>
+  requireTeamPermission(principal: Principal, teamId: string, minimum: 'viewer' | 'member' | 'manager'): Promise<CapacityPlanningTeamPermission>
+  /** Resolves all workload visibility from the permission already checked by `withTeam`. */
+  getWorkloadVisibility(principal: Principal, teamId: string, permission: CapacityPlanningTeamPermission): Promise<CapacityPlanningVisibility>
+  /** Verifies that a member belongs to the authorized Team scope. */
+  verifyMember(principal: Principal, teamId: string, memberId: string, permission: CapacityPlanningTeamPermission): Promise<void>
   /** Returns whether the principal may mutate another member's profile. */
   canManageMember(principal: Principal, teamId: string, memberId: string): Promise<boolean>
   /** Verifies Project access for a mutation. */
@@ -54,13 +72,11 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
   const router = new Hono()
 
   router.get('/api/teams/:teamId/workload', async (context) => {
-    return await withTeam(context, dependencies, 'viewer', async (principal, teamId) => {
+    return await withTeam(context, dependencies, 'viewer', async (principal, teamId, permission) => {
       const fromDate = readRequiredQuery(context, 'from')
       const toDate = readRequiredQuery(context, 'to')
       const granularity = readGranularity(context.req.query('granularity'))
-      const visibleMemberIds = await dependencies.getVisibleMemberIds(principal, teamId)
-      const visibleProjectIds = await dependencies.getVisibleProjectIds(principal, teamId)
-      const canViewConfidential = await dependencies.canViewConfidential(principal, teamId)
+      const visibility = await dependencies.getWorkloadVisibility(principal, teamId, permission)
       const snapshot = await dependencies.getCapacityPlanning().getSnapshot({
         workspaceId: principal.directoryId,
         teamId,
@@ -68,17 +84,18 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         toDate,
         granularity,
         viewerMemberId: principal.userKey,
-        ...(visibleMemberIds ? { visibleMemberIds } : {}),
-        ...(visibleProjectIds ? { visibleProjectIds } : {}),
-        canViewConfidential,
+        ...(visibility.visibleMemberIds ? { visibleMemberIds: visibility.visibleMemberIds } : {}),
+        ...(visibility.visibleProjectIds ? { visibleProjectIds: visibility.visibleProjectIds } : {}),
+        canViewConfidential: visibility.canViewConfidential,
       })
       return context.json(snapshot)
     })
   })
 
   router.put('/api/teams/:teamId/workload/profiles/:memberId', async (context) => {
-    return await withTeam(context, dependencies, 'member', async (principal, teamId) => {
+    return await withTeam(context, dependencies, 'member', async (principal, teamId, permission) => {
       const memberId = readRequiredString(context.req.param('memberId'), 'Member ID')
+      await dependencies.verifyMember(principal, teamId, memberId, permission)
       const canManage = await dependencies.canManageMember(principal, teamId, memberId)
       if (!canManage && memberId !== principal.userKey) {
         throw new CapacityPlanningError(403, 'WorkloadProfileDenied', 'Only the member or a Team manager may change this profile.')
@@ -103,8 +120,9 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
   })
 
   router.put('/api/teams/:teamId/workload/profiles/:memberId/time-off/:timeOffId', async (context) => {
-    return await withTeam(context, dependencies, 'member', async (principal, teamId) => {
+    return await withTeam(context, dependencies, 'member', async (principal, teamId, permission) => {
       const memberId = readRequiredString(context.req.param('memberId'), 'Member ID')
+      await dependencies.verifyMember(principal, teamId, memberId, permission)
       const canManage = await dependencies.canManageMember(principal, teamId, memberId)
       if (!canManage && memberId !== principal.userKey) {
         throw new CapacityPlanningError(403, 'WorkloadTimeOffDenied', 'Only the member or a Team manager may change this time off.')
@@ -158,13 +176,19 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
   })
 
   router.post('/api/teams/:teamId/workload/assignments', async (context) => {
-    return await withTeam(context, dependencies, 'manager', async (principal, teamId) => {
+    return await withTeam(context, dependencies, 'manager', async (principal, teamId, permission) => {
       const body = asRecord(await dependencies.readJson(context.req))
       const memberId = readRequiredString(body.memberId, 'Member ID')
+      await dependencies.verifyMember(principal, teamId, memberId, permission)
       const canManage = await dependencies.canManageMember(principal, teamId, memberId)
       if (!canManage) throw new CapacityPlanningError(403, 'ResourceAssignmentDenied', 'Only a Team manager may assign another member.')
       const projectId = readOptionalString(body.projectId)
       if (projectId) await dependencies.verifyProject(principal, teamId, projectId, 'manager')
+      const requestId = readOptionalString(body.requestId)
+      const request = requestId
+        ? await dependencies.getCapacityPlanning().getRequest(principal.directoryId, teamId, requestId)
+        : undefined
+      if (request?.projectId) await dependencies.verifyProject(principal, teamId, request.projectId, 'manager')
       const workItemId = readOptionalString(body.workItemId)
       const workItemProjectId = workItemId
         ? await dependencies.verifyWorkItem(principal, teamId, workItemId, 'manager')
@@ -175,7 +199,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
       const result = await dependencies.getCapacityPlanning().createAssignment({
         workspaceId: principal.directoryId,
         teamId,
-        ...(readOptionalString(body.requestId) ? { requestId: readOptionalString(body.requestId) } : {}),
+        ...(requestId ? { requestId } : {}),
         ...((projectId ?? workItemProjectId) ? { projectId: projectId ?? workItemProjectId } : {}),
         ...(workItemId ? { workItemId } : {}),
         ...(readOptionalString(body.cycleId) ? { cycleId: readOptionalString(body.cycleId) } : {}),
@@ -197,13 +221,19 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
   })
 
   router.patch('/api/teams/:teamId/workload/assignments/:assignmentId', async (context) => {
-    return await withTeam(context, dependencies, 'manager', async (principal, teamId) => {
+    return await withTeam(context, dependencies, 'manager', async (principal, teamId, permission) => {
       const body = asRecord(await dependencies.readJson(context.req))
+      const assignmentId = readRequiredString(context.req.param('assignmentId'), 'Assignment ID')
+      const current = await dependencies.getCapacityPlanning().getAssignment(principal.directoryId, teamId, assignmentId)
+      if (current.projectId) await dependencies.verifyProject(principal, teamId, current.projectId, 'manager')
+      await dependencies.verifyMember(principal, teamId, current.memberId, permission)
+      const nextMemberId = readOptionalString(body.memberId)
+      if (nextMemberId) await dependencies.verifyMember(principal, teamId, nextMemberId, permission)
       const result = await dependencies.getCapacityPlanning().updateAssignment({
         workspaceId: principal.directoryId,
         teamId,
-        assignmentId: readRequiredString(context.req.param('assignmentId'), 'Assignment ID'),
-        ...(readOptionalString(body.memberId) ? { memberId: readOptionalString(body.memberId) } : {}),
+        assignmentId,
+        ...(nextMemberId ? { memberId: nextMemberId } : {}),
         ...(readOptionalString(body.fromDate) ? { fromDate: readOptionalString(body.fromDate) } : {}),
         ...(readOptionalString(body.toDate) ? { toDate: readOptionalString(body.toDate) } : {}),
         ...(body.allocationMinutes === undefined ? {} : { allocationMinutes: readRequiredInteger(body.allocationMinutes, 'Allocation minutes') }),
@@ -218,27 +248,27 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
   })
 
   router.post('/api/teams/:teamId/workload/what-if', async (context) => {
-    return await withTeam(context, dependencies, 'manager', async (principal, teamId) => {
+    return await withTeam(context, dependencies, 'manager', async (principal, teamId, permission) => {
       const body = asRecord(await dependencies.readJson(context.req))
-      const visibleMemberIds = await dependencies.getVisibleMemberIds(principal, teamId)
-      const visibleProjectIds = await dependencies.getVisibleProjectIds(principal, teamId)
-      const canViewConfidential = await dependencies.canViewConfidential(principal, teamId)
+      const memberId = readRequiredString(body.memberId, 'Member ID')
+      await dependencies.verifyMember(principal, teamId, memberId, permission)
+      const visibility = await dependencies.getWorkloadVisibility(principal, teamId, permission)
       const result = await dependencies.getCapacityPlanning().whatIf({
         workspaceId: principal.directoryId,
         teamId,
         fromDate: readRequiredString(body.fromDate, 'Snapshot start date'),
         toDate: readRequiredString(body.toDate, 'Snapshot end date'),
         granularity: readGranularity(readOptionalString(body.granularity)),
-        memberId: readRequiredString(body.memberId, 'Member ID'),
+        memberId,
         assignmentId: readOptionalString(body.assignmentId),
         assignmentFromDate: readRequiredString(body.assignmentFromDate, 'Assignment start date'),
         assignmentToDate: readRequiredString(body.assignmentToDate, 'Assignment end date'),
         allocationMinutes: readRequiredInteger(body.allocationMinutes, 'Allocation minutes'),
         plannedEffortMinutes: readRequiredInteger(body.plannedEffortMinutes, 'Planned effort minutes'),
         viewerMemberId: principal.userKey,
-        ...(visibleMemberIds ? { visibleMemberIds } : {}),
-        ...(visibleProjectIds ? { visibleProjectIds } : {}),
-        canViewConfidential,
+        ...(visibility.visibleMemberIds ? { visibleMemberIds: visibility.visibleMemberIds } : {}),
+        ...(visibility.visibleProjectIds ? { visibleProjectIds: visibility.visibleProjectIds } : {}),
+        canViewConfidential: visibility.canViewConfidential,
       })
       return context.json(result)
     })
@@ -267,12 +297,12 @@ async function withTeam<Principal extends CapacityPlanningPrincipal>(
   context: Context,
   dependencies: CapacityPlanningRouterDependencies<Principal>,
   minimum: 'viewer' | 'member' | 'manager',
-  operation: (principal: Principal, teamId: string) => Promise<Response>,
+  operation: (principal: Principal, teamId: string, permission: CapacityPlanningTeamPermission) => Promise<Response>,
 ): Promise<Response> {
   return await withAuthenticated(context, dependencies, async (principal) => {
     const teamId = readRequiredString(context.req.param('teamId'), 'Team ID')
-    await dependencies.requireTeamPermission(principal, teamId, minimum)
-    return await operation(principal, teamId)
+    const permission = await dependencies.requireTeamPermission(principal, teamId, minimum)
+    return await operation(principal, teamId, permission)
   })
 }
 
@@ -302,7 +332,7 @@ function readRequiredQuery(context: Context, name: string): string {
   return readRequiredString(context.req.query(name), name)
 }
 
-/** Reads a bounded integer. */
+/** Reads a non-negative safe integer. */
 function readRequiredInteger(value: unknown, label: string): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) throw new CapacityPlanningError(400, 'InvalidRequest', `${label} must be a non-negative integer.`)
   return value

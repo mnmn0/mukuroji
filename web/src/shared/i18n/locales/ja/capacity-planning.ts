@@ -20,7 +20,7 @@ export const capacityPlanningMessages = {
   'workload.legend.balanced': '上限内',
   'workload.legend.over': '超過',
   'workload.legend.unavailable': '利用不可',
-  'workload.redacted': '機密割り当て {count} 件を非表示',
+  'workload.redacted': '機密割り当てを非表示: {count}',
   'workload.table.label': 'チーム負荷ヒートマップ',
   'workload.table.member': 'メンバー',
   'workload.cell.allocated': '割り当て',

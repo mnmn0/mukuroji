@@ -1749,16 +1749,23 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
 
   /** Lists Team estimates. */
   async listEstimates(workspaceId: string, teamId: string) {
-    const response = await this.documentClient.send(new QueryCommand({
-      TableName: this.tableName,
-      KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
-      ExpressionAttributeValues: {
-        ':workspaceId': workspaceId,
-        ':prefix': `${ESTIMATE_PREFIX}${teamId}#`,
-      },
-      ConsistentRead: true,
-    }))
-    return (response.Items ?? []).map(readStoredEstimate)
+    const estimates: TimeEstimate[] = []
+    let exclusiveStartKey: QueryCommandInput['ExclusiveStartKey']
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
+        ExpressionAttributeValues: {
+          ':workspaceId': workspaceId,
+          ':prefix': `${ESTIMATE_PREFIX}${teamId}#`,
+        },
+        ConsistentRead: true,
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }))
+      estimates.push(...(response.Items ?? []).map(readStoredEstimate))
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+    return estimates
   }
 
   /** Saves an estimate using a single-owner key. */

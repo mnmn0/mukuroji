@@ -359,7 +359,12 @@ async function sendWorkloadMutation(
 /** Checks whether a response has the minimum workload snapshot shape. */
 function isWorkloadSnapshot(value: unknown): value is WorkloadSnapshot {
   if (!isRecord(value) || value.schemaVersion !== CAPACITY_PLANNING_SCHEMA_VERSION ||
+    typeof value.workspaceId !== 'string' || typeof value.teamId !== 'string' ||
+    !isIsoDate(value.fromDate) || !isIsoDate(value.toDate) || value.fromDate > value.toDate ||
     !Array.isArray(value.members) || !Array.isArray(value.requests) || !Array.isArray(value.assignments) ||
+    !isNonNegativeSafeInteger(value.redactedAssignmentCount) ||
+    !isNonNegativeSafeInteger(value.redactedRequestCount) ||
+    !isNonNegativeSafeInteger(value.revision) || typeof value.generatedAt !== 'string' ||
     (value.granularity !== 'day' && value.granularity !== 'week' && value.granularity !== 'month')) return false
   return value.members.every((member): member is WorkloadMemberSummary => isRecord(member) &&
     typeof member.memberId === 'string' &&
@@ -369,7 +374,60 @@ function isWorkloadSnapshot(value: unknown): value is WorkloadSnapshot {
     Array.isArray(member.holidays) && member.holidays.every(isWorkloadHoliday) &&
     typeof member.profileRevision === 'number' &&
     Number.isSafeInteger(member.profileRevision) && member.profileRevision >= 0 &&
-    Array.isArray(member.cells))
+    Array.isArray(member.cells) && member.cells.every(isWorkloadCell) &&
+    isNonNegativeSafeInteger(member.capacityMinutes) &&
+    isNonNegativeSafeInteger(member.allocatedMinutes) &&
+    isNonNegativeSafeInteger(member.plannedEffortMinutes) &&
+    isNonNegativeSafeInteger(member.actualMinutes) &&
+    isNonNegativeSafeInteger(member.remainingEffortMinutes) &&
+    typeof member.overloaded === 'boolean') &&
+    value.requests.every(isResourceRequest) && value.assignments.every(isResourceAssignment)
+}
+
+/** Checks the required numeric and date fields of one workload cell. */
+function isWorkloadCell(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  return isIsoDate(value.fromDate) && isIsoDate(value.toDate) && value.fromDate <= value.toDate &&
+    typeof value.label === 'string' &&
+    isNonNegativeSafeInteger(value.capacityMinutes) &&
+    isNonNegativeSafeInteger(value.allocatedMinutes) &&
+    isNonNegativeSafeInteger(value.plannedEffortMinutes) &&
+    isNonNegativeSafeInteger(value.actualMinutes) &&
+    isNonNegativeSafeInteger(value.remainingEffortMinutes) &&
+    isNonNegativeSafeInteger(value.utilizationPercent) &&
+    typeof value.varianceMinutes === 'number' && Number.isSafeInteger(value.varianceMinutes) &&
+    (value.status === 'under' || value.status === 'balanced' || value.status === 'over' || value.status === 'unavailable')
+}
+
+/** Checks one resource request returned by a workload snapshot. */
+function isResourceRequest(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  return typeof value.id === 'string' && typeof value.workspaceId === 'string' && typeof value.teamId === 'string' &&
+    (value.projectId === undefined || typeof value.projectId === 'string') &&
+    typeof value.title === 'string' && (value.role === undefined || typeof value.role === 'string') &&
+    Array.isArray(value.skillIds) && value.skillIds.every((skill) => typeof skill === 'string') &&
+    isIsoDate(value.fromDate) && isIsoDate(value.toDate) && value.fromDate <= value.toDate &&
+    isNonNegativeSafeInteger(value.requestedMinutes) && typeof value.confidential === 'boolean' &&
+    (value.status === 'open' || value.status === 'partially-filled' || value.status === 'filled' || value.status === 'canceled') &&
+    isPositiveSafeInteger(value.revision) && typeof value.createdAt === 'string' && typeof value.updatedAt === 'string'
+}
+
+/** Checks one resource assignment returned by a workload snapshot. */
+function isResourceAssignment(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  return typeof value.id === 'string' && typeof value.workspaceId === 'string' && typeof value.teamId === 'string' &&
+    (value.requestId === undefined || typeof value.requestId === 'string') &&
+    (value.projectId === undefined || typeof value.projectId === 'string') &&
+    (value.workItemId === undefined || typeof value.workItemId === 'string') &&
+    (value.cycleId === undefined || typeof value.cycleId === 'string') &&
+    (value.recurringWorkId === undefined || typeof value.recurringWorkId === 'string') &&
+    typeof value.memberId === 'string' && (value.role === undefined || typeof value.role === 'string') &&
+    Array.isArray(value.skillIds) && value.skillIds.every((skill) => typeof skill === 'string') &&
+    isIsoDate(value.fromDate) && isIsoDate(value.toDate) && value.fromDate <= value.toDate &&
+    isNonNegativeSafeInteger(value.allocationMinutes) && isNonNegativeSafeInteger(value.plannedEffortMinutes) &&
+    typeof value.confidential === 'boolean' &&
+    (value.status === 'tentative' || value.status === 'confirmed' || value.status === 'canceled') &&
+    isPositiveSafeInteger(value.revision) && typeof value.createdAt === 'string' && typeof value.updatedAt === 'string'
 }
 
 /** Checks the seven-day working schedule included in a member summary. */
@@ -386,6 +444,23 @@ function isWorkingSchedule(value: unknown): value is WorkingSchedule {
 function isWorkloadHoliday(value: unknown): value is WorkloadHoliday {
   return isRecord(value) && typeof value.date === 'string' &&
     (value.label === undefined || typeof value.label === 'string')
+}
+
+/** Checks a non-negative safe integer at the workload API boundary. */
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+/** Checks a positive safe integer at the workload API boundary. */
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+}
+
+/** Checks a Gregorian calendar date at the workload API boundary. */
+function isIsoDate(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false
+  const parsed = Date.parse(`${value}T00:00:00Z`)
+  return Number.isFinite(parsed) && new Date(parsed).toISOString().slice(0, 10) === value
 }
 
 /** Reads a safe API error message. */

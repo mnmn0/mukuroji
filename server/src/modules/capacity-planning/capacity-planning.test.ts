@@ -92,6 +92,35 @@ describe('capacity planning calculations', () => {
     })
   })
 
+  test('preserves the rounded entry duration when splitting across local midnight', () => {
+    const snapshot = buildWorkloadSnapshot(
+      createState([profile]),
+      [{
+        memberId: 'member-1',
+        workItemId: 'work-item-1',
+        startAt: '2026-08-03T23:59:40.000Z',
+        endAt: '2026-08-04T00:00:20.000Z',
+        durationMinutes: 1,
+        status: 'approved',
+      }],
+      [],
+      createInput({ fromDate: '2026-08-03', toDate: '2026-08-04' }),
+    )
+
+    expect(snapshot.members[0]?.actualMinutes).toBe(1)
+  })
+
+  test('distributes an assignment over its full range before selecting the view slice', () => {
+    const snapshot = buildWorkloadSnapshot(
+      createState([profile], [createAssignment('long-assignment', false, '2026-08-03', '2026-08-14', 480)]),
+      [],
+      [],
+      createInput({ fromDate: '2026-08-10', toDate: '2026-08-10' }),
+    )
+
+    expect(snapshot.members[0]?.allocatedMinutes).toBe(48)
+  })
+
   test('redacts confidential assignments while retaining an explicit redaction count', () => {
     const assignment = createAssignment('secret', true)
     const snapshot = buildWorkloadSnapshot(
@@ -368,6 +397,7 @@ describe('capacity planning mutations', () => {
   })
 })
 
+/** Creates a deterministic member profile fixture. */
 function createProfile(memberId: string, timeZone: string): WorkloadMemberProfile {
   return {
     schemaVersion: CAPACITY_PLANNING_SCHEMA_VERSION,
@@ -385,6 +415,7 @@ function createProfile(memberId: string, timeZone: string): WorkloadMemberProfil
   }
 }
 
+/** Creates a deterministic resource assignment fixture. */
 function createAssignment(
   id: string,
   confidential: boolean,
@@ -410,6 +441,7 @@ function createAssignment(
   }
 }
 
+/** Creates a deterministic capacity-planning state fixture. */
 function createState(
   profiles: WorkloadMemberProfile[],
   assignments: ReturnType<typeof createAssignment>[] = [],
@@ -417,6 +449,7 @@ function createState(
   return { revision: 1, profiles, requests: [], assignments }
 }
 
+/** Creates a snapshot input fixture with optional overrides. */
 function createInput(overrides: Partial<Parameters<typeof buildWorkloadSnapshot>[3]> = {}) {
   return {
     workspaceId: 'workspace-1',

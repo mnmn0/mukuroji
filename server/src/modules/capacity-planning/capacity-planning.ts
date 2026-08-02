@@ -70,6 +70,8 @@ export type CapacityPlanningDataSource = {
     /** Exclusive instant upper bound. */
     to: string
   }): Promise<WorkloadTimeEntry[]>
+  /** Lists all Team time entries for per-Work-Item actual reconciliation. */
+  listAllTimeEntries?(workspaceId: string, teamId: string): Promise<WorkloadTimeEntry[]>
   /** Lists Work Item estimates for the selected Team. */
   listEstimates(workspaceId: string, teamId: string): Promise<WorkloadEstimate[]>
 }
@@ -185,13 +187,15 @@ export function buildWorkloadSnapshot(
   const profileByMemberId = new Map(profiles.map((profile) => [profile.memberId, profile]))
   const isProjectVisible = (projectId: string | undefined): boolean =>
     input.visibleProjectIds === undefined || projectId === undefined || input.visibleProjectIds.has(projectId)
-  const visibleAssignments = state.assignments.filter((assignment) => {
-    if (assignment.status === 'canceled' || !profileByMemberId.has(assignment.memberId)) return false
-    if (!isProjectVisible(assignment.projectId)) return false
-    return !assignment.confidential || input.canViewConfidential || assignment.memberId === input.viewerMemberId
-  })
+  const visibleAssignments = state.assignments.filter((assignment) =>
+    isAssignmentVisible(assignment, input, profileByMemberId, isProjectVisible)
+  )
+  const visibleAssignmentRequestIds = new Set(
+    visibleAssignments.flatMap((assignment) => assignment.requestId ? [assignment.requestId] : []),
+  )
   const visibleRequests = state.requests.filter((request) =>
-    isProjectVisible(request.projectId) && (!request.confidential || input.canViewConfidential)
+    isProjectVisible(request.projectId) &&
+    (!request.confidential || input.canViewConfidential || visibleAssignmentRequestIds.has(request.id))
   )
   const redactedAssignmentCount = state.assignments.filter((assignment) =>
     assignment.status !== 'canceled' &&
@@ -251,6 +255,19 @@ export function buildWorkloadSnapshot(
   }
 }
 
+/** Applies the member, Project, lifecycle, and confidential visibility rules to one assignment. */
+function isAssignmentVisible(
+  assignment: ResourceAssignment,
+  input: WorkloadSnapshotInput,
+  profileByMemberId: ReadonlyMap<string, WorkloadMemberProfile>,
+  isProjectVisible: (projectId: string | undefined) => boolean,
+): boolean {
+  return assignment.status !== 'canceled' &&
+    profileByMemberId.has(assignment.memberId) &&
+    isProjectVisible(assignment.projectId) &&
+    (!assignment.confidential || input.canViewConfidential || assignment.memberId === input.viewerMemberId)
+}
+
 /** Application service for availability, allocation, and workload planning. */
 export class CapacityPlanningService {
   /** Durable capacity planning state. */
@@ -278,16 +295,19 @@ export class CapacityPlanningService {
   async getSnapshot(input: WorkloadSnapshotInput): Promise<WorkloadSnapshot> {
     const range = validateDateRange(input.fromDate, input.toDate)
     const state = await this.repository.getState(input.workspaceId, input.teamId)
-    const [entries, estimates] = await Promise.all([
+    const [entries, allEntries, estimates] = await Promise.all([
       this.dataSource.listTimeEntries({
         workspaceId: input.workspaceId,
         teamId: input.teamId,
         from: `${addCalendarDays(range.fromDate, -1)}T00:00:00.000Z`,
         to: `${addCalendarDays(range.toDate, 2)}T00:00:00.000Z`,
       }),
+      this.dataSource.listAllTimeEntries
+        ? this.dataSource.listAllTimeEntries(input.workspaceId, input.teamId)
+        : Promise.resolve(undefined),
       this.dataSource.listEstimates(input.workspaceId, input.teamId),
     ])
-    return buildWorkloadSnapshot(state, entries, estimates, input, this.now().toISOString())
+    return buildWorkloadSnapshot(state, allEntries ?? entries, estimates, input, this.now().toISOString())
   }
 
   /** Saves or replaces one member's recurring schedule and holidays. */
@@ -385,6 +405,15 @@ export class CapacityPlanningService {
     })
   }
 
+  /** Reads one Team resource request for transport-layer authorization. */
+  async getRequest(workspaceId: string, teamId: string, requestId: string): Promise<ResourceRequest> {
+    validateIdentifier(workspaceId, 'Workspace ID')
+    validateIdentifier(teamId, 'Team ID')
+    validateIdentifier(requestId, 'Request ID')
+    const state = await this.repository.getState(workspaceId, teamId)
+    return clone(requireRequest(state, requestId))
+  }
+
   /** Creates an assignment for a profile and optionally fulfills a request. */
   async createAssignment(input: CreateResourceAssignmentInput): Promise<ResourceAssignment> {
     validateAssignmentFields(input)
@@ -425,6 +454,17 @@ export class CapacityPlanningService {
       refreshRequestStatuses(state, timestamp)
       return assignment
     })
+  }
+
+  /** Reads one Team assignment for transport-layer authorization. */
+  async getAssignment(workspaceId: string, teamId: string, assignmentId: string): Promise<ResourceAssignment> {
+    validateIdentifier(workspaceId, 'Workspace ID')
+    validateIdentifier(teamId, 'Team ID')
+    validateIdentifier(assignmentId, 'Assignment ID')
+    const state = await this.repository.getState(workspaceId, teamId)
+    const assignment = state.assignments.find((candidate) => candidate.id === assignmentId)
+    if (!assignment) throw new CapacityPlanningError(404, 'ResourceAssignmentNotFound', 'The resource assignment was not found.')
+    return clone(assignment)
   }
 
   /** Moves, reassigns, or resizes an assignment using optimistic concurrency. */
@@ -474,12 +514,27 @@ export class CapacityPlanningService {
     })
     const range = validateDateRange(input.fromDate, input.toDate)
     const state = await this.repository.getState(input.workspaceId, input.teamId)
+    if (input.visibleMemberIds && !input.visibleMemberIds.has(input.memberId)) {
+      throw new CapacityPlanningError(404, 'ResourceAssignmentNotFound', 'The resource assignment was not found.')
+    }
     const profile = requireProfile(state, input.memberId)
     const current = input.assignmentId
       ? state.assignments.find((assignment) => assignment.id === input.assignmentId)
       : undefined
     if (input.assignmentId && !current) {
       throw new CapacityPlanningError(404, 'ResourceAssignmentNotFound', 'The resource assignment was not found.')
+    }
+    if (current) {
+      const visibleProfiles = new Map(
+        state.profiles
+          .filter((candidate) => input.visibleMemberIds === undefined || input.visibleMemberIds.has(candidate.memberId))
+          .map((candidate) => [candidate.memberId, candidate]),
+      )
+      const isProjectVisible = (projectId: string | undefined): boolean =>
+        input.visibleProjectIds === undefined || projectId === undefined || input.visibleProjectIds.has(projectId)
+      if (!isAssignmentVisible(current, input, visibleProfiles, isProjectVisible)) {
+        throw new CapacityPlanningError(404, 'ResourceAssignmentNotFound', 'The resource assignment was not found.')
+      }
     }
     const preview: ResourceAssignment = current
       ? {
@@ -508,16 +563,19 @@ export class CapacityPlanningService {
         }
     if (current) replaceById(state.assignments, preview, 'id')
     else state.assignments.push(preview)
-    const [entries, estimates] = await Promise.all([
+    const [entries, allEntries, estimates] = await Promise.all([
       this.dataSource.listTimeEntries({
         workspaceId: input.workspaceId,
         teamId: input.teamId,
         from: `${addCalendarDays(range.fromDate, -1)}T00:00:00.000Z`,
         to: `${addCalendarDays(range.toDate, 2)}T00:00:00.000Z`,
       }),
+      this.dataSource.listAllTimeEntries
+        ? this.dataSource.listAllTimeEntries(input.workspaceId, input.teamId)
+        : Promise.resolve(undefined),
       this.dataSource.listEstimates(input.workspaceId, input.teamId),
     ])
-    return buildWorkloadSnapshot(state, entries, estimates, input, this.now().toISOString())
+    return buildWorkloadSnapshot(state, allEntries ?? entries, estimates, input, this.now().toISOString())
   }
 
   /** Applies one state mutation with a Team-wide optimistic concurrency check. */
@@ -590,7 +648,7 @@ export class DynamoDbCapacityPlanningRepository implements CapacityPlanningRepos
       ConsistentRead: true,
     }))
     if (!response.Item) return emptyState()
-    return readState(response.Item)
+    return readState(response.Item, workspaceId, teamId)
   }
 
   /** Writes a Team state using a revision condition. */
@@ -646,8 +704,8 @@ function calculateMemberSummary(
     })
   }
   for (const assignment of assignments) {
-    const assignmentDates = dates.filter((date) => date >= assignment.fromDate && date <= assignment.toDate)
-    if (assignmentDates.length === 0) continue
+    const assignmentDates = listCalendarDates(assignment.fromDate, assignment.toDate)
+    if (!assignmentDates.some((date) => daily.has(date))) continue
     const distributionDates = chooseDistributionDates(profile, assignmentDates)
     distributeMinutes(daily, distributionDates, assignment.allocationMinutes, 'allocatedMinutes')
     distributeMinutes(daily, distributionDates, assignment.plannedEffortMinutes, 'plannedEffortMinutes')
@@ -747,10 +805,11 @@ function distributeMinutes(
   const base = Math.floor(minutes / dates.length)
   let remainder = minutes % dates.length
   for (const date of dates) {
+    const extraMinute = remainder > 0 ? 1 : 0
+    remainder -= 1
     const value = daily.get(date)
     if (!value) continue
-    value[field] += base + (remainder > 0 ? 1 : 0)
-    remainder -= 1
+    value[field] += base + extraMinute
   }
 }
 
@@ -763,6 +822,8 @@ function createActualMinutesByMemberDate(
 ): Map<string, { byDate: Map<string, number>; byWorkItemId: Map<string, number> }> {
   const profilesByMemberId = new Map(profiles.map((profile) => [profile.memberId, profile]))
   const result = new Map<string, { byDate: Map<string, number>; byWorkItemId: Map<string, number> }>()
+  const selectedDates = new Set(listCalendarDates(fromDate, toDate))
+  const formatters = createDateTimeFormatterCache()
   for (const entry of entries) {
     if (!['submitted', 'approved', 'locked'].includes(entry.status)) continue
     const profile = profilesByMemberId.get(entry.memberId)
@@ -774,12 +835,25 @@ function createActualMinutesByMemberDate(
       byDate: new Map<string, number>(),
       byWorkItemId: new Map<string, number>(),
     }
-    for (const date of listCalendarDates(fromDate, toDate)) {
-      const dayStart = resolveLocalDateStart(date, profile.timeZone)
-      const dayEnd = resolveLocalDateStart(addCalendarDays(date, 1), profile.timeZone)
-      const overlapMinutes = Math.max(0, Math.round((Math.min(end, dayEnd) - Math.max(start, dayStart)) / 60_000))
+    const firstDate = localDateAt(start, profile.timeZone, formatters)
+    const lastDate = localDateAt(end - 1, profile.timeZone, formatters)
+    const entryDates = listCalendarDates(firstDate, lastDate)
+    const overlaps = entryDates.map((date) => {
+      const dayStart = resolveLocalDateStart(date, profile.timeZone, formatters)
+      const dayEnd = resolveLocalDateStart(addCalendarDays(date, 1), profile.timeZone, formatters)
+      return Math.max(0, Math.min(end, dayEnd) - Math.max(start, dayStart))
+    })
+    const totalOverlap = overlaps.reduce((total, overlap) => total + overlap, 0)
+    const durationMinutes = Number.isSafeInteger(entry.durationMinutes)
+      ? Math.max(0, entry.durationMinutes)
+      : Math.max(0, Math.round(entry.durationMinutes))
+    const allocatedMinutes = allocateRoundedDuration(durationMinutes, overlaps, totalOverlap)
+    for (const [index, date] of entryDates.entries()) {
+      const overlapMinutes = allocatedMinutes[index] ?? 0
       if (overlapMinutes > 0) {
-        memberActual.byDate.set(date, (memberActual.byDate.get(date) ?? 0) + overlapMinutes)
+        if (selectedDates.has(date)) {
+          memberActual.byDate.set(date, (memberActual.byDate.get(date) ?? 0) + overlapMinutes)
+        }
         memberActual.byWorkItemId.set(
           entry.workItemId,
           (memberActual.byWorkItemId.get(entry.workItemId) ?? 0) + overlapMinutes,
@@ -789,6 +863,25 @@ function createActualMinutesByMemberDate(
     result.set(entry.memberId, memberActual)
   }
   return result
+}
+
+/** Allocates a stored rounded entry duration across local date overlaps without losing minutes. */
+function allocateRoundedDuration(
+  durationMinutes: number,
+  overlaps: readonly number[],
+  totalOverlap: number,
+): number[] {
+  if (durationMinutes === 0 || totalOverlap === 0) return overlaps.map(() => 0)
+  const allocations = overlaps.map((overlap) => Math.floor(durationMinutes * overlap / totalOverlap))
+  let remainder = durationMinutes - allocations.reduce((total, value) => total + value, 0)
+  for (const [index, overlap] of overlaps.entries()) {
+    if (remainder === 0) break
+    if (overlap > 0) {
+      allocations[index] = (allocations[index] ?? 0) + 1
+      remainder -= 1
+    }
+  }
+  return allocations
 }
 
 /** Aggregates actual minutes by Work Item across visible members. */
@@ -860,24 +953,49 @@ function bucketFor(date: string, granularity: CapacityPlanningGranularity): { fr
 }
 
 /** Finds the UTC instant corresponding to local midnight, including DST changes. */
-function resolveLocalDateStart(date: string, timeZone: string): number {
+function resolveLocalDateStart(date: string, timeZone: string, cache: DateTimeFormatterCache): number {
+  const cacheKey = `${timeZone}\0${date}`
+  const cached = cache.midnight.get(cacheKey)
+  if (cached !== undefined) return cached
   const guess = Date.parse(`${date}T00:00:00.000Z`)
   for (let offsetMinutes = -900; offsetMinutes <= 900; offsetMinutes += 15) {
     const candidate = guess - offsetMinutes * 60_000
-    if (localDateAt(candidate, timeZone) === date && localTimeAt(candidate, timeZone) === '00:00') return candidate
+    if (localDateAt(candidate, timeZone, cache) === date && localTimeAt(candidate, timeZone, cache) === '00:00') {
+      cache.midnight.set(cacheKey, candidate)
+      return candidate
+    }
   }
   throw new CapacityPlanningError(400, 'InvalidTimeZoneBoundary', 'The local date boundary could not be resolved.')
 }
 
+/** Caches timezone formatters and resolved local-midnight instants for one snapshot. */
+type DateTimeFormatterCache = {
+  /** Date formatters keyed by timezone. */
+  dates: Map<string, Intl.DateTimeFormat>
+  /** Wall-clock time formatters keyed by timezone. */
+  times: Map<string, Intl.DateTimeFormat>
+  /** Resolved local-midnight instants keyed by timezone and date. */
+  midnight: Map<string, number>
+}
+
+/** Creates empty per-snapshot date-time formatter caches. */
+function createDateTimeFormatterCache(): DateTimeFormatterCache {
+  return { dates: new Map(), times: new Map(), midnight: new Map() }
+}
+
 /** Reads a local calendar date from an instant. */
-function localDateAt(timestamp: number, timeZone: string): string {
-  const parts = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date(timestamp))
+function localDateAt(timestamp: number, timeZone: string, cache: DateTimeFormatterCache): string {
+  const formatter = cache.dates.get(timeZone) ?? new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' })
+  cache.dates.set(timeZone, formatter)
+  const parts = formatter.formatToParts(new Date(timestamp))
   return `${parts.find((part) => part.type === 'year')?.value}-${parts.find((part) => part.type === 'month')?.value}-${parts.find((part) => part.type === 'day')?.value}`
 }
 
 /** Reads a local wall-clock time from an instant. */
-function localTimeAt(timestamp: number, timeZone: string): string {
-  const parts = new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(timestamp))
+function localTimeAt(timestamp: number, timeZone: string, cache: DateTimeFormatterCache): string {
+  const formatter = cache.times.get(timeZone) ?? new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+  cache.times.set(timeZone, formatter)
+  const parts = formatter.formatToParts(new Date(timestamp))
   return `${parts.find((part) => part.type === 'hour')?.value}:${parts.find((part) => part.type === 'minute')?.value}`
 }
 
@@ -1062,7 +1180,7 @@ function stateRecordKey(teamId: string): string {
 }
 
 /** Reads a stored state after applying bounded shape validation. */
-function readState(item: Record<string, unknown>): CapacityPlanningState {
+function readState(item: Record<string, unknown>, workspaceId: string, teamId: string): CapacityPlanningState {
   const revision = item.revision
   const profiles = item.profiles
   const requests = item.requests
@@ -1077,9 +1195,9 @@ function readState(item: Record<string, unknown>): CapacityPlanningState {
     profiles.length > MAX_PROFILES ||
     requests.length > MAX_REQUESTS ||
     assignments.length > MAX_ASSIGNMENTS ||
-    !profiles.every(isStoredMemberProfile) ||
-    !requests.every(isStoredResourceRequest) ||
-    !assignments.every(isStoredResourceAssignment) ||
+    !profiles.every((value) => isStoredMemberProfileForScope(value, workspaceId, teamId)) ||
+    !requests.every((value) => isStoredResourceRequestForScope(value, workspaceId, teamId)) ||
+    !assignments.every((value) => isStoredResourceAssignmentForScope(value, workspaceId, teamId)) ||
     (item.updatedAt !== undefined && typeof item.updatedAt !== 'string')
   ) {
     throw new CapacityPlanningError(500, 'InvalidCapacityPlanningState', 'The stored capacity planning state is invalid.')
@@ -1091,6 +1209,21 @@ function readState(item: Record<string, unknown>): CapacityPlanningState {
     assignments,
     ...(typeof item.updatedAt === 'string' ? { updatedAt: item.updatedAt } : {}),
   }
+}
+
+/** Narrows a stored profile and verifies its DynamoDB partition scope. */
+function isStoredMemberProfileForScope(value: unknown, workspaceId: string, teamId: string): value is WorkloadMemberProfile {
+  return isStoredMemberProfile(value) && value.workspaceId === workspaceId && value.teamId === teamId
+}
+
+/** Narrows a stored request and verifies its DynamoDB partition scope. */
+function isStoredResourceRequestForScope(value: unknown, workspaceId: string, teamId: string): value is ResourceRequest {
+  return isStoredResourceRequest(value) && value.workspaceId === workspaceId && value.teamId === teamId
+}
+
+/** Narrows a stored assignment and verifies its DynamoDB partition scope. */
+function isStoredResourceAssignmentForScope(value: unknown, workspaceId: string, teamId: string): value is ResourceAssignment {
+  return isStoredResourceAssignment(value) && value.workspaceId === workspaceId && value.teamId === teamId
 }
 
 /** Narrows one stored member profile after a DynamoDB read. */

@@ -26,6 +26,7 @@ const meta = {
 } satisfies Meta<typeof WorkloadPlanningControls>
 
 export default meta
+/** Story object type for the workload planning controls stories. */
 type Story = StoryObj<typeof meta>
 
 /** Displays the profile, absence, request, assignment, and what-if forms. */

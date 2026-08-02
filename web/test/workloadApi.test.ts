@@ -89,10 +89,18 @@ describe('workload API', () => {
     const requests: Array<{ method: string; url: string; body: string }> = []
     installFetchRecorder(requests, {
       schemaVersion: 1,
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      fromDate: '2026-08-10',
+      toDate: '2026-08-10',
       granularity: 'day',
       members: [],
       requests: [],
       assignments: [],
+      redactedAssignmentCount: 0,
+      redactedRequestCount: 0,
+      revision: 1,
+      generatedAt: '2026-08-02T00:00:00.000Z',
     })
 
     await expect(previewWorkloadAssignment('token', 'team-1', {
@@ -112,6 +120,7 @@ describe('workload API', () => {
   })
 })
 
+/** Installs a deterministic fetch stub and records outgoing workload requests. */
 function installFetchRecorder(
   requests: Array<{ method: string; url: string; body: string }>,
   responseBody: Record<string, unknown> = {},

@@ -308,6 +308,18 @@ function createCapacityPlanningDataSource(
         status: entry.status,
       }))
     },
+    async listAllTimeEntries(workspaceId, teamId) {
+      const entries = await timeTrackingService.listAllEntries({ workspaceId, teamId })
+      return entries.map((entry) => ({
+        memberId: entry.userId,
+        ...(entry.projectId ? { projectId: entry.projectId } : {}),
+        workItemId: entry.workItemId,
+        startAt: entry.startAt,
+        endAt: entry.endAt,
+        durationMinutes: entry.durationMinutes,
+        status: entry.status,
+      }))
+    },
     async listEstimates(workspaceId, teamId) {
       return await timeTrackingService.listEstimates(workspaceId, teamId)
     },
@@ -320,9 +332,13 @@ export function createCapacityPlanningService(
 ): CapacityPlanningService {
   const config = loadServerConfig()
   const dynamoDbClient = createDynamoDbClient()
+  const tableName = config.environment.CAPACITY_PLANNING_TABLE_NAME
+  if (config.production && !tableName) {
+    throw new Error('CAPACITY_PLANNING_TABLE_NAME must be set for durable capacity planning storage.')
+  }
   return new CapacityPlanningService(
     new DynamoDbCapacityPlanningRepository(
-      config.environment.CAPACITY_PLANNING_TABLE_NAME ?? 'mukuroji-capacity-planning-local',
+      tableName ?? 'mukuroji-capacity-planning-local',
       createDynamoDbDocumentClient(dynamoDbClient),
     ),
     createCapacityPlanningDataSource(timeTrackingService),

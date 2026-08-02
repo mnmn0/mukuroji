@@ -56,22 +56,27 @@ export function TeamWorkloadView({
             {t('workload.description')}
           </p>
         </div>
-        <div className="flex rounded-lg border border-slate-200 bg-white p-1" role="tablist" aria-label={t('workload.granularity.label')}>
+        <fieldset className="flex rounded-lg border border-slate-200 bg-white p-1">
+          <legend className="sr-only">{t('workload.granularity.label')}</legend>
           {(['day', 'week', 'month'] as const).map((option) => (
-            <button
-              aria-selected={granularity === option}
+            <label
               className={granularity === option
                 ? 'rounded-md bg-[#0d1833] px-3 py-2 text-xs font-bold text-white'
                 : 'rounded-md px-3 py-2 text-xs font-bold text-[#526381] transition hover:bg-slate-50'}
               key={option}
-              role="tab"
-              type="button"
-              onClick={() => onGranularityChange(option)}
             >
+              <input
+                checked={granularity === option}
+                className="sr-only"
+                name="workload-granularity"
+                type="radio"
+                value={option}
+                onChange={() => onGranularityChange(option)}
+              />
               {t(`workload.granularity.${option}`)}
-            </button>
+            </label>
           ))}
-        </div>
+        </fieldset>
       </div>
 
       {error ? (
@@ -124,7 +129,7 @@ export function TeamWorkloadView({
                   </th>
                   {cells.map((cell) => (
                     <th className="min-w-[92px] border-l border-slate-100 px-3 py-3 text-xs font-bold text-[#69758a]" key={cell.fromDate} scope="col">
-                      {formatBucket(cell)}
+                      {formatBucket(cell, granularity)}
                     </th>
                   ))}
                 </tr>
@@ -157,7 +162,7 @@ export function TeamWorkloadView({
                           {onMoveAssignment ? snapshot?.assignments
                             .filter((assignment) => assignmentMatchesCell(assignment, member.memberId, cell))
                             .map((assignment) => (
-                              <details className="mt-2 max-w-full text-[10px] font-bold text-[#526381]">
+                              <details className="mt-2 max-w-full text-[10px] font-bold text-[#526381]" key={assignment.id}>
                                 <summary
                                   className="max-w-full cursor-grab truncate rounded bg-white/80 px-1.5 py-1 shadow-sm disabled:opacity-50"
                                   draggable={!isAssignmentMutationPending}
@@ -239,8 +244,16 @@ function cellClass(cell: WorkloadCell): string {
 }
 
 /** Formats a bucket header without assuming that all users share a timezone. */
-function formatBucket(cell: WorkloadCell): string {
+function formatBucket(cell: WorkloadCell, granularity: CapacityPlanningGranularity): string {
   const date = new Date(`${cell.fromDate}T12:00:00Z`)
+  if (granularity === 'month') {
+    return new Intl.DateTimeFormat(undefined, { month: 'short', year: 'numeric', timeZone: 'UTC' }).format(date)
+  }
+  if (granularity === 'week') {
+    const end = new Date(`${cell.toDate}T12:00:00Z`)
+    const formatter = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })
+    return `${formatter.format(date)}–${formatter.format(end)}`
+  }
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' }).format(date)
 }
 
