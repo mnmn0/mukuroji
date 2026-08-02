@@ -453,6 +453,8 @@ import {
 } from '../modules/analytics/analytics'
 import { createTimeTrackingRouter } from '../modules/time-tracking/adapter-in/http/time-tracking-router'
 import { TimeTrackingError } from '../modules/time-tracking'
+import { createCapacityPlanningRouter } from '../modules/capacity-planning/adapter-in/http/capacity-planning-router'
+import { CapacityPlanningError } from '../modules/capacity-planning'
 
 /**
  * Workspace access の永続化 client と API error です。
@@ -1038,6 +1040,11 @@ const automationDependencies: AutomationDependencies = {
 const timeTrackingDependencies = {
   get timeTrackingService() {
     return requireAppDependencies().timeTracking.timeTrackingService
+  },
+}
+const capacityPlanningDependencies = {
+  get capacityPlanningService() {
+    return requireAppDependencies().capacityPlanning.capacityPlanningService
   },
 }
 const developerPlatformDependencies: DeveloperPlatformDependencies = {
@@ -4393,6 +4400,52 @@ routeApp.route('/', createTimeTrackingRouter({
   getTimeTracking: () => timeTrackingDependencies.timeTrackingService,
   readJson,
   mapError: toTimeTrackingErrorResponse,
+}))
+
+routeApp.route('/', createCapacityPlanningRouter({
+  readBearerAccessToken,
+  authenticate: async (accessToken, context) =>
+    await authenticateWorkspacePrincipal(accessToken, undefined, context),
+  requireTeamPermission: async (principal, teamId, minimum) => {
+    await requireTeamPermission(principal, teamId, minimum)
+  },
+  canViewConfidential: async (principal, teamId) => {
+    try {
+      await requireTeamPermission(principal, teamId, 'manager')
+      return true
+    } catch (error) {
+      if (error instanceof ProjectDataError && error.status === 403) return false
+      throw error
+    }
+  },
+  getVisibleMemberIds: async (principal, teamId) => {
+    if (principal.isSystemAdmin || principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') {
+      return undefined
+    }
+    const context = await requireTeamPermission(principal, teamId, 'viewer')
+    const projectIds = (context.projectAccesses ?? []).map((access) => access.projectId)
+    const members = await Promise.all(projectIds.map((projectId) =>
+      workspaceDependencies.projectDirectory.getProjectMembers(principal.directoryId, projectId),
+    ))
+    return new Set([
+      principal.userKey,
+      ...members.flatMap((response) => response.members.map((member) => member.id)),
+    ])
+  },
+  canManageMember: async (principal, teamId, memberId) => {
+    if (principal.isSystemAdmin || principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') return true
+    if (principal.userKey === memberId) return true
+    try {
+      await requireTeamPermission(principal, teamId, 'manager')
+      return true
+    } catch (error) {
+      if (error instanceof ProjectDataError && error.status === 403) return false
+      throw error
+    }
+  },
+  getCapacityPlanning: () => capacityPlanningDependencies.capacityPlanningService,
+  readJson,
+  mapError: toCapacityPlanningErrorResponse,
 }))
 
 routeApp.route('/', createNotificationRouter({
@@ -15366,6 +15419,31 @@ function toTimeTrackingErrorResponse(c: Context, error: unknown) {
   if (!(error instanceof TimeTrackingError)) {
     console.error(error)
     return c.json({ code: 'TimeTrackingUnavailable', message: 'Time tracking is unavailable.' }, 502)
+  }
+  if (error.status >= 500) console.error(error)
+  const status = error.status === 400 ||
+    error.status === 401 ||
+    error.status === 403 ||
+    error.status === 404 ||
+    error.status === 409 ||
+    error.status === 413 ||
+    error.status === 422 ||
+    error.status === 503
+    ? error.status
+    : 502
+  return c.json({ code: error.code, message: error.message }, status)
+}
+
+/** Converts capacity-planning failures to safe API responses. */
+function toCapacityPlanningErrorResponse(c: Context, error: unknown) {
+  if (error instanceof CognitoServiceError) return toCognitoDirectoryErrorResponse(c, error)
+  if (error instanceof WorkspaceAccessError) return toWorkspaceAccessErrorResponse(c, error)
+  if (error instanceof ProjectDataError || isTeamIssueNotFoundError(error)) {
+    return toProjectDataErrorResponse(c, error)
+  }
+  if (!(error instanceof CapacityPlanningError)) {
+    console.error(error)
+    return c.json({ code: 'CapacityPlanningUnavailable', message: 'Capacity planning is unavailable.' }, 502)
   }
   if (error.status >= 500) console.error(error)
   const status = error.status === 400 ||

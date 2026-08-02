@@ -44,6 +44,7 @@ import type { EnterpriseSessionActivityClient } from '../../modules/enterprise-i
 import type { FileProofingClient } from '../../modules/files/file-proofing'
 import type { NotificationClient } from '../../modules/notifications/notifications'
 import type { PlanningClient } from '../../modules/planning/planning'
+import type { CapacityPlanningService } from '../../modules/capacity-planning'
 import type { RealtimeTicketsClient } from '../../modules/realtime/realtime-ticket'
 import type { RequestIntakeClient } from '../../modules/request-intake/request-intake'
 import type {
@@ -211,6 +212,12 @@ export interface TimeTrackingDependencies {
   timeTrackingService: TimeTrackingService
 }
 
+/** Dependencies required by capacity-planning routes. */
+export interface CapacityPlanningDependencies {
+  /** Provides the application service for workload and resource allocation. */
+  capacityPlanningService: CapacityPlanningService
+}
+
 /** Operational dependencies required by system routes. */
 export interface OperationalDependencies {
   /** Records bounded runtime-control decisions and metrics. */
@@ -247,6 +254,8 @@ export interface AppDependencies {
   automation: Readonly<AutomationDependencies>
   /** Time tracking route dependencies. */
   timeTracking: Readonly<TimeTrackingDependencies>
+  /** Capacity planning route dependencies. */
+  capacityPlanning: Readonly<CapacityPlanningDependencies>
   /** Developer Platform route and worker dependencies. */
   developerPlatform: Readonly<DeveloperPlatformDependencies>
 }
@@ -269,6 +278,7 @@ export function freezeAppDependencies(
     workItems: Object.freeze({ ...dependencies.workItems }),
     automation: Object.freeze({ ...dependencies.automation }),
     timeTracking: Object.freeze({ ...dependencies.timeTracking }),
+    capacityPlanning: Object.freeze({ ...dependencies.capacityPlanning }),
     developerPlatform: Object.freeze({ ...dependencies.developerPlatform }),
   })
 }
@@ -280,6 +290,7 @@ export type AppDependencyOverrides = Partial<
   WorkItemDependencies &
   AutomationDependencies &
   TimeTrackingDependencies &
+  CapacityPlanningDependencies &
   DeveloperPlatformDependencies &
   OperationalDependencies
 > & {

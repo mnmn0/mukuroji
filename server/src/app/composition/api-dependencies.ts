@@ -105,6 +105,12 @@ import {
   TimeTrackingService,
   type TimeTrackingIdempotencyPort,
 } from '../../modules/time-tracking'
+import {
+  CapacityPlanningService,
+  DynamoDbCapacityPlanningRepository,
+  InMemoryCapacityPlanningRepository,
+  type CapacityPlanningDataSource,
+} from '../../modules/capacity-planning'
 
 /**
  * Projects shared idempotency reservation and transaction-completion capabilities
@@ -282,6 +288,43 @@ export function createTimeTrackingService(idempotency?: TimeTrackingIdempotencyP
       },
       ...(idempotency ? { idempotency } : {}),
     },
+  )
+}
+
+/** Creates capacity-planning source adapters backed by the shared time-tracking service. */
+function createCapacityPlanningDataSource(
+  timeTrackingService: TimeTrackingService,
+): CapacityPlanningDataSource {
+  return {
+    async listTimeEntries(input) {
+      const entries = await timeTrackingService.listAllEntries(input)
+      return entries.map((entry) => ({
+        memberId: entry.userId,
+        workItemId: entry.workItemId,
+        startAt: entry.startAt,
+        endAt: entry.endAt,
+        durationMinutes: entry.durationMinutes,
+        status: entry.status,
+      }))
+    },
+    async listEstimates(workspaceId, teamId) {
+      return await timeTrackingService.listEstimates(workspaceId, teamId)
+    },
+  }
+}
+
+/** Creates a capacity-planning service using durable state and shared time tracking. */
+export function createCapacityPlanningService(
+  timeTrackingService: TimeTrackingService,
+): CapacityPlanningService {
+  const config = loadServerConfig()
+  const dynamoDbClient = createDynamoDbClient()
+  return new CapacityPlanningService(
+    new DynamoDbCapacityPlanningRepository(
+      config.environment.CAPACITY_PLANNING_TABLE_NAME ?? 'mukuroji-capacity-planning-local',
+      createDynamoDbDocumentClient(dynamoDbClient),
+    ),
+    createCapacityPlanningDataSource(timeTrackingService),
   )
 }
 
@@ -565,16 +608,18 @@ function createLazyWorkItemImportQueue(): WorkItemImportQueue {
  */
 export function createProductionConnectorAppDependencies(): AppDependencies {
   const adapters = createDynamoDbDeveloperPlatformAdapters()
+  const timeTrackingService = createTimeTrackingService(
+    createTimeTrackingIdempotencyPort(adapters.idempotency, adapters.transactions),
+  )
   return {
     operational: createProductionOperationalDependencies(),
     authentication: createProductionAuthenticationDependencies(),
     workspace: createProductionWorkspaceDependencies(),
     workItems: createProductionWorkItemDependencies(),
     automation: createProductionAutomationDependencies(),
-    timeTracking: {
-      timeTrackingService: createTimeTrackingService(
-        createTimeTrackingIdempotencyPort(adapters.idempotency, adapters.transactions),
-      ),
+    timeTracking: { timeTrackingService },
+    capacityPlanning: {
+      capacityPlanningService: createCapacityPlanningService(timeTrackingService),
     },
     developerPlatform: {
       ...adapters,
@@ -594,19 +639,21 @@ export function createProductionConnectorAppDependencies(): AppDependencies {
  */
 export function createProductionAppDependencies(): AppDependencies {
   const developerPlatform = createProductionDeveloperPlatformDependencies()
+  const timeTrackingService = createTimeTrackingService(
+    createTimeTrackingIdempotencyPort(
+      developerPlatform.idempotency,
+      developerPlatform.transactions,
+    ),
+  )
   return {
     operational: createProductionOperationalDependencies(),
     authentication: createProductionAuthenticationDependencies(),
     workspace: createProductionWorkspaceDependencies(),
     workItems: createProductionWorkItemDependencies(),
     automation: createProductionAutomationDependencies(),
-    timeTracking: {
-      timeTrackingService: createTimeTrackingService(
-        createTimeTrackingIdempotencyPort(
-          developerPlatform.idempotency,
-          developerPlatform.transactions,
-        ),
-      ),
+    timeTracking: { timeTrackingService },
+    capacityPlanning: {
+      capacityPlanningService: createCapacityPlanningService(timeTrackingService),
     },
     developerPlatform,
   }
@@ -619,6 +666,7 @@ export function createProductionAppDependencies(): AppDependencies {
  */
 export function createTestAppDependencies(): AppDependencies {
   const production = createProductionAppDependencies()
+  const timeTrackingService = new TimeTrackingService(new InMemoryTimeTrackingRepository())
   return {
     ...production,
     operational: createTestOperationalDependencies(),
@@ -628,8 +676,12 @@ export function createTestAppDependencies(): AppDependencies {
       planning: new InMemoryPlanningClient(),
       analytics: new InMemoryAnalyticsRepository(),
     },
-    timeTracking: {
-      timeTrackingService: new TimeTrackingService(new InMemoryTimeTrackingRepository()),
+    timeTracking: { timeTrackingService },
+    capacityPlanning: {
+      capacityPlanningService: new CapacityPlanningService(
+        new InMemoryCapacityPlanningRepository(),
+        createCapacityPlanningDataSource(timeTrackingService),
+      ),
     },
   }
 }
@@ -748,6 +800,12 @@ export function overrideAppDependencies(
     timeTracking: {
       ...dependencies.timeTracking,
       ...(overrides.timeTrackingService ? { timeTrackingService: overrides.timeTrackingService } : {}),
+    },
+    capacityPlanning: {
+      ...dependencies.capacityPlanning,
+      ...(overrides.capacityPlanningService
+        ? { capacityPlanningService: overrides.capacityPlanningService }
+        : {}),
     },
     developerPlatform: {
       ...dependencies.developerPlatform,

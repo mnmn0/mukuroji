@@ -15,6 +15,7 @@ import { requestsMessages } from './requests'
 import { publicMessages } from './public'
 import { securityMessages } from './security'
 import { projectsMessages } from './projects'
+import { capacityPlanningMessages } from './capacity-planning'
 
 /**
  * Verifies that a locale dictionary contains exactly the canonical message keys.
@@ -48,4 +49,5 @@ export const enMessages = defineMessages({
   ...publicMessages,
   ...securityMessages,
   ...projectsMessages,
+  ...capacityPlanningMessages,
 })

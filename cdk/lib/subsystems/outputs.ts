@@ -26,6 +26,8 @@ export type StackOutputResources = {
   readonly automationTable: dynamodb.ITable;
   /** Planning and portfolio data table. */
   readonly planningTable: dynamodb.ITable;
+  /** Capacity planning availability and assignment data table. */
+  readonly capacityPlanningTable: dynamodb.ITable;
   /** Developer platform state table. */
   readonly developerPlatformTable: dynamodb.ITable;
   /** Analytics facts, reports, and snapshots table. */
@@ -169,6 +171,9 @@ export function buildStackOutputs(
   });
   new cdk.CfnOutput(scope, 'PlanningTableName', {
     value: resources.planningTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'CapacityPlanningTableName', {
+    value: resources.capacityPlanningTable.tableName,
   });
   new cdk.CfnOutput(scope, 'DeveloperPlatformTableName', {
     value: resources.developerPlatformTable.tableName,

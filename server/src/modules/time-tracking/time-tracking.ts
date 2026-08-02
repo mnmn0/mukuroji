@@ -985,6 +985,14 @@ export class TimeTrackingService {
     )
   }
 
+  /** Lists all Work Item estimates for a Team for capacity-planning reconciliation. */
+  async listEstimates(workspaceId: string, teamId: string): Promise<TimeEstimate[]> {
+    return await this.repository.listEstimates(
+      readIdentifier(workspaceId, 'Workspace ID'),
+      readIdentifier(teamId, 'Team ID'),
+    )
+  }
+
   /** Saves a Team or Project budget. */
   async saveBudget(input: SaveTimeBudgetInput): Promise<TimeBudget> {
     return await this.withIdempotency(
