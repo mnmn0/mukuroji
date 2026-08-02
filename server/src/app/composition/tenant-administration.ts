@@ -29,7 +29,10 @@ export function createProductionTenantAdministrationClient(): DynamoDbTenantAdmi
     resources.tenantAdministrationTableName,
     createDynamoDbDocumentClient(createDynamoDbClient()),
     undefined,
-    createDynamoDbTenantAdministrationAuditWriter(resources.auditEventsTableName),
+    createDynamoDbTenantAdministrationAuditWriter(
+      resources.auditEventsTableName,
+      config.environment.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY,
+    ),
     {
       dataResidency: config.awsRegion,
       encryptionKeyPolicy: 'aws-managed',

@@ -571,6 +571,12 @@ export class DynamoDbTenantAdministrationClient implements
     ])
     if (input.direction === 'activate') {
       assertTenantSeatAvailable(entitlement, current)
+    } else if (current.activeSeats === 0) {
+      throw new TenantAdministrationError(
+        503,
+        'TenantSeatCounterCorrupt',
+        'Tenant seat state is inconsistent with active membership.',
+      )
     }
     const periodUsage = beginTenantUsageMutation(
       current,
@@ -578,7 +584,7 @@ export class DynamoDbTenantAdministrationClient implements
     )
     const activeSeats = input.direction === 'activate'
       ? periodUsage.activeSeats + 1
-      : Math.max(0, periodUsage.activeSeats - 1)
+      : periodUsage.activeSeats - 1
     const updated: TenantUsage = {
       ...periodUsage,
       activeSeats,
@@ -623,7 +629,8 @@ export class DynamoDbTenantAdministrationClient implements
       eventType: input.direction === 'activate'
         ? 'tenant.seat.assigned'
         : 'tenant.seat.released',
-      entityId: input.memberKey,
+      entityId: input.workspaceId,
+      privateMemberKey: input.memberKey,
       action: input.direction === 'activate' ? 'assigned' : 'released',
       path: '/internal/tenant/seats',
       requestMethod: 'INTERNAL',
@@ -633,7 +640,6 @@ export class DynamoDbTenantAdministrationClient implements
       after: updated,
       metadata: {
         direction: input.direction,
-        memberKey: input.memberKey,
       },
       retentionDays: governance.auditRetentionDays,
       legalHold: governance.legalHold,
@@ -1221,14 +1227,31 @@ export class DynamoDbTenantAdministrationClient implements
       )
     }
     return rawItems.map((rawItem) => {
-      if (!isRecord(rawItem) || typeof rawItem.payload !== 'string') {
-        throw new TenantAdministrationError(
-          503,
-          'TenantAdministrationCorrupt',
-          'Tenant billing history is invalid.',
+      if (
+        !isRecord(rawItem) ||
+        typeof rawItem.recordKey !== 'string' ||
+        !rawItem.recordKey.startsWith(BILLING_PERIOD_RECORD_PREFIX)
+      ) {
+        throw tenantAdministrationCorrupt(
+          'Tenant billing history key is invalid.',
         )
       }
-      return readTenantBillingPeriod(parsePayload(rawItem.payload))
+      const billingPeriod = this.parseStateItem(
+        rawItem,
+        workspaceId,
+        rawItem.recordKey,
+        readTenantBillingPeriod,
+      )
+      if (
+        rawItem.recordKey !== createBillingPeriodRecordKey(
+          billingPeriod.periodStart,
+        )
+      ) {
+        throw tenantAdministrationCorrupt(
+          'Tenant billing history period is inconsistent.',
+        )
+      }
+      return billingPeriod
     })
   }
 
@@ -1460,23 +1483,14 @@ export class DynamoDbTenantAdministrationClient implements
       throw toTenantPersistenceError(error)
     }
     const item: unknown = response.Item
-    if (!isRecord(item) || typeof item.payload !== 'string') {
+    if (item === undefined) {
       throw new TenantAdministrationError(
         404,
         'TenantAdministrationNotInitialized',
         'Tenant administration state is not initialized.',
       )
     }
-    try {
-      return parser(parsePayload(item.payload))
-    } catch (error) {
-      if (error instanceof TenantAdministrationError) throw error
-      throw new TenantAdministrationError(
-        503,
-        'TenantAdministrationCorrupt',
-        'Tenant administration state is invalid.',
-      )
-    }
+    return this.parseStateItem(item, workspaceId, recordKey, parser)
   }
 
   /** Reads an optional tenant record and validates its serialized payload. */
@@ -1497,23 +1511,60 @@ export class DynamoDbTenantAdministrationClient implements
     }
     const item: unknown = response.Item
     if (item === undefined) return undefined
-    if (!isRecord(item) || typeof item.payload !== 'string') {
-      throw new TenantAdministrationError(
-        503,
-        'TenantAdministrationCorrupt',
-        'Tenant administration state is invalid.',
+    return this.parseStateItem(item, workspaceId, recordKey, parser)
+  }
+
+  /**
+   * Validates physical and serialized tenant scope before returning one state value.
+   *
+   * @param item - Untrusted DynamoDB item returned by the document client.
+   * @param workspaceId - Canonical tenant partition requested by the caller.
+   * @param recordKey - Canonical tenant record key requested by the caller.
+   * @param parser - Runtime parser for the serialized payload.
+   * @returns Parsed state that matches its physical tenant key and revision.
+   */
+  private parseStateItem<T>(
+    item: unknown,
+    workspaceId: string,
+    recordKey: string,
+    parser: (value: unknown) => T,
+  ): T {
+    if (
+      !isRecord(item) ||
+      item.workspaceId !== workspaceId ||
+      item.recordKey !== recordKey ||
+      typeof item.payload !== 'string'
+    ) {
+      throw tenantAdministrationCorrupt(
+        'Tenant administration state does not match its physical key.',
       )
     }
+    let parsed: T
     try {
-      return parser(parsePayload(item.payload))
-    } catch (error) {
-      if (error instanceof TenantAdministrationError) throw error
-      throw new TenantAdministrationError(
-        503,
-        'TenantAdministrationCorrupt',
-        'Tenant administration state is invalid.',
+      parsed = parser(parsePayload(item.payload))
+    } catch {
+      throw tenantAdministrationCorrupt(
+        'Tenant administration state payload is invalid.',
       )
     }
+    if (
+      isRecord(parsed) &&
+      (
+        ('workspaceId' in parsed && parsed.workspaceId !== workspaceId) ||
+        (
+          'revision' in parsed &&
+          (
+            typeof parsed.revision !== 'number' ||
+            item.revision !== parsed.revision
+          )
+        )
+      )
+    ) {
+      throw tenantAdministrationCorrupt(
+        'Tenant administration payload scope or revision is inconsistent.',
+      )
+    }
+    return parsed
   }
 
   /**

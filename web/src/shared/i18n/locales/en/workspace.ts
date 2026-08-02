@@ -563,6 +563,7 @@ export const workspaceMessages = {
   'workspace.tenantAdministration.lifecycleMeta': 'Trusted executors attach evidence; administrators can pause, resume, and verify',
   'workspace.tenantAdministration.exportOperation': 'Tenant export',
   'workspace.tenantAdministration.closureOperation': 'Account closure',
+  'workspace.tenantAdministration.exportFormat': 'Export format',
   'workspace.tenantAdministration.waiting': 'waiting to start',
   'workspace.tenantAdministration.pause': 'Pause',
   'workspace.tenantAdministration.resume': 'Resume',

@@ -122,6 +122,51 @@ describe('DynamoDbTenantAdministrationClient', () => {
     })
   })
 
+  test('fails closed when a serialized tenant payload crosses Workspace scope', async () => {
+    const items = createAggregateItems(1)
+    const profile = items.get('PROFILE')
+    if (!profile) throw new Error('Tenant profile fixture is unavailable.')
+    items.set('PROFILE', { ...profile, workspaceId: 'workspace-2' })
+    const client = new DynamoDbTenantAdministrationClient(
+      'TenantAdministrationTable',
+      createDocumentClient((command) => {
+        if (command.constructor.name === 'QueryCommand') return { Items: [] }
+        const recordKey = readRecordKey(command)
+        if (!recordKey) return {}
+        const value = items.get(recordKey)
+        return value ? { Item: createStateItem(recordKey, value) } : {}
+      }),
+    )
+
+    await expect(client.getSnapshot('workspace-1')).rejects.toMatchObject({
+      code: 'TenantAdministrationCorrupt',
+      status: 503,
+    })
+  })
+
+  test('treats an existing malformed tenant row as corruption, not missing state', async () => {
+    const client = new DynamoDbTenantAdministrationClient(
+      'TenantAdministrationTable',
+      createDocumentClient((command) => {
+        if (command.constructor.name === 'QueryCommand') return { Items: [] }
+        const recordKey = readRecordKey(command)
+        if (recordKey !== 'PROFILE') return {}
+        return {
+          Item: {
+            workspaceId: 'workspace-1',
+            recordKey,
+            revision: 0,
+          },
+        }
+      }),
+    )
+
+    await expect(client.getSnapshot('workspace-1')).rejects.toMatchObject({
+      code: 'TenantAdministrationCorrupt',
+      status: 503,
+    })
+  })
+
   test('reconciles an authoritative Workspace owner without trusting the administrator', async () => {
     const items = createAggregateItems(1)
     const transactions: Array<Record<string, unknown>> = []
@@ -645,6 +690,29 @@ describe('DynamoDbTenantAdministrationClient', () => {
       direction: 'activate',
       occurredAt: '2026-08-02T00:01:00.000Z',
     })).rejects.toMatchObject({ code: 'TenantSeatLimitExceeded' })
+  })
+
+  test('fails closed instead of masking a seat counter underflow', async () => {
+    const items = createAggregateItems(0)
+    const client = new DynamoDbTenantAdministrationClient(
+      'TenantAdministrationTable',
+      createDocumentClient((command) => {
+        const recordKey = readRecordKey(command)
+        if (!recordKey) return {}
+        const value = items.get(recordKey)
+        return value ? { Item: createStateItem(recordKey, value) } : {}
+      }),
+    )
+
+    await expect(client.prepareSeatMutation({
+      workspaceId: 'workspace-1',
+      memberKey: 'member-1',
+      direction: 'deactivate',
+      occurredAt: '2026-08-02T00:01:00.000Z',
+    })).rejects.toMatchObject({
+      code: 'TenantSeatCounterCorrupt',
+      status: 503,
+    })
   })
 
   test('blocks closure progress when legal hold becomes active after the request', async () => {

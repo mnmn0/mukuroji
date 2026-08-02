@@ -38,6 +38,20 @@ describe('tenant administration domain', () => {
     })
   })
 
+  test('grandfathers authoritative active seats into the initial seat limit', () => {
+    const snapshot = createDefaultTenantAdministrationSnapshot(
+      'workspace-1',
+      'member-1',
+      '2026-08-02T00:00:00.000Z',
+      undefined,
+      18,
+    )
+
+    expect(snapshot.usage.activeSeats).toBe(18)
+    expect(snapshot.entitlement.seatLimit).toBe(18)
+    expect(snapshot.billingPeriods[0]?.activeSeatHighWaterMark).toBe(18)
+  })
+
   test('retains invoice usage and the active-seat high-water mark by billing period', () => {
     const snapshot = createDefaultTenantAdministrationSnapshot(
       'workspace-1',

@@ -562,6 +562,7 @@ export const workspaceMessages = {
   'workspace.tenantAdministration.lifecycleMeta': 'trusted executor が証跡を付与し、管理者は中断・再開・検証を行えます',
   'workspace.tenantAdministration.exportOperation': 'テナント export',
   'workspace.tenantAdministration.closureOperation': 'アカウント閉鎖',
+  'workspace.tenantAdministration.exportFormat': 'Export 形式',
   'workspace.tenantAdministration.waiting': '開始待ち',
   'workspace.tenantAdministration.pause': '中断',
   'workspace.tenantAdministration.resume': '再開',

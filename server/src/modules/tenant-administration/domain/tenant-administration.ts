@@ -123,17 +123,26 @@ export function createDefaultTenantPolicy(): TenantDefaultPolicy {
  *
  * @param workspaceId - Canonical Workspace identifier.
  * @param now - Entitlement creation timestamp.
+ * @param activeSeats - Authoritative active seats that must remain entitled during initialization.
  * @returns A starter entitlement with bounded capacity.
  */
 export function createDefaultTenantEntitlement(
   workspaceId: string,
   now: string,
+  activeSeats = 1,
 ): TenantEntitlement {
   return {
     workspaceId,
     plan: 'starter',
     features: ['documents'],
-    seatLimit: 5,
+    seatLimit: Math.max(
+      5,
+      validateTenantInteger(
+        activeSeats,
+        TENANT_MAX_SEAT_LIMIT,
+        'InvalidTenantActiveSeats',
+      ),
+    ),
     usageQuota: 10_000,
     gracePeriodDays: 7,
     revision: 0,
@@ -268,7 +277,11 @@ export function createDefaultTenantAdministrationSnapshot(
       now,
       normalizedEnforcement.dataResidency,
     ),
-    entitlement: createDefaultTenantEntitlement(workspaceId, now),
+    entitlement: createDefaultTenantEntitlement(
+      workspaceId,
+      now,
+      usage.activeSeats,
+    ),
     usage,
     billingPeriods: [recordTenantBillingPeriod(usage)],
     governance: createDefaultTenantGovernance(

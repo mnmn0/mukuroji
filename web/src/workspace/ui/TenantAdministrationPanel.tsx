@@ -466,7 +466,16 @@ export function TenantAdministrationPanel({
                 <span>{activeOperation.kind === 'export' ? t('workspace.tenantAdministration.exportOperation') : t('workspace.tenantAdministration.closureOperation')}</span>
                 <span className="text-xs uppercase tracking-[0.08em] text-[var(--workbench-primary)]">{activeOperation.status}</span>
               </div>
-              <div className="mt-3 h-2 overflow-hidden rounded-full bg-[#d9eee9]">
+              <div
+                aria-label={activeOperation.kind === 'export'
+                  ? t('workspace.tenantAdministration.exportOperation')
+                  : t('workspace.tenantAdministration.closureOperation')}
+                aria-valuemax={100}
+                aria-valuemin={0}
+                aria-valuenow={operationPercent}
+                className="mt-3 h-2 overflow-hidden rounded-full bg-[#d9eee9]"
+                role="progressbar"
+              >
                 <div className="h-full rounded-full bg-[var(--workbench-primary)] transition-[width] motion-reduce:transition-none" style={{ width: `${operationPercent}%` }} />
               </div>
               <p className="mt-2 text-xs font-semibold text-[var(--workbench-muted)]">{operationPercent}% · {activeOperation.currentStep ?? t('workspace.tenantAdministration.waiting')}</p>
@@ -482,7 +491,7 @@ export function TenantAdministrationPanel({
               <p className="text-sm font-semibold text-[var(--workbench-text)]">{t('workspace.tenantAdministration.exportTitle')}</p>
               <p className="mt-1 text-sm leading-6 text-[var(--workbench-muted)]">{t('workspace.tenantAdministration.exportDescription')}</p>
               <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-                <select className="workbench-input" onChange={(event) => onChangeExportFormat(event.target.value === 'csv' ? 'csv' : 'jsonl')} value={exportFormat}>
+                <select aria-label={t('workspace.tenantAdministration.exportFormat')} className="workbench-input" onChange={(event) => onChangeExportFormat(event.target.value === 'csv' ? 'csv' : 'jsonl')} value={exportFormat}>
                   <option value="jsonl">JSONL</option>
                   <option value="csv">CSV</option>
                 </select>

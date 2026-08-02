@@ -23,6 +23,8 @@ Mutating feature requests reserve usage under entitlement and usage revision con
 
 Active-seat changes are prepared by the tenant adapter and committed in the same DynamoDB transaction as invitation acceptance, administrator activation/deactivation, and SCIM provisioning/deprovisioning. A concurrent seat-limit change or membership write therefore fails closed instead of drifting the usage counter. Every usage or seat mutation also updates the tenant's UTC billing-period record. The management snapshot returns the newest 13 invoice aggregates with metered units and the highest concurrent seat count; older records remain tenant-partitioned in the table.
 
+Lazy initialization reads authoritative active Workspace membership. If a legacy tenant already has more than the starter plan's five-seat default, its initial seat limit is raised to that existing count so initialization never creates an already-over-limit aggregate; further seat activation remains blocked until the system control plane assigns additional capacity. A release from a zero seat counter is treated as corrupt state and fails closed instead of hiding membership drift.
+
 Quota and grace-period checks live in the tenant domain. A new grace deadline is created only by the server. Seat release remains available after grace expiry, while feature mutations are rejected once the server-created grace period has ended.
 
 ## Residency and encryption
@@ -36,6 +38,8 @@ Profile, entitlement, governance, usage, billing, seat, retention, and lifecycle
 Initial tenant setup and every later retention or legal-hold change create `RETENTION_JOB` with the aggregate transaction. The tenant-operation Lambda processes at most 22 historical audit rows per invocation, removes TTL under legal hold, restores the policy-derived TTL after release, and persists a cursor, processed count, and immutable progress/completion audit event. The same worker consumes new audit-event inserts and applies the current tenant policy under a governance-revision condition, so concurrent policy changes fail and retry instead of leaving a stale TTL. DynamoDB Streams continue each page; retry exhaustion goes to a retained DLQ with an alarm. A second governance change is rejected while reconciliation is active.
 
 Operation identifiers and evidence references are opaque; raw export data, member identifiers from an export artifact, raw idempotency keys, and secrets are never placed in the tenant table or audit metadata.
+
+Seat audit events use the same Workspace-scoped HMAC member pseudonym contract as Workspace access history. Raw member keys are not stored as audit entity IDs or metadata, and owner/requester fields are redacted from immutable state diffs at write time.
 
 ## Export and closure lifecycle
 

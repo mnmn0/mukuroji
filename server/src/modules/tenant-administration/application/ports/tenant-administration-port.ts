@@ -31,6 +31,8 @@ export type TenantAdministrationAuditEvent = {
   eventType: string
   /** Stable entity identifier for the audit event. */
   entityId: string
+  /** Private member key converted to a scoped HMAC pseudonym by the audit adapter. */
+  privateMemberKey?: string
   /** Short action name shown in audit history. */
   action: string
   /** Route or internal operation that caused the mutation. */
