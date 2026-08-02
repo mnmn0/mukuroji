@@ -15,9 +15,17 @@ import {
   processAutomationEventBatch,
   type AutomationEventPort,
 } from './automation-event'
+import type { AutomationFeatureEntitlementPort } from '../../application/ports'
 import type {
   DynamoStreamEvent,
 } from '../../../collaboration/adapter-in/events/collaboration-projection'
+
+const enabledAutomationEntitlement: AutomationFeatureEntitlementPort = {
+  /** Allows Automation execution in tests that focus on event delivery behavior. */
+  async isAutomationEnabled() {
+    return true
+  },
+}
 
 describe('automation event handler', () => {
   test('delivers an event to rules from every DynamoDB query page', async () => {
@@ -35,7 +43,7 @@ describe('automation event handler', () => {
     } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
     const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
     const handled: string[] = []
-    const processor = createAutomationEventProcessor(client, {
+    const processor = createAutomationEventProcessor(client, enabledAutomationEntitlement, {
       async handleEvent(rule) {
         handled.push(rule.id)
         return undefined
@@ -54,6 +62,36 @@ describe('automation event handler', () => {
     expect(queries).toHaveLength(2)
     expect(queries[0]?.ConsistentRead).toBe(true)
     expect(queries[1]?.ExclusiveStartKey).toEqual(cursor)
+  })
+
+  test('acknowledges events without reading rules when tenant Automation is disabled', async () => {
+    let ruleReads = 0
+    const client = createAutomationEventPort({
+      async listRules() {
+        ruleReads += 1
+        return []
+      },
+    })
+    const processor = createAutomationEventProcessor(client, {
+      async isAutomationEnabled(workspaceId) {
+        expect(workspaceId).toBe('workspace-1')
+        return false
+      },
+    }, {
+      async handleEvent() {
+        throw new Error('Disabled Automation must not execute rules.')
+      },
+    })
+
+    await processor.process({
+      eventId: 'event-disabled',
+      eventType: 'work-item.updated',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-16T00:00:00.000Z',
+      changes: [],
+    })
+
+    expect(ruleReads).toBe(0)
   })
 
   test('normalizes audit metadata, changes, and automation lineage', () => {
@@ -217,7 +255,7 @@ describe('automation event handler', () => {
       },
     })
     let handled = 0
-    const processor = createAutomationEventProcessor(client, {
+    const processor = createAutomationEventProcessor(client, enabledAutomationEntitlement, {
       async handleEvent(candidateRule, candidateEvent) {
         handled += 1
         expect(candidateRule).toBe(rule)
@@ -235,7 +273,7 @@ describe('automation event handler', () => {
       'Execution state could not be saved.',
       true,
     )
-    const rejectingProcessor = createAutomationEventProcessor(client, {
+    const rejectingProcessor = createAutomationEventProcessor(client, enabledAutomationEntitlement, {
       async handleEvent() {
         throw persistenceError
       },

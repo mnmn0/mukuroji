@@ -8,6 +8,7 @@ import {
   type ConnectorSyncDynamoStreamEvent,
   type ConnectorSyncQueue,
   type ConnectorSyncSqsEvent,
+  type ConnectorTenantFeatureAvailability,
   type ConnectorSyncWorkerEngine,
   type ConnectorSyncWorkerPlatform,
 } from '../../connector-sync-worker'
@@ -24,6 +25,8 @@ export interface ConnectorEventDependencies {
   checkpoints: ConnectorPollCheckpointStore
   /** Workspace 横断 schedule が読む secret-free inventory です。 */
   inventory: ConnectorPollInventory
+  /** Current tenant entitlement used by every provider-work boundary. */
+  featureAvailability: ConnectorTenantFeatureAvailability
 }
 
 /**
@@ -44,12 +47,16 @@ export function createConnectorEventHandlers(dependencies: ConnectorEventDepende
     async auditProjectionHandler(event: ConnectorSyncDynamoStreamEvent) {
       return await processConnectorSyncAuditProjectionBatch(
         event,
-        { queue: dependencies.queue },
+        {
+          featureAvailability: dependencies.featureAvailability,
+          queue: dependencies.queue,
+        },
       )
     },
     /** Global sparse inventory から bounded polling jobs を enqueue します。 */
     async pollHandler(event: ConnectorPollScheduleEvent = {}) {
       return await scheduleConnectorPollInventory(event, {
+        featureAvailability: dependencies.featureAvailability,
         inventory: dependencies.inventory,
         queue: dependencies.queue,
         maximumPages: 100,

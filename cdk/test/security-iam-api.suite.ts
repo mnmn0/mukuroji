@@ -50,6 +50,7 @@ test('shared server handler is bundled as a Lambda asset with production environ
     'MUKUROJI_API_DATA_CONFIG_SECRET_ARN',
     'MUKUROJI_API_IDENTITY_CONFIG_SECRET_ARN',
     'MUKUROJI_API_WORKFLOW_CONFIG_SECRET_ARN',
+    'TENANT_EXPORT_BUCKET_NAME',
   ]);
   expect(variables)
     .not.toHaveProperty('MUKUROJI_WORK_ITEM_CONFIGURATION_TABLE');

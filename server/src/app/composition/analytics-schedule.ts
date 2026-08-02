@@ -27,6 +27,7 @@ import {
 import {
   loadServerDynamoDbResourceConfig,
 } from '../../infrastructure/config/server-resource-config'
+import { createProductionTenantFeatureGate } from './tenant-administration'
 
 /**
  * Creates the production Analytics schedule processor.
@@ -45,6 +46,7 @@ export function createProductionAnalyticsScheduleHandler() {
     },
   )
   const cognito = new AwsCognitoClient()
+  const tenantFeatureGate = createProductionTenantFeatureGate('analytics')
   const render = createAnalyticsScheduleRenderer({
     directory: new DynamoDbProjectDirectoryClient(),
     workItems: new DynamoDbTeamIssuesClient(),
@@ -89,7 +91,14 @@ export function createProductionAnalyticsScheduleHandler() {
   async function handleAnalyticsSchedule(event: AnalyticsScheduleEvent = {}) {
     return await processAnalyticsSchedule(
       resolveAnalyticsScheduleProcessingTime(event),
-      { repository, render, renderArtifact: renderInAppAnalyticsArtifact },
+      {
+        repository,
+        entitlement: {
+          isAnalyticsEnabled: (workspaceId) => tenantFeatureGate.isEnabled(workspaceId),
+        },
+        render,
+        renderArtifact: renderInAppAnalyticsArtifact,
+      },
     )
   }
 

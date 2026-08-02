@@ -9,7 +9,6 @@ import { S3Client } from '@aws-sdk/client-s3'
 import {
   DynamoDBDocumentClient,
   GetCommand,
-  PutCommand,
   QueryCommand,
   TransactWriteCommand,
   UpdateCommand,
@@ -237,6 +236,16 @@ export interface RequestIntakeClient {
   ): Promise<RequestAttachmentAccess>
 }
 
+/** Tenant lifecycle boundary used by public Request Intake operations. */
+export interface RequestIntakeTenantAvailability {
+  /** Returns whether the tenant may serve public reads and writes. */
+  isActive(workspaceId: string): Promise<boolean>
+  /** Returns an atomic guard for a tenant-owned DynamoDB write when available. */
+  createActiveWriteCondition?(
+    workspaceId: string,
+  ): NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+}
+
 /** DynamoDB/S3 client の差し替え option です。 */
 export type DynamoDbRequestIntakeClientOptions = {
   /** Request intake table 名です。 */
@@ -259,6 +268,8 @@ export type DynamoDbRequestIntakeClientOptions = {
   token?: () => string
   /** Local DynamoDB table 欠落を作成するかどうかです。 */
   bootstrapLocalTable?: boolean
+  /** Public traffic を tenant closure と直列化する lifecycle boundary です。 */
+  tenantAvailability?: RequestIntakeTenantAvailability
 }
 
 /** Raw capability token を除いた form root row です。 */
@@ -1236,6 +1247,8 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
   private readonly token: () => string
   /** Local table を自動作成するかどうかです。 */
   private readonly bootstrapLocalTable: boolean
+  /** Public Request Intake traffic の tenant lifecycle boundary です。 */
+  private readonly tenantAvailability: RequestIntakeTenantAvailability
   /** In-flight local table bootstrap promise です。 */
   private tableReady?: Promise<void>
 
@@ -1259,6 +1272,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     this.now = options.now ?? (() => new Date())
     this.token = options.token ?? (() => randomBytes(32).toString('base64url'))
     this.bootstrapLocalTable = options.bootstrapLocalTable ?? Boolean(endpoint)
+    this.tenantAvailability = options.tenantAvailability ?? ALLOW_ACTIVE_TENANT
   }
 
   /** Workspace の form 一覧を返します。 */
@@ -1554,6 +1568,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       lookup.revokedAt ||
       lookup.expiresAtIso && Date.parse(lookup.expiresAtIso) <= now.getTime()
     ) throw unavailableForm()
+    await this.requireTenantActive(lookup.workspaceId)
     const form = await this.getStoredForm(lookup.workspaceId, lookup.formId)
     if (
       form.status !== 'published' ||
@@ -1575,6 +1590,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     context: RequestExternalContext,
   ) {
     await this.ensureReady()
+    await this.requireTenantActive(resolution.workspaceId)
     await this.consumeLinkRateLimits(
       resolution,
       context,
@@ -1607,11 +1623,24 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       expiresAt: Math.floor(expiresAtDate.getTime() / 1_000),
     }
     assertStoredRequestItemSize(session)
-    await this.documentClient.send(new PutCommand({
-      TableName: this.tableName,
-      Item: session,
-      ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
-    }))
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          ...this.createTenantWriteGuard(resolution.workspaceId),
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: session,
+              ConditionExpression:
+                'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+            },
+          },
+        ],
+      }))
+    } catch (error) {
+      if (isConditionalFailure(error)) throw unavailableForm()
+      throw toRequestStoreError(error)
+    }
     return {
       schemaVersion: REQUEST_FORM_SCHEMA_VERSION,
       formId: version.formId,
@@ -1632,6 +1661,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     input: RequestAttachmentUploadInput,
     context: RequestExternalContext,
   ) {
+    await this.requireTenantActive(resolution.workspaceId)
     const session = await this.getActiveSession(resolution, input.sessionToken, false)
     if (session.usedAt) {
       throw new RequestIntakeError(409, 'RequestSessionConsumed', 'Submission session was already used.')
@@ -1681,11 +1711,24 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       expiresAt: Math.floor((now.getTime() + 24 * 60 * 60_000) / 1_000),
     }
     assertStoredRequestItemSize(stored)
-    await this.documentClient.send(new PutCommand({
-      TableName: this.tableName,
-      Item: stored,
-      ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
-    }))
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          ...this.createTenantWriteGuard(session.workspaceId),
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: stored,
+              ConditionExpression:
+                'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+            },
+          },
+        ],
+      }))
+    } catch (error) {
+      if (isConditionalFailure(error)) throw unavailableForm()
+      throw toRequestStoreError(error)
+    }
     return {
       attachmentId,
       fieldId,
@@ -1706,6 +1749,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     input: SubmitRequestInput,
     context: RequestExternalContext,
   ) {
+    await this.requireTenantActive(resolution.workspaceId)
     if (typeof input.honeypot === 'string' && input.honeypot.trim()) {
       throw invalidInput('Request submission is invalid.')
     }
@@ -1885,6 +1929,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     assertStoredRequestItemSize(submission)
     assertStoredRequestItemSize(threadLookup)
     const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+      ...this.createTenantWriteGuard(session.workspaceId),
       {
         Put: {
           TableName: this.tableName,
@@ -1955,6 +2000,9 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       return receipt
     } catch (error) {
       if (isConditionalFailure(error)) {
+        if (!await this.tenantAvailability.isActive(resolution.workspaceId)) {
+          throw unavailableForm()
+        }
         const replay = await this.getSessionByDigest(this.hashToken('session', input.sessionToken))
         if (replay.inputFingerprint === inputFingerprint && replay.receipt) {
           await this.consumeReplayRateLimit(
@@ -2196,7 +2244,8 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       requireCapabilityToken(threadToken, 'Request thread token'),
     )
     const lookup = await this.getThreadLookup(threadDigest)
-    await this.consumeThreadReadRateLimit(threadDigest, context)
+    await this.requireTenantActive(lookup.workspaceId)
+    await this.consumeThreadReadRateLimit(lookup.workspaceId, threadDigest, context)
     const submission = await this.getStoredSubmission(lookup.workspaceId, lookup.submissionId)
     return {
       status: terminalSubmissionStatuses.has(submission.status) ? 'closed' : 'open',
@@ -2219,6 +2268,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     await this.ensureReady()
     const threadDigest = this.hashToken('thread', requireCapabilityToken(threadToken, 'Request thread token'))
     const lookup = await this.getThreadLookup(threadDigest)
+    await this.requireTenantActive(lookup.workspaceId)
     const body = requireText(input.body, 'Requester reply', 20_000)
     const inputFingerprint = stableHash({ body, threadDigest })
     const idempotencyKey = context.idempotencyKey === undefined
@@ -2227,7 +2277,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     const replyDigest = idempotencyKey
       ? this.hashToken('reply-idempotency', `${threadDigest}\0${idempotencyKey}`)
       : undefined
-    await this.consumeThreadRateLimit(threadDigest, context)
+    await this.consumeThreadRateLimit(lookup.workspaceId, threadDigest, context)
     if (replyDigest) {
       const existing = await this.documentClient.send(new GetCommand({
         TableName: this.tableName,
@@ -2258,6 +2308,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     const threadToken = requireCapabilityToken(envelope.threadToken, 'Request email thread token')
     const threadDigest = this.hashToken('thread', threadToken)
     const lookup = await this.getThreadLookup(threadDigest)
+    await this.requireTenantActive(lookup.workspaceId)
     const fromAddress = normalizeEmail(envelope.fromAddress)
     if (!lookup.requesterEmail || lookup.requesterEmail !== fromAddress) {
       throw new RequestIntakeError(403, 'RequestEmailSenderDenied', 'Email sender does not match the request thread.')
@@ -2447,22 +2498,32 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
   ) {
     const maximumBytesBeforeUpload = maxFiles * maxFileSizeBytes - sizeBytes
     try {
-      await this.documentClient.send(new UpdateCommand({
-        TableName: this.tableName,
-        Key: { scopeKey: session.scopeKey, recordKey: session.recordKey },
-        UpdateExpression: 'ADD uploadCount :one, uploadBytes :sizeBytes',
-        ConditionExpression:
-          'attribute_not_exists(usedAt) AND expiresAt >= :nowEpoch AND (attribute_not_exists(uploadCount) OR uploadCount < :maxFiles) AND (attribute_not_exists(uploadBytes) OR uploadBytes <= :maximumBytesBeforeUpload)',
-        ExpressionAttributeValues: {
-          ':one': 1,
-          ':sizeBytes': sizeBytes,
-          ':nowEpoch': Math.floor(this.now().getTime() / 1_000),
-          ':maxFiles': maxFiles,
-          ':maximumBytesBeforeUpload': maximumBytesBeforeUpload,
-        },
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          ...this.createTenantWriteGuard(session.workspaceId),
+          {
+            Update: {
+              TableName: this.tableName,
+              Key: { scopeKey: session.scopeKey, recordKey: session.recordKey },
+              UpdateExpression: 'ADD uploadCount :one, uploadBytes :sizeBytes',
+              ConditionExpression:
+                'attribute_not_exists(usedAt) AND expiresAt >= :nowEpoch AND (attribute_not_exists(uploadCount) OR uploadCount < :maxFiles) AND (attribute_not_exists(uploadBytes) OR uploadBytes <= :maximumBytesBeforeUpload)',
+              ExpressionAttributeValues: {
+                ':one': 1,
+                ':sizeBytes': sizeBytes,
+                ':nowEpoch': Math.floor(this.now().getTime() / 1_000),
+                ':maxFiles': maxFiles,
+                ':maximumBytesBeforeUpload': maximumBytesBeforeUpload,
+              },
+            },
+          },
+        ],
       }))
     } catch (error) {
       if (isConditionalFailure(error)) {
+        if (!await this.tenantAvailability.isActive(session.workspaceId)) {
+          throw unavailableForm()
+        }
         throw new RequestIntakeError(409, 'RequestAttachmentLimitExceeded', 'Attachment upload limit was reached.')
       }
       throw toRequestStoreError(error)
@@ -2641,6 +2702,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     }
     assertStoredRequestItemSize(next)
     const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+      ...this.createTenantWriteGuard(lookup.workspaceId),
       {
         Put: {
           TableName: this.tableName,
@@ -2683,6 +2745,9 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       return receipt
     } catch (error) {
       if (dedupe && isConditionalFailure(error)) {
+        if (!await this.tenantAvailability.isActive(lookup.workspaceId)) {
+          throw unavailableForm()
+        }
         const existing = await this.documentClient.send(new GetCommand({
           TableName: this.tableName,
           Key: { scopeKey: createLookupScopeKey(dedupe.scope, dedupe.digest), recordKey: 'RECEIPT' },
@@ -2751,6 +2816,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
+          ...this.createTenantWriteGuard(resolution.workspaceId),
           this.createRateLimitUpdate(
             resolution,
             operation,
@@ -2770,7 +2836,12 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
         ],
       }))
     } catch (error) {
-      if (isConditionalFailure(error)) throw requestRateLimited()
+      if (isConditionalFailure(error)) {
+        if (!await this.tenantAvailability.isActive(resolution.workspaceId)) {
+          throw unavailableForm()
+        }
+        throw requestRateLimited()
+      }
       throw toRequestStoreError(error)
     }
   }
@@ -2792,9 +2863,13 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     )
   }
 
-  private async consumeThreadRateLimit(threadDigest: string, context: RequestExternalContext) {
+  private async consumeThreadRateLimit(
+    workspaceId: string,
+    threadDigest: string,
+    context: RequestExternalContext,
+  ) {
     const resolution: RequestLinkResolution = {
-      workspaceId: 'thread',
+      workspaceId,
       formId: 'thread',
       accessMode: 'public',
       tokenDigest: threadDigest,
@@ -2811,11 +2886,12 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
   }
 
   private async consumeThreadReadRateLimit(
+    workspaceId: string,
     threadDigest: string,
     context: RequestExternalContext,
   ) {
     const resolution: RequestLinkResolution = {
-      workspaceId: 'thread',
+      workspaceId,
       formId: 'thread',
       accessMode: 'public',
       tokenDigest: threadDigest,
@@ -2841,15 +2917,38 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       this.now(),
     )
     try {
-      await this.documentClient.send(new UpdateCommand(update.Update))
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          ...this.createTenantWriteGuard(resolution.workspaceId),
+          update,
+        ],
+      }))
     } catch (error) {
-      if (isConditionalFailure(error)) throw requestRateLimited()
+      if (isConditionalFailure(error)) {
+        if (!await this.tenantAvailability.isActive(resolution.workspaceId)) {
+          throw unavailableForm()
+        }
+        throw requestRateLimited()
+      }
       throw toRequestStoreError(error)
     }
   }
 
   private hashToken(kind: string, value: string) {
     return createHmac('sha256', this.tokenHashSecret).update(`${kind}\0${value}`).digest('hex')
+  }
+
+  /** Rejects public traffic after a tenant closure transition. */
+  private async requireTenantActive(workspaceId: string): Promise<void> {
+    if (!await this.tenantAvailability.isActive(workspaceId)) throw unavailableForm()
+  }
+
+  /** Returns a transaction guard when the configured lifecycle adapter supports one. */
+  private createTenantWriteGuard(
+    workspaceId: string,
+  ): NonNullable<TransactWriteCommandInput['TransactItems']> {
+    const condition = this.tenantAvailability.createActiveWriteCondition?.(workspaceId)
+    return condition ? [condition] : []
   }
 
   private async ensureReady() {
@@ -2863,9 +2962,23 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
   }
 }
 
-/** Environment から標準 Request intake client を作成します。 */
-export function createDefaultRequestIntakeClient(): RequestIntakeClient {
-  return new DynamoDbRequestIntakeClient()
+/**
+ * Creates the production Request Intake client with a mandatory tenant lifecycle guard.
+ *
+ * @param tenantAvailability - Active-tenant read and atomic write boundary.
+ * @returns A configured Request Intake client.
+ */
+export function createDefaultRequestIntakeClient(
+  tenantAvailability: RequestIntakeTenantAvailability,
+): RequestIntakeClient {
+  return new DynamoDbRequestIntakeClient({ tenantAvailability })
+}
+
+/** Explicit compatibility boundary used only by directly constructed test/local clients. */
+const ALLOW_ACTIVE_TENANT: RequestIntakeTenantAvailability = {
+  async isActive() {
+    return true
+  },
 }
 
 const editableFormCapabilities = {

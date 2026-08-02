@@ -1,4 +1,5 @@
 import * as cdk from 'aws-cdk-lib';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 import { configureAlarmRouting } from './aspects/alarm-routing';
 import { buildLambdaBuildPaths } from './config/lambda-build-paths';
@@ -36,6 +37,7 @@ import { buildConnectorWorkers } from './subsystems/workers/connectors';
 import { buildEnterpriseIdentityWorkers } from './subsystems/workers/enterprise-identity';
 import { buildRequestEmailWorker } from './subsystems/workers/request-email';
 import { buildScheduleWorkers } from './subsystems/workers/schedules';
+import { buildTenantOperationWorker } from './subsystems/workers/tenant-operation';
 import { buildWebhookDeliveryWorkers } from './subsystems/workers/webhook-delivery';
 import { buildWorkItemImportWorker } from './subsystems/workers/work-item-import';
 
@@ -283,6 +285,34 @@ export class CdkStack extends cdk.Stack {
       parameters,
       runtimeControls,
     });
+    const tenantOperationWorker = buildTenantOperationWorker(this, {
+      dataStores,
+      fileStorage,
+      lambdaBuildPaths,
+      parameters,
+      runtimeControls,
+      workspaceAuditPseudonymSecret:
+        apiTransports.workspaceAuditPseudonymSecret,
+    });
+    apiRuntime.apiFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['s3:ListBucket'],
+      resources: [tenantOperationWorker.tenantExportBucket.bucketArn],
+      conditions: {
+        StringLike: {
+          's3:prefix': ['tenant-exports/*'],
+        },
+      },
+    }));
+    apiRuntime.apiFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['s3:GetObject'],
+      resources: [
+        tenantOperationWorker.tenantExportBucket.arnForObjects('tenant-exports/*'),
+      ],
+    }));
+    apiRuntime.apiFunction.addEnvironment(
+      'TENANT_EXPORT_BUCKET_NAME',
+      tenantOperationWorker.tenantExportBucket.bucketName,
+    );
 
     configureAlarmRouting(this, {
       notificationTopicArns: parameters.alarmNotificationTopicArns,
@@ -304,6 +334,7 @@ export class CdkStack extends cdk.Stack {
       ...automationWorkers,
       ...scheduleWorkers,
       ...requestEmailWorker,
+      ...tenantOperationWorker,
       ...runtimeControls,
       workspaceDirectoryId: parameters.workspaceDirectoryId,
     });

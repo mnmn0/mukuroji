@@ -86,6 +86,7 @@ export function buildWebhookDeliveryWorkers(
     developerPlatformWebhookKey,
     enterpriseIdentityTable,
     projectDirectoryTable,
+    tenantAdministrationTable,
     workspaceAccessTable,
   } = input.dataStores;
   const {
@@ -274,6 +275,8 @@ export function buildWebhookDeliveryWorkers(
         PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME:
           'WebhookAuthorizationIndex',
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
+        TENANT_ADMINISTRATION_TABLE_NAME:
+          tenantAdministrationTable.tableName,
         WEBHOOK_DELIVERY_QUEUE_URL: webhookDeliveryQueue.queueUrl,
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
       },
@@ -315,6 +318,7 @@ export function buildWebhookDeliveryWorkers(
         developerPlatformTable.tableArn,
         enterpriseIdentityTable.tableArn,
         projectDirectoryTable.tableArn,
+        tenantAdministrationTable.tableArn,
         workspaceAccessTable.tableArn,
       ],
     }),

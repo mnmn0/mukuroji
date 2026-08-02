@@ -23,6 +23,7 @@ import {
 import {
   DynamoDbWorkspaceAccessClient,
 } from '../../modules/workspace-access/workspace-access'
+import { createProductionTenantFeatureGate } from './tenant-administration'
 
 /**
  * Production Webhook SQS queue adapter を作成します。
@@ -37,7 +38,12 @@ export function createProductionWebhookQueue(): WebhookDeliveryQueue {
 export function createProductionWebhookProjectionHandler(
   queue = createProductionWebhookQueue(),
 ) {
-  return createWebhookProjectionHandler({ queue })
+  return createWebhookProjectionHandler({
+    featureAvailability: createProductionTenantFeatureGate(
+      'developer-platform',
+    ),
+    queue,
+  })
 }
 
 /**
@@ -78,6 +84,9 @@ export function createProductionWebhookDeliveryHandler(
     grantCleanup: new DynamoDbWebhookGrantCleanupStore(),
     queue,
     claims: new DynamoDbWebhookDeliveryClaimStore(),
+    featureAvailability: createProductionTenantFeatureGate(
+      'developer-platform',
+    ),
     deliver: deliverPreparedWebhook,
     now: () => new Date(),
     random: Math.random,

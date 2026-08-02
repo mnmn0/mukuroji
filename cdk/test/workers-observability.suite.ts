@@ -115,6 +115,9 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
           PROJECT_DIRECTORY_TABLE_NAME: {
             Ref: 'ProjectDirectoryTable9ED01C01',
           },
+          TENANT_ADMINISTRATION_TABLE_NAME: {
+            Ref: 'TenantAdministrationTable621D59EB',
+          },
           WORKSPACE_ACCESS_TABLE_NAME: {
             Ref: 'WorkspaceAccessTableD7C8D2C7',
           },
@@ -219,6 +222,34 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
   expect(actionsForTable('AuditEventsTable0723963E')).toEqual([
     'dynamodb:PutItem',
   ]);
+  expect(actionsForTable('TenantAdministrationTable621D59EB')).toEqual([
+    'dynamodb:ConditionCheckItem',
+    'dynamodb:GetItem',
+    'dynamodb:PutItem',
+    'dynamodb:Query',
+  ]);
+  const tenantTransactionStatement = roleStatements.find((statement) => {
+    const actions = Array.isArray(statement.Action)
+      ? statement.Action
+      : [statement.Action];
+    return actions.includes('dynamodb:ConditionCheckItem') &&
+      actions.includes('dynamodb:PutItem') &&
+      JSON.stringify(statement.Resource).includes(
+        'TenantAdministrationTable621D59EB',
+      );
+  });
+  expect(tenantTransactionStatement).toEqual({
+    Action: ['dynamodb:ConditionCheckItem', 'dynamodb:PutItem'],
+    Condition: {
+      'ForAnyValue:StringEquals': {
+        'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+      },
+    },
+    Effect: 'Allow',
+    Resource: {
+      'Fn::GetAtt': ['TenantAdministrationTable621D59EB', 'Arn'],
+    },
+  });
   expect(actionsForTable('TeamIssuesTable189D851D')).toEqual([
     'dynamodb:DescribeTable',
   ]);
@@ -288,6 +319,8 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
   const projectDirectoryTableLogicalId =
     template.toJSON().Outputs.ProjectDirectoryTableName?.Value?.Ref;
   const workItemsTableLogicalId = template.toJSON().Outputs.WorkItemsTableName?.Value?.Ref;
+  const tenantAdministrationTableLogicalId =
+    template.toJSON().Outputs.TenantAdministrationTableName?.Value?.Ref;
   const workspaceAccessTableLogicalId =
     template.toJSON().Outputs.WorkspaceAccessTableName?.Value?.Ref;
 
@@ -295,12 +328,14 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
   expect(typeof auditTableLogicalId).toBe('string');
   expect(typeof projectDirectoryTableLogicalId).toBe('string');
   expect(typeof workItemsTableLogicalId).toBe('string');
+  expect(typeof tenantAdministrationTableLogicalId).toBe('string');
   expect(typeof workspaceAccessTableLogicalId).toBe('string');
   if (
     typeof analyticsTableLogicalId !== 'string' ||
     typeof auditTableLogicalId !== 'string' ||
     typeof projectDirectoryTableLogicalId !== 'string' ||
     typeof workItemsTableLogicalId !== 'string' ||
+    typeof tenantAdministrationTableLogicalId !== 'string' ||
     typeof workspaceAccessTableLogicalId !== 'string'
   ) {
     throw new Error('Analytics schedule data table outputs must reference tables.');
@@ -319,6 +354,7 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
         MUKUROJI_PROJECT_DIRECTORY_TABLE: { Ref: projectDirectoryTableLogicalId },
         MUKUROJI_WORK_ITEMS_TABLE: { Ref: workItemsTableLogicalId },
         SYSTEM_ADMIN_GROUPS: { Ref: 'SystemAdminGroups' },
+        TENANT_ADMINISTRATION_TABLE_NAME: { Ref: tenantAdministrationTableLogicalId },
         WORKSPACE_ACCESS_TABLE_NAME: { Ref: workspaceAccessTableLogicalId },
       }),
     },
@@ -358,6 +394,7 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
   expect(serializedSchedulePolicies).toContain(auditTableLogicalId);
   expect(serializedSchedulePolicies).toContain(projectDirectoryTableLogicalId);
   expect(serializedSchedulePolicies).toContain(workItemsTableLogicalId);
+  expect(serializedSchedulePolicies).toContain(tenantAdministrationTableLogicalId);
   expect(serializedSchedulePolicies).toContain(workspaceAccessTableLogicalId);
   expect(serializedSchedulePolicies).toContain('CognitoUserPoolId');
   expect(serializedSchedulePolicies).toContain('cognito-idp:AdminListGroupsForUser');
@@ -400,6 +437,9 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
   expect(new Set(actionsForResource(workspaceAccessTableLogicalId))).toEqual(
     new Set(['dynamodb:GetItem']),
   );
+  expect(new Set(actionsForResource(tenantAdministrationTableLogicalId))).toEqual(
+    new Set(['dynamodb:GetItem']),
+  );
 
   const scheduleDynamoActions = scheduleStatements
     .flatMap((statement) => {
@@ -425,7 +465,9 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
     JSON.stringify(resource).includes(auditTableLogicalId)
   );
 
-  expect(auditStreamMappings).toHaveLength(2);
+  expect(auditStreamMappings.some((resource) =>
+    JSON.stringify(resource).includes('AnalyticsScheduleFunction')
+  )).toBe(false);
 });
 
 test('durable Work Item imports use retained versioned sources and an isolated resumable worker', () => {
@@ -438,6 +480,8 @@ test('durable Work Item imports use retained versioned sources and an isolated r
   const outputs = template.toJSON().Outputs;
   const enterpriseIdentityTableId = outputs.EnterpriseIdentityTableName?.Value?.Ref;
   const planningTableId = outputs.PlanningTableName?.Value?.Ref;
+  const tenantAdministrationTableId =
+    outputs.TenantAdministrationTableName?.Value?.Ref;
   const workItemConfigurationTableId =
     outputs.WorkItemConfigurationTableName?.Value?.Ref;
   const workspaceAccessTableId = outputs.WorkspaceAccessTableName?.Value?.Ref;
@@ -464,6 +508,7 @@ test('durable Work Item imports use retained versioned sources and an isolated r
   expect(workerEntry).toBeDefined();
   expect(typeof enterpriseIdentityTableId).toBe('string');
   expect(typeof planningTableId).toBe('string');
+  expect(typeof tenantAdministrationTableId).toBe('string');
   expect(typeof workItemConfigurationTableId).toBe('string');
   expect(typeof workspaceAccessTableId).toBe('string');
   if (!importBucketEntry || !importQueueEntry || !importDlqEntry || !workerEntry) {
@@ -620,6 +665,7 @@ test('durable Work Item imports use retained versioned sources and an isolated r
         DEVELOPER_PLATFORM_TABLE_NAME: { Ref: 'DeveloperPlatformTable772E085C' },
         ENTERPRISE_IDENTITY_TABLE_NAME: { Ref: enterpriseIdentityTableId },
         PLANNING_TABLE_NAME: { Ref: planningTableId },
+        TENANT_ADMINISTRATION_TABLE_NAME: { Ref: tenantAdministrationTableId },
         MUKUROJI_RUNTIME_ROLE: 'work-item-import-worker',
         WORK_ITEM_IMPORT_BUCKET_NAME: { Ref: importBucketId },
         WORK_ITEM_IMPORT_QUEUE_URL: { Ref: importQueueId },
@@ -642,6 +688,7 @@ test('durable Work Item imports use retained versioned sources and an isolated r
   )?.[1];
   expect(workerPolicy).toBeDefined();
   const serializedWorkerPolicy = JSON.stringify(workerPolicy);
+  expect(serializedWorkerPolicy).toContain(String(tenantAdministrationTableId));
   const workerStatements = (
     workerPolicy as {
       Properties?: {
@@ -817,7 +864,7 @@ test('public API workers and the migration provider use retained 90-day log grou
   assertRetainedLogGroup([...providerLogGroupIds][0]);
 });
 
-test('audit stream projects all downstream deliveries with one combined consumer', () => {
+test('audit stream isolates downstream delivery and retention consumers', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
 
@@ -857,6 +904,9 @@ test('audit stream projects all downstream deliveries with one combined consumer
         },
         SYSTEM_ADMIN_GROUPS: {
           Ref: 'SystemAdminGroups',
+        },
+        TENANT_ADMINISTRATION_TABLE_NAME: {
+          Ref: 'TenantAdministrationTable621D59EB',
         },
         MUKUROJI_RUNTIME_ROLE: 'audit-projection',
         MUKUROJI_WORK_ITEMS_TABLE: {
@@ -957,6 +1007,7 @@ test('audit stream projects all downstream deliveries with one combined consumer
   expect(serializedProjectionPolicy).toContain('cognito-idp:AdminListGroupsForUser');
   expect(serializedProjectionPolicy).toContain('CognitoUserPoolId');
   expect(serializedProjectionPolicy).toContain('TeamIssuesTable189D851D');
+  expect(serializedProjectionPolicy).toContain('TenantAdministrationTable621D59EB');
   expect(serializedProjectionPolicy).not.toContain('DeveloperPlatformTable772E085C');
   expect(serializedProjectionPolicy).not.toContain('LookupKeyIndex');
   expect(serializedProjectionPolicy).toContain('WebhookDeliveryQueue2A244492');
@@ -1009,11 +1060,12 @@ test('audit stream projects all downstream deliveries with one combined consumer
     ).Properties?.EventSourceArn;
     return JSON.stringify(eventSourceArn).includes('AuditEventsTable0723963E');
   }) as Array<{ Properties: { FunctionName: { Ref: string } } }>;
-  expect(auditStreamMappings).toHaveLength(2);
+  expect(auditStreamMappings).toHaveLength(3);
   expect(auditStreamMappings.map(({ Properties }) => Properties.FunctionName.Ref).sort())
     .toEqual([
       'AutomationEventFunction5E8CB543',
       'CollaborationProjectionFunction1AAC5764',
+      'TenantOperationFunction9BEB780E',
     ]);
 });
 
@@ -1067,6 +1119,9 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
       PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME:
         'WebhookAuthorizationIndex',
       SYSTEM_ADMIN_GROUPS: { Ref: 'SystemAdminGroups' },
+      TENANT_ADMINISTRATION_TABLE_NAME: {
+        Ref: 'TenantAdministrationTable621D59EB',
+      },
       WEBHOOK_DELIVERY_QUEUE_URL: {
         Ref: 'WebhookDeliveryQueue2A244492',
       },
@@ -1283,6 +1338,7 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
   expect(deliveryPolicies).toContain(enterpriseIdentityTableId);
   expect(deliveryPolicies).toContain('ProjectDirectoryTable9ED01C01');
   expect(deliveryPolicies).toContain('WorkspaceAccessTableD7C8D2C7');
+  expect(deliveryPolicies).toContain('TenantAdministrationTable621D59EB');
   expect(deliveryPolicies).toContain('WebhookDeliveryQueue2A244492');
   expect(deliveryPolicies).toContain('dynamodb:PutItem');
   expect(deliveryPolicies).toContain('dynamodb:UpdateItem');
@@ -1311,6 +1367,9 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
     { 'Fn::GetAtt': [developerPlatformTableId, 'Arn'] },
     { 'Fn::GetAtt': [enterpriseIdentityTableId, 'Arn'] },
     { 'Fn::GetAtt': [projectDirectoryTableId, 'Arn'] },
+    {
+      'Fn::GetAtt': ['TenantAdministrationTable621D59EB', 'Arn'],
+    },
     { 'Fn::GetAtt': [workspaceAccessTableId, 'Arn'] },
     {
       'Fn::GetAtt': [
@@ -1319,7 +1378,7 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
       ],
     },
   ]));
-  expect(getItemResources).toHaveLength(6);
+  expect(getItemResources).toHaveLength(7);
   expect(queryResources).toEqual(expect.arrayContaining([
     {
       'Fn::Join': [
@@ -1574,6 +1633,9 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
         Variables: Match.objectLike({
           CONNECTOR_SYNC_QUEUE_URL: { Ref: queueId },
           MUKUROJI_RUNTIME_ROLE: runtimeRole,
+          TENANT_ADMINISTRATION_TABLE_NAME: {
+            Ref: 'TenantAdministrationTable621D59EB',
+          },
         }),
       },
     });
@@ -1733,12 +1795,14 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
   expect(projectionPolicies).not.toContain('ConnectorRuntimeSecret');
   expect(projectionPolicies).not.toContain('DeveloperPlatformTable772E085C');
   expect(projectionPolicies).toContain('WebhookDeliveryQueue2A244492');
+  expect(projectionPolicies).toContain('TenantAdministrationTable621D59EB');
   expect(workerPolicies).toContain(secretId);
   expect(workerPolicies).toContain(queueId);
   expect(workerPolicies).toContain('DeveloperPlatformTable772E085C');
   expect(workerPolicies).toContain('TeamIssuesTable189D851D');
   expect(workerPolicies).toContain('AuditEventsTable0723963E');
   expect(workerPolicies).toContain('WorkspaceAccessTableD7C8D2C7');
+  expect(workerPolicies).toContain('TenantAdministrationTable621D59EB');
   expect(workerAuthorizationConditionStatement).toEqual({
     Action: 'dynamodb:ConditionCheckItem',
     Condition: {
@@ -1809,6 +1873,7 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
   }
   expect(pollPolicies).toContain(queueId);
   expect(pollPolicies).toContain(developerPlatformTableId);
+  expect(pollPolicies).toContain('TenantAdministrationTable621D59EB');
   expect(pollPolicies).toContain('dynamodb:DeleteItem');
   expect(pollPolicies).toContain('dynamodb:GetItem');
   expect(pollPolicies).toContain('dynamodb:Query');
@@ -1911,7 +1976,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     },
     MaximumRetryAttempts: 2,
   });
-  template.resourceCountIs('AWS::SQS::Queue', 18);
+  template.resourceCountIs('AWS::SQS::Queue', 25);
   template.hasResourceProperties('AWS::SQS::Queue', {
     MessageRetentionPeriod: 1209600,
     SqsManagedSseEnabled: true,
@@ -1968,7 +2033,7 @@ test('application Lambdas emit active X-Ray traces and critical DLQs survive rep
 
   template.resourcePropertiesCountIs('AWS::Lambda::Function', {
     TracingConfig: { Mode: 'Active' },
-  }, 21);
+  }, 28);
 
   for (const logicalIdPrefix of [
     'CollaborationProjectionDlq',
@@ -1978,6 +2043,7 @@ test('application Lambdas emit active X-Ray traces and critical DLQs survive rep
     'NotificationScheduleDlq',
     'EnterpriseScimGroupJobDlq',
     'EnterpriseIdentityMaintenanceDlq',
+    'TenantOperationDlq',
   ]) {
     const queueEntry = Object.entries(queues).find(([logicalId]) =>
       logicalId.startsWith(logicalIdPrefix)
@@ -1995,6 +2061,232 @@ test('application Lambdas emit active X-Ray traces and critical DLQs survive rep
       }),
     }));
   }
+});
+
+test('tenant retention worker can query and reconcile only tenant and audit stores', () => {
+  const resources = synthesizedTemplate.toJSON().Resources;
+  const policy = Object.entries(resources).find(([logicalId, resource]) =>
+    logicalId.startsWith('TenantOperationFunctionServiceRoleDefaultPolicy') &&
+    (resource as { Type?: string }).Type === 'AWS::IAM::Policy'
+  )?.[1] as {
+    Properties?: { PolicyDocument?: { Statement?: Array<Record<string, unknown>> } };
+  } | undefined;
+  const statements = policy?.Properties?.PolicyDocument?.Statement ?? [];
+  const auditStatement = statements.find((statement) =>
+    JSON.stringify(statement.Resource).includes('AuditEventsTable0723963E')
+  );
+  const tenantStatement = statements.find((statement) =>
+    JSON.stringify(statement.Resource).includes('TenantAdministrationTable621D59EB')
+  );
+
+  expect(auditStatement).toEqual(expect.objectContaining({
+    Effect: 'Allow',
+    Action: expect.arrayContaining([
+      'dynamodb:GetItem',
+      'dynamodb:Query',
+      'dynamodb:UpdateItem',
+      'dynamodb:PutItem',
+    ]),
+  }));
+  expect(tenantStatement).toEqual(expect.objectContaining({
+    Effect: 'Allow',
+    Action: expect.arrayContaining([
+      'dynamodb:GetItem',
+      'dynamodb:Query',
+      'dynamodb:PutItem',
+      'dynamodb:DeleteItem',
+    ]),
+  }));
+  expect(JSON.stringify(policy)).not.toContain('secretsmanager:');
+  expect(JSON.stringify(policy)).not.toContain('s3:');
+
+  const mappings = Object.values(resources).filter((resource) =>
+    (resource as { Type?: string }).Type === 'AWS::Lambda::EventSourceMapping' &&
+    JSON.stringify(resource).includes('TenantOperationFunction9BEB780E')
+  ) as Array<{
+    Properties?: {
+      EventSourceArn?: unknown;
+      FilterCriteria?: { Filters?: Array<{ Pattern?: string }> };
+    };
+  }>;
+  expect(mappings).toHaveLength(2);
+  const tenantMapping = mappings.find((mapping) =>
+    JSON.stringify(mapping.Properties?.EventSourceArn)
+      .includes('TenantAdministrationTable621D59EB')
+  );
+  const auditMapping = mappings.find((mapping) =>
+    JSON.stringify(mapping.Properties?.EventSourceArn)
+      .includes('AuditEventsTable0723963E')
+  );
+  expect(tenantMapping).toBeDefined();
+  expect(auditMapping).toBeDefined();
+  expect(JSON.stringify(tenantMapping?.Properties?.FilterCriteria))
+    .toContain('\\\"eventName\\\":[\\\"INSERT\\\",\\\"MODIFY\\\"]');
+  expect(JSON.stringify(auditMapping?.Properties?.FilterCriteria))
+    .toContain('\\\"eventName\\\":[\\\"INSERT\\\"]');
+  const operationPattern = tenantMapping?.Properties?.FilterCriteria?.Filters
+    ?.map(({ Pattern }) => Pattern ?? '')
+    .find((pattern) => pattern.includes('operation'));
+  expect(operationPattern).toContain('"eventName":["INSERT","MODIFY"]');
+});
+
+test('tenant lifecycle execution is split into queued environment-bound resource owners', () => {
+  const document = synthesizedTemplate.toJSON();
+  const resources = document.Resources;
+  const capacityPlanningTableId =
+    document.Outputs.CapacityPlanningTableName?.Value?.Ref;
+  expect(typeof capacityPlanningTableId).toBe('string');
+  const specifications = [
+    {
+      functionId: 'TenantExportCapabilityFunction9B1A8023',
+      outputId: 'TenantExportCapabilityFunctionName',
+      executorId: 'executor:tenant-export',
+      allowedSteps: 'snapshot,prepare-artifact,verify-artifact,export',
+      owner: 'export',
+      queuePrefix: 'TenantExportExecutionQueue',
+    },
+    {
+      functionId: 'TenantAccessCapabilityFunction394667B9',
+      outputId: 'TenantAccessCapabilityFunctionName',
+      executorId: 'executor:tenant-access-revocation',
+      allowedSteps: 'revoke-access',
+      owner: 'access',
+      queuePrefix: 'TenantAccessExecutionQueue',
+    },
+    {
+      functionId: 'TenantIdentityCapabilityFunctionD1DC9097',
+      outputId: 'TenantIdentityCapabilityFunctionName',
+      executorId: 'executor:tenant-member-anonymization',
+      allowedSteps: 'anonymize-members',
+      owner: 'identity',
+      queuePrefix: 'TenantIdentityExecutionQueue',
+    },
+    {
+      functionId: 'TenantDataCapabilityFunction8F76A72C',
+      outputId: 'TenantDataCapabilityFunctionName',
+      executorId: 'executor:tenant-data-deletion',
+      allowedSteps: 'delete-data',
+      owner: 'data',
+      queuePrefix: 'TenantDataExecutionQueue',
+    },
+    {
+      functionId: 'TenantSecretsCapabilityFunctionAA395B2E',
+      outputId: 'TenantSecretsCapabilityFunctionName',
+      executorId: 'executor:tenant-secret-deletion',
+      allowedSteps: 'delete-secrets',
+      owner: 'secrets',
+      queuePrefix: 'TenantSecretsExecutionQueue',
+    },
+    {
+      functionId: 'TenantVerificationCapabilityFunctionFBC78F82',
+      outputId: 'TenantVerificationCapabilityFunctionName',
+      executorId: 'executor:tenant-closure-verification',
+      allowedSteps: 'verify',
+      owner: 'verification',
+      queuePrefix: 'TenantVerificationExecutionQueue',
+    },
+  ];
+
+  for (const specification of specifications) {
+    const resource = resources[specification.functionId];
+    expect(resource).toEqual(expect.objectContaining({
+      Type: 'AWS::Lambda::Function',
+      Properties: expect.objectContaining({
+        Handler: 'index.resourceOwnerHandler',
+        MemorySize: 512,
+        ReservedConcurrentExecutions: 1,
+        Runtime: 'nodejs22.x',
+        Timeout: 300,
+        Environment: expect.objectContaining({
+          Variables: expect.objectContaining({
+            TENANT_OPERATION_ALLOWED_STEPS: specification.allowedSteps,
+            TENANT_OPERATION_EXECUTOR_ID: specification.executorId,
+            TENANT_OPERATION_RESOURCE_OWNER: specification.owner,
+            TENANT_OPERATION_RESOURCE_OWNER_QUEUE_URL: expect.anything(),
+            CAPACITY_PLANNING_TABLE_NAME: { Ref: capacityPlanningTableId },
+            AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX:
+              'mukuroji/automation-inbound-webhooks',
+            AUTOMATION_WEBHOOK_SECRET_PREFIX:
+              'mukuroji/automation-webhooks',
+            TENANT_OPERATION_PSEUDONYM_SECRET_ARN: {
+              Ref: 'ApiWorkspaceAuditPseudonymValueSecretC16FD0F8',
+            },
+            WORK_ITEM_IMPORT_BUCKET_NAME: {
+              Ref: 'WorkItemImportBucket14068778',
+            },
+          }),
+        }),
+      }),
+    }));
+    expect(document.Outputs[specification.outputId]?.Value).toEqual({
+      Ref: specification.functionId,
+    });
+    expect(
+      resource.Properties.Environment.Variables,
+    ).not.toHaveProperty('MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY');
+
+    const policy = Object.entries(resources).find(([logicalId]) =>
+      logicalId.startsWith(
+        `${specification.functionId.slice(0, -8)}ServiceRoleDefaultPolicy`,
+      )
+    )?.[1];
+    const serializedPolicy = JSON.stringify(policy);
+    expect(policy).toBeDefined();
+    expect(serializedPolicy).toContain('TenantAdministrationTable621D59EB');
+    expect(serializedPolicy).toContain('AuditEventsTable0723963E');
+    expect(serializedPolicy).toContain('secretsmanager:GetSecretValue');
+    if (specification.owner === 'secrets') {
+      expect(serializedPolicy).toContain('secretsmanager:ListSecrets');
+      expect(serializedPolicy).toContain('secretsmanager:DeleteSecret');
+      expect(serializedPolicy).toContain('mukuroji/automation-webhooks/');
+      expect(serializedPolicy).toContain('mukuroji/automation-inbound-webhooks/');
+    } else if (specification.owner === 'verification') {
+      expect(serializedPolicy).toContain('secretsmanager:ListSecrets');
+      expect(serializedPolicy).not.toContain('secretsmanager:DeleteSecret');
+    } else {
+      expect(serializedPolicy).not.toContain('secretsmanager:ListSecrets');
+      expect(serializedPolicy).not.toContain('secretsmanager:DeleteSecret');
+    }
+    if (specification.owner === 'export' || specification.owner === 'data') {
+      expect(serializedPolicy).toContain('s3:');
+      expect(serializedPolicy).toContain(String(capacityPlanningTableId));
+      expect(serializedPolicy).toContain('WorkItemImportBucket14068778');
+      if (specification.owner === 'export') {
+        expect(serializedPolicy).toContain('s3:GetObjectVersion');
+      } else {
+        expect(serializedPolicy).toContain('s3:DeleteObjectVersion');
+      }
+    } else if (specification.owner === 'verification') {
+      expect(serializedPolicy).toContain('s3:ListBucketVersions');
+      expect(serializedPolicy).not.toContain('s3:DeleteObject');
+      expect(serializedPolicy).toContain(String(capacityPlanningTableId));
+      expect(serializedPolicy).toContain('WorkItemImportBucket14068778');
+    } else {
+      expect(serializedPolicy).not.toContain('s3:');
+      expect(serializedPolicy).not.toContain('WorkItemImportBucket14068778');
+    }
+    const queueId = Object.keys(resources).find((logicalId) =>
+      logicalId.startsWith(specification.queuePrefix) &&
+      resources[logicalId]?.Type === 'AWS::SQS::Queue'
+    );
+    expect(queueId).toBeDefined();
+    expect(Object.values(resources)).toContainEqual(expect.objectContaining({
+      Type: 'AWS::Lambda::EventSourceMapping',
+      Properties: expect.objectContaining({
+        BatchSize: 1,
+        EventSourceArn: { 'Fn::GetAtt': [queueId, 'Arn'] },
+        FunctionName: { Ref: specification.functionId },
+        FunctionResponseTypes: ['ReportBatchItemFailures'],
+      }),
+    }));
+  }
+
+  expect(resources.TenantOperationFunction9BEB780E.Properties.Handler)
+    .toBe('index.handler');
+  expect(
+    resources.TenantOperationFunction9BEB780E.Properties.Environment.Variables
+      .TENANT_OPERATION_ALLOWED_STEPS,
+  ).toBeUndefined();
 });
 
 test('request email ingestion is an asynchronous narrow-IAM Lambda with a monitored DLQ', () => {
@@ -2021,6 +2313,9 @@ test('request email ingestion is an asynchronous narrow-IAM Lambda with a monito
           REQUEST_EMAIL_WEBHOOK_SECRET: { Ref: 'RequestEmailWebhookSecret' },
           REQUEST_INTAKE_TABLE_NAME: expect.anything(),
           REQUEST_TOKEN_HASH_SECRET: { Ref: 'RequestTokenHashSecret' },
+          TENANT_ADMINISTRATION_TABLE_NAME: {
+            Ref: 'TenantAdministrationTable621D59EB',
+          },
         }),
       }),
     }),
@@ -2043,6 +2338,7 @@ test('request email ingestion is an asynchronous narrow-IAM Lambda with a monito
 
   expect(policies).not.toHaveLength(0);
   expect(serializedPolicies).toContain(String(requestTableLogicalId));
+  expect(serializedPolicies).toContain('TenantAdministrationTable621D59EB');
   expect(serializedPolicies).toContain('dynamodb:GetItem');
   expect(serializedPolicies).toContain('dynamodb:PutItem');
   expect(serializedPolicies).not.toContain('dynamodb:TransactWriteItems');
@@ -2125,6 +2421,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         MUKUROJI_SYSTEM_ADMIN_GROUPS: { Ref: 'SystemAdminGroups' },
         PROJECT_DIRECTORY_TABLE_NAME: { Ref: 'ProjectDirectoryTable9ED01C01' },
         SYSTEM_ADMIN_GROUPS: { Ref: 'SystemAdminGroups' },
+        TENANT_ADMINISTRATION_TABLE_NAME: { Ref: 'TenantAdministrationTable621D59EB' },
         WORK_ITEM_CONFIGURATION_TABLE_NAME: { Ref: 'WorkItemConfigurationTable35E94558' },
         WORK_ITEMS_TABLE_NAME: { Ref: 'TeamIssuesTable189D851D' },
         WORKSPACE_SEARCH_TABLE_NAME: { Ref: 'WorkspaceSearchTable2575AD6B' },
@@ -2149,6 +2446,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         MUKUROJI_SYSTEM_ADMIN_GROUPS: { Ref: 'SystemAdminGroups' },
         PROJECT_DIRECTORY_TABLE_NAME: { Ref: 'ProjectDirectoryTable9ED01C01' },
         SYSTEM_ADMIN_GROUPS: { Ref: 'SystemAdminGroups' },
+        TENANT_ADMINISTRATION_TABLE_NAME: { Ref: 'TenantAdministrationTable621D59EB' },
         WORK_ITEM_CONFIGURATION_TABLE_NAME: { Ref: 'WorkItemConfigurationTable35E94558' },
         WORK_ITEMS_TABLE_NAME: { Ref: 'TeamIssuesTable189D851D' },
         WORKSPACE_SEARCH_TABLE_NAME: { Ref: 'WorkspaceSearchTable2575AD6B' },
@@ -2214,6 +2512,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
     expect(serialized).toContain('FileProofingTable81DA272F');
     expect(serialized).toContain('ProjectDirectoryTable9ED01C01');
     expect(serialized).toContain('TeamIssuesTable189D851D');
+    expect(serialized).toContain('TenantAdministrationTable621D59EB');
     expect(serialized).toContain('WorkspaceSearchTable2575AD6B');
     const statements = (policy as {
       Properties?: { PolicyDocument?: { Statement?: Array<Record<string, unknown>> } };
@@ -2290,6 +2589,18 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         'dynamodb:GetItem',
         'dynamodb:Query',
       ]),
+    }));
+    const tenantEntitlementStatement = statements.find((statement) => {
+      const actions = Array.isArray(statement.Action)
+        ? statement.Action
+        : [statement.Action];
+      return actions.includes('dynamodb:GetItem') &&
+        JSON.stringify(statement.Resource)
+          .includes('TenantAdministrationTable621D59EB');
+    });
+    expect(tenantEntitlementStatement).toEqual(expect.objectContaining({
+      Effect: 'Allow',
+      Action: 'dynamodb:GetItem',
     }));
   }
   for (const policyPrefix of [

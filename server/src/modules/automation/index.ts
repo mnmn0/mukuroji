@@ -109,6 +109,9 @@ export {
   type AutomationWebhookSender,
 } from './automation-webhook'
 export {
+  type AutomationFeatureEntitlementPort,
+} from './application/ports/feature-entitlement-port'
+export {
   createAutomationEventProcessor,
   parseAutomationStreamRecord,
   processAutomationEventBatch,

@@ -28,6 +28,7 @@ import { createDefaultFileProofingClient } from '../../modules/files/file-proofi
 import { DynamoDbTeamIssuesClient } from '../../modules/work-items'
 import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'
 import { DynamoDbWorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
+import { createProductionTenantFeatureGate } from './tenant-administration'
 
 /**
  * Creates only the production ports used by Automation actions.
@@ -68,8 +69,12 @@ export function createProductionAutomationEventHandler() {
   const actionExecutor = createAutomationActionExecutor(
     createAutomationActionDependencies(automationClient, teamIssues),
   )
+  const tenantFeatureGate = createProductionTenantFeatureGate('automation')
   const processor = createAutomationEventProcessor(
     automationClient,
+    {
+      isAutomationEnabled: (workspaceId) => tenantFeatureGate.isEnabled(workspaceId),
+    },
     new AutomationEngine(automationClient, actionExecutor),
     teamIssues,
   )
@@ -91,12 +96,16 @@ export function createProductionAutomationScheduleHandler() {
       new DynamoDbTeamIssuesClient(),
     ),
   )
+  const tenantFeatureGate = createProductionTenantFeatureGate('automation')
 
   return (event: AutomationScheduleEvent = {}) =>
     processAutomationSchedule(
       resolveAutomationScheduleProcessingTime(event),
       {
         client: automationClient,
+        entitlement: {
+          isAutomationEnabled: (workspaceId) => tenantFeatureGate.isEnabled(workspaceId),
+        },
         actionExecutor,
         inboundWebhookSecrets,
       },

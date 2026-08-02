@@ -72,6 +72,16 @@ const runtimeControlledEntrypoints: readonly RuntimeControlledEntrypoint[] = [
     surface: 'request-intake-email',
   },
   {
+    filename: 'tenant-operation-execution-handler.ts',
+    exportName: 'handler',
+    surface: 'tenant-operation-execution',
+  },
+  {
+    filename: 'tenant-operation-execution-handler.ts',
+    exportName: 'resourceOwnerHandler',
+    surface: 'tenant-operation-execution',
+  },
+  {
     filename: 'webhook-handler.ts',
     exportName: 'deliveryHandler',
     surface: 'webhook-delivery',
@@ -96,6 +106,19 @@ test('guards every deployed worker and realtime entrypoint with its exact surfac
       )
       expect(compactSource).toContain(
         "createRuntimeControlGuardedHandler( 'audit-projection',",
+      )
+      continue
+    }
+
+    if (entrypoint.surface === 'tenant-operation-execution') {
+      const factory = entrypoint.exportName === 'handler'
+        ? 'createTenantOperationExecutionEntrypoint'
+        : 'createTenantOperationResourceOwnerEntrypoint'
+      expect(compactSource).toContain(
+        `export const ${entrypoint.exportName} = ${factory}(`,
+      )
+      expect(compactSource).toContain(
+        "createRuntimeControlGuardedHandler( 'tenant-operation-execution',",
       )
       continue
     }

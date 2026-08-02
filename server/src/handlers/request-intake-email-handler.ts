@@ -5,13 +5,16 @@ import {
 import {
   createDefaultRequestIntakeClient,
 } from '../modules/request-intake/request-intake'
+import { createProductionTenantAvailability } from '../app/composition/tenant-administration'
 import { createLazySingleton } from '../app/composition/lazy-singleton'
 import {
   createRuntimeControlGuardedHandler,
 } from '../app/composition/runtime-control'
 
 const getProductionHandler = createLazySingleton(() =>
-  createRequestEmailHandler(createDefaultRequestIntakeClient()))
+  createRequestEmailHandler(createDefaultRequestIntakeClient(
+    createProductionTenantAvailability(),
+  )))
 
 /**
  * Passes one admitted signed email to the Request Intake application port.

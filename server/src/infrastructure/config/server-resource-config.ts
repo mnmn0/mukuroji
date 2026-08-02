@@ -13,6 +13,10 @@ export interface ServerDynamoDbResourceConfig {
   readonly auditEventsTableName: string
   /** Enterprise Identity control table name. */
   readonly enterpriseIdentityTableName: string
+  /** Tenant administration and data-governance table name. */
+  readonly tenantAdministrationTableName: string
+  /** Workspace membership table sealed by tenant closure verification. */
+  readonly workspaceAccessTableName: string
 }
 
 /**
@@ -34,5 +38,10 @@ export function loadServerDynamoDbResourceConfig(
     enterpriseIdentityTableName:
       environment.ENTERPRISE_IDENTITY_TABLE_NAME ??
         'mukuroji-enterprise-identity',
+    tenantAdministrationTableName:
+      environment.TENANT_ADMINISTRATION_TABLE_NAME ??
+        'mukuroji-tenant-administration',
+    workspaceAccessTableName:
+      environment.WORKSPACE_ACCESS_TABLE_NAME ?? 'mukuroji-workspace-access',
   })
 }

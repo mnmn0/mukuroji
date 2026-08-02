@@ -61,9 +61,6 @@ import {
   DynamoDbDocumentsClient,
 } from '../../modules/documents/adapter-out/dynamodb/dynamo-db-documents-client'
 import {
-  DynamoDbDocumentAuthorizationRevisionMutationAdapter,
-} from '../../modules/documents/adapter-out/dynamodb/document-authorization'
-import {
   createEnterpriseIdentityClient,
   createEnterpriseIdentityCapabilities,
 } from '../../modules/enterprise-identity'
@@ -96,7 +93,10 @@ import {
   type WorkItemImportSourceStore,
 } from '../../modules/work-items'
 import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
-import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'
+import {
+  createProductionTenantExportDownloadClient,
+  type TenantEntitlementEnforcement,
+} from '../../modules/tenant-administration'
 import { DynamoDbWorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
 import { createProductionQueueWebhookDeliveryMessage } from './webhook'
 import {
@@ -105,6 +105,10 @@ import {
   TimeTrackingService,
   type TimeTrackingIdempotencyPort,
 } from '../../modules/time-tracking'
+import {
+  createProductionTenantAvailability,
+  createProductionTenantMeteredWorkspaceAccess,
+} from './tenant-administration'
 import {
   CapacityPlanningService,
   DynamoDbCapacityPlanningRepository,
@@ -441,17 +445,19 @@ export function createProductionAuthenticationDependencies(): AuthenticationDepe
  */
 export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
   const enterpriseIdentityClient = createEnterpriseIdentityClient()
+  const { tenantAdministration, workspaceAccess } =
+    createProductionTenantMeteredWorkspaceAccess()
   return {
     dashboardSummary: new DynamoDbDashboardSummaryClient(),
     projectDirectory: new DynamoDbProjectDirectoryClient(),
     auditEvents: createAuditEventsClient(),
-    workspaceAccess: new DynamoDbWorkspaceAccessClient({
-      documentAuthorizationRevisionMutationPort:
-        new DynamoDbDocumentAuthorizationRevisionMutationAdapter(),
-    }),
+    workspaceAccess,
     enterpriseIdentity: createEnterpriseIdentityCapabilities(enterpriseIdentityClient),
     enterpriseSessionActivity: createEnterpriseSessionActivityClient(),
     enterpriseIdentityProviderConnectionTester: testEnterpriseIdentityProviderConnection,
+    tenantAdministration,
+    tenantExportDownload: createProductionTenantExportDownloadClient(),
+    tenantEntitlementEnforcement: tenantAdministration,
   }
 }
 
@@ -473,7 +479,9 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
     workspaceSearchProjectionEnabled: shouldEnableWorkspaceSearchProjection(),
     workItemConfigurations: createWorkItemConfigurationClient(),
     planning: createPlanningClient(),
-    requestIntake: createDefaultRequestIntakeClient(),
+    requestIntake: createDefaultRequestIntakeClient(
+      createProductionTenantAvailability(),
+    ),
     analytics: createAnalyticsRepository(),
   }
 }
@@ -549,6 +557,19 @@ function createTestOperationalDependencies(): OperationalDependencies {
     recordAccess() {},
     recordError() {},
     runtimeControl: createStaticRuntimeControlProvider('enabled'),
+  }
+}
+
+/**
+ * Creates permissive entitlement enforcement for route tests unrelated to billing policy.
+ *
+ * @returns An isolated no-op enforcement port that never performs network I/O.
+ */
+function createTestTenantEntitlementEnforcement(): TenantEntitlementEnforcement {
+  return {
+    async assertActive() {},
+    async assertFeature() {},
+    async reserveUsage() {},
   }
 }
 
@@ -675,6 +696,10 @@ export function createTestAppDependencies(): AppDependencies {
   return {
     ...production,
     operational: createTestOperationalDependencies(),
+    workspace: {
+      ...production.workspace,
+      tenantEntitlementEnforcement: createTestTenantEntitlementEnforcement(),
+    },
     workItems: {
       ...production.workItems,
       workItemConfigurations: createDefaultWorkItemConfigurationClient(),
@@ -749,6 +774,17 @@ export function overrideAppDependencies(
               overrides.enterpriseIdentityProviderConnectionTester,
           }
         : {}),
+      ...(overrides.tenantAdministration
+        ? { tenantAdministration: overrides.tenantAdministration }
+        : {}),
+      ...(overrides.tenantEntitlementEnforcement
+        ? {
+            tenantEntitlementEnforcement:
+              overrides.tenantEntitlementEnforcement,
+          }
+        : overrides.tenantAdministration
+          ? { tenantEntitlementEnforcement: overrides.tenantAdministration }
+          : {}),
     },
     workItems: {
       ...dependencies.workItems,

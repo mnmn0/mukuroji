@@ -9,6 +9,7 @@ import {
   AutomationError,
   type AutomationInboundWebhookSecretCleanup,
 } from '../../automation'
+import type { AutomationFeatureEntitlementPort } from '../../application/ports'
 import {
   processAutomationSchedule,
   processDueAutomationExecution,
@@ -112,6 +113,13 @@ function createAutomationSchedulePort(
   }
 }
 
+const enabledAutomationEntitlement: AutomationFeatureEntitlementPort = {
+  /** Allows Automation execution in tests focused on schedule behavior. */
+  async isAutomationEnabled() {
+    return true
+  },
+}
+
 describe('automation schedule handler', () => {
   test('validates event time without using an old delivery time for processing leases', () => {
     const wallClock = new Date('2026-07-17T12:00:00.000Z')
@@ -122,6 +130,35 @@ describe('automation schedule handler', () => {
     expect(() => resolveAutomationScheduleProcessingTime({
       time: 'not-a-timestamp',
     }, wallClock)).toThrow('Schedule time is invalid.')
+  })
+
+  test('leaves due work paused when tenant Automation is disabled', async () => {
+    const definition = createRecurringWork()
+    const result = await processRecurringWorkDefinition(
+      definition,
+      new Date(definition.nextRunAt),
+      {
+        client: createAutomationSchedulePort({
+          async getRecurringWork() {
+            return definition
+          },
+        }),
+        entitlement: {
+          /** Denies the tenant feature while preserving the due schedule cursor. */
+          async isAutomationEnabled(workspaceId) {
+            expect(workspaceId).toBe(definition.workspaceId)
+            return false
+          },
+        },
+        actionExecutor: {
+          async execute() {
+            throw new Error('Disabled Automation must not execute actions.')
+          },
+        },
+      },
+    )
+
+    expect(result).toEqual(definition)
   })
 
   test('materializes an on-time skip slot once across schedule redelivery', async () => {
@@ -191,6 +228,7 @@ describe('automation schedule handler', () => {
     })
     const dependencies = {
       client,
+      entitlement: enabledAutomationEntitlement,
       actionExecutor: {
         async execute(action, context) {
           actionExecutions += 1
@@ -295,6 +333,7 @@ describe('automation schedule handler', () => {
     })
     const dependencies = {
       client,
+      entitlement: enabledAutomationEntitlement,
       actionExecutor: {
         async execute() {
           actionExecutions += 1
@@ -375,6 +414,7 @@ describe('automation schedule handler', () => {
     })
     const dependencies = {
       client,
+      entitlement: enabledAutomationEntitlement,
       actionExecutor: {
         async execute(action, context) {
           actionExecutions += 1
@@ -434,6 +474,7 @@ describe('automation schedule handler', () => {
     })
     const dependencies = {
       client,
+      entitlement: enabledAutomationEntitlement,
       actionExecutor: {
         async execute() {
           actionExecutions += 1
@@ -470,6 +511,7 @@ describe('automation schedule handler', () => {
     })
     const dependencies = {
       client,
+      entitlement: enabledAutomationEntitlement,
       actionExecutor: {
         async execute() {
           actionExecutions += 1
@@ -512,6 +554,7 @@ describe('automation schedule handler', () => {
       new Date('2026-07-16T00:00:00.000Z'),
       {
         client,
+        entitlement: enabledAutomationEntitlement,
         actionExecutor: {
           async execute() {
             actionExecutions += 1
@@ -548,6 +591,7 @@ describe('automation schedule handler', () => {
       new Date(definition.nextRunAt),
       {
         client: harness.client,
+        entitlement: enabledAutomationEntitlement,
         actionExecutor: {
           async execute() {
             actionExecutions += 1
@@ -569,6 +613,7 @@ describe('automation schedule handler', () => {
     let actionExecutions = 0
     const dependencies = {
       client: harness.client,
+      entitlement: enabledAutomationEntitlement,
       actionExecutor: {
         async execute() {
           actionExecutions += 1
@@ -622,6 +667,7 @@ describe('automation schedule handler', () => {
     let actionExecutions = 0
     const dependencies = {
       client: harness.client,
+      entitlement: enabledAutomationEntitlement,
       actionExecutor: {
         async execute() {
           actionExecutions += 1
@@ -670,6 +716,7 @@ describe('automation schedule handler', () => {
     let actionExecutions = 0
     const dependencies = {
       client: harness.client,
+      entitlement: enabledAutomationEntitlement,
       actionExecutor: {
         async execute() {
           actionExecutions += 1
@@ -708,6 +755,7 @@ describe('automation schedule handler', () => {
     let actionExecutions = 0
     const dependencies = {
       client: harness.client,
+      entitlement: enabledAutomationEntitlement,
       actionExecutor: {
         async execute() {
           actionExecutions += 1
@@ -746,6 +794,7 @@ describe('automation schedule handler', () => {
     let attempts = 0
     const dependencies = {
       client: harness.client,
+      entitlement: enabledAutomationEntitlement,
       actionExecutor: {
         async execute(action, context) {
           actions.push(structuredClone(action))
@@ -824,6 +873,7 @@ describe('automation schedule handler', () => {
       new Date('2026-07-16T00:00:00.000Z'),
       {
         client: harness.client,
+        entitlement: enabledAutomationEntitlement,
         actionExecutor: {
           async execute() {
             actionExecutions += 1
@@ -932,6 +982,7 @@ describe('automation schedule handler', () => {
       new Date('2026-07-16T00:01:00.000Z'),
       {
         client,
+        entitlement: enabledAutomationEntitlement,
         actionExecutor: {
           async execute(action, context) {
             actionExecutions += 1
@@ -1028,6 +1079,7 @@ describe('automation schedule handler', () => {
       new Date('2026-07-16T00:05:00.000Z'),
       {
         client,
+        entitlement: enabledAutomationEntitlement,
         actionExecutor: {
           async execute() {
             actionExecutions += 1
@@ -1066,6 +1118,7 @@ describe('automation schedule handler', () => {
           calls.push('complete')
         },
       }),
+      entitlement: enabledAutomationEntitlement,
       actionExecutor: { async execute() {} },
       inboundWebhookSecrets: {
         async provision() {

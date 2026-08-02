@@ -134,6 +134,46 @@ describe('durable Work Item import', () => {
     expect(fixture.jobEvents).toEqual(['running', 'failed:validation_failed'])
   })
 
+  test('stops materialization when tenant closure begins between rows', async () => {
+    const fixture = createFixture()
+    const jobId = createWorkItemImportJobId(
+      'workspace-1',
+      'member@example.com',
+      'request-closing',
+    )
+    await stageWorkItemImport(createStageRequest(jobId), fixture)
+    let enabled = true
+    const createdRows: number[] = []
+    const dependencies = createWorkerDependencies(fixture, {
+      async assertTenantEnabled() {
+        if (!enabled) {
+          throw new WorkItemImportError(
+            'ImportTenantUnavailable',
+            'The tenant can no longer execute imports.',
+          )
+        }
+      },
+      async createWorkItem(request) {
+        createdRows.push(request.row)
+        enabled = false
+      },
+    })
+
+    const response = await processWorkItemImportBatch(
+      createSqsEvent(jobId),
+      dependencies,
+    )
+
+    expect(response).toEqual({ batchItemFailures: [] })
+    expect(createdRows).toEqual([1])
+    expect(fixture.execution?.status).toBe('failed')
+    expect(fixture.execution?.terminalReport).toMatchObject({
+      validRows: 1,
+      invalidRows: 1,
+      errors: [{ row: 2, code: 'ImportTenantUnavailable' }],
+    })
+  })
+
   test('persists a bounded row report when asynchronous validation fails', async () => {
     const fixture = createFixture()
     const jobId = createWorkItemImportJobId('workspace-1', 'member@example.com', 'request-invalid')
@@ -718,6 +758,7 @@ function createWorkerDependencies(
       },
     },
     async authorize() {},
+    async assertTenantEnabled() {},
     async validate() {
       return {
         report: {

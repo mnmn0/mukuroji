@@ -55,6 +55,8 @@ export type DataStoreResources = {
   readonly workspaceAccessTable: dynamodb.Table;
   /** Enterprise identity configuration and maintenance table. */
   readonly enterpriseIdentityTable: dynamodb.Table;
+  /** Tenant profile, entitlement, governance, and lifecycle table. */
+  readonly tenantAdministrationTable: dynamodb.Table;
   /** Collaborative documents and whiteboards table. */
   readonly documentsTable: dynamodb.Table;
   /** HMAC secret for public document share tokens. */
@@ -365,6 +367,17 @@ export function buildDataStores(
     timeToLiveAttribute: 'expiresAt',
   });
 
+  const tenantAdministrationTable = new dynamodb.Table(stack, 'TenantAdministrationTable', {
+    partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    encryption: dynamodb.TableEncryption.AWS_MANAGED,
+    pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
+    stream: dynamodb.StreamViewType.NEW_IMAGE,
+    timeToLiveAttribute: 'expiresAt',
+  });
+
   const documentsTable = new dynamodb.Table(stack, 'DocumentsTable', {
     partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
     sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
@@ -461,6 +474,7 @@ export function buildDataStores(
     processedAuditEventsTable,
     workspaceAccessTable,
     enterpriseIdentityTable,
+    tenantAdministrationTable,
     documentsTable,
     documentPublicShareTokenSecret,
     collaborationTable,

@@ -23,11 +23,19 @@ import {
   processAnalyticsSchedule,
   processDueAnalyticsReport,
   resolveAnalyticsScheduleProcessingTime,
+  type AnalyticsFeatureEntitlementPort,
   type AnalyticsScheduleArtifactInput,
 } from './analytics-schedule'
 
 const NOW = new Date('2026-07-18T08:30:00.000Z')
 const SCHEDULED_FOR = '2026-07-18T08:00:00.000Z'
+
+const enabledAnalyticsEntitlement: AnalyticsFeatureEntitlementPort = {
+  /** Allows Analytics execution in tests focused on schedule behavior. */
+  async isAnalyticsEnabled() {
+    return true
+  },
+}
 
 test('renders recipient-specific current ACL data and filters audit events by exact entity ID', async () => {
   const repository = new InMemoryAnalyticsRepository(() => NOW)
@@ -1179,6 +1187,37 @@ test('fails closed when relevant entity history exceeds the schedule event limit
   })
 })
 
+test('leaves due reports paused when tenant Analytics is disabled', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const report = await createScheduledReport(repository, ['recipient@example.com'])
+
+  const result = await processDueAnalyticsReport(report, NOW, {
+    repository,
+    entitlement: {
+      /** Denies Analytics while preserving the due report cursor. */
+      async isAnalyticsEnabled(workspaceId) {
+        expect(workspaceId).toBe(report.workspaceId)
+        return false
+      },
+    },
+    async render() {
+      throw new Error('Disabled Analytics must not render snapshots.')
+    },
+    async renderArtifact() {
+      throw new Error('Disabled Analytics must not render artifacts.')
+    },
+  })
+
+  expect(result).toEqual({
+    processed: false,
+    receiptsCreated: 0,
+    skippedRecipients: 0,
+    snapshotsStored: 0,
+  })
+  expect((await repository.getReport(report.workspaceId, report.id))?.revision)
+    .toBe(report.revision)
+})
+
 test('skips inactive recipients without reading directory, Work Item, or audit data', async () => {
   const repository = new InMemoryAnalyticsRepository(() => NOW)
   const report = await createScheduledReport(repository, ['inactive@example.com'])
@@ -1226,6 +1265,7 @@ test('skips inactive recipients without reading directory, Work Item, or audit d
   const result = await processDueAnalyticsReport(report, NOW, {
     repository,
     render: renderer,
+    entitlement: enabledAnalyticsEntitlement,
     renderArtifact: async () => {},
   })
 
@@ -1277,6 +1317,7 @@ test('retries a partial recipient failure across an ACL change without poisoning
         new Set([`project-${authorizationVersion}`]),
       )
     },
+    entitlement: enabledAnalyticsEntitlement,
     async renderArtifact(input: AnalyticsScheduleArtifactInput) {
       renderedArtifacts.push(input)
     },
@@ -1342,6 +1383,7 @@ test('restarts a partially delivered occurrence under a new semantic report defi
       }
       return createRenderedSnapshot(input.report, input.recipientMemberKey)
     },
+    entitlement: enabledAnalyticsEntitlement,
     renderArtifact: async () => {},
   }
 
@@ -1401,6 +1443,7 @@ test('resumes after durable recipient checkpoints instead of restarting from the
       }
       return createRenderedSnapshot(input.report, input.recipientMemberKey)
     },
+    entitlement: enabledAnalyticsEntitlement,
     renderArtifact: async () => {},
   }
 
@@ -1457,6 +1500,7 @@ test('advances the delivered occurrence after an unrelated report edit wins the 
     async render(input) {
       return createRenderedSnapshot(input.report, input.recipientMemberKey)
     },
+    entitlement: enabledAnalyticsEntitlement,
     renderArtifact: async () => {},
   })
 
@@ -1504,6 +1548,7 @@ test('reprocesses the occurrence when a semantic report edit wins the first CAS'
       renderedRevisions.push(input.report.revision)
       return createRenderedSnapshot(input.report, input.recipientMemberKey)
     },
+    entitlement: enabledAnalyticsEntitlement,
     renderArtifact: async () => {},
   }
 
@@ -1552,6 +1597,7 @@ test('does not overwrite a schedule cursor changed by a concurrent edit', async 
     async render(input) {
       return createRenderedSnapshot(input.report, input.recipientMemberKey)
     },
+    entitlement: enabledAnalyticsEntitlement,
     renderArtifact: async () => {},
   })
 
@@ -1605,6 +1651,7 @@ test('advances past the second DST-fold instant on the same local delivery date'
         input.scheduledFor,
       )
     },
+    entitlement: enabledAnalyticsEntitlement,
     renderArtifact: async () => {},
   })
 
@@ -1621,6 +1668,7 @@ test('does not advance the schedule when every delivery attempt cannot complete'
     async render(input) {
       return createRenderedSnapshot(input.report, input.recipientMemberKey)
     },
+    entitlement: enabledAnalyticsEntitlement,
     async renderArtifact() {
       throw new AnalyticsError(
         503,
@@ -1655,6 +1703,7 @@ test('fails closed when an occurrence receipt has a different immutable payload'
     async render(input) {
       return createRenderedSnapshot(input.report, input.recipientMemberKey)
     },
+    entitlement: enabledAnalyticsEntitlement,
     renderArtifact: async () => {},
   })).rejects.toMatchObject({ code: 'AnalyticsDeliveryConflict' })
 
@@ -1681,6 +1730,7 @@ test('fails closed when a receipt checkpoint identity does not match its lookup 
     async render(input) {
       return createRenderedSnapshot(input.report, input.recipientMemberKey)
     },
+    entitlement: enabledAnalyticsEntitlement,
     renderArtifact: async () => {},
   })).rejects.toMatchObject({ code: 'AnalyticsDeliveryConflict' })
 
@@ -1733,6 +1783,7 @@ test('processes due reports with a bounded worker pool and preserves every settl
         }
         return createRenderedSnapshot(input.report, input.recipientMemberKey)
       },
+      entitlement: enabledAnalyticsEntitlement,
       renderArtifact: async () => {},
     })
   } catch (error) {
@@ -1769,6 +1820,7 @@ test('processes every due report when a shard spans multiple mutating pages', as
       attemptedReportIds.push(input.report.id)
       return createRenderedSnapshot(input.report, input.recipientMemberKey)
     },
+    entitlement: enabledAnalyticsEntitlement,
     renderArtifact: async () => {},
   })
 
@@ -1803,6 +1855,7 @@ test('bounds empty due pages that keep returning continuation cursors', async ()
     async render() {
       throw new Error('Empty due pages must not invoke the renderer.')
     },
+    entitlement: enabledAnalyticsEntitlement,
     renderArtifact: async () => {},
   })).rejects.toMatchObject({
     code: 'AnalyticsScheduleLimitExceeded',

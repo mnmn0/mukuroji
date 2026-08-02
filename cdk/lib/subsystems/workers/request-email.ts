@@ -49,7 +49,7 @@ export function buildRequestEmailWorker(
   scope: cdk.Stack,
   input: RequestEmailWorkerInput,
 ): RequestEmailWorkerResources {
-  const { requestIntakeTable } = input.dataStores;
+  const { requestIntakeTable, tenantAdministrationTable } = input.dataStores;
   const { requestEmailWebhookSecret, requestTokenHashSecret } = input.parameters;
   const { depsLockFilePath, projectRoot, serverHandlersDirectory } = input.lambdaBuildPaths;
 
@@ -84,6 +84,8 @@ export function buildRequestEmailWorker(
         REQUEST_EMAIL_WEBHOOK_SECRET: requestEmailWebhookSecret.valueAsString,
         REQUEST_INTAKE_TABLE_NAME: requestIntakeTable.tableName,
         REQUEST_TOKEN_HASH_SECRET: requestTokenHashSecret.valueAsString,
+        TENANT_ADMINISTRATION_TABLE_NAME:
+          tenantAdministrationTable.tableName,
       },
     },
   );
@@ -96,6 +98,23 @@ export function buildRequestEmailWorker(
     new iam.PolicyStatement({
       actions: ['dynamodb:GetItem'],
       resources: [requestIntakeTable.tableArn],
+    }),
+  );
+  requestEmailIngestionFunction.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem'],
+      resources: [tenantAdministrationTable.tableArn],
+    }),
+  );
+  requestEmailIngestionFunction.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['dynamodb:ConditionCheckItem'],
+      resources: [tenantAdministrationTable.tableArn],
+      conditions: {
+        'ForAnyValue:StringEquals': {
+          'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+        },
+      },
     }),
   );
   requestEmailIngestionFunction.addToRolePolicy(
