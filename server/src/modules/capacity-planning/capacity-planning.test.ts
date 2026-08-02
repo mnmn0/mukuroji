@@ -270,6 +270,74 @@ describe('capacity planning mutations', () => {
     })
   })
 
+  test('keeps an assignment aligned with its resource request Project', async () => {
+    const service = new CapacityPlanningService(
+      new InMemoryCapacityPlanningRepository(),
+      { listTimeEntries: async () => [], listEstimates: async () => [] },
+      { createId: () => 'generated-id' },
+    )
+    await service.saveMemberProfile({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      memberId: 'member-1',
+      skills: [],
+      timeZone: 'UTC',
+      schedule: createDefaultWorkingSchedule(),
+      holidays: [],
+      expectedRevision: 0,
+      expectedTeamRevision: 0,
+      actorMemberId: 'member-1',
+    })
+    const request = await service.createRequest({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      projectId: 'project-a',
+      title: 'Project A support',
+      skillIds: [],
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      requestedMinutes: 480,
+      confidential: false,
+      expectedTeamRevision: 1,
+      actorMemberId: 'member-1',
+    })
+
+    await expect(service.createAssignment({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      requestId: request.id,
+      projectId: 'project-b',
+      memberId: 'member-1',
+      skillIds: [],
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      allocationMinutes: 480,
+      plannedEffortMinutes: 480,
+      confidential: false,
+      status: 'confirmed',
+      expectedTeamRevision: 2,
+      actorMemberId: 'member-1',
+    })).rejects.toMatchObject({ code: 'InvalidResourceAssignment', status: 400 })
+
+    const assignment = await service.createAssignment({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      requestId: request.id,
+      memberId: 'member-1',
+      skillIds: [],
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      allocationMinutes: 480,
+      plannedEffortMinutes: 480,
+      confidential: false,
+      status: 'confirmed',
+      expectedTeamRevision: 2,
+      actorMemberId: 'member-1',
+    })
+
+    expect(assignment.projectId).toBe('project-a')
+  })
+
   test('rejects a state payload that would exceed the DynamoDB item safety budget', async () => {
     const repository = new InMemoryCapacityPlanningRepository()
     const service = new CapacityPlanningService(repository, {

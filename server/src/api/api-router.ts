@@ -4423,7 +4423,9 @@ routeApp.route('/', createCapacityPlanningRouter({
       return undefined
     }
     const context = await requireTeamPermission(principal, teamId, 'viewer')
-    const projectIds = (context.projectAccesses ?? []).map((access) => access.projectId)
+    const projectIds = (context.projectAccesses ?? [])
+      .filter((access) => projectAccessAllows(access, 'viewer'))
+      .map((access) => access.projectId)
     const members = await Promise.all(projectIds.map((projectId) =>
       workspaceDependencies.projectDirectory.getProjectMembers(principal.directoryId, projectId),
     ))
@@ -4437,7 +4439,11 @@ routeApp.route('/', createCapacityPlanningRouter({
       return undefined
     }
     const context = await requireTeamPermission(principal, teamId, 'viewer')
-    return new Set((context.projectAccesses ?? []).map((access) => access.projectId))
+    return new Set(
+      (context.projectAccesses ?? [])
+        .filter((access) => projectAccessAllows(access, 'viewer'))
+        .map((access) => access.projectId),
+    )
   },
   canManageMember: async (principal, teamId, memberId) => {
     if (principal.isSystemAdmin || principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') return true

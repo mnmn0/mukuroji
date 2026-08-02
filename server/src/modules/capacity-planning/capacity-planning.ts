@@ -393,14 +393,18 @@ export class CapacityPlanningService {
         throw new CapacityPlanningError(413, 'CapacityPlanningLimitExceeded', 'The Team has reached its resource assignment limit.')
       }
       requireProfile(state, input.memberId)
-      if (input.requestId) requireRequest(state, input.requestId)
+      const request = input.requestId ? requireRequest(state, input.requestId) : undefined
+      if (request?.projectId && input.projectId && request.projectId !== input.projectId) {
+        throw new CapacityPlanningError(400, 'InvalidResourceAssignment', 'The assignment Project must match its resource request.')
+      }
+      const projectId = input.projectId ?? request?.projectId
       const timestamp = this.now().toISOString()
       const assignment: ResourceAssignment = {
         id: this.createId(),
         workspaceId: input.workspaceId,
         teamId: input.teamId,
         ...(input.requestId ? { requestId: input.requestId } : {}),
-        ...(input.projectId ? { projectId: input.projectId } : {}),
+        ...(projectId ? { projectId } : {}),
         ...(input.workItemId ? { workItemId: input.workItemId } : {}),
         ...(input.cycleId ? { cycleId: input.cycleId } : {}),
         ...(input.recurringWorkId ? { recurringWorkId: input.recurringWorkId } : {}),
