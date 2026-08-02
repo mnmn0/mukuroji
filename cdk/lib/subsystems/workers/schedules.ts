@@ -61,6 +61,7 @@ export function buildScheduleWorkers(
     analyticsTable,
     auditEventsTable,
     projectDirectoryTable,
+    tenantAdministrationTable,
     workItemsTable,
     workspaceAccessTable,
   } = input.dataStores;
@@ -110,6 +111,7 @@ export function buildScheduleWorkers(
         MUKUROJI_PROJECT_DIRECTORY_TABLE: projectDirectoryTable.tableName,
         MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
+        TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
       },
     },
@@ -146,6 +148,10 @@ export function buildScheduleWorkers(
   analyticsScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:GetItem'],
     resources: [workspaceAccessTable.tableArn],
+  }));
+  analyticsScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:GetItem'],
+    resources: [tenantAdministrationTable.tableArn],
   }));
 
   new cloudwatch.Alarm(scope, 'AnalyticsScheduleDlqAlarm', {

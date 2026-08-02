@@ -161,6 +161,11 @@ export type DocumentApiDependencies = {
     memberKey: string,
   ) => Promise<DocumentApiMember | undefined>
   /**
+   * Enforces the Documents entitlement after an opaque public token resolves
+   * to its server-owned Workspace.
+   */
+  assertPublicShareEntitled: (workspaceId: string) => Promise<void>
+  /**
    * Relation/Whiteboard card の target が存在し、actor が閲覧できることを
    * source of truth で一括検証します。
    */
@@ -1042,6 +1047,7 @@ export function registerDocumentApiRoutes(
         throw new DocumentError(404, 'DocumentShareNotFound', 'Document share was not found.')
       }
       const resolved = await dependencies.getClient().resolvePublicShare(token)
+      await dependencies.assertPublicShareEntitled(resolved.workspaceId)
       const response: PublicDocumentResponse = {
         document: toPublicDocument(resolved.document),
         allowExport: resolved.share.allowExport,
@@ -1061,6 +1067,7 @@ export function registerDocumentApiRoutes(
         throw new DocumentError(404, 'DocumentShareNotFound', 'Document share was not found.')
       }
       const resolved = await dependencies.getClient().resolvePublicShare(token)
+      await dependencies.assertPublicShareEntitled(resolved.workspaceId)
       const rendered = renderAuthorizedPublicDocumentExport(
         resolved,
         toPublicDocument(resolved.document),

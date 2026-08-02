@@ -13,6 +13,7 @@ const API_IDENTITY_SECRET_LOGICAL_ID =
   'ApiIdentityRuntimeConfigurationSecret9BDC16DA';
 const API_WORKFLOW_SECRET_LOGICAL_ID =
   'ApiWorkflowRuntimeConfigurationSecret225372D1';
+const TENANT_EXPORT_BUCKET_LOGICAL_ID = 'TenantExportBucket06599E71';
 const API_ENTERPRISE_IDENTITY_TOKEN_HASH_VALUE_SECRET_LOGICAL_ID =
   'ApiEnterpriseIdentityTokenHashValueSecretD05ED67C';
 const API_ENTERPRISE_SSO_STATE_VALUE_SECRET_LOGICAL_ID =
@@ -240,6 +241,9 @@ const expectedDataConfiguration = {
   ),
   PROJECT_DIRECTORY_TABLE_NAME: base64(
     ref('ProjectDirectoryTable9ED01C01'),
+  ),
+  TENANT_ADMINISTRATION_TABLE_NAME: base64(
+    ref('TenantAdministrationTable621D59EB'),
   ),
   WORKSPACE_ACCESS_TABLE_NAME: base64(ref('WorkspaceAccessTableD7C8D2C7')),
   WORKSPACE_SEARCH_MIGRATION_STATE_TABLE_NAME: base64(
@@ -510,7 +514,7 @@ function resolveMaximumSecretName(
 }
 
 /**
- * Resolves an API configuration-secret Ref to a conservative complete ARN.
+ * Resolves an API environment Ref to a conservative value for the size budget.
  *
  * @param value - Lambda environment value.
  * @param parameters - Synthesized CloudFormation parameters.
@@ -524,7 +528,10 @@ function resolveApiEnvironmentValue(
 ): string {
   const expression = requireRecord(value, 'API environment value');
   if (typeof expression.Ref !== 'string') {
-    throw new Error('Every API environment value must Ref a configuration secret.');
+    throw new Error('Every API environment value must Ref a deployment resource.');
+  }
+  if (expression.Ref === TENANT_EXPORT_BUCKET_LOGICAL_ID) {
+    return 'tenant-export-bucket';
   }
   const secret = requireRecord(
     resources[expression.Ref],
@@ -752,6 +759,7 @@ describe('API runtime configuration externalization', () => {
         ref(API_IDENTITY_SECRET_LOGICAL_ID),
       MUKUROJI_API_WORKFLOW_CONFIG_SECRET_ARN:
         ref(API_WORKFLOW_SECRET_LOGICAL_ID),
+      TENANT_EXPORT_BUCKET_NAME: ref(TENANT_EXPORT_BUCKET_LOGICAL_ID),
     });
 
     const resolvedVariables: Record<string, string> = {};

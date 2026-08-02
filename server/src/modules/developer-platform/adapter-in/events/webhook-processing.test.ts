@@ -25,6 +25,22 @@ import {
   type WebhookProjectionStateStore,
 } from './webhook-processing'
 
+/** Always enables Developer Platform processing in tests not focused on entitlement. */
+const enabledFeatureAvailability = {
+  /** Returns true for every deterministic test Workspace. */
+  async isEnabled() {
+    return true
+  },
+}
+
+/** Disables Developer Platform processing for entitlement-focused tests. */
+const disabledFeatureAvailability = {
+  /** Returns false for every deterministic test Workspace. */
+  async isEnabled() {
+    return false
+  },
+}
+
 test('queues an ID-only durable projection locator from a pending audit event', async () => {
   const now = new Date('2026-07-18T00:00:00.000Z')
   const queued: WebhookQueueMessage[] = []
@@ -39,6 +55,7 @@ test('queues an ID-only durable projection locator from a pending audit event', 
       },
     }],
   }, {
+    featureAvailability: enabledFeatureAvailability,
     queue: createRecordingQueue(queued),
   })
 
@@ -67,6 +84,7 @@ test('queues an ID-only grant cleanup job from a Project archive outbox event', 
       },
     }],
   }, {
+    featureAvailability: disabledFeatureAvailability,
     queue: createRecordingQueue(queued),
   })).resolves.toEqual({ batchItemFailures: [] })
   expect(queued).toEqual([{
@@ -76,6 +94,52 @@ test('queues an ID-only grant cleanup job from a Project archive outbox event', 
     teamId: 'team-1',
     projectId: 'project-1',
   }])
+})
+
+test('suppresses projection and HTTP delivery for a disabled tenant', async () => {
+  const now = new Date('2026-07-18T00:00:00.000Z')
+  const queued: WebhookQueueMessage[] = []
+  const event = createWorkItemAuditEvent(now)
+  await expect(processWebhookProjectionBatch({
+    Records: [{
+      eventName: 'INSERT',
+      dynamodb: {
+        SequenceNumber: 'disabled-projection-1',
+        NewImage: marshallRecord(event),
+      },
+    }],
+  }, {
+    featureAvailability: disabledFeatureAvailability,
+    queue: createRecordingQueue(queued),
+  })).resolves.toEqual({ batchItemFailures: [] })
+  expect(queued).toEqual([])
+
+  let claimAttempts = 0
+  let deliveryAttempts = 0
+  await expect(processWebhookDeliveryBatch({
+    Records: [createSqsRecord('delivery-disabled')],
+  }, {
+    auditEvents: createMissingAuditReader(),
+    authorizer: { async canDeliver() { return true } },
+    claims: {
+      async release() {},
+      async tryClaim() {
+        claimAttempts += 1
+        return true
+      },
+    },
+    developerPlatform: createPlatform(() => now),
+    featureAvailability: disabledFeatureAvailability,
+    queue: createRecordingQueue(queued),
+    now: () => now,
+    random: () => 0.5,
+    async deliver() {
+      deliveryAttempts += 1
+      return { succeeded: true, retryable: false }
+    },
+  })).resolves.toEqual({ batchItemFailures: [] })
+  expect(claimAttempts).toBe(0)
+  expect(deliveryAttempts).toBe(0)
 })
 
 test('projects one bounded subscription page and queues a durable continuation', async () => {
@@ -118,6 +182,7 @@ test('projects one bounded subscription page and queues a durable continuation',
   const response = await processWebhookDeliveryBatch({
     Records: [createProjectionSqsRecord(event.eventId)],
   }, {
+    featureAvailability: enabledFeatureAvailability,
     auditEvents: { getEvent: async () => event },
     developerPlatform: platform,
     authorizer: {
@@ -197,6 +262,7 @@ test('does not expand a projection page chain after duplicate messages and send 
   const queued: WebhookQueueMessage[] = []
   const event = createWorkItemAuditEvent(now)
   const dependencies = {
+    featureAvailability: enabledFeatureAvailability,
     auditEvents: { getEvent: async () => event },
     developerPlatform: platform,
     authorizer: { canDeliver: async () => true },
@@ -288,6 +354,7 @@ test('serializes concurrent projection continuation senders across a multi-page 
   }
   const queued: WebhookQueueMessage[] = []
   const dependencies = {
+    featureAvailability: enabledFeatureAvailability,
     auditEvents: { getEvent: async () => event },
     developerPlatform: platform,
     authorizer: { canDeliver: async () => true },
@@ -347,6 +414,7 @@ test('serializes concurrent grant cleanup continuation senders across pages', as
   const queued: WebhookQueueMessage[] = []
   const cleanupRequests: Array<string | undefined> = []
   const dependencies = {
+    featureAvailability: enabledFeatureAvailability,
     auditEvents: createMissingAuditReader(),
     developerPlatform: createPlatform(() => now),
     authorizer: { canDeliver: async () => true },
@@ -461,6 +529,7 @@ test('records a successful signed HTTP attempt in the delivery log', async () =>
   const response = await processWebhookDeliveryBatch({
     Records: [createSqsRecord(fixture.deliveryId)],
   }, {
+    featureAvailability: enabledFeatureAvailability,
     auditEvents: createMissingAuditReader(),
     developerPlatform: fixture.platform,
     authorizer: {
@@ -505,6 +574,7 @@ test('claims a delivery ID before HTTP and retries a concurrent duplicate', asyn
       createSqsRecord(fixture.deliveryId, 'message-duplicate'),
     ],
   }, {
+    featureAvailability: enabledFeatureAvailability,
     auditEvents: createMissingAuditReader(),
     developerPlatform: fixture.platform,
     authorizer: { canDeliver: async () => true },
@@ -541,6 +611,7 @@ test('does not acknowledge a redelivery while a failed attempt lease is active',
   }
   let deliveryCalls = 0
   const dependencies = {
+    featureAvailability: enabledFeatureAvailability,
     auditEvents: createMissingAuditReader(),
     developerPlatform: fixture.platform,
     authorizer: { canDeliver: async () => true },
@@ -736,6 +807,7 @@ test('blocks a queued replay after the subscription creator loses access', async
   const response = await processWebhookDeliveryBatch({
     Records: [createSqsRecord(fixture.deliveryId)],
   }, {
+    featureAvailability: enabledFeatureAvailability,
     auditEvents: createMissingAuditReader(),
     developerPlatform: fixture.platform,
     authorizer: { canDeliver: async () => false },
@@ -761,6 +833,7 @@ test('persists retry schedule and avoids an early duplicate HTTP attempt', async
   const queued: WebhookQueueMessage[] = []
   let deliveryCalls = 0
   const dependencies = {
+    featureAvailability: enabledFeatureAvailability,
     auditEvents: createMissingAuditReader(),
     developerPlatform: fixture.platform,
     authorizer: { canDeliver: async () => true },
@@ -828,6 +901,7 @@ test('records terminal rejection and isolates an invalid queue message', async (
       { messageId: 'invalid-message', body: '{' },
     ],
   }, {
+    featureAvailability: enabledFeatureAvailability,
     auditEvents: createMissingAuditReader(),
     developerPlatform: fixture.platform,
     authorizer: { canDeliver: async () => true },

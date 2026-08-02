@@ -63,6 +63,7 @@ export function buildEnterpriseIdentityWorkers(
     enterpriseIdentityTable,
     planningTable,
     projectDirectoryTable,
+    tenantAdministrationTable,
     workspaceAccessTable,
   } = input.dataStores;
   const {
@@ -120,6 +121,8 @@ export function buildEnterpriseIdentityWorkers(
           workspaceAuditPseudonymKey.valueAsString,
         PLANNING_TABLE_NAME: planningTable.tableName,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
+        TENANT_ADMINISTRATION_TABLE_NAME:
+          tenantAdministrationTable.tableName,
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
       },
     },
@@ -167,6 +170,19 @@ export function buildEnterpriseIdentityWorkers(
   enterpriseScimGroupJobFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:PutItem'],
     resources: [auditEventsTable.tableArn],
+  }));
+  enterpriseScimGroupJobFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:GetItem', 'dynamodb:Query'],
+    resources: [tenantAdministrationTable.tableArn],
+  }));
+  enterpriseScimGroupJobFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:ConditionCheckItem', 'dynamodb:PutItem'],
+    resources: [tenantAdministrationTable.tableArn],
+    conditions: {
+      'ForAnyValue:StringEquals': {
+        'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+      },
+    },
   }));
   enterpriseScimGroupJobFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: [

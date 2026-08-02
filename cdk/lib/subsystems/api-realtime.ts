@@ -87,6 +87,8 @@ export type ApiTransportsAndRealtimeResources = Readonly<{
   readonly httpApi: apigatewayv2.HttpApi;
   /** Auto-deployed production WebSocket stage. */
   readonly realtimeWebSocketStage: apigatewayv2.WebSocketStage;
+  /** Retained Workspace audit pseudonym secret shared with lifecycle workers. */
+  readonly workspaceAuditPseudonymSecret: secretsmanager.ISecret;
 }>;
 
 /**
@@ -271,7 +273,7 @@ function createApiRuntimeConfigurationSecret(
  * @param apiFunction - Replacement API function receiving only secret ARNs.
  * @param httpApi - HTTP API whose stable endpoint is exposed to automation.
  * @param realtimeWebSocketStage - WebSocket stage exposed to the API.
- * @returns Nothing.
+ * @returns The retained pseudonym secret shared with trusted lifecycle workers.
  */
 function bindApiRuntimeConfiguration(
   scope: cdk.Stack,
@@ -279,7 +281,7 @@ function bindApiRuntimeConfiguration(
   apiFunction: lambdaNodejs.NodejsFunction,
   httpApi: apigatewayv2.HttpApi,
   realtimeWebSocketStage: apigatewayv2.WebSocketStage,
-): void {
+): secretsmanager.ISecret {
   const {
     analyticsTable,
     auditEventsTable,
@@ -294,6 +296,7 @@ function bindApiRuntimeConfiguration(
     documentPublicShareTokenSecret,
     documentsTable,
     enterpriseIdentityTable,
+    tenantAdministrationTable,
     legacyTasksTable,
     notificationsTable,
     planningTable,
@@ -449,6 +452,7 @@ function bindApiRuntimeConfiguration(
         developerPlatformWebhookKey.keyArn,
       DOCUMENTS_TABLE_NAME: documentsTable.tableName,
       ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
+      TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,
       MUKUROJI_PROJECT_TASKS_TABLE: legacyTasksTable.tableName,
       MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: teamIssueEventsTable.tableName,
       PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
@@ -524,6 +528,7 @@ function bindApiRuntimeConfiguration(
   enterpriseSsoStateValueSecret.grantRead(apiFunction);
   requestTokenHashValueSecret.grantRead(apiFunction);
   workspaceAuditPseudonymValueSecret.grantRead(apiFunction);
+  return workspaceAuditPseudonymValueSecret;
 }
 
 /**
@@ -550,6 +555,7 @@ export function buildApiRuntime(
     developerPlatformWebhookKey,
     documentsTable,
     enterpriseIdentityTable,
+    tenantAdministrationTable,
     legacyTasksTable,
     notificationsTable,
     planningTable,
@@ -624,6 +630,7 @@ export function buildApiRuntime(
   projectDirectoryTable.grants.readWriteData(apiFunction);
   auditEventsTable.grants.readWriteData(apiFunction);
   workspaceAccessTable.grants.readWriteData(apiFunction);
+  tenantAdministrationTable.grants.readWriteData(apiFunction);
   documentsTable.grants.readWriteData(apiFunction);
   collaborationTable.grants.readWriteData(apiFunction);
   fileProofingTable.grants.readWriteData(apiFunction);
@@ -1213,7 +1220,7 @@ export function buildApiTransportsAndRealtime(
   );
   realtimeWebSocketStage.grantManagementApiAccess(realtimeFunction);
 
-  bindApiRuntimeConfiguration(
+  const workspaceAuditPseudonymSecret = bindApiRuntimeConfiguration(
     scope,
     input,
     apiFunction,
@@ -1264,5 +1271,6 @@ export function buildApiTransportsAndRealtime(
     functionUrl,
     httpApi,
     realtimeWebSocketStage,
+    workspaceAuditPseudonymSecret,
   };
 }

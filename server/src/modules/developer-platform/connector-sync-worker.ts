@@ -178,6 +178,12 @@ export type ConnectorSyncWorkerEngine = Pick<
   'processOutbound' | 'pollInstallation'
 >
 
+/** Tenant entitlement boundary used by connector background processing. */
+export interface ConnectorTenantFeatureAvailability {
+  /** Returns whether Developer Platform processing is enabled for a Workspace. */
+  isEnabled(workspaceId: string): Promise<boolean>
+}
+
 /** Connector sync queue worker の注入可能 dependencies です。 */
 export type ConnectorSyncWorkerDependencies = {
   /** Current installation/link state を返す authoritative store です。 */
@@ -190,6 +196,8 @@ export type ConnectorSyncWorkerDependencies = {
   checkpoints: ConnectorPollCheckpointStore
   /** Inventory continuation message を処理する global secret-free inventory です。 */
   inventory?: ConnectorPollInventory
+  /** Rejects provider work when the tenant entitlement is disabled or closing. */
+  featureAvailability?: ConnectorTenantFeatureAvailability
   /** 1 poll message で読む provider page 上限です。 */
   maximumPollPages?: number
   /** 1 inventory continuation message で読む global inventory page 上限です。 */
@@ -241,6 +249,8 @@ export type ConnectorPollScheduleDependencies = {
   inventory: ConnectorPollInventory
   /** ID-only poll messages を送る durable queue です。 */
   queue: ConnectorSyncQueue
+  /** Filters inventory targets by current tenant entitlement. */
+  featureAvailability?: ConnectorTenantFeatureAvailability
   /** Event input が省略した場合の inventory page 上限です。 */
   maximumPages?: number
 }
@@ -324,6 +334,8 @@ export type ConnectorSyncBatchResponse = {
 export type ConnectorSyncAuditProjectionDependencies = {
   /** Work Item change locator を送る durable queue です。 */
   queue: ConnectorSyncQueue
+  /** Suppresses new provider work for disabled or closing tenants. */
+  featureAvailability?: ConnectorTenantFeatureAvailability
 }
 
 /**
@@ -376,6 +388,12 @@ export async function processConnectorSyncMessage(
   dependencies: ConnectorSyncWorkerDependencies,
 ): Promise<void> {
   const normalized = normalizeQueueMessage(message)
+  if (
+    normalized.kind !== 'disconnect-links' &&
+    normalized.kind !== 'poll-inventory' &&
+    dependencies.featureAvailability &&
+    !await dependencies.featureAvailability.isEnabled(normalized.workspaceId)
+  ) return
   if (normalized.kind === 'work-item-changed') {
     await enqueueCurrentOutboundLinks(normalized, dependencies)
     return
@@ -396,6 +414,9 @@ export async function processConnectorSyncMessage(
     }, {
       inventory: dependencies.inventory,
       queue: dependencies.queue,
+      ...(dependencies.featureAvailability
+        ? { featureAvailability: dependencies.featureAvailability }
+        : {}),
     })
     return
   }
@@ -444,7 +465,14 @@ export async function scheduleConnectorPollInventory(
   while (pages < maximumPages) {
     const page = await dependencies.inventory.listPollTargets(cursor)
     pages += 1
-    const messages = page.targets.flatMap((target) => {
+    const featureAvailability = dependencies.featureAvailability
+    const eligibleTargets = featureAvailability
+      ? (await Promise.all(page.targets.map(async (target) => ({
+          enabled: await featureAvailability.isEnabled(target.workspaceId),
+          target,
+        })))).filter(({ enabled }) => enabled).map(({ target }) => target)
+      : page.targets
+    const messages = eligibleTargets.flatMap((target) => {
       const message = normalizeQueueMessage({
         version: CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION,
         kind: 'poll',
@@ -550,6 +578,10 @@ async function projectAuditRecord(
     }
     return
   }
+  if (
+    dependencies.featureAvailability &&
+    !await dependencies.featureAvailability.isEnabled(event.workspaceId)
+  ) return
   if (isConnectorSyncOrigin(event)) return
   if (event.eventType === 'work-item.updated') {
     const identity = readAuditWorkItemIdentity(event)

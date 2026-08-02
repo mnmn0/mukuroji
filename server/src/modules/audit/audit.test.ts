@@ -123,6 +123,27 @@ test('allows an omitted expiry only for an unknown-time backfill event', () => {
   expect(event.expiresAt).toBeUndefined()
 })
 
+test('omits audit expiry while retention is suspended by legal hold', () => {
+  const context = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'admin-1', kind: 'user' },
+    idempotencyKey: 'tenant-governance-2',
+    occurredAt: '2026-07-11T12:00:00.000Z',
+    request: { method: 'PATCH', path: '/api/tenant/governance', body: { legalHold: true } },
+    source: { kind: 'api', route: '/api/tenant/governance' },
+  })
+
+  const event = createAuditEvent({
+    context,
+    eventType: 'tenant.governance.updated',
+    entity: { type: 'tenant', id: 'workspace-1' },
+    action: 'updated',
+    retentionSuspended: true,
+  })
+
+  expect(event.expiresAt).toBeUndefined()
+})
+
 test('preserves a session-bound break-glass actor kind in immutable events', () => {
   const context = createMutationAuditContext({
     workspaceId: 'workspace-1',

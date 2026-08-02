@@ -14,6 +14,7 @@ import {
   createProductionConnectorAppDependencies,
 } from './api-dependencies'
 import type { AppDependencies } from './app-dependencies'
+import { createProductionTenantFeatureGate } from './tenant-administration'
 
 /** Connector event handlers produced by the domain event adapter. */
 type ConnectorEventHandlers = ReturnType<typeof createConnectorEventHandlers>
@@ -90,6 +91,9 @@ export function createProductionConnectorEventHandlers() {
   const appDependencies = createProductionConnectorAppDependencies()
   const connectors = appDependencies.developerPlatform.connectors
   const externalLinks = appDependencies.developerPlatform.externalLinks
+  const featureAvailability = createProductionTenantFeatureGate(
+    'developer-platform',
+  )
   const handlers = createConnectorEventHandlers({
     platform: {
       listConnectors: (workspaceId) => connectors.listConnectors(workspaceId),
@@ -102,6 +106,7 @@ export function createProductionConnectorEventHandlers() {
     queue: new SqsConnectorSyncQueue(createSqsClient(), queueUrl),
     checkpoints: new DynamoDbConnectorPollCheckpointStore(),
     inventory: new DynamoDbConnectorPollInventory(),
+    featureAvailability,
   })
 
   return bindConnectorEventHandlersToAppDependencies(appDependencies, handlers)

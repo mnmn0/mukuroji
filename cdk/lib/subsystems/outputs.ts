@@ -46,6 +46,8 @@ export type StackOutputResources = {
   readonly workspaceAccessTable: dynamodb.ITable;
   /** Enterprise identity and security state table. */
   readonly enterpriseIdentityTable: dynamodb.ITable;
+  /** Tenant profile, entitlement, governance, and lifecycle table. */
+  readonly tenantAdministrationTable: dynamodb.ITable;
   /** Collaborative documents table. */
   readonly documentsTable: dynamodb.ITable;
   /** Work Item collaboration projection table. */
@@ -126,6 +128,22 @@ export type StackOutputResources = {
   readonly requestEmailIngestionFunction: lambda.IFunction;
   /** Dead-letter queue for request email ingestion failures. */
   readonly requestEmailIngestionDlq: sqs.IQueue;
+  /** Stream-only tenant lifecycle starter and retention worker. */
+  readonly tenantOperationFunction: lambda.IFunction;
+  /** Queued export artifact resource owner. */
+  readonly tenantExportCapabilityFunction: lambda.IFunction;
+  /** Queued access-revocation resource owner. */
+  readonly tenantAccessCapabilityFunction: lambda.IFunction;
+  /** Queued member-anonymization resource owner. */
+  readonly tenantIdentityCapabilityFunction: lambda.IFunction;
+  /** Queued data-deletion resource owner. */
+  readonly tenantDataCapabilityFunction: lambda.IFunction;
+  /** Queued secret-deletion resource owner. */
+  readonly tenantSecretsCapabilityFunction: lambda.IFunction;
+  /** Queued closure-verification resource owner. */
+  readonly tenantVerificationCapabilityFunction: lambda.IFunction;
+  /** Dead-letter queue for tenant lifecycle and retention stream failures. */
+  readonly tenantOperationDlq: sqs.IQueue;
   /** Lambda Function URL for the project task API. */
   readonly functionUrl: lambda.FunctionUrl;
   /** HTTP API Gateway endpoint for the project task API. */
@@ -212,6 +230,9 @@ export function buildStackOutputs(
   });
   new cdk.CfnOutput(scope, 'EnterpriseIdentityTableName', {
     value: resources.enterpriseIdentityTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'TenantAdministrationTableName', {
+    value: resources.tenantAdministrationTable.tableName,
   });
   new cdk.CfnOutput(scope, 'DocumentsTableName', {
     value: resources.documentsTable.tableName,
@@ -332,6 +353,30 @@ export function buildStackOutputs(
   });
   new cdk.CfnOutput(scope, 'RequestEmailIngestionDlqUrl', {
     value: resources.requestEmailIngestionDlq.queueUrl,
+  });
+  new cdk.CfnOutput(scope, 'TenantOperationFunctionName', {
+    value: resources.tenantOperationFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'TenantExportCapabilityFunctionName', {
+    value: resources.tenantExportCapabilityFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'TenantAccessCapabilityFunctionName', {
+    value: resources.tenantAccessCapabilityFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'TenantIdentityCapabilityFunctionName', {
+    value: resources.tenantIdentityCapabilityFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'TenantDataCapabilityFunctionName', {
+    value: resources.tenantDataCapabilityFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'TenantSecretsCapabilityFunctionName', {
+    value: resources.tenantSecretsCapabilityFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'TenantVerificationCapabilityFunctionName', {
+    value: resources.tenantVerificationCapabilityFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'TenantOperationDlqUrl', {
+    value: resources.tenantOperationDlq.queueUrl,
   });
   new cdk.CfnOutput(scope, 'ProjectTasksApiUrl', {
     value: resources.functionUrl.url,

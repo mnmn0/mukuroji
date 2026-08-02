@@ -3894,6 +3894,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       canExport: storedShare.allowExport,
     }
     return {
+      workspaceId: lookup.targetWorkspaceId,
       document,
       share: stripShareStorageFields(storedShare),
     }
