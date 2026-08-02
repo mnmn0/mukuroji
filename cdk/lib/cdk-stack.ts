@@ -197,7 +197,9 @@ export class CdkStack extends cdk.Stack {
     });
     const tenantOperationWorker = buildTenantOperationWorker(this, {
       dataStores,
+      fileStorage,
       lambdaBuildPaths,
+      parameters,
       runtimeControls,
     });
 

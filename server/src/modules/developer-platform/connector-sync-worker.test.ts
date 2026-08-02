@@ -282,6 +282,34 @@ test('does not preload external links before delegating a poll to the engine', a
   expect(fixture.pollCalls).toHaveLength(1)
 })
 
+test('skips provider work for a disabled tenant but still runs disconnect cleanup', async () => {
+  const fixture = createWorkerFixture()
+  fixture.dependencies.featureAvailability = {
+    async isEnabled() {
+      return false
+    },
+  }
+
+  await processConnectorSyncMessage({
+    version: CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION,
+    kind: 'outbound',
+    workspaceId: 'workspace-1',
+    linkId: 'link-1',
+    sourceEventId: 'audit-event-1',
+  }, fixture.dependencies)
+  expect(fixture.readEngineLoads()).toBe(0)
+  expect(fixture.outboundCalls).toEqual([])
+
+  await processConnectorSyncMessage({
+    version: CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION,
+    kind: 'disconnect-links',
+    workspaceId: 'workspace-1',
+    installationId: 'installation-1',
+    lifecycleRevision: 4,
+  }, fixture.dependencies)
+  expect(fixture.pauseCalls).toHaveLength(1)
+})
+
 test('continues disconnected link cleanup through durable ID-only jobs', async () => {
   const fixture = createWorkerFixture({
     disconnectPages: [
@@ -549,6 +577,49 @@ test('enumerates a global secret-free inventory without requiring workspace inpu
       resourceType: 'merge-request',
     },
   ])
+})
+
+test('filters scheduled connector polling by current tenant entitlement', async () => {
+  const queued: ConnectorSyncQueueMessage[] = []
+  const result = await scheduleConnectorPollInventory({}, {
+    featureAvailability: {
+      async isEnabled(workspaceId) {
+        return workspaceId === 'workspace-enabled'
+      },
+    },
+    inventory: {
+      async listPollTargets() {
+        return {
+          targets: [
+            {
+              workspaceId: 'workspace-enabled',
+              installationId: 'installation-enabled',
+              resourceType: 'issue',
+            },
+            {
+              workspaceId: 'workspace-disabled',
+              installationId: 'installation-disabled',
+              resourceType: 'issue',
+            },
+          ],
+        }
+      },
+    },
+    queue: {
+      async enqueue(message) {
+        queued.push(message)
+      },
+    },
+  })
+
+  expect(result).toEqual({ pages: 1, enqueued: 1, continuationQueued: false })
+  expect(queued).toEqual([{
+    version: CONNECTOR_SYNC_QUEUE_MESSAGE_VERSION,
+    kind: 'poll',
+    workspaceId: 'workspace-enabled',
+    installationId: 'installation-enabled',
+    resourceType: 'issue',
+  }])
 })
 
 test('continues a capped global inventory scan through a durable queue job', async () => {

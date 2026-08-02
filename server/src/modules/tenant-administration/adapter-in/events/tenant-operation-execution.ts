@@ -4,12 +4,18 @@ import type {
   DynamoStreamRecord,
 } from '../../../../infrastructure/aws/dynamodb-stream'
 import type { ExecuteTenantOperationInput } from '../../application/tenant-operation-executor'
+import {
+  TENANT_OPERATION_EXECUTION_JOB_VERSION,
+  type TenantOperationExecutionJob,
+} from '../../application/tenant-operation-resource-owner'
 import { TenantAdministrationError } from '../../domain/tenant-administration'
 
 /** Capability used by the internal tenant lifecycle event adapter. */
 export interface TenantOperationExecutionProcessor {
   /** Starts or advances one evidence-backed tenant operation. */
   execute(input: ExecuteTenantOperationInput): Promise<unknown>
+  /** Routes one running step to its capability-isolated durable queue. */
+  dispatchOperationExecution?(job: TenantOperationExecutionJob): Promise<unknown>
   /** Applies one bounded page of tenant audit-retention reconciliation. */
   reconcileAuditRetention(workspaceId: string): Promise<unknown>
   /** Applies current tenant retention policy to one newly inserted audit event. */
@@ -36,6 +42,18 @@ export async function processTenantOperationExecutionBatch(
       const input = readRequestedTenantOperation(record)
       if (input) {
         await processor.execute(input)
+        continue
+      }
+      const executionJob = readRunnableTenantOperation(record)
+      if (executionJob) {
+        if (!processor.dispatchOperationExecution) {
+          throw new TenantAdministrationError(
+            503,
+            'TenantOperationDispatcherUnavailable',
+            'Tenant operation resource-owner dispatcher is unavailable.',
+          )
+        }
+        await processor.dispatchOperationExecution(executionJob)
         continue
       }
       const retentionWorkspaceId = readTenantRetentionWorkspace(record)
@@ -136,6 +154,54 @@ export function readRequestedTenantOperation(
   }
 }
 
+/**
+ * Reads one running tenant operation into an ID-only resource-owner job.
+ *
+ * @param record - Candidate DynamoDB stream record.
+ * @returns A validated queue job, or undefined for another record or state.
+ */
+export function readRunnableTenantOperation(
+  record: DynamoStreamRecord,
+): TenantOperationExecutionJob | undefined {
+  if (record.eventName !== 'INSERT' && record.eventName !== 'MODIFY') {
+    return undefined
+  }
+  const image = record.dynamodb?.NewImage
+  const workspaceId = image?.workspaceId?.S
+  const recordKey = image?.recordKey?.S
+  const payload = image?.payload?.S
+  if (
+    image?.kind?.S !== 'operation' ||
+    !recordKey?.startsWith('OPERATION#')
+  ) {
+    return undefined
+  }
+  if (!workspaceId || !payload) throw malformedTenantOperationRecord()
+  let value: unknown
+  try {
+    value = JSON.parse(payload)
+  } catch {
+    throw malformedTenantOperationRecord()
+  }
+  if (
+    !isRecord(value) ||
+    value.status !== 'running' ||
+    typeof value.operationId !== 'string' ||
+    value.workspaceId !== workspaceId ||
+    recordKey !== `OPERATION#${value.operationId}` ||
+    !isTenantOperationStep(value.currentStep)
+  ) {
+    if (isRecord(value) && value.status !== 'running') return undefined
+    throw malformedTenantOperationRecord()
+  }
+  return {
+    version: TENANT_OPERATION_EXECUTION_JOB_VERSION,
+    workspaceId,
+    operationId: value.operationId,
+    step: value.currentStep,
+  }
+}
+
 /** Newly inserted audit event fields needed to enforce tenant retention. */
 export type TenantAuditRetentionEvent = {
   /** Canonical Workspace identifier. */
@@ -205,4 +271,19 @@ function isTenantOperationStatus(value: unknown): boolean {
     value === 'completed' ||
     value === 'failed' ||
     value === 'verified'
+}
+
+/** Returns true for one bounded tenant lifecycle step. */
+function isTenantOperationStep(
+  value: unknown,
+): value is TenantOperationExecutionJob['step'] {
+  return value === 'snapshot' ||
+    value === 'prepare-artifact' ||
+    value === 'verify-artifact' ||
+    value === 'export' ||
+    value === 'revoke-access' ||
+    value === 'anonymize-members' ||
+    value === 'delete-data' ||
+    value === 'delete-secrets' ||
+    value === 'verify'
 }

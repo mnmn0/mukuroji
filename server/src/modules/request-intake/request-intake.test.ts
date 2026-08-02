@@ -21,6 +21,7 @@ import {
   validateRequestFormDefinition,
   validateRequestFormDraft,
   type RequestLinkResolution,
+  type RequestIntakeTenantAvailability,
 } from './request-intake'
 
 const now = new Date('2026-07-16T09:00:00.000Z')
@@ -434,6 +435,7 @@ function createClient(
   options: {
     objectClient?: FileObjectClient
     rateLimitPerHour?: number
+    tenantAvailability?: RequestIntakeTenantAvailability
     token?: () => string
   } = {},
 ) {
@@ -448,6 +450,9 @@ function createClient(
     now: () => new Date(now),
     token: options.token ?? (() => threadToken),
     bootstrapLocalTable: false,
+    ...(options.tenantAvailability
+      ? { tenantAvailability: options.tenantAvailability }
+      : {}),
   })
 }
 
@@ -1011,12 +1016,81 @@ test('returns an allowlisted public DTO without routing or storage keys', async 
   expect(publicJson).not.toContain('team-core')
   expect(publicJson).not.toContain('triage@example.com')
   expect(publicJson).not.toContain('scopeKey')
-  const sessionWrite = writes.find((command) =>
-    (command.input.Item as { entryType?: string } | undefined)?.entryType === 'submission-session'
-  )
-  expect(sessionWrite?.input.Item).toMatchObject({
+  const sessionWrite = writes.flatMap((command) => {
+    const items = command.input.TransactItems
+    return Array.isArray(items) ? items : []
+  }).find((item) => {
+    if (!item || typeof item !== 'object' || !('Put' in item)) return false
+    const put = item.Put
+    return put && typeof put === 'object' && 'Item' in put &&
+      put.Item && typeof put.Item === 'object' &&
+      'entryType' in put.Item && put.Item.entryType === 'submission-session'
+  })
+  expect(sessionWrite).toMatchObject({ Put: { Item: {
     entryType: 'submission-session',
     formVersion: 1,
+  } } })
+})
+
+test('serializes public writes with tenant closure and rejects unavailable tenants', async () => {
+  const form = createStoredForm()
+  const version = createStoredVersion()
+  const transactions: FakeCommand[] = []
+  const tenantCondition = {
+    ConditionCheck: {
+      TableName: 'tenant-administration-table',
+      Key: { workspaceId: 'workspace-1', recordKey: 'PROFILE' },
+      ConditionExpression: '#lifecycleStatus = :active',
+    },
+  }
+  const client = createClient(createDocumentClient((command) => {
+    const key = command.input.Key
+    const recordKey = key && typeof key === 'object' && 'recordKey' in key
+      ? key.recordKey
+      : undefined
+    if (recordKey === 'FORM_ROOT#form-1') return { Item: form }
+    if (typeof recordKey === 'string' && recordKey.includes('#VERSION#')) {
+      return { Item: version }
+    }
+    if (command.input.TransactItems) {
+      transactions.push(command)
+      return {}
+    }
+    throw new Error(`Unexpected command: ${JSON.stringify(command.input)}`)
+  }), {
+    tenantAvailability: {
+      createActiveWriteCondition: () => tenantCondition,
+      async isActive() {
+        return true
+      },
+    },
+    token: () => sessionToken,
+  })
+
+  await expect(client.getPublicForm(
+    resolution,
+    { clientKey: 'client-1' },
+  )).resolves.toMatchObject({ formId: 'form-1' })
+  expect(transactions).toHaveLength(2)
+  for (const transaction of transactions) {
+    expect(transaction.input.TransactItems).toContainEqual(tenantCondition)
+  }
+
+  const unavailable = createClient(createDocumentClient(() => {
+    throw new Error('Storage must not be touched for an unavailable tenant.')
+  }), {
+    tenantAvailability: {
+      async isActive() {
+        return false
+      },
+    },
+  })
+  await expect(unavailable.getPublicForm(
+    resolution,
+    { clientKey: 'client-1' },
+  )).rejects.toMatchObject({
+    code: 'RequestFormUnavailable',
+    status: 404,
   })
 })
 
@@ -1029,7 +1103,11 @@ test('atomically enforces client and link-global rate limits with isolated names
     const key = command.input.Key as { recordKey?: string } | undefined
     if (key?.recordKey === 'FORM_ROOT#form-1') return { Item: form }
     if (key?.recordKey?.includes('#VERSION#')) return { Item: version }
-    if ((command.input.Item as { entryType?: string } | undefined)?.entryType === 'submission-session') {
+    const transactionItems = command.input.TransactItems
+    if (
+      Array.isArray(transactionItems) &&
+      transactionItems.some((item) => JSON.stringify(item).includes('submission-session'))
+    ) {
       return {}
     }
     throw new Error(`Unexpected command: ${JSON.stringify(command.input)}`)
@@ -1156,6 +1234,10 @@ test('claims an attachment after submission session renewal without persisting t
   const client = createClient(createDocumentClient((command) => {
     if (command.input.TransactItems) {
       transaction = command.input.TransactItems as typeof transaction
+      const attachmentPut = transaction?.find(({ Put }) =>
+        Put?.Item?.entryType === 'attachment-upload'
+      )?.Put?.Item
+      if (attachmentPut) storedUpload = attachmentPut
       return {}
     }
     if (command.input.ReturnValues === 'UPDATED_NEW') {

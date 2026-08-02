@@ -185,7 +185,7 @@ export interface TenantAdministrationClient extends TenantEntitlementEnforcement
     actorMemberKey: string,
     operationId: string,
   ): Promise<TenantOperation>
-  /** Resumes one paused workflow. */
+  /** Starts one held requested workflow or resumes one paused workflow. */
   resumeOperation(
     workspaceId: string,
     actorMemberKey: string,

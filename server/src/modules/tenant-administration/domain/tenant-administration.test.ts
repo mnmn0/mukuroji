@@ -6,6 +6,7 @@ import {
   assertTenantGovernanceEnforced,
   beginTenantUsageMutation,
   createDefaultTenantAdministrationSnapshot,
+  failTenantOperation,
   pauseTenantOperation,
   recordTenantBillingPeriod,
   reserveTenantUsage,
@@ -24,6 +25,17 @@ describe('tenant administration domain', () => {
     expect(snapshot.profile.workspaceId).toBe('workspace-1')
     expect(snapshot.profile.ownerMemberKey).toBe('member-1')
     expect(snapshot.entitlement.seatLimit).toBe(5)
+    expect(snapshot.entitlement).toMatchObject({
+      plan: 'enterprise',
+      features: [
+        'documents',
+        'analytics',
+        'automation',
+        'developer-platform',
+        'sso',
+        'scim',
+      ],
+    })
     expect(snapshot.usage.activeSeats).toBe(1)
     expect(snapshot.billingPeriods).toEqual([
       expect.objectContaining({
@@ -169,6 +181,14 @@ describe('tenant administration domain', () => {
       revision: 0,
     }
     const running = advanceTenantOperation(requested, undefined, '2026-08-02T00:01:00.000Z')
+    expect(resumeTenantOperation(
+      requested,
+      '2026-08-02T00:00:30.000Z',
+    )).toMatchObject({
+      status: 'running',
+      currentStep: 'export',
+      revision: 1,
+    })
     expect(() => pauseTenantOperation(requested, '2026-08-02T00:00:30.000Z')).toThrow(
       'Tenant operation cannot be paused.',
     )
@@ -177,6 +197,27 @@ describe('tenant administration domain', () => {
       'Tenant operation cannot be paused.',
     )
     const resumed = resumeTenantOperation(paused, '2026-08-02T00:02:00.000Z')
+    expect(failTenantOperation(
+      {
+        ...resumed,
+        currentStep: 'revoke-access',
+        completedSteps: ['export'],
+      },
+      'ACCESS_REVOKE_FAILED',
+      '2026-08-02T00:02:30.000Z',
+    )).toMatchObject({
+      status: 'failed',
+      failureCode: 'ACCESS_REVOKE_FAILED',
+    })
+    expect(() => failTenantOperation(
+      {
+        ...resumed,
+        currentStep: 'delete-data',
+        completedSteps: ['export', 'revoke-access', 'anonymize-members'],
+      },
+      'DATA_DELETE_FAILED',
+      '2026-08-02T00:02:30.000Z',
+    )).toThrow('must remain sealed for recovery')
     const proofs: TenantOperationStepProof[] = [
       { step: 'export', evidenceReference: createEvidenceReference(1) },
       { step: 'revoke-access', evidenceReference: createEvidenceReference(2) },

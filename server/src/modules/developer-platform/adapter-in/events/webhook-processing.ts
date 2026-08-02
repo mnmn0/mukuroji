@@ -281,10 +281,18 @@ export interface WebhookDeliveryClaimStore {
   release(request: WebhookDeliveryClaimRequest): Promise<void>
 }
 
+/** Tenant entitlement boundary used by Webhook background processing. */
+export interface WebhookTenantFeatureAvailability {
+  /** Returns whether Developer Platform processing is enabled for a Workspace. */
+  isEnabled(workspaceId: string): Promise<boolean>
+}
+
 /** Audit stream projection の注入可能 dependencies です。 */
 export type WebhookProjectionDependencies = {
   /** Durable projection message を delivery worker へ渡す queue です。 */
   queue: WebhookDeliveryQueue
+  /** Suppresses new delivery projection for disabled or closing tenants. */
+  featureAvailability: WebhookTenantFeatureAvailability
 }
 
 /** Webhook HTTP worker の注入可能 dependencies です。 */
@@ -306,6 +314,8 @@ export type WebhookDeliveryWorkerDependencies = {
   queue: WebhookDeliveryQueue
   /** Delivery ID ごとの durable HTTP attempt claim です。 */
   claims: WebhookDeliveryClaimStore
+  /** Prevents background HTTP delivery when tenant entitlement is unavailable. */
+  featureAvailability: WebhookTenantFeatureAvailability
   /** 署名付き HTTP request を1回だけ実行します。 */
   deliver(prepared: PreparedWebhookDelivery): Promise<WebhookRequestResult>
   /** Retry schedule と署名時刻を決める clock です。 */
@@ -419,6 +429,7 @@ async function projectAuditRecord(
     })
     return
   }
+  if (!await dependencies.featureAvailability.isEnabled(event.workspaceId)) return
   if (!isWebhookEventType(event.eventType)) return
   await dependencies.queue.enqueue({
     kind: 'projection',
@@ -593,6 +604,7 @@ async function processWebhookQueueRecord(
     await processWebhookGrantCleanupMessage(message, dependencies)
     return
   }
+  if (!await dependencies.featureAvailability.isEnabled(message.workspaceId)) return
   const now = dependencies.now()
   const claim: WebhookDeliveryClaimRequest = {
     workspaceId: message.workspaceId,

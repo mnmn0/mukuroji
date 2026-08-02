@@ -128,17 +128,17 @@ export type StackOutputResources = {
   readonly requestEmailIngestionDlq: sqs.IQueue;
   /** Stream-only tenant lifecycle starter and retention worker. */
   readonly tenantOperationFunction: lambda.IFunction;
-  /** Export-step proof ingress. */
+  /** Queued export artifact resource owner. */
   readonly tenantExportCapabilityFunction: lambda.IFunction;
-  /** Access-revocation proof ingress. */
+  /** Queued access-revocation resource owner. */
   readonly tenantAccessCapabilityFunction: lambda.IFunction;
-  /** Member-anonymization proof ingress. */
+  /** Queued member-anonymization resource owner. */
   readonly tenantIdentityCapabilityFunction: lambda.IFunction;
-  /** Data-deletion proof ingress. */
+  /** Queued data-deletion resource owner. */
   readonly tenantDataCapabilityFunction: lambda.IFunction;
-  /** Secret-deletion proof ingress. */
+  /** Queued secret-deletion resource owner. */
   readonly tenantSecretsCapabilityFunction: lambda.IFunction;
-  /** Closure-verification proof ingress. */
+  /** Queued closure-verification resource owner. */
   readonly tenantVerificationCapabilityFunction: lambda.IFunction;
   /** Dead-letter queue for tenant lifecycle and retention stream failures. */
   readonly tenantOperationDlq: sqs.IQueue;

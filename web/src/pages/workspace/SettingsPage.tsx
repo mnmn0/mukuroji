@@ -35,10 +35,12 @@ export function SettingsPage() {
                 accessToken={workspace.accessToken}
                 locale={workspace.locale}
               />
-              <TenantAdministrationPanelContainer
-                accessToken={workspace.accessToken}
-                locale={workspace.locale}
-              />
+              {workspace.canManageWorkspaceConfiguration ? (
+                <TenantAdministrationPanelContainer
+                  accessToken={workspace.accessToken}
+                  locale={workspace.locale}
+                />
+              ) : null}
               <DeveloperPlatformSettingsPanelContainer
                 accessToken={workspace.accessToken}
                 initialSection={developerPlatformInitialSection}

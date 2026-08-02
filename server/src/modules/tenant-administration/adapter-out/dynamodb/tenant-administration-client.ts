@@ -63,6 +63,7 @@ import type {
   TenantSeatMeter,
   TenantSeatMutationInput,
 } from '../../application/ports/tenant-administration-port'
+import { createTenantDeletedMemberAlias } from '../../application/tenant-operation-resource-owner'
 
 /** DynamoDB transaction item used by tenant administration mutations. */
 type TenantTransactionItem = NonNullable<
@@ -73,6 +74,8 @@ type TenantTransactionItem = NonNullable<
 type TenantOperationTransitionOptions = {
   /** Blocks a closure transition and detects concurrent legal-hold changes. */
   requireInactiveLegalHold?: boolean
+  /** Leaves a requested operation pending instead of retrying while legal hold is active. */
+  returnCurrentOnLegalHold?: boolean
   /** Recognizes a safely replayed transition before applying another mutation. */
   acceptReplay?: (operation: TenantOperation) => boolean
   /** Seals the tenant profile when a completed closure is verified. */
@@ -139,6 +142,8 @@ export class DynamoDbTenantAdministrationClient implements
   private readonly governanceEnforcement: TenantGovernanceEnforcement
   /** Append-only audit table whose TTL attributes are reconciled. */
   private readonly auditTableName?: string
+  /** Workspace membership table used to remove the final closure verifier. */
+  private readonly workspaceAccessTableName?: string
 
   /**
    * Creates a tenant administration adapter.
@@ -149,6 +154,7 @@ export class DynamoDbTenantAdministrationClient implements
    * @param auditWriter - Optional append-only audit transaction builder.
    * @param governanceEnforcement - Residency and key controls implemented by the deployment.
    * @param auditTableName - Optional audit table used by the retention worker.
+   * @param workspaceAccessTableName - Workspace membership table sealed by closure verification.
    */
   constructor(
     tableName: string,
@@ -157,6 +163,7 @@ export class DynamoDbTenantAdministrationClient implements
     auditWriter?: TenantAdministrationAuditWriter<TenantTransactionItem>,
     governanceEnforcement: TenantGovernanceEnforcement = DEFAULT_TENANT_GOVERNANCE_ENFORCEMENT,
     auditTableName?: string,
+    workspaceAccessTableName?: string,
   ) {
     const normalizedTableName = tableName.trim()
     if (!normalizedTableName) {
@@ -172,6 +179,7 @@ export class DynamoDbTenantAdministrationClient implements
     this.auditWriter = auditWriter
     this.governanceEnforcement = validateTenantGovernanceEnforcement(governanceEnforcement)
     this.auditTableName = auditTableName?.trim() || undefined
+    this.workspaceAccessTableName = workspaceAccessTableName?.trim() || undefined
   }
 
   /** Ensures tenant aggregate and initial retention records exist before returning them. */
@@ -452,7 +460,6 @@ export class DynamoDbTenantAdministrationClient implements
       ),
       this.readRecord(workspaceId, PROFILE_RECORD_KEY, readTenantProfile),
     ])
-    assertTenantActive(profile)
     if (current.revision !== input.expectedRevision) {
       throw revisionConflict('TenantGovernanceRevisionConflict')
     }
@@ -476,6 +483,23 @@ export class DynamoDbTenantAdministrationClient implements
         400,
         'InvalidAuditRetentionDays',
         'Audit retention must be at least 30 days.',
+      )
+    }
+    if (profile.status === 'closed') {
+      assertTenantActive(profile)
+    }
+    if (
+      profile.status === 'closing' &&
+      (
+        updated.auditRetentionDays !== current.auditRetentionDays ||
+        updated.dataResidency !== current.dataResidency ||
+        updated.encryptionKeyPolicy !== current.encryptionKeyPolicy
+      )
+    ) {
+      throw new TenantAdministrationError(
+        409,
+        'TenantGovernanceLockedDuringClosure',
+        'Only legal hold can be changed while tenant closure is active.',
       )
     }
     const auditEvent: TenantAdministrationAuditEvent = {
@@ -589,6 +613,31 @@ export class DynamoDbTenantAdministrationClient implements
       readTenantProfile,
     )
     if (profile) assertTenantActive(profile)
+  }
+
+  /**
+   * Creates a cross-table transaction guard that linearizes tenant-owned writes
+   * against account closure.
+   *
+   * @param workspaceId - Canonical Workspace identifier.
+   * @returns A DynamoDB condition check that accepts active or legacy-uninitialized tenants.
+   */
+  createActiveWriteCondition(workspaceId: string): TenantTransactionItem {
+    return {
+      ConditionCheck: {
+        TableName: this.tableName,
+        Key: { workspaceId, recordKey: PROFILE_RECORD_KEY },
+        ConditionExpression:
+          'attribute_not_exists(recordKey) OR ' +
+          '(#kind = :profileKind AND ' +
+          '(attribute_not_exists(lifecycleStatus) OR lifecycleStatus = :active))',
+        ExpressionAttributeNames: { '#kind': 'kind' },
+        ExpressionAttributeValues: {
+          ':active': 'active',
+          ':profileKind': 'profile',
+        },
+      },
+    }
   }
 
   /** Checks one feature against the current strongly consistent entitlement. */
@@ -1146,6 +1195,30 @@ export class DynamoDbTenantAdministrationClient implements
     return operation
   }
 
+  /**
+   * Rechecks pause and legal-hold state immediately before one resource-owner page.
+   *
+   * @param workspaceId - Canonical Workspace identifier.
+   * @param operationId - Durable tenant operation identifier.
+   * @returns Whether the current operation may still perform side effects.
+   */
+  async isOperationExecutionAllowed(
+    workspaceId: string,
+    operationId: string,
+  ): Promise<boolean> {
+    const [operation, governance] = await Promise.all([
+      this.getOperation(workspaceId, operationId),
+      this.readRecord(
+        workspaceId,
+        GOVERNANCE_RECORD_KEY,
+        readTenantGovernance,
+      ),
+    ])
+    return operation.status === 'running' &&
+      operation.currentStep !== undefined &&
+      (operation.kind !== 'closure' || !governance.legalHold)
+  }
+
   /** Advances one operation step and releases the tenant lock at terminal state. */
   async advanceOperation(
     workspaceId: string,
@@ -1160,6 +1233,7 @@ export class DynamoDbTenantAdministrationClient implements
       (operation) => advanceTenantOperation(operation, proof, this.now()),
       {
         requireInactiveLegalHold: true,
+        returnCurrentOnLegalHold: true,
         acceptReplay: (operation) => proof !== undefined &&
           operation.completedSteps.includes(proof.step) &&
           operation.lastEvidenceReference === proof.evidenceReference.trim(),
@@ -1205,7 +1279,7 @@ export class DynamoDbTenantAdministrationClient implements
     )
   }
 
-  /** Resumes one paused operation. */
+  /** Starts one held requested operation or resumes one paused operation. */
   async resumeOperation(
     workspaceId: string,
     actorMemberKey: string,
@@ -1618,6 +1692,7 @@ export class DynamoDbTenantAdministrationClient implements
       current.kind === 'closure' &&
       governance.legalHold
     ) {
+      if (options.returnCurrentOnLegalHold) return current
       throw new TenantAdministrationError(
         409,
         'TenantLegalHoldActive',
@@ -1625,14 +1700,31 @@ export class DynamoDbTenantAdministrationClient implements
       )
     }
     const transitioned = transition(current)
+    const closesTenant = options.closeTenant && transitioned.status === 'verified'
+    const closureRequesterAlias = closesTenant
+      ? createTenantDeletedMemberAlias(
+          workspaceId,
+          operationId,
+          current.requestedBy,
+        )
+      : undefined
     const operation: TenantOperation = {
       ...transitioned,
-      updatedBy: actorMemberKey,
+      ...(closureRequesterAlias
+        ? {
+            requestedBy: closureRequesterAlias,
+            updatedBy: closureRequesterAlias,
+          }
+        : { updatedBy: actorMemberKey }),
     }
-    const closedProfile: TenantProfile | undefined = options.closeTenant &&
-        operation.status === 'verified'
+    const closedProfile: TenantProfile | undefined = closesTenant
       ? {
           ...profile,
+          ownerMemberKey: createTenantDeletedMemberAlias(
+            workspaceId,
+            operationId,
+            profile.ownerMemberKey,
+          ),
           status: 'closed',
           closedAt: operation.updatedAt,
           closedByOperationId: operation.operationId,
@@ -1706,6 +1798,29 @@ export class DynamoDbTenantAdministrationClient implements
           Key: { workspaceId, recordKey: ACTIVE_OPERATION_RECORD_KEY },
           ConditionExpression: 'operationId = :operationId',
           ExpressionAttributeValues: { ':operationId': operationId },
+        },
+      })
+    }
+    if (closedProfile) {
+      if (!this.workspaceAccessTableName) {
+        throw new TenantAdministrationError(
+          503,
+          'TenantClosureVerificationUnavailable',
+          'Tenant closure verification cannot seal Workspace access.',
+        )
+      }
+      const requesterMemberKey = normalizeClosureMemberKey(current.requestedBy)
+      items.push({
+        Delete: {
+          TableName: this.workspaceAccessTableName,
+          Key: {
+            workspaceId,
+            recordKey: `MEMBER#${requesterMemberKey}`,
+          },
+          ConditionExpression: 'memberKey = :requesterMemberKey',
+          ExpressionAttributeValues: {
+            ':requesterMemberKey': requesterMemberKey,
+          },
         },
       })
     }
@@ -2052,6 +2167,22 @@ function createOperationHistoryRecordKey(operation: TenantOperation): string {
   return `${OPERATION_HISTORY_RECORD_PREFIX}${operation.requestedAt}#${operation.operationId}`
 }
 
+/**
+ * Normalizes the retained closure requester to the Workspace membership key format.
+ *
+ * @param value - Requester identity stored on the closure operation.
+ * @returns Lowercase member key used by Workspace access storage.
+ */
+function normalizeClosureMemberKey(value: string): string {
+  const normalized = value.trim().toLowerCase()
+  if (!normalized) {
+    throw tenantAdministrationCorrupt(
+      'Tenant closure requester identity is invalid.',
+    )
+  }
+  return normalized
+}
+
 function createStateItem<T extends object>(
   workspaceId: string,
   recordKey: string,
@@ -2064,6 +2195,15 @@ function createStateItem<T extends object>(
   const updatedAt = 'updatedAt' in value && typeof value.updatedAt === 'string'
     ? value.updatedAt
     : new Date(0).toISOString()
+  const lifecycleStatus = kind === 'profile' &&
+      'status' in value &&
+      (
+        value.status === 'active' ||
+        value.status === 'closing' ||
+        value.status === 'closed'
+      )
+    ? value.status
+    : undefined
   return {
     workspaceId,
     recordKey,
@@ -2071,6 +2211,7 @@ function createStateItem<T extends object>(
     revision,
     updatedAt,
     payload: JSON.stringify(value),
+    ...(lifecycleStatus ? { lifecycleStatus } : {}),
   }
 }
 

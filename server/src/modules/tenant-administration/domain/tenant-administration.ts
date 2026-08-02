@@ -140,7 +140,7 @@ export function createDefaultTenantPolicy(): TenantDefaultPolicy {
  * @param workspaceId - Canonical Workspace identifier.
  * @param now - Entitlement creation timestamp.
  * @param activeSeats - Authoritative active seats that must remain entitled during initialization.
- * @returns A starter entitlement with bounded capacity.
+ * @returns A compatibility entitlement that preserves pre-rollout feature access.
  */
 export function createDefaultTenantEntitlement(
   workspaceId: string,
@@ -149,8 +149,15 @@ export function createDefaultTenantEntitlement(
 ): TenantEntitlement {
   return {
     workspaceId,
-    plan: 'starter',
-    features: ['documents'],
+    plan: 'enterprise',
+    features: [
+      'documents',
+      'analytics',
+      'automation',
+      'developer-platform',
+      'sso',
+      'scim',
+    ],
     seatLimit: Math.max(
       5,
       validateTenantInteger(
@@ -700,6 +707,16 @@ export function failTenantOperation(
       'Tenant operation cannot fail in its current state.',
     )
   }
+  if (
+    operation.kind === 'closure' &&
+    isIrreversibleTenantClosureStep(operation.currentStep)
+  ) {
+    throw new TenantAdministrationError(
+      409,
+      'TenantClosureRecoveryRequired',
+      'Tenant closure has entered an irreversible step and must remain sealed for recovery.',
+    )
+  }
   const normalizedFailureCode = failureCode.trim()
   if (!/^[A-Z][A-Z0-9_]{2,63}$/u.test(normalizedFailureCode)) {
     throw new TenantAdministrationError(
@@ -715,6 +732,16 @@ export function failTenantOperation(
     updatedAt: now,
     revision: operation.revision + 1,
   }
+}
+
+/** Returns whether a closure step may already have changed retained identity or data. */
+function isIrreversibleTenantClosureStep(
+  step: TenantOperationStepProof['step'],
+): boolean {
+  return step === 'anonymize-members' ||
+    step === 'delete-data' ||
+    step === 'delete-secrets' ||
+    step === 'verify'
 }
 
 /**
@@ -758,7 +785,7 @@ export function pauseTenantOperation(
 }
 
 /**
- * Resumes a paused tenant operation.
+ * Starts a requested operation or resumes a paused tenant operation.
  *
  * @param operation - Current durable operation.
  * @param now - Transition timestamp.
@@ -768,8 +795,15 @@ export function resumeTenantOperation(
   operation: TenantOperation,
   now: string,
 ): TenantOperation {
+  if (operation.status === 'requested') {
+    return advanceTenantOperation(operation, undefined, now)
+  }
   if (operation.status !== 'paused') {
-    throw new TenantAdministrationError(409, 'TenantOperationNotResumable', 'Tenant operation is not paused.')
+    throw new TenantAdministrationError(
+      409,
+      'TenantOperationNotResumable',
+      'Tenant operation is neither requested nor paused.',
+    )
   }
   return {
     ...operation,

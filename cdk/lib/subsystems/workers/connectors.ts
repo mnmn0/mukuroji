@@ -88,6 +88,7 @@ export function buildConnectorWorkers(
     planningTable,
     projectDirectoryTable,
     teamIssueEventsTable,
+    tenantAdministrationTable,
     workItemConfigurationTable,
     workItemsTable,
     workspaceAccessTable,
@@ -166,6 +167,8 @@ export function buildConnectorWorkers(
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
         TEAM_ISSUE_EVENTS_TABLE_NAME: teamIssueEventsTable.tableName,
         TEAM_ISSUES_TABLE_NAME: workItemsTable.tableName,
+        TENANT_ADMINISTRATION_TABLE_NAME:
+          tenantAdministrationTable.tableName,
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
         WORKSPACE_SEARCH_TABLE_NAME: workspaceSearchTable.tableName,
         WORK_ITEM_CONFIGURATION_TABLE_NAME: workItemConfigurationTable.tableName,
@@ -203,6 +206,10 @@ export function buildConnectorWorkers(
       planningTable.tableArn,
       enterpriseIdentityTable.tableArn,
     ],
+  }));
+  connectorSyncFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:GetItem'],
+    resources: [tenantAdministrationTable.tableArn],
   }));
   workItemConfigurationTable.grants.readData(connectorSyncFunction);
   workspaceSearchTable.grants.readWriteData(connectorSyncFunction);
@@ -279,6 +286,8 @@ export function buildConnectorWorkers(
         DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: 'LookupKeyIndex',
         DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
         MUKUROJI_RUNTIME_ROLE: 'connector-poll',
+        TENANT_ADMINISTRATION_TABLE_NAME:
+          tenantAdministrationTable.tableName,
       },
     },
   );
@@ -297,6 +306,10 @@ export function buildConnectorWorkers(
       'dynamodb:GetItem',
     ],
     resources: [developerPlatformTable.tableArn],
+  }));
+  connectorPollFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:GetItem'],
+    resources: [tenantAdministrationTable.tableArn],
   }));
   connectorPollFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:Query'],

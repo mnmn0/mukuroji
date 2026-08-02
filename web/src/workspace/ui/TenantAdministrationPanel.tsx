@@ -267,7 +267,8 @@ export function TenantAdministrationPanel({
   const operationPercent = activeOperation
     ? Math.round((activeOperation.completedSteps.length / operationSteps) * 100)
     : 0
-  const tenantClosed = profile.status !== 'active'
+  const tenantLifecycleLocked = profile.status !== 'active'
+  const tenantClosed = profile.status === 'closed'
 
   return (
     <section className="workbench-panel overflow-hidden" data-testid="tenant-administration-panel">
@@ -286,7 +287,7 @@ export function TenantAdministrationPanel({
             {profile.region} · {profile.status}
           </div>
         </div>
-        {tenantClosed ? (
+        {tenantLifecycleLocked ? (
           <p className="mt-4 rounded-lg border border-[#f1c4b8] bg-[#fff8f5] px-3 py-2 text-sm font-semibold text-[#9e3d27]" role="status">
             {t(profile.status === 'closed'
               ? 'workspace.tenantAdministration.closed'
@@ -340,7 +341,7 @@ export function TenantAdministrationPanel({
               {t('workspace.tenantAdministration.locale')}
               <select
                 className="workbench-input"
-                disabled={tenantClosed}
+                disabled={tenantLifecycleLocked}
                 onChange={(event) => onChangeProfile({ ...profile, locale: event.target.value === 'en' ? 'en' : 'ja' })}
                 value={profile.locale}
               >
@@ -352,7 +353,7 @@ export function TenantAdministrationPanel({
               {t('workspace.tenantAdministration.defaultRole')}
               <select
                 className="workbench-input"
-                disabled={tenantClosed}
+                disabled={tenantLifecycleLocked}
                 onChange={(event) => onChangeProfile({
                   ...profile,
                   defaultPolicy: {
@@ -367,7 +368,7 @@ export function TenantAdministrationPanel({
               </select>
             </label>
           </div>
-          <button className="workbench-button-primary mt-5" disabled={isSaving || tenantClosed} onClick={onSaveProfile} type="button">
+          <button className="workbench-button-primary mt-5" disabled={isSaving || tenantLifecycleLocked} onClick={onSaveProfile} type="button">
             {t('workspace.tenantAdministration.saveProfile')}
           </button>
         </section>
@@ -420,7 +421,7 @@ export function TenantAdministrationPanel({
         <section className="border-t border-[var(--workbench-border)] py-7 xl:col-span-2">
           <SectionHeader title={t('workspace.tenantAdministration.governanceTitle')} meta={t('workspace.tenantAdministration.governanceMeta')} />
           <div className="mt-5 grid gap-4 sm:grid-cols-2">
-            <NumberField disabled={tenantClosed} label={t('workspace.tenantAdministration.retention')} value={governance.auditRetentionDays} onChange={(value) => onChangeGovernance({ ...governance, auditRetentionDays: value })} />
+            <NumberField disabled={tenantLifecycleLocked} label={t('workspace.tenantAdministration.retention')} value={governance.auditRetentionDays} onChange={(value) => onChangeGovernance({ ...governance, auditRetentionDays: value })} />
             <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
               {t('workspace.tenantAdministration.dataResidency')}
               <input
@@ -478,7 +479,7 @@ export function TenantAdministrationPanel({
               <p className="mt-2 text-xs font-semibold text-[var(--workbench-muted)]">{operationPercent}% · {activeOperation.currentStep ?? t('workspace.tenantAdministration.waiting')}</p>
               <div className="mt-4 flex flex-wrap gap-2">
                 {activeOperation.status === 'running' ? <button className="workbench-button-secondary" disabled={isSaving} onClick={() => onPauseOperation(activeOperation)} type="button">{t('workspace.tenantAdministration.pause')}</button> : null}
-                {activeOperation.status === 'paused' ? <button className="workbench-button-secondary" disabled={isSaving} onClick={() => onResumeOperation(activeOperation)} type="button">{t('workspace.tenantAdministration.resume')}</button> : null}
+                {activeOperation.status === 'paused' || activeOperation.status === 'requested' ? <button className="workbench-button-secondary" disabled={isSaving || governance.legalHold} onClick={() => onResumeOperation(activeOperation)} type="button">{t('workspace.tenantAdministration.resume')}</button> : null}
                 {activeOperation.kind === 'closure' && activeOperation.status === 'completed' ? <button className="workbench-button-primary" disabled={isSaving} onClick={() => onVerifyClosure(activeOperation)} type="button">{t('workspace.tenantAdministration.verify')}</button> : null}
               </div>
             </div>
@@ -492,7 +493,7 @@ export function TenantAdministrationPanel({
                   <option value="jsonl">JSONL</option>
                   <option value="csv">CSV</option>
                 </select>
-                <button className="workbench-button-secondary" disabled={isSaving || tenantClosed || Boolean(activeOperation)} onClick={onRequestExport} type="button">{t('workspace.tenantAdministration.startExport')}</button>
+                <button className="workbench-button-secondary" disabled={isSaving || tenantLifecycleLocked || Boolean(activeOperation)} onClick={onRequestExport} type="button">{t('workspace.tenantAdministration.startExport')}</button>
               </div>
             </div>
             <div className="border-l-2 border-[#d76a4d] bg-[#fffaf8] px-4 py-5 sm:border-l-0 sm:pl-5">
@@ -500,7 +501,7 @@ export function TenantAdministrationPanel({
               <p className="mt-1 text-sm leading-6 text-[#9e604f]">{t('workspace.tenantAdministration.closureDescription')}</p>
               <div className="mt-3 flex flex-col gap-2 sm:flex-row">
                 <input aria-label={t('workspace.tenantAdministration.confirmationLabel')} className="workbench-input" onChange={(event) => onChangeClosureConfirmation(event.target.value)} placeholder="CLOSE" value={closureConfirmation} />
-                <button className="workbench-button-danger" disabled={isSaving || tenantClosed || Boolean(activeOperation) || governance.legalHold || closureConfirmation !== 'CLOSE'} onClick={onRequestClosure} type="button">{t('workspace.tenantAdministration.startClosure')}</button>
+                <button className="workbench-button-danger" disabled={isSaving || tenantLifecycleLocked || Boolean(activeOperation) || governance.legalHold || closureConfirmation !== 'CLOSE'} onClick={onRequestClosure} type="button">{t('workspace.tenantAdministration.startClosure')}</button>
               </div>
             </div>
           </div>

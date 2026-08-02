@@ -85,7 +85,13 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
       'FileMalwareProtectionPolicy/Resource',
       'ListProjectTasksFunction/ServiceRole/DefaultPolicy/Resource',
       'CollaborationProjectionFunction/ServiceRole/DefaultPolicy/Resource',
+      'TenantExportCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
+      'TenantDataCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
     ],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<TenantExportBucket06599E71.Arn>/tenant-exports/*]',
+    ['TenantExportCapabilityFunction/ServiceRole/DefaultPolicy/Resource'],
   ],
   [
     'AwsSolutions-IAM5[Resource::<ProjectTasksTableE21F6637.Arn>/index/*]',
@@ -370,6 +376,7 @@ const acknowledgedFindings = [
   ...[
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:events:<AWS::Region>:<AWS::AccountId>:rule/DO-NOT-DELETE-AmazonGuardDutyMalwareProtectionS3*]',
     'AwsSolutions-IAM5[Resource::<FileBucketCDFCD6DE.Arn>/workspaces/*]',
+    'AwsSolutions-IAM5[Resource::<TenantExportBucket06599E71.Arn>/tenant-exports/*]',
     'AwsSolutions-IAM5[Resource::<ProjectTasksTableE21F6637.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<AuditEventsTable0723963E.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<NotificationsTable76DCFC6C.Arn>/index/*]',

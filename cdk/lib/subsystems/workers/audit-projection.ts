@@ -71,6 +71,7 @@ export function buildAuditProjectionWorker(
     processedAuditEventsTable,
     projectDirectoryTable,
     realtimeSessionsTable,
+    tenantAdministrationTable,
     workItemsTable,
     workspaceAccessTable,
   } = input.dataStores;
@@ -120,6 +121,8 @@ export function buildAuditProjectionWorker(
           'WebhookAuthorizationIndex',
         REALTIME_SESSIONS_TABLE_NAME: realtimeSessionsTable.tableName,
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
+        TENANT_ADMINISTRATION_TABLE_NAME:
+          tenantAdministrationTable.tableName,
         MUKUROJI_RUNTIME_ROLE: 'audit-projection',
         MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
         TEAM_ISSUES_TABLE_NAME: workItemsTable.tableName,
@@ -171,6 +174,12 @@ export function buildAuditProjectionWorker(
   realtimeSessionsTable.grants.readWriteData(collaborationProjectionFunction);
   workItemsTable.grants.readData(collaborationProjectionFunction);
   workspaceAccessTable.grants.readData(collaborationProjectionFunction);
+  collaborationProjectionFunction.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem'],
+      resources: [tenantAdministrationTable.tableArn],
+    }),
+  );
   collaborationProjectionFunction.addToRolePolicy(
     new iam.PolicyStatement({
       actions: ['dynamodb:GetItem', 'dynamodb:Query'],

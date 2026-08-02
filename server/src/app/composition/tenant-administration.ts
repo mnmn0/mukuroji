@@ -33,6 +33,16 @@ export interface ProductionTenantFeatureGate {
   isEnabled(workspaceId: string): Promise<boolean>
 }
 
+/** Active-state guard used by unauthenticated tenant-owned write surfaces. */
+export interface ProductionTenantAvailability {
+  /** Returns whether the tenant can currently accept normal data-plane traffic. */
+  isActive(workspaceId: string): Promise<boolean>
+  /** Creates an atomic DynamoDB write guard against a concurrent closure transition. */
+  createActiveWriteCondition(
+    workspaceId: string,
+  ): ReturnType<DynamoDbTenantAdministrationClient['createActiveWriteCondition']>
+}
+
 /**
  * Creates the configured tenant administration persistence adapter.
  *
@@ -54,6 +64,7 @@ export function createProductionTenantAdministrationClient(): DynamoDbTenantAdmi
       encryptionKeyPolicy: 'aws-managed',
     },
     resources.auditEventsTableName,
+    resources.workspaceAccessTableName,
   )
 }
 
@@ -137,7 +148,7 @@ export function createProductionTenantMeteredWorkspaceAccess():
 /**
  * Creates a fail-closed feature gate for a trusted background worker.
  *
- * Deliberately disabled and not-yet-initialized tenant features return `false`.
+ * Deliberately disabled, unavailable, and not-yet-initialized tenant features return `false`.
  * Authenticated API access owns legacy initialization from authoritative Workspace
  * membership; persistence and configuration failures remain errors for retry.
  *
@@ -159,7 +170,9 @@ export function createProductionTenantFeatureGate(
           error instanceof TenantAdministrationError &&
           (
             error.code === 'TenantFeatureNotEntitled' ||
-            error.code === 'TenantAdministrationNotInitialized'
+            error.code === 'TenantAdministrationNotInitialized' ||
+            error.code === 'TenantClosing' ||
+            error.code === 'TenantClosed'
           )
         ) {
           return false
@@ -167,5 +180,32 @@ export function createProductionTenantFeatureGate(
         throw error
       }
     },
+  }
+}
+
+/**
+ * Creates an active-state guard for public or asynchronous tenant-owned writes.
+ *
+ * @returns A read check and transaction condition backed by tenant lifecycle state.
+ */
+export function createProductionTenantAvailability(): ProductionTenantAvailability {
+  const tenantAdministration = createProductionTenantAdministrationClient()
+  return {
+    async isActive(workspaceId) {
+      try {
+        await tenantAdministration.assertActive(workspaceId)
+        return true
+      } catch (error) {
+        if (
+          error instanceof TenantAdministrationError &&
+          (error.code === 'TenantClosing' || error.code === 'TenantClosed')
+        ) {
+          return false
+        }
+        throw error
+      }
+    },
+    createActiveWriteCondition: (workspaceId) =>
+      tenantAdministration.createActiveWriteCondition(workspaceId),
   }
 }

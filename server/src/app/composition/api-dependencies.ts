@@ -102,7 +102,10 @@ import {
   TimeTrackingService,
   type TimeTrackingIdempotencyPort,
 } from '../../modules/time-tracking'
-import { createProductionTenantMeteredWorkspaceAccess } from './tenant-administration'
+import {
+  createProductionTenantAvailability,
+  createProductionTenantMeteredWorkspaceAccess,
+} from './tenant-administration'
 
 /**
  * Projects shared idempotency reservation and transaction-completion capabilities
@@ -424,7 +427,9 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
     workspaceSearchProjectionEnabled: shouldEnableWorkspaceSearchProjection(),
     workItemConfigurations: createWorkItemConfigurationClient(),
     planning: createPlanningClient(),
-    requestIntake: createDefaultRequestIntakeClient(),
+    requestIntake: createDefaultRequestIntakeClient(
+      createProductionTenantAvailability(),
+    ),
     analytics: createAnalyticsRepository(),
   }
 }

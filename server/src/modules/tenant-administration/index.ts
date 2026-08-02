@@ -53,3 +53,19 @@ export type {
   ExecuteTenantOperationInput,
   TenantOperationStatePort,
 } from './application/tenant-operation-executor'
+export {
+  TENANT_OPERATION_EXECUTION_JOB_VERSION,
+  TenantOperationResourceOwnerExecutor,
+  createTenantDeletedMemberAlias,
+  createTenantOperationEvidenceDigest,
+  resolveTenantOperationResourceOwner,
+} from './application/tenant-operation-resource-owner'
+export type {
+  TenantOperationContinuationQueue,
+  TenantOperationExecutionCursor,
+  TenantOperationExecutionJob,
+  TenantOperationExecutionStatePort,
+  TenantOperationResourceOwner,
+  TenantOperationResourceOwnerKind,
+  TenantOperationResourceOwnerResult,
+} from './application/tenant-operation-resource-owner'
