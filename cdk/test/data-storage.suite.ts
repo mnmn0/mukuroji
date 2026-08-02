@@ -215,6 +215,8 @@ test('analytics state is retained with a due-delivery index and scoped API acces
         { AttributeName: 'recordKey', AttributeType: 'S' },
         { AttributeName: 'scheduleShard', AttributeType: 'S' },
         { AttributeName: 'nextDeliveryAtRecordKey', AttributeType: 'S' },
+        { AttributeName: 'teamId', AttributeType: 'S' },
+        { AttributeName: 'startAt', AttributeType: 'S' },
       ]),
       BillingMode: 'PAY_PER_REQUEST',
       GlobalSecondaryIndexes: [
@@ -225,6 +227,14 @@ test('analytics state is retained with a due-delivery index and scoped API acces
             { AttributeName: 'nextDeliveryAtRecordKey', KeyType: 'RANGE' },
           ],
           Projection: { ProjectionType: 'KEYS_ONLY' },
+        }),
+        expect.objectContaining({
+          IndexName: 'TimeEntryTeamDateIndex',
+          KeySchema: [
+            { AttributeName: 'teamId', KeyType: 'HASH' },
+            { AttributeName: 'startAt', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'ALL' },
         }),
       ],
       KeySchema: [

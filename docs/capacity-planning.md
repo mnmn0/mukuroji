@@ -18,7 +18,7 @@ Issue #33 の capacity planning は、Team の member profile、resource request
 
 - `allocatedMinutes`: active assignment の capacity reservation の合計。
 - `plannedEffortMinutes`: assignment が計画する Work Item effort の合計。
-- `actualMinutes`: `submitted`、`approved`、`locked` の time entry の合計。draft と rejected は actual に含めません。snapshot は表示期間と、表示対象の Work Item assignment の期間を包含する bounded range だけを取得します。
+- `actualMinutes`: `submitted`、`approved`、`locked` の time entry の合計。draft と rejected は actual に含めません。snapshot は表示期間と、表示対象の Work Item assignment の期間を包含する bounded range を `TimeEntryTeamDateIndex` のキー条件で取得します。最大 7 日の time entry が期間境界を跨ぐため、開始時刻の下限だけはその分だけ前倒しします。
 - `remainingEffortMinutes`: Work Item ごとに `max(estimate, planned effort 合計)` を baseline とし、actual を差し引いた値（0 未満にはしない）。この残工数は同じ Work Item を持つ assignment へ planned effort（0 の場合は allocation）で加重配分します。Work Item がない assignment は planned effort を残り工数の初期値にします。
 - `varianceMinutes`: `capacityMinutes - allocatedMinutes`。
 - `status`: capacity が 0 で demand がなければ `unavailable`、差が負なら `over`、0 なら `balanced`、正なら `under` です。

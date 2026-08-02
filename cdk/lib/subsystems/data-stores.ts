@@ -207,6 +207,13 @@ export function buildDataStores(
     projectionType: dynamodb.ProjectionType.KEYS_ONLY,
   });
 
+  analyticsTable.addGlobalSecondaryIndex({
+    indexName: 'TimeEntryTeamDateIndex',
+    partitionKey: { name: 'teamId', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'startAt', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.ALL,
+  });
+
   const requestIntakeTable = new dynamodb.Table(stack, 'RequestIntakeTable', {
     partitionKey: { name: 'scopeKey', type: dynamodb.AttributeType.STRING },
     sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },

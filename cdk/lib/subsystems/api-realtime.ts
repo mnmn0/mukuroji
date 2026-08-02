@@ -842,7 +842,10 @@ export function buildApiRuntime(
         'dynamodb:Query',
         'dynamodb:UpdateItem',
       ],
-      resources: [analyticsTable.tableArn],
+      resources: [
+        analyticsTable.tableArn,
+        `${analyticsTable.tableArn}/index/TimeEntryTeamDateIndex`,
+      ],
     })],
   });
   const apiAuditTransactionDataPolicy = new iam.Policy(
