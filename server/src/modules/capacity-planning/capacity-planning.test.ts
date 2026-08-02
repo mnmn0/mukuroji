@@ -106,6 +106,19 @@ describe('capacity planning calculations', () => {
     expect(snapshot.members[0]?.allocatedMinutes).toBe(0)
   })
 
+  test('filters project-scoped assignments from a restricted workload view', () => {
+    const assignment = { ...createAssignment('project-secret', false), projectId: 'project-secret' }
+    const snapshot = buildWorkloadSnapshot(
+      createState([profile], [assignment]),
+      [],
+      [],
+      createInput({ visibleProjectIds: new Set(['project-visible']) }),
+    )
+
+    expect(snapshot.assignments).toEqual([])
+    expect(snapshot.members[0]?.allocatedMinutes).toBe(0)
+  })
+
   test('aggregates capacity into Monday-first weeks and preserves over-allocation evidence', () => {
     const snapshot = buildWorkloadSnapshot(
       createState([profile], [createAssignment('assignment-1', false, '2026-08-03', '2026-08-14', 4_800)]),
@@ -121,6 +134,21 @@ describe('capacity planning calculations', () => {
     expect(snapshot.members[0]?.cells).toHaveLength(2)
     expect(snapshot.members[0]?.cells.map((cell) => cell.fromDate)).toEqual(['2026-08-03', '2026-08-10'])
     expect(snapshot.members[0]?.cells.every((cell) => cell.status === 'balanced')).toBe(true)
+  })
+
+  test('keeps remaining effort when an earlier assignment for the Work Item is outside the range', () => {
+    const assignments = [
+      { ...createAssignment('outside-range', false, '2026-08-01'), workItemId: 'work-item-1' },
+      { ...createAssignment('inside-range', false), workItemId: 'work-item-1' },
+    ]
+    const snapshot = buildWorkloadSnapshot(
+      createState([profile], assignments),
+      [],
+      [{ workItemId: 'work-item-1', estimateMinutes: 480 }],
+      createInput(),
+    )
+
+    expect(snapshot.members[0]?.remainingEffortMinutes).toBe(480)
   })
 })
 

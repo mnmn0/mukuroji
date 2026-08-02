@@ -4432,6 +4432,13 @@ routeApp.route('/', createCapacityPlanningRouter({
       ...members.flatMap((response) => response.members.map((member) => member.id)),
     ])
   },
+  getVisibleProjectIds: async (principal, teamId) => {
+    if (principal.isSystemAdmin || principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') {
+      return undefined
+    }
+    const context = await requireTeamPermission(principal, teamId, 'viewer')
+    return new Set((context.projectAccesses ?? []).map((access) => access.projectId))
+  },
   canManageMember: async (principal, teamId, memberId) => {
     if (principal.isSystemAdmin || principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') return true
     if (principal.userKey === memberId) return true
@@ -4443,6 +4450,23 @@ routeApp.route('/', createCapacityPlanningRouter({
       throw error
     }
   },
+  verifyProject: async (principal, teamId, projectId, minimum) => {
+    const context = await requireTeamPermission(principal, teamId, minimum)
+    if (
+      !principal.isSystemAdmin &&
+      !(context.projectAccesses ?? []).some((access) =>
+        access.projectId === projectId && projectAccessAllows(access, minimum)
+      )
+    ) {
+      throw new ProjectDataError(
+        403,
+        'ProjectAccessDenied',
+        `User "${principal.userKey}" cannot access project "${projectId}".`,
+      )
+    }
+  },
+  verifyWorkItem: async (principal, teamId, workItemId, minimum) =>
+    (await loadAuthorizedTeamIssue(principal, teamId, workItemId, minimum)).detail.issue.assignedProjectId ?? undefined,
   getCapacityPlanning: () => capacityPlanningDependencies.capacityPlanningService,
   readJson,
   mapError: toCapacityPlanningErrorResponse,

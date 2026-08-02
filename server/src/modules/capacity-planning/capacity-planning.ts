@@ -35,6 +35,8 @@ const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u
 export type WorkloadTimeEntry = {
   /** Workspace member who recorded the time. */
   memberId: string
+  /** Optional Project identifier used for project-scoped visibility. */
+  projectId?: string
   /** Canonical Work Item identifier. */
   workItemId: string
   /** Inclusive instant start. */
@@ -115,6 +117,8 @@ export type WorkloadSnapshotInput = {
   viewerMemberId?: string
   /** Member allowlist for the caller. Undefined means the entire Team. */
   visibleMemberIds?: ReadonlySet<string>
+  /** Project allowlist for the caller. Undefined means the entire Team. */
+  visibleProjectIds?: ReadonlySet<string>
   /** Whether confidential assignments and requests may be returned. */
   canViewConfidential: boolean
 }
@@ -179,26 +183,30 @@ export function buildWorkloadSnapshot(
     input.visibleMemberIds === undefined || input.visibleMemberIds.has(profile.memberId)
   )
   const profileByMemberId = new Map(profiles.map((profile) => [profile.memberId, profile]))
+  const isProjectVisible = (projectId: string | undefined): boolean =>
+    input.visibleProjectIds === undefined || projectId === undefined || input.visibleProjectIds.has(projectId)
   const visibleAssignments = state.assignments.filter((assignment) => {
     if (assignment.status === 'canceled' || !profileByMemberId.has(assignment.memberId)) return false
+    if (!isProjectVisible(assignment.projectId)) return false
     return !assignment.confidential || input.canViewConfidential || assignment.memberId === input.viewerMemberId
   })
   const visibleRequests = state.requests.filter((request) =>
-    !request.confidential || input.canViewConfidential
+    isProjectVisible(request.projectId) && (!request.confidential || input.canViewConfidential)
   )
   const redactedAssignmentCount = state.assignments.filter((assignment) =>
     assignment.status !== 'canceled' &&
     profileByMemberId.has(assignment.memberId) &&
+    isProjectVisible(assignment.projectId) &&
     assignment.confidential &&
     !input.canViewConfidential &&
     assignment.memberId !== input.viewerMemberId
   ).length
   const redactedRequestCount = state.requests.filter((request) =>
-    request.confidential && !input.canViewConfidential
+    isProjectVisible(request.projectId) && request.confidential && !input.canViewConfidential
   ).length
   const actualByMember = createActualMinutesByMemberDate(
     profiles,
-    entries,
+    entries.filter((entry) => isProjectVisible(entry.projectId)),
     fromDate,
     toDate,
   )
@@ -628,6 +636,7 @@ function calculateMemberSummary(
   const remainingAssignedWorkItems = new Set<string>()
   for (const assignment of assignments) {
     const assignmentDates = dates.filter((date) => date >= assignment.fromDate && date <= assignment.toDate)
+    if (assignmentDates.length === 0) continue
     const distributionDates = chooseDistributionDates(profile, assignmentDates)
     distributeMinutes(daily, distributionDates, assignment.allocationMinutes, 'allocatedMinutes')
     distributeMinutes(daily, distributionDates, assignment.plannedEffortMinutes, 'plannedEffortMinutes')

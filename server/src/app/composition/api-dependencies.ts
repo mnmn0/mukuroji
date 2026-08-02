@@ -300,6 +300,7 @@ function createCapacityPlanningDataSource(
       const entries = await timeTrackingService.listAllEntries(input)
       return entries.map((entry) => ({
         memberId: entry.userId,
+        ...(entry.projectId ? { projectId: entry.projectId } : {}),
         workItemId: entry.workItemId,
         startAt: entry.startAt,
         endAt: entry.endAt,

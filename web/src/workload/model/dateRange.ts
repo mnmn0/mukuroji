@@ -18,6 +18,20 @@ export function createWorkloadDateRange(referenceDate = new Date(), days = 14): 
   }
 }
 
+/** Returns the inclusive number of calendar days in a workload date range. */
+export function countWorkloadCalendarDays(fromDate: string, toDate: string): number {
+  const from = Date.parse(`${fromDate}T12:00:00Z`)
+  const to = Date.parse(`${toDate}T12:00:00Z`)
+  return Math.max(1, Math.round((to - from) / 86_400_000) + 1)
+}
+
+/** Adds calendar days without applying browser-local timezone arithmetic. */
+export function addWorkloadCalendarDays(date: string, days: number): string {
+  const next = new Date(`${date}T12:00:00Z`)
+  next.setUTCDate(next.getUTCDate() + days)
+  return next.toISOString().slice(0, 10)
+}
+
 /** Formats a browser-local date as YYYY-MM-DD. */
 function formatLocalDate(date: Date): string {
   const year = date.getFullYear()

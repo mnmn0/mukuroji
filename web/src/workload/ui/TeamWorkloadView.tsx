@@ -157,17 +157,42 @@ export function TeamWorkloadView({
                           {onMoveAssignment ? snapshot?.assignments
                             .filter((assignment) => assignmentMatchesCell(assignment, member.memberId, cell))
                             .map((assignment) => (
-                              <button
-                                className="mt-2 block max-w-full truncate rounded bg-white/80 px-1.5 py-1 text-[10px] font-bold text-[#526381] shadow-sm disabled:opacity-50"
-                                draggable={!isAssignmentMutationPending}
-                                key={assignment.id}
-                                title={assignment.workItemId ?? assignment.id}
-                                type="button"
-                                disabled={isAssignmentMutationPending}
-                                onDragStart={(event) => event.dataTransfer.setData('text/workload-assignment', assignment.id)}
-                              >
-                                {assignment.workItemId ?? assignment.id}
-                              </button>
+                              <details className="mt-2 max-w-full text-[10px] font-bold text-[#526381]">
+                                <summary
+                                  className="max-w-full cursor-grab truncate rounded bg-white/80 px-1.5 py-1 shadow-sm disabled:opacity-50"
+                                  draggable={!isAssignmentMutationPending}
+                                  title={assignment.workItemId ?? assignment.id}
+                                  onDragStart={(event) => event.dataTransfer.setData('text/workload-assignment', assignment.id)}
+                                >
+                                  {assignment.workItemId ?? assignment.id}
+                                </summary>
+                                <form
+                                  className="mt-2 grid gap-1 rounded border border-slate-200 bg-white p-2 text-left"
+                                  onSubmit={(event) => {
+                                    event.preventDefault()
+                                    const formData = new FormData(event.currentTarget)
+                                    const targetMemberId = formData.get('memberId')
+                                    const targetDate = formData.get('targetDate')
+                                    if (typeof targetMemberId === 'string' && typeof targetDate === 'string' && targetMemberId && targetDate) {
+                                      onMoveAssignment?.(assignment.id, targetMemberId, targetDate)
+                                    }
+                                  }}
+                                >
+                                  <label className="grid gap-1 font-semibold" htmlFor={`workload-member-${assignment.id}`}>
+                                    {t('workload.assignment.member')}
+                                    <select className="min-h-8 rounded border border-slate-200 bg-white px-1 text-[10px]" defaultValue={assignment.memberId} id={`workload-member-${assignment.id}`} name="memberId">
+                                      {members.map((candidate) => <option key={candidate.memberId} value={candidate.memberId}>{candidate.displayName ?? candidate.memberId}</option>)}
+                                    </select>
+                                  </label>
+                                  <label className="grid gap-1 font-semibold" htmlFor={`workload-date-${assignment.id}`}>
+                                    {t('workload.assignment.date')}
+                                    <input className="min-h-8 rounded border border-slate-200 bg-white px-1 text-[10px]" defaultValue={assignment.fromDate} id={`workload-date-${assignment.id}`} name="targetDate" type="date" />
+                                  </label>
+                                  <button className="rounded bg-[#0d1833] px-2 py-1 text-[10px] font-bold text-white disabled:opacity-50" disabled={isAssignmentMutationPending} type="submit">
+                                    {t('workload.assignment.move')}
+                                  </button>
+                                </form>
+                              </details>
                             )) : null}
                         </div>
                       </td>

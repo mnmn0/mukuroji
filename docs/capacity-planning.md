@@ -31,12 +31,14 @@ Issue #33 の capacity planning は、Team の member profile、resource request
 
 `ResourceAssignment` は member、project / Work Item（必要に応じて Cycle / recurring-work の識別子も保持）、期間、allocation、planned effort、status を持ちます。drag/drop の reschedule / reassign は assignment の `expectedRevision` と Team の `expectedTeamRevision` を同時に検証し、stale write を `409` で拒否します。`POST /api/teams/:teamId/workload/what-if` は同じ計算を使いますが保存しません。
 
-Team member 画面では、稼働プロファイル、time off、resource request、assignment の作成と what-if preview を実行できます。保存済み assignment は heatmap のセル間で drag/drop して reschedule / reassign できます。
+Team member 画面では、稼働プロファイル、time off、resource request、assignment の作成と what-if preview を実行できます。保存済み assignment は元の期間を保ったまま heatmap のセル間で drag/drop して reschedule / reassign できます。assignment の詳細メニューにはキーボードで実行できる移動フォームもあります。
 
 ## Visibility
 
 - Team viewer は自分とアクセス可能な project の member workload を見られます。
+- project に紐づく request、assignment、time entry の集計は、viewer がアクセスできる project に限定します。project のない Team-wide レコードは Team の可視性に従います。
 - member は自分の schedule と time off を変更できます。Team manager と Workspace owner / admin は他の member も変更できます。
+- time off は member が planned として登録でき、approved への変更は Team manager に限定します。
 - confidential assignment / request は Team manager と assignment の本人だけが内容を見られます。非許可 viewer には行を返さず、snapshot の `redactedAssignmentCount` / `redactedRequestCount` だけを返します。
 - guest は workload API の Team access を持たず、capacity planning の mutation は実行できません。
 

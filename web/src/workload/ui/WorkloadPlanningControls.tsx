@@ -175,7 +175,7 @@ export function WorkloadPlanningControls({
       fromDate: timeOffFrom,
       toDate: timeOffTo,
       ...(timeOffMinutes.trim() ? { minutesPerDay: Number(timeOffMinutes) } : {}),
-      status: 'approved',
+      status: 'planned',
       expectedRevision: profileRevision,
       expectedTeamRevision: teamRevision,
     }))

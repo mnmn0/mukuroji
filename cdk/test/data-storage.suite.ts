@@ -48,6 +48,13 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
     }));
   }
 
+  expect(resources.CapacityPlanningTable0EECD517.Properties)
+    .toEqual(expect.objectContaining({
+      SSESpecification: {
+        SSEEnabled: true,
+      },
+    }));
+
   expect(resources.ProjectDirectoryTable9ED01C01.Properties)
     .toEqual(expect.objectContaining({
       GlobalSecondaryIndexes: expect.arrayContaining([

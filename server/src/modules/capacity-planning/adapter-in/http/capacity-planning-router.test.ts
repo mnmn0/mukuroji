@@ -25,7 +25,7 @@ const emptyDataSource: CapacityPlanningDataSource = {
 }
 
 /** Creates a router with deterministic authentication and an in-memory service. */
-function createFixture() {
+function createFixture(options: { allowManager?: boolean } = {}) {
   const calls: string[] = []
   const service = new CapacityPlanningService(
     new InMemoryCapacityPlanningRepository(),
@@ -40,10 +40,16 @@ function createFixture() {
     },
     requireTeamPermission: async (_value, teamId, minimum) => {
       calls.push(`permission:${teamId}:${minimum}`)
+      if (minimum === 'manager' && options.allowManager === false) {
+        throw new CapacityPlanningError(403, 'PermissionDenied', 'manager required')
+      }
     },
     canViewConfidential: async () => false,
     getVisibleMemberIds: async () => undefined,
+    getVisibleProjectIds: async () => undefined,
     canManageMember: async (_value, _teamId, memberId) => memberId === principal.userKey,
+    verifyProject: async () => undefined,
+    verifyWorkItem: async () => undefined,
     getCapacityPlanning: () => service,
     readJson: async (request) => await request.json(),
     mapError: (context, error) => context.json({
@@ -96,5 +102,27 @@ describe('createCapacityPlanningRouter', () => {
 
     expect(response.status).toBe(503)
     expect(calls).toEqual(['authenticate:workload-token', 'permission:team-1:manager'])
+  })
+
+  test('does not let a member approve their own time off', async () => {
+    const { calls, router } = createFixture({ allowManager: false })
+    const response = await router.request('/api/teams/team-1/workload/profiles/member-1/time-off/time-off-1', {
+      method: 'PUT',
+      headers: { Authorization: 'Bearer workload-token', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fromDate: '2026-08-03',
+        toDate: '2026-08-03',
+        status: 'approved',
+        expectedRevision: 1,
+        expectedTeamRevision: 0,
+      }),
+    })
+
+    expect(response.status).toBe(503)
+    expect(calls).toEqual([
+      'authenticate:workload-token',
+      'permission:team-1:member',
+      'permission:team-1:manager',
+    ])
   })
 })

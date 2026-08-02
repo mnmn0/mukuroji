@@ -13,6 +13,7 @@ import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 import { useTeamWorkload } from '../../workload/queries/useTeamWorkload'
 import { updateWorkloadAssignment } from '../../workload/api'
+import { addWorkloadCalendarDays, countWorkloadCalendarDays } from '../../workload/model/dateRange'
 import {
   WorkloadPlanningControls,
   type WorkloadPlanningMemberOption,
@@ -121,10 +122,11 @@ export function TeamMembersPage() {
             if (!assignment || !workspace.accessToken || !activeTeam) return
             setWorkloadMutationError(undefined)
             setIsAssignmentMutationPending(true)
+            const durationDays = countWorkloadCalendarDays(assignment.fromDate, assignment.toDate)
             void updateWorkloadAssignment(workspace.accessToken, activeTeam.id, assignment.id, {
               memberId,
               fromDate: targetDate,
-              toDate: targetDate,
+              toDate: addWorkloadCalendarDays(targetDate, durationDays - 1),
               expectedRevision: assignment.revision,
               expectedTeamRevision: workload.data?.revision ?? 0,
             }).then(async () => {
