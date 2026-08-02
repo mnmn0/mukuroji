@@ -221,6 +221,7 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `MUKUROJI_REALTIME_SESSIONS_TABLE` / `REALTIME_SESSIONS_TABLE_NAME`: WebSocket ticket と connection lease を保存する DynamoDB table 名。未指定時は `mukuroji-realtime-sessions-local`
 - `REALTIME_WEBSOCKET_URL`: production の collaboration invalidation/presence 用 WebSocket URL。未指定時は Web が polling fallback を使います。
 - `MUKUROJI_AUDIT_EVENTS_TABLE` / `AUDIT_EVENTS_TABLE_NAME`: immutable audit event/outbox を保存する DynamoDB table 名。ローカル既定値は `mukuroji-audit-events`
+- `TENANT_ADMINISTRATION_TABLE_NAME`: tenant profile、entitlement、governance、lifecycle を保存する DynamoDB table 名。ローカル既定値は `mukuroji-tenant-administration-local`
 - `ENTERPRISE_IDENTITY_TABLE_NAME`: Workspace generation/`CONTROL` checkpoint、global domain claim、SSO/domain/policy/role、SCIM identity/group、provisioning run、service account、break-glass metadata を保存する DynamoDB table 名。Enterprise Identity 専用 GSI はなく、ローカル既定値は `mukuroji-enterprise-identity-local`
 - `ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET`: SCIM bearer token と service account credential を HMAC-SHA-256 する32–256文字の安定した secret。DynamoDB には credential kind・Workspace・credential ID で domain-separated な digest だけを保存します。作成・rotate response の raw credential は通常一回だけ表示し、同じ idempotency request の応答消失時に限り10分以内は同じ値を回復できます。
 - `MUKUROJI_AUTOMATION_TABLE` / `AUTOMATION_TABLE_NAME`: rule/template/recurring/execution/bulk/template application に加え、inbound webhook endpoint と delivery/replay receipt を保存する DynamoDB table 名。ローカル既定値は `mukuroji-automation-local`

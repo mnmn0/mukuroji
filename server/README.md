@@ -267,6 +267,7 @@ Default local table names are:
 - `ANALYTICS_SCHEDULE_INDEX_NAME=ScheduleDueIndex`
 - `MUKUROJI_WORKSPACE_SEARCH_TABLE` / `WORKSPACE_SEARCH_TABLE_NAME`（未指定時は `mukuroji-workspace-search-local`）
 - `MUKUROJI_AUDIT_RETENTION_DAYS=2555`
+- `TENANT_ADMINISTRATION_TABLE_NAME=mukuroji-tenant-administration-local`
 - `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<64桁の小文字hex固定key>`（`openssl rand -hex 32` などで生成し、API と backfill で共有して通常は rotation しない）
 - `MUKUROJI_WORKSPACE_DIRECTORY_ID=workspace#mukuroji-local`
 - `MUKUROJI_WORKSPACE_ACCESS_TABLE=mukuroji-workspace-access-local`
