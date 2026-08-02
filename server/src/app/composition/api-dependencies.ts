@@ -308,18 +308,6 @@ function createCapacityPlanningDataSource(
         status: entry.status,
       }))
     },
-    async listAllTimeEntries(workspaceId, teamId) {
-      const entries = await timeTrackingService.listAllEntries({ workspaceId, teamId })
-      return entries.map((entry) => ({
-        memberId: entry.userId,
-        ...(entry.projectId ? { projectId: entry.projectId } : {}),
-        workItemId: entry.workItemId,
-        startAt: entry.startAt,
-        endAt: entry.endAt,
-        durationMinutes: entry.durationMinutes,
-        status: entry.status,
-      }))
-    },
     async listEstimates(workspaceId, teamId) {
       return await timeTrackingService.listEstimates(workspaceId, teamId)
     },

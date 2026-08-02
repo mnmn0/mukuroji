@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   CAPACITY_PLANNING_SCHEMA_VERSION,
+  type ResourceAssignment,
   type WorkloadMemberProfile,
 } from '@mukuroji/contracts'
 import {
@@ -194,6 +195,31 @@ describe('capacity planning calculations', () => {
     )
 
     expect(snapshot.members.map((member) => member.remainingEffortMinutes)).toEqual([240, 240])
+  })
+
+  test('bounds the snapshot time-entry query by the visible assignment horizon', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    await repository.saveState(
+      'workspace-1',
+      'team-1',
+      createState([profile], [{ ...createAssignment('assignment-1', false, '2026-08-01'), workItemId: 'work-item-1' }]),
+      0,
+    )
+    let observedFrom: string | undefined
+    let observedTo: string | undefined
+    const service = new CapacityPlanningService(repository, {
+      listTimeEntries: async (input) => {
+        observedFrom = input.from
+        observedTo = input.to
+        return []
+      },
+      listEstimates: async () => [],
+    })
+
+    await service.getSnapshot(createInput({ fromDate: '2026-08-10', toDate: '2026-08-10' }))
+
+    expect(observedFrom).toBe('2026-07-31T00:00:00.000Z')
+    expect(observedTo).toBe('2026-08-12T00:00:00.000Z')
   })
 })
 
@@ -422,13 +448,14 @@ function createAssignment(
   fromDate = '2026-08-03',
   toDate = fromDate,
   allocationMinutes = 480,
-) {
+): ResourceAssignment {
   return {
     id,
     workspaceId: 'workspace-1',
     teamId: 'team-1',
     memberId: 'member-1',
     skillIds: [],
+    workItemId: undefined,
     fromDate,
     toDate,
     allocationMinutes,
@@ -444,7 +471,7 @@ function createAssignment(
 /** Creates a deterministic capacity-planning state fixture. */
 function createState(
   profiles: WorkloadMemberProfile[],
-  assignments: ReturnType<typeof createAssignment>[] = [],
+  assignments: ResourceAssignment[] = [],
 ): CapacityPlanningState {
   return { revision: 1, profiles, requests: [], assignments }
 }

@@ -70,8 +70,6 @@ export type CapacityPlanningDataSource = {
     /** Exclusive instant upper bound. */
     to: string
   }): Promise<WorkloadTimeEntry[]>
-  /** Lists all Team time entries for per-Work-Item actual reconciliation. */
-  listAllTimeEntries?(workspaceId: string, teamId: string): Promise<WorkloadTimeEntry[]>
   /** Lists Work Item estimates for the selected Team. */
   listEstimates(workspaceId: string, teamId: string): Promise<WorkloadEstimate[]>
 }
@@ -268,6 +266,35 @@ function isAssignmentVisible(
     (!assignment.confidential || input.canViewConfidential || assignment.memberId === input.viewerMemberId)
 }
 
+/** Builds the smallest time-entry window needed for the visible workload range. */
+function getTimeEntryQueryRange(
+  state: CapacityPlanningState,
+  input: WorkloadSnapshotInput,
+  range: { fromDate: string; toDate: string },
+): { from: string; to: string } {
+  const profiles = state.profiles.filter((profile) =>
+    input.visibleMemberIds === undefined || input.visibleMemberIds.has(profile.memberId)
+  )
+  const profileByMemberId = new Map(profiles.map((profile) => [profile.memberId, profile]))
+  const isProjectVisible = (projectId: string | undefined): boolean =>
+    input.visibleProjectIds === undefined || projectId === undefined || input.visibleProjectIds.has(projectId)
+  const relevantAssignments = state.assignments.filter((assignment) =>
+    assignment.workItemId !== undefined && isAssignmentVisible(assignment, input, profileByMemberId, isProjectVisible)
+  )
+  const fromDate = relevantAssignments.reduce(
+    (earliest, assignment) => assignment.fromDate < earliest ? assignment.fromDate : earliest,
+    range.fromDate,
+  )
+  const toDate = relevantAssignments.reduce(
+    (latest, assignment) => assignment.toDate > latest ? assignment.toDate : latest,
+    range.toDate,
+  )
+  return {
+    from: `${addCalendarDays(fromDate, -1)}T00:00:00.000Z`,
+    to: `${addCalendarDays(toDate, 2)}T00:00:00.000Z`,
+  }
+}
+
 /** Application service for availability, allocation, and workload planning. */
 export class CapacityPlanningService {
   /** Durable capacity planning state. */
@@ -295,19 +322,17 @@ export class CapacityPlanningService {
   async getSnapshot(input: WorkloadSnapshotInput): Promise<WorkloadSnapshot> {
     const range = validateDateRange(input.fromDate, input.toDate)
     const state = await this.repository.getState(input.workspaceId, input.teamId)
-    const [entries, allEntries, estimates] = await Promise.all([
+    const timeEntryRange = getTimeEntryQueryRange(state, input, range)
+    const [entries, estimates] = await Promise.all([
       this.dataSource.listTimeEntries({
         workspaceId: input.workspaceId,
         teamId: input.teamId,
-        from: `${addCalendarDays(range.fromDate, -1)}T00:00:00.000Z`,
-        to: `${addCalendarDays(range.toDate, 2)}T00:00:00.000Z`,
+        from: timeEntryRange.from,
+        to: timeEntryRange.to,
       }),
-      this.dataSource.listAllTimeEntries
-        ? this.dataSource.listAllTimeEntries(input.workspaceId, input.teamId)
-        : Promise.resolve(undefined),
       this.dataSource.listEstimates(input.workspaceId, input.teamId),
     ])
-    return buildWorkloadSnapshot(state, allEntries ?? entries, estimates, input, this.now().toISOString())
+    return buildWorkloadSnapshot(state, entries, estimates, input, this.now().toISOString())
   }
 
   /** Saves or replaces one member's recurring schedule and holidays. */
@@ -563,19 +588,17 @@ export class CapacityPlanningService {
         }
     if (current) replaceById(state.assignments, preview, 'id')
     else state.assignments.push(preview)
-    const [entries, allEntries, estimates] = await Promise.all([
+    const timeEntryRange = getTimeEntryQueryRange(state, input, range)
+    const [entries, estimates] = await Promise.all([
       this.dataSource.listTimeEntries({
         workspaceId: input.workspaceId,
         teamId: input.teamId,
-        from: `${addCalendarDays(range.fromDate, -1)}T00:00:00.000Z`,
-        to: `${addCalendarDays(range.toDate, 2)}T00:00:00.000Z`,
+        from: timeEntryRange.from,
+        to: timeEntryRange.to,
       }),
-      this.dataSource.listAllTimeEntries
-        ? this.dataSource.listAllTimeEntries(input.workspaceId, input.teamId)
-        : Promise.resolve(undefined),
       this.dataSource.listEstimates(input.workspaceId, input.teamId),
     ])
-    return buildWorkloadSnapshot(state, allEntries ?? entries, estimates, input, this.now().toISOString())
+    return buildWorkloadSnapshot(state, entries, estimates, input, this.now().toISOString())
   }
 
   /** Applies one state mutation with a Team-wide optimistic concurrency check. */

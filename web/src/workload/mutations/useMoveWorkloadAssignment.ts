@@ -42,6 +42,7 @@ export function useMoveWorkloadAssignment({
 
   /** Moves an assignment while retaining its original duration in calendar days. */
   const move = (assignmentId: string, memberId: string, targetDate: string) => {
+    if (isPending) return
     const currentSnapshot = snapshot
     const assignment = currentSnapshot?.assignments.find((candidate) => candidate.id === assignmentId)
     if (!assignment || !accessToken || !teamId || !currentSnapshot) return
