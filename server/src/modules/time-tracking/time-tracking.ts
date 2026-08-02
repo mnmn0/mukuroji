@@ -854,7 +854,8 @@ export class TimeTrackingService {
       before: toAuditTimerSnapshot(timer),
       includeFields: ['teamId', 'workItemId', 'userId', 'startedAt', 'description', 'billable', 'revision'],
       metadata: { teamId: timer.teamId, workItemId: timer.workItemId, userId },
-      path: `/api/time-tracking/timers/${timer.id}`,
+      path: `/api/teams/${timer.teamId}/timers/${timer.id}`,
+      occurredAt: readNow(this.now).toISOString(),
     })
     const result: CompletedTimeTrackingMutation = { completed: true }
     const idempotencyPut = completion ? await completion(result) : undefined
@@ -2215,6 +2216,7 @@ const localDateFormatters = new Map<string, Intl.DateTimeFormat>()
 const localTimeFormatters = new Map<string, Intl.DateTimeFormat>()
 const zonedDateTimeFormatters = new Map<string, Intl.DateTimeFormat>()
 const localDateStartCache = new Map<string, number>()
+const LOCAL_DATE_START_CACHE_LIMIT = 4_096
 
 /** Returns a cached formatter for local calendar dates. */
 function getLocalDateFormatter(timeZone: string): Intl.DateTimeFormat {
@@ -2282,18 +2284,21 @@ function resolveLocalDateStart(date: string, timeZone: string): number {
     candidates.add(approximate - offset * 60_000)
   }
   const exact = [...candidates].find((candidate) => localDateAt(candidate, timeZone) === date && localTimeAt(candidate, timeZone) === '00:00')
-  if (exact !== undefined) {
-    localDateStartCache.set(cacheKey, exact)
-    return exact
-  }
+  if (exact !== undefined) return cacheLocalDateStart(cacheKey, exact)
   for (let minute = 0; minute < 180; minute += 1) {
     const candidate = [...candidates].map((value) => value + minute * 60_000).find((value) => localDateAt(value, timeZone) === date)
-    if (candidate !== undefined) {
-      localDateStartCache.set(cacheKey, candidate)
-      return candidate
-    }
+    if (candidate !== undefined) return cacheLocalDateStart(cacheKey, candidate)
   }
   throw new TimeTrackingError(400, 'InvalidTimeZoneBoundary', 'The local date boundary could not be resolved.')
+}
+
+/** Stores a local date boundary while bounding process-wide cache growth. */
+function cacheLocalDateStart(cacheKey: string, value: number): number {
+  if (localDateStartCache.size >= LOCAL_DATE_START_CACHE_LIMIT && !localDateStartCache.has(cacheKey)) {
+    localDateStartCache.clear()
+  }
+  localDateStartCache.set(cacheKey, value)
+  return value
 }
 
 /** Returns a local 24-hour time. */
@@ -2517,7 +2522,7 @@ function readStoredEstimate(value: unknown): TimeEstimate {
     teamId: readString(record.teamId, 'Stored estimate Team ID'),
     workItemId: readString(record.workItemId, 'Stored estimate Work Item ID'),
     estimateMinutes: readNumber(record.estimateMinutes, 'Stored estimate'),
-    revision: readOptionalNumber(record.revision) ?? 1,
+    revision: readNumber(record.revision, 'Stored estimate revision'),
     updatedBy: readString(record.updatedBy, 'Stored estimate actor'),
     updatedAt: readString(record.updatedAt, 'Stored estimate timestamp'),
   }
@@ -2696,6 +2701,7 @@ function createTimeTrackingRequestFingerprint(operation: string, input: object):
   const body = Object.fromEntries(
     Object.entries(input)
       .filter(([key]) => key !== 'idempotencyKey')
+      .sort(([left], [right]) => left.localeCompare(right))
       .map(([key, value]) => [key, sortRequestValue(value)]),
   )
   return JSON.stringify({ operation, body })

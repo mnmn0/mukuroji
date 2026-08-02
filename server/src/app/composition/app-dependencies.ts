@@ -205,7 +205,7 @@ export interface DeveloperPlatformDependencies {
   queueWebhookDelivery: NonNullable<PublicApiDependencies['queueWebhookDelivery']>
 }
 
-/** Dependencies required by time entry, timer, timesheet, and budget routes. */
+/** Provides dependencies required by time-tracking routes. */
 export interface TimeTrackingDependencies {
   /** Provides the application service for one API application instance. */
   timeTrackingService: TimeTrackingService

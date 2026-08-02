@@ -6,6 +6,20 @@ import {
   TimeTrackingService,
 } from '../../time-tracking'
 
+/** Converts a domain status to the HTTP status values accepted by Hono. */
+function toTimeTrackingHttpStatus(status: number): 400 | 403 | 404 | 409 | 500 {
+  switch (status) {
+    case 400:
+    case 403:
+    case 404:
+    case 409:
+    case 500:
+      return status
+    default:
+      return 500
+  }
+}
+
 /** Creates an isolated HTTP router fixture with deterministic authentication and storage. */
 function createFixture(canManageRates = false) {
   const service = new TimeTrackingService(new InMemoryTimeTrackingRepository(), {
@@ -28,8 +42,7 @@ function createFixture(canManageRates = false) {
     readJson: async (request) => await request.json(),
     mapError: (context, error) => {
       if (error instanceof TimeTrackingError) {
-        // Hono's JSON response type only accepts its known status union; the domain error validates status at runtime.
-        return context.json({ code: error.code, message: error.message }, error.status as 400 | 403 | 404 | 409 | 500)
+        return context.json({ code: error.code, message: error.message }, toTimeTrackingHttpStatus(error.status))
       }
       throw error
     },
