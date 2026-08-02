@@ -210,8 +210,16 @@ export function buildWorkloadSnapshot(
     fromDate,
     toDate,
   )
+  const actualByWorkItemId = aggregateActualMinutesByWorkItem(actualByMember)
   const estimateByWorkItemId = new Map(
     estimates.map((estimate) => [estimate.workItemId, Math.max(0, estimate.estimateMinutes)]),
+  )
+  const remainingEffortByAssignmentId = calculateRemainingEffortByAssignment(
+    visibleAssignments,
+    actualByWorkItemId,
+    estimateByWorkItemId,
+    fromDate,
+    toDate,
   )
 
   const members = profiles.map((profile) =>
@@ -219,10 +227,10 @@ export function buildWorkloadSnapshot(
       profile,
       visibleAssignments.filter((assignment) => assignment.memberId === profile.memberId),
       actualByMember.get(profile.memberId) ?? { byDate: new Map(), byWorkItemId: new Map() },
-      estimateByWorkItemId,
       fromDate,
       toDate,
       input.granularity,
+      remainingEffortByAssignmentId,
     )
   )
 
@@ -617,10 +625,10 @@ function calculateMemberSummary(
   profile: WorkloadMemberProfile,
   assignments: readonly ResourceAssignment[],
   actual: { byDate: ReadonlyMap<string, number>; byWorkItemId: ReadonlyMap<string, number> },
-  estimateByWorkItemId: ReadonlyMap<string, number>,
   fromDate: string,
   toDate: string,
   granularity: CapacityPlanningGranularity,
+  remainingEffortByAssignmentId: ReadonlyMap<string, number>,
 ): WorkloadMemberSummary {
   const dates = listCalendarDates(fromDate, toDate)
   const daily = new Map<string, DailyWorkload>()
@@ -633,23 +641,15 @@ function calculateMemberSummary(
       remainingEffortMinutes: 0,
     })
   }
-  const remainingAssignedWorkItems = new Set<string>()
   for (const assignment of assignments) {
     const assignmentDates = dates.filter((date) => date >= assignment.fromDate && date <= assignment.toDate)
     if (assignmentDates.length === 0) continue
     const distributionDates = chooseDistributionDates(profile, assignmentDates)
     distributeMinutes(daily, distributionDates, assignment.allocationMinutes, 'allocatedMinutes')
     distributeMinutes(daily, distributionDates, assignment.plannedEffortMinutes, 'plannedEffortMinutes')
-    const actualMinutes = assignment.workItemId
-      ? actual.byWorkItemId.get(assignment.workItemId) ?? 0
-      : 0
-    const estimate = assignment.workItemId
-      ? estimateByWorkItemId.get(assignment.workItemId) ?? assignment.plannedEffortMinutes
+    const remaining = assignment.workItemId
+      ? remainingEffortByAssignmentId.get(assignment.id) ?? 0
       : assignment.plannedEffortMinutes
-    const remaining = assignment.workItemId && remainingAssignedWorkItems.has(assignment.workItemId)
-      ? 0
-      : Math.max(0, Math.max(estimate, assignment.plannedEffortMinutes) - actualMinutes)
-    if (assignment.workItemId) remainingAssignedWorkItems.add(assignment.workItemId)
     distributeMinutes(daily, distributionDates, remaining, 'remainingEffortMinutes')
   }
   const cells = aggregateCells(daily, granularity)
@@ -783,6 +783,57 @@ function createActualMinutesByMemberDate(
       }
     }
     result.set(entry.memberId, memberActual)
+  }
+  return result
+}
+
+/** Aggregates actual minutes by Work Item across visible members. */
+function aggregateActualMinutesByWorkItem(
+  actualByMember: ReadonlyMap<string, { byDate: ReadonlyMap<string, number>; byWorkItemId: ReadonlyMap<string, number> }>,
+): Map<string, number> {
+  const result = new Map<string, number>()
+  for (const actual of actualByMember.values()) {
+    for (const [workItemId, minutes] of actual.byWorkItemId) {
+      result.set(workItemId, (result.get(workItemId) ?? 0) + minutes)
+    }
+  }
+  return result
+}
+
+/** Distributes each Work Item's remaining effort across its visible assignments. */
+function calculateRemainingEffortByAssignment(
+  assignments: readonly ResourceAssignment[],
+  actualByWorkItemId: ReadonlyMap<string, number>,
+  estimateByWorkItemId: ReadonlyMap<string, number>,
+  fromDate: string,
+  toDate: string,
+): Map<string, number> {
+  const assignmentsByWorkItemId = new Map<string, ResourceAssignment[]>()
+  for (const assignment of assignments) {
+    if (!assignment.workItemId || assignment.toDate < fromDate || assignment.fromDate > toDate) continue
+    const group = assignmentsByWorkItemId.get(assignment.workItemId) ?? []
+    group.push(assignment)
+    assignmentsByWorkItemId.set(assignment.workItemId, group)
+  }
+
+  const result = new Map<string, number>()
+  for (const [workItemId, group] of assignmentsByWorkItemId) {
+    const plannedTotal = sum(group, (assignment) => assignment.plannedEffortMinutes)
+    const baseline = Math.max(estimateByWorkItemId.get(workItemId) ?? plannedTotal, plannedTotal)
+    const remainingTotal = Math.max(0, baseline - (actualByWorkItemId.get(workItemId) ?? 0))
+    const weights = group.map((assignment) => assignment.plannedEffortMinutes || assignment.allocationMinutes)
+    const weightTotal = sum(weights, (weight) => weight)
+    let remainder = remainingTotal
+    for (const [index, assignment] of group.entries()) {
+      const weight = weights[index] ?? 0
+      const share = index === group.length - 1
+        ? remainder
+        : weightTotal > 0
+          ? Math.floor(remainingTotal * weight / weightTotal)
+          : Math.floor(remainingTotal / group.length)
+      result.set(assignment.id, share)
+      remainder -= share
+    }
   }
   return result
 }

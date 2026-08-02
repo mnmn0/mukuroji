@@ -150,6 +150,22 @@ describe('capacity planning calculations', () => {
 
     expect(snapshot.members[0]?.remainingEffortMinutes).toBe(480)
   })
+
+  test('distributes one Work Item remaining effort across multiple member assignments', () => {
+    const secondMember = createProfile('member-2', 'UTC')
+    const assignments = [
+      { ...createAssignment('assignment-a', false), workItemId: 'work-item-1', plannedEffortMinutes: 240 },
+      { ...createAssignment('assignment-b', false), memberId: 'member-2', workItemId: 'work-item-1', plannedEffortMinutes: 240 },
+    ]
+    const snapshot = buildWorkloadSnapshot(
+      createState([profile, secondMember], assignments),
+      [],
+      [{ workItemId: 'work-item-1', estimateMinutes: 480 }],
+      createInput(),
+    )
+
+    expect(snapshot.members.map((member) => member.remainingEffortMinutes)).toEqual([240, 240])
+  })
 })
 
 describe('capacity planning mutations', () => {
