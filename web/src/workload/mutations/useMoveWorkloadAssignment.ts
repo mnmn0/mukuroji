@@ -42,8 +42,9 @@ export function useMoveWorkloadAssignment({
 
   /** Moves an assignment while retaining its original duration in calendar days. */
   const move = (assignmentId: string, memberId: string, targetDate: string) => {
-    const assignment = snapshot?.assignments.find((candidate) => candidate.id === assignmentId)
-    if (!assignment || !accessToken || !teamId) return
+    const currentSnapshot = snapshot
+    const assignment = currentSnapshot?.assignments.find((candidate) => candidate.id === assignmentId)
+    if (!assignment || !accessToken || !teamId || !currentSnapshot) return
     setError(undefined)
     setIsPending(true)
     const durationDays = countWorkloadCalendarDays(assignment.fromDate, assignment.toDate)
@@ -52,7 +53,7 @@ export function useMoveWorkloadAssignment({
       fromDate: targetDate,
       toDate: addWorkloadCalendarDays(targetDate, durationDays - 1),
       expectedRevision: assignment.revision,
-      expectedTeamRevision: snapshot.revision,
+      expectedTeamRevision: currentSnapshot.revision,
     }).then(async () => {
       await refresh()
     }).catch((cause: unknown) => {
