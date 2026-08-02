@@ -802,6 +802,12 @@ CDK は configuration row を強制 seed しません。row が無い Workspace 
 
 Table は `PAY_PER_REQUEST`、`Retain`、PITR enabled で作成します。deploy 前後に `PlanningTableName` output と Lambda の `PLANNING_TABLE_NAME` が同じ table を指すこと、table replacement がないこと、API role 以外へ不要な planning data 権限が付いていないことを確認してください。
 
+## Capacity planning data
+
+`CapacityPlanningTable` は `workspaceId` / `recordKey` を primary key とし、Team ごとの working schedule、holiday / time-off、resource request、resource assignment を一つの CAS 管理レコードへ保存します。API Lambda には `CAPACITY_PLANNING_TABLE_NAME` を設定し、capacity planning table への `GetItem` / 条件付き `PutItem` / `DescribeTable` だけを許可します。
+
+Table は `PAY_PER_REQUEST`、`Retain`、PITR enabled で作成します。deploy 前後に `CapacityPlanningTableName` output と Lambda の `CAPACITY_PLANNING_TABLE_NAME` が同じ table を指すこと、table replacement がないこと、API role 以外へ workload の権限が付いていないことを確認してください。
+
 ## Analytics data and scheduled delivery
 
 `AnalyticsTable` は `workspaceId` / `recordKey` をprimary keyとし、saved report、immutable

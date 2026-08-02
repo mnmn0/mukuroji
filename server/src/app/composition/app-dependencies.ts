@@ -44,6 +44,7 @@ import type { EnterpriseSessionActivityClient } from '../../modules/enterprise-i
 import type { FileProofingClient } from '../../modules/files/file-proofing'
 import type { NotificationClient } from '../../modules/notifications/notifications'
 import type { PlanningClient } from '../../modules/planning/planning'
+import type { CapacityPlanningService } from '../../modules/capacity-planning'
 import type { RealtimeTicketsClient } from '../../modules/realtime/realtime-ticket'
 import type { RequestIntakeClient } from '../../modules/request-intake/request-intake'
 import type {
@@ -58,6 +59,7 @@ import type {
 } from '../../modules/work-items/work-item-import'
 import type { WorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'
 import type { WorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
+import type { TimeTrackingService } from '../../modules/time-tracking'
 import type {
   ApiAccessObservation,
   ApiErrorObservation,
@@ -204,6 +206,18 @@ export interface DeveloperPlatformDependencies {
   queueWebhookDelivery: NonNullable<PublicApiDependencies['queueWebhookDelivery']>
 }
 
+/** Provides dependencies required by time-tracking routes. */
+export interface TimeTrackingDependencies {
+  /** Provides the application service for one API application instance. */
+  timeTrackingService: TimeTrackingService
+}
+
+/** Dependencies required by capacity-planning routes. */
+export interface CapacityPlanningDependencies {
+  /** Provides the application service for workload and resource allocation. */
+  capacityPlanningService: CapacityPlanningService
+}
+
 /** Operational dependencies required by system routes. */
 export interface OperationalDependencies {
   /** Records bounded runtime-control decisions and metrics. */
@@ -238,6 +252,10 @@ export interface AppDependencies {
   workItems: Readonly<WorkItemDependencies>
   /** Automation route dependencies. */
   automation: Readonly<AutomationDependencies>
+  /** Time tracking route dependencies. */
+  timeTracking: Readonly<TimeTrackingDependencies>
+  /** Capacity planning route dependencies. */
+  capacityPlanning: Readonly<CapacityPlanningDependencies>
   /** Developer Platform route and worker dependencies. */
   developerPlatform: Readonly<DeveloperPlatformDependencies>
 }
@@ -259,6 +277,8 @@ export function freezeAppDependencies(
     workspace: Object.freeze({ ...dependencies.workspace }),
     workItems: Object.freeze({ ...dependencies.workItems }),
     automation: Object.freeze({ ...dependencies.automation }),
+    timeTracking: Object.freeze({ ...dependencies.timeTracking }),
+    capacityPlanning: Object.freeze({ ...dependencies.capacityPlanning }),
     developerPlatform: Object.freeze({ ...dependencies.developerPlatform }),
   })
 }
@@ -269,6 +289,8 @@ export type AppDependencyOverrides = Partial<
   Omit<WorkspaceDependencies, 'enterpriseIdentity'> &
   WorkItemDependencies &
   AutomationDependencies &
+  TimeTrackingDependencies &
+  CapacityPlanningDependencies &
   DeveloperPlatformDependencies &
   OperationalDependencies
 > & {

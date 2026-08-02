@@ -273,6 +273,7 @@ const expectedWorkflowConfiguration = {
   ),
   NOTIFICATIONS_STATUS_INDEX_NAME: base64('RecipientStatusIndex'),
   NOTIFICATIONS_TABLE_NAME: base64(ref('NotificationsTable76DCFC6C')),
+  CAPACITY_PLANNING_TABLE_NAME: base64(ref('CapacityPlanningTable0EECD517')),
   PLANNING_TABLE_NAME: base64(ref('PlanningTable2A0D4CC5')),
   REALTIME_SESSIONS_TABLE_NAME: base64(
     ref('RealtimeSessionsTable607096EB'),

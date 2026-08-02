@@ -741,6 +741,12 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
       JSON.stringify(statement.Condition)?.includes('dynamodb:EnclosingOperation') === true &&
       JSON.stringify(statement.Resource).includes('WorkspaceSearchTable2575AD6B');
   });
+  const auditTransactionStatements = statements.filter((statement) => {
+    const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+    return (actions.includes('dynamodb:PutItem') || actions.includes('dynamodb:ConditionCheckItem')) &&
+      JSON.stringify(statement.Resource).includes('AuditEventsTable') &&
+      JSON.stringify(statement.Condition)?.includes('dynamodb:EnclosingOperation') === true;
+  });
   const configurationDataStatement = statements.find((statement) =>
     JSON.stringify(statement.Resource) === JSON.stringify({
       'Fn::GetAtt': ['WorkItemConfigurationTable35E94558', 'Arn'],
@@ -849,6 +855,16 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     .not.toContain('ProjectTasksTableE21F6637');
   expect(JSON.stringify(transactionConditionCheckStatement)).toContain('FileProofingTable');
   expect(serializedApiPolicies).not.toContain('dynamodb:TransactWriteItems');
+  expect(auditTransactionStatements).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      Action: expect.arrayContaining(['dynamodb:PutItem']),
+      Resource: { 'Fn::GetAtt': ['AuditEventsTable0723963E', 'Arn'] },
+    }),
+    expect.objectContaining({
+      Action: expect.arrayContaining(['dynamodb:ConditionCheckItem']),
+      Resource: { 'Fn::GetAtt': ['AuditEventsTable0723963E', 'Arn'] },
+    }),
+  ]));
   expect(fileObjectStatements).not.toHaveLength(0);
   expect(fileObjectStatements).toEqual(expect.arrayContaining([
     expect.objectContaining({ Effect: 'Allow' }),

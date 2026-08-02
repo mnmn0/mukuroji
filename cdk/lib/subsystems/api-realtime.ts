@@ -284,6 +284,7 @@ function bindApiRuntimeConfiguration(
     analyticsTable,
     auditEventsTable,
     automationTable,
+    capacityPlanningTable,
     collaborationTable,
     connectorRuntimeSecret,
     developerPlatformConnectorKey,
@@ -474,6 +475,7 @@ function bindApiRuntimeConfiguration(
       FILE_UPLOAD_URL_TTL_SECONDS: fileUploadUrlTtlSeconds.valueAsString,
       NOTIFICATIONS_STATUS_INDEX_NAME: 'RecipientStatusIndex',
       NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
+      CAPACITY_PLANNING_TABLE_NAME: capacityPlanningTable.tableName,
       PLANNING_TABLE_NAME: planningTable.tableName,
       REALTIME_SESSIONS_TABLE_NAME: realtimeSessionsTable.tableName,
       REQUEST_INTAKE_TABLE_NAME: requestIntakeTable.tableName,
@@ -539,6 +541,7 @@ export function buildApiRuntime(
     analyticsTable,
     auditEventsTable,
     automationTable,
+    capacityPlanningTable,
     collaborationTable,
     connectorRuntimeSecret,
     developerPlatformConnectorKey,
@@ -627,6 +630,20 @@ export function buildApiRuntime(
   notificationsTable.grants.readWriteData(apiFunction);
   workspaceSearchTable.grants.readWriteData(apiFunction);
   realtimeSessionsTable.grants.readWriteData(apiFunction);
+  const apiCapacityPlanningDataPolicy = new iam.Policy(
+    scope,
+    'ApiCapacityPlanningDataPolicy',
+    {
+      statements: [new iam.PolicyStatement({
+        actions: [
+          'dynamodb:DescribeTable',
+          'dynamodb:GetItem',
+          'dynamodb:PutItem',
+        ],
+        resources: [capacityPlanningTable.tableArn],
+      })],
+    },
+  );
   const apiAutomationDataPolicy = new iam.Policy(
     scope,
     'ApiAutomationDataPolicy',
@@ -816,24 +833,47 @@ export function buildApiRuntime(
     })],
   });
   const apiAnalyticsDataPolicy = new iam.Policy(scope, 'ApiAnalyticsDataPolicy', {
-    statements: [new iam.PolicyStatement({
-      actions: [
-        'dynamodb:DeleteItem',
-        'dynamodb:DescribeTable',
-        'dynamodb:GetItem',
-        'dynamodb:PutItem',
-        'dynamodb:Query',
-        'dynamodb:UpdateItem',
-      ],
-      resources: [analyticsTable.tableArn],
-    })],
+    statements: [
+      new iam.PolicyStatement({
+        actions: [
+          'dynamodb:DeleteItem',
+          'dynamodb:DescribeTable',
+          'dynamodb:GetItem',
+          'dynamodb:PutItem',
+          'dynamodb:Query',
+          'dynamodb:UpdateItem',
+        ],
+        resources: [analyticsTable.tableArn],
+      }),
+      new iam.PolicyStatement({
+        actions: ['dynamodb:Query'],
+        resources: [`${analyticsTable.tableArn}/index/TimeEntryTeamDateIndex`],
+      }),
+    ],
   });
+  const apiAuditTransactionDataPolicy = new iam.Policy(
+    scope,
+    'ApiAuditTransactionDataPolicy',
+    {
+      statements: [new iam.PolicyStatement({
+        actions: ['dynamodb:ConditionCheckItem', 'dynamodb:PutItem'],
+        resources: [auditEventsTable.tableArn],
+        conditions: {
+          'ForAnyValue:StringEquals': {
+            'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+          },
+        },
+      })],
+    },
+  );
   apiFunction.role.attachInlinePolicy(apiAutomationDataPolicy);
   apiFunction.role.attachInlinePolicy(apiEnterpriseIdentityDataPolicy);
   apiFunction.role.attachInlinePolicy(apiWorkItemConfigurationDataPolicy);
   apiFunction.role.attachInlinePolicy(apiDeveloperPlatformDataPolicy);
   apiFunction.role.attachInlinePolicy(apiPlanningDataPolicy);
+  apiFunction.role.attachInlinePolicy(apiCapacityPlanningDataPolicy);
   apiFunction.role.attachInlinePolicy(apiAnalyticsDataPolicy);
+  apiFunction.role.attachInlinePolicy(apiAuditTransactionDataPolicy);
   apiFunction.role.attachInlinePolicy(apiRequestIntakeDataPolicy);
   apiFunction.role.attachInlinePolicy(apiTransactionConditionCheckPolicy);
   connectorRuntimeSecret.grantRead(apiFunction);
