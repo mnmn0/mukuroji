@@ -60,7 +60,22 @@ export interface TimeTrackingIdempotencyPort {
     requestFingerprint: string
     reservationId: string
   }): Promise<void>
+  /** Prepares a receipt completion item for the domain transaction. */
+  prepareIdempotencyCompletion?(request: {
+    workspaceId: string
+    credentialId: string
+    idempotencyKey: string
+    requestFingerprint: string
+    reservationId: string
+    response: unknown
+  }): Promise<AuditTransactWriteItem>
 }
+
+/** Callback used to attach an idempotency completion to a domain transaction. */
+type TimeTrackingIdempotencyCompletion = (response: unknown) => Promise<AuditTransactWriteItem>
+
+/** JSON-safe response used to persist a void timer-cancellation result. */
+type CompletedTimeTrackingMutation = { completed: true }
 
 const ENTRY_PREFIX = 'TIME_ENTRY#'
 const HISTORY_PREFIX = 'TIME_HISTORY#'
@@ -376,6 +391,7 @@ export interface TimeTrackingRepository {
     history: TimeEntryHistory,
     expectedRevision?: number,
     auditPut?: AuditTransactWriteItem,
+    idempotencyPut?: AuditTransactWriteItem,
   ): Promise<void>
   /** Saves an immutable lifecycle history record. */
   saveHistory(workspaceId: string, teamId: string, history: TimeEntryHistory): Promise<void>
@@ -384,26 +400,27 @@ export interface TimeTrackingRepository {
   /** Reads the active timer for one Workspace member. */
   getActiveTimer(workspaceId: string, userId: string): Promise<RunningTimer | undefined>
   /** Removes the active timer with an optimistic identity check. */
-  cancelTimer(timer: RunningTimer, auditPut?: AuditTransactWriteItem): Promise<void>
+  cancelTimer(timer: RunningTimer, auditPut?: AuditTransactWriteItem, idempotencyPut?: AuditTransactWriteItem): Promise<void>
   /** Creates an active timer and rejects a duplicate active timer. */
-  createTimer(timer: RunningTimer, auditPut?: AuditTransactWriteItem): Promise<void>
+  createTimer(timer: RunningTimer, auditPut?: AuditTransactWriteItem, idempotencyPut?: AuditTransactWriteItem): Promise<void>
   /** Stops a timer and persists its resulting entry atomically where supported. */
   finishTimer(
     timer: RunningTimer,
     entry: TimeEntry,
     history: TimeEntryHistory,
     auditPut?: AuditTransactWriteItem,
+    idempotencyPut?: AuditTransactWriteItem,
   ): Promise<void>
   /** Reads a Work Item estimate. */
   getEstimate(workspaceId: string, teamId: string, workItemId: string): Promise<TimeEstimate | undefined>
   /** Lists estimates in a Team. */
   listEstimates(workspaceId: string, teamId: string): Promise<TimeEstimate[]>
   /** Saves a Work Item estimate with optimistic concurrency and optional audit. */
-  saveEstimate(estimate: TimeEstimate, expectedRevision: number, auditPut?: AuditTransactWriteItem): Promise<void>
+  saveEstimate(estimate: TimeEstimate, expectedRevision: number, auditPut?: AuditTransactWriteItem, idempotencyPut?: AuditTransactWriteItem): Promise<void>
   /** Reads a Team or Project budget. */
   getBudget(workspaceId: string, scopeType: 'team' | 'project', scopeId: string): Promise<TimeBudget | undefined>
   /** Saves a Team or Project budget with optimistic concurrency and optional audit. */
-  saveBudget(budget: TimeBudget, expectedRevision: number, auditPut?: AuditTransactWriteItem): Promise<void>
+  saveBudget(budget: TimeBudget, expectedRevision: number, auditPut?: AuditTransactWriteItem, idempotencyPut?: AuditTransactWriteItem): Promise<void>
 }
 
 /** Stable error raised by time tracking validation, authorization, or persistence. */
@@ -460,13 +477,17 @@ export class TimeTrackingService {
       input.idempotencyKey,
       'time-entry.create',
       input,
-      () => this.createEntryInternal(input, canManageRates),
+      (completion) => this.createEntryInternal(input, canManageRates, completion),
       readStoredEntry,
     )
   }
 
   /** Persists a manual time entry without the public idempotency wrapper. */
-  private async createEntryInternal(input: CreateTimeEntryInput, canManageRates: boolean): Promise<TimeEntry> {
+  private async createEntryInternal(
+    input: CreateTimeEntryInput,
+    canManageRates: boolean,
+    completion?: TimeTrackingIdempotencyCompletion,
+  ): Promise<TimeEntry> {
     const normalized = normalizeCreateInput(input, canManageRates)
     const now = readNow(this.now)
     const entry: TimeEntry = {
@@ -494,11 +515,14 @@ export class TimeTrackingService {
       updatedAt: now.toISOString(),
     }
     const history = createHistory(this.createId, entry, 'created', normalized.userId, now)
+    const auditPut = this.createAuditPut(entry, history, undefined, input.idempotencyKey)
+    const idempotencyPut = completion ? await completion(entry) : undefined
     await this.repository.saveEntryWithHistory(
       entry,
       history,
       undefined,
-      this.createAuditPut(entry, history, undefined, input.idempotencyKey),
+      auditPut,
+      idempotencyPut,
     )
     return entry
   }
@@ -511,13 +535,16 @@ export class TimeTrackingService {
       input.idempotencyKey,
       'time-entry.update',
       input,
-      () => this.updateEntryInternal(input),
+      (completion) => this.updateEntryInternal(input, completion),
       readStoredEntry,
     )
   }
 
   /** Persists an entry update without the public idempotency wrapper. */
-  private async updateEntryInternal(input: UpdateTimeEntryInput): Promise<TimeEntry> {
+  private async updateEntryInternal(
+    input: UpdateTimeEntryInput,
+    completion?: TimeTrackingIdempotencyCompletion,
+  ): Promise<TimeEntry> {
     const current = await this.requireEntry(input.workspaceId, input.entryId, input.teamId)
     if (current.userId !== input.actorUserId && !input.canManageRates) {
       throw new TimeTrackingError(403, 'TimeEntryAccessDenied', 'Only the entry owner or a manager may edit this entry.')
@@ -564,11 +591,14 @@ export class TimeTrackingService {
       updatedAt: now,
     }
     const history = createHistory(this.createId, next, 'updated', input.actorUserId, new Date(now), current.status, current.status)
+    const auditPut = this.createAuditPut(next, history, current, input.idempotencyKey)
+    const idempotencyPut = completion ? await completion(next) : undefined
     await this.repository.saveEntryWithHistory(
       next,
       history,
       current.revision,
-      this.createAuditPut(next, history, current, input.idempotencyKey),
+      auditPut,
+      idempotencyPut,
     )
     return next
   }
@@ -581,13 +611,16 @@ export class TimeTrackingService {
       input.idempotencyKey,
       `time-entry.transition:${input.action}`,
       input,
-      () => this.transitionEntryInternal(input),
+      (completion) => this.transitionEntryInternal(input, completion),
       readStoredEntry,
     )
   }
 
   /** Applies an entry transition without the public idempotency wrapper. */
-  private async transitionEntryInternal(input: TransitionTimeEntryInput): Promise<TimeEntry> {
+  private async transitionEntryInternal(
+    input: TransitionTimeEntryInput,
+    completion?: TimeTrackingIdempotencyCompletion,
+  ): Promise<TimeEntry> {
     const current = await this.requireEntry(input.workspaceId, input.entryId, input.teamId)
     if (current.revision !== input.expectedRevision) {
       throw new TimeTrackingError(409, 'TimeEntryRevisionConflict', 'The time entry was changed by another request.')
@@ -635,11 +668,14 @@ export class TimeTrackingService {
       transition.toStatus,
       input.reason,
     )
+    const auditPut = this.createAuditPut(next, history, current, input.idempotencyKey)
+    const idempotencyPut = completion ? await completion(next) : undefined
     await this.repository.saveEntryWithHistory(
       next,
       history,
       current.revision,
-      this.createAuditPut(next, history, current, input.idempotencyKey),
+      auditPut,
+      idempotencyPut,
     )
     return next
   }
@@ -652,13 +688,16 @@ export class TimeTrackingService {
       input.idempotencyKey,
       'timer.start',
       input,
-      () => this.startTimerInternal(input),
+      (completion) => this.startTimerInternal(input, completion),
       readStoredTimer,
     )
   }
 
   /** Starts a timer without the public idempotency wrapper. */
-  private async startTimerInternal(input: StartTimerInput): Promise<RunningTimer> {
+  private async startTimerInternal(
+    input: StartTimerInput,
+    completion?: TimeTrackingIdempotencyCompletion,
+  ): Promise<RunningTimer> {
     const startedAt = input.startedAt === undefined
       ? readNow(this.now).toISOString()
       : validateInstant(input.startedAt, 'Timer start')
@@ -676,7 +715,7 @@ export class TimeTrackingService {
       revision: 1,
       updatedAt: readNow(this.now).toISOString(),
     }
-    await this.repository.createTimer(timer, this.createAuditEventPut({
+    const auditPut = this.createAuditEventPut({
       workspaceId: timer.workspaceId,
       teamId: timer.teamId,
       actorUserId: timer.userId,
@@ -691,7 +730,9 @@ export class TimeTrackingService {
       metadata: { teamId: timer.teamId, workItemId: timer.workItemId, userId: timer.userId },
       path: `/api/teams/${timer.teamId}/timers`,
       occurredAt: timer.updatedAt,
-    }))
+    })
+    const idempotencyPut = completion ? await completion(timer) : undefined
+    await this.repository.createTimer(timer, auditPut, idempotencyPut)
     return timer
   }
 
@@ -711,13 +752,16 @@ export class TimeTrackingService {
       input.idempotencyKey,
       'timer.stop',
       input,
-      () => this.stopTimerInternal(input),
+      (completion) => this.stopTimerInternal(input, completion),
       readStoredEntry,
     )
   }
 
   /** Stops a timer without the public idempotency wrapper. */
-  private async stopTimerInternal(input: StopTimerInput): Promise<TimeEntry> {
+  private async stopTimerInternal(
+    input: StopTimerInput,
+    completion?: TimeTrackingIdempotencyCompletion,
+  ): Promise<TimeEntry> {
     const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
     const userId = readIdentifier(input.userId, 'User ID')
     const timerId = readIdentifier(input.timerId, 'Timer ID')
@@ -760,17 +804,36 @@ export class TimeTrackingService {
       updatedAt: now,
     }
     const history = createHistory(this.createId, entry, 'created', userId, new Date(now))
+    const auditPut = this.createAuditPut(entry, history, undefined, input.idempotencyKey)
+    const idempotencyPut = completion ? await completion(entry) : undefined
     await this.repository.finishTimer(
       timer,
       entry,
       history,
-      this.createAuditPut(entry, history, undefined, input.idempotencyKey),
+      auditPut,
+      idempotencyPut,
     )
     return entry
   }
 
   /** Cancels an active timer without creating a time entry. */
   async cancelTimer(input: CancelTimerInput): Promise<void> {
+    await this.withIdempotency(
+      input.workspaceId,
+      input.userId,
+      input.idempotencyKey,
+      'timer.cancel',
+      input,
+      (completion) => this.cancelTimerInternal(input, completion),
+      readCompletedTimeTrackingMutation,
+    )
+  }
+
+  /** Cancels a timer without the public idempotency wrapper. */
+  private async cancelTimerInternal(
+    input: CancelTimerInput,
+    completion?: TimeTrackingIdempotencyCompletion,
+  ): Promise<CompletedTimeTrackingMutation> {
     const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
     const userId = readIdentifier(input.userId, 'User ID')
     const timerId = readIdentifier(input.timerId, 'Timer ID')
@@ -778,7 +841,7 @@ export class TimeTrackingService {
     if (!timer || timer.id !== timerId) {
       throw new TimeTrackingError(404, 'RunningTimerNotFound', 'The running timer was not found or has already been stopped.')
     }
-    await this.repository.cancelTimer(timer, this.createAuditEventPut({
+    const auditPut = this.createAuditEventPut({
       workspaceId,
       teamId: timer.teamId,
       actorUserId: userId,
@@ -792,7 +855,11 @@ export class TimeTrackingService {
       includeFields: ['teamId', 'workItemId', 'userId', 'startedAt', 'description', 'billable', 'revision'],
       metadata: { teamId: timer.teamId, workItemId: timer.workItemId, userId },
       path: `/api/time-tracking/timers/${timer.id}`,
-    }))
+    })
+    const result: CompletedTimeTrackingMutation = { completed: true }
+    const idempotencyPut = completion ? await completion(result) : undefined
+    await this.repository.cancelTimer(timer, auditPut, idempotencyPut)
+    return result
   }
 
   /** Reads one time entry after verifying its Team partition through the repository. */
@@ -849,13 +916,16 @@ export class TimeTrackingService {
       input.idempotencyKey,
       'time-estimate.save',
       input,
-      () => this.saveEstimateInternal(input),
+      (completion) => this.saveEstimateInternal(input, completion),
       readStoredEstimate,
     )
   }
 
   /** Saves an estimate without the public idempotency wrapper. */
-  private async saveEstimateInternal(input: SaveTimeEstimateInput): Promise<TimeEstimate> {
+  private async saveEstimateInternal(
+    input: SaveTimeEstimateInput,
+    completion?: TimeTrackingIdempotencyCompletion,
+  ): Promise<TimeEstimate> {
     const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
     const teamId = readIdentifier(input.teamId, 'Team ID')
     const workItemId = readIdentifier(input.workItemId, 'Work Item ID')
@@ -878,26 +948,29 @@ export class TimeTrackingService {
       updatedBy: readIdentifier(input.updatedBy, 'User ID'),
       updatedAt: readNow(this.now).toISOString(),
     }
+    const auditPut = this.createAuditEventPut({
+      workspaceId,
+      teamId,
+      actorUserId: estimate.updatedBy,
+      eventType: 'time-estimate.updated',
+      entityType: 'work-item',
+      entityId: workItemId,
+      action: 'updated',
+      idempotencyKey: input.idempotencyKey ?? this.createId(),
+      requestBody: { action: 'estimate.updated', workItemId, estimateMinutes },
+      before: current ? toAuditEstimateSnapshot(current) : undefined,
+      after: toAuditEstimateSnapshot(estimate),
+      includeFields: ['teamId', 'workItemId', 'estimateMinutes', 'revision', 'updatedBy'],
+      metadata: { teamId, workItemId },
+      path: `/api/teams/${teamId}/work-items/${workItemId}/time-estimate`,
+      occurredAt: estimate.updatedAt,
+    })
+    const idempotencyPut = completion ? await completion(estimate) : undefined
     await this.repository.saveEstimate(
       estimate,
       expectedRevision,
-      this.createAuditEventPut({
-        workspaceId,
-        teamId,
-        actorUserId: estimate.updatedBy,
-        eventType: 'time-estimate.updated',
-        entityType: 'work-item',
-        entityId: workItemId,
-        action: 'updated',
-        idempotencyKey: input.idempotencyKey ?? this.createId(),
-        requestBody: { action: 'estimate.updated', workItemId, estimateMinutes },
-        before: current ? toAuditEstimateSnapshot(current) : undefined,
-        after: toAuditEstimateSnapshot(estimate),
-        includeFields: ['teamId', 'workItemId', 'estimateMinutes', 'revision', 'updatedBy'],
-        metadata: { teamId, workItemId },
-        path: `/api/teams/${teamId}/work-items/${workItemId}/time-estimate`,
-        occurredAt: estimate.updatedAt,
-      }),
+      auditPut,
+      idempotencyPut,
     )
     return estimate
   }
@@ -919,13 +992,16 @@ export class TimeTrackingService {
       input.idempotencyKey,
       'time-budget.save',
       input,
-      () => this.saveBudgetInternal(input),
+      (completion) => this.saveBudgetInternal(input, completion),
       readStoredBudget,
     )
   }
 
   /** Saves a budget without the public idempotency wrapper. */
-  private async saveBudgetInternal(input: SaveTimeBudgetInput): Promise<TimeBudget> {
+  private async saveBudgetInternal(
+    input: SaveTimeBudgetInput,
+    completion?: TimeTrackingIdempotencyCompletion,
+  ): Promise<TimeBudget> {
     const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
     const scopeId = readIdentifier(input.scopeId, 'Budget scope ID')
     const teamId = input.teamId
@@ -964,38 +1040,41 @@ export class TimeTrackingService {
       revision: expectedRevision + 1,
       updatedAt: readNow(this.now).toISOString(),
     }
+    const auditPut = this.createAuditEventPut({
+      workspaceId,
+      teamId: resolvedTeamId,
+      actorUserId: input.updatedBy,
+      eventType: 'time-budget.updated',
+      entityType: 'time-budget',
+      entityId: `${input.scopeType}:${scopeId}`,
+      action: 'updated',
+      idempotencyKey: input.idempotencyKey ?? this.createId(),
+      requestBody: {
+        action: 'budget.updated',
+        scopeType: input.scopeType,
+        scopeId,
+        revision: budget.revision,
+      },
+      before: current ? toAuditBudgetSnapshot(current) : undefined,
+      after: toAuditBudgetSnapshot(budget),
+      includeFields: ['scopeType', 'scopeId', 'amountMinor', 'currency', 'periodFrom', 'periodTo', 'revision'],
+      redactFields: ['amountMinor'],
+      metadata: {
+        scopeType: input.scopeType,
+        scopeId,
+        ...(input.scopeType === 'team' ? { teamId: scopeId } : { projectId: scopeId }),
+      },
+      path: input.scopeType === 'team'
+        ? `/api/teams/${scopeId}/time-budget`
+        : `/api/teams/${resolvedTeamId}/projects/${scopeId}/time-budget`,
+      occurredAt: budget.updatedAt,
+    })
+    const idempotencyPut = completion ? await completion(budget) : undefined
     await this.repository.saveBudget(
       budget,
       expectedRevision,
-      this.createAuditEventPut({
-        workspaceId,
-        teamId: resolvedTeamId,
-        actorUserId: input.updatedBy,
-        eventType: 'time-budget.updated',
-        entityType: 'time-budget',
-        entityId: `${input.scopeType}:${scopeId}`,
-        action: 'updated',
-        idempotencyKey: input.idempotencyKey ?? this.createId(),
-        requestBody: {
-          action: 'budget.updated',
-          scopeType: input.scopeType,
-          scopeId,
-          revision: budget.revision,
-        },
-        before: current ? toAuditBudgetSnapshot(current) : undefined,
-        after: toAuditBudgetSnapshot(budget),
-        includeFields: ['scopeType', 'scopeId', 'amountMinor', 'currency', 'periodFrom', 'periodTo', 'revision'],
-        redactFields: ['amountMinor'],
-        metadata: {
-          scopeType: input.scopeType,
-          scopeId,
-          ...(input.scopeType === 'team' ? { teamId: scopeId } : { projectId: scopeId }),
-        },
-        path: input.scopeType === 'team'
-          ? `/api/teams/${scopeId}/time-budget`
-          : `/api/teams/${resolvedTeamId}/projects/${scopeId}/time-budget`,
-        occurredAt: budget.updatedAt,
-      }),
+      auditPut,
+      idempotencyPut,
     )
     return budget
   }
@@ -1088,7 +1167,7 @@ export class TimeTrackingService {
     idempotencyKey: string | undefined,
     operation: string,
     requestInput: object,
-    execute: () => Promise<T>,
+    execute: (completion?: TimeTrackingIdempotencyCompletion) => Promise<T>,
     decode: (value: unknown) => T,
   ): Promise<T> {
     if (!this.idempotency || idempotencyKey === undefined) return await execute()
@@ -1109,8 +1188,17 @@ export class TimeTrackingService {
     }
     const completionRequest = { ...receiptRequest, reservationId: reservation.reservationId }
     try {
-      const result = await execute()
-      await this.idempotency.completeIdempotency({ ...completionRequest, response: result })
+      const completion = this.idempotency.prepareIdempotencyCompletion
+        ? async (response: unknown): Promise<AuditTransactWriteItem> =>
+          await this.idempotency!.prepareIdempotencyCompletion!({
+            ...completionRequest,
+            response,
+          })
+        : undefined
+      const result = await execute(completion)
+      if (!completion) {
+        await this.idempotency.completeIdempotency({ ...completionRequest, response: result })
+      }
       return result
     } catch (error) {
       await this.idempotency.releaseIdempotency(completionRequest).catch(() => undefined)
@@ -1249,6 +1337,7 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
     history: TimeEntryHistory,
     expectedRevision?: number,
     _auditPut?: AuditTransactWriteItem,
+    _idempotencyPut?: AuditTransactWriteItem,
   ) {
     await this.saveEntry(entry, expectedRevision)
     await this.saveHistory(entry.workspaceId, entry.teamId, history)
@@ -1274,7 +1363,11 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Removes an active timer after verifying its identity. */
-  async cancelTimer(timer: RunningTimer, _auditPut?: AuditTransactWriteItem) {
+  async cancelTimer(
+    timer: RunningTimer,
+    _auditPut?: AuditTransactWriteItem,
+    _idempotencyPut?: AuditTransactWriteItem,
+  ) {
     const key = timerKey(timer.workspaceId, timer.userId)
     const current = this.timers.get(key)
     if (!current || current.id !== timer.id || current.revision !== timer.revision) {
@@ -1284,7 +1377,11 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Creates an active timer and rejects duplicates. */
-  async createTimer(timer: RunningTimer, _auditPut?: AuditTransactWriteItem) {
+  async createTimer(
+    timer: RunningTimer,
+    _auditPut?: AuditTransactWriteItem,
+    _idempotencyPut?: AuditTransactWriteItem,
+  ) {
     const key = timerKey(timer.workspaceId, timer.userId)
     if (this.timers.has(key)) throw new TimeTrackingError(409, 'RunningTimerAlreadyExists', 'Only one running timer is allowed per member.')
     this.timers.set(key, clone(timer))
@@ -1296,6 +1393,7 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
     entry: TimeEntry,
     history: TimeEntryHistory,
     _auditPut?: AuditTransactWriteItem,
+    _idempotencyPut?: AuditTransactWriteItem,
   ) {
     const key = timerKey(timer.workspaceId, timer.userId)
     const current = this.timers.get(key)
@@ -1321,7 +1419,12 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Saves an estimate. */
-  async saveEstimate(estimate: TimeEstimate, expectedRevision: number, _auditPut?: AuditTransactWriteItem) {
+  async saveEstimate(
+    estimate: TimeEstimate,
+    expectedRevision: number,
+    _auditPut?: AuditTransactWriteItem,
+    _idempotencyPut?: AuditTransactWriteItem,
+  ) {
     const key = estimateKey(estimate.workspaceId, estimate.teamId, estimate.workItemId)
     const current = this.estimates.get(key)
     if ((current?.revision ?? 0) !== expectedRevision) {
@@ -1344,6 +1447,7 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
     budget: TimeBudget,
     expectedRevision: number,
     _auditPut?: AuditTransactWriteItem,
+    _idempotencyPut?: AuditTransactWriteItem,
   ) {
     const key = budgetKey(budget.workspaceId, budget.scopeType, budget.scopeId)
     const current = this.budgets.get(key)
@@ -1435,6 +1539,7 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
     history: TimeEntryHistory,
     expectedRevision?: number,
     auditPut?: AuditTransactWriteItem,
+    idempotencyPut?: AuditTransactWriteItem,
   ) {
     try {
       await this.documentClient.send(new TransactWriteCommand({
@@ -1463,6 +1568,7 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
             },
           },
           ...(auditPut ? [auditPut] : []),
+          ...(idempotencyPut ? [idempotencyPut] : []),
         ],
       }))
     } catch (error) {
@@ -1509,7 +1615,11 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Removes an active timer with a conditional identity check. */
-  async cancelTimer(timer: RunningTimer, auditPut?: AuditTransactWriteItem) {
+  async cancelTimer(
+    timer: RunningTimer,
+    auditPut?: AuditTransactWriteItem,
+    idempotencyPut?: AuditTransactWriteItem,
+  ) {
     try {
       const deletion = {
         Delete: {
@@ -1522,8 +1632,10 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
           },
         },
       }
-      if (auditPut) {
-        await this.documentClient.send(new TransactWriteCommand({ TransactItems: [deletion, auditPut] }))
+      if (auditPut || idempotencyPut) {
+        await this.documentClient.send(new TransactWriteCommand({
+          TransactItems: [deletion, ...(auditPut ? [auditPut] : []), ...(idempotencyPut ? [idempotencyPut] : [])],
+        }))
       } else {
         await this.documentClient.send(new DeleteCommand(deletion.Delete))
       }
@@ -1533,7 +1645,11 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Creates an active timer with a conditional put. */
-  async createTimer(timer: RunningTimer, auditPut?: AuditTransactWriteItem) {
+  async createTimer(
+    timer: RunningTimer,
+    auditPut?: AuditTransactWriteItem,
+    idempotencyPut?: AuditTransactWriteItem,
+  ) {
     try {
       const put = {
         Put: {
@@ -1542,8 +1658,10 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
           ConditionExpression: 'attribute_not_exists(recordKey)',
         },
       }
-      if (auditPut) {
-        await this.documentClient.send(new TransactWriteCommand({ TransactItems: [put, auditPut] }))
+      if (auditPut || idempotencyPut) {
+        await this.documentClient.send(new TransactWriteCommand({
+          TransactItems: [put, ...(auditPut ? [auditPut] : []), ...(idempotencyPut ? [idempotencyPut] : [])],
+        }))
       } else {
         await this.documentClient.send(new PutCommand(put.Put))
       }
@@ -1558,6 +1676,7 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
     entry: TimeEntry,
     history: TimeEntryHistory,
     auditPut?: AuditTransactWriteItem,
+    idempotencyPut?: AuditTransactWriteItem,
   ) {
     try {
       await this.documentClient.send(new TransactWriteCommand({
@@ -1592,6 +1711,7 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
             },
           },
           ...(auditPut ? [auditPut] : []),
+          ...(idempotencyPut ? [idempotencyPut] : []),
         ],
       }))
     } catch (error) {
@@ -1624,7 +1744,12 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Saves an estimate using a single-owner key. */
-  async saveEstimate(estimate: TimeEstimate, expectedRevision: number, auditPut?: AuditTransactWriteItem) {
+  async saveEstimate(
+    estimate: TimeEstimate,
+    expectedRevision: number,
+    auditPut?: AuditTransactWriteItem,
+    idempotencyPut?: AuditTransactWriteItem,
+  ) {
     const item = {
       ...estimate,
       recordKey: `${ESTIMATE_PREFIX}${estimate.teamId}#${estimate.workItemId}`,
@@ -1637,7 +1762,7 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
           ConditionExpression: 'revision = :expectedRevision',
           ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
         }
-    if (!auditPut) {
+    if (!auditPut && !idempotencyPut) {
       await this.documentClient.send(new PutCommand({
         TableName: this.tableName,
         Item: item,
@@ -1649,7 +1774,8 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
           { Put: { TableName: this.tableName, Item: item, ...condition } },
-          auditPut,
+          ...(auditPut ? [auditPut] : []),
+          ...(idempotencyPut ? [idempotencyPut] : []),
         ],
       }))
     } catch (error) {
@@ -1668,7 +1794,12 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Saves a budget with optimistic concurrency. */
-  async saveBudget(budget: TimeBudget, expectedRevision: number, auditPut?: AuditTransactWriteItem) {
+  async saveBudget(
+    budget: TimeBudget,
+    expectedRevision: number,
+    auditPut?: AuditTransactWriteItem,
+    idempotencyPut?: AuditTransactWriteItem,
+  ) {
     try {
       const put = {
         Put: {
@@ -1682,8 +1813,10 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
               }),
         },
       }
-      if (auditPut) {
-        await this.documentClient.send(new TransactWriteCommand({ TransactItems: [put, auditPut] }))
+      if (auditPut || idempotencyPut) {
+        await this.documentClient.send(new TransactWriteCommand({
+          TransactItems: [put, ...(auditPut ? [auditPut] : []), ...(idempotencyPut ? [idempotencyPut] : [])],
+        }))
       } else {
         await this.documentClient.send(new PutCommand(put.Put))
       }
@@ -2393,6 +2526,14 @@ function readStoredBudget(value: unknown): TimeBudget {
     revision: readNumber(record.revision, 'Stored budget revision'),
     updatedAt: readString(record.updatedAt, 'Stored budget timestamp'),
   }
+}
+
+/** Validates the replay response for a void timer cancellation. */
+function readCompletedTimeTrackingMutation(value: unknown): CompletedTimeTrackingMutation {
+  if (!isRecord(value) || value.completed !== true) {
+    throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored time tracking mutation response is invalid.')
+  }
+  return { completed: true }
 }
 
 /** Rejects missing and future persisted schema versions before parsing fields. */

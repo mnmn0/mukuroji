@@ -2,7 +2,11 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { describe, expect, test } from 'bun:test'
 import type { TimeEntry, TimeEntryHistory } from '@mukuroji/contracts'
-import { DynamoDbTimeTrackingRepository, TimeTrackingService } from './time-tracking'
+import {
+  DynamoDbTimeTrackingRepository,
+  TimeTrackingService,
+  type TimeTrackingIdempotencyPort,
+} from './time-tracking'
 
 type CommandWithInput = {
   /** Command input captured by the test transport. */
@@ -137,6 +141,56 @@ describe('DynamoDbTimeTrackingRepository', () => {
     if (!Array.isArray(transactionItems)) throw new Error('Expected transaction items.')
     expect(JSON.stringify(transactionItems[2])).not.toContain('hourlyRateMinor')
     expect(JSON.stringify(transactionItems[2])).toContain('audit-table')
+  })
+
+  test('commits the durable idempotency receipt with the entry transaction', async () => {
+    const commands: CommandWithInput[] = []
+    let completed = 0
+    const idempotency: TimeTrackingIdempotencyPort = {
+      async reserveIdempotency() {
+        return { status: 'reserved', reservationId: 'reservation-1' }
+      },
+      async completeIdempotency() {
+        completed += 1
+      },
+      async releaseIdempotency() {},
+      async prepareIdempotencyCompletion() {
+        return {
+          Put: {
+            TableName: 'developer-platform-table',
+            Item: { idempotency: 'completed' },
+          },
+        }
+      },
+    }
+    const service = new TimeTrackingService(
+      new DynamoDbTimeTrackingRepository(
+        'analytics-table',
+        createDocumentClient([{}], commands),
+      ),
+      {
+        now: () => new Date('2026-08-02T12:00:00.000Z'),
+        createId: () => 'entry-1',
+        idempotency,
+      },
+    )
+
+    await service.createEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      workItemId: 'work-item-1',
+      userId: 'member-1',
+      startAt: '2026-08-02T09:00:00.000Z',
+      endAt: '2026-08-02T10:00:00.000Z',
+      billable: false,
+      currency: 'USD',
+      source: 'manual',
+      idempotencyKey: 'entry-1',
+    }, false)
+
+    expect(commands[0]?.input.TransactItems).toHaveLength(3)
+    expect(JSON.stringify(commands[0]?.input.TransactItems)).toContain('developer-platform-table')
+    expect(completed).toBe(0)
   })
 
   test('writes estimate and budget audit events in their state transactions', async () => {

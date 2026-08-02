@@ -55,6 +55,8 @@ import { DynamoDbAutomationRepository } from '../../modules/automation'
 import { SecretsManagerAutomationInboundWebhookSecretStore } from '../../modules/automation'
 import { DynamoDbCollaborationClient } from '../../modules/collaboration/collaboration'
 import { createDynamoDbDeveloperPlatformAdapters } from '../../modules/developer-platform/adapter-out/dynamodb/developer-platform-adapters'
+import type { DeveloperPlatformTransactionPort } from '../../modules/developer-platform/adapter-out/dynamodb/developer-platform-transaction-port'
+import type { IdempotencyPort } from '../../modules/developer-platform'
 import {
   DynamoDbDocumentsClient,
 } from '../../modules/documents/adapter-out/dynamodb/dynamo-db-documents-client'
@@ -103,6 +105,32 @@ import {
   TimeTrackingService,
   type TimeTrackingIdempotencyPort,
 } from '../../modules/time-tracking'
+
+/**
+ * Projects shared idempotency reservation and transaction-completion capabilities
+ * into the time-tracking application port.
+ *
+ * @param idempotency - Shared durable reservation and replay capability.
+ * @param transactions - Shared DynamoDB transaction contribution capability.
+ * @returns A time-tracking-specific idempotency port.
+ */
+function createTimeTrackingIdempotencyPort(
+  idempotency: IdempotencyPort,
+  transactions: DeveloperPlatformTransactionPort,
+): TimeTrackingIdempotencyPort {
+  const prepareCompletion = transactions.prepareIdempotencyCompletionTransactWrite
+  return {
+    reserveIdempotency: (request) => idempotency.reserveIdempotency(request),
+    completeIdempotency: (request) => idempotency.completeIdempotency(request),
+    releaseIdempotency: (request) => idempotency.releaseIdempotency(request),
+    ...(prepareCompletion
+      ? {
+          prepareIdempotencyCompletion: async (request) =>
+            (await prepareCompletion.call(transactions, request)).transactWriteItem,
+        }
+      : {}),
+  }
+}
 
 /**
  * Creates the configured immutable audit event adapter.
@@ -543,7 +571,11 @@ export function createProductionConnectorAppDependencies(): AppDependencies {
     workspace: createProductionWorkspaceDependencies(),
     workItems: createProductionWorkItemDependencies(),
     automation: createProductionAutomationDependencies(),
-    timeTracking: { timeTrackingService: createTimeTrackingService(adapters.idempotency) },
+    timeTracking: {
+      timeTrackingService: createTimeTrackingService(
+        createTimeTrackingIdempotencyPort(adapters.idempotency, adapters.transactions),
+      ),
+    },
     developerPlatform: {
       ...adapters,
       publicWorkItems: createCanonicalPublicWorkItemService(),
@@ -568,7 +600,14 @@ export function createProductionAppDependencies(): AppDependencies {
     workspace: createProductionWorkspaceDependencies(),
     workItems: createProductionWorkItemDependencies(),
     automation: createProductionAutomationDependencies(),
-    timeTracking: { timeTrackingService: createTimeTrackingService(developerPlatform.idempotency) },
+    timeTracking: {
+      timeTrackingService: createTimeTrackingService(
+        createTimeTrackingIdempotencyPort(
+          developerPlatform.idempotency,
+          developerPlatform.transactions,
+        ),
+      ),
+    },
     developerPlatform,
   }
 }
