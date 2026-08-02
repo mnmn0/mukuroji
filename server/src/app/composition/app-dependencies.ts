@@ -59,6 +59,7 @@ import type {
 import type { WorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'
 import type { WorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
 import type { TenantAdministrationClient } from '../../modules/tenant-administration'
+import type { TimeTrackingService } from '../../modules/time-tracking'
 import type {
   ApiAccessObservation,
   ApiErrorObservation,
@@ -207,6 +208,12 @@ export interface DeveloperPlatformDependencies {
   queueWebhookDelivery: NonNullable<PublicApiDependencies['queueWebhookDelivery']>
 }
 
+/** Provides dependencies required by time-tracking routes. */
+export interface TimeTrackingDependencies {
+  /** Provides the application service for one API application instance. */
+  timeTrackingService: TimeTrackingService
+}
+
 /** Operational dependencies required by system routes. */
 export interface OperationalDependencies {
   /** Records bounded runtime-control decisions and metrics. */
@@ -241,6 +248,8 @@ export interface AppDependencies {
   workItems: Readonly<WorkItemDependencies>
   /** Automation route dependencies. */
   automation: Readonly<AutomationDependencies>
+  /** Time tracking route dependencies. */
+  timeTracking: Readonly<TimeTrackingDependencies>
   /** Developer Platform route and worker dependencies. */
   developerPlatform: Readonly<DeveloperPlatformDependencies>
 }
@@ -262,6 +271,7 @@ export function freezeAppDependencies(
     workspace: Object.freeze({ ...dependencies.workspace }),
     workItems: Object.freeze({ ...dependencies.workItems }),
     automation: Object.freeze({ ...dependencies.automation }),
+    timeTracking: Object.freeze({ ...dependencies.timeTracking }),
     developerPlatform: Object.freeze({ ...dependencies.developerPlatform }),
   })
 }
@@ -272,6 +282,7 @@ export type AppDependencyOverrides = Partial<
   Omit<WorkspaceDependencies, 'enterpriseIdentity'> &
   WorkItemDependencies &
   AutomationDependencies &
+  TimeTrackingDependencies &
   DeveloperPlatformDependencies &
   OperationalDependencies
 > & {

@@ -54,12 +54,15 @@ import {
   createMutationAuditContext,
   createAuditTransactPut,
   DynamoDbAuditEventsClient,
+  getConfiguredAuditRetentionDays,
   getConfiguredAuditTableName,
 } from '../../modules/audit/audit'
 import { DynamoDbAutomationRepository } from '../../modules/automation'
 import { SecretsManagerAutomationInboundWebhookSecretStore } from '../../modules/automation'
 import { DynamoDbCollaborationClient } from '../../modules/collaboration/collaboration'
 import { createDynamoDbDeveloperPlatformAdapters } from '../../modules/developer-platform/adapter-out/dynamodb/developer-platform-adapters'
+import type { DeveloperPlatformTransactionPort } from '../../modules/developer-platform/adapter-out/dynamodb/developer-platform-transaction-port'
+import type { IdempotencyPort } from '../../modules/developer-platform'
 import {
   DynamoDbDocumentsClient,
 } from '../../modules/documents/adapter-out/dynamodb/dynamo-db-documents-client'
@@ -106,6 +109,38 @@ import {
 } from '../../modules/tenant-administration'
 import { DynamoDbWorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
 import { createProductionQueueWebhookDeliveryMessage } from './webhook'
+import {
+  DynamoDbTimeTrackingRepository,
+  InMemoryTimeTrackingRepository,
+  TimeTrackingService,
+  type TimeTrackingIdempotencyPort,
+} from '../../modules/time-tracking'
+
+/**
+ * Projects shared idempotency reservation and transaction-completion capabilities
+ * into the time-tracking application port.
+ *
+ * @param idempotency - Shared durable reservation and replay capability.
+ * @param transactions - Shared DynamoDB transaction contribution capability.
+ * @returns A time-tracking-specific idempotency port.
+ */
+function createTimeTrackingIdempotencyPort(
+  idempotency: IdempotencyPort,
+  transactions: DeveloperPlatformTransactionPort,
+): TimeTrackingIdempotencyPort {
+  const prepareCompletion = transactions.prepareIdempotencyCompletionTransactWrite
+  return {
+    reserveIdempotency: (request) => idempotency.reserveIdempotency(request),
+    completeIdempotency: (request) => idempotency.completeIdempotency(request),
+    releaseIdempotency: (request) => idempotency.releaseIdempotency(request),
+    ...(prepareCompletion
+      ? {
+          prepareIdempotencyCompletion: async (request) =>
+            (await prepareCompletion.call(transactions, request)).transactWriteItem,
+        }
+      : {}),
+  }
+}
 
 /**
  * Creates the configured immutable audit event adapter.
@@ -213,13 +248,49 @@ export function createPlanningClient(): DynamoDbPlanningClient {
 export function createAnalyticsRepository(): DynamoDbAnalyticsRepository {
   const config = loadServerConfig()
   const dynamoDbClient = createDynamoDbClient()
+  const tableName = config.environment.ANALYTICS_TABLE_NAME
+  if (config.production && !tableName) {
+    throw new Error('ANALYTICS_TABLE_NAME must be set for durable analytics storage.')
+  }
 
   return new DynamoDbAnalyticsRepository(
-    config.environment.ANALYTICS_TABLE_NAME ?? 'mukuroji-analytics-local',
+    tableName ?? 'mukuroji-analytics-local',
     createDynamoDbDocumentClient(dynamoDbClient),
     {
       scheduleDueIndexName:
         config.environment.ANALYTICS_SCHEDULE_INDEX_NAME ?? 'ScheduleDueIndex',
+    },
+  )
+}
+
+/**
+ * Creates the configured durable time tracking service.
+ *
+ * @param idempotency - Optional shared receipt store used for mutation replay.
+ * @returns A configured time tracking service.
+ */
+export function createTimeTrackingService(idempotency?: TimeTrackingIdempotencyPort): TimeTrackingService {
+  const config = loadServerConfig()
+  const dynamoDbClient = createDynamoDbClient()
+  const tableName = config.environment.ANALYTICS_TABLE_NAME
+  const auditTableName = getConfiguredAuditTableName()
+  if (config.production && !tableName) {
+    throw new Error('ANALYTICS_TABLE_NAME must be set for durable time tracking storage.')
+  }
+  if (config.production && !auditTableName) {
+    throw new Error('MUKUROJI_AUDIT_EVENTS_TABLE or AUDIT_EVENTS_TABLE_NAME must be set for time tracking audit writes.')
+  }
+  return new TimeTrackingService(
+    new DynamoDbTimeTrackingRepository(
+      tableName ?? 'mukuroji-analytics-local',
+      createDynamoDbDocumentClient(dynamoDbClient),
+    ),
+    {
+      audit: {
+        tableName: auditTableName ?? 'mukuroji-audit-events',
+        retentionDays: getConfiguredAuditRetentionDays(),
+      },
+      ...(idempotency ? { idempotency } : {}),
     },
   )
 }
@@ -555,6 +626,11 @@ export function createProductionConnectorAppDependencies(): AppDependencies {
     workspace: createProductionWorkspaceDependencies(),
     workItems: createProductionWorkItemDependencies(),
     automation: createProductionAutomationDependencies(),
+    timeTracking: {
+      timeTrackingService: createTimeTrackingService(
+        createTimeTrackingIdempotencyPort(adapters.idempotency, adapters.transactions),
+      ),
+    },
     developerPlatform: {
       ...adapters,
       publicWorkItems: createCanonicalPublicWorkItemService(),
@@ -572,13 +648,22 @@ export function createProductionConnectorAppDependencies(): AppDependencies {
  * @returns A nested, domain-owned dependency graph.
  */
 export function createProductionAppDependencies(): AppDependencies {
+  const developerPlatform = createProductionDeveloperPlatformDependencies()
   return {
     operational: createProductionOperationalDependencies(),
     authentication: createProductionAuthenticationDependencies(),
     workspace: createProductionWorkspaceDependencies(),
     workItems: createProductionWorkItemDependencies(),
     automation: createProductionAutomationDependencies(),
-    developerPlatform: createProductionDeveloperPlatformDependencies(),
+    timeTracking: {
+      timeTrackingService: createTimeTrackingService(
+        createTimeTrackingIdempotencyPort(
+          developerPlatform.idempotency,
+          developerPlatform.transactions,
+        ),
+      ),
+    },
+    developerPlatform,
   }
 }
 
@@ -597,6 +682,9 @@ export function createTestAppDependencies(): AppDependencies {
       workItemConfigurations: createDefaultWorkItemConfigurationClient(),
       planning: new InMemoryPlanningClient(),
       analytics: new InMemoryAnalyticsRepository(),
+    },
+    timeTracking: {
+      timeTrackingService: new TimeTrackingService(new InMemoryTimeTrackingRepository()),
     },
   }
 }
@@ -714,6 +802,10 @@ export function overrideAppDependencies(
               overrides.automationInboundWebhookSecrets,
           }
         : {}),
+    },
+    timeTracking: {
+      ...dependencies.timeTracking,
+      ...(overrides.timeTrackingService ? { timeTrackingService: overrides.timeTrackingService } : {}),
     },
     developerPlatform: {
       ...dependencies.developerPlatform,
