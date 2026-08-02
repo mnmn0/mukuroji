@@ -1980,7 +1980,7 @@ test('application Lambdas emit active X-Ray traces and critical DLQs survive rep
 
   template.resourcePropertiesCountIs('AWS::Lambda::Function', {
     TracingConfig: { Mode: 'Active' },
-  }, 21);
+  }, 27);
 
   for (const logicalIdPrefix of [
     'CollaborationProjectionDlq',
@@ -2076,6 +2076,91 @@ test('tenant retention worker can query and reconcile only tenant and audit stor
     .find((pattern) => pattern.includes('operation'));
   expect(operationPattern).toContain('"eventName":["INSERT"]');
   expect(operationPattern).not.toContain('MODIFY');
+});
+
+test('tenant lifecycle proof ingress is split into environment-bound capabilities', () => {
+  const document = synthesizedTemplate.toJSON();
+  const resources = document.Resources;
+  const specifications = [
+    {
+      functionId: 'TenantExportCapabilityFunction9B1A8023',
+      outputId: 'TenantExportCapabilityFunctionName',
+      executorId: 'executor:tenant-export',
+      allowedSteps: 'snapshot,prepare-artifact,verify-artifact,export',
+    },
+    {
+      functionId: 'TenantAccessCapabilityFunction394667B9',
+      outputId: 'TenantAccessCapabilityFunctionName',
+      executorId: 'executor:tenant-access-revocation',
+      allowedSteps: 'revoke-access',
+    },
+    {
+      functionId: 'TenantIdentityCapabilityFunctionD1DC9097',
+      outputId: 'TenantIdentityCapabilityFunctionName',
+      executorId: 'executor:tenant-member-anonymization',
+      allowedSteps: 'anonymize-members',
+    },
+    {
+      functionId: 'TenantDataCapabilityFunction8F76A72C',
+      outputId: 'TenantDataCapabilityFunctionName',
+      executorId: 'executor:tenant-data-deletion',
+      allowedSteps: 'delete-data',
+    },
+    {
+      functionId: 'TenantSecretsCapabilityFunctionAA395B2E',
+      outputId: 'TenantSecretsCapabilityFunctionName',
+      executorId: 'executor:tenant-secret-deletion',
+      allowedSteps: 'delete-secrets',
+    },
+    {
+      functionId: 'TenantVerificationCapabilityFunctionFBC78F82',
+      outputId: 'TenantVerificationCapabilityFunctionName',
+      executorId: 'executor:tenant-closure-verification',
+      allowedSteps: 'verify',
+    },
+  ];
+
+  for (const specification of specifications) {
+    const resource = resources[specification.functionId];
+    expect(resource).toEqual(expect.objectContaining({
+      Type: 'AWS::Lambda::Function',
+      Properties: expect.objectContaining({
+        Handler: 'index.capabilityHandler',
+        MemorySize: 256,
+        ReservedConcurrentExecutions: 1,
+        Runtime: 'nodejs22.x',
+        Timeout: 30,
+        Environment: expect.objectContaining({
+          Variables: expect.objectContaining({
+            TENANT_OPERATION_ALLOWED_STEPS: specification.allowedSteps,
+            TENANT_OPERATION_EXECUTOR_ID: specification.executorId,
+          }),
+        }),
+      }),
+    }));
+    expect(document.Outputs[specification.outputId]?.Value).toEqual({
+      Ref: specification.functionId,
+    });
+
+    const policy = Object.entries(resources).find(([logicalId]) =>
+      logicalId.startsWith(
+        `${specification.functionId.slice(0, -8)}ServiceRoleDefaultPolicy`,
+      )
+    )?.[1];
+    const serializedPolicy = JSON.stringify(policy);
+    expect(policy).toBeDefined();
+    expect(serializedPolicy).toContain('TenantAdministrationTable621D59EB');
+    expect(serializedPolicy).toContain('AuditEventsTable0723963E');
+    expect(serializedPolicy).not.toContain('secretsmanager:');
+    expect(serializedPolicy).not.toContain('s3:');
+  }
+
+  expect(resources.TenantOperationFunction9BEB780E.Properties.Handler)
+    .toBe('index.handler');
+  expect(
+    resources.TenantOperationFunction9BEB780E.Properties.Environment.Variables
+      .TENANT_OPERATION_ALLOWED_STEPS,
+  ).toBeUndefined();
 });
 
 test('request email ingestion is an asynchronous narrow-IAM Lambda with a monitored DLQ', () => {

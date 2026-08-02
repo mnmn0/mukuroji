@@ -58,10 +58,9 @@ function createSnapshot() {
       region: 'ap-northeast-1',
       locale: 'ja',
       defaultPolicy: {
-        allowExternalCollaborators: false,
-        requireMfa: true,
         defaultMemberRole: 'member',
       },
+      status: 'active',
       revision: 1,
       createdAt: '2026-08-01T00:00:00.000Z',
       updatedAt: '2026-08-02T00:00:00.000Z',
@@ -94,6 +93,7 @@ function createSnapshot() {
       revision: 2,
       updatedAt: '2026-08-02T00:00:00.000Z',
     }],
+    recentOperations: [],
     governance: {
       workspaceId: 'workspace-1',
       auditRetentionDays: 365,

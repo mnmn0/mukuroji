@@ -28,6 +28,52 @@ import {
   expect,
   test,
 } from 'bun:test'
+import { createDefaultTenantAdministrationSnapshot } from '../../../tenant-administration/domain/tenant-administration'
+import type { TenantAdministrationClient } from '../../../tenant-administration/application/ports/tenant-administration-port'
+
+/** Creates a complete tenant administration fake with one configured invite default. */
+function createTenantAdministrationFake(
+  defaultMemberRole: 'member' | 'guest',
+  ensureCalls: Array<{
+    workspaceId: string
+    ownerMemberKey: string
+    activeSeats: number | undefined
+  }>,
+): TenantAdministrationClient {
+  const snapshot = createDefaultTenantAdministrationSnapshot(
+    'user#demo@example.com',
+    'demo@example.com',
+    '2026-08-02T00:00:00.000Z',
+    undefined,
+    4,
+  )
+  snapshot.profile.defaultPolicy.defaultMemberRole = defaultMemberRole
+  /** Fails when a route unexpectedly reaches an unrelated tenant capability. */
+  const unavailable = (): never => {
+    throw new Error('Unexpected tenant administration test call.')
+  }
+  return {
+    async assertActive() {},
+    async ensureSnapshot(workspaceId, ownerMemberKey, activeSeats) {
+      ensureCalls.push({ workspaceId, ownerMemberKey, activeSeats })
+      return snapshot
+    },
+    async getSnapshot() { return unavailable() },
+    async updateProfile() { return unavailable() },
+    async updateEntitlement() { return unavailable() },
+    async updateGovernance() { return unavailable() },
+    async assertFeature() { return unavailable() },
+    async reserveUsage() { return unavailable() },
+    async requestExport() { return unavailable() },
+    async requestClosure() { return unavailable() },
+    async getOperation() { return unavailable() },
+    async advanceOperation() { return unavailable() },
+    async failOperation() { return unavailable() },
+    async pauseOperation() { return unavailable() },
+    async resumeOperation() { return unavailable() },
+    async verifyClosure() { return unavailable() },
+  }
+}
 
 afterEach(() => {
   resetTestApp()
@@ -508,6 +554,53 @@ test('resends credentials when inviting an existing unconfirmed Workspace identi
       identityOwnership: 'pre-existing',
       status: 'pending',
     },
+  })
+})
+
+test('uses the tenant default role when an invitation omits its role', async () => {
+  const calls = configureFakeProjectClients(true)
+  const ensureCalls: Array<{
+    workspaceId: string
+    ownerMemberKey: string
+    activeSeats: number | undefined
+  }> = []
+  setTestAppDependencies({
+    tenantAdministration: createTenantAdministrationFake('guest', ensureCalls),
+  })
+
+  const response = await app.request('/api/workspace/invitations', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'workspace-default-role-invitation-1',
+      'X-Correlation-Id': 'workspace-default-role-correlation',
+    },
+    body: JSON.stringify({
+      email: 'guest@example.com',
+      name: 'Guest',
+    }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(ensureCalls).toEqual([{
+    workspaceId: 'user#demo@example.com',
+    ownerMemberKey: 'demo@example.com',
+    activeSeats: 4,
+  }])
+  expectStableWorkspaceMutationAuditContexts(calls.workspaceMutationAuditContexts, {
+    actorId: 'demo@example.com',
+    clientCorrelationId: 'workspace-default-role-correlation',
+    idempotencyKey: 'workspace-default-role-invitation-1',
+    method: 'POST',
+    requestBody: { email: 'guest@example.com', name: 'Guest', role: 'guest' },
+    route: '/api/workspace/invitations',
+    stages: [
+      'createInvitation',
+      'markInvitationIdentityMutationStarted',
+      'markInvitationDelivery',
+    ],
+    workspaceId: 'user#demo@example.com',
   })
 })
 

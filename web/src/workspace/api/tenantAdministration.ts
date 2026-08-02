@@ -280,6 +280,8 @@ function readTenantAdministrationSnapshot(value: unknown): TenantAdministrationS
     isTenantUsage(value.usage) &&
     Array.isArray(value.billingPeriods) &&
     value.billingPeriods.every(isTenantBillingPeriod) &&
+    Array.isArray(value.recentOperations) &&
+    value.recentOperations.every(isTenantOperation) &&
     isTenantGovernancePolicy(value.governance) &&
     isTenantGovernanceEnforcement(value.governanceEnforcement) &&
     (value.retentionReconciliation === undefined ||
@@ -292,6 +294,7 @@ function readTenantAdministrationSnapshot(value: unknown): TenantAdministrationS
       entitlement: value.entitlement,
       usage: value.usage,
       billingPeriods: value.billingPeriods,
+      recentOperations: value.recentOperations,
       governance: value.governance,
       governanceEnforcement: value.governanceEnforcement,
       ...(value.retentionReconciliation
@@ -335,13 +338,17 @@ function isTenantProfile(value: unknown): value is TenantProfile {
     typeof value.region === 'string' &&
     (value.locale === 'ja' || value.locale === 'en') &&
     isTenantDefaultPolicy(value.defaultPolicy) &&
+    (value.status === 'active' || value.status === 'closing' || value.status === 'closed') &&
+    (value.closedAt === undefined || typeof value.closedAt === 'string') &&
+    (value.closedByOperationId === undefined || typeof value.closedByOperationId === 'string') &&
+    (value.status === 'closed'
+      ? typeof value.closedAt === 'string' && typeof value.closedByOperationId === 'string'
+      : value.closedAt === undefined && value.closedByOperationId === undefined) &&
     isRevisionedRecord(value)
 }
 
 function isTenantDefaultPolicy(value: unknown): value is TenantDefaultPolicy {
   return isRecord(value) &&
-    typeof value.allowExternalCollaborators === 'boolean' &&
-    typeof value.requireMfa === 'boolean' &&
     (value.defaultMemberRole === 'member' || value.defaultMemberRole === 'guest')
 }
 
@@ -411,8 +418,31 @@ function isTenantOperation(value: unknown): value is TenantOperation {
     typeof value.updatedAt === 'string' &&
     typeof value.updatedBy === 'string' &&
     Array.isArray(value.completedSteps) &&
-    value.completedSteps.every((step) => typeof step === 'string') &&
+    value.completedSteps.every(isTenantOperationStep) &&
+    (value.currentStep === undefined || isTenantOperationStep(value.currentStep)) &&
+    (value.lastEvidenceReference === undefined ||
+      typeof value.lastEvidenceReference === 'string' &&
+      /^evidence:sha256:[a-f0-9]{64}$/u.test(value.lastEvidenceReference)) &&
+    (value.failureCode === undefined ||
+      typeof value.failureCode === 'string' &&
+      /^[A-Z][A-Z0-9_]{2,63}$/u.test(value.failureCode)) &&
+    (value.exportFormat === undefined || value.exportFormat === 'jsonl' || value.exportFormat === 'csv') &&
     isRevisionedRecord(value)
+}
+
+/** Returns true for one bounded tenant lifecycle step. */
+function isTenantOperationStep(
+  value: unknown,
+): value is TenantOperation['completedSteps'][number] {
+  return value === 'snapshot' ||
+    value === 'prepare-artifact' ||
+    value === 'verify-artifact' ||
+    value === 'export' ||
+    value === 'revoke-access' ||
+    value === 'anonymize-members' ||
+    value === 'delete-data' ||
+    value === 'delete-secrets' ||
+    value === 'verify'
 }
 
 function isRevisionedRecord(value: Record<string, unknown>): boolean {

@@ -32,6 +32,7 @@ function createClient(
 ): TenantAdministrationClient {
   const operation = createOperation()
   return {
+    async assertActive() {},
     async ensureSnapshot(workspaceId, ownerMemberKey, activeSeats) {
       ensureCalls.push([workspaceId, ownerMemberKey, activeSeats])
       return snapshot
@@ -63,6 +64,9 @@ function createClient(
     },
     async advanceOperation() {
       return operation
+    },
+    async failOperation() {
+      return { ...operation, status: 'failed', failureCode: 'EXECUTION_FAILED' }
     },
     async pauseOperation() {
       return { ...operation, status: 'paused' }

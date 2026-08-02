@@ -20,6 +20,7 @@ test('rejects a disabled feature on an actual authenticated API route', async ()
   configureFakeProjectClients(true)
   setTestAppDependencies({
     tenantEntitlementEnforcement: {
+      async assertActive() {},
       async assertFeature() {
         throw new TenantAdministrationError(
           403,
@@ -52,6 +53,7 @@ test('reserves mutation usage before entering an enabled feature route', async (
   }> = []
   setTestAppDependencies({
     tenantEntitlementEnforcement: {
+      async assertActive() {},
       async assertFeature() {},
       async reserveUsage(workspaceId, feature, units, idempotencyKey) {
         reservations.push({ workspaceId, feature, units, idempotencyKey })
@@ -86,6 +88,36 @@ test('reserves mutation usage before entering an enabled feature route', async (
       /^tenant-meter:v1:[a-f0-9]{64}:[a-f0-9]{64}$/u,
     ),
   }])
+})
+
+test('rejects an oversized idempotent metered body before reserving usage', async () => {
+  configureFakeProjectClients(true)
+  let reservations = 0
+  setTestAppDependencies({
+    tenantEntitlementEnforcement: {
+      async assertActive() {},
+      async assertFeature() {},
+      async reserveUsage() {
+        reservations += 1
+      },
+    },
+  })
+
+  const response = await app.request('/api/analytics/reports', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'oversized-metered-request',
+    },
+    body: JSON.stringify({ padding: 'x'.repeat(10 * 1024 * 1024) }),
+  })
+
+  expect(response.status).toBe(413)
+  expect(await response.json()).toMatchObject({
+    code: 'TenantMeteringBodyTooLarge',
+  })
+  expect(reservations).toBe(0)
 })
 
 test('rejects public SSO discovery and start when the tenant feature is disabled', async () => {
@@ -128,6 +160,7 @@ test('rejects public SSO discovery and start when the tenant feature is disabled
   setTestAppDependencies({
     enterpriseIdentity: identity,
     tenantEntitlementEnforcement: {
+      async assertActive() {},
       async assertFeature(_workspaceId, feature) {
         checkedFeatures.push(feature)
         throw new TenantAdministrationError(

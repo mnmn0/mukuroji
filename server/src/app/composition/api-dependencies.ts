@@ -584,6 +584,7 @@ function createTestOperationalDependencies(): OperationalDependencies {
  */
 function createTestTenantEntitlementEnforcement(): TenantEntitlementEnforcement {
   return {
+    async assertActive() {},
     async assertFeature() {},
     async reserveUsage() {},
   }

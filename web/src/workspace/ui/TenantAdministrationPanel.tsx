@@ -267,6 +267,7 @@ export function TenantAdministrationPanel({
   const operationPercent = activeOperation
     ? Math.round((activeOperation.completedSteps.length / operationSteps) * 100)
     : 0
+  const tenantClosed = profile.status !== 'active'
 
   return (
     <section className="workbench-panel overflow-hidden" data-testid="tenant-administration-panel">
@@ -282,9 +283,16 @@ export function TenantAdministrationPanel({
             </p>
           </div>
           <div className="rounded-full border border-[#9dd8cf] bg-white/80 px-3 py-1.5 text-xs font-semibold tracking-[0.08em] text-[var(--workbench-primary)]">
-            {profile.region}
+            {profile.region} · {profile.status}
           </div>
         </div>
+        {tenantClosed ? (
+          <p className="mt-4 rounded-lg border border-[#f1c4b8] bg-[#fff8f5] px-3 py-2 text-sm font-semibold text-[#9e3d27]" role="status">
+            {t(profile.status === 'closed'
+              ? 'workspace.tenantAdministration.closed'
+              : 'workspace.tenantAdministration.closing')}
+          </p>
+        ) : null}
         {actionError ? (
           <p className="mt-4 rounded-lg border border-[#f1c4b8] bg-[#fff8f5] px-3 py-2 text-sm font-semibold text-[#9e3d27]" role="alert">
             {actionError}
@@ -311,6 +319,15 @@ export function TenantAdministrationPanel({
           <SectionHeader title={t('workspace.tenantAdministration.profileTitle')} meta={t('workspace.tenantAdministration.profileMeta')} />
           <div className="mt-5 grid gap-4 sm:grid-cols-2">
             <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
+              {t('workspace.tenantAdministration.owner')}
+              <input
+                className="workbench-input"
+                disabled
+                readOnly
+                value={profile.ownerMemberKey}
+              />
+            </label>
+            <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
               {t('workspace.tenantAdministration.region')}
               <input
                 className="workbench-input"
@@ -323,6 +340,7 @@ export function TenantAdministrationPanel({
               {t('workspace.tenantAdministration.locale')}
               <select
                 className="workbench-input"
+                disabled={tenantClosed}
                 onChange={(event) => onChangeProfile({ ...profile, locale: event.target.value === 'en' ? 'en' : 'ja' })}
                 value={profile.locale}
               >
@@ -334,6 +352,7 @@ export function TenantAdministrationPanel({
               {t('workspace.tenantAdministration.defaultRole')}
               <select
                 className="workbench-input"
+                disabled={tenantClosed}
                 onChange={(event) => onChangeProfile({
                   ...profile,
                   defaultPolicy: {
@@ -348,29 +367,7 @@ export function TenantAdministrationPanel({
               </select>
             </label>
           </div>
-          <label className="mt-4 flex items-center gap-3 text-sm font-semibold text-[var(--workbench-text)]">
-            <input
-              checked={profile.defaultPolicy.allowExternalCollaborators}
-              onChange={(event) => onChangeProfile({
-                ...profile,
-                defaultPolicy: { ...profile.defaultPolicy, allowExternalCollaborators: event.target.checked },
-              })}
-              type="checkbox"
-            />
-            {t('workspace.tenantAdministration.allowExternal')}
-          </label>
-          <label className="mt-3 flex items-center gap-3 text-sm font-semibold text-[var(--workbench-text)]">
-            <input
-              checked={profile.defaultPolicy.requireMfa}
-              onChange={(event) => onChangeProfile({
-                ...profile,
-                defaultPolicy: { ...profile.defaultPolicy, requireMfa: event.target.checked },
-              })}
-              type="checkbox"
-            />
-            {t('workspace.tenantAdministration.requireMfa')}
-          </label>
-          <button className="workbench-button-primary mt-5" disabled={isSaving} onClick={onSaveProfile} type="button">
+          <button className="workbench-button-primary mt-5" disabled={isSaving || tenantClosed} onClick={onSaveProfile} type="button">
             {t('workspace.tenantAdministration.saveProfile')}
           </button>
         </section>
@@ -423,7 +420,7 @@ export function TenantAdministrationPanel({
         <section className="border-t border-[var(--workbench-border)] py-7 xl:col-span-2">
           <SectionHeader title={t('workspace.tenantAdministration.governanceTitle')} meta={t('workspace.tenantAdministration.governanceMeta')} />
           <div className="mt-5 grid gap-4 sm:grid-cols-2">
-            <NumberField label={t('workspace.tenantAdministration.retention')} value={governance.auditRetentionDays} onChange={(value) => onChangeGovernance({ ...governance, auditRetentionDays: value })} />
+            <NumberField disabled={tenantClosed} label={t('workspace.tenantAdministration.retention')} value={governance.auditRetentionDays} onChange={(value) => onChangeGovernance({ ...governance, auditRetentionDays: value })} />
             <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
               {t('workspace.tenantAdministration.dataResidency')}
               <input
@@ -443,7 +440,7 @@ export function TenantAdministrationPanel({
             </label>
           </div>
           <label className="mt-4 flex items-start gap-3 rounded-lg border border-[#f0d7a8] bg-[#fffaf0] p-3 text-sm font-semibold text-[#7b5b22]">
-            <input checked={governance.legalHold} onChange={(event) => onChangeGovernance({ ...governance, legalHold: event.target.checked })} type="checkbox" />
+            <input checked={governance.legalHold} disabled={tenantClosed} onChange={(event) => onChangeGovernance({ ...governance, legalHold: event.target.checked })} type="checkbox" />
             <span>{t('workspace.tenantAdministration.legalHold')}</span>
           </label>
           {data.retentionReconciliation && (
@@ -453,7 +450,7 @@ export function TenantAdministrationPanel({
               {data.retentionReconciliation.processedEvents.toLocaleString(locale)}
             </p>
           )}
-          <button className="workbench-button-primary mt-5" disabled={isSaving} onClick={onSaveGovernance} type="button">
+          <button className="workbench-button-primary mt-5" disabled={isSaving || tenantClosed} onClick={onSaveGovernance} type="button">
             {t('workspace.tenantAdministration.saveGovernance')}
           </button>
         </section>
@@ -495,7 +492,7 @@ export function TenantAdministrationPanel({
                   <option value="jsonl">JSONL</option>
                   <option value="csv">CSV</option>
                 </select>
-                <button className="workbench-button-secondary" disabled={isSaving || Boolean(activeOperation)} onClick={onRequestExport} type="button">{t('workspace.tenantAdministration.startExport')}</button>
+                <button className="workbench-button-secondary" disabled={isSaving || tenantClosed || Boolean(activeOperation)} onClick={onRequestExport} type="button">{t('workspace.tenantAdministration.startExport')}</button>
               </div>
             </div>
             <div className="border-l-2 border-[#d76a4d] bg-[#fffaf8] px-4 py-5 sm:border-l-0 sm:pl-5">
@@ -503,10 +500,46 @@ export function TenantAdministrationPanel({
               <p className="mt-1 text-sm leading-6 text-[#9e604f]">{t('workspace.tenantAdministration.closureDescription')}</p>
               <div className="mt-3 flex flex-col gap-2 sm:flex-row">
                 <input aria-label={t('workspace.tenantAdministration.confirmationLabel')} className="workbench-input" onChange={(event) => onChangeClosureConfirmation(event.target.value)} placeholder="CLOSE" value={closureConfirmation} />
-                <button className="workbench-button-danger" disabled={isSaving || Boolean(activeOperation) || governance.legalHold || closureConfirmation !== 'CLOSE'} onClick={onRequestClosure} type="button">{t('workspace.tenantAdministration.startClosure')}</button>
+                <button className="workbench-button-danger" disabled={isSaving || tenantClosed || Boolean(activeOperation) || governance.legalHold || closureConfirmation !== 'CLOSE'} onClick={onRequestClosure} type="button">{t('workspace.tenantAdministration.startClosure')}</button>
               </div>
             </div>
           </div>
+          {data.recentOperations.length > 0 ? (
+            <div className="mt-6">
+              <h3 className="text-sm font-semibold text-[var(--workbench-text)]">
+                {t('workspace.tenantAdministration.operationHistory')}
+              </h3>
+              <div className="mt-2 divide-y divide-[var(--workbench-border)] border-y border-[var(--workbench-border)]">
+                {data.recentOperations.map((operation) => (
+                  <div className="grid gap-1 py-3 text-xs sm:grid-cols-[minmax(0,1fr)_auto] sm:gap-x-4" key={operation.operationId}>
+                    <div className="min-w-0">
+                      <p className="font-semibold text-[var(--workbench-text)]">
+                        {operation.kind} · {operation.status}
+                      </p>
+                      <p className="mt-1 break-all text-[var(--workbench-muted)]">
+                        {operation.operationId}
+                      </p>
+                      {operation.lastEvidenceReference ? (
+                        <p className="mt-1 break-all text-[var(--workbench-muted)]">
+                          {t('workspace.tenantAdministration.operationEvidence')}: {' '}
+                          {operation.lastEvidenceReference}
+                        </p>
+                      ) : null}
+                      {operation.failureCode ? (
+                        <p className="mt-1 font-semibold text-[#9e3d27]">
+                          {t('workspace.tenantAdministration.operationFailure')}: {' '}
+                          {operation.failureCode}
+                        </p>
+                      ) : null}
+                    </div>
+                    <p className="text-[var(--workbench-muted)] sm:text-right">
+                      {formatTenantOperationTimestamp(operation.requestedAt, locale)}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </section>
       </div>
       <div className="grid border-t border-[var(--workbench-border)] bg-[#f8faf9] sm:grid-cols-3 sm:divide-x sm:divide-[var(--workbench-border)]">
@@ -525,6 +558,16 @@ export function TenantAdministrationPanel({
   )
 }
 
+/** Formats one audited lifecycle timestamp for the active tenant locale. */
+function formatTenantOperationTimestamp(timestamp: string, locale: string): string {
+  const date = new Date(timestamp)
+  if (Number.isNaN(date.getTime())) return timestamp
+  return new Intl.DateTimeFormat(locale, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(date)
+}
+
 /** Compact usage metric with an optional progress bar. */
 function TenantMetric({ label, value, progress }: { label: string; value: string; progress?: number }) {
   return (
@@ -537,11 +580,11 @@ function TenantMetric({ label, value, progress }: { label: string; value: string
 }
 
 /** Numeric input used by tenant capacity and retention forms. */
-function NumberField({ label, value, onChange }: { label: string; value: number; onChange: (value: number) => void }) {
+function NumberField({ disabled = false, label, value, onChange }: { disabled?: boolean; label: string; value: number; onChange: (value: number) => void }) {
   return (
     <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
       {label}
-      <input className="workbench-input" min={0} onChange={(event) => onChange(Number(event.target.value))} type="number" value={value} />
+      <input className="workbench-input" disabled={disabled} min={0} onChange={(event) => onChange(Number(event.target.value))} type="number" value={value} />
     </label>
   )
 }

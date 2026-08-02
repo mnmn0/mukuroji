@@ -288,8 +288,6 @@ function readTenantDefaultPolicy(value: unknown): TenantDefaultPolicy {
     throw new TenantAdministrationError(400, 'InvalidTenantDefaultRole', 'Tenant default role is invalid.')
   }
   return {
-    allowExternalCollaborators: validateTenantBoolean(policy.allowExternalCollaborators, 'InvalidTenantPolicy'),
-    requireMfa: validateTenantBoolean(policy.requireMfa, 'InvalidTenantPolicy'),
     defaultMemberRole,
   }
 }

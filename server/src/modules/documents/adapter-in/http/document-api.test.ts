@@ -1836,6 +1836,7 @@ test('projects every public document kind without internal metadata', async () =
     const app = createTestApp(createDocumentClient({
       async resolvePublicShare() {
         return {
+          workspaceId: 'workspace-1',
           document: testCase.document,
           share: publicShare,
         }
@@ -1851,6 +1852,41 @@ test('projects every public document kind without internal metadata', async () =
       allowExport: true,
     })
   }
+})
+
+test('enforces the server-owned tenant entitlement for public document access', async () => {
+  const checkedWorkspaces: string[] = []
+  const app = createTestApp(
+    createDocumentClient({
+      async resolvePublicShare() {
+        return {
+          workspaceId: 'workspace-1',
+          document: pageDocument,
+          share: publicShare,
+        }
+      },
+    }),
+    {
+      async assertPublicShareEntitled(workspaceId) {
+        checkedWorkspaces.push(workspaceId)
+        throw new DocumentError(
+          403,
+          'TenantFeatureDisabled',
+          'Documents are disabled for this tenant.',
+        )
+      },
+    },
+  )
+  const token = 'a-valid-public-token-with-more-than-32-characters'
+
+  const [readResponse, exportResponse] = await Promise.all([
+    app.request(`/api/public/documents/${token}`),
+    app.request(`/api/public/documents/${token}/export?format=json`),
+  ])
+
+  expect(readResponse.status).toBe(403)
+  expect(exportResponse.status).toBe(403)
+  expect(checkedWorkspaces).toEqual(['workspace-1', 'workspace-1'])
 })
 
 test('exports a public document only when the current token permits it', async () => {
@@ -1892,6 +1928,7 @@ test('exports a public document only when the current token permits it', async (
   const app = createTestApp(createDocumentClient({
     async resolvePublicShare() {
       return {
+        workspaceId: 'workspace-1',
         document,
         share: {
           ...publicShare,
@@ -2119,6 +2156,7 @@ function createTestApp(
       memberKey,
       email: memberKey,
     }),
+    assertPublicShareEntitled: async () => undefined,
     validateRelationTargets: async () => undefined,
     ...overrides,
     getClient: () => client,

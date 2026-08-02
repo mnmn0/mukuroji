@@ -104,6 +104,12 @@ describe('tenant administration domain', () => {
       snapshot.entitlement,
       usage,
       1,
+      usage.gracePeriodEndsAt ?? '',
+    )).toThrow('Tenant usage quota has been exceeded.')
+    expect(() => reserveTenantUsage(
+      snapshot.entitlement,
+      usage,
+      1,
       '2026-08-10T00:00:00.000Z',
     )).toThrow('Tenant usage quota has been exceeded.')
   })

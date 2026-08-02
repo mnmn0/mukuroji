@@ -14,6 +14,10 @@ export type ExecuteTenantOperationInput = {
   executorId: string
   /** Immutable evidence for the currently running workflow step. */
   proof?: TenantOperationStepProof
+  /** Safe terminal failure code reported by the current step capability. */
+  failureCode?: string
+  /** Workflow steps assigned to the invoked IAM capability. */
+  allowedSteps?: readonly TenantOperationStepProof['step'][]
 }
 
 /** Minimal durable state capability required by the trusted executor. */
@@ -26,6 +30,13 @@ export interface TenantOperationStatePort {
     actorMemberKey: string,
     operationId: string,
     proof: TenantOperationStepProof | undefined,
+  ): Promise<TenantOperation>
+  /** Records a safe terminal failure for the current operation step. */
+  failOperation(
+    workspaceId: string,
+    actorMemberKey: string,
+    operationId: string,
+    failureCode: string,
   ): Promise<TenantOperation>
 }
 
@@ -62,6 +73,13 @@ export class TenantOperationExecutor {
         'A trusted tenant operation executor identity is required.',
       )
     }
+    if (input.proof !== undefined && input.failureCode !== undefined) {
+      throw new TenantAdministrationError(
+        400,
+        'TenantOperationExecutionInputInvalid',
+        'Tenant operation proof and failure cannot be reported together.',
+      )
+    }
     let operation = await this.client.getOperation(workspaceId, operationId)
     if (operation.status === 'requested') {
       operation = await this.client.advanceOperation(
@@ -71,6 +89,20 @@ export class TenantOperationExecutor {
         undefined,
       )
     }
+    const commandedStep = input.proof?.step ?? operation.currentStep
+    if (
+      (input.proof !== undefined || input.failureCode !== undefined) &&
+      (
+        commandedStep === undefined ||
+        !input.allowedSteps?.includes(commandedStep)
+      )
+    ) {
+      throw new TenantAdministrationError(
+        403,
+        'TenantOperationCapabilityDenied',
+        'The invoked tenant operation capability does not own the commanded step.',
+      )
+    }
     if (
       input.proof !== undefined &&
       operation.completedSteps.includes(input.proof.step) &&
@@ -78,8 +110,21 @@ export class TenantOperationExecutor {
     ) {
       return operation
     }
-    if (operation.status !== 'running' || input.proof === undefined) {
+    if (
+      operation.status === 'failed' &&
+      input.failureCode?.trim() === operation.failureCode
+    ) {
       return operation
+    }
+    if (input.proof === undefined && input.failureCode === undefined) return operation
+    if (operation.status !== 'running' || operation.currentStep === undefined) return operation
+    if (input.failureCode !== undefined) {
+      return await this.client.failOperation(
+        workspaceId,
+        executorId,
+        operationId,
+        input.failureCode,
+      )
     }
     return await this.client.advanceOperation(
       workspaceId,

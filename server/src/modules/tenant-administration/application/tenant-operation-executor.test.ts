@@ -3,7 +3,10 @@ import type {
   TenantOperation,
   TenantOperationStepProof,
 } from '@mukuroji/contracts'
-import { advanceTenantOperation } from '../domain/tenant-administration'
+import {
+  advanceTenantOperation,
+  failTenantOperation,
+} from '../domain/tenant-administration'
 import {
   TenantOperationExecutor,
   type ExecuteTenantOperationInput,
@@ -49,6 +52,26 @@ class InMemoryTenantOperationState implements TenantOperationStatePort {
       ...advanceTenantOperation(
         this.operation,
         proof,
+        `2026-08-02T00:0${this.operation.revision + 1}:00.000Z`,
+      ),
+      updatedBy: actorMemberKey,
+    }
+    return this.operation
+  }
+
+  /** Applies the same terminal failure transition used by the DynamoDB adapter. */
+  async failOperation(
+    workspaceId: string,
+    actorMemberKey: string,
+    operationId: string,
+    failureCode: string,
+  ): Promise<TenantOperation> {
+    await this.getOperation(workspaceId, operationId)
+    this.actors.push(actorMemberKey)
+    this.operation = {
+      ...failTenantOperation(
+        this.operation,
+        failureCode,
         `2026-08-02T00:0${this.operation.revision + 1}:00.000Z`,
       ),
       updatedBy: actorMemberKey,
@@ -102,6 +125,7 @@ describe('TenantOperationExecutor', () => {
       workspaceId: 'workspace-1',
       operationId: 'operation-1',
       executorId: 'executor:data-export',
+      allowedSteps: ['snapshot'],
       proof: {
         step: 'snapshot',
         evidenceReference: createEvidenceReference(1),
@@ -129,6 +153,7 @@ describe('TenantOperationExecutor', () => {
       workspaceId: 'workspace-1',
       operationId: 'operation-1',
       executorId: 'executor:data-export',
+      allowedSteps: ['snapshot'],
       proof: {
         step: 'snapshot',
         evidenceReference: createEvidenceReference(2),
@@ -150,6 +175,37 @@ describe('TenantOperationExecutor', () => {
     ])
   })
 
+  test('rejects a committed proof replay through a different step capability', async () => {
+    const state = new InMemoryTenantOperationState(createRequestedOperation())
+    const executor = new TenantOperationExecutor(state)
+    const proof: TenantOperationStepProof = {
+      step: 'snapshot',
+      evidenceReference: createEvidenceReference(1),
+    }
+    await executor.execute({
+      workspaceId: 'workspace-1',
+      operationId: 'operation-1',
+      executorId: 'executor:tenant-export',
+      allowedSteps: ['snapshot'],
+      proof,
+    })
+
+    await expect(executor.execute({
+      workspaceId: 'workspace-1',
+      operationId: 'operation-1',
+      executorId: 'executor:tenant-access-revocation',
+      allowedSteps: ['revoke-access'],
+      proof,
+    })).rejects.toMatchObject({
+      code: 'TenantOperationCapabilityDenied',
+      status: 403,
+    })
+    expect(state.actors).toEqual([
+      'executor:tenant-export',
+      'executor:tenant-export',
+    ])
+  })
+
   test('rejects untrusted actor identities before reading operation state', async () => {
     const state = new InMemoryTenantOperationState(createRequestedOperation())
     const executor = new TenantOperationExecutor(state)
@@ -161,6 +217,46 @@ describe('TenantOperationExecutor', () => {
     })).rejects.toMatchObject({
       code: 'TenantOperationExecutorInvalid',
       status: 403,
+    })
+  })
+
+  test('rejects a proof when the invoked capability does not own the current step', async () => {
+    const state = new InMemoryTenantOperationState(createRequestedOperation())
+    const executor = new TenantOperationExecutor(state)
+
+    await expect(executor.execute({
+      workspaceId: 'workspace-1',
+      operationId: 'operation-1',
+      executorId: 'executor:tenant-secret-deletion',
+      allowedSteps: ['delete-secrets'],
+      proof: {
+        step: 'snapshot',
+        evidenceReference: createEvidenceReference(3),
+      },
+    })).rejects.toMatchObject({
+      code: 'TenantOperationCapabilityDenied',
+      status: 403,
+    })
+  })
+
+  test('records a terminal failure from the capability owning the current step', async () => {
+    const state = new InMemoryTenantOperationState(createRequestedOperation())
+    const executor = new TenantOperationExecutor(state)
+
+    const operation = await executor.execute({
+      workspaceId: 'workspace-1',
+      operationId: 'operation-1',
+      executorId: 'executor:data-export',
+      allowedSteps: ['snapshot'],
+      failureCode: 'EXPORT_SNAPSHOT_FAILED',
+    })
+
+    expect(operation).toMatchObject({
+      status: 'failed',
+      currentStep: 'snapshot',
+      failureCode: 'EXPORT_SNAPSHOT_FAILED',
+      updatedBy: 'executor:data-export',
+      revision: 2,
     })
   })
 })

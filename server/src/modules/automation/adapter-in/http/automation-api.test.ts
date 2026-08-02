@@ -801,6 +801,7 @@ test('accepts an unauthenticated signed inbound webhook without exposing secret 
         },
       },
       tenantEntitlementEnforcement: {
+        async assertActive() {},
         async assertFeature() {},
         async reserveUsage(_workspaceId, _feature, _units, idempotencyKey) {
           usageReservationKeys.push(idempotencyKey)
@@ -873,6 +874,7 @@ test('maps inbound webhook public validation failures without Cognito authentica
       },
     }),
     tenantEntitlementEnforcement: {
+      async assertActive() {},
       async assertFeature() {},
       async reserveUsage() {
         usageReservations += 1

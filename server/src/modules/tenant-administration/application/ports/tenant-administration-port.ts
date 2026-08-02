@@ -14,12 +14,6 @@ import type {
   UpdateTenantProfileInput,
 } from '@mukuroji/contracts'
 import type { TenantFeature } from '@mukuroji/contracts'
-import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
-
-/** DynamoDB transaction item prepared for a tenant administration mutation. */
-export type TenantAdministrationTransactionItem = NonNullable<
-  TransactWriteCommandInput['TransactItems']
->[number]
 
 /** Safe tenant mutation data passed to the append-only audit writer. */
 export type TenantAdministrationAuditEvent = {
@@ -56,11 +50,11 @@ export type TenantAdministrationAuditEvent = {
 }
 
 /** Prepares audit persistence in the same transaction as a tenant mutation. */
-export type TenantAdministrationAuditWriter = {
+export type TenantAdministrationAuditWriter<TransactionItem = unknown> = {
   /** Creates an append-only audit Put or omits it when audit persistence is disabled. */
   createTransactionItem(
     event: TenantAdministrationAuditEvent,
-  ): TenantAdministrationTransactionItem | undefined
+  ): TransactionItem | undefined
 }
 
 /** Input used to meter one Workspace membership state transition. */
@@ -79,6 +73,8 @@ export type TenantSeatMutationInput = {
  * Server-side feature and quota checks used by authenticated feature routes.
  */
 export interface TenantEntitlementEnforcement {
+  /** Rejects normal route access while tenant closure is active or complete. */
+  assertActive(workspaceId: string): Promise<void>
   /** Rejects a feature route when the current entitlement does not include it. */
   assertFeature(workspaceId: string, feature: TenantFeature): Promise<void>
   /** Reserves metered usage after checking feature entitlement and quota. */
@@ -93,11 +89,11 @@ export interface TenantEntitlementEnforcement {
 /**
  * Prepares seat-meter writes that join the authoritative membership transaction.
  */
-export interface TenantSeatMeter {
+export interface TenantSeatMeter<TransactionItem = unknown> {
   /** Returns conditional usage and audit items for one membership transition. */
   prepareSeatMutation(
     input: TenantSeatMutationInput,
-  ): Promise<readonly TenantAdministrationTransactionItem[]>
+  ): Promise<readonly TransactionItem[]>
 }
 
 /** Capability used by the trusted worker to reconcile audit TTL state. */
@@ -118,6 +114,8 @@ export interface TenantAuditRetentionProcessor {
  * Application port for tenant administration and data-governance state.
  */
 export interface TenantAdministrationClient extends TenantEntitlementEnforcement {
+  /** Rejects normal access when a verified closure has sealed the tenant. */
+  assertActive(workspaceId: string): Promise<void>
   /** Ensures the tenant aggregate exists and reconciles its authoritative owner. */
   ensureSnapshot(
     workspaceId: string,
@@ -173,6 +171,13 @@ export interface TenantAdministrationClient extends TenantEntitlementEnforcement
     actorMemberKey: string,
     operationId: string,
     proof: TenantOperationStepProof | undefined,
+  ): Promise<TenantOperation>
+  /** Records a safe terminal failure from the capability owning the current step. */
+  failOperation(
+    workspaceId: string,
+    actorMemberKey: string,
+    operationId: string,
+    failureCode: string,
   ): Promise<TenantOperation>
   /** Pauses one active workflow. */
   pauseOperation(

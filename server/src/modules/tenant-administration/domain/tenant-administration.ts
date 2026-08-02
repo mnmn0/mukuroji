@@ -99,9 +99,27 @@ export function createDefaultTenantProfile(
     region: validateTenantRegion(region),
     locale: 'ja',
     defaultPolicy: createDefaultTenantPolicy(),
+    status: 'active',
     revision: 0,
     createdAt: now,
     updatedAt: now,
+  }
+}
+
+/**
+ * Rejects normal data-plane access after a verified tenant closure.
+ *
+ * @param profile - Current tenant profile lifecycle state.
+ */
+export function assertTenantActive(profile: TenantProfile): void {
+  if (profile.status !== 'active') {
+    throw new TenantAdministrationError(
+      403,
+      profile.status === 'closed' ? 'TenantClosed' : 'TenantClosing',
+      profile.status === 'closed'
+        ? 'The tenant has been closed.'
+        : 'The tenant is being closed.',
+    )
   }
 }
 
@@ -112,8 +130,6 @@ export function createDefaultTenantProfile(
  */
 export function createDefaultTenantPolicy(): TenantDefaultPolicy {
   return {
-    allowExternalCollaborators: false,
-    requireMfa: false,
     defaultMemberRole: 'member',
   }
 }
@@ -284,6 +300,7 @@ export function createDefaultTenantAdministrationSnapshot(
     ),
     usage,
     billingPeriods: [recordTenantBillingPeriod(usage)],
+    recentOperations: [],
     governance: createDefaultTenantGovernance(
       workspaceId,
       ownerMemberKey,
@@ -482,7 +499,7 @@ export function reserveTenantUsage(
     const graceEndsAt = periodUsage.gracePeriodEndsAt
       ? new Date(periodUsage.gracePeriodEndsAt)
       : new Date(current.getTime() + entitlement.gracePeriodDays * 86_400_000)
-    if (Number.isNaN(graceEndsAt.getTime()) || current > graceEndsAt) {
+    if (Number.isNaN(graceEndsAt.getTime()) || current >= graceEndsAt) {
       throw new TenantAdministrationError(
         429,
         'TenantUsageQuotaExceeded',
@@ -658,6 +675,43 @@ export function advanceTenantOperation(
     currentStep: nextStep ?? operation.currentStep,
     completedSteps,
     lastEvidenceReference: evidenceReference,
+    updatedAt: now,
+    revision: operation.revision + 1,
+  }
+}
+
+/**
+ * Records a safe terminal failure reported by the current step capability.
+ *
+ * @param operation - Current durable tenant operation.
+ * @param failureCode - Stable non-sensitive executor failure code.
+ * @param now - Transition timestamp.
+ * @returns The failed terminal operation state.
+ */
+export function failTenantOperation(
+  operation: TenantOperation,
+  failureCode: string,
+  now: string,
+): TenantOperation {
+  if (operation.status !== 'running' || operation.currentStep === undefined) {
+    throw new TenantAdministrationError(
+      409,
+      'TenantOperationNotFailable',
+      'Tenant operation cannot fail in its current state.',
+    )
+  }
+  const normalizedFailureCode = failureCode.trim()
+  if (!/^[A-Z][A-Z0-9_]{2,63}$/u.test(normalizedFailureCode)) {
+    throw new TenantAdministrationError(
+      400,
+      'TenantOperationFailureCodeInvalid',
+      'Tenant operation failure code is invalid.',
+    )
+  }
+  return {
+    ...operation,
+    status: 'failed',
+    failureCode: normalizedFailureCode,
     updatedAt: now,
     revision: operation.revision + 1,
   }

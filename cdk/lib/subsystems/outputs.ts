@@ -126,8 +126,20 @@ export type StackOutputResources = {
   readonly requestEmailIngestionFunction: lambda.IFunction;
   /** Dead-letter queue for request email ingestion failures. */
   readonly requestEmailIngestionDlq: sqs.IQueue;
-  /** IAM-invokable tenant lifecycle executor. */
+  /** Stream-only tenant lifecycle starter and retention worker. */
   readonly tenantOperationFunction: lambda.IFunction;
+  /** Export-step proof ingress. */
+  readonly tenantExportCapabilityFunction: lambda.IFunction;
+  /** Access-revocation proof ingress. */
+  readonly tenantAccessCapabilityFunction: lambda.IFunction;
+  /** Member-anonymization proof ingress. */
+  readonly tenantIdentityCapabilityFunction: lambda.IFunction;
+  /** Data-deletion proof ingress. */
+  readonly tenantDataCapabilityFunction: lambda.IFunction;
+  /** Secret-deletion proof ingress. */
+  readonly tenantSecretsCapabilityFunction: lambda.IFunction;
+  /** Closure-verification proof ingress. */
+  readonly tenantVerificationCapabilityFunction: lambda.IFunction;
   /** Dead-letter queue for tenant lifecycle and retention stream failures. */
   readonly tenantOperationDlq: sqs.IQueue;
   /** Lambda Function URL for the project task API. */
@@ -339,6 +351,24 @@ export function buildStackOutputs(
   });
   new cdk.CfnOutput(scope, 'TenantOperationFunctionName', {
     value: resources.tenantOperationFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'TenantExportCapabilityFunctionName', {
+    value: resources.tenantExportCapabilityFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'TenantAccessCapabilityFunctionName', {
+    value: resources.tenantAccessCapabilityFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'TenantIdentityCapabilityFunctionName', {
+    value: resources.tenantIdentityCapabilityFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'TenantDataCapabilityFunctionName', {
+    value: resources.tenantDataCapabilityFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'TenantSecretsCapabilityFunctionName', {
+    value: resources.tenantSecretsCapabilityFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'TenantVerificationCapabilityFunctionName', {
+    value: resources.tenantVerificationCapabilityFunction.functionName,
   });
   new cdk.CfnOutput(scope, 'TenantOperationDlqUrl', {
     value: resources.tenantOperationDlq.queueUrl,

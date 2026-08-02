@@ -3,6 +3,7 @@ import {
   QueryCommand,
   TransactWriteCommand,
   type DynamoDBDocumentClient,
+  type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import { createHash, randomUUID } from 'node:crypto'
 import type {
@@ -33,11 +34,13 @@ import {
   DEFAULT_TENANT_GOVERNANCE_ENFORCEMENT,
   TenantAdministrationError,
   advanceTenantOperation,
+  assertTenantActive,
   assertTenantFeatureEnabled,
   assertTenantGovernanceEnforced,
   assertTenantSeatAvailable,
   beginTenantUsageMutation,
   createDefaultTenantAdministrationSnapshot,
+  failTenantOperation,
   isTenantOperationActive,
   pauseTenantOperation,
   recordTenantBillingPeriod,
@@ -57,13 +60,14 @@ import type {
   TenantAdministrationAuditWriter,
   TenantAuditRetentionProcessor,
   TenantAdministrationClient,
-  TenantAdministrationTransactionItem,
   TenantSeatMeter,
   TenantSeatMutationInput,
 } from '../../application/ports/tenant-administration-port'
 
 /** DynamoDB transaction item used by tenant administration mutations. */
-type TenantTransactionItem = TenantAdministrationTransactionItem
+type TenantTransactionItem = NonNullable<
+  TransactWriteCommandInput['TransactItems']
+>[number]
 
 /** Optional governance conditions applied to a lifecycle state transition. */
 type TenantOperationTransitionOptions = {
@@ -71,6 +75,8 @@ type TenantOperationTransitionOptions = {
   requireInactiveLegalHold?: boolean
   /** Recognizes a safely replayed transition before applying another mutation. */
   acceptReplay?: (operation: TenantOperation) => boolean
+  /** Seals the tenant profile when a completed closure is verified. */
+  closeTenant?: boolean
 }
 
 /** Durable, expiring receipt for one metered request reservation. */
@@ -106,6 +112,7 @@ const GOVERNANCE_RECORD_KEY = 'GOVERNANCE'
 const ACTIVE_OPERATION_RECORD_KEY = 'ACTIVE_OPERATION'
 const BILLING_PERIOD_RECORD_PREFIX = 'BILLING#'
 const OPERATION_RECORD_PREFIX = 'OPERATION#'
+const OPERATION_HISTORY_RECORD_PREFIX = 'OPERATION_HISTORY#'
 const USAGE_RECEIPT_RECORD_PREFIX = 'USAGE_RECEIPT#'
 const RETENTION_JOB_RECORD_KEY = 'RETENTION_JOB'
 const RETENTION_RECONCILIATION_PAGE_SIZE = 22
@@ -118,7 +125,7 @@ const TENANT_METERING_IDEMPOTENCY_PATTERN =
  */
 export class DynamoDbTenantAdministrationClient implements
   TenantAdministrationClient,
-  TenantSeatMeter,
+  TenantSeatMeter<TenantTransactionItem>,
   TenantAuditRetentionProcessor {
   /** DynamoDB table containing tenant control-plane records. */
   private readonly tableName: string
@@ -127,7 +134,7 @@ export class DynamoDbTenantAdministrationClient implements
   /** Clock injected for deterministic tests and operation timestamps. */
   private readonly now: () => string
   /** Optional append-only audit transaction builder. */
-  private readonly auditWriter?: TenantAdministrationAuditWriter
+  private readonly auditWriter?: TenantAdministrationAuditWriter<TenantTransactionItem>
   /** Residency and key controls implemented by the deployed data plane. */
   private readonly governanceEnforcement: TenantGovernanceEnforcement
   /** Append-only audit table whose TTL attributes are reconciled. */
@@ -147,7 +154,7 @@ export class DynamoDbTenantAdministrationClient implements
     tableName: string,
     documentClient: DynamoDBDocumentClient,
     now: () => string = () => new Date().toISOString(),
-    auditWriter?: TenantAdministrationAuditWriter,
+    auditWriter?: TenantAdministrationAuditWriter<TenantTransactionItem>,
     governanceEnforcement: TenantGovernanceEnforcement = DEFAULT_TENANT_GOVERNANCE_ENFORCEMENT,
     auditTableName?: string,
   ) {
@@ -175,7 +182,10 @@ export class DynamoDbTenantAdministrationClient implements
   ): Promise<TenantAdministrationSnapshot> {
     try {
       const snapshot = await this.getSnapshot(workspaceId)
-      if (snapshot.profile.ownerMemberKey === ownerMemberKey) return snapshot
+      if (
+        snapshot.profile.status !== 'active' ||
+        snapshot.profile.ownerMemberKey === ownerMemberKey
+      ) return snapshot
       return await this.reconcileAuthoritativeOwner(snapshot, ownerMemberKey)
     } catch (error) {
       if (!(error instanceof TenantAdministrationError) || error.code !== 'TenantAdministrationNotInitialized') {
@@ -246,8 +256,14 @@ export class DynamoDbTenantAdministrationClient implements
       this.readRecord(workspaceId, USAGE_RECORD_KEY, readTenantUsage),
       this.readRecord(workspaceId, GOVERNANCE_RECORD_KEY, readTenantGovernance),
     ])
-    const [activeOperation, retentionReconciliation, storedBillingPeriods] = await Promise.all([
+    const [
+      activeOperation,
+      recentOperations,
+      retentionReconciliation,
+      storedBillingPeriods,
+    ] = await Promise.all([
       this.readActiveOperation(workspaceId),
+      this.readRecentOperations(workspaceId),
       this.readOptionalRecord(
         workspaceId,
         RETENTION_JOB_RECORD_KEY,
@@ -266,6 +282,7 @@ export class DynamoDbTenantAdministrationClient implements
       billingPeriods,
       governance,
       governanceEnforcement: this.governanceEnforcement,
+      recentOperations,
       ...(retentionReconciliation ? { retentionReconciliation } : {}),
       ...(activeOperation ? { activeOperation } : {}),
     }
@@ -281,6 +298,7 @@ export class DynamoDbTenantAdministrationClient implements
       this.readRecord(workspaceId, PROFILE_RECORD_KEY, readTenantProfile),
       this.readRecord(workspaceId, GOVERNANCE_RECORD_KEY, readTenantGovernance),
     ])
+    assertTenantActive(current)
     if (current.revision !== input.expectedRevision) {
       throw revisionConflict('TenantProfileRevisionConflict')
     }
@@ -330,11 +348,13 @@ export class DynamoDbTenantAdministrationClient implements
     actorMemberKey: string,
     input: UpdateTenantEntitlementInput,
   ): Promise<TenantEntitlement> {
-    const [current, usage, governance] = await Promise.all([
+    const [current, usage, governance, profile] = await Promise.all([
       this.readRecord(workspaceId, ENTITLEMENT_RECORD_KEY, readTenantEntitlement),
       this.readRecord(workspaceId, USAGE_RECORD_KEY, readTenantUsage),
       this.readRecord(workspaceId, GOVERNANCE_RECORD_KEY, readTenantGovernance),
+      this.readRecord(workspaceId, PROFILE_RECORD_KEY, readTenantProfile),
     ])
+    assertTenantActive(profile)
     if (current.revision !== input.expectedRevision) {
       throw revisionConflict('TenantEntitlementRevisionConflict')
     }
@@ -398,6 +418,12 @@ export class DynamoDbTenantAdministrationClient implements
         GOVERNANCE_RECORD_KEY,
         governance.revision,
       ),
+      createRevisionConditionCheck(
+        this.tableName,
+        workspaceId,
+        PROFILE_RECORD_KEY,
+        profile.revision,
+      ),
     ]
     if (auditPut) items.push(auditPut)
     try {
@@ -417,14 +443,16 @@ export class DynamoDbTenantAdministrationClient implements
     actorMemberKey: string,
     input: UpdateTenantGovernanceInput,
   ): Promise<TenantGovernancePolicy> {
-    const [current, currentRetentionJob] = await Promise.all([
+    const [current, currentRetentionJob, profile] = await Promise.all([
       this.readRecord(workspaceId, GOVERNANCE_RECORD_KEY, readTenantGovernance),
       this.readOptionalRecord(
         workspaceId,
         RETENTION_JOB_RECORD_KEY,
         readTenantRetentionReconciliation,
       ),
+      this.readRecord(workspaceId, PROFILE_RECORD_KEY, readTenantProfile),
     ])
+    assertTenantActive(profile)
     if (current.revision !== input.expectedRevision) {
       throw revisionConflict('TenantGovernanceRevisionConflict')
     }
@@ -476,6 +504,8 @@ export class DynamoDbTenantAdministrationClient implements
         updated,
         current.revision,
         auditEvent,
+        undefined,
+        profile.revision,
       )
       return updated
     }
@@ -531,6 +561,12 @@ export class DynamoDbTenantAdministrationClient implements
           ExpressionAttributeValues: { ':completed': 'completed' },
         },
       },
+      createRevisionConditionCheck(
+        this.tableName,
+        workspaceId,
+        PROFILE_RECORD_KEY,
+        profile.revision,
+      ),
     ]
     const auditPut = this.createAuditPut(auditEvent)
     if (auditPut) items.push(auditPut)
@@ -545,8 +581,19 @@ export class DynamoDbTenantAdministrationClient implements
     return updated
   }
 
+  /** Rejects normal access after a verified tenant closure. */
+  async assertActive(workspaceId: string): Promise<void> {
+    const profile = await this.readOptionalRecord(
+      workspaceId,
+      PROFILE_RECORD_KEY,
+      readTenantProfile,
+    )
+    if (profile) assertTenantActive(profile)
+  }
+
   /** Checks one feature against the current strongly consistent entitlement. */
   async assertFeature(workspaceId: string, feature: TenantFeature): Promise<void> {
+    await this.assertActive(workspaceId)
     const entitlement = await this.readRecord(
       workspaceId,
       ENTITLEMENT_RECORD_KEY,
@@ -564,11 +611,13 @@ export class DynamoDbTenantAdministrationClient implements
   async prepareSeatMutation(
     input: TenantSeatMutationInput,
   ): Promise<readonly TenantTransactionItem[]> {
-    const [entitlement, current, governance] = await Promise.all([
+    const [entitlement, current, governance, profile] = await Promise.all([
       this.readRecord(input.workspaceId, ENTITLEMENT_RECORD_KEY, readTenantEntitlement),
       this.readRecord(input.workspaceId, USAGE_RECORD_KEY, readTenantUsage),
       this.readRecord(input.workspaceId, GOVERNANCE_RECORD_KEY, readTenantGovernance),
+      this.readRecord(input.workspaceId, PROFILE_RECORD_KEY, readTenantProfile),
     ])
+    assertTenantActive(profile)
     if (input.direction === 'activate') {
       assertTenantSeatAvailable(entitlement, current)
     } else if (current.activeSeats === 0) {
@@ -622,6 +671,11 @@ export class DynamoDbTenantAdministrationClient implements
       input.workspaceId,
       GOVERNANCE_RECORD_KEY,
       governance.revision,
+    ), createRevisionConditionCheck(
+      this.tableName,
+      input.workspaceId,
+      PROFILE_RECORD_KEY,
+      profile.revision,
     ))
     const auditPut = this.createAuditPut({
       workspaceId: input.workspaceId,
@@ -871,10 +925,17 @@ export class DynamoDbTenantAdministrationClient implements
       additionalUnits,
       meteringIdempotency?.requestBinding,
     )
-    const [entitlement, current, governance, existingReceipt] = await Promise.all([
+    const [
+      entitlement,
+      current,
+      governance,
+      profile,
+      existingReceipt,
+    ] = await Promise.all([
       this.readRecord(workspaceId, ENTITLEMENT_RECORD_KEY, readTenantEntitlement),
       this.readRecord(workspaceId, USAGE_RECORD_KEY, readTenantUsage),
       this.readRecord(workspaceId, GOVERNANCE_RECORD_KEY, readTenantGovernance),
+      this.readRecord(workspaceId, PROFILE_RECORD_KEY, readTenantProfile),
       receiptRecordKey
         ? this.readOptionalRecord(
             workspaceId,
@@ -883,6 +944,7 @@ export class DynamoDbTenantAdministrationClient implements
           )
         : Promise.resolve(undefined),
     ])
+    assertTenantActive(profile)
     assertTenantFeatureEnabled(entitlement, feature)
     if (existingReceipt && existingReceipt.expiresAt > currentEpochSeconds) {
       assertTenantUsageReceipt(
@@ -930,6 +992,12 @@ export class DynamoDbTenantAdministrationClient implements
         workspaceId,
         GOVERNANCE_RECORD_KEY,
         governance.revision,
+      ),
+      createRevisionConditionCheck(
+        this.tableName,
+        workspaceId,
+        PROFILE_RECORD_KEY,
+        profile.revision,
       ),
       {
         Put: {
@@ -1009,14 +1077,17 @@ export class DynamoDbTenantAdministrationClient implements
     idempotencyKey?: string,
   ): Promise<TenantOperation> {
     const snapshot = await this.getSnapshot(workspaceId)
+    assertTenantActive(snapshot.profile)
     const operation = await this.createOperation(
       workspaceId,
       actorMemberKey,
       'export',
+      snapshot.profile,
       input.format,
       snapshot.governance.auditRetentionDays,
       snapshot.governance.legalHold,
       snapshot.governance.revision,
+      snapshot.profile.revision,
       idempotencyKey,
     )
     return operation
@@ -1044,10 +1115,12 @@ export class DynamoDbTenantAdministrationClient implements
       workspaceId,
       actorMemberKey,
       'closure',
+      snapshot.profile,
       undefined,
       snapshot.governance.auditRetentionDays,
       snapshot.governance.legalHold,
       snapshot.governance.revision,
+      snapshot.profile.revision,
       idempotencyKey,
     )
   }
@@ -1090,6 +1163,26 @@ export class DynamoDbTenantAdministrationClient implements
         acceptReplay: (operation) => proof !== undefined &&
           operation.completedSteps.includes(proof.step) &&
           operation.lastEvidenceReference === proof.evidenceReference.trim(),
+      },
+    )
+  }
+
+  /** Records a safe terminal failure from the current step capability. */
+  async failOperation(
+    workspaceId: string,
+    actorMemberKey: string,
+    operationId: string,
+    failureCode: string,
+  ): Promise<TenantOperation> {
+    return this.transitionOperation(
+      workspaceId,
+      actorMemberKey,
+      operationId,
+      (operation) => failTenantOperation(operation, failureCode, this.now()),
+      {
+        acceptReplay: (operation) => operation.status === 'failed' &&
+          operation.failureCode === failureCode.trim() &&
+          operation.updatedBy === actorMemberKey,
       },
     )
   }
@@ -1145,6 +1238,8 @@ export class DynamoDbTenantAdministrationClient implements
       {
         acceptReplay: (operation) => operation.status === 'verified' &&
           operation.updatedBy === actorMemberKey,
+        closeTenant: true,
+        requireInactiveLegalHold: true,
       },
     )
   }
@@ -1255,15 +1350,66 @@ export class DynamoDbTenantAdministrationClient implements
     })
   }
 
+  /** Reads the newest lifecycle operation snapshots for result inspection. */
+  private async readRecentOperations(workspaceId: string): Promise<TenantOperation[]> {
+    let response
+    try {
+      response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression:
+          'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
+        ExpressionAttributeValues: {
+          ':workspaceId': workspaceId,
+          ':prefix': OPERATION_HISTORY_RECORD_PREFIX,
+        },
+        ConsistentRead: true,
+        ScanIndexForward: false,
+        Limit: 10,
+      }))
+    } catch (error) {
+      throw toTenantPersistenceError(error)
+    }
+    const rawItems: unknown = response.Items
+    if (rawItems === undefined) return []
+    if (!Array.isArray(rawItems)) {
+      throw tenantAdministrationCorrupt('Tenant operation history is invalid.')
+    }
+    return rawItems.map((rawItem) => {
+      if (
+        !isRecord(rawItem) ||
+        typeof rawItem.recordKey !== 'string' ||
+        !rawItem.recordKey.startsWith(OPERATION_HISTORY_RECORD_PREFIX)
+      ) {
+        throw tenantAdministrationCorrupt(
+          'Tenant operation history key is invalid.',
+        )
+      }
+      const operation = this.parseStateItem(
+        rawItem,
+        workspaceId,
+        rawItem.recordKey,
+        readTenantOperation,
+      )
+      if (rawItem.recordKey !== createOperationHistoryRecordKey(operation)) {
+        throw tenantAdministrationCorrupt(
+          'Tenant operation history entry is inconsistent.',
+        )
+      }
+      return operation
+    })
+  }
+
   /** Creates an operation and an active-operation lock in one transaction. */
   private async createOperation(
     workspaceId: string,
     actorMemberKey: string,
     kind: 'export' | 'closure',
+    profile: TenantProfile,
     format?: 'jsonl' | 'csv',
     retentionDays = 2_555,
     legalHold = false,
     governanceRevision = 0,
+    profileRevision = profile.revision,
     idempotencyKey?: string,
   ): Promise<TenantOperation> {
     const normalizedIdempotencyKey = readOptionalTenantIdempotencyKey(idempotencyKey)
@@ -1286,6 +1432,7 @@ export class DynamoDbTenantAdministrationClient implements
         return replay
       }
     }
+    assertTenantActive(profile)
     if (await this.readActiveOperation(workspaceId)) {
       throw new TenantAdministrationError(
         409,
@@ -1307,6 +1454,14 @@ export class DynamoDbTenantAdministrationClient implements
       ...(format ? { exportFormat: format } : {}),
       revision: 0,
     }
+    const closingProfile: TenantProfile | undefined = kind === 'closure'
+      ? {
+          ...profile,
+          status: 'closing',
+          revision: profile.revision + 1,
+          updatedAt: now,
+        }
+      : undefined
     const auditPut = this.createAuditPut({
       workspaceId,
       actorMemberKey,
@@ -1321,11 +1476,42 @@ export class DynamoDbTenantAdministrationClient implements
       legalHold,
       occurredAt: now,
     })
+    const profileAuditPut = closingProfile
+      ? this.createAuditPut({
+          workspaceId,
+          actorMemberKey,
+          eventType: 'tenant.profile.closing',
+          entityId: workspaceId,
+          action: 'closing',
+          path: '/api/tenant/closures',
+          requestMethod: 'POST',
+          idempotencyKey:
+            `tenant-profile-closing:${workspaceId}:${operationId}:${closingProfile.revision}`,
+          before: profile,
+          after: closingProfile,
+          metadata: { operationId },
+          retentionDays,
+          legalHold,
+          occurredAt: now,
+        })
+      : undefined
     const items: TenantTransactionItem[] = [
       {
         Put: {
           TableName: this.tableName,
           Item: createStateItem(workspaceId, `${OPERATION_RECORD_PREFIX}${operationId}`, 'operation', operation),
+          ConditionExpression: 'attribute_not_exists(recordKey)',
+        },
+      },
+      {
+        Put: {
+          TableName: this.tableName,
+          Item: createStateItem(
+            workspaceId,
+            createOperationHistoryRecordKey(operation),
+            'operation-history',
+            operation,
+          ),
           ConditionExpression: 'attribute_not_exists(recordKey)',
         },
       },
@@ -1351,7 +1537,30 @@ export class DynamoDbTenantAdministrationClient implements
           },
         },
       },
+      closingProfile
+        ? {
+            Put: {
+              TableName: this.tableName,
+              Item: createStateItem(
+                workspaceId,
+                PROFILE_RECORD_KEY,
+                'profile',
+                closingProfile,
+              ),
+              ConditionExpression: 'revision = :expectedProfileRevision',
+              ExpressionAttributeValues: {
+                ':expectedProfileRevision': profileRevision,
+              },
+            },
+          }
+        : createRevisionConditionCheck(
+            this.tableName,
+            workspaceId,
+            PROFILE_RECORD_KEY,
+            profileRevision,
+          ),
       ...(auditPut ? [auditPut] : []),
+      ...(profileAuditPut ? [profileAuditPut] : []),
     ]
     try {
       await this.documentClient.send(new TransactWriteCommand({
@@ -1391,7 +1600,19 @@ export class DynamoDbTenantAdministrationClient implements
   ): Promise<TenantOperation> {
     const current = await this.getOperation(workspaceId, operationId)
     if (options.acceptReplay?.(current)) return current
-    const governance = await this.readRecord(workspaceId, GOVERNANCE_RECORD_KEY, readTenantGovernance)
+    const [governance, profile] = await Promise.all([
+      this.readRecord(workspaceId, GOVERNANCE_RECORD_KEY, readTenantGovernance),
+      this.readRecord(workspaceId, PROFILE_RECORD_KEY, readTenantProfile),
+    ])
+    if (current.kind === 'closure') {
+      if (profile.status !== 'closing') {
+        throw tenantAdministrationCorrupt(
+          'Tenant closure operation does not match profile lifecycle state.',
+        )
+      }
+    } else {
+      assertTenantActive(profile)
+    }
     if (
       options.requireInactiveLegalHold &&
       current.kind === 'closure' &&
@@ -1408,20 +1629,76 @@ export class DynamoDbTenantAdministrationClient implements
       ...transitioned,
       updatedBy: actorMemberKey,
     }
-    const items: TenantTransactionItem[] = [{
-      Put: {
-        TableName: this.tableName,
-        Item: createStateItem(workspaceId, `${OPERATION_RECORD_PREFIX}${operationId}`, 'operation', operation),
-        ConditionExpression: 'revision = :expectedRevision',
-        ExpressionAttributeValues: { ':expectedRevision': current.revision },
+    const closedProfile: TenantProfile | undefined = options.closeTenant &&
+        operation.status === 'verified'
+      ? {
+          ...profile,
+          status: 'closed',
+          closedAt: operation.updatedAt,
+          closedByOperationId: operation.operationId,
+          revision: profile.revision + 1,
+          updatedAt: operation.updatedAt,
+        }
+      : undefined
+    const reopenedProfile: TenantProfile | undefined =
+      current.kind === 'closure' && operation.status === 'failed'
+        ? {
+            ...profile,
+            status: 'active',
+            revision: profile.revision + 1,
+            updatedAt: operation.updatedAt,
+          }
+        : undefined
+    const transitionedProfile = closedProfile ?? reopenedProfile
+    const items: TenantTransactionItem[] = [
+      {
+        Put: {
+          TableName: this.tableName,
+          Item: createStateItem(workspaceId, `${OPERATION_RECORD_PREFIX}${operationId}`, 'operation', operation),
+          ConditionExpression: 'revision = :expectedRevision',
+          ExpressionAttributeValues: { ':expectedRevision': current.revision },
+        },
       },
-    }]
+      {
+        Put: {
+          TableName: this.tableName,
+          Item: createStateItem(
+            workspaceId,
+            createOperationHistoryRecordKey(operation),
+            'operation-history',
+            operation,
+          ),
+          ConditionExpression: 'revision = :expectedRevision',
+          ExpressionAttributeValues: { ':expectedRevision': current.revision },
+        },
+      },
+    ]
     items.push(createRevisionConditionCheck(
       this.tableName,
       workspaceId,
       GOVERNANCE_RECORD_KEY,
       governance.revision,
     ))
+    items.push(transitionedProfile
+      ? {
+          Put: {
+            TableName: this.tableName,
+            Item: createStateItem(
+              workspaceId,
+              PROFILE_RECORD_KEY,
+              'profile',
+              transitionedProfile,
+            ),
+            ConditionExpression: 'revision = :expectedRevision',
+            ExpressionAttributeValues: { ':expectedRevision': profile.revision },
+          },
+        }
+      : createRevisionConditionCheck(
+          this.tableName,
+          workspaceId,
+          PROFILE_RECORD_KEY,
+          profile.revision,
+        ))
     if (!doesTenantOperationOwnActiveLock(operation)) {
       items.push({
         Delete: {
@@ -1457,6 +1734,27 @@ export class DynamoDbTenantAdministrationClient implements
       occurredAt: operation.updatedAt,
     })
     if (auditPut) items.push(auditPut)
+    if (transitionedProfile) {
+      const profileAction = closedProfile ? 'closed' : 'reopened'
+      const profileAuditPut = this.createAuditPut({
+        workspaceId,
+        actorMemberKey,
+        eventType: `tenant.profile.${profileAction}`,
+        entityId: workspaceId,
+        action: profileAction,
+        path: `/internal/tenant/operations/${operation.operationId}`,
+        requestMethod: 'INTERNAL',
+        idempotencyKey:
+          `tenant-profile-${profileAction}:${workspaceId}:${operation.operationId}:${transitionedProfile.revision}`,
+        before: profile,
+        after: transitionedProfile,
+        metadata: { operationId: operation.operationId },
+        retentionDays: governance.auditRetentionDays,
+        legalHold: governance.legalHold,
+        occurredAt: operation.updatedAt,
+      })
+      if (profileAuditPut) items.push(profileAuditPut)
+    }
     try {
       await this.documentClient.send(new TransactWriteCommand({ TransactItems: items }))
     } catch (error) {
@@ -1622,6 +1920,7 @@ export class DynamoDbTenantAdministrationClient implements
     expectedRevision: number,
     audit?: TenantAdministrationAuditEvent,
     governanceRevision?: number,
+    profileRevision?: number,
   ): Promise<void> {
     const auditPut = audit ? this.createAuditPut(audit) : undefined
     const items: TenantTransactionItem[] = [{
@@ -1638,6 +1937,14 @@ export class DynamoDbTenantAdministrationClient implements
         workspaceId,
         GOVERNANCE_RECORD_KEY,
         governanceRevision,
+      ))
+    }
+    if (profileRevision !== undefined) {
+      items.push(createRevisionConditionCheck(
+        this.tableName,
+        workspaceId,
+        PROFILE_RECORD_KEY,
+        profileRevision,
       ))
     }
     if (auditPut) items.push(auditPut)
@@ -1735,6 +2042,16 @@ function createBillingPeriodRecordKey(periodStart: string): string {
   return `${BILLING_PERIOD_RECORD_PREFIX}${periodStart}`
 }
 
+/**
+ * Creates a newest-first sortable history key for one tenant operation.
+ *
+ * @param operation - Durable operation whose request timestamp owns the key.
+ * @returns Tenant-partition operation-history sort key.
+ */
+function createOperationHistoryRecordKey(operation: TenantOperation): string {
+  return `${OPERATION_HISTORY_RECORD_PREFIX}${operation.requestedAt}#${operation.operationId}`
+}
+
 function createStateItem<T extends object>(
   workspaceId: string,
   recordKey: string,
@@ -1806,12 +2123,36 @@ function readTenantProfile(value: unknown): TenantProfile {
   const ownerMemberKey = readRequiredString(value.ownerMemberKey)
   const createdAt = readRequiredString(value.createdAt)
   const updatedAt = readRequiredString(value.updatedAt)
+  const status = value.status === undefined
+    ? 'active'
+    : value.status === 'active' ||
+        value.status === 'closing' ||
+        value.status === 'closed'
+      ? value.status
+      : undefined
+  if (!status) throw new Error('invalid tenant status')
+  const closedAt = value.closedAt === undefined
+    ? undefined
+    : readRequiredTimestamp(value.closedAt)
+  const closedByOperationId = value.closedByOperationId === undefined
+    ? undefined
+    : readRequiredString(value.closedByOperationId)
+  if (
+    status === 'closed'
+      ? !closedAt || !closedByOperationId
+      : closedAt !== undefined || closedByOperationId !== undefined
+  ) {
+    throw new Error('invalid tenant closure state')
+  }
   return {
     workspaceId,
     ownerMemberKey,
     region: validateTenantRegion(value.region),
     locale: validateTenantLocale(value.locale),
     defaultPolicy: policy,
+    status,
+    ...(closedAt ? { closedAt } : {}),
+    ...(closedByOperationId ? { closedByOperationId } : {}),
     revision: readRevision(value.revision),
     createdAt,
     updatedAt,
@@ -1847,8 +2188,6 @@ function readTenantDefaultPolicy(value: unknown): TenantDefaultPolicy {
     : undefined
   if (defaultMemberRole === undefined) throw new Error('invalid member role')
   return {
-    allowExternalCollaborators: validateTenantBoolean(value.allowExternalCollaborators, 'InvalidTenantPolicy'),
-    requireMfa: validateTenantBoolean(value.requireMfa, 'InvalidTenantPolicy'),
     defaultMemberRole,
   }
 }
@@ -1981,23 +2320,98 @@ function readTenantOperation(value: unknown): TenantOperation {
     ? undefined
     : isTenantStep(value.currentStep) ? value.currentStep : undefined
   if (value.currentStep !== undefined && currentStep === undefined) throw new Error('invalid current step')
-  return {
+  const failureCode = typeof value.failureCode === 'string'
+    ? value.failureCode.trim()
+    : undefined
+  const lastEvidenceReference = typeof value.lastEvidenceReference === 'string'
+    ? value.lastEvidenceReference.trim()
+    : undefined
+  const operation: TenantOperation = {
     operationId: readRequiredString(value.operationId),
     workspaceId: readRequiredString(value.workspaceId),
     kind,
     status,
     requestedBy: readRequiredString(value.requestedBy),
-    requestedAt: readRequiredString(value.requestedAt),
-    updatedAt: readRequiredString(value.updatedAt),
+    requestedAt: readRequiredTimestamp(value.requestedAt),
+    updatedAt: readRequiredTimestamp(value.updatedAt),
     updatedBy: readRequiredString(value.updatedBy),
     ...(currentStep ? { currentStep } : {}),
     completedSteps,
-    ...(typeof value.lastEvidenceReference === 'string' && value.lastEvidenceReference.trim()
-      ? { lastEvidenceReference: value.lastEvidenceReference }
+    ...(lastEvidenceReference
+      ? { lastEvidenceReference }
       : {}),
-    ...(typeof value.failureCode === 'string' ? { failureCode: value.failureCode } : {}),
+    ...(failureCode ? { failureCode } : {}),
     ...(value.exportFormat === 'jsonl' || value.exportFormat === 'csv' ? { exportFormat: value.exportFormat } : {}),
     revision: readRevision(value.revision),
+  }
+  assertTenantOperationState(operation)
+  return operation
+}
+
+/**
+ * Rejects durable lifecycle states that do not match their workflow prefix.
+ *
+ * @param operation - Parsed tenant operation candidate.
+ */
+function assertTenantOperationState(operation: TenantOperation): void {
+  const steps = operation.kind === 'export'
+    ? TENANT_EXPORT_STEPS
+    : TENANT_CLOSURE_STEPS
+  if (
+    operation.completedSteps.length > steps.length ||
+    operation.completedSteps.some((step, index) => step !== steps[index])
+  ) {
+    throw new Error('invalid completed operation prefix')
+  }
+  const expectedCurrentStep = steps[operation.completedSteps.length] ?? steps.at(-1)
+  if (operation.status === 'requested') {
+    if (
+      operation.currentStep !== undefined ||
+      operation.completedSteps.length !== 0 ||
+      operation.lastEvidenceReference !== undefined
+    ) {
+      throw new Error('invalid requested operation state')
+    }
+  } else if (
+    operation.status === 'running' ||
+    operation.status === 'paused' ||
+    operation.status === 'failed'
+  ) {
+    if (operation.currentStep !== expectedCurrentStep) {
+      throw new Error('invalid active operation step')
+    }
+  } else if (
+    operation.completedSteps.length !== steps.length ||
+    operation.currentStep !== steps.at(-1)
+  ) {
+    throw new Error('invalid completed operation state')
+  }
+  if (
+    (operation.completedSteps.length > 0) !==
+      (operation.lastEvidenceReference !== undefined) ||
+    (
+      operation.lastEvidenceReference !== undefined &&
+      !/^evidence:sha256:[a-f0-9]{64}$/u.test(operation.lastEvidenceReference)
+    )
+  ) {
+    throw new Error('invalid operation evidence state')
+  }
+  if (
+    operation.status === 'failed'
+      ? !operation.failureCode || !/^[A-Z][A-Z0-9_]{2,63}$/u.test(operation.failureCode)
+      : operation.failureCode !== undefined
+  ) {
+    throw new Error('invalid operation failure state')
+  }
+  if (
+    operation.kind === 'export'
+      ? operation.exportFormat !== 'jsonl' && operation.exportFormat !== 'csv'
+      : operation.exportFormat !== undefined
+  ) {
+    throw new Error('invalid operation export format')
+  }
+  if (operation.status === 'verified' && operation.kind !== 'closure') {
+    throw new Error('invalid verified operation kind')
   }
 }
 
@@ -2322,6 +2736,13 @@ function readRequiredString(value: unknown): string {
   throw new Error('required string missing')
 }
 
+/** Reads one non-empty ISO timestamp from durable state. */
+function readRequiredTimestamp(value: unknown): string {
+  const timestamp = readRequiredString(value)
+  if (Number.isNaN(Date.parse(timestamp))) throw new Error('timestamp invalid')
+  return timestamp
+}
+
 function readRevision(value: unknown): number {
   if (typeof value === 'number' && Number.isInteger(value) && value >= 0) return value
   throw new Error('revision missing')
@@ -2331,11 +2752,34 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/**
+ * Distinguishes optimistic-lock failures from retryable DynamoDB cancellations.
+ *
+ * @param error - Unknown persistence failure returned by DynamoDB.
+ * @returns Whether every reported transaction failure is conditional.
+ */
 function isConditionalFailure(error: unknown): boolean {
-  return error instanceof Error && (
-    error.name === 'ConditionalCheckFailedException' ||
-    error.name === 'TransactionCanceledException'
-  )
+  if (!isRecord(error)) return false
+  const errorName = typeof error.name === 'string'
+    ? error.name
+    : typeof error.code === 'string'
+      ? error.code
+      : undefined
+  if (errorName === 'ConditionalCheckFailedException') return true
+  if (errorName !== 'TransactionCanceledException') return false
+
+  const reasons = error.CancellationReasons
+  if (!Array.isArray(reasons) || reasons.length === 0) return false
+  let hasConditionalFailure = false
+  for (const reason of reasons) {
+    if (!isRecord(reason)) return false
+    if (reason.Code === 'ConditionalCheckFailed') {
+      hasConditionalFailure = true
+      continue
+    }
+    if (reason.Code !== 'None') return false
+  }
+  return hasConditionalFailure
 }
 
 function revisionConflict(code: string): TenantAdministrationError {

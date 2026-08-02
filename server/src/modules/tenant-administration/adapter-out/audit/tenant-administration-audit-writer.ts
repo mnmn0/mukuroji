@@ -5,6 +5,7 @@ import {
   createAuditTransactPut,
   createMutationAuditContext,
   createWorkspaceMemberAuditEntityId,
+  type AuditTransactWriteItem,
 } from '../../../audit'
 import type { TenantAdministrationAuditWriter } from '../../application/ports/tenant-administration-port'
 import { TenantAdministrationError } from '../../domain/tenant-administration'
@@ -27,7 +28,7 @@ const TENANT_AUDIT_REDACT_FIELDS = [
 export function createDynamoDbTenantAdministrationAuditWriter(
   auditTableName: string,
   auditPseudonymKey?: string,
-): TenantAdministrationAuditWriter {
+): TenantAdministrationAuditWriter<AuditTransactWriteItem> {
   const normalizedTableName = auditTableName.trim()
   if (!normalizedTableName) {
     throw new TenantAdministrationError(

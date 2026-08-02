@@ -28,11 +28,7 @@ export type TenantFeature =
  * Tenant defaults applied when new members or resources are created.
  */
 export type TenantDefaultPolicy = {
-  /** Whether new external collaborators are allowed by default. */
-  allowExternalCollaborators: boolean
-  /** Whether new members must complete MFA by default. */
-  requireMfa: boolean
-  /** The default Workspace role assigned to an accepted invitation. */
+  /** The Workspace role used when an invitation omits an explicit role. */
   defaultMemberRole: 'member' | 'guest'
 }
 
@@ -50,6 +46,12 @@ export type TenantProfile = {
   locale: TenantLocale
   /** Defaults applied to newly created tenant resources. */
   defaultPolicy: TenantDefaultPolicy
+  /** Whether normal tenant access remains enabled. */
+  status: 'active' | 'closing' | 'closed'
+  /** Timestamp at which a verified closure sealed the tenant. */
+  closedAt?: string
+  /** Closure operation that sealed the tenant. */
+  closedByOperationId?: string
   /** Optimistic concurrency revision for profile changes. */
   revision: number
   /** Profile creation timestamp. */
@@ -282,6 +284,8 @@ export type TenantAdministrationSnapshot = {
   retentionReconciliation?: TenantRetentionReconciliation
   /** Active operation or completed closure awaiting administrator verification. */
   activeOperation?: TenantOperation
+  /** Newest lifecycle operations retained for progress and result inspection. */
+  recentOperations: TenantOperation[]
 }
 
 /**

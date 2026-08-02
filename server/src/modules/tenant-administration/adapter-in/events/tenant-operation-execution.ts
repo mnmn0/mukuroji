@@ -52,7 +52,14 @@ export async function processTenantOperationExecutionBatch(
         )
       }
     } catch (error) {
-      console.error('Tenant operation execution failed:', error)
+      console.error('Tenant operation execution failed.', {
+        code: isRecord(error) && typeof error.code === 'string'
+          ? error.code
+          : 'TenantOperationExecutionFailed',
+        name: isRecord(error) && typeof error.name === 'string'
+          ? error.name
+          : 'Error',
+      })
       const sequenceNumber = record.dynamodb?.SequenceNumber
       if (!sequenceNumber) throw error
       return { batchItemFailures: [{ itemIdentifier: sequenceNumber }] }

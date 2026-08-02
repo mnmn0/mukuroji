@@ -1728,6 +1728,16 @@ routeApp.post('/api/auth/sso/exchange', async (c) => {
 registerDocumentApiRoutes(routeApp, {
   getClient: () => workItemDependencies.documents,
   authenticate: createDocumentApiPrincipal,
+  assertPublicShareEntitled: async (workspaceId) => {
+    try {
+      await enforceTenantFeatureForWorkspace(workspaceId, 'documents', 'GET')
+    } catch (error) {
+      if (error instanceof WorkspaceAccessError) {
+        throw new DocumentError(error.status, error.code, error.message)
+      }
+      throw error
+    }
+  },
   getActiveMember: (workspaceId, memberKey) =>
     workspaceDependencies.workspaceAccess.getActiveMember(workspaceId, memberKey),
   validateRelationTargets: validateDocumentRelationTargets,
@@ -2107,7 +2117,9 @@ routeApp.post('/api/workspace/invitations', async (c) => {
     requireWorkspaceAdministration(principal)
     const body = await readJson<CreateWorkspaceInvitationRequestBody>(c.req)
     const email = readWorkspaceEmail(body?.email)
-    const role = readWorkspaceRole(body?.role)
+    const role = body?.role === undefined
+      ? await resolveTenantDefaultInvitationRole(principal)
+      : readWorkspaceRole(body.role)
     const name = readOptionalWorkspaceName(body?.name)
     const enterpriseSnapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
     requireEnterpriseExternalAccessAllowed(enterpriseSnapshot, email, role)
@@ -11447,6 +11459,46 @@ function readOptionalWorkspaceName(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
 
+/**
+ * Resolves the tenant-owned invitation default from authoritative Workspace state.
+ *
+ * @param principal - Current active Workspace administrator.
+ * @returns The member or guest role configured by tenant administration.
+ */
+async function resolveTenantDefaultInvitationRole(
+  principal: WorkspacePrincipal,
+): Promise<'member' | 'guest'> {
+  try {
+    const activeMembers = await workspaceDependencies.workspaceAccess.listActiveMembers(
+      principal.directoryId,
+    )
+    const owner = activeMembers.find((member) => member.role === 'owner')
+    if (!owner) {
+      throw new TenantAdministrationError(
+        503,
+        'TenantOwnerUnavailable',
+        'The Workspace owner required for tenant initialization is unavailable.',
+      )
+    }
+    const snapshot = await workspaceDependencies.tenantAdministration.ensureSnapshot(
+      principal.directoryId,
+      owner.memberKey,
+      activeMembers.length,
+    )
+    return snapshot.profile.defaultPolicy.defaultMemberRole
+  } catch (error) {
+    if (error instanceof TenantAdministrationError) {
+      throw new WorkspaceAccessError(
+        error.status,
+        error.code,
+        error.message,
+        { cause: error },
+      )
+    }
+    throw error
+  }
+}
+
 function readWorkspaceRole(value: unknown): WorkspaceRole {
   if (value === 'owner' || value === 'admin' || value === 'member' || value === 'guest') {
     return value
@@ -11786,6 +11838,9 @@ function resolveTenantFeatureForPath(path: string): TenantFeature | undefined {
   return undefined
 }
 
+/** Maximum body retained while binding a metering receipt to one API request. */
+const TENANT_METERING_BODY_MAX_BYTES = 10 * 1024 * 1024
+
 /**
  * Executes one feature check or mutation-unit reservation.
  *
@@ -11871,9 +11926,43 @@ async function createTenantUsageIdempotencyScope(
       'Tenant usage idempotency is unavailable for this request.',
     )
   }
-  const body = new Uint8Array(
-    await context.req.raw.clone().arrayBuffer(),
-  )
+  const contentLength = context.req.header('Content-Length')
+  if (
+    contentLength !== undefined &&
+    /^\d+$/u.test(contentLength) &&
+    Number(contentLength) > TENANT_METERING_BODY_MAX_BYTES
+  ) {
+    throw new TenantAdministrationError(
+      413,
+      'TenantMeteringBodyTooLarge',
+      'The metered request body is too large.',
+    )
+  }
+  const requestBodyDigest = createHash('sha256')
+    .update(context.req.header('Content-Type') ?? '')
+    .update('\0')
+  const bodyReader = context.req.raw.clone().body?.getReader()
+  let bodyBytes = 0
+  if (bodyReader) {
+    try {
+      while (true) {
+        const chunk = await bodyReader.read()
+        if (chunk.done) break
+        bodyBytes += chunk.value.byteLength
+        if (bodyBytes > TENANT_METERING_BODY_MAX_BYTES) {
+          await bodyReader.cancel().catch(() => undefined)
+          throw new TenantAdministrationError(
+            413,
+            'TenantMeteringBodyTooLarge',
+            'The metered request body is too large.',
+          )
+        }
+        requestBodyDigest.update(chunk.value)
+      }
+    } finally {
+      bodyReader.releaseLock()
+    }
+  }
   const url = new URL(context.req.url)
   const scopeDigest = createHash('sha256')
     .update(context.req.method.toUpperCase())
@@ -11886,11 +11975,7 @@ async function createTenantUsageIdempotencyScope(
     .update('\0')
     .update(normalized)
     .digest('hex')
-  const requestDigest = createHash('sha256')
-    .update(context.req.header('Content-Type') ?? '')
-    .update('\0')
-    .update(body)
-    .digest('hex')
+  const requestDigest = requestBodyDigest.digest('hex')
   return `tenant-meter:v1:${scopeDigest}:${requestDigest}`
 }
 
@@ -11962,7 +12047,9 @@ async function authenticateWorkspacePrincipal(
   options: WorkspaceAuthenticationOptions = {},
 ): Promise<WorkspacePrincipal> {
   if (accessToken.startsWith('msa_')) {
-    return authenticateEnterpriseServiceAccount(accessToken, context)
+    const principal = await authenticateEnterpriseServiceAccount(accessToken, context)
+    await enforceActiveTenantForRequest(principal.directoryId, context)
+    return principal
   }
   validateConfiguredCognitoAccessToken(accessToken)
   const principal = toProjectPrincipal(user ?? await authenticationDependencies.cognito.getUser(accessToken), accessToken)
@@ -12231,6 +12318,7 @@ async function authenticateWorkspacePrincipal(
     }
   }
 
+  await enforceActiveTenantForRequest(principal.directoryId, context)
   await enforceTenantFeatureForRequest(principal.directoryId, context)
 
   return {
@@ -12259,6 +12347,29 @@ async function authenticateWorkspacePrincipal(
     workspaceMember,
     workspaceRole: workspaceMember.role,
     workspaceMemberStatus: workspaceMember.status,
+  }
+}
+
+/**
+ * Rejects normal authenticated API access after verified account closure.
+ *
+ * Tenant administration routes remain available for closure evidence and
+ * idempotent verification reads; their mutation clients enforce closed state.
+ *
+ * @param workspaceId - Canonical Workspace identifier.
+ * @param context - Current route context, when authentication is route-bound.
+ */
+async function enforceActiveTenantForRequest(
+  workspaceId: string,
+  context?: Context,
+): Promise<void> {
+  if (!context || context.req.path.startsWith('/api/tenant/')) return
+  try {
+    await workspaceDependencies.tenantEntitlementEnforcement.assertActive(
+      workspaceId,
+    )
+  } catch (error) {
+    throw toTenantEntitlementBoundaryError(error)
   }
 }
 
@@ -15558,6 +15669,7 @@ function toWorkspaceAccessErrorResponse(c: Context, error: unknown) {
   }
 
   const status = error.status === 400 ||
+    error.status === 413 ||
     error.status === 403 ||
     error.status === 404 ||
     error.status === 409 ||
@@ -15581,6 +15693,7 @@ function toTenantAdministrationErrorResponse(c: Context, error: unknown) {
     error.status === 403 ||
     error.status === 404 ||
     error.status === 409 ||
+    error.status === 413 ||
     error.status === 429 ||
     error.status === 503
     ? error.status
