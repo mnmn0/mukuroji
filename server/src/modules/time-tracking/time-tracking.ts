@@ -1187,6 +1187,7 @@ export class TimeTrackingService {
       throw new TimeTrackingError(409, 'TimeTrackingMutationInProgress', 'The same time tracking mutation is still in progress.')
     }
     const completionRequest = { ...receiptRequest, reservationId: reservation.reservationId }
+    let mutationCommitted = false
     try {
       const completion = this.idempotency.prepareIdempotencyCompletion
         ? async (response: unknown): Promise<AuditTransactWriteItem> =>
@@ -1196,12 +1197,15 @@ export class TimeTrackingService {
           })
         : undefined
       const result = await execute(completion)
+      mutationCommitted = true
       if (!completion) {
         await this.idempotency.completeIdempotency({ ...completionRequest, response: result })
       }
       return result
     } catch (error) {
-      await this.idempotency.releaseIdempotency(completionRequest).catch(() => undefined)
+      if (!mutationCommitted && canReleaseTimeTrackingIdempotencyReservation(error)) {
+        await this.idempotency.releaseIdempotency(completionRequest).catch(() => undefined)
+      }
       throw error
     }
   }
@@ -1285,6 +1289,11 @@ export class TimeTrackingService {
     })
     return createAuditEventTransactPut(this.audit.tableName, event)
   }
+}
+
+/** Returns whether a failed mutation definitely did not commit its idempotency-bound state. */
+function canReleaseTimeTrackingIdempotencyReservation(error: unknown): boolean {
+  return error instanceof TimeTrackingError && error.status < 500
 }
 
 /** In-memory repository for isolated application tests and local development. */
