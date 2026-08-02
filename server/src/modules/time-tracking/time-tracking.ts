@@ -1770,13 +1770,17 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
       : {
           ConditionExpression: 'revision = :expectedRevision',
           ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
-        }
+    }
     if (!auditPut && !idempotencyPut) {
-      await this.documentClient.send(new PutCommand({
-        TableName: this.tableName,
-        Item: item,
-        ...condition,
-      }))
+      try {
+        await this.documentClient.send(new PutCommand({
+          TableName: this.tableName,
+          Item: item,
+          ...condition,
+        }))
+      } catch (error) {
+        throw mapConditionalWriteError(error, 'TimeEstimateRevisionConflict', 'The estimate was changed by another request.')
+      }
       return
     }
     try {
