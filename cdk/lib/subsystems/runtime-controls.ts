@@ -28,6 +28,7 @@ export type RuntimeControlScope =
   | 'notification-schedule'
   | 'realtime'
   | 'request-intake-email'
+  | 'tenant-operation-execution'
   | 'webhook-delivery'
   | 'work-item-import';
 

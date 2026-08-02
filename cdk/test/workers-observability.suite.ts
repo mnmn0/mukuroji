@@ -288,6 +288,8 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
   const projectDirectoryTableLogicalId =
     template.toJSON().Outputs.ProjectDirectoryTableName?.Value?.Ref;
   const workItemsTableLogicalId = template.toJSON().Outputs.WorkItemsTableName?.Value?.Ref;
+  const tenantAdministrationTableLogicalId =
+    template.toJSON().Outputs.TenantAdministrationTableName?.Value?.Ref;
   const workspaceAccessTableLogicalId =
     template.toJSON().Outputs.WorkspaceAccessTableName?.Value?.Ref;
 
@@ -295,12 +297,14 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
   expect(typeof auditTableLogicalId).toBe('string');
   expect(typeof projectDirectoryTableLogicalId).toBe('string');
   expect(typeof workItemsTableLogicalId).toBe('string');
+  expect(typeof tenantAdministrationTableLogicalId).toBe('string');
   expect(typeof workspaceAccessTableLogicalId).toBe('string');
   if (
     typeof analyticsTableLogicalId !== 'string' ||
     typeof auditTableLogicalId !== 'string' ||
     typeof projectDirectoryTableLogicalId !== 'string' ||
     typeof workItemsTableLogicalId !== 'string' ||
+    typeof tenantAdministrationTableLogicalId !== 'string' ||
     typeof workspaceAccessTableLogicalId !== 'string'
   ) {
     throw new Error('Analytics schedule data table outputs must reference tables.');
@@ -319,6 +323,7 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
         MUKUROJI_PROJECT_DIRECTORY_TABLE: { Ref: projectDirectoryTableLogicalId },
         MUKUROJI_WORK_ITEMS_TABLE: { Ref: workItemsTableLogicalId },
         SYSTEM_ADMIN_GROUPS: { Ref: 'SystemAdminGroups' },
+        TENANT_ADMINISTRATION_TABLE_NAME: { Ref: tenantAdministrationTableLogicalId },
         WORKSPACE_ACCESS_TABLE_NAME: { Ref: workspaceAccessTableLogicalId },
       }),
     },
@@ -358,6 +363,7 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
   expect(serializedSchedulePolicies).toContain(auditTableLogicalId);
   expect(serializedSchedulePolicies).toContain(projectDirectoryTableLogicalId);
   expect(serializedSchedulePolicies).toContain(workItemsTableLogicalId);
+  expect(serializedSchedulePolicies).toContain(tenantAdministrationTableLogicalId);
   expect(serializedSchedulePolicies).toContain(workspaceAccessTableLogicalId);
   expect(serializedSchedulePolicies).toContain('CognitoUserPoolId');
   expect(serializedSchedulePolicies).toContain('cognito-idp:AdminListGroupsForUser');
@@ -398,6 +404,9 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
     new Set(['dynamodb:Query']),
   );
   expect(new Set(actionsForResource(workspaceAccessTableLogicalId))).toEqual(
+    new Set(['dynamodb:GetItem']),
+  );
+  expect(new Set(actionsForResource(tenantAdministrationTableLogicalId))).toEqual(
     new Set(['dynamodb:GetItem']),
   );
 
@@ -1911,7 +1920,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     },
     MaximumRetryAttempts: 2,
   });
-  template.resourceCountIs('AWS::SQS::Queue', 16);
+  template.resourceCountIs('AWS::SQS::Queue', 17);
   template.hasResourceProperties('AWS::SQS::Queue', {
     MessageRetentionPeriod: 1209600,
     SqsManagedSseEnabled: true,
@@ -1968,7 +1977,7 @@ test('application Lambdas emit active X-Ray traces and critical DLQs survive rep
 
   template.resourcePropertiesCountIs('AWS::Lambda::Function', {
     TracingConfig: { Mode: 'Active' },
-  }, 20);
+  }, 21);
 
   for (const logicalIdPrefix of [
     'CollaborationProjectionDlq',
@@ -1978,6 +1987,7 @@ test('application Lambdas emit active X-Ray traces and critical DLQs survive rep
     'NotificationScheduleDlq',
     'EnterpriseScimGroupJobDlq',
     'EnterpriseIdentityMaintenanceDlq',
+    'TenantOperationDlq',
   ]) {
     const queueEntry = Object.entries(queues).find(([logicalId]) =>
       logicalId.startsWith(logicalIdPrefix)
@@ -1995,6 +2005,44 @@ test('application Lambdas emit active X-Ray traces and critical DLQs survive rep
       }),
     }));
   }
+});
+
+test('tenant retention worker can query and reconcile only tenant and audit stores', () => {
+  const resources = synthesizedTemplate.toJSON().Resources;
+  const policy = Object.entries(resources).find(([logicalId, resource]) =>
+    logicalId.startsWith('TenantOperationFunctionServiceRoleDefaultPolicy') &&
+    (resource as { Type?: string }).Type === 'AWS::IAM::Policy'
+  )?.[1] as {
+    Properties?: { PolicyDocument?: { Statement?: Array<Record<string, unknown>> } };
+  } | undefined;
+  const statements = policy?.Properties?.PolicyDocument?.Statement ?? [];
+  const auditStatement = statements.find((statement) =>
+    JSON.stringify(statement.Resource).includes('AuditEventsTable0723963E')
+  );
+  const tenantStatement = statements.find((statement) =>
+    JSON.stringify(statement.Resource).includes('TenantAdministrationTable621D59EB')
+  );
+
+  expect(auditStatement).toEqual(expect.objectContaining({
+    Effect: 'Allow',
+    Action: expect.arrayContaining([
+      'dynamodb:GetItem',
+      'dynamodb:Query',
+      'dynamodb:UpdateItem',
+      'dynamodb:PutItem',
+    ]),
+  }));
+  expect(tenantStatement).toEqual(expect.objectContaining({
+    Effect: 'Allow',
+    Action: expect.arrayContaining([
+      'dynamodb:GetItem',
+      'dynamodb:Query',
+      'dynamodb:PutItem',
+      'dynamodb:DeleteItem',
+    ]),
+  }));
+  expect(JSON.stringify(policy)).not.toContain('secretsmanager:');
+  expect(JSON.stringify(policy)).not.toContain('s3:');
 });
 
 test('request email ingestion is an asynchronous narrow-IAM Lambda with a monitored DLQ', () => {
@@ -2125,6 +2173,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         MUKUROJI_SYSTEM_ADMIN_GROUPS: { Ref: 'SystemAdminGroups' },
         PROJECT_DIRECTORY_TABLE_NAME: { Ref: 'ProjectDirectoryTable9ED01C01' },
         SYSTEM_ADMIN_GROUPS: { Ref: 'SystemAdminGroups' },
+        TENANT_ADMINISTRATION_TABLE_NAME: { Ref: 'TenantAdministrationTable621D59EB' },
         WORK_ITEM_CONFIGURATION_TABLE_NAME: { Ref: 'WorkItemConfigurationTable35E94558' },
         WORK_ITEMS_TABLE_NAME: { Ref: 'TeamIssuesTable189D851D' },
         WORKSPACE_SEARCH_TABLE_NAME: { Ref: 'WorkspaceSearchTable2575AD6B' },
@@ -2149,6 +2198,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         MUKUROJI_SYSTEM_ADMIN_GROUPS: { Ref: 'SystemAdminGroups' },
         PROJECT_DIRECTORY_TABLE_NAME: { Ref: 'ProjectDirectoryTable9ED01C01' },
         SYSTEM_ADMIN_GROUPS: { Ref: 'SystemAdminGroups' },
+        TENANT_ADMINISTRATION_TABLE_NAME: { Ref: 'TenantAdministrationTable621D59EB' },
         WORK_ITEM_CONFIGURATION_TABLE_NAME: { Ref: 'WorkItemConfigurationTable35E94558' },
         WORK_ITEMS_TABLE_NAME: { Ref: 'TeamIssuesTable189D851D' },
         WORKSPACE_SEARCH_TABLE_NAME: { Ref: 'WorkspaceSearchTable2575AD6B' },
@@ -2214,6 +2264,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
     expect(serialized).toContain('FileProofingTable81DA272F');
     expect(serialized).toContain('ProjectDirectoryTable9ED01C01');
     expect(serialized).toContain('TeamIssuesTable189D851D');
+    expect(serialized).toContain('TenantAdministrationTable621D59EB');
     expect(serialized).toContain('WorkspaceSearchTable2575AD6B');
     const statements = (policy as {
       Properties?: { PolicyDocument?: { Statement?: Array<Record<string, unknown>> } };
@@ -2290,6 +2341,18 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         'dynamodb:GetItem',
         'dynamodb:Query',
       ]),
+    }));
+    const tenantEntitlementStatement = statements.find((statement) => {
+      const actions = Array.isArray(statement.Action)
+        ? statement.Action
+        : [statement.Action];
+      return actions.includes('dynamodb:GetItem') &&
+        JSON.stringify(statement.Resource)
+          .includes('TenantAdministrationTable621D59EB');
+    });
+    expect(tenantEntitlementStatement).toEqual(expect.objectContaining({
+      Effect: 'Allow',
+      Action: 'dynamodb:GetItem',
     }));
   }
   for (const policyPrefix of [

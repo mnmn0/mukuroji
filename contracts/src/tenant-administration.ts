@@ -1,7 +1,7 @@
 /**
  * Tenant administration contract schema version.
  */
-export const TENANT_ADMINISTRATION_SCHEMA_VERSION = 1 as const
+export const TENANT_ADMINISTRATION_SCHEMA_VERSION = 2 as const
 
 /**
  * Locales supported by tenant-owned defaults.
@@ -103,6 +103,26 @@ export type TenantUsage = {
 }
 
 /**
+ * Invoice-ready tenant usage aggregate retained for one UTC billing period.
+ */
+export type TenantBillingPeriod = {
+  /** Canonical Workspace identifier used as the tenant identifier. */
+  workspaceId: string
+  /** Inclusive start of the UTC billing period. */
+  periodStart: string
+  /** Exclusive end of the UTC billing period. */
+  periodEnd: string
+  /** Metered units accumulated during the period. */
+  meteredUnits: number
+  /** Highest number of concurrently active seats observed during the period. */
+  activeSeatHighWaterMark: number
+  /** Optimistic concurrency revision for billing aggregation. */
+  revision: number
+  /** Billing aggregate last-update timestamp. */
+  updatedAt: string
+}
+
+/**
  * Data governance and cryptographic policy for a tenant.
  */
 export type TenantGovernancePolicy = {
@@ -121,6 +141,46 @@ export type TenantGovernancePolicy = {
   /** Governance policy last-update timestamp. */
   updatedAt: string
   /** Stable member key that performed the last update. */
+  updatedBy: string
+}
+
+/**
+ * Governance controls enforced by the deployed tenant data plane.
+ */
+export type TenantGovernanceEnforcement = {
+  /** AWS region in which the deployed tenant data plane is hosted. */
+  dataResidency: string
+  /** Encryption-key ownership implemented by the deployed data stores. */
+  encryptionKeyPolicy: 'aws-managed' | 'customer-managed'
+}
+
+/** Durable state of audit-retention reconciliation. */
+export type TenantRetentionReconciliationStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+
+/** Progress of tenant audit TTL reconciliation after a policy change. */
+export type TenantRetentionReconciliation = {
+  /** Canonical Workspace identifier. */
+  workspaceId: string
+  /** Governance revision whose retention policy is being applied. */
+  governanceRevision: number
+  /** Durable reconciliation state. */
+  status: TenantRetentionReconciliationStatus
+  /** Audit retention period being applied. */
+  retentionDays: number
+  /** Whether TTL is removed for legal hold. */
+  legalHold: boolean
+  /** Number of audit events processed across completed pages. */
+  processedEvents: number
+  /** Last processed event key used to resume a bounded page. */
+  cursorEventId?: string
+  /** Optimistic concurrency revision for the reconciliation job. */
+  revision: number
+  /** Job last-update timestamp. */
+  updatedAt: string
+  /** Stable service or member key that requested the policy change. */
   updatedBy: string
 }
 
@@ -212,8 +272,14 @@ export type TenantAdministrationSnapshot = {
   entitlement: TenantEntitlement
   /** Current-period usage counters. */
   usage: TenantUsage
+  /** Recent invoice-ready usage and seat aggregates, newest first. */
+  billingPeriods: TenantBillingPeriod[]
   /** Retention, residency, and encryption policy. */
   governance: TenantGovernancePolicy
+  /** Residency and key controls enforced by the deployed data plane. */
+  governanceEnforcement: TenantGovernanceEnforcement
+  /** Audit TTL reconciliation progress after a retention or legal-hold change. */
+  retentionReconciliation?: TenantRetentionReconciliation
   /** Active export or closure operation, if any. */
   activeOperation?: TenantOperation
 }

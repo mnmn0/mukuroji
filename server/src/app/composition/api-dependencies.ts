@@ -26,7 +26,6 @@ import {
 } from '../../infrastructure/aws/dynamodb-client'
 import { createSecretsManagerClient } from '../../infrastructure/aws/secrets-manager-client'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
-import { loadServerDynamoDbResourceConfig } from '../../infrastructure/config/server-resource-config'
 import {
   recordApiAccess,
   recordApiError,
@@ -48,11 +47,6 @@ import {
   InMemoryAnalyticsRepository,
 } from '../../modules/analytics/analytics'
 import {
-  calculateAuditExpiresAt,
-  createAuditFieldDiff,
-  createAuditEvent,
-  createMutationAuditContext,
-  createAuditTransactPut,
   DynamoDbAuditEventsClient,
   getConfiguredAuditRetentionDays,
   getConfiguredAuditTableName,
@@ -102,10 +96,14 @@ import {
   type WorkItemImportSourceStore,
 } from '../../modules/work-items'
 import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
-import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'
 import {
-  DynamoDbTenantAdministrationClient,
-  type TenantAdministrationAuditWriter,
+  DynamoDbWorkspaceAccessClient,
+  WorkspaceAccessError,
+  type WorkspaceSeatMeter,
+} from '../../modules/workspace-access/workspace-access'
+import {
+  TenantAdministrationError,
+  type TenantEntitlementEnforcement,
 } from '../../modules/tenant-administration'
 import { DynamoDbWorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
 import { createProductionQueueWebhookDeliveryMessage } from './webhook'
@@ -115,6 +113,7 @@ import {
   TimeTrackingService,
   type TimeTrackingIdempotencyPort,
 } from '../../modules/time-tracking'
+import { createProductionTenantAdministrationClient } from './tenant-administration'
 
 /**
  * Projects shared idempotency reservation and transaction-completion capabilities
@@ -403,62 +402,81 @@ export function createProductionAuthenticationDependencies(): AuthenticationDepe
  */
 export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
   const enterpriseIdentityClient = createEnterpriseIdentityClient()
-  const resourceConfig = loadServerDynamoDbResourceConfig()
-  const dynamoDbClient = createDynamoDbClient()
+  const tenantAdministration = createProductionTenantAdministrationClient()
+  let workspaceAccessClient: DynamoDbWorkspaceAccessClient | undefined
+  const seatMeter: WorkspaceSeatMeter = {
+    /** Initializes missing tenant state before joining seat writes to membership transactions. */
+    async prepareSeatMutation(input) {
+      try {
+        return await tenantAdministration.prepareSeatMutation(input)
+      } catch (error) {
+        if (
+          error instanceof TenantAdministrationError &&
+          error.code === 'TenantAdministrationNotInitialized'
+        ) {
+          if (!workspaceAccessClient) {
+            throw new WorkspaceAccessError(
+              503,
+              'TenantSeatMeterUnavailable',
+              'Tenant seat metering is unavailable.',
+              { cause: error },
+            )
+          }
+          const activeMembers = await workspaceAccessClient.listActiveMembers(input.workspaceId)
+          const owner = activeMembers.find((member) => member.role === 'owner')
+          if (!owner) {
+            throw new WorkspaceAccessError(
+              503,
+              'TenantOwnerUnavailable',
+              'The Workspace owner required for tenant initialization is unavailable.',
+            )
+          }
+          await tenantAdministration.ensureSnapshot(
+            input.workspaceId,
+            owner.memberKey,
+            activeMembers.length,
+          )
+          try {
+            return await tenantAdministration.prepareSeatMutation(input)
+          } catch (retryError) {
+            if (retryError instanceof TenantAdministrationError) {
+              throw new WorkspaceAccessError(
+                retryError.status,
+                retryError.code,
+                retryError.message,
+                { cause: retryError },
+              )
+            }
+            throw retryError
+          }
+        }
+        if (error instanceof TenantAdministrationError) {
+          throw new WorkspaceAccessError(
+            error.status,
+            error.code,
+            error.message,
+            { cause: error },
+          )
+        }
+        throw error
+      }
+    },
+  }
+  workspaceAccessClient = new DynamoDbWorkspaceAccessClient({
+    documentAuthorizationRevisionMutationPort:
+      new DynamoDbDocumentAuthorizationRevisionMutationAdapter(),
+    seatMeter,
+  })
   return {
     dashboardSummary: new DynamoDbDashboardSummaryClient(),
     projectDirectory: new DynamoDbProjectDirectoryClient(),
     auditEvents: createAuditEventsClient(),
-    workspaceAccess: new DynamoDbWorkspaceAccessClient({
-      documentAuthorizationRevisionMutationPort:
-        new DynamoDbDocumentAuthorizationRevisionMutationAdapter(),
-    }),
+    workspaceAccess: workspaceAccessClient,
     enterpriseIdentity: createEnterpriseIdentityCapabilities(enterpriseIdentityClient),
     enterpriseSessionActivity: createEnterpriseSessionActivityClient(),
     enterpriseIdentityProviderConnectionTester: testEnterpriseIdentityProviderConnection,
-    tenantAdministration: new DynamoDbTenantAdministrationClient(
-      resourceConfig.tenantAdministrationTableName,
-      createDynamoDbDocumentClient(dynamoDbClient),
-      undefined,
-      createTenantAdministrationAuditWriter(),
-    ),
-  }
-}
-
-/** Creates the audit transaction builder used by tenant administration mutations. */
-function createTenantAdministrationAuditWriter(): TenantAdministrationAuditWriter {
-  const auditTableName = getConfiguredAuditTableName() ?? 'mukuroji-audit-events'
-  return {
-    createTransactionItem(event) {
-      const actorKind = event.actorMemberKey.startsWith('meter:') ? 'service' : 'user'
-      const context = createMutationAuditContext({
-        workspaceId: event.workspaceId,
-        actor: { id: event.actorMemberKey, kind: actorKind },
-        idempotencyKey: event.idempotencyKey,
-        occurredAt: event.occurredAt,
-        request: {
-          method: event.path.startsWith('/api/') ? 'PATCH' : 'INTERNAL',
-          path: event.path,
-          ...(event.after ? { body: event.after } : {}),
-        },
-        source: {
-          kind: event.path.startsWith('/api/') ? 'api' : 'system',
-          route: event.path,
-        },
-      })
-      const auditEvent = createAuditEvent({
-        context,
-        eventType: event.eventType,
-        entity: { type: 'tenant', id: event.entityId },
-        action: event.action,
-        changes: createAuditFieldDiff(event.before, event.after),
-        ...(event.legalHold
-          ? { retentionSuspended: true }
-          : { expiresAt: calculateAuditExpiresAt(event.occurredAt, event.retentionDays) }),
-        ...(event.metadata ? { metadata: event.metadata } : {}),
-      })
-      return createAuditTransactPut(auditTableName, auditEvent)
-    },
+    tenantAdministration,
+    tenantEntitlementEnforcement: tenantAdministration,
   }
 }
 
@@ -556,6 +574,18 @@ function createTestOperationalDependencies(): OperationalDependencies {
     recordAccess() {},
     recordError() {},
     runtimeControl: createStaticRuntimeControlProvider('enabled'),
+  }
+}
+
+/**
+ * Creates permissive entitlement enforcement for route tests unrelated to billing policy.
+ *
+ * @returns An isolated no-op enforcement port that never performs network I/O.
+ */
+function createTestTenantEntitlementEnforcement(): TenantEntitlementEnforcement {
+  return {
+    async assertFeature() {},
+    async reserveUsage() {},
   }
 }
 
@@ -677,6 +707,10 @@ export function createTestAppDependencies(): AppDependencies {
   return {
     ...production,
     operational: createTestOperationalDependencies(),
+    workspace: {
+      ...production.workspace,
+      tenantEntitlementEnforcement: createTestTenantEntitlementEnforcement(),
+    },
     workItems: {
       ...production.workItems,
       workItemConfigurations: createDefaultWorkItemConfigurationClient(),
@@ -750,6 +784,14 @@ export function overrideAppDependencies(
       ...(overrides.tenantAdministration
         ? { tenantAdministration: overrides.tenantAdministration }
         : {}),
+      ...(overrides.tenantEntitlementEnforcement
+        ? {
+            tenantEntitlementEnforcement:
+              overrides.tenantEntitlementEnforcement,
+          }
+        : overrides.tenantAdministration
+          ? { tenantEntitlementEnforcement: overrides.tenantAdministration }
+          : {}),
     },
     workItems: {
       ...dependencies.workItems,

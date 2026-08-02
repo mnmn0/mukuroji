@@ -25,6 +25,7 @@ import type {
   AutomationActionExecutor,
   AutomationExecutionClaimToken,
   AutomationExecutionServicePort,
+  AutomationFeatureEntitlementPort,
   AutomationInboundWebhookPort,
   AutomationInboundWebhookSecretCleanup,
   AutomationInboundWebhookSecretStore,
@@ -54,6 +55,8 @@ export type AutomationSchedulePort =
 export type AutomationScheduleDependencies = {
   /** Automation definitions、execution、receipts の durable store です。 */
   client: AutomationSchedulePort
+  /** Server-side feature gate evaluated before tenant Automation execution. */
+  entitlement: AutomationFeatureEntitlementPort
   /** Recurring Work Item create action の executor です。 */
   actionExecutor: AutomationActionExecutor
   /** Revoke 済み inbound webhook secret の durable cleanup store です。 */
@@ -173,6 +176,9 @@ export async function processDueAutomationExecution(
   if (!execution.nextRetryAt || execution.nextRetryAt > now.toISOString()) {
     return execution
   }
+  if (!await dependencies.entitlement.isAutomationEnabled(execution.workspaceId)) {
+    return execution
+  }
   const engine = new AutomationEngine(dependencies.client, dependencies.actionExecutor)
   try {
     if (execution.ruleId.startsWith('recurring:')) {
@@ -234,6 +240,9 @@ export async function processScheduledAutomationRule(
     !rule.nextRunAt ||
     new Date(rule.nextRunAt) > now
   ) {
+    return rule
+  }
+  if (!await dependencies.entitlement.isAutomationEnabled(rule.workspaceId)) {
     return rule
   }
   const dueStart = new Date(new Date(rule.nextRunAt).getTime() - 1)
@@ -302,6 +311,9 @@ export async function processRecurringWorkDefinition(
   )
   if (!definition) return scheduledDefinition
   if (!definition.enabled || new Date(definition.nextRunAt) > now) return definition
+  if (!await dependencies.entitlement.isAutomationEnabled(definition.workspaceId)) {
+    return definition
+  }
   const dueStart = new Date(new Date(definition.nextRunAt).getTime() - 1)
   const dueOccurrences = getRecurringOccurrences(definition.schedule, dueStart, now)
   const fallbackOccurrence = new Date(definition.nextRunAt)

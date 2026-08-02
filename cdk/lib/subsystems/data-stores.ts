@@ -356,6 +356,8 @@ export function buildDataStores(
     encryption: dynamodb.TableEncryption.AWS_MANAGED,
     pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     removalPolicy: cdk.RemovalPolicy.RETAIN,
+    stream: dynamodb.StreamViewType.NEW_IMAGE,
+    timeToLiveAttribute: 'expiresAt',
   });
 
   const documentsTable = new dynamodb.Table(stack, 'DocumentsTable', {

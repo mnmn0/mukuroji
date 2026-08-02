@@ -7,6 +7,7 @@ import type {
   TenantOperation,
   TenantOperationStepProof,
   TenantProfile,
+  TenantRetentionReconciliation,
   TenantUsage,
   UpdateTenantEntitlementInput,
   UpdateTenantGovernanceInput,
@@ -34,6 +35,8 @@ export type TenantAdministrationAuditEvent = {
   action: string
   /** Route or internal operation that caused the mutation. */
   path: string
+  /** HTTP method or trusted internal source that caused the mutation. */
+  requestMethod: 'PATCH' | 'POST' | 'INTERNAL'
   /** Idempotency key for deterministic audit event identity. */
   idempotencyKey: string
   /** Optional previous safe state. */
@@ -58,12 +61,61 @@ export type TenantAdministrationAuditWriter = {
   ): TenantAdministrationTransactionItem | undefined
 }
 
+/** Input used to meter one Workspace membership state transition. */
+export type TenantSeatMutationInput = {
+  /** Canonical Workspace identifier. */
+  workspaceId: string
+  /** Stable member key whose active-seat state changed. */
+  memberKey: string
+  /** Direction of the authoritative membership transition. */
+  direction: 'activate' | 'deactivate'
+  /** Timestamp shared with the Workspace membership transaction. */
+  occurredAt: string
+}
+
+/**
+ * Server-side feature and quota checks used by authenticated feature routes.
+ */
+export interface TenantEntitlementEnforcement {
+  /** Rejects a feature route when the current entitlement does not include it. */
+  assertFeature(workspaceId: string, feature: TenantFeature): Promise<void>
+  /** Reserves metered usage after checking feature entitlement and quota. */
+  reserveUsage(
+    workspaceId: string,
+    feature: TenantFeature,
+    additionalUnits: number,
+    idempotencyKey?: string,
+  ): Promise<unknown>
+}
+
+/**
+ * Prepares seat-meter writes that join the authoritative membership transaction.
+ */
+export interface TenantSeatMeter {
+  /** Returns conditional usage and audit items for one membership transition. */
+  prepareSeatMutation(
+    input: TenantSeatMutationInput,
+  ): Promise<readonly TenantAdministrationTransactionItem[]>
+}
+
+/** Capability used by the trusted worker to reconcile audit TTL state. */
+export interface TenantAuditRetentionProcessor {
+  /** Applies one bounded page of the current tenant retention job. */
+  reconcileAuditRetention(
+    workspaceId: string,
+  ): Promise<TenantRetentionReconciliation | undefined>
+}
+
 /**
  * Application port for tenant administration and data-governance state.
  */
-export interface TenantAdministrationClient {
+export interface TenantAdministrationClient extends TenantEntitlementEnforcement {
   /** Ensures and returns the tenant aggregate for an authenticated Workspace. */
-  ensureSnapshot(workspaceId: string, ownerMemberKey: string): Promise<TenantAdministrationSnapshot>
+  ensureSnapshot(
+    workspaceId: string,
+    ownerMemberKey: string,
+    activeSeats?: number,
+  ): Promise<TenantAdministrationSnapshot>
   /** Returns the current tenant aggregate without trusting client-supplied tenant IDs. */
   getSnapshot(workspaceId: string): Promise<TenantAdministrationSnapshot>
   /** Updates profile fields with an optimistic revision condition. */
@@ -84,23 +136,26 @@ export interface TenantAdministrationClient {
     actorMemberKey: string,
     input: UpdateTenantGovernanceInput,
   ): Promise<TenantGovernancePolicy>
-  /** Reserves metered usage after checking the current server-side entitlement. */
+  /** Reserves metered usage and returns the updated current-period counter. */
   reserveUsage(
     workspaceId: string,
     feature: TenantFeature,
     additionalUnits: number,
+    idempotencyKey?: string,
   ): Promise<TenantUsage>
   /** Starts a bounded, durable tenant export operation. */
   requestExport(
     workspaceId: string,
     actorMemberKey: string,
     input: RequestTenantExportInput,
+    idempotencyKey?: string,
   ): Promise<TenantOperation>
   /** Starts a legal-hold-aware account closure operation. */
   requestClosure(
     workspaceId: string,
     actorMemberKey: string,
     input: RequestTenantClosureInput,
+    idempotencyKey?: string,
   ): Promise<TenantOperation>
   /** Returns one operation belonging to the authenticated tenant. */
   getOperation(workspaceId: string, operationId: string): Promise<TenantOperation>

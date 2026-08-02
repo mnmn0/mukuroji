@@ -198,10 +198,18 @@ export type AnalyticsScheduleArtifactRenderer = (
   input: AnalyticsScheduleArtifactInput,
 ) => Promise<void>
 
+/** Server-side feature gate required by the trusted Analytics schedule worker. */
+export interface AnalyticsFeatureEntitlementPort {
+  /** Returns whether Analytics execution is currently enabled for a Workspace. */
+  isAnalyticsEnabled(workspaceId: string): Promise<boolean>
+}
+
 /** Analytics schedule runner の dependency contract です。 */
 export type AnalyticsScheduleDependencies = {
   /** Reports、snapshots、delivery receipts の durable store です。 */
   repository: AnalyticsRepository
+  /** Server-side feature gate evaluated before tenant Analytics execution. */
+  entitlement: AnalyticsFeatureEntitlementPort
   /** Recipient の current ACL を適用する snapshot renderer です。 */
   render: AnalyticsScheduleRenderer
   /** Durable write 前に artifact を検証する注入可能な純粋 renderer です。 */
@@ -390,6 +398,9 @@ export async function processDueAnalyticsReport(
     !schedule.nextRunAt ||
     schedule.nextRunAt > now.toISOString()
   ) {
+    return emptyScheduledReportResult()
+  }
+  if (!await dependencies.entitlement.isAnalyticsEnabled(current.workspaceId)) {
     return emptyScheduledReportResult()
   }
 

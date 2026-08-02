@@ -1,10 +1,12 @@
 import type {
   TenantAdministrationSnapshot,
+  TenantBillingPeriod,
   TenantClosureStep,
   TenantDefaultPolicy,
   TenantEntitlement,
   TenantExportStep,
   TenantFeature,
+  TenantGovernanceEnforcement,
   TenantGovernancePolicy,
   TenantLocale,
   TenantOperation,
@@ -27,6 +29,12 @@ export const TENANT_MAX_SEAT_LIMIT = 1_000_000
 /** Maximum metered units accepted by the tenant entitlement policy. */
 export const TENANT_MAX_USAGE_QUOTA = 1_000_000_000
 
+/** Default data-plane governance controls used by local development. */
+export const DEFAULT_TENANT_GOVERNANCE_ENFORCEMENT: TenantGovernanceEnforcement = {
+  dataResidency: 'ap-northeast-1',
+  encryptionKeyPolicy: 'aws-managed',
+}
+
 /** Stable steps for an export operation. */
 export const TENANT_EXPORT_STEPS: readonly TenantExportStep[] = [
   'snapshot',
@@ -43,6 +51,8 @@ export const TENANT_CLOSURE_STEPS: readonly TenantClosureStep[] = [
   'delete-secrets',
   'verify',
 ]
+
+const TENANT_OPERATION_EVIDENCE_PATTERN = /^evidence:sha256:[a-f0-9]{64}$/u
 
 /**
  * Stable application error raised by tenant administration invariants.
@@ -74,17 +84,19 @@ export class TenantAdministrationError extends Error {
  * @param workspaceId - Canonical Workspace identifier.
  * @param ownerMemberKey - Current owner member key.
  * @param now - Creation timestamp.
+ * @param region - Region enforced by the deployed data plane.
  * @returns A revision-zero tenant profile.
  */
 export function createDefaultTenantProfile(
   workspaceId: string,
   ownerMemberKey: string,
   now: string,
+  region: string = DEFAULT_TENANT_GOVERNANCE_ENFORCEMENT.dataResidency,
 ): TenantProfile {
   return {
     workspaceId,
     ownerMemberKey,
-    region: 'ap-northeast-1',
+    region: validateTenantRegion(region),
     locale: 'ja',
     defaultPolicy: createDefaultTenantPolicy(),
     revision: 0,
@@ -134,11 +146,13 @@ export function createDefaultTenantEntitlement(
  *
  * @param workspaceId - Canonical Workspace identifier.
  * @param now - Current timestamp used to calculate the period.
- * @returns A zeroed current-period usage record.
+ * @param activeSeats - Authoritative active member count at initialization.
+ * @returns A current-period usage record initialized from active membership.
  */
 export function createDefaultTenantUsage(
   workspaceId: string,
   now: string,
+  activeSeats = 1,
 ): TenantUsage {
   const current = new Date(now)
   if (Number.isNaN(current.getTime())) {
@@ -148,7 +162,11 @@ export function createDefaultTenantUsage(
   const periodEnd = new Date(Date.UTC(current.getUTCFullYear(), current.getUTCMonth() + 1, 1))
   return {
     workspaceId,
-    activeSeats: 0,
+    activeSeats: validateTenantInteger(
+      activeSeats,
+      TENANT_MAX_SEAT_LIMIT,
+      'InvalidTenantActiveSeats',
+    ),
     periodUsage: 0,
     periodStart: periodStart.toISOString(),
     periodEnd: periodEnd.toISOString(),
@@ -158,24 +176,65 @@ export function createDefaultTenantUsage(
 }
 
 /**
+ * Creates or advances the invoice-ready aggregate for a usage period.
+ *
+ * @param usage - Authoritative tenant usage after the current mutation.
+ * @param current - Existing aggregate for the same billing period, when present.
+ * @returns A revisioned period aggregate aligned with the usage counter.
+ */
+export function recordTenantBillingPeriod(
+  usage: TenantUsage,
+  current?: TenantBillingPeriod,
+): TenantBillingPeriod {
+  if (
+    current &&
+    (
+      current.workspaceId !== usage.workspaceId ||
+      current.periodStart !== usage.periodStart ||
+      current.periodEnd !== usage.periodEnd
+    )
+  ) {
+    throw new TenantAdministrationError(
+      503,
+      'TenantBillingPeriodMismatch',
+      'Tenant billing period state is inconsistent.',
+    )
+  }
+  return {
+    workspaceId: usage.workspaceId,
+    periodStart: usage.periodStart,
+    periodEnd: usage.periodEnd,
+    meteredUnits: usage.periodUsage,
+    activeSeatHighWaterMark: Math.max(
+      current?.activeSeatHighWaterMark ?? 0,
+      usage.activeSeats,
+    ),
+    revision: current ? current.revision + 1 : 0,
+    updatedAt: usage.updatedAt,
+  }
+}
+
+/**
  * Creates the default governance policy for a tenant.
  *
  * @param workspaceId - Canonical Workspace identifier.
  * @param actorMemberKey - Member key that created the policy.
  * @param now - Creation timestamp.
+ * @param enforcement - Controls implemented by the deployed data plane.
  * @returns A retention-safe governance policy.
  */
 export function createDefaultTenantGovernance(
   workspaceId: string,
   actorMemberKey: string,
   now: string,
+  enforcement: TenantGovernanceEnforcement = DEFAULT_TENANT_GOVERNANCE_ENFORCEMENT,
 ): TenantGovernancePolicy {
   return {
     workspaceId,
     auditRetentionDays: 365,
     legalHold: false,
-    dataResidency: 'ap-northeast-1',
-    encryptionKeyPolicy: 'aws-managed',
+    dataResidency: validateTenantRegion(enforcement.dataResidency),
+    encryptionKeyPolicy: enforcement.encryptionKeyPolicy,
     revision: 0,
     updatedAt: now,
     updatedBy: actorMemberKey,
@@ -188,19 +247,91 @@ export function createDefaultTenantGovernance(
  * @param workspaceId - Canonical Workspace identifier.
  * @param ownerMemberKey - Current owner member key.
  * @param now - Snapshot creation timestamp.
+ * @param enforcement - Controls implemented by the deployed data plane.
+ * @param activeSeats - Authoritative active member count at initialization.
  * @returns A complete default tenant administration aggregate.
  */
 export function createDefaultTenantAdministrationSnapshot(
   workspaceId: string,
   ownerMemberKey: string,
   now: string,
+  enforcement: TenantGovernanceEnforcement = DEFAULT_TENANT_GOVERNANCE_ENFORCEMENT,
+  activeSeats = 1,
 ): TenantAdministrationSnapshot {
+  const normalizedEnforcement = validateTenantGovernanceEnforcement(enforcement)
+  const usage = createDefaultTenantUsage(workspaceId, now, activeSeats)
   return {
-    schemaVersion: 1,
-    profile: createDefaultTenantProfile(workspaceId, ownerMemberKey, now),
+    schemaVersion: 2,
+    profile: createDefaultTenantProfile(
+      workspaceId,
+      ownerMemberKey,
+      now,
+      normalizedEnforcement.dataResidency,
+    ),
     entitlement: createDefaultTenantEntitlement(workspaceId, now),
-    usage: createDefaultTenantUsage(workspaceId, now),
-    governance: createDefaultTenantGovernance(workspaceId, ownerMemberKey, now),
+    usage,
+    billingPeriods: [recordTenantBillingPeriod(usage)],
+    governance: createDefaultTenantGovernance(
+      workspaceId,
+      ownerMemberKey,
+      now,
+      normalizedEnforcement,
+    ),
+    governanceEnforcement: normalizedEnforcement,
+  }
+}
+
+/**
+ * Validates the immutable governance controls implemented by the deployment.
+ *
+ * @param value - Candidate deployment enforcement values.
+ * @returns Normalized governance enforcement controls.
+ */
+export function validateTenantGovernanceEnforcement(
+  value: TenantGovernanceEnforcement,
+): TenantGovernanceEnforcement {
+  if (
+    value.encryptionKeyPolicy !== 'aws-managed' &&
+    value.encryptionKeyPolicy !== 'customer-managed'
+  ) {
+    throw new TenantAdministrationError(
+      503,
+      'TenantEncryptionPolicyUnavailable',
+      'Tenant encryption policy is unavailable.',
+    )
+  }
+  return {
+    dataResidency: validateTenantRegion(value.dataResidency),
+    encryptionKeyPolicy: value.encryptionKeyPolicy,
+  }
+}
+
+/**
+ * Rejects governance settings that the deployed data plane cannot enforce.
+ *
+ * @param dataResidency - Requested tenant data-residency region.
+ * @param encryptionKeyPolicy - Requested encryption-key ownership policy.
+ * @param enforcement - Controls implemented by the deployed data plane.
+ */
+export function assertTenantGovernanceEnforced(
+  dataResidency: string,
+  encryptionKeyPolicy: 'aws-managed' | 'customer-managed',
+  enforcement: TenantGovernanceEnforcement,
+): void {
+  const normalizedEnforcement = validateTenantGovernanceEnforcement(enforcement)
+  if (validateTenantRegion(dataResidency) !== normalizedEnforcement.dataResidency) {
+    throw new TenantAdministrationError(
+      409,
+      'TenantDataResidencyUnavailable',
+      'The requested tenant data residency is not available in this deployment.',
+    )
+  }
+  if (encryptionKeyPolicy !== normalizedEnforcement.encryptionKeyPolicy) {
+    throw new TenantAdministrationError(
+      409,
+      'TenantEncryptionKeyPolicyUnavailable',
+      'The requested tenant encryption key policy is not available in this deployment.',
+    )
   }
 }
 
@@ -331,25 +462,10 @@ export function reserveTenantUsage(
   now: string,
 ): TenantUsage {
   const units = validateTenantInteger(additionalUnits, TENANT_MAX_USAGE_QUOTA, 'InvalidUsageUnits')
-  const current = new Date(now)
-  if (Number.isNaN(current.getTime())) {
-    throw new TenantAdministrationError(500, 'InvalidTenantClock', 'Tenant clock is invalid.')
-  }
-  const periodEnd = new Date(usage.periodEnd)
-  if (Number.isNaN(periodEnd.getTime())) {
-    throw new TenantAdministrationError(503, 'InvalidTenantUsagePeriod', 'Tenant usage period is invalid.')
-  }
-  let periodUsage = usage
-  if (current >= periodEnd) {
-    periodUsage = {
-      ...usage,
-      periodUsage: 0,
-      ...getTenantUsagePeriod(current),
-      gracePeriodEndsAt: undefined,
-    }
-  }
+  const periodUsage = beginTenantUsageMutation(usage, now)
   const nextUsage = periodUsage.periodUsage + units
   if (nextUsage > entitlement.usageQuota) {
+    const current = new Date(now)
     const graceEndsAt = periodUsage.gracePeriodEndsAt
       ? new Date(periodUsage.gracePeriodEndsAt)
       : new Date(current.getTime() + entitlement.gracePeriodDays * 86_400_000)
@@ -364,14 +480,48 @@ export function reserveTenantUsage(
       ...periodUsage,
       periodUsage: nextUsage,
       gracePeriodEndsAt: graceEndsAt.toISOString(),
-      revision: periodUsage.revision + 1,
-      updatedAt: now,
     }
   }
   return {
     ...periodUsage,
     periodUsage: nextUsage,
-    revision: periodUsage.revision + 1,
+  }
+}
+
+/**
+ * Opens one revisioned usage mutation and rolls an expired UTC period forward.
+ *
+ * This helper does not apply quota policy, so authoritative seat releases remain
+ * available even after usage grace has expired.
+ *
+ * @param usage - Current durable tenant usage.
+ * @param now - Mutation timestamp.
+ * @returns A revisioned usage candidate aligned to the current UTC period.
+ */
+export function beginTenantUsageMutation(
+  usage: TenantUsage,
+  now: string,
+): TenantUsage {
+  const current = new Date(now)
+  if (Number.isNaN(current.getTime())) {
+    throw new TenantAdministrationError(500, 'InvalidTenantClock', 'Tenant clock is invalid.')
+  }
+  const periodEnd = new Date(usage.periodEnd)
+  if (Number.isNaN(periodEnd.getTime())) {
+    throw new TenantAdministrationError(503, 'InvalidTenantUsagePeriod', 'Tenant usage period is invalid.')
+  }
+  let periodUsage: TenantUsage = usage
+  if (current >= periodEnd) {
+    periodUsage = {
+      ...usage,
+      periodUsage: 0,
+      ...getTenantUsagePeriod(current),
+      gracePeriodEndsAt: undefined,
+    }
+  }
+  return {
+    ...periodUsage,
+    revision: usage.revision + 1,
     updatedAt: now,
   }
 }
@@ -466,17 +616,16 @@ export function advanceTenantOperation(
       'Tenant operation cannot be advanced in its current state.',
     )
   }
-  if (
-    proof === undefined ||
-    proof.step !== operation.currentStep ||
-    proof.evidenceReference.trim().length === 0
-  ) {
+  if (proof === undefined || proof.step !== operation.currentStep) {
     throw new TenantAdministrationError(
       403,
       'TenantOperationStepProofRequired',
       'Trusted execution evidence is required to complete the current tenant operation step.',
     )
   }
+  const evidenceReference = validateTenantOperationEvidenceReference(
+    proof.evidenceReference,
+  )
   const steps = operation.kind === 'export' ? TENANT_EXPORT_STEPS : TENANT_CLOSURE_STEPS
   const currentIndex = steps.findIndex((step) => step === operation.currentStep)
   if (currentIndex < 0) {
@@ -495,10 +644,28 @@ export function advanceTenantOperation(
     status: nextStep === undefined ? 'completed' : 'running',
     currentStep: nextStep ?? operation.currentStep,
     completedSteps,
-    lastEvidenceReference: proof.evidenceReference.trim(),
+    lastEvidenceReference: evidenceReference,
     updatedAt: now,
     revision: operation.revision + 1,
   }
+}
+
+/**
+ * Validates a content-addressed immutable tenant-operation evidence reference.
+ *
+ * @param value - Candidate reference from a capability-scoped executor.
+ * @returns The normalized SHA-256 evidence reference.
+ */
+export function validateTenantOperationEvidenceReference(value: unknown): string {
+  const normalized = typeof value === 'string' ? value.trim() : ''
+  if (!TENANT_OPERATION_EVIDENCE_PATTERN.test(normalized)) {
+    throw new TenantAdministrationError(
+      400,
+      'TenantOperationEvidenceInvalid',
+      'Tenant operation evidence must be an immutable SHA-256 reference.',
+    )
+  }
+  return normalized
 }
 
 /**
@@ -512,7 +679,7 @@ export function pauseTenantOperation(
   operation: TenantOperation,
   now: string,
 ): TenantOperation {
-  if (!isTenantOperationActive(operation.status)) {
+  if (operation.status !== 'running') {
     throw new TenantAdministrationError(409, 'TenantOperationNotPausable', 'Tenant operation cannot be paused.')
   }
   return {

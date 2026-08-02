@@ -26,6 +26,14 @@ export type TenantAdministrationPrincipal = {
   userKey: string
 }
 
+/** Authoritative membership inputs used when tenant state is first initialized. */
+export type TenantAdministrationInitialization = {
+  /** Stable member key of the active Workspace owner. */
+  ownerMemberKey: string
+  /** Number of active Workspace members that currently consume seats. */
+  activeSeats: number
+}
+
 /** Dependencies injected into the tenant administration HTTP adapter. */
 export type TenantAdministrationRouterDependencies<
   Principal extends TenantAdministrationPrincipal,
@@ -34,8 +42,14 @@ export type TenantAdministrationRouterDependencies<
   authenticate(accessToken: string, context: Context): Promise<Principal>
   /** Enforces Workspace owner/admin authorization at the route boundary. */
   requireAdministration(principal: Principal): void
+  /** Restricts commercial entitlement mutations to the trusted system control plane. */
+  requireEntitlementAdministration(principal: Principal): void
   /** Provides the tenant administration application port. */
   client: TenantAdministrationClient
+  /** Resolves authoritative owner and seat state for first-time initialization. */
+  resolveInitialization(
+    principal: Principal,
+  ): Promise<TenantAdministrationInitialization>
   /** Parses an untrusted HTTP request body. */
   readJson(request: { json: () => Promise<unknown> }): Promise<unknown>
   /** Converts authentication and domain failures to the repository response shape. */
@@ -59,10 +73,7 @@ export function createTenantAdministrationRouter<
     try {
       const principal = await requirePrincipal(context, dependencies)
       dependencies.requireAdministration(principal)
-      return context.json(await dependencies.client.ensureSnapshot(
-        principal.directoryId,
-        principal.userKey,
-      ))
+      return context.json(await ensureTenantInitialized(principal, dependencies))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -72,6 +83,7 @@ export function createTenantAdministrationRouter<
     try {
       const principal = await requirePrincipal(context, dependencies)
       dependencies.requireAdministration(principal)
+      await ensureTenantInitialized(principal, dependencies)
       const input = readTenantProfileInput(await dependencies.readJson(context.req))
       return context.json({
         profile: await dependencies.client.updateProfile(
@@ -88,7 +100,8 @@ export function createTenantAdministrationRouter<
   router.patch('/api/tenant/entitlement', async (context) => {
     try {
       const principal = await requirePrincipal(context, dependencies)
-      dependencies.requireAdministration(principal)
+      dependencies.requireEntitlementAdministration(principal)
+      await ensureTenantInitialized(principal, dependencies)
       const input = readTenantEntitlementInput(await dependencies.readJson(context.req))
       return context.json({
         entitlement: await dependencies.client.updateEntitlement(
@@ -106,6 +119,7 @@ export function createTenantAdministrationRouter<
     try {
       const principal = await requirePrincipal(context, dependencies)
       dependencies.requireAdministration(principal)
+      await ensureTenantInitialized(principal, dependencies)
       const input = readTenantGovernanceInput(await dependencies.readJson(context.req))
       return context.json({
         governance: await dependencies.client.updateGovernance(
@@ -123,12 +137,14 @@ export function createTenantAdministrationRouter<
     try {
       const principal = await requirePrincipal(context, dependencies)
       dependencies.requireAdministration(principal)
+      await ensureTenantInitialized(principal, dependencies)
       const input = readTenantExportInput(await dependencies.readJson(context.req))
       return context.json({
         operation: await dependencies.client.requestExport(
           principal.directoryId,
           principal.userKey,
           input,
+          readOptionalIdempotencyKey(context.req.header('Idempotency-Key')),
         ),
       }, 201)
     } catch (error) {
@@ -140,12 +156,14 @@ export function createTenantAdministrationRouter<
     try {
       const principal = await requirePrincipal(context, dependencies)
       dependencies.requireAdministration(principal)
+      await ensureTenantInitialized(principal, dependencies)
       const input = readTenantClosureInput(await dependencies.readJson(context.req))
       return context.json({
         operation: await dependencies.client.requestClosure(
           principal.directoryId,
           principal.userKey,
           input,
+          readOptionalIdempotencyKey(context.req.header('Idempotency-Key')),
         ),
       }, 202)
     } catch (error) {
@@ -187,6 +205,27 @@ export function createTenantAdministrationRouter<
   }
 
   return router
+}
+
+/**
+ * Initializes legacy tenant state from authoritative active Workspace membership.
+ *
+ * @param principal - Authenticated tenant administration principal.
+ * @param dependencies - Tenant administration route dependencies.
+ * @returns The current tenant administration snapshot.
+ */
+async function ensureTenantInitialized<
+  Principal extends TenantAdministrationPrincipal,
+>(
+  principal: Principal,
+  dependencies: TenantAdministrationRouterDependencies<Principal>,
+) {
+  const initialization = await dependencies.resolveInitialization(principal)
+  return await dependencies.client.ensureSnapshot(
+    principal.directoryId,
+    initialization.ownerMemberKey,
+    initialization.activeSeats,
+  )
 }
 
 async function requirePrincipal<Principal extends TenantAdministrationPrincipal>(
@@ -277,6 +316,29 @@ function readOperationId(value: string | undefined): string {
     throw new TenantAdministrationError(400, 'InvalidTenantOperationId', 'Tenant operation ID is invalid.')
   }
   return operationId
+}
+
+/**
+ * Validates an optional tenant operation idempotency header.
+ *
+ * @param value - Candidate header value.
+ * @returns A normalized key, or undefined when the header is absent.
+ */
+function readOptionalIdempotencyKey(value: string | undefined): string | undefined {
+  const normalized = value?.trim()
+  if (!normalized) return undefined
+  const hasControlCharacter = [...normalized].some((character) => {
+    const codePoint = character.codePointAt(0)
+    return codePoint !== undefined && (codePoint <= 31 || codePoint === 127)
+  })
+  if (normalized.length > 256 || hasControlCharacter) {
+    throw new TenantAdministrationError(
+      400,
+      'InvalidTenantIdempotencyKey',
+      'Tenant idempotency key is invalid.',
+    )
+  }
+  return normalized
 }
 
 function readRecord(value: unknown): Record<string, unknown> {

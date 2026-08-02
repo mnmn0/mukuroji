@@ -62,6 +62,13 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
         }),
       ]),
     }));
+  expect(resources.TenantAdministrationTable621D59EB.Properties)
+    .toEqual(expect.objectContaining({
+      TimeToLiveSpecification: {
+        AttributeName: 'expiresAt',
+        Enabled: true,
+      },
+    }));
   expect(resources.TeamIssuesTable189D851D.Properties)
     .toEqual(expect.objectContaining({
       AttributeDefinitions: expect.arrayContaining([

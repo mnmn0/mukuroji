@@ -1,36 +1,18 @@
 import {
-  useEffect,
   useMemo,
-  useRef,
   useState,
 } from 'react'
-import { useSWRConfig } from 'swr'
 import type {
   TenantFeature,
   TenantOperation,
-  TenantPlan,
   TenantProfile,
   TenantGovernancePolicy,
   TenantEntitlement,
   TenantAdministrationSnapshot,
 } from '@mukuroji/contracts'
-import {
-  pauseTenantOperation,
-  requestTenantClosure,
-  requestTenantExport,
-  resumeTenantOperation,
-  updateTenantEntitlement,
-  updateTenantGovernance,
-  updateTenantProfile,
-  verifyTenantClosure,
-  WorkspaceAccessApiError,
-} from '../api'
-import {
-  createMutationRequestRunner,
-  type MutationRequestContext,
-} from '../../shared/api/mutationHeaders'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
-import { InfoGrid, SectionHeader } from '../../shared/ui/WorkbenchPrimitives'
+import { SectionHeader } from '../../shared/ui/WorkbenchPrimitives'
+import { useTenantAdministrationMutations } from '../mutations/useTenantAdministrationMutations'
 import { useTenantAdministration } from '../queries/useTenantAdministration'
 
 /** Props for the tenant administration panel container. */
@@ -39,6 +21,14 @@ type TenantAdministrationPanelContainerProps = {
   accessToken: string
   /** Locale used for labels and workflow copy. */
   locale: Locale
+}
+
+/** Editable server value pinned to the revision from which it was derived. */
+type RevisionedDraft<Value> = {
+  /** Server revision used to initialize the draft. */
+  baseRevision: number
+  /** Locally edited value. */
+  value: Value
 }
 
 /** Supported tenant features shown as entitlement controls. */
@@ -51,8 +41,23 @@ const tenantFeatures: readonly TenantFeature[] = [
   'scim',
 ]
 
-/** Supported commercial plans shown as entitlement controls. */
-const tenantPlans: readonly TenantPlan[] = ['starter', 'growth', 'enterprise']
+/** Flat governance notes displayed below tenant administration controls. */
+const tenantAdministrationInfoItems: ReadonlyArray<
+  readonly [MessageKey, MessageKey]
+> = [
+  [
+    'workspace.tenantAdministration.auditTitle',
+    'workspace.tenantAdministration.auditDescription',
+  ],
+  [
+    'workspace.tenantAdministration.residencyTitle',
+    'workspace.tenantAdministration.residencyDescription',
+  ],
+  [
+    'workspace.tenantAdministration.workflowTitle',
+    'workspace.tenantAdministration.workflowDescription',
+  ],
+]
 
 /**
  * Connects tenant administration data and mutations to the settings view.
@@ -65,142 +70,64 @@ export function TenantAdministrationPanelContainer({
   locale,
 }: TenantAdministrationPanelContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
-  const { mutate: mutateCache } = useSWRConfig()
-  const mutationRunner = useRef(createMutationRequestRunner()).current
   const {
     data,
     error,
     isLoading,
-    key,
+    mutate: refresh,
   } = useTenantAdministration(accessToken)
-  const [profile, setProfile] = useState<TenantProfile>()
-  const [entitlement, setEntitlement] = useState<TenantEntitlement>()
-  const [governance, setGovernance] = useState<TenantGovernancePolicy>()
-  const [activeOperation, setActiveOperation] = useState<TenantOperation>()
+  const [profileDraft, setProfileDraft] = useState<RevisionedDraft<TenantProfile>>()
+  const [governanceDraft, setGovernanceDraft] =
+    useState<RevisionedDraft<TenantGovernancePolicy>>()
   const [exportFormat, setExportFormat] = useState<'jsonl' | 'csv'>('jsonl')
   const [closureConfirmation, setClosureConfirmation] = useState('')
-  const [isSaving, setIsSaving] = useState(false)
-  const [actionError, setActionError] = useState<string>()
+  const mutations = useTenantAdministrationMutations({ accessToken, refresh })
 
-  useEffect(() => {
-    if (!data) return
-    setProfile(data.profile)
-    setEntitlement(data.entitlement)
-    setGovernance(data.governance)
-    setActiveOperation(data.activeOperation)
-  }, [data])
-
-  const refresh = async () => {
-    if (!key) return
-    await mutateCache(key)
-  }
-
-  const runMutation = async <Result,>(
-    operationKey: string,
-    fingerprint: string,
-    request: (context: MutationRequestContext) => Promise<Result>,
-  ) => {
-    setIsSaving(true)
-    setActionError(undefined)
-    try {
-      await mutationRunner.run(operationKey, fingerprint, request)
-      await refresh()
-    } catch (mutationError) {
-      setActionError(
-        mutationError instanceof WorkspaceAccessApiError
-          ? mutationError.message
-          : t('workspace.tenantAdministration.error'),
-      )
-    } finally {
-      setIsSaving(false)
-    }
-  }
+  const profile = data && profileDraft?.baseRevision === data.profile.revision
+    ? profileDraft.value
+    : data?.profile
+  const governance = data && governanceDraft?.baseRevision === data.governance.revision
+    ? governanceDraft.value
+    : data?.governance
+  const activeOperation = data?.activeOperation
+  const actionError = mutations.actionError?.kind === 'api'
+    ? mutations.actionError.message
+    : mutations.actionError
+      ? t('workspace.tenantAdministration.error')
+      : undefined
 
   const saveProfile = () => {
     if (!profile) return
-    void runMutation(
-      'tenant-profile',
-      JSON.stringify(profile),
-      (context) => updateTenantProfile(accessToken, {
-        region: profile.region,
-        locale: profile.locale,
-        defaultPolicy: profile.defaultPolicy,
-        expectedRevision: profile.revision,
-      }, context),
-    )
-  }
-
-  const saveEntitlement = () => {
-    if (!entitlement) return
-    void runMutation(
-      'tenant-entitlement',
-      JSON.stringify(entitlement),
-      (context) => updateTenantEntitlement(accessToken, {
-        plan: entitlement.plan,
-        features: entitlement.features,
-        seatLimit: entitlement.seatLimit,
-        usageQuota: entitlement.usageQuota,
-        gracePeriodDays: entitlement.gracePeriodDays,
-        expectedRevision: entitlement.revision,
-      }, context),
-    )
+    void mutations.saveProfile(profile)
   }
 
   const saveGovernance = () => {
     if (!governance) return
-    void runMutation(
-      'tenant-governance',
-      JSON.stringify(governance),
-      (context) => updateTenantGovernance(accessToken, {
-        auditRetentionDays: governance.auditRetentionDays,
-        legalHold: governance.legalHold,
-        dataResidency: governance.dataResidency,
-        encryptionKeyPolicy: governance.encryptionKeyPolicy,
-        expectedRevision: governance.revision,
-      }, context),
-    )
+    void mutations.saveGovernance(governance)
   }
 
   const runOperation = (
     operation: TenantOperation,
     action: 'pause' | 'resume' | 'verify',
   ) => {
-    void runMutation(
-      `tenant-operation-${operation.operationId}`,
-      `${operation.operationId}:${action}:${operation.revision}`,
-      (context) => {
-        const request = action === 'pause'
-          ? pauseTenantOperation
-          : action === 'resume'
-            ? resumeTenantOperation
-            : verifyTenantClosure
-        return request(accessToken, operation.operationId, context)
-      },
-    )
+    void mutations.runOperation(operation, action)
   }
 
   const requestExportAction = () => {
-    void runMutation(
-      'tenant-export',
-      `export:${exportFormat}`,
-      (context) => requestTenantExport(accessToken, { format: exportFormat }, context),
-    )
+    void mutations.requestExport(exportFormat)
   }
 
   const requestClosureAction = () => {
     if (closureConfirmation !== 'CLOSE') return
-    void runMutation(
-      'tenant-closure',
-      'closure:CLOSE',
-      (context) => requestTenantClosure(accessToken, { confirmation: 'CLOSE' }, context),
-    )
-    setClosureConfirmation('')
+    void mutations.requestClosure(closureConfirmation).then((completed) => {
+      if (completed) setClosureConfirmation('')
+    })
   }
 
   if (isLoading) {
     return <section className="workbench-panel p-5">{t('workspace.tenantAdministration.loading')}</section>
   }
-  if (error || !data || !profile || !entitlement || !governance) {
+  if (error || !data || !profile || !governance) {
     return (
       <section className="workbench-panel border-[#f1c4b8] p-5" data-testid="tenant-administration-error">
         <SectionHeader
@@ -220,21 +147,25 @@ export function TenantAdministrationPanelContainer({
       activeOperation={activeOperation}
       closureConfirmation={closureConfirmation}
       data={data}
-      entitlement={entitlement}
+      entitlement={data.entitlement}
       exportFormat={exportFormat}
       governance={governance}
-      isSaving={isSaving}
+      isSaving={mutations.isSaving}
       locale={locale}
       onChangeClosureConfirmation={setClosureConfirmation}
       onChangeExportFormat={setExportFormat}
-      onChangeEntitlement={setEntitlement}
-      onChangeGovernance={setGovernance}
-      onChangeProfile={setProfile}
+      onChangeGovernance={(value) => setGovernanceDraft({
+        baseRevision: data.governance.revision,
+        value,
+      })}
+      onChangeProfile={(value) => setProfileDraft({
+        baseRevision: data.profile.revision,
+        value,
+      })}
       onPauseOperation={(operation) => runOperation(operation, 'pause')}
       onRequestClosure={requestClosureAction}
       onRequestExport={requestExportAction}
       onResumeOperation={(operation) => runOperation(operation, 'resume')}
-      onSaveEntitlement={saveEntitlement}
       onSaveGovernance={saveGovernance}
       onSaveProfile={saveProfile}
       onVerifyClosure={(operation) => runOperation(operation, 'verify')}
@@ -254,7 +185,7 @@ type TenantAdministrationPanelProps = {
   closureConfirmation: string
   /** Current aggregate returned by the server. */
   data: TenantAdministrationSnapshot
-  /** Editable entitlement draft. */
+  /** Read-only commercial entitlement assigned by the system control plane. */
   entitlement: TenantEntitlement
   /** Selected export format. */
   exportFormat: 'jsonl' | 'csv'
@@ -272,8 +203,6 @@ type TenantAdministrationPanelProps = {
   onChangeClosureConfirmation: (value: string) => void
   /** Changes the export format. */
   onChangeExportFormat: (value: 'jsonl' | 'csv') => void
-  /** Changes the entitlement draft. */
-  onChangeEntitlement: (value: TenantEntitlement) => void
   /** Changes the governance draft. */
   onChangeGovernance: (value: TenantGovernancePolicy) => void
   /** Changes the profile draft. */
@@ -286,8 +215,6 @@ type TenantAdministrationPanelProps = {
   onRequestExport: () => void
   /** Resumes one paused operation. */
   onResumeOperation: (operation: TenantOperation) => void
-  /** Saves entitlement changes. */
-  onSaveEntitlement: () => void
   /** Saves governance changes. */
   onSaveGovernance: () => void
   /** Saves profile changes. */
@@ -302,7 +229,7 @@ type TenantAdministrationPanelProps = {
  * @param props - Tenant aggregate, drafts, callbacks, and localized labels.
  * @returns Tenant administration settings panel.
  */
-function TenantAdministrationPanel({
+export function TenantAdministrationPanel({
   actionError,
   activeOperation,
   closureConfirmation,
@@ -314,14 +241,12 @@ function TenantAdministrationPanel({
   locale,
   onChangeClosureConfirmation,
   onChangeExportFormat,
-  onChangeEntitlement,
   onChangeGovernance,
   onChangeProfile,
   onPauseOperation,
   onRequestClosure,
   onRequestExport,
   onResumeOperation,
-  onSaveEntitlement,
   onSaveGovernance,
   onSaveProfile,
   onVerifyClosure,
@@ -345,7 +270,7 @@ function TenantAdministrationPanel({
 
   return (
     <section className="workbench-panel overflow-hidden" data-testid="tenant-administration-panel">
-      <div className="border-b border-[var(--workbench-border)] bg-[linear-gradient(110deg,#eef9f7_0%,#ffffff_58%,#fff7ef_100%)] px-5 py-6 sm:px-7">
+      <div className="border-b border-[var(--workbench-border)] bg-[#f1f7f5] px-5 py-6 sm:px-7">
         <div className="flex flex-wrap items-end justify-between gap-5">
           <div>
             <p className="workbench-eyebrow">{t('workspace.tenantAdministration.eyebrow')}</p>
@@ -367,7 +292,7 @@ function TenantAdministrationPanel({
         ) : null}
       </div>
 
-      <div className="grid gap-4 border-b border-[var(--workbench-border)] p-5 sm:grid-cols-3 sm:p-7">
+      <div className="grid border-b border-[var(--workbench-border)] px-5 py-6 sm:grid-cols-3 sm:divide-x sm:divide-[var(--workbench-border)] sm:px-7">
         <TenantMetric label={t('workspace.tenantAdministration.metric.plan')} value={entitlement.plan} />
         <TenantMetric
           label={t('workspace.tenantAdministration.metric.seats')}
@@ -381,16 +306,17 @@ function TenantAdministrationPanel({
         />
       </div>
 
-      <div className="grid gap-5 p-5 sm:p-7 xl:grid-cols-2">
-        <section className="rounded-xl border border-[var(--workbench-border)] bg-white p-5">
+      <div className="grid px-5 sm:px-7 xl:grid-cols-2 xl:gap-x-8">
+        <section className="border-t border-[var(--workbench-border)] py-7">
           <SectionHeader title={t('workspace.tenantAdministration.profileTitle')} meta={t('workspace.tenantAdministration.profileMeta')} />
           <div className="mt-5 grid gap-4 sm:grid-cols-2">
             <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
               {t('workspace.tenantAdministration.region')}
               <input
                 className="workbench-input"
-                onChange={(event) => onChangeProfile({ ...profile, region: event.target.value })}
-                value={profile.region}
+                disabled
+                readOnly
+                value={data.governanceEnforcement.dataResidency}
               />
             </label>
             <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
@@ -449,21 +375,15 @@ function TenantAdministrationPanel({
           </button>
         </section>
 
-        <section className="rounded-xl border border-[var(--workbench-border)] bg-white p-5">
+        <section className="border-t border-[var(--workbench-border)] py-7">
           <SectionHeader title={t('workspace.tenantAdministration.entitlementTitle')} meta={t('workspace.tenantAdministration.entitlementMeta')} />
           <div className="mt-5 grid gap-4 sm:grid-cols-3">
             <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
               {t('workspace.tenantAdministration.plan')}
-              <select
-                className="workbench-input"
-                onChange={(event) => onChangeEntitlement({ ...entitlement, plan: readPlan(event.target.value) })}
-                value={entitlement.plan}
-              >
-                {tenantPlans.map((plan) => <option key={plan} value={plan}>{plan}</option>)}
-              </select>
+              <input className="workbench-input" disabled readOnly value={entitlement.plan} />
             </label>
-            <NumberField label={t('workspace.tenantAdministration.seatLimit')} value={entitlement.seatLimit} onChange={(value) => onChangeEntitlement({ ...entitlement, seatLimit: value })} />
-            <NumberField label={t('workspace.tenantAdministration.usageQuota')} value={entitlement.usageQuota} onChange={(value) => onChangeEntitlement({ ...entitlement, usageQuota: value })} />
+            <ReadOnlyNumberField label={t('workspace.tenantAdministration.seatLimit')} value={entitlement.seatLimit} />
+            <ReadOnlyNumberField label={t('workspace.tenantAdministration.usageQuota')} value={entitlement.usageQuota} />
           </div>
           <fieldset className="mt-4">
             <legend className="text-sm font-semibold text-[var(--workbench-text)]">{t('workspace.tenantAdministration.features')}</legend>
@@ -471,28 +391,36 @@ function TenantAdministrationPanel({
               {tenantFeatures.map((feature) => {
                 const checked = entitlement.features.includes(feature)
                 return (
-                  <label className={`cursor-pointer rounded-full border px-3 py-1.5 text-xs font-semibold transition ${checked ? 'border-[#8acfc3] bg-[#ecfaf7] text-[var(--workbench-primary)]' : 'border-[var(--workbench-border)] text-[var(--workbench-muted)]'}`} key={feature}>
-                    <input
-                      checked={checked}
-                      className="sr-only"
-                      onChange={() => onChangeEntitlement({
-                        ...entitlement,
-                        features: checked ? entitlement.features.filter((candidate) => candidate !== feature) : [...entitlement.features, feature],
-                      })}
-                      type="checkbox"
-                    />
+                  <span className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${checked ? 'border-[#8acfc3] bg-[#ecfaf7] text-[var(--workbench-primary)]' : 'border-[var(--workbench-border)] text-[var(--workbench-muted)]'}`} key={feature}>
                     {feature}
-                  </label>
+                  </span>
                 )
               })}
             </div>
           </fieldset>
-          <button className="workbench-button-primary mt-5" disabled={isSaving} onClick={onSaveEntitlement} type="button">
-            {t('workspace.tenantAdministration.saveEntitlement')}
-          </button>
+          <div className="mt-5 border-t border-[var(--workbench-border)] pt-4">
+            <p className="text-sm font-semibold text-[var(--workbench-text)]">
+              {t('workspace.tenantAdministration.invoiceHistory')}
+            </p>
+            <div className="mt-2 grid gap-2">
+              {data.billingPeriods.slice(0, 3).map((period) => (
+                <div className="flex items-center justify-between gap-3 border-b border-[var(--workbench-border)] py-2 text-xs last:border-b-0" key={period.periodStart}>
+                  <span className="font-semibold text-[var(--workbench-text)]">
+                    {period.periodStart.slice(0, 7)}
+                  </span>
+                  <span className="text-right text-[var(--workbench-muted)]">
+                    {t('workspace.tenantAdministration.metric.usage')}: {' '}
+                    {period.meteredUnits.toLocaleString(locale)} · {' '}
+                    {t('workspace.tenantAdministration.metric.seats')}: {' '}
+                    {period.activeSeatHighWaterMark.toLocaleString(locale)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
         </section>
 
-        <section className="rounded-xl border border-[var(--workbench-border)] bg-white p-5">
+        <section className="border-t border-[var(--workbench-border)] py-7 xl:col-span-2">
           <SectionHeader title={t('workspace.tenantAdministration.governanceTitle')} meta={t('workspace.tenantAdministration.governanceMeta')} />
           <div className="mt-5 grid gap-4 sm:grid-cols-2">
             <NumberField label={t('workspace.tenantAdministration.retention')} value={governance.auditRetentionDays} onChange={(value) => onChangeGovernance({ ...governance, auditRetentionDays: value })} />
@@ -500,15 +428,17 @@ function TenantAdministrationPanel({
               {t('workspace.tenantAdministration.dataResidency')}
               <input
                 className="workbench-input"
-                onChange={(event) => onChangeGovernance({ ...governance, dataResidency: event.target.value })}
-                value={governance.dataResidency}
+                disabled
+                readOnly
+                value={data.governanceEnforcement.dataResidency}
               />
             </label>
             <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
               {t('workspace.tenantAdministration.encryption')}
-              <select className="workbench-input" onChange={(event) => onChangeGovernance({ ...governance, encryptionKeyPolicy: event.target.value === 'customer-managed' ? 'customer-managed' : 'aws-managed' })} value={governance.encryptionKeyPolicy}>
-                <option value="aws-managed">AWS managed</option>
-                <option value="customer-managed">Customer managed</option>
+              <select className="workbench-input" disabled value={data.governanceEnforcement.encryptionKeyPolicy}>
+                <option value={data.governanceEnforcement.encryptionKeyPolicy}>
+                  {data.governanceEnforcement.encryptionKeyPolicy === 'customer-managed' ? 'Customer managed' : 'AWS managed'}
+                </option>
               </select>
             </label>
           </div>
@@ -516,12 +446,19 @@ function TenantAdministrationPanel({
             <input checked={governance.legalHold} onChange={(event) => onChangeGovernance({ ...governance, legalHold: event.target.checked })} type="checkbox" />
             <span>{t('workspace.tenantAdministration.legalHold')}</span>
           </label>
+          {data.retentionReconciliation && (
+            <p className="mt-3 text-xs font-semibold text-[var(--workbench-muted)]">
+              {t('workspace.tenantAdministration.retentionProgress')}: {' '}
+              {data.retentionReconciliation.status} · {' '}
+              {data.retentionReconciliation.processedEvents.toLocaleString(locale)}
+            </p>
+          )}
           <button className="workbench-button-primary mt-5" disabled={isSaving} onClick={onSaveGovernance} type="button">
             {t('workspace.tenantAdministration.saveGovernance')}
           </button>
         </section>
 
-        <section className="rounded-xl border border-[var(--workbench-border)] bg-[#fbfcfd] p-5">
+        <section className="border-t border-[var(--workbench-border)] py-7 xl:col-span-2">
           <SectionHeader title={t('workspace.tenantAdministration.lifecycleTitle')} meta={t('workspace.tenantAdministration.lifecycleMeta')} />
           {activeOperation ? (
             <div className="mt-5 rounded-lg border border-[#99d7cf] bg-[#f2fbf9] p-4">
@@ -530,21 +467,21 @@ function TenantAdministrationPanel({
                 <span className="text-xs uppercase tracking-[0.08em] text-[var(--workbench-primary)]">{activeOperation.status}</span>
               </div>
               <div className="mt-3 h-2 overflow-hidden rounded-full bg-[#d9eee9]">
-                <div className="h-full rounded-full bg-[var(--workbench-primary)] transition-[width]" style={{ width: `${operationPercent}%` }} />
+                <div className="h-full rounded-full bg-[var(--workbench-primary)] transition-[width] motion-reduce:transition-none" style={{ width: `${operationPercent}%` }} />
               </div>
               <p className="mt-2 text-xs font-semibold text-[var(--workbench-muted)]">{operationPercent}% · {activeOperation.currentStep ?? t('workspace.tenantAdministration.waiting')}</p>
               <div className="mt-4 flex flex-wrap gap-2">
-                {(activeOperation.status === 'requested' || activeOperation.status === 'running') ? <button className="workbench-button-secondary" disabled={isSaving} onClick={() => onPauseOperation(activeOperation)} type="button">{t('workspace.tenantAdministration.pause')}</button> : null}
+                {activeOperation.status === 'running' ? <button className="workbench-button-secondary" disabled={isSaving} onClick={() => onPauseOperation(activeOperation)} type="button">{t('workspace.tenantAdministration.pause')}</button> : null}
                 {activeOperation.status === 'paused' ? <button className="workbench-button-secondary" disabled={isSaving} onClick={() => onResumeOperation(activeOperation)} type="button">{t('workspace.tenantAdministration.resume')}</button> : null}
                 {activeOperation.kind === 'closure' && activeOperation.status === 'completed' ? <button className="workbench-button-primary" disabled={isSaving} onClick={() => onVerifyClosure(activeOperation)} type="button">{t('workspace.tenantAdministration.verify')}</button> : null}
               </div>
             </div>
           ) : null}
-          <div className="mt-5 grid gap-4 sm:grid-cols-2">
-            <div className="rounded-lg border border-[var(--workbench-border)] bg-white p-4">
+          <div className="mt-5 grid border-y border-[var(--workbench-border)] sm:grid-cols-2 sm:divide-x sm:divide-[var(--workbench-border)]">
+            <div className="py-5 sm:pr-5">
               <p className="text-sm font-semibold text-[var(--workbench-text)]">{t('workspace.tenantAdministration.exportTitle')}</p>
               <p className="mt-1 text-sm leading-6 text-[var(--workbench-muted)]">{t('workspace.tenantAdministration.exportDescription')}</p>
-              <div className="mt-3 flex gap-2">
+              <div className="mt-3 flex flex-col gap-2 sm:flex-row">
                 <select className="workbench-input" onChange={(event) => onChangeExportFormat(event.target.value === 'csv' ? 'csv' : 'jsonl')} value={exportFormat}>
                   <option value="jsonl">JSONL</option>
                   <option value="csv">CSV</option>
@@ -552,10 +489,10 @@ function TenantAdministrationPanel({
                 <button className="workbench-button-secondary" disabled={isSaving || Boolean(activeOperation)} onClick={onRequestExport} type="button">{t('workspace.tenantAdministration.startExport')}</button>
               </div>
             </div>
-            <div className="rounded-lg border border-[#f1c4b8] bg-[#fffaf8] p-4">
+            <div className="border-l-2 border-[#d76a4d] bg-[#fffaf8] px-4 py-5 sm:border-l-0 sm:pl-5">
               <p className="text-sm font-semibold text-[#8d3c29]">{t('workspace.tenantAdministration.closureTitle')}</p>
               <p className="mt-1 text-sm leading-6 text-[#9e604f]">{t('workspace.tenantAdministration.closureDescription')}</p>
-              <div className="mt-3 flex gap-2">
+              <div className="mt-3 flex flex-col gap-2 sm:flex-row">
                 <input aria-label={t('workspace.tenantAdministration.confirmationLabel')} className="workbench-input" onChange={(event) => onChangeClosureConfirmation(event.target.value)} placeholder="CLOSE" value={closureConfirmation} />
                 <button className="workbench-button-danger" disabled={isSaving || Boolean(activeOperation) || governance.legalHold || closureConfirmation !== 'CLOSE'} onClick={onRequestClosure} type="button">{t('workspace.tenantAdministration.startClosure')}</button>
               </div>
@@ -563,11 +500,18 @@ function TenantAdministrationPanel({
           </div>
         </section>
       </div>
-      <InfoGrid items={[
-        ['workspace.tenantAdministration.auditTitle', 'workspace.tenantAdministration.auditDescription'],
-        ['workspace.tenantAdministration.residencyTitle', 'workspace.tenantAdministration.residencyDescription'],
-        ['workspace.tenantAdministration.workflowTitle', 'workspace.tenantAdministration.workflowDescription'],
-      ]} t={t} />
+      <div className="grid border-t border-[var(--workbench-border)] bg-[#f8faf9] sm:grid-cols-3 sm:divide-x sm:divide-[var(--workbench-border)]">
+        {tenantAdministrationInfoItems.map(([titleKey, descriptionKey]) => (
+          <section className="px-5 py-5 sm:px-7" key={titleKey}>
+            <h3 className="text-sm font-semibold text-[var(--workbench-text)]">
+              {t(titleKey)}
+            </h3>
+            <p className="mt-2 text-xs font-medium leading-5 tracking-[0.01em] text-[var(--workbench-muted)]">
+              {t(descriptionKey)}
+            </p>
+          </section>
+        ))}
+      </div>
     </section>
   )
 }
@@ -575,7 +519,7 @@ function TenantAdministrationPanel({
 /** Compact usage metric with an optional progress bar. */
 function TenantMetric({ label, value, progress }: { label: string; value: string; progress?: number }) {
   return (
-    <div className="rounded-xl border border-[var(--workbench-border)] bg-white p-4">
+    <div className="py-1 sm:px-6 sm:first:pl-0 sm:last:pr-0">
       <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">{label}</p>
       <p className="mt-2 text-xl font-semibold tracking-[-0.02em] text-[var(--workbench-text)]">{value}</p>
       {progress === undefined ? null : <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-[#e7efef]"><div className="h-full rounded-full bg-[var(--workbench-primary)]" style={{ width: `${progress}%` }} /></div>}
@@ -593,6 +537,12 @@ function NumberField({ label, value, onChange }: { label: string; value: number;
   )
 }
 
-function readPlan(value: string): TenantPlan {
-  return value === 'growth' || value === 'enterprise' ? value : 'starter'
+/** Read-only numeric field used for server-assigned commercial limits. */
+function ReadOnlyNumberField({ label, value }: { label: string; value: number }) {
+  return (
+    <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
+      {label}
+      <input className="workbench-input" disabled readOnly type="number" value={value} />
+    </label>
+  )
 }

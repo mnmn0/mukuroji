@@ -30,6 +30,7 @@ import { buildConnectorWorkers } from './subsystems/workers/connectors';
 import { buildEnterpriseIdentityWorkers } from './subsystems/workers/enterprise-identity';
 import { buildRequestEmailWorker } from './subsystems/workers/request-email';
 import { buildScheduleWorkers } from './subsystems/workers/schedules';
+import { buildTenantOperationWorker } from './subsystems/workers/tenant-operation';
 import { buildWebhookDeliveryWorkers } from './subsystems/workers/webhook-delivery';
 import { buildWorkItemImportWorker } from './subsystems/workers/work-item-import';
 
@@ -194,6 +195,11 @@ export class CdkStack extends cdk.Stack {
       parameters,
       runtimeControls,
     });
+    const tenantOperationWorker = buildTenantOperationWorker(this, {
+      dataStores,
+      lambdaBuildPaths,
+      runtimeControls,
+    });
 
     configureAlarmRouting(this, {
       notificationTopicArns: parameters.alarmNotificationTopicArns,
@@ -215,6 +221,7 @@ export class CdkStack extends cdk.Stack {
       ...automationWorkers,
       ...scheduleWorkers,
       ...requestEmailWorker,
+      ...tenantOperationWorker,
       ...runtimeControls,
       workspaceDirectoryId: parameters.workspaceDirectoryId,
     });

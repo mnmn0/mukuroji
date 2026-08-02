@@ -2,11 +2,14 @@ import type {
   RequestTenantClosureInput,
   RequestTenantExportInput,
   TenantAdministrationSnapshot,
+  TenantBillingPeriod,
   TenantDefaultPolicy,
   TenantEntitlement,
+  TenantGovernanceEnforcement,
   TenantGovernancePolicy,
   TenantOperation,
   TenantProfile,
+  TenantRetentionReconciliation,
   TenantUsage,
   UpdateTenantEntitlementInput,
   UpdateTenantGovernanceInput,
@@ -271,23 +274,58 @@ function readResponseEntity<T>(
 function readTenantAdministrationSnapshot(value: unknown): TenantAdministrationSnapshot {
   if (
     isRecord(value) &&
-    value.schemaVersion === 1 &&
+    value.schemaVersion === 2 &&
     isTenantProfile(value.profile) &&
     isTenantEntitlement(value.entitlement) &&
     isTenantUsage(value.usage) &&
+    Array.isArray(value.billingPeriods) &&
+    value.billingPeriods.every(isTenantBillingPeriod) &&
     isTenantGovernancePolicy(value.governance) &&
+    isTenantGovernanceEnforcement(value.governanceEnforcement) &&
+    (value.retentionReconciliation === undefined ||
+      isTenantRetentionReconciliation(value.retentionReconciliation)) &&
     (value.activeOperation === undefined || isTenantOperation(value.activeOperation))
   ) {
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       profile: value.profile,
       entitlement: value.entitlement,
       usage: value.usage,
+      billingPeriods: value.billingPeriods,
       governance: value.governance,
+      governanceEnforcement: value.governanceEnforcement,
+      ...(value.retentionReconciliation
+        ? { retentionReconciliation: value.retentionReconciliation }
+        : {}),
       ...(value.activeOperation ? { activeOperation: value.activeOperation } : {}),
     }
   }
   throw new WorkspaceAccessApiError(502, 'tenant.administration.invalidResponse')
+}
+
+/** Returns true for data-plane governance enforcement controls. */
+function isTenantGovernanceEnforcement(
+  value: unknown,
+): value is TenantGovernanceEnforcement {
+  return isRecord(value) &&
+    typeof value.dataResidency === 'string' &&
+    (value.encryptionKeyPolicy === 'aws-managed' || value.encryptionKeyPolicy === 'customer-managed')
+}
+
+/** Returns true for one validated audit-retention reconciliation progress record. */
+function isTenantRetentionReconciliation(
+  value: unknown,
+): value is TenantRetentionReconciliation {
+  return isRecord(value) &&
+    typeof value.workspaceId === 'string' &&
+    isNonNegativeInteger(value.governanceRevision) &&
+    (value.status === 'pending' || value.status === 'running' || value.status === 'completed') &&
+    isNonNegativeInteger(value.retentionDays) &&
+    typeof value.legalHold === 'boolean' &&
+    isNonNegativeInteger(value.processedEvents) &&
+    (value.cursorEventId === undefined || typeof value.cursorEventId === 'string') &&
+    typeof value.updatedBy === 'string' &&
+    isRevisionedRecord(value)
 }
 
 function isTenantProfile(value: unknown): value is TenantProfile {
@@ -336,6 +374,17 @@ function isTenantUsage(value: unknown): value is TenantUsage {
     typeof value.periodStart === 'string' &&
     typeof value.periodEnd === 'string' &&
     (value.gracePeriodEndsAt === undefined || typeof value.gracePeriodEndsAt === 'string') &&
+    isRevisionedRecord(value)
+}
+
+/** Returns true for one invoice-ready tenant billing aggregate. */
+function isTenantBillingPeriod(value: unknown): value is TenantBillingPeriod {
+  return isRecord(value) &&
+    typeof value.workspaceId === 'string' &&
+    typeof value.periodStart === 'string' &&
+    typeof value.periodEnd === 'string' &&
+    isNonNegativeInteger(value.meteredUnits) &&
+    isNonNegativeInteger(value.activeSeatHighWaterMark) &&
     isRevisionedRecord(value)
 }
 

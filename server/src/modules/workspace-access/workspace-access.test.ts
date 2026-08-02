@@ -15,6 +15,8 @@ import {
   WorkspaceAccessError,
   isWorkspaceIdentitySafeToDelete,
   type WorkspaceMember,
+  type WorkspaceSeatMeter,
+  type WorkspaceSeatMutationInput,
 } from './workspace-access'
 
 const workspaceId = 'user#demo@example.com'
@@ -115,6 +117,7 @@ function createDocumentClient(
  * @param auditTableName - Optional Audit table name.
  * @param auditPseudonymKey - Optional audit pseudonym key.
  * @param documentsTableName - Optional Documents table name.
+ * @param seatMeter - Optional tenant seat-meter transaction contributor.
  * @returns Configured Workspace Access adapter.
  */
 function createWorkspaceAccessClientWithDocumentAuthorization(
@@ -127,6 +130,7 @@ function createWorkspaceAccessClientWithDocumentAuthorization(
   auditTableName?: string | null,
   auditPseudonymKey?: string,
   documentsTableName?: string,
+  seatMeter?: WorkspaceSeatMeter,
 ): DynamoDbWorkspaceAccessClient {
   return new DynamoDbWorkspaceAccessClient(
     tableName,
@@ -140,6 +144,7 @@ function createWorkspaceAccessClientWithDocumentAuthorization(
     new DynamoDbDocumentAuthorizationRevisionMutationAdapter(
       documentsTableName,
     ),
+    seatMeter,
   )
 }
 
@@ -1376,6 +1381,76 @@ test('serializes member deactivation with the Planning graph revision', async ()
           },
           ConditionExpression:
             'revision = :expectedDocumentAuthorizationRevision',
+        },
+      },
+    ],
+  })
+})
+
+test('joins seat release to the authoritative member deactivation transaction', async () => {
+  const actor = createWorkspaceMember('demo@example.com')
+  const target = createWorkspaceMember('member@example.com', 'member')
+  const transactionInputs: Array<Record<string, unknown>> = []
+  const seatInputs: WorkspaceSeatMutationInput[] = []
+  const seatMeter: WorkspaceSeatMeter = {
+    async prepareSeatMutation(input) {
+      seatInputs.push(input)
+      return [{
+        Put: {
+          TableName: 'TenantAdministrationTable',
+          Item: {
+            workspaceId: input.workspaceId,
+            recordKey: 'USAGE',
+          },
+          ConditionExpression: 'revision = :expectedRevision',
+        },
+      }]
+    },
+  }
+  const client = createWorkspaceAccessClientWithDocumentAuthorization(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      if (command.constructor.name === 'GetCommand') {
+        const key = command.input.Key as { recordKey?: string }
+        return { Item: toMemberItem(key.recordKey?.includes('member@example.com') ? target : actor) }
+      }
+      transactionInputs.push(command.input)
+      return {}
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+    undefined,
+    undefined,
+    'DocumentsTable',
+    seatMeter,
+  )
+
+  await client.updateMember(workspaceId, actor.memberKey, target.memberKey, {
+    status: 'deactivated',
+    expectedVersion: target.version,
+    expectedPlanningRevision: 7,
+    expectedDocumentAuthorizationRevision: 3,
+  })
+
+  expect(seatInputs).toEqual([{
+    workspaceId,
+    memberKey: target.memberKey,
+    direction: 'deactivate',
+    occurredAt: now.toISOString(),
+  }])
+  expect(transactionInputs[0]).toMatchObject({
+    TransactItems: [
+      {},
+      {},
+      {},
+      {},
+      {
+        Put: {
+          TableName: 'TenantAdministrationTable',
+          Item: { workspaceId, recordKey: 'USAGE' },
+          ConditionExpression: 'revision = :expectedRevision',
         },
       },
     ],

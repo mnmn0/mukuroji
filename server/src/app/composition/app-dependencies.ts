@@ -58,7 +58,10 @@ import type {
 } from '../../modules/work-items/work-item-import'
 import type { WorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'
 import type { WorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
-import type { TenantAdministrationClient } from '../../modules/tenant-administration'
+import type {
+  TenantAdministrationClient,
+  TenantEntitlementEnforcement,
+} from '../../modules/tenant-administration'
 import type { TimeTrackingService } from '../../modules/time-tracking'
 import type {
   ApiAccessObservation,
@@ -126,6 +129,8 @@ export interface WorkspaceDependencies {
   enterpriseIdentityProviderConnectionTester: EnterpriseIdentityProviderConnectionTester
   /** Provides tenant profile, entitlement, governance, and lifecycle state. */
   tenantAdministration: TenantAdministrationClient
+  /** Enforces tenant feature and usage policy at authenticated route boundaries. */
+  tenantEntitlementEnforcement: TenantEntitlementEnforcement
 }
 
 /** Dependencies required by Work Item and collaboration routes. */

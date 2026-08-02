@@ -170,6 +170,8 @@ function createTestRouter(input: {
   managementPrincipal?: DeveloperManagementPrincipal
   /** Management authentication の request context を検証する override です。 */
   authenticateManagement?: PublicApiDependencies['authenticateManagement']
+  /** Commercial entitlement policy used by the focused router test. */
+  enforceEntitlement?: PublicApiDependencies['enforceEntitlement']
   platform?: InMemoryDeveloperPlatformClient
   now?: () => Date
   queueWebhookDelivery?: (workspaceId: string, deliveryId: string) => Promise<void>
@@ -182,6 +184,7 @@ function createTestRouter(input: {
     ...createFocusedTestPlatform(platform),
     authenticateManagement: input.authenticateManagement ??
       (async () => input.managementPrincipal ?? managementPrincipal),
+    enforceEntitlement: input.enforceEntitlement ?? (async () => undefined),
     workItems: input.workItems ?? createDefaultWorkItemService(),
     openApiDocument: { openapi: '3.1.0' },
     cursorSecret: 'public-api-test-cursor-secret-at-least-32-bytes',
@@ -241,6 +244,32 @@ describe('public API router', () => {
       '/developer',
       'forwarded',
     ])
+  })
+
+  test('enforces Developer Platform entitlement after resolving the credential Workspace', async () => {
+    const observations: Array<{ workspaceId: string; method: string }> = []
+    const { platform, router } = createTestRouter({
+      async enforceEntitlement(workspaceId, method) {
+        observations.push({ workspaceId, method })
+        throw new PublicApiServiceError(
+          403,
+          'forbidden',
+          'Developer Platform is not enabled for this Workspace.',
+        )
+      },
+    })
+    const apiKey = await createApiKey(platform, ['work-items:read'])
+
+    const response = await router.request('http://localhost/v1/work-items', {
+      headers: { Authorization: `Bearer ${apiKey.secret}` },
+    })
+
+    expect(response.status).toBe(403)
+    expect(await response.json()).toMatchObject({
+      code: 'forbidden',
+      detail: 'Developer Platform is not enabled for this Workspace.',
+    })
+    expect(observations).toEqual([{ workspaceId: 'workspace-1', method: 'GET' }])
   })
 
   test('redacts error messages, stacks, causes, and unsafe codes from log fields', () => {

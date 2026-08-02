@@ -776,6 +776,7 @@ test('accepts an unauthenticated signed inbound webhook without exposing secret 
       | undefined
     const signingSecret = Buffer.from('server-issued-secret', 'utf8')
     const secretReads: unknown[] = []
+    const usageReservationKeys: Array<string | undefined> = []
     setTestAppDependencies({
       inboundWebhooks: createAutomationInboundWebhookPort({
         async resolveInboundWebhookEndpoint() {
@@ -796,6 +797,12 @@ test('accepts an unauthenticated signed inbound webhook without exposing secret 
         },
         async delete() {
           throw new Error('Public delivery must not delete a secret.')
+        },
+      },
+      tenantEntitlementEnforcement: {
+        async assertFeature() {},
+        async reserveUsage(_workspaceId, _feature, _units, idempotencyKey) {
+          usageReservationKeys.push(idempotencyKey)
         },
       },
     })
@@ -835,6 +842,9 @@ test('accepts an unauthenticated signed inbound webhook without exposing secret 
     expect(JSON.stringify(deliveryInput)).not.toContain('server-issued-secret')
     expect(JSON.stringify(deliveryInput)).not.toContain(signature)
     expect(deliveryInput?.bodyFingerprint).toMatch(/^[a-f0-9]{64}$/)
+    expect(usageReservationKeys).toEqual([
+      `inbound-webhook:${resolvedEndpoint.id}:sender-delivery-1`,
+    ])
 
     resolvedEndpoint = { ...resolvedEndpoint, status: 'paused' }
     expect((await request()).status).toBe(423)
@@ -848,12 +858,19 @@ test('accepts an unauthenticated signed inbound webhook without exposing secret 
 
 test('maps inbound webhook public validation failures without Cognito authentication', async () => {
   const endpoint = createInboundWebhookEndpointRecord()
+  let usageReservations = 0
   setTestAppDependencies({
     inboundWebhooks: createAutomationInboundWebhookPort({
       async resolveInboundWebhookEndpoint(opaqueEndpointId) {
         return opaqueEndpointId === endpoint.opaqueEndpointId ? endpoint : undefined
       },
     }),
+    tenantEntitlementEnforcement: {
+      async assertFeature() {},
+      async reserveUsage() {
+        usageReservations += 1
+      },
+    },
   })
   const baseUrl = `/api/automation/inbound-webhooks/${endpoint.opaqueEndpointId}`
   expect((await app.request(baseUrl, {
@@ -871,6 +888,7 @@ test('maps inbound webhook public validation failures without Cognito authentica
     headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'delivery-1' },
     body: '{}',
   })).status).toBe(404)
+  expect(usageReservations).toBe(0)
 })
 
 test('returns plaintext inbound secrets only from create/rotate and redacts durable endpoints', async () => {

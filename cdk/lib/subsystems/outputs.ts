@@ -126,6 +126,10 @@ export type StackOutputResources = {
   readonly requestEmailIngestionFunction: lambda.IFunction;
   /** Dead-letter queue for request email ingestion failures. */
   readonly requestEmailIngestionDlq: sqs.IQueue;
+  /** IAM-invokable tenant lifecycle executor. */
+  readonly tenantOperationFunction: lambda.IFunction;
+  /** Dead-letter queue for tenant lifecycle stream failures. */
+  readonly tenantOperationDlq: sqs.IQueue;
   /** Lambda Function URL for the project task API. */
   readonly functionUrl: lambda.FunctionUrl;
   /** HTTP API Gateway endpoint for the project task API. */
@@ -332,6 +336,12 @@ export function buildStackOutputs(
   });
   new cdk.CfnOutput(scope, 'RequestEmailIngestionDlqUrl', {
     value: resources.requestEmailIngestionDlq.queueUrl,
+  });
+  new cdk.CfnOutput(scope, 'TenantOperationFunctionName', {
+    value: resources.tenantOperationFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'TenantOperationDlqUrl', {
+    value: resources.tenantOperationDlq.queueUrl,
   });
   new cdk.CfnOutput(scope, 'ProjectTasksApiUrl', {
     value: resources.functionUrl.url,

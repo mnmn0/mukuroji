@@ -297,6 +297,12 @@ export type PublicApiDependencies = {
   idempotency: IdempotencyPort
   /** Credential-scoped rate-limit port. */
   rateLimits: RateLimitPort
+  /** Enforces Developer Platform entitlement and mutation usage for one Workspace request. */
+  enforceEntitlement(
+    workspaceId: string,
+    method: string,
+    idempotencyKey?: string,
+  ): Promise<void>
   /** Cognito bearer token と request metadata を current Workspace principal へ解決します。 */
   authenticateManagement(
     authorization: string,
@@ -1835,6 +1841,11 @@ async function authenticatePublicRequest(
       requiredScopes,
     })
   }
+  await dependencies.enforceEntitlement(
+    credential.workspaceId,
+    c.req.method,
+    c.req.header('Idempotency-Key'),
+  )
   const rateLimit = await dependencies.rateLimits.consumeRateLimit({
     workspaceId: credential.workspaceId,
     credentialId: credential.credentialId,
