@@ -202,8 +202,18 @@ export type WorkloadMemberSummary = {
   memberId: string
   /** Optional display name. */
   displayName?: string
+  /** Optional primary role used by resource matching. */
+  role?: string
+  /** Skills used by resource matching. */
+  skills: string[]
   /** Member's schedule timezone. */
   timeZone: string
+  /** Recurring local working schedule. */
+  schedule: WorkingSchedule
+  /** Local dates that are not available. */
+  holidays: WorkloadHoliday[]
+  /** Revision of the persisted availability profile used by mutations. */
+  profileRevision: number
   /** Daily, weekly, or monthly cells. */
   cells: WorkloadCell[]
   /** Total capacity across the selected range. */

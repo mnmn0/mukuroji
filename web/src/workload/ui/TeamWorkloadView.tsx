@@ -1,4 +1,4 @@
-import type { CapacityPlanningGranularity, WorkloadCell, WorkloadSnapshot } from '@mukuroji/contracts'
+import type { CapacityPlanningGranularity, ResourceAssignment, WorkloadCell, WorkloadSnapshot } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 
 /** Props for the Team workload heatmap. */
@@ -17,6 +17,10 @@ export type TeamWorkloadViewProps = {
   onRetry: () => void
   /** Resolves localized labels. */
   t: (key: MessageKey) => string
+  /** Moves an assignment to the member and bucket receiving a drop. */
+  onMoveAssignment?: (assignmentId: string, memberId: string, targetDate: string) => void
+  /** Whether an assignment mutation is currently in flight. */
+  isAssignmentMutationPending?: boolean
 }
 
 /** Renders a capacity-aware workload heatmap with an accessible tabular fallback. */
@@ -26,6 +30,8 @@ export function TeamWorkloadView({
   isLoading,
   onGranularityChange,
   onRetry,
+  onMoveAssignment,
+  isAssignmentMutationPending = false,
   snapshot,
   t,
 }: TeamWorkloadViewProps) {
@@ -131,12 +137,38 @@ export function TeamWorkloadView({
                       <span className="mt-1 block text-xs font-semibold text-[var(--workbench-muted)]">{member.timeZone}</span>
                     </th>
                     {member.cells.map((cell) => (
-                      <td className="border-l border-slate-100 px-2 py-2" key={`${member.memberId}-${cell.fromDate}`}>
+                      <td
+                        className="border-l border-slate-100 px-2 py-2"
+                        key={`${member.memberId}-${cell.fromDate}`}
+                        onDragOver={(event) => {
+                          if (onMoveAssignment) event.preventDefault()
+                        }}
+                        onDrop={(event) => {
+                          event.preventDefault()
+                          const assignmentId = event.dataTransfer.getData('text/workload-assignment')
+                          if (assignmentId && onMoveAssignment) onMoveAssignment(assignmentId, member.memberId, cell.fromDate)
+                        }}
+                      >
                         <div className={`min-h-[66px] rounded-md px-2 py-2 ${cellClass(cell)}`} title={formatCellTitle(cell, t)}>
                           <span className="block text-sm font-bold text-[#0d1833]">{formatMinutes(cell.allocatedMinutes)}</span>
                           <span className="mt-1 block text-[11px] font-semibold text-[#526381]">
                             {formatMinutes(cell.capacityMinutes)} · {cell.utilizationPercent}%
                           </span>
+                          {onMoveAssignment ? snapshot?.assignments
+                            .filter((assignment) => assignmentMatchesCell(assignment, member.memberId, cell))
+                            .map((assignment) => (
+                              <button
+                                className="mt-2 block max-w-full truncate rounded bg-white/80 px-1.5 py-1 text-[10px] font-bold text-[#526381] shadow-sm disabled:opacity-50"
+                                draggable={!isAssignmentMutationPending}
+                                key={assignment.id}
+                                title={assignment.workItemId ?? assignment.id}
+                                type="button"
+                                disabled={isAssignmentMutationPending}
+                                onDragStart={(event) => event.dataTransfer.setData('text/workload-assignment', assignment.id)}
+                              >
+                                {assignment.workItemId ?? assignment.id}
+                              </button>
+                            )) : null}
                         </div>
                       </td>
                     ))}
@@ -184,7 +216,7 @@ function cellClass(cell: WorkloadCell): string {
 /** Formats a bucket header without assuming that all users share a timezone. */
 function formatBucket(cell: WorkloadCell): string {
   const date = new Date(`${cell.fromDate}T12:00:00Z`)
-  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(date)
+  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' }).format(date)
 }
 
 /** Formats workload minutes in a compact human-readable form. */
@@ -196,4 +228,10 @@ function formatMinutes(minutes: number): string {
 /** Creates an accessible cell summary. */
 function formatCellTitle(cell: WorkloadCell, t: (key: MessageKey) => string): string {
   return `${formatMinutes(cell.allocatedMinutes)} ${t('workload.cell.allocated')} · ${formatMinutes(cell.capacityMinutes)} ${t('workload.cell.capacity')} · ${cell.utilizationPercent}%`
+}
+
+/** Checks whether an assignment intersects a displayed member and date bucket. */
+function assignmentMatchesCell(assignment: ResourceAssignment, memberId: string, cell: WorkloadCell): boolean {
+  return assignment.memberId === memberId && assignment.status !== 'canceled' &&
+    assignment.fromDate <= cell.toDate && assignment.toDate >= cell.fromDate
 }

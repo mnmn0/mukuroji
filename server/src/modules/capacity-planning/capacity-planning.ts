@@ -28,6 +28,7 @@ const MAX_PROFILES = 2_000
 const MAX_REQUESTS = 10_000
 const MAX_ASSIGNMENTS = 20_000
 const MAX_SKILLS = 64
+const MAX_STATE_BYTES = 350_000
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u
 
 /** A time entry projection used by capacity calculations. */
@@ -401,7 +402,7 @@ export class CapacityPlanningService {
         updatedAt: timestamp,
       }
       state.assignments.push(assignment)
-      refreshRequestStatuses(state)
+      refreshRequestStatuses(state, timestamp)
       return assignment
     })
   }
@@ -423,6 +424,7 @@ export class CapacityPlanningService {
       const plannedEffortMinutes = input.plannedEffortMinutes ?? current.plannedEffortMinutes
       validateNonNegativeInteger(allocationMinutes, 'Allocation minutes')
       validateNonNegativeInteger(plannedEffortMinutes, 'Planned effort minutes')
+      const timestamp = this.now().toISOString()
       const next: ResourceAssignment = {
         ...current,
         memberId,
@@ -432,10 +434,10 @@ export class CapacityPlanningService {
         plannedEffortMinutes,
         ...(input.status ? { status: input.status } : {}),
         revision: current.revision + 1,
-        updatedAt: this.now().toISOString(),
+        updatedAt: timestamp,
       }
       replaceById(state.assignments, next, 'id')
-      refreshRequestStatuses(state)
+      refreshRequestStatuses(state, timestamp)
       return next
     })
   }
@@ -513,6 +515,9 @@ export class CapacityPlanningService {
     const result = mutate(next)
     next.revision = current.revision + 1
     next.updatedAt = this.now().toISOString()
+    if (new TextEncoder().encode(JSON.stringify(next)).byteLength > MAX_STATE_BYTES) {
+      throw new CapacityPlanningError(413, 'CapacityPlanningLimitExceeded', 'The Team workload plan is too large to save.')
+    }
     await this.repository.saveState(workspaceId, teamId, next, current.revision)
     return result
   }
@@ -642,7 +647,12 @@ function calculateMemberSummary(
   return {
     memberId: profile.memberId,
     ...(profile.displayName ? { displayName: profile.displayName } : {}),
+    ...(profile.role ? { role: profile.role } : {}),
+    skills: [...profile.skills],
     timeZone: profile.timeZone,
+    schedule: clone(profile.schedule),
+    holidays: profile.holidays.map(({ date, label }) => ({ date, ...(label ? { label } : {}) })),
+    profileRevision: profile.revision,
     cells,
     capacityMinutes: sum(cells, (cell) => cell.capacityMinutes),
     allocatedMinutes: sum(cells, (cell) => cell.allocatedMinutes),
@@ -840,7 +850,8 @@ function validateDateRange(fromDate: string, toDate: string): { fromDate: string
 
 /** Validates a Gregorian calendar date. */
 function validateDate(value: string, label: string): void {
-  if (!ISO_DATE_PATTERN.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`))) {
+  const parsed = ISO_DATE_PATTERN.test(value) ? Date.parse(`${value}T00:00:00Z`) : Number.NaN
+  if (Number.isNaN(parsed) || new Date(parsed).toISOString().slice(0, 10) !== value) {
     throw new CapacityPlanningError(400, 'InvalidDate', `${label} must be a valid YYYY-MM-DD date.`)
   }
 }
@@ -911,14 +922,17 @@ function requireRequest(state: CapacityPlanningState, requestId: string): Resour
 }
 
 /** Refreshes request status from the allocation committed against it. */
-function refreshRequestStatuses(state: CapacityPlanningState): void {
+function refreshRequestStatuses(state: CapacityPlanningState, timestamp: string): void {
   for (const request of state.requests) {
     const assigned = state.assignments
       .filter((assignment) => assignment.requestId === request.id && assignment.status !== 'canceled')
       .reduce((total, assignment) => total + assignment.allocationMinutes, 0)
-    request.status = assigned === 0 ? 'open' : assigned >= request.requestedMinutes ? 'filled' : 'partially-filled'
-    request.updatedAt = state.updatedAt ?? request.updatedAt
-    request.revision += 1
+    const status = assigned === 0 ? 'open' : assigned >= request.requestedMinutes ? 'filled' : 'partially-filled'
+    if (status !== request.status) {
+      request.status = status
+      request.updatedAt = timestamp
+      request.revision += 1
+    }
   }
 }
 
@@ -1155,7 +1169,9 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
 
 /** Checks a stored ISO calendar date. */
 function isIsoDate(value: unknown): value is string {
-  return isString(value) && ISO_DATE_PATTERN.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`))
+  if (!isString(value) || !ISO_DATE_PATTERN.test(value)) return false
+  const parsed = Date.parse(`${value}T00:00:00Z`)
+  return !Number.isNaN(parsed) && new Date(parsed).toISOString().slice(0, 10) === value
 }
 
 /** Checks a stored IANA timezone identifier. */

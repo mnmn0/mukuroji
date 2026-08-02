@@ -20,6 +20,8 @@ describe('capacity planning calculations', () => {
     schedule.saturday = { enabled: true, minutes: 240 }
     const member = {
       ...profile,
+      role: 'Engineer',
+      skills: ['typescript'],
       schedule,
       holidays: [{ date: '2026-08-04', label: 'Company day' }],
       timeOff: [{
@@ -54,6 +56,12 @@ describe('capacity planning calculations', () => {
     )
 
     const memberSummary = snapshot.members[0]
+    expect(memberSummary).toMatchObject({
+      role: 'Engineer',
+      skills: ['typescript'],
+      holidays: [{ date: '2026-08-04', label: 'Company day' }],
+    })
+    expect(memberSummary.schedule).toEqual(schedule)
     expect(memberSummary.capacityMinutes).toBe(960)
     expect(memberSummary.allocatedMinutes).toBe(1_440)
     expect(memberSummary.cells.map((cell) => cell.capacityMinutes)).toEqual([480, 0, 0, 480])
@@ -152,6 +160,99 @@ describe('capacity planning mutations', () => {
       code: 'CapacityPlanningRevisionConflict',
       status: 409,
     })
+  })
+
+  test('updates a request timestamp only when its fill status changes', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    let now = new Date('2026-08-01T00:00:00.000Z')
+    const service = new CapacityPlanningService(
+      repository,
+      { listTimeEntries: async () => [], listEstimates: async () => [] },
+      { now: () => now, createId: () => 'generated-id' },
+    )
+    await service.saveMemberProfile({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      memberId: 'member-1',
+      skills: [],
+      timeZone: 'UTC',
+      schedule: createDefaultWorkingSchedule(),
+      holidays: [],
+      expectedRevision: 0,
+      expectedTeamRevision: 0,
+      actorMemberId: 'member-1',
+    })
+    const request = await service.createRequest({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      title: 'Release support',
+      skillIds: [],
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      requestedMinutes: 480,
+      confidential: false,
+      expectedTeamRevision: 1,
+      actorMemberId: 'member-1',
+    })
+    now = new Date('2026-08-02T00:00:00.000Z')
+    await service.createAssignment({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      requestId: request.id,
+      memberId: 'member-1',
+      skillIds: [],
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      allocationMinutes: 480,
+      plannedEffortMinutes: 480,
+      confidential: false,
+      status: 'confirmed',
+      expectedTeamRevision: 2,
+      actorMemberId: 'member-1',
+    })
+
+    const snapshot = await service.getSnapshot({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      granularity: 'day',
+      canViewConfidential: true,
+    })
+    expect(snapshot.requests[0]).toMatchObject({
+      status: 'filled',
+      revision: 2,
+      updatedAt: '2026-08-02T00:00:00.000Z',
+    })
+  })
+
+  test('rejects a state payload that would exceed the DynamoDB item safety budget', async () => {
+    const repository = new InMemoryCapacityPlanningRepository()
+    const service = new CapacityPlanningService(repository, {
+      listTimeEntries: async () => [],
+      listEstimates: async () => [],
+    })
+    const holidays = Array.from({ length: 2_000 }, (_, index) => ({
+      date: new Date(Date.UTC(2026, 0, index + 1)).toISOString().slice(0, 10),
+      label: 'Company holiday '.repeat(20),
+    }))
+
+    await expect(service.saveMemberProfile({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      memberId: 'member-1',
+      skills: [],
+      timeZone: 'UTC',
+      schedule: createDefaultWorkingSchedule(),
+      holidays,
+      expectedRevision: 0,
+      expectedTeamRevision: 0,
+      actorMemberId: 'member-1',
+    })).rejects.toMatchObject({
+      code: 'CapacityPlanningLimitExceeded',
+      status: 413,
+    })
+    expect((await repository.getState('workspace-1', 'team-1')).profiles).toEqual([])
   })
 })
 

@@ -31,6 +31,8 @@ Issue #33 の capacity planning は、Team の member profile、resource request
 
 `ResourceAssignment` は member、project / Work Item（必要に応じて Cycle / recurring-work の識別子も保持）、期間、allocation、planned effort、status を持ちます。drag/drop の reschedule / reassign は assignment の `expectedRevision` と Team の `expectedTeamRevision` を同時に検証し、stale write を `409` で拒否します。`POST /api/teams/:teamId/workload/what-if` は同じ計算を使いますが保存しません。
 
+Team member 画面では、稼働プロファイル、time off、resource request、assignment の作成と what-if preview を実行できます。保存済み assignment は heatmap のセル間で drag/drop して reschedule / reassign できます。
+
 ## Visibility
 
 - Team viewer は自分とアクセス可能な project の member workload を見られます。
@@ -48,4 +50,4 @@ Issue #33 の capacity planning は、Team の member profile、resource request
 - `PATCH /api/teams/:teamId/workload/assignments/:assignmentId`
 - `POST /api/teams/:teamId/workload/what-if`
 
-Capacity planning state は Workspace / Team ごとに DynamoDB の一つの record として保存し、Team revision を CAS 条件にします。profile と assignment 自体にも revision を持たせ、同時編集で一部だけが反映される状態を防ぎます。
+Capacity planning state は Workspace / Team ごとに DynamoDB の一つの record として保存し、Team revision を CAS 条件にします。profile と assignment 自体にも revision を持たせ、同時編集で一部だけが反映される状態を防ぎます。record は DynamoDB item の 400 KB 制限を超えないよう保存前に byte budget を検証し、超過時は `413 CapacityPlanningLimitExceeded` を返します。
