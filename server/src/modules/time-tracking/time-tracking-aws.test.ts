@@ -5,6 +5,7 @@ import type { TimeEntry, TimeEntryHistory } from '@mukuroji/contracts'
 import { DynamoDbTimeTrackingRepository, TimeTrackingService } from './time-tracking'
 
 type CommandWithInput = {
+  /** Command input captured by the test transport. */
   input: Record<string, unknown>
 }
 
@@ -163,6 +164,7 @@ describe('DynamoDbTimeTrackingRepository', () => {
       teamId: 'team-1',
       workItemId: 'work-item-1',
       estimateMinutes: 120,
+      expectedRevision: 0,
       updatedBy: 'manager-1',
       idempotencyKey: 'estimate-1',
     })

@@ -30,10 +30,12 @@ export type TimeTrackingRouterDependencies<Principal extends TimeTrackingPrincip
   canManageRates(principal: Principal, teamId: string): Promise<boolean>
   /** Returns the Project allowlist visible inside the selected Team. */
   getAccessibleProjectIds(principal: Principal, teamId: string): Promise<ReadonlySet<string> | undefined>
+  /** Returns the Project IDs for which the principal may view confidential costs. */
+  getManagedProjectIds(principal: Principal, teamId: string): Promise<ReadonlySet<string> | undefined>
   /** Verifies Project-level access for a Team operation. */
   verifyProject(principal: Principal, teamId: string, projectId: string, minimum: 'viewer' | 'member' | 'manager'): Promise<void>
   /** Verifies that a referenced Work Item belongs to the selected Team. */
-  verifyWorkItem(principal: Principal, teamId: string, workItemId: string): Promise<void>
+  verifyWorkItem(principal: Principal, teamId: string, workItemId: string, minimum?: 'viewer' | 'member' | 'manager'): Promise<string | undefined>
   /** Returns the application service bound to the current app. */
   getTimeTracking(): TimeTrackingService
   /** Safely parses a JSON request body. */
@@ -52,16 +54,25 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
     return await withTeam(context, dependencies, 'member', async (principal, teamId, canManage) => {
       const body = asRecord(await dependencies.readJson(context.req))
       const workItemId = readRequiredString(body.workItemId, 'Work Item ID')
-      await dependencies.verifyWorkItem(principal, teamId, workItemId)
-      if (readOptionalString(body.projectId)) {
-        await dependencies.verifyProject(principal, teamId, readRequiredString(body.projectId, 'Project ID'), 'member')
+      const canonicalProjectId = await dependencies.verifyWorkItem(principal, teamId, workItemId, 'member')
+      const requestedProjectId = readOptionalString(body.projectId)
+      if (requestedProjectId !== undefined && requestedProjectId !== canonicalProjectId) {
+        throw new TimeTrackingError(400, 'WorkItemProjectMismatch', 'The Project must match the Work Item assignment.')
+      }
+      if (canonicalProjectId) {
+        await dependencies.verifyProject(
+          principal,
+          teamId,
+          canonicalProjectId,
+          body.hourlyRateMinor === undefined ? 'member' : 'manager',
+        )
       }
       const entry = await dependencies.getTimeTracking().createEntry({
         workspaceId: principal.directoryId,
         teamId,
         workItemId,
         userId: principal.userKey,
-        ...(readOptionalString(body.projectId) ? { projectId: readOptionalString(body.projectId) } : {}),
+        ...(canonicalProjectId ? { projectId: canonicalProjectId } : {}),
         startAt: readRequiredString(body.startAt, 'Start time'),
         endAt: readRequiredString(body.endAt, 'End time'),
         ...(readOptionalString(body.description) ? { description: readOptionalString(body.description) } : {}),
@@ -71,7 +82,8 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         source: 'manual',
         ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
       }, canManage)
-      return context.json({ entry: redactEntry(entry, canManage) }, 201)
+      const managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
+      return context.json({ entry: redactEntry(entry, canManage, managedProjectIds) }, 201)
     })
   })
 
@@ -80,6 +92,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
       const requestedUserId = context.req.query('userId')?.trim() || undefined
       const userId = canManage ? requestedUserId : principal.userKey
       const projectIds = await dependencies.getAccessibleProjectIds(principal, teamId)
+      const managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
       const entries = await dependencies.getTimeTracking().listEntries({
         workspaceId: principal.directoryId,
         teamId,
@@ -87,10 +100,10 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         ...(context.req.query('from') ? { from: context.req.query('from') } : {}),
         ...(context.req.query('to') ? { to: context.req.query('to') } : {}),
         ...(context.req.query('status') ? { status: readStatus(context.req.query('status')) } : {}),
-        ...(context.req.query('limit') ? { limit: Number(context.req.query('limit')) } : {}),
+        ...(context.req.query('limit') === undefined ? {} : { limit: readEntryLimit(context.req.query('limit')) }),
         ...(projectIds ? { projectIds } : {}),
       })
-      return context.json({ entries: entries.map((entry) => redactEntry(entry, canManage)) })
+      return context.json({ entries: entries.map((entry) => redactEntry(entry, canManage, managedProjectIds)) })
     })
   })
 
@@ -102,13 +115,23 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         teamId,
         readRequiredString(context.req.param('entryId'), 'Time entry ID'),
       )
-      await dependencies.verifyWorkItem(principal, teamId, current.workItemId)
-      if (current.projectId) await dependencies.verifyProject(principal, teamId, current.projectId, 'member')
-      if (body.workItemId !== undefined) {
-        await dependencies.verifyWorkItem(principal, teamId, readRequiredString(body.workItemId, 'Work Item ID'))
+      const currentProjectId = await dependencies.verifyWorkItem(principal, teamId, current.workItemId, 'member')
+      const nextWorkItemId = body.workItemId === undefined
+        ? current.workItemId
+        : readRequiredString(body.workItemId, 'Work Item ID')
+      const nextProjectId = body.workItemId === undefined
+        ? currentProjectId
+        : await dependencies.verifyWorkItem(principal, teamId, nextWorkItemId, 'member')
+      if (body.projectId !== undefined && body.projectId !== null && readRequiredString(body.projectId, 'Project ID') !== nextProjectId) {
+        throw new TimeTrackingError(400, 'WorkItemProjectMismatch', 'The Project must match the Work Item assignment.')
       }
-      if (body.projectId !== undefined && body.projectId !== null) {
-        await dependencies.verifyProject(principal, teamId, readRequiredString(body.projectId, 'Project ID'), 'member')
+      if (nextProjectId) {
+        await dependencies.verifyProject(
+          principal,
+          teamId,
+          nextProjectId,
+          body.hourlyRateMinor === undefined ? 'member' : 'manager',
+        )
       }
       const entry = await dependencies.getTimeTracking().updateEntry({
         workspaceId: principal.directoryId,
@@ -120,14 +143,15 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         ...(body.startAt === undefined ? {} : { startAt: readRequiredString(body.startAt, 'Start time') }),
         ...(body.endAt === undefined ? {} : { endAt: readRequiredString(body.endAt, 'End time') }),
         ...(body.workItemId === undefined ? {} : { workItemId: readRequiredString(body.workItemId, 'Work Item ID') }),
-        ...(body.projectId === null ? { projectId: null } : body.projectId === undefined ? {} : { projectId: readRequiredString(body.projectId, 'Project ID') }),
+        projectId: nextProjectId ?? null,
         ...(body.description === null ? { description: null } : body.description === undefined ? {} : { description: readRequiredString(body.description, 'Description') }),
         ...(body.billable === undefined ? {} : { billable: readRequiredBoolean(body.billable, 'Billable') }),
         ...(body.currency === undefined ? {} : { currency: readRequiredString(body.currency, 'Currency') }),
         ...(body.hourlyRateMinor === null ? { hourlyRateMinor: null } : body.hourlyRateMinor === undefined ? {} : { hourlyRateMinor: readRequiredNumber(body.hourlyRateMinor, 'Hourly rate') }),
         ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
       })
-      return context.json({ entry: redactEntry(entry, canManage) })
+      const managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
+      return context.json({ entry: redactEntry(entry, canManage, managedProjectIds) })
     })
   })
 
@@ -141,7 +165,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
           teamId,
           readRequiredString(context.req.param('entryId'), 'Time entry ID'),
         )
-        await dependencies.verifyWorkItem(principal, teamId, current.workItemId)
+        await dependencies.verifyWorkItem(principal, teamId, current.workItemId, minimum)
         if (current.projectId) await dependencies.verifyProject(principal, teamId, current.projectId, minimum)
         const entry = await dependencies.getTimeTracking().transitionEntry({
           workspaceId: principal.directoryId,
@@ -154,7 +178,8 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
           ...(body.reason === undefined ? {} : { reason: readRequiredString(body.reason, 'Reason') }),
           ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
         })
-        return context.json({ entry: redactEntry(entry, canManage) })
+        const managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
+        return context.json({ entry: redactEntry(entry, canManage, managedProjectIds) })
       })
     })
   }
@@ -167,7 +192,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         const from = readRequiredString(body.from, 'Period start')
         const to = readRequiredString(body.to, 'Period end')
         const projectIds = await dependencies.getAccessibleProjectIds(principal, teamId)
-        const entries = await dependencies.getTimeTracking().listEntries({
+        const entries = await dependencies.getTimeTracking().listAllEntries({
           workspaceId: principal.directoryId,
           teamId,
           from,
@@ -180,23 +205,32 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
           : action === 'lock'
             ? entry.status === 'approved'
             : entry.status === 'submitted')
-        const updated = []
+        const projectIdsToVerify = [...new Set(eligible.flatMap((entry) => entry.projectId ? [entry.projectId] : []))]
+        for (const projectId of projectIdsToVerify) await dependencies.verifyProject(principal, teamId, projectId, minimum)
+        const updated: TimeEntry[] = []
+        const failedEntryIds: string[] = []
         for (const entry of eligible) {
-          if (entry.projectId) await dependencies.verifyProject(principal, teamId, entry.projectId, minimum)
-          updated.push(await dependencies.getTimeTracking().transitionEntry({
-            workspaceId: principal.directoryId,
-            teamId,
-            entryId: entry.id,
-            actorUserId: principal.userKey,
-            canApprove: canManage,
-            expectedRevision: entry.revision,
-            action,
-            ...(body.reason === undefined ? {} : { reason: readRequiredString(body.reason, 'Reason') }),
-          }))
+          try {
+            updated.push(await dependencies.getTimeTracking().transitionEntry({
+              workspaceId: principal.directoryId,
+              teamId,
+              entryId: entry.id,
+              actorUserId: principal.userKey,
+              canApprove: canManage,
+              expectedRevision: entry.revision,
+              action,
+              ...(body.reason === undefined ? {} : { reason: readRequiredString(body.reason, 'Reason') }),
+            }))
+          } catch {
+            failedEntryIds.push(entry.id)
+          }
         }
+        const managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
         return context.json({
           count: updated.length,
-          entries: updated.map((entry) => redactEntry(entry, canManage)),
+          failedEntryIds,
+          partialFailure: failedEntryIds.length > 0,
+          entries: updated.map((entry) => redactEntry(entry, canManage, managedProjectIds)),
         })
       })
     })
@@ -209,7 +243,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         teamId,
         readRequiredString(context.req.param('entryId'), 'Time entry ID'),
       )
-      await dependencies.verifyWorkItem(principal, teamId, entry.workItemId)
+      await dependencies.verifyWorkItem(principal, teamId, entry.workItemId, 'viewer')
       if (entry.projectId) await dependencies.verifyProject(principal, teamId, entry.projectId, 'viewer')
       if (!canManage && entry.userId !== principal.userKey) {
         throw new TimeTrackingError(403, 'TimeEntryAccessDenied', 'Only the entry owner or a manager may view its history.')
@@ -223,14 +257,17 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
     return await withTeam(context, dependencies, 'member', async (principal, teamId) => {
       const body = asRecord(await dependencies.readJson(context.req))
       const workItemId = readRequiredString(body.workItemId, 'Work Item ID')
-      await dependencies.verifyWorkItem(principal, teamId, workItemId)
-      const projectId = readOptionalString(body.projectId)
-      if (projectId) await dependencies.verifyProject(principal, teamId, projectId, 'member')
+      const canonicalProjectId = await dependencies.verifyWorkItem(principal, teamId, workItemId, 'member')
+      const requestedProjectId = readOptionalString(body.projectId)
+      if (requestedProjectId !== undefined && requestedProjectId !== canonicalProjectId) {
+        throw new TimeTrackingError(400, 'WorkItemProjectMismatch', 'The Project must match the Work Item assignment.')
+      }
+      if (canonicalProjectId) await dependencies.verifyProject(principal, teamId, canonicalProjectId, 'member')
       const timer = await dependencies.getTimeTracking().startTimer({
         workspaceId: principal.directoryId,
         teamId,
         workItemId,
-        ...(projectId ? { projectId } : {}),
+        ...(canonicalProjectId ? { projectId: canonicalProjectId } : {}),
         userId: principal.userKey,
         ...(readOptionalString(body.description) ? { description: readOptionalString(body.description) } : {}),
         billable: readRequiredBoolean(body.billable, 'Billable'),
@@ -258,6 +295,9 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
       if (timer.projectId) await dependencies.verifyProject(principal, timer.teamId, timer.projectId, 'member')
       const canManage = await dependencies.canManageRates(principal, timer.teamId)
       const body = asRecord(await dependencies.readJson(context.req))
+      if (timer.projectId && body.hourlyRateMinor !== undefined) {
+        await dependencies.verifyProject(principal, timer.teamId, timer.projectId, 'manager')
+      }
       const entry = await dependencies.getTimeTracking().stopTimer({
         workspaceId: principal.directoryId,
         timerId: timer.id,
@@ -268,7 +308,25 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         canManageRates: canManage,
         ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
       })
-      return context.json({ entry: redactEntry(entry, canManage) })
+      const managedProjectIds = await dependencies.getManagedProjectIds(principal, timer.teamId)
+      return context.json({ entry: redactEntry(entry, canManage, managedProjectIds) })
+    })
+  })
+
+  router.delete('/api/time-tracking/timers/:timerId', async (context) => {
+    return await withAuthenticated(context, dependencies, async (principal) => {
+      const timer = await dependencies.getTimeTracking().getActiveTimer(principal.directoryId, principal.userKey)
+      if (!timer || timer.id !== context.req.param('timerId')) {
+        throw new TimeTrackingError(404, 'RunningTimerNotFound', 'The running timer was not found or has already been stopped.')
+      }
+      await dependencies.requireTeamPermission(principal, timer.teamId, 'member')
+      await dependencies.getTimeTracking().cancelTimer({
+        workspaceId: principal.directoryId,
+        timerId: timer.id,
+        userId: principal.userKey,
+        ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
+      })
+      return context.body(null, 204)
     })
   })
 
@@ -276,6 +334,8 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
     return await withTeam(context, dependencies, 'viewer', async (principal, teamId, canManage) => {
       const input = readReportInput(context, principal.directoryId, teamId, canManage)
       input.projectIds = await dependencies.getAccessibleProjectIds(principal, teamId)
+      input.managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
+      if (input.budgetScope === 'project' && input.budgetScopeId) await dependencies.verifyProject(principal, teamId, input.budgetScopeId, 'viewer')
       return context.json(await dependencies.getTimeTracking().createSummary(input))
     })
   })
@@ -284,6 +344,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
     return await withTeam(context, dependencies, 'viewer', async (principal, teamId, canManage) => {
       const input = readReportInput(context, principal.directoryId, teamId, canManage)
       input.projectIds = await dependencies.getAccessibleProjectIds(principal, teamId)
+      input.managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
       return context.json(await dependencies.getTimeTracking().createTimesheet(input))
     })
   })
@@ -292,6 +353,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
     return await withTeam(context, dependencies, 'viewer', async (principal, teamId, canManage) => {
       const input = readReportInput(context, principal.directoryId, teamId, canManage)
       input.projectIds = await dependencies.getAccessibleProjectIds(principal, teamId)
+      input.managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
       const csv = await dependencies.getTimeTracking().createCsv(input)
       return new Response(csv, {
         status: 200,
@@ -353,13 +415,14 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
   router.put('/api/teams/:teamId/work-items/:workItemId/time-estimate', async (context) => {
     return await withTeam(context, dependencies, 'manager', async (principal, teamId) => {
       const workItemId = readRequiredString(context.req.param('workItemId'), 'Work Item ID')
-      await dependencies.verifyWorkItem(principal, teamId, workItemId)
+      await dependencies.verifyWorkItem(principal, teamId, workItemId, 'member')
       const body = asRecord(await dependencies.readJson(context.req))
       const estimate = await dependencies.getTimeTracking().saveEstimate({
         workspaceId: principal.directoryId,
         teamId,
         workItemId,
         estimateMinutes: readRequiredNumber(body.estimateMinutes, 'Estimate minutes'),
+        expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
         updatedBy: principal.userKey,
         ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
       })
@@ -370,7 +433,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
   router.get('/api/teams/:teamId/work-items/:workItemId/time-estimate', async (context) => {
     return await withTeam(context, dependencies, 'viewer', async (principal, teamId) => {
       const workItemId = readRequiredString(context.req.param('workItemId'), 'Work Item ID')
-      await dependencies.verifyWorkItem(principal, teamId, workItemId)
+      await dependencies.verifyWorkItem(principal, teamId, workItemId, 'viewer')
       const estimate = await dependencies.getTimeTracking().getEstimate(
         principal.directoryId,
         teamId,
@@ -424,9 +487,25 @@ function readReportInput(
   const to = context.req.query('to')
   const timeZone = context.req.query('timeZone') ?? 'UTC'
   if (!from || !to) throw new TimeTrackingError(400, 'InvalidTimeRange', 'from and to are required.')
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone }).format()
+  } catch {
+    throw new TimeTrackingError(400, 'InvalidTimeZone', 'timeZone must be a valid IANA timezone identifier.')
+  }
   const groupBy: string = context.req.query('groupBy') ?? 'day'
   if (groupBy !== 'day' && groupBy !== 'week' && groupBy !== 'user' && groupBy !== 'project' && groupBy !== 'work-item') {
     throw new TimeTrackingError(400, 'InvalidGroupBy', 'groupBy must be day, week, project, user, or work-item.')
+  }
+  const budgetScope = context.req.query('budgetScope')
+  if (budgetScope !== undefined && budgetScope !== 'team' && budgetScope !== 'project') {
+    throw new TimeTrackingError(400, 'InvalidBudgetScope', 'budgetScope must be team or project.')
+  }
+  const budgetScopeId = context.req.query('projectId')?.trim() || undefined
+  if (budgetScope === 'project' && !budgetScopeId) {
+    throw new TimeTrackingError(400, 'InvalidBudgetScope', 'projectId is required for a project budget scope.')
+  }
+  if (budgetScope !== 'project' && budgetScopeId) {
+    throw new TimeTrackingError(400, 'InvalidBudgetScope', 'projectId is only valid for a project budget scope.')
   }
   return {
     workspaceId,
@@ -436,14 +515,24 @@ function readReportInput(
     timeZone,
     groupBy: readGroupBy(groupBy),
     includeCosts,
+    ...(budgetScope ? { budgetScope } : {}),
+    ...(budgetScopeId ? { budgetScopeId } : {}),
   }
 }
 
 /** Removes confidential money fields for general Workspace members. */
-function redactEntry(entry: TimeEntry, includeCosts: boolean): TimeEntry {
-  if (includeCosts) return entry
+function redactEntry(entry: TimeEntry, includeCosts: boolean, managedProjectIds?: ReadonlySet<string>): TimeEntry {
+  if (includeCosts && (managedProjectIds === undefined || (entry.projectId !== undefined && managedProjectIds.has(entry.projectId)))) return entry
   const { hourlyRateMinor: _hourlyRateMinor, actualCostMinor: _actualCostMinor, ...visible } = entry
   return visible
+}
+
+/** Validates the optional bounded entry-list limit query. */
+function readEntryLimit(value: string | undefined): number {
+  if (value === undefined || !/^\d+$/u.test(value)) throw new TimeTrackingError(400, 'InvalidLimit', 'limit must be a positive integer.')
+  const limit = Number(value)
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new TimeTrackingError(400, 'InvalidLimit', 'limit must be between 1 and 500.')
+  return limit
 }
 
 /** Converts unknown JSON into a record. */

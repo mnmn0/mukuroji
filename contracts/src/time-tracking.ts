@@ -122,6 +122,8 @@ export type TimeEstimate = {
   workItemId: string
   /** Planned effort in minutes. */
   estimateMinutes: number
+  /** Optimistic concurrency revision. */
+  revision: number
   /** Member who last changed the estimate. */
   updatedBy: string
   /** Last update timestamp. */
@@ -168,6 +170,8 @@ export type TimeSummaryGroup = {
   estimateMinutes?: number
   /** Confidential actual cost in minor currency units. */
   actualCostMinor?: number
+  /** Confidential actual cost totals keyed by ISO currency code. */
+  actualCostByCurrency?: Readonly<Record<string, number>>
 }
 
 /** Aggregated time tracking report. */
@@ -190,6 +194,8 @@ export type TimeTrackingSummary = {
   totalEstimateMinutes: number
   /** Confidential total actual cost in minor currency units. */
   totalActualCostMinor?: number
+  /** Confidential total actual cost totals keyed by ISO currency code. */
+  totalActualCostByCurrency?: Readonly<Record<string, number>>
   /** Budget for the requested scope, when configured and authorized. */
   budget?: TimeBudget
   /** Whether money fields were withheld from this response. */

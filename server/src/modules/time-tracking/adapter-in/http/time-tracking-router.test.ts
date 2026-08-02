@@ -6,6 +6,7 @@ import {
   TimeTrackingService,
 } from '../../time-tracking'
 
+/** Creates an isolated HTTP router fixture with deterministic authentication and storage. */
 function createFixture(canManageRates = false) {
   const service = new TimeTrackingService(new InMemoryTimeTrackingRepository(), {
     now: () => new Date('2026-08-02T12:00:00.000Z'),
@@ -20,12 +21,14 @@ function createFixture(canManageRates = false) {
     requireTeamPermission: async () => {},
     canManageRates: async () => canManageRates,
     getAccessibleProjectIds: async () => undefined,
+    getManagedProjectIds: async () => undefined,
     verifyProject: async () => {},
-    verifyWorkItem: async () => {},
+    verifyWorkItem: async () => undefined,
     getTimeTracking: () => service,
     readJson: async (request) => await request.json(),
     mapError: (context, error) => {
       if (error instanceof TimeTrackingError) {
+        // Hono's JSON response type only accepts its known status union; the domain error validates status at runtime.
         return context.json({ code: error.code, message: error.message }, error.status as 400 | 403 | 404 | 409 | 500)
       }
       throw error

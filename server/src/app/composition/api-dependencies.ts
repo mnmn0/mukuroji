@@ -101,6 +101,7 @@ import {
   DynamoDbTimeTrackingRepository,
   InMemoryTimeTrackingRepository,
   TimeTrackingService,
+  type TimeTrackingIdempotencyPort,
 } from '../../modules/time-tracking'
 
 /**
@@ -209,9 +210,13 @@ export function createPlanningClient(): DynamoDbPlanningClient {
 export function createAnalyticsRepository(): DynamoDbAnalyticsRepository {
   const config = loadServerConfig()
   const dynamoDbClient = createDynamoDbClient()
+  const tableName = config.environment.ANALYTICS_TABLE_NAME
+  if (config.production && !tableName) {
+    throw new Error('ANALYTICS_TABLE_NAME must be set for durable analytics storage.')
+  }
 
   return new DynamoDbAnalyticsRepository(
-    config.environment.ANALYTICS_TABLE_NAME ?? 'mukuroji-analytics-local',
+    tableName ?? 'mukuroji-analytics-local',
     createDynamoDbDocumentClient(dynamoDbClient),
     {
       scheduleDueIndexName:
@@ -220,20 +225,34 @@ export function createAnalyticsRepository(): DynamoDbAnalyticsRepository {
   )
 }
 
-/** Creates the configured durable time tracking service. */
-export function createTimeTrackingService(): TimeTrackingService {
+/**
+ * Creates the configured durable time tracking service.
+ *
+ * @param idempotency - Optional shared receipt store used for mutation replay.
+ * @returns A configured time tracking service.
+ */
+export function createTimeTrackingService(idempotency?: TimeTrackingIdempotencyPort): TimeTrackingService {
   const config = loadServerConfig()
   const dynamoDbClient = createDynamoDbClient()
+  const tableName = config.environment.ANALYTICS_TABLE_NAME
+  const auditTableName = getConfiguredAuditTableName()
+  if (config.production && !tableName) {
+    throw new Error('ANALYTICS_TABLE_NAME must be set for durable time tracking storage.')
+  }
+  if (config.production && !auditTableName) {
+    throw new Error('MUKUROJI_AUDIT_EVENTS_TABLE or AUDIT_EVENTS_TABLE_NAME must be set for time tracking audit writes.')
+  }
   return new TimeTrackingService(
     new DynamoDbTimeTrackingRepository(
-      config.environment.ANALYTICS_TABLE_NAME ?? 'mukuroji-analytics-local',
+      tableName ?? 'mukuroji-analytics-local',
       createDynamoDbDocumentClient(dynamoDbClient),
     ),
     {
       audit: {
-        tableName: getConfiguredAuditTableName() ?? 'mukuroji-audit-events',
+        tableName: auditTableName ?? 'mukuroji-audit-events',
         retentionDays: getConfiguredAuditRetentionDays(),
       },
+      ...(idempotency ? { idempotency } : {}),
     },
   )
 }
@@ -524,7 +543,7 @@ export function createProductionConnectorAppDependencies(): AppDependencies {
     workspace: createProductionWorkspaceDependencies(),
     workItems: createProductionWorkItemDependencies(),
     automation: createProductionAutomationDependencies(),
-    timeTracking: { service: createTimeTrackingService() },
+    timeTracking: { timeTrackingService: createTimeTrackingService(adapters.idempotency) },
     developerPlatform: {
       ...adapters,
       publicWorkItems: createCanonicalPublicWorkItemService(),
@@ -542,14 +561,15 @@ export function createProductionConnectorAppDependencies(): AppDependencies {
  * @returns A nested, domain-owned dependency graph.
  */
 export function createProductionAppDependencies(): AppDependencies {
+  const developerPlatform = createProductionDeveloperPlatformDependencies()
   return {
     operational: createProductionOperationalDependencies(),
     authentication: createProductionAuthenticationDependencies(),
     workspace: createProductionWorkspaceDependencies(),
     workItems: createProductionWorkItemDependencies(),
     automation: createProductionAutomationDependencies(),
-    timeTracking: { service: createTimeTrackingService() },
-    developerPlatform: createProductionDeveloperPlatformDependencies(),
+    timeTracking: { timeTrackingService: createTimeTrackingService(developerPlatform.idempotency) },
+    developerPlatform,
   }
 }
 
@@ -570,7 +590,7 @@ export function createTestAppDependencies(): AppDependencies {
       analytics: new InMemoryAnalyticsRepository(),
     },
     timeTracking: {
-      service: new TimeTrackingService(new InMemoryTimeTrackingRepository()),
+      timeTrackingService: new TimeTrackingService(new InMemoryTimeTrackingRepository()),
     },
   }
 }
@@ -688,7 +708,7 @@ export function overrideAppDependencies(
     },
     timeTracking: {
       ...dependencies.timeTracking,
-      ...(overrides.service ? { service: overrides.service } : {}),
+      ...(overrides.timeTrackingService ? { timeTrackingService: overrides.timeTrackingService } : {}),
     },
     developerPlatform: {
       ...dependencies.developerPlatform,

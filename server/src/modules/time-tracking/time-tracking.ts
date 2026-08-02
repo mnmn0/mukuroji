@@ -1,4 +1,5 @@
 import {
+  DeleteCommand,
   GetCommand,
   PutCommand,
   QueryCommand,
@@ -26,6 +27,40 @@ import {
   createMutationAuditContext,
   type AuditTransactWriteItem,
 } from '../audit'
+
+/** Decision returned by the shared idempotency receipt store. */
+export type TimeTrackingIdempotencyDecision =
+  | { status: 'reserved'; reservationId: string }
+  | { status: 'in-progress' }
+  | { status: 'replay'; response: unknown }
+
+/** Minimal idempotency port used by time-tracking mutations. */
+export interface TimeTrackingIdempotencyPort {
+  /** Reserves a request key or returns a replayable response. */
+  reserveIdempotency(request: {
+    workspaceId: string
+    credentialId: string
+    idempotencyKey: string
+    requestFingerprint: string
+  }): Promise<TimeTrackingIdempotencyDecision>
+  /** Stores the JSON-safe mutation response. */
+  completeIdempotency(request: {
+    workspaceId: string
+    credentialId: string
+    idempotencyKey: string
+    requestFingerprint: string
+    reservationId: string
+    response: unknown
+  }): Promise<void>
+  /** Releases an incomplete reservation. */
+  releaseIdempotency(request: {
+    workspaceId: string
+    credentialId: string
+    idempotencyKey: string
+    requestFingerprint: string
+    reservationId: string
+  }): Promise<void>
+}
 
 const ENTRY_PREFIX = 'TIME_ENTRY#'
 const HISTORY_PREFIX = 'TIME_HISTORY#'
@@ -181,6 +216,18 @@ export type StopTimerInput = {
   idempotencyKey?: string
 }
 
+/** Request used to discard a running timer without creating an entry. */
+export type CancelTimerInput = {
+  /** Workspace identifier. */
+  workspaceId: string
+  /** Active timer identifier. */
+  timerId: string
+  /** Timer owner. */
+  userId: string
+  /** Optional client key used to make cancellation idempotent. */
+  idempotencyKey?: string
+}
+
 /** An estimate update request. */
 export type SaveTimeEstimateInput = {
   /** Workspace identifier. */
@@ -191,6 +238,8 @@ export type SaveTimeEstimateInput = {
   workItemId: string
   /** Planned effort in minutes. */
   estimateMinutes: number
+  /** Expected estimate revision, or zero for a new estimate. */
+  expectedRevision: number
   /** Actor changing the estimate. */
   updatedBy: string
   /** Optional client key used to make audit writes idempotent across retries. */
@@ -305,6 +354,12 @@ export type TimeTrackingReportInput = {
   includeCosts: boolean
   /** Project allowlist applied before report aggregation. */
   projectIds?: ReadonlySet<string>
+  /** Project IDs for which the caller may view confidential costs. */
+  managedProjectIds?: ReadonlySet<string>
+  /** Explicit budget scope selected by the caller. */
+  budgetScope?: 'team' | 'project'
+  /** Project ID used when budgetScope is project. */
+  budgetScopeId?: string
 }
 
 /** Repository used by the time tracking application service. */
@@ -328,6 +383,8 @@ export interface TimeTrackingRepository {
   listHistory(workspaceId: string, teamId: string, entryId: string): Promise<TimeEntryHistory[]>
   /** Reads the active timer for one Workspace member. */
   getActiveTimer(workspaceId: string, userId: string): Promise<RunningTimer | undefined>
+  /** Removes the active timer with an optimistic identity check. */
+  cancelTimer(timer: RunningTimer, auditPut?: AuditTransactWriteItem): Promise<void>
   /** Creates an active timer and rejects a duplicate active timer. */
   createTimer(timer: RunningTimer, auditPut?: AuditTransactWriteItem): Promise<void>
   /** Stops a timer and persists its resulting entry atomically where supported. */
@@ -341,8 +398,8 @@ export interface TimeTrackingRepository {
   getEstimate(workspaceId: string, teamId: string, workItemId: string): Promise<TimeEstimate | undefined>
   /** Lists estimates in a Team. */
   listEstimates(workspaceId: string, teamId: string): Promise<TimeEstimate[]>
-  /** Saves a Work Item estimate, optionally with its audit event. */
-  saveEstimate(estimate: TimeEstimate, auditPut?: AuditTransactWriteItem): Promise<void>
+  /** Saves a Work Item estimate with optimistic concurrency and optional audit. */
+  saveEstimate(estimate: TimeEstimate, expectedRevision: number, auditPut?: AuditTransactWriteItem): Promise<void>
   /** Reads a Team or Project budget. */
   getBudget(workspaceId: string, scopeType: 'team' | 'project', scopeId: string): Promise<TimeBudget | undefined>
   /** Saves a Team or Project budget with optimistic concurrency and optional audit. */
@@ -375,6 +432,8 @@ export class TimeTrackingService {
   private readonly createId: () => string
   /** Shared audit event configuration. */
   private readonly audit?: TimeTrackingAuditOptions
+  /** Durable receipt store used for mutation replay. */
+  private readonly idempotency?: TimeTrackingIdempotencyPort
 
   /** Creates a time tracking service. */
   constructor(
@@ -383,16 +442,31 @@ export class TimeTrackingService {
       now?: () => Date
       createId?: () => string
       audit?: TimeTrackingAuditOptions
+      idempotency?: TimeTrackingIdempotencyPort
     } = {},
   ) {
     this.repository = repository
     this.now = options.now ?? (() => new Date())
     this.createId = options.createId ?? (() => crypto.randomUUID())
     this.audit = options.audit
+    this.idempotency = options.idempotency
   }
 
   /** Creates a manual time entry in draft state. */
   async createEntry(input: CreateTimeEntryInput, canManageRates: boolean): Promise<TimeEntry> {
+    return await this.withIdempotency(
+      input.workspaceId,
+      input.userId,
+      input.idempotencyKey,
+      'time-entry.create',
+      input,
+      () => this.createEntryInternal(input, canManageRates),
+      readStoredEntry,
+    )
+  }
+
+  /** Persists a manual time entry without the public idempotency wrapper. */
+  private async createEntryInternal(input: CreateTimeEntryInput, canManageRates: boolean): Promise<TimeEntry> {
     const normalized = normalizeCreateInput(input, canManageRates)
     const now = readNow(this.now)
     const entry: TimeEntry = {
@@ -431,6 +505,19 @@ export class TimeTrackingService {
 
   /** Updates a draft or rejected time entry with optimistic concurrency. */
   async updateEntry(input: UpdateTimeEntryInput): Promise<TimeEntry> {
+    return await this.withIdempotency(
+      input.workspaceId,
+      input.actorUserId,
+      input.idempotencyKey,
+      'time-entry.update',
+      input,
+      () => this.updateEntryInternal(input),
+      readStoredEntry,
+    )
+  }
+
+  /** Persists an entry update without the public idempotency wrapper. */
+  private async updateEntryInternal(input: UpdateTimeEntryInput): Promise<TimeEntry> {
     const current = await this.requireEntry(input.workspaceId, input.entryId, input.teamId)
     if (current.userId !== input.actorUserId && !input.canManageRates) {
       throw new TimeTrackingError(403, 'TimeEntryAccessDenied', 'Only the entry owner or a manager may edit this entry.')
@@ -470,7 +557,9 @@ export class TimeTrackingService {
       billable: input.billable ?? current.billable,
       currency,
       revision: current.revision + 1,
-      ...(hourlyRateMinor === undefined ? { hourlyRateMinor: undefined } : { hourlyRateMinor }),
+      hourlyRateMinor: undefined,
+      actualCostMinor: undefined,
+      ...(hourlyRateMinor === undefined ? {} : { hourlyRateMinor }),
       ...calculateCostFields(input.billable ?? current.billable, hourlyRateMinor, startAt, endAt),
       updatedAt: now,
     }
@@ -486,6 +575,19 @@ export class TimeTrackingService {
 
   /** Applies a submit, approve, reject, or lock transition. */
   async transitionEntry(input: TransitionTimeEntryInput): Promise<TimeEntry> {
+    return await this.withIdempotency(
+      input.workspaceId,
+      input.actorUserId,
+      input.idempotencyKey,
+      `time-entry.transition:${input.action}`,
+      input,
+      () => this.transitionEntryInternal(input),
+      readStoredEntry,
+    )
+  }
+
+  /** Applies an entry transition without the public idempotency wrapper. */
+  private async transitionEntryInternal(input: TransitionTimeEntryInput): Promise<TimeEntry> {
     const current = await this.requireEntry(input.workspaceId, input.entryId, input.teamId)
     if (current.revision !== input.expectedRevision) {
       throw new TimeTrackingError(409, 'TimeEntryRevisionConflict', 'The time entry was changed by another request.')
@@ -493,6 +595,9 @@ export class TimeTrackingService {
     const isOwner = current.userId === input.actorUserId
     if (input.action === 'submit' && !isOwner) {
       throw new TimeTrackingError(403, 'TimeEntryAccessDenied', 'Only the entry owner may submit time.')
+    }
+    if (input.action === 'approve' && isOwner) {
+      throw new TimeTrackingError(403, 'TimesheetSelfApprovalDenied', 'An entry owner may not approve their own time.')
     }
     if (input.action !== 'submit' && !input.canApprove) {
       throw new TimeTrackingError(403, 'TimesheetApprovalDenied', 'Only a manager may approve, reject, or lock time.')
@@ -541,6 +646,19 @@ export class TimeTrackingService {
 
   /** Starts the member's one allowed running timer. */
   async startTimer(input: StartTimerInput): Promise<RunningTimer> {
+    return await this.withIdempotency(
+      input.workspaceId,
+      input.userId,
+      input.idempotencyKey,
+      'timer.start',
+      input,
+      () => this.startTimerInternal(input),
+      readStoredTimer,
+    )
+  }
+
+  /** Starts a timer without the public idempotency wrapper. */
+  private async startTimerInternal(input: StartTimerInput): Promise<RunningTimer> {
     const startedAt = input.startedAt === undefined
       ? readNow(this.now).toISOString()
       : validateInstant(input.startedAt, 'Timer start')
@@ -587,8 +705,24 @@ export class TimeTrackingService {
 
   /** Stops the member's timer and creates one draft time entry. */
   async stopTimer(input: StopTimerInput): Promise<TimeEntry> {
-    const timer = await this.repository.getActiveTimer(input.workspaceId, input.userId)
-    if (!timer || timer.id !== input.timerId) {
+    return await this.withIdempotency(
+      input.workspaceId,
+      input.userId,
+      input.idempotencyKey,
+      'timer.stop',
+      input,
+      () => this.stopTimerInternal(input),
+      readStoredEntry,
+    )
+  }
+
+  /** Stops a timer without the public idempotency wrapper. */
+  private async stopTimerInternal(input: StopTimerInput): Promise<TimeEntry> {
+    const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
+    const userId = readIdentifier(input.userId, 'User ID')
+    const timerId = readIdentifier(input.timerId, 'Timer ID')
+    const timer = await this.repository.getActiveTimer(workspaceId, userId)
+    if (!timer || timer.id !== timerId) {
       throw new TimeTrackingError(404, 'RunningTimerNotFound', 'The running timer was not found or has already been stopped.')
     }
     const endedAt = input.endedAt === undefined
@@ -625,7 +759,7 @@ export class TimeTrackingService {
       createdAt: now,
       updatedAt: now,
     }
-    const history = createHistory(this.createId, entry, 'created', input.userId, new Date(now))
+    const history = createHistory(this.createId, entry, 'created', userId, new Date(now))
     await this.repository.finishTimer(
       timer,
       entry,
@@ -633,6 +767,32 @@ export class TimeTrackingService {
       this.createAuditPut(entry, history, undefined, input.idempotencyKey),
     )
     return entry
+  }
+
+  /** Cancels an active timer without creating a time entry. */
+  async cancelTimer(input: CancelTimerInput): Promise<void> {
+    const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
+    const userId = readIdentifier(input.userId, 'User ID')
+    const timerId = readIdentifier(input.timerId, 'Timer ID')
+    const timer = await this.repository.getActiveTimer(workspaceId, userId)
+    if (!timer || timer.id !== timerId) {
+      throw new TimeTrackingError(404, 'RunningTimerNotFound', 'The running timer was not found or has already been stopped.')
+    }
+    await this.repository.cancelTimer(timer, this.createAuditEventPut({
+      workspaceId,
+      teamId: timer.teamId,
+      actorUserId: userId,
+      eventType: 'timer.cancelled',
+      entityType: 'timer',
+      entityId: timer.id,
+      action: 'cancelled',
+      idempotencyKey: input.idempotencyKey ?? timer.id,
+      requestBody: { action: 'timer.cancelled', timerId: timer.id },
+      before: toAuditTimerSnapshot(timer),
+      includeFields: ['teamId', 'workItemId', 'userId', 'startedAt', 'description', 'billable', 'revision'],
+      metadata: { teamId: timer.teamId, workItemId: timer.workItemId, userId },
+      path: `/api/time-tracking/timers/${timer.id}`,
+    }))
   }
 
   /** Reads one time entry after verifying its Team partition through the repository. */
@@ -653,7 +813,24 @@ export class TimeTrackingService {
       teamId: readIdentifier(input.teamId, 'Team ID'),
       ...(from ? { from } : {}),
       ...(to ? { to } : {}),
-      ...(input.limit === undefined ? {} : { limit: requireInteger(input.limit, 'Entry limit', 1, MAX_LIST_LIMIT) }),
+      limit: input.limit === undefined ? MAX_LIST_LIMIT : requireInteger(input.limit, 'Entry limit', 1, MAX_LIST_LIMIT),
+      ...(input.projectIds ? { projectIds: input.projectIds } : {}),
+    })
+  }
+
+  /** Lists every matching entry for complete reports and bulk operations. */
+  async listAllEntries(input: ListTimeEntriesInput): Promise<TimeEntry[]> {
+    const from = input.from === undefined ? undefined : validateEntryBoundary(input.from, 'Entry range start')
+    const to = input.to === undefined ? undefined : validateEntryBoundary(input.to, 'Entry range end')
+    if (from && to && !(Date.parse(to) > Date.parse(from))) {
+      throw new TimeTrackingError(400, 'InvalidTimeRange', 'Entry range must have a positive duration.')
+    }
+    return await this.repository.listEntries({
+      ...input,
+      workspaceId: readIdentifier(input.workspaceId, 'Workspace ID'),
+      teamId: readIdentifier(input.teamId, 'Team ID'),
+      ...(from ? { from } : {}),
+      ...(to ? { to } : {}),
       ...(input.projectIds ? { projectIds: input.projectIds } : {}),
     })
   }
@@ -666,22 +843,44 @@ export class TimeTrackingService {
 
   /** Saves a Work Item estimate. */
   async saveEstimate(input: SaveTimeEstimateInput): Promise<TimeEstimate> {
+    return await this.withIdempotency(
+      input.workspaceId,
+      input.updatedBy,
+      input.idempotencyKey,
+      'time-estimate.save',
+      input,
+      () => this.saveEstimateInternal(input),
+      readStoredEstimate,
+    )
+  }
+
+  /** Saves an estimate without the public idempotency wrapper. */
+  private async saveEstimateInternal(input: SaveTimeEstimateInput): Promise<TimeEstimate> {
     const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
     const teamId = readIdentifier(input.teamId, 'Team ID')
     const workItemId = readIdentifier(input.workItemId, 'Work Item ID')
     const estimateMinutes = requireInteger(input.estimateMinutes, 'Estimate minutes', 0, MAX_ENTRY_DURATION_MINUTES * 365)
+    const expectedRevision = requireInteger(input.expectedRevision, 'Estimate revision', 0, Number.MAX_SAFE_INTEGER)
     const current = await this.repository.getEstimate(workspaceId, teamId, workItemId)
+    if (current && current.revision !== expectedRevision) {
+      throw new TimeTrackingError(409, 'TimeEstimateRevisionConflict', 'The estimate was changed by another request.')
+    }
+    if (!current && expectedRevision !== 0) {
+      throw new TimeTrackingError(409, 'TimeEstimateRevisionConflict', 'The estimate does not exist at the requested revision.')
+    }
     const estimate: TimeEstimate = {
       schemaVersion: 1,
       workspaceId,
       teamId,
       workItemId,
       estimateMinutes,
+      revision: expectedRevision + 1,
       updatedBy: readIdentifier(input.updatedBy, 'User ID'),
       updatedAt: readNow(this.now).toISOString(),
     }
     await this.repository.saveEstimate(
       estimate,
+      expectedRevision,
       this.createAuditEventPut({
         workspaceId,
         teamId,
@@ -694,7 +893,7 @@ export class TimeTrackingService {
         requestBody: { action: 'estimate.updated', workItemId, estimateMinutes },
         before: current ? toAuditEstimateSnapshot(current) : undefined,
         after: toAuditEstimateSnapshot(estimate),
-        includeFields: ['teamId', 'workItemId', 'estimateMinutes', 'updatedBy'],
+        includeFields: ['teamId', 'workItemId', 'estimateMinutes', 'revision', 'updatedBy'],
         metadata: { teamId, workItemId },
         path: `/api/teams/${teamId}/work-items/${workItemId}/time-estimate`,
         occurredAt: estimate.updatedAt,
@@ -714,13 +913,30 @@ export class TimeTrackingService {
 
   /** Saves a Team or Project budget. */
   async saveBudget(input: SaveTimeBudgetInput): Promise<TimeBudget> {
+    return await this.withIdempotency(
+      input.workspaceId,
+      input.updatedBy,
+      input.idempotencyKey,
+      'time-budget.save',
+      input,
+      () => this.saveBudgetInternal(input),
+      readStoredBudget,
+    )
+  }
+
+  /** Saves a budget without the public idempotency wrapper. */
+  private async saveBudgetInternal(input: SaveTimeBudgetInput): Promise<TimeBudget> {
     const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
     const scopeId = readIdentifier(input.scopeId, 'Budget scope ID')
     const teamId = input.teamId
       ? readIdentifier(input.teamId, 'Team ID')
       : input.scopeType === 'team'
         ? scopeId
-        : 'project-scope'
+        : undefined
+    if (input.scopeType === 'project' && !teamId) {
+      throw new TimeTrackingError(400, 'TeamRequired', 'A Team is required for a Project budget.')
+    }
+    const resolvedTeamId = teamId ?? scopeId
     const amountMinor = requireMoney(input.amountMinor, 'Budget amount')
     const currency = validateCurrency(input.currency)
     const expectedRevision = requireInteger(input.expectedRevision, 'Budget revision', 0, Number.MAX_SAFE_INTEGER)
@@ -753,7 +969,7 @@ export class TimeTrackingService {
       expectedRevision,
       this.createAuditEventPut({
         workspaceId,
-        teamId,
+        teamId: resolvedTeamId,
         actorUserId: input.updatedBy,
         eventType: 'time-budget.updated',
         entityType: 'time-budget',
@@ -777,7 +993,7 @@ export class TimeTrackingService {
         },
         path: input.scopeType === 'team'
           ? `/api/teams/${scopeId}/time-budget`
-          : `/api/teams/${teamId}/projects/${scopeId}/time-budget`,
+          : `/api/teams/${resolvedTeamId}/projects/${scopeId}/time-budget`,
         occurredAt: budget.updatedAt,
       }),
     )
@@ -787,24 +1003,23 @@ export class TimeTrackingService {
   /** Builds an ACL-filtered aggregate report. */
   async createSummary(input: TimeTrackingReportInput): Promise<TimeTrackingSummary> {
     const period = normalizePeriod(input.from, input.to, input.timeZone)
-    const entries = await this.repository.listEntries({
+    const entries = await this.listAllEntries({
       workspaceId: input.workspaceId,
       teamId: input.teamId,
       from: period.from,
       to: period.to,
       ...(input.projectIds ? { projectIds: input.projectIds } : {}),
-      limit: MAX_LIST_LIMIT,
     })
     const estimates = await this.repository.listEstimates(input.workspaceId, input.teamId)
     const estimateByWorkItem = new Map(estimates.map((estimate) => [estimate.workItemId, estimate.estimateMinutes]))
-    const groups = aggregateEntries(entries, input.groupBy, input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts)
-    const budget = input.groupBy === 'project' && groups.length === 1
-      ? await this.repository.getBudget(input.workspaceId, 'project', groups[0]!.key)
+    const groups = aggregateEntries(entries, input.groupBy, input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds)
+    const budget = input.budgetScope === 'project' && input.budgetScopeId
+      ? await this.repository.getBudget(input.workspaceId, 'project', input.budgetScopeId)
       : await this.repository.getBudget(input.workspaceId, 'team', input.teamId)
     const totalEstimateMinutes = [...new Set(entries.map((entry) => entry.workItemId))]
       .reduce((sum, workItemId) => sum + (estimateByWorkItem.get(workItemId) ?? 0), 0)
-    const totalActualCostMinor = input.includeCosts
-      ? sumCosts(entries)
+    const totalActualCostByCurrency = input.includeCosts
+      ? sumCostsByCurrency(entries, period.from, period.to, input.managedProjectIds)
       : undefined
     return {
       from: period.from,
@@ -812,10 +1027,13 @@ export class TimeTrackingService {
       timeZone: input.timeZone,
       groupBy: input.groupBy,
       groups,
-      totalMinutes: entries.reduce((sum, entry) => sum + entry.durationMinutes, 0),
-      totalBillableMinutes: entries.reduce((sum, entry) => sum + (entry.billable ? entry.durationMinutes : 0), 0),
+      totalMinutes: entries.reduce((sum, entry) => sum + clippedEntryMinutes(entry, period.from, period.to), 0),
+      totalBillableMinutes: entries.reduce((sum, entry) => sum + (entry.billable ? clippedEntryMinutes(entry, period.from, period.to) : 0), 0),
       totalEstimateMinutes,
-      ...(totalActualCostMinor === undefined ? {} : { totalActualCostMinor }),
+      ...(totalActualCostByCurrency === undefined ? {} : { totalActualCostByCurrency }),
+      ...(totalActualCostByCurrency !== undefined && Object.keys(totalActualCostByCurrency).length === 1
+        ? { totalActualCostMinor: Object.values(totalActualCostByCurrency)[0] }
+        : {}),
       ...(input.includeCosts && budget ? { budget } : {}),
       costsRedacted: !input.includeCosts,
     }
@@ -824,18 +1042,17 @@ export class TimeTrackingService {
   /** Builds daily and weekly timesheet rows with DST-aware local boundaries. */
   async createTimesheet(input: TimeTrackingReportInput): Promise<TimeSheet> {
     const period = normalizePeriod(input.from, input.to, input.timeZone)
-    const entries = await this.repository.listEntries({
+    const entries = await this.listAllEntries({
       workspaceId: input.workspaceId,
       teamId: input.teamId,
       from: period.from,
       to: period.to,
       ...(input.projectIds ? { projectIds: input.projectIds } : {}),
-      limit: MAX_LIST_LIMIT,
     })
     const estimates = await this.repository.listEstimates(input.workspaceId, input.teamId)
     const estimateByWorkItem = new Map(estimates.map((estimate) => [estimate.workItemId, estimate.estimateMinutes]))
-    const days = aggregateCalendarEntries(entries, 'day', input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts)
-    const weeks = aggregateCalendarEntries(entries, 'week', input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts)
+    const days = aggregateCalendarEntries(entries, 'day', input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds)
+    const weeks = aggregateCalendarEntries(entries, 'week', input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds)
     return {
       from: period.from,
       to: period.to,
@@ -850,7 +1067,7 @@ export class TimeTrackingService {
   async createCsv(input: TimeTrackingReportInput): Promise<string> {
     const summary = await this.createSummary(input)
     const lines = [
-      ['Group', 'Minutes', 'Billable minutes', 'Entries', 'Estimate minutes', 'Actual cost minor'].map(csvCell).join(','),
+      ['Group', 'Minutes', 'Billable minutes', 'Entries', 'Estimate minutes', 'Actual cost minor', 'Actual cost by currency'].map(csvCell).join(','),
       ...summary.groups.map((group) => [
         group.label,
         group.minutes,
@@ -858,9 +1075,47 @@ export class TimeTrackingService {
         group.entryCount,
         group.estimateMinutes ?? '',
         group.actualCostMinor ?? '',
+        group.actualCostByCurrency ? JSON.stringify(group.actualCostByCurrency) : '',
       ].map(csvCell).join(',')),
     ]
     return `${lines.join('\n')}\n`
+  }
+
+  /** Reserves and completes a durable mutation receipt when a key is supplied. */
+  private async withIdempotency<T>(
+    workspaceId: string,
+    actorUserId: string,
+    idempotencyKey: string | undefined,
+    operation: string,
+    requestInput: object,
+    execute: () => Promise<T>,
+    decode: (value: unknown) => T,
+  ): Promise<T> {
+    if (!this.idempotency || idempotencyKey === undefined) return await execute()
+    const normalizedWorkspaceId = readIdentifier(workspaceId, 'Workspace ID')
+    const normalizedActorUserId = readIdentifier(actorUserId, 'Actor user ID')
+    const normalizedKey = readIdentifier(idempotencyKey, 'Idempotency key')
+    const requestFingerprint = createTimeTrackingRequestFingerprint(operation, requestInput)
+    const receiptRequest = {
+      workspaceId: normalizedWorkspaceId,
+      credentialId: `time-tracking:${normalizedActorUserId}`,
+      idempotencyKey: normalizedKey,
+      requestFingerprint,
+    }
+    const reservation = await this.idempotency.reserveIdempotency(receiptRequest)
+    if (reservation.status === 'replay') return decode(reservation.response)
+    if (reservation.status === 'in-progress') {
+      throw new TimeTrackingError(409, 'TimeTrackingMutationInProgress', 'The same time tracking mutation is still in progress.')
+    }
+    const completionRequest = { ...receiptRequest, reservationId: reservation.reservationId }
+    try {
+      const result = await execute()
+      await this.idempotency.completeIdempotency({ ...completionRequest, response: result })
+      return result
+    } catch (error) {
+      await this.idempotency.releaseIdempotency(completionRequest).catch(() => undefined)
+      throw error
+    }
   }
 
   /** Requires an entry and optionally checks its Team partition. */
@@ -962,15 +1217,14 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
     const from = input.from ? Date.parse(input.from) : Number.NEGATIVE_INFINITY
     const to = input.to ? Date.parse(input.to) : Number.POSITIVE_INFINITY
     if (Number.isNaN(from) || Number.isNaN(to)) throw new TimeTrackingError(400, 'InvalidTimeRange', 'Time range is invalid.')
-    return [...this.entries.values()]
+    const matching = [...this.entries.values()]
       .filter((entry) => entry.workspaceId === input.workspaceId && entry.teamId === input.teamId)
       .filter((entry) => input.userId === undefined || entry.userId === input.userId)
       .filter((entry) => input.status === undefined || entry.status === input.status)
-      .filter((entry) => input.projectIds === undefined || entry.projectId === undefined || input.projectIds.has(entry.projectId))
+      .filter((entry) => input.projectIds === undefined || (entry.projectId !== undefined && input.projectIds.has(entry.projectId)))
       .filter((entry) => Date.parse(entry.endAt) > from && Date.parse(entry.startAt) < to)
       .sort((left, right) => left.startAt.localeCompare(right.startAt) || left.id.localeCompare(right.id))
-      .slice(0, input.limit ?? MAX_LIST_LIMIT)
-      .map(clone)
+    return (input.limit === undefined ? matching : matching.slice(0, input.limit)).map(clone)
   }
 
   /** Reads an entry. */
@@ -1019,6 +1273,16 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
     return timer ? clone(timer) : undefined
   }
 
+  /** Removes an active timer after verifying its identity. */
+  async cancelTimer(timer: RunningTimer, _auditPut?: AuditTransactWriteItem) {
+    const key = timerKey(timer.workspaceId, timer.userId)
+    const current = this.timers.get(key)
+    if (!current || current.id !== timer.id || current.revision !== timer.revision) {
+      throw new TimeTrackingError(409, 'RunningTimerConflict', 'The running timer changed before it was cancelled.')
+    }
+    this.timers.delete(key)
+  }
+
   /** Creates an active timer and rejects duplicates. */
   async createTimer(timer: RunningTimer, _auditPut?: AuditTransactWriteItem) {
     const key = timerKey(timer.workspaceId, timer.userId)
@@ -1057,9 +1321,14 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Saves an estimate. */
-  async saveEstimate(estimate: TimeEstimate, _auditPut?: AuditTransactWriteItem) {
+  async saveEstimate(estimate: TimeEstimate, expectedRevision: number, _auditPut?: AuditTransactWriteItem) {
+    const key = estimateKey(estimate.workspaceId, estimate.teamId, estimate.workItemId)
+    const current = this.estimates.get(key)
+    if ((current?.revision ?? 0) !== expectedRevision) {
+      throw new TimeTrackingError(409, 'TimeEstimateRevisionConflict', 'The estimate was changed by another request.')
+    }
     this.estimates.set(
-      estimateKey(estimate.workspaceId, estimate.teamId, estimate.workItemId),
+      key,
       clone(estimate),
     )
   }
@@ -1118,15 +1387,15 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
         const entry = readStoredEntry(item)
         if (input.userId !== undefined && entry.userId !== input.userId) continue
         if (input.status !== undefined && entry.status !== input.status) continue
-        if (input.projectIds !== undefined && entry.projectId !== undefined && !input.projectIds.has(entry.projectId)) continue
+        if (input.projectIds !== undefined && (entry.projectId === undefined || !input.projectIds.has(entry.projectId))) continue
         const from = input.from ? Date.parse(input.from) : Number.NEGATIVE_INFINITY
         const to = input.to ? Date.parse(input.to) : Number.POSITIVE_INFINITY
         if (Date.parse(entry.endAt) <= from || Date.parse(entry.startAt) >= to) continue
         entries.push(entry)
-        if (entries.length === limit) break
+        if (input.limit !== undefined && entries.length === limit) break
       }
       exclusiveStartKey = response.LastEvaluatedKey
-    } while (exclusiveStartKey && entries.length < limit)
+    } while (exclusiveStartKey && (input.limit === undefined || entries.length < limit))
     return entries.sort(
       (left, right) => left.startAt.localeCompare(right.startAt) || left.id.localeCompare(right.id),
     )
@@ -1239,6 +1508,30 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
     return response.Item ? readStoredTimer(response.Item) : undefined
   }
 
+  /** Removes an active timer with a conditional identity check. */
+  async cancelTimer(timer: RunningTimer, auditPut?: AuditTransactWriteItem) {
+    try {
+      const deletion = {
+        Delete: {
+          TableName: this.tableName,
+          Key: { workspaceId: timer.workspaceId, recordKey: `${TIMER_PREFIX}${timer.userId}` },
+          ConditionExpression: 'id = :timerId AND revision = :timerRevision',
+          ExpressionAttributeValues: {
+            ':timerId': timer.id,
+            ':timerRevision': timer.revision,
+          },
+        },
+      }
+      if (auditPut) {
+        await this.documentClient.send(new TransactWriteCommand({ TransactItems: [deletion, auditPut] }))
+      } else {
+        await this.documentClient.send(new DeleteCommand(deletion.Delete))
+      }
+    } catch (error) {
+      throw mapConditionalWriteError(error, 'RunningTimerConflict', 'The running timer changed before it was cancelled.')
+    }
+  }
+
   /** Creates an active timer with a conditional put. */
   async createTimer(timer: RunningTimer, auditPut?: AuditTransactWriteItem) {
     try {
@@ -1331,27 +1624,36 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
   }
 
   /** Saves an estimate using a single-owner key. */
-  async saveEstimate(estimate: TimeEstimate, auditPut?: AuditTransactWriteItem) {
+  async saveEstimate(estimate: TimeEstimate, expectedRevision: number, auditPut?: AuditTransactWriteItem) {
     const item = {
       ...estimate,
       recordKey: `${ESTIMATE_PREFIX}${estimate.teamId}#${estimate.workItemId}`,
     }
+    const condition = expectedRevision === 0
+      ? {
+          ConditionExpression: 'attribute_not_exists(recordKey)',
+        }
+      : {
+          ConditionExpression: 'revision = :expectedRevision',
+          ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+        }
     if (!auditPut) {
       await this.documentClient.send(new PutCommand({
         TableName: this.tableName,
         Item: item,
+        ...condition,
       }))
       return
     }
     try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
-          { Put: { TableName: this.tableName, Item: item } },
+          { Put: { TableName: this.tableName, Item: item, ...condition } },
           auditPut,
         ],
       }))
     } catch (error) {
-      throw mapConditionalWriteError(error, 'TimeEstimateIdempotencyConflict', 'The estimate mutation was already processed with a different request.')
+      throw mapConditionalWriteError(error, 'TimeEstimateRevisionConflict', 'The estimate was changed by another request.')
     }
   }
 
@@ -1462,26 +1764,30 @@ function aggregateEntries(
   to: string,
   estimateByWorkItem: ReadonlyMap<string, number>,
   includeCosts: boolean,
+  managedProjectIds?: ReadonlySet<string>,
 ): TimeSummaryGroup[] {
   if (groupBy === 'day' || groupBy === 'week') {
-    return aggregateCalendarEntries(entries, groupBy, timeZone, from, to, estimateByWorkItem, includeCosts)
+    return aggregateCalendarEntries(entries, groupBy, timeZone, from, to, estimateByWorkItem, includeCosts, managedProjectIds)
   }
   const grouped = new Map<string, MutableSummaryGroup>()
   for (const entry of entries) {
+    const minutes = clippedEntryMinutes(entry, from, to)
+    if (minutes === 0) continue
     const key = groupBy === 'user'
       ? entry.userId
       : groupBy === 'work-item'
         ? entry.workItemId
         : entry.projectId ?? 'unassigned'
     const group = grouped.get(key) ?? createMutableSummaryGroup(key)
-    group.minutes += entry.durationMinutes
-    group.billableMinutes += entry.billable ? entry.durationMinutes : 0
-    group.entryCount += 1
+    group.minutes += minutes
+    group.billableMinutes += entry.billable ? minutes : 0
+    group.entryIds.add(entry.id)
     if (!group.estimateWorkItemIds.has(entry.workItemId)) {
       group.estimateMinutes += estimateByWorkItem.get(entry.workItemId) ?? 0
       group.estimateWorkItemIds.add(entry.workItemId)
     }
-    if (includeCosts) group.actualCostMinor += entry.actualCostMinor ?? 0
+    const cost = costForEntry(entry, minutes, includeCosts, managedProjectIds)
+    if (cost !== undefined) addCost(group, entry.currency, cost)
     grouped.set(key, group)
   }
   return [...grouped.values()]
@@ -1498,6 +1804,7 @@ function aggregateCalendarEntries(
   to: string,
   estimateByWorkItem: ReadonlyMap<string, number>,
   includeCosts: boolean,
+  managedProjectIds?: ReadonlySet<string>,
 ): TimeSummaryGroup[] {
   const grouped = new Map<string, MutableSummaryGroup>()
   const segments = entries.flatMap((entry) => splitEntryByLocalDate(entry, timeZone, from, to)
@@ -1516,16 +1823,15 @@ function aggregateCalendarEntries(
     const group = grouped.get(key) ?? createMutableSummaryGroup(key)
     group.minutes += segment.minutes
     group.billableMinutes += entry.billable ? segment.minutes : 0
-    group.entryCount += 1
+    group.entryIds.add(entry.id)
     const entryDurationMilliseconds = Date.parse(entry.endAt) - Date.parse(entry.startAt)
     const actualMilliseconds = entryDurationMilliseconds * segment.ratio
     const workItemActualMilliseconds = actualMillisecondsByWorkItem.get(entry.workItemId) ?? 0
     group.estimateMinutes += workItemActualMilliseconds > 0
       ? Math.round((estimateByWorkItem.get(entry.workItemId) ?? 0) * actualMilliseconds / workItemActualMilliseconds)
       : 0
-    if (includeCosts) {
-      group.actualCostMinor += Math.round((entry.actualCostMinor ?? 0) * segment.ratio)
-    }
+    const cost = costForEntry(entry, segment.minutes, includeCosts, managedProjectIds)
+    if (cost !== undefined) addCost(group, entry.currency, cost)
     grouped.set(key, group)
   }
   return [...grouped.values()]
@@ -1545,18 +1851,34 @@ function splitEntryByLocalDate(entry: TimeEntry, timeZone: string, from: string,
     dates.add(cursor)
     cursor = addCalendarDays(cursor, 1)
   }
-  const result: Array<{ date: string; minutes: number; ratio: number }> = []
+  const rawSegments: Array<{ date: string; rawMinutes: number; ratio: number }> = []
   for (const date of dates) {
     const dayStart = resolveLocalDateStart(date, timeZone)
     const dayEnd = resolveLocalDateStart(addCalendarDays(date, 1), timeZone)
     const segmentStart = Math.max(start, dayStart)
     const segmentEnd = Math.min(end, dayEnd)
     if (segmentEnd > segmentStart) {
-      const minutes = Math.max(1, Math.round((segmentEnd - segmentStart) / 60_000))
-      result.push({ date, minutes, ratio: (segmentEnd - segmentStart) / (end - start) })
+      rawSegments.push({
+        date,
+        rawMinutes: (segmentEnd - segmentStart) / 60_000,
+        ratio: (segmentEnd - segmentStart) / (end - start),
+      })
     }
   }
-  return result
+  const totalMinutes = calculateDurationMinutes(new Date(start).toISOString(), new Date(end).toISOString())
+  const allocated = rawSegments.map((segment) => ({
+    ...segment,
+    minutes: Math.floor(segment.rawMinutes),
+  }))
+  let remaining = totalMinutes - allocated.reduce((sum, segment) => sum + segment.minutes, 0)
+  for (const segment of [...allocated].sort((left, right) =>
+    (right.rawMinutes - Math.floor(right.rawMinutes)) - (left.rawMinutes - Math.floor(left.rawMinutes))
+  )) {
+    if (remaining <= 0) break
+    segment.minutes += 1
+    remaining -= 1
+  }
+  return allocated.map(({ date, minutes, ratio }) => ({ date, minutes, ratio }))
 }
 
 /** Mutable aggregation row used internally. */
@@ -1567,14 +1889,14 @@ type MutableSummaryGroup = {
   minutes: number
   /** Total billable minutes in the group. */
   billableMinutes: number
-  /** Number of entry contributions in the group. */
-  entryCount: number
+  /** Entry identifiers contributing to the group. */
+  entryIds: Set<string>
   /** Sum of unique Work Item estimates in the group. */
   estimateMinutes: number
   /** Work Items whose estimates have already been included. */
   estimateWorkItemIds: Set<string>
-  /** Total actual cost in minor currency units. */
-  actualCostMinor: number
+  /** Total actual costs grouped by currency. */
+  actualCostByCurrency: Map<string, number>
 }
 
 /** Creates an empty aggregation row. */
@@ -1583,10 +1905,10 @@ function createMutableSummaryGroup(key: string): MutableSummaryGroup {
     key,
     minutes: 0,
     billableMinutes: 0,
-    entryCount: 0,
+    entryIds: new Set<string>(),
     estimateMinutes: 0,
     estimateWorkItemIds: new Set<string>(),
-    actualCostMinor: 0,
+    actualCostByCurrency: new Map<string, number>(),
   }
 }
 
@@ -1597,15 +1919,69 @@ function toSummaryGroup(group: MutableSummaryGroup, includeCosts: boolean): Time
     label: group.key === 'unassigned' ? 'Unassigned' : group.key,
     minutes: group.minutes,
     billableMinutes: group.billableMinutes,
-    entryCount: group.entryCount,
+    entryCount: group.entryIds.size,
     ...(group.estimateMinutes === 0 ? {} : { estimateMinutes: group.estimateMinutes }),
-    ...(includeCosts ? { actualCostMinor: group.actualCostMinor } : {}),
+    ...(includeCosts ? costFields(group.actualCostByCurrency) : {}),
   }
 }
 
-/** Computes total cost for a set of entries. */
-function sumCosts(entries: readonly TimeEntry[]): number {
-  return entries.reduce((sum, entry) => sum + (entry.actualCostMinor ?? 0), 0)
+/** Adds a cost to a currency-specific aggregation bucket. */
+function addCost(group: MutableSummaryGroup, currency: string, amount: number): void {
+  group.actualCostByCurrency.set(currency, (group.actualCostByCurrency.get(currency) ?? 0) + amount)
+}
+
+/** Builds public cost fields without combining incompatible currencies. */
+function costFields(costs: ReadonlyMap<string, number>): {
+  actualCostMinor?: number
+  actualCostByCurrency: Readonly<Record<string, number>>
+} {
+  const actualCostByCurrency = Object.fromEntries([...costs.entries()].sort(([left], [right]) => left.localeCompare(right)))
+  const currencies = Object.keys(actualCostByCurrency)
+  return {
+    actualCostByCurrency,
+    ...(currencies.length === 1 ? { actualCostMinor: actualCostByCurrency[currencies[0]!] } : {}),
+  }
+}
+
+/** Computes total costs by currency for a clipped report period. */
+function sumCostsByCurrency(
+  entries: readonly TimeEntry[],
+  from: string,
+  to: string,
+  managedProjectIds: ReadonlySet<string> | undefined,
+): Readonly<Record<string, number>> {
+  const costs = new Map<string, number>()
+  for (const entry of entries) {
+    const minutes = clippedEntryMinutes(entry, from, to)
+    const cost = costForEntry(entry, minutes, true, managedProjectIds)
+    if (cost !== undefined) costs.set(entry.currency, (costs.get(entry.currency) ?? 0) + cost)
+  }
+  return costFields(costs).actualCostByCurrency
+}
+
+/** Returns whether a caller can see an entry's confidential costs. */
+function canViewCosts(entry: TimeEntry, managedProjectIds?: ReadonlySet<string>): boolean {
+  return managedProjectIds === undefined || (entry.projectId !== undefined && managedProjectIds.has(entry.projectId))
+}
+
+/** Calculates a clipped entry cost when the caller is authorized to see it. */
+function costForEntry(
+  entry: TimeEntry,
+  minutes: number,
+  includeCosts: boolean,
+  managedProjectIds?: ReadonlySet<string>,
+): number | undefined {
+  if (!includeCosts || !canViewCosts(entry, managedProjectIds) || !entry.billable || entry.hourlyRateMinor === undefined || minutes === 0) return undefined
+  return Math.round((minutes / 60) * entry.hourlyRateMinor)
+}
+
+/** Returns rounded minutes contributed by an entry within report bounds. */
+function clippedEntryMinutes(entry: TimeEntry, from: string, to: string): number {
+  const start = Math.max(Date.parse(entry.startAt), Date.parse(from))
+  const end = Math.min(Date.parse(entry.endAt), Date.parse(to))
+  return end > start
+    ? calculateDurationMinutes(new Date(start).toISOString(), new Date(end).toISOString())
+    : 0
 }
 
 /** Removes confidential money fields before a time-entry snapshot enters audit. */
@@ -1645,6 +2021,7 @@ function toAuditEstimateSnapshot(estimate: TimeEstimate): Record<string, unknown
     teamId: estimate.teamId,
     workItemId: estimate.workItemId,
     estimateMinutes: estimate.estimateMinutes,
+    revision: estimate.revision,
     updatedBy: estimate.updatedBy,
   }
 }
@@ -1688,50 +2065,44 @@ function normalizePeriod(from: string, to: string, timeZone: string): { from: st
 }
 
 /** Returns the local date for an instant. */
-function localDateAt(timestamp: number, timeZone: string): string {
-  const parts = new Intl.DateTimeFormat('en-US', {
+const localDateFormatters = new Map<string, Intl.DateTimeFormat>()
+const localTimeFormatters = new Map<string, Intl.DateTimeFormat>()
+const zonedDateTimeFormatters = new Map<string, Intl.DateTimeFormat>()
+const localDateStartCache = new Map<string, number>()
+
+/** Returns a cached formatter for local calendar dates. */
+function getLocalDateFormatter(timeZone: string): Intl.DateTimeFormat {
+  const cached = localDateFormatters.get(timeZone)
+  if (cached) return cached
+  const formatter = new Intl.DateTimeFormat('en-US', {
     timeZone,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
-  }).formatToParts(new Date(timestamp))
-  const values = new Map(parts.map((part) => [part.type, part.value]))
-  return `${values.get('year')}-${values.get('month')}-${values.get('day')}`
+  })
+  localDateFormatters.set(timeZone, formatter)
+  return formatter
 }
 
-/** Resolves local midnight, including a safe DST-gap fallback. */
-function resolveLocalDateStart(date: string, timeZone: string): number {
-  const approximate = Date.parse(`${date}T00:00:00.000Z`)
-  const candidates = new Set<number>()
-  for (const dayOffset of [-2, -1, 0, 1, 2]) {
-    const candidate = approximate + dayOffset * 86_400_000
-    const offset = zonedOffsetMinutes(candidate, timeZone)
-    candidates.add(approximate - offset * 60_000)
-  }
-  const exact = [...candidates].find((candidate) => localDateAt(candidate, timeZone) === date && localTimeAt(candidate, timeZone) === '00:00')
-  if (exact !== undefined) return exact
-  for (let minute = 0; minute < 180; minute += 1) {
-    const candidate = [...candidates].map((value) => value + minute * 60_000).find((value) => localDateAt(value, timeZone) === date)
-    if (candidate !== undefined) return candidate
-  }
-  throw new TimeTrackingError(400, 'InvalidTimeZoneBoundary', 'The local date boundary could not be resolved.')
-}
-
-/** Returns a local 24-hour time. */
-function localTimeAt(timestamp: number, timeZone: string): string {
-  const parts = new Intl.DateTimeFormat('en-US', {
+/** Returns a cached formatter for local clock times. */
+function getLocalTimeFormatter(timeZone: string): Intl.DateTimeFormat {
+  const cached = localTimeFormatters.get(timeZone)
+  if (cached) return cached
+  const formatter = new Intl.DateTimeFormat('en-US', {
     timeZone,
     hour: '2-digit',
     minute: '2-digit',
     hourCycle: 'h23',
-  }).formatToParts(new Date(timestamp))
-  const values = new Map(parts.map((part) => [part.type, part.value]))
-  return `${values.get('hour')}:${values.get('minute')}`
+  })
+  localTimeFormatters.set(timeZone, formatter)
+  return formatter
 }
 
-/** Reads the timezone offset in minutes at an instant. */
-function zonedOffsetMinutes(timestamp: number, timeZone: string): number {
-  const parts = new Intl.DateTimeFormat('en-US', {
+/** Returns a cached formatter for timezone offset calculations. */
+function getZonedDateTimeFormatter(timeZone: string): Intl.DateTimeFormat {
+  const cached = zonedDateTimeFormatters.get(timeZone)
+  if (cached) return cached
+  const formatter = new Intl.DateTimeFormat('en-US', {
     timeZone,
     year: 'numeric',
     month: '2-digit',
@@ -1740,7 +2111,55 @@ function zonedOffsetMinutes(timestamp: number, timeZone: string): number {
     minute: '2-digit',
     second: '2-digit',
     hourCycle: 'h23',
-  }).formatToParts(new Date(timestamp))
+  })
+  zonedDateTimeFormatters.set(timeZone, formatter)
+  return formatter
+}
+
+/** Returns the local date for an instant. */
+function localDateAt(timestamp: number, timeZone: string): string {
+  const parts = getLocalDateFormatter(timeZone).formatToParts(new Date(timestamp))
+  const values = new Map(parts.map((part) => [part.type, part.value]))
+  return `${values.get('year')}-${values.get('month')}-${values.get('day')}`
+}
+
+/** Resolves local midnight, including a safe DST-gap fallback. */
+function resolveLocalDateStart(date: string, timeZone: string): number {
+  const cacheKey = `${timeZone}\0${date}`
+  const cached = localDateStartCache.get(cacheKey)
+  if (cached !== undefined) return cached
+  const approximate = Date.parse(`${date}T00:00:00.000Z`)
+  const candidates = new Set<number>()
+  for (const dayOffset of [-2, -1, 0, 1, 2]) {
+    const candidate = approximate + dayOffset * 86_400_000
+    const offset = zonedOffsetMinutes(candidate, timeZone)
+    candidates.add(approximate - offset * 60_000)
+  }
+  const exact = [...candidates].find((candidate) => localDateAt(candidate, timeZone) === date && localTimeAt(candidate, timeZone) === '00:00')
+  if (exact !== undefined) {
+    localDateStartCache.set(cacheKey, exact)
+    return exact
+  }
+  for (let minute = 0; minute < 180; minute += 1) {
+    const candidate = [...candidates].map((value) => value + minute * 60_000).find((value) => localDateAt(value, timeZone) === date)
+    if (candidate !== undefined) {
+      localDateStartCache.set(cacheKey, candidate)
+      return candidate
+    }
+  }
+  throw new TimeTrackingError(400, 'InvalidTimeZoneBoundary', 'The local date boundary could not be resolved.')
+}
+
+/** Returns a local 24-hour time. */
+function localTimeAt(timestamp: number, timeZone: string): string {
+  const parts = getLocalTimeFormatter(timeZone).formatToParts(new Date(timestamp))
+  const values = new Map(parts.map((part) => [part.type, part.value]))
+  return `${values.get('hour')}:${values.get('minute')}`
+}
+
+/** Reads the timezone offset in minutes at an instant. */
+function zonedOffsetMinutes(timestamp: number, timeZone: string): number {
+  const parts = getZonedDateTimeFormatter(timeZone).formatToParts(new Date(timestamp))
   const values = new Map(parts.map((part) => [part.type, part.value]))
   const asUtc = Date.UTC(
     Number(values.get('year')),
@@ -1793,9 +2212,15 @@ function validateInstant(value: string, label: string): string {
 /** Validates an optional local date. */
 function validateOptionalDate(value: string | undefined, label: string): void {
   if (value === undefined) return
-  if (!ISO_DATE_PATTERN.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00.000Z`))) {
+  if (!ISO_DATE_PATTERN.test(value) || !isValidCalendarDate(value)) {
     throw new TimeTrackingError(400, 'InvalidDate', `${label} must be an ISO date.`)
   }
+}
+
+/** Validates a calendar date without accepting JavaScript date normalization. */
+function isValidCalendarDate(value: string): boolean {
+  const parsed = new Date(`${value}T00:00:00.000Z`)
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value
 }
 
 /** Validates a list boundary that may be an ISO local date or instant. */
@@ -1872,6 +2297,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Reads a stored time entry. */
 function readStoredEntry(value: unknown): TimeEntry {
   const record = readRecord(value)
+  readSchemaVersion(record, 'Stored time entry')
   return {
     schemaVersion: 1,
     id: readString(record.id, 'Stored time entry ID'),
@@ -1903,6 +2329,7 @@ function readStoredEntry(value: unknown): TimeEntry {
 /** Reads a stored timer. */
 function readStoredTimer(value: unknown): RunningTimer {
   const record = readRecord(value)
+  readSchemaVersion(record, 'Stored timer')
   return {
     schemaVersion: 1,
     id: readString(record.id, 'Stored timer ID'),
@@ -1937,12 +2364,14 @@ function readStoredHistory(value: unknown): TimeEntryHistory {
 /** Reads a stored estimate. */
 function readStoredEstimate(value: unknown): TimeEstimate {
   const record = readRecord(value)
-    return {
-      schemaVersion: 1,
-      workspaceId: readString(record.workspaceId, 'Stored estimate Workspace ID'),
-      teamId: readString(record.teamId, 'Stored estimate Team ID'),
+  readSchemaVersion(record, 'Stored estimate')
+  return {
+    schemaVersion: 1,
+    workspaceId: readString(record.workspaceId, 'Stored estimate Workspace ID'),
+    teamId: readString(record.teamId, 'Stored estimate Team ID'),
     workItemId: readString(record.workItemId, 'Stored estimate Work Item ID'),
     estimateMinutes: readNumber(record.estimateMinutes, 'Stored estimate'),
+    revision: readOptionalNumber(record.revision) ?? 1,
     updatedBy: readString(record.updatedBy, 'Stored estimate actor'),
     updatedAt: readString(record.updatedAt, 'Stored estimate timestamp'),
   }
@@ -1951,10 +2380,11 @@ function readStoredEstimate(value: unknown): TimeEstimate {
 /** Reads a stored budget. */
 function readStoredBudget(value: unknown): TimeBudget {
   const record = readRecord(value)
-    return {
-      schemaVersion: 1,
-      workspaceId: readString(record.workspaceId, 'Stored budget Workspace ID'),
-      scopeType: readScopeType(record.scopeType),
+  readSchemaVersion(record, 'Stored budget')
+  return {
+    schemaVersion: 1,
+    workspaceId: readString(record.workspaceId, 'Stored budget Workspace ID'),
+    scopeType: readScopeType(record.scopeType),
     scopeId: readString(record.scopeId, 'Stored budget scope ID'),
     amountMinor: readNumber(record.amountMinor, 'Stored budget amount'),
     currency: readString(record.currency, 'Stored budget currency'),
@@ -1962,6 +2392,13 @@ function readStoredBudget(value: unknown): TimeBudget {
     ...(readOptionalString(record.periodTo) ? { periodTo: readOptionalString(record.periodTo) } : {}),
     revision: readNumber(record.revision, 'Stored budget revision'),
     updatedAt: readString(record.updatedAt, 'Stored budget timestamp'),
+  }
+}
+
+/** Rejects missing and future persisted schema versions before parsing fields. */
+function readSchemaVersion(record: Record<string, unknown>, label: string): void {
+  if (record.schemaVersion !== 1) {
+    throw new TimeTrackingError(500, 'UnsupportedStoredTimeTrackingSchema', `${label} schema version is unsupported.`)
   }
 }
 
@@ -2026,8 +2463,36 @@ function readScopeType(value: unknown): 'team' | 'project' {
 /** Converts a conditional write error to a stable domain error. */
 function mapConditionalWriteError(error: unknown, code: string, message: string): TimeTrackingError {
   const name = typeof error === 'object' && error !== null && 'name' in error && typeof error.name === 'string' ? error.name : undefined
-  if (name === 'ConditionalCheckFailedException' || name === 'TransactionCanceledException') return new TimeTrackingError(409, code, message)
+  if (name === 'ConditionalCheckFailedException') return new TimeTrackingError(409, code, message)
+  if (name === 'TransactionCanceledException' && isTransactionConditionFailure(error)) {
+    return new TimeTrackingError(409, code, message)
+  }
+  if (name === 'TransactionCanceledException' && isRetryableTransactionCancellation(error)) {
+    return new TimeTrackingError(503, 'TimeTrackingTransientFailure', 'The time tracking transaction was temporarily unavailable. Retry the request.')
+  }
   throw error
+}
+
+/** Returns whether a transaction was cancelled by an item condition. */
+function isTransactionConditionFailure(error: unknown): boolean {
+  return readTransactionCancellationCodes(error).includes('ConditionalCheckFailed')
+}
+
+/** Returns whether a transaction cancellation represents a retryable outage. */
+function isRetryableTransactionCancellation(error: unknown): boolean {
+  return readTransactionCancellationCodes(error).some((code) =>
+    code === 'TransactionConflict' ||
+    code === 'ProvisionedThroughputExceeded' ||
+    code === 'ThrottlingError'
+  )
+}
+
+/** Reads sanitized cancellation reason codes from an AWS transaction error. */
+function readTransactionCancellationCodes(error: unknown): string[] {
+  if (!isRecord(error) || !Array.isArray(error.CancellationReasons)) return []
+  return error.CancellationReasons.flatMap((reason) =>
+    isRecord(reason) && typeof reason.Code === 'string' ? [reason.Code] : []
+  )
 }
 
 /** Builds an entry key. */
@@ -2067,6 +2532,28 @@ function clone<T>(value: T): T {
 
 /** Escapes one CSV field. */
 function csvCell(value: string | number): string {
-  const text = String(value)
-  return /[",\n]/u.test(text) ? `"${text.replaceAll('"', '""')}"` : text
+  const raw = String(value)
+  const text = /^[=+\-@\t\r]/u.test(raw) ? `'${raw}` : raw
+  return /[",\r\n]/u.test(text) ? `"${text.replaceAll('"', '""')}"` : text
+}
+
+/** Creates a stable request fingerprint while excluding the idempotency key itself. */
+function createTimeTrackingRequestFingerprint(operation: string, input: object): string {
+  const body = Object.fromEntries(
+    Object.entries(input)
+      .filter(([key]) => key !== 'idempotencyKey')
+      .map(([key, value]) => [key, sortRequestValue(value)]),
+  )
+  return JSON.stringify({ operation, body })
+}
+
+/** Recursively sorts object keys before they are included in a request fingerprint. */
+function sortRequestValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortRequestValue)
+  if (!isRecord(value)) return value
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => [key, sortRequestValue(child)]),
+  )
 }

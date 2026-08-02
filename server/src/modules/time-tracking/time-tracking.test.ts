@@ -4,6 +4,7 @@ import {
   TimeTrackingService,
 } from './time-tracking'
 
+/** Creates an isolated service fixture with deterministic IDs and clock values. */
 function createFixture() {
   let id = 0
   const repository = new InMemoryTimeTrackingRepository()
@@ -152,6 +153,7 @@ describe('TimeTrackingService', () => {
       teamId: 'team-1',
       workItemId: 'work-item-1',
       estimateMinutes: 120,
+      expectedRevision: 0,
       updatedBy: 'manager-1',
     })
     await service.createEntry({
@@ -225,5 +227,171 @@ describe('TimeTrackingService', () => {
     expect(await service.getEstimate('workspace-1', 'team-1', 'work-item-1')).toMatchObject({
       estimateMinutes: 120,
     })
+  })
+
+  test('clears stale costs, enforces estimate and budget revisions, and rejects invalid dates', async () => {
+    const { service } = createFixture()
+    const entry = await service.createEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      projectId: 'project-1',
+      workItemId: 'work-item-1',
+      userId: 'member-1',
+      startAt: '2026-08-02T09:00:00.000Z',
+      endAt: '2026-08-02T10:00:00.000Z',
+      billable: true,
+      currency: 'USD',
+      hourlyRateMinor: 6_000,
+      source: 'manual',
+    }, true)
+    const updated = await service.updateEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      entryId: entry.id,
+      actorUserId: 'member-1',
+      canManageRates: true,
+      expectedRevision: entry.revision,
+      billable: false,
+    })
+    expect(updated.actualCostMinor).toBeUndefined()
+
+    const estimate = await service.saveEstimate({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      workItemId: 'work-item-1',
+      estimateMinutes: 60,
+      expectedRevision: 0,
+      updatedBy: 'manager-1',
+    })
+    await expect(service.saveEstimate({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      workItemId: 'work-item-1',
+      estimateMinutes: 90,
+      expectedRevision: 0,
+      updatedBy: 'manager-1',
+    })).rejects.toMatchObject({ code: 'TimeEstimateRevisionConflict' })
+    await expect(service.saveBudget({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      scopeType: 'team',
+      scopeId: 'team-1',
+      amountMinor: 10_000,
+      currency: 'USD',
+      periodFrom: '2026-02-30',
+      expectedRevision: 0,
+      updatedBy: 'manager-1',
+    })).rejects.toMatchObject({ code: 'InvalidDate' })
+    const budget = await service.saveBudget({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      scopeType: 'team',
+      scopeId: 'team-1',
+      amountMinor: 10_000,
+      currency: 'USD',
+      expectedRevision: 0,
+      updatedBy: 'manager-1',
+    })
+    await expect(service.saveBudget({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      scopeType: 'team',
+      scopeId: 'team-1',
+      amountMinor: 12_000,
+      currency: 'USD',
+      expectedRevision: 0,
+      updatedBy: 'manager-1',
+    })).rejects.toMatchObject({ code: 'TimeBudgetRevisionConflict' })
+    expect(estimate.revision).toBe(1)
+    expect(budget.revision).toBe(1)
+  })
+
+  test('clips report totals and keeps mixed-currency costs separate', async () => {
+    const { service } = createFixture()
+    await service.createEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      workItemId: 'work-item-usd',
+      userId: 'member-1',
+      startAt: '2026-08-02T09:00:00.000Z',
+      endAt: '2026-08-02T11:00:00.000Z',
+      billable: true,
+      currency: 'USD',
+      hourlyRateMinor: 6_000,
+      source: 'manual',
+    }, true)
+    await service.createEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      workItemId: 'work-item-eur',
+      userId: 'member-1',
+      startAt: '2026-08-02T09:30:00.000Z',
+      endAt: '2026-08-02T10:30:00.000Z',
+      billable: true,
+      currency: 'EUR',
+      hourlyRateMinor: 6_000,
+      source: 'manual',
+    }, true)
+    const summary = await service.createSummary({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      from: '2026-08-02T10:00:00.000Z',
+      to: '2026-08-02T11:00:00.000Z',
+      timeZone: 'UTC',
+      groupBy: 'user',
+      includeCosts: true,
+    })
+    expect(summary.totalMinutes).toBe(90)
+    expect(summary.totalActualCostMinor).toBeUndefined()
+    expect(summary.totalActualCostByCurrency).toEqual({ EUR: 3_000, USD: 6_000 })
+  })
+
+  test('loads more than 500 entries for complete reports', async () => {
+    const { service } = createFixture()
+    const base = Date.parse('2026-08-01T00:00:00.000Z')
+    for (let index = 0; index < 501; index += 1) {
+      const startAt = new Date(base + index * 60_000).toISOString()
+      const endAt = new Date(base + (index + 1) * 60_000).toISOString()
+      await service.createEntry({
+        workspaceId: 'workspace-1',
+        teamId: 'team-1',
+        workItemId: `work-item-${index}`,
+        userId: 'member-1',
+        startAt,
+        endAt,
+        billable: false,
+        currency: 'USD',
+        source: 'manual',
+      }, false)
+    }
+    const summary = await service.createSummary({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      from: '2026-08-01',
+      to: '2026-08-02',
+      timeZone: 'UTC',
+      groupBy: 'user',
+      includeCosts: false,
+    })
+    expect(summary.totalMinutes).toBe(501)
+    expect(summary.groups[0]?.entryCount).toBe(501)
+  })
+
+  test('allows an overlong timer to be cancelled', async () => {
+    const { service } = createFixture()
+    const timer = await service.startTimer({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      workItemId: 'work-item-1',
+      userId: 'member-1',
+      billable: false,
+      startedAt: '2026-07-20T09:00:00.000Z',
+    })
+    await service.cancelTimer({
+      workspaceId: 'workspace-1',
+      timerId: timer.id,
+      userId: 'member-1',
+    })
+    expect(await service.getActiveTimer('workspace-1', 'member-1')).toBeUndefined()
   })
 })

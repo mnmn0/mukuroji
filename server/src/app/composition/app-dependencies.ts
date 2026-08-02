@@ -208,7 +208,7 @@ export interface DeveloperPlatformDependencies {
 /** Dependencies required by time entry, timer, timesheet, and budget routes. */
 export interface TimeTrackingDependencies {
   /** Provides the application service for one API application instance. */
-  service: TimeTrackingService
+  timeTrackingService: TimeTrackingService
 }
 
 /** Operational dependencies required by system routes. */

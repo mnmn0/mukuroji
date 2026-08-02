@@ -823,7 +823,6 @@ export function buildApiRuntime(
         'dynamodb:GetItem',
         'dynamodb:PutItem',
         'dynamodb:Query',
-        'dynamodb:TransactWriteItems',
         'dynamodb:UpdateItem',
       ],
       resources: [analyticsTable.tableArn],
@@ -834,8 +833,13 @@ export function buildApiRuntime(
     'ApiAuditTransactionDataPolicy',
     {
       statements: [new iam.PolicyStatement({
-        actions: ['dynamodb:TransactWriteItems'],
+        actions: ['dynamodb:ConditionCheckItem', 'dynamodb:PutItem'],
         resources: [auditEventsTable.tableArn],
+        conditions: {
+          'ForAnyValue:StringEquals': {
+            'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+          },
+        },
       })],
     },
   );

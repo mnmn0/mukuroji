@@ -1036,8 +1036,8 @@ const automationDependencies: AutomationDependencies = {
   },
 }
 const timeTrackingDependencies = {
-  get service() {
-    return requireAppDependencies().timeTracking.service
+  get timeTrackingService() {
+    return requireAppDependencies().timeTracking.timeTrackingService
   },
 }
 const developerPlatformDependencies: DeveloperPlatformDependencies = {
@@ -4362,6 +4362,15 @@ routeApp.route('/', createTimeTrackingRouter({
         .map((access) => access.projectId),
     )
   },
+  getManagedProjectIds: async (principal, teamId) => {
+    const context = await requireTeamPermission(principal, teamId, 'viewer')
+    if (principal.isSystemAdmin) return undefined
+    return new Set(
+      (context.projectAccesses ?? [])
+        .filter((access) => projectAccessAllows(access, 'manager'))
+        .map((access) => access.projectId),
+    )
+  },
   verifyProject: async (principal, teamId, projectId, minimum) => {
     const context = await requireTeamPermission(principal, teamId, minimum)
     if (
@@ -4377,10 +4386,11 @@ routeApp.route('/', createTimeTrackingRouter({
       )
     }
   },
-  verifyWorkItem: async (principal, teamId, workItemId) => {
-    await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+  verifyWorkItem: async (principal, teamId, workItemId, minimum = 'member') => {
+    const { detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, minimum)
+    return detail.issue.assignedProjectId ?? undefined
   },
-  getTimeTracking: () => timeTrackingDependencies.service,
+  getTimeTracking: () => timeTrackingDependencies.timeTrackingService,
   readJson,
   mapError: toTimeTrackingErrorResponse,
 }))
