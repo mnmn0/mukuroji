@@ -87,16 +87,19 @@ export function createProductionTenantOperationResourceOwner(): TenantOperationR
         : {}),
     }),
     config: readTenantOperationResourceOwnerConfig(),
+    pseudonymKey:
+      serverConfig.environment.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY ?? '',
   })
   return new TenantOperationResourceOwnerExecutor(
     state,
     awsOwner,
     {
       /** Enqueues one same-capability continuation without accepting a destination. */
-      async send(job) {
+      async send(job, delaySeconds) {
         await sqs.send(new SendMessageCommand({
           QueueUrl: queueUrl,
           MessageBody: JSON.stringify(job),
+          ...(delaySeconds === undefined ? {} : { DelaySeconds: delaySeconds }),
         }))
       },
     },
@@ -222,6 +225,7 @@ function readTenantOperationResourceOwnerConfig(): TenantOperationResourceOwnerC
     workItemConfigurationTableName: requireEnvironment('WORK_ITEM_CONFIGURATION_TABLE_NAME'),
     automationTableName: requireEnvironment('AUTOMATION_TABLE_NAME'),
     planningTableName: requireEnvironment('PLANNING_TABLE_NAME'),
+    capacityPlanningTableName: requireEnvironment('CAPACITY_PLANNING_TABLE_NAME'),
     developerPlatformTableName: requireEnvironment('DEVELOPER_PLATFORM_TABLE_NAME'),
     analyticsTableName: requireEnvironment('ANALYTICS_TABLE_NAME'),
     requestIntakeTableName: requireEnvironment('REQUEST_INTAKE_TABLE_NAME'),

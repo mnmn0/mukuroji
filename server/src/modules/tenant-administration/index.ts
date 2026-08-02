@@ -22,6 +22,7 @@ export {
   failTenantOperation,
   isTenantOperationActive,
   pauseTenantOperation,
+  repairTenantClosureOperation,
   recordTenantBillingPeriod,
   reserveTenantUsage,
   resumeTenantOperation,
@@ -58,7 +59,10 @@ export {
   TenantOperationResourceOwnerExecutor,
   createTenantDeletedMemberAlias,
   createTenantOperationEvidenceDigest,
+  createTenantOperationEvidenceRecordKey,
+  createTenantOperationEvidenceRecordPrefix,
   resolveTenantOperationResourceOwner,
+  validateTenantPseudonymKey,
 } from './application/tenant-operation-resource-owner'
 export type {
   TenantOperationContinuationQueue,
@@ -68,4 +72,5 @@ export type {
   TenantOperationResourceOwner,
   TenantOperationResourceOwnerKind,
   TenantOperationResourceOwnerResult,
+  TenantOperationResourceOwnerExecutorOptions,
 } from './application/tenant-operation-resource-owner'

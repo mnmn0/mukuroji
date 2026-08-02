@@ -65,6 +65,7 @@ export function createProductionTenantAdministrationClient(): DynamoDbTenantAdmi
     },
     resources.auditEventsTableName,
     resources.workspaceAccessTableName,
+    config.environment.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY,
   )
 }
 

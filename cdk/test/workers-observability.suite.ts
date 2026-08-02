@@ -480,6 +480,8 @@ test('durable Work Item imports use retained versioned sources and an isolated r
   const outputs = template.toJSON().Outputs;
   const enterpriseIdentityTableId = outputs.EnterpriseIdentityTableName?.Value?.Ref;
   const planningTableId = outputs.PlanningTableName?.Value?.Ref;
+  const tenantAdministrationTableId =
+    outputs.TenantAdministrationTableName?.Value?.Ref;
   const workItemConfigurationTableId =
     outputs.WorkItemConfigurationTableName?.Value?.Ref;
   const workspaceAccessTableId = outputs.WorkspaceAccessTableName?.Value?.Ref;
@@ -506,6 +508,7 @@ test('durable Work Item imports use retained versioned sources and an isolated r
   expect(workerEntry).toBeDefined();
   expect(typeof enterpriseIdentityTableId).toBe('string');
   expect(typeof planningTableId).toBe('string');
+  expect(typeof tenantAdministrationTableId).toBe('string');
   expect(typeof workItemConfigurationTableId).toBe('string');
   expect(typeof workspaceAccessTableId).toBe('string');
   if (!importBucketEntry || !importQueueEntry || !importDlqEntry || !workerEntry) {
@@ -662,6 +665,7 @@ test('durable Work Item imports use retained versioned sources and an isolated r
         DEVELOPER_PLATFORM_TABLE_NAME: { Ref: 'DeveloperPlatformTable772E085C' },
         ENTERPRISE_IDENTITY_TABLE_NAME: { Ref: enterpriseIdentityTableId },
         PLANNING_TABLE_NAME: { Ref: planningTableId },
+        TENANT_ADMINISTRATION_TABLE_NAME: { Ref: tenantAdministrationTableId },
         MUKUROJI_RUNTIME_ROLE: 'work-item-import-worker',
         WORK_ITEM_IMPORT_BUCKET_NAME: { Ref: importBucketId },
         WORK_ITEM_IMPORT_QUEUE_URL: { Ref: importQueueId },
@@ -684,6 +688,7 @@ test('durable Work Item imports use retained versioned sources and an isolated r
   )?.[1];
   expect(workerPolicy).toBeDefined();
   const serializedWorkerPolicy = JSON.stringify(workerPolicy);
+  expect(serializedWorkerPolicy).toContain(String(tenantAdministrationTableId));
   const workerStatements = (
     workerPolicy as {
       Properties?: {
@@ -2128,6 +2133,9 @@ test('tenant retention worker can query and reconcile only tenant and audit stor
 test('tenant lifecycle execution is split into queued environment-bound resource owners', () => {
   const document = synthesizedTemplate.toJSON();
   const resources = document.Resources;
+  const capacityPlanningTableId =
+    document.Outputs.CapacityPlanningTableName?.Value?.Ref;
+  expect(typeof capacityPlanningTableId).toBe('string');
   const specifications = [
     {
       functionId: 'TenantExportCapabilityFunction9B1A8023',
@@ -2195,6 +2203,10 @@ test('tenant lifecycle execution is split into queued environment-bound resource
             TENANT_OPERATION_EXECUTOR_ID: specification.executorId,
             TENANT_OPERATION_RESOURCE_OWNER: specification.owner,
             TENANT_OPERATION_RESOURCE_OWNER_QUEUE_URL: expect.anything(),
+            CAPACITY_PLANNING_TABLE_NAME: { Ref: capacityPlanningTableId },
+            MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: {
+              Ref: 'WorkspaceAuditPseudonymKey',
+            },
           }),
         }),
       }),
@@ -2215,9 +2227,11 @@ test('tenant lifecycle execution is split into queued environment-bound resource
     expect(serializedPolicy).not.toContain('secretsmanager:');
     if (specification.owner === 'export' || specification.owner === 'data') {
       expect(serializedPolicy).toContain('s3:');
+      expect(serializedPolicy).toContain(String(capacityPlanningTableId));
     } else if (specification.owner === 'verification') {
       expect(serializedPolicy).toContain('s3:ListBucketVersions');
       expect(serializedPolicy).not.toContain('s3:DeleteObject');
+      expect(serializedPolicy).toContain(String(capacityPlanningTableId));
     } else {
       expect(serializedPolicy).not.toContain('s3:');
     }

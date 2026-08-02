@@ -8,6 +8,7 @@ import {
   createDefaultTenantAdministrationSnapshot,
   failTenantOperation,
   pauseTenantOperation,
+  repairTenantClosureOperation,
   recordTenantBillingPeriod,
   reserveTenantUsage,
   resumeTenantOperation,
@@ -234,6 +235,25 @@ describe('tenant administration domain', () => {
       ),
       resumed,
     )
+    const verifying = proofs.slice(0, 5).reduce(
+      (operation, proof, index) => advanceTenantOperation(
+        operation,
+        proof,
+        `2026-08-02T00:0${index + 3}:00.000Z`,
+      ),
+      resumed,
+    )
+    expect(repairTenantClosureOperation(
+      verifying,
+      'delete-secrets',
+      createEvidenceReference(4),
+      '2026-08-02T00:09:00.000Z',
+    )).toMatchObject({
+      status: 'running',
+      currentStep: 'delete-secrets',
+      completedSteps: ['export', 'revoke-access', 'anonymize-members', 'delete-data'],
+      lastEvidenceReference: createEvidenceReference(4),
+    })
 
     expect(completed.lastEvidenceReference).toBe(createEvidenceReference(6))
     expect(verifyTenantClosure(completed, '2026-08-02T00:03:00.000Z').status).toBe('verified')

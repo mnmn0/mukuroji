@@ -421,7 +421,7 @@ export function TenantAdministrationPanel({
         <section className="border-t border-[var(--workbench-border)] py-7 xl:col-span-2">
           <SectionHeader title={t('workspace.tenantAdministration.governanceTitle')} meta={t('workspace.tenantAdministration.governanceMeta')} />
           <div className="mt-5 grid gap-4 sm:grid-cols-2">
-            <NumberField disabled={tenantLifecycleLocked} label={t('workspace.tenantAdministration.retention')} value={governance.auditRetentionDays} onChange={(value) => onChangeGovernance({ ...governance, auditRetentionDays: value })} />
+            <NumberField disabled={tenantLifecycleLocked} label={t('workspace.tenantAdministration.retention')} min={30} value={governance.auditRetentionDays} onChange={(value) => onChangeGovernance({ ...governance, auditRetentionDays: value })} />
             <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
               {t('workspace.tenantAdministration.dataResidency')}
               <input
@@ -480,7 +480,7 @@ export function TenantAdministrationPanel({
               <div className="mt-4 flex flex-wrap gap-2">
                 {activeOperation.status === 'running' ? <button className="workbench-button-secondary" disabled={isSaving} onClick={() => onPauseOperation(activeOperation)} type="button">{t('workspace.tenantAdministration.pause')}</button> : null}
                 {activeOperation.status === 'paused' || activeOperation.status === 'requested' ? <button className="workbench-button-secondary" disabled={isSaving || governance.legalHold} onClick={() => onResumeOperation(activeOperation)} type="button">{t('workspace.tenantAdministration.resume')}</button> : null}
-                {activeOperation.kind === 'closure' && activeOperation.status === 'completed' ? <button className="workbench-button-primary" disabled={isSaving} onClick={() => onVerifyClosure(activeOperation)} type="button">{t('workspace.tenantAdministration.verify')}</button> : null}
+                {activeOperation.kind === 'closure' && activeOperation.status === 'completed' ? <button className="workbench-button-primary" disabled={isSaving || governance.legalHold} onClick={() => onVerifyClosure(activeOperation)} type="button">{t('workspace.tenantAdministration.verify')}</button> : null}
               </div>
             </div>
           ) : null}
@@ -581,11 +581,11 @@ function TenantMetric({ label, value, progress }: { label: string; value: string
 }
 
 /** Numeric input used by tenant capacity and retention forms. */
-function NumberField({ disabled = false, label, value, onChange }: { disabled?: boolean; label: string; value: number; onChange: (value: number) => void }) {
+function NumberField({ disabled = false, label, min = 0, value, onChange }: { disabled?: boolean; label: string; min?: number; value: number; onChange: (value: number) => void }) {
   return (
     <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
       {label}
-      <input className="workbench-input" disabled={disabled} min={0} onChange={(event) => onChange(Number(event.target.value))} type="number" value={value} />
+      <input className="workbench-input" disabled={disabled} min={min} onChange={(event) => onChange(Number(event.target.value))} type="number" value={value} />
     </label>
   )
 }

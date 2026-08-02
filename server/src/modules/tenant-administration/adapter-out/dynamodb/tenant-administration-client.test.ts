@@ -5,7 +5,10 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import { describe, expect, test } from 'bun:test'
 import { createHash } from 'node:crypto'
-import type { UpdateTenantEntitlementInput } from '@mukuroji/contracts'
+import type {
+  TenantOperation,
+  UpdateTenantEntitlementInput,
+} from '@mukuroji/contracts'
 import {
   TenantAdministrationError,
   createDefaultTenantAdministrationSnapshot,
@@ -911,6 +914,13 @@ describe('DynamoDbTenantAdministrationClient', () => {
       expectedRevision: 0,
     })).resolves.toMatchObject({ legalHold: true, revision: 1 })
     expect(transactions).toHaveLength(1)
+    const legalHoldItems = transactions[0]?.TransactItems
+    if (!Array.isArray(legalHoldItems)) {
+      throw new Error('Expected a legal-hold transaction.')
+    }
+    expect(legalHoldItems.some((item: unknown) =>
+      JSON.stringify(item).includes('OPERATION_EXECUTION_LEASE')
+    )).toBe(true)
 
     await expect(client.updateGovernance('workspace-1', 'owner-1', {
       auditRetentionDays: 730,
@@ -922,6 +932,92 @@ describe('DynamoDbTenantAdministrationClient', () => {
       code: 'TenantGovernanceLockedDuringClosure',
       status: 409,
     })
+  })
+
+  test('fences resource pages and pause with one expiring execution lease', async () => {
+    const items = createAggregateItems(1)
+    markTenantClosing(items)
+    const operation: TenantOperation = {
+      operationId: 'closure-1',
+      workspaceId: 'workspace-1',
+      kind: 'closure',
+      status: 'running',
+      requestedBy: 'owner-1',
+      requestedAt: '2026-08-02T00:00:00.000Z',
+      updatedAt: '2026-08-02T00:02:00.000Z',
+      updatedBy: 'executor:tenant-member-anonymization',
+      currentStep: 'delete-data',
+      completedSteps: ['export', 'revoke-access', 'anonymize-members'],
+      lastEvidenceReference: createEvidenceReference('anonymize-members'),
+      revision: 4,
+    }
+    items.set('OPERATION#closure-1', {
+      ...operation,
+      completedSteps: [...operation.completedSteps],
+    })
+    const commands: CapturedCommand[] = []
+    const client = new DynamoDbTenantAdministrationClient(
+      'TenantAdministrationTable',
+      createDocumentClient((command) => {
+        commands.push(command)
+        if (command.constructor.name === 'TransactWriteCommand') return {}
+        if (command.constructor.name === 'DeleteCommand') return {}
+        const recordKey = readRecordKey(command)
+        if (!recordKey) return {}
+        const value = items.get(recordKey)
+        return value ? { Item: createStateItem(recordKey, value) } : {}
+      }),
+      () => '2026-08-02T00:02:00.000Z',
+    )
+    const expiresAt = Math.floor(Date.parse('2026-08-02T00:08:00.000Z') / 1_000)
+
+    await expect(client.acquireOperationExecutionLease(
+      operation,
+      'lease-owner-1',
+      expiresAt,
+    )).resolves.toBe(true)
+    await client.releaseOperationExecutionLease(
+      'workspace-1',
+      'closure-1',
+      'lease-owner-1',
+    )
+    await expect(client.pauseOperation(
+      'workspace-1',
+      'owner-1',
+      'closure-1',
+    )).resolves.toMatchObject({ status: 'paused' })
+
+    const transactions = commands
+      .filter((command) => command.constructor.name === 'TransactWriteCommand')
+      .map((command) => command.input)
+    expect(transactions[0]).toMatchObject({
+      TransactItems: [
+        { ConditionCheck: { Key: { recordKey: 'OPERATION#closure-1' } } },
+        { ConditionCheck: { Key: { recordKey: 'GOVERNANCE' } } },
+        {
+          Put: {
+            Item: {
+              recordKey: 'OPERATION_EXECUTION_LEASE',
+              leaseOwner: 'lease-owner-1',
+              leaseExpiresAtEpochSeconds: expiresAt,
+            },
+          },
+        },
+      ],
+    })
+    const pauseItems = transactions[1]?.TransactItems
+    if (!Array.isArray(pauseItems)) throw new Error('Expected a pause transaction.')
+    expect(pauseItems.some((item: unknown) =>
+      JSON.stringify(item).includes('OPERATION_EXECUTION_LEASE')
+    )).toBe(true)
+    expect(commands.find((command) => command.constructor.name === 'DeleteCommand'))
+      .toMatchObject({
+        input: {
+          Key: { recordKey: 'OPERATION_EXECUTION_LEASE' },
+          ConditionExpression:
+            'operationId = :operationId AND leaseOwner = :leaseOwner',
+        },
+      })
   })
 
   test('atomically seals new access on closure request and replays the same request', async () => {
@@ -1039,6 +1135,7 @@ describe('DynamoDbTenantAdministrationClient', () => {
       undefined,
       undefined,
       'WorkspaceAccessTable',
+      '1'.repeat(64),
     )
 
     const completed = await client.advanceOperation(
@@ -1109,7 +1206,8 @@ describe('DynamoDbTenantAdministrationClient', () => {
         },
       ],
     })
-    expect(verified.requestedBy).toMatch(/^deleted\+[a-f0-9]{24}@invalid\.example$/u)
+    expect(verified.requestedBy)
+      .toMatch(/^deleted\+[a-f0-9]{16}\.[a-f0-9]{24}@invalid\.example$/u)
     expect(verified.updatedBy).toBe(verified.requestedBy)
     expect(JSON.stringify(transactions[1])).toContain(
       '\\"status\\":\\"closed\\"',
@@ -1117,6 +1215,76 @@ describe('DynamoDbTenantAdministrationClient', () => {
     expect(JSON.stringify(transactions[1])).toContain(
       '\\"closedByOperationId\\":\\"closure-1\\"',
     )
+  })
+
+  test('persists a verified residual repair as a valid cleanup-step prefix', async () => {
+    const items = createAggregateItems(1)
+    markTenantClosing(items)
+    items.set('OPERATION#closure-1', {
+      operationId: 'closure-1',
+      workspaceId: 'workspace-1',
+      kind: 'closure',
+      status: 'running',
+      requestedBy: 'owner-1',
+      requestedAt: '2026-08-02T00:00:00.000Z',
+      updatedAt: '2026-08-02T00:06:00.000Z',
+      updatedBy: 'executor:tenant-secret-deletion',
+      currentStep: 'verify',
+      completedSteps: [
+        'export',
+        'revoke-access',
+        'anonymize-members',
+        'delete-data',
+        'delete-secrets',
+      ],
+      lastEvidenceReference: createEvidenceReference('delete-secrets'),
+      revision: 6,
+    })
+    const client = new DynamoDbTenantAdministrationClient(
+      'TenantAdministrationTable',
+      createDocumentClient((command) => {
+        if (command.constructor.name === 'TransactWriteCommand') return {}
+        if (command.constructor.name === 'QueryCommand') {
+          return {
+            Items: [{
+              workspaceId: 'workspace-1',
+              recordKey:
+                'EVIDENCE#closure-1#delete-data#REVISION#0000000000000004',
+              kind: 'operation-evidence',
+              operationId: 'closure-1',
+              operationRevision: 4,
+              step: 'delete-data',
+              evidenceDigest: createHash('sha256')
+                .update('delete-data')
+                .digest('hex'),
+            }],
+          }
+        }
+        const recordKey = readRecordKey(command)
+        if (!recordKey) return {}
+        const value = items.get(recordKey)
+        return value ? { Item: createStateItem(recordKey, value) } : {}
+      }),
+      () => '2026-08-02T00:07:00.000Z',
+    )
+
+    const repaired = await client.repairOperation(
+      'workspace-1',
+      'executor:tenant-closure-verification',
+      'closure-1',
+      'delete-secrets',
+    )
+
+    expect(repaired).toMatchObject({
+      status: 'running',
+      currentStep: 'delete-secrets',
+      completedSteps: ['export', 'revoke-access', 'anonymize-members', 'delete-data'],
+      lastEvidenceReference: createEvidenceReference('delete-data'),
+      revision: 7,
+    })
+    items.set('OPERATION#closure-1', repaired)
+    await expect(client.getOperation('workspace-1', 'closure-1'))
+      .resolves.toEqual(repaired)
   })
 
   test('reopens a closing tenant when a reversible capability fails safely', async () => {

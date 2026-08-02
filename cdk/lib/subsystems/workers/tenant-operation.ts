@@ -399,6 +399,8 @@ function buildTenantOperationCapabilityFunction(
       ANALYTICS_TABLE_NAME: input.dataStores.analyticsTable.tableName,
       AUDIT_EVENTS_TABLE_NAME: input.dataStores.auditEventsTable.tableName,
       AUTOMATION_TABLE_NAME: input.dataStores.automationTable.tableName,
+      CAPACITY_PLANNING_TABLE_NAME:
+        input.dataStores.capacityPlanningTable.tableName,
       COGNITO_USER_POOL_ID: input.parameters.cognitoUserPoolId.valueAsString,
       COLLABORATION_TABLE_NAME: input.dataStores.collaborationTable.tableName,
       DEVELOPER_PLATFORM_TABLE_NAME:
@@ -411,6 +413,8 @@ function buildTenantOperationCapabilityFunction(
       MUKUROJI_PROJECT_TASKS_TABLE: input.dataStores.legacyTasksTable.tableName,
       MUKUROJI_TEAM_ISSUE_EVENTS_TABLE:
         input.dataStores.teamIssueEventsTable.tableName,
+      MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY:
+        input.parameters.workspaceAuditPseudonymKey.valueAsString,
       NOTIFICATIONS_TABLE_NAME: input.dataStores.notificationsTable.tableName,
       PLANNING_TABLE_NAME: input.dataStores.planningTable.tableName,
       PROJECT_DIRECTORY_TABLE_NAME:
@@ -480,6 +484,7 @@ function grantTenantResourceOwner(
     stores.workItemConfigurationTable,
     stores.automationTable,
     stores.planningTable,
+    stores.capacityPlanningTable,
     stores.analyticsTable,
     stores.requestIntakeTable,
     stores.projectDirectoryTable,

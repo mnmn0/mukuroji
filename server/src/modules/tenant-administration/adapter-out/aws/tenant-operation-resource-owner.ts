@@ -1,4 +1,10 @@
-import { createHash } from 'node:crypto'
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  createHmac,
+  randomBytes,
+} from 'node:crypto'
 import {
   AdminUserGlobalSignOutCommand,
   type CognitoIdentityProviderClient,
@@ -26,6 +32,8 @@ import type { TenantOperation } from '@mukuroji/contracts'
 import {
   createTenantDeletedMemberAlias,
   createTenantOperationEvidenceDigest,
+  createTenantOperationEvidenceRecordKey,
+  validateTenantPseudonymKey,
   type TenantOperationExecutionCursor,
   type TenantOperationExecutionJob,
   type TenantOperationResourceOwner,
@@ -36,6 +44,9 @@ import { TenantAdministrationError } from '../../domain/tenant-administration'
 
 const RESOURCE_PAGE_SIZE = 20
 const IDENTITY_PAGE_SIZE = 10
+const TENANT_CLOSURE_QUIESCENCE_SECONDS = 16 * 60
+const TENANT_CURSOR_IV_BYTES = 12
+const TENANT_CURSOR_AUTH_TAG_BYTES = 16
 
 /** Environment-backed AWS resource names used by lifecycle resource owners. */
 export type TenantOperationResourceOwnerConfig = {
@@ -59,6 +70,8 @@ export type TenantOperationResourceOwnerConfig = {
   automationTableName: string
   /** Planning table. */
   planningTableName: string
+  /** Capacity-planning availability and assignment table. */
+  capacityPlanningTableName: string
   /** Developer-platform table containing tenant credentials and state. */
   developerPlatformTableName: string
   /** Analytics table. */
@@ -99,6 +112,8 @@ export type TenantOperationAwsResourceOwnerInput = {
   cognitoClient: CognitoIdentityProviderClient
   /** Exact resource names injected by CDK. */
   config: TenantOperationResourceOwnerConfig
+  /** Stable HMAC key used for closure pseudonyms and encrypted queue cursors. */
+  pseudonymKey: string
   /** Testable clock used only in immutable evidence metadata. */
   clock?: () => Date
 }
@@ -180,6 +195,10 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
   private readonly config: TenantOperationResourceOwnerConfig
   /** Evidence timestamp source. */
   private readonly clock: () => Date
+  /** Stable HMAC key used for retained identity aliases. */
+  private readonly pseudonymKey: string
+  /** Domain-separated AES-256 key used for continuation cursor protection. */
+  private readonly cursorProtectionKey: Buffer
 
   /**
    * Creates one capability-isolated AWS resource owner.
@@ -193,6 +212,11 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     this.cognitoClient = input.cognitoClient
     this.config = input.config
     this.clock = input.clock ?? (() => new Date())
+    this.pseudonymKey = validateTenantPseudonymKey(input.pseudonymKey)
+    this.cursorProtectionKey = createHmac(
+      'sha256',
+      Buffer.from(this.pseudonymKey, 'hex'),
+    ).update('mukuroji-tenant-operation-cursor-key-v1').digest()
   }
 
   /**
@@ -264,6 +288,12 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         ],
       ),
       exactTarget('planning', this.config.planningTableName, 'workspaceId', 'recordKey'),
+      exactTarget(
+        'capacity-planning',
+        this.config.capacityPlanningTableName,
+        'workspaceId',
+        'recordKey',
+      ),
       attributeTarget('developer-platform', this.config.developerPlatformTableName, 'workspaceId', 'recordKey', [
         workspaceSelector('workspaceId', 'equals'),
       ]),
@@ -349,6 +379,18 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
   ): Promise<TenantOperationResourceOwnerResult> {
     const phase = resolveExportPhase(job)
     if (phase === 'snapshot') {
+      const quiescenceDelay = this.readClosureQuiescenceDelay(job, operation)
+      if (quiescenceDelay !== undefined) {
+        return {
+          status: 'continuing',
+          nextJob: createContinuation(job, {
+            targetIndex: 0,
+            phase: 'snapshot',
+            processedCount: 0,
+          }),
+          delaySeconds: quiescenceDelay,
+        }
+      }
       const result = await this.processExportSnapshotPage(job, operation)
       if (typeof result !== 'number') return result
       await this.writeExportSnapshotMarker(operation, result)
@@ -366,7 +408,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         artifactPrefix: createExportPrefix(operation),
         phase: 'snapshot',
         processedCount: result,
-      })
+      }, operation.revision)
     }
     if (phase === 'prepare') {
       const marker = await this.requireExportObject(
@@ -406,7 +448,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         artifactPrefix: createExportPrefix(operation),
         manifestDigest: createHash('sha256').update(manifest).digest('hex'),
         phase: 'prepare',
-      })
+      }, operation.revision)
     }
     const manifest = await this.requireExportObject(
       `${createExportPrefix(operation)}/manifest.json`,
@@ -427,7 +469,41 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
       manifestEtag: normalizeEtag(manifest.ETag),
       phase: 'verify',
       snapshotEtag: normalizeEtag(snapshot.ETag),
-    })
+    }, operation.revision)
+  }
+
+  /**
+   * Delays the first closure snapshot until admitted long-running writes drain.
+   *
+   * @param job - Current closure export queue job.
+   * @param operation - Durable closure operation.
+   * @returns Bounded SQS delay, or undefined after the quiescence barrier.
+   */
+  private readClosureQuiescenceDelay(
+    job: TenantOperationExecutionJob,
+    operation: TenantOperation,
+  ): number | undefined {
+    if (
+      job.step !== 'export' ||
+      (job.cursor?.targetIndex !== undefined && job.cursor.targetIndex !== 0) ||
+      (job.cursor?.processedCount !== undefined && job.cursor.processedCount !== 0) ||
+      job.cursor?.position !== undefined
+    ) {
+      return undefined
+    }
+    const requestedAt = Date.parse(operation.requestedAt)
+    const now = this.clock().getTime()
+    if (!Number.isFinite(requestedAt) || !Number.isFinite(now)) {
+      throw new TenantAdministrationError(
+        503,
+        'TenantClosureQuiescenceClockInvalid',
+        'Tenant closure quiescence timestamp is invalid.',
+      )
+    }
+    const remainingMilliseconds = requestedAt +
+      TENANT_CLOSURE_QUIESCENCE_SECONDS * 1_000 - now
+    if (remainingMilliseconds <= 0) return undefined
+    return Math.min(900, Math.max(1, Math.ceil(remainingMilliseconds / 1_000)))
   }
 
   /** Processes one DynamoDB or file-object page of an export snapshot. */
@@ -453,7 +529,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
       const page = await this.readDynamoPage(
         target,
         operation.workspaceId,
-        decodeDynamoPosition(cursor.position),
+        this.decodeDynamoPosition(job, cursor.position),
         false,
       )
       const body = serializeExportPage(
@@ -482,7 +558,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
             ? cursor.targetIndex
             : cursor.targetIndex + 1,
           ...(page.lastEvaluatedKey
-            ? { position: encodeCursor({ kind: 'dynamo', key: page.lastEvaluatedKey }) }
+            ? { position: this.encodeCursor(job, { kind: 'dynamo', key: page.lastEvaluatedKey }) }
             : {}),
           phase: 'snapshot',
           processedCount: cursor.processedCount + page.items.length,
@@ -490,7 +566,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
       }
     }
     if (cursor.targetIndex > targets.length) return cursor.processedCount
-    const objectCursor = decodeObjectPosition(cursor.position)
+    const objectCursor = this.decodeObjectPosition(job, cursor.position)
     const response = await this.s3Client.send(new ListObjectsV2Command({
       Bucket: this.config.fileBucketName,
       Prefix: `workspaces/${operation.workspaceId}/`,
@@ -514,7 +590,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         status: 'continuing',
         nextJob: createContinuation(job, {
           targetIndex: targets.length,
-          position: encodeCursor({
+          position: this.encodeCursor(job, {
             kind: 'objects',
             continuationToken: response.NextContinuationToken,
           }),
@@ -582,7 +658,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
       const page = await this.readDynamoPage(
         target,
         operation.workspaceId,
-        decodeDynamoPosition(cursor.position),
+        this.decodeDynamoPosition(job, cursor.position),
         false,
       )
       let revoked = 0
@@ -609,7 +685,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         nextJob: createContinuation(job, {
           targetIndex: page.lastEvaluatedKey ? 0 : 1,
           ...(page.lastEvaluatedKey
-            ? { position: encodeCursor({ kind: 'dynamo', key: page.lastEvaluatedKey }) }
+            ? { position: this.encodeCursor(job, { kind: 'dynamo', key: page.lastEvaluatedKey }) }
             : {}),
           processedCount: cursor.processedCount + revoked,
         }),
@@ -628,7 +704,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
       const page = await this.readDynamoPage(
         target,
         operation.workspaceId,
-        decodeDynamoPosition(cursor.position),
+        this.decodeDynamoPosition(job, cursor.position),
         true,
       )
       await this.deleteDynamoItems(target, page.items)
@@ -637,7 +713,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
           status: 'continuing',
           nextJob: createContinuation(job, {
             targetIndex: 1,
-            position: encodeCursor({ kind: 'dynamo', key: page.lastEvaluatedKey }),
+            position: this.encodeCursor(job, { kind: 'dynamo', key: page.lastEvaluatedKey }),
             processedCount: cursor.processedCount + page.items.length,
           }),
         }
@@ -645,7 +721,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
       return await this.completeWithEvidence(job, {
         processedCount: cursor.processedCount + page.items.length,
         sessionsDeleted: page.items.length,
-      })
+      }, operation.revision)
     }
     return { status: 'failed', failureCode: 'ACCESS_REVOCATION_CURSOR_INVALID' }
   }
@@ -675,7 +751,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     const page = await this.readDynamoPage(
       target,
       operation.workspaceId,
-      decodeDynamoPosition(cursor.position),
+      this.decodeDynamoPosition(job, cursor.position),
       false,
       IDENTITY_PAGE_SIZE,
     )
@@ -703,6 +779,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         operation.workspaceId,
         operation.operationId,
         item.memberKey,
+        this.pseudonymKey,
       )
       const aliasRecordKey = `MEMBER#${alias}`
       const tombstone = {
@@ -746,7 +823,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         status: 'continuing',
         nextJob: createContinuation(job, {
           targetIndex: 0,
-          position: encodeCursor({ kind: 'dynamo', key: page.lastEvaluatedKey }),
+          position: this.encodeCursor(job, { kind: 'dynamo', key: page.lastEvaluatedKey }),
           processedCount: cursor.processedCount + anonymized,
         }),
       }
@@ -775,7 +852,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     const page = await this.readDynamoPage(
       target,
       operation.workspaceId,
-      decodeDynamoPosition(cursor.position),
+      this.decodeDynamoPosition(job, cursor.position),
       false,
       IDENTITY_PAGE_SIZE,
     )
@@ -786,6 +863,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
       const anonymizedPayload = anonymizeTenantAdministrationPayload(
         payload,
         operation,
+        this.pseudonymKey,
       )
       if (anonymizedPayload === payload) continue
       await this.documentClient.send(new PutCommand({
@@ -801,7 +879,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         status: 'continuing',
         nextJob: createContinuation(job, {
           targetIndex: 1,
-          position: encodeCursor({ kind: 'dynamo', key: page.lastEvaluatedKey }),
+          position: this.encodeCursor(job, { kind: 'dynamo', key: page.lastEvaluatedKey }),
           processedCount: cursor.processedCount + anonymized,
         }),
       }
@@ -809,7 +887,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     return await this.completeWithEvidence(job, {
       anonymizedRecords: cursor.processedCount + anonymized,
       requesterRetainedForVerification: true,
-    })
+    }, operation.revision)
   }
 
   /** Deletes one bounded page of tenant business data or versioned files. */
@@ -825,7 +903,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
       const page = await this.readDynamoPage(
         target,
         operation.workspaceId,
-        decodeDynamoPosition(cursor.position),
+        this.decodeDynamoPosition(job, cursor.position),
         true,
       )
       await this.deleteDynamoItems(target, page.items)
@@ -836,14 +914,14 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
             ? cursor.targetIndex
             : cursor.targetIndex + 1,
           ...(page.lastEvaluatedKey
-            ? { position: encodeCursor({ kind: 'dynamo', key: page.lastEvaluatedKey }) }
+            ? { position: this.encodeCursor(job, { kind: 'dynamo', key: page.lastEvaluatedKey }) }
             : {}),
           processedCount: cursor.processedCount + page.items.length,
         }),
       }
     }
     if (cursor.targetIndex === targets.length) {
-      const versionCursor = decodeVersionPosition(cursor.position)
+      const versionCursor = this.decodeVersionPosition(job, cursor.position)
       const response = await this.s3Client.send(new ListObjectVersionsCommand({
         Bucket: this.config.fileBucketName,
         Prefix: `workspaces/${operation.workspaceId}/`,
@@ -877,7 +955,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
           status: 'continuing',
           nextJob: createContinuation(job, {
             targetIndex: targets.length,
-            position: encodeCursor({
+            position: this.encodeCursor(job, {
               kind: 'versions',
               keyMarker: response.NextKeyMarker,
               ...(response.NextVersionIdMarker
@@ -891,7 +969,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
       return await this.completeWithEvidence(job, {
         deletedResources: cursor.processedCount + objects.length,
         versionedFilesDeleted: objects.length,
-      })
+      }, operation.revision)
     }
     return { status: 'failed', failureCode: 'DATA_DELETION_CURSOR_INVALID' }
   }
@@ -914,21 +992,53 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     job: TenantOperationExecutionJob,
     operation: TenantOperation,
   ): Promise<TenantOperationResourceOwnerResult> {
+    const dataTargets = this.dataDeletionTargets()
+    const secretTargets = this.secretDeletionTargets()
     const targets = [
-      ...this.dataDeletionTargets(),
-      ...this.secretDeletionTargets(),
+      ...dataTargets,
+      ...secretTargets,
     ]
-    for (const target of targets) {
+    const cursor = job.cursor ?? { targetIndex: 0, processedCount: 0 }
+    if (cursor.targetIndex < targets.length) {
+      const target = targets[cursor.targetIndex]
+      if (!target) {
+        return { status: 'failed', failureCode: 'VERIFICATION_TARGET_INVALID' }
+      }
       const page = await this.readDynamoPage(
         target,
         operation.workspaceId,
-        undefined,
+        this.decodeDynamoPosition(job, cursor.position),
         true,
         1,
       )
       if (page.items.length > 0) {
-        return { status: 'failed', failureCode: 'VERIFIED_DELETION_INCOMPLETE' }
+        return {
+          status: 'repair',
+          step: cursor.targetIndex < dataTargets.length
+            ? 'delete-data'
+            : 'delete-secrets',
+        }
       }
+      return {
+        status: 'continuing',
+        nextJob: createContinuation(job, {
+          targetIndex: page.lastEvaluatedKey
+            ? cursor.targetIndex
+            : cursor.targetIndex + 1,
+          ...(page.lastEvaluatedKey
+            ? {
+                position: this.encodeCursor(job, {
+                  kind: 'dynamo',
+                  key: page.lastEvaluatedKey,
+                }),
+              }
+            : {}),
+          processedCount: cursor.processedCount + 1,
+        }),
+      }
+    }
+    if (cursor.targetIndex > targets.length) {
+      return { status: 'failed', failureCode: 'VERIFICATION_CURSOR_INVALID' }
     }
     const files = await this.s3Client.send(new ListObjectVersionsCommand({
       Bucket: this.config.fileBucketName,
@@ -939,12 +1049,12 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
       (files.Versions?.length ?? 0) > 0 ||
       (files.DeleteMarkers?.length ?? 0) > 0
     ) {
-      return { status: 'failed', failureCode: 'VERIFIED_DELETION_INCOMPLETE' }
+      return { status: 'repair', step: 'delete-data' }
     }
     return await this.completeWithEvidence(job, {
       checkedTargets: targets.map((target) => target.id),
       versionedFilePrefixEmpty: true,
-    })
+    }, operation.revision)
   }
 
   /** Executes a bounded sequence of DynamoDB-only deletion targets. */
@@ -958,14 +1068,14 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     if (cursor.targetIndex >= targets.length) {
       return await this.completeWithEvidence(job, {
         [evidenceField]: cursor.processedCount,
-      })
+      }, operation.revision)
     }
     const target = targets[cursor.targetIndex]
     if (!target) return { status: 'failed', failureCode: 'DELETION_TARGET_INVALID' }
     const page = await this.readDynamoPage(
       target,
       operation.workspaceId,
-      decodeDynamoPosition(cursor.position),
+      this.decodeDynamoPosition(job, cursor.position),
       true,
     )
     await this.deleteDynamoItems(target, page.items)
@@ -976,11 +1086,102 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
           ? cursor.targetIndex
           : cursor.targetIndex + 1,
         ...(page.lastEvaluatedKey
-          ? { position: encodeCursor({ kind: 'dynamo', key: page.lastEvaluatedKey }) }
+          ? { position: this.encodeCursor(job, { kind: 'dynamo', key: page.lastEvaluatedKey }) }
           : {}),
         processedCount: cursor.processedCount + page.items.length,
       }),
     }
+  }
+
+  /** Encrypts one continuation cursor and binds it to the exact tenant job scope. */
+  private encodeCursor(
+    job: TenantOperationExecutionJob,
+    cursor: ResourceCursor,
+  ): string {
+    const initializationVector = randomBytes(TENANT_CURSOR_IV_BYTES)
+    const cipher = createCipheriv(
+      'aes-256-gcm',
+      this.cursorProtectionKey,
+      initializationVector,
+    )
+    cipher.setAAD(createCursorAdditionalAuthenticatedData(job))
+    const ciphertext = Buffer.concat([
+      cipher.update(JSON.stringify(cursor), 'utf8'),
+      cipher.final(),
+    ])
+    return Buffer.concat([
+      Buffer.from([1]),
+      initializationVector,
+      cipher.getAuthTag(),
+      ciphertext,
+    ]).toString('base64url')
+  }
+
+  /** Decrypts one job-bound cursor and rejects tampering or cross-scope replay. */
+  private decodeCursor(
+    job: TenantOperationExecutionJob,
+    value: string | undefined,
+  ): ResourceCursor | undefined {
+    if (value === undefined) return undefined
+    if (!/^[a-zA-Z0-9_-]+$/u.test(value)) throw invalidCursor()
+    try {
+      const envelope = Buffer.from(value, 'base64url')
+      const minimumLength = 1 + TENANT_CURSOR_IV_BYTES +
+        TENANT_CURSOR_AUTH_TAG_BYTES + 1
+      if (envelope.length < minimumLength || envelope[0] !== 1) {
+        throw invalidCursor()
+      }
+      const ivStart = 1
+      const tagStart = ivStart + TENANT_CURSOR_IV_BYTES
+      const ciphertextStart = tagStart + TENANT_CURSOR_AUTH_TAG_BYTES
+      const decipher = createDecipheriv(
+        'aes-256-gcm',
+        this.cursorProtectionKey,
+        envelope.subarray(ivStart, tagStart),
+      )
+      decipher.setAAD(createCursorAdditionalAuthenticatedData(job))
+      decipher.setAuthTag(envelope.subarray(tagStart, ciphertextStart))
+      const plaintext = Buffer.concat([
+        decipher.update(envelope.subarray(ciphertextStart)),
+        decipher.final(),
+      ]).toString('utf8')
+      return readResourceCursor(JSON.parse(plaintext))
+    } catch (error) {
+      if (
+        error instanceof TenantAdministrationError &&
+        error.code === 'TenantOperationCursorInvalid'
+      ) {
+        throw error
+      }
+      throw invalidCursor()
+    }
+  }
+
+  /** Decodes a DynamoDB continuation key for the current job scope. */
+  private decodeDynamoPosition(
+    job: TenantOperationExecutionJob,
+    value: string | undefined,
+  ): Record<string, unknown> | undefined {
+    const cursor = this.decodeCursor(job, value)
+    return cursor?.kind === 'dynamo' ? cursor.key : undefined
+  }
+
+  /** Decodes an S3 object-list continuation for the current job scope. */
+  private decodeObjectPosition(
+    job: TenantOperationExecutionJob,
+    value: string | undefined,
+  ): ObjectCursor | undefined {
+    const cursor = this.decodeCursor(job, value)
+    return cursor?.kind === 'objects' ? cursor : undefined
+  }
+
+  /** Decodes an S3 version-list continuation for the current job scope. */
+  private decodeVersionPosition(
+    job: TenantOperationExecutionJob,
+    value: string | undefined,
+  ): VersionCursor | undefined {
+    const cursor = this.decodeCursor(job, value)
+    return cursor?.kind === 'versions' ? cursor : undefined
   }
 
   /** Reads one strongly consistent bounded DynamoDB page using tenant-owned keys only. */
@@ -1078,19 +1279,30 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
   private async completeWithEvidence(
     job: TenantOperationExecutionJob,
     summary: Readonly<Record<string, unknown>>,
+    operationRevision: number,
   ): Promise<TenantOperationResourceOwnerResult> {
-    const recordKey = `EVIDENCE#${job.operationId}#${job.step}`
+    const recordKey = createTenantOperationEvidenceRecordKey(
+      job.operationId,
+      job.step,
+      operationRevision,
+    )
     const existing = await this.documentClient.send(new GetCommand({
       TableName: this.config.tenantAdministrationTableName,
       Key: { workspaceId: job.workspaceId, recordKey },
       ConsistentRead: true,
     }))
-    const existingDigest = readEvidenceDigest(existing.Item)
+    const existingDigest = readEvidenceDigest(
+      existing.Item,
+      job,
+      recordKey,
+      operationRevision,
+    )
     if (existingDigest) return { status: 'completed', evidenceDigest: existingDigest }
     const evidencePayload = {
       schemaVersion: 1,
       workspaceDigest: digestIdentifier(job.workspaceId),
       operationId: job.operationId,
+      operationRevision,
       step: job.step,
       owner: this.owner,
       summary,
@@ -1104,6 +1316,9 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
           workspaceId: job.workspaceId,
           recordKey,
           kind: 'operation-evidence',
+          operationId: job.operationId,
+          operationRevision,
+          step: job.step,
           evidenceDigest,
           payload: JSON.stringify(evidencePayload),
           createdAt: evidencePayload.completedAt,
@@ -1117,7 +1332,12 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         Key: { workspaceId: job.workspaceId, recordKey },
         ConsistentRead: true,
       }))
-      const replayDigest = readEvidenceDigest(replay.Item)
+      const replayDigest = readEvidenceDigest(
+        replay.Item,
+        job,
+        recordKey,
+        operationRevision,
+      )
       if (!replayDigest) {
         throw new TenantAdministrationError(
           503,
@@ -1323,69 +1543,47 @@ function createContinuation(
   return { ...job, cursor }
 }
 
-/** Encodes a secret-free resource cursor for SQS transport. */
-function encodeCursor(cursor: ResourceCursor): string {
-  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
-}
-
-/** Decodes a DynamoDB continuation key. */
-function decodeDynamoPosition(
-  value: string | undefined,
-): Record<string, unknown> | undefined {
-  const cursor = decodeCursor(value)
-  return cursor?.kind === 'dynamo' ? cursor.key : undefined
-}
-
-/** Decodes an S3 object-list continuation. */
-function decodeObjectPosition(value: string | undefined): ObjectCursor | undefined {
-  const cursor = decodeCursor(value)
-  return cursor?.kind === 'objects' ? cursor : undefined
-}
-
-/** Decodes an S3 version-list continuation. */
-function decodeVersionPosition(value: string | undefined): VersionCursor | undefined {
-  const cursor = decodeCursor(value)
-  return cursor?.kind === 'versions' ? cursor : undefined
-}
-
-/** Strictly decodes one bounded resource cursor. */
-function decodeCursor(value: string | undefined): ResourceCursor | undefined {
-  if (value === undefined) return undefined
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
-  } catch {
-    throw invalidCursor()
-  }
-  if (!isRecord(parsed) || typeof parsed.kind !== 'string') throw invalidCursor()
-  if (parsed.kind === 'dynamo' && isRecord(parsed.key)) {
-    return { kind: 'dynamo', key: parsed.key }
+/** Parses one decrypted bounded resource cursor. */
+function readResourceCursor(value: unknown): ResourceCursor {
+  if (!isRecord(value) || typeof value.kind !== 'string') throw invalidCursor()
+  if (value.kind === 'dynamo' && isRecord(value.key)) {
+    return { kind: 'dynamo', key: value.key }
   }
   if (
-    parsed.kind === 'objects' &&
-    (parsed.continuationToken === undefined || typeof parsed.continuationToken === 'string')
+    value.kind === 'objects' &&
+    (value.continuationToken === undefined || typeof value.continuationToken === 'string')
   ) {
     return {
       kind: 'objects',
-      ...(typeof parsed.continuationToken === 'string'
-        ? { continuationToken: parsed.continuationToken }
+      ...(typeof value.continuationToken === 'string'
+        ? { continuationToken: value.continuationToken }
         : {}),
     }
   }
   if (
-    parsed.kind === 'versions' &&
-    (parsed.keyMarker === undefined || typeof parsed.keyMarker === 'string') &&
-    (parsed.versionIdMarker === undefined || typeof parsed.versionIdMarker === 'string')
+    value.kind === 'versions' &&
+    (value.keyMarker === undefined || typeof value.keyMarker === 'string') &&
+    (value.versionIdMarker === undefined || typeof value.versionIdMarker === 'string')
   ) {
     return {
       kind: 'versions',
-      ...(typeof parsed.keyMarker === 'string' ? { keyMarker: parsed.keyMarker } : {}),
-      ...(typeof parsed.versionIdMarker === 'string'
-        ? { versionIdMarker: parsed.versionIdMarker }
+      ...(typeof value.keyMarker === 'string' ? { keyMarker: value.keyMarker } : {}),
+      ...(typeof value.versionIdMarker === 'string'
+        ? { versionIdMarker: value.versionIdMarker }
         : {}),
     }
   }
   throw invalidCursor()
+}
+
+/** Creates additional authenticated data that forbids cross-job cursor replay. */
+function createCursorAdditionalAuthenticatedData(
+  job: TenantOperationExecutionJob,
+): Buffer {
+  return Buffer.from(
+    `mukuroji-tenant-operation-cursor-v1\0${job.workspaceId}\0${job.operationId}\0${job.step}`,
+    'utf8',
+  )
 }
 
 /** Creates a stable invalid-cursor failure. */
@@ -1444,10 +1642,18 @@ function normalizeTimestamp(value: unknown, fallback: string): string {
     : fallback
 }
 
-/** Replaces retained top-level member identity fields in one control-plane payload. */
+/**
+ * Replaces retained top-level member identity fields in one control-plane payload.
+ *
+ * @param payload - Serialized tenant control-plane value.
+ * @param operation - Closure operation that scopes deterministic aliases.
+ * @param pseudonymKey - Stable validated HMAC key.
+ * @returns Original or anonymized serialized payload.
+ */
 function anonymizeTenantAdministrationPayload(
   payload: string,
   operation: TenantOperation,
+  pseudonymKey: string,
 ): string {
   let value: unknown
   try {
@@ -1483,6 +1689,7 @@ function anonymizeTenantAdministrationPayload(
           operation.workspaceId,
           operation.operationId,
           entry,
+          pseudonymKey,
         ),
       ]
     }
@@ -1493,14 +1700,32 @@ function anonymizeTenantAdministrationPayload(
 
 /** Returns whether one actor field contains a user identity rather than a service identity. */
 function isPersonalMemberIdentity(value: string): boolean {
-  return !/^(?:deleted\+|executor:|meter:|system:)/u.test(value)
+  return !/^(?:executor:|meter:|system:)/u.test(value)
 }
 
-/** Reads one validated content-addressed evidence digest. */
-function readEvidenceDigest(value: unknown): string | undefined {
+/**
+ * Reads one evidence digest only when all immutable attempt metadata matches.
+ *
+ * @param value - Candidate tenant-administration evidence item.
+ * @param job - Exact tenant, operation, and step scope.
+ * @param recordKey - Revision-scoped evidence record key.
+ * @param operationRevision - Operation revision held by this attempt.
+ * @returns Validated content digest, or undefined for corrupt state.
+ */
+function readEvidenceDigest(
+  value: unknown,
+  job: TenantOperationExecutionJob,
+  recordKey: string,
+  operationRevision: number,
+): string | undefined {
   if (
     !isRecord(value) ||
+    value.workspaceId !== job.workspaceId ||
+    value.recordKey !== recordKey ||
     value.kind !== 'operation-evidence' ||
+    value.operationId !== job.operationId ||
+    value.operationRevision !== operationRevision ||
+    value.step !== job.step ||
     typeof value.evidenceDigest !== 'string' ||
     !/^[a-f0-9]{64}$/u.test(value.evidenceDigest)
   ) {

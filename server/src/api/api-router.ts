@@ -21566,6 +21566,30 @@ export function createWorkItemImportWorkerDependencies(): WorkItemImportWorkerDe
     sources: developerPlatformDependencies.workItemImportSources,
     jobs: createWorkItemImportJobLifecycle(),
     authorize: authorizeWorkItemImportExecution,
+    async assertTenantEnabled(execution) {
+      try {
+        await workspaceDependencies.tenantEntitlementEnforcement.assertFeature(
+          execution.workspaceId,
+          'developer-platform',
+        )
+      } catch (error) {
+        if (
+          error instanceof TenantAdministrationError &&
+          (
+            error.code === 'TenantFeatureNotEntitled' ||
+            error.code === 'TenantAdministrationNotInitialized' ||
+            error.code === 'TenantClosing' ||
+            error.code === 'TenantClosed'
+          )
+        ) {
+          throw new WorkItemImportError(
+            'ImportTenantUnavailable',
+            'The tenant can no longer execute Developer Platform imports.',
+          )
+        }
+        throw error
+      }
+    },
     async validate(execution, sourceContent) {
       try {
         const principal = await resolveWorkItemImportPrincipal(execution)

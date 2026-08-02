@@ -57,6 +57,7 @@ export function buildWorkItemImportWorker(
     planningTable,
     projectDirectoryTable,
     teamIssueEventsTable,
+    tenantAdministrationTable,
     workItemConfigurationTable,
     workItemsTable,
     workspaceAccessTable,
@@ -122,6 +123,7 @@ export function buildWorkItemImportWorker(
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
         TEAM_ISSUE_EVENTS_TABLE_NAME: teamIssueEventsTable.tableName,
         TEAM_ISSUES_TABLE_NAME: workItemsTable.tableName,
+        TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
         WORKSPACE_SEARCH_TABLE_NAME: workspaceSearchTable.tableName,
         WORK_ITEM_CONFIGURATION_TABLE_NAME: workItemConfigurationTable.tableName,
@@ -153,6 +155,7 @@ export function buildWorkItemImportWorker(
   auditEventsTable.grants.readWriteData(workItemImportFunction);
   projectDirectoryTable.grants.readData(workItemImportFunction);
   workspaceAccessTable.grants.readData(workItemImportFunction);
+  tenantAdministrationTable.grants.readData(workItemImportFunction);
   workItemImportFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:GetItem', 'dynamodb:Query'],
     resources: [

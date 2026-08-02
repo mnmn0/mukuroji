@@ -814,6 +814,54 @@ export function resumeTenantOperation(
 }
 
 /**
+ * Rewinds verified residual state to the earliest cleanup step that must be replayed.
+ *
+ * @param operation - Current closure operation at its verification step.
+ * @param step - Earliest cleanup step selected by the verification capability.
+ * @param retainedEvidenceReference - Evidence for the last retained completed step.
+ * @param now - Repair transition timestamp.
+ * @returns Running closure operation with only the safe completed-step prefix retained.
+ */
+export function repairTenantClosureOperation(
+  operation: TenantOperation,
+  step: 'delete-data' | 'delete-secrets',
+  retainedEvidenceReference: string,
+  now: string,
+): TenantOperation {
+  if (
+    operation.kind !== 'closure' ||
+    operation.status !== 'running' ||
+    operation.currentStep !== 'verify'
+  ) {
+    throw new TenantAdministrationError(
+      409,
+      'TenantClosureRepairUnavailable',
+      'Tenant closure cleanup repair is unavailable in the current state.',
+    )
+  }
+  const repairIndex = TENANT_CLOSURE_STEPS.indexOf(step)
+  if (repairIndex < 0) {
+    throw new TenantAdministrationError(
+      400,
+      'TenantClosureRepairStepInvalid',
+      'Tenant closure cleanup repair step is invalid.',
+    )
+  }
+  return {
+    ...operation,
+    status: 'running',
+    currentStep: step,
+    completedSteps: TENANT_CLOSURE_STEPS.slice(0, repairIndex),
+    lastEvidenceReference: validateTenantOperationEvidenceReference(
+      retainedEvidenceReference,
+    ),
+    failureCode: undefined,
+    updatedAt: now,
+    revision: operation.revision + 1,
+  }
+}
+
+/**
  * Verifies a completed closure operation and seals its result.
  *
  * @param operation - Current durable closure operation.

@@ -17,6 +17,7 @@ const testCredentials = {
   accessKeyId: 'test-access-key',
   secretAccessKey: 'test-secret-key',
 }
+const testPseudonymKey = '1'.repeat(64)
 
 /** Creates stable test resource names for every tenant-owned store. */
 function createConfig(): TenantOperationResourceOwnerConfig {
@@ -31,6 +32,7 @@ function createConfig(): TenantOperationResourceOwnerConfig {
     workItemConfigurationTableName: 'work-item-configuration',
     automationTableName: 'automation',
     planningTableName: 'planning',
+    capacityPlanningTableName: 'capacity-planning',
     developerPlatformTableName: 'developer-platform',
     analyticsTableName: 'analytics',
     requestIntakeTableName: 'request-intake',
@@ -139,6 +141,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       s3Client,
       cognitoClient,
       config: createConfig(),
+      pseudonymKey: testPseudonymKey,
     })
     const operation = createOperation()
 
@@ -171,7 +174,16 @@ describe('AwsTenantOperationResourceOwner', () => {
         },
       })
 
-      await owner.execute(createDataJob(7), operation)
+      await owner.execute(createDataJob(6), operation)
+      expect(requests.at(-1)).toMatchObject({
+        TableName: 'capacity-planning',
+        KeyConditionExpression: '#partitionKey = :tenantValue',
+        ExpressionAttributeValues: {
+          ':tenantValue': { S: 'workspace/one' },
+        },
+      })
+
+      await owner.execute(createDataJob(8), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'request-intake',
         ExpressionAttributeValues: {
@@ -180,7 +192,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         },
       })
 
-      await owner.execute(createDataJob(9), operation)
+      await owner.execute(createDataJob(10), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'documents',
         ExpressionAttributeValues: {
@@ -189,7 +201,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         },
       })
 
-      await owner.execute(createDataJob(10), operation)
+      await owner.execute(createDataJob(11), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'collaboration',
         ExpressionAttributeValues: {
@@ -197,7 +209,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         },
       })
 
-      await owner.execute(createDataJob(12), operation)
+      await owner.execute(createDataJob(13), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'notifications',
         ExpressionAttributeValues: {
@@ -205,7 +217,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         },
       })
 
-      await owner.execute(createDataJob(13), operation)
+      await owner.execute(createDataJob(14), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'realtime-sessions',
         ExpressionAttributeValues: {
@@ -213,12 +225,249 @@ describe('AwsTenantOperationResourceOwner', () => {
         },
       })
 
-      await owner.execute(createDataJob(14), operation)
+      await owner.execute(createDataJob(15), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'file-proofing',
         ExpressionAttributeValues: {
           ':tenant0': { S: 'WORKSPACE#workspace/one#' },
         },
+      })
+    } finally {
+      documentClient.destroy()
+      s3Client.destroy()
+      cognitoClient.destroy()
+    }
+  })
+
+  test('encrypts scan cursors and rejects tampering or cross-operation replay', async () => {
+    const requests: unknown[] = []
+    let requestCount = 0
+    const otherTenantKey = {
+      directoryProjectId: 'workspace-other#project-1',
+      taskId: 'private-task-1',
+    }
+    const lowLevelClient = new DynamoDBClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          requests.push(readJsonRequestBody(request))
+          requestCount += 1
+          return {
+            response: {
+              body: new TextEncoder().encode(JSON.stringify(requestCount === 1
+                ? {
+                    Items: [],
+                    LastEvaluatedKey: {
+                      directoryProjectId: { S: otherTenantKey.directoryProjectId },
+                      taskId: { S: otherTenantKey.taskId },
+                    },
+                  }
+                : { Items: [] })),
+              headers: {},
+              statusCode: 200,
+            },
+          }
+        },
+      },
+    })
+    const documentClient = DynamoDBDocumentClient.from(lowLevelClient)
+    const s3Client = new S3Client({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const cognitoClient = new CognitoIdentityProviderClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const owner = new AwsTenantOperationResourceOwner({
+      owner: 'data',
+      documentClient,
+      s3Client,
+      cognitoClient,
+      config: createConfig(),
+      pseudonymKey: testPseudonymKey,
+    })
+    const operation = createOperation()
+
+    try {
+      const first = await owner.execute(createDataJob(0), operation)
+      if (first.status !== 'continuing' || !first.nextJob.cursor?.position) {
+        throw new Error('Expected an encrypted continuation cursor.')
+      }
+      const serialized = JSON.stringify(first.nextJob)
+      expect(serialized).not.toContain(otherTenantKey.directoryProjectId)
+      expect(serialized).not.toContain(otherTenantKey.taskId)
+
+      await owner.execute(first.nextJob, operation)
+      expect(requests[1]).toMatchObject({
+        ExclusiveStartKey: {
+          directoryProjectId: { S: otherTenantKey.directoryProjectId },
+          taskId: { S: otherTenantKey.taskId },
+        },
+      })
+
+      const position = first.nextJob.cursor.position
+      const replacement = position.endsWith('A') ? 'B' : 'A'
+      const tamperedJob: TenantOperationExecutionJob = {
+        ...first.nextJob,
+        cursor: {
+          ...first.nextJob.cursor,
+          position: `${position.slice(0, -1)}${replacement}`,
+        },
+      }
+      await expect(owner.execute(tamperedJob, operation)).rejects.toMatchObject({
+        code: 'TenantOperationCursorInvalid',
+      })
+
+      const crossOperation = { ...operation, operationId: 'operation-2' }
+      await expect(owner.execute({
+        ...first.nextJob,
+        operationId: 'operation-2',
+      }, crossOperation)).rejects.toMatchObject({
+        code: 'TenantOperationCursorInvalid',
+      })
+    } finally {
+      documentClient.destroy()
+      s3Client.destroy()
+      cognitoClient.destroy()
+    }
+  })
+
+  test('continues filtered verification scans and repairs a discovered residual row', async () => {
+    let requestCount = 0
+    const lowLevelClient = new DynamoDBClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle() {
+          requestCount += 1
+          return {
+            response: {
+              body: new TextEncoder().encode(JSON.stringify(requestCount === 1
+                ? {
+                    Items: [],
+                    LastEvaluatedKey: {
+                      directoryProjectId: { S: 'workspace-other#project-1' },
+                      taskId: { S: 'task-other' },
+                    },
+                  }
+                : {
+                    Items: [{
+                      directoryProjectId: { S: 'workspace/one#project-1' },
+                      taskId: { S: 'residual-task' },
+                    }],
+                  })),
+              headers: {},
+              statusCode: 200,
+            },
+          }
+        },
+      },
+    })
+    const documentClient = DynamoDBDocumentClient.from(lowLevelClient)
+    const s3Client = new S3Client({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const cognitoClient = new CognitoIdentityProviderClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const owner = new AwsTenantOperationResourceOwner({
+      owner: 'verification',
+      documentClient,
+      s3Client,
+      cognitoClient,
+      config: createConfig(),
+      pseudonymKey: testPseudonymKey,
+    })
+    const operation: TenantOperation = {
+      ...createOperation(),
+      currentStep: 'verify',
+      completedSteps: [
+        'export',
+        'revoke-access',
+        'anonymize-members',
+        'delete-data',
+        'delete-secrets',
+      ],
+      revision: 6,
+    }
+    const job: TenantOperationExecutionJob = {
+      version: TENANT_OPERATION_EXECUTION_JOB_VERSION,
+      workspaceId: operation.workspaceId,
+      operationId: operation.operationId,
+      step: 'verify',
+    }
+
+    try {
+      const first = await owner.execute(job, operation)
+      expect(first).toMatchObject({
+        status: 'continuing',
+        nextJob: { cursor: { targetIndex: 0 } },
+      })
+      if (first.status !== 'continuing') {
+        throw new Error('Expected a verification continuation.')
+      }
+      expect(await owner.execute(first.nextJob, operation)).toEqual({
+        status: 'repair',
+        step: 'delete-data',
+      })
+    } finally {
+      documentClient.destroy()
+      s3Client.destroy()
+      cognitoClient.destroy()
+    }
+  })
+
+  test('delays the first closure export snapshot until writers quiesce', async () => {
+    const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    }))
+    const s3Client = new S3Client({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const cognitoClient = new CognitoIdentityProviderClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const owner = new AwsTenantOperationResourceOwner({
+      owner: 'export',
+      documentClient,
+      s3Client,
+      cognitoClient,
+      config: createConfig(),
+      pseudonymKey: testPseudonymKey,
+      clock: () => new Date('2026-08-02T00:01:00.000Z'),
+    })
+    const operation: TenantOperation = {
+      ...createOperation(),
+      currentStep: 'export',
+      completedSteps: [],
+      revision: 1,
+    }
+    const job: TenantOperationExecutionJob = {
+      version: TENANT_OPERATION_EXECUTION_JOB_VERSION,
+      workspaceId: operation.workspaceId,
+      operationId: operation.operationId,
+      step: 'export',
+    }
+
+    try {
+      expect(await owner.execute(job, operation)).toEqual({
+        status: 'continuing',
+        nextJob: {
+          ...job,
+          cursor: {
+            targetIndex: 0,
+            phase: 'snapshot',
+            processedCount: 0,
+          },
+        },
+        delaySeconds: 900,
       })
     } finally {
       documentClient.destroy()
@@ -279,6 +528,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       s3Client,
       cognitoClient,
       config: createConfig(),
+      pseudonymKey: testPseudonymKey,
     })
     const operation: TenantOperation = {
       ...createOperation('workspace-1'),
@@ -392,6 +642,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       s3Client,
       cognitoClient,
       config: createConfig(),
+      pseudonymKey: testPseudonymKey,
       clock: () => new Date('2026-08-02T00:05:00.000Z'),
     })
     const operation: TenantOperation = {

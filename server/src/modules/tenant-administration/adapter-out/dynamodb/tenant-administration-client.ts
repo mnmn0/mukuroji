@@ -1,8 +1,10 @@
 import {
+  DeleteCommand,
   GetCommand,
   QueryCommand,
   TransactWriteCommand,
   type DynamoDBDocumentClient,
+  type QueryCommandOutput,
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import { createHash, randomUUID } from 'node:crypto'
@@ -43,6 +45,7 @@ import {
   failTenantOperation,
   isTenantOperationActive,
   pauseTenantOperation,
+  repairTenantClosureOperation,
   recordTenantBillingPeriod,
   reserveTenantUsage,
   resumeTenantOperation,
@@ -63,7 +66,11 @@ import type {
   TenantSeatMeter,
   TenantSeatMutationInput,
 } from '../../application/ports/tenant-administration-port'
-import { createTenantDeletedMemberAlias } from '../../application/tenant-operation-resource-owner'
+import {
+  createTenantDeletedMemberAlias,
+  createTenantOperationEvidenceRecordPrefix,
+  validateTenantPseudonymKey,
+} from '../../application/tenant-operation-resource-owner'
 
 /** DynamoDB transaction item used by tenant administration mutations. */
 type TenantTransactionItem = NonNullable<
@@ -80,6 +87,8 @@ type TenantOperationTransitionOptions = {
   acceptReplay?: (operation: TenantOperation) => boolean
   /** Seals the tenant profile when a completed closure is verified. */
   closeTenant?: boolean
+  /** Rejects pause while one capability owns a non-expired side-effect lease. */
+  requireInactiveExecutionLease?: boolean
 }
 
 /** Durable, expiring receipt for one metered request reservation. */
@@ -113,6 +122,7 @@ const ENTITLEMENT_RECORD_KEY = 'ENTITLEMENT'
 const USAGE_RECORD_KEY = 'USAGE'
 const GOVERNANCE_RECORD_KEY = 'GOVERNANCE'
 const ACTIVE_OPERATION_RECORD_KEY = 'ACTIVE_OPERATION'
+const OPERATION_EXECUTION_LEASE_RECORD_KEY = 'OPERATION_EXECUTION_LEASE'
 const BILLING_PERIOD_RECORD_PREFIX = 'BILLING#'
 const OPERATION_RECORD_PREFIX = 'OPERATION#'
 const OPERATION_HISTORY_RECORD_PREFIX = 'OPERATION_HISTORY#'
@@ -144,6 +154,8 @@ export class DynamoDbTenantAdministrationClient implements
   private readonly auditTableName?: string
   /** Workspace membership table used to remove the final closure verifier. */
   private readonly workspaceAccessTableName?: string
+  /** Stable HMAC key used to anonymize retained closure identities. */
+  private readonly pseudonymKey?: string
 
   /**
    * Creates a tenant administration adapter.
@@ -155,6 +167,7 @@ export class DynamoDbTenantAdministrationClient implements
    * @param governanceEnforcement - Residency and key controls implemented by the deployment.
    * @param auditTableName - Optional audit table used by the retention worker.
    * @param workspaceAccessTableName - Workspace membership table sealed by closure verification.
+   * @param pseudonymKey - Stable 32-byte lowercase hexadecimal tenant pseudonym key.
    */
   constructor(
     tableName: string,
@@ -164,6 +177,7 @@ export class DynamoDbTenantAdministrationClient implements
     governanceEnforcement: TenantGovernanceEnforcement = DEFAULT_TENANT_GOVERNANCE_ENFORCEMENT,
     auditTableName?: string,
     workspaceAccessTableName?: string,
+    pseudonymKey?: string,
   ) {
     const normalizedTableName = tableName.trim()
     if (!normalizedTableName) {
@@ -180,6 +194,9 @@ export class DynamoDbTenantAdministrationClient implements
     this.governanceEnforcement = validateTenantGovernanceEnforcement(governanceEnforcement)
     this.auditTableName = auditTableName?.trim() || undefined
     this.workspaceAccessTableName = workspaceAccessTableName?.trim() || undefined
+    this.pseudonymKey = pseudonymKey === undefined
+      ? undefined
+      : validateTenantPseudonymKey(pseudonymKey)
   }
 
   /** Ensures tenant aggregate and initial retention records exist before returning them. */
@@ -592,6 +609,17 @@ export class DynamoDbTenantAdministrationClient implements
         profile.revision,
       ),
     ]
+    if (
+      !current.legalHold &&
+      updated.legalHold &&
+      profile.status === 'closing'
+    ) {
+      items.push(createInactiveExecutionLeaseConditionCheck(
+        this.tableName,
+        workspaceId,
+        readEpochSeconds(updated.updatedAt),
+      ))
+    }
     const auditPut = this.createAuditPut(auditEvent)
     if (auditPut) items.push(auditPut)
     try {
@@ -1219,6 +1247,119 @@ export class DynamoDbTenantAdministrationClient implements
       (operation.kind !== 'closure' || !governance.legalHold)
   }
 
+  /** Acquires the single side-effect lease under operation and governance revisions. */
+  async acquireOperationExecutionLease(
+    operation: TenantOperation,
+    leaseOwner: string,
+    leaseExpiresAtEpochSeconds: number,
+  ): Promise<boolean> {
+    const normalizedLeaseOwner = leaseOwner.trim()
+    if (!/^[a-zA-Z0-9._/-]{1,128}$/u.test(normalizedLeaseOwner)) {
+      throw new TenantAdministrationError(
+        400,
+        'TenantOperationLeaseOwnerInvalid',
+        'Tenant operation execution lease owner is invalid.',
+      )
+    }
+    const nowEpochSeconds = readEpochSeconds(this.now())
+    if (
+      !Number.isSafeInteger(leaseExpiresAtEpochSeconds) ||
+      leaseExpiresAtEpochSeconds <= nowEpochSeconds ||
+      leaseExpiresAtEpochSeconds > nowEpochSeconds + 10 * 60
+    ) {
+      throw new TenantAdministrationError(
+        400,
+        'TenantOperationLeaseExpiryInvalid',
+        'Tenant operation execution lease expiry is invalid.',
+      )
+    }
+    if (operation.status !== 'running' || operation.currentStep === undefined) {
+      return false
+    }
+    const governance = await this.readRecord(
+      operation.workspaceId,
+      GOVERNANCE_RECORD_KEY,
+      readTenantGovernance,
+    )
+    if (operation.kind === 'closure' && governance.legalHold) return false
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            ConditionCheck: {
+              TableName: this.tableName,
+              Key: {
+                workspaceId: operation.workspaceId,
+                recordKey: `${OPERATION_RECORD_PREFIX}${operation.operationId}`,
+              },
+              ConditionExpression: 'revision = :expectedOperationRevision',
+              ExpressionAttributeValues: {
+                ':expectedOperationRevision': operation.revision,
+              },
+            },
+          },
+          createRevisionConditionCheck(
+            this.tableName,
+            operation.workspaceId,
+            GOVERNANCE_RECORD_KEY,
+            governance.revision,
+          ),
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: {
+                workspaceId: operation.workspaceId,
+                recordKey: OPERATION_EXECUTION_LEASE_RECORD_KEY,
+                kind: 'operation-execution-lease',
+                operationId: operation.operationId,
+                step: operation.currentStep,
+                operationRevision: operation.revision,
+                leaseOwner: normalizedLeaseOwner,
+                leaseExpiresAtEpochSeconds,
+                expiresAt: leaseExpiresAtEpochSeconds,
+              },
+              ConditionExpression:
+                'attribute_not_exists(recordKey) OR ' +
+                'leaseExpiresAtEpochSeconds <= :nowEpochSeconds OR ' +
+                'operationRevision <> :operationRevision',
+              ExpressionAttributeValues: {
+                ':nowEpochSeconds': nowEpochSeconds,
+                ':operationRevision': operation.revision,
+              },
+            },
+          },
+        ],
+      }))
+    } catch (error) {
+      if (isConditionalFailure(error)) return false
+      throw toTenantPersistenceError(error)
+    }
+    return true
+  }
+
+  /** Releases the current invocation lease without deleting a replacement lease. */
+  async releaseOperationExecutionLease(
+    workspaceId: string,
+    operationId: string,
+    leaseOwner: string,
+  ): Promise<void> {
+    try {
+      await this.documentClient.send(new DeleteCommand({
+        TableName: this.tableName,
+        Key: { workspaceId, recordKey: OPERATION_EXECUTION_LEASE_RECORD_KEY },
+        ConditionExpression:
+          'operationId = :operationId AND leaseOwner = :leaseOwner',
+        ExpressionAttributeValues: {
+          ':operationId': operationId,
+          ':leaseOwner': leaseOwner,
+        },
+      }))
+    } catch (error) {
+      if (isConditionalFailure(error)) return
+      throw toTenantPersistenceError(error)
+    }
+  }
+
   /** Advances one operation step and releases the tenant lock at terminal state. */
   async advanceOperation(
     workspaceId: string,
@@ -1261,6 +1402,37 @@ export class DynamoDbTenantAdministrationClient implements
     )
   }
 
+  /** Rewinds a closure verification to replay residual cleanup. */
+  async repairOperation(
+    workspaceId: string,
+    actorMemberKey: string,
+    operationId: string,
+    step: 'delete-data' | 'delete-secrets',
+  ): Promise<TenantOperation> {
+    const retainedStep = step === 'delete-data'
+      ? 'anonymize-members'
+      : 'delete-data'
+    const retainedEvidenceReference = await this.readOperationEvidenceReference(
+      workspaceId,
+      operationId,
+      retainedStep,
+    )
+    return this.transitionOperation(
+      workspaceId,
+      actorMemberKey,
+      operationId,
+      (operation) => repairTenantClosureOperation(
+        operation,
+        step,
+        retainedEvidenceReference,
+        this.now(),
+      ),
+      {
+        requireInactiveLegalHold: true,
+      },
+    )
+  }
+
   /** Pauses one active operation. */
   async pauseOperation(
     workspaceId: string,
@@ -1275,6 +1447,7 @@ export class DynamoDbTenantAdministrationClient implements
       {
         acceptReplay: (operation) => operation.status === 'paused' &&
           operation.updatedBy === actorMemberKey,
+        requireInactiveExecutionLease: true,
       },
     )
   }
@@ -1706,6 +1879,7 @@ export class DynamoDbTenantAdministrationClient implements
           workspaceId,
           operationId,
           current.requestedBy,
+          this.requirePseudonymKey(),
         )
       : undefined
     const operation: TenantOperation = {
@@ -1724,6 +1898,7 @@ export class DynamoDbTenantAdministrationClient implements
             workspaceId,
             operationId,
             profile.ownerMemberKey,
+            this.requirePseudonymKey(),
           ),
           status: 'closed',
           closedAt: operation.updatedAt,
@@ -1791,6 +1966,13 @@ export class DynamoDbTenantAdministrationClient implements
           PROFILE_RECORD_KEY,
           profile.revision,
         ))
+    if (options.requireInactiveExecutionLease) {
+      items.push(createInactiveExecutionLeaseConditionCheck(
+        this.tableName,
+        workspaceId,
+        readEpochSeconds(operation.updatedAt),
+      ))
+    }
     if (!doesTenantOperationOwnActiveLock(operation)) {
       items.push({
         Delete: {
@@ -2071,6 +2253,73 @@ export class DynamoDbTenantAdministrationClient implements
     }
   }
 
+  /** Returns mandatory closure pseudonym key material or fails closed. */
+  private requirePseudonymKey(): string {
+    return validateTenantPseudonymKey(this.pseudonymKey)
+  }
+
+  /** Reads immutable evidence for the last completed step retained by a repair. */
+  private async readOperationEvidenceReference(
+    workspaceId: string,
+    operationId: string,
+    step: 'anonymize-members' | 'delete-data',
+  ): Promise<string> {
+    const recordKeyPrefix = createTenantOperationEvidenceRecordPrefix(
+      operationId,
+      step,
+    )
+    let response: QueryCommandOutput
+    try {
+      response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression:
+          '#workspaceId = :workspaceId AND begins_with(#recordKey, :recordKeyPrefix)',
+        ExpressionAttributeNames: {
+          '#workspaceId': 'workspaceId',
+          '#recordKey': 'recordKey',
+        },
+        ExpressionAttributeValues: {
+          ':workspaceId': workspaceId,
+          ':recordKeyPrefix': recordKeyPrefix,
+        },
+        ConsistentRead: true,
+        ScanIndexForward: false,
+        Limit: 1,
+      }))
+    } catch (error) {
+      throw toTenantPersistenceError(error)
+    }
+    const item = response.Items?.[0]
+    const recordKey = isRecord(item) && typeof item.recordKey === 'string'
+      ? item.recordKey
+      : ''
+    const evidenceDigest = isRecord(item) &&
+        typeof item.evidenceDigest === 'string'
+      ? item.evidenceDigest.trim()
+      : ''
+    if (
+      !isRecord(item) ||
+      item.workspaceId !== workspaceId ||
+      item.kind !== 'operation-evidence' ||
+      item.operationId !== operationId ||
+      item.step !== step ||
+      !recordKey.startsWith(recordKeyPrefix) ||
+      !/^\d{16}$/u.test(recordKey.slice(recordKeyPrefix.length)) ||
+      typeof item.operationRevision !== 'number' ||
+      !Number.isSafeInteger(item.operationRevision) ||
+      String(item.operationRevision).padStart(16, '0') !==
+        recordKey.slice(recordKeyPrefix.length) ||
+      !/^[a-f0-9]{64}$/u.test(evidenceDigest)
+    ) {
+      throw new TenantAdministrationError(
+        503,
+        'TenantClosureRepairEvidenceUnavailable',
+        'Tenant closure cleanup repair evidence is unavailable.',
+      )
+    }
+    return `evidence:sha256:${evidenceDigest}`
+  }
+
   /** Creates a conditional audit event Put for a tenant mutation. */
   private createAuditPut(input: TenantAdministrationAuditEvent): TenantTransactionItem | undefined {
     return this.auditWriter?.createTransactionItem(input)
@@ -2150,6 +2399,43 @@ function createRevisionConditionCheck(
       ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
     },
   }
+}
+
+/**
+ * Creates a condition that serializes pause or legal hold with one side-effect page.
+ *
+ * @param tableName - Tenant administration table name.
+ * @param workspaceId - Canonical Workspace identifier.
+ * @param nowEpochSeconds - Transition timestamp used to permit expired leases.
+ * @returns One DynamoDB transaction condition check.
+ */
+function createInactiveExecutionLeaseConditionCheck(
+  tableName: string,
+  workspaceId: string,
+  nowEpochSeconds: number,
+): TenantTransactionItem {
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: { workspaceId, recordKey: OPERATION_EXECUTION_LEASE_RECORD_KEY },
+      ConditionExpression:
+        'attribute_not_exists(recordKey) OR leaseExpiresAtEpochSeconds <= :nowEpochSeconds',
+      ExpressionAttributeValues: { ':nowEpochSeconds': nowEpochSeconds },
+    },
+  }
+}
+
+/** Converts one validated ISO timestamp to a DynamoDB lease epoch second. */
+function readEpochSeconds(value: string): number {
+  const timestamp = Date.parse(value)
+  if (!Number.isFinite(timestamp)) {
+    throw new TenantAdministrationError(
+      500,
+      'InvalidTenantClock',
+      'Tenant clock is invalid.',
+    )
+  }
+  return Math.floor(timestamp / 1_000)
 }
 
 /** Creates the tenant-partition sort key for one UTC billing period. */
