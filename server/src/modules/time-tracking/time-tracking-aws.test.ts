@@ -64,6 +64,39 @@ function createDocumentClient(
 }
 
 describe('DynamoDbTimeTrackingRepository', () => {
+  test('uses the team date index for bounded entry queries', async () => {
+    const entry = createEntry('visible-project')
+    const commands: CommandWithInput[] = []
+    const repository = new DynamoDbTimeTrackingRepository(
+      'analytics-table',
+      createDocumentClient([{ Items: [entry] }], commands),
+    )
+
+    const entries = await repository.listEntries({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      from: '2026-08-02T09:00:00.000Z',
+      to: '2026-08-03T00:00:00.000Z',
+    })
+
+    expect(entries.map((candidate) => candidate.id)).toEqual([entry.id])
+    expect(commands[0]?.input.IndexName).toBe('TimeEntryTeamDateIndex')
+    expect(commands[0]?.input.KeyConditionExpression).toBe(
+      'teamId = :teamId AND startAt >= :queryFrom AND startAt < :queryTo',
+    )
+    expect(commands[0]?.input.ExpressionAttributeValues).toEqual({
+      ':teamId': 'team-1',
+      ':queryFrom': '2026-07-26T09:00:00.000Z',
+      ':queryTo': '2026-08-03T00:00:00.000Z',
+      ':workspaceId': 'workspace-1',
+      ':prefix': 'TIME_ENTRY#team-1#',
+      ':from': '2026-08-02T09:00:00.000Z',
+    })
+    expect(commands[0]?.input.FilterExpression).toBe(
+      'workspaceId = :workspaceId AND begins_with(recordKey, :prefix) AND endAt > :from',
+    )
+  })
+
   test('continues filtered entry queries and uses the entry/history transaction', async () => {
     const hiddenEntry = createEntry('hidden-project')
     const visibleEntry = createEntry('visible-project')

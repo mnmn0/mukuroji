@@ -1,6 +1,7 @@
 export * from './analytics'
 export * from './api-runtime-configuration'
 export * from './automation'
+export * from './capacity-planning'
 export * from './developer-platform'
 export * from './documents'
 export * from './enterprise-identity'
