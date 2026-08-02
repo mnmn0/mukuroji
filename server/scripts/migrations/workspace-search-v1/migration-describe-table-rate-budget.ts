@@ -797,6 +797,7 @@ export type WorkspaceSearchMigrationDescribeTableRatePolicy = {
 export type WorkspaceSearchMigrationDescribeTablePhase =
   | 'measurement'
   | 'checkpoint-page'
+  | 'integrity-check'
   | 'pre-send-guard'
   | 'post-send-guard'
   | 'reconciliation'
@@ -5586,6 +5587,7 @@ function detachAndValidateAttemptInput(
   if (
     phase !== 'measurement' &&
     phase !== 'checkpoint-page' &&
+    phase !== 'integrity-check' &&
     phase !== 'pre-send-guard' &&
     phase !== 'post-send-guard' &&
     phase !== 'reconciliation'

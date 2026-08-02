@@ -3,9 +3,42 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import type {
+  WorkspaceSearchMigrationDeploymentTrustRoot,
+} from '../config/workspace-search-migration-deployment-targets';
 
 const minimumJournalRetentionDays = 30;
 const maximumJournalRetentionDays = 31;
+const minimumRehearsalEvidenceRetentionDays = 365;
+const maximumRehearsalEvidenceRetentionDays = 366;
+
+/** Stable tag key carrying the Workspace Search migration environment attestation. */
+export const WORKSPACE_SEARCH_MIGRATION_ENVIRONMENT_TAG_KEY =
+  'mukuroji:workspace-search-migration-environment';
+
+/** Stable tag key carrying the exact reviewed deployment account. */
+export const WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_ACCOUNT_TAG_KEY =
+  'mukuroji:workspace-search-migration-deployment-account';
+
+/** Stable tag key carrying the exact reviewed deployment Region. */
+export const WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_REGION_TAG_KEY =
+  'mukuroji:workspace-search-migration-deployment-region';
+
+/** Stable tag key carrying the source-controlled deployment target identifier. */
+export const WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_TARGET_TAG_KEY =
+  'mukuroji:workspace-search-migration-deployment-target';
+
+/** Stable tag key carrying the versioned deployment trust-root digest. */
+export const WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_TRUST_ROOT_TAG_KEY =
+  'mukuroji:workspace-search-migration-deployment-trust-root';
+
+/** Stable tag key carrying the deployment trust schema version. */
+export const WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_TRUST_VERSION_TAG_KEY =
+  'mukuroji:workspace-search-migration-deployment-trust-version';
+
+/** Stable tag key carrying only a digest of the protected production account. */
+export const WORKSPACE_SEARCH_MIGRATION_PRODUCTION_ACCOUNT_DIGEST_TAG_KEY =
+  'mukuroji:workspace-search-migration-production-account-sha256';
 
 /**
  * Existing application tables used by the Workspace Search maintenance migration.
@@ -21,6 +54,9 @@ export type MigrationStorageInput = {
   readonly workItemsTable: dynamodb.ITable;
   /** Workspace Search projection target. */
   readonly workspaceSearchTable: dynamodb.ITable;
+  /** Validated source-controlled deployment trust root recorded on resources. */
+  readonly deploymentTrustRoot:
+    WorkspaceSearchMigrationDeploymentTrustRoot;
 };
 
 /**
@@ -33,6 +69,10 @@ export type MigrationStorageResources = {
   readonly workspaceSearchMigrationJournalKey: kms.Key;
   /** Least-privilege permissions attached explicitly to an approved operator principal. */
   readonly workspaceSearchMigrationOperatorPolicy: iam.ManagedPolicy;
+  /** Non-production-only retention extension attached alongside the operator policy. */
+  readonly workspaceSearchMigrationRehearsalEvidencePolicy: iam.ManagedPolicy;
+  /** Deployment condition guarding the rehearsal-only evidence policy and output. */
+  readonly workspaceSearchMigrationRehearsalEvidenceCondition: cdk.CfnCondition;
   /** Durable checkpoint, lease, operation-marker, and verification state table. */
   readonly workspaceSearchMigrationStateTable: dynamodb.Table;
 };
@@ -72,6 +112,10 @@ export function buildMigrationStorage(
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     },
   );
+  applyMigrationDeploymentTrustTags(
+    workspaceSearchMigrationStateTable,
+    input.deploymentTrustRoot,
+  );
 
   const workspaceSearchMigrationJournalAccessLogsBucket = new s3.Bucket(
     scope,
@@ -91,6 +135,10 @@ export function buildMigrationStorage(
       versioned: true,
     },
   );
+  applyMigrationDeploymentTrustTags(
+    workspaceSearchMigrationJournalAccessLogsBucket,
+    input.deploymentTrustRoot,
+  );
 
   const workspaceSearchMigrationJournalKey = new kms.Key(
     scope,
@@ -101,6 +149,10 @@ export function buildMigrationStorage(
       enableKeyRotation: true,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     },
+  );
+  applyMigrationDeploymentTrustTags(
+    workspaceSearchMigrationJournalKey,
+    input.deploymentTrustRoot,
   );
 
   const workspaceSearchMigrationJournalBucket = new s3.Bucket(
@@ -125,10 +177,18 @@ export function buildMigrationStorage(
       versioned: true,
     },
   );
+  applyMigrationDeploymentTrustTags(
+    workspaceSearchMigrationJournalBucket,
+    input.deploymentTrustRoot,
+  );
 
   const journalObjectArn =
     workspaceSearchMigrationJournalBucket.arnForObjects(
       'workspace-search/v1/*',
+    );
+  const rehearsalEvidenceObjectArn =
+    workspaceSearchMigrationJournalBucket.arnForObjects(
+      'workspace-search/v1/rehearsal/evidence-*',
     );
 
   workspaceSearchMigrationJournalBucket.addToResourcePolicy(
@@ -230,8 +290,38 @@ export function buildMigrationStorage(
         },
       },
       effect: iam.Effect.DENY,
+      notResources: [rehearsalEvidenceObjectArn],
       principals: [new iam.AnyPrincipal()],
-      resources: [journalObjectArn],
+    }),
+  );
+  workspaceSearchMigrationJournalBucket.addToResourcePolicy(
+    new iam.PolicyStatement({
+      sid: 'DenyShortRehearsalEvidenceRetention',
+      actions: ['s3:PutObjectRetention'],
+      conditions: {
+        NumericLessThan: {
+          's3:object-lock-remaining-retention-days':
+            minimumRehearsalEvidenceRetentionDays,
+        },
+      },
+      effect: iam.Effect.DENY,
+      principals: [new iam.AnyPrincipal()],
+      resources: [rehearsalEvidenceObjectArn],
+    }),
+  );
+  workspaceSearchMigrationJournalBucket.addToResourcePolicy(
+    new iam.PolicyStatement({
+      sid: 'DenyLongRehearsalEvidenceRetention',
+      actions: ['s3:PutObjectRetention'],
+      conditions: {
+        NumericGreaterThan: {
+          's3:object-lock-remaining-retention-days':
+            maximumRehearsalEvidenceRetentionDays,
+        },
+      },
+      effect: iam.Effect.DENY,
+      principals: [new iam.AnyPrincipal()],
+      resources: [rehearsalEvidenceObjectArn],
     }),
   );
 
@@ -398,10 +488,112 @@ export function buildMigrationStorage(
     },
   );
 
+  const workspaceSearchMigrationRehearsalEvidenceCondition =
+    new cdk.CfnCondition(
+      scope,
+      'WorkspaceSearchMigrationRehearsalEvidenceNonProduction',
+      {
+        expression: cdk.Fn.conditionEquals(
+          input.deploymentTrustRoot.rehearsalEnabled
+            ? input.deploymentTrustRoot.environment
+            : 'production-disabled',
+          'non-production',
+        ),
+      },
+    );
+  const workspaceSearchMigrationRehearsalEvidencePolicy =
+    new iam.ManagedPolicy(
+      scope,
+      'WorkspaceSearchMigrationRehearsalEvidencePolicy',
+      {
+        description:
+          'Unattached non-production-only permission to extend immutable rehearsal evidence retention.',
+        statements: [
+          new iam.PolicyStatement({
+            actions: ['s3:GetBucketTagging'],
+            resources: [workspaceSearchMigrationJournalBucket.bucketArn],
+          }),
+          new iam.PolicyStatement({
+            actions: ['s3:PutObjectRetention'],
+            conditions: {
+              NumericGreaterThanEquals: {
+                's3:object-lock-remaining-retention-days':
+                  minimumRehearsalEvidenceRetentionDays,
+              },
+              NumericLessThanEquals: {
+                's3:object-lock-remaining-retention-days':
+                  maximumRehearsalEvidenceRetentionDays,
+              },
+              StringEquals: {
+                's3:object-lock-mode': 'COMPLIANCE',
+              },
+            },
+            resources: [rehearsalEvidenceObjectArn],
+          }),
+        ],
+      },
+    );
+  const rehearsalEvidencePolicyResource =
+    workspaceSearchMigrationRehearsalEvidencePolicy.node.defaultChild;
+  if (!(rehearsalEvidencePolicyResource instanceof iam.CfnManagedPolicy)) {
+    throw new Error(
+      'Migration rehearsal evidence policy has no CloudFormation resource.',
+    );
+  }
+  rehearsalEvidencePolicyResource.cfnOptions.condition =
+    workspaceSearchMigrationRehearsalEvidenceCondition;
+  applyMigrationDeploymentTrustTags(
+    workspaceSearchMigrationRehearsalEvidencePolicy,
+    input.deploymentTrustRoot,
+  );
+
   return {
     workspaceSearchMigrationJournalBucket,
     workspaceSearchMigrationJournalKey,
     workspaceSearchMigrationOperatorPolicy,
+    workspaceSearchMigrationRehearsalEvidenceCondition,
+    workspaceSearchMigrationRehearsalEvidencePolicy,
     workspaceSearchMigrationStateTable,
   };
+}
+
+/**
+ * Applies the complete secret-free deployment trust binding to one resource.
+ *
+ * The protected production account is intentionally represented only by its
+ * domain-separated digest. The deployment account and Region remain explicit
+ * because CloudFormation independently asserts them for enabled rehearsal
+ * targets.
+ *
+ * @param resource - Taggable migration resource owned by this subsystem.
+ * @param trustRoot - Validated source-controlled deployment trust root.
+ * @returns Nothing.
+ */
+function applyMigrationDeploymentTrustTags(
+  resource: cdk.Resource,
+  trustRoot: WorkspaceSearchMigrationDeploymentTrustRoot,
+): void {
+  const deploymentAccount = trustRoot.rehearsalEnabled
+    ? trustRoot.deploymentAccount
+    : cdk.Aws.ACCOUNT_ID;
+  const deploymentRegion = trustRoot.rehearsalEnabled
+    ? trustRoot.region
+    : cdk.Aws.REGION;
+  for (const [key, value] of [
+    [WORKSPACE_SEARCH_MIGRATION_ENVIRONMENT_TAG_KEY, trustRoot.environment],
+    [WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_ACCOUNT_TAG_KEY, deploymentAccount],
+    [WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_REGION_TAG_KEY, deploymentRegion],
+    [WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_TARGET_TAG_KEY, trustRoot.targetId],
+    [WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_TRUST_ROOT_TAG_KEY, trustRoot.digest],
+    [
+      WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_TRUST_VERSION_TAG_KEY,
+      String(trustRoot.version),
+    ],
+    [
+      WORKSPACE_SEARCH_MIGRATION_PRODUCTION_ACCOUNT_DIGEST_TAG_KEY,
+      trustRoot.productionAccountDigest,
+    ],
+  ]) {
+    cdk.Tags.of(resource).add(key, value);
+  }
 }

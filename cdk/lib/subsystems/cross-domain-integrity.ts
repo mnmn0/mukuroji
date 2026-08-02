@@ -13,6 +13,10 @@ export type CrossDomainIntegrityInput = {
   readonly fileProofingTable: dynamodb.ITable;
   /** Versioned workspace file bucket inspected by exact object version. */
   readonly fileBucket: s3.IBucket;
+  /** Fixed object key of the immutable file-bucket incarnation marker. */
+  readonly fileBucketIncarnationMarkerKey: string;
+  /** Exact marker version that the operator policy may read. */
+  readonly fileBucketIncarnationMarkerVersionId: string;
   /** Team and Project relation graph used by canonical Work Items. */
   readonly projectDirectoryTable: dynamodb.ITable;
   /** Canonical Work Item rows whose configuration and relations are checked. */
@@ -55,6 +59,9 @@ export function buildCrossDomainIntegrityAccess(
     input.workspaceAccessTable.tableArn,
   ];
   const fileObjectArn = input.fileBucket.arnForObjects('workspaces/*');
+  const markerObjectArn = input.fileBucket.arnForObjects(
+    input.fileBucketIncarnationMarkerKey,
+  );
 
   const crossDomainIntegrityOperatorPolicy = new iam.ManagedPolicy(
     scope,
@@ -64,8 +71,12 @@ export function buildCrossDomainIntegrityAccess(
         'Read-only access for bounded source and isolated-restore cross-domain integrity checks.',
       statements: [
         new iam.PolicyStatement({
-          actions: ['dynamodb:Scan'],
+          actions: ['dynamodb:DescribeTable', 'dynamodb:Scan'],
           resources: tableArns,
+        }),
+        new iam.PolicyStatement({
+          actions: ['s3:GetBucketVersioning'],
+          resources: [input.fileBucket.bucketArn],
         }),
         new iam.PolicyStatement({
           actions: ['s3:ListBucket'],
@@ -83,6 +94,18 @@ export function buildCrossDomainIntegrityAccess(
             's3:GetObjectVersionTagging',
           ],
           resources: [fileObjectArn],
+        }),
+        new iam.PolicyStatement({
+          actions: [
+            's3:GetObjectVersion',
+            's3:GetObjectVersionAttributes',
+          ],
+          conditions: {
+            StringEquals: {
+              's3:VersionId': input.fileBucketIncarnationMarkerVersionId,
+            },
+          },
+          resources: [markerObjectArn],
         }),
       ],
     },

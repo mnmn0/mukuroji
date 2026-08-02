@@ -165,6 +165,27 @@ export type WorkspaceSearchMigrationExecutionStatus = {
 export type WorkspaceSearchMigrationExecutionTerminalRelease =
   ReleaseWorkspaceSearchMigrationApplicationWriterFenceInput
 
+/**
+ * Identifier-free exact projection of one strongly read immutable applied root.
+ */
+export type WorkspaceSearchMigrationExecutionAppliedRootProjection = {
+  /** Digest of the immutable execution admission consumed by apply. */
+  readonly executionRunDigest: string
+  /** Exact complete apply-seal fields needed by application evidence. */
+  readonly seal: {
+    /** Merkle root of the exact ordered immutable plan. */
+    readonly planDigest: string
+    /** Exact plan operation count fixed by the complete seal. */
+    readonly planOperationCount: number
+    /** Exact durable operation-marker count fixed by the seal. */
+    readonly markerCount: number
+  }
+  /** Digest of the immutable applied phase root. */
+  readonly rootDigest: string
+  /** Canonical transaction time committed in the applied root. */
+  readonly committedAt: string
+}
+
 /** Read-only writer-fence capability used during graph reconstruction. */
 type WorkspaceSearchMigrationExecutionWriterFenceReadPort = Pick<
   WorkspaceSearchMigrationApplicationWriterFenceAwsPort,
@@ -198,7 +219,7 @@ type WorkspaceSearchMigrationExecutionRunReadPort = Pick<
 /** Read-only apply-state capability. */
 type WorkspaceSearchMigrationApplyReadPort = Pick<
   WorkspaceSearchMigrationApplyOperationAwsPort,
-  'readRunState'
+  'readAppliedRoot' | 'readRunState'
 >
 
 /** Read-only verification-state capability. */
@@ -696,6 +717,41 @@ export async function readWorkspaceSearchMigrationExecutionStatus(
     guard,
   )
   return await readExecutionStatusFromLoadedContext(
+    request.session,
+    loaded,
+    guard,
+  )
+}
+
+/**
+ * Reconstructs the exact immutable applied root after an applied-phase read.
+ *
+ * The durable phase and root are read separately. This prevents an apply
+ * response, operator input, or public status projection from being reused as
+ * application evidence after response loss.
+ *
+ * @param input - Managed session, run identity, and reviewed configuration.
+ * @returns Exact applied root, or undefined outside the applied phase.
+ */
+export async function readWorkspaceSearchMigrationExecutionAppliedRoot(
+  input: ReadWorkspaceSearchMigrationExecutionStatusInput,
+): Promise<
+  WorkspaceSearchMigrationExecutionAppliedRootProjection | undefined
+> {
+  const request = snapshotExecutionStatusInput(input)
+  const runId = requireMigrationIdentifier(request.runId, 'Run ID')
+  requireExpectedConfigurationHash(request.expectedConfigurationHash)
+  const guard = createSignalGuard()
+  const loaded = await loadExecutionContext(
+    request.session,
+    runId,
+    request.expectedConfigurationHash,
+    guard,
+  )
+  if (loaded.kind === 'released') {
+    return failExecutionSupervisor('INVALID_STATE')
+  }
+  return readAppliedRootFromLoadedContext(
     request.session,
     loaded,
     guard,
@@ -1993,6 +2049,56 @@ async function readExecutionStatusFromLoadedContext(
   return (
     await readDurableExecutionSnapshot(ports, guard)
   ).status
+}
+
+/**
+ * Strongly rereads one applied root from an already validated execution graph.
+ *
+ * @param session - Read-only current measured session.
+ * @param loaded - Cross-validated boundary, root, plan, and admission.
+ * @param guard - Current read activity guard.
+ * @returns Exact applied root, or undefined outside the applied phase.
+ */
+async function readAppliedRootFromLoadedContext(
+  session: WorkspaceSearchMigrationExecutionStatusSession,
+  loaded: LoadedClosedExecutionContext,
+  guard: ExecutionOperationGuard,
+): Promise<
+  WorkspaceSearchMigrationExecutionAppliedRootProjection | undefined
+> {
+  const executionRun = loaded.executionRun
+  if (executionRun === undefined) return undefined
+  const ports = createExecutionPhaseReadPorts(
+    session,
+    loaded,
+    executionRun,
+  )
+  const snapshot = await readDurableExecutionSnapshot(ports, guard)
+  if (snapshot.kind !== 'applied') return undefined
+  const root = await runGuardedOperation(
+    guard,
+    () => ports.apply.readAppliedRoot(),
+  )
+  if (
+    root === undefined ||
+    root.executionRunDigest !== executionRun.executionRunDigest ||
+    root.seal.planDigest !== loaded.sealedPlanningAuthority.planDigest ||
+    root.seal.planOperationCount !==
+      loaded.sealedPlanningAuthority.planOperationCount ||
+    root.seal.markerCount !== root.seal.planOperationCount
+  ) {
+    return failExecutionSupervisor('INVALID_STATE')
+  }
+  return Object.freeze({
+    executionRunDigest: root.executionRunDigest,
+    seal: Object.freeze({
+      planDigest: root.seal.planDigest,
+      planOperationCount: root.seal.planOperationCount,
+      markerCount: root.seal.markerCount,
+    }),
+    rootDigest: root.rootDigest,
+    committedAt: root.committedAt,
+  })
 }
 
 /**

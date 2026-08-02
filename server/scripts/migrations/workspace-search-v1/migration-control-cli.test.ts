@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import {
+  createMigrationDigest,
   serializeCanonicalJson,
   WorkspaceSearchMigrationFailure,
   type WorkspaceSearchMigrationLease,
@@ -16,6 +17,7 @@ import {
   type WorkspaceSearchMigrationDescribeTableRateRecorder,
 } from './migration-describe-table-rate-budget'
 import {
+  createWorkspaceSearchMigrationControlCliDependencies,
   parseWorkspaceSearchMigrationControlCliArguments,
   readBoundedInputFile,
   runWorkspaceSearchMigrationControlCli,
@@ -24,15 +26,24 @@ import {
   type WorkspaceSearchMigrationControlCliDependencies,
   type WorkspaceSearchMigrationControlCliExitCode,
   type WorkspaceSearchMigrationControlCliMutationSession,
+  type WorkspaceSearchMigrationControlCliMutationResultObservation,
+  type WorkspaceSearchMigrationControlCliRateManagedSessionConstructor,
   type WorkspaceSearchMigrationControlCliReadSession,
   type WorkspaceSearchMigrationWriterFenceSummary,
 } from './migration-control-cli'
 import type {
   WorkspaceSearchMigrationControlCoordinatorSummary,
 } from './migration-control-coordinator'
+import {
+  parseWorkspaceSearchMigrationDescribeTableRatePolicyDocument,
+} from './migration-describe-table-rate-policy'
 import type {
   WorkspaceSearchMigrationExecutionStatus,
 } from './migration-execution-supervisor'
+import type {
+  CreateAwsWorkspaceSearchMigrationRateManagedSessionInput,
+  WorkspaceSearchMigrationRateManagedAwsSession,
+} from './migration-identity-aws'
 import {
   MAINTENANCE_EVIDENCE_MAX_BYTES,
 } from './maintenance-evidence'
@@ -59,6 +70,12 @@ const differentConfigurationHash = '2'.repeat(64)
 const evidenceReceiptDigest = '3'.repeat(64)
 const refreshedEvidenceReceiptDigest = '4'.repeat(64)
 const writerFenceRecordDigest = '5'.repeat(64)
+const terminalRootDigest = '6'.repeat(64)
+const executionRunDigest = '7'.repeat(64)
+const planDigest = '8'.repeat(64)
+const appliedRootDigest = '9'.repeat(64)
+const appliedAt = '2026-08-01T00:18:30.000Z'
+const releasedAt = '2026-08-01T00:19:30.000Z'
 const rootDirectory = resolve(import.meta.dir, '../../../..')
 const ratePolicyPath = '/operator/rate-policy.json'
 const maintenanceEvidencePath = '/operator/maintenance-evidence.json'
@@ -394,7 +411,35 @@ class RecordingMutationSession
       return { mode: input.mode, phase: 'planning-admitted' }
     }
     if (input.mode === 'release') {
-      return { mode: input.mode, phase: 'released' }
+      return {
+        mode: input.mode,
+        phase: 'released',
+        terminalKind: 'verified',
+        terminalPersistenceVersion: 1,
+        terminalRootDigest,
+        writerFenceRecordDigest,
+        releasedAt,
+      }
+    }
+    if (input.mode === 'apply') {
+      return {
+        mode: input.mode,
+        execution: {
+          phase: 'applying',
+          nextAction: {
+            kind: 'choose',
+            options: ['apply', 'partial-rollback'],
+          },
+        },
+        application: {
+          executionRunDigest,
+          planDigest,
+          sealedPlanOperationCount: 2,
+          appliedOperationCount: 2,
+          appliedRootDigest,
+          appliedAt,
+        },
+      }
     }
     return {
       mode: input.mode,
@@ -655,6 +700,56 @@ function createMeasureArguments(): string[] {
   return ['measure', ...createCommonArguments()]
 }
 
+/**
+ * Builds one direct factory request from the same strict fixtures as the CLI.
+ *
+ * @returns Explicit resources and parsed reviewed rate policy.
+ */
+function createFactoryReadSessionInput():
+  CreateWorkspaceSearchMigrationControlCliReadSessionInput {
+  const configuration =
+    parseWorkspaceSearchMigrationControlCliArguments(
+      createMeasureArguments(),
+    )
+  if (configuration.command !== 'measure') {
+    throw new Error('Expected measure configuration.')
+  }
+  return {
+    resources: configuration.resources,
+    ratePolicy:
+      parseWorkspaceSearchMigrationDescribeTableRatePolicyDocument(
+        ratePolicyBytes,
+      ),
+    rateBootstrap: configuration.rateBootstrap,
+    rateRecoverInterruptedCleanup:
+      configuration.rateRecoverInterruptedCleanup,
+    rateRecoverInterruptedAttempt:
+      configuration.rateRecoverInterruptedAttempt,
+  }
+}
+
+/**
+ * Narrows the deliberately incomplete session used to fault one projection.
+ *
+ * The fixture satisfies only the constructor boundary reached before the
+ * intentional accessor failure. It must never escape a rejected factory call.
+ *
+ * @param value - Candidate test fixture.
+ * @returns Whether close is callable and measurement is accessor-backed.
+ */
+function isProjectionFailureManagedSessionFixture(
+  value: unknown,
+): value is WorkspaceSearchMigrationRateManagedAwsSession {
+  if (typeof value !== 'object' || value === null) return false
+  const closeDescriptor = Object.getOwnPropertyDescriptor(value, 'close')
+  const measureDescriptor = Object.getOwnPropertyDescriptor(
+    value,
+    'measureConfiguration',
+  )
+  return typeof closeDescriptor?.value === 'function' &&
+    typeof measureDescriptor?.get === 'function'
+}
+
 /** Builds one strict writer-fence status command. */
 function createStatusArguments(): string[] {
   return [
@@ -892,6 +987,171 @@ describe('Workspace Search migration control CLI parser', () => {
   })
 })
 
+describe('Workspace Search migration control CLI dependency factory', () => {
+  test('captures one constructor and forwards only the production session input', async () => {
+    const constructionInputs:
+      CreateAwsWorkspaceSearchMigrationRateManagedSessionInput[] = []
+    const constructionFailure = new Error('construction stopped')
+    let replacementCalls = 0
+    const constructor:
+      WorkspaceSearchMigrationControlCliRateManagedSessionConstructor =
+        async (input) => {
+          constructionInputs.push(input)
+          throw constructionFailure
+        }
+    const replacement:
+      WorkspaceSearchMigrationControlCliRateManagedSessionConstructor =
+        async () => {
+          replacementCalls += 1
+          throw new Error('replacement called')
+        }
+    const factoryInput = { createRateManagedSession: constructor }
+    const dependencies =
+      createWorkspaceSearchMigrationControlCliDependencies(factoryInput)
+    expect(Object.isFrozen(dependencies)).toBe(true)
+    expect(Object.keys(dependencies).sort()).toEqual([
+      'createMutationSession',
+      'createReadSession',
+      'createTelemetryRecorder',
+      'readInputFile',
+    ])
+    expect(
+      Reflect.set(factoryInput, 'createRateManagedSession', replacement),
+    ).toBe(true)
+    const signal = new AbortController().signal
+    const sessionInput = {
+      ...createFactoryReadSessionInput(),
+      rateBootstrap: true,
+      rateRecoverInterruptedCleanup: true,
+      rateRecoverInterruptedAttempt: true,
+      signal,
+    }
+
+    await expect(
+      dependencies.createReadSession(sessionInput),
+    ).rejects.toBe(constructionFailure)
+
+    expect(replacementCalls).toBe(0)
+    expect(constructionInputs).toHaveLength(1)
+    expect(constructionInputs[0]?.requested).toBe(sessionInput.resources)
+    expect(constructionInputs[0]?.ratePolicy).toBe(sessionInput.ratePolicy)
+    expect(constructionInputs[0]).toMatchObject({
+      bootstrapRateCheckpoint: true,
+      recoverInterruptedCleanup: true,
+      recoverInterruptedAttempt: true,
+      signal,
+    })
+    expect(Object.keys(constructionInputs[0] ?? {}).sort()).toEqual([
+      'bootstrapRateCheckpoint',
+      'ratePolicy',
+      'recoverInterruptedAttempt',
+      'recoverInterruptedCleanup',
+      'requested',
+      'signal',
+    ])
+  })
+
+  test('rejects accessor and Proxy constructors without invoking traps', () => {
+    const constructor:
+      WorkspaceSearchMigrationControlCliRateManagedSessionConstructor =
+        async () => {
+          throw new Error('constructor called')
+        }
+    let accessorReads = 0
+    const accessorInput = { createRateManagedSession: constructor }
+    Object.defineProperty(accessorInput, 'createRateManagedSession', {
+      enumerable: true,
+      get: () => {
+        accessorReads += 1
+        return constructor
+      },
+    })
+    expect(() =>
+      createWorkspaceSearchMigrationControlCliDependencies(accessorInput)
+    ).toThrow('session constructor is invalid')
+    expect(accessorReads).toBe(0)
+
+    let inputProxyTraps = 0
+    const proxiedInput = new Proxy(
+      { createRateManagedSession: constructor },
+      {
+        get: (target, property, receiver) => {
+          inputProxyTraps += 1
+          return Reflect.get(target, property, receiver)
+        },
+        getPrototypeOf: (target) => {
+          inputProxyTraps += 1
+          return Reflect.getPrototypeOf(target)
+        },
+        ownKeys: (target) => {
+          inputProxyTraps += 1
+          return Reflect.ownKeys(target)
+        },
+      },
+    )
+    expect(() =>
+      createWorkspaceSearchMigrationControlCliDependencies(proxiedInput)
+    ).toThrow('session constructor is invalid')
+    expect(inputProxyTraps).toBe(0)
+
+    let constructorProxyCalls = 0
+    const proxiedConstructor = new Proxy(constructor, {
+      apply: (target, thisArgument, argumentList) => {
+        constructorProxyCalls += 1
+        return Reflect.apply(target, thisArgument, argumentList)
+      },
+    })
+    expect(() =>
+      createWorkspaceSearchMigrationControlCliDependencies({
+        createRateManagedSession: proxiedConstructor,
+      })
+    ).toThrow('session constructor is invalid')
+    expect(constructorProxyCalls).toBe(0)
+  })
+
+  test('closes each newly created session when capability projection fails', async () => {
+    const projectionFailure = new Error('projection stopped')
+    let closeCount = 0
+    const constructor:
+      WorkspaceSearchMigrationControlCliRateManagedSessionConstructor =
+        async () => {
+          const fixture: unknown = Object.defineProperties({}, {
+            close: {
+              enumerable: true,
+              value: async (): Promise<void> => {
+                closeCount += 1
+                throw new Error('close stopped')
+              },
+            },
+            measureConfiguration: {
+              enumerable: true,
+              get: (): never => {
+                throw projectionFailure
+              },
+            },
+          })
+          if (!isProjectionFailureManagedSessionFixture(fixture)) {
+            throw new Error('Invalid projection failure fixture.')
+          }
+          return fixture
+        }
+    const dependencies =
+      createWorkspaceSearchMigrationControlCliDependencies({
+        createRateManagedSession: constructor,
+      })
+    const input = createFactoryReadSessionInput()
+
+    await expect(
+      dependencies.createReadSession(input),
+    ).rejects.toBe(projectionFailure)
+    await expect(
+      dependencies.createMutationSession(input),
+    ).rejects.toBe(projectionFailure)
+
+    expect(closeCount).toBe(2)
+  })
+})
+
 describe('Workspace Search migration control CLI capabilities', () => {
   test('snapshots accessor-backed argv before identifying and parsing it', async () => {
     const harness = createDependencies()
@@ -1056,6 +1316,74 @@ describe('Workspace Search migration control CLI capabilities', () => {
 })
 
 describe('Workspace Search migration control CLI output and lifecycle', () => {
+  test('observes the exact trusted mutation and merged stdout line', async () => {
+    const harness = createDependencies({ telemetry: true })
+    const observations:
+      WorkspaceSearchMigrationControlCliMutationResultObservation[] = []
+    const result = await captureCliRun(
+      createMutationArguments('apply', 'apply-sealed-migration-plan'),
+      {
+        ...harness.dependencies,
+        observeMutationResult: (observation) => {
+          observations.push(observation)
+        },
+      },
+    )
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toEqual([])
+    expect(result.stdout).toHaveLength(1)
+    expect(observations).toHaveLength(1)
+    const observation = observations[0]
+    const serializedOutputLine = result.stdout[0]
+    expect(observation).toBeDefined()
+    expect(serializedOutputLine).toBeDefined()
+    if (observation === undefined || serializedOutputLine === undefined) {
+      throw new Error('Expected one trusted mutation observation.')
+    }
+    expect(Object.isFrozen(observation)).toBe(true)
+    expect(observation.serializedOutputLine).toBe(serializedOutputLine)
+    expect(observation.serializedOutputLineDigest).toBe(
+      createMigrationDigest(serializedOutputLine),
+    )
+    expect(observation.result).toMatchObject({
+      operation: 'apply',
+      status: 'pass',
+      configurationHash: expectedConfigurationHash,
+      policyVersion,
+      coordinator: {
+        mode: 'apply',
+      },
+    })
+    expect(JSON.parse(serializedOutputLine)).toMatchObject({
+      _aws: {
+        Timestamp: 1_800_000_000_000,
+      },
+      operation: 'apply',
+      status: 'pass',
+    })
+  })
+
+  test('fails closed before stdout when mutation observation fails', async () => {
+    const harness = createDependencies({ telemetry: true })
+    const result = await captureCliRun(
+      createMutationArguments('apply', 'apply-sealed-migration-plan'),
+      {
+        ...harness.dependencies,
+        observeMutationResult: async () => {
+          throw new Error('private-observer-failure-canary')
+        },
+      },
+    )
+
+    expect(result.exitCode).toBe(1)
+    expect(result.stdout).toEqual([])
+    expect(result.stderr).toHaveLength(1)
+    expect(result.stderr[0]).toContain('OPERATION_FAILED')
+    expect(result.stderr[0]).not.toContain('private-observer-failure-canary')
+    expect(harness.events.filter((event) => event === 'close')).toHaveLength(1)
+  })
+
   test('merges deferred-bound rate telemetry into the single measure line', async () => {
     const harness = createDependencies({
       telemetry: true,

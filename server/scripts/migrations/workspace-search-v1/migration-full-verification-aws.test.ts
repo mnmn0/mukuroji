@@ -349,6 +349,16 @@ describe('Workspace Search migration full-verification AWS adapter', () => {
       throw new Error('Expected strict verified root reread.')
     }
     expect(conditionRoot.verifiedRootDigest).toBe(root.verifiedRootDigest)
+    const verifiedResult = await harness.port.readVerifiedResult()
+    if (verifiedResult === undefined) {
+      throw new Error('Expected strict verified result replay.')
+    }
+    expect(verifiedResult).toMatchObject({
+      status: 'pass',
+      resultDigest: root.verificationResultDigest,
+      expectedTargetPresentBindings:
+        verifiedResult.observedTargetPresentBindings,
+    })
 
     const rootItem = transactionItems(harness.transactions.at(-1))[
       workspaceSearchMigrationFullVerificationPublishTransactionIndex
@@ -542,6 +552,10 @@ describe('Workspace Search migration full-verification AWS adapter', () => {
       harness.port.readVerifiedRoot()
     )
     expect(failure.code).toBe('INVALID_STATE')
+    const resultFailure = await captureFailure(() =>
+      harness.port.readVerifiedResult()
+    )
+    expect(resultFailure.code).toBe('INVALID_STATE')
   })
 
   test('rejects a self-rehashed verified-root receipt-time substitution', async () => {

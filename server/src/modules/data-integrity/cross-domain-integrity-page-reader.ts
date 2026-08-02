@@ -155,7 +155,7 @@ class AwsCrossDomainIntegrityNormalizedPageReader
       const exclusiveStartKey = request.cursor === undefined
         ? undefined
         : decodeCrossDomainIntegrityPageCursor(request.cursor)
-      const callerAccount = await this.reader.readCallerAccount()
+      const callerAccount = await this.reader.readCallerAccount(request.signal)
       if (callerAccount !== this.accountId) {
         throw new CrossDomainIntegrityNormalizedPageReaderFailure(
           'AWS_RESPONSE_INVALID',
@@ -169,6 +169,7 @@ class AwsCrossDomainIntegrityNormalizedPageReader
         pageSize: this.pageSize,
         reader: this.reader,
         remainingItemCapacity: request.remainingItemCapacity,
+        signal: request.signal,
         target: request.target,
       })
       return {
@@ -241,7 +242,10 @@ class RawAwsReadPort implements CrossDomainIntegrityManagedAwsReadPort {
   }
 
   /** @inheritdoc */
-  getObjectAttributes(reference: CrossDomainIntegrityObjectVersionReference) {
+  getObjectAttributes(
+    reference: CrossDomainIntegrityObjectVersionReference,
+    signal?: AbortSignal,
+  ) {
     const target = this.requireObjectReference(reference)
     return this.s3.send(new GetObjectAttributesCommand({
       Bucket: this.bucketName,
@@ -249,34 +253,43 @@ class RawAwsReadPort implements CrossDomainIntegrityManagedAwsReadPort {
       Key: target.key,
       ObjectAttributes: [ObjectAttributes.CHECKSUM, ObjectAttributes.OBJECT_SIZE],
       VersionId: target.versionId,
-    }))
+    }), { abortSignal: requireNormalizedPageSignal(signal) })
   }
 
   /** @inheritdoc */
-  getObjectTagging(reference: CrossDomainIntegrityObjectVersionReference) {
+  getObjectTagging(
+    reference: CrossDomainIntegrityObjectVersionReference,
+    signal?: AbortSignal,
+  ) {
     const target = this.requireObjectReference(reference)
     return this.s3.send(new GetObjectTaggingCommand({
       Bucket: this.bucketName,
       ExpectedBucketOwner: this.accountId,
       Key: target.key,
       VersionId: target.versionId,
-    }))
+    }), { abortSignal: requireNormalizedPageSignal(signal) })
   }
 
   /** @inheritdoc */
-  headObject(reference: CrossDomainIntegrityObjectVersionReference) {
+  headObject(
+    reference: CrossDomainIntegrityObjectVersionReference,
+    signal?: AbortSignal,
+  ) {
     const target = this.requireObjectReference(reference)
     return this.s3.send(new HeadObjectCommand({
       Bucket: this.bucketName,
       ExpectedBucketOwner: this.accountId,
       Key: target.key,
       VersionId: target.versionId,
-    }))
+    }), { abortSignal: requireNormalizedPageSignal(signal) })
   }
 
   /** @inheritdoc */
-  async readCallerAccount(): Promise<string> {
-    const output = await this.sts.send(new GetCallerIdentityCommand({}))
+  async readCallerAccount(signal?: AbortSignal): Promise<string> {
+    const output = await this.sts.send(
+      new GetCallerIdentityCommand({}),
+      { abortSignal: requireNormalizedPageSignal(signal) },
+    )
     if (output.Account !== this.accountId) {
       throw new CrossDomainIntegrityNormalizedPageReaderFailure(
         'AWS_RESPONSE_INVALID',
@@ -289,13 +302,14 @@ class RawAwsReadPort implements CrossDomainIntegrityManagedAwsReadPort {
   scanPage(
     target: CrossDomainIntegrityTableTarget,
     exclusiveStartKey?: Record<string, AttributeValue>,
+    signal?: AbortSignal,
   ) {
     return this.dynamodb.send(new ScanCommand({
       ConsistentRead: true,
       ...(exclusiveStartKey === undefined ? {} : { ExclusiveStartKey: exclusiveStartKey }),
       Limit: this.pageSize,
       TableName: resolveTableName(this.tableNames, target),
-    }))
+    }), { abortSignal: requireNormalizedPageSignal(signal) })
   }
 
   /**
@@ -319,6 +333,16 @@ class RawAwsReadPort implements CrossDomainIntegrityManagedAwsReadPort {
     }
     return reference
   }
+}
+
+/** Requires the caller's finite normalized-page cancellation signal. */
+function requireNormalizedPageSignal(signal: AbortSignal | undefined): AbortSignal {
+  if (!(signal instanceof AbortSignal) || signal.aborted) {
+    throw new CrossDomainIntegrityNormalizedPageReaderFailure(
+      'AWS_RESPONSE_INVALID',
+    )
+  }
+  return signal
 }
 
 /**

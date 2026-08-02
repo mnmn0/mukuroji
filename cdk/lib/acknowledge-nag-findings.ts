@@ -17,6 +17,8 @@ const deadLetterQueuePaths = [
   'RequestEmailIngestionDlq/Resource',
 ] as const;
 const lambdaPaths = [
+  'FileBucketIncarnationMarkerFunction/Resource',
+  'FileBucketIncarnationMarkerProvider/framework-onEvent/Resource',
   'ListProjectTasksFunction/Resource',
   'WorkItemImportFunction/Resource',
   'RealtimeHandlerFunction/Resource',
@@ -36,6 +38,8 @@ const lambdaPaths = [
 ] as const;
 const managedPolicyRolePaths = [
   'BucketNotificationsHandler050a0587b7544547bf325f094a3db834/Role/Resource',
+  'FileBucketIncarnationMarkerFunction/ServiceRole/Resource',
+  'FileBucketIncarnationMarkerProvider/framework-onEvent/ServiceRole/Resource',
   'ListProjectTasksFunction/ServiceRole/Resource',
   'WorkItemImportFunction/ServiceRole/Resource',
   'RealtimeHandlerFunction/ServiceRole/Resource',
@@ -156,6 +160,10 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     ['WorkspaceSearchMigrationOperatorPolicy/Resource'],
   ],
   [
+    'AwsSolutions-IAM5[Resource::<WorkspaceSearchMigrationJournalBucket4E515934.Arn>/workspace-search/v1/rehearsal/evidence-*]',
+    ['WorkspaceSearchMigrationOperatorPolicy/Resource'],
+  ],
+  [
     'AwsSolutions-IAM5[Resource::<AutomationTableE3D67F0D.Arn>/index/*]',
     [
       'ApiAutomationDataPolicy/Resource',
@@ -205,6 +213,12 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
       'RuntimeControlAlarmReadinessPollFunction/ServiceRole/DefaultPolicy/Resource',
       'RuntimeControlAlarmMonitorPolicy/Resource',
+    ],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<FileBucketIncarnationMarkerFunctionBCDA95D8.Arn>:*]',
+    [
+      'FileBucketIncarnationMarkerProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource',
     ],
   ],
   [
@@ -378,6 +392,7 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::<RealtimeSessionsTable607096EB.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<WorkItemImportBucket14068778.Arn>/work-item-imports/*]',
     'AwsSolutions-IAM5[Resource::<WorkspaceSearchMigrationJournalBucket4E515934.Arn>/workspace-search/v1/*]',
+    'AwsSolutions-IAM5[Resource::<WorkspaceSearchMigrationJournalBucket4E515934.Arn>/workspace-search/v1/rehearsal/evidence-*]',
     'AwsSolutions-IAM5[Resource::<AutomationTableE3D67F0D.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<RequestIntakeTable608708D4.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*]',
@@ -385,6 +400,7 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::<DeveloperPlatformTable772E085C.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:execute-api:<AWS::Region>:<AWS::AccountId>:<RealtimeWebSocketApiC99C6240>/production/*/@connections/*]',
     'AwsSolutions-IAM5[Resource::*]',
+    'AwsSolutions-IAM5[Resource::<FileBucketIncarnationMarkerFunctionBCDA95D8.Arn>:*]',
     'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessOnEventFunctionA25C5A0C.Arn>:*]',
     'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessPollFunctionCD017060.Arn>:*]',
     'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessProviderframeworkisComplete30325ABD.Arn>:*]',

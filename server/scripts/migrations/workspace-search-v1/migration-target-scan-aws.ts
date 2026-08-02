@@ -38,9 +38,13 @@ export interface WorkspaceSearchMigrationTargetScanAwsTransport {
    * Sends one exact unfiltered base-table Scan command.
    *
    * @param command - Adapter-owned read-only command.
+   * @param signal - Optional managed-session cancellation signal.
    * @returns Raw low-level DynamoDB page.
    */
-  scanTarget(command: ScanCommand): Promise<ScanCommandOutput>
+  scanTarget(
+    command: ScanCommand,
+    signal?: AbortSignal,
+  ): Promise<ScanCommandOutput>
 }
 
 /**

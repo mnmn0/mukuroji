@@ -57,6 +57,10 @@ const restoreDrillFunctionIds = new Set([
   'RestoreDrillRunnerFunction5F951D72',
 ]);
 
+const fileStorageInfrastructureFunctionIds = new Set([
+  'FileBucketIncarnationMarkerFunctionBCDA95D8',
+]);
+
 /**
  * Narrows an unknown synthesized value to a string-keyed record.
  *
@@ -594,6 +598,7 @@ test('binds exact runtime-control settings through API config and thirteen direc
       const description = resource.Properties?.Description;
       return runtimeControlPlaneFunctionIds.has(logicalId) ||
         restoreDrillFunctionIds.has(logicalId) ||
+        fileStorageInfrastructureFunctionIds.has(logicalId) ||
         logicalId.startsWith('AWS679f53fac002430cb0da5b7982bd2287') ||
         (
           typeof description === 'string' &&

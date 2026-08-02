@@ -44,6 +44,7 @@ import {
 } from './migration-execution-run'
 import {
   readMeasuredWorkspaceSearchMigrationExecutionTerminalRelease,
+  readWorkspaceSearchMigrationExecutionAppliedRoot,
   readWorkspaceSearchMigrationExecutionStatus,
   readWorkspaceSearchMigrationExecutionTerminalRelease,
   superviseWorkspaceSearchMigrationExecution,
@@ -52,6 +53,9 @@ import {
   type WorkspaceSearchMigrationExecutionSupervisorMode,
   type WorkspaceSearchMigrationExecutionSupervisorSession,
 } from './migration-execution-supervisor'
+import type {
+  WorkspaceSearchMigrationAppliedRoot,
+} from './migration-apply-seal'
 import type {
   WorkspaceSearchMigrationFullVerificationPersistenceState,
   WorkspaceSearchMigrationFullVerificationResultArtifactReference,
@@ -414,6 +418,9 @@ class ExecutionSupervisorHarness {
   /** Optional deferred operation result held across a heartbeat race. */
   private deferredOperation: DeferredRunState | undefined
 
+  /** Whether the post-apply immutable root read returns durable absence. */
+  private omitAppliedRootRead = false
+
   /** Optional intentional maintenance evidence collection barrier. */
   private maintenanceEvidenceCollectionBarrier:
     Promise<void> | undefined
@@ -582,6 +589,11 @@ class ExecutionSupervisorHarness {
         this.currentAuthority
           .maintenanceEvidenceReceiptDigest,
     }
+  }
+
+  /** Makes a later post-apply strong root read observe durable absence. */
+  omitAppliedRootOnRead(): void {
+    this.omitAppliedRootRead = true
   }
 
   /**
@@ -833,6 +845,16 @@ class ExecutionSupervisorHarness {
           this.events.push('apply:read')
           return structuredClone(this.runState)
         },
+        readAppliedRoot: async () => {
+          this.events.push('apply:read-root')
+          if (
+            this.omitAppliedRootRead ||
+            this.runState.status !== 'applied'
+          ) {
+            return undefined
+          }
+          return createSupervisorAppliedRoot(this.fixture)
+        },
         readOperationMarker: async () => undefined,
         readApplyReceipt: async () => undefined,
         adoptExecutionAuthority: async (input) => {
@@ -912,6 +934,7 @@ class ExecutionSupervisorHarness {
           this.events.push('verification:read-root')
           return structuredClone(this.verifiedRoot)
         },
+        readVerifiedResult: async () => undefined,
         saveVerificationPage: async (input) => {
           this.events.push(
             `verify-page:${input.expectedRevision}:${input.location}`,
@@ -1433,6 +1456,57 @@ describe('Workspace Search migration execution supervisor', () => {
         harness.events.some(isLeaseOrAuthorityMutation),
       ).toBe(false)
     }
+  })
+
+  test('rereads the exact immutable applied root after reconstructing applied phase', async () => {
+    const harness = new ExecutionSupervisorHarness('applied')
+
+    const root =
+      await readWorkspaceSearchMigrationExecutionAppliedRoot({
+        session: harness.session,
+        runId,
+        expectedConfigurationHash:
+          harness.fixture.configurationHash,
+      })
+
+    const durableRoot = createSupervisorAppliedRoot(harness.fixture)
+    expect(root).toEqual({
+      executionRunDigest: durableRoot.executionRunDigest,
+      seal: {
+        planDigest: durableRoot.seal.planDigest,
+        planOperationCount: durableRoot.seal.planOperationCount,
+        markerCount: durableRoot.seal.markerCount,
+      },
+      rootDigest: durableRoot.rootDigest,
+      committedAt: durableRoot.committedAt,
+    })
+    expect(harness.events.filter(
+      (event) => event === 'apply:read-root',
+    )).toHaveLength(1)
+    expect(harness.events.indexOf('apply:read-root')).toBeGreaterThan(
+      harness.events.indexOf('apply:read'),
+    )
+    expect(
+      harness.events.some(isLeaseOrAuthorityMutation),
+    ).toBe(false)
+  })
+
+  test('rejects applied response-loss recovery when the required strong root reread is absent', async () => {
+    const harness = new ExecutionSupervisorHarness('applied')
+    harness.omitAppliedRootOnRead()
+
+    const failure = await captureMigrationFailure(
+      async () =>
+        await readWorkspaceSearchMigrationExecutionAppliedRoot({
+          session: harness.session,
+          runId,
+          expectedConfigurationHash:
+            harness.fixture.configurationHash,
+        }),
+    )
+
+    expect(failure.code).toBe('INVALID_STATE')
+    expect(harness.events).toContain('apply:read-root')
   })
 
   test('reconstructs released status only from an exactly bound open row', async () => {
@@ -2611,6 +2685,99 @@ function createAppliedSuccessor(
       contentDigest: digest('apply-seal'),
     },
     updatedAt: evaluatedAt,
+  }
+}
+
+/**
+ * Creates one type-complete immutable applied root for strong-read tests.
+ *
+ * @param fixture - Exact admitted execution and sealed plan binding.
+ * @returns Detached durable applied root.
+ */
+function createSupervisorAppliedRoot(
+  fixture: SupervisorFixture,
+): WorkspaceSearchMigrationAppliedRoot {
+  const predecessorRevision = 7
+  const successorRevision = predecessorRevision + 1
+  const committedAt = '2026-07-29T01:20:00.000Z'
+  const apply = completeTraversal(fixture.executionRun.runState.apply)
+  const seal: WorkspaceSearchMigrationAppliedRoot['seal'] = {
+    kind: 'workspace-search-migration-complete-apply-seal',
+    sealVersion: 1,
+    migrationId: WORKSPACE_SEARCH_MIGRATION_ID,
+    migrationVersion: WORKSPACE_SEARCH_MIGRATION_VERSION,
+    scope: 'complete-plan',
+    runId,
+    configurationHash: fixture.configurationHash,
+    executionRunDigest: fixture.executionRun.executionRunDigest,
+    executionRunBindingDigest: digest('execution-run-binding'),
+    sealedPlanningAuthorityDigest:
+      fixture.sealedPlanningAuthority.authorityDigest,
+    tableIds: fixture.sealedPlanningAuthority.tableIds,
+    planSealReference:
+      fixture.sealedPlanningAuthority.planSealReference,
+    planDigest: fixture.sealedPlanningAuthority.planDigest,
+    sourceOperationCount:
+      fixture.sealedPlanningAuthority.sourceOperationCount,
+    orphanOperationCount:
+      fixture.sealedPlanningAuthority.orphanOperationCount,
+    planOperationCount:
+      fixture.sealedPlanningAuthority.planOperationCount,
+    predecessorRevision,
+    predecessorExecutionStateDigest:
+      digest('applied-predecessor-state'),
+    predecessorRunStateDigest:
+      digest('applied-predecessor-run-state'),
+    markerCount: fixture.sealedPlanningAuthority.planOperationCount,
+    applyMarkerDigestState: {
+      count: fixture.sealedPlanningAuthority.planOperationCount,
+      sumHex: digest('applied-marker-sum'),
+      xorHex: digest('applied-marker-xor'),
+    },
+    applyMarkerAggregateDigest: digest('applied-marker-aggregate'),
+    journalSequence: 1,
+    journalHeadDigest: digest('applied-journal-head'),
+    apply,
+    applyTraversalDigest: createMigrationDigest(apply),
+    createdAt: committedAt,
+    sealDigest: digest('complete-apply-seal'),
+  }
+  return {
+    kind: 'workspace-search-migration-applied-root',
+    rootVersion: 1,
+    migrationId: WORKSPACE_SEARCH_MIGRATION_ID,
+    migrationVersion: WORKSPACE_SEARCH_MIGRATION_VERSION,
+    stateTableId:
+      fixture.configuration.tables['migration-state'].tableId,
+    configurationHash: fixture.configurationHash,
+    runId,
+    executionRunDigest: fixture.executionRun.executionRunDigest,
+    predecessorRevision,
+    predecessorExecutionStateDigest:
+      seal.predecessorExecutionStateDigest,
+    predecessorRunStateDigest: seal.predecessorRunStateDigest,
+    seal,
+    sealReference: {
+      scope: 'complete-plan',
+      objectKey: 'workspace-search/v1/apply-seal.artifact',
+      versionId: 'apply-seal-version-1',
+      contentDigest: digest('complete-apply-seal'),
+      byteLength: 1,
+      retainUntil,
+    },
+    authority: {
+      ownerId,
+      fenceToken: 7,
+      maintenanceEvidencePointerRevision: 13,
+      maintenanceEvidenceReceiptDigest:
+        digest('applied-maintenance-receipt'),
+      evaluatedAt,
+    },
+    successorRevision,
+    status: 'applied',
+    successorRunStateDigest: digest('applied-successor-run-state'),
+    committedAt,
+    rootDigest: digest('applied-root'),
   }
 }
 

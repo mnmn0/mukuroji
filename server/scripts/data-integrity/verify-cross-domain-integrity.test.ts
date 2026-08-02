@@ -7,19 +7,25 @@ import {
   readdir,
   rm,
   stat,
+  symlink,
+  utimes,
   writeFile,
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  DescribeTableCommand,
   ScanCommand,
+  type DescribeTableCommandOutput,
   type ScanCommandOutput,
 } from '@aws-sdk/client-dynamodb'
 import {
+  GetBucketVersioningCommand,
   GetObjectAttributesCommand,
   GetObjectTaggingCommand,
   HeadObjectCommand,
   ObjectAttributes,
+  type GetBucketVersioningCommandOutput,
   type GetObjectAttributesCommandOutput,
   type GetObjectTaggingCommandOutput,
   type HeadObjectCommandOutput,
@@ -31,14 +37,24 @@ import {
 import {
   authenticateCrossDomainIntegrityResult,
   calculateCrossDomainIntegrityResourceIdentityDigest,
+  createCrossDomainIntegrityInvocationDeadline,
   CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+  CROSS_DOMAIN_INTEGRITY_FILE_BUCKET_MARKER_KEY,
+  CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
   CROSS_DOMAIN_INTEGRITY_NON_TARGETS,
   CROSS_DOMAIN_INTEGRITY_RESOURCE_TARGETS,
+  CROSS_DOMAIN_INTEGRITY_REHEARSAL_LIVE_PROVENANCE_KIND,
   CROSS_DOMAIN_INTEGRITY_RESULT_KIND,
+  CROSS_DOMAIN_INTEGRITY_TABLE_RESOURCE_TARGETS,
   CROSS_DOMAIN_INTEGRITY_TARGETS,
+  parseCrossDomainIntegrityResourceAttestation,
   type CrossDomainDomainEvidence,
   type CrossDomainIntegrityDomain,
+  type CrossDomainIntegrityObservationMode,
+  type CrossDomainIntegrityRehearsalLiveRuntimeProvenance,
   type CrossDomainIntegrityResourceIdentity,
+  type CrossDomainIntegrityResourceAttestation,
+  type CrossDomainIntegrityTableResourceTarget,
   type CrossDomainIntegrityResult,
 } from './cross-domain-integrity'
 import {
@@ -52,6 +68,7 @@ import {
   parseCrossDomainIntegrityDigestKey,
   runCrossDomainIntegrityCli,
   writeCrossDomainIntegrityEvidenceAtomically,
+  writeCrossDomainIntegrityResourceAttestationAtomically,
   type CrossDomainIntegrityAwsReaderConfiguration,
   type CrossDomainIntegrityAwsSdkClientConfiguration,
   type CrossDomainIntegrityAwsTransport,
@@ -74,6 +91,67 @@ const TEST_RESOURCE_IDENTITY_DIGEST =
     TEST_RESOURCE_IDENTITIES,
     TEST_DIGEST_KEY,
   )
+const TEST_MARKER_CHECKSUM_SHA256 = Buffer.alloc(32, 0x5a).toString('base64')
+
+/**
+ * Reads the POSIX effective user identifier required by private-file tests.
+ *
+ * @returns Current effective user identifier.
+ */
+function readTestEffectiveUserId(): number {
+  const getEffectiveUserId = process.geteuid
+  if (typeof getEffectiveUserId !== 'function') {
+    throw new Error('Effective user identity is unavailable.')
+  }
+  return Reflect.apply(getEffectiveUserId, process, [])
+}
+
+/** Creates one complete private immutable-resource snapshot fixture. */
+function createResourceAttestation(): CrossDomainIntegrityResourceAttestation {
+  const account = '123456789012'
+  const region = 'ap-northeast-1'
+  const tableNames = createTableNames()
+  const namesByResourceTarget: Record<
+    CrossDomainIntegrityTableResourceTarget,
+    string
+  > = {
+    'table:audit-events': tableNames['audit-events'],
+    'table:file-proofing': tableNames['file-proofing'],
+    'table:project-directory': tableNames['project-directory'],
+    'table:work-item-configuration': tableNames['work-item-configuration'],
+    'table:work-items': tableNames['work-items'],
+    'table:workspace-access': tableNames['workspace-access'],
+  }
+  return {
+    kind: 'mukuroji-cross-domain-integrity-resource-attestation',
+    version: 1,
+    scheme: CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
+    account,
+    region,
+    bucket: {
+      target: 'bucket:file',
+      bucketName: 'file-integrity-bucket',
+      marker: {
+        key: CROSS_DOMAIN_INTEGRITY_FILE_BUCKET_MARKER_KEY,
+        versionId: 'file-bucket-marker-version-1',
+        checksumSha256: TEST_MARKER_CHECKSUM_SHA256,
+        size: 128,
+      },
+    },
+    tables: CROSS_DOMAIN_INTEGRITY_TABLE_RESOURCE_TARGETS.map(
+      (target, index) => {
+        const tableName = namesByResourceTarget[target]
+        return {
+          target,
+          tableName,
+          tableArn: `arn:aws:dynamodb:${region}:${account}:table/${tableName}`,
+          tableId: `immutable-table-id-${index + 1}`,
+          creationTime: `2026-01-0${index + 1}T00:00:00.000Z`,
+        }
+      },
+    ),
+  }
+}
 
 /** Complete non-sensitive physical table-name fixture. */
 function createTableNames(): CrossDomainIntegrityTableNames {
@@ -153,10 +231,80 @@ function createCheckArguments(
     '10',
     '--max-items',
     '1000',
+    '--maximum-duration-milliseconds',
+    '60000',
     '--audit-pseudonym-key-file',
     auditPseudonymKeyPath,
     '--digest-key-file',
     digestKeyPath,
+    '--output',
+    outputPath,
+  ]
+}
+
+/**
+ * Creates one explicit live-rehearsal CLI argument list without checkedAt.
+ *
+ * @param digestKeyPath - Mode-restricted key-file path.
+ * @param outputPath - Fresh evidence path.
+ * @param resourceAttestationPath - Owner-only private resource snapshot path.
+ * @returns Strict live source-check arguments.
+ */
+function createLiveCheckArguments(
+  digestKeyPath: string,
+  outputPath: string,
+  resourceAttestationPath = `${digestKeyPath}.resource-attestation`,
+): string[] {
+  const arguments_ = createCheckArguments(digestKeyPath, outputPath)
+  const checkedAtIndex = arguments_.indexOf('--checked-at')
+  arguments_.splice(checkedAtIndex, 2)
+  arguments_.push('--observation-mode', 'migration-rehearsal-live')
+  arguments_.push(
+    '--resource-attestation-file',
+    resourceAttestationPath,
+  )
+  return arguments_
+}
+
+/**
+ * Creates one explicit immutable-resource attestation command.
+ *
+ * @param outputPath - Fresh owner-only snapshot path.
+ * @returns Strict complete operator argument vector.
+ */
+function createAttestResourcesArguments(outputPath: string): string[] {
+  return [
+    'attest-resources',
+    '--account',
+    '123456789012',
+    '--region',
+    'ap-northeast-1',
+    '--profile',
+    'integrity-read-only',
+    '--table',
+    'work-items=work-items-table',
+    '--table',
+    'work-item-configuration=work-item-configuration-table',
+    '--table',
+    'project-directory=project-directory-table',
+    '--table',
+    'workspace-access=workspace-access-table',
+    '--table',
+    'audit-events=audit-events-table',
+    '--table',
+    'file-proofing=file-proofing-table',
+    '--bucket',
+    'file=file-integrity-bucket',
+    '--marker-key',
+    CROSS_DOMAIN_INTEGRITY_FILE_BUCKET_MARKER_KEY,
+    '--marker-version-id',
+    'file-bucket-marker-version-1',
+    '--marker-checksum-sha256',
+    TEST_MARKER_CHECKSUM_SHA256,
+    '--marker-size',
+    '128',
+    '--maximum-duration-milliseconds',
+    '60000',
     '--output',
     outputPath,
   ]
@@ -171,6 +319,11 @@ async function writeTestKeyFiles(digestKeyPath: string): Promise<void> {
   await Promise.all([
     writeFile(digestKeyPath, 'ab'.repeat(32), { mode: 0o600 }),
     writeFile(`${digestKeyPath}.audit-pseudonym`, 'cd'.repeat(32), { mode: 0o600 }),
+    writeFile(
+      `${digestKeyPath}.resource-attestation`,
+      `${JSON.stringify(createResourceAttestation(), undefined, 2)}\n`,
+      { mode: 0o600 },
+    ),
   ])
 }
 
@@ -182,6 +335,11 @@ type EvidenceFixtureOptions = {
   readonly maxItems?: number
   /** Maximum page count. */
   readonly maxPages?: number
+  /** Logical or live result provenance. */
+  readonly observationMode?: CrossDomainIntegrityObservationMode
+  /** Exact live runtime boundaries for a live fixture. */
+  readonly runtimeProvenance?:
+    CrossDomainIntegrityRehearsalLiveRuntimeProvenance
   /** Requested page size. */
   readonly pageSize?: number
   /** Logical resource-binding digest. */
@@ -190,6 +348,9 @@ type EvidenceFixtureOptions = {
   readonly resourceIdentities?: readonly CrossDomainIntegrityResourceIdentity[]
   /** Physical resource-identity digest. */
   readonly resourceIdentityDigest?: string
+  /** Immutable incarnation scheme required by live evidence. */
+  readonly resourceIdentityScheme?:
+    typeof CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME
   /** Dataset role. */
   readonly role?: 'restore' | 'source'
   /** Overall fixture status. */
@@ -227,6 +388,9 @@ function createEvidence(
     TEST_RESOURCE_IDENTITIES).map((identity) => ({ ...identity }))
   return authenticateCrossDomainIntegrityResult({
     checkedAt: options.checkedAt ?? TEST_CHECKED_AT,
+    ...(options.runtimeProvenance === undefined
+      ? {}
+      : { runtimeProvenance: options.runtimeProvenance }),
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
     evidence: {
       algorithm: 'HMAC-SHA-256',
@@ -241,6 +405,13 @@ function createEvidence(
       keyFingerprint: 'cd'.repeat(32),
       resourceBindingDigest,
       resourceIdentities,
+      ...(options.resourceIdentityScheme === undefined &&
+          options.runtimeProvenance === undefined
+        ? {}
+        : {
+            resourceIdentityScheme: options.resourceIdentityScheme ??
+              CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
+          }),
       resourceIdentityDigest: options.resourceIdentityDigest ??
         calculateCrossDomainIntegrityResourceIdentityDigest(
           resourceIdentities,
@@ -316,6 +487,15 @@ function createPublicationExpectation(
 
 /** Allowlisted command recorder used without AWS or network access. */
 class RecordingAwsTransport implements CrossDomainIntegrityAwsTransport {
+  /** Finite signals received by allowlisted transport requests. */
+  readonly requestSignals: AbortSignal[] = []
+
+  /** Recorded DynamoDB table-description commands. */
+  readonly describeTableCommands: DescribeTableCommand[] = []
+
+  /** Recorded S3 bucket-versioning commands. */
+  readonly getBucketVersioningCommands: GetBucketVersioningCommand[] = []
+
   /** Recorded S3 object-attributes commands. */
   readonly getObjectAttributesCommands: GetObjectAttributesCommand[] = []
 
@@ -343,34 +523,81 @@ class RecordingAwsTransport implements CrossDomainIntegrityAwsTransport {
   }
 
   /** @inheritdoc */
+  async describeTable(
+    command: DescribeTableCommand,
+    signal: AbortSignal,
+  ): Promise<DescribeTableCommandOutput> {
+    this.describeTableCommands.push(command)
+    this.requestSignals.push(signal)
+    const tableName = command.input.TableName
+    if (tableName === undefined) return { $metadata: {} }
+    return {
+      $metadata: {},
+      Table: {
+        TableName: tableName,
+        TableArn:
+          `arn:aws:dynamodb:ap-northeast-1:123456789012:table/${tableName}`,
+        TableId: `immutable-${tableName}`,
+        TableStatus: 'ACTIVE',
+        CreationDateTime: new Date('2026-01-01T00:00:00.000Z'),
+      },
+    }
+  }
+
+  /** @inheritdoc */
+  async getBucketVersioning(
+    command: GetBucketVersioningCommand,
+    signal: AbortSignal,
+  ): Promise<GetBucketVersioningCommandOutput> {
+    this.getBucketVersioningCommands.push(command)
+    this.requestSignals.push(signal)
+    return { $metadata: {}, Status: 'Enabled' }
+  }
+
+  /** @inheritdoc */
   async getObjectAttributes(
     command: GetObjectAttributesCommand,
+    signal: AbortSignal,
   ): Promise<GetObjectAttributesCommandOutput> {
     this.getObjectAttributesCommands.push(command)
-    return { $metadata: {} }
+    this.requestSignals.push(signal)
+    return command.input.Key === CROSS_DOMAIN_INTEGRITY_FILE_BUCKET_MARKER_KEY
+      ? {
+          $metadata: {},
+          VersionId: 'file-bucket-marker-version-1',
+          Checksum: { ChecksumSHA256: TEST_MARKER_CHECKSUM_SHA256 },
+          ObjectSize: 128,
+        }
+      : { $metadata: {} }
   }
 
   /** @inheritdoc */
   async getObjectTagging(
     command: GetObjectTaggingCommand,
+    signal: AbortSignal,
   ): Promise<GetObjectTaggingCommandOutput> {
     this.getObjectTaggingCommands.push(command)
+    this.requestSignals.push(signal)
     return { $metadata: {}, TagSet: [] }
   }
 
   /** @inheritdoc */
   async headObject(
     command: HeadObjectCommand,
+    signal: AbortSignal,
   ): Promise<HeadObjectCommandOutput> {
     this.headObjectCommands.push(command)
+    this.requestSignals.push(signal)
     return { $metadata: {} }
   }
 
   /** @inheritdoc */
   async readCallerIdentity(
     command: GetCallerIdentityCommand,
+    signal: AbortSignal,
   ): Promise<GetCallerIdentityCommandOutput> {
     this.callerIdentityCommands.push(command)
+    this.requestSignals.push(signal)
     if (this.callerIdentityFailure !== undefined) {
       throw this.callerIdentityFailure
     }
@@ -378,8 +605,12 @@ class RecordingAwsTransport implements CrossDomainIntegrityAwsTransport {
   }
 
   /** @inheritdoc */
-  async scan(command: ScanCommand): Promise<ScanCommandOutput> {
+  async scan(
+    command: ScanCommand,
+    signal: AbortSignal,
+  ): Promise<ScanCommandOutput> {
     this.scanCommands.push(command)
+    this.requestSignals.push(signal)
     return { $metadata: {}, Items: [] }
   }
 }
@@ -397,10 +628,13 @@ describe('cross-domain integrity CLI argument parsing', () => {
       digestKeyFile: '/secure/key.hex',
       maxItems: 1000,
       maxPages: 10,
+      maximumDurationMilliseconds: 60000,
+      observationMode: 'logical',
       output: '/evidence/result.json',
       pageSize: 100,
       profile: 'integrity-read-only',
       region: 'ap-northeast-1',
+      resourceAttestationFile: null,
       role: 'source',
       tables: createTableNames(),
     })
@@ -413,6 +647,38 @@ describe('cross-domain integrity CLI argument parsing', () => {
         '/secure/key.hex',
       ),
     )).toThrow('INVALID_USAGE')
+  })
+
+  test('separates operator timestamps from explicit live rehearsal mode', () => {
+    const live = parseCrossDomainIntegrityCliArguments(
+      createLiveCheckArguments('/secure/key.hex', '/evidence/live.json'),
+    )
+    expect(live).toMatchObject({
+      checkedAt: null,
+      observationMode: 'migration-rehearsal-live',
+      role: 'source',
+    })
+
+    const withOperatorTimestamp = createLiveCheckArguments(
+      '/secure/key.hex',
+      '/evidence/live.json',
+    )
+    withOperatorTimestamp.push('--checked-at', TEST_CHECKED_AT)
+    const restore = createLiveCheckArguments(
+      '/secure/key.hex',
+      '/evidence/live.json',
+    )
+    restore[restore.indexOf('--role') + 1] = 'restore'
+    const unknownMode = createLiveCheckArguments(
+      '/secure/key.hex',
+      '/evidence/live.json',
+    )
+    unknownMode[unknownMode.indexOf('--observation-mode') + 1] = 'live'
+    for (const invalid of [withOperatorTimestamp, restore, unknownMode]) {
+      expect(() => parseCrossDomainIntegrityCliArguments(invalid)).toThrow(
+        'INVALID_USAGE',
+      )
+    }
   })
 
   test('rejects missing, duplicate, and untyped resource mappings', () => {
@@ -457,6 +723,8 @@ describe('cross-domain integrity CLI argument parsing', () => {
       ['--max-pages', '10001'],
       ['--max-items', '0'],
       ['--max-items', '1000001'],
+      ['--maximum-duration-milliseconds', '0'],
+      ['--maximum-duration-milliseconds', '900001'],
       ['--checked-at', '2026-08-01'],
       ['--region', 'ap-northeast-1.attacker.invalid'],
       ['--bucket', 'file=127.0.0.1'],
@@ -533,6 +801,39 @@ describe('cross-domain integrity CLI argument parsing', () => {
     expect(createCrossDomainIntegrityResourceIdentityDigest(changed, key)).not.toBe(sourceDigest)
   })
 
+  test('requires every explicit immutable marker input for resource attestation', () => {
+    expect(parseCrossDomainIntegrityCliArguments(
+      createAttestResourcesArguments('/evidence/resources.json'),
+    )).toEqual({
+      account: '123456789012',
+      buckets: { file: 'file-integrity-bucket' },
+      command: 'attest-resources',
+      marker: {
+        key: CROSS_DOMAIN_INTEGRITY_FILE_BUCKET_MARKER_KEY,
+        versionId: 'file-bucket-marker-version-1',
+        checksumSha256: TEST_MARKER_CHECKSUM_SHA256,
+        size: 128,
+      },
+      maximumDurationMilliseconds: 60000,
+      output: '/evidence/resources.json',
+      profile: 'integrity-read-only',
+      region: 'ap-northeast-1',
+      tables: createTableNames(),
+    })
+
+    for (const flag of [
+      '--marker-version-id',
+      '--marker-checksum-sha256',
+      '--marker-size',
+    ]) {
+      const invalid = createAttestResourcesArguments('/evidence/resources.json')
+      invalid.splice(invalid.indexOf(flag), 2)
+      expect(() => parseCrossDomainIntegrityCliArguments(invalid)).toThrow(
+        'INVALID_USAGE',
+      )
+    }
+  })
+
   test('returns only machine-readable help for the exact help command', () => {
     expect(parseCrossDomainIntegrityCliArguments(['help'])).toEqual({
       command: 'help',
@@ -575,6 +876,10 @@ describe('cross-domain integrity AWS adapter', () => {
       GetCallerIdentityCommand,
     )
     expect(transport.callerIdentityCommands[0]?.input).toEqual({})
+    expect(transport.requestSignals).toHaveLength(6)
+    expect(transport.requestSignals.every((signal) =>
+      signal instanceof AbortSignal && !signal.aborted
+    )).toBe(true)
     expect(transport.scanCommands[0]).toBeInstanceOf(ScanCommand)
     expect(transport.scanCommands[0]?.input).toEqual({
       ConsistentRead: true,
@@ -750,6 +1055,63 @@ describe('cross-domain integrity evidence publication', () => {
     }
   })
 
+  test('requires publication headroom and retries only an exact committed artifact', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cross-domain-deadline-'))
+    const outputPath = join(directory, 'result.json')
+    const evidence = createEvidence()
+    const shortDeadline = createCrossDomainIntegrityInvocationDeadline({
+      maximumDurationMilliseconds: 29_999,
+      monotonicClock: () => 1_000,
+    })
+    try {
+      await expect(writeCrossDomainIntegrityEvidenceAtomically(
+        outputPath,
+        evidence,
+        createPublicationExpectation(),
+        undefined,
+        shortDeadline,
+      )).rejects.toThrow('DEADLINE_EXCEEDED')
+      await expect(stat(outputPath)).rejects.toBeDefined()
+
+      let now = 1_000
+      const crossingDeadline = createCrossDomainIntegrityInvocationDeadline({
+        maximumDurationMilliseconds: 60_000,
+        monotonicClock: () => now,
+      })
+      await expect(writeCrossDomainIntegrityEvidenceAtomically(
+        outputPath,
+        evidence,
+        createPublicationExpectation(),
+        {
+          /** Removes the temporary publication name. */
+          removeTemporaryFile: (path) => rm(path),
+          /** Crosses the total deadline after the final durability operation. */
+          syncOutputDirectory: () => {
+            now = 61_001
+            return Promise.resolve()
+          },
+        },
+        crossingDeadline,
+      )).rejects.toThrow('OUTPUT_FILE_PUBLISHED_SYNC_FAILED')
+      expect(JSON.parse(await readFile(outputPath, 'utf8'))).toEqual(evidence)
+
+      const retryDeadline = createCrossDomainIntegrityInvocationDeadline({
+        maximumDurationMilliseconds: 60_000,
+        monotonicClock: () => 1_000,
+      })
+      await expect(writeCrossDomainIntegrityEvidenceAtomically(
+        outputPath,
+        evidence,
+        createPublicationExpectation(),
+        undefined,
+        retryDeadline,
+      )).resolves.toEqual(evidence)
+      expect(await readdir(directory)).toEqual(['result.json'])
+    } finally {
+      await rm(directory, { force: true, recursive: true })
+    }
+  })
+
   test('rejects every structural or MAC-authentication mutation', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'cross-domain-tamper-'))
     const outputPath = join(directory, 'result.json')
@@ -786,6 +1148,17 @@ describe('cross-domain integrity evidence publication', () => {
           ),
         },
       },
+      {
+        ...valid,
+        runtimeProvenance: {
+          kind: CROSS_DOMAIN_INTEGRITY_REHEARSAL_LIVE_PROVENANCE_KIND,
+          version: 1,
+          mode: 'migration-rehearsal-live',
+          startedAt: '2026-07-31T23:59:59.000Z',
+          completedAt: TEST_CHECKED_AT,
+          checkedAtSource: 'trusted-wall-clock-after-external-reads',
+        },
+      },
       { ...valid, resultMac: '00'.repeat(32) },
       { ...valid, note: 'harmless-but-unknown' },
       missingResultMac,
@@ -814,6 +1187,7 @@ describe('cross-domain integrity evidence publication', () => {
     const mismatchedExpectations: CrossDomainIntegrityPublicationExpectation[] = [
       { ...expectation, role: 'restore' },
       { ...expectation, checkedAt: '2026-08-01T00:00:01.000Z' },
+      { ...expectation, observationMode: 'migration-rehearsal-live' },
       {
         ...expectation,
         limits: { ...expectation.limits, pageSize: 99 },
@@ -843,6 +1217,146 @@ describe('cross-domain integrity evidence publication', () => {
       }
       await expect(stat(outputPath)).rejects.toBeDefined()
     } finally {
+      await rm(directory, { force: true, recursive: true })
+    }
+  })
+})
+
+describe('cross-domain integrity private resource-attestation boundary', () => {
+  test('publishes canonical mode-0600 bytes and reconciles only the exact file', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cross-domain-attestation-'))
+    const outputPath = join(directory, 'resources.json')
+    const attestation = createResourceAttestation()
+    try {
+      await expect(writeCrossDomainIntegrityResourceAttestationAtomically(
+        outputPath,
+        attestation,
+      )).resolves.toEqual(parseCrossDomainIntegrityResourceAttestation(attestation))
+      expect((await stat(outputPath)).mode & 0o777).toBe(0o600)
+      expect(await readFile(outputPath, 'utf8')).toBe(
+        `${JSON.stringify(
+          parseCrossDomainIntegrityResourceAttestation(attestation),
+          undefined,
+          2,
+        )}\n`,
+      )
+      await expect(writeCrossDomainIntegrityResourceAttestationAtomically(
+        outputPath,
+        attestation,
+      )).resolves.toBeDefined()
+
+      await chmod(outputPath, 0o640)
+      await expect(writeCrossDomainIntegrityResourceAttestationAtomically(
+        outputPath,
+        attestation,
+      )).rejects.toThrow('OUTPUT_FILE_WRITE_FAILED')
+      expect((await stat(outputPath)).mode & 0o777).toBe(0o640)
+    } finally {
+      await rm(directory, { force: true, recursive: true })
+    }
+  })
+
+  test('never follows an existing final symlink during reconciliation', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cross-domain-attestation-link-'))
+    const targetPath = join(directory, 'target.json')
+    const outputPath = join(directory, 'resources.json')
+    const attestation = createResourceAttestation()
+    const canonical = `${JSON.stringify(
+      parseCrossDomainIntegrityResourceAttestation(attestation),
+      undefined,
+      2,
+    )}\n`
+    try {
+      await writeFile(targetPath, canonical, { mode: 0o600 })
+      await symlink(targetPath, outputPath)
+      await expect(writeCrossDomainIntegrityResourceAttestationAtomically(
+        outputPath,
+        attestation,
+      )).rejects.toThrow('OUTPUT_FILE_WRITE_FAILED')
+      expect(await readFile(targetPath, 'utf8')).toBe(canonical)
+    } finally {
+      await rm(directory, { force: true, recursive: true })
+    }
+  })
+
+  test('requires current effective-user ownership for private publication', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cross-domain-attestation-owner-'))
+    const outputPath = join(directory, 'resources.json')
+    const effectiveUserId = readTestEffectiveUserId()
+    const effectiveUserSpy = spyOn(process, 'geteuid').mockReturnValue(
+      effectiveUserId + 1,
+    )
+    try {
+      await expect(writeCrossDomainIntegrityResourceAttestationAtomically(
+        outputPath,
+        createResourceAttestation(),
+      )).rejects.toThrow('OUTPUT_FILE_WRITE_FAILED')
+      await expect(stat(outputPath)).rejects.toBeDefined()
+    } finally {
+      effectiveUserSpy.mockRestore()
+      await rm(directory, { force: true, recursive: true })
+    }
+  })
+
+  test('attests versioning, six ACTIVE tables, and one exact marker version', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cross-domain-attest-cli-'))
+    const outputPath = join(directory, 'resources.json')
+    const transport = new RecordingAwsTransport()
+    const reader = new AwsCrossDomainIntegrityReader(
+      createReaderConfiguration(),
+      () => transport,
+    )
+    const outputWriter = spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      const exitCode = await runCrossDomainIntegrityCli(
+        createAttestResourcesArguments(outputPath),
+        {
+          /** Returns the deterministic read-only AWS adapter. */
+          createReader: () => reader,
+          /** Must not run for resource attestation. */
+          runCheck: () => Promise.resolve(createEvidence()),
+        },
+      )
+
+      expect(exitCode).toBe(0)
+      expect((await stat(outputPath)).mode & 0o777).toBe(0o600)
+      const published: unknown = JSON.parse(await readFile(outputPath, 'utf8'))
+      expect(() => parseCrossDomainIntegrityResourceAttestation(
+        published,
+      )).not.toThrow()
+      expect(transport.getBucketVersioningCommands).toHaveLength(1)
+      expect(transport.getBucketVersioningCommands[0]?.input).toEqual({
+        Bucket: 'file-integrity-bucket',
+        ExpectedBucketOwner: '123456789012',
+      })
+      expect(transport.describeTableCommands.map((command) =>
+        command.input.TableName
+      )).toEqual([
+        'audit-events-table',
+        'file-proofing-table',
+        'project-directory-table',
+        'work-item-configuration-table',
+        'work-items-table',
+        'workspace-access-table',
+      ])
+      expect(transport.getObjectAttributesCommands).toHaveLength(1)
+      expect(transport.getObjectAttributesCommands[0]?.input).toEqual({
+        Bucket: 'file-integrity-bucket',
+        ExpectedBucketOwner: '123456789012',
+        Key: CROSS_DOMAIN_INTEGRITY_FILE_BUCKET_MARKER_KEY,
+        ObjectAttributes: [
+          ObjectAttributes.CHECKSUM,
+          ObjectAttributes.OBJECT_SIZE,
+        ],
+        VersionId: 'file-bucket-marker-version-1',
+      })
+      expect(transport.scanCommands).toHaveLength(0)
+      expect(transport.closeCount).toBe(1)
+      expect(outputWriter).toHaveBeenCalledWith(
+        '{"operation":"attest-resources","status":"succeeded"}',
+      )
+    } finally {
+      outputWriter.mockRestore()
       await rm(directory, { force: true, recursive: true })
     }
   })
@@ -923,6 +1437,293 @@ describe('cross-domain integrity CLI execution boundary', () => {
       )
     } finally {
       outputWriter.mockRestore()
+      await rm(directory, { force: true, recursive: true })
+    }
+  })
+
+  test('binds trusted live checker start and post-read completion samples', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cross-domain-live-cli-'))
+    const digestKeyPath = join(directory, 'digest-key.hex')
+    const outputPath = join(directory, 'result.json')
+    const transport = new RecordingAwsTransport()
+    const reader = new AwsCrossDomainIntegrityReader(
+      createReaderConfiguration(),
+      () => transport,
+    )
+    const liveStartedAt = '2026-08-01T04:05:06.000Z'
+    const liveCompletedAt = '2026-08-01T04:05:06.789Z'
+    let wallClockCalls = 0
+    let bridgeInput: CrossDomainIntegrityCheckBridgeInput | undefined
+    const outputWriter = spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      await writeTestKeyFiles(digestKeyPath)
+      const exitCode = await runCrossDomainIntegrityCli(
+        createLiveCheckArguments(digestKeyPath, outputPath),
+        {
+          /** Returns the deterministic read-only adapter. */
+          createReader: () => reader,
+          /** Returns live evidence bound to the exact bridge observation. */
+          runCheck: (input) => {
+            bridgeInput = input
+            const completedAt = input.liveRuntime?.sampleCompletedAt()
+            if (completedAt === undefined) {
+              throw new Error('Expected live completion seam.')
+            }
+            return Promise.resolve(createEvidence(input.digestKey, {
+              checkedAt: completedAt,
+              maxItems: input.maxItems,
+              maxPages: input.maxPages,
+              pageSize: input.pageSize,
+              resourceBindingDigest: input.resourceBindingDigest,
+              resourceIdentities: input.resourceIdentities,
+              resourceIdentityDigest: input.resourceIdentityDigest,
+              role: input.role,
+              runtimeProvenance: {
+                kind: CROSS_DOMAIN_INTEGRITY_REHEARSAL_LIVE_PROVENANCE_KIND,
+                version: 1,
+                mode: 'migration-rehearsal-live',
+                startedAt: input.checkedAt,
+                completedAt,
+                checkedAtSource:
+                  'trusted-wall-clock-after-external-reads',
+              },
+            }))
+          },
+          /** Samples the trusted actual-runtime wall clock. */
+          wallClock: () => {
+            const samples = [liveStartedAt, liveCompletedAt]
+            const sample = samples[wallClockCalls]
+            wallClockCalls += 1
+            return new Date(sample ?? Number.NaN)
+          },
+        },
+      )
+
+      expect(exitCode).toBe(0)
+      expect(wallClockCalls).toBe(2)
+      expect(bridgeInput?.checkedAt).toBe(liveStartedAt)
+      expect(bridgeInput?.observationMode).toBe('migration-rehearsal-live')
+      const published: unknown = JSON.parse(await readFile(outputPath, 'utf8'))
+      expect(published).toMatchObject({
+        checkedAt: liveCompletedAt,
+        runtimeProvenance: {
+          kind: CROSS_DOMAIN_INTEGRITY_REHEARSAL_LIVE_PROVENANCE_KIND,
+          version: 1,
+          mode: 'migration-rehearsal-live',
+          startedAt: liveStartedAt,
+          completedAt: liveCompletedAt,
+          checkedAtSource: 'trusted-wall-clock-after-external-reads',
+        },
+      })
+    } finally {
+      outputWriter.mockRestore()
+      await rm(directory, { force: true, recursive: true })
+    }
+  })
+
+  test('rejects a signed logical result returned during a live invocation', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cross-domain-live-forge-'))
+    const digestKeyPath = join(directory, 'digest-key.hex')
+    const outputPath = join(directory, 'result.json')
+    const transport = new RecordingAwsTransport()
+    const reader = new AwsCrossDomainIntegrityReader(
+      createReaderConfiguration(),
+      () => transport,
+    )
+    const errorWriter = spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await writeTestKeyFiles(digestKeyPath)
+      const exitCode = await runCrossDomainIntegrityCli(
+        createLiveCheckArguments(digestKeyPath, outputPath),
+        {
+          /** Returns the deterministic read-only adapter. */
+          createReader: () => reader,
+          /** Returns a valid logical result lacking required live provenance. */
+          runCheck: (input) => Promise.resolve(createEvidence(input.digestKey, {
+            checkedAt: input.checkedAt,
+            maxItems: input.maxItems,
+            maxPages: input.maxPages,
+            pageSize: input.pageSize,
+            resourceBindingDigest: input.resourceBindingDigest,
+            resourceIdentities: input.resourceIdentities,
+            resourceIdentityDigest: input.resourceIdentityDigest,
+            role: input.role,
+          })),
+          /** Supplies the trusted live start timestamp. */
+          wallClock: () => new Date('2026-08-01T04:05:06.789Z'),
+        },
+      )
+
+      expect(exitCode).toBe(1)
+      expect(errorWriter).toHaveBeenCalledWith(
+        '{"operation":"check","status":"error","code":"EVIDENCE_INVALID"}',
+      )
+      await expect(stat(outputPath)).rejects.toBeDefined()
+    } finally {
+      errorWriter.mockRestore()
+      await rm(directory, { force: true, recursive: true })
+    }
+  })
+
+  test('rejects multiple live completion samples before publication', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cross-domain-live-repeat-'))
+    const digestKeyPath = join(directory, 'digest-key.hex')
+    const outputPath = join(directory, 'result.json')
+    const transport = new RecordingAwsTransport()
+    const reader = new AwsCrossDomainIntegrityReader(
+      createReaderConfiguration(),
+      () => transport,
+    )
+    const errorWriter = spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await writeTestKeyFiles(digestKeyPath)
+      const exitCode = await runCrossDomainIntegrityCli(
+        createLiveCheckArguments(digestKeyPath, outputPath),
+        {
+          /** Returns the deterministic read-only adapter. */
+          createReader: () => reader,
+          /** Violates the one-shot trusted completion contract. */
+          runCheck: (input) => {
+            const liveRuntime = input.liveRuntime
+            if (liveRuntime === undefined) {
+              throw new Error('Expected live completion seam.')
+            }
+            liveRuntime.sampleCompletedAt()
+            liveRuntime.sampleCompletedAt()
+            return Promise.resolve(createEvidence())
+          },
+          /** Returns stable ordered start and completion samples. */
+          wallClock: () => new Date('2026-08-01T04:05:06.789Z'),
+        },
+      )
+
+      expect(exitCode).toBe(1)
+      expect(errorWriter).toHaveBeenCalledWith(
+        '{"operation":"check","status":"error","code":"EVIDENCE_INVALID"}',
+      )
+      await expect(stat(outputPath)).rejects.toBeDefined()
+    } finally {
+      errorWriter.mockRestore()
+      await rm(directory, { force: true, recursive: true })
+    }
+  })
+
+  test('rejects a symlinked private resource-attestation input', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cross-domain-live-link-'))
+    const digestKeyPath = join(directory, 'digest-key.hex')
+    const attestationTarget = `${digestKeyPath}.resource-attestation`
+    const attestationLink = join(directory, 'resource-attestation-link.json')
+    const outputPath = join(directory, 'result.json')
+    const errorWriter = spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await writeTestKeyFiles(digestKeyPath)
+      await symlink(attestationTarget, attestationLink)
+      const exitCode = await runCrossDomainIntegrityCli(
+        createLiveCheckArguments(
+          digestKeyPath,
+          outputPath,
+          attestationLink,
+        ),
+        {
+          /** Must not create AWS clients for an unsafe private input. */
+          createReader: () => createUnreachableReader(),
+          /** Must not run for an unsafe private input. */
+          runCheck: () => Promise.resolve(createEvidence()),
+        },
+      )
+      expect(exitCode).toBe(2)
+      expect(errorWriter).toHaveBeenCalledWith(
+        '{"operation":"check","status":"error","code":"INPUT_FILE_UNREADABLE"}',
+      )
+      await expect(stat(outputPath)).rejects.toBeDefined()
+    } finally {
+      errorWriter.mockRestore()
+      await rm(directory, { force: true, recursive: true })
+    }
+  })
+
+  test('rejects wrong mode or effective ownership on private attestation input', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cross-domain-live-private-'))
+    const digestKeyPath = join(directory, 'digest-key.hex')
+    const attestationPath = `${digestKeyPath}.resource-attestation`
+    const outputPath = join(directory, 'result.json')
+    const errorWriter = spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await writeTestKeyFiles(digestKeyPath)
+      await chmod(attestationPath, 0o640)
+      expect(await runCrossDomainIntegrityCli(
+        createLiveCheckArguments(digestKeyPath, outputPath),
+        {
+          /** Must not create AWS clients for an unsafe private input. */
+          createReader: () => createUnreachableReader(),
+          /** Must not run for an unsafe private input. */
+          runCheck: () => Promise.resolve(createEvidence()),
+        },
+      )).toBe(2)
+      expect(errorWriter).toHaveBeenLastCalledWith(
+        '{"operation":"check","status":"error","code":"RESOURCE_ATTESTATION_INVALID"}',
+      )
+
+      await chmod(attestationPath, 0o600)
+      const effectiveUserId = readTestEffectiveUserId()
+      const effectiveUserSpy = spyOn(process, 'geteuid').mockReturnValue(
+        effectiveUserId + 1,
+      )
+      try {
+        expect(await runCrossDomainIntegrityCli(
+          createLiveCheckArguments(digestKeyPath, outputPath),
+          {
+            /** Must not create AWS clients for a wrong-owner private input. */
+            createReader: () => createUnreachableReader(),
+            /** Must not run for a wrong-owner private input. */
+            runCheck: () => Promise.resolve(createEvidence()),
+          },
+        )).toBe(2)
+      } finally {
+        effectiveUserSpy.mockRestore()
+      }
+      expect(errorWriter).toHaveBeenLastCalledWith(
+        '{"operation":"check","status":"error","code":"RESOURCE_ATTESTATION_INVALID"}',
+      )
+      await expect(stat(outputPath)).rejects.toBeDefined()
+    } finally {
+      errorWriter.mockRestore()
+      await rm(directory, { force: true, recursive: true })
+    }
+  })
+
+  test('rejects private attestation metadata mutation during its read', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'cross-domain-live-mutation-'))
+    const digestKeyPath = join(directory, 'digest-key.hex')
+    const attestationPath = `${digestKeyPath}.resource-attestation`
+    const outputPath = join(directory, 'result.json')
+    const errorWriter = spyOn(console, 'error').mockImplementation(() => {})
+    let mutationCount = 0
+    try {
+      await writeTestKeyFiles(digestKeyPath)
+      const exitCode = await runCrossDomainIntegrityCli(
+        createLiveCheckArguments(digestKeyPath, outputPath, attestationPath),
+        {
+          /** Mutates timestamps after the security-sensitive initial fstat. */
+          afterResourceAttestationMetadataRead: async (path) => {
+            mutationCount += 1
+            const instant = new Date(Date.now() + mutationCount)
+            await utimes(path, instant, instant)
+          },
+          /** Must not create AWS clients after a changing private input. */
+          createReader: () => createUnreachableReader(),
+          /** Must not run after a changing private input. */
+          runCheck: () => Promise.resolve(createEvidence()),
+        },
+      )
+      expect(mutationCount).toBe(1)
+      expect(exitCode).toBe(2)
+      expect(errorWriter).toHaveBeenCalledWith(
+        '{"operation":"check","status":"error","code":"RESOURCE_ATTESTATION_INVALID"}',
+      )
+      await expect(stat(outputPath)).rejects.toBeDefined()
+    } finally {
+      errorWriter.mockRestore()
       await rm(directory, { force: true, recursive: true })
     }
   })
@@ -1018,8 +1819,8 @@ describe('cross-domain integrity CLI execution boundary', () => {
     const outputPath = join(directory, 'result.json')
     const transport = new RecordingAwsTransport()
     const originalIdentityReader = transport.readCallerIdentity.bind(transport)
-    transport.readCallerIdentity = async (command) => {
-      await originalIdentityReader(command)
+    transport.readCallerIdentity = async (command, signal) => {
+      await originalIdentityReader(command, signal)
       return { $metadata: {}, Account: '999999999999' }
     }
     const reader = new AwsCrossDomainIntegrityReader(

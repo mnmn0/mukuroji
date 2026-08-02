@@ -450,7 +450,7 @@ export type CreateWorkspaceSearchMigrationApplyRunStateAwsReaderInput = {
  */
 export type WorkspaceSearchMigrationApplyRunStateAwsReader = Pick<
   WorkspaceSearchMigrationApplyOperationAwsPort,
-  'readRunState'
+  'readAppliedRoot' | 'readRunState'
 >
 
 /**
@@ -586,6 +586,42 @@ export type CreateWorkspaceSearchMigrationApplyOperationAwsPortInput = {
   readonly clock: WorkspaceSearchMigrationApplyOperationAwsClock
 }
 
+/** Static admitted-run material needed to parse durable apply audit rows. */
+export type WorkspaceSearchMigrationApplyAuditBindingInput = Pick<
+  CreateWorkspaceSearchMigrationApplyOperationAwsPortInput,
+  | 'closedWriterFenceRecord'
+  | 'configuration'
+  | 'configurationHash'
+  | 'executionBoundary'
+  | 'executionRun'
+  | 'sealedPlanningAuthority'
+>
+
+/** Strict durable operation-marker projection exposed to read-only audits. */
+export type WorkspaceSearchMigrationApplyMarkerAuditRecord = {
+  /** Exact deterministic state-table sort key read by the collector. */
+  readonly recordKey: string
+  /** Exact strict no-op or mutation marker stored in the durable row. */
+  readonly marker: WorkspaceSearchOperationMarker
+  /** Revision condition-checked by the marker transaction. */
+  readonly predecessorRevision: number
+  /** Revision committed by the marker transaction. */
+  readonly successorRevision: number
+  /** Digest of the exact successor mutable execution-state envelope. */
+  readonly successorExecutionStateDigest: string
+  /** Digest of the exact canonical marker. */
+  readonly markerDigest: string
+}
+
+/** Strict durable authority-adoption projection exposed to read-only audits. */
+export type WorkspaceSearchMigrationApplyAuthorityAuditRecord = {
+  /** Exact deterministic state-table sort key read by the collector. */
+  readonly recordKey: string
+  /** Exact immutable authority-adoption receipt stored in the durable row. */
+  readonly receipt:
+    WorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt
+}
+
 /**
  * Caller command for adapter-owned complete apply sealing.
  */
@@ -616,6 +652,13 @@ export interface WorkspaceSearchMigrationApplyOperationAwsPort {
    * @returns Exact immutable admission or mutable successor run state.
    */
   readRunState(): Promise<WorkspaceSearchMigrationRunState>
+
+  /**
+   * Strongly reads and validates the immutable applied phase root.
+   *
+   * @returns Exact applied root, or undefined before complete apply publication.
+   */
+  readAppliedRoot(): Promise<WorkspaceSearchMigrationAppliedRoot | undefined>
 
   /**
    * Strongly reads one immutable operation-id marker.
@@ -938,6 +981,20 @@ type DurableApplyMarker = {
   readonly markerDigest: string
 }
 
+/** Strict generic marker row retained before current-run classification. */
+type GenericApplyMarkerAuditRecord = DurableApplyMarker & {
+  /** Exact deterministic state-table sort key. */
+  readonly recordKey: string
+  /** Immutable physical migration-state TableId claimed by the row. */
+  readonly stateTableId: string
+  /** Reviewed measured configuration digest claimed by the row. */
+  readonly configurationHash: string
+  /** Operator-selected run identifier claimed by the row. */
+  readonly runId: string
+  /** Immutable execution admission digest claimed by the row. */
+  readonly executionRunDigest: string
+}
+
 /**
  * Constructs one measured atomic apply adapter.
  *
@@ -991,6 +1048,78 @@ export function createAwsWorkspaceSearchMigrationApplyOperationPort(
 }
 
 /**
+ * Strictly parses one queried immutable operation-marker row for reconciliation.
+ *
+ * This boundary reuses the same admitted-run binding and row codec as the
+ * mutation adapter. A collector therefore cannot accept a relaxed duplicate
+ * schema or detach a marker from the exact measured execution generation.
+ *
+ * @param bindingInput - Exact measured configuration and admitted run graph.
+ * @param item - Raw low-level DynamoDB item returned by a base-table query.
+ * @returns Current-run marker, or undefined for one strict foreign-run row.
+ */
+export function parseWorkspaceSearchMigrationApplyMarkerAuditRecord(
+  bindingInput: WorkspaceSearchMigrationApplyAuditBindingInput,
+  item: Readonly<Record<string, AttributeValue>>,
+): WorkspaceSearchMigrationApplyMarkerAuditRecord | undefined {
+  return runApplySynchronousBoundary(() => {
+    const binding = createApplyAuditBinding(bindingInput)
+    const foreign = parseGenericMarkerAuditRecord(item)
+    if (!markerAuditRecordBelongsToBinding(binding, foreign)) {
+      return undefined
+    }
+    const operationId = foreign.marker.operationId
+    const durable = parseMarkerRecord(binding, operationId, item)
+    return Object.freeze({
+      recordKey: readStringAttribute(item, 'recordKey'),
+      marker: durable.marker,
+      predecessorRevision: durable.predecessorRevision,
+      successorRevision: durable.successorRevision,
+      successorExecutionStateDigest:
+        durable.successorExecutionStateDigest,
+      markerDigest: durable.markerDigest,
+    })
+  }, false)
+}
+
+/**
+ * Strictly parses one queried authority-adoption row for reconciliation.
+ *
+ * The canonical receipt bytes first reconstruct their deterministic command
+ * identity, after which the writer-owned row codec verifies every redundant
+ * low-level attribute against the same exact admitted-run binding.
+ *
+ * @param bindingInput - Exact measured configuration and admitted run graph.
+ * @param item - Raw low-level DynamoDB item returned by a base-table query.
+ * @returns Current-run adoption, or undefined for one strict foreign-run row.
+ */
+export function parseWorkspaceSearchMigrationApplyAuthorityAuditRecord(
+  bindingInput: WorkspaceSearchMigrationApplyAuditBindingInput,
+  item: Readonly<Record<string, AttributeValue>>,
+): WorkspaceSearchMigrationApplyAuthorityAuditRecord | undefined {
+  return runApplySynchronousBoundary(() => {
+    const binding = createApplyAuditBinding(bindingInput)
+    const receipt = parseGenericAuthorityAuditRecord(item)
+    if (!authorityAuditRecordBelongsToBinding(binding, receipt)) {
+      return undefined
+    }
+    const identity = requireAuthorityAdoptionReceiptBinding(
+      binding,
+      receipt,
+    )
+    const strict = parseAuthorityAdoptionReceiptRecord(
+      binding,
+      identity,
+      item,
+    )
+    return Object.freeze({
+      recordKey: readStringAttribute(item, 'recordKey'),
+      receipt: strict,
+    })
+  }, false)
+}
+
+/**
  * Constructs one measured read-only apply run-state reader.
  *
  * The returned capability captures only strong DynamoDB reads, exact-version
@@ -1032,6 +1161,11 @@ export function createAwsWorkspaceSearchMigrationApplyRunStateReader(
         runApplyBoundary(async () =>
           (await readEffectiveApplyState(binding, dependencies))
             .runState
+        ),
+      readAppliedRoot: () =>
+        runApplyBoundary(async () =>
+          (await readEffectiveApplyState(binding, dependencies))
+            .appliedRoot
         ),
     }
   } catch (error: unknown) {
@@ -1130,6 +1264,19 @@ implements WorkspaceSearchMigrationApplyOperationAwsPort {
   async readRunState(): Promise<WorkspaceSearchMigrationRunState> {
     return runApplyBoundary(async () =>
       (await this.readEffectiveState()).runState
+    )
+  }
+
+  /**
+   * Strongly reads and validates the immutable applied phase root.
+   *
+   * @returns Exact applied root, or undefined before publication.
+   */
+  async readAppliedRoot(): Promise<
+    WorkspaceSearchMigrationAppliedRoot | undefined
+  > {
+    return runApplyBoundary(async () =>
+      (await this.readEffectiveState()).appliedRoot
     )
   }
 
@@ -2925,6 +3072,34 @@ function createApplyOperationBinding(
         executionRun,
       }),
   }
+}
+
+/**
+ * Detaches the exact static material accepted by the read-only audit codecs.
+ *
+ * @param value - Candidate measured configuration and admitted execution graph.
+ * @returns Complete writer-owned apply binding used by strict row parsers.
+ */
+function createApplyAuditBinding(
+  value: WorkspaceSearchMigrationApplyAuditBindingInput,
+): ApplyOperationBinding {
+  const record = requirePlainRecord(value, 'INVALID_ARGUMENT')
+  requireExactKeys(record, [
+    'closedWriterFenceRecord',
+    'configuration',
+    'configurationHash',
+    'executionBoundary',
+    'executionRun',
+    'sealedPlanningAuthority',
+  ], 'INVALID_ARGUMENT')
+  return createApplyOperationBinding(
+    readOwn(record, 'configuration', 'INVALID_ARGUMENT'),
+    readOwn(record, 'configurationHash', 'INVALID_ARGUMENT'),
+    readOwn(record, 'executionBoundary', 'INVALID_ARGUMENT'),
+    readOwn(record, 'sealedPlanningAuthority', 'INVALID_ARGUMENT'),
+    readOwn(record, 'closedWriterFenceRecord', 'INVALID_ARGUMENT'),
+    readOwn(record, 'executionRun', 'INVALID_ARGUMENT'),
+  )
 }
 
 /**
@@ -5444,6 +5619,103 @@ function parseAuthorityAdoptionReceiptRecord(
 }
 
 /**
+ * Strictly parses an adoption row before current-run classification.
+ *
+ * @param item - Raw low-level row from the unfiltered adoption-prefix query.
+ * @returns Complete self-consistent immutable adoption receipt.
+ */
+function parseGenericAuthorityAuditRecord(
+  item: Readonly<Record<string, AttributeValue>>,
+): WorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt {
+  requireExactAttributeKeys(
+    item,
+    authorityAdoptionReceiptRecordAttributeNames,
+    'INVALID_STATE',
+  )
+  if (
+    readStringAttribute(item, 'migrationId') !==
+      WORKSPACE_SEARCH_MIGRATION_ID ||
+    readStringAttribute(item, 'kind') !==
+      authorityAdoptionReceiptRecordKind ||
+    readNumberAttribute(item, 'recordVersion') !==
+      applyRecordVersion
+  ) {
+    return failApply('INVALID_STATE')
+  }
+  const receipt =
+    parseWorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt(
+      readBinaryAttribute(item, 'receiptBytes'),
+    )
+  const identity =
+    createWorkspaceSearchMigrationExecutionAuthorityAdoptionCommandIdentity({
+      stateTableId: receipt.stateTableId,
+      configurationHash: receipt.configurationHash,
+      runId: receipt.runId,
+      executionRunDigest: receipt.executionRunDigest,
+      expectedRevision: receipt.predecessorRevision,
+      authorityClaim: {
+        lease: {
+          runId: receipt.runId,
+          ownerId: receipt.currentAuthority.ownerId,
+          fenceToken: receipt.currentAuthority.fenceToken,
+        },
+        maintenanceEvidencePointerRevision:
+          receipt.currentAuthority.maintenanceEvidencePointerRevision,
+        maintenanceEvidenceReceiptDigest:
+          receipt.currentAuthority.maintenanceEvidenceReceiptDigest,
+      },
+    })
+  if (
+    readStringAttribute(item, 'recordKey') !==
+      createWorkspaceSearchMigrationExecutionAuthorityAdoptionReceiptRecordKey(
+        identity,
+      ) ||
+    readStringAttribute(item, 'stateTableId') !== receipt.stateTableId ||
+    readStringAttribute(item, 'configurationHash') !==
+      receipt.configurationHash ||
+    readStringAttribute(item, 'runId') !== receipt.runId ||
+    readStringAttribute(item, 'executionRunDigest') !==
+      receipt.executionRunDigest ||
+    readStringAttribute(item, 'commandDigest') !==
+      receipt.commandDigest ||
+    readNumberAttribute(item, 'predecessorRevision') !==
+      receipt.predecessorRevision ||
+    readNumberAttribute(item, 'successorRevision') !==
+      receipt.successorRevision ||
+    readStringAttribute(item, 'successorExecutionStateDigest') !==
+      receipt.successorExecutionStateDigest ||
+    readStringAttribute(item, 'successorRunStateDigest') !==
+      receipt.successorRunStateDigest ||
+    readNumberAttribute(item, 'maintenanceEvidenceRenewalCount') !==
+      receipt.maintenanceEvidenceRenewalCount ||
+    readStringAttribute(item, 'currentAuthorityDigest') !==
+      createMigrationDigest(receipt.currentAuthority) ||
+    readStringAttribute(item, 'receiptDigest') !== receipt.receiptDigest
+  ) {
+    return failApply('INVALID_STATE')
+  }
+  return receipt
+}
+
+/**
+ * Classifies one strict adoption receipt against the admitted execution run.
+ *
+ * @param binding - Current measured admitted-run binding.
+ * @param receipt - Strict self-consistent adoption receipt.
+ * @returns Whether the receipt belongs to the current execution generation.
+ */
+function authorityAuditRecordBelongsToBinding(
+  binding: ApplyOperationBinding,
+  receipt: WorkspaceSearchMigrationExecutionAuthorityAdoptionReceipt,
+): boolean {
+  return receipt.stateTableId === binding.stateTable.tableId &&
+    receipt.configurationHash === binding.configurationHash &&
+    receipt.runId === binding.executionRun.runId &&
+    receipt.executionRunDigest ===
+      binding.executionRun.executionRunDigest
+}
+
+/**
  * Reconstructs the exact command identity bound by an adoption receipt.
  *
  * @param binding - Exact admitted apply binding.
@@ -5719,6 +5991,93 @@ function parseMarkerRecord(
     return failApply('INVALID_STATE')
   }
   return durable
+}
+
+/**
+ * Strictly parses a marker row before deciding whether it belongs to this run.
+ *
+ * @param item - Raw low-level row from the unfiltered marker-prefix query.
+ * @returns Complete self-consistent marker projection and claimed binding.
+ */
+function parseGenericMarkerAuditRecord(
+  item: Readonly<Record<string, AttributeValue>>,
+): GenericApplyMarkerAuditRecord {
+  requireExactAttributeKeys(
+    item,
+    markerRecordAttributeNames,
+    'INVALID_STATE',
+  )
+  const recordKey = readIdentifier(
+    readStringAttribute(item, 'recordKey'),
+    'INVALID_STATE',
+  )
+  const stateTableId = readIdentifier(
+    readStringAttribute(item, 'stateTableId'),
+    'INVALID_STATE',
+  )
+  const configurationHash = readDigest(
+    readStringAttribute(item, 'configurationHash'),
+    'INVALID_STATE',
+  )
+  const runId = readIdentifier(
+    readStringAttribute(item, 'runId'),
+    'INVALID_STATE',
+  )
+  const executionRunDigest = readDigest(
+    readStringAttribute(item, 'executionRunDigest'),
+    'INVALID_STATE',
+  )
+  if (
+    readStringAttribute(item, 'migrationId') !==
+      WORKSPACE_SEARCH_MIGRATION_ID ||
+    readStringAttribute(item, 'kind') !==
+      operationMarkerRecordKind ||
+    readNumberAttribute(item, 'recordVersion') !==
+      applyRecordVersion ||
+    !/^apply-operation\/v1\/[0-9a-f]{64}\/marker$/u.test(recordKey)
+  ) {
+    return failApply('INVALID_STATE')
+  }
+  const marker = parseWorkspaceSearchMigrationOperationMarker(
+    readBinaryAttribute(item, 'markerBytes'),
+  )
+  const durable = createDurableMarkerProjection(item, marker)
+  if (
+    marker.runId !== runId ||
+    marker.configurationHash !== configurationHash ||
+    readStringAttribute(item, 'operationId') !== marker.operationId ||
+    readNumberAttribute(item, 'planSequence') !== marker.planSequence ||
+    readStringAttribute(item, 'planOperationDigest') !==
+      marker.planOperationDigest
+  ) {
+    return failApply('INVALID_STATE')
+  }
+  return {
+    ...durable,
+    recordKey,
+    stateTableId,
+    configurationHash,
+    runId,
+    executionRunDigest,
+  }
+}
+
+/**
+ * Classifies one strict generic marker against the exact admitted run.
+ *
+ * @param binding - Current measured admitted-run binding.
+ * @param record - Strict generic row projection.
+ * @returns Whether the row belongs to the current execution generation.
+ */
+function markerAuditRecordBelongsToBinding(
+  binding: ApplyOperationBinding,
+  record: GenericApplyMarkerAuditRecord,
+): boolean {
+  return record.stateTableId === binding.stateTable.tableId &&
+    record.configurationHash === binding.configurationHash &&
+    record.runId === binding.executionRun.runId &&
+    record.executionRunDigest ===
+      binding.executionRun.executionRunDigest
 }
 
 /**

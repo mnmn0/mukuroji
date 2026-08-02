@@ -43,6 +43,10 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
     MinLength: 1,
     Type: 'String',
   });
+  expect(parameters.WorkspaceSearchMigrationEnvironment).toBeUndefined();
+  expect(
+    parameters.WorkspaceSearchMigrationProductionAccountId,
+  ).toBeUndefined();
   expect(parameters.RestoreDrillCleanupApproverRoleArn).toEqual({
     AllowedPattern:
       '^arn:(?:aws|aws-us-gov|aws-cn):iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$',
@@ -151,6 +155,9 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
         'AlarmPrimaryTopicName must differ from AlarmSecondaryTopicName.',
     }],
   });
+  expect(
+    template.toJSON().Rules.WorkspaceSearchMigrationAccountSeparation,
+  ).toBeUndefined();
   expect(template.toJSON().Rules.EnterpriseSecretSeparation).toEqual({
     Assertions: [{
       Assert: {

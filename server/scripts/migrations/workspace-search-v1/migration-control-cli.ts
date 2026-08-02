@@ -12,6 +12,7 @@ import {
   type WorkspaceSearchMigrationControlCoordinatorSummary,
 } from './migration-control-coordinator'
 import {
+  createMigrationDigest,
   createWorkspaceSearchConfigurationHash,
   isCanonicalTimestamp,
   WorkspaceSearchMigrationFailure,
@@ -31,6 +32,7 @@ import {
 } from './migration-describe-table-rate-policy'
 import {
   createAwsWorkspaceSearchMigrationRateManagedSession,
+  type CreateAwsWorkspaceSearchMigrationRateManagedSessionInput,
   type WorkspaceSearchMigrationRateManagedAwsSession,
 } from './migration-identity-aws'
 import {
@@ -402,6 +404,57 @@ export type WorkspaceSearchMigrationWriterFenceSummary =
       readonly recordDigest: string
     }
 
+/** Successful initial writer-fence bootstrap payload. */
+export type WorkspaceSearchMigrationControlCliBootstrapMutationResult = {
+  /** Stable output schema version. */
+  readonly schemaVersion: 1
+  /** Exact bootstrap operation. */
+  readonly operation: 'bootstrap-open'
+  /** Mandatory successful result. */
+  readonly status: 'pass'
+  /** Fresh measured configuration digest. */
+  readonly configurationHash: string
+  /** Reviewed DescribeTable rate-policy digest. */
+  readonly policyVersion: string
+  /** Safe durable writer-fence projection. */
+  readonly writerFence: WorkspaceSearchMigrationWriterFenceSummary
+  /** Identifier-free actual DescribeTable aggregate. */
+  readonly rateAggregate: WorkspaceSearchMigrationDescribeTableRateEvidence
+}
+
+/** Successful explicitly selected coordinator-stage payload. */
+export type WorkspaceSearchMigrationControlCliCoordinatorMutationResult = {
+  /** Stable output schema version. */
+  readonly schemaVersion: 1
+  /** Exact explicitly selected coordinator operation. */
+  readonly operation: WorkspaceSearchMigrationCoordinatorCliArguments['command']
+  /** Mandatory successful result. */
+  readonly status: 'pass'
+  /** Reviewed measured configuration digest. */
+  readonly configurationHash: string
+  /** Reviewed DescribeTable rate-policy digest. */
+  readonly policyVersion: string
+  /** Trusted in-memory exact coordinator result. */
+  readonly coordinator: WorkspaceSearchMigrationControlCoordinatorSummary
+  /** Identifier-free actual DescribeTable aggregate. */
+  readonly rateAggregate: WorkspaceSearchMigrationDescribeTableRateEvidence
+}
+
+/** Every successful mutating control result available before stdout. */
+export type WorkspaceSearchMigrationControlCliMutationResult =
+  | WorkspaceSearchMigrationControlCliBootstrapMutationResult
+  | WorkspaceSearchMigrationControlCliCoordinatorMutationResult
+
+/** Trusted pre-stdout mutation observation for rehearsal composition. */
+export type WorkspaceSearchMigrationControlCliMutationResultObservation = {
+  /** Trusted in-memory mutation result, never recovered from child stdout. */
+  readonly result: WorkspaceSearchMigrationControlCliMutationResult
+  /** Exact merged control and EMF line later written unchanged to stdout. */
+  readonly serializedOutputLine: string
+  /** Digest of the exact trusted serialized output line. */
+  readonly serializedOutputLineDigest: string
+}
+
 /** Capability-minimized read-only session used by three status commands. */
 export interface WorkspaceSearchMigrationControlCliReadSession {
   /**
@@ -603,6 +656,30 @@ export type WorkspaceSearchMigrationControlCliDependencies = {
     context: WorkspaceSearchMigrationTelemetryContext,
     sink: WorkspaceSearchMigrationTelemetrySink,
   ) => WorkspaceSearchMigrationTelemetryRecorder
+  /** Observes one trusted mutation result and exact line before stdout. */
+  readonly observeMutationResult?: (
+    observation: WorkspaceSearchMigrationControlCliMutationResultObservation,
+  ) => Promise<void> | void
+}
+
+/**
+ * Constructor for one production-equivalent rate-managed AWS session.
+ *
+ * The non-production rehearsal composition implements this exact boundary so
+ * the control CLI can retain its existing capability projection and output.
+ *
+ * @param input - Existing production session-construction input.
+ * @returns Fresh complete managed session for private projection.
+ */
+export type WorkspaceSearchMigrationControlCliRateManagedSessionConstructor = (
+  input: CreateAwsWorkspaceSearchMigrationRateManagedSessionInput,
+) => Promise<WorkspaceSearchMigrationRateManagedAwsSession>
+
+/** Input for the bounded control-CLI dependency factory. */
+export type CreateWorkspaceSearchMigrationControlCliDependenciesInput = {
+  /** Exact trusted managed-session constructor captured by the factory. */
+  readonly createRateManagedSession:
+    WorkspaceSearchMigrationControlCliRateManagedSessionConstructor
 }
 
 /** Capability-minimized dependencies retained by a read-only command. */
@@ -614,7 +691,10 @@ type WorkspaceSearchMigrationControlCliReadDependencies = Pick<
 /** Capability-minimized dependencies retained by a mutating command. */
 type WorkspaceSearchMigrationControlCliMutationDependencies = Pick<
   WorkspaceSearchMigrationControlCliDependencies,
-  'createMutationSession' | 'createTelemetryRecorder' | 'readInputFile'
+  | 'createMutationSession'
+  | 'createTelemetryRecorder'
+  | 'observeMutationResult'
+  | 'readInputFile'
 >
 
 /** File and read-session capabilities captured before the first CLI await. */
@@ -665,11 +745,38 @@ class WorkspaceSearchMigrationControlCliFailure extends Error {
   }
 }
 
-const defaultControlCliDependencies:
-  WorkspaceSearchMigrationControlCliDependencies = {
-    createReadSession: createDefaultControlCliReadSession,
-    createMutationSession: createDefaultControlCliMutationSession,
+/**
+ * Creates the standard control-CLI dependencies over one captured session constructor.
+ *
+ * The constructor is accepted only as an own data property on a plain input
+ * object. Proxy and accessor-backed inputs are rejected without invoking their
+ * traps. Returned dependencies preserve the production file, telemetry, and
+ * capability projections; no managed session or transport is exposed.
+ *
+ * @param input - Trusted constructor selected before CLI execution begins.
+ * @returns Frozen dependencies with isolated read and mutation factories.
+ */
+export function createWorkspaceSearchMigrationControlCliDependencies(
+  input: CreateWorkspaceSearchMigrationControlCliDependenciesInput,
+): WorkspaceSearchMigrationControlCliDependencies {
+  const createRateManagedSession =
+    captureControlCliRateManagedSessionConstructor(input)
+  return Object.freeze({
+    /** Creates the existing read-only projection over one fresh session. */
+    createReadSession: async (sessionInput) =>
+      await createProjectedControlCliReadSession(
+        sessionInput,
+        createRateManagedSession,
+      ),
+    /** Creates the existing mutation projection over one fresh session. */
+    createMutationSession: async (sessionInput) =>
+      await createProjectedControlCliMutationSession(
+        sessionInput,
+        createRateManagedSession,
+      ),
+    /** Retains the existing strict bounded regular-file reader. */
     readInputFile: readBoundedInputFile,
+    /** Retains production telemetry serialization and live stall output. */
     createTelemetryRecorder: (context, sink) =>
       createWorkspaceSearchMigrationTelemetryRecorder(
         context,
@@ -681,7 +788,68 @@ const defaultControlCliDependencies:
             console.error(serializedRecord),
         },
       ),
+  })
+}
+
+const defaultControlCliDependencies:
+  WorkspaceSearchMigrationControlCliDependencies =
+    createWorkspaceSearchMigrationControlCliDependencies({
+      createRateManagedSession:
+        createAwsWorkspaceSearchMigrationRateManagedSession,
+    })
+
+/**
+ * Captures one exact constructor without invoking input accessors or Proxy traps.
+ *
+ * @param input - Potentially hostile programmatic factory input.
+ * @returns Trusted constructor detached from its input object.
+ */
+function captureControlCliRateManagedSessionConstructor(
+  input: CreateWorkspaceSearchMigrationControlCliDependenciesInput,
+): WorkspaceSearchMigrationControlCliRateManagedSessionConstructor {
+  if (
+    typeof input !== 'object' ||
+    input === null ||
+    nodeUtilTypes.isProxy(input) ||
+    Object.getPrototypeOf(input) !== Object.prototype ||
+    Reflect.ownKeys(input).length !== 1
+  ) {
+    throw invalidControlCliSessionConstructor()
   }
+  const descriptor = Object.getOwnPropertyDescriptor(
+    input,
+    'createRateManagedSession',
+  )
+  const candidate: unknown = descriptor?.value
+  if (
+    descriptor === undefined ||
+    !descriptor.enumerable ||
+    !Object.hasOwn(descriptor, 'value') ||
+    !isControlCliRateManagedSessionConstructor(candidate)
+  ) {
+    throw invalidControlCliSessionConstructor()
+  }
+  return candidate
+}
+
+/**
+ * Narrows one value to a direct non-Proxy managed-session constructor.
+ *
+ * @param value - Candidate own data-property value.
+ * @returns Whether the value is callable without a Proxy apply trap.
+ */
+function isControlCliRateManagedSessionConstructor(
+  value: unknown,
+): value is WorkspaceSearchMigrationControlCliRateManagedSessionConstructor {
+  return typeof value === 'function' && !nodeUtilTypes.isProxy(value)
+}
+
+/** Creates one stable programmatic factory-input failure. */
+function invalidControlCliSessionConstructor(): TypeError {
+  return new TypeError(
+    'Workspace Search migration control CLI session constructor is invalid.',
+  )
+}
 
 /**
  * Parses strict subcommands and explicit flags without ambient defaults.
@@ -787,6 +955,12 @@ export async function runWorkspaceSearchMigrationControlCli(
   let operation: WorkspaceSearchMigrationControlCliOperation = 'unknown'
   let telemetry:
     WorkspaceSearchMigrationControlCliTelemetryInvocation | undefined
+  let mutationResult:
+    WorkspaceSearchMigrationControlCliMutationResult | undefined
+  let observeMutationResult:
+    WorkspaceSearchMigrationControlCliDependencies[
+      'observeMutationResult'
+    ]
   try {
     const argumentsSnapshot = snapshotControlCliArguments(arguments_)
     operation = identifyOperation(argumentsSnapshot[0])
@@ -825,6 +999,7 @@ export async function runWorkspaceSearchMigrationControlCli(
     } else {
       const capturedDependencies =
         snapshotControlCliMutationDependencies(dependencies)
+      observeMutationResult = capturedDependencies.observeMutationResult
       const ratePolicy = await readControlCliRatePolicy(
         configuration.ratePolicyFile,
         capturedDependencies,
@@ -839,24 +1014,33 @@ export async function runWorkspaceSearchMigrationControlCli(
         configuration,
         telemetry?.recorder,
       )
-      result = await runMutatingCommand(
+      mutationResult = await runMutatingCommand(
         configuration,
         ratePolicy,
         capturedDependencies,
         telemetry?.recorder,
         signal,
       )
+      result = mutationResult
     }
     finalizeControlCliTelemetry(
       telemetry?.recorder,
       telemetryPhaseForOperation(operation),
       'succeeded',
     )
-    writeJsonLine(
-      console.log,
+    const serializedOutputLine = serializeJsonLine(
       result,
       telemetry?.readSerializedRecord(),
     )
+    if (mutationResult !== undefined && observeMutationResult !== undefined) {
+      await observeMutationResult(Object.freeze({
+        result: mutationResult,
+        serializedOutputLine,
+        serializedOutputLineDigest:
+          createMigrationDigest(serializedOutputLine),
+      }))
+    }
+    console.log(serializedOutputLine)
     return 0
   } catch (error: unknown) {
     const failure = classifyControlCliFailure(error)
@@ -992,10 +1176,15 @@ function snapshotControlCliMutationDependencies(
     ]
   let readInputFile:
     WorkspaceSearchMigrationControlCliDependencies['readInputFile']
+  let observeMutationResult:
+    WorkspaceSearchMigrationControlCliDependencies[
+      'observeMutationResult'
+    ]
   try {
     createMutationSession = dependencies.createMutationSession
     createTelemetryRecorder = dependencies.createTelemetryRecorder
     readInputFile = dependencies.readInputFile
+    observeMutationResult = dependencies.observeMutationResult
   } catch {
     throw operationFailed()
   }
@@ -1005,6 +1194,9 @@ function snapshotControlCliMutationDependencies(
       createTelemetryRecorder !== undefined &&
       typeof createTelemetryRecorder !== 'function'
     ) ||
+    (observeMutationResult !== undefined &&
+      (typeof observeMutationResult !== 'function' ||
+        nodeUtilTypes.isProxy(observeMutationResult))) ||
     typeof readInputFile !== 'function'
   ) {
     throw operationFailed()
@@ -1025,6 +1217,16 @@ function snapshotControlCliMutationDependencies(
     /** Invokes the captured file reader without retaining its owner. */
     readInputFile: (path, maximumBytes) =>
       readInputFile(path, maximumBytes),
+    ...(observeMutationResult === undefined
+      ? {}
+      : {
+          /** Invokes the captured trusted pre-stdout observer. */
+          observeMutationResult: (
+            observation:
+              WorkspaceSearchMigrationControlCliMutationResultObservation,
+          ) =>
+            observeMutationResult(observation),
+        }),
   })
 }
 
@@ -1721,7 +1923,7 @@ async function runMutatingCommand(
   dependencies: WorkspaceSearchMigrationControlCliMutationDependencies,
   telemetryRecorder?: WorkspaceSearchMigrationTelemetryRecorder,
   signal?: AbortSignal,
-): Promise<unknown> {
+): Promise<WorkspaceSearchMigrationControlCliMutationResult> {
   const bootstrapEvidence = configuration.command === 'bootstrap-open'
     ? await dependencies.readInputFile(
         configuration.maintenanceEvidenceFile,
@@ -1984,41 +2186,78 @@ async function runWithControlCliSession<
 }
 
 /**
- * Creates the production read-only surface over one rate-managed session.
+ * Creates one read-only CLI projection through a captured session constructor.
  *
  * @param input - Explicit resources and reviewed policy.
+ * @param createRateManagedSession - Captured production-equivalent constructor.
  * @returns Capability-minimized read session.
  */
-async function createDefaultControlCliReadSession(
+async function createProjectedControlCliReadSession(
   input: CreateWorkspaceSearchMigrationControlCliReadSessionInput,
+  createRateManagedSession:
+    WorkspaceSearchMigrationControlCliRateManagedSessionConstructor,
 ): Promise<WorkspaceSearchMigrationControlCliReadSession> {
-  const managed = await createAwsWorkspaceSearchMigrationRateManagedSession({
-    requested: input.resources,
-    ratePolicy: input.ratePolicy,
-    bootstrapRateCheckpoint: input.rateBootstrap,
-    recoverInterruptedCleanup: input.rateRecoverInterruptedCleanup,
-    recoverInterruptedAttempt: input.rateRecoverInterruptedAttempt,
-    ...(input.rateRecorder === undefined
-      ? {}
-      : { rateRecorder: input.rateRecorder }),
-    ...(input.telemetryRecorder === undefined
-      ? {}
-      : { telemetryRecorder: input.telemetryRecorder }),
-    ...(input.signal === undefined ? {} : { signal: input.signal }),
-  })
-  return createControlCliReadSession(managed)
+  const managed = await createRateManagedSession(
+    createControlCliRateManagedSessionInput(input),
+  )
+  let close:
+    WorkspaceSearchMigrationRateManagedAwsSession['close'] | undefined
+  try {
+    close = captureControlCliManagedSessionClose(managed)
+    return createControlCliReadSession(managed, close)
+  } catch (error: unknown) {
+    await closeControlCliManagedSessionAfterProjectionFailure(
+      managed,
+      close,
+    )
+    throw error
+  }
 }
 
 /**
- * Creates the production mutation surface over one rate-managed session.
+ * Creates one mutation CLI projection through a captured session constructor.
  *
  * @param input - Explicit resources, policy, and lifecycle authority.
+ * @param createRateManagedSession - Captured production-equivalent constructor.
  * @returns Capability-minimized mutating session.
  */
-async function createDefaultControlCliMutationSession(
+async function createProjectedControlCliMutationSession(
   input: CreateWorkspaceSearchMigrationControlCliMutationSessionInput,
+  createRateManagedSession:
+    WorkspaceSearchMigrationControlCliRateManagedSessionConstructor,
 ): Promise<WorkspaceSearchMigrationControlCliMutationSession> {
-  const managed = await createAwsWorkspaceSearchMigrationRateManagedSession({
+  const managed = await createRateManagedSession(
+    createControlCliRateManagedSessionInput(input),
+  )
+  let close:
+    WorkspaceSearchMigrationRateManagedAwsSession['close'] | undefined
+  try {
+    close = captureControlCliManagedSessionClose(managed)
+    return createControlCliMutationSession(
+      managed,
+      close,
+      input.resources,
+      input.telemetryRecorder,
+    )
+  } catch (error: unknown) {
+    await closeControlCliManagedSessionAfterProjectionFailure(
+      managed,
+      close,
+    )
+    throw error
+  }
+}
+
+/**
+ * Converts one CLI factory input to the existing AWS composition contract.
+ *
+ * @param input - Detached control-CLI session request.
+ * @returns Exact rate-managed AWS session-construction input.
+ */
+function createControlCliRateManagedSessionInput(
+  input: CreateWorkspaceSearchMigrationControlCliReadSessionInput,
+): CreateAwsWorkspaceSearchMigrationRateManagedSessionInput {
+  return {
     requested: input.resources,
     ratePolicy: input.ratePolicy,
     bootstrapRateCheckpoint: input.rateBootstrap,
@@ -2031,11 +2270,47 @@ async function createDefaultControlCliMutationSession(
       ? {}
       : { telemetryRecorder: input.telemetryRecorder }),
     ...(input.signal === undefined ? {} : { signal: input.signal }),
-  })
-  return createControlCliMutationSession(
-    managed,
-    input.resources,
-    input.telemetryRecorder,
+  }
+}
+
+/**
+ * Captures the close capability before any other managed-session projection.
+ *
+ * @param managed - Newly constructed managed session.
+ * @returns Exact close method retained for normal or failure cleanup.
+ */
+function captureControlCliManagedSessionClose(
+  managed: WorkspaceSearchMigrationRateManagedAwsSession,
+): WorkspaceSearchMigrationRateManagedAwsSession['close'] {
+  const close = managed.close
+  if (typeof close !== 'function') throw invalidControlCliSessionProjection()
+  return close
+}
+
+/**
+ * Closes a newly constructed session after its capability projection fails.
+ *
+ * Cleanup failure never replaces the original projection failure.
+ *
+ * @param managed - Session whose projection did not complete.
+ * @param close - Close method captured before projection began.
+ */
+async function closeControlCliManagedSessionAfterProjectionFailure(
+  managed: WorkspaceSearchMigrationRateManagedAwsSession,
+  close: WorkspaceSearchMigrationRateManagedAwsSession['close'] | undefined,
+): Promise<void> {
+  if (close === undefined) return
+  try {
+    await close.call(managed)
+  } catch {
+    // Preserve the capability-projection failure after best-effort drainage.
+  }
+}
+
+/** Creates one stable managed-session projection failure. */
+function invalidControlCliSessionProjection(): TypeError {
+  return new TypeError(
+    'Workspace Search migration control CLI session projection is invalid.',
   )
 }
 
@@ -2043,18 +2318,35 @@ async function createDefaultControlCliMutationSession(
  * Narrows one managed session to read-only CLI operations.
  *
  * @param managed - Complete rate-managed migration session.
+ * @param close - Captured session cleanup capability.
  * @returns Read-only control surface without mutation methods.
  */
 function createControlCliReadSession(
   managed: WorkspaceSearchMigrationRateManagedAwsSession,
+  close: WorkspaceSearchMigrationRateManagedAwsSession['close'],
 ): WorkspaceSearchMigrationControlCliReadSession {
-  return {
+  const measureConfiguration = managed.measureConfiguration
+  const createApplicationWriterFencePort =
+    managed.createApplicationWriterFencePort
+  const readDescribeTableRateEvidence =
+    managed.readDescribeTableRateEvidence
+  const interruptDescribeTableRate =
+    managed.interruptDescribeTableRate
+  if (
+    typeof measureConfiguration !== 'function' ||
+    typeof createApplicationWriterFencePort !== 'function' ||
+    typeof readDescribeTableRateEvidence !== 'function' ||
+    typeof interruptDescribeTableRate !== 'function'
+  ) {
+    throw invalidControlCliSessionProjection()
+  }
+  return Object.freeze({
     measureConfigurationHash: async (): Promise<string> =>
       createWorkspaceSearchConfigurationHash(
-        await managed.measureConfiguration(),
+        await measureConfiguration.call(managed),
       ),
     readWriterFence: async () => summarizeWriterFence(
-      await managed.createApplicationWriterFencePort().read(),
+      await createApplicationWriterFencePort.call(managed).read(),
     ),
     readExecutionStatus: async (
       runId: string,
@@ -2065,38 +2357,78 @@ function createControlCliReadSession(
         runId,
         expectedConfigurationHash,
       }),
-    readRateAggregate: () => managed.readDescribeTableRateEvidence(),
-    interrupt: () => managed.interruptDescribeTableRate(),
-    close: async () => await managed.close(),
-  }
+    readRateAggregate: () =>
+      readDescribeTableRateEvidence.call(managed),
+    interrupt: () => interruptDescribeTableRate.call(managed),
+    close: async () => await close.call(managed),
+  })
 }
 
 /**
  * Narrows one managed session to explicit CLI mutation operations.
  *
  * @param managed - Complete rate-managed migration session.
+ * @param close - Captured session cleanup capability.
  * @param resources - Immutable resources rebound by subordinate measurements.
  * @param telemetryRecorder - Optional best-effort invocation telemetry.
  * @returns Explicit mutating control surface.
  */
 function createControlCliMutationSession(
   managed: WorkspaceSearchMigrationRateManagedAwsSession,
+  close: WorkspaceSearchMigrationRateManagedAwsSession['close'],
   resources: WorkspaceSearchMigrationRequestedResources,
   telemetryRecorder?: WorkspaceSearchMigrationTelemetryRecorder,
 ): WorkspaceSearchMigrationControlCliMutationSession {
-  return {
+  const measureConfiguration = managed.measureConfiguration
+  const acquireLease = managed.acquireLease
+  const heartbeatLease = managed.heartbeatLease
+  const renewMaintenanceEvidence = managed.renewMaintenanceEvidence
+  const readAuthority = managed.readAuthority
+  const createApplicationWriterFencePort =
+    managed.createApplicationWriterFencePort
+  const createRateManagedMeasurementSession =
+    managed.createRateManagedMeasurementSession
+  const readDescribeTableRateEvidence =
+    managed.readDescribeTableRateEvidence
+  const runWithMutationAdmissionGuardMethod =
+    managed.runWithMutationAdmissionGuard
+  const interruptMutationAdmission =
+    managed.interruptMutationAdmission
+  const interruptDescribeTableRate =
+    managed.interruptDescribeTableRate
+  if (
+    typeof measureConfiguration !== 'function' ||
+    typeof acquireLease !== 'function' ||
+    typeof heartbeatLease !== 'function' ||
+    typeof renewMaintenanceEvidence !== 'function' ||
+    typeof readAuthority !== 'function' ||
+    typeof createApplicationWriterFencePort !== 'function' ||
+    typeof createRateManagedMeasurementSession !== 'function' ||
+    typeof readDescribeTableRateEvidence !== 'function' ||
+    typeof runWithMutationAdmissionGuardMethod !== 'function' ||
+    typeof interruptMutationAdmission !== 'function' ||
+    typeof interruptDescribeTableRate !== 'function'
+  ) {
+    throw invalidControlCliSessionProjection()
+  }
+  const runWithMutationAdmissionGuard =
+    runWithMutationAdmissionGuardMethod.bind(managed)
+  const projected: WorkspaceSearchMigrationControlCliMutationSession = {
     measureConfigurationHash: async (): Promise<string> =>
       createWorkspaceSearchConfigurationHash(
-        await managed.measureConfiguration(),
+        await measureConfiguration.call(managed),
       ),
-    acquireLease: async (input) => await managed.acquireLease(input),
-    heartbeatLease: async (input) => await managed.heartbeatLease(input),
+    acquireLease: async (input) =>
+      await acquireLease.call(managed, input),
+    heartbeatLease: async (input) =>
+      await heartbeatLease.call(managed, input),
     renewMaintenanceEvidence: async (input) =>
-      await managed.renewMaintenanceEvidence(input),
-    readAuthority: async (claim) => await managed.readAuthority(claim),
+      await renewMaintenanceEvidence.call(managed, input),
+    readAuthority: async (claim) =>
+      await readAuthority.call(managed, claim),
     bootstrapWriterFence: async (authority) => summarizeWriterFence(
-      await managed
-        .createApplicationWriterFencePort()
+      await createApplicationWriterFencePort
+        .call(managed)
         .bootstrapOpen(authority),
     ),
     advanceStage: async (input) =>
@@ -2111,16 +2443,21 @@ function createControlCliMutationSession(
         evidenceFilePath: maintenanceEvidenceFile,
         readEvidenceFile: readMaintenanceEvidenceFile,
         createMeasurementSession: async () =>
-          await managed.createRateManagedMeasurementSession(),
+          await createRateManagedMeasurementSession.call(managed),
       }),
-    readRateAggregate: () => managed.readDescribeTableRateEvidence(),
-    runWithMutationAdmissionGuard: async (guard, task) =>
-      await managed.runWithMutationAdmissionGuard(guard, task),
+    readRateAggregate: () =>
+      readDescribeTableRateEvidence.call(managed),
+    runWithMutationAdmissionGuard: async <Result>(
+      guard: () => void,
+      task: () => Promise<Result>,
+    ): Promise<Result> =>
+      await runWithMutationAdmissionGuard<Result>(guard, task),
     interruptMutationAdmission: () =>
-      managed.interruptMutationAdmission(),
-    interrupt: () => managed.interruptDescribeTableRate(),
-    close: async () => await managed.close(),
+      interruptMutationAdmission.call(managed),
+    interrupt: () => interruptDescribeTableRate.call(managed),
+    close: async () => await close.call(managed),
   }
+  return Object.freeze(projected)
 }
 
 /**
@@ -2834,9 +3171,23 @@ function writeJsonLine(
   value: unknown,
   telemetryRecord?: string,
 ): void {
-  writer(JSON.stringify(
+  writer(serializeJsonLine(value, telemetryRecord))
+}
+
+/**
+ * Serializes the exact merged control and telemetry output once.
+ *
+ * @param value - Raw-value-free internal control payload.
+ * @param telemetryRecord - Optional serialized EMF fields.
+ * @returns Exact string written unchanged to the selected console stream.
+ */
+function serializeJsonLine(
+  value: unknown,
+  telemetryRecord?: string,
+): string {
+  return JSON.stringify(
     mergeControlCliTelemetryRecord(value, telemetryRecord),
-  ))
+  )
 }
 
 /**

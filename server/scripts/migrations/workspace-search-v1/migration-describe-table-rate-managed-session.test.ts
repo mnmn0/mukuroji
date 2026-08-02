@@ -13,6 +13,7 @@ import {
 import {
   createWorkspaceSearchMigrationManagedDescribeTableRate,
   type CreateWorkspaceSearchMigrationManagedDescribeTableRateInput,
+  type WorkspaceSearchMigrationManagedDescribeTableRate,
 } from './migration-describe-table-rate-managed-session'
 import {
   runWithWorkspaceSearchMigrationHeartbeat,
@@ -22,6 +23,7 @@ import type {
   WorkspaceSearchMigrationDescribeTableRateCheckpointStore,
   WorkspaceSearchMigrationDescribeTableRateCheckpointWrite,
   WorkspaceSearchMigrationDescribeTableRatePolicy,
+  WorkspaceSearchMigrationDescribeTablePhase,
 } from './migration-describe-table-rate-budget'
 
 const fixtureAccount = '123456789012'
@@ -33,6 +35,16 @@ const fixtureTableNames = Object.freeze([
   'rate-managed-test-documents',
   'rate-managed-test-workspace-search',
   'rate-managed-test-migration-state',
+])
+const fixtureAdditionalTableNames = Object.freeze([
+  'rate-managed-test-audit-events',
+  'rate-managed-test-file-proofing',
+  'rate-managed-test-work-item-configuration',
+  'rate-managed-test-workspace-access',
+])
+const fixtureRehearsalAllowedTableNames = Object.freeze([
+  ...fixtureTableNames,
+  ...fixtureAdditionalTableNames,
 ])
 const fixtureCredentials = {
   accessKeyId: 'rate-managed-test-access-key',
@@ -75,10 +87,7 @@ beforeAll(() => {
       const command = callArguments[0]
       if (command instanceof DescribeTableCommand) {
         const tableName = command.input.TableName
-        if (
-          typeof tableName === 'string' &&
-          fixtureTableNames.includes(tableName)
-        ) {
+        if (typeof tableName === 'string') {
           observedDescribeTableNames.push(tableName)
           const callback = describeTableCallbacks.get(tableName)
           return callback === undefined
@@ -325,6 +334,11 @@ async function createManagedRate(
     readonly recoverInterruptedCleanup?: boolean
     /** Whether an uncertain attempt may be reconciled. */
     readonly recoverInterruptedAttempt?: boolean
+    /** Optional exact-six or exact-ten full physical table allowlist. */
+    readonly allowedTableNames?: readonly string[]
+    /** Optional secret-free rate observation recorder. */
+    readonly recorder?:
+      CreateWorkspaceSearchMigrationManagedDescribeTableRateInput['recorder']
     /** Optional cancellation stopping the initial fence claim. */
     readonly signal?: AbortSignal
   },
@@ -332,15 +346,34 @@ async function createManagedRate(
   return await createWorkspaceSearchMigrationManagedDescribeTableRate({
     account: fixtureAccount,
     region: fixtureRegion,
-    tableNames: fixtureTableNames,
+    recoveryTableNames: fixtureTableNames,
+    allowedTableNames: input.allowedTableNames ?? fixtureTableNames,
     policy: fixturePolicy,
     checkpointStore: store,
     credentials: fixtureCredentials,
     bootstrap: input.bootstrap,
     recoverInterruptedCleanup: input.recoverInterruptedCleanup,
     recoverInterruptedAttempt: input.recoverInterruptedAttempt,
+    ...(input.recorder === undefined ? {} : { recorder: input.recorder }),
     ...(input.signal === undefined ? {} : { signal: input.signal }),
   })
+}
+
+/** Requires one table lookup to fail through the stable managed boundary. */
+async function expectManagedTableRejection(
+  rate: WorkspaceSearchMigrationManagedDescribeTableRate,
+  tableName: string,
+  phase: WorkspaceSearchMigrationDescribeTablePhase,
+): Promise<void> {
+  try {
+    await rate.describeTable(tableName, phase)
+  } catch (error: unknown) {
+    expect(error).toMatchObject({
+      code: 'MANAGED_DESCRIBE_TABLE_RATE_FAILED',
+    })
+    return
+  }
+  throw new Error('Expected managed table allowlist rejection.')
 }
 
 describe('managed DescribeTable rate session', () => {
@@ -350,7 +383,8 @@ describe('managed DescribeTable rate session', () => {
       createWorkspaceSearchMigrationManagedDescribeTableRate({
         account: fixtureAccount,
         region: fixtureRegion,
-        tableNames: fixtureTableNames,
+        recoveryTableNames: fixtureTableNames,
+        allowedTableNames: fixtureTableNames,
         policy: fixturePolicy,
         checkpointStore: store,
         credentials: {
@@ -361,6 +395,183 @@ describe('managed DescribeTable rate session', () => {
       }),
     ).rejects.toThrow('MANAGED_DESCRIBE_TABLE_RATE_FAILED')
     expect(store.readCompareAndSwapCallCount()).toBe(0)
+  })
+
+  test('rejects malformed recovery and allowed table vectors before side effects', async () => {
+    const additionalFifthTable = 'rate-managed-test-unreviewed-extra'
+    const invalidVectors = [
+      {
+        name: 'recovery-missing',
+        recoveryTableNames: fixtureTableNames.slice(0, 5),
+        allowedTableNames: fixtureRehearsalAllowedTableNames,
+      },
+      {
+        name: 'recovery-extra',
+        recoveryTableNames: [
+          ...fixtureTableNames,
+          fixtureAdditionalTableNames[0] ?? '',
+        ],
+        allowedTableNames: fixtureRehearsalAllowedTableNames,
+      },
+      {
+        name: 'recovery-duplicate',
+        recoveryTableNames: [
+          fixtureTableNames[0] ?? '',
+          fixtureTableNames[0] ?? '',
+          ...fixtureTableNames.slice(2),
+        ],
+        allowedTableNames: fixtureTableNames,
+      },
+      {
+        name: 'recovery-invalid',
+        recoveryTableNames: ['', ...fixtureTableNames.slice(1)],
+        allowedTableNames: fixtureTableNames,
+      },
+      {
+        name: 'allowed-missing-recovery',
+        recoveryTableNames: fixtureTableNames,
+        allowedTableNames: [
+          ...fixtureTableNames.slice(0, 5),
+          fixtureAdditionalTableNames[0] ?? '',
+        ],
+      },
+      {
+        name: 'allowed-seven',
+        recoveryTableNames: fixtureTableNames,
+        allowedTableNames: [
+          ...fixtureTableNames,
+          fixtureAdditionalTableNames[0] ?? '',
+        ],
+      },
+      {
+        name: 'allowed-nine',
+        recoveryTableNames: fixtureTableNames,
+        allowedTableNames: [
+          ...fixtureTableNames,
+          ...fixtureAdditionalTableNames.slice(0, 3),
+        ],
+      },
+      {
+        name: 'allowed-eleven',
+        recoveryTableNames: fixtureTableNames,
+        allowedTableNames: [
+          ...fixtureRehearsalAllowedTableNames,
+          additionalFifthTable,
+        ],
+      },
+      {
+        name: 'allowed-duplicate',
+        recoveryTableNames: fixtureTableNames,
+        allowedTableNames: [
+          ...fixtureTableNames,
+          ...fixtureAdditionalTableNames.slice(0, 3),
+          fixtureTableNames[0] ?? '',
+        ],
+      },
+      {
+        name: 'allowed-invalid',
+        recoveryTableNames: fixtureTableNames,
+        allowedTableNames: [
+          ...fixtureTableNames,
+          ...fixtureAdditionalTableNames.slice(0, 3),
+          '',
+        ],
+      },
+    ]
+
+    for (const invalid of invalidVectors) {
+      const store = new InMemoryRateCheckpointStore()
+      const observations: unknown[] = []
+      const observedAwsCallCount = observedDescribeTableNames.length
+      await expect(
+        createWorkspaceSearchMigrationManagedDescribeTableRate({
+          account: fixtureAccount,
+          region: fixtureRegion,
+          recoveryTableNames: invalid.recoveryTableNames,
+          allowedTableNames: invalid.allowedTableNames,
+          policy: fixturePolicy,
+          checkpointStore: store,
+          credentials: fixtureCredentials,
+          bootstrap: true,
+          recorder: {
+            record: (observation): void => {
+              observations.push(observation)
+            },
+          },
+        }),
+        invalid.name,
+      ).rejects.toThrow('MANAGED_DESCRIBE_TABLE_RATE_FAILED')
+      expect(store.readCompareAndSwapCallCount(), invalid.name).toBe(0)
+      expect(observations, invalid.name).toEqual([])
+      expect(observedDescribeTableNames, invalid.name).toHaveLength(
+        observedAwsCallCount,
+      )
+    }
+  })
+
+  test('accepts migration-only six and rehearsal union ten allowlists', async () => {
+    for (const allowedTableNames of [
+      fixtureTableNames,
+      fixtureRehearsalAllowedTableNames,
+    ]) {
+      observedDescribeTableNames.length = 0
+      const store = new InMemoryRateCheckpointStore()
+      const rate = await createManagedRate(store, {
+        bootstrap: true,
+        allowedTableNames,
+      })
+      const selectedTableName = allowedTableNames.at(-1)
+      if (selectedTableName === undefined) {
+        throw new Error('Expected one allowed fixture table.')
+      }
+      await rate.describeTable(selectedTableName, 'integrity-check')
+      expect(observedDescribeTableNames).toEqual([selectedTableName])
+      expect(rate.readEvidence().attemptCount).toBe(1)
+      await rate.close()
+    }
+  })
+
+  test('rejects a disallowed table before every surface side effect', async () => {
+    observedDescribeTableNames.length = 0
+    const store = new InMemoryRateCheckpointStore()
+    const observations: unknown[] = []
+    const rate = await createManagedRate(store, {
+      bootstrap: true,
+      allowedTableNames: fixtureRehearsalAllowedTableNames,
+      recorder: {
+        record: (observation): void => {
+          observations.push(observation)
+        },
+      },
+    })
+    const disallowedTableName = 'rate-managed-test-disallowed'
+
+    /** Verifies one rejection against all externally observable side effects. */
+    const expectNoSideEffects = async (
+      phase: WorkspaceSearchMigrationDescribeTablePhase,
+    ): Promise<void> => {
+      const checkpointCasCount = store.readCompareAndSwapCallCount()
+      const observationCount = observations.length
+      const awsCallCount = observedDescribeTableNames.length
+      await expectManagedTableRejection(rate, disallowedTableName, phase)
+      expect(store.readCompareAndSwapCallCount()).toBe(checkpointCasCount)
+      expect(observations).toHaveLength(observationCount)
+      expect(observedDescribeTableNames).toHaveLength(awsCallCount)
+    }
+
+    await expectNoSideEffects('measurement')
+    await rate.runNonPageOperation(
+      async () => await expectNoSideEffects('pre-send-guard'),
+    )
+    await rate.runCheckpointPage(
+      {},
+      async () => await expectNoSideEffects('checkpoint-page'),
+    )
+    await rate.runMandatoryCleanup(
+      async () => await expectNoSideEffects('post-send-guard'),
+    )
+    expect(rate.readEvidence().attemptCount).toBe(0)
+    await rate.close()
   })
 
   test('reads every construction field once before a blocked load', async () => {
@@ -400,8 +611,12 @@ describe('managed DescribeTable rate session', () => {
         recordRead('region')
         return changed ? 'invalid' : fixtureRegion
       },
-      get tableNames() {
-        recordRead('tableNames')
+      get recoveryTableNames() {
+        recordRead('recoveryTableNames')
+        return changed ? ['invalid'] : fixtureTableNames
+      },
+      get allowedTableNames() {
+        recordRead('allowedTableNames')
         return changed ? ['invalid'] : fixtureTableNames
       },
       get policy() {
@@ -449,7 +664,7 @@ describe('managed DescribeTable rate session', () => {
     blockedLoad.release()
     const rate = await creating
 
-    expect(readCounts.size).toBe(11)
+    expect(readCounts.size).toBe(12)
     expect([...readCounts.values()]).toEqual(
       Array.from({ length: readCounts.size }, () => 1),
     )
@@ -652,6 +867,42 @@ describe('managed DescribeTable rate session', () => {
     const firstClose = rate.close()
     expect(rate.close()).toBe(firstClose)
     await firstClose
+  })
+
+  test('closes only after admitted work contributes to final evidence', async () => {
+    observedDescribeTableNames.length = 0
+    const store = new InMemoryRateCheckpointStore()
+    const rate = await createManagedRate(store, { bootstrap: true })
+    const started = createDeferred<void>()
+    const release = createDeferred<void>()
+    describeTableCallbacks.set(fixtureTableNames[0] ?? '', async () => {
+      started.resolve()
+      await release.promise
+      const error = new Error('test-throttle')
+      error.name = 'ThrottlingException'
+      throw error
+    })
+
+    const operation = rate.describeTable(
+      fixtureTableNames[0] ?? '',
+      'measurement',
+    )
+    await started.promise
+    expect(rate.readEvidence().throttleCount).toBe(0)
+
+    const finalEvidence = rate.closeAndReadEvidence()
+    expect(rate.closeAndReadEvidence()).toBe(finalEvidence)
+    expect(() => rate.readEvidence()).toThrow(
+      'MANAGED_DESCRIBE_TABLE_RATE_FAILED',
+    )
+    release.resolve()
+
+    await expect(operation).rejects.toThrow()
+    await expect(finalEvidence).resolves.toMatchObject({
+      attemptCount: 1,
+      throttleCount: 1,
+    })
+    describeTableCallbacks.clear()
   })
 
   test('defers interruption until an active all-six cleanup finishes', async () => {
@@ -890,6 +1141,7 @@ describe('managed DescribeTable rate session', () => {
       bootstrap: false,
       recoverInterruptedCleanup: true,
       recoverInterruptedAttempt: true,
+      allowedTableNames: fixtureRehearsalAllowedTableNames,
     })
     expect(observedDescribeTableNames).toEqual([...fixtureTableNames])
     expect(store.read()?.attemptInFlight).toBe(false)

@@ -6088,6 +6088,7 @@ export class AwsRestoreDrillVerifier implements RestoreDrillVerifier {
     let reader: CrossDomainIntegrityNormalizedPageReader | undefined
     let result: RestoreDrillSemanticClaimPage | undefined
     let secret: RestoreDrillAuditPseudonymSecret | undefined
+    const pageSignal = AbortSignal.timeout(MAX_VERIFICATION_BATCH_MILLISECONDS)
     try {
       reader = this.semanticReaderFactory.create(
         {
@@ -6098,10 +6099,13 @@ export class AwsRestoreDrillVerifier implements RestoreDrillVerifier {
           tableNames: createCrossDomainTableNames(input.checkpoint),
         },
       )
-      const output = await this.secrets.send(new GetSecretValueCommand({
-        SecretId: this.configuration.auditPseudonymSecretArn,
-        VersionId: auditPseudonymSecretVersionId,
-      }))
+      const output = await this.secrets.send(
+        new GetSecretValueCommand({
+          SecretId: this.configuration.auditPseudonymSecretArn,
+          VersionId: auditPseudonymSecretVersionId,
+        }),
+        { abortSignal: pageSignal },
+      )
       secret = parseAuditPseudonymSecret(
         output,
         input.digestKey,
@@ -6113,6 +6117,7 @@ export class AwsRestoreDrillVerifier implements RestoreDrillVerifier {
         ...(nextCursor ? { cursor: nextCursor } : {}),
         digestKey: input.digestKey,
         remainingItemCapacity,
+        signal: pageSignal,
         target: toCrossDomainTableTarget(target),
       })
       const claims: RestoreDrillSemanticClaim[] = []

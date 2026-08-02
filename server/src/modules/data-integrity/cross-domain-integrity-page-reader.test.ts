@@ -196,6 +196,7 @@ function pageRequest(
     ...(cursor === undefined ? {} : { cursor }),
     digestKey: DIGEST_KEY,
     remainingItemCapacity: 1_000,
+    signal: AbortSignal.timeout(60_000),
     target,
   }
 }

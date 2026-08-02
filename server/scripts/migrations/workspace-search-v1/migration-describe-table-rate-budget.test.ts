@@ -2437,7 +2437,7 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
       )
     }
     await lifecycle.runDescribeTableAttempt(
-      { phase: 'reconciliation' },
+      { phase: 'integrity-check' },
       createAttempt(async () => 'resumed'),
     )
 
@@ -2454,6 +2454,10 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
         .map((observation) => observation.backoffMilliseconds),
     ).toEqual([50, 100, 200])
     expect(harness.waits).toEqual([1_000, 50, 100, 200])
+    expect(harness.observations.at(-1)).toMatchObject({
+      kind: 'attempt',
+      phase: 'integrity-check',
+    })
     expect(lifecycle.readEvidence()).toMatchObject({
       attemptCount: 4,
       throttleCount: 3,

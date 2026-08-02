@@ -9,11 +9,14 @@ import {
 import {
   readMeasuredWorkspaceSearchMigrationExecutionStatus,
   readMeasuredWorkspaceSearchMigrationExecutionTerminalRelease,
+  readWorkspaceSearchMigrationExecutionAppliedRoot,
   readWorkspaceSearchMigrationExecutionStatus,
+  readWorkspaceSearchMigrationExecutionTerminalRelease,
   superviseWorkspaceSearchMigrationExecution,
   type ReadWorkspaceSearchMigrationExecutionStatusInput,
   type SuperviseWorkspaceSearchMigrationExecutionInput,
   type WorkspaceSearchMigrationExecutionSupervisorSession,
+  type WorkspaceSearchMigrationExecutionAppliedRootProjection,
   type WorkspaceSearchMigrationExecutionStatusSession,
   type WorkspaceSearchMigrationExecutionStatus,
   type WorkspaceSearchMigrationExecutionTerminalRelease,
@@ -34,6 +37,7 @@ import {
   superviseWorkspaceSearchMigrationPostClosePlanning,
   type SuperviseWorkspaceSearchMigrationPostClosePlanningInput,
   type WorkspaceSearchMigrationMaintenanceEvidenceProvider,
+  type WorkspaceSearchMigrationPostClosePlanningResult,
 } from './migration-post-close-planning-supervisor'
 import type {
   WorkspaceSearchMigrationPrePlanAuthority,
@@ -235,20 +239,104 @@ export type WorkspaceSearchMigrationControlPlanningSummary = {
   readonly mode: 'close-replan'
   /** Durable planning boundary reached by the existing supervisor. */
   readonly phase: 'planning-admitted'
+  /** Identifier-free exact durable planning graph, when provided. */
+  readonly planning?: WorkspaceSearchMigrationControlPlanningEvidence
+}
+
+/** Identifier-free exact durable close, drain, and sealed-plan graph. */
+export type WorkspaceSearchMigrationControlPlanningEvidence = {
+  /** Digest of the revision-two planning-admitted boundary. */
+  readonly executionBoundaryDigest: string
+  /** Digest of the exact canonical closed writer-fence record. */
+  readonly closedWriterFenceRecordDigest: string
+  /** Canonical durable writer-fence close time. */
+  readonly closedAt: string
+  /** Canonical beginning of the observed zero-writer drain. */
+  readonly drainStartedAt: string
+  /** Canonical completion of the observed zero-writer drain. */
+  readonly drainCompletedAt: string
+  /** Canonical planning-admission commit time. */
+  readonly admittedAt: string
+  /** Digest of the immutable sealed planning authority. */
+  readonly sealedPlanningAuthorityDigest: string
+  /** Merkle root of the exact ordered immutable plan. */
+  readonly planDigest: string
+  /** Exact non-zero or zero sealed plan operation count. */
+  readonly planOperationCount: number
+  /** Exact source-derived operation count. */
+  readonly sourceOperationCount: number
+  /** Exact target-orphan operation count. */
+  readonly orphanOperationCount: number
+  /** Canonical immutable plan creation time. */
+  readonly planCreatedAt: string
+  /** Canonical sealed-authority publication time. */
+  readonly sealedAt: string
 }
 
 /**
  * Secret-free result after one explicit execution branch reaches its boundary.
  */
-export type WorkspaceSearchMigrationControlExecutionSummary = {
-  /** Explicit execution stage that completed. */
-  readonly mode:
-    | 'apply'
-    | 'rollback-complete'
-    | 'rollback-partial'
-    | 'verify'
-  /** Read-only durable phase and next explicit operator action. */
-  readonly execution: WorkspaceSearchMigrationExecutionStatus
+export type WorkspaceSearchMigrationControlExecutionSummary =
+  | {
+      /** Explicit forward-apply stage that completed. */
+      readonly mode: 'apply'
+      /** Read-only durable applied phase and next explicit operator action. */
+      readonly execution: WorkspaceSearchMigrationExecutionStatus
+      /** Exact durable applied-root projection from a post-apply strong read. */
+      readonly application: WorkspaceSearchMigrationControlApplicationEvidence
+    }
+  | {
+      /** Explicit verification or rollback stage that completed. */
+      readonly mode: 'rollback-complete' | 'rollback-partial' | 'verify'
+      /** Read-only durable phase and next explicit operator action. */
+      readonly execution: WorkspaceSearchMigrationExecutionStatus
+      /** Exact terminal graph projection after verify or rollback, when present. */
+      readonly terminal?: WorkspaceSearchMigrationControlExecutionTerminalEvidence
+    }
+
+/** Identifier-free exact immutable applied-root evidence. */
+export type WorkspaceSearchMigrationControlApplicationEvidence = {
+  /** Digest of the immutable execution admission consumed by apply. */
+  readonly executionRunDigest: string
+  /** Merkle root of the exact ordered immutable plan. */
+  readonly planDigest: string
+  /** Exact plan operation count sealed by complete apply. */
+  readonly sealedPlanOperationCount: number
+  /** Exact durable operation-marker count fixed by the applied root. */
+  readonly appliedOperationCount: number
+  /** Digest of the immutable applied phase root. */
+  readonly appliedRootDigest: string
+  /** Canonical transaction time committed in the applied root. */
+  readonly appliedAt: string
+}
+
+/** Identifier-free exact immutable terminal graph projected after execution. */
+export type WorkspaceSearchMigrationControlExecutionTerminalEvidence = {
+  /** Authoritative verified or rolled-back terminal outcome. */
+  readonly terminalKind: WorkspaceSearchWriterFenceTerminalOutcome['kind']
+  /** Persistence schema version of the authoritative terminal root. */
+  readonly terminalPersistenceVersion:
+    WorkspaceSearchWriterFenceTerminalOutcome['persistenceVersion']
+  /** Digest of the authoritative terminal root. */
+  readonly terminalRootDigest: string
+  /** Canonical terminal-root publication time. */
+  readonly terminalAt: string
+  /** Digest of the admitted execution boundary. */
+  readonly executionBoundaryDigest: string
+  /** Digest of the exact closed writer-fence record. */
+  readonly closedWriterFenceRecordDigest: string
+  /** Digest of the immutable sealed planning authority. */
+  readonly sealedPlanningAuthorityDigest: string
+  /** Digest of the immutable execution admission. */
+  readonly executionRunDigest: string
+  /** Merkle root of the exact ordered immutable plan. */
+  readonly planDigest: string
+  /** Exact sealed plan operation count. */
+  readonly planOperationCount: number
+  /** Exact forward-applied count consumed by the terminal branch. */
+  readonly appliedOperationCount: number
+  /** Complete applied-root or committed-prefix origin digest. */
+  readonly applyBoundaryDigest: string
 }
 
 /**
@@ -259,7 +347,24 @@ export type WorkspaceSearchMigrationControlReleaseSummary = {
   readonly mode: 'release'
   /** Durable released-open writer-fence boundary. */
   readonly phase: 'released'
+  /** Verified or rolled-back terminal outcome authorizing release. */
+  readonly terminalKind: WorkspaceSearchWriterFenceTerminalOutcome['kind']
+  /** Persistence schema version of the immutable terminal root. */
+  readonly terminalPersistenceVersion:
+    WorkspaceSearchWriterFenceTerminalOutcome['persistenceVersion']
+  /** Digest of the exact immutable terminal root. */
+  readonly terminalRootDigest: string
+  /** Digest of the exact canonical released writer-fence record. */
+  readonly writerFenceRecordDigest: string
+  /** Canonical durable release time fixed by the opened fence record. */
+  readonly releasedAt: string
 }
+
+/** Secret-free durable evidence returned by the terminal release boundary. */
+export type WorkspaceSearchMigrationControlReleaseEvidence = Omit<
+  WorkspaceSearchMigrationControlReleaseSummary,
+  'mode' | 'phase'
+>
 
 /**
  * Secret-free result of exactly one explicit coordinator stage.
@@ -281,7 +386,7 @@ export interface WorkspaceSearchMigrationControlCoordinatorDependencies {
    */
   supervisePostClosePlanning(
     input: SuperviseWorkspaceSearchMigrationPostClosePlanningInput,
-  ): Promise<void>
+  ): Promise<WorkspaceSearchMigrationPostClosePlanningResult | void>
 
   /**
    * Runs one existing explicit apply, verify, or rollback supervisor branch.
@@ -294,14 +399,38 @@ export interface WorkspaceSearchMigrationControlCoordinatorDependencies {
   ): ReturnType<typeof superviseWorkspaceSearchMigrationExecution>
 
   /**
+   * Reconstructs the exact immutable terminal graph after a terminal branch.
+   *
+   * @param input - Same measured session, run, and configuration binding.
+   * @returns Exact terminal release graph, or undefined outside terminal state.
+   */
+  readonly readExecutionTerminal?: (
+    input: ReadWorkspaceSearchMigrationExecutionStatusInput,
+  ) => ReturnType<
+    typeof readWorkspaceSearchMigrationExecutionTerminalRelease
+  >
+
+  /**
+   * Strongly reconstructs the exact immutable applied root after apply.
+   *
+   * @param input - Same measured session, run, and configuration binding.
+   * @returns Exact applied root, or undefined outside applied state.
+   */
+  readonly readExecutionApplication?: (
+    input: ReadWorkspaceSearchMigrationExecutionStatusInput,
+  ) => ReturnType<
+    typeof readWorkspaceSearchMigrationExecutionAppliedRoot
+  >
+
+  /**
    * Runs one fresh-authority terminal writer-fence release or read-only recovery.
    *
    * @param input - Exact release session, evidence provider, owner, and signal.
-   * @returns Completion after release or matching durable recovery.
+   * @returns Secret-free terminal and released-fence digest evidence.
    */
   releaseTerminal(
     input: WorkspaceSearchMigrationControlReleaseInput,
-  ): Promise<void>
+  ): Promise<WorkspaceSearchMigrationControlReleaseEvidence>
 }
 
 /**
@@ -322,11 +451,14 @@ export interface WorkspaceSearchMigrationControlExecutionStatusDependencies {
 /** Default mutating supervisors used by the production coordinator. */
 const defaultCoordinatorDependencies:
   WorkspaceSearchMigrationControlCoordinatorDependencies = {
-    supervisePostClosePlanning: async (input): Promise<void> => {
-      await superviseWorkspaceSearchMigrationPostClosePlanning(input)
-    },
+    supervisePostClosePlanning:
+      superviseWorkspaceSearchMigrationPostClosePlanning,
     superviseExecution:
       superviseWorkspaceSearchMigrationExecution,
+    readExecutionApplication:
+      readWorkspaceSearchMigrationExecutionAppliedRoot,
+    readExecutionTerminal:
+      readWorkspaceSearchMigrationExecutionTerminalRelease,
     releaseTerminal: releaseTerminalWriterFence,
   }
 
@@ -375,7 +507,7 @@ export async function advanceWorkspaceSearchMigrationControlStage(
   assertCoordinatorActive(request.signal)
 
   if (request.mode === 'close-replan') {
-    await dependencies.supervisePostClosePlanning({
+    const planningResult = await dependencies.supervisePostClosePlanning({
       session: request.session,
       maintenanceEvidenceProvider: request.maintenanceEvidenceProvider,
       runId: request.runId,
@@ -399,12 +531,22 @@ export async function advanceWorkspaceSearchMigrationControlStage(
         ? {}
         : { checkpointStallSchedule: request.checkpointStallSchedule }),
     })
-    return { mode: 'close-replan', phase: 'planning-admitted' }
+    return {
+      mode: 'close-replan',
+      phase: 'planning-admitted',
+      ...(planningResult === undefined
+        ? {}
+        : { planning: createControlPlanningEvidence(planningResult) }),
+    }
   }
 
   if (request.mode === 'release') {
-    await dependencies.releaseTerminal(request)
-    return { mode: 'release', phase: 'released' }
+    const evidence = await dependencies.releaseTerminal(request)
+    return {
+      mode: 'release',
+      phase: 'released',
+      ...evidence,
+    }
   }
 
   const execution = await dependencies.superviseExecution({
@@ -429,7 +571,149 @@ export async function advanceWorkspaceSearchMigrationControlStage(
       ? {}
       : { checkpointStallSchedule: request.checkpointStallSchedule }),
   })
+  if (request.mode === 'apply') {
+    if (
+      execution.phase !== 'applied' ||
+      dependencies.readExecutionApplication === undefined
+    ) {
+      return failCoordinator('INVALID_STATE')
+    }
+    const appliedRoot = await dependencies.readExecutionApplication({
+      session: request.session,
+      runId: request.runId,
+      expectedConfigurationHash: request.expectedConfigurationHash,
+    })
+    if (appliedRoot === undefined) {
+      return failCoordinator('INVALID_STATE')
+    }
+    return {
+      mode: 'apply',
+      execution,
+      application: createControlApplicationEvidence(appliedRoot),
+    }
+  }
+  if (
+    (execution.phase === 'verified' || execution.phase === 'rolled-back') &&
+    dependencies.readExecutionTerminal !== undefined
+  ) {
+    const terminal = await dependencies.readExecutionTerminal({
+      session: request.session,
+      runId: request.runId,
+      expectedConfigurationHash: request.expectedConfigurationHash,
+      ...(request.signal === undefined ? {} : { signal: request.signal }),
+    })
+    if (terminal === undefined) return failCoordinator('INVALID_STATE')
+    return {
+      mode: request.mode,
+      execution,
+      terminal: createControlExecutionTerminalEvidence(terminal),
+    }
+  }
   return { mode: request.mode, execution }
+}
+
+/**
+ * Projects one exact durable applied root without raw identifiers.
+ *
+ * @param root - Strongly reread and execution-bound immutable applied root.
+ * @returns Identifier-free digests, counts, and durable apply time.
+ */
+function createControlApplicationEvidence(
+  root: WorkspaceSearchMigrationExecutionAppliedRootProjection,
+): WorkspaceSearchMigrationControlApplicationEvidence {
+  return Object.freeze({
+    executionRunDigest: root.executionRunDigest,
+    planDigest: root.seal.planDigest,
+    sealedPlanOperationCount: root.seal.planOperationCount,
+    appliedOperationCount: root.seal.markerCount,
+    appliedRootDigest: root.rootDigest,
+    appliedAt: root.committedAt,
+  })
+}
+
+/**
+ * Projects the exact planning supervisor result without raw identifiers.
+ *
+ * @param result - Exact durable planning boundary, authority, and plan seal.
+ * @returns Identifier-free digest, count, and timestamp evidence.
+ */
+function createControlPlanningEvidence(
+  result: WorkspaceSearchMigrationPostClosePlanningResult,
+): WorkspaceSearchMigrationControlPlanningEvidence {
+  return Object.freeze({
+    executionBoundaryDigest: result.executionBoundary.boundaryDigest,
+    closedWriterFenceRecordDigest:
+      result.executionBoundary.closedWriterFenceRecordDigest,
+    closedAt: result.executionBoundary.closedAt,
+    drainStartedAt:
+      result.executionBoundary.planningAdmission.drainStartedAt,
+    drainCompletedAt:
+      result.executionBoundary.planningAdmission.drainCompletedAt,
+    admittedAt: result.executionBoundary.planningAdmission.admittedAt,
+    sealedPlanningAuthorityDigest:
+      result.sealedPlanningAuthority.authorityDigest,
+    planDigest: result.sealedPlanningAuthority.planDigest,
+    planOperationCount:
+      result.sealedPlanningAuthority.planOperationCount,
+    sourceOperationCount:
+      result.sealedPlanningAuthority.sourceOperationCount,
+    orphanOperationCount:
+      result.sealedPlanningAuthority.orphanOperationCount,
+    planCreatedAt: result.planSeal.createdAt,
+    sealedAt: result.sealedPlanningAuthority.sealedAt,
+  })
+}
+
+/**
+ * Projects an exact terminal release graph without raw identifiers.
+ *
+ * @param release - Exact immutable verified or rolled-back release graph.
+ * @returns Identifier-free root, count, digest, and timestamp evidence.
+ */
+function createControlExecutionTerminalEvidence(
+  release: WorkspaceSearchMigrationExecutionTerminalRelease,
+): WorkspaceSearchMigrationControlExecutionTerminalEvidence {
+  const terminal = createWriterFenceTerminalOutcome(release)
+  if (release.terminal.kind === 'verified') {
+    return Object.freeze({
+      terminalKind: terminal.kind,
+      terminalPersistenceVersion: terminal.persistenceVersion,
+      terminalRootDigest: terminal.rootDigest,
+      terminalAt: release.terminal.root.verifiedAt,
+      executionBoundaryDigest: release.executionBoundary.boundaryDigest,
+      closedWriterFenceRecordDigest:
+        release.executionBoundary.closedWriterFenceRecordDigest,
+      sealedPlanningAuthorityDigest:
+        release.sealedPlanningAuthority.authorityDigest,
+      executionRunDigest: release.executionRun.executionRunDigest,
+      planDigest: release.sealedPlanningAuthority.planDigest,
+      planOperationCount:
+        release.sealedPlanningAuthority.planOperationCount,
+      appliedOperationCount:
+        release.sealedPlanningAuthority.planOperationCount,
+      applyBoundaryDigest: release.terminal.root.appliedRootDigest,
+    })
+  }
+  return Object.freeze({
+    terminalKind: terminal.kind,
+    terminalPersistenceVersion: terminal.persistenceVersion,
+    terminalRootDigest: terminal.rootDigest,
+    terminalAt: release.terminal.root.finishedAt,
+    executionBoundaryDigest: release.executionBoundary.boundaryDigest,
+    closedWriterFenceRecordDigest:
+      release.executionBoundary.closedWriterFenceRecordDigest,
+    sealedPlanningAuthorityDigest:
+      release.sealedPlanningAuthority.authorityDigest,
+    executionRunDigest: release.executionRun.executionRunDigest,
+    planDigest: release.sealedPlanningAuthority.planDigest,
+    planOperationCount:
+      release.sealedPlanningAuthority.planOperationCount,
+    appliedOperationCount:
+      release.terminal.root.terminalState.upperBoundSequence,
+    applyBoundaryDigest: release.terminal.kind === 'rolled-back-v1'
+      ? release.terminal.root.appliedRootDigest
+      : release.terminal.root.originDigest,
+  })
 }
 
 /** Coordinator input union for the four execution-supervisor branches. */
@@ -881,7 +1165,7 @@ function snapshotCoordinatorPlanningLimits(
  */
 async function releaseTerminalWriterFence(
   input: WorkspaceSearchMigrationControlReleaseInput,
-): Promise<void> {
+): Promise<WorkspaceSearchMigrationControlReleaseEvidence> {
   const runId = requireMigrationIdentifier(input.runId, 'Run ID')
   const ownerId = requireMigrationIdentifier(input.ownerId, 'Owner ID')
   requireExpectedConfigurationHash(input.expectedConfigurationHash)
@@ -926,7 +1210,7 @@ async function releaseTerminalWriterFence(
     ) {
       return failCoordinator('INVALID_STATE')
     }
-    return
+    return createControlReleaseEvidence(preflightFence)
   }
 
   const terminal = await runCoordinatorOperation(
@@ -946,7 +1230,7 @@ async function releaseTerminalWriterFence(
     guard,
     () => input.session.acquireLease({ runId, ownerId }),
   )
-  await runWithWorkspaceSearchMigrationHeartbeat({
+  return await runWithWorkspaceSearchMigrationHeartbeat({
     lease,
     port: input.session,
     signal: input.signal,
@@ -1007,8 +1291,36 @@ async function releaseTerminalWriterFence(
         configurationHash,
         currentTerminal,
       )
+      return createControlReleaseEvidence(released)
     },
   })
+}
+
+/**
+ * Projects one strict released writer-fence observation into external evidence.
+ *
+ * @param observation - Exact durable release response or recovery observation.
+ * @returns Identifier-free terminal and released-record digests.
+ */
+function createControlReleaseEvidence(
+  observation: WorkspaceSearchWriterFenceObservation,
+): WorkspaceSearchMigrationControlReleaseEvidence {
+  if (
+    observation.status !== 'present' ||
+    observation.record.mode !== 'open' ||
+    observation.record.version !== 2
+  ) {
+    return failCoordinator('INVALID_STATE')
+  }
+  const record = observation.record
+  return {
+    terminalKind: record.release.terminal.kind,
+    terminalPersistenceVersion:
+      record.release.terminal.persistenceVersion,
+    terminalRootDigest: record.release.terminal.rootDigest,
+    writerFenceRecordDigest: record.recordDigest,
+    releasedAt: record.openedAt,
+  }
 }
 
 /**

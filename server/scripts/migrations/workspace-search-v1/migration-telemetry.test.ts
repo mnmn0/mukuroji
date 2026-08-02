@@ -250,7 +250,7 @@ describe('Workspace Search migration telemetry', () => {
       version:
         WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
       kind: 'attempt',
-      phase: 'measurement',
+      phase: 'integrity-check',
       sequence: 1,
       observedAtMilliseconds: 10,
       remainingNormalAdmissionAttempts: 200,

@@ -64,6 +64,7 @@ export type WorkspaceSearchMigrationTelemetryPhase =
   | 'checkpoint-page'
   | 'close'
   | 'drain'
+  | 'integrity-check'
   | 'measurement'
   | 'planning'
   | 'post-send-guard'
@@ -598,6 +599,7 @@ const telemetryPhases = new Set<string>([
   'checkpoint-page',
   'close',
   'drain',
+  'integrity-check',
   'measurement',
   'planning',
   'post-send-guard',
@@ -644,6 +646,7 @@ const describeTablePhaseCatalog: Readonly<
   Record<WorkspaceSearchMigrationDescribeTablePhase, true>
 > = Object.freeze({
   'checkpoint-page': true,
+  'integrity-check': true,
   measurement: true,
   'post-send-guard': true,
   'pre-send-guard': true,

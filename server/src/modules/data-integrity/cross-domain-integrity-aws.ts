@@ -42,7 +42,14 @@ import {
 } from '../../infrastructure/aws/dynamodb-attribute-codec'
 import {
   CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+  calculateCrossDomainIntegrityResourceIdentityDigest,
+  createCrossDomainIntegrityImmutableResourceIdentities,
+  CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
+  parseCrossDomainIntegrityResourceAttestation,
+  requireCrossDomainIntegrityInvocationDeadline,
   runCrossDomainIntegrityCheck,
+  runCrossDomainIntegrityRequestWithinDeadline,
+  sameCrossDomainIntegrityResourceAttestation,
   validateCrossDomainIntegrityLimits,
   type CrossDomainAuditReference,
   type CrossDomainExternalFileEvidence,
@@ -50,6 +57,8 @@ import {
   type CrossDomainIntegrityPage,
   type CrossDomainIntegrityPageRequest,
   type CrossDomainIntegrityReadPort,
+  type CrossDomainIntegrityLiveRuntimeObservation,
+  type CrossDomainIntegrityResourceAttestation,
   type CrossDomainIntegrityResult,
   type CrossDomainRelationType,
 } from './cross-domain-integrity-checker'
@@ -141,12 +150,16 @@ type FileRowNormalizationInput = {
   readonly collection: BridgeCollection
   /** Dedicated in-memory evidence HMAC key. */
   readonly digestKey: Uint8Array
+  /** Shared total deadline when normalization belongs to a full checker run. */
+  readonly deadline?: CrossDomainIntegrityCheckBridgeInput['deadline']
   /** Optional page-preflight result that prevents repeated validation and parsing. */
   readonly preparedRow?: PreparedFileRow
   /** Raw low-level row used only as HMAC input. */
   readonly rawItem: Readonly<Record<string, AttributeValue>>
   /** Narrow exact-version AWS reader. */
   readonly reader: CrossDomainIntegrityCheckBridgeInput['reader']
+  /** Optional finite signal for standalone normalized-page reads. */
+  readonly signal?: AbortSignal
   /** Strict native File row. */
   readonly row: Record<string, unknown>
 }
@@ -164,10 +177,20 @@ type PreparedFileRow = {
 }
 
 /** Minimal bridge fields consumed while normalizing one raw row. */
-type RowNormalizationBridgeInput = Pick<
-  CrossDomainIntegrityCheckBridgeInput,
-  'auditPseudonymKey' | 'checkedAt' | 'digestKey' | 'reader'
->
+type RowNormalizationBridgeInput = {
+  /** Existing Workspace Audit pseudonym key. */
+  readonly auditPseudonymKey: Uint8Array
+  /** Canonical observation time. */
+  readonly checkedAt: string
+  /** Dedicated evidence authentication key. */
+  readonly digestKey: Uint8Array
+  /** Shared total deadline when normalization belongs to a full checker run. */
+  readonly deadline?: CrossDomainIntegrityCheckBridgeInput['deadline']
+  /** Narrow raw AWS read port. */
+  readonly reader: CrossDomainIntegrityCheckBridgeInput['reader']
+  /** Optional finite signal for standalone normalized-page reads. */
+  readonly signal?: AbortSignal
+}
 
 /** Process-local audit candidate before the latest-resource lifecycle is resolved. */
 export type CrossDomainIntegrityAwsAuditCandidate = {
@@ -214,6 +237,8 @@ export class CrossDomainIntegrityAwsBridgeFailure extends Error {
     | 'KEY_CONFIGURATION_INVALID'
     | 'LIMIT_EXCEEDED'
     | 'NORMALIZATION_FAILED'
+    | 'RESOURCE_ATTESTATION_INVALID'
+    | 'RUNTIME_PROVENANCE_INVALID'
 
   /**
    * Creates a raw-data-free bridge failure.
@@ -225,7 +250,9 @@ export class CrossDomainIntegrityAwsBridgeFailure extends Error {
       | 'AWS_PAGE_INVALID'
       | 'KEY_CONFIGURATION_INVALID'
       | 'LIMIT_EXCEEDED'
-      | 'NORMALIZATION_FAILED',
+      | 'NORMALIZATION_FAILED'
+      | 'RESOURCE_ATTESTATION_INVALID'
+      | 'RUNTIME_PROVENANCE_INVALID',
   ) {
     super(code)
     this.name = 'CrossDomainIntegrityAwsBridgeFailure'
@@ -257,6 +284,8 @@ export type CrossDomainIntegrityAwsNormalizedPageInput = {
   readonly checkedAt: string
   /** Invocation-local restore-drill HMAC key. */
   readonly digestKey: Uint8Array
+  /** Optional total deadline supplied by a bounded higher-level invocation. */
+  readonly deadline?: CrossDomainIntegrityCheckBridgeInput['deadline']
   /** Opaque preceding low-level Scan key. */
   readonly exclusiveStartKey?: Readonly<Record<string, AttributeValue>>
   /** Maximum raw rows accepted from the scan response. */
@@ -265,6 +294,8 @@ export type CrossDomainIntegrityAwsNormalizedPageInput = {
   readonly remainingItemCapacity: number
   /** Narrow isolated AWS reader. */
   readonly reader: CrossDomainIntegrityCheckBridgeInput['reader']
+  /** Caller-owned finite cancellation shared by every raw page read. */
+  readonly signal: AbortSignal
   /** Canonical isolated table target. */
   readonly target: CrossDomainIntegrityTableTarget
 }
@@ -297,6 +328,9 @@ export async function readCrossDomainIntegrityAwsNormalizedPage(
 ): Promise<CrossDomainIntegrityAwsNormalizedPage> {
   requireCanonicalTimestamp(input.checkedAt)
   validateBridgeKeys(input.digestKey, input.auditPseudonymKey)
+  if (!(input.signal instanceof AbortSignal) || input.signal.aborted) {
+    throw new CrossDomainIntegrityAwsBridgeFailure('AWS_PAGE_INVALID')
+  }
   if (!Number.isSafeInteger(input.pageSize) || input.pageSize < 1 || input.pageSize > 100) {
     throw new CrossDomainIntegrityAwsBridgeFailure('AWS_PAGE_INVALID')
   }
@@ -305,12 +339,23 @@ export async function readCrossDomainIntegrityAwsNormalizedPage(
     input.remainingItemCapacity < 0 ||
     input.remainingItemCapacity > 1_000_000
   ) throw new CrossDomainIntegrityAwsBridgeFailure('LIMIT_EXCEEDED')
-  const output = await input.reader.scanPage(
-    input.target,
-    input.exclusiveStartKey === undefined
-      ? undefined
-      : parseRawAttributeMap(input.exclusiveStartKey),
-  )
+  const exclusiveStartKey = input.exclusiveStartKey === undefined
+    ? undefined
+    : parseRawAttributeMap(input.exclusiveStartKey)
+  const output = input.deadline === undefined
+    ? await input.reader.scanPage(
+      input.target,
+      exclusiveStartKey,
+      input.signal,
+    )
+    : await runCrossDomainIntegrityRequestWithinDeadline(
+      input.deadline,
+      (signal) => input.reader.scanPage(
+        input.target,
+        exclusiveStartKey,
+        signal,
+      ),
+    )
   const page = parseRawScanPage(output, input.pageSize)
   if (
     input.exclusiveStartKey !== undefined &&
@@ -397,6 +442,7 @@ export async function readCrossDomainIntegrityAwsNormalizedPage(
 export async function runCrossDomainIntegrityAwsCheck(
   input: CrossDomainIntegrityCheckBridgeInput,
 ): Promise<CrossDomainIntegrityResult> {
+  requireCrossDomainIntegrityInvocationDeadline(input.deadline)
   requireCanonicalTimestamp(input.checkedAt)
   validateCrossDomainIntegrityLimits({
     maxItems: input.maxItems,
@@ -404,20 +450,37 @@ export async function runCrossDomainIntegrityAwsCheck(
     pageSize: input.pageSize,
   })
   validateBridgeKeys(input.digestKey, input.auditPseudonymKey)
+  requireCrossDomainIntegrityInvocationDeadline(input.deadline)
+  const resourceAttestationGuard = prepareResourceAttestationGuard(input)
+  await resourceAttestationGuard.measureAndRequireMatch()
+  requireCrossDomainIntegrityInvocationDeadline(input.deadline)
   const collection = createBridgeCollection(input.maxItems, input.maxPages)
   for (const target of tableScanOrder) {
     await scanAndNormalizeTable(input, target, collection)
+    requireCrossDomainIntegrityInvocationDeadline(input.deadline)
     if (collection.limitReached) break
   }
   finalizePendingAuditReferences(collection)
+  requireCrossDomainIntegrityInvocationDeadline(input.deadline)
   const externalFileEvidence = createExternalFileEvidence(input.digestKey, collection)
+  requireCrossDomainIntegrityInvocationDeadline(input.deadline)
+  await resourceAttestationGuard.measureAndRequireMatch()
+  requireCrossDomainIntegrityInvocationDeadline(input.deadline)
+  const liveRuntimeObservation = completeLiveRuntimeObservation(input)
+  const resultCheckedAt = liveRuntimeObservation?.completedAt ?? input.checkedAt
   return runCrossDomainIntegrityCheck({
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
-    checkedAt: input.checkedAt,
+    checkedAt: resultCheckedAt,
+    observationMode: input.observationMode,
+    liveRuntimeObservation,
+    deadline: input.deadline,
     role: input.role,
     digestKey: input.digestKey,
     resourceBindingDigest: input.resourceBindingDigest,
     resourceIdentities: input.resourceIdentities,
+    ...(input.resourceIdentityScheme === undefined
+      ? {}
+      : { resourceIdentityScheme: input.resourceIdentityScheme }),
     resourceIdentityDigest: input.resourceIdentityDigest,
     limits: {
       maxPages: input.maxPages,
@@ -427,6 +490,156 @@ export async function runCrossDomainIntegrityAwsCheck(
     reader: createNormalizedReadPort(collection.items, collection.limitReached),
     externalFileEvidence,
   })
+}
+
+/** Stable pre/post immutable resource-attestation measurement capability. */
+type CrossDomainIntegrityResourceAttestationGuard = {
+  /** Measures every resource and requires exact equality with the snapshot. */
+  readonly measureAndRequireMatch: () => Promise<void>
+}
+
+/**
+ * Prepares the exact preflight/postflight resource-incarnation guard.
+ *
+ * @param input - Strict bridge input carrying optional live attestation state.
+ * @returns No-op logical guard or one captured live measurement capability.
+ */
+function prepareResourceAttestationGuard(
+  input: CrossDomainIntegrityCheckBridgeInput,
+): CrossDomainIntegrityResourceAttestationGuard {
+  const observationMode = input.observationMode ?? 'logical'
+  if (observationMode === 'logical') {
+    if (
+      input.resourceAttestation !== undefined ||
+      input.resourceIdentityScheme !== undefined
+    ) {
+      throw new CrossDomainIntegrityAwsBridgeFailure(
+        'RESOURCE_ATTESTATION_INVALID',
+      )
+    }
+    return Object.freeze({
+      measureAndRequireMatch: () => Promise.resolve(),
+    })
+  }
+  const measureResourceAttestation =
+    input.reader.measureResourceAttestation
+  if (
+    observationMode !== 'migration-rehearsal-live' ||
+    input.resourceIdentityScheme !==
+      CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME ||
+    input.resourceAttestation === undefined ||
+    typeof measureResourceAttestation !== 'function'
+  ) {
+    throw new CrossDomainIntegrityAwsBridgeFailure(
+      'RESOURCE_ATTESTATION_INVALID',
+    )
+  }
+  let attestation: CrossDomainIntegrityResourceAttestation
+  try {
+    attestation = parseCrossDomainIntegrityResourceAttestation(
+      input.resourceAttestation,
+    )
+  } catch {
+    throw new CrossDomainIntegrityAwsBridgeFailure(
+      'RESOURCE_ATTESTATION_INVALID',
+    )
+  }
+  const expectedResourceIdentities =
+    createCrossDomainIntegrityImmutableResourceIdentities(
+      attestation,
+      input.digestKey,
+    )
+  const expectedResourceIdentityDigest =
+    calculateCrossDomainIntegrityResourceIdentityDigest(
+      expectedResourceIdentities,
+      input.digestKey,
+    )
+  if (
+    expectedResourceIdentityDigest !== input.resourceIdentityDigest ||
+    expectedResourceIdentities.length !== input.resourceIdentities.length ||
+    expectedResourceIdentities.some((identity, index) => {
+      const supplied = input.resourceIdentities[index]
+      return supplied === undefined ||
+        supplied.target !== identity.target ||
+        supplied.identityDigest !== identity.identityDigest
+    })
+  ) {
+    throw new CrossDomainIntegrityAwsBridgeFailure(
+      'RESOURCE_ATTESTATION_INVALID',
+    )
+  }
+  const marker = Object.freeze({ ...attestation.bucket.marker })
+  const reader = input.reader
+  return Object.freeze({
+    measureAndRequireMatch: async (): Promise<void> => {
+      const measured = await runCrossDomainIntegrityRequestWithinDeadline(
+        input.deadline,
+        (signal) => Reflect.apply(
+          measureResourceAttestation,
+          reader,
+          [marker, signal],
+        ),
+      )
+      let parsedMeasured: CrossDomainIntegrityResourceAttestation
+      try {
+        parsedMeasured = parseCrossDomainIntegrityResourceAttestation(measured)
+      } catch {
+        throw new CrossDomainIntegrityAwsBridgeFailure(
+          'RESOURCE_ATTESTATION_INVALID',
+        )
+      }
+      if (!sameCrossDomainIntegrityResourceAttestation(
+        attestation,
+        parsedMeasured,
+      )) {
+        throw new CrossDomainIntegrityAwsBridgeFailure(
+          'RESOURCE_ATTESTATION_INVALID',
+        )
+      }
+    },
+  })
+}
+
+/**
+ * Samples live completion only after all raw AWS reads have completed.
+ *
+ * @param input - Strict bridge input carrying logical or live observation state.
+ * @returns Trusted live timestamps, or undefined for a logical invocation.
+ */
+function completeLiveRuntimeObservation(
+  input: CrossDomainIntegrityCheckBridgeInput,
+): CrossDomainIntegrityLiveRuntimeObservation | undefined {
+  const observationMode = input.observationMode ?? 'logical'
+  if (observationMode === 'logical') {
+    if (input.liveRuntime !== undefined) {
+      throw new CrossDomainIntegrityAwsBridgeFailure(
+        'RUNTIME_PROVENANCE_INVALID',
+      )
+    }
+    return undefined
+  }
+  const liveRuntime = input.liveRuntime
+  if (
+    observationMode !== 'migration-rehearsal-live' ||
+    liveRuntime === undefined ||
+    liveRuntime.startedAt !== input.checkedAt
+  ) {
+    throw new CrossDomainIntegrityAwsBridgeFailure(
+      'RUNTIME_PROVENANCE_INVALID',
+    )
+  }
+  requireCanonicalTimestamp(liveRuntime.startedAt)
+  const completedAt = liveRuntime.sampleCompletedAt()
+  requireCanonicalTimestamp(completedAt)
+  if (Date.parse(completedAt) < Date.parse(liveRuntime.startedAt)) {
+    throw new CrossDomainIntegrityAwsBridgeFailure(
+      'RUNTIME_PROVENANCE_INVALID',
+    )
+  }
+  return {
+    startedAt: liveRuntime.startedAt,
+    completedAt,
+  }
 }
 
 /**
@@ -511,7 +724,14 @@ async function scanAndNormalizeTable(
       return
     }
     collection.rawPageCount += 1
-    const output = await input.reader.scanPage(target, exclusiveStartKey)
+    const output = await runCrossDomainIntegrityRequestWithinDeadline(
+      input.deadline,
+      (signal) => input.reader.scanPage(
+        target,
+        exclusiveStartKey,
+        signal,
+      ),
+    )
     const page = parseRawScanPage(output, input.pageSize)
     if (collection.rawPageCount === collection.rawPageCapacity && page.nextKey) {
       collection.limitReached = true
@@ -608,10 +828,12 @@ async function normalizeRow(
   return normalizeFileRow({
     checkedAt: input.checkedAt,
     collection,
+    ...(input.deadline === undefined ? {} : { deadline: input.deadline }),
     digestKey: input.digestKey,
     ...(preparedFileRow === undefined ? {} : { preparedRow: preparedFileRow }),
     rawItem,
     reader: input.reader,
+    ...(input.signal === undefined ? {} : { signal: input.signal }),
     row,
   })
 }
@@ -1340,10 +1562,15 @@ async function normalizeFileRow(
       return []
     }
     input.collection.exactObjectVersionReadCount += 1
-    const observed = await observeExactFileObject(input.reader, {
-      ...reference,
-      objectVersionId,
-    })
+    const observed = await observeExactFileObject(
+      input.reader,
+      {
+        ...reference,
+        objectVersionId,
+      },
+      input.deadline,
+      input.signal,
+    )
     if (!observed) continue
     observations.push(observed.observation)
     observedByIdentity.set(fileObjectIdentity(reference.objectKey, objectVersionId), observed)
@@ -1409,6 +1636,8 @@ async function normalizeFileRow(
 async function observeExactFileObject(
   reader: CrossDomainIntegrityCheckBridgeInput['reader'],
   reference: FileIntegrityReference & { readonly objectVersionId: string },
+  deadline?: CrossDomainIntegrityCheckBridgeInput['deadline'],
+  signal?: AbortSignal,
 ): Promise<ObservedFileObject | undefined> {
   const objectReference: CrossDomainIntegrityObjectVersionReference = {
     bucket: 'file',
@@ -1421,11 +1650,26 @@ async function observeExactFileObject(
     GetObjectTaggingCommandOutput,
   ]
   try {
-    responses = await Promise.all([
-      reader.headObject(objectReference),
-      reader.getObjectAttributes(objectReference),
-      reader.getObjectTagging(objectReference),
-    ])
+    responses = deadline === undefined
+      ? await Promise.all([
+        reader.headObject(objectReference, signal),
+        reader.getObjectAttributes(objectReference, signal),
+        reader.getObjectTagging(objectReference, signal),
+      ])
+      : await Promise.all([
+        runCrossDomainIntegrityRequestWithinDeadline(
+          deadline,
+          (signal) => reader.headObject(objectReference, signal),
+        ),
+        runCrossDomainIntegrityRequestWithinDeadline(
+          deadline,
+          (signal) => reader.getObjectAttributes(objectReference, signal),
+        ),
+        runCrossDomainIntegrityRequestWithinDeadline(
+          deadline,
+          (signal) => reader.getObjectTagging(objectReference, signal),
+        ),
+      ])
   } catch (error) {
     if (isMissingFileObjectVersionError(error)) return undefined
     throw error

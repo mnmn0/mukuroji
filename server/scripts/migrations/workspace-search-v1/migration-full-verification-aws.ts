@@ -519,6 +519,14 @@ export interface WorkspaceSearchMigrationFullVerificationAwsPort {
     >
 
   /**
+   * Replays the exact result authenticated by the authoritative verified root.
+   *
+   * @returns Strict independently accumulated result, or undefined before publication.
+   */
+  readVerifiedResult():
+    Promise<WorkspaceSearchMigrationFullVerificationResult | undefined>
+
+  /**
    * Scans and atomically persists one exact verification page.
    *
    * @param input - Exact predecessor revision, lease, and location.
@@ -642,6 +650,14 @@ type PreparedVerificationPlan = {
   /** Compact exact two-root plan-artifact binding. */
   readonly artifactBinding:
     WorkspaceSearchMigrationFullVerificationPlanArtifactBinding
+}
+
+/** Authoritative verified root paired with its exact replayed result. */
+type WorkspaceSearchMigrationVerifiedRootObservation = {
+  /** Strict immutable authoritative verified root. */
+  readonly root: WorkspaceSearchMigrationFullVerificationVerifiedRoot
+  /** Strict pure result independently reconstructed from durable progress. */
+  readonly result: WorkspaceSearchMigrationFullVerificationResult
 }
 
 /**
@@ -898,63 +914,84 @@ implements WorkspaceSearchMigrationFullVerificationAwsPort {
     Promise<
       WorkspaceSearchMigrationFullVerificationVerifiedRoot | undefined
   > {
-    return runVerificationBoundary(async () => {
-      const [durable, preparedPlan, appliedRoot, terminal] =
-        await Promise.all([
-          this.readRoot(),
-          this.getPreparedPlan(),
-          this.requireAppliedRoot(),
-          this.readState(),
-        ])
-      requireAppliedRootBinding(
-        this.binding,
-        preparedPlan,
-        appliedRoot,
-      )
-      if (durable === undefined) return undefined
-      if (
-        terminal === undefined ||
-        terminal.state.stateDigest !==
-          durable.root.terminalStateDigest
-      ) {
-        return failVerification('INVALID_STATE')
-      }
-      await this.requireStateReceiptChain(
-        terminal.state,
-        preparedPlan,
-        appliedRoot,
-        'authoritative-full',
-      )
-      const terminalReceipt = await this.requireTerminalReceipt(
-        terminal.state,
-      )
-      const applySeal = readApplySealCandidate(
-        await this.dependencies.readApplySeal(
-          appliedRoot.sealReference,
+    return runVerificationBoundary(async () =>
+      (await this.readVerifiedRootObservation())?.root
+    )
+  }
+
+  /**
+   * Replays the exact independent result bound by the verified root.
+   *
+   * @returns Strict result or undefined before authoritative publication.
+   */
+  async readVerifiedResult():
+    Promise<WorkspaceSearchMigrationFullVerificationResult | undefined> {
+    return runVerificationBoundary(async () =>
+      (await this.readVerifiedRootObservation())?.result
+    )
+  }
+
+  /**
+   * Reconstructs one authoritative root and its exact semantic result.
+   *
+   * @returns Strict paired observation, or undefined before root publication.
+   */
+  private async readVerifiedRootObservation():
+    Promise<WorkspaceSearchMigrationVerifiedRootObservation | undefined> {
+    const [durable, preparedPlan, appliedRoot, terminal] =
+      await Promise.all([
+        this.readRoot(),
+        this.getPreparedPlan(),
+        this.requireAppliedRoot(),
+        this.readState(),
+      ])
+    requireAppliedRootBinding(
+      this.binding,
+      preparedPlan,
+      appliedRoot,
+    )
+    if (durable === undefined) return undefined
+    if (
+      terminal === undefined ||
+      terminal.state.stateDigest !==
+        durable.root.terminalStateDigest
+    ) {
+      return failVerification('INVALID_STATE')
+    }
+    await this.requireStateReceiptChain(
+      terminal.state,
+      preparedPlan,
+      appliedRoot,
+      'authoritative-full',
+    )
+    const terminalReceipt = await this.requireTerminalReceipt(
+      terminal.state,
+    )
+    const applySeal = readApplySealCandidate(
+      await this.dependencies.readApplySeal(
+        appliedRoot.sealReference,
+      ),
+    )
+    requireExactApplySeal(appliedRoot, applySeal)
+    const result = completeWorkspaceSearchMigrationFullVerification({
+      plan: preparedPlan.plan,
+      progress:
+        decodeWorkspaceSearchMigrationFullVerificationProgressSnapshot(
+          terminal.state.progress,
         ),
-      )
-      requireExactApplySeal(appliedRoot, applySeal)
-      const result =
-        completeWorkspaceSearchMigrationFullVerification({
-          plan: preparedPlan.plan,
-          progress:
-            decodeWorkspaceSearchMigrationFullVerificationProgressSnapshot(
-              terminal.state.progress,
-            ),
-          applySeal,
-          sealedPlanningAuthority:
-            this.binding.sealedPlanningAuthority,
-        })
-      await this.requireExistingRootResult(
-        durable.root,
-        preparedPlan,
-        appliedRoot,
-        terminal.state,
-        terminalReceipt.receipt,
-        result,
-      )
-      return durable.root
+      applySeal,
+      sealedPlanningAuthority:
+        this.binding.sealedPlanningAuthority,
     })
+    await this.requireExistingRootResult(
+      durable.root,
+      preparedPlan,
+      appliedRoot,
+      terminal.state,
+      terminalReceipt.receipt,
+      result,
+    )
+    return Object.freeze({ root: durable.root, result })
   }
 
   /**

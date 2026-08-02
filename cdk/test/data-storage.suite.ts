@@ -570,6 +570,187 @@ test('file bucket is private durable and scoped for direct browser transfers', (
   template.hasOutput('FileBucketName', {});
 });
 
+test('file bucket incarnation marker is create-once, immutable, and published exactly', () => {
+  const template = synthesizedTemplate;
+  const document = template.toJSON();
+  const fileBucketLogicalId = document.Outputs.FileBucketName?.Value?.Ref;
+  if (typeof fileBucketLogicalId !== 'string') {
+    throw new Error('File bucket output does not reference the retained bucket.');
+  }
+  expect(fileBucketLogicalId).toBe('FileBucketCDFCD6DE');
+
+  const markerEntries = Object.entries(
+    template.findResources('Custom::FileBucketIncarnationMarker'),
+  );
+  expect(markerEntries).toHaveLength(1);
+  const markerEntry = markerEntries[0];
+  if (!markerEntry) {
+    throw new Error('File bucket incarnation marker was not synthesized.');
+  }
+  const [markerLogicalId, markerResource] = markerEntry;
+  expect(markerResource).toEqual(expect.objectContaining({
+    Properties: expect.objectContaining({
+      BucketName: { Ref: fileBucketLogicalId },
+      ExpectedAccount: { Ref: 'AWS::AccountId' },
+      MarkerKey: 'system/data-integrity/file-bucket-incarnation/v1.json',
+      ServiceToken: expect.anything(),
+    }),
+  }));
+
+  expect(document.Outputs.FileBucketIncarnationMarkerKey?.Value).toEqual({
+    'Fn::GetAtt': [markerLogicalId, 'Key'],
+  });
+  expect(document.Outputs.FileBucketIncarnationMarkerVersionId?.Value).toEqual({
+    'Fn::GetAtt': [markerLogicalId, 'VersionId'],
+  });
+  expect(
+    document.Outputs.FileBucketIncarnationMarkerChecksumSha256?.Value,
+  ).toEqual({
+    'Fn::GetAtt': [markerLogicalId, 'ChecksumSHA256'],
+  });
+  expect(document.Outputs.FileBucketIncarnationMarkerSize?.Value).toEqual({
+    'Fn::GetAtt': [markerLogicalId, 'Size'],
+  });
+
+  const fileBucket = document.Resources[fileBucketLogicalId];
+  expect(fileBucket.Properties).not.toHaveProperty('ObjectLockEnabled');
+  expect(fileBucket.Properties).not.toHaveProperty('ObjectLockConfiguration');
+
+  const bucketPolicyEntry = Object.entries(
+    template.findResources('AWS::S3::BucketPolicy'),
+  ).find(([, resource]) =>
+    resource.Properties?.Bucket?.Ref === fileBucketLogicalId);
+  if (!bucketPolicyEntry) {
+    throw new Error('File bucket policy was not synthesized.');
+  }
+  const [bucketPolicyLogicalId, bucketPolicy] = bucketPolicyEntry;
+  const markerDependencies = Array.isArray(markerResource.DependsOn)
+    ? markerResource.DependsOn
+    : [markerResource.DependsOn];
+  expect(markerDependencies).toContain(bucketPolicyLogicalId);
+  const bucketPolicyDependencies = Array.isArray(bucketPolicy.DependsOn)
+    ? bucketPolicy.DependsOn
+    : [bucketPolicy.DependsOn];
+  expect(bucketPolicyDependencies).not.toContain(markerLogicalId);
+  const markerObjectArn = {
+    'Fn::Join': [
+      '',
+      [
+        { 'Fn::GetAtt': [fileBucketLogicalId, 'Arn'] },
+        '/system/data-integrity/file-bucket-incarnation/v1.json',
+      ],
+    ],
+  };
+  expect(bucketPolicy.Properties.PolicyDocument.Statement).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        Action: ['s3:DeleteObject', 's3:DeleteObjectVersion'],
+        Effect: 'Deny',
+        Principal: { AWS: '*' },
+        Resource: markerObjectArn,
+        Sid: 'FileBucketIncarnationMarkerCannotBeDeleted',
+      }),
+      expect.objectContaining({
+        Action: 's3:PutObject',
+        Condition: {
+          ArnNotEquals: {
+            'aws:PrincipalArn': expect.anything(),
+          },
+        },
+        Effect: 'Deny',
+        Principal: { AWS: '*' },
+        Resource: markerObjectArn,
+        Sid: 'OnlyFileBucketIncarnationMarkerProviderCanPut',
+      }),
+      expect.objectContaining({
+        Action: 's3:PutObject',
+        Condition: {
+          StringNotEquals: {
+            's3:if-none-match': '*',
+          },
+        },
+        Effect: 'Deny',
+        Principal: { AWS: '*' },
+        Resource: markerObjectArn,
+        Sid: 'FileBucketIncarnationMarkerRequiresCreateOnlyPut',
+      }),
+    ]),
+  );
+
+  const providerFunction = Object.values(
+    template.findResources('AWS::Lambda::Function'),
+  ).find((resource) =>
+    resource.Properties?.Description ===
+      'Creates or reconciles the immutable file-bucket incarnation marker.');
+  expect(providerFunction).toEqual(expect.objectContaining({
+    Properties: expect.objectContaining({
+      Handler: 'index.handler',
+      MemorySize: 256,
+      Runtime: 'nodejs22.x',
+      Timeout: 30,
+      TracingConfig: { Mode: 'Active' },
+    }),
+  }));
+  const providerPrincipalBoundary =
+    bucketPolicy.Properties.PolicyDocument.Statement.find(
+      (statement: unknown) =>
+        statement !== null &&
+        typeof statement === 'object' &&
+        Reflect.get(statement, 'Sid') ===
+          'OnlyFileBucketIncarnationMarkerProviderCanPut',
+    );
+  const providerPrincipalCondition =
+    providerPrincipalBoundary !== null &&
+    typeof providerPrincipalBoundary === 'object'
+      ? Reflect.get(providerPrincipalBoundary, 'Condition')
+      : undefined;
+  expect(providerPrincipalCondition).toEqual({
+    ArnNotEquals: {
+      'aws:PrincipalArn': providerFunction?.Properties.Role,
+    },
+  });
+
+  const providerPolicy = Object.values(
+    template.findResources('AWS::IAM::Policy'),
+  ).find((resource) => {
+    const serialized = JSON.stringify(resource);
+    return serialized.includes('FileBucketIncarnationMarkerFunction') &&
+      serialized.includes('s3:PutObject');
+  });
+  if (!providerPolicy) {
+    throw new Error('Marker provider IAM policy was not synthesized.');
+  }
+  expect(providerPolicy.Properties.PolicyDocument.Statement).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        Action: 's3:GetBucketVersioning',
+        Effect: 'Allow',
+        Resource: { 'Fn::GetAtt': [fileBucketLogicalId, 'Arn'] },
+      }),
+      expect.objectContaining({
+        Action: [
+          's3:GetObject',
+          's3:GetObjectAttributes',
+          's3:GetObjectVersion',
+          's3:GetObjectVersionAttributes',
+          's3:PutObject',
+        ],
+        Effect: 'Allow',
+        Resource: {
+          'Fn::Join': [
+            '',
+            [
+              { 'Fn::GetAtt': [fileBucketLogicalId, 'Arn'] },
+              '/system/data-integrity/file-bucket-incarnation/v1.json',
+            ],
+          ],
+        },
+      }),
+    ]),
+  );
+  expect(JSON.stringify(providerPolicy)).not.toContain('"s3:ListBucket"');
+});
+
 test('collaboration notifications and realtime sessions use production-safe DynamoDB schemas', () => {
   const template = synthesizedTemplate;
   const bootstrapPayload = JSON.stringify(template.findResources('Custom::AWS'));

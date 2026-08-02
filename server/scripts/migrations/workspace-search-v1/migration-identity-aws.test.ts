@@ -15,6 +15,8 @@ import {
   type GetItemCommandOutput,
   type GlobalSecondaryIndexDescription,
   type KeySchemaElement,
+  QueryCommand,
+  type QueryCommandOutput,
   ResourceNotFoundException,
   ScanCommand,
   type ScanCommandOutput,
@@ -194,6 +196,17 @@ import {
   MAINTENANCE_EVIDENCE_MAX_BYTES,
   maintenanceRuntimeControlSurfaces,
 } from './maintenance-evidence'
+import {
+  createWorkspaceSearchMigrationRehearsalFaultController,
+  type WorkspaceSearchMigrationRehearsalApplyCheckpointFailpoint,
+  type WorkspaceSearchMigrationRehearsalFaultPlan,
+  type WorkspaceSearchMigrationRehearsalFaultReceipt,
+  type WorkspaceSearchMigrationRehearsalPlanningPageFailpoint,
+} from './migration-rehearsal-faults'
+import {
+  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_APPROVAL,
+  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE,
+} from './migration-rehearsal-permit'
 
 const TEST_ACCOUNT = '123456789012'
 const TEST_REGION = 'ap-northeast-1'
@@ -509,6 +522,15 @@ class RecordingIdentityAwsTransport
   /** Recorded DynamoDB target Scan commands. */
   readonly scanTargetCommands: ScanCommand[] = []
 
+  /** Session-linked cancellation signals received by target Scans. */
+  readonly scanTargetSignals: (AbortSignal | undefined)[] = []
+
+  /** Recorded strongly consistent reconciliation Query commands. */
+  readonly queryStatePageCommands: QueryCommand[] = []
+
+  /** Ordered low-level reconciliation Query pages returned by this fake. */
+  readonly queryStatePageOutputs: QueryCommandOutput[] = []
+
   /** Recorded strongly consistent source-evidence point reads. */
   readonly getSourceEvidenceCommands: GetItemCommand[] = []
 
@@ -530,6 +552,13 @@ class RecordingIdentityAwsTransport
   readonly transactWritePrePlanAuthorityCommands:
     TransactWriteItemsCommand[] = []
 
+  /** Recorded strongly consistent rehearsal stage-reservation reads. */
+  readonly getRehearsalStageReservationCommands: GetItemCommand[] = []
+
+  /** Recorded rehearsal stage-reservation CAS transactions. */
+  readonly transactWriteRehearsalStageReservationCommands:
+    TransactWriteItemsCommand[] = []
+
   /** Number of low-level authority write preparations. */
   preparePrePlanAuthorityWriteCount = 0
 
@@ -549,6 +578,10 @@ class RecordingIdentityAwsTransport
 
   /** Durable fake pre-plan authority items keyed by recordKey. */
   private readonly prePlanAuthorityItems =
+    new Map<string, Readonly<Record<string, AttributeValue>>>()
+
+  /** Durable fake rehearsal stage-head items keyed by recordKey. */
+  private readonly rehearsalStageReservationItems =
     new Map<string, Readonly<Record<string, AttributeValue>>>()
 
   /** Optional synchronous effect after recording an evidence point read. */
@@ -856,18 +889,67 @@ class RecordingIdentityAwsTransport
    * Records one target Scan command.
    *
    * @param command - Exact command under test.
+   * @param signal - Optional managed-session cancellation signal.
    * @returns Configured fake response.
    */
-  async scanTarget(command: ScanCommand): Promise<ScanCommandOutput> {
+  async scanTarget(
+    command: ScanCommand,
+    signal?: AbortSignal,
+  ): Promise<ScanCommandOutput> {
     this.scanTargetCommands.push(command)
+    this.scanTargetSignals.push(signal)
     this.scanTargetEffect?.()
     if (this.scanTargetFailure !== undefined) {
       throw this.scanTargetFailure
     }
     if (this.scanTargetDeferred !== undefined) {
-      return await this.scanTargetDeferred
+      const deferred = this.scanTargetDeferred
+      if (signal === undefined) return await deferred
+      return await new Promise<ScanCommandOutput>((resolve, reject) => {
+        /** Rejects the finite fake request when its SDK signal is aborted. */
+        const rejectAfterAbort = (): void => {
+          signal.removeEventListener('abort', rejectAfterAbort)
+          reject(new DOMException('Target Scan aborted.', 'AbortError'))
+        }
+        if (signal.aborted) {
+          rejectAfterAbort()
+          return
+        }
+        signal.addEventListener('abort', rejectAfterAbort, { once: true })
+        deferred.then(
+          (output) => {
+            signal.removeEventListener('abort', rejectAfterAbort)
+            resolve(output)
+          },
+          (error: unknown) => {
+            signal.removeEventListener('abort', rejectAfterAbort)
+            reject(error)
+          },
+        )
+      })
     }
     return this.scanTargetOutput
+  }
+
+  /**
+   * Records and serves one strongly consistent reconciliation Query page.
+   *
+   * @param command - Exact collector-owned base-table Query command.
+   * @param signal - Request-local collector deadline signal.
+   * @returns Next configured page or one empty terminal page.
+   */
+  async queryStatePage(
+    command: QueryCommand,
+    signal: AbortSignal,
+  ): Promise<QueryCommandOutput> {
+    if (signal.aborted) throw new Error('Query signal aborted.')
+    this.queryStatePageCommands.push(command)
+    return structuredClone(this.queryStatePageOutputs.shift() ?? {
+      $metadata: {},
+      Count: 0,
+      Items: [],
+      ScannedCount: 0,
+    })
   }
 
   /**
@@ -1125,6 +1207,67 @@ class RecordingIdentityAwsTransport
       this.prePlanAuthorityItems.set(entry.recordKey, entry.item)
     }
     this.transactWritePrePlanAuthorityPostCommitEffect?.()
+    return { $metadata: {} }
+  }
+
+  /**
+   * Records and serves one exact rehearsal stage-reservation point read.
+   *
+   * @param command - Exact adapter-owned GetItem command.
+   * @returns Detached durable stage-head item when one exists.
+   */
+  async getRehearsalStageReservation(
+    command: GetItemCommand,
+  ): Promise<GetItemCommandOutput> {
+    this.getRehearsalStageReservationCommands.push(command)
+    const recordKey = command.input.Key?.recordKey?.S
+    if (recordKey === undefined) {
+      throw new Error('Expected exact rehearsal stage-head record key.')
+    }
+    const item = this.rehearsalStageReservationItems.get(recordKey)
+    return {
+      $metadata: {},
+      ...(item === undefined ? {} : { Item: structuredClone(item) }),
+    }
+  }
+
+  /**
+   * Records and installs every rehearsal stage-reservation Put item.
+   *
+   * The reservation adapter tests own exact conditional semantics. This
+   * managed-session fake proves capability routing and durable item exposure.
+   *
+   * @param command - Exact adapter-owned transaction command.
+   * @returns Empty successful transaction response.
+   */
+  async transactWriteRehearsalStageReservation(
+    command: TransactWriteItemsCommand,
+  ): Promise<TransactWriteItemsCommandOutput> {
+    this.transactWriteRehearsalStageReservationCommands.push(command)
+    const pending: {
+      /** Exact deterministic rehearsal stage-head record key. */
+      readonly recordKey: string
+      /** Detached low-level rehearsal stage-head item. */
+      readonly item: Readonly<Record<string, AttributeValue>>
+    }[] = []
+    for (const entry of command.input.TransactItems ?? []) {
+      if (entry.Put === undefined) continue
+      const item = entry.Put.Item
+      const recordKey = item?.recordKey?.S
+      if (item === undefined || recordKey === undefined) {
+        throw new Error('Expected one exact rehearsal stage-head Put item.')
+      }
+      pending.push({
+        recordKey,
+        item: structuredClone(item),
+      })
+    }
+    if (pending.length === 0) {
+      throw new Error('Expected at least one rehearsal stage-head Put item.')
+    }
+    for (const entry of pending) {
+      this.rehearsalStageReservationItems.set(entry.recordKey, entry.item)
+    }
     return { $metadata: {} }
   }
 
@@ -1708,6 +1851,21 @@ function createRecordingManagedRateHarness(
         cadenceWaitMilliseconds: 0,
         maximumInFlight: 0,
       }),
+      closeAndReadEvidence: async () => {
+        accepting = false
+        return {
+          version:
+            WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
+          policyVersion: '0'.repeat(64),
+          attemptCount: 0,
+          forfeitedAttemptCount: 0,
+          throttleCount: 0,
+          budgetStopCount: 0,
+          cadenceWaitCount: 0,
+          cadenceWaitMilliseconds: 0,
+          maximumInFlight: 0,
+        }
+      },
       close: async () => {
         accepting = false
       },
@@ -2117,6 +2275,184 @@ describe('Workspace Search migration AWS identity adapter', () => {
     expect(transport.describeTableCommands).toHaveLength(stateDescribeCount)
     port.close()
   })
+
+  test(
+    'drains admitted writes after claimed reservation expiry and rejects fresh I/O',
+    async () => {
+      for (const responseLost of [false, true]) {
+        const requested = createRequestedResources()
+        const transport = new RecordingIdentityAwsTransport()
+        seedValidMeasurementOutputs(transport, requested)
+        const permitIssuedAt = '2026-07-28T03:19:00.000Z'
+        const reservationExpiresAt = '2026-07-28T03:21:00.000Z'
+        const permitExpiresAt = '2026-07-28T03:22:00.000Z'
+        let permitClockAt = '2026-07-28T03:20:00.000Z'
+        let expiredDescribeTableCount = 0
+        let expiredAuthorityReadCount = 0
+        transport.describeTableEffect = () => {
+          if (permitClockAt === reservationExpiresAt) {
+            expiredDescribeTableCount += 1
+          }
+        }
+        transport.getPrePlanAuthorityEffect = () => {
+          if (permitClockAt === reservationExpiresAt) {
+            expiredAuthorityReadCount += 1
+          }
+        }
+        const port = createAwsWorkspaceSearchMigrationIdentityPort(
+          requested,
+          () => transport,
+          () => new Date('2026-07-28T03:20:00.000Z'),
+        )
+        await port.measureConfiguration()
+        const managedRate = installRecordingManagedRateHarness(
+          port,
+          transport,
+        )
+        if (!Reflect.set(port, 'rehearsalGuard', {
+          permit: {
+            issuedAt: permitIssuedAt,
+            expiresAt: permitExpiresAt,
+          },
+          clock: () => new Date(permitClockAt),
+        })) {
+          throw new Error('Expected test-only rehearsal guard installation.')
+        }
+        const claimedStageHead = Object.freeze({
+          manifestDigest: 'a'.repeat(64),
+          completedStageOrdinal: 0,
+          headReceiptDigest: null,
+          activeReservationDigest: 'b'.repeat(64),
+          activeStageOrdinal: 1,
+          activeExpiresAt: reservationExpiresAt,
+          abandonmentCount: 0,
+          abandonmentRootDigest: 'c'.repeat(64),
+          revision: 1,
+        })
+        const malformedClaimedStageHeads = [
+          Object.freeze({
+            ...claimedStageHead,
+            activeReservationDigest: null,
+          }),
+          Object.freeze({
+            ...claimedStageHead,
+            activeStageOrdinal: null,
+          }),
+          Object.freeze({
+            ...claimedStageHead,
+            activeExpiresAt: null,
+          }),
+          Object.freeze({
+            ...claimedStageHead,
+            activeStageOrdinal: 2,
+          }),
+        ]
+        const preMalformedDescribeCount =
+          transport.describeTableCommands.length
+        for (const malformedHead of malformedClaimedStageHeads) {
+          expect(Reflect.set(
+            port,
+            'claimedRehearsalStageHead',
+            malformedHead,
+          )).toBe(true)
+          await expect(port.describeTable(
+            requested.tables['migration-state'],
+          )).rejects.toMatchObject({
+            code: 'NON_PRODUCTION_REHEARSAL_GUARD_FAILED',
+          })
+        }
+        expect(transport.describeTableCommands).toHaveLength(
+          preMalformedDescribeCount,
+        )
+        if (!Reflect.set(
+          port,
+          'claimedRehearsalStageHead',
+          claimedStageHead,
+        )) {
+          throw new Error('Expected test-only claimed stage installation.')
+        }
+        let parallelDescribe: Promise<DescribeTableCommandOutput> | undefined
+        let escapedDescribe: Promise<DescribeTableCommandOutput> | undefined
+        let releaseEscapedDescribe: (() => void) | undefined
+        const escapedDescribeGate = new Promise<void>((resolve) => {
+          releaseEscapedDescribe = resolve
+        })
+        transport.transactWritePrePlanAuthorityEffect = () => {
+          permitClockAt = reservationExpiresAt
+          parallelDescribe = port.describeTable(
+            requested.tables['migration-state'],
+          )
+          void parallelDescribe.catch(() => undefined)
+          escapedDescribe = (async () => {
+            await escapedDescribeGate
+            return await port.describeTable(
+              requested.tables['migration-state'],
+            )
+          })()
+          void escapedDescribe.catch(() => undefined)
+        }
+        transport.transactWritePrePlanAuthorityPostCommitEffect = responseLost
+          ? () => {
+              throw new Error('redacted transaction response loss')
+            }
+          : undefined
+
+        const acquired = await port.acquireLease({
+          runId: responseLost
+            ? 'permit-expiry-response-loss-run'
+            : 'permit-expiry-success-run',
+          ownerId: 'permit-expiry-owner',
+        })
+
+        expect(acquired).toMatchObject({
+          ownerId: 'permit-expiry-owner',
+          fenceToken: 1,
+        })
+        expect(expiredDescribeTableCount).toBeGreaterThanOrEqual(2)
+        expect(expiredAuthorityReadCount).toBeGreaterThanOrEqual(
+          responseLost ? 1 : 0,
+        )
+        expect(managedRate.readMandatoryCleanupDepth()).toBe(0)
+        if (
+          parallelDescribe === undefined ||
+          escapedDescribe === undefined ||
+          releaseEscapedDescribe === undefined
+        ) {
+          throw new Error('Expected parallel drain probes to be installed.')
+        }
+        await expect(parallelDescribe).rejects.toMatchObject({
+          code: 'NON_PRODUCTION_REHEARSAL_GUARD_FAILED',
+        })
+        const describeCount = transport.describeTableCommands.length
+        const readCount = transport.getPrePlanAuthorityCommands.length
+        const transactionCount =
+          transport.transactWritePrePlanAuthorityCommands.length
+        releaseEscapedDescribe()
+        await expect(escapedDescribe).rejects.toMatchObject({
+          code: 'NON_PRODUCTION_REHEARSAL_GUARD_FAILED',
+        })
+        expect(transport.describeTableCommands).toHaveLength(describeCount)
+
+        await expect(port.acquireLease({
+          runId: 'permit-expiry-fresh-operation',
+          ownerId: 'permit-expiry-owner',
+        })).rejects.toMatchObject({ code: 'INVALID_STATE' })
+        await expect(port.heartbeatLease({
+          lease: {
+            runId: acquired.runId,
+            ownerId: acquired.ownerId,
+            fenceToken: acquired.fenceToken,
+          },
+        })).rejects.toMatchObject({ code: 'INVALID_STATE' })
+        expect(transport.describeTableCommands).toHaveLength(describeCount)
+        expect(transport.getPrePlanAuthorityCommands).toHaveLength(readCount)
+        expect(
+          transport.transactWritePrePlanAuthorityCommands,
+        ).toHaveLength(transactionCount)
+        await port.close()
+      }
+    },
+  )
 
   test('passes through exact expired historical maintenance bindings', async () => {
     const requested = createRequestedResources()
@@ -2933,6 +3269,33 @@ describe('Workspace Search migration AWS identity adapter', () => {
   test(
     'skips post-send guards when control transactions are rejected pre-send',
     async () => {
+      const stateRequested = createRequestedResources()
+      const stateTransport = new RecordingIdentityAwsTransport()
+      seedValidMeasurementOutputs(stateTransport, stateRequested)
+      const stateSession = createAwsWorkspaceSearchMigrationIdentityPort(
+        stateRequested,
+        () => stateTransport,
+        () => new Date('2026-07-28T06:49:00.000Z'),
+      )
+      await stateSession.measureConfiguration()
+      const stateRate = installRecordingManagedRateHarness(
+        stateSession,
+        stateTransport,
+      )
+      stateRate.interruptBeforeNextMutation()
+      await expect(stateSession.acquireLease({
+        runId: 'state-pre-send-interrupt',
+        ownerId: 'state-pre-send-owner',
+      })).rejects.toBeDefined()
+      expect(
+        stateTransport.transactWritePrePlanAuthorityCommands,
+      ).toHaveLength(0)
+      expect(stateTransport.describeTableCommands).toHaveLength(
+        stateRate.readInterruptedMutationDescribeTableCount() ?? -1,
+      )
+      expect(stateRate.readMandatoryCleanupDepth()).toBe(0)
+      await stateSession.close()
+
       const publication = await createManagedSealedPublicationFixture(
         'sealed-publication-pre-send-interrupt',
       )
@@ -3409,6 +3772,54 @@ describe('Workspace Search migration AWS identity adapter', () => {
     port.close()
   })
 
+  test('links caller and session close cancellation into target AWS requests', async () => {
+    const cancellationOwners: readonly ('caller' | 'session')[] = [
+      'caller',
+      'session',
+    ]
+    for (const cancellationOwner of cancellationOwners) {
+      const requested = createRequestedResources()
+      const transport = new RecordingIdentityAwsTransport()
+      seedValidMeasurementOutputs(transport, requested)
+      const port = createAwsWorkspaceSearchMigrationIdentityPort(
+        requested,
+        () => transport,
+      )
+      const configuration = await port.measureConfiguration()
+      const deferred = createDeferredScanOutput()
+      transport.scanTargetDeferred = deferred.promise
+      const callerController = new AbortController()
+
+      const pending = port.scanTargetPage(
+        createTargetScanInput(configuration),
+        callerController.signal,
+      )
+      await waitForRecordedTargetScanCount(transport, 1)
+      const requestSignal = transport.scanTargetSignals[0]
+      expect(requestSignal).toBeInstanceOf(AbortSignal)
+      if (!(requestSignal instanceof AbortSignal)) {
+        throw new Error('Expected one target Scan cancellation signal.')
+      }
+      expect(requestSignal).not.toBe(callerController.signal)
+      expect(requestSignal.aborted).toBe(false)
+
+      if (cancellationOwner === 'caller') {
+        callerController.abort()
+      } else {
+        await port.close()
+      }
+
+      expect(requestSignal.aborted).toBe(true)
+      await expect(pending).rejects.toMatchObject({
+        code: 'INVALID_STATE',
+        message:
+          'Workspace Search target Scan read stopped safely (INVALID_STATE).',
+      })
+      deferred.resolve(createEmptyScanOutput())
+      await port.close()
+    }
+  })
+
   test('uses only the exact target checkpoint cursor for continuation', async () => {
     const requested = createRequestedResources()
     const transport = new RecordingIdentityAwsTransport()
@@ -3749,6 +4160,388 @@ describe('Workspace Search migration AWS identity adapter', () => {
     expect(transport.headSourceArtifactCommands).toHaveLength(0)
     expect(transport.getSourceArtifactCommands).toHaveLength(0)
     port.close()
+  })
+
+  test('reaches each nonterminal source-page fault at its exact durable boundary', async () => {
+    const failpoints:
+      readonly WorkspaceSearchMigrationRehearsalPlanningPageFailpoint[] = [
+        'planning-page-artifact-uploaded-before-checkpoint-commit',
+        'planning-page-transaction-response-lost',
+      ]
+    for (const failpoint of failpoints) {
+      const requested = createRequestedResources()
+      const transport = new RecordingIdentityAwsTransport()
+      seedValidMeasurementOutputs(transport, requested)
+      const clockAt = '2026-07-28T05:55:00.000Z'
+      const trace: string[] = []
+      const receipts: WorkspaceSearchMigrationRehearsalFaultReceipt[] = []
+      const plan: WorkspaceSearchMigrationRehearsalFaultPlan = {
+        stage: WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE,
+        approval: WORKSPACE_SEARCH_MIGRATION_REHEARSAL_APPROVAL,
+        failpoint,
+        target: {
+          kind: 'source',
+          source: 'project-directory',
+          pageSequence: 1,
+          cursorState: 'present',
+        },
+      }
+      const recordFault = async (
+        receipt: WorkspaceSearchMigrationRehearsalFaultReceipt,
+      ): Promise<void> => {
+        trace.push(receipt.failpoint)
+        receipts.push(receipt)
+      }
+      const controller =
+        createWorkspaceSearchMigrationRehearsalFaultController({
+          plan,
+          waitAtBarrier: recordFault,
+          reportResponseLoss: recordFault,
+        })
+      const port = createAwsWorkspaceSearchMigrationIdentityPort(
+        requested,
+        () => transport,
+        () => new Date(clockAt),
+      )
+      Reflect.set(port, 'rehearsalFaultController', controller)
+      try {
+        const configuration = await port.measureConfiguration()
+        const authority = await createManagedPlanningAuthority(
+          port,
+          clockAt,
+          `source-fault-${failpoint}`,
+        )
+        Reflect.set(port, 'rehearsalGuard', {
+          permit: {
+            issuedAt: '2026-07-28T05:54:00.000Z',
+            expiresAt: '2026-07-28T06:10:00.000Z',
+          },
+          clock: () => new Date(clockAt),
+        })
+        Reflect.set(
+          port,
+          'rehearsalClosedWriterFenceRecordDigest',
+          createMigrationDigest(`closed-fence-${failpoint}`),
+        )
+        transport.scanSourceOutput = {
+          $metadata: {},
+          Count: 1,
+          Items: [createIgnoredSourceItem(failpoint)],
+          LastEvaluatedKey: createProjectDirectoryCursor(failpoint),
+          ScannedCount: 1,
+        }
+        transport.putSourceArtifactEffect = () => {
+          trace.push('artifact')
+        }
+        transport.transactWriteSourceEvidenceEffect = () => {
+          trace.push('transaction')
+        }
+
+        const progress = await port.commitNextSourceEvidencePage(
+          createPlanningSourceEvidenceRequest(
+            configuration,
+            structuredClone(authority),
+          ),
+        )
+
+        expect(progress).toMatchObject({
+          pageSequence: 1,
+          checkpoint: { completed: false },
+        })
+        expect(receipts).toHaveLength(1)
+        expect(receipts[0]).toMatchObject({
+          failpoint,
+          target: {
+            kind: 'source',
+            source: 'project-directory',
+            pageSequence: 1,
+            cursorState: 'present',
+          },
+          action: failpoint ===
+            'planning-page-transaction-response-lost'
+            ? 'response-loss'
+            : 'barrier',
+        })
+        const faultObservation =
+          takeInternalRehearsalFaultObservation(port)
+        expect(faultObservation).toMatchObject({
+          observationVersion: 1,
+          kind: 'planning-page',
+          failpoint,
+          durableHeadPosition: failpoint ===
+              'planning-page-artifact-uploaded-before-checkpoint-commit'
+            ? 'predecessor'
+            : 'committed-successor',
+          durableHeadPageSequence: failpoint ===
+              'planning-page-artifact-uploaded-before-checkpoint-commit'
+            ? 0
+            : 1,
+          durableHeadCursorState: failpoint ===
+              'planning-page-artifact-uploaded-before-checkpoint-commit'
+            ? 'absent'
+            : 'present',
+          durableHeadCompleted: false,
+          planningTarget: plan.target,
+        })
+        expect(JSON.stringify(faultObservation)).not.toContain(
+          'LastEvaluatedKey',
+        )
+        expect(takeInternalRehearsalFaultObservation(port)).toBeUndefined()
+        const faultIndex = trace.indexOf(failpoint)
+        const artifactIndex = trace.indexOf('artifact')
+        const transactionIndex = trace.indexOf('transaction')
+        expect(artifactIndex).toBeGreaterThanOrEqual(0)
+        expect(transactionIndex).toBeGreaterThan(artifactIndex)
+        if (
+          failpoint ===
+            'planning-page-artifact-uploaded-before-checkpoint-commit'
+        ) {
+          expect(faultIndex).toBeGreaterThan(artifactIndex)
+          expect(faultIndex).toBeLessThan(transactionIndex)
+        } else {
+          expect(faultIndex).toBeGreaterThan(transactionIndex)
+        }
+      } finally {
+        port.close()
+      }
+    }
+  })
+
+  test('reconciles a nonterminal target-page response loss after its transaction', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const clockAt = '2026-07-28T05:57:00.000Z'
+    const trace: string[] = []
+    const receipts: WorkspaceSearchMigrationRehearsalFaultReceipt[] = []
+    const controller =
+      createWorkspaceSearchMigrationRehearsalFaultController({
+        plan: {
+          stage: WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE,
+          approval: WORKSPACE_SEARCH_MIGRATION_REHEARSAL_APPROVAL,
+          failpoint:
+            'planning-page-transaction-response-lost',
+          target: {
+            kind: 'target',
+            pageSequence: 1,
+            cursorState: 'present',
+          },
+        },
+        waitAtBarrier: async (): Promise<void> => undefined,
+        reportResponseLoss: async (receipt): Promise<void> => {
+          trace.push(receipt.failpoint)
+          receipts.push(receipt)
+        },
+      })
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => new Date(clockAt),
+    )
+    Reflect.set(port, 'rehearsalFaultController', controller)
+    try {
+      const configuration = await port.measureConfiguration()
+      const authority = await createManagedPlanningAuthority(
+        port,
+        clockAt,
+        'target-fault',
+      )
+      Reflect.set(port, 'rehearsalGuard', {
+        permit: {
+          issuedAt: '2026-07-28T05:56:00.000Z',
+          expiresAt: '2026-07-28T06:10:00.000Z',
+        },
+        clock: () => new Date(clockAt),
+      })
+      Reflect.set(
+        port,
+        'rehearsalClosedWriterFenceRecordDigest',
+        createMigrationDigest('closed-fence-target-response-loss'),
+      )
+      transport.scanTargetOutput = {
+        $metadata: {},
+        Count: 1,
+        Items: [createIgnoredTargetItem('target-fault')],
+        LastEvaluatedKey: createTargetCursor('target-fault'),
+        ScannedCount: 1,
+      }
+      transport.putTargetArtifactEffect = () => {
+        trace.push('artifact')
+      }
+      transport.transactWriteTargetEvidenceEffect = () => {
+        trace.push('transaction')
+      }
+
+      await expect(port.commitNextTargetEvidencePage(
+        createPlanningTargetEvidenceRequest(
+          configuration,
+          structuredClone(authority),
+        ),
+      )).resolves.toMatchObject({
+        pageSequence: 1,
+        checkpoint: { completed: false },
+      })
+
+      expect(trace).toEqual([
+        'artifact',
+        'transaction',
+        'planning-page-transaction-response-lost',
+      ])
+      expect(receipts).toHaveLength(1)
+      expect(receipts[0]).toMatchObject({
+        action: 'response-loss',
+        target: {
+          kind: 'target',
+          pageSequence: 1,
+          cursorState: 'present',
+        },
+      })
+      expect(takeInternalRehearsalFaultObservation(port)).toMatchObject({
+        observationVersion: 1,
+        kind: 'planning-page',
+        failpoint: 'planning-page-transaction-response-lost',
+        durableHeadPosition: 'committed-successor',
+        durableHeadPageSequence: 1,
+        durableHeadCursorState: 'present',
+        durableHeadCompleted: false,
+        planningTarget: {
+          kind: 'target',
+          pageSequence: 1,
+          cursorState: 'present',
+        },
+      })
+    } finally {
+      port.close()
+    }
+  })
+
+  test('exposes the durable lease interval before the acquire fault', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    let authorityClockAt = '2026-07-28T05:58:00.000Z'
+    const trace: string[] = []
+    const receipts: WorkspaceSearchMigrationRehearsalFaultReceipt[] = []
+    let observationAtFault: unknown
+    /** Takes one observation through the runtime rehearsal-only method. */
+    let takeObservation = (): unknown => {
+      throw new Error('Rehearsal session is not installed yet.')
+    }
+    const controller =
+      createWorkspaceSearchMigrationRehearsalFaultController({
+        plan: {
+          stage: WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE,
+          approval: WORKSPACE_SEARCH_MIGRATION_REHEARSAL_APPROVAL,
+          failpoint: 'lease-acquired-before-first-heartbeat',
+          target: { kind: 'planning-lease' },
+        },
+        waitAtBarrier: async (receipt): Promise<void> => {
+          observationAtFault = takeObservation()
+          trace.push(receipt.failpoint)
+          receipts.push(receipt)
+        },
+        reportResponseLoss: async (): Promise<void> => undefined,
+      })
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => new Date(authorityClockAt),
+    )
+    takeObservation = (): unknown => {
+      const method: unknown = Reflect.get(
+        port,
+        'takeRehearsalLeaseAcquisitionObservation',
+      )
+      if (typeof method !== 'function') {
+        throw new Error('Expected the internal rehearsal-only method.')
+      }
+      return Reflect.apply(method, port, [])
+    }
+    try {
+      expect(() => takeObservation()).toThrow(
+        'NON_PRODUCTION_REHEARSAL_GUARD_FAILED',
+      )
+      await port.measureConfiguration()
+      Reflect.set(port, 'rehearsalGuard', {
+        permit: {
+          issuedAt: '2026-07-28T05:57:00.000Z',
+          expiresAt: '2026-07-28T06:10:00.000Z',
+        },
+        clock: () => new Date('2026-07-28T05:58:00.000Z'),
+      })
+      Reflect.set(port, 'rehearsalFaultController', controller)
+      transport.transactWritePrePlanAuthorityEffect = () => {
+        trace.push('lease-transaction')
+      }
+
+      await expect(port.acquireLease({
+        runId: 'rehearsal-lease-fault-run',
+        ownerId: 'rehearsal-lease-fault-owner',
+      })).resolves.toMatchObject({ fenceToken: 1 })
+
+      expect(trace).toEqual([
+        'lease-transaction',
+        'lease-acquired-before-first-heartbeat',
+      ])
+      expect(receipts).toHaveLength(1)
+      expect(receipts[0]).toMatchObject({
+        failpoint: 'lease-acquired-before-first-heartbeat',
+        action: 'barrier',
+        target: { kind: 'planning-lease' },
+      })
+      expect(observationAtFault).toEqual({
+        kind: 'acquired',
+        predecessorLeaseIdentityDigest: null,
+        predecessorLeaseExpiresAt: null,
+        acquiredAt: '2026-07-28T05:58:00.000Z',
+        successorLeaseIdentityDigest: expect.any(String),
+        successorLeaseExpiresAt: '2026-07-28T05:59:00.000Z',
+      })
+      expect(Object.isFrozen(observationAtFault)).toBe(true)
+      const faultObservation =
+        takeInternalRehearsalFaultObservation(port)
+      expect(faultObservation).toMatchObject({
+        observationVersion: 1,
+        kind: 'lease',
+        failpoint: 'lease-acquired-before-first-heartbeat',
+        closedWriterFenceRecordDigest: null,
+        durableAppliedOperationCount: 0,
+        sealedPlanOperationCount: null,
+      })
+      expect(Object.isFrozen(faultObservation)).toBe(true)
+      expect(takeInternalRehearsalFaultObservation(port)).toBeUndefined()
+      expect(takeObservation()).toBeUndefined()
+      await expect(port.acquireLease({
+        runId: 'rehearsal-lease-fault-run',
+        ownerId: 'rehearsal-lease-fault-owner',
+      })).resolves.toMatchObject({ fenceToken: 1 })
+      expect(takeObservation()).toEqual({
+        kind: 'reused-active',
+        currentLeaseIdentityDigest: expect.any(String),
+        evaluatedAt: '2026-07-28T05:58:00.000Z',
+        currentLeaseExpiresAt: '2026-07-28T05:59:00.000Z',
+      })
+
+      Reflect.set(port, 'rehearsalFaultController', undefined)
+      authorityClockAt = '2026-07-28T05:59:00.000Z'
+      await expect(port.acquireLease({
+        runId: 'rehearsal-lease-takeover-run',
+        ownerId: 'rehearsal-lease-takeover-owner',
+      })).resolves.toMatchObject({
+        fenceToken: 2,
+        heartbeatAt: authorityClockAt,
+      })
+      expect(takeObservation()).toEqual({
+        kind: 'acquired',
+        predecessorLeaseIdentityDigest: expect.any(String),
+        predecessorLeaseExpiresAt: authorityClockAt,
+        acquiredAt: authorityClockAt,
+        successorLeaseIdentityDigest: expect.any(String),
+        successorLeaseExpiresAt: '2026-07-28T06:00:00.000Z',
+      })
+    } finally {
+      port.close()
+    }
   })
 
   test('commits detached planning authority with a guarded five-item transaction', async () => {
@@ -7387,6 +8180,17 @@ describe('Workspace Search migration AWS identity adapter', () => {
         fixture.closedWriterFenceRecord,
         fixture.executionRun,
       )
+      await expect(restarted.readAppliedRoot()).resolves.toMatchObject({
+        executionRunDigest: fixture.executionRun.executionRunDigest,
+        seal: {
+          planDigest: fixture.sealedPlanningAuthority.planDigest,
+          planOperationCount:
+            fixture.sealedPlanningAuthority.planOperationCount,
+          markerCount:
+            fixture.sealedPlanningAuthority.planOperationCount,
+        },
+        status: 'applied',
+      })
       await expect(
         restarted.sealApply(
           createManagedApplySealCommand(
@@ -7687,6 +8491,150 @@ describe('Workspace Search migration AWS identity adapter', () => {
         workspaceSearchMigrationApplyCheckpointTransactionIndex.count,
       )
       fixture.port.close()
+    },
+  )
+
+  test(
+    'reaches apply cursor barriers before and after the checkpoint transaction',
+    async () => {
+      const failpoints = [
+        'apply-checkpoint-cursor-captured-before-commit',
+        'apply-checkpoint-cursor-committed-before-return',
+      ] satisfies readonly WorkspaceSearchMigrationRehearsalApplyCheckpointFailpoint[]
+      for (const failpoint of failpoints) {
+        const fixture = await createManagedApplyOperationFixture(
+          `apply-cursor-fault-${failpoint}`,
+        )
+        const trace: string[] = []
+        const receipts: WorkspaceSearchMigrationRehearsalFaultReceipt[] = []
+        const controller =
+          createWorkspaceSearchMigrationRehearsalFaultController({
+            plan: {
+              stage: WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE,
+              approval: WORKSPACE_SEARCH_MIGRATION_REHEARSAL_APPROVAL,
+              failpoint,
+              target: {
+                kind: 'apply-checkpoint',
+                location: 'project-directory',
+                pageSequence: 1,
+                cursorState: 'present',
+              },
+            },
+            waitAtBarrier: async (receipt): Promise<void> => {
+              trace.push(receipt.failpoint)
+              receipts.push(receipt)
+            },
+            reportResponseLoss: async (): Promise<void> => undefined,
+          })
+        Reflect.set(
+          fixture.port,
+          'rehearsalFaultController',
+          controller,
+        )
+        Reflect.set(fixture.port, 'rehearsalGuard', {
+          permit: {
+            issuedAt: '2026-07-28T00:00:00.000Z',
+            expiresAt: '2026-07-29T00:00:00.000Z',
+          },
+          clock: () => new Date('2026-07-28T07:20:00.000Z'),
+        })
+        Reflect.set(
+          fixture.port,
+          'rehearsalLeaseIdentityDigest',
+          createMigrationDigest(`apply-lease-${failpoint}`),
+        )
+        try {
+          const apply = await createManagedApplyCheckpointPort(fixture)
+          fixture.transport.scanSourceOutput = {
+            $metadata: {},
+            Count: 1,
+            Items: [createIgnoredSourceItem(failpoint)],
+            LastEvaluatedKey:
+              createProjectDirectoryCursor(failpoint),
+            ScannedCount: 1,
+          }
+          fixture.transport.scanSourceEffect = () => {
+            trace.push('scan')
+          }
+          fixture.transport.transactWritePrePlanAuthorityEffect = () => {
+            trace.push('transaction')
+          }
+
+          const next = await apply.saveApplyCheckpoint(
+            createManagedApplyCheckpointCommand(
+              fixture,
+              'project-directory',
+              2,
+            ),
+          )
+          expect(next).toMatchObject({
+            revision: 3,
+            apply: {
+              sources: {
+                'project-directory': {
+                  completed: false,
+                  aggregate: { pageCount: 1 },
+                },
+              },
+            },
+          })
+
+          expect(receipts).toHaveLength(1)
+          expect(receipts[0]).toMatchObject({
+            failpoint,
+            target: {
+              kind: 'apply-checkpoint',
+              location: 'project-directory',
+              pageSequence: 1,
+              cursorState: 'present',
+            },
+          })
+          expect(
+            takeInternalRehearsalFaultObservation(fixture.port),
+          ).toMatchObject({
+            observationVersion: 1,
+            kind: 'apply-checkpoint',
+            failpoint,
+            closedWriterFenceRecordDigest:
+              fixture.closedWriterFenceRecord.recordDigest,
+            durableAppliedOperationCount: 1,
+            sealedPlanOperationCount: 1,
+            checkpointLocation: 'project-directory',
+            durableStatePosition: failpoint ===
+                'apply-checkpoint-cursor-captured-before-commit'
+              ? 'predecessor'
+              : 'committed-successor',
+            durableCheckpointPageSequence: failpoint ===
+                'apply-checkpoint-cursor-captured-before-commit'
+              ? 0
+              : 1,
+            durableCheckpointCursorState: failpoint ===
+                'apply-checkpoint-cursor-captured-before-commit'
+              ? 'absent'
+              : 'present',
+            durableCheckpointCompleted: false,
+          })
+          expect(
+            takeInternalRehearsalFaultObservation(fixture.port),
+          ).toBeUndefined()
+          const scanIndex = trace.indexOf('scan')
+          const transactionIndex = trace.indexOf('transaction')
+          const faultIndex = trace.indexOf(failpoint)
+          expect(scanIndex).toBeGreaterThanOrEqual(0)
+          expect(transactionIndex).toBeGreaterThan(scanIndex)
+          if (
+            failpoint ===
+              'apply-checkpoint-cursor-captured-before-commit'
+          ) {
+            expect(faultIndex).toBeGreaterThan(scanIndex)
+            expect(faultIndex).toBeLessThan(transactionIndex)
+          } else {
+            expect(faultIndex).toBeGreaterThan(transactionIndex)
+          }
+        } finally {
+          fixture.port.close()
+        }
+      }
     },
   )
 
@@ -12962,6 +13910,122 @@ describe('Workspace Search migration AWS identity adapter', () => {
     ).rejects.toBe(failure)
     port.close()
   })
+
+  test('queues strict rehearsal authority observations once in renewal order', async () => {
+    const requested = createRequestedResources()
+    const transport = new RecordingIdentityAwsTransport()
+    seedValidMeasurementOutputs(transport, requested)
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      requested,
+      () => transport,
+      () => new Date('2026-07-28T09:00:00.000Z'),
+    )
+    await port.measureConfiguration()
+    if (!Reflect.set(port, 'rehearsalGuard', {
+      permit: {
+        issuedAt: '2026-07-28T08:59:00.000Z',
+        expiresAt: '2026-07-28T09:10:00.000Z',
+      },
+      clock: () => new Date('2026-07-28T09:00:00.000Z'),
+    })) {
+      throw new Error('Expected test-only rehearsal guard installation.')
+    }
+    const capture: unknown = Reflect.get(
+      port,
+      'captureManagedApplyOperationAuthority',
+    )
+    const record: unknown = Reflect.get(
+      port,
+      'recordRehearsalAuthorityAdoptionObservation',
+    )
+    const take: unknown = Reflect.get(
+      port,
+      'takeRehearsalAuthorityAdoptionObservation',
+    )
+    if (
+      typeof capture !== 'function' ||
+      typeof record !== 'function' ||
+      typeof take !== 'function'
+    ) {
+      throw new Error('Expected private authority-observation capabilities.')
+    }
+    const authority: unknown = Reflect.apply(capture, port, [])
+    const first = Object.freeze({
+      maintenanceEvidenceRenewalCount: 1,
+      receiptDigest: createMigrationDigest('authority-receipt-one'),
+    })
+    const second = Object.freeze({
+      maintenanceEvidenceRenewalCount: 2,
+      receiptDigest: createMigrationDigest('authority-receipt-two'),
+    })
+
+    Reflect.apply(record, port, [first, authority])
+    Reflect.apply(record, port, [first, authority])
+    expect(() => Reflect.apply(record, port, [{
+      maintenanceEvidenceRenewalCount: 2,
+      receiptDigest: first.receiptDigest,
+    }, authority])).toThrow()
+    expect(() => Reflect.apply(record, port, [{
+      maintenanceEvidenceRenewalCount: 3,
+      receiptDigest: createMigrationDigest('authority-receipt-three'),
+    }, authority])).toThrow()
+    Reflect.apply(record, port, [second, authority])
+    expect(() => Reflect.apply(record, port, [{
+      maintenanceEvidenceRenewalCount: 2,
+      receiptDigest: createMigrationDigest('authority-receipt-conflict'),
+    }, authority])).toThrow()
+
+    expect(Reflect.apply(take, port, [])).toEqual(first)
+    expect(Reflect.apply(take, port, [])).toEqual(second)
+    expect(Reflect.apply(take, port, [])).toBeUndefined()
+    Reflect.apply(record, port, [first, authority])
+    expect(Reflect.apply(take, port, [])).toBeUndefined()
+    port.close()
+  })
+
+  test('rejects reconciliation on production after consuming its owned key', async () => {
+    const transport = new RecordingIdentityAwsTransport()
+    const port = createAwsWorkspaceSearchMigrationIdentityPort(
+      createRequestedResources(),
+      () => transport,
+    )
+    const collect: unknown = Reflect.get(
+      port,
+      'collectRehearsalReconciliation',
+    )
+    if (typeof collect !== 'function') {
+      throw new Error('Expected internal reconciliation capability.')
+    }
+    const digestKey = new Uint8Array(32).fill(0x5a)
+
+    await expect(Reflect.apply(collect, port, [{
+      runId: 'production-reconciliation-rejected',
+      runLocatorDigest: createMigrationDigest('restricted-run-locator'),
+      scenario: 'happy-path-verified',
+      expectedAuthorities: [{
+        maintenanceEvidenceRenewalCount: 1,
+        receiptDigest: createMigrationDigest('authority-receipt'),
+      }],
+      integrity: {
+        kind: 'verified-result',
+        resultBytes: new Uint8Array([0x7b, 0x7d]),
+        digestKey,
+      },
+      limits: {
+        maximumPages: 2,
+        maximumItems: 10,
+        maximumBytes: 1_024,
+        requestTimeoutMilliseconds: 1_000,
+        maximumDurationMilliseconds: 5_000,
+      },
+      clock: () => new Date('2026-07-28T09:01:00.000Z'),
+    }])).rejects.toMatchObject({
+      code: 'NON_PRODUCTION_REHEARSAL_GUARD_FAILED',
+    })
+    expect([...digestKey]).toEqual(Array.from({ length: 32 }, () => 0))
+    expect(transport.queryStatePageCommands).toHaveLength(0)
+    port.close()
+  })
 })
 
 /**
@@ -13529,6 +14593,22 @@ async function createManagedPlanningAuthority(
     expectedPointer: null,
     evidenceBytes: createManagedMaintenanceEvidenceBytes(clockAt),
   })
+}
+
+/**
+ * Takes one runtime fault observation through the rehearsal-only surface.
+ *
+ * @param port - Managed session whose private test guard enables the method.
+ * @returns Oldest unread cursor-free observation, or undefined when empty.
+ */
+function takeInternalRehearsalFaultObservation(
+  port: WorkspaceSearchMigrationManagedAwsSession,
+): unknown {
+  const method: unknown = Reflect.get(port, 'takeRehearsalFaultObservation')
+  if (typeof method !== 'function') {
+    throw new Error('Expected the internal rehearsal fault observation method.')
+  }
+  return Reflect.apply(method, port, [])
 }
 
 /**
@@ -14516,7 +15596,7 @@ async function waitForRecordedScanCount(
   transport: RecordingIdentityAwsTransport,
   expectedCount: number,
 ): Promise<void> {
-  for (let attempt = 0; attempt < 200; attempt += 1) {
+  for (let attempt = 0; attempt < 2_000; attempt += 1) {
     if (transport.scanSourceCommands.length >= expectedCount) return
     await Promise.resolve()
   }

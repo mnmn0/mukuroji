@@ -2,17 +2,27 @@ import { expect, test } from 'bun:test'
 import {
   authenticateCrossDomainIntegrityResult,
   calculateCrossDomainIntegrityResourceIdentityDigest,
+  compareCrossDomainIntegrityMigrationRehearsalResults,
   compareCrossDomainIntegrityResults,
+  CrossDomainIntegrityDeadlineFailure,
+  createCrossDomainIntegrityInvocationDeadline,
   CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+  CROSS_DOMAIN_INTEGRITY_MAX_DURATION_MILLISECONDS,
+  CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
+  CROSS_DOMAIN_INTEGRITY_MIGRATION_REHEARSAL_COMPARISON_KIND,
+  CROSS_DOMAIN_INTEGRITY_REHEARSAL_LIVE_PROVENANCE_KIND,
   CROSS_DOMAIN_INTEGRITY_RESOURCE_TARGETS,
   parseCrossDomainIntegrityResult,
   runCrossDomainIntegrityCheck,
   verifyCrossDomainIntegrityResult,
   type CrossDomainIntegrityItem,
+  type CrossDomainIntegrityMigrationRehearsalFailureCode,
+  type CrossDomainIntegrityObservationMode,
   type CrossDomainIntegrityPage,
   type CrossDomainIntegrityReadPort,
   type CrossDomainIntegrityResourceIdentity,
   type CrossDomainIntegrityRole,
+  type RunCrossDomainIntegrityCheckInput,
 } from './cross-domain-integrity'
 
 const digestKey = new Uint8Array(32).fill(19)
@@ -30,7 +40,20 @@ const restoreResourceIdentityDigest =
     digestKey,
   )
 const checkedAt = '2026-08-01T00:00:00.000Z'
+const afterCheckedAt = '2026-08-01T00:00:01.000Z'
 const defaultLimits = { pageSize: 100, maxPages: 100, maxItems: 1_000 }
+
+/**
+ * Creates one fresh deterministic deadline for a checker test invocation.
+ *
+ * @returns Active one-minute deadline with a stable monotonic clock.
+ */
+function createTestDeadline() {
+  return createCrossDomainIntegrityInvocationDeadline({
+    maximumDurationMilliseconds: 60_000,
+    monotonicClock: () => 1_000,
+  })
+}
 
 /**
  * Creates one complete canonical resource identity vector with unique test digests.
@@ -186,11 +209,26 @@ async function run(
   resourceIdentities = role === 'source'
     ? sourceResourceIdentities
     : restoreResourceIdentities,
+  observationMode: CrossDomainIntegrityObservationMode = 'logical',
 ) {
   return runCrossDomainIntegrityCheck({
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+    deadline: createTestDeadline(),
     role,
     checkedAt: resultCheckedAt,
+    observationMode,
+    ...(observationMode === 'migration-rehearsal-live'
+      ? {
+          liveRuntimeObservation: {
+            startedAt: new Date(
+              Date.parse(resultCheckedAt) - 1_000,
+            ).toISOString(),
+            completedAt: resultCheckedAt,
+          },
+          resourceIdentityScheme:
+            CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
+        }
+      : {}),
     digestKey,
     resourceBindingDigest: bindingDigest,
     resourceIdentities,
@@ -202,6 +240,20 @@ async function run(
     limits,
     reader: createPageReader([[...items]]),
   })
+}
+
+/**
+ * Creates one typed aggregate-difference scenario for the rehearsal comparator.
+ *
+ * @param code - Expected dedicated domain difference code.
+ * @param items - Healthy after-check dataset containing the domain change.
+ * @returns Typed scenario retaining the literal failure-code contract.
+ */
+function createMigrationRehearsalScenario(
+  code: CrossDomainIntegrityMigrationRehearsalFailureCode,
+  items: readonly CrossDomainIntegrityItem[],
+) {
+  return { code, items }
 }
 
 test('passes a healthy dataset without requiring historical audit resources to remain current', async () => {
@@ -219,10 +271,77 @@ test('passes a healthy dataset without requiring historical audit resources to r
   expect(result.scope.nonTargets).toContain('historical-audit-resource-liveness')
 })
 
+test('MAC-authenticates live runtime provenance without changing logical results', async () => {
+  const logical = await run(createHealthyItems())
+  const live = await run(
+    createHealthyItems(),
+    'source',
+    resourceBindingDigest,
+    checkedAt,
+    defaultLimits,
+    sourceResourceIdentities,
+    'migration-rehearsal-live',
+  )
+  expect(logical.runtimeProvenance).toBeUndefined()
+  expect(live.runtimeProvenance).toEqual({
+    kind: CROSS_DOMAIN_INTEGRITY_REHEARSAL_LIVE_PROVENANCE_KIND,
+    version: 1,
+    mode: 'migration-rehearsal-live',
+    startedAt: '2026-07-31T23:59:59.000Z',
+    completedAt: checkedAt,
+    checkedAtSource: 'trusted-wall-clock-after-external-reads',
+  })
+  expect(live.evidence.resourceIdentityScheme).toBe(
+    CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
+  )
+  expect(verifyCrossDomainIntegrityResult(live, digestKey)).toBe(true)
+
+  const forgedLive = {
+    ...logical,
+    runtimeProvenance: live.runtimeProvenance,
+  }
+  const { runtimeProvenance: removedProvenance, ...missingProvenance } = live
+  const {
+    resourceIdentityScheme: removedScheme,
+    ...legacyNameOnlyEvidence
+  } = live.evidence
+  const legacyNameOnlyLive = {
+    ...live,
+    evidence: legacyNameOnlyEvidence,
+  }
+  expect(removedProvenance).toEqual(live.runtimeProvenance)
+  expect(removedScheme).toBe(
+    CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
+  )
+  expect(verifyCrossDomainIntegrityResult(forgedLive, digestKey)).toBe(false)
+  expect(verifyCrossDomainIntegrityResult(missingProvenance, digestKey)).toBe(false)
+  expect(verifyCrossDomainIntegrityResult(legacyNameOnlyLive, digestKey)).toBe(false)
+  expect(() => parseCrossDomainIntegrityResult(legacyNameOnlyLive)).toThrow()
+  expect(() => parseCrossDomainIntegrityResult({
+    ...live,
+    contractVersion: 1,
+  })).toThrow()
+  expect(verifyCrossDomainIntegrityResult({
+    ...live,
+    evidence: {
+      ...live.evidence,
+      resourceIdentityScheme: 'name-only-v1',
+    },
+  }, digestKey)).toBe(false)
+  expect(() => parseCrossDomainIntegrityResult({
+    ...live,
+    runtimeProvenance: {
+      ...live.runtimeProvenance,
+      checkedAtSource: 'operator-supplied',
+    },
+  })).toThrow('live runtime provenance is invalid')
+})
+
 test('produces the same result for different item order and page boundaries', async () => {
   const items = createHealthyItems()
   const onePage = await runCrossDomainIntegrityCheck({
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+    deadline: createTestDeadline(),
     role: 'source',
     checkedAt,
     digestKey,
@@ -235,6 +354,7 @@ test('produces the same result for different item order and page boundaries', as
   const reversed = [...items].reverse()
   const manyPages = await runCrossDomainIntegrityCheck({
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+    deadline: createTestDeadline(),
     role: 'source',
     checkedAt,
     digestKey,
@@ -363,6 +483,7 @@ test('classifies exact object metadata differences and orphan object versions', 
 test('incorporates only aggregate external file evidence and stable failure codes', async () => {
   const result = await runCrossDomainIntegrityCheck({
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+    deadline: createTestDeadline(),
     role: 'restore',
     checkedAt,
     digestKey,
@@ -409,6 +530,254 @@ test('compares source and restore by stable aggregate domains', async () => {
   expect(compareCrossDomainIntegrityResults(source, restore, digestKey).failureCodes).toEqual([
     'RESTORE_WORK_ITEM_DIFFERENCE',
   ])
+})
+
+test('compares strictly later authenticated checks over the same migration source', async () => {
+  const before = await run(createHealthyItems(), 'source')
+  const after = await run(
+    createHealthyItems(),
+    'source',
+    resourceBindingDigest,
+    afterCheckedAt,
+  )
+
+  expect(compareCrossDomainIntegrityMigrationRehearsalResults(
+    before,
+    after,
+    digestKey,
+  )).toEqual({
+    kind: CROSS_DOMAIN_INTEGRITY_MIGRATION_REHEARSAL_COMPARISON_KIND,
+    contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+    status: 'pass',
+    failureCodes: [],
+  })
+})
+
+test('compares every same-resource domain aggregate and item count', async () => {
+  const before = await run(createHealthyItems(), 'source')
+
+  const auditItems = createHealthyItems()
+  auditItems.push({
+    kind: 'audit-reference',
+    workspaceId: 'tenant-secret-a',
+    referencedWorkspaceId: 'tenant-secret-a',
+    resourceType: 'work-item',
+    resourceId: 'another-historical-secret',
+    teamId: 'team-secret-a',
+    resourceState: 'historical',
+  })
+
+  const configurationItems = createHealthyItems()
+  configurationItems.push({
+    kind: 'configuration',
+    workspaceId: 'another-tenant-secret',
+    teamId: null,
+    workflowStatuses: [{ statusId: 'todo', category: 'unstarted' }],
+  })
+
+  const fileItems = createHealthyItems()
+  for (const item of fileItems) {
+    if (item.kind === 'file-metadata' || item.kind === 'file-object') {
+      item.sizeBytes += 1
+    }
+  }
+
+  const relationItems = createHealthyItems()
+  for (const item of relationItems) {
+    if (item.kind === 'relation') item.relationType = 'related'
+    if (item.kind === 'work-item' && item.workItemId === 'work-secret-a') {
+      item.relationIds = ['related:work-secret-b']
+    }
+    if (item.kind === 'work-item' && item.workItemId === 'work-secret-b') {
+      item.relationIds = ['related:work-secret-a']
+    }
+  }
+
+  const resourceItems = createHealthyItems()
+  resourceItems.push({
+    kind: 'team',
+    workspaceId: 'another-tenant-secret',
+    teamId: 'another-team-secret',
+  })
+
+  const workItemItems = createHealthyItems()
+  const changedWorkItem = workItemItems.find((item) =>
+    item.kind === 'work-item' && item.workItemId === 'work-secret-a'
+  )
+  if (changedWorkItem?.kind === 'work-item') {
+    changedWorkItem.workflowStatusId = 'done'
+    changedWorkItem.statusCategory = 'completed'
+  }
+
+  const scenarios = [
+    createMigrationRehearsalScenario(
+      'REHEARSAL_AUDIT_DIFFERENCE',
+      auditItems,
+    ),
+    createMigrationRehearsalScenario(
+      'REHEARSAL_CONFIGURATION_DIFFERENCE',
+      configurationItems,
+    ),
+    createMigrationRehearsalScenario(
+      'REHEARSAL_FILE_DIFFERENCE',
+      fileItems,
+    ),
+    createMigrationRehearsalScenario(
+      'REHEARSAL_RELATION_DIFFERENCE',
+      relationItems,
+    ),
+    createMigrationRehearsalScenario(
+      'REHEARSAL_RESOURCE_DIFFERENCE',
+      resourceItems,
+    ),
+    createMigrationRehearsalScenario(
+      'REHEARSAL_WORK_ITEM_DIFFERENCE',
+      workItemItems,
+    ),
+  ]
+  for (const scenario of scenarios) {
+    const after = await run(
+      scenario.items,
+      'source',
+      resourceBindingDigest,
+      afterCheckedAt,
+    )
+    expect(after.status).toBe('pass')
+    expect(compareCrossDomainIntegrityMigrationRehearsalResults(
+      before,
+      after,
+      digestKey,
+    ).failureCodes).toContain(scenario.code)
+  }
+})
+
+test('requires identical same-source bindings, identities, key, and limits', async () => {
+  const before = await run(createHealthyItems(), 'source')
+  const after = await run(
+    createHealthyItems(),
+    'source',
+    resourceBindingDigest,
+    afterCheckedAt,
+  )
+  const keyMismatch = authenticateCrossDomainIntegrityResult({
+    kind: after.kind,
+    contractVersion: after.contractVersion,
+    role: after.role,
+    checkedAt: after.checkedAt,
+    limits: after.limits,
+    status: after.status,
+    failureCodes: after.failureCodes,
+    scope: after.scope,
+    evidence: {
+      ...after.evidence,
+      keyFingerprint: 'f'.repeat(64),
+    },
+  }, digestKey)
+  const bindingMismatch = await run(
+    createHealthyItems(),
+    'source',
+    'c'.repeat(64),
+    afterCheckedAt,
+  )
+  const identityMismatch = await run(
+    createHealthyItems(),
+    'source',
+    resourceBindingDigest,
+    afterCheckedAt,
+    defaultLimits,
+    restoreResourceIdentities,
+  )
+  const limitsMismatch = await run(
+    createHealthyItems(),
+    'source',
+    resourceBindingDigest,
+    afterCheckedAt,
+    { pageSize: 50, maxPages: 100, maxItems: 1_000 },
+  )
+  const roleMismatch = await run(
+    createHealthyItems(),
+    'restore',
+    resourceBindingDigest,
+    afterCheckedAt,
+    defaultLimits,
+    sourceResourceIdentities,
+  )
+
+  expect(compareCrossDomainIntegrityMigrationRehearsalResults(
+    before,
+    keyMismatch,
+    digestKey,
+  ).failureCodes).toEqual(['REHEARSAL_KEY_MISMATCH'])
+  expect(compareCrossDomainIntegrityMigrationRehearsalResults(
+    before,
+    bindingMismatch,
+    digestKey,
+  ).failureCodes).toEqual(['REHEARSAL_RESOURCE_BINDING_MISMATCH'])
+  expect(compareCrossDomainIntegrityMigrationRehearsalResults(
+    before,
+    identityMismatch,
+    digestKey,
+  ).failureCodes).toEqual(['REHEARSAL_RESOURCE_IDENTITIES_MISMATCH'])
+  expect(compareCrossDomainIntegrityMigrationRehearsalResults(
+    before,
+    limitsMismatch,
+    digestKey,
+  ).failureCodes).toEqual(['REHEARSAL_LIMITS_MISMATCH'])
+  expect(compareCrossDomainIntegrityMigrationRehearsalResults(
+    before,
+    roleMismatch,
+    digestKey,
+  ).failureCodes).toEqual(['REHEARSAL_ROLE_MISMATCH'])
+  expect(compareCrossDomainIntegrityMigrationRehearsalResults(
+    before,
+    before,
+    digestKey,
+  ).failureCodes).toEqual(['REHEARSAL_CHECKED_AT_ORDER_INVALID'])
+})
+
+test('fails closed on unauthenticated or failed rehearsal checks', async () => {
+  const healthyBefore = await run(createHealthyItems(), 'source')
+  const healthyAfter = await run(
+    createHealthyItems(),
+    'source',
+    resourceBindingDigest,
+    afterCheckedAt,
+  )
+  const failedItems = createHealthyItems().filter((item) =>
+    item.kind !== 'workspace-member'
+  )
+  const failedBefore = await run(failedItems, 'source')
+  const failedAfter = await run(
+    failedItems,
+    'source',
+    resourceBindingDigest,
+    afterCheckedAt,
+  )
+
+  expect(compareCrossDomainIntegrityMigrationRehearsalResults(
+    { ...healthyBefore, resultMac: '0'.repeat(64) },
+    healthyAfter,
+    digestKey,
+  ).failureCodes).toEqual([
+    'REHEARSAL_BEFORE_RESULT_AUTHENTICATION_FAILED',
+  ])
+  expect(compareCrossDomainIntegrityMigrationRehearsalResults(
+    healthyBefore,
+    { ...healthyAfter, resultMac: '0'.repeat(64) },
+    digestKey,
+  ).failureCodes).toEqual([
+    'REHEARSAL_AFTER_RESULT_AUTHENTICATION_FAILED',
+  ])
+  expect(compareCrossDomainIntegrityMigrationRehearsalResults(
+    failedBefore,
+    healthyAfter,
+    digestKey,
+  ).failureCodes).toContain('REHEARSAL_BEFORE_CHECK_FAILED')
+  expect(compareCrossDomainIntegrityMigrationRehearsalResults(
+    healthyBefore,
+    failedAfter,
+    digestKey,
+  ).failureCodes).toContain('REHEARSAL_AFTER_CHECK_FAILED')
 })
 
 test('treats exact object-store Version IDs as dataset-local restore identities', async () => {
@@ -635,6 +1004,7 @@ test('fails closed on a repeated opaque cursor and item limit without serializin
   }
   const cursorResult = await runCrossDomainIntegrityCheck({
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+    deadline: createTestDeadline(),
     role: 'source',
     checkedAt,
     digestKey,
@@ -646,6 +1016,7 @@ test('fails closed on a repeated opaque cursor and item limit without serializin
   })
   const limitResult = await runCrossDomainIntegrityCheck({
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+    deadline: createTestDeadline(),
     role: 'source',
     checkedAt,
     digestKey,
@@ -670,6 +1041,7 @@ test('fails closed when an adapter returns more than the requested page size', a
   }
   const result = await runCrossDomainIntegrityCheck({
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+    deadline: createTestDeadline(),
     role: 'source',
     checkedAt,
     digestKey,
@@ -687,6 +1059,7 @@ test('fails closed when an adapter returns more than the requested page size', a
 test('includes external file evidence in the configured total item bound', async () => {
   const result = await runCrossDomainIntegrityCheck({
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+    deadline: createTestDeadline(),
     role: 'source',
     checkedAt,
     digestKey,
@@ -711,6 +1084,7 @@ test('includes external file evidence in the configured total item bound', async
 test('rejects invalid bounds, digest keys, and row-level external evidence shapes', async () => {
   await expect(runCrossDomainIntegrityCheck({
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+    deadline: createTestDeadline(),
     role: 'source',
     checkedAt,
     digestKey: new Uint8Array(31),
@@ -722,6 +1096,7 @@ test('rejects invalid bounds, digest keys, and row-level external evidence shape
   })).rejects.toThrow('exactly 32 bytes')
   await expect(runCrossDomainIntegrityCheck({
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+    deadline: createTestDeadline(),
     role: 'source',
     checkedAt,
     digestKey,
@@ -733,6 +1108,7 @@ test('rejects invalid bounds, digest keys, and row-level external evidence shape
   })).rejects.toThrow('pageSize')
   await expect(runCrossDomainIntegrityCheck({
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+    deadline: createTestDeadline(),
     role: 'source',
     checkedAt,
     digestKey,
@@ -744,6 +1120,7 @@ test('rejects invalid bounds, digest keys, and row-level external evidence shape
   })).rejects.toThrow('page capacity')
   await expect(runCrossDomainIntegrityCheck({
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+    deadline: createTestDeadline(),
     role: 'source',
     checkedAt,
     digestKey,
@@ -755,6 +1132,7 @@ test('rejects invalid bounds, digest keys, and row-level external evidence shape
   })).rejects.toThrow('resource binding digest')
   await expect(runCrossDomainIntegrityCheck({
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+    deadline: createTestDeadline(),
     role: 'source',
     checkedAt: '2026-08-01T00:00:00Z',
     digestKey,
@@ -766,6 +1144,7 @@ test('rejects invalid bounds, digest keys, and row-level external evidence shape
   })).rejects.toThrow('canonical UTC timestamp')
   await expect(runCrossDomainIntegrityCheck({
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+    deadline: createTestDeadline(),
     role: 'source',
     checkedAt,
     digestKey,
@@ -777,6 +1156,7 @@ test('rejects invalid bounds, digest keys, and row-level external evidence shape
   })).rejects.toThrow('resource identity digest')
   await expect(runCrossDomainIntegrityCheck({
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+    deadline: createTestDeadline(),
     role: 'source',
     checkedAt,
     digestKey,
@@ -792,4 +1172,133 @@ test('rejects invalid bounds, digest keys, and row-level external evidence shape
       failureCodes: [],
     },
   })).rejects.toThrow('External file integrity evidence is invalid')
+})
+
+test('enforces one finite total deadline and aborts an unresolved page request', async () => {
+  let observedSignal: AbortSignal | undefined
+  const deadline = createCrossDomainIntegrityInvocationDeadline({
+    maximumDurationMilliseconds: 5,
+    monotonicClock: () => 1_000,
+  })
+  const reader: CrossDomainIntegrityReadPort = {
+    /** Retains the finite signal until the total deadline aborts it. */
+    async readPage(request): Promise<CrossDomainIntegrityPage> {
+      observedSignal = request.signal
+      return await new Promise((_resolve, reject) => {
+        request.signal.addEventListener('abort', () => {
+          reject(new Error('untrusted adapter abort detail'))
+        }, { once: true })
+      })
+    },
+  }
+
+  const failure = await runCrossDomainIntegrityCheck({
+    contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+    deadline,
+    role: 'source',
+    checkedAt,
+    digestKey,
+    resourceBindingDigest,
+    resourceIdentities: sourceResourceIdentities,
+    resourceIdentityDigest: sourceResourceIdentityDigest,
+    limits: { pageSize: 1, maxPages: 1, maxItems: 1 },
+    reader,
+  }).catch((error: unknown) => error)
+
+  expect(failure).toBeInstanceOf(CrossDomainIntegrityDeadlineFailure)
+  if (!(failure instanceof CrossDomainIntegrityDeadlineFailure)) {
+    throw new Error('Expected a deadline failure.')
+  }
+  expect(failure.code).toBe('DEADLINE_EXCEEDED')
+  expect(observedSignal?.aborted).toBe(true)
+})
+
+test('rejects monotonic clock regression and durations beyond fifteen minutes', async () => {
+  const samples = [1_000, 1_001, 999]
+  let sampleIndex = 0
+  const deadline = createCrossDomainIntegrityInvocationDeadline({
+    maximumDurationMilliseconds: 60_000,
+    monotonicClock: () => samples[sampleIndex++] ?? 999,
+  })
+  let readCount = 0
+  const failure = await runCrossDomainIntegrityCheck({
+    contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+    deadline,
+    role: 'source',
+    checkedAt,
+    digestKey,
+    resourceBindingDigest,
+    resourceIdentities: sourceResourceIdentities,
+    resourceIdentityDigest: sourceResourceIdentityDigest,
+    limits: { pageSize: 1, maxPages: 1, maxItems: 1 },
+    reader: {
+      /** Counts any request that escaped deadline preflight. */
+      async readPage(): Promise<CrossDomainIntegrityPage> {
+        readCount += 1
+        return { items: [] }
+      },
+    },
+  }).catch((error: unknown) => error)
+
+  expect(failure).toBeInstanceOf(CrossDomainIntegrityDeadlineFailure)
+  if (!(failure instanceof CrossDomainIntegrityDeadlineFailure)) {
+    throw new Error('Expected a deadline failure.')
+  }
+  expect(failure.code).toBe('CLOCK_INVALID')
+  expect(readCount).toBe(0)
+  expect(() => createCrossDomainIntegrityInvocationDeadline({
+    maximumDurationMilliseconds:
+      CROSS_DOMAIN_INTEGRITY_MAX_DURATION_MILLISECONDS + 1,
+    monotonicClock: () => 1_000,
+  })).toThrow('invocation deadline is invalid')
+})
+
+test('cancels a non-cooperative adapter and admits no later request', async () => {
+  const controller = new AbortController()
+  let observedSignal: AbortSignal | undefined
+  let readCount = 0
+  let resolveStarted: (() => void) | undefined
+  const started = new Promise<void>((resolve) => {
+    resolveStarted = resolve
+  })
+  const deadline = createCrossDomainIntegrityInvocationDeadline({
+    maximumDurationMilliseconds: 60_000,
+    monotonicClock: () => 1_000,
+    signal: controller.signal,
+  })
+  const input: RunCrossDomainIntegrityCheckInput = {
+    contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+    deadline,
+    role: 'source',
+    checkedAt,
+    digestKey,
+    resourceBindingDigest,
+    resourceIdentities: sourceResourceIdentities,
+    resourceIdentityDigest: sourceResourceIdentityDigest,
+    limits: { pageSize: 1, maxPages: 1, maxItems: 1 },
+    reader: {
+      /** Never settles, proving cancellation does not depend on adapter cooperation. */
+      async readPage(request): Promise<CrossDomainIntegrityPage> {
+        readCount += 1
+        observedSignal = request.signal
+        resolveStarted?.()
+        return await new Promise(() => {})
+      },
+    },
+  }
+  const pending = runCrossDomainIntegrityCheck(input)
+  await started
+  controller.abort()
+  const failure = await pending.catch((error: unknown) => error)
+
+  expect(failure).toBeInstanceOf(CrossDomainIntegrityDeadlineFailure)
+  if (!(failure instanceof CrossDomainIntegrityDeadlineFailure)) {
+    throw new Error('Expected a deadline failure.')
+  }
+  expect(failure.code).toBe('CANCELLED')
+  expect(observedSignal?.aborted).toBe(true)
+  await expect(runCrossDomainIntegrityCheck(input)).rejects.toMatchObject({
+    code: 'CANCELLED',
+  })
+  expect(readCount).toBe(1)
 })

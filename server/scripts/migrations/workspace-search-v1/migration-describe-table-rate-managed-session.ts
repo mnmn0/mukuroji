@@ -67,8 +67,10 @@ export type CreateWorkspaceSearchMigrationManagedDescribeTableRateInput = {
   readonly account: string
   /** Exact requested AWS region shared by identity measurement and the ledger. */
   readonly region: string
-  /** Exact six requested physical table names used only for recovery guards. */
-  readonly tableNames: readonly string[]
+  /** Exact six migration table names used only by cleanup recovery. */
+  readonly recoveryTableNames: readonly string[]
+  /** Complete exact-six or exact-ten physical DescribeTable allowlist. */
+  readonly allowedTableNames: readonly string[]
   /** Explicit reviewed rate policy; no service-quota default is accepted. */
   readonly policy: WorkspaceSearchMigrationDescribeTableRatePolicy
   /** Durable pre-measurement checkpoint store. */
@@ -95,8 +97,10 @@ type ManagedDescribeTableRateConstructionSnapshot = {
   readonly account: string
   /** Exact requested AWS region. */
   readonly region: string
-  /** Exact six distinct recovery table names. */
-  readonly tableNames: readonly string[]
+  /** Exact six distinct migration table names used by cleanup recovery. */
+  readonly recoveryTableNames: readonly string[]
+  /** Complete detached exact-six or exact-ten DescribeTable allowlist. */
+  readonly allowedTableNames: readonly string[]
   /** Detached reviewed rate policy. */
   readonly policy: WorkspaceSearchMigrationDescribeTableRatePolicy
   /** Captured durable checkpoint store capability. */
@@ -204,6 +208,14 @@ export interface WorkspaceSearchMigrationManagedDescribeTableRate {
   readEvidence(): WorkspaceSearchMigrationDescribeTableRateEvidence
 
   /**
+   * Stops admission, drains every admitted owner, and returns final evidence.
+   *
+   * @returns Final aggregate sampled after the serialized gate is quiescent.
+   */
+  closeAndReadEvidence():
+    Promise<WorkspaceSearchMigrationDescribeTableRateEvidence>
+
+  /**
    * Permanently closes the lifecycle and drains the dedicated transport.
    *
    * @returns Completion after every admitted owner and cleanup has settled.
@@ -246,6 +258,9 @@ class ManagedDescribeTableRate
   /** Exact requested AWS region. */
   readonly #region: string
 
+  /** Complete immutable physical table allowlist for every attempt surface. */
+  readonly #allowedTableNames: ReadonlySet<string>
+
   /** Asynchronous capability context isolated across concurrent call chains. */
   readonly #surface =
     new AsyncLocalStorage<ManagedDescribeTableExecutionSurface>()
@@ -275,6 +290,10 @@ class ManagedDescribeTableRate
   /** Exact-once completion for dedicated transport closure. */
   #closeCompletion: Promise<void> | undefined
 
+  /** Exact-once final aggregate sampled immediately before transport closure. */
+  #closeEvidenceCompletion:
+    Promise<WorkspaceSearchMigrationDescribeTableRateEvidence> | undefined
+
   /**
    * Retains one already constructed and durably claimed controller.
    *
@@ -293,6 +312,7 @@ class ManagedDescribeTableRate
   ) {
     this.#account = snapshot.account
     this.#region = snapshot.region
+    this.#allowedTableNames = new Set(snapshot.allowedTableNames)
     this.#checkpointStore = snapshot.checkpointStore
     this.#registry = registry
     this.#transport = transport
@@ -306,14 +326,15 @@ class ManagedDescribeTableRate
     phase: WorkspaceSearchMigrationDescribeTablePhase,
     signal?: AbortSignal,
   ): Promise<DescribeTableCommandOutput> {
+    this.#requireAllowedTableName(tableName)
     const surface = this.#surface.getStore()
     requireActiveManagedSurface(surface)
     if (surface?.kind === 'page') {
-      const attempt = this.#transport.createAttempt(tableName)
+      const attempt = this.#createAllowedAttempt(tableName)
       return surface.page.runDescribeTableAttempt({ phase, signal }, attempt)
     }
     if (surface?.kind === 'cleanup') {
-      const attempt = this.#transport.createAttempt(tableName)
+      const attempt = this.#createAllowedAttempt(tableName)
       return surface.cleanup.runDescribeTableAttempt(
         { phase: 'post-send-guard' },
         attempt,
@@ -321,7 +342,7 @@ class ManagedDescribeTableRate
     }
     if (surface?.kind === 'non-page') {
       this.#requireAccepting()
-      const attempt = this.#transport.createAttempt(tableName)
+      const attempt = this.#createAllowedAttempt(tableName)
       return this.#lifecycle.runDescribeTableAttempt(
         { phase, signal },
         attempt,
@@ -514,21 +535,30 @@ class ManagedDescribeTableRate
     return this.#lifecycle.readEvidence()
   }
 
-  /** Closes the lifecycle and transport once, after any active page settles. */
-  close(): Promise<void> {
-    const existing = this.#closeCompletion
+  /** Stops admission, drains the gate, and snapshots final rate evidence. */
+  closeAndReadEvidence():
+    Promise<WorkspaceSearchMigrationDescribeTableRateEvidence> {
+    const existing = this.#closeEvidenceCompletion
     if (existing !== undefined) return existing
     this.#status = 'closed'
     this.#claimAbortController.abort()
     this.#lifecycle.close()
-    const completion = this.#gateTail.then(
-      () => {
-        this.#transport.close()
-      },
-      () => {
-        this.#transport.close()
-      },
-    )
+    /** Seals this admission controller and returns its final evidence once. */
+    const finish = (): WorkspaceSearchMigrationDescribeTableRateEvidence => {
+      const evidence = Object.freeze(this.#lifecycle.readEvidence())
+      this.#transport.close()
+      return evidence
+    }
+    const completion = this.#gateTail.then(finish, finish)
+    this.#closeEvidenceCompletion = completion
+    return completion
+  }
+
+  /** Closes the lifecycle and transport once, after any active page settles. */
+  close(): Promise<void> {
+    const existing = this.#closeCompletion
+    if (existing !== undefined) return existing
+    const completion = this.closeAndReadEvidence().then(() => undefined)
     this.#closeCompletion = completion
     return completion
   }
@@ -538,12 +568,12 @@ class ManagedDescribeTableRate
    *
    * @param recoverAttempt - Whether one already-fenced uncertain attempt exists.
    * @param recoverCleanup - Whether all six table guards must be rerun.
-   * @param tableNames - Detached exact six requested table names.
+   * @param recoveryTableNames - Detached exact six migration table names.
    */
   async recoverAuthorizedInterruptedState(
     recoverAttempt: boolean,
     recoverCleanup: boolean,
-    tableNames: readonly string[],
+    recoveryTableNames: readonly string[],
   ): Promise<void> {
     if (recoverAttempt) {
       await this.#lifecycle.recoverInterruptedAttempt(
@@ -552,8 +582,8 @@ class ManagedDescribeTableRate
     }
     if (recoverCleanup) {
       await this.#lifecycle.recoverInterruptedCleanup(async (cleanup) => {
-        for (const tableName of tableNames) {
-          const attempt = this.#transport.createAttempt(tableName)
+        for (const tableName of recoveryTableNames) {
+          const attempt = this.#createAllowedAttempt(tableName)
           await cleanup.runDescribeTableAttempt(
             { phase: 'reconciliation' },
             attempt,
@@ -637,6 +667,32 @@ class ManagedDescribeTableRate
   /** Fails after interruption, quarantine, or close stopped admission. */
   #requireAccepting(): void {
     if (this.#status !== 'active') return failManagedRate()
+  }
+
+  /**
+   * Creates one transport attempt only for a construction-pinned table.
+   *
+   * @param tableName - Candidate physical DynamoDB table name.
+   * @returns Nominal one-shot attempt for the exact allowlisted table.
+   */
+  #createAllowedAttempt(
+    tableName: string,
+  ): ReturnType<
+    WorkspaceSearchMigrationDescribeTableSingleAttemptAwsTransport[
+      'createAttempt'
+    ]
+  > {
+    this.#requireAllowedTableName(tableName)
+    return this.#transport.createAttempt(tableName)
+  }
+
+  /**
+   * Rejects a table before any nominal attempt or rate side effect exists.
+   *
+   * @param tableName - Candidate physical DynamoDB table name.
+   */
+  #requireAllowedTableName(tableName: string): void {
+    if (!this.#allowedTableNames.has(tableName)) return failManagedRate()
   }
 }
 
@@ -729,7 +785,7 @@ export async function createWorkspaceSearchMigrationManagedDescribeTableRate(
     await controller.recoverAuthorizedInterruptedState(
       snapshot.recoverInterruptedAttempt,
       snapshot.recoverInterruptedCleanup,
-      snapshot.tableNames,
+      snapshot.recoveryTableNames,
     )
     requireManagedRateSignalActive(signal)
   } catch (error: unknown) {
@@ -751,7 +807,8 @@ function detachManagedRateConstructionInput(
 ): ManagedDescribeTableRateConstructionSnapshot {
   let account: string
   let region: string
-  let tableNamesInput: readonly string[]
+  let recoveryTableNamesInput: readonly string[]
+  let allowedTableNamesInput: readonly string[]
   let policy: WorkspaceSearchMigrationDescribeTableRatePolicy
   let checkpointStore:
     WorkspaceSearchMigrationDescribeTableRateCheckpointStore
@@ -765,7 +822,8 @@ function detachManagedRateConstructionInput(
   try {
     account = input.account
     region = input.region
-    tableNamesInput = input.tableNames
+    recoveryTableNamesInput = input.recoveryTableNames
+    allowedTableNamesInput = input.allowedTableNames
     policy = structuredClone(input.policy)
     checkpointStore = input.checkpointStore
     credentials = input.credentials
@@ -832,10 +890,18 @@ function detachManagedRateConstructionInput(
             Reflect.apply(record, recorder, [observation])
           },
         })
+  const recoveryTableNames = detachRecoveryTableNames(
+    recoveryTableNamesInput,
+  )
+  const allowedTableNames = detachAllowedTableNames(
+    allowedTableNamesInput,
+    recoveryTableNames,
+  )
   return Object.freeze({
     account,
     region,
-    tableNames: detachRecoveryTableNames(tableNamesInput),
+    recoveryTableNames,
+    allowedTableNames,
     policy: Object.freeze(policy),
     checkpointStore: capturedCheckpointStore,
     credentials,
@@ -907,7 +973,12 @@ function closeManagedRateTransport(
   }
 }
 
-/** Detaches and validates the exact six distinct recovery guard table names. */
+/**
+ * Detaches and validates the exact six distinct recovery guard table names.
+ *
+ * @param value - Candidate recovery-only physical table-name vector.
+ * @returns Frozen detached exact-six recovery vector.
+ */
 function detachRecoveryTableNames(value: readonly string[]): readonly string[] {
   let tableNames: string[]
   try {
@@ -918,16 +989,56 @@ function detachRecoveryTableNames(value: readonly string[]): readonly string[] {
   if (
     tableNames.length !== 6 ||
     new Set(tableNames).size !== 6 ||
-    tableNames.some(
-      (tableName) =>
-        tableName.length < 3 ||
-        tableName.length > 255 ||
-        !/^[A-Za-z0-9_.-]+$/u.test(tableName),
-    )
+    tableNames.some((tableName) => !isManagedRateTableName(tableName))
   ) {
     return failManagedRate()
   }
   return Object.freeze(tableNames)
+}
+
+/**
+ * Detaches the complete exact-six or exact-ten physical table allowlist.
+ *
+ * Every recovery table must remain present. Additional semantic role and
+ * shared-name validation belongs to the higher-level identity composition.
+ *
+ * @param value - Candidate full migration-only or rehearsal union allowlist.
+ * @param recoveryTableNames - Validated exact six recovery table names.
+ * @returns Frozen detached table-name vector used by every attempt surface.
+ */
+function detachAllowedTableNames(
+  value: readonly string[],
+  recoveryTableNames: readonly string[],
+): readonly string[] {
+  let tableNames: string[]
+  try {
+    tableNames = Array.from(value)
+  } catch {
+    return failManagedRate()
+  }
+  const tableNameSet = new Set(tableNames)
+  if (
+    (tableNames.length !== 6 && tableNames.length !== 10) ||
+    tableNameSet.size !== tableNames.length ||
+    tableNames.some((tableName) => !isManagedRateTableName(tableName)) ||
+    recoveryTableNames.some((tableName) => !tableNameSet.has(tableName))
+  ) {
+    return failManagedRate()
+  }
+  return Object.freeze(tableNames)
+}
+
+/**
+ * Returns whether one value is a valid physical DynamoDB table name.
+ *
+ * @param value - Candidate unknown value.
+ * @returns Whether the value satisfies DynamoDB table-name syntax and length.
+ */
+function isManagedRateTableName(value: unknown): value is string {
+  return typeof value === 'string' &&
+    value.length >= 3 &&
+    value.length <= 255 &&
+    /^[A-Za-z0-9_.-]+$/u.test(value)
 }
 
 /** Reads one strict non-negative fence from a trusted store result. */

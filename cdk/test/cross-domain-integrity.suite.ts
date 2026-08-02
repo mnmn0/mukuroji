@@ -50,14 +50,27 @@ test('cross-domain integrity access is unattached, bounded, and read-only', () =
   if (typeof fileBucketLogicalId !== 'string') {
     throw new Error('Integrity policy file bucket output is incomplete.');
   }
+  const markerKey = document.Outputs.FileBucketIncarnationMarkerKey?.Value;
+  const markerVersionId =
+    document.Outputs.FileBucketIncarnationMarkerVersionId?.Value;
+  if (!markerKey || !markerVersionId) {
+    throw new Error('Integrity policy marker outputs are incomplete.');
+  }
 
   expect(statements).toEqual([
     {
-      Action: 'dynamodb:Scan',
+      Action: ['dynamodb:DescribeTable', 'dynamodb:Scan'],
       Effect: 'Allow',
       Resource: tableLogicalIds.map((logicalId) => ({
         'Fn::GetAtt': [logicalId, 'Arn'],
       })),
+    },
+    {
+      Action: 's3:GetBucketVersioning',
+      Effect: 'Allow',
+      Resource: {
+        'Fn::GetAtt': [fileBucketLogicalId, 'Arn'],
+      },
     },
     {
       Action: 's3:ListBucket',
@@ -84,6 +97,28 @@ test('cross-domain integrity access is unattached, bounded, and read-only', () =
           [
             { 'Fn::GetAtt': [fileBucketLogicalId, 'Arn'] },
             '/workspaces/*',
+          ],
+        ],
+      },
+    },
+    {
+      Action: [
+        's3:GetObjectVersion',
+        's3:GetObjectVersionAttributes',
+      ],
+      Condition: {
+        StringEquals: {
+          's3:VersionId': markerVersionId,
+        },
+      },
+      Effect: 'Allow',
+      Resource: {
+        'Fn::Join': [
+          '',
+          [
+            { 'Fn::GetAtt': [fileBucketLogicalId, 'Arn'] },
+            '/',
+            markerKey,
           ],
         ],
       },

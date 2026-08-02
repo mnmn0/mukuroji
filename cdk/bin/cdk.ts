@@ -3,9 +3,26 @@ import * as cdk from 'aws-cdk-lib';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { acknowledgeKnownNagFindings } from '../lib/acknowledge-nag-findings';
 import { CdkStack } from '../lib/cdk-stack';
+import {
+  DEFAULT_WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_TARGET_ID,
+} from '../lib/config/workspace-search-migration-deployment-targets';
 
 const app = new cdk.App();
 cdk.Validations.of(app).addPlugins(new AwsSolutionsChecks(app));
+const deploymentTargetContext: unknown = app.node.tryGetContext(
+  'workspaceSearchMigrationDeploymentTarget',
+);
+if (
+  deploymentTargetContext !== undefined &&
+  typeof deploymentTargetContext !== 'string'
+) {
+  throw new Error(
+    'workspaceSearchMigrationDeploymentTarget must name a reviewed target.',
+  );
+}
+const workspaceSearchMigrationDeploymentTargetId =
+  deploymentTargetContext ??
+    DEFAULT_WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_TARGET_ID;
 // oxlint-disable-next-line awscdk/no-construct-stack-suffix -- Existing stack ID is part of the deployed resource identity.
 const stack = new CdkStack(app, 'CdkStack', {
   /* If you don't specify 'env', this stack will be environment-agnostic.
@@ -21,5 +38,6 @@ const stack = new CdkStack(app, 'CdkStack', {
   // env: { account: '123456789012', region: 'us-east-1' },
 
   /* For more information, see https://docs.aws.amazon.com/cdk/latest/guide/environments.html */
+  workspaceSearchMigrationDeploymentTargetId,
 });
 acknowledgeKnownNagFindings(stack);
