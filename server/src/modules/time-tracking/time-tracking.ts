@@ -87,7 +87,9 @@ const ISO_INSTANT_PATTERN = /T.*(?:Z|[+-]\d{2}:\d{2})$/u
 const CURRENCY_PATTERN = /^[A-Z]{3}$/u
 const MAX_DESCRIPTION_LENGTH = 4_000
 const MAX_ENTRY_DURATION_MINUTES = 24 * 60 * 7
+const MAX_ENTRY_DURATION_MILLISECONDS = MAX_ENTRY_DURATION_MINUTES * 60_000
 const MAX_LIST_LIMIT = 500
+const TIME_ENTRY_DATE_INDEX_NAME = 'TimeEntryTeamDateIndex'
 const TIME_ENTRY_AUDIT_FIELDS = [
   'status',
   'revision',
@@ -985,6 +987,14 @@ export class TimeTrackingService {
     )
   }
 
+  /** Lists all Work Item estimates for a Team for capacity-planning reconciliation. */
+  async listEstimates(workspaceId: string, teamId: string): Promise<TimeEstimate[]> {
+    return await this.repository.listEstimates(
+      readIdentifier(workspaceId, 'Workspace ID'),
+      readIdentifier(teamId, 'Team ID'),
+    )
+  }
+
   /** Saves a Team or Project budget. */
   async saveBudget(input: SaveTimeBudgetInput): Promise<TimeBudget> {
     return await this.withIdempotency(
@@ -1479,20 +1489,49 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
     this.documentClient = documentClient
   }
 
-  /** Lists Team entries by the shared Workspace partition. */
+  /** Lists Team entries using the date index whenever a range is supplied. */
   async listEntries(input: ListTimeEntriesInput): Promise<TimeEntry[]> {
     const limit = input.limit ?? MAX_LIST_LIMIT
     const entries: TimeEntry[] = []
     let exclusiveStartKey: QueryCommandInput['ExclusiveStartKey']
+    const from = input.from === undefined ? undefined : normalizeEntryBoundary(input.from)
+    const to = input.to === undefined ? undefined : normalizeEntryBoundary(input.to)
+    const hasDateRange = from !== undefined || to !== undefined
     do {
+      const keyConditionParts = hasDateRange
+        ? [
+            'teamId = :teamId',
+            ...(from ? ['startAt >= :queryFrom'] : []),
+            ...(to ? ['startAt < :queryTo'] : []),
+          ]
+        : ['workspaceId = :workspaceId', 'begins_with(recordKey, :prefix)']
+      const expressionAttributeValues = hasDateRange
+        ? {
+            ':teamId': input.teamId,
+            ...(from ? { ':queryFrom': new Date(Date.parse(from) - MAX_ENTRY_DURATION_MILLISECONDS).toISOString() } : {}),
+            ...(to ? { ':queryTo': to } : {}),
+            ':workspaceId': input.workspaceId,
+            ':prefix': `${ENTRY_PREFIX}${input.teamId}#`,
+            ...(from ? { ':from': from } : {}),
+          }
+        : {
+            ':workspaceId': input.workspaceId,
+            ':prefix': `${ENTRY_PREFIX}${input.teamId}#`,
+          }
       const response = await this.documentClient.send(new QueryCommand({
         TableName: this.tableName,
-        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
-        ExpressionAttributeValues: {
-          ':workspaceId': input.workspaceId,
-          ':prefix': `${ENTRY_PREFIX}${input.teamId}#`,
-        },
-        ConsistentRead: true,
+        ...(hasDateRange ? { IndexName: TIME_ENTRY_DATE_INDEX_NAME } : {}),
+        KeyConditionExpression: keyConditionParts.join(' AND '),
+        ExpressionAttributeValues: expressionAttributeValues,
+        ...(hasDateRange
+          ? {
+              FilterExpression: [
+                'workspaceId = :workspaceId',
+                'begins_with(recordKey, :prefix)',
+                ...(from ? ['endAt > :from'] : []),
+              ].join(' AND '),
+            }
+          : { ConsistentRead: true }),
         Limit: limit,
         ScanIndexForward: true,
         ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
@@ -1741,16 +1780,23 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
 
   /** Lists Team estimates. */
   async listEstimates(workspaceId: string, teamId: string) {
-    const response = await this.documentClient.send(new QueryCommand({
-      TableName: this.tableName,
-      KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
-      ExpressionAttributeValues: {
-        ':workspaceId': workspaceId,
-        ':prefix': `${ESTIMATE_PREFIX}${teamId}#`,
-      },
-      ConsistentRead: true,
-    }))
-    return (response.Items ?? []).map(readStoredEstimate)
+    const estimates: TimeEstimate[] = []
+    let exclusiveStartKey: QueryCommandInput['ExclusiveStartKey']
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
+        ExpressionAttributeValues: {
+          ':workspaceId': workspaceId,
+          ':prefix': `${ESTIMATE_PREFIX}${teamId}#`,
+        },
+        ConsistentRead: true,
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }))
+      estimates.push(...(response.Items ?? []).map(readStoredEstimate))
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+    return estimates
   }
 
   /** Saves an estimate using a single-owner key. */
@@ -2381,6 +2427,11 @@ function validateEntryBoundary(value: string, label: string): string {
     return value
   }
   return validateInstant(value, label)
+}
+
+/** Normalizes an entry query boundary to the instant representation used by the date index. */
+function normalizeEntryBoundary(value: string): string {
+  return ISO_DATE_PATTERN.test(value) ? `${value}T00:00:00.000Z` : new Date(value).toISOString()
 }
 
 /** Validates an IANA timezone identifier. */

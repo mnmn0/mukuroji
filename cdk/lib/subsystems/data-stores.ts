@@ -25,6 +25,8 @@ export type DataStoreResources = {
   readonly automationTable: dynamodb.Table;
   /** Planning domain state table. */
   readonly planningTable: dynamodb.Table;
+  /** Capacity planning availability, request, and assignment state table. */
+  readonly capacityPlanningTable: dynamodb.Table;
   /** Developer platform configuration and execution state table. */
   readonly developerPlatformTable: dynamodb.Table;
   /** Analytics definitions and scheduled delivery state table. */
@@ -171,6 +173,15 @@ export function buildDataStores(
     removalPolicy: cdk.RemovalPolicy.RETAIN,
   });
 
+  const capacityPlanningTable = new dynamodb.Table(stack, 'CapacityPlanningTable', {
+    partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    encryption: dynamodb.TableEncryption.AWS_MANAGED,
+    pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
+  });
+
   const developerPlatformTable = new dynamodb.Table(stack, 'DeveloperPlatformTable', {
     partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
     sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
@@ -194,6 +205,13 @@ export function buildDataStores(
     partitionKey: { name: 'scheduleShard', type: dynamodb.AttributeType.STRING },
     sortKey: { name: 'nextDeliveryAtRecordKey', type: dynamodb.AttributeType.STRING },
     projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+  });
+
+  analyticsTable.addGlobalSecondaryIndex({
+    indexName: 'TimeEntryTeamDateIndex',
+    partitionKey: { name: 'teamId', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'startAt', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.ALL,
   });
 
   const requestIntakeTable = new dynamodb.Table(stack, 'RequestIntakeTable', {
@@ -428,6 +446,7 @@ export function buildDataStores(
     workItemConfigurationTable,
     automationTable,
     planningTable,
+    capacityPlanningTable,
     developerPlatformTable,
     analyticsTable,
     requestIntakeTable,
