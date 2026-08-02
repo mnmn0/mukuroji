@@ -833,20 +833,23 @@ export function buildApiRuntime(
     })],
   });
   const apiAnalyticsDataPolicy = new iam.Policy(scope, 'ApiAnalyticsDataPolicy', {
-    statements: [new iam.PolicyStatement({
-      actions: [
-        'dynamodb:DeleteItem',
-        'dynamodb:DescribeTable',
-        'dynamodb:GetItem',
-        'dynamodb:PutItem',
-        'dynamodb:Query',
-        'dynamodb:UpdateItem',
-      ],
-      resources: [
-        analyticsTable.tableArn,
-        `${analyticsTable.tableArn}/index/TimeEntryTeamDateIndex`,
-      ],
-    })],
+    statements: [
+      new iam.PolicyStatement({
+        actions: [
+          'dynamodb:DeleteItem',
+          'dynamodb:DescribeTable',
+          'dynamodb:GetItem',
+          'dynamodb:PutItem',
+          'dynamodb:Query',
+          'dynamodb:UpdateItem',
+        ],
+        resources: [analyticsTable.tableArn],
+      }),
+      new iam.PolicyStatement({
+        actions: ['dynamodb:Query'],
+        resources: [`${analyticsTable.tableArn}/index/TimeEntryTeamDateIndex`],
+      }),
+    ],
   });
   const apiAuditTransactionDataPolicy = new iam.Policy(
     scope,
