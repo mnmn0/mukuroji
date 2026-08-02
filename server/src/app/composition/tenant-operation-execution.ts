@@ -1,11 +1,13 @@
 import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider'
 import { S3Client } from '@aws-sdk/client-s3'
+import { GetSecretValueCommand } from '@aws-sdk/client-secrets-manager'
 import { SendMessageCommand } from '@aws-sdk/client-sqs'
 import {
   createDynamoDbClient,
   createDynamoDbDocumentClient,
 } from '../../infrastructure/aws/dynamodb-client'
 import { createSqsClient } from '../../infrastructure/aws/sqs-client'
+import { createSecretsManagerClient } from '../../infrastructure/aws/secrets-manager-client'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
 import {
   TenantOperationExecutor,
@@ -20,6 +22,9 @@ import {
 import type {
   TenantOperationExecutionProcessor,
 } from '../../modules/tenant-administration/adapter-in/events/tenant-operation-execution'
+import type {
+  TenantOperationResourceOwnerProcessor,
+} from '../../modules/tenant-administration/adapter-in/events/tenant-operation-resource-owner'
 import { createProductionTenantAdministrationClient } from './tenant-administration'
 
 /**
@@ -60,52 +65,73 @@ export function createProductionTenantOperationExecutor(): TenantOperationExecut
  *
  * @returns A bounded AWS resource owner that commits only content-addressed proof.
  */
-export function createProductionTenantOperationResourceOwner(): TenantOperationResourceOwnerExecutor {
+export function createProductionTenantOperationResourceOwner(): TenantOperationResourceOwnerProcessor {
   const serverConfig = loadServerConfig()
   const documentClient = createDynamoDbDocumentClient(createDynamoDbClient(serverConfig))
-  const state = createProductionTenantAdministrationClient()
   const sqs = createSqsClient()
+  const secretsManagerClient = createSecretsManagerClient()
   const owner = readTenantOperationResourceOwnerKind()
   const capability = readTenantOperationCapability(owner)
   const queueUrl = requireEnvironment(
     'TENANT_OPERATION_RESOURCE_OWNER_QUEUE_URL',
   )
-  const awsOwner = new AwsTenantOperationResourceOwner({
-    owner,
-    documentClient,
-    s3Client: new S3Client({ region: serverConfig.awsRegion }),
-    cognitoClient: new CognitoIdentityProviderClient({
-      region: serverConfig.awsRegion,
-      ...(serverConfig.cognitoEndpoint
-        ? {
-            endpoint: serverConfig.cognitoEndpoint,
-            credentials: {
-              accessKeyId: serverConfig.environment.AWS_ACCESS_KEY_ID ?? 'test',
-              secretAccessKey: serverConfig.environment.AWS_SECRET_ACCESS_KEY ?? 'test',
-            },
-          }
-        : {}),
-    }),
-    config: readTenantOperationResourceOwnerConfig(),
-    pseudonymKey:
-      serverConfig.environment.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY ?? '',
-  })
-  return new TenantOperationResourceOwnerExecutor(
-    state,
-    awsOwner,
-    {
-      /** Enqueues one same-capability continuation without accepting a destination. */
-      async send(job, delaySeconds) {
-        await sqs.send(new SendMessageCommand({
-          QueueUrl: queueUrl,
-          MessageBody: JSON.stringify(job),
-          ...(delaySeconds === undefined ? {} : { DelaySeconds: delaySeconds }),
-        }))
+  let executor: TenantOperationResourceOwnerExecutor | undefined
+
+  /** Loads sensitive key material once and constructs the bounded owner in memory. */
+  async function resolveExecutor(): Promise<TenantOperationResourceOwnerExecutor> {
+    if (executor) return executor
+    const response = await secretsManagerClient.send(new GetSecretValueCommand({
+      SecretId: requireEnvironment('TENANT_OPERATION_PSEUDONYM_SECRET_ARN'),
+    }))
+    if (typeof response.SecretString !== 'string') {
+      throw new TypeError('Tenant operation pseudonym secret is invalid.')
+    }
+    const state = createProductionTenantAdministrationClient(response.SecretString)
+    const awsOwner = new AwsTenantOperationResourceOwner({
+      owner,
+      documentClient,
+      s3Client: new S3Client({ region: serverConfig.awsRegion }),
+      cognitoClient: new CognitoIdentityProviderClient({
+        region: serverConfig.awsRegion,
+        ...(serverConfig.cognitoEndpoint
+          ? {
+              endpoint: serverConfig.cognitoEndpoint,
+              credentials: {
+                accessKeyId: serverConfig.environment.AWS_ACCESS_KEY_ID ?? 'test',
+                secretAccessKey: serverConfig.environment.AWS_SECRET_ACCESS_KEY ?? 'test',
+              },
+            }
+          : {}),
+      }),
+      secretsManagerClient,
+      config: readTenantOperationResourceOwnerConfig(),
+      pseudonymKey: response.SecretString,
+    })
+    executor = new TenantOperationResourceOwnerExecutor(
+      state,
+      awsOwner,
+      {
+        /** Enqueues one same-capability continuation without accepting a destination. */
+        async send(job, delaySeconds) {
+          await sqs.send(new SendMessageCommand({
+            QueueUrl: queueUrl,
+            MessageBody: JSON.stringify(job),
+            ...(delaySeconds === undefined ? {} : { DelaySeconds: delaySeconds }),
+          }))
+        },
       },
+      capability.executorId,
+      capability.allowedSteps,
+    )
+    return executor
+  }
+
+  return {
+    /** Executes one queued page after lazy in-memory secret hydration. */
+    async execute(job) {
+      return await (await resolveExecutor()).execute(job)
     },
-    capability.executorId,
-    capability.allowedSteps,
-  )
+  }
 }
 
 /** Resolves one capability queue URL without accepting a caller-supplied destination. */
@@ -224,6 +250,10 @@ function readTenantOperationResourceOwnerConfig(): TenantOperationResourceOwnerC
     workItemEventsTableName: requireEnvironment('MUKUROJI_TEAM_ISSUE_EVENTS_TABLE'),
     workItemConfigurationTableName: requireEnvironment('WORK_ITEM_CONFIGURATION_TABLE_NAME'),
     automationTableName: requireEnvironment('AUTOMATION_TABLE_NAME'),
+    automationWebhookSecretPrefix: requireEnvironment('AUTOMATION_WEBHOOK_SECRET_PREFIX'),
+    automationInboundWebhookSecretPrefix: requireEnvironment(
+      'AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX',
+    ),
     planningTableName: requireEnvironment('PLANNING_TABLE_NAME'),
     capacityPlanningTableName: requireEnvironment('CAPACITY_PLANNING_TABLE_NAME'),
     developerPlatformTableName: requireEnvironment('DEVELOPER_PLATFORM_TABLE_NAME'),

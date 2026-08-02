@@ -87,6 +87,8 @@ export type ApiTransportsAndRealtimeResources = Readonly<{
   readonly httpApi: apigatewayv2.HttpApi;
   /** Auto-deployed production WebSocket stage. */
   readonly realtimeWebSocketStage: apigatewayv2.WebSocketStage;
+  /** Retained Workspace audit pseudonym secret shared with lifecycle workers. */
+  readonly workspaceAuditPseudonymSecret: secretsmanager.ISecret;
 }>;
 
 /**
@@ -271,7 +273,7 @@ function createApiRuntimeConfigurationSecret(
  * @param apiFunction - Replacement API function receiving only secret ARNs.
  * @param httpApi - HTTP API whose stable endpoint is exposed to automation.
  * @param realtimeWebSocketStage - WebSocket stage exposed to the API.
- * @returns Nothing.
+ * @returns The retained pseudonym secret shared with trusted lifecycle workers.
  */
 function bindApiRuntimeConfiguration(
   scope: cdk.Stack,
@@ -279,7 +281,7 @@ function bindApiRuntimeConfiguration(
   apiFunction: lambdaNodejs.NodejsFunction,
   httpApi: apigatewayv2.HttpApi,
   realtimeWebSocketStage: apigatewayv2.WebSocketStage,
-): void {
+): secretsmanager.ISecret {
   const {
     analyticsTable,
     auditEventsTable,
@@ -526,6 +528,7 @@ function bindApiRuntimeConfiguration(
   enterpriseSsoStateValueSecret.grantRead(apiFunction);
   requestTokenHashValueSecret.grantRead(apiFunction);
   workspaceAuditPseudonymValueSecret.grantRead(apiFunction);
+  return workspaceAuditPseudonymValueSecret;
 }
 
 /**
@@ -1217,7 +1220,7 @@ export function buildApiTransportsAndRealtime(
   );
   realtimeWebSocketStage.grantManagementApiAccess(realtimeFunction);
 
-  bindApiRuntimeConfiguration(
+  const workspaceAuditPseudonymSecret = bindApiRuntimeConfiguration(
     scope,
     input,
     apiFunction,
@@ -1268,5 +1271,6 @@ export function buildApiTransportsAndRealtime(
     functionUrl,
     httpApi,
     realtimeWebSocketStage,
+    workspaceAuditPseudonymSecret,
   };
 }

@@ -179,6 +179,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
       'ApiAutomationWebhookSecretPolicy/Resource',
       'AutomationEventWebhookSecretPolicy/Resource',
       'AutomationScheduleWebhookSecretPolicy/Resource',
+      'TenantSecretsCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
     ],
   ],
   [
@@ -186,6 +187,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     [
       'ApiAutomationInboundWebhookSecretPolicy/Resource',
       'AutomationScheduleInboundWebhookSecretCleanupPolicy/Resource',
+      'TenantSecretsCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
     ],
   ],
   [
@@ -211,6 +213,8 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
       'RuntimeControlAlarmReadinessPollFunction/ServiceRole/DefaultPolicy/Resource',
       'RuntimeControlAlarmMonitorPolicy/Resource',
+      'TenantSecretsCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
+      'TenantVerificationCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
     ],
   ],
   [

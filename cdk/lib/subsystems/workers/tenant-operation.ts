@@ -8,6 +8,7 @@ import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
 import type { DataStoreResources } from '../data-stores';
@@ -29,6 +30,8 @@ export interface TenantOperationWorkerInput {
   readonly parameters: StackParameters;
   /** Dynamic operational controls shared by application runtimes. */
   readonly runtimeControls: RuntimeControlResources;
+  /** Retained secret containing the shared Workspace audit pseudonym key. */
+  readonly workspaceAuditPseudonymSecret: secretsmanager.ISecret;
 }
 
 /** Trusted tenant operation worker resources. */
@@ -257,6 +260,7 @@ export function buildTenantOperationWorker(
     runtimeControls: input.runtimeControls,
     tenantExportBucket,
     tenantAdministrationTable,
+    workspaceAuditPseudonymSecret: input.workspaceAuditPseudonymSecret,
   };
   const tenantExportCapabilityFunction =
     buildTenantOperationCapabilityFunction(scope, capabilityInput, {
@@ -355,6 +359,8 @@ type TenantOperationCapabilityFunctionInput = {
   readonly tenantExportBucket: s3.Bucket;
   /** Tenant lifecycle state table. */
   readonly tenantAdministrationTable: DataStoreResources['tenantAdministrationTable'];
+  /** Retained secret containing the shared Workspace audit pseudonym key. */
+  readonly workspaceAuditPseudonymSecret: secretsmanager.ISecret;
 };
 
 /**
@@ -398,7 +404,11 @@ function buildTenantOperationCapabilityFunction(
     environment: {
       ANALYTICS_TABLE_NAME: input.dataStores.analyticsTable.tableName,
       AUDIT_EVENTS_TABLE_NAME: input.dataStores.auditEventsTable.tableName,
+      AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX:
+        input.parameters.automationInboundWebhookSecretPrefix,
       AUTOMATION_TABLE_NAME: input.dataStores.automationTable.tableName,
+      AUTOMATION_WEBHOOK_SECRET_PREFIX:
+        input.parameters.automationWebhookSecretPrefix,
       CAPACITY_PLANNING_TABLE_NAME:
         input.dataStores.capacityPlanningTable.tableName,
       COGNITO_USER_POOL_ID: input.parameters.cognitoUserPoolId.valueAsString,
@@ -413,8 +423,6 @@ function buildTenantOperationCapabilityFunction(
       MUKUROJI_PROJECT_TASKS_TABLE: input.dataStores.legacyTasksTable.tableName,
       MUKUROJI_TEAM_ISSUE_EVENTS_TABLE:
         input.dataStores.teamIssueEventsTable.tableName,
-      MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY:
-        input.parameters.workspaceAuditPseudonymKey.valueAsString,
       NOTIFICATIONS_TABLE_NAME: input.dataStores.notificationsTable.tableName,
       PLANNING_TABLE_NAME: input.dataStores.planningTable.tableName,
       PROJECT_DIRECTORY_TABLE_NAME:
@@ -429,6 +437,8 @@ function buildTenantOperationCapabilityFunction(
       TENANT_OPERATION_EXECUTOR_ID: spec.executorId,
       TENANT_OPERATION_RESOURCE_OWNER: spec.owner,
       TENANT_OPERATION_RESOURCE_OWNER_QUEUE_URL: spec.queue.queueUrl,
+      TENANT_OPERATION_PSEUDONYM_SECRET_ARN:
+        input.workspaceAuditPseudonymSecret.secretArn,
       WORKSPACE_ACCESS_TABLE_NAME:
         input.dataStores.workspaceAccessTable.tableName,
       WORKSPACE_SEARCH_TABLE_NAME:
@@ -459,6 +469,7 @@ function buildTenantOperationCapabilityFunction(
   }));
   spec.queue.grants.consumeMessages(capabilityFunction);
   spec.queue.grants.sendMessages(capabilityFunction);
+  input.workspaceAuditPseudonymSecret.grantRead(capabilityFunction);
   capabilityFunction.addEventSource(new lambdaEventSources.SqsEventSource(
     spec.queue,
     {
@@ -558,11 +569,26 @@ function grantTenantResourceOwner(
   }
   if (owner === 'secrets') {
     for (const table of secretTables) grantTableReadWrite(target, table);
+    target.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:ListSecrets'],
+      resources: ['*'],
+    }));
+    target.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:DeleteSecret'],
+      resources: [
+        input.parameters.automationWebhookSecretArn,
+        input.parameters.automationInboundWebhookSecretArn,
+      ],
+    }));
     return;
   }
   for (const table of [...dataTables, ...secretTables]) {
     grantTableRead(target, table);
   }
+  target.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['secretsmanager:ListSecrets'],
+    resources: ['*'],
+  }));
   target.addToRolePolicy(new iam.PolicyStatement({
     actions: ['s3:ListBucket', 's3:ListBucketVersions'],
     resources: [input.fileStorage.fileBucket.bucketArn],

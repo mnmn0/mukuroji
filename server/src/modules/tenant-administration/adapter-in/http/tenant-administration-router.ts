@@ -2,6 +2,7 @@ import { Hono, type Context } from 'hono'
 import type {
   RequestTenantClosureInput,
   RequestTenantExportInput,
+  TenantAdministrationSnapshot,
   TenantDefaultPolicy,
   UpdateTenantEntitlementInput,
   UpdateTenantGovernanceInput,
@@ -219,7 +220,18 @@ async function ensureTenantInitialized<
 >(
   principal: Principal,
   dependencies: TenantAdministrationRouterDependencies<Principal>,
-) {
+): Promise<TenantAdministrationSnapshot> {
+  try {
+    const snapshot = await dependencies.client.getSnapshot(principal.directoryId)
+    if (snapshot.profile.status !== 'active') return snapshot
+  } catch (error) {
+    if (
+      !(error instanceof TenantAdministrationError) ||
+      error.code !== 'TenantAdministrationNotInitialized'
+    ) {
+      throw error
+    }
+  }
   const initialization = await dependencies.resolveInitialization(principal)
   return await dependencies.client.ensureSnapshot(
     principal.directoryId,

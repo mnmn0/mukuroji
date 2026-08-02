@@ -2204,8 +2204,12 @@ test('tenant lifecycle execution is split into queued environment-bound resource
             TENANT_OPERATION_RESOURCE_OWNER: specification.owner,
             TENANT_OPERATION_RESOURCE_OWNER_QUEUE_URL: expect.anything(),
             CAPACITY_PLANNING_TABLE_NAME: { Ref: capacityPlanningTableId },
-            MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: {
-              Ref: 'WorkspaceAuditPseudonymKey',
+            AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX:
+              'mukuroji/automation-inbound-webhooks',
+            AUTOMATION_WEBHOOK_SECRET_PREFIX:
+              'mukuroji/automation-webhooks',
+            TENANT_OPERATION_PSEUDONYM_SECRET_ARN: {
+              Ref: 'ApiWorkspaceAuditPseudonymValueSecretC16FD0F8',
             },
           }),
         }),
@@ -2214,6 +2218,9 @@ test('tenant lifecycle execution is split into queued environment-bound resource
     expect(document.Outputs[specification.outputId]?.Value).toEqual({
       Ref: specification.functionId,
     });
+    expect(
+      resource.Properties.Environment.Variables,
+    ).not.toHaveProperty('MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY');
 
     const policy = Object.entries(resources).find(([logicalId]) =>
       logicalId.startsWith(
@@ -2224,7 +2231,19 @@ test('tenant lifecycle execution is split into queued environment-bound resource
     expect(policy).toBeDefined();
     expect(serializedPolicy).toContain('TenantAdministrationTable621D59EB');
     expect(serializedPolicy).toContain('AuditEventsTable0723963E');
-    expect(serializedPolicy).not.toContain('secretsmanager:');
+    expect(serializedPolicy).toContain('secretsmanager:GetSecretValue');
+    if (specification.owner === 'secrets') {
+      expect(serializedPolicy).toContain('secretsmanager:ListSecrets');
+      expect(serializedPolicy).toContain('secretsmanager:DeleteSecret');
+      expect(serializedPolicy).toContain('mukuroji/automation-webhooks/');
+      expect(serializedPolicy).toContain('mukuroji/automation-inbound-webhooks/');
+    } else if (specification.owner === 'verification') {
+      expect(serializedPolicy).toContain('secretsmanager:ListSecrets');
+      expect(serializedPolicy).not.toContain('secretsmanager:DeleteSecret');
+    } else {
+      expect(serializedPolicy).not.toContain('secretsmanager:ListSecrets');
+      expect(serializedPolicy).not.toContain('secretsmanager:DeleteSecret');
+    }
     if (specification.owner === 'export' || specification.owner === 'data') {
       expect(serializedPolicy).toContain('s3:');
       expect(serializedPolicy).toContain(String(capacityPlanningTableId));

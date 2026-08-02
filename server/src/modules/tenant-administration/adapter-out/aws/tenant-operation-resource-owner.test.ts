@@ -1,7 +1,9 @@
+import { createHash } from 'node:crypto'
 import { describe, expect, test } from 'bun:test'
 import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { S3Client } from '@aws-sdk/client-s3'
+import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager'
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import type { TenantOperation } from '@mukuroji/contracts'
 import {
@@ -18,6 +20,10 @@ const testCredentials = {
   secretAccessKey: 'test-secret-key',
 }
 const testPseudonymKey = '1'.repeat(64)
+const inertSecretsManagerClient = new SecretsManagerClient({
+  credentials: testCredentials,
+  region: 'ap-northeast-1',
+})
 
 /** Creates stable test resource names for every tenant-owned store. */
 function createConfig(): TenantOperationResourceOwnerConfig {
@@ -31,6 +37,8 @@ function createConfig(): TenantOperationResourceOwnerConfig {
     workItemEventsTableName: 'work-item-events',
     workItemConfigurationTableName: 'work-item-configuration',
     automationTableName: 'automation',
+    automationWebhookSecretPrefix: 'mukuroji/automation-webhooks',
+    automationInboundWebhookSecretPrefix: 'mukuroji/automation-inbound-webhooks',
     planningTableName: 'planning',
     capacityPlanningTableName: 'capacity-planning',
     developerPlatformTableName: 'developer-platform',
@@ -89,8 +97,11 @@ function createDataJob(
 function readJsonRequestBody(request: unknown): unknown {
   if (!isRecord(request)) throw new Error('Expected a serialized AWS request.')
   const body = Reflect.get(request, 'body')
-  if (typeof body !== 'string') throw new Error('Expected a JSON request body.')
-  return JSON.parse(body)
+  if (typeof body === 'string') return JSON.parse(body)
+  if (body instanceof Uint8Array) {
+    return JSON.parse(new TextDecoder().decode(body))
+  }
+  throw new Error('Expected a JSON request body.')
 }
 
 /** Reads a string or byte-backed Smithy request body. */
@@ -140,6 +151,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       documentClient,
       s3Client,
       cognitoClient,
+      secretsManagerClient: inertSecretsManagerClient,
       config: createConfig(),
       pseudonymKey: testPseudonymKey,
     })
@@ -285,6 +297,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       documentClient,
       s3Client,
       cognitoClient,
+      secretsManagerClient: inertSecretsManagerClient,
       config: createConfig(),
       pseudonymKey: testPseudonymKey,
     })
@@ -379,6 +392,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       documentClient,
       s3Client,
       cognitoClient,
+      secretsManagerClient: inertSecretsManagerClient,
       config: createConfig(),
       pseudonymKey: testPseudonymKey,
     })
@@ -439,6 +453,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       documentClient,
       s3Client,
       cognitoClient,
+      secretsManagerClient: inertSecretsManagerClient,
       config: createConfig(),
       pseudonymKey: testPseudonymKey,
       clock: () => new Date('2026-08-02T00:01:00.000Z'),
@@ -527,6 +542,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       documentClient,
       s3Client,
       cognitoClient,
+      secretsManagerClient: inertSecretsManagerClient,
       config: createConfig(),
       pseudonymKey: testPseudonymKey,
     })
@@ -558,6 +574,215 @@ describe('AwsTenantOperationResourceOwner', () => {
       documentClient.destroy()
       s3Client.destroy()
       cognitoClient.destroy()
+    }
+  })
+
+  test('deletes both Automation secret namespaces with encrypted pagination', async () => {
+    const workspaceId = 'workspace/one'
+    const workspaceHash = createHash('sha256').update(workspaceId).digest('hex')
+    const outboundSecret = `mukuroji/automation-webhooks/${workspaceHash}/partner-primary`
+    const inboundSecret = `mukuroji/automation-inbound-webhooks/${workspaceHash}/endpoint-1`
+    const secretRequests: unknown[] = []
+    let listRequestCount = 0
+    const secretsManagerClient = new SecretsManagerClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          const body = readJsonRequestBody(request)
+          secretRequests.push(body)
+          const isListRequest = isRecord(body) && Array.isArray(body.Filters)
+          let responseBody: Record<string, unknown> = {}
+          if (isListRequest) {
+            listRequestCount += 1
+            responseBody = listRequestCount === 1
+              ? {
+                  SecretList: [{ Name: outboundSecret }],
+                  NextToken: 'provider-secret-token',
+                }
+              : listRequestCount === 3
+                ? { SecretList: [{ Name: inboundSecret }] }
+                : { SecretList: [] }
+          }
+          return {
+            response: {
+              body: new TextEncoder().encode(JSON.stringify(responseBody)),
+              headers: {},
+              statusCode: 200,
+            },
+          }
+        },
+      },
+    })
+    const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle() {
+          return {
+            response: {
+              body: new TextEncoder().encode('{}'),
+              headers: {},
+              statusCode: 200,
+            },
+          }
+        },
+      },
+    }))
+    const s3Client = new S3Client({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const cognitoClient = new CognitoIdentityProviderClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const owner = new AwsTenantOperationResourceOwner({
+      owner: 'secrets',
+      documentClient,
+      s3Client,
+      cognitoClient,
+      secretsManagerClient,
+      config: createConfig(),
+      pseudonymKey: testPseudonymKey,
+    })
+    const operation: TenantOperation = {
+      ...createOperation(workspaceId),
+      currentStep: 'delete-secrets',
+      completedSteps: [
+        'export',
+        'revoke-access',
+        'anonymize-members',
+        'delete-data',
+      ],
+      revision: 5,
+    }
+    const job: TenantOperationExecutionJob = {
+      version: TENANT_OPERATION_EXECUTION_JOB_VERSION,
+      workspaceId,
+      operationId: operation.operationId,
+      step: 'delete-secrets',
+      cursor: { targetIndex: 2, processedCount: 0 },
+    }
+
+    try {
+      const outboundPage = await owner.execute(job, operation)
+      if (outboundPage.status !== 'continuing') {
+        throw new Error('Expected an outbound secret continuation.')
+      }
+      expect(JSON.stringify(outboundPage.nextJob)).not.toContain(
+        'provider-secret-token',
+      )
+      const outboundComplete = await owner.execute(outboundPage.nextJob, operation)
+      if (outboundComplete.status !== 'continuing') {
+        throw new Error('Expected an inbound namespace continuation.')
+      }
+      const inboundComplete = await owner.execute(outboundComplete.nextJob, operation)
+      if (inboundComplete.status !== 'continuing') {
+        throw new Error('Expected an evidence continuation.')
+      }
+      expect(await owner.execute(inboundComplete.nextJob, operation)).toMatchObject({
+        status: 'completed',
+        evidenceDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      })
+
+      const serializedRequests = JSON.stringify(secretRequests)
+      expect(serializedRequests).toContain(
+        `mukuroji/automation-webhooks/${workspaceHash}/`,
+      )
+      expect(serializedRequests).toContain(
+        `mukuroji/automation-inbound-webhooks/${workspaceHash}/`,
+      )
+      const deletedSecretIds = secretRequests.flatMap((request) =>
+        isRecord(request) && typeof request.SecretId === 'string'
+          ? [request.SecretId]
+          : []
+      )
+      expect(deletedSecretIds).toEqual([outboundSecret, inboundSecret])
+    } finally {
+      documentClient.destroy()
+      s3Client.destroy()
+      cognitoClient.destroy()
+      secretsManagerClient.destroy()
+    }
+  })
+
+  test('repairs closure when an Automation secret remains after table deletion', async () => {
+    const workspaceId = 'workspace/one'
+    const workspaceHash = createHash('sha256').update(workspaceId).digest('hex')
+    const inboundPrefix = `mukuroji/automation-inbound-webhooks/${workspaceHash}/`
+    const secretsManagerClient = new SecretsManagerClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          const body = readJsonRequestBody(request)
+          const serialized = JSON.stringify(body)
+          return {
+            response: {
+              body: new TextEncoder().encode(JSON.stringify({
+                SecretList: serialized.includes(inboundPrefix)
+                  ? [{ Name: `${inboundPrefix}endpoint-1` }]
+                  : [],
+              })),
+              headers: {},
+              statusCode: 200,
+            },
+          }
+        },
+      },
+    })
+    const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    }))
+    const s3Client = new S3Client({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const cognitoClient = new CognitoIdentityProviderClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const owner = new AwsTenantOperationResourceOwner({
+      owner: 'verification',
+      documentClient,
+      s3Client,
+      cognitoClient,
+      secretsManagerClient,
+      config: createConfig(),
+      pseudonymKey: testPseudonymKey,
+    })
+    const operation: TenantOperation = {
+      ...createOperation(workspaceId),
+      currentStep: 'verify',
+      completedSteps: [
+        'export',
+        'revoke-access',
+        'anonymize-members',
+        'delete-data',
+        'delete-secrets',
+      ],
+      revision: 6,
+    }
+    const job: TenantOperationExecutionJob = {
+      version: TENANT_OPERATION_EXECUTION_JOB_VERSION,
+      workspaceId,
+      operationId: operation.operationId,
+      step: 'verify',
+      cursor: { targetIndex: 18, processedCount: 18 },
+    }
+
+    try {
+      expect(await owner.execute(job, operation)).toEqual({
+        status: 'repair',
+        step: 'delete-secrets',
+      })
+    } finally {
+      documentClient.destroy()
+      s3Client.destroy()
+      cognitoClient.destroy()
+      secretsManagerClient.destroy()
     }
   })
 
@@ -641,6 +866,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       documentClient,
       s3Client,
       cognitoClient,
+      secretsManagerClient: inertSecretsManagerClient,
       config: createConfig(),
       pseudonymKey: testPseudonymKey,
       clock: () => new Date('2026-08-02T00:05:00.000Z'),

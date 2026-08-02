@@ -19,6 +19,11 @@ import {
   type S3Client,
 } from '@aws-sdk/client-s3'
 import {
+  DeleteSecretCommand,
+  ListSecretsCommand,
+  type SecretsManagerClient,
+} from '@aws-sdk/client-secrets-manager'
+import {
   BatchWriteCommand,
   DeleteCommand,
   GetCommand,
@@ -68,6 +73,10 @@ export type TenantOperationResourceOwnerConfig = {
   workItemConfigurationTableName: string
   /** Automation table. */
   automationTableName: string
+  /** Root Secrets Manager prefix for outbound Automation webhook credentials. */
+  automationWebhookSecretPrefix: string
+  /** Root Secrets Manager prefix for inbound Automation webhook credentials. */
+  automationInboundWebhookSecretPrefix: string
   /** Planning table. */
   planningTableName: string
   /** Capacity-planning availability and assignment table. */
@@ -110,6 +119,8 @@ export type TenantOperationAwsResourceOwnerInput = {
   s3Client: S3Client
   /** Cognito client scoped by the Lambda role. */
   cognitoClient: CognitoIdentityProviderClient
+  /** Secrets Manager client scoped by the Lambda role. */
+  secretsManagerClient: SecretsManagerClient
   /** Exact resource names injected by CDK. */
   config: TenantOperationResourceOwnerConfig
   /** Stable HMAC key used for closure pseudonyms and encrypted queue cursors. */
@@ -168,8 +179,24 @@ type VersionCursor = {
   readonly versionIdMarker?: string
 }
 
+/** Opaque Secrets Manager pagination state carried between queue jobs. */
+type SecretsCursor = {
+  /** Cursor discriminator. */
+  readonly kind: 'secrets'
+  /** Provider continuation token for the next secret page. */
+  readonly nextToken?: string
+}
+
+/** One deterministic tenant-owned Secrets Manager namespace. */
+type TenantSecretNamespace = {
+  /** Stable resource identifier stored in closure evidence. */
+  readonly id: string
+  /** Exact hashed Workspace prefix including its trailing delimiter. */
+  readonly prefix: string
+}
+
 /** Every resource cursor accepted by a lifecycle resource owner. */
-type ResourceCursor = DynamoCursor | ObjectCursor | VersionCursor
+type ResourceCursor = DynamoCursor | ObjectCursor | VersionCursor | SecretsCursor
 
 /** One normalized bounded DynamoDB page. */
 type DynamoPage = {
@@ -191,6 +218,8 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
   private readonly s3Client: S3Client
   /** Cognito client restricted by the owner Lambda role. */
   private readonly cognitoClient: CognitoIdentityProviderClient
+  /** Secrets Manager client restricted by the owner Lambda role. */
+  private readonly secretsManagerClient: SecretsManagerClient
   /** Immutable deployed resource names. */
   private readonly config: TenantOperationResourceOwnerConfig
   /** Evidence timestamp source. */
@@ -210,6 +239,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     this.documentClient = input.documentClient
     this.s3Client = input.s3Client
     this.cognitoClient = input.cognitoClient
+    this.secretsManagerClient = input.secretsManagerClient
     this.config = input.config
     this.clock = input.clock ?? (() => new Date())
     this.pseudonymKey = validateTenantPseudonymKey(input.pseudonymKey)
@@ -370,6 +400,26 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     return this.exportTargets().filter((target) =>
       target.id === 'developer-platform' || target.id === 'enterprise-identity'
     )
+  }
+
+  /** Returns both deterministic Automation secret namespaces owned by one tenant. */
+  private secretNamespaces(workspaceId: string): TenantSecretNamespace[] {
+    return [
+      {
+        id: 'automation-webhook-secrets',
+        prefix: createTenantSecretNamespacePrefix(
+          this.config.automationWebhookSecretPrefix,
+          workspaceId,
+        ),
+      },
+      {
+        id: 'automation-inbound-webhook-secrets',
+        prefix: createTenantSecretNamespacePrefix(
+          this.config.automationInboundWebhookSecretPrefix,
+          workspaceId,
+        ),
+      },
+    ]
   }
 
   /** Processes export snapshot, manifest, and verification phases. */
@@ -979,12 +1029,88 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     job: TenantOperationExecutionJob,
     operation: TenantOperation,
   ): Promise<TenantOperationResourceOwnerResult> {
-    return await this.executeDynamoDeletionTargets(
-      job,
-      operation,
-      this.secretDeletionTargets(),
-      'deletedSecretRecords',
-    )
+    const targets = this.secretDeletionTargets()
+    const namespaces = this.secretNamespaces(operation.workspaceId)
+    const cursor = job.cursor ?? { targetIndex: 0, processedCount: 0 }
+    if (cursor.targetIndex < targets.length) {
+      const target = targets[cursor.targetIndex]
+      if (!target) return { status: 'failed', failureCode: 'DELETION_TARGET_INVALID' }
+      const page = await this.readDynamoPage(
+        target,
+        operation.workspaceId,
+        this.decodeDynamoPosition(job, cursor.position),
+        true,
+      )
+      await this.deleteDynamoItems(target, page.items)
+      return {
+        status: 'continuing',
+        nextJob: createContinuation(job, {
+          targetIndex: page.lastEvaluatedKey
+            ? cursor.targetIndex
+            : cursor.targetIndex + 1,
+          ...(page.lastEvaluatedKey
+            ? { position: this.encodeCursor(job, { kind: 'dynamo', key: page.lastEvaluatedKey }) }
+            : {}),
+          processedCount: cursor.processedCount + page.items.length,
+        }),
+      }
+    }
+    const namespaceIndex = cursor.targetIndex - targets.length
+    if (namespaceIndex < namespaces.length) {
+      const namespace = namespaces[namespaceIndex]
+      if (!namespace) {
+        return { status: 'failed', failureCode: 'SECRET_NAMESPACE_INVALID' }
+      }
+      const secretsCursor = this.decodeSecretsPosition(job, cursor.position)
+      const response = await this.secretsManagerClient.send(new ListSecretsCommand({
+        Filters: [{ Key: 'name', Values: [namespace.prefix] }],
+        MaxResults: RESOURCE_PAGE_SIZE,
+        NextToken: secretsCursor?.nextToken,
+      }))
+      let deleted = 0
+      for (const secret of response.SecretList ?? []) {
+        if (!secret.Name || !secret.Name.startsWith(namespace.prefix)) {
+          throw new TenantAdministrationError(
+            503,
+            'TenantSecretScopeMismatch',
+            'Tenant secret deletion returned a resource outside its Workspace namespace.',
+          )
+        }
+        try {
+          await this.secretsManagerClient.send(new DeleteSecretCommand({
+            SecretId: secret.Name,
+            ForceDeleteWithoutRecovery: true,
+          }))
+          deleted += 1
+        } catch (error) {
+          if (!isNamedError(error, 'ResourceNotFoundException')) throw error
+        }
+      }
+      return {
+        status: 'continuing',
+        nextJob: createContinuation(job, {
+          targetIndex: response.NextToken
+            ? cursor.targetIndex
+            : cursor.targetIndex + 1,
+          ...(response.NextToken
+            ? {
+                position: this.encodeCursor(job, {
+                  kind: 'secrets',
+                  nextToken: response.NextToken,
+                }),
+              }
+            : {}),
+          processedCount: cursor.processedCount + deleted,
+        }),
+      }
+    }
+    if (namespaceIndex > namespaces.length) {
+      return { status: 'failed', failureCode: 'SECRET_DELETION_CURSOR_INVALID' }
+    }
+    return await this.completeWithEvidence(job, {
+      deletedSecretRecords: cursor.processedCount,
+      secretNamespaces: namespaces.map((namespace) => namespace.id),
+    }, operation.revision)
   }
 
   /** Verifies that every data and secret target plus the file prefix is empty. */
@@ -1040,6 +1166,24 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     if (cursor.targetIndex > targets.length) {
       return { status: 'failed', failureCode: 'VERIFICATION_CURSOR_INVALID' }
     }
+    const secretNamespaces = this.secretNamespaces(operation.workspaceId)
+    for (const namespace of secretNamespaces) {
+      const response = await this.secretsManagerClient.send(new ListSecretsCommand({
+        Filters: [{ Key: 'name', Values: [namespace.prefix] }],
+        MaxResults: 1,
+      }))
+      const secret = response.SecretList?.[0]
+      if (secret) {
+        if (!secret.Name || !secret.Name.startsWith(namespace.prefix)) {
+          throw new TenantAdministrationError(
+            503,
+            'TenantSecretScopeMismatch',
+            'Tenant secret verification returned a resource outside its Workspace namespace.',
+          )
+        }
+        return { status: 'repair', step: 'delete-secrets' }
+      }
+    }
     const files = await this.s3Client.send(new ListObjectVersionsCommand({
       Bucket: this.config.fileBucketName,
       Prefix: `workspaces/${operation.workspaceId}/`,
@@ -1052,45 +1196,12 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
       return { status: 'repair', step: 'delete-data' }
     }
     return await this.completeWithEvidence(job, {
-      checkedTargets: targets.map((target) => target.id),
+      checkedTargets: [
+        ...targets.map((target) => target.id),
+        ...secretNamespaces.map((namespace) => namespace.id),
+      ],
       versionedFilePrefixEmpty: true,
     }, operation.revision)
-  }
-
-  /** Executes a bounded sequence of DynamoDB-only deletion targets. */
-  private async executeDynamoDeletionTargets(
-    job: TenantOperationExecutionJob,
-    operation: TenantOperation,
-    targets: readonly TenantDynamoTarget[],
-    evidenceField: string,
-  ): Promise<TenantOperationResourceOwnerResult> {
-    const cursor = job.cursor ?? { targetIndex: 0, processedCount: 0 }
-    if (cursor.targetIndex >= targets.length) {
-      return await this.completeWithEvidence(job, {
-        [evidenceField]: cursor.processedCount,
-      }, operation.revision)
-    }
-    const target = targets[cursor.targetIndex]
-    if (!target) return { status: 'failed', failureCode: 'DELETION_TARGET_INVALID' }
-    const page = await this.readDynamoPage(
-      target,
-      operation.workspaceId,
-      this.decodeDynamoPosition(job, cursor.position),
-      true,
-    )
-    await this.deleteDynamoItems(target, page.items)
-    return {
-      status: 'continuing',
-      nextJob: createContinuation(job, {
-        targetIndex: page.lastEvaluatedKey
-          ? cursor.targetIndex
-          : cursor.targetIndex + 1,
-        ...(page.lastEvaluatedKey
-          ? { position: this.encodeCursor(job, { kind: 'dynamo', key: page.lastEvaluatedKey }) }
-          : {}),
-        processedCount: cursor.processedCount + page.items.length,
-      }),
-    }
   }
 
   /** Encrypts one continuation cursor and binds it to the exact tenant job scope. */
@@ -1182,6 +1293,15 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
   ): VersionCursor | undefined {
     const cursor = this.decodeCursor(job, value)
     return cursor?.kind === 'versions' ? cursor : undefined
+  }
+
+  /** Decodes a Secrets Manager continuation token for the current job scope. */
+  private decodeSecretsPosition(
+    job: TenantOperationExecutionJob,
+    value: string | undefined,
+  ): SecretsCursor | undefined {
+    const cursor = this.decodeCursor(job, value)
+    return cursor?.kind === 'secrets' ? cursor : undefined
   }
 
   /** Reads one strongly consistent bounded DynamoDB page using tenant-owned keys only. */
@@ -1573,7 +1693,42 @@ function readResourceCursor(value: unknown): ResourceCursor {
         : {}),
     }
   }
+  if (
+    value.kind === 'secrets' &&
+    (value.nextToken === undefined || typeof value.nextToken === 'string')
+  ) {
+    return {
+      kind: 'secrets',
+      ...(typeof value.nextToken === 'string'
+        ? { nextToken: value.nextToken }
+        : {}),
+    }
+  }
   throw invalidCursor()
+}
+
+/** Creates the exact hashed Workspace namespace shared by Automation secret IDs. */
+function createTenantSecretNamespacePrefix(
+  rootPrefix: string,
+  workspaceId: string,
+): string {
+  const normalizedRoot = rootPrefix.trim().replace(/^\/+|\/+$/gu, '')
+  if (!normalizedRoot) {
+    throw new TenantAdministrationError(
+      503,
+      'TenantSecretNamespaceInvalid',
+      'Tenant secret namespace configuration is invalid.',
+    )
+  }
+  const workspaceHash = createHash('sha256')
+    .update(workspaceId.trim())
+    .digest('hex')
+  return `${normalizedRoot}/${workspaceHash}/`
+}
+
+/** Tests an unknown provider error name without retaining its payload. */
+function isNamedError(error: unknown, name: string): boolean {
+  return isRecord(error) && error.name === name
 }
 
 /** Creates additional authenticated data that forbids cross-job cursor replay. */

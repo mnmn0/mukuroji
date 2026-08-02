@@ -46,18 +46,23 @@ export interface ProductionTenantAvailability {
 /**
  * Creates the configured tenant administration persistence adapter.
  *
+ * @param pseudonymKeyOverride - Optional in-memory key loaded by a trusted non-API runtime.
  * @returns A DynamoDB-backed tenant administration client.
  */
-export function createProductionTenantAdministrationClient(): DynamoDbTenantAdministrationClient {
+export function createProductionTenantAdministrationClient(
+  pseudonymKeyOverride?: string,
+): DynamoDbTenantAdministrationClient {
   const resources = loadServerDynamoDbResourceConfig()
   const config = loadServerConfig()
+  const pseudonymKey = pseudonymKeyOverride ??
+    config.environment.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY
   return new DynamoDbTenantAdministrationClient(
     resources.tenantAdministrationTableName,
     createDynamoDbDocumentClient(createDynamoDbClient()),
     undefined,
     createDynamoDbTenantAdministrationAuditWriter(
       resources.auditEventsTableName,
-      config.environment.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY,
+      pseudonymKey,
     ),
     {
       dataResidency: config.awsRegion,
@@ -65,7 +70,7 @@ export function createProductionTenantAdministrationClient(): DynamoDbTenantAdmi
     },
     resources.auditEventsTableName,
     resources.workspaceAccessTableName,
-    config.environment.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY,
+    pseudonymKey,
   )
 }
 

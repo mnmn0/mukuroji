@@ -90,6 +90,14 @@ test('initializes tenant state from authoritative owner and active-seat membersh
   )
   const ensureCalls: Array<[string, string, number | undefined]> = []
   let administrationChecks = 0
+  const client = createClient(snapshot, ensureCalls)
+  client.getSnapshot = async () => {
+    throw new TenantAdministrationError(
+      404,
+      'TenantAdministrationNotInitialized',
+      'Tenant administration state is not initialized.',
+    )
+  }
   const router = createTenantAdministrationRouter({
     async authenticate() {
       return { directoryId: 'workspace-1', userKey: 'admin-1' }
@@ -98,7 +106,7 @@ test('initializes tenant state from authoritative owner and active-seat membersh
       administrationChecks += 1
     },
     requireEntitlementAdministration() {},
-    client: createClient(snapshot, ensureCalls),
+    client,
     async resolveInitialization() {
       return { ownerMemberKey: 'owner-1', activeSeats: 4 }
     },
@@ -123,6 +131,60 @@ test('initializes tenant state from authoritative owner and active-seat membersh
   })
   expect(ensureCalls).toEqual([['workspace-1', 'owner-1', 4]])
   expect(administrationChecks).toBe(1)
+})
+
+test('returns a closing tenant snapshot without requiring an active owner', async () => {
+  const activeSnapshot = createDefaultTenantAdministrationSnapshot(
+    'workspace-1',
+    'owner-1',
+    '2026-08-02T00:00:00.000Z',
+  )
+  const snapshot: TenantAdministrationSnapshot = {
+    ...activeSnapshot,
+    profile: {
+      ...activeSnapshot.profile,
+      status: 'closing',
+      revision: activeSnapshot.profile.revision + 1,
+    },
+  }
+  const ensureCalls: Array<[string, string, number | undefined]> = []
+  let initializationCalls = 0
+  const router = createTenantAdministrationRouter({
+    async authenticate() {
+      return { directoryId: 'workspace-1', userKey: 'admin-1' }
+    },
+    requireAdministration() {},
+    requireEntitlementAdministration() {},
+    client: createClient(snapshot, ensureCalls),
+    async resolveInitialization() {
+      initializationCalls += 1
+      throw new TenantAdministrationError(
+        503,
+        'TenantOwnerUnavailable',
+        'An active Workspace owner is unavailable.',
+      )
+    },
+    async readJson(request) {
+      return await request.json()
+    },
+    mapError(_context, error) {
+      if (error instanceof TenantAdministrationError) {
+        return Response.json({ code: error.code }, { status: error.status })
+      }
+      return Response.json({ code: 'UnknownError' }, { status: 500 })
+    },
+  })
+
+  const response = await router.request('/api/tenant/administration', {
+    headers: { Authorization: 'Bearer token-1' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    profile: { status: 'closing' },
+  })
+  expect(initializationCalls).toBe(0)
+  expect(ensureCalls).toEqual([])
 })
 
 test('creates export operations without exposing the trusted advance boundary', async () => {

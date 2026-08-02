@@ -53,17 +53,18 @@ export function useTenantAdministrationMutations({
   const [actionError, setActionError] =
     useState<TenantAdministrationMutationError>()
 
-  /** Executes one deduplicated mutation and refreshes the tenant aggregate. */
+  /** Executes one deduplicated mutation and optionally refreshes the tenant aggregate. */
   async function runMutation<Result>(
     operationKey: string,
     fingerprint: string,
     request: (context: MutationRequestContext) => Promise<Result>,
+    refreshAfterSuccess = true,
   ): Promise<boolean> {
     setIsSaving(true)
     setActionError(undefined)
     try {
       await mutationRunner.run(operationKey, fingerprint, request)
-      await refresh()
+      if (refreshAfterSuccess) await refresh()
       return true
     } catch (error) {
       setActionError(error instanceof WorkspaceAccessApiError
@@ -122,6 +123,7 @@ export function useTenantAdministrationMutations({
             : verifyTenantClosure
         return request(accessToken, operation.operationId, context)
       },
+      action !== 'verify',
     )
   }
 

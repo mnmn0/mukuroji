@@ -201,6 +201,8 @@ export class CdkStack extends cdk.Stack {
       lambdaBuildPaths,
       parameters,
       runtimeControls,
+      workspaceAuditPseudonymSecret:
+        apiTransports.workspaceAuditPseudonymSecret,
     });
 
     configureAlarmRouting(this, {
