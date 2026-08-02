@@ -46,6 +46,9 @@ import { assertSafeWebhookUrl, UnsafeWebhookUrlError } from './webhook-delivery'
 /** Public API が一 credential に許可する1分あたりの既定 request 数です。 */
 export const PUBLIC_API_RATE_LIMIT = 120
 
+/** Maximum request body hashed for one entitlement metering receipt. */
+const PUBLIC_API_METERING_BODY_MAX_BYTES = 10 * 1024 * 1024
+
 /** OAuth token endpoint が一 client ID に許可する1分あたりの request 数です。 */
 export const OAUTH_TOKEN_CLIENT_RATE_LIMIT = 30
 
@@ -1895,9 +1898,35 @@ async function createPublicApiUsageIdempotencyScope(
       true,
     )
   }
-  const body = new Uint8Array(
-    await context.req.raw.clone().arrayBuffer(),
-  )
+  const contentLength = context.req.header('Content-Length')
+  if (
+    contentLength !== undefined &&
+    /^\d+$/u.test(contentLength) &&
+    Number(contentLength) > PUBLIC_API_METERING_BODY_MAX_BYTES
+  ) {
+    throw publicApiMeteringBodyTooLarge()
+  }
+  const requestDigest = createHash('sha256')
+    .update(context.req.header('Content-Type') ?? '')
+    .update('\0')
+  const bodyReader = context.req.raw.clone().body?.getReader()
+  let bodyBytes = 0
+  if (bodyReader) {
+    try {
+      while (true) {
+        const chunk = await bodyReader.read()
+        if (chunk.done) break
+        bodyBytes += chunk.value.byteLength
+        if (bodyBytes > PUBLIC_API_METERING_BODY_MAX_BYTES) {
+          await bodyReader.cancel().catch(() => undefined)
+          throw publicApiMeteringBodyTooLarge()
+        }
+        requestDigest.update(chunk.value)
+      }
+    } finally {
+      bodyReader.releaseLock()
+    }
+  }
   const url = new URL(context.req.url)
   const scopeDigest = createHash('sha256')
     .update(context.req.method.toUpperCase())
@@ -1910,12 +1939,16 @@ async function createPublicApiUsageIdempotencyScope(
     .update('\0')
     .update(value)
     .digest('hex')
-  const requestDigest = createHash('sha256')
-    .update(context.req.header('Content-Type') ?? '')
-    .update('\0')
-    .update(body)
-    .digest('hex')
-  return `tenant-meter:v1:${scopeDigest}:${requestDigest}`
+  return `tenant-meter:v1:${scopeDigest}:${requestDigest.digest('hex')}`
+}
+
+/** Creates the stable public API response used for an oversized metering body. */
+function publicApiMeteringBodyTooLarge(): PublicApiServiceError {
+  return new PublicApiServiceError(
+    413,
+    'invalid_request',
+    'The metered request body is too large.',
+  )
 }
 
 async function enforceOAuthTokenRateLimit(

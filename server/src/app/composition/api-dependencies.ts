@@ -61,9 +61,6 @@ import {
   DynamoDbDocumentsClient,
 } from '../../modules/documents/adapter-out/dynamodb/dynamo-db-documents-client'
 import {
-  DynamoDbDocumentAuthorizationRevisionMutationAdapter,
-} from '../../modules/documents/adapter-out/dynamodb/document-authorization'
-import {
   createEnterpriseIdentityClient,
   createEnterpriseIdentityCapabilities,
 } from '../../modules/enterprise-identity'
@@ -96,15 +93,7 @@ import {
   type WorkItemImportSourceStore,
 } from '../../modules/work-items'
 import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
-import {
-  DynamoDbWorkspaceAccessClient,
-  WorkspaceAccessError,
-  type WorkspaceSeatMeter,
-} from '../../modules/workspace-access/workspace-access'
-import {
-  TenantAdministrationError,
-  type TenantEntitlementEnforcement,
-} from '../../modules/tenant-administration'
+import type { TenantEntitlementEnforcement } from '../../modules/tenant-administration'
 import { DynamoDbWorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
 import { createProductionQueueWebhookDeliveryMessage } from './webhook'
 import {
@@ -113,7 +102,7 @@ import {
   TimeTrackingService,
   type TimeTrackingIdempotencyPort,
 } from '../../modules/time-tracking'
-import { createProductionTenantAdministrationClient } from './tenant-administration'
+import { createProductionTenantMeteredWorkspaceAccess } from './tenant-administration'
 
 /**
  * Projects shared idempotency reservation and transaction-completion capabilities
@@ -402,76 +391,13 @@ export function createProductionAuthenticationDependencies(): AuthenticationDepe
  */
 export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
   const enterpriseIdentityClient = createEnterpriseIdentityClient()
-  const tenantAdministration = createProductionTenantAdministrationClient()
-  let workspaceAccessClient: DynamoDbWorkspaceAccessClient | undefined
-  const seatMeter: WorkspaceSeatMeter = {
-    /** Initializes missing tenant state before joining seat writes to membership transactions. */
-    async prepareSeatMutation(input) {
-      try {
-        return await tenantAdministration.prepareSeatMutation(input)
-      } catch (error) {
-        if (
-          error instanceof TenantAdministrationError &&
-          error.code === 'TenantAdministrationNotInitialized'
-        ) {
-          if (!workspaceAccessClient) {
-            throw new WorkspaceAccessError(
-              503,
-              'TenantSeatMeterUnavailable',
-              'Tenant seat metering is unavailable.',
-              { cause: error },
-            )
-          }
-          const activeMembers = await workspaceAccessClient.listActiveMembers(input.workspaceId)
-          const owner = activeMembers.find((member) => member.role === 'owner')
-          if (!owner) {
-            throw new WorkspaceAccessError(
-              503,
-              'TenantOwnerUnavailable',
-              'The Workspace owner required for tenant initialization is unavailable.',
-            )
-          }
-          await tenantAdministration.ensureSnapshot(
-            input.workspaceId,
-            owner.memberKey,
-            activeMembers.length,
-          )
-          try {
-            return await tenantAdministration.prepareSeatMutation(input)
-          } catch (retryError) {
-            if (retryError instanceof TenantAdministrationError) {
-              throw new WorkspaceAccessError(
-                retryError.status,
-                retryError.code,
-                retryError.message,
-                { cause: retryError },
-              )
-            }
-            throw retryError
-          }
-        }
-        if (error instanceof TenantAdministrationError) {
-          throw new WorkspaceAccessError(
-            error.status,
-            error.code,
-            error.message,
-            { cause: error },
-          )
-        }
-        throw error
-      }
-    },
-  }
-  workspaceAccessClient = new DynamoDbWorkspaceAccessClient({
-    documentAuthorizationRevisionMutationPort:
-      new DynamoDbDocumentAuthorizationRevisionMutationAdapter(),
-    seatMeter,
-  })
+  const { tenantAdministration, workspaceAccess } =
+    createProductionTenantMeteredWorkspaceAccess()
   return {
     dashboardSummary: new DynamoDbDashboardSummaryClient(),
     projectDirectory: new DynamoDbProjectDirectoryClient(),
     auditEvents: createAuditEventsClient(),
-    workspaceAccess: workspaceAccessClient,
+    workspaceAccess,
     enterpriseIdentity: createEnterpriseIdentityCapabilities(enterpriseIdentityClient),
     enterpriseSessionActivity: createEnterpriseSessionActivityClient(),
     enterpriseIdentityProviderConnectionTester: testEnterpriseIdentityProviderConnection,

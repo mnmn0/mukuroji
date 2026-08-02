@@ -115,6 +115,9 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
           PROJECT_DIRECTORY_TABLE_NAME: {
             Ref: 'ProjectDirectoryTable9ED01C01',
           },
+          TENANT_ADMINISTRATION_TABLE_NAME: {
+            Ref: 'TenantAdministrationTable621D59EB',
+          },
           WORKSPACE_ACCESS_TABLE_NAME: {
             Ref: 'WorkspaceAccessTableD7C8D2C7',
           },
@@ -219,6 +222,34 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
   expect(actionsForTable('AuditEventsTable0723963E')).toEqual([
     'dynamodb:PutItem',
   ]);
+  expect(actionsForTable('TenantAdministrationTable621D59EB')).toEqual([
+    'dynamodb:ConditionCheckItem',
+    'dynamodb:GetItem',
+    'dynamodb:PutItem',
+    'dynamodb:Query',
+  ]);
+  const tenantTransactionStatement = roleStatements.find((statement) => {
+    const actions = Array.isArray(statement.Action)
+      ? statement.Action
+      : [statement.Action];
+    return actions.includes('dynamodb:ConditionCheckItem') &&
+      actions.includes('dynamodb:PutItem') &&
+      JSON.stringify(statement.Resource).includes(
+        'TenantAdministrationTable621D59EB',
+      );
+  });
+  expect(tenantTransactionStatement).toEqual({
+    Action: ['dynamodb:ConditionCheckItem', 'dynamodb:PutItem'],
+    Condition: {
+      'ForAnyValue:StringEquals': {
+        'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+      },
+    },
+    Effect: 'Allow',
+    Resource: {
+      'Fn::GetAtt': ['TenantAdministrationTable621D59EB', 'Arn'],
+    },
+  });
   expect(actionsForTable('TeamIssuesTable189D851D')).toEqual([
     'dynamodb:DescribeTable',
   ]);

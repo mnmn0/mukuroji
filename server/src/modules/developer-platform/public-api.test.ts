@@ -333,6 +333,33 @@ describe('public API router', () => {
     expect(keys[0]).not.toBe(keys[1])
   })
 
+  test('rejects an oversized idempotent body before entitlement metering', async () => {
+    let entitlementCalls = 0
+    const { platform, router } = createTestRouter({
+      async enforceEntitlement() {
+        entitlementCalls += 1
+      },
+    })
+    const apiKey = await createApiKey(platform, ['work-items:write'])
+
+    const response = await router.request('http://localhost/v1/work-items', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey.secret}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'oversized-payload-key',
+      },
+      body: 'x'.repeat(10 * 1024 * 1024 + 1),
+    })
+
+    expect(response.status).toBe(413)
+    expect(await response.json()).toMatchObject({
+      code: 'invalid_request',
+      detail: 'The metered request body is too large.',
+    })
+    expect(entitlementCalls).toBe(0)
+  })
+
   test('does not meter a request rejected by credential rate limiting', async () => {
     let entitlementCalls = 0
     const { platform, router } = createTestRouter({
