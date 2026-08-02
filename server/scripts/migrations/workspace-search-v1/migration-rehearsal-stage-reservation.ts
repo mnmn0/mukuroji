@@ -87,7 +87,7 @@ export type WorkspaceSearchMigrationRehearsalStageReservationClaims = {
   readonly previousStageReceiptDigest: string | null
   /** Exact authenticated rate predecessor selected before child execution. */
   readonly expectedPreviousRateSegment:
-    WorkspaceSearchMigrationRehearsalVerifiedRateSegment | null
+    WorkspaceSearchMigrationRehearsalVerifiedRateSegment
   /** Exact fresh rate-segment ordinal the claimed child must create. */
   readonly expectedCurrentRateSegmentOrdinal: number
   /** Planning-commit-pinned rollback preimage bytes, or null for other stages. */
@@ -170,9 +170,9 @@ export type CreateWorkspaceSearchMigrationRehearsalStageReservationInput = {
   readonly reservedAt: string
   /** Canonical exclusive reservation expiry within the bounded claim lifetime. */
   readonly expiresAt: string
-  /** Exact authenticated predecessor rate summary, or null at stage one. */
+  /** Exact authenticated predecessor rate summary rooted at ordinal zero. */
   readonly expectedPreviousRateSegment:
-    WorkspaceSearchMigrationRehearsalVerifiedRateSegment | null
+    WorkspaceSearchMigrationRehearsalVerifiedRateSegment
   /** Exact new rate segment ordinal required from this child. */
   readonly expectedCurrentRateSegmentOrdinal: number
   /** Planning-commit-pinned rollback preimage bytes, or null for other stages. */
@@ -293,6 +293,15 @@ type StageReservationSelection = {
   readonly policyVersion: string
 }
 
+/** Reauthenticated selection claims plus the non-serialized rate root. */
+type StageReservationSelectionContext = {
+  /** Exact scalar claims copied into the durable reservation. */
+  readonly claims: StageReservationSelection
+  /** Permit-authenticated ordinal-zero predecessor for global stage one. */
+  readonly integrityAttestationRootSegment:
+    WorkspaceSearchMigrationRehearsalVerifiedRateSegment
+}
+
 /**
  * Creates one authenticated reservation from a reauthenticated selection.
  *
@@ -311,21 +320,21 @@ export function createWorkspaceSearchMigrationRehearsalStageReservation(
     const expectedRate = readExpectedReservationRateBinding(
       input.expectedPreviousRateSegment,
       input.expectedCurrentRateSegmentOrdinal,
-      selection.stageOrdinal,
       key,
     )
+    requireReservationRootRateBinding(expectedRate, selection)
     const expectedTargetPreimageArtifactContentDigest =
       readExpectedTargetPreimageArtifactContentDigest(
         input.expectedTargetPreimageArtifactContentDigest,
-        selection.command,
-        selection.scenario,
+        selection.claims.command,
+        selection.claims.scenario,
       )
     const claims: WorkspaceSearchMigrationRehearsalStageReservationClaims =
       Object.freeze({
         kind: WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_KIND,
         reservationVersion:
           WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_VERSION,
-        ...selection,
+        ...selection.claims,
         ...expectedRate,
         expectedTargetPreimageArtifactContentDigest,
         parentLivenessProtocol:
@@ -425,7 +434,7 @@ export function parseWorkspaceSearchMigrationRehearsalStageReservationDocument(
 function snapshotReservationSelection(
   value: unknown,
   verificationKey: Uint8Array,
-): StageReservationSelection {
+): StageReservationSelectionContext {
   const record = reservationGuards.requireRecord(value)
   reservationGuards.requireExactKeys(record, [
     'entry',
@@ -461,7 +470,7 @@ function snapshotReservationSelection(
   if ((ordinal === 1) !== (previousStageReceiptDigest === null)) {
     return failStageReservation()
   }
-  return Object.freeze({
+  const claims: StageReservationSelection = Object.freeze({
     manifestDigest,
     manifestEntryDigest: createMigrationDigest(manifestEntry),
     previousStageReceiptDigest,
@@ -479,6 +488,11 @@ function snapshotReservationSelection(
     requestedResourcesBinding: manifest.requestedResourcesBinding,
     configurationBindingDigest: manifest.configurationBindingDigest,
     policyVersion: manifest.policyVersion,
+  })
+  return Object.freeze({
+    claims,
+    integrityAttestationRootSegment:
+      manifest.integrityAttestationRoot.segment,
   })
 }
 
@@ -520,7 +534,6 @@ function readReservationClaims(
   const expectedRate = readExpectedReservationRateBinding(
     reservationGuards.readOwn(record, 'expectedPreviousRateSegment'),
     reservationGuards.readOwn(record, 'expectedCurrentRateSegmentOrdinal'),
-    stageOrdinal,
     verificationKey,
   )
   const scenario = readReservationScenario(
@@ -622,30 +635,23 @@ function readExpectedTargetPreimageArtifactContentDigest(
 function readExpectedReservationRateBinding(
   previousValue: unknown,
   currentOrdinalValue: unknown,
-  stageOrdinal: number,
   verificationKey: Uint8Array | undefined,
 ): {
   /** Detached exact authenticated predecessor summary. */
   readonly expectedPreviousRateSegment:
-    WorkspaceSearchMigrationRehearsalVerifiedRateSegment | null
+    WorkspaceSearchMigrationRehearsalVerifiedRateSegment
   /** Exact ordinal required from the new process segment. */
   readonly expectedCurrentRateSegmentOrdinal: number
 } {
-  const expectedPreviousRateSegment = previousValue === null
-    ? null
-    : readReservationVerifiedRateSegment(previousValue)
+  if (previousValue === null) return failStageReservation()
+  const expectedPreviousRateSegment =
+    readReservationVerifiedRateSegment(previousValue)
   const expectedCurrentRateSegmentOrdinal =
     readReservationNonNegativeInteger(currentOrdinalValue)
   if (
-    (stageOrdinal === 1 &&
-      (expectedPreviousRateSegment !== null ||
-        expectedCurrentRateSegmentOrdinal !== 0)) ||
-    (stageOrdinal > 1 &&
-      (expectedPreviousRateSegment === null ||
-        expectedCurrentRateSegmentOrdinal !==
-          expectedPreviousRateSegment.segmentOrdinal + 1)) ||
+    expectedCurrentRateSegmentOrdinal !==
+      expectedPreviousRateSegment.segmentOrdinal + 1 ||
     (verificationKey !== undefined &&
-      expectedPreviousRateSegment !== null &&
       expectedPreviousRateSegment.authenticationKeyFingerprint !==
         createWorkspaceSearchMigrationRehearsalRateAuthenticationKeyFingerprint(
           verificationKey,
@@ -724,7 +730,7 @@ function readParentLivenessProtocol(
 /** Requires exact equality between reservation claims and parent selection. */
 function requireReservationMatchesSelection(
   claims: WorkspaceSearchMigrationRehearsalStageReservationClaims,
-  selection: StageReservationSelection,
+  selection: StageReservationSelectionContext,
 ): void {
   for (const key of [
     'manifestDigest',
@@ -746,7 +752,10 @@ function requireReservationMatchesSelection(
     'policyVersion',
   ]) {
     const claimsDescriptor = Object.getOwnPropertyDescriptor(claims, key)
-    const selectionDescriptor = Object.getOwnPropertyDescriptor(selection, key)
+    const selectionDescriptor = Object.getOwnPropertyDescriptor(
+      selection.claims,
+      key,
+    )
     if (
       claimsDescriptor === undefined ||
       selectionDescriptor === undefined ||
@@ -755,6 +764,27 @@ function requireReservationMatchesSelection(
       claimsDescriptor.value !== selectionDescriptor.value
     ) return failStageReservation()
   }
+  requireReservationRootRateBinding(claims, selection)
+}
+
+/** Requires stage one to name the permit-authenticated ordinal-zero segment. */
+function requireReservationRootRateBinding(
+  value: Pick<
+    WorkspaceSearchMigrationRehearsalStageReservationClaims,
+    | 'expectedCurrentRateSegmentOrdinal'
+    | 'expectedPreviousRateSegment'
+  >,
+  selection: StageReservationSelectionContext,
+): void {
+  if (
+    selection.claims.stageOrdinal === 1 &&
+    (serializeCanonicalJson(value.expectedPreviousRateSegment) !==
+        serializeCanonicalJson(
+          selection.integrityAttestationRootSegment,
+        ) ||
+      value.expectedCurrentRateSegmentOrdinal !==
+        selection.integrityAttestationRootSegment.segmentOrdinal + 1)
+  ) return failStageReservation()
 }
 
 /** Reads and validates the finite reservation interval. */

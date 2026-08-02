@@ -416,6 +416,10 @@ metric化されません。
 
 CDKはthrottle、budget stop、budget exhaustion、5分checkpoint stall、quarantine、terminal failureに対する6 alarmを
 5分`Sum >= 1`、missing data=`notBreaching`で作成し、既存primary/secondary SNS topicへ通知します。
+Rate observation v2はAWS throttleとfinal-publicationのpost-success injectionを有限なprovenanceで分離し、
+budget stopも`operational` / `aws-service-throttle` / injectionへ分離します。Durable checkpointとaggregateは
+totalがsource別countの和に一致する場合だけ受理します。Telemetryはsource/reasonの組合せをstrictに検査しますが、
+既存のlow-cardinality EMF metricをsource別dimensionへ増やさず、raw AWS errorやresource identityを保存しません。
 Alarm responseとnon-productionのreal metricによる`OK → ALARM → OK`/両subscription receiptは
 [`docs/operational-readiness.md`](../docs/operational-readiness.md)を参照してください。Non-production
 execution/alarm delivery rehearsalとrestore/DR evidenceが揃うまではproduction migration gateを
@@ -447,6 +451,10 @@ receipt、execution boundary、sealed plan、closed writer fenceへ束縛しま�
 
 Rollback scenarioの`apply` process invocation自体にも、直前のauthenticated planning receiptで固定した
 同じpreimageが必要です。`--rehearsal-previous-stage-receipt-file`の直後、process approvalの前にだけ指定します。
+`--rehearsal-rate-previous-segment-file`は全process invocationで必須です。最初のstageはroot CLIの
+ordinal 0 segment、通常の次stageは直前のcommitted receiptのrate segment、rollback `apply`は
+target-preimage auditのrate successor、terminal後の`release`はterminal reconciliation auditのrate successorを
+渡します。`release`にterminal receipt自体のrate segmentを再指定するとpreflightで失敗します。
 
 ```sh
   --rehearsal-previous-stage-receipt-file "$PREVIOUS_STAGE_RECEIPT_FILE" \
@@ -458,6 +466,42 @@ Rollback scenarioの`apply` process invocation自体にも、直前のauthentica
 
 `partial-apply-rollback`と`complete-apply-rollback`以外、または`apply`以外のprocessへこのflagを渡すと、
 reservation作成やchild spawnより前に失敗します。
+
+Child終了後はAWS commitより先にoffline finalizerを実行します。Global ordinal 1では
+`--previous-receipt-file`を省略し、ordinal 2以降では直前のcommitted receiptを必須にします。
+Terminal stageのparser順序は次の通りです。旧`--target-audit-key-file`は存在せず、指定すると
+`INVALID_USAGE`になります。`--control-arguments-file`にはoperatorが再構成したfileではなく、同じprocess
+parentがmanifest認証済みの実argvからclaim/spawn前にmode `0600`で永続化した固定
+`$EVIDENCE_DIRECTORY/control-arguments.json`を渡します。Resumeとcompleted recoveryもこのcanonical bytesを
+現在の認証済みargvと完全一致させるため、別stageや編集済みvectorは再利用できません。
+
+```sh
+PREVIOUS_FINALIZER_RECEIPT_ARGS=()
+if (( STAGE_ORDINAL >= 2 )); then
+  PREVIOUS_FINALIZER_RECEIPT_ARGS=(
+    --previous-receipt-file "$PREVIOUS_COMMITTED_STAGE_RECEIPT_FILE"
+  )
+fi
+
+bun run --silent search:migration:rehearsal:finalize-stage -- \
+  --manifest-file "$REHEARSAL_STAGE_MANIFEST_FILE" \
+  "${PREVIOUS_FINALIZER_RECEIPT_ARGS[@]}" \
+  --material-file "$CURRENT_PARENT_PERSISTED_CHILD_MATERIAL_FILE" \
+  --lifecycle-file "$CURRENT_PARENT_PERSISTED_LIFECYCLE_FILE" \
+  --parent-authentication-file "$CURRENT_PARENT_AUTHENTICATION_FILE" \
+  --stage-key-file "$REHEARSAL_MASTER_KEY_FILE" \
+  --control-arguments-file "$EVIDENCE_DIRECTORY/control-arguments.json" \
+  --planning-receipt-file "$SCENARIO_PLANNING_STAGE_RECEIPT_FILE" \
+  --reconciliation-artifact-file "$SCENARIO_TERMINAL_RECONCILIATION_AUDIT_FILE" \
+  --output-file "$NEW_FINALIZED_STAGE_RECEIPT_FILE" \
+  --approval finalize-reviewed-non-production-migration-rehearsal-stage-receipt
+```
+
+上のproof suffixはterminal (`verify` / `rollback-partial` / `rollback-complete`)専用です。通常の
+nonterminalでは省略し、rollback `apply`では`--target-preimage-audit-file`だけ、takeover-completed
+`apply`では`--planning-receipt-file`だけを使います。Stopped fault boundaryとresponse-loss completionでは
+`--material-file`直後のprefixを、それぞれ`fault-plan → boundary-rate-segment`、
+`boundary-material → fault-plan → boundary-rate-segment → final-rate-segment`へ置き換えます。
 
 `search:migration:rehearsal:commit-stage`は、parent authenticationに保存されたcleanup digestだけではcommitを
 許可しません。全stageで`--runtime-key-evidence-directory`を必須とし、そのdirectoryの固定cleanup
@@ -474,6 +518,46 @@ preimageからcapを作り直す際に既存intentの`commitGateObservedAt`をby
 差し替えません。Terminal retryも既存intentと同じartifact/rate bindingだけを受理します。したがって
 transaction response lossやlocal output lossからはfresh capabilityでexact durable journalを回収できますが、
 別artifact、別scenario、clone/Proxy、消費済みcapによるreplayは受理されません。
+
+Terminal receiptのcommit例は次です。Commit parserはflag pairの順序を固定しませんが、下のcanonical順を使い、
+`--approval`は渡しません。Ordinal 1ではprevious receipt配列を空にし、ordinal 2以降だけ直前receiptを
+指定します。Nonterminalではterminal audit flagを省略し、rollback planning commitでは代わりに
+`--target-preimage-audit-file`を指定します。
+
+```sh
+PREVIOUS_COMMIT_RECEIPT_ARGS=()
+if (( STAGE_ORDINAL >= 2 )); then
+  PREVIOUS_COMMIT_RECEIPT_ARGS=(
+    --previous-receipt-file "$PREVIOUS_COMMITTED_STAGE_RECEIPT_FILE"
+  )
+fi
+
+bun run --silent search:migration:rehearsal:commit-stage -- \
+  --account "$NON_PRODUCTION_ACCOUNT" \
+  --region "$AWS_REGION" \
+  --profile "$AWS_PROFILE" \
+  --commit "$REVIEWED_COMMIT_OID" \
+  --project-directory-table "$PROJECT_DIRECTORY_TABLE" \
+  --work-items-table "$WORK_ITEMS_TABLE" \
+  --collaboration-table "$COLLABORATION_TABLE" \
+  --documents-table "$DOCUMENTS_TABLE" \
+  --workspace-search-table "$WORKSPACE_SEARCH_TABLE" \
+  --migration-state-table "$MIGRATION_STATE_TABLE" \
+  --journal-bucket "$MIGRATION_JOURNAL_BUCKET" \
+  --journal-key-arn "$MIGRATION_JOURNAL_KEY_ARN" \
+  --rate-policy-file "$REVIEWED_RATE_POLICY_FILE" \
+  --permit-file "$REHEARSAL_PERMIT_FILE" \
+  --rehearsal-authentication-key-file "$REHEARSAL_MASTER_KEY_FILE" \
+  --stage-manifest-file "$REHEARSAL_STAGE_MANIFEST_FILE" \
+  "${PREVIOUS_COMMIT_RECEIPT_ARGS[@]}" \
+  --material-file "$CURRENT_PARENT_PERSISTED_CHILD_MATERIAL_FILE" \
+  --lifecycle-evidence-file "$CURRENT_PARENT_PERSISTED_LIFECYCLE_FILE" \
+  --parent-authentication-file "$CURRENT_PARENT_AUTHENTICATION_FILE" \
+  --stage-receipt-file "$NEW_FINALIZED_STAGE_RECEIPT_FILE" \
+  --runtime-key-evidence-directory "$EVIDENCE_DIRECTORY" \
+  --terminal-reconciliation-audit-file "$SCENARIO_TERMINAL_RECONCILIATION_AUDIT_FILE" \
+  --output-file "$NEW_COMMITTED_STAGE_EVIDENCE_FILE"
+```
 
 各reservationは失効後15分までprepared commitのbounded recoveryを許可し、そのdeadline後にも15分の
 explicit abandonment runwayをpermit内へ予約します。`search:migration:rehearsal:abandon-stage`はdeadline前に
@@ -526,13 +610,28 @@ session close、O_EXCL writeとfile/directory fsyncまでを含みます。Persi
 durable化を証明できなければCLI successを出しません。
 
 ```sh
+EXACT_RESOURCE_FLAGS=(
+  --account "$MIGRATION_ACCOUNT"
+  --region "$MIGRATION_REGION"
+  --profile "$MIGRATION_PROFILE"
+  --commit "$REVIEWED_COMMIT_OID"
+  --project-directory-table "$PROJECT_DIRECTORY_TABLE_NAME"
+  --work-items-table "$WORK_ITEMS_TABLE_NAME"
+  --collaboration-table "$COLLABORATION_TABLE_NAME"
+  --documents-table "$DOCUMENTS_TABLE_NAME"
+  --workspace-search-table "$WORKSPACE_SEARCH_TABLE_NAME"
+  --migration-state-table "$WORKSPACE_SEARCH_MIGRATION_STATE_TABLE_NAME"
+  --journal-bucket "$MIGRATION_JOURNAL_BUCKET"
+  --journal-key-arn "$MIGRATION_JOURNAL_KEY_ARN"
+)
+
 COMMON_RECONCILIATION_ARGS=(
   --manifest-file "$REHEARSAL_STAGE_MANIFEST_FILE"
   --previous-receipt-file "$PREVIOUS_COMMITTED_STAGE_RECEIPT_FILE"
   --material-file "$CURRENT_PARENT_PERSISTED_CHILD_MATERIAL_FILE"
   --lifecycle-file "$CURRENT_PARENT_PERSISTED_LIFECYCLE_FILE"
   --parent-authentication-file "$CURRENT_PARENT_AUTHENTICATION_FILE"
-  --control-arguments-file "$CURRENT_REVIEWED_CONTROL_ARGUMENTS_FILE"
+  --control-arguments-file "$EVIDENCE_DIRECTORY/control-arguments.json"
   --permit-file "$REHEARSAL_PERMIT_FILE"
   --authentication-key-file "$RESTRICTED_REHEARSAL_MASTER_KEY_FILE"
   --previous-rate-segment-file "$PREVIOUS_RATE_SEGMENT_FILE"
@@ -543,17 +642,31 @@ bun run --silent search:migration:rehearsal:reconcile -- target-preimage \
   "${COMMON_RECONCILIATION_ARGS[@]}" \
   --maximum-target-pages 10000 \
   --maximum-duration-milliseconds 900000 \
+  --resource-attestation-file "$ROOT_RESOURCE_ATTESTATION_FILE" \
+  --integrity-digest-key-file "$RESTRICTED_INTEGRITY_DIGEST_KEY_FILE" \
+  --audit-pseudonym-key-file "$RESTRICTED_AUDIT_PSEUDONYM_KEY_FILE" \
+  --page-size 100 \
+  --max-pages 10000 \
+  --max-items 1000000 \
+  --integrity-maximum-duration-milliseconds 900000 \
   --output-file "$NEW_SCENARIO_TARGET_PREIMAGE_AUDIT_FILE" \
   --approval collect-reviewed-non-production-migration-rehearsal-reconciliation \
-  -- measure <EXACT_RESOURCE_FLAGS> --rate-policy-file "$REVIEWED_RATE_POLICY_FILE"
+  -- measure "${EXACT_RESOURCE_FLAGS[@]}" --rate-policy-file "$REVIEWED_RATE_POLICY_FILE"
 
 bun run --silent search:migration:rehearsal:reconcile -- target-restored \
   "${COMMON_RECONCILIATION_ARGS[@]}" \
   --maximum-target-pages 10000 \
   --maximum-duration-milliseconds 900000 \
+  --resource-attestation-file "$ROOT_RESOURCE_ATTESTATION_FILE" \
+  --integrity-digest-key-file "$RESTRICTED_INTEGRITY_DIGEST_KEY_FILE" \
+  --audit-pseudonym-key-file "$RESTRICTED_AUDIT_PSEUDONYM_KEY_FILE" \
+  --page-size 100 \
+  --max-pages 10000 \
+  --max-items 1000000 \
+  --integrity-maximum-duration-milliseconds 900000 \
   --output-file "$NEW_SCENARIO_TARGET_RESTORED_AUDIT_FILE" \
   --approval collect-reviewed-non-production-migration-rehearsal-reconciliation \
-  -- measure <EXACT_RESOURCE_FLAGS> --rate-policy-file "$REVIEWED_RATE_POLICY_FILE"
+  -- measure "${EXACT_RESOURCE_FLAGS[@]}" --rate-policy-file "$REVIEWED_RATE_POLICY_FILE"
 ```
 
 Verified scenarios use one passing post-terminal #163 result. Rollback scenarios replace that single input with the
@@ -563,8 +676,13 @@ mandatory; output and rate-segment files are mode `0600`, no-replace files with 
 ```sh
 bun run --silent search:migration:rehearsal:reconcile -- reconcile \
   "${COMMON_RECONCILIATION_ARGS[@]}" \
-  --integrity-result-file "$POST_TERMINAL_163_RESULT_FILE" \
-  --integrity-key-file "$RESTRICTED_163_HMAC_KEY_FILE" \
+  --resource-attestation-file "$ROOT_RESOURCE_ATTESTATION_FILE" \
+  --integrity-digest-key-file "$RESTRICTED_INTEGRITY_DIGEST_KEY_FILE" \
+  --audit-pseudonym-key-file "$RESTRICTED_AUDIT_PSEUDONYM_KEY_FILE" \
+  --page-size 100 \
+  --max-pages 10000 \
+  --max-items 1000000 \
+  --integrity-maximum-duration-milliseconds 900000 \
   --maximum-query-pages 10000 \
   --maximum-query-items 100000 \
   --maximum-query-bytes 268435456 \
@@ -572,7 +690,22 @@ bun run --silent search:migration:rehearsal:reconcile -- reconcile \
   --maximum-duration-milliseconds 600000 \
   --output-file "$NEW_SCENARIO_RECONCILIATION_AUDIT_FILE" \
   --approval collect-reviewed-non-production-migration-rehearsal-reconciliation \
-  -- measure <EXACT_RESOURCE_FLAGS> --rate-policy-file "$REVIEWED_RATE_POLICY_FILE"
+  -- measure "${EXACT_RESOURCE_FLAGS[@]}" --rate-policy-file "$REVIEWED_RATE_POLICY_FILE"
+
+# Rollback terminal: the authenticated before/after target audits contain the
+# two purpose-bound live #163 results; no saved raw integrity result is accepted.
+bun run --silent search:migration:rehearsal:reconcile -- reconcile \
+  "${COMMON_RECONCILIATION_ARGS[@]}" \
+  --target-preimage-audit-file "$SCENARIO_TARGET_PREIMAGE_AUDIT_FILE" \
+  --target-restored-audit-file "$SCENARIO_TARGET_RESTORED_AUDIT_FILE" \
+  --maximum-query-pages 10000 \
+  --maximum-query-items 100000 \
+  --maximum-query-bytes 268435456 \
+  --request-timeout-milliseconds 10000 \
+  --maximum-duration-milliseconds 600000 \
+  --output-file "$NEW_SCENARIO_RECONCILIATION_AUDIT_FILE" \
+  --approval collect-reviewed-non-production-migration-rehearsal-reconciliation \
+  -- measure "${EXACT_RESOURCE_FLAGS[@]}" --rate-policy-file "$REVIEWED_RATE_POLICY_FILE"
 ```
 
 Alarm delivery evidenceは、通常migration用permitを流用せず、alarm collection planの
@@ -582,7 +715,8 @@ Alarm planの`migrationResourceAttestationDigest`にはmain measured sessionの
 `attestation.resourceAttestationDigest`をそのまま指定します。これらから作る
 `sharedSessionBindingDigest`、alarm permit digest、alarm plan bindingはfinal alarm artifactに入り、
 main suiteのHMACへ結合されます。したがって別account/role/main resources/commitのalarm artifactは
-suiteへ差し込めません。Permit署名keyはpurposeごとに別のrestricted mode `0600` fileを使用できます。
+suiteへ差し込めません。Permit署名keyはpurposeごとに別のrestricted mode `0600` pathに置いた、
+異なる32-byte keyを必ず使用します。Main rehearsal keyとpathまたは内容を共有するとpublication前に拒否されます。
 
 Alarm planはcanonical JSONで、上記digestに加えて、exact partition/account/production account/region/profile/
 commit、CDK outputのcanonical 6 alarm ARN、primary/secondary topic ARNと専用queue URL、review済み
@@ -593,22 +727,44 @@ signal digestはplanへ書けません。
 発行します。Plan、permit、key、receipt、final outputはすべて別pathにしてください。実AWS実行は、
 これらのexact non-production resources、role、commit、UTC windowをchange recordで明示承認した後だけ行います。
 
+Alarm-purpose permitは、認証済みmain permitとreview済みplanを入力に専用issuerで発行します。Issuerはmain
+permitをmain master key由来runtime keyで再認証し、account/production account/partition付きcaller ARN/region/
+commit/configuration/policy/resource attestationをplanと照合します。発行時刻にはtrusted current clockを使い、
+capture/finalizeの有限windowがmain permit expiry内に収まる場合だけ、別alarm master keyのdigestを持つpermitを
+exclusive mode `0600` pathへ保存します。2個のmaster keyはpathと32-byte内容の両方を必ず分離し、output pathは
+未作成でなければなりません。
+
+```sh
+bun run --silent search:migration:rehearsal:alarm-permit -- \
+  --alarm-plan-file "$REVIEWED_ALARM_PLAN_FILE" \
+  --main-permit-file "$REHEARSAL_PERMIT_FILE" \
+  --main-authentication-key-file "$REHEARSAL_MASTER_KEY_FILE" \
+  --alarm-authentication-key-file "$RESTRICTED_ALARM_MASTER_KEY_FILE" \
+  --output-file "$ALARM_PURPOSE_PERMIT_FILE" \
+  --approval issue-reviewed-non-production-migration-rehearsal-alarm-permit
+```
+
 Captureはreal metricを出す前に開始します。12件を検証してimmediate duplicate drainを終えた後、
 receipt artifactをexclusive mode `0600` fileへfile/directory fsyncし、そのdurable barrierの後だけ12件を
 deleteします。Artifactはalarm-purpose runtime keyでplanの`requestedResourcesBinding`と全12 receiptをHMACし、
 別planの既存outputを流用できません。Deleteは各requestを有限時間に制限して失敗handleだけを最大3 round
 再試行します。Durable書込み後に一部deleteが完了しなくてもevidenceは有効で、CLIはexit 0と
-`receiptAcknowledgement: "incomplete"`を返します。この場合、queue retention/DLQ監視を継続し、raw handleを
+`receiptAcknowledgement: "incomplete"`を返します。この場合、receipt queueのvisible message数、
+oldest message age、14日retentionを監視し、raw handleを
 保存して再deleteしてはいけません。同じcaptureを再実行するとAWS clientを作る前にexisting mode `0600` outputを
 canonical/digest/HMAC/plan bindingまで検証し、`receiptAcknowledgement: "recovered-existing"`で安全に回収します。
 Artifact書込み前に失敗した場合は1件もdeleteしないため再実行できます。Raw body、ARN/name、message ID、queue URL、
 receipt handleはartifact/stdout/stderrへ出しません。
+Receipt queueにredrive policy/DLQはありません。Final suiteの`dlq` evidenceも、migration本体が同期実行で
+あることを`not-applicable / synchronous-migration`として記録します。Stage receiptのfinalize/commitと
+final publicationも同期commandで、stage receiptを運ぶqueueやmigration DLQはありません。Alarm receipt
+queueをmigration実行queueまたはDLQ evidenceとして扱いません。
 
 ```sh
 bun run --silent search:migration:rehearsal:alarms -- capture \
   --plan-file "$REVIEWED_ALARM_PLAN_FILE" \
   --permit-file "$ALARM_PURPOSE_PERMIT_FILE" \
-  --permit-key-file "$RESTRICTED_ALARM_PERMIT_KEY_FILE" \
+  --permit-key-file "$RESTRICTED_ALARM_MASTER_KEY_FILE" \
   --output-file "$NEW_ALARM_RECEIPT_FILE" \
   --approval acknowledge-non-production-alarm-evidence-collection
 ```
@@ -630,7 +786,7 @@ bun run --silent search:migration:telemetry-rehearsal -- \
   --policy-version "$MIGRATION_RATE_POLICY_VERSION" \
   --evidence-locator-digest "$SIGNAL_EVIDENCE_LOCATOR_DIGEST" \
   --authorization-binding-digest "$ALARM_PLAN_REQUESTED_RESOURCES_BINDING" \
-  --permit-key-file "$RESTRICTED_ALARM_PERMIT_KEY_FILE" \
+  --permit-key-file "$RESTRICTED_ALARM_MASTER_KEY_FILE" \
   --output-file "$NEW_SIGNAL_RECEIPT_FILE"
 ```
 
@@ -646,7 +802,7 @@ bun run --silent search:migration:rehearsal:ingest-alarm-signal -- \
   --approval acknowledge-non-production-alarm-log-ingestion \
   --plan-file "$REVIEWED_ALARM_PLAN_FILE" \
   --permit-file "$ALARM_PURPOSE_PERMIT_FILE" \
-  --permit-key-file "$RESTRICTED_ALARM_PERMIT_KEY_FILE" \
+  --permit-key-file "$RESTRICTED_ALARM_MASTER_KEY_FILE" \
   --signal-receipt-file "$CURRENT_SIGNAL_RECEIPT_FILE" \
   --output-file "$NEW_INGESTION_RECEIPT_FILE"
 ```
@@ -665,13 +821,86 @@ immutable artifactへ結合します。
 bun run --silent search:migration:rehearsal:alarms -- finalize \
   --plan-file "$REVIEWED_ALARM_PLAN_FILE" \
   --permit-file "$ALARM_PURPOSE_PERMIT_FILE" \
-  --permit-key-file "$RESTRICTED_ALARM_PERMIT_KEY_FILE" \
+  --permit-key-file "$RESTRICTED_ALARM_MASTER_KEY_FILE" \
   --receipt-file "$NEW_ALARM_RECEIPT_FILE" \
   --signal-receipt-file "$FINAL_SIGNAL_RECEIPT_FILE" \
   --ingestion-receipt-file "$FINAL_INGESTION_RECEIPT_FILE" \
   --output-file "$NEW_FINAL_ALARM_EVIDENCE_FILE" \
   --approval acknowledge-non-production-alarm-evidence-collection
 ```
+
+全36 stage receipt、canonical順の8 terminal reconciliation audit、final alarm artifactが揃ったら、次の
+strict publication commandを実行します。Main rehearsalとalarm-purposeのmaster keyは別のowner-only mode
+`0600` fileかつ異なる32-byte keyでなければなりません。旧suite input fileは渡しません。
+
+```sh
+if (( ${#ORDERED_STAGE_RECEIPT_FILES[@]} != 36 )); then
+  exit 2
+fi
+if (( ${#ORDERED_RECONCILIATION_AUDIT_FILES[@]} != 8 )); then
+  exit 2
+fi
+if (( ${#ORDERED_EXISTING_RATE_SEGMENT_FILES[@]} != 49 )); then
+  exit 2
+fi
+
+STAGE_RECEIPT_ARGS=()
+for file in "${ORDERED_STAGE_RECEIPT_FILES[@]}"; do
+  STAGE_RECEIPT_ARGS+=(--rehearsal-stage-receipt-file "$file")
+done
+
+RECONCILIATION_AUDIT_ARGS=()
+for file in "${ORDERED_RECONCILIATION_AUDIT_FILES[@]}"; do
+  RECONCILIATION_AUDIT_ARGS+=(--rehearsal-reconciliation-audit-file "$file")
+done
+
+RATE_SEGMENT_ARGS=()
+for file in "${ORDERED_EXISTING_RATE_SEGMENT_FILES[@]}"; do
+  RATE_SEGMENT_ARGS+=(--rehearsal-rate-segment-file "$file")
+done
+
+bun run --silent search:migration:rehearsal:publish -- \
+  --rehearsal-alarm-artifact-file "$NEW_FINAL_ALARM_EVIDENCE_FILE" \
+  --rehearsal-permit-file "$REHEARSAL_PERMIT_FILE" \
+  --rehearsal-authentication-key-file "$REHEARSAL_MASTER_KEY_FILE" \
+  --rehearsal-alarm-authentication-key-file "$RESTRICTED_ALARM_MASTER_KEY_FILE" \
+  --rehearsal-stage-receipt-manifest-file "$REHEARSAL_STAGE_MANIFEST_FILE" \
+  "${STAGE_RECEIPT_ARGS[@]}" \
+  "${RECONCILIATION_AUDIT_ARGS[@]}" \
+  --rehearsal-rate-configuration-hash "$MEASURED_CONFIGURATION_HASH" \
+  "${RATE_SEGMENT_ARGS[@]}" \
+  --rehearsal-final-rate-segment-file "$NEW_FINAL_PUBLICATION_RATE_SEGMENT_FILE" \
+  --request-timeout-milliseconds 10000 \
+  --approval publish-reviewed-non-production-migration-rehearsal \
+  -- measure \
+  --account "$NON_PRODUCTION_ACCOUNT" \
+  --region "$AWS_REGION" \
+  --profile "$AWS_PROFILE" \
+  --commit "$REVIEWED_COMMIT_OID" \
+  --project-directory-table "$PROJECT_DIRECTORY_TABLE" \
+  --work-items-table "$WORK_ITEMS_TABLE" \
+  --collaboration-table "$COLLABORATION_TABLE" \
+  --documents-table "$DOCUMENTS_TABLE" \
+  --workspace-search-table "$WORKSPACE_SEARCH_TABLE" \
+  --migration-state-table "$MIGRATION_STATE_TABLE" \
+  --journal-bucket "$MIGRATION_JOURNAL_BUCKET" \
+  --journal-key-arn "$MIGRATION_JOURNAL_KEY_ARN" \
+  --rate-policy-file "$REVIEWED_RATE_POLICY_FILE"
+```
+
+Stage receipt配列はmanifestのglobal ordinal順、audit配列はcanonical 8 scenario順、49個のexisting rate segmentは
+root、全stage、target/reconciliation collectionのauthenticated successor順です。Final segment pathはfreshかつ
+他の全input pathと異なるものにし、CLIがordinal 49の50個目としてexclusive作成します。Suffixはread-only
+`measure`だけで、上記resource vectorとrate policyをexactに再測定します。
+
+Final measurementがreal AWSで成功してreview済みconfiguration hashと一致した後だけ、固定migration-state tableの
+`DescribeTable`を`maxAttempts=1`で1回成功させ、その成功後にprivate rehearsal boundaryがthrottleを注入します。
+これによりfinal segment末尾は`attempt-charged → attempt-started → attempt-throttled → budget-stop`となり、
+後2 eventのprovenanceは`rehearsal-after-success-injection`です。Real AWS throttle/failureは注入扱いにせず、
+probe tableを選択するCLI flagもありません。Finalizerは50 segmentすべてを認証し、injected throttle/stopが各1件、
+AWS-service/injected source countの和が既存totalと一致することを検証します。Telemetryにはlow-cardinality sourceだけを
+出し、raw error/resource ID/table名は出しません。Final segmentをflush/closeしてdurable化した後にcompletion timeを
+採取し、suiteをimmutable publicationします。
 
 現時点では file の保存元は未導入のため、file は backfill 対象になりません。
 Work Item は canonical row の `creatorMemberKey`、`workflowStatusId`、`customFieldValues`、

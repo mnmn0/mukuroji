@@ -2319,7 +2319,12 @@ function readIntegrityAttestationRootProjection(
     aggregate.attemptCount !== 12 ||
     aggregate.forfeitedAttemptCount !== 0 ||
     aggregate.throttleCount !== 0 ||
+    aggregate.awsServiceThrottleCount !== 0 ||
+    aggregate.rehearsalInjectedThrottleCount !== 0 ||
     aggregate.budgetStopCount !== 0 ||
+    aggregate.operationalBudgetStopCount !== 0 ||
+    aggregate.awsServiceThrottleBudgetStopCount !== 0 ||
+    aggregate.rehearsalInjectedBudgetStopCount !== 0 ||
     aggregate.maximumInFlight !== 1 ||
     createMigrationDigest(aggregate) !== aggregateDigest ||
     Date.parse(startedAt) > Date.parse(interval.startedAt) ||
@@ -2716,7 +2721,12 @@ function calculateRootRateAggregate(
     attemptCount,
     forfeitedAttemptCount: 0,
     throttleCount: 0,
+    awsServiceThrottleCount: 0,
+    rehearsalInjectedThrottleCount: 0,
     budgetStopCount: 0,
+    operationalBudgetStopCount: 0,
+    awsServiceThrottleBudgetStopCount: 0,
+    rehearsalInjectedBudgetStopCount: 0,
     cadenceWaitCount,
     cadenceWaitMilliseconds,
     maximumInFlight: 1,
@@ -2742,28 +2752,63 @@ function readDurableRateEvidence(
   const record = requireRecord(value)
   requireExactKeys(record, [
     'attemptCount',
+    'awsServiceThrottleBudgetStopCount',
+    'awsServiceThrottleCount',
     'budgetStopCount',
     'cadenceWaitCount',
     'cadenceWaitMilliseconds',
     'forfeitedAttemptCount',
     'maximumInFlight',
+    'operationalBudgetStopCount',
     'policyVersion',
+    'rehearsalInjectedBudgetStopCount',
+    'rehearsalInjectedThrottleCount',
     'throttleCount',
     'version',
   ])
+  const throttleCount = readNonNegativeInteger(
+    readOwn(record, 'throttleCount'),
+  )
+  const awsServiceThrottleCount = readNonNegativeInteger(
+    readOwn(record, 'awsServiceThrottleCount'),
+  )
+  const rehearsalInjectedThrottleCount = readNonNegativeInteger(
+    readOwn(record, 'rehearsalInjectedThrottleCount'),
+  )
+  const budgetStopCount = readNonNegativeInteger(
+    readOwn(record, 'budgetStopCount'),
+  )
+  const operationalBudgetStopCount = readNonNegativeInteger(
+    readOwn(record, 'operationalBudgetStopCount'),
+  )
+  const awsServiceThrottleBudgetStopCount = readNonNegativeInteger(
+    readOwn(record, 'awsServiceThrottleBudgetStopCount'),
+  )
+  const rehearsalInjectedBudgetStopCount = readNonNegativeInteger(
+    readOwn(record, 'rehearsalInjectedBudgetStopCount'),
+  )
+  if (
+    throttleCount !==
+      awsServiceThrottleCount + rehearsalInjectedThrottleCount ||
+    budgetStopCount !==
+      operationalBudgetStopCount +
+        awsServiceThrottleBudgetStopCount +
+        rehearsalInjectedBudgetStopCount
+  ) return failIntegrityRateEvidence()
   const durable = Object.freeze({
-    version: readOne(readOwn(record, 'version')),
+    version: readRateObservationVersion(readOwn(record, 'version')),
     policyVersion: readDigest(readOwn(record, 'policyVersion')),
     attemptCount: readPositiveInteger(readOwn(record, 'attemptCount')),
     forfeitedAttemptCount: readNonNegativeInteger(
       readOwn(record, 'forfeitedAttemptCount'),
     ),
-    throttleCount: readNonNegativeInteger(
-      readOwn(record, 'throttleCount'),
-    ),
-    budgetStopCount: readNonNegativeInteger(
-      readOwn(record, 'budgetStopCount'),
-    ),
+    throttleCount,
+    awsServiceThrottleCount,
+    rehearsalInjectedThrottleCount,
+    budgetStopCount,
+    operationalBudgetStopCount,
+    awsServiceThrottleBudgetStopCount,
+    rehearsalInjectedBudgetStopCount,
     cadenceWaitCount: readNonNegativeInteger(
       readOwn(record, 'cadenceWaitCount'),
     ),
@@ -2775,7 +2820,23 @@ function readDurableRateEvidence(
   return durable
 }
 
-/** Reads the exact current contract version or one-valued maximum in-flight. */
+/**
+ * Reads the exact current secret-free rate observation version.
+ *
+ * @param value - Candidate durable aggregate version.
+ * @returns Exact current observation contract version.
+ */
+function readRateObservationVersion(
+  value: unknown,
+): typeof WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION {
+  if (
+    value !==
+      WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION
+  ) return failIntegrityRateEvidence()
+  return value
+}
+
+/** Reads the exact one-valued maximum in-flight counter. */
 function readOne(value: unknown): 1 {
   if (value !== 1) return failIntegrityRateEvidence()
   return 1

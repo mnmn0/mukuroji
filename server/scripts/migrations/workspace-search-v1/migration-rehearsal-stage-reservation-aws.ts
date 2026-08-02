@@ -351,7 +351,7 @@ export type WorkspaceSearchMigrationRehearsalStageReservationClaimBinding = {
   readonly publicationKeyDigest: string
   /** Exact authenticated rate predecessor selected before child execution. */
   readonly expectedPreviousRateSegment:
-    WorkspaceSearchMigrationRehearsalVerifiedRateSegment | null
+    WorkspaceSearchMigrationRehearsalVerifiedRateSegment
   /** Exact fresh rate-segment ordinal required from this child. */
   readonly expectedCurrentRateSegmentOrdinal: number
   /** Planning-commit-pinned rollback preimage bytes, or null otherwise. */
@@ -750,7 +750,7 @@ type DurableActiveReservation = {
   readonly previousStageReceiptDigest: string | null
   /** Exact rate predecessor authenticated when this claim became durable. */
   readonly expectedPreviousRateSegment:
-    WorkspaceSearchMigrationRehearsalVerifiedRateSegment | null
+    WorkspaceSearchMigrationRehearsalVerifiedRateSegment
   /** Exact rate-segment ordinal reserved for the claimed child. */
   readonly expectedCurrentRateSegmentOrdinal: number
   /** Planning-commit-pinned rollback preimage bytes, or null otherwise. */
@@ -1821,10 +1821,12 @@ async function requireStageClaimRatePredecessor(
   publicationKey: Uint8Array | undefined,
 ): Promise<void> {
   let expectedPreviousRateSegment:
-    WorkspaceSearchMigrationRehearsalVerifiedRateSegment | null
+    WorkspaceSearchMigrationRehearsalVerifiedRateSegment
   let expectedTargetPreimageArtifactContentDigest: string | null = null
   if (previousReceipt === null) {
-    expectedPreviousRateSegment = null
+    expectedPreviousRateSegment = Object.freeze({
+      ...selection.manifest.integrityAttestationRoot.segment,
+    })
   } else if (
     selection.entry.command === 'apply' &&
     (selection.entry.scenario === 'complete-apply-rollback' ||
@@ -1861,9 +1863,8 @@ async function requireStageClaimRatePredecessor(
       ...previousReceipt.rateSegment,
     })
   }
-  const expectedCurrentRateSegmentOrdinal = expectedPreviousRateSegment === null
-    ? 0
-    : expectedPreviousRateSegment.segmentOrdinal + 1
+  const expectedCurrentRateSegmentOrdinal =
+    expectedPreviousRateSegment.segmentOrdinal + 1
   if (
     serializeCanonicalJson(expectedPreviousRateSegment) !==
       serializeCanonicalJson(reservation.expectedPreviousRateSegment) ||
@@ -4275,15 +4276,9 @@ function parseActiveReservation(value: unknown): DurableActiveReservation {
     previousStageReceiptDigest: readStageHeadNullableDigest(
       stageHeadGuards.readOwn(record, 'previousStageReceiptDigest'),
     ),
-    expectedPreviousRateSegment:
-      stageHeadGuards.readOwn(record, 'expectedPreviousRateSegment') === null
-        ? null
-        : parseActiveReservationRateSegment(
-            stageHeadGuards.readOwn(
-              record,
-              'expectedPreviousRateSegment',
-            ),
-          ),
+    expectedPreviousRateSegment: parseActiveReservationRateSegment(
+      stageHeadGuards.readOwn(record, 'expectedPreviousRateSegment'),
+    ),
     expectedCurrentRateSegmentOrdinal: readStageHeadNonNegativeInteger(
       stageHeadGuards.readOwn(
         record,
@@ -4396,13 +4391,13 @@ function requireStageHeadStateInvariants(
       active.manifestEntryDigest ||
     (active.expectedTargetPreimageArtifactContentDigest !== null) !==
       requiresTargetPreimage ||
+    active.expectedCurrentRateSegmentOrdinal !==
+      active.expectedPreviousRateSegment.segmentOrdinal + 1 ||
     (active.stageOrdinal === 1 &&
-      (active.expectedPreviousRateSegment !== null ||
-        active.expectedCurrentRateSegmentOrdinal !== 0)) ||
-    (active.stageOrdinal > 1 &&
-      (active.expectedPreviousRateSegment === null ||
-        active.expectedCurrentRateSegmentOrdinal !==
-          active.expectedPreviousRateSegment.segmentOrdinal + 1))
+      serializeCanonicalJson(active.expectedPreviousRateSegment) !==
+        serializeCanonicalJson(
+          binding.manifest.integrityAttestationRoot.segment,
+        ))
   ) return failInvalidStageHead()
 }
 

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   type AttributeValue,
+  DescribeTableCommand,
   DynamoDBClient,
   GetItemCommand,
   TransactWriteItemsCommand,
@@ -25,6 +26,7 @@ import {
   createAwsWorkspaceSearchMigrationIdentityPort,
   createAwsWorkspaceSearchMigrationNonProductionRehearsalSession,
   createAwsWorkspaceSearchMigrationRateManagedSession,
+  createAwsWorkspaceSearchMigrationRehearsalFinalPublicationSession,
 } from './migration-identity-aws'
 import {
   createWorkspaceSearchMigrationRequestedResourcesBinding,
@@ -154,12 +156,17 @@ function createIntegrityAttestationRootProjection(
   rootCompletedAt: string,
 ) {
   const aggregate = {
-    version: 1,
+    version: 2,
     policyVersion: ratePolicy.policyVersion,
     attemptCount: 12,
     forfeitedAttemptCount: 0,
     throttleCount: 0,
+    awsServiceThrottleCount: 0,
+    rehearsalInjectedThrottleCount: 0,
     budgetStopCount: 0,
+    operationalBudgetStopCount: 0,
+    awsServiceThrottleBudgetStopCount: 0,
+    rehearsalInjectedBudgetStopCount: 0,
     cadenceWaitCount: 0,
     cadenceWaitMilliseconds: 0,
     maximumInFlight: 1,
@@ -297,8 +304,9 @@ function createStageFactoryFixture(): StageFactoryFixture {
       nonce: new Uint8Array(32).fill(0x51),
       reservedAt: '2026-08-02T00:05:00.000Z',
       expiresAt: '2026-08-02T00:30:00.000Z',
-      expectedPreviousRateSegment: null,
-      expectedCurrentRateSegmentOrdinal: 0,
+      expectedPreviousRateSegment:
+        material.manifest.integrityAttestationRoot.segment,
+      expectedCurrentRateSegmentOrdinal: 1,
       expectedTargetPreimageArtifactContentDigest: null,
       signingKey: material.authenticationKey,
     })
@@ -480,6 +488,212 @@ describe('non-production migration rehearsal AWS guard', () => {
         DynamoDBClient.prototype,
         'send',
         originalDynamoDbSend,
+      )
+    }
+  })
+
+  test('isolates one fixed final-publication throttle exercise and closes every rate transport', async () => {
+    const originalStsSend = STSClient.prototype.send
+    const originalS3Send = S3Client.prototype.send
+    const originalDynamoDbSend = DynamoDBClient.prototype.send
+    const originalDynamoDbDestroy = DynamoDBClient.prototype.destroy
+    const exercisePolicy: WorkspaceSearchMigrationDescribeTableRatePolicy = {
+      ...ratePolicy,
+      windowMilliseconds: 1,
+      minimumAttemptIntervalMilliseconds: 1,
+      minimumPageIntervalMilliseconds: 1,
+    }
+    let checkpointItem:
+      Readonly<Record<string, AttributeValue>> | undefined
+    let dynamoDbDestroyCount = 0
+    const observedDescribeTableNames: string[] = []
+    Reflect.set(STSClient.prototype, 'send', function (): unknown {
+      return Promise.resolve({
+        $metadata: {},
+        Account: account,
+        Arn: callerArn,
+        UserId: 'AROA12345678901234567:reviewed-session',
+      })
+    })
+    Reflect.set(
+      S3Client.prototype,
+      'send',
+      function (...callArguments: unknown[]): unknown {
+        if (!(callArguments[0] instanceof GetBucketTaggingCommand)) {
+          return Promise.reject(new Error('unexpected-s3-command'))
+        }
+        return Promise.resolve({
+          $metadata: {},
+          TagSet: [{
+            Key: WORKSPACE_SEARCH_MIGRATION_REHEARSAL_ENVIRONMENT_TAG_KEY,
+            Value: WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE,
+          }, {
+            Key:
+              WORKSPACE_SEARCH_MIGRATION_REHEARSAL_DEPLOYMENT_TRUST_ROOT_TAG_KEY,
+            Value: deploymentTrustRootDigest,
+          }, {
+            Key:
+              WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PRODUCTION_ACCOUNT_DIGEST_TAG_KEY,
+            Value:
+              createWorkspaceSearchMigrationRehearsalProductionAccountDigest(
+                productionAccount,
+              ),
+          }],
+        })
+      },
+    )
+    Reflect.set(
+      DynamoDBClient.prototype,
+      'send',
+      function (...callArguments: unknown[]): unknown {
+        const command = callArguments[0]
+        if (command instanceof GetItemCommand) {
+          return Promise.resolve({
+            $metadata: {},
+            ...(checkpointItem === undefined
+              ? {}
+              : { Item: structuredClone(checkpointItem) }),
+          })
+        }
+        if (command instanceof TransactWriteItemsCommand) {
+          const item = command.input.TransactItems?.[0]?.Put?.Item
+          if (item === undefined) {
+            return Promise.reject(new Error('expected-rate-checkpoint'))
+          }
+          checkpointItem = structuredClone(item)
+          return Promise.resolve({ $metadata: {} })
+        }
+        if (command instanceof DescribeTableCommand) {
+          const tableName = command.input.TableName
+          if (typeof tableName !== 'string') {
+            return Promise.reject(new Error('expected-table-name'))
+          }
+          observedDescribeTableNames.push(tableName)
+          return Promise.resolve({
+            $metadata: { attempts: 1 },
+            Table: { TableName: tableName },
+          })
+        }
+        return Promise.reject(new Error('unexpected-dynamodb-command'))
+      },
+    )
+    Reflect.set(
+      DynamoDBClient.prototype,
+      'destroy',
+      function (this: DynamoDBClient): void {
+        dynamoDbDestroyCount += 1
+        Reflect.apply(originalDynamoDbDestroy, this, [])
+      },
+    )
+    try {
+      await withStaticProfile(async () => {
+        const production =
+          await createAwsWorkspaceSearchMigrationRateManagedSession({
+            requested,
+            ratePolicy: exercisePolicy,
+            bootstrapRateCheckpoint: true,
+            recoverInterruptedCleanup: false,
+            recoverInterruptedAttempt: false,
+          })
+        expect(Reflect.has(
+          production,
+          'exerciseDescribeTableThrottle',
+        )).toBe(false)
+        await production.close()
+
+        const generic =
+          await createAwsWorkspaceSearchMigrationNonProductionRehearsalSession({
+            requested,
+            ratePolicy: exercisePolicy,
+            bootstrapRateCheckpoint: false,
+            recoverInterruptedCleanup: false,
+            recoverInterruptedAttempt: false,
+            permit: createPermit(),
+            permitVerificationKey: permitKey,
+            permitClock: () => new Date(fixedTime),
+          })
+        expect(Reflect.has(
+          generic,
+          'exerciseDescribeTableThrottle',
+        )).toBe(false)
+        await generic.close()
+
+        const session =
+          await createAwsWorkspaceSearchMigrationRehearsalFinalPublicationSession({
+            requested,
+            ratePolicy: exercisePolicy,
+            bootstrapRateCheckpoint: false,
+            recoverInterruptedCleanup: false,
+            recoverInterruptedAttempt: false,
+            permit: createPermit(),
+            permitVerificationKey: permitKey,
+            permitClock: () => new Date(fixedTime),
+          })
+        expect(Object.isFrozen(session)).toBe(true)
+        expect(Reflect.ownKeys(session).sort()).toEqual([
+          'close',
+          'createRehearsalArtifactPublisher',
+          'createRehearsalEvidencePublisher',
+          'exerciseDescribeTableThrottle',
+          'interruptDescribeTableRate',
+          'measureConfiguration',
+          'readDescribeTableRateEvidence',
+          'readRehearsalEvidenceSessionBinding',
+          'readRehearsalPermitValidity',
+        ])
+        for (const forbidden of [
+          'collectRehearsalReconciliation',
+          'createRateManagedMeasurementSession',
+          'describeTable',
+          'readRehearsalClaimedStageHead',
+          'runNonPageOperation',
+          'sealAndReadDescribeTableRateEvidence',
+        ]) {
+          expect(Reflect.has(session, forbidden)).toBe(false)
+        }
+        await expect(
+          session.exerciseDescribeTableThrottle(),
+        ).resolves.toEqual({
+          version: 1,
+          awsSuccessfulAttemptCount: 1,
+          rehearsalInjectedThrottleCount: 1,
+          rehearsalInjectedBudgetStopCount: 1,
+        })
+        expect(observedDescribeTableNames).toEqual([
+          requested.tables['migration-state'],
+        ])
+        expect(session.readDescribeTableRateEvidence()).toMatchObject({
+          attemptCount: 1,
+          throttleCount: 1,
+          awsServiceThrottleCount: 0,
+          rehearsalInjectedThrottleCount: 1,
+          budgetStopCount: 1,
+          operationalBudgetStopCount: 0,
+          awsServiceThrottleBudgetStopCount: 0,
+          rehearsalInjectedBudgetStopCount: 1,
+        })
+        await expect(
+          session.exerciseDescribeTableThrottle(),
+        ).rejects.toThrow('MANAGED_DESCRIBE_TABLE_RATE_FAILED')
+        expect(observedDescribeTableNames).toHaveLength(1)
+        const beforeFinalClose = dynamoDbDestroyCount
+        await session.close()
+        expect(dynamoDbDestroyCount - beforeFinalClose).toBe(3)
+        await session.close()
+        expect(dynamoDbDestroyCount - beforeFinalClose).toBe(3)
+      })
+    } finally {
+      Reflect.set(STSClient.prototype, 'send', originalStsSend)
+      Reflect.set(S3Client.prototype, 'send', originalS3Send)
+      Reflect.set(
+        DynamoDBClient.prototype,
+        'send',
+        originalDynamoDbSend,
+      )
+      Reflect.set(
+        DynamoDBClient.prototype,
+        'destroy',
+        originalDynamoDbDestroy,
       )
     }
   })

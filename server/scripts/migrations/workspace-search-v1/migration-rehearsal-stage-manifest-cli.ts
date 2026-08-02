@@ -15,6 +15,10 @@ import {
   type WorkspaceSearchMigrationRehearsalScenarioName,
 } from './migration-rehearsal-evidence'
 import {
+  parseWorkspaceSearchMigrationRehearsalIntegrityAttestationRootProjection,
+  type WorkspaceSearchMigrationRehearsalIntegrityAttestationRootProjection,
+} from './migration-rehearsal-integrity-rate-evidence'
+import {
   deriveWorkspaceSearchMigrationRehearsalKeys,
   zeroizeWorkspaceSearchMigrationRehearsalKey,
 } from './migration-rehearsal-key-derivation'
@@ -150,6 +154,7 @@ const stageManifestClaimKeys = Object.freeze([
   'deploymentTrustRootDigest',
   'evidenceKeyDigest',
   'entries',
+  'integrityAttestationRoot',
   'integrityResourceIdentityDigest',
   'integrityResourceIdentities',
   'integrityResourceIdentityScheme',
@@ -335,6 +340,20 @@ export function parseWorkspaceSearchMigrationRehearsalStageManifestClaims(
       ),
       invalidClaimsFile,
     )
+    let integrityAttestationRoot:
+      WorkspaceSearchMigrationRehearsalIntegrityAttestationRootProjection
+    try {
+      integrityAttestationRoot =
+        parseWorkspaceSearchMigrationRehearsalIntegrityAttestationRootProjection(
+          readStageManifestDataProperty(
+            record,
+            'integrityAttestationRoot',
+            invalidClaimsFile,
+          ),
+        )
+    } catch {
+      throw invalidClaimsFile()
+    }
     const configurationBindingDigest = readStageManifestDigest(
       readStageManifestDataProperty(
         record,
@@ -362,6 +381,13 @@ export function parseWorkspaceSearchMigrationRehearsalStageManifestClaims(
     const entries = readStageManifestEntries(
       readStageManifestDataProperty(record, 'entries', invalidClaimsFile),
     )
+    if (
+      integrityAttestationRoot.configurationBindingDigest !==
+        configurationBindingDigest ||
+      integrityAttestationRoot.policyVersion !== policyVersion ||
+      Date.parse(integrityAttestationRoot.completedAt) >
+        Date.parse(reviewedAt)
+    ) throw invalidClaimsFile()
     return Object.freeze({
       kind,
       manifestVersion,
@@ -375,6 +401,7 @@ export function parseWorkspaceSearchMigrationRehearsalStageManifestClaims(
       integrityResourceIdentityScheme,
       integrityResourceIdentities,
       integrityResourceIdentityDigest,
+      integrityAttestationRoot,
       configurationBindingDigest,
       policyVersion,
       reviewedAt,
@@ -759,6 +786,11 @@ function requireStageManifestPermitBinding(
     ) ||
     claims.integrityResourceIdentityDigest !==
       permit.integrityResourceIdentityDigest ||
+    serializeCanonicalJson(claims.integrityAttestationRoot) !==
+      serializeCanonicalJson(permit.integrityAttestationRoot) ||
+    claims.configurationBindingDigest !==
+      permit.configurationBindingDigest ||
+    claims.policyVersion !== permit.policyVersion ||
     claims.evidenceKeyDigest !== permit.evidenceKeyDigest ||
     claims.publicationKeyDigest !== permit.publicationKeyDigest ||
     reviewedAtMilliseconds < Date.parse(permit.issuedAt) ||

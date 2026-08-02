@@ -96,7 +96,7 @@ function createRateSegment(
   const claims = Object.freeze({
     kind:
       'mukuroji-workspace-search-migration-rehearsal-describe-table-rate-segment',
-    version: 1,
+    version: 2,
     segmentLocatorDigest: digest('fault-rate-segment'),
     segmentOrdinal: ordinal,
     previousSegmentDigest: ordinal === 0 ? null : digest('previous-segment'),
@@ -109,7 +109,7 @@ function createRateSegment(
   })
   const mac = createHmac('sha256', key)
     .update(
-      'mukuroji:workspace-search-migration:rehearsal-rate-record:v1',
+      'mukuroji:workspace-search-migration:rehearsal-rate-record:v2',
       'utf8',
     )
     .update('\0', 'utf8')
@@ -175,6 +175,8 @@ function createFaultMaterialFixture(): FaultMaterialFixture {
         base.manifest.integrityResourceIdentities,
       integrityResourceIdentityDigest:
         base.manifest.integrityResourceIdentityDigest,
+      integrityAttestationRoot:
+        base.manifest.integrityAttestationRoot,
       configurationBindingDigest:
         base.manifest.configurationBindingDigest,
       policyVersion: base.manifest.policyVersion,

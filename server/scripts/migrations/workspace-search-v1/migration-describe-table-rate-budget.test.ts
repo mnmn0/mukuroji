@@ -503,6 +503,46 @@ class StaticCheckpointStore
 }
 
 /**
+ * Mutable test store that exposes one legacy value and accepts its v2 CAS.
+ */
+class LegacyUpgradeCheckpointStore
+  implements WorkspaceSearchMigrationDescribeTableRateCheckpointStore {
+  /** Current untrusted or upgraded checkpoint value. */
+  private value: unknown
+
+  /**
+   * Retains the exact legacy checkpoint supplied to the first load.
+   *
+   * @param value - Exact legacy parser input.
+   */
+  constructor(value: unknown) {
+    this.value = value
+  }
+
+  /**
+   * Reads the current legacy or upgraded value.
+   *
+   * @returns Current detached checkpoint candidate.
+   */
+  load(): Promise<unknown> {
+    return Promise.resolve(this.value)
+  }
+
+  /**
+   * Stores the strict successor emitted after legacy parsing.
+   *
+   * @param write - Parser-validated v2 successor CAS.
+   * @returns Stored for the single deterministic upgrade path.
+   */
+  compareAndSwap(
+    write: WorkspaceSearchMigrationDescribeTableRateCheckpointWrite,
+  ): Promise<'stored'> {
+    this.value = write.checkpoint
+    return Promise.resolve('stored')
+  }
+}
+
+/**
  * Checkpoint store that stalls one scope load while delegating all other work.
  */
 class SelectivelyStalledCheckpointStore
@@ -1045,6 +1085,87 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
     })).not.toContain('RAW-CHECKPOINT-RESPONSE-LOSS-CANARY')
   })
 
+  test('maps every authenticated v1 throttle stop to AWS provenance', async () => {
+    const sourceHarness = new DeterministicRateHarness()
+    const policy = createPolicy()
+    const source = await
+      createWorkspaceSearchMigrationDescribeTableRateRegistry({
+        policy,
+        checkpointStore: sourceHarness,
+        clock: sourceHarness.clock,
+        epochClock: sourceHarness.clock,
+        waiter: sourceHarness,
+        recorder: sourceHarness,
+        random: () => 0,
+      }).claim(createClaim())
+    const current = source.readCheckpoint()
+    const legacyCheckpoint = Object.freeze({
+      version: 1,
+      scopeBindingDigest: current.scopeBindingDigest,
+      transportBindingDigest: current.transportBindingDigest,
+      policy: current.policy,
+      revision: current.revision,
+      fenceToken: current.fenceToken,
+      writeNonce: current.writeNonce,
+      capturedAtEpochMilliseconds: current.capturedAtEpochMilliseconds,
+      attemptCount: 1,
+      forfeitedAttemptCount: 0,
+      reservedAttempts: 0,
+      reservationKind: 'none',
+      mandatoryCleanupRequired: false,
+      attemptInFlight: false,
+      attemptInFlightNonce: null,
+      sequence: 1,
+      throttleCount: 1,
+      budgetStopCount: 2,
+      cadenceWaitCount: 0,
+      cadenceWaitMilliseconds: 0,
+      maximumInFlight: 1,
+    })
+    const restoredHarness = new DeterministicRateHarness()
+    const upgradeStore = new LegacyUpgradeCheckpointStore(legacyCheckpoint)
+    const restored = await
+      createWorkspaceSearchMigrationDescribeTableRateRegistry({
+        policy,
+        checkpointStore: upgradeStore,
+        clock: restoredHarness.clock,
+        epochClock: restoredHarness.clock,
+        waiter: restoredHarness,
+        recorder: restoredHarness,
+        random: () => 0,
+      }).claim(createClaim({ fenceToken: 2, bootstrap: false }))
+    expect(restored.readEvidence()).toMatchObject({
+      throttleCount: 1,
+      awsServiceThrottleCount: 1,
+      rehearsalInjectedThrottleCount: 0,
+      budgetStopCount: 2,
+      operationalBudgetStopCount: 1,
+      awsServiceThrottleBudgetStopCount: 1,
+      rehearsalInjectedBudgetStopCount: 0,
+    })
+    expect(await upgradeStore.load()).toMatchObject({
+      version: 2,
+      operationalBudgetStopCount: 1,
+      awsServiceThrottleBudgetStopCount: 1,
+    })
+
+    const invalidHarness = new DeterministicRateHarness()
+    const error = await captureRateError(() =>
+      createWorkspaceSearchMigrationDescribeTableRateRegistry({
+        policy,
+        checkpointStore: new LegacyUpgradeCheckpointStore({
+          ...legacyCheckpoint,
+          budgetStopCount: 0,
+        }),
+        clock: invalidHarness.clock,
+        epochClock: invalidHarness.clock,
+        waiter: invalidHarness,
+        recorder: invalidHarness,
+        random: () => 0,
+      }).claim(createClaim({ fenceToken: 2, bootstrap: false })))
+    expect(error.reason).toBe('invalid-lifecycle')
+  })
+
   test('rejects mismatched, stale, accessor, and extra-field checkpoints', async () => {
     const sourceHarness = new DeterministicRateHarness()
     const policy = createPolicy()
@@ -1091,6 +1212,22 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
       readonly claim:
         ClaimWorkspaceSearchMigrationDescribeTableRateLifecycleInput
     }> = [
+      {
+        value: {
+          ...checkpoint,
+          awsServiceThrottleCount:
+            checkpoint.awsServiceThrottleCount + 1,
+        },
+        claim: createClaim({ fenceToken: 2, bootstrap: false }),
+      },
+      {
+        value: {
+          ...checkpoint,
+          operationalBudgetStopCount:
+            checkpoint.operationalBudgetStopCount + 1,
+        },
+        claim: createClaim({ fenceToken: 2, bootstrap: false }),
+      },
       {
         value: { ...checkpoint, unexpected: true },
         claim: createClaim({ fenceToken: 2, bootstrap: false }),
@@ -2453,6 +2590,20 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
         .filter((observation) => observation.kind === 'throttle')
         .map((observation) => observation.backoffMilliseconds),
     ).toEqual([50, 100, 200])
+    expect(
+      harness.observations
+        .filter((observation) => observation.kind === 'throttle')
+        .map((observation) => observation.provenance),
+    ).toEqual(['aws-service', 'aws-service', 'aws-service'])
+    expect(
+      harness.observations
+        .filter((observation) => observation.kind === 'budget-stop')
+        .map((observation) => observation.provenance),
+    ).toEqual([
+      'aws-service-throttle',
+      'aws-service-throttle',
+      'aws-service-throttle',
+    ])
     expect(harness.waits).toEqual([1_000, 50, 100, 200])
     expect(harness.observations.at(-1)).toMatchObject({
       kind: 'attempt',
@@ -2461,7 +2612,12 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
     expect(lifecycle.readEvidence()).toMatchObject({
       attemptCount: 4,
       throttleCount: 3,
+      awsServiceThrottleCount: 3,
+      rehearsalInjectedThrottleCount: 0,
       budgetStopCount: 3,
+      operationalBudgetStopCount: 0,
+      awsServiceThrottleBudgetStopCount: 3,
+      rehearsalInjectedBudgetStopCount: 0,
     })
     expect(JSON.stringify({ errors, observations: harness.observations }))
       .not.toContain(rawCanary)
@@ -4086,6 +4242,7 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
         'kind',
         'observedAtMilliseconds',
         'phase',
+        'provenance',
         'sequence',
         'version',
       ],
@@ -4093,6 +4250,7 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
         'kind',
         'observedAtMilliseconds',
         'phase',
+        'provenance',
         'reason',
         'remainingNormalAdmissionAttempts',
         'remainingWindowAttempts',
@@ -4122,12 +4280,17 @@ describe('Workspace Search migration DescribeTable rate budget', () => {
     const evidence = lifecycle.readEvidence()
     expect(Object.keys(evidence).sort()).toEqual([
       'attemptCount',
+      'awsServiceThrottleBudgetStopCount',
+      'awsServiceThrottleCount',
       'budgetStopCount',
       'cadenceWaitCount',
       'cadenceWaitMilliseconds',
       'forfeitedAttemptCount',
       'maximumInFlight',
+      'operationalBudgetStopCount',
       'policyVersion',
+      'rehearsalInjectedBudgetStopCount',
+      'rehearsalInjectedThrottleCount',
       'throttleCount',
       'version',
     ])

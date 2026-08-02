@@ -202,12 +202,18 @@ class RecordingSessionBase {
   readRateAggregate(): WorkspaceSearchMigrationDescribeTableRateEvidence {
     this.events.push('read-rate')
     return {
-      version: 1,
+      version:
+        WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
       policyVersion,
       attemptCount: 6,
       forfeitedAttemptCount: 0,
       throttleCount: 0,
+      awsServiceThrottleCount: 0,
+      rehearsalInjectedThrottleCount: 0,
       budgetStopCount: 0,
+      operationalBudgetStopCount: 0,
+      awsServiceThrottleBudgetStopCount: 0,
+      rehearsalInjectedBudgetStopCount: 0,
       cadenceWaitCount: 5,
       cadenceWaitMilliseconds: 100,
       maximumInFlight: 0,
@@ -1465,6 +1471,7 @@ describe('Workspace Search migration control CLI output and lifecycle', () => {
         remainingNormalAdmissionAttempts: 0,
         remainingWindowAttempts: 0,
         retryAfterMilliseconds: 1_000,
+        provenance: 'operational',
       },
     })
 
@@ -1847,12 +1854,17 @@ describe('Workspace Search migration control CLI output and lifecycle', () => {
         policyVersion,
         execution: { phase: 'ready', nextAction: { kind: 'apply' } },
         rateAggregate: {
-          version: 1,
+          version: 2,
           policyVersion,
           attemptCount: 6,
           forfeitedAttemptCount: 0,
           throttleCount: 0,
+          awsServiceThrottleCount: 0,
+          rehearsalInjectedThrottleCount: 0,
           budgetStopCount: 0,
+          operationalBudgetStopCount: 0,
+          awsServiceThrottleBudgetStopCount: 0,
+          rehearsalInjectedBudgetStopCount: 0,
           cadenceWaitCount: 5,
           cadenceWaitMilliseconds: 100,
           maximumInFlight: 0,

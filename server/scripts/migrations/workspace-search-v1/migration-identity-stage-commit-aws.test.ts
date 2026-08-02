@@ -21,9 +21,6 @@ import {
 } from '@aws-sdk/client-s3'
 import { STSClient } from '@aws-sdk/client-sts'
 import { createMigrationDigest } from './migration-contract'
-import {
-  createWorkspaceSearchMigrationRehearsalRateAuthenticationKeyFingerprint,
-} from './migration-rehearsal-rate-evidence'
 import type {
   WorkspaceSearchMigrationDescribeTableRatePolicy,
 } from './migration-describe-table-rate-budget'
@@ -402,17 +399,20 @@ function createStageReceipt(
       }),
       rateSegment: Object.freeze({
         authenticationKeyFingerprint:
-          createWorkspaceSearchMigrationRehearsalRateAuthenticationKeyFingerprint(
-            material.authenticationKey,
-          ),
-        segmentLocatorDigest: digest('segment-locator'),
-        segmentOrdinal: 0,
-        firstEventSequence: 1,
-        eventCount: 0,
-        firstCommittedEventSequence: null,
-        lastCommittedEventSequence: null,
-        terminalRecordMac: digest('segment-terminal-mac'),
-        segmentDigest: digest('segment'),
+          material.committedRateSegment.authenticationKeyFingerprint,
+        segmentLocatorDigest:
+          material.committedRateSegment.segmentLocatorDigest,
+        segmentOrdinal: material.committedRateSegment.segmentOrdinal,
+        firstEventSequence:
+          material.committedRateSegment.firstEventSequence,
+        eventCount: material.committedRateSegment.eventCount,
+        firstCommittedEventSequence:
+          material.committedRateSegment.firstCommittedEventSequence,
+        lastCommittedEventSequence:
+          material.committedRateSegment.lastCommittedEventSequence,
+        terminalRecordMac:
+          material.committedRateSegment.terminalRecordMac,
+        segmentDigest: material.committedRateSegment.segmentDigest,
       }),
     },
     signingKey: material.authenticationKey,
@@ -434,8 +434,9 @@ async function createStandaloneFixture(): Promise<StandaloneStageCommitFixture> 
       nonce: new Uint8Array(32).fill(0x61),
       reservedAt: '2026-08-02T00:05:00.000Z',
       expiresAt: '2026-08-02T00:30:00.000Z',
-      expectedPreviousRateSegment: null,
-      expectedCurrentRateSegmentOrdinal: 0,
+      expectedPreviousRateSegment:
+        material.manifest.integrityAttestationRoot.segment,
+      expectedCurrentRateSegmentOrdinal: 1,
       expectedTargetPreimageArtifactContentDigest: null,
       signingKey: material.authenticationKey,
     })

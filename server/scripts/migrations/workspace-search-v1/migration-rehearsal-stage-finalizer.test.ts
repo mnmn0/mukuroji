@@ -4,11 +4,25 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
 import {
+  calculateCrossDomainIntegrityResourceBindingDigest,
   calculateCrossDomainIntegrityResourceIdentityDigest,
+  createCrossDomainIntegrityImmutableResourceIdentities,
+  createCrossDomainIntegrityInvocationDeadline,
   CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+  CROSS_DOMAIN_INTEGRITY_FILE_BUCKET_MARKER_KEY,
   CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
-  CROSS_DOMAIN_INTEGRITY_RESOURCE_TARGETS,
+  CROSS_DOMAIN_INTEGRITY_TABLE_RESOURCE_TARGETS,
+  runCrossDomainIntegrityCheck,
+  type CrossDomainIntegrityResourceAttestation,
 } from '../../data-integrity/cross-domain-integrity'
+import {
+  DescribeTableCommand,
+  type DescribeTableCommandOutput,
+} from '@aws-sdk/client-dynamodb'
+import type {
+  CrossDomainIntegrityAwsTransport,
+  CrossDomainIntegrityTableNames,
+} from '../../data-integrity/verify-cross-domain-integrity'
 import {
   createMigrationDigest,
   serializeCanonicalJson,
@@ -50,6 +64,22 @@ import {
   type FinalizeWorkspaceSearchMigrationRehearsalRateSegmentEvidenceInput,
   type WorkspaceSearchMigrationRehearsalRateCommittedSegment,
 } from './migration-rehearsal-rate-evidence'
+import {
+  finalizeWorkspaceSearchMigrationRehearsalRateBoundIntegrityResult,
+  verifyWorkspaceSearchMigrationRehearsalIntegrityRateInterval,
+  type WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult,
+} from './migration-rehearsal-integrity-rate-evidence'
+import {
+  createWorkspaceSearchMigrationRehearsalIntegrityRateAdapter,
+} from './migration-rehearsal-integrity-rate-adapter'
+import {
+  WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
+  type WorkspaceSearchMigrationDescribeTablePhase,
+  type WorkspaceSearchMigrationDescribeTableRateEvidence,
+} from './migration-describe-table-rate-budget'
+import type {
+  WorkspaceSearchMigrationManagedDescribeTableRate,
+} from './migration-describe-table-rate-managed-session'
 import {
   finalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArtifact,
   type WorkspaceSearchMigrationRehearsalReconciliationCollectorResult,
@@ -121,6 +151,46 @@ const integrityKey = new Uint8Array(32).fill(47)
 
 /** Dedicated target-audit key retained by the fixture. */
 const targetAuditKey = new Uint8Array(32).fill(59)
+
+/** Private physical-resource authority shared by genuine live fixture checks. */
+const integrityResourceAttestation:
+  CrossDomainIntegrityResourceAttestation = Object.freeze({
+    kind: 'mukuroji-cross-domain-integrity-resource-attestation',
+    version: 1,
+    scheme: CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
+    account: '123456789012',
+    region: 'ap-northeast-1',
+    bucket: Object.freeze({
+      target: 'bucket:file',
+      bucketName: 'mukuroji-stage-finalizer-files',
+      marker: Object.freeze({
+        key: CROSS_DOMAIN_INTEGRITY_FILE_BUCKET_MARKER_KEY,
+        versionId: 'stage-finalizer-marker-version-1',
+        checksumSha256: Buffer.alloc(32, 0x61).toString('base64'),
+        size: 128,
+      }),
+    }),
+    tables: Object.freeze(
+      CROSS_DOMAIN_INTEGRITY_TABLE_RESOURCE_TARGETS.map((target, index) => {
+        const tableName = `stage-finalizer-${index + 1}`
+        return Object.freeze({
+          target,
+          tableName,
+          tableArn:
+            `arn:aws:dynamodb:ap-northeast-1:123456789012:table/${tableName}`,
+          tableId: `stage-finalizer-table-id-${index + 1}`,
+          creationTime: `2026-01-0${index + 1}T00:00:00.000Z`,
+        })
+      }),
+    ),
+  })
+
+/** Canonical keyed identities derived from the private fixture authority. */
+const integrityResourceIdentities =
+  createCrossDomainIntegrityImmutableResourceIdentities(
+    integrityResourceAttestation,
+    integrityKey,
+  )
 
 /** Reviewed implementation commit shared by every fixture artifact. */
 const fixtureCommit = 'a'.repeat(40)
@@ -303,6 +373,84 @@ function at(second: number): string {
   return new Date(Date.UTC(2026, 7, 1, 0, 0, second)).toISOString()
 }
 
+/** Creates the strict clean ordinal-zero root used by stage fixtures. */
+function createIntegrityAttestationRoot():
+  WorkspaceSearchMigrationRehearsalStageManifestClaims[
+    'integrityAttestationRoot'
+  ] {
+  const policyVersion = digest('rate-policy')
+  const aggregate = Object.freeze({
+    version:
+      WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
+    policyVersion,
+    attemptCount: 12,
+    forfeitedAttemptCount: 0,
+    throttleCount: 0,
+    awsServiceThrottleCount: 0,
+    rehearsalInjectedThrottleCount: 0,
+    budgetStopCount: 0,
+    operationalBudgetStopCount: 0,
+    awsServiceThrottleBudgetStopCount: 0,
+    rehearsalInjectedBudgetStopCount: 0,
+    cadenceWaitCount: 0,
+    cadenceWaitMilliseconds: 0,
+    maximumInFlight: 1,
+  })
+  return Object.freeze({
+    kind:
+      'mukuroji-workspace-search-migration-rehearsal-integrity-attestation-root-projection',
+    version: 1,
+    deploymentTargetId: 'stage-finalizer-fixture',
+    productionAccountDigest: digest('production-account'),
+    configurationBindingDigest: digest('configuration'),
+    policyVersion,
+    attestation: Object.freeze({
+      contentMac: digest('root-attestation-content'),
+      byteLength: 1_024,
+    }),
+    segment: Object.freeze({
+      authenticationKeyFingerprint:
+        createWorkspaceSearchMigrationRehearsalRateAuthenticationKeyFingerprint(
+          mainKey,
+        ),
+      segmentLocatorDigest: digest('root-segment-locator'),
+      segmentOrdinal: 0,
+      firstEventSequence: 1,
+      eventCount: 24,
+      firstCommittedEventSequence: 1,
+      lastCommittedEventSequence: 24,
+      terminalRecordMac: digest('root-terminal-record'),
+      segmentDigest: digest('root-segment'),
+    }),
+    interval: Object.freeze({
+      kind:
+        'mukuroji-workspace-search-migration-rehearsal-integrity-rate-interval',
+      version: 1,
+      phase: 'integrity-check',
+      tablePassCount: 1,
+      describeTableCallCount: 6,
+      firstAttemptSequence: 7,
+      lastAttemptSequence: 12,
+      attemptSequences: Object.freeze([7, 8, 9, 10, 11, 12]),
+      firstEventSequence: 13,
+      lastEventSequence: 24,
+      eventSequences: Object.freeze(
+        Array.from({ length: 12 }, (_value, index) => index + 13),
+      ),
+      cadenceWaitCount: 0,
+      cadenceWaitMilliseconds: 0,
+      startedAt: at(-0.8),
+      completedAt: at(-0.2),
+    }),
+    aggregate,
+    aggregateDigest: createMigrationDigest(aggregate),
+    tableOrderBindingMac: digest('root-table-order'),
+    rootMac: digest('root'),
+    startedAt: at(-1),
+    completedAt: at(0),
+  })
+}
+
 /** Returns the base second assigned to one global stage ordinal. */
 function stageBase(ordinal: number): number {
   return (ordinal - 1) * 20
@@ -475,11 +623,8 @@ function controlArguments(
 }
 
 /** Creates the canonical #163 physical identity vector for one namespace. */
-function fixtureIntegrityResourceIdentities(namespace: string) {
-  return CROSS_DOMAIN_INTEGRITY_RESOURCE_TARGETS.map((target) => ({
-    target,
-    identityDigest: digest(`${namespace}:${target}`),
-  }))
+function fixtureIntegrityResourceIdentities(_namespace: string) {
+  return integrityResourceIdentities.map((identity) => ({ ...identity }))
 }
 
 /** Creates a complete valid reviewed manifest and its detached claims. */
@@ -537,6 +682,7 @@ function createManifestFixture(): ManifestFixture {
           fixtureIntegrityResourceIdentities('resource'),
           integrityKey,
         ),
+      integrityAttestationRoot: createIntegrityAttestationRoot(),
       policyVersion: digest('rate-policy'),
       reviewedAt: at(0),
       entries: Object.freeze(entries),
@@ -640,10 +786,12 @@ function createStageContext(
         .digest(),
       reservedAt: at(base - 2),
       expiresAt: at(base - 2 + claimSeconds),
-      expectedPreviousRateSegment: previousReceipt?.rateSegment ?? null,
+      expectedPreviousRateSegment: previousReceipt?.rateSegment ??
+        selection.manifest.integrityAttestationRoot.segment,
       expectedCurrentRateSegmentOrdinal:
         previousReceipt === null
-          ? 0
+          ? selection.manifest.integrityAttestationRoot.segment
+              .segmentOrdinal + 1
           : previousReceipt.rateSegment.segmentOrdinal + 1,
       expectedTargetPreimageArtifactContentDigest,
       signingKey: mainKey,
@@ -821,12 +969,18 @@ function createMutationResult(
     policyVersion: selection.manifest.policyVersion,
     coordinator,
     rateAggregate: Object.freeze({
-      version: 1,
+      version:
+        WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
       policyVersion: selection.manifest.policyVersion,
       attemptCount: 1,
       forfeitedAttemptCount: 0,
       throttleCount: 0,
+      awsServiceThrottleCount: 0,
+      rehearsalInjectedThrottleCount: 0,
       budgetStopCount: 0,
+      operationalBudgetStopCount: 0,
+      awsServiceThrottleBudgetStopCount: 0,
+      rehearsalInjectedBudgetStopCount: 0,
       cadenceWaitCount: 0,
       cadenceWaitMilliseconds: 0,
       maximumInFlight: 1,
@@ -935,19 +1089,16 @@ async function createCommittedRateSegment(
   previousReceipt: WorkspaceSearchMigrationRehearsalStageReceipt | null,
 ): Promise<WorkspaceSearchMigrationRehearsalRateCommittedSegment> {
   const entry = selection.entry
+  const ratePredecessor = previousReceipt?.rateSegment ??
+    selection.manifest.integrityAttestationRoot.segment
   const recorder =
     await createWorkspaceSearchMigrationRehearsalRateRecorder({
       segmentLocatorDigest: digest(`segment-locator:${entry.ordinal}`),
-      segmentOrdinal: previousReceipt === null
-        ? 0
-        : previousReceipt.rateSegment.segmentOrdinal + 1,
-      previousSegmentDigest: previousReceipt?.rateSegment.segmentDigest ?? null,
-      previousRecordMac:
-        previousReceipt?.rateSegment.terminalRecordMac ?? null,
-      firstEventSequence: previousReceipt === null
-        ? 1
-        : previousReceipt.rateSegment.firstEventSequence +
-          previousReceipt.rateSegment.eventCount,
+      segmentOrdinal: ratePredecessor.segmentOrdinal + 1,
+      previousSegmentDigest: ratePredecessor.segmentDigest,
+      previousRecordMac: ratePredecessor.terminalRecordMac,
+      firstEventSequence: ratePredecessor.firstEventSequence +
+        ratePredecessor.eventCount,
       anchorUtc: at(stageBase(entry.ordinal)),
       monotonicAnchorMilliseconds: 0,
       policyVersion: selection.manifest.policyVersion,
@@ -1338,8 +1489,12 @@ type RateSuccessorFixture = {
   /** One-shot input consumed by an artifact finalizer. */
   readonly input:
     FinalizeWorkspaceSearchMigrationRehearsalRateSegmentEvidenceInput
+  /** Exact canonical bytes immediately preceding the successor. */
+  readonly predecessorSegmentBytes: Uint8Array
   /** Exact canonical bytes that can precede a later linked segment. */
   readonly successorSegmentBytes: Uint8Array
+  /** Canonical successor anchor used to derive live interval timestamps. */
+  readonly successorAnchorUtc: string
 }
 
 /** Actual dual-key target artifact and its authenticated projection. */
@@ -1371,6 +1526,9 @@ function createTargetAuditContextFixture(
     permitDigest: manifest.permitDigest,
     requestedResourcesBinding: manifest.requestedResourcesBinding,
     configurationBindingDigest: manifest.configurationBindingDigest,
+    policyVersion: manifest.policyVersion,
+    integrityResourceIdentityDigest:
+      manifest.integrityResourceIdentityDigest,
     planningReceiptDigest: createMigrationDigest(planningReceipt),
     executionBoundaryDigest:
       planningReceipt.evidence.executionBoundaryDigest,
@@ -1414,12 +1572,10 @@ function createTargetAuditArtifactFixture(
     .digest('hex')
   const sourceSessionBindingDigest = digest('target-source-session')
   const startedAt = observedAt
-  const integrityBefore = purpose.endsWith('-preimage')
-    ? createReconciliationIntegrityResult(
-        `${context.scenario}:before`,
-        at(stageBase(planningReceipt.stageOrdinal) + 15),
-      )
-    : null
+  const integrityCompletedAt = observedAt
+  const integrityStartedAt = new Date(
+    Date.parse(observedAt) - 1_000,
+  ).toISOString()
   const observationFields = Object.freeze({
     startedAt,
     observedAt,
@@ -1459,9 +1615,72 @@ function createTargetAuditArtifactFixture(
   const rate = finalizeWorkspaceSearchMigrationRehearsalRateSegmentEvidence(
     rateFixture.input,
   )
+  const integrityResultBase = createReconciliationIntegrityResult(
+    `${context.scenario}:${purpose.endsWith('-preimage') ? 'before' : 'after'}`,
+    integrityCompletedAt,
+  )
+  const integrityResult = Object.freeze({
+    ...integrityResultBase,
+    runtimeProvenance: Object.freeze({
+      ...integrityResultBase.runtimeProvenance,
+      startedAt: integrityStartedAt,
+      completedAt: integrityCompletedAt,
+    }),
+  })
+  const firstIntegrityEventSequence = rate.successor.firstEventSequence
+  const integrityClaims = Object.freeze({
+    kind:
+      'mukuroji-workspace-search-migration-rehearsal-rate-bound-integrity-result',
+    version: 1,
+    result: integrityResult,
+    predecessor: rate.predecessor,
+    segment: rate.successor,
+    interval: Object.freeze({
+      kind:
+        'mukuroji-workspace-search-migration-rehearsal-integrity-rate-interval',
+      version: 1,
+      phase: 'integrity-check',
+      tablePassCount: 2,
+      describeTableCallCount: 12,
+      firstAttemptSequence: 2,
+      lastAttemptSequence: 13,
+      attemptSequences: Object.freeze(
+        Array.from({ length: 12 }, (_, index) => index + 2),
+      ),
+      firstEventSequence: firstIntegrityEventSequence,
+      lastEventSequence: firstIntegrityEventSequence + 23,
+      eventSequences: Object.freeze(
+        Array.from(
+          { length: 24 },
+          (_, index) => firstIntegrityEventSequence + index,
+        ),
+      ),
+      cadenceWaitCount: 0,
+      cadenceWaitMilliseconds: 0,
+      startedAt: new Date(
+        Date.parse(integrityStartedAt) + 10,
+      ).toISOString(),
+      completedAt: new Date(
+        Date.parse(integrityStartedAt) + 120,
+      ).toISOString(),
+    }),
+    policyVersion: manifest.policyVersion,
+    configurationBindingDigest: manifest.configurationBindingDigest,
+    tableOrderBindingMac: digest('target-integrity-table-order-binding'),
+  })
+  const integrity = Object.freeze({
+    ...integrityClaims,
+    bindingMac: createHmac('sha256', mainKey)
+      .update(
+        'mukuroji:workspace-search-migration:rate-bound-integrity-result:v1\0',
+        'utf8',
+      )
+      .update(serializeCanonicalJson(integrityClaims), 'utf8')
+      .digest('hex'),
+  })
   const runtimeKeyFingerprint = createHmac('sha256', mainKey)
     .update(
-      'mukuroji-workspace-search-migration-rehearsal-target-audit-runtime-key/v3\n',
+      'mukuroji-workspace-search-migration-rehearsal-target-audit-runtime-key/v4\n',
       'utf8',
     )
     .digest('hex')
@@ -1470,7 +1689,7 @@ function createTargetAuditArtifactFixture(
     version: WORKSPACE_SEARCH_MIGRATION_REHEARSAL_TARGET_AUDIT_VERSION,
     purpose,
     ...observationFields,
-    integrityBefore,
+    integrity,
     context,
     terminal,
     observationDigest,
@@ -1482,14 +1701,14 @@ function createTargetAuditArtifactFixture(
   })
   const runtimeMac = createHmac('sha256', mainKey)
     .update(
-      'mukuroji-workspace-search-migration-rehearsal-target-audit-runtime-mac/v3\n',
+      'mukuroji-workspace-search-migration-rehearsal-target-audit-runtime-mac/v4\n',
       'utf8',
     )
     .update(serializeCanonicalJson(unsigned), 'utf8')
     .digest('hex')
   const publicationKeyFingerprint = createHmac('sha256', publicationKey)
     .update(
-      'mukuroji-workspace-search-migration-rehearsal-target-audit-publication-key/v3\n',
+      'mukuroji-workspace-search-migration-rehearsal-target-audit-publication-key/v4\n',
       'utf8',
     )
     .digest('hex')
@@ -1503,7 +1722,7 @@ function createTargetAuditArtifactFixture(
   })
   const publicationMac = createHmac('sha256', publicationKey)
     .update(
-      'mukuroji-workspace-search-migration-rehearsal-target-audit-publication-mac/v3\n',
+      'mukuroji-workspace-search-migration-rehearsal-target-audit-publication-mac/v4\n',
       'utf8',
     )
     .update(serializeCanonicalJson(publicationUnsigned), 'utf8')
@@ -1584,7 +1803,7 @@ function createTargetRateHeaderBytes(
 ): Uint8Array {
   const mac = createHmac('sha256', authenticationKey)
     .update(
-      'mukuroji:workspace-search-migration:rehearsal-rate-record:v1',
+      'mukuroji:workspace-search-migration:rehearsal-rate-record:v2',
       'utf8',
     )
     .update('\0', 'utf8')
@@ -1597,7 +1816,12 @@ function createTargetRateHeaderBytes(
 
 /** Reads the exact MAC from one canonical target-rate header record. */
 function readTargetRateHeaderMac(bytes: Uint8Array): string {
-  const value: unknown = JSON.parse(new TextDecoder().decode(bytes))
+  const terminalLine = new TextDecoder().decode(bytes).trimEnd()
+    .split('\n').at(-1)
+  if (terminalLine === undefined) {
+    throw new Error('Missing target-rate terminal record.')
+  }
+  const value: unknown = JSON.parse(terminalLine)
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error('Invalid target-rate header fixture.')
   }
@@ -1606,6 +1830,23 @@ function readTargetRateHeaderMac(bytes: Uint8Array): string {
     throw new Error('Missing target-rate header fixture MAC.')
   }
   return descriptor.value
+}
+
+/** Concatenates exact target-rate records without retaining aliases. */
+function concatenateTargetRateRecords(
+  records: readonly Uint8Array[],
+): Uint8Array {
+  const byteLength = records.reduce(
+    (total, record) => total + record.byteLength,
+    0,
+  )
+  const bytes = new Uint8Array(byteLength)
+  let offset = 0
+  for (const record of records) {
+    bytes.set(record, offset)
+    offset += record.byteLength
+  }
+  return bytes
 }
 
 /** Creates one immediate authenticated successor for exact predecessor bytes. */
@@ -1618,6 +1859,7 @@ function createRateSuccessorFixture(
   label: string,
   anchorUtc: string,
   completedAt: string,
+  includeIntegrityCalls = false,
 ): RateSuccessorFixture {
   const authenticationKey = new Uint8Array(mainKey)
   const authenticationKeyFingerprint =
@@ -1627,7 +1869,7 @@ function createRateSuccessorFixture(
   const successorPayload = Object.freeze({
     kind:
       'mukuroji-workspace-search-migration-rehearsal-describe-table-rate-segment',
-    version: 1,
+    version: 2,
     segmentLocatorDigest: digest(`target-rate-successor:${label}`),
     segmentOrdinal: predecessorOrdinal + 1,
     previousSegmentDigest: createHash('sha256')
@@ -1640,10 +1882,48 @@ function createRateSuccessorFixture(
     policyVersion,
     configurationBindingDigest,
   })
-  const successorSegmentBytes = createTargetRateHeaderBytes(
+  const headerBytes = createTargetRateHeaderBytes(
     successorPayload,
     authenticationKey,
   )
+  const records: Uint8Array[] = [headerBytes]
+  let previousRecordMac = readTargetRateHeaderMac(headerBytes)
+  let eventSequence = firstEventSequence
+  if (includeIntegrityCalls) {
+    for (let index = 0; index < 12; index += 1) {
+      const attemptSequence = index + 2
+      const offsetMilliseconds = (index + 1) * 10
+      const charged = createTargetRateHeaderBytes(Object.freeze({
+        kind: 'attempt-charged',
+        version: 2,
+        eventSequence,
+        offsetMilliseconds,
+        previousRecordMac,
+        phase: 'integrity-check',
+        attemptSequence,
+      }), authenticationKey)
+      records.push(charged)
+      previousRecordMac = readTargetRateHeaderMac(charged)
+      eventSequence += 1
+      const started = createTargetRateHeaderBytes(Object.freeze({
+        kind: 'attempt-started',
+        version: 2,
+        eventSequence,
+        offsetMilliseconds,
+        previousRecordMac,
+        phase: 'integrity-check',
+        attemptSequence,
+        remainingNormalAdmissionAttempts: 90 - index,
+        remainingWindowAttempts: 9,
+        remainingPageAttempts: 5,
+        inFlight: 1,
+      }), authenticationKey)
+      records.push(started)
+      previousRecordMac = readTargetRateHeaderMac(started)
+      eventSequence += 1
+    }
+  }
+  const successorSegmentBytes = concatenateTargetRateRecords(records)
   const input = Object.freeze({
     verifiedSuccessor:
       verifyWorkspaceSearchMigrationRehearsalRateSegmentSuccessor({
@@ -1654,12 +1934,18 @@ function createRateSuccessorFixture(
         expectedConfigurationBindingDigest: configurationBindingDigest,
       }),
     durableEvidence: Object.freeze({
-      version: 1,
+      version:
+        WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
       policyVersion,
-      attemptCount: 1,
+      attemptCount: includeIntegrityCalls ? 13 : 1,
       forfeitedAttemptCount: 0,
       throttleCount: 0,
+      awsServiceThrottleCount: 0,
+      rehearsalInjectedThrottleCount: 0,
       budgetStopCount: 0,
+      operationalBudgetStopCount: 0,
+      awsServiceThrottleBudgetStopCount: 0,
+      rehearsalInjectedBudgetStopCount: 0,
       cadenceWaitCount: 0,
       cadenceWaitMilliseconds: 0,
       maximumInFlight: 1,
@@ -1667,7 +1953,238 @@ function createRateSuccessorFixture(
     completedAt,
   })
   authenticationKey.fill(0)
-  return Object.freeze({ input, successorSegmentBytes })
+  return Object.freeze({
+    input,
+    predecessorSegmentBytes: new Uint8Array(predecessorSegmentBytes),
+    successorSegmentBytes,
+    successorAnchorUtc: anchorUtc,
+  })
+}
+
+/** Creates the exact logical-to-physical table allowlist for live checks. */
+function createIntegrityTableNames(): CrossDomainIntegrityTableNames {
+  return {
+    'audit-events': integrityResourceAttestation.tables[0]?.tableName ?? '',
+    'file-proofing': integrityResourceAttestation.tables[1]?.tableName ?? '',
+    'project-directory':
+      integrityResourceAttestation.tables[2]?.tableName ?? '',
+    'work-item-configuration':
+      integrityResourceAttestation.tables[3]?.tableName ?? '',
+    'work-items': integrityResourceAttestation.tables[4]?.tableName ?? '',
+    'workspace-access':
+      integrityResourceAttestation.tables[5]?.tableName ?? '',
+  }
+}
+
+/** Creates one clean cumulative managed-rate aggregate. */
+function createIntegrityRateEvidence(
+  policyVersion: string,
+  attemptCount: number,
+): WorkspaceSearchMigrationDescribeTableRateEvidence {
+  return {
+    version:
+      WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
+    policyVersion,
+    attemptCount,
+    forfeitedAttemptCount: 0,
+    throttleCount: 0,
+    awsServiceThrottleCount: 0,
+    rehearsalInjectedThrottleCount: 0,
+    budgetStopCount: 0,
+    operationalBudgetStopCount: 0,
+    awsServiceThrottleBudgetStopCount: 0,
+    rehearsalInjectedBudgetStopCount: 0,
+    cadenceWaitCount: 0,
+    cadenceWaitMilliseconds: 0,
+    maximumInFlight: 1,
+  }
+}
+
+/** Creates a minimal managed rate owner aligned to one integrity segment. */
+function createIntegrityManagedRate(
+  policyVersion: string,
+): WorkspaceSearchMigrationManagedDescribeTableRate {
+  let attemptCount = 1
+  return {
+    /** Answers one exact attested DescribeTable call and charges one attempt. */
+    async describeTable(
+      tableName: string,
+      _phase: WorkspaceSearchMigrationDescribeTablePhase,
+    ): Promise<DescribeTableCommandOutput> {
+      const table = integrityResourceAttestation.tables.find((candidate) =>
+        candidate.tableName === tableName)
+      if (table === undefined) throw new Error('Unknown integrity table.')
+      attemptCount += 1
+      return {
+        $metadata: {},
+        Table: {
+          TableName: table.tableName,
+          TableArn: table.tableArn,
+          TableId: table.tableId,
+          TableStatus: 'ACTIVE',
+          CreationDateTime: new Date(table.creationTime),
+        },
+      }
+    },
+    /** Runs an unused checkpoint-page task. */
+    async runCheckpointPage(_input, task) {
+      return await task()
+    },
+    /** Runs an unused mandatory-cleanup task. */
+    async runMandatoryCleanup(task) {
+      return await task()
+    },
+    /** Runs the complete two-pass checker under one non-page gate. */
+    async runNonPageOperation(task) {
+      return await task()
+    },
+    /** Runs an unused mutation-guard task. */
+    async runWithMutationAdmissionGuard(_guard, task) {
+      return await task()
+    },
+    /** Accepts fixture data I/O. */
+    assertNewDataIoAllowed(): void {},
+    /** Accepts an unused lease claim. */
+    async claimAfterLease(): Promise<void> {},
+    /** Leaves the fixture active. */
+    interrupt(): void {},
+    /** Leaves the fixture active. */
+    quarantine(): void {},
+    /** Reads the exact current cumulative attempt count. */
+    readEvidence: () => createIntegrityRateEvidence(
+      policyVersion,
+      attemptCount,
+    ),
+    /** Reads the exact final cumulative attempt count. */
+    async closeAndReadEvidence() {
+      return createIntegrityRateEvidence(policyVersion, attemptCount)
+    },
+    /** Leaves the fixture lifecycle unchanged. */
+    async close(): Promise<void> {},
+  }
+}
+
+/** Creates the unused transport retained behind the managed live adapter. */
+function createUnusedIntegrityTransport(): CrossDomainIntegrityAwsTransport {
+  return {
+    /** No-op fixture close. */
+    close(): void {},
+    /** Rejects every forbidden base DescribeTable fallback. */
+    async describeTable(): Promise<DescribeTableCommandOutput> {
+      throw new Error('Forbidden integrity DescribeTable fallback.')
+    },
+    /** Returns enabled versioning for an unused bucket read. */
+    async getBucketVersioning() {
+      return { $metadata: {}, Status: 'Enabled' }
+    },
+    /** Returns an unused object-attributes result. */
+    async getObjectAttributes() {
+      return { $metadata: {} }
+    },
+    /** Returns an unused empty tag set. */
+    async getObjectTagging() {
+      return { $metadata: {}, TagSet: [] }
+    },
+    /** Returns unused empty object headers. */
+    async headObject() {
+      return { $metadata: {} }
+    },
+    /** Returns the fixed fixture account. */
+    async readCallerIdentity() {
+      return { $metadata: {}, Account: integrityResourceAttestation.account }
+    },
+    /** Returns an unused empty table page. */
+    async scan() {
+      return { $metadata: {}, Items: [] }
+    },
+  }
+}
+
+/** Creates one genuine two-pass result bound to the reconciliation segment. */
+async function createGenuineVerifiedIntegrity(
+  rate: RateSuccessorFixture,
+  manifest: WorkspaceSearchMigrationRehearsalStageManifest,
+  resourceIdentities = fixtureIntegrityResourceIdentities('resource'),
+): Promise<WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult> {
+  const startedAt = rate.successorAnchorUtc
+  const completedAt = new Date(
+    Date.parse(startedAt) + 120,
+  ).toISOString()
+  const adapter = createWorkspaceSearchMigrationRehearsalIntegrityRateAdapter({
+    tableNames: createIntegrityTableNames(),
+    tablePassCount: 2,
+    baseTransport: createUnusedIntegrityTransport(),
+    rate: createIntegrityManagedRate(manifest.policyVersion),
+  })
+  const signal = new AbortController().signal
+  const result = await adapter.run(async () => {
+    const tableNames = createIntegrityTableNames()
+    for (let passIndex = 0; passIndex < 2; passIndex += 1) {
+      for (const tableName of Object.values(tableNames)) {
+        await adapter.describeTable(
+          new DescribeTableCommand({ TableName: tableName }),
+          signal,
+        )
+      }
+    }
+    return await runCrossDomainIntegrityCheck({
+      contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+      deadline: createCrossDomainIntegrityInvocationDeadline({
+        maximumDurationMilliseconds: 60_000,
+        monotonicClock: () => 1_000,
+      }),
+      role: 'source',
+      checkedAt: completedAt,
+      observationMode: 'migration-rehearsal-live',
+      liveRuntimeObservation: { startedAt, completedAt },
+      resourceIdentityScheme:
+        CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
+      digestKey: new Uint8Array(integrityKey),
+      resourceBindingDigest:
+        calculateCrossDomainIntegrityResourceBindingDigest(),
+      resourceIdentities,
+      resourceIdentityDigest:
+        calculateCrossDomainIntegrityResourceIdentityDigest(
+          resourceIdentities,
+          integrityKey,
+        ),
+      limits: { pageSize: 100, maxPages: 10, maxItems: 1_000 },
+      reader: {
+        /** Returns one valid empty page for every logical domain. */
+        async readPage() {
+          return { items: [] }
+        },
+      },
+    })
+  })
+  const sequence = adapter.takeCompletedSequence(result)
+  const rateBinding =
+    verifyWorkspaceSearchMigrationRehearsalIntegrityRateInterval({
+      canonicalSegmentBytes: new Uint8Array(rate.successorSegmentBytes),
+      authenticationKey: new Uint8Array(mainKey),
+      predecessorSegmentBytes:
+        new Uint8Array(rate.predecessorSegmentBytes),
+      expectedPolicyVersion: manifest.policyVersion,
+      expectedConfigurationBindingDigest:
+        manifest.configurationBindingDigest,
+      expectedStartedAt: startedAt,
+      expectedCompletedAt: completedAt,
+      sequence,
+      taskResult: result,
+    })
+  return finalizeWorkspaceSearchMigrationRehearsalRateBoundIntegrityResult({
+    rateBinding,
+    result,
+    resourceAttestation: integrityResourceAttestation,
+    integrityDigestKey: new Uint8Array(integrityKey),
+    rateAuthenticationKey: new Uint8Array(mainKey),
+    expectedResourceIdentityDigest:
+      calculateCrossDomainIntegrityResourceIdentityDigest(
+        resourceIdentities,
+        integrityKey,
+      ),
+    clock: () => new Date(completedAt),
+  })
 }
 
 /** Creates one standalone target-owned rate successor at an exact time. */
@@ -1679,16 +2196,22 @@ function createTargetRateFixture(
   predecessorOrdinal: number,
 ): RateSuccessorFixture {
   const authenticationKey = new Uint8Array(mainKey)
+  const successorAnchorUtc = new Date(
+    Date.parse(completedAt) - 1_000,
+  ).toISOString()
+  const predecessorAnchorUtc = new Date(
+    Date.parse(completedAt) - 2_000,
+  ).toISOString()
   const predecessorPayload = Object.freeze({
     kind:
       'mukuroji-workspace-search-migration-rehearsal-describe-table-rate-segment',
-    version: 1,
+    version: 2,
     segmentLocatorDigest: digest(`target-rate-predecessor:${label}`),
     segmentOrdinal: predecessorOrdinal,
     previousSegmentDigest: digest(`target-rate-prior-segment:${label}`),
     previousRecordMac: digest(`target-rate-prior-mac:${label}`),
     firstEventSequence: 1,
-    anchorUtc: completedAt,
+    anchorUtc: predecessorAnchorUtc,
     authenticationKeyFingerprint:
       createWorkspaceSearchMigrationRehearsalRateAuthenticationKeyFingerprint(
         authenticationKey,
@@ -1708,8 +2231,9 @@ function createTargetRateFixture(
     context.configurationBindingDigest,
     policyVersion,
     label,
+    successorAnchorUtc,
     completedAt,
-    completedAt,
+    true,
   )
 }
 
@@ -1720,6 +2244,7 @@ function createReconciliationIntegrityResult(
   resourceIdentities = fixtureIntegrityResourceIdentities('resource'),
 ): WorkspaceSearchMigrationRehearsalReconciliationIntegrityResultBinding {
   const scenario = label.replace(/:(?:after|before)$/u, '')
+  const startedAt = new Date(Date.parse(checkedAt) - 1_000).toISOString()
   return Object.freeze({
     checkedAt,
     contentDigest: digest(`integrity-content:${label}`),
@@ -1731,7 +2256,7 @@ function createReconciliationIntegrityResult(
         'mukuroji-cross-domain-integrity-rehearsal-live-provenance',
       version: 1,
       mode: 'migration-rehearsal-live',
-      startedAt: checkedAt,
+      startedAt,
       completedAt: checkedAt,
       checkedAtSource: 'trusted-wall-clock-after-external-reads',
     }),
@@ -1750,47 +2275,42 @@ function createReconciliationIntegrityResult(
 /** Creates scenario-specific collector-authenticated integrity material. */
 function createReconciliationIntegrity(
   context: WorkspaceSearchMigrationRehearsalReconciliationCoreContext,
-  planningOrdinal: number,
-  terminalOrdinal: number,
-  targetAggregateDigest: string,
-  resourceIdentities = fixtureIntegrityResourceIdentities('resource'),
+  targetAudits:
+    WorkspaceSearchMigrationRehearsalReconciliationTargetAuditPair | null,
+  verifiedIntegrity:
+    WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult | null,
 ): WorkspaceSearchMigrationRehearsalReconciliationIntegrityCollectorResult {
   const rollback = context.scenario === 'partial-apply-rollback' ||
     context.scenario === 'complete-apply-rollback'
   if (!rollback) {
-    const completedAt = at(stageBase(terminalOrdinal) + 14)
+    if (verifiedIntegrity === null || targetAudits !== null) {
+      throw new Error('Expected verified live integrity authority.')
+    }
     return Object.freeze({
       kind: 'verified-result',
       status: 'pass',
       failureCount: 0,
-      completedAt,
-      result: createReconciliationIntegrityResult(
-        `${context.scenario}:after`,
-        completedAt,
-        resourceIdentities,
-      ),
+      completedAt: verifiedIntegrity.result.checkedAt,
+      result: verifiedIntegrity.result,
       terminalRootDigest: context.terminalRootDigest,
       integrityAggregateDigest:
-        digest(`integrity-aggregate:${context.scenario}`),
+        verifiedIntegrity.result.integrityAggregateDigest,
     })
+  }
+  if (targetAudits === null || verifiedIntegrity !== null) {
+    throw new Error('Expected rollback target integrity authority.')
   }
   const purpose = context.scenario === 'partial-apply-rollback'
     ? 'partial-rollback'
     : 'complete-rollback'
-  const startedAt = at(stageBase(planningOrdinal) + 14)
-  const applyStartedAt = at(stageBase(planningOrdinal) + 16)
-  const terminalAt = context.terminalAt
-  const completedAt = at(stageBase(terminalOrdinal) + 14)
-  const before = createReconciliationIntegrityResult(
-    `${context.scenario}:before`,
-    at(stageBase(planningOrdinal) + 15),
-    resourceIdentities,
-  )
-  const after = createReconciliationIntegrityResult(
-    `${context.scenario}:after`,
-    completedAt,
-    resourceIdentities,
-  )
+  const terminal = targetAudits.restored.terminal
+  if (terminal === null) throw new Error('Expected rollback terminal binding.')
+  const before = targetAudits.preimage.integrity.result
+  const after = targetAudits.restored.integrity.result
+  const startedAt = before.runtimeProvenance.startedAt
+  const applyStartedAt = terminal.applyStartedAt
+  const terminalAt = terminal.terminalAt
+  const completedAt = after.checkedAt
   const comparisonDigest = createMigrationDigest({
     purpose,
     beforeResultDigest: before.resultDigest,
@@ -1815,8 +2335,8 @@ function createReconciliationIntegrity(
     after,
     comparisonDigest,
     comparisonContextDigest: createMigrationDigest({
-      kind: 'workspace-search-migration-rehearsal-integrity-context',
-      version: 1,
+      kind: 'workspace-search-migration-rehearsal-integrity-context/v3',
+      version: 3,
       purpose,
       startedAt,
       applyStartedAt,
@@ -1827,8 +2347,8 @@ function createReconciliationIntegrity(
       comparisonDigest,
     }),
     terminalRootDigest: context.terminalRootDigest,
-    targetPreimageAggregateDigest: targetAggregateDigest,
-    targetRestoredAggregateDigest: targetAggregateDigest,
+    targetPreimageAggregateDigest: targetAudits.preimage.aggregateDigest,
+    targetRestoredAggregateDigest: targetAudits.restored.aggregateDigest,
     targetPreimageStatus: 'equal',
   })
 }
@@ -1845,7 +2365,9 @@ function createReconciliationTargetSummary(
     observedAt: binding.observedAt,
     observationDigest: binding.observationDigest,
     aggregateDigest: binding.aggregateDigest,
-    integrityBefore: binding.integrityBefore,
+    context: binding.context,
+    terminal: binding.terminal,
+    integrity: binding.integrity,
     contextDigest: createMigrationDigest(binding.context),
     rate: binding.rate,
   })
@@ -1890,6 +2412,9 @@ async function createTerminalReconciliationArtifact(
     runLocatorDigest: planningReceipt.runLocatorDigest,
     configurationBindingDigest:
       selection.manifest.configurationBindingDigest,
+    policyVersion: selection.manifest.policyVersion,
+    integrityResourceIdentityDigest:
+      selection.manifest.integrityResourceIdentityDigest,
     sealedPlanningAuthorityDigest:
       terminal.sealedPlanningAuthorityDigest,
     executionRunDigest: terminal.executionRunDigest,
@@ -1967,7 +2492,7 @@ async function createTerminalReconciliationArtifact(
     sourceTargetAggregateDigest =
       digest(`source-target-aggregate:${entry.scenario}`)
     ratePredecessorBytes = committedRate.canonicalBytes
-    ratePredecessorOrdinal = entry.ordinal - 1
+    ratePredecessorOrdinal = committedRate.segmentOrdinal
     rateFirstEventSequence = committedRate.firstEventSequence +
       committedRate.eventCount
   }
@@ -1978,9 +2503,17 @@ async function createTerminalReconciliationArtifact(
     selection.manifest.configurationBindingDigest,
     selection.manifest.policyVersion,
     `reconciliation:${entry.scenario}:${entry.ordinal}`,
-    at(stageBase(entry.ordinal) + 16),
-    at(stageBase(entry.ordinal) + 16),
+    at(stageBase(entry.ordinal) + (rollback ? 16 : 14)),
+    at(stageBase(entry.ordinal) + (rollback ? 16 : 15)),
+    !rollback,
   )
+  const verifiedIntegrity = rollback
+    ? null
+    : await createGenuineVerifiedIntegrity(
+        rate,
+        selection.manifest,
+        resourceIdentities,
+      )
   const markerAggregateDigest =
     digest(`marker-aggregate:${entry.scenario}`)
   const authorityChainDigest =
@@ -1989,10 +2522,8 @@ async function createTerminalReconciliationArtifact(
     context,
     integrity: createReconciliationIntegrity(
       context,
-      planningReceipt.stageOrdinal,
-      entry.ordinal,
-      sourceTargetAggregateDigest,
-      resourceIdentities,
+      targetAudits,
+      verifiedIntegrity,
     ),
     targetAudits,
     markerSummary: Object.freeze({
@@ -2028,6 +2559,7 @@ async function createTerminalReconciliationArtifact(
     finalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArtifact({
       collectorResult,
       rate: rate.input,
+      verifiedIntegrity,
     }, new Uint8Array(mainKey), new Uint8Array(publicationKey))
   return new Uint8Array(finalized.canonicalBytes)
 }
@@ -3438,41 +3970,15 @@ describe('Workspace Search migration rehearsal stage finalizer', () => {
             })
           : identity
       )
-    const replacementPersisted = await createPersistedSuccessFixture(
-      selection,
-      previous,
-    )
-    const replacementArtifactBytes =
-      await createTerminalReconciliationArtifact(
+    await expect(
+      createTerminalReconciliationArtifact(
         selection,
         previous,
         planningReceipt,
         undefined,
         replacementResourceIdentities,
-      )
-    const replacementMainKey = new Uint8Array(mainKey)
-    expect(() => finalizeUnknown({
-      selection,
-      previousReceipt: previous,
-      controlArguments: controlArguments(
-        terminalEntry.scenario,
-        terminalEntry.scenarioStageOrdinal,
-        terminalEntry.command,
-        terminalEntry.attemptOrdinal,
       ),
-      materialKind: 'success',
-      persistedMaterialEvidence: replacementPersisted.materialEvidence,
-      persistedLifecycleEvidence: replacementPersisted.lifecycleEvidence,
-      parentAuthentication: replacementPersisted.parentAuthentication,
-      proof: {
-        kind: 'terminal',
-        planningReceipt,
-        reconciliationArtifactBytes: replacementArtifactBytes,
-      },
-      runtimeAuthenticationKey: replacementMainKey,
-      publicationAuthenticationKey: new Uint8Array(publicationKey),
-    })).toThrow(WorkspaceSearchMigrationRehearsalStageFinalizerError)
-    expect(isZeroized(replacementMainKey)).toBe(true)
+    ).rejects.toThrow()
     const persisted = await createPersistedSuccessFixture(
       selection,
       previous,

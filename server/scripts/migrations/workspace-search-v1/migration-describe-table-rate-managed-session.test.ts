@@ -12,6 +12,7 @@ import {
 } from '@aws-sdk/client-dynamodb'
 import {
   createWorkspaceSearchMigrationManagedDescribeTableRate,
+  createWorkspaceSearchMigrationRehearsalManagedDescribeTableRate,
   type CreateWorkspaceSearchMigrationManagedDescribeTableRateInput,
   type WorkspaceSearchMigrationManagedDescribeTableRate,
 } from './migration-describe-table-rate-managed-session'
@@ -22,6 +23,7 @@ import type {
   WorkspaceSearchMigrationDescribeTableRateCheckpoint,
   WorkspaceSearchMigrationDescribeTableRateCheckpointStore,
   WorkspaceSearchMigrationDescribeTableRateCheckpointWrite,
+  WorkspaceSearchMigrationDescribeTableRateObservation,
   WorkspaceSearchMigrationDescribeTableRatePolicy,
   WorkspaceSearchMigrationDescribeTablePhase,
 } from './migration-describe-table-rate-budget'
@@ -377,6 +379,157 @@ async function expectManagedTableRejection(
 }
 
 describe('managed DescribeTable rate session', () => {
+  test('keeps the rehearsal exercise absent from the production runtime surface', async () => {
+    const rate = await createManagedRate(
+      new InMemoryRateCheckpointStore(),
+      { bootstrap: true },
+    )
+
+    expect(Reflect.has(rate, 'exercise')).toBe(false)
+    expect(Reflect.has(rate, 'runRehearsalExercise')).toBe(false)
+    expect(Reflect.ownKeys(rate)).not.toContain('exercise')
+    const prototype = Object.getPrototypeOf(rate)
+    expect(Reflect.ownKeys(prototype)).not.toContain(
+      'exercise',
+    )
+    const constructor = Reflect.get(prototype, 'constructor')
+    expect(typeof constructor).toBe('function')
+    expect(Reflect.ownKeys(constructor)).not.toContain(
+      'controllerRunRehearsalExercise',
+    )
+    await rate.close()
+  })
+
+  test('runs one post-success injected throttle through the isolated one-shot capability', async () => {
+    observedDescribeTableNames.length = 0
+    const observations: WorkspaceSearchMigrationDescribeTableRateObservation[] =
+      []
+    const bundle =
+      await createWorkspaceSearchMigrationRehearsalManagedDescribeTableRate({
+        account: fixtureAccount,
+        region: fixtureRegion,
+        recoveryTableNames: fixtureTableNames,
+        allowedTableNames: fixtureRehearsalAllowedTableNames,
+        policy: fixturePolicy,
+        checkpointStore: new InMemoryRateCheckpointStore(),
+        credentials: fixtureCredentials,
+        bootstrap: true,
+        exerciseTableName: fixtureTableNames[5] ?? '',
+        recorder: { record: (observation) => observations.push(observation) },
+      })
+
+    expect(Object.isFrozen(bundle)).toBe(true)
+    expect(Object.isFrozen(bundle.rate)).toBe(true)
+    expect(Object.isFrozen(bundle.exercise)).toBe(true)
+    expect(Reflect.ownKeys(bundle)).toEqual(['rate', 'exercise'])
+    expect(Reflect.ownKeys(bundle.exercise)).toEqual(['run'])
+    expect(Reflect.ownKeys(bundle.rate).sort()).toEqual([
+      'assertNewDataIoAllowed',
+      'claimAfterLease',
+      'close',
+      'closeAndReadEvidence',
+      'describeTable',
+      'interrupt',
+      'quarantine',
+      'readEvidence',
+      'runCheckpointPage',
+      'runMandatoryCleanup',
+      'runNonPageOperation',
+      'runWithMutationAdmissionGuard',
+    ])
+    expect(Reflect.has(bundle.rate, 'exercise')).toBe(false)
+    expect(Reflect.has(bundle.rate, 'run')).toBe(false)
+    await expect(bundle.exercise.run()).resolves.toEqual({
+      version: 1,
+      awsSuccessfulAttemptCount: 1,
+      rehearsalInjectedThrottleCount: 1,
+      rehearsalInjectedBudgetStopCount: 1,
+    })
+    expect(observedDescribeTableNames).toEqual([fixtureTableNames[5]])
+    expect(bundle.rate.readEvidence()).toMatchObject({
+      attemptCount: 1,
+      throttleCount: 1,
+      awsServiceThrottleCount: 0,
+      rehearsalInjectedThrottleCount: 1,
+      budgetStopCount: 1,
+      operationalBudgetStopCount: 0,
+      awsServiceThrottleBudgetStopCount: 0,
+      rehearsalInjectedBudgetStopCount: 1,
+    })
+    expect(observations.filter((value) => value.kind === 'throttle'))
+      .toEqual([
+        expect.objectContaining({
+          provenance: 'rehearsal-after-success-injection',
+        }),
+      ])
+    expect(observations.filter((value) => value.kind === 'budget-stop'))
+      .toEqual([
+        expect.objectContaining({
+          provenance: 'rehearsal-after-success-injection',
+          reason: 'throttled',
+        }),
+      ])
+    await expect(bundle.exercise.run()).rejects.toThrow(
+      'MANAGED_DESCRIBE_TABLE_RATE_FAILED',
+    )
+    expect(observedDescribeTableNames).toHaveLength(1)
+    await bundle.rate.close()
+  })
+
+  test('keeps AWS throttles and forged injection names outside injected provenance', async () => {
+    for (const scenario of ['aws-throttle', 'forged-name'] as const) {
+      observedDescribeTableNames.length = 0
+      const observations:
+        WorkspaceSearchMigrationDescribeTableRateObservation[] = []
+      const tableName = fixtureTableNames[5] ?? ''
+      describeTableCallbacks.set(tableName, async () => {
+        const error = new Error('sanitized test error')
+        error.name = scenario === 'aws-throttle'
+          ? 'ProvisionedThroughputExceededException'
+          : 'WorkspaceSearchMigrationRehearsalAfterSuccessThrottleError'
+        throw error
+      })
+      const bundle =
+        await createWorkspaceSearchMigrationRehearsalManagedDescribeTableRate({
+          account: fixtureAccount,
+          region: fixtureRegion,
+          recoveryTableNames: fixtureTableNames,
+          allowedTableNames: fixtureRehearsalAllowedTableNames,
+          policy: fixturePolicy,
+          checkpointStore: new InMemoryRateCheckpointStore(),
+          credentials: fixtureCredentials,
+          bootstrap: true,
+          exerciseTableName: tableName,
+          recorder: { record: (observation) => observations.push(observation) },
+        })
+
+      await expect(bundle.exercise.run()).rejects.toThrow(
+        'MANAGED_DESCRIBE_TABLE_RATE_FAILED',
+      )
+      const evidence = bundle.rate.readEvidence()
+      expect(evidence.rehearsalInjectedThrottleCount).toBe(0)
+      expect(evidence.rehearsalInjectedBudgetStopCount).toBe(0)
+      if (scenario === 'aws-throttle') {
+        expect(evidence.awsServiceThrottleCount).toBe(1)
+        expect(evidence.awsServiceThrottleBudgetStopCount).toBe(1)
+        expect(observations).toContainEqual(expect.objectContaining({
+          kind: 'throttle',
+          provenance: 'aws-service',
+        }))
+        expect(observations).toContainEqual(expect.objectContaining({
+          kind: 'budget-stop',
+          provenance: 'aws-service-throttle',
+        }))
+      } else {
+        expect(evidence.throttleCount).toBe(0)
+        expect(evidence.budgetStopCount).toBe(0)
+      }
+      expect(observedDescribeTableNames).toEqual([tableName])
+      describeTableCallbacks.delete(tableName)
+      await bundle.rate.close()
+    }
+  })
+
   test('validates the dedicated transport before any checkpoint CAS', async () => {
     const store = new InMemoryRateCheckpointStore()
     await expect(

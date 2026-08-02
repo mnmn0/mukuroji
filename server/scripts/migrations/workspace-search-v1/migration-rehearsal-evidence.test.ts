@@ -73,6 +73,17 @@ describe('migration rehearsal evidence index', () => {
     expect(index.reconciliation).toHaveLength(8)
     expect(Object.hasOwn(index, 'integrity')).toBe(false)
     expect(Object.hasOwn(index, 'targetRollback')).toBe(false)
+    expect(index.rate.aggregate).toMatchObject({
+      version: 2,
+      throttleCount: 1,
+      awsServiceThrottleCount: 0,
+      rehearsalInjectedThrottleCount: 1,
+      budgetStopCount: 1,
+      operationalBudgetStopCount: 0,
+      awsServiceThrottleBudgetStopCount: 0,
+      rehearsalInjectedBudgetStopCount: 1,
+    })
+    expect(index.rate.observedMaximumRatePerSecond).toBeGreaterThan(0)
 
     const verified =
       verifyWorkspaceSearchMigrationRehearsalReconciliationEvidence(
@@ -136,6 +147,35 @@ describe('migration rehearsal evidence index', () => {
     }))
   })
 
+  test('rejects missing or inconsistent source-separated rate totals', async () => {
+    const missing = requireRecord(cloneJson(
+      await createAuthenticWorkspaceSearchMigrationRehearsalEvidenceClaims(),
+    ))
+    const missingRate = requireRecord(missing.rate)
+    const missingAggregate = requireRecord(missingRate.aggregate)
+    delete missingAggregate.awsServiceThrottleCount
+    missingRate.aggregateDigest = createMigrationDigest(missingAggregate)
+    expectEvidenceFailure(() => createIndexUnknown(missing))
+
+    const throttleMismatch = requireRecord(cloneJson(
+      await createAuthenticWorkspaceSearchMigrationRehearsalEvidenceClaims(),
+    ))
+    const throttleRate = requireRecord(throttleMismatch.rate)
+    const throttleAggregate = requireRecord(throttleRate.aggregate)
+    throttleAggregate.awsServiceThrottleCount = 1
+    throttleRate.aggregateDigest = createMigrationDigest(throttleAggregate)
+    expectEvidenceFailure(() => createIndexUnknown(throttleMismatch))
+
+    const stopMismatch = requireRecord(cloneJson(
+      await createAuthenticWorkspaceSearchMigrationRehearsalEvidenceClaims(),
+    ))
+    const stopRate = requireRecord(stopMismatch.rate)
+    const stopAggregate = requireRecord(stopRate.aggregate)
+    stopAggregate.operationalBudgetStopCount = 1
+    stopRate.aggregateDigest = createMigrationDigest(stopAggregate)
+    expectEvidenceFailure(() => createIndexUnknown(stopMismatch))
+  })
+
   test('rejects target audits on verified scenarios', async () => {
     const claims = requireRecord(cloneJson(
       await createAuthenticWorkspaceSearchMigrationRehearsalEvidenceClaims(),
@@ -189,6 +229,16 @@ describe('migration rehearsal evidence index', () => {
       (claims: Record<string, unknown>): void => {
         const reconciliation = requireArray(claims.reconciliation)
         const verified = requireRecord(reconciliation[0])
+        verified.policyVersion = '0'.repeat(64)
+      },
+      (claims: Record<string, unknown>): void => {
+        const reconciliation = requireArray(claims.reconciliation)
+        const verified = requireRecord(reconciliation[0])
+        verified.integrityResourceIdentityDigest = '0'.repeat(64)
+      },
+      (claims: Record<string, unknown>): void => {
+        const reconciliation = requireArray(claims.reconciliation)
+        const verified = requireRecord(reconciliation[0])
         const integrity = requireRecord(verified.integrity)
         const result = requireRecord(integrity.result)
         delete result.runtimeProvenance
@@ -222,7 +272,7 @@ describe('migration rehearsal evidence index', () => {
         const integrity = requireRecord(partial.integrity)
         const targetAudits = requireRecord(partial.targetAudits)
         const preimage = requireRecord(targetAudits.preimage)
-        preimage.integrityBefore = integrity.after
+        preimage.integrity = integrity.after
       },
       (claims: Record<string, unknown>): void => {
         const reconciliation = requireArray(claims.reconciliation)
@@ -248,6 +298,15 @@ describe('migration rehearsal evidence index', () => {
         const targetAudits = requireRecord(partial.targetAudits)
         const restored = requireRecord(targetAudits.restored)
         restored.startedAt = partial.terminalAt
+      },
+      (claims: Record<string, unknown>): void => {
+        const reconciliation = requireArray(claims.reconciliation)
+        const partial = requireRecord(reconciliation[6])
+        const targetAudits = requireRecord(partial.targetAudits)
+        const restored = requireRecord(targetAudits.restored)
+        const rate = requireRecord(restored.rate)
+        const link = requireRecord(rate.link)
+        link.policyVersion = '0'.repeat(64)
       },
     ]
     for (const mutate of mutations) {

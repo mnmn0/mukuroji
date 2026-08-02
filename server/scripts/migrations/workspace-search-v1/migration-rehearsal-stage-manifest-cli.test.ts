@@ -29,6 +29,7 @@ import {
   readWorkspaceSearchMigrationRehearsalPrivateInputFile,
 } from './migration-rehearsal-private-input'
 import {
+  createWorkspaceSearchMigrationRehearsalProductionAccountDigest,
   createWorkspaceSearchMigrationRehearsalPermit,
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_APPROVAL,
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PERMIT_KIND,
@@ -134,6 +135,84 @@ afterEach(async () => {
 /** Creates one deterministic conventional digest. */
 function digest(label: string): string {
   return createMigrationDigest({ label })
+}
+
+/** Creates one structurally strict clean ordinal-zero root projection. */
+function createIntegrityAttestationRoot(
+  productionAccount: string,
+): WorkspaceSearchMigrationRehearsalPermit[
+  'integrityAttestationRoot'
+] {
+  const policyVersion = digest('policy')
+  const aggregate = Object.freeze({
+    version: 2,
+    policyVersion,
+    attemptCount: 12,
+    forfeitedAttemptCount: 0,
+    throttleCount: 0,
+    awsServiceThrottleCount: 0,
+    rehearsalInjectedThrottleCount: 0,
+    budgetStopCount: 0,
+    operationalBudgetStopCount: 0,
+    awsServiceThrottleBudgetStopCount: 0,
+    rehearsalInjectedBudgetStopCount: 0,
+    cadenceWaitCount: 0,
+    cadenceWaitMilliseconds: 0,
+    maximumInFlight: 1,
+  })
+  return Object.freeze({
+    kind:
+      'mukuroji-workspace-search-migration-rehearsal-integrity-attestation-root-projection',
+    version: 1,
+    deploymentTargetId: 'manifest-cli-fixture',
+    productionAccountDigest:
+      createWorkspaceSearchMigrationRehearsalProductionAccountDigest(
+        productionAccount,
+      ),
+    configurationBindingDigest: digest('configuration'),
+    policyVersion,
+    attestation: Object.freeze({
+      contentMac: digest('attestation-content'),
+      byteLength: 1_024,
+    }),
+    segment: Object.freeze({
+      authenticationKeyFingerprint: digest('rate-key-fingerprint'),
+      segmentLocatorDigest: digest('root-segment-locator'),
+      segmentOrdinal: 0,
+      firstEventSequence: 1,
+      eventCount: 24,
+      firstCommittedEventSequence: 1,
+      lastCommittedEventSequence: 24,
+      terminalRecordMac: digest('root-terminal-record'),
+      segmentDigest: digest('root-segment'),
+    }),
+    interval: Object.freeze({
+      kind:
+        'mukuroji-workspace-search-migration-rehearsal-integrity-rate-interval',
+      version: 1,
+      phase: 'integrity-check',
+      tablePassCount: 1,
+      describeTableCallCount: 6,
+      firstAttemptSequence: 7,
+      lastAttemptSequence: 12,
+      attemptSequences: Object.freeze([7, 8, 9, 10, 11, 12]),
+      firstEventSequence: 13,
+      lastEventSequence: 24,
+      eventSequences: Object.freeze(
+        Array.from({ length: 12 }, (_value, index) => index + 13),
+      ),
+      cadenceWaitCount: 0,
+      cadenceWaitMilliseconds: 0,
+      startedAt: '2026-08-01T23:59:59.700Z',
+      completedAt: '2026-08-01T23:59:59.900Z',
+    }),
+    aggregate,
+    aggregateDigest: createMigrationDigest(aggregate),
+    tableOrderBindingMac: digest('table-order'),
+    rootMac: digest('root'),
+    startedAt: '2026-08-01T23:59:59.000Z',
+    completedAt: '2026-08-01T23:59:59.999Z',
+  })
 }
 
 /** Encodes one value as exact canonical UTF-8 JSON bytes. */
@@ -277,6 +356,9 @@ function createPermit(): {
 } {
   const key = Uint8Array.from({ length: 32 }, (_value, index) => index + 1)
   const derivedKeys = deriveWorkspaceSearchMigrationRehearsalKeys(key)
+  const productionAccount = '222222222222'
+  const integrityAttestationRoot =
+    createIntegrityAttestationRoot(productionAccount)
   const permit = createWorkspaceSearchMigrationRehearsalPermit({
     claims: {
       kind: WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PERMIT_KIND,
@@ -284,11 +366,12 @@ function createPermit(): {
       stage: WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE,
       approval: WORKSPACE_SEARCH_MIGRATION_REHEARSAL_APPROVAL,
       account: '111111111111',
-      productionAccount: '222222222222',
+      productionAccount,
       region: 'ap-northeast-1',
       callerArn:
         'arn:aws:sts::111111111111:assumed-role/Rehearsal/manifest-test',
       commit,
+      deploymentTargetId: integrityAttestationRoot.deploymentTargetId,
       requestedResourcesBinding,
       integrityResourceIdentityScheme:
         CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
@@ -297,6 +380,10 @@ function createPermit(): {
       evidenceKeyDigest: derivedKeys.runtimeKeyDigest,
       publicationKeyDigest: derivedKeys.publicationKeyDigest,
       deploymentTrustRootDigest: digest('deployment-trust-root'),
+      configurationBindingDigest:
+        integrityAttestationRoot.configurationBindingDigest,
+      policyVersion: integrityAttestationRoot.policyVersion,
+      integrityAttestationRoot,
       issuedAt: '2026-08-02T00:00:00.000Z',
       expiresAt: '2026-08-02T01:00:00.000Z',
     },
@@ -325,8 +412,9 @@ function createManifestClaims(
       permit.integrityResourceIdentityScheme,
     integrityResourceIdentities: permit.integrityResourceIdentities,
     integrityResourceIdentityDigest,
-    configurationBindingDigest: digest('configuration'),
-    policyVersion: digest('policy'),
+    integrityAttestationRoot: permit.integrityAttestationRoot,
+    configurationBindingDigest: permit.configurationBindingDigest,
+    policyVersion: permit.policyVersion,
     reviewedAt: '2026-08-02T00:30:00.000Z',
     entries: createManifestEntries(),
   })
@@ -608,6 +696,13 @@ describe('workspace search migration rehearsal stage manifest CLI', () => {
               : identity
           ),
       },
+      {
+        ...claims,
+        integrityAttestationRoot: {
+          ...claims.integrityAttestationRoot,
+          rootMac: digest('different-root'),
+        },
+      },
       { ...claims, reviewedAt: permit.expiresAt },
     ]
     for (const candidate of mismatchedClaims) {
@@ -626,6 +721,24 @@ describe('workspace search migration rehearsal stage manifest CLI', () => {
       expect(harness.observations.writeCount).toBe(0)
       expectZeroized(readerKey)
     }
+    const beforeRootCompletionKey = key.slice()
+    const beforeRootCompletion = createHarness({
+      claimsBytes: canonicalBytes({
+        ...claims,
+        reviewedAt: '2026-08-01T23:59:59.998Z',
+      }),
+      permitBytes: canonicalBytes(permit),
+      readerKey: beforeRootCompletionKey,
+    })
+    expect(await runWorkspaceSearchMigrationRehearsalStageManifestCli(
+      createArguments(),
+      beforeRootCompletion.dependencies,
+    )).toBe(2)
+    expect(beforeRootCompletion.observations.writeCount).toBe(0)
+    expect(beforeRootCompletion.observations.stderrLines[0]).toContain(
+      'INVALID_CLAIMS_FILE',
+    )
+    expect(Array.from(beforeRootCompletionKey)).toEqual(Array.from(key))
     const invalidStageHarness = createHarness({
       claimsBytes: canonicalBytes({ ...claims, stage: 'production' }),
       permitBytes: canonicalBytes(permit),

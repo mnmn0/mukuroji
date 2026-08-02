@@ -4,16 +4,6 @@ import {
   createWorkspaceSearchDocument,
 } from '../../../src/modules/workspace-search'
 import {
-  calculateCrossDomainIntegrityResourceBindingDigest,
-  calculateCrossDomainIntegrityResourceIdentityDigest,
-  createCrossDomainIntegrityInvocationDeadline,
-  CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
-  CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
-  CROSS_DOMAIN_INTEGRITY_RESOURCE_TARGETS,
-  runCrossDomainIntegrityCheck,
-  type CrossDomainIntegrityResourceIdentity,
-} from '../../data-integrity/cross-domain-integrity'
-import {
   createMigrationDigest,
   createWorkspaceSearchConfigurationHash,
   serializeCanonicalJson,
@@ -30,15 +20,13 @@ import type {
   WorkspaceSearchMigrationRehearsalEvidenceSessionBinding,
 } from './migration-rehearsal-evidence-aws'
 import {
-  authenticateWorkspaceSearchMigrationRehearsalIntegrityPreimageResult,
-  type WorkspaceSearchMigrationRehearsalIntegrityPreimageResultCapability,
-} from './migration-rehearsal-integrity-evidence'
-import {
-  createWorkspaceSearchMigrationRehearsalRateAuthenticationKeyFingerprint,
   finalizeWorkspaceSearchMigrationRehearsalRateSegmentEvidence,
-  type FinalizeWorkspaceSearchMigrationRehearsalRateSegmentEvidenceInput,
-  verifyWorkspaceSearchMigrationRehearsalRateSegmentSuccessor,
 } from './migration-rehearsal-rate-evidence'
+import {
+  createTargetAuditIntegrityRateFixture,
+  targetAuditIntegrityResourceIdentityDigest,
+  targetAuditPolicyVersion,
+} from './migration-rehearsal-target-audit.test-fixture'
 import {
   authenticateWorkspaceSearchMigrationRehearsalTargetAuditArtifact,
   collectWorkspaceSearchMigrationRehearsalTargetAudit,
@@ -73,20 +61,6 @@ import {
 
 const targetAuditKey = new Uint8Array(32).fill(91)
 const targetAuditPublicationKey = new Uint8Array(32).fill(93)
-/** Dedicated #163 HMAC key used by live preimage fixtures. */
-const integrityDigestKey = new Uint8Array(32).fill(73)
-/** Fixed physical-resource identities carried by every live preimage fixture. */
-const integrityResourceIdentities: readonly CrossDomainIntegrityResourceIdentity[] =
-  CROSS_DOMAIN_INTEGRITY_RESOURCE_TARGETS.map((target) => Object.freeze({
-    target,
-    identityDigest: digest(`integrity-resource:${target}`),
-  }))
-/** Exact keyed resource identity expected by target-preimage fixtures. */
-const integrityResourceIdentityDigest =
-  calculateCrossDomainIntegrityResourceIdentityDigest(
-    integrityResourceIdentities,
-    integrityDigestKey,
-  )
 const partialTerminal:
   WorkspaceSearchMigrationRehearsalPartialRollbackTerminalBinding = {
     scenario: 'partial-apply-rollback',
@@ -145,58 +119,6 @@ function isZeroized(value: Uint8Array): boolean {
   return value.every((byte) => byte === 0)
 }
 
-/**
- * Authenticates one passing live #163 result completed no later than a target scan.
- *
- * @param observedAt - Canonical completion time of the following target audit.
- * @returns Genuine one-shot #163 preimage capability.
- */
-async function createIntegrityPreimageCapability(
-  observedAt: string,
-): Promise<WorkspaceSearchMigrationRehearsalIntegrityPreimageResultCapability> {
-  const startedAt = new Date(Date.parse(observedAt) - 1_000).toISOString()
-  const result = await runCrossDomainIntegrityCheck({
-    contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
-    deadline: createCrossDomainIntegrityInvocationDeadline({
-      maximumDurationMilliseconds: 60_000,
-      monotonicClock: () => 1_000,
-    }),
-    role: 'source',
-    checkedAt: observedAt,
-    observationMode: 'migration-rehearsal-live',
-    liveRuntimeObservation: {
-      startedAt,
-      completedAt: observedAt,
-    },
-    resourceIdentityScheme:
-      CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
-    digestKey: integrityDigestKey,
-    resourceBindingDigest:
-      calculateCrossDomainIntegrityResourceBindingDigest(),
-    resourceIdentities: integrityResourceIdentities,
-    resourceIdentityDigest: integrityResourceIdentityDigest,
-    limits: {
-      pageSize: 100,
-      maxPages: 10,
-      maxItems: 1_000,
-    },
-    reader: {
-      readPage: async () => ({ items: [] }),
-    },
-  })
-  const resultBytes = new TextEncoder().encode(
-    `${JSON.stringify(result, undefined, 2)}\n`,
-  )
-  return authenticateWorkspaceSearchMigrationRehearsalIntegrityPreimageResult(
-    {
-      resultBytes,
-      expectedResourceIdentityDigest: integrityResourceIdentityDigest,
-      clock: () => new Date(observedAt),
-    },
-    new Uint8Array(integrityDigestKey),
-  )
-}
-
 describe('Workspace Search migration rehearsal target audit', () => {
   test('collects a real complete scan and emits only contextual authenticated canonical bytes', async () => {
     const firstItem = createOwnedDocumentItem('owned')
@@ -218,7 +140,9 @@ describe('Workspace Search migration rehearsal target audit', () => {
     const context = createTargetContext('partial-apply-rollback', 'first')
     const ownedKey = new Uint8Array(targetAuditKey)
     const ownedPublicationKey = new Uint8Array(targetAuditPublicationKey)
-    const integrityBefore = await createIntegrityPreimageCapability(
+    const live = await createTargetAuditIntegrityRateFixture(
+      context,
+      'first',
       '2026-08-01T00:00:00.000Z',
     )
     const artifact =
@@ -226,9 +150,9 @@ describe('Workspace Search migration rehearsal target audit', () => {
         {
           audit,
           context,
-          integrityBefore,
+          integrity: live.integrity,
           purpose: 'partial-rollback-preimage',
-          rate: createRateInput(context, 'first'),
+          rate: live.rate,
           terminal: null,
         },
         ownedKey,
@@ -253,6 +177,13 @@ describe('Workspace Search migration rehearsal target audit', () => {
       evidenceKeyDigest:
         createHash('sha256').update(targetAuditKey).digest('hex'),
       terminal: null,
+      integrity: {
+        kind:
+          'mukuroji-workspace-search-migration-rehearsal-rate-bound-integrity-result',
+        version: 1,
+        policyVersion: targetAuditPolicyVersion,
+        configurationBindingDigest: context.configurationBindingDigest,
+      },
       aggregate: {
         scanned: 2,
         owned: 1,
@@ -264,6 +195,7 @@ describe('Workspace Search migration rehearsal target audit', () => {
       },
     })
     for (const forbidden of [
+      'integrityBefore',
       'workspace-1',
       'table-workspace-search',
       'runId',
@@ -273,16 +205,18 @@ describe('Workspace Search migration rehearsal target audit', () => {
     }
     const replayKey = new Uint8Array(targetAuditKey)
     const replayPublicationKey = new Uint8Array(targetAuditPublicationKey)
-    const replayIntegrityBefore = await createIntegrityPreimageCapability(
+    const replayLive = await createTargetAuditIntegrityRateFixture(
+      context,
+      'first-replay',
       '2026-08-01T00:00:00.000Z',
     )
     expect(() => finalizeWorkspaceSearchMigrationRehearsalTargetAuditArtifact(
       {
         audit,
         context,
-        integrityBefore: replayIntegrityBefore,
+        integrity: replayLive.integrity,
         purpose: 'partial-rollback-preimage',
-        rate: createRateInput(context, 'first-replay'),
+        rate: replayLive.rate,
         terminal: null,
       },
       replayKey,
@@ -290,6 +224,72 @@ describe('Workspace Search migration rehearsal target audit', () => {
     )).toThrow('Workspace Search migration rehearsal target audit failed.')
     expect(isZeroized(replayKey)).toBe(true)
     expect(isZeroized(replayPublicationKey)).toBe(true)
+  })
+
+  test('requires one genuine uncloned rate-bound result and rejects replay', async () => {
+    const observedAt = '2026-08-01T00:00:00.000Z'
+    const audit = await collectWithPages(
+      [{ items: [] }],
+      observedAt,
+      'rate-bound-capability',
+    )
+    const context = createTargetContext(
+      'partial-apply-rollback',
+      'rate-bound-capability',
+    )
+    const live = await createTargetAuditIntegrityRateFixture(
+      context,
+      'rate-bound-capability',
+      observedAt,
+    )
+    for (const integrity of [
+      structuredClone(live.integrity),
+      { ...live.integrity },
+    ]) {
+      const runtimeKey = new Uint8Array(targetAuditKey)
+      const publicationKey = new Uint8Array(targetAuditPublicationKey)
+      expect(() =>
+        finalizeWorkspaceSearchMigrationRehearsalTargetAuditArtifact(
+          {
+            audit,
+            context,
+            integrity,
+            purpose: 'partial-rollback-preimage',
+            rate: live.rate,
+            terminal: null,
+          },
+          runtimeKey,
+          publicationKey,
+        )).toThrow(
+          'Workspace Search migration rehearsal target audit failed.',
+        )
+      expect(isZeroized(runtimeKey)).toBe(true)
+      expect(isZeroized(publicationKey)).toBe(true)
+    }
+    finalizeWorkspaceSearchMigrationRehearsalTargetAuditArtifact(
+      {
+        audit,
+        context,
+        integrity: live.integrity,
+        purpose: 'partial-rollback-preimage',
+        rate: live.rate,
+        terminal: null,
+      },
+      new Uint8Array(targetAuditKey),
+      new Uint8Array(targetAuditPublicationKey),
+    )
+    expect(() => finalizeWorkspaceSearchMigrationRehearsalTargetAuditArtifact(
+      {
+        audit,
+        context,
+        integrity: live.integrity,
+        purpose: 'partial-rollback-preimage',
+        rate: live.rate,
+        terminal: null,
+      },
+      new Uint8Array(targetAuditKey),
+      new Uint8Array(targetAuditPublicationKey),
+    )).toThrow('Workspace Search migration rehearsal target audit failed.')
   })
 
   test('authenticates one canonical artifact into an immutable exact binding', async () => {
@@ -325,6 +325,11 @@ describe('Workspace Search migration rehearsal target audit', () => {
     expect(Object.isFrozen(binding)).toBe(true)
     expect(Object.isFrozen(binding.terminal)).toBe(true)
     expect(Object.isFrozen(binding.aggregate)).toBe(true)
+    expect(binding.integrity.predecessor).toEqual(binding.rate.predecessor)
+    expect(binding.integrity.segment).toEqual(binding.rate.successor)
+    expect(binding.integrity.interval.firstEventSequence).toBeGreaterThanOrEqual(
+      binding.rate.successor.firstEventSequence,
+    )
     expect(binding).toMatchObject({
       contentDigest: artifact.contentDigest,
       byteLength: artifact.byteLength,
@@ -366,7 +371,7 @@ describe('Workspace Search migration rehearsal target audit', () => {
       'contentDigest',
       'context',
       'evidenceKeyDigest',
-      'integrityBefore',
+      'integrity',
       'observationDigest',
       'observedAt',
       'purpose',
@@ -378,7 +383,7 @@ describe('Workspace Search migration rehearsal target audit', () => {
     ])
   })
 
-  test('rejects target reads that cross a terminal or begin before their integrity preimage', async () => {
+  test('rejects target reads that cross a terminal or finish before their live integrity result', async () => {
     for (const targetStartedAt of [
       partialTerminal.terminalAt,
       '2026-08-01T00:44:59.000Z',
@@ -395,13 +400,19 @@ describe('Workspace Search migration rehearsal target audit', () => {
       )
       const runtimeKey = new Uint8Array(targetAuditKey)
       const publicationKey = new Uint8Array(targetAuditPublicationKey)
+      const live = await createTargetAuditIntegrityRateFixture(
+        context,
+        `restored-window:${targetStartedAt}`,
+        '2026-08-01T00:45:01.000Z',
+        { integrityStartedAt: partialTerminal.terminalAt },
+      )
       expect(() => finalizeWorkspaceSearchMigrationRehearsalTargetAuditArtifact(
         {
           audit,
           context,
-          integrityBefore: null,
+          integrity: live.integrity,
           purpose: 'partial-rollback-restored',
-          rate: createRateInput(context, `restored-window:${targetStartedAt}`),
+          rate: live.rate,
           terminal: partialTerminal,
         },
         runtimeKey,
@@ -421,8 +432,14 @@ describe('Workspace Search migration rehearsal target audit', () => {
       'partial-apply-rollback',
       'integrity-target-window',
     )
-    const lateIntegrityBefore = await createIntegrityPreimageCapability(
-      '2026-08-01T00:00:05.000Z',
+    const lateLive = await createTargetAuditIntegrityRateFixture(
+      preimageContext,
+      'integrity-target-window',
+      '2026-08-01T00:00:10.000Z',
+      {
+        integrityStartedAt: '2026-08-01T00:00:09.000Z',
+        integrityCompletedAt: '2026-08-01T00:00:11.000Z',
+      },
     )
     const runtimeKey = new Uint8Array(targetAuditKey)
     const publicationKey = new Uint8Array(targetAuditPublicationKey)
@@ -430,9 +447,9 @@ describe('Workspace Search migration rehearsal target audit', () => {
       {
         audit: preimageAudit,
         context: preimageContext,
-        integrityBefore: lateIntegrityBefore,
+        integrity: lateLive.integrity,
         purpose: 'partial-rollback-preimage',
-        rate: createRateInput(preimageContext, 'integrity-target-window'),
+        rate: lateLive.rate,
         terminal: null,
       },
       runtimeKey,
@@ -503,6 +520,38 @@ describe('Workspace Search migration rehearsal target audit', () => {
       expect(isZeroized(verificationKey)).toBe(true)
       expect(isZeroized(publicationVerificationKey)).toBe(true)
     }
+
+    const innerTamperedBytes = rewrapTargetAuditFixture(
+      artifacts.partialPreimage.canonicalBytes,
+      (document) => {
+        const integrity = requireTargetAuditFixtureRecord(
+          document.integrity,
+        )
+        return {
+          ...document,
+          integrity: {
+            ...integrity,
+            bindingMac: digest('forged-inner-integrity-binding'),
+          },
+        }
+      },
+    )
+    expect(() =>
+      authenticateWorkspaceSearchMigrationRehearsalTargetAuditArtifact(
+        {
+          artifactBytes: innerTamperedBytes,
+          expectedContext: createTargetContext(
+            'partial-apply-rollback',
+            'partial-session',
+          ),
+          purpose: 'partial-rollback-preimage',
+          terminal: null,
+        },
+        new Uint8Array(targetAuditKey),
+        new Uint8Array(targetAuditPublicationKey),
+      )).toThrow(
+        'Workspace Search migration rehearsal target audit failed.',
+      )
 
     const foreignKey = new Uint8Array(32).fill(92)
     const validPublicationKey = new Uint8Array(targetAuditPublicationKey)
@@ -589,14 +638,14 @@ describe('Workspace Search migration rehearsal target audit', () => {
       expect(binding.rate).toEqual(fixture.authenticatedBinding.rate)
       expect(binding.contextDigest).toBe(createMigrationDigest({
         kind: 'workspace-search-migration-rehearsal-target-preimage-context',
-        version: 1,
+        version: 2,
         context: fixture.authenticatedBinding.context,
       }))
       const { bindingDigest, ...bindingWithoutDigest } = binding
       expect(bindingDigest).toBe(createMigrationDigest({
         kind:
           'workspace-search-migration-rehearsal-target-preimage-evidence-binding',
-        version: 1,
+        version: 2,
         binding: bindingWithoutDigest,
       }))
       expect(
@@ -752,7 +801,7 @@ describe('Workspace Search migration rehearsal target audit', () => {
     })
     expectTargetPreimageGateFailure({
       ...fixture.input,
-      commitGateObservedAt: '2026-08-02T23:59:59.999Z',
+      commitGateObservedAt: '2026-08-01T00:00:00.999Z',
     })
     expectTargetPreimageGateFailure({
       ...fixture.input,
@@ -768,16 +817,13 @@ describe('Workspace Search migration rehearsal target audit', () => {
       },
     })
 
-    const integrityBefore = fixture.authenticatedBinding.integrityBefore
-    if (integrityBefore === null) {
-      throw new Error('Expected a live target-preimage integrity result.')
-    }
+    const integrity = fixture.authenticatedBinding.integrity
     const equalityCapability =
       finalizeWorkspaceSearchMigrationRehearsalTargetPreimageEvidence(
         {
           ...fixture.input,
           expectedPlanningReceiptCompletedAt:
-            integrityBefore.runtimeProvenance.startedAt,
+            integrity.result.runtimeProvenance.startedAt,
           commitGateObservedAt:
             fixture.authenticatedBinding.rate.completedAt,
         },
@@ -890,7 +936,9 @@ describe('Workspace Search migration rehearsal target audit', () => {
       'partial-apply-rollback',
       'shared-session',
     )
-    const integrityBefore = await createIntegrityPreimageCapability(
+    const live = await createTargetAuditIntegrityRateFixture(
+      context,
+      'wrong-runtime-key',
       '2026-08-01T00:00:00.000Z',
     )
 
@@ -898,9 +946,9 @@ describe('Workspace Search migration rehearsal target audit', () => {
       {
         audit,
         context,
-        integrityBefore,
+        integrity: live.integrity,
         purpose: 'partial-rollback-preimage',
-        rate: createRateInput(context, 'wrong-runtime-key'),
+        rate: live.rate,
         terminal: null,
       },
       foreignKey,
@@ -923,20 +971,19 @@ describe('Workspace Search migration rehearsal target audit', () => {
     const runtimeSigningKey = new Uint8Array(targetAuditKey)
     const publicationSigningKey =
       new Uint8Array(targetAuditPublicationKey)
-    const integrityBefore = await createIntegrityPreimageCapability(
+    const foreignLive = await createTargetAuditIntegrityRateFixture(
+      context,
+      'foreign-rate-key',
       '2026-08-01T00:00:00.000Z',
+      { rateAuthenticationKey: new Uint8Array(32).fill(92) },
     )
     expect(() => finalizeWorkspaceSearchMigrationRehearsalTargetAuditArtifact(
       {
         audit,
         context,
-        integrityBefore,
+        integrity: foreignLive.integrity,
         purpose: 'partial-rollback-preimage',
-        rate: createRateInput(
-          context,
-          'foreign-rate-key',
-          new Uint8Array(32).fill(92),
-        ),
+        rate: foreignLive.rate,
         terminal: null,
       },
       runtimeSigningKey,
@@ -956,13 +1003,16 @@ describe('Workspace Search migration rehearsal target audit', () => {
       'partial-apply-rollback',
       'foreign-rate-wrapper',
     )
+    const foreignWrapperLive =
+      await createTargetAuditIntegrityRateFixture(
+        validContext,
+        'foreign-rate-wrapper:foreign',
+        '2026-08-01T00:00:00.000Z',
+        { rateAuthenticationKey: new Uint8Array(32).fill(92) },
+      )
     const foreignRate =
       finalizeWorkspaceSearchMigrationRehearsalRateSegmentEvidence(
-        createRateInput(
-          validContext,
-          'foreign-rate-wrapper:foreign',
-          new Uint8Array(32).fill(92),
-        ),
+        foreignWrapperLive.rate,
       )
     const maliciousArtifact = rewrapTargetAuditWithRate(
       validArtifact.canonicalBytes,
@@ -993,16 +1043,18 @@ describe('Workspace Search migration rehearsal target audit', () => {
       'shared-session',
     )
     const aliasedSigningKey = new Uint8Array(targetAuditKey)
-    const aliasedIntegrityBefore = await createIntegrityPreimageCapability(
+    const aliasedLive = await createTargetAuditIntegrityRateFixture(
+      context,
+      'aliased-signing-key',
       '2026-08-01T00:00:00.000Z',
     )
     expect(() => finalizeWorkspaceSearchMigrationRehearsalTargetAuditArtifact(
       {
         audit,
         context,
-        integrityBefore: aliasedIntegrityBefore,
+        integrity: aliasedLive.integrity,
         purpose: 'partial-rollback-preimage',
-        rate: createRateInput(context, 'aliased-signing-key'),
+        rate: aliasedLive.rate,
         terminal: null,
       },
       aliasedSigningKey,
@@ -1012,16 +1064,18 @@ describe('Workspace Search migration rehearsal target audit', () => {
 
     const equalRuntimeSigningKey = new Uint8Array(targetAuditKey)
     const equalPublicationSigningKey = new Uint8Array(targetAuditKey)
-    const equalIntegrityBefore = await createIntegrityPreimageCapability(
+    const equalLive = await createTargetAuditIntegrityRateFixture(
+      context,
+      'equal-signing-keys',
       '2026-08-01T00:00:00.000Z',
     )
     expect(() => finalizeWorkspaceSearchMigrationRehearsalTargetAuditArtifact(
       {
         audit,
         context,
-        integrityBefore: equalIntegrityBefore,
+        integrity: equalLive.integrity,
         purpose: 'partial-rollback-preimage',
-        rate: createRateInput(context, 'equal-signing-keys'),
+        rate: equalLive.rate,
         terminal: null,
       },
       equalRuntimeSigningKey,
@@ -1094,7 +1148,9 @@ describe('Workspace Search migration rehearsal target audit', () => {
       const runtimeSigningKey = new Uint8Array(targetAuditKey)
       const publicationSigningKey =
         new Uint8Array(targetAuditPublicationKey)
-      const integrityBefore = await createIntegrityPreimageCapability(
+      const live = await createTargetAuditIntegrityRateFixture(
+        candidate,
+        `attribution-drift:${index}`,
         '2026-08-01T00:00:00.000Z',
       )
       expect(() =>
@@ -1102,9 +1158,9 @@ describe('Workspace Search migration rehearsal target audit', () => {
           {
             audit,
             context: candidate,
-            integrityBefore,
+            integrity: live.integrity,
             purpose: 'partial-rollback-preimage',
-            rate: createRateInput(candidate, `attribution-drift:${index}`),
+            rate: live.rate,
             terminal: null,
           },
           runtimeSigningKey,
@@ -1502,6 +1558,9 @@ function createTargetContext(
     requestedResourcesBinding: digest(`requested-resources:${label}`),
     configurationBindingDigest:
       createWorkspaceSearchConfigurationHash(configuration),
+    policyVersion: targetAuditPolicyVersion,
+    integrityResourceIdentityDigest:
+      targetAuditIntegrityResourceIdentityDigest,
     planningReceiptDigest: digest(`planning-receipt:${label}`),
     executionBoundaryDigest: digest(`execution-boundary:${label}`),
     sealedPlanningAuthorityDigest: digest(`sealed-authority:${label}`),
@@ -1613,7 +1672,7 @@ function rewrapTargetAuditFixture(
   }
   const runtimeMac = createHmac('sha256', targetAuditKey)
     .update(
-      'mukuroji-workspace-search-migration-rehearsal-target-audit-runtime-mac/v3\n',
+      'mukuroji-workspace-search-migration-rehearsal-target-audit-runtime-mac/v4\n',
       'utf8',
     )
     .update(serializeCanonicalJson(runtimeUnsigned), 'utf8')
@@ -1632,7 +1691,7 @@ function rewrapTargetAuditFixture(
     targetAuditPublicationKey,
   )
     .update(
-      'mukuroji-workspace-search-migration-rehearsal-target-audit-publication-mac/v3\n',
+      'mukuroji-workspace-search-migration-rehearsal-target-audit-publication-mac/v4\n',
       'utf8',
     )
     .update(serializeCanonicalJson(publicationUnsigned), 'utf8')
@@ -1644,144 +1703,6 @@ function rewrapTargetAuditFixture(
       publicationMac,
     },
   }))
-}
-
-/** Creates one canonical HMAC-authenticated empty rate-segment header. */
-function createRateHeaderBytes(
-  payload: object,
-  authenticationKey: Uint8Array,
-): Uint8Array {
-  const mac = createHmac('sha256', authenticationKey)
-    .update(
-      'mukuroji:workspace-search-migration:rehearsal-rate-record:v1',
-      'utf8',
-    )
-    .update('\0', 'utf8')
-    .update(serializeCanonicalJson(payload), 'utf8')
-    .digest('hex')
-  return new TextEncoder().encode(
-    `${serializeCanonicalJson({ ...payload, mac })}\n`,
-  )
-}
-
-/** Concatenates canonical LF-terminated rate records without aliases. */
-function concatenateRateRecords(
-  first: Uint8Array,
-  second: Uint8Array,
-): Uint8Array {
-  const combined = new Uint8Array(first.byteLength + second.byteLength)
-  combined.set(first, 0)
-  combined.set(second, first.byteLength)
-  return combined
-}
-
-/** Reads the exact MAC from one test-only canonical header record. */
-function readRateHeaderMac(bytes: Uint8Array): string {
-  const value: unknown = JSON.parse(new TextDecoder().decode(bytes))
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error('Invalid rate header fixture.')
-  }
-  const descriptor = Object.getOwnPropertyDescriptor(value, 'mac')
-  if (descriptor === undefined || typeof descriptor.value !== 'string') {
-    throw new Error('Missing rate header fixture MAC.')
-  }
-  return descriptor.value
-}
-
-/** Creates one fresh auxiliary rate proof bound to the target context. */
-function createRateInput(
-  context: WorkspaceSearchMigrationRehearsalTargetAuditContext,
-  label: string,
-  authenticationKey: Uint8Array = new Uint8Array(targetAuditKey),
-): FinalizeWorkspaceSearchMigrationRehearsalRateSegmentEvidenceInput {
-  const authenticationKeyFingerprint =
-    createWorkspaceSearchMigrationRehearsalRateAuthenticationKeyFingerprint(
-      authenticationKey,
-    )
-  const policyVersion = digest(`rate-policy:${label}`)
-  const predecessorOrdinal =
-    (Number.parseInt(digest(label).slice(0, 2), 16) % 120) * 2
-  const predecessorPayload = Object.freeze({
-    kind:
-      'mukuroji-workspace-search-migration-rehearsal-describe-table-rate-segment',
-    version: 1,
-    segmentLocatorDigest: digest(`rate-predecessor:${label}`),
-    segmentOrdinal: predecessorOrdinal,
-    previousSegmentDigest: predecessorOrdinal === 0
-      ? null
-      : digest(`rate-prior-segment:${label}`),
-    previousRecordMac: predecessorOrdinal === 0
-      ? null
-      : digest(`rate-prior-mac:${label}`),
-    firstEventSequence: 1,
-    anchorUtc: '2026-08-01T00:00:00.000Z',
-    authenticationKeyFingerprint,
-    policyVersion,
-    configurationBindingDigest: context.configurationBindingDigest,
-  })
-  const predecessorHeaderBytes = createRateHeaderBytes(
-    predecessorPayload,
-    authenticationKey,
-  )
-  const predecessorEventBytes = createRateHeaderBytes(
-    Object.freeze({
-      kind: 'cadence-wait',
-      version: 1,
-      eventSequence: 1,
-      offsetMilliseconds: 1,
-      previousRecordMac: readRateHeaderMac(predecessorHeaderBytes),
-      phase: 'reconciliation',
-      delayMilliseconds: 1,
-    }),
-    authenticationKey,
-  )
-  const predecessorSegmentBytes = concatenateRateRecords(
-    predecessorHeaderBytes,
-    predecessorEventBytes,
-  )
-  const successorPayload = Object.freeze({
-    kind:
-      'mukuroji-workspace-search-migration-rehearsal-describe-table-rate-segment',
-    version: 1,
-    segmentLocatorDigest: digest(`rate-successor:${label}`),
-    segmentOrdinal: predecessorOrdinal + 1,
-    previousSegmentDigest: createHash('sha256')
-      .update(predecessorSegmentBytes)
-      .digest('hex'),
-    previousRecordMac: readRateHeaderMac(predecessorEventBytes),
-    firstEventSequence: 2,
-    anchorUtc: '2026-08-02T00:00:00.000Z',
-    authenticationKeyFingerprint,
-    policyVersion,
-    configurationBindingDigest: context.configurationBindingDigest,
-  })
-  const successorSegmentBytes = createRateHeaderBytes(
-    successorPayload,
-    authenticationKey,
-  )
-  return Object.freeze({
-    verifiedSuccessor:
-      verifyWorkspaceSearchMigrationRehearsalRateSegmentSuccessor({
-        predecessorSegmentBytes,
-        successorSegmentBytes,
-        authenticationKey,
-        expectedPolicyVersion: policyVersion,
-        expectedConfigurationBindingDigest:
-          context.configurationBindingDigest,
-      }),
-    durableEvidence: Object.freeze({
-      version: 1,
-      policyVersion,
-      attemptCount: 1,
-      forfeitedAttemptCount: 0,
-      throttleCount: 0,
-      budgetStopCount: 0,
-      cadenceWaitCount: 0,
-      cadenceWaitMilliseconds: 0,
-      maximumInFlight: 1,
-    }),
-    completedAt: '2026-08-03T00:00:00.000Z',
-  })
 }
 
 /** Creates all four correctly bound authenticated target-audit artifacts. */
@@ -1840,16 +1761,23 @@ async function createArtifact(
     ? 'partial-apply-rollback'
     : 'complete-apply-rollback'
   const context = createTargetContext(scenario, sessionLabel)
-  const rate = createRateInput(
+  const live = await createTargetAuditIntegrityRateFixture(
     context,
     `${sessionLabel}:${purpose}:${observedAt}`,
+    observedAt,
   )
   let artifact: WorkspaceSearchMigrationRehearsalFinalizedTargetAuditArtifact
   if (purpose === 'partial-rollback-preimage') {
     if (terminal !== null) throw new Error('Invalid preimage fixture terminal.')
-    const integrityBefore = await createIntegrityPreimageCapability(observedAt)
     artifact = finalizeWorkspaceSearchMigrationRehearsalTargetAuditArtifact(
-      { audit, context, integrityBefore, purpose, rate, terminal },
+      {
+        audit,
+        context,
+        integrity: live.integrity,
+        purpose,
+        rate: live.rate,
+        terminal,
+      },
       signingKey,
       publicationSigningKey,
     )
@@ -1858,15 +1786,28 @@ async function createArtifact(
       throw new Error('Invalid partial-rollback fixture terminal.')
     }
     artifact = finalizeWorkspaceSearchMigrationRehearsalTargetAuditArtifact(
-      { audit, context, integrityBefore: null, purpose, rate, terminal },
+      {
+        audit,
+        context,
+        integrity: live.integrity,
+        purpose,
+        rate: live.rate,
+        terminal,
+      },
       signingKey,
       publicationSigningKey,
     )
   } else if (purpose === 'complete-rollback-preimage') {
     if (terminal !== null) throw new Error('Invalid preimage fixture terminal.')
-    const integrityBefore = await createIntegrityPreimageCapability(observedAt)
     artifact = finalizeWorkspaceSearchMigrationRehearsalTargetAuditArtifact(
-      { audit, context, integrityBefore, purpose, rate, terminal },
+      {
+        audit,
+        context,
+        integrity: live.integrity,
+        purpose,
+        rate: live.rate,
+        terminal,
+      },
       signingKey,
       publicationSigningKey,
     )
@@ -1875,7 +1816,14 @@ async function createArtifact(
       throw new Error('Invalid complete-rollback fixture terminal.')
     }
     artifact = finalizeWorkspaceSearchMigrationRehearsalTargetAuditArtifact(
-      { audit, context, integrityBefore: null, purpose, rate, terminal },
+      {
+        audit,
+        context,
+        integrity: live.integrity,
+        purpose,
+        rate: live.rate,
+        terminal,
+      },
       signingKey,
       publicationSigningKey,
     )

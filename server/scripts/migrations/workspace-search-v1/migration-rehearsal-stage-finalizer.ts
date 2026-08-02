@@ -3381,7 +3381,7 @@ function deriveTerminalEvidence(
       : reconciliationIntegrity.before.resultDigest
   const integrityAfterResultDigest =
     reconciliationIntegrity.kind === 'verified-result'
-      ? reconciliationIntegrity.result.resultDigest
+      ? reconciliationIntegrity.result.result.resultDigest
       : reconciliationIntegrity.after.resultDigest
   const integrityComparisonDigest =
     reconciliationIntegrity.kind === 'verified-result'
@@ -3466,13 +3466,16 @@ function requireReconciliationArtifactMatchesTerminal(
 ): void {
   const verified = selection.entry.command === 'verify'
   const integrityResults = reconciliation.integrity.kind === 'verified-result'
-    ? [reconciliation.integrity.result]
+    ? [reconciliation.integrity.result.result]
     : [reconciliation.integrity.before, reconciliation.integrity.after]
   if (
     reconciliation.scenario !== selection.entry.scenario ||
     reconciliation.runLocatorDigest !== runLocatorDigest ||
     reconciliation.configurationBindingDigest !==
       selection.manifest.configurationBindingDigest ||
+    reconciliation.policyVersion !== selection.manifest.policyVersion ||
+    reconciliation.integrityResourceIdentityDigest !==
+      selection.manifest.integrityResourceIdentityDigest ||
     reconciliation.sealedPlanningAuthorityDigest !==
       terminal.sealedPlanningAuthorityDigest ||
     reconciliation.executionRunDigest !== terminal.executionRunDigest ||
@@ -3534,6 +3537,9 @@ function createReconciliationContextFromArtifact(
     scenario: reconciliation.scenario,
     runLocatorDigest: reconciliation.runLocatorDigest,
     configurationBindingDigest: reconciliation.configurationBindingDigest,
+    policyVersion: reconciliation.policyVersion,
+    integrityResourceIdentityDigest:
+      reconciliation.integrityResourceIdentityDigest,
     sealedPlanningAuthorityDigest:
       reconciliation.sealedPlanningAuthorityDigest,
     executionRunDigest: reconciliation.executionRunDigest,
@@ -3652,7 +3658,8 @@ function createTargetAuditContextFromValues(
     planning.requestedResourcesBinding !==
       manifest.requestedResourcesBinding ||
     planning.configurationBindingDigest !==
-      manifest.configurationBindingDigest
+      manifest.configurationBindingDigest ||
+    planning.policyVersion !== manifest.policyVersion
   ) return failStageFinalizer()
   return Object.freeze({
     scenario,
@@ -3661,6 +3668,9 @@ function createTargetAuditContextFromValues(
     permitDigest: manifest.permitDigest,
     requestedResourcesBinding: manifest.requestedResourcesBinding,
     configurationBindingDigest: manifest.configurationBindingDigest,
+    policyVersion: manifest.policyVersion,
+    integrityResourceIdentityDigest:
+      manifest.integrityResourceIdentityDigest,
     planningReceiptDigest: createMigrationDigest(planning),
     executionBoundaryDigest: planning.evidence.executionBoundaryDigest,
     sealedPlanningAuthorityDigest:

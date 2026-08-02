@@ -29,6 +29,9 @@ import type {
   WorkspaceSearchMigrationRehearsalFaultPlan,
 } from './migration-rehearsal-faults'
 import {
+  deriveWorkspaceSearchMigrationRehearsalKeys,
+} from './migration-rehearsal-key-derivation'
+import {
   readWorkspaceSearchMigrationRehearsalPrivateInputFile,
 } from './migration-rehearsal-private-input'
 import {
@@ -38,6 +41,9 @@ import {
   type WorkspaceSearchMigrationRehearsalSupportedSelectedStage,
   type WorkspaceSearchMigrationRehearsalStageFinalizationProof,
 } from './migration-rehearsal-stage-finalizer'
+import {
+  createAuthenticWorkspaceSearchMigrationRehearsalCommitGateFixture,
+} from './migration-rehearsal-suite-finalizer.test-fixture'
 import {
   createWorkspaceSearchMigrationRehearsalStageChildMaterialTestFixture,
   createWorkspaceSearchMigrationRehearsalStageFaultMaterialTestFixture,
@@ -59,6 +65,10 @@ import type {
   WorkspaceSearchMigrationRehearsalStageCommand,
   WorkspaceSearchMigrationRehearsalStageOutcome,
 } from './migration-rehearsal-stage-receipt'
+import {
+  authenticateWorkspaceSearchMigrationRehearsalTargetAuditArtifact,
+  type WorkspaceSearchMigrationRehearsalTargetAuditArtifactBinding,
+} from './migration-rehearsal-target-audit'
 
 /** Shared authenticated manifest fixture used for supported selections. */
 const childFixture =
@@ -74,6 +84,9 @@ const faultCompletionFixture =
 
 /** One valid authenticated receipt returned by the finite finalizer stub. */
 const outputReceipt = faultBoundaryFixture.previousReceipt
+
+/** CLI-compatible master key used by authentic migration fixtures. */
+const stageMasterAuthenticationKey = new Uint8Array(32).fill(0x37)
 
 /** Exact canonical UTF-8 encoder used by every file fixture. */
 const encoder = new TextEncoder()
@@ -639,8 +652,6 @@ function createProofArguments(
     return [
       '--target-preimage-audit-file',
       paths.targetPreimage,
-      '--target-audit-key-file',
-      paths.targetAuditKey,
     ]
   }
   return [
@@ -690,18 +701,21 @@ function createMaterialArguments(profile: MaterialProfile): string[] {
  *
  * @param requirement - Authenticated stage-derived proof profile.
  * @param materialProfile - Authenticated outcome-derived material profile.
+ * @param includePreviousReceipt - Whether to include the predecessor flag.
  * @returns Exact ordered offline finalizer argument vector.
  */
 function createCliArguments(
   requirement:
     WorkspaceSearchMigrationRehearsalStageFinalizerProofRequirement,
   materialProfile: MaterialProfile = 'success',
+  includePreviousReceipt = true,
 ): string[] {
   return [
     '--manifest-file',
     paths.manifest,
-    '--previous-receipt-file',
-    paths.previousReceipt,
+    ...(includePreviousReceipt
+      ? ['--previous-receipt-file', paths.previousReceipt]
+      : []),
     ...createMaterialArguments(materialProfile),
     '--lifecycle-file',
     paths.lifecycle,
@@ -724,15 +738,21 @@ function createCliArguments(
  *
  * @param selection - Authenticated supported stage returned after selection.
  * @param faultPlan - Canonical fault plan read before authenticated selection.
+ * @param previousReceipt - Candidate predecessor supplied by the optional file.
+ * @param targetPreimageBytes - Raw target audit returned by the private reader.
  * @returns Dependencies and retained observations for zeroization assertions.
  */
 function createCliHarness(
   selection: WorkspaceSearchMigrationRehearsalSupportedSelectedStage,
   faultPlan: unknown = faultBoundaryFixture.faultPlan,
+  previousReceipt: unknown = selection.entry.ordinal === 1
+    ? null
+    : outputReceipt,
+  targetPreimageBytes: Uint8Array = canonicalBytes({ target: 'preimage' }),
 ) {
   const files = new Map<string, Uint8Array>([
     [paths.manifest, canonicalBytes({ manifest: true })],
-    [paths.previousReceipt, canonicalBytes(null)],
+    [paths.previousReceipt, canonicalBytes(previousReceipt)],
     [paths.material, canonicalBytes({ material: true })],
     [paths.boundaryMaterial, canonicalBytes({ boundaryMaterial: true })],
     [paths.faultPlan, canonicalBytes(faultPlan)],
@@ -746,7 +766,7 @@ function createCliHarness(
       paths.reconciliationArtifact,
       canonicalBytes({ reconciliation: 'actual-artifact' }),
     ],
-    [paths.targetPreimage, canonicalBytes({ target: 'preimage' })],
+    [paths.targetPreimage, new Uint8Array(targetPreimageBytes)],
   ])
   const readerOwnedBuffers: Uint8Array[] = []
   const readerOwnedKeys: Uint8Array[] = []
@@ -760,11 +780,14 @@ function createCliHarness(
   const reconciliationArtifactCopies: Uint8Array[] = []
   const outputBufferReferences: Uint8Array[] = []
   const outputCopies: Uint8Array[] = []
+  const readPaths: string[] = []
+  const readKeyPaths: string[] = []
   const stdoutLines: string[] = []
   const stderrLines: string[] = []
   const dependencies:
     WorkspaceSearchMigrationRehearsalStageFinalizerCliDependencies = {
       readPrivateInputFile: async (path, maximumBytes) => {
+        readPaths.push(path)
         const source = files.get(path)
         if (source === undefined || source.byteLength > maximumBytes) {
           throw new Error('Private fixture is unavailable.')
@@ -774,13 +797,11 @@ function createCliHarness(
         return owned
       },
       readKeyFile: async (path) => {
-        if (
-          path !== paths.stageKey &&
-          path !== paths.targetAuditKey
-        ) throw new Error('Key fixture is unavailable.')
-        const owned = new Uint8Array(32).fill(
-          path === paths.stageKey ? 11 : 37,
-        )
+        readKeyPaths.push(path)
+        if (path !== paths.stageKey) {
+          throw new Error('Key fixture is unavailable.')
+        }
+        const owned = new Uint8Array(stageMasterAuthenticationKey)
         readerOwnedKeys.push(owned)
         return owned
       },
@@ -815,6 +836,8 @@ function createCliHarness(
     reconciliationArtifactCopies,
     outputBufferReferences,
     outputCopies,
+    readKeyPaths,
+    readPaths,
     readerOwnedBuffers,
     readerOwnedKeys,
     selectionInputs,
@@ -824,7 +847,7 @@ function createCliHarness(
 }
 
 describe('Workspace Search migration rehearsal stage finalizer CLI parser', () => {
-  test('accepts exactly the three material and four proof profiles', () => {
+  test('accepts each exact profile with or without the predecessor flag', () => {
     for (const materialProfile of [
       'success',
       'fault-boundary',
@@ -836,26 +859,35 @@ describe('Workspace Search migration rehearsal stage finalizer CLI parser', () =
         'complete-apply',
         'terminal',
       ] satisfies readonly WorkspaceSearchMigrationRehearsalStageFinalizerProofRequirement[]) {
-        const parsed =
-          parseWorkspaceSearchMigrationRehearsalStageFinalizerCliArguments(
-            createCliArguments(requirement, materialProfile),
+        for (const includePreviousReceipt of [true, false]) {
+          const parsed =
+            parseWorkspaceSearchMigrationRehearsalStageFinalizerCliArguments(
+              createCliArguments(
+                requirement,
+                materialProfile,
+                includePreviousReceipt,
+              ),
+            )
+          expect(parsed.previousReceiptFile).toBe(
+            includePreviousReceipt ? paths.previousReceipt : undefined,
           )
-        expect(parsed.materialKind).toBe(materialProfile)
-        expect(parsed.proofFiles.kind).toBe(requirement)
-        expect(parsed.outputFile).toBe(paths.output)
-        if (parsed.materialKind === 'fault-boundary') {
-          expect(parsed.faultPlanFile).toBe(paths.faultPlan)
-          expect(parsed.boundaryRateSegmentFile).toBe(
-            paths.boundaryRateSegment,
-          )
-        }
-        if (parsed.materialKind === 'fault-completion') {
-          expect(parsed.boundaryMaterialFile).toBe(paths.boundaryMaterial)
-          expect(parsed.faultPlanFile).toBe(paths.faultPlan)
-          expect(parsed.boundaryRateSegmentFile).toBe(
-            paths.boundaryRateSegment,
-          )
-          expect(parsed.finalRateSegmentFile).toBe(paths.finalRateSegment)
+          expect(parsed.materialKind).toBe(materialProfile)
+          expect(parsed.proofFiles.kind).toBe(requirement)
+          expect(parsed.outputFile).toBe(paths.output)
+          if (parsed.materialKind === 'fault-boundary') {
+            expect(parsed.faultPlanFile).toBe(paths.faultPlan)
+            expect(parsed.boundaryRateSegmentFile).toBe(
+              paths.boundaryRateSegment,
+            )
+          }
+          if (parsed.materialKind === 'fault-completion') {
+            expect(parsed.boundaryMaterialFile).toBe(paths.boundaryMaterial)
+            expect(parsed.faultPlanFile).toBe(paths.faultPlan)
+            expect(parsed.boundaryRateSegmentFile).toBe(
+              paths.boundaryRateSegment,
+            )
+            expect(parsed.finalRateSegmentFile).toBe(paths.finalRateSegment)
+          }
         }
       }
     }
@@ -903,6 +935,12 @@ describe('Workspace Search migration rehearsal stage finalizer CLI parser', () =
 
   test('rejects reordering, extras, aliases, derived claims, and bad approval', () => {
     const valid = createCliArguments('none')
+    const completeApply = createCliArguments('complete-apply')
+    const withoutPreviousReceipt = createCliArguments(
+      'none',
+      'success',
+      false,
+    )
     const reordered = [...valid]
     const firstFlag = reordered[0]
     const secondFlag = reordered[2]
@@ -913,6 +951,9 @@ describe('Workspace Search migration rehearsal stage finalizer CLI parser', () =
     reordered[2] = firstFlag
     const aliased = valid.map((value) =>
       value === paths.output ? paths.manifest : value
+    )
+    const aliasedTargetPreimage = completeApply.map((value) =>
+      value === paths.targetPreimage ? paths.stageKey : value
     )
     const badApproval = valid.map((value) =>
       value ===
@@ -926,13 +967,36 @@ describe('Workspace Search migration rehearsal stage finalizer CLI parser', () =
       'a'.repeat(64),
       ...valid.slice(-4),
     ]
+    const lifecycleOffset = withoutPreviousReceipt.indexOf('--lifecycle-file')
+    if (lifecycleOffset < 0) throw new Error('Missing lifecycle fixture flag.')
+    const misplacedPreviousReceipt = [
+      ...withoutPreviousReceipt.slice(0, lifecycleOffset),
+      '--previous-receipt-file',
+      paths.previousReceipt,
+      ...withoutPreviousReceipt.slice(lifecycleOffset),
+    ]
+    const targetPreimageOffset = completeApply.indexOf(
+      '--target-preimage-audit-file',
+    )
+    if (targetPreimageOffset < 0) {
+      throw new Error('Missing target-preimage fixture flag.')
+    }
+    const legacyTargetAuditKey = [
+      ...completeApply.slice(0, targetPreimageOffset + 2),
+      '--target-audit-key-file',
+      paths.targetAuditKey,
+      ...completeApply.slice(targetPreimageOffset + 2),
+    ]
     for (const invalid of [
       valid.slice(0, -1),
       [...valid, '--extra'],
       reordered,
       aliased,
+      aliasedTargetPreimage,
       badApproval,
       derivedClaim,
+      misplacedPreviousReceipt,
+      legacyTargetAuditKey,
     ]) {
       expect(() =>
         parseWorkspaceSearchMigrationRehearsalStageFinalizerCliArguments(
@@ -967,6 +1031,204 @@ describe('Workspace Search migration rehearsal stage proof requirements', () => 
 })
 
 describe('Workspace Search migration rehearsal stage finalizer CLI', () => {
+  test('derives an internal null predecessor when global stage one omits the flag', async () => {
+    const selection = createSupportedSelection({
+      scenario: 'happy-path-verified',
+      command: 'close-replan',
+      proofKind: 'planning',
+      requirement: 'none',
+    })
+    expect(selection.entry.ordinal).toBe(1)
+    const harness = createCliHarness(selection)
+
+    expect(await runWorkspaceSearchMigrationRehearsalStageFinalizerCli(
+      createCliArguments('none', 'success', false),
+      harness.dependencies,
+    )).toBe(0)
+
+    expect(harness.readPaths).not.toContain(paths.previousReceipt)
+    expect(harness.selectionInputs).toHaveLength(1)
+    expect(harness.selectionInputs[0]?.previousReceipt).toBeNull()
+    expect(harness.finalizerInputs).toHaveLength(1)
+    expect(harness.finalizerInputs[0]?.previousReceipt).toBeNull()
+  })
+
+  test('rejects an omitted predecessor after an authenticated later-stage selection', async () => {
+    const selection = createSupportedSelection({
+      scenario: 'happy-path-verified',
+      command: 'apply',
+      proofKind: 'apply',
+      requirement: 'none',
+    })
+    expect(selection.entry.ordinal).toBe(2)
+    const harness = createCliHarness(selection)
+
+    expect(await runWorkspaceSearchMigrationRehearsalStageFinalizerCli(
+      createCliArguments('none', 'success', false),
+      harness.dependencies,
+    )).toBe(2)
+
+    expect(harness.readPaths).not.toContain(paths.previousReceipt)
+    expect(harness.selectionInputs).toHaveLength(1)
+    expect(harness.selectionInputs[0]?.previousReceipt).toBeNull()
+    expect(harness.finalizerInputs).toEqual([])
+    expect(harness.stdoutLines).toEqual([])
+    expect(harness.stderrLines).toEqual([
+      serializeCanonicalJson({
+        kind:
+          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_FINALIZER_CLI_RESULT_KIND,
+        status: 'error',
+        code: 'UNSUPPORTED_STAGE',
+      }),
+    ])
+  })
+
+  test('rejects a non-null predecessor for authenticated global stage one', async () => {
+    const selection = createSupportedSelection({
+      scenario: 'happy-path-verified',
+      command: 'close-replan',
+      proofKind: 'planning',
+      requirement: 'none',
+    })
+    expect(selection.entry.ordinal).toBe(1)
+    const harness = createCliHarness(
+      selection,
+      faultBoundaryFixture.faultPlan,
+      outputReceipt,
+    )
+
+    expect(await runWorkspaceSearchMigrationRehearsalStageFinalizerCli(
+      createCliArguments('none'),
+      harness.dependencies,
+    )).toBe(2)
+
+    expect(harness.selectionInputs).toHaveLength(1)
+    expect(harness.selectionInputs[0]?.previousReceipt).toEqual(outputReceipt)
+    expect(harness.finalizerInputs).toEqual([])
+    expect(harness.stdoutLines).toEqual([])
+    expect(harness.stderrLines).toEqual([
+      serializeCanonicalJson({
+        kind:
+          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_FINALIZER_CLI_RESULT_KIND,
+        status: 'error',
+        code: 'UNSUPPORTED_STAGE',
+      }),
+    ])
+  })
+
+  test('authenticates a genuine target audit with the derived runtime key', async () => {
+    const targetFixture =
+      createAuthenticWorkspaceSearchMigrationRehearsalCommitGateFixture(
+        'target-preimage',
+      )
+    if (targetFixture.kind !== 'target-preimage') {
+      throw new Error('Expected a target-preimage fixture.')
+    }
+    const entry = targetFixture.selection.manifest.entries.find(
+      (candidate) =>
+        candidate.scenario === 'complete-apply-rollback' &&
+        candidate.command === 'apply',
+    )
+    if (entry === undefined) {
+      throw new Error('Missing complete-rollback apply fixture entry.')
+    }
+    const selectedStage: WorkspaceSearchMigrationRehearsalSelectedStage =
+      Object.freeze({
+        manifest: targetFixture.selection.manifest,
+        manifestDigest: createMigrationDigest(
+          targetFixture.selection.manifest,
+        ),
+        entry,
+        previousStageReceiptDigest:
+          createMigrationDigest(targetFixture.receipt),
+      })
+    if (!isWorkspaceSearchMigrationRehearsalGenericSuccessSelectedStage(
+      selectedStage,
+    )) throw new Error('Expected a supported complete-apply selection.')
+    const harness = createCliHarness(
+      selectedStage,
+      faultBoundaryFixture.faultPlan,
+      targetFixture.receipt,
+      targetFixture.artifactBytes,
+    )
+    const runtimeAuthenticationKeyCopies: Uint8Array[] = []
+    const targetVerificationKeyCopies: Uint8Array[] = []
+    const authenticatedBindings:
+      WorkspaceSearchMigrationRehearsalTargetAuditArtifactBinding[] = []
+    let proofUsesFreshRuntimeKeyCopy = false
+    const dependencies:
+      WorkspaceSearchMigrationRehearsalStageFinalizerCliDependencies =
+        Object.freeze({
+          ...harness.dependencies,
+          finalizeStageReceipt: (input) => {
+            if (
+              input.proof.kind !== 'apply' ||
+              input.proof.targetPreimageAudit === null
+            ) throw new Error('Expected complete-apply target proof.')
+            proofUsesFreshRuntimeKeyCopy =
+              input.proof.targetPreimageAudit.verificationKey !==
+                input.runtimeAuthenticationKey
+            runtimeAuthenticationKeyCopies.push(
+              new Uint8Array(input.runtimeAuthenticationKey),
+            )
+            targetVerificationKeyCopies.push(
+              new Uint8Array(
+                input.proof.targetPreimageAudit.verificationKey,
+              ),
+            )
+            const expectedArtifact = targetFixture.finalizationInput.artifact
+            authenticatedBindings.push(
+              authenticateWorkspaceSearchMigrationRehearsalTargetAuditArtifact(
+                {
+                  artifactBytes:
+                    input.proof.targetPreimageAudit.artifactBytes,
+                  expectedContext: expectedArtifact.expectedContext,
+                  purpose: expectedArtifact.purpose,
+                  terminal: expectedArtifact.terminal,
+                },
+                input.proof.targetPreimageAudit.verificationKey,
+                input.publicationAuthenticationKey,
+              ),
+            )
+            return harness.dependencies.finalizeStageReceipt(input)
+          },
+        })
+
+    expect(await runWorkspaceSearchMigrationRehearsalStageFinalizerCli(
+      createCliArguments('complete-apply'),
+      dependencies,
+    )).toBe(0)
+
+    const expectedKeys = deriveWorkspaceSearchMigrationRehearsalKeys(
+      new Uint8Array(stageMasterAuthenticationKey),
+    )
+    expect(harness.readKeyPaths).toEqual([paths.stageKey])
+    expect(proofUsesFreshRuntimeKeyCopy).toBe(true)
+    expect(runtimeAuthenticationKeyCopies).toEqual([
+      expectedKeys.runtimeKey,
+    ])
+    expect(targetVerificationKeyCopies).toEqual([
+      expectedKeys.runtimeKey,
+    ])
+    expect(targetVerificationKeyCopies[0]).toEqual(
+      runtimeAuthenticationKeyCopies[0],
+    )
+    expect(targetVerificationKeyCopies[0]).not.toEqual(
+      stageMasterAuthenticationKey,
+    )
+    expect(authenticatedBindings).toHaveLength(1)
+    expect(authenticatedBindings[0]?.contentDigest).toBe(
+      createHash('sha256')
+        .update(targetFixture.artifactBytes)
+        .digest('hex'),
+    )
+    expect(harness.stderrLines).toEqual([])
+    expectedKeys.runtimeKey.fill(0)
+    expectedKeys.publicationKey.fill(0)
+    targetFixture.runtimeAuthenticationKey.fill(0)
+    targetFixture.publicationAuthenticationKey.fill(0)
+  })
+
   for (const stageCase of supportedStageCases) {
     test(`derives proof and finalizes ${stageCase.scenario} ${stageCase.command}`, async () => {
       const selection = createSupportedSelection(stageCase)

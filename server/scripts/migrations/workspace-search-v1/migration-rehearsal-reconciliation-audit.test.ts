@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import { createHash, createHmac } from 'node:crypto'
 import {
+  consumeWorkspaceSearchMigrationRehearsalRateBoundIntegrityResult,
+  type WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult,
+} from './migration-rehearsal-integrity-rate-evidence'
+import {
   CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
   CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
   CROSS_DOMAIN_INTEGRITY_RESOURCE_TARGETS,
@@ -31,6 +35,7 @@ import {
   readWorkspaceSearchMigrationRehearsalFinalizedTerminalReconciliationEvidenceBinding,
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_SCENARIOS,
   WorkspaceSearchMigrationRehearsalFinalizedTerminalReconciliationEvidence,
+  type FinalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArtifactInput,
   type WorkspaceSearchMigrationRehearsalFinalizedReconciliationAuditArtifact,
   type WorkspaceSearchMigrationRehearsalReconciliationCollectorResult,
   type WorkspaceSearchMigrationRehearsalReconciliationCoreContext,
@@ -39,6 +44,15 @@ import {
   type WorkspaceSearchMigrationRehearsalReconciliationSourceTargetCollectorResult,
   type WorkspaceSearchMigrationRehearsalReconciliationTargetAuditPair,
 } from './migration-rehearsal-reconciliation-audit'
+import {
+  createTargetAuditIntegrityRateFixture,
+  targetAuditIntegrityResourceIdentityDigest,
+  targetAuditPolicyVersion,
+} from './migration-rehearsal-target-audit.test-fixture'
+import type {
+  WorkspaceSearchMigrationRehearsalTargetAuditContext,
+  WorkspaceSearchMigrationRehearsalTargetAuditTerminalBinding,
+} from './migration-rehearsal-target-audit'
 
 /** Fixed terminal publication instant used by all isolated test scenarios. */
 const terminalAt = '2026-08-01T00:00:10.000Z'
@@ -70,6 +84,11 @@ function publicationKey(): Uint8Array {
   return new Uint8Array(32).fill(74)
 }
 
+/** Adds a bounded per-run offset so batch integrity results stay unique. */
+function createFixtureObservedAt(base: string, ordinal: number): string {
+  return new Date(Date.parse(base) + ordinal % 400).toISOString()
+}
+
 /** Creates one canonical HMAC-authenticated empty rate-segment header. */
 function createRateHeaderBytes(
   payload: object,
@@ -77,7 +96,7 @@ function createRateHeaderBytes(
 ): Uint8Array {
   const mac = createHmac('sha256', authenticationKey)
     .update(
-      'mukuroji:workspace-search-migration:rehearsal-rate-record:v1',
+      'mukuroji:workspace-search-migration:rehearsal-rate-record:v2',
       'utf8',
     )
     .update('\0', 'utf8')
@@ -101,12 +120,12 @@ function createRateInput(
     createWorkspaceSearchMigrationRehearsalRateAuthenticationKeyFingerprint(
       authenticationKey,
     )
-  const policyVersion = digest('rate-policy')
+  const policyVersion = context.policyVersion
   const predecessorOrdinal = (ordinal % 120) * 2
   const predecessorPayload = Object.freeze({
     kind:
       'mukuroji-workspace-search-migration-rehearsal-describe-table-rate-segment',
-    version: 1,
+    version: 2,
     segmentLocatorDigest: digest(
       `rate-predecessor:${context.runLocatorDigest}:${ordinal}`,
     ),
@@ -137,7 +156,7 @@ function createRateInput(
   const successorPayload = Object.freeze({
     kind:
       'mukuroji-workspace-search-migration-rehearsal-describe-table-rate-segment',
-    version: 1,
+    version: 2,
     segmentLocatorDigest: digest(
       `rate-successor:${context.runLocatorDigest}:${ordinal}`,
     ),
@@ -167,12 +186,17 @@ function createRateInput(
           context.configurationBindingDigest,
       }),
     durableEvidence: Object.freeze({
-      version: 1,
+      version: 2,
       policyVersion,
       attemptCount: ordinal % 120 + 1,
       forfeitedAttemptCount: 0,
       throttleCount: 0,
+      awsServiceThrottleCount: 0,
+      rehearsalInjectedThrottleCount: 0,
       budgetStopCount: 0,
+      operationalBudgetStopCount: 0,
+      awsServiceThrottleBudgetStopCount: 0,
+      rehearsalInjectedBudgetStopCount: 0,
       cadenceWaitCount: 0,
       cadenceWaitMilliseconds: 0,
       maximumInFlight: 1,
@@ -181,45 +205,90 @@ function createRateInput(
   })
 }
 
-/** Creates authenticated target summaries retained by one rollback audit. */
-function createTargetAudits(
+/** Creates genuine v4 target summaries retained by one rollback audit. */
+async function createTargetAudits(
   context: WorkspaceSearchMigrationRehearsalReconciliationCoreContext,
   sourceTarget:
     WorkspaceSearchMigrationRehearsalReconciliationSourceTargetCollectorResult,
-  integrity:
-    WorkspaceSearchMigrationRehearsalReconciliationIntegrityCollectorResult,
   ordinal: number,
-): WorkspaceSearchMigrationRehearsalReconciliationTargetAuditPair | null {
-  if (isVerifiedScenario(context.scenario)) return null
-  if (integrity.kind !== 'rollback-comparison') {
-    throw new Error('Expected rollback integrity fixture.')
-  }
+): Promise<
+  WorkspaceSearchMigrationRehearsalReconciliationTargetAuditPair | null
+> {
+  if (context.scenario !== 'partial-apply-rollback' &&
+    context.scenario !== 'complete-apply-rollback') return null
   const purposePrefix = context.scenario === 'partial-apply-rollback'
     ? 'partial-rollback'
     : 'complete-rollback'
-  const contextDigest = digest(`target-context:${context.scenario}:${ordinal}`)
+  const targetContext: WorkspaceSearchMigrationRehearsalTargetAuditContext =
+    Object.freeze({
+      scenario: context.scenario,
+      runLocatorDigest: context.runLocatorDigest,
+      manifestDigest: digest(`manifest:${context.scenario}:${ordinal}`),
+      permitDigest: digest(`permit:${context.scenario}:${ordinal}`),
+      requestedResourcesBinding:
+        digest(`resources:${context.scenario}:${ordinal}`),
+      configurationBindingDigest: context.configurationBindingDigest,
+      policyVersion: context.policyVersion,
+      integrityResourceIdentityDigest:
+        context.integrityResourceIdentityDigest,
+      planningReceiptDigest:
+        digest(`planning-receipt:${context.scenario}:${ordinal}`),
+      executionBoundaryDigest: context.applyBoundaryDigest,
+      sealedPlanningAuthorityDigest:
+        context.sealedPlanningAuthorityDigest,
+      planDigest: context.planDigest,
+      writerFenceDigest: digest(`writer-fence:${context.scenario}:${ordinal}`),
+    })
+  const contextDigest = createMigrationDigest(targetContext)
+  const preimageFixture = await createTargetAuditIntegrityRateFixture(
+    targetContext,
+    `reconciliation:${context.scenario}:${ordinal}:preimage`,
+    createFixtureObservedAt('2026-08-01T00:00:05.000Z', ordinal),
+    { rateAuthenticationKey: key() },
+  )
+  const restoredFixture = await createTargetAuditIntegrityRateFixture(
+    targetContext,
+    `reconciliation:${context.scenario}:${ordinal}:restored`,
+    createFixtureObservedAt('2026-08-01T00:00:11.000Z', ordinal),
+    {
+      integrityStartedAt: '2026-08-01T00:00:10.001Z',
+      rateAuthenticationKey: key(),
+    },
+  )
+  const preimageIntegrity =
+    consumeWorkspaceSearchMigrationRehearsalRateBoundIntegrityResult(
+      preimageFixture.integrity,
+    )
+  const restoredIntegrity =
+    consumeWorkspaceSearchMigrationRehearsalRateBoundIntegrityResult(
+      restoredFixture.integrity,
+    )
   const preimageRate =
     finalizeWorkspaceSearchMigrationRehearsalRateSegmentEvidence(
-      createRateInput(
-        context,
-        ordinal * 3 + 1,
-        key(),
-        '2026-08-01T00:00:06.000Z',
-        '2026-08-01T00:00:03.000Z',
-        '2026-08-01T00:00:04.000Z',
-      ),
+      preimageFixture.rate,
     )
   const restoredRate =
     finalizeWorkspaceSearchMigrationRehearsalRateSegmentEvidence(
-      createRateInput(
-        context,
-        ordinal * 3 + 2,
-        key(),
-        '2026-08-01T00:00:12.000Z',
-        '2026-08-01T00:00:09.000Z',
-        '2026-08-01T00:00:10.000Z',
-      ),
+      restoredFixture.rate,
     )
+  const terminal: WorkspaceSearchMigrationRehearsalTargetAuditTerminalBinding =
+    context.scenario === 'partial-apply-rollback'
+      ? Object.freeze({
+          scenario: 'partial-apply-rollback',
+          kind: 'rolled-back',
+          version: 2,
+          rootDigest: context.terminalRootDigest,
+          applyStartedAt: '2026-08-01T00:00:07.000Z',
+          terminalAt: context.terminalAt,
+        })
+      : Object.freeze({
+          scenario: 'complete-apply-rollback',
+          kind: 'rolled-back',
+          version: 1,
+          rootDigest: context.terminalRootDigest,
+          applyStartedAt: '2026-08-01T00:00:07.000Z',
+          terminalAt: context.terminalAt,
+        })
   return Object.freeze({
     preimage: Object.freeze({
       purpose: `${purposePrefix}-preimage`,
@@ -230,7 +299,9 @@ function createTargetAudits(
       observationDigest: digest(`target-preimage-observation:${ordinal}`),
       aggregateDigest: sourceTarget.expectedAggregateDigest,
       contextDigest,
-      integrityBefore: integrity.before,
+      context: targetContext,
+      terminal: null,
+      integrity: preimageIntegrity,
       rate: preimageRate,
     }),
     restored: Object.freeze({
@@ -242,7 +313,9 @@ function createTargetAudits(
       observationDigest: digest(`target-restored-observation:${ordinal}`),
       aggregateDigest: sourceTarget.observedAggregateDigest,
       contextDigest,
-      integrityBefore: null,
+      context: targetContext,
+      terminal,
+      integrity: restoredIntegrity,
       rate: restoredRate,
     }),
   })
@@ -268,6 +341,9 @@ function createCoreContext(
     scenario,
     runLocatorDigest: digest(`run:${scenario}:${ordinal}`),
     configurationBindingDigest: digest(`configuration:${ordinal}`),
+    policyVersion: targetAuditPolicyVersion,
+    integrityResourceIdentityDigest:
+      targetAuditIntegrityResourceIdentityDigest,
     sealedPlanningAuthorityDigest: digest(`authority:${scenario}:${ordinal}`),
     executionRunDigest: digest(`execution:${scenario}:${ordinal}`),
     planDigest: digest(`plan:${scenario}:${ordinal}`),
@@ -435,12 +511,7 @@ function createCollector(
   return Object.freeze({
     context,
     integrity,
-    targetAudits: createTargetAudits(
-      context,
-      sourceTarget,
-      integrity,
-      ordinal,
-    ),
+    targetAudits: null,
     markerSummary: Object.freeze({
       expectedCount: context.appliedOperationCount,
       expectedAggregateDigest: markerExpected,
@@ -553,37 +624,206 @@ function createCollectorWithDiscrepancy(
   })
 }
 
-/** Finalizes one fixture under a fresh copy of the common test key. */
-function finalizeCollector(
-  collector: WorkspaceSearchMigrationRehearsalReconciliationCollectorResult,
-): WorkspaceSearchMigrationRehearsalFinalizedReconciliationAuditArtifact {
-  return finalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArtifact(
-    {
-      collectorResult: collector,
-      rate: createRateInput(
-        collector.context,
-        Number.parseInt(collector.context.runLocatorDigest.slice(0, 2), 16),
-      ),
+/** Prepared authority-bearing finalizer input and its exact predecessor. */
+type PreparedCollectorFinalization = {
+  /** Final input carrying a genuine verified one-shot or rollback null. */
+  readonly input:
+    FinalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArtifactInput
+  /** Exact outer rate predecessor authenticated by that input. */
+  readonly expectedRatePredecessor:
+    WorkspaceSearchMigrationRehearsalVerifiedRateSegment
+}
+
+/** Creates the target-compatible planning context for verified live fixtures. */
+function createVerifiedTargetContext(
+  context: WorkspaceSearchMigrationRehearsalReconciliationCoreContext,
+  ordinal: number,
+): WorkspaceSearchMigrationRehearsalTargetAuditContext {
+  return Object.freeze({
+    scenario: 'complete-apply-rollback',
+    runLocatorDigest: context.runLocatorDigest,
+    manifestDigest: digest(`verified-manifest:${ordinal}`),
+    permitDigest: digest(`verified-permit:${ordinal}`),
+    requestedResourcesBinding: digest(`verified-resources:${ordinal}`),
+    configurationBindingDigest: context.configurationBindingDigest,
+    policyVersion: context.policyVersion,
+    integrityResourceIdentityDigest:
+      context.integrityResourceIdentityDigest,
+    planningReceiptDigest: digest(`verified-planning:${ordinal}`),
+    executionBoundaryDigest: context.applyBoundaryDigest,
+    sealedPlanningAuthorityDigest: context.sealedPlanningAuthorityDigest,
+    planDigest: context.planDigest,
+    writerFenceDigest: digest(`verified-fence:${ordinal}`),
+  })
+}
+
+/** Rebuilds verified collector comparison fields from genuine live authority. */
+function createVerifiedCollectorIntegrity(
+  context: WorkspaceSearchMigrationRehearsalReconciliationCoreContext,
+  integrity: WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult,
+): WorkspaceSearchMigrationRehearsalReconciliationIntegrityCollectorResult {
+  return Object.freeze({
+    kind: 'verified-result',
+    status: 'pass',
+    failureCount: 0,
+    completedAt: '2026-08-01T00:00:12.000Z',
+    result: integrity.result,
+    terminalRootDigest: context.terminalRootDigest,
+    integrityAggregateDigest:
+      integrity.result.integrityAggregateDigest,
+  })
+}
+
+/** Rebuilds rollback comparison fields only from authenticated target results. */
+function createRollbackCollectorIntegrity(
+  context: WorkspaceSearchMigrationRehearsalReconciliationCoreContext,
+  sourceTarget:
+    WorkspaceSearchMigrationRehearsalReconciliationSourceTargetCollectorResult,
+  targetAudits: WorkspaceSearchMigrationRehearsalReconciliationTargetAuditPair,
+): WorkspaceSearchMigrationRehearsalReconciliationIntegrityCollectorResult {
+  const terminal = targetAudits.restored.terminal
+  if (terminal === null) throw new Error('Expected restored terminal fixture.')
+  const purpose = context.scenario === 'partial-apply-rollback'
+    ? 'partial-rollback'
+    : 'complete-rollback'
+  const before = targetAudits.preimage.integrity.result
+  const after = targetAudits.restored.integrity.result
+  const startedAt = before.runtimeProvenance.startedAt
+  const applyStartedAt = terminal.applyStartedAt
+  const completedAt = after.checkedAt
+  const comparisonDigest = createMigrationDigest({
+    purpose,
+    beforeResultDigest: before.resultDigest,
+    afterResultDigest: after.resultDigest,
+    comparison: {
+      kind:
+        'mukuroji-cross-domain-integrity-migration-rehearsal-comparison',
+      contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+      status: 'pass',
     },
+  })
+  return Object.freeze({
+    kind: 'rollback-comparison',
+    purpose,
+    status: 'pass',
+    failureCount: 0,
+    startedAt,
+    applyStartedAt,
+    terminalAt: terminal.terminalAt,
+    completedAt,
+    before,
+    after,
+    comparisonDigest,
+    comparisonContextDigest: createMigrationDigest({
+      kind: 'workspace-search-migration-rehearsal-integrity-context/v3',
+      version: 3,
+      purpose,
+      startedAt,
+      applyStartedAt,
+      terminalAt: terminal.terminalAt,
+      completedAt,
+      before,
+      after,
+      comparisonDigest,
+    }),
+    terminalRootDigest: context.terminalRootDigest,
+    targetPreimageAggregateDigest:
+      sourceTarget.expectedAggregateDigest,
+    targetRestoredAggregateDigest:
+      sourceTarget.observedAggregateDigest,
+    targetPreimageStatus: 'equal',
+  })
+}
+
+/** Creates one scenario-correct genuine v3 finalizer input. */
+async function prepareCollectorFinalization(
+  collector: WorkspaceSearchMigrationRehearsalReconciliationCollectorResult,
+  ordinal: number,
+): Promise<PreparedCollectorFinalization> {
+  if (isVerifiedScenario(collector.context.scenario)) {
+    const fixture = await createTargetAuditIntegrityRateFixture(
+      createVerifiedTargetContext(collector.context, ordinal),
+      `reconciliation:verified:${collector.context.scenario}:${ordinal}`,
+      createFixtureObservedAt('2026-08-01T00:00:12.000Z', ordinal),
+      { rateAuthenticationKey: key() },
+    )
+    const collectorResult = Object.freeze({
+      ...collector,
+      integrity: createVerifiedCollectorIntegrity(
+        collector.context,
+        fixture.integrity,
+      ),
+      targetAudits: null,
+    })
+    return Object.freeze({
+      input: Object.freeze({
+        collectorResult,
+        rate: fixture.rate,
+        verifiedIntegrity: fixture.integrity,
+      }),
+      expectedRatePredecessor:
+        fixture.rate.verifiedSuccessor.predecessor,
+    })
+  }
+  const targetAudits = await createTargetAudits(
+    collector.context,
+    collector.sourceTargetSummary,
+    ordinal,
+  )
+  if (targetAudits === null) throw new Error('Expected rollback targets.')
+  const rate = createRateInput(collector.context, ordinal)
+  return Object.freeze({
+    input: Object.freeze({
+      collectorResult: Object.freeze({
+        ...collector,
+        integrity: createRollbackCollectorIntegrity(
+          collector.context,
+          collector.sourceTargetSummary,
+          targetAudits,
+        ),
+        targetAudits,
+      }),
+      rate,
+      verifiedIntegrity: null,
+    }),
+    expectedRatePredecessor: rate.verifiedSuccessor.predecessor,
+  })
+}
+
+/** Finalizes one fixture under a fresh copy of the common test key. */
+async function finalizeCollector(
+  collector: WorkspaceSearchMigrationRehearsalReconciliationCollectorResult,
+  ordinal = Number.parseInt(collector.context.runLocatorDigest.slice(0, 2), 16),
+): Promise<WorkspaceSearchMigrationRehearsalFinalizedReconciliationAuditArtifact> {
+  const prepared = await prepareCollectorFinalization(collector, ordinal)
+  return finalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArtifact(
+    prepared.input,
     key(),
     publicationKey(),
   )
 }
 
 /** Finalizes one artifact while retaining its exact authenticated predecessor. */
-function finalizeTerminalCollector(
+async function finalizeTerminalCollector(
   collector: WorkspaceSearchMigrationRehearsalReconciliationCollectorResult,
   ordinal: number,
-) {
-  const rate = createRateInput(collector.context, ordinal)
-  const expectedRatePredecessor = rate.verifiedSuccessor.predecessor
+): Promise<Readonly<{
+  /** Finalized canonical artifact. */
+  artifact: WorkspaceSearchMigrationRehearsalFinalizedReconciliationAuditArtifact
+  /** Exact predecessor required by the terminal commit gate. */
+  expectedRatePredecessor: WorkspaceSearchMigrationRehearsalVerifiedRateSegment
+}>> {
+  const prepared = await prepareCollectorFinalization(collector, ordinal)
   const artifact =
     finalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArtifact(
-      { collectorResult: collector, rate },
+      prepared.input,
       key(),
       publicationKey(),
     )
-  return Object.freeze({ artifact, expectedRatePredecessor })
+  return Object.freeze({
+    artifact,
+    expectedRatePredecessor: prepared.expectedRatePredecessor,
+  })
 }
 
 /** Requires one mutable ordinary parsed JSON record for attack fixtures. */
@@ -620,10 +860,10 @@ function requireFixtureString(value: unknown): string {
   return value
 }
 
-/** Rewraps foreign rate evidence with otherwise valid parent audit HMACs. */
-function rewrapReconciliationAuditWithRate(
+/** Rewraps one semantic mutation with otherwise valid parent audit HMACs. */
+function rewrapReconciliationAuditMutation(
   artifactBytes: Uint8Array,
-  rate: unknown,
+  mutate: (record: Record<string, unknown>) => void,
 ): Uint8Array {
   const parsed: unknown = JSON.parse(
     new TextDecoder().decode(artifactBytes),
@@ -640,12 +880,10 @@ function rewrapReconciliationAuditWithRate(
   const {
     authentication: _authentication,
     auditDigest: _auditDigest,
-    ...semanticWithoutRateReplacement
+    ...semanticFields
   } = document
-  const semantic = {
-    ...semanticWithoutRateReplacement,
-    rate,
-  }
+  const semantic = { ...semanticFields }
+  mutate(semantic)
   const auditDigest = createMigrationDigest(semantic)
   const runtimeUnsigned = {
     ...semantic,
@@ -657,7 +895,7 @@ function rewrapReconciliationAuditWithRate(
   }
   const runtimeMac = createHmac('sha256', key())
     .update(
-      'mukuroji-workspace-search-migration-rehearsal-reconciliation-audit-runtime-mac/v2\n',
+      'mukuroji-workspace-search-migration-rehearsal-reconciliation-audit-runtime-mac/v3\n',
       'utf8',
     )
     .update(serializeCanonicalJson(runtimeUnsigned), 'utf8')
@@ -674,7 +912,7 @@ function rewrapReconciliationAuditWithRate(
   }
   const publicationMac = createHmac('sha256', publicationKey())
     .update(
-      'mukuroji-workspace-search-migration-rehearsal-reconciliation-audit-publication-mac/v2\n',
+      'mukuroji-workspace-search-migration-rehearsal-reconciliation-audit-publication-mac/v3\n',
       'utf8',
     )
     .update(serializeCanonicalJson(publicationUnsigned), 'utf8')
@@ -688,17 +926,28 @@ function rewrapReconciliationAuditWithRate(
   }))
 }
 
+/** Rewraps foreign rate evidence with otherwise valid parent audit HMACs. */
+function rewrapReconciliationAuditWithRate(
+  artifactBytes: Uint8Array,
+  rate: unknown,
+): Uint8Array {
+  return rewrapReconciliationAuditMutation(
+    artifactBytes,
+    (document) => {
+      document.rate = rate
+    },
+  )
+}
+
 describe('workspace search migration rehearsal reconciliation audit', () => {
-  test('finalizes and authenticates one all-safe canonical artifact', () => {
+  test('finalizes and authenticates one all-safe canonical artifact', async () => {
     const signingKey = key()
     const publicationSigningKey = publicationKey()
     const collector = createCollector('happy-path-verified', 1)
+    const prepared = await prepareCollectorFinalization(collector, 1)
     const finalized =
       finalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArtifact(
-        {
-          collectorResult: collector,
-          rate: createRateInput(collector.context, 1),
-        },
+        prepared.input,
         signingKey,
         publicationSigningKey,
       )
@@ -755,8 +1004,8 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
     expect(actualArtifactBinding).toEqual(binding)
   })
 
-  test('fails closed while authenticating untrusted actual artifact bytes', () => {
-    const artifact = finalizeCollector(
+  test('fails closed while authenticating untrusted actual artifact bytes', async () => {
+    const artifact = await finalizeCollector(
       createCollector('cursor-after-commit-kill', 79),
     )
     const tampered = mutateCanonicalArtifact(
@@ -799,10 +1048,225 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
       )).toThrow('REHEARSAL_RECONCILIATION_AUDIT_INVALID')
   })
 
-  test('issues one terminal capability from the exact dual-key artifact binding', () => {
+  test('requires one fresh genuine verified integrity result per finalization', async () => {
+    const clonedFixture = await prepareCollectorFinalization(
+      createCollector('happy-path-verified', 120),
+      120,
+    )
+    const clonedAuthority = clonedFixture.input.verifiedIntegrity
+    if (clonedAuthority === null) throw new Error('Expected live authority.')
+    expect(() =>
+      finalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArtifact(
+        {
+          ...clonedFixture.input,
+          verifiedIntegrity: Object.freeze({ ...clonedAuthority }),
+        },
+        key(),
+        publicationKey(),
+      )).toThrow('REHEARSAL_RECONCILIATION_AUDIT_INVALID')
+    consumeWorkspaceSearchMigrationRehearsalRateBoundIntegrityResult(
+      clonedAuthority,
+    )
+
+    const proxiedFixture = await prepareCollectorFinalization(
+      createCollector('lease-expiry-takeover', 121),
+      121,
+    )
+    const proxiedAuthority = proxiedFixture.input.verifiedIntegrity
+    if (proxiedAuthority === null) throw new Error('Expected live authority.')
+    expect(() =>
+      finalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArtifact(
+        {
+          ...proxiedFixture.input,
+          verifiedIntegrity: new Proxy(
+            proxiedAuthority,
+            Object.freeze({}),
+          ),
+        },
+        key(),
+        publicationKey(),
+      )).toThrow('REHEARSAL_RECONCILIATION_AUDIT_INVALID')
+    consumeWorkspaceSearchMigrationRehearsalRateBoundIntegrityResult(
+      proxiedAuthority,
+    )
+
+    const forgedFixture = await prepareCollectorFinalization(
+      createCollector('transaction-response-loss', 122),
+      122,
+    )
+    const forgedAuthority = forgedFixture.input.verifiedIntegrity
+    if (forgedAuthority === null) throw new Error('Expected live authority.')
+    expect(() =>
+      finalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArtifact(
+        {
+          ...forgedFixture.input,
+          verifiedIntegrity: Object.freeze({
+            ...forgedAuthority,
+            bindingMac: digest('forged-integrity-binding'),
+          }),
+        },
+        key(),
+        publicationKey(),
+      )).toThrow('REHEARSAL_RECONCILIATION_AUDIT_INVALID')
+    consumeWorkspaceSearchMigrationRehearsalRateBoundIntegrityResult(
+      forgedAuthority,
+    )
+
+    const replayFixture = await prepareCollectorFinalization(
+      createCollector('cursor-after-commit-kill', 123),
+      123,
+    )
+    const replayedAuthority = replayFixture.input.verifiedIntegrity
+    if (replayedAuthority === null) throw new Error('Expected live authority.')
+    finalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArtifact(
+      replayFixture.input,
+      key(),
+      publicationKey(),
+    )
+    const replayTarget = await prepareCollectorFinalization(
+      createCollector('cursor-after-commit-kill', 124),
+      124,
+    )
+    expect(() =>
+      finalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArtifact(
+        {
+          ...replayTarget.input,
+          verifiedIntegrity: replayedAuthority,
+        },
+        key(),
+        publicationKey(),
+      )).toThrow('REHEARSAL_RECONCILIATION_AUDIT_INVALID')
+    if (replayTarget.input.verifiedIntegrity === null) {
+      throw new Error('Expected unused live authority.')
+    }
+    consumeWorkspaceSearchMigrationRehearsalRateBoundIntegrityResult(
+      replayTarget.input.verifiedIntegrity,
+    )
+  })
+
+  test('rejects outer-rewrapped verified integrity semantic tampering', async () => {
+    const artifact = await finalizeCollector(
+      createCollector('cursor-before-commit-kill', 125),
+      125,
+    )
+    const mutations: readonly (
+      (document: Record<string, unknown>) => void
+    )[] = [
+      (document) => {
+        const integrity = requireRecord(
+          requireRecord(document.integrity).result,
+        )
+        integrity.bindingMac = digest('foreign-inner-binding')
+      },
+      (document) => {
+        const integrity = requireRecord(
+          requireRecord(document.integrity).result,
+        )
+        integrity.policyVersion = digest('foreign-integrity-policy')
+      },
+      (document) => {
+        const integrity = requireRecord(
+          requireRecord(document.integrity).result,
+        )
+        integrity.configurationBindingDigest =
+          digest('foreign-integrity-configuration')
+      },
+      (document) => {
+        const integrity = requireRecord(
+          requireRecord(document.integrity).result,
+        )
+        requireRecord(integrity.result).resourceIdentityDigest =
+          digest('foreign-integrity-resource')
+      },
+      (document) => {
+        const integrity = requireRecord(
+          requireRecord(document.integrity).result,
+        )
+        requireRecord(integrity.interval).describeTableCallCount = 11
+      },
+      (document) => {
+        const integrity = requireRecord(
+          requireRecord(document.integrity).result,
+        )
+        requireRecord(
+          requireRecord(integrity.result).runtimeProvenance,
+        ).startedAt = terminalAt
+      },
+      (document) => {
+        requireRecord(document.integrity).failureCount = 1
+      },
+    ]
+    for (const mutate of mutations) {
+      const tampered = rewrapReconciliationAuditMutation(
+        artifact.canonicalBytes,
+        mutate,
+      )
+      expect(() =>
+        authenticateWorkspaceSearchMigrationRehearsalReconciliationAuditArtifact(
+          {
+            artifactBytes: tampered,
+            expectedContext: artifact.context,
+          },
+          key(),
+          publicationKey(),
+        )).toThrow('REHEARSAL_RECONCILIATION_AUDIT_INVALID')
+    }
+  })
+
+  test('rejects outer-rewrapped rollback authority tampering', async () => {
+    const artifact = await finalizeCollector(
+      createCollector('partial-apply-rollback', 126),
+      126,
+    )
+    const mutations: readonly (
+      (document: Record<string, unknown>) => void
+    )[] = [
+      (document) => {
+        const targets = requireRecord(document.targetAudits)
+        requireRecord(targets.preimage).purpose =
+          'complete-rollback-preimage'
+      },
+      (document) => {
+        const targets = requireRecord(document.targetAudits)
+        const restored = requireRecord(targets.restored)
+        requireRecord(restored.terminal).applyStartedAt = terminalAt
+      },
+      (document) => {
+        const targets = requireRecord(document.targetAudits)
+        const restored = requireRecord(targets.restored)
+        const integrity = requireRecord(restored.integrity)
+        requireRecord(integrity.result).resourceIdentityDigest =
+          digest('foreign-restored-resource')
+      },
+      (document) => {
+        const targets = requireRecord(document.targetAudits)
+        const preimage = requireRecord(targets.preimage)
+        const integrity = requireRecord(preimage.integrity)
+        requireRecord(integrity.result).integrityAggregateDigest =
+          digest('foreign-preimage-aggregate')
+      },
+    ]
+    for (const mutate of mutations) {
+      const tampered = rewrapReconciliationAuditMutation(
+        artifact.canonicalBytes,
+        mutate,
+      )
+      expect(() =>
+        authenticateWorkspaceSearchMigrationRehearsalReconciliationAuditArtifact(
+          {
+            artifactBytes: tampered,
+            expectedContext: artifact.context,
+          },
+          key(),
+          publicationKey(),
+        )).toThrow('REHEARSAL_RECONCILIATION_AUDIT_INVALID')
+    }
+  })
+
+  test('issues one terminal capability from the exact dual-key artifact binding', async () => {
     const collector = createCollector('happy-path-verified', 80)
     const { artifact, expectedRatePredecessor } =
-      finalizeTerminalCollector(collector, 80)
+      await finalizeTerminalCollector(collector, 80)
     const runtimeVerificationKey = key()
     const publicationVerificationKey = publicationKey()
     const capability =
@@ -845,7 +1309,7 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
       )).toThrow('REHEARSAL_RECONCILIATION_AUDIT_INVALID')
   })
 
-  test('issues no terminal capability for any nonzero safety discrepancy', () => {
+  test('issues no terminal capability for any nonzero safety discrepancy', async () => {
     const discrepancies = [
       'authority-missing',
       'authority-orphan',
@@ -862,7 +1326,7 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
         discrepancy,
       )
       const { artifact, expectedRatePredecessor } =
-        finalizeTerminalCollector(collector, 90 + index)
+        await finalizeTerminalCollector(collector, 90 + index)
       expect(() =>
         finalizeWorkspaceSearchMigrationRehearsalTerminalReconciliationEvidence(
           {
@@ -878,7 +1342,7 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
     }
   })
 
-  test('binds both rollback target audits and their terminal timing exactly', () => {
+  test('binds both rollback target audits and their terminal timing exactly', async () => {
     const scenarios:
       readonly WorkspaceSearchMigrationRehearsalScenarioName[] = [
       'partial-apply-rollback',
@@ -887,7 +1351,7 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
     for (const [index, scenario] of scenarios.entries()) {
       const collector = createCollector(scenario, 81 + index)
       const { artifact, expectedRatePredecessor } =
-        finalizeTerminalCollector(collector, 81 + index)
+        await finalizeTerminalCollector(collector, 81 + index)
       const capability =
         finalizeWorkspaceSearchMigrationRehearsalTerminalReconciliationEvidence(
           {
@@ -905,10 +1369,18 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
           capability,
         )
       const targetAudits = binding.targetAudits
-      if (targetAudits === null || collector.targetAudits === null) {
+      if (targetAudits === null) {
         throw new Error('Expected exact rollback target-audit pair.')
       }
-      expect(targetAudits).toEqual(collector.targetAudits)
+      if (binding.integrity.kind !== 'rollback-comparison') {
+        throw new Error('Expected rollback comparison binding.')
+      }
+      expect(targetAudits.preimage.integrity.result).toEqual(
+        binding.integrity.before,
+      )
+      expect(targetAudits.restored.integrity.result).toEqual(
+        binding.integrity.after,
+      )
       expect(targetAudits.preimage.aggregateDigest).toBe(
         targetAudits.restored.aggregateDigest,
       )
@@ -927,44 +1399,56 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
     }
   })
 
-  test('rejects rollback target-pair substitution and either rate-time inversion', () => {
+  test('rejects rollback target-pair substitution and either rate-time inversion', async () => {
     const collector = createCollector('partial-apply-rollback', 86)
-    const targetAudits = collector.targetAudits
+    const preparedRollback = await prepareCollectorFinalization(collector, 86)
+    const targetAudits = preparedRollback.input.collectorResult.targetAudits
     if (targetAudits === null) {
       throw new Error('Expected rollback target-audit fixture.')
     }
     const verifiedCollector = createCollector('happy-path-verified', 86)
     expect(verifiedCollector.targetAudits).toBeNull()
+    const preparedVerified = await prepareCollectorFinalization(
+      verifiedCollector,
+      86,
+    )
     expect(() =>
       finalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArtifact(
         {
           collectorResult: Object.freeze({
-            ...verifiedCollector,
+            ...preparedVerified.input.collectorResult,
             targetAudits,
           }),
-          rate: createRateInput(verifiedCollector.context, 86),
+          rate: preparedVerified.input.rate,
+          verifiedIntegrity: preparedVerified.input.verifiedIntegrity,
         },
         key(),
         publicationKey(),
       )).toThrow('REHEARSAL_RECONCILIATION_AUDIT_INVALID')
+    const missingTargets = await prepareCollectorFinalization(collector, 86)
     expect(() =>
       finalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArtifact(
         {
           collectorResult: Object.freeze({
-            ...collector,
+            ...missingTargets.input.collectorResult,
             targetAudits: null,
           }),
-          rate: createRateInput(collector.context, 86),
+          rate: missingTargets.input.rate,
+          verifiedIntegrity: null,
         },
         key(),
         publicationKey(),
       )).toThrow('REHEARSAL_RECONCILIATION_AUDIT_INVALID')
+    const substitutedFixture = await prepareCollectorFinalization(collector, 86)
+    const substitutedTargets =
+      substitutedFixture.input.collectorResult.targetAudits
+    if (substitutedTargets === null) throw new Error('Expected targets.')
     const substitutedPair = Object.freeze({
-      ...collector,
+      ...substitutedFixture.input.collectorResult,
       targetAudits: Object.freeze({
-        preimage: targetAudits.preimage,
+        preimage: substitutedTargets.preimage,
         restored: Object.freeze({
-          ...targetAudits.restored,
+          ...substitutedTargets.restored,
           contextDigest: digest('substituted-restored-context'),
         }),
       }),
@@ -973,7 +1457,8 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
       finalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArtifact(
         {
           collectorResult: substitutedPair,
-          rate: createRateInput(collector.context, 86),
+          rate: substitutedFixture.input.rate,
+          verifiedIntegrity: null,
         },
         key(),
         publicationKey(),
@@ -990,12 +1475,15 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
           '2026-08-01T00:00:10.000Z',
         ),
       )
+    const lateFixture = await prepareCollectorFinalization(collector, 87)
+    const lateTargets = lateFixture.input.collectorResult.targetAudits
+    if (lateTargets === null) throw new Error('Expected targets.')
     const lateRestored = Object.freeze({
-      ...collector,
+      ...lateFixture.input.collectorResult,
       targetAudits: Object.freeze({
-        preimage: targetAudits.preimage,
+        preimage: lateTargets.preimage,
         restored: Object.freeze({
-          ...targetAudits.restored,
+          ...lateTargets.restored,
           rate: lateRestoredRate,
         }),
       }),
@@ -1004,32 +1492,35 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
       finalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArtifact(
         {
           collectorResult: lateRestored,
-          rate: createRateInput(collector.context, 87),
+          rate: lateFixture.input.rate,
+          verifiedIntegrity: null,
         },
         key(),
         publicationKey(),
       )).toThrow('REHEARSAL_RECONCILIATION_AUDIT_INVALID')
 
+    const earlyRateFixture = await prepareCollectorFinalization(collector, 88)
     expect(() =>
       finalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArtifact(
         {
-          collectorResult: collector,
+          collectorResult: earlyRateFixture.input.collectorResult,
           rate: createRateInput(
             collector.context,
             88,
             key(),
             '2026-08-01T00:00:12.999Z',
           ),
+          verifiedIntegrity: null,
         },
         key(),
         publicationKey(),
       )).toThrow('REHEARSAL_RECONCILIATION_AUDIT_INVALID')
   })
 
-  test('rejects a wrong context, content, key, predecessor, or nonterminal file', () => {
+  test('rejects a wrong context, content, key, predecessor, or nonterminal file', async () => {
     const collector = createCollector('happy-path-verified', 83)
     const { artifact, expectedRatePredecessor } =
-      finalizeTerminalCollector(collector, 83)
+      await finalizeTerminalCollector(collector, 83)
     const foreignRate = createRateInput(collector.context, 84)
     const tamperedArtifact = mutateCanonicalArtifact(
       artifact.canonicalBytes,
@@ -1130,10 +1621,10 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
     }
   })
 
-  test('rejects every terminal rate-predecessor binding field mismatch', () => {
+  test('rejects every terminal rate-predecessor binding field mismatch', async () => {
     const collector = createCollector('lease-expiry-takeover', 87)
     const { artifact, expectedRatePredecessor } =
-      finalizeTerminalCollector(collector, 87)
+      await finalizeTerminalCollector(collector, 87)
     const mismatches = [
       Object.freeze({
         ...expectedRatePredecessor,
@@ -1149,17 +1640,23 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
       }),
       Object.freeze({
         ...expectedRatePredecessor,
-        eventCount: 1,
-        firstCommittedEventSequence: 1,
-        lastCommittedEventSequence: 1,
+        eventCount: expectedRatePredecessor.eventCount + 1,
+        firstCommittedEventSequence:
+          expectedRatePredecessor.firstCommittedEventSequence ??
+          expectedRatePredecessor.firstEventSequence,
+        lastCommittedEventSequence:
+          (expectedRatePredecessor.lastCommittedEventSequence ??
+            expectedRatePredecessor.firstEventSequence - 1) + 1,
       }),
       Object.freeze({
         ...expectedRatePredecessor,
-        firstCommittedEventSequence: 1,
+        firstCommittedEventSequence:
+          (expectedRatePredecessor.firstCommittedEventSequence ?? 0) + 1,
       }),
       Object.freeze({
         ...expectedRatePredecessor,
-        lastCommittedEventSequence: 1,
+        lastCommittedEventSequence:
+          (expectedRatePredecessor.lastCommittedEventSequence ?? 0) + 1,
       }),
       Object.freeze({
         ...expectedRatePredecessor,
@@ -1186,10 +1683,10 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
     }
   })
 
-  test('rejects cloned, proxied, forged, and reused terminal capabilities', () => {
+  test('rejects cloned, proxied, forged, and reused terminal capabilities', async () => {
     const collector = createCollector('transaction-response-loss', 85)
     const { artifact, expectedRatePredecessor } =
-      finalizeTerminalCollector(collector, 85)
+      await finalizeTerminalCollector(collector, 85)
     const capability =
       finalizeWorkspaceSearchMigrationRehearsalTerminalReconciliationEvidence(
         {
@@ -1226,8 +1723,8 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
       )).toThrow('REHEARSAL_RECONCILIATION_AUDIT_INVALID')
   })
 
-  test('returns nonzero measured terminal failures without overwriting them', () => {
-    const finalized = finalizeCollector(
+  test('returns nonzero measured terminal failures without overwriting them', async () => {
+    const finalized = await finalizeCollector(
       createCollector('transaction-response-loss', 2, true),
     )
     const binding =
@@ -1247,8 +1744,8 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
     expect(binding.authoritySummary.orphanCount).toBe(1)
   })
 
-  test('rejects wrong keys, noncanonical bytes, extra keys, and tampering', () => {
-    const finalized = finalizeCollector(
+  test('rejects wrong keys, noncanonical bytes, extra keys, and tampering', async () => {
+    const finalized = await finalizeCollector(
       createCollector('cursor-before-commit-kill', 3),
     )
     const wrongKey = new Uint8Array(32).fill(12)
@@ -1313,7 +1810,7 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
       )).toThrow('REHEARSAL_RECONCILIATION_AUDIT_INVALID')
   })
 
-  test('rejects aliased or equal runtime and publication keys at every boundary', () => {
+  test('rejects aliased or equal runtime and publication keys at every boundary', async () => {
     const collector = createCollector('happy-path-verified', 33)
     const aliasedSigningKey = key()
     expect(() =>
@@ -1321,6 +1818,7 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
         {
           collectorResult: collector,
           rate: createRateInput(collector.context, 33),
+          verifiedIntegrity: null,
         },
         aliasedSigningKey,
         aliasedSigningKey,
@@ -1334,6 +1832,7 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
         {
           collectorResult: collector,
           rate: createRateInput(collector.context, 34),
+          verifiedIntegrity: null,
         },
         equalRuntimeSigningKey,
         equalPublicationSigningKey,
@@ -1341,7 +1840,7 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
     expect(equalRuntimeSigningKey.every((byte) => byte === 0)).toBe(true)
     expect(equalPublicationSigningKey.every((byte) => byte === 0)).toBe(true)
 
-    const finalized = finalizeCollector(collector)
+    const finalized = await finalizeCollector(collector)
     const aliasedVerificationKey = key()
     expect(() =>
       authenticateWorkspaceSearchMigrationRehearsalReconciliationAuditArtifact(
@@ -1370,10 +1869,12 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
       true,
     )
 
-    const batch = WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_SCENARIOS
-      .map((scenario, index) =>
-        finalizeCollector(createCollector(scenario, index + 100)))
-      .map((artifact) => Object.freeze({
+    const batchArtifacts = await Promise.all(
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_SCENARIOS
+        .map(async (scenario, index) =>
+          await finalizeCollector(createCollector(scenario, index + 100))),
+    )
+    const batch = batchArtifacts.map((artifact) => Object.freeze({
         artifactBytes: artifact.canonicalBytes,
         expectedContext: artifact.context,
       }))
@@ -1398,7 +1899,7 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
     expect(equalBatchPublicationKey.every((byte) => byte === 0)).toBe(true)
   })
 
-  test('rejects rate evidence authenticated by a foreign runtime key', () => {
+  test('rejects rate evidence authenticated by a foreign runtime key', async () => {
     const collector = createCollector('happy-path-verified', 35)
     const runtimeSigningKey = key()
     const publicationSigningKey = publicationKey()
@@ -1411,6 +1912,7 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
             35,
             new Uint8Array(32).fill(75),
           ),
+          verifiedIntegrity: null,
         },
         runtimeSigningKey,
         publicationSigningKey,
@@ -1418,7 +1920,7 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
     expect(runtimeSigningKey.every((byte) => byte === 0)).toBe(true)
     expect(publicationSigningKey.every((byte) => byte === 0)).toBe(true)
 
-    const validArtifact = finalizeCollector(
+    const validArtifact = await finalizeCollector(
       createCollector('happy-path-verified', 36),
     )
     const foreignRate =
@@ -1444,7 +1946,7 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
       )).toThrow('REHEARSAL_RECONCILIATION_AUDIT_INVALID')
   })
 
-  test('rejects malformed collector arithmetic and aggregate equality', () => {
+  test('rejects malformed collector arithmetic and aggregate equality', async () => {
     const collector = createCollector('happy-path-verified', 4)
     const badArithmetic = Object.freeze({
       ...collector,
@@ -1459,6 +1961,7 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
         {
           collectorResult: badArithmetic,
           rate: createRateInput(badArithmetic.context, 4),
+          verifiedIntegrity: null,
         },
         arithmeticKey,
         publicationKey(),
@@ -1477,20 +1980,21 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
         {
           collectorResult: badAggregate,
           rate: createRateInput(badAggregate.context, 5),
+          verifiedIntegrity: null,
         },
         key(),
         publicationKey(),
       )).toThrow('REHEARSAL_RECONCILIATION_AUDIT_INVALID')
   })
 
-  test('rejects cross-scenario and cross-run-root context replay', () => {
-    const happy = finalizeCollector(
+  test('rejects cross-scenario and cross-run-root context replay', async () => {
+    const happy = await finalizeCollector(
       createCollector('happy-path-verified', 5),
     )
-    const cursor = finalizeCollector(
+    const cursor = await finalizeCollector(
       createCollector('cursor-after-commit-kill', 6),
     )
-    const otherHappy = finalizeCollector(
+    const otherHappy = await finalizeCollector(
       createCollector('happy-path-verified', 7),
     )
     expect(() =>
@@ -1513,10 +2017,12 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
       )).toThrow('REHEARSAL_RECONCILIATION_AUDIT_INVALID')
   })
 
-  test('authenticates the exact ordered eight-scenario batch and consumes once', () => {
-    const finalized = WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_SCENARIOS
-      .map((scenario, index) =>
-        finalizeCollector(createCollector(scenario, index + 20)))
+  test('authenticates the exact ordered eight-scenario batch and consumes once', async () => {
+    const finalized = await Promise.all(
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_SCENARIOS
+        .map(async (scenario, index) =>
+          await finalizeCollector(createCollector(scenario, index + 20))),
+    )
     const batchKey = key()
     const batchPublicationKey = publicationKey()
     const capability =
@@ -1542,7 +2048,7 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
       )).toThrow('REHEARSAL_RECONCILIATION_AUDIT_INVALID')
   })
 
-  test('rejects every nonzero discrepancy from an authenticated batch', () => {
+  test('rejects every nonzero discrepancy from an authenticated batch', async () => {
     const failedCollectors = Object.freeze([
       createCollectorWithDiscrepancy(
         'happy-path-verified',
@@ -1586,16 +2092,17 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
       if (failedCollector === undefined) {
         throw new Error('Expected failed collector fixture.')
       }
-      const finalized =
+      const finalized = await Promise.all(
         WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_SCENARIOS
-          .map((scenario, scenarioIndex) => finalizeCollector(
+          .map(async (scenario, scenarioIndex) => await finalizeCollector(
             scenarioIndex === 0
               ? failedCollector
               : createCollector(
                 scenario,
                 100 + failedIndex * 10 + scenarioIndex,
               ),
-          ))
+          )),
+      )
       expect(() =>
         finalizeWorkspaceSearchMigrationRehearsalReconciliationEvidence({
           artifacts: finalized.map((artifact) => Object.freeze({
@@ -1608,10 +2115,12 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
     }
   })
 
-  test('rejects missing, duplicate, reordered, and terminal-root replay batches', () => {
-    const finalized = WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_SCENARIOS
-      .map((scenario, index) =>
-        finalizeCollector(createCollector(scenario, index + 40)))
+  test('rejects missing, duplicate, reordered, and terminal-root replay batches', async () => {
+    const finalized = await Promise.all(
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_SCENARIOS
+        .map(async (scenario, index) =>
+          await finalizeCollector(createCollector(scenario, index + 40))),
+    )
     const expectations = finalized.map((artifact) => Object.freeze({
       artifactBytes: artifact.canonicalBytes,
       expectedContext: artifact.context,
@@ -1637,7 +2146,7 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
 
     const replayRoot = finalized[0]?.context.terminalRootDigest
     if (replayRoot === undefined) throw new Error('Expected first root.')
-    const replayedSecond = finalizeCollector(createCollector(
+    const replayedSecond = await finalizeCollector(createCollector(
       'cursor-before-commit-kill',
       99,
       false,
@@ -1658,22 +2167,28 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
       )
   })
 
-  test('rejects #163 bindings that predate the terminal or lose preimage equality', () => {
+  test('rejects #163 bindings that predate the terminal or lose preimage equality', async () => {
     const collector = createCollector('happy-path-verified', 70)
     if (collector.integrity.kind !== 'verified-result') {
       throw new Error('Expected verified integrity fixture.')
     }
+    const preparedVerified = await prepareCollectorFinalization(collector, 70)
+    if (preparedVerified.input.collectorResult.integrity.kind !==
+      'verified-result') {
+      throw new Error('Expected prepared verified integrity fixture.')
+    }
     const staleIntegrity = Object.freeze({
-      ...collector.integrity,
+      ...preparedVerified.input.collectorResult.integrity,
       completedAt: terminalAt,
     })
     expect(() =>
       finalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArtifact({
         collectorResult: Object.freeze({
-          ...collector,
+          ...preparedVerified.input.collectorResult,
           integrity: staleIntegrity,
         }),
-        rate: createRateInput(collector.context, 70),
+        rate: preparedVerified.input.rate,
+        verifiedIntegrity: preparedVerified.input.verifiedIntegrity,
       }, key(), publicationKey())).toThrow(
         'REHEARSAL_RECONCILIATION_AUDIT_INVALID',
       )
@@ -1682,17 +2197,23 @@ describe('workspace search migration rehearsal reconciliation audit', () => {
     if (rollback.integrity.kind !== 'rollback-comparison') {
       throw new Error('Expected rollback integrity fixture.')
     }
+    const preparedRollback = await prepareCollectorFinalization(rollback, 71)
+    if (preparedRollback.input.collectorResult.integrity.kind !==
+      'rollback-comparison') {
+      throw new Error('Expected prepared rollback integrity fixture.')
+    }
     const unequal = Object.freeze({
-      ...rollback.integrity,
+      ...preparedRollback.input.collectorResult.integrity,
       targetRestoredAggregateDigest: digest('not-the-preimage'),
     })
     expect(() =>
       finalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArtifact({
         collectorResult: Object.freeze({
-          ...rollback,
+          ...preparedRollback.input.collectorResult,
           integrity: unequal,
         }),
-        rate: createRateInput(rollback.context, 71),
+        rate: preparedRollback.input.rate,
+        verifiedIntegrity: null,
       }, key(), publicationKey())).toThrow(
         'REHEARSAL_RECONCILIATION_AUDIT_INVALID',
       )

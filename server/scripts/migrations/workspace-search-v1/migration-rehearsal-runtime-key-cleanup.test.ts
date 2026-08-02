@@ -87,8 +87,9 @@ async function createFixture(
       nonce: createHash('sha256').update('cleanup-reservation').digest(),
       reservedAt,
       expiresAt,
-      expectedPreviousRateSegment: null,
-      expectedCurrentRateSegmentOrdinal: 0,
+      expectedPreviousRateSegment:
+        material.manifest.integrityAttestationRoot.segment,
+      expectedCurrentRateSegmentOrdinal: 1,
       expectedTargetPreimageArtifactContentDigest: null,
       signingKey: runtimeKey,
     })

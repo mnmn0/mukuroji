@@ -478,6 +478,47 @@ class MemoryStageReservationTransport
     })
   }
 
+  /** Rewrites an authenticated active head into the rejected legacy root form. */
+  rewriteStageOneRatePredecessorAsLegacyNull(): void {
+    const current = this.item
+    const stateJson = current?.stateJson?.S
+    const stateTableLocationBindingDigest =
+      current?.stateTableLocationBindingDigest?.S
+    if (
+      current === undefined ||
+      stateJson === undefined ||
+      stateTableLocationBindingDigest === undefined
+    ) throw new Error('Missing current active head.')
+    const state: unknown = JSON.parse(stateJson)
+    if (
+      typeof state !== 'object' ||
+      state === null ||
+      Array.isArray(state)
+    ) throw new Error('Expected state record.')
+    const activeReservation = Reflect.get(state, 'activeReservation')
+    if (
+      typeof activeReservation !== 'object' ||
+      activeReservation === null ||
+      Array.isArray(activeReservation) ||
+      !Reflect.set(activeReservation, 'expectedPreviousRateSegment', null) ||
+      !Reflect.set(activeReservation, 'expectedCurrentRateSegmentOrdinal', 0)
+    ) throw new Error('Expected active reservation record.')
+    const rewrittenStateJson = serializeCanonicalJson(state)
+    this.item = Object.freeze({
+      ...current,
+      stateDigest: {
+        S: createMigrationDigest({
+          kind: WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_HEAD_KIND,
+          version:
+            WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_HEAD_VERSION,
+          stateTableLocationBindingDigest,
+          state,
+        }),
+      },
+      stateJson: { S: rewrittenStateJson },
+    })
+  }
+
   /** Returns the number of immutable transition journal rows. */
   journalCount(): number {
     return this.journalItems.size
@@ -538,8 +579,9 @@ function createReservation(
     nonce: new Uint8Array(32).fill(fill),
     reservedAt: creationTime,
     expiresAt: expiryTime,
-    expectedPreviousRateSegment: null,
-    expectedCurrentRateSegmentOrdinal: 0,
+    expectedPreviousRateSegment:
+      fixture.manifest.integrityAttestationRoot.segment,
+    expectedCurrentRateSegmentOrdinal: 1,
     expectedTargetPreimageArtifactContentDigest: null,
     signingKey: fixture.authenticationKey,
   })
@@ -1721,6 +1763,8 @@ describe('Workspace Search rehearsal durable stage reservation AWS store', () =>
             manifest.integrityResourceIdentities,
           integrityResourceIdentityDigest:
             manifest.integrityResourceIdentityDigest,
+          integrityAttestationRoot:
+            manifest.integrityAttestationRoot,
           configurationBindingDigest:
             manifest.configurationBindingDigest,
           policyVersion: manifest.policyVersion,
@@ -2163,6 +2207,23 @@ describe('Workspace Search rehearsal durable stage reservation AWS store', () =>
       verificationKey: fixture.authenticationKey,
     })
     transport.corruptStateJson()
+    await expect(store.read()).rejects.toMatchObject({
+      code: 'INVALID_STAGE_RESERVATION_STATE',
+    })
+  })
+
+  test('rejects an authenticated legacy null predecessor at stage one', async () => {
+    const fixture =
+      createWorkspaceSearchMigrationRehearsalStageChildMaterialTestFixture()
+    const { store, transport } = createStore(fixture)
+    await store.claim({
+      reservation: createReservation(fixture, 9),
+      selection: fixture.selection,
+      observedAt: '2026-08-02T00:01:00.000Z',
+      verificationKey: fixture.authenticationKey,
+    })
+    transport.rewriteStageOneRatePredecessorAsLegacyNull()
+
     await expect(store.read()).rejects.toMatchObject({
       code: 'INVALID_STAGE_RESERVATION_STATE',
     })

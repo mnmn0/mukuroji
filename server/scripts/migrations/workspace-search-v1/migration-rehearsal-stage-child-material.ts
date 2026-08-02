@@ -6,15 +6,16 @@ import {
   isHexDigest,
   serializeCanonicalJson,
 } from './migration-contract'
+import {
+  WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
+  type WorkspaceSearchMigrationDescribeTableRateEvidence,
+} from './migration-describe-table-rate-budget'
 import type {
   WorkspaceSearchMigrationControlCliMutationResultObservation,
 } from './migration-control-cli'
 import type {
   WorkspaceSearchMigrationControlCoordinatorSummary,
 } from './migration-control-coordinator'
-import type {
-  WorkspaceSearchMigrationDescribeTableRateEvidence,
-} from './migration-describe-table-rate-budget'
 import {
   verifyWorkspaceSearchMigrationRehearsalRateSegmentPredecessor,
   type WorkspaceSearchMigrationRehearsalRateCommittedSegment,
@@ -1345,38 +1346,74 @@ function readRateAggregate(
 ): WorkspaceSearchMigrationDescribeTableRateEvidence {
   const record = requireExactRecord(value, [
     'attemptCount',
+    'awsServiceThrottleBudgetStopCount',
+    'awsServiceThrottleCount',
     'budgetStopCount',
     'cadenceWaitCount',
     'cadenceWaitMilliseconds',
     'forfeitedAttemptCount',
     'maximumInFlight',
+    'operationalBudgetStopCount',
     'policyVersion',
+    'rehearsalInjectedBudgetStopCount',
+    'rehearsalInjectedThrottleCount',
     'throttleCount',
     'version',
   ])
-  if (readOwn(record, 'version') !== 1) return failChildMaterial()
+  if (
+    readOwn(record, 'version') !==
+      WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION
+  ) return failChildMaterial()
   const policyVersion = readDigest(readOwn(record, 'policyVersion'))
   if (policyVersion !== expectedPolicyVersion) return failChildMaterial()
   const maximumInFlight = readOwn(record, 'maximumInFlight')
   if (maximumInFlight !== 0 && maximumInFlight !== 1) {
     return failChildMaterial()
   }
-  return Object.freeze({
-    version: 1,
-    policyVersion,
-    attemptCount: readNonNegativeInteger(readOwn(record, 'attemptCount')),
-    forfeitedAttemptCount:
-      readNonNegativeInteger(readOwn(record, 'forfeitedAttemptCount')),
-    throttleCount:
-      readNonNegativeInteger(readOwn(record, 'throttleCount')),
-    budgetStopCount:
-      readNonNegativeInteger(readOwn(record, 'budgetStopCount')),
-    cadenceWaitCount:
-      readNonNegativeInteger(readOwn(record, 'cadenceWaitCount')),
-    cadenceWaitMilliseconds:
-      readNonNegativeInteger(readOwn(record, 'cadenceWaitMilliseconds')),
-    maximumInFlight,
-  })
+  const aggregate: WorkspaceSearchMigrationDescribeTableRateEvidence =
+    Object.freeze({
+      version:
+        WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
+      policyVersion,
+      attemptCount: readNonNegativeInteger(
+        readOwn(record, 'attemptCount'),
+      ),
+      forfeitedAttemptCount:
+        readNonNegativeInteger(readOwn(record, 'forfeitedAttemptCount')),
+      throttleCount:
+        readNonNegativeInteger(readOwn(record, 'throttleCount')),
+      awsServiceThrottleCount:
+        readNonNegativeInteger(readOwn(record, 'awsServiceThrottleCount')),
+      rehearsalInjectedThrottleCount: readNonNegativeInteger(
+        readOwn(record, 'rehearsalInjectedThrottleCount'),
+      ),
+      budgetStopCount:
+        readNonNegativeInteger(readOwn(record, 'budgetStopCount')),
+      operationalBudgetStopCount: readNonNegativeInteger(
+        readOwn(record, 'operationalBudgetStopCount'),
+      ),
+      awsServiceThrottleBudgetStopCount: readNonNegativeInteger(
+        readOwn(record, 'awsServiceThrottleBudgetStopCount'),
+      ),
+      rehearsalInjectedBudgetStopCount: readNonNegativeInteger(
+        readOwn(record, 'rehearsalInjectedBudgetStopCount'),
+      ),
+      cadenceWaitCount:
+        readNonNegativeInteger(readOwn(record, 'cadenceWaitCount')),
+      cadenceWaitMilliseconds:
+        readNonNegativeInteger(readOwn(record, 'cadenceWaitMilliseconds')),
+      maximumInFlight,
+    })
+  if (
+    aggregate.throttleCount !==
+      aggregate.awsServiceThrottleCount +
+        aggregate.rehearsalInjectedThrottleCount ||
+    aggregate.budgetStopCount !==
+      aggregate.operationalBudgetStopCount +
+        aggregate.awsServiceThrottleBudgetStopCount +
+        aggregate.rehearsalInjectedBudgetStopCount
+  ) return failChildMaterial()
+  return aggregate
 }
 
 /** Reauthenticates exact segment bytes and matches their claimed summary. */

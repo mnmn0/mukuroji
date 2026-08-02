@@ -6,6 +6,7 @@ import {
   type CrossDomainIntegrityResourceIdentity,
 } from '../../data-integrity/cross-domain-integrity'
 import {
+  createMigrationDigest,
   isCanonicalTimestamp,
   isHexDigest,
   serializeCanonicalJson,
@@ -150,6 +151,18 @@ export type CreateWorkspaceSearchMigrationRehearsalPermitInput = {
   readonly claims: WorkspaceSearchMigrationRehearsalPermitClaims
   /** Dedicated 32-byte in-memory permit signing key. */
   readonly signingKey: Uint8Array
+}
+
+/** Inputs fixing the main rehearsal resource-attestation digest. */
+export type CreateWorkspaceSearchMigrationRehearsalResourceAttestationDigestInput = {
+  /** Exact measured six-table configuration digest. */
+  readonly configurationHash: string
+  /** Source-controlled deployment trust-root digest. */
+  readonly deploymentTrustRootDigest: string
+  /** Private production account that remains unreachable. */
+  readonly productionAccount: string
+  /** Digest of the exact requested main migration resources. */
+  readonly requestedResourcesBinding: string
 }
 
 /** Fixed canonical permit claim fields in serialization order. */
@@ -457,6 +470,50 @@ export function createWorkspaceSearchMigrationRehearsalProductionAccountDigest(
     )
     .update(readAccount(account), 'utf8')
     .digest('hex')
+}
+
+/**
+ * Derives the exact secret-free main-session resource attestation.
+ *
+ * This helper is shared by measured session publication and alarm-purpose
+ * permit issuance so an alarm plan cannot restate a different main resource
+ * session while preserving the same account, commit, or caller.
+ *
+ * @param input - Exact measured configuration and reviewed deployment claims.
+ * @returns Domain-separated lowercase SHA-256 digest.
+ */
+export function createWorkspaceSearchMigrationRehearsalResourceAttestationDigest(
+  input: CreateWorkspaceSearchMigrationRehearsalResourceAttestationDigestInput,
+): string {
+  const record = permitGuards.requireRecord(input)
+  permitGuards.requireExactKeys(record, [
+    'configurationHash',
+    'deploymentTrustRootDigest',
+    'productionAccount',
+    'requestedResourcesBinding',
+  ])
+  const configurationHash = permitGuards.readDigest(
+    permitGuards.readOwn(record, 'configurationHash'),
+  )
+  const deploymentTrustRootDigest = permitGuards.readDigest(
+    permitGuards.readOwn(record, 'deploymentTrustRootDigest'),
+  )
+  const productionAccount = readAccount(
+    permitGuards.readOwn(record, 'productionAccount'),
+  )
+  const requestedResourcesBinding = permitGuards.readDigest(
+    permitGuards.readOwn(record, 'requestedResourcesBinding'),
+  )
+  return createMigrationDigest({
+    configurationHash,
+    deploymentTrustRootDigest,
+    environmentTag: WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE,
+    productionAccountDigest:
+      createWorkspaceSearchMigrationRehearsalProductionAccountDigest(
+        productionAccount,
+      ),
+    requestedResourcesBinding,
+  })
 }
 
 /**

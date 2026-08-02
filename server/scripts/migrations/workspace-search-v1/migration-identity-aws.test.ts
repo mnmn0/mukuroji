@@ -81,12 +81,14 @@ import {
   WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
 } from './migration-telemetry'
 import {
+  completeWorkspaceSearchMigrationRehearsalReconciliation,
   createAwsWorkspaceSearchMigrationIdentityPort,
   type JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput,
   type WorkspaceSearchMigrationIdentityAwsSdkConfigurations,
   type WorkspaceSearchMigrationManagedAwsTransport,
   type WorkspaceSearchMigrationManagedAwsSession,
   type WorkspaceSearchMigrationManagedPartialRollbackAwsPort,
+  WorkspaceSearchMigrationRehearsalCollectedReconciliationBase,
   WORKSPACE_SEARCH_MIGRATION_MANAGED_ARTIFACT_REQUEST_TIMEOUT_MILLISECONDS,
   WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_CANONICAL_BYTES,
   WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_OPERATIONS,
@@ -1846,7 +1848,12 @@ function createRecordingManagedRateHarness(
         attemptCount: 0,
         forfeitedAttemptCount: 0,
         throttleCount: 0,
+        awsServiceThrottleCount: 0,
+        rehearsalInjectedThrottleCount: 0,
         budgetStopCount: 0,
+        operationalBudgetStopCount: 0,
+        awsServiceThrottleBudgetStopCount: 0,
+        rehearsalInjectedBudgetStopCount: 0,
         cadenceWaitCount: 0,
         cadenceWaitMilliseconds: 0,
         maximumInFlight: 0,
@@ -1860,7 +1867,12 @@ function createRecordingManagedRateHarness(
           attemptCount: 0,
           forfeitedAttemptCount: 0,
           throttleCount: 0,
+          awsServiceThrottleCount: 0,
+          rehearsalInjectedThrottleCount: 0,
           budgetStopCount: 0,
+          operationalBudgetStopCount: 0,
+          awsServiceThrottleBudgetStopCount: 0,
+          rehearsalInjectedBudgetStopCount: 0,
           cadenceWaitCount: 0,
           cadenceWaitMilliseconds: 0,
           maximumInFlight: 0,
@@ -13983,7 +13995,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
     port.close()
   })
 
-  test('rejects reconciliation on production after consuming its owned key', async () => {
+  test('rejects reconciliation on production before Query I/O', async () => {
     const transport = new RecordingIdentityAwsTransport()
     const port = createAwsWorkspaceSearchMigrationIdentityPort(
       createRequestedResources(),
@@ -13996,8 +14008,6 @@ describe('Workspace Search migration AWS identity adapter', () => {
     if (typeof collect !== 'function') {
       throw new Error('Expected internal reconciliation capability.')
     }
-    const digestKey = new Uint8Array(32).fill(0x5a)
-
     await expect(Reflect.apply(collect, port, [{
       runId: 'production-reconciliation-rejected',
       runLocatorDigest: createMigrationDigest('restricted-run-locator'),
@@ -14006,11 +14016,6 @@ describe('Workspace Search migration AWS identity adapter', () => {
         maintenanceEvidenceRenewalCount: 1,
         receiptDigest: createMigrationDigest('authority-receipt'),
       }],
-      integrity: {
-        kind: 'verified-result',
-        resultBytes: new Uint8Array([0x7b, 0x7d]),
-        digestKey,
-      },
       limits: {
         maximumPages: 2,
         maximumItems: 10,
@@ -14022,9 +14027,24 @@ describe('Workspace Search migration AWS identity adapter', () => {
     }])).rejects.toMatchObject({
       code: 'NON_PRODUCTION_REHEARSAL_GUARD_FAILED',
     })
-    expect([...digestKey]).toEqual(Array.from({ length: 32 }, () => 0))
     expect(transport.queryStatePageCommands).toHaveLength(0)
     port.close()
+  })
+
+  test('rejects forged collected reconciliation completion capabilities', () => {
+    expect(() =>
+      new WorkspaceSearchMigrationRehearsalCollectedReconciliationBase(
+        Symbol('forged-collected-base'),
+      )
+    ).toThrow('Workspace Search migration rehearsal reconciliation failed.')
+    expect(() => Reflect.apply(
+      completeWorkspaceSearchMigrationRehearsalReconciliation,
+      undefined,
+      [{
+        collectedBase: Object.freeze({}),
+        verifiedIntegrity: null,
+      }],
+    )).toThrow('Workspace Search migration rehearsal reconciliation failed.')
   })
 })
 

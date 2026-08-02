@@ -59,12 +59,17 @@ const rootMeasurementInputKeys = Object.freeze([
 /** Exact fields of one durable DescribeTable aggregate snapshot. */
 const rateEvidenceKeys = Object.freeze([
   'attemptCount',
+  'awsServiceThrottleBudgetStopCount',
+  'awsServiceThrottleCount',
   'budgetStopCount',
   'cadenceWaitCount',
   'cadenceWaitMilliseconds',
   'forfeitedAttemptCount',
   'maximumInFlight',
+  'operationalBudgetStopCount',
   'policyVersion',
+  'rehearsalInjectedBudgetStopCount',
+  'rehearsalInjectedThrottleCount',
   'throttleCount',
   'version',
 ])
@@ -152,27 +157,8 @@ type RootMeasurementInputSnapshot = {
 }
 
 /** Detached strictly parsed cumulative rate evidence. */
-type RootMeasurementRateSnapshot = {
-  /** Exact rate evidence contract version. */
-  readonly version:
-    typeof WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION
-  /** Stable reviewed policy digest. */
-  readonly policyVersion: string
-  /** Cumulative conservatively charged attempt count. */
-  readonly attemptCount: number
-  /** Cumulative interrupted-attempt forfeiture count. */
-  readonly forfeitedAttemptCount: number
-  /** Cumulative throttled attempt count. */
-  readonly throttleCount: number
-  /** Cumulative fail-closed admission stop count. */
-  readonly budgetStopCount: number
-  /** Cumulative cadence wait count. */
-  readonly cadenceWaitCount: number
-  /** Cumulative cadence delay in milliseconds. */
-  readonly cadenceWaitMilliseconds: number
-  /** Maximum cumulative charged in-flight episode count. */
-  readonly maximumInFlight: 0 | 1
-}
+type RootMeasurementRateSnapshot =
+  WorkspaceSearchMigrationDescribeTableRateEvidence
 
 /** Private causal state consumed with the exact measured result. */
 type AuthenticatedRootMeasurementState = {
@@ -405,7 +391,7 @@ function readRateEvidence(value: unknown): RootMeasurementRateSnapshot {
   if (maximumInFlight !== 0 && maximumInFlight !== 1) {
     return failRootMeasurement()
   }
-  return Object.freeze({
+  const snapshot: RootMeasurementRateSnapshot = Object.freeze({
     version,
     policyVersion,
     attemptCount: readNonNegativeCount(record, 'attemptCount'),
@@ -414,7 +400,27 @@ function readRateEvidence(value: unknown): RootMeasurementRateSnapshot {
       'forfeitedAttemptCount',
     ),
     throttleCount: readNonNegativeCount(record, 'throttleCount'),
+    awsServiceThrottleCount: readNonNegativeCount(
+      record,
+      'awsServiceThrottleCount',
+    ),
+    rehearsalInjectedThrottleCount: readNonNegativeCount(
+      record,
+      'rehearsalInjectedThrottleCount',
+    ),
     budgetStopCount: readNonNegativeCount(record, 'budgetStopCount'),
+    operationalBudgetStopCount: readNonNegativeCount(
+      record,
+      'operationalBudgetStopCount',
+    ),
+    awsServiceThrottleBudgetStopCount: readNonNegativeCount(
+      record,
+      'awsServiceThrottleBudgetStopCount',
+    ),
+    rehearsalInjectedBudgetStopCount: readNonNegativeCount(
+      record,
+      'rehearsalInjectedBudgetStopCount',
+    ),
     cadenceWaitCount: readNonNegativeCount(record, 'cadenceWaitCount'),
     cadenceWaitMilliseconds: readNonNegativeCount(
       record,
@@ -422,6 +428,16 @@ function readRateEvidence(value: unknown): RootMeasurementRateSnapshot {
     ),
     maximumInFlight,
   })
+  if (
+    snapshot.throttleCount !==
+      snapshot.awsServiceThrottleCount +
+        snapshot.rehearsalInjectedThrottleCount ||
+    snapshot.budgetStopCount !==
+      snapshot.operationalBudgetStopCount +
+        snapshot.awsServiceThrottleBudgetStopCount +
+        snapshot.rehearsalInjectedBudgetStopCount
+  ) return failRootMeasurement()
+  return snapshot
 }
 
 /** Reads one exact non-negative cumulative rate counter. */
@@ -443,7 +459,12 @@ function requireCleanRootRateStart(
     before.attemptCount !== 0 ||
     before.forfeitedAttemptCount !== 0 ||
     before.throttleCount !== 0 ||
+    before.awsServiceThrottleCount !== 0 ||
+    before.rehearsalInjectedThrottleCount !== 0 ||
     before.budgetStopCount !== 0 ||
+    before.operationalBudgetStopCount !== 0 ||
+    before.awsServiceThrottleBudgetStopCount !== 0 ||
+    before.rehearsalInjectedBudgetStopCount !== 0 ||
     before.cadenceWaitCount !== 0 ||
     before.cadenceWaitMilliseconds !== 0 ||
     before.maximumInFlight !== 0
@@ -463,7 +484,16 @@ function requireExactRootRateDelta(
       before.attemptCount + rootMeasurementDescribeTableCallCount ||
     after.forfeitedAttemptCount !== before.forfeitedAttemptCount ||
     after.throttleCount !== before.throttleCount ||
+    after.awsServiceThrottleCount !== before.awsServiceThrottleCount ||
+    after.rehearsalInjectedThrottleCount !==
+      before.rehearsalInjectedThrottleCount ||
     after.budgetStopCount !== before.budgetStopCount ||
+    after.operationalBudgetStopCount !==
+      before.operationalBudgetStopCount ||
+    after.awsServiceThrottleBudgetStopCount !==
+      before.awsServiceThrottleBudgetStopCount ||
+    after.rehearsalInjectedBudgetStopCount !==
+      before.rehearsalInjectedBudgetStopCount ||
     after.cadenceWaitCount < before.cadenceWaitCount ||
     after.cadenceWaitMilliseconds < before.cadenceWaitMilliseconds ||
     after.maximumInFlight !== 1

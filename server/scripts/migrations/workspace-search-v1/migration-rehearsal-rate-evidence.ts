@@ -12,10 +12,12 @@ import {
 } from './migration-contract'
 import type {
   WorkspaceSearchMigrationDescribeTablePhase,
+  WorkspaceSearchMigrationDescribeTableBudgetStopProvenance,
   WorkspaceSearchMigrationDescribeTableRateEvidence,
   WorkspaceSearchMigrationDescribeTableRateObservation,
   WorkspaceSearchMigrationDescribeTableRateRecorder,
   WorkspaceSearchMigrationDescribeTableRateStopReason,
+  WorkspaceSearchMigrationDescribeTableThrottleProvenance,
 } from './migration-describe-table-rate-budget'
 import {
   WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
@@ -25,7 +27,7 @@ import {
 } from './migration-strict-record-guards'
 
 /** Version of the authenticated rehearsal rate-segment contract. */
-export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RATE_SEGMENT_VERSION = 1
+export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RATE_SEGMENT_VERSION = 2
 
 /** Exact HMAC key length accepted by the rate evidence stream. */
 export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RATE_KEY_BYTES = 32
@@ -55,11 +57,11 @@ const maximumRateCount = 10_000_000
 
 /** Domain separating rate-record HMACs from all other migration artifacts. */
 const rateRecordMacDomain =
-  'mukuroji:workspace-search-migration:rehearsal-rate-record:v1'
+  'mukuroji:workspace-search-migration:rehearsal-rate-record:v2'
 
 /** Domain separating the secret-free rate authentication-key fingerprint. */
 const rateAuthenticationKeyFingerprintDomain =
-  'mukuroji:workspace-search-migration:rehearsal-rate-authentication-key-fingerprint:v1'
+  'mukuroji:workspace-search-migration:rehearsal-rate-authentication-key-fingerprint:v2'
 
 /** Stable public failure used for malformed or inconsistent evidence. */
 const invalidRateEvidenceMessage = 'Invalid migration rehearsal rate evidence.'
@@ -79,17 +81,28 @@ const rateSegmentHeaderKind =
 /** Actual identifier-free DescribeTable rate aggregate. */
 export type WorkspaceSearchMigrationRehearsalRateAggregate = {
   /** Secret-free rate observation contract version. */
-  readonly version: 1
+  readonly version:
+    typeof WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION
   /** Digest of the reviewed rate-policy document. */
   readonly policyVersion: string
   /** Conservatively charged physical attempts. */
   readonly attemptCount: number
   /** Charged permits forfeited while recovering interrupted pages. */
   readonly forfeitedAttemptCount: number
-  /** Attempts classified as throttled. */
+  /** Total attempts classified as throttled from every explicit provenance. */
   readonly throttleCount: number
-  /** Fail-closed admission stops. */
+  /** Throttles returned by the genuine AWS service. */
+  readonly awsServiceThrottleCount: number
+  /** Deterministic throttles injected only after one physical AWS success. */
+  readonly rehearsalInjectedThrottleCount: number
+  /** Total fail-closed admission stops from every explicit provenance. */
   readonly budgetStopCount: number
+  /** Admission stops unrelated to a classified throttle. */
+  readonly operationalBudgetStopCount: number
+  /** Admission stops caused by genuine AWS-service throttles. */
+  readonly awsServiceThrottleBudgetStopCount: number
+  /** Admission stops caused by deterministic post-success injection. */
+  readonly rehearsalInjectedBudgetStopCount: number
   /** Admission cadence waits before external I/O. */
   readonly cadenceWaitCount: number
   /** Total requested cadence delay in milliseconds. */
@@ -108,7 +121,13 @@ export type WorkspaceSearchMigrationRehearsalRateEvidence = {
   readonly observationStreamDigest: string
   /** Exact number of observations in the immutable stream. */
   readonly observationCount: number
-  /** Maximum observed physical attempt-start rate per second. */
+  /**
+   * Actual maximum physical AWS request-start rate per second.
+   *
+   * This is calculated only from authenticated `attempt-started` events and
+   * therefore includes a successful request later classified by the
+   * deterministic post-success throttle exercise.
+   */
   readonly observedMaximumRatePerSecond: number
 }
 
@@ -478,6 +497,9 @@ type RateEventPayload = RateEventBase & (
     readonly phase: WorkspaceSearchMigrationDescribeTablePhase
     /** Bounded cooldown selected by the controller. */
     readonly backoffMilliseconds: number
+    /** Authenticated origin of this controller-classified throttle. */
+    readonly provenance:
+      WorkspaceSearchMigrationDescribeTableThrottleProvenance
   }
   | {
     /** Admission stopped before another external operation. */
@@ -494,6 +516,9 @@ type RateEventPayload = RateEventBase & (
     readonly remainingWindowAttempts: number
     /** Bounded delay before explicit retry. */
     readonly retryAfterMilliseconds: number
+    /** Authenticated operational or throttle-specific stop origin. */
+    readonly provenance:
+      WorkspaceSearchMigrationDescribeTableBudgetStopProvenance
   }
   | {
     /** Admission waited before starting external I/O. */
@@ -580,10 +605,20 @@ type RateAggregationState = {
   attemptCount: number
   /** Number of interrupted checkpoint-page reservation permits forfeited. */
   forfeitedAttemptCount: number
-  /** Number of throttled physical attempts. */
+  /** Total number of throttled physical attempts. */
   throttleCount: number
-  /** Number of fail-closed stops. */
+  /** Number of genuine AWS-service throttles. */
+  awsServiceThrottleCount: number
+  /** Number of deterministic post-success injected throttles. */
+  rehearsalInjectedThrottleCount: number
+  /** Total number of fail-closed stops. */
   budgetStopCount: number
+  /** Number of non-throttle admission stops. */
+  operationalBudgetStopCount: number
+  /** Number of stops caused by genuine AWS-service throttles. */
+  awsServiceThrottleBudgetStopCount: number
+  /** Number of stops caused by deterministic post-success injection. */
+  rehearsalInjectedBudgetStopCount: number
   /** Number of cadence waits. */
   cadenceWaitCount: number
   /** Sum of requested cadence waits. */
@@ -600,6 +635,9 @@ type RateAggregationState = {
   readonly startedAttemptSequences: Set<number>
   /** Physical attempt sequences already classified as throttled. */
   readonly throttledAttemptSequences: Set<number>
+  /** Throttle provenance that the immediately following stop must close. */
+  pendingThrottleProvenance:
+    WorkspaceSearchMigrationDescribeTableThrottleProvenance | null
   /** Most recent started attempt sequence. */
   lastStartedAttemptSequence: number | null
   /** Absolute UTC millisecond timestamps for physical starts. */
@@ -1647,15 +1685,19 @@ function convertRateObservation(
         backoffMilliseconds: readNonNegativeCount(
           observation.backoffMilliseconds,
         ),
+        provenance: readThrottleProvenance(observation.provenance),
         observedAtMilliseconds: readMonotonicTime(
           observation.observedAtMilliseconds,
         ),
       })])
-    case 'budget-stop':
+    case 'budget-stop': {
+      const reason = readStopReason(observation.reason)
+      const provenance = readBudgetStopProvenance(observation.provenance)
+      requireBudgetStopProvenanceMatchesReason(provenance, reason)
       return Object.freeze([Object.freeze({
         kind: 'budget-stop',
         phase: readPhase(observation.phase),
-        reason: readStopReason(observation.reason),
+        reason,
         requiredAttempts: readNonNegativeCount(
           observation.requiredAttempts,
         ),
@@ -1668,10 +1710,12 @@ function convertRateObservation(
         retryAfterMilliseconds: readNonNegativeCount(
           observation.retryAfterMilliseconds,
         ),
+        provenance,
         observedAtMilliseconds: readMonotonicTime(
           observation.observedAtMilliseconds,
         ),
       })])
+    }
     case 'cadence-wait':
       return Object.freeze([Object.freeze({
         kind: 'cadence-wait',
@@ -1743,6 +1787,7 @@ function createEventPayload(
         attemptSequence: event.attemptSequence,
         phase: event.phase,
         backoffMilliseconds: event.backoffMilliseconds,
+        provenance: event.provenance,
       })
     case 'budget-stop':
       return Object.freeze({
@@ -1755,6 +1800,7 @@ function createEventPayload(
           event.remainingNormalAdmissionAttempts,
         remainingWindowAttempts: event.remainingWindowAttempts,
         retryAfterMilliseconds: event.retryAfterMilliseconds,
+        provenance: event.provenance,
       })
     case 'cadence-wait':
       return Object.freeze({
@@ -2127,6 +2173,7 @@ function parseEvent(value: unknown, key: Uint8Array): RateEvent {
         'attemptSequence',
         'backoffMilliseconds',
         'phase',
+        'provenance',
       ])
       payload = Object.freeze({
         ...readEventBase(record),
@@ -2137,6 +2184,9 @@ function parseEvent(value: unknown, key: Uint8Array): RateEvent {
         phase: readPhase(rateGuards.readOwn(record, 'phase')),
         backoffMilliseconds: readPositiveCount(
           rateGuards.readOwn(record, 'backoffMilliseconds'),
+        ),
+        provenance: readThrottleProvenance(
+          rateGuards.readOwn(record, 'provenance'),
         ),
       })
       break
@@ -2149,12 +2199,18 @@ function parseEvent(value: unknown, key: Uint8Array): RateEvent {
         'remainingWindowAttempts',
         'requiredAttempts',
         'retryAfterMilliseconds',
+        'provenance',
       ])
+      const reason = readStopReason(rateGuards.readOwn(record, 'reason'))
+      const provenance = readBudgetStopProvenance(
+        rateGuards.readOwn(record, 'provenance'),
+      )
+      requireBudgetStopProvenanceMatchesReason(provenance, reason)
       payload = Object.freeze({
         ...readEventBase(record),
         kind,
         phase: readPhase(rateGuards.readOwn(record, 'phase')),
-        reason: readStopReason(rateGuards.readOwn(record, 'reason')),
+        reason,
         requiredAttempts: readNonNegativeCount(
           rateGuards.readOwn(record, 'requiredAttempts'),
         ),
@@ -2167,6 +2223,7 @@ function parseEvent(value: unknown, key: Uint8Array): RateEvent {
         retryAfterMilliseconds: readNonNegativeCount(
           rateGuards.readOwn(record, 'retryAfterMilliseconds'),
         ),
+        provenance,
       })
       break
     case 'cadence-wait':
@@ -2241,7 +2298,12 @@ function aggregateRateEvents(
     attemptCount: 0,
     forfeitedAttemptCount: 0,
     throttleCount: 0,
+    awsServiceThrottleCount: 0,
+    rehearsalInjectedThrottleCount: 0,
     budgetStopCount: 0,
+    operationalBudgetStopCount: 0,
+    awsServiceThrottleBudgetStopCount: 0,
+    rehearsalInjectedBudgetStopCount: 0,
     cadenceWaitCount: 0,
     cadenceWaitMilliseconds: 0,
     maximumInFlight: 0,
@@ -2250,6 +2312,7 @@ function aggregateRateEvents(
     nextAttemptSequence: 1,
     startedAttemptSequences: new Set<number>(),
     throttledAttemptSequences: new Set<number>(),
+    pendingThrottleProvenance: null,
     lastStartedAttemptSequence: null,
     attemptStartedAtEpochMilliseconds: [],
   }
@@ -2260,6 +2323,13 @@ function aggregateRateEvents(
         state.pendingAttemptSequence !== null &&
         event.kind !== 'attempt-started' &&
         event.kind !== 'attempt-forfeited'
+      ) {
+        return failInvalidRateEvidence()
+      }
+      if (
+        state.pendingThrottleProvenance !== null &&
+        event.kind !== 'budget-stop' &&
+        event.kind !== 'cadence-wait'
       ) {
         return failInvalidRateEvidence()
       }
@@ -2313,6 +2383,18 @@ function aggregateRateEvents(
           }
           state.throttledAttemptSequences.add(event.attemptSequence)
           state.throttleCount = addBoundedCounts(state.throttleCount, 1)
+          if (event.provenance === 'aws-service') {
+            state.awsServiceThrottleCount = addBoundedCounts(
+              state.awsServiceThrottleCount,
+              1,
+            )
+          } else {
+            state.rehearsalInjectedThrottleCount = addBoundedCounts(
+              state.rehearsalInjectedThrottleCount,
+              1,
+            )
+          }
+          state.pendingThrottleProvenance = event.provenance
           break
         case 'reservation-forfeited':
           state.forfeitedAttemptCount = addBoundedCounts(
@@ -2321,10 +2403,42 @@ function aggregateRateEvents(
           )
           break
         case 'budget-stop':
+          if (
+            event.provenance === 'operational'
+              ? state.pendingThrottleProvenance !== null
+              : state.pendingThrottleProvenance === null ||
+                !doesBudgetStopCloseThrottle(
+                  event.provenance,
+                  state.pendingThrottleProvenance,
+                )
+          ) {
+            return failInvalidRateEvidence()
+          }
           state.budgetStopCount = addBoundedCounts(
             state.budgetStopCount,
             1,
           )
+          switch (event.provenance) {
+            case 'operational':
+              state.operationalBudgetStopCount = addBoundedCounts(
+                state.operationalBudgetStopCount,
+                1,
+              )
+              break
+            case 'aws-service-throttle':
+              state.awsServiceThrottleBudgetStopCount = addBoundedCounts(
+                state.awsServiceThrottleBudgetStopCount,
+                1,
+              )
+              break
+            case 'rehearsal-after-success-injection':
+              state.rehearsalInjectedBudgetStopCount = addBoundedCounts(
+                state.rehearsalInjectedBudgetStopCount,
+                1,
+              )
+              break
+          }
+          state.pendingThrottleProvenance = null
           break
         case 'cadence-wait':
           state.cadenceWaitCount = addBoundedCounts(
@@ -2342,10 +2456,20 @@ function aggregateRateEvents(
   if (
     state.pendingAttemptSequence !== null ||
     state.pendingAttemptChargedAtEpochMilliseconds !== null ||
+    state.pendingThrottleProvenance !== null ||
     state.attemptCount < 1 ||
     state.attemptStartedAtEpochMilliseconds.length < 1 ||
-    state.throttleCount < 1 ||
-    state.budgetStopCount < 1
+    state.throttleCount !== addBoundedCounts(
+      state.awsServiceThrottleCount,
+      state.rehearsalInjectedThrottleCount,
+    ) ||
+    state.budgetStopCount !== addBoundedCounts(
+      addBoundedCounts(
+        state.operationalBudgetStopCount,
+        state.awsServiceThrottleBudgetStopCount,
+      ),
+      state.rehearsalInjectedBudgetStopCount,
+    )
   ) {
     return failInvalidRateEvidence()
   }
@@ -2364,7 +2488,14 @@ function createRateAggregate(
     attemptCount: state.attemptCount,
     forfeitedAttemptCount: state.forfeitedAttemptCount,
     throttleCount: state.throttleCount,
+    awsServiceThrottleCount: state.awsServiceThrottleCount,
+    rehearsalInjectedThrottleCount: state.rehearsalInjectedThrottleCount,
     budgetStopCount: state.budgetStopCount,
+    operationalBudgetStopCount: state.operationalBudgetStopCount,
+    awsServiceThrottleBudgetStopCount:
+      state.awsServiceThrottleBudgetStopCount,
+    rehearsalInjectedBudgetStopCount:
+      state.rehearsalInjectedBudgetStopCount,
     cadenceWaitCount: state.cadenceWaitCount,
     cadenceWaitMilliseconds: state.cadenceWaitMilliseconds,
     maximumInFlight: state.maximumInFlight,
@@ -2474,12 +2605,17 @@ function readDurableEvidence(
   const record = rateGuards.requireRecord(value)
   rateGuards.requireExactKeys(record, [
     'attemptCount',
+    'awsServiceThrottleBudgetStopCount',
+    'awsServiceThrottleCount',
     'budgetStopCount',
     'cadenceWaitCount',
     'cadenceWaitMilliseconds',
     'forfeitedAttemptCount',
     'maximumInFlight',
+    'operationalBudgetStopCount',
     'policyVersion',
+    'rehearsalInjectedBudgetStopCount',
+    'rehearsalInjectedThrottleCount',
     'throttleCount',
     'version',
   ])
@@ -2492,6 +2628,40 @@ function readDurableEvidence(
   ) {
     return failInvalidRateEvidence()
   }
+  const throttleCount = readNonNegativeCount(
+    rateGuards.readOwn(record, 'throttleCount'),
+  )
+  const awsServiceThrottleCount = readNonNegativeCount(
+    rateGuards.readOwn(record, 'awsServiceThrottleCount'),
+  )
+  const rehearsalInjectedThrottleCount = readNonNegativeCount(
+    rateGuards.readOwn(record, 'rehearsalInjectedThrottleCount'),
+  )
+  const budgetStopCount = readNonNegativeCount(
+    rateGuards.readOwn(record, 'budgetStopCount'),
+  )
+  const operationalBudgetStopCount = readNonNegativeCount(
+    rateGuards.readOwn(record, 'operationalBudgetStopCount'),
+  )
+  const awsServiceThrottleBudgetStopCount = readNonNegativeCount(
+    rateGuards.readOwn(record, 'awsServiceThrottleBudgetStopCount'),
+  )
+  const rehearsalInjectedBudgetStopCount = readNonNegativeCount(
+    rateGuards.readOwn(record, 'rehearsalInjectedBudgetStopCount'),
+  )
+  if (
+    throttleCount !== addBoundedCounts(
+      awsServiceThrottleCount,
+      rehearsalInjectedThrottleCount,
+    ) ||
+    budgetStopCount !== addBoundedCounts(
+      addBoundedCounts(
+        operationalBudgetStopCount,
+        awsServiceThrottleBudgetStopCount,
+      ),
+      rehearsalInjectedBudgetStopCount,
+    )
+  ) return failInvalidRateEvidence()
   return Object.freeze({
     version: WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
     policyVersion: expectedPolicyVersion,
@@ -2501,12 +2671,13 @@ function readDurableEvidence(
     forfeitedAttemptCount: readNonNegativeCount(
       rateGuards.readOwn(record, 'forfeitedAttemptCount'),
     ),
-    throttleCount: readNonNegativeCount(
-      rateGuards.readOwn(record, 'throttleCount'),
-    ),
-    budgetStopCount: readNonNegativeCount(
-      rateGuards.readOwn(record, 'budgetStopCount'),
-    ),
+    throttleCount,
+    awsServiceThrottleCount,
+    rehearsalInjectedThrottleCount,
+    budgetStopCount,
+    operationalBudgetStopCount,
+    awsServiceThrottleBudgetStopCount,
+    rehearsalInjectedBudgetStopCount,
     cadenceWaitCount: readNonNegativeCount(
       rateGuards.readOwn(record, 'cadenceWaitCount'),
     ),
@@ -2755,6 +2926,77 @@ function readStopReason(
     default:
       return failInvalidRateEvidence()
   }
+}
+
+/**
+ * Reads one exact source classification for a throttled physical attempt.
+ *
+ * @param value - Candidate provenance from a controller observation or record.
+ * @returns Validated finite physical-throttle provenance.
+ */
+function readThrottleProvenance(
+  value: unknown,
+): WorkspaceSearchMigrationDescribeTableThrottleProvenance {
+  switch (value) {
+    case 'aws-service':
+    case 'rehearsal-after-success-injection':
+      return value
+    default:
+      return failInvalidRateEvidence()
+  }
+}
+
+/**
+ * Reads one exact operational or throttle-derived budget-stop provenance.
+ *
+ * @param value - Candidate provenance from a controller observation or record.
+ * @returns Validated finite budget-stop provenance.
+ */
+function readBudgetStopProvenance(
+  value: unknown,
+): WorkspaceSearchMigrationDescribeTableBudgetStopProvenance {
+  switch (value) {
+    case 'operational':
+    case 'aws-service-throttle':
+    case 'rehearsal-after-success-injection':
+      return value
+    default:
+      return failInvalidRateEvidence()
+  }
+}
+
+/**
+ * Requires a stop reason to agree with its explicit source classification.
+ *
+ * @param provenance - Validated explicit stop source.
+ * @param reason - Validated stable admission-stop reason.
+ */
+function requireBudgetStopProvenanceMatchesReason(
+  provenance: WorkspaceSearchMigrationDescribeTableBudgetStopProvenance,
+  reason: WorkspaceSearchMigrationDescribeTableRateStopReason,
+): void {
+  if (
+    (provenance === 'operational' && reason === 'throttled') ||
+    (provenance !== 'operational' && reason !== 'throttled')
+  ) return failInvalidRateEvidence()
+}
+
+/**
+ * Returns whether one throttle-derived stop closes the same source event.
+ *
+ * @param budgetStopProvenance - Validated throttle-derived stop source.
+ * @param throttleProvenance - Pending physical-throttle source.
+ * @returns Whether both classifications describe the same causal throttle.
+ */
+function doesBudgetStopCloseThrottle(
+  budgetStopProvenance:
+    WorkspaceSearchMigrationDescribeTableBudgetStopProvenance,
+  throttleProvenance:
+    WorkspaceSearchMigrationDescribeTableThrottleProvenance,
+): boolean {
+  return throttleProvenance === 'aws-service'
+    ? budgetStopProvenance === 'aws-service-throttle'
+    : budgetStopProvenance === 'rehearsal-after-success-injection'
 }
 
 /** Adds two bounded counts without permitting safe-integer overflow. */

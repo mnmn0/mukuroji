@@ -22,6 +22,9 @@ import {
   type WorkspaceSearchMigrationRehearsalRateSegmentEvidence,
   type WorkspaceSearchMigrationRehearsalVerifiedRateSegment,
 } from './migration-rehearsal-rate-evidence'
+import type {
+  WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult,
+} from './migration-rehearsal-integrity-rate-evidence'
 import {
   verifyWorkspaceSearchMigrationRehearsalStageCommitEvidenceChain,
   readWorkspaceSearchMigrationRehearsalStageCommitChainAuthorizationBinding,
@@ -69,8 +72,11 @@ import type {
   WorkspaceSearchMigrationRehearsalReconciliationCoreContext,
   WorkspaceSearchMigrationRehearsalReconciliationIntegrityResultBinding,
   WorkspaceSearchMigrationRehearsalReconciliationTargetAuditPair,
-  WorkspaceSearchMigrationRehearsalVerifiedIntegrityCollectorResult,
 } from './migration-rehearsal-reconciliation-audit'
+import type {
+  WorkspaceSearchMigrationRehearsalTargetAuditContext,
+  WorkspaceSearchMigrationRehearsalTargetAuditTerminalBinding,
+} from './migration-rehearsal-target-audit'
 import {
   createWorkspaceSearchMigrationRehearsalStageReservationAwsStore,
   createWorkspaceSearchMigrationRehearsalStageStateTableLocationBindingDigest,
@@ -651,6 +657,7 @@ function createReconciliationIntegrityResult(
 function createVerifiedRateSegment(
   predecessor: WorkspaceSearchMigrationRehearsalVerifiedRateSegment,
   label: string,
+  eventCount = 1,
 ): WorkspaceSearchMigrationRehearsalVerifiedRateSegment {
   const firstEventSequence =
     predecessor.firstEventSequence + predecessor.eventCount
@@ -659,9 +666,9 @@ function createVerifiedRateSegment(
     segmentLocatorDigest: digest(`aux-rate-locator:${label}`),
     segmentOrdinal: predecessor.segmentOrdinal + 1,
     firstEventSequence,
-    eventCount: 1,
+    eventCount,
     firstCommittedEventSequence: firstEventSequence,
-    lastCommittedEventSequence: firstEventSequence,
+    lastCommittedEventSequence: firstEventSequence + eventCount - 1,
     terminalRecordMac: digest(`aux-rate-mac:${label}`),
     segmentDigest: digest(`aux-rate-segment:${label}`),
   })
@@ -672,15 +679,23 @@ function createAuxiliaryRateEvidence(
   predecessor: WorkspaceSearchMigrationRehearsalVerifiedRateSegment,
   label: string,
   completedAt: string,
+  eventCount = 1,
+  policyVersion = digest('policy'),
+  configurationBindingDigest = digest('configuration'),
 ): WorkspaceSearchMigrationRehearsalRateSegmentEvidence {
-  const successor = createVerifiedRateSegment(predecessor, label)
+  const successor = createVerifiedRateSegment(predecessor, label, eventCount)
   const aggregate = Object.freeze({
-    version: 1,
-    policyVersion: digest('policy'),
+    version: 2,
+    policyVersion,
     attemptCount: 1,
     forfeitedAttemptCount: 0,
     throttleCount: 0,
+    awsServiceThrottleCount: 0,
+    rehearsalInjectedThrottleCount: 0,
     budgetStopCount: 0,
+    operationalBudgetStopCount: 0,
+    awsServiceThrottleBudgetStopCount: 0,
+    rehearsalInjectedBudgetStopCount: 0,
     cadenceWaitCount: 0,
     cadenceWaitMilliseconds: 0,
     maximumInFlight: 1,
@@ -693,12 +708,92 @@ function createAuxiliaryRateEvidence(
       previousSegmentDigest: predecessor.segmentDigest,
       previousRecordMac: predecessor.terminalRecordMac,
       firstEventSequence: successor.firstCommittedEventSequence ?? 1,
-      policyVersion: digest('policy'),
-      configurationBindingDigest: digest('configuration'),
+      policyVersion,
+      configurationBindingDigest,
     }),
     aggregate,
     aggregateDigest: createMigrationDigest(aggregate),
     completedAt,
+  })
+}
+
+/** Wraps one live result in its complete authenticated rate projection. */
+function createRateBoundIntegrityResult(
+  result: WorkspaceSearchMigrationRehearsalReconciliationIntegrityResultBinding,
+  rate: WorkspaceSearchMigrationRehearsalRateSegmentEvidence,
+): WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult {
+  const firstAttemptSequence = rate.successor.segmentOrdinal * 12 + 1
+  const firstEventSequence = rate.successor.firstEventSequence
+  const claims = Object.freeze({
+    kind:
+      'mukuroji-workspace-search-migration-rehearsal-rate-bound-integrity-result',
+    version: 1,
+    result,
+    predecessor: rate.predecessor,
+    segment: rate.successor,
+    interval: Object.freeze({
+      kind:
+        'mukuroji-workspace-search-migration-rehearsal-integrity-rate-interval',
+      version: 1,
+      phase: 'integrity-check',
+      tablePassCount: 2,
+      describeTableCallCount: 12,
+      firstAttemptSequence,
+      lastAttemptSequence: firstAttemptSequence + 11,
+      attemptSequences: Object.freeze(
+        Array.from(
+          { length: 12 },
+          (_value, index) => firstAttemptSequence + index,
+        ),
+      ),
+      firstEventSequence,
+      lastEventSequence: firstEventSequence + 23,
+      eventSequences: Object.freeze(
+        Array.from(
+          { length: 24 },
+          (_value, index) => firstEventSequence + index,
+        ),
+      ),
+      cadenceWaitCount: 0,
+      cadenceWaitMilliseconds: 0,
+      startedAt: result.runtimeProvenance.startedAt,
+      completedAt: result.runtimeProvenance.completedAt,
+    }),
+    policyVersion: rate.link.policyVersion,
+    configurationBindingDigest: rate.link.configurationBindingDigest,
+    tableOrderBindingMac: digest(`table-order:${result.resultDigest}`),
+  })
+  return Object.freeze({
+    ...claims,
+    bindingMac: digest(`rate-bound:${result.resultDigest}`),
+  })
+}
+
+/** Creates the exact rollback target context owned by a planning receipt. */
+function createTargetAuditContext(
+  scenario: 'complete-apply-rollback' | 'partial-apply-rollback',
+  planningReceipt: WorkspaceSearchMigrationRehearsalStageReceipt,
+): WorkspaceSearchMigrationRehearsalTargetAuditContext {
+  if (planningReceipt.evidence.kind !== 'planning-sealed') {
+    throw new Error('Expected rollback planning receipt.')
+  }
+  return Object.freeze({
+    scenario,
+    runLocatorDigest: digest(`run:${scenario}`),
+    manifestDigest: planningReceipt.manifestDigest,
+    permitDigest: planningReceipt.permitDigest,
+    requestedResourcesBinding: planningReceipt.requestedResourcesBinding,
+    configurationBindingDigest: planningReceipt.configurationBindingDigest,
+    policyVersion: planningReceipt.policyVersion,
+    integrityResourceIdentityDigest:
+      planningReceipt.integrityResourceIdentityDigest,
+    planningReceiptDigest: createMigrationDigest(planningReceipt),
+    executionBoundaryDigest:
+      planningReceipt.evidence.executionBoundaryDigest,
+    sealedPlanningAuthorityDigest:
+      planningReceipt.evidence.sealedPlanningAuthorityDigest,
+    planDigest: planningReceipt.evidence.planDigest,
+    writerFenceDigest: planningReceipt.writerFenceDigest,
   })
 }
 
@@ -733,7 +828,10 @@ function createReconciliationContext(
     Object.freeze({
       scenario,
       runLocatorDigest: digest(`run:${scenario}`),
-      configurationBindingDigest: digest('configuration'),
+      configurationBindingDigest:
+        planningReceipt.configurationBindingDigest,
+      policyVersion: planningReceipt.policyVersion,
+      integrityResourceIdentityDigest: digest('integrity-resource-identity'),
       sealedPlanningAuthorityDigest: digest(`authority:${scenario}`),
       executionRunDigest: digest(`execution-run:${scenario}`),
       planDigest: digest(`plan:${scenario}`),
@@ -748,8 +846,8 @@ function createReconciliationContext(
     })
   const migrationContextDigest = createMigrationDigest({
     kind:
-      'workspace-search-migration-rehearsal-terminal-integrity-migration-context',
-    version: 1,
+      'workspace-search-migration-rehearsal-terminal-integrity-migration-context/v3',
+    version: 3,
     ...core,
   })
   if (!rollback) {
@@ -758,14 +856,24 @@ function createReconciliationContext(
       'verified',
       stageTimestamp(entry.ordinal, 1.4),
     )
-    const fields:
-      WorkspaceSearchMigrationRehearsalVerifiedIntegrityCollectorResult =
-        Object.freeze({
+    const integrityRate = createAuxiliaryRateEvidence(
+      terminalRate,
+      `reconciliation:${scenario}`,
+      stageTimestamp(entry.ordinal, 2),
+      24,
+      core.policyVersion,
+      core.configurationBindingDigest,
+    )
+    const rateBoundResult = createRateBoundIntegrityResult(
+      result,
+      integrityRate,
+    )
+    const fields = Object.freeze({
           kind: 'verified-result',
           status: 'pass',
           failureCount: 0,
           completedAt: stageTimestamp(entry.ordinal, 1.6),
-          result,
+          result: rateBoundResult,
           terminalRootDigest,
           integrityAggregateDigest:
             digest(`integrity-aggregate:${scenario}`),
@@ -776,11 +884,17 @@ function createReconciliationContext(
         ...fields,
         resultContextDigest: createMigrationDigest({
           domain:
-            'workspace-search-migration-rehearsal-terminal-integrity-result-context',
-          version: 1,
+            'workspace-search-migration-rehearsal-terminal-integrity-result-context/v3',
+          version: 3,
           scenario,
           migrationContextDigest,
-          ...fields,
+          kind: fields.kind,
+          status: fields.status,
+          failureCount: fields.failureCount,
+          completedAt: fields.completedAt,
+          result,
+          terminalRootDigest: fields.terminalRootDigest,
+          integrityAggregateDigest: fields.integrityAggregateDigest,
         }),
         migrationContextDigest,
       }),
@@ -798,9 +912,9 @@ function createReconciliationContext(
     'after',
     stageTimestamp(entry.ordinal, 1.4),
   )
-  const startedAt = stageTimestamp(planningReceipt.stageOrdinal, 1.4)
+  const startedAt = before.runtimeProvenance.startedAt
   const applyStartedAt = stageTimestamp(planningReceipt.stageOrdinal, 2)
-  const completedAt = stageTimestamp(entry.ordinal, 1.6)
+  const completedAt = after.checkedAt
   const comparisonDigest = createMigrationDigest({
     purpose,
     beforeResultDigest: before.resultDigest,
@@ -817,13 +931,38 @@ function createReconciliationContext(
     planningReceipt.rateSegment,
     `target-preimage:${scenario}`,
     stageTimestamp(planningReceipt.stageOrdinal, 1.8),
+    24,
+    core.policyVersion,
+    core.configurationBindingDigest,
   )
   const restoredRate = createAuxiliaryRateEvidence(
     terminalRate,
     `target-restored:${scenario}`,
     stageTimestamp(entry.ordinal, 1.8),
+    24,
+    core.policyVersion,
+    core.configurationBindingDigest,
   )
-  const targetContextDigest = digest(`target-context:${scenario}`)
+  const targetContext = createTargetAuditContext(scenario, planningReceipt)
+  const targetContextDigest = createMigrationDigest(targetContext)
+  const terminal: WorkspaceSearchMigrationRehearsalTargetAuditTerminalBinding =
+    partial
+      ? Object.freeze({
+          scenario: 'partial-apply-rollback',
+          kind: 'rolled-back',
+          version: 2,
+          rootDigest: terminalRootDigest,
+          applyStartedAt,
+          terminalAt,
+        })
+      : Object.freeze({
+          scenario: 'complete-apply-rollback',
+          kind: 'rolled-back',
+          version: 1,
+          rootDigest: terminalRootDigest,
+          applyStartedAt,
+          terminalAt,
+        })
   const targetAudits:
     WorkspaceSearchMigrationRehearsalReconciliationTargetAuditPair =
       Object.freeze({
@@ -836,7 +975,9 @@ function createReconciliationContext(
           observationDigest:
             digest(`target-observation:${scenario}:preimage`),
           aggregateDigest: targetAggregateDigest,
-          integrityBefore: before,
+          context: targetContext,
+          terminal: null,
+          integrity: createRateBoundIntegrityResult(before, preimageRate),
           contextDigest: targetContextDigest,
           rate: preimageRate,
         }),
@@ -848,7 +989,9 @@ function createReconciliationContext(
           observedAt: stageTimestamp(entry.ordinal, 1.7),
           observationDigest: digest(`target-observation:${scenario}`),
           aggregateDigest: targetAggregateDigest,
-          integrityBefore: null,
+          context: targetContext,
+          terminal,
+          integrity: createRateBoundIntegrityResult(after, restoredRate),
           contextDigest: targetContextDigest,
           rate: restoredRate,
         }),
@@ -868,8 +1011,8 @@ function createReconciliationContext(
       after,
       comparisonDigest,
       comparisonContextDigest: createMigrationDigest({
-        kind: 'workspace-search-migration-rehearsal-integrity-context',
-        version: 1,
+        kind: 'workspace-search-migration-rehearsal-integrity-context/v3',
+        version: 3,
         purpose,
         startedAt,
         applyStartedAt,
@@ -994,7 +1137,7 @@ function createNonFaultEvidence(
   const integrityAfterResultDigest =
     reconciliationContext.integrity.kind === 'rollback-comparison'
       ? reconciliationContext.integrity.after.resultDigest
-      : reconciliationContext.integrity.result.resultDigest
+      : reconciliationContext.integrity.result.result.resultDigest
   const integrityComparisonDigest =
     reconciliationContext.integrity.kind === 'rollback-comparison'
       ? reconciliationContext.integrity.comparisonDigest
@@ -1010,6 +1153,9 @@ function createNonFaultEvidence(
     reconciliationPredecessor,
     `reconciliation:${entry.scenario}`,
     stageTimestamp(entry.ordinal, 2),
+    reconciliationContext.targetAudits === null ? 24 : 1,
+    reconciliationContext.policyVersion,
+    reconciliationContext.configurationBindingDigest,
   )
   return Object.freeze({
     kind: 'terminal',
@@ -1099,6 +1245,7 @@ function createProcessLifecycle(
  * @param leaseIdentityDigest - Identity represented by the observation.
  * @param signingKey - Shared receipt authentication key.
  * @param rateSegmentOrdinal - Global child-segment ordinal after auxiliaries.
+ * @param rateFirstEventSequence - First global event after prior auxiliaries.
  * @param completedAt - Latest authenticated completion evidence timestamp.
  * @param runLocatorDigest - Restricted digest of the exact scenario run.
  * @param claimRevision - Durable revision that activated the reservation.
@@ -1116,6 +1263,7 @@ function createReceipt(
   leaseIdentityDigest: string,
   signingKey: Uint8Array,
   rateSegmentOrdinal: number,
+  rateFirstEventSequence: number,
   completedAt: string,
   runLocatorDigest: string,
   claimRevision: number,
@@ -1124,7 +1272,6 @@ function createReceipt(
     WORKSPACE_SEARCH_MIGRATION_REHEARSAL_INITIAL_ABANDONMENT_ROOT_DIGEST,
 ): WorkspaceSearchMigrationRehearsalStageReceipt {
   const manifestDigest = createMigrationDigest(manifest)
-  const eventSequence = rateSegmentOrdinal + 1
   const rateSegment = Object.freeze({
     authenticationKeyFingerprint:
       createWorkspaceSearchMigrationRehearsalRateAuthenticationKeyFingerprint(
@@ -1132,10 +1279,10 @@ function createReceipt(
       ),
     segmentLocatorDigest: digest(`segment-locator:${entry.ordinal}`),
     segmentOrdinal: rateSegmentOrdinal,
-    firstEventSequence: eventSequence,
+    firstEventSequence: rateFirstEventSequence,
     eventCount: 1,
-    firstCommittedEventSequence: eventSequence,
-    lastCommittedEventSequence: eventSequence,
+    firstCommittedEventSequence: rateFirstEventSequence,
+    lastCommittedEventSequence: rateFirstEventSequence,
     terminalRecordMac: digest(`segment-mac:${entry.ordinal}`),
     segmentDigest: digest(`segment:${entry.ordinal}`),
   })
@@ -1236,6 +1383,9 @@ function createCommitGate(
       receipt.rateSegment,
       `target-preimage:${receipt.scenario}`,
       stageTimestamp(receipt.stageOrdinal, 1.8),
+      24,
+      receipt.policyVersion,
+      receipt.configurationBindingDigest,
     )
     return Object.freeze({
       kind: 'target-preimage',
@@ -1244,7 +1394,9 @@ function createCommitGate(
       contentDigest: digest(`target-preimage:${receipt.scenario}`),
       byteLength: 256,
       purpose,
-      contextDigest: digest(`target-context:${receipt.scenario}`),
+      contextDigest: createMigrationDigest(
+        createTargetAuditContext(receipt.scenario, receipt),
+      ),
       commitGateObservedAt: receipt.completedAt,
       observationDigest:
         digest(`target-observation:${receipt.scenario}:preimage`),
@@ -1407,7 +1559,7 @@ async function createFixture(
   const activeLeaseIdentities = new Map<string, string>()
   let previousReceiptDigest: string | null = null
   let previousCommitRevision = 0
-  let nextRateSegmentOrdinal = 0
+  let nextRateSegmentOrdinal = 1
   let abandonmentCount = 0
   let abandonmentRootDigest =
     WORKSPACE_SEARCH_MIGRATION_REHEARSAL_INITIAL_ABANDONMENT_ROOT_DIGEST
@@ -1423,7 +1575,7 @@ async function createFixture(
               entry.scenario === 'partial-apply-rollback') &&
             priorCommitGate?.kind === 'target-preimage'
           ? priorCommitGate.rateSuccessor
-          : priorReceipt?.rateSegment ?? null
+          : priorReceipt?.rateSegment ?? manifest.integrityAttestationRoot.segment
     let abandonmentDelta = 0
     if (entry.ordinal === abandonmentAtOrdinal) {
       abandonmentDelta = abandonmentTotal
@@ -1446,9 +1598,7 @@ async function createFixture(
             expiresAt: stageTimestamp(entry.ordinal, offset + 0.5),
             expectedPreviousRateSegment,
             expectedCurrentRateSegmentOrdinal:
-              expectedPreviousRateSegment === null
-                ? 0
-                : expectedPreviousRateSegment.segmentOrdinal + 1,
+              expectedPreviousRateSegment.segmentOrdinal + 1,
             expectedTargetPreimageArtifactContentDigest:
               entry.command === 'apply' &&
                 (entry.scenario === 'complete-apply-rollback' ||
@@ -1533,6 +1683,8 @@ async function createFixture(
       leaseIdentityDigest,
       verificationKey,
       nextRateSegmentOrdinal,
+      expectedPreviousRateSegment.firstEventSequence +
+        expectedPreviousRateSegment.eventCount,
       stageTimestamp(
         entry.ordinal,
         entry.ordinal === 1

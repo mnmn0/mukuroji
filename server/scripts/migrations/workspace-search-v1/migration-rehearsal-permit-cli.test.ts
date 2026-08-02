@@ -103,12 +103,18 @@ function createStructuralRootProjection(
   const aggregate: WorkspaceSearchMigrationRehearsalIntegrityAttestationRootProjection[
     'aggregate'
   ] = {
-    version: 1,
+    version:
+      WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
     policyVersion,
     attemptCount: 12,
     forfeitedAttemptCount: 0,
     throttleCount: 0,
+    awsServiceThrottleCount: 0,
+    rehearsalInjectedThrottleCount: 0,
     budgetStopCount: 0,
+    operationalBudgetStopCount: 0,
+    awsServiceThrottleBudgetStopCount: 0,
+    rehearsalInjectedBudgetStopCount: 0,
     cadenceWaitCount: 0,
     cadenceWaitMilliseconds: 0,
     maximumInFlight: 1,
@@ -227,7 +233,12 @@ async function createPermitRootMaterial(
       attemptCount: 12,
       forfeitedAttemptCount: 0,
       throttleCount: 0,
+      awsServiceThrottleCount: 0,
+      rehearsalInjectedThrottleCount: 0,
       budgetStopCount: 0,
+      operationalBudgetStopCount: 0,
+      awsServiceThrottleBudgetStopCount: 0,
+      rehearsalInjectedBudgetStopCount: 0,
       cadenceWaitCount: 0,
       cadenceWaitMilliseconds: 0,
       maximumInFlight: 1,

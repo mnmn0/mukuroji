@@ -1863,6 +1863,7 @@ function recordRehearsalSignal(
         sequence: 1,
         observedAtMilliseconds: 0,
         backoffMilliseconds: 0,
+        provenance: 'aws-service',
       })
       return
     case 'rate-budget-exhaustion':
@@ -1877,6 +1878,7 @@ function recordRehearsalSignal(
         remainingNormalAdmissionAttempts: 0,
         remainingWindowAttempts: 0,
         retryAfterMilliseconds: 0,
+        provenance: 'operational',
       })
       return
     case 'checkpoint-stall':

@@ -1,6 +1,6 @@
 import { constants, type BigIntStats } from 'node:fs'
 import { open } from 'node:fs/promises'
-import { createHash } from 'node:crypto'
+import { createHash, timingSafeEqual } from 'node:crypto'
 import { types as nodeUtilTypes } from 'node:util'
 import {
   createMigrationDigest,
@@ -17,10 +17,13 @@ import {
   WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_POLICY_MAX_BYTES,
 } from './migration-describe-table-rate-policy'
 import {
-  createAwsWorkspaceSearchMigrationNonProductionRehearsalSession,
+  createAwsWorkspaceSearchMigrationRehearsalFinalPublicationSession,
   type CreateAwsWorkspaceSearchMigrationNonProductionRehearsalSessionInput,
-  type WorkspaceSearchMigrationNonProductionRehearsalAwsSession,
+  type WorkspaceSearchMigrationRehearsalFinalPublicationAwsSession,
 } from './migration-identity-aws'
+import {
+  type WorkspaceSearchMigrationRehearsalDescribeTableRateExerciseReceipt,
+} from './migration-describe-table-rate-managed-session'
 import {
   createWorkspaceSearchMigrationRequestedResourcesBinding,
 } from './migration-identity'
@@ -71,18 +74,14 @@ import {
   type WorkspaceSearchMigrationRehearsalFinalizedStageChainEvidence,
 } from './migration-rehearsal-stage-receipt'
 import {
-  assembleWorkspaceSearchMigrationRehearsalSuitePreparationInput,
-  type AssembleWorkspaceSearchMigrationRehearsalSuitePreparationInput,
+  assembleWorkspaceSearchMigrationRehearsalAuthenticatedSuite,
+  type AssembleWorkspaceSearchMigrationRehearsalAuthenticatedSuiteInput,
   type WorkspaceSearchMigrationRehearsalFinalizedSuitePreparation,
 } from './migration-rehearsal-suite-finalizer'
 
 /** Exact review acknowledgement required for final immutable publication. */
 export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PUBLICATION_APPROVAL =
   'publish-reviewed-non-production-migration-rehearsal'
-
-/** Maximum exact canonical bytes accepted for the suite prestage document. */
-export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PRESTAGE_MAX_BYTES =
-  64 * 1_024 * 1_024
 
 /** Maximum exact canonical bytes accepted for the combined alarm artifact. */
 export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_ALARM_ARTIFACT_MAX_BYTES =
@@ -94,7 +93,7 @@ export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_MAIN_PERMIT_MAX_BYTES =
 
 /** Largest bounded restricted artifact accepted by this executable. */
 const maximumRestrictedPublicationInputBytes =
-  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PRESTAGE_MAX_BYTES
+  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_ALARM_ARTIFACT_MAX_BYTES
 
 /** Stable discriminator used by the canonical CLI failure line. */
 export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PUBLICATION_CLI_RESULT_KIND =
@@ -149,14 +148,14 @@ export type WorkspaceSearchMigrationRehearsalPublicationCliExitCode =
 
 /** Strictly parsed final publication wrapper configuration. */
 export type WorkspaceSearchMigrationRehearsalPublicationCliArguments = {
-  /** Canonical prestage suite document that omits rate and completion time. */
-  readonly suiteInputFile: string
-  /** Canonical complete alarm artifact bytes referenced by the prestage data. */
+  /** Canonical complete alarm artifact authenticated at publication time. */
   readonly alarmArtifactFile: string
   /** Canonical authenticated main rehearsal permit. */
   readonly permitFile: string
   /** Raw owner-only 32-byte rehearsal master authentication key. */
   readonly authenticationKeyFile: string
+  /** Raw owner-only 32-byte alarm-purpose master authentication key. */
+  readonly alarmAuthenticationKeyFile: string
   /** Authenticated stage-receipt chain used to derive #163 time windows. */
   readonly stageReceiptManifestFile: string
   /** Explicit globally ordered authenticated stage receipt files. */
@@ -187,6 +186,14 @@ export interface WorkspaceSearchMigrationRehearsalFinalPublicationSession
    * @returns Reviewed digest of the exact measured configuration.
    */
   measureConfigurationHash(): Promise<string>
+
+  /**
+   * Runs the construction-fixed real-AWS-success throttle exercise once.
+   *
+   * @returns Exact source-specific throttle and budget-stop delta receipt.
+   */
+  exerciseDescribeTableThrottle():
+    Promise<WorkspaceSearchMigrationRehearsalDescribeTableRateExerciseReceipt>
 
   /** Stops every not-yet-started rate-managed measurement operation. */
   interruptDescribeTableRate(): void
@@ -231,7 +238,7 @@ export type WorkspaceSearchMigrationRehearsalPublicationCliDependencies = {
   ) => WorkspaceSearchMigrationRehearsalFinalizedReconciliationEvidence
   /** Assembles and semantically validates the final suite preparation input. */
   readonly assembleSuite: (
-    input: AssembleWorkspaceSearchMigrationRehearsalSuitePreparationInput,
+    input: AssembleWorkspaceSearchMigrationRehearsalAuthenticatedSuiteInput,
   ) => WorkspaceSearchMigrationRehearsalFinalizedSuitePreparation
   /** Publishes all ten children and the final HMAC index in one session. */
   readonly publishSuite: (
@@ -319,9 +326,9 @@ const defaultPublicationCliDependencies:
         input,
         runtimeVerificationKey,
         publicationVerificationKey,
-      ),
+    ),
     assembleSuite: (input) =>
-      assembleWorkspaceSearchMigrationRehearsalSuitePreparationInput(input),
+      assembleWorkspaceSearchMigrationRehearsalAuthenticatedSuite(input),
     publishSuite: (input) =>
       publishWorkspaceSearchMigrationRehearsalSuite(input),
     clock: (): Date => new Date(),
@@ -345,18 +352,21 @@ export function parseWorkspaceSearchMigrationRehearsalPublicationCliArguments(
 ): WorkspaceSearchMigrationRehearsalPublicationCliArguments {
   const snapshot = snapshotArguments(arguments_)
   if (
-    snapshot[0] !== '--rehearsal-suite-input-file' ||
-    snapshot[2] !== '--rehearsal-alarm-artifact-file' ||
-    snapshot[4] !== '--rehearsal-permit-file' ||
-    snapshot[6] !== '--rehearsal-authentication-key-file' ||
+    snapshot[0] !== '--rehearsal-alarm-artifact-file' ||
+    snapshot[2] !== '--rehearsal-permit-file' ||
+    snapshot[4] !== '--rehearsal-authentication-key-file' ||
+    snapshot[6] !== '--rehearsal-alarm-authentication-key-file' ||
     snapshot[8] !== '--rehearsal-stage-receipt-manifest-file'
   ) {
     return failPublicationCli('INVALID_USAGE', 2)
   }
-  const suiteInputFile = readPath(snapshot[1])
-  const alarmArtifactFile = readPath(snapshot[3])
-  const permitFile = readPath(snapshot[5])
-  const authenticationKeyFile = readPath(snapshot[7])
+  const alarmArtifactFile = readPath(snapshot[1])
+  const permitFile = readPath(snapshot[3])
+  const authenticationKeyFile = readPath(snapshot[5])
+  const alarmAuthenticationKeyFile = readPath(snapshot[7])
+  if (alarmAuthenticationKeyFile === authenticationKeyFile) {
+    return failPublicationCli('INVALID_USAGE', 2)
+  }
   const stageReceiptManifestFile = readPath(snapshot[9])
   let cursor = 10
   const stageReceiptFiles: string[] = []
@@ -386,7 +396,6 @@ export function parseWorkspaceSearchMigrationRehearsalPublicationCliArguments(
     reconciliationAuditFiles.push(readPath(snapshot[cursor + 1]))
     cursor += 2
   }
-  requireUniqueReconciliationInputPaths(reconciliationAuditFiles)
   if (snapshot[cursor] !== '--rehearsal-rate-configuration-hash') {
     return failPublicationCli('INVALID_USAGE', 2)
   }
@@ -441,11 +450,23 @@ export function parseWorkspaceSearchMigrationRehearsalPublicationCliArguments(
   if (parsedControl.command !== 'measure') {
     return failPublicationCli('INVALID_USAGE', 2)
   }
-  return Object.freeze({
-    suiteInputFile,
+  requireUniquePublicationPaths([
     alarmArtifactFile,
     permitFile,
     authenticationKeyFile,
+    alarmAuthenticationKeyFile,
+    stageReceiptManifestFile,
+    ...stageReceiptFiles,
+    ...reconciliationAuditFiles,
+    parsedControl.ratePolicyFile,
+    ...rateSegmentFiles,
+    finalRateSegmentFile,
+  ])
+  return Object.freeze({
+    alarmArtifactFile,
+    permitFile,
+    authenticationKeyFile,
+    alarmAuthenticationKeyFile,
     stageReceiptManifestFile,
     stageReceiptFiles: Object.freeze(stageReceiptFiles),
     reconciliationAuditFiles: Object.freeze(reconciliationAuditFiles),
@@ -483,8 +504,11 @@ export async function runWorkspaceSearchMigrationRehearsalPublicationCli(
   let session:
     WorkspaceSearchMigrationRehearsalFinalPublicationSession | undefined
   let masterKey: Uint8Array | undefined
+  let alarmMasterKey: Uint8Array | undefined
   let runtimeAuthenticationKey: Uint8Array | undefined
   let publicationAuthenticationKey: Uint8Array | undefined
+  let alarmRuntimeAuthenticationKey: Uint8Array | undefined
+  let alarmPublicationAuthenticationKey: Uint8Array | undefined
   let restrictedInputs: RestrictedPublicationInputs | undefined
   let result: WorkspaceSearchMigrationRehearsalPublicationResult | undefined
   let primaryFailure: unknown
@@ -507,13 +531,21 @@ export async function runWorkspaceSearchMigrationRehearsalPublicationCli(
     const inputs = await readAllRestrictedInputs(configuration, captured)
     restrictedInputs = inputs
     masterKey = inputs.authenticationKey
+    alarmMasterKey = inputs.alarmAuthenticationKey
     const derivedKeys = deriveWorkspaceSearchMigrationRehearsalKeys(
       masterKey,
     )
     runtimeAuthenticationKey = derivedKeys.runtimeKey
     publicationAuthenticationKey = derivedKeys.publicationKey
+    const alarmDerivedKeys = deriveWorkspaceSearchMigrationRehearsalKeys(
+      alarmMasterKey,
+    )
+    alarmRuntimeAuthenticationKey = alarmDerivedKeys.runtimeKey
+    alarmPublicationAuthenticationKey = alarmDerivedKeys.publicationKey
     zeroize(masterKey)
     masterKey = undefined
+    zeroize(alarmMasterKey)
+    alarmMasterKey = undefined
     const localPermitVerificationKey = copyAuthenticationKey(
       runtimeAuthenticationKey,
     )
@@ -649,6 +681,10 @@ export async function runWorkspaceSearchMigrationRehearsalPublicationCli(
       return failPublicationCli('OPERATION_FAILED', 1)
     }
     requireActive(signal)
+    requireFinalPublicationRateExerciseReceipt(
+      await activeSession.exerciseDescribeTableThrottle(),
+    )
+    requireActive(signal)
     await runtime.flush()
     await runtime.close()
     runtime = undefined
@@ -682,16 +718,17 @@ export async function runWorkspaceSearchMigrationRehearsalPublicationCli(
     }
     const completedAt = readTrustedTimestamp(captured.clock)
     requireActive(signal)
+    const sessionBinding =
+      activeSession.readRehearsalEvidenceSessionBinding()
     const alarmSignalVerificationKey = copyAuthenticationKey(
-      runtimeAuthenticationKey,
+      alarmRuntimeAuthenticationKey,
     )
     const alarmPublicationVerificationKey = copyAuthenticationKey(
-      publicationAuthenticationKey,
+      alarmPublicationAuthenticationKey,
     )
     let suite: WorkspaceSearchMigrationRehearsalFinalizedSuitePreparation
     try {
       suite = captured.assembleSuite({
-        document: inputs.suiteDocument,
         alarmArtifactBytes: inputs.alarmArtifactBytes,
         alarmPublicationVerificationKey,
         alarmSignalVerificationKey,
@@ -699,6 +736,11 @@ export async function runWorkspaceSearchMigrationRehearsalPublicationCli(
         reconciliation,
         rate,
         completedAt,
+        sessionBinding,
+        expectedEvidenceKeyDigest:
+          permitKeyBindings.evidenceKeyDigest,
+        expectedPublicationKeyDigest:
+          permitKeyBindings.publicationKeyDigest,
       })
     } finally {
       zeroize(alarmSignalVerificationKey)
@@ -725,8 +767,11 @@ export async function runWorkspaceSearchMigrationRehearsalPublicationCli(
   removeAbortListener?.()
   const closeFailed = await closeOwnedCapabilities(runtime, session)
   zeroize(masterKey)
+  zeroize(alarmMasterKey)
   zeroize(runtimeAuthenticationKey)
   zeroize(publicationAuthenticationKey)
+  zeroize(alarmRuntimeAuthenticationKey)
+  zeroize(alarmPublicationAuthenticationKey)
   zeroizeRestrictedPublicationInputs(restrictedInputs)
   if (output === undefined) {
     output = captureOutputDependencies(dependencies)
@@ -763,14 +808,14 @@ export async function runWorkspaceSearchMigrationRehearsalPublicationCli(
 
 /** Complete secure input snapshot read before AWS composition. */
 type RestrictedPublicationInputs = {
-  /** Canonical untrusted suite prestage document. */
-  readonly suiteDocument: unknown
   /** Exact complete canonical alarm artifact bytes. */
   readonly alarmArtifactBytes: Uint8Array
   /** Canonical authenticated main permit document. */
   readonly permit: unknown
   /** Owned 32-byte rehearsal master key retained only through derivation. */
   readonly authenticationKey: Uint8Array
+  /** Owned 32-byte alarm-purpose master key retained only through derivation. */
+  readonly alarmAuthenticationKey: Uint8Array
   /** Exact canonical authenticated stage receipt manifest bytes. */
   readonly stageReceiptManifestBytes: Uint8Array
   /** Exact canonical authenticated stage receipt bytes in global order. */
@@ -829,6 +874,7 @@ function zeroizeRestrictedPublicationInputs(
   if (value === undefined) return
   zeroize(value.alarmArtifactBytes)
   zeroize(value.authenticationKey)
+  zeroize(value.alarmAuthenticationKey)
   zeroize(value.stageReceiptManifestBytes)
   for (const bytes of value.stageReceiptBytes) zeroize(bytes)
   for (const bytes of value.reconciliationAudits) zeroize(bytes)
@@ -852,16 +898,6 @@ async function readAllRestrictedInputs(
     return bytes
   }
   try {
-    const suiteBytes = await readOwned(
-      configuration.suiteInputFile,
-      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PRESTAGE_MAX_BYTES,
-    )
-    let suiteDocument: unknown
-    try {
-      suiteDocument = parseCanonicalJson(suiteBytes)
-    } finally {
-      zeroize(suiteBytes)
-    }
     const alarmArtifactBytes = await readOwned(
       configuration.alarmArtifactFile,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_ALARM_ARTIFACT_MAX_BYTES,
@@ -883,6 +919,18 @@ async function readAllRestrictedInputs(
     const authenticationKey = copyAuthenticationKey(authenticationKeyBytes)
     ownedBuffers.push(authenticationKey)
     zeroize(authenticationKeyBytes)
+    const alarmAuthenticationKeyBytes = await readOwned(
+      configuration.alarmAuthenticationKeyFile,
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_MASTER_KEY_BYTES,
+    )
+    const alarmAuthenticationKey = copyAuthenticationKey(
+      alarmAuthenticationKeyBytes,
+    )
+    ownedBuffers.push(alarmAuthenticationKey)
+    zeroize(alarmAuthenticationKeyBytes)
+    if (timingSafeEqual(authenticationKey, alarmAuthenticationKey)) {
+      return failPublicationCli('INPUT_FILE_INVALID', 2)
+    }
     const stageReceiptManifestBytes = await readOwned(
       configuration.stageReceiptManifestFile,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_MANIFEST_MAX_BYTES,
@@ -933,10 +981,10 @@ async function readAllRestrictedInputs(
       rateSegments.push(bytes)
     }
     const inputs = Object.freeze({
-      suiteDocument,
       alarmArtifactBytes,
       permit,
       authenticationKey,
+      alarmAuthenticationKey,
       stageReceiptManifestBytes,
       stageReceiptBytes: Object.freeze(stageReceiptBytes),
       reconciliationAudits: Object.freeze(reconciliationAudits),
@@ -1091,19 +1139,23 @@ async function createFinalPublicationSession(
   input: CreateAwsWorkspaceSearchMigrationNonProductionRehearsalSessionInput,
 ): Promise<WorkspaceSearchMigrationRehearsalFinalPublicationSession> {
   const session =
-    await createAwsWorkspaceSearchMigrationNonProductionRehearsalSession(input)
+    await createAwsWorkspaceSearchMigrationRehearsalFinalPublicationSession(
+      input,
+    )
   return projectFinalPublicationSession(session)
 }
 
 /** Projects the full migration session onto final measurement/publication only. */
 function projectFinalPublicationSession(
-  session: WorkspaceSearchMigrationNonProductionRehearsalAwsSession,
+  session: WorkspaceSearchMigrationRehearsalFinalPublicationAwsSession,
 ): WorkspaceSearchMigrationRehearsalFinalPublicationSession {
   return Object.freeze({
     measureConfigurationHash: async (): Promise<string> =>
       createWorkspaceSearchConfigurationHash(
         await session.measureConfiguration(),
       ),
+    exerciseDescribeTableThrottle: async () =>
+      await session.exerciseDescribeTableThrottle(),
     interruptDescribeTableRate: (): void =>
       session.interruptDescribeTableRate(),
     createRehearsalArtifactPublisher: (
@@ -1347,12 +1399,9 @@ function requireLastValue(values: readonly string[]): string {
   return value
 }
 
-/** Rejects key/artifact path reuse before any restricted input is opened. */
-function requireUniqueReconciliationInputPaths(
-  artifactFiles: readonly string[],
-): void {
-  const paths = new Set<string>(artifactFiles)
-  if (paths.size !== artifactFiles.length) {
+/** Rejects any restricted input or output path reuse before file access. */
+function requireUniquePublicationPaths(paths: readonly string[]): void {
+  if (new Set<string>(paths).size !== paths.length) {
     return failPublicationCli('INVALID_USAGE', 2)
   }
 }
@@ -1387,6 +1436,85 @@ function readPermitKeyBindings(
     return failPublicationCli('OPERATION_FAILED', 1)
   }
   return Object.freeze({ evidenceKeyDigest, publicationKeyDigest })
+}
+
+/**
+ * Requires the exact receipt produced by the isolated final rate exercise.
+ *
+ * This check keeps an injectable or accidentally widened session from letting
+ * publication continue without the proven real-AWS-success, injected
+ * throttle, and resulting source-specific budget stop.
+ *
+ * @param value - Candidate one-shot exercise receipt.
+ */
+function requireFinalPublicationRateExerciseReceipt(value: unknown): void {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    nodeUtilTypes.isProxy(value)
+  ) {
+    return failPublicationCli('OPERATION_FAILED', 1)
+  }
+  try {
+    const expectedKeys = [
+      'awsSuccessfulAttemptCount',
+      'rehearsalInjectedBudgetStopCount',
+      'rehearsalInjectedThrottleCount',
+      'version',
+    ]
+    const ownKeys = Reflect.ownKeys(value)
+    if (
+      Object.getPrototypeOf(value) !== Object.prototype ||
+      ownKeys.length !== expectedKeys.length ||
+      ownKeys.some((key) =>
+        typeof key !== 'string' || !expectedKeys.includes(key)
+      )
+    ) {
+      return failPublicationCli('OPERATION_FAILED', 1)
+    }
+    const version = Object.getOwnPropertyDescriptor(value, 'version')
+    const awsSuccessfulAttemptCount = Object.getOwnPropertyDescriptor(
+      value,
+      'awsSuccessfulAttemptCount',
+    )
+    const rehearsalInjectedThrottleCount =
+      Object.getOwnPropertyDescriptor(
+        value,
+        'rehearsalInjectedThrottleCount',
+      )
+    const rehearsalInjectedBudgetStopCount =
+      Object.getOwnPropertyDescriptor(
+        value,
+        'rehearsalInjectedBudgetStopCount',
+      )
+    for (const descriptor of [
+      version,
+      awsSuccessfulAttemptCount,
+      rehearsalInjectedThrottleCount,
+      rehearsalInjectedBudgetStopCount,
+    ]) {
+      if (
+        descriptor === undefined ||
+        !descriptor.enumerable ||
+        !Object.hasOwn(descriptor, 'value')
+      ) {
+        return failPublicationCli('OPERATION_FAILED', 1)
+      }
+    }
+    if (
+      version?.value !== 1 ||
+      awsSuccessfulAttemptCount?.value !== 1 ||
+      rehearsalInjectedThrottleCount?.value !== 1 ||
+      rehearsalInjectedBudgetStopCount?.value !== 1
+    ) {
+      return failPublicationCli('OPERATION_FAILED', 1)
+    }
+  } catch (error: unknown) {
+    if (error instanceof WorkspaceSearchMigrationRehearsalPublicationCliError) {
+      throw error
+    }
+    return failPublicationCli('OPERATION_FAILED', 1)
+  }
 }
 
 /** Reads one positive bounded decimal integer. */

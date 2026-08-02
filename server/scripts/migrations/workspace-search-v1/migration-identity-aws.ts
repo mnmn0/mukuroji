@@ -1,9 +1,19 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { createHash } from 'node:crypto'
+import { createHash, timingSafeEqual } from 'node:crypto'
+import { performance } from 'node:perf_hooks'
 import { types as nodeUtilTypes } from 'node:util'
 import {
+  calculateCrossDomainIntegrityResourceIdentityDigest,
   calculateCrossDomainIntegrityImmutableResourceIdentity,
+  createCrossDomainIntegrityImmutableResourceIdentities,
+  CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
   CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
+  CROSS_DOMAIN_INTEGRITY_MAX_DURATION_MILLISECONDS,
+  CROSS_DOMAIN_INTEGRITY_RESOURCE_ATTESTATION_MAX_BYTES,
+  parseCrossDomainIntegrityResourceAttestation,
+  serializeCrossDomainIntegrityResourceAttestation,
+  validateCrossDomainIntegrityLimits,
+  type CrossDomainIntegrityResourceAttestation,
   type CrossDomainIntegrityResourceIdentity,
 } from '../../data-integrity/cross-domain-integrity'
 import {
@@ -33,6 +43,11 @@ import {
 import {
   GetBucketTaggingCommand,
   type GetBucketTaggingOutput,
+  type GetBucketVersioningCommandOutput,
+  GetObjectAttributesCommand,
+  type GetObjectAttributesCommandOutput,
+  GetObjectTaggingCommand,
+  type GetObjectTaggingCommandOutput,
   GetObjectCommand,
   type GetObjectCommandOutput,
   GetBucketEncryptionCommand,
@@ -111,8 +126,11 @@ import {
 } from './migration-describe-table-rate-budget'
 import {
   createWorkspaceSearchMigrationManagedDescribeTableRate,
+  createWorkspaceSearchMigrationRehearsalManagedDescribeTableRate,
   WorkspaceSearchMigrationManagedDescribeTableRateError,
   type WorkspaceSearchMigrationManagedDescribeTableRate,
+  type WorkspaceSearchMigrationRehearsalDescribeTableRateExercise,
+  type WorkspaceSearchMigrationRehearsalDescribeTableRateExerciseReceipt,
 } from './migration-describe-table-rate-managed-session'
 import {
   WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
@@ -123,7 +141,17 @@ import {
   loadWorkspaceSearchMigrationSharedProfiles,
 } from './migration-shared-profile-loader'
 import {
+  AwsCrossDomainIntegrityReader,
+  type CrossDomainIntegrityAwsTransport,
+  type CrossDomainIntegrityBucketNames,
+  type CrossDomainIntegrityTableNames,
+} from '../../data-integrity/verify-cross-domain-integrity'
+import {
+  resolveWorkspaceSearchMigrationRehearsalDeploymentTarget,
+} from './migration-deployment-targets'
+import {
   createWorkspaceSearchMigrationRehearsalProductionAccountDigest,
+  createWorkspaceSearchMigrationRehearsalResourceAttestationDigest,
   verifyWorkspaceSearchMigrationRehearsalPermit,
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_DEPLOYMENT_TRUST_ROOT_TAG_KEY,
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_ENVIRONMENT_TAG_KEY,
@@ -132,6 +160,37 @@ import {
   WorkspaceSearchMigrationRehearsalPermitError,
   type WorkspaceSearchMigrationRehearsalPermitClaims,
 } from './migration-rehearsal-permit'
+import {
+  parseWorkspaceSearchMigrationRehearsalRootPlan,
+  type WorkspaceSearchMigrationRehearsalRootPlan,
+} from './migration-rehearsal-root-plan'
+import {
+  createWorkspaceSearchMigrationRehearsalIntegrityRateAdapter,
+  type WorkspaceSearchMigrationRehearsalIntegrityRateAdapter,
+} from './migration-rehearsal-integrity-rate-adapter'
+import {
+  disposeWorkspaceSearchMigrationRehearsalIntegrityLiveSession,
+  finalizeWorkspaceSearchMigrationRehearsalIntegrityLiveSession,
+  runWorkspaceSearchMigrationRehearsalIntegrityLiveSession,
+  WorkspaceSearchMigrationRehearsalIntegrityLiveSessionError,
+  type WorkspaceSearchMigrationRehearsalIntegrityLiveReadTransport,
+  type WorkspaceSearchMigrationRehearsalIntegrityLiveSessionPending,
+} from './migration-rehearsal-integrity-live-session'
+import type {
+  WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult,
+} from './migration-rehearsal-integrity-rate-evidence'
+import {
+  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RATE_MAX_SEGMENT_BYTES,
+} from './migration-rehearsal-rate-evidence'
+import {
+  createWorkspaceSearchMigrationRehearsalPrePermitRootSession,
+  createWorkspaceSearchMigrationRehearsalRootTimeline,
+  WorkspaceSearchMigrationRehearsalPrePermitRootSessionError,
+  type WorkspaceSearchMigrationRehearsalPrePermitRootSession,
+  type WorkspaceSearchMigrationRehearsalRootAttestationOperation,
+  type WorkspaceSearchMigrationRehearsalRootAttestationOperationResult,
+  type WorkspaceSearchMigrationRehearsalRootTimeline,
+} from './migration-rehearsal-pre-permit-root-session'
 import {
   createWorkspaceSearchMigrationRehearsalFaultController,
   type CreateWorkspaceSearchMigrationRehearsalFaultControllerInput,
@@ -412,12 +471,7 @@ import type {
   WorkspaceSearchMigrationRehearsalScenarioName,
 } from './migration-rehearsal-evidence'
 import {
-  authenticateWorkspaceSearchMigrationRehearsalIntegrityPair,
-  authenticateWorkspaceSearchMigrationRehearsalIntegrityResult,
-  sameWorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection,
-  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_INTEGRITY_RESULT_MAX_BYTES,
-  type WorkspaceSearchMigrationRehearsalAuthenticatedIntegrityPair,
-  type WorkspaceSearchMigrationRehearsalAuthenticatedIntegrityResult,
+  readWorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection,
   type WorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection,
 } from './migration-rehearsal-integrity-evidence'
 import {
@@ -908,6 +962,44 @@ type ManagedReconciliationAuthenticatedTargetPair = {
   readonly restored:
     WorkspaceSearchMigrationRehearsalTargetAuditArtifactBinding
 }
+
+/** Complete collected result fields that do not depend on post-seal #163. */
+type ManagedReconciliationCollectedBaseValue = Omit<
+  WorkspaceSearchMigrationRehearsalReconciliationCollectorResult,
+  'integrity'
+>
+
+/** Private state retained behind one collected-base capability. */
+type ManagedReconciliationCollectedBaseState = {
+  /** Detached collector fields measured before rate sealing. */
+  readonly base: ManagedReconciliationCollectedBaseValue
+  /** Exact permit-bound migration table identities measured in-session. */
+  readonly expectedMigrationResourceIdentities:
+    WorkspaceSearchMigrationManagedReconciliationResourceIdentities
+  /** Exact permit-bound complete seven-resource identity digest. */
+  readonly expectedResourceIdentityDigest: string
+  /** Authenticated rollback target pair, absent for verified terminals. */
+  readonly target?: ManagedReconciliationAuthenticatedTargetPair
+  /** Trusted clock retained for post-live completion chronology. */
+  readonly clock: () => Date
+}
+
+/** Minimal strictly parsed fields needed before the genuine result is consumed. */
+type ManagedReconciliationRateBoundIntegrityProjection = {
+  /** Strict detached live #163 result projection. */
+  readonly result:
+    WorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection
+  /** Reviewed rate policy digest carried by the combined result. */
+  readonly policyVersion: string
+  /** Measured configuration digest carried by the combined result. */
+  readonly configurationBindingDigest: string
+}
+
+/** Genuine unconsumed bases indexed by their opaque outer capability. */
+const managedReconciliationCollectedBaseStates = new WeakMap<
+  WorkspaceSearchMigrationRehearsalCollectedReconciliationBase,
+  ManagedReconciliationCollectedBaseState
+>()
 
 /**
  * Measurement authority captured for one complete source-evidence operation.
@@ -1494,35 +1586,6 @@ export interface WorkspaceSearchMigrationRateManagedAwsSession
     WorkspaceSearchMigrationDescribeTableRateEvidence
 }
 
-/** Raw post-terminal #163 material authenticated inside the measured session. */
-export type WorkspaceSearchMigrationRehearsalReconciliationVerifiedIntegrityInput = {
-  /** Selects one passing post-verified-terminal #163 result. */
-  readonly kind: 'verified-result'
-  /** Exact canonical #163 result bytes to authenticate after terminal reread. */
-  readonly resultBytes: Uint8Array
-  /** Owned 32-byte #163 HMAC key consumed and overwritten by this operation. */
-  readonly digestKey: Uint8Array
-}
-
-/** Raw rollback #163 pair authenticated inside the measured session. */
-export type WorkspaceSearchMigrationRehearsalReconciliationRollbackIntegrityInput = {
-  /** Selects a purpose-bound before/after rollback comparison. */
-  readonly kind: 'rollback-comparison'
-  /** Inclusive trusted beginning of the two-result observation window. */
-  readonly startedAt: string
-  /** Exact canonical pre-migration #163 result bytes. */
-  readonly beforeResultBytes: Uint8Array
-  /** Exact canonical post-rollback #163 result bytes. */
-  readonly afterResultBytes: Uint8Array
-  /** Owned 32-byte #163 HMAC key consumed and overwritten by this operation. */
-  readonly digestKey: Uint8Array
-}
-
-/** Scenario-specific raw #163 input accepted by reconciliation collection. */
-export type WorkspaceSearchMigrationRehearsalReconciliationIntegrityInput =
-  | WorkspaceSearchMigrationRehearsalReconciliationRollbackIntegrityInput
-  | WorkspaceSearchMigrationRehearsalReconciliationVerifiedIntegrityInput
-
 /** Raw target-audit pair authenticated only after a rollback terminal reread. */
 export type WorkspaceSearchMigrationRehearsalReconciliationRollbackTargetInput = {
   /** Canonical authenticated target observation captured before apply. */
@@ -1553,9 +1616,6 @@ export type CollectWorkspaceSearchMigrationRehearsalReconciliationSessionInput =
    */
   readonly expectedAuthorities:
     readonly WorkspaceSearchMigrationRehearsalExpectedAuthority[]
-  /** Raw #163 files authenticated only after the authoritative terminal read. */
-  readonly integrity:
-    WorkspaceSearchMigrationRehearsalReconciliationIntegrityInput
   /** Mandatory target preimage/restored files for either rollback scenario. */
   readonly rollbackTarget?:
     WorkspaceSearchMigrationRehearsalReconciliationRollbackTargetInput
@@ -1565,6 +1625,36 @@ export type CollectWorkspaceSearchMigrationRehearsalReconciliationSessionInput =
   readonly clock: () => Date
   /** Optional caller cancellation propagated to every reconciliation request. */
   readonly signal?: AbortSignal
+}
+
+/** Module-private construction authority for collected reconciliation bases. */
+const collectedReconciliationBaseToken = Symbol(
+  'workspace-search-migration-rehearsal-collected-reconciliation-base',
+)
+
+/** Opaque one-shot terminal collection awaiting post-seal #163 completion. */
+export class WorkspaceSearchMigrationRehearsalCollectedReconciliationBase {
+  /**
+   * Constructs only capabilities minted by the measured session.
+   *
+   * @param token - Module-private construction authority.
+   */
+  constructor(token: symbol) {
+    if (token !== collectedReconciliationBaseToken) {
+      return failManagedReconciliationSession()
+    }
+    Object.freeze(this)
+  }
+}
+
+/** Input completing one measured base after rate sealing and live finalization. */
+export type CompleteWorkspaceSearchMigrationRehearsalReconciliationInput = {
+  /** Genuine one-shot base returned by the exact measured session. */
+  readonly collectedBase:
+    WorkspaceSearchMigrationRehearsalCollectedReconciliationBase
+  /** Genuine live result for verified scenarios, otherwise strict null. */
+  readonly verifiedIntegrity:
+    WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult | null
 }
 
 /**
@@ -1592,12 +1682,12 @@ export interface WorkspaceSearchMigrationNonProductionRehearsalAwsSession
    * counts or digests, and no generic Query primitive is exposed.
    *
    * @param input - Restricted run, authenticated evidence files, and budgets.
-   * @returns Complete context plus marker, authority, and source/target audits.
+   * @returns Opaque one-shot base awaiting post-seal #163 completion.
    */
   collectRehearsalReconciliation(
     input:
       CollectWorkspaceSearchMigrationRehearsalReconciliationSessionInput,
-  ): Promise<WorkspaceSearchMigrationRehearsalReconciliationCollectorResult>
+  ): Promise<WorkspaceSearchMigrationRehearsalCollectedReconciliationBase>
 
   /**
    * Reads the immutable secret-free head claimed during session construction.
@@ -1689,6 +1779,241 @@ export interface WorkspaceSearchMigrationNonProductionRehearsalAwsSession
   ): WorkspaceSearchMigrationRehearsalEvidenceAwsPublisher
 }
 
+/**
+ * Capability-minimized AWS session dedicated to final rehearsal publication.
+ *
+ * It deliberately omits generic reads, mutations, stage state, reconciliation,
+ * child-session creation, and raw transports. The sole rate exercise is bound
+ * to the session's construction-fixed migration-state table.
+ */
+export interface WorkspaceSearchMigrationRehearsalFinalPublicationAwsSession {
+  /**
+   * Measures the exact construction-fixed migration resources.
+   *
+   * @returns Exact measured migration configuration.
+   */
+  measureConfiguration(): Promise<WorkspaceSearchMigrationConfiguration>
+
+  /**
+   * Runs the one-shot real post-success DescribeTable throttle exercise.
+   *
+   * @returns Exact source-specific one-attempt, one-throttle, one-stop receipt.
+   */
+  exerciseDescribeTableThrottle():
+    Promise<WorkspaceSearchMigrationRehearsalDescribeTableRateExerciseReceipt>
+
+  /**
+   * Creates the journal-bound immutable child-artifact publisher.
+   *
+   * @param input - Trusted clock and finite per-request deadline only.
+   * @returns Publisher with no caller-selected AWS resource identity.
+   */
+  createRehearsalArtifactPublisher(
+    input: Pick<
+      CreateWorkspaceSearchMigrationRehearsalArtifactAwsPublisherInput,
+      'clock' | 'requestTimeoutMilliseconds'
+    >,
+  ): WorkspaceSearchMigrationRehearsalArtifactAwsPublisher
+
+  /**
+   * Creates the journal-bound immutable evidence-index publisher.
+   *
+   * @param input - Trusted clock and finite per-request deadline only.
+   * @returns Publisher with no caller-selected AWS resource identity.
+   */
+  createRehearsalEvidencePublisher(
+    input: Pick<
+      CreateWorkspaceSearchMigrationRehearsalEvidenceAwsPublisherInput,
+      'clock' | 'requestTimeoutMilliseconds'
+    >,
+  ): WorkspaceSearchMigrationRehearsalEvidenceAwsPublisher
+
+  /**
+   * Reads digest-only facts derived from the authenticated measured session.
+   *
+   * @returns Frozen binding required by final evidence publication.
+   */
+  readRehearsalEvidenceSessionBinding():
+    CreateWorkspaceSearchMigrationRehearsalEvidenceAwsPublisherInput[
+      'sessionBinding'
+    ]
+
+  /**
+   * Reads the current source-separated secret-free rate aggregate.
+   *
+   * @returns Current aggregate owned by the shared durable rate lifecycle.
+   */
+  readDescribeTableRateEvidence():
+    WorkspaceSearchMigrationDescribeTableRateEvidence
+
+  /**
+   * Reads the authenticated interval containing the complete rehearsal.
+   *
+   * @returns Exact canonical inclusive issue and exclusive expiry timestamps.
+   */
+  readRehearsalPermitValidity():
+    WorkspaceSearchMigrationRehearsalPermitValidity
+
+  /** Stops every not-yet-started rate-managed operation. */
+  interruptDescribeTableRate(): void
+
+  /** Stops admission and closes the standard and exercise AWS transports. */
+  close(): Promise<void>
+}
+
+/** Caller-controlled limits for one permit-backed actual #163 live check. */
+export type RunAwsWorkspaceSearchMigrationRehearsalIntegrityLiveSessionInput = {
+  /** Invocation-owned Workspace Audit pseudonym key consumed on every path. */
+  readonly auditPseudonymKey: Uint8Array
+  /** Fixed DynamoDB Scan item limit. */
+  readonly pageSize: number
+  /** Total DynamoDB Scan page bound. */
+  readonly maxPages: number
+  /** Total normalized checker item bound. */
+  readonly maxItems: number
+  /** Complete non-resettable live-check duration bound in milliseconds. */
+  readonly maximumDurationMilliseconds: number
+  /** Optional caller cancellation combined with session cancellation. */
+  readonly signal?: AbortSignal
+}
+
+/** Module-private construction authority for dedicated outer pending handles. */
+const rehearsalIntegrityAwsPendingToken = Symbol(
+  'workspace-search-migration-rehearsal-integrity-aws-pending',
+)
+
+/** Opaque session-owned handle that never exposes the generic live pending. */
+export class WorkspaceSearchMigrationRehearsalIntegrityAwsPending {
+  /**
+   * Constructs only handles minted by the dedicated permit-backed session.
+   *
+   * @param token - Module-private construction authority.
+   */
+  constructor(token: symbol) {
+    if (token !== rehearsalIntegrityAwsPendingToken) {
+      throw new TypeError('Invalid rehearsal integrity AWS pending handle.')
+    }
+    Object.freeze(this)
+  }
+}
+
+/** Exact raw rate material accepted by the dedicated outer finalizer. */
+export type FinalizeAwsWorkspaceSearchMigrationRehearsalIntegritySessionInput = {
+  /** Genuine pending handle returned by this exact dedicated session. */
+  readonly pending: WorkspaceSearchMigrationRehearsalIntegrityAwsPending
+  /** Canonical raw segment bytes containing the exact live run. */
+  readonly canonicalSegmentBytes: Uint8Array
+  /** Canonical raw bytes of the immediate authenticated predecessor. */
+  readonly predecessorSegmentBytes: Uint8Array
+  /** Caller-owned runtime rate authentication key consumed on every path. */
+  readonly rateAuthenticationKey: Uint8Array
+}
+
+/** Dedicated permit-backed non-production session for one actual #163 check. */
+export interface WorkspaceSearchMigrationRehearsalIntegrityAwsSession {
+  /** Stops admission and waits for the owned rate and AWS clients to close. */
+  close(): Promise<void>
+
+  /**
+   * Measures the exact permit-authorized six-table migration configuration.
+   *
+   * @returns Exact measured migration configuration.
+   */
+  measureConfiguration(): Promise<WorkspaceSearchMigrationConfiguration>
+
+  /**
+   * Reads and reduces one target page through this measured claimed session.
+   *
+   * @param input - Measured target context and predecessor checkpoint.
+   * @param signal - Optional reconciliation deadline or cancellation.
+   * @returns Bound cumulative checkpoint and detached row evidence.
+   */
+  scanTargetPage(
+    input: WorkspaceSearchMigrationTargetScanReadInput,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceSearchMigrationTargetScanPageResult>
+
+  /**
+   * Returns the digest of the exact permit-authorized resource selection.
+   *
+   * @returns Lowercase requested-resource binding digest.
+   */
+  readRequestedResourcesBinding(): string
+
+  /**
+   * Returns the digest-only binding derived from this measured session.
+   *
+   * @returns Permit, resource, policy, and measured-configuration binding.
+   */
+  readRehearsalEvidenceSessionBinding():
+    CreateWorkspaceSearchMigrationRehearsalEvidenceAwsPublisherInput[
+      'sessionBinding'
+    ]
+
+  /**
+   * Returns the immutable stage head claimed during construction.
+   *
+   * @returns Detached claimed stage head.
+   */
+  readRehearsalClaimedStageHead():
+    WorkspaceSearchMigrationRehearsalStageHead | undefined
+
+  /**
+   * Reconstructs one authoritative terminal run using the claimed session.
+   *
+   * @param input - Restricted authenticated evidence and finite read budgets.
+   * @returns Opaque one-shot base awaiting post-seal #163 completion.
+   */
+  collectRehearsalReconciliation(
+    input:
+      CollectWorkspaceSearchMigrationRehearsalReconciliationSessionInput,
+  ): Promise<WorkspaceSearchMigrationRehearsalCollectedReconciliationBase>
+
+  /** Stops every new rate-managed DescribeTable operation. */
+  interruptDescribeTableRate(): void
+
+  /** Stops live admission and returns the final drained rate aggregate. */
+  sealAndReadDescribeTableRateEvidence():
+    Promise<WorkspaceSearchMigrationDescribeTableRateEvidence>
+
+  /** Reads only the current secret-free durable rate aggregate. */
+  readDescribeTableRateEvidence():
+    WorkspaceSearchMigrationDescribeTableRateEvidence
+
+  /**
+   * Runs the real source integrity checker exactly once behind the permit gate.
+   *
+   * Account, Region, profile, physical resources, caller identity, immutable
+   * resource digest, managed rate owner, clocks, and AWS transport are all
+   * retained privately by the session and cannot be selected by this call.
+   *
+   * @param input - Audit key, finite read limits, and optional cancellation.
+   * @returns Opaque pending result for later authenticated segment sealing.
+   */
+  runRehearsalIntegrityLiveSession(
+    input: RunAwsWorkspaceSearchMigrationRehearsalIntegrityLiveSessionInput,
+  ): Promise<WorkspaceSearchMigrationRehearsalIntegrityAwsPending>
+
+  /**
+   * Finalizes one session-owned pending handle against its raw rate segment.
+   *
+   * Policy/configuration bindings are derived from the authenticated permit.
+   * The runtime rate key must differ from the retained dedicated integrity key.
+   *
+   * @param input - Genuine handle, linked raw segments, and runtime rate key.
+   * @returns Authenticated rate-bound integrity result.
+   */
+  finalizeRehearsalIntegrityLiveSession(
+    input:
+      FinalizeAwsWorkspaceSearchMigrationRehearsalIntegritySessionInput,
+  ): WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult
+
+  /** Burns one unfinalized session-owned pending handle and its retained key. */
+  disposeRehearsalIntegrityLiveSession(
+    pending: WorkspaceSearchMigrationRehearsalIntegrityAwsPending,
+  ): void
+}
+
 /** Authenticated time interval that must contain the complete rehearsal. */
 export type WorkspaceSearchMigrationRehearsalPermitValidity = {
   /** Canonical inclusive permit issuance boundary. */
@@ -1720,6 +2045,22 @@ export type CreateAwsWorkspaceSearchMigrationRateManagedSessionInput = {
   readonly signal?: AbortSignal
 }
 
+/** Input for the dedicated owner-only pre-permit non-production root. */
+export type CreateAwsWorkspaceSearchMigrationRehearsalPrePermitRootSessionInput = {
+  /** Strict source-controlled root-plan document validated before clients. */
+  readonly rootPlan: unknown
+  /** Exact reviewed DescribeTable policy bound by later root evidence. */
+  readonly ratePolicy: WorkspaceSearchMigrationDescribeTableRatePolicy
+  /** Optional best-effort secret-free rate observation sink. */
+  readonly rateRecorder?: WorkspaceSearchMigrationDescribeTableRateRecorder
+  /** Optional caller cancellation combined with the non-resettable root bound. */
+  readonly signal?: AbortSignal
+  /** Optional trusted process-monotonic clock used by the complete root. */
+  readonly monotonicClock?: () => number
+  /** Optional trusted wall clock used for root chronology. */
+  readonly wallClock?: () => Date
+}
+
 /** Input for the isolated non-production runtime-fault rehearsal session. */
 export type CreateAwsWorkspaceSearchMigrationNonProductionRehearsalSessionInput =
   CreateAwsWorkspaceSearchMigrationRateManagedSessionInput & {
@@ -1735,6 +2076,32 @@ export type CreateAwsWorkspaceSearchMigrationNonProductionRehearsalSessionInput 
     /** Optional authenticated one-shot durable stage reservation claim. */
     readonly stageReservationClaim?:
       PrepareWorkspaceSearchMigrationRehearsalStageReservationAwsClaimInput
+  }
+
+/** Input for one permit-backed session owning the actual #163 live gate. */
+export type CreateAwsWorkspaceSearchMigrationRehearsalIntegritySessionInput =
+  {
+    /** Complete explicit permit-authorized non-production resources. */
+    readonly requested: WorkspaceSearchMigrationRequestedResources
+    /** Exact reviewed and permit-bound DescribeTable policy. */
+    readonly ratePolicy: WorkspaceSearchMigrationDescribeTableRatePolicy
+    /** Optional best-effort secret-free rate observation sink. */
+    readonly rateRecorder?: WorkspaceSearchMigrationDescribeTableRateRecorder
+    /** Authenticated short-lived non-production permit. */
+    readonly permit: unknown
+    /** Dedicated 32-byte runtime key authenticating the reviewed permit. */
+    readonly permitVerificationKey: Uint8Array
+    /** Optional trusted clock used around permit-bound external reads. */
+    readonly permitClock?: () => Date
+    /** Required authenticated one-shot durable auxiliary-stage claim. */
+    readonly stageReservationClaim:
+      PrepareWorkspaceSearchMigrationRehearsalStageReservationAwsClaimInput
+    /** Canonical owner-only immutable resource-attestation bytes, consumed. */
+    readonly resourceAttestationBytes: Uint8Array
+    /** Dedicated 32-byte immutable-resource and result HMAC key, consumed. */
+    readonly integrityDigestKey: Uint8Array
+    /** Optional cancellation stopping construction and later live admission. */
+    readonly signal?: AbortSignal
   }
 
 /** Input for one standalone authenticated non-production stage commit. */
@@ -1860,6 +2227,103 @@ type RateManagedAwsSessionConstructionSnapshot = {
     WorkspaceSearchMigrationPrePlanAuthorityClock
   /** Optional captured composition cancellation. */
   readonly signal?: AbortSignal
+}
+
+/** Module-owned sink receiving the isolated final-publication exercise. */
+type RegisterFinalPublicationDescribeTableRateExercise = (
+  exercise: WorkspaceSearchMigrationRehearsalDescribeTableRateExercise,
+) => void
+
+/** Synchronously detached construction for the dedicated pre-permit root. */
+type RehearsalPrePermitRootConstructionSnapshot = {
+  /** Strict plan re-resolved from the repository-owned target map. */
+  readonly plan: WorkspaceSearchMigrationRehearsalRootPlan
+  /** Detached reviewed DescribeTable rate policy. */
+  readonly ratePolicy: WorkspaceSearchMigrationDescribeTableRatePolicy
+  /** Optional captured secret-free rate observation sink. */
+  readonly rateRecorder?: WorkspaceSearchMigrationDescribeTableRateRecorder
+  /** Optional caller cancellation combined with the root deadline. */
+  readonly signal?: AbortSignal
+  /** Trusted process-monotonic root clock. */
+  readonly monotonicClock: () => number
+  /** Trusted canonical root wall clock. */
+  readonly wallClock: () => Date
+}
+
+/** Fixed rate construction authority derived from one strict root plan. */
+type RehearsalPrePermitRootRateConstruction = {
+  /** Exact six migration tables allowed only for interrupted cleanup logic. */
+  readonly recoveryTableNames: readonly string[]
+  /** Exact canonical ten-name migration/integrity union. */
+  readonly allowedTableNames: readonly string[]
+  /** Root-only authority to create the first absent checkpoint. */
+  readonly bootstrap: true
+  /** Mandatory refusal to recover a retained cleanup marker. */
+  readonly recoverInterruptedCleanup: false
+  /** Mandatory refusal to recover one uncertain physical attempt. */
+  readonly recoverInterruptedAttempt: false
+}
+
+/** Exact physical names shared by pre-permit and permit-backed integrity roots. */
+type RehearsalIntegrityTableSelection = {
+  /** Exact six migration tables admitted to interrupted cleanup only. */
+  readonly recoveryTableNames: readonly string[]
+  /** Exact canonical migration-six plus integrity-four union. */
+  readonly allowedTableNames: readonly string[]
+}
+
+/** Synchronously authenticated owner-only state for one actual #163 session. */
+type NonProductionRehearsalIntegrityConstruction = {
+  /** Privately retained canonical owner-only attestation bytes. */
+  readonly resourceAttestationBytes: Uint8Array
+  /** Privately retained dedicated immutable-resource and result key. */
+  readonly integrityDigestKey: Uint8Array
+  /** Exact six integrity tables derived only from the private attestation. */
+  readonly tables: CrossDomainIntegrityTableNames
+  /** Exact File bucket derived only from the private attestation. */
+  readonly buckets: CrossDomainIntegrityBucketNames
+  /** Permit-matched keyed digest of the canonical seven-resource vector. */
+  readonly expectedResourceIdentityDigest: string
+  /** Exact six-table cleanup and exact ten-table operational authority. */
+  readonly rateTables: RehearsalIntegrityTableSelection
+}
+
+/** Complete synchronous result before any integrity-session AWS client exists. */
+type NonProductionRehearsalIntegritySessionConstructionSnapshot = {
+  /** Detached generic rate-managed construction. */
+  readonly session: RateManagedAwsSessionConstructionSnapshot
+  /** Authenticated permit and optional one-shot stage claim. */
+  readonly preflight: NonProductionRehearsalConstructionPreflight
+  /** Permit-matched owner-only integrity construction. */
+  readonly integrity: NonProductionRehearsalIntegrityConstruction
+}
+
+/** Detached caller-controlled state for one dedicated actual #163 invocation. */
+type RehearsalIntegrityLiveInvocationSnapshot = {
+  /** Invocation-owned detached audit pseudonym key. */
+  readonly auditPseudonymKey: Uint8Array
+  /** Fixed DynamoDB Scan item limit. */
+  readonly pageSize: number
+  /** Total Scan page bound. */
+  readonly maxPages: number
+  /** Total normalized item bound. */
+  readonly maxItems: number
+  /** Complete non-resettable duration bound. */
+  readonly maximumDurationMilliseconds: number
+  /** Optional validated caller cancellation. */
+  readonly signal?: AbortSignal
+}
+
+/** Private generic pending and key retained behind one outer session handle. */
+type RehearsalIntegrityAwsPendingState = {
+  /** Genuine generic pending that never crosses the dedicated outer gate. */
+  readonly pending: WorkspaceSearchMigrationRehearsalIntegrityLiveSessionPending
+  /** Dedicated integrity key copy used only for runtime-key separation. */
+  readonly integrityDigestKey: Uint8Array
+  /** Combined signal whose later abort burns this unfinalized handle. */
+  readonly signal: AbortSignal
+  /** Exact listener removed on explicit finalization or disposal. */
+  readonly abortListener: () => void
 }
 
 /** Validated non-production guard retained only through composition preflight. */
@@ -2716,12 +3180,17 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
    * Reads the selected journal bucket's deployment-environment tags.
    *
    * @param command - Exact owner-bound GetBucketTagging command.
+   * @param signal - Optional root-owned complete-lifecycle cancellation.
    * @returns Raw S3 bucket tag response used only during rehearsal preflight.
    */
   getBucketTagging(
     command: GetBucketTaggingCommand,
+    signal?: AbortSignal,
   ): Promise<GetBucketTaggingOutput> {
-    return this.s3Client.send(command)
+    return this.s3Client.send(
+      command,
+      signal === undefined ? {} : { abortSignal: signal },
+    )
   }
 
   /**
@@ -2752,12 +3221,17 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
    * Sends one caller-identity read.
    *
    * @param command - Exact GetCallerIdentity command.
+   * @param signal - Optional root-owned complete-lifecycle cancellation.
    * @returns STS caller response.
    */
   getCallerIdentity(
     command: GetCallerIdentityCommand,
+    signal?: AbortSignal,
   ): Promise<GetCallerIdentityCommandOutput> {
-    return this.stsClient.send(command)
+    return this.stsClient.send(
+      command,
+      signal === undefined ? {} : { abortSignal: signal },
+    )
   }
 
   /**
@@ -2770,6 +3244,271 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
     command: GetObjectLockConfigurationCommand,
   ): Promise<GetObjectLockConfigurationOutput> {
     return this.s3Client.send(command)
+  }
+}
+
+/**
+ * Dedicated read-only S3 transport for a root or guarded live attestation.
+ *
+ * DescribeTable is deliberately an unreachable fallback because the managed
+ * integrity adapter owns every table read. STS, Scan, object-tag, and HEAD
+ * operations also fail locally for the root operation. The same constructor
+ * can be reused behind a permit-backed live outer gate without weakening its
+ * fallback rule.
+ */
+class AwsSdkWorkspaceSearchMigrationRehearsalIntegrityTransport
+  implements CrossDomainIntegrityAwsTransport {
+  /** S3 client sharing the exact pinned profile and official endpoint. */
+  private readonly s3Client: S3Client
+
+  /** Whether the sole owned SDK client was already destroyed. */
+  private closed = false
+
+  /**
+   * Creates the exact S3 client needed by immutable resource attestation.
+   *
+   * @param configuration - Existing hardened migration S3 configuration.
+   */
+  constructor(
+    configuration: WorkspaceSearchMigrationIdentityS3SdkClientConfiguration,
+  ) {
+    this.s3Client = new S3Client(configuration)
+  }
+
+  /** Releases the sole owned S3 client exactly once. */
+  close(): void {
+    if (this.closed) return
+    this.closed = true
+    this.s3Client.destroy()
+  }
+
+  /** Rejects any attempt to bypass the managed DescribeTable adapter. */
+  describeTable(
+    _command: DescribeTableCommand,
+    _signal: AbortSignal,
+  ): Promise<DescribeTableCommandOutput> {
+    return rejectPrePermitRootOperation()
+  }
+
+  /** Reads only the exact owner-bound File bucket versioning state. */
+  getBucketVersioning(
+    command: GetBucketVersioningCommand,
+    signal: AbortSignal,
+  ): Promise<GetBucketVersioningCommandOutput> {
+    return this.s3Client.send(command, { abortSignal: signal })
+  }
+
+  /** Reads only the exact immutable File marker object's attributes. */
+  getObjectAttributes(
+    command: GetObjectAttributesCommand,
+    signal: AbortSignal,
+  ): Promise<GetObjectAttributesCommandOutput> {
+    return this.s3Client.send(command, { abortSignal: signal })
+  }
+
+  /** Rejects object-tag reads because root attestation does not need them. */
+  getObjectTagging(
+    _command: GetObjectTaggingCommand,
+    _signal: AbortSignal,
+  ): Promise<GetObjectTaggingCommandOutput> {
+    return rejectPrePermitRootOperation()
+  }
+
+  /** Rejects object HEAD reads because root attestation does not need them. */
+  headObject(
+    _command: HeadObjectCommand,
+    _signal: AbortSignal,
+  ): Promise<HeadObjectCommandOutput> {
+    return rejectPrePermitRootOperation()
+  }
+
+  /** Rejects a second caller-identity path after exact outer STS preflight. */
+  readCallerIdentity(
+    _command: GetCallerIdentityCommand,
+    _signal: AbortSignal,
+  ): Promise<GetCallerIdentityCommandOutput> {
+    return rejectPrePermitRootOperation()
+  }
+
+  /** Rejects every data-plane Scan from the attestation-only transport. */
+  scan(
+    _command: ScanCommand,
+    _signal: AbortSignal,
+  ): Promise<ScanCommandOutput> {
+    return rejectPrePermitRootOperation()
+  }
+}
+
+/** Real read-only AWS transport retained only for one permit-backed live run. */
+class AwsSdkWorkspaceSearchMigrationRehearsalIntegrityLiveTransport
+  implements WorkspaceSearchMigrationRehearsalIntegrityLiveReadTransport {
+  /** DynamoDB data-plane client restricted to bounded Scan commands. */
+  private readonly dynamodbClient: DynamoDBClient
+
+  /** S3 client restricted to versioning, attributes, tags, and HEAD reads. */
+  private readonly s3Client: S3Client
+
+  /** STS client restricted to one exact caller-identity read. */
+  private readonly stsClient: STSClient
+
+  /** Exact account expected from the live STS call. */
+  private readonly expectedAccount: string
+
+  /** Exact assumed-role session ARN authenticated by the permit. */
+  private readonly expectedCallerArn: string
+
+  /** Session-owned admission check run before and after every service read. */
+  private readonly requireAdmission: () => void
+
+  /** Whether every owned SDK client was already destroyed. */
+  private closed = false
+
+  /**
+   * Creates only the three official-endpoint clients needed by #163.
+   *
+   * @param configurations - Pinned official-endpoint client configurations.
+   * @param expectedAccount - Exact permit-authorized AWS account.
+   * @param expectedCallerArn - Exact permit-authorized STS caller ARN.
+   * @param requireAdmission - Session admission checked around every send.
+   */
+  constructor(
+    configurations: WorkspaceSearchMigrationIdentityAwsSdkConfigurations,
+    expectedAccount: string,
+    expectedCallerArn: string,
+    requireAdmission: () => void,
+  ) {
+    this.dynamodbClient = new DynamoDBClient(configurations.dynamodb)
+    this.s3Client = new S3Client(configurations.s3)
+    this.stsClient = new STSClient(configurations.sts)
+    this.expectedAccount = expectedAccount
+    this.expectedCallerArn = expectedCallerArn
+    this.requireAdmission = requireAdmission
+  }
+
+  /** Releases every owned SDK client exactly once and without early exit. */
+  close(): void {
+    if (this.closed) return
+    this.closed = true
+    for (const client of [
+      this.dynamodbClient,
+      this.s3Client,
+      this.stsClient,
+    ]) {
+      try {
+        client.destroy()
+      } catch {
+        // Every client receives its best-effort close despite sibling failure.
+      }
+    }
+  }
+
+  /** Reads only the exact owner-bound File bucket versioning state. */
+  getBucketVersioning(
+    command: GetBucketVersioningCommand,
+    signal: AbortSignal,
+  ): Promise<GetBucketVersioningCommandOutput> {
+    return this.runRead(
+      signal,
+      async () => await this.s3Client.send(command, {
+        abortSignal: signal,
+      }),
+    )
+  }
+
+  /** Reads only the exact immutable File marker object's attributes. */
+  getObjectAttributes(
+    command: GetObjectAttributesCommand,
+    signal: AbortSignal,
+  ): Promise<GetObjectAttributesCommandOutput> {
+    return this.runRead(
+      signal,
+      async () => await this.s3Client.send(command, {
+        abortSignal: signal,
+      }),
+    )
+  }
+
+  /** Reads only immutable File object tags selected by the checker. */
+  getObjectTagging(
+    command: GetObjectTaggingCommand,
+    signal: AbortSignal,
+  ): Promise<GetObjectTaggingCommandOutput> {
+    return this.runRead(
+      signal,
+      async () => await this.s3Client.send(command, {
+        abortSignal: signal,
+      }),
+    )
+  }
+
+  /** Reads only immutable File object metadata selected by the checker. */
+  headObject(
+    command: HeadObjectCommand,
+    signal: AbortSignal,
+  ): Promise<HeadObjectCommandOutput> {
+    return this.runRead(
+      signal,
+      async () => await this.s3Client.send(command, {
+        abortSignal: signal,
+      }),
+    )
+  }
+
+  /** Reads and enforces the exact permit-authorized STS caller identity. */
+  async readCallerIdentity(
+    command: GetCallerIdentityCommand,
+    signal: AbortSignal,
+  ): Promise<GetCallerIdentityCommandOutput> {
+    const output = await this.runRead(
+      signal,
+      async () => await this.stsClient.send(command, {
+        abortSignal: signal,
+      }),
+    )
+    requirePreMeasurementCallerIdentity(output, this.expectedAccount)
+    if (
+      output.Account !== this.expectedAccount ||
+      output.Arn !== this.expectedCallerArn
+    ) throw new WorkspaceSearchMigrationRehearsalPermitError()
+    return output
+  }
+
+  /** Sends only one checker-built bounded strongly consistent Scan page. */
+  scan(
+    command: ScanCommand,
+    signal: AbortSignal,
+  ): Promise<ScanCommandOutput> {
+    return this.runRead(
+      signal,
+      async () => await this.dynamodbClient.send(command, {
+        abortSignal: signal,
+      }),
+    )
+  }
+
+  /**
+   * Runs one service read between exact permit/session admission checks.
+   *
+   * @param signal - Complete live invocation cancellation.
+   * @param operation - One allowlisted SDK send using the same signal.
+   * @returns Raw SDK output after post-send admission remains active.
+   */
+  private async runRead<Result>(
+    signal: AbortSignal,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    if (
+      this.closed ||
+      !(signal instanceof AbortSignal) ||
+      nodeUtilTypes.isProxy(signal) ||
+      signal.aborted
+    ) throw new WorkspaceSearchMigrationRehearsalIntegrityLiveSessionError()
+    this.requireAdmission()
+    try {
+      return await operation()
+    } finally {
+      this.requireAdmission()
+    }
   }
 }
 
@@ -3114,14 +3853,15 @@ class AwsWorkspaceSearchMigrationIdentityPort
   /**
    * Reconstructs and reconciles one authoritative rehearsal terminal.
    *
-   * @param input - Restricted run, raw authenticated files, and finite limits.
-   * @returns Complete independently measured reconciliation collector result.
+   * @param input - Restricted run, rollback target files, and finite limits.
+   * @returns Opaque one-shot base awaiting post-seal #163 completion.
    */
   async collectRehearsalReconciliation(
     input:
       CollectWorkspaceSearchMigrationRehearsalReconciliationSessionInput,
-  ): Promise<WorkspaceSearchMigrationRehearsalReconciliationCollectorResult> {
+  ): Promise<WorkspaceSearchMigrationRehearsalCollectedReconciliationBase> {
     const request = prepareManagedReconciliationSessionInput(input)
+    let integrityKey: Uint8Array | undefined
     try {
       this.requireNewAwsAdmission()
       const guard = this.rehearsalGuard
@@ -3134,11 +3874,17 @@ class AwsWorkspaceSearchMigrationIdentityPort
         request.runId,
         request.signal,
       )
+      integrityKey = this.copyManagedReconciliationIntegrityKey()
+      if (integrityKey === undefined) {
+        return failManagedReconciliationSession()
+      }
       const expectedMigrationResourceIdentities =
         createWorkspaceSearchMigrationManagedReconciliationResourceIdentities(
           graph.authority.configuration,
-          request.integrity.digestKey,
+          integrityKey,
         )
+      integrityKey.fill(0)
+      integrityKey = undefined
       validateWorkspaceSearchMigrationManagedReconciliationResourceIdentities({
         expected: expectedMigrationResourceIdentities,
         resourceIdentityScheme:
@@ -3160,14 +3906,10 @@ class AwsWorkspaceSearchMigrationIdentityPort
         guard,
         this.claimedRehearsalStageHead,
       )
-      const integrity = authenticateManagedReconciliationIntegrity(
-        request.integrity,
-        request.scenario,
-        terminal.binding,
+      requireManagedReconciliationTargetResourceIdentities(
         target,
         guard.permit.integrityResourceIdentityDigest,
         expectedMigrationResourceIdentities,
-        request.clock,
       )
       const expectedMarkers = createManagedReconciliationExpectedMarkers(
         graph.replay,
@@ -3235,6 +3977,8 @@ class AwsWorkspaceSearchMigrationIdentityPort
       const context = createManagedReconciliationCoreContext(
         request,
         terminal.binding,
+        guard.permit.policyVersion,
+        guard.permit.integrityResourceIdentityDigest,
         checkedAt,
       )
       const sourceTargetSummary =
@@ -3242,9 +3986,8 @@ class AwsWorkspaceSearchMigrationIdentityPort
           terminal.verifiedResult,
           target,
         )
-      return Object.freeze({
+      const base = Object.freeze({
         context,
-        integrity,
         targetAudits: target === undefined
           ? null
           : createManagedReconciliationTargetAuditPair(target),
@@ -3252,7 +3995,21 @@ class AwsWorkspaceSearchMigrationIdentityPort
         authoritySummary: collected.authoritySummary,
         sourceTargetSummary,
       })
+      const capability =
+        new WorkspaceSearchMigrationRehearsalCollectedReconciliationBase(
+          collectedReconciliationBaseToken,
+        )
+      managedReconciliationCollectedBaseStates.set(capability, Object.freeze({
+        base,
+        expectedMigrationResourceIdentities,
+        expectedResourceIdentityDigest:
+          guard.permit.integrityResourceIdentityDigest,
+        ...(target === undefined ? {} : { target }),
+        clock: request.clock,
+      }))
+      return capability
     } finally {
+      integrityKey?.fill(0)
       zeroizeManagedReconciliationSessionInput(request)
     }
   }
@@ -10828,10 +11585,31 @@ class AwsWorkspaceSearchMigrationIdentityPort
    * reservations, and writes. It does not disable `close`, post-send guards,
    * or reconciliation needed to drain an already-admitted operation.
    */
-  private requireNewAwsAdmission(): void {
+  protected requireNewAwsAdmission(): void {
     this.requireOpen()
     if (this.rateSealed) throw inactiveManagedIdentityPort()
     this.requireRehearsalAdmissionActive()
+  }
+
+  /**
+   * Returns cancellation tripped by session seal or complete closure.
+   *
+   * @returns Stable session-owned operational cancellation signal.
+   */
+  protected readOperationalAbortSignal(): AbortSignal {
+    return this.operationalAbortController.signal
+  }
+
+  /**
+   * Copies dedicated #163 identity authority for measured reconciliation.
+   *
+   * Generic and production sessions own no such authority and fail closed.
+   *
+   * @returns Fresh owned key copy, or undefined outside the dedicated root.
+   */
+  protected copyManagedReconciliationIntegrityKey():
+    Uint8Array | undefined {
+    return undefined
   }
 
   /**
@@ -10906,6 +11684,505 @@ class AwsWorkspaceSearchMigrationIdentityPort
   }
 }
 
+/** Internal full session hidden behind the dedicated live-only projection. */
+class AwsWorkspaceSearchMigrationRehearsalIntegrityPort
+  extends AwsWorkspaceSearchMigrationIdentityPort {
+  /** Immutable requested resource snapshot used to derive live clients. */
+  private readonly integrityRequested:
+    WorkspaceSearchMigrationRequestedResourcesSnapshot
+
+  /** Shared exact-ten managed rate owner used by the live adapter. */
+  private readonly integrityRate:
+    WorkspaceSearchMigrationManagedDescribeTableRate
+
+  /** Authenticated permit retained for exact caller and clock admission. */
+  private readonly integrityGuard: NonProductionRehearsalConstructionGuard
+
+  /** Optional construction cancellation retained through the live operation. */
+  private readonly integritySessionSignal: AbortSignal | undefined
+
+  /** Exact six integrity tables derived from canonical private bytes. */
+  private readonly integrityTables: CrossDomainIntegrityTableNames
+
+  /** Exact File bucket derived from canonical private bytes. */
+  private readonly integrityBuckets: CrossDomainIntegrityBucketNames
+
+  /** Permit-matched immutable seven-resource identity digest. */
+  private readonly expectedResourceIdentityDigest: string
+
+  /** Canonical owner-only bytes retained until use, seal, or close. */
+  private readonly resourceAttestationBytes: Uint8Array
+
+  /** Dedicated result and immutable-resource HMAC key retained privately. */
+  private readonly integrityDigestKey: Uint8Array
+
+  /** Whether the sole actual live invocation was already attempted. */
+  private liveAttempted = false
+
+  /** Whether retained owner-only bytes and key were already overwritten. */
+  private integrityMaterialDestroyed = false
+
+  /** Genuine generic pendings hidden behind this session's outer handles. */
+  private readonly integrityPendingStates = new WeakMap<
+    object,
+    RehearsalIntegrityAwsPendingState
+  >()
+
+  /** Enumerable live handles used only for seal/close cleanup. */
+  private readonly unfinalizedIntegrityPendings =
+    new Set<WorkspaceSearchMigrationRehearsalIntegrityAwsPending>()
+
+  /**
+   * Creates one internal permit-backed session after synchronous validation.
+   *
+   * @param requested - Exact permit-authorized migration resources.
+   * @param transport - Main session transport for rate and narrow control reads.
+   * @param prePlanAuthorityClock - Internal system authority clock.
+   * @param rate - Exact-ten managed DescribeTable owner.
+   * @param measurementSessionFactory - Internal shared-rate child factory.
+   * @param guard - Authenticated permit and trusted clock.
+   * @param claimedStageHead - Optional immutable claimed stage head.
+   * @param integrity - Permit-matched private attestation construction.
+   * @param sessionSignal - Optional construction/session cancellation.
+   */
+  constructor(
+    requested: WorkspaceSearchMigrationRequestedResourcesSnapshot,
+    transport: WorkspaceSearchMigrationManagedAwsTransport,
+    prePlanAuthorityClock:
+      WorkspaceSearchMigrationPrePlanAuthorityClock,
+    rate: WorkspaceSearchMigrationManagedDescribeTableRate,
+    measurementSessionFactory:
+      () => Promise<WorkspaceSearchMigrationManagedIdentityPort>,
+    guard: NonProductionRehearsalConstructionGuard,
+    claimedStageHead: WorkspaceSearchMigrationRehearsalStageHead | undefined,
+    integrity: NonProductionRehearsalIntegrityConstruction,
+    sessionSignal: AbortSignal | undefined,
+  ) {
+    super(
+      requested,
+      transport,
+      prePlanAuthorityClock,
+      undefined,
+      rate,
+      true,
+      measurementSessionFactory,
+      guard,
+      claimedStageHead,
+    )
+    this.integrityRequested = requested
+    this.integrityRate = rate
+    this.integrityGuard = guard
+    this.integritySessionSignal = sessionSignal
+    this.integrityTables = integrity.tables
+    this.integrityBuckets = integrity.buckets
+    this.expectedResourceIdentityDigest =
+      integrity.expectedResourceIdentityDigest
+    this.resourceAttestationBytes = integrity.resourceAttestationBytes
+    this.integrityDigestKey = integrity.integrityDigestKey
+  }
+
+  /** Overwrites retained private material before complete session closure. */
+  override close(): Promise<void> {
+    this.disposeAllIntegrityPendings()
+    this.destroyIntegrityMaterial()
+    return super.close()
+  }
+
+  /** Overwrites retained private material before final rate sealing begins. */
+  override sealAndReadDescribeTableRateEvidence():
+    Promise<WorkspaceSearchMigrationDescribeTableRateEvidence> {
+    this.disposeAllIntegrityPendings()
+    this.destroyIntegrityMaterial()
+    return super.sealAndReadDescribeTableRateEvidence()
+  }
+
+  /**
+   * Returns one private key copy only before live use, seal, or close.
+   *
+   * @returns Fresh owned key copy, or undefined after private destruction.
+   */
+  protected override copyManagedReconciliationIntegrityKey():
+    Uint8Array | undefined {
+    if (this.integrityMaterialDestroyed) return undefined
+    return new Uint8Array(this.integrityDigestKey)
+  }
+
+  /**
+   * Runs the real source #163 checker exactly once with no injected AWS state.
+   *
+   * @param input - Audit pseudonym key, bounded limits, and cancellation only.
+   * @returns Opaque pending result for authenticated segment finalization.
+   */
+  async runRehearsalIntegrityLiveSession(
+    input: RunAwsWorkspaceSearchMigrationRehearsalIntegrityLiveSessionInput,
+  ): Promise<WorkspaceSearchMigrationRehearsalIntegrityAwsPending> {
+    const replayed = this.liveAttempted
+    this.liveAttempted = true
+    let invocation: RehearsalIntegrityLiveInvocationSnapshot | undefined
+    let transport:
+      AwsSdkWorkspaceSearchMigrationRehearsalIntegrityLiveTransport | undefined
+    let pending:
+      WorkspaceSearchMigrationRehearsalIntegrityLiveSessionPending | undefined
+    let integrityDigestKey: Uint8Array | undefined
+    let pendingIntegrityDigestKey: Uint8Array | undefined
+    let resourceAttestationBytes: Uint8Array | undefined
+    try {
+      invocation = detachRehearsalIntegrityLiveInvocation(input)
+      if (replayed) return failRehearsalIntegrityLiveInvocation()
+      if (
+        createHash('sha256')
+          .update(invocation.auditPseudonymKey)
+          .digest('hex') === this.integrityGuard.permit.evidenceKeyDigest
+      ) return failRehearsalIntegrityLiveInvocation()
+      this.requireNewAwsAdmission()
+      integrityDigestKey = copyRehearsalIntegrityLiveKey(
+        this.integrityDigestKey,
+      )
+      pendingIntegrityDigestKey = copyRehearsalIntegrityLiveKey(
+        this.integrityDigestKey,
+      )
+      resourceAttestationBytes = copyRehearsalIntegrityLiveBytes(
+        this.resourceAttestationBytes,
+        CROSS_DOMAIN_INTEGRITY_RESOURCE_ATTESTATION_MAX_BYTES,
+      )
+      const signal = combineRehearsalIntegrityLiveSignals(
+        this.readOperationalAbortSignal(),
+        this.integritySessionSignal,
+        invocation.signal,
+      )
+      if (signal.aborted) return failRehearsalIntegrityLiveInvocation()
+      const credentials = createPinnedProfileCredentials(
+        this.integrityRequested,
+        signal,
+      )
+      const configurations = createIdentityAwsSdkConfigurations(
+        this.integrityRequested,
+        credentials,
+      )
+      transport =
+        new AwsSdkWorkspaceSearchMigrationRehearsalIntegrityLiveTransport(
+          configurations,
+          this.integrityRequested.account,
+          this.integrityGuard.permit.callerArn,
+          () => this.requireNewAwsAdmission(),
+        )
+      pending =
+        await runWorkspaceSearchMigrationRehearsalIntegrityLiveSession({
+          account: this.integrityRequested.account,
+          auditPseudonymKey: invocation.auditPseudonymKey,
+          buckets: this.integrityBuckets,
+          expectedResourceIdentityDigest:
+            this.expectedResourceIdentityDigest,
+          integrityDigestKey,
+          maxItems: invocation.maxItems,
+          maxPages: invocation.maxPages,
+          maximumDurationMilliseconds:
+            invocation.maximumDurationMilliseconds,
+          monotonicClock: readRehearsalRootSystemMonotonicClock,
+          pageSize: invocation.pageSize,
+          profile: this.integrityRequested.profile,
+          rate: this.integrityRate,
+          region: this.integrityRequested.region,
+          resourceAttestationBytes,
+          role: 'source',
+          signal,
+          tables: this.integrityTables,
+          transport,
+          wallClock: this.integrityGuard.clock,
+        })
+      this.requireNewAwsAdmission()
+      const completed = new WorkspaceSearchMigrationRehearsalIntegrityAwsPending(
+        rehearsalIntegrityAwsPendingToken,
+      )
+      const completedPending = pending
+      const completedIntegrityKey = pendingIntegrityDigestKey
+      const abortListener = (): void => {
+        this.disposeTrackedIntegrityPending(completed)
+      }
+      this.integrityPendingStates.set(completed, Object.freeze({
+        pending: completedPending,
+        integrityDigestKey: completedIntegrityKey,
+        signal,
+        abortListener,
+      }))
+      this.unfinalizedIntegrityPendings.add(completed)
+      signal.addEventListener('abort', abortListener, { once: true })
+      pending = undefined
+      pendingIntegrityDigestKey = undefined
+      if (signal.aborted) {
+        this.disposeTrackedIntegrityPending(completed)
+        return failRehearsalIntegrityLiveInvocation()
+      }
+      return completed
+    } catch {
+      if (pending !== undefined) {
+        try {
+          disposeWorkspaceSearchMigrationRehearsalIntegrityLiveSession(
+            pending,
+          )
+        } catch {
+          // Preserve the stable outer failure after burning pending authority.
+        }
+      }
+      return failRehearsalIntegrityLiveInvocation()
+    } finally {
+      invocation?.auditPseudonymKey.fill(0)
+      integrityDigestKey?.fill(0)
+      pendingIntegrityDigestKey?.fill(0)
+      resourceAttestationBytes?.fill(0)
+      transport?.close()
+      this.destroyIntegrityMaterial()
+    }
+  }
+
+  /**
+   * Finalizes one outer pending after enforcing runtime/integrity key separation.
+   *
+   * @param input - Session handle, exact linked raw segments, and runtime key.
+   * @returns Authenticated rate-bound live result.
+   */
+  finalizeRehearsalIntegrityLiveSession(
+    input:
+      FinalizeAwsWorkspaceSearchMigrationRehearsalIntegritySessionInput,
+  ): WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult {
+    let transferredRateKey: unknown
+    let rateAuthenticationKey: Uint8Array | undefined
+    let canonicalSegmentBytes: Uint8Array | undefined
+    let predecessorSegmentBytes: Uint8Array | undefined
+    let pendingState: RehearsalIntegrityAwsPendingState | undefined
+    try {
+      const record = rehearsalIntegrityLiveInvocationGuards.requireRecord(input)
+      transferredRateKey = readRehearsalIntegrityOwnDataCandidate(
+        record,
+        'rateAuthenticationKey',
+      )
+      rehearsalIntegrityLiveInvocationGuards.requireExactKeys(record, [
+        'canonicalSegmentBytes',
+        'pending',
+        'predecessorSegmentBytes',
+        'rateAuthenticationKey',
+      ])
+      pendingState = this.consumeIntegrityPendingState(
+        rehearsalIntegrityLiveInvocationGuards.readOwn(record, 'pending'),
+      )
+      transferredRateKey = rehearsalIntegrityLiveInvocationGuards.readOwn(
+        record,
+        'rateAuthenticationKey',
+      )
+      rateAuthenticationKey = copyRehearsalIntegrityLiveKey(
+        transferredRateKey,
+      )
+      canonicalSegmentBytes = copyRehearsalIntegrityLiveBytes(
+        rehearsalIntegrityLiveInvocationGuards.readOwn(
+          record,
+          'canonicalSegmentBytes',
+        ),
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RATE_MAX_SEGMENT_BYTES,
+      )
+      predecessorSegmentBytes = copyRehearsalIntegrityLiveBytes(
+        rehearsalIntegrityLiveInvocationGuards.readOwn(
+          record,
+          'predecessorSegmentBytes',
+        ),
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RATE_MAX_SEGMENT_BYTES,
+      )
+      if (timingSafeEqual(
+        rateAuthenticationKey,
+        pendingState.integrityDigestKey,
+      ) || createHash('sha256')
+        .update(rateAuthenticationKey)
+        .digest('hex') !== this.integrityGuard.permit.evidenceKeyDigest) {
+        disposeWorkspaceSearchMigrationRehearsalIntegrityLiveSession(
+          pendingState.pending,
+        )
+        return failRehearsalIntegrityLiveInvocation()
+      }
+      this.requireNewAwsAdmission()
+      return finalizeWorkspaceSearchMigrationRehearsalIntegrityLiveSession({
+        canonicalSegmentBytes,
+        expectedConfigurationBindingDigest:
+          this.integrityGuard.permit.configurationBindingDigest,
+        expectedPolicyVersion: this.integrityGuard.permit.policyVersion,
+        pending: pendingState.pending,
+        predecessorSegmentBytes,
+        rateAuthenticationKey,
+      })
+    } catch {
+      if (pendingState !== undefined) {
+        try {
+          disposeWorkspaceSearchMigrationRehearsalIntegrityLiveSession(
+            pendingState.pending,
+          )
+        } catch {
+          // The generic finalizer may already have burned the inner pending.
+        }
+      }
+      return failRehearsalIntegrityLiveInvocation()
+    } finally {
+      zeroizeRehearsalIntegrityCandidate(transferredRateKey)
+      rateAuthenticationKey?.fill(0)
+      canonicalSegmentBytes?.fill(0)
+      predecessorSegmentBytes?.fill(0)
+      pendingState?.integrityDigestKey.fill(0)
+    }
+  }
+
+  /** Burns one genuine outer handle and its hidden generic pending. */
+  disposeRehearsalIntegrityLiveSession(
+    pending: WorkspaceSearchMigrationRehearsalIntegrityAwsPending,
+  ): void {
+    const state = this.consumeIntegrityPendingState(pending)
+    try {
+      disposeWorkspaceSearchMigrationRehearsalIntegrityLiveSession(
+        state.pending,
+      )
+    } catch {
+      return failRehearsalIntegrityLiveInvocation()
+    } finally {
+      state.integrityDigestKey.fill(0)
+    }
+  }
+
+  /** Consumes one exact-session outer pending before any finalizer validation. */
+  private consumeIntegrityPendingState(
+    value: unknown,
+  ): RehearsalIntegrityAwsPendingState {
+    if (
+      typeof value !== 'object' ||
+      value === null ||
+      nodeUtilTypes.isProxy(value)
+    ) return failRehearsalIntegrityLiveInvocation()
+    const state = this.integrityPendingStates.get(value)
+    if (state === undefined) return failRehearsalIntegrityLiveInvocation()
+    this.integrityPendingStates.delete(value)
+    this.unfinalizedIntegrityPendings.delete(value)
+    state.signal.removeEventListener('abort', state.abortListener)
+    return state
+  }
+
+  /** Best-effort abort/seal cleanup for one possibly already consumed handle. */
+  private disposeTrackedIntegrityPending(
+    pending: WorkspaceSearchMigrationRehearsalIntegrityAwsPending,
+  ): void {
+    const state = this.integrityPendingStates.get(pending)
+    if (state === undefined) return
+    this.integrityPendingStates.delete(pending)
+    this.unfinalizedIntegrityPendings.delete(pending)
+    state.signal.removeEventListener('abort', state.abortListener)
+    try {
+      disposeWorkspaceSearchMigrationRehearsalIntegrityLiveSession(
+        state.pending,
+      )
+    } catch {
+      // Abort/seal/close cleanup is exhaustive and best effort.
+    } finally {
+      state.integrityDigestKey.fill(0)
+    }
+  }
+
+  /** Burns every still-unfinalized handle before seal or close proceeds. */
+  private disposeAllIntegrityPendings(): void {
+    for (const pending of this.unfinalizedIntegrityPendings) {
+      this.disposeTrackedIntegrityPending(pending)
+    }
+  }
+
+  /** Overwrites the retained private attestation and HMAC key exactly once. */
+  private destroyIntegrityMaterial(): void {
+    if (this.integrityMaterialDestroyed) return
+    this.integrityMaterialDestroyed = true
+    this.resourceAttestationBytes.fill(0)
+    this.integrityDigestKey.fill(0)
+  }
+}
+
+/**
+ * Hides every generic mutation and low-level read capability of the full port.
+ *
+ * @param session - Internal full session owned by this narrow projection.
+ * @returns Frozen live, seal, evidence, and close capability only.
+ */
+function createRehearsalIntegrityAwsSessionProjection(
+  session: AwsWorkspaceSearchMigrationRehearsalIntegrityPort,
+): WorkspaceSearchMigrationRehearsalIntegrityAwsSession {
+  return Object.freeze({
+    close: async (): Promise<void> => await session.close(),
+    measureConfiguration: async () => await session.measureConfiguration(),
+    scanTargetPage: async (
+      input: WorkspaceSearchMigrationTargetScanReadInput,
+      signal?: AbortSignal,
+    ) => await session.scanTargetPage(input, signal),
+    readRequestedResourcesBinding: () =>
+      session.readRequestedResourcesBinding(),
+    readRehearsalEvidenceSessionBinding: () =>
+      session.readRehearsalEvidenceSessionBinding(),
+    readRehearsalClaimedStageHead: () =>
+      session.readRehearsalClaimedStageHead(),
+    collectRehearsalReconciliation: async (
+      input:
+        CollectWorkspaceSearchMigrationRehearsalReconciliationSessionInput,
+    ) => await session.collectRehearsalReconciliation(input),
+    interruptDescribeTableRate: (): void =>
+      session.interruptDescribeTableRate(),
+    sealAndReadDescribeTableRateEvidence: async () =>
+      await session.sealAndReadDescribeTableRateEvidence(),
+    readDescribeTableRateEvidence: () =>
+      session.readDescribeTableRateEvidence(),
+    runRehearsalIntegrityLiveSession: async (
+      input: RunAwsWorkspaceSearchMigrationRehearsalIntegrityLiveSessionInput,
+    ) =>
+      await session.runRehearsalIntegrityLiveSession(input),
+    finalizeRehearsalIntegrityLiveSession: (
+      input:
+        FinalizeAwsWorkspaceSearchMigrationRehearsalIntegritySessionInput,
+    ) =>
+      session.finalizeRehearsalIntegrityLiveSession(input),
+    disposeRehearsalIntegrityLiveSession: (
+      pending: WorkspaceSearchMigrationRehearsalIntegrityAwsPending,
+    ) =>
+      session.disposeRehearsalIntegrityLiveSession(pending),
+  })
+}
+
+/**
+ * Projects one authenticated session onto final-publication capabilities only.
+ *
+ * @param session - Internal full rehearsal session owning all AWS transports.
+ * @param exercise - Construction-fixed opaque one-shot rate exercise.
+ * @returns Frozen measure, publish, evidence, interrupt, exercise, and close surface.
+ */
+function createRehearsalFinalPublicationAwsSessionProjection(
+  session: WorkspaceSearchMigrationNonProductionRehearsalAwsSession,
+  exercise: WorkspaceSearchMigrationRehearsalDescribeTableRateExercise,
+): WorkspaceSearchMigrationRehearsalFinalPublicationAwsSession {
+  return Object.freeze({
+    measureConfiguration: async () =>
+      await session.measureConfiguration(),
+    exerciseDescribeTableThrottle: async () => await exercise.run(),
+    createRehearsalArtifactPublisher: (
+      input: Pick<
+        CreateWorkspaceSearchMigrationRehearsalArtifactAwsPublisherInput,
+        'clock' | 'requestTimeoutMilliseconds'
+      >,
+    ) => session.createRehearsalArtifactPublisher(input),
+    createRehearsalEvidencePublisher: (
+      input: Pick<
+        CreateWorkspaceSearchMigrationRehearsalEvidenceAwsPublisherInput,
+        'clock' | 'requestTimeoutMilliseconds'
+      >,
+    ) => session.createRehearsalEvidencePublisher(input),
+    readRehearsalEvidenceSessionBinding: () =>
+      session.readRehearsalEvidenceSessionBinding(),
+    readDescribeTableRateEvidence: () =>
+      session.readDescribeTableRateEvidence(),
+    readRehearsalPermitValidity: () =>
+      session.readRehearsalPermitValidity(),
+    interruptDescribeTableRate: (): void =>
+      session.interruptDescribeTableRate(),
+    close: async (): Promise<void> => await session.close(),
+  })
+}
+
 /**
  * Creates a managed AWS migration session pinned to resources and endpoints.
  *
@@ -10953,6 +12230,39 @@ export async function createAwsWorkspaceSearchMigrationRateManagedSession(
   rejectProductionStageReservationCapabilities(input)
   const snapshot = detachRateManagedAwsSessionConstructionInput(input)
   return createRateManagedAwsSessionFromSnapshot(snapshot)
+}
+
+/**
+ * Creates the dedicated owner-only pre-permit non-production root session.
+ *
+ * The strict source-controlled root plan is parsed before clocks, credentials,
+ * or clients are constructed. The complete timeline begins before the first
+ * possible profile-assumption or GetCallerIdentity service read. Exact STS
+ * identity and journal deployment tags are verified before rate-checkpoint
+ * I/O. Bootstrap is fixed on while both recovery authorities are fixed off.
+ *
+ * @param input - Strict root plan, reviewed policy, clocks, and cancellation.
+ * @returns Capability-narrow measurement, attestation, seal, and close session.
+ */
+export async function createAwsWorkspaceSearchMigrationRehearsalPrePermitRootSession(
+  input:
+    CreateAwsWorkspaceSearchMigrationRehearsalPrePermitRootSessionInput,
+): Promise<WorkspaceSearchMigrationRehearsalPrePermitRootSession> {
+  const construction = detachRehearsalPrePermitRootConstruction(input)
+  const plan = construction.plan
+  const timeline = createWorkspaceSearchMigrationRehearsalRootTimeline({
+    maximumDurationMilliseconds:
+      plan.document.maximumDurationMilliseconds,
+    monotonicClock: construction.monotonicClock,
+    wallClock: construction.wallClock,
+    ...(construction.signal === undefined
+      ? {}
+      : { signal: construction.signal }),
+  })
+  return await createRehearsalPrePermitRootSessionFromSnapshot(
+    construction,
+    timeline,
+  )
 }
 
 /**
@@ -11005,6 +12315,109 @@ export async function createAwsWorkspaceSearchMigrationNonProductionRehearsalSes
     )
   } finally {
     rehearsalPreflight.stageReservationClaim?.destroy()
+  }
+}
+
+/**
+ * Creates the capability-minimized session used only by final publication.
+ *
+ * The caller cannot choose the exercise target. This factory fixes it to the
+ * already authenticated and allowlisted migration-state table and keeps the
+ * exercise outside both production and generic rehearsal session surfaces.
+ *
+ * @param input - Authenticated non-production session construction.
+ * @returns Frozen final-publication projection with one opaque rate exercise.
+ */
+export async function createAwsWorkspaceSearchMigrationRehearsalFinalPublicationSession(
+  input:
+    CreateAwsWorkspaceSearchMigrationNonProductionRehearsalSessionInput,
+): Promise<WorkspaceSearchMigrationRehearsalFinalPublicationAwsSession> {
+  const snapshot = detachRateManagedAwsSessionConstructionInput(input)
+  const rehearsalPreflight = detachNonProductionRehearsalConstructionGuard(
+    input,
+    snapshot.resources,
+    snapshot.ratePolicy,
+  )
+  const exerciseHolder: {
+    /** Opaque exercise registered only by the specialized rate factory. */
+    exercise?: WorkspaceSearchMigrationRehearsalDescribeTableRateExercise
+  } = {}
+  let session:
+    WorkspaceSearchMigrationNonProductionRehearsalAwsSession | undefined
+  try {
+    session = await createRateManagedAwsSessionFromSnapshot(
+      snapshot,
+      rehearsalPreflight,
+      undefined,
+      (exercise) => {
+        exerciseHolder.exercise = exercise
+      },
+    )
+    const exercise = exerciseHolder.exercise
+    if (exercise === undefined) {
+      await session.close()
+      throw new WorkspaceSearchMigrationRehearsalPermitError()
+    }
+    return createRehearsalFinalPublicationAwsSessionProjection(
+      session,
+      exercise,
+    )
+  } catch (error: unknown) {
+    try {
+      await session?.close()
+    } catch {
+      // Preserve the construction or projection failure after draining I/O.
+    }
+    throw error
+  } finally {
+    rehearsalPreflight.stageReservationClaim?.destroy()
+  }
+}
+
+/**
+ * Creates one stage-bound permit-backed session for an actual #163 live run.
+ *
+ * The private attestation, dedicated integrity key, exact permit resource
+ * vector, aggregate identity digest, source-controlled deployment target, and
+ * exact recovery-six/allow-ten tables are validated synchronously before any
+ * credentials, AWS clients, or rate-checkpoint I/O are created. Bootstrap and
+ * both recovery authorities are fixed false. The returned projection exposes
+ * no generic AWS reads, mutation ports, rate owner, or transport.
+ *
+ * @param input - Permit, required stage claim, private attestation, key, and policy.
+ * @returns Frozen live, rate evidence, seal, and close capability only.
+ */
+export async function createAwsWorkspaceSearchMigrationRehearsalIntegritySession(
+  input: CreateAwsWorkspaceSearchMigrationRehearsalIntegritySessionInput,
+): Promise<WorkspaceSearchMigrationRehearsalIntegrityAwsSession> {
+  const construction =
+    detachNonProductionRehearsalIntegritySessionConstruction(input)
+  let transferred = false
+  let internal:
+    AwsWorkspaceSearchMigrationRehearsalIntegrityPort | undefined
+  try {
+    internal = await createRateManagedAwsSessionFromSnapshot(
+      construction.session,
+      construction.preflight,
+      construction.integrity,
+    )
+    const projection = createRehearsalIntegrityAwsSessionProjection(internal)
+    transferred = true
+    internal = undefined
+    return projection
+  } catch {
+    try {
+      await internal?.close()
+    } catch {
+      // Preserve the stable construction failure after draining owned state.
+    }
+    throw new WorkspaceSearchMigrationRehearsalPermitError()
+  } finally {
+    construction.preflight.stageReservationClaim?.destroy()
+    if (!transferred) {
+      construction.integrity.resourceAttestationBytes.fill(0)
+      construction.integrity.integrityDigestKey.fill(0)
+    }
   }
 }
 
@@ -11335,11 +12748,445 @@ export async function commitAwsWorkspaceSearchMigrationNonProductionRehearsalSta
   }
 }
 
+/** Exact allowed fields of the pre-permit root construction input. */
+const rehearsalPrePermitRootConstructionKeys = new Set([
+  'monotonicClock',
+  'ratePolicy',
+  'rateRecorder',
+  'rootPlan',
+  'signal',
+  'wallClock',
+])
+
+/** Stable strict guards for the owner-only pre-permit construction. */
+const rehearsalPrePermitRootConstructionGuards =
+  new WorkspaceSearchMigrationStrictRecordGuards(
+    failRehearsalPrePermitRootOperation,
+  )
+
+/**
+ * Detaches the complete pre-permit construction before its first clock sample.
+ *
+ * The root plan is parsed first and therefore re-resolves the enabled target
+ * from the repository-owned deployment map before any client can exist.
+ * Recovery and bootstrap properties are not accepted on this public input.
+ *
+ * @param input - Candidate owner-only pre-permit construction.
+ * @returns Strict plan, policy, clocks, recorder, and cancellation snapshot.
+ */
+function detachRehearsalPrePermitRootConstruction(
+  input:
+    CreateAwsWorkspaceSearchMigrationRehearsalPrePermitRootSessionInput,
+): RehearsalPrePermitRootConstructionSnapshot {
+  const record = rehearsalPrePermitRootConstructionGuards.requireRecord(input)
+  const prototype = Object.getPrototypeOf(record)
+  if (
+    (prototype !== Object.prototype && prototype !== null) ||
+    (prototype !== null && nodeUtilTypes.isProxy(prototype))
+  ) return failRehearsalPrePermitRootOperation()
+  const keys = Reflect.ownKeys(record)
+  for (const key of keys) {
+    if (
+      typeof key !== 'string' ||
+      !rehearsalPrePermitRootConstructionKeys.has(key)
+    ) return failRehearsalPrePermitRootOperation()
+    const descriptor = Object.getOwnPropertyDescriptor(record, key)
+    if (
+      descriptor === undefined ||
+      !Object.hasOwn(descriptor, 'value')
+    ) return failRehearsalPrePermitRootOperation()
+  }
+  if (
+    !Object.hasOwn(record, 'rootPlan') ||
+    !Object.hasOwn(record, 'ratePolicy')
+  ) return failRehearsalPrePermitRootOperation()
+  const plan = parseWorkspaceSearchMigrationRehearsalRootPlan(
+    rehearsalPrePermitRootConstructionGuards.readOwn(record, 'rootPlan'),
+  )
+  let ratePolicy: WorkspaceSearchMigrationDescribeTableRatePolicy
+  let rateRecorder:
+    WorkspaceSearchMigrationDescribeTableRateRecorder | undefined
+  let signal: AbortSignal | undefined
+  let monotonicClock: (() => number) | undefined
+  let wallClock: (() => Date) | undefined
+  try {
+    ratePolicy = structuredClone(input.ratePolicy)
+    rateRecorder = Object.hasOwn(record, 'rateRecorder')
+      ? input.rateRecorder
+      : undefined
+    signal = Object.hasOwn(record, 'signal')
+      ? input.signal
+      : undefined
+    monotonicClock = Object.hasOwn(record, 'monotonicClock')
+      ? input.monotonicClock
+      : undefined
+    wallClock = Object.hasOwn(record, 'wallClock')
+      ? input.wallClock
+      : undefined
+  } catch {
+    return failRehearsalPrePermitRootOperation()
+  }
+  if (
+    (signal !== undefined &&
+      (!(signal instanceof AbortSignal) || nodeUtilTypes.isProxy(signal))) ||
+    (monotonicClock !== undefined &&
+      (typeof monotonicClock !== 'function' ||
+        nodeUtilTypes.isProxy(monotonicClock))) ||
+    (wallClock !== undefined &&
+      (typeof wallClock !== 'function' || nodeUtilTypes.isProxy(wallClock)))
+  ) return failRehearsalPrePermitRootOperation()
+  return Object.freeze({
+    plan,
+    ratePolicy: Object.freeze(ratePolicy),
+    ...(rateRecorder === undefined ? {} : { rateRecorder }),
+    ...(signal === undefined ? {} : { signal }),
+    monotonicClock: monotonicClock ?? readRehearsalRootSystemMonotonicClock,
+    wallClock: wallClock ?? readRehearsalRootSystemWallClock,
+  })
+}
+
+/**
+ * Composes one authenticated pre-permit root after the timeline has begun.
+ *
+ * @param construction - Strict detached source-controlled construction.
+ * @param timeline - Complete non-resettable root timeline begun before clients.
+ * @returns Capability-narrow root session after fixed rate bootstrap.
+ */
+async function createRehearsalPrePermitRootSessionFromSnapshot(
+  construction: RehearsalPrePermitRootConstructionSnapshot,
+  timeline: WorkspaceSearchMigrationRehearsalRootTimeline,
+): Promise<WorkspaceSearchMigrationRehearsalPrePermitRootSession> {
+  const plan = construction.plan
+  const resources = plan.document.requestedResources
+  const credentialsProvider = createPinnedProfileCredentials(
+    resources,
+    timeline.signal,
+  )
+  const configurations = createIdentityAwsSdkConfigurations(
+    resources,
+    credentialsProvider,
+  )
+  const transport =
+    new AwsSdkWorkspaceSearchMigrationIdentityTransport(configurations)
+  let rate: WorkspaceSearchMigrationManagedDescribeTableRate | undefined
+  let measurementPort: AwsWorkspaceSearchMigrationIdentityPort | undefined
+  let attestationOperation:
+    WorkspaceSearchMigrationRehearsalRootAttestationOperation | undefined
+  try {
+    const caller = await timeline.run(
+      async (signal) => await transport.getCallerIdentity(
+        new GetCallerIdentityCommand({}),
+        signal,
+      ),
+    )
+    requirePreMeasurementCallerIdentity(caller, resources.account)
+    if (caller.Arn !== plan.document.expectedCallerArn) {
+      return failRehearsalPrePermitRootOperation()
+    }
+    await timeline.run(async () => await credentialsProvider())
+    const tags = await timeline.run(
+      async (signal) => await transport.getBucketTagging(
+        new GetBucketTaggingCommand({
+          Bucket: resources.journalBucket,
+          ExpectedBucketOwner: resources.account,
+        }),
+        signal,
+      ),
+    )
+    requireRehearsalPrePermitRootJournalTags(tags, plan)
+
+    const checkpointStore =
+      createWorkspaceSearchMigrationDescribeTableRateCheckpointAwsStore({
+        binding: {
+          account: resources.account,
+          region: resources.region,
+          tableName: resources.tables['migration-state'],
+        },
+        transport,
+      })
+    const rateConstruction =
+      createRehearsalIntegrityRateConstruction(plan)
+    rate = await timeline.run(
+      async (signal) =>
+        await createWorkspaceSearchMigrationManagedDescribeTableRate({
+          account: resources.account,
+          region: resources.region,
+          recoveryTableNames: rateConstruction.recoveryTableNames,
+          allowedTableNames: rateConstruction.allowedTableNames,
+          policy: construction.ratePolicy,
+          checkpointStore,
+          credentials: createPinnedDescribeTableCredentialsProvider(
+            credentialsProvider,
+            resources.account,
+          ),
+          bootstrap: rateConstruction.bootstrap,
+          recoverInterruptedCleanup:
+            rateConstruction.recoverInterruptedCleanup,
+          recoverInterruptedAttempt:
+            rateConstruction.recoverInterruptedAttempt,
+          ...(construction.rateRecorder === undefined
+            ? {}
+            : { recorder: construction.rateRecorder }),
+          signal,
+        }),
+    )
+    measurementPort = new AwsWorkspaceSearchMigrationIdentityPort(
+      resources,
+      transport,
+      construction.wallClock,
+      undefined,
+      rate,
+      false,
+    )
+    attestationOperation =
+      createRateManagedRehearsalRootAttestationOperation({
+        configurations,
+        plan,
+        rate,
+      })
+    const ownedMeasurementPort = measurementPort
+    const rootMeasurementPort = Object.freeze({
+      measureConfiguration: async () =>
+        await ownedMeasurementPort.measureConfiguration(),
+      readDescribeTableRateEvidence: () =>
+        ownedMeasurementPort.readDescribeTableRateEvidence(),
+    })
+    return createWorkspaceSearchMigrationRehearsalPrePermitRootSession({
+      measurementPort: rootMeasurementPort,
+      closeMeasurementPort: async () => {
+        await ownedMeasurementPort.close()
+      },
+      rate,
+      attestationOperation,
+      expectedConfigurationBindingDigest:
+        plan.configurationBindingDigest,
+      expectedPolicyVersion: construction.ratePolicy.policyVersion,
+      timeline,
+    })
+  } catch {
+    timeline.interrupt()
+    rate?.interrupt()
+    try {
+      await rate?.close()
+    } catch {
+      // Continue closing both AWS transports before raising the stable failure.
+    }
+    try {
+      await measurementPort?.close()
+    } catch {
+      // Continue closing the attestation transport after measurement failure.
+    }
+    if (measurementPort === undefined) {
+      try {
+        transport.close()
+      } catch {
+        // The stable root failure hides transport-specific close details.
+      }
+    }
+    try {
+      attestationOperation?.close()
+    } catch {
+      // Every best-effort close is attempted before the stable root failure.
+    }
+    return failRehearsalPrePermitRootOperation()
+  }
+}
+
+/** Input for the reusable rate-managed integrity reader composition. */
+type CreateRateManagedRehearsalRootAttestationOperationInput = {
+  /** Existing hardened official-endpoint client configuration set. */
+  readonly configurations:
+    WorkspaceSearchMigrationIdentityAwsSdkConfigurations
+  /** Strict source-controlled root plan and exact integrity resources. */
+  readonly plan: WorkspaceSearchMigrationRehearsalRootPlan
+  /** Existing exact-ten managed DescribeTable owner. */
+  readonly rate: WorkspaceSearchMigrationManagedDescribeTableRate
+}
+
+/**
+ * Creates a one-shot adapter/reader pair with no DescribeTable fallback.
+ *
+ * This helper deliberately keeps the adapter and reader private. A future
+ * permit-backed live composition can reuse the same outer construction while
+ * supplying its separately guarded non-DescribeTable transport and pass count.
+ *
+ * @param input - Pinned clients, strict resources, and shared rate owner.
+ * @returns One-shot root attestation operation with exact close ownership.
+ */
+function createRateManagedRehearsalRootAttestationOperation(
+  input: CreateRateManagedRehearsalRootAttestationOperationInput,
+): WorkspaceSearchMigrationRehearsalRootAttestationOperation {
+  const plan = input.plan
+  const resources = plan.document.integrityResources
+  const baseTransport =
+    new AwsSdkWorkspaceSearchMigrationRehearsalIntegrityTransport(
+      input.configurations.s3,
+    )
+  let adapter: WorkspaceSearchMigrationRehearsalIntegrityRateAdapter
+  let reader: AwsCrossDomainIntegrityReader
+  try {
+    adapter = createWorkspaceSearchMigrationRehearsalIntegrityRateAdapter({
+      tableNames: resources.tables,
+      tablePassCount: 1,
+      baseTransport,
+      rate: input.rate,
+    })
+    reader = new AwsCrossDomainIntegrityReader({
+      buckets: { file: resources.fileBucket },
+      expectedAccount: plan.document.requestedResources.account,
+      maxPages: 1,
+      pageSize: 1,
+      profile: plan.document.requestedResources.profile,
+      region: plan.document.requestedResources.region,
+      tables: resources.tables,
+    }, () => adapter)
+  } catch {
+    baseTransport.close()
+    return failRehearsalPrePermitRootOperation()
+  }
+  let used = false
+  let closed = false
+  return Object.freeze({
+    run: async (
+      signal: AbortSignal,
+    ): Promise<WorkspaceSearchMigrationRehearsalRootAttestationOperationResult> => {
+      if (
+        used ||
+        closed ||
+        !(signal instanceof AbortSignal) ||
+        nodeUtilTypes.isProxy(signal)
+      ) return failRehearsalPrePermitRootOperation()
+      used = true
+      const resourceAttestation = await adapter.run(
+        async () => await reader.measureResourceAttestation(
+          resources.marker,
+          signal,
+        ),
+      )
+      const sequence = adapter.takeCompletedSequence(resourceAttestation)
+      return Object.freeze({ resourceAttestation, sequence })
+    },
+    close: (): void => {
+      if (closed) return
+      closed = true
+      reader.close()
+    },
+  })
+}
+
+/**
+ * Creates the exact-ten allowlist and fixed root recovery/bootstrap authority.
+ *
+ * @param plan - Strict source-controlled root plan.
+ * @returns Canonical migration six, union ten, and non-caller-controlled flags.
+ */
+function createRehearsalIntegrityRateConstruction(
+  plan: WorkspaceSearchMigrationRehearsalRootPlan,
+): RehearsalPrePermitRootRateConstruction {
+  const tables = plan.document.requestedResources.tables
+  const recoveryTableNames = Object.freeze([
+    tables['project-directory'],
+    tables['work-items'],
+    tables.collaboration,
+    tables.documents,
+    tables['workspace-search'],
+    tables['migration-state'],
+  ])
+  const allowedTableNames = Object.freeze([
+    ...plan.allowedDescribeTableNames,
+  ])
+  if (
+    recoveryTableNames.length !== 6 ||
+    new Set(recoveryTableNames).size !== 6 ||
+    allowedTableNames.length !== 10 ||
+    new Set(allowedTableNames).size !== 10 ||
+    recoveryTableNames.some(
+      (tableName) => !allowedTableNames.includes(tableName),
+    )
+  ) return failRehearsalPrePermitRootOperation()
+  return Object.freeze({
+    recoveryTableNames,
+    allowedTableNames,
+    bootstrap: true,
+    recoverInterruptedCleanup: false,
+    recoverInterruptedAttempt: false,
+  })
+}
+
+/** Requires all three source-controlled journal deployment tags exactly once. */
+function requireRehearsalPrePermitRootJournalTags(
+  output: GetBucketTaggingOutput,
+  plan: WorkspaceSearchMigrationRehearsalRootPlan,
+): void {
+  const tags = output.TagSet
+  if (!Array.isArray(tags)) return failRehearsalPrePermitRootOperation()
+  let environmentCount = 0
+  let trustRootCount = 0
+  let productionDigestCount = 0
+  for (const tag of tags) {
+    if (tag.Key === WORKSPACE_SEARCH_MIGRATION_REHEARSAL_ENVIRONMENT_TAG_KEY) {
+      environmentCount += 1
+      if (tag.Value !== WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE) {
+        return failRehearsalPrePermitRootOperation()
+      }
+      continue
+    }
+    if (
+      tag.Key ===
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_DEPLOYMENT_TRUST_ROOT_TAG_KEY
+    ) {
+      trustRootCount += 1
+      if (tag.Value !== plan.deploymentTrustRootDigest) {
+        return failRehearsalPrePermitRootOperation()
+      }
+      continue
+    }
+    if (
+      tag.Key ===
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PRODUCTION_ACCOUNT_DIGEST_TAG_KEY
+    ) {
+      productionDigestCount += 1
+      if (tag.Value !== plan.productionAccountDigest) {
+        return failRehearsalPrePermitRootOperation()
+      }
+    }
+  }
+  if (
+    environmentCount !== 1 ||
+    trustRootCount !== 1 ||
+    productionDigestCount !== 1
+  ) return failRehearsalPrePermitRootOperation()
+}
+
+/** Reads the default trusted process-monotonic root clock. */
+function readRehearsalRootSystemMonotonicClock(): number {
+  return Math.floor(performance.now())
+}
+
+/** Reads the default trusted root wall clock. */
+function readRehearsalRootSystemWallClock(): Date {
+  return new Date()
+}
+
+/** Creates one locally rejected Promise for a forbidden root transport call. */
+function rejectPrePermitRootOperation<Result>(): Promise<Result> {
+  return Promise.reject(
+    new WorkspaceSearchMigrationRehearsalPrePermitRootSessionError(),
+  )
+}
+
+/** Raises the stable raw-value-free pre-permit root failure. */
+function failRehearsalPrePermitRootOperation(): never {
+  throw new WorkspaceSearchMigrationRehearsalPrePermitRootSessionError()
+}
+
 /**
  * Composes one rate-managed session from an already detached construction.
  *
  * @param snapshot - Validated production-compatible session construction.
  * @param rehearsalPreflight - Optional authenticated non-production preflight.
+ * @param integrity - Optional dedicated integrity-session construction.
+ * @param registerFinalPublicationExercise - Optional specialized exercise sink.
  * @returns Fully claimed parent session and subordinate measurement factory.
  */
 function createRateManagedAwsSessionFromSnapshot(
@@ -11348,10 +13195,25 @@ function createRateManagedAwsSessionFromSnapshot(
 ): Promise<WorkspaceSearchMigrationNonProductionRehearsalAwsSession>
 function createRateManagedAwsSessionFromSnapshot(
   snapshot: RateManagedAwsSessionConstructionSnapshot,
+  rehearsalPreflight: NonProductionRehearsalConstructionPreflight,
+  integrity: NonProductionRehearsalIntegrityConstruction,
+): Promise<AwsWorkspaceSearchMigrationRehearsalIntegrityPort>
+function createRateManagedAwsSessionFromSnapshot(
+  snapshot: RateManagedAwsSessionConstructionSnapshot,
+  rehearsalPreflight: NonProductionRehearsalConstructionPreflight,
+  integrity: undefined,
+  registerFinalPublicationExercise:
+    RegisterFinalPublicationDescribeTableRateExercise,
+): Promise<WorkspaceSearchMigrationNonProductionRehearsalAwsSession>
+function createRateManagedAwsSessionFromSnapshot(
+  snapshot: RateManagedAwsSessionConstructionSnapshot,
 ): Promise<WorkspaceSearchMigrationRateManagedAwsSession>
 async function createRateManagedAwsSessionFromSnapshot(
   snapshot: RateManagedAwsSessionConstructionSnapshot,
   rehearsalPreflight?: NonProductionRehearsalConstructionPreflight,
+  integrity?: NonProductionRehearsalIntegrityConstruction,
+  registerFinalPublicationExercise?:
+    RegisterFinalPublicationDescribeTableRateExercise,
 ): Promise<WorkspaceSearchMigrationRateManagedAwsSession> {
   const rehearsalGuard = rehearsalPreflight?.guard
   const stageReservationClaim =
@@ -11359,7 +13221,10 @@ async function createRateManagedAwsSessionFromSnapshot(
   const signal = snapshot.signal
   requireRateManagedSessionSignalActive(signal)
   const resources = snapshot.resources
-  const credentialsProvider = createPinnedProfileCredentials(resources)
+  const credentialsProvider = createPinnedProfileCredentials(
+    resources,
+    signal,
+  )
   const configurations = createIdentityAwsSdkConfigurations(
     resources,
     credentialsProvider,
@@ -11447,11 +13312,13 @@ async function createRateManagedAwsSessionFromSnapshot(
     })
   let rate: WorkspaceSearchMigrationManagedDescribeTableRate
   try {
-    rate = await createWorkspaceSearchMigrationManagedDescribeTableRate({
+    const rateConstruction = {
       account: resources.account,
       region: resources.region,
-      recoveryTableNames: Object.values(resources.tables),
-      allowedTableNames: Object.values(resources.tables),
+      recoveryTableNames: integrity?.rateTables.recoveryTableNames ??
+        Object.values(resources.tables),
+      allowedTableNames: integrity?.rateTables.allowedTableNames ??
+        Object.values(resources.tables),
       policy: snapshot.ratePolicy,
       checkpointStore,
       credentials: createPinnedDescribeTableCredentialsProvider(
@@ -11465,7 +13332,23 @@ async function createRateManagedAwsSessionFromSnapshot(
         ? {}
         : { recorder: snapshot.rateRecorder }),
       ...(signal === undefined ? {} : { signal }),
-    })
+    }
+    if (registerFinalPublicationExercise === undefined) {
+      rate = await createWorkspaceSearchMigrationManagedDescribeTableRate(
+        rateConstruction,
+      )
+    } else {
+      if (rehearsalGuard === undefined || integrity !== undefined) {
+        throw new WorkspaceSearchMigrationRehearsalPermitError()
+      }
+      const bundle =
+        await createWorkspaceSearchMigrationRehearsalManagedDescribeTableRate({
+          ...rateConstruction,
+          exerciseTableName: resources.tables['migration-state'],
+        })
+      rate = bundle.rate
+      registerFinalPublicationExercise(bundle.exercise)
+    }
   } catch (error: unknown) {
     transport.close()
     throw error
@@ -11510,6 +13393,23 @@ async function createRateManagedAwsSessionFromSnapshot(
     }
   }
   try {
+    if (integrity !== undefined) {
+      if (
+        rehearsalGuard === undefined ||
+        claimedRehearsalStageHead === undefined
+      ) throw new WorkspaceSearchMigrationRehearsalPermitError()
+      return new AwsWorkspaceSearchMigrationRehearsalIntegrityPort(
+        resources,
+        transport,
+        prePlanAuthorityClock,
+        rate,
+        createMeasurementSession,
+        rehearsalGuard,
+        claimedRehearsalStageHead,
+        integrity,
+        signal,
+      )
+    }
     return new AwsWorkspaceSearchMigrationIdentityPort(
       resources,
       transport,
@@ -11720,6 +13620,594 @@ function detachRateManagedAwsSessionConstructionInput(
       createWorkspaceSearchMigrationPrePlanAuthoritySystemTime,
     ...(signal === undefined ? {} : { signal }),
   })
+}
+
+/** Strict public-record guards for the permit-backed integrity factory. */
+const rehearsalIntegritySessionConstructionGuards =
+  new WorkspaceSearchMigrationStrictRecordGuards(
+    failRehearsalIntegritySessionConstruction,
+  )
+
+/** Required public fields for one permit-backed integrity construction. */
+const rehearsalIntegritySessionRequiredConstructionKeys = Object.freeze([
+  'integrityDigestKey',
+  'permit',
+  'permitVerificationKey',
+  'ratePolicy',
+  'requested',
+  'resourceAttestationBytes',
+  'stageReservationClaim',
+])
+
+/** Optional public fields inherited from the restricted rehearsal session. */
+const rehearsalIntegritySessionOptionalConstructionKeys = Object.freeze([
+  'permitClock',
+  'rateRecorder',
+  'signal',
+])
+
+/** Raises the stable permit boundary for malformed integrity construction. */
+function failRehearsalIntegritySessionConstruction(): never {
+  throw new WorkspaceSearchMigrationRehearsalPermitError()
+}
+
+/**
+ * Authenticates the complete dedicated integrity construction synchronously.
+ *
+ * Canonical attestation parsing, immutable identity derivation, exact permit
+ * comparison, source-controlled target resolution, and exact ten-table rate
+ * selection all finish before credentials, clients, or checkpoint I/O exist.
+ * The caller-owned attestation and integrity key are overwritten on every path.
+ *
+ * @param input - Exact permit-backed owner-only construction input.
+ * @returns Detached generic, permit, and private integrity construction state.
+ */
+function detachNonProductionRehearsalIntegritySessionConstruction(
+  input: CreateAwsWorkspaceSearchMigrationRehearsalIntegritySessionInput,
+): NonProductionRehearsalIntegritySessionConstructionSnapshot {
+  let transferredAttestationBytes: unknown
+  let transferredIntegrityKey: unknown
+  let resourceAttestationBytes: Uint8Array | undefined
+  let integrityDigestKey: Uint8Array | undefined
+  let permitVerificationKey: Uint8Array | undefined
+  let preflight: NonProductionRehearsalConstructionPreflight | undefined
+  try {
+    const record = rehearsalIntegritySessionConstructionGuards.requireRecord(
+      input,
+    )
+    transferredAttestationBytes = readRehearsalIntegrityOwnDataCandidate(
+      record,
+      'resourceAttestationBytes',
+    )
+    transferredIntegrityKey = readRehearsalIntegrityOwnDataCandidate(
+      record,
+      'integrityDigestKey',
+    )
+    const exactKeys = [
+      ...rehearsalIntegritySessionRequiredConstructionKeys,
+      ...rehearsalIntegritySessionOptionalConstructionKeys.filter(
+        (key) => Object.hasOwn(record, key),
+      ),
+    ]
+    rehearsalIntegritySessionConstructionGuards.requireExactKeys(
+      record,
+      exactKeys,
+    )
+    transferredAttestationBytes =
+      rehearsalIntegritySessionConstructionGuards.readOwn(
+        record,
+        'resourceAttestationBytes',
+      )
+    transferredIntegrityKey =
+      rehearsalIntegritySessionConstructionGuards.readOwn(
+        record,
+        'integrityDigestKey',
+      )
+    resourceAttestationBytes = copyRehearsalIntegrityBytes(
+      transferredAttestationBytes,
+      CROSS_DOMAIN_INTEGRITY_RESOURCE_ATTESTATION_MAX_BYTES,
+    )
+    integrityDigestKey = copyRehearsalIntegrityKey(
+      transferredIntegrityKey,
+    )
+    permitVerificationKey = copyRehearsalIntegrityKey(
+      rehearsalIntegritySessionConstructionGuards.readOwn(
+        record,
+        'permitVerificationKey',
+      ),
+    )
+    if (timingSafeEqual(integrityDigestKey, permitVerificationKey)) {
+      return failRehearsalIntegritySessionConstruction()
+    }
+    const genericInput:
+      CreateAwsWorkspaceSearchMigrationNonProductionRehearsalSessionInput = {
+        requested: input.requested,
+        ratePolicy: input.ratePolicy,
+        bootstrapRateCheckpoint: false,
+        recoverInterruptedCleanup: false,
+        recoverInterruptedAttempt: false,
+        ...(Object.hasOwn(record, 'rateRecorder')
+          ? { rateRecorder: input.rateRecorder }
+          : {}),
+        permit: input.permit,
+        permitVerificationKey,
+        ...(Object.hasOwn(record, 'permitClock')
+          ? { permitClock: input.permitClock }
+          : {}),
+        stageReservationClaim: input.stageReservationClaim,
+        ...(Object.hasOwn(record, 'signal')
+          ? { signal: input.signal }
+          : {}),
+      }
+    const session = detachRateManagedAwsSessionConstructionInput(genericInput)
+    if (session.signal !== undefined && nodeUtilTypes.isProxy(session.signal)) {
+      return failRehearsalIntegritySessionConstruction()
+    }
+    preflight = detachNonProductionRehearsalConstructionGuard(
+      genericInput,
+      session.resources,
+      session.ratePolicy,
+    )
+    if (
+      createHash('sha256').update(permitVerificationKey).digest('hex') !==
+        preflight.guard.permit.evidenceKeyDigest ||
+      createHash('sha256').update(integrityDigestKey).digest('hex') ===
+        preflight.guard.permit.evidenceKeyDigest
+    ) return failRehearsalIntegritySessionConstruction()
+    const validated = validateNonProductionRehearsalIntegrityConstruction(
+      resourceAttestationBytes,
+      integrityDigestKey,
+      session,
+      preflight,
+    )
+    resourceAttestationBytes = undefined
+    integrityDigestKey = undefined
+    preflight = undefined
+    return Object.freeze({
+      session,
+      preflight: validated.preflight,
+      integrity: validated.integrity,
+    })
+  } catch {
+    return failRehearsalIntegritySessionConstruction()
+  } finally {
+    zeroizeRehearsalIntegrityCandidate(transferredAttestationBytes)
+    zeroizeRehearsalIntegrityCandidate(transferredIntegrityKey)
+    resourceAttestationBytes?.fill(0)
+    integrityDigestKey?.fill(0)
+    permitVerificationKey?.fill(0)
+    preflight?.stageReservationClaim?.destroy()
+  }
+}
+
+/** Validated private state paired with its already authenticated preflight. */
+type ValidatedNonProductionRehearsalIntegrityConstruction = {
+  /** Authenticated permit and optional prepared stage claim. */
+  readonly preflight: NonProductionRehearsalConstructionPreflight
+  /** Canonical attestation, key, resource map, digest, and rate tables. */
+  readonly integrity: NonProductionRehearsalIntegrityConstruction
+}
+
+/**
+ * Matches one canonical private attestation and dedicated key to the permit.
+ *
+ * @param resourceAttestationBytes - Owned canonical attestation byte copy.
+ * @param integrityDigestKey - Owned dedicated 32-byte key copy.
+ * @param session - Detached requested resources and reviewed rate policy.
+ * @param preflight - Authenticated permit and optional prepared stage claim.
+ * @returns Permit-matched private integrity state retaining both byte arrays.
+ */
+function validateNonProductionRehearsalIntegrityConstruction(
+  resourceAttestationBytes: Uint8Array,
+  integrityDigestKey: Uint8Array,
+  session: RateManagedAwsSessionConstructionSnapshot,
+  preflight: NonProductionRehearsalConstructionPreflight,
+): ValidatedNonProductionRehearsalIntegrityConstruction {
+  const attestation = parseCanonicalRehearsalIntegrityAttestation(
+    resourceAttestationBytes,
+  )
+  if (preflight.stageReservationClaim === undefined) {
+    return failRehearsalIntegritySessionConstruction()
+  }
+  const permit = preflight.guard.permit
+  const target = resolveWorkspaceSearchMigrationRehearsalDeploymentTarget(
+    permit.deploymentTargetId,
+  )
+  const productionAccountDigest =
+    createWorkspaceSearchMigrationRehearsalProductionAccountDigest(
+      permit.productionAccount,
+    )
+  if (
+    attestation.account !== session.resources.account ||
+    attestation.region !== session.resources.region ||
+    permit.account !== target.deploymentAccount ||
+    permit.region !== target.region ||
+    permit.deploymentTrustRootDigest !== target.digest ||
+    productionAccountDigest !== target.productionAccountDigest ||
+    permit.policyVersion !== session.ratePolicy.policyVersion ||
+    permit.integrityAttestationRoot.attestation.byteLength !==
+      resourceAttestationBytes.byteLength ||
+    permit.integrityResourceIdentityScheme !==
+      CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME
+  ) return failRehearsalIntegritySessionConstruction()
+  const identities = createCrossDomainIntegrityImmutableResourceIdentities(
+    attestation,
+    integrityDigestKey,
+  )
+  if (!sameRehearsalIntegrityResourceIdentities(
+    identities,
+    permit.integrityResourceIdentities,
+  )) return failRehearsalIntegritySessionConstruction()
+  const expectedResourceIdentityDigest =
+    calculateCrossDomainIntegrityResourceIdentityDigest(
+      identities,
+      integrityDigestKey,
+    )
+  if (
+    expectedResourceIdentityDigest !==
+      permit.integrityResourceIdentityDigest
+  ) return failRehearsalIntegritySessionConstruction()
+  const tables = createRehearsalIntegrityTableNames(attestation)
+  const rateTables = selectRehearsalIntegrityTables(
+    session.resources.tables,
+    tables,
+  )
+  return Object.freeze({
+    preflight,
+    integrity: Object.freeze({
+      resourceAttestationBytes,
+      integrityDigestKey,
+      tables,
+      buckets: Object.freeze({
+        file: attestation.bucket.bucketName,
+      }),
+      expectedResourceIdentityDigest,
+      rateTables,
+    }),
+  })
+}
+
+/** Parses exact canonical UTF-8 private resource-attestation bytes. */
+function parseCanonicalRehearsalIntegrityAttestation(
+  bytes: Uint8Array,
+): CrossDomainIntegrityResourceAttestation {
+  let text: string
+  let parsed: unknown
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    parsed = JSON.parse(text)
+    const attestation = parseCrossDomainIntegrityResourceAttestation(parsed)
+    if (serializeCrossDomainIntegrityResourceAttestation(attestation) !== text) {
+      return failRehearsalIntegritySessionConstruction()
+    }
+    return attestation
+  } catch {
+    return failRehearsalIntegritySessionConstruction()
+  }
+}
+
+/** Projects the canonical six-table map from one strict attestation. */
+function createRehearsalIntegrityTableNames(
+  attestation: CrossDomainIntegrityResourceAttestation,
+): CrossDomainIntegrityTableNames {
+  const tables = attestation.tables
+  if (tables.length !== 6) {
+    return failRehearsalIntegritySessionConstruction()
+  }
+  return Object.freeze({
+    'audit-events': tables[0]?.tableName ??
+      failRehearsalIntegritySessionConstruction(),
+    'file-proofing': tables[1]?.tableName ??
+      failRehearsalIntegritySessionConstruction(),
+    'project-directory': tables[2]?.tableName ??
+      failRehearsalIntegritySessionConstruction(),
+    'work-item-configuration': tables[3]?.tableName ??
+      failRehearsalIntegritySessionConstruction(),
+    'work-items': tables[4]?.tableName ??
+      failRehearsalIntegritySessionConstruction(),
+    'workspace-access': tables[5]?.tableName ??
+      failRehearsalIntegritySessionConstruction(),
+  })
+}
+
+/** Requires exact target-and-digest equality for both canonical vectors. */
+function sameRehearsalIntegrityResourceIdentities(
+  actual: readonly CrossDomainIntegrityResourceIdentity[],
+  expected: readonly CrossDomainIntegrityResourceIdentity[],
+): boolean {
+  return actual.length === 7 &&
+    expected.length === actual.length &&
+    actual.every((identity, index) => {
+      const expectedIdentity = expected[index]
+      return expectedIdentity !== undefined &&
+        identity.target === expectedIdentity.target &&
+        identity.identityDigest === expectedIdentity.identityDigest
+    })
+}
+
+/**
+ * Selects exact migration cleanup and migration/integrity operational tables.
+ *
+ * @param migrationTables - Six migration tables from the requested snapshot.
+ * @param integrityTables - Six integrity tables from the private attestation.
+ * @returns Canonical recovery six and union ten.
+ */
+function selectRehearsalIntegrityTables(
+  migrationTables: WorkspaceSearchMigrationRequestedResourcesSnapshot[
+    'tables'
+  ],
+  integrityTables: CrossDomainIntegrityTableNames,
+): RehearsalIntegrityTableSelection {
+  const recoveryTableNames = Object.freeze([
+    migrationTables['project-directory'],
+    migrationTables['work-items'],
+    migrationTables.collaboration,
+    migrationTables.documents,
+    migrationTables['workspace-search'],
+    migrationTables['migration-state'],
+  ])
+  const integrityTableNames = Object.freeze([
+    integrityTables['audit-events'],
+    integrityTables['file-proofing'],
+    integrityTables['project-directory'],
+    integrityTables['work-item-configuration'],
+    integrityTables['work-items'],
+    integrityTables['workspace-access'],
+  ])
+  const allowedTableNames = Object.freeze([
+    ...recoveryTableNames,
+    integrityTables['audit-events'],
+    integrityTables['file-proofing'],
+    integrityTables['work-item-configuration'],
+    integrityTables['workspace-access'],
+  ])
+  if (
+    integrityTables['project-directory'] !==
+      migrationTables['project-directory'] ||
+    integrityTables['work-items'] !== migrationTables['work-items'] ||
+    recoveryTableNames.length !== 6 ||
+    new Set(recoveryTableNames).size !== 6 ||
+    integrityTableNames.length !== 6 ||
+    new Set(integrityTableNames).size !== 6 ||
+    allowedTableNames.length !== 10 ||
+    new Set(allowedTableNames).size !== 10 ||
+    recoveryTableNames.some(
+      (tableName) => !allowedTableNames.includes(tableName),
+    )
+  ) return failRehearsalIntegritySessionConstruction()
+  return Object.freeze({ recoveryTableNames, allowedTableNames })
+}
+
+/** Copies one plain non-shared byte array below an explicit finite bound. */
+function copyRehearsalIntegrityBytes(
+  value: unknown,
+  maximumByteLength: number,
+): Uint8Array {
+  if (
+    !nodeUtilTypes.isUint8Array(value) ||
+    nodeUtilTypes.isProxy(value) ||
+    Object.getPrototypeOf(value) !== Uint8Array.prototype
+  ) return failRehearsalIntegritySessionConstruction()
+  const buffer = rehearsalIntegritySessionConstructionGuards
+    .readIntrinsicBuffer(value)
+  const byteLength = rehearsalIntegritySessionConstructionGuards
+    .readIntrinsicByteLength(value)
+  if (
+    nodeUtilTypes.isSharedArrayBuffer(buffer) ||
+    byteLength < 1 ||
+    byteLength > maximumByteLength
+  ) return failRehearsalIntegritySessionConstruction()
+  const copied = new Uint8Array(byteLength)
+  try {
+    Reflect.apply(Uint8Array.prototype.set, copied, [value])
+  } catch {
+    copied.fill(0)
+    return failRehearsalIntegritySessionConstruction()
+  }
+  return copied
+}
+
+/** Copies one exact plain non-shared 32-byte integrity key. */
+function copyRehearsalIntegrityKey(value: unknown): Uint8Array {
+  const key = copyRehearsalIntegrityBytes(value, 32)
+  if (key.byteLength !== 32) {
+    key.fill(0)
+    return failRehearsalIntegritySessionConstruction()
+  }
+  return key
+}
+
+/** Reads one own data value without invoking a hostile accessor. */
+function readRehearsalIntegrityOwnDataCandidate(
+  value: object,
+  key: string,
+): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key)
+  return descriptor !== undefined && Object.hasOwn(descriptor, 'value')
+    ? descriptor.value
+    : undefined
+}
+
+/** Best-effort intrinsic zeroization for transferred owner-only bytes. */
+function zeroizeRehearsalIntegrityCandidate(value: unknown): void {
+  if (
+    !nodeUtilTypes.isUint8Array(value) ||
+    nodeUtilTypes.isProxy(value) ||
+    Object.getPrototypeOf(value) !== Uint8Array.prototype
+  ) return
+  try {
+    Reflect.apply(Uint8Array.prototype.fill, value, [0])
+  } catch {
+    // A hostile detached view cannot weaken the already stable failure path.
+  }
+}
+
+/** Strict public-record guards for one actual live invocation. */
+const rehearsalIntegrityLiveInvocationGuards =
+  new WorkspaceSearchMigrationStrictRecordGuards(
+    failRehearsalIntegrityLiveInvocation,
+  )
+
+/** Raises the stable actual live outer-gate failure. */
+function failRehearsalIntegrityLiveInvocation(): never {
+  throw new WorkspaceSearchMigrationRehearsalIntegrityLiveSessionError()
+}
+
+/**
+ * Detaches the six-field live input and consumes its audit pseudonym key.
+ *
+ * @param input - Untrusted key, limits, and optional cancellation only.
+ * @returns Detached bounded invocation safe to retain through AWS I/O.
+ */
+function detachRehearsalIntegrityLiveInvocation(
+  input: RunAwsWorkspaceSearchMigrationRehearsalIntegrityLiveSessionInput,
+): RehearsalIntegrityLiveInvocationSnapshot {
+  let transferredAuditKey: unknown
+  let auditPseudonymKey: Uint8Array | undefined
+  try {
+    const record = rehearsalIntegrityLiveInvocationGuards.requireRecord(input)
+    transferredAuditKey = readRehearsalIntegrityOwnDataCandidate(
+      record,
+      'auditPseudonymKey',
+    )
+    const expectedKeys = Object.hasOwn(record, 'signal')
+      ? [
+        'auditPseudonymKey',
+        'maxItems',
+        'maxPages',
+        'maximumDurationMilliseconds',
+        'pageSize',
+        'signal',
+      ]
+      : [
+        'auditPseudonymKey',
+        'maxItems',
+        'maxPages',
+        'maximumDurationMilliseconds',
+        'pageSize',
+      ]
+    rehearsalIntegrityLiveInvocationGuards.requireExactKeys(
+      record,
+      expectedKeys,
+    )
+    transferredAuditKey = rehearsalIntegrityLiveInvocationGuards.readOwn(
+      record,
+      'auditPseudonymKey',
+    )
+    auditPseudonymKey = copyRehearsalIntegrityLiveKey(transferredAuditKey)
+    const pageSize = readRehearsalIntegrityLiveBound(
+      rehearsalIntegrityLiveInvocationGuards.readOwn(record, 'pageSize'),
+      1_000,
+    )
+    const maxPages = readRehearsalIntegrityLiveBound(
+      rehearsalIntegrityLiveInvocationGuards.readOwn(record, 'maxPages'),
+      10_000,
+    )
+    const maxItems = readRehearsalIntegrityLiveBound(
+      rehearsalIntegrityLiveInvocationGuards.readOwn(record, 'maxItems'),
+      1_000_000,
+    )
+    validateCrossDomainIntegrityLimits({ pageSize, maxPages, maxItems })
+    const maximumDurationMilliseconds = readRehearsalIntegrityLiveBound(
+      rehearsalIntegrityLiveInvocationGuards.readOwn(
+        record,
+        'maximumDurationMilliseconds',
+      ),
+      CROSS_DOMAIN_INTEGRITY_MAX_DURATION_MILLISECONDS,
+    )
+    const signalValue = Object.hasOwn(record, 'signal')
+      ? rehearsalIntegrityLiveInvocationGuards.readOwn(record, 'signal')
+      : undefined
+    if (
+      signalValue !== undefined &&
+      (!(signalValue instanceof AbortSignal) ||
+        nodeUtilTypes.isProxy(signalValue))
+    ) return failRehearsalIntegrityLiveInvocation()
+    const snapshot = Object.freeze({
+      auditPseudonymKey,
+      pageSize,
+      maxPages,
+      maxItems,
+      maximumDurationMilliseconds,
+      ...(signalValue === undefined ? {} : { signal: signalValue }),
+    })
+    auditPseudonymKey = undefined
+    return snapshot
+  } catch {
+    return failRehearsalIntegrityLiveInvocation()
+  } finally {
+    zeroizeRehearsalIntegrityCandidate(transferredAuditKey)
+    auditPseudonymKey?.fill(0)
+  }
+}
+
+/** Reads one finite positive integer under an explicit reviewed maximum. */
+function readRehearsalIntegrityLiveBound(
+  value: unknown,
+  maximum: number,
+): number {
+  if (
+    typeof value !== 'number' ||
+    !Number.isSafeInteger(value) ||
+    value < 1 ||
+    value > maximum
+  ) return failRehearsalIntegrityLiveInvocation()
+  return value
+}
+
+/** Copies one plain non-shared byte array for the stable live boundary. */
+function copyRehearsalIntegrityLiveBytes(
+  value: unknown,
+  maximumByteLength: number,
+): Uint8Array {
+  if (
+    !nodeUtilTypes.isUint8Array(value) ||
+    nodeUtilTypes.isProxy(value) ||
+    Object.getPrototypeOf(value) !== Uint8Array.prototype
+  ) return failRehearsalIntegrityLiveInvocation()
+  const buffer = rehearsalIntegrityLiveInvocationGuards
+    .readIntrinsicBuffer(value)
+  const byteLength = rehearsalIntegrityLiveInvocationGuards
+    .readIntrinsicByteLength(value)
+  if (
+    nodeUtilTypes.isSharedArrayBuffer(buffer) ||
+    byteLength < 1 ||
+    byteLength > maximumByteLength
+  ) return failRehearsalIntegrityLiveInvocation()
+  const copied = new Uint8Array(byteLength)
+  try {
+    Reflect.apply(Uint8Array.prototype.set, copied, [value])
+  } catch {
+    copied.fill(0)
+    return failRehearsalIntegrityLiveInvocation()
+  }
+  return copied
+}
+
+/** Copies one exact plain non-shared 32-byte live HMAC key. */
+function copyRehearsalIntegrityLiveKey(value: unknown): Uint8Array {
+  const key = copyRehearsalIntegrityLiveBytes(value, 32)
+  if (key.byteLength !== 32) {
+    key.fill(0)
+    return failRehearsalIntegrityLiveInvocation()
+  }
+  return key
+}
+
+/** Combines close/seal, construction, and invocation cancellation signals. */
+function combineRehearsalIntegrityLiveSignals(
+  operationalSignal: AbortSignal,
+  sessionSignal: AbortSignal | undefined,
+  invocationSignal: AbortSignal | undefined,
+): AbortSignal {
+  const signals: AbortSignal[] = [operationalSignal]
+  if (sessionSignal !== undefined) signals.push(sessionSignal)
+  if (invocationSignal !== undefined) signals.push(invocationSignal)
+  try {
+    return AbortSignal.any(signals)
+  } catch {
+    return failRehearsalIntegrityLiveInvocation()
+  }
 }
 
 /** Strict standalone construction guards with one stable public failure. */
@@ -13244,18 +15732,14 @@ function createNonProductionRehearsalEvidenceSessionBinding(
         callerArn: permit.callerArn,
         stage: permit.stage,
       }),
-      resourceAttestationDigest: createMigrationDigest({
-        configurationHash,
-        deploymentTrustRootDigest:
-          permit.deploymentTrustRootDigest,
-        environmentTag:
-          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE,
-        productionAccountDigest:
-          createWorkspaceSearchMigrationRehearsalProductionAccountDigest(
-            permit.productionAccount,
-          ),
-        requestedResourcesBinding,
-      }),
+      resourceAttestationDigest:
+        createWorkspaceSearchMigrationRehearsalResourceAttestationDigest({
+          configurationHash,
+          deploymentTrustRootDigest:
+            permit.deploymentTrustRootDigest,
+          productionAccount: permit.productionAccount,
+          requestedResourcesBinding,
+        }),
       productionIsolationDigest: createMigrationDigest({
         accountsSeparated: true,
         productionAccount: permit.productionAccount,
@@ -13507,17 +15991,19 @@ function createWorkspaceSearchMigrationPrePlanAuthoritySystemTime(): Date {
  * endpoint override environment variables.
  *
  * @param requested - Validated immutable resource selection.
+ * @param signal - Optional complete-lifecycle cancellation for nested STS.
  * @returns Lazy shared-profile credentials provider.
  */
 function createPinnedProfileCredentials(
   requested: WorkspaceSearchMigrationRequestedResourcesSnapshot,
+  signal?: AbortSignal,
 ): ReturnType<typeof fromIni> {
   const configuration: WorkspaceSearchMigrationRoleAssumptionConfiguration = {
     endpoint: resolveOfficialAwsRegionalEndpoint('sts', requested.region),
     profile: requested.profile,
     region: requested.region,
   }
-  const roleAssumer = createPinnedRoleAssumer(configuration)
+  const roleAssumer = createPinnedRoleAssumer(configuration, signal)
   let cachedCredentials: WorkspaceSearchMigrationProfileCredentials | undefined
   let credentialPlan:
     Promise<WorkspaceSearchMigrationCredentialPlan> | undefined
@@ -13857,10 +16343,12 @@ function detachProfileCredentials(
  * official-endpoint STS client.
  *
  * @param configuration - Explicit profile, region, and STS endpoint.
+ * @param signal - Optional complete-lifecycle cancellation for AssumeRole.
  * @returns AWS SDK shared-profile role-assumption callback.
  */
 function createPinnedRoleAssumer(
   configuration: WorkspaceSearchMigrationRoleAssumptionConfiguration,
+  signal?: AbortSignal,
 ): WorkspaceSearchMigrationProfileRoleAssumer {
   return async (sourceCredentials, parameters) => {
     const client = new STSClient({
@@ -13868,7 +16356,10 @@ function createPinnedRoleAssumer(
       credentials: sourceCredentials,
     })
     try {
-      const output = await client.send(new AssumeRoleCommand(parameters))
+      const output = await client.send(
+        new AssumeRoleCommand(parameters),
+        signal === undefined ? {} : { abortSignal: signal },
+      )
       return readAssumedCredentials(output.Credentials)
     } finally {
       client.destroy()
@@ -14322,8 +16813,6 @@ function prepareManagedReconciliationSessionInput(
   input:
     CollectWorkspaceSearchMigrationRehearsalReconciliationSessionInput,
 ): PreparedManagedReconciliationSessionInput {
-  let integrity:
-    WorkspaceSearchMigrationRehearsalReconciliationIntegrityInput | undefined
   let rollbackTarget:
     WorkspaceSearchMigrationRehearsalReconciliationRollbackTargetInput |
       undefined
@@ -14334,7 +16823,6 @@ function prepareManagedReconciliationSessionInput(
     managedReconciliationGuards.requireExactKeys(record, [
       'clock',
       'expectedAuthorities',
-      'integrity',
       'limits',
       ...(hasRollbackTarget ? ['rollbackTarget'] : []),
       'runId',
@@ -14362,19 +16850,15 @@ function prepareManagedReconciliationSessionInput(
         ),
         limits.maximumItems,
       )
-    integrity = prepareManagedReconciliationIntegrityInput(
-      managedReconciliationGuards.readOwn(record, 'integrity'),
-      scenario,
-    )
     const rollbackTargetValue = hasRollbackTarget
       ? managedReconciliationGuards.readOwn(record, 'rollbackTarget')
       : undefined
     if (isManagedReconciliationVerifiedScenario(scenario)) {
-      if (rollbackTargetValue !== undefined) {
+      if (hasRollbackTarget) {
         return failManagedReconciliationSession()
       }
     } else {
-      if (rollbackTargetValue === undefined) {
+      if (!hasRollbackTarget || rollbackTargetValue === undefined) {
         return failManagedReconciliationSession()
       }
       rollbackTarget =
@@ -14397,7 +16881,6 @@ function prepareManagedReconciliationSessionInput(
       runLocatorDigest,
       scenario,
       expectedAuthorities,
-      integrity,
       ...(rollbackTarget === undefined ? {} : { rollbackTarget }),
       limits,
       clock,
@@ -14405,9 +16888,6 @@ function prepareManagedReconciliationSessionInput(
     })
     return prepared
   } catch (error: unknown) {
-    if (integrity !== undefined) {
-      zeroizeManagedReconciliationIntegrityInput(integrity)
-    }
     if (rollbackTarget !== undefined) {
       zeroizeManagedReconciliationRollbackTargetInput(rollbackTarget)
     }
@@ -14637,103 +17117,6 @@ function readManagedReconciliationSignal(
 }
 
 /**
- * Detaches scenario-specific #163 bytes and consumes the caller-owned key.
- *
- * @param value - Candidate verified result or rollback comparison.
- * @param scenario - Canonical scenario selecting the required branch.
- * @returns Frozen aliases-free #163 authentication input.
- */
-function prepareManagedReconciliationIntegrityInput(
-  value: unknown,
-  scenario: WorkspaceSearchMigrationRehearsalScenarioName,
-): WorkspaceSearchMigrationRehearsalReconciliationIntegrityInput {
-  const record = managedReconciliationGuards.requireRecord(value)
-  const kind = managedReconciliationGuards.readOwn(record, 'kind')
-  if (kind === 'verified-result') {
-    if (!isManagedReconciliationVerifiedScenario(scenario)) {
-      return failManagedReconciliationSession()
-    }
-    managedReconciliationGuards.requireExactKeys(record, [
-      'digestKey',
-      'kind',
-      'resultBytes',
-    ])
-    const originalKey = managedReconciliationGuards.readOwn(
-      record,
-      'digestKey',
-    )
-    let resultBytes: Uint8Array | undefined
-    let digestKey: Uint8Array | undefined
-    try {
-      resultBytes = copyManagedReconciliationBytes(
-        managedReconciliationGuards.readOwn(record, 'resultBytes'),
-        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_INTEGRITY_RESULT_MAX_BYTES,
-      )
-      digestKey = copyManagedReconciliationKey(originalKey)
-      return Object.freeze({
-        kind,
-        resultBytes,
-        digestKey,
-      })
-    } catch (error: unknown) {
-      zeroizeManagedReconciliationBytes(resultBytes)
-      zeroizeManagedReconciliationBytes(digestKey)
-      throw error
-    } finally {
-      zeroizeManagedReconciliationBytes(originalKey)
-    }
-  }
-  if (kind !== 'rollback-comparison') {
-    return failManagedReconciliationSession()
-  }
-  if (isManagedReconciliationVerifiedScenario(scenario)) {
-    return failManagedReconciliationSession()
-  }
-  managedReconciliationGuards.requireExactKeys(record, [
-    'afterResultBytes',
-    'beforeResultBytes',
-    'digestKey',
-    'kind',
-    'startedAt',
-  ])
-  const originalKey = managedReconciliationGuards.readOwn(
-    record,
-    'digestKey',
-  )
-  let beforeResultBytes: Uint8Array | undefined
-  let afterResultBytes: Uint8Array | undefined
-  let digestKey: Uint8Array | undefined
-  try {
-    const startedAt = managedReconciliationGuards.readTimestamp(
-      managedReconciliationGuards.readOwn(record, 'startedAt'),
-    )
-    beforeResultBytes = copyManagedReconciliationBytes(
-      managedReconciliationGuards.readOwn(record, 'beforeResultBytes'),
-      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_INTEGRITY_RESULT_MAX_BYTES,
-    )
-    afterResultBytes = copyManagedReconciliationBytes(
-      managedReconciliationGuards.readOwn(record, 'afterResultBytes'),
-      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_INTEGRITY_RESULT_MAX_BYTES,
-    )
-    digestKey = copyManagedReconciliationKey(originalKey)
-    return Object.freeze({
-      kind,
-      startedAt,
-      beforeResultBytes,
-      afterResultBytes,
-      digestKey,
-    })
-  } catch (error: unknown) {
-    zeroizeManagedReconciliationBytes(beforeResultBytes)
-    zeroizeManagedReconciliationBytes(afterResultBytes)
-    zeroizeManagedReconciliationBytes(digestKey)
-    throw error
-  } finally {
-    zeroizeManagedReconciliationBytes(originalKey)
-  }
-}
-
-/**
  * Detaches both target-audit files and consumes their caller-owned keys.
  *
  * @param value - Candidate preimage/restored target observation pair.
@@ -14825,10 +17208,12 @@ function readManagedReconciliationTargetContext(
   managedReconciliationGuards.requireExactKeys(record, [
     'configurationBindingDigest',
     'executionBoundaryDigest',
+    'integrityResourceIdentityDigest',
     'manifestDigest',
     'permitDigest',
     'planDigest',
     'planningReceiptDigest',
+    'policyVersion',
     'requestedResourcesBinding',
     'runLocatorDigest',
     'scenario',
@@ -14869,6 +17254,16 @@ function readManagedReconciliationTargetContext(
         managedReconciliationGuards.readOwn(
           record,
           'configurationBindingDigest',
+        ),
+      ),
+    policyVersion: managedReconciliationGuards.readDigest(
+      managedReconciliationGuards.readOwn(record, 'policyVersion'),
+    ),
+    integrityResourceIdentityDigest:
+      managedReconciliationGuards.readDigest(
+        managedReconciliationGuards.readOwn(
+          record,
+          'integrityResourceIdentityDigest',
         ),
       ),
     planningReceiptDigest: managedReconciliationGuards.readDigest(
@@ -14969,19 +17364,6 @@ function zeroizeManagedReconciliationBytes(value: unknown): void {
   }
 }
 
-/** Overwrites every detached #163 buffer retained by one prepared branch. */
-function zeroizeManagedReconciliationIntegrityInput(
-  input: WorkspaceSearchMigrationRehearsalReconciliationIntegrityInput,
-): void {
-  zeroizeManagedReconciliationBytes(input.digestKey)
-  if (input.kind === 'verified-result') {
-    zeroizeManagedReconciliationBytes(input.resultBytes)
-    return
-  }
-  zeroizeManagedReconciliationBytes(input.beforeResultBytes)
-  zeroizeManagedReconciliationBytes(input.afterResultBytes)
-}
-
 /** Overwrites every detached target-audit buffer retained for a rollback. */
 function zeroizeManagedReconciliationRollbackTargetInput(
   input: WorkspaceSearchMigrationRehearsalReconciliationRollbackTargetInput,
@@ -14996,7 +17378,6 @@ function zeroizeManagedReconciliationRollbackTargetInput(
 function zeroizeManagedReconciliationSessionInput(
   input: PreparedManagedReconciliationSessionInput,
 ): void {
-  zeroizeManagedReconciliationIntegrityInput(input.integrity)
   if (input.rollbackTarget !== undefined) {
     zeroizeManagedReconciliationRollbackTargetInput(input.rollbackTarget)
   }
@@ -15297,6 +17678,9 @@ function requireManagedReconciliationTargetContext(
       requestedResourcesBinding ||
     context.configurationBindingDigest !==
       terminal.configurationBindingDigest ||
+    context.policyVersion !== guard.permit.policyVersion ||
+    context.integrityResourceIdentityDigest !==
+      guard.permit.integrityResourceIdentityDigest ||
     context.executionBoundaryDigest !==
       createMigrationDigest(graph.executionBoundary) ||
     context.sealedPlanningAuthorityDigest !==
@@ -15387,8 +17771,10 @@ function createManagedReconciliationTargetAuditSummary(
     observedAt: binding.observedAt,
     observationDigest: binding.observationDigest,
     aggregateDigest: binding.aggregateDigest,
-    integrityBefore: binding.integrityBefore,
     contextDigest: createMigrationDigest(binding.context),
+    context: binding.context,
+    terminal: binding.terminal,
+    integrity: binding.integrity,
     rate: binding.rate,
   })
 }
@@ -15500,128 +17886,273 @@ function sameManagedReconciliationResourceIdentityVector(
 }
 
 /**
- * Authenticates scenario-specific #163 evidence after terminal reconstruction.
+ * Requires both authenticated rollback target results to match measured state.
  *
- * @param input - Detached raw #163 bytes and owned authentication key.
- * @param scenario - Canonical scenario selecting result or comparison.
- * @param terminal - Exact authoritative terminal binding.
- * @param target - Authenticated target pair required only for rollback.
- * @param expectedResourceIdentityDigest - Permit-pinned #163 resource identity.
- * @param expectedMigrationResourceIdentities - Precomputed keyed table identities.
- * @param clock - Captured trusted clock sampled after authentication.
- * @returns Finalizer-ready digest-only integrity projection.
+ * @param target - Authenticated target pair, absent for verified scenarios.
+ * @param expectedResourceIdentityDigest - Permit-pinned seven-resource digest.
+ * @param expectedMigrationResourceIdentities - Measured keyed table identities.
  */
-function authenticateManagedReconciliationIntegrity(
-  input: WorkspaceSearchMigrationRehearsalReconciliationIntegrityInput,
-  scenario: WorkspaceSearchMigrationRehearsalScenarioName,
-  terminal:
-    WorkspaceSearchMigrationRehearsalReconciliationTerminalBinding,
+function requireManagedReconciliationTargetResourceIdentities(
   target: ManagedReconciliationAuthenticatedTargetPair | undefined,
   expectedResourceIdentityDigest: string,
   expectedMigrationResourceIdentities:
     WorkspaceSearchMigrationManagedReconciliationResourceIdentities,
-  clock: () => Date,
-): WorkspaceSearchMigrationRehearsalReconciliationIntegrityCollectorResult {
-  if (isManagedReconciliationVerifiedScenario(scenario)) {
+): void {
+  if (target === undefined) return
+  for (const binding of [target.preimage, target.restored]) {
+    const integrity = binding.integrity
     if (
-      input.kind !== 'verified-result' ||
-      terminal.terminalRootKind !== 'verified' ||
-      target !== undefined
+      integrity.result.resourceIdentityDigest !==
+        expectedResourceIdentityDigest ||
+      integrity.configurationBindingDigest !==
+        binding.context.configurationBindingDigest ||
+      integrity.policyVersion !== binding.context.policyVersion
     ) return failManagedReconciliationSession()
-    const authenticated =
-      authenticateWorkspaceSearchMigrationRehearsalIntegrityResult({
-        terminalAt: terminal.terminalAt,
-        expectedResourceIdentityDigest,
-        resultBytes: input.resultBytes,
-        clock,
-      }, input.digestKey)
     requireManagedReconciliationResultResourceIdentities(
-      authenticated.result,
+      integrity.result,
       expectedMigrationResourceIdentities,
     )
-    return createManagedVerifiedReconciliationIntegrity(
-      authenticated,
-      terminal.terminalRootDigest,
-    )
   }
-  if (
-    input.kind !== 'rollback-comparison' ||
-    terminal.terminalRootKind !== 'rolled-back' ||
-    target === undefined
-  ) return failManagedReconciliationSession()
-  const purpose = scenario === 'partial-apply-rollback'
-    ? 'partial-rollback'
-    : 'complete-rollback'
-  const targetTerminal = target.restored.terminal
-  if (targetTerminal === null) return failManagedReconciliationSession()
-  const authenticated =
-    authenticateWorkspaceSearchMigrationRehearsalIntegrityPair({
-      purpose,
-      startedAt: input.startedAt,
-      applyStartedAt: targetTerminal.applyStartedAt,
-      terminalAt: terminal.terminalAt,
-      expectedResourceIdentityDigest,
-      beforeResultBytes: input.beforeResultBytes,
-      afterResultBytes: input.afterResultBytes,
-      clock,
-    }, input.digestKey)
-  requireManagedReconciliationResultResourceIdentities(
-    authenticated.binding.before,
-    expectedMigrationResourceIdentities,
-  )
-  requireManagedReconciliationResultResourceIdentities(
-    authenticated.binding.after,
-    expectedMigrationResourceIdentities,
-  )
-  const targetIntegrityBefore = target.preimage.integrityBefore
-  if (
-    targetIntegrityBefore === null ||
-    !sameWorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection(
-      authenticated.binding.before,
-      targetIntegrityBefore,
-    )
-  ) return failManagedReconciliationSession()
-  return createManagedRollbackReconciliationIntegrity(
-    authenticated,
-    terminal.terminalRootDigest,
-    target,
-  )
 }
 
 /**
- * Binds one authenticated passing #163 result to its verified terminal.
+ * Completes one measured base after rate sealing and live #163 finalization.
  *
- * @param authenticated - Independently authenticated passing #163 result.
- * @param terminalRootDigest - Exact verified root digest.
- * @returns Finalizer-ready verified integrity projection.
+ * The verified genuine rate-bound result is inspected but deliberately not
+ * consumed; the reconciliation-audit v3 finalizer remains its sole consumer.
+ * Rollback comparison fields are derived only from the two already
+ * authenticated target-audit integrity results retained behind the base.
+ *
+ * @param input - Genuine base and scenario-specific post-seal live result.
+ * @returns Complete finalizer-ready reconciliation collector result.
  */
-function createManagedVerifiedReconciliationIntegrity(
-  authenticated:
-    WorkspaceSearchMigrationRehearsalAuthenticatedIntegrityResult,
-  terminalRootDigest: string,
-): WorkspaceSearchMigrationRehearsalReconciliationIntegrityCollectorResult {
+export function completeWorkspaceSearchMigrationRehearsalReconciliation(
+  input: CompleteWorkspaceSearchMigrationRehearsalReconciliationInput,
+): WorkspaceSearchMigrationRehearsalReconciliationCollectorResult {
+  const record = managedReconciliationGuards.requireRecord(input)
+  managedReconciliationGuards.requireExactKeys(record, [
+    'collectedBase',
+    'verifiedIntegrity',
+  ])
+  const state = consumeManagedReconciliationCollectedBase(
+    managedReconciliationGuards.readOwn(record, 'collectedBase'),
+  )
+  const context = completeManagedReconciliationCoreContext(
+    state.base.context,
+    state.clock,
+  )
+  const verifiedIntegrity = managedReconciliationGuards.readOwn(
+    record,
+    'verifiedIntegrity',
+  )
+  const integrity = state.target === undefined
+    ? createManagedVerifiedReconciliationIntegrity(
+      verifiedIntegrity,
+      state,
+      context,
+    )
+    : createManagedRollbackReconciliationIntegrity(
+      verifiedIntegrity,
+      state,
+      context,
+    )
   return Object.freeze({
-    ...authenticated,
-    terminalRootDigest,
+    ...state.base,
+    context,
+    integrity,
   })
 }
 
-/**
- * Binds one authenticated #163 comparison to equal target observations.
- *
- * @param authenticated - Purpose-bound passing #163 before/after comparison.
- * @param terminalRootDigest - Exact rolled-back root digest.
- * @param target - Equal independently authenticated target observations.
- * @returns Finalizer-ready rollback integrity projection.
- */
-function createManagedRollbackReconciliationIntegrity(
-  authenticated: WorkspaceSearchMigrationRehearsalAuthenticatedIntegrityPair,
-  terminalRootDigest: string,
-  target: ManagedReconciliationAuthenticatedTargetPair,
-): WorkspaceSearchMigrationRehearsalReconciliationIntegrityCollectorResult {
+/** Consumes one genuine collected base before post-seal input validation. */
+function consumeManagedReconciliationCollectedBase(
+  value: unknown,
+): ManagedReconciliationCollectedBaseState {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    nodeUtilTypes.isProxy(value)
+  ) return failManagedReconciliationSession()
+  const state = managedReconciliationCollectedBaseStates.get(value)
+  if (state === undefined) return failManagedReconciliationSession()
+  managedReconciliationCollectedBaseStates.delete(value)
+  return state
+}
+
+/** Samples the retained clock and advances the final collector completion. */
+function completeManagedReconciliationCoreContext(
+  context: WorkspaceSearchMigrationRehearsalReconciliationCoreContext,
+  clock: () => Date,
+): WorkspaceSearchMigrationRehearsalReconciliationCoreContext {
+  const checkedAt = readManagedReconciliationClock(clock)
+  if (Date.parse(checkedAt) < Date.parse(context.checkedAt)) {
+    return failManagedReconciliationSession()
+  }
+  return Object.freeze({ ...context, checkedAt })
+}
+
+/** Strictly reads the live projection without consuming its genuine wrapper. */
+function readManagedReconciliationRateBoundIntegrityProjection(
+  value: unknown,
+): ManagedReconciliationRateBoundIntegrityProjection {
+  const record = managedReconciliationGuards.requireRecord(value)
+  managedReconciliationGuards.requireExactKeys(record, [
+    'bindingMac',
+    'configurationBindingDigest',
+    'interval',
+    'kind',
+    'policyVersion',
+    'predecessor',
+    'result',
+    'segment',
+    'tableOrderBindingMac',
+    'version',
+  ])
+  if (
+    managedReconciliationGuards.readOwn(record, 'kind') !==
+      'mukuroji-workspace-search-migration-rehearsal-rate-bound-integrity-result' ||
+    managedReconciliationGuards.readOwn(record, 'version') !== 1
+  ) return failManagedReconciliationSession()
+  let result: WorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection
+  try {
+    result = readWorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection(
+      managedReconciliationGuards.readOwn(record, 'result'),
+    )
+  } catch {
+    return failManagedReconciliationSession()
+  }
   return Object.freeze({
-    ...authenticated.binding,
-    terminalRootDigest,
+    result,
+    policyVersion: managedReconciliationGuards.readDigest(
+      managedReconciliationGuards.readOwn(record, 'policyVersion'),
+    ),
+    configurationBindingDigest:
+      managedReconciliationGuards.readDigest(
+        managedReconciliationGuards.readOwn(
+          record,
+          'configurationBindingDigest',
+        ),
+      ),
+  })
+}
+
+/** Derives the verified collector branch without consuming the live result. */
+function createManagedVerifiedReconciliationIntegrity(
+  value: unknown,
+  state: ManagedReconciliationCollectedBaseState,
+  context: WorkspaceSearchMigrationRehearsalReconciliationCoreContext,
+): WorkspaceSearchMigrationRehearsalReconciliationIntegrityCollectorResult {
+  if (
+    value === null ||
+    !isManagedReconciliationVerifiedScenario(context.scenario) ||
+    context.terminalRootKind !== 'verified'
+  ) return failManagedReconciliationSession()
+  const parsed = readManagedReconciliationRateBoundIntegrityProjection(value)
+  const result = parsed.result
+  if (
+    parsed.policyVersion !== context.policyVersion ||
+    parsed.configurationBindingDigest !==
+      context.configurationBindingDigest ||
+    result.resourceIdentityDigest !==
+      state.expectedResourceIdentityDigest ||
+    Date.parse(result.runtimeProvenance.startedAt) <=
+      Date.parse(context.terminalAt) ||
+    Date.parse(result.checkedAt) <= Date.parse(context.terminalAt) ||
+    Date.parse(result.checkedAt) > Date.parse(context.checkedAt)
+  ) return failManagedReconciliationSession()
+  requireManagedReconciliationResultResourceIdentities(
+    result,
+    state.expectedMigrationResourceIdentities,
+  )
+  return Object.freeze({
+    kind: 'verified-result',
+    status: 'pass',
+    failureCount: 0,
+    completedAt: context.checkedAt,
+    result,
+    terminalRootDigest: context.terminalRootDigest,
+    integrityAggregateDigest: result.integrityAggregateDigest,
+  })
+}
+
+/** Derives the rollback comparison solely from authenticated target results. */
+function createManagedRollbackReconciliationIntegrity(
+  verifiedIntegrity: unknown,
+  state: ManagedReconciliationCollectedBaseState,
+  context: WorkspaceSearchMigrationRehearsalReconciliationCoreContext,
+): WorkspaceSearchMigrationRehearsalReconciliationIntegrityCollectorResult {
+  const target = state.target
+  if (
+    verifiedIntegrity !== null ||
+    target === undefined ||
+    context.terminalRootKind !== 'rolled-back'
+  ) return failManagedReconciliationSession()
+  const purpose = context.scenario === 'partial-apply-rollback'
+    ? 'partial-rollback'
+    : context.scenario === 'complete-apply-rollback'
+    ? 'complete-rollback'
+    : failManagedReconciliationSession()
+  const terminal = target.restored.terminal
+  if (terminal === null) return failManagedReconciliationSession()
+  const before = target.preimage.integrity.result
+  const after = target.restored.integrity.result
+  const startedAt = before.runtimeProvenance.startedAt
+  const applyStartedAt = terminal.applyStartedAt
+  const terminalAt = terminal.terminalAt
+  const completedAt = after.checkedAt
+  if (
+    before.contentDigest === after.contentDigest ||
+    before.resultDigest === after.resultDigest ||
+    before.resultMac === after.resultMac ||
+    before.integrityAggregateDigest !== after.integrityAggregateDigest ||
+    before.resourceIdentityScheme !== after.resourceIdentityScheme ||
+    !sameManagedReconciliationResourceIdentityVector(
+      before.resourceIdentities,
+      after.resourceIdentities,
+    ) ||
+    before.resourceIdentityDigest !== after.resourceIdentityDigest ||
+    before.resourceIdentityDigest !==
+      state.expectedResourceIdentityDigest ||
+    Date.parse(before.checkedAt) >= Date.parse(applyStartedAt) ||
+    Date.parse(applyStartedAt) >= Date.parse(terminalAt) ||
+    terminalAt !== context.terminalAt ||
+    Date.parse(after.runtimeProvenance.startedAt) <=
+      Date.parse(terminalAt) ||
+    Date.parse(completedAt) > Date.parse(context.checkedAt) ||
+    target.preimage.aggregateDigest !== target.restored.aggregateDigest
+  ) return failManagedReconciliationSession()
+  const comparisonDigest = createMigrationDigest({
+    purpose,
+    beforeResultDigest: before.resultDigest,
+    afterResultDigest: after.resultDigest,
+    comparison: {
+      kind:
+        'mukuroji-cross-domain-integrity-migration-rehearsal-comparison',
+      contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+      status: 'pass',
+    },
+  })
+  const comparisonFields = Object.freeze({
+    purpose,
+    startedAt,
+    applyStartedAt,
+    terminalAt,
+    completedAt,
+    before,
+    after,
+    comparisonDigest,
+  })
+  return Object.freeze({
+    kind: 'rollback-comparison',
+    status: 'pass',
+    failureCount: 0,
+    ...comparisonFields,
+    comparisonContextDigest: createMigrationDigest({
+      kind:
+        'workspace-search-migration-rehearsal-integrity-context/v3',
+      version: 3,
+      ...comparisonFields,
+    }),
+    terminalRootDigest: context.terminalRootDigest,
     targetPreimageAggregateDigest: target.preimage.aggregateDigest,
     targetRestoredAggregateDigest: target.restored.aggregateDigest,
     targetPreimageStatus: 'equal',
@@ -15797,6 +18328,8 @@ function createManagedReconciliationExpectedMarkers(
  *
  * @param request - Detached scenario and stage-derived run locator.
  * @param terminal - Exact measured authoritative terminal.
+ * @param policyVersion - Permit-authenticated reviewed rate-policy digest.
+ * @param integrityResourceIdentityDigest - Permit-authenticated #163 identity.
  * @param checkedAt - Trusted completion sampled after collection.
  * @returns Frozen complete reconciliation core context.
  */
@@ -15804,9 +18337,13 @@ function createManagedReconciliationCoreContext(
   request: PreparedManagedReconciliationSessionInput,
   terminal:
     WorkspaceSearchMigrationRehearsalReconciliationTerminalBinding,
+  policyVersion: string,
+  integrityResourceIdentityDigest: string,
   checkedAt: string,
 ): WorkspaceSearchMigrationRehearsalReconciliationCoreContext {
   if (
+    !isHexDigest(policyVersion) ||
+    !isHexDigest(integrityResourceIdentityDigest) ||
     !isCanonicalTimestamp(checkedAt) ||
     Date.parse(terminal.terminalAt) >= Date.parse(checkedAt)
   ) return failManagedReconciliationSession()
@@ -15814,6 +18351,8 @@ function createManagedReconciliationCoreContext(
     scenario: request.scenario,
     runLocatorDigest: request.runLocatorDigest,
     configurationBindingDigest: terminal.configurationBindingDigest,
+    policyVersion,
+    integrityResourceIdentityDigest,
     sealedPlanningAuthorityDigest:
       terminal.sealedPlanningAuthorityDigest,
     executionRunDigest: terminal.executionRunDigest,

@@ -180,6 +180,14 @@ export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_FAULT_RECEIPT_FILENAME =
 export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_LIFECYCLE_FILENAME =
   'lifecycle.json'
 
+/** Parent-owned canonical authenticated control argument vector. */
+export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME =
+  'control-arguments.json'
+
+/** Maximum canonical bytes admitted for the persisted control vector. */
+export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_MAX_BYTES =
+  8 * 1_024 * 1_024
+
 /** Fresh child-owned append-only actual-rate segment filename. */
 export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RATE_SEGMENT_FILENAME =
   'rate-segment.ndjson'
@@ -281,10 +289,16 @@ export type WorkspaceSearchMigrationRehearsalExclusiveCreateOutcome =
   | 'created'
   | 'exists'
 
+/** Exact recoverable state of one owner-only pre-spawn directory. */
+export type WorkspaceSearchMigrationRehearsalReservationDirectoryState =
+  | 'empty-unclaimed'
+  | 'reservation-present'
+
 /** Fixed evidence filenames accepted by the immutable writer boundary. */
 export type WorkspaceSearchMigrationRehearsalEvidenceFilename =
   | typeof WORKSPACE_SEARCH_MIGRATION_REHEARSAL_FAULT_RECEIPT_FILENAME
   | typeof WORKSPACE_SEARCH_MIGRATION_REHEARSAL_NO_FAULT_RECEIPT_FILENAME
+  | typeof WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME
   | typeof WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CHILD_MATERIAL_FILENAME
   | typeof WORKSPACE_SEARCH_MIGRATION_REHEARSAL_FAULT_BOUNDARY_MATERIAL_FILENAME
   | typeof WORKSPACE_SEARCH_MIGRATION_REHEARSAL_FAULT_COMPLETION_MATERIAL_FILENAME
@@ -297,6 +311,7 @@ export type WorkspaceSearchMigrationRehearsalEvidenceFilename =
 const processCliRecoverablePublicationFilenames:
   readonly WorkspaceSearchMigrationRehearsalEvidenceFilename[] =
     Object.freeze([
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CHILD_MATERIAL_FILENAME,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_FAULT_BOUNDARY_MATERIAL_FILENAME,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_FAULT_COMPLETION_MATERIAL_FILENAME,
@@ -310,6 +325,7 @@ const processCliRecoverablePublicationFilenames:
 const processCliRecoveryFoundationPublicationFilenames:
   readonly WorkspaceSearchMigrationRehearsalEvidenceFilename[] =
     Object.freeze([
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_LIFECYCLE_FILENAME,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_PARENT_AUTHENTICATION_FILENAME,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
@@ -421,10 +437,12 @@ export type WorkspaceSearchMigrationRehearsalProcessCliDependencies = {
   readonly cleanupRuntimeKeyFile?: (
     input: CleanupWorkspaceSearchMigrationRehearsalRuntimeKeyInput,
   ) => Promise<WorkspaceSearchMigrationRehearsalRuntimeKeyCleanupAuthorization>
-  /** Validates an existing owner-only directory contains only a reservation. */
+  /** Normalizes an empty/reservation/control pre-spawn directory and returns its state. */
   readonly validateReservationOnlyDirectory?: (
     directoryPath: string,
-  ) => Promise<void>
+  ) => Promise<
+    WorkspaceSearchMigrationRehearsalReservationDirectoryState | void
+  >
   /** Trusted parent clock used for reservation and spawn admission. */
   readonly now?: () => Date
   /** Cryptographic parent entropy used only for a fresh reservation. */
@@ -505,6 +523,7 @@ export type WorkspaceSearchMigrationRehearsalProcessCliExitCode =
 
 /** Stable raw-value-free parent-harness failures. */
 type WorkspaceSearchMigrationRehearsalProcessCliFailureCode =
+  | 'CONTROL_ARGUMENTS_WRITE_FAILED'
   | 'EVIDENCE_DIRECTORY_CREATE_FAILED'
   | 'EVIDENCE_DIRECTORY_EXISTS'
   | 'FAULT_RECEIPT_WRITE_FAILED'
@@ -1180,6 +1199,7 @@ export async function runWorkspaceSearchMigrationRehearsalProcessCli(
         configuration,
         selectedStage,
         stageSelection.previousReceipt,
+        expectedPreviousRateSegment,
         stageKey,
         publicationKey,
         captured,
@@ -2047,6 +2067,8 @@ export async function writeWorkspaceSearchMigrationRehearsalEvidenceFileExclusiv
     filename !==
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_NO_FAULT_RECEIPT_FILENAME &&
     filename !==
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME &&
+    filename !==
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CHILD_MATERIAL_FILENAME &&
     filename !==
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_FAULT_BOUNDARY_MATERIAL_FILENAME &&
@@ -2062,10 +2084,8 @@ export async function writeWorkspaceSearchMigrationRehearsalEvidenceFileExclusiv
   ) {
     throw outputBoundaryFailed()
   }
-  const maximumBytes = filename ===
-      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_FAULT_BOUNDARY_RATE_SEGMENT_FILENAME
-      ? WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RATE_MAX_SEGMENT_BYTES
-      : WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PROCESS_EVIDENCE_MAX_BYTES
+  const maximumBytes =
+    readProcessCliEvidencePublicationMaximumBytes(filename)
   const content = copyEvidenceBytes(bytes, maximumBytes)
   const finalPath = join(directory, filename)
   const temporaryPath = processCliEvidencePublicationTemporaryPath(
@@ -2315,6 +2335,10 @@ function processCliEvidencePublicationTemporaryFilename(
 function readProcessCliEvidencePublicationMaximumBytes(
   filename: WorkspaceSearchMigrationRehearsalEvidenceFilename,
 ): number {
+  if (
+    filename ===
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME
+  ) return WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_MAX_BYTES
   return filename ===
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_FAULT_BOUNDARY_RATE_SEGMENT_FILENAME
     ? WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RATE_MAX_SEGMENT_BYTES
@@ -2548,49 +2572,139 @@ export async function removeWorkspaceSearchMigrationRehearsalRuntimeKeyFile(
 }
 
 /**
- * Validates that an owner-only resume directory contains only one reservation.
+ * Validates and normalizes one exact pre-spawn reservation directory.
+ *
+ * The only admitted extension to the reservation is the fixed immutable
+ * control-argument publication, including its crash-recoverable temporary
+ * inode. The caller still authenticates its exact bytes before reuse.
  *
  * @param directoryPath - Exact pre-existing evidence directory to inspect.
+ * @returns Whether a durable reservation remains after normalization.
  */
 export async function validateWorkspaceSearchMigrationRehearsalReservationOnlyDirectory(
   directoryPath: string,
-): Promise<void> {
+): Promise<WorkspaceSearchMigrationRehearsalReservationDirectoryState> {
   const directory = requireProcessCliPath(directoryPath)
+  let directoryHandle: Awaited<ReturnType<typeof open>> | undefined
+  let failed = false
+  let state:
+    WorkspaceSearchMigrationRehearsalReservationDirectoryState | undefined
   try {
-    const metadata = await lstat(directory)
-    const getuid = process.getuid
-    if (
-      !metadata.isDirectory() ||
-      metadata.isSymbolicLink() ||
-      (metadata.mode & 0o7777) !== 0o700 ||
-      (typeof getuid === 'function' && metadata.uid !== getuid.call(process))
-    ) {
-      throw outputBoundaryFailed()
-    }
-    const entries = await readdir(directory)
-    if (
-      entries.length !== 1 ||
-      entries[0] !==
-        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME
-    ) {
-      throw outputBoundaryFailed()
-    }
-    const reservationMetadata = await lstat(join(
-      directory,
+    directoryHandle = await openProcessCliEvidenceDirectory(directory)
+    const controlTemporaryFilename =
+      processCliEvidencePublicationTemporaryFilename(
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
+      )
+    const reservationTemporaryFilename =
+      processCliEvidencePublicationTemporaryFilename(
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
+      )
+    const allowed = new Set<string>([
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
-    ))
+      reservationTemporaryFilename,
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
+      controlTemporaryFilename,
+    ])
+    const initialEntries = await readdir(directory)
+    const hasReservationPublication = initialEntries.some((entry) =>
+      entry ===
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME ||
+      entry === reservationTemporaryFilename
+    )
     if (
-      !reservationMetadata.isFile() ||
-      reservationMetadata.isSymbolicLink() ||
-      (reservationMetadata.mode & 0o7777) !== 0o600 ||
-      (typeof getuid === 'function' &&
-        reservationMetadata.uid !== getuid.call(process))
-    ) {
+      (initialEntries.length > 0 && !hasReservationPublication) ||
+      initialEntries.some((entry) => !allowed.has(entry))
+    ) throw outputBoundaryFailed()
+    await recoverProcessCliEvidenceFilePublication(
+      join(
+        directory,
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
+      ),
+      processCliEvidencePublicationTemporaryPath(
+        directory,
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
+      ),
+      directoryHandle,
+      undefined,
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_MAX_BYTES,
+    )
+    await recoverProcessCliEvidenceFilePublication(
+      join(
+        directory,
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
+      ),
+      processCliEvidencePublicationTemporaryPath(
+        directory,
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
+      ),
+      directoryHandle,
+      undefined,
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_MAX_BYTES,
+    )
+    const entries = [...await readdir(directory)].sort()
+    const empty: string[] = []
+    const reservationOnly = [
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
+    ]
+    const reservationAndControl = [
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
+    ].sort()
+    if (
+      entries.length !== empty.length &&
+      entries.length !== reservationOnly.length &&
+      entries.length !== reservationAndControl.length
+    ) throw outputBoundaryFailed()
+    const expected = entries.length === empty.length
+      ? empty
+      : entries.length === reservationOnly.length
+        ? reservationOnly
+        : reservationAndControl
+    if (entries.some((entry, index) => entry !== expected[index])) {
       throw outputBoundaryFailed()
+    }
+    if (entries.length === empty.length) {
+      state = 'empty-unclaimed'
+    } else {
+      requireProcessCliEvidencePublicationMetadata(
+        await lstat(join(
+          directory,
+          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
+        )),
+        undefined,
+        1,
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_MAX_BYTES,
+      )
+      state = 'reservation-present'
+    }
+    if (entries.includes(
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
+    )) {
+      if (!entries.includes(
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
+      )) throw outputBoundaryFailed()
+      requireProcessCliEvidencePublicationMetadata(
+        await lstat(join(
+          directory,
+          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
+        )),
+        undefined,
+        1,
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_MAX_BYTES,
+      )
     }
   } catch {
-    throw outputBoundaryFailed()
+    failed = true
   }
+  if (directoryHandle !== undefined) {
+    try {
+      await directoryHandle.close()
+    } catch {
+      failed = true
+    }
+  }
+  if (failed || state === undefined) throw outputBoundaryFailed()
+  return state
 }
 
 /**
@@ -2635,6 +2749,7 @@ async function recoverProcessCliInterruptedRuntimeKeyPublication(
     directoryHandle = await openProcessCliEvidenceDirectory(directory)
     const entries = [...await readdir(directory)].sort()
     const expectedEntries = [
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RUNTIME_KEY_FILENAME,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
     ].sort()
@@ -2826,6 +2941,7 @@ async function inspectProcessCliParentAuthenticationRecoveryDirectory(
   const directory = requireProcessCliPath(directoryPath)
   await recoverProcessCliParentAuthenticationPublication(directory)
   const allowed = new Set<string>([
+    WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
     WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
     WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RUNTIME_KEY_CLEANUP_INTENT_FILENAME,
     WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RUNTIME_KEY_CLEANUP_COMPLETION_FILENAME,
@@ -3044,6 +3160,7 @@ function createProcessCliRecoveryEvidenceEntries(
   materialKind: ProcessCliRecoveryMaterialKind,
 ): string[] {
   return [
+    WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
     WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
     WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RATE_SEGMENT_FILENAME,
     WORKSPACE_SEARCH_MIGRATION_REHEARSAL_LIFECYCLE_FILENAME,
@@ -3497,7 +3614,7 @@ async function readProcessCliStageSelection(
  * @param previousReceipt - Runtime-authenticated immediate receipt, or null.
  * @param runtimeKey - Runtime-only rate-record authentication key.
  * @param dependencies - Captured bounded file reader.
- * @returns Exact verified predecessor summary, or null at stage one.
+ * @returns Exact verified predecessor summary rooted at ordinal zero.
  */
 async function readProcessCliExpectedPreviousRateSegment(
   configuration: WorkspaceSearchMigrationRehearsalProcessCliArguments,
@@ -3508,24 +3625,31 @@ async function readProcessCliExpectedPreviousRateSegment(
     WorkspaceSearchMigrationRehearsalProcessCliDependencies,
     'readInputFile'
   >,
-): Promise<WorkspaceSearchMigrationRehearsalVerifiedRateSegment | null> {
+): Promise<WorkspaceSearchMigrationRehearsalVerifiedRateSegment> {
   const previousRateSegmentFile = configuration.ratePreviousSegmentFile
-  if (previousReceipt === null) {
-    if (previousRateSegmentFile !== undefined) {
-      throw invalidProcessCliStageSelection()
-    }
-    return null
-  }
   if (previousRateSegmentFile === undefined) {
     throw invalidProcessCliStageSelection()
   }
-  const derivesFromCommitJournal =
-    selection.entry.command === 'release' ||
-    (selection.entry.command === 'apply' &&
-      (selection.entry.scenario === 'complete-apply-rollback' ||
-        selection.entry.scenario === 'partial-apply-rollback'))
-  const expectedSegmentOrdinal = previousReceipt.rateSegment.segmentOrdinal +
-    (derivesFromCommitJournal ? 1 : 0)
+  const rollbackApply = previousReceipt !== null &&
+    selection.entry.command === 'apply' &&
+    (selection.entry.scenario === 'complete-apply-rollback' ||
+      selection.entry.scenario === 'partial-apply-rollback')
+  let expectedRateSegment: WorkspaceSearchMigrationRehearsalVerifiedRateSegment
+  if (previousReceipt === null) {
+    expectedRateSegment =
+      selection.manifest.integrityAttestationRoot.segment
+  } else if (selection.entry.command === 'release') {
+    if (previousReceipt.evidence.kind !== 'terminal') {
+      throw invalidProcessCliStageSelection()
+    }
+    expectedRateSegment =
+      previousReceipt.evidence.reconciliationRate.successor
+  } else {
+    expectedRateSegment = previousReceipt.rateSegment
+  }
+  const expectedSegmentOrdinal = rollbackApply
+    ? expectedRateSegment.segmentOrdinal + 1
+    : expectedRateSegment.segmentOrdinal
   try {
     const canonicalBytes = await readProcessCliStageFile(
       previousRateSegmentFile,
@@ -3541,9 +3665,9 @@ async function readProcessCliExpectedPreviousRateSegment(
         selection.manifest.configurationBindingDigest,
     })
     if (
-      !derivesFromCommitJournal &&
+      !rollbackApply &&
       serializeCanonicalJson(verified) !==
-        serializeCanonicalJson(previousReceipt.rateSegment)
+        serializeCanonicalJson(expectedRateSegment)
     ) throw invalidProcessCliStageSelection()
     return verified
   } catch {
@@ -3557,6 +3681,7 @@ async function readProcessCliExpectedPreviousRateSegment(
  * @param configuration - Strict process invocation containing the audit path.
  * @param selection - Authenticated rollback apply selection.
  * @param previousReceipt - Exact planning receipt immediately preceding apply.
+ * @param expectedPreviousRateSegment - Authenticated raw target-owned segment.
  * @param runtimeKey - Runtime target-audit authentication key.
  * @param publicationKey - Parent-only target-audit authentication key.
  * @param dependencies - Captured bounded file reader.
@@ -3566,6 +3691,8 @@ async function readProcessCliExpectedTargetPreimageArtifactContentDigest(
   configuration: WorkspaceSearchMigrationRehearsalProcessCliArguments,
   selection: WorkspaceSearchMigrationRehearsalSelectedStage,
   previousReceipt: WorkspaceSearchMigrationRehearsalStageReceipt | null,
+  expectedPreviousRateSegment:
+    WorkspaceSearchMigrationRehearsalVerifiedRateSegment,
   runtimeKey: Uint8Array,
   publicationKey: Uint8Array,
   dependencies: Pick<
@@ -3598,6 +3725,9 @@ async function readProcessCliExpectedTargetPreimageArtifactContentDigest(
         selection.manifest.requestedResourcesBinding,
       configurationBindingDigest:
         selection.manifest.configurationBindingDigest,
+      policyVersion: selection.manifest.policyVersion,
+      integrityResourceIdentityDigest:
+        selection.manifest.integrityResourceIdentityDigest,
       planningReceiptDigest: createMigrationDigest(previousReceipt),
       executionBoundaryDigest:
         previousReceipt.evidence.executionBoundaryDigest,
@@ -3625,22 +3755,25 @@ async function readProcessCliExpectedTargetPreimageArtifactContentDigest(
           purpose: 'partial-rollback-preimage',
           terminal: null,
         }, new Uint8Array(runtimeKey), new Uint8Array(publicationKey))
-    const integrityBefore = binding.integrityBefore
+    const integrity = binding.integrity.result
     if (
-      integrityBefore === null ||
-      integrityBefore.resourceIdentityScheme !==
+      integrity.resourceIdentityScheme !==
         selection.manifest.integrityResourceIdentityScheme ||
       !sameProcessCliIntegrityResourceIdentities(
-        integrityBefore.resourceIdentities,
+        integrity.resourceIdentities,
         selection.manifest.integrityResourceIdentities,
       ) ||
-      integrityBefore.resourceIdentityDigest !==
+      integrity.resourceIdentityDigest !==
         selection.manifest.integrityResourceIdentityDigest ||
       binding.commit !== selection.manifest.commit ||
       binding.configurationHash !==
         selection.manifest.configurationBindingDigest ||
       binding.sourceResourceBindingDigest !==
         selection.manifest.requestedResourcesBinding ||
+      serializeCanonicalJson(binding.rate.predecessor) !==
+        serializeCanonicalJson(previousReceipt.rateSegment) ||
+      serializeCanonicalJson(binding.rate.successor) !==
+        serializeCanonicalJson(expectedPreviousRateSegment) ||
       Date.parse(binding.observedAt) < Date.parse(previousReceipt.completedAt)
     ) throw invalidProcessCliStageSelection()
     return binding.contentDigest
@@ -3679,7 +3812,7 @@ async function prepareProcessCliStageReservation(
   configuration: WorkspaceSearchMigrationRehearsalProcessCliArguments,
   selection: WorkspaceSearchMigrationRehearsalSelectedStage,
   expectedPreviousRateSegment:
-    WorkspaceSearchMigrationRehearsalVerifiedRateSegment | null,
+    WorkspaceSearchMigrationRehearsalVerifiedRateSegment,
   expectedTargetPreimageArtifactContentDigest: string | null,
   permit: unknown,
   runtimeKey: Uint8Array,
@@ -3698,74 +3831,59 @@ async function prepareProcessCliStageReservation(
     throw evidenceDirectoryCreateFailed()
   }
   if (directoryOutcome === 'created') {
-    const now = readProcessCliTrustedDate(dependencies.now)
-    const permitExpiresAt = readProcessCliPermitExpiry(permit)
-    const expiresAtMilliseconds = now.getTime() +
-      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_CLAIM_MILLISECONDS
-    if (
-      expiresAtMilliseconds +
-        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_PERMIT_RECOVERY_WINDOW_MILLISECONDS +
-        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_PERMIT_ABANDONMENT_RUNWAY_MILLISECONDS >
-      permitExpiresAt
-    ) {
-      throw invalidProcessCliStageSelection()
-    }
-    let nonce: Uint8Array | undefined
-    try {
-      nonce = copyProcessCliReservationNonce(
-        dependencies.randomBytes(
-          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_NONCE_BYTES,
-        ),
-      )
-      const reservation =
-        createWorkspaceSearchMigrationRehearsalStageReservation({
-          selection,
-          nonce,
-          reservedAt: now.toISOString(),
-          expiresAt: new Date(expiresAtMilliseconds).toISOString(),
-          expectedPreviousRateSegment,
-          expectedCurrentRateSegmentOrdinal:
-            expectedPreviousRateSegment === null
-              ? 0
-              : expectedPreviousRateSegment.segmentOrdinal + 1,
-          expectedTargetPreimageArtifactContentDigest,
-          signingKey: runtimeKey,
-        })
-      const outcome = await dependencies.writeEvidenceFileExclusive(
-        configuration.evidenceDirectory,
-        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
-        new TextEncoder().encode(serializeCanonicalJson(reservation)),
-      )
-      if (outcome !== 'created') {
-        throw invalidProcessCliStageSelection()
-      }
-      return Object.freeze({
-        phase: 'execute-child',
-        reservation,
-      })
-    } catch (error: unknown) {
-      if (error instanceof WorkspaceSearchMigrationRehearsalProcessCliFailure) {
-        throw error
-      }
-      throw invalidProcessCliStageSelection()
-    } finally {
-      zeroizeProcessCliKey(nonce)
-    }
+    const reservation = await createAndPersistProcessCliStageReservation(
+      configuration.evidenceDirectory,
+      selection,
+      expectedPreviousRateSegment,
+      expectedTargetPreimageArtifactContentDigest,
+      permit,
+      runtimeKey,
+      dependencies,
+    )
+    await persistProcessCliControlArgumentsEvidence(
+      configuration.evidenceDirectory,
+      configuration.controlArguments,
+      dependencies,
+    )
+    return Object.freeze({
+      phase: 'execute-child',
+      reservation,
+    })
   }
   if (directoryOutcome !== 'exists') {
     throw evidenceDirectoryCreateFailed()
   }
   let reservationOnly = false
+  let reservationDirectoryState:
+    WorkspaceSearchMigrationRehearsalReservationDirectoryState =
+      'reservation-present'
+  let invalidReservationDirectoryState = false
   try {
-    await dependencies.validateReservationOnlyDirectory(
+    const state: unknown =
+      await dependencies.validateReservationOnlyDirectory(
       configuration.evidenceDirectory,
     )
-    reservationOnly = true
+    if (
+      state !== undefined &&
+      state !== 'empty-unclaimed' &&
+      state !== 'reservation-present'
+    ) {
+      invalidReservationDirectoryState = true
+    } else {
+      reservationDirectoryState = state ?? 'reservation-present'
+      reservationOnly = true
+    }
   } catch {
     // A completed evidence phase is authenticated below without a child spawn.
   }
+  if (invalidReservationDirectoryState) throw evidenceDirectoryExists()
   if (!reservationOnly) {
     try {
+      await requireProcessCliRecoveredControlArgumentsEvidence(
+        configuration.evidenceDirectory,
+        configuration.controlArguments,
+        dependencies,
+      )
       const interruptedRuntimePublicationRecovered =
         await recoverProcessCliInterruptedRuntimeKeyPublication(
           configuration.evidenceDirectory,
@@ -3798,6 +3916,26 @@ async function prepareProcessCliStageReservation(
       throw evidenceDirectoryExists()
     }
   }
+  if (reservationDirectoryState === 'empty-unclaimed') {
+    const reservation = await createAndPersistProcessCliStageReservation(
+      configuration.evidenceDirectory,
+      selection,
+      expectedPreviousRateSegment,
+      expectedTargetPreimageArtifactContentDigest,
+      permit,
+      runtimeKey,
+      dependencies,
+    )
+    await persistProcessCliControlArgumentsEvidence(
+      configuration.evidenceDirectory,
+      configuration.controlArguments,
+      dependencies,
+    )
+    return Object.freeze({
+      phase: 'execute-child',
+      reservation,
+    })
+  }
   try {
     const reservationBytes = await dependencies.readInputFile(
       join(
@@ -3827,6 +3965,11 @@ async function prepareProcessCliStageReservation(
     ) {
       throw invalidProcessCliStageSelection()
     }
+    await persistProcessCliControlArgumentsEvidence(
+      configuration.evidenceDirectory,
+      configuration.controlArguments,
+      dependencies,
+    )
     return Object.freeze({
       phase: 'execute-child',
       reservation,
@@ -3836,6 +3979,74 @@ async function prepareProcessCliStageReservation(
       throw error
     }
     throw evidenceDirectoryExists()
+  }
+}
+
+/**
+ * Creates and durably publishes one fresh authenticated stage reservation.
+ *
+ * @param directory - Fresh or normalized empty owner-only directory.
+ * @param selection - Independently authenticated manifest selection.
+ * @param expectedPreviousRateSegment - Authenticated rate predecessor.
+ * @param expectedTargetPreimageArtifactContentDigest - Optional preimage bytes.
+ * @param permit - Authenticated permit bounding reservation recovery.
+ * @param runtimeKey - Runtime HMAC key authenticating the reservation.
+ * @param dependencies - Captured clock, entropy, and immutable writer.
+ * @returns Exact authenticated reservation persisted before remote claim.
+ */
+async function createAndPersistProcessCliStageReservation(
+  directory: string,
+  selection: WorkspaceSearchMigrationRehearsalSelectedStage,
+  expectedPreviousRateSegment:
+    WorkspaceSearchMigrationRehearsalVerifiedRateSegment,
+  expectedTargetPreimageArtifactContentDigest: string | null,
+  permit: unknown,
+  runtimeKey: Uint8Array,
+  dependencies: CapturedProcessCliDependencies,
+): Promise<WorkspaceSearchMigrationRehearsalStageReservation> {
+  const now = readProcessCliTrustedDate(dependencies.now)
+  const permitExpiresAt = readProcessCliPermitExpiry(permit)
+  const expiresAtMilliseconds = now.getTime() +
+    WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_CLAIM_MILLISECONDS
+  if (
+    expiresAtMilliseconds +
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_PERMIT_RECOVERY_WINDOW_MILLISECONDS +
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_PERMIT_ABANDONMENT_RUNWAY_MILLISECONDS >
+    permitExpiresAt
+  ) throw invalidProcessCliStageSelection()
+  let nonce: Uint8Array | undefined
+  try {
+    nonce = copyProcessCliReservationNonce(
+      dependencies.randomBytes(
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_NONCE_BYTES,
+      ),
+    )
+    const reservation =
+      createWorkspaceSearchMigrationRehearsalStageReservation({
+        selection,
+        nonce,
+        reservedAt: now.toISOString(),
+        expiresAt: new Date(expiresAtMilliseconds).toISOString(),
+        expectedPreviousRateSegment,
+        expectedCurrentRateSegmentOrdinal:
+          expectedPreviousRateSegment.segmentOrdinal + 1,
+        expectedTargetPreimageArtifactContentDigest,
+        signingKey: runtimeKey,
+      })
+    const outcome = await dependencies.writeEvidenceFileExclusive(
+      directory,
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
+      new TextEncoder().encode(serializeCanonicalJson(reservation)),
+    )
+    if (outcome !== 'created') throw invalidProcessCliStageSelection()
+    return reservation
+  } catch (error: unknown) {
+    if (error instanceof WorkspaceSearchMigrationRehearsalProcessCliFailure) {
+      throw error
+    }
+    throw invalidProcessCliStageSelection()
+  } finally {
+    zeroizeProcessCliKey(nonce)
   }
 }
 
@@ -3899,6 +4110,11 @@ async function recoverProcessCliStageParentAuthentication(
   const directory = configuration.evidenceDirectory
   const initialEntries =
     await inspectProcessCliParentAuthenticationRecoveryDirectory(directory)
+  await requireProcessCliRecoveredControlArgumentsEvidence(
+    directory,
+    configuration.controlArguments,
+    dependencies,
+  )
   const reservationBytes = await dependencies.readInputFile(
     join(
       directory,
@@ -4892,6 +5108,111 @@ function readProcessCliLifecycleProtocolDigest(
   return receiptDigest
 }
 
+/**
+ * Persists or exact-reconciles the manifest-authenticated control vector.
+ *
+ * @param directory - Parent-owned stage evidence directory.
+ * @param controlArguments - Exact arguments already admitted by selection.
+ * @param dependencies - Immutable writer and bounded private reader.
+ */
+async function persistProcessCliControlArgumentsEvidence(
+  directory: string,
+  controlArguments: readonly string[],
+  dependencies: Pick<
+    WorkspaceSearchMigrationRehearsalProcessCliDependencies,
+    'readInputFile' | 'writeEvidenceFileExclusive'
+  >,
+): Promise<void> {
+  let expectedBytes: Uint8Array | undefined
+  let existingBytes: Uint8Array | undefined
+  try {
+    expectedBytes = encodeProcessCliControlArgumentsEvidence(controlArguments)
+    const outcome = await dependencies.writeEvidenceFileExclusive(
+      directory,
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
+      expectedBytes,
+    )
+    if (outcome === 'created') return
+    if (outcome !== 'exists') throw controlArgumentsWriteFailed()
+    existingBytes = await dependencies.readInputFile(
+      join(
+        directory,
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
+      ),
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_MAX_BYTES,
+    )
+    if (
+      !(existingBytes instanceof Uint8Array) ||
+      nodeUtilTypes.isProxy(existingBytes) ||
+      !equalProcessCliBytes(existingBytes, expectedBytes)
+    ) throw controlArgumentsWriteFailed()
+  } catch {
+    throw controlArgumentsWriteFailed()
+  } finally {
+    zeroizeProcessCliKey(existingBytes)
+    zeroizeProcessCliKey(expectedBytes)
+  }
+}
+
+/**
+ * Authenticates persisted control arguments before completed-phase recovery.
+ *
+ * @param directory - Existing owner-only evidence directory.
+ * @param controlArguments - Current manifest-authenticated exact arguments.
+ * @param dependencies - Bounded private evidence reader.
+ */
+async function requireProcessCliRecoveredControlArgumentsEvidence(
+  directory: string,
+  controlArguments: readonly string[],
+  dependencies: Pick<
+    WorkspaceSearchMigrationRehearsalProcessCliDependencies,
+    'readInputFile'
+  >,
+): Promise<void> {
+  let expectedBytes: Uint8Array | undefined
+  let existingBytes: Uint8Array | undefined
+  try {
+    expectedBytes = encodeProcessCliControlArgumentsEvidence(controlArguments)
+    existingBytes = await dependencies.readInputFile(
+      join(
+        directory,
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
+      ),
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_MAX_BYTES,
+    )
+    if (
+      !(existingBytes instanceof Uint8Array) ||
+      nodeUtilTypes.isProxy(existingBytes) ||
+      !equalProcessCliBytes(existingBytes, expectedBytes)
+    ) throw evidenceDirectoryExists()
+  } catch {
+    throw evidenceDirectoryExists()
+  } finally {
+    zeroizeProcessCliKey(existingBytes)
+    zeroizeProcessCliKey(expectedBytes)
+  }
+}
+
+/** Encodes one exact canonical private control vector within its fixed bound. */
+function encodeProcessCliControlArgumentsEvidence(
+  controlArguments: readonly string[],
+): Uint8Array {
+  let bytes: Uint8Array
+  try {
+    bytes = new TextEncoder().encode(
+      serializeCanonicalJson(controlArguments),
+    )
+  } catch {
+    throw outputBoundaryFailed()
+  }
+  if (
+    bytes.byteLength === 0 ||
+    bytes.byteLength >
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_MAX_BYTES
+  ) throw outputBoundaryFailed()
+  return bytes
+}
+
 /** Persists one canonical lifecycle document after verified child termination. */
 async function persistLifecycleEvidence(
   directory: string,
@@ -5508,6 +5829,14 @@ function evidenceDirectoryExists(): WorkspaceSearchMigrationRehearsalProcessCliF
 function evidenceDirectoryCreateFailed(): WorkspaceSearchMigrationRehearsalProcessCliFailure {
   return new WorkspaceSearchMigrationRehearsalProcessCliFailure(
     'EVIDENCE_DIRECTORY_CREATE_FAILED',
+    1,
+  )
+}
+
+/** Creates one exact canonical control-vector durability failure. */
+function controlArgumentsWriteFailed(): WorkspaceSearchMigrationRehearsalProcessCliFailure {
+  return new WorkspaceSearchMigrationRehearsalProcessCliFailure(
+    'CONTROL_ARGUMENTS_WRITE_FAILED',
     1,
   )
 }

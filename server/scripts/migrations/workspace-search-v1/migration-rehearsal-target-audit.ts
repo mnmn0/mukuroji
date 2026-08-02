@@ -11,11 +11,15 @@ import {
   WorkspaceSearchMigrationFailure,
 } from './migration-contract'
 import {
-  consumeWorkspaceSearchMigrationRehearsalIntegrityPreimageResult,
   readWorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection,
   type WorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection,
-  type WorkspaceSearchMigrationRehearsalIntegrityPreimageResultCapability,
 } from './migration-rehearsal-integrity-evidence'
+import {
+  consumeWorkspaceSearchMigrationRehearsalRateBoundIntegrityResult,
+  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_INTEGRITY_RATE_INTERVAL_VERSION,
+  type WorkspaceSearchMigrationRehearsalIntegrityRateInterval,
+  type WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult,
+} from './migration-rehearsal-integrity-rate-evidence'
 import type {
   WorkspaceSearchMigrationRehearsalEvidenceSessionBinding,
 } from './migration-rehearsal-evidence-aws'
@@ -44,8 +48,8 @@ import type {
 export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_TARGET_AUDIT_KIND =
   'mukuroji-workspace-search-migration-rehearsal-target-audit'
 
-/** Dual-authenticated four-artifact target-audit contract. */
-export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_TARGET_AUDIT_VERSION = 3
+/** Dual-authenticated rate-bound four-artifact target-audit contract. */
+export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_TARGET_AUDIT_VERSION = 4
 
 /** Maximum exact canonical bytes accepted for one target-audit artifact. */
 export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_TARGET_AUDIT_MAX_BYTES =
@@ -82,6 +86,10 @@ export type WorkspaceSearchMigrationRehearsalTargetAuditContext = {
   readonly requestedResourcesBinding: string
   /** Digest of the measured configuration and resource generation. */
   readonly configurationBindingDigest: string
+  /** Reviewed DescribeTable policy digest shared by live and audit evidence. */
+  readonly policyVersion: string
+  /** Permit-authenticated immutable #163 resource-identity digest. */
+  readonly integrityResourceIdentityDigest: string
   /** Digest of the exact prospective or committed close-replan receipt. */
   readonly planningReceiptDigest: string
   /** Digest of the admitted closed-fence execution boundary. */
@@ -233,7 +241,10 @@ type FinalizeWorkspaceSearchMigrationRehearsalTargetAuditArtifactBaseInput = {
   readonly audit: WorkspaceSearchMigrationRehearsalCollectedTargetAudit
   /** Parent-authenticated scenario, run, planning, and apply identity. */
   readonly context: WorkspaceSearchMigrationRehearsalTargetAuditContext
-  /** Fresh auxiliary rate proof and final close-drained ledger snapshot. */
+  /** Genuine rate-bound live #163 result consumed exactly once. */
+  readonly integrity:
+    WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult
+  /** Fresh enclosing rate proof and final close-drained ledger snapshot. */
   readonly rate:
     FinalizeWorkspaceSearchMigrationRehearsalRateSegmentEvidenceInput
 }
@@ -246,9 +257,6 @@ export type FinalizeWorkspaceSearchMigrationRehearsalTargetAuditArtifactInput =
       readonly purpose: 'partial-rollback-preimage'
       /** A pre-apply baseline is deliberately independent of a later root. */
       readonly terminal: null
-      /** Genuine one-shot live #163 observation completed before this scan. */
-      readonly integrityBefore:
-        WorkspaceSearchMigrationRehearsalIntegrityPreimageResultCapability
     }
     | {
       /** Selects the target state restored by committed-prefix rollback. */
@@ -256,17 +264,12 @@ export type FinalizeWorkspaceSearchMigrationRehearsalTargetAuditArtifactInput =
       /** Exact authoritative committed-prefix rollback root. */
       readonly terminal:
         WorkspaceSearchMigrationRehearsalPartialRollbackTerminalBinding
-      /** Restored target artifacts must not carry a pre-apply #163 result. */
-      readonly integrityBefore: null
     }
     | {
       /** Selects the baseline captured before complete-plan apply. */
       readonly purpose: 'complete-rollback-preimage'
       /** A pre-apply baseline is deliberately independent of a later root. */
       readonly terminal: null
-      /** Genuine one-shot live #163 observation completed before this scan. */
-      readonly integrityBefore:
-        WorkspaceSearchMigrationRehearsalIntegrityPreimageResultCapability
     }
     | {
       /** Selects the target state restored by complete-plan rollback. */
@@ -274,8 +277,6 @@ export type FinalizeWorkspaceSearchMigrationRehearsalTargetAuditArtifactInput =
       /** Exact authoritative complete-plan rollback root. */
       readonly terminal:
         WorkspaceSearchMigrationRehearsalCompleteRollbackTerminalBinding
-      /** Restored target artifacts must not carry a pre-apply #163 result. */
-      readonly integrityBefore: null
     }
   )
 
@@ -353,9 +354,9 @@ export type WorkspaceSearchMigrationRehearsalTargetAuditArtifactBinding = {
   readonly sourceSessionBindingDigest: string
   /** Exact session-owned requested-resource binding digest. */
   readonly sourceResourceBindingDigest: string
-  /** Exact live #163 preimage pinned by a target baseline, otherwise null. */
-  readonly integrityBefore:
-    WorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection | null
+  /** Full genuine live #163 result and its exact authenticated rate interval. */
+  readonly integrity:
+    WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult
   /** Parent-authenticated scenario, run, planning, and apply identity. */
   readonly context: WorkspaceSearchMigrationRehearsalTargetAuditContext
   /** Exact authenticated terminal root, absent for a scenario preimage. */
@@ -409,15 +410,12 @@ export type FinalizeWorkspaceSearchMigrationRehearsalTargetPreimageEvidenceInput
 export type WorkspaceSearchMigrationRehearsalTargetPreimageEvidenceBinding =
   Omit<
     WorkspaceSearchMigrationRehearsalTargetAuditArtifactBinding,
-    'integrityBefore' | 'purpose' | 'terminal'
+    'purpose' | 'terminal'
   > & {
     /** Scenario-specific authenticated rollback preimage purpose. */
     readonly purpose: WorkspaceSearchMigrationRehearsalTargetPreimagePurpose
     /** A pre-apply observation carries no later rollback terminal. */
     readonly terminal: null
-    /** Exact live #163 result that preceded this target baseline. */
-    readonly integrityBefore:
-      WorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection
     /** Digest of the complete parent-authenticated target-audit context. */
     readonly contextDigest: string
     /** Exact self-reference-free prospective planning-receipt digest. */
@@ -547,9 +545,9 @@ type TargetAuditDocument = {
   readonly sourceSessionBindingDigest: string
   /** Exact session-owned requested-resource binding digest. */
   readonly sourceResourceBindingDigest: string
-  /** Exact live #163 preimage pinned by a target baseline, otherwise null. */
-  readonly integrityBefore:
-    WorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection | null
+  /** Full genuine live #163 result and its exact authenticated rate interval. */
+  readonly integrity:
+    WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult
   /** Parent-authenticated scenario, run, planning, and apply identity. */
   readonly context: WorkspaceSearchMigrationRehearsalTargetAuditContext
   /** Scenario terminal root, absent for the pre-apply baseline. */
@@ -651,19 +649,23 @@ const targetAuditKeyByteLength = 32
 
 /** Domain separating the target-audit runtime-key fingerprint. */
 const targetAuditRuntimeKeyFingerprintDomain =
-  'mukuroji-workspace-search-migration-rehearsal-target-audit-runtime-key/v3\n'
+  'mukuroji-workspace-search-migration-rehearsal-target-audit-runtime-key/v4\n'
 
 /** Domain separating the target-audit runtime semantic HMAC. */
 const targetAuditRuntimeMacDomain =
-  'mukuroji-workspace-search-migration-rehearsal-target-audit-runtime-mac/v3\n'
+  'mukuroji-workspace-search-migration-rehearsal-target-audit-runtime-mac/v4\n'
 
 /** Domain separating the target-audit parent-key fingerprint. */
 const targetAuditPublicationKeyFingerprintDomain =
-  'mukuroji-workspace-search-migration-rehearsal-target-audit-publication-key/v3\n'
+  'mukuroji-workspace-search-migration-rehearsal-target-audit-publication-key/v4\n'
 
 /** Domain separating the target-audit parent outer HMAC. */
 const targetAuditPublicationMacDomain =
-  'mukuroji-workspace-search-migration-rehearsal-target-audit-publication-mac/v3\n'
+  'mukuroji-workspace-search-migration-rehearsal-target-audit-publication-mac/v4\n'
+
+/** Domain separating the embedded live-result rate binding from outer HMACs. */
+const targetAuditIntegrityBindingMacDomain =
+  'mukuroji:workspace-search-migration:rate-bound-integrity-result:v1\0'
 
 /** Module-private construction token for actual collected observations. */
 const collectedTargetAuditToken = Symbol(
@@ -748,7 +750,7 @@ export function finalizeWorkspaceSearchMigrationRehearsalTargetAuditArtifact(
     targetAuditGuards.requireExactKeys(record, [
       'audit',
       'context',
-      'integrityBefore',
+      'integrity',
       'purpose',
       'rate',
       'terminal',
@@ -765,6 +767,11 @@ export function finalizeWorkspaceSearchMigrationRehearsalTargetAuditArtifact(
       targetAuditGuards.readOwn(record, 'context'),
     )
     requirePurposeContext(purpose, context, terminal)
+    const integrity = consumeTargetAuditIntegrity(
+      targetAuditGuards.readOwn(record, 'integrity'),
+      purpose,
+      terminal,
+    )
     const rate = finalizeWorkspaceSearchMigrationRehearsalRateSegmentEvidence(
       targetAuditGuards.readOwn(record, 'rate'),
     )
@@ -799,8 +806,29 @@ export function finalizeWorkspaceSearchMigrationRehearsalTargetAuditArtifact(
       observation.sourcePermitDigest !== context.permitDigest ||
       observation.sourceResourceBindingDigest !==
         context.requestedResourcesBinding ||
+      integrity.configurationBindingDigest !==
+        context.configurationBindingDigest ||
+      integrity.policyVersion !== context.policyVersion ||
+      integrity.result.resourceIdentityDigest !==
+        context.integrityResourceIdentityDigest ||
+      !safeTargetAuditDigestEqual(
+        integrity.bindingMac,
+        createTargetAuditIntegrityBindingMac(
+          integrity,
+          runtimeWorkingKey,
+        ),
+      ) ||
       rate.link.configurationBindingDigest !==
         context.configurationBindingDigest ||
+      rate.link.policyVersion !== context.policyVersion ||
+      !sameVerifiedTargetAuditRateSegment(
+        integrity.predecessor,
+        rate.predecessor,
+      ) ||
+      !sameVerifiedTargetAuditRateSegment(
+        integrity.segment,
+        rate.successor,
+      ) ||
       Date.parse(rate.completedAt) < Date.parse(observation.observedAt)
     ) return failRehearsalTargetAudit('IDENTITY_MISMATCH')
     requireTargetAuditObservationWindow(
@@ -810,11 +838,11 @@ export function finalizeWorkspaceSearchMigrationRehearsalTargetAuditArtifact(
       terminal,
       'INVALID_STATE',
     )
-    const integrityBefore = consumeTargetAuditIntegrityBefore(
-      targetAuditGuards.readOwn(record, 'integrityBefore'),
+    requireTargetAuditIntegrityWindow(
+      integrity,
       purpose,
-      observation.startedAt,
       observation.observedAt,
+      terminal,
     )
     const runtimeKeyFingerprint = createTargetAuditRuntimeKeyFingerprint(
       runtimeWorkingKey,
@@ -824,7 +852,7 @@ export function finalizeWorkspaceSearchMigrationRehearsalTargetAuditArtifact(
       purpose,
       terminal,
       context,
-      integrityBefore,
+      integrity,
       rate,
       runtimeKeyFingerprint,
     )
@@ -1036,18 +1064,17 @@ export function finalizeWorkspaceSearchMigrationRehearsalTargetPreimageEvidence(
         runtimeVerificationKey,
         publicationVerificationKey,
       )
-    const integrityBefore = binding.integrityBefore
+    const integrity = binding.integrity
     if (
       binding.purpose !== purpose ||
       binding.terminal !== null ||
-      integrityBefore === null ||
       !sameVerifiedTargetAuditRateSegment(
-        binding.rate.predecessor,
+        integrity.predecessor,
         expectedRatePredecessor,
       ) ||
       Date.parse(expectedPlanningReceiptCompletedAt) >
-        Date.parse(integrityBefore.runtimeProvenance.startedAt) ||
-      Date.parse(integrityBefore.runtimeProvenance.completedAt) >
+        Date.parse(integrity.result.runtimeProvenance.startedAt) ||
+      Date.parse(integrity.result.runtimeProvenance.completedAt) >
         Date.parse(binding.observedAt) ||
       Date.parse(binding.observedAt) > Date.parse(binding.rate.completedAt) ||
       Date.parse(binding.rate.completedAt) >
@@ -1055,14 +1082,13 @@ export function finalizeWorkspaceSearchMigrationRehearsalTargetPreimageEvidence(
     ) return failRehearsalTargetAudit('INVALID_STATE')
     const contextDigest = createMigrationDigest({
       kind: 'workspace-search-migration-rehearsal-target-preimage-context',
-      version: 1,
+      version: 2,
       context: binding.context,
     })
     const bindingWithoutDigest = Object.freeze({
       ...binding,
       purpose,
       terminal: null,
-      integrityBefore,
       contextDigest,
       prospectivePlanningReceiptDigest:
         expectedProspectivePlanningReceiptDigest,
@@ -1074,7 +1100,7 @@ export function finalizeWorkspaceSearchMigrationRehearsalTargetPreimageEvidence(
       bindingDigest: createMigrationDigest({
         kind:
           'workspace-search-migration-rehearsal-target-preimage-evidence-binding',
-        version: 1,
+        version: 2,
         binding: bindingWithoutDigest,
       }),
     })
@@ -1643,8 +1669,7 @@ function createUnsignedTargetAuditDocument(
   terminal:
     WorkspaceSearchMigrationRehearsalTargetAuditTerminalBinding | null,
   context: WorkspaceSearchMigrationRehearsalTargetAuditContext,
-  integrityBefore:
-    WorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection | null,
+  integrity: WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult,
   rate: WorkspaceSearchMigrationRehearsalRateSegmentEvidence,
   runtimeKeyFingerprint: string,
 ): UnsignedTargetAuditDocument {
@@ -1659,7 +1684,7 @@ function createUnsignedTargetAuditDocument(
     evidenceKeyDigest: observation.evidenceKeyDigest,
     sourceSessionBindingDigest: observation.sourceSessionBindingDigest,
     sourceResourceBindingDigest: observation.sourceResourceBindingDigest,
-    integrityBefore,
+    integrity,
     context,
     terminal: terminal === null ? null : Object.freeze({ ...terminal }),
     aggregate: observation.aggregate,
@@ -1714,6 +1739,13 @@ function readAuthenticatedTargetAuditDocument(
       !safeTargetAuditDigestEqual(
         document.rate.authenticationKeyFingerprint,
         createWorkspaceSearchMigrationRehearsalRateAuthenticationKeyFingerprint(
+          runtimeKey,
+        ),
+      ) ||
+      !safeTargetAuditDigestEqual(
+        document.integrity.bindingMac,
+        createTargetAuditIntegrityBindingMac(
+          document.integrity,
           runtimeKey,
         ),
       )
@@ -1801,7 +1833,7 @@ function createTargetAuditArtifactBinding(
     evidenceKeyDigest: document.evidenceKeyDigest,
     sourceSessionBindingDigest: document.sourceSessionBindingDigest,
     sourceResourceBindingDigest: document.sourceResourceBindingDigest,
-    integrityBefore: document.integrityBefore,
+    integrity: document.integrity,
     context: document.context,
     terminal: document.terminal,
     aggregate: Object.freeze({ ...document.aggregate }),
@@ -1822,7 +1854,7 @@ function readTargetAuditDocument(value: unknown): TargetAuditDocument {
     'configurationHash',
     'context',
     'evidenceKeyDigest',
-    'integrityBefore',
+    'integrity',
     'kind',
     'observationDigest',
     'observedAt',
@@ -1882,11 +1914,11 @@ function readTargetAuditDocument(value: unknown): TargetAuditDocument {
     terminal,
     'INVALID_ARGUMENT',
   )
-  const integrityBefore = readTargetAuditIntegrityBefore(
-    targetAuditGuards.readOwn(record, 'integrityBefore'),
+  const integrity = readTargetAuditIntegrity(
+    targetAuditGuards.readOwn(record, 'integrity'),
     purpose,
-    startedAt,
     observedAt,
+    terminal,
   )
   const rate = readWorkspaceSearchMigrationRehearsalRateSegmentEvidence(
     targetAuditGuards.readOwn(record, 'rate'),
@@ -1903,8 +1935,22 @@ function readTargetAuditDocument(value: unknown): TargetAuditDocument {
   if (
     configurationHash !== context.configurationBindingDigest ||
     sourceResourceBindingDigest !== context.requestedResourcesBinding ||
+    integrity.configurationBindingDigest !==
+      context.configurationBindingDigest ||
+    integrity.policyVersion !== context.policyVersion ||
+    integrity.result.resourceIdentityDigest !==
+      context.integrityResourceIdentityDigest ||
     rate.link.configurationBindingDigest !==
       context.configurationBindingDigest ||
+    rate.link.policyVersion !== context.policyVersion ||
+    !sameVerifiedTargetAuditRateSegment(
+      integrity.predecessor,
+      rate.predecessor,
+    ) ||
+    !sameVerifiedTargetAuditRateSegment(
+      integrity.segment,
+      rate.successor,
+    ) ||
     Date.parse(rate.completedAt) < Date.parse(observedAt)
   ) return failRehearsalTargetAudit('INVALID_ARGUMENT')
   const observationDigest = targetAuditGuards.readDigest(
@@ -1937,7 +1983,7 @@ function readTargetAuditDocument(value: unknown): TargetAuditDocument {
     evidenceKeyDigest,
     sourceSessionBindingDigest,
     sourceResourceBindingDigest,
-    integrityBefore,
+    integrity,
     context,
     terminal,
     aggregate,
@@ -2034,10 +2080,12 @@ function readTargetAuditContext(
   targetAuditGuards.requireExactKeys(record, [
     'configurationBindingDigest',
     'executionBoundaryDigest',
+    'integrityResourceIdentityDigest',
     'manifestDigest',
     'permitDigest',
     'planDigest',
     'planningReceiptDigest',
+    'policyVersion',
     'requestedResourcesBinding',
     'runLocatorDigest',
     'scenario',
@@ -2065,6 +2113,15 @@ function readTargetAuditContext(
     ),
     configurationBindingDigest: targetAuditGuards.readDigest(
       targetAuditGuards.readOwn(record, 'configurationBindingDigest'),
+    ),
+    policyVersion: targetAuditGuards.readDigest(
+      targetAuditGuards.readOwn(record, 'policyVersion'),
+    ),
+    integrityResourceIdentityDigest: targetAuditGuards.readDigest(
+      targetAuditGuards.readOwn(
+        record,
+        'integrityResourceIdentityDigest',
+      ),
     ),
     planningReceiptDigest: targetAuditGuards.readDigest(
       targetAuditGuards.readOwn(record, 'planningReceiptDigest'),
@@ -2142,6 +2199,9 @@ function sameTargetAuditContext(
     left.permitDigest === right.permitDigest &&
     left.requestedResourcesBinding === right.requestedResourcesBinding &&
     left.configurationBindingDigest === right.configurationBindingDigest &&
+    left.policyVersion === right.policyVersion &&
+    left.integrityResourceIdentityDigest ===
+      right.integrityResourceIdentityDigest &&
     left.planningReceiptDigest === right.planningReceiptDigest &&
     left.executionBoundaryDigest === right.executionBoundaryDigest &&
     left.sealedPlanningAuthorityDigest ===
@@ -2264,85 +2324,310 @@ function readTargetPreimagePurpose(
 }
 
 /**
- * Consumes the exact live #163 preimage required only by baseline artifacts.
+ * Consumes one genuine same-process rate-bound #163 result exactly once.
  *
- * @param value - Candidate one-shot preimage authority or strict null.
+ * @param value - Candidate one-shot result from the live rate finalizer.
  * @param purpose - Fixed target-audit semantic purpose.
- * @param targetStartedAt - Trusted sample before target external reads.
- * @param observedAt - Completion of the actual target baseline scan.
- * @returns Detached live projection for preimages, otherwise strict null.
+ * @param terminal - Purpose-bound rollback terminal, if restored.
+ * @returns Detached strict rate-bound live-result projection.
  */
-function consumeTargetAuditIntegrityBefore(
+function consumeTargetAuditIntegrity(
   value: unknown,
   purpose: WorkspaceSearchMigrationRehearsalTargetAuditPurpose,
-  targetStartedAt: string,
-  observedAt: string,
-): WorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection | null {
-  if (
-    purpose === 'partial-rollback-restored' ||
-    purpose === 'complete-rollback-restored'
-  ) {
-    if (value !== null) {
-      return failRehearsalTargetAudit('INVALID_ARGUMENT')
-    }
-    return null
-  }
-  let projection:
-    WorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection
+  terminal:
+    WorkspaceSearchMigrationRehearsalTargetAuditTerminalBinding | null,
+): WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult {
+  let consumed: WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult
   try {
-    projection =
-      consumeWorkspaceSearchMigrationRehearsalIntegrityPreimageResult(value)
+    consumed =
+      consumeWorkspaceSearchMigrationRehearsalRateBoundIntegrityResult(value)
   } catch {
     return failRehearsalTargetAudit('INVALID_ARGUMENT')
   }
+  const integrity = readTargetAuditIntegrityProjection(consumed)
   if (
-    Date.parse(projection.runtimeProvenance.completedAt) >
-      Date.parse(targetStartedAt) ||
-    Date.parse(targetStartedAt) > Date.parse(observedAt)
+    (purpose === 'partial-rollback-restored' ||
+      purpose === 'complete-rollback-restored') &&
+    (
+      terminal === null ||
+      Date.parse(integrity.result.runtimeProvenance.startedAt) <
+        Date.parse(terminal.terminalAt)
+    )
   ) return failRehearsalTargetAudit('INVALID_STATE')
-  return projection
+  return integrity
 }
 
 /**
- * Reads the purpose-bound #163 projection from an authenticated document.
+ * Reads one complete rate-bound #163 projection from an authenticated audit.
  *
- * @param value - Candidate published projection or strict null.
+ * @param value - Candidate published rate-bound live-result projection.
  * @param purpose - Fixed target-audit semantic purpose.
- * @param targetStartedAt - Canonical sample before target external reads.
  * @param observedAt - Canonical completion of the target observation.
- * @returns Strict live preimage for baseline artifacts, otherwise null.
+ * @param terminal - Purpose-bound rollback terminal, if restored.
+ * @returns Strict detached rate-bound live-result projection.
  */
-function readTargetAuditIntegrityBefore(
+function readTargetAuditIntegrity(
   value: unknown,
   purpose: WorkspaceSearchMigrationRehearsalTargetAuditPurpose,
-  targetStartedAt: string,
   observedAt: string,
-): WorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection | null {
+  terminal:
+    WorkspaceSearchMigrationRehearsalTargetAuditTerminalBinding | null,
+): WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult {
+  const integrity = readTargetAuditIntegrityProjection(value)
+  requireTargetAuditIntegrityWindow(
+    integrity,
+    purpose,
+    observedAt,
+    terminal,
+    'INVALID_ARGUMENT',
+  )
+  return integrity
+}
+
+/** Strictly reads every public field of one rate-bound live result. */
+function readTargetAuditIntegrityProjection(
+  value: unknown,
+): WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult {
+  const record = targetAuditGuards.requireRecord(value)
+  targetAuditGuards.requireExactKeys(record, [
+    'bindingMac',
+    'configurationBindingDigest',
+    'interval',
+    'kind',
+    'policyVersion',
+    'predecessor',
+    'result',
+    'segment',
+    'tableOrderBindingMac',
+    'version',
+  ])
   if (
-    purpose === 'partial-rollback-restored' ||
-    purpose === 'complete-rollback-restored'
-  ) {
-    if (value !== null) {
-      return failRehearsalTargetAudit('INVALID_ARGUMENT')
-    }
-    return null
-  }
-  let projection:
-    WorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection
+    targetAuditGuards.readOwn(record, 'kind') !==
+      'mukuroji-workspace-search-migration-rehearsal-rate-bound-integrity-result' ||
+    targetAuditGuards.readOwn(record, 'version') !== 1
+  ) return failRehearsalTargetAudit('INVALID_ARGUMENT')
+  let result: WorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection
   try {
-    projection =
+    result =
       readWorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection(
-        value,
+        targetAuditGuards.readOwn(record, 'result'),
       )
   } catch {
     return failRehearsalTargetAudit('INVALID_ARGUMENT')
   }
+  const predecessor = readTargetPreimageRatePredecessor(
+    targetAuditGuards.readOwn(record, 'predecessor'),
+  )
+  const segment = readTargetPreimageRatePredecessor(
+    targetAuditGuards.readOwn(record, 'segment'),
+  )
+  const interval = readTargetAuditIntegrityInterval(
+    targetAuditGuards.readOwn(record, 'interval'),
+  )
+  const segmentLastEventSequence =
+    segment.firstEventSequence + segment.eventCount - 1
+  const expectedSegmentFirstEventSequence =
+    predecessor.firstEventSequence + predecessor.eventCount
   if (
-    Date.parse(projection.runtimeProvenance.completedAt) >
-      Date.parse(targetStartedAt) ||
-    Date.parse(targetStartedAt) > Date.parse(observedAt)
+    predecessor.authenticationKeyFingerprint !==
+      segment.authenticationKeyFingerprint ||
+    segment.segmentOrdinal !== predecessor.segmentOrdinal + 1 ||
+    segment.segmentLocatorDigest === predecessor.segmentLocatorDigest ||
+    !Number.isSafeInteger(expectedSegmentFirstEventSequence) ||
+    segment.firstEventSequence !== expectedSegmentFirstEventSequence ||
+    segment.eventCount === 0 ||
+    !Number.isSafeInteger(segmentLastEventSequence) ||
+    interval.firstEventSequence < segment.firstEventSequence ||
+    interval.lastEventSequence > segmentLastEventSequence ||
+    Date.parse(interval.startedAt) <
+      Date.parse(result.runtimeProvenance.startedAt) ||
+    Date.parse(interval.completedAt) >
+      Date.parse(result.runtimeProvenance.completedAt)
   ) return failRehearsalTargetAudit('INVALID_ARGUMENT')
-  return projection
+  return Object.freeze({
+    kind:
+      'mukuroji-workspace-search-migration-rehearsal-rate-bound-integrity-result',
+    version: 1,
+    result,
+    predecessor,
+    segment,
+    interval,
+    policyVersion: targetAuditGuards.readDigest(
+      targetAuditGuards.readOwn(record, 'policyVersion'),
+    ),
+    configurationBindingDigest: targetAuditGuards.readDigest(
+      targetAuditGuards.readOwn(record, 'configurationBindingDigest'),
+    ),
+    tableOrderBindingMac: targetAuditGuards.readDigest(
+      targetAuditGuards.readOwn(record, 'tableOrderBindingMac'),
+    ),
+    bindingMac: targetAuditGuards.readDigest(
+      targetAuditGuards.readOwn(record, 'bindingMac'),
+    ),
+  })
+}
+
+/** Strictly reads one complete two-pass integrity rate interval. */
+function readTargetAuditIntegrityInterval(
+  value: unknown,
+): WorkspaceSearchMigrationRehearsalIntegrityRateInterval {
+  const record = targetAuditGuards.requireRecord(value)
+  targetAuditGuards.requireExactKeys(record, [
+    'attemptSequences',
+    'cadenceWaitCount',
+    'cadenceWaitMilliseconds',
+    'completedAt',
+    'describeTableCallCount',
+    'eventSequences',
+    'firstAttemptSequence',
+    'firstEventSequence',
+    'kind',
+    'lastAttemptSequence',
+    'lastEventSequence',
+    'phase',
+    'startedAt',
+    'tablePassCount',
+    'version',
+  ])
+  if (
+    targetAuditGuards.readOwn(record, 'kind') !==
+      'mukuroji-workspace-search-migration-rehearsal-integrity-rate-interval' ||
+    targetAuditGuards.readOwn(record, 'version') !==
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_INTEGRITY_RATE_INTERVAL_VERSION ||
+    targetAuditGuards.readOwn(record, 'phase') !== 'integrity-check' ||
+    targetAuditGuards.readOwn(record, 'tablePassCount') !== 2 ||
+    targetAuditGuards.readOwn(record, 'describeTableCallCount') !== 12
+  ) return failRehearsalTargetAudit('INVALID_ARGUMENT')
+  const attemptSequences = readTargetAuditSequenceVector(
+    targetAuditGuards.readOwn(record, 'attemptSequences'),
+    12,
+    12,
+  )
+  const eventSequences = readTargetAuditSequenceVector(
+    targetAuditGuards.readOwn(record, 'eventSequences'),
+    24,
+    100_000,
+  )
+  const firstAttemptSequence = readPositiveInteger(
+    targetAuditGuards.readOwn(record, 'firstAttemptSequence'),
+  )
+  const lastAttemptSequence = readPositiveInteger(
+    targetAuditGuards.readOwn(record, 'lastAttemptSequence'),
+  )
+  const firstEventSequence = readPositiveInteger(
+    targetAuditGuards.readOwn(record, 'firstEventSequence'),
+  )
+  const lastEventSequence = readPositiveInteger(
+    targetAuditGuards.readOwn(record, 'lastEventSequence'),
+  )
+  const cadenceWaitCount = readNonNegativeInteger(
+    targetAuditGuards.readOwn(record, 'cadenceWaitCount'),
+  )
+  const cadenceWaitMilliseconds = readNonNegativeInteger(
+    targetAuditGuards.readOwn(record, 'cadenceWaitMilliseconds'),
+  )
+  const startedAt = targetAuditGuards.readTimestamp(
+    targetAuditGuards.readOwn(record, 'startedAt'),
+  )
+  const completedAt = targetAuditGuards.readTimestamp(
+    targetAuditGuards.readOwn(record, 'completedAt'),
+  )
+  if (
+    firstAttemptSequence !== attemptSequences[0] ||
+    lastAttemptSequence !== attemptSequences.at(-1) ||
+    attemptSequences.some((sequence, index) =>
+      index > 0 && sequence !== (attemptSequences[index - 1] ?? 0) + 1) ||
+    eventSequences.length !== 24 + cadenceWaitCount ||
+    firstEventSequence !== eventSequences[0] ||
+    lastEventSequence !== eventSequences.at(-1) ||
+    eventSequences.some((sequence, index) =>
+      index > 0 && sequence !== (eventSequences[index - 1] ?? 0) + 1) ||
+    (cadenceWaitCount === 0) !== (cadenceWaitMilliseconds === 0) ||
+    Date.parse(startedAt) > Date.parse(completedAt)
+  ) return failRehearsalTargetAudit('INVALID_ARGUMENT')
+  return Object.freeze({
+    kind:
+      'mukuroji-workspace-search-migration-rehearsal-integrity-rate-interval',
+    version:
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_INTEGRITY_RATE_INTERVAL_VERSION,
+    phase: 'integrity-check',
+    tablePassCount: 2,
+    describeTableCallCount: 12,
+    firstAttemptSequence,
+    lastAttemptSequence,
+    attemptSequences,
+    firstEventSequence,
+    lastEventSequence,
+    eventSequences,
+    cadenceWaitCount,
+    cadenceWaitMilliseconds,
+    startedAt,
+    completedAt,
+  })
+}
+
+/** Reads one exact ordinary dense positive-integer sequence vector. */
+function readTargetAuditSequenceVector(
+  value: unknown,
+  minimumLength: number,
+  maximumLength: number,
+): readonly number[] {
+  if (
+    nodeUtilTypes.isProxy(value) ||
+    !Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Array.prototype
+  ) return failRehearsalTargetAudit('INVALID_ARGUMENT')
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length')
+  const length: unknown = lengthDescriptor?.value
+  if (
+    lengthDescriptor === undefined ||
+    lengthDescriptor.enumerable ||
+    !Object.hasOwn(lengthDescriptor, 'value') ||
+    typeof length !== 'number' ||
+    !Number.isSafeInteger(length) ||
+    length < minimumLength ||
+    length > maximumLength
+  ) return failRehearsalTargetAudit('INVALID_ARGUMENT')
+  const ownKeys = Reflect.ownKeys(value)
+  if (ownKeys.length !== length + 1 || ownKeys[length] !== 'length') {
+    return failRehearsalTargetAudit('INVALID_ARGUMENT')
+  }
+  const detached: number[] = []
+  for (let index = 0; index < length; index += 1) {
+    const key = String(index)
+    if (ownKeys[index] !== key) {
+      return failRehearsalTargetAudit('INVALID_ARGUMENT')
+    }
+    detached.push(readPositiveInteger(
+      targetAuditGuards.readOwn(value, key),
+    ))
+  }
+  return Object.freeze(detached)
+}
+
+/** Requires the live result to occupy the audit's purpose-bound time window. */
+function requireTargetAuditIntegrityWindow(
+  integrity: WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult,
+  purpose: WorkspaceSearchMigrationRehearsalTargetAuditPurpose,
+  observedAt: string,
+  terminal:
+    WorkspaceSearchMigrationRehearsalTargetAuditTerminalBinding | null,
+  failureCode: WorkspaceSearchMigrationRehearsalTargetAuditFailureCode =
+    'INVALID_STATE',
+): void {
+  if (
+    Date.parse(integrity.result.runtimeProvenance.completedAt) >
+      Date.parse(observedAt) ||
+    (
+      purpose === 'partial-rollback-restored' ||
+      purpose === 'complete-rollback-restored'
+    ) &&
+      (
+        terminal === null ||
+        Date.parse(integrity.result.runtimeProvenance.startedAt) <
+          Date.parse(terminal.terminalAt)
+      )
+  ) return failRehearsalTargetAudit(failureCode)
 }
 
 /** Recreates the unsigned authenticated document projection. */
@@ -2360,7 +2645,7 @@ function createUnsignedDocumentFromAuthenticated(
     evidenceKeyDigest: document.evidenceKeyDigest,
     sourceSessionBindingDigest: document.sourceSessionBindingDigest,
     sourceResourceBindingDigest: document.sourceResourceBindingDigest,
-    integrityBefore: document.integrityBefore,
+    integrity: document.integrity,
     context: document.context,
     terminal: document.terminal,
     aggregate: document.aggregate,
@@ -2565,6 +2850,28 @@ function createTargetAuditRuntimeMac(
   return createHmac('sha256', key)
     .update(targetAuditRuntimeMacDomain, 'utf8')
     .update(serializeCanonicalJson(document), 'utf8')
+    .digest('hex')
+}
+
+/** Recomputes the embedded rate-bound result HMAC with the runtime key. */
+function createTargetAuditIntegrityBindingMac(
+  integrity: WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult,
+  key: Uint8Array,
+): string {
+  const claims = Object.freeze({
+    kind: integrity.kind,
+    version: integrity.version,
+    result: integrity.result,
+    predecessor: integrity.predecessor,
+    segment: integrity.segment,
+    interval: integrity.interval,
+    policyVersion: integrity.policyVersion,
+    configurationBindingDigest: integrity.configurationBindingDigest,
+    tableOrderBindingMac: integrity.tableOrderBindingMac,
+  })
+  return createHmac('sha256', key)
+    .update(targetAuditIntegrityBindingMacDomain, 'utf8')
+    .update(serializeCanonicalJson(claims), 'utf8')
     .digest('hex')
 }
 

@@ -14,6 +14,10 @@ import {
   type WorkspaceSearchMigrationRehearsalScenarioName,
 } from './migration-rehearsal-evidence'
 import {
+  parseWorkspaceSearchMigrationRehearsalIntegrityAttestationRootProjection,
+  type WorkspaceSearchMigrationRehearsalIntegrityAttestationRootProjection,
+} from './migration-rehearsal-integrity-rate-evidence'
+import {
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE,
 } from './migration-rehearsal-permit'
 import {
@@ -101,6 +105,9 @@ export type WorkspaceSearchMigrationRehearsalStageManifestClaims = {
     readonly CrossDomainIntegrityResourceIdentity[]
   /** Authenticated #163 physical resource-identity digest. */
   readonly integrityResourceIdentityDigest: string
+  /** Exact permit-authenticated clean ordinal-zero rate root. */
+  readonly integrityAttestationRoot:
+    WorkspaceSearchMigrationRehearsalIntegrityAttestationRootProjection
   /** Reviewed measured configuration binding. */
   readonly configurationBindingDigest: string
   /** Reviewed DescribeTable policy digest. */
@@ -161,6 +168,7 @@ const manifestClaimKeys = Object.freeze([
   'integrityResourceIdentityDigest',
   'integrityResourceIdentities',
   'integrityResourceIdentityScheme',
+  'integrityAttestationRoot',
   'kind',
   'manifestVersion',
   'permitDigest',
@@ -296,6 +304,31 @@ function readManifestClaims(
   ) return failStageManifest()
   const entries = readManifestEntries(manifestGuards.readOwn(record, 'entries'))
   validateCompleteManifest(entries)
+  let integrityAttestationRoot:
+    WorkspaceSearchMigrationRehearsalIntegrityAttestationRootProjection
+  try {
+    integrityAttestationRoot =
+      parseWorkspaceSearchMigrationRehearsalIntegrityAttestationRootProjection(
+        manifestGuards.readOwn(record, 'integrityAttestationRoot'),
+      )
+  } catch {
+    return failStageManifest()
+  }
+  const configurationBindingDigest = manifestGuards.readDigest(
+    manifestGuards.readOwn(record, 'configurationBindingDigest'),
+  )
+  const policyVersion = manifestGuards.readDigest(
+    manifestGuards.readOwn(record, 'policyVersion'),
+  )
+  const reviewedAt = manifestGuards.readTimestamp(
+    manifestGuards.readOwn(record, 'reviewedAt'),
+  )
+  if (
+    integrityAttestationRoot.configurationBindingDigest !==
+      configurationBindingDigest ||
+    integrityAttestationRoot.policyVersion !== policyVersion ||
+    Date.parse(integrityAttestationRoot.completedAt) > Date.parse(reviewedAt)
+  ) return failStageManifest()
   return Object.freeze({
     kind,
     manifestVersion,
@@ -326,15 +359,10 @@ function readManifestClaims(
     integrityResourceIdentityDigest: manifestGuards.readDigest(
       manifestGuards.readOwn(record, 'integrityResourceIdentityDigest'),
     ),
-    configurationBindingDigest: manifestGuards.readDigest(
-      manifestGuards.readOwn(record, 'configurationBindingDigest'),
-    ),
-    policyVersion: manifestGuards.readDigest(
-      manifestGuards.readOwn(record, 'policyVersion'),
-    ),
-    reviewedAt: manifestGuards.readTimestamp(
-      manifestGuards.readOwn(record, 'reviewedAt'),
-    ),
+    integrityAttestationRoot,
+    configurationBindingDigest,
+    policyVersion,
+    reviewedAt,
     entries,
   })
 }

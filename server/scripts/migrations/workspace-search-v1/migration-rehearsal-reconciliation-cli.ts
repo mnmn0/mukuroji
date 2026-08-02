@@ -2,6 +2,11 @@ import { timingSafeEqual } from 'node:crypto'
 import { lstat } from 'node:fs/promises'
 import { types as nodeUtilTypes } from 'node:util'
 import {
+  CROSS_DOMAIN_INTEGRITY_MAX_DURATION_MILLISECONDS,
+  CROSS_DOMAIN_INTEGRITY_RESOURCE_ATTESTATION_MAX_BYTES,
+  validateCrossDomainIntegrityLimits,
+} from '../../data-integrity/cross-domain-integrity'
+import {
   createMigrationDigest,
   createWorkspaceSearchConfigurationHash,
   serializeCanonicalJson,
@@ -20,7 +25,12 @@ import type {
 } from './migration-describe-table-rate-budget'
 import type {
   CollectWorkspaceSearchMigrationRehearsalReconciliationSessionInput,
+  CompleteWorkspaceSearchMigrationRehearsalReconciliationInput,
   CreateAwsWorkspaceSearchMigrationNonProductionRehearsalSessionInput,
+  CreateAwsWorkspaceSearchMigrationRehearsalIntegritySessionInput,
+  WorkspaceSearchMigrationRehearsalCollectedReconciliationBase,
+  WorkspaceSearchMigrationRehearsalIntegrityAwsPending,
+  WorkspaceSearchMigrationRehearsalIntegrityAwsSession,
 } from './migration-identity-aws'
 import {
   createWorkspaceSearchMigrationRequestedResourcesBinding,
@@ -37,11 +47,6 @@ import {
 import {
   readWorkspaceSearchMigrationRehearsalPrivateInputFile,
 } from './migration-rehearsal-private-input'
-import {
-  authenticateWorkspaceSearchMigrationRehearsalIntegrityPreimageResult,
-  type AuthenticateWorkspaceSearchMigrationRehearsalIntegrityPreimageResultInput,
-  type WorkspaceSearchMigrationRehearsalIntegrityPreimageResultCapability,
-} from './migration-rehearsal-integrity-evidence'
 import {
   finalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArtifact,
   type FinalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArtifactInput,
@@ -71,6 +76,9 @@ import {
   type WorkspaceSearchMigrationRehearsalRateCommittedSegment,
   type WorkspaceSearchMigrationRehearsalVerifiedRateSegmentSuccessor,
 } from './migration-rehearsal-rate-evidence'
+import type {
+  WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult,
+} from './migration-rehearsal-integrity-rate-evidence'
 import type {
   WorkspaceSearchMigrationDescribeTableRateEvidence,
 } from './migration-describe-table-rate-budget'
@@ -113,7 +121,6 @@ import {
   type FinalizeWorkspaceSearchMigrationRehearsalTargetAuditArtifactInput,
   type WorkspaceSearchMigrationRehearsalFinalizedTargetAuditArtifact,
   type WorkspaceSearchMigrationRehearsalCollectedTargetAudit,
-  type WorkspaceSearchMigrationRehearsalTargetAuditSession,
   type WorkspaceSearchMigrationRehearsalTargetAuditContext,
   type WorkspaceSearchMigrationRehearsalTargetAuditTerminalBinding,
 } from './migration-rehearsal-target-audit'
@@ -129,10 +136,6 @@ export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_CLI_RESULT_KIND
 /** Maximum canonical bytes accepted for one authenticated rehearsal permit. */
 export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_PERMIT_MAX_BYTES =
   64 * 1_024
-
-/** Maximum exact bytes accepted for one cross-domain integrity result. */
-export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_INTEGRITY_MAX_BYTES =
-  1_024 * 1_024
 
 /** Maximum local path length admitted at the CLI boundary. */
 const maximumPathLength = 4_096
@@ -210,18 +213,32 @@ type WorkspaceSearchMigrationRehearsalTargetAuditCliBaseArguments =
     readonly maximumTargetPages: number
     /** Finite total target-audit deadline. */
     readonly maximumDurationMilliseconds: number
-  }
+  } & WorkspaceSearchMigrationRehearsalLiveIntegrityCliArguments
 
-/** Target-audit mode arguments with strict preimage-only #163 inputs. */
+/** Private files and finite limits for one actual same-process #163 run. */
+export type WorkspaceSearchMigrationRehearsalLiveIntegrityCliArguments = {
+  /** Canonical owner-only immutable-resource attestation. */
+  readonly resourceAttestationFile: string
+  /** Dedicated raw immutable-resource and live-result HMAC key. */
+  readonly integrityDigestKeyFile: string
+  /** Dedicated raw Workspace Audit pseudonym key. */
+  readonly auditPseudonymKeyFile: string
+  /** Fixed DynamoDB Scan item limit. */
+  readonly pageSize: number
+  /** Total DynamoDB Scan page bound. */
+  readonly maxPages: number
+  /** Total normalized checker item bound. */
+  readonly maxItems: number
+  /** Complete non-resettable live-check duration bound. */
+  readonly integrityMaximumDurationMilliseconds: number
+}
+
+/** Target-audit mode arguments with one required actual live #163 run. */
 export type WorkspaceSearchMigrationRehearsalTargetAuditCliArguments =
   WorkspaceSearchMigrationRehearsalTargetAuditCliBaseArguments & (
     | {
       /** Selects the target baseline collected before apply admission. */
       readonly mode: 'target-preimage'
-      /** Canonical passing live #163 result completed before target collection. */
-      readonly integrityBeforeResultFile: string
-      /** Dedicated raw #163 result authentication key. */
-      readonly integrityKeyFile: string
     }
     | {
       /** Selects the target state observed after authoritative rollback. */
@@ -229,26 +246,16 @@ export type WorkspaceSearchMigrationRehearsalTargetAuditCliArguments =
     }
   )
 
-/** Raw verified-terminal integrity file selection. */
+/** Actual verified-terminal live-integrity selection. */
 export type WorkspaceSearchMigrationRehearsalVerifiedIntegrityCliFiles = {
-  /** Selects one post-verified-terminal #163 result. */
-  readonly kind: 'verified-result'
-  /** Canonical complete #163 result file. */
-  readonly resultFile: string
-  /** Dedicated raw #163 result authentication key. */
-  readonly integrityKeyFile: string
-}
+  /** Selects one fresh post-verified-terminal #163 run. */
+  readonly kind: 'verified-live'
+} & WorkspaceSearchMigrationRehearsalLiveIntegrityCliArguments
 
-/** Raw rollback-terminal integrity and target file selection. */
+/** Rollback-terminal authenticated target file selection. */
 export type WorkspaceSearchMigrationRehearsalRollbackIntegrityCliFiles = {
-  /** Selects a purpose-bound before/after rollback comparison. */
-  readonly kind: 'rollback-comparison'
-  /** Canonical pre-apply #163 result file. */
-  readonly beforeResultFile: string
-  /** Canonical post-rollback #163 result file. */
-  readonly afterResultFile: string
-  /** Dedicated raw #163 result authentication key. */
-  readonly integrityKeyFile: string
+  /** Selects comparison derived from two authenticated target v4 artifacts. */
+  readonly kind: 'rollback-target-pair'
   /** Scenario-specific canonical pre-apply target audit. */
   readonly targetPreimageAuditFile: string
   /** Scenario-specific canonical post-rollback target audit. */
@@ -319,6 +326,8 @@ export type WorkspaceSearchMigrationRehearsalAuthenticatedCollectionContext = {
   readonly configurationBindingDigest: string
   /** Reviewed DescribeTable rate-policy digest. */
   readonly policyVersion: string
+  /** Permit-authenticated immutable #163 resource-identity digest. */
+  readonly integrityResourceIdentityDigest: string
   /** Digest of the exact authenticated rehearsal manifest. */
   readonly manifestDigest: string
   /** Digest of the committed close-replan stage receipt. */
@@ -368,48 +377,24 @@ export type WorkspaceSearchMigrationRehearsalAuthenticatedCollection = {
     WorkspaceSearchMigrationRehearsalAuthenticatedCollectionStageClaim
 }
 
-/** Narrow session used by target scans and terminal reconciliation only. */
-export interface WorkspaceSearchMigrationRehearsalReconciliationCliSession
-  extends WorkspaceSearchMigrationRehearsalTargetAuditSession {
-  /**
-   * Returns the exact durable head strongly read during idempotent claim.
-   *
-   * @returns Detached claimed head, or undefined when no claim was presented.
-   */
-  readRehearsalClaimedStageHead():
-    WorkspaceSearchMigrationRehearsalStageHead | undefined
+/** Narrow common session surface used by both live and rollback profiles. */
+export type WorkspaceSearchMigrationRehearsalReconciliationCliSession =
+  Pick<
+    WorkspaceSearchMigrationRehearsalIntegrityAwsSession,
+    | 'close'
+    | 'collectRehearsalReconciliation'
+    | 'interruptDescribeTableRate'
+    | 'measureConfiguration'
+    | 'readRehearsalClaimedStageHead'
+    | 'readRehearsalEvidenceSessionBinding'
+    | 'readRequestedResourcesBinding'
+    | 'scanTargetPage'
+    | 'sealAndReadDescribeTableRateEvidence'
+  >
 
-  /**
-   * Measures the exact six-resource configuration through the rate gate.
-   *
-   * @returns Complete measured configuration selected by the session.
-   */
-  measureConfiguration(): Promise<WorkspaceSearchMigrationConfiguration>
-
-  /**
-   * Performs the high-level terminal reconciliation without exposing Query.
-   *
-   * @param input - Exact bounded reconciliation request.
-   * @returns Authenticated collector result from the measured session.
-   */
-  collectRehearsalReconciliation(
-    input: CollectWorkspaceSearchMigrationRehearsalReconciliationSessionInput,
-  ): Promise<WorkspaceSearchMigrationRehearsalReconciliationCollectorResult>
-
-  /** Stops new rate-managed admission after interruption. */
-  interruptDescribeTableRate(): void
-
-  /** Drains owned work and closes all AWS clients. */
-  close(): Promise<void>
-
-  /**
-   * Seals rate admission.
-   *
-   * @returns Final drained durable DescribeTable rate aggregate.
-   */
-  sealAndReadDescribeTableRateEvidence():
-    Promise<WorkspaceSearchMigrationDescribeTableRateEvidence>
-}
+/** Measured terminal collection before post-seal #163 completion. */
+export type WorkspaceSearchMigrationRehearsalReconciliationCliCollectedBase =
+  WorkspaceSearchMigrationRehearsalCollectedReconciliationBase
 
 /** Injectable secure file, trust, session, and artifact boundaries. */
 export type WorkspaceSearchMigrationRehearsalReconciliationCliDependencies = {
@@ -426,20 +411,22 @@ export type WorkspaceSearchMigrationRehearsalReconciliationCliDependencies = {
   readonly verifyPermit: (
     input: VerifyWorkspaceSearchMigrationRehearsalPermitInput,
   ) => ReturnType<typeof verifyWorkspaceSearchMigrationRehearsalPermit>
-  /** Authenticates one live #163 preimage into a one-shot target authority. */
-  readonly authenticateIntegrityPreimage: (
-    input:
-      AuthenticateWorkspaceSearchMigrationRehearsalIntegrityPreimageResultInput,
-    digestKey: Uint8Array,
-  ) => WorkspaceSearchMigrationRehearsalIntegrityPreimageResultCapability
   /** Creates one fresh append-only actual-rate runtime. */
   readonly createRateRuntime: (
     input: CreateWorkspaceSearchMigrationRehearsalRateRuntimeInput,
   ) => Promise<WorkspaceSearchMigrationRehearsalRateRuntime>
   /** Creates one authenticated measured non-production session. */
   readonly createSession: (
+    input: CreateAwsWorkspaceSearchMigrationRehearsalIntegritySessionInput,
+  ) => Promise<WorkspaceSearchMigrationRehearsalIntegrityAwsSession>
+  /** Creates the no-live permit-backed session used only by rollback reconcile. */
+  readonly createRollbackSession: (
     input: CreateAwsWorkspaceSearchMigrationNonProductionRehearsalSessionInput,
   ) => Promise<WorkspaceSearchMigrationRehearsalReconciliationCliSession>
+  /** Completes one measured base from live or authenticated rollback authority. */
+  readonly completeReconciliationCollection: (
+    input: CompleteWorkspaceSearchMigrationRehearsalReconciliationInput,
+  ) => Promise<WorkspaceSearchMigrationRehearsalReconciliationCollectorResult>
   /** Authenticates the exact immediate predecessor/successor rate link. */
   readonly verifyRateSegmentSuccessor: (
     input: VerifyWorkspaceSearchMigrationRehearsalRateSegmentSuccessorInput,
@@ -534,14 +521,12 @@ type ReconciliationCliOwnedInputs = {
   readonly ratePolicy: WorkspaceSearchMigrationDescribeTableRatePolicy
   /** Raw master key buffer. */
   readonly masterKey: Uint8Array
-  /** Optional raw dedicated #163 key. */
-  readonly integrityKey?: Uint8Array
-  /** Optional raw #163 result bytes. */
-  readonly integrityResultBytes?: Uint8Array
-  /** Optional raw pre-apply #163 result bytes. */
-  readonly integrityBeforeResultBytes?: Uint8Array
-  /** Optional raw post-rollback #163 result bytes. */
-  readonly integrityAfterResultBytes?: Uint8Array
+  /** Optional owner-only immutable-resource attestation for a live mode. */
+  readonly resourceAttestationBytes?: Uint8Array
+  /** Optional dedicated immutable-resource and live-result HMAC key. */
+  readonly integrityDigestKey?: Uint8Array
+  /** Optional dedicated Workspace Audit pseudonym key. */
+  readonly auditPseudonymKey?: Uint8Array
   /** Optional raw scenario-specific pre-apply target audit. */
   readonly targetPreimageAuditBytes?: Uint8Array
   /** Optional raw scenario-specific restored target audit. */
@@ -557,32 +542,43 @@ const defaultReconciliationCliDependencies:
     authenticateCollectionContext: (input) => {
       const authenticated =
         authenticateWorkspaceSearchMigrationRehearsalCollectionContext(input)
+      const stageClaim =
+        readWorkspaceSearchMigrationRehearsalAuthenticatedCollectionStageClaim(
+          authenticated,
+        )
       return Object.freeze({
-        context:
-          snapshotWorkspaceSearchMigrationRehearsalAuthenticatedCollectionContext(
+        context: Object.freeze({
+          ...snapshotWorkspaceSearchMigrationRehearsalAuthenticatedCollectionContext(
             authenticated,
           ),
-        stageClaim:
-          readWorkspaceSearchMigrationRehearsalAuthenticatedCollectionStageClaim(
-            authenticated,
-          ),
+          integrityResourceIdentityDigest:
+            stageClaim.selection.manifest.integrityResourceIdentityDigest,
+        }),
+        stageClaim,
       })
     },
     verifyPermit: (input) =>
       verifyWorkspaceSearchMigrationRehearsalPermit(input),
-    authenticateIntegrityPreimage: (input, digestKey) =>
-      authenticateWorkspaceSearchMigrationRehearsalIntegrityPreimageResult(
-        input,
-        digestKey,
-      ),
     createRateRuntime: (input) =>
       createWorkspaceSearchMigrationRehearsalRateRuntime(input),
     createSession: async (input) => {
       const identity = await import('./migration-identity-aws')
       return await identity
+        .createAwsWorkspaceSearchMigrationRehearsalIntegritySession(
+          input,
+        )
+    },
+    createRollbackSession: async (input) => {
+      const identity = await import('./migration-identity-aws')
+      return await identity
         .createAwsWorkspaceSearchMigrationNonProductionRehearsalSession(
           input,
         )
+    },
+    completeReconciliationCollection: async (input) => {
+      const identity = await import('./migration-identity-aws')
+      return identity
+        .completeWorkspaceSearchMigrationRehearsalReconciliation(input)
     },
     verifyRateSegmentSuccessor: (input) =>
       verifyWorkspaceSearchMigrationRehearsalRateSegmentSuccessor(input),
@@ -638,16 +634,18 @@ export function parseWorkspaceSearchMigrationRehearsalReconciliationCliArguments
   const mode = readMode(values[0])
   const common = parseCommonPrefix(values, mode)
   let cursor = common.nextOffset
-  let targetPreimageFiles: {
-    /** Canonical live #163 result path. */
-    readonly integrityBeforeResultFile: string
-    /** Dedicated #163 authentication-key path. */
-    readonly integrityKeyFile: string
-  } | undefined
   let modeSpecific:
     | Pick<
       WorkspaceSearchMigrationRehearsalTargetAuditCliArguments,
-      'maximumDurationMilliseconds' | 'maximumTargetPages'
+      | 'auditPseudonymKeyFile'
+      | 'integrityDigestKeyFile'
+      | 'integrityMaximumDurationMilliseconds'
+      | 'maximumDurationMilliseconds'
+      | 'maximumTargetPages'
+      | 'maxItems'
+      | 'maxPages'
+      | 'pageSize'
+      | 'resourceAttestationFile'
     >
     | Pick<WorkspaceSearchMigrationRehearsalTerminalReconciliationCliArguments, 'integrityFiles' | 'limits'>
   if (mode === 'target-preimage' || mode === 'target-restored') {
@@ -655,6 +653,7 @@ export function parseWorkspaceSearchMigrationRehearsalReconciliationCliArguments
       values[cursor] !== '--maximum-target-pages' ||
       values[cursor + 2] !== '--maximum-duration-milliseconds'
     ) throw invalidUsage()
+    const live = parseLiveIntegrityInputs(values, cursor + 4)
     modeSpecific = Object.freeze({
       maximumTargetPages: readPositiveInteger(
         values[cursor + 1],
@@ -664,19 +663,9 @@ export function parseWorkspaceSearchMigrationRehearsalReconciliationCliArguments
         values[cursor + 3],
         WORKSPACE_SEARCH_MIGRATION_REHEARSAL_TARGET_AUDIT_MAX_DURATION_MILLISECONDS,
       ),
+      ...live.value,
     })
-    cursor += 4
-    if (mode === 'target-preimage') {
-      if (
-        values[cursor] !== '--integrity-before-result-file' ||
-        values[cursor + 2] !== '--integrity-key-file'
-      ) throw invalidUsage()
-      targetPreimageFiles = Object.freeze({
-        integrityBeforeResultFile: readPath(values[cursor + 1]),
-        integrityKeyFile: readPath(values[cursor + 3]),
-      })
-      cursor += 4
-    }
+    cursor = live.nextOffset
   } else {
     const parsed = parseReconciliationInputs(values, cursor)
     modeSpecific = parsed.value
@@ -709,19 +698,22 @@ export function parseWorkspaceSearchMigrationRehearsalReconciliationCliArguments
       maximumTargetPages: modeSpecific.maximumTargetPages,
       maximumDurationMilliseconds:
         modeSpecific.maximumDurationMilliseconds,
+      resourceAttestationFile: modeSpecific.resourceAttestationFile,
+      integrityDigestKeyFile: modeSpecific.integrityDigestKeyFile,
+      auditPseudonymKeyFile: modeSpecific.auditPseudonymKeyFile,
+      pageSize: modeSpecific.pageSize,
+      maxPages: modeSpecific.maxPages,
+      maxItems: modeSpecific.maxItems,
+      integrityMaximumDurationMilliseconds:
+        modeSpecific.integrityMaximumDurationMilliseconds,
       outputFile,
       approval:
         WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_CLI_APPROVAL,
       measure,
     })
-    const configuration: WorkspaceSearchMigrationRehearsalTargetAuditCliArguments =
-      mode === 'target-preimage'
-        ? Object.freeze({
-            mode,
-            ...commonTargetFields,
-            ...requireTargetPreimageFiles(targetPreimageFiles),
-          })
-        : Object.freeze({ mode, ...commonTargetFields })
+    const configuration:
+      WorkspaceSearchMigrationRehearsalTargetAuditCliArguments =
+      Object.freeze({ mode, ...commonTargetFields })
     requireUniquePaths(configuration)
     return configuration
   }
@@ -740,29 +732,6 @@ export function parseWorkspaceSearchMigrationRehearsalReconciliationCliArguments
     })
   requireUniquePaths(configuration)
   return configuration
-}
-
-/**
- * Requires the exact two preimage-only #163 file selections.
- *
- * @param value - Parsed file selection or absence from another mode.
- * @returns Strict detached preimage file paths.
- */
-function requireTargetPreimageFiles(
-  value: {
-    /** Canonical live #163 result path. */
-    readonly integrityBeforeResultFile: string
-    /** Dedicated #163 authentication-key path. */
-    readonly integrityKeyFile: string
-  } | undefined,
-): {
-  /** Canonical live #163 result path. */
-  readonly integrityBeforeResultFile: string
-  /** Dedicated #163 authentication-key path. */
-  readonly integrityKeyFile: string
-} {
-  if (value === undefined) throw invalidUsage()
-  return value
 }
 
 /** Parsed common prefix and the first mode-specific argument index. */
@@ -840,6 +809,63 @@ function parseCommonPrefix(
   })
 }
 
+/** Strict parsed live-integrity input suffix. */
+type ParsedLiveIntegrityInputs = {
+  /** Frozen private-file and finite-limit selection. */
+  readonly value: WorkspaceSearchMigrationRehearsalLiveIntegrityCliArguments
+  /** First argument after the exact live profile. */
+  readonly nextOffset: number
+}
+
+/** Parses the exact private-file and finite-limit live-integrity profile. */
+function parseLiveIntegrityInputs(
+  values: readonly string[],
+  initialOffset: number,
+): ParsedLiveIntegrityInputs {
+  if (
+    values[initialOffset] !== '--resource-attestation-file' ||
+    values[initialOffset + 2] !== '--integrity-digest-key-file' ||
+    values[initialOffset + 4] !== '--audit-pseudonym-key-file' ||
+    values[initialOffset + 6] !== '--page-size' ||
+    values[initialOffset + 8] !== '--max-pages' ||
+    values[initialOffset + 10] !== '--max-items' ||
+    values[initialOffset + 12] !==
+      '--integrity-maximum-duration-milliseconds'
+  ) throw invalidUsage()
+  const pageSize = readPositiveInteger(
+    values[initialOffset + 7],
+    Number.MAX_SAFE_INTEGER,
+  )
+  const maxPages = readPositiveInteger(
+    values[initialOffset + 9],
+    Number.MAX_SAFE_INTEGER,
+  )
+  const maxItems = readPositiveInteger(
+    values[initialOffset + 11],
+    Number.MAX_SAFE_INTEGER,
+  )
+  try {
+    validateCrossDomainIntegrityLimits({ pageSize, maxPages, maxItems })
+  } catch {
+    throw invalidUsage()
+  }
+  return Object.freeze({
+    value: Object.freeze({
+      resourceAttestationFile: readPath(values[initialOffset + 1]),
+      integrityDigestKeyFile: readPath(values[initialOffset + 3]),
+      auditPseudonymKeyFile: readPath(values[initialOffset + 5]),
+      pageSize,
+      maxPages,
+      maxItems,
+      integrityMaximumDurationMilliseconds: readPositiveInteger(
+        values[initialOffset + 13],
+        CROSS_DOMAIN_INTEGRITY_MAX_DURATION_MILLISECONDS,
+      ),
+    }),
+    nextOffset: initialOffset + 14,
+  })
+}
+
 /** Parsed reconciliation-only file and limit suffix. */
 type ParsedReconciliationInputs = {
   /** Frozen reconciliation-only fields. */
@@ -860,30 +886,23 @@ function parseReconciliationInputs(
   let integrityFiles:
     | WorkspaceSearchMigrationRehearsalRollbackIntegrityCliFiles
     | WorkspaceSearchMigrationRehearsalVerifiedIntegrityCliFiles
-  if (values[cursor] === '--integrity-result-file') {
-    if (values[cursor + 2] !== '--integrity-key-file') throw invalidUsage()
+  if (values[cursor] === '--resource-attestation-file') {
+    const live = parseLiveIntegrityInputs(values, cursor)
     integrityFiles = Object.freeze({
-      kind: 'verified-result',
-      resultFile: readPath(values[cursor + 1]),
-      integrityKeyFile: readPath(values[cursor + 3]),
+      kind: 'verified-live',
+      ...live.value,
     })
-    cursor += 4
+    cursor = live.nextOffset
   } else if (
-    values[cursor] === '--integrity-before-result-file' &&
-    values[cursor + 2] === '--integrity-after-result-file' &&
-    values[cursor + 4] === '--integrity-key-file' &&
-    values[cursor + 6] === '--target-preimage-audit-file' &&
-    values[cursor + 8] === '--target-restored-audit-file'
+    values[cursor] === '--target-preimage-audit-file' &&
+    values[cursor + 2] === '--target-restored-audit-file'
   ) {
     integrityFiles = Object.freeze({
-      kind: 'rollback-comparison',
-      beforeResultFile: readPath(values[cursor + 1]),
-      afterResultFile: readPath(values[cursor + 3]),
-      integrityKeyFile: readPath(values[cursor + 5]),
-      targetPreimageAuditFile: readPath(values[cursor + 7]),
-      targetRestoredAuditFile: readPath(values[cursor + 9]),
+      kind: 'rollback-target-pair',
+      targetPreimageAuditFile: readPath(values[cursor + 1]),
+      targetRestoredAuditFile: readPath(values[cursor + 3]),
     })
-    cursor += 10
+    cursor += 4
   } else {
     throw invalidUsage()
   }
@@ -951,7 +970,13 @@ export async function runWorkspaceSearchMigrationRehearsalReconciliationCli(
   let runtime: WorkspaceSearchMigrationRehearsalRateRuntime | undefined
   let session: WorkspaceSearchMigrationRehearsalReconciliationCliSession |
     undefined
+  let liveSession: WorkspaceSearchMigrationRehearsalIntegrityAwsSession |
+    undefined
+  let liveIntegrityPending:
+    WorkspaceSearchMigrationRehearsalIntegrityAwsPending | undefined
   let artifactBytes: Uint8Array | undefined
+  let preSealRateSegmentBytes: Uint8Array | undefined
+  let finalRateSegmentBytes: Uint8Array | undefined
   let removeAbortListener: (() => void) | undefined
   let primaryFailure: unknown
   let result: {
@@ -1028,13 +1053,6 @@ export async function runWorkspaceSearchMigrationRehearsalReconciliationCli(
       requestedResourcesBinding,
     )
     requireActive(signal)
-    const targetIntegrityBefore = configuration.mode === 'target-preimage'
-      ? authenticateTargetIntegrityBefore(
-          inputs,
-          permitClaims.integrityResourceIdentityDigest,
-          captured,
-        )
-      : null
     const rateRuntimeKey = copyKey(runtimeKey)
     try {
       runtime = await captured.createRateRuntime({
@@ -1048,33 +1066,61 @@ export async function runWorkspaceSearchMigrationRehearsalReconciliationCli(
     } finally {
       zeroize(rateRuntimeKey)
     }
+    const liveConfiguration = readLiveIntegrityConfiguration(configuration)
     const sessionPermitKey = copyKey(runtimeKey)
     const sessionStageKey = copyKey(runtimeKey)
+    let sessionResourceAttestation: Uint8Array | undefined
+    let sessionIntegrityDigestKey: Uint8Array | undefined
     try {
-      session = await captured.createSession({
-        requested: configuration.measure.resources,
-        ratePolicy: inputs.ratePolicy,
-        bootstrapRateCheckpoint: configuration.measure.rateBootstrap,
-        recoverInterruptedCleanup:
-          configuration.measure.rateRecoverInterruptedCleanup,
-        recoverInterruptedAttempt:
-          configuration.measure.rateRecoverInterruptedAttempt,
-        rateRecorder: runtime.recorder,
-        permit: inputs.permit,
-        permitVerificationKey: sessionPermitKey,
-        permitClock: captured.clock,
-        stageReservationClaim: {
-          reservation: stageClaim.reservation,
-          selection: stageClaim.selection,
-          previousReceipt: null,
-          stageKey: sessionStageKey,
-          publicationKey: null,
-        },
-        ...(signal === undefined ? {} : { signal }),
-      })
+      const stageReservationClaim = {
+        reservation: stageClaim.reservation,
+        selection: stageClaim.selection,
+        previousReceipt: null,
+        stageKey: sessionStageKey,
+        publicationKey: null,
+      }
+      if (liveConfiguration === undefined) {
+        session = await captured.createRollbackSession({
+          requested: configuration.measure.resources,
+          ratePolicy: inputs.ratePolicy,
+          bootstrapRateCheckpoint: configuration.measure.rateBootstrap,
+          recoverInterruptedCleanup:
+            configuration.measure.rateRecoverInterruptedCleanup,
+          recoverInterruptedAttempt:
+            configuration.measure.rateRecoverInterruptedAttempt,
+          rateRecorder: runtime.recorder,
+          permit: inputs.permit,
+          permitVerificationKey: sessionPermitKey,
+          permitClock: captured.clock,
+          stageReservationClaim,
+          ...(signal === undefined ? {} : { signal }),
+        })
+      } else {
+        sessionResourceAttestation = copyRequiredInputBuffer(
+          inputs.resourceAttestationBytes,
+        )
+        sessionIntegrityDigestKey = copyRequiredInputKey(
+          inputs.integrityDigestKey,
+        )
+        liveSession = await captured.createSession({
+          requested: configuration.measure.resources,
+          ratePolicy: inputs.ratePolicy,
+          rateRecorder: runtime.recorder,
+          permit: inputs.permit,
+          permitVerificationKey: sessionPermitKey,
+          permitClock: captured.clock,
+          stageReservationClaim,
+          resourceAttestationBytes: sessionResourceAttestation,
+          integrityDigestKey: sessionIntegrityDigestKey,
+          ...(signal === undefined ? {} : { signal }),
+        })
+        session = liveSession
+      }
     } finally {
       zeroize(sessionPermitKey)
       zeroize(sessionStageKey)
+      zeroize(sessionResourceAttestation)
+      zeroize(sessionIntegrityDigestKey)
     }
     const activeSession = session
     const claimedHead = activeSession.readRehearsalClaimedStageHead()
@@ -1118,11 +1164,36 @@ export async function runWorkspaceSearchMigrationRehearsalReconciliationCli(
       throw authenticationFailed()
     }
     requireActive(signal)
+    if (liveConfiguration !== undefined) {
+      const activeLiveSession = liveSession
+      if (activeLiveSession === undefined) throw operationFailed()
+      const auditPseudonymKey = copyRequiredInputKey(
+        inputs.auditPseudonymKey,
+      )
+      try {
+        liveIntegrityPending =
+          await activeLiveSession.runRehearsalIntegrityLiveSession({
+            auditPseudonymKey,
+            pageSize: liveConfiguration.pageSize,
+            maxPages: liveConfiguration.maxPages,
+            maxItems: liveConfiguration.maxItems,
+            maximumDurationMilliseconds:
+              liveConfiguration.integrityMaximumDurationMilliseconds,
+            ...(signal === undefined ? {} : { signal }),
+          })
+      } finally {
+        zeroize(auditPseudonymKey)
+      }
+    }
+    requireCollectionDeadlineActive(
+      collectionDeadline,
+      captured.monotonicClock,
+    )
     const pendingCollection: PendingReconciliationCliCollection =
       configuration.mode === 'reconcile'
       ? Object.freeze({
         kind: 'reconciliation',
-        collectorResult: await collectReconciliationResult(
+        ...await collectReconciliationResult(
           configuration,
           inputs,
           context,
@@ -1153,6 +1224,42 @@ export async function runWorkspaceSearchMigrationRehearsalReconciliationCli(
       collectionDeadline,
       captured.monotonicClock,
     )
+    const preSealCommittedRateSegment = await runtime.flush()
+    preSealRateSegmentBytes = preSealCommittedRateSegment.canonicalBytes
+    requireCollectionDeadlineActive(
+      collectionDeadline,
+      captured.monotonicClock,
+    )
+    let verifiedIntegrity:
+      WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult | null = null
+    if (liveConfiguration !== undefined) {
+      const pending = liveIntegrityPending
+      if (pending === undefined) throw operationFailed()
+      const rawSegments = await readRawRateSegments(
+        configuration,
+        captured,
+        inputs.buffers,
+      )
+      if (!sameBytes(
+        rawSegments.currentBytes,
+        preSealCommittedRateSegment.canonicalBytes,
+      )) throw authenticationFailed()
+      const activeLiveSession = liveSession
+      if (activeLiveSession === undefined) throw operationFailed()
+      liveIntegrityPending = undefined
+      verifiedIntegrity = finalizeLiveIntegrityPending(
+        activeLiveSession,
+        pending,
+        rawSegments,
+        runtimeKey,
+      )
+    } else if (liveIntegrityPending !== undefined) {
+      throw operationFailed()
+    }
+    requireCollectionDeadlineActive(
+      collectionDeadline,
+      captured.monotonicClock,
+    )
     const durableRateEvidence =
       await activeSession.sealAndReadDescribeTableRateEvidence()
     requireCollectionDeadlineActive(
@@ -1160,6 +1267,18 @@ export async function runWorkspaceSearchMigrationRehearsalReconciliationCli(
       captured.monotonicClock,
     )
     const committedRateSegment = await runtime.flush()
+    finalRateSegmentBytes = committedRateSegment.canonicalBytes
+    if (!sameCommittedSegments(
+      preSealCommittedRateSegment,
+      committedRateSegment,
+    )) throw authenticationFailed()
+    requireCollectionDeadlineActive(
+      collectionDeadline,
+      captured.monotonicClock,
+    )
+    await activeSession.close()
+    session = undefined
+    liveSession = undefined
     requireCollectionDeadlineActive(
       collectionDeadline,
       captured.monotonicClock,
@@ -1182,7 +1301,32 @@ export async function runWorkspaceSearchMigrationRehearsalReconciliationCli(
         inputs.buffers,
       )
     } finally {
+      zeroize(preSealCommittedRateSegment.canonicalBytes)
       zeroize(committedRateSegment.canonicalBytes)
+    }
+    requireCollectionDeadlineActive(
+      collectionDeadline,
+      captured.monotonicClock,
+    )
+    let completedCollection: CompletedReconciliationCliCollection
+    if (pendingCollection.kind === 'reconciliation') {
+      const collectorResult =
+        await captured.completeReconciliationCollection({
+          collectedBase: pendingCollection.collected,
+          verifiedIntegrity,
+        })
+      requireCollectorContextBindings(
+        collectorResult,
+        context,
+        pendingCollection.integrityCompletedAt,
+        collectionDeadline.reservationCutoffAtMilliseconds,
+      )
+      completedCollection = Object.freeze({
+        kind: 'reconciliation',
+        collectorResult,
+      })
+    } else {
+      completedCollection = pendingCollection
     }
     requireCollectionDeadlineActive(
       collectionDeadline,
@@ -1194,22 +1338,16 @@ export async function runWorkspaceSearchMigrationRehearsalReconciliationCli(
     ).toISOString()
     const artifact = finalizePendingCollection(
       configuration,
-      pendingCollection,
+      completedCollection,
       context,
       rateProof,
       completedAt,
-      targetIntegrityBefore,
+      verifiedIntegrity,
       runtimeKey,
       publicationKey,
       captured,
     )
     artifactBytes = artifact.canonicalBytes
-    requireCollectionDeadlineActive(
-      collectionDeadline,
-      captured.monotonicClock,
-    )
-    await activeSession.close()
-    session = undefined
     requireCollectionDeadlineActive(
       collectionDeadline,
       captured.monotonicClock,
@@ -1239,17 +1377,24 @@ export async function runWorkspaceSearchMigrationRehearsalReconciliationCli(
     primaryFailure = error
   }
   removeAbortListener?.()
+  const disposeFailed = disposeLiveIntegrityPending(
+    liveSession,
+    liveIntegrityPending,
+  )
+  liveIntegrityPending = undefined
   const closeFailed = await closeCapabilities(session, runtime)
   zeroize(runtimeKey)
   zeroize(publicationKey)
   zeroize(artifactBytes)
+  zeroize(preSealRateSegmentBytes)
+  zeroize(finalRateSegmentBytes)
   zeroizeOwnedInputs(inputs)
   if (primaryFailure !== undefined) {
     const failure = classifyFailure(primaryFailure, signal)
     writeFailure(output.writeStderrLine, failure.code)
     return failure.exitCode
   }
-  if (closeFailed) {
+  if (disposeFailed || closeFailed) {
     writeFailure(output.writeStderrLine, 'CAPABILITY_CLOSE_FAILED')
     return 1
   }
@@ -1281,14 +1426,40 @@ type PendingReconciliationCliCollection =
   | {
     /** Selects a measured terminal reconciliation result. */
     readonly kind: 'reconciliation'
-    /** Complete normalized result before final artifact authentication. */
-    readonly collectorResult:
-      WorkspaceSearchMigrationRehearsalReconciliationCollectorResult
+    /** Measured terminal base before live/rollback completion. */
+    readonly collected:
+      WorkspaceSearchMigrationRehearsalReconciliationCliCollectedBase
+    /** First trusted in-session completion clock sample. */
+    readonly integrityCompletedAt: string
   }
   | {
     /** Selects one measured target observation capability. */
     readonly kind: 'target-audit'
     /** Opaque actual paginated target observation. */
+    readonly audit: WorkspaceSearchMigrationRehearsalCollectedTargetAudit
+  }
+
+/** Exact owner-only predecessor and current raw rate-segment bytes. */
+type ReconciliationCliRawRateSegments = {
+  /** Canonical raw immediate predecessor segment. */
+  readonly predecessorBytes: Uint8Array
+  /** Canonical raw segment containing this invocation. */
+  readonly currentBytes: Uint8Array
+}
+
+/** Collection normalized after post-seal live or rollback completion. */
+type CompletedReconciliationCliCollection =
+  | {
+    /** Selects one completed terminal reconciliation. */
+    readonly kind: 'reconciliation'
+    /** Full collector result accepted by reconciliation artifact v3. */
+    readonly collectorResult:
+      WorkspaceSearchMigrationRehearsalReconciliationCollectorResult
+  }
+  | {
+    /** Selects one measured target observation. */
+    readonly kind: 'target-audit'
+    /** Opaque target observation preserved from the pending collection. */
     readonly audit: WorkspaceSearchMigrationRehearsalCollectedTargetAudit
   }
 
@@ -1323,6 +1494,15 @@ type ReconciliationCliIntegrityCompletionClock = {
   readonly readCompletedAt: () => string
 }
 
+/** Measured base paired with its first trusted post-live clock sample. */
+type CollectedReconciliationCliBaseResult = {
+  /** Exact terminal base returned by the claimed session. */
+  readonly collected:
+    WorkspaceSearchMigrationRehearsalReconciliationCliCollectedBase
+  /** First in-session trusted clock sample after the live run. */
+  readonly integrityCompletedAt: string
+}
+
 /** Collects and signs one terminal reconciliation audit. */
 async function collectReconciliationResult(
   configuration:
@@ -1335,7 +1515,7 @@ async function collectReconciliationResult(
   publicationKey: Uint8Array,
   deadline: ReconciliationCliCollectionDeadline,
   signal: AbortSignal | undefined,
-): Promise<WorkspaceSearchMigrationRehearsalReconciliationCollectorResult> {
+): Promise<CollectedReconciliationCliBaseResult> {
   const maximumDurationMilliseconds = Math.min(
     configuration.limits.maximumDurationMilliseconds,
     readCollectionRemainingDuration(
@@ -1348,8 +1528,8 @@ async function collectReconciliationResult(
     deadline,
     dependencies.clock,
   )
-  const integrity = createReconciliationIntegrityInput(inputs, context)
-  const rollbackTarget = integrity.kind === 'rollback-comparison'
+  const rollbackTarget =
+    configuration.integrityFiles.kind === 'rollback-target-pair'
     ? createRollbackTargetInput(
         inputs,
         context,
@@ -1357,15 +1537,14 @@ async function collectReconciliationResult(
         publicationKey,
       )
     : undefined
-  let collectorResult:
-    WorkspaceSearchMigrationRehearsalReconciliationCollectorResult
+  let collected:
+    WorkspaceSearchMigrationRehearsalReconciliationCliCollectedBase
   try {
-    collectorResult = await session.collectRehearsalReconciliation({
+    const collectorInput = Object.freeze({
       runId: context.runId,
       runLocatorDigest: context.runLocatorDigest,
       scenario: context.scenario,
       expectedAuthorities: context.expectedAuthorities,
-      integrity,
       ...(rollbackTarget === undefined ? {} : { rollbackTarget }),
       limits: Object.freeze({
         ...configuration.limits,
@@ -1374,19 +1553,16 @@ async function collectReconciliationResult(
       clock: integrityCompletionClock.clock,
       ...(signal === undefined ? {} : { signal }),
     })
+    collected = await session.collectRehearsalReconciliation(collectorInput)
   } finally {
-    zeroize(integrity.digestKey)
     zeroize(rollbackTarget?.runtimeVerificationKey)
     zeroize(rollbackTarget?.publicationVerificationKey)
   }
   const integrityCompletedAt = integrityCompletionClock.readCompletedAt()
-  requireCollectorContextBindings(
-    collectorResult,
-    context,
+  return Object.freeze({
+    collected,
     integrityCompletedAt,
-    deadline.reservationCutoffAtMilliseconds,
-  )
-  return collectorResult
+  })
 }
 
 /** Requires measured collector facts to reproduce parent-authenticated context. */
@@ -1403,28 +1579,37 @@ function requireCollectorContextBindings(
     collected.runLocatorDigest !== context.runLocatorDigest ||
     collected.configurationBindingDigest !==
       context.configurationBindingDigest ||
+    collected.policyVersion !== context.policyVersion ||
+    collected.integrityResourceIdentityDigest !==
+      context.integrityResourceIdentityDigest ||
     collected.sealedPlanningAuthorityDigest !==
       context.sealedPlanningAuthorityDigest ||
     collected.planDigest !== context.planDigest
   ) throw authenticationFailed()
-  const integrity = collectorResult.integrity
+  const checkedAtMilliseconds = Date.parse(collected.checkedAt)
+  const firstCollectorClockMilliseconds = Date.parse(integrityCompletedAt)
   if (
-    integrity.completedAt !== integrityCompletedAt ||
-    Date.parse(integrityCompletedAt) <
+    checkedAtMilliseconds < firstCollectorClockMilliseconds ||
+    firstCollectorClockMilliseconds <
       Date.parse(context.integrityWindow.startedAt) ||
-    Date.parse(integrityCompletedAt) >=
-      reservationCutoffAtMilliseconds
+    checkedAtMilliseconds >= reservationCutoffAtMilliseconds
   ) {
     throw authenticationFailed()
   }
+  const integrity = collectorResult.integrity
   if (integrity.kind === 'verified-result') {
-    if (context.terminal !== null) throw authenticationFailed()
+    if (
+      context.terminal !== null ||
+      integrity.completedAt !== collected.checkedAt
+    ) throw authenticationFailed()
     return
   }
   const terminal = context.terminal
   if (
     terminal === null ||
-    integrity.startedAt !== context.integrityWindow.startedAt ||
+    Date.parse(integrity.startedAt) <
+      Date.parse(context.integrityWindow.startedAt) ||
+    Date.parse(integrity.completedAt) > checkedAtMilliseconds ||
     integrity.terminalRootDigest !== terminal.rootDigest ||
     collected.terminalRootKind !== terminal.kind ||
     collected.terminalRootVersion !== terminal.version ||
@@ -1470,6 +1655,44 @@ async function verifyClosedRateSegment(
   dependencies: WorkspaceSearchMigrationRehearsalReconciliationCliDependencies,
   ownedBuffers: Uint8Array[],
 ): Promise<ReconciliationCliRateProof> {
+  const rawSegments = await readRawRateSegments(
+    configuration,
+    dependencies,
+    ownedBuffers,
+  )
+  if (!sameBytes(rawSegments.currentBytes, committed.canonicalBytes)) {
+    throw authenticationFailed()
+  }
+  const verificationKey = copyKey(runtimeKey)
+  let successor:
+    WorkspaceSearchMigrationRehearsalVerifiedRateSegmentSuccessor
+  try {
+    successor = dependencies.verifyRateSegmentSuccessor({
+      predecessorSegmentBytes: rawSegments.predecessorBytes,
+      successorSegmentBytes: rawSegments.currentBytes,
+      authenticationKey: verificationKey,
+      expectedPolicyVersion: context.policyVersion,
+      expectedConfigurationBindingDigest:
+        context.configurationBindingDigest,
+    })
+  } finally {
+    zeroize(verificationKey)
+  }
+  if (!sameCommittedAndVerifiedSegment(committed, successor.successor)) {
+    throw authenticationFailed()
+  }
+  return Object.freeze({
+    successor,
+    durableEvidence,
+  })
+}
+
+/** Reads and retains one stable restricted predecessor/current rate pair. */
+async function readRawRateSegments(
+  configuration: WorkspaceSearchMigrationRehearsalReconciliationCliArguments,
+  dependencies: WorkspaceSearchMigrationRehearsalReconciliationCliDependencies,
+  ownedBuffers: Uint8Array[],
+): Promise<ReconciliationCliRawRateSegments> {
   /** Reads and retains one exact owner-only rate segment. */
   const readSegment = async (path: string): Promise<Uint8Array> => {
     let bytes: Uint8Array
@@ -1492,46 +1715,23 @@ async function verifyClosedRateSegment(
     ownedBuffers.push(bytes)
     return bytes
   }
-  const predecessorBytes = await readSegment(
-    configuration.previousRateSegmentFile,
-  )
-  const currentBytes = await readSegment(configuration.rateSegmentFile)
-  if (!sameBytes(currentBytes, committed.canonicalBytes)) {
-    throw authenticationFailed()
-  }
-  const verificationKey = copyKey(runtimeKey)
-  let successor:
-    WorkspaceSearchMigrationRehearsalVerifiedRateSegmentSuccessor
-  try {
-    successor = dependencies.verifyRateSegmentSuccessor({
-      predecessorSegmentBytes: predecessorBytes,
-      successorSegmentBytes: currentBytes,
-      authenticationKey: verificationKey,
-      expectedPolicyVersion: context.policyVersion,
-      expectedConfigurationBindingDigest:
-        context.configurationBindingDigest,
-    })
-  } finally {
-    zeroize(verificationKey)
-  }
-  if (!sameCommittedAndVerifiedSegment(committed, successor.successor)) {
-    throw authenticationFailed()
-  }
   return Object.freeze({
-    successor,
-    durableEvidence,
+    predecessorBytes: await readSegment(
+      configuration.previousRateSegmentFile,
+    ),
+    currentBytes: await readSegment(configuration.rateSegmentFile),
   })
 }
 
 /** Finalizes only after session close and durable rate-segment verification. */
 function finalizePendingCollection(
   configuration: WorkspaceSearchMigrationRehearsalReconciliationCliArguments,
-  pending: PendingReconciliationCliCollection,
+  pending: CompletedReconciliationCliCollection,
   context: WorkspaceSearchMigrationRehearsalAuthenticatedCollectionContext,
   rateProof: ReconciliationCliRateProof,
   completedAt: string,
-  integrityBefore:
-    WorkspaceSearchMigrationRehearsalIntegrityPreimageResultCapability | null,
+  verifiedIntegrity:
+    WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult | null,
   runtimeKey: Uint8Array,
   publicationKey: Uint8Array,
   dependencies: WorkspaceSearchMigrationRehearsalReconciliationCliDependencies,
@@ -1549,6 +1749,7 @@ function finalizePendingCollection(
             durableEvidence: rateProof.durableEvidence,
             completedAt,
           },
+          verifiedIntegrity,
         },
         runtimeSigningKey,
         publicationSigningKey,
@@ -1561,12 +1762,12 @@ function finalizePendingCollection(
       durableEvidence: rateProof.durableEvidence,
       completedAt,
     })
+    if (verifiedIntegrity === null) throw authenticationFailed()
     if (configuration.mode === 'target-preimage') {
-      if (integrityBefore === null) throw authenticationFailed()
       return dependencies.finalizeTargetAudit({
         audit: pending.audit,
         context: targetContext,
-        integrityBefore,
+        integrity: verifiedIntegrity,
         purpose: context.scenario === 'partial-apply-rollback'
           ? 'partial-rollback-preimage'
           : 'complete-rollback-preimage',
@@ -1580,7 +1781,7 @@ function finalizePendingCollection(
       return dependencies.finalizeTargetAudit({
         audit: pending.audit,
         context: targetContext,
-        integrityBefore: null,
+        integrity: verifiedIntegrity,
         purpose: 'partial-rollback-restored',
         rate,
         terminal,
@@ -1589,7 +1790,7 @@ function finalizePendingCollection(
     return dependencies.finalizeTargetAudit({
       audit: pending.audit,
       context: targetContext,
-      integrityBefore: null,
+      integrity: verifiedIntegrity,
       purpose: 'complete-rollback-restored',
       rate,
       terminal,
@@ -1614,6 +1815,9 @@ function createTargetAuditContext(
     permitDigest: context.permitDigest,
     requestedResourcesBinding: context.requestedResourcesBinding,
     configurationBindingDigest: context.configurationBindingDigest,
+    policyVersion: context.policyVersion,
+    integrityResourceIdentityDigest:
+      context.integrityResourceIdentityDigest,
     planningReceiptDigest: context.planningReceiptDigest,
     executionBoundaryDigest: context.executionBoundaryDigest,
     sealedPlanningAuthorityDigest:
@@ -1623,9 +1827,80 @@ function createTargetAuditContext(
   })
 }
 
+/** Returns the live profile selected by target or verified reconciliation. */
+function readLiveIntegrityConfiguration(
+  configuration: WorkspaceSearchMigrationRehearsalReconciliationCliArguments,
+): WorkspaceSearchMigrationRehearsalLiveIntegrityCliArguments | undefined {
+  if (configuration.mode !== 'reconcile') return configuration
+  return configuration.integrityFiles.kind === 'verified-live'
+    ? configuration.integrityFiles
+    : undefined
+}
+
+/** Finalizes one exact dedicated pending and burns it on every failure. */
+function finalizeLiveIntegrityPending(
+  session: WorkspaceSearchMigrationRehearsalIntegrityAwsSession,
+  pending: WorkspaceSearchMigrationRehearsalIntegrityAwsPending,
+  rawSegments: ReconciliationCliRawRateSegments,
+  runtimeKey: Uint8Array,
+): WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult {
+  const rateAuthenticationKey = copyKey(runtimeKey)
+  try {
+    return session.finalizeRehearsalIntegrityLiveSession({
+      pending,
+      canonicalSegmentBytes: rawSegments.currentBytes,
+      predecessorSegmentBytes: rawSegments.predecessorBytes,
+      rateAuthenticationKey,
+    })
+  } catch {
+    try {
+      session.disposeRehearsalIntegrityLiveSession(pending)
+    } catch {
+      // The failed finalizer may already have burned this exact handle.
+    }
+    throw authenticationFailed()
+  } finally {
+    zeroize(rateAuthenticationKey)
+  }
+}
+
+/** Best-effort burns one still-unfinalized live handle before session close. */
+function disposeLiveIntegrityPending(
+  session: WorkspaceSearchMigrationRehearsalIntegrityAwsSession | undefined,
+  pending: WorkspaceSearchMigrationRehearsalIntegrityAwsPending | undefined,
+): boolean {
+  if (pending === undefined) return false
+  if (session === undefined) return true
+  try {
+    session.disposeRehearsalIntegrityLiveSession(pending)
+    return false
+  } catch {
+    return true
+  }
+}
+
 /** Compares the exact durable bytes without early-exit content leakage. */
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
   return left.byteLength === right.byteLength && timingSafeEqual(left, right)
+}
+
+/** Requires final seal/close flushing to append no rate event or field. */
+function sameCommittedSegments(
+  left: WorkspaceSearchMigrationRehearsalRateCommittedSegment,
+  right: WorkspaceSearchMigrationRehearsalRateCommittedSegment,
+): boolean {
+  return sameBytes(left.canonicalBytes, right.canonicalBytes) &&
+    left.authenticationKeyFingerprint ===
+      right.authenticationKeyFingerprint &&
+    left.segmentLocatorDigest === right.segmentLocatorDigest &&
+    left.segmentOrdinal === right.segmentOrdinal &&
+    left.firstEventSequence === right.firstEventSequence &&
+    left.eventCount === right.eventCount &&
+    left.firstCommittedEventSequence ===
+      right.firstCommittedEventSequence &&
+    left.lastCommittedEventSequence === right.lastCommittedEventSequence &&
+    left.terminalRecordMac === right.terminalRecordMac &&
+    left.segmentDigest === right.segmentDigest
 }
 
 /** Requires reread authentication to reproduce every flushed segment field. */
@@ -1636,8 +1911,11 @@ function sameCommittedAndVerifiedSegment(
       'successor'
     ],
 ): boolean {
-  return committed.segmentLocatorDigest === verified.segmentLocatorDigest &&
+  return committed.authenticationKeyFingerprint ===
+      verified.authenticationKeyFingerprint &&
+    committed.segmentLocatorDigest === verified.segmentLocatorDigest &&
     committed.segmentOrdinal === verified.segmentOrdinal &&
+    committed.firstEventSequence === verified.firstEventSequence &&
     committed.eventCount === verified.eventCount &&
     committed.firstCommittedEventSequence ===
       verified.firstCommittedEventSequence &&
@@ -1645,65 +1923,6 @@ function sameCommittedAndVerifiedSegment(
       verified.lastCommittedEventSequence &&
     committed.terminalRecordMac === verified.terminalRecordMac &&
     committed.segmentDigest === verified.segmentDigest
-}
-
-/**
- * Authenticates the target-preimage #163 result before any AWS capability opens.
- *
- * @param inputs - Invocation-owned raw result and dedicated key buffers.
- * @param expectedResourceIdentityDigest - Authenticated permit resource identity.
- * @param dependencies - Captured trusted authenticator and wall clock.
- * @returns One-shot live #163 authority consumed by target finalization.
- */
-function authenticateTargetIntegrityBefore(
-  inputs: ReconciliationCliOwnedInputs,
-  expectedResourceIdentityDigest: string,
-  dependencies: WorkspaceSearchMigrationRehearsalReconciliationCliDependencies,
-): WorkspaceSearchMigrationRehearsalIntegrityPreimageResultCapability {
-  const resultBytes = inputs.integrityBeforeResultBytes
-  if (resultBytes === undefined) throw authenticationFailed()
-  const key = copyRequiredInputKey(inputs.integrityKey)
-  try {
-    return dependencies.authenticateIntegrityPreimage({
-      resultBytes,
-      expectedResourceIdentityDigest,
-      clock: dependencies.clock,
-    }, key)
-  } catch {
-    throw authenticationFailed()
-  } finally {
-    zeroize(key)
-  }
-}
-
-/** Creates the exact identity-session integrity union from authenticated context. */
-function createReconciliationIntegrityInput(
-  inputs: ReconciliationCliOwnedInputs,
-  context: WorkspaceSearchMigrationRehearsalAuthenticatedCollectionContext,
-): CollectWorkspaceSearchMigrationRehearsalReconciliationSessionInput[
-  'integrity'
-] {
-  const key = copyRequiredInputKey(inputs.integrityKey)
-  if (inputs.integrityResultBytes !== undefined) {
-    return Object.freeze({
-      kind: 'verified-result',
-      resultBytes: inputs.integrityResultBytes,
-      digestKey: key,
-    })
-  }
-  const beforeResultBytes = inputs.integrityBeforeResultBytes
-  const afterResultBytes = inputs.integrityAfterResultBytes
-  if (beforeResultBytes === undefined || afterResultBytes === undefined) {
-    zeroize(key)
-    throw authenticationFailed()
-  }
-  return Object.freeze({
-    kind: 'rollback-comparison',
-    startedAt: context.integrityWindow.startedAt,
-    beforeResultBytes,
-    afterResultBytes,
-    digestKey: key,
-  })
 }
 
 /** Creates the exact rollback target input with an owned runtime key later. */
@@ -1852,70 +2071,51 @@ async function readAllInputs(
     } catch {
       throw inputInvalid()
     }
-    if (configuration.mode === 'target-restored') {
-      return Object.freeze({ buffers, material, permit, ratePolicy, masterKey })
-    }
-    if (configuration.mode === 'target-preimage') {
-      const integrityKey = await read(
-        configuration.integrityKeyFile,
-        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_MASTER_KEY_BYTES,
-      )
-      requireExactKey(integrityKey)
+    if (
+      configuration.mode === 'reconcile' &&
+      configuration.integrityFiles.kind === 'rollback-target-pair'
+    ) {
       return Object.freeze({
         buffers,
         material,
         permit,
         ratePolicy,
         masterKey,
-        integrityKey,
-        integrityBeforeResultBytes: await read(
-          configuration.integrityBeforeResultFile,
-          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_INTEGRITY_MAX_BYTES,
+        targetPreimageAuditBytes: await read(
+          configuration.integrityFiles.targetPreimageAuditFile,
+          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_TARGET_AUDIT_MAX_BYTES,
+        ),
+        targetRestoredAuditBytes: await read(
+          configuration.integrityFiles.targetRestoredAuditFile,
+          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_TARGET_AUDIT_MAX_BYTES,
         ),
       })
     }
-    const integrityKey = await read(
-      configuration.integrityFiles.integrityKeyFile,
+    const live = readLiveIntegrityConfiguration(configuration)
+    if (live === undefined) throw authenticationFailed()
+    const resourceAttestationBytes = await read(
+      live.resourceAttestationFile,
+      CROSS_DOMAIN_INTEGRITY_RESOURCE_ATTESTATION_MAX_BYTES,
+    )
+    const integrityDigestKey = await read(
+      live.integrityDigestKeyFile,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_MASTER_KEY_BYTES,
     )
-    requireExactKey(integrityKey)
-    if (configuration.integrityFiles.kind === 'verified-result') {
-      return Object.freeze({
-        buffers,
-        material,
-        permit,
-        ratePolicy,
-        masterKey,
-        integrityKey,
-        integrityResultBytes: await read(
-          configuration.integrityFiles.resultFile,
-          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_INTEGRITY_MAX_BYTES,
-        ),
-      })
-    }
+    requireExactKey(integrityDigestKey)
+    const auditPseudonymKey = await read(
+      live.auditPseudonymKeyFile,
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_MASTER_KEY_BYTES,
+    )
+    requireExactKey(auditPseudonymKey)
     return Object.freeze({
       buffers,
       material,
       permit,
       ratePolicy,
       masterKey,
-      integrityKey,
-      integrityBeforeResultBytes: await read(
-        configuration.integrityFiles.beforeResultFile,
-        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_INTEGRITY_MAX_BYTES,
-      ),
-      integrityAfterResultBytes: await read(
-        configuration.integrityFiles.afterResultFile,
-        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_INTEGRITY_MAX_BYTES,
-      ),
-      targetPreimageAuditBytes: await read(
-        configuration.integrityFiles.targetPreimageAuditFile,
-        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_TARGET_AUDIT_MAX_BYTES,
-      ),
-      targetRestoredAuditBytes: await read(
-        configuration.integrityFiles.targetRestoredAuditFile,
-        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_TARGET_AUDIT_MAX_BYTES,
-      ),
+      resourceAttestationBytes,
+      integrityDigestKey,
+      auditPseudonymKey,
     })
   } catch (error: unknown) {
     for (const buffer of buffers) zeroize(buffer)
@@ -1935,6 +2135,7 @@ function requireContextBindings(
     context.permitDigest !== expectedPermitDigest ||
     context.requestedResourcesBinding !== requestedResourcesBinding ||
     context.configurationBindingDigest.length !== 64 ||
+    context.integrityResourceIdentityDigest.length !== 64 ||
     context.policyVersion !== inputs.ratePolicy.policyVersion ||
     context.runId.length === 0 ||
     context.runLocatorDigest.length !== 64 ||
@@ -1967,7 +2168,7 @@ function requireContextBindings(
       : 'verify'
     if (
       context.command !== expectedCommand ||
-      (configuration.integrityFiles.kind === 'rollback-comparison') !==
+      (configuration.integrityFiles.kind === 'rollback-target-pair') !==
         isRollbackScenario(context.scenario)
     ) throw authenticationFailed()
   }
@@ -2010,6 +2211,8 @@ function requireClaimedStageHeadBindings(
         selection.manifest.configurationBindingDigest ||
       context.configurationBindingDigest !==
         reservation.configurationBindingDigest ||
+      context.integrityResourceIdentityDigest !==
+        selection.manifest.integrityResourceIdentityDigest ||
       context.policyVersion !== selection.manifest.policyVersion ||
       context.policyVersion !== reservation.policyVersion ||
       context.scenario !== entry.scenario ||
@@ -2058,7 +2261,12 @@ function requireDedicatedKeys(
     inputs.masterKey,
     runtimeKey,
     publicationKey,
-    ...(inputs.integrityKey === undefined ? [] : [inputs.integrityKey]),
+    ...(inputs.integrityDigestKey === undefined
+      ? []
+      : [inputs.integrityDigestKey]),
+    ...(inputs.auditPseudonymKey === undefined
+      ? []
+      : [inputs.auditPseudonymKey]),
   ]
   for (let left = 0; left < keys.length; left += 1) {
     for (let right = left + 1; right < keys.length; right += 1) {
@@ -2129,9 +2337,11 @@ function captureDependencies(
     readRestrictedFile: value.readRestrictedFile,
     authenticateCollectionContext: value.authenticateCollectionContext,
     verifyPermit: value.verifyPermit,
-    authenticateIntegrityPreimage: value.authenticateIntegrityPreimage,
     createRateRuntime: value.createRateRuntime,
     createSession: value.createSession,
+    createRollbackSession: value.createRollbackSession,
+    completeReconciliationCollection:
+      value.completeReconciliationCollection,
     verifyRateSegmentSuccessor: value.verifyRateSegmentSuccessor,
     collectTargetAudit: value.collectTargetAudit,
     finalizeTargetAudit: value.finalizeTargetAudit,
@@ -2263,6 +2473,19 @@ function copyKey(value: Uint8Array): Uint8Array {
 function copyRequiredInputKey(value: Uint8Array | undefined): Uint8Array {
   if (value === undefined) throw authenticationFailed()
   return copyKey(value)
+}
+
+/** Copies one required private input buffer for an ownership transfer. */
+function copyRequiredInputBuffer(
+  value: Uint8Array | undefined,
+): Uint8Array {
+  if (
+    value === undefined ||
+    nodeUtilTypes.isProxy(value) ||
+    nodeUtilTypes.isSharedArrayBuffer(value.buffer) ||
+    value.byteLength === 0
+  ) throw authenticationFailed()
+  return value.slice()
 }
 
 /** Reads one trusted finite Date observation. */
@@ -2522,24 +2745,21 @@ function requireUniquePaths(
     ...(configuration.materialFiles.finalRateSegmentFile === undefined
       ? []
       : [configuration.materialFiles.finalRateSegmentFile]),
-    ...(configuration.mode === 'target-preimage'
-      ? [
-          configuration.integrityBeforeResultFile,
-          configuration.integrityKeyFile,
-        ]
-      : []),
     ...(configuration.mode !== 'reconcile'
-      ? []
+      ? [
+        configuration.resourceAttestationFile,
+        configuration.integrityDigestKeyFile,
+        configuration.auditPseudonymKeyFile,
+      ]
+      : configuration.integrityFiles.kind === 'verified-live'
+      ? [
+        configuration.integrityFiles.resourceAttestationFile,
+        configuration.integrityFiles.integrityDigestKeyFile,
+        configuration.integrityFiles.auditPseudonymKeyFile,
+      ]
       : [
-        configuration.integrityFiles.integrityKeyFile,
-        ...(configuration.integrityFiles.kind === 'verified-result'
-          ? [configuration.integrityFiles.resultFile]
-          : [
-            configuration.integrityFiles.beforeResultFile,
-            configuration.integrityFiles.afterResultFile,
-            configuration.integrityFiles.targetPreimageAuditFile,
-            configuration.integrityFiles.targetRestoredAuditFile,
-          ]),
+        configuration.integrityFiles.targetPreimageAuditFile,
+        configuration.integrityFiles.targetRestoredAuditFile,
       ]),
   ]
   if (new Set(paths).size !== paths.length) throw invalidUsage()

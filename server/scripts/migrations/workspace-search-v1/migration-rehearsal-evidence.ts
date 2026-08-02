@@ -271,9 +271,9 @@ export type WorkspaceSearchMigrationRehearsalReconciliationTargetAuditEvidence =
   readonly observationDigest: string
   /** Pagination-independent target aggregate digest. */
   readonly aggregateDigest: string
-  /** Exact pre-apply #163 projection for a preimage, otherwise null. */
-  readonly integrityBefore:
-    WorkspaceSearchMigrationRehearsalReconciliationResultEvidence | null
+  /** Exact live #163 projection authenticated by this target observation. */
+  readonly integrity:
+    WorkspaceSearchMigrationRehearsalReconciliationResultEvidence
   /** Digest of the full parent-authenticated target planning context. */
   readonly contextDigest: string
   /** Exact authenticated auxiliary rate segment and ledger binding. */
@@ -300,6 +300,10 @@ export type WorkspaceSearchMigrationRehearsalReconciliationSummaryEvidence = {
   readonly runLocatorDigest: string
   /** Digest of the exact measured configuration and resource generation. */
   readonly configurationBindingDigest: string
+  /** Exact reviewed DescribeTable policy version bound by this audit. */
+  readonly policyVersion: string
+  /** Immutable physical-resource identity digest bound by terminal #163. */
+  readonly integrityResourceIdentityDigest: string
   /** Digest of the immutable sealed planning authority. */
   readonly sealedPlanningAuthorityDigest: string
   /** Digest of the immutable execution admission. */
@@ -510,7 +514,7 @@ export type WorkspaceSearchMigrationRehearsalEvidenceClaims = {
   /** Canonical eight authenticated terminal reconciliation summaries. */
   readonly reconciliation:
     WorkspaceSearchMigrationRehearsalReconciliationEvidence
-  /** Actual bounded DescribeTable rate observations. */
+  /** Actual physical AWS starts and source-separated throttle observations. */
   readonly rate: WorkspaceSearchMigrationRehearsalRateEvidence
   /** Exact complete alarm delivery vector in canonical order. */
   readonly alarms: readonly WorkspaceSearchMigrationRehearsalAlarmEvidence[]
@@ -832,6 +836,7 @@ function readClaimFields(
     ),
     reconciliation: readReconciliation(
       evidenceGuards.readOwn(record, 'reconciliation'),
+      ratePolicyVersion,
     ),
     rate: readRate(
       evidenceGuards.readOwn(record, 'rate'),
@@ -1479,9 +1484,16 @@ function expectedTerminalVersion(
   return name === 'partial-apply-rollback' ? 2 : 1
 }
 
-/** Reads the exact canonical eight-scenario reconciliation vector. */
+/**
+ * Reads the exact canonical eight-scenario reconciliation vector.
+ *
+ * @param value - Candidate ordered reconciliation summaries.
+ * @param ratePolicyVersion - Optional outer reviewed policy version.
+ * @returns Strict detached canonical reconciliation evidence.
+ */
 function readReconciliation(
   value: unknown,
+  ratePolicyVersion?: string,
 ): WorkspaceSearchMigrationRehearsalReconciliationEvidence {
   const values = readExactArray(
     value,
@@ -1498,7 +1510,19 @@ function readReconciliation(
   const auxiliaryRateKeyFingerprints: string[] = []
   const targetContentDigests: string[] = []
   const resourceIdentityBindings: string[] = []
+  const expectedRatePolicyVersion = ratePolicyVersion ??
+    summaries[0]?.policyVersion
+  if (expectedRatePolicyVersion === undefined) return failEvidence()
   for (const summary of summaries) {
+    const summaryResourceIdentityDigest =
+      summary.integrity.kind === 'verified-result'
+        ? summary.integrity.result.resourceIdentityDigest
+        : summary.integrity.before.resourceIdentityDigest
+    if (
+      summary.policyVersion !== expectedRatePolicyVersion ||
+      summary.integrityResourceIdentityDigest !==
+        summaryResourceIdentityDigest
+    ) return failEvidence()
     auxiliaryRateSegmentDigests.push(summary.rateSegmentDigest)
     auxiliaryRateSegmentLocators.push(summary.rateSegmentLocatorDigest)
     auxiliaryRateKeyFingerprints.push(
@@ -1588,10 +1612,12 @@ function readReconciliationSummary(
     'duplicateApplyCount',
     'executionRunDigest',
     'integrity',
+    'integrityResourceIdentityDigest',
     'lostItemCount',
     'markerSummaryDigest',
     'orphanAuthorityCount',
     'planDigest',
+    'policyVersion',
     'rateAuthenticationKeyFingerprint',
     'rateSegmentDigest',
     'rateSegmentLocatorDigest',
@@ -1658,6 +1684,12 @@ function readReconciliationSummary(
     configurationBindingDigest: evidenceGuards.readDigest(
       evidenceGuards.readOwn(record, 'configurationBindingDigest'),
     ),
+    policyVersion: evidenceGuards.readDigest(
+      evidenceGuards.readOwn(record, 'policyVersion'),
+    ),
+    integrityResourceIdentityDigest: evidenceGuards.readDigest(
+      evidenceGuards.readOwn(record, 'integrityResourceIdentityDigest'),
+    ),
     sealedPlanningAuthorityDigest: evidenceGuards.readDigest(
       evidenceGuards.readOwn(record, 'sealedPlanningAuthorityDigest'),
     ),
@@ -1680,8 +1712,8 @@ function readReconciliationSummary(
   })
   const migrationContextDigest = createMigrationDigest({
     kind:
-      'workspace-search-migration-rehearsal-terminal-integrity-migration-context',
-    version: 1,
+      'workspace-search-migration-rehearsal-terminal-integrity-migration-context/v3',
+    version: 3,
     ...core,
   })
   const integrity = readReconciliationIntegrity(
@@ -1691,12 +1723,15 @@ function readReconciliationSummary(
     terminalAt,
     checkedAt,
     migrationContextDigest,
+    core.integrityResourceIdentityDigest,
   )
   const targetAudits = readReconciliationTargetAudits(
     evidenceGuards.readOwn(record, 'targetAudits'),
     expectedScenario,
     integrity,
     core.configurationBindingDigest,
+    core.policyVersion,
+    core.integrityResourceIdentityDigest,
     terminalAt,
     checkedAt,
   )
@@ -1750,6 +1785,8 @@ function readReconciliationSummary(
  * @param scenario - Scenario fixed by the canonical reconciliation slot.
  * @param integrity - Authenticated #163 result or rollback comparison.
  * @param configurationBindingDigest - Exact measured configuration binding.
+ * @param policyVersion - Exact reviewed DescribeTable policy version.
+ * @param integrityResourceIdentityDigest - Permit-pinned physical identity digest.
  * @param terminalAt - Authoritative terminal publication time.
  * @param checkedAt - Reconciliation completion time.
  * @returns Strict rollback target pair, otherwise null for verified scenarios.
@@ -1759,6 +1796,8 @@ function readReconciliationTargetAudits(
   scenario: WorkspaceSearchMigrationRehearsalScenarioName,
   integrity: WorkspaceSearchMigrationRehearsalReconciliationIntegrityEvidence,
   configurationBindingDigest: string,
+  policyVersion: string,
+  integrityResourceIdentityDigest: string,
   terminalAt: string,
   checkedAt: string,
 ): WorkspaceSearchMigrationRehearsalReconciliationTargetAuditPairEvidence |
@@ -1781,19 +1820,24 @@ function readReconciliationTargetAudits(
     evidenceGuards.readOwn(record, 'preimage'),
     `${purposePrefix}-preimage`,
     configurationBindingDigest,
+    policyVersion,
+    integrityResourceIdentityDigest,
   )
   const restored = readReconciliationTargetAudit(
     evidenceGuards.readOwn(record, 'restored'),
     `${purposePrefix}-restored`,
     configurationBindingDigest,
+    policyVersion,
+    integrityResourceIdentityDigest,
   )
-  const integrityBefore = preimage.integrityBefore
   if (
-    integrityBefore === null ||
-    restored.integrityBefore !== null ||
     !sameWorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection(
-      integrityBefore,
+      preimage.integrity,
       integrity.before,
+    ) ||
+    !sameWorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection(
+      restored.integrity,
+      integrity.after,
     ) ||
     preimage.contentDigest === restored.contentDigest ||
     preimage.observationDigest === restored.observationDigest ||
@@ -1822,7 +1866,16 @@ function readReconciliationTargetAudits(
   return Object.freeze({ preimage, restored })
 }
 
-/** Reads one public digest-only authenticated target-audit projection. */
+/**
+ * Reads one public digest-only authenticated target-audit projection.
+ *
+ * @param value - Candidate public target-audit projection.
+ * @param expectedPurpose - Scenario-specific target-audit purpose.
+ * @param configurationBindingDigest - Parent measured configuration digest.
+ * @param policyVersion - Parent reviewed DescribeTable policy version.
+ * @param integrityResourceIdentityDigest - Parent physical identity digest.
+ * @returns Strict detached public target-audit evidence.
+ */
 function readReconciliationTargetAudit(
   value: unknown,
   expectedPurpose:
@@ -1831,6 +1884,8 @@ function readReconciliationTargetAudit(
     | 'partial-rollback-preimage'
     | 'partial-rollback-restored',
   configurationBindingDigest: string,
+  policyVersion: string,
+  integrityResourceIdentityDigest: string,
 ): WorkspaceSearchMigrationRehearsalReconciliationTargetAuditEvidence {
   const record = evidenceGuards.requireRecord(value)
   evidenceGuards.requireExactKeys(record, [
@@ -1838,7 +1893,7 @@ function readReconciliationTargetAudit(
     'byteLength',
     'contentDigest',
     'contextDigest',
-    'integrityBefore',
+    'integrity',
     'observationDigest',
     'observedAt',
     'purpose',
@@ -1860,26 +1915,17 @@ function readReconciliationTargetAudit(
   if (
     Date.parse(startedAt) > Date.parse(observedAt) ||
     rate.link.configurationBindingDigest !== configurationBindingDigest ||
+    rate.link.policyVersion !== policyVersion ||
     Date.parse(rate.completedAt) < Date.parse(observedAt)
   ) return failEvidence()
-  const integrityBeforeValue = evidenceGuards.readOwn(
-    record,
-    'integrityBefore',
+  const integrity = readReconciliationResult(
+    evidenceGuards.readOwn(record, 'integrity'),
   )
-  const preimage = expectedPurpose === 'partial-rollback-preimage' ||
-    expectedPurpose === 'complete-rollback-preimage'
-  let integrityBefore:
-    WorkspaceSearchMigrationRehearsalReconciliationResultEvidence | null
-  if (preimage) {
-    integrityBefore = readReconciliationResult(integrityBeforeValue)
-    if (
-      Date.parse(integrityBefore.runtimeProvenance.completedAt) >
-        Date.parse(startedAt)
-    ) return failEvidence()
-  } else {
-    if (integrityBeforeValue !== null) return failEvidence()
-    integrityBefore = null
-  }
+  if (
+    integrity.resourceIdentityDigest !== integrityResourceIdentityDigest ||
+    Date.parse(integrity.runtimeProvenance.completedAt) >
+      Date.parse(startedAt)
+  ) return failEvidence()
   return Object.freeze({
     purpose: expectedPurpose,
     contentDigest: evidenceGuards.readDigest(
@@ -1897,7 +1943,7 @@ function readReconciliationTargetAudit(
     aggregateDigest: evidenceGuards.readDigest(
       evidenceGuards.readOwn(record, 'aggregateDigest'),
     ),
-    integrityBefore,
+    integrity,
     contextDigest: evidenceGuards.readDigest(
       evidenceGuards.readOwn(record, 'contextDigest'),
     ),
@@ -1914,6 +1960,7 @@ function readReconciliationTargetAudit(
  * @param expectedTerminalAt - Outer authoritative terminal publication time.
  * @param checkedAt - Outer reconciliation completion time.
  * @param migrationContextDigest - Reproduced exact migration context digest.
+ * @param integrityResourceIdentityDigest - Permit-pinned physical identity digest.
  * @returns Detached verified-result or rollback-comparison evidence.
  */
 function readReconciliationIntegrity(
@@ -1923,6 +1970,7 @@ function readReconciliationIntegrity(
   expectedTerminalAt: string,
   checkedAt: string,
   migrationContextDigest: string,
+  integrityResourceIdentityDigest: string,
 ): WorkspaceSearchMigrationRehearsalReconciliationIntegrityEvidence {
   const record = evidenceGuards.requireRecord(value)
   const kind = evidenceGuards.readOwn(record, 'kind')
@@ -1960,6 +2008,7 @@ function readReconciliationIntegrity(
     )
     if (
       integrityAggregateDigest !== result.integrityAggregateDigest ||
+      result.resourceIdentityDigest !== integrityResourceIdentityDigest ||
       Date.parse(result.runtimeProvenance.startedAt) <=
         Date.parse(expectedTerminalAt) ||
       Date.parse(result.checkedAt) <= Date.parse(expectedTerminalAt) ||
@@ -1970,8 +2019,8 @@ function readReconciliationIntegrity(
     }
     const resultContextDigest = createMigrationDigest({
       domain:
-        'workspace-search-migration-rehearsal-terminal-integrity-result-context',
-      version: 1,
+        'workspace-search-migration-rehearsal-terminal-integrity-result-context/v3',
+      version: 3,
       scenario,
       migrationContextDigest,
       kind: 'verified-result',
@@ -2078,8 +2127,8 @@ function readReconciliationIntegrity(
     },
   })
   const expectedComparisonContextDigest = createMigrationDigest({
-    kind: 'workspace-search-migration-rehearsal-integrity-context',
-    version: 1,
+    kind: 'workspace-search-migration-rehearsal-integrity-context/v3',
+    version: 3,
     purpose: expectedPurpose,
     startedAt,
     applyStartedAt,
@@ -2096,6 +2145,7 @@ function readReconciliationIntegrity(
     before.resultMac === after.resultMac ||
     before.integrityAggregateDigest !== after.integrityAggregateDigest ||
     before.resourceIdentityDigest !== after.resourceIdentityDigest ||
+    before.resourceIdentityDigest !== integrityResourceIdentityDigest ||
     Date.parse(startedAt) >
       Date.parse(before.runtimeProvenance.startedAt) ||
     Date.parse(before.checkedAt) >= Date.parse(applyStartedAt) ||
@@ -2204,17 +2254,22 @@ function readRateAggregate(
   const record = evidenceGuards.requireRecord(value)
   evidenceGuards.requireExactKeys(record, [
     'attemptCount',
+    'awsServiceThrottleBudgetStopCount',
+    'awsServiceThrottleCount',
     'budgetStopCount',
     'cadenceWaitCount',
     'cadenceWaitMilliseconds',
     'forfeitedAttemptCount',
     'maximumInFlight',
+    'operationalBudgetStopCount',
     'policyVersion',
+    'rehearsalInjectedBudgetStopCount',
+    'rehearsalInjectedThrottleCount',
     'throttleCount',
     'version',
   ])
   if (
-    evidenceGuards.readOwn(record, 'version') !== 1 ||
+    evidenceGuards.readOwn(record, 'version') !== 2 ||
     evidenceGuards.readOwn(record, 'policyVersion') !== ratePolicyVersion ||
     evidenceGuards.readOwn(record, 'maximumInFlight') !== 1
   ) {
@@ -2226,13 +2281,40 @@ function readRateAggregate(
   const cadenceWaitMilliseconds = readCount(
     evidenceGuards.readOwn(record, 'cadenceWaitMilliseconds'),
   )
+  const throttleCount = readCount(
+    evidenceGuards.readOwn(record, 'throttleCount'),
+  )
+  const awsServiceThrottleCount = readCount(
+    evidenceGuards.readOwn(record, 'awsServiceThrottleCount'),
+  )
+  const rehearsalInjectedThrottleCount = readCount(
+    evidenceGuards.readOwn(record, 'rehearsalInjectedThrottleCount'),
+  )
+  const budgetStopCount = readCount(
+    evidenceGuards.readOwn(record, 'budgetStopCount'),
+  )
+  const operationalBudgetStopCount = readCount(
+    evidenceGuards.readOwn(record, 'operationalBudgetStopCount'),
+  )
+  const awsServiceThrottleBudgetStopCount = readCount(
+    evidenceGuards.readOwn(record, 'awsServiceThrottleBudgetStopCount'),
+  )
+  const rehearsalInjectedBudgetStopCount = readCount(
+    evidenceGuards.readOwn(record, 'rehearsalInjectedBudgetStopCount'),
+  )
   if (
-    (cadenceWaitCount === 0) !== (cadenceWaitMilliseconds === 0)
+    (cadenceWaitCount === 0) !== (cadenceWaitMilliseconds === 0) ||
+    throttleCount !==
+      awsServiceThrottleCount + rehearsalInjectedThrottleCount ||
+    budgetStopCount !==
+      operationalBudgetStopCount +
+        awsServiceThrottleBudgetStopCount +
+        rehearsalInjectedBudgetStopCount
   ) {
     return failEvidence()
   }
   return {
-    version: 1,
+    version: 2,
     policyVersion: ratePolicyVersion,
     attemptCount: readPositiveCount(
       evidenceGuards.readOwn(record, 'attemptCount'),
@@ -2240,12 +2322,13 @@ function readRateAggregate(
     forfeitedAttemptCount: readCount(
       evidenceGuards.readOwn(record, 'forfeitedAttemptCount'),
     ),
-    throttleCount: readCount(
-      evidenceGuards.readOwn(record, 'throttleCount'),
-    ),
-    budgetStopCount: readCount(
-      evidenceGuards.readOwn(record, 'budgetStopCount'),
-    ),
+    throttleCount,
+    awsServiceThrottleCount,
+    rehearsalInjectedThrottleCount,
+    budgetStopCount,
+    operationalBudgetStopCount,
+    awsServiceThrottleBudgetStopCount,
+    rehearsalInjectedBudgetStopCount,
     cadenceWaitCount,
     cadenceWaitMilliseconds,
     maximumInFlight: 1,

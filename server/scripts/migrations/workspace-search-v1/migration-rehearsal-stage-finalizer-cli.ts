@@ -126,8 +126,6 @@ export type WorkspaceSearchMigrationRehearsalStageFinalizerApplyProofFiles = {
   readonly kind: 'complete-apply'
   /** Exact private canonical pre-apply target audit path. */
   readonly targetPreimageAuditFile: string
-  /** Exact private raw target-audit authentication key path. */
-  readonly targetAuditKeyFile: string
 }
 
 /** Historical planning receipt needed without integrity or target audits. */
@@ -159,8 +157,8 @@ export type WorkspaceSearchMigrationRehearsalStageFinalizerProofFiles =
 type WorkspaceSearchMigrationRehearsalStageFinalizerCliArgumentsBase = {
   /** Exact private authenticated manifest path. */
   readonly manifestFile: string
-  /** Exact private previous-receipt path containing a receipt or canonical null. */
-  readonly previousReceiptFile: string
+  /** Exact private previous-receipt path, omitted only at global stage one. */
+  readonly previousReceiptFile?: string
   /** Exact private persisted lifecycle wrapper path. */
   readonly lifecycleFile: string
   /** Exact private parent-origin authentication record path. */
@@ -420,12 +418,20 @@ export function parseWorkspaceSearchMigrationRehearsalStageFinalizerCliArguments
   arguments_: readonly string[],
 ): WorkspaceSearchMigrationRehearsalStageFinalizerCliArguments {
   const snapshot = snapshotStageFinalizerCliArguments(arguments_)
-  if (
-    snapshot[0] !== '--manifest-file' ||
-    snapshot[2] !== '--previous-receipt-file' ||
-    snapshot[4] !== '--material-file'
-  ) throw invalidUsage()
-  const materialFiles = parseStageFinalizerMaterialFilePrefix(snapshot)
+  if (snapshot[0] !== '--manifest-file') throw invalidUsage()
+  let materialOffset = 2
+  let previousReceiptFile: string | undefined
+  if (snapshot[materialOffset] === '--previous-receipt-file') {
+    previousReceiptFile = requireStageFinalizerCliPath(
+      snapshot[materialOffset + 1],
+    )
+    materialOffset += 2
+  }
+  if (snapshot[materialOffset] !== '--material-file') throw invalidUsage()
+  const materialFiles = parseStageFinalizerMaterialFilePrefix(
+    snapshot,
+    materialOffset,
+  )
   const commonOffset = materialFiles.nextOffset
   if (
     snapshot[commonOffset] !== '--lifecycle-file' ||
@@ -445,7 +451,7 @@ export function parseWorkspaceSearchMigrationRehearsalStageFinalizerCliArguments
   ) throw invalidUsage()
   const configuration = Object.freeze({
     manifestFile: requireStageFinalizerCliPath(snapshot[1]),
-    previousReceiptFile: requireStageFinalizerCliPath(snapshot[3]),
+    ...(previousReceiptFile === undefined ? {} : { previousReceiptFile }),
     ...materialFiles.files,
     lifecycleFile:
       requireStageFinalizerCliPath(snapshot[commonOffset + 1]),
@@ -472,51 +478,65 @@ type ParsedStageFinalizerMaterialFilePrefix = {
   readonly nextOffset: number
 }
 
-/** Parses one of the three exact ordered material-file prefixes. */
+/**
+ * Parses one of the three exact ordered material-file prefixes.
+ *
+ * @param snapshot - Detached complete CLI argument vector.
+ * @param initialOffset - Exact index of the material-file flag.
+ * @returns Strict material selection and first shared-suffix offset.
+ */
 function parseStageFinalizerMaterialFilePrefix(
   snapshot: readonly string[],
+  initialOffset: number,
 ): ParsedStageFinalizerMaterialFilePrefix {
-  const materialFile = requireStageFinalizerCliPath(snapshot[5])
-  if (snapshot[6] === '--lifecycle-file') {
+  if (snapshot[initialOffset] !== '--material-file') throw invalidUsage()
+  const materialFile = requireStageFinalizerCliPath(
+    snapshot[initialOffset + 1],
+  )
+  if (snapshot[initialOffset + 2] === '--lifecycle-file') {
     return Object.freeze({
       files: Object.freeze({ materialKind: 'success', materialFile }),
-      nextOffset: 6,
+      nextOffset: initialOffset + 2,
     })
   }
   if (
-    snapshot[6] === '--fault-plan-file' &&
-    snapshot[8] === '--boundary-rate-segment-file'
+    snapshot[initialOffset + 2] === '--fault-plan-file' &&
+    snapshot[initialOffset + 4] === '--boundary-rate-segment-file'
   ) {
     return Object.freeze({
       files: Object.freeze({
         materialKind: 'fault-boundary',
         materialFile,
-        faultPlanFile: requireStageFinalizerCliPath(snapshot[7]),
+        faultPlanFile: requireStageFinalizerCliPath(
+          snapshot[initialOffset + 3],
+        ),
         boundaryRateSegmentFile:
-          requireStageFinalizerCliPath(snapshot[9]),
+          requireStageFinalizerCliPath(snapshot[initialOffset + 5]),
       }),
-      nextOffset: 10,
+      nextOffset: initialOffset + 6,
     })
   }
   if (
-    snapshot[6] === '--boundary-material-file' &&
-    snapshot[8] === '--fault-plan-file' &&
-    snapshot[10] === '--boundary-rate-segment-file' &&
-    snapshot[12] === '--final-rate-segment-file'
+    snapshot[initialOffset + 2] === '--boundary-material-file' &&
+    snapshot[initialOffset + 4] === '--fault-plan-file' &&
+    snapshot[initialOffset + 6] === '--boundary-rate-segment-file' &&
+    snapshot[initialOffset + 8] === '--final-rate-segment-file'
   ) {
     return Object.freeze({
       files: Object.freeze({
         materialKind: 'fault-completion',
         materialFile,
         boundaryMaterialFile:
-          requireStageFinalizerCliPath(snapshot[7]),
-        faultPlanFile: requireStageFinalizerCliPath(snapshot[9]),
+          requireStageFinalizerCliPath(snapshot[initialOffset + 3]),
+        faultPlanFile: requireStageFinalizerCliPath(
+          snapshot[initialOffset + 5],
+        ),
         boundaryRateSegmentFile:
-          requireStageFinalizerCliPath(snapshot[11]),
+          requireStageFinalizerCliPath(snapshot[initialOffset + 7]),
         finalRateSegmentFile:
-          requireStageFinalizerCliPath(snapshot[13]),
+          requireStageFinalizerCliPath(snapshot[initialOffset + 9]),
       }),
-      nextOffset: 14,
+      nextOffset: initialOffset + 10,
     })
   }
   throw invalidUsage()
@@ -694,6 +714,36 @@ function requireStageFinalizerMaterialMatchesSelection(
   ) throw unsupportedStage()
 }
 
+/**
+ * Requires the predecessor input shape implied by an authenticated selection.
+ *
+ * Global stage one admits an omitted file or an explicit canonical null. Every
+ * later stage requires one non-null authenticated predecessor file; selection
+ * and finalization perform the complete receipt-chain authentication.
+ *
+ * @param previousReceiptFile - Optional operator-selected predecessor path.
+ * @param previousReceipt - Parsed predecessor candidate or internal null.
+ * @param selection - Authenticated next manifest stage.
+ */
+function requireStageFinalizerPreviousReceiptMatchesSelection(
+  previousReceiptFile: string | undefined,
+  previousReceipt: unknown,
+  selection: WorkspaceSearchMigrationRehearsalSupportedSelectedStage,
+): void {
+  if (selection.entry.ordinal === 1) {
+    if (
+      previousReceipt !== null ||
+      selection.previousStageReceiptDigest !== null
+    ) throw unsupportedStage()
+    return
+  }
+  if (
+    previousReceiptFile === undefined ||
+    previousReceipt === null ||
+    selection.previousStageReceiptDigest === null
+  ) throw unsupportedStage()
+}
+
 /** Calls the finalizer with the exact loaded material union arm. */
 function finalizeStageFinalizerMaterialInput(
   material: ReadStageFinalizerMaterialInput,
@@ -783,12 +833,14 @@ export async function runWorkspaceSearchMigrationRehearsalStageFinalizerCli(
       capturedDependencies,
       ownedBuffers,
     )
-    const previousReceipt = await readCanonicalStageFinalizerDocument(
-      configuration.previousReceiptFile,
-      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RECEIPT_MAX_BYTES,
-      capturedDependencies,
-      ownedBuffers,
-    )
+    const previousReceipt = configuration.previousReceiptFile === undefined
+      ? null
+      : await readCanonicalStageFinalizerDocument(
+          configuration.previousReceiptFile,
+          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RECEIPT_MAX_BYTES,
+          capturedDependencies,
+          ownedBuffers,
+        )
     const controlArgumentsValue = await readCanonicalStageFinalizerDocument(
       configuration.controlArgumentsFile,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_CONTROL_ARGUMENTS_MAX_BYTES,
@@ -832,6 +884,11 @@ export async function runWorkspaceSearchMigrationRehearsalStageFinalizerCli(
     } finally {
       zeroizeStageFinalizerBytes(selectionKey)
     }
+    requireStageFinalizerPreviousReceiptMatchesSelection(
+      configuration.previousReceiptFile,
+      previousReceipt,
+      selection,
+    )
     requireStageFinalizerMaterialMatchesSelection(materialInput, selection)
     const requirement =
       determineWorkspaceSearchMigrationRehearsalStageFinalizerProofRequirement(
@@ -857,6 +914,7 @@ export async function runWorkspaceSearchMigrationRehearsalStageFinalizerCli(
     const proof = await readStageFinalizerProof(
       configuration.proofFiles,
       selection,
+      stageKey,
       capturedDependencies,
       ownedBuffers,
     )
@@ -926,14 +984,12 @@ function parseStageFinalizerProofFileSuffix(
     return Object.freeze({ kind: 'none' })
   }
   if (
-    suffix.length === 8 &&
-    suffix[0] === '--target-preimage-audit-file' &&
-    suffix[2] === '--target-audit-key-file'
+    suffix.length === 6 &&
+    suffix[0] === '--target-preimage-audit-file'
   ) {
     return Object.freeze({
       kind: 'complete-apply',
       targetPreimageAuditFile: requireStageFinalizerCliPath(suffix[1]),
-      targetAuditKeyFile: requireStageFinalizerCliPath(suffix[3]),
     })
   }
   if (
@@ -965,8 +1021,10 @@ function stageFinalizerProofArgumentLength(
   proof: WorkspaceSearchMigrationRehearsalStageFinalizerProofFiles,
 ): 0 | 2 | 4 {
   if (proof.kind === 'none') return 0
-  if (proof.kind === 'planning-receipt') return 2
-  if (proof.kind === 'complete-apply') return 4
+  if (
+    proof.kind === 'planning-receipt' ||
+    proof.kind === 'complete-apply'
+  ) return 2
   return 4
 }
 
@@ -1014,7 +1072,9 @@ function requireDistinctStageFinalizerCliPaths(
 ): void {
   const paths = [
     configuration.manifestFile,
-    configuration.previousReceiptFile,
+    ...(configuration.previousReceiptFile === undefined
+      ? []
+      : [configuration.previousReceiptFile]),
     configuration.materialFile,
     configuration.lifecycleFile,
     configuration.parentAuthenticationFile,
@@ -1037,7 +1097,7 @@ function requireDistinctStageFinalizerCliPaths(
   }
   const proof = configuration.proofFiles
   if (proof.kind === 'complete-apply') {
-    paths.push(proof.targetPreimageAuditFile, proof.targetAuditKeyFile)
+    paths.push(proof.targetPreimageAuditFile)
   } else if (proof.kind === 'planning-receipt') {
     paths.push(proof.planningReceiptFile)
   } else if (proof.kind === 'terminal') {
@@ -1185,13 +1245,27 @@ function readStageFinalizerControlArguments(
   return Object.freeze(snapshot)
 }
 
-/** Reads the exact raw proof selected by the authenticated stage. */
+/**
+ * Reads the exact raw proof selected by the authenticated stage.
+ *
+ * Complete-apply target verification receives a fresh copy of the already
+ * derived stage runtime key so no second raw-key input can diverge from the
+ * authenticated stage identity.
+ *
+ * @param files - Strict proof-file profile selected by the CLI parser.
+ * @param selection - Main-key-authenticated selected stage.
+ * @param runtimeAuthenticationKey - Derived stage runtime key to copy.
+ * @param dependencies - Captured private input boundary.
+ * @param ownedBuffers - Buffers overwritten when the CLI invocation ends.
+ * @returns Finalizer proof matching the authenticated selected stage.
+ */
 async function readStageFinalizerProof(
   files: WorkspaceSearchMigrationRehearsalStageFinalizerProofFiles,
   selection: WorkspaceSearchMigrationRehearsalSupportedSelectedStage,
+  runtimeAuthenticationKey: Uint8Array,
   dependencies: Pick<
     WorkspaceSearchMigrationRehearsalStageFinalizerCliDependencies,
-    'readKeyFile' | 'readPrivateInputFile'
+    'readPrivateInputFile'
   >,
   ownedBuffers: Uint8Array[],
 ): Promise<WorkspaceSearchMigrationRehearsalStageFinalizationProof> {
@@ -1236,12 +1310,8 @@ async function readStageFinalizerProof(
       dependencies,
       ownedBuffers,
     )
-    const verificationKey = await readStageFinalizerKey(
-      files.targetAuditKeyFile,
-      dependencies,
-      ownedBuffers,
-      invalidProof,
-    )
+    const verificationKey = copyStageFinalizerKey(runtimeAuthenticationKey)
+    ownedBuffers.push(verificationKey)
     return Object.freeze({
       kind: 'apply',
       planningReceipt: null,

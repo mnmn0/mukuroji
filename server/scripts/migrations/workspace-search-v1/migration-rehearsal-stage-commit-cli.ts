@@ -1227,6 +1227,9 @@ function createStageCommitTargetAuditContext(
     permitDigest: input.receipt.permitDigest,
     requestedResourcesBinding: input.receipt.requestedResourcesBinding,
     configurationBindingDigest: input.receipt.configurationBindingDigest,
+    policyVersion: input.receipt.policyVersion,
+    integrityResourceIdentityDigest:
+      input.selection.manifest.integrityResourceIdentityDigest,
     planningReceiptDigest: createMigrationDigest(input.receipt),
     executionBoundaryDigest:
       input.receipt.evidence.executionBoundaryDigest,

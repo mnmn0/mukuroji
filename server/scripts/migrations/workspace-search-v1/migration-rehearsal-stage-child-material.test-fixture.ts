@@ -26,12 +26,16 @@ import {
   type WorkspaceSearchMigrationRehearsalScenarioName,
 } from './migration-rehearsal-evidence'
 import {
+  createWorkspaceSearchMigrationRehearsalProductionAccountDigest,
   createWorkspaceSearchMigrationRehearsalPermit,
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_APPROVAL,
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PERMIT_KIND,
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PERMIT_VERSION,
   type WorkspaceSearchMigrationRehearsalPermit,
 } from './migration-rehearsal-permit'
+import type {
+  WorkspaceSearchMigrationRehearsalIntegrityAttestationRootProjection,
+} from './migration-rehearsal-integrity-rate-evidence'
 import {
   createWorkspaceSearchMigrationRehearsalRateAuthenticationKeyFingerprint,
   type WorkspaceSearchMigrationRehearsalRateCommittedSegment,
@@ -124,6 +128,9 @@ export type WorkspaceSearchMigrationRehearsalStageChildMaterialTestFixture = {
   /** Closed committed segment whose digest matches its exact bytes. */
   readonly committedRateSegment:
     WorkspaceSearchMigrationRehearsalRateCommittedSegment
+  /** Exact canonical permit-root segment preceding global stage one. */
+  readonly integrityAttestationRootSegment:
+    WorkspaceSearchMigrationRehearsalRateCommittedSegment
   /** Reviewed measured configuration digest. */
   readonly configurationBindingDigest: string
   /** Reviewed DescribeTable rate-policy digest. */
@@ -213,9 +220,198 @@ type FixtureStage = {
   readonly attemptOrdinal: number
 }
 
+/** Genuine raw ordinal-zero segment and its frozen permit projection. */
+type FixtureIntegrityAttestationRoot = {
+  /** Structurally strict projection copied into permit and manifest claims. */
+  readonly projection:
+    WorkspaceSearchMigrationRehearsalIntegrityAttestationRootProjection
+  /** Exact runtime-key-authenticated ordinal-zero canonical segment. */
+  readonly committedSegment:
+    WorkspaceSearchMigrationRehearsalRateCommittedSegment
+}
+
 /** Returns one deterministic lowercase SHA-256 digest. */
 function digest(label: string): string {
   return createHash('sha256').update(label, 'utf8').digest('hex')
+}
+
+/** Creates the exact domain-separated HMAC for one fixture rate record. */
+function createFixtureRateRecordMac(
+  payload: unknown,
+  authenticationKey: Uint8Array,
+): string {
+  return createHmac('sha256', authenticationKey)
+    .update(
+      'mukuroji:workspace-search-migration:rehearsal-rate-record:v2',
+      'utf8',
+    )
+    .update('\0', 'utf8')
+    .update(serializeCanonicalJson(payload), 'utf8')
+    .digest('hex')
+}
+
+/** Creates a clean authentic twelve-attempt ordinal-zero integrity root. */
+function createFixtureIntegrityAttestationRoot(
+  authenticationKey: Uint8Array,
+  configurationBindingDigest: string,
+  policyVersion: string,
+): FixtureIntegrityAttestationRoot {
+  const authenticationKeyFingerprint =
+    createWorkspaceSearchMigrationRehearsalRateAuthenticationKeyFingerprint(
+      authenticationKey,
+    )
+  const headerPayload = Object.freeze({
+    kind:
+      'mukuroji-workspace-search-migration-rehearsal-describe-table-rate-segment',
+    version: 2,
+    segmentLocatorDigest: digest('integrity-root-segment-locator'),
+    segmentOrdinal: 0,
+    previousSegmentDigest: null,
+    previousRecordMac: null,
+    firstEventSequence: 1,
+    anchorUtc: '2026-08-01T23:59:59.000Z',
+    authenticationKeyFingerprint,
+    policyVersion,
+    configurationBindingDigest,
+  })
+  const headerMac = createFixtureRateRecordMac(
+    headerPayload,
+    authenticationKey,
+  )
+  const header = Object.freeze({ ...headerPayload, mac: headerMac })
+  const events: Readonly<Record<string, unknown>>[] = []
+  let previousRecordMac = headerMac
+  for (let attemptSequence = 1; attemptSequence <= 12;
+    attemptSequence += 1) {
+    const firstEventSequence = (attemptSequence - 1) * 2 + 1
+    const phase = attemptSequence <= 6 ? 'measurement' : 'integrity-check'
+    const chargedPayload = Object.freeze({
+      version: 2,
+      eventSequence: firstEventSequence,
+      offsetMilliseconds: (attemptSequence - 1) * 20,
+      previousRecordMac,
+      kind: 'attempt-charged',
+      attemptSequence,
+      phase,
+    })
+    const chargedMac = createFixtureRateRecordMac(
+      chargedPayload,
+      authenticationKey,
+    )
+    events.push(Object.freeze({ ...chargedPayload, mac: chargedMac }))
+    const startedPayload = Object.freeze({
+      version: 2,
+      eventSequence: firstEventSequence + 1,
+      offsetMilliseconds: (attemptSequence - 1) * 20 + 10,
+      previousRecordMac: chargedMac,
+      kind: 'attempt-started',
+      attemptSequence,
+      phase,
+      remainingNormalAdmissionAttempts: 100,
+      remainingWindowAttempts: 100,
+      remainingPageAttempts: 0,
+      inFlight: 1,
+    })
+    const startedMac = createFixtureRateRecordMac(
+      startedPayload,
+      authenticationKey,
+    )
+    events.push(Object.freeze({ ...startedPayload, mac: startedMac }))
+    previousRecordMac = startedMac
+  }
+  const canonicalText = [header, ...events]
+    .map((record) => `${serializeCanonicalJson(record)}\n`)
+    .join('')
+  const canonicalBytes = new TextEncoder().encode(canonicalText)
+  const segmentDigest = createHash('sha256')
+    .update(canonicalBytes)
+    .digest('hex')
+  const committedSegment = Object.freeze({
+    authenticationKeyFingerprint,
+    segmentLocatorDigest: headerPayload.segmentLocatorDigest,
+    segmentOrdinal: 0,
+    firstEventSequence: 1,
+    eventCount: 24,
+    firstCommittedEventSequence: 1,
+    lastCommittedEventSequence: 24,
+    terminalRecordMac: previousRecordMac,
+    segmentDigest,
+    canonicalBytes,
+  })
+  const aggregate = Object.freeze({
+    version: 2,
+    policyVersion,
+    attemptCount: 12,
+    forfeitedAttemptCount: 0,
+    throttleCount: 0,
+    awsServiceThrottleCount: 0,
+    rehearsalInjectedThrottleCount: 0,
+    budgetStopCount: 0,
+    operationalBudgetStopCount: 0,
+    awsServiceThrottleBudgetStopCount: 0,
+    rehearsalInjectedBudgetStopCount: 0,
+    cadenceWaitCount: 0,
+    cadenceWaitMilliseconds: 0,
+    maximumInFlight: 1,
+  })
+  const projection: WorkspaceSearchMigrationRehearsalIntegrityAttestationRootProjection =
+    Object.freeze({
+      kind:
+        'mukuroji-workspace-search-migration-rehearsal-integrity-attestation-root-projection',
+      version: 1,
+      deploymentTargetId: 'fixture-rehearsal',
+      productionAccountDigest:
+        createWorkspaceSearchMigrationRehearsalProductionAccountDigest(
+          '999999999999',
+        ),
+      configurationBindingDigest,
+      policyVersion,
+      attestation: Object.freeze({
+        contentMac: digest('integrity-root-attestation-content'),
+        byteLength: 1_024,
+      }),
+      segment: Object.freeze({
+        authenticationKeyFingerprint:
+          committedSegment.authenticationKeyFingerprint,
+        segmentLocatorDigest: committedSegment.segmentLocatorDigest,
+        segmentOrdinal: committedSegment.segmentOrdinal,
+        firstEventSequence: committedSegment.firstEventSequence,
+        eventCount: committedSegment.eventCount,
+        firstCommittedEventSequence:
+          committedSegment.firstCommittedEventSequence,
+        lastCommittedEventSequence:
+          committedSegment.lastCommittedEventSequence,
+        terminalRecordMac: committedSegment.terminalRecordMac,
+        segmentDigest: committedSegment.segmentDigest,
+      }),
+      interval: Object.freeze({
+        kind:
+          'mukuroji-workspace-search-migration-rehearsal-integrity-rate-interval',
+        version: 1,
+        phase: 'integrity-check',
+        tablePassCount: 1,
+        describeTableCallCount: 6,
+        firstAttemptSequence: 7,
+        lastAttemptSequence: 12,
+        attemptSequences: Object.freeze([7, 8, 9, 10, 11, 12]),
+        firstEventSequence: 13,
+        lastEventSequence: 24,
+        eventSequences: Object.freeze(
+          Array.from({ length: 12 }, (_value, index) => index + 13),
+        ),
+        cadenceWaitCount: 0,
+        cadenceWaitMilliseconds: 0,
+        startedAt: '2026-08-01T23:59:59.120Z',
+        completedAt: '2026-08-01T23:59:59.230Z',
+      }),
+      aggregate,
+      aggregateDigest: createMigrationDigest(aggregate),
+      tableOrderBindingMac: digest('integrity-root-table-order'),
+      rootMac: digest('integrity-root'),
+      startedAt: '2026-08-01T23:59:59.000Z',
+      completedAt: '2026-08-01T23:59:59.999Z',
+    })
+  return Object.freeze({ projection, committedSegment })
 }
 
 /** Fixed reviewed policy path used by every strict fixture control command. */
@@ -257,6 +453,15 @@ const fixtureRatePolicyBytes = new TextEncoder().encode(
     throttleBackoffMaximumMilliseconds: 2_000,
   }),
 )
+
+/**
+ * Creates fresh canonical reviewed rate-policy bytes shared by CLI fixtures.
+ *
+ * @returns Fresh bytes whose SHA-256 digest is the fixture policy version.
+ */
+export function createWorkspaceSearchMigrationRehearsalStageChildMaterialRatePolicyBytes(): Uint8Array {
+  return new Uint8Array(fixtureRatePolicyBytes)
+}
 
 /**
  * Builds one complete strict control command for an authenticated stage.
@@ -339,7 +544,7 @@ function createFixtureControlArguments(
 function createFixtureClaimedStageContext(
   selection: WorkspaceSearchMigrationRehearsalSelectedStage,
   expectedPreviousRateSegment:
-    WorkspaceSearchMigrationRehearsalStageRateSegment | null,
+    WorkspaceSearchMigrationRehearsalStageRateSegment,
   authenticationKey: Uint8Array,
   label: string,
 ): {
@@ -356,9 +561,7 @@ function createFixtureClaimedStageContext(
       expiresAt: '2026-08-02T01:40:00.000Z',
       expectedPreviousRateSegment,
       expectedCurrentRateSegmentOrdinal:
-        expectedPreviousRateSegment === null
-          ? 0
-          : expectedPreviousRateSegment.segmentOrdinal + 1,
+        expectedPreviousRateSegment.segmentOrdinal + 1,
       expectedTargetPreimageArtifactContentDigest:
         selection.entry.command === 'apply' &&
           (selection.entry.scenario === 'complete-apply-rollback' ||
@@ -494,6 +697,8 @@ function createFixtureManifestClaims(
   requestedResourcesBinding: string,
   configurationBindingDigest: string,
   policyVersion: string,
+  integrityAttestationRoot:
+    WorkspaceSearchMigrationRehearsalIntegrityAttestationRootProjection,
 ): WorkspaceSearchMigrationRehearsalStageManifestClaims {
   const entries: WorkspaceSearchMigrationRehearsalStageManifestEntry[] = []
   let ordinal = 1
@@ -539,6 +744,7 @@ function createFixtureManifestClaims(
     integrityResourceIdentities: fixtureIntegrityResourceIdentities,
     integrityResourceIdentityDigest:
       digest('integrity-resource-identity'),
+    integrityAttestationRoot,
     configurationBindingDigest,
     policyVersion,
     reviewedAt: '2026-08-02T00:00:00.000Z',
@@ -578,6 +784,11 @@ export function createWorkspaceSearchMigrationRehearsalStageChildMaterialTestFix
   const policyVersion = options.policyVersion ?? createHash('sha256')
     .update(fixtureRatePolicyBytes)
     .digest('hex')
+  const integrityAttestationRoot = createFixtureIntegrityAttestationRoot(
+    authenticationKey,
+    configurationBindingDigest,
+    policyVersion,
+  )
   const permit = createWorkspaceSearchMigrationRehearsalPermit({
     claims: Object.freeze({
       kind: WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PERMIT_KIND,
@@ -590,6 +801,7 @@ export function createWorkspaceSearchMigrationRehearsalStageChildMaterialTestFix
       callerArn:
         'arn:aws:sts::111111111111:assumed-role/Rehearsal/session',
       commit: 'a'.repeat(40),
+      deploymentTargetId: 'fixture-rehearsal',
       requestedResourcesBinding,
       integrityResourceIdentityScheme:
         CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
@@ -600,6 +812,9 @@ export function createWorkspaceSearchMigrationRehearsalStageChildMaterialTestFix
         evidenceKeyDigest,
       publicationKeyDigest,
       deploymentTrustRootDigest: digest('deployment-trust-root'),
+      configurationBindingDigest,
+      policyVersion,
+      integrityAttestationRoot: integrityAttestationRoot.projection,
       issuedAt: '2026-08-02T00:00:00.000Z',
       expiresAt: '2026-08-02T02:30:00.000Z',
     }),
@@ -613,6 +828,7 @@ export function createWorkspaceSearchMigrationRehearsalStageChildMaterialTestFix
       requestedResourcesBinding,
       configurationBindingDigest,
       policyVersion,
+      integrityAttestationRoot.projection,
     ),
     signingKey: authenticationKey,
   })
@@ -631,7 +847,7 @@ export function createWorkspaceSearchMigrationRehearsalStageChildMaterialTestFix
   })
   const claimedStageContext = createFixtureClaimedStageContext(
     selection,
-    null,
+    integrityAttestationRoot.projection.segment,
     authenticationKey,
     'generic-success-stage-reservation',
   )
@@ -662,12 +878,17 @@ export function createWorkspaceSearchMigrationRehearsalStageChildMaterialTestFix
         }),
       }),
       rateAggregate: Object.freeze({
-        version: 1,
+        version: 2,
         policyVersion,
         attemptCount: 0,
         forfeitedAttemptCount: 0,
         throttleCount: 0,
+        awsServiceThrottleCount: 0,
+        rehearsalInjectedThrottleCount: 0,
         budgetStopCount: 0,
+        operationalBudgetStopCount: 0,
+        awsServiceThrottleBudgetStopCount: 0,
+        rehearsalInjectedBudgetStopCount: 0,
         cadenceWaitCount: 0,
         cadenceWaitMilliseconds: 0,
         maximumInFlight: 0,
@@ -686,12 +907,14 @@ export function createWorkspaceSearchMigrationRehearsalStageChildMaterialTestFix
   const rateHeaderClaims = Object.freeze({
     kind:
       'mukuroji-workspace-search-migration-rehearsal-describe-table-rate-segment',
-    version: 1,
-    segmentLocatorDigest: digest('segment-locator'),
-    segmentOrdinal: 0,
-    previousSegmentDigest: null,
-    previousRecordMac: null,
-    firstEventSequence: 1,
+    version: 2,
+    segmentLocatorDigest: digest('stage-one-segment-locator'),
+    segmentOrdinal: 1,
+    previousSegmentDigest:
+      integrityAttestationRoot.committedSegment.segmentDigest,
+    previousRecordMac:
+      integrityAttestationRoot.committedSegment.terminalRecordMac,
+    firstEventSequence: 25,
     anchorUtc: '2026-08-02T00:00:00.000Z',
     authenticationKeyFingerprint,
     policyVersion,
@@ -699,7 +922,7 @@ export function createWorkspaceSearchMigrationRehearsalStageChildMaterialTestFix
   })
   const headerMac = createHmac('sha256', authenticationKey)
     .update(
-      'mukuroji:workspace-search-migration:rehearsal-rate-record:v1',
+      'mukuroji:workspace-search-migration:rehearsal-rate-record:v2',
       'utf8',
     )
     .update('\0', 'utf8')
@@ -711,7 +934,7 @@ export function createWorkspaceSearchMigrationRehearsalStageChildMaterialTestFix
   const committedRateSegment = Object.freeze({
     authenticationKeyFingerprint,
     segmentLocatorDigest: rateHeaderClaims.segmentLocatorDigest,
-    segmentOrdinal: 0,
+    segmentOrdinal: rateHeaderClaims.segmentOrdinal,
     firstEventSequence: rateHeaderClaims.firstEventSequence,
     eventCount: 0,
     firstCommittedEventSequence: null,
@@ -739,6 +962,8 @@ export function createWorkspaceSearchMigrationRehearsalStageChildMaterialTestFix
     ratePolicyBytes: new Uint8Array(fixtureRatePolicyBytes),
     ratePolicyFile: fixtureRatePolicyFile,
     requestedResourcesBinding,
+    integrityAttestationRootSegment:
+      integrityAttestationRoot.committedSegment,
   })
 }
 
@@ -810,6 +1035,8 @@ export function createWorkspaceSearchMigrationRehearsalStageFaultMaterialTestFix
         base.manifest.integrityResourceIdentities,
       integrityResourceIdentityDigest:
         base.manifest.integrityResourceIdentityDigest,
+      integrityAttestationRoot:
+        base.manifest.integrityAttestationRoot,
       configurationBindingDigest:
         base.manifest.configurationBindingDigest,
       policyVersion: base.manifest.policyVersion,
@@ -836,7 +1063,7 @@ export function createWorkspaceSearchMigrationRehearsalStageFaultMaterialTestFix
   const previousRateHeaderClaims = Object.freeze({
     kind:
       'mukuroji-workspace-search-migration-rehearsal-describe-table-rate-segment',
-    version: 1,
+    version: 2,
     segmentLocatorDigest: digest(`segment:${previousEntry.ordinal}`),
     segmentOrdinal: previousEntry.ordinal - 1,
     previousSegmentDigest: digest(`segment:${previousEntry.ordinal - 1}`),
@@ -852,7 +1079,7 @@ export function createWorkspaceSearchMigrationRehearsalStageFaultMaterialTestFix
   })
   const previousRateHeaderMac = createHmac('sha256', key)
     .update(
-      'mukuroji:workspace-search-migration:rehearsal-rate-record:v1',
+      'mukuroji:workspace-search-migration:rehearsal-rate-record:v2',
       'utf8',
     )
     .update('\0', 'utf8')
@@ -988,7 +1215,7 @@ export function createWorkspaceSearchMigrationRehearsalStageFaultMaterialTestFix
   const rateHeaderClaims = Object.freeze({
     kind:
       'mukuroji-workspace-search-migration-rehearsal-describe-table-rate-segment',
-    version: 1,
+    version: 2,
     segmentLocatorDigest: digest(`fault-segment:${scenario}`),
     segmentOrdinal: expectedPreviousRateSegment.segmentOrdinal + 1,
     previousSegmentDigest: expectedPreviousRateSegment.segmentDigest,
@@ -1003,7 +1230,7 @@ export function createWorkspaceSearchMigrationRehearsalStageFaultMaterialTestFix
   })
   const headerMac = createHmac('sha256', key)
     .update(
-      'mukuroji:workspace-search-migration:rehearsal-rate-record:v1',
+      'mukuroji:workspace-search-migration:rehearsal-rate-record:v2',
       'utf8',
     )
     .update('\0', 'utf8')

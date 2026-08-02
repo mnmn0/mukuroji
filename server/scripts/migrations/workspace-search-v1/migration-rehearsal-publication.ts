@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto'
 import { types as nodeUtilTypes } from 'node:util'
 import { createMigrationDigest } from './migration-contract'
-import type {
-  WorkspaceSearchMigrationDescribeTableRateEvidence,
+import {
+  WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
+  type WorkspaceSearchMigrationDescribeTableRateEvidence,
 } from './migration-describe-table-rate-budget'
 import type {
   WorkspaceSearchMigrationNonProductionRehearsalAwsSession,
@@ -67,12 +68,17 @@ const publicationInputKeys = Object.freeze([
 /** Exact complete live DescribeTable aggregate fields. */
 const liveRateEvidenceKeys = Object.freeze([
   'attemptCount',
+  'awsServiceThrottleBudgetStopCount',
+  'awsServiceThrottleCount',
   'budgetStopCount',
   'cadenceWaitCount',
   'cadenceWaitMilliseconds',
   'forfeitedAttemptCount',
   'maximumInFlight',
+  'operationalBudgetStopCount',
   'policyVersion',
+  'rehearsalInjectedBudgetStopCount',
+  'rehearsalInjectedThrottleCount',
   'throttleCount',
   'version',
 ])
@@ -112,7 +118,7 @@ export interface WorkspaceSearchMigrationRehearsalPublicationSession {
     WorkspaceSearchMigrationNonProductionRehearsalAwsSession[
       'readDescribeTableRateEvidence'
     ]
-  /** Reads the permit interval that must contain the complete suite. */
+  /** Reads the permit interval containing first-stage start through completion. */
   readonly readRehearsalPermitValidity:
     WorkspaceSearchMigrationNonProductionRehearsalAwsSession[
       'readRehearsalPermitValidity'
@@ -268,26 +274,8 @@ type PreparedPublicationTiming = {
 }
 
 /** Strict detached live durable DescribeTable aggregate. */
-type ParsedLiveRateEvidence = {
-  /** Exact rate observation contract version. */
-  readonly version: 1
-  /** Exact reviewed rate policy digest. */
-  readonly policyVersion: string
-  /** Conservatively charged physical attempts. */
-  readonly attemptCount: number
-  /** Charged permits forfeited during recovery. */
-  readonly forfeitedAttemptCount: number
-  /** Attempts classified as throttled. */
-  readonly throttleCount: number
-  /** Distinct fail-closed budget stops. */
-  readonly budgetStopCount: number
-  /** Admission cadence waits. */
-  readonly cadenceWaitCount: number
-  /** Total requested cadence delay. */
-  readonly cadenceWaitMilliseconds: number
-  /** Maximum charged concurrent attempt count. */
-  readonly maximumInFlight: 0 | 1
-}
+type ParsedLiveRateEvidence =
+  WorkspaceSearchMigrationDescribeTableRateEvidence
 
 /** Strict guards bound to this module's stable invalid-argument failure. */
 const publicationGuards = new WorkspaceSearchMigrationStrictRecordGuards(
@@ -662,12 +650,23 @@ function requireSessionBinding(
     rateEvidence.forfeitedAttemptCount !==
       finalizedRate.forfeitedAttemptCount ||
     rateEvidence.throttleCount !== finalizedRate.throttleCount ||
+    rateEvidence.awsServiceThrottleCount !==
+      finalizedRate.awsServiceThrottleCount ||
+    rateEvidence.rehearsalInjectedThrottleCount !==
+      finalizedRate.rehearsalInjectedThrottleCount ||
     rateEvidence.budgetStopCount !== finalizedRate.budgetStopCount ||
+    rateEvidence.operationalBudgetStopCount !==
+      finalizedRate.operationalBudgetStopCount ||
+    rateEvidence.awsServiceThrottleBudgetStopCount !==
+      finalizedRate.awsServiceThrottleBudgetStopCount ||
+    rateEvidence.rehearsalInjectedBudgetStopCount !==
+      finalizedRate.rehearsalInjectedBudgetStopCount ||
     rateEvidence.cadenceWaitCount !== finalizedRate.cadenceWaitCount ||
     rateEvidence.cadenceWaitMilliseconds !==
       finalizedRate.cadenceWaitMilliseconds ||
     rateEvidence.maximumInFlight !== finalizedRate.maximumInFlight ||
-    Date.parse(suite.startedAt) < Date.parse(permitValidity.issuedAt) ||
+    Date.parse(suite.firstStageStartedAt) <
+      Date.parse(permitValidity.issuedAt) ||
     Date.parse(suite.completedAt) >= Date.parse(permitValidity.expiresAt) ||
     !attestationsEqual(binding.attestation, suite.attestation)
   ) {
@@ -681,7 +680,10 @@ function readLiveRateEvidence(
 ): ParsedLiveRateEvidence {
   const record = sessionBindingGuards.requireRecord(value)
   sessionBindingGuards.requireExactKeys(record, liveRateEvidenceKeys)
-  if (sessionBindingGuards.readOwn(record, 'version') !== 1) {
+  if (
+    sessionBindingGuards.readOwn(record, 'version') !==
+      WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION
+  ) {
     return failPublication('SESSION_BINDING_MISMATCH')
   }
   const maximumInFlight = sessionBindingGuards.readOwn(
@@ -691,8 +693,9 @@ function readLiveRateEvidence(
   if (maximumInFlight !== 0 && maximumInFlight !== 1) {
     return failPublication('SESSION_BINDING_MISMATCH')
   }
-  return Object.freeze({
-    version: 1,
+  const evidence: ParsedLiveRateEvidence = Object.freeze({
+    version:
+      WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
     policyVersion: sessionBindingGuards.readDigest(
       sessionBindingGuards.readOwn(record, 'policyVersion'),
     ),
@@ -700,12 +703,32 @@ function readLiveRateEvidence(
     forfeitedAttemptCount:
       readLiveRateCount(record, 'forfeitedAttemptCount'),
     throttleCount: readLiveRateCount(record, 'throttleCount'),
+    awsServiceThrottleCount:
+      readLiveRateCount(record, 'awsServiceThrottleCount'),
+    rehearsalInjectedThrottleCount:
+      readLiveRateCount(record, 'rehearsalInjectedThrottleCount'),
     budgetStopCount: readLiveRateCount(record, 'budgetStopCount'),
+    operationalBudgetStopCount:
+      readLiveRateCount(record, 'operationalBudgetStopCount'),
+    awsServiceThrottleBudgetStopCount:
+      readLiveRateCount(record, 'awsServiceThrottleBudgetStopCount'),
+    rehearsalInjectedBudgetStopCount:
+      readLiveRateCount(record, 'rehearsalInjectedBudgetStopCount'),
     cadenceWaitCount: readLiveRateCount(record, 'cadenceWaitCount'),
     cadenceWaitMilliseconds:
       readLiveRateCount(record, 'cadenceWaitMilliseconds'),
     maximumInFlight,
   })
+  if (
+    evidence.throttleCount !==
+      evidence.awsServiceThrottleCount +
+        evidence.rehearsalInjectedThrottleCount ||
+    evidence.budgetStopCount !==
+      evidence.operationalBudgetStopCount +
+        evidence.awsServiceThrottleBudgetStopCount +
+        evidence.rehearsalInjectedBudgetStopCount
+  ) return failPublication('SESSION_BINDING_MISMATCH')
+  return evidence
 }
 
 /** Reads one nonnegative safe live rate counter. */

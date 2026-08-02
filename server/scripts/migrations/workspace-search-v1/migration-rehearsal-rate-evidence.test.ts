@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { createHash } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 import type {
   WorkspaceSearchMigrationDescribeTablePhase,
   WorkspaceSearchMigrationDescribeTableRateEvidence,
@@ -98,6 +98,8 @@ function attemptObservation(
 function throttleObservation(
   sequence: number,
   observedAtMilliseconds: number,
+  provenance: 'aws-service' | 'rehearsal-after-success-injection' =
+    'aws-service',
 ): WorkspaceSearchMigrationDescribeTableRateObservation {
   return {
     version:
@@ -107,24 +109,30 @@ function throttleObservation(
     sequence,
     observedAtMilliseconds,
     backoffMilliseconds: 125,
+    provenance,
   }
 }
 
 /** Creates one sanitized fail-closed budget observation. */
 function budgetStopObservation(
   observedAtMilliseconds: number,
+  provenance:
+    | 'aws-service-throttle'
+    | 'operational'
+    | 'rehearsal-after-success-injection' = 'aws-service-throttle',
 ): WorkspaceSearchMigrationDescribeTableRateObservation {
   return {
     version:
       WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
     kind: 'budget-stop',
     phase: 'checkpoint-page',
-    reason: 'budget-capacity',
+    reason: provenance === 'operational' ? 'budget-capacity' : 'throttled',
     observedAtMilliseconds,
     requiredAttempts: 1,
     remainingNormalAdmissionAttempts: 0,
     remainingWindowAttempts: 0,
     retryAfterMilliseconds: 500,
+    provenance,
   }
 }
 
@@ -208,14 +216,37 @@ function readSegmentChain(bytes: Uint8Array): SegmentChain {
 function durableEvidence(
   overrides: Partial<WorkspaceSearchMigrationDescribeTableRateEvidence> = {},
 ): WorkspaceSearchMigrationDescribeTableRateEvidence {
+  const throttleCount = overrides.throttleCount ?? 0
+  const rehearsalInjectedThrottleCount =
+    overrides.rehearsalInjectedThrottleCount ?? 0
+  const awsServiceThrottleCount = overrides.awsServiceThrottleCount ??
+    throttleCount - rehearsalInjectedThrottleCount
+  const budgetStopCount = overrides.budgetStopCount ?? 0
+  const rehearsalInjectedBudgetStopCount =
+    overrides.rehearsalInjectedBudgetStopCount ?? 0
+  const awsServiceThrottleBudgetStopCount =
+    overrides.awsServiceThrottleBudgetStopCount ??
+      (awsServiceThrottleCount > 0
+        ? budgetStopCount - rehearsalInjectedBudgetStopCount
+        : 0)
+  const operationalBudgetStopCount =
+    overrides.operationalBudgetStopCount ??
+      budgetStopCount -
+        rehearsalInjectedBudgetStopCount -
+        awsServiceThrottleBudgetStopCount
   return {
     version:
       WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
     policyVersion,
     attemptCount: 1,
     forfeitedAttemptCount: 0,
-    throttleCount: 0,
-    budgetStopCount: 0,
+    throttleCount,
+    awsServiceThrottleCount,
+    rehearsalInjectedThrottleCount,
+    budgetStopCount,
+    operationalBudgetStopCount,
+    awsServiceThrottleBudgetStopCount,
+    rehearsalInjectedBudgetStopCount,
     cadenceWaitCount: 0,
     cadenceWaitMilliseconds: 0,
     maximumInFlight: 1,
@@ -542,6 +573,52 @@ describe('migration rehearsal actual DescribeTable rate evidence', () => {
     await successor.recorder.close()
   })
 
+  test('rejects an authenticated unpublished v1 segment contract', () => {
+    const legacyFingerprint = createHmac('sha256', key)
+      .update(
+        'mukuroji:workspace-search-migration:rehearsal-rate-authentication-key-fingerprint:v1',
+        'utf8',
+      )
+      .digest('hex')
+    const legacyHeaderPayload = Object.freeze({
+      kind:
+        'mukuroji-workspace-search-migration-rehearsal-describe-table-rate-segment',
+      version: 1,
+      authenticationKeyFingerprint: legacyFingerprint,
+      segmentLocatorDigest: digest('legacy-v1-rate-segment'),
+      segmentOrdinal: 0,
+      previousSegmentDigest: null,
+      previousRecordMac: null,
+      firstEventSequence: 1,
+      anchorUtc: '2026-08-02T00:00:00.000Z',
+      policyVersion,
+      configurationBindingDigest,
+    })
+    const legacyHeaderMac = createHmac('sha256', key)
+      .update(
+        'mukuroji:workspace-search-migration:rehearsal-rate-record:v1',
+        'utf8',
+      )
+      .update('\0', 'utf8')
+      .update(serializeCanonicalJson(legacyHeaderPayload), 'utf8')
+      .digest('hex')
+    const legacyBytes = new TextEncoder().encode(
+      `${serializeCanonicalJson({
+        ...legacyHeaderPayload,
+        mac: legacyHeaderMac,
+      })}\n`,
+    )
+
+    expect(() =>
+      recoverWorkspaceSearchMigrationRehearsalRateContinuation({
+        previousSegmentBytes: legacyBytes,
+        authenticationKey: key,
+        expectedPolicyVersion: policyVersion,
+        expectedConfigurationBindingDigest: configurationBindingDigest,
+      })
+    ).toThrow('Invalid migration rehearsal rate evidence.')
+  })
+
   test('recovers exact successor metadata from an authenticated complete SIGKILL prefix', async () => {
     const stored = await createStoredSegment({
       segmentOrdinal: 0,
@@ -686,12 +763,17 @@ describe('migration rehearsal actual DescribeTable rate evidence', () => {
     )
 
     expect(result.evidence.aggregate).toEqual({
-      version: 1,
+      version: 2,
       policyVersion,
       attemptCount: 5,
       forfeitedAttemptCount: 2,
       throttleCount: 1,
+      awsServiceThrottleCount: 1,
+      rehearsalInjectedThrottleCount: 0,
       budgetStopCount: 1,
+      operationalBudgetStopCount: 0,
+      awsServiceThrottleBudgetStopCount: 1,
+      rehearsalInjectedBudgetStopCount: 0,
       cadenceWaitCount: 1,
       cadenceWaitMilliseconds: 50,
       maximumInFlight: 1,
@@ -712,6 +794,152 @@ describe('migration rehearsal actual DescribeTable rate evidence', () => {
     let artifactValue: unknown = JSON.parse(artifactText)
     expect(serializeCanonicalJson(artifactValue)).toBe(artifactText)
     await stored.recorder.close()
+  })
+
+  test('separates the deterministic post-success exercise from zero AWS throttles', async () => {
+    const stored = await createStoredSegment({
+      segmentOrdinal: 0,
+      firstEventSequence: 1,
+      previousSegmentDigest: null,
+      previousRecordMac: null,
+      anchorUtc: '2026-08-02T00:00:00.000Z',
+      monotonicAnchorMilliseconds: 1_000,
+    })
+    stored.recorder.record(attemptObservation(1, 1_000, 'measurement'))
+    stored.recorder.record(throttleObservation(
+      1,
+      1_001,
+      'rehearsal-after-success-injection',
+    ))
+    stored.recorder.record(budgetStopObservation(
+      1_002,
+      'rehearsal-after-success-injection',
+    ))
+    const committed = await stored.recorder.flush()
+    const result = finalize(
+      [committed.canonicalBytes],
+      durableEvidence({
+        throttleCount: 1,
+        awsServiceThrottleCount: 0,
+        rehearsalInjectedThrottleCount: 1,
+        budgetStopCount: 1,
+        operationalBudgetStopCount: 0,
+        awsServiceThrottleBudgetStopCount: 0,
+        rehearsalInjectedBudgetStopCount: 1,
+      }),
+    )
+
+    expect(result.evidence.aggregate.awsServiceThrottleCount).toBe(0)
+    expect(result.evidence.aggregate.rehearsalInjectedThrottleCount).toBe(1)
+    expect(result.evidence.aggregate.rehearsalInjectedBudgetStopCount).toBe(1)
+    expect(result.evidence.observedMaximumRatePerSecond).toBe(1)
+    expect(result.startedAttemptCount).toBe(1)
+    await stored.recorder.close()
+  })
+
+  test('rejects unknown or semantically mismatched observation provenance', async () => {
+    const stored = await createStoredSegment({
+      segmentOrdinal: 0,
+      firstEventSequence: 1,
+      previousSegmentDigest: null,
+      previousRecordMac: null,
+      anchorUtc: '2026-08-02T00:00:00.000Z',
+      monotonicAnchorMilliseconds: 1_000,
+    })
+    stored.recorder.record(attemptObservation(1, 1_000))
+    Reflect.apply(stored.recorder.record, stored.recorder, [{
+      ...throttleObservation(1, 1_001),
+      provenance: 'unknown',
+    }])
+    await expect(stored.recorder.flush()).rejects.toThrow(
+      'Invalid migration rehearsal rate evidence.',
+    )
+
+    const mismatch = await createStoredSegment({
+      segmentOrdinal: 0,
+      firstEventSequence: 1,
+      previousSegmentDigest: null,
+      previousRecordMac: null,
+      anchorUtc: '2026-08-02T00:00:00.000Z',
+      monotonicAnchorMilliseconds: 1_000,
+    })
+    Reflect.apply(mismatch.recorder.record, mismatch.recorder, [{
+      ...budgetStopObservation(1_002, 'operational'),
+      reason: 'throttled',
+    }])
+    await expect(mismatch.recorder.flush()).rejects.toThrow(
+      'Invalid migration rehearsal rate evidence.',
+    )
+    await expect(stored.recorder.close()).rejects.toThrow(
+      'Invalid migration rehearsal rate evidence.',
+    )
+    await expect(mismatch.recorder.close()).rejects.toThrow(
+      'Invalid migration rehearsal rate evidence.',
+    )
+  })
+
+  test('rejects sequence, source-pair, and durable source-total mismatches', async () => {
+    const wrongSequence = await createStoredSegment({
+      segmentOrdinal: 0,
+      firstEventSequence: 1,
+      previousSegmentDigest: null,
+      previousRecordMac: null,
+      anchorUtc: '2026-08-02T00:00:00.000Z',
+      monotonicAnchorMilliseconds: 1_000,
+    })
+    wrongSequence.recorder.record(attemptObservation(1, 1_000))
+    wrongSequence.recorder.record(throttleObservation(2, 1_001))
+    wrongSequence.recorder.record(budgetStopObservation(1_002))
+    const wrongSequenceCommitted = await wrongSequence.recorder.flush()
+    expect(() => finalize(
+      [wrongSequenceCommitted.canonicalBytes],
+      durableEvidence({ throttleCount: 1, budgetStopCount: 1 }),
+    )).toThrow('Invalid migration rehearsal rate evidence.')
+
+    const wrongPair = await createStoredSegment({
+      segmentOrdinal: 0,
+      firstEventSequence: 1,
+      previousSegmentDigest: null,
+      previousRecordMac: null,
+      anchorUtc: '2026-08-02T00:00:00.000Z',
+      monotonicAnchorMilliseconds: 1_000,
+    })
+    wrongPair.recorder.record(attemptObservation(1, 1_000))
+    wrongPair.recorder.record(throttleObservation(1, 1_001))
+    wrongPair.recorder.record(budgetStopObservation(
+      1_002,
+      'rehearsal-after-success-injection',
+    ))
+    const wrongPairCommitted = await wrongPair.recorder.flush()
+    expect(() => finalize(
+      [wrongPairCommitted.canonicalBytes],
+      durableEvidence({ throttleCount: 1, budgetStopCount: 1 }),
+    )).toThrow('Invalid migration rehearsal rate evidence.')
+
+    const correctPair = await createStoredSegment({
+      segmentOrdinal: 0,
+      firstEventSequence: 1,
+      previousSegmentDigest: null,
+      previousRecordMac: null,
+      anchorUtc: '2026-08-02T00:00:00.000Z',
+      monotonicAnchorMilliseconds: 1_000,
+    })
+    correctPair.recorder.record(attemptObservation(1, 1_000))
+    correctPair.recorder.record(throttleObservation(1, 1_001))
+    correctPair.recorder.record(budgetStopObservation(1_002))
+    const correctPairCommitted = await correctPair.recorder.flush()
+    expect(() => finalize(
+      [correctPairCommitted.canonicalBytes],
+      durableEvidence({
+        throttleCount: 1,
+        awsServiceThrottleCount: 0,
+        budgetStopCount: 1,
+        awsServiceThrottleBudgetStopCount: 1,
+      }),
+    )).toThrow('Invalid migration rehearsal rate evidence.')
+    await wrongSequence.recorder.close()
+    await wrongPair.recorder.close()
+    await correctPair.recorder.close()
   })
 
   test('joins a SIGKILL cutoff only after restart forfeits the durable charge', async () => {

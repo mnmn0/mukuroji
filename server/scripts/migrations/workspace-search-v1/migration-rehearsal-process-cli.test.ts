@@ -20,8 +20,10 @@ import {
   workspaceSearchMigrationControlApprovalLiterals,
 } from './migration-control-coordinator'
 import {
+  createWorkspaceSearchMigrationRehearsalPermit,
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_APPROVAL,
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE,
+  type WorkspaceSearchMigrationRehearsalPermit,
 } from './migration-rehearsal-permit'
 import {
   createWorkspaceSearchMigrationRehearsalChildSpawnSpecification,
@@ -32,8 +34,8 @@ import {
   runWorkspaceSearchMigrationRehearsalNoFaultProcess,
   runWorkspaceSearchMigrationRehearsalProcessCli,
   removeWorkspaceSearchMigrationRehearsalRuntimeKeyFile,
-  spawnWorkspaceSearchMigrationRehearsalControlChild,
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_CHILD_SCRIPT,
+  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CHILD_MATERIAL_FILENAME,
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_FAULT_BOUNDARY_MATERIAL_FILENAME,
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_FAULT_BOUNDARY_RATE_SEGMENT_FILENAME,
@@ -104,6 +106,9 @@ import {
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_INITIAL_ABANDONMENT_ROOT_DIGEST,
 } from './migration-rehearsal-stage-reservation-chain'
 import {
+  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PROCESS_CHILD_BOUNDARY_WORKER_PATH,
+} from './migration-rehearsal-process-child-boundary.test-fixture'
+import {
   createWorkspaceSearchMigrationRehearsalStageManifest,
   createWorkspaceSearchMigrationRehearsalStageReceipt,
   selectWorkspaceSearchMigrationRehearsalStage,
@@ -129,9 +134,16 @@ import {
   finalizeWorkspaceSearchMigrationRehearsalRateSegmentEvidence,
   verifyWorkspaceSearchMigrationRehearsalRateSegment,
   verifyWorkspaceSearchMigrationRehearsalRateSegmentSuccessor,
+  type WorkspaceSearchMigrationRehearsalRateCommittedSegment,
   type WorkspaceSearchMigrationRehearsalRateSegmentEvidence,
   type WorkspaceSearchMigrationRehearsalVerifiedRateSegment,
 } from './migration-rehearsal-rate-evidence'
+import {
+  createAuthenticWorkspaceSearchMigrationRehearsalReleaseTerminalFixture,
+  type AuthenticWorkspaceSearchMigrationRehearsalRateSegmentRoleName,
+  type AuthenticWorkspaceSearchMigrationRehearsalReleaseTerminalFixture,
+  type AuthenticWorkspaceSearchMigrationRehearsalReleaseTerminalScenario,
+} from './migration-rehearsal-suite-finalizer.test-fixture'
 import {
   authenticateWorkspaceSearchMigrationRehearsalTargetAuditArtifact,
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_TARGET_AUDIT_KIND,
@@ -210,6 +222,8 @@ type RollbackApplyPreimageProcessFixture = {
   readonly artifactB: Uint8Array
   /** Authentic preimage whose integrity vector differs from the manifest. */
   readonly artifactWithForgedIntegrityVector: Uint8Array
+  /** Authentic preimage bound to a different genuine rate successor. */
+  readonly artifactWithAlternateRate: Uint8Array
 }
 
 /** Both rollback scenarios whose apply admission requires a preimage. */
@@ -219,6 +233,54 @@ const rollbackApplyPreimageScenarios: RollbackApplyPreimageProcessFixture[
   'complete-apply-rollback',
   'partial-apply-rollback',
 ]
+
+/** Process-compatible release inputs derived from one genuine terminal chain. */
+type ReleaseTerminalProcessFixture = {
+  /** Exact verified or rollback scenario immediately before release. */
+  readonly scenario:
+    AuthenticWorkspaceSearchMigrationRehearsalReleaseTerminalScenario
+  /** Original genuine terminal fixture and complete 50-segment ledger. */
+  readonly source:
+    AuthenticWorkspaceSearchMigrationRehearsalReleaseTerminalFixture
+  /** Parent-held master key deriving the fixture runtime and publication keys. */
+  readonly masterAuthenticationKey: Uint8Array
+  /** Fresh authenticated permit matching the strict process control resources. */
+  readonly permit: WorkspaceSearchMigrationRehearsalPermit
+  /** Re-signed genuine manifest containing the strict release argument digest. */
+  readonly manifest: ReturnType<
+    typeof createWorkspaceSearchMigrationRehearsalStageManifest
+  >
+  /** Re-signed genuine terminal receipt immediately preceding release. */
+  readonly previousReceipt: WorkspaceSearchMigrationRehearsalStageReceipt
+  /** Exact strict release control arguments selected by the manifest. */
+  readonly controlArguments: readonly string[]
+  /** Authenticated release selection derived by the production selector. */
+  readonly selection: WorkspaceSearchMigrationRehearsalSelectedStage
+  /** Canonical reviewed rate policy accepted by the process claim boundary. */
+  readonly ratePolicyBytes: Uint8Array
+  /** Exact private path referenced by the strict control arguments. */
+  readonly ratePolicyFile: string
+  /** Genuine reconciliation successor required as the release predecessor. */
+  readonly previousRateSegmentBytes: Uint8Array
+  /** Independently verified summary of the required release predecessor. */
+  readonly expectedPreviousRateSegment:
+    WorkspaceSearchMigrationRehearsalVerifiedRateSegment
+  /** Different authentic same-ordinal segment that must be rejected. */
+  readonly substitutedPreviousRateSegmentBytes: Uint8Array
+  /** Genuine release-owned successor persisted by the successful child. */
+  readonly committedRateSegment:
+    WorkspaceSearchMigrationRehearsalRateCommittedSegment
+  /** Trusted release-admission time following the terminal receipt. */
+  readonly admittedAt: string
+}
+
+/** Every terminal branch that may authorize the strict release command. */
+const releaseTerminalProcessScenarios:
+  AuthenticWorkspaceSearchMigrationRehearsalReleaseTerminalScenario[] = [
+    'happy-path-verified',
+    'partial-apply-rollback',
+    'complete-apply-rollback',
+  ]
 
 /** Returns one conventional SHA-256 digest for deterministic test material. */
 function digestProcessFixture(label: string): string {
@@ -239,11 +301,136 @@ function requireProcessFixtureEntry(
   return entry
 }
 
-/** Creates one canonical target-owned empty rate successor. */
+/** Canonical authenticated rate record used by the process fixture. */
+type ProcessFixtureRateRecord = {
+  /** Exact LF-terminated canonical record bytes. */
+  readonly bytes: Uint8Array
+  /** Terminal record HMAC used by the following event. */
+  readonly mac: string
+}
+
+/** Creates one canonical authenticated rate record and its terminal HMAC. */
+function createProcessFixtureRateRecord(
+  payload: object,
+  runtimeKey: Uint8Array,
+): ProcessFixtureRateRecord {
+  const mac = createHmac('sha256', runtimeKey)
+    .update(
+      'mukuroji:workspace-search-migration:rehearsal-rate-record:v2',
+      'utf8',
+    )
+    .update('\0', 'utf8')
+    .update(serializeCanonicalJson(payload), 'utf8')
+    .digest('hex')
+  return Object.freeze({
+    bytes: new TextEncoder().encode(
+      `${serializeCanonicalJson({ ...payload, mac })}\n`,
+    ),
+    mac,
+  })
+}
+
+/** Concatenates exact rate-record byte chunks without retaining aliases. */
+function concatenateProcessFixtureRateRecords(
+  records: readonly ProcessFixtureRateRecord[],
+): Uint8Array {
+  const byteLength = records.reduce(
+    (total, record) => total + record.bytes.byteLength,
+    0,
+  )
+  const bytes = new Uint8Array(byteLength)
+  let offset = 0
+  for (const record of records) {
+    bytes.set(record.bytes, offset)
+    offset += record.bytes.byteLength
+  }
+  return bytes
+}
+
+/**
+ * Creates one genuine empty successor linked to exact authenticated bytes.
+ *
+ * @param predecessor - Independently verified predecessor summary.
+ * @param predecessorBytes - Exact canonical predecessor bytes.
+ * @param runtimeKey - Runtime HMAC key authenticating both segments.
+ * @param policyVersion - Reviewed policy digest embedded in the header.
+ * @param configurationBindingDigest - Reviewed configuration binding.
+ * @param variant - Stable label making this successor unique.
+ * @param anchorUtc - Canonical successor wall-clock anchor.
+ * @returns Authenticated committed successor including exact canonical bytes.
+ */
+function createProcessFixtureEmptyRateSuccessor(
+  predecessor: WorkspaceSearchMigrationRehearsalVerifiedRateSegment,
+  predecessorBytes: Uint8Array,
+  runtimeKey: Uint8Array,
+  policyVersion: string,
+  configurationBindingDigest: string,
+  variant: string,
+  anchorUtc: string,
+): WorkspaceSearchMigrationRehearsalRateCommittedSegment {
+  const header = createProcessFixtureRateRecord(Object.freeze({
+    kind:
+      'mukuroji-workspace-search-migration-rehearsal-describe-table-rate-segment',
+    version: 2,
+    segmentLocatorDigest:
+      digestProcessFixture(`empty-rate-successor:${variant}`),
+    segmentOrdinal: predecessor.segmentOrdinal + 1,
+    previousSegmentDigest: predecessor.segmentDigest,
+    previousRecordMac: predecessor.terminalRecordMac,
+    firstEventSequence:
+      predecessor.firstEventSequence + predecessor.eventCount,
+    anchorUtc,
+    authenticationKeyFingerprint:
+      createWorkspaceSearchMigrationRehearsalRateAuthenticationKeyFingerprint(
+        runtimeKey,
+      ),
+    policyVersion,
+    configurationBindingDigest,
+  }), runtimeKey)
+  const canonicalBytes = new Uint8Array(header.bytes)
+  const linked =
+    verifyWorkspaceSearchMigrationRehearsalRateSegmentSuccessor({
+      predecessorSegmentBytes: predecessorBytes,
+      successorSegmentBytes: canonicalBytes,
+      authenticationKey: new Uint8Array(runtimeKey),
+      expectedPolicyVersion: policyVersion,
+      expectedConfigurationBindingDigest: configurationBindingDigest,
+    })
+  const verified = verifyWorkspaceSearchMigrationRehearsalRateSegment({
+    canonicalBytes,
+    authenticationKey: new Uint8Array(runtimeKey),
+    expectedSegmentOrdinal: predecessor.segmentOrdinal + 1,
+    expectedPolicyVersion: policyVersion,
+    expectedConfigurationBindingDigest: configurationBindingDigest,
+  })
+  if (
+    serializeCanonicalJson(linked.predecessor) !==
+      serializeCanonicalJson(predecessor) ||
+    serializeCanonicalJson(linked.successor) !==
+      serializeCanonicalJson(verified)
+  ) {
+    throw new Error('Expected exact authenticated empty rate successor.')
+  }
+  return Object.freeze({
+    ...verified,
+    canonicalBytes,
+  })
+}
+
+/**
+ * Creates one canonical target-owned twelve-attempt rate successor.
+ *
+ * @param previousReceipt - Authenticated planning receipt owning predecessor.
+ * @param predecessorBytes - Exact raw predecessor segment bytes.
+ * @param runtimeKey - Runtime HMAC key authenticating both segments.
+ * @param variant - Stable fixture label producing a distinct successor.
+ * @returns Raw successor, finalized evidence, and verified summary.
+ */
 function createProcessFixtureRateSuccessor(
   previousReceipt: WorkspaceSearchMigrationRehearsalStageReceipt,
   predecessorBytes: Uint8Array,
   runtimeKey: Uint8Array,
+  variant = 'primary',
 ): {
   /** Exact canonical successor bytes. */
   readonly bytes: Uint8Array
@@ -256,8 +443,9 @@ function createProcessFixtureRateSuccessor(
   const headerClaims = Object.freeze({
     kind:
       'mukuroji-workspace-search-migration-rehearsal-describe-table-rate-segment',
-    version: 1,
-    segmentLocatorDigest: digestProcessFixture('target-rate-successor'),
+    version: 2,
+    segmentLocatorDigest:
+      digestProcessFixture(`target-rate-successor:${variant}`),
     segmentOrdinal: predecessor.segmentOrdinal + 1,
     previousSegmentDigest: predecessor.segmentDigest,
     previousRecordMac: predecessor.terminalRecordMac,
@@ -272,17 +460,44 @@ function createProcessFixtureRateSuccessor(
     configurationBindingDigest:
       previousReceipt.configurationBindingDigest,
   })
-  const mac = createHmac('sha256', runtimeKey)
-    .update(
-      'mukuroji:workspace-search-migration:rehearsal-rate-record:v1',
-      'utf8',
-    )
-    .update('\0', 'utf8')
-    .update(serializeCanonicalJson(headerClaims), 'utf8')
-    .digest('hex')
-  const bytes = new TextEncoder().encode(
-    `${serializeCanonicalJson({ ...headerClaims, mac })}\n`,
-  )
+  const records: ProcessFixtureRateRecord[] = [
+    createProcessFixtureRateRecord(headerClaims, runtimeKey),
+  ]
+  let previousRecordMac = records[0]?.mac ?? ''
+  let eventSequence = headerClaims.firstEventSequence
+  for (let index = 0; index < 12; index += 1) {
+    const attemptSequence = index + 2
+    const offsetMilliseconds = (index + 1) * 10
+    const charged = createProcessFixtureRateRecord(Object.freeze({
+      kind: 'attempt-charged',
+      version: 2,
+      eventSequence,
+      offsetMilliseconds,
+      previousRecordMac,
+      phase: 'integrity-check',
+      attemptSequence,
+    }), runtimeKey)
+    records.push(charged)
+    previousRecordMac = charged.mac
+    eventSequence += 1
+    const started = createProcessFixtureRateRecord(Object.freeze({
+      kind: 'attempt-started',
+      version: 2,
+      eventSequence,
+      offsetMilliseconds,
+      previousRecordMac,
+      phase: 'integrity-check',
+      attemptSequence,
+      remainingNormalAdmissionAttempts: 90 - index,
+      remainingWindowAttempts: 9,
+      remainingPageAttempts: 5,
+      inFlight: 1,
+    }), runtimeKey)
+    records.push(started)
+    previousRecordMac = started.mac
+    eventSequence += 1
+  }
+  const bytes = concatenateProcessFixtureRateRecords(records)
   const evidence =
     finalizeWorkspaceSearchMigrationRehearsalRateSegmentEvidence({
       verifiedSuccessor:
@@ -295,12 +510,17 @@ function createProcessFixtureRateSuccessor(
             previousReceipt.configurationBindingDigest,
         }),
       durableEvidence: Object.freeze({
-        version: 1,
+        version: 2,
         policyVersion: previousReceipt.policyVersion,
-        attemptCount: 1,
+        attemptCount: 13,
         forfeitedAttemptCount: 0,
         throttleCount: 0,
+        awsServiceThrottleCount: 0,
+        rehearsalInjectedThrottleCount: 0,
         budgetStopCount: 0,
+        operationalBudgetStopCount: 0,
+        awsServiceThrottleBudgetStopCount: 0,
+        rehearsalInjectedBudgetStopCount: 0,
         cadenceWaitCount: 0,
         cadenceWaitMilliseconds: 0,
         maximumInFlight: 1,
@@ -341,6 +561,9 @@ function createProcessFixtureTargetArtifact(
       permitDigest: manifest.permitDigest,
       requestedResourcesBinding: manifest.requestedResourcesBinding,
       configurationBindingDigest: manifest.configurationBindingDigest,
+      policyVersion: manifest.policyVersion,
+      integrityResourceIdentityDigest:
+        manifest.integrityResourceIdentityDigest,
       planningReceiptDigest: createMigrationDigest(previousReceipt),
       executionBoundaryDigest:
         previousReceipt.evidence.executionBoundaryDigest,
@@ -405,8 +628,8 @@ function createProcessFixtureTargetArtifact(
           : identity,
       ))
     : manifest.integrityResourceIdentities
-  const integrityBefore = Object.freeze({
-    checkedAt: '2026-08-02T00:19:00.000Z',
+  const integrityResult = Object.freeze({
+    checkedAt: '2026-08-02T00:20:01.000Z',
     contentDigest: digestProcessFixture('integrity-content'),
     byteLength: 1_024,
     resultDigest: digestProcessFixture('integrity-result'),
@@ -415,8 +638,8 @@ function createProcessFixtureTargetArtifact(
       kind: CROSS_DOMAIN_INTEGRITY_REHEARSAL_LIVE_PROVENANCE_KIND,
       version: 1,
       mode: 'migration-rehearsal-live',
-      startedAt: '2026-08-02T00:18:30.000Z',
-      completedAt: '2026-08-02T00:19:00.000Z',
+      startedAt: '2026-08-02T00:20:00.000Z',
+      completedAt: '2026-08-02T00:20:01.000Z',
       checkedAtSource: 'trusted-wall-clock-after-external-reads',
     }),
     resourceIdentityScheme: manifest.integrityResourceIdentityScheme,
@@ -424,9 +647,57 @@ function createProcessFixtureTargetArtifact(
     integrityAggregateDigest: digestProcessFixture('integrity-aggregate'),
     resourceIdentityDigest: manifest.integrityResourceIdentityDigest,
   })
+  const firstIntegrityEventSequence = rate.successor.firstEventSequence
+  const integrityClaims = Object.freeze({
+    kind:
+      'mukuroji-workspace-search-migration-rehearsal-rate-bound-integrity-result',
+    version: 1,
+    result: integrityResult,
+    predecessor: rate.predecessor,
+    segment: rate.successor,
+    interval: Object.freeze({
+      kind:
+        'mukuroji-workspace-search-migration-rehearsal-integrity-rate-interval',
+      version: 1,
+      phase: 'integrity-check',
+      tablePassCount: 2,
+      describeTableCallCount: 12,
+      firstAttemptSequence: 2,
+      lastAttemptSequence: 13,
+      attemptSequences: Object.freeze(
+        Array.from({ length: 12 }, (_, index) => index + 2),
+      ),
+      firstEventSequence: firstIntegrityEventSequence,
+      lastEventSequence: firstIntegrityEventSequence + 23,
+      eventSequences: Object.freeze(
+        Array.from(
+          { length: 24 },
+          (_, index) => firstIntegrityEventSequence + index,
+        ),
+      ),
+      cadenceWaitCount: 0,
+      cadenceWaitMilliseconds: 0,
+      startedAt: '2026-08-02T00:20:00.010Z',
+      completedAt: '2026-08-02T00:20:00.120Z',
+    }),
+    policyVersion: manifest.policyVersion,
+    configurationBindingDigest: manifest.configurationBindingDigest,
+    tableOrderBindingMac:
+      digestProcessFixture('integrity-table-order-binding'),
+  })
+  const integrity = Object.freeze({
+    ...integrityClaims,
+    bindingMac: createHmac('sha256', runtimeKey)
+      .update(
+        'mukuroji:workspace-search-migration:rate-bound-integrity-result:v1\0',
+        'utf8',
+      )
+      .update(serializeCanonicalJson(integrityClaims), 'utf8')
+      .digest('hex'),
+  })
   const runtimeKeyFingerprint = createHmac('sha256', runtimeKey)
     .update(
-      'mukuroji-workspace-search-migration-rehearsal-target-audit-runtime-key/v3\n',
+      'mukuroji-workspace-search-migration-rehearsal-target-audit-runtime-key/v4\n',
       'utf8',
     )
     .digest('hex')
@@ -441,7 +712,7 @@ function createProcessFixtureTargetArtifact(
     version: WORKSPACE_SEARCH_MIGRATION_REHEARSAL_TARGET_AUDIT_VERSION,
     purpose,
     ...observationFields,
-    integrityBefore,
+    integrity,
     context,
     terminal: null,
     observationDigest,
@@ -453,14 +724,14 @@ function createProcessFixtureTargetArtifact(
   })
   const runtimeMac = createHmac('sha256', runtimeKey)
     .update(
-      'mukuroji-workspace-search-migration-rehearsal-target-audit-runtime-mac/v3\n',
+      'mukuroji-workspace-search-migration-rehearsal-target-audit-runtime-mac/v4\n',
       'utf8',
     )
     .update(serializeCanonicalJson(unsigned), 'utf8')
     .digest('hex')
   const publicationKeyFingerprint = createHmac('sha256', publicationKey)
     .update(
-      'mukuroji-workspace-search-migration-rehearsal-target-audit-publication-key/v3\n',
+      'mukuroji-workspace-search-migration-rehearsal-target-audit-publication-key/v4\n',
       'utf8',
     )
     .digest('hex')
@@ -474,7 +745,7 @@ function createProcessFixtureTargetArtifact(
   })
   const publicationMac = createHmac('sha256', publicationKey)
     .update(
-      'mukuroji-workspace-search-migration-rehearsal-target-audit-publication-mac/v3\n',
+      'mukuroji-workspace-search-migration-rehearsal-target-audit-publication-mac/v4\n',
       'utf8',
     )
     .update(serializeCanonicalJson(publicationUnsigned), 'utf8')
@@ -638,6 +909,12 @@ function createRollbackApplyPreimageProcessFixture(
     predecessorBytes,
     base.authenticationKey,
   )
+  const alternateRate = createProcessFixtureRateSuccessor(
+    previousReceipt,
+    predecessorBytes,
+    base.authenticationKey,
+    'alternate',
+  )
   return Object.freeze({
     scenario,
     masterAuthenticationKey:
@@ -679,19 +956,35 @@ function createRollbackApplyPreimageProcessFixture(
       base.publicationAuthenticationKey,
       'forged-integrity-vector',
     ),
+    artifactWithAlternateRate: createProcessFixtureTargetArtifact(
+      manifest,
+      previousReceipt,
+      scenario,
+      alternateRate.evidence,
+      base.authenticationKey,
+      base.publicationAuthenticationKey,
+      'a',
+    ),
   })
 }
 
-/** Creates a genuine cleanup capability for one isolated dependency harness. */
+/**
+ * Creates a genuine cleanup capability for one isolated dependency harness.
+ *
+ * @param input - Exact parent cleanup request.
+ * @param persistedMaterialReservation - Reservation persisted by the child.
+ * @param timestamps - Two trusted cleanup transition timestamps.
+ * @returns Fresh authenticated cleanup capability.
+ */
 async function createProcessCliTestCleanupAuthorization(
   input: CleanupWorkspaceSearchMigrationRehearsalRuntimeKeyInput,
   persistedMaterialReservation: unknown,
-): Promise<WorkspaceSearchMigrationRehearsalRuntimeKeyCleanupAuthorization> {
-  const directory = await mkdtemp(join(tmpdir(), 'mukuroji-process-cleanup-'))
-  const timestamps = [
+  timestamps: readonly [string, string] = [
     '2026-08-02T01:00:00.008Z',
     '2026-08-02T01:00:00.009Z',
-  ]
+  ],
+): Promise<WorkspaceSearchMigrationRehearsalRuntimeKeyCleanupAuthorization> {
+  const directory = await mkdtemp(join(tmpdir(), 'mukuroji-process-cleanup-'))
   let clockIndex = 0
   try {
     await writeFile(
@@ -934,20 +1227,6 @@ async function* createFiniteProcessStream(
   for (const chunk of chunks) yield chunk
 }
 
-/**
- * Collects one finite process byte stream without decoding private content.
- *
- * @param stream - Finite isolated process stream.
- * @returns Exact observed byte count.
- */
-async function countProcessBytes(
-  stream: AsyncIterable<Uint8Array>,
-): Promise<number> {
-  let byteLength = 0
-  for await (const chunk of stream) byteLength += chunk.byteLength
-  return byteLength
-}
-
 /** Creates one no-fault child that exits only after the durable parent ACK. */
 function createNoFaultChildHarness(
   receipt: WorkspaceSearchMigrationRehearsalNoFaultLifecycleReceipt,
@@ -1077,11 +1356,20 @@ function createRollbackApplyPreimageCliArguments(
   ])
 }
 
-/** Creates the bounded reader for one rollback preimage process test. */
+/**
+ * Creates the bounded reader for one rollback preimage process test.
+ *
+ * @param fixture - Complete authenticated rollback fixture.
+ * @param artifactBytes - Candidate target-preimage artifact bytes.
+ * @param reservationBytes - Optional recovered reservation bytes.
+ * @param previousRateSegmentBytes - Optional raw predecessor substitution.
+ * @returns Path-bounded private input reader.
+ */
 function createRollbackApplyPreimageReader(
   fixture: RollbackApplyPreimageProcessFixture,
   artifactBytes: Uint8Array,
   reservationBytes?: Uint8Array,
+  previousRateSegmentBytes: Uint8Array = fixture.previousRateSegmentBytes,
 ): WorkspaceSearchMigrationRehearsalProcessCliDependencies['readInputFile'] {
   return async (path): Promise<Uint8Array> => {
     if (path === permitPath) {
@@ -1098,7 +1386,7 @@ function createRollbackApplyPreimageReader(
       )
     }
     if (path === previousRateSegmentPath) {
-      return new Uint8Array(fixture.previousRateSegmentBytes)
+      return new Uint8Array(previousRateSegmentBytes)
     }
     if (path === targetPreimageAuditPath) {
       return new Uint8Array(artifactBytes)
@@ -1171,6 +1459,8 @@ function createSuccessfulCliArguments(
     targetEvidenceDirectory,
     '--rehearsal-rate-configuration-hash',
     configurationBindingDigest,
+    '--rehearsal-rate-previous-segment-file',
+    previousRateSegmentPath,
     '--rehearsal-stage-manifest-file',
     stageManifestPath,
     '--approval',
@@ -1178,6 +1468,551 @@ function createSuccessfulCliArguments(
     '--',
     ...controlArguments,
   ]
+}
+
+/**
+ * Returns one canonical timestamp shifted from an authenticated fixture time.
+ *
+ * @param timestamp - Canonical source timestamp.
+ * @param milliseconds - Finite millisecond offset.
+ * @returns Shifted canonical timestamp.
+ */
+function shiftProcessFixtureTimestamp(
+  timestamp: string,
+  milliseconds: number,
+): string {
+  return new Date(Date.parse(timestamp) + milliseconds).toISOString()
+}
+
+/**
+ * Converts the complete close-replan fixture vector to a strict release vector.
+ *
+ * @param baseArguments - Complete process-compatible control arguments.
+ * @param scenario - Scenario owning the selected release entry.
+ * @returns Exact strict release argument vector without planning-only fields.
+ */
+function createProcessFixtureReleaseControlArguments(
+  baseArguments: readonly string[],
+  scenario:
+    AuthenticWorkspaceSearchMigrationRehearsalReleaseTerminalScenario,
+): readonly string[] {
+  const planningIndex = baseArguments.indexOf('--reviewed-dry-run-file')
+  if (planningIndex < 0) {
+    throw new Error('Expected complete close-replan control fixture.')
+  }
+  const controlArguments = baseArguments.slice(0, planningIndex)
+  const approvalIndex = controlArguments.indexOf('--approval')
+  const runIndex = controlArguments.indexOf('--run-id')
+  const ownerIndex = controlArguments.indexOf('--owner-id')
+  if (
+    approvalIndex < 0 ||
+    runIndex < 0 ||
+    ownerIndex < 0 ||
+    controlArguments[approvalIndex + 1] === undefined ||
+    controlArguments[runIndex + 1] === undefined ||
+    controlArguments[ownerIndex + 1] === undefined
+  ) {
+    throw new Error('Expected complete common control fixture.')
+  }
+  controlArguments[0] = 'release'
+  controlArguments[approvalIndex + 1] =
+    workspaceSearchMigrationControlApprovalLiterals.release
+  controlArguments[runIndex + 1] = `run-${scenario}-release`
+  controlArguments[ownerIndex + 1] = `owner-${scenario}-release`
+  return Object.freeze(controlArguments)
+}
+
+/**
+ * Adapts one genuine terminal chain to the strict process CLI boundary.
+ *
+ * Only the permit/resource binding and selected release argument digest are
+ * re-signed. The terminal evidence and its genuine reconciliation successor
+ * remain byte-for-byte those produced by the complete suite fixture.
+ *
+ * @param scenario - Verified or rollback terminal branch to release.
+ * @returns Complete process-compatible authenticated release fixture.
+ */
+function createReleaseTerminalProcessFixture(
+  scenario:
+    AuthenticWorkspaceSearchMigrationRehearsalReleaseTerminalScenario,
+): ReleaseTerminalProcessFixture {
+  const source =
+    createAuthenticWorkspaceSearchMigrationRehearsalReleaseTerminalFixture(
+      scenario,
+    )
+  const base =
+    createWorkspaceSearchMigrationRehearsalStageChildMaterialTestFixture({
+      configurationBindingDigest:
+        source.manifest.configurationBindingDigest,
+    })
+  if (
+    createHash('sha256').update(source.ratePolicyBytes).digest('hex') !==
+      source.manifest.policyVersion ||
+    base.authenticationKey.length !== source.runtimeAuthenticationKey.length ||
+    !base.authenticationKey.every(
+      (byte, index) => byte === source.runtimeAuthenticationKey[index],
+    )
+  ) {
+    throw new Error(
+      'Release terminal fixture must use the process-compatible policy and key.',
+    )
+  }
+  const controlArguments = createProcessFixtureReleaseControlArguments(
+    base.controlArguments,
+    scenario,
+  )
+  const permitIssuedAt = shiftProcessFixtureTimestamp(
+    source.terminalReceipt.completedAt,
+    15_000,
+  )
+  const admittedAt = shiftProcessFixtureTimestamp(
+    source.terminalReceipt.completedAt,
+    60_000,
+  )
+  const { permitMac: _permitMac, ...basePermitClaims } = base.permit
+  const permit = createWorkspaceSearchMigrationRehearsalPermit({
+    claims: Object.freeze({
+      ...basePermitClaims,
+      issuedAt: permitIssuedAt,
+      expiresAt: shiftProcessFixtureTimestamp(permitIssuedAt, 4 * 60 * 60_000),
+    }),
+    signingKey: new Uint8Array(source.runtimeAuthenticationKey),
+  })
+  const entries = source.manifest.entries.map((entry) =>
+    entry.scenario === scenario && entry.command === 'release'
+      ? Object.freeze({
+          ...entry,
+          controlArgumentsDigest: createMigrationDigest(controlArguments),
+        })
+      : entry
+  )
+  const { manifestMac: _manifestMac, ...sourceManifestClaims } =
+    source.manifest
+  const manifest = createWorkspaceSearchMigrationRehearsalStageManifest({
+    claims: Object.freeze({
+      ...sourceManifestClaims,
+      permitDigest: createMigrationDigest(permit),
+      requestedResourcesBinding: permit.requestedResourcesBinding,
+      entries: Object.freeze(entries),
+    }),
+    signingKey: new Uint8Array(source.runtimeAuthenticationKey),
+  })
+  const previousEntry = manifest.entries[
+    source.terminalReceipt.stageOrdinal - 1
+  ]
+  if (
+    previousEntry === undefined ||
+    previousEntry.scenario !== scenario ||
+    previousEntry.command !== source.terminalReceipt.command
+  ) {
+    throw new Error('Expected exact terminal manifest entry.')
+  }
+  const { receiptMac: _receiptMac, ...sourceReceiptClaims } =
+    source.terminalReceipt
+  const previousReceipt =
+    createWorkspaceSearchMigrationRehearsalStageReceipt({
+      claims: Object.freeze({
+        ...sourceReceiptClaims,
+        manifestDigest: createMigrationDigest(manifest),
+        manifestEntryDigest: createMigrationDigest(previousEntry),
+        permitDigest: manifest.permitDigest,
+        requestedResourcesBinding: manifest.requestedResourcesBinding,
+      }),
+      signingKey: new Uint8Array(source.runtimeAuthenticationKey),
+    })
+  const selection = selectWorkspaceSearchMigrationRehearsalStage({
+    manifest,
+    verificationKey: new Uint8Array(source.runtimeAuthenticationKey),
+    previousReceipt,
+    controlArguments,
+    faultPlanDigest: null,
+  })
+  if (
+    previousReceipt.evidence.kind !== 'terminal' ||
+    selection.entry.command !== 'release'
+  ) {
+    throw new Error('Expected terminal-bound release selection.')
+  }
+  const expectedPreviousRateSegment =
+    verifyWorkspaceSearchMigrationRehearsalRateSegment({
+      canonicalBytes: source.reconciliationSuccessorSegmentBytes,
+      authenticationKey:
+        new Uint8Array(source.runtimeAuthenticationKey),
+      expectedSegmentOrdinal:
+        previousReceipt.evidence.reconciliationRate.successor.segmentOrdinal,
+      expectedPolicyVersion: manifest.policyVersion,
+      expectedConfigurationBindingDigest:
+        manifest.configurationBindingDigest,
+    })
+  if (
+    serializeCanonicalJson(expectedPreviousRateSegment) !==
+      serializeCanonicalJson(
+        previousReceipt.evidence.reconciliationRate.successor,
+      )
+  ) {
+    throw new Error('Expected exact terminal reconciliation successor.')
+  }
+  const substitutedPredecessorBytes = source.allRateSegmentBytes[
+    expectedPreviousRateSegment.segmentOrdinal - 1
+  ]
+  if (substitutedPredecessorBytes === undefined) {
+    throw new Error('Expected reconciliation predecessor bytes.')
+  }
+  const substitutedPredecessor =
+    verifyWorkspaceSearchMigrationRehearsalRateSegment({
+      canonicalBytes: substitutedPredecessorBytes,
+      authenticationKey:
+        new Uint8Array(source.runtimeAuthenticationKey),
+      expectedSegmentOrdinal:
+        expectedPreviousRateSegment.segmentOrdinal - 1,
+      expectedPolicyVersion: manifest.policyVersion,
+      expectedConfigurationBindingDigest:
+        manifest.configurationBindingDigest,
+    })
+  const substitutedPreviousRateSegment =
+    createProcessFixtureEmptyRateSuccessor(
+      substitutedPredecessor,
+      substitutedPredecessorBytes,
+      source.runtimeAuthenticationKey,
+      manifest.policyVersion,
+      manifest.configurationBindingDigest,
+      `substituted-release-predecessor:${scenario}`,
+      admittedAt,
+    )
+  if (
+    substitutedPreviousRateSegment.segmentDigest ===
+      expectedPreviousRateSegment.segmentDigest
+  ) {
+    throw new Error('Expected distinct authentic replacement segment.')
+  }
+  const committedRateSegment = createProcessFixtureEmptyRateSuccessor(
+    expectedPreviousRateSegment,
+    source.reconciliationSuccessorSegmentBytes,
+    source.runtimeAuthenticationKey,
+    manifest.policyVersion,
+    manifest.configurationBindingDigest,
+    `release-child:${scenario}`,
+    shiftProcessFixtureTimestamp(admittedAt, 1_000),
+  )
+  return Object.freeze({
+    scenario,
+    source,
+    masterAuthenticationKey: new Uint8Array(base.masterAuthenticationKey),
+    permit,
+    manifest,
+    previousReceipt,
+    controlArguments,
+    selection,
+    ratePolicyBytes: new Uint8Array(source.ratePolicyBytes),
+    ratePolicyFile: base.ratePolicyFile,
+    previousRateSegmentBytes:
+      new Uint8Array(source.reconciliationSuccessorSegmentBytes),
+    expectedPreviousRateSegment,
+    substitutedPreviousRateSegmentBytes:
+      new Uint8Array(substitutedPreviousRateSegment.canonicalBytes),
+    committedRateSegment,
+    admittedAt,
+  })
+}
+
+/** Creates exact generic-success arguments including a terminal predecessor. */
+function createReleaseTerminalProcessCliArguments(
+  fixture: ReleaseTerminalProcessFixture,
+): readonly string[] {
+  const baseArguments = createSuccessfulCliArguments(
+    fixture.controlArguments,
+    fixture.manifest.configurationBindingDigest,
+  )
+  const approvalIndex = baseArguments.indexOf('--approval')
+  if (approvalIndex < 0) {
+    throw new Error('Expected process approval argument.')
+  }
+  return Object.freeze([
+    ...baseArguments.slice(0, approvalIndex),
+    '--rehearsal-previous-stage-receipt-file',
+    previousStageReceiptPath,
+    ...baseArguments.slice(approvalIndex),
+  ])
+}
+
+/** Captured process effects for one terminal-bound release invocation. */
+type ReleaseTerminalDependencyHarness = {
+  /** Complete injected process CLI dependencies. */
+  readonly dependencies: WorkspaceSearchMigrationRehearsalProcessCliDependencies
+  /** Ordered durable evidence writes made after successful admission. */
+  readonly evidenceWrites: EvidenceWrite[]
+  /** Safe canonical success lines emitted by the process parent. */
+  readonly stdoutLines: string[]
+  /** Safe canonical failure lines emitted by the process parent. */
+  readonly stderrLines: string[]
+  /** Returns the number of exclusive evidence-directory attempts. */
+  readonly readDirectoryCalls: () => number
+  /** Returns the number of remote reservation-claim attempts. */
+  readonly readClaimCalls: () => number
+  /** Returns the number of runtime-key publication attempts. */
+  readonly readRuntimeKeyWrites: () => number
+  /** Returns the number of completed runtime-key cleanup authorizations. */
+  readonly readCleanupCompletions: () => number
+  /** Returns the number of isolated child spawn attempts. */
+  readonly readSpawnCalls: () => number
+}
+
+/**
+ * Creates one complete dependency harness for terminal-bound release.
+ *
+ * @param fixture - Process-compatible authenticated release fixture.
+ * @param predecessorBytes - Candidate raw release predecessor file.
+ * @returns Captured success-capable process dependencies and counters.
+ */
+function createReleaseTerminalDependencyHarness(
+  fixture: ReleaseTerminalProcessFixture,
+  predecessorBytes: Uint8Array = fixture.previousRateSegmentBytes,
+): ReleaseTerminalDependencyHarness {
+  const evidenceWrites: EvidenceWrite[] = []
+  const stdoutLines: string[] = []
+  const stderrLines: string[] = []
+  let directoryCalls = 0
+  let claimCalls = 0
+  let runtimeKeyWrites = 0
+  let cleanupCompletions = 0
+  let spawnCalls = 0
+  let reservation:
+    ReturnType<
+      typeof createWorkspaceSearchMigrationRehearsalStageReservation
+    > | undefined
+  let claimedStageHead: WorkspaceSearchMigrationRehearsalStageHead | undefined
+  const dummyPort: WorkspaceSearchMigrationRehearsalProcessPort = {
+    stdout: createFiniteProcessStream([]),
+    stderr: createFiniteProcessStream([]),
+    exited: Promise.resolve({ kind: 'exit-code', exitCode: 0 }),
+    kill: (): void => {},
+    acknowledgeResponseLoss: (): void => {},
+  }
+  const dependencies: WorkspaceSearchMigrationRehearsalProcessCliDependencies = {
+    readInputFile: async (path): Promise<Uint8Array> => {
+      if (path === permitPath) {
+        return new TextEncoder().encode(serializeCanonicalJson(fixture.permit))
+      }
+      if (path === stageManifestPath) {
+        return new TextEncoder().encode(
+          serializeCanonicalJson(fixture.manifest),
+        )
+      }
+      if (path === previousStageReceiptPath) {
+        return new TextEncoder().encode(
+          serializeCanonicalJson(fixture.previousReceipt),
+        )
+      }
+      if (path === previousRateSegmentPath) {
+        return new Uint8Array(predecessorBytes)
+      }
+      if (path === fixture.ratePolicyFile) {
+        return new Uint8Array(fixture.ratePolicyBytes)
+      }
+      throw new Error('Unexpected release process input path.')
+    },
+    readStageKeyFile: async (path): Promise<Uint8Array> => {
+      if (path === keyPath) {
+        return new Uint8Array(fixture.masterAuthenticationKey)
+      }
+      throw new Error('Unexpected release process key path.')
+    },
+    createEvidenceDirectoryExclusive: async (): Promise<'created'> => {
+      directoryCalls += 1
+      return 'created'
+    },
+    writeEvidenceFileExclusive: async (_directory, filename, bytes) => {
+      evidenceWrites.push(Object.freeze({
+        filename,
+        bytes: new Uint8Array(bytes),
+      }))
+      return 'created'
+    },
+    claimStageReservation: async (input) => {
+      claimCalls += 1
+      const authenticatedReservation =
+        verifyWorkspaceSearchMigrationRehearsalStageReservation({
+          reservation: input.stageReservationClaim.reservation,
+          selection: fixture.selection,
+          verificationKey: input.stageReservationClaim.stageKey,
+        })
+      const head: WorkspaceSearchMigrationRehearsalStageHead = Object.freeze({
+        manifestDigest: fixture.selection.manifestDigest,
+        completedStageOrdinal: fixture.selection.entry.ordinal - 1,
+        headReceiptDigest: fixture.selection.previousStageReceiptDigest,
+        activeReservationDigest:
+          createMigrationDigest(authenticatedReservation),
+        activeStageOrdinal: fixture.selection.entry.ordinal,
+        activeExpiresAt: authenticatedReservation.expiresAt,
+        abandonmentCount:
+          fixture.previousReceipt.stageReservationAbandonmentCount,
+        abandonmentRootDigest:
+          fixture.previousReceipt.stageReservationAbandonmentRootDigest,
+        revision: fixture.selection.entry.ordinal * 2 - 1,
+      })
+      reservation = authenticatedReservation
+      claimedStageHead = head
+      return head
+    },
+    writeRuntimeKeyFileExclusive: async (_directory, key) => {
+      runtimeKeyWrites += 1
+      expect(key).toEqual(fixture.source.runtimeAuthenticationKey)
+      return 'created'
+    },
+    cleanupRuntimeKeyFile: async (input) => {
+      if (reservation === undefined) {
+        throw new Error('Expected claimed release reservation.')
+      }
+      const authorization = await createProcessCliTestCleanupAuthorization(
+        input,
+        reservation,
+        [
+          shiftProcessFixtureTimestamp(fixture.admittedAt, 5_000),
+          shiftProcessFixtureTimestamp(fixture.admittedAt, 5_001),
+        ],
+      )
+      cleanupCompletions += 1
+      return authorization
+    },
+    now: (): Date => new Date(fixture.admittedAt),
+    randomBytes: (): Uint8Array => new Uint8Array(32).fill(0x52),
+    spawnControlChild: () => {
+      spawnCalls += 1
+      return dummyPort
+    },
+    runProcess: runWorkspaceSearchMigrationRehearsalProcess,
+    runNoFaultProcess: runWorkspaceSearchMigrationRehearsalNoFaultProcess,
+    runSuccessfulProcess: async (input) => {
+      if (
+        reservation === undefined ||
+        claimedStageHead === undefined ||
+        fixture.previousReceipt.evidence.kind !== 'terminal'
+      ) {
+        throw new Error('Expected claimed terminal release context.')
+      }
+      const terminal = fixture.previousReceipt.evidence
+      const result = Object.freeze({
+        schemaVersion: 1,
+        operation: 'release',
+        status: 'pass',
+        configurationHash: fixture.manifest.configurationBindingDigest,
+        policyVersion: fixture.manifest.policyVersion,
+        coordinator: Object.freeze({
+          mode: 'release',
+          phase: 'released',
+          terminalKind: terminal.terminalKind,
+          terminalPersistenceVersion: terminal.terminalPersistenceVersion,
+          terminalRootDigest: terminal.terminalRootDigest,
+          writerFenceRecordDigest:
+            digestProcessFixture(`released-fence:${fixture.scenario}`),
+          releasedAt: shiftProcessFixtureTimestamp(fixture.admittedAt, 1_000),
+        }),
+        rateAggregate: Object.freeze({
+          version: 2,
+          policyVersion: fixture.manifest.policyVersion,
+          attemptCount: 0,
+          forfeitedAttemptCount: 0,
+          throttleCount: 0,
+          awsServiceThrottleCount: 0,
+          rehearsalInjectedThrottleCount: 0,
+          budgetStopCount: 0,
+          operationalBudgetStopCount: 0,
+          awsServiceThrottleBudgetStopCount: 0,
+          rehearsalInjectedBudgetStopCount: 0,
+          cadenceWaitCount: 0,
+          cadenceWaitMilliseconds: 0,
+          maximumInFlight: 0,
+        }),
+      })
+      const serializedOutputLine = serializeCanonicalJson(result)
+      const observation =
+        captureWorkspaceSearchMigrationRehearsalChildMutationObservation({
+          selection: fixture.selection,
+          authenticationKey:
+            new Uint8Array(fixture.source.runtimeAuthenticationKey),
+          observation: Object.freeze({
+            result,
+            serializedOutputLine,
+            serializedOutputLineDigest:
+              createMigrationDigest(serializedOutputLine),
+          }),
+        })
+      const previousLeaseExpiry =
+        fixture.previousReceipt.leaseObservation.kind === 'acquired'
+          ? fixture.previousReceipt.leaseObservation.successorLeaseExpiresAt
+          : fixture.previousReceipt.leaseObservation.currentLeaseExpiresAt
+      if (
+        Date.parse(previousLeaseExpiry) <= Date.parse(fixture.admittedAt)
+      ) {
+        throw new Error('Expected active terminal attempt lease for release.')
+      }
+      const material =
+        createWorkspaceSearchMigrationRehearsalStageChildMaterial({
+          selection: fixture.selection,
+          observation,
+          committedRateSegment: fixture.committedRateSegment,
+          stageReservation: reservation,
+          claimedStageHead,
+          leaseAcquisitionObservation: Object.freeze({
+            kind: 'reused-active',
+            currentLeaseIdentityDigest:
+              fixture.previousReceipt.leaseIdentityDigest,
+            evaluatedAt: fixture.admittedAt,
+            currentLeaseExpiresAt: previousLeaseExpiry,
+          }),
+          authenticationKey:
+            new Uint8Array(fixture.source.runtimeAuthenticationKey),
+        })
+      const materialDigest = createMigrationDigest(material)
+      await input.persistSuccessMaterialDurably(
+        Object.freeze({
+          material,
+          materialDigest,
+          observedAt: shiftProcessFixtureTimestamp(fixture.admittedAt, 2_000),
+        }),
+        new AbortController().signal,
+      )
+      return Object.freeze({
+        lifecycleVersion: 1,
+        manifestDigest: material.manifestDigest,
+        manifestEntryDigest: material.manifestEntryDigest,
+        previousStageReceiptDigest: material.previousStageReceiptDigest,
+        stageOrdinal: material.stageOrdinal,
+        scenario: material.scenario,
+        command: material.command,
+        attemptOrdinal: material.attemptOrdinal,
+        expectedOutcome: material.expectedOutcome,
+        materialDigest,
+        stdoutSha256: digestProcessFixture(`release-stdout:${fixture.scenario}`),
+        runnerStartedAt: fixture.admittedAt,
+        materialObservedAt:
+          shiftProcessFixtureTimestamp(fixture.admittedAt, 2_000),
+        materialPersistedAt:
+          shiftProcessFixtureTimestamp(fixture.admittedAt, 3_000),
+        processExitedAt:
+          shiftProcessFixtureTimestamp(fixture.admittedAt, 4_000),
+        exitClass: 'successful-no-fault',
+      })
+    },
+    installSignalHandler: () => (): void => {},
+    writeStdoutLine: (line): void => {
+      stdoutLines.push(line)
+    },
+    writeStderrLine: (line): void => {
+      stderrLines.push(line)
+    },
+  }
+  return Object.freeze({
+    dependencies,
+    evidenceWrites,
+    stdoutLines,
+    stderrLines,
+    readDirectoryCalls: (): number => directoryCalls,
+    readClaimCalls: (): number => claimCalls,
+    readRuntimeKeyWrites: (): number => runtimeKeyWrites,
+    readCleanupCompletions: (): number => cleanupCompletions,
+    readSpawnCalls: (): number => spawnCalls,
+  })
 }
 
 /**
@@ -1631,6 +2466,9 @@ describe('migration rehearsal rollback apply preimage admission', () => {
           fixture.manifest.requestedResourcesBinding,
         configurationBindingDigest:
           fixture.manifest.configurationBindingDigest,
+        policyVersion: fixture.manifest.policyVersion,
+        integrityResourceIdentityDigest:
+          fixture.manifest.integrityResourceIdentityDigest,
         planningReceiptDigest:
           createMigrationDigest(fixture.previousReceipt),
         executionBoundaryDigest:
@@ -1670,6 +2508,15 @@ describe('migration rehearsal rollback apply preimage admission', () => {
             return 'created'
           },
           writeEvidenceFileExclusive: async (_directory, filename, bytes) => {
+            if (
+              filename ===
+                WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME
+            ) {
+              expect(JSON.parse(new TextDecoder().decode(bytes))).toEqual(
+                fixture.controlArguments,
+              )
+              return 'created'
+            }
             expect(filename).toBe(
               WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
             )
@@ -1753,6 +2600,10 @@ describe('migration rehearsal rollback apply preimage admission', () => {
         Object.freeze({
           include: true,
           bytes: fixture.artifactWithForgedIntegrityVector,
+        }),
+        Object.freeze({
+          include: true,
+          bytes: fixture.artifactWithAlternateRate,
         }),
       ]) {
         let directoryCalls = 0
@@ -1945,30 +2796,32 @@ describe('migration rehearsal fixed child process boundary', () => {
     })
   })
 
-  test('discards ordinary child stderr instead of mapping it to the fd3 protocol stream', async () => {
-    const port = spawnWorkspaceSearchMigrationRehearsalControlChild([
-      '--invalid-one',
-      'value-one',
-      '--invalid-two',
-      'value-two',
-      '--invalid-three',
-      'value-three',
-      '--invalid-four',
-      'value-four',
-      '--invalid-five',
-      'value-five',
-      '--',
-      'plan',
-    ])
-    const [stdoutBytes, protocolBytes, exit] = await Promise.all([
-      countProcessBytes(port.stdout),
-      countProcessBytes(port.stderr),
-      port.exited,
-    ])
-    expect(stdoutBytes).toBe(0)
-    expect(protocolBytes).toBe(0)
-    expect(exit).toEqual({ kind: 'exit-code', exitCode: 2 })
-  })
+  test(
+    'discards ordinary child stderr instead of mapping it to the fd3 protocol stream',
+    async () => {
+      const subprocess = Bun.spawn({
+        cmd: [
+          process.execPath,
+          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PROCESS_CHILD_BOUNDARY_WORKER_PATH,
+        ],
+        timeout: 25_000,
+        killSignal: 'SIGKILL',
+        stdout: 'pipe',
+        stderr: 'pipe',
+      })
+      const [exitCode, standardOutput, standardError] = await Promise.all([
+        subprocess.exited,
+        new Response(subprocess.stdout).text(),
+        new Response(subprocess.stderr).text(),
+      ])
+      expect({ exitCode, standardOutput, standardError }).toEqual({
+        exitCode: 0,
+        standardOutput: '',
+        standardError: '',
+      })
+    },
+    30_000,
+  )
 })
 
 describe('migration rehearsal process CLI protocol and durability', () => {
@@ -2018,6 +2871,11 @@ describe('migration rehearsal process CLI protocol and durability', () => {
         if (path === stageManifestPath) {
           return new TextEncoder().encode(
             serializeCanonicalJson(fixture.manifest),
+          )
+        }
+        if (path === previousRateSegmentPath) {
+          return new Uint8Array(
+            fixture.integrityAttestationRootSegment.canonicalBytes,
           )
         }
         if (path === fixture.ratePolicyFile) {
@@ -2119,17 +2977,21 @@ describe('migration rehearsal process CLI protocol and durability', () => {
     expect(childArguments).toHaveLength(1)
     expect(evidenceWrites.map((write) => write.filename)).toEqual([
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CHILD_MATERIAL_FILENAME,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_LIFECYCLE_FILENAME,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_PARENT_AUTHENTICATION_FILENAME,
     ])
-    const materialEvidence = JSON.parse(new TextDecoder().decode(
+    expect(JSON.parse(new TextDecoder().decode(
       evidenceWrites[1]?.bytes,
+    ))).toEqual(fixture.controlArguments)
+    const materialEvidence = JSON.parse(new TextDecoder().decode(
+      evidenceWrites[2]?.bytes,
     ))
     expect(materialEvidence.material).toEqual(material)
     expect(materialEvidence.materialDigest).toBe(materialDigest)
     const parentAuthentication = JSON.parse(new TextDecoder().decode(
-      evidenceWrites[3]?.bytes,
+      evidenceWrites[4]?.bytes,
     ))
     expect(parentAuthentication).toMatchObject({
       kind:
@@ -2268,6 +3130,91 @@ describe('migration rehearsal process CLI protocol and durability', () => {
       ])
       expect(stderrLines[0], candidate.label).not.toContain(permitPath)
       expect(stderrLines[0], candidate.label).not.toContain(keyPath)
+    }
+  })
+
+  test('requires the exact authenticated root segment before stage one', async () => {
+    const fixture =
+      createWorkspaceSearchMigrationRehearsalStageChildMaterialTestFixture({
+        configurationBindingDigest: rateConfigurationHash,
+      })
+    const validArguments = [...createSuccessfulCliArguments(
+      fixture.controlArguments,
+      fixture.configurationBindingDigest,
+    )]
+    const previousRateIndex = validArguments.indexOf(
+      '--rehearsal-rate-previous-segment-file',
+    )
+    if (previousRateIndex < 0) throw new Error('Missing root fixture flag.')
+    const missingArguments = Object.freeze([
+      ...validArguments.slice(0, previousRateIndex),
+      ...validArguments.slice(previousRateIndex + 2),
+    ])
+    for (const candidate of [
+      Object.freeze({
+        label: 'missing-root',
+        arguments_: missingArguments,
+        previousBytes: fixture.integrityAttestationRootSegment.canonicalBytes,
+      }),
+      Object.freeze({
+        label: 'wrong-root',
+        arguments_: Object.freeze(validArguments),
+        previousBytes: fixture.committedRateSegment.canonicalBytes,
+      }),
+    ]) {
+      let directoryCalls = 0
+      let spawnCalls = 0
+      const stderrLines: string[] = []
+      const exitCode = await runWorkspaceSearchMigrationRehearsalProcessCli(
+        candidate.arguments_,
+        {
+          readInputFile: async (path): Promise<Uint8Array> => {
+            if (path === permitPath) {
+              return new TextEncoder().encode(
+                serializeCanonicalJson(fixture.permit),
+              )
+            }
+            if (path === stageManifestPath) {
+              return new TextEncoder().encode(
+                serializeCanonicalJson(fixture.manifest),
+              )
+            }
+            if (path === previousRateSegmentPath) {
+              return new Uint8Array(candidate.previousBytes)
+            }
+            throw new Error('Unexpected root-admission input path.')
+          },
+          readStageKeyFile: async (): Promise<Uint8Array> =>
+            new Uint8Array(fixture.masterAuthenticationKey),
+          createEvidenceDirectoryExclusive: async (): Promise<'created'> => {
+            directoryCalls += 1
+            return 'created'
+          },
+          writeEvidenceFileExclusive: async (): Promise<'created'> =>
+            'created',
+          spawnControlChild: () => {
+            spawnCalls += 1
+            throw new Error('Invalid root must not spawn.')
+          },
+          runProcess: runWorkspaceSearchMigrationRehearsalProcess,
+          runNoFaultProcess:
+            runWorkspaceSearchMigrationRehearsalNoFaultProcess,
+          installSignalHandler: () => (): void => {},
+          writeStdoutLine: (): void => {},
+          writeStderrLine: (line): void => {
+            stderrLines.push(line)
+          },
+        },
+      )
+      expect({ exitCode, directoryCalls, spawnCalls }, candidate.label)
+        .toEqual({ exitCode: 2, directoryCalls: 0, spawnCalls: 0 })
+      expect(stderrLines, candidate.label).toEqual([
+        serializeCanonicalJson({
+          code: 'INVALID_STAGE_SELECTION',
+          kind: WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PROCESS_RESULT_KIND,
+          status: 'error',
+        }),
+      ])
     }
   })
 
@@ -2490,6 +3437,11 @@ describe('migration rehearsal process CLI protocol and durability', () => {
           serializeCanonicalJson(fixture.manifest),
         )
       }
+      if (path === previousRateSegmentPath) {
+        return new Uint8Array(
+          fixture.integrityAttestationRootSegment.canonicalBytes,
+        )
+      }
       if (path === fixture.ratePolicyFile) {
         return new Uint8Array(fixture.ratePolicyBytes)
       }
@@ -2616,6 +3568,7 @@ describe('migration rehearsal process CLI protocol and durability', () => {
       expect(parentAuthenticationWriteAttempts).toBe(1)
       expect(persistedFilenames).toEqual([
         WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
         WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CHILD_MATERIAL_FILENAME,
         WORKSPACE_SEARCH_MIGRATION_REHEARSAL_LIFECYCLE_FILENAME,
         WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_PARENT_AUTHENTICATION_FILENAME,
@@ -2693,6 +3646,38 @@ describe('migration rehearsal process CLI protocol and durability', () => {
             stderrLines.push(line)
           },
         }
+      const controlArgumentsPath = join(
+        directory,
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
+      )
+      const authenticControlArgumentsBytes = await readFile(
+        controlArgumentsPath,
+      )
+      await writeFile(
+        controlArgumentsPath,
+        serializeCanonicalJson([...fixture.controlArguments, '--tampered']),
+      )
+      const tamperStderrLines: string[] = []
+      const tamperDependencies:
+        WorkspaceSearchMigrationRehearsalProcessCliDependencies = {
+          ...recoveryDependencies,
+          writeStdoutLine: (): void => {
+            throw new Error('Tampered recovery must not succeed.')
+          },
+          writeStderrLine: (line): void => {
+            tamperStderrLines.push(line)
+          },
+        }
+      await expect(runWorkspaceSearchMigrationRehearsalProcessCli(
+        arguments_,
+        tamperDependencies,
+      )).resolves.toBe(1)
+      expect(tamperStderrLines[0]).toContain('EVIDENCE_DIRECTORY_EXISTS')
+      expect({ spawnCalls, claimCalls }).toEqual({
+        spawnCalls: 1,
+        claimCalls: 1,
+      })
+      await writeFile(controlArgumentsPath, authenticControlArgumentsBytes)
       const recoveryExitCode = await runWorkspaceSearchMigrationRehearsalProcessCli(
         arguments_,
         recoveryDependencies,
@@ -2823,6 +3808,10 @@ describe('migration rehearsal process CLI protocol and durability', () => {
             fixture.stageReservation,
           ],
           [
+            WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
+            fixture.controlArguments,
+          ],
+          [
             WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CHILD_MATERIAL_FILENAME,
             materialEvidence,
           ],
@@ -2934,6 +3923,11 @@ describe('migration rehearsal process CLI protocol and durability', () => {
               serializeCanonicalJson(fixture.manifest),
             )
           }
+          if (path === previousRateSegmentPath) {
+            return new Uint8Array(
+              fixture.integrityAttestationRootSegment.canonicalBytes,
+            )
+          }
           if (path.startsWith(`${directory}/`)) {
             return new Uint8Array(await readFile(path))
           }
@@ -3039,6 +4033,13 @@ describe('migration rehearsal process CLI protocol and durability', () => {
           serializeCanonicalJson(fixture.stageReservation),
         ),
       )
+      await writeWorkspaceSearchMigrationRehearsalEvidenceFileExclusive(
+        directory,
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
+        new TextEncoder().encode(
+          serializeCanonicalJson(fixture.controlArguments),
+        ),
+      )
       await expect(
         writeWorkspaceSearchMigrationRehearsalRuntimeKeyFileExclusive(
           directory,
@@ -3066,6 +4067,11 @@ describe('migration rehearsal process CLI protocol and durability', () => {
             if (path === stageManifestPath) {
               return new TextEncoder().encode(
                 serializeCanonicalJson(fixture.manifest),
+              )
+            }
+            if (path === previousRateSegmentPath) {
+              return new Uint8Array(
+                fixture.integrityAttestationRootSegment.canonicalBytes,
               )
             }
             if (path === fixture.ratePolicyFile) {
@@ -3214,6 +4220,7 @@ describe('migration rehearsal process CLI protocol and durability', () => {
 
     expect(harness.evidenceWrites.map((write) => write.filename)).toEqual([
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_FAULT_BOUNDARY_RATE_SEGMENT_FILENAME,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_FAULT_BOUNDARY_MATERIAL_FILENAME,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_LIFECYCLE_FILENAME,
@@ -3256,7 +4263,7 @@ describe('migration rehearsal process CLI protocol and durability', () => {
       ...fixture.controlArguments,
     ]])
     const materialDocument = JSON.parse(
-      new TextDecoder().decode(harness.evidenceWrites[2]?.bytes),
+      new TextDecoder().decode(harness.evidenceWrites[3]?.bytes),
     )
     expect(materialDocument).toEqual({
       kind:
@@ -3266,11 +4273,11 @@ describe('migration rehearsal process CLI protocol and durability', () => {
       materialDigest: createMigrationDigest(harness.boundary),
       observedAt: '2026-08-02T01:00:00.001Z',
     })
-    expect(harness.evidenceWrites[1]?.bytes).toEqual(
+    expect(harness.evidenceWrites[2]?.bytes).toEqual(
       fixture.committedRateSegment.canonicalBytes,
     )
     expect(JSON.parse(new TextDecoder().decode(
-      harness.evidenceWrites[4]?.bytes,
+      harness.evidenceWrites[5]?.bytes,
     ))).toMatchObject({
       materialEvidenceDigest: createMigrationDigest(materialDocument),
       boundaryMaterialEvidenceDigest: null,
@@ -3305,6 +4312,7 @@ describe('migration rehearsal process CLI protocol and durability', () => {
 
     expect(harness.evidenceWrites.map((write) => write.filename)).toEqual([
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_FAULT_BOUNDARY_RATE_SEGMENT_FILENAME,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_FAULT_BOUNDARY_MATERIAL_FILENAME,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_FAULT_COMPLETION_MATERIAL_FILENAME,
@@ -3312,20 +4320,20 @@ describe('migration rehearsal process CLI protocol and durability', () => {
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_PARENT_AUTHENTICATION_FILENAME,
     ])
     const completionDocument = JSON.parse(
-      new TextDecoder().decode(harness.evidenceWrites[3]?.bytes),
+      new TextDecoder().decode(harness.evidenceWrites[4]?.bytes),
     )
     expect(completionDocument.material).toEqual(harness.completion)
     expect(completionDocument.materialDigest).toBe(
       createMigrationDigest(harness.completion),
     )
     const boundaryDocument = JSON.parse(new TextDecoder().decode(
-      harness.evidenceWrites[2]?.bytes,
+      harness.evidenceWrites[3]?.bytes,
     ))
-    expect(harness.evidenceWrites[1]?.bytes).toEqual(
+    expect(harness.evidenceWrites[2]?.bytes).toEqual(
       fixture.committedRateSegment.canonicalBytes,
     )
     expect(JSON.parse(new TextDecoder().decode(
-      harness.evidenceWrites[5]?.bytes,
+      harness.evidenceWrites[6]?.bytes,
     ))).toMatchObject({
       materialEvidenceDigest: createMigrationDigest(completionDocument),
       boundaryMaterialEvidenceDigest: createMigrationDigest(boundaryDocument),
@@ -3363,6 +4371,7 @@ describe('migration rehearsal process CLI protocol and durability', () => {
 
     expect(harness.evidenceWrites.map((write) => write.filename)).toEqual([
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_FAULT_BOUNDARY_RATE_SEGMENT_FILENAME,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_FAULT_BOUNDARY_MATERIAL_FILENAME,
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_LIFECYCLE_FILENAME,
@@ -3548,7 +4557,9 @@ describe('migration rehearsal process CLI protocol and durability', () => {
         harness.events.push(`write:${filename}`)
         if (
           filename ===
-            WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME
+            WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME ||
+          filename ===
+            WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME
         ) {
           return await harness.dependencies.writeEvidenceFileExclusive(
             path,
@@ -3611,6 +4622,7 @@ describe('migration rehearsal process CLI protocol and durability', () => {
     expect(runnerCalls).toBe(0)
     expect(harness.events).toEqual([
       `write:${WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME}`,
+      `write:${WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME}`,
       'write:runtime-key',
       'kill:SIGKILL',
       'remove:runtime-key',
@@ -3646,6 +4658,106 @@ describe('migration rehearsal process CLI protocol and durability', () => {
     ).resolves.toBe(1)
     expect(spawnCalls).toBe(0)
     expect(harness.stderrLines[0]).toContain('EVIDENCE_DIRECTORY_EXISTS')
+  })
+
+  test('reissues empty reservations and reconciles only exact persisted control arguments', async () => {
+    for (const scenario of [
+      'empty-unclaimed',
+      'matching-control',
+      'mismatched-control',
+    ] satisfies readonly (
+      | 'empty-unclaimed'
+      | 'matching-control'
+      | 'mismatched-control'
+    )[]) {
+      const fixture =
+        createWorkspaceSearchMigrationRehearsalStageFaultMaterialTestFixture()
+      const harness = createAuthenticatedFaultDependencyHarness(fixture)
+      const readInputFile = harness.dependencies.readInputFile
+      const writes: WorkspaceSearchMigrationRehearsalEvidenceFilename[] = []
+      let claimCalls = 0
+      let spawnCalls = 0
+      const dependencies:
+        WorkspaceSearchMigrationRehearsalProcessCliDependencies = {
+          ...harness.dependencies,
+          createEvidenceDirectoryExclusive: async () => 'exists',
+          validateReservationOnlyDirectory: async () =>
+            scenario === 'empty-unclaimed'
+              ? 'empty-unclaimed'
+              : 'reservation-present',
+          readInputFile: async (path, maximumBytes) => {
+            if (path === join(
+              evidenceDirectory,
+              WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
+            )) {
+              return new TextEncoder().encode(
+                serializeCanonicalJson(fixture.stageReservation),
+              )
+            }
+            if (path === join(
+              evidenceDirectory,
+              WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
+            )) {
+              return new TextEncoder().encode(serializeCanonicalJson(
+                scenario === 'mismatched-control'
+                  ? [...fixture.controlArguments, '--tampered']
+                  : fixture.controlArguments,
+              ))
+            }
+            return await readInputFile(path, maximumBytes)
+          },
+          writeEvidenceFileExclusive: async (
+            _directory,
+            filename,
+          ) => {
+            writes.push(filename)
+            if (
+              filename ===
+                WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME &&
+              scenario !== 'empty-unclaimed'
+            ) return 'exists'
+            return 'created'
+          },
+          claimStageReservation: async () => {
+            claimCalls += 1
+            throw new Error('Stop after the authenticated pre-claim state.')
+          },
+          spawnControlChild: () => {
+            spawnCalls += 1
+            throw new Error('Pre-claim test must not spawn.')
+          },
+        }
+
+      const exitCode = await runWorkspaceSearchMigrationRehearsalProcessCli(
+        createAuthenticatedFaultCliArguments(fixture),
+        dependencies,
+      )
+
+      expect(spawnCalls).toBe(0)
+      if (scenario === 'empty-unclaimed') {
+        expect(exitCode).toBe(2)
+        expect(claimCalls).toBe(1)
+        expect(writes).toEqual([
+          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
+          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
+        ])
+      } else if (scenario === 'matching-control') {
+        expect(exitCode).toBe(2)
+        expect(claimCalls).toBe(1)
+        expect(writes).toEqual([
+          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
+        ])
+      } else {
+        expect(exitCode).toBe(1)
+        expect(claimCalls).toBe(0)
+        expect(writes).toEqual([
+          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
+        ])
+        expect(harness.stderrLines[0]).toContain(
+          'CONTROL_ARGUMENTS_WRITE_FAILED',
+        )
+      }
+    }
   })
 
   test('rejects an expired reservation-only resume before claim or spawn', async () => {
@@ -3748,7 +4860,9 @@ describe('migration rehearsal process CLI protocol and durability', () => {
     expect(claimCalls).toBe(1)
     expect(runtimeKeyWrites).toBe(0)
     expect(spawnCalls).toBe(0)
-    expect(harness.events).toEqual([])
+    expect(harness.events).toEqual([
+      `write:${WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME}`,
+    ])
     expect(harness.stderrLines[0]).toContain('INVALID_STAGE_SELECTION')
   })
 
@@ -3809,11 +4923,15 @@ describe('migration rehearsal process CLI protocol and durability', () => {
 
     expect(harness.events).toEqual([
       `write:${WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME}`,
+      `write:${WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME}`,
       'write:runtime-key',
       'kill:SIGKILL',
       'remove:runtime-key',
     ])
-    expect(harness.evidenceWrites).toHaveLength(1)
+    expect(harness.evidenceWrites.map((write) => write.filename)).toEqual([
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
+    ])
     expect(harness.stdoutLines).toEqual([])
     expect(harness.stderrLines).toEqual([
       serializeCanonicalJson({
@@ -4057,6 +5175,7 @@ describe('migration rehearsal evidence filesystem boundary', () => {
       )
       const additionalFilenames:
         readonly WorkspaceSearchMigrationRehearsalEvidenceFilename[] = [
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
         WORKSPACE_SEARCH_MIGRATION_REHEARSAL_FAULT_BOUNDARY_RATE_SEGMENT_FILENAME,
         WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_PARENT_AUTHENTICATION_FILENAME,
       ]
@@ -4143,6 +5262,99 @@ describe('migration rehearsal evidence filesystem boundary', () => {
     }
   })
 
+  test('normalizes every reservation and control publication checkpoint before retry', async () => {
+    const filenames = [
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
+    ] satisfies readonly WorkspaceSearchMigrationRehearsalEvidenceFilename[]
+    const checkpoints = [
+      'temporary-file-durable',
+      'final-link-created',
+      'final-link-durable',
+      'temporary-link-removed',
+    ] satisfies readonly WorkspaceSearchMigrationRehearsalEvidencePublicationCheckpoint[]
+    for (const filename of filenames) {
+      for (const checkpoint of checkpoints) {
+        const root = await mkdtemp(join(
+          tmpdir(),
+          'mukuroji-pre-spawn-publish-',
+        ))
+        const directory = join(root, 'evidence')
+        const bytes = new TextEncoder().encode(
+          filename ===
+              WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME
+            ? '{}'
+            : serializeCanonicalJson(['verify']),
+        )
+        try {
+          await createWorkspaceSearchMigrationRehearsalEvidenceDirectoryExclusive(
+            directory,
+          )
+          if (
+            filename ===
+              WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME
+          ) {
+            await writeWorkspaceSearchMigrationRehearsalEvidenceFileExclusive(
+              directory,
+              WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
+              new TextEncoder().encode('{}'),
+            )
+          }
+          await expect(
+            writeWorkspaceSearchMigrationRehearsalEvidenceFileExclusive(
+              directory,
+              filename,
+              bytes,
+              undefined,
+              {
+                onCheckpoint: (observed): void => {
+                  if (observed === checkpoint) {
+                    throw new Error('SIMULATED_PRE_SPAWN_PUBLICATION_CRASH')
+                  }
+                },
+              },
+            ),
+          ).rejects.toThrow('OUTPUT_BOUNDARY_FAILED')
+
+          await expect(
+            validateWorkspaceSearchMigrationRehearsalReservationOnlyDirectory(
+              directory,
+            ),
+          ).resolves.toBe(
+            filename ===
+                WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME &&
+              checkpoint === 'temporary-file-durable'
+              ? 'empty-unclaimed'
+              : 'reservation-present',
+          )
+          await expect(
+            writeWorkspaceSearchMigrationRehearsalEvidenceFileExclusive(
+              directory,
+              filename,
+              bytes,
+            ),
+          ).resolves.toBe(
+            checkpoint === 'temporary-file-durable' ? 'created' : 'exists',
+          )
+          await expect(
+            validateWorkspaceSearchMigrationRehearsalReservationOnlyDirectory(
+              directory,
+            ),
+          ).resolves.toBe('reservation-present')
+          expect(new Uint8Array(await readFile(
+            join(directory, filename),
+          ))).toEqual(bytes)
+          await expect(readFile(join(
+            directory,
+            `.${filename}.publication.tmp`,
+          ))).rejects.toMatchObject({ code: 'ENOENT' })
+        } finally {
+          await rm(root, { force: true, recursive: true })
+        }
+      }
+    }
+  })
+
   test('recovers an interrupted partial parent-authentication temporary file', async () => {
     const root = await mkdtemp(join(tmpdir(), 'mukuroji-parent-auth-partial-'))
     const directory = join(root, 'evidence')
@@ -4192,7 +5404,18 @@ describe('migration rehearsal evidence filesystem boundary', () => {
         validateWorkspaceSearchMigrationRehearsalReservationOnlyDirectory(
           directory,
         ),
-      ).resolves.toBeUndefined()
+      ).resolves.toBe('reservation-present')
+
+      await writeWorkspaceSearchMigrationRehearsalEvidenceFileExclusive(
+        directory,
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
+        new TextEncoder().encode(serializeCanonicalJson(['verify'])),
+      )
+      await expect(
+        validateWorkspaceSearchMigrationRehearsalReservationOnlyDirectory(
+          directory,
+        ),
+      ).resolves.toBe('reservation-present')
 
       await writeFile(
         join(
@@ -4285,6 +5508,218 @@ describe('migration rehearsal evidence filesystem boundary', () => {
       await expect(readFile(runtimePath)).rejects.toBeDefined()
     } finally {
       await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('migration rehearsal terminal-bound release rate continuity', () => {
+  test.each(releaseTerminalProcessScenarios)(
+    'accepts the genuine reconciliation successor before %s release',
+    async (scenario) => {
+      const fixture = createReleaseTerminalProcessFixture(scenario)
+      const harness = createReleaseTerminalDependencyHarness(fixture)
+
+      const exitCode = await runWorkspaceSearchMigrationRehearsalProcessCli(
+        createReleaseTerminalProcessCliArguments(fixture),
+        harness.dependencies,
+      )
+
+      expect({
+        exitCode,
+        directoryCalls: harness.readDirectoryCalls(),
+        claimCalls: harness.readClaimCalls(),
+        runtimeKeyWrites: harness.readRuntimeKeyWrites(),
+        cleanupCompletions: harness.readCleanupCompletions(),
+        spawnCalls: harness.readSpawnCalls(),
+        evidenceFilenames:
+          harness.evidenceWrites.map((write) => write.filename),
+        stderrLines: harness.stderrLines,
+      }).toEqual({
+        exitCode: 0,
+        directoryCalls: 1,
+        claimCalls: 1,
+        runtimeKeyWrites: 1,
+        cleanupCompletions: 1,
+        spawnCalls: 1,
+        evidenceFilenames: [
+          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
+          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
+          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CHILD_MATERIAL_FILENAME,
+          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_LIFECYCLE_FILENAME,
+          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_PARENT_AUTHENTICATION_FILENAME,
+        ],
+        stderrLines: [],
+      })
+      expect(harness.stdoutLines).toHaveLength(1)
+      expect(harness.evidenceWrites.map((write) => write.filename)).toEqual([
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_RESERVATION_FILENAME,
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CONTROL_ARGUMENTS_FILENAME,
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_CHILD_MATERIAL_FILENAME,
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_LIFECYCLE_FILENAME,
+        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE_PARENT_AUTHENTICATION_FILENAME,
+      ])
+      const reservation = JSON.parse(new TextDecoder().decode(
+        harness.evidenceWrites[0]?.bytes,
+      ))
+      const childMaterialEvidence = JSON.parse(new TextDecoder().decode(
+        harness.evidenceWrites[2]?.bytes,
+      ))
+      expect(reservation.expectedPreviousRateSegment).toEqual(
+        fixture.expectedPreviousRateSegment,
+      )
+      expect(
+        childMaterialEvidence.material.stageReservation
+          .expectedPreviousRateSegment,
+      ).toEqual(fixture.expectedPreviousRateSegment)
+      expect(childMaterialEvidence.material.rateSegment.segmentOrdinal).toBe(
+        fixture.expectedPreviousRateSegment.segmentOrdinal + 1,
+      )
+      expect(fixture.previousReceipt.rateSegment.segmentDigest).not.toBe(
+        fixture.expectedPreviousRateSegment.segmentDigest,
+      )
+    },
+  )
+
+  test('rejects stale and substituted authenticated release predecessors before effects', async () => {
+    for (const scenario of releaseTerminalProcessScenarios) {
+      const fixture = createReleaseTerminalProcessFixture(scenario)
+      const candidates = Object.freeze([
+        Object.freeze({
+          name: 'stale-terminal-child-segment',
+          bytes: fixture.source.terminalRateSegmentBytes,
+        }),
+        Object.freeze({
+          name: 'substituted-same-ordinal-segment',
+          bytes: fixture.substitutedPreviousRateSegmentBytes,
+        }),
+      ])
+      for (const candidate of candidates) {
+        const harness = createReleaseTerminalDependencyHarness(
+          fixture,
+          candidate.bytes,
+        )
+
+        await expect(runWorkspaceSearchMigrationRehearsalProcessCli(
+          createReleaseTerminalProcessCliArguments(fixture),
+          harness.dependencies,
+        )).resolves.toBe(2)
+
+        expect(
+          {
+            scenario,
+            candidate: candidate.name,
+            directoryCalls: harness.readDirectoryCalls(),
+            claimCalls: harness.readClaimCalls(),
+            runtimeKeyWrites: harness.readRuntimeKeyWrites(),
+            spawnCalls: harness.readSpawnCalls(),
+          },
+        ).toEqual({
+          scenario,
+          candidate: candidate.name,
+          directoryCalls: 0,
+          claimCalls: 0,
+          runtimeKeyWrites: 0,
+          spawnCalls: 0,
+        })
+        expect(harness.stdoutLines).toEqual([])
+        expect(harness.stderrLines).toEqual([
+          serializeCanonicalJson({
+            code: 'INVALID_STAGE_SELECTION',
+            kind: WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PROCESS_RESULT_KIND,
+            status: 'error',
+          }),
+        ])
+      }
+    }
+  })
+
+  test('verifies the exact 50-segment role composition and every link', () => {
+    const fixture =
+      createAuthenticWorkspaceSearchMigrationRehearsalReleaseTerminalFixture(
+        'happy-path-verified',
+      )
+    const counts:
+      Record<AuthenticWorkspaceSearchMigrationRehearsalRateSegmentRoleName, number> = {
+        'integrity-root': 0,
+        stage: 0,
+        'target-preimage': 0,
+        'target-restored': 0,
+        'terminal-reconciliation': 0,
+        'final-publication': 0,
+      }
+    expect(fixture.allRateSegmentBytes).toHaveLength(50)
+    expect(fixture.rateSegmentRoles).toHaveLength(50)
+    for (let index = 0; index < fixture.allRateSegmentBytes.length;
+      index += 1) {
+      const bytes = fixture.allRateSegmentBytes[index]
+      const role = fixture.rateSegmentRoles[index]
+      if (bytes === undefined || role === undefined) {
+        throw new Error('Expected dense 50-segment fixture composition.')
+      }
+      const verified = verifyWorkspaceSearchMigrationRehearsalRateSegment({
+        canonicalBytes: bytes,
+        authenticationKey:
+          new Uint8Array(fixture.runtimeAuthenticationKey),
+        expectedSegmentOrdinal: index,
+        expectedPolicyVersion: fixture.manifest.policyVersion,
+        expectedConfigurationBindingDigest:
+          fixture.manifest.configurationBindingDigest,
+      })
+      expect(role.segmentOrdinal).toBe(index)
+      expect(verified.segmentOrdinal).toBe(index)
+      counts[role.role] += 1
+      if (index === 0) continue
+      const predecessorBytes = fixture.allRateSegmentBytes[index - 1]
+      if (predecessorBytes === undefined) {
+        throw new Error('Expected dense predecessor segment.')
+      }
+      const link =
+        verifyWorkspaceSearchMigrationRehearsalRateSegmentSuccessor({
+          predecessorSegmentBytes: predecessorBytes,
+          successorSegmentBytes: bytes,
+          authenticationKey:
+            new Uint8Array(fixture.runtimeAuthenticationKey),
+          expectedPolicyVersion: fixture.manifest.policyVersion,
+          expectedConfigurationBindingDigest:
+            fixture.manifest.configurationBindingDigest,
+        })
+      expect(link.successor).toEqual(verified)
+      expect(link.predecessor.segmentOrdinal).toBe(index - 1)
+    }
+    expect(counts).toEqual({
+      'integrity-root': 1,
+      stage: 36,
+      'target-preimage': 2,
+      'target-restored': 2,
+      'terminal-reconciliation': 8,
+      'final-publication': 1,
+    })
+
+    for (const scenario of releaseTerminalProcessScenarios) {
+      const terminal =
+        createAuthenticWorkspaceSearchMigrationRehearsalReleaseTerminalFixture(
+          scenario,
+        )
+      if (terminal.terminalReceipt.evidence.kind !== 'terminal') {
+        throw new Error('Expected genuine terminal release predecessor.')
+      }
+      const terminalOrdinal = terminal.terminalReceipt.rateSegment.segmentOrdinal
+      const reconciliationOrdinal =
+        terminal.terminalReceipt.evidence.reconciliationRate.successor
+          .segmentOrdinal
+      expect(terminal.allRateSegmentBytes[terminalOrdinal]).toEqual(
+        terminal.terminalRateSegmentBytes,
+      )
+      expect(terminal.allRateSegmentBytes[reconciliationOrdinal]).toEqual(
+        terminal.reconciliationSuccessorSegmentBytes,
+      )
+      expect(terminal.rateSegmentRoles[reconciliationOrdinal]).toMatchObject({
+        segmentOrdinal: reconciliationOrdinal,
+        role: 'terminal-reconciliation',
+        scenario,
+        stageOrdinal: null,
+        command: null,
+      })
     }
   })
 })

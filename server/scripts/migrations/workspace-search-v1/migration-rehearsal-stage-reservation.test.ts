@@ -50,14 +50,19 @@ describe('Workspace Search migration rehearsal stage reservation', () => {
         nonce,
         reservedAt,
         expiresAt,
-        expectedPreviousRateSegment: null,
-        expectedCurrentRateSegmentOrdinal: 0,
+        expectedPreviousRateSegment:
+          fixture.manifest.integrityAttestationRoot.segment,
+        expectedCurrentRateSegmentOrdinal: 1,
         expectedTargetPreimageArtifactContentDigest: null,
         signingKey: fixture.authenticationKey,
       })
 
     expect(reservation.stageOrdinal).toBe(1)
     expect(reservation.previousStageReceiptDigest).toBeNull()
+    expect(reservation.expectedPreviousRateSegment).toEqual(
+      fixture.manifest.integrityAttestationRoot.segment,
+    )
+    expect(reservation.expectedCurrentRateSegmentOrdinal).toBe(1)
     expect(reservation.nonceDigest).toHaveLength(64)
     expect(nonce).toEqual(new Uint8Array(32).fill(4))
     expect(
@@ -74,6 +79,23 @@ describe('Workspace Search migration rehearsal stage reservation', () => {
         fixture.authenticationKey,
       ),
     ).toEqual(reservation)
+    const {
+      canonicalBytes: _canonicalBytes,
+      ...wrongStageOnePredecessor
+    } = fixture.committedRateSegment
+    expect(() =>
+      createWorkspaceSearchMigrationRehearsalStageReservation({
+        selection: fixture.selection,
+        nonce: new Uint8Array(32).fill(0x24),
+        reservedAt,
+        expiresAt,
+        expectedPreviousRateSegment: wrongStageOnePredecessor,
+        expectedCurrentRateSegmentOrdinal:
+          wrongStageOnePredecessor.segmentOrdinal + 1,
+        expectedTargetPreimageArtifactContentDigest: null,
+        signingKey: fixture.authenticationKey,
+      })
+    ).toThrow(WorkspaceSearchMigrationRehearsalStageReservationError)
   })
 
   test('requires a target-preimage digest only for rollback apply', () => {
@@ -129,8 +151,9 @@ describe('Workspace Search migration rehearsal stage reservation', () => {
         nonce: new Uint8Array(32).fill(0x46),
         reservedAt,
         expiresAt,
-        expectedPreviousRateSegment: null,
-        expectedCurrentRateSegmentOrdinal: 0,
+        expectedPreviousRateSegment:
+          fixture.manifest.integrityAttestationRoot.segment,
+        expectedCurrentRateSegmentOrdinal: 1,
         expectedTargetPreimageArtifactContentDigest: contentDigest,
         signingKey: fixture.authenticationKey,
       })
@@ -146,8 +169,9 @@ describe('Workspace Search migration rehearsal stage reservation', () => {
         nonce: new Uint8Array(32).fill(5),
         reservedAt,
         expiresAt,
-        expectedPreviousRateSegment: null,
-        expectedCurrentRateSegmentOrdinal: 0,
+        expectedPreviousRateSegment:
+          fixture.manifest.integrityAttestationRoot.segment,
+        expectedCurrentRateSegmentOrdinal: 1,
         expectedTargetPreimageArtifactContentDigest: null,
         signingKey: fixture.authenticationKey,
       })
@@ -194,8 +218,9 @@ describe('Workspace Search migration rehearsal stage reservation', () => {
           nonce: new Uint8Array(32).fill(6),
           reservedAt,
           expiresAt: invalidExpiry,
-          expectedPreviousRateSegment: null,
-          expectedCurrentRateSegmentOrdinal: 0,
+          expectedPreviousRateSegment:
+            fixture.manifest.integrityAttestationRoot.segment,
+          expectedCurrentRateSegmentOrdinal: 1,
           expectedTargetPreimageArtifactContentDigest: null,
           signingKey: fixture.authenticationKey,
         })
@@ -207,8 +232,9 @@ describe('Workspace Search migration rehearsal stage reservation', () => {
         nonce: new Uint8Array(31),
         reservedAt,
         expiresAt,
-        expectedPreviousRateSegment: null,
-        expectedCurrentRateSegmentOrdinal: 0,
+        expectedPreviousRateSegment:
+          fixture.manifest.integrityAttestationRoot.segment,
+        expectedCurrentRateSegmentOrdinal: 1,
         expectedTargetPreimageArtifactContentDigest: null,
         signingKey: fixture.authenticationKey,
       })
@@ -224,8 +250,9 @@ describe('Workspace Search migration rehearsal stage reservation', () => {
         nonce: new Uint8Array(32).fill(7),
         reservedAt,
         expiresAt,
-        expectedPreviousRateSegment: null,
-        expectedCurrentRateSegmentOrdinal: 0,
+        expectedPreviousRateSegment:
+          fixture.manifest.integrityAttestationRoot.segment,
+        expectedCurrentRateSegmentOrdinal: 1,
         expectedTargetPreimageArtifactContentDigest: null,
         signingKey: fixture.authenticationKey,
       })

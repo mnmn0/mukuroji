@@ -17,6 +17,12 @@ import {
   type WorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection,
 } from './migration-rehearsal-integrity-evidence'
 import {
+  consumeWorkspaceSearchMigrationRehearsalRateBoundIntegrityResult,
+  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_INTEGRITY_RATE_INTERVAL_VERSION,
+  type WorkspaceSearchMigrationRehearsalIntegrityRateInterval,
+  type WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult,
+} from './migration-rehearsal-integrity-rate-evidence'
+import {
   createWorkspaceSearchMigrationRehearsalRateAuthenticationKeyFingerprint,
   finalizeWorkspaceSearchMigrationRehearsalRateSegmentEvidence,
   readWorkspaceSearchMigrationRehearsalRateSegmentEvidence,
@@ -27,6 +33,10 @@ import {
 import {
   WorkspaceSearchMigrationStrictRecordGuards,
 } from './migration-strict-record-guards'
+import type {
+  WorkspaceSearchMigrationRehearsalTargetAuditContext,
+  WorkspaceSearchMigrationRehearsalTargetAuditTerminalBinding,
+} from './migration-rehearsal-target-audit'
 
 /** Stable discriminator for one terminal reconciliation-audit artifact. */
 export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_AUDIT_KIND =
@@ -34,7 +44,7 @@ export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_AUDIT_KIND =
 
 /** Complete terminal reconciliation-audit artifact contract. */
 export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_AUDIT_VERSION =
-  2
+  3
 
 /** Maximum exact canonical bytes accepted for one reconciliation audit. */
 export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_AUDIT_MAX_BYTES =
@@ -88,6 +98,10 @@ export type WorkspaceSearchMigrationRehearsalReconciliationCoreContext = {
   readonly runLocatorDigest: string
   /** Digest of the exact measured configuration and resource generation. */
   readonly configurationBindingDigest: string
+  /** Reviewed DescribeTable policy digest shared by all live rate evidence. */
+  readonly policyVersion: string
+  /** Permit-authenticated immutable #163 resource-identity digest. */
+  readonly integrityResourceIdentityDigest: string
   /** Digest of the immutable sealed planning authority. */
   readonly sealedPlanningAuthorityDigest: string
   /** Digest of the immutable execution admission. */
@@ -200,7 +214,12 @@ export type WorkspaceSearchMigrationRehearsalReconciliationIntegrityCollectorRes
 
 /** Verified-terminal #163 projection bound into this artifact context. */
 export type WorkspaceSearchMigrationRehearsalVerifiedIntegritySummary =
-  WorkspaceSearchMigrationRehearsalVerifiedIntegrityCollectorResult & {
+  Omit<
+    WorkspaceSearchMigrationRehearsalVerifiedIntegrityCollectorResult,
+    'result'
+  > & {
+    /** Genuine one-shot rate-bound live result that authorized this summary. */
+    readonly result: WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult
     /** Digest binding the result file to its scenario and terminal context. */
     readonly resultContextDigest: string
     /** Digest of the exact migration terminal context shared with #163. */
@@ -241,9 +260,13 @@ export type WorkspaceSearchMigrationRehearsalReconciliationTargetAuditSummary = 
   readonly aggregateDigest: string
   /** Digest of the full parent-authenticated target planning context. */
   readonly contextDigest: string
-  /** Exact live #163 preimage pinned by a target baseline, otherwise null. */
-  readonly integrityBefore:
-    WorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection | null
+  /** Full parent-authenticated target planning context. */
+  readonly context: WorkspaceSearchMigrationRehearsalTargetAuditContext
+  /** Purpose-bound rollback terminal, absent only for the preimage side. */
+  readonly terminal:
+    WorkspaceSearchMigrationRehearsalTargetAuditTerminalBinding | null
+  /** Exact full rate-bound live #163 result authenticated by target audit v4. */
+  readonly integrity: WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult
   /** Exact authenticated auxiliary rate segment and final ledger binding. */
   readonly rate: WorkspaceSearchMigrationRehearsalRateSegmentEvidence
 }
@@ -355,6 +378,9 @@ export type FinalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArtifact
   /** Fresh raw-segment proof, final closed ledger, and completion instant. */
   readonly rate:
     FinalizeWorkspaceSearchMigrationRehearsalRateSegmentEvidenceInput
+  /** Fresh verified live result for verified scenarios, otherwise strict null. */
+  readonly verifiedIntegrity:
+    WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult | null
 }
 
 /** Marker seal selected by the authenticated apply boundary. */
@@ -613,7 +639,9 @@ const contextKeys = Object.freeze([
   'configurationBindingDigest',
   'executionRunDigest',
   'integrity',
+  'integrityResourceIdentityDigest',
   'planDigest',
+  'policyVersion',
   'runLocatorDigest',
   'scenario',
   'sealedPlanOperationCount',
@@ -638,11 +666,13 @@ const documentKeys = Object.freeze([
   'duplicateApplyCount',
   'executionRunDigest',
   'integrity',
+  'integrityResourceIdentityDigest',
   'kind',
   'lostItemCount',
   'markerSummary',
   'orphanAuthorityCount',
   'planDigest',
+  'policyVersion',
   'rate',
   'runLocatorDigest',
   'scenario',
@@ -672,21 +702,37 @@ const authoritySummaryDomain =
 const sourceTargetSummaryDomain =
   'mukuroji-workspace-search-migration-rehearsal-source-target-summary/v1'
 
+/** Domain separating a complete embedded rate-bound #163 result HMAC. */
+const reconciliationIntegrityBindingMacDomain =
+  'mukuroji:workspace-search-migration:rate-bound-integrity-result:v1\0'
+
+/** v3 context domain binding a verified live result to one terminal. */
+const verifiedIntegrityResultContextDomain =
+  'workspace-search-migration-rehearsal-terminal-integrity-result-context/v3'
+
+/** v3 context kind binding one rollback before/after comparison. */
+const rollbackIntegrityComparisonContextKind =
+  'workspace-search-migration-rehearsal-integrity-context/v3'
+
+/** v3 context kind binding terminal migration provenance to #163. */
+const migrationIntegrityContextKind =
+  'workspace-search-migration-rehearsal-terminal-integrity-migration-context/v3'
+
 /** Domain separating runtime-key fingerprints from all other uses. */
 const reconciliationAuditRuntimeKeyFingerprintDomain =
-  'mukuroji-workspace-search-migration-rehearsal-reconciliation-audit-runtime-key/v2\n'
+  'mukuroji-workspace-search-migration-rehearsal-reconciliation-audit-runtime-key/v3\n'
 
 /** Domain separating runtime semantic HMAC values from all other uses. */
 const reconciliationAuditRuntimeMacDomain =
-  'mukuroji-workspace-search-migration-rehearsal-reconciliation-audit-runtime-mac/v2\n'
+  'mukuroji-workspace-search-migration-rehearsal-reconciliation-audit-runtime-mac/v3\n'
 
 /** Domain separating parent publication-key fingerprints. */
 const reconciliationAuditPublicationKeyFingerprintDomain =
-  'mukuroji-workspace-search-migration-rehearsal-reconciliation-audit-publication-key/v2\n'
+  'mukuroji-workspace-search-migration-rehearsal-reconciliation-audit-publication-key/v3\n'
 
 /** Domain separating parent outer-authorization HMAC values. */
 const reconciliationAuditPublicationMacDomain =
-  'mukuroji-workspace-search-migration-rehearsal-reconciliation-audit-publication-mac/v2\n'
+  'mukuroji-workspace-search-migration-rehearsal-reconciliation-audit-publication-mac/v3\n'
 
 /** Module-private token for one successful terminal reconciliation proof. */
 const finalizedTerminalReconciliationEvidenceToken = Symbol(
@@ -753,6 +799,7 @@ export function finalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArti
     reconciliationAuditGuards.requireExactKeys(inputRecord, [
       'collectorResult',
       'rate',
+      'verifiedIntegrity',
     ])
     const rate = finalizeWorkspaceSearchMigrationRehearsalRateSegmentEvidence(
       reconciliationAuditGuards.readOwn(inputRecord, 'rate'),
@@ -768,6 +815,8 @@ export function finalizeWorkspaceSearchMigrationRehearsalReconciliationAuditArti
     const semantic = readReconciliationCollectorResult(
       reconciliationAuditGuards.readOwn(inputRecord, 'collectorResult'),
       rate,
+      reconciliationAuditGuards.readOwn(inputRecord, 'verifiedIntegrity'),
+      runtimeWorkingKey,
     )
     const auditDigest = createMigrationDigest(semantic)
     const runtimeKeyFingerprint =
@@ -1206,6 +1255,8 @@ function requireZeroBatchDiscrepancies(
 function readReconciliationCollectorResult(
   value: unknown,
   rate: WorkspaceSearchMigrationRehearsalRateSegmentEvidence,
+  verifiedIntegrityValue: unknown,
+  runtimeKey: Uint8Array,
 ): ReconciliationAuditSemanticDocument {
   const record = reconciliationAuditGuards.requireRecord(value)
   reconciliationAuditGuards.requireExactKeys(record, [
@@ -1229,22 +1280,93 @@ function readReconciliationCollectorResult(
   const sourceTargetSummary = readSourceTargetCollectorResult(
     reconciliationAuditGuards.readOwn(record, 'sourceTargetSummary'),
   )
-  const integrity = readIntegrityCollectorResult(
-    reconciliationAuditGuards.readOwn(record, 'integrity'),
-    coreContext,
-    sourceTargetSummary,
-  )
   const targetAudits = readReconciliationTargetAudits(
     reconciliationAuditGuards.readOwn(record, 'targetAudits'),
     coreContext,
-    integrity,
     sourceTargetSummary,
   )
   if (
     rate.link.configurationBindingDigest !==
       coreContext.configurationBindingDigest ||
+    rate.link.policyVersion !== coreContext.policyVersion ||
     Date.parse(rate.completedAt) < Date.parse(coreContext.checkedAt)
   ) return failReconciliationAudit()
+  let integrity:
+    WorkspaceSearchMigrationRehearsalReconciliationIntegritySummary
+  const collectorIntegrityRecord = reconciliationAuditGuards.requireRecord(
+    reconciliationAuditGuards.readOwn(record, 'integrity'),
+  )
+  if (isVerifiedScenario(coreContext.scenario)) {
+    if (targetAudits !== null) return failReconciliationAudit()
+    let consumedIntegrity:
+      WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult
+    try {
+      consumedIntegrity =
+        consumeWorkspaceSearchMigrationRehearsalRateBoundIntegrityResult(
+          verifiedIntegrityValue,
+        )
+    } catch {
+      return failReconciliationAudit()
+    }
+    const verifiedIntegrity = readRateBoundIntegrityResult(
+      consumedIntegrity,
+    )
+    requireIntegrityRuntimeBinding(verifiedIntegrity, runtimeKey)
+    requireVerifiedIntegrityRateAndContext(
+      verifiedIntegrity,
+      rate,
+      coreContext,
+    )
+    reconciliationAuditGuards.requireExactKeys(collectorIntegrityRecord, [
+      'completedAt',
+      'failureCount',
+      'integrityAggregateDigest',
+      'kind',
+      'result',
+      'status',
+      'terminalRootDigest',
+    ])
+    integrity = readVerifiedIntegrityCollector(
+      collectorIntegrityRecord,
+      coreContext,
+      verifiedIntegrity,
+      readIntegrityResultBinding(
+        reconciliationAuditGuards.readOwn(
+          collectorIntegrityRecord,
+          'result',
+        ),
+      ),
+    )
+  } else {
+    if (verifiedIntegrityValue !== null || targetAudits === null) {
+      return failReconciliationAudit()
+    }
+    requireTargetIntegrityRuntimeBindings(targetAudits, runtimeKey)
+    reconciliationAuditGuards.requireExactKeys(collectorIntegrityRecord, [
+      'after',
+      'applyStartedAt',
+      'before',
+      'comparisonContextDigest',
+      'comparisonDigest',
+      'completedAt',
+      'failureCount',
+      'kind',
+      'purpose',
+      'startedAt',
+      'status',
+      'targetPreimageAggregateDigest',
+      'targetPreimageStatus',
+      'targetRestoredAggregateDigest',
+      'terminalAt',
+      'terminalRootDigest',
+    ])
+    integrity = readRollbackIntegrityCollector(
+      collectorIntegrityRecord,
+      coreContext,
+      sourceTargetSummary,
+      targetAudits,
+    )
+  }
   return Object.freeze({
     kind:
       WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_AUDIT_KIND,
@@ -1268,20 +1390,17 @@ function readReconciliationCollectorResult(
  *
  * @param value - Candidate authenticated target pair or strict null.
  * @param context - Exact terminal reconciliation context.
- * @param integrity - Independently authenticated #163 result or comparison.
  * @param sourceTarget - Strong-read source/target reconciliation summary.
  * @returns Strict target pair for rollback, otherwise null.
  */
 function readReconciliationTargetAudits(
   value: unknown,
   context: WorkspaceSearchMigrationRehearsalReconciliationCoreContext,
-  integrity:
-    WorkspaceSearchMigrationRehearsalReconciliationIntegritySummary,
   sourceTarget:
     | WorkspaceSearchMigrationRehearsalReconciliationSourceTargetSummary
     | undefined,
 ): WorkspaceSearchMigrationRehearsalReconciliationTargetAuditPair | null {
-  if (integrity.kind === 'verified-result') {
+  if (isVerifiedScenario(context.scenario)) {
     if (value !== null) return failReconciliationAudit()
     return null
   }
@@ -1304,43 +1423,56 @@ function readReconciliationTargetAudits(
     reconciliationAuditGuards.readOwn(record, 'restored'),
     `${purposePrefix}-restored`,
   )
-  const integrityBefore = preimage.integrityBefore
+  const terminal = restored.terminal
   if (
-    integrityBefore === null ||
-    restored.integrityBefore !== null ||
-    !sameWorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection(
-      integrityBefore,
-      integrity.before,
-    ) ||
+    preimage.terminal !== null ||
+    terminal === null ||
     preimage.contentDigest === restored.contentDigest ||
     preimage.observationDigest === restored.observationDigest ||
     preimage.aggregateDigest !== restored.aggregateDigest ||
-    preimage.aggregateDigest !==
-      integrity.targetPreimageAggregateDigest ||
-    restored.aggregateDigest !==
-      integrity.targetRestoredAggregateDigest ||
     (sourceTarget !== undefined &&
       (preimage.aggregateDigest !== sourceTarget.expectedAggregateDigest ||
         restored.aggregateDigest !== sourceTarget.observedAggregateDigest)) ||
     preimage.contextDigest !== restored.contextDigest ||
-    Date.parse(integrity.applyStartedAt) >=
-      Date.parse(integrity.terminalAt) ||
-    integrity.terminalAt !== context.terminalAt ||
+    serializeCanonicalJson(preimage.context) !==
+      serializeCanonicalJson(restored.context) ||
+    preimage.context.scenario !== context.scenario ||
+    preimage.context.runLocatorDigest !== context.runLocatorDigest ||
+    preimage.context.configurationBindingDigest !==
+      context.configurationBindingDigest ||
+    preimage.context.policyVersion !== context.policyVersion ||
+    preimage.context.integrityResourceIdentityDigest !==
+      context.integrityResourceIdentityDigest ||
+    preimage.context.sealedPlanningAuthorityDigest !==
+      context.sealedPlanningAuthorityDigest ||
+    preimage.context.planDigest !== context.planDigest ||
+    terminal.scenario !== context.scenario ||
+    terminal.kind !== 'rolled-back' ||
+    terminal.version !== context.terminalRootVersion ||
+    terminal.rootDigest !== context.terminalRootDigest ||
+    terminal.terminalAt !== context.terminalAt ||
+    Date.parse(terminal.applyStartedAt) >= Date.parse(terminal.terminalAt) ||
     Date.parse(preimage.observedAt) >=
-      Date.parse(integrity.applyStartedAt) ||
+      Date.parse(terminal.applyStartedAt) ||
     Date.parse(preimage.rate.completedAt) >=
-      Date.parse(integrity.applyStartedAt) ||
+      Date.parse(terminal.applyStartedAt) ||
     Date.parse(preimage.observedAt) >= Date.parse(context.terminalAt) ||
     Date.parse(restored.startedAt) <= Date.parse(context.terminalAt) ||
     Date.parse(restored.observedAt) <= Date.parse(context.terminalAt) ||
     Date.parse(restored.observedAt) > Date.parse(context.checkedAt) ||
     Date.parse(restored.rate.completedAt) > Date.parse(context.checkedAt) ||
+    preimage.integrity.result.resourceIdentityScheme !==
+      restored.integrity.result.resourceIdentityScheme ||
+    serializeCanonicalJson(preimage.integrity.result.resourceIdentities) !==
+      serializeCanonicalJson(restored.integrity.result.resourceIdentities) ||
+    preimage.integrity.result.resourceIdentityDigest !==
+      restored.integrity.result.resourceIdentityDigest ||
+    preimage.integrity.result.integrityAggregateDigest !==
+      restored.integrity.result.integrityAggregateDigest ||
     preimage.rate.successor.segmentDigest ===
       restored.rate.successor.segmentDigest ||
     preimage.rate.successor.segmentLocatorDigest ===
-      restored.rate.successor.segmentLocatorDigest ||
-    preimage.rate.successor.segmentOrdinal >=
-      restored.rate.successor.segmentOrdinal
+      restored.rate.successor.segmentLocatorDigest
   ) {
     return failReconciliationAudit()
   }
@@ -1350,7 +1482,7 @@ function readReconciliationTargetAudits(
 /**
  * Reads one exact target-audit summary embedded after dual-key authentication.
  *
- * @param value - Candidate digest-only target summary.
+ * @param value - Candidate full authenticated target summary.
  * @param expectedPurpose - Scenario and side fixed by the outer context.
  * @returns Frozen target summary with strict auxiliary rate evidence.
  */
@@ -1367,13 +1499,15 @@ function readReconciliationTargetAuditSummary(
     'aggregateDigest',
     'byteLength',
     'contentDigest',
+    'context',
     'contextDigest',
-    'integrityBefore',
+    'integrity',
     'observationDigest',
     'observedAt',
     'purpose',
     'rate',
     'startedAt',
+    'terminal',
   ])
   if (reconciliationAuditGuards.readOwn(record, 'purpose') !== expectedPurpose) {
     return failReconciliationAudit()
@@ -1387,41 +1521,50 @@ function readReconciliationTargetAuditSummary(
   const rate = readWorkspaceSearchMigrationRehearsalRateSegmentEvidence(
     reconciliationAuditGuards.readOwn(record, 'rate'),
   )
-  if (
-    Date.parse(startedAt) > Date.parse(observedAt) ||
-    Date.parse(rate.completedAt) < Date.parse(observedAt)
-  ) {
-    return failReconciliationAudit()
-  }
-  const integrityBeforeValue = reconciliationAuditGuards.readOwn(
-    record,
-    'integrityBefore',
-  )
   const preimage = expectedPurpose === 'partial-rollback-preimage' ||
     expectedPurpose === 'complete-rollback-preimage'
-  let integrityBefore:
-    WorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection | null
-  if (preimage) {
-    try {
-      integrityBefore =
-        readWorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection(
-          integrityBeforeValue,
-        )
-    } catch {
-      return failReconciliationAudit()
-    }
-    if (
-      Date.parse(integrityBefore.runtimeProvenance.completedAt) >
-        Date.parse(startedAt)
-    ) return failReconciliationAudit()
-  } else {
-    if (integrityBeforeValue !== null) return failReconciliationAudit()
-    integrityBefore = null
+  const context = readTargetAuditContext(
+    reconciliationAuditGuards.readOwn(record, 'context'),
+  )
+  const terminal = readTargetAuditTerminal(
+    reconciliationAuditGuards.readOwn(record, 'terminal'),
+    expectedPurpose,
+  )
+  const integrity = readRateBoundIntegrityResult(
+    reconciliationAuditGuards.readOwn(record, 'integrity'),
+  )
+  if (
+    Date.parse(startedAt) > Date.parse(observedAt) ||
+    Date.parse(rate.completedAt) < Date.parse(observedAt) ||
+    Date.parse(integrity.result.runtimeProvenance.completedAt) >
+      Date.parse(observedAt) ||
+    integrity.configurationBindingDigest !==
+      context.configurationBindingDigest ||
+    integrity.policyVersion !== context.policyVersion ||
+    integrity.result.resourceIdentityDigest !==
+      context.integrityResourceIdentityDigest ||
+    rate.link.configurationBindingDigest !==
+      context.configurationBindingDigest ||
+    rate.link.policyVersion !== context.policyVersion ||
+    !sameVerifiedRateSegment(integrity.predecessor, rate.predecessor) ||
+    !sameVerifiedRateSegment(integrity.segment, rate.successor) ||
+    (preimage && terminal !== null) ||
+    (!preimage &&
+      (terminal === null ||
+        Date.parse(startedAt) <= Date.parse(terminal.terminalAt) ||
+        Date.parse(integrity.result.runtimeProvenance.startedAt) <
+          Date.parse(terminal.terminalAt)))
+  ) {
+    return failReconciliationAudit()
   }
   const byteLength = readPositiveInteger(
     reconciliationAuditGuards.readOwn(record, 'byteLength'),
   )
   if (byteLength > 64 * 1_024 * 1_024) return failReconciliationAudit()
+  const contextDigest = readDigestOwn(record, 'contextDigest')
+  if (contextDigest !== createMigrationDigest(context)) {
+    return failReconciliationAudit()
+  }
   return Object.freeze({
     purpose: expectedPurpose,
     startedAt,
@@ -1430,8 +1573,10 @@ function readReconciliationTargetAuditSummary(
     observedAt,
     observationDigest: readDigestOwn(record, 'observationDigest'),
     aggregateDigest: readDigestOwn(record, 'aggregateDigest'),
-    contextDigest: readDigestOwn(record, 'contextDigest'),
-    integrityBefore,
+    contextDigest,
+    context,
+    terminal,
+    integrity,
     rate,
   })
 }
@@ -1483,6 +1628,7 @@ function readAuthenticatedReconciliationAuditDocument(
       createReconciliationAuditRuntimeKeyFingerprint(runtimeKey)
     const publicationKeyFingerprint =
       createReconciliationAuditPublicationKeyFingerprint(publicationKey)
+    requireDocumentIntegrityRuntimeBindings(document, runtimeKey)
     if (
       !safeDigestEqual(
         document.authentication.runtimeKeyFingerprint,
@@ -1574,18 +1720,20 @@ function readReconciliationAuditDocument(
   if (
     rate.link.configurationBindingDigest !==
       coreContext.configurationBindingDigest ||
+    rate.link.policyVersion !== coreContext.policyVersion ||
     Date.parse(rate.completedAt) < Date.parse(coreContext.checkedAt)
   ) return failReconciliationAudit()
+  const targetAudits = readReconciliationTargetAudits(
+    reconciliationAuditGuards.readOwn(record, 'targetAudits'),
+    coreContext,
+    sourceTargetSummary,
+  )
   const integrity = readIntegritySummary(
     reconciliationAuditGuards.readOwn(record, 'integrity'),
     coreContext,
     sourceTargetSummary,
-  )
-  const targetAudits = readReconciliationTargetAudits(
-    reconciliationAuditGuards.readOwn(record, 'targetAudits'),
-    coreContext,
-    integrity,
-    sourceTargetSummary,
+    targetAudits,
+    rate,
   )
   const context = Object.freeze({ ...coreContext, integrity, targetAudits })
   const duplicateApplyCount = readNonNegativeInteger(
@@ -1640,15 +1788,16 @@ function readReconciliationAuditContext(
   const record = reconciliationAuditGuards.requireRecord(value)
   reconciliationAuditGuards.requireExactKeys(record, contextKeys)
   const coreContext = readReconciliationAuditCoreContextFields(record)
+  const targetAudits = readReconciliationTargetAudits(
+    reconciliationAuditGuards.readOwn(record, 'targetAudits'),
+    coreContext,
+    undefined,
+  )
   const integrity = readIntegritySummary(
     reconciliationAuditGuards.readOwn(record, 'integrity'),
     coreContext,
     undefined,
-  )
-  const targetAudits = readReconciliationTargetAudits(
-    reconciliationAuditGuards.readOwn(record, 'targetAudits'),
-    coreContext,
-    integrity,
+    targetAudits,
     undefined,
   )
   return Object.freeze({ ...coreContext, integrity, targetAudits })
@@ -1712,6 +1861,11 @@ function readReconciliationAuditCoreContextFields(
     configurationBindingDigest: readDigestOwn(
       record,
       'configurationBindingDigest',
+    ),
+    policyVersion: readDigestOwn(record, 'policyVersion'),
+    integrityResourceIdentityDigest: readDigestOwn(
+      record,
+      'integrityResourceIdentityDigest',
     ),
     sealedPlanningAuthorityDigest: readDigestOwn(
       record,
@@ -1978,51 +2132,6 @@ function readSourceTargetMaterial(
   })
 }
 
-/** Derives a scenario-specific #163 summary from authenticated collector data. */
-function readIntegrityCollectorResult(
-  value: unknown,
-  context: WorkspaceSearchMigrationRehearsalReconciliationCoreContext,
-  sourceTarget:
-    WorkspaceSearchMigrationRehearsalReconciliationSourceTargetSummary,
-): WorkspaceSearchMigrationRehearsalReconciliationIntegritySummary {
-  const record = reconciliationAuditGuards.requireRecord(value)
-  const kind = reconciliationAuditGuards.readOwn(record, 'kind')
-  if (kind === 'verified-result') {
-    reconciliationAuditGuards.requireExactKeys(record, [
-      'completedAt',
-      'failureCount',
-      'kind',
-      'result',
-      'integrityAggregateDigest',
-      'status',
-      'terminalRootDigest',
-    ])
-    return readVerifiedIntegrityCollector(record, context)
-  }
-  if (kind === 'rollback-comparison') {
-    reconciliationAuditGuards.requireExactKeys(record, [
-      'after',
-      'applyStartedAt',
-      'before',
-      'comparisonContextDigest',
-      'comparisonDigest',
-      'completedAt',
-      'failureCount',
-      'kind',
-      'purpose',
-      'startedAt',
-      'status',
-      'targetPreimageAggregateDigest',
-      'targetPreimageStatus',
-      'targetRestoredAggregateDigest',
-      'terminalAt',
-      'terminalRootDigest',
-    ])
-    return readRollbackIntegrityCollector(record, context, sourceTarget)
-  }
-  return failReconciliationAudit()
-}
-
 /** Strictly reads a derived #163 summary from an artifact or expectation. */
 function readIntegritySummary(
   value: unknown,
@@ -2030,6 +2139,9 @@ function readIntegritySummary(
   sourceTarget:
     | WorkspaceSearchMigrationRehearsalReconciliationSourceTargetSummary
     | undefined,
+  targetAudits:
+    WorkspaceSearchMigrationRehearsalReconciliationTargetAuditPair | null,
+  rate: WorkspaceSearchMigrationRehearsalRateSegmentEvidence | undefined,
 ): WorkspaceSearchMigrationRehearsalReconciliationIntegritySummary {
   const record = reconciliationAuditGuards.requireRecord(value)
   const kind = reconciliationAuditGuards.readOwn(record, 'kind')
@@ -2045,9 +2157,20 @@ function readIntegritySummary(
       'status',
       'terminalRootDigest',
     ])
+    if (targetAudits !== null) return failReconciliationAudit()
+    const result = readRateBoundIntegrityResult(
+      reconciliationAuditGuards.readOwn(record, 'result'),
+    )
+    if (rate !== undefined) {
+      requireVerifiedIntegrityRateAndContext(result, rate, context)
+    } else {
+      requireIntegrityContext(result, context)
+    }
     const parsed = readVerifiedIntegrityCollector(
       record,
       context,
+      result,
+      result.result,
     )
     const migrationContextDigest = readDigestOwn(
       record,
@@ -2085,10 +2208,12 @@ function readIntegritySummary(
       'terminalAt',
       'terminalRootDigest',
     ])
+    if (targetAudits === null) return failReconciliationAudit()
     const parsed = readRollbackIntegrityCollector(
       record,
       context,
       sourceTarget,
+      targetAudits,
     )
     if (
       parsed.migrationContextDigest !==
@@ -2105,6 +2230,9 @@ function readIntegritySummary(
 function readVerifiedIntegrityCollector(
   record: object,
   context: WorkspaceSearchMigrationRehearsalReconciliationCoreContext,
+  result: WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult,
+  reportedResult:
+    WorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection,
 ): WorkspaceSearchMigrationRehearsalVerifiedIntegritySummary {
   if (
     !isVerifiedScenario(context.scenario) ||
@@ -2118,9 +2246,6 @@ function readVerifiedIntegrityCollector(
   const completedAt = reconciliationAuditGuards.readTimestamp(
     reconciliationAuditGuards.readOwn(record, 'completedAt'),
   )
-  const result = readIntegrityResultBinding(
-    reconciliationAuditGuards.readOwn(record, 'result'),
-  )
   const terminalRootDigest = readDigestOwn(record, 'terminalRootDigest')
   const integrityAggregateDigest = readDigestOwn(
     record,
@@ -2128,11 +2253,16 @@ function readVerifiedIntegrityCollector(
   )
   if (
     terminalRootDigest !== context.terminalRootDigest ||
-    integrityAggregateDigest !== result.integrityAggregateDigest ||
-    Date.parse(result.runtimeProvenance.startedAt) <=
+    !sameWorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection(
+      reportedResult,
+      result.result,
+    ) ||
+    integrityAggregateDigest !==
+      result.result.integrityAggregateDigest ||
+    Date.parse(result.result.runtimeProvenance.startedAt) <=
       Date.parse(context.terminalAt) ||
-    Date.parse(result.checkedAt) <= Date.parse(context.terminalAt) ||
-    Date.parse(result.checkedAt) > Date.parse(completedAt) ||
+    Date.parse(result.result.checkedAt) <= Date.parse(context.terminalAt) ||
+    Date.parse(result.result.checkedAt) > Date.parse(completedAt) ||
     Date.parse(completedAt) <= Date.parse(context.terminalAt) ||
     Date.parse(completedAt) > Date.parse(context.checkedAt)
   ) {
@@ -2141,26 +2271,32 @@ function readVerifiedIntegrityCollector(
   const migrationContextDigest = createMigrationIntegrityContextDigest(
     context,
   )
-  const fields:
-    WorkspaceSearchMigrationRehearsalVerifiedIntegrityCollectorResult =
-      Object.freeze({
-        kind: 'verified-result',
-        status: 'pass',
-        failureCount: 0,
-        completedAt,
-        result,
-        terminalRootDigest,
-        integrityAggregateDigest,
-      })
+  const fields: Omit<
+    WorkspaceSearchMigrationRehearsalVerifiedIntegritySummary,
+    'migrationContextDigest' | 'resultContextDigest'
+  > = Object.freeze({
+    kind: 'verified-result',
+    status: 'pass',
+    failureCount: 0,
+    completedAt,
+    result,
+    terminalRootDigest,
+    integrityAggregateDigest,
+  })
   return Object.freeze({
     ...fields,
     resultContextDigest: createMigrationDigest({
-      domain:
-        'workspace-search-migration-rehearsal-terminal-integrity-result-context',
-      version: 1,
+      domain: verifiedIntegrityResultContextDomain,
+      version: 3,
       scenario: context.scenario,
       migrationContextDigest,
-      ...fields,
+      kind: fields.kind,
+      status: fields.status,
+      failureCount: fields.failureCount,
+      completedAt: fields.completedAt,
+      result: fields.result.result,
+      terminalRootDigest: fields.terminalRootDigest,
+      integrityAggregateDigest: fields.integrityAggregateDigest,
     }),
     migrationContextDigest,
   })
@@ -2173,6 +2309,8 @@ function readRollbackIntegrityCollector(
   sourceTarget:
     | WorkspaceSearchMigrationRehearsalReconciliationSourceTargetSummary
     | undefined,
+  targetAudits:
+    WorkspaceSearchMigrationRehearsalReconciliationTargetAuditPair,
 ): WorkspaceSearchMigrationRehearsalRollbackIntegritySummary {
   const expectedPurpose = context.scenario === 'partial-apply-rollback'
     ? 'partial-rollback'
@@ -2193,22 +2331,22 @@ function readRollbackIntegrityCollector(
     return failReconciliationAudit()
   }
   const purpose = expectedPurpose
-  const startedAt = reconciliationAuditGuards.readTimestamp(
+  const reportedStartedAt = reconciliationAuditGuards.readTimestamp(
     reconciliationAuditGuards.readOwn(record, 'startedAt'),
   )
-  const applyStartedAt = reconciliationAuditGuards.readTimestamp(
+  const reportedApplyStartedAt = reconciliationAuditGuards.readTimestamp(
     reconciliationAuditGuards.readOwn(record, 'applyStartedAt'),
   )
-  const terminalAt = reconciliationAuditGuards.readTimestamp(
+  const reportedTerminalAt = reconciliationAuditGuards.readTimestamp(
     reconciliationAuditGuards.readOwn(record, 'terminalAt'),
   )
-  const completedAt = reconciliationAuditGuards.readTimestamp(
+  const reportedCompletedAt = reconciliationAuditGuards.readTimestamp(
     reconciliationAuditGuards.readOwn(record, 'completedAt'),
   )
-  const before = readIntegrityResultBinding(
+  const reportedBefore = readIntegrityResultBinding(
     reconciliationAuditGuards.readOwn(record, 'before'),
   )
-  const after = readIntegrityResultBinding(
+  const reportedAfter = readIntegrityResultBinding(
     reconciliationAuditGuards.readOwn(record, 'after'),
   )
   const comparisonDigest = readDigestOwn(record, 'comparisonDigest')
@@ -2225,8 +2363,32 @@ function readRollbackIntegrityCollector(
     record,
     'targetRestoredAggregateDigest',
   )
+  const terminal = targetAudits.restored.terminal
+  if (terminal === null) return failReconciliationAudit()
+  const before = targetAudits.preimage.integrity.result
+  const after = targetAudits.restored.integrity.result
+  const startedAt = before.runtimeProvenance.startedAt
+  const applyStartedAt = terminal.applyStartedAt
+  const terminalAt = terminal.terminalAt
+  const completedAt = after.checkedAt
   if (
     terminalRootDigest !== context.terminalRootDigest ||
+    reportedStartedAt !== startedAt ||
+    reportedApplyStartedAt !== applyStartedAt ||
+    reportedTerminalAt !== terminalAt ||
+    reportedCompletedAt !== completedAt ||
+    !sameWorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection(
+      reportedBefore,
+      before,
+    ) ||
+    !sameWorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection(
+      reportedAfter,
+      after,
+    ) ||
+    targetPreimageAggregateDigest !==
+      targetAudits.preimage.aggregateDigest ||
+    targetRestoredAggregateDigest !==
+      targetAudits.restored.aggregateDigest ||
     targetPreimageAggregateDigest !== targetRestoredAggregateDigest ||
     (sourceTarget !== undefined &&
       (targetPreimageAggregateDigest !==
@@ -2237,15 +2399,15 @@ function readRollbackIntegrityCollector(
     before.resultDigest === after.resultDigest ||
     before.resultMac === after.resultMac ||
     before.integrityAggregateDigest !== after.integrityAggregateDigest ||
+    before.resourceIdentityScheme !== after.resourceIdentityScheme ||
+    serializeCanonicalJson(before.resourceIdentities) !==
+      serializeCanonicalJson(after.resourceIdentities) ||
     before.resourceIdentityDigest !== after.resourceIdentityDigest ||
-    Date.parse(startedAt) >
-      Date.parse(before.runtimeProvenance.startedAt) ||
     Date.parse(before.checkedAt) >= Date.parse(applyStartedAt) ||
     Date.parse(applyStartedAt) >= Date.parse(terminalAt) ||
     terminalAt !== context.terminalAt ||
     Date.parse(before.checkedAt) >= Date.parse(after.checkedAt) ||
     Date.parse(after.runtimeProvenance.startedAt) <= Date.parse(terminalAt) ||
-    Date.parse(after.checkedAt) > Date.parse(completedAt) ||
     Date.parse(completedAt) <= Date.parse(context.terminalAt) ||
     Date.parse(completedAt) > Date.parse(context.checkedAt)
   ) {
@@ -2263,8 +2425,8 @@ function readRollbackIntegrityCollector(
     },
   })
   const expectedComparisonContextDigest = createMigrationDigest({
-    kind: 'workspace-search-migration-rehearsal-integrity-context',
-    version: 1,
+    kind: rollbackIntegrityComparisonContextKind,
+    version: 3,
     purpose,
     startedAt,
     applyStartedAt,
@@ -2314,14 +2476,453 @@ function readIntegrityResultBinding(
   }
 }
 
+/** Strictly reads one complete public rate-bound #163 projection. */
+function readRateBoundIntegrityResult(
+  value: unknown,
+): WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult {
+  const record = reconciliationAuditGuards.requireRecord(value)
+  reconciliationAuditGuards.requireExactKeys(record, [
+    'bindingMac',
+    'configurationBindingDigest',
+    'interval',
+    'kind',
+    'policyVersion',
+    'predecessor',
+    'result',
+    'segment',
+    'tableOrderBindingMac',
+    'version',
+  ])
+  if (
+    reconciliationAuditGuards.readOwn(record, 'kind') !==
+      'mukuroji-workspace-search-migration-rehearsal-rate-bound-integrity-result' ||
+    reconciliationAuditGuards.readOwn(record, 'version') !== 1
+  ) return failReconciliationAudit()
+  const result = readIntegrityResultBinding(
+    reconciliationAuditGuards.readOwn(record, 'result'),
+  )
+  const predecessor = readTerminalReconciliationRatePredecessor(
+    reconciliationAuditGuards.readOwn(record, 'predecessor'),
+  )
+  const segment = readTerminalReconciliationRatePredecessor(
+    reconciliationAuditGuards.readOwn(record, 'segment'),
+  )
+  const interval = readIntegrityRateInterval(
+    reconciliationAuditGuards.readOwn(record, 'interval'),
+  )
+  const expectedFirstEventSequence =
+    predecessor.firstEventSequence + predecessor.eventCount
+  const segmentLastEventSequence =
+    segment.firstEventSequence + segment.eventCount - 1
+  if (
+    predecessor.authenticationKeyFingerprint !==
+      segment.authenticationKeyFingerprint ||
+    segment.segmentOrdinal !== predecessor.segmentOrdinal + 1 ||
+    segment.segmentLocatorDigest === predecessor.segmentLocatorDigest ||
+    !Number.isSafeInteger(expectedFirstEventSequence) ||
+    segment.firstEventSequence !== expectedFirstEventSequence ||
+    segment.eventCount === 0 ||
+    !Number.isSafeInteger(segmentLastEventSequence) ||
+    interval.firstEventSequence < segment.firstEventSequence ||
+    interval.lastEventSequence > segmentLastEventSequence ||
+    Date.parse(interval.startedAt) <
+      Date.parse(result.runtimeProvenance.startedAt) ||
+    Date.parse(interval.completedAt) >
+      Date.parse(result.runtimeProvenance.completedAt)
+  ) return failReconciliationAudit()
+  return Object.freeze({
+    kind:
+      'mukuroji-workspace-search-migration-rehearsal-rate-bound-integrity-result',
+    version: 1,
+    result,
+    predecessor,
+    segment,
+    interval,
+    policyVersion: readDigestOwn(record, 'policyVersion'),
+    configurationBindingDigest: readDigestOwn(
+      record,
+      'configurationBindingDigest',
+    ),
+    tableOrderBindingMac: readDigestOwn(
+      record,
+      'tableOrderBindingMac',
+    ),
+    bindingMac: readDigestOwn(record, 'bindingMac'),
+  })
+}
+
+/** Strictly reads one complete two-pass integrity rate interval. */
+function readIntegrityRateInterval(
+  value: unknown,
+): WorkspaceSearchMigrationRehearsalIntegrityRateInterval {
+  const record = reconciliationAuditGuards.requireRecord(value)
+  reconciliationAuditGuards.requireExactKeys(record, [
+    'attemptSequences',
+    'cadenceWaitCount',
+    'cadenceWaitMilliseconds',
+    'completedAt',
+    'describeTableCallCount',
+    'eventSequences',
+    'firstAttemptSequence',
+    'firstEventSequence',
+    'kind',
+    'lastAttemptSequence',
+    'lastEventSequence',
+    'phase',
+    'startedAt',
+    'tablePassCount',
+    'version',
+  ])
+  if (
+    reconciliationAuditGuards.readOwn(record, 'kind') !==
+      'mukuroji-workspace-search-migration-rehearsal-integrity-rate-interval' ||
+    reconciliationAuditGuards.readOwn(record, 'version') !==
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_INTEGRITY_RATE_INTERVAL_VERSION ||
+    reconciliationAuditGuards.readOwn(record, 'phase') !==
+      'integrity-check' ||
+    reconciliationAuditGuards.readOwn(record, 'tablePassCount') !== 2 ||
+    reconciliationAuditGuards.readOwn(record, 'describeTableCallCount') !== 12
+  ) return failReconciliationAudit()
+  const attemptSequences = readIntegritySequenceVector(
+    reconciliationAuditGuards.readOwn(record, 'attemptSequences'),
+    12,
+    12,
+  )
+  const eventSequences = readIntegritySequenceVector(
+    reconciliationAuditGuards.readOwn(record, 'eventSequences'),
+    24,
+    100_000,
+  )
+  const firstAttemptSequence = readPositiveInteger(
+    reconciliationAuditGuards.readOwn(record, 'firstAttemptSequence'),
+  )
+  const lastAttemptSequence = readPositiveInteger(
+    reconciliationAuditGuards.readOwn(record, 'lastAttemptSequence'),
+  )
+  const firstEventSequence = readPositiveInteger(
+    reconciliationAuditGuards.readOwn(record, 'firstEventSequence'),
+  )
+  const lastEventSequence = readPositiveInteger(
+    reconciliationAuditGuards.readOwn(record, 'lastEventSequence'),
+  )
+  const cadenceWaitCount = readNonNegativeInteger(
+    reconciliationAuditGuards.readOwn(record, 'cadenceWaitCount'),
+  )
+  const cadenceWaitMilliseconds = readNonNegativeInteger(
+    reconciliationAuditGuards.readOwn(record, 'cadenceWaitMilliseconds'),
+  )
+  const startedAt = reconciliationAuditGuards.readTimestamp(
+    reconciliationAuditGuards.readOwn(record, 'startedAt'),
+  )
+  const completedAt = reconciliationAuditGuards.readTimestamp(
+    reconciliationAuditGuards.readOwn(record, 'completedAt'),
+  )
+  if (
+    firstAttemptSequence !== attemptSequences[0] ||
+    lastAttemptSequence !== attemptSequences.at(-1) ||
+    attemptSequences.some((sequence, index) =>
+      index > 0 && sequence !== (attemptSequences[index - 1] ?? 0) + 1) ||
+    eventSequences.length !== 24 + cadenceWaitCount ||
+    firstEventSequence !== eventSequences[0] ||
+    lastEventSequence !== eventSequences.at(-1) ||
+    eventSequences.some((sequence, index) =>
+      index > 0 && sequence !== (eventSequences[index - 1] ?? 0) + 1) ||
+    (cadenceWaitCount === 0) !== (cadenceWaitMilliseconds === 0) ||
+    Date.parse(startedAt) > Date.parse(completedAt)
+  ) return failReconciliationAudit()
+  return Object.freeze({
+    kind:
+      'mukuroji-workspace-search-migration-rehearsal-integrity-rate-interval',
+    version:
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_INTEGRITY_RATE_INTERVAL_VERSION,
+    phase: 'integrity-check',
+    tablePassCount: 2,
+    describeTableCallCount: 12,
+    firstAttemptSequence,
+    lastAttemptSequence,
+    attemptSequences,
+    firstEventSequence,
+    lastEventSequence,
+    eventSequences,
+    cadenceWaitCount,
+    cadenceWaitMilliseconds,
+    startedAt,
+    completedAt,
+  })
+}
+
+/** Reads one exact dense positive-integer sequence vector. */
+function readIntegritySequenceVector(
+  value: unknown,
+  minimumLength: number,
+  maximumLength: number,
+): readonly number[] {
+  if (
+    nodeUtilTypes.isProxy(value) ||
+    !Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Array.prototype
+  ) return failReconciliationAudit()
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length')
+  const length: unknown = lengthDescriptor?.value
+  if (
+    lengthDescriptor === undefined ||
+    lengthDescriptor.enumerable ||
+    !Object.hasOwn(lengthDescriptor, 'value') ||
+    typeof length !== 'number' ||
+    !Number.isSafeInteger(length) ||
+    length < minimumLength ||
+    length > maximumLength
+  ) return failReconciliationAudit()
+  const ownKeys = Reflect.ownKeys(value)
+  if (ownKeys.length !== length + 1 || ownKeys[length] !== 'length') {
+    return failReconciliationAudit()
+  }
+  const sequences: number[] = []
+  for (let index = 0; index < length; index += 1) {
+    if (ownKeys[index] !== String(index)) return failReconciliationAudit()
+    sequences.push(readPositiveInteger(
+      reconciliationAuditGuards.readOwn(value, String(index)),
+    ))
+  }
+  return Object.freeze(sequences)
+}
+
+/** Requires a full live result to match the parent terminal context. */
+function requireIntegrityContext(
+  integrity: WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult,
+  context: WorkspaceSearchMigrationRehearsalReconciliationCoreContext,
+): void {
+  if (
+    integrity.configurationBindingDigest !==
+      context.configurationBindingDigest ||
+    integrity.policyVersion !== context.policyVersion ||
+    integrity.result.resourceIdentityDigest !==
+      context.integrityResourceIdentityDigest
+  ) return failReconciliationAudit()
+}
+
+/** Requires verified #163 calls to be the reconciliation audit rate segment. */
+function requireVerifiedIntegrityRateAndContext(
+  integrity: WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult,
+  rate: WorkspaceSearchMigrationRehearsalRateSegmentEvidence,
+  context: WorkspaceSearchMigrationRehearsalReconciliationCoreContext,
+): void {
+  requireIntegrityContext(integrity, context)
+  if (
+    !sameVerifiedRateSegment(integrity.predecessor, rate.predecessor) ||
+    !sameVerifiedRateSegment(integrity.segment, rate.successor) ||
+    Date.parse(integrity.result.runtimeProvenance.startedAt) <=
+      Date.parse(context.terminalAt) ||
+    Date.parse(integrity.result.checkedAt) > Date.parse(context.checkedAt)
+  ) return failReconciliationAudit()
+}
+
+/** Requires one embedded full #163 result to retain its runtime-key HMAC. */
+function requireIntegrityRuntimeBinding(
+  integrity: WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult,
+  runtimeKey: Uint8Array,
+): void {
+  const expectedKeyFingerprint =
+    createWorkspaceSearchMigrationRehearsalRateAuthenticationKeyFingerprint(
+      runtimeKey,
+    )
+  if (
+    integrity.predecessor.authenticationKeyFingerprint !==
+      expectedKeyFingerprint ||
+    integrity.segment.authenticationKeyFingerprint !==
+      expectedKeyFingerprint ||
+    !safeDigestEqual(
+      integrity.bindingMac,
+      createIntegrityBindingMac(integrity, runtimeKey),
+    )
+  ) return failReconciliationAudit()
+}
+
+/** Requires both rollback target results to retain runtime-key HMACs. */
+function requireTargetIntegrityRuntimeBindings(
+  targetAudits:
+    WorkspaceSearchMigrationRehearsalReconciliationTargetAuditPair,
+  runtimeKey: Uint8Array,
+): void {
+  requireIntegrityRuntimeBinding(targetAudits.preimage.integrity, runtimeKey)
+  requireIntegrityRuntimeBinding(targetAudits.restored.integrity, runtimeKey)
+}
+
+/** Requires every scenario-authoritative embedded #163 HMAC in one document. */
+function requireDocumentIntegrityRuntimeBindings(
+  document: ReconciliationAuditDocument,
+  runtimeKey: Uint8Array,
+): void {
+  if (document.integrity.kind === 'verified-result') {
+    requireIntegrityRuntimeBinding(document.integrity.result, runtimeKey)
+    return
+  }
+  if (document.targetAudits === null) return failReconciliationAudit()
+  requireTargetIntegrityRuntimeBindings(document.targetAudits, runtimeKey)
+}
+
+/** Recomputes one embedded rate-bound result HMAC. */
+function createIntegrityBindingMac(
+  integrity: WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult,
+  runtimeKey: Uint8Array,
+): string {
+  const claims = Object.freeze({
+    kind: integrity.kind,
+    version: integrity.version,
+    result: integrity.result,
+    predecessor: integrity.predecessor,
+    segment: integrity.segment,
+    interval: integrity.interval,
+    policyVersion: integrity.policyVersion,
+    configurationBindingDigest: integrity.configurationBindingDigest,
+    tableOrderBindingMac: integrity.tableOrderBindingMac,
+  })
+  return createHmac('sha256', runtimeKey)
+    .update(reconciliationIntegrityBindingMacDomain, 'utf8')
+    .update(serializeCanonicalJson(claims), 'utf8')
+    .digest('hex')
+}
+
+/** Compares every field of two authenticated rate summaries exactly. */
+function sameVerifiedRateSegment(
+  left: WorkspaceSearchMigrationRehearsalVerifiedRateSegment,
+  right: WorkspaceSearchMigrationRehearsalVerifiedRateSegment,
+): boolean {
+  return left.authenticationKeyFingerprint ===
+      right.authenticationKeyFingerprint &&
+    left.segmentLocatorDigest === right.segmentLocatorDigest &&
+    left.segmentOrdinal === right.segmentOrdinal &&
+    left.firstEventSequence === right.firstEventSequence &&
+    left.eventCount === right.eventCount &&
+    left.firstCommittedEventSequence ===
+      right.firstCommittedEventSequence &&
+    left.lastCommittedEventSequence === right.lastCommittedEventSequence &&
+    left.terminalRecordMac === right.terminalRecordMac &&
+    left.segmentDigest === right.segmentDigest
+}
+
+/** Strictly reads one parent-authenticated target planning context. */
+function readTargetAuditContext(
+  value: unknown,
+): WorkspaceSearchMigrationRehearsalTargetAuditContext {
+  const record = reconciliationAuditGuards.requireRecord(value)
+  reconciliationAuditGuards.requireExactKeys(record, [
+    'configurationBindingDigest',
+    'executionBoundaryDigest',
+    'integrityResourceIdentityDigest',
+    'manifestDigest',
+    'permitDigest',
+    'planDigest',
+    'planningReceiptDigest',
+    'policyVersion',
+    'requestedResourcesBinding',
+    'runLocatorDigest',
+    'scenario',
+    'sealedPlanningAuthorityDigest',
+    'writerFenceDigest',
+  ])
+  const scenario = reconciliationAuditGuards.readOwn(record, 'scenario')
+  if (
+    scenario !== 'complete-apply-rollback' &&
+    scenario !== 'partial-apply-rollback'
+  ) return failReconciliationAudit()
+  return Object.freeze({
+    scenario,
+    runLocatorDigest: readDigestOwn(record, 'runLocatorDigest'),
+    manifestDigest: readDigestOwn(record, 'manifestDigest'),
+    permitDigest: readDigestOwn(record, 'permitDigest'),
+    requestedResourcesBinding: readDigestOwn(
+      record,
+      'requestedResourcesBinding',
+    ),
+    configurationBindingDigest: readDigestOwn(
+      record,
+      'configurationBindingDigest',
+    ),
+    policyVersion: readDigestOwn(record, 'policyVersion'),
+    integrityResourceIdentityDigest: readDigestOwn(
+      record,
+      'integrityResourceIdentityDigest',
+    ),
+    planningReceiptDigest: readDigestOwn(record, 'planningReceiptDigest'),
+    executionBoundaryDigest: readDigestOwn(record, 'executionBoundaryDigest'),
+    sealedPlanningAuthorityDigest: readDigestOwn(
+      record,
+      'sealedPlanningAuthorityDigest',
+    ),
+    planDigest: readDigestOwn(record, 'planDigest'),
+    writerFenceDigest: readDigestOwn(record, 'writerFenceDigest'),
+  })
+}
+
+/** Strictly reads one purpose-bound rollback terminal or preimage null. */
+function readTargetAuditTerminal(
+  value: unknown,
+  purpose:
+    | 'complete-rollback-preimage'
+    | 'complete-rollback-restored'
+    | 'partial-rollback-preimage'
+    | 'partial-rollback-restored',
+): WorkspaceSearchMigrationRehearsalTargetAuditTerminalBinding | null {
+  const preimage = purpose === 'complete-rollback-preimage' ||
+    purpose === 'partial-rollback-preimage'
+  if (preimage) {
+    if (value !== null) return failReconciliationAudit()
+    return null
+  }
+  const record = reconciliationAuditGuards.requireRecord(value)
+  reconciliationAuditGuards.requireExactKeys(record, [
+    'applyStartedAt',
+    'kind',
+    'rootDigest',
+    'scenario',
+    'terminalAt',
+    'version',
+  ])
+  const partial = purpose === 'partial-rollback-restored'
+  const scenario = partial
+    ? 'partial-apply-rollback'
+    : 'complete-apply-rollback'
+  const version = partial ? 2 : 1
+  if (
+    reconciliationAuditGuards.readOwn(record, 'scenario') !== scenario ||
+    reconciliationAuditGuards.readOwn(record, 'kind') !== 'rolled-back' ||
+    reconciliationAuditGuards.readOwn(record, 'version') !== version
+  ) return failReconciliationAudit()
+  const rootDigest = readDigestOwn(record, 'rootDigest')
+  const applyStartedAt = reconciliationAuditGuards.readTimestamp(
+    reconciliationAuditGuards.readOwn(record, 'applyStartedAt'),
+  )
+  const terminalAt = reconciliationAuditGuards.readTimestamp(
+    reconciliationAuditGuards.readOwn(record, 'terminalAt'),
+  )
+  if (partial) {
+    return Object.freeze({
+      scenario: 'partial-apply-rollback',
+      kind: 'rolled-back',
+      version: 2,
+      rootDigest,
+      applyStartedAt,
+      terminalAt,
+    })
+  }
+  return Object.freeze({
+    scenario: 'complete-apply-rollback',
+    kind: 'rolled-back',
+    version: 1,
+    rootDigest,
+    applyStartedAt,
+    terminalAt,
+  })
+}
+
 /** Creates the exact migration context digest shared with #163 evidence. */
 function createMigrationIntegrityContextDigest(
   context: WorkspaceSearchMigrationRehearsalReconciliationCoreContext,
 ): string {
   return createMigrationDigest({
-    kind:
-      'workspace-search-migration-rehearsal-terminal-integrity-migration-context',
-    version: 1,
+    kind: migrationIntegrityContextKind,
+    version: 3,
     ...context,
   })
 }
@@ -2610,6 +3211,9 @@ function createReconciliationAuditBinding(
     scenario: document.scenario,
     runLocatorDigest: document.runLocatorDigest,
     configurationBindingDigest: document.configurationBindingDigest,
+    policyVersion: document.policyVersion,
+    integrityResourceIdentityDigest:
+      document.integrityResourceIdentityDigest,
     sealedPlanningAuthorityDigest:
       document.sealedPlanningAuthorityDigest,
     executionRunDigest: document.executionRunDigest,
@@ -2645,6 +3249,9 @@ function sameReconciliationAuditContext(
   return left.scenario === right.scenario &&
     left.runLocatorDigest === right.runLocatorDigest &&
     left.configurationBindingDigest === right.configurationBindingDigest &&
+    left.policyVersion === right.policyVersion &&
+    left.integrityResourceIdentityDigest ===
+      right.integrityResourceIdentityDigest &&
     left.sealedPlanningAuthorityDigest ===
       right.sealedPlanningAuthorityDigest &&
     left.executionRunDigest === right.executionRunDigest &&
@@ -2671,6 +3278,9 @@ function createContextFromSemanticDocument(
     scenario: document.scenario,
     runLocatorDigest: document.runLocatorDigest,
     configurationBindingDigest: document.configurationBindingDigest,
+    policyVersion: document.policyVersion,
+    integrityResourceIdentityDigest:
+      document.integrityResourceIdentityDigest,
     sealedPlanningAuthorityDigest:
       document.sealedPlanningAuthorityDigest,
     executionRunDigest: document.executionRunDigest,
@@ -2850,7 +3460,9 @@ function requireUniqueBatchBindings(
       }
     }
     if (binding.integrity.kind === 'verified-result') {
-      integrityResultDigests.add(binding.integrity.result.resultDigest)
+      integrityResultDigests.add(
+        binding.integrity.result.result.resultDigest,
+      )
       integrityResultCount += 1
     } else {
       integrityResultDigests.add(binding.integrity.before.resultDigest)

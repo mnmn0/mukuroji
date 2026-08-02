@@ -5,6 +5,12 @@ import {
   MINIMUM_MAINTENANCE_DRAIN_SECONDS,
   serializeCanonicalJson,
 } from './migration-contract'
+import type {
+  WorkspaceSearchMigrationDescribeTableBudgetStopProvenance,
+  WorkspaceSearchMigrationDescribeTablePhase,
+  WorkspaceSearchMigrationDescribeTableRateStopReason,
+  WorkspaceSearchMigrationDescribeTableThrottleProvenance,
+} from './migration-describe-table-rate-budget'
 import {
   createWorkspaceSearchMigrationRehearsalEvidenceIndex,
   verifyWorkspaceSearchMigrationRehearsalAttestationEvidence,
@@ -26,6 +32,9 @@ import {
   type WorkspaceSearchMigrationRehearsalScenarioEvidence,
   type WorkspaceSearchMigrationRehearsalScenarioName,
 } from './migration-rehearsal-evidence'
+import type {
+  WorkspaceSearchMigrationRehearsalEvidenceSessionBinding,
+} from './migration-rehearsal-evidence-aws'
 import {
   type WorkspaceSearchMigrationRehearsalFailpoint,
   type WorkspaceSearchMigrationRehearsalFaultReceipt,
@@ -46,9 +55,15 @@ import type {
 } from './migration-rehearsal-process-cli'
 import {
   consumeWorkspaceSearchMigrationRehearsalFinalizedRateEvidence,
+  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RATE_SEGMENT_VERSION,
   type WorkspaceSearchMigrationRehearsalFinalizedRateEvidence,
   type WorkspaceSearchMigrationRehearsalRateSegmentEvidence,
+  type WorkspaceSearchMigrationRehearsalVerifiedRateSegment,
 } from './migration-rehearsal-rate-evidence'
+import type {
+  WorkspaceSearchMigrationRehearsalIntegrityRateInterval,
+  WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult,
+} from './migration-rehearsal-integrity-rate-evidence'
 import {
   consumeWorkspaceSearchMigrationRehearsalFinalizedReconciliationEvidence,
   type WorkspaceSearchMigrationRehearsalFinalizedReconciliationEvidence,
@@ -310,6 +325,32 @@ export type AssembleWorkspaceSearchMigrationRehearsalSuitePreparationInput = {
   readonly completedAt: string
 }
 
+/** Authenticated inputs that derive every suite claim without operator JSON. */
+export type AssembleWorkspaceSearchMigrationRehearsalAuthenticatedSuiteInput = {
+  /** Exact canonical combined alarm artifact read from a restricted file. */
+  readonly alarmArtifactBytes: Uint8Array
+  /** Dedicated restricted key authenticating the actual EMF signal chain. */
+  readonly alarmSignalVerificationKey: Uint8Array
+  /** Distinct parent key authenticating the final alarm artifact. */
+  readonly alarmPublicationVerificationKey: Uint8Array
+  /** Authenticated complete control-stage chain consumed exactly once. */
+  readonly stageChain:
+    WorkspaceSearchMigrationRehearsalFinalizedStageChainEvidence
+  /** Eight authenticated terminal reconciliation audits consumed once. */
+  readonly reconciliation:
+    WorkspaceSearchMigrationRehearsalFinalizedReconciliationEvidence
+  /** Finalized authenticated rate evidence including publication measurement. */
+  readonly rate: WorkspaceSearchMigrationRehearsalFinalizedRateEvidence
+  /** Trusted completion sampled after final rate evidence became durable. */
+  readonly completedAt: string
+  /** Live measured session facts authenticated by permit, STS, and tags. */
+  readonly sessionBinding: unknown
+  /** Permit-verified digest of the child/runtime evidence key. */
+  readonly expectedEvidenceKeyDigest: string
+  /** Permit-verified digest of the parent-only publication key. */
+  readonly expectedPublicationKeyDigest: string
+}
+
 /** Runtime-only discriminator for one completely validated suite preparation. */
 export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_FINALIZED_SUITE_KIND =
   'mukuroji-workspace-search-migration-rehearsal-finalized-suite'
@@ -349,8 +390,10 @@ export type WorkspaceSearchMigrationRehearsalSuitePublicationBindings = {
   readonly configurationHash: string
   /** Reviewed DescribeTable rate-policy digest. */
   readonly ratePolicyVersion: string
-  /** Canonical beginning of the authenticated first stage process. */
+  /** Canonical beginning of the authenticated integrity-attestation root. */
   readonly startedAt: string
+  /** Canonical beginning of the authenticated first stage process. */
+  readonly firstStageStartedAt: string
   /** Canonical completion after the fresh publication measurement. */
   readonly completedAt: string
   /** Exact permit, caller, resource, and isolation attestations. */
@@ -400,6 +443,20 @@ const suiteAssemblyInputKeys = Object.freeze([
   'document',
   'rate',
   'reconciliation',
+  'stageChain',
+])
+
+/** Exact authenticated assembler envelope fields without operator claims. */
+const authenticatedSuiteAssemblyInputKeys = Object.freeze([
+  'alarmArtifactBytes',
+  'alarmPublicationVerificationKey',
+  'alarmSignalVerificationKey',
+  'completedAt',
+  'expectedEvidenceKeyDigest',
+  'expectedPublicationKeyDigest',
+  'rate',
+  'reconciliation',
+  'sessionBinding',
   'stageChain',
 ])
 
@@ -510,12 +567,17 @@ const rateEvidenceKeys = Object.freeze([
 /** Exact actual-rate aggregate fields inspected before nested property reads. */
 const rateAggregateKeys = Object.freeze([
   'attemptCount',
+  'awsServiceThrottleBudgetStopCount',
+  'awsServiceThrottleCount',
   'budgetStopCount',
   'cadenceWaitCount',
   'cadenceWaitMilliseconds',
   'forfeitedAttemptCount',
   'maximumInFlight',
+  'operationalBudgetStopCount',
   'policyVersion',
+  'rehearsalInjectedBudgetStopCount',
+  'rehearsalInjectedThrottleCount',
   'throttleCount',
   'version',
 ])
@@ -638,9 +700,198 @@ export function assembleWorkspaceSearchMigrationRehearsalSuitePreparationInput(
   }
 }
 
+/**
+ * Derives a complete suite only from authenticated capabilities and live facts.
+ *
+ * No operator-authored attestation, commit, configuration, alarm metadata, or
+ * other static claim document is accepted by this production boundary.
+ *
+ * @param input - Authenticated stage, reconciliation, rate, alarm, and session.
+ * @returns Opaque one-shot suite preparation for immutable publication.
+ * @throws {WorkspaceSearchMigrationRehearsalSuiteFinalizerError} On any
+ * malformed, substituted, mismatched, or incomplete evidence.
+ */
+export function assembleWorkspaceSearchMigrationRehearsalAuthenticatedSuite(
+  input: AssembleWorkspaceSearchMigrationRehearsalAuthenticatedSuiteInput,
+): WorkspaceSearchMigrationRehearsalFinalizedSuitePreparation {
+  let transferredAlarmSignalKey: unknown
+  let transferredAlarmPublicationKey: unknown
+  let workingAlarmSignalKey: Uint8Array | undefined
+  let workingAlarmPublicationKey: Uint8Array | undefined
+  try {
+    const envelope = suiteGuards.requireRecord(input)
+    suiteGuards.requireExactKeys(
+      envelope,
+      authenticatedSuiteAssemblyInputKeys,
+    )
+    transferredAlarmSignalKey = suiteGuards.readOwn(
+      envelope,
+      'alarmSignalVerificationKey',
+    )
+    workingAlarmSignalKey = copyAlarmSignalVerificationKey(
+      transferredAlarmSignalKey,
+    )
+    transferredAlarmPublicationKey = suiteGuards.readOwn(
+      envelope,
+      'alarmPublicationVerificationKey',
+    )
+    workingAlarmPublicationKey = copyAlarmSignalVerificationKey(
+      transferredAlarmPublicationKey,
+    )
+    if (bytesEqual(workingAlarmSignalKey, workingAlarmPublicationKey)) {
+      return failSuiteFinalizer()
+    }
+    const expectedEvidenceKeyDigest = suiteGuards.readDigest(
+      suiteGuards.readOwn(envelope, 'expectedEvidenceKeyDigest'),
+    )
+    const expectedPublicationKeyDigest = suiteGuards.readDigest(
+      suiteGuards.readOwn(envelope, 'expectedPublicationKeyDigest'),
+    )
+    if (expectedEvidenceKeyDigest === expectedPublicationKeyDigest) {
+      return failSuiteFinalizer()
+    }
+    const sessionBinding = readAuthenticatedSuiteSessionBinding(
+      suiteGuards.readOwn(envelope, 'sessionBinding'),
+    )
+    if (
+      sessionBinding.evidenceKeyDigest !== expectedEvidenceKeyDigest ||
+      sessionBinding.publicationKeyDigest !==
+        expectedPublicationKeyDigest
+    ) return failSuiteFinalizer()
+    const completedAt = suiteGuards.readTimestamp(
+      suiteGuards.readOwn(envelope, 'completedAt'),
+    )
+    const alarm = readSuitePreparationAlarmArtifact(
+      suiteGuards.readOwn(envelope, 'alarmArtifactBytes'),
+      workingAlarmSignalKey,
+      workingAlarmPublicationKey,
+    )
+    const stageChain =
+      consumeWorkspaceSearchMigrationRehearsalFinalizedStageChainEvidence(
+        suiteGuards.readOwn(envelope, 'stageChain'),
+      )
+    if (
+      stageChain.commit !== sessionBinding.commit ||
+      stageChain.configurationBindingDigest !==
+        sessionBinding.configurationHash ||
+      stageChain.permitDigest !== sessionBinding.attestation.permitDigest
+    ) return failSuiteFinalizer()
+    const reconciliation =
+      consumeWorkspaceSearchMigrationRehearsalFinalizedReconciliationEvidence(
+        suiteGuards.readOwn(envelope, 'reconciliation'),
+      )
+    consumeWorkspaceSearchMigrationRehearsalFinalizedRateEvidence(input.rate)
+    const rate = structuredClone(input.rate)
+    const state = prepareAuthenticatedStageSuiteState({
+      alarm,
+      alarmSignalVerificationKey: workingAlarmSignalKey,
+      alarmPublicationVerificationKey: workingAlarmPublicationKey,
+      attestation: sessionBinding.attestation,
+      commit: stageChain.commit,
+      completedAt,
+      configurationHash: stageChain.configurationBindingDigest,
+      rate,
+      ratePolicyVersion: stageChain.policyVersion,
+      reconciliation,
+      stageChain,
+      startedAt: stageChain.integrityAttestationRoot.startedAt,
+    })
+    const capability = Object.freeze({
+      kind: WORKSPACE_SEARCH_MIGRATION_REHEARSAL_FINALIZED_SUITE_KIND,
+    })
+    finalizedSuitePreparations.set(capability, state)
+    return capability
+  } catch {
+    return failSuiteFinalizer()
+  } finally {
+    zeroizeAlarmSignalVerificationKey(transferredAlarmSignalKey)
+    zeroizeAlarmSignalVerificationKey(transferredAlarmPublicationKey)
+    zeroizeAlarmSignalVerificationKey(workingAlarmSignalKey)
+    zeroizeAlarmSignalVerificationKey(workingAlarmPublicationKey)
+  }
+}
+
+/** Strictly parses exact live session facts without invoking property accessors. */
+function readAuthenticatedSuiteSessionBinding(
+  value: unknown,
+): WorkspaceSearchMigrationRehearsalEvidenceSessionBinding {
+  const record = suiteGuards.requireRecord(value)
+  suiteGuards.requireExactKeys(record, [
+    'attestation',
+    'commit',
+    'configurationHash',
+    'evidenceKeyDigest',
+    'publicationKeyDigest',
+  ])
+  const evidenceKeyDigest = suiteGuards.readDigest(
+    suiteGuards.readOwn(record, 'evidenceKeyDigest'),
+  )
+  const publicationKeyDigest = suiteGuards.readDigest(
+    suiteGuards.readOwn(record, 'publicationKeyDigest'),
+  )
+  if (evidenceKeyDigest === publicationKeyDigest) {
+    return failSuiteFinalizer()
+  }
+  return Object.freeze({
+    commit: readCommit(suiteGuards.readOwn(record, 'commit')),
+    configurationHash: suiteGuards.readDigest(
+      suiteGuards.readOwn(record, 'configurationHash'),
+    ),
+    evidenceKeyDigest,
+    publicationKeyDigest,
+    attestation: verifyWorkspaceSearchMigrationRehearsalAttestationEvidence(
+      suiteGuards.readOwn(record, 'attestation'),
+    ),
+  })
+}
+
 /** Re-derives finalized alarm evidence from separate restricted bytes. */
 function readSuitePreparationAlarm(
   metadataValue: unknown,
+  bytesValue: unknown,
+  signalVerificationKey: Uint8Array,
+  publicationVerificationKey: Uint8Array,
+): WorkspaceSearchMigrationRehearsalFinalizedAlarmEvidence {
+  const finalized = readSuitePreparationAlarmArtifact(
+    bytesValue,
+    signalVerificationKey,
+    publicationVerificationKey,
+  )
+  const metadata = suiteGuards.requireRecord(metadataValue)
+  suiteGuards.requireExactKeys(
+    metadata,
+    suitePreparationAlarmMetadataKeys,
+  )
+  const authorization = readFinalizedAlarmAuthorization(
+    suiteGuards.readOwn(metadata, 'authorization'),
+  )
+  if (
+    suiteGuards.readOwn(metadata, 'artifactByteLength') !==
+      finalized.artifactByteLength ||
+    suiteGuards.readDigest(
+      suiteGuards.readOwn(metadata, 'artifactDigest'),
+    ) !== finalized.artifactDigest ||
+    suiteGuards.readOwn(metadata, 'receiptCount') !== 12 ||
+    authorization.permitDigest !== finalized.authorization.permitDigest ||
+    authorization.requestedResourcesBinding !==
+      finalized.authorization.requestedResourcesBinding ||
+    authorization.sharedSessionBindingDigest !==
+      finalized.authorization.sharedSessionBindingDigest
+  ) {
+    return failSuiteFinalizer()
+  }
+  return finalized
+}
+
+/**
+ * Re-derives alarm metadata and evidence from one canonical artifact.
+ *
+ * @param bytesValue - Candidate canonical restricted alarm bytes.
+ * @param signalVerificationKey - Derived signal-chain verification key.
+ * @param publicationVerificationKey - Distinct derived publication key.
+ * @returns Genuine finalized alarm evidence with derived metadata.
+ */
+function readSuitePreparationAlarmArtifact(
   bytesValue: unknown,
   signalVerificationKey: Uint8Array,
   publicationVerificationKey: Uint8Array,
@@ -674,28 +925,7 @@ function readSuitePreparationAlarm(
     signalVerificationKey,
     transitionArtifact: artifact.transitionArtifact,
   })
-  const metadata = suiteGuards.requireRecord(metadataValue)
-  suiteGuards.requireExactKeys(
-    metadata,
-    suitePreparationAlarmMetadataKeys,
-  )
-  const authorization = readFinalizedAlarmAuthorization(
-    suiteGuards.readOwn(metadata, 'authorization'),
-  )
-  if (
-    suiteGuards.readOwn(metadata, 'artifactByteLength') !==
-      finalized.artifactByteLength ||
-    suiteGuards.readDigest(
-      suiteGuards.readOwn(metadata, 'artifactDigest'),
-    ) !== finalized.artifactDigest ||
-    suiteGuards.readOwn(metadata, 'receiptCount') !== 12 ||
-    authorization.permitDigest !== finalized.authorization.permitDigest ||
-    authorization.requestedResourcesBinding !==
-      finalized.authorization.requestedResourcesBinding ||
-    authorization.sharedSessionBindingDigest !==
-      finalized.authorization.sharedSessionBindingDigest ||
-    !bytesEqual(bytes, finalized.canonicalArtifactBytes)
-  ) {
+  if (!bytesEqual(bytes, finalized.canonicalArtifactBytes)) {
     return failSuiteFinalizer()
   }
   return finalized
@@ -807,11 +1037,14 @@ export function consumeWorkspaceSearchMigrationRehearsalFinalizedSuitePreparatio
 function detachSuitePublicationBindings(
   claims: Omit<WorkspaceSearchMigrationRehearsalEvidenceClaims, 'artifacts'>,
 ): WorkspaceSearchMigrationRehearsalSuitePublicationBindings {
+  const firstScenario = claims.scenarios[0]
+  if (firstScenario === undefined) return failSuiteFinalizer()
   return Object.freeze({
     commit: claims.commit,
     configurationHash: claims.configurationHash,
     ratePolicyVersion: claims.ratePolicyVersion,
     startedAt: claims.startedAt,
+    firstStageStartedAt: firstScenario.startedAt,
     completedAt: claims.completedAt,
     attestation: Object.freeze({ ...claims.attestation }),
     rateAggregate: Object.freeze({ ...claims.rate.aggregate }),
@@ -873,7 +1106,7 @@ type PrepareAuthenticatedStageSuiteStateInput = {
     readonly WorkspaceSearchMigrationRehearsalReconciliationAuditArtifactBinding[]
   /** Authenticated complete control-stage chain. */
   readonly stageChain: WorkspaceSearchMigrationRehearsalStageChainEvidence
-  /** Canonical beginning of the first authenticated control stage. */
+  /** Canonical beginning of the authenticated integrity-attestation root. */
   readonly startedAt: string
 }
 
@@ -891,14 +1124,20 @@ type StageBoundScenarioState = {
 function prepareAuthenticatedStageSuiteState(
   input: PrepareAuthenticatedStageSuiteStateInput,
 ): PreparedSuiteState {
+  const integrityAttestationRoot =
+    input.stageChain.integrityAttestationRoot
+  const firstStageStartedAt = input.stageChain.startedAt
   if (
     input.stageChain.commit !== input.commit ||
     input.stageChain.permitDigest !== input.attestation.permitDigest ||
     input.stageChain.configurationBindingDigest !==
       input.configurationHash ||
     input.stageChain.policyVersion !== input.ratePolicyVersion ||
-    input.stageChain.startedAt !== input.startedAt ||
-    Date.parse(input.stageChain.reviewedAt) > Date.parse(input.startedAt) ||
+    integrityAttestationRoot.startedAt !== input.startedAt ||
+    Date.parse(integrityAttestationRoot.completedAt) >
+      Date.parse(input.stageChain.reviewedAt) ||
+    Date.parse(input.stageChain.reviewedAt) >
+      Date.parse(firstStageStartedAt) ||
     Date.parse(input.stageChain.completedAt) >= Date.parse(input.completedAt)
   ) {
     return failSuiteFinalizer()
@@ -916,21 +1155,28 @@ function prepareAuthenticatedStageSuiteState(
   const scenarioState = createStageBoundScenarioState(
     stageScenarios,
     input.configurationHash,
-    input.startedAt,
+    firstStageStartedAt,
     input.completedAt,
   )
   const rate = readFinalizedRate(
     input.rate,
     input.configurationHash,
     input.ratePolicyVersion,
-    input.startedAt,
+    firstStageStartedAt,
     input.completedAt,
+    integrityAttestationRoot,
   )
   requireStageChainRateBindings(
     stageScenarios,
     input.reconciliation,
     rate,
     input.completedAt,
+    integrityAttestationRoot,
+  )
+  requireCompleteIntegrityRateInventory(
+    input.reconciliation,
+    rate,
+    integrityAttestationRoot,
   )
   const reconciliation = createPublicReconciliationEvidence(
     input.reconciliation,
@@ -1148,7 +1394,7 @@ function requireStageChainReconciliationBindings(
       return failSuiteFinalizer()
     }
     const integrityResults = binding.integrity.kind === 'verified-result'
-      ? [binding.integrity.result]
+      ? [binding.integrity.result.result]
       : [binding.integrity.before, binding.integrity.after]
     if (integrityResults.some((result) =>
       result.resourceIdentityScheme !==
@@ -1175,6 +1421,9 @@ function createReconciliationContext(
     scenario: binding.scenario,
     runLocatorDigest: binding.runLocatorDigest,
     configurationBindingDigest: binding.configurationBindingDigest,
+    policyVersion: binding.policyVersion,
+    integrityResourceIdentityDigest:
+      binding.integrityResourceIdentityDigest,
     sealedPlanningAuthorityDigest: binding.sealedPlanningAuthorityDigest,
     executionRunDigest: binding.executionRunDigest,
     planDigest: binding.planDigest,
@@ -1201,7 +1450,8 @@ function requireStageReconciliationIntegrityBinding(
     if (
       scenario.integrityPurpose !== 'verified' ||
       scenario.integrityBeforeResultDigest !== null ||
-      scenario.integrityAfterResultDigest !== integrity.result.resultDigest ||
+      scenario.integrityAfterResultDigest !==
+        integrity.result.result.resultDigest ||
       scenario.integrityComparisonDigest !== null ||
       scenario.integrityContextDigest !== integrity.resultContextDigest
     ) {
@@ -1232,6 +1482,9 @@ function createPublicReconciliationEvidence(
         status: 'pass',
         runLocatorDigest: binding.runLocatorDigest,
         configurationBindingDigest: binding.configurationBindingDigest,
+        policyVersion: binding.policyVersion,
+        integrityResourceIdentityDigest:
+          binding.integrityResourceIdentityDigest,
         sealedPlanningAuthorityDigest:
           binding.sealedPlanningAuthorityDigest,
         executionRunDigest: binding.executionRunDigest,
@@ -1244,8 +1497,10 @@ function createPublicReconciliationEvidence(
         appliedOperationCount: binding.appliedOperationCount,
         terminalAt: binding.terminalAt,
         checkedAt: binding.checkedAt,
-        integrity: binding.integrity,
-        targetAudits: binding.targetAudits,
+        integrity: createPublicReconciliationIntegrity(binding.integrity),
+        targetAudits: createPublicReconciliationTargetAudits(
+          binding.targetAudits,
+        ),
         markerSummaryDigest: binding.markerSummary.summaryDigest,
         authoritySummaryDigest: binding.authoritySummary.summaryDigest,
         sourceTargetSummaryDigest: binding.sourceTargetSummary.summaryDigest,
@@ -1263,6 +1518,69 @@ function createPublicReconciliationEvidence(
         auditDigest: binding.auditDigest,
       }),
   ))
+}
+
+/** Projects one authenticated audit integrity summary without rate MACs. */
+function createPublicReconciliationIntegrity(
+  integrity:
+    WorkspaceSearchMigrationRehearsalReconciliationAuditArtifactBinding[
+      'integrity'
+    ],
+): WorkspaceSearchMigrationRehearsalReconciliationSummaryEvidence[
+  'integrity'
+] {
+  if (integrity.kind === 'rollback-comparison') return integrity
+  return Object.freeze({
+    ...integrity,
+    result: integrity.result.result,
+  })
+}
+
+/** Projects both target audits without private context or full integrity MACs. */
+function createPublicReconciliationTargetAudits(
+  targetAudits:
+    WorkspaceSearchMigrationRehearsalReconciliationAuditArtifactBinding[
+      'targetAudits'
+    ],
+): WorkspaceSearchMigrationRehearsalReconciliationSummaryEvidence[
+  'targetAudits'
+] {
+  if (targetAudits === null) return null
+  return Object.freeze({
+    preimage: createPublicReconciliationTargetAudit(
+      targetAudits.preimage,
+    ),
+    restored: createPublicReconciliationTargetAudit(
+      targetAudits.restored,
+    ),
+  })
+}
+
+/** Projects one target audit to its secret-free public evidence shape. */
+function createPublicReconciliationTargetAudit(
+  target:
+    NonNullable<
+      WorkspaceSearchMigrationRehearsalReconciliationAuditArtifactBinding[
+        'targetAudits'
+      ]
+    >['preimage'],
+): NonNullable<
+  WorkspaceSearchMigrationRehearsalReconciliationSummaryEvidence[
+    'targetAudits'
+  ]
+>['preimage'] {
+  return Object.freeze({
+    purpose: target.purpose,
+    contentDigest: target.contentDigest,
+    byteLength: target.byteLength,
+    startedAt: target.startedAt,
+    observedAt: target.observedAt,
+    observationDigest: target.observationDigest,
+    aggregateDigest: target.aggregateDigest,
+    integrity: target.integrity.result,
+    contextDigest: target.contextDigest,
+    rate: target.rate,
+  })
 }
 
 /** Requires four independent authenticated target audits to match rollbacks. */
@@ -1323,6 +1641,14 @@ function requireStageChainTargetBindings(
       completeAudits.preimage.aggregateDigest ||
     completeReconciliation.integrity.targetRestoredAggregateDigest !==
       completeAudits.restored.aggregateDigest ||
+    serializeCanonicalJson(partialAudits.preimage.integrity.result) !==
+      serializeCanonicalJson(partialReconciliation.integrity.before) ||
+    serializeCanonicalJson(partialAudits.restored.integrity.result) !==
+      serializeCanonicalJson(partialReconciliation.integrity.after) ||
+    serializeCanonicalJson(completeAudits.preimage.integrity.result) !==
+      serializeCanonicalJson(completeReconciliation.integrity.before) ||
+    serializeCanonicalJson(completeAudits.restored.integrity.result) !==
+      serializeCanonicalJson(completeReconciliation.integrity.after) ||
     partialAudits.preimage.contextDigest !==
       partialAudits.restored.contextDigest ||
     completeAudits.preimage.contextDigest !==
@@ -1674,7 +2000,7 @@ function requireStageScenarioReconciliationAudit(
   }
 }
 
-/** Requires all 48 scenario segments plus one fresh publication measurement. */
+/** Requires the integrity root, all 48 scenario segments, and one fresh publication measurement. */
 function requireStageChainRateBindings(
   scenarios:
     readonly WorkspaceSearchMigrationRehearsalStageChainScenarioEvidence[],
@@ -1682,9 +2008,13 @@ function requireStageChainRateBindings(
     readonly WorkspaceSearchMigrationRehearsalReconciliationAuditArtifactBinding[],
   rate: ParsedFinalizedRate,
   suiteCompletedAt: string,
+  integrityAttestationRoot:
+    WorkspaceSearchMigrationRehearsalStageChainEvidence[
+      'integrityAttestationRoot'
+    ],
 ): void {
   const expected: WorkspaceSearchMigrationRehearsalNoFaultRateSegmentReceipt[] =
-    []
+    [Object.freeze({ ...integrityAttestationRoot.segment })]
   for (let index = 0; index < scenarios.length; index += 1) {
     const scenario = scenarios[index]
     const audit = reconciliation[index]
@@ -1715,7 +2045,7 @@ function requireStageChainRateBindings(
     appendAuxiliaryRateSegment(expected, audit.rate)
     appendStageRateSegment(expected, stages.at(-1))
   }
-  if (expected.length !== 48 || rate.segmentBindings.length !== 49) {
+  if (expected.length !== 49 || rate.segmentBindings.length !== 50) {
     return failSuiteFinalizer()
   }
   const locators = new Set<string>()
@@ -1751,6 +2081,292 @@ function requireStageChainRateBindings(
     finalAttempt.processExitedAt,
     suiteCompletedAt,
   )
+}
+
+/** One semantic integrity operation claimed from the complete rate stream. */
+type SuiteIntegrityRateOperation = {
+  /** Immediate authenticated predecessor, absent only for the root. */
+  readonly predecessor:
+    WorkspaceSearchMigrationRehearsalVerifiedRateSegment | null
+  /** Exact authenticated segment containing the selected operation. */
+  readonly segment: WorkspaceSearchMigrationRehearsalVerifiedRateSegment
+  /** Exact identifier-free authenticated event interval. */
+  readonly interval: WorkspaceSearchMigrationRehearsalIntegrityRateInterval
+  /** Reviewed rate-policy digest bound to the segment. */
+  readonly policyVersion: string
+  /** Measured configuration digest bound to the segment. */
+  readonly configurationBindingDigest: string
+}
+
+/**
+ * Requires one root and ten ordered live #163 operations to own every
+ * `integrity-check` event exactly once across the authentic 50-segment stream.
+ */
+function requireCompleteIntegrityRateInventory(
+  reconciliation:
+    readonly WorkspaceSearchMigrationRehearsalReconciliationAuditArtifactBinding[],
+  rate: ParsedFinalizedRate,
+  root:
+    WorkspaceSearchMigrationRehearsalStageChainEvidence[
+      'integrityAttestationRoot'
+    ],
+): void {
+  const operations = collectSuiteIntegrityRateOperations(
+    reconciliation,
+    root,
+  )
+  if (
+    operations.length !== 11 ||
+    rate.segments.length !== rate.segmentBindings.length
+  ) return failSuiteFinalizer()
+
+  const claimedEventSequences = new Set<number>()
+  const claimedAttemptSequences = new Set<number>()
+  let previousIntegritySegmentOrdinal = -1
+  let claimedDescribeTableCallCount = 0
+  let claimedCadenceWaitCount = 0
+  let claimedCadenceWaitMilliseconds = 0
+  for (let index = 0; index < operations.length; index += 1) {
+    const operation = operations[index]
+    if (operation === undefined) return failSuiteFinalizer()
+    const expectedCallCount = index === 0 ? 6 : 12
+    const expectedTablePassCount = index === 0 ? 1 : 2
+    const segmentOrdinal = operation.segment.segmentOrdinal
+    const segment = rate.segments[segmentOrdinal]
+    const predecessor = segmentOrdinal === 0
+      ? null
+      : rate.segmentBindings[segmentOrdinal - 1]
+    if (
+      segment === undefined ||
+      segmentOrdinal <= previousIntegritySegmentOrdinal ||
+      !sameVerifiedRateSegment(operation.segment, segment.binding) ||
+      operation.policyVersion !== root.policyVersion ||
+      operation.configurationBindingDigest !==
+        root.configurationBindingDigest ||
+      operation.interval.tablePassCount !== expectedTablePassCount ||
+      operation.interval.describeTableCallCount !== expectedCallCount ||
+      operation.interval.attemptSequences.length !== expectedCallCount ||
+      (operation.predecessor === null) !== (predecessor === null) ||
+      (operation.predecessor !== null &&
+        predecessor !== null &&
+        !sameVerifiedRateSegment(operation.predecessor, predecessor))
+    ) return failSuiteFinalizer()
+    const intervalCounts = requireOneIntegrityRateInterval(
+      operation.interval,
+      segment,
+      claimedEventSequences,
+      claimedAttemptSequences,
+    )
+    claimedDescribeTableCallCount += expectedCallCount
+    claimedCadenceWaitCount += intervalCounts.cadenceWaitCount
+    claimedCadenceWaitMilliseconds += intervalCounts.cadenceWaitMilliseconds
+    previousIntegritySegmentOrdinal = segmentOrdinal
+  }
+
+  let rawIntegrityEventCount = 0
+  let rawIntegrityChargedCount = 0
+  let rawIntegrityStartedCount = 0
+  let rawIntegrityCadenceWaitCount = 0
+  let rawIntegrityCadenceWaitMilliseconds = 0
+  for (const segment of rate.segments) {
+    for (const event of segment.events) {
+      if (event.phase !== 'integrity-check') continue
+      rawIntegrityEventCount += 1
+      if (!claimedEventSequences.has(event.eventSequence)) {
+        return failSuiteFinalizer()
+      }
+      switch (event.kind) {
+        case 'attempt-charged':
+          rawIntegrityChargedCount += 1
+          break
+        case 'attempt-started':
+          rawIntegrityStartedCount += 1
+          break
+        case 'cadence-wait':
+          rawIntegrityCadenceWaitCount += 1
+          rawIntegrityCadenceWaitMilliseconds +=
+            event.delayMilliseconds ?? 0
+          break
+        case 'attempt-forfeited':
+        case 'attempt-throttled':
+        case 'budget-stop':
+        case 'reservation-forfeited':
+          return failSuiteFinalizer()
+      }
+    }
+  }
+  if (
+    claimedDescribeTableCallCount !== 126 ||
+    claimedAttemptSequences.size !== 126 ||
+    rawIntegrityChargedCount !== 126 ||
+    rawIntegrityStartedCount !== 126 ||
+    claimedEventSequences.size !== rawIntegrityEventCount ||
+    claimedCadenceWaitCount !== rawIntegrityCadenceWaitCount ||
+    claimedCadenceWaitMilliseconds !== rawIntegrityCadenceWaitMilliseconds
+  ) return failSuiteFinalizer()
+}
+
+/** Exact cadence totals returned while one interval is claimed. */
+type SuiteIntegrityRateIntervalCounts = {
+  /** Number of authenticated cadence-wait events in the interval. */
+  readonly cadenceWaitCount: number
+  /** Sum of authenticated cadence delays in milliseconds. */
+  readonly cadenceWaitMilliseconds: number
+}
+
+/** Claims and cross-checks one complete authenticated integrity interval. */
+function requireOneIntegrityRateInterval(
+  interval: WorkspaceSearchMigrationRehearsalIntegrityRateInterval,
+  segment: ParsedFinalizedRateSegment,
+  claimedEventSequences: Set<number>,
+  claimedAttemptSequences: Set<number>,
+): SuiteIntegrityRateIntervalCounts {
+  const eventsBySequence = new Map(
+    segment.events.map((event) => [event.eventSequence, event]),
+  )
+  const chargedAttemptSequences: number[] = []
+  const startedAttemptSequences: number[] = []
+  let cadenceWaitCount = 0
+  let cadenceWaitMilliseconds = 0
+  let firstEvent: ParsedFinalizedRateEvent | undefined
+  let lastEvent: ParsedFinalizedRateEvent | undefined
+  for (const eventSequence of interval.eventSequences) {
+    const event = eventsBySequence.get(eventSequence)
+    if (
+      event === undefined ||
+      event.phase !== 'integrity-check' ||
+      claimedEventSequences.has(eventSequence)
+    ) return failSuiteFinalizer()
+    claimedEventSequences.add(eventSequence)
+    firstEvent ??= event
+    lastEvent = event
+    switch (event.kind) {
+      case 'attempt-charged':
+        if (event.attemptSequence === null) return failSuiteFinalizer()
+        chargedAttemptSequences.push(event.attemptSequence)
+        break
+      case 'attempt-started':
+        if (event.attemptSequence === null) return failSuiteFinalizer()
+        startedAttemptSequences.push(event.attemptSequence)
+        break
+      case 'cadence-wait':
+        if (event.delayMilliseconds === null) return failSuiteFinalizer()
+        cadenceWaitCount += 1
+        cadenceWaitMilliseconds += event.delayMilliseconds
+        break
+      case 'attempt-forfeited':
+      case 'attempt-throttled':
+      case 'budget-stop':
+      case 'reservation-forfeited':
+        return failSuiteFinalizer()
+    }
+  }
+  if (
+    firstEvent === undefined ||
+    lastEvent === undefined ||
+    interval.firstEventSequence !== firstEvent.eventSequence ||
+    interval.lastEventSequence !== lastEvent.eventSequence ||
+    interval.startedAt !==
+      new Date(firstEvent.epochMilliseconds).toISOString() ||
+    interval.completedAt !==
+      new Date(lastEvent.epochMilliseconds).toISOString() ||
+    interval.cadenceWaitCount !== cadenceWaitCount ||
+    interval.cadenceWaitMilliseconds !== cadenceWaitMilliseconds ||
+    !samePositiveIntegerVector(
+      interval.attemptSequences,
+      chargedAttemptSequences,
+    ) ||
+    !samePositiveIntegerVector(
+      interval.attemptSequences,
+      startedAttemptSequences,
+    )
+  ) return failSuiteFinalizer()
+  for (const attemptSequence of interval.attemptSequences) {
+    if (claimedAttemptSequences.has(attemptSequence)) {
+      return failSuiteFinalizer()
+    }
+    claimedAttemptSequences.add(attemptSequence)
+  }
+  return Object.freeze({
+    cadenceWaitCount,
+    cadenceWaitMilliseconds,
+  })
+}
+
+/** Collects the fixed semantic root/live integrity order across all scenarios. */
+function collectSuiteIntegrityRateOperations(
+  reconciliation:
+    readonly WorkspaceSearchMigrationRehearsalReconciliationAuditArtifactBinding[],
+  root:
+    WorkspaceSearchMigrationRehearsalStageChainEvidence[
+      'integrityAttestationRoot'
+    ],
+): readonly SuiteIntegrityRateOperation[] {
+  const operations: SuiteIntegrityRateOperation[] = [Object.freeze({
+    predecessor: null,
+    segment: root.segment,
+    interval: root.interval,
+    policyVersion: root.policyVersion,
+    configurationBindingDigest: root.configurationBindingDigest,
+  })]
+  for (let index = 0; index <= 5; index += 1) {
+    const binding = reconciliation[index]
+    if (
+      binding === undefined ||
+      binding.integrity.kind !== 'verified-result' ||
+      binding.targetAudits !== null
+    ) return failSuiteFinalizer()
+    operations.push(detachSuiteIntegrityRateOperation(
+      binding.integrity.result,
+    ))
+  }
+  for (let index = 6; index <= 7; index += 1) {
+    const binding = reconciliation[index]
+    if (
+      binding === undefined ||
+      binding.integrity.kind !== 'rollback-comparison' ||
+      binding.targetAudits === null
+    ) return failSuiteFinalizer()
+    operations.push(detachSuiteIntegrityRateOperation(
+      binding.targetAudits.preimage.integrity,
+    ))
+    operations.push(detachSuiteIntegrityRateOperation(
+      binding.targetAudits.restored.integrity,
+    ))
+  }
+  return Object.freeze(operations)
+}
+
+/** Detaches one public live rate-bound result into the inventory shape. */
+function detachSuiteIntegrityRateOperation(
+  result: WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult,
+): SuiteIntegrityRateOperation {
+  return Object.freeze({
+    predecessor: result.predecessor,
+    segment: result.segment,
+    interval: result.interval,
+    policyVersion: result.policyVersion,
+    configurationBindingDigest: result.configurationBindingDigest,
+  })
+}
+
+/** Returns whether two exact authenticated rate summaries are identical. */
+function sameVerifiedRateSegment(
+  left: WorkspaceSearchMigrationRehearsalVerifiedRateSegment,
+  right:
+    | WorkspaceSearchMigrationRehearsalVerifiedRateSegment
+    | WorkspaceSearchMigrationRehearsalNoFaultRateSegmentReceipt,
+): boolean {
+  return serializeCanonicalJson(left) === serializeCanonicalJson(right)
+}
+
+/** Returns whether two positive-integer vectors are exactly identical. */
+function samePositiveIntegerVector(
+  left: readonly number[],
+  right: readonly number[],
+): boolean {
+  return left.length === right.length &&
+    left.every((value, index) => value === right[index])
 }
 
 /** Appends one stage-owned segment at its exact global stream position. */
@@ -1879,6 +2495,112 @@ function requireFreshPublicationRateSegment(
     }
   }
   if (startedAttemptCount < 1) return failSuiteFinalizer()
+  requireDeterministicPublicationRateExercise(rate, expectedOrdinal)
+}
+
+/**
+ * Requires the exact post-success fault exercise and reconciles source totals.
+ *
+ * @param rate - Authenticated complete 50-segment rate artifact.
+ * @param publicationOrdinal - Sole unassigned final publication segment.
+ */
+function requireDeterministicPublicationRateExercise(
+  rate: ParsedFinalizedRate,
+  publicationOrdinal: number,
+): void {
+  let awsServiceThrottleCount = 0
+  let rehearsalInjectedThrottleCount = 0
+  let operationalBudgetStopCount = 0
+  let awsServiceThrottleBudgetStopCount = 0
+  let rehearsalInjectedBudgetStopCount = 0
+  for (const segment of rate.segments) {
+    for (const event of segment.events) {
+      if (event.kind === 'attempt-throttled') {
+        switch (event.provenance) {
+          case 'aws-service':
+            awsServiceThrottleCount += 1
+            break
+          case 'rehearsal-after-success-injection':
+            if (segment.binding.segmentOrdinal !== publicationOrdinal) {
+              return failSuiteFinalizer()
+            }
+            rehearsalInjectedThrottleCount += 1
+            break
+          default:
+            return failSuiteFinalizer()
+        }
+      }
+      if (event.kind === 'budget-stop') {
+        switch (event.provenance) {
+          case 'operational':
+            operationalBudgetStopCount += 1
+            break
+          case 'aws-service-throttle':
+            awsServiceThrottleBudgetStopCount += 1
+            break
+          case 'rehearsal-after-success-injection':
+            if (segment.binding.segmentOrdinal !== publicationOrdinal) {
+              return failSuiteFinalizer()
+            }
+            rehearsalInjectedBudgetStopCount += 1
+            break
+          default:
+            return failSuiteFinalizer()
+        }
+      }
+    }
+  }
+  const aggregate = rate.evidence.aggregate
+  if (
+    aggregate.awsServiceThrottleCount !== awsServiceThrottleCount ||
+    aggregate.rehearsalInjectedThrottleCount !==
+      rehearsalInjectedThrottleCount ||
+    aggregate.throttleCount !==
+      awsServiceThrottleCount + rehearsalInjectedThrottleCount ||
+    aggregate.operationalBudgetStopCount !== operationalBudgetStopCount ||
+    aggregate.awsServiceThrottleBudgetStopCount !==
+      awsServiceThrottleBudgetStopCount ||
+    aggregate.rehearsalInjectedBudgetStopCount !==
+      rehearsalInjectedBudgetStopCount ||
+    aggregate.budgetStopCount !==
+      operationalBudgetStopCount +
+        awsServiceThrottleBudgetStopCount +
+        rehearsalInjectedBudgetStopCount ||
+    rehearsalInjectedThrottleCount !== 1 ||
+    rehearsalInjectedBudgetStopCount !== 1
+  ) return failSuiteFinalizer()
+
+  const finalEvents = rate.segments[publicationOrdinal]?.events
+  const charged = finalEvents?.at(-4)
+  const started = finalEvents?.at(-3)
+  const throttled = finalEvents?.at(-2)
+  const stopped = finalEvents?.at(-1)
+  if (
+    charged === undefined ||
+    started === undefined ||
+    throttled === undefined ||
+    stopped === undefined ||
+    charged.kind !== 'attempt-charged' ||
+    started.kind !== 'attempt-started' ||
+    throttled.kind !== 'attempt-throttled' ||
+    stopped.kind !== 'budget-stop' ||
+    charged.phase !== 'measurement' ||
+    started.phase !== 'measurement' ||
+    throttled.phase !== 'measurement' ||
+    stopped.phase !== 'measurement' ||
+    charged.attemptSequence === null ||
+    charged.attemptSequence !== started.attemptSequence ||
+    charged.attemptSequence !== throttled.attemptSequence ||
+    started.eventSequence !== charged.eventSequence + 1 ||
+    throttled.eventSequence !== started.eventSequence + 1 ||
+    stopped.eventSequence !== throttled.eventSequence + 1 ||
+    throttled.provenance !== 'rehearsal-after-success-injection' ||
+    stopped.provenance !== 'rehearsal-after-success-injection' ||
+    stopped.stopReason !== 'throttled' ||
+    stopped.requiredAttempts !== 0 ||
+    throttled.backoffMilliseconds === null ||
+    stopped.retryAfterMilliseconds !== throttled.backoffMilliseconds
+  ) return failSuiteFinalizer()
 }
 
 /** Actual alarm evidence paired with its collector-authenticated receipts. */
@@ -2470,6 +3192,65 @@ type ParsedFinalizedRate = {
   /** Recalculated exact per-process segment bindings. */
   readonly segmentBindings:
     readonly WorkspaceSearchMigrationRehearsalNoFaultRateSegmentReceipt[]
+  /** Authenticated event projections retained for complete integrity ownership. */
+  readonly segments: readonly ParsedFinalizedRateSegment[]
+}
+
+/** Durable event labels needed by the suite-wide integrity inventory. */
+type ParsedFinalizedRateEventKind =
+  | 'attempt-charged'
+  | 'attempt-forfeited'
+  | 'attempt-started'
+  | 'attempt-throttled'
+  | 'budget-stop'
+  | 'cadence-wait'
+  | 'reservation-forfeited'
+
+/** Minimal authenticated durable event retained by the suite finalizer. */
+type ParsedFinalizedRateEvent = {
+  /** Exact durable event label. */
+  readonly kind: ParsedFinalizedRateEventKind
+  /** Global one-based durable event sequence. */
+  readonly eventSequence: number
+  /** Absolute authenticated UTC event time in epoch milliseconds. */
+  readonly epochMilliseconds: number
+  /** Semantic rate phase, or null for reservation forfeiture. */
+  readonly phase: WorkspaceSearchMigrationDescribeTablePhase | null
+  /** Global durable attempt sequence when the event owns one. */
+  readonly attemptSequence: number | null
+  /** Exact cadence delay when the event is a cadence wait. */
+  readonly delayMilliseconds: number | null
+  /** Throttle cooldown, or null for every other event. */
+  readonly backoffMilliseconds: number | null
+  /** Stop retry delay, or null for every other event. */
+  readonly retryAfterMilliseconds: number | null
+  /** Stop permit request, or null for every other event. */
+  readonly requiredAttempts: number | null
+  /** Stable stop reason, or null for every other event. */
+  readonly stopReason: WorkspaceSearchMigrationDescribeTableRateStopReason |
+    null
+  /** Explicit throttle or stop source, or null for unrelated events. */
+  readonly provenance:
+    | WorkspaceSearchMigrationDescribeTableBudgetStopProvenance
+    | WorkspaceSearchMigrationDescribeTableThrottleProvenance
+    | null
+}
+
+/** One authenticated rate segment plus events needed by global inventory. */
+type ParsedFinalizedRateSegment = {
+  /** Exact independently reconstructed public segment binding. */
+  readonly binding: WorkspaceSearchMigrationRehearsalNoFaultRateSegmentReceipt
+  /** Exact authenticated durable event order. */
+  readonly events: readonly ParsedFinalizedRateEvent[]
+}
+
+/** Parsed rate artifact material returned by the strict raw reader. */
+type ParsedFinalizedRateArtifact = {
+  /** Exact independently reconstructed public segment bindings. */
+  readonly bindings:
+    readonly WorkspaceSearchMigrationRehearsalNoFaultRateSegmentReceipt[]
+  /** Exact authenticated segments and their inventory event projections. */
+  readonly segments: readonly ParsedFinalizedRateSegment[]
 }
 
 /** Requires nonempty, digest-matched actual-rate finalizer output. */
@@ -2479,6 +3260,10 @@ function readFinalizedRate(
   ratePolicyVersion: string,
   suiteStartedAt: string,
   suiteCompletedAt: string,
+  integrityAttestationRoot:
+    WorkspaceSearchMigrationRehearsalStageChainEvidence[
+      'integrityAttestationRoot'
+    ],
 ): ParsedFinalizedRate {
   const record = suiteGuards.requireRecord(value)
   suiteGuards.requireExactKeys(record, finalizedRateKeys)
@@ -2510,6 +3295,34 @@ function readFinalizedRate(
     suiteGuards.readOwn(aggregateRecord, 'attemptCount'),
     maximumOperationCount,
   )
+  const aggregateThrottleCount = readNonNegativeCount(
+    suiteGuards.readOwn(aggregateRecord, 'throttleCount'),
+    maximumOperationCount,
+  )
+  const aggregateAwsServiceThrottleCount = readNonNegativeCount(
+    suiteGuards.readOwn(aggregateRecord, 'awsServiceThrottleCount'),
+    maximumOperationCount,
+  )
+  const aggregateRehearsalInjectedThrottleCount = readNonNegativeCount(
+    suiteGuards.readOwn(aggregateRecord, 'rehearsalInjectedThrottleCount'),
+    maximumOperationCount,
+  )
+  const aggregateBudgetStopCount = readNonNegativeCount(
+    suiteGuards.readOwn(aggregateRecord, 'budgetStopCount'),
+    maximumOperationCount,
+  )
+  const aggregateOperationalBudgetStopCount = readNonNegativeCount(
+    suiteGuards.readOwn(aggregateRecord, 'operationalBudgetStopCount'),
+    maximumOperationCount,
+  )
+  const aggregateAwsServiceThrottleBudgetStopCount = readNonNegativeCount(
+    suiteGuards.readOwn(aggregateRecord, 'awsServiceThrottleBudgetStopCount'),
+    maximumOperationCount,
+  )
+  const aggregateRehearsalInjectedBudgetStopCount = readNonNegativeCount(
+    suiteGuards.readOwn(aggregateRecord, 'rehearsalInjectedBudgetStopCount'),
+    maximumOperationCount,
+  )
   const artifactDigest = createHash('sha256').update(bytes).digest('hex')
   if (
     artifactDigest !== suiteGuards.readDigest(value.artifactDigest) ||
@@ -2519,7 +3332,14 @@ function readFinalizedRate(
     readPositiveCount(value.segmentCount, 256) < 1 ||
     readPositiveCount(value.startedAttemptCount, 100_000) < 1 ||
     aggregatePolicyVersion !== ratePolicyVersion ||
-    aggregateAttemptCount < 1
+    aggregateAttemptCount < 1 ||
+    aggregateThrottleCount !==
+      aggregateAwsServiceThrottleCount +
+        aggregateRehearsalInjectedThrottleCount ||
+    aggregateBudgetStopCount !==
+      aggregateOperationalBudgetStopCount +
+        aggregateAwsServiceThrottleBudgetStopCount +
+        aggregateRehearsalInjectedBudgetStopCount
   ) {
     return failSuiteFinalizer()
   }
@@ -2533,7 +3353,7 @@ function readFinalizedRate(
   if (serializeCanonicalJson(parsed) !== text) {
     return failSuiteFinalizer()
   }
-  const segmentBindings = requireFinalizedRateArtifact(
+  const artifact = requireFinalizedRateArtifact(
     parsed,
     configurationHash,
     ratePolicyVersion,
@@ -2542,13 +3362,15 @@ function readFinalizedRate(
     value.startedAttemptCount,
     suiteStartedAt,
     suiteCompletedAt,
+    integrityAttestationRoot,
   )
   return {
     evidence: value.evidence,
     artifactDigest,
     artifactByteLength: byteLength,
     artifactBytes: new Uint8Array(bytes),
-    segmentBindings,
+    segmentBindings: artifact.bindings,
+    segments: artifact.segments,
   }
 }
 
@@ -2562,7 +3384,11 @@ function requireFinalizedRateArtifact(
   startedAttemptCount: number,
   suiteStartedAt: string,
   suiteCompletedAt: string,
-): readonly WorkspaceSearchMigrationRehearsalNoFaultRateSegmentReceipt[] {
+  integrityAttestationRoot:
+    WorkspaceSearchMigrationRehearsalStageChainEvidence[
+      'integrityAttestationRoot'
+    ],
+): ParsedFinalizedRateArtifact {
   const record = suiteGuards.requireRecord(value)
   suiteGuards.requireExactKeys(record, [
     'configurationBindingDigest',
@@ -2573,7 +3399,8 @@ function requireFinalizedRateArtifact(
   ])
   if (
     suiteGuards.readOwn(record, 'kind') !== finalizedRateArtifactKind ||
-    suiteGuards.readOwn(record, 'version') !== 1 ||
+    suiteGuards.readOwn(record, 'version') !==
+      WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RATE_SEGMENT_VERSION ||
     suiteGuards.readOwn(record, 'policyVersion') !== ratePolicyVersion ||
     suiteGuards.readOwn(record, 'configurationBindingDigest') !==
       configurationHash
@@ -2586,6 +3413,7 @@ function requireFinalizedRateArtifact(
   let observedStarts = 0
   const bindings: WorkspaceSearchMigrationRehearsalNoFaultRateSegmentReceipt[] =
     []
+  const parsedSegments: ParsedFinalizedRateSegment[] = []
   let expectedEventSequence = 1
   for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex += 1) {
     const segmentValue = segments[segmentIndex]
@@ -2597,7 +3425,16 @@ function requireFinalizedRateArtifact(
     const anchorUtc = suiteGuards.readTimestamp(
       suiteGuards.readOwn(header, 'anchorUtc'),
     )
-    if (anchorUtc < suiteStartedAt || anchorUtc > suiteCompletedAt) {
+    const segmentStartedAt = segmentIndex === 0
+      ? integrityAttestationRoot.startedAt
+      : suiteStartedAt
+    const segmentCompletedAt = segmentIndex === 0
+      ? integrityAttestationRoot.completedAt
+      : suiteCompletedAt
+    if (
+      Date.parse(anchorUtc) < Date.parse(segmentStartedAt) ||
+      Date.parse(anchorUtc) > Date.parse(segmentCompletedAt)
+    ) {
       return failSuiteFinalizer()
     }
     const segmentOrdinal = suiteGuards.readOwn(header, 'segmentOrdinal')
@@ -2617,6 +3454,7 @@ function requireFinalizedRateArtifact(
     }
     const events = readExactArray(eventValue, eventValue.length)
     observedEvents += events.length
+    const parsedEvents: ParsedFinalizedRateEvent[] = []
     for (let eventIndex = 0; eventIndex < events.length; eventIndex += 1) {
       const eventValue = events[eventIndex]
       const event = suiteGuards.requireRecord(eventValue)
@@ -2633,14 +3471,18 @@ function requireFinalizedRateArtifact(
       const eventTime = Date.parse(anchorUtc) + offsetMilliseconds
       if (
         !Number.isSafeInteger(eventTime) ||
-        eventTime < Date.parse(suiteStartedAt) ||
-        eventTime > Date.parse(suiteCompletedAt)
+        eventTime < Date.parse(segmentStartedAt) ||
+        eventTime > Date.parse(segmentCompletedAt)
       ) {
         return failSuiteFinalizer()
       }
       if (suiteGuards.readOwn(event, 'kind') === 'attempt-started') {
         observedStarts += 1
       }
+      parsedEvents.push(readFinalizedRateEvent(
+        event,
+        eventTime,
+      ))
     }
     const terminal = events.at(-1) ?? header
     const terminalRecordMac = suiteGuards.readDigest(
@@ -2649,7 +3491,7 @@ function requireFinalizedRateArtifact(
     const canonicalSegmentText = [header, ...events]
       .map((record) => `${serializeCanonicalJson(record)}\n`)
       .join('')
-    bindings.push(Object.freeze({
+    const binding = Object.freeze({
       authenticationKeyFingerprint: suiteGuards.readDigest(
         suiteGuards.readOwn(header, 'authenticationKeyFingerprint'),
       ),
@@ -2669,6 +3511,11 @@ function requireFinalizedRateArtifact(
       segmentDigest: createHash('sha256')
         .update(canonicalSegmentText, 'utf8')
         .digest('hex'),
+    })
+    bindings.push(binding)
+    parsedSegments.push(Object.freeze({
+      binding,
+      events: Object.freeze(parsedEvents),
     }))
     expectedEventSequence += events.length
   }
@@ -2678,7 +3525,182 @@ function requireFinalizedRateArtifact(
   ) {
     return failSuiteFinalizer()
   }
-  return Object.freeze(bindings)
+  return Object.freeze({
+    bindings: Object.freeze(bindings),
+    segments: Object.freeze(parsedSegments),
+  })
+}
+
+/** Reads the authenticated event fields needed by complete integrity inventory. */
+function readFinalizedRateEvent(
+  event: object,
+  epochMilliseconds: number,
+): ParsedFinalizedRateEvent {
+  const kind = readFinalizedRateEventKind(
+    suiteGuards.readOwn(event, 'kind'),
+  )
+  const eventSequence = readPositiveCount(
+    suiteGuards.readOwn(event, 'eventSequence'),
+    100_000,
+  )
+  const phase = kind === 'reservation-forfeited'
+    ? null
+    : readFinalizedRatePhase(suiteGuards.readOwn(event, 'phase'))
+  const attemptSequence =
+    kind === 'attempt-charged' ||
+      kind === 'attempt-forfeited' ||
+      kind === 'attempt-started' ||
+      kind === 'attempt-throttled'
+      ? readPositiveCount(
+          suiteGuards.readOwn(event, 'attemptSequence'),
+          maximumOperationCount,
+        )
+      : null
+  const delayMilliseconds = kind === 'cadence-wait'
+    ? readPositiveCount(
+        suiteGuards.readOwn(event, 'delayMilliseconds'),
+        24 * 60 * 60 * 1_000,
+      )
+    : null
+  const backoffMilliseconds = kind === 'attempt-throttled'
+    ? readPositiveCount(
+        suiteGuards.readOwn(event, 'backoffMilliseconds'),
+        24 * 60 * 60 * 1_000,
+      )
+    : null
+  const retryAfterMilliseconds = kind === 'budget-stop'
+    ? readNonNegativeCount(
+        suiteGuards.readOwn(event, 'retryAfterMilliseconds'),
+        24 * 60 * 60 * 1_000,
+      )
+    : null
+  const requiredAttempts = kind === 'budget-stop'
+    ? readNonNegativeCount(
+        suiteGuards.readOwn(event, 'requiredAttempts'),
+        maximumOperationCount,
+      )
+    : null
+  const stopReason = kind === 'budget-stop'
+    ? readFinalizedRateStopReason(suiteGuards.readOwn(event, 'reason'))
+    : null
+  const provenance = kind === 'attempt-throttled'
+    ? readFinalizedRateThrottleProvenance(
+        suiteGuards.readOwn(event, 'provenance'),
+      )
+    : kind === 'budget-stop'
+    ? readFinalizedRateBudgetStopProvenance(
+        suiteGuards.readOwn(event, 'provenance'),
+      )
+    : null
+  return Object.freeze({
+    kind,
+    eventSequence,
+    epochMilliseconds,
+    phase,
+    attemptSequence,
+    delayMilliseconds,
+    backoffMilliseconds,
+    retryAfterMilliseconds,
+    requiredAttempts,
+    stopReason,
+    provenance,
+  })
+}
+
+/** Reads one finite authenticated durable rate-event label. */
+function readFinalizedRateEventKind(
+  value: unknown,
+): ParsedFinalizedRateEventKind {
+  switch (value) {
+    case 'attempt-charged':
+    case 'attempt-forfeited':
+    case 'attempt-started':
+    case 'attempt-throttled':
+    case 'budget-stop':
+    case 'cadence-wait':
+    case 'reservation-forfeited':
+      return value
+    default:
+      return failSuiteFinalizer()
+  }
+}
+
+/** Reads one finite identifier-free rate phase from authenticated evidence. */
+function readFinalizedRatePhase(
+  value: unknown,
+): WorkspaceSearchMigrationDescribeTablePhase {
+  switch (value) {
+    case 'measurement':
+    case 'checkpoint-page':
+    case 'integrity-check':
+    case 'pre-send-guard':
+    case 'post-send-guard':
+    case 'reconciliation':
+      return value
+    default:
+      return failSuiteFinalizer()
+  }
+}
+
+/**
+ * Reads one exact stop reason from authenticated final rate evidence.
+ *
+ * @param value - Candidate authenticated stop-reason field.
+ * @returns Validated finite stop reason.
+ */
+function readFinalizedRateStopReason(
+  value: unknown,
+): WorkspaceSearchMigrationDescribeTableRateStopReason {
+  switch (value) {
+    case 'budget-capacity':
+    case 'cadence-bound':
+    case 'interrupted':
+    case 'invalid-lifecycle':
+    case 'page-capacity':
+    case 'quarantined':
+    case 'throttled':
+    case 'taken-over':
+      return value
+    default:
+      return failSuiteFinalizer()
+  }
+}
+
+/**
+ * Reads one exact physical-throttle source from authenticated evidence.
+ *
+ * @param value - Candidate authenticated throttle-provenance field.
+ * @returns Validated finite physical-throttle provenance.
+ */
+function readFinalizedRateThrottleProvenance(
+  value: unknown,
+): WorkspaceSearchMigrationDescribeTableThrottleProvenance {
+  switch (value) {
+    case 'aws-service':
+    case 'rehearsal-after-success-injection':
+      return value
+    default:
+      return failSuiteFinalizer()
+  }
+}
+
+/**
+ * Reads one exact budget-stop source from authenticated evidence.
+ *
+ * @param value - Candidate authenticated stop-provenance field.
+ * @returns Validated finite budget-stop provenance.
+ */
+function readFinalizedRateBudgetStopProvenance(
+  value: unknown,
+): WorkspaceSearchMigrationDescribeTableBudgetStopProvenance {
+  switch (value) {
+    case 'operational':
+    case 'aws-service-throttle':
+    case 'rehearsal-after-success-injection':
+      return value
+    default:
+      return failSuiteFinalizer()
+  }
 }
 
 /** Validates claims through the canonical evidence reader and detaches them. */

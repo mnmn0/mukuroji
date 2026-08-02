@@ -275,6 +275,9 @@ describe('Workspace Search migration single-attempt DescribeTable transport', ()
         Object.freeze({}),
       ),
     ).toBeFalse()
+    expect(
+      Reflect.has(transport, 'createAfterSuccessThrottleAttempt'),
+    ).toBeFalse()
     expect(() =>
       Reflect.apply(
         transport.createAttempt,

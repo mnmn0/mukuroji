@@ -46,7 +46,7 @@ type SessionOptions = {
   readonly failEvidencePublication?: boolean
   /** Whether every close callback raises after recording its attempt. */
   readonly failClose?: boolean
-  /** Milliseconds added to the suite start for the permit issue boundary. */
+  /** Milliseconds added to the first-stage start for the permit issue boundary. */
   readonly issuedAtOffsetMilliseconds?: number
   /** Milliseconds added to suite completion for the permit expiry boundary. */
   readonly expiresAtOffsetMilliseconds?: number
@@ -153,7 +153,16 @@ function createSession(
         attemptCount: aggregate.attemptCount,
         forfeitedAttemptCount: aggregate.forfeitedAttemptCount,
         throttleCount: aggregate.throttleCount,
+        awsServiceThrottleCount: aggregate.awsServiceThrottleCount,
+        rehearsalInjectedThrottleCount:
+          aggregate.rehearsalInjectedThrottleCount,
         budgetStopCount: aggregate.budgetStopCount,
+        operationalBudgetStopCount:
+          aggregate.operationalBudgetStopCount,
+        awsServiceThrottleBudgetStopCount:
+          aggregate.awsServiceThrottleBudgetStopCount,
+        rehearsalInjectedBudgetStopCount:
+          aggregate.rehearsalInjectedBudgetStopCount,
         cadenceWaitCount: aggregate.cadenceWaitCount,
         cadenceWaitMilliseconds: aggregate.cadenceWaitMilliseconds,
         maximumInFlight: aggregate.maximumInFlight,
@@ -165,7 +174,7 @@ function createSession(
       calls.push('read-validity')
       return Object.freeze({
         issuedAt: new Date(
-          Date.parse(suite.startedAt) +
+          Date.parse(suite.firstStageStartedAt) +
             (options.issuedAtOffsetMilliseconds ?? 0),
         ).toISOString(),
         expiresAt: new Date(
@@ -303,6 +312,9 @@ describe('Workspace Search migration rehearsal publication', () => {
 
   test('prepares all children, publishes, finalizes, signs, and closes', async () => {
     const { input, expected } = await createInput()
+    expect(Date.parse(expected.startedAt)).toBeLessThan(
+      Date.parse(expected.firstStageStartedAt),
+    )
     const expectedRetention = new Date(
       Date.parse(expected.completedAt) + 60_000 +
         (365 * 24 + 12) * 60 * 60 * 1_000,
@@ -357,7 +369,7 @@ describe('Workspace Search migration rehearsal publication', () => {
     ])
   })
 
-  test('rejects a suite outside the permit before creating a publisher', async () => {
+  test('rejects a first stage outside the permit before creating a publisher', async () => {
     const { input } = await createInput({
       issuedAtOffsetMilliseconds: 1,
     })
@@ -399,7 +411,12 @@ describe('Workspace Search migration rehearsal publication', () => {
       'attemptCount',
       'forfeitedAttemptCount',
       'throttleCount',
+      'awsServiceThrottleCount',
+      'rehearsalInjectedThrottleCount',
       'budgetStopCount',
+      'operationalBudgetStopCount',
+      'awsServiceThrottleBudgetStopCount',
+      'rehearsalInjectedBudgetStopCount',
       'cadenceWaitCount',
       'cadenceWaitMilliseconds',
       'maximumInFlight',

@@ -17,6 +17,9 @@ import {
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_FAILPOINTS,
   type WorkspaceSearchMigrationRehearsalFailpoint,
 } from './migration-rehearsal-faults'
+import type {
+  WorkspaceSearchMigrationRehearsalIntegrityAttestationRootProjection,
+} from './migration-rehearsal-integrity-rate-evidence'
 import {
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_INITIAL_ABANDONMENT_ROOT_DIGEST,
 } from './migration-rehearsal-stage-reservation-chain'
@@ -667,6 +670,9 @@ export type WorkspaceSearchMigrationRehearsalStageChainEvidence = {
   readonly deploymentTrustRootDigest: string
   /** Digest of the authenticated rehearsal permit. */
   readonly permitDigest: string
+  /** Exact permit-authenticated clean ordinal-zero rate root. */
+  readonly integrityAttestationRoot:
+    WorkspaceSearchMigrationRehearsalIntegrityAttestationRootProjection
   /** Requested-resource binding authenticated by the permit. */
   readonly requestedResourcesBinding: string
   /** Exact immutable resource identity scheme authenticated by the manifest. */
@@ -1011,6 +1017,13 @@ export function deriveWorkspaceSearchMigrationRehearsalStageChainEvidence(
     const rateSegmentLocators = new Set<string>()
     const rateSegmentDigests = new Set<string>()
     const rateSegmentMacs = new Set<string>()
+    const integrityAttestationRootSegment =
+      manifest.integrityAttestationRoot.segment
+    rateSegmentLocators.add(
+      integrityAttestationRootSegment.segmentLocatorDigest,
+    )
+    rateSegmentDigests.add(integrityAttestationRootSegment.segmentDigest)
+    rateSegmentMacs.add(integrityAttestationRootSegment.terminalRecordMac)
     const processLifecycleDigests = new Set<string>()
     const stageReservationDigests = new Set<string>()
     let reservationAbandonmentIndex = 0
@@ -1116,11 +1129,17 @@ export function deriveWorkspaceSearchMigrationRehearsalStageChainEvidence(
       stageReservationDigests.add(receipt.stageReservationDigest)
       requireGlobalRateSegment(
         receipt.rateSegment,
-        previousReceipt?.rateSegment,
+        previousReceipt?.rateSegment ?? integrityAttestationRootSegment,
         rateSegmentLocators,
         rateSegmentDigests,
         rateSegmentMacs,
       )
+      if (previousReceipt === undefined) {
+        requireIntegrityRootRateSuccessor(
+          integrityAttestationRootSegment,
+          receipt.rateSegment,
+        )
+      }
       if (
         processLifecycleDigests.has(
           receipt.processLifecycle.lifecycleDigest,
@@ -1166,7 +1185,8 @@ export function deriveWorkspaceSearchMigrationRehearsalStageChainEvidence(
       terminal === undefined ||
       firstDigest === undefined ||
       terminalDigest === undefined ||
-      terminal.command !== 'release'
+      terminal.command !== 'release' ||
+      Date.parse(manifest.reviewedAt) > Date.parse(first.startedAt)
     ) return failStageReceipt()
     const projection: WorkspaceSearchMigrationRehearsalStageChainEvidence =
       Object.freeze({
@@ -1174,6 +1194,7 @@ export function deriveWorkspaceSearchMigrationRehearsalStageChainEvidence(
       commit: manifest.commit,
       deploymentTrustRootDigest: manifest.deploymentTrustRootDigest,
       permitDigest: manifest.permitDigest,
+      integrityAttestationRoot: manifest.integrityAttestationRoot,
       requestedResourcesBinding: manifest.requestedResourcesBinding,
       integrityResourceIdentityScheme:
         manifest.integrityResourceIdentityScheme,
@@ -1610,6 +1631,22 @@ function requireGlobalRateSegment(
   segmentMacs.add(segment.terminalRecordMac)
 }
 
+/** Requires global stage one to immediately succeed the authenticated root. */
+function requireIntegrityRootRateSuccessor(
+  root: WorkspaceSearchMigrationRehearsalIntegrityAttestationRootProjection[
+    'segment'
+  ],
+  successor: WorkspaceSearchMigrationRehearsalStageRateSegment,
+): void {
+  if (
+    successor.authenticationKeyFingerprint !==
+      root.authenticationKeyFingerprint ||
+    successor.segmentOrdinal !== root.segmentOrdinal + 1 ||
+    successor.firstEventSequence !==
+      root.firstEventSequence + root.eventCount
+  ) return failStageReceipt()
+}
+
 /** Derives and cross-validates one complete scenario's durable stage graph. */
 function deriveScenarioChainEvidence(
   scenario: WorkspaceSearchMigrationRehearsalScenarioName,
@@ -1790,6 +1827,8 @@ function deriveScenarioChainEvidence(
     targetPreimageArtifactContentDigest,
     runLocatorDigest,
     terminalReceipt.configurationBindingDigest,
+    terminalReceipt.policyVersion,
+    terminalReceipt.integrityResourceIdentityDigest,
     reconciliationApplyBoundaryDigest,
     terminalReceipt.completedAt,
     terminalReceipt.rateSegment,
@@ -1935,6 +1974,8 @@ function deriveScenarioChainEvidence(
  * @param targetPreimageArtifactContentDigest - Optional pre-apply target file.
  * @param runLocatorDigest - Authenticated scenario run locator.
  * @param configurationBindingDigest - Reviewed measured configuration.
+ * @param policyVersion - Reviewed durable DescribeTable policy digest.
+ * @param integrityResourceIdentityDigest - Reviewed immutable identity digest.
  * @param applyBoundaryDigest - Exact admitted apply or prefix boundary.
  * @param terminalReceiptCompletedAt - Upper bound for expectation checks.
  * @param terminalRate - Exact child rate segment preceding reconciliation.
@@ -1945,6 +1986,8 @@ function requireScenarioAuditEvidence(
   targetPreimageArtifactContentDigest: string | null,
   runLocatorDigest: string,
   configurationBindingDigest: string,
+  policyVersion: string,
+  integrityResourceIdentityDigest: string,
   applyBoundaryDigest: string,
   terminalReceiptCompletedAt: string,
   terminalRate: WorkspaceSearchMigrationRehearsalStageRateSegment,
@@ -1985,6 +2028,9 @@ function requireScenarioAuditEvidence(
     reconciliationContext.runLocatorDigest !== runLocatorDigest ||
     reconciliationContext.configurationBindingDigest !==
       configurationBindingDigest ||
+    reconciliationContext.policyVersion !== policyVersion ||
+    reconciliationContext.integrityResourceIdentityDigest !==
+      integrityResourceIdentityDigest ||
     reconciliationContext.applyBoundaryDigest !== applyBoundaryDigest ||
     Date.parse(reconciliationContext.checkedAt) >
       Date.parse(terminalReceiptCompletedAt) ||
@@ -2003,7 +2049,7 @@ function requireScenarioAuditEvidence(
         terminal.integrityContextDigest === null ||
         reconciliationContext.integrity.kind !== 'verified-result' ||
         terminal.integrityAfterResultDigest !==
-          reconciliationContext.integrity.result.resultDigest ||
+          reconciliationContext.integrity.result.result.resultDigest ||
         terminal.integrityContextDigest !==
           reconciliationContext.integrity.resultContextDigest)) ||
     (expectedPurpose !== 'verified' &&
@@ -3133,7 +3179,7 @@ function readTerminalEvidence(
         integrityComparisonDigest !== null ||
         reconciliationIntegrity.kind !== 'verified-result' ||
         integrityAfterResultDigest !==
-          reconciliationIntegrity.result.resultDigest ||
+          reconciliationIntegrity.result.result.resultDigest ||
         integrityContextDigest !==
           reconciliationIntegrity.resultContextDigest)) ||
     (command !== 'verify' &&

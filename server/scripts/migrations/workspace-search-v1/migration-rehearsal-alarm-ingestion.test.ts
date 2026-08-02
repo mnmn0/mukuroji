@@ -123,12 +123,17 @@ function createIntegrityAttestationRootProjection() {
   const rootStartedAt = '2026-08-01T23:54:58.000Z'
   const rootCompletedAt = '2026-08-01T23:54:59.999Z'
   const aggregate = {
-    version: 1,
+    version: 2,
     policyVersion,
     attemptCount: 12,
     forfeitedAttemptCount: 0,
     throttleCount: 0,
+    awsServiceThrottleCount: 0,
+    rehearsalInjectedThrottleCount: 0,
     budgetStopCount: 0,
+    operationalBudgetStopCount: 0,
+    awsServiceThrottleBudgetStopCount: 0,
+    rehearsalInjectedBudgetStopCount: 0,
     cadenceWaitCount: 0,
     cadenceWaitMilliseconds: 0,
     maximumInFlight: 1,

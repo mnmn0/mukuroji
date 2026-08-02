@@ -177,8 +177,9 @@ describe('authenticated rehearsal stage child material', () => {
         nonce: new Uint8Array(32).fill(0x93),
         reservedAt: fixture.stageReservation.reservedAt,
         expiresAt: fixture.stageReservation.expiresAt,
-        expectedPreviousRateSegment: null,
-        expectedCurrentRateSegmentOrdinal: 0,
+        expectedPreviousRateSegment:
+          fixture.manifest.integrityAttestationRoot.segment,
+        expectedCurrentRateSegmentOrdinal: 1,
         expectedTargetPreimageArtifactContentDigest: null,
         signingKey: fixture.authenticationKey,
       })

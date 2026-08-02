@@ -19,6 +19,7 @@ import {
 } from './migration-describe-table-rate-budget'
 import {
   deriveWorkspaceSearchMigrationRehearsalKeys,
+  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_MASTER_KEY_BYTES,
   zeroizeWorkspaceSearchMigrationRehearsalKey,
 } from './migration-rehearsal-key-derivation'
 import {
@@ -31,16 +32,19 @@ import {
   parseWorkspaceSearchMigrationRehearsalPublicationCliArguments,
   readWorkspaceSearchMigrationRehearsalRestrictedInputFile,
   runWorkspaceSearchMigrationRehearsalPublicationCli,
-  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PRESTAGE_MAX_BYTES,
+  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_ALARM_ARTIFACT_MAX_BYTES,
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PUBLICATION_APPROVAL,
   WorkspaceSearchMigrationRehearsalPublicationCliError,
   type WorkspaceSearchMigrationRehearsalPublicationCliDependencies,
 } from './migration-rehearsal-publication-cli'
+import type {
+  WorkspaceSearchMigrationRehearsalEvidenceSessionBinding,
+} from './migration-rehearsal-evidence-aws'
 import {
   readWorkspaceSearchMigrationRehearsalFinalizedStageChainReconciliationContexts,
 } from './migration-rehearsal-stage-receipt'
 import {
-  assembleWorkspaceSearchMigrationRehearsalSuitePreparationInput,
+  assembleWorkspaceSearchMigrationRehearsalAuthenticatedSuite,
   consumeWorkspaceSearchMigrationRehearsalFinalizedSuitePreparation,
 } from './migration-rehearsal-suite-finalizer'
 import {
@@ -50,14 +54,36 @@ import {
 
 const configurationHash = '1'.repeat(64)
 
+/** Deterministic main rehearsal master kept distinct from alarm authority. */
+const mainRehearsalMasterKey = new Uint8Array(32).fill(0x37)
+
+/** Deterministic alarm-purpose master matching the authentic alarm fixture. */
+const alarmRehearsalMasterKey = new Uint8Array(32).fill(7)
+
 /** Derived digest-only permit bindings for the fixture master key. */
 const publicationPermitKeyDigests = (() => {
   const keys = deriveWorkspaceSearchMigrationRehearsalKeys(
-    new Uint8Array(32).fill(7),
+    mainRehearsalMasterKey,
   )
   try {
     return Object.freeze({
       evidenceKeyDigest: keys.runtimeKeyDigest,
+      publicationKeyDigest: keys.publicationKeyDigest,
+    })
+  } finally {
+    zeroizeWorkspaceSearchMigrationRehearsalKey(keys.runtimeKey)
+    zeroizeWorkspaceSearchMigrationRehearsalKey(keys.publicationKey)
+  }
+})()
+
+/** Derived digest-only bindings for the alarm-purpose fixture master key. */
+const alarmAuthenticationKeyDigests = (() => {
+  const keys = deriveWorkspaceSearchMigrationRehearsalKeys(
+    alarmRehearsalMasterKey,
+  )
+  try {
+    return Object.freeze({
+      runtimeKeyDigest: keys.runtimeKeyDigest,
       publicationKeyDigest: keys.publicationKeyDigest,
     })
   } finally {
@@ -126,14 +152,14 @@ function createPublicationArguments(
   expectedConfigurationHash: string = configurationHash,
 ): string[] {
   return [
-    '--rehearsal-suite-input-file',
-    '/operator/rehearsal-suite.json',
     '--rehearsal-alarm-artifact-file',
     '/operator/rehearsal-alarms.json',
     '--rehearsal-permit-file',
     '/operator/rehearsal-permit.json',
     '--rehearsal-authentication-key-file',
     '/operator/rehearsal-authentication.key',
+    '--rehearsal-alarm-authentication-key-file',
+    '/operator/rehearsal-alarm-authentication.key',
     '--rehearsal-stage-receipt-manifest-file',
     '/operator/rehearsal-stage-receipts.json',
     '--rehearsal-stage-receipt-file',
@@ -164,6 +190,17 @@ function createPublicationArguments(
   ]
 }
 
+/** Replaces one required path in a detached publication argument vector. */
+function replaceRequiredPublicationPath(
+  arguments_: string[],
+  currentPath: string,
+  replacementPath: string,
+): void {
+  const index = arguments_.indexOf(currentPath)
+  if (index < 0) throw new Error('Expected publication path argument.')
+  arguments_[index] = replacementPath
+}
+
 /** Requires one operation to fail with the stable publication CLI error. */
 async function requirePublicationCliFailure(
   operation: () => unknown | Promise<unknown>,
@@ -184,9 +221,23 @@ async function requirePublicationCliFailure(
   throw new Error('Expected final publication CLI failure.')
 }
 
+/** Creates the live session binding authenticated by the fixture permit. */
+function createFixtureSessionBinding(
+  fixture: AuthenticWorkspaceSearchMigrationRehearsalAssemblerFixture,
+): WorkspaceSearchMigrationRehearsalEvidenceSessionBinding {
+  return Object.freeze({
+    commit: fixture.expected.commit,
+    configurationHash: fixture.expected.configurationHash,
+    evidenceKeyDigest: publicationPermitKeyDigests.evidenceKeyDigest,
+    publicationKeyDigest: publicationPermitKeyDigests.publicationKeyDigest,
+    attestation: fixture.expected.attestation,
+  })
+}
+
 /** Creates a no-AWS harness that retains all final assembler trust boundaries. */
 function createFinalPublicationWiringHarness(
   fixture: AuthenticWorkspaceSearchMigrationRehearsalAssemblerFixture,
+  sessionBindingOverride?: WorkspaceSearchMigrationRehearsalEvidenceSessionBinding,
 ) {
   const events: string[] = []
   const returnedBuffers: Uint8Array[] = []
@@ -195,6 +246,7 @@ function createFinalPublicationWiringHarness(
   const stdout: string[] = []
   const stderr: string[] = []
   let publicationCount = 0
+  let exerciseCount = 0
   /** Retains only the purpose and digest of a transferred secret key. */
   const recordTransferredKey = (
     purpose: string,
@@ -214,15 +266,18 @@ function createFinalPublicationWiringHarness(
             WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_AUDIT_MAX_BYTES,
           )
         }
-        let bytes: Uint8Array
-        if (path.endsWith('rehearsal-suite.json')) {
-          bytes = new TextEncoder().encode(
-            serializeCanonicalJson(fixture.input.document),
+        if (path.endsWith('rehearsal-alarm-authentication.key')) {
+          expect(maximumBytes).toBe(
+            WORKSPACE_SEARCH_MIGRATION_REHEARSAL_MASTER_KEY_BYTES,
           )
-        } else if (path.endsWith('rehearsal-alarms.json')) {
+        }
+        let bytes: Uint8Array
+        if (path.endsWith('rehearsal-alarms.json')) {
           bytes = new Uint8Array(fixture.input.alarmArtifactBytes)
+        } else if (path.endsWith('rehearsal-alarm-authentication.key')) {
+          bytes = new Uint8Array(alarmRehearsalMasterKey)
         } else if (path.endsWith('.key')) {
-          bytes = new Uint8Array(32).fill(7)
+          bytes = new Uint8Array(mainRehearsalMasterKey)
         } else if (path.endsWith('rehearsal-permit.json')) {
           bytes = new TextEncoder().encode(serializeCanonicalJson(
             publicationPermitKeyDigests,
@@ -329,11 +384,24 @@ function createFinalPublicationWiringHarness(
             events.push('measure-configuration')
             return fixture.expected.configurationHash
           },
+          exerciseDescribeTableThrottle: async () => {
+            events.push('exercise-describe-table-throttle')
+            exerciseCount += 1
+            if (exerciseCount !== 1) {
+              throw new Error('Final publication rate exercise replayed.')
+            }
+            return Object.freeze({
+              version: 1,
+              awsSuccessfulAttemptCount: 1,
+              rehearsalInjectedThrottleCount: 1,
+              rehearsalInjectedBudgetStopCount: 1,
+            })
+          },
           interruptDescribeTableRate: (): void => {},
           createRehearsalArtifactPublisher: () => unexpectedTestEffect(),
           createRehearsalEvidencePublisher: () => unexpectedTestEffect(),
           readRehearsalEvidenceSessionBinding: () =>
-            unexpectedTestEffect(),
+            sessionBindingOverride ?? createFixtureSessionBinding(fixture),
           readDescribeTableRateEvidence: () => fixture.expected.rateAggregate,
           readRehearsalPermitValidity: () => unexpectedTestEffect(),
           close: async (): Promise<void> => {
@@ -352,7 +420,11 @@ function createFinalPublicationWiringHarness(
           'alarm-signal',
           input.alarmSignalVerificationKey,
         )
-        return assembleWorkspaceSearchMigrationRehearsalSuitePreparationInput(
+        recordTransferredKey(
+          'alarm-publication',
+          input.alarmPublicationVerificationKey,
+        )
+        return assembleWorkspaceSearchMigrationRehearsalAuthenticatedSuite(
           input,
         )
       },
@@ -399,6 +471,8 @@ function createFinalPublicationWiringHarness(
     stderr,
     /** Returns how many authenticated suites reached publication. */
     readPublicationCount: (): number => publicationCount,
+    /** Returns how many times the one-shot final rate exercise ran. */
+    readExerciseCount: (): number => exerciseCount,
   })
 }
 
@@ -410,6 +484,12 @@ describe('migration rehearsal final publication CLI parser', () => {
       )
 
     expect(parsed.configurationHash).toBe(configurationHash)
+    expect(parsed.authenticationKeyFile).toBe(
+      '/operator/rehearsal-authentication.key',
+    )
+    expect(parsed.alarmAuthenticationKeyFile).toBe(
+      '/operator/rehearsal-alarm-authentication.key',
+    )
     expect(parsed.stageReceiptFiles).toEqual([
       '/operator/rehearsal-stage-receipt-0001.json',
       '/operator/rehearsal-stage-receipt-0002.json',
@@ -427,6 +507,68 @@ describe('migration rehearsal final publication CLI parser', () => {
     expect(parsed.requestTimeoutMilliseconds).toBe(5_000)
     expect(parsed.measure.command).toBe('measure')
     expect(parsed.measure.rateBootstrap).toBe(false)
+  })
+
+  test('requires the ordered distinct alarm authentication key path', async () => {
+    const missingArguments = createPublicationArguments()
+    const alarmKeyIndex = missingArguments.indexOf(
+      '--rehearsal-alarm-authentication-key-file',
+    )
+    missingArguments.splice(alarmKeyIndex, 2)
+    await requirePublicationCliFailure(
+      () => parseWorkspaceSearchMigrationRehearsalPublicationCliArguments(
+        missingArguments,
+      ),
+      'INVALID_USAGE',
+    )
+
+    const reorderedArguments = createPublicationArguments()
+    const mainKeyFlagIndex = reorderedArguments.indexOf(
+      '--rehearsal-authentication-key-file',
+    )
+    const alarmKeyFlagIndex = reorderedArguments.indexOf(
+      '--rehearsal-alarm-authentication-key-file',
+    )
+    reorderedArguments[mainKeyFlagIndex] =
+      '--rehearsal-alarm-authentication-key-file'
+    reorderedArguments[alarmKeyFlagIndex] =
+      '--rehearsal-authentication-key-file'
+    await requirePublicationCliFailure(
+      () => parseWorkspaceSearchMigrationRehearsalPublicationCliArguments(
+        reorderedArguments,
+      ),
+      'INVALID_USAGE',
+    )
+
+    const aliasedArguments = createPublicationArguments()
+    const alarmKeyPathIndex = aliasedArguments.indexOf(
+      '/operator/rehearsal-alarm-authentication.key',
+    )
+    aliasedArguments[alarmKeyPathIndex] =
+      '/operator/rehearsal-authentication.key'
+    await requirePublicationCliFailure(
+      () => parseWorkspaceSearchMigrationRehearsalPublicationCliArguments(
+        aliasedArguments,
+      ),
+      'INVALID_USAGE',
+    )
+  })
+
+  test('rejects the removed operator-authored prestage document flag', async () => {
+    const arguments_ = createPublicationArguments()
+    arguments_.splice(
+      0,
+      0,
+      '--rehearsal-suite-input-file',
+      '/operator/rehearsal-suite.json',
+    )
+
+    await requirePublicationCliFailure(
+      () => parseWorkspaceSearchMigrationRehearsalPublicationCliArguments(
+        arguments_,
+      ),
+      'INVALID_USAGE',
+    )
   })
 
   test('rejects omitted durable predecessor segments', async () => {
@@ -590,6 +732,47 @@ describe('migration rehearsal final publication CLI parser', () => {
     )
   })
 
+  test('rejects path reuse across every restricted input and output class', async () => {
+    const stageReplayArguments = createPublicationArguments()
+    replaceRequiredPublicationPath(
+      stageReplayArguments,
+      '/operator/rehearsal-stage-receipt-0001.json',
+      '/operator/rehearsal-alarms.json',
+    )
+    await requirePublicationCliFailure(
+      () => parseWorkspaceSearchMigrationRehearsalPublicationCliArguments(
+        stageReplayArguments,
+      ),
+      'INVALID_USAGE',
+    )
+
+    const outputReplayArguments = createPublicationArguments()
+    replaceRequiredPublicationPath(
+      outputReplayArguments,
+      '/operator/rate-segment-final.json',
+      '/operator/rate-segment-0001.json',
+    )
+    await requirePublicationCliFailure(
+      () => parseWorkspaceSearchMigrationRehearsalPublicationCliArguments(
+        outputReplayArguments,
+      ),
+      'INVALID_USAGE',
+    )
+
+    const policyReplayArguments = createPublicationArguments()
+    replaceRequiredPublicationPath(
+      policyReplayArguments,
+      '/operator/rate-policy.json',
+      '/operator/rehearsal-permit.json',
+    )
+    await requirePublicationCliFailure(
+      () => parseWorkspaceSearchMigrationRehearsalPublicationCliArguments(
+        policyReplayArguments,
+      ),
+      'INVALID_USAGE',
+    )
+  })
+
   test('rejects an unreviewed approval and a non-measure suffix', async () => {
     const approvalArguments = createPublicationArguments()
     const approvalIndex = approvalArguments.indexOf('--approval')
@@ -624,7 +807,7 @@ describe('migration rehearsal restricted publication input reader', () => {
       const actual =
         await readWorkspaceSearchMigrationRehearsalRestrictedInputFile(
           path,
-          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PRESTAGE_MAX_BYTES,
+          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_ALARM_ARTIFACT_MAX_BYTES,
         )
 
       expect(actual).toEqual(expected)
@@ -778,6 +961,46 @@ describe('migration rehearsal final publication orchestration', () => {
     ])
   })
 
+  test('rejects byte-equal main and alarm masters before AWS composition', async () => {
+    const fixture =
+      await createAuthenticWorkspaceSearchMigrationRehearsalAssemblerFixture()
+    const harness = createFinalPublicationWiringHarness(fixture)
+    let rejectedAlarmMaster: Uint8Array | undefined
+    const dependencies:
+      WorkspaceSearchMigrationRehearsalPublicationCliDependencies = {
+        ...harness.dependencies,
+        readRestrictedFile: async (path, maximumBytes) => {
+          if (path.endsWith('rehearsal-alarm-authentication.key')) {
+            harness.events.push(`read:${path}`)
+            rejectedAlarmMaster = new Uint8Array(mainRehearsalMasterKey)
+            return rejectedAlarmMaster
+          }
+          return await harness.dependencies.readRestrictedFile(
+            path,
+            maximumBytes,
+          )
+        },
+      }
+
+    const exitCode =
+      await runWorkspaceSearchMigrationRehearsalPublicationCli(
+        createPublicationArguments(fixture.expected.configurationHash),
+        dependencies,
+      )
+
+    expect(exitCode).toBe(2)
+    expect(harness.events).not.toContain('derive-stage-chain')
+    expect(harness.events).not.toContain('create-rate-runtime')
+    expect(harness.events).not.toContain('create-session')
+    expect(rejectedAlarmMaster).toEqual(new Uint8Array(32))
+    expect(harness.returnedBuffers.every((bytes) =>
+      bytes.every((byte) => byte === 0)
+    )).toBe(true)
+    expect(harness.stderr).toEqual([
+      '{"code":"INPUT_FILE_INVALID","kind":"mukuroji-workspace-search-migration-rehearsal-publication-cli-result","status":"error"}',
+    ])
+  })
+
   test('overwrites ordered audit bytes and both keys when reconciliation fails', async () => {
     const fixture =
       await createAuthenticWorkspaceSearchMigrationRehearsalAssemblerFixture()
@@ -864,6 +1087,150 @@ describe('migration rehearsal final publication orchestration', () => {
     )).toBe(true)
   })
 
+  test('rejects live session identity substitutions before publication', async () => {
+    for (const variant of [
+      'session',
+      'attestation',
+      'evidence-key',
+      'publication-key',
+      'commit',
+      'configuration',
+    ]) {
+      const fixture =
+        await createAuthenticWorkspaceSearchMigrationRehearsalAssemblerFixture()
+      const expected = createFixtureSessionBinding(fixture)
+      let substituted:
+        WorkspaceSearchMigrationRehearsalEvidenceSessionBinding
+      switch (variant) {
+        case 'session':
+          substituted = Object.freeze({
+            commit: 'b'.repeat(40),
+            configurationHash: '0'.repeat(64),
+            evidenceKeyDigest: '2'.repeat(64),
+            publicationKeyDigest: '3'.repeat(64),
+            attestation: Object.freeze({
+              ...expected.attestation,
+              callerAttestationDigest: '4'.repeat(64),
+            }),
+          })
+          break
+        case 'attestation':
+          substituted = Object.freeze({
+            ...expected,
+            attestation: Object.freeze({
+              ...expected.attestation,
+              resourceAttestationDigest: '5'.repeat(64),
+            }),
+          })
+          break
+        case 'evidence-key':
+          substituted = Object.freeze({
+            ...expected,
+            evidenceKeyDigest: '6'.repeat(64),
+          })
+          break
+        case 'publication-key':
+          substituted = Object.freeze({
+            ...expected,
+            publicationKeyDigest: '7'.repeat(64),
+          })
+          break
+        case 'commit':
+          substituted = Object.freeze({
+            ...expected,
+            commit: 'b'.repeat(40),
+          })
+          break
+        case 'configuration':
+          substituted = Object.freeze({
+            ...expected,
+            configurationHash: '0'.repeat(64),
+          })
+          break
+        default:
+          throw new Error('Unexpected session substitution variant.')
+      }
+      const harness = createFinalPublicationWiringHarness(
+        fixture,
+        substituted,
+      )
+
+      const exitCode =
+        await runWorkspaceSearchMigrationRehearsalPublicationCli(
+          createPublicationArguments(fixture.expected.configurationHash),
+          harness.dependencies,
+        )
+
+      expect(exitCode).toBe(1)
+      expect(harness.events).toContain('assemble-suite')
+      expect(harness.events).not.toContain('publish-suite')
+      expect(harness.events.at(-1)).toBe('close-session')
+      expect(harness.returnedBuffers).toHaveLength(19)
+      expect(harness.returnedBuffers.every((bytes) =>
+        bytes.every((byte) => byte === 0)
+      )).toBe(true)
+      expect(harness.transferredKeys.every((key) =>
+        key.every((byte) => byte === 0)
+      )).toBe(true)
+    }
+  })
+
+  test('never flushes or publishes without one exact final rate exercise', async () => {
+    for (const variant of ['missing', 'malformed']) {
+      const fixture =
+        await createAuthenticWorkspaceSearchMigrationRehearsalAssemblerFixture()
+      const harness = createFinalPublicationWiringHarness(fixture)
+      const dependencies:
+        WorkspaceSearchMigrationRehearsalPublicationCliDependencies = {
+          ...harness.dependencies,
+          createSession: async (input) => {
+            const session = await harness.dependencies.createSession(input)
+            if (variant === 'missing') {
+              Reflect.deleteProperty(
+                session,
+                'exerciseDescribeTableThrottle',
+              )
+            } else {
+              Object.defineProperty(
+                session,
+                'exerciseDescribeTableThrottle',
+                {
+                  enumerable: true,
+                  configurable: true,
+                  value: async () => Object.freeze({
+                    version: 1,
+                    awsSuccessfulAttemptCount: 1,
+                    rehearsalInjectedThrottleCount: 1,
+                    rehearsalInjectedBudgetStopCount: 0,
+                  }),
+                },
+              )
+            }
+            return session
+          },
+        }
+
+      const exitCode =
+        await runWorkspaceSearchMigrationRehearsalPublicationCli(
+          createPublicationArguments(fixture.expected.configurationHash),
+          dependencies,
+        )
+
+      expect(exitCode).toBe(1)
+      expect(harness.readPublicationCount()).toBe(0)
+      expect(harness.events).toContain('measure-configuration')
+      expect(harness.events).not.toContain('flush-rate-runtime')
+      expect(harness.events).not.toContain('finalize-rate')
+      expect(harness.events).not.toContain('assemble-suite')
+      expect(harness.events).not.toContain('publish-suite')
+      expect(harness.events.at(-1)).toBe('close-session')
+      expect(harness.stdout).toHaveLength(0)
+      expect(harness.stderr).toEqual([
+        '{"code":"OPERATION_FAILED","kind":"mukuroji-workspace-search-migration-rehearsal-publication-cli-result","status":"error"}',
+      ])
+    }
+  })
+
   test('wires every authentic capability into the final assembler', async () => {
     const fixture =
       await createAuthenticWorkspaceSearchMigrationRehearsalAssemblerFixture()
@@ -877,14 +1244,23 @@ describe('migration rehearsal final publication orchestration', () => {
 
     expect(exitCode).toBe(0)
     expect(harness.readPublicationCount()).toBe(1)
+    expect(harness.readExerciseCount()).toBe(1)
     expect(harness.events).toContain('assemble-suite')
     expect(harness.events).toContain('publish-suite')
+    expect(
+      harness.events.indexOf('measure-configuration'),
+    ).toBeLessThan(
+      harness.events.indexOf('exercise-describe-table-throttle'),
+    )
+    expect(
+      harness.events.indexOf('exercise-describe-table-throttle'),
+    ).toBeLessThan(harness.events.indexOf('flush-rate-runtime'))
     expect(harness.events.at(-1)).toBe('close-session')
     expect(harness.returnedBuffers).toHaveLength(19)
     expect(harness.returnedBuffers.every((bytes) =>
       bytes.every((byte) => byte === 0)
     )).toBe(true)
-    expect(harness.transferredKeys).toHaveLength(10)
+    expect(harness.transferredKeys).toHaveLength(11)
     expect(harness.transferredKeys.every((key) =>
       key.every((byte) => byte === 0)
     )).toBe(true)
@@ -897,7 +1273,8 @@ describe('migration rehearsal final publication orchestration', () => {
       `rate-runtime:${publicationPermitKeyDigests.evidenceKeyDigest}`,
       `permit-runtime:${publicationPermitKeyDigests.evidenceKeyDigest}`,
       `rate-finalizer:${publicationPermitKeyDigests.evidenceKeyDigest}`,
-      `alarm-signal:${publicationPermitKeyDigests.evidenceKeyDigest}`,
+      `alarm-signal:${alarmAuthenticationKeyDigests.runtimeKeyDigest}`,
+      `alarm-publication:${alarmAuthenticationKeyDigests.publicationKeyDigest}`,
       `publication:${publicationPermitKeyDigests.publicationKeyDigest}`,
     ])
     expect(harness.stderr).toHaveLength(0)
@@ -937,10 +1314,10 @@ describe('migration rehearsal final publication orchestration', () => {
 
 /** Creates one path-specific restricted file payload for orchestration. */
 function createRestrictedFixtureBytes(path: string): Uint8Array {
-  if (path.endsWith('.key')) return new Uint8Array(32).fill(7)
-  if (path.endsWith('rehearsal-suite.json')) {
-    return new TextEncoder().encode('{}')
+  if (path.endsWith('rehearsal-alarm-authentication.key')) {
+    return new Uint8Array(alarmRehearsalMasterKey)
   }
+  if (path.endsWith('.key')) return new Uint8Array(mainRehearsalMasterKey)
   if (path.endsWith('rehearsal-permit.json')) {
     return new TextEncoder().encode(serializeCanonicalJson(
       publicationPermitKeyDigests,
