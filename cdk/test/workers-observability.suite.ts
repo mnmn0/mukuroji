@@ -434,7 +434,9 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
     JSON.stringify(resource).includes(auditTableLogicalId)
   );
 
-  expect(auditStreamMappings).toHaveLength(2);
+  expect(auditStreamMappings.some((resource) =>
+    JSON.stringify(resource).includes('AnalyticsScheduleFunction')
+  )).toBe(false);
 });
 
 test('durable Work Item imports use retained versioned sources and an isolated resumable worker', () => {
@@ -826,7 +828,7 @@ test('public API workers and the migration provider use retained 90-day log grou
   assertRetainedLogGroup([...providerLogGroupIds][0]);
 });
 
-test('audit stream projects all downstream deliveries with one combined consumer', () => {
+test('audit stream isolates downstream delivery and retention consumers', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
 
@@ -1018,11 +1020,12 @@ test('audit stream projects all downstream deliveries with one combined consumer
     ).Properties?.EventSourceArn;
     return JSON.stringify(eventSourceArn).includes('AuditEventsTable0723963E');
   }) as Array<{ Properties: { FunctionName: { Ref: string } } }>;
-  expect(auditStreamMappings).toHaveLength(2);
+  expect(auditStreamMappings).toHaveLength(3);
   expect(auditStreamMappings.map(({ Properties }) => Properties.FunctionName.Ref).sort())
     .toEqual([
       'AutomationEventFunction5E8CB543',
       'CollaborationProjectionFunction1AAC5764',
+      'TenantOperationFunction9BEB780E',
     ]);
 });
 
@@ -2043,6 +2046,36 @@ test('tenant retention worker can query and reconcile only tenant and audit stor
   }));
   expect(JSON.stringify(policy)).not.toContain('secretsmanager:');
   expect(JSON.stringify(policy)).not.toContain('s3:');
+
+  const mappings = Object.values(resources).filter((resource) =>
+    (resource as { Type?: string }).Type === 'AWS::Lambda::EventSourceMapping' &&
+    JSON.stringify(resource).includes('TenantOperationFunction9BEB780E')
+  ) as Array<{
+    Properties?: {
+      EventSourceArn?: unknown;
+      FilterCriteria?: { Filters?: Array<{ Pattern?: string }> };
+    };
+  }>;
+  expect(mappings).toHaveLength(2);
+  const tenantMapping = mappings.find((mapping) =>
+    JSON.stringify(mapping.Properties?.EventSourceArn)
+      .includes('TenantAdministrationTable621D59EB')
+  );
+  const auditMapping = mappings.find((mapping) =>
+    JSON.stringify(mapping.Properties?.EventSourceArn)
+      .includes('AuditEventsTable0723963E')
+  );
+  expect(tenantMapping).toBeDefined();
+  expect(auditMapping).toBeDefined();
+  expect(JSON.stringify(tenantMapping?.Properties?.FilterCriteria))
+    .toContain('\\\"eventName\\\":[\\\"INSERT\\\"]');
+  expect(JSON.stringify(auditMapping?.Properties?.FilterCriteria))
+    .toContain('\\\"eventName\\\":[\\\"INSERT\\\"]');
+  const operationPattern = tenantMapping?.Properties?.FilterCriteria?.Filters
+    ?.map(({ Pattern }) => Pattern ?? '')
+    .find((pattern) => pattern.includes('operation'));
+  expect(operationPattern).toContain('"eventName":["INSERT"]');
+  expect(operationPattern).not.toContain('MODIFY');
 });
 
 test('request email ingestion is an asynchronous narrow-IAM Lambda with a monitored DLQ', () => {

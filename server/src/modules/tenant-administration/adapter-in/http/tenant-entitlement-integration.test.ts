@@ -82,7 +82,9 @@ test('reserves mutation usage before entering an enabled feature route', async (
     workspaceId: 'user#demo@example.com',
     feature: 'analytics',
     units: 1,
-    idempotencyKey: 'analytics-report-1',
+    idempotencyKey: expect.stringMatching(
+      /^tenant-meter:v1:[a-f0-9]{64}:[a-f0-9]{64}$/u,
+    ),
   }])
 })
 

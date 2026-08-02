@@ -280,7 +280,7 @@ export type TenantAdministrationSnapshot = {
   governanceEnforcement: TenantGovernanceEnforcement
   /** Audit TTL reconciliation progress after a retention or legal-hold change. */
   retentionReconciliation?: TenantRetentionReconciliation
-  /** Active export or closure operation, if any. */
+  /** Active operation or completed closure awaiting administrator verification. */
   activeOperation?: TenantOperation
 }
 

@@ -12,6 +12,7 @@ test('binds direct proof commands to a server-owned executor identity', async ()
         return { accepted: true }
       },
       async reconcileAuditRetention() {},
+      async reconcileAuditEventRetention() {},
     }),
     {
       provider: createStaticRuntimeControlProvider('enabled'),
@@ -47,6 +48,7 @@ test('rejects mutable or location-only evidence references', async () => {
         executionCalls += 1
       },
       async reconcileAuditRetention() {},
+      async reconcileAuditEventRetention() {},
     }),
     {
       provider: createStaticRuntimeControlProvider('enabled'),

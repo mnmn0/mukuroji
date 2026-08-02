@@ -62,6 +62,7 @@ import {
   test,
 } from 'bun:test'
 import {
+  createHash,
   createHmac,
 } from 'node:crypto'
 
@@ -843,7 +844,13 @@ test('accepts an unauthenticated signed inbound webhook without exposing secret 
     expect(JSON.stringify(deliveryInput)).not.toContain(signature)
     expect(deliveryInput?.bodyFingerprint).toMatch(/^[a-f0-9]{64}$/)
     expect(usageReservationKeys).toEqual([
-      `inbound-webhook:${resolvedEndpoint.id}:sender-delivery-1`,
+      `tenant-meter:v1:${createHash('sha256')
+        .update('POST')
+        .update('\0')
+        .update(resolvedEndpoint.id)
+        .update('\0')
+        .update('sender-delivery-1')
+        .digest('hex')}:${deliveryInput?.bodyFingerprint}`,
     ])
 
     resolvedEndpoint = { ...resolvedEndpoint, status: 'paused' }

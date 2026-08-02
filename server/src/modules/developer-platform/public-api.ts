@@ -1841,11 +1841,6 @@ async function authenticatePublicRequest(
       requiredScopes,
     })
   }
-  await dependencies.enforceEntitlement(
-    credential.workspaceId,
-    c.req.method,
-    c.req.header('Idempotency-Key'),
-  )
   const rateLimit = await dependencies.rateLimits.consumeRateLimit({
     workspaceId: credential.workspaceId,
     credentialId: credential.credentialId,
@@ -1866,7 +1861,61 @@ async function authenticatePublicRequest(
     c.header('Retry-After', String(rateLimit.retryAfterSeconds ?? 1))
     throw new PublicApiServiceError(429, 'rate_limited', 'API rate limit exceeded.', true)
   }
+  await dependencies.enforceEntitlement(
+    credential.workspaceId,
+    c.req.method,
+    await createPublicApiUsageIdempotencyScope(c),
+  )
   return credential
+}
+
+/**
+ * Binds a public API idempotency key to its method, route, and payload.
+ *
+ * @param context - Current public API request context.
+ * @returns A route-scoped digest, or undefined when no key was supplied.
+ */
+async function createPublicApiUsageIdempotencyScope(
+  context: Context,
+): Promise<string | undefined> {
+  const value = context.req.header('Idempotency-Key')?.trim()
+  if (!value) return undefined
+  if (value.length > 256 || containsAsciiControl(value, false)) {
+    throw new PublicApiServiceError(
+      400,
+      'invalid_request',
+      'Idempotency-Key must contain 1 to 256 characters without control characters.',
+    )
+  }
+  if (context.req.raw.bodyUsed) {
+    throw new PublicApiServiceError(
+      503,
+      'temporarily_unavailable',
+      'Request idempotency could not be evaluated.',
+      true,
+    )
+  }
+  const body = new Uint8Array(
+    await context.req.raw.clone().arrayBuffer(),
+  )
+  const url = new URL(context.req.url)
+  const scopeDigest = createHash('sha256')
+    .update(context.req.method.toUpperCase())
+    .update('\0')
+    .update(context.req.path)
+    .update('\0')
+    .update(url.search)
+    .update('\0')
+    .update(context.req.header('If-Match') ?? '')
+    .update('\0')
+    .update(value)
+    .digest('hex')
+  const requestDigest = createHash('sha256')
+    .update(context.req.header('Content-Type') ?? '')
+    .update('\0')
+    .update(body)
+    .digest('hex')
+  return `tenant-meter:v1:${scopeDigest}:${requestDigest}`
 }
 
 async function enforceOAuthTokenRateLimit(

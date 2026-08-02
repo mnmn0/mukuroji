@@ -128,7 +128,7 @@ export type StackOutputResources = {
   readonly requestEmailIngestionDlq: sqs.IQueue;
   /** IAM-invokable tenant lifecycle executor. */
   readonly tenantOperationFunction: lambda.IFunction;
-  /** Dead-letter queue for tenant lifecycle stream failures. */
+  /** Dead-letter queue for tenant lifecycle and retention stream failures. */
   readonly tenantOperationDlq: sqs.IQueue;
   /** Lambda Function URL for the project task API. */
   readonly functionUrl: lambda.FunctionUrl;

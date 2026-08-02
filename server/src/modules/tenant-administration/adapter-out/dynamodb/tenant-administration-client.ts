@@ -91,6 +91,14 @@ type TenantUsageReceipt = {
   expiresAt: number
 }
 
+/** Parsed metering idempotency scope and request binding. */
+type TenantUsageIdempotency = {
+  /** Stable input used to derive the durable receipt key. */
+  receiptKeyInput: string
+  /** Optional request digest used to reject key reuse with another payload. */
+  requestBinding?: string
+}
+
 const PROFILE_RECORD_KEY = 'PROFILE'
 const ENTITLEMENT_RECORD_KEY = 'ENTITLEMENT'
 const USAGE_RECORD_KEY = 'USAGE'
@@ -102,6 +110,8 @@ const USAGE_RECEIPT_RECORD_PREFIX = 'USAGE_RECEIPT#'
 const RETENTION_JOB_RECORD_KEY = 'RETENTION_JOB'
 const RETENTION_RECONCILIATION_PAGE_SIZE = 22
 const USAGE_RECEIPT_RETENTION_SECONDS = 35 * 24 * 60 * 60
+const TENANT_METERING_IDEMPOTENCY_PATTERN =
+  /^tenant-meter:v1:([a-f0-9]{64}):([a-f0-9]{64})$/u
 
 /**
  * DynamoDB-backed tenant administration state and workflow adapter.
@@ -157,14 +167,16 @@ export class DynamoDbTenantAdministrationClient implements
     this.auditTableName = auditTableName?.trim() || undefined
   }
 
-  /** Ensures the four tenant aggregate records exist before returning them. */
+  /** Ensures tenant aggregate and initial retention records exist before returning them. */
   async ensureSnapshot(
     workspaceId: string,
     ownerMemberKey: string,
     activeSeats = 1,
   ): Promise<TenantAdministrationSnapshot> {
     try {
-      return await this.getSnapshot(workspaceId)
+      const snapshot = await this.getSnapshot(workspaceId)
+      if (snapshot.profile.ownerMemberKey === ownerMemberKey) return snapshot
+      return await this.reconcileAuthoritativeOwner(snapshot, ownerMemberKey)
     } catch (error) {
       if (!(error instanceof TenantAdministrationError) || error.code !== 'TenantAdministrationNotInitialized') {
         throw error
@@ -180,6 +192,20 @@ export class DynamoDbTenantAdministrationClient implements
       activeSeats,
     )
     try {
+      const retentionJob: TenantRetentionReconciliation | undefined =
+        this.auditTableName && this.auditWriter
+          ? {
+              workspaceId,
+              governanceRevision: snapshot.governance.revision,
+              status: 'pending',
+              retentionDays: snapshot.governance.auditRetentionDays,
+              legalHold: snapshot.governance.legalHold,
+              processedEvents: 0,
+              revision: 0,
+              updatedAt: now,
+              updatedBy: ownerMemberKey,
+            }
+          : undefined
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
           createPutTransactionItem(this.tableName, workspaceId, PROFILE_RECORD_KEY, 'profile', snapshot.profile),
@@ -193,6 +219,15 @@ export class DynamoDbTenantAdministrationClient implements
             recordTenantBillingPeriod(snapshot.usage),
           ),
           createPutTransactionItem(this.tableName, workspaceId, GOVERNANCE_RECORD_KEY, 'governance', snapshot.governance),
+          ...(retentionJob
+            ? [{
+                Put: {
+                  TableName: this.tableName,
+                  Item: createRetentionJobStateItem(retentionJob),
+                  ConditionExpression: 'attribute_not_exists(recordKey)',
+                },
+              }]
+            : []),
         ],
       }))
     } catch (error) {
@@ -262,22 +297,30 @@ export class DynamoDbTenantAdministrationClient implements
       governance.encryptionKeyPolicy,
       this.governanceEnforcement,
     )
-    await this.putRecord(workspaceId, PROFILE_RECORD_KEY, 'profile', updated, current.revision, {
+    await this.putRecord(
       workspaceId,
-      actorMemberKey,
-      eventType: 'tenant.profile.updated',
-      entityId: workspaceId,
-      action: 'updated',
-      path: '/api/tenant/profile',
-      requestMethod: 'PATCH',
-      idempotencyKey: `tenant-profile:${workspaceId}:${updated.revision}`,
-      before: current,
-      after: updated,
-      metadata: { kind: 'tenant-profile' },
-      retentionDays: governance.auditRetentionDays,
-      legalHold: governance.legalHold,
-      occurredAt: updated.updatedAt,
-    })
+      PROFILE_RECORD_KEY,
+      'profile',
+      updated,
+      current.revision,
+      {
+        workspaceId,
+        actorMemberKey,
+        eventType: 'tenant.profile.updated',
+        entityId: workspaceId,
+        action: 'updated',
+        path: '/api/tenant/profile',
+        requestMethod: 'PATCH',
+        idempotencyKey: `tenant-profile:${workspaceId}:${updated.revision}`,
+        before: current,
+        after: updated,
+        metadata: { kind: 'tenant-profile' },
+        retentionDays: governance.auditRetentionDays,
+        legalHold: governance.legalHold,
+        occurredAt: updated.updatedAt,
+      },
+      governance.revision,
+    )
     return updated
   }
 
@@ -348,6 +391,12 @@ export class DynamoDbTenantAdministrationClient implements
         workspaceId,
         USAGE_RECORD_KEY,
         usage.revision,
+      ),
+      createRevisionConditionCheck(
+        this.tableName,
+        workspaceId,
+        GOVERNANCE_RECORD_KEY,
+        governance.revision,
       ),
     ]
     if (auditPut) items.push(auditPut)
@@ -562,6 +611,11 @@ export class DynamoDbTenantAdministrationClient implements
       input.workspaceId,
       billingPeriod,
       currentBillingPeriod,
+    ), createRevisionConditionCheck(
+      this.tableName,
+      input.workspaceId,
+      GOVERNANCE_RECORD_KEY,
+      governance.revision,
     ))
     const auditPut = this.createAuditPut({
       workspaceId: input.workspaceId,
@@ -710,6 +764,77 @@ export class DynamoDbTenantAdministrationClient implements
     return updated
   }
 
+  /** Applies the current governance policy to one newly inserted audit event. */
+  async reconcileAuditEventRetention(
+    workspaceId: string,
+    eventId: string,
+    occurredAt: string,
+  ): Promise<void> {
+    let governance: TenantGovernancePolicy
+    try {
+      governance = await this.readRecord(
+        workspaceId,
+        GOVERNANCE_RECORD_KEY,
+        readTenantGovernance,
+      )
+    } catch (error) {
+      if (
+        error instanceof TenantAdministrationError &&
+        error.code === 'TenantAdministrationNotInitialized'
+      ) {
+        return
+      }
+      throw error
+    }
+    if (!this.auditTableName) {
+      throw new TenantAdministrationError(
+        503,
+        'TenantRetentionReconciliationUnavailable',
+        'Tenant audit retention reconciliation is unavailable.',
+      )
+    }
+    const auditUpdate: TenantTransactionItem = {
+      Update: {
+        TableName: this.auditTableName,
+        Key: { directoryId: workspaceId, eventId },
+        UpdateExpression: governance.legalHold
+          ? 'REMOVE expiresAt'
+          : 'SET expiresAt = :expiresAt',
+        ConditionExpression:
+          'attribute_exists(eventId) AND occurredAt = :occurredAt',
+        ExpressionAttributeValues: {
+          ':occurredAt': occurredAt,
+          ...(governance.legalHold
+            ? {}
+            : {
+                ':expiresAt': calculateAuditExpiresAt(
+                  occurredAt,
+                  governance.auditRetentionDays,
+                ),
+              }),
+        },
+      },
+    }
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          createRevisionConditionCheck(
+            this.tableName,
+            workspaceId,
+            GOVERNANCE_RECORD_KEY,
+            governance.revision,
+          ),
+          auditUpdate,
+        ],
+      }))
+    } catch (error) {
+      if (isConditionalFailure(error)) {
+        throw revisionConflict('TenantAuditRetentionConflict')
+      }
+      throw toTenantPersistenceError(error)
+    }
+  }
+
   /**
    * Applies a feature and quota check before atomically persisting metered usage.
    *
@@ -727,11 +852,19 @@ export class DynamoDbTenantAdministrationClient implements
   ): Promise<TenantUsage> {
     const now = this.now()
     const currentEpochSeconds = toEpochSeconds(now)
-    const normalizedIdempotencyKey = readOptionalTenantIdempotencyKey(idempotencyKey)
-    const receiptRecordKey = normalizedIdempotencyKey
-      ? createUsageReceiptRecordKey(workspaceId, feature, normalizedIdempotencyKey)
+    const meteringIdempotency = readTenantUsageIdempotency(idempotencyKey)
+    const receiptRecordKey = meteringIdempotency
+      ? createUsageReceiptRecordKey(
+          workspaceId,
+          feature,
+          meteringIdempotency.receiptKeyInput,
+        )
       : undefined
-    const requestFingerprint = createUsageRequestFingerprint(feature, additionalUnits)
+    const requestFingerprint = createUsageRequestFingerprint(
+      feature,
+      additionalUnits,
+      meteringIdempotency?.requestBinding,
+    )
     const [entitlement, current, governance, existingReceipt] = await Promise.all([
       this.readRecord(workspaceId, ENTITLEMENT_RECORD_KEY, readTenantEntitlement),
       this.readRecord(workspaceId, USAGE_RECORD_KEY, readTenantUsage),
@@ -785,6 +918,12 @@ export class DynamoDbTenantAdministrationClient implements
         workspaceId,
         ENTITLEMENT_RECORD_KEY,
         entitlement.revision,
+      ),
+      createRevisionConditionCheck(
+        this.tableName,
+        workspaceId,
+        GOVERNANCE_RECORD_KEY,
+        governance.revision,
       ),
       {
         Put: {
@@ -863,7 +1002,7 @@ export class DynamoDbTenantAdministrationClient implements
     input: RequestTenantExportInput,
     idempotencyKey?: string,
   ): Promise<TenantOperation> {
-    const snapshot = await this.ensureSnapshot(workspaceId, actorMemberKey)
+    const snapshot = await this.getSnapshot(workspaceId)
     const operation = await this.createOperation(
       workspaceId,
       actorMemberKey,
@@ -887,7 +1026,7 @@ export class DynamoDbTenantAdministrationClient implements
     if (input.confirmation !== 'CLOSE') {
       throw new TenantAdministrationError(400, 'ClosureConfirmationRequired', 'Closure confirmation is required.')
     }
-    const snapshot = await this.ensureSnapshot(workspaceId, actorMemberKey)
+    const snapshot = await this.getSnapshot(workspaceId)
     if (snapshot.governance.legalHold) {
       throw new TenantAdministrationError(
         409,
@@ -1004,32 +1143,54 @@ export class DynamoDbTenantAdministrationClient implements
     )
   }
 
-  /** Reads the active operation by querying only the tenant partition. */
+  /** Reads the operation referenced by the tenant's single-operation lock. */
   private async readActiveOperation(workspaceId: string): Promise<TenantOperation | undefined> {
     let response
     try {
-      response = await this.documentClient.send(new QueryCommand({
+      response = await this.documentClient.send(new GetCommand({
         TableName: this.tableName,
-        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
-        ExpressionAttributeValues: {
-          ':workspaceId': workspaceId,
-          ':prefix': OPERATION_RECORD_PREFIX,
-        },
+        Key: { workspaceId, recordKey: ACTIVE_OPERATION_RECORD_KEY },
         ConsistentRead: true,
-        ScanIndexForward: false,
-        Limit: 25,
       }))
     } catch (error) {
       throw toTenantPersistenceError(error)
     }
-    const rawItems: unknown = response.Items
-    if (!Array.isArray(rawItems)) return undefined
-    for (const rawItem of rawItems) {
-      if (!isRecord(rawItem) || typeof rawItem.payload !== 'string') continue
-      const operation = readTenantOperation(parsePayload(rawItem.payload))
-      if (isTenantOperationActive(operation.status)) return operation
+    const lock: unknown = response.Item
+    if (lock === undefined) return undefined
+    if (
+      !isRecord(lock) ||
+      lock.workspaceId !== workspaceId ||
+      lock.recordKey !== ACTIVE_OPERATION_RECORD_KEY ||
+      typeof lock.operationId !== 'string' ||
+      (lock.kind !== 'export' && lock.kind !== 'closure')
+    ) {
+      throw tenantAdministrationCorrupt(
+        'Tenant active-operation lock is invalid.',
+      )
     }
-    return undefined
+    let operation: TenantOperation
+    try {
+      operation = await this.getOperation(workspaceId, lock.operationId)
+    } catch (error) {
+      if (
+        error instanceof TenantAdministrationError &&
+        error.code === 'TenantOperationNotFound'
+      ) {
+        throw tenantAdministrationCorrupt(
+          'Tenant active-operation lock references a missing operation.',
+        )
+      }
+      throw error
+    }
+    if (
+      operation.kind !== lock.kind ||
+      !doesTenantOperationOwnActiveLock(operation)
+    ) {
+      throw tenantAdministrationCorrupt(
+        'Tenant active-operation lock does not match operation state.',
+      )
+    }
+    return operation
   }
 
   /** Reads the newest invoice-ready tenant billing periods. */
@@ -1232,19 +1393,13 @@ export class DynamoDbTenantAdministrationClient implements
         ExpressionAttributeValues: { ':expectedRevision': current.revision },
       },
     }]
-    if (options.requireInactiveLegalHold && current.kind === 'closure') {
-      items.push({
-        ConditionCheck: {
-          TableName: this.tableName,
-          Key: { workspaceId, recordKey: GOVERNANCE_RECORD_KEY },
-          ConditionExpression: 'revision = :expectedGovernanceRevision',
-          ExpressionAttributeValues: {
-            ':expectedGovernanceRevision': governance.revision,
-          },
-        },
-      })
-    }
-    if (!isTenantOperationActive(operation.status)) {
+    items.push(createRevisionConditionCheck(
+      this.tableName,
+      workspaceId,
+      GOVERNANCE_RECORD_KEY,
+      governance.revision,
+    ))
+    if (!doesTenantOperationOwnActiveLock(operation)) {
       items.push({
         Delete: {
           TableName: this.tableName,
@@ -1361,6 +1516,52 @@ export class DynamoDbTenantAdministrationClient implements
     }
   }
 
+  /**
+   * Reconciles profile ownership from authoritative Workspace membership.
+   *
+   * @param snapshot - Current tenant aggregate read before reconciliation.
+   * @param ownerMemberKey - Current active Workspace owner member key.
+   * @returns The aggregate with its reconciled profile.
+   */
+  private async reconcileAuthoritativeOwner(
+    snapshot: TenantAdministrationSnapshot,
+    ownerMemberKey: string,
+  ): Promise<TenantAdministrationSnapshot> {
+    const current = snapshot.profile
+    const updated: TenantProfile = {
+      ...current,
+      ownerMemberKey,
+      revision: current.revision + 1,
+      updatedAt: this.now(),
+    }
+    await this.putRecord(
+      current.workspaceId,
+      PROFILE_RECORD_KEY,
+      'profile',
+      updated,
+      current.revision,
+      {
+        workspaceId: current.workspaceId,
+        actorMemberKey: 'system:workspace-owner-reconciliation',
+        eventType: 'tenant.profile.owner-reconciled',
+        entityId: current.workspaceId,
+        action: 'reconciled',
+        path: '/internal/tenant/profile/owner',
+        requestMethod: 'INTERNAL',
+        idempotencyKey:
+          `tenant-profile-owner:${current.workspaceId}:${updated.revision}`,
+        before: current,
+        after: updated,
+        metadata: { kind: 'tenant-profile-owner' },
+        retentionDays: snapshot.governance.auditRetentionDays,
+        legalHold: snapshot.governance.legalHold,
+        occurredAt: updated.updatedAt,
+      },
+      snapshot.governance.revision,
+    )
+    return { ...snapshot, profile: updated }
+  }
+
   /** Writes one tenant record and uses a revision condition for updates. */
   private async putRecord<T extends object>(
     workspaceId: string,
@@ -1369,6 +1570,7 @@ export class DynamoDbTenantAdministrationClient implements
     value: T,
     expectedRevision: number,
     audit?: TenantAdministrationAuditEvent,
+    governanceRevision?: number,
   ): Promise<void> {
     const auditPut = audit ? this.createAuditPut(audit) : undefined
     const items: TenantTransactionItem[] = [{
@@ -1379,6 +1581,14 @@ export class DynamoDbTenantAdministrationClient implements
         ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
       },
     }]
+    if (governanceRevision !== undefined) {
+      items.push(createRevisionConditionCheck(
+        this.tableName,
+        workspaceId,
+        GOVERNANCE_RECORD_KEY,
+        governanceRevision,
+      ))
+    }
     if (auditPut) items.push(auditPut)
     try {
       await this.documentClient.send(new TransactWriteCommand({ TransactItems: items }))
@@ -1740,6 +1950,22 @@ function readTenantOperation(value: unknown): TenantOperation {
   }
 }
 
+/**
+ * Returns whether an operation must keep the tenant's single-operation lock.
+ *
+ * Completed closures retain the lock until an administrator verifies their
+ * evidence-backed terminal result. Completed exports release it immediately.
+ *
+ * @param operation - Durable tenant operation state.
+ * @returns Whether `ACTIVE_OPERATION` must still reference this operation.
+ */
+function doesTenantOperationOwnActiveLock(
+  operation: TenantOperation,
+): boolean {
+  return isTenantOperationActive(operation.status) ||
+    (operation.kind === 'closure' && operation.status === 'completed')
+}
+
 function isTenantStep(value: unknown): value is TenantExportStep | TenantClosureStep {
   return typeof value === 'string' && (
     TENANT_EXPORT_STEPS.some((step) => step === value) ||
@@ -1806,20 +2032,20 @@ function readAuditCursorEventId(
  *
  * @param workspaceId - Canonical Workspace identifier.
  * @param feature - Commercial feature being metered.
- * @param idempotencyKey - Validated raw request key, used only as hash input.
+ * @param receiptKeyInput - Validated raw or server-scoped receipt-key input.
  * @returns A non-secret DynamoDB record key.
  */
 function createUsageReceiptRecordKey(
   workspaceId: string,
   feature: TenantFeature,
-  idempotencyKey: string,
+  receiptKeyInput: string,
 ): string {
   const digest = createHash('sha256')
     .update(workspaceId)
     .update('\0')
     .update(feature)
     .update('\0')
-    .update(idempotencyKey)
+    .update(receiptKeyInput)
     .digest('hex')
   return `${USAGE_RECEIPT_RECORD_PREFIX}${digest}`
 }
@@ -1829,17 +2055,22 @@ function createUsageReceiptRecordKey(
  *
  * @param feature - Commercial feature being metered.
  * @param additionalUnits - Requested unit count.
+ * @param requestBinding - Optional digest binding the key to request semantics.
  * @returns A stable SHA-256 request fingerprint.
  */
 function createUsageRequestFingerprint(
   feature: TenantFeature,
   additionalUnits: number,
+  requestBinding?: string,
 ): string {
-  return createHash('sha256')
+  const hash = createHash('sha256')
     .update(feature)
     .update('\0')
     .update(String(additionalUnits))
-    .digest('hex')
+  if (requestBinding) {
+    hash.update('\0').update(requestBinding)
+  }
+  return hash.digest('hex')
 }
 
 /**
@@ -1914,6 +2145,34 @@ function readOptionalTenantIdempotencyKey(value: string | undefined): string | u
     )
   }
   return normalized
+}
+
+/**
+ * Reads an optional metering scope while retaining compatibility with internal keys.
+ *
+ * @param value - Candidate scoped or legacy idempotency key.
+ * @returns Receipt-key input and optional request binding.
+ */
+function readTenantUsageIdempotency(
+  value: string | undefined,
+): TenantUsageIdempotency | undefined {
+  const normalized = readOptionalTenantIdempotencyKey(value)
+  if (!normalized) return undefined
+  const scoped = normalized.match(TENANT_METERING_IDEMPOTENCY_PATTERN)
+  if (!scoped) return { receiptKeyInput: normalized }
+  const receiptKeyInput = scoped[1]
+  const requestBinding = scoped[2]
+  if (!receiptKeyInput || !requestBinding) {
+    throw new TenantAdministrationError(
+      400,
+      'InvalidTenantIdempotencyKey',
+      'Tenant idempotency key is invalid.',
+    )
+  }
+  return {
+    receiptKeyInput,
+    requestBinding,
+  }
 }
 
 /**
@@ -2030,6 +2289,15 @@ function isConditionalFailure(error: unknown): boolean {
 
 function revisionConflict(code: string): TenantAdministrationError {
   return new TenantAdministrationError(409, code, 'Tenant state was changed by another request.')
+}
+
+/** Creates one fail-closed durable tenant-state corruption error. */
+function tenantAdministrationCorrupt(message: string): TenantAdministrationError {
+  return new TenantAdministrationError(
+    503,
+    'TenantAdministrationCorrupt',
+    message,
+  )
 }
 
 function toTenantPersistenceError(error: unknown): TenantAdministrationError {

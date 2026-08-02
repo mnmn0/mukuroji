@@ -122,6 +122,122 @@ describe('DynamoDbTenantAdministrationClient', () => {
     })
   })
 
+  test('reconciles an authoritative Workspace owner without trusting the administrator', async () => {
+    const items = createAggregateItems(1)
+    const transactions: Array<Record<string, unknown>> = []
+    const client = new DynamoDbTenantAdministrationClient(
+      'TenantAdministrationTable',
+      createDocumentClient((command) => {
+        if (command.constructor.name === 'QueryCommand') return { Items: [] }
+        if (command.constructor.name === 'TransactWriteCommand') {
+          transactions.push(command.input)
+          return {}
+        }
+        const recordKey = readRecordKey(command)
+        if (!recordKey) return {}
+        const value = items.get(recordKey)
+        return value ? { Item: createStateItem(recordKey, value) } : {}
+      }),
+      () => '2026-08-02T00:01:00.000Z',
+      createAuditWriter(),
+    )
+
+    const snapshot = await client.ensureSnapshot(
+      'workspace-1',
+      'new-owner@example.com',
+      1,
+    )
+
+    expect(snapshot.profile).toMatchObject({
+      ownerMemberKey: 'new-owner@example.com',
+      revision: 1,
+      updatedAt: '2026-08-02T00:01:00.000Z',
+    })
+    expect(transactions[0]).toMatchObject({
+      TransactItems: [
+        {
+          Put: {
+            Item: {
+              workspaceId: 'workspace-1',
+              recordKey: 'PROFILE',
+              revision: 1,
+            },
+            ConditionExpression: 'revision = :expectedRevision',
+            ExpressionAttributeValues: { ':expectedRevision': 0 },
+          },
+        },
+        {
+          ConditionCheck: {
+            Key: { workspaceId: 'workspace-1', recordKey: 'GOVERNANCE' },
+            ExpressionAttributeValues: { ':expectedRevision': 0 },
+          },
+        },
+        {
+          Put: {
+            TableName: 'AuditEventsTable',
+            Item: {
+              directoryId: 'workspace-1',
+              eventId: 'tenant-profile-owner:workspace-1:1',
+            },
+          },
+        },
+      ],
+    })
+  })
+
+  test('returns a completed closure while administrator verification is pending', async () => {
+    const items = createAggregateItems(1)
+    const closure = {
+      operationId: 'closure-1',
+      workspaceId: 'workspace-1',
+      kind: 'closure',
+      status: 'completed',
+      requestedBy: 'owner-1',
+      requestedAt: '2026-08-02T00:00:00.000Z',
+      updatedAt: '2026-08-02T00:06:00.000Z',
+      updatedBy: 'executor:tenant-operation-capability',
+      currentStep: 'verify',
+      completedSteps: [
+        'export',
+        'revoke-access',
+        'anonymize-members',
+        'delete-data',
+        'delete-secrets',
+        'verify',
+      ],
+      revision: 7,
+    }
+    const client = new DynamoDbTenantAdministrationClient(
+      'TenantAdministrationTable',
+      createDocumentClient((command) => {
+        const recordKey = readRecordKey(command)
+        if (!recordKey) return {}
+        if (recordKey === 'ACTIVE_OPERATION') {
+          return {
+            Item: {
+              workspaceId: 'workspace-1',
+              recordKey,
+              operationId: 'closure-1',
+              kind: 'closure',
+            },
+          }
+        }
+        if (recordKey === 'OPERATION#closure-1') {
+          return { Item: createStateItem(recordKey, closure) }
+        }
+        const value = items.get(recordKey)
+        return value ? { Item: createStateItem(recordKey, value) } : {}
+      }),
+    )
+
+    const snapshot = await client.getSnapshot('workspace-1')
+
+    expect(snapshot.activeOperation).toMatchObject({
+      operationId: 'closure-1',
+      status: 'completed',
+    })
+  })
+
   test('rejects residency and key settings that the deployment cannot enforce', async () => {
     const items = createAggregateItems(1)
     let transactionWrites = 0
@@ -172,7 +288,7 @@ describe('DynamoDbTenantAdministrationClient', () => {
       occurredAt: '2026-08-02T00:01:00.000Z',
     })
 
-    expect(transactionItems).toHaveLength(3)
+    expect(transactionItems).toHaveLength(4)
     expect(transactionItems[0]).toMatchObject({
       ConditionCheck: {
         TableName: 'TenantAdministrationTable',
@@ -206,6 +322,17 @@ describe('DynamoDbTenantAdministrationClient', () => {
           recordKey: 'BILLING#2026-08-01T00:00:00.000Z',
           revision: 1,
         },
+      },
+    })
+    expect(transactionItems[3]).toMatchObject({
+      ConditionCheck: {
+        TableName: 'TenantAdministrationTable',
+        Key: {
+          workspaceId: 'workspace-1',
+          recordKey: 'GOVERNANCE',
+        },
+        ConditionExpression: 'revision = :expectedRevision',
+        ExpressionAttributeValues: { ':expectedRevision': 0 },
       },
     })
   })
@@ -254,6 +381,14 @@ describe('DynamoDbTenantAdministrationClient', () => {
             ExpressionAttributeValues: { ':expectedRevision': 0 },
           },
         },
+        {
+          ConditionCheck: {
+            TableName: 'TenantAdministrationTable',
+            Key: { workspaceId: 'workspace-1', recordKey: 'GOVERNANCE' },
+            ConditionExpression: 'revision = :expectedRevision',
+            ExpressionAttributeValues: { ':expectedRevision': 0 },
+          },
+        },
       ],
     })
   })
@@ -289,6 +424,12 @@ describe('DynamoDbTenantAdministrationClient', () => {
         {
           ConditionCheck: {
             Key: { workspaceId: 'workspace-1', recordKey: 'ENTITLEMENT' },
+            ExpressionAttributeValues: { ':expectedRevision': 0 },
+          },
+        },
+        {
+          ConditionCheck: {
+            Key: { workspaceId: 'workspace-1', recordKey: 'GOVERNANCE' },
             ExpressionAttributeValues: { ':expectedRevision': 0 },
           },
         },
@@ -361,6 +502,69 @@ describe('DynamoDbTenantAdministrationClient', () => {
     )
 
     expect(replayed).toMatchObject({ periodUsage: 2, revision: 1 })
+    expect(transactionWrites).toBe(0)
+  })
+
+  test('rejects a scoped metering key reused with another request payload', async () => {
+    const items = createAggregateItems(1)
+    const scopeDigest = 'a'.repeat(64)
+    const firstBinding = 'b'.repeat(64)
+    const secondBinding = 'c'.repeat(64)
+    const receiptKey = `USAGE_RECEIPT#${createHash('sha256')
+      .update('workspace-1')
+      .update('\0')
+      .update('documents')
+      .update('\0')
+      .update(scopeDigest)
+      .digest('hex')}`
+    const usage = items.get('USAGE')
+    if (!usage) throw new Error('Usage fixture is unavailable.')
+    items.set('USAGE', {
+      ...usage,
+      periodUsage: 2,
+      revision: 1,
+      updatedAt: '2026-08-02T00:01:00.000Z',
+    })
+    items.set(receiptKey, {
+      workspaceId: 'workspace-1',
+      feature: 'documents',
+      additionalUnits: 2,
+      requestFingerprint: createHash('sha256')
+        .update('documents')
+        .update('\0')
+        .update('2')
+        .update('\0')
+        .update(firstBinding)
+        .digest('hex'),
+      usageRevision: 1,
+      createdAt: '2026-08-02T00:01:00.000Z',
+      expiresAt: 1_900_000_000,
+    })
+    let transactionWrites = 0
+    const client = new DynamoDbTenantAdministrationClient(
+      'TenantAdministrationTable',
+      createDocumentClient((command) => {
+        if (command.constructor.name === 'TransactWriteCommand') {
+          transactionWrites += 1
+          return {}
+        }
+        const recordKey = readRecordKey(command)
+        if (!recordKey) return {}
+        const value = items.get(recordKey)
+        return value ? { Item: createStateItem(recordKey, value) } : {}
+      }),
+      () => '2026-08-02T00:02:00.000Z',
+    )
+
+    await expect(client.reserveUsage(
+      'workspace-1',
+      'documents',
+      2,
+      `tenant-meter:v1:${scopeDigest}:${secondBinding}`,
+    )).rejects.toMatchObject({
+      code: 'TenantUsageIdempotencyConflict',
+      status: 409,
+    })
     expect(transactionWrites).toBe(0)
   })
 
@@ -487,6 +691,134 @@ describe('DynamoDbTenantAdministrationClient', () => {
       status: 409,
     })
     expect(transactionWrites).toBe(0)
+  })
+
+  test('keeps a completed closure locked until its terminal verification', async () => {
+    const items = createAggregateItems(1)
+    const completedSteps = [
+      'export',
+      'revoke-access',
+      'anonymize-members',
+      'delete-data',
+      'delete-secrets',
+    ]
+    items.set('OPERATION#closure-1', {
+      operationId: 'closure-1',
+      workspaceId: 'workspace-1',
+      kind: 'closure',
+      status: 'running',
+      requestedBy: 'owner-1',
+      requestedAt: '2026-08-02T00:00:00.000Z',
+      updatedAt: '2026-08-02T00:05:00.000Z',
+      updatedBy: 'executor:tenant-operation-capability',
+      currentStep: 'verify',
+      completedSteps,
+      revision: 6,
+    })
+    const transactions: Array<Record<string, unknown>> = []
+    const client = new DynamoDbTenantAdministrationClient(
+      'TenantAdministrationTable',
+      createDocumentClient((command) => {
+        if (command.constructor.name === 'TransactWriteCommand') {
+          transactions.push(command.input)
+          return {}
+        }
+        const recordKey = readRecordKey(command)
+        if (!recordKey) return {}
+        const value = items.get(recordKey)
+        return value ? { Item: createStateItem(recordKey, value) } : {}
+      }),
+      () => '2026-08-02T00:06:00.000Z',
+    )
+
+    const completed = await client.advanceOperation(
+      'workspace-1',
+      'executor:tenant-operation-capability',
+      'closure-1',
+      {
+        step: 'verify',
+        evidenceReference: `evidence:sha256:${'6'.padStart(64, '0')}`,
+      },
+    )
+
+    expect(completed.status).toBe('completed')
+    expect(JSON.stringify(transactions[0])).not.toContain('ACTIVE_OPERATION')
+
+    items.set('OPERATION#closure-1', completed)
+    const verified = await client.verifyClosure(
+      'workspace-1',
+      'owner-1',
+      'closure-1',
+    )
+
+    expect(verified.status).toBe('verified')
+    expect(transactions[1]).toMatchObject({
+      TransactItems: [
+        { Put: { Item: { recordKey: 'OPERATION#closure-1' } } },
+        { ConditionCheck: { Key: { recordKey: 'GOVERNANCE' } } },
+        {
+          Delete: {
+            Key: {
+              workspaceId: 'workspace-1',
+              recordKey: 'ACTIVE_OPERATION',
+            },
+            ConditionExpression: 'operationId = :operationId',
+          },
+        },
+      ],
+    })
+  })
+
+  test('applies current legal hold to each newly inserted tenant audit event', async () => {
+    const items = createAggregateItems(1)
+    const governance = items.get('GOVERNANCE')
+    if (!governance) throw new Error('Governance fixture is unavailable.')
+    items.set('GOVERNANCE', { ...governance, legalHold: true, revision: 2 })
+    const transactions: Array<Record<string, unknown>> = []
+    const client = new DynamoDbTenantAdministrationClient(
+      'TenantAdministrationTable',
+      createDocumentClient((command) => {
+        if (command.constructor.name === 'TransactWriteCommand') {
+          transactions.push(command.input)
+          return {}
+        }
+        const recordKey = readRecordKey(command)
+        if (!recordKey) return {}
+        const value = items.get(recordKey)
+        return value ? { Item: createStateItem(recordKey, value) } : {}
+      }),
+      undefined,
+      undefined,
+      undefined,
+      'AuditEventsTable',
+    )
+
+    await client.reconcileAuditEventRetention(
+      'workspace-1',
+      'event-1',
+      '2026-08-02T00:00:00.000Z',
+    )
+
+    expect(transactions[0]).toMatchObject({
+      TransactItems: [
+        {
+          ConditionCheck: {
+            Key: { workspaceId: 'workspace-1', recordKey: 'GOVERNANCE' },
+            ExpressionAttributeValues: { ':expectedRevision': 2 },
+          },
+        },
+        {
+          Update: {
+            TableName: 'AuditEventsTable',
+            Key: { directoryId: 'workspace-1', eventId: 'event-1' },
+            UpdateExpression: 'REMOVE expiresAt',
+            ExpressionAttributeValues: {
+              ':occurredAt': '2026-08-02T00:00:00.000Z',
+            },
+          },
+        },
+      ],
+    })
   })
 
   test('creates a durable retention job with a legal-hold policy change', async () => {

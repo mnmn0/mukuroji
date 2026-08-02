@@ -172,6 +172,8 @@ function createTestRouter(input: {
   authenticateManagement?: PublicApiDependencies['authenticateManagement']
   /** Commercial entitlement policy used by the focused router test. */
   enforceEntitlement?: PublicApiDependencies['enforceEntitlement']
+  /** Credential request limiter used by admission-order tests. */
+  rateLimits?: PublicApiDependencies['rateLimits']
   platform?: InMemoryDeveloperPlatformClient
   now?: () => Date
   queueWebhookDelivery?: (workspaceId: string, deliveryId: string) => Promise<void>
@@ -182,6 +184,7 @@ function createTestRouter(input: {
   )
   const router = createPublicApiRouter({
     ...createFocusedTestPlatform(platform),
+    ...(input.rateLimits ? { rateLimits: input.rateLimits } : {}),
     authenticateManagement: input.authenticateManagement ??
       (async () => input.managementPrincipal ?? managementPrincipal),
     enforceEntitlement: input.enforceEntitlement ?? (async () => undefined),
@@ -270,6 +273,92 @@ describe('public API router', () => {
       detail: 'Developer Platform is not enabled for this Workspace.',
     })
     expect(observations).toEqual([{ workspaceId: 'workspace-1', method: 'GET' }])
+  })
+
+  test('scopes entitlement idempotency by public API route', async () => {
+    const keys: Array<string | undefined> = []
+    const { platform, router } = createTestRouter({
+      async enforceEntitlement(_workspaceId, _method, idempotencyKey) {
+        keys.push(idempotencyKey)
+      },
+    })
+    const apiKey = await createApiKey(platform, ['work-items:read'])
+    const headers = {
+      Authorization: `Bearer ${apiKey.secret}`,
+      'Idempotency-Key': 'shared-caller-key',
+    }
+
+    const [collection, detail] = await Promise.all([
+      router.request('http://localhost/v1/work-items?teamId=team-1', { headers }),
+      router.request(
+        'http://localhost/v1/work-items/work-item-1?teamId=team-1',
+        { headers },
+      ),
+    ])
+
+    expect(collection.status).toBe(200)
+    expect(detail.status).toBe(200)
+    expect(keys).toHaveLength(2)
+    expect(keys[0]).not.toBe(keys[1])
+    expect(keys.every((key) =>
+      /^tenant-meter:v1:[a-f0-9]{64}:[a-f0-9]{64}$/u.test(key ?? '')
+    )).toBe(true)
+  })
+
+  test('scopes entitlement idempotency by public API payload', async () => {
+    const keys: Array<string | undefined> = []
+    const { platform, router } = createTestRouter({
+      async enforceEntitlement(_workspaceId, _method, idempotencyKey) {
+        keys.push(idempotencyKey)
+      },
+    })
+    const apiKey = await createApiKey(platform, ['work-items:write'])
+    const request = (title: string) => router.request(
+      'http://localhost/v1/work-items',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey.secret}`,
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'shared-payload-key',
+        },
+        body: JSON.stringify({ teamId: 'team-1', title }),
+      },
+    )
+
+    await request('First payload')
+    await request('Second payload')
+
+    expect(keys).toHaveLength(2)
+    expect(keys[0]).not.toBe(keys[1])
+  })
+
+  test('does not meter a request rejected by credential rate limiting', async () => {
+    let entitlementCalls = 0
+    const { platform, router } = createTestRouter({
+      rateLimits: {
+        async consumeRateLimit() {
+          return {
+            allowed: false,
+            limit: 120,
+            remaining: 0,
+            resetAt: '2026-08-02T00:01:00.000Z',
+            retryAfterSeconds: 60,
+          }
+        },
+      },
+      async enforceEntitlement() {
+        entitlementCalls += 1
+      },
+    })
+    const apiKey = await createApiKey(platform, ['work-items:read'])
+
+    const response = await router.request('http://localhost/v1/work-items', {
+      headers: { Authorization: `Bearer ${apiKey.secret}` },
+    })
+
+    expect(response.status).toBe(429)
+    expect(entitlementCalls).toBe(0)
   })
 
   test('redacts error messages, stacks, causes, and unsafe codes from log fields', () => {

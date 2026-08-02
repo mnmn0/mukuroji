@@ -104,13 +104,19 @@ export interface TenantAuditRetentionProcessor {
   reconcileAuditRetention(
     workspaceId: string,
   ): Promise<TenantRetentionReconciliation | undefined>
+  /** Applies the current tenant retention policy to one newly inserted audit event. */
+  reconcileAuditEventRetention(
+    workspaceId: string,
+    eventId: string,
+    occurredAt: string,
+  ): Promise<void>
 }
 
 /**
  * Application port for tenant administration and data-governance state.
  */
 export interface TenantAdministrationClient extends TenantEntitlementEnforcement {
-  /** Ensures and returns the tenant aggregate for an authenticated Workspace. */
+  /** Ensures the tenant aggregate exists and reconciles its authoritative owner. */
   ensureSnapshot(
     workspaceId: string,
     ownerMemberKey: string,

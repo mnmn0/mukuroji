@@ -4683,16 +4683,23 @@ routeApp.post('/api/automation/inbound-webhooks/:opaqueEndpointId', async (c) =>
         'Request body contains an unsupported JSON value.',
       )
     }
+    const bodyFingerprint = createHash('sha256').update(rawBody).digest('hex')
+    const meteringScope = createHash('sha256')
+      .update('POST')
+      .update('\0')
+      .update(endpoint.id)
+      .update('\0')
+      .update(idempotencyKey)
+      .digest('hex')
     await enforceTenantFeatureForWorkspace(
       endpoint.workspaceId,
       'automation',
       c.req.method,
-      `inbound-webhook:${endpoint.id}:${idempotencyKey}`,
+      `tenant-meter:v1:${meteringScope}:${bodyFingerprint}`,
     )
 
     const auditTableName = getConfiguredAuditTableName()
     if (!auditTableName) throw automationInboundWebhookUnavailable()
-    const bodyFingerprint = createHash('sha256').update(rawBody).digest('hex')
     const path = `/api/automation/inbound-webhooks/${endpoint.opaqueEndpointId}`
     const auditContext = createMutationAuditContext({
       workspaceId: endpoint.workspaceId,
@@ -11821,12 +11828,70 @@ async function enforceTenantFeatureForRequest(
   if (!context) return
   const feature = resolveTenantFeatureForPath(context.req.path)
   if (!feature) return
+  let idempotencyKey: string | undefined
+  try {
+    idempotencyKey = await createTenantUsageIdempotencyScope(context)
+  } catch (error) {
+    throw toTenantEntitlementBoundaryError(error)
+  }
   await enforceTenantFeatureForWorkspace(
     workspaceId,
     feature,
     context.req.method,
-    context.req.header('Idempotency-Key'),
+    idempotencyKey,
   )
+}
+
+/**
+ * Binds a caller idempotency key to one concrete metered HTTP request.
+ *
+ * @param context - Current authenticated request context.
+ * @returns A digest safe to persist as a second-stage tenant receipt input.
+ */
+async function createTenantUsageIdempotencyScope(
+  context: Context,
+): Promise<string | undefined> {
+  const normalized = context.req.header('Idempotency-Key')?.trim()
+  if (!normalized) return undefined
+  const hasControlCharacter = [...normalized].some((character) => {
+    const codePoint = character.codePointAt(0)
+    return codePoint !== undefined && (codePoint <= 31 || codePoint === 127)
+  })
+  if (normalized.length > 256 || hasControlCharacter) {
+    throw new TenantAdministrationError(
+      400,
+      'InvalidTenantIdempotencyKey',
+      'Tenant idempotency key is invalid.',
+    )
+  }
+  if (context.req.raw.bodyUsed) {
+    throw new TenantAdministrationError(
+      503,
+      'TenantUsageIdempotencyUnavailable',
+      'Tenant usage idempotency is unavailable for this request.',
+    )
+  }
+  const body = new Uint8Array(
+    await context.req.raw.clone().arrayBuffer(),
+  )
+  const url = new URL(context.req.url)
+  const scopeDigest = createHash('sha256')
+    .update(context.req.method.toUpperCase())
+    .update('\0')
+    .update(context.req.path)
+    .update('\0')
+    .update(url.search)
+    .update('\0')
+    .update(context.req.header('If-Match') ?? '')
+    .update('\0')
+    .update(normalized)
+    .digest('hex')
+  const requestDigest = createHash('sha256')
+    .update(context.req.header('Content-Type') ?? '')
+    .update('\0')
+    .update(body)
+    .digest('hex')
+  return `tenant-meter:v1:${scopeDigest}:${requestDigest}`
 }
 
 /**

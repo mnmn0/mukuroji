@@ -3,6 +3,7 @@ import type { ExecuteTenantOperationInput } from '../../application/tenant-opera
 import {
   processTenantOperationExecutionBatch,
   readRequestedTenantOperation,
+  readTenantAuditRetentionEvent,
   readTenantRetentionWorkspace,
 } from './tenant-operation-execution'
 
@@ -32,6 +33,67 @@ test('starts only a matching requested operation stream record', () => {
   })
 })
 
+test('ignores valid operation updates after the requested start transition', () => {
+  expect(readRequestedTenantOperation({
+    eventName: 'MODIFY',
+    dynamodb: {
+      NewImage: {
+        kind: { S: 'operation' },
+        workspaceId: { S: 'workspace-1' },
+        recordKey: { S: 'OPERATION#operation-1' },
+        payload: {
+          S: JSON.stringify({
+            workspaceId: 'workspace-1',
+            operationId: 'operation-1',
+            status: 'running',
+          }),
+        },
+      },
+    },
+  })).toBeUndefined()
+})
+
+test('routes new audit events to current tenant retention enforcement', async () => {
+  const auditEvents: Array<{
+    workspaceId: string
+    eventId: string
+    occurredAt: string
+  }> = []
+  const record = {
+    eventName: 'INSERT',
+    dynamodb: {
+      SequenceNumber: 'audit-sequence-1',
+      NewImage: {
+        directoryId: { S: 'workspace-1' },
+        workspaceId: { S: 'workspace-1' },
+        eventId: { S: 'event-1' },
+        occurredAt: { S: '2026-08-02T00:00:00.000Z' },
+      },
+    },
+  }
+  const result = await processTenantOperationExecutionBatch({
+    Records: [record],
+  }, {
+    async execute() {},
+    async reconcileAuditRetention() {},
+    async reconcileAuditEventRetention(workspaceId, eventId, occurredAt) {
+      auditEvents.push({ workspaceId, eventId, occurredAt })
+    },
+  })
+
+  expect(readTenantAuditRetentionEvent(record)).toEqual({
+    workspaceId: 'workspace-1',
+    eventId: 'event-1',
+    occurredAt: '2026-08-02T00:00:00.000Z',
+  })
+  expect(result).toEqual({ batchItemFailures: [] })
+  expect(auditEvents).toEqual([{
+    workspaceId: 'workspace-1',
+    eventId: 'event-1',
+    occurredAt: '2026-08-02T00:00:00.000Z',
+  }])
+})
+
 test('routes active retention jobs to the bounded reconciliation processor', async () => {
   const executionInputs: ExecuteTenantOperationInput[] = []
   const retentionWorkspaces: string[] = []
@@ -55,6 +117,7 @@ test('routes active retention jobs to the bounded reconciliation processor', asy
     async reconcileAuditRetention(workspaceId) {
       retentionWorkspaces.push(workspaceId)
     },
+    async reconcileAuditEventRetention() {},
   })
 
   expect(result).toEqual({ batchItemFailures: [] })
@@ -88,6 +151,7 @@ test('returns the failed stream checkpoint when execution fails', async () => {
       throw new Error('temporary failure')
     },
     async reconcileAuditRetention() {},
+    async reconcileAuditEventRetention() {},
   })
 
   expect(result).toEqual({
@@ -115,6 +179,7 @@ test('fails closed instead of acknowledging a malformed operation row', async ()
       executions += 1
     },
     async reconcileAuditRetention() {},
+    async reconcileAuditEventRetention() {},
   })
 
   expect(executions).toBe(0)

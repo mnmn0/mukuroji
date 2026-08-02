@@ -24,7 +24,7 @@ export interface TenantOperationWorkerInput {
 
 /** Trusted tenant operation worker resources. */
 export type TenantOperationWorkerResources = {
-  /** Dead-letter queue for tenant operation stream failures. */
+  /** Dead-letter queue for tenant lifecycle and retention stream failures. */
   readonly tenantOperationDlq: sqs.Queue;
   /** IAM-invokable worker that accepts capability evidence. */
   readonly tenantOperationFunction: lambdaNodejs.NodejsFunction;
@@ -73,7 +73,7 @@ export function buildTenantOperationWorker(
       memorySize: 512,
       reservedConcurrentExecutions: 2,
       description:
-        'Trusted executor boundary for evidence-backed tenant export and closure transitions.',
+        'Trusted tenant lifecycle executor and audit-retention reconciliation worker.',
       bundling: {
         bundleAwsSDK: true,
         minify: true,
@@ -103,7 +103,7 @@ export function buildTenantOperationWorker(
       retryAttempts: 10,
       reportBatchItemFailures: true,
       filters: [lambda.FilterCriteria.filter({
-        eventName: lambda.FilterRule.or('INSERT', 'MODIFY'),
+        eventName: lambda.FilterRule.isEqual('INSERT'),
         dynamodb: {
           NewImage: {
             kind: { S: lambda.FilterRule.isEqual('operation') },
@@ -129,9 +129,24 @@ export function buildTenantOperationWorker(
     }),
   );
   tenantAdministrationTable.grantStreamRead(tenantOperationFunction);
+  tenantOperationFunction.addEventSource(
+    new lambdaEventSources.DynamoEventSource(auditEventsTable, {
+      startingPosition: lambda.StartingPosition.TRIM_HORIZON,
+      batchSize: 10,
+      bisectBatchOnError: true,
+      parallelizationFactor: 1,
+      retryAttempts: 10,
+      reportBatchItemFailures: true,
+      filters: [lambda.FilterCriteria.filter({
+        eventName: lambda.FilterRule.isEqual('INSERT'),
+      })],
+      onFailure: new lambdaEventSources.SqsDlq(tenantOperationDlq),
+    }),
+  );
+  auditEventsTable.grantStreamRead(tenantOperationFunction);
   new cloudwatch.Alarm(scope, 'TenantOperationDlqAlarm', {
     alarmDescription:
-      'Detects tenant lifecycle transitions that exhausted bounded retries.',
+      'Detects tenant lifecycle or audit-retention records that exhausted bounded retries.',
     comparisonOperator:
       cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
     datapointsToAlarm: 1,
