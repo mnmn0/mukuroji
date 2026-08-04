@@ -171,12 +171,50 @@ test('retains encrypted TLS-only primary and secondary receipt queues', () => {
         MessageRetentionPeriod: 1_209_600,
         ReceiveMessageWaitTimeSeconds: 20,
         SqsManagedSseEnabled: true,
-        VisibilityTimeout: 120,
+        VisibilityTimeout: 1_800,
       }),
       Type: 'AWS::SQS::Queue',
       UpdateReplacePolicy: 'Retain',
     }));
     expectQueueRequiresSsl(synthesizedTemplate, logicalId);
+  }
+});
+
+test('denies direct or foreign sends to each alarm evidence queue', () => {
+  for (const route of ['Primary', 'Secondary']) {
+    const [queueId] = findResource(
+      'AWS::SQS::Queue',
+      `WorkspaceSearchMigrationAlarmEvidence${route}Queue`,
+    );
+    const queuePolicy = Object.values(
+      synthesizedTemplate.findResources('AWS::SQS::QueuePolicy'),
+    ).find((resource) =>
+      JSON.stringify(resource.Properties?.Queues).includes(queueId),
+    );
+    if (!queuePolicy) {
+      throw new Error(`${route} alarm evidence queue policy is missing.`);
+    }
+    const properties = readRecord(queuePolicy, 'Properties');
+    const policyDocument = readRecord(properties, 'PolicyDocument');
+    if (!Array.isArray(policyDocument.Statement)) {
+      throw new Error(`${route} queue policy statements are not an array.`);
+    }
+    expect(policyDocument.Statement).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        Action: 'sqs:SendMessage',
+        Condition: {
+          ArnNotEqualsIfExists: {
+            'aws:SourceArn': expect.anything(),
+          },
+        },
+        Effect: 'Deny',
+        Principal: { AWS: '*' },
+        Resource: { 'Fn::GetAtt': [queueId, 'Arn'] },
+      }),
+    ]));
+    expect(JSON.stringify(policyDocument)).toContain(
+      `Alarm${route}TopicName`,
+    );
   }
 });
 

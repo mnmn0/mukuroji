@@ -755,9 +755,7 @@ test('file bucket incarnation marker is create-once, immutable, and published ex
       expect.objectContaining({
         Action: [
           's3:GetObject',
-          's3:GetObjectAttributes',
           's3:GetObjectVersion',
-          's3:GetObjectVersionAttributes',
           's3:PutObject',
         ],
         Effect: 'Allow',

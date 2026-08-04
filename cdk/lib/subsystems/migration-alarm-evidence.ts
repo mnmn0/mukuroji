@@ -32,6 +32,12 @@ const migrationAlarmEvidenceNames:
     'terminal-failure',
   ]);
 
+/**
+ * Keeps accepted alarm receipts invisible through the maximum collection,
+ * publication, and bounded acknowledgement window.
+ */
+const migrationAlarmEvidenceVisibilityTimeout = cdk.Duration.minutes(30);
+
 /** Inputs required to build the non-production alarm-delivery sink. */
 export type MigrationAlarmEvidenceSinkInput = {
   /** Validated source-controlled deployment trust root gating every resource. */
@@ -133,6 +139,18 @@ function subscribeEvidenceQueue(
   if (!(queuePolicy instanceof sqs.QueuePolicy)) {
     throw new Error('Migration alarm evidence queue policy was not created.');
   }
+  queue.addToResourcePolicy(new iam.PolicyStatement({
+    sid: 'OnlyExpectedSnsTopicCanSendAlarmEvidence',
+    effect: iam.Effect.DENY,
+    principals: [new iam.AnyPrincipal()],
+    actions: ['sqs:SendMessage'],
+    resources: [queue.queueArn],
+    conditions: {
+      ArnNotEqualsIfExists: {
+        'aws:SourceArn': topic.topicArn,
+      },
+    },
+  }));
   applyResourceCondition(queuePolicy, condition);
 }
 
@@ -177,7 +195,7 @@ export function buildMigrationAlarmEvidenceSink(
       receiveMessageWaitTime: cdk.Duration.seconds(20),
       removalPolicy: cdk.RemovalPolicy.RETAIN,
       retentionPeriod: cdk.Duration.days(14),
-      visibilityTimeout: cdk.Duration.minutes(2),
+      visibilityTimeout: migrationAlarmEvidenceVisibilityTimeout,
     },
   );
   const secondaryQueue = new sqs.Queue(
@@ -190,7 +208,7 @@ export function buildMigrationAlarmEvidenceSink(
       receiveMessageWaitTime: cdk.Duration.seconds(20),
       removalPolicy: cdk.RemovalPolicy.RETAIN,
       retentionPeriod: cdk.Duration.days(14),
-      visibilityTimeout: cdk.Duration.minutes(2),
+      visibilityTimeout: migrationAlarmEvidenceVisibilityTimeout,
     },
   );
   applyResourceCondition(primaryQueue, nonProductionCondition);

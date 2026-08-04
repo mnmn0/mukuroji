@@ -1333,7 +1333,12 @@ async function captureAlarmReceipts(
       startedAt: plan.startedAt,
     },
     runtime.queuePort,
-    { now: () => readAlarmCliClock(dependencies.clock).getTime() },
+    {
+      now: () => readAlarmCliClock(dependencies.clock).getTime(),
+      sleep: (milliseconds) => new Promise((resolve) => {
+        setTimeout(resolve, milliseconds)
+      }),
+    },
   )
   return {
     bytes: serializeWorkspaceSearchMigrationRehearsalAlarmReceiptArtifact(
@@ -1444,7 +1449,12 @@ async function finalizeAlarmDelivery(
         startedAt: plan.startedAt,
       },
       runtime.historyPort,
-      { now: () => readAlarmCliClock(dependencies.clock).getTime() },
+      {
+        now: () => readAlarmCliClock(dependencies.clock).getTime(),
+        sleep: (milliseconds) => new Promise((resolve) => {
+          setTimeout(resolve, milliseconds)
+        }),
+      },
     )
   const finalized = finalizeWorkspaceSearchMigrationRehearsalAlarmEvidence({
     authorization,

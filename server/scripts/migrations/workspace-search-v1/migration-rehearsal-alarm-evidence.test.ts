@@ -359,8 +359,9 @@ CollectWorkspaceSearchMigrationRehearsalAlarmEvidenceInput {
 /** Creates deterministic collector dependencies. */
 function createDependencies(
   now: () => number = () => collectionNow,
+  sleep: (milliseconds: number) => Promise<void> = async () => undefined,
 ): WorkspaceSearchMigrationRehearsalAlarmCollectorDependencies {
-  return { now }
+  return { now, sleep }
 }
 
 /** Creates one UUID-like actual SNS message identifier. */
@@ -1394,14 +1395,52 @@ describe('migration rehearsal alarm history collector', () => {
       items: [createHistoryItem(0, 'OK', 'ALARM')],
       nextToken: undefined,
     }])
+    let nowMilliseconds = collectionNow
     await expectFailure(
       collectWorkspaceSearchMigrationRehearsalAlarmHistory(
-        createHistoryCollectorInput(),
+        {
+          ...createHistoryCollectorInput(),
+          maximumWaitMilliseconds: 1_000,
+          requestTimeoutMilliseconds: 100,
+        },
         incompletePort,
-        createDependencies(),
+        createDependencies(
+          () => nowMilliseconds,
+          async (milliseconds) => {
+            nowMilliseconds += milliseconds
+          },
+        ),
       ),
-      'INVALID_MIGRATION_REHEARSAL_ALARM_EVIDENCE',
+      'MIGRATION_REHEARSAL_ALARM_EVIDENCE_TIMEOUT',
     )
+  })
+
+  test('re-polls a terminal incomplete history until the recovery record appears', async () => {
+    const port = createCompleteHistoryPort()
+    const firstAlarmName = alarmPhysicalNames[0]
+    if (firstAlarmName === undefined) {
+      throw new Error('Alarm fixture is missing.')
+    }
+    port.pages.set(firstAlarmName, [{
+      items: [createHistoryItem(0, 'OK', 'ALARM')],
+      nextToken: undefined,
+    }, {
+      items: [
+        createHistoryItem(0, 'OK', 'ALARM'),
+        createHistoryItem(0, 'ALARM', 'OK'),
+      ],
+      nextToken: undefined,
+    }])
+
+    const artifact = await collectWorkspaceSearchMigrationRehearsalAlarmHistory(
+      createHistoryCollectorInput(),
+      port,
+      createDependencies(),
+    )
+
+    expect(artifact.transitions).toHaveLength(6)
+    expect(port.requests).toHaveLength(7)
+    expect(port.requests[1]?.nextToken).toBeUndefined()
   })
 
   test('rejects repeated pagination tokens within the finite page bound', async () => {

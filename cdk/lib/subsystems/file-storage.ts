@@ -165,9 +165,7 @@ export function buildFileStorage(
   markerFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: [
       's3:GetObject',
-      's3:GetObjectAttributes',
       's3:GetObjectVersion',
-      's3:GetObjectVersionAttributes',
       's3:PutObject',
     ],
     resources: [fileBucket.arnForObjects(FILE_BUCKET_INCARNATION_MARKER_KEY)],

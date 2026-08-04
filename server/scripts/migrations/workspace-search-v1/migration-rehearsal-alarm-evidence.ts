@@ -685,6 +685,8 @@ type ParsedAlarmMetricEvaluation = {
 export type WorkspaceSearchMigrationRehearsalAlarmCollectorDependencies = {
   /** Monotonic-enough wall-clock milliseconds used for all deadlines. */
   readonly now: () => number
+  /** Waits before retrying a terminal but incomplete CloudWatch history page. */
+  readonly sleep: (milliseconds: number) => Promise<void>
 }
 
 /** Maximum raw SQS body admitted by the restricted collector. */
@@ -737,6 +739,9 @@ const maximumAlarmHistoryPageSize = 100
 /** Maximum accepted page count for one alarm. */
 const maximumAlarmHistoryPagesPerAlarm = 10
 
+/** Delay between terminal CloudWatch history polls while transitions propagate. */
+const alarmHistoryPollIntervalMilliseconds = 1_000
+
 /** Maximum bounded delete rounds before acknowledgement fails closed. */
 export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_ALARM_ACKNOWLEDGEMENT_ATTEMPTS =
   3
@@ -755,6 +760,13 @@ const arnPattern = /^arn:(aws|aws-cn|aws-us-gov):/
 const alarmGuards = new WorkspaceSearchMigrationStrictRecordGuards(
   failInvalid,
 )
+
+/** Waits for one bounded CloudWatch history propagation interval. */
+function waitForAlarmHistoryRetry(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds)
+  })
+}
 
 /** Process-local acknowledgement barrier hiding every raw receipt handle. */
 class PendingAlarmReceiptCollection
@@ -1017,6 +1029,7 @@ export async function collectWorkspaceSearchMigrationRehearsalAlarmEvidence(
   port: WorkspaceSearchMigrationRehearsalAlarmQueuePort,
   dependencies: WorkspaceSearchMigrationRehearsalAlarmCollectorDependencies = {
     now: Date.now,
+    sleep: waitForAlarmHistoryRetry,
   },
 ): Promise<WorkspaceSearchMigrationRehearsalPendingAlarmReceiptCollection> {
   try {
@@ -1140,6 +1153,7 @@ export async function collectWorkspaceSearchMigrationRehearsalAlarmHistory(
   port: WorkspaceSearchMigrationRehearsalAlarmHistoryPort,
   dependencies: WorkspaceSearchMigrationRehearsalAlarmCollectorDependencies = {
     now: Date.now,
+    sleep: waitForAlarmHistoryRetry,
   },
 ): Promise<WorkspaceSearchMigrationRehearsalAlarmTransitionArtifact> {
   try {
@@ -1162,56 +1176,77 @@ export async function collectWorkspaceSearchMigrationRehearsalAlarmHistory(
       if (signal === undefined || signal.name !== alarm.name) {
         return failInvalid()
       }
-      const rawItems:
-        WorkspaceSearchMigrationRehearsalRawAlarmHistoryItem[] = []
-      const seenTokens = new Set<string>()
-      let nextToken: string | undefined
-      let completedPagination = false
+      const maximumPollAttempts = Math.ceil(
+        configuration.maximumWaitMilliseconds /
+          alarmHistoryPollIntervalMilliseconds,
+      ) + 1
+      let transition: WorkspaceSearchMigrationRehearsalAlarmTransition |
+        undefined
+      for (let pollAttempt = 0; pollAttempt < maximumPollAttempts; pollAttempt += 1) {
+        const rawItems:
+          WorkspaceSearchMigrationRehearsalRawAlarmHistoryItem[] = []
+        const seenTokens = new Set<string>()
+        let nextToken: string | undefined
+        let completedPagination = false
 
-      for (
-        let pageIndex = 0;
-        pageIndex < configuration.maximumPagesPerAlarm;
-        pageIndex += 1
-      ) {
-        const remainingMilliseconds = deadlineMilliseconds - dependencies.now()
-        if (remainingMilliseconds <= 0) return failTimeout()
-        const page = await runBoundedQueueOperation(
-          (abortSignal) => port.readPage({
-            abortSignal,
-            alarmArn: alarm.alarmArn,
-            alarmName: alarm.alarmName,
-            endDate: new Date(configuration.completedAt),
-            nextToken,
-            expectedAccountId: configuration.expectedAccountId,
-            expectedRegion: configuration.expectedRegion,
-            startDate: new Date(configuration.startedAt),
-          }),
-          Math.min(
-            configuration.requestTimeoutMilliseconds,
-            remainingMilliseconds,
-          ),
-        )
-        const parsedPage = readAlarmHistoryPage(page)
-        rawItems.push(...parsedPage.items)
-        if (rawItems.length > 2) return failInvalid()
-        nextToken = parsedPage.nextToken
-        if (nextToken === undefined) {
-          completedPagination = true
+        for (
+          let pageIndex = 0;
+          pageIndex < configuration.maximumPagesPerAlarm;
+          pageIndex += 1
+        ) {
+          const remainingMilliseconds = deadlineMilliseconds - dependencies.now()
+          if (remainingMilliseconds <= 0) return failTimeout()
+          const page = await runBoundedQueueOperation(
+            (abortSignal) => port.readPage({
+              abortSignal,
+              alarmArn: alarm.alarmArn,
+              alarmName: alarm.alarmName,
+              endDate: new Date(configuration.completedAt),
+              nextToken,
+              expectedAccountId: configuration.expectedAccountId,
+              expectedRegion: configuration.expectedRegion,
+              startDate: new Date(configuration.startedAt),
+            }),
+            Math.min(
+              configuration.requestTimeoutMilliseconds,
+              remainingMilliseconds,
+            ),
+          )
+          const parsedPage = readAlarmHistoryPage(page)
+          rawItems.push(...parsedPage.items)
+          if (rawItems.length > 2) return failInvalid()
+          nextToken = parsedPage.nextToken
+          if (nextToken === undefined) {
+            completedPagination = true
+            break
+          }
+          if (seenTokens.has(nextToken)) return failInvalid()
+          seenTokens.add(nextToken)
+        }
+        if (!completedPagination || nextToken !== undefined) {
+          return failInvalid()
+        }
+        if (rawItems.length === 2) {
+          transition = readAlarmTransitionFromHistory(
+            rawItems,
+            alarm,
+            signal,
+            configuration.startedAt,
+            configuration.completedAt,
+          )
           break
         }
-        if (seenTokens.has(nextToken)) return failInvalid()
-        seenTokens.add(nextToken)
+        const remainingMilliseconds = deadlineMilliseconds - dependencies.now()
+        if (remainingMilliseconds <= 0 || pollAttempt + 1 >= maximumPollAttempts) {
+          return failTimeout()
+        }
+        await dependencies.sleep(Math.min(
+          alarmHistoryPollIntervalMilliseconds,
+          remainingMilliseconds,
+        ))
       }
-      if (!completedPagination || nextToken !== undefined) {
-        return failInvalid()
-      }
-      transitions.push(readAlarmTransitionFromHistory(
-        rawItems,
-        alarm,
-        signal,
-        configuration.startedAt,
-        configuration.completedAt,
-      ))
+      if (transition === undefined) return failTimeout()
+      transitions.push(transition)
     }
     return createTransitionArtifact(
       configuration.startedAt,
