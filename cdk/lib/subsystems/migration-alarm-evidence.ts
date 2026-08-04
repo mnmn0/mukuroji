@@ -33,10 +33,10 @@ const migrationAlarmEvidenceNames:
   ]);
 
 /**
- * Keeps accepted alarm receipts invisible through the maximum collection,
- * publication, and bounded acknowledgement window.
+ * Keeps accepted alarm receipts invisible through the maximum receipt
+ * collection, history publication, and three-attempt acknowledgement window.
  */
-const migrationAlarmEvidenceVisibilityTimeout = cdk.Duration.minutes(30);
+const migrationAlarmEvidenceVisibilityTimeout = cdk.Duration.minutes(45);
 
 /** Inputs required to build the non-production alarm-delivery sink. */
 export type MigrationAlarmEvidenceSinkInput = {

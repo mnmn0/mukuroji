@@ -171,7 +171,7 @@ test('retains encrypted TLS-only primary and secondary receipt queues', () => {
         MessageRetentionPeriod: 1_209_600,
         ReceiveMessageWaitTimeSeconds: 20,
         SqsManagedSseEnabled: true,
-        VisibilityTimeout: 1_800,
+        VisibilityTimeout: 2_700,
       }),
       Type: 'AWS::SQS::Queue',
       UpdateReplacePolicy: 'Retain',
