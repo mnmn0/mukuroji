@@ -19130,19 +19130,30 @@ async function prepareConfiguredCreateWorkItem(
   input: CreateTeamIssueRequestBody,
   resolved: ResolvedWorkItemConfiguration,
 ): Promise<CreateTeamIssueRequestBody> {
+  const { quickCapture, ...inputWithoutQuickCapture } = input
   const workflowStatus = resolveWorkflowStatus(
     resolved.configuration,
     input.workflowStatusId,
   )
+  const isQuickCapture = quickCapture === true
+
+  if (isQuickCapture && workflowStatus.statusCategory !== 'backlog') {
+    throw new WorkItemConfigurationError(
+      400,
+      'InvalidQuickCaptureStatus',
+      'Quick capture is only available in a backlog workflow status.',
+    )
+  }
+
   const projectId = readAssignedProjectId(input.assignedProjectId) ?? undefined
   const customFieldValues = normalizeCustomFieldValues(
     resolved.configuration,
     input.customFieldValues,
-    { mode: 'create', projectId },
+    { allowRequiredMissing: isQuickCapture, mode: 'create', projectId },
   )
   await requireActiveCustomFieldPeople(directoryId, resolved.configuration, customFieldValues, projectId)
   return {
-    ...input,
+    ...inputWithoutQuickCapture,
     workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
     workflowStatusId: workflowStatus.workflowStatusId,
     statusCategory: workflowStatus.statusCategory,
@@ -19183,6 +19194,9 @@ async function prepareConfiguredUpdateWorkItem(
     resolved.configuration,
     input.customFieldValues,
     {
+      allowRequiredMissing:
+        currentWorkflowStatus.statusCategory === 'backlog' &&
+        nextWorkflowStatus.statusCategory === 'backlog',
       mode: 'update',
       existingValues: current.customFieldValues,
       projectId,

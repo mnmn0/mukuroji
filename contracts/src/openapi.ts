@@ -361,6 +361,7 @@ const components = {
         assigneeUserId: { type: 'string' },
         workflowStatusId: { type: 'string' },
         customFieldValues: { type: 'object', additionalProperties: true },
+        quickCapture: { type: 'boolean' },
         dueDate: { type: 'string', format: 'date' },
         priority: { type: 'string', enum: ['high', 'medium', 'low'] },
       },

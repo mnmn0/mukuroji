@@ -191,6 +191,22 @@ test('applies defaults only on create and does not resurrect removed values on u
     .toThrow('is required')
 })
 
+test('allows required fields to be completed after a quick capture', () => {
+  const configuration = createConfiguration({
+    customFields: [field('required', 'text', { required: true })],
+  })
+
+  expect(normalizeCustomFieldValues(configuration, undefined, {
+    allowRequiredMissing: true,
+    mode: 'create',
+  })).toEqual({})
+  expect(normalizeCustomFieldValues(configuration, undefined, {
+    allowRequiredMissing: true,
+    existingValues: {},
+    mode: 'update',
+  })).toEqual({})
+})
+
 test('revalidates stored values against the current definition before an unrelated update', () => {
   const configuration = createConfiguration({
     customFields: [field('amount', 'number')],

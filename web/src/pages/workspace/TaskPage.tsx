@@ -68,6 +68,7 @@ import {
   resolveCurrentUserProjectKey,
   resolveProjectTaskRouteContext,
 } from '../../tasks/model/taskRoute'
+import { applyTaskPatchOptimistically, type TaskCreateContext } from '../../tasks/model/taskView'
 import { TaskScreen } from '../../tasks/ui/TaskScreen'
 import type { WorkspaceMember } from '../../workspace/api'
 import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
@@ -517,30 +518,36 @@ export function TaskPage() {
     ''
   ).trim()
 
-  const handleCreateTask = async (input: CreateProjectTaskInput) => {
+  const handleCreateTask = async (
+    input: CreateProjectTaskInput,
+    context?: TaskCreateContext,
+  ) => {
     if (!accessToken) {
       return
     }
 
-    if (!creationTeam) {
+    const targetTeamId = context?.teamId ?? creationTeam?.id
+    const targetProjectId = context?.projectId ?? input.assignedProjectId ?? projectId
+
+    if (!targetTeamId) {
       throw new Error(t('issues.error.create'))
     }
 
     const issue = await guardEnterpriseSession(mutationRequestRunner.run(
-      'issue:create',
-      JSON.stringify([creationTeam.id, projectId, input]),
+      `issue:create:${targetTeamId}:${targetProjectId}`,
+      JSON.stringify([targetTeamId, targetProjectId, input]),
       (context) => createTeamIssue(
-        creationTeam.id,
+        targetTeamId,
         accessToken,
         {
           ...input,
-          assignedProjectId: projectId,
+          assignedProjectId: targetProjectId,
         },
         context,
       ),
     ))
     await mutateProjectTasks()
-    navigate(createProjectIssuesPath(projectId, creationTeam.id, issue.id))
+    navigate(createProjectIssuesPath(targetProjectId, targetTeamId, issue.id))
   }
 
   const handleUpdateProjectMember = async (
@@ -606,6 +613,78 @@ export function TaskPage() {
     navigate(createProjectIssuesPath(task.assignedProjectId ?? projectId, nextTeamId, task.id))
   }
 
+  /** Updates a visible Work Item with optimistic cache projection and conflict rollback. */
+  const handleUpdateTask = async (
+    task: ProjectTask,
+    input: UpdateTeamIssueInput,
+  ): Promise<ProjectTask> => {
+    if (!accessToken) {
+      return task
+    }
+
+    const currentTask = selectedIssueDetail?.issue.id === task.id &&
+      selectedIssueDetail.issue.teamId === task.teamId
+      ? selectedIssueDetail.issue
+      : tasks.find((candidate) => candidate.id === task.id && candidate.teamId === task.teamId)
+
+    if (!currentTask) {
+      return task
+    }
+
+    const configuration = workItemConfigurationLoadResult.configurationsByTeam[currentTask.teamId]?.configuration ??
+      selectedIssueDetail?.resolvedConfiguration?.configuration
+    const optimisticTask = applyTaskPatchOptimistically(currentTask, input, configuration)
+    const matchesTask = (candidate: ProjectTask) =>
+      candidate.id === currentTask.id && candidate.teamId === currentTask.teamId
+
+    await mutateProjectTasks(
+      (currentTasks = []) => currentTasks.map((candidate) =>
+        matchesTask(candidate) ? optimisticTask : candidate,
+      ),
+      { revalidate: false },
+    )
+
+    try {
+      const updatedTask = await guardEnterpriseSession(mutationRequestRunner.run(
+        `issue:update:${currentTask.teamId}:${currentTask.id}`,
+        JSON.stringify([currentTask.revision, input]),
+        (context) => updateTeamIssue(
+          currentTask.teamId,
+          currentTask.id,
+          accessToken,
+          {
+            ...input,
+            expectedRevision: currentTask.revision,
+          },
+          context,
+        ),
+      ))
+      await mutateProjectTasks(
+        (currentTasks = []) => currentTasks.map((candidate) =>
+          matchesTask(candidate) ? updatedTask : candidate,
+        ),
+        { revalidate: false },
+      )
+      // Revalidate after the optimistic replacement so a Project reassignment
+      // removes the item from this Project's list instead of leaving stale data.
+      await mutateProjectTasks()
+      await mutateSelectedIssueDetail()
+      return updatedTask
+    } catch (error) {
+      await mutateProjectTasks(
+        (currentTasks = []) => currentTasks.map((candidate) =>
+          matchesTask(candidate) ? currentTask : candidate,
+        ),
+        { revalidate: false },
+      )
+      redirectEnterpriseSessionError(error)
+      if (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') {
+        await Promise.all([mutateProjectTasks(), mutateSelectedIssueDetail()])
+      }
+      throw error
+    }
+  }
+
   const handleUpdateIssue = async (
     teamId: string,
     issueId: string,
@@ -631,22 +710,7 @@ export function TaskPage() {
     ])
 
     try {
-      await mutationRequestRunner.run(
-        `issue:update:${teamId}:${issueId}`,
-        JSON.stringify([currentIssue.revision, input]),
-        (context) => updateTeamIssue(
-          teamId,
-          issueId,
-          accessToken,
-          {
-            ...input,
-            expectedRevision: currentIssue.revision,
-          },
-          context,
-        ),
-      )
-      await mutateProjectTasks()
-      await mutateSelectedIssueDetail()
+      await handleUpdateTask(currentIssue, input)
     } catch (error) {
       redirectEnterpriseSessionError(error)
       if (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') {
@@ -800,6 +864,10 @@ export function TaskPage() {
     }
   }
 
+  const canCreateProjectTask = canMutateContent && Object.keys(
+    workItemConfigurationLoadResult.configurationsByTeam,
+  ).length > 0
+
   return (
     <TaskScreen
       workspaceId={workspaceId}
@@ -813,10 +881,7 @@ export function TaskPage() {
       isRelationCandidatesLoading={Boolean(relationCandidatesKey && isRelationCandidatesLoading)}
       locale={locale}
       activeProjectTeamId={interactionTeamId}
-      onCreateTask={canMutateContent && creationTeam &&
-        Boolean(workItemConfigurationLoadResult.configurationsByTeam[creationTeam.id])
-        ? handleCreateTask
-        : undefined}
+      onCreateTask={canCreateProjectTask ? handleCreateTask : undefined}
       onAddRelation={canMutateContent ? handleAddRelation : undefined}
       assigneeErrorMessage={projectMembersErrorMessage}
       assigneeOptions={activeProjectMembers}
@@ -840,6 +905,7 @@ export function TaskPage() {
       onDeleteRelation={canMutateContent ? handleDeleteRelation : undefined}
       onSelectedIssueChange={handleSelectedIssueChange}
       onUpdateIssue={canMutateContent ? handleUpdateIssue : undefined}
+      onUpdateTask={canMutateContent ? handleUpdateTask : undefined}
       onUpdateProjectMember={canManageProjectMembers ? handleUpdateProjectMember : undefined}
       onBulkApply={canMutateContent && workspaceId ? handleBulkApply : undefined}
       onBulkPreview={canMutateContent && workspaceId ? handleBulkPreview : undefined}

@@ -67,6 +67,8 @@ export type TaskDetailPaneProps = {
   onAddRelation?: (issueId: string, input: WorkItemRelationEditorInput) => Promise<void>
   /** Deletes a relation from the selected Work Item. */
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
+  /** Closes the detail pane while keeping the list selection and scroll position. */
+  onClose?: () => void
   /** Saves editable fields on the selected Work Item. */
   onUpdateIssue?: (
     teamId: string,
@@ -108,6 +110,7 @@ export function TaskDetailPane({
   isRelationCandidatesLoading,
   locale,
   onAddRelation,
+  onClose,
   onDeleteRelation,
   onUpdateIssue,
   projects,
@@ -238,7 +241,20 @@ export function TaskDetailPane({
               <p className="mt-2 text-sm font-medium text-[var(--workbench-muted)]">{t('tasks.detail.loading')}</p>
             ) : null}
           </div>
-          <TaskPriorityBadge priority={issue?.priority ?? task.priority} t={t} />
+          <div className="flex items-center gap-2">
+            <TaskPriorityBadge priority={issue?.priority ?? task.priority} t={t} />
+            {onClose ? (
+              <button
+                aria-label={t('tasks.detail.close')}
+                className="rounded px-2 py-1 text-lg leading-none text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-text)]"
+                data-testid="task-detail-close"
+                onClick={onClose}
+                type="button"
+              >
+                ×
+              </button>
+            ) : null}
+          </div>
         </div>
         <fieldset className="contents" disabled={isReadOnly}>
           <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">

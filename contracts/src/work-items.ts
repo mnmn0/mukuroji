@@ -187,6 +187,10 @@ export type CreateWorkItemInput = {
    */
   customFieldValues?: Record<string, CustomFieldValue>
   /**
+   * Backlog/Triage に required custom field を未入力のまま仮保存するかどうかです。
+   */
+  quickCapture?: boolean
+  /**
    * Work Item の期限日です。
    */
   dueDate: string

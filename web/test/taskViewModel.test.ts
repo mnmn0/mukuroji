@@ -14,6 +14,7 @@ import {
   createAssigneeFilterOptions,
   createBulkProjectOptions,
   createBulkOperationSelection,
+  createTaskInversePatch,
   createProjectStatusTestToken,
   createProjectTaskStatusColumns,
   createTaskCalendarModel,
@@ -23,6 +24,7 @@ import {
   filterAndSortProjectTasks,
   findTaskBySelection,
   formatTaskDateInputValue,
+  applyTaskPatchOptimistically,
   isTaskInProjectStatusColumn,
   isTaskOverdue,
   matchesTaskDueDateFilter,
@@ -118,6 +120,57 @@ describe('task selection model', () => {
       selectionKey: createTaskKey(designTask),
       teamId: 'design-team',
       workItemId: 'same-local-id',
+    })
+  })
+})
+
+describe('contextual task mutations', () => {
+  test('projects inline changes optimistically and restores touched fields for undo', () => {
+    const configuration = createConfiguration('core-team', [
+      createStatus('todo', 'To do', 'unstarted', 0),
+      createStatus('active', 'In progress', 'started', 1),
+    ], [
+      {
+        id: 'risk',
+        name: 'Risk',
+        options: [{ id: 'low', name: 'Low', sortOrder: 0 }],
+        required: false,
+        sortOrder: 0,
+        type: 'select',
+      },
+      {
+        id: 'note',
+        name: 'Note',
+        required: false,
+        sortOrder: 1,
+        type: 'text',
+      },
+    ])
+    const task = createTask({
+      customFieldValues: { note: 'Keep this', risk: 'low' },
+      dueDate: '2026/07/23',
+      workflowStatusId: 'todo',
+    })
+    const patch = {
+      customFieldValues: { note: null, risk: 'low' },
+      dueDate: '2026/07/25',
+      workflowStatusId: 'active',
+    }
+
+    const optimisticTask = applyTaskPatchOptimistically(task, patch, configuration)
+    const inversePatch = createTaskInversePatch(task, patch)
+
+    expect(optimisticTask).toMatchObject({
+      customFieldValues: { risk: 'low' },
+      dueDate: '2026/07/25',
+      statusCategory: 'started',
+      workflowStatusId: 'active',
+    })
+    expect(optimisticTask.customFieldValues).not.toHaveProperty('note')
+    expect(inversePatch).toEqual({
+      customFieldValues: { note: 'Keep this', risk: 'low' },
+      dueDate: '2026/07/23',
+      workflowStatusId: 'todo',
     })
   })
 })

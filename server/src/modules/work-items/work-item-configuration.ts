@@ -86,6 +86,8 @@ export type NormalizeCustomFieldValuesOptions = {
   existingValues?: Readonly<Record<string, CustomFieldValue>>
   /** Project scoped field の適用判定に使う遂行先 Project ID です。 */
   projectId?: string
+  /** Backlog/Triage の quick capture では required value の欠落を許可します。 */
+  allowRequiredMissing?: boolean
 }
 
 /** Workflow status の解決結果です。 */
@@ -351,7 +353,7 @@ export function normalizeCustomFieldValues(
     }
     const value = values[definition.id]
     if (value === undefined) {
-      if (definition.required) {
+      if (definition.required && !options.allowRequiredMissing) {
         throw invalidFieldValue(`Custom field "${definition.id}" is required.`)
       }
       continue

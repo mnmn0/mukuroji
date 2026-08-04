@@ -3,6 +3,7 @@ import type {
   ResolvedWorkItemConfiguration,
   WorkflowStatusDefinition,
   WorkItemConfiguration,
+  WorkItemPatch,
 } from '@mukuroji/contracts'
 import type { BulkOperationSelection } from '../../bulk-operations/model/bulkOperation'
 import type { ProjectDirectoryTeam } from '../../projects/api/directory'
@@ -69,6 +70,24 @@ export type DueDateFilter = (typeof taskDueDateFilters)[number]
 /** Due-date ordering selected in the task list. */
 export type TaskSortOrder = (typeof taskSortOrders)[number]
 
+/**
+ * Context inherited when a Work Item is created from a task view.
+ */
+export type TaskCreateContext = {
+  /** Project receiving the new Work Item. */
+  projectId: string
+  /** Team owning the destination workflow. */
+  teamId?: string
+  /** Workflow status inherited from a Board column or other status surface. */
+  workflowStatusId?: string
+  /** Due date inherited from a Calendar or planning surface. */
+  dueDate?: string
+  /** Assignee inherited from an assignee-oriented surface. */
+  assigneeUserId?: string
+  /** Surface that initiated the create action. */
+  source: 'header' | 'table' | 'board' | 'gantt' | 'calendar' | 'assignee'
+}
+
 /** A selectable assignee filter option derived from visible task data. */
 export type AssigneeFilterOption = {
   /** Stable assignee identity used as the filter value. */
@@ -129,6 +148,88 @@ export type TaskSummary = {
   doneCount: number
   /** Rounded percentage of completed tasks among all tasks. */
   completionRate: number
+}
+
+/**
+ * Returns the optimistic task projection for a canonical Work Item patch.
+ *
+ * @param task - Current Work Item snapshot.
+ * @param patch - Fields that will be sent to the Work Item API.
+ * @param configuration - Workflow configuration used to resolve a status category.
+ * @returns A task projection with the patch applied locally.
+ */
+export function applyTaskPatchOptimistically(
+  task: ProjectTask,
+  patch: WorkItemPatch,
+  configuration?: WorkItemConfiguration,
+) {
+  const nextCustomFieldValues = { ...task.customFieldValues }
+
+  for (const [fieldId, value] of Object.entries(patch.customFieldValues ?? {})) {
+    if (value === null) {
+      delete nextCustomFieldValues[fieldId]
+      continue
+    }
+
+    nextCustomFieldValues[fieldId] = value
+  }
+
+  const nextStatus = patch.workflowStatusId && configuration
+    ? configuration.workflow.statuses.find((status) => status.id === patch.workflowStatusId)
+    : undefined
+
+  return {
+    ...task,
+    ...(patch.title === undefined ? {} : { title: patch.title }),
+    ...(patch.description === undefined ? {} : { description: patch.description }),
+    ...(patch.assignedProjectId === undefined
+      ? {}
+      : patch.assignedProjectId === null
+        ? { assignedProjectId: undefined }
+        : { assignedProjectId: patch.assignedProjectId }),
+    ...(patch.assigneeUserId === undefined ? {} : { assigneeUserId: patch.assigneeUserId }),
+    ...(patch.dueDate === undefined ? {} : { dueDate: patch.dueDate }),
+    ...(patch.priority === undefined ? {} : { priority: patch.priority }),
+    ...(patch.workflowStatusId === undefined ? {} : { workflowStatusId: patch.workflowStatusId }),
+    ...(nextStatus ? { statusCategory: nextStatus.category } : {}),
+    ...(patch.customFieldValues === undefined ? {} : { customFieldValues: nextCustomFieldValues }),
+  }
+}
+
+/**
+ * Creates the inverse patch used by the common inline-edit undo action.
+ *
+ * @param task - Snapshot before the optimistic update.
+ * @param patch - Patch that was applied to the snapshot.
+ * @returns A patch that restores every field touched by the original patch.
+ */
+export function createTaskInversePatch(
+  task: ProjectTask,
+  patch: WorkItemPatch,
+): WorkItemPatch {
+  const inverseCustomFieldValues = patch.customFieldValues === undefined
+    ? undefined
+    : Object.fromEntries(
+        Object.keys(patch.customFieldValues).map((fieldId) => [
+          fieldId,
+          task.customFieldValues[fieldId] ?? null,
+        ]),
+      )
+
+  return {
+    ...(patch.title === undefined ? {} : { title: task.title }),
+    ...(patch.description === undefined ? {} : { description: task.description ?? '' }),
+    ...(patch.assignedProjectId === undefined
+      ? {}
+      : { assignedProjectId: task.assignedProjectId ?? null }),
+    ...(patch.assigneeUserId === undefined ? {} : { assigneeUserId: task.assigneeUserId }),
+    ...(patch.dueDate === undefined ? {} : { dueDate: task.dueDate }),
+    ...(patch.priority === undefined ? {} : { priority: task.priority }),
+    ...(patch.workflowStatusId === undefined ? {} : { workflowStatusId: task.workflowStatusId }),
+    ...(inverseCustomFieldValues === undefined
+      ? {}
+      : { customFieldValues: inverseCustomFieldValues }),
+  }
 }
 
 /** A deduplicated Project option available to bulk move operations. */
