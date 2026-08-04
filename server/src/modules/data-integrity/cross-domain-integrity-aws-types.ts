@@ -8,6 +8,10 @@ import type {
   HeadObjectCommandOutput,
 } from '@aws-sdk/client-s3'
 import type {
+  CrossDomainIntegrityInvocationDeadline,
+  CrossDomainIntegrityObservationMode,
+  CrossDomainIntegrityResourceAttestation,
+  CrossDomainIntegrityFileBucketMarkerAttestation,
   CrossDomainIntegrityResourceIdentity,
   CrossDomainIntegrityRole,
 } from './cross-domain-integrity-checker'
@@ -67,53 +71,86 @@ export interface CrossDomainIntegrityManagedAwsReadPort {
   close(): void
 
   /**
+   * Measures all six table incarnations and one exact File bucket marker.
+   *
+   * @param marker - Exact infrastructure-emitted marker version expectation.
+   * @param signal - Invocation-wide cancellation for the eight finite reads.
+   * @returns Strict private immutable resource-attestation snapshot.
+   */
+  readonly measureResourceAttestation?: (
+    marker: CrossDomainIntegrityFileBucketMarkerAttestation,
+    signal?: AbortSignal,
+  ) => Promise<CrossDomainIntegrityResourceAttestation>
+
+  /**
    * Reads attributes for one exact allowlisted S3 object version.
    *
    * @param reference - Exact bucket, key, and VersionId reference.
+   * @param signal - Invocation-wide cancellation for this finite request.
    * @returns S3 object-attributes response.
    */
   getObjectAttributes(
     reference: CrossDomainIntegrityObjectVersionReference,
+    signal?: AbortSignal,
   ): Promise<GetObjectAttributesCommandOutput>
 
   /**
    * Reads tags for one exact allowlisted S3 object version.
    *
    * @param reference - Exact bucket, key, and VersionId reference.
+   * @param signal - Invocation-wide cancellation for this finite request.
    * @returns S3 object-tagging response.
    */
   getObjectTagging(
     reference: CrossDomainIntegrityObjectVersionReference,
+    signal?: AbortSignal,
   ): Promise<GetObjectTaggingCommandOutput>
 
   /**
    * Reads headers for one exact allowlisted S3 object version.
    *
    * @param reference - Exact bucket, key, and VersionId reference.
+   * @param signal - Invocation-wide cancellation for this finite request.
    * @returns S3 HEAD response.
    */
   headObject(
     reference: CrossDomainIntegrityObjectVersionReference,
+    signal?: AbortSignal,
   ): Promise<HeadObjectCommandOutput>
 
   /**
    * Reads and validates the AWS account bound to the explicit profile.
    *
+   * @param signal - Invocation-wide cancellation for this finite request.
    * @returns Twelve-digit caller account identifier.
    */
-  readCallerAccount(): Promise<string>
+  readCallerAccount(signal?: AbortSignal): Promise<string>
 
   /**
    * Reads one bounded, unfiltered, strongly consistent DynamoDB page.
    *
    * @param target - Logical table target.
    * @param exclusiveStartKey - Opaque cursor returned by the preceding page.
+   * @param signal - Invocation-wide cancellation for this finite request.
    * @returns DynamoDB scan response.
    */
   scanPage(
     target: CrossDomainIntegrityTableTarget,
     exclusiveStartKey?: Record<string, AttributeValue>,
+    signal?: AbortSignal,
   ): Promise<ScanCommandOutput>
+}
+
+/** One-shot trusted completion seam for an actual live checker bridge. */
+export type CrossDomainIntegrityLiveRuntimeBridge = {
+  /** Trusted wall-clock sample immediately before bridge invocation. */
+  readonly startedAt: string
+  /**
+   * Samples the trusted wall clock after all external reads finish.
+   *
+   * @returns Canonical completion timestamp exactly once.
+   */
+  readonly sampleCompletedAt: () => string
 }
 
 /** Input supplied to the cross-domain core composition bridge. */
@@ -122,8 +159,14 @@ export type CrossDomainIntegrityCheckBridgeInput = {
   readonly auditPseudonymKey: Uint8Array
   /** Canonical UTC timestamp shared by paired source and restore checks. */
   readonly checkedAt: string
+  /** Logical observation or an actual-runtime migration rehearsal check. */
+  readonly observationMode?: CrossDomainIntegrityObservationMode
+  /** Required one-shot trusted completion seam for actual live mode. */
+  readonly liveRuntime?: CrossDomainIntegrityLiveRuntimeBridge
   /** Dedicated HMAC key retained only for the invocation lifetime. */
   readonly digestKey: Uint8Array
+  /** Non-resettable total deadline shared by every raw and normalized read. */
+  readonly deadline: CrossDomainIntegrityInvocationDeadline
   /** Total checker page bound. */
   readonly maxPages: number
   /** Total normalized item bound derived from the two scan bounds. */
@@ -136,6 +179,11 @@ export type CrossDomainIntegrityCheckBridgeInput = {
   readonly resourceBindingDigest: string
   /** Canonical keyed identities for each exact physical resource. */
   readonly resourceIdentities: readonly CrossDomainIntegrityResourceIdentity[]
+  /** Required private immutable snapshot for an actual live rehearsal. */
+  readonly resourceAttestation?: CrossDomainIntegrityResourceAttestation
+  /** Required immutable identity scheme for an actual live rehearsal. */
+  readonly resourceIdentityScheme?:
+    CrossDomainIntegrityResourceAttestation['scheme']
   /** Keyed digest binding evidence to the exact account, Region, tables, and bucket. */
   readonly resourceIdentityDigest: string
   /** Source or isolated-restore dataset role. */

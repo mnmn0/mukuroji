@@ -26,9 +26,11 @@ import {
   WORKSPACE_SEARCH_MIGRATION_VERSION,
 } from './migration-contract'
 import type {
+  WorkspaceSearchMigrationExecutionAppliedRootProjection,
   WorkspaceSearchMigrationExecutionStatus,
 } from './migration-execution-supervisor'
 import {
+  readWorkspaceSearchMigrationExecutionAppliedRoot,
   superviseWorkspaceSearchMigrationExecution,
 } from './migration-execution-supervisor'
 import {
@@ -67,6 +69,54 @@ type RealCoordinatorTerminalOutcome =
       /** Exact rolled-back root digest. */
       readonly rootDigest: string
     }
+
+/**
+ * Creates one identifier-free exact applied-root projection for coordinator tests.
+ *
+ * @param label - Stable digest namespace for the selected durable graph.
+ * @param planOperationCount - Exact sealed and applied operation count.
+ * @returns Detached application evidence source.
+ */
+function createApplicationProjection(
+  label: string,
+  planOperationCount = 1,
+): WorkspaceSearchMigrationExecutionAppliedRootProjection {
+  return {
+    executionRunDigest: digest(`${label}-execution-run`),
+    seal: {
+      planDigest: digest(`${label}-plan`),
+      planOperationCount,
+      markerCount: planOperationCount,
+    },
+    rootDigest: digest(`${label}-applied-root`),
+    committedAt: '2026-08-01T00:18:30.000Z',
+  }
+}
+
+/**
+ * Projects the coordinator-facing application evidence expected by a test.
+ *
+ * @param label - Stable digest namespace for the selected durable graph.
+ * @param planOperationCount - Exact sealed and applied operation count.
+ * @returns Identifier-free application summary fields.
+ */
+function createExpectedApplicationEvidence(
+  label: string,
+  planOperationCount = 1,
+) {
+  const projection = createApplicationProjection(
+    label,
+    planOperationCount,
+  )
+  return {
+    executionRunDigest: projection.executionRunDigest,
+    planDigest: projection.seal.planDigest,
+    sealedPlanOperationCount: projection.seal.planOperationCount,
+    appliedOperationCount: projection.seal.markerCount,
+    appliedRootDigest: projection.rootDigest,
+    appliedAt: projection.committedAt,
+  }
+}
 
 /**
  * Creates injectable existing-supervisor boundaries that record dispatch only.
@@ -117,8 +167,19 @@ function createRecordingDependencies(
         nextAction: { kind: 'none' },
       }
     },
+    readExecutionApplication: async (input) => {
+      events.push(`application:${input.runId}`)
+      return createApplicationProjection('recording')
+    },
     releaseTerminal: async (input) => {
       events.push(`release:${input.runId}:${input.ownerId}`)
+      return {
+        terminalKind: 'verified',
+        terminalPersistenceVersion: 1,
+        terminalRootDigest: digest('recording-terminal-root'),
+        writerFenceRecordDigest: digest('recording-released-fence'),
+        releasedAt: '2026-08-01T00:19:30.000Z',
+      }
     },
   }
 }
@@ -311,6 +372,29 @@ implements WorkspaceSearchMigrationControlCoordinatorDependencies,
   }
 
   /**
+   * Simulates a separate strong applied-root read after apply completion.
+   *
+   * @param _input - Exact read-only application evidence request.
+   * @returns Exact application projection, or undefined before apply.
+   */
+  async readExecutionApplication(
+    _input: Parameters<
+      NonNullable<
+        WorkspaceSearchMigrationControlCoordinatorDependencies[
+          'readExecutionApplication'
+        ]
+      >
+    >[0],
+  ): Promise<
+    WorkspaceSearchMigrationExecutionAppliedRootProjection | undefined
+  > {
+    this.events.push('application')
+    return this.phase === 'applied'
+      ? createApplicationProjection('restart')
+      : undefined
+  }
+
+  /**
    * Simulates the existing terminal-bound release adapter and recovery.
    *
    * @param _input - Exact fresh-evidence release request.
@@ -321,7 +405,11 @@ implements WorkspaceSearchMigrationControlCoordinatorDependencies,
         'releaseTerminal'
       ]
     >[0],
-  ): Promise<void> {
+  ): ReturnType<
+    WorkspaceSearchMigrationControlCoordinatorDependencies[
+      'releaseTerminal'
+    ]
+  > {
     this.events.push('release')
     if (
       this.phase !== 'verified' &&
@@ -330,7 +418,21 @@ implements WorkspaceSearchMigrationControlCoordinatorDependencies,
     ) {
       throw new Error('Unexpected release phase.')
     }
+    const terminalKind = this.phase === 'verified'
+      ? 'verified'
+      : 'rolled-back'
+    const terminalPersistenceVersion = this.phase === 'verified' ? 1 : 2
+    const terminalRootDigest = this.phase === 'verified'
+      ? digest('restart-verified-root')
+      : digest('restart-partial-rolled-back-root')
     this.phase = 'released'
+    return {
+      terminalKind,
+      terminalPersistenceVersion,
+      terminalRootDigest,
+      writerFenceRecordDigest: digest('restart-released-fence'),
+      releasedAt: '2026-08-01T00:19:30.000Z',
+    }
   }
 
   /**
@@ -594,6 +696,21 @@ class RealCoordinatorDurableHarness {
           this.record(processId, 'apply:read')
           return this.createApplyRunState()
         },
+        readAppliedRoot: async () => {
+          this.record(processId, 'apply:read-root')
+          return this.applyPhase === 'applied'
+            ? {
+                executionRunDigest: digest('real-execution'),
+                seal: {
+                  planDigest: digest('real-plan'),
+                  planOperationCount: 0,
+                  markerCount: 0,
+                },
+                rootDigest: digest('real-applied-root'),
+                committedAt: '2026-08-01T00:18:30.000Z',
+              }
+            : undefined
+        },
         adoptExecutionAuthority: async () => {
           this.record(processId, 'apply:adopt-authority')
           return this.createApplyRunState()
@@ -810,6 +927,24 @@ class RealCoordinatorDurableHarness {
     return structuredClone(
       this.releasedFence?.release.terminal,
     )
+  }
+
+  /**
+   * Reads the durable released-open record digest.
+   *
+   * @returns Exact released writer-fence digest, when committed.
+   */
+  readReleasedWriterFenceRecordDigest(): string | undefined {
+    return this.releasedFence?.recordDigest
+  }
+
+  /**
+   * Reads the durable released-open record timestamp.
+   *
+   * @returns Canonical opened time, when release committed.
+   */
+  readReleasedWriterFenceOpenedAt(): string | undefined {
+    return this.releasedFence?.openedAt
   }
 
   /**
@@ -1091,8 +1226,21 @@ function createRealExecutionCoordinatorDependencies(
     },
     superviseExecution:
       superviseWorkspaceSearchMigrationExecution,
+    readExecutionApplication:
+      readWorkspaceSearchMigrationExecutionAppliedRoot,
     releaseTerminal: async (input) => {
-      await advanceWorkspaceSearchMigrationControlStage(input)
+      const result = await advanceWorkspaceSearchMigrationControlStage(input)
+      if (result.mode !== 'release') {
+        throw new Error('Expected one terminal release result.')
+      }
+      return {
+        terminalKind: result.terminalKind,
+        terminalPersistenceVersion:
+          result.terminalPersistenceVersion,
+        terminalRootDigest: result.terminalRootDigest,
+        writerFenceRecordDigest: result.writerFenceRecordDigest,
+        releasedAt: result.releasedAt,
+      }
     },
   }
 }
@@ -1131,10 +1279,43 @@ describe('Workspace Search migration control coordinator', () => {
           options: ['verify', 'complete-rollback'],
         },
       },
+      application: createExpectedApplicationEvidence('recording'),
     })
     expect(modeReads).toBe(1)
     expect(events).toEqual([
       `execution:apply:${runId}:${ownerId}`,
+      `application:${runId}`,
+    ])
+  })
+
+  test('rejects successful apply response-loss recovery without a strong durable root projection', async () => {
+    const events: string[] = []
+    const dependencies = {
+      ...createRecordingDependencies(events),
+      readExecutionApplication: async () => {
+        events.push('application:absent')
+        return undefined
+      },
+    }
+
+    const failure = await captureError(() => invokeCoordinator({
+      session: { capability: 'execution-only' },
+      maintenanceEvidenceProvider: { capability: 'fresh-evidence' },
+      runId,
+      ownerId,
+      expectedConfigurationHash: '0'.repeat(64),
+      mode: 'apply',
+      approval: workspaceSearchMigrationControlApprovalLiterals.apply,
+    }, dependencies))
+
+    expect(failure).toMatchObject({
+      name: 'WorkspaceSearchMigrationFailure',
+      code: 'INVALID_STATE',
+      message: 'INVALID_STATE',
+    })
+    expect(events).toEqual([
+      `execution:apply:${runId}:${ownerId}`,
+      'application:absent',
     ])
   })
 
@@ -1350,9 +1531,13 @@ describe('Workspace Search migration control coordinator', () => {
         dependencies,
       )
       expect(summary).toMatchObject({ mode: entry.mode })
-      expect(events).toEqual([
+      const expectedEvents = [
         `execution:${entry.supervisorMode}:${runId}:${ownerId}`,
-      ])
+      ]
+      if (entry.mode === 'apply') {
+        expectedEvents.push(`application:${runId}`)
+      }
+      expect(events).toEqual(expectedEvents)
     }
   })
 
@@ -1445,7 +1630,11 @@ describe('Workspace Search migration control coordinator', () => {
       approval:
         workspaceSearchMigrationControlApprovalLiterals.apply,
     }, harness))
-    expect(harness.events).toEqual(['close-replan', 'apply'])
+    expect(harness.events).toEqual([
+      'close-replan',
+      'apply',
+      'application',
+    ])
     expect(harness.readPhase()).toBe('applied')
 
     summaries.push(await invokeCoordinator({
@@ -1461,6 +1650,7 @@ describe('Workspace Search migration control coordinator', () => {
     expect(harness.events).toEqual([
       'close-replan',
       'apply',
+      'application',
       'verify',
     ])
     expect(harness.readPhase()).toBe('verified')
@@ -1478,6 +1668,7 @@ describe('Workspace Search migration control coordinator', () => {
     expect(harness.events).toEqual([
       'close-replan',
       'apply',
+      'application',
       'verify',
       'release',
     ])
@@ -1578,7 +1769,15 @@ describe('Workspace Search migration control coordinator', () => {
       mode: 'release',
       approval:
         workspaceSearchMigrationControlApprovalLiterals.release,
-    }, harness)).toEqual({ mode: 'release', phase: 'released' })
+    }, harness)).toEqual({
+      mode: 'release',
+      phase: 'released',
+      terminalKind: 'rolled-back',
+      terminalPersistenceVersion: 2,
+      terminalRootDigest: digest('restart-partial-rolled-back-root'),
+      writerFenceRecordDigest: digest('restart-released-fence'),
+      releasedAt: '2026-08-01T00:19:30.000Z',
+    })
     expect(harness.events).toEqual([
       'close-replan',
       'apply',
@@ -1675,6 +1874,14 @@ describe('Workspace Search migration control coordinator', () => {
           options: ['verify', 'complete-rollback'],
         },
       },
+      application: {
+        executionRunDigest: digest('real-execution'),
+        planDigest: digest('real-plan'),
+        sealedPlanOperationCount: 0,
+        appliedOperationCount: 0,
+        appliedRootDigest: digest('real-applied-root'),
+        appliedAt: '2026-08-01T00:18:30.000Z',
+      },
     })
     expect(
       harness.events.some((event) =>
@@ -1765,6 +1972,12 @@ describe('Workspace Search migration control coordinator', () => {
     expect(releaseSummary).toEqual({
       mode: 'release',
       phase: 'released',
+      terminalKind: 'verified',
+      terminalPersistenceVersion: 1,
+      terminalRootDigest: digest('real-verified'),
+      writerFenceRecordDigest:
+        harness.readReleasedWriterFenceRecordDigest(),
+      releasedAt: harness.readReleasedWriterFenceOpenedAt(),
     })
     expect(harness.isReleased()).toBe(true)
     expect(harness.events).toContain('process-5:evidence:collect')
@@ -1803,7 +2016,16 @@ describe('Workspace Search migration control coordinator', () => {
         workspaceSearchMigrationControlApprovalLiterals.release,
       heartbeatScheduler: harness.createHeartbeatScheduler(6),
       clock: readCoordinatorHarnessClock,
-    }, dependencies)).toEqual({ mode: 'release', phase: 'released' })
+    }, dependencies)).toEqual({
+      mode: 'release',
+      phase: 'released',
+      terminalKind: 'verified',
+      terminalPersistenceVersion: 1,
+      terminalRootDigest: digest('real-verified'),
+      writerFenceRecordDigest:
+        harness.readReleasedWriterFenceRecordDigest(),
+      releasedAt: harness.readReleasedWriterFenceOpenedAt(),
+    })
     expect(harness.events.slice(eventsBeforeRecovery)).toEqual([
       'process-6:configuration:read',
       'process-6:writer-fence:read',
@@ -1951,7 +2173,16 @@ describe('Workspace Search migration control coordinator', () => {
         workspaceSearchMigrationControlApprovalLiterals.release,
       heartbeatScheduler: harness.createHeartbeatScheduler(6),
       clock: readCoordinatorHarnessClock,
-    }, dependencies)).toEqual({ mode: 'release', phase: 'released' })
+    }, dependencies)).toEqual({
+      mode: 'release',
+      phase: 'released',
+      terminalKind: 'rolled-back',
+      terminalPersistenceVersion: 2,
+      terminalRootDigest: digest('real-partial-rolled-back'),
+      writerFenceRecordDigest:
+        harness.readReleasedWriterFenceRecordDigest(),
+      releasedAt: harness.readReleasedWriterFenceOpenedAt(),
+    })
     expect(harness.events.slice(eventsBeforeRecovery)).toEqual([
       'process-6:configuration:read',
       'process-6:writer-fence:read',

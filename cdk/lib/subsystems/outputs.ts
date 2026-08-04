@@ -9,6 +9,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as stepfunctions from 'aws-cdk-lib/aws-stepfunctions';
+import type { FileBucketIncarnationMarker } from './file-storage';
 
 /**
  * Resources whose deployment attributes are published as stack outputs.
@@ -62,6 +63,10 @@ export type StackOutputResources = {
   readonly workspaceSearchMigrationJournalKey: kms.IKey;
   /** Least-privilege policy attached explicitly to an approved migration operator. */
   readonly workspaceSearchMigrationOperatorPolicy: iam.IManagedPolicy;
+  /** Non-production-only retention extension attached alongside the migration operator policy. */
+  readonly workspaceSearchMigrationRehearsalEvidencePolicy: iam.IManagedPolicy;
+  /** Deployment condition guarding rehearsal-only evidence resources. */
+  readonly workspaceSearchMigrationRehearsalEvidenceCondition: cdk.CfnCondition;
   /** Read-only policy attached explicitly to an approved integrity-check operator. */
   readonly crossDomainIntegrityOperatorPolicy: iam.IManagedPolicy;
   /** Standard state machine that performs an isolated restore drill. */
@@ -86,6 +91,8 @@ export type StackOutputResources = {
   readonly fileProofingTable: dynamodb.ITable;
   /** Versioned workspace file bucket. */
   readonly fileBucket: s3.IBucket;
+  /** Exact immutable marker that identifies this file-bucket incarnation. */
+  readonly fileBucketIncarnationMarker: FileBucketIncarnationMarker;
   /** GuardDuty malware protection plan for workspace files. */
   readonly malwareProtectionPlan: guardduty.CfnMalwareProtectionPlan;
   /** Deployed realtime WebSocket stage. */
@@ -255,6 +262,17 @@ export function buildStackOutputs(
   new cdk.CfnOutput(scope, 'WorkspaceSearchMigrationOperatorPolicyArn', {
     value: resources.workspaceSearchMigrationOperatorPolicy.managedPolicyArn,
   });
+  const rehearsalEvidencePolicyOutput = new cdk.CfnOutput(
+    scope,
+    'WorkspaceSearchMigrationRehearsalEvidencePolicyArn',
+    {
+      value:
+        resources.workspaceSearchMigrationRehearsalEvidencePolicy
+          .managedPolicyArn,
+    },
+  );
+  rehearsalEvidencePolicyOutput.condition =
+    resources.workspaceSearchMigrationRehearsalEvidenceCondition;
   new cdk.CfnOutput(scope, 'CrossDomainIntegrityOperatorPolicyArn', {
     value: resources.crossDomainIntegrityOperatorPolicy.managedPolicyArn,
   });
@@ -290,6 +308,18 @@ export function buildStackOutputs(
   });
   new cdk.CfnOutput(scope, 'FileBucketName', {
     value: resources.fileBucket.bucketName,
+  });
+  new cdk.CfnOutput(scope, 'FileBucketIncarnationMarkerKey', {
+    value: resources.fileBucketIncarnationMarker.key,
+  });
+  new cdk.CfnOutput(scope, 'FileBucketIncarnationMarkerVersionId', {
+    value: resources.fileBucketIncarnationMarker.versionId,
+  });
+  new cdk.CfnOutput(scope, 'FileBucketIncarnationMarkerChecksumSha256', {
+    value: resources.fileBucketIncarnationMarker.checksumSha256,
+  });
+  new cdk.CfnOutput(scope, 'FileBucketIncarnationMarkerSize', {
+    value: resources.fileBucketIncarnationMarker.size,
   });
   new cdk.CfnOutput(scope, 'FileMalwareProtectionPlanId', {
     value: resources.malwareProtectionPlan.attrMalwareProtectionPlanId,

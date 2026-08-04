@@ -8,6 +8,7 @@ import {
   type TransactWriteItemsCommandOutput,
 } from '@aws-sdk/client-dynamodb'
 import {
+  createMigrationDigest,
   WorkspaceSearchMigrationFailure,
   WORKSPACE_SEARCH_MIGRATION_ID,
 } from './migration-contract'
@@ -152,6 +153,160 @@ describe('DescribeTable rate checkpoint AWS store', () => {
         recordKey: { S: recordKey },
       },
     })
+  })
+
+  test('authenticates a legacy v1 row and upgrades it on the next CAS', async () => {
+    const transport = new FakeRateCheckpointTransport()
+    const store = createStore(transport)
+    expect(await store.compareAndSwap({
+      scopeBindingDigest,
+      expectedRevision: null,
+      checkpoint: createCheckpoint(),
+    })).toBe('stored')
+    const currentItem = requirePutItem(
+      requireTransactionPut(requireOnlyTransactionCommand(transport)),
+    )
+    const legacyCheckpoint = Object.freeze({
+      version: 1,
+      scopeBindingDigest,
+      transportBindingDigest,
+      policy: ratePolicy,
+      revision: 0,
+      fenceToken: 1,
+      writeNonce: 'a'.repeat(64),
+      capturedAtEpochMilliseconds: 1_754_006_400_000,
+      attemptCount: 1,
+      forfeitedAttemptCount: 0,
+      reservedAttempts: 0,
+      reservationKind: 'none',
+      mandatoryCleanupRequired: false,
+      attemptInFlight: false,
+      attemptInFlightNonce: null,
+      sequence: 1,
+      throttleCount: 1,
+      budgetStopCount: 2,
+      cadenceWaitCount: 0,
+      cadenceWaitMilliseconds: 0,
+      maximumInFlight: 1,
+    })
+    const stateTableLocationBindingDigest = createMigrationDigest({
+      kind: 'workspace-search-migration-state-table-location-binding',
+      version: 1,
+      tableName: 'migration-state-table',
+    })
+    const checkpointJson = JSON.stringify(legacyCheckpoint)
+    transport.getOutput = {
+      $metadata: {},
+      Item: {
+        ...currentItem,
+        checkpointJson: { S: checkpointJson },
+        checkpointDigest: {
+          S: createMigrationDigest({
+            kind:
+              'workspace-search-migration-describe-table-rate-checkpoint',
+            version: 1,
+            stateTableLocationBindingDigest,
+            checkpoint: legacyCheckpoint,
+          }),
+        },
+      },
+    }
+
+    expect(await store.load(scopeBindingDigest)).toEqual({
+      version: 2,
+      scopeBindingDigest,
+      transportBindingDigest,
+      policy: ratePolicy,
+      revision: 0,
+      fenceToken: 1,
+      writeNonce: 'a'.repeat(64),
+      capturedAtEpochMilliseconds: 1_754_006_400_000,
+      attemptCount: 1,
+      forfeitedAttemptCount: 0,
+      reservedAttempts: 0,
+      reservationKind: 'none',
+      mandatoryCleanupRequired: false,
+      attemptInFlight: false,
+      attemptInFlightNonce: null,
+      sequence: 1,
+      throttleCount: 1,
+      awsServiceThrottleCount: 1,
+      rehearsalInjectedThrottleCount: 0,
+      budgetStopCount: 2,
+      operationalBudgetStopCount: 1,
+      awsServiceThrottleBudgetStopCount: 1,
+      rehearsalInjectedBudgetStopCount: 0,
+      cadenceWaitCount: 0,
+      cadenceWaitMilliseconds: 0,
+      maximumInFlight: 1,
+    })
+
+    const invalidLegacyCheckpoint = Object.freeze({
+      ...legacyCheckpoint,
+      budgetStopCount: 0,
+    })
+    transport.getOutput = {
+      $metadata: {},
+      Item: {
+        ...currentItem,
+        checkpointJson: { S: JSON.stringify(invalidLegacyCheckpoint) },
+        checkpointDigest: {
+          S: createMigrationDigest({
+            kind:
+              'workspace-search-migration-describe-table-rate-checkpoint',
+            version: 1,
+            stateTableLocationBindingDigest,
+            checkpoint: invalidLegacyCheckpoint,
+          }),
+        },
+      },
+    }
+    await expect(store.load(scopeBindingDigest)).rejects.toThrow(
+      'Workspace Search migration DescribeTable rate checkpoint storage failed.',
+    )
+    transport.getOutput = {
+      $metadata: {},
+      Item: {
+        ...currentItem,
+        checkpointJson: { S: checkpointJson },
+        checkpointDigest: {
+          S: createMigrationDigest({
+            kind:
+              'workspace-search-migration-describe-table-rate-checkpoint',
+            version: 1,
+            stateTableLocationBindingDigest,
+            checkpoint: legacyCheckpoint,
+          }),
+        },
+      },
+    }
+
+    const successor = Object.freeze({
+      ...createCheckpoint({
+        revision: 1,
+        fenceToken: 2,
+        writeNonce: 'e'.repeat(64),
+      }),
+      attemptCount: 1,
+      sequence: 1,
+      throttleCount: 1,
+      awsServiceThrottleCount: 1,
+      budgetStopCount: 2,
+      operationalBudgetStopCount: 1,
+      awsServiceThrottleBudgetStopCount: 1,
+      maximumInFlight: 1,
+    })
+    expect(await store.compareAndSwap({
+      scopeBindingDigest,
+      expectedRevision: 0,
+      checkpoint: successor,
+    })).toBe('stored')
+    const upgradedItem = requirePutItem(
+      requireTransactionPut(requireLastTransactionCommand(transport)),
+    )
+    expect(readStringAttribute(upgradedItem, 'checkpointJson')).toContain(
+      '"rehearsalInjectedThrottleCount":0',
+    )
   })
 
   test('updates only the exact validated predecessor revision, digest, and fence', async () => {
@@ -463,7 +618,12 @@ function createCheckpoint(
     attemptInFlightNonce: null,
     sequence: 0,
     throttleCount: 0,
+    awsServiceThrottleCount: 0,
+    rehearsalInjectedThrottleCount: 0,
     budgetStopCount: 0,
+    operationalBudgetStopCount: 0,
+    awsServiceThrottleBudgetStopCount: 0,
+    rehearsalInjectedBudgetStopCount: 0,
     cadenceWaitCount: 0,
     cadenceWaitMilliseconds: 0,
     maximumInFlight: 0,

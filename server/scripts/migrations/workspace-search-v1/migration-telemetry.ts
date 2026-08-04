@@ -3,10 +3,12 @@ import { types as nodeUtilTypes } from 'node:util'
 import { isHexDigest } from './migration-contract'
 import {
   WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
+  type WorkspaceSearchMigrationDescribeTableBudgetStopProvenance,
   type WorkspaceSearchMigrationDescribeTablePhase,
   type WorkspaceSearchMigrationDescribeTableRateObservation,
   type WorkspaceSearchMigrationDescribeTableRateRecorder,
   type WorkspaceSearchMigrationDescribeTableRateStopReason,
+  type WorkspaceSearchMigrationDescribeTableThrottleProvenance,
 } from './migration-describe-table-rate-budget'
 
 /** Version of the strict Workspace Search migration telemetry contract. */
@@ -64,6 +66,7 @@ export type WorkspaceSearchMigrationTelemetryPhase =
   | 'checkpoint-page'
   | 'close'
   | 'drain'
+  | 'integrity-check'
   | 'measurement'
   | 'planning'
   | 'post-send-guard'
@@ -598,6 +601,7 @@ const telemetryPhases = new Set<string>([
   'checkpoint-page',
   'close',
   'drain',
+  'integrity-check',
   'measurement',
   'planning',
   'post-send-guard',
@@ -644,6 +648,7 @@ const describeTablePhaseCatalog: Readonly<
   Record<WorkspaceSearchMigrationDescribeTablePhase, true>
 > = Object.freeze({
   'checkpoint-page': true,
+  'integrity-check': true,
   measurement: true,
   'post-send-guard': true,
   'pre-send-guard': true,
@@ -1957,6 +1962,7 @@ function sanitizeDescribeTableThrottle(
       'kind',
       'observedAtMilliseconds',
       'phase',
+      'provenance',
       'sequence',
       'version',
     ]) ||
@@ -1964,7 +1970,8 @@ function sanitizeDescribeTableThrottle(
       WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION ||
     !isPositiveSafeInteger(record.get('sequence')) ||
     !isNonNegativeSafeInteger(record.get('observedAtMilliseconds')) ||
-    !isNonNegativeSafeInteger(record.get('backoffMilliseconds'))
+    !isNonNegativeSafeInteger(record.get('backoffMilliseconds')) ||
+    !isDescribeTableThrottleProvenance(record.get('provenance'))
   ) {
     return undefined
   }
@@ -2005,6 +2012,7 @@ function sanitizeDescribeTableBudgetStop(
       'kind',
       'observedAtMilliseconds',
       'phase',
+      'provenance',
       'reason',
       'remainingNormalAdmissionAttempts',
       'remainingWindowAttempts',
@@ -2026,9 +2034,11 @@ function sanitizeDescribeTableBudgetStop(
   }
   const phase = record.get('phase')
   const reason = record.get('reason')
+  const provenance = record.get('provenance')
   if (
     !isDescribeTablePhase(phase) ||
-    !isDescribeTableStopReason(reason)
+    !isDescribeTableStopReason(reason) ||
+    !isDescribeTableBudgetStopProvenance(reason, provenance)
   ) {
     return undefined
   }
@@ -2609,6 +2619,35 @@ function isDescribeTableStopReason(
 ): value is WorkspaceSearchMigrationDescribeTableRateStopReason {
   return typeof value === 'string' &&
     Object.hasOwn(describeTableStopReasonCatalog, value)
+}
+
+/**
+ * Checks one finite source of a classified DescribeTable throttle.
+ *
+ * @param value - Candidate source value.
+ * @returns Whether the source is one of the two controller-owned values.
+ */
+function isDescribeTableThrottleProvenance(
+  value: unknown,
+): value is WorkspaceSearchMigrationDescribeTableThrottleProvenance {
+  return value === 'aws-service' ||
+    value === 'rehearsal-after-success-injection'
+}
+
+/**
+ * Checks that one budget-stop source agrees with its classified reason.
+ *
+ * @param reason - Already validated budget-stop reason.
+ * @param provenance - Candidate source value.
+ * @returns Whether the reason and source form one admitted pair.
+ */
+function isDescribeTableBudgetStopProvenance(
+  reason: WorkspaceSearchMigrationDescribeTableRateStopReason,
+  provenance: unknown,
+): provenance is WorkspaceSearchMigrationDescribeTableBudgetStopProvenance {
+  if (reason !== 'throttled') return provenance === 'operational'
+  return provenance === 'aws-service-throttle' ||
+    provenance === 'rehearsal-after-success-injection'
 }
 
 /**

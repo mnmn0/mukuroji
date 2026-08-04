@@ -55,6 +55,10 @@ test('Workspace Search migration alarms cover rate, progress, quarantine, and te
       metricName: 'DescribeTableThrottleCount',
     }),
     Object.freeze({
+      logicalIdPrefix: 'WorkspaceSearchMigrationDescribeTableBudgetStopAlarm',
+      metricName: 'DescribeTableBudgetStopCount',
+    }),
+    Object.freeze({
       logicalIdPrefix: 'WorkspaceSearchMigrationRateBudgetExhaustionAlarm',
       metricName: 'DescribeTableBudgetExhaustionCount',
     }),

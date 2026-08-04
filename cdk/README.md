@@ -37,16 +37,31 @@
 
 `WorkspaceDirectoryId`、`WorkspaceAuditPseudonymKey`、owner email / username は data key と認可境界に使います。環境ごとに固定し、通常の application deploy で変更しないでください。pseudonym key を変更すると既存 resource の audit timeline が分裂するため、通常の rotation 対象にはしません。
 
+### Workspace Search migration deployment target
+
+Migration rehearsalのaccount、Region、environmentはCloudFormation parameterでは指定しません。
+CDK contextの`workspaceSearchMigrationDeploymentTarget`は、
+[`lib/config/workspace-search-migration-deployment-targets.ts`](lib/config/workspace-search-migration-deployment-targets.ts)
+にreview済みcodeとして固定したtarget IDを選ぶだけです。未知のID、不完全なtarget、stackの
+account/Regionとの不一致はsynth時に失敗します。現在のmapはrehearsal resourceを作成しない
+`production-disabled`だけを含みます。
+
+実non-production targetの追加は、具体的で互いに異なるdeployment accountとproduction-account digest、
+固定Region、`rehearsalEnabled=true`を同じsource mapへ追加する独立したreview対象です。追加時はcloud assemblyと
+`cdk diff`をreviewし、stack environmentとCloudFormation assertionがexact account/Regionへ固定されることを
+確認します。Production account IDそのものはsource、template、tag、outputへ保存せず、private permit入力から
+domain-separated SHA-256を計算してCDKのdigest tagと照合します。
+
 ## API observability
 
-Application Lambda 18個は X-Ray active tracing を有効にし、各 execution role には X-Ray が要求する
+Application Lambda 25個は X-Ray active tracing を有効にし、各 execution role には X-Ray が要求する
 trace/telemetry write action だけを追加します。API Lambda は readiness probe 用に
 `AuditEventsTable`、`WorkItemsTable`、`WorkspaceAccessTable` への `dynamodb:DescribeTable` だけを
 持つ独立 policy を使います。
 
 Stack は API Lambda の `Errors`、`Throttles`、p95 `Duration`（12秒）、HTTP API の 5xx、
 application EMF の `ServerErrorCount` を CloudWatch alarm として作成します。Workspace Search
-migration専用の5 alarmを含む43 metric alarmと
+migration専用の6 alarmを含む45 metric alarmと
 1 composite alarmの
 `AlarmActions` は、必須parameterで指定した既存のprimary/secondary SNS topicへ接続します。
 Stackはtopic、subscription、Incident Manager escalation planを作成・変更しません。Topic ownerは
@@ -75,16 +90,17 @@ environment evidenceへ保存します。
 
 Operator自身の`sns:Publish`だけではCloudWatch principalとKMS経路を検証できません。Deploy後は
 同じ両topic actionを持つcontrolled test alarmを実際に`OK → ALARM`へ遷移させ、CloudWatch alarm
-history、両subscriptionの受信時刻/message ID、`ALARM → OK`への復帰を保存します。全44 alarmの
+history、両subscriptionの受信時刻/message ID、`ALARM → OK`への復帰を保存します。全46 alarmの
 `AlarmActions`がprimary/secondaryの2 ARNを含み、inventory済みの既存actionも保持していることを
 templateとdeployed configurationの両方で照合します。
 
 ### Workspace Search migration alarms
 
 `Mukuroji/WorkspaceSearchMigration` namespaceには、
-`Service=mukuroji-workspace-search-migration`だけをdimensionとする次の5 alarmがあります。
+`Service=mukuroji-workspace-search-migration`だけをdimensionとする次の6 alarmがあります。
 
 - `WorkspaceSearchMigrationDescribeTableThrottleAlarm`
+- `WorkspaceSearchMigrationDescribeTableBudgetStopAlarm`
 - `WorkspaceSearchMigrationRateBudgetExhaustionAlarm`
 - `WorkspaceSearchMigrationCheckpointStallAlarm`
 - `WorkspaceSearchMigrationQuarantineAlarm`
@@ -92,8 +108,11 @@ templateとdeployed configurationの両方で照合します。
 
 すべて5分`Sum >= 1`、evaluation/datapoints 1/1、`TreatMissingData=notBreaching`です。
 Run ID、table、tenant、operation、phase、outcome、correlationはdimensionにしません。既存のalarm routing
-aspectがprimary/secondaryの両SNS actionを付与し、stackは追加topic、subscription、migration用
-`PutMetricData`権限を作成しません。CLIのterminal EMFと即時live-stall EMFをmetric化する実行surfaceは、
+aspectがprimary/secondaryの両SNS actionを付与します。Stackは追加topicやmigration用
+`PutMetricData`権限を作成しません。review済みtargetが`environment=non-production`かつ
+`rehearsalEnabled=true`のときだけ、
+6 alarmの`ALARM`通知を受けるprimary/secondary別のfilter済みSQS subscriptionと、未接続collector policyを
+作成します。CLIのterminal EMFと即時live-stall EMFをmetric化する実行surfaceは、
 そのstdout/stderrの両方をCloudWatch Logsへingestする必要があります。Alarm response、secret-free correlation、非本番の
 real metricによる`OK → ALARM → OK`と両receiptの手順は
 [`docs/operational-readiness.md`](../docs/operational-readiness.md)を参照してください。
@@ -114,6 +133,8 @@ real metricによる`OK → ALARM → OK`と両receiptの手順は
 - `RequestEmailIngestionFunctionName`, `RequestEmailIngestionDlqUrl`
 - `ProjectDirectoryTableName`, `TeamIssueEventsTableName`
 - `FileProofingTableName`, `FileBucketName`, `FileMalwareProtectionPlanId`
+- `FileBucketIncarnationMarkerKey`, `FileBucketIncarnationMarkerVersionId`, `FileBucketIncarnationMarkerChecksumSha256`, `FileBucketIncarnationMarkerSize`（同名 bucket 再作成を検出する固定 marker の exact S3 version、base64 SHA-256、byte size。cross-domain integrity operator の明示入力に使い、current version へ fallback しない）
+- `CrossDomainIntegrityOperatorPolicyArn`（6表の `Scan` / `DescribeTable`、exact FileBucket の `GetBucketVersioning`、`workspaces/*` の exact-version read、出力された marker VersionId に条件固定した marker exact-key read だけを持つ未接続 read-only policy）
 - `NotificationsTableName`, `CollaborationProjectionDlqUrl`, `NotificationScheduleDlqUrl`
 - `AnalyticsScheduleDlqUrl`
 - `AuditEventsTableName`, `ProcessedAuditEventsTableName`
@@ -123,8 +144,13 @@ real metricによる`OK → ALARM → OK`と両receiptの手順は
 - `WorkItemCollaborationTableName`, `RealtimeSessionsTableName`, `RealtimeWebSocketUrl`
 - `WorkspaceSearchTableName`（検索文書、saved view、ユーザー別 view preference）
 - `WorkspaceSearchMigrationStateTableName`（lease、checkpoint、operation receipt 用の retained/PITR store）
-- `WorkspaceSearchMigrationJournalBucketName`, `WorkspaceSearchMigrationJournalKeyArn`（30日間の Object Lock COMPLIANCE 付き lossless migration artifact store。Preimage journal segment は2 MiB以下、planning raw source/target artifact segment は16 MiB以下の単一 `PutObject` に限定し、multipart upload は許可しません。専用 access log bucket は current/noncurrent version を90日保持）
-- `WorkspaceSearchMigrationOperatorPolicyArn`（承認済み operator principal へ明示的に attach する未接続 policy）
+- `WorkspaceSearchMigrationDeploymentTargetId`, `WorkspaceSearchMigrationDeploymentTrustVersion`, `WorkspaceSearchMigrationDeploymentEnvironment`, `WorkspaceSearchMigrationDeploymentAccount`, `WorkspaceSearchMigrationDeploymentRegion`, `WorkspaceSearchMigrationProductionAccountDigest`, `WorkspaceSearchMigrationDeploymentTrustRootDigest`（review済みsource mapから決まるcanonical deployment trust root。raw production account IDは含めない）
+- `WorkspaceSearchMigrationJournalBucketName`, `WorkspaceSearchMigrationJournalKeyArn`（通常artifactは30–31日、`workspace-search/v1/rehearsal/evidence-*`だけ365–366日の Object Lock COMPLIANCE 付きlossless migration artifact store。Preimage journal segment は2 MiB以下、planning raw source/target artifact segment は16 MiB以下の単一 `PutObject` に限定し、multipart upload は許可しません。専用 access log bucket は current/noncurrent version を90日保持）
+- `WorkspaceSearchMigrationOperatorPolicyArn`（承認済み operator principal へ明示的に attach する未接続 policy。通常journalの30–31日保持権限だけを持つ）
+- `WorkspaceSearchMigrationRehearsalEvidencePolicyArn`（`non-production`だけに出力する未接続policy。Issue 167のimmutable evidenceを365–366日へ延長する実行時だけoperator policyと同じ短命roleへ追加する）
+- `WorkspaceSearchMigrationAlarmEvidenceAlarmArns`, `WorkspaceSearchMigrationAlarmEvidencePrimaryQueueUrl`, `WorkspaceSearchMigrationAlarmEvidenceSecondaryQueueUrl`, `WorkspaceSearchMigrationAlarmEvidenceCollectorPolicyArn`（`non-production`だけに出力する6 alarmのcanonical vector、route別receipt queue、未接続collector policy）
+- `WorkspaceSearchMigrationAlarmEvidenceSignalLogGroupName`, `WorkspaceSearchMigrationAlarmEvidenceSignalLogStreamName`, `WorkspaceSearchMigrationAlarmEvidenceSignalLogStreamArn`, `WorkspaceSearchMigrationAlarmEvidenceIngestionPolicyArn`（`non-production`だけに作成するretained 365日LogGroup、固定/precreated `alarm-signals-v1` stream、そのstreamへの`logs:PutLogEvents`だけを許す未接続ingestion policy。production operator policyには接続しない）
+- `WorkspaceSearchMigrationAlarmEvidenceDeploymentTrustRootDigest`, `WorkspaceSearchMigrationAlarmEvidenceDeploymentTargetId`（条件付きalarm evidence sinkを同じdeployment trust rootへ束縛する値）
 - `RestoreDrillStateMachineArn`, `RestoreDrillCleanupStateMachineArn`
 - `RestoreDrillEvidenceBucketName`, `RestoreDrillScratchBucketName`, `RestoreDrillStateTableName`
 - `RestoreDrillCleanupApprovalPolicyArn`, `RestoreDrillScheduleDlqUrl`
@@ -453,6 +479,7 @@ poll job も再実行するため、対象と影響を棚卸しせず実施し�
 File body は API request body に通さず、認証・認可済み API が発行する短命 URL で `workspaces/<workspaceId>/...` の object key へ直接 upload / download します。client が任意の bucket key を指定する方式ではありません。
 
 - S3 bucket は Block Public Access、Bucket owner enforced、SSE-S3、TLS 強制、versioning、`Retain` を有効にします。
+- `system/data-integrity/file-bucket-incarnation/v1.json` は bucket policy と TLS 強制の適用後、custom provider が事前 GET を行わず `If-None-Match: *` の条件付き PUT を最初に1回だけ試みます。Policy は同 key の delete / version delete を全 principal に拒否し、provider role 以外の PUT と `If-None-Match: *` を欠く PUT を拒否します。条件不成立または Create response を失った再試行だけ current marker の checksum / size を照合して同じ VersionId を返し、新しい version を作りません。Provider に bucket-wide `ListBucket` は付与しません。Object Lock は有効化しません。
 - browser CORS は `TaskApiAllowedOrigins` と揃え、direct `PUT` / `GET` / `HEAD` と checksum / metadata header だけを許可します。
 - GuardDuty Malware Protection for S3 は `workspaces/` prefix を scan し、`GuardDutyMalwareScanStatus` tag を付けます。
 - bucket policy は GuardDuty 以外による scan status tag の追加・変更・削除を拒否し、API と cleanup consumer は既存 status を同値のまま保持する tag 更新だけを行います。
@@ -700,7 +727,7 @@ VITE_API_BASE_URL="$FUNCTION_URL" bun run web:dev
 
 Alarm routingを初めて追加するupgradeでは、同一account/regionに異なる2つのstandard SNS topicを
 先に作成し、上記policy、KMS、subscription、controlled alarm testの契約を満たします。既存環境で
-monitoring stack、custom resource、または手動操作が`AlarmActions`を管理している場合は、全44 alarmの
+monitoring stack、custom resource、または手動操作が`AlarmActions`を管理している場合は、全46 alarmの
 現行actionとownerをinventory化し、必要なdestinationを新topic側へ移行してから旧reconcilerを停止します。
 複数ownerが同じalarm propertyを更新する状態でdeployしません。`cdk diff`では
 2つの必須parameter、相異rule、既存alarmの`AlarmActions`以外にalarm resourceの置換や

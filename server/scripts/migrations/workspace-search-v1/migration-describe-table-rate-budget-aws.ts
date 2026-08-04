@@ -477,16 +477,23 @@ function parseRateCheckpointRecord(
   } catch {
     return failRateCheckpointAws('INVALID_STATE')
   }
+  const isLegacyCheckpoint = readStoredCheckpointVersion(candidate) === 1
   const checkpoint = parseRateCheckpoint(
     candidate,
     scopeBindingDigest,
     'INVALID_STATE',
   )
-  const prepared = prepareRateCheckpoint(
-    checkpoint,
-    stateTableLocationBindingDigest,
-    'INVALID_STATE',
-  )
+  const prepared = isLegacyCheckpoint
+    ? prepareLegacyStoredRateCheckpoint(
+      checkpoint,
+      stateTableLocationBindingDigest,
+      'INVALID_STATE',
+    )
+    : prepareRateCheckpoint(
+      checkpoint,
+      stateTableLocationBindingDigest,
+      'INVALID_STATE',
+    )
   const checkpointDigest = readDigestAttribute(
     item,
     'checkpointDigest',
@@ -517,6 +524,30 @@ function parseRateCheckpointRecord(
     ...prepared,
     recordKey,
   })
+}
+
+/**
+ * Reads only an own JSON data property's numeric checkpoint version.
+ *
+ * The complete exact shape is still validated by `parseRateCheckpoint`; this
+ * early read selects the durable representation needed to authenticate an
+ * existing v1 row before it is upgraded in memory.
+ *
+ * @param value - JSON-decoded untrusted checkpoint candidate.
+ * @returns Its own numeric version, or undefined for every other shape.
+ */
+function readStoredCheckpointVersion(value: unknown): number | undefined {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    nodeUtilTypes.isProxy(value)
+  ) return undefined
+  const descriptor = Object.getOwnPropertyDescriptor(value, 'version')
+  return descriptor !== undefined &&
+      Object.hasOwn(descriptor, 'value') &&
+      typeof descriptor.value === 'number'
+    ? descriptor.value
+    : undefined
 }
 
 /**
@@ -735,6 +766,72 @@ function prepareRateCheckpoint(
 }
 
 /**
+ * Reconstructs and authenticates the exact durable v1 checkpoint shape.
+ *
+ * Existing v1 rows predate source-separated throttle and budget-stop counts.
+ * They must be verified against their original JSON and digest before the
+ * parser-provided v2 checkpoint is returned to the lifecycle. The next normal
+ * compare-and-swap writes the upgraded v2 representation.
+ *
+ * @param checkpoint - Strict in-memory v2 upgrade of one validated v1 row.
+ * @param stateTableLocationBindingDigest - Requested table-name binding.
+ * @param code - Stable failure code for reconstruction errors.
+ * @returns Upgraded checkpoint paired with the exact authenticated v1 bytes.
+ */
+function prepareLegacyStoredRateCheckpoint(
+  checkpoint: WorkspaceSearchMigrationDescribeTableRateCheckpoint,
+  stateTableLocationBindingDigest: string,
+  code: WorkspaceSearchMigrationFailureCode,
+): PreparedRateCheckpoint {
+  try {
+    const legacyCheckpoint = Object.freeze({
+      version: 1,
+      scopeBindingDigest: checkpoint.scopeBindingDigest,
+      transportBindingDigest: checkpoint.transportBindingDigest,
+      policy: checkpoint.policy,
+      revision: checkpoint.revision,
+      fenceToken: checkpoint.fenceToken,
+      writeNonce: checkpoint.writeNonce,
+      capturedAtEpochMilliseconds:
+        checkpoint.capturedAtEpochMilliseconds,
+      attemptCount: checkpoint.attemptCount,
+      forfeitedAttemptCount: checkpoint.forfeitedAttemptCount,
+      reservedAttempts: checkpoint.reservedAttempts,
+      reservationKind: checkpoint.reservationKind,
+      mandatoryCleanupRequired: checkpoint.mandatoryCleanupRequired,
+      attemptInFlight: checkpoint.attemptInFlight,
+      attemptInFlightNonce: checkpoint.attemptInFlightNonce,
+      sequence: checkpoint.sequence,
+      throttleCount: checkpoint.throttleCount,
+      budgetStopCount: checkpoint.budgetStopCount,
+      cadenceWaitCount: checkpoint.cadenceWaitCount,
+      cadenceWaitMilliseconds: checkpoint.cadenceWaitMilliseconds,
+      maximumInFlight: checkpoint.maximumInFlight,
+    })
+    const checkpointJson = JSON.stringify(legacyCheckpoint)
+    if (
+      typeof checkpointJson !== 'string' ||
+      new TextEncoder().encode(checkpointJson).byteLength >
+        maximumCheckpointJsonBytes
+    ) {
+      return failRateCheckpointAws(code)
+    }
+    return Object.freeze({
+      checkpoint,
+      checkpointJson,
+      checkpointDigest: createMigrationDigest({
+        kind: rateCheckpointRecordKind,
+        version: rateCheckpointRecordVersion,
+        stateTableLocationBindingDigest,
+        checkpoint: legacyCheckpoint,
+      }),
+    })
+  } catch {
+    return failRateCheckpointAws(code)
+  }
+}
+
+/**
  * Parses and detaches one exact-shape rate checkpoint.
  *
  * @param value - Candidate untrusted checkpoint.
@@ -748,7 +845,7 @@ function parseRateCheckpoint(
   code: WorkspaceSearchMigrationFailureCode,
 ): WorkspaceSearchMigrationDescribeTableRateCheckpoint {
   const guards = createRateCheckpointGuards(code)
-  const record = requirePlainExactRecord(guards, value, [
+  const legacyKeys = [
     'attemptCount',
     'attemptInFlight',
     'attemptInFlightNonce',
@@ -770,7 +867,53 @@ function parseRateCheckpoint(
     'transportBindingDigest',
     'version',
     'writeNonce',
-  ], code)
+  ]
+  const currentKeys = [
+    'attemptCount',
+    'attemptInFlight',
+    'attemptInFlightNonce',
+    'awsServiceThrottleBudgetStopCount',
+    'awsServiceThrottleCount',
+    'budgetStopCount',
+    'cadenceWaitCount',
+    'cadenceWaitMilliseconds',
+    'capturedAtEpochMilliseconds',
+    'fenceToken',
+    'forfeitedAttemptCount',
+    'mandatoryCleanupRequired',
+    'maximumInFlight',
+    'operationalBudgetStopCount',
+    'policy',
+    'rehearsalInjectedBudgetStopCount',
+    'rehearsalInjectedThrottleCount',
+    'reservationKind',
+    'reservedAttempts',
+    'revision',
+    'scopeBindingDigest',
+    'sequence',
+    'throttleCount',
+    'transportBindingDigest',
+    'version',
+    'writeNonce',
+  ]
+  let legacy = false
+  let record: object
+  try {
+    record = requirePlainExactRecord(
+      guards,
+      value,
+      currentKeys,
+      code,
+    )
+  } catch {
+    record = requirePlainExactRecord(
+      guards,
+      value,
+      legacyKeys,
+      code,
+    )
+    legacy = true
+  }
   const version = guards.readOwn(record, 'version')
   const scopeBindingDigest = requireDigest(
     guards.readOwn(record, 'scopeBindingDigest'),
@@ -827,10 +970,40 @@ function parseRateCheckpoint(
     guards.readOwn(record, 'throttleCount'),
     code,
   )
+  const awsServiceThrottleCount = legacy
+    ? throttleCount
+    : requireNonNegativeSafeInteger(
+      guards.readOwn(record, 'awsServiceThrottleCount'),
+      code,
+    )
+  const rehearsalInjectedThrottleCount = legacy
+    ? 0
+    : requireNonNegativeSafeInteger(
+      guards.readOwn(record, 'rehearsalInjectedThrottleCount'),
+      code,
+    )
   const budgetStopCount = requireNonNegativeSafeInteger(
     guards.readOwn(record, 'budgetStopCount'),
     code,
   )
+  const operationalBudgetStopCount = legacy
+    ? budgetStopCount - throttleCount
+    : requireNonNegativeSafeInteger(
+      guards.readOwn(record, 'operationalBudgetStopCount'),
+      code,
+    )
+  const awsServiceThrottleBudgetStopCount = legacy
+    ? throttleCount
+    : requireNonNegativeSafeInteger(
+      guards.readOwn(record, 'awsServiceThrottleBudgetStopCount'),
+      code,
+    )
+  const rehearsalInjectedBudgetStopCount = legacy
+    ? 0
+    : requireNonNegativeSafeInteger(
+      guards.readOwn(record, 'rehearsalInjectedBudgetStopCount'),
+      code,
+    )
   const cadenceWaitCount = requireNonNegativeSafeInteger(
     guards.readOwn(record, 'cadenceWaitCount'),
     code,
@@ -852,8 +1025,10 @@ function parseRateCheckpoint(
     return failRateCheckpointAws(code)
   }
   if (
-    version !==
-      WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_CHECKPOINT_VERSION ||
+    (legacy
+      ? version !== 1
+      : version !==
+        WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_CHECKPOINT_VERSION) ||
     scopeBindingDigest !== expectedScopeBindingDigest ||
     (
       reservationKind !== 'none' &&
@@ -867,6 +1042,13 @@ function parseRateCheckpoint(
     ) ||
     typeof mandatoryCleanupRequired !== 'boolean' ||
     sequence !== attemptCount ||
+    (legacy && budgetStopCount < throttleCount) ||
+    throttleCount !==
+      awsServiceThrottleCount + rehearsalInjectedThrottleCount ||
+    budgetStopCount !==
+      operationalBudgetStopCount +
+        awsServiceThrottleBudgetStopCount +
+        rehearsalInjectedBudgetStopCount ||
     (maximumInFlight !== 0 && maximumInFlight !== 1) ||
     attemptCount + forfeitedAttemptCount + reservedAttempts >
       policy.maximumAttemptsPerLifecycle
@@ -892,7 +1074,12 @@ function parseRateCheckpoint(
     attemptInFlightNonce,
     sequence,
     throttleCount,
+    awsServiceThrottleCount,
+    rehearsalInjectedThrottleCount,
     budgetStopCount,
+    operationalBudgetStopCount,
+    awsServiceThrottleBudgetStopCount,
+    rehearsalInjectedBudgetStopCount,
     cadenceWaitCount,
     cadenceWaitMilliseconds,
     maximumInFlight,

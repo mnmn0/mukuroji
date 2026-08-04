@@ -12,6 +12,13 @@ import type {
   CrossDomainWorkflowStatus,
   CrossDomainWorkItem,
 } from './cross-domain-integrity-contract'
+import {
+  calculateCrossDomainIntegrityResourceIdentityDigest,
+  CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
+  CROSS_DOMAIN_INTEGRITY_RESOURCE_TARGETS,
+  parseCrossDomainIntegrityResourceIdentities,
+  type CrossDomainIntegrityResourceIdentity,
+} from './cross-domain-integrity-resource-attestation'
 
 /** Public normalized cross-domain record contracts owned by data-integrity. */
 export type {
@@ -32,9 +39,34 @@ export type {
   CrossDomainWorkItem,
   CrossDomainWorkspaceMember,
 } from './cross-domain-integrity-contract'
+/** Immutable resource-attestation contracts retained on the checker surface. */
+export {
+  calculateCrossDomainIntegrityImmutableResourceIdentity,
+  calculateCrossDomainIntegrityResourceIdentityDigest,
+  createCrossDomainIntegrityImmutableResourceIdentities,
+  CROSS_DOMAIN_INTEGRITY_FILE_BUCKET_MARKER_KEY,
+  CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
+  CROSS_DOMAIN_INTEGRITY_RESOURCE_ATTESTATION_KIND,
+  CROSS_DOMAIN_INTEGRITY_RESOURCE_ATTESTATION_MAX_BYTES,
+  CROSS_DOMAIN_INTEGRITY_RESOURCE_ATTESTATION_VERSION,
+  CROSS_DOMAIN_INTEGRITY_RESOURCE_TARGETS,
+  CROSS_DOMAIN_INTEGRITY_TABLE_RESOURCE_TARGETS,
+  parseCrossDomainIntegrityResourceAttestation,
+  parseCrossDomainIntegrityResourceIdentities,
+  sameCrossDomainIntegrityResourceAttestation,
+  serializeCrossDomainIntegrityResourceAttestation,
+  type CrossDomainIntegrityFileBucketMarkerAttestation,
+  type CrossDomainIntegrityFileBucketResourceAttestation,
+  type CrossDomainIntegrityImmutableResourceIdentityInput,
+  type CrossDomainIntegrityResourceAttestation,
+  type CrossDomainIntegrityResourceIdentity,
+  type CrossDomainIntegrityResourceTarget,
+  type CrossDomainIntegrityTableResourceAttestation,
+  type CrossDomainIntegrityTableResourceTarget,
+} from './cross-domain-integrity-resource-attestation'
 
 /** Current cross-domain checker contract version. */
-export const CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION = 1
+export const CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION = 2
 
 /** Machine-readable result discriminator. */
 export const CROSS_DOMAIN_INTEGRITY_RESULT_KIND = 'mukuroji-cross-domain-integrity-result'
@@ -43,10 +75,99 @@ export const CROSS_DOMAIN_INTEGRITY_RESULT_KIND = 'mukuroji-cross-domain-integri
 export const CROSS_DOMAIN_INTEGRITY_COMPARISON_KIND =
   'mukuroji-cross-domain-integrity-comparison'
 
+/** Machine-readable same-resource migration rehearsal comparison discriminator. */
+export const CROSS_DOMAIN_INTEGRITY_MIGRATION_REHEARSAL_COMPARISON_KIND =
+  'mukuroji-cross-domain-integrity-migration-rehearsal-comparison'
+
+/** Machine-readable provenance discriminator emitted only by live rehearsal checks. */
+export const CROSS_DOMAIN_INTEGRITY_REHEARSAL_LIVE_PROVENANCE_KIND =
+  'mukuroji-cross-domain-integrity-rehearsal-live-provenance'
+
 const DIGEST_KEY_BYTE_LENGTH = 32
 const MAX_PAGE_SIZE = 1_000
 const MAX_PAGE_COUNT = 10_000
 const MAX_ITEM_COUNT = 1_000_000
+
+/** Maximum caller-selected duration for one complete integrity invocation. */
+export const CROSS_DOMAIN_INTEGRITY_MAX_DURATION_MILLISECONDS = 15 * 60 * 1_000
+
+/** Stable failure categories emitted by the invocation deadline capability. */
+export type CrossDomainIntegrityDeadlineFailureCode =
+  | 'CANCELLED'
+  | 'CLOCK_INVALID'
+  | 'DEADLINE_EXCEEDED'
+
+/** Safe failure raised when one invocation can no longer continue. */
+export class CrossDomainIntegrityDeadlineFailure extends Error {
+  /** Stable raw-data-free failure category. */
+  readonly code: CrossDomainIntegrityDeadlineFailureCode
+
+  /**
+   * Creates one stable deadline failure.
+   *
+   * @param code - Raw-data-free cancellation, clock, or timeout category.
+   */
+  constructor(code: CrossDomainIntegrityDeadlineFailureCode) {
+    super(code)
+    this.name = 'CrossDomainIntegrityDeadlineFailure'
+    this.code = code
+  }
+}
+
+/** Inputs used to create one non-resettable total invocation deadline. */
+export type CreateCrossDomainIntegrityInvocationDeadlineInput = {
+  /** Caller-selected total duration no greater than fifteen minutes. */
+  readonly maximumDurationMilliseconds: number
+  /** Trusted non-negative, integer, monotonic clock. */
+  readonly monotonicClock: () => number
+  /** Optional caller cancellation propagated to every external request. */
+  readonly signal?: AbortSignal
+}
+
+/** Private mutable state retained outside the frozen deadline capability. */
+type CrossDomainIntegrityInvocationDeadlineState = {
+  /** Controller shared by every external request in this invocation. */
+  readonly controller: AbortController
+  /** Absolute monotonic expiration instant. */
+  readonly deadlineMilliseconds: number
+  /** Removes the optional caller-cancellation listener. */
+  readonly disposeCallerSignal: () => void
+  /** Trusted clock captured once at capability creation. */
+  readonly monotonicClock: () => number
+  /** Initial monotonic sample. */
+  readonly startedAtMilliseconds: number
+  /** Failure responsible for aborting the invocation, when known. */
+  failure?: CrossDomainIntegrityDeadlineFailure
+  /** Latest accepted monotonic sample. */
+  lastObservedMilliseconds: number
+}
+
+const crossDomainIntegrityInvocationDeadlineStates =
+  new WeakMap<CrossDomainIntegrityInvocationDeadline,
+    CrossDomainIntegrityInvocationDeadlineState>()
+const crossDomainIntegrityInvocationDeadlineToken = Symbol(
+  'cross-domain-integrity-invocation-deadline',
+)
+
+/** Opaque, non-resettable capability for one complete integrity invocation. */
+export class CrossDomainIntegrityInvocationDeadline {
+  /** Caller-selected total duration authenticated by construction. */
+  readonly maximumDurationMilliseconds: number
+
+  /**
+   * Creates a capability only for this module's deadline factory.
+   *
+   * @param token - Module-private construction authority.
+   * @param maximumDurationMilliseconds - Validated total duration.
+   */
+  constructor(token: symbol, maximumDurationMilliseconds: number) {
+    if (token !== crossDomainIntegrityInvocationDeadlineToken) {
+      throw new TypeError('Cross-domain integrity invocation deadline is invalid.')
+    }
+    this.maximumDurationMilliseconds = maximumDurationMilliseconds
+    Object.freeze(this)
+  }
+}
 const KNOWN_FAILURE_CODES = new Set<string>([
   'AUDIT_RESOURCE_MISSING',
   'AUDIT_TENANT_MISMATCH',
@@ -110,28 +231,6 @@ export const CROSS_DOMAIN_INTEGRITY_NON_TARGETS = Object.freeze([
   'single-table-physical-integrity',
 ])
 
-/** Logical AWS resources whose physical identities are authenticated individually. */
-export type CrossDomainIntegrityResourceTarget =
-  | 'bucket:file'
-  | 'table:audit-events'
-  | 'table:file-proofing'
-  | 'table:project-directory'
-  | 'table:work-item-configuration'
-  | 'table:work-items'
-  | 'table:workspace-access'
-
-/** Canonical fixed order for the complete physical-resource identity vector. */
-export const CROSS_DOMAIN_INTEGRITY_RESOURCE_TARGETS:
-  readonly CrossDomainIntegrityResourceTarget[] = Object.freeze([
-    'bucket:file',
-    'table:audit-events',
-    'table:file-proofing',
-    'table:project-directory',
-    'table:work-item-configuration',
-    'table:work-items',
-    'table:workspace-access',
-  ])
-
 /**
  * Calculates the versioned logical-resource binding shared by source and
  * isolated-restore checks.
@@ -174,14 +273,6 @@ export type CrossDomainIntegrityDomain =
   | 'resource'
   | 'work-item'
 
-/** One secret-free keyed identity for an exact physical resource. */
-export type CrossDomainIntegrityResourceIdentity = {
-  /** Logical resource target in the canonical fixed vector. */
-  target: CrossDomainIntegrityResourceTarget
-  /** HMAC of the exact account, Region, service, and physical resource name. */
-  identityDigest: string
-}
-
 /** Bounded page request issued to a normalized read adapter. */
 export type CrossDomainIntegrityPageRequest = {
   /** Dataset role being read. */
@@ -190,6 +281,8 @@ export type CrossDomainIntegrityPageRequest = {
   cursor?: string
   /** Maximum number of normalized items requested for this page. */
   pageSize: number
+  /** Invocation-wide cancellation bound to this finite page request. */
+  signal: AbortSignal
 }
 
 /** One normalized page returned by a read adapter. */
@@ -233,6 +326,35 @@ export type CrossDomainIntegrityLimits = {
   maxItems: number
 }
 
+/** Supported checker observation modes. */
+export type CrossDomainIntegrityObservationMode =
+  | 'logical'
+  | 'migration-rehearsal-live'
+
+/** Authenticated provenance emitted only for an actual live rehearsal invocation. */
+export type CrossDomainIntegrityRehearsalLiveRuntimeProvenance = {
+  /** Fixed provenance discriminator. */
+  kind: typeof CROSS_DOMAIN_INTEGRITY_REHEARSAL_LIVE_PROVENANCE_KIND
+  /** Provenance contract version. */
+  version: 1
+  /** Explicit live migration-rehearsal mode. */
+  mode: 'migration-rehearsal-live'
+  /** Trusted wall-clock sample immediately before the actual checker run. */
+  startedAt: string
+  /** Trusted wall-clock sample after all external reads completed. */
+  completedAt: string
+  /** Trusted source of the result's checkedAt timestamp. */
+  checkedAtSource: 'trusted-wall-clock-after-external-reads'
+}
+
+/** Trusted live timestamps supplied after the bridge completes external reads. */
+export type CrossDomainIntegrityLiveRuntimeObservation = {
+  /** Trusted wall-clock sample immediately before the checker bridge starts. */
+  readonly startedAt: string
+  /** Trusted wall-clock sample after every external read completes. */
+  readonly completedAt: string
+}
+
 /** Versioned input shared by source and restore checks. */
 export type RunCrossDomainIntegrityCheckInput = {
   /** Input contract version. */
@@ -241,16 +363,25 @@ export type RunCrossDomainIntegrityCheckInput = {
   role: CrossDomainIntegrityRole
   /** Caller-supplied canonical UTC timestamp shared by paired source and restore checks. */
   checkedAt: string
+  /** Logical mode by default, or explicit actual-runtime rehearsal provenance. */
+  observationMode?: CrossDomainIntegrityObservationMode
+  /** Required trusted start/completion timestamps for explicit live mode. */
+  liveRuntimeObservation?: CrossDomainIntegrityLiveRuntimeObservation
   /** In-memory 32-byte HMAC key. */
   digestKey: Uint8Array
   /** Secret-free digest that binds evidence to the intended logical resource allowlist. */
   resourceBindingDigest: string
   /** Canonical keyed identities for each exact physical resource used by this role. */
   resourceIdentities: readonly CrossDomainIntegrityResourceIdentity[]
+  /** Required immutable-incarnation scheme for an actual live rehearsal. */
+  resourceIdentityScheme?:
+    typeof CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME
   /** Keyed digest of the exact account, Region, physical tables, and bucket used by this role. */
   resourceIdentityDigest: string
   /** Configured reader limits captured in the authenticated result. */
   limits: CrossDomainIntegrityLimits
+  /** Non-resettable total deadline shared with every upstream external read. */
+  deadline: CrossDomainIntegrityInvocationDeadline
   /** Bounded normalized reader. */
   reader: CrossDomainIntegrityReadPort
   /** Optional aggregate result from the independent file checker. */
@@ -278,7 +409,10 @@ export type CrossDomainIntegrityEvidence = {
   /** Secret-free digest binding the result to the intended logical resources. */
   resourceBindingDigest: string
   /** Canonical keyed identities for every exact physical resource. */
-  resourceIdentities: CrossDomainIntegrityResourceIdentity[]
+  resourceIdentities: readonly CrossDomainIntegrityResourceIdentity[]
+  /** Present only for live results derived from immutable resource attestations. */
+  resourceIdentityScheme?:
+    typeof CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME
   /** Keyed digest identifying the exact physical resources without exposing their names. */
   resourceIdentityDigest: string
   /** Per-domain aggregates sorted by domain. */
@@ -299,6 +433,8 @@ export type UnsignedCrossDomainIntegrityResult = {
   role: CrossDomainIntegrityRole
   /** Canonical UTC timestamp supplied for this paired check. */
   checkedAt: string
+  /** Present only when checkedAt came from the trusted live checker wall clock. */
+  runtimeProvenance?: CrossDomainIntegrityRehearsalLiveRuntimeProvenance
   /** Configured read bounds used by this check. */
   limits: CrossDomainIntegrityLimits
   /** Overall result derived from failureCodes. */
@@ -332,6 +468,181 @@ export type CrossDomainIntegrityComparisonResult = {
   status: 'pass' | 'fail'
   /** Stable failure codes in lexical order. */
   failureCodes: CrossDomainIntegrityFailureCode[]
+}
+
+/** Stable failures emitted only by a same-resource migration rehearsal comparison. */
+export type CrossDomainIntegrityMigrationRehearsalFailureCode =
+  | 'REHEARSAL_AFTER_CHECK_FAILED'
+  | 'REHEARSAL_AFTER_RESULT_AUTHENTICATION_FAILED'
+  | 'REHEARSAL_AUDIT_DIFFERENCE'
+  | 'REHEARSAL_BEFORE_CHECK_FAILED'
+  | 'REHEARSAL_BEFORE_RESULT_AUTHENTICATION_FAILED'
+  | 'REHEARSAL_CHECKED_AT_ORDER_INVALID'
+  | 'REHEARSAL_CONFIGURATION_DIFFERENCE'
+  | 'REHEARSAL_FILE_DIFFERENCE'
+  | 'REHEARSAL_KEY_MISMATCH'
+  | 'REHEARSAL_LIMITS_MISMATCH'
+  | 'REHEARSAL_RELATION_DIFFERENCE'
+  | 'REHEARSAL_RESOURCE_BINDING_MISMATCH'
+  | 'REHEARSAL_RESOURCE_DIFFERENCE'
+  | 'REHEARSAL_RESOURCE_IDENTITIES_MISMATCH'
+  | 'REHEARSAL_ROLE_MISMATCH'
+  | 'REHEARSAL_WORK_ITEM_DIFFERENCE'
+
+/** Versioned comparison result for migration rehearsal checks over one source. */
+export type CrossDomainIntegrityMigrationRehearsalComparisonResult = {
+  /** Migration rehearsal comparison discriminator. */
+  kind: typeof CROSS_DOMAIN_INTEGRITY_MIGRATION_REHEARSAL_COMPARISON_KIND
+  /** Comparison contract version. */
+  contractVersion: typeof CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION
+  /** Overall result derived from failureCodes. */
+  status: 'pass' | 'fail'
+  /** Stable migration rehearsal failure codes in lexical order. */
+  failureCodes: CrossDomainIntegrityMigrationRehearsalFailureCode[]
+}
+
+/**
+ * Creates one total, non-resettable deadline shared by a complete invocation.
+ *
+ * @param input - Caller duration, trusted monotonic clock, and cancellation.
+ * @returns Opaque deadline capability for every checker and AWS read boundary.
+ */
+export function createCrossDomainIntegrityInvocationDeadline(
+  input: CreateCrossDomainIntegrityInvocationDeadlineInput,
+): CrossDomainIntegrityInvocationDeadline {
+  if (
+    !Number.isSafeInteger(input.maximumDurationMilliseconds) ||
+    input.maximumDurationMilliseconds < 1 ||
+    input.maximumDurationMilliseconds >
+      CROSS_DOMAIN_INTEGRITY_MAX_DURATION_MILLISECONDS ||
+    typeof input.monotonicClock !== 'function' ||
+    (
+      input.signal !== undefined &&
+      !(input.signal instanceof AbortSignal)
+    )
+  ) {
+    throw new TypeError('Cross-domain integrity invocation deadline is invalid.')
+  }
+  const startedAtMilliseconds = readCrossDomainIntegrityMonotonicClock(
+    input.monotonicClock,
+  )
+  const deadlineMilliseconds =
+    startedAtMilliseconds + input.maximumDurationMilliseconds
+  if (!Number.isSafeInteger(deadlineMilliseconds)) {
+    throw new TypeError('Cross-domain integrity invocation deadline is invalid.')
+  }
+  const capability = new CrossDomainIntegrityInvocationDeadline(
+    crossDomainIntegrityInvocationDeadlineToken,
+    input.maximumDurationMilliseconds,
+  )
+  const controller = new AbortController()
+  const callerSignal = input.signal
+  /** Propagates caller cancellation into the invocation-wide controller. */
+  const handleCallerAbort = (): void => {
+    const state = crossDomainIntegrityInvocationDeadlineStates.get(capability)
+    if (state !== undefined) abortCrossDomainIntegrityDeadline(state, 'CANCELLED')
+  }
+  const state: CrossDomainIntegrityInvocationDeadlineState = {
+    controller,
+    deadlineMilliseconds,
+    disposeCallerSignal: (): void => {
+      callerSignal?.removeEventListener('abort', handleCallerAbort)
+    },
+    monotonicClock: input.monotonicClock,
+    startedAtMilliseconds,
+    lastObservedMilliseconds: startedAtMilliseconds,
+  }
+  crossDomainIntegrityInvocationDeadlineStates.set(capability, state)
+  callerSignal?.addEventListener('abort', handleCallerAbort, { once: true })
+  if (callerSignal?.aborted === true) handleCallerAbort()
+  return capability
+}
+
+/**
+ * Fails closed when a shared deadline expired, regressed, or was cancelled.
+ *
+ * @param deadline - Opaque invocation deadline capability.
+ */
+export function requireCrossDomainIntegrityInvocationDeadline(
+  deadline: CrossDomainIntegrityInvocationDeadline,
+): void {
+  const state = requireCrossDomainIntegrityDeadlineState(deadline)
+  readCrossDomainIntegrityDeadlineSample(state, false)
+}
+
+/**
+ * Reads the positive duration remaining before another bounded operation.
+ *
+ * @param deadline - Opaque invocation deadline capability.
+ * @returns Positive remaining duration in integer milliseconds.
+ */
+export function readCrossDomainIntegrityInvocationRemainingMilliseconds(
+  deadline: CrossDomainIntegrityInvocationDeadline,
+): number {
+  const state = requireCrossDomainIntegrityDeadlineState(deadline)
+  return readCrossDomainIntegrityDeadlineSample(state, true)
+}
+
+/**
+ * Runs one external request behind the invocation's remaining finite duration.
+ *
+ * @param deadline - Opaque invocation deadline capability.
+ * @param operation - Request issued with the shared invocation AbortSignal.
+ * @returns Request result completed before the non-resettable deadline.
+ */
+export async function runCrossDomainIntegrityRequestWithinDeadline<Result>(
+  deadline: CrossDomainIntegrityInvocationDeadline,
+  operation: (signal: AbortSignal) => Promise<Result>,
+): Promise<Result> {
+  const state = requireCrossDomainIntegrityDeadlineState(deadline)
+  const remainingMilliseconds =
+    readCrossDomainIntegrityInvocationRemainingMilliseconds(deadline)
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  /** Rejects the request race with the deadline's stable failure. */
+  const rejectForAbort = (
+    reject: (reason?: unknown) => void,
+  ): (() => void) => () => {
+    reject(state.failure ?? new CrossDomainIntegrityDeadlineFailure('CANCELLED'))
+  }
+  let handleAbort: (() => void) | undefined
+  try {
+    const cancelled = new Promise<Result>((_resolve, reject) => {
+      handleAbort = rejectForAbort(reject)
+      state.controller.signal.addEventListener('abort', handleAbort, {
+        once: true,
+      })
+      if (state.controller.signal.aborted) handleAbort()
+    })
+    timeout = setTimeout(() => {
+      abortCrossDomainIntegrityDeadline(state, 'DEADLINE_EXCEEDED')
+    }, remainingMilliseconds)
+    const result = await Promise.race([
+      cancelled,
+      Promise.resolve().then(() => operation(state.controller.signal)),
+    ])
+    readCrossDomainIntegrityDeadlineSample(state, false)
+    return result
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout)
+    if (handleAbort !== undefined) {
+      state.controller.signal.removeEventListener('abort', handleAbort)
+    }
+  }
+}
+
+/**
+ * Disposes one invocation deadline and cancels any still-active request.
+ *
+ * @param deadline - Opaque invocation deadline capability.
+ */
+export function disposeCrossDomainIntegrityInvocationDeadline(
+  deadline: CrossDomainIntegrityInvocationDeadline,
+): void {
+  const state = crossDomainIntegrityInvocationDeadlineStates.get(deadline)
+  if (state === undefined) return
+  state.disposeCallerSignal()
+  abortCrossDomainIntegrityDeadline(state, 'CANCELLED')
+  crossDomainIntegrityInvocationDeadlineStates.delete(deadline)
 }
 
 /** Collected records and invariant failures held only in process memory. */
@@ -392,13 +703,20 @@ export async function runCrossDomainIntegrityCheck(
   input: RunCrossDomainIntegrityCheckInput,
 ): Promise<CrossDomainIntegrityResult> {
   validateRunInput(input)
+  requireCrossDomainIntegrityInvocationDeadline(input.deadline)
   const dataset = await readDataset(input)
+  requireCrossDomainIntegrityInvocationDeadline(input.deadline)
   const failures = dataset.readFailures
   const indexes = buildIndexes(dataset.items, failures)
+  requireCrossDomainIntegrityInvocationDeadline(input.deadline)
   checkWorkItems(indexes, failures)
+  requireCrossDomainIntegrityInvocationDeadline(input.deadline)
   checkRelations(indexes, failures)
+  requireCrossDomainIntegrityInvocationDeadline(input.deadline)
   checkAuditReferences(indexes, failures)
+  requireCrossDomainIntegrityInvocationDeadline(input.deadline)
   checkFiles(indexes, failures)
+  requireCrossDomainIntegrityInvocationDeadline(input.deadline)
   const acceptedExternalFileEvidence = input.externalFileEvidence &&
       input.externalFileEvidence.checkedItemCount <= input.limits.maxItems
     ? input.externalFileEvidence
@@ -411,15 +729,21 @@ export async function runCrossDomainIntegrityCheck(
     input.digestKey,
     input.resourceBindingDigest,
     input.resourceIdentities,
+    input.resourceIdentityScheme,
     input.resourceIdentityDigest,
     acceptedExternalFileEvidence,
   )
+  requireCrossDomainIntegrityInvocationDeadline(input.deadline)
   const failureCodes = [...failures].sort(compareUtf8Ordinal)
   const unsignedResult: UnsignedCrossDomainIntegrityResult = {
     kind: CROSS_DOMAIN_INTEGRITY_RESULT_KIND,
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
     role: input.role,
     checkedAt: input.checkedAt,
+    ...createRuntimeProvenanceFields(
+      input.observationMode ?? 'logical',
+      input.liveRuntimeObservation,
+    ),
     limits: { ...input.limits },
     status: failureCodes.length === 0 ? 'pass' : 'fail',
     failureCodes,
@@ -429,7 +753,12 @@ export async function runCrossDomainIntegrityCheck(
     },
     evidence,
   }
-  return authenticateCrossDomainIntegrityResult(unsignedResult, input.digestKey)
+  const result = authenticateCrossDomainIntegrityResult(
+    unsignedResult,
+    input.digestKey,
+  )
+  requireCrossDomainIntegrityInvocationDeadline(input.deadline)
+  return result
 }
 
 /**
@@ -502,7 +831,7 @@ function parseAuthenticatedResult(
  */
 export function parseCrossDomainIntegrityResult(value: unknown): CrossDomainIntegrityResult {
   const record = requireRecord(value, 'Cross-domain integrity result')
-  requireExactKeys(record, [
+  const expectedKeys = [
     'checkedAt',
     'contractVersion',
     'evidence',
@@ -513,7 +842,11 @@ export function parseCrossDomainIntegrityResult(value: unknown): CrossDomainInte
     'role',
     'scope',
     'status',
-  ], 'Cross-domain integrity result')
+  ]
+  if (Object.hasOwn(record, 'runtimeProvenance')) {
+    expectedKeys.push('runtimeProvenance')
+  }
+  requireExactKeys(record, expectedKeys, 'Cross-domain integrity result')
   if (record.kind !== CROSS_DOMAIN_INTEGRITY_RESULT_KIND) {
     throw new TypeError('Cross-domain integrity result kind is invalid.')
   }
@@ -522,23 +855,89 @@ export function parseCrossDomainIntegrityResult(value: unknown): CrossDomainInte
   }
   const role = parseRole(record.role)
   const checkedAt = parseCheckedAt(record.checkedAt)
+  const runtimeProvenance = Object.hasOwn(record, 'runtimeProvenance')
+    ? parseRehearsalLiveRuntimeProvenance(record.runtimeProvenance)
+    : undefined
+  if (
+    runtimeProvenance !== undefined &&
+    (
+      runtimeProvenance.completedAt !== checkedAt ||
+      Date.parse(runtimeProvenance.startedAt) >
+        Date.parse(runtimeProvenance.completedAt)
+    )
+  ) {
+    throw new TypeError(
+      'Cross-domain integrity live runtime provenance timestamps are invalid.',
+    )
+  }
   const limits = parseLimits(record.limits)
   const failureCodes = parseFailureCodes(record.failureCodes)
   const status = parseResultStatus(record.status, failureCodes)
   const scope = parseResultScope(record.scope)
   const evidence = parseResultEvidence(record.evidence, limits)
+  if (
+    (runtimeProvenance !== undefined) !==
+      (evidence.resourceIdentityScheme ===
+        CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME)
+  ) {
+    throw new TypeError(
+      'Cross-domain integrity live results require immutable resource identities.',
+    )
+  }
   const resultMac = requireHexDigest(record.resultMac, 'Cross-domain integrity result MAC')
   return {
     kind: CROSS_DOMAIN_INTEGRITY_RESULT_KIND,
     contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
     role,
     checkedAt,
+    ...(runtimeProvenance === undefined ? {} : { runtimeProvenance }),
     limits,
     status,
     failureCodes,
     scope,
     evidence,
     resultMac,
+  }
+}
+
+/**
+ * Strictly parses one exact live rehearsal runtime-provenance object.
+ *
+ * @param value - Untrusted optional result field.
+ * @returns Normalized exact live provenance.
+ */
+function parseRehearsalLiveRuntimeProvenance(
+  value: unknown,
+): CrossDomainIntegrityRehearsalLiveRuntimeProvenance {
+  const record = requireRecord(
+    value,
+    'Cross-domain integrity live runtime provenance',
+  )
+  requireExactKeys(record, [
+    'checkedAtSource',
+    'completedAt',
+    'kind',
+    'mode',
+    'startedAt',
+    'version',
+  ], 'Cross-domain integrity live runtime provenance')
+  if (
+    record.kind !== CROSS_DOMAIN_INTEGRITY_REHEARSAL_LIVE_PROVENANCE_KIND ||
+    record.version !== 1 ||
+    record.mode !== 'migration-rehearsal-live' ||
+    record.checkedAtSource !== 'trusted-wall-clock-after-external-reads'
+  ) {
+    throw new TypeError(
+      'Cross-domain integrity live runtime provenance is invalid.',
+    )
+  }
+  return {
+    kind: CROSS_DOMAIN_INTEGRITY_REHEARSAL_LIVE_PROVENANCE_KIND,
+    version: 1,
+    mode: 'migration-rehearsal-live',
+    startedAt: parseCheckedAt(record.startedAt),
+    completedAt: parseCheckedAt(record.completedAt),
+    checkedAtSource: 'trusted-wall-clock-after-external-reads',
   }
 }
 
@@ -632,7 +1031,7 @@ function parseResultEvidence(
   limits: CrossDomainIntegrityLimits,
 ): CrossDomainIntegrityEvidence {
   const record = requireRecord(value, 'Cross-domain integrity evidence')
-  requireExactKeys(record, [
+  const expectedKeys = [
     'aggregateDigest',
     'algorithm',
     'digestVersion',
@@ -642,7 +1041,11 @@ function parseResultEvidence(
     'resourceBindingDigest',
     'resourceIdentities',
     'resourceIdentityDigest',
-  ], 'Cross-domain integrity evidence')
+  ]
+  if (Object.hasOwn(record, 'resourceIdentityScheme')) {
+    expectedKeys.push('resourceIdentityScheme')
+  }
+  requireExactKeys(record, expectedKeys, 'Cross-domain integrity evidence')
   if (record.algorithm !== 'HMAC-SHA-256' || record.digestVersion !== 1) {
     throw new TypeError('Cross-domain integrity evidence algorithm or version is invalid.')
   }
@@ -667,7 +1070,18 @@ function parseResultEvidence(
       record.resourceBindingDigest,
       'Cross-domain integrity resource binding digest',
     ),
-    resourceIdentities: parseResourceIdentities(record.resourceIdentities),
+    resourceIdentities: parseCrossDomainIntegrityResourceIdentities(
+      record.resourceIdentities,
+    ),
+    ...(record.resourceIdentityScheme === undefined
+      ? {}
+      : record.resourceIdentityScheme ===
+          CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME
+      ? {
+          resourceIdentityScheme:
+            CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
+        }
+      : failResourceIdentityScheme()),
     resourceIdentityDigest: requireHexDigest(
       record.resourceIdentityDigest,
       'Cross-domain integrity resource identity digest',
@@ -679,6 +1093,13 @@ function parseResultEvidence(
     ),
     itemCount,
   }
+}
+
+/** Raises one stable strict-parser failure for an unknown identity scheme. */
+function failResourceIdentityScheme(): never {
+  throw new TypeError(
+    'Cross-domain integrity resource identity scheme is invalid.',
+  )
 }
 
 /** Parses the complete lexically ordered domain evidence vector. */
@@ -721,53 +1142,6 @@ function parseDomainEvidence(
   return domains
 }
 
-/**
- * Parses the complete canonical physical-resource identity vector.
- *
- * @param value - Untrusted vector from serialized or in-memory evidence.
- * @returns Normalized exact-order keyed resource identities.
- */
-function parseResourceIdentities(
-  value: unknown,
-): CrossDomainIntegrityResourceIdentity[] {
-  if (
-    !isUnknownArray(value) ||
-    value.length !== CROSS_DOMAIN_INTEGRITY_RESOURCE_TARGETS.length
-  ) {
-    throw new TypeError('Cross-domain integrity resource identities are incomplete.')
-  }
-  const identities: CrossDomainIntegrityResourceIdentity[] = []
-  for (
-    let index = 0;
-    index < CROSS_DOMAIN_INTEGRITY_RESOURCE_TARGETS.length;
-    index += 1
-  ) {
-    const expectedTarget = CROSS_DOMAIN_INTEGRITY_RESOURCE_TARGETS[index]
-    const record = requireRecord(
-      value[index],
-      'Cross-domain integrity resource identity',
-    )
-    requireExactKeys(
-      record,
-      ['identityDigest', 'target'],
-      'Cross-domain integrity resource identity',
-    )
-    if (expectedTarget === undefined || record.target !== expectedTarget) {
-      throw new TypeError(
-        'Cross-domain integrity resource identities are not in canonical order.',
-      )
-    }
-    identities.push({
-      target: expectedTarget,
-      identityDigest: requireHexDigest(
-        record.identityDigest,
-        'Cross-domain integrity physical resource identity digest',
-      ),
-    })
-  }
-  return identities
-}
-
 /** Returns a normalized copy containing every MAC-authenticated field. */
 function createUnsignedResult(
   result: CrossDomainIntegrityResult,
@@ -777,6 +1151,9 @@ function createUnsignedResult(
     contractVersion: result.contractVersion,
     role: result.role,
     checkedAt: result.checkedAt,
+    ...(result.runtimeProvenance === undefined
+      ? {}
+      : { runtimeProvenance: { ...result.runtimeProvenance } }),
     limits: { ...result.limits },
     status: result.status,
     failureCodes: [...result.failureCodes],
@@ -825,8 +1202,11 @@ function canonicalizeUnsignedResult(result: UnsignedCrossDomainIntegrityResult):
     String(result.evidence.digestVersion),
     result.evidence.keyFingerprint,
     result.evidence.resourceBindingDigest,
-    String(result.evidence.resourceIdentities.length),
   ]
+  if (result.evidence.resourceIdentityScheme !== undefined) {
+    fields.push(result.evidence.resourceIdentityScheme)
+  }
+  fields.push(String(result.evidence.resourceIdentities.length))
   for (const identity of result.evidence.resourceIdentities) {
     fields.push(identity.target, identity.identityDigest)
   }
@@ -838,7 +1218,46 @@ function canonicalizeUnsignedResult(result: UnsignedCrossDomainIntegrityResult):
     fields.push(domain.domain, String(domain.itemCount), domain.aggregateDigest)
   }
   fields.push(result.evidence.aggregateDigest, String(result.evidence.itemCount))
+  if (result.runtimeProvenance !== undefined) {
+    fields.push(
+      result.runtimeProvenance.kind,
+      String(result.runtimeProvenance.version),
+      result.runtimeProvenance.mode,
+      result.runtimeProvenance.startedAt,
+      result.runtimeProvenance.completedAt,
+      result.runtimeProvenance.checkedAtSource,
+    )
+  }
   return canonicalFields(fields)
+}
+
+/**
+ * Creates the optional result fields for a validated observation mode.
+ *
+ * @param observationMode - Logical or explicit live observation mode.
+ * @param liveRuntimeObservation - Trusted live timestamps when required.
+ * @returns Empty logical fields or exact live runtime provenance.
+ */
+function createRuntimeProvenanceFields(
+  observationMode: CrossDomainIntegrityObservationMode,
+  liveRuntimeObservation: CrossDomainIntegrityLiveRuntimeObservation | undefined,
+): { readonly runtimeProvenance?: CrossDomainIntegrityRehearsalLiveRuntimeProvenance } {
+  if (observationMode === 'logical') return {}
+  if (liveRuntimeObservation === undefined) {
+    throw new TypeError(
+      'Cross-domain integrity live runtime observation is required.',
+    )
+  }
+  return {
+    runtimeProvenance: {
+      kind: CROSS_DOMAIN_INTEGRITY_REHEARSAL_LIVE_PROVENANCE_KIND,
+      version: 1,
+      mode: 'migration-rehearsal-live',
+      startedAt: liveRuntimeObservation.startedAt,
+      completedAt: liveRuntimeObservation.completedAt,
+      checkedAtSource: 'trusted-wall-clock-after-external-reads',
+    },
+  }
 }
 
 /** Narrows an unknown value to a non-array record. */
@@ -996,6 +1415,103 @@ export function compareCrossDomainIntegrityResults(
 }
 
 /**
+ * Compares authenticated before and after checks over the same migration source.
+ *
+ * This contract is deliberately separate from the source/restore comparator:
+ * rehearsal inputs must reuse the exact physical resources and the after check
+ * must occur strictly later, while a restore comparison requires distinct
+ * physical resources observed at the same checkedAt instant.
+ *
+ * @param beforeValue - Untrusted source result captured before migration.
+ * @param afterValue - Untrusted source result captured after verify or rollback.
+ * @param digestKey - In-memory HMAC key used to authenticate both results.
+ * @returns Deterministically classified same-resource rehearsal differences.
+ */
+export function compareCrossDomainIntegrityMigrationRehearsalResults(
+  beforeValue: unknown,
+  afterValue: unknown,
+  digestKey: Uint8Array,
+): CrossDomainIntegrityMigrationRehearsalComparisonResult {
+  const failures =
+    new Set<CrossDomainIntegrityMigrationRehearsalFailureCode>()
+  const before = parseAuthenticatedResult(beforeValue, digestKey)
+  const after = parseAuthenticatedResult(afterValue, digestKey)
+  if (!before) {
+    failures.add('REHEARSAL_BEFORE_RESULT_AUTHENTICATION_FAILED')
+  }
+  if (!after) {
+    failures.add('REHEARSAL_AFTER_RESULT_AUTHENTICATION_FAILED')
+  }
+  if (!before || !after) {
+    return createMigrationRehearsalComparisonResult(failures)
+  }
+  if (before.role !== 'source' || after.role !== 'source') {
+    failures.add('REHEARSAL_ROLE_MISMATCH')
+  }
+  if (Date.parse(after.checkedAt) <= Date.parse(before.checkedAt)) {
+    failures.add('REHEARSAL_CHECKED_AT_ORDER_INVALID')
+  }
+  const limitsMatch = sameLimits(before.limits, after.limits)
+  if (!limitsMatch) {
+    failures.add('REHEARSAL_LIMITS_MISMATCH')
+  }
+  if (before.status === 'fail') {
+    failures.add('REHEARSAL_BEFORE_CHECK_FAILED')
+  }
+  if (after.status === 'fail') {
+    failures.add('REHEARSAL_AFTER_CHECK_FAILED')
+  }
+  const keyMatches =
+    before.evidence.keyFingerprint === after.evidence.keyFingerprint
+  if (!keyMatches) {
+    failures.add('REHEARSAL_KEY_MISMATCH')
+  }
+  const resourceBindingMatches =
+    before.evidence.resourceBindingDigest ===
+      after.evidence.resourceBindingDigest
+  if (!resourceBindingMatches) {
+    failures.add('REHEARSAL_RESOURCE_BINDING_MISMATCH')
+  }
+  const resourceIdentitiesMatch =
+    before.evidence.resourceIdentityDigest ===
+      after.evidence.resourceIdentityDigest &&
+    sameResourceIdentities(
+      before.evidence.resourceIdentities,
+      after.evidence.resourceIdentities,
+    )
+  if (!resourceIdentitiesMatch) {
+    failures.add('REHEARSAL_RESOURCE_IDENTITIES_MISMATCH')
+  }
+  if (
+    limitsMatch &&
+    keyMatches &&
+    resourceBindingMatches &&
+    resourceIdentitiesMatch
+  ) {
+    const domains = integrityDomains()
+    for (let index = 0; index < domains.length; index += 1) {
+      const domain = domains[index]
+      const beforeDomain = before.evidence.domains[index]
+      const afterDomain = after.evidence.domains[index]
+      if (
+        domain === undefined ||
+        beforeDomain === undefined ||
+        afterDomain === undefined ||
+        beforeDomain.domain !== domain ||
+        afterDomain.domain !== domain ||
+        beforeDomain.itemCount !== afterDomain.itemCount ||
+        beforeDomain.aggregateDigest !== afterDomain.aggregateDigest
+      ) {
+        if (domain !== undefined) {
+          failures.add(migrationRehearsalDomainDifferenceCode(domain))
+        }
+      }
+    }
+  }
+  return createMigrationRehearsalComparisonResult(failures)
+}
+
+/**
  * Checks whether a source physical resource was reused for the same restore target.
  *
  * @param source - Authenticated canonical source identity vector.
@@ -1025,6 +1541,33 @@ function hasReusedResourceIdentity(
   return false
 }
 
+/**
+ * Compares complete canonical physical-resource identity vectors exactly.
+ *
+ * @param before - Authenticated resource identities captured before migration.
+ * @param after - Authenticated resource identities captured after migration.
+ * @returns Whether every target and keyed physical identity is unchanged.
+ */
+function sameResourceIdentities(
+  before: readonly CrossDomainIntegrityResourceIdentity[],
+  after: readonly CrossDomainIntegrityResourceIdentity[],
+): boolean {
+  if (before.length !== after.length) return false
+  for (let index = 0; index < before.length; index += 1) {
+    const beforeIdentity = before[index]
+    const afterIdentity = after[index]
+    if (
+      beforeIdentity === undefined ||
+      afterIdentity === undefined ||
+      beforeIdentity.target !== afterIdentity.target ||
+      beforeIdentity.identityDigest !== afterIdentity.identityDigest
+    ) {
+      return false
+    }
+  }
+  return true
+}
+
 /** Creates one stable comparison result from accumulated failure codes. */
 function createComparisonResult(
   failures: ReadonlySet<CrossDomainIntegrityFailureCode>,
@@ -1038,12 +1581,66 @@ function createComparisonResult(
   }
 }
 
+/**
+ * Creates one stable same-resource migration rehearsal comparison result.
+ *
+ * @param failures - Accumulated dedicated rehearsal failures.
+ * @returns Canonical bounded comparison result.
+ */
+function createMigrationRehearsalComparisonResult(
+  failures: ReadonlySet<CrossDomainIntegrityMigrationRehearsalFailureCode>,
+): CrossDomainIntegrityMigrationRehearsalComparisonResult {
+  const failureCodes = [...failures].sort(compareUtf8Ordinal)
+  return {
+    kind: CROSS_DOMAIN_INTEGRITY_MIGRATION_REHEARSAL_COMPARISON_KIND,
+    contractVersion: CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+    status: failureCodes.length === 0 ? 'pass' : 'fail',
+    failureCodes,
+  }
+}
+
 /** Validates caller-controlled bounds and the in-memory digest key. */
 function validateRunInput(input: RunCrossDomainIntegrityCheckInput): void {
   if (input.contractVersion !== CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION) {
     throw new TypeError('Unsupported cross-domain integrity contract version.')
   }
   validateCanonicalCheckedAt(input.checkedAt)
+  if (
+    input.observationMode !== undefined &&
+    input.observationMode !== 'logical' &&
+    input.observationMode !== 'migration-rehearsal-live'
+  ) {
+    throw new TypeError('Cross-domain integrity observation mode is invalid.')
+  }
+  if ((input.observationMode ?? 'logical') === 'logical') {
+    if (
+      input.liveRuntimeObservation !== undefined ||
+      input.resourceIdentityScheme !== undefined
+    ) {
+      throw new TypeError(
+        'Cross-domain integrity logical checks cannot carry live-only fields.',
+      )
+    }
+  } else {
+    const observation = input.liveRuntimeObservation
+    if (observation === undefined) {
+      throw new TypeError(
+        'Cross-domain integrity live runtime observation is required.',
+      )
+    }
+    validateCanonicalCheckedAt(observation.startedAt)
+    validateCanonicalCheckedAt(observation.completedAt)
+    if (
+      input.resourceIdentityScheme !==
+        CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME ||
+      input.checkedAt !== observation.completedAt ||
+      Date.parse(observation.startedAt) > Date.parse(observation.completedAt)
+    ) {
+      throw new TypeError(
+        'Cross-domain integrity live runtime observation timestamps are invalid.',
+      )
+    }
+  }
   validateDigestKey(input.digestKey)
   if (!/^[0-9a-f]{64}$/u.test(input.resourceBindingDigest)) {
     throw new TypeError('Cross-domain integrity resource binding digest must be 64 lowercase hex characters.')
@@ -1111,6 +1708,88 @@ function validatePositiveBound(value: number, maximum: number, name: string): vo
   }
 }
 
+/** Reads the private state for one authentic, active deadline capability. */
+function requireCrossDomainIntegrityDeadlineState(
+  deadline: CrossDomainIntegrityInvocationDeadline,
+): CrossDomainIntegrityInvocationDeadlineState {
+  const state = crossDomainIntegrityInvocationDeadlineStates.get(deadline)
+  if (state === undefined) {
+    throw new TypeError('Cross-domain integrity invocation deadline is invalid.')
+  }
+  if (state.controller.signal.aborted) {
+    throw state.failure ?? new CrossDomainIntegrityDeadlineFailure('CANCELLED')
+  }
+  return state
+}
+
+/** Reads one monotonic sample and enforces the invocation deadline. */
+function readCrossDomainIntegrityDeadlineSample(
+  state: CrossDomainIntegrityInvocationDeadlineState,
+  requirePositiveRemainingDuration: boolean,
+): number {
+  if (state.controller.signal.aborted) {
+    throw state.failure ?? new CrossDomainIntegrityDeadlineFailure('CANCELLED')
+  }
+  let now: number
+  try {
+    now = readCrossDomainIntegrityMonotonicClock(state.monotonicClock)
+  } catch {
+    abortCrossDomainIntegrityDeadline(state, 'CLOCK_INVALID')
+    throw state.failure
+  }
+  if (state.controller.signal.aborted) {
+    throw state.failure ?? new CrossDomainIntegrityDeadlineFailure('CANCELLED')
+  }
+  if (
+    now < state.startedAtMilliseconds ||
+    now < state.lastObservedMilliseconds
+  ) {
+    abortCrossDomainIntegrityDeadline(state, 'CLOCK_INVALID')
+    throw state.failure
+  }
+  state.lastObservedMilliseconds = now
+  if (
+    now > state.deadlineMilliseconds ||
+    (requirePositiveRemainingDuration && now === state.deadlineMilliseconds)
+  ) {
+    abortCrossDomainIntegrityDeadline(state, 'DEADLINE_EXCEEDED')
+    throw state.failure
+  }
+  return state.deadlineMilliseconds - now
+}
+
+/** Reads one finite, non-negative, safe integer monotonic-clock sample. */
+function readCrossDomainIntegrityMonotonicClock(
+  monotonicClock: () => number,
+): number {
+  let value: unknown
+  try {
+    value = Reflect.apply(monotonicClock, undefined, [])
+  } catch {
+    throw new CrossDomainIntegrityDeadlineFailure('CLOCK_INVALID')
+  }
+  if (
+    typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    !Number.isSafeInteger(value) ||
+    value < 0
+  ) {
+    throw new CrossDomainIntegrityDeadlineFailure('CLOCK_INVALID')
+  }
+  return value
+}
+
+/** Aborts a deadline exactly once with one stable failure category. */
+function abortCrossDomainIntegrityDeadline(
+  state: CrossDomainIntegrityInvocationDeadlineState,
+  code: CrossDomainIntegrityDeadlineFailureCode,
+): void {
+  if (state.failure === undefined) {
+    state.failure = new CrossDomainIntegrityDeadlineFailure(code)
+  }
+  if (!state.controller.signal.aborted) state.controller.abort()
+}
+
 /** Validates externally aggregated file evidence before incorporating it. */
 function validateExternalFileEvidence(evidence: CrossDomainExternalFileEvidence): void {
   if (
@@ -1143,11 +1822,15 @@ async function readDataset(input: RunCrossDomainIntegrityCheckInput): Promise<Cr
       readFailures.add('INTEGRITY_LIMIT_EXCEEDED')
       break
     }
-    const page = await input.reader.readPage({
-      role: input.role,
-      ...(cursor === undefined ? {} : { cursor }),
-      pageSize: input.limits.pageSize,
-    })
+    const page = await runCrossDomainIntegrityRequestWithinDeadline(
+      input.deadline,
+      (signal) => input.reader.readPage({
+        role: input.role,
+        ...(cursor === undefined ? {} : { cursor }),
+        pageSize: input.limits.pageSize,
+        signal,
+      }),
+    )
     pageCount += 1
     if (page.items.length > input.limits.pageSize) {
       readFailures.add('INTEGRITY_LIMIT_EXCEEDED')
@@ -1538,6 +2221,9 @@ function createEvidence(
   digestKey: Uint8Array,
   resourceBindingDigest: string,
   resourceIdentities: readonly CrossDomainIntegrityResourceIdentity[],
+  resourceIdentityScheme:
+    typeof CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME |
+    undefined,
   resourceIdentityDigest: string,
   externalFileEvidence: CrossDomainExternalFileEvidence | undefined,
 ): CrossDomainIntegrityEvidence {
@@ -1593,6 +2279,9 @@ function createEvidence(
     keyFingerprint: keyedDigest(digestKey, 'key-fingerprint-v1', 'cross-domain').toString('hex'),
     resourceBindingDigest,
     resourceIdentities: resourceIdentities.map((identity) => ({ ...identity })),
+    ...(resourceIdentityScheme === undefined
+      ? {}
+      : { resourceIdentityScheme }),
     resourceIdentityDigest,
     domains,
     aggregateDigest: calculateEvidenceAggregateDigest(
@@ -1602,28 +2291,6 @@ function createEvidence(
     ),
     itemCount: items.length + (externalFileEvidence?.checkedItemCount ?? 0),
   }
-}
-
-/**
- * Calculates the aggregate identity HMAC for the canonical resource vector.
- *
- * @param resourceIdentities - Complete canonical per-resource identity vector.
- * @param digestKey - In-memory 32-byte HMAC key.
- * @returns Aggregate keyed identity digest covering all seven resource targets.
- */
-export function calculateCrossDomainIntegrityResourceIdentityDigest(
-  resourceIdentities: readonly CrossDomainIntegrityResourceIdentity[],
-  digestKey: Uint8Array,
-): string {
-  validateDigestKey(digestKey)
-  const parsedIdentities = parseResourceIdentities(resourceIdentities)
-  const fields: string[] = [String(parsedIdentities.length)]
-  for (const identity of parsedIdentities) {
-    fields.push(identity.target, identity.identityDigest)
-  }
-  return createDomainHmac(digestKey, 'resource-identity-vector-v1')
-    .update(canonicalFields(fields), 'utf8')
-    .digest('hex')
 }
 
 /**
@@ -1678,6 +2345,20 @@ function domainDifferenceCode(domain: CrossDomainIntegrityDomain): CrossDomainIn
   if (domain === 'relation') return 'RESTORE_RELATION_DIFFERENCE'
   if (domain === 'resource') return 'RESTORE_RESOURCE_DIFFERENCE'
   return 'RESTORE_WORK_ITEM_DIFFERENCE'
+}
+
+/** Maps one evidence domain to its same-resource rehearsal difference code. */
+function migrationRehearsalDomainDifferenceCode(
+  domain: CrossDomainIntegrityDomain,
+): CrossDomainIntegrityMigrationRehearsalFailureCode {
+  if (domain === 'audit') return 'REHEARSAL_AUDIT_DIFFERENCE'
+  if (domain === 'configuration') {
+    return 'REHEARSAL_CONFIGURATION_DIFFERENCE'
+  }
+  if (domain === 'file') return 'REHEARSAL_FILE_DIFFERENCE'
+  if (domain === 'relation') return 'REHEARSAL_RELATION_DIFFERENCE'
+  if (domain === 'resource') return 'REHEARSAL_RESOURCE_DIFFERENCE'
+  return 'REHEARSAL_WORK_ITEM_DIFFERENCE'
 }
 
 /** Produces a stable canonical string for one normalized item. */

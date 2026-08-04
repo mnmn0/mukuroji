@@ -132,8 +132,8 @@ reported as an observed cross-domain or File-copy mismatch.
 
 Evidence contains only:
 
-- schema and digest contract versions, dataset role, the caller-supplied
-  `checkedAt`, and configured bounds;
+- schema and digest contract versions, dataset role, logical caller-supplied or
+  live trusted-clock `checkedAt`, and configured bounds;
 - safe aggregate counts, per-domain aggregate HMACs, sorted stable failure
   codes, and overall `pass` or `fail`;
 - one shared logical-resource binding digest, a fixed seven-target vector of
@@ -156,6 +156,18 @@ Paired source and restore checks use the same key, `checkedAt`, bounds, and
 logical binding. Every corresponding keyed physical-resource identity must
 differ; changing only one restore resource cannot hide reuse of any other
 protected source table or bucket.
+
+The existing source/restore workflow remains logical: `--checked-at` is
+operator supplied and no runtime provenance field is emitted. An explicit
+Workspace Search rehearsal instead uses
+`--observation-mode migration-rehearsal-live`, requires `--role source`, and
+forbids `--checked-at`. A trusted wall clock is sampled immediately before the
+checker bridge and exactly once more after all DynamoDB and exact-version S3
+reads finish. The result sets `checkedAt` to that completion sample and adds
+strict `runtimeProvenance` containing the start, completion, live-mode
+discriminator, version, and trusted-clock source. Those fields are covered by
+the whole-result HMAC; adding, removing, changing, or backdating provenance
+without the result key invalidates the result.
 
 ## Operator boundary
 
@@ -208,10 +220,23 @@ bun server/scripts/data-integrity/verify-cross-domain-integrity.ts check \
   --page-size 100 \
   --max-pages 100 \
   --max-items 10000 \
+  --maximum-duration-milliseconds 900000 \
   --audit-pseudonym-key-file /secure/workspace-audit-pseudonym.key \
   --digest-key-file /secure/cross-domain-integrity.key \
   --output /secure/source-integrity.json
 ```
+
+For a live migration-rehearsal observation, use the same bounded explicit
+resource/key arguments but replace `--checked-at ...` with:
+
+```sh
+--observation-mode migration-rehearsal-live
+```
+
+The live mode cannot be used with `--role restore`. Publication fails if the
+checker omits or invokes the trusted completion seam more than once, returns a
+different completion timestamp, or returns a logical result without the exact
+authenticated live provenance.
 
 Both key files must contain 64 lowercase hexadecimal characters and have no
 group or other permission bits. The evidence digest key must be newly
@@ -220,6 +245,15 @@ key. Run the restore check with the same `checkedAt`, bounds, Audit pseudonym
 key, and evidence digest key, but isolated physical resources and a different
 new output path. Both decoded keys are erased from invocation-owned buffers on
 every success or failure path.
+
+`--maximum-duration-milliseconds` is required and must be between 1 and
+900,000. One non-resettable monotonic deadline covers key reads, STS,
+DynamoDB, exact-version S3 requests, result generation, and exclusive durable
+publication. Every AWS request receives the shared abort signal. Publication
+starts only with at least 30 seconds of remaining headroom; a deadline crossed
+during publication is a failure even when the exact artifact exists. A later
+retry may accept only that byte-for-byte authenticated artifact and re-sync its
+directory entry.
 
 ## Hook contract
 
@@ -238,6 +272,16 @@ that consumes the exported full result must bind all of the following:
 - per-domain and total aggregate HMACs, checked counts, and sorted failure
   codes;
 - the authenticated whole-result `resultMac`.
+
+Workspace Search rehearsal consumers additionally require a passing live
+source result whose physical-resource identity digest equals the authenticated
+permit/manifest digest. Rollback evidence requires the complete before check to
+finish strictly before apply starts and the complete after check to finish
+strictly after the authoritative rollback terminal. The exported opaque
+preimage capability authenticates and retains the exact canonical file
+`contentDigest`, byte length, result digest/MAC, completion `checkedAt`, runtime
+provenance, aggregate digest, and resource-identity digest; it can be consumed
+only once by the planning publication boundary.
 
 In-process callers must also supply the existing 32-byte Workspace Audit
 pseudonym key separately from the evidence digest key and erase both after the

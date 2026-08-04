@@ -1,5 +1,14 @@
 /** Registers Workspace Search migration storage and least-privilege IAM tests. */
 import { expect, test } from '@jest/globals';
+import {
+  WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_ACCOUNT_TAG_KEY,
+  WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_REGION_TAG_KEY,
+  WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_TARGET_TAG_KEY,
+  WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_TRUST_ROOT_TAG_KEY,
+  WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_TRUST_VERSION_TAG_KEY,
+  WORKSPACE_SEARCH_MIGRATION_ENVIRONMENT_TAG_KEY,
+  WORKSPACE_SEARCH_MIGRATION_PRODUCTION_ACCOUNT_DIGEST_TAG_KEY,
+} from '../lib/subsystems/migration-storage';
 import { synthesizedTemplate } from './test-support';
 
 /**
@@ -11,6 +20,65 @@ import { synthesizedTemplate } from './test-support';
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
+
+test('Workspace Search durable migration resources carry the deployment trust root', () => {
+  const synthesized = synthesizedTemplate.toJSON();
+  const stateTableId =
+    synthesized.Outputs.WorkspaceSearchMigrationStateTableName?.Value?.Ref;
+  const journalBucketId =
+    synthesized.Outputs.WorkspaceSearchMigrationJournalBucketName?.Value?.Ref;
+
+  expect(typeof stateTableId).toBe('string');
+  expect(typeof journalBucketId).toBe('string');
+  if (typeof stateTableId !== 'string' || typeof journalBucketId !== 'string') {
+    throw new Error('Migration outputs do not reference both durable resources.');
+  }
+
+  const environmentTag = {
+    Key: WORKSPACE_SEARCH_MIGRATION_ENVIRONMENT_TAG_KEY,
+    Value: 'production',
+  };
+  const trustTags = [
+    environmentTag,
+    {
+      Key: WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_ACCOUNT_TAG_KEY,
+      Value: { Ref: 'AWS::AccountId' },
+    },
+    {
+      Key: WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_REGION_TAG_KEY,
+      Value: { Ref: 'AWS::Region' },
+    },
+    {
+      Key: WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_TARGET_TAG_KEY,
+      Value: 'production-disabled',
+    },
+    {
+      Key: WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_TRUST_VERSION_TAG_KEY,
+      Value: '1',
+    },
+    {
+      Key: WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_TRUST_ROOT_TAG_KEY,
+      Value:
+        synthesized.Outputs
+          .WorkspaceSearchMigrationDeploymentTrustRootDigest.Value,
+    },
+    {
+      Key: WORKSPACE_SEARCH_MIGRATION_PRODUCTION_ACCOUNT_DIGEST_TAG_KEY,
+      Value:
+        synthesized.Outputs
+          .WorkspaceSearchMigrationProductionAccountDigest.Value,
+    },
+  ];
+  expect(synthesized.Resources[stateTableId].Properties.Tags).toEqual(
+    expect.arrayContaining(trustTags),
+  );
+  expect(synthesized.Resources[journalBucketId].Properties.Tags).toEqual(
+    expect.arrayContaining(trustTags),
+  );
+  expect(JSON.stringify(trustTags)).not.toContain(
+    'workspace-search-migration-production-account"',
+  );
+});
 
 test('Workspace Search migration state is retained, encrypted, protected, and recoverable', () => {
   const template = synthesizedTemplate;
@@ -222,6 +290,14 @@ test('Workspace Search journal is retained, write-once, encrypted, and access lo
   const longRetentionStatement = journalPolicyStatements.find(
     (statement) => statement.Sid === 'DenyLongJournalRetention',
   );
+  const shortEvidenceRetentionStatement = journalPolicyStatements.find(
+    (statement) =>
+      statement.Sid === 'DenyShortRehearsalEvidenceRetention',
+  );
+  const longEvidenceRetentionStatement = journalPolicyStatements.find(
+    (statement) =>
+      statement.Sid === 'DenyLongRehearsalEvidenceRetention',
+  );
   const serializedJournalPolicy = JSON.stringify(journalBucketPolicy);
   const allJournalObjectsArn = {
     'Fn::Join': [
@@ -238,6 +314,15 @@ test('Workspace Search journal is retained, write-once, encrypted, and access lo
       [
         { 'Fn::GetAtt': [journalBucketId, 'Arn'] },
         '/workspace-search/v1/*',
+      ],
+    ],
+  };
+  const rehearsalEvidenceObjectsArn = {
+    'Fn::Join': [
+      '',
+      [
+        { 'Fn::GetAtt': [journalBucketId, 'Arn'] },
+        '/workspace-search/v1/rehearsal/evidence-*',
       ],
     ],
   };
@@ -321,8 +406,30 @@ test('Workspace Search journal is retained, write-once, encrypted, and access lo
       },
     },
     Effect: 'Deny',
+    NotResource: rehearsalEvidenceObjectsArn,
     Principal: { AWS: '*' },
-    Resource: journalV1ObjectsArn,
+  }));
+  expect(shortEvidenceRetentionStatement).toEqual(expect.objectContaining({
+    Action: 's3:PutObjectRetention',
+    Condition: {
+      NumericLessThan: {
+        's3:object-lock-remaining-retention-days': 365,
+      },
+    },
+    Effect: 'Deny',
+    Principal: { AWS: '*' },
+    Resource: rehearsalEvidenceObjectsArn,
+  }));
+  expect(longEvidenceRetentionStatement).toEqual(expect.objectContaining({
+    Action: 's3:PutObjectRetention',
+    Condition: {
+      NumericGreaterThan: {
+        's3:object-lock-remaining-retention-days': 366,
+      },
+    },
+    Effect: 'Deny',
+    Principal: { AWS: '*' },
+    Resource: rehearsalEvidenceObjectsArn,
   }));
   expect(serializedJournalPolicy).toContain('s3:TlsVersion');
   expect(serializedJournalPolicy).toContain('1.2');
@@ -334,6 +441,10 @@ test('Workspace Search migration operator policy is unattached and least privile
   const synthesized = template.toJSON();
   const operatorPolicyId =
     synthesized.Outputs.WorkspaceSearchMigrationOperatorPolicyArn?.Value?.Ref;
+  const rehearsalEvidencePolicyOutput =
+    synthesized.Outputs.WorkspaceSearchMigrationRehearsalEvidencePolicyArn;
+  const rehearsalEvidencePolicyId =
+    rehearsalEvidencePolicyOutput?.Value?.Ref;
   const journalBucketId =
     synthesized.Outputs.WorkspaceSearchMigrationJournalBucketName?.Value?.Ref;
   const journalKeyId =
@@ -349,6 +460,7 @@ test('Workspace Search migration operator policy is unattached and least privile
   ];
 
   expect(typeof operatorPolicyId).toBe('string');
+  expect(typeof rehearsalEvidencePolicyId).toBe('string');
   expect(typeof journalBucketId).toBe('string');
   expect(typeof journalKeyId).toBe('string');
   expect(typeof stateTableId).toBe('string');
@@ -357,6 +469,7 @@ test('Workspace Search migration operator policy is unattached and least privile
     .toBe(true);
   if (
     typeof operatorPolicyId !== 'string' ||
+    typeof rehearsalEvidencePolicyId !== 'string' ||
     typeof journalBucketId !== 'string' ||
     typeof journalKeyId !== 'string' ||
     typeof stateTableId !== 'string' ||
@@ -366,6 +479,8 @@ test('Workspace Search migration operator policy is unattached and least privile
   }
 
   const operatorPolicy = synthesized.Resources[operatorPolicyId];
+  const rehearsalEvidencePolicy =
+    synthesized.Resources[rehearsalEvidencePolicyId];
   const operatorPolicyProperties = isRecord(operatorPolicy?.Properties)
     ? operatorPolicy.Properties
     : undefined;
@@ -431,8 +546,32 @@ test('Workspace Search migration operator policy is unattached and least privile
     statement.Action === 's3:PutObject'
   );
   const journalRetentionStatement = statements.find((statement) =>
-    statement.Action === 's3:PutObjectRetention'
+    statement.Action === 's3:PutObjectRetention' &&
+    JSON.stringify(statement.Condition).includes(':30')
   );
+  const rehearsalEvidencePolicyProperties = isRecord(
+    rehearsalEvidencePolicy?.Properties,
+  )
+    ? rehearsalEvidencePolicy.Properties
+    : undefined;
+  const rehearsalEvidencePolicyDocument = isRecord(
+    rehearsalEvidencePolicyProperties?.PolicyDocument,
+  )
+    ? rehearsalEvidencePolicyProperties.PolicyDocument
+    : undefined;
+  const rehearsalEvidenceStatements: Record<string, unknown>[] = Array.isArray(
+    rehearsalEvidencePolicyDocument?.Statement,
+  )
+    ? rehearsalEvidencePolicyDocument.Statement.filter(isRecord)
+    : [];
+  const rehearsalEvidenceRetentionStatement =
+    rehearsalEvidenceStatements.find((statement) =>
+      statement.Action === 's3:PutObjectRetention'
+    );
+  const rehearsalEvidenceBucketTagStatement =
+    rehearsalEvidenceStatements.find((statement) =>
+      statement.Action === 's3:GetBucketTagging'
+    );
   const journalReadStatement = statements.find((statement) =>
     Array.isArray(statement.Action) &&
     statement.Action.includes('s3:GetObjectVersion')
@@ -460,6 +599,20 @@ test('Workspace Search migration operator policy is unattached and least privile
       Users: expect.anything(),
     }),
   }));
+  expect(statements.some((statement) =>
+    statement.Action === 's3:PutObjectRetention' &&
+    JSON.stringify(statement.Condition).includes(':365')
+  )).toBe(false);
+  expect(rehearsalEvidencePolicy).toEqual(expect.objectContaining({
+    Condition: 'WorkspaceSearchMigrationRehearsalEvidenceNonProduction',
+    Type: 'AWS::IAM::ManagedPolicy',
+    Properties: expect.not.objectContaining({
+      Roles: expect.anything(),
+      Users: expect.anything(),
+    }),
+  }));
+  expect(rehearsalEvidencePolicyOutput?.Condition)
+    .toBe('WorkspaceSearchMigrationRehearsalEvidenceNonProduction');
   expect(sourceReadStatement?.Resource).toHaveLength(4);
   expect(sourceReadStatement?.Resource).toEqual(expect.arrayContaining(
     sourceTableIds.map((logicalId) => ({
@@ -537,6 +690,7 @@ test('Workspace Search migration operator policy is unattached and least privile
     's3:GetBucketLogging',
     's3:GetBucketObjectLockConfiguration',
   ]));
+  expect(journalBucketStatement?.Action).not.toContain('s3:GetBucketTagging');
   expect(journalBucketStatement?.Condition).toBeUndefined();
   expect(journalListStatement?.Condition).toEqual({
     StringLike: {
@@ -570,6 +724,22 @@ test('Workspace Search migration operator policy is unattached and least privile
   });
   expect(JSON.stringify(journalRetentionStatement?.Resource))
     .toContain('workspace-search/v1/');
+  expect(rehearsalEvidenceRetentionStatement?.Condition).toEqual({
+    NumericGreaterThanEquals: {
+      's3:object-lock-remaining-retention-days': 365,
+    },
+    NumericLessThanEquals: {
+      's3:object-lock-remaining-retention-days': 366,
+    },
+    StringEquals: {
+      's3:object-lock-mode': 'COMPLIANCE',
+    },
+  });
+  expect(JSON.stringify(rehearsalEvidenceRetentionStatement?.Resource))
+    .toContain('workspace-search/v1/rehearsal/evidence-');
+  expect(rehearsalEvidenceBucketTagStatement?.Resource).toEqual({
+    'Fn::GetAtt': [journalBucketId, 'Arn'],
+  });
   expect(JSON.stringify(journalReadStatement?.Resource))
     .toContain('workspace-search/v1/');
   expect(journalReadStatement?.Action).toEqual([
@@ -609,6 +779,7 @@ test('Workspace Search migration operator policy is unattached and least privile
     expect(serializedOperatorPolicy).not.toContain(`"${forbiddenAction}"`);
   }
   expect(serializedOperatorPolicy).not.toMatch(/"s3:PutBucket[A-Za-z]*"/u);
+  expect(serializedOperatorPolicy).not.toContain('"s3:GetBucketTagging"');
   expect(serializedOperatorPolicy).not.toContain('"Resource":"*"');
 });
 

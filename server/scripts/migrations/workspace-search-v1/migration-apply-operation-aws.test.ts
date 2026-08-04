@@ -54,6 +54,8 @@ import {
 } from './migration-artifacts'
 import {
   createAwsWorkspaceSearchMigrationApplyOperationPort,
+  parseWorkspaceSearchMigrationApplyAuthorityAuditRecord,
+  parseWorkspaceSearchMigrationApplyMarkerAuditRecord,
   createWorkspaceSearchMigrationApplyPredecessorAwsBinding,
   type WorkspaceSearchMigrationApplyAuthorityAdoptionCommandInput,
   type WorkspaceSearchMigrationApplyCheckpointScanner,
@@ -1112,6 +1114,45 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
   )
 
   test(
+    'rejects a current-run marker whose deterministic record key is corrupted',
+    async () => {
+      const fixture = createApplyFixture('no-op')
+      const harness = new ApplyOperationHarness(fixture)
+      const port = createApplyPort(fixture, harness)
+      await port.commitApplyOperation(createApplyCommand(fixture))
+      const items = requireTransactionItems(
+        requireTransaction(harness.transactions[0]),
+      )
+      const markerItem = items[
+        workspaceSearchMigrationApplyOperationTransactionIndex
+          .operationMarker
+      ]?.Put?.Item
+      if (markerItem === undefined) {
+        throw new Error('Expected one durable operation marker.')
+      }
+      const corrupted = structuredClone(markerItem)
+      corrupted.recordKey = {
+        S: `apply-operation/v1/${digest('wrong-current-marker-key')}/marker`,
+      }
+
+      const failure = captureSynchronousMigrationFailure(() =>
+        parseWorkspaceSearchMigrationApplyMarkerAuditRecord({
+          closedWriterFenceRecord:
+            fixture.closedWriterFenceRecord,
+          configuration: fixture.configuration,
+          configurationHash: fixture.configurationHash,
+          executionBoundary: fixture.executionBoundary,
+          executionRun: fixture.executionRun,
+          sealedPlanningAuthority:
+            fixture.sealedPlanningAuthority,
+        }, corrupted)
+      )
+
+      expect(failure.code).toBe('INVALID_STATE')
+    },
+  )
+
+  test(
     'adopts a same-fence refresh from admission in fixed eleven-item exact order',
     async () => {
       const fixture = createApplyFixture('put', 0)
@@ -1231,6 +1272,54 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
       expect(receipt.successorRunStateDigest).toBe(
         state.runStateDigest,
       )
+    },
+  )
+
+  test(
+    'rejects a current-run authority receipt whose deterministic record key is corrupted',
+    async () => {
+      const fixture = createApplyFixture('put', 0)
+      const harness = new ApplyOperationHarness(fixture)
+      const authority = createRenewedAuthority(
+        fixture,
+        7,
+        13,
+        ownerId,
+      )
+      harness.replaceCurrentAuthority(authority)
+      const port = createApplyPort(fixture, harness)
+      await port.adoptExecutionAuthority(
+        createAuthorityAdoptionCommand(authority, 1),
+      )
+      const items = requireTransactionItems(
+        requireTransaction(harness.transactions[0]),
+      )
+      const receiptItem = items[
+        workspaceSearchMigrationApplyAuthorityAdoptionTransactionIndex
+          .authorityAdoptionReceipt
+      ]?.Put?.Item
+      if (receiptItem === undefined) {
+        throw new Error('Expected one durable authority receipt.')
+      }
+      const corrupted = structuredClone(receiptItem)
+      corrupted.recordKey = {
+        S: `execution-authority-adoption/v1/${digest('wrong-current-authority-key')}/receipt`,
+      }
+
+      const failure = captureSynchronousMigrationFailure(() =>
+        parseWorkspaceSearchMigrationApplyAuthorityAuditRecord({
+          closedWriterFenceRecord:
+            fixture.closedWriterFenceRecord,
+          configuration: fixture.configuration,
+          configurationHash: fixture.configurationHash,
+          executionBoundary: fixture.executionBoundary,
+          executionRun: fixture.executionRun,
+          sealedPlanningAuthority:
+            fixture.sealedPlanningAuthority,
+        }, corrupted)
+      )
+
+      expect(failure.code).toBe('INVALID_STATE')
     },
   )
 
@@ -4148,6 +4237,23 @@ describe('Workspace Search migration apply-operation AWS adapter', () => {
       expect(harness.uploadedApplySeals).toHaveLength(1)
       const transactionCount = harness.transactions.length
       const restarted = createApplyPort(fixture, harness)
+      const rootRecord = harness.findLastTransactionRecord(
+        'workspace-search-migration-applied-root-record',
+      )
+      if (rootRecord === undefined) {
+        throw new Error('Expected one response-loss applied root.')
+      }
+      const expectedRoot = parseWorkspaceSearchMigrationAppliedRoot(
+        requireBinaryAttribute(rootRecord, 'rootBytes'),
+      )
+      const readCount = harness.reads.length
+      expect(await restarted.readAppliedRoot()).toEqual(expectedRoot)
+      expect(harness.reads.slice(readCount)).toHaveLength(3)
+      expect(
+        harness.reads
+          .slice(readCount)
+          .every((command) => command.input.ConsistentRead === true),
+      ).toBe(true)
       expect(
         await restarted.sealApply(
           createApplySealCommand(fixture, terminal.revision),

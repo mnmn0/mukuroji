@@ -68,11 +68,45 @@ export const WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_CLEANUP_RECOVERY_ATTEMPTS
 
 /** Version of the secret-free DescribeTable rate observation contract. */
 export const WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION =
-  1
+  2
 
 /** Version of the durable DescribeTable rate checkpoint contract. */
 export const WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_CHECKPOINT_VERSION =
-  1
+  2
+
+/** Provenance assigned to one controller-classified throttle. */
+export type WorkspaceSearchMigrationDescribeTableThrottleProvenance =
+  | 'aws-service'
+  | 'rehearsal-after-success-injection'
+
+/** Provenance assigned to one fail-closed admission stop. */
+export type WorkspaceSearchMigrationDescribeTableBudgetStopProvenance =
+  | 'operational'
+  | 'aws-service-throttle'
+  | 'rehearsal-after-success-injection'
+
+/** Module-private identity for deterministic post-success throttle faults. */
+const rehearsalAfterSuccessThrottleErrors = new WeakSet<object>()
+
+/** Creates one raw-value-free error that callers cannot structurally forge. */
+function createRehearsalAfterSuccessThrottleError(): Error {
+  const error = new Error('Rehearsal DescribeTable throttle injection.')
+  error.name = 'WorkspaceSearchMigrationRehearsalAfterSuccessThrottleError'
+  rehearsalAfterSuccessThrottleErrors.add(error)
+  return error
+}
+
+/**
+ * Checks whether the exact module-private post-success fault was observed.
+ *
+ * @param error - Candidate transport failure.
+ * @returns Whether this module minted the candidate after an AWS success.
+ */
+function isRehearsalAfterSuccessThrottleError(error: unknown): boolean {
+  return typeof error === 'object' &&
+    error !== null &&
+    rehearsalAfterSuccessThrottleErrors.has(error)
+}
 
 /**
  * Static AWS credentials pinned to the measured migration account.
@@ -304,6 +338,22 @@ export interface WorkspaceSearchMigrationDescribeTableSingleAttemptAwsTransport 
 }
 
 /**
+ * Rehearsal-only transport capability kept outside the production projection.
+ */
+export interface WorkspaceSearchMigrationDescribeTableRehearsalThrottleAwsTransport
+  extends WorkspaceSearchMigrationDescribeTableSingleAttemptAwsTransport {
+  /**
+   * Creates one real read-only attempt that injects only after AWS succeeds.
+   *
+   * @param tableName - Construction-fixed allowlisted DynamoDB table name.
+   * @returns Nominal attempt consumed only by the genuine rate controller.
+   */
+  createAfterSuccessThrottleAttempt(
+    tableName: string,
+  ): WorkspaceSearchMigrationDescribeTableSingleAttempt<never>
+}
+
+/**
  * AWS SDK implementation owning one dedicated DynamoDB client.
  */
 class AwsSdkWorkspaceSearchMigrationDescribeTableSingleAttemptTransport
@@ -364,6 +414,77 @@ class AwsSdkWorkspaceSearchMigrationDescribeTableSingleAttemptTransport
       (signal) => this.#client.describeTable(command, signal),
     )
   }
+
+  /**
+   * Runs a genuine AWS read and replaces only its successful response.
+   *
+   * AWS throttles and all other failures pass through untouched, so they can
+   * never be misclassified as the deterministic rehearsal injection.
+   *
+   * @param tableName - Validated rehearsal table name.
+   * @returns Controller-only attempt that never returns a response.
+   */
+  createAfterSuccessThrottleAttempt(
+    tableName: string,
+  ): WorkspaceSearchMigrationDescribeTableSingleAttempt<never> {
+    const command = new DescribeTableCommand({
+      TableName: detachAndValidateDescribeTableName(tableName),
+    })
+    return new WorkspaceSearchMigrationDescribeTableSingleAttempt(
+      singleAttemptConstructionKey,
+      this.#scopeBindingDigest,
+      this.#transportBindingDigest,
+      async (signal): Promise<never> => {
+        await this.#client.describeTable(command, signal)
+        throw createRehearsalAfterSuccessThrottleError()
+      },
+    )
+  }
+}
+
+/**
+ * Production-only projection that hides rehearsal transport capabilities.
+ */
+class ProjectedWorkspaceSearchMigrationDescribeTableSingleAttemptTransport
+  implements WorkspaceSearchMigrationDescribeTableSingleAttemptAwsTransport {
+  /** Hidden concrete transport retained behind the narrow projection. */
+  readonly #transport:
+    AwsSdkWorkspaceSearchMigrationDescribeTableSingleAttemptTransport
+
+  /**
+   * Retains one genuine transport behind the production-only surface.
+   *
+   * @param constructionKey - Module-private capability construction key.
+   * @param transport - Hidden concrete transport with rehearsal extensions.
+   */
+  constructor(
+    constructionKey: symbol,
+    transport:
+      AwsSdkWorkspaceSearchMigrationDescribeTableSingleAttemptTransport,
+  ) {
+    requireDescribeTableCapabilityConstructionKey(constructionKey)
+    this.#transport = transport
+    Object.freeze(this)
+  }
+
+  /** Releases the hidden dedicated DynamoDB client. */
+  close(): void {
+    this.#transport.close()
+  }
+
+  /**
+   * Creates one controller-only operation through the hidden transport.
+   *
+   * @param tableName - Untrusted DynamoDB table name.
+   * @returns Nominal operation executable only by the rate controller.
+   */
+  createAttempt(
+    tableName: string,
+  ): WorkspaceSearchMigrationDescribeTableSingleAttempt<
+    DescribeTableCommandOutput
+  > {
+    return this.#transport.createAttempt(tableName)
+  }
 }
 
 /**
@@ -418,6 +539,13 @@ Object.freeze(
   AwsSdkWorkspaceSearchMigrationDescribeTableSingleAttemptTransport,
 )
 Object.freeze(
+  ProjectedWorkspaceSearchMigrationDescribeTableSingleAttemptTransport
+    .prototype,
+)
+Object.freeze(
+  ProjectedWorkspaceSearchMigrationDescribeTableSingleAttemptTransport,
+)
+Object.freeze(
   DynamoDbWorkspaceSearchMigrationDescribeTableAwsSdkClient.prototype,
 )
 Object.freeze(
@@ -434,6 +562,26 @@ export function createWorkspaceSearchMigrationDescribeTableSingleAttemptAwsTrans
   configuration: WorkspaceSearchMigrationDescribeTableAwsSdkConfiguration,
 ): WorkspaceSearchMigrationDescribeTableSingleAttemptAwsTransport {
   return createDescribeTableTransport(configuration)
+}
+
+/**
+ * Creates the separate non-production post-success throttle transport surface.
+ *
+ * The standard production factory never returns this additional method.
+ *
+ * @param configuration - Explicit pinned AWS scope and credentials.
+ * @returns Closeable standard transport plus one rehearsal-only attempt factory.
+ */
+export function createWorkspaceSearchMigrationDescribeTableRehearsalThrottleAwsTransport(
+  configuration: WorkspaceSearchMigrationDescribeTableAwsSdkConfiguration,
+): WorkspaceSearchMigrationDescribeTableRehearsalThrottleAwsTransport {
+  const transport = createConcreteDescribeTableTransport(configuration)
+  return Object.freeze({
+    close: (): void => transport.close(),
+    createAttempt: (tableName: string) => transport.createAttempt(tableName),
+    createAfterSuccessThrottleAttempt: (tableName: string) =>
+      transport.createAfterSuccessThrottleAttempt(tableName),
+  })
 }
 
 /**
@@ -522,6 +670,21 @@ function createDescribeTableAwsSdkCredentialsFromSnapshot(
 function createDescribeTableTransport(
   configuration: WorkspaceSearchMigrationDescribeTableAwsSdkConfiguration,
 ): WorkspaceSearchMigrationDescribeTableSingleAttemptAwsTransport {
+  return new ProjectedWorkspaceSearchMigrationDescribeTableSingleAttemptTransport(
+    describeTableCapabilityConstructionKey,
+    createConcreteDescribeTableTransport(configuration),
+  )
+}
+
+/**
+ * Creates the hidden concrete transport used by either narrow projection.
+ *
+ * @param configuration - Untrusted caller-owned configuration.
+ * @returns Concrete transport retained only behind module-owned closures.
+ */
+function createConcreteDescribeTableTransport(
+  configuration: WorkspaceSearchMigrationDescribeTableAwsSdkConfiguration,
+): AwsSdkWorkspaceSearchMigrationDescribeTableSingleAttemptTransport {
   const snapshot =
     detachAndValidateDescribeTableAwsSdkConfiguration(configuration)
   const { account, region } = snapshot
@@ -797,6 +960,7 @@ export type WorkspaceSearchMigrationDescribeTableRatePolicy = {
 export type WorkspaceSearchMigrationDescribeTablePhase =
   | 'measurement'
   | 'checkpoint-page'
+  | 'integrity-check'
   | 'pre-send-guard'
   | 'post-send-guard'
   | 'reconciliation'
@@ -853,6 +1017,9 @@ export type WorkspaceSearchMigrationDescribeTableRateObservation =
     readonly observedAtMilliseconds: number
     /** Bounded cooldown required before a later admission. */
     readonly backoffMilliseconds: number
+    /** Unambiguous origin of the controller-classified throttle. */
+    readonly provenance:
+      WorkspaceSearchMigrationDescribeTableThrottleProvenance
   }
   | {
     /** Contract version for downstream telemetry validation. */
@@ -874,6 +1041,9 @@ export type WorkspaceSearchMigrationDescribeTableRateObservation =
     readonly remainingWindowAttempts: number
     /** Bounded delay after which a caller may explicitly resume. */
     readonly retryAfterMilliseconds: number
+    /** Operational or throttle-specific origin of this admission stop. */
+    readonly provenance:
+      WorkspaceSearchMigrationDescribeTableBudgetStopProvenance
   }
   | {
     /** Contract version for downstream telemetry validation. */
@@ -1044,8 +1214,18 @@ export type WorkspaceSearchMigrationDescribeTableRateEvidence = {
   readonly forfeitedAttemptCount: number
   /** Count of attempts classified as throttled. */
   readonly throttleCount: number
+  /** Throttles classified from genuine AWS service failures. */
+  readonly awsServiceThrottleCount: number
+  /** Deterministic throttles injected only after an AWS success response. */
+  readonly rehearsalInjectedThrottleCount: number
   /** Count of distinct fail-closed admission stops. */
   readonly budgetStopCount: number
+  /** Admission stops not caused by either throttle provenance. */
+  readonly operationalBudgetStopCount: number
+  /** Admission stops caused by an AWS-service throttle classification. */
+  readonly awsServiceThrottleBudgetStopCount: number
+  /** Admission stops caused by the post-success rehearsal injection. */
+  readonly rehearsalInjectedBudgetStopCount: number
   /** Count of waits performed before external I/O. */
   readonly cadenceWaitCount: number
   /** Sum of requested delays, including waits canceled before full expiry. */
@@ -1098,8 +1278,18 @@ export type WorkspaceSearchMigrationDescribeTableRateCheckpoint = {
   readonly sequence: number
   /** Count of attempts classified as throttled. */
   readonly throttleCount: number
+  /** Throttles classified from genuine AWS service failures. */
+  readonly awsServiceThrottleCount: number
+  /** Deterministic throttles injected only after an AWS success response. */
+  readonly rehearsalInjectedThrottleCount: number
   /** Count of distinct fail-closed admission stops. */
   readonly budgetStopCount: number
+  /** Admission stops not caused by either throttle provenance. */
+  readonly operationalBudgetStopCount: number
+  /** Admission stops caused by an AWS-service throttle classification. */
+  readonly awsServiceThrottleBudgetStopCount: number
+  /** Admission stops caused by the post-success rehearsal injection. */
+  readonly rehearsalInjectedBudgetStopCount: number
   /** Count of cadence-delay requests started. */
   readonly cadenceWaitCount: number
   /** Aggregate requested delay, including an early-canceled final wait. */
@@ -1357,8 +1547,18 @@ type RateEvidenceState = {
   forfeitedAttemptCount: number
   /** Throttled physical attempts. */
   throttleCount: number
+  /** Genuine AWS-service throttle classifications. */
+  awsServiceThrottleCount: number
+  /** Rehearsal post-success throttle classifications. */
+  rehearsalInjectedThrottleCount: number
   /** Distinct fail-closed stops. */
   budgetStopCount: number
+  /** Non-throttle admission stops. */
+  operationalBudgetStopCount: number
+  /** Stops emitted from AWS-service throttle handling. */
+  awsServiceThrottleBudgetStopCount: number
+  /** Stops emitted from post-success rehearsal injection handling. */
+  rehearsalInjectedBudgetStopCount: number
   /** Admission delay requests started. */
   cadenceWaitCount: number
   /** Aggregate requested admission delay. */
@@ -2406,7 +2606,15 @@ class DescribeTableRateLifecycle
       attemptCount: evidence.attemptCount,
       forfeitedAttemptCount: evidence.forfeitedAttemptCount,
       throttleCount: evidence.throttleCount,
+      awsServiceThrottleCount: evidence.awsServiceThrottleCount,
+      rehearsalInjectedThrottleCount:
+        evidence.rehearsalInjectedThrottleCount,
       budgetStopCount: evidence.budgetStopCount,
+      operationalBudgetStopCount: evidence.operationalBudgetStopCount,
+      awsServiceThrottleBudgetStopCount:
+        evidence.awsServiceThrottleBudgetStopCount,
+      rehearsalInjectedBudgetStopCount:
+        evidence.rehearsalInjectedBudgetStopCount,
       cadenceWaitCount: evidence.cadenceWaitCount,
       cadenceWaitMilliseconds: evidence.cadenceWaitMilliseconds,
       maximumInFlight: evidence.maximumInFlight,
@@ -2671,8 +2879,20 @@ class DescribeTableRateLifecycle
           result = await execution
         } catch (error: unknown) {
           this.#requireCurrentOperationGeneration()
-          if (isSafeThrottlingError(error)) {
+          const throttleProvenance:
+            WorkspaceSearchMigrationDescribeTableThrottleProvenance | undefined =
+              isRehearsalAfterSuccessThrottleError(error)
+                ? 'rehearsal-after-success-injection'
+                : isSafeThrottlingError(error)
+                  ? 'aws-service'
+                  : undefined
+          if (throttleProvenance !== undefined) {
             this.#scope.evidence.throttleCount += 1
+            if (throttleProvenance === 'aws-service') {
+              this.#scope.evidence.awsServiceThrottleCount += 1
+            } else {
+              this.#scope.evidence.rehearsalInjectedThrottleCount += 1
+            }
             this.#scope.consecutiveThrottles += 1
             const observedAt = this.#readClock()
             const backoffMilliseconds = this.#createThrottleBackoff()
@@ -2694,12 +2914,16 @@ class DescribeTableRateLifecycle
               sequence,
               observedAtMilliseconds: observedAt,
               backoffMilliseconds,
+              provenance: throttleProvenance,
             })
             return this.#stop(
               request.phase,
               'throttled',
               0,
               backoffMilliseconds,
+              throttleProvenance === 'aws-service'
+                ? 'aws-service-throttle'
+                : throttleProvenance,
             )
           }
           await this.#persistAttemptEpisodeCompletion(
@@ -3678,7 +3902,17 @@ class DescribeTableRateLifecycle
       attemptInFlightNonce: this.#scope.attemptInFlightNonce,
       sequence: this.#scope.sequence,
       throttleCount: this.#scope.evidence.throttleCount,
+      awsServiceThrottleCount:
+        this.#scope.evidence.awsServiceThrottleCount,
+      rehearsalInjectedThrottleCount:
+        this.#scope.evidence.rehearsalInjectedThrottleCount,
       budgetStopCount: this.#scope.evidence.budgetStopCount,
+      operationalBudgetStopCount:
+        this.#scope.evidence.operationalBudgetStopCount,
+      awsServiceThrottleBudgetStopCount:
+        this.#scope.evidence.awsServiceThrottleBudgetStopCount,
+      rehearsalInjectedBudgetStopCount:
+        this.#scope.evidence.rehearsalInjectedBudgetStopCount,
       cadenceWaitCount: this.#scope.evidence.cadenceWaitCount,
       cadenceWaitMilliseconds:
         this.#scope.evidence.cadenceWaitMilliseconds,
@@ -4200,6 +4434,9 @@ class DescribeTableRateLifecycle
     reason: WorkspaceSearchMigrationDescribeTableRateStopReason,
     requiredAttempts: number,
     retryAfterMilliseconds: number,
+    provenance:
+      WorkspaceSearchMigrationDescribeTableBudgetStopProvenance =
+        'operational',
   ): never {
     this.#requireCurrentOperationGeneration()
     const observedAtMilliseconds = this.#readClock()
@@ -4209,10 +4446,21 @@ class DescribeTableRateLifecycle
         ? retryAfterMilliseconds
         : 0
     const signature =
-      `${phase}:${reason}:${this.#scope.resumeNotBefore}`
+      `${phase}:${reason}:${provenance}:${this.#scope.resumeNotBefore}`
     if (this.#scope.lastBudgetStopSignature !== signature) {
       this.#scope.lastBudgetStopSignature = signature
       this.#scope.evidence.budgetStopCount += 1
+      switch (provenance) {
+        case 'operational':
+          this.#scope.evidence.operationalBudgetStopCount += 1
+          break
+        case 'aws-service-throttle':
+          this.#scope.evidence.awsServiceThrottleBudgetStopCount += 1
+          break
+        case 'rehearsal-after-success-injection':
+          this.#scope.evidence.rehearsalInjectedBudgetStopCount += 1
+          break
+      }
       this.#record({
         version:
           WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
@@ -4226,6 +4474,7 @@ class DescribeTableRateLifecycle
         remainingWindowAttempts:
           this.#readAvailableWindowAttempts(),
         retryAfterMilliseconds: safeRetryAfterMilliseconds,
+        provenance,
       })
     }
     throw new WorkspaceSearchMigrationDescribeTableRateError(reason)
@@ -5065,7 +5314,7 @@ function parseRateCheckpoint(
   transportBindingDigest: string,
 ): WorkspaceSearchMigrationDescribeTableRateCheckpoint {
   try {
-    const record = requireExactDataObject(value, [
+    const legacyKeys = [
       'attemptCount',
       'attemptInFlight',
       'attemptInFlightNonce',
@@ -5087,7 +5336,43 @@ function parseRateCheckpoint(
       'transportBindingDigest',
       'version',
       'writeNonce',
-    ])
+    ]
+    const currentKeys = [
+      'attemptCount',
+      'attemptInFlight',
+      'attemptInFlightNonce',
+      'awsServiceThrottleBudgetStopCount',
+      'awsServiceThrottleCount',
+      'budgetStopCount',
+      'cadenceWaitCount',
+      'cadenceWaitMilliseconds',
+      'capturedAtEpochMilliseconds',
+      'fenceToken',
+      'forfeitedAttemptCount',
+      'mandatoryCleanupRequired',
+      'maximumInFlight',
+      'operationalBudgetStopCount',
+      'policy',
+      'rehearsalInjectedBudgetStopCount',
+      'rehearsalInjectedThrottleCount',
+      'reservationKind',
+      'reservedAttempts',
+      'revision',
+      'scopeBindingDigest',
+      'sequence',
+      'throttleCount',
+      'transportBindingDigest',
+      'version',
+      'writeNonce',
+    ]
+    let legacy = false
+    let record: object
+    try {
+      record = requireExactDataObject(value, currentKeys)
+    } catch {
+      record = requireExactDataObject(value, legacyKeys)
+      legacy = true
+    }
     const version = Reflect.get(record, 'version')
     const storedScopeBindingDigest = Reflect.get(
       record,
@@ -5126,6 +5411,24 @@ function parseRateCheckpoint(
     const sequence = Reflect.get(record, 'sequence')
     const throttleCount = Reflect.get(record, 'throttleCount')
     const budgetStopCount = Reflect.get(record, 'budgetStopCount')
+    const awsServiceThrottleCount = legacy
+      ? throttleCount
+      : Reflect.get(record, 'awsServiceThrottleCount')
+    const rehearsalInjectedThrottleCount = legacy
+      ? 0
+      : Reflect.get(record, 'rehearsalInjectedThrottleCount')
+    const operationalBudgetStopCount = legacy
+      ? isNonNegativeSafeInteger(budgetStopCount) &&
+          isNonNegativeSafeInteger(throttleCount)
+        ? budgetStopCount - throttleCount
+        : Number.NaN
+      : Reflect.get(record, 'operationalBudgetStopCount')
+    const awsServiceThrottleBudgetStopCount = legacy
+      ? throttleCount
+      : Reflect.get(record, 'awsServiceThrottleBudgetStopCount')
+    const rehearsalInjectedBudgetStopCount = legacy
+      ? 0
+      : Reflect.get(record, 'rehearsalInjectedBudgetStopCount')
     const cadenceWaitCount = Reflect.get(record, 'cadenceWaitCount')
     const cadenceWaitMilliseconds = Reflect.get(
       record,
@@ -5142,6 +5445,11 @@ function parseRateCheckpoint(
       !isNonNegativeSafeInteger(sequence) ||
       !isNonNegativeSafeInteger(throttleCount) ||
       !isNonNegativeSafeInteger(budgetStopCount) ||
+      !isNonNegativeSafeInteger(awsServiceThrottleCount) ||
+      !isNonNegativeSafeInteger(rehearsalInjectedThrottleCount) ||
+      !isNonNegativeSafeInteger(operationalBudgetStopCount) ||
+      !isNonNegativeSafeInteger(awsServiceThrottleBudgetStopCount) ||
+      !isNonNegativeSafeInteger(rehearsalInjectedBudgetStopCount) ||
       !isNonNegativeSafeInteger(cadenceWaitCount) ||
       !isNonNegativeSafeInteger(cadenceWaitMilliseconds)
     ) {
@@ -5174,8 +5482,12 @@ function parseRateCheckpoint(
       detachedAttemptInFlightNonce = null
     }
     if (
-      version !==
-        WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_CHECKPOINT_VERSION ||
+      (
+        legacy
+          ? version !== 1
+          : version !==
+            WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_CHECKPOINT_VERSION
+      ) ||
       typeof storedScopeBindingDigest !== 'string' ||
       storedScopeBindingDigest !== scopeBindingDigest ||
       typeof storedTransportBindingDigest !== 'string' ||
@@ -5195,6 +5507,12 @@ function parseRateCheckpoint(
       ) ||
       typeof mandatoryCleanupRequired !== 'boolean' ||
       sequence !== attemptCount ||
+      throttleCount !==
+        awsServiceThrottleCount + rehearsalInjectedThrottleCount ||
+      budgetStopCount !==
+        operationalBudgetStopCount +
+          awsServiceThrottleBudgetStopCount +
+          rehearsalInjectedBudgetStopCount ||
       (
         maximumInFlight !== 0 &&
         maximumInFlight !== 1
@@ -5227,7 +5545,12 @@ function parseRateCheckpoint(
       attemptInFlightNonce: detachedAttemptInFlightNonce,
       sequence,
       throttleCount,
+      awsServiceThrottleCount,
+      rehearsalInjectedThrottleCount,
       budgetStopCount,
+      operationalBudgetStopCount,
+      awsServiceThrottleBudgetStopCount,
+      rehearsalInjectedBudgetStopCount,
       cadenceWaitCount,
       cadenceWaitMilliseconds,
       maximumInFlight,
@@ -5586,6 +5909,7 @@ function detachAndValidateAttemptInput(
   if (
     phase !== 'measurement' &&
     phase !== 'checkpoint-page' &&
+    phase !== 'integrity-check' &&
     phase !== 'pre-send-guard' &&
     phase !== 'post-send-guard' &&
     phase !== 'reconciliation'
@@ -5664,7 +5988,12 @@ function createFreshRateScopeState(
       attemptCount: 0,
       forfeitedAttemptCount: 0,
       throttleCount: 0,
+      awsServiceThrottleCount: 0,
+      rehearsalInjectedThrottleCount: 0,
       budgetStopCount: 0,
+      operationalBudgetStopCount: 0,
+      awsServiceThrottleBudgetStopCount: 0,
+      rehearsalInjectedBudgetStopCount: 0,
       cadenceWaitCount: 0,
       cadenceWaitMilliseconds: 0,
       maximumInFlight: 0,
@@ -5789,7 +6118,16 @@ function createRestoredRateScopeState(
       attemptCount: checkpoint.attemptCount,
       forfeitedAttemptCount,
       throttleCount: checkpoint.throttleCount,
+      awsServiceThrottleCount: checkpoint.awsServiceThrottleCount,
+      rehearsalInjectedThrottleCount:
+        checkpoint.rehearsalInjectedThrottleCount,
       budgetStopCount: checkpoint.budgetStopCount,
+      operationalBudgetStopCount:
+        checkpoint.operationalBudgetStopCount,
+      awsServiceThrottleBudgetStopCount:
+        checkpoint.awsServiceThrottleBudgetStopCount,
+      rehearsalInjectedBudgetStopCount:
+        checkpoint.rehearsalInjectedBudgetStopCount,
       cadenceWaitCount: checkpoint.cadenceWaitCount,
       cadenceWaitMilliseconds: checkpoint.cadenceWaitMilliseconds,
       maximumInFlight: checkpoint.maximumInFlight,

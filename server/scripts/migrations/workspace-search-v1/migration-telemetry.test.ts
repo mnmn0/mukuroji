@@ -2,8 +2,10 @@ import { createHash } from 'node:crypto'
 import { describe, expect, test } from 'bun:test'
 import {
   WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
+  type WorkspaceSearchMigrationDescribeTableBudgetStopProvenance,
   type WorkspaceSearchMigrationDescribeTableRateRecorder,
   type WorkspaceSearchMigrationDescribeTableRateStopReason,
+  type WorkspaceSearchMigrationDescribeTableThrottleProvenance,
 } from './migration-describe-table-rate-budget'
 import {
   createWorkspaceSearchMigrationCheckpointStallWatchdog,
@@ -250,7 +252,7 @@ describe('Workspace Search migration telemetry', () => {
       version:
         WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
       kind: 'attempt',
-      phase: 'measurement',
+      phase: 'integrity-check',
       sequence: 1,
       observedAtMilliseconds: 10,
       remainingNormalAdmissionAttempts: 200,
@@ -267,6 +269,7 @@ describe('Workspace Search migration telemetry', () => {
         sequence: backoffMilliseconds,
         observedAtMilliseconds: backoffMilliseconds,
         backoffMilliseconds,
+        provenance: 'aws-service',
       })
     }
     const stopReasons: readonly WorkspaceSearchMigrationDescribeTableRateStopReason[] = [
@@ -286,6 +289,9 @@ describe('Workspace Search migration telemetry', () => {
         remainingNormalAdmissionAttempts: 0,
         remainingWindowAttempts: 0,
         retryAfterMilliseconds: 1_000,
+        provenance: reason === 'throttled'
+          ? 'aws-service-throttle'
+          : 'operational',
       })
     }
     for (const delayMilliseconds of [20, 30]) {
@@ -339,6 +345,113 @@ describe('Workspace Search migration telemetry', () => {
       OperationCount: 1,
       QuarantineCount: 1,
     })
+  })
+
+  test('keeps source provenance out of metrics and drops inconsistent pairs', () => {
+    const lines: string[] = []
+    const recorder = createDeterministicRecorder(lines, 'measure')
+    const rateRecorder = recorder.describeTableRateRecorder
+    const throttleCases: ReadonlyArray<
+      readonly [number, WorkspaceSearchMigrationDescribeTableThrottleProvenance]
+    > = [
+      [1, 'aws-service'],
+      [2, 'rehearsal-after-success-injection'],
+    ]
+    for (const [sequence, provenance] of throttleCases) {
+      rateRecorder.record({
+        version:
+          WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
+        kind: 'throttle',
+        phase: 'measurement',
+        sequence,
+        observedAtMilliseconds: sequence,
+        backoffMilliseconds: sequence * 100,
+        provenance,
+      })
+    }
+    const throttleStopProvenances:
+      readonly WorkspaceSearchMigrationDescribeTableBudgetStopProvenance[] = [
+      'aws-service-throttle',
+      'rehearsal-after-success-injection',
+    ]
+    for (const provenance of throttleStopProvenances) {
+      rateRecorder.record({
+        version:
+          WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
+        kind: 'budget-stop',
+        phase: 'measurement',
+        reason: 'throttled',
+        observedAtMilliseconds: 3,
+        requiredAttempts: 0,
+        remainingNormalAdmissionAttempts: 1,
+        remainingWindowAttempts: 1,
+        retryAfterMilliseconds: 1,
+        provenance,
+      })
+    }
+    rateRecorder.record({
+      version:
+        WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
+      kind: 'budget-stop',
+      phase: 'measurement',
+      reason: 'budget-capacity',
+      observedAtMilliseconds: 4,
+      requiredAttempts: 1,
+      remainingNormalAdmissionAttempts: 0,
+      remainingWindowAttempts: 0,
+      retryAfterMilliseconds: 1,
+      provenance: 'operational',
+    })
+
+    const rawCanary = 'RAW-PROVENANCE-CANARY'
+    for (const invalid of [{
+      version:
+        WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
+      kind: 'throttle',
+      phase: 'measurement',
+      sequence: 5,
+      observedAtMilliseconds: 5,
+      backoffMilliseconds: 500,
+      provenance: rawCanary,
+    }, {
+      version:
+        WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
+      kind: 'budget-stop',
+      phase: 'measurement',
+      reason: 'throttled',
+      observedAtMilliseconds: 6,
+      requiredAttempts: 0,
+      remainingNormalAdmissionAttempts: 1,
+      remainingWindowAttempts: 1,
+      retryAfterMilliseconds: 1,
+      provenance: 'operational',
+    }, {
+      version:
+        WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION,
+      kind: 'budget-stop',
+      phase: 'measurement',
+      reason: 'budget-capacity',
+      observedAtMilliseconds: 7,
+      requiredAttempts: 1,
+      remainingNormalAdmissionAttempts: 0,
+      remainingWindowAttempts: 0,
+      retryAfterMilliseconds: 1,
+      provenance: 'aws-service-throttle',
+    }]) {
+      Reflect.apply(rateRecorder.record, rateRecorder, [invalid])
+    }
+
+    expect(recorder.snapshot()).toMatchObject({
+      observationCount: 5,
+      metrics: {
+        DescribeTableBudgetExhaustionCount: 1,
+        DescribeTableBudgetStopCount: 3,
+        DescribeTableThrottleBackoffMilliseconds: 200,
+        DescribeTableThrottleCount: 2,
+      },
+    })
+    expect(JSON.stringify(recorder.snapshot())).not.toContain(rawCanary)
+    expect(lines).toEqual([])
   })
 
   test('emits a bound watchdog stall immediately and excludes it from final pending metrics', () => {
@@ -587,6 +700,7 @@ describe('Workspace Search migration telemetry', () => {
       sequence: 1,
       observedAtMilliseconds: 10,
       backoffMilliseconds: 250,
+      provenance: 'aws-service',
     })
     recorder.describeTableRateRecorder.record({
       version:
@@ -599,6 +713,7 @@ describe('Workspace Search migration telemetry', () => {
       remainingNormalAdmissionAttempts: 0,
       remainingWindowAttempts: 0,
       retryAfterMilliseconds: 1_000,
+      provenance: 'operational',
     })
     recorder.record({
       version: WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,

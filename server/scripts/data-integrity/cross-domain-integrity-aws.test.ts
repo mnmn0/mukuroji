@@ -26,13 +26,22 @@ import {
 import {
   calculateCrossDomainIntegrityResourceIdentityDigest,
   compareCrossDomainIntegrityResults,
+  createCrossDomainIntegrityImmutableResourceIdentities,
+  createCrossDomainIntegrityInvocationDeadline,
+  CrossDomainIntegrityDeadlineFailure,
   CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
+  CROSS_DOMAIN_INTEGRITY_FILE_BUCKET_MARKER_KEY,
+  CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
   CROSS_DOMAIN_INTEGRITY_RESOURCE_TARGETS,
   verifyCrossDomainIntegrityResult,
+  type CrossDomainIntegrityFileBucketMarkerAttestation,
   type CrossDomainIntegrityResourceIdentity,
+  type CrossDomainIntegrityResourceAttestation,
+  type CrossDomainIntegrityObservationMode,
 } from './cross-domain-integrity'
 import type {
   CrossDomainIntegrityManagedAwsReadPort,
+  CrossDomainIntegrityLiveRuntimeBridge,
   CrossDomainIntegrityObjectVersionReference,
   CrossDomainIntegrityTableTarget,
 } from './verify-cross-domain-integrity'
@@ -74,6 +83,100 @@ const RESTORE_RESOURCE_IDENTITY_DIGEST =
     RESTORE_RESOURCE_IDENTITIES,
     DIGEST_KEY,
   )
+const RESOURCE_ATTESTATION = createResourceAttestation()
+const LIVE_RESOURCE_IDENTITIES =
+  createCrossDomainIntegrityImmutableResourceIdentities(
+    RESOURCE_ATTESTATION,
+    DIGEST_KEY,
+  )
+const LIVE_RESOURCE_IDENTITY_DIGEST =
+  calculateCrossDomainIntegrityResourceIdentityDigest(
+    LIVE_RESOURCE_IDENTITIES,
+    DIGEST_KEY,
+  )
+
+/**
+ * Creates one strict immutable resource-attestation fixture.
+ *
+ * @returns Immutable private resource-attestation fixture.
+ */
+function createResourceAttestation(): CrossDomainIntegrityResourceAttestation {
+  return {
+    kind: 'mukuroji-cross-domain-integrity-resource-attestation',
+    version: 1,
+    scheme: CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
+    account: '123456789012',
+    region: 'ap-northeast-1',
+    bucket: {
+      target: 'bucket:file',
+      bucketName: 'file-integrity-bucket',
+      marker: {
+        key: CROSS_DOMAIN_INTEGRITY_FILE_BUCKET_MARKER_KEY,
+        versionId: 'file-bucket-marker-version-1',
+        checksumSha256: Buffer.alloc(32, 0x5a).toString('base64'),
+        size: 128,
+      },
+    },
+    tables: [
+      createTableAttestation('table:audit-events', 'audit-events-table', 1),
+      createTableAttestation('table:file-proofing', 'file-proofing-table', 2),
+      createTableAttestation('table:project-directory', 'project-directory-table', 3),
+      createTableAttestation(
+        'table:work-item-configuration',
+        'work-item-configuration-table',
+        4,
+      ),
+      createTableAttestation('table:work-items', 'work-items-table', 5),
+      createTableAttestation('table:workspace-access', 'workspace-access-table', 6),
+    ],
+  }
+}
+
+/**
+ * Creates one strict immutable table-attestation fixture.
+ *
+ * @param target - Canonical logical table target.
+ * @param tableName - Exact configured table name.
+ * @param index - Unique immutable fixture suffix.
+ * @returns Immutable table resource fields.
+ */
+function createTableAttestation(
+  target: CrossDomainIntegrityResourceIdentity['target'] & `table:${string}`,
+  tableName: string,
+  index: number,
+) {
+  return {
+    target,
+    tableName,
+    tableArn:
+      `arn:aws:dynamodb:ap-northeast-1:123456789012:table/${tableName}`,
+    tableId: `immutable-table-id-${index}`,
+    creationTime: `2026-01-0${index}T00:00:00.000Z`,
+  }
+}
+
+/**
+ * Replaces one immutable TableId while preserving the strict snapshot shape.
+ *
+ * @param attestation - Source strict immutable-resource snapshot.
+ * @param tableIndex - Canonical table-vector index to replace.
+ * @returns New snapshot containing one different table incarnation.
+ */
+function replaceResourceAttestationTableId(
+  attestation: CrossDomainIntegrityResourceAttestation,
+  tableIndex: number,
+): CrossDomainIntegrityResourceAttestation {
+  return {
+    ...attestation,
+    bucket: {
+      ...attestation.bucket,
+      marker: { ...attestation.bucket.marker },
+    },
+    tables: attestation.tables.map((table, index) => index === tableIndex
+      ? { ...table, tableId: `${table.tableId}-replaced` }
+      : { ...table }),
+  }
+}
 
 describe('bounded normalized page origin digests', () => {
   test('prehashes a near-DynamoDB-limit row without a semantic token length cap', () => {
@@ -100,6 +203,7 @@ describe('normalized page global capacity boundary', () => {
       pageSize: 25,
       reader: emptyReader,
       remainingItemCapacity: 0,
+      signal: AbortSignal.timeout(60_000),
       target: 'work-items',
     })).resolves.toMatchObject({ retainedUnitCount: 0 })
 
@@ -114,6 +218,7 @@ describe('normalized page global capacity boundary', () => {
       pageSize: 25,
       reader: fullReader,
       remainingItemCapacity: 0,
+      signal: AbortSignal.timeout(60_000),
       target: 'work-items',
     })).rejects.toEqual(new CrossDomainIntegrityAwsBridgeFailure('LIMIT_EXCEEDED'))
   })
@@ -133,6 +238,7 @@ describe('normalized page global capacity boundary', () => {
       pageSize: 2,
       reader,
       remainingItemCapacity: 5,
+      signal: AbortSignal.timeout(60_000),
       target: 'file-proofing',
     })).rejects.toEqual(new CrossDomainIntegrityAwsBridgeFailure('LIMIT_EXCEEDED'))
     expect(exactS3OperationCount(reader)).toBe(0)
@@ -156,6 +262,7 @@ describe('normalized page global capacity boundary', () => {
       pageSize: 2,
       reader,
       remainingItemCapacity: 6,
+      signal: AbortSignal.timeout(60_000),
       target: 'file-proofing',
     })).rejects.toEqual(new CrossDomainIntegrityAwsBridgeFailure('NORMALIZATION_FAILED'))
     expect(exactS3OperationCount(reader)).toBe(0)
@@ -184,6 +291,9 @@ type FixtureReaderOptions = {
   readonly echoedVersionId?: string
   /** Raw exact-version HEAD failure returned by the fake reader. */
   readonly headError?: Error
+  /** Optional ordered immutable-resource snapshots returned by pre/post measurement. */
+  readonly resourceAttestations?:
+    readonly CrossDomainIntegrityResourceAttestation[]
   /** Upload lifecycle tag returned by GetObjectTagging. */
   readonly uploadState?: 'completed' | 'pending'
 }
@@ -206,6 +316,14 @@ type RunBridgeOptions = {
   readonly maxItems?: number
   /** Maximum raw DynamoDB pages shared across every table. */
   readonly maxPages?: number
+  /** Total invocation duration used by focused deadline tests. */
+  readonly maximumDurationMilliseconds?: number
+  /** Trusted monotonic clock used by focused deadline tests. */
+  readonly monotonicClock?: () => number
+  /** Logical or actual-runtime migration rehearsal mode. */
+  readonly observationMode?: CrossDomainIntegrityObservationMode
+  /** One-shot trusted completion seam for live mode. */
+  readonly liveRuntime?: CrossDomainIntegrityLiveRuntimeBridge
   /** Fixed page size shared with the pure checker. */
   readonly pageSize?: number
   /** Complete physical resource identities for this dataset. */
@@ -230,6 +348,9 @@ type FileVersionOptions = {
 
 /** Fake read-only AWS port retaining requests for exact-read assertions. */
 class FixtureAwsReader implements CrossDomainIntegrityManagedAwsReadPort {
+  /** Finite signals received by raw AWS request boundaries. */
+  readonly requestSignals: AbortSignal[] = []
+
   /** Exact GetObjectAttributes references received by the reader. */
   readonly attributeReferences: CrossDomainIntegrityObjectVersionReference[] = []
 
@@ -241,6 +362,12 @@ class FixtureAwsReader implements CrossDomainIntegrityManagedAwsReadPort {
 
   /** Raw scan calls in invocation order. */
   readonly scanRequests: CapturedScanRequest[] = []
+
+  /** High-level external operation order for pre/post attestation assertions. */
+  readonly operationOrder: string[] = []
+
+  /** Number of immutable-resource measurements completed. */
+  resourceAttestationMeasurementCount = 0
 
   /** Per-target next page indexes. */
   private readonly nextPageIndexes = new Map<CrossDomainIntegrityTableTarget, number>()
@@ -268,8 +395,11 @@ class FixtureAwsReader implements CrossDomainIntegrityManagedAwsReadPort {
   /** Returns attributes for the exact requested immutable object version. */
   async getObjectAttributes(
     reference: CrossDomainIntegrityObjectVersionReference,
+    signal?: AbortSignal,
   ): Promise<GetObjectAttributesCommandOutput> {
+    this.operationOrder.push('get-object-attributes')
     this.attributeReferences.push(reference)
+    if (signal !== undefined) this.requestSignals.push(signal)
     return {
       $metadata: {},
       ObjectSize: 4_096,
@@ -280,8 +410,11 @@ class FixtureAwsReader implements CrossDomainIntegrityManagedAwsReadPort {
   /** Returns scan and upload tags for the exact requested immutable version. */
   async getObjectTagging(
     reference: CrossDomainIntegrityObjectVersionReference,
+    signal?: AbortSignal,
   ): Promise<GetObjectTaggingCommandOutput> {
+    this.operationOrder.push('get-object-tagging')
     this.taggingReferences.push(reference)
+    if (signal !== undefined) this.requestSignals.push(signal)
     return {
       $metadata: {},
       TagSet: [
@@ -295,8 +428,11 @@ class FixtureAwsReader implements CrossDomainIntegrityManagedAwsReadPort {
   /** Returns headers for the exact requested immutable object version. */
   async headObject(
     reference: CrossDomainIntegrityObjectVersionReference,
+    signal?: AbortSignal,
   ): Promise<HeadObjectCommandOutput> {
+    this.operationOrder.push('head-object')
     this.headReferences.push(reference)
+    if (signal !== undefined) this.requestSignals.push(signal)
     if (this.options.headError) throw this.options.headError
     return {
       $metadata: {},
@@ -311,11 +447,35 @@ class FixtureAwsReader implements CrossDomainIntegrityManagedAwsReadPort {
     return '123456789012'
   }
 
+  /** Measures one configured immutable-resource snapshot. */
+  async measureResourceAttestation(
+    marker: CrossDomainIntegrityFileBucketMarkerAttestation,
+    signal?: AbortSignal,
+  ): Promise<CrossDomainIntegrityResourceAttestation> {
+    this.operationOrder.push('resource-attestation')
+    if (signal !== undefined) this.requestSignals.push(signal)
+    if (
+      marker.key !== RESOURCE_ATTESTATION.bucket.marker.key ||
+      marker.versionId !== RESOURCE_ATTESTATION.bucket.marker.versionId ||
+      marker.checksumSha256 !==
+        RESOURCE_ATTESTATION.bucket.marker.checksumSha256 ||
+      marker.size !== RESOURCE_ATTESTATION.bucket.marker.size
+    ) {
+      throw new Error('Unexpected immutable marker fixture.')
+    }
+    const index = this.resourceAttestationMeasurementCount
+    this.resourceAttestationMeasurementCount += 1
+    return this.options.resourceAttestations?.[index] ?? RESOURCE_ATTESTATION
+  }
+
   /** Returns the next configured raw page for one target. */
   async scanPage(
     target: CrossDomainIntegrityTableTarget,
     exclusiveStartKey?: Record<string, AttributeValue>,
+    signal?: AbortSignal,
   ): Promise<ScanCommandOutput> {
+    this.operationOrder.push('scan')
+    if (signal !== undefined) this.requestSignals.push(signal)
     this.scanRequests.push(exclusiveStartKey === undefined
       ? { target }
       : { target, exclusiveStartKey })
@@ -765,18 +925,36 @@ function runBridge(
   reader: CrossDomainIntegrityManagedAwsReadPort,
   options: RunBridgeOptions = {},
 ) {
+  const live = options.observationMode === 'migration-rehearsal-live'
   return runCrossDomainIntegrityAwsCheck({
     auditPseudonymKey: options.auditPseudonymKey ?? AUDIT_PSEUDONYM_KEY,
     checkedAt: CHECKED_AT,
+    observationMode: options.observationMode,
+    ...(options.liveRuntime === undefined
+      ? {}
+      : { liveRuntime: options.liveRuntime }),
+    deadline: createCrossDomainIntegrityInvocationDeadline({
+      maximumDurationMilliseconds:
+        options.maximumDurationMilliseconds ?? 60_000,
+      monotonicClock: options.monotonicClock ?? (() => 1_000),
+    }),
     digestKey: options.digestKey ?? DIGEST_KEY,
     maxPages: options.maxPages ?? 100,
     maxItems: options.maxItems ?? 100,
     pageSize: options.pageSize ?? 100,
     reader,
     resourceBindingDigest: 'b'.repeat(64),
-    resourceIdentities: options.resourceIdentities ?? RESOURCE_IDENTITIES,
+    ...(live
+      ? {
+          resourceAttestation: RESOURCE_ATTESTATION,
+          resourceIdentityScheme:
+            CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
+        }
+      : {}),
+    resourceIdentities: options.resourceIdentities ??
+      (live ? LIVE_RESOURCE_IDENTITIES : RESOURCE_IDENTITIES),
     resourceIdentityDigest: options.resourceIdentityDigest ??
-      RESOURCE_IDENTITY_DIGEST,
+      (live ? LIVE_RESOURCE_IDENTITY_DIGEST : RESOURCE_IDENTITY_DIGEST),
     role: options.role ?? 'source',
   })
 }
@@ -788,6 +966,91 @@ function exactS3OperationCount(reader: FixtureAwsReader): number {
 }
 
 describe('cross-domain integrity AWS composition bridge', () => {
+  test('samples live completion exactly after all external reads', async () => {
+    const reader = new FixtureAwsReader(
+      createPagesFromNativeRows(createHealthyNativeRows()),
+    )
+    const completedAt = '2026-08-02T00:01:00.000Z'
+    let completionCalls = 0
+    const result = await runBridge(reader, {
+      observationMode: 'migration-rehearsal-live',
+      liveRuntime: {
+        startedAt: CHECKED_AT,
+        sampleCompletedAt: () => {
+          completionCalls += 1
+          expect(reader.scanRequests).toHaveLength(6)
+          expect(exactS3OperationCount(reader)).toBe(3)
+          expect(reader.resourceAttestationMeasurementCount).toBe(2)
+          expect(reader.operationOrder[0]).toBe('resource-attestation')
+          expect(reader.operationOrder.at(-1)).toBe('resource-attestation')
+          return completedAt
+        },
+      },
+    })
+
+    expect(completionCalls).toBe(1)
+    expect(reader.operationOrder.indexOf('scan')).toBeGreaterThan(0)
+    expect(result.checkedAt).toBe(completedAt)
+    expect(result.runtimeProvenance).toMatchObject({
+      startedAt: CHECKED_AT,
+      completedAt,
+      checkedAtSource: 'trusted-wall-clock-after-external-reads',
+    })
+    expect(verifyCrossDomainIntegrityResult(result, DIGEST_KEY)).toBe(true)
+  })
+
+  test('rejects an immutable-resource mismatch before the first Scan', async () => {
+    const reader = new FixtureAwsReader(
+      createPagesFromNativeRows(createHealthyNativeRows()),
+      {
+        resourceAttestations: [
+          replaceResourceAttestationTableId(RESOURCE_ATTESTATION, 0),
+        ],
+      },
+    )
+
+    await expect(runBridge(reader, {
+      observationMode: 'migration-rehearsal-live',
+      liveRuntime: {
+        startedAt: CHECKED_AT,
+        sampleCompletedAt: () => '2026-08-02T00:01:00.000Z',
+      },
+    })).rejects.toEqual(
+      new CrossDomainIntegrityAwsBridgeFailure('RESOURCE_ATTESTATION_INVALID'),
+    )
+    expect(reader.resourceAttestationMeasurementCount).toBe(1)
+    expect(reader.scanRequests).toHaveLength(0)
+  })
+
+  test('rejects resource reincarnation measured after all data reads', async () => {
+    const reader = new FixtureAwsReader(
+      createPagesFromNativeRows(createHealthyNativeRows()),
+      {
+        resourceAttestations: [
+          RESOURCE_ATTESTATION,
+          replaceResourceAttestationTableId(RESOURCE_ATTESTATION, 5),
+        ],
+      },
+    )
+    let completionCalls = 0
+
+    await expect(runBridge(reader, {
+      observationMode: 'migration-rehearsal-live',
+      liveRuntime: {
+        startedAt: CHECKED_AT,
+        sampleCompletedAt: () => {
+          completionCalls += 1
+          return '2026-08-02T00:01:00.000Z'
+        },
+      },
+    })).rejects.toEqual(
+      new CrossDomainIntegrityAwsBridgeFailure('RESOURCE_ATTESTATION_INVALID'),
+    )
+    expect(reader.resourceAttestationMeasurementCount).toBe(2)
+    expect(reader.scanRequests).toHaveLength(6)
+    expect(completionCalls).toBe(0)
+  })
+
   test('normalizes all six tables and reads only exact immutable object versions', async () => {
     const reader = new FixtureAwsReader(
       createPagesFromNativeRows(createHealthyNativeRows()),
@@ -813,6 +1076,9 @@ describe('cross-domain integrity AWS composition bridge', () => {
     expect(reader.headReferences).toEqual([expectedReference])
     expect(reader.attributeReferences).toEqual([expectedReference])
     expect(reader.taggingReferences).toEqual([expectedReference])
+    expect(reader.requestSignals.length).toBeGreaterThan(0)
+    expect(new Set(reader.requestSignals).size).toBe(1)
+    expect(reader.requestSignals[0]?.aborted).toBe(false)
     const evidence = JSON.stringify(result)
     for (const privateValue of [
       WORKSPACE_ID,
@@ -1500,5 +1766,50 @@ describe('cross-domain integrity AWS composition bridge', () => {
     expect(result.evidence.itemCount).toBeLessThanOrEqual(maxItems)
     expect(exactS3OperationCount(reader)).toBeLessThanOrEqual(3 * maxItems)
     expect(exactS3OperationCount(reader)).toBe(0)
+  })
+
+  test('bounds a pending raw AWS page and aborts it with the shared signal', async () => {
+    let observedSignal: AbortSignal | undefined
+    const reader: CrossDomainIntegrityManagedAwsReadPort = {
+      /** Releases no resources for this pending-request fixture. */
+      close(): void {},
+      /** Must remain unreachable before the first raw Scan completes. */
+      async getObjectAttributes(): Promise<never> {
+        throw new Error('Unexpected object attributes request.')
+      },
+      /** Must remain unreachable before the first raw Scan completes. */
+      async getObjectTagging(): Promise<never> {
+        throw new Error('Unexpected object tagging request.')
+      },
+      /** Must remain unreachable before the first raw Scan completes. */
+      async headObject(): Promise<never> {
+        throw new Error('Unexpected object head request.')
+      },
+      /** Returns the fixed account unused by the bridge. */
+      async readCallerAccount(): Promise<string> {
+        return '123456789012'
+      },
+      /** Waits until the bridge's finite request deadline aborts the Scan. */
+      async scanPage(_target, _cursor, signal): Promise<ScanCommandOutput> {
+        observedSignal = signal
+        if (signal === undefined) throw new Error('Expected a finite signal.')
+        return await new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => {
+            reject(new Error('untrusted raw adapter abort detail'))
+          }, { once: true })
+        })
+      },
+    }
+
+    const failure = await runBridge(reader, {
+      maximumDurationMilliseconds: 5,
+    }).catch((error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(CrossDomainIntegrityDeadlineFailure)
+    if (!(failure instanceof CrossDomainIntegrityDeadlineFailure)) {
+      throw new Error('Expected a deadline failure.')
+    }
+    expect(failure.code).toBe('DEADLINE_EXCEEDED')
+    expect(observedSignal?.aborted).toBe(true)
   })
 })

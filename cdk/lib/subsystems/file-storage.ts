@@ -1,9 +1,32 @@
 import * as cdk from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as guardduty from 'aws-cdk-lib/aws-guardduty';
+import * as customResources from 'aws-cdk-lib/custom-resources';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import {
+  resolveCdkLambdaHandlerEntry,
+  type LambdaBuildPaths,
+} from '../config/lambda-build-paths';
+
+/** Fixed object key reserved for the immutable file-bucket incarnation marker. */
+export const FILE_BUCKET_INCARNATION_MARKER_KEY =
+  'system/data-integrity/file-bucket-incarnation/v1.json';
+
+/** Immutable identity attributes of the deployed file bucket incarnation. */
+export type FileBucketIncarnationMarker = {
+  /** Base64-encoded SHA-256 checksum of the exact marker version. */
+  readonly checksumSha256: string;
+  /** Fixed marker object key. */
+  readonly key: string;
+  /** Marker body size in bytes, represented by a CloudFormation string token. */
+  readonly size: string;
+  /** Opaque exact S3 object version identifier. */
+  readonly versionId: string;
+};
 
 /**
  * Configuration required to build durable file storage resources.
@@ -13,6 +36,8 @@ export type FileStorageConfiguration = {
   readonly allowedOrigins: string[];
   /** File proofing metadata table created by the data-store subsystem. */
   readonly fileProofingTable: dynamodb.Table;
+  /** Stable source paths used to bundle the marker provider Lambda. */
+  readonly lambdaBuildPaths: LambdaBuildPaths;
   /** Number of days deleted file versions are retained. */
   readonly retentionDays: cdk.CfnParameter;
   /** Maximum accepted age for presigned download requests. */
@@ -29,6 +54,8 @@ export type FileStorageResources = {
   readonly fileProofingTable: dynamodb.Table;
   /** Versioned bucket that stores workspace files. */
   readonly fileBucket: s3.Bucket;
+  /** Exact immutable marker that identifies this file-bucket incarnation. */
+  readonly fileBucketIncarnationMarker: FileBucketIncarnationMarker;
   /** GuardDuty malware protection plan for workspace files. */
   readonly malwareProtectionPlan: guardduty.CfnMalwareProtectionPlan;
   /** IAM role assumed by GuardDuty malware protection. */
@@ -96,6 +123,129 @@ export function buildFileStorage(
     removalPolicy: cdk.RemovalPolicy.RETAIN,
     versioned: true,
   });
+
+  const markerLogGroup = new logs.LogGroup(
+    scope,
+    'FileBucketIncarnationMarkerLogGroup',
+    {
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      retention: logs.RetentionDays.THREE_MONTHS,
+    },
+  );
+  const markerFunction = new lambdaNodejs.NodejsFunction(
+    scope,
+    'FileBucketIncarnationMarkerFunction',
+    {
+      bundling: {
+        bundleAwsSDK: true,
+        minify: true,
+        sourceMap: true,
+        target: 'node22',
+      },
+      depsLockFilePath: configuration.lambdaBuildPaths.depsLockFilePath,
+      description:
+        'Creates or reconciles the immutable file-bucket incarnation marker.',
+      entry: resolveCdkLambdaHandlerEntry(
+        configuration.lambdaBuildPaths,
+        'file-bucket-incarnation-marker-handler.ts',
+      ),
+      handler: 'handler',
+      logGroup: markerLogGroup,
+      memorySize: 256,
+      projectRoot: configuration.lambdaBuildPaths.projectRoot,
+      runtime: lambda.Runtime.NODEJS_22_X,
+      timeout: cdk.Duration.seconds(30),
+      tracing: lambda.Tracing.ACTIVE,
+    },
+  );
+  markerFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['s3:GetBucketVersioning'],
+    resources: [fileBucket.bucketArn],
+  }));
+  markerFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: [
+      's3:GetObject',
+      's3:GetObjectVersion',
+      's3:PutObject',
+    ],
+    resources: [fileBucket.arnForObjects(FILE_BUCKET_INCARNATION_MARKER_KEY)],
+  }));
+  const markerFunctionRole = markerFunction.role;
+  if (!markerFunctionRole) {
+    throw new Error('Marker function did not create an execution role.');
+  }
+
+  fileBucket.addToResourcePolicy(new iam.PolicyStatement({
+    sid: 'FileBucketIncarnationMarkerCannotBeDeleted',
+    effect: iam.Effect.DENY,
+    principals: [new iam.AnyPrincipal()],
+    actions: ['s3:DeleteObject', 's3:DeleteObjectVersion'],
+    resources: [fileBucket.arnForObjects(FILE_BUCKET_INCARNATION_MARKER_KEY)],
+  }));
+  fileBucket.addToResourcePolicy(new iam.PolicyStatement({
+    sid: 'OnlyFileBucketIncarnationMarkerProviderCanPut',
+    effect: iam.Effect.DENY,
+    principals: [new iam.AnyPrincipal()],
+    actions: ['s3:PutObject'],
+    resources: [fileBucket.arnForObjects(FILE_BUCKET_INCARNATION_MARKER_KEY)],
+    conditions: {
+      ArnNotEquals: {
+        'aws:PrincipalArn': markerFunctionRole.roleArn,
+      },
+    },
+  }));
+  fileBucket.addToResourcePolicy(new iam.PolicyStatement({
+    sid: 'FileBucketIncarnationMarkerRequiresCreateOnlyPut',
+    effect: iam.Effect.DENY,
+    principals: [new iam.AnyPrincipal()],
+    actions: ['s3:PutObject'],
+    resources: [fileBucket.arnForObjects(FILE_BUCKET_INCARNATION_MARKER_KEY)],
+    conditions: {
+      StringNotEquals: {
+        's3:if-none-match': '*',
+      },
+    },
+  }));
+  if (!fileBucket.policy) {
+    throw new Error('File bucket policy was not created for the marker boundary.');
+  }
+
+  const markerProviderLogGroup = new logs.LogGroup(
+    scope,
+    'FileBucketIncarnationMarkerProviderLogGroup',
+    {
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      retention: logs.RetentionDays.THREE_MONTHS,
+    },
+  );
+  const markerProvider = new customResources.Provider(
+    scope,
+    'FileBucketIncarnationMarkerProvider',
+    {
+      logGroup: markerProviderLogGroup,
+      onEventHandler: markerFunction,
+    },
+  );
+  const markerResource = new cdk.CustomResource(
+    scope,
+    'FileBucketIncarnationMarker',
+    {
+      properties: {
+        BucketName: fileBucket.bucketName,
+        ExpectedAccount: scope.account,
+        MarkerKey: FILE_BUCKET_INCARNATION_MARKER_KEY,
+      },
+      resourceType: 'Custom::FileBucketIncarnationMarker',
+      serviceToken: markerProvider.serviceToken,
+    },
+  );
+  markerResource.node.addDependency(fileBucket.policy);
+  const fileBucketIncarnationMarker: FileBucketIncarnationMarker = {
+    checksumSha256: markerResource.getAttString('ChecksumSHA256'),
+    key: markerResource.getAttString('Key'),
+    size: markerResource.getAttString('Size'),
+    versionId: markerResource.getAttString('VersionId'),
+  };
 
   const workItemImportAccessLogsBucket = new s3.Bucket(
     scope,
@@ -305,6 +455,7 @@ export function buildFileStorage(
   return {
     fileProofingTable: configuration.fileProofingTable,
     fileBucket,
+    fileBucketIncarnationMarker,
     malwareProtectionPlan,
     malwareProtectionRole,
     workItemImportBucket,

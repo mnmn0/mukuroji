@@ -17,6 +17,8 @@
       "name": "cdk",
       "version": "0.1.0",
       "dependencies": {
+        "@aws-sdk/client-s3": "^3.1057.0",
+        "@mukuroji/contracts": "workspace:*",
         "aws-cdk-lib": "2.261.0",
         "constructs": "^10.5.0",
       },
@@ -29,7 +31,6 @@
         "esbuild": "^0.28.1",
         "jest": "^30",
         "ts-jest": "^29",
-        "ts-node": "^10.9.2",
         "typescript": "~5.9.3",
       },
     },
@@ -43,6 +44,7 @@
         "@aws-sdk/client-apigatewaymanagementapi": "^3.1057.0",
         "@aws-sdk/client-appconfigdata": "3.1057.0",
         "@aws-sdk/client-cloudwatch": "3.1057.0",
+        "@aws-sdk/client-cloudwatch-logs": "3.1057.0",
         "@aws-sdk/client-cognito-identity-provider": "^3.1057.0",
         "@aws-sdk/client-dynamodb": "3.1057.0",
         "@aws-sdk/client-kms": "3.1057.0",
@@ -126,6 +128,8 @@
     "@aws-sdk/client-appconfigdata": ["@aws-sdk/client-appconfigdata@3.1057.0", "", { "dependencies": { "@aws-crypto/sha256-browser": "5.2.0", "@aws-crypto/sha256-js": "5.2.0", "@aws-sdk/core": "^3.974.15", "@aws-sdk/credential-provider-node": "^3.972.47", "@aws-sdk/types": "^3.973.9", "@smithy/core": "^3.24.5", "@smithy/fetch-http-handler": "^5.4.5", "@smithy/node-http-handler": "^4.7.5", "@smithy/types": "^4.14.2", "tslib": "^2.6.2" } }, "sha512-tJnEcDSNmMPwomgn8cGzcqQNj/lms85JBXx4kMgXn14h+xWdjkskKgdwlawC2zT15GH2fslwQQPgDYH6oHcWUA=="],
 
     "@aws-sdk/client-cloudwatch": ["@aws-sdk/client-cloudwatch@3.1057.0", "", { "dependencies": { "@aws-crypto/sha256-browser": "5.2.0", "@aws-crypto/sha256-js": "5.2.0", "@aws-sdk/core": "^3.974.15", "@aws-sdk/credential-provider-node": "^3.972.47", "@aws-sdk/types": "^3.973.9", "@smithy/core": "^3.24.5", "@smithy/fetch-http-handler": "^5.4.5", "@smithy/middleware-compression": "^4.4.5", "@smithy/node-http-handler": "^4.7.5", "@smithy/types": "^4.14.2", "tslib": "^2.6.2" } }, "sha512-8xwd2bkVtmO0Z6ar9UX+h/LLbxD+TLqYLY3D1j/k+WPGnHws+uaimi8nxpLN+VWahtXbB67yioozNL8pKPlw4g=="],
+
+    "@aws-sdk/client-cloudwatch-logs": ["@aws-sdk/client-cloudwatch-logs@3.1057.0", "", { "dependencies": { "@aws-crypto/sha256-browser": "5.2.0", "@aws-crypto/sha256-js": "5.2.0", "@aws-sdk/core": "^3.974.15", "@aws-sdk/credential-provider-node": "^3.972.47", "@aws-sdk/types": "^3.973.9", "@smithy/core": "^3.24.5", "@smithy/fetch-http-handler": "^5.4.5", "@smithy/node-http-handler": "^4.7.5", "@smithy/types": "^4.14.2", "tslib": "^2.6.2" } }, "sha512-VzrpX93RMMGE8mG9EKm/TX9aZQsQvg0bYz276UOUuxAZlMBrYxKhiMyRDIHtFSUFI5SKaBWE3nY5xoI3SK74LQ=="],
 
     "@aws-sdk/client-cognito-identity-provider": ["@aws-sdk/client-cognito-identity-provider@3.1085.0", "", { "dependencies": { "@aws-sdk/core": "^3.975.1", "@aws-sdk/credential-provider-node": "^3.972.66", "@aws-sdk/types": "^3.974.0", "@smithy/core": "^3.29.2", "@smithy/fetch-http-handler": "^5.6.4", "@smithy/node-http-handler": "^4.9.4", "@smithy/types": "^4.16.0", "tslib": "^2.6.2" } }, "sha512-RGBrP5cGlitR/oc77t1ZG1lK/EjKIxwsc6zOp4l6bo5Xlo5M48xYNzNeQ9DLX6+Eyptw41NN6KSo+GOejKDjBA=="],
 
@@ -1853,6 +1857,16 @@
 
     "@aws-sdk/client-cloudwatch/@smithy/node-http-handler": ["@smithy/node-http-handler@4.9.11", "", { "dependencies": { "@smithy/core": "^3.30.0", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-slbzbz8taEOzoXv/9y34YNBoE+ZHmddLykCgjDAjvMAsu2nM5s2Gzwa5OGF721tD8s+CKeFUBds5lSj9lcbuDg=="],
 
+    "@aws-sdk/client-cloudwatch-logs/@aws-sdk/core": ["@aws-sdk/core@3.977.1", "", { "dependencies": { "@aws-sdk/types": "^3.974.2", "@aws-sdk/xml-builder": "^3.972.37", "@aws/lambda-invoke-store": "^0.3.0", "@smithy/core": "^3.29.8", "@smithy/signature-v4": "^5.6.9", "@smithy/types": "^4.16.1", "bowser": "^2.11.0", "tslib": "^2.6.2" } }, "sha512-KVtQRtc00ES/y+Sc3vYXeP6pCIcNlBJCZOwvqSy8ZpVGmbM5+IG+AfhuTKQ2oXmIVqZJewaGMMpzPkywC6xg0w=="],
+
+    "@aws-sdk/client-cloudwatch-logs/@aws-sdk/credential-provider-node": ["@aws-sdk/credential-provider-node@3.972.72", "", { "dependencies": { "@aws-sdk/credential-provider-env": "^3.972.61", "@aws-sdk/credential-provider-http": "^3.972.63", "@aws-sdk/credential-provider-ini": "^3.973.6", "@aws-sdk/credential-provider-process": "^3.972.61", "@aws-sdk/credential-provider-sso": "^3.973.5", "@aws-sdk/credential-provider-web-identity": "^3.972.67", "@aws-sdk/types": "^3.974.2", "@smithy/core": "^3.29.8", "@smithy/credential-provider-imds": "^4.4.13", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-blQ7F5QGzylnzeh5549zQLoCAiMHkXFLjFovEMaVy4b2X8JhUu+u9NXro1hyK95YHdVFNmBHKs2hIHtZchxKlQ=="],
+
+    "@aws-sdk/client-cloudwatch-logs/@aws-sdk/types": ["@aws-sdk/types@3.974.2", "", { "dependencies": { "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-3W6IUtSxFbH6X7Wb7DzGCV5QiFQsd0g8bOfntpmDxQlzBoKWUMBu/JPQR0DwkE+Hpnxd6db1tXbOwdeHddG6cA=="],
+
+    "@aws-sdk/client-cloudwatch-logs/@smithy/fetch-http-handler": ["@smithy/fetch-http-handler@5.6.11", "", { "dependencies": { "@smithy/core": "^3.30.0", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-o0Zkj1nKqJAoq+a+BrkhU39tRftMNjLwpc/z06Frfl43wpbHrJMaSAVZE4vTqlxtVkNaGaT0bIDxOp7tkFTuQQ=="],
+
+    "@aws-sdk/client-cloudwatch-logs/@smithy/node-http-handler": ["@smithy/node-http-handler@4.9.11", "", { "dependencies": { "@smithy/core": "^3.30.0", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-slbzbz8taEOzoXv/9y34YNBoE+ZHmddLykCgjDAjvMAsu2nM5s2Gzwa5OGF721tD8s+CKeFUBds5lSj9lcbuDg=="],
+
     "@aws-sdk/client-cognito-identity-provider/@smithy/core": ["@smithy/core@3.29.3", "", { "dependencies": { "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-L+Ys6ecjk5vwPMAKHBpPKlJ3DkqwNcnfEISXBZIsVvWG/XKXfsAP8mwIYlTeLcd2ElHdesPI8OuOmJSFAPhm6A=="],
 
     "@aws-sdk/client-dynamodb/@aws-sdk/core": ["@aws-sdk/core@3.974.15", "", { "dependencies": { "@aws-sdk/types": "^3.973.9", "@aws-sdk/xml-builder": "^3.972.26", "@aws/lambda-invoke-store": "^0.2.2", "@smithy/core": "^3.24.5", "@smithy/signature-v4": "^5.4.5", "@smithy/types": "^4.14.2", "bowser": "^2.11.0", "tslib": "^2.6.2" } }, "sha512-UpA0rTGW/tHGITcCqHisbuuEPraYg9GG+mWmXjY5+RxZBMLGe6aL9oe0ix50LztwAcPIkGZLH0yWdMIkCM10hw=="],
@@ -2162,6 +2176,24 @@
     "@aws-sdk/client-appconfigdata/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-web-identity": ["@aws-sdk/credential-provider-web-identity@3.972.67", "", { "dependencies": { "@aws-sdk/core": "^3.977.0", "@aws-sdk/nested-clients": "^3.997.35", "@aws-sdk/types": "^3.974.2", "@smithy/core": "^3.29.8", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-FTNZ05gkPBA6CKbU3N4zPgybV+stdazwMOya75CmGdcJL7p8Fw/BdHP8WVxJd0mvzyPK2cg/C3gli58Ir4HgCw=="],
 
     "@aws-sdk/client-appconfigdata/@aws-sdk/credential-provider-node/@smithy/credential-provider-imds": ["@smithy/credential-provider-imds@4.4.14", "", { "dependencies": { "@smithy/core": "^3.30.0", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-QgbuahIb2qxQeZQvNK0sw3aF3JH5zwH8j2lLp5DUasVXexGGMWULAR+7z0omPXFolCP/m5wN9M5lm9EGdSviTQ=="],
+
+    "@aws-sdk/client-cloudwatch-logs/@aws-sdk/core/@aws-sdk/xml-builder": ["@aws-sdk/xml-builder@3.972.37", "", { "dependencies": { "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-zKq4HQum8JwDyEuyfuI4bbiAcU0KxP6qy+9PR/IsR92IyE/DaBAikzAS50tjxip4bqIIANpCcG+Yyj6CVhXupg=="],
+
+    "@aws-sdk/client-cloudwatch-logs/@aws-sdk/core/@smithy/signature-v4": ["@smithy/signature-v4@5.6.10", "", { "dependencies": { "@smithy/core": "^3.30.0", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-EXhWePm3SXJAX38npIy4TXL2Aex/OVgCClTjelN2QHw/U+8CQUH8C7AaxsVzQcYieYPseywn48s89DmvuGjiAg=="],
+
+    "@aws-sdk/client-cloudwatch-logs/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-env": ["@aws-sdk/credential-provider-env@3.972.61", "", { "dependencies": { "@aws-sdk/core": "^3.977.0", "@aws-sdk/types": "^3.974.2", "@smithy/core": "^3.29.8", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-qihs2ekMb89Nxd2JenCgVFhjbkb3EIo7HEBCBzyZACKVJdrLUZBLOmAE3xr0Sayml8n/jZSzwO/IufIiIzO7PQ=="],
+
+    "@aws-sdk/client-cloudwatch-logs/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-http": ["@aws-sdk/credential-provider-http@3.972.63", "", { "dependencies": { "@aws-sdk/core": "^3.977.0", "@aws-sdk/types": "^3.974.2", "@smithy/core": "^3.29.8", "@smithy/fetch-http-handler": "^5.6.10", "@smithy/node-http-handler": "^4.9.10", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-yfozsS8wkWZEi/n6IsrodcFKBWZ0iNAezhJbTReMNc0z1Px17qdeAeuL1/wziCAmCZyXiW7QzP75ggJkBQv8jQ=="],
+
+    "@aws-sdk/client-cloudwatch-logs/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-ini": ["@aws-sdk/credential-provider-ini@3.973.6", "", { "dependencies": { "@aws-sdk/core": "^3.977.0", "@aws-sdk/credential-provider-env": "^3.972.61", "@aws-sdk/credential-provider-http": "^3.972.63", "@aws-sdk/credential-provider-login": "^3.972.68", "@aws-sdk/credential-provider-process": "^3.972.61", "@aws-sdk/credential-provider-sso": "^3.973.5", "@aws-sdk/credential-provider-web-identity": "^3.972.67", "@aws-sdk/nested-clients": "^3.997.35", "@aws-sdk/types": "^3.974.2", "@smithy/core": "^3.29.8", "@smithy/credential-provider-imds": "^4.4.13", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-jGLTW1bj148GL/6/IMlfY2fMYS9FtHOG+NahkFD4y0qkzYudNUahelxryY68/HGMslYuHClk1XaS/3b3eJzEkg=="],
+
+    "@aws-sdk/client-cloudwatch-logs/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-process": ["@aws-sdk/credential-provider-process@3.972.61", "", { "dependencies": { "@aws-sdk/core": "^3.977.0", "@aws-sdk/types": "^3.974.2", "@smithy/core": "^3.29.8", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-xzRuj+fUVO4nkafKQJVKAF97kGpeQbfjuwmRrtGZNf42/1dkmcz6o7dswBy7alY0htQn5sCL1GWQYEykviWZkA=="],
+
+    "@aws-sdk/client-cloudwatch-logs/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-sso": ["@aws-sdk/credential-provider-sso@3.973.5", "", { "dependencies": { "@aws-sdk/core": "^3.977.0", "@aws-sdk/nested-clients": "^3.997.35", "@aws-sdk/token-providers": "3.1095.0", "@aws-sdk/types": "^3.974.2", "@smithy/core": "^3.29.8", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-fZRjjWhLFelsDoOYjqShQTrIGYC3Pf9Mx9Czf+1ikfQDgktxjze33dVo1q1/ZQ+T0qbtejVoHNHrfD5aJVpv/w=="],
+
+    "@aws-sdk/client-cloudwatch-logs/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-web-identity": ["@aws-sdk/credential-provider-web-identity@3.972.67", "", { "dependencies": { "@aws-sdk/core": "^3.977.0", "@aws-sdk/nested-clients": "^3.997.35", "@aws-sdk/types": "^3.974.2", "@smithy/core": "^3.29.8", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-FTNZ05gkPBA6CKbU3N4zPgybV+stdazwMOya75CmGdcJL7p8Fw/BdHP8WVxJd0mvzyPK2cg/C3gli58Ir4HgCw=="],
+
+    "@aws-sdk/client-cloudwatch-logs/@aws-sdk/credential-provider-node/@smithy/credential-provider-imds": ["@smithy/credential-provider-imds@4.4.14", "", { "dependencies": { "@smithy/core": "^3.30.0", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-QgbuahIb2qxQeZQvNK0sw3aF3JH5zwH8j2lLp5DUasVXexGGMWULAR+7z0omPXFolCP/m5wN9M5lm9EGdSviTQ=="],
 
     "@aws-sdk/client-cloudwatch/@aws-sdk/core/@aws-sdk/xml-builder": ["@aws-sdk/xml-builder@3.972.37", "", { "dependencies": { "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-zKq4HQum8JwDyEuyfuI4bbiAcU0KxP6qy+9PR/IsR92IyE/DaBAikzAS50tjxip4bqIIANpCcG+Yyj6CVhXupg=="],
 
@@ -2487,6 +2519,16 @@
 
     "@aws-sdk/client-appconfigdata/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-web-identity/@aws-sdk/nested-clients": ["@aws-sdk/nested-clients@3.997.35", "", { "dependencies": { "@aws-sdk/core": "^3.977.0", "@aws-sdk/signature-v4-multi-region": "^3.996.42", "@aws-sdk/types": "^3.974.2", "@smithy/core": "^3.29.8", "@smithy/fetch-http-handler": "^5.6.10", "@smithy/node-http-handler": "^4.9.10", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-2MJfseVG/aXvIyOIBlYA/Oaf6qFDdsu4D8RKsEUdOQpVuLaor0BdxIBBtJLBNQQEe6Ku3YMvLljwb1MwVUpzRw=="],
 
+    "@aws-sdk/client-cloudwatch-logs/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-ini/@aws-sdk/credential-provider-login": ["@aws-sdk/credential-provider-login@3.972.68", "", { "dependencies": { "@aws-sdk/core": "^3.977.0", "@aws-sdk/nested-clients": "^3.997.35", "@aws-sdk/types": "^3.974.2", "@smithy/core": "^3.29.8", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-w6tNci6g7RqFpLhj1f5xseBvaNojb4Pkgp5Jp5apl9hrJtaf2AA+rX9+qlhlWUK6kcyAFYPA7emO+55zj+S98Q=="],
+
+    "@aws-sdk/client-cloudwatch-logs/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-ini/@aws-sdk/nested-clients": ["@aws-sdk/nested-clients@3.997.35", "", { "dependencies": { "@aws-sdk/core": "^3.977.0", "@aws-sdk/signature-v4-multi-region": "^3.996.42", "@aws-sdk/types": "^3.974.2", "@smithy/core": "^3.29.8", "@smithy/fetch-http-handler": "^5.6.10", "@smithy/node-http-handler": "^4.9.10", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-2MJfseVG/aXvIyOIBlYA/Oaf6qFDdsu4D8RKsEUdOQpVuLaor0BdxIBBtJLBNQQEe6Ku3YMvLljwb1MwVUpzRw=="],
+
+    "@aws-sdk/client-cloudwatch-logs/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-sso/@aws-sdk/nested-clients": ["@aws-sdk/nested-clients@3.997.35", "", { "dependencies": { "@aws-sdk/core": "^3.977.0", "@aws-sdk/signature-v4-multi-region": "^3.996.42", "@aws-sdk/types": "^3.974.2", "@smithy/core": "^3.29.8", "@smithy/fetch-http-handler": "^5.6.10", "@smithy/node-http-handler": "^4.9.10", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-2MJfseVG/aXvIyOIBlYA/Oaf6qFDdsu4D8RKsEUdOQpVuLaor0BdxIBBtJLBNQQEe6Ku3YMvLljwb1MwVUpzRw=="],
+
+    "@aws-sdk/client-cloudwatch-logs/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-sso/@aws-sdk/token-providers": ["@aws-sdk/token-providers@3.1095.0", "", { "dependencies": { "@aws-sdk/core": "^3.977.0", "@aws-sdk/nested-clients": "^3.997.35", "@aws-sdk/types": "^3.974.2", "@smithy/core": "^3.29.8", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-65SudS6y4nzaYHybtqcpm3sHe5jLhdMn68HRKS1nUx690BtQeaAQOoujQ+dpOjBATIVGVgKKjEP8tR+U06QJQA=="],
+
+    "@aws-sdk/client-cloudwatch-logs/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-web-identity/@aws-sdk/nested-clients": ["@aws-sdk/nested-clients@3.997.35", "", { "dependencies": { "@aws-sdk/core": "^3.977.0", "@aws-sdk/signature-v4-multi-region": "^3.996.42", "@aws-sdk/types": "^3.974.2", "@smithy/core": "^3.29.8", "@smithy/fetch-http-handler": "^5.6.10", "@smithy/node-http-handler": "^4.9.10", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-2MJfseVG/aXvIyOIBlYA/Oaf6qFDdsu4D8RKsEUdOQpVuLaor0BdxIBBtJLBNQQEe6Ku3YMvLljwb1MwVUpzRw=="],
+
     "@aws-sdk/client-cloudwatch/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-ini/@aws-sdk/credential-provider-login": ["@aws-sdk/credential-provider-login@3.972.68", "", { "dependencies": { "@aws-sdk/core": "^3.977.0", "@aws-sdk/nested-clients": "^3.997.35", "@aws-sdk/types": "^3.974.2", "@smithy/core": "^3.29.8", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-w6tNci6g7RqFpLhj1f5xseBvaNojb4Pkgp5Jp5apl9hrJtaf2AA+rX9+qlhlWUK6kcyAFYPA7emO+55zj+S98Q=="],
 
     "@aws-sdk/client-cloudwatch/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-ini/@aws-sdk/nested-clients": ["@aws-sdk/nested-clients@3.997.35", "", { "dependencies": { "@aws-sdk/core": "^3.977.0", "@aws-sdk/signature-v4-multi-region": "^3.996.42", "@aws-sdk/types": "^3.974.2", "@smithy/core": "^3.29.8", "@smithy/fetch-http-handler": "^5.6.10", "@smithy/node-http-handler": "^4.9.10", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-2MJfseVG/aXvIyOIBlYA/Oaf6qFDdsu4D8RKsEUdOQpVuLaor0BdxIBBtJLBNQQEe6Ku3YMvLljwb1MwVUpzRw=="],
@@ -2607,6 +2649,12 @@
 
     "@aws-sdk/client-appconfigdata/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-web-identity/@aws-sdk/nested-clients/@aws-sdk/signature-v4-multi-region": ["@aws-sdk/signature-v4-multi-region@3.996.42", "", { "dependencies": { "@aws-sdk/types": "^3.974.2", "@smithy/signature-v4": "^5.6.9", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-DBV4naZP6HYBlAvPpoQzOP12Wvfou/5rN8yJPXjBTBylU5qwCbh/tXr2MddHoIjgoRkEl/eS+IljiUqvmwey1Q=="],
 
+    "@aws-sdk/client-cloudwatch-logs/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-ini/@aws-sdk/nested-clients/@aws-sdk/signature-v4-multi-region": ["@aws-sdk/signature-v4-multi-region@3.996.42", "", { "dependencies": { "@aws-sdk/types": "^3.974.2", "@smithy/signature-v4": "^5.6.9", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-DBV4naZP6HYBlAvPpoQzOP12Wvfou/5rN8yJPXjBTBylU5qwCbh/tXr2MddHoIjgoRkEl/eS+IljiUqvmwey1Q=="],
+
+    "@aws-sdk/client-cloudwatch-logs/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-sso/@aws-sdk/nested-clients/@aws-sdk/signature-v4-multi-region": ["@aws-sdk/signature-v4-multi-region@3.996.42", "", { "dependencies": { "@aws-sdk/types": "^3.974.2", "@smithy/signature-v4": "^5.6.9", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-DBV4naZP6HYBlAvPpoQzOP12Wvfou/5rN8yJPXjBTBylU5qwCbh/tXr2MddHoIjgoRkEl/eS+IljiUqvmwey1Q=="],
+
+    "@aws-sdk/client-cloudwatch-logs/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-web-identity/@aws-sdk/nested-clients/@aws-sdk/signature-v4-multi-region": ["@aws-sdk/signature-v4-multi-region@3.996.42", "", { "dependencies": { "@aws-sdk/types": "^3.974.2", "@smithy/signature-v4": "^5.6.9", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-DBV4naZP6HYBlAvPpoQzOP12Wvfou/5rN8yJPXjBTBylU5qwCbh/tXr2MddHoIjgoRkEl/eS+IljiUqvmwey1Q=="],
+
     "@aws-sdk/client-cloudwatch/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-ini/@aws-sdk/nested-clients/@aws-sdk/signature-v4-multi-region": ["@aws-sdk/signature-v4-multi-region@3.996.42", "", { "dependencies": { "@aws-sdk/types": "^3.974.2", "@smithy/signature-v4": "^5.6.9", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-DBV4naZP6HYBlAvPpoQzOP12Wvfou/5rN8yJPXjBTBylU5qwCbh/tXr2MddHoIjgoRkEl/eS+IljiUqvmwey1Q=="],
 
     "@aws-sdk/client-cloudwatch/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-sso/@aws-sdk/nested-clients/@aws-sdk/signature-v4-multi-region": ["@aws-sdk/signature-v4-multi-region@3.996.42", "", { "dependencies": { "@aws-sdk/types": "^3.974.2", "@smithy/signature-v4": "^5.6.9", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-DBV4naZP6HYBlAvPpoQzOP12Wvfou/5rN8yJPXjBTBylU5qwCbh/tXr2MddHoIjgoRkEl/eS+IljiUqvmwey1Q=="],
@@ -2678,6 +2726,12 @@
     "@aws-sdk/client-appconfigdata/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-sso/@aws-sdk/nested-clients/@aws-sdk/signature-v4-multi-region/@smithy/signature-v4": ["@smithy/signature-v4@5.6.10", "", { "dependencies": { "@smithy/core": "^3.30.0", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-EXhWePm3SXJAX38npIy4TXL2Aex/OVgCClTjelN2QHw/U+8CQUH8C7AaxsVzQcYieYPseywn48s89DmvuGjiAg=="],
 
     "@aws-sdk/client-appconfigdata/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-web-identity/@aws-sdk/nested-clients/@aws-sdk/signature-v4-multi-region/@smithy/signature-v4": ["@smithy/signature-v4@5.6.10", "", { "dependencies": { "@smithy/core": "^3.30.0", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-EXhWePm3SXJAX38npIy4TXL2Aex/OVgCClTjelN2QHw/U+8CQUH8C7AaxsVzQcYieYPseywn48s89DmvuGjiAg=="],
+
+    "@aws-sdk/client-cloudwatch-logs/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-ini/@aws-sdk/nested-clients/@aws-sdk/signature-v4-multi-region/@smithy/signature-v4": ["@smithy/signature-v4@5.6.10", "", { "dependencies": { "@smithy/core": "^3.30.0", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-EXhWePm3SXJAX38npIy4TXL2Aex/OVgCClTjelN2QHw/U+8CQUH8C7AaxsVzQcYieYPseywn48s89DmvuGjiAg=="],
+
+    "@aws-sdk/client-cloudwatch-logs/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-sso/@aws-sdk/nested-clients/@aws-sdk/signature-v4-multi-region/@smithy/signature-v4": ["@smithy/signature-v4@5.6.10", "", { "dependencies": { "@smithy/core": "^3.30.0", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-EXhWePm3SXJAX38npIy4TXL2Aex/OVgCClTjelN2QHw/U+8CQUH8C7AaxsVzQcYieYPseywn48s89DmvuGjiAg=="],
+
+    "@aws-sdk/client-cloudwatch-logs/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-web-identity/@aws-sdk/nested-clients/@aws-sdk/signature-v4-multi-region/@smithy/signature-v4": ["@smithy/signature-v4@5.6.10", "", { "dependencies": { "@smithy/core": "^3.30.0", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-EXhWePm3SXJAX38npIy4TXL2Aex/OVgCClTjelN2QHw/U+8CQUH8C7AaxsVzQcYieYPseywn48s89DmvuGjiAg=="],
 
     "@aws-sdk/client-cloudwatch/@aws-sdk/credential-provider-node/@aws-sdk/credential-provider-ini/@aws-sdk/nested-clients/@aws-sdk/signature-v4-multi-region/@smithy/signature-v4": ["@smithy/signature-v4@5.6.10", "", { "dependencies": { "@smithy/core": "^3.30.0", "@smithy/types": "^4.16.1", "tslib": "^2.6.2" } }, "sha512-EXhWePm3SXJAX38npIy4TXL2Aex/OVgCClTjelN2QHw/U+8CQUH8C7AaxsVzQcYieYPseywn48s89DmvuGjiAg=="],
 

@@ -85,6 +85,8 @@ export type CrossDomainIntegrityNormalizedPageRequest = {
   readonly digestKey: Uint8Array
   /** Remaining global normalized/evidence-unit capacity before this page. */
   readonly remainingItemCapacity: number
+  /** Caller-owned finite cancellation shared by every raw read for this page. */
+  readonly signal: AbortSignal
   /** Canonical isolated table target. */
   readonly target: CrossDomainIntegrityTableTarget
 }
