@@ -29,6 +29,7 @@ const assigneeOptions = [
 ] satisfies ProjectMember[]
 
 const quickCaptureContext = {
+  dueDate: '2026/06/12',
   projectId: 'refero',
   source: 'table',
   teamId: 'core-team',

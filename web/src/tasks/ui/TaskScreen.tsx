@@ -676,7 +676,7 @@ export function TaskScreen({
             ) : null}
             {isCreateTaskOpen && onCreateTask ? (
               <CreateTaskPanel
-                key={`${createTaskContext?.source ?? 'header'}:${createTaskContext?.teamId ?? ''}:${createTaskContext?.workflowStatusId ?? ''}:${createTaskContext?.dueDate ?? ''}`}
+                key={`${createTaskContext?.source ?? 'header'}:${createTaskContext?.teamId ?? ''}:${createTaskContext?.workflowStatusId ?? ''}:${createTaskContext?.dueDate ?? ''}:${createTaskContext?.assigneeUserId ?? ''}`}
                 assigneeErrorMessage={assigneeErrorMessage}
                 assigneeOptions={assigneeOptions}
                 configuration={createConfiguration}

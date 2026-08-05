@@ -72,7 +72,10 @@ export function TaskGanttView({
         <div className="flex justify-end border-b border-[#e4e7ec] px-4 py-2">
           <button
             className="text-sm font-semibold text-[var(--workbench-primary)] hover:underline"
-            onClick={() => onCreateTaskOpen({ projectId: projectId ?? '', source: 'gantt' })}
+            onClick={() => onCreateTaskOpen({
+              ...(projectId ? { projectId } : {}),
+              source: 'gantt',
+            })}
             type="button"
           >
             + {t('tasks.gantt.add')}

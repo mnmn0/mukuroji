@@ -75,7 +75,7 @@ export type TaskSortOrder = (typeof taskSortOrders)[number]
  */
 export type TaskCreateContext = {
   /** Project receiving the new Work Item. */
-  projectId: string
+  projectId?: string
   /** Team owning the destination workflow. */
   teamId?: string
   /** Workflow status inherited from a Board column or other status surface. */

@@ -523,7 +523,7 @@ export function TaskPage() {
     context?: TaskCreateContext,
   ) => {
     if (!accessToken) {
-      return
+      throw new Error(t('issues.error.create'))
     }
 
     const targetTeamId = context?.teamId ?? creationTeam?.id

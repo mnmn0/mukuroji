@@ -67,7 +67,7 @@ export function TaskCalendarView({
                     className="rounded px-1.5 text-lg font-semibold text-[var(--workbench-primary)] hover:bg-[#e5f7f4]"
                     onClick={() => onCreateTaskOpen({
                       dueDate: day.date,
-                      projectId: projectId ?? '',
+                      ...(projectId ? { projectId } : {}),
                       source: 'calendar',
                     })}
                     type="button"
@@ -103,7 +103,7 @@ export function TaskCalendarView({
                     aria-label={t('tasks.calendar.addWithoutDate')}
                     className="rounded px-1.5 text-lg font-semibold text-[var(--workbench-primary)] hover:bg-[#e5f7f4]"
                     onClick={() => onCreateTaskOpen({
-                      projectId: projectId ?? '',
+                      ...(projectId ? { projectId } : {}),
                       source: 'calendar',
                     })}
                     type="button"

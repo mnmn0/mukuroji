@@ -96,6 +96,7 @@ export function CreateTaskPanel({
     : mode
   const initialAssigneeUserId = context?.assigneeUserId ?? ''
   const quickCaptureAssigneeUserId = initialAssigneeUserId || assigneeOptions[0]?.id || ''
+  const quickCaptureDueDate = context?.dueDate?.replaceAll('/', '-') ?? ''
   const initialDueDate = context?.dueDate?.replaceAll('/', '-') ?? today
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
   const defaultCustomFieldValues = configuration
@@ -120,7 +121,7 @@ export function CreateTaskPanel({
             ? quickCaptureAssigneeUserId
             : String(formData.get('assigneeUserId') ?? initialAssigneeUserId).trim()
           const rawDueDate = formData.get('dueDate')
-          const dueDate = String(rawDueDate || initialDueDate).replaceAll('-', '/')
+          const dueDate = String(rawDueDate ?? '').trim().replaceAll('-', '/')
           const workflowStatusId = effectiveMode === 'quick'
             ? quickCaptureStatusId ?? initialWorkflowStatusId
             : String(formData.get('workflowStatusId') ?? initialWorkflowStatusId).trim()
@@ -128,6 +129,11 @@ export function CreateTaskPanel({
           const priority = resolveTaskPriority(formData.get('priority'))
 
           if (effectiveMode === 'quick' && !assigneeUserId) {
+            return
+          }
+
+          if (!dueDate) {
+            event.currentTarget.reportValidity()
             return
           }
 
@@ -206,6 +212,16 @@ export function CreateTaskPanel({
             <p className="text-sm font-medium text-[var(--workbench-muted)]">
               {t('tasks.create.quickDescription')}
             </p>
+            <label className="grid max-w-[220px] gap-1.5 text-sm font-semibold text-[#505967]">
+              {t('tasks.column.dueDate')}
+              <input
+                className="workbench-input h-10 px-3"
+                defaultValue={quickCaptureDueDate}
+                name="dueDate"
+                required
+                type="date"
+              />
+            </label>
             <div className="flex items-center gap-2">
               <button
                 className="workbench-button-primary h-10 px-4 disabled:cursor-not-allowed disabled:border-[#b5bdc9] disabled:bg-[#b5bdc9]"

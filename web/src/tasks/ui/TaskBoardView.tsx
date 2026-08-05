@@ -293,7 +293,7 @@ export function TaskBoardView({
                         )}
                         {onUpdateTask ? (
                           <button
-                            aria-label={resolveWorkItemTitle(task)}
+                            aria-label={`${t('tasks.detail.title')}: ${resolveWorkItemTitle(task)}`}
                             className="rounded px-1 text-xs text-[var(--workbench-muted)] hover:bg-white hover:text-[var(--workbench-primary)]"
                             onClick={() => onSelectTask(task)}
                             type="button"

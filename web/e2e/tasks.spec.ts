@@ -2141,7 +2141,7 @@ test.describe('authenticated task page', () => {
       '- checkbox "新しいランディングページのワイヤーフレーム作成"',
     )
     expect(tableSnapshot).toContain(
-      '- button "新しいランディングページのワイヤーフレーム作成"',
+      '- \'button "タスク詳細: 新しいランディングページのワイヤーフレーム作成"\'',
     )
 
     const tableTab = tablist.getByRole('tab', { name: 'テーブル' })
@@ -3838,11 +3838,15 @@ test.describe('authenticated task page', () => {
 
     await expect(page).toHaveURL('/projects/shared-launch/issues')
     await expect(page.getByTestId('task-row-ambiguous-issue')).toHaveCount(2)
-    await expect(page.getByRole('button', { exact: true, name: 'Core ambiguous issue' })).toBeVisible()
-    await expect(page.getByRole('button', { exact: true, name: 'Design ambiguous issue' })).toBeVisible()
+    await expect(
+      page.getByRole('button', { exact: true, name: 'タスク詳細: Core ambiguous issue' }),
+    ).toBeVisible()
+    await expect(
+      page.getByRole('button', { exact: true, name: 'タスク詳細: Design ambiguous issue' }),
+    ).toBeVisible()
     expect(teamScopedIssueRequestPaths).toEqual([])
 
-    await page.getByRole('button', { exact: true, name: 'Design ambiguous issue' }).click()
+    await page.getByRole('button', { exact: true, name: 'タスク詳細: Design ambiguous issue' }).click()
 
     await expect(page).toHaveURL(
       '/projects/shared-launch/issues?teamId=design-team&issueId=ambiguous-issue',

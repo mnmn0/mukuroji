@@ -224,17 +224,25 @@ export function TaskTableView({
       return
     }
 
-    event.preventDefault()
     const selectedTasks = selectedTaskKeys.flatMap((taskKey) => {
       const task = tasks.find((candidate) => createTaskKey(candidate) === taskKey)
       return task ? [task] : []
     })
     const targetElement = event.target instanceof HTMLElement ? event.target : undefined
     const rowElement = targetElement?.closest<HTMLElement>('[data-row-index]')
-    const focusedRowIndex = Number(rowElement?.dataset.rowIndex ?? 0)
+    const focusedRowIndex = rowElement ? Number(rowElement.dataset.rowIndex) : undefined
+
+    if (
+      selectedTasks.length === 0 &&
+      (focusedRowIndex === undefined || !Number.isInteger(focusedRowIndex) || focusedRowIndex < 0)
+    ) {
+      return
+    }
+
+    event.preventDefault()
     const targetTasks = selectedTasks.length > 0
       ? selectedTasks
-      : tasks.slice(Number.isInteger(focusedRowIndex) && focusedRowIndex >= 0 ? focusedRowIndex : 0)
+      : tasks.slice(focusedRowIndex ?? 0)
     const updates: Array<{ task: ProjectTask; patch: WorkItemPatch }> = []
     let invalidCount = Math.max(0, rows.length - targetTasks.length)
 
@@ -541,7 +549,7 @@ function TaskTableRow({
           )}
           {onUpdateTask ? (
             <button
-              aria-label={taskTitle}
+              aria-label={`${t('tasks.detail.title')}: ${taskTitle}`}
               className="rounded px-1 text-xs text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)]"
               data-testid={`task-open-detail-${task.id}`}
               onClick={() => onSelectTask(task)}
