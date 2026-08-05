@@ -3299,9 +3299,14 @@ test.describe('authenticated task page', () => {
     await page.getByRole('button', { name: /期限が近い順/ }).click()
     await page.getByRole('menuitemradio', { name: '期限が遠い順' }).click()
 
+    await expect(page.getByTestId('task-row-competitor-report')).toBeVisible()
     await expect(page.getByTestId('task-row-seo-research')).toBeVisible()
     await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
-    await expect(page.getByTestId('task-row-seo-research')).toHaveAttribute('data-row-index', '0')
+    await expect(page.getByTestId('task-row-competitor-report')).toHaveAttribute(
+      'data-row-index',
+      '0',
+    )
+    await expect(page.getByTestId('task-row-seo-research')).toHaveAttribute('data-row-index', '1')
 
     await page.goto('/teams/core-team/issues')
     await page.getByRole('button', { name: '新規 Issue' }).click()
