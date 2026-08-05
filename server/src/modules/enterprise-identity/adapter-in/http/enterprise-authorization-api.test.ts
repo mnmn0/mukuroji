@@ -45,6 +45,7 @@ import type {
   DocumentDetail,
   PlanningSnapshot,
 } from '@mukuroji/contracts'
+import { createDefaultDueDateWorkItemSchedule } from '@mukuroji/contracts'
 import {
   afterEach,
   expect,
@@ -1454,7 +1455,8 @@ test('preserves an empty Team and Team-scoped Planning aggregates for a director
         teamId: 'empty-team',
         title: 'Empty Team Work Item',
         statusCategory: 'started' as const,
-        dueDate: '2026/06/18',
+        dueDate: '2026-06-18',
+        schedule: createDefaultDueDateWorkItemSchedule('2026-06-18'),
       }],
     }
     await planningClient.create(workspaceId, {

@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  createDefaultDueDateWorkItemSchedule,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
@@ -29,6 +30,24 @@ function createRecordingDocumentClient(
 }
 
 function createWorkItem(overrides: Record<string, unknown> = {}) {
+  const {
+    dueDate: dueDateOverride,
+    schedule: scheduleOverride,
+    ...remainingOverrides
+  } = overrides
+  const rawDueDate = typeof dueDateOverride === 'string'
+    ? dueDateOverride
+    : '2026-07-12'
+  const dueDate = rawDueDate
+  const schedule = scheduleOverride ?? {
+    calendarPolicy: {
+      holidays: [],
+      timeZone: 'UTC',
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+    },
+    dueDate,
+    mode: 'due-date',
+  }
   return {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
@@ -47,11 +66,12 @@ function createWorkItem(overrides: Record<string, unknown> = {}) {
     statusCategory: 'started',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/07/12',
+    dueDate,
+    schedule,
     priority: 'medium',
     createdAt: '2026-07-01T09:00:00.000Z',
     updatedAt: '2026-07-11T09:00:00.000Z',
-    ...overrides,
+    ...remainingOverrides,
   }
 }
 
@@ -73,11 +93,13 @@ function createRunOptions(
 }
 
 describe('notification schedule handler', () => {
-  test('parses only valid slash or dash UTC date-only values', () => {
-    expect(parseUtcDateOnly('2026/07/12')).toBe('2026-07-12')
+  test('parses only valid canonical UTC date-only values', () => {
+    expect(parseUtcDateOnly('2026/07/12')).toBeUndefined()
     expect(parseUtcDateOnly('2026-07-12')).toBe('2026-07-12')
-    expect(parseUtcDateOnly('2024/02/29')).toBe('2024-02-29')
-    expect(parseUtcDateOnly('2026/02/29')).toBeUndefined()
+    expect(parseUtcDateOnly('2024-02-29')).toBe('2024-02-29')
+    expect(parseUtcDateOnly('1000-01-01')).toBe('1000-01-01')
+    expect(parseUtcDateOnly('0999-12-31')).toBeUndefined()
+    expect(parseUtcDateOnly('2026-02-29')).toBeUndefined()
     expect(parseUtcDateOnly('2026-02/28')).toBeUndefined()
     expect(parseUtcDateOnly('2026/13/01')).toBeUndefined()
     expect(parseUtcDateOnly('2026/07/12T00:00:00Z')).toBeUndefined()
@@ -87,7 +109,7 @@ describe('notification schedule handler', () => {
     const recording = createRecordingDocumentClient((name) => {
       if (name === 'ScanCommand') {
         return {
-          ScannedCount: 7,
+          ScannedCount: 4,
           Items: [
             createWorkItem(),
             createWorkItem({
@@ -95,11 +117,8 @@ describe('notification schedule handler', () => {
               title: 'Security review',
               dueDate: '2026-07-10',
             }),
-            createWorkItem({ issueId: 'future', dueDate: '2026/07/13' }),
-            createWorkItem({ issueId: 'invalid-date', dueDate: '2026/02/29' }),
+            createWorkItem({ issueId: 'future', dueDate: '2026-07-13' }),
             createWorkItem({ issueId: 'done', statusCategory: 'completed' }),
-            createWorkItem({ issueId: 'unassigned', assigneeUserId: '' }),
-            createWorkItem({ issueId: 'malformed', teamId: undefined }),
           ],
         }
       }
@@ -113,10 +132,10 @@ describe('notification schedule handler', () => {
     const overdueEvent = puts[1]?.input.Item as Record<string, unknown>
 
     expect(result).toEqual({
-      scannedItems: 7,
+      scannedItems: 4,
       emittedEvents: 2,
       duplicateEvents: 0,
-      skippedItems: 5,
+      skippedItems: 2,
       scannedPages: 1,
     })
     expect(puts).toHaveLength(2)
@@ -186,38 +205,70 @@ describe('notification schedule handler', () => {
       .toMatchObject({ eventType: 'work-item.due' })
   })
 
-  test('fails closed for non-canonical Work Item rows', async () => {
-    const recording = createRecordingDocumentClient((name) => {
-      if (name !== 'ScanCommand') {
-        return {}
-      }
+  test('evaluates each due date in its canonical schedule timezone', async () => {
+    const tokyoSchedule = {
+      ...createDefaultDueDateWorkItemSchedule('2026-07-12'),
+      calendarPolicy: {
+        timeZone: 'Asia/Tokyo',
+        workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+        holidays: [],
+      },
+    }
+    const newYorkSchedule = {
+      ...createDefaultDueDateWorkItemSchedule('2026-07-12'),
+      calendarPolicy: {
+        timeZone: 'America/New_York',
+        workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+        holidays: [],
+      },
+    }
+    const recording = createRecordingDocumentClient((name) => name === 'ScanCommand'
+      ? {
+          Items: [
+            createWorkItem({ issueId: 'tokyo', schedule: tokyoSchedule }),
+            createWorkItem({ issueId: 'new-york', schedule: newYorkSchedule }),
+          ],
+        }
+      : {})
 
-      return {
-        ScannedCount: 6,
-        Items: [
-          createWorkItem(),
-          createWorkItem({ issueId: 'missing-relations', relationIds: undefined }),
-          createWorkItem({ issueId: 'legacy-status', status: 'started' }),
-          createWorkItem({ issueId: 'missing-creator', creatorMemberKey: undefined }),
-          createWorkItem({
-            issueId: 'wrong-project-key',
-            directoryProjectId: 'workspace-1#project#other',
-          }),
-          createWorkItem({
-            issueId: 'stray-project-key',
-            assignedProjectId: undefined,
-          }),
-        ],
-      }
-    })
-
-    await expect(runNotificationSchedule(createRunOptions(recording.client))).resolves.toEqual({
-      scannedItems: 6,
+    await expect(runNotificationSchedule(createRunOptions(recording.client, {
+      now: new Date('2026-07-11T15:00:00.000Z'),
+    }))).resolves.toMatchObject({
       emittedEvents: 1,
-      duplicateEvents: 0,
-      skippedItems: 5,
-      scannedPages: 1,
+      skippedItems: 1,
     })
+    expect(recording.commands.find(({ name }) => name === 'PutCommand')?.input.Item)
+      .toMatchObject({
+        entityId: 'team/core-team/issue/tokyo',
+        eventType: 'work-item.due',
+      })
+  })
+
+  test('fails closed for non-canonical Work Item rows', async () => {
+    const invalidRows = [
+      createWorkItem({ issueId: 'invalid-date', dueDate: '2026-02-29' }),
+      createWorkItem({ issueId: 'unassigned', assigneeUserId: '' }),
+      createWorkItem({ issueId: 'missing-relations', relationIds: undefined }),
+      createWorkItem({ issueId: 'legacy-status', status: 'started' }),
+      createWorkItem({ issueId: 'missing-creator', creatorMemberKey: undefined }),
+      createWorkItem({
+        issueId: 'wrong-project-key',
+        directoryProjectId: 'workspace-1#project#other',
+      }),
+      createWorkItem({
+        issueId: 'stray-project-key',
+        assignedProjectId: undefined,
+      }),
+    ]
+
+    for (const invalidRow of invalidRows) {
+      const recording = createRecordingDocumentClient((name) => name === 'ScanCommand'
+        ? { ScannedCount: 1, Items: [invalidRow] }
+        : {})
+      await expect(runNotificationSchedule(createRunOptions(recording.client))).rejects.toThrow(
+        'Notification schedule encountered a non-canonical Work Item row.',
+      )
+    }
   })
 
   test('paginates a bounded strongly consistent Work Item scan', async () => {
@@ -239,7 +290,7 @@ describe('notification schedule handler', () => {
           }
         : {
             ScannedCount: 1,
-            Items: [createWorkItem({ issueId: 'overdue', dueDate: '2026/07/11' })],
+            Items: [createWorkItem({ issueId: 'overdue', dueDate: '2026-07-11' })],
           }
     })
 
@@ -277,7 +328,7 @@ describe('notification schedule handler', () => {
         return {
           Items: [createWorkItem({
             assigneeUserId: scanCount === 3 ? 'new-owner@example.com' : 'Member@Example.com',
-            dueDate: scanCount === 1 ? '2026/07/12' : '2026-07-12',
+            dueDate: '2026-07-12',
           })],
         }
       }
@@ -318,7 +369,7 @@ describe('notification schedule handler', () => {
         return {
           Items: [
             createWorkItem(),
-            createWorkItem({ issueId: 'second', dueDate: '2026/07/11' }),
+            createWorkItem({ issueId: 'second', dueDate: '2026-07-11' }),
           ],
         }
       }

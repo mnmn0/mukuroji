@@ -65,6 +65,7 @@ import {
   type WorkItemConfiguration,
   type WorkItemRelation,
   type WorkItemRelationType,
+  type WorkItemScheduleImpact,
   type WorkspaceSearchFilters,
   type EnterpriseBreakGlassAccount,
   type EnterpriseCustomRole,
@@ -191,12 +192,15 @@ import {
   createWorkItemAuthorizationChangedError,
   customFieldValueRecordsEqual,
   isTeamIssueNotFoundError,
+  normalizeWorkItemScheduleOperation,
+  previewWorkItemScheduleChange,
   readAssignedProjectId,
   readRequiredCommentBody,
   readRequiredString,
   readTeamIssueAssigneeUserId,
   readWorkItemExpectedRevision,
   toTeamIssueResponseItem,
+  WorkItemScheduleError,
   type CreateTeamIssueCommentRequestBody,
   type CreateTeamIssueRequestBody,
   type CreateTeamIssueResponse,
@@ -6647,7 +6651,11 @@ routeApp.post('/api/teams/:teamId/issues', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     requireWorkspaceBusinessWrite(principal)
     const context = await requireTeamPermission(principal, teamId, 'member')
-    const requestBody = await readJson<CreateTeamIssueRequestBody>(c.req) ?? {}
+    const requestBody = await readJson<CreateTeamIssueRequestBody>(c.req)
+    if (!requestBody) {
+      throw new ProjectDataError(400, 'InvalidProjectWrite', 'Work Item body is required.')
+    }
+    rejectDerivedWorkItemScheduleFields(requestBody)
     delete requestBody.idempotencyResourceId
     const body = normalizeTeamIssueInput(
       requestBody,
@@ -6807,6 +6815,100 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
         principal.directoryId,
       ),
     )
+  } catch (error) {
+    return toWorkItemConfigurationErrorResponse(c, error)
+  }
+})
+
+/**
+ * Validates a Work Item schedule operation and returns its impact before mutation.
+ */
+routeApp.post('/api/teams/:teamId/issues/:issueId/schedule/preview', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const teamId = c.req.param('teamId')
+  const issueId = c.req.param('issueId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  if (!teamId || !issueId) {
+    return c.json({ message: 'Team ID and issue ID are required.' }, 400)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    requireWorkspaceBusinessWrite(principal)
+    const context = await requireTeamPermission(principal, teamId, 'member')
+    const body = await readJson<Record<string, unknown>>(c.req) ?? {}
+    const expectedRevision = readWorkItemExpectedRevision(body.expectedRevision)
+    const operation = normalizeWorkItemScheduleOperation(body.operation)
+    const [detail, relationPage] = await Promise.all([
+      workItemDependencies.teamIssues.getTeamIssueDetail(
+        principal.directoryId,
+        teamId,
+        issueId,
+        { consistentIssueRead: true, eventLimit: 0 },
+      ),
+      workItemDependencies.workItemConfigurations.listRelations(
+        principal.directoryId,
+        teamId,
+        issueId,
+      ),
+    ])
+    requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'member')
+    if (detail.issue.revision !== expectedRevision) {
+      throw new ProjectDataError(
+        409,
+        'WorkItemRevisionConflict',
+        'Work Item changed. Reload and try again.',
+      )
+    }
+
+    const directPreview = previewWorkItemScheduleChange(
+      teamId,
+      issueId,
+      expectedRevision,
+      detail.issue.schedule,
+      operation,
+    )
+    const dependencyTargetIds = [...new Set(relationPage.relations.flatMap((relation) =>
+      relation.sourceWorkItemId === issueId && relation.type === 'blocks'
+        ? [relation.targetWorkItemId]
+        : []
+    ))]
+    const dependencyTargets = await readRelationTargets(
+      principal,
+      teamId,
+      dependencyTargetIds,
+    )
+    const visibleDependencyTargets = dependencyTargets.filter(([, target]) =>
+      canAccessAssignedProject(
+        principal,
+        context,
+        target.assignedProjectId,
+        'viewer',
+      )
+    )
+
+    return c.json({
+      ...directPreview,
+      impacts: [
+        ...directPreview.impacts,
+        ...visibleDependencyTargets.map(([targetWorkItemId, target]): WorkItemScheduleImpact => ({
+          after: target.schedule,
+          before: target.schedule,
+          expectedRevision: target.revision,
+          kind: 'dependency',
+          teamId,
+          workItemId: targetWorkItemId,
+        })),
+      ],
+      relationGraphRevision: relationPage.graphRevision,
+      warnings: visibleDependencyTargets.length > 0
+        ? ['DependencyRippleRequiresReview']
+        : [],
+    })
   } catch (error) {
     return toWorkItemConfigurationErrorResponse(c, error)
   }
@@ -10313,8 +10415,8 @@ const bulkEditableWorkItemFields = new Set([
   'assigneeUserId',
   'customFieldValues',
   'description',
-  'dueDate',
   'priority',
+  'schedule',
   'title',
   'workflowStatusId',
 ])
@@ -10617,9 +10719,17 @@ async function executeAutomationWorkItemCreate(
   if (!teamId) {
     throw new AutomationError('invalid-input', 'AutomationTargetMissing', 'Create action requires a Team ID.')
   }
-  const body = { ...values }
-  delete body.teamId
-  body.idempotencyResourceId = `${context.execution.id}_create_${context.actionIndex}`
+  const body: CreateTeamIssueRequestBody = {
+    assignedProjectId: values.assignedProjectId,
+    assigneeUserId: values.assigneeUserId,
+    customFieldValues: values.customFieldValues,
+    description: values.description,
+    idempotencyResourceId: `${context.execution.id}_create_${context.actionIndex}`,
+    priority: values.priority,
+    schedule: values.schedule,
+    title: values.title,
+    workflowStatusId: values.workflowStatusId,
+  }
   const team = await requireAutomationTeam(
     context.execution.workspaceId,
     teamId,
@@ -10628,7 +10738,7 @@ async function executeAutomationWorkItemCreate(
   const configuredBody = await prepareConfiguredCreateWorkItem(
     context.execution.workspaceId,
     teamId,
-    normalizeTeamIssueInput(body as CreateTeamIssueRequestBody, team),
+    normalizeTeamIssueInput(body, team),
     await dependencies.workItemConfigurations.getTeamConfiguration(
       context.execution.workspaceId,
       teamId,
@@ -15853,6 +15963,9 @@ function toWorkItemConfigurationErrorResponse(c: Context, error: unknown) {
   ) {
     return toProjectDataErrorResponse(c, error)
   }
+  if (error instanceof WorkItemScheduleError) {
+    return c.json({ code: error.code, message: error.message }, 400)
+  }
   if (!(error instanceof WorkItemConfigurationError)) {
     console.error(error)
     return c.json({ message: 'Work Item configuration is unavailable.' }, 502)
@@ -17106,6 +17219,7 @@ const currentAssigneeNotificationReasons = new Set([
   'due',
   'due-date-change',
   'overdue',
+  'schedule-change',
   'status-change',
 ])
 
@@ -17281,6 +17395,13 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
   }
 
   if (error.code === 'InvalidWorkItemArchiveUpdate') {
+    return c.json({ code: error.code, message: error.message }, 400)
+  }
+
+  if (
+    error.code.startsWith('InvalidWorkItemSchedule') ||
+    error.code === 'WorkItemScheduleDurationMismatch'
+  ) {
     return c.json({ code: error.code, message: error.message }, 400)
   }
 
@@ -18724,6 +18845,7 @@ async function readPlanningWorkItemState(
         : {}),
       statusCategory: workItem.statusCategory,
       dueDate: workItem.dueDate,
+      schedule: workItem.schedule,
     } satisfies PlanningWorkItemSummary)),
   }
 }
@@ -19115,11 +19237,27 @@ function normalizeTeamIssueInput<TInput extends CreateTeamIssueRequestBody | Upd
 }
 
 function rejectInternalWorkItemUpdateFields(input: PublicUpdateTeamIssueRequestBody) {
+  rejectDerivedWorkItemScheduleFields(input)
   if ('archivedAt' in input || 'archivedBy' in input) {
     throw new ProjectDataError(
       400,
       'InvalidWorkItemArchiveUpdate',
       'Work Item archive fields cannot be updated through this endpoint.',
+    )
+  }
+}
+
+/**
+ * Rejects the removed deadline mutation field at internal Work Item API boundaries.
+ *
+ * @param input - Untrusted create or update body.
+ */
+function rejectDerivedWorkItemScheduleFields(input: object): void {
+  if ('dueDate' in input) {
+    throw new WorkItemScheduleError(
+      400,
+      'InvalidWorkItemSchedule',
+      'dueDate is derived from schedule and cannot be written directly.',
     )
   }
 }

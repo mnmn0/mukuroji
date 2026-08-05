@@ -42,7 +42,8 @@ describe('Automation editors', () => {
       assigneeUserId: null,
       customFieldValues: [],
       description: false,
-      dueDate: [],
+      dueDate: '2026-07-31',
+      schedule: { mode: 'unscheduled' },
       teamId: {},
       workflowStatusId: 2,
     }
@@ -61,7 +62,15 @@ describe('Automation editors', () => {
       assigneeUserId: 'user-1',
       customFieldValues: { effort: 3, labels: ['review'] },
       description: 'Review open work',
-      dueDate: '2026-07-31',
+      schedule: {
+        calendarPolicy: {
+          holidays: [],
+          timeZone: 'UTC',
+          workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+        },
+        dueDate: '2026-07-31',
+        mode: 'due-date',
+      },
       teamId: 'team-1',
       title: 'Review',
       workflowStatusId: 'backlog',
@@ -71,12 +80,42 @@ describe('Automation editors', () => {
         assigneeUserId: 'user-1',
         customFieldValues: { effort: 3, labels: ['review'] },
         description: 'Review open work',
-        dueDate: '2026-07-31',
+        schedule: {
+          calendarPolicy: {
+            holidays: [],
+            timeZone: 'UTC',
+            workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+          },
+          dueDate: '2026-07-31',
+          mode: 'due-date',
+        },
         teamId: 'team-1',
         title: 'Review',
         workflowStatusId: 'backlog',
       },
     })
+  })
+
+  test('rejects a date range beyond the server planning horizon', () => {
+    const startDate = '2000-01-01'
+    const endDate = new Date(
+      Date.parse(`${startDate}T00:00:00.000Z`) + 36_600 * 24 * 60 * 60 * 1_000,
+    ).toISOString().slice(0, 10)
+
+    expect(parseAutomationTemplatePayload(JSON.stringify({
+      schedule: {
+        calendarPolicy: {
+          holidays: [],
+          timeZone: 'UTC',
+          workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+        },
+        durationDays: 1,
+        endDate,
+        mode: 'date-range',
+        startDate,
+      },
+      title: 'Excessive range',
+    }))).toEqual({ error: 'invalid-value' })
   })
 
   test('creates localized initial Workflow and status names', () => {

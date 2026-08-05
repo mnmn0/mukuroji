@@ -4,6 +4,8 @@ import {
   type AnalyticsReport,
   type CanonicalWorkItem,
   type CreateAnalyticsReportInput,
+  WORK_ITEM_SCHEMA_VERSION,
+  createDefaultDueDateWorkItemSchedule,
 } from '@mukuroji/contracts'
 import {
   createAuditEvent,
@@ -1951,7 +1953,7 @@ function createReportQuery(
 
 function createWorkItem(id: string, assignedProjectId: string): CanonicalWorkItem {
   return {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     id,
     teamId: 'team-1',
@@ -1965,6 +1967,7 @@ function createWorkItem(id: string, assignedProjectId: string): CanonicalWorkIte
     customFieldValues: {},
     relationIds: [],
     dueDate: '2026-07-31',
+    schedule: createDefaultDueDateWorkItemSchedule('2026-07-31'),
     priority: 'medium',
     createdAt: '2026-07-01T00:00:00.000Z',
     updatedAt: '2026-07-17T00:00:00.000Z',

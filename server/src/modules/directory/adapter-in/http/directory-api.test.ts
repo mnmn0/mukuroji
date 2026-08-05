@@ -18,6 +18,7 @@ import {
 import type {
   DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
+import { createDefaultDueDateWorkItemSchedule } from '@mukuroji/contracts'
 import {
   afterEach,
   expect,
@@ -546,7 +547,7 @@ test('denies project-assigned Work Item creation when the project role is viewer
       title: '新規タスク',
       assignedProjectId: 'refero',
       assigneeUserId: 'sato@example.com',
-      dueDate: '2026/06/20',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-06-20'),
       priority: 'high',
       workflowStatusId: 'todo',
     }),
@@ -762,6 +763,7 @@ test('rejects archiving scopes referenced only by a stored Planning Work Item li
       projectId: 'refero',
       statusCategory: 'completed' as const,
       dueDate: '2026-08-31',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-08-31'),
     }],
   }
   await planningClient.create(

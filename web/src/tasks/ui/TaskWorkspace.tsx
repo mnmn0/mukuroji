@@ -3,8 +3,10 @@ import type {
   BulkOperationPreview,
   BulkOperationRequest,
   ResolvedWorkItemConfiguration,
-  WorkItemPatch,
   WorkItemConfiguration,
+  WorkItemPatch,
+  WorkItemScheduleChangePreview,
+  WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
 import {
   useEffect,
@@ -161,6 +163,16 @@ export type TaskWorkspaceProps = {
   onVisibleTaskSelectionChange: (selectionKeys: string[], selected: boolean) => void
   /** Updates a task through the shared Work Item mutation. */
   onUpdateTask?: (task: ProjectTask, input: WorkItemPatch) => Promise<ProjectTask>
+  /** Applies a schedule already confirmed by the Gantt or Calendar preview dialog. */
+  onApplyPreviewedScheduleChange?: (
+    task: ProjectTask,
+    input: WorkItemPatch,
+  ) => Promise<ProjectTask>
+  /** Previews a schedule move, resize, or replacement before it is applied. */
+  onPreviewScheduleChange?: (
+    task: ProjectTask,
+    operation: WorkItemScheduleOperation,
+  ) => Promise<WorkItemScheduleChangePreview>
   /** Adds or updates a project member role. */
   onUpdateProjectMember?: (
     projectId: string,
@@ -248,7 +260,9 @@ export function TaskWorkspace({
   onTaskSelectionChange,
   onVisibleTaskSelectionChange,
   onUpdateProjectMember,
+  onApplyPreviewedScheduleChange,
   onUpdateTask,
+  onPreviewScheduleChange,
   searchQuery,
   selectedTaskKeys,
   selectedBulkItems,
@@ -531,7 +545,9 @@ export function TaskWorkspace({
           configuration={configuration}
           configurationsByTeam={configurationsByTeam}
           onCreateTaskOpen={onCreateTaskOpen}
+          onPreviewScheduleChange={onPreviewScheduleChange}
           onSelectTask={onSelectTask}
+          onUpdateTask={onApplyPreviewedScheduleChange ?? onUpdateTask}
           projectId={projectId}
           t={t}
           tasks={tasks}
@@ -540,7 +556,9 @@ export function TaskWorkspace({
       {activeTab === 'calendar' && !taskErrorMessage ? (
         <TaskCalendarView
           onCreateTaskOpen={onCreateTaskOpen}
+          onPreviewScheduleChange={onPreviewScheduleChange}
           onSelectTask={onSelectTask}
+          onUpdateTask={onApplyPreviewedScheduleChange ?? onUpdateTask}
           projectId={projectId}
           t={t}
           tasks={tasks}

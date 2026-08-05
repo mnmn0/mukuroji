@@ -11,6 +11,7 @@ import { projectDirectoryFixtures } from '../src/projects/fixtures'
 import { TeamOverviewView } from '../src/projects/ui/TeamOverviewView'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import type { ProjectTask } from '../src/tasks/api'
+import { createDefaultDueDateTaskSchedule } from '../src/tasks/model/taskSchedule'
 import { DashboardWorkspaceView } from '../src/workspace/ui/DashboardWorkspaceView'
 import { HomeWorkspaceView } from '../src/workspace/ui/HomeWorkspaceView'
 import { MyTasksWorkspaceView } from '../src/workspace/ui/MyTasksWorkspaceView'
@@ -33,11 +34,12 @@ describe('Workspace approval Inbox', () => {
       creatorMemberKey: 'demo@example.com',
       createdAt: '2026-07-16T00:00:00.000Z',
       customFieldValues: {},
-      dueDate: '2026/01/01',
+      dueDate: '2026-01-01',
       id: 'configured-status',
       priority: 'high',
       relationIds: [],
       revision: 1,
+      schedule: createDefaultDueDateTaskSchedule('2026-01-01'),
       schemaVersion: WORK_ITEM_SCHEMA_VERSION,
       source: 'dynamodb',
       statusCategory: 'started',
@@ -136,11 +138,12 @@ describe('Workspace approval Inbox', () => {
         creatorMemberKey: 'demo@example.com',
         customFieldValues: {},
         createdAt: '2026-07-14T00:00:00.000Z',
-        dueDate: '2099/12/31',
+        dueDate: '2099-12-31',
         id: 'approval-proof',
         priority: 'low',
         relationIds: [],
         revision: 1,
+        schedule: createDefaultDueDateTaskSchedule('2099-12-31'),
         schemaVersion: WORK_ITEM_SCHEMA_VERSION,
         source: 'dynamodb',
         statusCategory: 'unstarted',
@@ -163,11 +166,12 @@ describe('Workspace approval Inbox', () => {
         creatorMemberKey: 'demo@example.com',
         customFieldValues: {},
         createdAt: '2026-07-14T00:00:00.000Z',
-        dueDate: '2099/12/31',
+        dueDate: '2099-12-31',
         id: 'approval-history-only',
         priority: 'low',
         relationIds: [],
         revision: 1,
+        schedule: createDefaultDueDateTaskSchedule('2099-12-31'),
         schemaVersion: WORK_ITEM_SCHEMA_VERSION,
         source: 'dynamodb',
         statusCategory: 'unstarted',
@@ -227,11 +231,12 @@ describe('Workspace approval Inbox', () => {
       creatorMemberKey: 'demo@example.com',
       createdAt: '2026-07-16T00:00:00.000Z',
       customFieldValues: {},
-      dueDate: '2099/12/31',
+      dueDate: '2099-12-31',
       id: 'configuration-unavailable',
       priority: 'high',
       relationIds: [],
       revision: 1,
+      schedule: createDefaultDueDateTaskSchedule('2099-12-31'),
       schemaVersion: WORK_ITEM_SCHEMA_VERSION,
       source: 'dynamodb',
       statusCategory: 'started',

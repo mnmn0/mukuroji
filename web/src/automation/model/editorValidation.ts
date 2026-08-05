@@ -1,19 +1,36 @@
-import type {
-  AutomationAction,
-  AutomationConditionOperator,
-  AutomationProjectTemplatePayload,
-  AutomationScheduleTrigger,
-  AutomationTemplateKind,
-  AutomationTemplatePayloadByKind,
-  AutomationTrigger,
-  AutomationValue,
-  AutomationWorkItemTemplatePayload,
-  CreateAutomationRuleInput,
-  CreateAutomationTemplateInputForKind,
-  WorkflowDefinition,
+import {
+  WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
+  WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
+  WORK_ITEM_SCHEDULE_MIN_YEAR,
+  type AutomationAction,
+  type AutomationConditionOperator,
+  type AutomationProjectTemplatePayload,
+  type AutomationScheduleTrigger,
+  type AutomationTemplateKind,
+  type AutomationTemplatePayloadByKind,
+  type AutomationTrigger,
+  type AutomationValue,
+  type AutomationWorkItemTemplatePayload,
+  type CreateAutomationRuleInput,
+  type CreateAutomationTemplateInputForKind,
+  type WorkItemSchedule,
+  type WorkItemScheduleCalendarPolicy,
+  type WorkItemScheduleWeekday,
+  type WorkflowDefinition,
 } from '@mukuroji/contracts'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
 import { createRecurringSchedule, type RecurringScheduleInput } from './recurringSchedule'
+
+const automationScheduleWeekdays: readonly WorkItemScheduleWeekday[] = [
+  'monday',
+  'tuesday',
+  'wednesday',
+  'thursday',
+  'friday',
+  'saturday',
+  'sunday',
+]
+const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1_000
 
 /** Trigger type が設定値を必須とするか返します。 */
 export function automationTriggerRequiresConfiguration(type: AutomationTrigger['type']) {
@@ -86,7 +103,7 @@ export function parseAutomationTemplatePayload(value: string):
   | { error: AutomationTemplatePayloadError } {
   let parsed: unknown
   try {
-    parsed = JSON.parse(value) as unknown
+    parsed = JSON.parse(value)
   } catch {
     return { error: 'invalid-json' }
   }
@@ -98,8 +115,8 @@ export function parseAutomationTemplatePayload(value: string):
     'assigneeUserId',
     'customFieldValues',
     'description',
-    'dueDate',
     'priority',
+    'schedule',
     'teamId',
     'title',
     'workflowStatusId',
@@ -129,13 +146,38 @@ export function parseAutomationTemplatePayload(value: string):
     (parsed.assigneeUserId !== undefined && typeof parsed.assigneeUserId !== 'string') ||
     (parsed.customFieldValues !== undefined && !isRecord(parsed.customFieldValues)) ||
     (parsed.description !== undefined && typeof parsed.description !== 'string') ||
-    (parsed.dueDate !== undefined && typeof parsed.dueDate !== 'string') ||
     (parsed.teamId !== undefined && typeof parsed.teamId !== 'string') ||
     (parsed.workflowStatusId !== undefined && typeof parsed.workflowStatusId !== 'string')
   ) {
     return { error: 'invalid-value' }
   }
-  return { payload: parsed as AutomationWorkItemTemplatePayload }
+  const schedule = readAutomationWorkItemSchedule(parsed.schedule)
+  if (!schedule) return { error: 'invalid-value' }
+  const customFieldValues = parsed.customFieldValues === undefined
+    ? undefined
+    : cloneAutomationValueRecord(parsed.customFieldValues)
+  if (parsed.customFieldValues !== undefined && customFieldValues === undefined) {
+    return { error: 'invalid-value' }
+  }
+  return {
+    payload: {
+      title: parsed.title,
+      ...(parsed.assignedProjectId === undefined
+        ? {}
+        : { assignedProjectId: parsed.assignedProjectId }),
+      ...(parsed.assigneeUserId === undefined
+        ? {}
+        : { assigneeUserId: parsed.assigneeUserId }),
+      ...(customFieldValues === undefined ? {} : { customFieldValues }),
+      ...(parsed.description === undefined ? {} : { description: parsed.description }),
+      ...(parsed.priority === undefined ? {} : { priority: parsed.priority }),
+      schedule,
+      ...(parsed.teamId === undefined ? {} : { teamId: parsed.teamId }),
+      ...(parsed.workflowStatusId === undefined
+        ? {}
+        : { workflowStatusId: parsed.workflowStatusId }),
+    },
+  }
 }
 
 /** 検証済み payload を template 作成 API input へ変換します。 */
@@ -290,6 +332,306 @@ function isDisplayName(value: string) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Reads a complete canonical Work Item schedule from template-editor JSON.
+ *
+ * @param value - Untrusted schedule candidate.
+ * @returns A detached schedule, or undefined when any mode invariant is invalid.
+ */
+function readAutomationWorkItemSchedule(value: unknown): WorkItemSchedule | undefined {
+  if (!isRecord(value) || typeof value.mode !== 'string') return undefined
+  const calendarPolicy = readAutomationScheduleCalendarPolicy(value.calendarPolicy)
+  if (!calendarPolicy) return undefined
+  const plannedEffortMinutes = value.plannedEffortMinutes
+  if (
+    plannedEffortMinutes !== undefined &&
+    (
+      typeof plannedEffortMinutes !== 'number' ||
+      !Number.isSafeInteger(plannedEffortMinutes) ||
+      plannedEffortMinutes < 0
+    )
+  ) {
+    return undefined
+  }
+  const plannedEffort = plannedEffortMinutes === undefined
+    ? {}
+    : { plannedEffortMinutes }
+
+  if (value.mode === 'unscheduled') {
+    if (!hasOnlyKeys(value, ['calendarPolicy', 'mode', 'plannedEffortMinutes'])) {
+      return undefined
+    }
+    return { calendarPolicy, mode: value.mode, ...plannedEffort }
+  }
+  if (value.mode === 'due-date') {
+    if (
+      !hasOnlyKeys(value, ['calendarPolicy', 'dueDate', 'mode', 'plannedEffortMinutes']) ||
+      !isIsoCalendarDate(value.dueDate)
+    ) {
+      return undefined
+    }
+    return {
+      calendarPolicy,
+      dueDate: value.dueDate,
+      mode: value.mode,
+      ...plannedEffort,
+    }
+  }
+  if (value.mode === 'date-range') {
+    if (
+      !hasOnlyKeys(value, [
+        'calendarPolicy',
+        'durationDays',
+        'endDate',
+        'mode',
+        'plannedEffortMinutes',
+        'startDate',
+      ]) ||
+      !isIsoCalendarDate(value.startDate) ||
+      !isIsoCalendarDate(value.endDate) ||
+      typeof value.durationDays !== 'number' ||
+      !Number.isSafeInteger(value.durationDays) ||
+      value.durationDays < 1 ||
+      value.durationDays > WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS ||
+      countAutomationScheduleWorkingDays(
+        value.startDate,
+        value.endDate,
+        calendarPolicy,
+      ) !== value.durationDays
+    ) {
+      return undefined
+    }
+    return {
+      calendarPolicy,
+      durationDays: value.durationDays,
+      endDate: value.endDate,
+      mode: value.mode,
+      startDate: value.startDate,
+      ...plannedEffort,
+    }
+  }
+  if (value.mode === 'milestone') {
+    if (
+      !hasOnlyKeys(value, [
+        'calendarPolicy',
+        'durationDays',
+        'endDate',
+        'mode',
+        'plannedEffortMinutes',
+        'startDate',
+      ]) ||
+      !isIsoCalendarDate(value.startDate) ||
+      value.endDate !== value.startDate ||
+      value.durationDays !== 0
+    ) {
+      return undefined
+    }
+    return {
+      calendarPolicy,
+      durationDays: 0,
+      endDate: value.startDate,
+      mode: value.mode,
+      startDate: value.startDate,
+      ...plannedEffort,
+    }
+  }
+  return undefined
+}
+
+/**
+ * Reads a canonical calendar policy without silently reordering or deduplicating values.
+ *
+ * @param value - Untrusted policy candidate.
+ * @returns A detached policy, or undefined when it is not canonical.
+ */
+function readAutomationScheduleCalendarPolicy(
+  value: unknown,
+): WorkItemScheduleCalendarPolicy | undefined {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['holidays', 'timeZone', 'workingWeekdays'])) {
+    return undefined
+  }
+  if (
+    typeof value.timeZone !== 'string' ||
+    !value.timeZone ||
+    value.timeZone.trim() !== value.timeZone ||
+    !isCanonicalTimeZone(value.timeZone) ||
+    !Array.isArray(value.workingWeekdays) ||
+    !Array.isArray(value.holidays)
+  ) {
+    return undefined
+  }
+  if (
+    value.workingWeekdays.length > automationScheduleWeekdays.length ||
+    value.holidays.length > WORK_ITEM_SCHEDULE_MAX_HOLIDAYS
+  ) {
+    return undefined
+  }
+  const workingWeekdays: WorkItemScheduleWeekday[] = []
+  for (const weekday of value.workingWeekdays) {
+    if (!isAutomationScheduleWeekday(weekday)) return undefined
+    workingWeekdays.push(weekday)
+  }
+  const expectedWeekdays = automationScheduleWeekdays
+    .filter((weekday) => workingWeekdays.includes(weekday))
+  if (
+    workingWeekdays.length === 0 ||
+    workingWeekdays.length !== expectedWeekdays.length ||
+    workingWeekdays.some((weekday, index) => weekday !== expectedWeekdays[index])
+  ) {
+    return undefined
+  }
+  const holidays: string[] = []
+  for (const holiday of value.holidays) {
+    if (!isIsoCalendarDate(holiday)) return undefined
+    holidays.push(holiday)
+  }
+  const expectedHolidays = [...new Set(holidays)].sort()
+  if (
+    holidays.length !== expectedHolidays.length ||
+    holidays.some((holiday, index) => holiday !== expectedHolidays[index])
+  ) {
+    return undefined
+  }
+  return {
+    holidays: [...holidays],
+    timeZone: value.timeZone,
+    workingWeekdays: [...workingWeekdays],
+  }
+}
+
+/**
+ * Counts working dates in an inclusive schedule range.
+ *
+ * @param startDate - Inclusive ISO start date.
+ * @param endDate - Inclusive ISO end date.
+ * @param policy - Canonical policy used for weekday and holiday exclusions.
+ * @returns The working-date count, or undefined for an invalid or excessive range.
+ */
+function countAutomationScheduleWorkingDays(
+  startDate: string,
+  endDate: string,
+  policy: WorkItemScheduleCalendarPolicy,
+): number | undefined {
+  const start = Date.parse(`${startDate}T00:00:00.000Z`)
+  const end = Date.parse(`${endDate}T00:00:00.000Z`)
+  const spanDays = (end - start) / MILLISECONDS_PER_DAY
+  if (spanDays < 0 || spanDays >= WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS) return undefined
+  const holidaySet = new Set(policy.holidays)
+  const workingWeekdaySet = new Set(policy.workingWeekdays)
+  let count = 0
+  for (let timestamp = start; timestamp <= end; timestamp += MILLISECONDS_PER_DAY) {
+    const date = new Date(timestamp)
+    const isoDate = date.toISOString().slice(0, 10)
+    if (
+      workingWeekdaySet.has(readAutomationScheduleWeekday(date.getUTCDay())) &&
+      !holidaySet.has(isoDate)
+    ) {
+      count += 1
+    }
+  }
+  return count
+}
+
+/**
+ * Clones a JSON-compatible custom-field record without a type assertion.
+ *
+ * @param value - Candidate record from parsed template JSON.
+ * @returns A detached Automation value record, or undefined when invalid.
+ */
+function cloneAutomationValueRecord(
+  value: unknown,
+): Record<string, AutomationValue> | undefined {
+  if (!isRecord(value)) return undefined
+  const result: Record<string, AutomationValue> = {}
+  for (const [key, candidate] of Object.entries(value)) {
+    if (!isAutomationValueCompatible(candidate)) return undefined
+    result[key] = structuredClone(candidate)
+  }
+  return result
+}
+
+/**
+ * Checks whether a record contains only the supplied keys.
+ *
+ * @param value - Record whose keys are being validated.
+ * @param keys - Complete allowlist for the record.
+ * @returns Whether every record key belongs to the allowlist.
+ */
+function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const allowedKeys = new Set(keys)
+  return Object.keys(value).every((key) => allowedKeys.has(key))
+}
+
+/**
+ * Checks whether a value is a real ISO calendar date.
+ *
+ * @param value - Untrusted date candidate.
+ * @returns Whether the value round-trips through UTC date parsing.
+ */
+function isIsoCalendarDate(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false
+  const date = new Date(`${value}T00:00:00.000Z`)
+  return Number(value.slice(0, 4)) >= WORK_ITEM_SCHEDULE_MIN_YEAR &&
+    !Number.isNaN(date.getTime()) &&
+    date.toISOString().slice(0, 10) === value
+}
+
+/**
+ * Checks whether an IANA timezone is already in its canonical form.
+ *
+ * @param value - Timezone identifier supplied by the editor.
+ * @returns Whether Intl accepts the identifier without canonicalizing it to another value.
+ */
+function isCanonicalTimeZone(value: string): boolean {
+  try {
+    return new Intl.DateTimeFormat('en-US', { timeZone: value })
+      .resolvedOptions().timeZone === value
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Narrows an unknown weekday name to the Work Item schedule contract.
+ *
+ * @param value - Untrusted weekday candidate.
+ * @returns Whether the value is one of the seven canonical weekday names.
+ */
+function isAutomationScheduleWeekday(value: unknown): value is WorkItemScheduleWeekday {
+  return value === 'monday' ||
+    value === 'tuesday' ||
+    value === 'wednesday' ||
+    value === 'thursday' ||
+    value === 'friday' ||
+    value === 'saturday' ||
+    value === 'sunday'
+}
+
+/**
+ * Maps a UTC weekday number to the Work Item schedule contract.
+ *
+ * @param day - Weekday index returned by `Date#getUTCDay`.
+ * @returns The matching canonical weekday name.
+ */
+function readAutomationScheduleWeekday(day: number): WorkItemScheduleWeekday {
+  switch (day) {
+    case 0:
+      return 'sunday'
+    case 1:
+      return 'monday'
+    case 2:
+      return 'tuesday'
+    case 3:
+      return 'wednesday'
+    case 4:
+      return 'thursday'
+    case 5:
+      return 'friday'
+    default:
+      return 'saturday'
+  }
 }
 
 function isAutomationValueCompatible(value: unknown, depth = 0): value is AutomationValue {

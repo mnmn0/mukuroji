@@ -880,10 +880,6 @@
           "description": {
             "type": "string"
           },
-          "dueDate": {
-            "format": "date",
-            "type": "string"
-          },
           "priority": {
             "enum": [
               "high",
@@ -895,6 +891,9 @@
           "quickCapture": {
             "description": "When true, workflowStatusId must identify a backlog status so required custom fields can be completed later.",
             "type": "boolean"
+          },
+          "schedule": {
+            "$ref": "#/components/schemas/WorkItemSchedule"
           },
           "teamId": {
             "type": "string"
@@ -911,7 +910,7 @@
           "teamId",
           "title",
           "assigneeUserId",
-          "dueDate",
+          "schedule",
           "priority"
         ],
         "type": "object"
@@ -1648,10 +1647,6 @@
           "description": {
             "type": "string"
           },
-          "dueDate": {
-            "format": "date",
-            "type": "string"
-          },
           "expectedRevision": {
             "minimum": 1,
             "type": "integer"
@@ -1663,6 +1658,9 @@
               "low"
             ],
             "type": "string"
+          },
+          "schedule": {
+            "$ref": "#/components/schemas/WorkItemSchedule"
           },
           "title": {
             "minLength": 1,
@@ -1923,8 +1921,16 @@
             "type": "string"
           },
           "dueDate": {
-            "format": "date",
-            "type": "string"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkItemScheduleDate"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "description": "Deadline projection derived from schedule; empty when unscheduled."
           },
           "id": {
             "type": "string"
@@ -1947,8 +1953,11 @@
             "minimum": 1,
             "type": "integer"
           },
+          "schedule": {
+            "$ref": "#/components/schemas/WorkItemSchedule"
+          },
           "schemaVersion": {
-            "const": 1,
+            "const": 2,
             "type": "integer"
           },
           "source": {
@@ -1991,6 +2000,7 @@
           "title",
           "assigneeUserId",
           "dueDate",
+          "schedule",
           "priority",
           "creatorMemberKey",
           "workflowStatusId",
@@ -2003,6 +2013,172 @@
           "source"
         ],
         "type": "object"
+      },
+      "WorkItemSchedule": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "calendarPolicy": {
+                "$ref": "#/components/schemas/WorkItemScheduleCalendarPolicy"
+              },
+              "mode": {
+                "const": "unscheduled",
+                "type": "string"
+              },
+              "plannedEffortMinutes": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "mode",
+              "calendarPolicy"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "calendarPolicy": {
+                "$ref": "#/components/schemas/WorkItemScheduleCalendarPolicy"
+              },
+              "dueDate": {
+                "$ref": "#/components/schemas/WorkItemScheduleDate"
+              },
+              "mode": {
+                "const": "due-date",
+                "type": "string"
+              },
+              "plannedEffortMinutes": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "mode",
+              "calendarPolicy",
+              "dueDate"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "calendarPolicy": {
+                "$ref": "#/components/schemas/WorkItemScheduleCalendarPolicy"
+              },
+              "durationDays": {
+                "maximum": 36600,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "endDate": {
+                "$ref": "#/components/schemas/WorkItemScheduleDate"
+              },
+              "mode": {
+                "const": "date-range",
+                "type": "string"
+              },
+              "plannedEffortMinutes": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "startDate": {
+                "$ref": "#/components/schemas/WorkItemScheduleDate"
+              }
+            },
+            "required": [
+              "mode",
+              "calendarPolicy",
+              "startDate",
+              "endDate",
+              "durationDays"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "calendarPolicy": {
+                "$ref": "#/components/schemas/WorkItemScheduleCalendarPolicy"
+              },
+              "durationDays": {
+                "const": 0,
+                "type": "integer"
+              },
+              "endDate": {
+                "$ref": "#/components/schemas/WorkItemScheduleDate"
+              },
+              "mode": {
+                "const": "milestone",
+                "type": "string"
+              },
+              "plannedEffortMinutes": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "startDate": {
+                "$ref": "#/components/schemas/WorkItemScheduleDate"
+              }
+            },
+            "required": [
+              "mode",
+              "calendarPolicy",
+              "startDate",
+              "endDate",
+              "durationDays"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkItemScheduleCalendarPolicy": {
+        "additionalProperties": false,
+        "properties": {
+          "holidays": {
+            "items": {
+              "$ref": "#/components/schemas/WorkItemScheduleDate"
+            },
+            "maxItems": 512,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "timeZone": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "workingWeekdays": {
+            "items": {
+              "enum": [
+                "monday",
+                "tuesday",
+                "wednesday",
+                "thursday",
+                "friday",
+                "saturday",
+                "sunday"
+              ],
+              "type": "string"
+            },
+            "maxItems": 7,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "timeZone",
+          "workingWeekdays",
+          "holidays"
+        ],
+        "type": "object"
+      },
+      "WorkItemScheduleDate": {
+        "description": "A real Gregorian date from 1000-01-01 through 9999-12-31.",
+        "format": "date",
+        "pattern": "^[1-9][0-9]{3}-[0-9]{2}-[0-9]{2}$",
+        "type": "string"
       },
       "WorkItemSyncConflict": {
         "additionalProperties": false,

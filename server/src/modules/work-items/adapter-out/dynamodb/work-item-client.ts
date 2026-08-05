@@ -37,10 +37,14 @@ import {
 } from '../../../request-intake'
 import {
   isCanonicalWorkItemArchiveWindow,
-  isCanonicalWorkItemDueDate,
   isCanonicalWorkItemRecord,
 } from '../../canonical-work-item'
 import { createResourceId } from '../../domain/resource-id'
+import {
+  deriveWorkItemScheduleDueDate,
+  normalizeWorkItemSchedule,
+  WorkItemScheduleError,
+} from '../../domain/work-item-schedule'
 import {
   CreateTableCommand,
   DescribeTableCommand,
@@ -72,6 +76,7 @@ import type {
   WorkflowStatusCategory,
   WorkItemPriority,
   WorkItemRelation,
+  WorkItemSchedule,
   WorkItemStatus,
 } from '@mukuroji/contracts'
 
@@ -440,6 +445,8 @@ type TeamIssueItem = {
    * 期限日として表示する文字列です。
    */
   dueDate: string
+  /** Canonical schedule shared by every Work Item planning surface. */
+  schedule: WorkItemSchedule
   /**
    * 優先度です。
    */
@@ -690,10 +697,8 @@ export type CreateTeamIssueRequestBody = {
    * Cognito user を参照する担当者 ID です。
    */
   assigneeUserId?: unknown
-  /**
-   * 期限日として保存する文字列です。
-   */
-  dueDate?: unknown
+  /** Explicit canonical schedule required for every new Work Item. */
+  schedule: unknown
   /**
    * 優先度です。
    */
@@ -766,10 +771,8 @@ export type PublicUpdateTeamIssueRequestBody = {
    * Cognito user を参照する担当者 ID です。
    */
   assigneeUserId?: unknown
-  /**
-   * 期限日として保存する文字列です。
-   */
-  dueDate?: unknown
+  /** Complete replacement schedule shared by every task view. */
+  schedule?: unknown
   /**
    * 優先度です。
    */
@@ -1527,7 +1530,8 @@ export class DynamoDbTeamIssuesClient {
     const title = readRequiredString(input.title, 'Issue title is required.')
     const description = readOptionalString(input.description, 'Issue description is invalid.')
     const assigneeUserId = readTeamIssueAssigneeUserId(input)
-    const dueDate = readWorkItemDueDate(input.dueDate)
+    const schedule = readWorkItemScheduleInput(input.schedule)
+    const dueDate = deriveWorkItemScheduleDueDate(schedule)
     const priority = readTaskPriority(input.priority)
     const assignedProjectId = readAssignedProjectId(input.assignedProjectId)
     const workflowSchemaVersion = readWorkflowSchemaVersion(input.workflowSchemaVersion)
@@ -1618,6 +1622,7 @@ export class DynamoDbTeamIssuesClient {
         customFieldValues,
         relationIds: [],
         dueDate,
+        schedule,
         priority,
         createdAt: now,
         updatedAt: now,
@@ -1658,6 +1663,7 @@ export class DynamoDbTeamIssuesClient {
           'statusCategory',
           'customFieldValues',
           'dueDate',
+          'schedule',
           'priority',
           'sourceRequestId',
         ]),
@@ -1793,6 +1799,7 @@ export class DynamoDbTeamIssuesClient {
             customFieldValues,
             description,
             dueDate,
+            schedule,
             priority,
             statusCategory,
             title,
@@ -1829,6 +1836,7 @@ export class DynamoDbTeamIssuesClient {
     let auditPut: ReturnType<typeof createMutationAuditEventPut> = undefined
     const expectedRevision = readWorkItemExpectedRevision(input.expectedRevision)
     const nextRevision = expectedRevision + 1
+    if ('schedule' in input) readWorkItemScheduleInput(input.schedule)
     const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
     const expressionAttributeNames: Record<string, string> = {
       '#schemaVersion': 'schemaVersion',
@@ -1914,12 +1922,6 @@ export class DynamoDbTeamIssuesClient {
       setExpressions.push('#customFieldValues = :customFieldValues')
     }
 
-    if ('dueDate' in input) {
-      expressionAttributeNames['#dueDate'] = 'dueDate'
-      expressionAttributeValues[':dueDate'] = readWorkItemDueDate(input.dueDate)
-      setExpressions.push('#dueDate = :dueDate')
-    }
-
     if ('priority' in input) {
       expressionAttributeNames['#priority'] = 'priority'
       expressionAttributeValues[':priority'] = readTaskPriority(input.priority)
@@ -1948,16 +1950,24 @@ export class DynamoDbTeamIssuesClient {
       }
     }
 
-    const updateExpression = [
-      `SET ${setExpressions.join(', ')}`,
-      removeExpressions.length > 0 ? `REMOVE ${removeExpressions.join(', ')}` : undefined,
-    ].filter(isDefined).join(' ')
-
     try {
       const beforeIssue = await this.getRequiredTeamIssueItem(directoryId, teamId, issueId, true)
       if (beforeIssue.revision !== expectedRevision) {
         throw createWorkItemRevisionConflictError()
       }
+      const schedule = 'schedule' in input
+        ? readWorkItemScheduleInput(input.schedule)
+        : beforeIssue.schedule
+      expressionAttributeNames['#dueDate'] = 'dueDate'
+      expressionAttributeNames['#schedule'] = 'schedule'
+      expressionAttributeValues[':dueDate'] = deriveWorkItemScheduleDueDate(schedule)
+      expressionAttributeValues[':schedule'] = schedule
+      setExpressions.push('#dueDate = :dueDate')
+      setExpressions.push('#schedule = :schedule')
+      const updateExpression = [
+        `SET ${setExpressions.join(', ')}`,
+        removeExpressions.length > 0 ? `REMOVE ${removeExpressions.join(', ')}` : undefined,
+      ].filter(isDefined).join(' ')
       const archivedAt = expressionAttributeValues[':archivedAt']
       if (
         archivedAt !== undefined &&
@@ -2017,6 +2027,7 @@ export class DynamoDbTeamIssuesClient {
           'statusCategory',
           'customFieldValues',
           'dueDate',
+          'schedule',
           'priority',
           'archivedAt',
           'archivedBy',
@@ -2197,6 +2208,7 @@ export class DynamoDbTeamIssuesClient {
         'statusCategory',
         'customFieldValues',
         'dueDate',
+        'schedule',
         'priority',
       ]),
       metadata: {
@@ -3066,6 +3078,7 @@ export function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
     customFieldValues: item.customFieldValues,
     relationIds: item.relationIds,
     dueDate: item.dueDate,
+    schedule: item.schedule,
     priority: item.priority,
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
@@ -3121,7 +3134,7 @@ function toCreateTeamIssueCommentResponse(
 }
 
 function toTeamIssueItem(value: unknown): TeamIssueItem {
-  if (!isTeamIssueItem(value)) {
+  if (!isCanonicalWorkItemRecord(value)) {
     throw new ProjectDataError(
       503,
       'InvalidTeamIssue',
@@ -3182,10 +3195,6 @@ function toProjectTaskResponseItem(value: unknown): ProjectTaskResponseItem {
   }
 
   return task
-}
-
-function isTeamIssueItem(value: unknown): value is TeamIssueItem {
-  return isCanonicalWorkItemRecord(value)
 }
 
 function isTeamIssueEventItem(value: unknown): value is TeamIssueEventItem {
@@ -3282,17 +3291,22 @@ export function readRequiredString(value: unknown, message: string) {
 }
 
 /**
- * Reads one required Work Item due date in a supported persisted date-only format.
+ * Reads and normalizes an explicit canonical schedule.
  *
- * @param value - Untrusted due date value.
- * @returns A canonical real calendar day.
+ * @param scheduleValue - Untrusted canonical schedule candidate.
+ * @returns A normalized canonical schedule whose dates use `YYYY-MM-DD`.
  */
-function readWorkItemDueDate(value: unknown): string {
-  const dueDate = readRequiredString(value, 'Issue due date is required.')
-  if (!isCanonicalWorkItemDueDate(dueDate)) {
-    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Issue due date is invalid.')
+function readWorkItemScheduleInput(
+  scheduleValue: unknown,
+): WorkItemSchedule {
+  try {
+    return normalizeWorkItemSchedule(scheduleValue)
+  } catch (error) {
+    if (error instanceof WorkItemScheduleError) {
+      throw new ProjectDataError(400, error.code, error.message)
+    }
+    throw error
   }
-  return dueDate
 }
 
 /**
@@ -3480,6 +3494,7 @@ function isMatchingIdempotentWorkItemCreate(
     customFieldValues: Record<string, CustomFieldValue>
     description: string | undefined
     dueDate: string
+    schedule: WorkItemSchedule
     priority: ProjectTaskPriority
     statusCategory: WorkflowStatusCategory
     title: string
@@ -3493,11 +3508,27 @@ function isMatchingIdempotentWorkItemCreate(
     customFieldValueRecordsEqual(issue.customFieldValues, expected.customFieldValues) &&
     issue.description === expected.description &&
     issue.dueDate === expected.dueDate &&
+    workItemSchedulesEqual(issue.schedule, expected.schedule) &&
     issue.priority === expected.priority &&
     issue.statusCategory === expected.statusCategory &&
     issue.title === expected.title &&
     issue.workflowSchemaVersion === expected.workflowSchemaVersion &&
     issue.workflowStatusId === expected.workflowStatusId
+}
+
+/**
+ * Compares schedule values after rebuilding their deterministic canonical representation.
+ *
+ * @param left - First normalized schedule.
+ * @param right - Second normalized schedule.
+ * @returns Whether both schedules serialize to the same canonical JSON value.
+ */
+function workItemSchedulesEqual(
+  left: WorkItemSchedule,
+  right: WorkItemSchedule,
+): boolean {
+  return JSON.stringify(normalizeWorkItemSchedule(left)) ===
+    JSON.stringify(normalizeWorkItemSchedule(right))
 }
 
 function readOptionalString(value: unknown, message: string) {
@@ -3719,8 +3750,8 @@ function createWorkItemNotificationCandidates(
     candidates.push({ memberKey: after.assigneeUserId, reason: 'status-change' })
   }
 
-  if (before.dueDate !== after.dueDate) {
-    candidates.push({ memberKey: after.assigneeUserId, reason: 'due-date-change' })
+  if (!workItemSchedulesEqual(before.schedule, after.schedule)) {
+    candidates.push({ memberKey: after.assigneeUserId, reason: 'schedule-change' })
   }
 
   if (before.archivedAt !== after.archivedAt) {
@@ -3746,8 +3777,8 @@ function createWorkItemNotificationSummary(before: TeamIssueItem, after: TeamIss
     return 'Work Item status changed.'
   }
 
-  if (before.dueDate !== after.dueDate) {
-    return 'Work Item due date changed.'
+  if (!workItemSchedulesEqual(before.schedule, after.schedule)) {
+    return 'Work Item schedule changed.'
   }
 
   return 'Work Item was updated.'

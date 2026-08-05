@@ -691,7 +691,9 @@ function mapLegacyTeamIssueEvent(item: Record<string, unknown>) {
 /** Strict canonical Work Item row を audit backfill event へ変換します。 */
 export function mapCurrentTeamIssue(item: Record<string, unknown>) {
   if (!isCanonicalWorkItemRecord(item)) {
-    return undefined
+    throw new TypeError(
+      'Audit backfill encountered a non-canonical Work Item row.',
+    )
   }
 
   const directoryId = item.directoryId
@@ -724,6 +726,7 @@ export function mapCurrentTeamIssue(item: Record<string, unknown>) {
       ['statusCategory', false],
       ['customFieldValues', true],
       ['dueDate', false],
+      ['schedule', false],
       ['priority', false],
       ['createdAt', false],
       ['updatedAt', false],

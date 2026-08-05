@@ -440,7 +440,15 @@ describe('AutomationManagementPanel', () => {
       "title": "Weekly review",
       "priority": "medium",
       "description": "Review open work every week",
-      "customFieldValues": { "labels": ["weekly", "review"], "estimate": 3 }
+      "customFieldValues": { "labels": ["weekly", "review"], "estimate": 3 },
+      "schedule": {
+        "calendarPolicy": {
+          "holidays": [],
+          "timeZone": "UTC",
+          "workingWeekdays": ["monday", "tuesday", "wednesday", "thursday", "friday"]
+        },
+        "mode": "unscheduled"
+      }
     }`)
     expect(parsed).toHaveProperty('payload')
     if (!('payload' in parsed)) throw new Error('Expected a valid template payload.')
@@ -464,6 +472,14 @@ describe('AutomationManagementPanel', () => {
         customFieldValues: { estimate: 3, labels: ['weekly', 'review'] },
         description: 'Review open work every week',
         priority: 'medium',
+        schedule: {
+          calendarPolicy: {
+            holidays: [],
+            timeZone: 'UTC',
+            workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+          },
+          mode: 'unscheduled',
+        },
         title: 'Weekly review',
       },
     })
@@ -477,9 +493,15 @@ describe('AutomationManagementPanel', () => {
     expect(parseAutomationTemplatePayload('{"description":"Missing title"}')).toEqual({
       error: 'invalid-value',
     })
+    expect(parseAutomationTemplatePayload('{"title":"Missing schedule"}')).toEqual({
+      error: 'invalid-value',
+    })
     expect(parseAutomationTemplatePayload('{"title":"Review","metadata":{}}')).toEqual({
       error: 'invalid-value',
     })
+    expect(parseAutomationTemplatePayload(
+      '{"title":"Review","dueDate":"2026-07-31"}',
+    )).toEqual({ error: 'invalid-value' })
     expect(parseAutomationTemplatePayload('{"estimate": 1e400}')).toEqual({ error: 'invalid-value' })
   })
 

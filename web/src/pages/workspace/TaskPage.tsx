@@ -3,6 +3,8 @@ import type {
   BulkOperationRequest,
   ResolvedWorkItemConfiguration,
   WorkItemRelation,
+  WorkItemScheduleChangePreview,
+  WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
@@ -42,6 +44,7 @@ import {
 } from '../../projects/queries/useProjectMembers'
 import {
   createTeamIssue,
+  previewTeamIssueSchedule,
   TeamIssuesApiError,
   type TeamIssue,
   type UpdateTeamIssueInput,
@@ -622,14 +625,30 @@ export function TaskPage() {
       throw new Error(t('tasks.action.updateError'))
     }
 
-    const currentTask = selectedIssueDetail?.issue.id === task.id &&
+    const detailTask = selectedIssueDetail?.issue.id === task.id &&
       selectedIssueDetail.issue.teamId === task.teamId
       ? selectedIssueDetail.issue
-      : tasks.find((candidate) => candidate.id === task.id && candidate.teamId === task.teamId)
+      : undefined
+    const listTask = tasks.find((candidate) =>
+      candidate.id === task.id && candidate.teamId === task.teamId
+    )
+    const latestKnownTask = detailTask && (!listTask || detailTask.revision >= listTask.revision)
+      ? detailTask
+      : listTask
 
-    if (!currentTask) {
+    if (!latestKnownTask) {
       throw new Error(t('tasks.action.updateError'))
     }
+    if (latestKnownTask.revision !== task.revision) {
+      await Promise.all([mutateProjectTasks(), mutateSelectedIssueDetail()])
+      throw new TeamIssuesApiError(
+        409,
+        t('tasks.action.conflict'),
+        'WorkItemRevisionConflict',
+      )
+    }
+
+    const currentTask = task
 
     const configuration = workItemConfigurationLoadResult.configurationsByTeam[currentTask.teamId]?.configuration ??
       selectedIssueDetail?.resolvedConfiguration?.configuration
@@ -721,6 +740,31 @@ export function TaskPage() {
         setIssueUpdateError([currentIssueUpdateErrorKey, t('tasks.detail.error')])
       }
 
+      throw error
+    }
+  }
+
+  /** Validates one interactive schedule operation against its observed revision. */
+  const handlePreviewScheduleChange = async (
+    task: ProjectTask,
+    operation: WorkItemScheduleOperation,
+  ): Promise<WorkItemScheduleChangePreview> => {
+    if (!accessToken) {
+      throw new Error(t('tasks.action.updateError'))
+    }
+
+    try {
+      return await guardEnterpriseSession(previewTeamIssueSchedule(
+        task.teamId,
+        task.id,
+        accessToken,
+        { expectedRevision: task.revision, operation },
+      ))
+    } catch (error) {
+      redirectEnterpriseSessionError(error)
+      if (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') {
+        await Promise.all([mutateProjectTasks(), mutateSelectedIssueDetail()])
+      }
       throw error
     }
   }
@@ -907,6 +951,7 @@ export function TaskPage() {
       onSelectedIssueChange={handleSelectedIssueChange}
       onUpdateIssue={canMutateContent ? handleUpdateIssue : undefined}
       onUpdateTask={canMutateContent ? handleUpdateTask : undefined}
+      onPreviewScheduleChange={canMutateContent ? handlePreviewScheduleChange : undefined}
       onUpdateProjectMember={canManageProjectMembers ? handleUpdateProjectMember : undefined}
       onBulkApply={canMutateContent && workspaceId ? handleBulkApply : undefined}
       onBulkPreview={canMutateContent && workspaceId ? handleBulkPreview : undefined}

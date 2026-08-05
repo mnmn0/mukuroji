@@ -1,4 +1,9 @@
 import { describe, expect, test } from 'bun:test'
+import {
+  createDefaultDueDateWorkItemSchedule,
+  createDefaultUnscheduledWorkItemSchedule,
+  deriveWorkItemScheduleDueDate,
+} from '@mukuroji/contracts'
 import type { ProjectMemberRole } from '../src/projects/api'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
 import {
@@ -23,8 +28,14 @@ if (!baseTask || !coreTeam) {
  * @param overrides - Fields that differ from the shared base fixture.
  * @returns A complete ProjectTask fixture.
  */
-function createTask(overrides: Partial<ProjectTask>): ProjectTask {
-  return { ...baseTask, ...overrides }
+function createTask(overrides: Omit<Partial<ProjectTask>, 'dueDate'>): ProjectTask {
+  const schedule = overrides.schedule ?? baseTask.schedule
+  return {
+    ...baseTask,
+    dueDate: deriveWorkItemScheduleDueDate(schedule),
+    schedule,
+    ...overrides,
+  }
 }
 
 /**
@@ -66,8 +77,8 @@ describe('Team insights model', () => {
         assigneeEmail: 'demo@example.com',
         assigneeName: 'Demo User',
         assigneeUserId: 'demo@example.com',
-        dueDate: '2026/07/21',
         id: 'refero-task',
+        schedule: createDefaultDueDateWorkItemSchedule('2026-07-21'),
         assignedProjectId: 'refero',
         teamId: 'core-team',
       }),
@@ -75,10 +86,10 @@ describe('Team insights model', () => {
         assigneeEmail: 'demo@example.com',
         assigneeName: 'Demo User',
         assigneeUserId: 'demo@example.com',
-        dueDate: '2026/07/19',
         id: 'roadmap-task',
         assignedProjectId: 'product-roadmap',
         priority: 'high',
+        schedule: createDefaultDueDateWorkItemSchedule('2026-07-19'),
         teamId: 'core-team',
       }),
       createTask({
@@ -101,7 +112,7 @@ describe('Team insights model', () => {
       expect.objectContaining({
         attentionTaskCount: 2,
         id: 'demo@example.com',
-        nextDueDate: '2026/07/19',
+        nextDueDate: '2026-07-19',
         openTaskCount: 2,
         projectAccess: [
           expect.objectContaining({ projectId: 'refero', role: 'member' }),
@@ -113,16 +124,16 @@ describe('Team insights model', () => {
     ])
   })
 
-  test('ignores empty and invalid due dates when selecting a member next due date', () => {
+  test('ignores unscheduled tasks when selecting a member next due date', () => {
     const tasks = [
       createTask({
         assignedProjectId: 'refero',
         assigneeEmail: 'demo@example.com',
         assigneeName: 'Demo User',
         assigneeUserId: 'demo@example.com',
-        dueDate: '',
         id: 'undated-task',
         priority: 'low',
+        schedule: createDefaultUnscheduledWorkItemSchedule(),
         statusCategory: 'unstarted',
         teamId: 'core-team',
         workflowStatusId: 'todo',
@@ -132,9 +143,9 @@ describe('Team insights model', () => {
         assigneeEmail: 'demo@example.com',
         assigneeName: 'Demo User',
         assigneeUserId: 'demo@example.com',
-        dueDate: '0000/00/00',
-        id: 'invalid-date-task',
+        id: 'second-undated-task',
         priority: 'low',
+        schedule: createDefaultUnscheduledWorkItemSchedule(),
         statusCategory: 'unstarted',
         teamId: 'core-team',
         workflowStatusId: 'todo',
@@ -144,9 +155,9 @@ describe('Team insights model', () => {
         assigneeEmail: 'demo@example.com',
         assigneeName: 'Demo User',
         assigneeUserId: 'demo@example.com',
-        dueDate: '2026/07/21',
         id: 'dated-task',
         priority: 'low',
+        schedule: createDefaultDueDateWorkItemSchedule('2026-07-21'),
         statusCategory: 'unstarted',
         teamId: 'core-team',
         workflowStatusId: 'todo',
@@ -159,16 +170,16 @@ describe('Team insights model', () => {
       memberAccesses,
       referenceDate,
       coreTeam.id,
-    )[0]?.nextDueDate).toBe('2026/07/21')
+    )[0]?.nextDueDate).toBe('2026-07-21')
   })
 
   test('builds Team-scoped Project summaries with member and next-action data', () => {
     const tasks = [
       createTask({
         assignedProjectId: 'refero',
-        dueDate: '2026/07/19',
         id: 'core-risk',
         priority: 'high',
+        schedule: createDefaultDueDateWorkItemSchedule('2026-07-19'),
         teamId: 'core-team',
       }),
       createTask({

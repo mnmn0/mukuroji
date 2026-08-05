@@ -1902,7 +1902,7 @@ function createInvalidProjectDirectoryItem(
  */
 function createWorkItemSourceItem(issueId: string): DynamoAttributeMap {
   return {
-    schemaVersion: { N: '1' },
+    schemaVersion: { N: '2' },
     revision: { N: '3' },
     workflowSchemaVersion: { N: '1' },
     directoryId: { S: 'workspace-1' },
@@ -1920,7 +1920,28 @@ function createWorkItemSourceItem(issueId: string): DynamoAttributeMap {
     statusCategory: { S: 'started' },
     customFieldValues: { M: { estimate: { N: '3' } } },
     relationIds: { L: [] },
-    dueDate: { S: '2026/07/31' },
+    dueDate: { S: '2026-07-31' },
+    schedule: {
+      M: {
+        calendarPolicy: {
+          M: {
+            holidays: { L: [] },
+            timeZone: { S: 'UTC' },
+            workingWeekdays: {
+              L: [
+                { S: 'monday' },
+                { S: 'tuesday' },
+                { S: 'wednesday' },
+                { S: 'thursday' },
+                { S: 'friday' },
+              ],
+            },
+          },
+        },
+        dueDate: { S: '2026-07-31' },
+        mode: { S: 'due-date' },
+      },
+    },
     priority: { S: 'high' },
     createdAt: { S: '2026-07-20T01:00:00.000Z' },
     updatedAt: { S: '2026-07-25T01:00:00.000Z' },

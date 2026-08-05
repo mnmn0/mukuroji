@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  WORK_ITEM_SCHEMA_VERSION,
+  createDefaultDueDateWorkItemSchedule,
+} from '@mukuroji/contracts'
+import {
   mapWorkspaceSearchMigrationRow,
   type WorkspaceSearchMigrationMappedRow,
   type WorkspaceSearchMigrationRowClassification,
@@ -61,7 +65,7 @@ function createWorkItemRow(
   overrides: Readonly<Record<string, unknown>> = {},
 ): Record<string, unknown> {
   return {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 3,
     workflowSchemaVersion: 1,
     directoryId: 'workspace-1',
@@ -82,7 +86,8 @@ function createWorkItemRow(
       labels: ['migration', 'production'],
     },
     relationIds: ['blocks:issue-2'],
-    dueDate: '2026/07/31',
+    dueDate: '2026-07-31',
+    schedule: createDefaultDueDateWorkItemSchedule('2026-07-31'),
     priority: 'high',
     createdAt: '2026-07-20T01:00:00.000Z',
     updatedAt: '2026-07-25T01:00:00.000Z',
@@ -400,7 +405,7 @@ describe('Workspace Search production migration mapper', () => {
 
   test('fails closed for every malformed Work Item target row', () => {
     for (const item of [
-      createWorkItemRow({ schemaVersion: 2 }),
+      createWorkItemRow({ schemaVersion: 1 }),
       createWorkItemRow({ directoryTeamId: 'workspace-1#team#other' }),
       createWorkItemRow({
         teamId: 'team/ambiguous',

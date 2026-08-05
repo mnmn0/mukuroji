@@ -1,8 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import {
   PUBLIC_API_OPENAPI_DOCUMENT,
+  WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
+  WORK_ITEM_SCHEMA_VERSION,
   type ApiScope,
   type CanonicalWorkItem,
+  type DueDateWorkItemSchedule,
   type ImportJob,
   type WorkItemSyncConflict,
 } from '@mukuroji/contracts'
@@ -54,9 +57,22 @@ const managementPrincipal: DeveloperManagementPrincipal = {
   },
 }
 
+/** Creates a canonical deadline-only schedule for public API fixtures. */
+function createDueDateSchedule(dueDate: string): DueDateWorkItemSchedule {
+  return {
+    calendarPolicy: {
+      holidays: [],
+      timeZone: 'UTC',
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+    },
+    dueDate,
+    mode: 'due-date',
+  }
+}
+
 function createWorkItem(id = 'work-item-1', teamId = 'team-1'): CanonicalWorkItem {
   return {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     id,
     teamId,
@@ -69,6 +85,7 @@ function createWorkItem(id = 'work-item-1', teamId = 'team-1'): CanonicalWorkIte
     customFieldValues: {},
     relationIds: [],
     dueDate: '2026-07-31',
+    schedule: createDueDateSchedule('2026-07-31'),
     priority: 'medium',
     createdAt: NOW.toISOString(),
     updatedAt: NOW.toISOString(),
@@ -85,7 +102,7 @@ function createImportJob(id: string, dryRun: boolean): ImportJob {
     mapping: [
       { sourceField: 'Title', targetField: 'title', transform: 'trim' },
       { sourceField: 'Assignee', targetField: 'assigneeUserId' },
-      { sourceField: 'Due', targetField: 'dueDate', required: true },
+      { sourceField: 'Schedule', targetField: 'schedule', required: true },
     ],
     dryRun,
     createdByUserId: 'user-1',
@@ -303,6 +320,55 @@ describe('public API router', () => {
     expect(keys.every((key) =>
       /^tenant-meter:v1:[a-f0-9]{64}:[a-f0-9]{64}$/u.test(key ?? '')
     )).toBe(true)
+  })
+
+  test('returns canonical schedules, including explicitly unscheduled Work Items', async () => {
+    const scheduled = createWorkItem('scheduled')
+    const unscheduled: CanonicalWorkItem = {
+      ...createWorkItem('unscheduled'),
+      dueDate: '',
+      schedule: {
+        calendarPolicy: scheduled.schedule.calendarPolicy,
+        mode: 'unscheduled',
+      },
+    }
+    const { platform, router } = createTestRouter({
+      workItems: createDefaultWorkItemService({
+        async list() {
+          return { items: [scheduled, unscheduled], hasMore: false }
+        },
+        async get() {
+          return unscheduled
+        },
+      }),
+    })
+    const apiKey = await createApiKey(platform, ['work-items:read'])
+    const headers = { Authorization: `Bearer ${apiKey.secret}` }
+
+    const [listResponse, detailResponse] = await Promise.all([
+      router.request('http://localhost/v1/work-items?teamId=team-1', { headers }),
+      router.request('http://localhost/v1/work-items/unscheduled?teamId=team-1', { headers }),
+    ])
+
+    expect(listResponse.status).toBe(200)
+    expect((await listResponse.json()).items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'scheduled',
+        schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+        schedule: expect.objectContaining({ mode: 'due-date' }),
+      }),
+      expect.objectContaining({
+        id: 'unscheduled',
+        schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+        schedule: expect.objectContaining({ mode: 'unscheduled' }),
+      }),
+    ]))
+    expect(detailResponse.status).toBe(200)
+    expect(await detailResponse.json()).toMatchObject({
+      id: 'unscheduled',
+      schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+      schedule: { mode: 'unscheduled' },
+    })
   })
 
   test('scopes entitlement idempotency by public API payload', async () => {
@@ -604,12 +670,19 @@ describe('public API router', () => {
     expect(secondBody.hasMore).toBe(false)
   })
 
-  test('rejects normalized impossible dates while accepting leap and month-end dates', async () => {
+  test('rejects impossible schedule dates while accepting leap and month-end dates', async () => {
     const receivedDueDates: string[] = []
     const workItems = createDefaultWorkItemService({
       async create(_credential, input) {
-        receivedDueDates.push(input.dueDate)
-        return { ...createWorkItem(), dueDate: input.dueDate }
+        if (input.schedule.mode !== 'due-date') {
+          throw new Error('Expected a deadline-only schedule.')
+        }
+        receivedDueDates.push(input.schedule.dueDate)
+        return {
+          ...createWorkItem(),
+          dueDate: input.schedule.dueDate,
+          schedule: input.schedule,
+        }
       },
     })
     const { platform, router } = createTestRouter({ workItems })
@@ -625,20 +698,60 @@ describe('public API router', () => {
         teamId: 'team-1',
         title: 'Date validation',
         assigneeUserId: 'user-1',
-        dueDate,
+        schedule: createDueDateSchedule(dueDate),
         priority: 'medium',
       }),
     })
 
-    for (const impossible of ['2026-02-29', '2026-02-31', '2026-04-31']) {
+    for (const impossible of ['0999-12-31', '2026-02-29', '2026-02-31', '2026-04-31']) {
       const response = await request(impossible)
       expect(response.status).toBe(400)
       expect(await response.json()).toMatchObject({ code: 'validation_failed' })
     }
-    for (const valid of ['2024-02-29', '2026-04-30']) {
+    for (const valid of ['1000-01-01', '2024-02-29', '2026-04-30']) {
       expect((await request(valid)).status).toBe(201)
     }
-    expect(receivedDueDates).toEqual(['2024-02-29', '2026-04-30'])
+    expect(receivedDueDates).toEqual(['1000-01-01', '2024-02-29', '2026-04-30'])
+  })
+
+  test('rejects oversized calendar collections before invoking the Work Item service', async () => {
+    let createCalls = 0
+    const workItems = createDefaultWorkItemService({
+      async create() {
+        createCalls += 1
+        return createWorkItem()
+      },
+    })
+    const { platform, router } = createTestRouter({ workItems })
+    const apiKey = await createApiKey(platform, ['work-items:write'])
+    const response = await router.request('http://localhost/v1/work-items', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey.secret}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'oversized-calendar-policy',
+      },
+      body: JSON.stringify({
+        assigneeUserId: 'user-1',
+        priority: 'medium',
+        schedule: {
+          ...createDueDateSchedule('2026-07-31'),
+          calendarPolicy: {
+            ...createDueDateSchedule('2026-07-31').calendarPolicy,
+            holidays: Array.from(
+              { length: WORK_ITEM_SCHEDULE_MAX_HOLIDAYS + 1 },
+              () => '2026-01-01',
+            ),
+          },
+        },
+        teamId: 'team-1',
+        title: 'Oversized calendar policy',
+      }),
+    })
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({ code: 'validation_failed' })
+    expect(createCalls).toBe(0)
   })
 
   test('rechecks current Work Item RBAC before replaying completed mutation receipts', async () => {
@@ -698,7 +811,7 @@ describe('public API router', () => {
         teamId: 'team-1',
         title: 'Replay create',
         assigneeUserId: 'user-1',
-        dueDate: '2026-07-31',
+        schedule: createDueDateSchedule('2026-07-31'),
         priority: 'medium',
       }),
     })
@@ -806,7 +919,7 @@ describe('public API router', () => {
         teamId: 'team-1',
         title: 'Denied replay',
         assigneeUserId: 'user-1',
-        dueDate: '2026-07-31',
+        schedule: createDueDateSchedule('2026-07-31'),
         priority: 'medium',
       }),
     })
@@ -1374,13 +1487,13 @@ describe('public API router', () => {
       source: {
         fileName: 'work-items.csv',
         mediaType: 'text/csv',
-        content: 'Title,Assignee,Due\n Example ,user-1,2026-07-31\n',
+        content: 'Title,Assignee,Schedule\n Example ,user-1,"{""mode"":""unscheduled""}"\n',
       },
       teamId: 'team-1',
       mapping: [
         { sourceField: 'Title', targetField: 'title', transform: 'trim' },
         { sourceField: 'Assignee', targetField: 'assigneeUserId' },
-        { sourceField: 'Due', targetField: 'dueDate', required: true },
+        { sourceField: 'Schedule', targetField: 'schedule', required: true },
       ],
     }
     const request = () => router.request('http://localhost/developer/imports', {

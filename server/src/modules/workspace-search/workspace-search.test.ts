@@ -111,6 +111,28 @@ test('derives document keys from entity identity instead of trusting producer in
   })).toThrow('record key does not match')
 })
 
+test('requires canonical ISO dates for Work Item search projections', () => {
+  const input = {
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    issueId: 'issue-1',
+    title: 'Release readiness',
+  }
+
+  expect(createWorkItemWorkspaceSearchDocument({
+    ...input,
+    dueDate: '2026-07-20',
+  }).dueDate).toBe('2026-07-20')
+  expect(() => createWorkItemWorkspaceSearchDocument({
+    ...input,
+    dueDate: '2026/07/20',
+  })).toThrow('must be a real ISO date')
+  expect(() => createWorkItemWorkspaceSearchDocument({
+    ...input,
+    dueDate: '2026-02-29',
+  })).toThrow('must be a real ISO date')
+})
+
 test('binds live projections to a deterministic server-owned content digest', async () => {
   const first = createWorkspaceSearchDocument({
     workspaceId: 'workspace-1',

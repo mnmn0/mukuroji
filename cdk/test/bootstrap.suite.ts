@@ -258,7 +258,12 @@ test('canonical Work Item seed writes complete schema data and preserves demo da
   expect(workItemPayload.match(/statusCategory/g)).toHaveLength(10);
   expect(workItemPayload.match(/customFieldValues/g)).toHaveLength(10);
   expect(workItemPayload.match(/relationIds/g)).toHaveLength(10);
+  expect(workItemPayload.match(/schedule/g)).toHaveLength(10);
   expect(workItemPayload.match(/creatorMemberKey/g)).toHaveLength(10);
+  expect(workItemPayload).toContain('"schemaVersion":{"N":"2"}');
+  expect(workItemPayload).toContain('"mode":{"S":"due-date"}');
+  expect(workItemPayload).toContain('"timeZone":{"S":"UTC"}');
+  expect(workItemPayload).toContain('"dueDate":{"S":"2026-06-03"}');
   expect(workItemPayload).toContain('"statusCategory":{"S":"unstarted"}');
   expect(workItemPayload).toContain('"statusCategory":{"S":"started"}');
   expect(workItemPayload).toContain('"statusCategory":{"S":"completed"}');

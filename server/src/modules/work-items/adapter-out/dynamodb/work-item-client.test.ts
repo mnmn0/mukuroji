@@ -27,10 +27,78 @@ import {
   spyOn,
   test,
 } from 'bun:test'
+import {
+  WORK_ITEM_SCHEMA_VERSION,
+  type DueDateWorkItemSchedule,
+} from '@mukuroji/contracts'
 
 afterEach(() => {
   resetTestApp()
 })
+
+/** Creates a canonical deadline-only schedule for DynamoDB Work Item fixtures. */
+function createDueDateSchedule(dueDate: string): DueDateWorkItemSchedule {
+  return {
+    calendarPolicy: {
+      holidays: [],
+      timeZone: 'UTC',
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+    },
+    dueDate,
+    mode: 'due-date',
+  }
+}
+
+/** Checks a mock AWS command fragment before reading nested transaction values. */
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Reads the Work Item put item from a captured DynamoDB transaction. */
+function readTransactionPutItem(
+  input: Record<string, unknown>,
+  tableName: string,
+): Record<string, unknown> | undefined {
+  const transactItems = input.TransactItems
+  if (!Array.isArray(transactItems)) {
+    return undefined
+  }
+  for (const transactItem of transactItems) {
+    if (!isUnknownRecord(transactItem) || !isUnknownRecord(transactItem.Put)) {
+      continue
+    }
+    if (
+      transactItem.Put.TableName === tableName &&
+      isUnknownRecord(transactItem.Put.Item)
+    ) {
+      return structuredClone(transactItem.Put.Item)
+    }
+  }
+  return undefined
+}
+
+/** Reads the Work Item update expression values from a captured DynamoDB transaction. */
+function readTransactionUpdateValues(
+  input: Record<string, unknown>,
+  tableName: string,
+): Record<string, unknown> | undefined {
+  const transactItems = input.TransactItems
+  if (!Array.isArray(transactItems)) {
+    return undefined
+  }
+  for (const transactItem of transactItems) {
+    if (!isUnknownRecord(transactItem) || !isUnknownRecord(transactItem.Update)) {
+      continue
+    }
+    if (
+      transactItem.Update.TableName === tableName &&
+      isUnknownRecord(transactItem.Update.ExpressionAttributeValues)
+    ) {
+      return structuredClone(transactItem.Update.ExpressionAttributeValues)
+    }
+  }
+  return undefined
+}
 
 test('DynamoDB task client initializes a missing local table before reading tasks', async () => {
   const rawInputs: Array<Record<string, unknown>> = []
@@ -280,7 +348,7 @@ test('DynamoDB task and Work Item list clients stop pagination at the requested 
     priority: 'high',
   }
   const canonicalWorkItem = {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     directoryId: 'user#demo@example.com',
     directoryTeamId: 'user#demo@example.com#team#core-team',
@@ -297,7 +365,8 @@ test('DynamoDB task and Work Item list clients stop pagination at the requested 
     statusCategory: 'unstarted',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/06/03',
+    dueDate: '2026-06-03',
+    schedule: createDueDateSchedule('2026-06-03'),
     priority: 'high',
     createdAt: '2026-07-12T00:00:00.000Z',
     updatedAt: '2026-07-12T00:00:00.000Z',
@@ -402,7 +471,7 @@ test('DynamoDB Team and project Work Item clients read every page without a defa
   const sentInputs: Array<Record<string, unknown>> = []
   const pageCounts = new Map<string, number>()
   const canonicalWorkItem = {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     directoryId: 'user#demo@example.com',
     directoryTeamId: 'user#demo@example.com#team#core-team',
@@ -419,7 +488,8 @@ test('DynamoDB Team and project Work Item clients read every page without a defa
     statusCategory: 'unstarted',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/06/03',
+    dueDate: '2026-06-03',
+    schedule: createDueDateSchedule('2026-06-03'),
     priority: 'high',
     createdAt: '2026-07-12T00:00:00.000Z',
     updatedAt: '2026-07-12T00:00:00.000Z',
@@ -470,7 +540,7 @@ test('DynamoDB Work Item list limits count visible rows instead of archived rows
   const sentInputs: Array<Record<string, unknown>> = []
   const pageCounts = new Map<string, number>()
   const canonicalWorkItem = {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     directoryId: 'user#demo@example.com',
     directoryTeamId: 'user#demo@example.com#team#core-team',
@@ -487,7 +557,8 @@ test('DynamoDB Work Item list limits count visible rows instead of archived rows
     statusCategory: 'unstarted',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/06/03',
+    dueDate: '2026-06-03',
+    schedule: createDueDateSchedule('2026-06-03'),
     priority: 'high',
     createdAt: '2026-07-12T00:00:00.000Z',
     updatedAt: '2026-07-12T00:00:00.000Z',
@@ -558,7 +629,7 @@ test('DynamoDB Work Item list limits count visible rows instead of archived rows
 test('DynamoDB Work Item creation allocates IDs and sort order across archived rows', async () => {
   const sentCommands: Array<{ input: Record<string, unknown>; name: string }> = []
   const archivedWorkItem = {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     directoryId: 'user#demo@example.com',
     directoryTeamId: 'user#demo@example.com#team#core-team',
@@ -575,7 +646,8 @@ test('DynamoDB Work Item creation allocates IDs and sort order across archived r
     statusCategory: 'unstarted',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/06/03',
+    dueDate: '2026-06-03',
+    schedule: createDueDateSchedule('2026-06-03'),
     priority: 'high',
     createdAt: '2026-07-12T00:00:00.000Z',
     updatedAt: '2026-07-12T01:00:00.000Z',
@@ -610,7 +682,7 @@ test('DynamoDB Work Item creation allocates IDs and sort order across archived r
       workflowStatusId: 'todo',
       statusCategory: 'unstarted',
       customFieldValues: {},
-      dueDate: '2026/06/03',
+      schedule: createDueDateSchedule('2026-06-03'),
       priority: 'high',
     },
     'demo@example.com',
@@ -625,12 +697,171 @@ test('DynamoDB Work Item creation allocates IDs and sort order across archived r
       Item: {
         issueId: 'wireframe-2',
         sortOrder: 20,
+        schemaVersion: 2,
+        dueDate: '2026-06-03',
+        schedule: {
+          mode: 'due-date',
+          dueDate: '2026-06-03',
+        },
       },
     },
   })
 })
 
-test('DynamoDB Work Item writes reject impossible due dates before persistence', async () => {
+test('DynamoDB Work Item persists and re-reads explicit schedule replacements', async () => {
+  let persistedItem: Record<string, unknown> | undefined
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'QueryCommand') {
+        return { Items: persistedItem ? [persistedItem] : [] }
+      }
+      if (command.constructor.name === 'GetCommand') {
+        return { Item: persistedItem }
+      }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        const putItem = readTransactionPutItem(command.input, 'WorkItemsTable')
+        if (putItem) {
+          persistedItem = putItem
+        }
+        const updateValues = readTransactionUpdateValues(command.input, 'WorkItemsTable')
+        if (persistedItem && updateValues) {
+          persistedItem = {
+            ...persistedItem,
+            schemaVersion: updateValues[':schemaVersion'],
+            revision: updateValues[':nextRevision'],
+            updatedAt: updateValues[':updatedAt'],
+            dueDate: updateValues[':dueDate'],
+            schedule: updateValues[':schedule'],
+          }
+        }
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+  const dateRangeSchedule = {
+    mode: 'date-range',
+    startDate: '2026-08-03',
+    endDate: '2026-08-07',
+    durationDays: 5,
+    plannedEffortMinutes: 1_800,
+    calendarPolicy: {
+      timeZone: 'Asia/Tokyo',
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+      holidays: ['2026-08-11'],
+    },
+  }
+
+  const created = await client.createTeamIssue(
+    'user#demo@example.com',
+    'core-team',
+    {
+      title: 'Scheduled Work Item',
+      assigneeUserId: 'sato@example.com',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'todo',
+      statusCategory: 'unstarted',
+      customFieldValues: {},
+      schedule: dateRangeSchedule,
+      priority: 'high',
+    },
+    'demo@example.com',
+  )
+
+  expect(created.issue).toMatchObject({
+    schemaVersion: 2,
+    dueDate: '2026-08-07',
+    schedule: dateRangeSchedule,
+  })
+  await expect(client.getTeamIssueDetail(
+    'user#demo@example.com',
+    'core-team',
+    created.issue.id,
+    { consistentIssueRead: true, eventLimit: 0 },
+  )).resolves.toMatchObject({
+    issue: {
+      dueDate: '2026-08-07',
+      schedule: dateRangeSchedule,
+    },
+  })
+
+  const milestoneSchedule = {
+    mode: 'milestone',
+    startDate: '2026-08-12',
+    endDate: '2026-08-12',
+    durationDays: 0,
+    plannedEffortMinutes: 60,
+    calendarPolicy: {
+      timeZone: 'Asia/Tokyo',
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+      holidays: ['2026-08-11'],
+    },
+  }
+  const updated = await client.updateTeamIssue(
+    'user#demo@example.com',
+    'core-team',
+    created.issue.id,
+    {
+      expectedRevision: 1,
+      schedule: milestoneSchedule,
+    },
+    'demo@example.com',
+  )
+
+  expect(updated.issue).toMatchObject({
+    schemaVersion: 2,
+    revision: 2,
+    dueDate: '2026-08-12',
+    schedule: milestoneSchedule,
+  })
+  await expect(client.getTeamIssueDetail(
+    'user#demo@example.com',
+    'core-team',
+    created.issue.id,
+    { consistentIssueRead: true, eventLimit: 0 },
+  )).resolves.toMatchObject({
+    issue: {
+      revision: 2,
+      dueDate: '2026-08-12',
+      schedule: milestoneSchedule,
+    },
+  })
+
+  const deadlineUpdated = await client.updateTeamIssue(
+    'user#demo@example.com',
+    'core-team',
+    created.issue.id,
+    {
+      expectedRevision: 2,
+      schedule: {
+        calendarPolicy: milestoneSchedule.calendarPolicy,
+        dueDate: '2026-08-13',
+        mode: 'due-date',
+        plannedEffortMinutes: 60,
+      },
+    },
+    'demo@example.com',
+  )
+
+  expect(deadlineUpdated.issue).toMatchObject({
+    dueDate: '2026-08-13',
+    revision: 3,
+    schedule: {
+      calendarPolicy: milestoneSchedule.calendarPolicy,
+      dueDate: '2026-08-13',
+      mode: 'due-date',
+      plannedEffortMinutes: 60,
+    },
+  })
+})
+
+test('DynamoDB Work Item writes reject invalid schedules before persistence', async () => {
   const dynamoDbClient = new DynamoDBClient({
     credentials: {
       accessKeyId: 'test-access-key',
@@ -648,8 +879,7 @@ test('DynamoDB Work Item writes reject impossible due dates before persistence',
     false,
   )
   const expectedFailure = {
-    code: 'InvalidProjectWrite',
-    message: 'Issue due date is invalid.',
+    code: 'InvalidWorkItemScheduleDate',
     status: 400,
   }
 
@@ -663,7 +893,15 @@ test('DynamoDB Work Item writes reject impossible due dates before persistence',
       workflowStatusId: 'todo',
       statusCategory: 'unstarted',
       customFieldValues: {},
-      dueDate: '2026/02/29',
+      schedule: {
+        calendarPolicy: {
+          holidays: [],
+          timeZone: 'UTC',
+          workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+        },
+        dueDate: '2026-02-29',
+        mode: 'due-date',
+      },
       priority: 'high',
     },
     'demo@example.com',
@@ -673,11 +911,42 @@ test('DynamoDB Work Item writes reject impossible due dates before persistence',
     'core-team',
     'impossible-date',
     {
-      dueDate: '2026-02-29',
       expectedRevision: 1,
+      schedule: {
+        calendarPolicy: {
+          holidays: [],
+          timeZone: 'UTC',
+          workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+        },
+        dueDate: '2026-02-29',
+        mode: 'due-date',
+      },
     },
     'demo@example.com',
   )).rejects.toMatchObject(expectedFailure)
+  await expect(client.updateTeamIssue(
+    'user#demo@example.com',
+    'core-team',
+    'impossible-duration',
+    {
+      expectedRevision: 1,
+      schedule: {
+        mode: 'date-range',
+        startDate: '2026-08-03',
+        endDate: '2026-08-07',
+        durationDays: 4,
+        calendarPolicy: {
+          timeZone: 'UTC',
+          workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+          holidays: [],
+        },
+      },
+    },
+    'demo@example.com',
+  )).rejects.toMatchObject({
+    code: 'WorkItemScheduleDurationMismatch',
+    status: 400,
+  })
 
   expect(sendSpy).not.toHaveBeenCalled()
   documentClient.destroy()
@@ -686,7 +955,7 @@ test('DynamoDB Work Item writes reject impossible due dates before persistence',
 test('DynamoDB Work Item archive updates reject timestamps outside the canonical window', async () => {
   const commandNames: string[] = []
   const currentIssue = {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     directoryId: 'user#demo@example.com',
     directoryTeamId: 'user#demo@example.com#team#core-team',
@@ -701,7 +970,8 @@ test('DynamoDB Work Item archive updates reject timestamps outside the canonical
     statusCategory: 'unstarted',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/06/03',
+    dueDate: '2026-06-03',
+    schedule: createDueDateSchedule('2026-06-03'),
     priority: 'high',
     createdAt: '2026-07-12T00:00:00.000Z',
     updatedAt: '2026-07-12T00:00:00.000Z',
@@ -771,7 +1041,7 @@ test('DynamoDB Work Item archive updates reject timestamps outside the canonical
 
 test('DynamoDB Work Item comment idempotent replay returns comment and activity', async () => {
   const issue = {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     directoryId: 'workspace-1',
     directoryTeamId: 'workspace-1#team#core-team',
@@ -786,7 +1056,8 @@ test('DynamoDB Work Item comment idempotent replay returns comment and activity'
     statusCategory: 'unstarted',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/07/20',
+    dueDate: '2026-07-20',
+    schedule: createDueDateSchedule('2026-07-20'),
     priority: 'medium',
     createdAt: '2026-07-17T00:00:00.000Z',
     updatedAt: '2026-07-17T00:00:00.000Z',
@@ -857,7 +1128,7 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
   const sentCommands: Array<{ input: Record<string, unknown>; name: string }> = []
   let preparedResponse: unknown
   const currentIssue = {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     directoryId: 'user#demo@example.com',
     directoryTeamId: 'user#demo@example.com#team#core-team',
@@ -874,7 +1145,8 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
     statusCategory: 'unstarted',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/06/03',
+    dueDate: '2026-06-03',
+    schedule: createDueDateSchedule('2026-06-03'),
     priority: 'high',
     createdAt: '2026-07-12T00:00:00.000Z',
     updatedAt: '2026-07-12T00:00:00.000Z',
@@ -918,6 +1190,7 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
       statusCategory: 'completed',
       customFieldValues: {},
       expectedRevision: 1,
+      schedule: createDueDateSchedule('2026-06-05'),
     },
     'demo@example.com',
     undefined,
@@ -935,7 +1208,16 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
       },
     },
   )).resolves.toMatchObject({
-    issue: { schemaVersion: 1, revision: 2, workflowStatusId: 'done' },
+    issue: {
+      schemaVersion: 2,
+      revision: 2,
+      workflowStatusId: 'done',
+      dueDate: '2026-06-05',
+      schedule: {
+        mode: 'due-date',
+        dueDate: '2026-06-05',
+      },
+    },
   })
   const transaction = sentCommands.find((command) => command.name === 'TransactWriteCommand')
   const transactItems = transaction?.input.TransactItems
@@ -944,6 +1226,11 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
       ExpressionAttributeValues: {
         ':expectedRevision': 1,
         ':nextRevision': 2,
+        ':dueDate': '2026-06-05',
+        ':schedule': {
+          mode: 'due-date',
+          dueDate: '2026-06-05',
+        },
       },
       ConditionExpression:
         'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
@@ -962,7 +1249,7 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
 test('DynamoDB Work Item delete atomically stores its replay receipt', async () => {
   const sentCommands: Array<{ input: Record<string, unknown>; name: string }> = []
   const currentIssue = {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 3,
     directoryId: 'workspace-1',
     directoryTeamId: 'workspace-1#team#core-team',
@@ -977,7 +1264,8 @@ test('DynamoDB Work Item delete atomically stores its replay receipt', async () 
     statusCategory: 'unstarted',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/07/20',
+    dueDate: '2026-07-20',
+    schedule: createDueDateSchedule('2026-07-20'),
     priority: 'medium',
     createdAt: '2026-07-12T00:00:00.000Z',
     updatedAt: '2026-07-12T00:00:00.000Z',
@@ -1077,7 +1365,7 @@ test('DynamoDB Work Item delete atomically stores its replay receipt', async () 
 
 test('DynamoDB Work Item client classifies configuration conflicts from the actual transaction layout', async () => {
   const currentIssue = {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     directoryId: 'workspace-1',
     directoryTeamId: 'workspace-1#team#core-team',
@@ -1094,7 +1382,8 @@ test('DynamoDB Work Item client classifies configuration conflicts from the actu
     statusCategory: 'unstarted',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/06/03',
+    dueDate: '2026-06-03',
+    schedule: createDueDateSchedule('2026-06-03'),
     priority: 'high',
     createdAt: '2026-07-12T00:00:00.000Z',
     updatedAt: '2026-07-12T00:00:00.000Z',
@@ -1168,7 +1457,7 @@ test('DynamoDB Work Item client classifies configuration conflicts from the actu
               workflowStatusId: 'todo',
               statusCategory: 'unstarted',
               customFieldValues: {},
-              dueDate: '2026/07/20',
+              schedule: createDueDateSchedule('2026-07-20'),
               priority: 'medium',
               configurationConditionChecks,
             },
@@ -1234,7 +1523,7 @@ test('DynamoDB Work Item client compiles authorization snapshots inside the adap
         workflowStatusId: 'todo',
         statusCategory: 'unstarted',
         customFieldValues: {},
-        dueDate: '2026/07/20',
+        schedule: createDueDateSchedule('2026-07-20'),
         priority: 'medium',
         authorizationSnapshot: {
           workspaceId: 'workspace-1',
@@ -1291,7 +1580,7 @@ test('DynamoDB Work Item client compiles authorization snapshots inside the adap
 
 test('DynamoDB Work Item mutations classify authorization snapshot races separately', async () => {
   const currentIssue = {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     directoryId: 'workspace-1',
     directoryTeamId: 'workspace-1#team#core-team',
@@ -1308,7 +1597,8 @@ test('DynamoDB Work Item mutations classify authorization snapshot races separat
     statusCategory: 'unstarted',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/07/20',
+    dueDate: '2026-07-20',
+    schedule: createDueDateSchedule('2026-07-20'),
     priority: 'medium',
     createdAt: '2026-07-12T00:00:00.000Z',
     updatedAt: '2026-07-12T00:00:00.000Z',
@@ -1373,7 +1663,7 @@ test('DynamoDB Work Item mutations classify authorization snapshot races separat
             workflowStatusId: 'todo',
             statusCategory: 'unstarted',
             customFieldValues: {},
-            dueDate: '2026/07/20',
+            schedule: createDueDateSchedule('2026-07-20'),
             priority: 'medium',
             authorizationConditionChecks,
           },
@@ -1465,7 +1755,7 @@ test('DynamoDB Work Item mutations classify authorization snapshot races separat
 
 test('DynamoDB Work Item delete distinguishes external-link and Document-backlink races', async () => {
   const currentIssue = {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     directoryId: 'workspace-1',
     directoryTeamId: 'workspace-1#team#core-team',
@@ -1480,7 +1770,8 @@ test('DynamoDB Work Item delete distinguishes external-link and Document-backlin
     statusCategory: 'unstarted',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/07/20',
+    dueDate: '2026-07-20',
+    schedule: createDueDateSchedule('2026-07-20'),
     priority: 'medium',
     createdAt: '2026-07-12T00:00:00.000Z',
     updatedAt: '2026-07-12T00:00:00.000Z',
@@ -1547,7 +1838,7 @@ test('DynamoDB Work Item delete distinguishes external-link and Document-backlin
 
 test('DynamoDB Work Item delete maps unclassified transaction cancellations to a retryable error', async () => {
   const currentIssue = {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     directoryId: 'workspace-1',
     directoryTeamId: 'workspace-1#team#core-team',
@@ -1562,7 +1853,8 @@ test('DynamoDB Work Item delete maps unclassified transaction cancellations to a
     statusCategory: 'unstarted',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/07/20',
+    dueDate: '2026-07-20',
+    schedule: createDueDateSchedule('2026-07-20'),
     priority: 'medium',
     createdAt: '2026-07-12T00:00:00.000Z',
     updatedAt: '2026-07-12T00:00:00.000Z',
@@ -1612,7 +1904,7 @@ test('DynamoDB Work Item delete maps unclassified transaction cancellations to a
 
 test('DynamoDB Work Item delete prioritizes authorization failure over deletion fences', async () => {
   const currentIssue = {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     directoryId: 'workspace-1',
     directoryTeamId: 'workspace-1#team#core-team',
@@ -1627,7 +1919,8 @@ test('DynamoDB Work Item delete prioritizes authorization failure over deletion 
     statusCategory: 'unstarted',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/07/20',
+    dueDate: '2026-07-20',
+    schedule: createDueDateSchedule('2026-07-20'),
     priority: 'medium',
     createdAt: '2026-07-12T00:00:00.000Z',
     updatedAt: '2026-07-12T00:00:00.000Z',
@@ -1696,7 +1989,7 @@ test('DynamoDB Work Item delete prioritizes authorization failure over deletion 
 test('DynamoDB Work Item update emits render-ready notification candidates', async () => {
   const sentCommands: Array<{ input: Record<string, unknown>; name: string }> = []
   const currentIssue = {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     directoryId: 'workspace-1',
     directoryTeamId: 'workspace-1#team#core-team',
@@ -1713,7 +2006,8 @@ test('DynamoDB Work Item update emits render-ready notification candidates', asy
     statusCategory: 'unstarted',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/07/20',
+    dueDate: '2026-07-20',
+    schedule: createDueDateSchedule('2026-07-20'),
     priority: 'high',
     createdAt: '2026-07-12T00:00:00.000Z',
     updatedAt: '2026-07-12T00:00:00.000Z',
@@ -1799,7 +2093,7 @@ test('DynamoDB Work Item update emits render-ready notification candidates', asy
 
 test('DynamoDB Work Item client classifies revision CAS transaction conditions', async () => {
   const currentIssue = {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     directoryId: 'user#demo@example.com',
     directoryTeamId: 'user#demo@example.com#team#core-team',
@@ -1816,7 +2110,8 @@ test('DynamoDB Work Item client classifies revision CAS transaction conditions',
     statusCategory: 'unstarted',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/06/03',
+    dueDate: '2026-06-03',
+    schedule: createDueDateSchedule('2026-06-03'),
     priority: 'high',
     createdAt: '2026-07-12T00:00:00.000Z',
     updatedAt: '2026-07-12T00:00:00.000Z',

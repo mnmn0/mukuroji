@@ -1,29 +1,35 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import { isIP } from 'node:net'
-import type {
-  ApiProblem,
-  ApiProblemCode,
-  ApiScope,
-  CanonicalWorkItem,
-  ConnectorAuthorizationOutput,
-  ConnectorDefinition,
-  ConnectorInstallation,
-  ConnectorProvider,
-  CreateConnectorInstallationInput,
-  CreateApiKeyInput,
-  CreateOAuthAppInput,
-  CreatePublicWorkItemRequest,
-  CreateWebhookSubscriptionInput,
-  DeveloperPlatformCapabilities,
-  DeveloperPlatformOverview,
-  ImportFieldMapping,
-  ImportDryRunReport,
-  ImportJob,
-  ImportSource,
-  ResolveWorkItemSyncConflictInput,
-  UpdatePublicWorkItemRequest,
-  UpdateWebhookSubscriptionInput,
-  WorkItemSyncConflict,
+import {
+  WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
+  WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
+  WORK_ITEM_SCHEDULE_MIN_YEAR,
+  type ApiProblem,
+  type ApiProblemCode,
+  type ApiScope,
+  type CanonicalWorkItem,
+  type ConnectorAuthorizationOutput,
+  type ConnectorDefinition,
+  type ConnectorInstallation,
+  type ConnectorProvider,
+  type CreateConnectorInstallationInput,
+  type CreateApiKeyInput,
+  type CreateOAuthAppInput,
+  type CreatePublicWorkItemRequest,
+  type CreateWebhookSubscriptionInput,
+  type DeveloperPlatformCapabilities,
+  type DeveloperPlatformOverview,
+  type ImportFieldMapping,
+  type ImportDryRunReport,
+  type ImportJob,
+  type ImportSource,
+  type ResolveWorkItemSyncConflictInput,
+  type UpdatePublicWorkItemRequest,
+  type UpdateWebhookSubscriptionInput,
+  type WorkItemSchedule,
+  type WorkItemScheduleCalendarPolicy,
+  type WorkItemScheduleWeekday,
+  type WorkItemSyncConflict,
 } from '@mukuroji/contracts'
 import { Hono, type Context } from 'hono'
 import type {
@@ -2440,7 +2446,7 @@ function readCreatePublicWorkItemRequest(value: unknown): CreatePublicWorkItemRe
     'assigneeUserId',
     'workflowStatusId',
     'customFieldValues',
-    'dueDate',
+    'schedule',
     'priority',
   ], 'Work Item body')
   const description = readOptionalString(body.description, 'description', 100_000)
@@ -2448,7 +2454,7 @@ function readCreatePublicWorkItemRequest(value: unknown): CreatePublicWorkItemRe
     teamId: readIdentifier(body.teamId, 'teamId'),
     title: readRequiredString(body.title, 'title'),
     assigneeUserId: readIdentifier(body.assigneeUserId, 'assigneeUserId'),
-    dueDate: readIsoDate(body.dueDate, 'dueDate'),
+    schedule: readPublicWorkItemSchedule(body.schedule),
     priority: readPriority(body.priority),
     ...(description !== undefined ? { description } : {}),
     ...(body.assignedProjectId !== undefined
@@ -2473,7 +2479,7 @@ function readUpdatePublicWorkItemRequest(value: unknown): UpdatePublicWorkItemRe
     'assigneeUserId',
     'workflowStatusId',
     'customFieldValues',
-    'dueDate',
+    'schedule',
     'priority',
   ], 'Work Item patch')
   const result: UpdatePublicWorkItemRequest = {
@@ -2495,7 +2501,7 @@ function readUpdatePublicWorkItemRequest(value: unknown): UpdatePublicWorkItemRe
   if ('customFieldValues' in body) {
     result.customFieldValues = readCustomFieldValues(body.customFieldValues, true)
   }
-  if ('dueDate' in body) result.dueDate = readIsoDate(body.dueDate, 'dueDate')
+  if ('schedule' in body) result.schedule = readPublicWorkItemSchedule(body.schedule)
   if ('priority' in body) result.priority = readPriority(body.priority)
   if (Object.keys(result).length === 1) {
     throw new PublicApiServiceError(
@@ -2882,12 +2888,194 @@ function readIsoDate(value: unknown, label: string) {
   if (
     !match ||
     !parsed ||
+    Number(match[1]) < WORK_ITEM_SCHEDULE_MIN_YEAR ||
     Number.isNaN(parsed.getTime()) ||
     parsed.getUTCFullYear() !== Number(match[1]) ||
     parsed.getUTCMonth() + 1 !== Number(match[2]) ||
     parsed.getUTCDate() !== Number(match[3])
   ) {
     throw new PublicApiServiceError(400, 'validation_failed', `${label} must be an ISO date.`)
+  }
+  return value
+}
+
+/** Reads an explicit canonical Work Item schedule from a public request. */
+function readPublicWorkItemSchedule(value: unknown): WorkItemSchedule {
+  const schedule = requireRecord(value, 'schedule must be an object.')
+  const calendarPolicy = readPublicWorkItemScheduleCalendarPolicy(schedule.calendarPolicy)
+  const plannedEffortMinutes = readOptionalNonNegativeInteger(
+    schedule.plannedEffortMinutes,
+    'schedule.plannedEffortMinutes',
+  )
+  const effort = plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes }
+
+  if (schedule.mode === 'unscheduled') {
+    assertAllowedFields(
+      schedule,
+      ['mode', 'calendarPolicy', 'plannedEffortMinutes'],
+      'schedule',
+    )
+    return { calendarPolicy, mode: 'unscheduled', ...effort }
+  }
+  if (schedule.mode === 'due-date') {
+    assertAllowedFields(
+      schedule,
+      ['mode', 'calendarPolicy', 'plannedEffortMinutes', 'dueDate'],
+      'schedule',
+    )
+    return {
+      calendarPolicy,
+      dueDate: readIsoDate(schedule.dueDate, 'schedule.dueDate'),
+      mode: 'due-date',
+      ...effort,
+    }
+  }
+  if (schedule.mode === 'date-range') {
+    assertAllowedFields(
+      schedule,
+      ['mode', 'calendarPolicy', 'plannedEffortMinutes', 'startDate', 'endDate', 'durationDays'],
+      'schedule',
+    )
+    const durationDays = readPositiveInteger(schedule.durationDays, 'schedule.durationDays')
+    if (durationDays > WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS) {
+      throw new PublicApiServiceError(
+        400,
+        'validation_failed',
+        `schedule.durationDays cannot exceed ${WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS}.`,
+      )
+    }
+    return {
+      calendarPolicy,
+      durationDays,
+      endDate: readIsoDate(schedule.endDate, 'schedule.endDate'),
+      mode: 'date-range',
+      startDate: readIsoDate(schedule.startDate, 'schedule.startDate'),
+      ...effort,
+    }
+  }
+  if (schedule.mode === 'milestone') {
+    assertAllowedFields(
+      schedule,
+      ['mode', 'calendarPolicy', 'plannedEffortMinutes', 'startDate', 'endDate', 'durationDays'],
+      'schedule',
+    )
+    if (schedule.durationDays !== 0) {
+      throw new PublicApiServiceError(
+        400,
+        'validation_failed',
+        'schedule.durationDays must be zero for a milestone.',
+      )
+    }
+    return {
+      calendarPolicy,
+      durationDays: 0,
+      endDate: readIsoDate(schedule.endDate, 'schedule.endDate'),
+      mode: 'milestone',
+      startDate: readIsoDate(schedule.startDate, 'schedule.startDate'),
+      ...effort,
+    }
+  }
+  throw new PublicApiServiceError(
+    400,
+    'validation_failed',
+    'schedule.mode is invalid.',
+  )
+}
+
+/** Reads a complete calendar policy from a public Work Item schedule. */
+function readPublicWorkItemScheduleCalendarPolicy(
+  value: unknown,
+): WorkItemScheduleCalendarPolicy {
+  const policy = requireRecord(value, 'schedule.calendarPolicy must be an object.')
+  assertAllowedFields(
+    policy,
+    ['timeZone', 'workingWeekdays', 'holidays'],
+    'schedule.calendarPolicy',
+  )
+  const timeZone = readRequiredString(policy.timeZone, 'schedule.calendarPolicy.timeZone')
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone }).format(0)
+  } catch {
+    throw new PublicApiServiceError(
+      400,
+      'validation_failed',
+      'schedule.calendarPolicy.timeZone must be an IANA timezone.',
+    )
+  }
+  if (
+    !Array.isArray(policy.workingWeekdays) ||
+    policy.workingWeekdays.length === 0 ||
+    policy.workingWeekdays.length > 7
+  ) {
+    throw new PublicApiServiceError(
+      400,
+      'validation_failed',
+      'schedule.calendarPolicy.workingWeekdays must contain between one and seven entries.',
+    )
+  }
+  const workingWeekdays = policy.workingWeekdays.map(readPublicWorkItemScheduleWeekday)
+  if (new Set(workingWeekdays).size !== workingWeekdays.length) {
+    throw new PublicApiServiceError(
+      400,
+      'validation_failed',
+      'schedule.calendarPolicy.workingWeekdays must not contain duplicates.',
+    )
+  }
+  if (!Array.isArray(policy.holidays)) {
+    throw new PublicApiServiceError(
+      400,
+      'validation_failed',
+      'schedule.calendarPolicy.holidays must be an array.',
+    )
+  }
+  if (policy.holidays.length > WORK_ITEM_SCHEDULE_MAX_HOLIDAYS) {
+    throw new PublicApiServiceError(
+      400,
+      'validation_failed',
+      `schedule.calendarPolicy.holidays cannot contain more than ${WORK_ITEM_SCHEDULE_MAX_HOLIDAYS} entries.`,
+    )
+  }
+  const holidays = policy.holidays.map((holiday) =>
+    readIsoDate(holiday, 'schedule.calendarPolicy.holidays'))
+  if (new Set(holidays).size !== holidays.length) {
+    throw new PublicApiServiceError(
+      400,
+      'validation_failed',
+      'schedule.calendarPolicy.holidays must not contain duplicates.',
+    )
+  }
+  return { holidays, timeZone, workingWeekdays }
+}
+
+/** Reads one supported schedule weekday. */
+function readPublicWorkItemScheduleWeekday(value: unknown): WorkItemScheduleWeekday {
+  if (
+    value === 'monday' ||
+    value === 'tuesday' ||
+    value === 'wednesday' ||
+    value === 'thursday' ||
+    value === 'friday' ||
+    value === 'saturday' ||
+    value === 'sunday'
+  ) {
+    return value
+  }
+  throw new PublicApiServiceError(
+    400,
+    'validation_failed',
+    'schedule.calendarPolicy.workingWeekdays contains an invalid weekday.',
+  )
+}
+
+/** Reads an optional non-negative integer from a public request. */
+function readOptionalNonNegativeInteger(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new PublicApiServiceError(
+      400,
+      'validation_failed',
+      `${label} must be a non-negative integer.`,
+    )
   }
   return value
 }

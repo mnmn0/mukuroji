@@ -4,6 +4,9 @@ import type {
   BulkOperationRequest,
   ResolvedWorkItemConfiguration,
   WorkItemRelation,
+  WorkItemSchedule,
+  WorkItemScheduleChangePreview,
+  WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
@@ -24,8 +27,10 @@ import type {
 import {
   createTranslator,
   type Locale,
+  type MessageKey,
 } from '../../shared/i18n/i18n'
 import type { WorkspaceMember } from '../../workspace/api'
+import { useModalFocus } from '../../shared/ui/useModalFocus'
 import { useWorkspaceSidebarController } from '../../shared/ui/sidebar'
 import type { WorkItemDefinitionFilter } from '../../work-items/model/workItemFilters'
 import { resolveWorkItemPersonOptions } from '../../work-items/model/workItemDisplay'
@@ -42,6 +47,7 @@ import {
   findTaskBySelection,
   resolveEffectiveDefinitionFilter,
   resolveEffectiveStatusFilter,
+  resolveLatestTaskSnapshot,
   resolveProjectTaskConfiguration,
   type AssigneeFilter,
   type DueDateFilter,
@@ -51,6 +57,10 @@ import {
   type TaskSortOrder,
   type TaskTab,
 } from '../model/taskView'
+import {
+  formatTaskScheduleRange,
+  taskScheduleModeLabelKeys,
+} from '../model/taskSchedule'
 import { CreateTaskPanel } from './CreateTaskPanel'
 import { TaskActionFeedback } from './TaskActionFeedback'
 import { TaskDetailPane } from './TaskDetailPane'
@@ -80,6 +90,16 @@ type TaskUndoState = {
   task: ProjectTask
   /** Patch that restores every field touched by the update. */
   inversePatch: UpdateTeamIssueInput
+  /** Patch that reapplies the successful update after an undo. */
+  forwardPatch: UpdateTeamIssueInput
+}
+
+/** Most recently undone task update retained for redo. */
+type TaskRedoState = {
+  /** Task snapshot returned by the successful undo. */
+  task: ProjectTask
+  /** Patch that reapplies the original update. */
+  forwardPatch: UpdateTeamIssueInput
 }
 
 /** Shared feedback state for create, edit, and move actions. */
@@ -88,6 +108,30 @@ type TaskActionState = {
   kind: 'success' | 'error'
   /** Localized feedback message. */
   message: string
+}
+
+/** Result of a task update that may require an explicit schedule confirmation. */
+type TaskUpdateResult = {
+  /** Whether persistence ran after the user confirmed the preview. */
+  applied: boolean
+  /** Updated task, or the original snapshot when the preview was cancelled. */
+  task: ProjectTask
+}
+
+/** One revision-bound schedule update waiting for explicit user confirmation. */
+type PendingTaskScheduleUpdate = {
+  /** Complete patch whose schedule was validated by the preview endpoint. */
+  input: UpdateTeamIssueInput
+  /** Server-owned direct and dependency impacts shown before applying. */
+  preview: WorkItemScheduleChangePreview
+  /** Rejects the originating edit when persistence fails. */
+  reject: (error: unknown) => void
+  /** Resolves the originating edit after apply or cancellation. */
+  resolve: (result: TaskUpdateResult) => void
+  /** Monotonic request order used when table batch previews finish out of order. */
+  sequence: number
+  /** Revision snapshot against which the preview was calculated. */
+  task: ProjectTask
 }
 
 /** Props accepted by the task management screen. */
@@ -201,6 +245,11 @@ export type TaskScreenProps = {
     task: ProjectTask,
     input: UpdateTeamIssueInput,
   ) => Promise<ProjectTask>
+  /** Previews one schedule operation against the current server revision. */
+  onPreviewScheduleChange?: (
+    task: ProjectTask,
+    operation: WorkItemScheduleOperation,
+  ) => Promise<WorkItemScheduleChangePreview>
   /** Creates a relation from the selected Work Item. */
   onAddRelation?: (issueId: string, input: WorkItemRelationEditorInput) => Promise<void>
   /** Deletes a relation from the selected Work Item. */
@@ -295,6 +344,7 @@ export function TaskScreen({
   onRetryConfigurations,
   onUpdateIssue,
   onUpdateTask,
+  onPreviewScheduleChange,
   onUpdateProjectMember,
   onBulkPreview,
   onBulkApply,
@@ -327,7 +377,12 @@ export function TaskScreen({
   const [isCreatingTask, setIsCreatingTask] = useState(false)
   const [taskAction, setTaskAction] = useState<TaskActionState>()
   const [taskUndo, setTaskUndo] = useState<TaskUndoState>()
-  const [isUndoingTask, setIsUndoingTask] = useState(false)
+  const [taskRedo, setTaskRedo] = useState<TaskRedoState>()
+  const [isRestoringTask, setIsRestoringTask] = useState(false)
+  const [scheduleUpdateQueue, setScheduleUpdateQueue] = useState<PendingTaskScheduleUpdate[]>([])
+  const [isApplyingScheduleUpdate, setIsApplyingScheduleUpdate] = useState(false)
+  const nextSchedulePreviewSequenceRef = useRef(0)
+  const scheduleUpdateChainRef = useRef<Promise<void>>(Promise.resolve())
   const detailScrollTopRef = useRef(0)
   const taskContentRef = useRef<HTMLDivElement>(null)
   const resolvedProjectName = projectName ?? projectId
@@ -433,7 +488,9 @@ export function TaskScreen({
     findTaskBySelection(tasks, initialSelectedTaskId, activeProjectTeamId) ??
     visibleTasks[0] ??
     tasks[0]
-  const detailTask = isDetailOpen ? selectedDetailTask : undefined
+  const detailTask = isDetailOpen
+    ? resolveLatestTaskSnapshot(selectedDetailTask, selectedIssueDetail?.issue)
+    : undefined
   const selectedDetailTaskKey = selectedDetailTask
     ? createTaskKey(selectedDetailTask)
     : undefined
@@ -520,7 +577,7 @@ export function TaskScreen({
       projectId: context?.projectId ?? projectId,
       source: context?.source ?? 'header',
       ...(context?.assigneeUserId ? { assigneeUserId: context.assigneeUserId } : {}),
-      ...(context?.dueDate ? { dueDate: context.dueDate } : {}),
+      ...(context?.schedule ? { schedule: context.schedule } : {}),
       ...(context?.teamId ?? defaultTeamId
         ? { teamId: context?.teamId ?? defaultTeamId }
         : {}),
@@ -545,8 +602,8 @@ export function TaskScreen({
     requestAnimationFrame(() => taskContentRef.current?.scrollTo({ top: scrollTop }))
   }
 
-  /** Updates a task through the shared action and retains an inverse for undo. */
-  const handleUpdateTask = async (
+  /** Persists an already-confirmed task patch and retains an inverse for undo. */
+  const persistTaskUpdate = async (
     task: ProjectTask,
     input: UpdateTeamIssueInput,
   ) => {
@@ -555,56 +612,234 @@ export function TaskScreen({
     }
 
     setTaskAction(undefined)
-    setTaskUndo(undefined)
 
     try {
       const updatedTask = await onUpdateTask(task, input)
       setTaskUndo({
+        forwardPatch: input,
         inversePatch: createTaskInversePatch(task, input),
         task: updatedTask,
       })
+      setTaskRedo(undefined)
       setTaskAction({
         kind: 'success',
         message: t('tasks.action.saved'),
       })
       return updatedTask
     } catch (error) {
+      const isRevisionConflict = isTaskRevisionConflict(error)
+      if (isRevisionConflict) {
+        setTaskUndo(undefined)
+        setTaskRedo(undefined)
+      }
       setTaskAction({
         kind: 'error',
-        message: error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict'
-          ? t('tasks.action.conflict')
-          : t('tasks.action.updateError'),
+        message: resolveTaskMutationErrorMessage(error, t),
       })
       throw error
     }
   }
 
-  /** Reverses the most recent successful inline task update. */
-  const handleUndoTask = async () => {
-    if (!taskUndo || !onUpdateTask || isUndoingTask) {
+  /**
+   * Previews every schedule patch before allowing the shared persistence path to run.
+   *
+   * Concurrent table paste or fill-down previews are queued in invocation order so each
+   * affected Work Item receives an explicit before/after confirmation.
+   *
+   * @param task - Revision-bound Work Item snapshot being changed.
+   * @param input - Complete update patch, including a replacement schedule when applicable.
+   * @returns Whether persistence ran and the resulting or unchanged task snapshot.
+   */
+  const performTaskUpdate = async (
+    task: ProjectTask,
+    input: UpdateTeamIssueInput,
+  ): Promise<TaskUpdateResult> => {
+    if (!input.schedule || !onPreviewScheduleChange) {
+      return {
+        applied: true,
+        task: await persistTaskUpdate(task, input),
+      }
+    }
+
+    const requestedSchedule = input.schedule
+    const sequence = nextSchedulePreviewSequenceRef.current
+    nextSchedulePreviewSequenceRef.current += 1
+    const queuedUpdate = scheduleUpdateChainRef.current.then(async (): Promise<TaskUpdateResult> => {
+      try {
+        const preview = await onPreviewScheduleChange(task, {
+          schedule: requestedSchedule,
+          type: 'replace',
+        })
+        const schedule = findDirectScheduleImpact(preview, task)
+        if (!schedule) {
+          throw new Error('Schedule preview did not contain the target Work Item.')
+        }
+
+        return await new Promise<TaskUpdateResult>((resolve, reject) => {
+          setScheduleUpdateQueue((current) => [...current, {
+            input: { ...input, schedule },
+            preview,
+            reject,
+            resolve,
+            sequence,
+            task,
+          }])
+        })
+      } catch (error) {
+        setTaskAction({
+          kind: 'error',
+          message: resolveTaskMutationErrorMessage(error, t),
+        })
+        throw error
+      }
+    })
+    scheduleUpdateChainRef.current = queuedUpdate.then(
+      () => undefined,
+      () => undefined,
+    )
+    return await queuedUpdate
+  }
+
+  /**
+   * Routes a task patch through schedule preview when needed.
+   *
+   * @param task - Revision-bound Work Item snapshot being changed.
+   * @param input - Complete update patch.
+   * @returns The resulting task, or the original snapshot after preview cancellation.
+   */
+  const handleUpdateTask = async (
+    task: ProjectTask,
+    input: UpdateTeamIssueInput,
+  ): Promise<ProjectTask> => (await performTaskUpdate(task, input)).task
+
+  const pendingScheduleUpdate = scheduleUpdateQueue[0]
+
+  /** Applies the first queued schedule preview using its original revision snapshot. */
+  const handleConfirmScheduleUpdate = async () => {
+    if (!pendingScheduleUpdate || isApplyingScheduleUpdate) {
       return
     }
 
-    setIsUndoingTask(true)
+    setIsApplyingScheduleUpdate(true)
+    try {
+      const updatedTask = await persistTaskUpdate(
+        pendingScheduleUpdate.task,
+        pendingScheduleUpdate.input,
+      )
+      pendingScheduleUpdate.resolve({ applied: true, task: updatedTask })
+    } catch (error) {
+      pendingScheduleUpdate.reject(error)
+    } finally {
+      setScheduleUpdateQueue((current) => current.filter(
+        (candidate) => candidate.sequence !== pendingScheduleUpdate.sequence,
+      ))
+      setIsApplyingScheduleUpdate(false)
+    }
+  }
+
+  /** Cancels the first queued preview without mutating its Work Item. */
+  const handleCancelScheduleUpdate = () => {
+    if (!pendingScheduleUpdate || isApplyingScheduleUpdate) {
+      return
+    }
+    pendingScheduleUpdate.resolve({ applied: false, task: pendingScheduleUpdate.task })
+    setScheduleUpdateQueue((current) => current.filter(
+      (candidate) => candidate.sequence !== pendingScheduleUpdate.sequence,
+    ))
+  }
+
+  /** Reverses the most recent successful inline task update. */
+  const handleUndoTask = async () => {
+    if (!taskUndo || !onUpdateTask || isRestoringTask) {
+      return
+    }
+
+    setIsRestoringTask(true)
 
     try {
-      await onUpdateTask(taskUndo.task, taskUndo.inversePatch)
+      const result = await performTaskUpdate(taskUndo.task, taskUndo.inversePatch)
+      if (!result.applied) {
+        setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
+        return
+      }
+      setTaskRedo({
+        forwardPatch: taskUndo.forwardPatch,
+        task: result.task,
+      })
       setTaskUndo(undefined)
       setTaskAction({
         kind: 'success',
         message: t('tasks.action.saved'),
       })
     } catch (error) {
+      const isRevisionConflict = isTaskRevisionConflict(error)
+      if (isRevisionConflict) {
+        setTaskUndo(undefined)
+        setTaskRedo(undefined)
+      }
       setTaskAction({
         kind: 'error',
-        message: error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict'
-          ? t('tasks.action.conflict')
-          : t('tasks.action.updateError'),
+        message: resolveTaskMutationErrorMessage(error, t),
       })
     } finally {
-      setIsUndoingTask(false)
+      setIsRestoringTask(false)
     }
   }
+
+  /** Reapplies the most recently undone inline task update. */
+  const handleRedoTask = async () => {
+    if (!taskRedo || !onUpdateTask || isRestoringTask) {
+      return
+    }
+
+    setIsRestoringTask(true)
+
+    try {
+      const result = await performTaskUpdate(taskRedo.task, taskRedo.forwardPatch)
+      if (!result.applied) {
+        setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
+        return
+      }
+      setTaskUndo({
+        forwardPatch: taskRedo.forwardPatch,
+        inversePatch: createTaskInversePatch(taskRedo.task, taskRedo.forwardPatch),
+        task: result.task,
+      })
+      setTaskRedo(undefined)
+      setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
+    } catch (error) {
+      const isRevisionConflict = isTaskRevisionConflict(error)
+      if (isRevisionConflict) {
+        setTaskUndo(undefined)
+        setTaskRedo(undefined)
+      }
+      setTaskAction({
+        kind: 'error',
+        message: resolveTaskMutationErrorMessage(error, t),
+      })
+    } finally {
+      setIsRestoringTask(false)
+    }
+  }
+
+  /** Routes detail schedule edits through preview while preserving pane-local errors otherwise. */
+  const handleUpdateDetailIssue = detailTask && (onUpdateTask || onUpdateIssue)
+    ? async (
+        teamId: string,
+        issueId: string,
+        input: UpdateTeamIssueInput,
+      ): Promise<void> => {
+        if (input.schedule && onUpdateTask) {
+          await handleUpdateTask(detailTask, input)
+          return
+        }
+        if (onUpdateIssue) {
+          await onUpdateIssue(teamId, issueId, input)
+          return
+        }
+        await handleUpdateTask(detailTask, input)
+      }
+    : onUpdateIssue
 
   return (
     <section aria-busy={isLoading} className="flex min-w-0 flex-1 flex-col overflow-hidden">
@@ -665,18 +900,25 @@ export function TaskScreen({
               <TaskActionFeedback
                 dismissLabel={t('tasks.action.dismiss')}
                 kind={taskAction.kind}
-                message={isUndoingTask ? t('tasks.action.undoing') : taskAction.message}
+                message={isRestoringTask
+                  ? taskRedo ? t('tasks.action.redoing') : t('tasks.action.undoing')
+                  : taskAction.message}
                 onDismiss={() => {
                   setTaskAction(undefined)
                   setTaskUndo(undefined)
+                  setTaskRedo(undefined)
                 }}
-                onUndo={taskUndo && !isUndoingTask ? () => void handleUndoTask() : undefined}
-                undoLabel={taskUndo && !isUndoingTask ? t('tasks.action.undo') : undefined}
+                onUndo={!isRestoringTask && (taskUndo || taskRedo)
+                  ? () => void (taskUndo ? handleUndoTask() : handleRedoTask())
+                  : undefined}
+                undoLabel={!isRestoringTask
+                  ? taskUndo ? t('tasks.action.undo') : taskRedo ? t('tasks.action.redo') : undefined
+                  : undefined}
               />
             ) : null}
             {isCreateTaskOpen && onCreateTask ? (
               <CreateTaskPanel
-                key={`${createTaskContext?.source ?? 'header'}:${createTaskContext?.teamId ?? ''}:${createTaskContext?.workflowStatusId ?? ''}:${createTaskContext?.dueDate ?? ''}:${createTaskContext?.assigneeUserId ?? ''}`}
+                key={createTaskContextKey(createTaskContext)}
                 assigneeErrorMessage={assigneeErrorMessage}
                 assigneeOptions={assigneeOptions}
                 configuration={createConfiguration}
@@ -697,6 +939,7 @@ export function TaskScreen({
                   try {
                     await onCreateTask(input, createTaskContext)
                     setTaskUndo(undefined)
+                    setTaskRedo(undefined)
                     setTaskAction({
                       kind: 'success',
                       message: t('tasks.action.saved'),
@@ -765,7 +1008,9 @@ export function TaskScreen({
                 onStatusFilterChange={setStatusFilter}
                 onTaskSelectionChange={updateTaskSelection}
                 onUpdateProjectMember={onUpdateProjectMember}
+                onApplyPreviewedScheduleChange={onUpdateTask ? persistTaskUpdate : undefined}
                 onUpdateTask={onUpdateTask ? handleUpdateTask : undefined}
+                onPreviewScheduleChange={onPreviewScheduleChange}
                 onVisibleTaskSelectionChange={updateVisibleTaskSelection}
                 personLabels={personLabels}
                 personOptions={personOptions}
@@ -820,7 +1065,7 @@ export function TaskScreen({
                   onUpdateIssue={detailTask &&
                       configurationFailedTeamIds.includes(detailTask.teamId)
                     ? undefined
-                    : onUpdateIssue}
+                    : handleUpdateDetailIssue}
                   projects={selectedDetailTeamProjects}
                   relationCandidates={relationCandidates}
                   relationCandidatesErrorMessage={relationCandidatesErrorMessage}
@@ -832,6 +1077,210 @@ export function TaskScreen({
             </div>
           </div>
         )}
+        {pendingScheduleUpdate ? (
+          <TaskScheduleUpdatePreview
+            isApplying={isApplyingScheduleUpdate}
+            onCancel={handleCancelScheduleUpdate}
+            onConfirm={() => void handleConfirmScheduleUpdate()}
+            pending={pendingScheduleUpdate}
+            t={t}
+          />
+        ) : null}
     </section>
   )
+}
+
+/** Props for the schedule preview shared by Table, Board, and detail updates. */
+type TaskScheduleUpdatePreviewProps = {
+  /** Whether the confirmed update is currently being persisted. */
+  isApplying: boolean
+  /** Cancels the pending update without persistence. */
+  onCancel: () => void
+  /** Applies the revision-bound direct schedule from the preview. */
+  onConfirm: () => void
+  /** First queued schedule update shown to the user. */
+  pending: PendingTaskScheduleUpdate
+  /** Translator for schedule labels and actions. */
+  t: (key: MessageKey) => string
+}
+
+/**
+ * Shows authoritative before/after and dependency impacts for non-timeline schedule edits.
+ *
+ * @param props - Pending preview, actions, and localized labels.
+ * @returns An accessible modal confirmation dialog.
+ */
+function TaskScheduleUpdatePreview({
+  isApplying,
+  onCancel,
+  onConfirm,
+  pending,
+  t,
+}: TaskScheduleUpdatePreviewProps) {
+  const dialogRef = useModalFocus<HTMLDivElement>(onCancel)
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-[#101828]/40 p-4">
+      <div
+        aria-labelledby="task-schedule-update-preview-title"
+        aria-modal="true"
+        className="w-full max-w-xl rounded-xl bg-white p-5 shadow-2xl"
+        data-testid="task-schedule-update-preview"
+        ref={dialogRef}
+        role="dialog"
+        tabIndex={-1}
+      >
+        <h2 className="text-lg font-bold text-[#101828]" id="task-schedule-update-preview-title">
+          {t('bulk.preview.title')}
+        </h2>
+        <ul className="mt-4 grid gap-3">
+          {pending.preview.impacts.map((impact) => (
+            <li className="rounded-lg border border-[#d0d5dd] p-3" key={`${impact.teamId}:${impact.workItemId}:${impact.kind}`}>
+              <div className="flex items-center justify-between gap-3">
+                <span className="font-mono text-xs font-semibold text-[#344054]">
+                  {impact.teamId} / {impact.workItemId}
+                </span>
+                <span className="text-xs font-bold uppercase tracking-wide text-[#667085]">
+                  {impact.kind === 'direct'
+                    ? t('tasks.schedule.impact.direct')
+                    : t('tasks.schedule.impact.dependency')}
+                </span>
+              </div>
+              <p className="mt-2 text-sm text-[#475467]">
+                <span className="font-semibold">{t('tasks.schedule.before')}: </span>
+                <span className="line-through">{describeTaskSchedule(impact.before, t)}</span>
+              </p>
+              <p className="mt-1 text-sm font-semibold text-[#101828]">
+                <span>{t('tasks.schedule.after')}: </span>
+                <span>{describeTaskSchedule(impact.after, t)}</span>
+              </p>
+            </li>
+          ))}
+        </ul>
+        {pending.preview.warnings.length > 0 ? (
+          <div className="mt-4 rounded-lg border border-[#f4d38b] bg-[#fffaeb] p-3" role="status">
+            <p className="text-sm font-bold text-[#93370d]">{t('tasks.schedule.warnings')}</p>
+            <ul className="mt-1 list-disc pl-5 text-sm text-[#93370d]">
+              {pending.preview.warnings.map((warning) => (
+                <li key={warning}>{resolveTaskScheduleWarning(warning, t)}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            className="rounded-lg border border-[#d0d5dd] px-4 py-2 text-sm font-semibold text-[#344054] disabled:opacity-60"
+            disabled={isApplying}
+            onClick={onCancel}
+            type="button"
+          >
+            {t('tasks.create.cancel')}
+          </button>
+          <button
+            className="rounded-lg bg-[var(--workbench-primary)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+            data-testid="task-schedule-update-confirm"
+            disabled={isApplying}
+            onClick={onConfirm}
+            type="button"
+          >
+            {isApplying ? t('bulk.applying') : t('bulk.apply')}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Finds the authoritative direct schedule for the task that initiated a preview.
+ *
+ * @param preview - Server preview containing direct and dependency impacts.
+ * @param task - Task whose requested replacement is being validated.
+ * @returns The server-owned direct after-schedule, when present.
+ */
+function findDirectScheduleImpact(
+  preview: WorkItemScheduleChangePreview,
+  task: ProjectTask,
+): WorkItemSchedule | undefined {
+  return preview.impacts.find((impact) =>
+    impact.kind === 'direct' &&
+    impact.teamId === task.teamId &&
+    impact.workItemId === task.id
+  )?.after
+}
+
+/**
+ * Formats one explicit schedule without hiding its mode from assistive technology.
+ *
+ * @param schedule - Canonical schedule from a preview impact.
+ * @param t - Translator used for the explicit mode label.
+ * @returns A compact localized description.
+ */
+function describeTaskSchedule(
+  schedule: WorkItemSchedule,
+  t: (key: MessageKey) => string,
+): string {
+  const range = formatTaskScheduleRange(schedule)
+  return `${t(taskScheduleModeLabelKeys[schedule.mode])}${range ? `: ${range}` : ''}`
+}
+
+/**
+ * Resolves a safe shared mutation error while retaining permission and conflict reasons.
+ *
+ * @param error - Unknown preview or persistence failure.
+ * @param t - Translator used for the client-safe message.
+ * @returns A localized reason suitable for the shared action alert.
+ */
+function resolveTaskMutationErrorMessage(
+  error: unknown,
+  t: (key: MessageKey) => string,
+): string {
+  if (error instanceof TeamIssuesApiError) {
+    if (error.code === 'WorkItemRevisionConflict') {
+      return t('tasks.action.conflict')
+    }
+    if (error.status === 403) {
+      return t('tasks.action.permission')
+    }
+    if (error.status === 400) {
+      return t('tasks.schedule.invalid')
+    }
+  }
+  return t('tasks.action.updateError')
+}
+
+/**
+ * Identifies the revision conflict that invalidates local undo and redo snapshots.
+ *
+ * @param error - Unknown mutation failure.
+ * @returns True only for the stable Work Item revision conflict code.
+ */
+function isTaskRevisionConflict(error: unknown): boolean {
+  return error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict'
+}
+
+/**
+ * Maps a stable preview warning to localized review guidance.
+ *
+ * @param warning - Warning code returned by the schedule preview endpoint.
+ * @param t - Translator used for known and generic warning text.
+ * @returns Localized warning guidance.
+ */
+function resolveTaskScheduleWarning(
+  warning: string,
+  t: (key: MessageKey) => string,
+): string {
+  return warning === 'DependencyRippleRequiresReview'
+    ? t('tasks.schedule.warning.dependencyRipple')
+    : t('tasks.schedule.warning.generic')
+}
+
+/**
+ * Serializes the complete create context so uncontrolled schedule inputs remount on any change.
+ *
+ * @param context - View-derived create context or the default header context.
+ * @returns A stable React key that includes every schedule field.
+ */
+function createTaskContextKey(context: TaskCreateContext | undefined): string {
+  return JSON.stringify(context ?? { source: 'header' })
 }

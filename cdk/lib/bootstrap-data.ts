@@ -14,16 +14,16 @@ const projectOwnerTeamIds = {
  * Refero demo records seeded into the canonical Work Item table.
  */
 const canonicalWorkItemItems = [
-  ['refero', 'wireframe', 10, '新しいランディングページのワイヤーフレーム作成', 'sato@example.com', 'in-progress', '2026/06/03', 'high'],
-  ['refero', 'brand-guideline', 20, 'ブランドガイドラインの更新', 'suzuki@example.com', 'review', '2026/06/05', 'medium'],
-  ['refero', 'pricing-content', 30, '料金ページのコンテンツ作成', 'tanaka@example.com', 'in-progress', '2026/06/08', 'high'],
-  ['refero', 'seo-research', 40, 'SEO キーワードリサーチ', 'yamamoto@example.com', 'todo', '2026/06/09', 'medium'],
-  ['refero', 'hero-design', 50, 'ヒーロー画像のデザイン作成', 'sato@example.com', 'review', '2026/06/10', 'medium'],
-  ['refero', 'analytics-tags', 60, 'アナリティクスタグの実装', 'suzuki@example.com', 'in-progress', '2026/06/11', 'low'],
-  ['refero', 'competitor-report', 70, '競合サイトの分析レポート作成', 'tanaka@example.com', 'done', '2026/06/02', 'low'],
-  ['refero', 'terms-page', 80, '利用規約ページの作成', 'yamamoto@example.com', 'todo', '2026/06/12', 'medium'],
-  ['refero', 'faq-content', 90, 'FAQ セクションのコンテンツ作成', 'sato@example.com', 'todo', '2026/06/15', 'low'],
-  ['refero', 'landing-release', 100, 'ランディングページの公開', 'suzuki@example.com', 'todo', '2026/06/16', 'high'],
+  ['refero', 'wireframe', 10, '新しいランディングページのワイヤーフレーム作成', 'sato@example.com', 'in-progress', '2026-06-03', 'high'],
+  ['refero', 'brand-guideline', 20, 'ブランドガイドラインの更新', 'suzuki@example.com', 'review', '2026-06-05', 'medium'],
+  ['refero', 'pricing-content', 30, '料金ページのコンテンツ作成', 'tanaka@example.com', 'in-progress', '2026-06-08', 'high'],
+  ['refero', 'seo-research', 40, 'SEO キーワードリサーチ', 'yamamoto@example.com', 'todo', '2026-06-09', 'medium'],
+  ['refero', 'hero-design', 50, 'ヒーロー画像のデザイン作成', 'sato@example.com', 'review', '2026-06-10', 'medium'],
+  ['refero', 'analytics-tags', 60, 'アナリティクスタグの実装', 'suzuki@example.com', 'in-progress', '2026-06-11', 'low'],
+  ['refero', 'competitor-report', 70, '競合サイトの分析レポート作成', 'tanaka@example.com', 'done', '2026-06-02', 'low'],
+  ['refero', 'terms-page', 80, '利用規約ページの作成', 'yamamoto@example.com', 'todo', '2026-06-12', 'medium'],
+  ['refero', 'faq-content', 90, 'FAQ セクションのコンテンツ作成', 'sato@example.com', 'todo', '2026-06-15', 'low'],
+  ['refero', 'landing-release', 100, 'ランディングページの公開', 'suzuki@example.com', 'todo', '2026-06-16', 'high'],
 ] as const;
 
 /**
@@ -414,7 +414,7 @@ export function createCanonicalWorkItemTransactItems(tableName: string, director
           teamId: { S: teamId },
           assignedProjectId: { S: projectId },
           issueId: { S: workItemId },
-          schemaVersion: { N: '1' },
+          schemaVersion: { N: '2' },
           revision: { N: '1' },
           sortOrder: { N: String(sortOrder) },
           title: { S: title },
@@ -426,6 +426,27 @@ export function createCanonicalWorkItemTransactItems(tableName: string, director
           customFieldValues: { M: {} },
           relationIds: { L: [] },
           dueDate: { S: dueDate },
+          schedule: {
+            M: {
+              mode: { S: 'due-date' },
+              dueDate: { S: dueDate },
+              calendarPolicy: {
+                M: {
+                  timeZone: { S: 'UTC' },
+                  workingWeekdays: {
+                    L: [
+                      { S: 'monday' },
+                      { S: 'tuesday' },
+                      { S: 'wednesday' },
+                      { S: 'thursday' },
+                      { S: 'friday' },
+                    ],
+                  },
+                  holidays: { L: [] },
+                },
+              },
+            },
+          },
           priority: { S: priority },
           createdAt: { S: canonicalWorkItemSeedTimestamp },
           updatedAt: { S: canonicalWorkItemSeedTimestamp },

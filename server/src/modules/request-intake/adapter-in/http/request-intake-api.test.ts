@@ -272,7 +272,15 @@ test('commits a Request conversion pointer in the same transaction as its canoni
       workflowStatusId: 'todo',
       statusCategory: 'unstarted',
       customFieldValues: {},
-      dueDate: '2026/07/31',
+      schedule: {
+        calendarPolicy: {
+          holidays: [],
+          timeZone: 'UTC',
+          workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+        },
+        dueDate: '2026-07-31',
+        mode: 'due-date',
+      },
       priority: 'medium',
     },
     'admin@example.com',

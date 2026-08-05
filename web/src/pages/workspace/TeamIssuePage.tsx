@@ -3,6 +3,7 @@ import type {
   WorkflowStatusDefinition,
   WorkItemConfiguration,
   WorkItemRelation,
+  WorkItemSchedule,
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
@@ -56,6 +57,12 @@ import {
   createTeamIssuesPath,
 } from '../../shared/routing/paths'
 import type { TaskPriority } from '../../tasks/api'
+import {
+  createDefaultDueDateTaskSchedule,
+  createDefaultUnscheduledTaskSchedule,
+  formatTaskScheduleRange,
+  taskScheduleModeLabelKeys,
+} from '../../tasks/model/taskSchedule'
 import type { WorkspaceMember } from '../../workspace/api'
 import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
 import { useWorkspaceSidebarController } from '../../shared/ui/sidebar'
@@ -1063,7 +1070,10 @@ function CreateIssuePanel({
           const description = String(formData.get('description') ?? '').trim()
           const assignedProjectId = String(formData.get('assignedProjectId') ?? '').trim()
           const assigneeUserId = String(formData.get('assigneeUserId') ?? '').trim()
-          const dueDate = String(formData.get('dueDate') ?? today).replaceAll('-', '/')
+          const dueDate = String(formData.get('dueDate') ?? '').trim()
+          const schedule = dueDate
+            ? createDefaultDueDateTaskSchedule(dueDate)
+            : createDefaultUnscheduledTaskSchedule()
           const workflowStatusId = String(
             formData.get('workflowStatusId') ?? initialWorkflowStatusId,
           ).trim()
@@ -1092,8 +1102,8 @@ function CreateIssuePanel({
             assignedProjectId: assignedProjectId || undefined,
             assigneeUserId,
             customFieldValues: parsedCustomFields.values,
-            dueDate,
             priority: resolveIssuePriority(formData.get('priority')),
+            schedule,
             workflowStatusId,
           })
         }}
@@ -1139,7 +1149,7 @@ function CreateIssuePanel({
           </label>
           <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('tasks.column.dueDate')}
-            <input className="workbench-input h-10 w-full min-w-0 px-3" defaultValue={today} name="dueDate" required type="date" />
+            <input className="workbench-input h-10 w-full min-w-0 px-3" defaultValue={today} name="dueDate" type="date" />
           </label>
           <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('tasks.column.status')}
@@ -1739,7 +1749,6 @@ function IssueDetailContent({
               assignedProjectId || undefined,
             ),
             description: String(formData.get('description') ?? '').trim(),
-            dueDate: String(formData.get('dueDate') ?? '').replaceAll('-', '/'),
             priority: resolveIssuePriority(formData.get('priority')),
             title: String(formData.get('title') ?? '').trim(),
             workflowStatusId,
@@ -1819,10 +1828,12 @@ function IssueDetailContent({
                 ))}
               </select>
             </label>
-            <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-              {t('tasks.column.dueDate')}
-              <input className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" defaultValue={issue.dueDate.replaceAll('/', '-')} name="dueDate" type="date" />
-            </label>
+            <div className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+              <span>{t('tasks.schedule.title')}</span>
+              <output className="min-h-9 rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3 py-2 font-medium text-[var(--workbench-muted)]">
+                {describeTeamIssueSchedule(issue.schedule, t)}
+              </output>
+            </div>
           </div>
           {hasCustomFields ? (
             <div className="workbench-panel-muted p-4">
@@ -1919,6 +1930,21 @@ function formatLocalDateInputValue(date = new Date()) {
 function resolveIssueTitle(issue: TeamIssue, t: (key: MessageKey) => string) {
   void t
   return resolveWorkItemTitle(issue)
+}
+
+/**
+ * Formats an explicit schedule without collapsing its mode into a deadline projection.
+ *
+ * @param schedule - Canonical schedule displayed by the read-only Team detail summary.
+ * @param t - Translator used for the schedule mode label.
+ * @returns A compact localized mode and date-range description.
+ */
+function describeTeamIssueSchedule(
+  schedule: WorkItemSchedule,
+  t: (key: MessageKey) => string,
+): string {
+  const range = formatTaskScheduleRange(schedule)
+  return `${t(taskScheduleModeLabelKeys[schedule.mode])}${range ? `: ${range}` : ''}`
 }
 
 function resolveAssignedProjectName(

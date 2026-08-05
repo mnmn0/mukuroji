@@ -13,6 +13,12 @@ import {
   workItemCustomFieldValueFixture,
 } from '../../work-items/fixtures'
 import type { ProjectTaskStatusColumn } from '../model/taskView'
+import {
+  createDefaultDateRangeTaskSchedule,
+  createDefaultDueDateTaskSchedule,
+  createDefaultMilestoneTaskSchedule,
+  createDefaultUnscheduledTaskSchedule,
+} from '../model/taskSchedule'
 
 /** Task selected by the independent detail-pane story. */
 export const taskViewStorySelectedTask = {
@@ -29,7 +35,8 @@ export const taskViewStorySelectedTask = {
   statusCategory: 'started',
   customFieldValues: {},
   relationIds: [],
-  dueDate: '2026/06/03',
+  dueDate: '2026-06-03',
+  schedule: createDefaultDateRangeTaskSchedule('2026-06-01', '2026-06-03'),
   priority: 'high',
   createdAt: '2026-06-01T00:00:00.000Z',
   updatedAt: '2026-06-01T00:00:00.000Z',
@@ -53,7 +60,8 @@ export const taskViewStoryTasks = [
     statusCategory: 'started',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/06/05',
+    dueDate: '2026-06-05',
+    schedule: createDefaultMilestoneTaskSchedule('2026-06-05'),
     priority: 'medium',
     createdAt: '2026-06-01T00:00:00.000Z',
     updatedAt: '2026-06-01T00:00:00.000Z',
@@ -73,7 +81,8 @@ export const taskViewStoryTasks = [
     statusCategory: 'unstarted',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/06/09',
+    dueDate: '2026-06-09',
+    schedule: createDefaultDueDateTaskSchedule('2026-06-09'),
     priority: 'medium',
     createdAt: '2026-06-01T00:00:00.000Z',
     updatedAt: '2026-06-01T00:00:00.000Z',
@@ -94,6 +103,7 @@ export const taskViewStoryTasks = [
     customFieldValues: {},
     relationIds: [],
     dueDate: '',
+    schedule: createDefaultUnscheduledTaskSchedule(),
     priority: 'low',
     createdAt: '2026-06-01T00:00:00.000Z',
     updatedAt: '2026-06-01T00:00:00.000Z',

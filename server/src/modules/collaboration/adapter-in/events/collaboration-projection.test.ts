@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import { S3Client } from '@aws-sdk/client-s3'
-import type {
-  EnterpriseIdentitySnapshot,
-  EnterpriseSecurityPolicy,
+import {
+  WORK_ITEM_SCHEMA_VERSION,
+  createDefaultDueDateWorkItemSchedule,
+  type EnterpriseIdentitySnapshot,
+  type EnterpriseSecurityPolicy,
 } from '@mukuroji/contracts'
 import {
   cleanupDeletedFileProjection,
@@ -75,7 +77,7 @@ function createRealtimeWorkItem(
   overrides: Partial<RealtimeWorkItemRecord> = {},
 ): RealtimeWorkItemRecord {
   return {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     workflowSchemaVersion: 1,
     directoryId: 'workspace-1',
@@ -92,7 +94,8 @@ function createRealtimeWorkItem(
     statusCategory: 'started',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/07/31',
+    dueDate: '2026-07-31',
+    schedule: createDefaultDueDateWorkItemSchedule('2026-07-31'),
     priority: 'medium',
     createdAt: '2026-07-01T09:00:00.000Z',
     updatedAt: '2026-07-12T09:00:00.000Z',
@@ -546,6 +549,26 @@ describe('collaboration projection pure helpers', () => {
       exists: true,
       statusCategory: 'completed',
     })).toBeUndefined()
+  })
+
+  test('accepts only canonical ISO Work Item due dates from audit metadata', () => {
+    const event = {
+      eventId: 'evt-due-date',
+      eventType: 'work-item.due',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-12T12:00:00.000Z',
+      entityType: 'work-item',
+      entityId: 'team/core/issue/example',
+    }
+
+    expect(parseAuditProjectionEvent({
+      ...event,
+      metadata: { dueDate: '2026-07-12' },
+    })?.dueDate).toBe('2026-07-12')
+    expect(parseAuditProjectionEvent({
+      ...event,
+      metadata: { dueDate: '2026/07/12' },
+    })?.dueDate).toBeUndefined()
   })
 
   test('tolerates legacy events without collaboration metadata', () => {

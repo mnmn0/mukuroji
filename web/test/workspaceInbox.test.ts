@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { ProjectTask } from '../src/tasks/api'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
+import { createDefaultDueDateTaskSchedule } from '../src/tasks/model/taskSchedule'
 import {
   createWorkspaceInboxReasons,
   createWorkspaceInboxTasks,
@@ -37,8 +38,9 @@ describe('Workspace Inbox model', () => {
         pendingCount: 2,
         rejectedCount: 0,
       },
-      dueDate: '2026/07/01',
+      dueDate: '2026-07-01',
       priority: 'high',
+      schedule: createDefaultDueDateTaskSchedule('2026-07-01'),
       workflowStatusId: 'review',
     })
 
@@ -52,8 +54,9 @@ describe('Workspace Inbox model', () => {
 
   test('uses watch fallback for a queue item without a stronger reason', () => {
     const task = createTask({
-      dueDate: '2026/07/30',
+      dueDate: '2026-07-30',
       priority: 'medium',
+      schedule: createDefaultDueDateTaskSchedule('2026-07-30'),
       workflowStatusId: 'todo',
     })
 
@@ -62,27 +65,31 @@ describe('Workspace Inbox model', () => {
 
   test('includes only high, review, overdue, or approval-attention items', () => {
     const ordinary = createTask({
-      dueDate: '2026/07/30',
+      dueDate: '2026-07-30',
       id: 'ordinary',
       priority: 'medium',
+      schedule: createDefaultDueDateTaskSchedule('2026-07-30'),
       workflowStatusId: 'todo',
     })
     const highPriority = createTask({
-      dueDate: '2026/07/30',
+      dueDate: '2026-07-30',
       id: 'high-priority',
       priority: 'high',
+      schedule: createDefaultDueDateTaskSchedule('2026-07-30'),
       workflowStatusId: 'todo',
     })
     const review = createTask({
-      dueDate: '2026/07/30',
+      dueDate: '2026-07-30',
       id: 'review',
       priority: 'low',
+      schedule: createDefaultDueDateTaskSchedule('2026-07-30'),
       workflowStatusId: 'review',
     })
     const overdue = createTask({
-      dueDate: '2026/07/19',
+      dueDate: '2026-07-19',
       id: 'overdue',
       priority: 'low',
+      schedule: createDefaultDueDateTaskSchedule('2026-07-19'),
       workflowStatusId: 'todo',
     })
     const approval = createTask({
@@ -93,9 +100,10 @@ describe('Workspace Inbox model', () => {
         pendingCount: 1,
         rejectedCount: 0,
       },
-      dueDate: '2026/07/30',
+      dueDate: '2026-07-30',
       id: 'approval',
       priority: 'low',
+      schedule: createDefaultDueDateTaskSchedule('2026-07-30'),
       workflowStatusId: 'todo',
     })
 

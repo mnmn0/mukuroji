@@ -4,6 +4,7 @@ import type {
   WorkflowStatusDefinition,
   WorkItemConfiguration,
   WorkItemPatch,
+  WorkItemSchedule,
 } from '@mukuroji/contracts'
 import type { BulkOperationSelection } from '../../bulk-operations/model/bulkOperation'
 import type { ProjectDirectoryTeam } from '../../projects/api/directory'
@@ -24,6 +25,11 @@ import {
   sortWorkflowStatuses,
 } from '../../work-items/model/workItemDisplay'
 import type { ProjectTask, TaskPriority } from '../api/tasks'
+import {
+  deriveTaskScheduleDueDate,
+  resolveTaskSchedule,
+  resolveTaskSchedulePrimaryDate,
+} from './taskSchedule'
 
 /** Task views available within the project task workspace. */
 export const taskTabs: readonly ['table', 'board', 'gantt', 'calendar', 'file', 'permissions'] = [
@@ -80,8 +86,8 @@ export type TaskCreateContext = {
   teamId?: string
   /** Workflow status inherited from a Board column or other status surface. */
   workflowStatusId?: string
-  /** Due date inherited from a Calendar or planning surface. */
-  dueDate?: string
+  /** Explicit schedule inherited from a Calendar range or planning surface. */
+  schedule?: WorkItemSchedule
   /** Assignee inherited from an assignee-oriented surface. */
   assigneeUserId?: string
   /** Surface that initiated the create action. */
@@ -188,7 +194,12 @@ export function applyTaskPatchOptimistically(
         ? { assignedProjectId: undefined }
         : { assignedProjectId: patch.assignedProjectId }),
     ...(patch.assigneeUserId === undefined ? {} : { assigneeUserId: patch.assigneeUserId }),
-    ...(patch.dueDate === undefined ? {} : { dueDate: patch.dueDate }),
+    ...(patch.schedule === undefined
+      ? {}
+      : {
+          dueDate: deriveTaskScheduleDueDate(patch.schedule),
+          schedule: patch.schedule,
+        }),
     ...(patch.priority === undefined ? {} : { priority: patch.priority }),
     ...(patch.workflowStatusId === undefined ? {} : { workflowStatusId: patch.workflowStatusId }),
     ...(nextStatus ? { statusCategory: nextStatus.category } : {}),
@@ -223,7 +234,9 @@ export function createTaskInversePatch(
       ? {}
       : { assignedProjectId: task.assignedProjectId ?? null }),
     ...(patch.assigneeUserId === undefined ? {} : { assigneeUserId: task.assigneeUserId }),
-    ...(patch.dueDate === undefined ? {} : { dueDate: task.dueDate }),
+    ...(patch.schedule === undefined
+      ? {}
+      : { schedule: task.schedule }),
     ...(patch.priority === undefined ? {} : { priority: task.priority }),
     ...(patch.workflowStatusId === undefined ? {} : { workflowStatusId: task.workflowStatusId }),
     ...(inverseCustomFieldValues === undefined
@@ -310,6 +323,31 @@ export function findTaskBySelection(
 }
 
 /**
+ * Chooses one canonical snapshot for detail rendering and its revision-guarded mutation.
+ *
+ * A detail request and the project list revalidate independently, so either source can be newer.
+ * A candidate for another Team-local Work Item is ignored even when its local ID happens to match.
+ *
+ * @param listTask - Work Item selected from the project list.
+ * @param detailTask - Independently cached detail snapshot.
+ * @returns The matching snapshot with the greatest observed revision.
+ */
+export function resolveLatestTaskSnapshot(
+  listTask: ProjectTask | undefined,
+  detailTask: ProjectTask | undefined,
+): ProjectTask | undefined {
+  if (!listTask) {
+    return undefined
+  }
+  return detailTask &&
+      detailTask.id === listTask.id &&
+      detailTask.teamId === listTask.teamId &&
+      detailTask.revision >= listTask.revision
+    ? detailTask
+    : listTask
+}
+
+/**
  * Converts a task into the revision snapshot required by bulk operations.
  *
  * @param task - Task selected for a bulk operation.
@@ -348,13 +386,19 @@ export function formatTaskDateInputValue(
 }
 
 /**
- * Parses the task storage date format into a local midnight Date.
+ * Parses a canonical ISO task date into a local midnight Date.
  *
- * @param value - Date stored as a slash-delimited year, month, and day.
- * @returns Parsed local Date, or null when required numeric parts are missing.
+ * @param value - Date stored in `YYYY-MM-DD` form.
+ * @returns Parsed local Date, or null when the value is malformed or impossible.
  */
 export function parseTaskDueDate(value: string) {
-  const [year, month, day] = value.split('/').map(Number)
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value)
+  if (!match) {
+    return null
+  }
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
 
   if (!year || !month || !day) {
     return null
@@ -363,7 +407,12 @@ export function parseTaskDueDate(value: string) {
   const date = new Date(year, month - 1, day)
   date.setHours(0, 0, 0, 0)
 
-  return Number.isNaN(date.getTime()) ? null : date
+  return Number.isNaN(date.getTime()) ||
+      date.getFullYear() !== year ||
+      date.getMonth() !== month - 1 ||
+      date.getDate() !== day
+    ? null
+    : date
 }
 
 /**
@@ -374,7 +423,7 @@ export function parseTaskDueDate(value: string) {
  * @returns True only for a parsed past date on a non-completed task.
  */
 export function isTaskOverdue(task: ProjectTask, now: Date = new Date()) {
-  const dueDate = parseTaskDueDate(task.dueDate)
+  const dueDate = parseTaskDueDate(deriveTaskScheduleDueDate(task.schedule))
 
   if (resolveWorkflowStatusCategory(task) === 'completed' || !dueDate) {
     return false
@@ -401,7 +450,7 @@ export function matchesTaskDueDateFilter(
     return true
   }
 
-  const dueDate = parseTaskDueDate(task.dueDate)
+  const dueDate = parseTaskDueDate(deriveTaskScheduleDueDate(task.schedule))
 
   if (filter === 'no-date') {
     return !dueDate
@@ -435,8 +484,8 @@ export function sortTasksByDueDate(
   sortOrder: TaskSortOrder,
 ) {
   return [...tasks].sort((firstTask, secondTask) => {
-    const firstTime = parseTaskDueDate(firstTask.dueDate)?.getTime()
-    const secondTime = parseTaskDueDate(secondTask.dueDate)?.getTime()
+    const firstTime = parseTaskDueDate(deriveTaskScheduleDueDate(firstTask.schedule))?.getTime()
+    const secondTime = parseTaskDueDate(deriveTaskScheduleDueDate(secondTask.schedule))?.getTime()
     const firstSortTime = firstTime ?? Number.MAX_SAFE_INTEGER
     const secondSortTime = secondTime ?? Number.MAX_SAFE_INTEGER
 
@@ -701,7 +750,7 @@ export function resolveTaskCustomFieldSearchValues(
 }
 
 /**
- * Groups tasks by their stored due-date value for the calendar view.
+ * Groups tasks by the canonical schedule anchor for the calendar view.
  *
  * @param tasks - Tasks displayed by the calendar.
  * @returns Sorted date groups and the tasks without a trimmed due date.
@@ -709,18 +758,22 @@ export function resolveTaskCustomFieldSearchValues(
 export function createTaskCalendarModel(
   tasks: readonly ProjectTask[],
 ): TaskCalendarModel {
-  const dates = Array.from(new Set(tasks.map((task) => task.dueDate)))
-    .filter((date) => date.trim().length > 0)
+  const dates = Array.from(new Set(tasks.map((task) =>
+    resolveTaskSchedulePrimaryDate(resolveTaskSchedule(task)),
+  )))
+    .filter((date): date is string => date !== undefined)
     .sort()
 
   return {
     days: dates.map((date) => ({
       date,
       id: date,
-      items: tasks.filter((task) => task.dueDate === date),
+      items: tasks.filter((task) =>
+        resolveTaskSchedulePrimaryDate(resolveTaskSchedule(task)) === date
+      ),
       label: date,
     })),
-    unscheduledTasks: tasks.filter((task) => !task.dueDate.trim()),
+    unscheduledTasks: tasks.filter((task) => resolveTaskSchedule(task).mode === 'unscheduled'),
   }
 }
 
@@ -822,7 +875,7 @@ export function filterAndSortProjectTasks(
       resolveTaskAssignee(task),
       resolveWorkItemWorkflowStatusLabel(task, resolvedTaskConfiguration),
       options.t(`tasks.priority.${task.priority}`),
-      task.dueDate,
+      deriveTaskScheduleDueDate(task.schedule),
       ...resolveTaskCustomFieldSearchValues(
         task,
         resolvedTaskConfiguration,

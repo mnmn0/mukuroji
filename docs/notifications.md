@@ -10,7 +10,7 @@ Mukuroji の Inbox は、Work Item の現在状態から都度組み立てる at
 
 - Work Item 作成・担当変更: `assignment`
 - Work Item status 変更: `status-change`
-- Work Item 期限変更: `due-date-change`
+- Work Item schedule 変更: `schedule-change`
 - 定期 due scan: `due` / `overdue`
 - comment / reply: `mention` / `reply` / `watcher` / `project-watcher`
 

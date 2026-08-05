@@ -14,6 +14,7 @@ import {
 import { AutomationError } from './automation-error'
 import { isAutomationValue } from './automation-value'
 import { validateRecurringSchedule } from './recurring-schedule'
+import { normalizeAutomationWorkItemSchedule } from './work-item-schedule-validation'
 
 /**
  * Validates and normalizes an untrusted Automation template definition.
@@ -39,8 +40,8 @@ export function validateCreateAutomationTemplateInput(
         'assigneeUserId',
         'customFieldValues',
         'description',
-        'dueDate',
         'priority',
+        'schedule',
         'teamId',
         'title',
         'workflowStatusId',
@@ -62,9 +63,9 @@ export function validateCreateAutomationTemplateInput(
         payload.description,
         'Work Item template description',
       )
-      const dueDate = readOptionalTemplateString(
-        payload.dueDate,
-        'Work Item template due date',
+      const schedule = normalizeAutomationWorkItemSchedule(
+        payload.schedule,
+        'Work Item template schedule',
       )
       const teamId = readOptionalTemplateString(
         payload.teamId,
@@ -98,8 +99,8 @@ export function validateCreateAutomationTemplateInput(
           ...(assigneeUserId === undefined ? {} : { assigneeUserId }),
           ...(customFieldValues === undefined ? {} : { customFieldValues }),
           ...(description === undefined ? {} : { description }),
-          ...(dueDate === undefined ? {} : { dueDate }),
           ...(payload.priority === undefined ? {} : { priority: payload.priority }),
+          schedule,
           ...(teamId === undefined ? {} : { teamId }),
           ...(workflowStatusId === undefined ? {} : { workflowStatusId }),
         },

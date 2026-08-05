@@ -1,6 +1,7 @@
-import type {
-  ResolvedWorkItemConfiguration,
-  WorkflowStatusDefinition,
+import {
+  deriveWorkItemScheduleDueDate,
+  type ResolvedWorkItemConfiguration,
+  type WorkflowStatusDefinition,
 } from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { ProjectTask } from '../../tasks/api'
@@ -406,7 +407,7 @@ export function hasApprovalAttention(task: ProjectTask) {
  * @returns True when the Work Item is incomplete and overdue.
  */
 export function isWorkspaceTaskOverdue(task: ProjectTask, referenceDate: Date) {
-  const dueDate = parseWorkspaceTaskDueDate(task.dueDate)
+  const dueDate = parseWorkspaceTaskDueDate(deriveWorkItemScheduleDueDate(task.schedule))
 
   if (!isOpenWorkItem(task) || !dueDate) {
     return false
@@ -419,13 +420,13 @@ export function isWorkspaceTaskOverdue(task: ProjectTask, referenceDate: Date) {
 }
 
 /**
- * Parses a Work Item's YYYY/MM/DD due date as a local date.
+ * Parses a Work Item's canonical ISO due-date projection as a local date.
  *
  * @param value - Work Item due-date string.
  * @returns The parsed date, or null when the value is invalid.
  */
 export function parseWorkspaceTaskDueDate(value: string) {
-  const match = /^(\d{4})\/(\d{2})\/(\d{2})$/.exec(value)
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value)
 
   if (!match) {
     return null
@@ -542,5 +543,7 @@ function normalizeWorkspaceSearchText(value?: string) {
  * @returns The due date in milliseconds, or the maximum safe integer when invalid.
  */
 function getWorkspaceDueTime(task: ProjectTask) {
-  return parseWorkspaceTaskDueDate(task.dueDate)?.getTime() ?? Number.MAX_SAFE_INTEGER
+  return parseWorkspaceTaskDueDate(
+    deriveWorkItemScheduleDueDate(task.schedule),
+  )?.getTime() ?? Number.MAX_SAFE_INTEGER
 }

@@ -4317,9 +4317,8 @@ function normalizeTimeZone(value: unknown, label: string) {
 }
 
 function normalizeDateOnly(value: string) {
-  const normalized = value.replaceAll('/', '-')
-  if (!ISO_DATE_PATTERN.test(normalized)) return undefined
-  const [yearText, monthText, dayText] = normalized.split('-')
+  if (!ISO_DATE_PATTERN.test(value)) return undefined
+  const [yearText, monthText, dayText] = value.split('-')
   const year = Number(yearText)
   const month = Number(monthText)
   const day = Number(dayText)
@@ -4329,7 +4328,7 @@ function normalizeDateOnly(value: string) {
     date.getUTCMonth() + 1 !== month ||
     date.getUTCDate() !== day
   ) return undefined
-  return normalized
+  return value
 }
 
 function normalizeClockValue(value: Date) {

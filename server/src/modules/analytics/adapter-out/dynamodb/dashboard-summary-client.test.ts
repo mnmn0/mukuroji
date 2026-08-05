@@ -9,6 +9,9 @@ import {
 } from './dashboard-summary-client'
 import type { ProjectRole } from '../../../directory'
 import {
+  createDefaultDueDateWorkItemSchedule,
+} from '@mukuroji/contracts'
+import {
   afterEach,
   expect,
   test,
@@ -48,7 +51,7 @@ test('DynamoDB dashboard summary client derives counts from canonical Work Items
           projectId,
           issues: [
             {
-              schemaVersion: 1 as const,
+              schemaVersion: 2 as const,
               revision: 1,
               id: 'active-high',
               teamId: 'core-team',
@@ -61,14 +64,15 @@ test('DynamoDB dashboard summary client derives counts from canonical Work Items
               statusCategory: 'started' as const,
               customFieldValues: {},
               relationIds: [],
-              dueDate: '2026/07/20',
+              dueDate: '2026-07-20',
+              schedule: createDefaultDueDateWorkItemSchedule('2026-07-20'),
               priority: 'high' as const,
               createdAt: '2026-07-01T00:00:00.000Z',
               updatedAt: '2026-07-01T00:00:00.000Z',
               source: 'dynamodb' as const,
             },
             {
-              schemaVersion: 1 as const,
+              schemaVersion: 2 as const,
               revision: 1,
               id: 'completed-high',
               teamId: 'core-team',
@@ -81,7 +85,8 @@ test('DynamoDB dashboard summary client derives counts from canonical Work Items
               statusCategory: 'completed' as const,
               customFieldValues: {},
               relationIds: [],
-              dueDate: '2026/07/20',
+              dueDate: '2026-07-20',
+              schedule: createDefaultDueDateWorkItemSchedule('2026-07-20'),
               priority: 'high' as const,
               createdAt: '2026-07-01T00:00:00.000Z',
               updatedAt: '2026-07-01T00:00:00.000Z',

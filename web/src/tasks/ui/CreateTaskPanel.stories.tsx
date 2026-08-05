@@ -5,6 +5,7 @@ import { collaborationWorkspaceMemberFixtures } from '../../issues/fixtures'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
 import type { CreateProjectTaskInput } from '../api/tasks'
+import { createDefaultUnscheduledTaskSchedule } from '../model/taskSchedule'
 import type { TaskCreateContext } from '../model/taskView'
 import { CreateTaskPanel } from './CreateTaskPanel'
 
@@ -29,8 +30,17 @@ const assigneeOptions = [
 ] satisfies ProjectMember[]
 
 const quickCaptureContext = {
-  dueDate: '2026/06/12',
   projectId: 'refero',
+  schedule: {
+    calendarPolicy: {
+      holidays: ['2026-06-11'],
+      timeZone: 'Asia/Tokyo',
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+    },
+    dueDate: '2026-06-12',
+    mode: 'due-date',
+    plannedEffortMinutes: 120,
+  },
   source: 'table',
   teamId: 'core-team',
   workflowStatusId: 'backlog',
@@ -120,8 +130,8 @@ export const SuccessfulSubmit: Story = {
           'risk-level': 'moderate',
           'story-points': 3,
         },
-        dueDate: expect.stringMatching(/^\d{4}\/\d{2}\/\d{2}$/),
         priority: 'medium',
+        schedule: createDefaultUnscheduledTaskSchedule(),
         title: 'オンボーディング導線を確認する',
         workflowStatusId: 'backlog',
       })
@@ -152,9 +162,9 @@ export const QuickCapture: Story = {
     await expect(args.onSubmit).toHaveBeenCalledWith({
       assigneeUserId: 'sato@example.com',
       customFieldValues: {},
-      dueDate: expect.stringMatching(/^\d{4}\/\d{2}\/\d{2}$/),
       priority: 'medium',
       quickCapture: true,
+      schedule: quickCaptureContext.schedule,
       title: 'リリース前の確認事項を整理する',
       workflowStatusId: 'backlog',
     })

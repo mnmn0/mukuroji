@@ -1,4 +1,8 @@
 import { describe, expect, test } from 'bun:test'
+import {
+  createDefaultDueDateWorkItemSchedule,
+  deriveWorkItemScheduleDueDate,
+} from '@mukuroji/contracts'
 import type { ProjectTask } from '../src/tasks/api'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
@@ -26,9 +30,12 @@ if (!baseTask) {
  * @param overrides - Fields that differ from the shared base fixture.
  * @returns A complete ProjectTask fixture.
  */
-function createTask(overrides: Partial<ProjectTask>): ProjectTask {
+function createTask(overrides: Omit<Partial<ProjectTask>, 'dueDate'>): ProjectTask {
+  const schedule = overrides.schedule ?? baseTask.schedule
   return {
     ...baseTask,
+    dueDate: deriveWorkItemScheduleDueDate(schedule),
+    schedule,
     ...overrides,
   }
 }
@@ -38,9 +45,9 @@ describe('Workspace Work Item model', () => {
 
   test('orders action queue by score and due date using an explicit reference date', () => {
     const overdueHigh = createTask({
-      dueDate: '2026/07/01',
       id: 'overdue-high',
       priority: 'high',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-01'),
       workflowStatusId: 'todo',
     })
     const approvalOverdue = createTask({
@@ -51,22 +58,22 @@ describe('Workspace Work Item model', () => {
         pendingCount: 1,
         rejectedCount: 0,
       },
-      dueDate: '2026/07/30',
       id: 'approval-overdue',
       priority: 'low',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-30'),
       statusCategory: 'completed',
       workflowStatusId: 'done',
     })
     const sameScoreEarlier = createTask({
-      dueDate: '2026/07/21',
       id: 'same-score-earlier',
       priority: 'medium',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-21'),
       workflowStatusId: 'todo',
     })
     const sameScoreLater = createTask({
-      dueDate: '2026/07/22',
       id: 'same-score-later',
       priority: 'medium',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-22'),
       workflowStatusId: 'todo',
     })
 
@@ -134,21 +141,23 @@ describe('Workspace Work Item model', () => {
     expect(designRow?.risk).toBe('watch')
   })
 
-  test('parses only exact YYYY/MM/DD calendar dates', () => {
-    const leapDay = parseWorkspaceTaskDueDate('2024/02/29')
+  test('parses only exact ISO calendar dates', () => {
+    const leapDay = parseWorkspaceTaskDueDate('2024-02-29')
 
     expect(leapDay?.getFullYear()).toBe(2024)
     expect(leapDay?.getMonth()).toBe(1)
     expect(leapDay?.getDate()).toBe(29)
     expect([
       '',
-      '2023/02/29',
-      '2026/02/30',
-      '2026/04/31',
-      '2026/13/01',
-      '2026/7/20',
-      '2026/07/20T00:00:00Z',
+      '2023-02-29',
+      '2026-02-30',
+      '2026-04-31',
+      '2026-13-01',
+      '2026-7-20',
+      '2026-07-20T00:00:00Z',
+      '2026/07/20',
     ].map(parseWorkspaceTaskDueDate)).toEqual([
+      null,
       null,
       null,
       null,

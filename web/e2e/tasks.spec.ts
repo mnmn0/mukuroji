@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import type { Locator, Page } from '@playwright/test'
 import {
+  DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
   type AnalyticsExportInput,
@@ -11,9 +12,12 @@ import {
   type FileAttachment,
   type FileVersion,
   type ProjectQuickAccessPreferences,
+  type PreviewWorkItemScheduleInput,
   type WorkItemConfiguration,
   type WorkItemRelation,
   type WorkItemRelationType,
+  type WorkItemSchedule,
+  type WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
 import { readFile } from 'node:fs/promises'
 import {
@@ -158,6 +162,10 @@ type MockRequestCounts = {
    */
   issueUpdates: number
   /**
+   * Work Item schedule preview API の request 数です。
+   */
+  schedulePreviews: number
+  /**
    * チーム Issue コメント API の request 数です。
    */
   issueComments: number
@@ -243,6 +251,10 @@ type MockAuthenticatedTaskPageOptions = {
    */
   revisionConflictIssueKeys?: readonly string[]
   /**
+   * Schedule preview を permission error にする `teamId\0issueId` key の一覧です。
+   */
+  forbiddenSchedulePreviewIssueKeys?: readonly string[]
+  /**
    * Notification API が初期状態として返す recipient 通知です。
    */
   notifications?: InboxNotification[]
@@ -299,6 +311,7 @@ async function mockAuthenticatedTaskPage(
     issueReads: 0,
     issueCreates: 0,
     issueUpdates: 0,
+    schedulePreviews: 0,
     issueComments: 0,
     taskCreates: 0,
     taskStatusUpdates: 0,
@@ -345,6 +358,9 @@ async function mockAuthenticatedTaskPage(
     'design-team': [...(options.teamIssuesByTeam?.['design-team'] ?? [])],
   }
   const pendingRevisionConflictIssueKeys = new Set(options.revisionConflictIssueKeys ?? [])
+  const forbiddenSchedulePreviewIssueKeys = new Set(
+    options.forbiddenSchedulePreviewIssueKeys ?? [],
+  )
   const failedWorkItemConfigurationTeamIds = new Set(
     options.failedWorkItemConfigurationTeamIds ?? [],
   )
@@ -982,12 +998,18 @@ async function mockAuthenticatedTaskPage(
         assigneeUserId?: string
         customFieldValues?: Record<string, CustomFieldValue>
         description?: string
-        dueDate?: string
         priority?: TeamIssue['priority']
+        schedule?: WorkItemSchedule
         title?: string
         workflowStatusId?: string
       }
       expect(body).not.toHaveProperty('status')
+      expect(body).not.toHaveProperty('dueDate')
+      expect(body.schedule).toBeDefined()
+      if (!body.schedule) {
+        await route.fulfill({ status: 400, json: { message: 'A canonical schedule is required.' } })
+        return
+      }
       const assigneeUser = projectUsers.find((user) => user.id === body.assigneeUserId)
       const configuration = teamWorkItemConfigurations[teamId] ?? workspaceWorkItemConfiguration
       const workflowStatus = configuration.workflow.statuses.find(
@@ -1012,7 +1034,8 @@ async function mockAuthenticatedTaskPage(
         workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
         customFieldValues: structuredClone(body.customFieldValues ?? {}),
         relationIds: [],
-        dueDate: body.dueDate ?? '2026/06/20',
+        dueDate: projectMockScheduleDueDate(body.schedule),
+        schedule: structuredClone(body.schedule),
         priority: body.priority ?? 'medium',
         createdAt: '2026-06-08T00:00:00.000Z',
         updatedAt: '2026-06-08T00:00:00.000Z',
@@ -1039,6 +1062,62 @@ async function mockAuthenticatedTaskPage(
       json: {
         teamId,
         issues: [...projectIssues, ...(teamIssuesByTeam[teamId] ?? [])],
+      },
+    })
+  })
+
+  await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/schedule\/preview$/, async (route) => {
+    requestCounts.schedulePreviews += 1
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+    expect(route.request().method()).toBe('POST')
+
+    const pathSegments = new URL(route.request().url()).pathname.split('/')
+    const teamId = decodeURIComponent(pathSegments[3] ?? '')
+    const issueId = decodeURIComponent(pathSegments[5] ?? '')
+    const issue = findTeamIssue(teamIssuesByTeam, teamId, issueId)
+      ?? Object.values(taskResponsesByProject)
+        .flat()
+        .find((candidate) => candidate.teamId === teamId && candidate.id === issueId)
+    const body: PreviewWorkItemScheduleInput = route.request().postDataJSON()
+
+    if (!issue) {
+      await route.fulfill({ status: 404, json: { message: 'Issue was not found.' } })
+      return
+    }
+    if (forbiddenSchedulePreviewIssueKeys.has(createIssueCollaborationKey(teamId, issueId))) {
+      await route.fulfill({
+        status: 403,
+        json: {
+          code: 'WorkItemScheduleForbidden',
+          message: 'Schedule changes require member permission.',
+        },
+      })
+      return
+    }
+    if (body.expectedRevision !== issue.revision) {
+      await route.fulfill({
+        status: 409,
+        json: {
+          code: 'WorkItemRevisionConflict',
+          message: 'Work Item changed after it was loaded.',
+        },
+      })
+      return
+    }
+
+    const before = structuredClone(issue.schedule)
+    await route.fulfill({
+      json: {
+        expectedRevision: body.expectedRevision,
+        impacts: [{
+          after: applyMockWorkItemScheduleOperation(before, body.operation),
+          before,
+          expectedRevision: issue.revision,
+          kind: 'direct',
+          teamId,
+          workItemId: issueId,
+        }],
+        warnings: [],
       },
     })
   })
@@ -1071,6 +1150,7 @@ async function mockAuthenticatedTaskPage(
         expectedRevision?: number
       }
       expect(body).not.toHaveProperty('status')
+      expect(body).not.toHaveProperty('dueDate')
       const { expectedRevision, ...patch } = body
 
       expect(expectedRevision).toBe(issue.revision)
@@ -1118,6 +1198,9 @@ async function mockAuthenticatedTaskPage(
         assignedProjectId: body.assignedProjectId === null
           ? undefined
           : body.assignedProjectId ?? issue.assignedProjectId,
+        dueDate: patch.schedule
+          ? projectMockScheduleDueDate(patch.schedule)
+          : issue.dueDate,
         statusCategory: updatedWorkflowStatus?.category ?? issue.statusCategory,
         workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
         revision: issue.revision + 1,
@@ -1894,7 +1977,12 @@ function createStoredTeamIssue(
     assigneeName: '佐藤 花子',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/06/22',
+    dueDate: '2026-06-22',
+    schedule: {
+      calendarPolicy: DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
+      dueDate: '2026-06-22',
+      mode: 'due-date',
+    },
     priority: 'medium',
     createdAt: '2026-06-08T00:00:00.000Z',
     updatedAt: '2026-06-08T00:00:00.000Z',
@@ -1951,6 +2039,223 @@ function replaceStoredTeamIssue(
   }
 
   teamIssuesByTeam[teamId] = [...issues, issue]
+}
+
+/**
+ * Applies one schedule operation in the browser API mock.
+ *
+ * The production calendar rules are covered by server domain tests; this mock only preserves the
+ * operation semantics needed to verify that browser interactions preview and persist canonical data.
+ *
+ * @param schedule - Current canonical schedule held by the mock API.
+ * @param operation - Preview operation posted by the browser.
+ * @returns The deterministic schedule returned by the mock preview endpoint.
+ */
+function applyMockWorkItemScheduleOperation(
+  schedule: WorkItemSchedule,
+  operation: WorkItemScheduleOperation,
+): WorkItemSchedule {
+  if (operation.type === 'replace') {
+    return structuredClone(operation.schedule)
+  }
+  if (operation.type === 'resize') {
+    if (schedule.mode !== 'date-range') {
+      return structuredClone(schedule)
+    }
+    return {
+      ...structuredClone(schedule),
+      durationDays: Math.max(
+        1,
+        differenceMockScheduleDays(schedule.startDate, operation.endDate) + 1,
+      ),
+      endDate: operation.endDate,
+    }
+  }
+
+  switch (schedule.mode) {
+    case 'unscheduled':
+      return structuredClone(schedule)
+    case 'due-date':
+      return { ...structuredClone(schedule), dueDate: operation.targetDate }
+    case 'milestone':
+      return {
+        ...structuredClone(schedule),
+        endDate: operation.targetDate,
+        startDate: operation.targetDate,
+      }
+    case 'date-range': {
+      const offsetDays = differenceMockScheduleDays(schedule.startDate, operation.targetDate)
+      return {
+        ...structuredClone(schedule),
+        endDate: addMockScheduleDays(schedule.endDate, offsetDays),
+        startDate: operation.targetDate,
+      }
+    }
+  }
+}
+
+/**
+ * Adds UTC calendar days for deterministic browser mock responses.
+ *
+ * @param date - ISO date-only value.
+ * @param days - Signed calendar-day offset.
+ * @returns Shifted ISO date-only value.
+ */
+function addMockScheduleDays(date: string, days: number): string {
+  const instant = new Date(`${date}T00:00:00.000Z`)
+  instant.setUTCDate(instant.getUTCDate() + days)
+  return instant.toISOString().slice(0, 10)
+}
+
+/**
+ * Calculates a signed UTC calendar-day difference for the browser mock.
+ *
+ * @param startDate - Start ISO date-only value.
+ * @param endDate - End ISO date-only value.
+ * @returns Signed number of calendar days from start to end.
+ */
+function differenceMockScheduleDays(startDate: string, endDate: string): number {
+  const start = new Date(`${startDate}T00:00:00.000Z`).getTime()
+  const end = new Date(`${endDate}T00:00:00.000Z`).getTime()
+  return Math.round((end - start) / 86_400_000)
+}
+
+/**
+ * Projects a canonical schedule into the derived deadline stored by the browser mock.
+ *
+ * @param schedule - Canonical schedule persisted by the mocked Work Item API.
+ * @returns Its final scheduled date, or an empty value for explicitly unscheduled work.
+ */
+function projectMockScheduleDueDate(schedule: WorkItemSchedule): string {
+  switch (schedule.mode) {
+    case 'unscheduled':
+      return ''
+    case 'due-date':
+      return schedule.dueDate
+    case 'date-range':
+    case 'milestone':
+      return schedule.endDate
+  }
+}
+
+/**
+ * Dispatches a native schedule-card drag with one render frame between drag start and drop.
+ *
+ * React must commit the dragged task identity before the destination handles the drop event. This
+ * mirrors a real pointer drag while keeping the E2E independent from layout-sensitive mouse paths.
+ *
+ * @param page - Playwright page owning the native `DataTransfer` object.
+ * @param source - Draggable Calendar task card.
+ * @param target - Calendar date or unscheduled bucket receiving the card.
+ */
+async function dragScheduleCard(page: Page, source: Locator, target: Locator): Promise<void> {
+  const dataTransfer = await page.evaluateHandle(() => new DataTransfer())
+
+  try {
+    await source.dispatchEvent('dragstart', { dataTransfer })
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => resolve())
+    }))
+    await target.dispatchEvent('dragover', { dataTransfer })
+    await target.dispatchEvent('drop', { dataTransfer })
+    await source.dispatchEvent('dragend', { dataTransfer })
+  } finally {
+    await dataTransfer.dispose()
+  }
+}
+
+/**
+ * Uses Playwright's real pointer drag sequence to drop a Gantt control on one visible date.
+ *
+ * @param page - Browser page containing the Gantt timeline.
+ * @param source - Draggable bar or resize handle.
+ * @param timeline - Complete row timeline receiving the bubbled native drop.
+ * @param date - Exact daily column on which the pointer is released.
+ */
+async function dragGanttControlToDate(
+  page: Page,
+  source: Locator,
+  timeline: Locator,
+  date: string,
+): Promise<void> {
+  const column = page.getByRole('columnheader', { exact: true, name: date })
+  await source.scrollIntoViewIfNeeded()
+  const [columnBounds, sourceBounds, timelineBounds] = await Promise.all([
+    column.boundingBox(),
+    source.boundingBox(),
+    timeline.boundingBox(),
+  ])
+
+  if (!columnBounds || !sourceBounds || !timelineBounds) {
+    throw new Error(`Gantt drag target is not visible: ${date}`)
+  }
+
+  const sourceX = sourceBounds.x + sourceBounds.width / 2
+  const sourceY = sourceBounds.y + sourceBounds.height / 2
+  const targetX = columnBounds.x + columnBounds.width / 2
+  const targetY = timelineBounds.y + timelineBounds.height / 2
+  const sourceReceivesPointer = await source.evaluate((element, point) => {
+    const hitTarget = document.elementFromPoint(point.x, point.y)
+    return element === hitTarget || (hitTarget !== null && element.contains(hitTarget))
+  }, { x: sourceX, y: sourceY })
+  if (!sourceReceivesPointer) {
+    throw new Error(`Gantt drag source is covered: ${date}`)
+  }
+
+  await source.dragTo(timeline, {
+    sourcePosition: {
+      x: sourceBounds.width / 2,
+      y: sourceBounds.height / 2,
+    },
+    targetPosition: {
+      x: targetX - timelineBounds.x,
+      y: targetY - timelineBounds.y,
+    },
+  })
+}
+
+/**
+ * Verifies one persisted date-range schedule across every task planning surface.
+ *
+ * @param page - Playwright page showing the Refero task workspace.
+ * @param startDate - Expected inclusive schedule start.
+ * @param endDate - Expected inclusive schedule end.
+ */
+async function expectWireframeScheduleAcrossTaskViews(
+  page: Page,
+  startDate: string,
+  endDate: string,
+): Promise<void> {
+  const dateRangeText = `${startDate} – ${endDate}`
+  const scheduleText = `期間: ${dateRangeText}`
+
+  await page.getByRole('tab', { name: 'テーブル', exact: true }).click()
+  await expect(page.getByTestId('task-row-wireframe')).toContainText(scheduleText)
+
+  await page.getByTestId('task-open-detail-wireframe').click()
+  const detailPane = page.getByTestId('task-detail-pane')
+
+  await expect(detailPane.locator('select[name="scheduleMode"]')).toHaveValue('date-range')
+  await expect(detailPane.locator('input[name="scheduleStartDate"]')).toHaveValue(startDate)
+  await expect(detailPane.locator('input[name="scheduleEndDate"]')).toHaveValue(endDate)
+  await detailPane.getByTestId('task-detail-close').click()
+
+  await page.getByRole('tab', { name: 'ボード', exact: true }).click()
+  await expect(page.getByTestId('project-task-card-wireframe')).toContainText(scheduleText)
+
+  await page.getByRole('tab', { name: '期限順', exact: true }).click()
+  const ganttBar = page.getByTestId('task-gantt-bar-wireframe')
+  const ganttRow = page.locator('article').filter({ has: ganttBar })
+
+  await expect(ganttRow.locator('select[id^="gantt-mode-"]')).toHaveValue('date-range')
+  await expect(ganttRow.locator('input[id^="gantt-start-"]')).toHaveValue(startDate)
+  await expect(ganttRow.locator('input[id^="gantt-end-"]')).toHaveValue(endDate)
+
+  await page.getByRole('tab', { name: '期限カレンダー', exact: true }).click()
+  const calendarCard = page.getByTestId('task-calendar-item-wireframe')
+
+  await expect(calendarCard).toContainText('期間')
+  await expect(calendarCard).toContainText(dateRangeText)
 }
 
 /**
@@ -2152,6 +2457,342 @@ test.describe('authenticated task page', () => {
     await expect(boardTab).toBeFocused()
     await expect(boardTab).toHaveAttribute('aria-selected', 'true')
     await expect(page.getByRole('tabpanel')).toContainText('ボードビュー')
+  })
+
+  test('Issue #188: Table の期限編集も共通 preview を確認してから保存する', async ({ page }) => {
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+    const dueDateField = page.getByTestId('task-inline-due-date-seo-research')
+
+    await dueDateField.click()
+    const dueDateInput = page.getByTestId('task-inline-due-date-seo-research-input')
+
+    await dueDateInput.fill('2026-06-10')
+    await dueDateInput.press('Enter')
+
+    const preview = page.getByTestId('task-schedule-update-preview')
+
+    await expect(preview).toHaveAccessibleName('一括操作の事前確認')
+    await expect(preview).toContainText('core-team / seo-research')
+    await expect(preview).toContainText('変更前: 期限のみ: 2026-06-09')
+    await expect(preview).toContainText('変更後: 期限のみ: 2026-06-10')
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
+    expect(requestCounts.issueUpdates).toBe(0)
+
+    await preview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect(page.getByTestId('task-inline-due-date-seo-research')).toContainText(
+      '期限のみ: 2026-06-10',
+    )
+    await expect.poll(() => requestCounts.issueUpdates).toBe(1)
+  })
+
+  test('Issue #188: Gantt はキーボード移動を事前確認し undo・redo・resize できる', async ({ page }) => {
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+
+    const bar = page.getByTestId('task-gantt-bar-wireframe')
+    const row = page.locator('article').filter({ has: bar })
+    const startDate = row.locator('input[id^="gantt-start-"]')
+    const endDate = row.locator('input[id^="gantt-end-"]')
+
+    await expect(startDate).toHaveValue('2026-06-01')
+    await expect(endDate).toHaveValue('2026-06-03')
+    await bar.focus()
+    await page.keyboard.press('ArrowRight')
+
+    const movePreview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+
+    await expect(movePreview).toContainText('2026-06-01 – 2026-06-03')
+    await expect(movePreview).toContainText('2026-06-02 – 2026-06-04')
+    await movePreview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect(startDate).toHaveValue('2026-06-02')
+    await expect(endDate).toHaveValue('2026-06-04')
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
+    await expect.poll(() => requestCounts.issueUpdates).toBe(1)
+
+    const feedback = page.getByTestId('task-action-feedback')
+
+    await feedback.getByRole('button', { name: '元に戻す', exact: true }).click()
+    const undoPreview = page.getByTestId('task-schedule-update-preview')
+    await expect(undoPreview).toContainText('2026-06-02 – 2026-06-04')
+    await expect(undoPreview).toContainText('2026-06-01 – 2026-06-03')
+    await undoPreview.getByRole('button', { name: '適用', exact: true }).click()
+    await expect(startDate).toHaveValue('2026-06-01')
+    await expect(endDate).toHaveValue('2026-06-03')
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(2)
+    await expect.poll(() => requestCounts.issueUpdates).toBe(2)
+
+    await feedback.getByRole('button', { name: 'やり直す', exact: true }).click()
+    const redoPreview = page.getByTestId('task-schedule-update-preview')
+    await expect(redoPreview).toContainText('2026-06-01 – 2026-06-03')
+    await expect(redoPreview).toContainText('2026-06-02 – 2026-06-04')
+    await redoPreview.getByRole('button', { name: '適用', exact: true }).click()
+    await expect(startDate).toHaveValue('2026-06-02')
+    await expect(endDate).toHaveValue('2026-06-04')
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(3)
+    await expect.poll(() => requestCounts.issueUpdates).toBe(3)
+
+    const resizeHandle = page.getByTestId('task-gantt-resize-wireframe')
+
+    await resizeHandle.focus()
+    await page.keyboard.press('ArrowRight')
+
+    const resizePreview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+
+    await expect(resizePreview).toContainText('2026-06-02 – 2026-06-04')
+    await expect(resizePreview).toContainText('2026-06-02 – 2026-06-05')
+    await resizePreview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect(endDate).toHaveValue('2026-06-05')
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(4)
+    await expect.poll(() => requestCounts.issueUpdates).toBe(4)
+    await expect(resizePreview).toHaveCount(0)
+
+    await expectWireframeScheduleAcrossTaskViews(page, '2026-06-02', '2026-06-05')
+    await page.reload()
+    await expectWireframeScheduleAcrossTaskViews(page, '2026-06-02', '2026-06-05')
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+
+    await row.locator('select[id^="gantt-mode-"]').selectOption('due-date')
+
+    const modePreview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+
+    await expect(modePreview).toContainText('2026-06-02 – 2026-06-05')
+    await expect(modePreview).toContainText('期限: 2026-06-05')
+    await modePreview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect(row.locator('input[id^="gantt-date-"]')).toHaveValue('2026-06-05')
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(5)
+    await expect.poll(() => requestCounts.issueUpdates).toBe(5)
+  })
+
+  test('Issue #188: Gantt は既存 bar と重なる日へ pointer drag で移動・短縮できる', async ({ page }) => {
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+
+    const bar = page.getByTestId('task-gantt-bar-wireframe')
+    const timeline = page.getByTestId('task-gantt-timeline-wireframe')
+
+    await dragGanttControlToDate(page, bar, timeline, '2026-06-02')
+
+    const movePreview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+
+    await expect(movePreview).toContainText('2026-06-01 – 2026-06-03')
+    await expect(movePreview).toContainText('2026-06-02 – 2026-06-04')
+    await movePreview.getByRole('button', { name: '適用', exact: true }).click()
+
+    const movedRow = page.locator('article').filter({
+      has: page.getByTestId('task-gantt-bar-wireframe'),
+    })
+    await expect(movedRow.locator('input[id^="gantt-start-"]')).toHaveValue('2026-06-02')
+    await expect(movedRow.locator('input[id^="gantt-end-"]')).toHaveValue('2026-06-04')
+
+    await dragGanttControlToDate(
+      page,
+      page.getByTestId('task-gantt-resize-wireframe'),
+      page.getByTestId('task-gantt-timeline-wireframe'),
+      '2026-06-03',
+    )
+
+    const resizePreview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+
+    await expect(resizePreview).toContainText('2026-06-02 – 2026-06-04')
+    await expect(resizePreview).toContainText('2026-06-02 – 2026-06-03')
+    await resizePreview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect(movedRow.locator('input[id^="gantt-start-"]')).toHaveValue('2026-06-02')
+    await expect(movedRow.locator('input[id^="gantt-end-"]')).toHaveValue('2026-06-03')
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(2)
+    await expect.poll(() => requestCounts.issueUpdates).toBe(2)
+  })
+
+  test('Issue #188: Gantt は未計画 row の明示日付から bar を作成し再読込後も保持する', async ({ page }) => {
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+    const unscheduledRow = page.locator('article').filter({
+      hasText: '競合サイトの分析レポート作成',
+    })
+
+    await unscheduledRow.locator('input[id^="gantt-create-"]').fill('2026-06-08')
+
+    const preview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+
+    await expect(preview).toContainText('予定なし')
+    await expect(preview).toContainText('2026-06-08')
+    await preview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect(page.getByTestId('task-gantt-bar-competitor-report')).toBeVisible()
+    await expect(unscheduledRow.locator('select[id^="gantt-mode-"]')).toHaveValue('date-range')
+    await expect(unscheduledRow.locator('input[id^="gantt-start-"]')).toHaveValue('2026-06-08')
+    await expect(unscheduledRow.locator('input[id^="gantt-end-"]')).toHaveValue('2026-06-08')
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
+    await expect.poll(() => requestCounts.issueUpdates).toBe(1)
+
+    await page.reload()
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+
+    const reloadedBar = page.getByTestId('task-gantt-bar-competitor-report')
+    const reloadedRow = page.locator('article').filter({ has: reloadedBar })
+
+    await expect(reloadedBar).toBeVisible()
+    await expect(reloadedRow.locator('select[id^="gantt-mode-"]')).toHaveValue('date-range')
+    await expect(reloadedRow.locator('input[id^="gantt-start-"]')).toHaveValue('2026-06-08')
+    await expect(reloadedRow.locator('input[id^="gantt-end-"]')).toHaveValue('2026-06-08')
+  })
+
+  test('Issue #188: Calendar は日付と未計画 bucket の間を drag and drop できる', async ({ page }) => {
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('tab', { name: '期限カレンダー', exact: true }).click()
+
+    const unscheduledBucket = page.getByTestId('task-calendar-unscheduled')
+    const calendarCard = page.getByTestId('task-calendar-item-wireframe')
+
+    await dragScheduleCard(page, calendarCard, unscheduledBucket)
+
+    const unschedulePreview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+
+    await expect(unschedulePreview).toContainText('2026-06-01 – 2026-06-03')
+    await expect(unschedulePreview).toContainText('予定なし')
+    await unschedulePreview.getByRole('button', { name: '適用', exact: true }).click()
+
+    const unscheduledCard = unscheduledBucket.getByTestId('task-calendar-item-wireframe')
+
+    await expect(unscheduledCard).toBeVisible()
+    await expect(unscheduledCard).toBeFocused()
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
+    await expect.poll(() => requestCounts.issueUpdates).toBe(1)
+
+    const targetDay = page.getByTestId('task-calendar-day-2026-06-07')
+
+    await dragScheduleCard(
+      page,
+      unscheduledBucket.getByTestId('task-calendar-item-wireframe'),
+      targetDay,
+    )
+
+    const reschedulePreview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+
+    await expect(reschedulePreview).toContainText('予定なし')
+    await expect(reschedulePreview).toContainText('2026-06-07')
+    await reschedulePreview.getByRole('button', { name: '適用', exact: true }).click()
+
+    const rescheduledCard = targetDay.getByTestId('task-calendar-item-wireframe')
+
+    await expect(rescheduledCard).toBeVisible()
+    await expect(rescheduledCard).toBeFocused()
+    await expect(unscheduledBucket.getByTestId('task-calendar-item-wireframe')).toHaveCount(0)
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(2)
+    await expect.poll(() => requestCounts.issueUpdates).toBe(2)
+
+    await page.reload()
+    await page.getByRole('tab', { name: '期限カレンダー', exact: true }).click()
+    await expect(
+      page.getByTestId('task-calendar-day-2026-06-07')
+        .getByTestId('task-calendar-item-wireframe'),
+    ).toBeVisible()
+  })
+
+  test('Issue #188: Calendar は2日を選んだ期間 task を作成し再読込後も保持する', async ({ page }) => {
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('tab', { name: '期限カレンダー', exact: true }).click()
+    await page.getByRole('button', {
+      name: '2026-06-08 を始点または終点にして期間を作成',
+    }).click()
+    await page.getByRole('button', {
+      name: '2026-06-10 を始点または終点にして期間を作成',
+    }).click()
+
+    const createTaskForm = page.getByTestId('create-task-form')
+
+    await expect(createTaskForm.locator('select[name="scheduleMode"]')).toHaveValue('date-range')
+    await expect(createTaskForm.locator('input[name="scheduleStartDate"]')).toHaveValue('2026-06-08')
+    await expect(createTaskForm.locator('input[name="scheduleEndDate"]')).toHaveValue('2026-06-10')
+
+    await createTaskForm.locator('input[name="title"]').fill('Calendar range task')
+    await createTaskForm.locator('select[name="assigneeUserId"]').selectOption('sato@example.com')
+    await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
+
+    const createdCard = page.getByTestId('task-calendar-item-calendar-range-task')
+
+    await expect(createdCard).toContainText('Calendar range task')
+    await expect(createdCard).toContainText('期間')
+    await expect(createdCard).toContainText('2026-06-08 – 2026-06-10')
+    await expect.poll(() => requestCounts.issueCreates).toBe(1)
+
+    await page.reload()
+    await page.getByRole('tab', { name: '期限カレンダー', exact: true }).click()
+    await expect(page.getByTestId('task-calendar-item-calendar-range-task')).toContainText(
+      '2026-06-08 – 2026-06-10',
+    )
+  })
+
+  test('Issue #188: schedule preview の permission error は理由を表示し更新しない', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      forbiddenSchedulePreviewIssueKeys: [
+        createIssueCollaborationKey('core-team', 'wireframe'),
+      ],
+    })
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+    const bar = page.getByTestId('task-gantt-bar-wireframe')
+
+    await bar.focus()
+    await page.keyboard.press('ArrowRight')
+
+    await expect(page.getByRole('alert').filter({
+      hasText: 'このスケジュールを変更する権限がありません。',
+    })).toBeVisible()
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
+    expect(requestCounts.issueUpdates).toBe(0)
+    await expect(page.getByRole('dialog', { name: '一括操作の事前確認' })).toHaveCount(0)
+  })
+
+  test('Issue #188: schedule の revision conflict は optimistic 表示を戻して理由を示す', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      revisionConflictIssueKeys: [createIssueCollaborationKey('core-team', 'wireframe')],
+    })
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+
+    const bar = page.getByTestId('task-gantt-bar-wireframe')
+    const row = page.locator('article').filter({ has: bar })
+    const startDate = row.locator('input[id^="gantt-start-"]')
+    const endDate = row.locator('input[id^="gantt-end-"]')
+
+    await expect(startDate).toHaveValue('2026-06-01')
+    await expect(endDate).toHaveValue('2026-06-03')
+    await bar.focus()
+    await page.keyboard.press('ArrowRight')
+
+    const preview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+
+    await expect(preview).toContainText('2026-06-02 – 2026-06-04')
+    await preview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect(preview).toHaveCount(0)
+    await expect(startDate).toHaveValue('2026-06-01')
+    await expect(endDate).toHaveValue('2026-06-03')
+    await expect(page.getByTestId('task-action-feedback')).toContainText(
+      '別の変更と競合しました。最新の内容を確認してください。',
+    )
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
+    await expect.poll(() => requestCounts.issueUpdates).toBe(1)
   })
 
   test('低速なタスクAPIを読み上げて一度だけ取得し、キーボード操作を保ったまま復帰する', async ({
@@ -2882,12 +3523,14 @@ test.describe('authenticated task page', () => {
     await expectTeamIssueLayoutToStayInsideColumns(page)
     await createIssueForm.locator('input[name="title"]').fill('割当待ち Issue')
     await createIssueForm.locator('select[name="assigneeUserId"]').selectOption('sato@example.com')
+    await createIssueForm.locator('input[name="dueDate"]').fill('')
     await createIssueForm.getByRole('button', { name: 'Issue を作成' }).click()
 
     await expect(page.getByTestId('issue-row-割当待ち-issue')).toBeVisible()
     expect(requestCounts.issueCreates).toBe(1)
 
     await page.getByTestId('issue-row-割当待ち-issue').click()
+    await expect(page.locator('aside output')).toContainText('未計画')
     await page.locator('aside select[name="assignedProjectId"]').selectOption('refero')
     await page.getByRole('button', { name: '変更を保存' }).click()
 
@@ -2905,6 +3548,37 @@ test.describe('authenticated task page', () => {
     await page.goto('/projects/refero/issues?teamId=core-team')
 
     await expect(page.getByTestId('task-row-割当待ち-issue')).toContainText('割当待ち Issue')
+  })
+
+  test('Team Issue の単一期限 editor は range schedule を暗黙に変更しない', async ({ page }) => {
+    const rangedIssue = createStoredTeamIssue({
+      dueDate: '2026-08-07',
+      id: 'ranged-team-issue',
+      schedule: {
+        calendarPolicy: DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
+        durationDays: 5,
+        endDate: '2026-08-07',
+        mode: 'date-range',
+        startDate: '2026-08-03',
+      },
+      title: 'Range schedule を維持する Issue',
+    })
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: { 'core-team': [rangedIssue] },
+    })
+    await page.goto('/teams/core-team/issues')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByTestId('issue-row-ranged-team-issue').click()
+    const detailPane = page.locator('aside')
+    const scheduleOutput = detailPane.locator('output')
+
+    await expect(scheduleOutput).toContainText('期間: 2026-08-03 – 2026-08-07')
+    await detailPane.locator('input[name="title"]').fill('Range schedule を維持した Issue')
+    await detailPane.getByRole('button', { name: '変更を保存' }).click()
+
+    await expect.poll(() => requestCounts.issueUpdates).toBe(1)
+    await expect(scheduleOutput).toContainText('期間: 2026-08-03 – 2026-08-07')
   })
 
   test('成果物を API body 経由せず upload し、annotation と approval を保存できる', async ({ page }) => {
@@ -4891,7 +5565,8 @@ test.describe('authenticated task page', () => {
 
     await createTaskForm.locator('input[name="title"]').fill('新規タスク')
     await createTaskForm.locator('select[name="assigneeUserId"]').selectOption('sato@example.com')
-    await createTaskForm.locator('input[name="dueDate"]').fill('2026-06-20')
+    await createTaskForm.locator('select[name="scheduleMode"]').selectOption('due-date')
+    await createTaskForm.locator('input[name="scheduleDueDate"]').fill('2026-06-20')
     await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
 
     await expect(page.getByTestId('task-row-new-task').getByText('新規タスク')).toBeVisible()
@@ -4923,7 +5598,8 @@ test.describe('authenticated task page', () => {
     const createTaskForm = page.getByTestId('create-task-form')
 
     await createTaskForm.locator('input[name="title"]').fill('担当者未選択タスク')
-    await createTaskForm.locator('input[name="dueDate"]').fill('2026-06-20')
+    await createTaskForm.locator('select[name="scheduleMode"]').selectOption('due-date')
+    await createTaskForm.locator('input[name="scheduleDueDate"]').fill('2026-06-20')
     await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
 
     await expect(createTaskForm.locator('select[name="assigneeUserId"]')).toHaveValue('')
