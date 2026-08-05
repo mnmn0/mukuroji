@@ -4,7 +4,7 @@ import type {
   WorkItemConfiguration,
   WorkItemRelation,
 } from '@mukuroji/contracts'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
 import {
   canManageWorkspaceStructure,
@@ -620,6 +620,7 @@ export function TeamIssueScreen({
     customFieldId: '',
   })
   const [isCreateOpen, setIsCreateOpen] = useState(defaultCreateIssueOpen)
+  const [createWorkflowStatusId, setCreateWorkflowStatusId] = useState<string>()
   const [createErrorMessage, setCreateErrorMessage] = useState<string | undefined>()
   const [detailUpdateError, setDetailUpdateError] = useState<readonly [string, string] | undefined>()
   const activeTeam = teams.find((team) => team.id === teamId)
@@ -659,6 +660,20 @@ export function TeamIssueScreen({
   const detailErrorMessageLocal = detailUpdateError && detailUpdateError[0] === selectedIssueUpdateErrorKey
     ? detailUpdateError[1]
     : undefined
+
+  /** Opens the Team create form with an optional Board-column status context. */
+  const openCreateIssue = (workflowStatusId?: string) => {
+    setCreateErrorMessage(undefined)
+    setCreateWorkflowStatusId(workflowStatusId)
+    setIsCreateOpen(true)
+  }
+
+  /** Closes the Team create form and clears its contextual defaults. */
+  const closeCreateIssue = () => {
+    setCreateErrorMessage(undefined)
+    setCreateWorkflowStatusId(undefined)
+    setIsCreateOpen(false)
+  }
 
   const visibleIssues = useMemo(
     () =>
@@ -736,7 +751,7 @@ export function TeamIssueScreen({
                 <button
                   aria-expanded={isCreateOpen}
                   className="workbench-button-primary inline-flex h-10 items-center gap-2 px-4"
-                  onClick={() => setIsCreateOpen(!isCreateOpen)}
+                  onClick={() => isCreateOpen ? closeCreateIssue() : openCreateIssue()}
                   type="button"
                 >
                   + {t('issues.action.new')}
@@ -767,13 +782,14 @@ export function TeamIssueScreen({
                 ) : null}
                 {isCreateOpen && onCreateIssue ? (
                   <CreateIssuePanel
+                    key={`create-issue-${createWorkflowStatusId ?? ''}`}
                     assigneeOptions={assigneeOptions}
                     configuration={configuration}
                     errorMessage={createErrorMessage}
+                    workflowStatusId={createWorkflowStatusId}
                     locale={locale}
                     onCancel={() => {
-                      setCreateErrorMessage(undefined)
-                      setIsCreateOpen(false)
+                      closeCreateIssue()
                     }}
                     onSubmit={async (input) => {
                       if (!onCreateIssue) {
@@ -784,7 +800,7 @@ export function TeamIssueScreen({
 
                       try {
                         await onCreateIssue(input)
-                        setIsCreateOpen(false)
+                        closeCreateIssue()
                       } catch (error) {
                         setCreateErrorMessage(error instanceof Error ? error.message : t('issues.error.create'))
                       }
@@ -844,6 +860,7 @@ export function TeamIssueScreen({
                       configuration={configuration}
                       issues={visibleIssues}
                       locale={locale}
+                      onCreateIssueOpen={onCreateIssue ? openCreateIssue : undefined}
                       onSelectIssue={(issueId) => {
                         setDetailUpdateError(undefined)
                         onSelectIssue?.(issueId)
@@ -852,6 +869,7 @@ export function TeamIssueScreen({
                       t={t}
                       workflowStatuses={workflowStatuses}
                       workspaceMembers={workspaceMembers}
+                      onUpdateIssue={onUpdateIssue}
                     />
                   )}
                 </div>
@@ -1003,6 +1021,7 @@ function CreateIssuePanel({
   onSubmit,
   projects,
   t,
+  workflowStatusId,
   workspaceMembers,
 }: {
   assigneeOptions: ProjectMember[]
@@ -1013,13 +1032,17 @@ function CreateIssuePanel({
   onSubmit: (input: CreateTeamIssueInput) => Promise<void>
   projects: ProjectDirectoryTeam['projects']
   t: (key: MessageKey) => string
+  workflowStatusId?: string
   workspaceMembers: WorkspaceMember[]
 }) {
   const today = formatLocalDateInputValue()
   const [selectedProjectId, setSelectedProjectId] = useState('')
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
   const workflowStatuses = resolveCreateWorkflowStatuses(configuration)
-  const initialWorkflowStatusId = configuration?.workflow.initialStatusId ?? ''
+  const contextualWorkflowStatusId = workflowStatusId && workflowStatuses.some((status) => status.id === workflowStatusId)
+    ? workflowStatusId
+    : undefined
+  const initialWorkflowStatusId = contextualWorkflowStatusId ?? configuration?.workflow.initialStatusId ?? workflowStatuses[0]?.id ?? ''
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
   const defaultCustomFieldValues = configuration
     ? createDefaultCustomFieldValues(configuration.customFields, selectedProjectId || undefined)
@@ -1275,7 +1298,9 @@ function IssueBoard({
   configuration,
   issues,
   locale,
+  onCreateIssueOpen,
   onSelectIssue,
+  onUpdateIssue,
   selectedIssueId,
   t,
   workflowStatuses,
@@ -1285,7 +1310,9 @@ function IssueBoard({
   configuration?: WorkItemConfiguration
   issues: TeamIssue[]
   locale: Locale
+  onCreateIssueOpen?: (workflowStatusId: string) => void
   onSelectIssue?: (issueId: string) => void
+  onUpdateIssue?: (issueId: string, input: UpdateTeamIssueInput) => Promise<void>
   selectedIssueId?: string
   t: (key: MessageKey) => string
   workflowStatuses: readonly WorkflowStatusDefinition[]
@@ -1294,58 +1321,203 @@ function IssueBoard({
   const personLabels = Object.fromEntries(
     workspaceMembers.map((member) => [member.email, member.name ?? member.email]),
   )
+  const [draggedIssueId, setDraggedIssueId] = useState<string>()
+  const [dropTargetStatusId, setDropTargetStatusId] = useState<string>()
+  const [movingIssueIds, setMovingIssueIds] = useState<ReadonlySet<string>>(() => new Set())
+  const [moveErrorMessage, setMoveErrorMessage] = useState<string>()
+
+  /** Validates and requests a Team workflow status change. */
+  const moveIssueToStatus = (issue: TeamIssue, workflowStatusId: string) => {
+    if (!onUpdateIssue || issue.workflowStatusId === workflowStatusId) {
+      return
+    }
+
+    const editableStatuses = resolveEditableWorkflowStatuses(issue, configuration)
+
+    if (!editableStatuses.some((status) => status.id === workflowStatusId)) {
+      return
+    }
+
+    const issueId = issue.id
+    setMoveErrorMessage(undefined)
+    setMovingIssueIds((currentIds) => new Set(currentIds).add(issueId))
+    void onUpdateIssue(issueId, { workflowStatusId })
+      .catch((error) => {
+        const cause = error instanceof Error ? error.cause : undefined
+        const isConflict = (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') ||
+          (cause instanceof TeamIssuesApiError && cause.code === 'WorkItemRevisionConflict')
+
+        setMoveErrorMessage(isConflict
+          ? t('tasks.action.conflict')
+          : t('tasks.action.updateError'))
+      })
+      .finally(() => {
+        setMovingIssueIds((currentIds) => {
+          const nextIds = new Set(currentIds)
+          nextIds.delete(issueId)
+          return nextIds
+        })
+      })
+  }
+
+  /** Starts a native drag for a Team Work Item. */
+  const handleDragStart = (event: DragEvent<HTMLElement>, issue: TeamIssue) => {
+    if (!onUpdateIssue) {
+      return
+    }
+
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('application/x-mukuroji-team-issue-id', issue.id)
+    event.dataTransfer.setData('text/plain', issue.id)
+    setDraggedIssueId(issue.id)
+  }
+
+  /** Resolves a dropped Team Work Item and requests a validated status change. */
+  const handleDrop = (event: DragEvent<HTMLElement>, status: WorkflowStatusDefinition) => {
+    event.preventDefault()
+    const issueId = event.dataTransfer.getData('application/x-mukuroji-team-issue-id') ||
+      event.dataTransfer.getData('text/plain') ||
+      draggedIssueId
+    const issue = issueId ? issues.find((candidate) => candidate.id === issueId) : undefined
+
+    setDraggedIssueId(undefined)
+    setDropTargetStatusId(undefined)
+
+    if (issue) {
+      moveIssueToStatus(issue, status.id)
+    }
+  }
 
   return (
-    <section className="mt-5 flex min-w-0 gap-4 overflow-x-auto pb-2">
-      {workflowStatuses.map((status) => {
-        const columnIssues = issues.filter(
-          (issue) => resolveWorkItemWorkflowStatusId(issue) === status.id,
-        )
+    <section className="mt-5 grid min-w-0 gap-3">
+      {moveErrorMessage ? (
+        <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-red-700" role="alert">
+          {moveErrorMessage}
+        </p>
+      ) : null}
+      <div className="flex min-w-0 gap-4 overflow-x-auto pb-2">
+        {workflowStatuses.map((status) => {
+          const columnIssues = issues.filter(
+            (issue) => resolveWorkItemWorkflowStatusId(issue) === status.id,
+          )
 
-        return (
-          <div className="workbench-panel min-h-[420px] w-[min(320px,82vw)] flex-none" key={status.id}>
-            <div className="flex items-center justify-between gap-3 border-b border-[var(--workbench-border)] px-4 py-3">
-              <IssueStatusBadge status={status} />
-              <span className="text-sm font-semibold text-[var(--workbench-muted)]">{columnIssues.length}</span>
+          return (
+            <div
+              className={`workbench-panel min-h-[420px] w-[min(320px,82vw)] flex-none transition ${dropTargetStatusId === status.id ? 'border-[#99d7cf] bg-[#e5f7f4] ring-2 ring-[#99d7cf]/40' : ''}`}
+              key={status.id}
+              onDragLeave={() => setDropTargetStatusId(undefined)}
+              onDragOver={(event) => {
+                if (!onUpdateIssue || !draggedIssueId) {
+                  return
+                }
+
+                const issue = issues.find((candidate) => candidate.id === draggedIssueId)
+
+                if (!issue || !resolveEditableWorkflowStatuses(issue, configuration).some((candidate) => candidate.id === status.id)) {
+                  return
+                }
+
+                event.preventDefault()
+                event.dataTransfer.dropEffect = 'move'
+                setDropTargetStatusId(status.id)
+              }}
+              onDrop={(event) => handleDrop(event, status)}
+            >
+              <div className="flex items-center justify-between gap-3 border-b border-[var(--workbench-border)] px-4 py-3">
+                <IssueStatusBadge status={status} />
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-semibold text-[var(--workbench-muted)]">{columnIssues.length}</span>
+                  {onCreateIssueOpen ? (
+                    <button
+                      aria-label={`${t('tasks.board.addInColumn')}: ${status.name}`}
+                      className="grid h-7 w-7 place-items-center rounded-md border border-[var(--workbench-border-strong)] bg-white text-lg leading-none text-[var(--workbench-primary)] hover:border-[#99d7cf] hover:bg-[#e5f7f4]"
+                      data-testid={`team-issue-add-${status.id}`}
+                      onClick={() => onCreateIssueOpen(status.id)}
+                      type="button"
+                    >
+                      +
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+              <div className="grid gap-3 p-3">
+                {columnIssues.length > 0 ? (
+                  columnIssues.map((issue) => {
+                    const isMoving = movingIssueIds.has(issue.id)
+                    const editableStatuses = resolveEditableWorkflowStatuses(issue, configuration)
+
+                    return (
+                      <article
+                        aria-grabbed={draggedIssueId === issue.id || undefined}
+                        className={`rounded-lg border p-4 text-left transition ${
+                          selectedIssueId === issue.id
+                            ? 'border-[#99d7cf] bg-[#e5f7f4]'
+                            : 'border-[var(--workbench-border)] bg-white hover:border-[#99d7cf] hover:bg-[var(--workbench-surface-muted)]'
+                        } ${draggedIssueId === issue.id ? 'opacity-50 ring-2 ring-[#99d7cf]' : ''} ${isMoving ? 'opacity-70' : ''}`}
+                        data-testid={`team-issue-card-${issue.id}`}
+                        draggable={Boolean(onUpdateIssue) && !isMoving}
+                        key={issue.id}
+                        onDragEnd={() => {
+                          setDraggedIssueId(undefined)
+                          setDropTargetStatusId(undefined)
+                        }}
+                        onDragStart={(event) => handleDragStart(event, issue)}
+                      >
+                        <button
+                          aria-pressed={selectedIssueId === issue.id}
+                          className="w-full text-left text-sm font-semibold leading-6 text-[var(--workbench-text)] hover:text-[var(--workbench-primary)] disabled:cursor-default disabled:text-[var(--workbench-text)]"
+                          disabled={!onSelectIssue}
+                          onClick={() => onSelectIssue?.(issue.id)}
+                          type="button"
+                        >
+                          {resolveIssueTitle(issue, t)}
+                        </button>
+                        <p className="mt-2 text-xs font-medium text-[var(--workbench-muted)]">{resolveAssignedProjectName(issue, activeTeam, t)}</p>
+                        <div className="mt-3">
+                          <IssueCustomFieldSummary
+                            configuration={configuration}
+                            issue={issue}
+                            locale={locale}
+                            personLabels={personLabels}
+                          />
+                        </div>
+                        <div className="mt-4 flex flex-wrap items-center gap-2">
+                          <IssuePriorityBadge priority={issue.priority} t={t} />
+                          <span className="text-xs font-semibold text-[var(--workbench-muted)]">{issue.dueDate}</span>
+                        </div>
+                        {onUpdateIssue && editableStatuses.length > 0 ? (
+                          <select
+                            aria-label={`${resolveIssueTitle(issue, t)}: ${t('tasks.column.status')}`}
+                            className="workbench-input mt-3 h-8 w-full px-2 text-xs"
+                            disabled={isMoving}
+                            onChange={(event) => moveIssueToStatus(issue, event.target.value)}
+                            value={issue.workflowStatusId}
+                          >
+                            {editableStatuses.map((editableStatus) => (
+                              <option key={editableStatus.id} value={editableStatus.id}>
+                                {editableStatus.name}
+                              </option>
+                            ))}
+                          </select>
+                        ) : null}
+                        {onUpdateIssue ? (
+                          <p className="mt-2 text-[11px] font-medium text-[var(--workbench-muted)]">
+                            {t('tasks.board.dragHint')}
+                          </p>
+                        ) : null}
+                      </article>
+                    )
+                  })
+                ) : (
+                  <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
+                    {t('tasks.board.empty')}
+                  </p>
+                )}
+              </div>
             </div>
-            <div className="grid gap-3 p-3">
-              {columnIssues.length > 0 ? (
-                columnIssues.map((issue) => (
-                  <button
-                    className={`rounded-lg border p-4 text-left transition ${
-                      selectedIssueId === issue.id
-                        ? 'border-[#99d7cf] bg-[#e5f7f4]'
-                        : 'border-[var(--workbench-border)] bg-white hover:border-[#99d7cf] hover:bg-[var(--workbench-surface-muted)]'
-                    }`}
-                    key={issue.id}
-                    onClick={() => onSelectIssue?.(issue.id)}
-                    type="button"
-                  >
-                    <p className="text-sm font-semibold leading-6 text-[var(--workbench-text)]">{resolveIssueTitle(issue, t)}</p>
-                    <p className="mt-2 text-xs font-medium text-[var(--workbench-muted)]">{resolveAssignedProjectName(issue, activeTeam, t)}</p>
-                    <div className="mt-3">
-                      <IssueCustomFieldSummary
-                        configuration={configuration}
-                        issue={issue}
-                        locale={locale}
-                        personLabels={personLabels}
-                      />
-                    </div>
-                    <div className="mt-4 flex flex-wrap items-center gap-2">
-                      <IssuePriorityBadge priority={issue.priority} t={t} />
-                      <span className="text-xs font-semibold text-[var(--workbench-muted)]">{issue.dueDate}</span>
-                    </div>
-                  </button>
-                ))
-              ) : (
-                <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
-                  {t('tasks.board.empty')}
-                </p>
-              )}
-            </div>
-          </div>
-        )
-      })}
+          )
+        })}
+      </div>
     </section>
   )
 }

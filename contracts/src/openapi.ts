@@ -361,6 +361,10 @@ const components = {
         assigneeUserId: { type: 'string' },
         workflowStatusId: { type: 'string' },
         customFieldValues: { type: 'object', additionalProperties: true },
+        quickCapture: {
+          type: 'boolean',
+          description: 'When true, workflowStatusId must identify a backlog status so required custom fields can be completed later.',
+        },
         dueDate: { type: 'string', format: 'date' },
         priority: { type: 'string', enum: ['high', 'medium', 'low'] },
       },

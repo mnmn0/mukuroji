@@ -5,6 +5,7 @@ import { collaborationWorkspaceMemberFixtures } from '../../issues/fixtures'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
 import type { CreateProjectTaskInput } from '../api/tasks'
+import type { TaskCreateContext } from '../model/taskView'
 import { CreateTaskPanel } from './CreateTaskPanel'
 
 const t = createTranslator('ja')
@@ -26,6 +27,25 @@ const assigneeOptions = [
     workspaceStatus: 'active',
   },
 ] satisfies ProjectMember[]
+
+const quickCaptureContext = {
+  dueDate: '2026/06/12',
+  projectId: 'refero',
+  source: 'table',
+  teamId: 'core-team',
+  workflowStatusId: 'backlog',
+} satisfies TaskCreateContext
+
+const detailedOnlyConfiguration = {
+  ...teamWorkItemConfigurationFixture,
+  workflow: {
+    ...teamWorkItemConfigurationFixture.workflow,
+    initialStatusId: 'ready',
+    statuses: teamWorkItemConfigurationFixture.workflow.statuses.filter((status) =>
+      status.category !== 'backlog',
+    ),
+  },
+} satisfies typeof teamWorkItemConfigurationFixture
 
 /** Storybook metadata for the independent project task creation panel. */
 const meta = {
@@ -106,6 +126,56 @@ export const SuccessfulSubmit: Story = {
         workflowStatusId: 'backlog',
       })
     })
+  },
+}
+
+/** Captures a title using the inherited backlog status and default assignee. */
+export const QuickCapture: Story = {
+  args: {
+    context: quickCaptureContext,
+    initialMode: 'quick',
+    onSubmit: fn(async (input: CreateProjectTaskInput) => {
+      void input
+    }),
+  },
+  play: async ({ args, canvasElement, step }) => {
+    const canvas = within(canvasElement)
+
+    await step('Enter a title in quick-capture mode', async () => {
+      await userEvent.type(
+        canvas.getByRole('textbox', { name: 'タスク名' }),
+        'リリース前の確認事項を整理する',
+      )
+      await userEvent.click(canvas.getByRole('button', { name: '登録' }))
+    })
+
+    await expect(args.onSubmit).toHaveBeenCalledWith({
+      assigneeUserId: 'sato@example.com',
+      customFieldValues: {},
+      dueDate: expect.stringMatching(/^\d{4}\/\d{2}\/\d{2}$/),
+      priority: 'medium',
+      quickCapture: true,
+      title: 'リリース前の確認事項を整理する',
+      workflowStatusId: 'backlog',
+    })
+  },
+}
+
+/** Falls back to detailed creation when the configuration has no backlog status. */
+export const DetailedWhenQuickCaptureUnavailable: Story = {
+  args: {
+    configuration: detailedOnlyConfiguration,
+    initialMode: 'quick',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await expect(canvas.queryByRole('button', { name: 'クイック登録' })).toBeNull()
+    await expect(canvas.getByRole('button', { name: '詳細登録' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    await expect(canvas.getByRole('combobox', { name: '担当者' })).toBeVisible()
   },
 }
 

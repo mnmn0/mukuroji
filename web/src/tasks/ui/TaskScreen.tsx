@@ -14,7 +14,7 @@ import {
 import { RelatedDocuments } from '../../documents/ui/RelatedDocuments'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import type { IssueCollaborationController } from '../../issues/mutations/useIssueCollaboration'
-import type { TeamIssue, TeamIssueDetail, UpdateTeamIssueInput } from '../../issues/api'
+import { TeamIssuesApiError, type TeamIssue, type TeamIssueDetail, type UpdateTeamIssueInput } from '../../issues/api'
 import type {
   ProjectDirectoryTeam,
   ProjectMember,
@@ -36,6 +36,7 @@ import {
   createBulkProjectOptions,
   createProjectTaskStatusColumns,
   createTaskKey,
+  createTaskInversePatch,
   createTaskPersonLabels,
   filterAndSortProjectTasks,
   findTaskBySelection,
@@ -45,11 +46,13 @@ import {
   type AssigneeFilter,
   type DueDateFilter,
   type PriorityFilter,
+  type TaskCreateContext,
   type StatusFilter,
   type TaskSortOrder,
   type TaskTab,
 } from '../model/taskView'
 import { CreateTaskPanel } from './CreateTaskPanel'
+import { TaskActionFeedback } from './TaskActionFeedback'
 import { TaskDetailPane } from './TaskDetailPane'
 import { TaskHeader } from './TaskHeader'
 import { TaskWorkspace } from './TaskWorkspace'
@@ -69,6 +72,22 @@ type TaskBulkSelectionState = {
   items: BulkOperationSelection[]
   /** Project whose task snapshots are selected. */
   projectId: string
+}
+
+/** Last successful inline update retained for a reversible task action. */
+type TaskUndoState = {
+  /** Task snapshot returned by the successful update. */
+  task: ProjectTask
+  /** Patch that restores every field touched by the update. */
+  inversePatch: UpdateTeamIssueInput
+}
+
+/** Shared feedback state for create, edit, and move actions. */
+type TaskActionState = {
+  /** Visual severity of the feedback. */
+  kind: 'success' | 'error'
+  /** Localized feedback message. */
+  message: string
 }
 
 /** Props accepted by the task management screen. */
@@ -177,12 +196,17 @@ export type TaskScreenProps = {
     issueId: string,
     input: UpdateTeamIssueInput,
   ) => Promise<void>
+  /** Updates any visible Work Item through the shared optimistic action. */
+  onUpdateTask?: (
+    task: ProjectTask,
+    input: UpdateTeamIssueInput,
+  ) => Promise<ProjectTask>
   /** Creates a relation from the selected Work Item. */
   onAddRelation?: (issueId: string, input: WorkItemRelationEditorInput) => Promise<void>
   /** Deletes a relation from the selected Work Item. */
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
-  /** Creates a Project task from the inline form. */
-  onCreateTask?: (input: CreateProjectTaskInput) => Promise<void>
+  /** Creates a Project task from a view-aware inline form. */
+  onCreateTask?: (input: CreateProjectTaskInput, context?: TaskCreateContext) => Promise<void>
   /** Loads the next page of Project user candidates. */
   onLoadMoreProjectUsers?: () => Promise<void>
   /** Changes the Project user search query. */
@@ -270,6 +294,7 @@ export function TaskScreen({
   onCreateTask,
   onRetryConfigurations,
   onUpdateIssue,
+  onUpdateTask,
   onUpdateProjectMember,
   onBulkPreview,
   onBulkApply,
@@ -295,9 +320,15 @@ export function TaskScreen({
     projectId,
   })
   const [localSelectedDetailTaskKey, setLocalSelectedDetailTaskKey] = useState<string>()
+  const [isDetailOpen, setIsDetailOpen] = useState(true)
   const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(defaultCreateTaskOpen)
+  const [createTaskContext, setCreateTaskContext] = useState<TaskCreateContext>()
   const [createTaskError, setCreateTaskError] = useState<string>()
   const [isCreatingTask, setIsCreatingTask] = useState(false)
+  const [taskAction, setTaskAction] = useState<TaskActionState>()
+  const [taskUndo, setTaskUndo] = useState<TaskUndoState>()
+  const [isUndoingTask, setIsUndoingTask] = useState(false)
+  const detailScrollTopRef = useRef(0)
   const taskContentRef = useRef<HTMLDivElement>(null)
   const resolvedProjectName = projectName ?? projectId
   const resolvedActiveTeam = activeProjectTeamId
@@ -402,18 +433,16 @@ export function TaskScreen({
     findTaskBySelection(tasks, initialSelectedTaskId, activeProjectTeamId) ??
     visibleTasks[0] ??
     tasks[0]
+  const detailTask = isDetailOpen ? selectedDetailTask : undefined
   const selectedDetailTaskKey = selectedDetailTask
     ? createTaskKey(selectedDetailTask)
     : undefined
-  const selectedDetailTeamProjects = selectedDetailTask
-    ? teams.find((team) => team.id === selectedDetailTask.teamId)?.projects ?? activeTeamProjects
+  const selectedDetailTeamProjects = detailTask
+    ? teams.find((team) => team.id === detailTask.teamId)?.projects ?? activeTeamProjects
     : activeTeamProjects
-
-  useEffect(() => {
-    if (isCreateTaskOpen) {
-      taskContentRef.current?.scrollTo({ top: 0 })
-    }
-  }, [isCreateTaskOpen])
+  const createConfiguration = createTaskContext?.teamId
+    ? resolvedConfigurationsByTeam[createTaskContext.teamId]?.configuration ?? configuration
+    : configuration
 
   /** Updates one task's Project-scoped bulk selection snapshot. */
   const updateTaskSelection = (taskKey: string, selected: boolean) => {
@@ -467,11 +496,114 @@ export function TaskScreen({
 
   /** Selects a task locally or delegates route-controlled selection to the caller. */
   const handleSelectDetailTask = (task: ProjectTask) => {
+    setIsDetailOpen(true)
     if (!onSelectedIssueChange) {
       setLocalSelectedDetailTaskKey(createTaskKey(task))
     }
 
     onSelectedIssueChange?.(task)
+    restoreDetailScrollTop()
+  }
+
+  /** Closes the detail pane without losing the current list position. */
+  const handleCloseDetail = () => {
+    detailScrollTopRef.current = taskContentRef.current?.scrollTop ?? 0
+    setIsDetailOpen(false)
+  }
+
+  /** Opens the shared create panel with context inherited from a task view. */
+  const handleCreateTaskOpen = (context?: TaskCreateContext) => {
+    const defaultTeamId = activeProjectTeamId ?? teams.find((team) =>
+      team.projects.some((project) => project.id === projectId),
+    )?.id
+    const resolvedContext: TaskCreateContext = {
+      projectId: context?.projectId ?? projectId,
+      source: context?.source ?? 'header',
+      ...(context?.assigneeUserId ? { assigneeUserId: context.assigneeUserId } : {}),
+      ...(context?.dueDate ? { dueDate: context.dueDate } : {}),
+      ...(context?.teamId ?? defaultTeamId
+        ? { teamId: context?.teamId ?? defaultTeamId }
+        : {}),
+      ...(context?.workflowStatusId
+        ? { workflowStatusId: context.workflowStatusId }
+        : {}),
+    }
+    setCreateTaskError(undefined)
+    setCreateTaskContext(resolvedContext)
+    setIsCreateTaskOpen(true)
+    taskContentRef.current?.scrollTo({ top: 0 })
+  }
+
+  /** Restores the list scroll position captured when the detail pane closed. */
+  const restoreDetailScrollTop = () => {
+    const scrollTop = detailScrollTopRef.current
+
+    if (scrollTop === 0) {
+      return
+    }
+
+    requestAnimationFrame(() => taskContentRef.current?.scrollTo({ top: scrollTop }))
+  }
+
+  /** Updates a task through the shared action and retains an inverse for undo. */
+  const handleUpdateTask = async (
+    task: ProjectTask,
+    input: UpdateTeamIssueInput,
+  ) => {
+    if (!onUpdateTask) {
+      return task
+    }
+
+    setTaskAction(undefined)
+    setTaskUndo(undefined)
+
+    try {
+      const updatedTask = await onUpdateTask(task, input)
+      setTaskUndo({
+        inversePatch: createTaskInversePatch(task, input),
+        task: updatedTask,
+      })
+      setTaskAction({
+        kind: 'success',
+        message: t('tasks.action.saved'),
+      })
+      return updatedTask
+    } catch (error) {
+      setTaskAction({
+        kind: 'error',
+        message: error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict'
+          ? t('tasks.action.conflict')
+          : t('tasks.action.updateError'),
+      })
+      throw error
+    }
+  }
+
+  /** Reverses the most recent successful inline task update. */
+  const handleUndoTask = async () => {
+    if (!taskUndo || !onUpdateTask || isUndoingTask) {
+      return
+    }
+
+    setIsUndoingTask(true)
+
+    try {
+      await onUpdateTask(taskUndo.task, taskUndo.inversePatch)
+      setTaskUndo(undefined)
+      setTaskAction({
+        kind: 'success',
+        message: t('tasks.action.saved'),
+      })
+    } catch (error) {
+      setTaskAction({
+        kind: 'error',
+        message: error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict'
+          ? t('tasks.action.conflict')
+          : t('tasks.action.updateError'),
+      })
+    } finally {
+      setIsUndoingTask(false)
+    }
   }
 
   return (
@@ -481,7 +613,13 @@ export function TaskScreen({
           isProjectQuickAccess={isProjectQuickAccess}
           isProjectQuickAccessSaving={isProjectQuickAccessSaving}
           isCreateTaskOpen={isCreateTaskOpen}
-          onCreateTaskOpenChange={onCreateTask ? setIsCreateTaskOpen : undefined}
+          onCreateTaskOpenChange={onCreateTask ? (isOpen) => {
+            if (isOpen) {
+              handleCreateTaskOpen()
+            } else {
+              setIsCreateTaskOpen(false)
+            }
+          } : undefined}
           onMobileSidebarOpen={openMobileSidebar}
           onProjectQuickAccessToggle={onProjectQuickAccessToggle}
           onTabChange={setActiveTab}
@@ -523,17 +661,33 @@ export function TaskScreen({
                 ) : null}
               </div>
             ) : null}
+            {taskAction ? (
+              <TaskActionFeedback
+                dismissLabel={t('tasks.action.dismiss')}
+                kind={taskAction.kind}
+                message={isUndoingTask ? t('tasks.action.undoing') : taskAction.message}
+                onDismiss={() => {
+                  setTaskAction(undefined)
+                  setTaskUndo(undefined)
+                }}
+                onUndo={taskUndo && !isUndoingTask ? () => void handleUndoTask() : undefined}
+                undoLabel={taskUndo && !isUndoingTask ? t('tasks.action.undo') : undefined}
+              />
+            ) : null}
             {isCreateTaskOpen && onCreateTask ? (
               <CreateTaskPanel
+                key={`${createTaskContext?.source ?? 'header'}:${createTaskContext?.teamId ?? ''}:${createTaskContext?.workflowStatusId ?? ''}:${createTaskContext?.dueDate ?? ''}:${createTaskContext?.assigneeUserId ?? ''}`}
                 assigneeErrorMessage={assigneeErrorMessage}
                 assigneeOptions={assigneeOptions}
-                configuration={configuration}
+                configuration={createConfiguration}
+                context={createTaskContext}
                 errorMessage={createTaskError}
                 isAssigneeOptionsLoading={isAssigneeOptionsLoading}
                 isSubmitting={isCreatingTask}
                 locale={locale}
                 onCancel={() => {
                   setCreateTaskError(undefined)
+                  setCreateTaskContext(undefined)
                   setIsCreateTaskOpen(false)
                 }}
                 onSubmit={async (input) => {
@@ -541,7 +695,13 @@ export function TaskScreen({
                   setIsCreatingTask(true)
 
                   try {
-                    await onCreateTask(input)
+                    await onCreateTask(input, createTaskContext)
+                    setTaskUndo(undefined)
+                    setTaskAction({
+                      kind: 'success',
+                      message: t('tasks.action.saved'),
+                    })
+                    setCreateTaskContext(undefined)
                     setIsCreateTaskOpen(false)
                   } catch (error) {
                     setCreateTaskError(
@@ -571,6 +731,7 @@ export function TaskScreen({
               <TaskWorkspace
                 activeTab={activeTab}
                 allTasks={tasks}
+                assigneeOptions={assigneeOptions}
                 assigneeFilter={assigneeFilter}
                 bulkProjectOptions={bulkProjectOptions}
                 bulkWorkspaceId={workspaceId}
@@ -591,7 +752,7 @@ export function TaskScreen({
                 onBulkPreview={onBulkPreview}
                 onBulkRetry={onBulkRetry}
                 onBulkUndo={onBulkUndo}
-                onCreateTaskOpen={onCreateTask ? () => setIsCreateTaskOpen(true) : undefined}
+                onCreateTaskOpen={onCreateTask ? handleCreateTaskOpen : undefined}
                 onDefinitionFilterChange={setDefinitionFilter}
                 onDueDateFilterChange={setDueDateFilter}
                 onLoadMoreProjectUsers={onLoadMoreProjectUsers}
@@ -604,6 +765,7 @@ export function TaskScreen({
                 onStatusFilterChange={setStatusFilter}
                 onTaskSelectionChange={updateTaskSelection}
                 onUpdateProjectMember={onUpdateProjectMember}
+                onUpdateTask={onUpdateTask ? handleUpdateTask : undefined}
                 onVisibleTaskSelectionChange={updateVisibleTaskSelection}
                 personLabels={personLabels}
                 personOptions={personOptions}
@@ -636,9 +798,9 @@ export function TaskScreen({
                   assigneeOptions={assigneeOptions}
                   artifacts={artifacts}
                   collaboration={collaboration}
-                  configuration={selectedDetailTask
+                  configuration={detailTask
                     ? resolveProjectTaskConfiguration(
-                        selectedDetailTask,
+                        detailTask,
                         resolvedConfigurationsByTeam,
                         configuration,
                       )
@@ -650,19 +812,20 @@ export function TaskScreen({
                   focusedRootCommentId={focusedRootCommentId}
                   isLoading={isSelectedIssueDetailLoading}
                   isRelationCandidatesLoading={isRelationCandidatesLoading}
-                  key={`${selectedDetailTask?.teamId ?? ''}:${selectedDetailTask?.id ?? ''}`}
+                  key={`${detailTask?.teamId ?? ''}:${detailTask?.id ?? ''}`}
                   locale={locale}
                   onAddRelation={onAddRelation}
+                  onClose={handleCloseDetail}
                   onDeleteRelation={onDeleteRelation}
-                  onUpdateIssue={selectedDetailTask &&
-                      configurationFailedTeamIds.includes(selectedDetailTask.teamId)
+                  onUpdateIssue={detailTask &&
+                      configurationFailedTeamIds.includes(detailTask.teamId)
                     ? undefined
                     : onUpdateIssue}
                   projects={selectedDetailTeamProjects}
                   relationCandidates={relationCandidates}
                   relationCandidatesErrorMessage={relationCandidatesErrorMessage}
                   t={t}
-                  task={selectedDetailTask}
+                  task={detailTask}
                   workspaceMembers={workspaceMembers}
                 />
               )}

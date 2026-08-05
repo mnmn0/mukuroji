@@ -191,6 +191,55 @@ test('applies defaults only on create and does not resurrect removed values on u
     .toThrow('is required')
 })
 
+test('allows required fields to be completed after a quick capture', () => {
+  const configuration = createConfiguration({
+    customFields: [field('required', 'text', { required: true })],
+  })
+
+  expect(normalizeCustomFieldValues(configuration, undefined, {
+    allowRequiredMissing: true,
+    mode: 'create',
+  })).toEqual({})
+  expect(normalizeCustomFieldValues(configuration, undefined, {
+    allowRequiredMissing: true,
+    existingValues: {},
+    mode: 'update',
+  })).toEqual({})
+})
+
+test('defers formulas that reference required values omitted by quick capture', () => {
+  const configuration = createConfiguration({
+    customFields: [
+      field('amount', 'number', { required: true }),
+      field('total', 'formula', { formulaExpression: '{amount} * 2' }),
+    ],
+  })
+
+  expect(normalizeCustomFieldValues(configuration, undefined, {
+    allowRequiredMissing: true,
+    mode: 'create',
+  })).toEqual({})
+})
+
+test('removes stale deferred formula values during a quick-capture update', () => {
+  const configuration = createConfiguration({
+    customFields: [
+      field('amount', 'number', { required: true }),
+      field('total', 'formula', { formulaExpression: '{amount} * 2' }),
+    ],
+  })
+
+  expect(normalizeCustomFieldValues(
+    configuration,
+    { amount: null },
+    {
+      allowRequiredMissing: true,
+      existingValues: { amount: 3, total: 6 },
+      mode: 'update',
+    },
+  )).toEqual({})
+})
+
 test('revalidates stored values against the current definition before an unrelated update', () => {
   const configuration = createConfiguration({
     customFields: [field('amount', 'number')],

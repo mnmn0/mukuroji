@@ -60,6 +60,7 @@ describe('independent task views', () => {
     expect(html).toContain('data-selected="true"')
     expect(html).toContain('data-testid="tasks-count"')
     expect(html).toContain('4件のタスク')
+    expect(html).toContain('data-testid="task-row-add-wireframe"')
 
     const emptyHtml = renderToStaticMarkup(
       <TaskTableView
@@ -147,12 +148,15 @@ describe('independent task views', () => {
       <TaskGanttView
         configuration={teamWorkItemConfigurationFixture}
         configurationsByTeam={taskViewStoryConfigurationsByTeam}
+        onCreateTaskOpen={() => undefined}
+        projectId="refero"
         t={t}
         tasks={[...taskViewStoryTasks].reverse()}
       />,
     )
 
     expect(html).toContain('aria-label="期限順リスト"')
+    expect(html).toContain('data-testid="task-gantt-add-wireframe"')
     expect(html.indexOf('ワイヤーフレームを確認する')).toBeLessThan(
       html.indexOf('ブランドガイドラインを更新する'),
     )
@@ -246,6 +250,64 @@ describe('independent task views', () => {
     expect(html).toContain('name="dueDate"')
   })
 
+  test('carries view context into quick capture and exposes shared inline editors', () => {
+    const quickHtml = renderToStaticMarkup(
+      <CreateTaskPanel
+        assigneeOptions={taskViewStoryProjectMembers}
+        configuration={teamWorkItemConfigurationFixture}
+        context={{
+          assigneeUserId: 'sato@example.com',
+          dueDate: '2026/06/12',
+          projectId: 'refero',
+          source: 'calendar',
+          teamId: 'core-team',
+          workflowStatusId: 'backlog',
+        }}
+        isAssigneeOptionsLoading={false}
+        isSubmitting={false}
+        locale="ja"
+        projectId="refero"
+        t={t}
+        workspaceMembers={collaborationWorkspaceMemberFixtures}
+        onCancel={() => undefined}
+        onSubmit={async () => undefined}
+      />,
+    )
+    const inlineHtml = renderToStaticMarkup(
+      <TaskTableView
+        assigneeOptions={taskViewStoryProjectMembers}
+        bulkProjectOptions={[]}
+        bulkWorkspaceId=""
+        configuration={teamWorkItemConfigurationFixture}
+        configurationsByTeam={taskViewStoryConfigurationsByTeam}
+        locale="ja"
+        personLabels={personLabels}
+        projectId="refero"
+        selectedBulkItems={[]}
+        selectedTaskKeys={[]}
+        t={t}
+        tasks={taskViewStoryTasks.slice(0, 1)}
+        visibleBulkItems={[]}
+        onBulkOperationComplete={() => undefined}
+        onSelectTask={() => undefined}
+        onCreateTaskOpen={() => undefined}
+        onTaskSelectionChange={() => undefined}
+        onUpdateTask={async (task) => task}
+        onVisibleTaskSelectionChange={() => undefined}
+      />,
+    )
+
+    expect(quickHtml).toMatch(new RegExp(
+      `<button[^>]*aria-pressed="true"[^>]*>${t('tasks.create.quick')}</button>`,
+    ))
+    expect(quickHtml).toContain('name="title"')
+    expect(quickHtml).not.toContain('name="workflowStatusId"')
+    expect(inlineHtml).toContain('data-testid="task-inline-title-wireframe"')
+    expect(inlineHtml).toContain('data-testid="task-inline-custom-fields-wireframe"')
+    expect(inlineHtml).toContain('data-testid="task-open-detail-wireframe"')
+    expect(inlineHtml).toContain('data-testid="task-row-add-wireframe"')
+  })
+
   test('omits a status badge when neither a status nor task is supplied', () => {
     expect(renderToStaticMarkup(<TaskStatusBadge />)).toBe('')
   })
@@ -264,6 +326,7 @@ describe('independent task views', () => {
         t={t}
         task={taskViewStoryTasks[0]}
         workspaceMembers={collaborationWorkspaceMemberFixtures}
+        onClose={() => undefined}
         onUpdateIssue={async () => undefined}
       />,
     )
@@ -295,6 +358,7 @@ describe('independent task views', () => {
     )
 
     expect(editableHtml).toContain('data-testid="task-detail-pane"')
+    expect(editableHtml).toContain('data-testid="task-detail-close"')
     expect(editableHtml).toContain('Refero の初回作業面を確認し')
     expect(editableHtml).toContain('name="custom-field:customer-impact"')
     expect(editableHtml).toContain('Enterprise customers can complete setup')

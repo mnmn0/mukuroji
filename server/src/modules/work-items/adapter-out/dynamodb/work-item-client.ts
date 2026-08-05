@@ -706,6 +706,8 @@ export type CreateTeamIssueRequestBody = {
    * Custom field ID ごとの型付き値です。
    */
   customFieldValues?: unknown
+  /** Quick capture では required custom field の入力を後回しにします。 */
+  quickCapture?: unknown
   /** API handler が検証後に付与する workflow extension schema version です。 */
   workflowSchemaVersion?: unknown
   /** API handler が検証後に付与する workflow status category です。 */

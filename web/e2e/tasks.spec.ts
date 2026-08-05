@@ -2141,7 +2141,7 @@ test.describe('authenticated task page', () => {
       '- checkbox "新しいランディングページのワイヤーフレーム作成"',
     )
     expect(tableSnapshot).toContain(
-      '- button "新しいランディングページのワイヤーフレーム作成"',
+      '- \'button "タスク詳細: 新しいランディングページのワイヤーフレーム作成"\'',
     )
 
     const tableTab = tablist.getByRole('tab', { name: 'テーブル' })
@@ -2263,6 +2263,7 @@ test.describe('authenticated task page', () => {
 
     const searchbox = page.getByRole('searchbox', { name: '検索...' })
     const statusFilterButton = page.getByRole('button', {
+      exact: true,
       name: 'ステータス',
     })
 
@@ -2626,23 +2627,23 @@ test.describe('authenticated task page', () => {
     await expect(initialDetailPane.getByRole('button', { name: '変更を保存' })).toBeEnabled()
     await expect(page.getByRole('button', { name: 'コメントを追加' })).toBeVisible()
 
-    await page.getByRole('button', { name: '担当者' }).click()
+    await page.getByRole('button', { exact: true, name: '担当者' }).click()
     await page.getByRole('menuitemradio', { name: '佐藤 花子' }).click()
 
     await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
     await expect(page.getByTestId('task-row-brand-guideline')).toBeHidden()
     await expect(page.getByTestId('tasks-count')).toContainText('1')
 
-    await page.getByRole('button', { name: '担当者' }).click()
+    await page.getByRole('button', { exact: true, name: '担当者' }).click()
     await page.getByRole('menuitemradio', { name: 'すべての担当者' }).click()
-    await page.getByRole('button', { name: '優先度' }).click()
+    await page.getByRole('button', { exact: true, name: '優先度' }).click()
     await page.getByRole('menuitemradio', { name: '高' }).click()
 
     await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
     await expect(page.getByTestId('task-row-seo-research')).toBeHidden()
     await expect(page.getByTestId('tasks-count')).toContainText('1')
 
-    await page.getByRole('button', { name: '優先度' }).click()
+    await page.getByRole('button', { exact: true, name: '優先度' }).click()
     await page.getByRole('menuitemradio', { name: 'すべての優先度' }).click()
     await page.getByRole('button', { name: '期限', exact: true }).click()
     await page.getByRole('menuitemradio', { name: '期限切れ' }).click()
@@ -2686,7 +2687,7 @@ test.describe('authenticated task page', () => {
     )
     await page.locator('textarea[name="body"]').fill('')
 
-    await page.getByTestId('task-row-seo-research').getByRole('button').click()
+    await page.getByTestId('task-open-detail-seo-research').click()
 
     await expect(page).toHaveURL(/issueId=seo-research/)
     await expect(page.getByTestId('task-detail-pane')).toContainText('SEO キーワードリサーチ')
@@ -2821,7 +2822,7 @@ test.describe('authenticated task page', () => {
 
     await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
     await expect(page.getByTestId('tasks-heading')).toBeVisible()
-    await page.getByTestId('task-row-brand-guideline').getByRole('button').click()
+    await page.getByTestId('task-open-detail-brand-guideline').click()
     await expect(page.getByTestId('task-detail-pane')).toContainText('ブランドガイドラインの更新')
 
     await page.goto('/teams/core-team/issues')
@@ -3432,7 +3433,7 @@ test.describe('authenticated task page', () => {
     await firstPanel.getByRole('button', { name: 'ダウンロード' }).click()
     await staleAccessStarted
 
-    await page.getByTestId('task-row-file-scope-second').getByRole('button').click()
+    await page.getByTestId('task-open-detail-file-scope-second').click()
     await expect(page).toHaveURL(/issueId=file-scope-second/)
     const secondPanel = page.getByTestId('issue-artifacts-panel')
     await expect(secondPanel.getByText('scope-first.png')).toHaveCount(0)
@@ -3837,11 +3838,15 @@ test.describe('authenticated task page', () => {
 
     await expect(page).toHaveURL('/projects/shared-launch/issues')
     await expect(page.getByTestId('task-row-ambiguous-issue')).toHaveCount(2)
-    await expect(page.getByRole('button', { name: 'Core ambiguous issue' })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Design ambiguous issue' })).toBeVisible()
+    await expect(
+      page.getByRole('button', { exact: true, name: 'タスク詳細: Core ambiguous issue' }),
+    ).toBeVisible()
+    await expect(
+      page.getByRole('button', { exact: true, name: 'タスク詳細: Design ambiguous issue' }),
+    ).toBeVisible()
     expect(teamScopedIssueRequestPaths).toEqual([])
 
-    await page.getByRole('button', { name: 'Design ambiguous issue' }).click()
+    await page.getByRole('button', { exact: true, name: 'タスク詳細: Design ambiguous issue' }).click()
 
     await expect(page).toHaveURL(
       '/projects/shared-launch/issues?teamId=design-team&issueId=ambiguous-issue',

@@ -86,6 +86,8 @@ export type NormalizeCustomFieldValuesOptions = {
   existingValues?: Readonly<Record<string, CustomFieldValue>>
   /** Project scoped field の適用判定に使う遂行先 Project ID です。 */
   projectId?: string
+  /** Backlog/Triage の quick capture では required value の欠落を許可します。 */
+  allowRequiredMissing?: boolean
 }
 
 /** Workflow status の解決結果です。 */
@@ -351,7 +353,7 @@ export function normalizeCustomFieldValues(
     }
     const value = values[definition.id]
     if (value === undefined) {
-      if (definition.required) {
+      if (definition.required && !options.allowRequiredMissing) {
         throw invalidFieldValue(`Custom field "${definition.id}" is required.`)
       }
       continue
@@ -367,19 +369,39 @@ export function normalizeCustomFieldValues(
       .map((definition) => [definition.id, definition]),
   )
   const evaluatedFormulaIds = new Set<string>()
-  const evaluateFormulaField = (fieldId: string) => {
+  const deferredFormulaIds = new Set<string>()
+  const evaluateFormulaField = (fieldId: string): boolean => {
     if (evaluatedFormulaIds.has(fieldId)) {
-      return
+      return true
+    }
+    if (deferredFormulaIds.has(fieldId)) {
+      return false
     }
     const definition = applicableFormulaDefinitions.get(fieldId)
     if (!definition) {
-      return
+      return true
     }
     for (const reference of readFormulaReferences(definition.formulaExpression ?? '')) {
-      evaluateFormulaField(reference)
+      if (applicableFormulaDefinitions.has(reference) && !evaluateFormulaField(reference)) {
+        delete values[fieldId]
+        deferredFormulaIds.add(fieldId)
+        return false
+      }
+
+      const referenceDefinition = definitionsById.get(reference)
+      if (
+        options.allowRequiredMissing &&
+        referenceDefinition?.required &&
+        values[reference] === undefined
+      ) {
+        delete values[fieldId]
+        deferredFormulaIds.add(fieldId)
+        return false
+      }
     }
     values[fieldId] = evaluateFormula(definition.formulaExpression ?? '', values)
     evaluatedFormulaIds.add(fieldId)
+    return true
   }
   for (const fieldId of applicableFormulaDefinitions.keys()) {
     evaluateFormulaField(fieldId)

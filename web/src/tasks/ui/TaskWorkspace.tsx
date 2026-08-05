@@ -3,6 +3,7 @@ import type {
   BulkOperationPreview,
   BulkOperationRequest,
   ResolvedWorkItemConfiguration,
+  WorkItemPatch,
   WorkItemConfiguration,
 } from '@mukuroji/contracts'
 import {
@@ -41,6 +42,7 @@ import {
   type DueDateFilter,
   type PriorityFilter,
   type ProjectTaskStatusColumn,
+  type TaskCreateContext,
   type StatusFilter,
   type TaskSortOrder,
   type TaskTab,
@@ -66,6 +68,8 @@ export type TaskWorkspaceProps = {
   bulkWorkspaceId: string
   /** Selected assignee filter. */
   assigneeFilter: AssigneeFilter
+  /** Active Project members available to inline assignee editors. */
+  assigneeOptions: ProjectMember[]
   /** Whether the current user may manage project members. */
   canManageProjectMembers: boolean
   /** Single-Team fallback Work Item configuration. */
@@ -136,7 +140,7 @@ export type TaskWorkspaceProps = {
   /** Loads the next project user page. */
   onLoadMoreProjectUsers?: () => Promise<void>
   /** Opens the inline task creation panel. */
-  onCreateTaskOpen?: () => void
+  onCreateTaskOpen?: (context?: TaskCreateContext) => void
   /** Changes the selected priority filter. */
   onPriorityFilterChange: (priorityFilter: PriorityFilter) => void
   /** Changes the project user search query. */
@@ -155,6 +159,8 @@ export type TaskWorkspaceProps = {
   onTaskSelectionChange: (taskKey: string, selected: boolean) => void
   /** Changes the bulk selection state of visible tasks. */
   onVisibleTaskSelectionChange: (selectionKeys: string[], selected: boolean) => void
+  /** Updates a task through the shared Work Item mutation. */
+  onUpdateTask?: (task: ProjectTask, input: WorkItemPatch) => Promise<ProjectTask>
   /** Adds or updates a project member role. */
   onUpdateProjectMember?: (
     projectId: string,
@@ -197,6 +203,7 @@ export function TaskWorkspace({
   bulkProjectOptions,
   bulkWorkspaceId,
   assigneeFilter,
+  assigneeOptions,
   canManageProjectMembers,
   configuration,
   configurationsByTeam,
@@ -241,6 +248,7 @@ export function TaskWorkspace({
   onTaskSelectionChange,
   onVisibleTaskSelectionChange,
   onUpdateProjectMember,
+  onUpdateTask,
   searchQuery,
   selectedTaskKeys,
   selectedBulkItems,
@@ -258,7 +266,7 @@ export function TaskWorkspace({
   const [isPriorityMenuOpen, setIsPriorityMenuOpen] = useState(false)
   const [isDueDateMenuOpen, setIsDueDateMenuOpen] = useState(false)
   const [isSortMenuOpen, setIsSortMenuOpen] = useState(false)
-  const assigneeOptions = createAssigneeFilterOptions(allTasks, t)
+  const assigneeFilterOptions = createAssigneeFilterOptions(allTasks, t)
 
   if (activeTab === 'permissions') {
     return (
@@ -365,7 +373,7 @@ export function TaskWorkspace({
             menuId="assignee-filter-menu"
             onOpenChange={setIsAssigneeMenuOpen}
           >
-            {assigneeOptions.map((option) => (
+            {assigneeFilterOptions.map((option) => (
               <MenuOption
                 checked={assigneeFilter === option.value}
                 key={option.value}
@@ -471,6 +479,7 @@ export function TaskWorkspace({
 
       {activeTab === 'table' ? (
         <TaskTableView
+          assigneeOptions={assigneeOptions}
           bulkProjectOptions={bulkProjectOptions}
           bulkWorkspaceId={bulkWorkspaceId}
           configuration={configuration}
@@ -482,9 +491,11 @@ export function TaskWorkspace({
           onBulkRetry={onBulkRetry}
           onBulkUndo={onBulkUndo}
           onCreateTaskOpen={onCreateTaskOpen}
+          onUpdateTask={onUpdateTask}
           onSelectTask={onSelectTask}
           onTaskSelectionChange={onTaskSelectionChange}
           onVisibleTaskSelectionChange={onVisibleTaskSelectionChange}
+          personOptions={personOptions}
           personLabels={personLabels}
           projectId={projectId}
           selectedBulkItems={selectedBulkItems}
@@ -498,12 +509,17 @@ export function TaskWorkspace({
       ) : null}
       {activeTab === 'board' && !taskErrorMessage ? (
         <TaskBoardView
+          assigneeOptions={assigneeOptions}
           configuration={configuration}
           configurationsByTeam={configurationsByTeam}
           configurationFailedTeamIds={configurationFailedTeamIds}
           locale={locale}
           onSelectTask={onSelectTask}
+          onCreateTaskOpen={onCreateTaskOpen}
+          onUpdateTask={onUpdateTask}
           personLabels={personLabels}
+          personOptions={personOptions}
+          projectId={projectId}
           selectedDetailTaskKey={selectedDetailTaskKey}
           statusColumns={statusColumns}
           t={t}
@@ -514,12 +530,21 @@ export function TaskWorkspace({
         <TaskGanttView
           configuration={configuration}
           configurationsByTeam={configurationsByTeam}
+          onCreateTaskOpen={onCreateTaskOpen}
+          onSelectTask={onSelectTask}
+          projectId={projectId}
           t={t}
           tasks={tasks}
         />
       ) : null}
       {activeTab === 'calendar' && !taskErrorMessage ? (
-        <TaskCalendarView t={t} tasks={tasks} />
+        <TaskCalendarView
+          onCreateTaskOpen={onCreateTaskOpen}
+          onSelectTask={onSelectTask}
+          projectId={projectId}
+          t={t}
+          tasks={tasks}
+        />
       ) : null}
     </div>
   )

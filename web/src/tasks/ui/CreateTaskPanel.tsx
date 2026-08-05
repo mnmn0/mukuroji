@@ -19,7 +19,11 @@ import {
   formatTaskDateInputValue,
   resolveTaskPriority,
   taskPriorities,
+  type TaskCreateContext,
 } from '../model/taskView'
+
+/** Interaction mode shown by the task creation panel. */
+type CreateTaskMode = 'quick' | 'detailed'
 
 /** Props accepted by the inline project task creation panel. */
 export type CreateTaskPanelProps = {
@@ -29,8 +33,12 @@ export type CreateTaskPanelProps = {
   assigneeOptions: ProjectMember[]
   /** Work Item configuration used to validate workflow and custom fields. */
   configuration?: WorkItemConfiguration
+  /** Context inherited from the view that opened the create panel. */
+  context?: TaskCreateContext
   /** Error returned by the create mutation. */
   errorMessage?: string
+  /** Initial create mode shown by the panel. */
+  initialMode?: CreateTaskMode
   /** Whether assignee candidates are being loaded. */
   isAssigneeOptionsLoading: boolean
   /** Whether a create mutation is currently running. */
@@ -59,7 +67,9 @@ export function CreateTaskPanel({
   assigneeErrorMessage,
   assigneeOptions,
   configuration,
+  context,
   errorMessage,
+  initialMode = context?.source === 'header' ? 'detailed' : context ? 'quick' : 'detailed',
   isAssigneeOptionsLoading,
   isSubmitting,
   locale,
@@ -72,7 +82,22 @@ export function CreateTaskPanel({
   const today = formatTaskDateInputValue(new Date())
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
   const workflowStatuses = resolveCreateWorkflowStatuses(configuration)
-  const initialWorkflowStatusId = configuration?.workflow.initialStatusId ?? ''
+  const initialWorkflowStatusId = context?.workflowStatusId ?? configuration?.workflow.initialStatusId ?? ''
+  const requestedWorkflowStatus = workflowStatuses.find((status) => status.id === initialWorkflowStatusId)
+  const quickCaptureStatusId = requestedWorkflowStatus?.category === 'backlog'
+    ? requestedWorkflowStatus.id
+    : context?.workflowStatusId
+      ? undefined
+      : workflowStatuses.find((status) => status.category === 'backlog')?.id
+  const quickCaptureAllowed = Boolean(quickCaptureStatusId)
+  const [mode, setMode] = useState<CreateTaskMode>(initialMode)
+  const effectiveMode: CreateTaskMode = mode === 'quick' && !quickCaptureAllowed
+    ? 'detailed'
+    : mode
+  const initialAssigneeUserId = context?.assigneeUserId ?? ''
+  const quickCaptureAssigneeUserId = initialAssigneeUserId || assigneeOptions[0]?.id || ''
+  const quickCaptureDueDate = context?.dueDate?.replaceAll('/', '-') ?? ''
+  const initialDueDate = context?.dueDate?.replaceAll('/', '-') ?? today
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
   const defaultCustomFieldValues = configuration
     ? createDefaultCustomFieldValues(configuration.customFields, projectId)
@@ -92,26 +117,39 @@ export function CreateTaskPanel({
 
           const formData = new FormData(event.currentTarget)
           const title = String(formData.get('title') ?? '').trim()
-          const assigneeUserId = String(formData.get('assigneeUserId') ?? '').trim()
-          const dueDate = String(formData.get('dueDate') ?? today).replaceAll('-', '/')
-          const workflowStatusId = String(
-            formData.get('workflowStatusId') ?? initialWorkflowStatusId,
-          ).trim()
+          const assigneeUserId = effectiveMode === 'quick'
+            ? quickCaptureAssigneeUserId
+            : String(formData.get('assigneeUserId') ?? initialAssigneeUserId).trim()
+          const rawDueDate = formData.get('dueDate')
+          const dueDate = String(rawDueDate ?? '').trim().replaceAll('-', '/')
+          const workflowStatusId = effectiveMode === 'quick'
+            ? quickCaptureStatusId ?? initialWorkflowStatusId
+            : String(formData.get('workflowStatusId') ?? initialWorkflowStatusId).trim()
           const workflowStatus = workflowStatuses.find((status) => status.id === workflowStatusId)
           const priority = resolveTaskPriority(formData.get('priority'))
-          const parsedCustomFields = configuration
+
+          if (effectiveMode === 'quick' && !assigneeUserId) {
+            return
+          }
+
+          if (!dueDate) {
+            event.currentTarget.reportValidity()
+            return
+          }
+
+          const parsedCustomFields = effectiveMode === 'detailed' && configuration
             ? parseCustomFieldFormData(formData, configuration.customFields, {
                 applyDefaults: true,
                 projectId,
               })
             : { errors: [], values: {} }
 
-          if (!assigneeUserId || !workflowStatus) {
+          if (effectiveMode === 'detailed' && (!assigneeUserId || !workflowStatus)) {
             event.currentTarget.reportValidity()
             return
           }
 
-          if (parsedCustomFields.errors.length > 0) {
+          if (effectiveMode === 'detailed' && parsedCustomFields.errors.length > 0) {
             setFieldErrors(createCustomFieldErrorMessages(
               parsedCustomFields.errors,
               configuration?.customFields ?? [],
@@ -125,103 +163,177 @@ export function CreateTaskPanel({
             title,
             assigneeUserId,
             dueDate,
-            workflowStatusId,
-            customFieldValues: parsedCustomFields.values,
+            ...(workflowStatusId ? { workflowStatusId } : {}),
+            customFieldValues: effectiveMode === 'detailed' ? parsedCustomFields.values : {},
             priority,
+            ...(effectiveMode === 'quick' ? { quickCapture: true } : {}),
           })
         }}
       >
-        <div className="grid grid-cols-[minmax(220px,1.4fr)_minmax(180px,0.9fr)_150px_150px_150px_auto] gap-3 max-[1180px]:grid-cols-2 max-[720px]:grid-cols-1">
-          <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
-            {t('tasks.create.title')}
-            <input
-              className="workbench-input h-10 px-3"
-              name="title"
-              placeholder={t('tasks.create.titlePlaceholder')}
-              required
-            />
-          </label>
-          <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
-            {t('tasks.create.assignee')}
-            <select
-              className="workbench-input h-10 px-3"
-              defaultValue=""
-              disabled={isSubmitting || isAssigneeOptionsLoading || Boolean(assigneeErrorMessage)}
-              name="assigneeUserId"
-              required
-            >
-              <option disabled hidden value="">
-                {t('tasks.create.assigneeSelectPlaceholder')}
-              </option>
-              {assigneeOptions.map((member) => (
-                <option key={member.id} value={member.id}>
-                  {formatProjectMemberOption(member)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
-            {t('tasks.column.dueDate')}
-            <input
-              className="workbench-input h-10 px-3"
-              defaultValue={today}
-              name="dueDate"
-              required
-              type="date"
-            />
-          </label>
-          <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
-            {t('tasks.column.status')}
-            <select
-              className="workbench-input h-10 px-3"
-              defaultValue={initialWorkflowStatusId}
-              name="workflowStatusId"
-            >
-              {workflowStatuses.map((status) => (
-                <option key={status.id} value={status.id}>
-                  {status.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
-            {t('tasks.column.priority')}
-            <select
-              className="workbench-input h-10 px-3"
-              defaultValue="medium"
-              name="priority"
-            >
-              {taskPriorities.map((priority) => (
-                <option key={priority} value={priority}>
-                  {t(`tasks.priority.${priority}`)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="flex items-end gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--workbench-border)] pb-3">
+          <div className="flex items-center gap-1 rounded-md border border-[var(--workbench-border)] bg-white p-1">
+            {quickCaptureAllowed ? (
+              <button
+                aria-pressed={effectiveMode === 'quick'}
+                className={`rounded px-3 py-1.5 text-sm font-semibold ${effectiveMode === 'quick' ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]' : 'text-[var(--workbench-muted)]'}`}
+                onClick={() => setMode('quick')}
+                type="button"
+              >
+                {t('tasks.create.quick')}
+              </button>
+            ) : null}
             <button
-              className="workbench-button-primary h-10 px-4 disabled:cursor-not-allowed disabled:border-[#b5bdc9] disabled:bg-[#b5bdc9]"
-              disabled={
-                isSubmitting ||
-                isAssigneeOptionsLoading ||
-                Boolean(assigneeErrorMessage) ||
-                assigneeOptions.length === 0
-              }
-              type="submit"
-            >
-              {isSubmitting ? t('tasks.create.saving') : t('tasks.create.submit')}
-            </button>
-            <button
-              className="workbench-button-secondary h-10 px-4"
-              disabled={isSubmitting}
-              onClick={onCancel}
+              aria-pressed={effectiveMode === 'detailed'}
+              className={`rounded px-3 py-1.5 text-sm font-semibold ${effectiveMode === 'detailed' ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]' : 'text-[var(--workbench-muted)]'}`}
+              onClick={() => setMode('detailed')}
               type="button"
             >
-              {t('tasks.create.cancel')}
+              {t('tasks.create.detailed')}
             </button>
           </div>
+          {context ? (
+            <p className="text-xs font-semibold text-[var(--workbench-muted)]">
+              {t('tasks.create.context')}
+            </p>
+          ) : null}
         </div>
-        {hasCustomFields ? (
+        {effectiveMode === 'quick' ? (
+          <div className="grid gap-3">
+            <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
+              {t('tasks.create.title')}
+              <input
+                autoFocus
+                className="workbench-input h-10 px-3"
+                name="title"
+                placeholder={t('tasks.create.titlePlaceholder')}
+                required
+              />
+            </label>
+            <p className="text-sm font-medium text-[var(--workbench-muted)]">
+              {t('tasks.create.quickDescription')}
+            </p>
+            <label className="grid max-w-[220px] gap-1.5 text-sm font-semibold text-[#505967]">
+              {t('tasks.column.dueDate')}
+              <input
+                className="workbench-input h-10 px-3"
+                defaultValue={quickCaptureDueDate}
+                name="dueDate"
+                required
+                type="date"
+              />
+            </label>
+            <div className="flex items-center gap-2">
+              <button
+                className="workbench-button-primary h-10 px-4 disabled:cursor-not-allowed disabled:border-[#b5bdc9] disabled:bg-[#b5bdc9]"
+                disabled={isSubmitting || isAssigneeOptionsLoading || Boolean(assigneeErrorMessage) || !quickCaptureAssigneeUserId}
+                type="submit"
+              >
+                {isSubmitting ? t('tasks.create.saving') : t('tasks.create.submit')}
+              </button>
+              <button
+                className="workbench-button-secondary h-10 px-4"
+                disabled={isSubmitting}
+                onClick={onCancel}
+                type="button"
+              >
+                {t('tasks.create.cancel')}
+              </button>
+            </div>
+          </div>
+        ) : null}
+        {effectiveMode === 'detailed' ? (
+          <div className="grid grid-cols-[minmax(220px,1.4fr)_minmax(180px,0.9fr)_150px_150px_150px_auto] gap-3 max-[1180px]:grid-cols-2 max-[720px]:grid-cols-1">
+            <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
+              {t('tasks.create.title')}
+              <input
+                className="workbench-input h-10 px-3"
+                name="title"
+                placeholder={t('tasks.create.titlePlaceholder')}
+                required
+              />
+            </label>
+            <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
+              {t('tasks.create.assignee')}
+              <select
+                className="workbench-input h-10 px-3"
+                defaultValue={initialAssigneeUserId}
+                disabled={isSubmitting || isAssigneeOptionsLoading || Boolean(assigneeErrorMessage)}
+                name="assigneeUserId"
+                required
+              >
+                <option disabled hidden value="">
+                  {t('tasks.create.assigneeSelectPlaceholder')}
+                </option>
+                {assigneeOptions.map((member) => (
+                  <option key={member.id} value={member.id}>
+                    {formatProjectMemberOption(member)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
+              {t('tasks.column.dueDate')}
+              <input
+                className="workbench-input h-10 px-3"
+                defaultValue={initialDueDate}
+                name="dueDate"
+                required
+                type="date"
+              />
+            </label>
+            <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
+              {t('tasks.column.status')}
+              <select
+                className="workbench-input h-10 px-3"
+                defaultValue={initialWorkflowStatusId}
+                name="workflowStatusId"
+              >
+                {workflowStatuses.map((status) => (
+                  <option key={status.id} value={status.id}>
+                    {status.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
+              {t('tasks.column.priority')}
+              <select
+                className="workbench-input h-10 px-3"
+                defaultValue="medium"
+                name="priority"
+              >
+                {taskPriorities.map((priority) => (
+                  <option key={priority} value={priority}>
+                    {t(`tasks.priority.${priority}`)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="flex items-end gap-2">
+              <button
+                className="workbench-button-primary h-10 px-4 disabled:cursor-not-allowed disabled:border-[#b5bdc9] disabled:bg-[#b5bdc9]"
+                disabled={
+                  isSubmitting ||
+                  isAssigneeOptionsLoading ||
+                  Boolean(assigneeErrorMessage) ||
+                  assigneeOptions.length === 0
+                }
+                type="submit"
+              >
+                {isSubmitting ? t('tasks.create.saving') : t('tasks.create.submit')}
+              </button>
+              <button
+                className="workbench-button-secondary h-10 px-4"
+                disabled={isSubmitting}
+                onClick={onCancel}
+                type="button"
+              >
+                {t('tasks.create.cancel')}
+              </button>
+            </div>
+          </div>
+        ) : null}
+        {effectiveMode === 'detailed' && hasCustomFields ? (
           <div className="workbench-panel-muted p-4">
             <WorkItemFieldsEditor
               definitions={configuration?.customFields ?? []}
