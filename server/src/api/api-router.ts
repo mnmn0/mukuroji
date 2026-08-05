@@ -19131,6 +19131,13 @@ async function prepareConfiguredCreateWorkItem(
   resolved: ResolvedWorkItemConfiguration,
 ): Promise<CreateTeamIssueRequestBody> {
   const { quickCapture, ...inputWithoutQuickCapture } = input
+  if (quickCapture !== undefined && typeof quickCapture !== 'boolean') {
+    throw new WorkItemConfigurationError(
+      400,
+      'InvalidQuickCapture',
+      'Quick capture must be a boolean.',
+    )
+  }
   const workflowStatus = resolveWorkflowStatus(
     resolved.configuration,
     input.workflowStatusId,

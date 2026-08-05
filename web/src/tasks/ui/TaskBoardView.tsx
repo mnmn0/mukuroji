@@ -249,7 +249,12 @@ export function TaskBoardView({
                         { label: resolveWorkItemAssignee(task), value: task.assigneeUserId },
                         ...memberOptions,
                       ]
-                    : memberOptions
+                    : task.assigneeUserId
+                      ? memberOptions
+                      : [
+                          { label: t('tasks.detail.unassigned'), value: '' },
+                          ...memberOptions,
+                        ]
 
                   return (
                     <article

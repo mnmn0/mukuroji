@@ -242,8 +242,21 @@ function parseInlineCustomFieldValue(
       .split(',')
       .map((item) => item.trim())
       .filter(Boolean)
+    const resolvedValues = values.map((item) => {
+      const normalizedItem = item.toLowerCase()
+      const option = definition.options?.find((candidate) =>
+        candidate.id.toLowerCase() === normalizedItem ||
+        candidate.name.toLowerCase() === normalizedItem,
+      )
 
-    return values.length > 0 ? [...new Set(values)] : null
+      if (!option) {
+        throw new Error(`Invalid option for custom field ${definition.id}`)
+      }
+
+      return option.id
+    })
+
+    return resolvedValues.length > 0 ? [...new Set(resolvedValues)] : null
   }
 
   if (definition.type === 'date') {

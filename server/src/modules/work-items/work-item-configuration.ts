@@ -383,6 +383,7 @@ export function normalizeCustomFieldValues(
     }
     for (const reference of readFormulaReferences(definition.formulaExpression ?? '')) {
       if (applicableFormulaDefinitions.has(reference) && !evaluateFormulaField(reference)) {
+        delete values[fieldId]
         deferredFormulaIds.add(fieldId)
         return false
       }
@@ -393,6 +394,7 @@ export function normalizeCustomFieldValues(
         referenceDefinition?.required &&
         values[reference] === undefined
       ) {
+        delete values[fieldId]
         deferredFormulaIds.add(fieldId)
         return false
       }

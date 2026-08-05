@@ -893,6 +893,7 @@
             "type": "string"
           },
           "quickCapture": {
+            "description": "When true, workflowStatusId must identify a backlog status so required custom fields can be completed later.",
             "type": "boolean"
           },
           "teamId": {

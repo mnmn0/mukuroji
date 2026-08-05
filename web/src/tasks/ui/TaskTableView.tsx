@@ -477,6 +477,10 @@ function TaskTableRow({
   const taskTitle = resolveWorkItemTitle(task)
   const overdue = isTaskOverdue(task)
   const editableStatuses = resolveEditableWorkflowStatuses(task, configuration)
+  const memberOptions = assigneeOptions.map((member) => ({
+    label: `${member.name ?? member.email} / ${member.email}`,
+    value: member.id,
+  }))
   const inlineAssigneeOptions = task.assigneeUserId && !assigneeOptions.some(
     (member) => member.id === task.assigneeUserId,
   )
@@ -485,15 +489,14 @@ function TaskTableRow({
           label: resolveWorkItemAssignee(task),
           value: task.assigneeUserId,
         },
-        ...assigneeOptions.map((member) => ({
-          label: `${member.name ?? member.email} / ${member.email}`,
-          value: member.id,
-        })),
+        ...memberOptions,
       ]
-    : assigneeOptions.map((member) => ({
-        label: `${member.name ?? member.email} / ${member.email}`,
-        value: member.id,
-      }))
+    : task.assigneeUserId
+      ? memberOptions
+      : [
+          { label: t('tasks.detail.unassigned'), value: '' },
+          ...memberOptions,
+        ]
   /** Sends one row edit through the shared Work Item mutation. */
   const commitPatch = async (patch: WorkItemPatch) => {
     await onUpdateTask?.(task, patch)
@@ -696,7 +699,12 @@ function createTaskPatchFromPastedCells(
       candidate.email.toLowerCase() === normalizedAssignee ||
       candidate.name?.toLowerCase() === normalizedAssignee,
     )
-    patch.assigneeUserId = member?.id ?? assignee
+
+    if (!member) {
+      return undefined
+    }
+
+    patch.assigneeUserId = member.id
   }
 
   const status = cells[2]
@@ -716,7 +724,13 @@ function createTaskPatchFromPastedCells(
 
   const dueDate = cells[3]
   if (dueDate) {
-    patch.dueDate = dueDate.replaceAll('-', '/')
+    const normalizedDueDate = dueDate.replaceAll('-', '/')
+
+    if (!isValidPastedTaskDueDate(normalizedDueDate)) {
+      return undefined
+    }
+
+    patch.dueDate = normalizedDueDate
   }
 
   const priority = cells[4]
@@ -729,6 +743,24 @@ function createTaskPatchFromPastedCells(
   }
 
   return Object.keys(patch).length > 0 ? patch : undefined
+}
+
+/** Returns whether a pasted task due date is a real YYYY/MM/DD calendar date. */
+function isValidPastedTaskDueDate(value: string) {
+  const match = /^(\d{4})\/(\d{2})\/(\d{2})$/.exec(value)
+
+  if (!match) {
+    return false
+  }
+
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const date = new Date(Date.UTC(year, month - 1, day))
+
+  return date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
 }
 
 /** Returns true when an event originates from an active inline editor control. */

@@ -95,6 +95,7 @@ export function CreateTaskPanel({
     ? 'detailed'
     : mode
   const initialAssigneeUserId = context?.assigneeUserId ?? ''
+  const quickCaptureAssigneeUserId = initialAssigneeUserId || assigneeOptions[0]?.id || ''
   const initialDueDate = context?.dueDate?.replaceAll('/', '-') ?? today
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
   const defaultCustomFieldValues = configuration
@@ -115,7 +116,9 @@ export function CreateTaskPanel({
 
           const formData = new FormData(event.currentTarget)
           const title = String(formData.get('title') ?? '').trim()
-          const assigneeUserId = String(formData.get('assigneeUserId') ?? initialAssigneeUserId).trim()
+          const assigneeUserId = effectiveMode === 'quick'
+            ? quickCaptureAssigneeUserId
+            : String(formData.get('assigneeUserId') ?? initialAssigneeUserId).trim()
           const rawDueDate = formData.get('dueDate')
           const dueDate = String(rawDueDate || initialDueDate).replaceAll('-', '/')
           const workflowStatusId = effectiveMode === 'quick'
@@ -123,6 +126,11 @@ export function CreateTaskPanel({
             : String(formData.get('workflowStatusId') ?? initialWorkflowStatusId).trim()
           const workflowStatus = workflowStatuses.find((status) => status.id === workflowStatusId)
           const priority = resolveTaskPriority(formData.get('priority'))
+
+          if (effectiveMode === 'quick' && !assigneeUserId) {
+            return
+          }
+
           const parsedCustomFields = effectiveMode === 'detailed' && configuration
             ? parseCustomFieldFormData(formData, configuration.customFields, {
                 applyDefaults: true,
@@ -201,7 +209,7 @@ export function CreateTaskPanel({
             <div className="flex items-center gap-2">
               <button
                 className="workbench-button-primary h-10 px-4 disabled:cursor-not-allowed disabled:border-[#b5bdc9] disabled:bg-[#b5bdc9]"
-                disabled={isSubmitting || isAssigneeOptionsLoading || Boolean(assigneeErrorMessage) || assigneeOptions.length === 0}
+                disabled={isSubmitting || isAssigneeOptionsLoading || Boolean(assigneeErrorMessage) || !quickCaptureAssigneeUserId}
                 type="submit"
               >
                 {isSubmitting ? t('tasks.create.saving') : t('tasks.create.submit')}

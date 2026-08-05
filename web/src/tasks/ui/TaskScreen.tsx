@@ -542,7 +542,7 @@ export function TaskScreen({
       return
     }
 
-    queueMicrotask(() => taskContentRef.current?.scrollTo({ top: scrollTop }))
+    requestAnimationFrame(() => taskContentRef.current?.scrollTo({ top: scrollTop }))
   }
 
   /** Updates a task through the shared action and retains an inverse for undo. */
@@ -586,7 +586,6 @@ export function TaskScreen({
     }
 
     setIsUndoingTask(true)
-    setTaskAction(undefined)
 
     try {
       await onUpdateTask(taskUndo.task, taskUndo.inversePatch)

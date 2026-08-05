@@ -218,6 +218,7 @@ export const workItemsMessages = {
   'tasks.board.addInColumn': 'この列に追加',
   'tasks.board.dragHint': 'ドラッグまたはステータス選択で移動',
   'tasks.calendar.addOnDate': 'この日に追加',
+  'tasks.calendar.addWithoutDate': '期限なしで追加',
   'tasks.gantt.add': '期間から追加',
   'tasks.inline.edit': 'インライン編集',
   'tasks.inline.customFields': 'カスタムフィールドを編集',

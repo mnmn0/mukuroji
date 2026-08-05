@@ -619,7 +619,7 @@ export function TaskPage() {
     input: UpdateTeamIssueInput,
   ): Promise<ProjectTask> => {
     if (!accessToken) {
-      return task
+      throw new Error(t('tasks.action.updateError'))
     }
 
     const currentTask = selectedIssueDetail?.issue.id === task.id &&
@@ -628,7 +628,7 @@ export function TaskPage() {
       : tasks.find((candidate) => candidate.id === task.id && candidate.teamId === task.teamId)
 
     if (!currentTask) {
-      return task
+      throw new Error(t('tasks.action.updateError'))
     }
 
     const configuration = workItemConfigurationLoadResult.configurationsByTeam[currentTask.teamId]?.configuration ??

@@ -7,7 +7,7 @@ export type TaskActionFeedbackProps = {
   /** Optional label for an undo action. */
   undoLabel?: string
   /** Accessible label for the dismiss action. */
-  dismissLabel?: string
+  dismissLabel: string
   /** Reverses the last successful optimistic action. */
   onUndo?: () => void
   /** Dismisses the current feedback message. */

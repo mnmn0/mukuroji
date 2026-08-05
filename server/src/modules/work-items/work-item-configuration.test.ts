@@ -221,6 +221,25 @@ test('defers formulas that reference required values omitted by quick capture', 
   })).toEqual({})
 })
 
+test('removes stale deferred formula values during a quick-capture update', () => {
+  const configuration = createConfiguration({
+    customFields: [
+      field('amount', 'number', { required: true }),
+      field('total', 'formula', { formulaExpression: '{amount} * 2' }),
+    ],
+  })
+
+  expect(normalizeCustomFieldValues(
+    configuration,
+    { amount: null },
+    {
+      allowRequiredMissing: true,
+      existingValues: { amount: 3, total: 6 },
+      mode: 'update',
+    },
+  )).toEqual({})
+})
+
 test('revalidates stored values against the current definition before an unrelated update', () => {
   const configuration = createConfiguration({
     customFields: [field('amount', 'number')],

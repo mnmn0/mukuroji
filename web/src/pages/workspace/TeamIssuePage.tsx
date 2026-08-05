@@ -1487,7 +1487,7 @@ function IssueBoard({
                         </div>
                         {onUpdateIssue && editableStatuses.length > 0 ? (
                           <select
-                            aria-label={`${t('tasks.inline.edit')}: ${t('tasks.column.status')}`}
+                            aria-label={`${resolveIssueTitle(issue, t)}: ${t('tasks.column.status')}`}
                             className="workbench-input mt-3 h-8 w-full px-2 text-xs"
                             disabled={isMoving}
                             onChange={(event) => moveIssueToStatus(issue, event.target.value)}

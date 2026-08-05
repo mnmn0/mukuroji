@@ -351,6 +351,11 @@ test('allows quick capture to defer required custom fields only in a backlog sta
     workflowStatusId: 'triage',
   }))
 
+  const nonBacklogStatus = configuration.workflow.statuses.find((status) => status.category !== 'backlog')
+  if (!nonBacklogStatus) {
+    throw new Error('The test configuration must include a non-backlog status.')
+  }
+
   const invalidStatusResponse = await app.request('/api/teams/core-team/issues', {
     method: 'POST',
     headers: {
@@ -364,7 +369,7 @@ test('allows quick capture to defer required custom fields only in a backlog sta
       dueDate: '2026/07/20',
       priority: 'medium',
       quickCapture: true,
-      workflowStatusId: 'todo',
+      workflowStatusId: nonBacklogStatus.id,
       customFieldValues: {},
     }),
   })
@@ -373,6 +378,30 @@ test('allows quick capture to defer required custom fields only in a backlog sta
   expect(await invalidStatusResponse.json()).toEqual({
     code: 'InvalidQuickCaptureStatus',
     message: 'Quick capture is only available in a backlog workflow status.',
+  })
+
+  const invalidTypeResponse = await app.request('/api/teams/core-team/issues', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: 'Invalid quick capture type',
+      assignedProjectId: 'refero',
+      assigneeUserId: 'sato@example.com',
+      dueDate: '2026/07/20',
+      priority: 'medium',
+      quickCapture: 'true',
+      workflowStatusId: 'triage',
+      customFieldValues: {},
+    }),
+  })
+
+  expect(invalidTypeResponse.status).toBe(400)
+  expect(await invalidTypeResponse.json()).toEqual({
+    code: 'InvalidQuickCapture',
+    message: 'Quick capture must be a boolean.',
   })
 })
 

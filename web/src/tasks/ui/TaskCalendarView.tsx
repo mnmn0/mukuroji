@@ -100,7 +100,7 @@ export function TaskCalendarView({
                 <p className="text-sm font-semibold text-[#1c1d1f]">{t('tasks.calendar.empty')}</p>
                 {onCreateTaskOpen ? (
                   <button
-                    aria-label={t('tasks.calendar.addOnDate')}
+                    aria-label={t('tasks.calendar.addWithoutDate')}
                     className="rounded px-1.5 text-lg font-semibold text-[var(--workbench-primary)] hover:bg-[#e5f7f4]"
                     onClick={() => onCreateTaskOpen({
                       projectId: projectId ?? '',
