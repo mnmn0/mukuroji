@@ -117,7 +117,9 @@ export function TaskInlineField({
     'data-testid': testId ? `${testId}-input` : undefined,
     disabled: isSaving,
     onBlur: () => {
-      if (kind !== 'select') {
+      if (kind === 'select') {
+        cancelEditing()
+      } else {
         void commit()
       }
     },

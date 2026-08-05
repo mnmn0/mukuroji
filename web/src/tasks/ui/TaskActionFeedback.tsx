@@ -33,7 +33,7 @@ export function TaskActionFeedback({
 }: TaskActionFeedbackProps) {
   return (
     <div
-      aria-live="polite"
+      aria-live={kind === 'error' ? 'assertive' : 'polite'}
       className={`mx-[clamp(20px,3vw,34px)] mt-4 flex flex-wrap items-center gap-3 rounded-md border px-4 py-3 text-sm font-semibold ${
         kind === 'error'
           ? 'border-red-200 bg-red-50 text-red-700'

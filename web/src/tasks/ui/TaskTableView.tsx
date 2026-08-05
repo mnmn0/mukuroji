@@ -211,7 +211,7 @@ export function TaskTableView({
 
   /** Handles multi-cell clipboard input for selected or focused table rows. */
   const handleTablePaste = (event: ClipboardEvent<HTMLElement>) => {
-    if (!onUpdateTask) {
+    if (!onUpdateTask || isInlineEditorTarget(event.target)) {
       return
     }
 
@@ -264,7 +264,12 @@ export function TaskTableView({
 
   /** Handles keyboard fill-down for the selected table rows without requiring a pointer. */
   const handleTableKeyDown = (event: KeyboardEvent<HTMLElement>) => {
-    if (!onUpdateTask || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'd') {
+    if (
+      !onUpdateTask ||
+      isInlineEditorTarget(event.target) ||
+      !(event.metaKey || event.ctrlKey) ||
+      event.key.toLowerCase() !== 'd'
+    ) {
       return
     }
 
@@ -647,7 +652,7 @@ function TaskTableRow({
             className="rounded px-2 py-1 text-lg font-semibold text-[var(--workbench-primary)] hover:bg-[var(--workbench-surface-muted)]"
             data-testid={`task-row-add-${task.id}`}
             onClick={() => onCreateTaskOpen({
-              assigneeUserId: task.assigneeUserId,
+              ...(task.assigneeUserId ? { assigneeUserId: task.assigneeUserId } : {}),
               ...(task.dueDate ? { dueDate: task.dueDate } : {}),
               projectId,
               source: 'table',
@@ -709,8 +714,9 @@ function createTaskPatchFromPastedCells(
     patch.workflowStatusId = editableStatus.id
   }
 
-  if (cells[3] !== undefined) {
-    patch.dueDate = cells[3].replaceAll('-', '/')
+  const dueDate = cells[3]
+  if (dueDate) {
+    patch.dueDate = dueDate.replaceAll('-', '/')
   }
 
   const priority = cells[4]
@@ -723,6 +729,12 @@ function createTaskPatchFromPastedCells(
   }
 
   return Object.keys(patch).length > 0 ? patch : undefined
+}
+
+/** Returns true when an event originates from an active inline editor control. */
+function isInlineEditorTarget(target: EventTarget | null) {
+  return target instanceof HTMLElement &&
+    Boolean(target.closest('input, select, textarea, [contenteditable="true"]'))
 }
 
 /** Creates the common mutation patch used by table fill-down for one field. */

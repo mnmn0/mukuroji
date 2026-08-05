@@ -239,10 +239,17 @@ export function TaskBoardView({
                   )
                   const editableStatuses = resolveEditableWorkflowStatuses(task, taskConfiguration)
                   const isMoving = movingTaskKeys.has(taskKey)
-                  const inlineAssigneeOptions = assigneeOptions.map((member) => ({
+                  const memberOptions = assigneeOptions.map((member) => ({
                     label: `${member.name ?? member.email} / ${member.email}`,
                     value: member.id,
                   }))
+                  const inlineAssigneeOptions = task.assigneeUserId &&
+                    !memberOptions.some((option) => option.value === task.assigneeUserId)
+                    ? [
+                        { label: resolveWorkItemAssignee(task), value: task.assigneeUserId },
+                        ...memberOptions,
+                      ]
+                    : memberOptions
 
                   return (
                     <article

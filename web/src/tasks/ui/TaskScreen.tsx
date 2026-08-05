@@ -434,8 +434,8 @@ export function TaskScreen({
     visibleTasks[0] ??
     tasks[0]
   const detailTask = isDetailOpen ? selectedDetailTask : undefined
-  const selectedDetailTaskKey = detailTask
-    ? createTaskKey(detailTask)
+  const selectedDetailTaskKey = selectedDetailTask
+    ? createTaskKey(selectedDetailTask)
     : undefined
   const selectedDetailTeamProjects = detailTask
     ? teams.find((team) => team.id === detailTask.teamId)?.projects ?? activeTeamProjects
@@ -443,21 +443,6 @@ export function TaskScreen({
   const createConfiguration = createTaskContext?.teamId
     ? resolvedConfigurationsByTeam[createTaskContext.teamId]?.configuration ?? configuration
     : configuration
-
-  useEffect(() => {
-    if (isCreateTaskOpen) {
-      taskContentRef.current?.scrollTo({ top: 0 })
-    }
-  }, [isCreateTaskOpen])
-
-  useEffect(() => {
-    if (!isDetailOpen || detailScrollTopRef.current === 0) {
-      return
-    }
-
-    const scrollTop = detailScrollTopRef.current
-    queueMicrotask(() => taskContentRef.current?.scrollTo({ top: scrollTop }))
-  }, [isDetailOpen])
 
   /** Updates one task's Project-scoped bulk selection snapshot. */
   const updateTaskSelection = (taskKey: string, selected: boolean) => {
@@ -517,6 +502,7 @@ export function TaskScreen({
     }
 
     onSelectedIssueChange?.(task)
+    restoreDetailScrollTop()
   }
 
   /** Closes the detail pane without losing the current list position. */
@@ -545,6 +531,18 @@ export function TaskScreen({
     setCreateTaskError(undefined)
     setCreateTaskContext(resolvedContext)
     setIsCreateTaskOpen(true)
+    taskContentRef.current?.scrollTo({ top: 0 })
+  }
+
+  /** Restores the list scroll position captured when the detail pane closed. */
+  const restoreDetailScrollTop = () => {
+    const scrollTop = detailScrollTopRef.current
+
+    if (scrollTop === 0) {
+      return
+    }
+
+    queueMicrotask(() => taskContentRef.current?.scrollTo({ top: scrollTop }))
   }
 
   /** Updates a task through the shared action and retains an inverse for undo. */

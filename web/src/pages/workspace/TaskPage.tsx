@@ -634,6 +634,7 @@ export function TaskPage() {
     const configuration = workItemConfigurationLoadResult.configurationsByTeam[currentTask.teamId]?.configuration ??
       selectedIssueDetail?.resolvedConfiguration?.configuration
     const optimisticTask = applyTaskPatchOptimistically(currentTask, input, configuration)
+    /** Returns whether a candidate is the same Team-local Work Item. */
     const matchesTask = (candidate: ProjectTask) =>
       candidate.id === currentTask.id && candidate.teamId === currentTask.teamId
 
@@ -864,7 +865,7 @@ export function TaskPage() {
     }
   }
 
-  const canCreateProjectTask = canMutateContent && Object.keys(
+  const canCreateProjectTask = canMutateContent && Boolean(creationTeam) && Object.keys(
     workItemConfigurationLoadResult.configurationsByTeam,
   ).length > 0
 

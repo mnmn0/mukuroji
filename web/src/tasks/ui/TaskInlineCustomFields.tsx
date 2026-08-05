@@ -174,7 +174,7 @@ function resolveInlineCustomFieldOptions(
       : []
 
     return [
-      ...(selectedPersonId ? [] : [{ label: t('workItems.fields.personPlaceholder'), value: '' }]),
+      { label: t('workItems.fields.personPlaceholder'), value: '' },
       ...selectedPerson,
       ...personOptions.map((person) => ({
         label: person.email && person.email !== person.name
@@ -201,6 +201,10 @@ function resolveInlineCustomFieldInputValue(
     return value === true ? 'true' : 'false'
   }
 
+  if (definition.type === 'date') {
+    return normalizeInlineDateValue(value)
+  }
+
   return value === undefined ? '' : String(value)
 }
 
@@ -225,7 +229,12 @@ function parseInlineCustomFieldValue(
     definition.type === 'duration'
   ) {
     const numberValue = Number(trimmedValue)
-    return Number.isFinite(numberValue) ? numberValue : null
+
+    if (!Number.isFinite(numberValue)) {
+      throw new Error(`Invalid numeric value for custom field ${definition.id}`)
+    }
+
+    return numberValue
   }
 
   if (definition.type === 'multi-select') {
@@ -237,5 +246,37 @@ function parseInlineCustomFieldValue(
     return values.length > 0 ? [...new Set(values)] : null
   }
 
+  if (definition.type === 'date') {
+    return trimmedValue.replaceAll('/', '-')
+  }
+
   return trimmedValue
+}
+
+/** Converts a stored custom-field date into the ISO value accepted by date inputs. */
+function normalizeInlineDateValue(value: CustomFieldValue | undefined) {
+  if (typeof value !== 'string') {
+    return ''
+  }
+
+  const normalizedValue = value.trim().replaceAll('/', '-')
+  return isValidInlineDateValue(normalizedValue) ? normalizedValue : ''
+}
+
+/** Returns whether a custom-field date is a valid calendar date in ISO format. */
+function isValidInlineDateValue(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value)
+
+  if (!match) {
+    return false
+  }
+
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const date = new Date(Date.UTC(year, month - 1, day))
+
+  return date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
 }

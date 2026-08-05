@@ -107,7 +107,7 @@ export function TaskGanttView({
                     className="rounded px-2 py-1 text-lg font-semibold text-[var(--workbench-primary)] hover:bg-[#e5f7f4]"
                     data-testid={`task-gantt-add-${task.id}`}
                     onClick={() => onCreateTaskOpen({
-                      assigneeUserId: task.assigneeUserId,
+                      ...(task.assigneeUserId ? { assigneeUserId: task.assigneeUserId } : {}),
                       ...(task.dueDate ? { dueDate: task.dueDate } : {}),
                       projectId: projectId ?? task.assignedProjectId ?? '',
                       source: 'gantt',

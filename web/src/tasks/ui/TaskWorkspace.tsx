@@ -518,6 +518,7 @@ export function TaskWorkspace({
           onCreateTaskOpen={onCreateTaskOpen}
           onUpdateTask={onUpdateTask}
           personLabels={personLabels}
+          personOptions={personOptions}
           projectId={projectId}
           selectedDetailTaskKey={selectedDetailTaskKey}
           statusColumns={statusColumns}

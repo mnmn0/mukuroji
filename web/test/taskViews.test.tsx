@@ -297,7 +297,9 @@ describe('independent task views', () => {
       />,
     )
 
-    expect(quickHtml).toContain('aria-pressed="true"')
+    expect(quickHtml).toMatch(new RegExp(
+      `<button[^>]*aria-pressed="true"[^>]*>${t('tasks.create.quick')}</button>`,
+    ))
     expect(quickHtml).toContain('name="title"')
     expect(quickHtml).not.toContain('name="workflowStatusId"')
     expect(inlineHtml).toContain('data-testid="task-inline-title-wireframe"')

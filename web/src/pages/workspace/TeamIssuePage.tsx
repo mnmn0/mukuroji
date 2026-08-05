@@ -1343,7 +1343,11 @@ function IssueBoard({
     setMovingIssueIds((currentIds) => new Set(currentIds).add(issueId))
     void onUpdateIssue(issueId, { workflowStatusId })
       .catch((error) => {
-        setMoveErrorMessage(error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict'
+        const cause = error instanceof Error ? error.cause : undefined
+        const isConflict = (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') ||
+          (cause instanceof TeamIssuesApiError && cause.code === 'WorkItemRevisionConflict')
+
+        setMoveErrorMessage(isConflict
           ? t('tasks.action.conflict')
           : t('tasks.action.updateError'))
       })

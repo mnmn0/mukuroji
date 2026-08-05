@@ -90,10 +90,11 @@ export function CreateTaskPanel({
       ? undefined
       : workflowStatuses.find((status) => status.category === 'backlog')?.id
   const quickCaptureAllowed = Boolean(quickCaptureStatusId)
-  const [mode, setMode] = useState<CreateTaskMode>(
-    initialMode === 'quick' && !quickCaptureAllowed ? 'detailed' : initialMode,
-  )
-  const initialAssigneeUserId = context?.assigneeUserId ?? assigneeOptions[0]?.id ?? ''
+  const [mode, setMode] = useState<CreateTaskMode>(initialMode)
+  const effectiveMode: CreateTaskMode = mode === 'quick' && !quickCaptureAllowed
+    ? 'detailed'
+    : mode
+  const initialAssigneeUserId = context?.assigneeUserId ?? ''
   const initialDueDate = context?.dueDate?.replaceAll('/', '-') ?? today
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
   const defaultCustomFieldValues = configuration
@@ -117,24 +118,24 @@ export function CreateTaskPanel({
           const assigneeUserId = String(formData.get('assigneeUserId') ?? initialAssigneeUserId).trim()
           const rawDueDate = formData.get('dueDate')
           const dueDate = String(rawDueDate || initialDueDate).replaceAll('-', '/')
-          const workflowStatusId = mode === 'quick'
+          const workflowStatusId = effectiveMode === 'quick'
             ? quickCaptureStatusId ?? initialWorkflowStatusId
             : String(formData.get('workflowStatusId') ?? initialWorkflowStatusId).trim()
           const workflowStatus = workflowStatuses.find((status) => status.id === workflowStatusId)
           const priority = resolveTaskPriority(formData.get('priority'))
-          const parsedCustomFields = configuration
+          const parsedCustomFields = effectiveMode === 'detailed' && configuration
             ? parseCustomFieldFormData(formData, configuration.customFields, {
                 applyDefaults: true,
                 projectId,
               })
             : { errors: [], values: {} }
 
-          if (mode === 'detailed' && (!assigneeUserId || !workflowStatus)) {
+          if (effectiveMode === 'detailed' && (!assigneeUserId || !workflowStatus)) {
             event.currentTarget.reportValidity()
             return
           }
 
-          if (mode === 'detailed' && parsedCustomFields.errors.length > 0) {
+          if (effectiveMode === 'detailed' && parsedCustomFields.errors.length > 0) {
             setFieldErrors(createCustomFieldErrorMessages(
               parsedCustomFields.errors,
               configuration?.customFields ?? [],
@@ -149,9 +150,9 @@ export function CreateTaskPanel({
             assigneeUserId,
             dueDate,
             ...(workflowStatusId ? { workflowStatusId } : {}),
-            customFieldValues: parsedCustomFields.values,
+            customFieldValues: effectiveMode === 'detailed' ? parsedCustomFields.values : {},
             priority,
-            ...(mode === 'quick' ? { quickCapture: true } : {}),
+            ...(effectiveMode === 'quick' ? { quickCapture: true } : {}),
           })
         }}
       >
@@ -159,8 +160,8 @@ export function CreateTaskPanel({
           <div className="flex items-center gap-1 rounded-md border border-[var(--workbench-border)] bg-white p-1">
             {quickCaptureAllowed ? (
               <button
-                aria-pressed={mode === 'quick'}
-                className={`rounded px-3 py-1.5 text-sm font-semibold ${mode === 'quick' ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]' : 'text-[var(--workbench-muted)]'}`}
+                aria-pressed={effectiveMode === 'quick'}
+                className={`rounded px-3 py-1.5 text-sm font-semibold ${effectiveMode === 'quick' ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]' : 'text-[var(--workbench-muted)]'}`}
                 onClick={() => setMode('quick')}
                 type="button"
               >
@@ -168,8 +169,8 @@ export function CreateTaskPanel({
               </button>
             ) : null}
             <button
-              aria-pressed={mode === 'detailed'}
-              className={`rounded px-3 py-1.5 text-sm font-semibold ${mode === 'detailed' ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]' : 'text-[var(--workbench-muted)]'}`}
+              aria-pressed={effectiveMode === 'detailed'}
+              className={`rounded px-3 py-1.5 text-sm font-semibold ${effectiveMode === 'detailed' ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]' : 'text-[var(--workbench-muted)]'}`}
               onClick={() => setMode('detailed')}
               type="button"
             >
@@ -182,7 +183,7 @@ export function CreateTaskPanel({
             </p>
           ) : null}
         </div>
-        {mode === 'quick' ? (
+        {effectiveMode === 'quick' ? (
           <div className="grid gap-3">
             <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
               {t('tasks.create.title')}
@@ -216,7 +217,7 @@ export function CreateTaskPanel({
             </div>
           </div>
         ) : null}
-        {mode === 'detailed' ? (
+        {effectiveMode === 'detailed' ? (
           <div className="grid grid-cols-[minmax(220px,1.4fr)_minmax(180px,0.9fr)_150px_150px_150px_auto] gap-3 max-[1180px]:grid-cols-2 max-[720px]:grid-cols-1">
             <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
               {t('tasks.create.title')}
@@ -308,7 +309,7 @@ export function CreateTaskPanel({
             </div>
           </div>
         ) : null}
-        {mode === 'detailed' && hasCustomFields ? (
+        {effectiveMode === 'detailed' && hasCustomFields ? (
           <div className="workbench-panel-muted p-4">
             <WorkItemFieldsEditor
               definitions={configuration?.customFields ?? []}
