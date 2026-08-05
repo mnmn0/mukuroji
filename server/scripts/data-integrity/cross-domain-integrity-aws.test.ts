@@ -9,6 +9,7 @@ import type {
   HeadObjectCommandOutput,
 } from '@aws-sdk/client-s3'
 import {
+  createDefaultDueDateWorkItemSchedule,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
@@ -507,6 +508,7 @@ function createWorkItemRow(): object {
     customFieldValues: {},
     relationIds: [],
     dueDate: '2026-08-31',
+    schedule: createDefaultDueDateWorkItemSchedule('2026-08-31'),
     priority: 'medium',
     createdAt: '2026-08-01T00:00:00.000Z',
     updatedAt: '2026-08-01T00:01:00.000Z',

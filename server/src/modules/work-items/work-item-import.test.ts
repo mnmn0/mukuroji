@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { S3Client } from '@aws-sdk/client-s3'
 import type { SQSClient } from '@aws-sdk/client-sqs'
+import { createDefaultDueDateWorkItemSchedule } from '@mukuroji/contracts'
 import {
   S3WorkItemImportSourceStore,
   SqsWorkItemImportQueue,
@@ -572,6 +573,10 @@ test('production Work Item import adapters fail closed when AWS resources are mi
 })
 
 function createStageRequest(jobId: string) {
+  const firstSchedule = JSON.stringify(createDefaultDueDateWorkItemSchedule('2026-07-31'))
+    .replaceAll('"', '""')
+  const secondSchedule = JSON.stringify(createDefaultDueDateWorkItemSchedule('2026-08-01'))
+    .replaceAll('"', '""')
   return {
     jobId,
     workspaceId: 'workspace-1',
@@ -580,12 +585,12 @@ function createStageRequest(jobId: string) {
     assignedProjectId: 'project-1',
     format: 'csv' as const,
     sourceContent:
-      'Title,Assignee,Due date\nShip durable import,member@example.com,2026/07/31\n' +
-      'Verify retry,member@example.com,2026/08/01\n',
+      `Title,Assignee,Schedule\nShip durable import,member@example.com,"${firstSchedule}"\n` +
+      `Verify retry,member@example.com,"${secondSchedule}"\n`,
     mapping: [
       { sourceField: 'Title', targetField: 'title' },
       { sourceField: 'Assignee', targetField: 'assigneeUserId' },
-      { sourceField: 'Due date', targetField: 'dueDate' },
+      { sourceField: 'Schedule', targetField: 'schedule' },
     ],
     requestFingerprint: 'fingerprint-1',
   }
@@ -775,7 +780,15 @@ function createWorkerDependencies(
             input: {
               title: 'Ship durable import',
               assigneeUserId: 'member@example.com',
-              dueDate: '2026/07/31',
+              schedule: {
+                calendarPolicy: {
+                  holidays: [],
+                  timeZone: 'UTC',
+                  workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+                },
+                dueDate: '2026-07-31',
+                mode: 'due-date',
+              },
               priority: 'medium',
             },
           },
@@ -784,7 +797,15 @@ function createWorkerDependencies(
             input: {
               title: 'Verify retry',
               assigneeUserId: 'member@example.com',
-              dueDate: '2026/08/01',
+              schedule: {
+                calendarPolicy: {
+                  holidays: [],
+                  timeZone: 'UTC',
+                  workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+                },
+                dueDate: '2026-08-01',
+                mode: 'due-date',
+              },
               priority: 'medium',
             },
           },

@@ -15,6 +15,7 @@ import {
   type AnalyticsSnapshotRecord,
   type CanonicalWorkItem,
   type CreateAnalyticsReportInput,
+  createDefaultDueDateWorkItemSchedule,
 } from '@mukuroji/contracts'
 import {
   ANALYTICS_METRIC_DEFINITIONS,
@@ -77,6 +78,7 @@ function createWorkItem(
   id: string,
   overrides: Partial<CanonicalWorkItem> = {},
 ): CanonicalWorkItem {
+  const dueDate = overrides.dueDate ?? '2026-01-10'
   return {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
@@ -85,7 +87,6 @@ function createWorkItem(
     title: `Work ${id}`,
     assigneeUserId: 'user-1',
     creatorMemberKey: 'member-1',
-    dueDate: '2026-01-10',
     priority: 'medium',
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-06T00:00:00.000Z',
@@ -96,6 +97,8 @@ function createWorkItem(
     relationIds: [],
     source: 'dynamodb',
     ...overrides,
+    dueDate,
+    schedule: overrides.schedule ?? createDefaultDueDateWorkItemSchedule(dueDate),
   }
 }
 
@@ -397,7 +400,7 @@ describe('Analytics metric engine', () => {
     const active = createWorkItem('active', {
       statusCategory: 'started',
       workflowStatusId: 'status-started',
-      dueDate: '2026/01/05',
+      dueDate: '2026-01-05',
       updatedAt: period.to,
     })
     const started = createAuditEvent(
@@ -580,7 +583,7 @@ describe('Analytics metric engine', () => {
     expect(snapshot.widgets.every((widget) => widget.warnings.length > 0)).toBeTrue()
   })
 
-  test('rewinds historical WIP calendar groups and handles slash due dates by timezone', () => {
+  test('rewinds historical WIP calendar groups and handles due dates by timezone', () => {
     const completed = createWorkItem('historical-wip', {
       createdAt: '2025-12-31T00:00:00.000Z',
       updatedAt: '2026-01-02T01:00:00.000Z',
@@ -620,10 +623,10 @@ describe('Analytics metric engine', () => {
     })
     expect(historical.widgets[0]?.groups.map((group) => group.value)).toEqual([1, 0])
 
-    const overdue = createWorkItem('slash-due', {
+    const overdue = createWorkItem('overdue', {
       statusCategory: 'unstarted',
       workflowStatusId: 'status-unstarted',
-      dueDate: '2026/01/01',
+      dueDate: '2026-01-01',
       updatedAt: '2026-01-01T18:00:00.000Z',
     })
     const overdueWidget = [{

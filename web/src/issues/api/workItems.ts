@@ -1,4 +1,13 @@
-import type { CanonicalWorkItem, CreateWorkItemInput, ResolvedWorkItemConfiguration, UpdateWorkItemInput, WorkItemPatch, WorkItemRelation } from '@mukuroji/contracts'
+import type {
+  CanonicalWorkItem,
+  CreateWorkItemInput,
+  PreviewWorkItemScheduleInput,
+  ResolvedWorkItemConfiguration,
+  UpdateWorkItemInput,
+  WorkItemPatch,
+  WorkItemRelation,
+  WorkItemScheduleChangePreview,
+} from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import type { TeamIssueActivity } from './activity'
 import type { TeamIssueComment } from './comments'
@@ -217,6 +226,32 @@ export async function updateTeamIssue(
   )
 
   return response.issue
+}
+
+/**
+ * Validates a schedule operation against the current Work Item revision without mutating it.
+ *
+ * @param teamId - Team that owns the Work Item.
+ * @param issueId - Team-local Work Item identifier.
+ * @param accessToken - Session bearer token.
+ * @param input - Revision and schedule operation to preview.
+ * @returns Server-authoritative before/after impacts and warnings.
+ */
+export async function previewTeamIssueSchedule(
+  teamId: string,
+  issueId: string,
+  accessToken: string,
+  input: PreviewWorkItemScheduleInput,
+) {
+  return requestJson<WorkItemScheduleChangePreview>(
+    `${issuesApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}/schedule/preview`,
+    accessToken,
+    {
+      body: JSON.stringify(input),
+      headers: { 'Content-Type': 'application/json' },
+      method: 'POST',
+    },
+  )
 }
 
 async function requestJson<TResponse>(

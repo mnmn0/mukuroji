@@ -20,6 +20,9 @@ import {
   CollaborationError,
 } from '../../../collaboration/collaboration'
 import {
+  createDefaultDueDateWorkItemSchedule,
+} from '@mukuroji/contracts'
+import {
   afterEach,
   expect,
   test,
@@ -100,10 +103,15 @@ test('loads all accessible canonical Work Items including unassigned items', asy
     'onboarding-friction',
   ])
   expect(body.workItems[0]).toMatchObject({
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: 1,
     teamId: 'core-team',
     source: 'dynamodb',
+    dueDate: '2026-06-18',
+    schedule: {
+      mode: 'due-date',
+      dueDate: '2026-06-18',
+    },
   })
   expect(body.workItems[0].assignedProjectId).toBeUndefined()
   expect(calls.issueReads).toEqual([
@@ -349,7 +357,7 @@ test('creates a team-owned issue after team access is confirmed', async () => {
       description: 'Issue の説明',
       assignedProjectId: 'refero',
       assigneeUserId: 'sato@example.com',
-      dueDate: '2026/06/20',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-06-20'),
       priority: 'medium',
       workflowStatusId: 'todo',
     }),
@@ -358,7 +366,7 @@ test('creates a team-owned issue after team access is confirmed', async () => {
   expect(response.status).toBe(201)
   expect(await response.json()).toEqual({
     issue: {
-      schemaVersion: 1,
+      schemaVersion: 2,
       revision: 1,
       id: 'new-issue',
       teamId: 'core-team',
@@ -374,7 +382,16 @@ test('creates a team-owned issue after team access is confirmed', async () => {
       statusCategory: 'unstarted',
       customFieldValues: {},
       relationIds: [],
-      dueDate: '2026/06/20',
+      dueDate: '2026-06-20',
+      schedule: {
+        mode: 'due-date',
+        dueDate: '2026-06-20',
+        calendarPolicy: {
+          timeZone: 'UTC',
+          workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+          holidays: [],
+        },
+      },
       priority: 'medium',
       createdAt: '2026-06-08T00:00:00.000Z',
       updatedAt: '2026-06-08T00:00:00.000Z',
@@ -394,6 +411,54 @@ test('creates a team-owned issue after team access is confirmed', async () => {
   ])
 })
 
+test('rejects a direct dueDate field even when create also includes a schedule', async () => {
+  const calls = configureFakeProjectClients(true)
+  const response = await app.request('/api/teams/core-team/issues', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      assigneeUserId: 'sato@example.com',
+      dueDate: '2026-06-20',
+      priority: 'medium',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-06-20'),
+      title: 'Invalid direct deadline',
+      workflowStatusId: 'todo',
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toEqual({
+    code: 'InvalidWorkItemSchedule',
+    message: 'dueDate is derived from schedule and cannot be written directly.',
+  })
+  expect(calls.issueCreates).toEqual([])
+})
+
+test('rejects non-object Work Item create bodies before reading schedule fields', async () => {
+  const calls = configureFakeProjectClients(true)
+
+  for (const body of [JSON.stringify('not-an-object'), JSON.stringify([])]) {
+    const response = await app.request('/api/teams/core-team/issues', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body,
+    })
+
+    expect(response.status).toBe(400)
+      expect(await response.json()).toEqual({
+        message: 'Work Item body must be an object.',
+      })
+  }
+
+  expect(calls.issueCreates).toEqual([])
+})
+
 test('rejects a team issue assignment to a project outside the owning team', async () => {
   const calls = configureFakeProjectClients(true)
 
@@ -407,9 +472,9 @@ test('rejects a team issue assignment to a project outside the owning team', asy
       title: '不正な割り当て',
       assignedProjectId: 'unknown-project',
       assigneeUserId: 'sato@example.com',
-      dueDate: '2026/06/20',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-06-20'),
       priority: 'medium',
-      status: 'todo',
+      workflowStatusId: 'todo',
     }),
   })
 
@@ -449,9 +514,9 @@ test('rejects a team issue assignment when the user lacks target project member 
       title: '権限外プロジェクトへの割り当て',
       assignedProjectId: 'product-roadmap',
       assigneeUserId: 'sato@example.com',
-      dueDate: '2026/06/20',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-06-20'),
       priority: 'medium',
-      status: 'todo',
+      workflowStatusId: 'todo',
     }),
   })
 

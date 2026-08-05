@@ -7,7 +7,238 @@ import {
 /**
  * 現在の canonical Work Item schema version です。
  */
-export const WORK_ITEM_SCHEMA_VERSION = 1 as const
+export const WORK_ITEM_SCHEMA_VERSION = 2 as const
+
+/** Maximum inclusive calendar span accepted by Work Item schedule arithmetic. */
+export const WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS = 36_600 as const
+
+/** Maximum distinct holiday dates stored in one Work Item calendar policy. */
+export const WORK_ITEM_SCHEDULE_MAX_HOLIDAYS = 512 as const
+
+/** Earliest four-digit Gregorian year accepted by every Work Item schedule boundary. */
+export const WORK_ITEM_SCHEDULE_MIN_YEAR = 1_000 as const
+
+/** Weekday names used by a Work Item schedule calendar policy. */
+export type WorkItemScheduleWeekday =
+  | 'monday'
+  | 'tuesday'
+  | 'wednesday'
+  | 'thursday'
+  | 'friday'
+  | 'saturday'
+  | 'sunday'
+
+/** Calendar rules captured with a Work Item schedule for reproducible date arithmetic. */
+export type WorkItemScheduleCalendarPolicy = {
+  /** IANA timezone used when an instant must be mapped to a local calendar date. */
+  timeZone: string
+  /** Weekdays that count toward a task duration. */
+  workingWeekdays: WorkItemScheduleWeekday[]
+  /** Local `YYYY-MM-DD` dates excluded from working-duration calculations. */
+  holidays: string[]
+}
+
+/** Default calendar policy used when a caller creates a new Work Item schedule. */
+export const DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY: WorkItemScheduleCalendarPolicy = {
+  timeZone: 'UTC',
+  workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+  holidays: [],
+}
+
+/** Fields shared by every explicit Work Item schedule state. */
+type WorkItemScheduleBase = {
+  /** Calendar policy applied to date movement and duration calculations. */
+  calendarPolicy: WorkItemScheduleCalendarPolicy
+  /** Planned effort independent from elapsed or working-day duration. */
+  plannedEffortMinutes?: number
+}
+
+/** A Work Item with no planned calendar placement. */
+export type UnscheduledWorkItemSchedule = WorkItemScheduleBase & {
+  /** Explicitly distinguishes an item with no dates from incomplete date data. */
+  mode: 'unscheduled'
+}
+
+/** A Work Item that has only a deadline and no inferred start date or duration. */
+export type DueDateWorkItemSchedule = WorkItemScheduleBase & {
+  /** Identifies a deadline-only schedule. */
+  mode: 'due-date'
+  /** Deadline as a local `YYYY-MM-DD` calendar date. */
+  dueDate: string
+}
+
+/** A task occupying an inclusive working-date range. */
+export type DateRangeWorkItemSchedule = WorkItemScheduleBase & {
+  /** Identifies a duration-bearing task schedule. */
+  mode: 'date-range'
+  /** Inclusive local start date in `YYYY-MM-DD` form. */
+  startDate: string
+  /** Inclusive local end date in `YYYY-MM-DD` form. */
+  endDate: string
+  /** Number of working dates in the inclusive range under `calendarPolicy`. */
+  durationDays: number
+}
+
+/** A zero-duration milestone placed on one local calendar date. */
+export type MilestoneWorkItemSchedule = WorkItemScheduleBase & {
+  /** Identifies a zero-duration milestone. */
+  mode: 'milestone'
+  /** Milestone date in `YYYY-MM-DD` form. */
+  startDate: string
+  /** Same date as `startDate`, retained for uniform range rendering. */
+  endDate: string
+  /** Milestones always have zero duration. */
+  durationDays: 0
+}
+
+/** Canonical schedule states supported by Work Items. */
+export type WorkItemSchedule =
+  | UnscheduledWorkItemSchedule
+  | DueDateWorkItemSchedule
+  | DateRangeWorkItemSchedule
+  | MilestoneWorkItemSchedule
+
+/**
+ * Derives the deadline-oriented read projection from a canonical schedule.
+ *
+ * @param schedule - Canonical schedule to project.
+ * @returns The deadline or inclusive end date, or an empty string when unscheduled.
+ */
+export function deriveWorkItemScheduleDueDate(schedule: WorkItemSchedule): string {
+  switch (schedule.mode) {
+    case 'unscheduled':
+      return ''
+    case 'due-date':
+      return schedule.dueDate
+    case 'date-range':
+    case 'milestone':
+      return schedule.endDate
+  }
+}
+
+/**
+ * Creates an explicit unscheduled state under the default calendar policy.
+ *
+ * @param plannedEffortMinutes - Optional effort estimate independent from calendar placement.
+ * @returns A detached unscheduled Work Item schedule.
+ */
+export function createDefaultUnscheduledWorkItemSchedule(
+  plannedEffortMinutes?: number,
+): UnscheduledWorkItemSchedule {
+  if (
+    plannedEffortMinutes !== undefined &&
+    (!Number.isSafeInteger(plannedEffortMinutes) || plannedEffortMinutes < 0)
+  ) {
+    throw new RangeError('Planned effort minutes must be a nonnegative integer.')
+  }
+
+  return {
+    calendarPolicy: {
+      holidays: [],
+      timeZone: DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY.timeZone,
+      workingWeekdays: [...DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY.workingWeekdays],
+    },
+    mode: 'unscheduled',
+    ...(plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes }),
+  }
+}
+
+/**
+ * Creates a deadline-only schedule under the default calendar policy.
+ *
+ * @param dueDate - Real calendar date in `YYYY-MM-DD` form.
+ * @returns A due-date schedule using the default UTC Monday-to-Friday policy.
+ */
+export function createDefaultDueDateWorkItemSchedule(
+  dueDate: string,
+): DueDateWorkItemSchedule {
+  if (!isIsoCalendarDate(dueDate)) {
+    throw new RangeError(`Invalid Work Item schedule date: ${dueDate}`)
+  }
+
+  return {
+    calendarPolicy: {
+      holidays: [],
+      timeZone: DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY.timeZone,
+      workingWeekdays: [...DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY.workingWeekdays],
+    },
+    dueDate,
+    mode: 'due-date',
+  }
+}
+
+/**
+ * Checks whether a value is a real ISO calendar date.
+ *
+ * @param value - Candidate `YYYY-MM-DD` value.
+ * @returns True when the date round-trips through UTC calendar arithmetic.
+ */
+function isIsoCalendarDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) {
+    return false
+  }
+  const date = new Date(`${value}T00:00:00.000Z`)
+  return Number(value.slice(0, 4)) >= WORK_ITEM_SCHEDULE_MIN_YEAR &&
+    !Number.isNaN(date.getTime()) &&
+    date.toISOString().slice(0, 10) === value
+}
+
+/** A schedule operation shared by Gantt, Calendar, Table, and detail surfaces. */
+export type WorkItemScheduleOperation =
+  | {
+      /** Replaces the complete schedule after server-side validation. */
+      type: 'replace'
+      /** Candidate schedule to validate and preview. */
+      schedule: WorkItemSchedule
+    }
+  | {
+      /** Moves a scheduled item while preserving its mode and duration. */
+      type: 'move'
+      /** New local date for the deadline, milestone, or range start. */
+      targetDate: string
+    }
+  | {
+      /** Changes the end of a date-range task and recalculates its duration. */
+      type: 'resize'
+      /** New inclusive local end date. */
+      endDate: string
+    }
+
+/** Request used to preview one canonical Work Item schedule operation. */
+export type PreviewWorkItemScheduleInput = {
+  /** Revision observed before the preview request. */
+  expectedRevision: number
+  /** Schedule operation evaluated by the server domain logic. */
+  operation: WorkItemScheduleOperation
+}
+
+/** One direct or dependency-propagated schedule change in a preview. */
+export type WorkItemScheduleImpact = {
+  /** Team that owns the affected Work Item. */
+  teamId: string
+  /** Team-local Work Item identifier. */
+  workItemId: string
+  /** Whether the item is the mutation target or a dependency-propagated item. */
+  kind: 'direct' | 'dependency'
+  /** Revision that must still match before this impact can be applied safely. */
+  expectedRevision: number
+  /** Schedule before the proposed operation. */
+  before: WorkItemSchedule
+  /** Schedule after the proposed operation. */
+  after: WorkItemSchedule
+}
+
+/** Server-validated preview shared by every schedule editing surface. */
+export type WorkItemScheduleChangePreview = {
+  /** Revision that must still match when the preview is applied. */
+  expectedRevision: number
+  /** Target Work Item followed by any dependency-propagated impacts. */
+  impacts: WorkItemScheduleImpact[]
+  /** Relation graph revision used to enumerate dependency impacts, when evaluated. */
+  relationGraphRevision?: number
+  /** Stable warning codes suitable for localized presentation. */
+  warnings: string[]
+}
 
 /**
  * Work Item の進捗状態です。
@@ -90,9 +321,11 @@ type WorkItemBase = {
    */
   assigneeName?: string
   /**
-   * Work Item の期限日です。
+   * Deadline-oriented read projection derived from `schedule`; empty only for `unscheduled`.
    */
   dueDate: string
+  /** Canonical schedule shared by every Work Item view and mutation surface. */
+  schedule: WorkItemSchedule
   /**
    * Work Item の優先度です。
    */
@@ -190,10 +423,8 @@ export type CreateWorkItemInput = {
    * Backlog/Triage に required custom field を未入力のまま仮保存するかどうかです。
    */
   quickCapture?: boolean
-  /**
-   * Work Item の期限日です。
-   */
-  dueDate: string
+  /** Complete canonical schedule for the new Work Item. */
+  schedule: WorkItemSchedule
   /**
    * Work Item の優先度です。
    */
@@ -228,10 +459,8 @@ export type WorkItemPatch = {
    * Field ID ごとの変更値です。null は value の削除を表します。
    */
   customFieldValues?: Record<string, CustomFieldValue | null>
-  /**
-   * 変更後の期限日です。
-   */
-  dueDate?: string
+  /** Complete replacement schedule used by all interactive planning views. */
+  schedule?: WorkItemSchedule
   /**
    * 変更後の優先度です。
    */

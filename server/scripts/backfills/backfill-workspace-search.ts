@@ -686,12 +686,14 @@ function mapProjectDirectoryItemRow(
  */
 export function mapWorkItem(item: Record<string, unknown>): SearchProjectionOperation | undefined {
   if (!isCanonicalWorkItemRecord(item)) {
-    return undefined
+    throw new TypeError(
+      'Workspace search backfill encountered a non-canonical Work Item row.',
+    )
   }
 
-  const workspaceId = readRequiredString(item.directoryId)
-  const teamId = readRequiredString(item.teamId)
-  const issueId = readRequiredString(item.issueId)
+  const workspaceId = item.directoryId
+  const teamId = item.teamId
+  const issueId = item.issueId
 
   if (!workspaceId || !teamId || !issueId) {
     return undefined
@@ -699,12 +701,12 @@ export function mapWorkItem(item: Record<string, unknown>): SearchProjectionOper
 
   const entityId = createWorkItemEntityId(teamId, issueId)
 
-  if (readOptionalString(item.deletedAt) || readOptionalString(item.archivedAt)) {
+  if (readOptionalString(item.deletedAt) || item.archivedAt) {
     return createDeleteOperation(workspaceId, 'work-item', entityId)
   }
 
-  const title = readRequiredString(item.title)
-  const projectId = readOptionalString(item.assignedProjectId)
+  const title = item.title
+  const projectId = item.assignedProjectId
 
   if (!title) {
     return undefined
@@ -717,16 +719,16 @@ export function mapWorkItem(item: Record<string, unknown>): SearchProjectionOper
       teamId,
       issueId,
       title,
-      body: readOptionalString(item.description),
+      body: item.description,
       projectId,
-      assigneeUserId: readOptionalString(item.assigneeUserId),
-      creatorUserId: readRequiredString(item.creatorMemberKey),
-      status: readRequiredString(item.workflowStatusId),
+      assigneeUserId: item.assigneeUserId,
+      creatorUserId: item.creatorMemberKey,
+      status: item.workflowStatusId,
       customFields: readCanonicalCustomFieldValues(item.customFieldValues),
-      relationIds: item.relationIds as string[],
-      dueDate: readOptionalString(item.dueDate),
-      createdAt: readOptionalString(item.createdAt),
-      updatedAt: readOptionalString(item.updatedAt),
+      relationIds: item.relationIds,
+      dueDate: item.dueDate,
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
     }),
   }
 }

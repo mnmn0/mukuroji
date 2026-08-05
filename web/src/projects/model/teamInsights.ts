@@ -1,3 +1,4 @@
+import { deriveWorkItemScheduleDueDate } from '@mukuroji/contracts'
 import type { ProjectTask } from '../../tasks/api'
 import {
   createWorkspaceActionQueue,
@@ -233,7 +234,7 @@ export function createTeamMemberRows(
       const openTasks = memberTasks.filter((task) => isOpenWorkItem(task))
       const openTaskCount = openTasks.length
       const nextDueDate = openTasks
-        .map((task) => task.dueDate)
+        .map((task) => deriveWorkItemScheduleDueDate(task.schedule))
         .filter((dueDate) => parseWorkspaceTaskDueDate(dueDate) !== null)
         .sort((firstDate, secondDate) => firstDate.localeCompare(secondDate))[0]
 

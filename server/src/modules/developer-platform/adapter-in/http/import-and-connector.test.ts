@@ -19,6 +19,7 @@ import {
   expect,
   test,
 } from 'bun:test'
+import type { CreateWorkItemInput } from '@mukuroji/contracts'
 
 afterEach(() => {
   resetTestApp()
@@ -49,12 +50,20 @@ test('scopes deterministic import row identities to the Workspace actor', () => 
     requestId: 'request-import-row',
     idempotencyKey: 'import-same-client-key-row-1',
   }
-  const input = {
+  const input: CreateWorkItemInput = {
     title: 'Imported row',
     assigneeUserId: 'assignee@example.com',
-    dueDate: '2026-07-31',
+    schedule: {
+      calendarPolicy: {
+        holidays: [],
+        timeZone: 'UTC',
+        workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+      },
+      dueDate: '2026-07-31',
+      mode: 'due-date',
+    },
     priority: 'medium',
-  } as const
+  }
   const firstActor = createImportRowCreateIdentity(
     'workspace-1',
     'user-1',

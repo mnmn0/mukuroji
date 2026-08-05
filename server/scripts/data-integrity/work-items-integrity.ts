@@ -1068,7 +1068,8 @@ function hasCanonicalPhysicalWorkItemShape(
     ) &&
     requiredNumberAttributeNames.every((name) => isNumberAttributeValue(item[name])) &&
     isCanonicalCustomFieldValuesAttribute(item.customFieldValues) &&
-    isStringListAttributeValue(item.relationIds)
+    isStringListAttributeValue(item.relationIds) &&
+    isMapAttributeValue(item.schedule)
 }
 
 /**

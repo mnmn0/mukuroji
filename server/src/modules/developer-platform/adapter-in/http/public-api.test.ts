@@ -24,6 +24,23 @@ import {
   expect,
   test,
 } from 'bun:test'
+import {
+  WORK_ITEM_SCHEMA_VERSION,
+  type DueDateWorkItemSchedule,
+} from '@mukuroji/contracts'
+
+/** Creates a canonical deadline-only schedule for Public API persistence fixtures. */
+function createDueDateSchedule(dueDate = '2026-07-31'): DueDateWorkItemSchedule {
+  return {
+    calendarPolicy: {
+      holidays: [],
+      timeZone: 'UTC',
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+    },
+    dueDate,
+    mode: 'due-date',
+  }
+}
 
 afterEach(() => {
   resetTestApp()
@@ -32,7 +49,7 @@ afterEach(() => {
 test('pages Public Work Items with a bounded updated-at GSI query and LastEvaluatedKey', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   const createStoredIssue = (issueId: string, updatedAt: string) => ({
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     workflowSchemaVersion: 1,
     directoryId: 'workspace-1',
@@ -50,6 +67,7 @@ test('pages Public Work Items with a bounded updated-at GSI query and LastEvalua
     customFieldValues: {},
     relationIds: [],
     dueDate: '2026-07-31',
+    schedule: createDueDateSchedule(),
     priority: 'medium',
     createdAt: '2026-07-18T00:00:00.000Z',
     updatedAt,
@@ -119,7 +137,7 @@ test('returns an existing deterministic import row only when its request digest 
   const digest = 'a'.repeat(64)
   const issueId = `import-${'b'.repeat(48)}`
   const existing = {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     workflowSchemaVersion: 1,
     directoryId: 'workspace-1',
@@ -136,6 +154,7 @@ test('returns an existing deterministic import row only when its request digest 
     customFieldValues: {},
     relationIds: [],
     dueDate: '2026-07-31',
+    schedule: createDueDateSchedule(),
     priority: 'medium',
     createdAt: '2026-07-18T00:00:00.000Z',
     updatedAt: '2026-07-18T00:00:00.000Z',
@@ -169,7 +188,7 @@ test('returns an existing deterministic import row only when its request digest 
     workflowStatusId: 'todo',
     statusCategory: 'unstarted',
     customFieldValues: {},
-    dueDate: '2026-07-31',
+    schedule: createDueDateSchedule(),
     priority: 'medium',
     idempotentIssueId: issueId,
     idempotentRequestDigest: digest,
@@ -223,7 +242,7 @@ test('accepts the deterministic public API Work Item ID namespace', async () => 
       workflowStatusId: 'todo',
       statusCategory: 'unstarted',
       customFieldValues: {},
-      dueDate: '2026-07-31',
+      schedule: createDueDateSchedule(),
       priority: 'medium',
       idempotentIssueId: issueId,
       idempotentRequestDigest: 'e'.repeat(64),
@@ -277,7 +296,7 @@ test('rejects a status-only canonical row instead of upcasting workflow fields',
 
 test('rejects legacy-only display fields on canonical rows', async () => {
   const canonicalItem = {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     workflowSchemaVersion: 1,
     directoryId: 'workspace-1',
@@ -292,7 +311,8 @@ test('rejects legacy-only display fields on canonical rows', async () => {
     statusCategory: 'unstarted',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/07/12',
+    dueDate: '2026-07-12',
+    schedule: createDueDateSchedule('2026-07-12'),
     priority: 'medium',
     createdAt: '2026-07-12T00:00:00.000Z',
     updatedAt: '2026-07-12T00:00:00.000Z',
@@ -338,7 +358,7 @@ test('pages filtered legacy comments with a scope-bound opaque event cursor', as
   const sentInputs: Array<Record<string, unknown>> = []
   let queryPage = 0
   const issueItem = {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     workflowSchemaVersion: 1,
     directoryId: 'workspace-1',
@@ -353,7 +373,8 @@ test('pages filtered legacy comments with a scope-bound opaque event cursor', as
     statusCategory: 'unstarted',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/07/12',
+    dueDate: '2026-07-12',
+    schedule: createDueDateSchedule('2026-07-12'),
     priority: 'medium',
     createdAt: '2026-07-12T00:00:00.000Z',
     updatedAt: '2026-07-12T00:00:00.000Z',

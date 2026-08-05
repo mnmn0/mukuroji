@@ -100,13 +100,14 @@ const runningOperation = {
 }
 
 describe('BulkOperationToolbar', () => {
-  test('normalizes the date input value to the Work Item storage format', () => {
-    expect(createBulkEditPatch('dueDate', ' 2026-07-31 ')).toEqual({
-      dueDate: '2026/07/31',
-    })
+  test('builds a normalized scalar Work Item patch', () => {
     expect(createBulkEditPatch('workflowStatusId', ' active ')).toEqual({
       workflowStatusId: 'active',
     })
+  })
+
+  test('rejects non-canonical bulk edit values', () => {
+    expect(() => createBulkEditPatch('priority', 'urgent')).toThrow(RangeError)
   })
 
   test('selects only visible rows while preserving hidden selections', () => {

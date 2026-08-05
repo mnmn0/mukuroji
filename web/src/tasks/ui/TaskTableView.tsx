@@ -30,6 +30,12 @@ import {
   taskPriorities,
   type TaskCreateContext,
 } from '../model/taskView'
+import {
+  formatTaskScheduleRange,
+  replaceTaskDeadlineSchedule,
+  resolveTaskSchedule,
+  taskScheduleModeLabelKeys,
+} from '../model/taskSchedule'
 import { TaskInlineField } from './TaskInlineField'
 import { TaskInlineCustomFields } from './TaskInlineCustomFields'
 import { resolveWorkflowStatusCategory } from '../../work-items/model/workItemDisplay'
@@ -294,12 +300,14 @@ export function TaskTableView({
     const sourceTask = selectedTasks[0]
     const targetElement = event.target instanceof HTMLElement ? event.target : undefined
     const fieldKey = targetElement?.closest<HTMLElement>('[data-task-field]')?.dataset.taskField ?? 'title'
+    const updates = selectedTasks.slice(1).flatMap((task) => {
+      const patch = createTaskFillPatch(sourceTask, task, fieldKey)
+      return patch ? [{ patch, task }] : []
+    })
     void runBatchTaskUpdates(
-      selectedTasks.slice(1).map((task) => ({
-        patch: createTaskFillPatch(sourceTask, fieldKey),
-        task,
-      })),
+      updates,
       t('tasks.action.fill'),
+      selectedTasks.length - 1 - updates.length,
     )
   }
 
@@ -483,6 +491,9 @@ function TaskTableRow({
     low: 'workbench-badge-success',
   }
   const taskTitle = resolveWorkItemTitle(task)
+  const schedule = resolveTaskSchedule(task)
+  const scheduleRange = formatTaskScheduleRange(schedule)
+  const scheduleDisplay = `${t(taskScheduleModeLabelKeys[schedule.mode])}${scheduleRange ? `: ${scheduleRange}` : ''}`
   const overdue = isTaskOverdue(task)
   const editableStatuses = resolveEditableWorkflowStatuses(task, configuration)
   const memberOptions = assigneeOptions.map((member) => ({
@@ -622,17 +633,19 @@ function TaskTableRow({
             : overdue ? 'text-red-700' : 'text-[#505967]'
         }`}
       >
-        {onUpdateTask ? (
+        {onUpdateTask && (schedule.mode === 'due-date' || schedule.mode === 'unscheduled') ? (
           <TaskInlineField
             ariaLabel={`${t('tasks.inline.edit')}: ${t('tasks.column.dueDate')}`}
-            displayValue={task.dueDate || t('tasks.calendar.empty')}
+            displayValue={scheduleDisplay}
             fieldKey="dueDate"
             kind="date"
             testId={`task-inline-due-date-${task.id}`}
-            value={task.dueDate.replaceAll('/', '-')}
-            onCommit={(value) => commitPatch({ dueDate: value.replaceAll('-', '/') })}
+            value={schedule.mode === 'due-date' ? schedule.dueDate : ''}
+            onCommit={(value) => commitPatch({
+              schedule: replaceTaskDeadlineSchedule(schedule, value),
+            })}
           />
-        ) : task.dueDate}
+        ) : <span>{scheduleDisplay}</span>}
       </td>
       <td className="px-3 py-2.5">
         {onUpdateTask ? (
@@ -664,8 +677,8 @@ function TaskTableRow({
             data-testid={`task-row-add-${task.id}`}
             onClick={() => onCreateTaskOpen({
               ...(task.assigneeUserId ? { assigneeUserId: task.assigneeUserId } : {}),
-              ...(task.dueDate ? { dueDate: task.dueDate } : {}),
               projectId,
+              schedule,
               source: 'table',
               teamId: task.teamId,
               workflowStatusId: task.workflowStatusId,
@@ -732,13 +745,18 @@ function createTaskPatchFromPastedCells(
 
   const dueDate = cells[3]
   if (dueDate) {
-    const normalizedDueDate = dueDate.replaceAll('-', '/')
+    const normalizedDueDate = dueDate.trim()
+    const schedule = resolveTaskSchedule(task)
 
-    if (!isValidPastedTaskDueDate(normalizedDueDate)) {
+    if (
+      !isValidPastedTaskDueDate(normalizedDueDate) ||
+      schedule.mode === 'date-range' ||
+      schedule.mode === 'milestone'
+    ) {
       return undefined
     }
 
-    patch.dueDate = normalizedDueDate
+    patch.schedule = replaceTaskDeadlineSchedule(schedule, normalizedDueDate)
   }
 
   const priority = cells[4]
@@ -753,9 +771,14 @@ function createTaskPatchFromPastedCells(
   return Object.keys(patch).length > 0 ? patch : undefined
 }
 
-/** Returns whether a pasted task due date is a real YYYY/MM/DD calendar date. */
+/**
+ * Checks whether a pasted task deadline is a real ISO calendar date.
+ *
+ * @param value - Candidate `YYYY-MM-DD` value.
+ * @returns True when the value round-trips through UTC calendar arithmetic.
+ */
 function isValidPastedTaskDueDate(value: string) {
-  const match = /^(\d{4})\/(\d{2})\/(\d{2})$/.exec(value)
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value)
 
   if (!match) {
     return false
@@ -779,29 +802,46 @@ function isInlineEditorTarget(target: EventTarget | null) {
 
 /** Creates the common mutation patch used by table fill-down for one field. */
 function createTaskFillPatch(
-  task: ProjectTask,
+  sourceTask: ProjectTask,
+  targetTask: ProjectTask,
   fieldKey: string,
-): WorkItemPatch {
+): WorkItemPatch | undefined {
   if (fieldKey.startsWith('customField:')) {
     const fieldId = fieldKey.slice('customField:'.length)
     return {
       customFieldValues: {
-        [fieldId]: task.customFieldValues[fieldId] ?? null,
+        [fieldId]: sourceTask.customFieldValues[fieldId] ?? null,
       },
     }
   }
 
   switch (fieldKey) {
     case 'assigneeUserId':
-      return { assigneeUserId: task.assigneeUserId }
-    case 'dueDate':
-      return { dueDate: task.dueDate }
+      return { assigneeUserId: sourceTask.assigneeUserId }
+    case 'dueDate': {
+      const sourceSchedule = resolveTaskSchedule(sourceTask)
+      const targetSchedule = resolveTaskSchedule(targetTask)
+      if (
+        sourceSchedule.mode === 'date-range' ||
+        sourceSchedule.mode === 'milestone' ||
+        targetSchedule.mode === 'date-range' ||
+        targetSchedule.mode === 'milestone'
+      ) {
+        return undefined
+      }
+      return {
+        schedule: replaceTaskDeadlineSchedule(
+          targetSchedule,
+          sourceSchedule.mode === 'due-date' ? sourceSchedule.dueDate : '',
+        ),
+      }
+    }
     case 'priority':
-      return { priority: task.priority }
+      return { priority: sourceTask.priority }
     case 'workflowStatusId':
-      return { workflowStatusId: task.workflowStatusId }
+      return { workflowStatusId: sourceTask.workflowStatusId }
     case 'title':
     default:
-      return { title: task.title }
+      return { title: sourceTask.title }
   }
 }

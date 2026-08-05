@@ -23,6 +23,12 @@ import {
   type ProjectTaskStatusColumn,
 } from '../model/taskView'
 import {
+  formatTaskScheduleRange,
+  replaceTaskDeadlineSchedule,
+  resolveTaskSchedule,
+  taskScheduleModeLabelKeys,
+} from '../model/taskSchedule'
+import {
   resolveEditableWorkflowStatuses,
   resolveWorkItemWorkflowStatusLabel,
 } from '../../work-items/model/workItemDisplay'
@@ -232,6 +238,9 @@ export function TaskBoardView({
               {statusTasks.length > 0 ? (
                 statusTasks.map((task) => {
                   const taskKey = createTaskKey(task)
+                  const schedule = resolveTaskSchedule(task)
+                  const scheduleRange = formatTaskScheduleRange(schedule)
+                  const scheduleDisplay = `${t(taskScheduleModeLabelKeys[schedule.mode])}${scheduleRange ? `: ${scheduleRange}` : ''}`
                   const taskConfiguration = resolveProjectTaskConfiguration(
                     task,
                     configurationsByTeam,
@@ -365,17 +374,19 @@ export function TaskBoardView({
                             onCommit={(value) => onUpdateTask(task, { priority: resolveTaskPriority(value) }).then(() => undefined)}
                           />
                         ) : <TaskPriorityBadge priority={task.priority} t={t} />}
-                        {onUpdateTask ? (
+                        {onUpdateTask && (schedule.mode === 'due-date' || schedule.mode === 'unscheduled') ? (
                           <TaskInlineField
                             ariaLabel={`${t('tasks.inline.edit')}: ${t('tasks.column.dueDate')}`}
-                            displayValue={task.dueDate || t('tasks.calendar.empty')}
+                            displayValue={scheduleDisplay}
                             kind="date"
                             testId={`task-inline-due-date-${task.id}`}
-                            value={task.dueDate.replaceAll('/', '-')}
-                            onCommit={(value) => onUpdateTask(task, { dueDate: value.replaceAll('-', '/') }).then(() => undefined)}
+                            value={schedule.mode === 'due-date' ? schedule.dueDate : ''}
+                            onCommit={(value) => onUpdateTask(task, {
+                              schedule: replaceTaskDeadlineSchedule(schedule, value),
+                            }).then(() => undefined)}
                           />
                         ) : (
-                          <span className="text-xs font-semibold text-[#5f6874]">{task.dueDate}</span>
+                          <span className="text-xs font-semibold text-[#5f6874]">{scheduleDisplay}</span>
                         )}
                       </div>
                       <p className="mt-2 text-[11px] font-medium text-[var(--workbench-muted)]">

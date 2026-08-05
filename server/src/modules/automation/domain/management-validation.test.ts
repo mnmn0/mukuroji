@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  createDefaultUnscheduledWorkItemSchedule,
+} from '@mukuroji/contracts'
+import {
   validateApplyAutomationTemplateInput,
   validateCreateAutomationInboundWebhookEndpointInput,
   validateCreateAutomationTemplateInput,
@@ -17,6 +20,7 @@ describe('Automation management validation domain', () => {
   })
 
   test('normalizes template and application inputs without persistence state', () => {
+    const schedule = createDefaultUnscheduledWorkItemSchedule()
     expect(validateCreateAutomationTemplateInput({
       kind: 'work-item',
       name: 'Bug template',
@@ -25,6 +29,7 @@ describe('Automation management validation domain', () => {
         title: 'Investigate',
         priority: 'high',
         customFieldValues: { severity: 'critical' },
+        schedule,
       },
     })).toEqual({
       kind: 'work-item',
@@ -34,6 +39,7 @@ describe('Automation management validation domain', () => {
         title: 'Investigate',
         priority: 'high',
         customFieldValues: { severity: 'critical' },
+        schedule,
       },
     })
     expect(validateApplyAutomationTemplateInput({
@@ -75,6 +81,12 @@ describe('Automation management validation domain', () => {
       name: 'Project',
       enabled: true,
       payload: { name: 'Project', hidden: true },
+    })).toThrow('unsupported fields')
+    expect(() => validateCreateAutomationTemplateInput({
+      kind: 'work-item',
+      name: 'Legacy deadline',
+      enabled: true,
+      payload: { title: 'Review', dueDate: '2026-07-31' },
     })).toThrow('unsupported fields')
   })
 })

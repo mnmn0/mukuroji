@@ -18,8 +18,9 @@ import type {
 import {
   WorkItemConfigurationError,
 } from '../../work-item-configuration'
-import type {
-  WorkItemConfiguration,
+import {
+  createDefaultDueDateWorkItemSchedule,
+  type WorkItemConfiguration,
 } from '@mukuroji/contracts'
 import {
   afterEach,
@@ -287,7 +288,7 @@ test('rejects missing required custom fields before creating a Work Item', async
       title: 'Missing effort',
       assignedProjectId: 'refero',
       assigneeUserId: 'sato@example.com',
-      dueDate: '2026/07/20',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-20'),
       priority: 'medium',
       workflowStatusId: 'todo',
       customFieldValues: {},
@@ -337,7 +338,7 @@ test('allows quick capture to defer required custom fields only in a backlog sta
       title: 'Quick capture',
       assignedProjectId: 'refero',
       assigneeUserId: 'sato@example.com',
-      dueDate: '2026/07/20',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-20'),
       priority: 'medium',
       quickCapture: true,
       workflowStatusId: 'triage',
@@ -366,7 +367,7 @@ test('allows quick capture to defer required custom fields only in a backlog sta
       title: 'Invalid quick capture',
       assignedProjectId: 'refero',
       assigneeUserId: 'sato@example.com',
-      dueDate: '2026/07/20',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-20'),
       priority: 'medium',
       quickCapture: true,
       workflowStatusId: nonBacklogStatus.id,
@@ -390,7 +391,7 @@ test('allows quick capture to defer required custom fields only in a backlog sta
       title: 'Invalid quick capture type',
       assignedProjectId: 'refero',
       assigneeUserId: 'sato@example.com',
-      dueDate: '2026/07/20',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-20'),
       priority: 'medium',
       quickCapture: 'true',
       workflowStatusId: 'triage',
@@ -405,7 +406,7 @@ test('allows quick capture to defer required custom fields only in a backlog sta
   })
 })
 
-test('uses the configured initial workflow status when create omits legacy status', async () => {
+test('uses the configured initial workflow status when create omits workflow status', async () => {
   const calls = configureFakeProjectClients(true)
   const configuration = createTestWorkItemConfiguration('team', 'core-team')
   configuration.workflow.initialStatusId = 'triage'
@@ -433,7 +434,7 @@ test('uses the configured initial workflow status when create omits legacy statu
       title: 'Starts in triage',
       assignedProjectId: 'refero',
       assigneeUserId: 'sato@example.com',
-      dueDate: '2026/07/20',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-20'),
       priority: 'medium',
     }),
   })

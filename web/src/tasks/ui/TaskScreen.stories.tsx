@@ -5,6 +5,7 @@ import {
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, fn, userEvent, within } from 'storybook/test'
 import { TaskScreen } from './TaskScreen'
+import { createDefaultDateRangeTaskSchedule } from '../model/taskSchedule'
 import type { TeamIssueDetail } from '../../issues/api'
 import {
   collaborationWorkspaceMemberFixtures,
@@ -97,6 +98,7 @@ const storyTasks = referoTaskFixtures.map((task, index) => {
     customFieldValues: {},
     relationIds: [],
     dueDate: task.dueDate,
+    schedule: task.schedule,
     priority: task.priority,
     createdAt: '2026-06-08T00:00:00.000Z',
     updatedAt: '2026-06-08T00:00:00.000Z',
@@ -137,7 +139,8 @@ const selectedIssueDetail: TeamIssueDetail = {
     statusCategory: 'started',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/06/03',
+    dueDate: '2026-06-03',
+    schedule: createDefaultDateRangeTaskSchedule('2026-06-01', '2026-06-03'),
     priority: 'high',
     createdAt: '2026-06-08T00:00:00.000Z',
     updatedAt: '2026-06-08T00:00:00.000Z',

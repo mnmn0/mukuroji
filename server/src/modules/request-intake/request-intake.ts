@@ -671,6 +671,7 @@ export function createRequestWorkItemInput(
   )
   const dueDate = new Date(`${submission.createdAt.slice(0, 10)}T00:00:00.000Z`)
   dueDate.setUTCDate(dueDate.getUTCDate() + target.dueDateOffsetDays)
+  const scheduleDueDate = dueDate.toISOString().slice(0, 10)
   return {
     target,
     input: {
@@ -680,7 +681,15 @@ export function createRequestWorkItemInput(
       assigneeUserId: target.assigneeUserId,
       ...(target.workflowStatusId ? { workflowStatusId: target.workflowStatusId } : {}),
       customFieldValues,
-      dueDate: dueDate.toISOString().slice(0, 10).replaceAll('-', '/'),
+      schedule: {
+        calendarPolicy: {
+          holidays: [],
+          timeZone: 'UTC',
+          workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+        },
+        dueDate: scheduleDueDate,
+        mode: 'due-date',
+      },
       priority: target.priority,
     },
   }

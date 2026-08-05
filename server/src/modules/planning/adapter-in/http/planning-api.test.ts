@@ -16,6 +16,7 @@ import type {
   PlanningMutationResponse,
   PlanningSnapshot,
 } from '@mukuroji/contracts'
+import { createDefaultDueDateWorkItemSchedule } from '@mukuroji/contracts'
 import {
   afterEach,
   expect,
@@ -527,6 +528,7 @@ test('requires old Planning scope permission when re-linking a moved Work Item',
       projectId: 'refero',
       statusCategory: 'started' as const,
       dueDate: '2026-08-31',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-08-31'),
     }],
   }
   await planningClient.create(
@@ -592,6 +594,7 @@ test('lets Workspace owners clean up inaccessible stale Work Item links', async 
       projectId: 'refero',
       statusCategory: 'unstarted' as const,
       dueDate: '2026-08-31',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-08-31'),
     }],
   }
   await planningClient.create(

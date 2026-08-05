@@ -1,4 +1,5 @@
 import type { WorkflowStatusCategory } from './work-item-configuration'
+import type { WorkItemSchedule } from './work-items'
 
 /** Planning domain の現行 schema version です。 */
 export const PLANNING_SCHEMA_VERSION = 1 as const
@@ -182,6 +183,8 @@ export type PlanningWorkItemSummary = {
   statusCategory: WorkflowStatusCategory
   /** Work Item 期限日です。 */
   dueDate: string
+  /** Canonical Work Item schedule used by planning timelines and impact previews. */
+  schedule: WorkItemSchedule
 }
 
 /** Planning snapshot から算出した critical path です。 */

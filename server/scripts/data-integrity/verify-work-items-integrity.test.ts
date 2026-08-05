@@ -25,6 +25,7 @@ import {
   GetCallerIdentityCommand,
   type GetCallerIdentityCommandOutput,
 } from '@aws-sdk/client-sts'
+import { WORK_ITEM_SCHEMA_VERSION } from '@mukuroji/contracts'
 import type {
   WorkItemsIntegrityManifest,
 } from './work-items-integrity'
@@ -299,7 +300,7 @@ function createManifestFileFixture(): WorkItemsIntegrityManifest {
       startedAt: '2026-07-20T00:00:00.000Z',
     },
     workflowSchemaVersion: 1,
-    workItemSchemaVersion: 1,
+    workItemSchemaVersion: WORK_ITEM_SCHEMA_VERSION,
   }
 }
 

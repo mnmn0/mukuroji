@@ -2,7 +2,7 @@
 
 ## 目的
 
-この文書は、Workspace / Team ごとに設定できる workflow、custom field、Work Item relation の保存契約と運用手順を定義する。既存 canonical Work Item の `schemaVersion=1` は変更せず、設定拡張には独立した `workflowSchemaVersion=1` と `WorkItemConfigurationTable` を使う。
+この文書は、Workspace / Team ごとに設定できる workflow、custom field、Work Item relation の保存契約と運用手順を定義する。canonical Work Item の `schemaVersion=2` とは独立して、設定拡張には `workflowSchemaVersion=1` と `WorkItemConfigurationTable` を使う。
 
 設定が未登録でも既存 Workspace が停止しないこと、設定変更と Work Item 更新の競合を検出すること、relation の両側を同じ transaction で確定することを必須とする。
 

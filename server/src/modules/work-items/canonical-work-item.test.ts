@@ -6,11 +6,12 @@ import {
   isCanonicalWorkItemRelationIds,
 } from './canonical-work-item'
 
+/** Creates a strict schema-v2 storage row for validation tests. */
 function createCanonicalWorkItem(
   overrides: Record<string, unknown> = {},
 ): Record<string, unknown> {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: 1,
     workflowSchemaVersion: 1,
     directoryId: 'workspace-1',
@@ -31,7 +32,16 @@ function createCanonicalWorkItem(
       labels: ['backend', 'urgent'],
     },
     relationIds: ['blocks:blocked-item', 'related:related-item'],
-    dueDate: '2026/07/31',
+    dueDate: '2026-07-31',
+    schedule: {
+      mode: 'due-date',
+      dueDate: '2026-07-31',
+      calendarPolicy: {
+        timeZone: 'UTC',
+        workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+        holidays: [],
+      },
+    },
     priority: 'medium',
     createdAt: '2026-07-01T09:00:00.000Z',
     updatedAt: '2026-07-12T09:00:00.000Z',
@@ -56,6 +66,107 @@ describe('canonical Work Item validation', () => {
       archivedBy: 'archiver@example.com',
     }))).toBe(true)
     expect(isCanonicalWorkItemRecord(unassigned)).toBe(true)
+  })
+
+  test('accepts all four explicit schedule states with an exact due-date projection', () => {
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      dueDate: '',
+      schedule: {
+        mode: 'unscheduled',
+        calendarPolicy: {
+          timeZone: 'Asia/Tokyo',
+          workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+          holidays: ['2026-08-11'],
+        },
+      },
+    }))).toBe(true)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem())).toBe(true)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      dueDate: '2026-07-31',
+      schedule: {
+        mode: 'date-range',
+        startDate: '2026-07-27',
+        endDate: '2026-07-31',
+        durationDays: 5,
+        plannedEffortMinutes: 1_200,
+        calendarPolicy: {
+          timeZone: 'UTC',
+          workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+          holidays: [],
+        },
+      },
+    }))).toBe(true)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      dueDate: '2026-07-31',
+      schedule: {
+        mode: 'milestone',
+        startDate: '2026-07-31',
+        endDate: '2026-07-31',
+        durationDays: 0,
+        calendarPolicy: {
+          timeZone: 'UTC',
+          workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+          holidays: [],
+        },
+      },
+    }))).toBe(true)
+  })
+
+  test('rejects invalid schedule states and mismatched due-date projections', () => {
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      dueDate: '2026-07-30',
+    }))).toBe(false)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      schedule: {
+        mode: 'date-range',
+        startDate: '2026-07-27',
+        endDate: '2026-07-31',
+        durationDays: 4,
+        calendarPolicy: {
+          timeZone: 'UTC',
+          workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+          holidays: [],
+        },
+      },
+    }))).toBe(false)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      schedule: {
+        mode: 'milestone',
+        startDate: '2026-07-30',
+        endDate: '2026-07-31',
+        durationDays: 0,
+        calendarPolicy: {
+          timeZone: 'UTC',
+          workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+          holidays: [],
+        },
+      },
+    }))).toBe(false)
+  })
+
+  test('rejects canonicalizable but non-canonical persisted schedule values', () => {
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      schedule: {
+        mode: 'due-date',
+        dueDate: '2026-07-31',
+        calendarPolicy: {
+          timeZone: 'utc',
+          workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+          holidays: [],
+        },
+      },
+    }))).toBe(false)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      schedule: {
+        mode: 'due-date',
+        dueDate: '2026-07-31',
+        calendarPolicy: {
+          timeZone: 'UTC',
+          workingWeekdays: ['friday', 'monday', 'monday'],
+          holidays: ['2026-08-11', '2026-08-11'],
+        },
+      },
+    }))).toBe(false)
   })
 
   test('rejects an invalid request source reference', () => {
@@ -101,6 +212,7 @@ describe('canonical Work Item validation', () => {
       'customFieldValues',
       'relationIds',
       'dueDate',
+      'schedule',
       'priority',
       'createdAt',
       'updatedAt',
@@ -112,7 +224,8 @@ describe('canonical Work Item validation', () => {
       expect(isCanonicalWorkItemRecord(item)).toBe(false)
     }
 
-    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ schemaVersion: 2 }))).toBe(false)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ schemaVersion: 1 }))).toBe(false)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ schemaVersion: 3 }))).toBe(false)
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ revision: 0 }))).toBe(false)
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ revision: 1.5 }))).toBe(false)
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ workflowSchemaVersion: 2 })))
@@ -148,12 +261,12 @@ describe('canonical Work Item validation', () => {
   })
 
   test('requires canonical calendar dates and ordered UTC timestamps', () => {
-    expect(isCanonicalWorkItemDueDate('2024/02/29')).toBe(true)
+    expect(isCanonicalWorkItemDueDate('2024/02/29')).toBe(false)
     expect(isCanonicalWorkItemDueDate('2024-02-29')).toBe(true)
     expect(isCanonicalWorkItemDueDate('2026/02/29')).toBe(false)
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
-      dueDate: '2026-07-31',
-    }))).toBe(true)
+      dueDate: '2026/07/31',
+    }))).toBe(false)
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
       dueDate: '2026/02/29',
     }))).toBe(false)

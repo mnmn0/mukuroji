@@ -8,6 +8,7 @@ import type {
   PlanningWorkItemSummary,
   UpdatePlanningEntityInput,
 } from '@mukuroji/contracts'
+import { createDefaultDueDateWorkItemSchedule } from '@mukuroji/contracts'
 import {
   DynamoDbPlanningClient,
   InMemoryPlanningClient,
@@ -98,6 +99,7 @@ function createWorkItem(
     projectId: 'project-1',
     statusCategory,
     dueDate: '2026-08-31',
+    schedule: createDefaultDueDateWorkItemSchedule('2026-08-31'),
   }
 }
 

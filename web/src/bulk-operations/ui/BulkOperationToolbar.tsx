@@ -119,10 +119,7 @@ export function BulkOperationToolbar({
   const isPreviewRequestCurrent = !previewedRequest ||
     isBulkOperationPreviewRequestCurrent(previewedRequest, request)
   const activePreview = isPreviewRequestCurrent ? preview : undefined
-  const requestReady = selectedItems.length > 0 && (
-    action === 'archive' ||
-    (action === 'move' ? Boolean(moveProjectId.trim()) : Boolean(editValue.trim()))
-  )
+  const requestReady = request !== undefined
   const mutationsAvailable = !readOnly && Boolean(onPreview && onApply)
 
   const resetReview = () => {
@@ -320,7 +317,7 @@ export function BulkOperationToolbar({
                       resetReview()
                     }}
                     placeholder={t(`bulk.edit.placeholder.${editField}`)}
-                    type={editField === 'dueDate' ? 'date' : 'text'}
+                    type="text"
                     value={editValue}
                   />
                 )}
@@ -408,11 +405,19 @@ function createBulkOperationRequest(
   }
 
   if (action === 'move') {
+    const normalizedProjectId = moveProjectId.trim()
+    if (!normalizedProjectId) {
+      return undefined
+    }
     return {
-      action: { targetProjectId: moveProjectId.trim(), type: action },
+      action: { targetProjectId: normalizedProjectId, type: action },
       items,
       workspaceId,
     }
+  }
+
+  if (!editValue.trim()) {
+    return undefined
   }
 
   return {

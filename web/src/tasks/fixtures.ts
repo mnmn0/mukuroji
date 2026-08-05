@@ -3,6 +3,12 @@ import {
   WORK_ITEM_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
 import type { ProjectTask } from './api'
+import {
+  createDefaultDateRangeTaskSchedule,
+  createDefaultDueDateTaskSchedule,
+  createDefaultMilestoneTaskSchedule,
+  createDefaultUnscheduledTaskSchedule,
+} from './model/taskSchedule'
 
 /**
  * TaskPage の Storybook と E2E で共有する Refero タスク fixture です。
@@ -24,7 +30,8 @@ export const referoTaskFixtures = [
     statusCategory: 'started',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/06/03',
+    dueDate: '2026-06-03',
+    schedule: createDefaultDateRangeTaskSchedule('2026-06-01', '2026-06-03'),
     priority: 'high',
     createdAt: '2026-06-01T00:00:00.000Z',
     updatedAt: '2026-06-01T00:00:00.000Z',
@@ -46,7 +53,8 @@ export const referoTaskFixtures = [
     statusCategory: 'started',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/06/05',
+    dueDate: '2026-06-05',
+    schedule: createDefaultMilestoneTaskSchedule('2026-06-05'),
     priority: 'medium',
     createdAt: '2026-06-01T00:00:00.000Z',
     updatedAt: '2026-06-01T00:00:00.000Z',
@@ -68,7 +76,8 @@ export const referoTaskFixtures = [
     statusCategory: 'unstarted',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/06/09',
+    dueDate: '2026-06-09',
+    schedule: createDefaultDueDateTaskSchedule('2026-06-09'),
     priority: 'medium',
     createdAt: '2026-06-01T00:00:00.000Z',
     updatedAt: '2026-06-01T00:00:00.000Z',
@@ -90,7 +99,8 @@ export const referoTaskFixtures = [
     statusCategory: 'completed',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/06/02',
+    dueDate: '',
+    schedule: createDefaultUnscheduledTaskSchedule(),
     priority: 'low',
     createdAt: '2026-06-01T00:00:00.000Z',
     updatedAt: '2026-06-01T00:00:00.000Z',

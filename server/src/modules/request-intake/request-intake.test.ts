@@ -710,7 +710,15 @@ test('uses the first matching routing rule and maps a submission into a canonica
       assigneeUserId: 'urgent@example.com',
       workflowStatusId: 'triage',
       customFieldValues: { 'request-channel': 'urgent', estimate: 8 },
-      dueDate: '2026/07/17',
+      schedule: {
+        calendarPolicy: {
+          holidays: [],
+          timeZone: 'UTC',
+          workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+        },
+        dueDate: '2026-07-17',
+        mode: 'due-date',
+      },
       priority: 'high',
     },
   })
@@ -731,7 +739,7 @@ test('uses the first matching routing rule and maps a submission into a canonica
   expect(overridden.input).toMatchObject({
     title: 'Manual title',
     assignedProjectId: 'project-manual',
-    dueDate: '2026/07/19',
+    schedule: { dueDate: '2026-07-19', mode: 'due-date' },
     priority: 'low',
   })
 })

@@ -15,6 +15,7 @@ import {
 import {
   SAVED_VIEW_SCHEMA_VERSION,
   SEARCH_SCHEMA_VERSION,
+  WORK_ITEM_SCHEDULE_MIN_YEAR,
   type CreateSavedWorkspaceViewInput,
   type DocumentBlock,
   type DocumentDetail,
@@ -512,7 +513,11 @@ export function createWorkspaceSearchDocument(
       input.sourceRevision
   }
   const dueDate = optionalText(input.dueDate, 'Search document dueDate', 128)
-  if (dueDate) document.dueDate = canonicalizeSearchDate(dueDate)
+  if (dueDate) {
+    document.dueDate = entityType === 'work-item'
+      ? requireCanonicalWorkItemSearchDate(dueDate)
+      : canonicalizeSearchDate(dueDate)
+  }
 
   if (input.customFields) {
     document.customFields = normalizeCustomFieldValues(input.customFields)
@@ -2414,6 +2419,34 @@ function createCommentSearchTitle(body: string) {
 function canonicalizeSearchDate(value: string) {
   const match = value.match(/^(\d{4})\/(\d{2})\/(\d{2})(.*)$/u)
   return match ? `${match[1]}-${match[2]}-${match[3]}${match[4]}` : value
+}
+
+/**
+ * Validates the strict ISO calendar date projected from a canonical Work Item.
+ *
+ * @param value - Candidate Work Item search due date.
+ * @returns The unchanged canonical date.
+ */
+function requireCanonicalWorkItemSearchDate(value: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value)
+  const year = Number(match?.[1])
+  const month = Number(match?.[2])
+  const day = Number(match?.[3])
+  const date = new Date(Date.UTC(year, month - 1, day))
+  if (
+    !match ||
+    year < WORK_ITEM_SCHEDULE_MIN_YEAR ||
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    throw new WorkspaceSearchError(
+      400,
+      'InvalidSearchDocument',
+      'Work Item search dueDate must be a real ISO date in YYYY-MM-DD format.',
+    )
+  }
+  return value
 }
 
 function matchesSearchDateRange(value: string, from?: string, to?: string) {

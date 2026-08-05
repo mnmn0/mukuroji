@@ -4,6 +4,7 @@ import { createTranslator } from '../src/shared/i18n/i18n'
 import { collaborationWorkspaceMemberFixtures } from '../src/issues/fixtures'
 import { teamWorkItemConfigurationFixture } from '../src/work-items/fixtures'
 import { createTaskKey } from '../src/tasks/model/taskView'
+import { createDefaultDueDateTaskSchedule } from '../src/tasks/model/taskSchedule'
 import { CreateTaskPanel } from '../src/tasks/ui/CreateTaskPanel'
 import { TaskBoardView } from '../src/tasks/ui/TaskBoardView'
 import { TaskCalendarView } from '../src/tasks/ui/TaskCalendarView'
@@ -157,6 +158,10 @@ describe('independent task views', () => {
 
     expect(html).toContain('aria-label="期限順リスト"')
     expect(html).toContain('data-testid="task-gantt-add-wireframe"')
+    expect(html).toContain('data-testid="task-gantt-bar-wireframe"')
+    expect(html).toContain('data-testid="task-gantt-resize-wireframe"')
+    expect(html).toContain('value="milestone"')
+    expect(html).toContain('value="unscheduled"')
     expect(html.indexOf('ワイヤーフレームを確認する')).toBeLessThan(
       html.indexOf('ブランドガイドラインを更新する'),
     )
@@ -165,13 +170,53 @@ describe('independent task views', () => {
     )
   })
 
+  test('bounds timeline views across the complete ISO planning horizon', () => {
+    const earlyTask = {
+      ...taskViewStoryTasks[2],
+      dueDate: '1000-01-01',
+      id: 'early-schedule',
+      schedule: createDefaultDueDateTaskSchedule('1000-01-01'),
+      title: 'Earliest schedule',
+    }
+    const lateTask = {
+      ...taskViewStoryTasks[2],
+      dueDate: '9999-12-31',
+      id: 'late-schedule',
+      schedule: createDefaultDueDateTaskSchedule('9999-12-31'),
+      title: 'Latest schedule',
+    }
+    const html = renderToStaticMarkup(
+      <TaskGanttView
+        configurationsByTeam={taskViewStoryConfigurationsByTeam}
+        t={t}
+        tasks={[earlyTask, lateTask]}
+      />,
+    )
+    const columnHeaderCount = html.match(/role="columnheader"/gu)?.length ?? 0
+    const calendarHtml = renderToStaticMarkup(
+      <TaskCalendarView t={t} tasks={[earlyTask, lateTask]} />,
+    )
+
+    expect(columnHeaderCount).toBeLessThanOrEqual(181)
+    expect(html).toContain('1000-01-01')
+    expect(html).toContain('9999-12-31')
+    expect(calendarHtml).toContain('1000-01-01')
+    expect(calendarHtml).toContain('9999-12-31')
+    expect(calendarHtml).not.toContain('0999-12-31')
+    expect(calendarHtml).not.toContain('+010000')
+  })
+
   test('groups calendar tasks by due date and preserves the unscheduled bucket', () => {
     const html = renderToStaticMarkup(
       <TaskCalendarView t={t} tasks={taskViewStoryTasks} />,
     )
 
     expect(html).toContain(`aria-label="${t('tasks.view.calendar')}"`)
-    expect(html).toContain('2026/06/03')
+    expect(html).toContain('2026-06-03')
+    expect(html).toContain('data-testid="task-calendar-item-wireframe"')
+    expect(html).toContain('data-testid="task-calendar-item-brand-guideline"')
+    expect(html).toContain(t('tasks.schedule.dateRange'))
+    expect(html).toContain(t('tasks.schedule.milestone'))
     expect(html).toContain('競合調査レポートを完成する')
     expect(html).toContain(t('tasks.calendar.empty'))
   })
@@ -247,7 +292,9 @@ describe('independent task views', () => {
     expect(html).toContain('name="workflowStatusId"')
     expect(html).toContain('name="custom-field:customer-impact"')
     expect(html).toContain('佐藤 花子 / sato@example.com')
-    expect(html).toContain('name="dueDate"')
+    expect(html).toContain('name="scheduleMode"')
+    expect(html).toContain('<option value="unscheduled" selected="">未計画</option>')
+    expect(html).not.toContain('name="scheduleDueDate"')
   })
 
   test('carries view context into quick capture and exposes shared inline editors', () => {
@@ -257,8 +304,8 @@ describe('independent task views', () => {
         configuration={teamWorkItemConfigurationFixture}
         context={{
           assigneeUserId: 'sato@example.com',
-          dueDate: '2026/06/12',
           projectId: 'refero',
+          schedule: createDefaultDueDateTaskSchedule('2026-06-12'),
           source: 'calendar',
           teamId: 'core-team',
           workflowStatusId: 'backlog',
@@ -301,6 +348,8 @@ describe('independent task views', () => {
       `<button[^>]*aria-pressed="true"[^>]*>${t('tasks.create.quick')}</button>`,
     ))
     expect(quickHtml).toContain('name="title"')
+    expect(quickHtml).toContain('name="dueDate"')
+    expect(quickHtml).toContain('value="2026-06-12"')
     expect(quickHtml).not.toContain('name="workflowStatusId"')
     expect(inlineHtml).toContain('data-testid="task-inline-title-wireframe"')
     expect(inlineHtml).toContain('data-testid="task-inline-custom-fields-wireframe"')
@@ -366,5 +415,44 @@ describe('independent task views', () => {
     expect(errorHtml).toContain('Lambda returned 500.')
     expect(errorHtml).toContain('disabled="" type="submit"')
     expect(emptyHtml).toContain(t('tasks.detail.empty'))
+  })
+
+  test('ignores a matching detail body when the list snapshot has a newer revision', () => {
+    const fresherTask = {
+      ...taskViewStoryTasks[0],
+      dueDate: '2026-06-10',
+      revision: 2,
+      schedule: createDefaultDueDateTaskSchedule('2026-06-10'),
+      title: '一覧の新しいタイトル',
+    }
+    const staleDetail = {
+      ...taskViewStorySelectedIssueDetail,
+      issue: {
+        ...taskViewStorySelectedIssueDetail.issue,
+        revision: 1,
+        title: '詳細の古いタイトル',
+      },
+    }
+    const html = renderToStaticMarkup(
+      <TaskDetailPane
+        assigneeOptions={taskViewStoryProjectMembers}
+        configuration={teamWorkItemConfigurationFixture}
+        detail={staleDetail}
+        isLoading={false}
+        isRelationCandidatesLoading={false}
+        locale="ja"
+        projects={[{ id: 'refero', name: 'Refero' }]}
+        relationCandidates={[]}
+        t={t}
+        task={fresherTask}
+        workspaceMembers={collaborationWorkspaceMemberFixtures}
+        onUpdateIssue={async () => undefined}
+      />,
+    )
+
+    expect(html).toContain('一覧の新しいタイトル')
+    expect(html).not.toContain('詳細の古いタイトル')
+    expect(html).toContain('value="2026-06-10"')
+    expect(html).toContain('<option value="due-date" selected="">期限のみ</option>')
   })
 })

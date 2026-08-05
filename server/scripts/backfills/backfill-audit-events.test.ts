@@ -1,4 +1,8 @@
 import { describe, expect, test } from 'bun:test'
+import {
+  WORK_ITEM_SCHEMA_VERSION,
+  createDefaultDueDateWorkItemSchedule,
+} from '@mukuroji/contracts'
 import { mapCurrentTeamIssue, mapWorkspaceAccessItem } from './backfill-audit-events'
 
 const workspaceAuditPseudonymKey =
@@ -8,7 +12,7 @@ const mapWorkspaceAccess = (item: Record<string, unknown>) =>
 
 function createCanonicalWorkItem(overrides: Record<string, unknown> = {}) {
   return {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     workflowSchemaVersion: 1,
     directoryId: 'workspace-1',
@@ -26,7 +30,8 @@ function createCanonicalWorkItem(overrides: Record<string, unknown> = {}) {
     statusCategory: 'started',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/07/31',
+    dueDate: '2026-07-31',
+    schedule: createDefaultDueDateWorkItemSchedule('2026-07-31'),
     priority: 'high',
     createdAt: '2026-07-01T00:00:00.000Z',
     updatedAt: '2026-07-16T00:00:00.000Z',
@@ -39,20 +44,37 @@ describe('audit backfill canonical Work Item mapping', () => {
     const event = mapCurrentTeamIssue(createCanonicalWorkItem())
 
     expect(event).toBeDefined()
-    expect(event?.changes).toEqual(expect.arrayContaining([{
-      field: 'creatorMemberKey',
-      after: '[REDACTED]',
-      redacted: true,
-    }]))
+    expect(event?.changes).toEqual(expect.arrayContaining([
+      {
+        field: 'creatorMemberKey',
+        after: '[REDACTED]',
+        redacted: true,
+      },
+      {
+        field: 'schedule.mode',
+        after: 'due-date',
+      },
+      {
+        field: 'schedule.dueDate',
+        after: '2026-07-31',
+      },
+      {
+        field: 'schedule.calendarPolicy.timeZone',
+        after: 'UTC',
+      },
+    ]))
   })
 
-  test('rejects non-canonical Work Item rows instead of backfilling them', () => {
-    expect(mapCurrentTeamIssue(createCanonicalWorkItem({ creatorMemberKey: undefined })))
-      .toBeUndefined()
-    expect(mapCurrentTeamIssue(createCanonicalWorkItem({ relationIds: undefined })))
-      .toBeUndefined()
-    expect(mapCurrentTeamIssue(createCanonicalWorkItem({ status: 'review' })))
-      .toBeUndefined()
+  test('fails closed on non-canonical Work Item rows', () => {
+    for (const item of [
+      createCanonicalWorkItem({ creatorMemberKey: undefined }),
+      createCanonicalWorkItem({ relationIds: undefined }),
+      createCanonicalWorkItem({ status: 'review' }),
+    ]) {
+      expect(() => mapCurrentTeamIssue(item)).toThrow(
+        'Audit backfill encountered a non-canonical Work Item row.',
+      )
+    }
   })
 })
 

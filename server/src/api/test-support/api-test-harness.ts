@@ -12,7 +12,11 @@ import {
   type ProjectQuickAccessPreferences,
   type UpdateProjectQuickAccessPreferencesInput,
   type WorkItemConfiguration,
+  type WorkItemRelation,
   type CanonicalWorkItem,
+  type WorkItemSchedule,
+  WORK_ITEM_SCHEMA_VERSION,
+  createDefaultDueDateWorkItemSchedule,
 } from '@mukuroji/contracts'
 import type { LambdaEvent } from 'hono/aws-lambda'
 import {
@@ -62,10 +66,12 @@ import {
   DEFAULT_WORK_ITEM_CONFIGURATION,
   type WorkItemConfigurationClient,
 } from '../../modules/work-items/work-item-configuration'
-import type {
-  CreateTeamIssueRequestBody,
-  TeamIssuesClient,
-  WorkItemAuthorizationSnapshot,
+import {
+  deriveWorkItemScheduleDueDate,
+  isWorkItemSchedule,
+  type CreateTeamIssueRequestBody,
+  type TeamIssuesClient,
+  type WorkItemAuthorizationSnapshot,
 } from '../../modules/work-items'
 import { type DocumentClient } from '../../modules/documents'
 import { InMemoryPlanningClient } from '../../modules/planning/planning'
@@ -144,8 +150,9 @@ function runWithTestAppDependencies<Result>(
 const originalBulkRecoveryTitle = 'Initial title'
 
 function createBulkRecoveryIssue() {
+  const schedule = createDefaultDueDateWorkItemSchedule('2026-07-31')
   return {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     id: 'onboarding-friction',
     teamId: 'core-team',
@@ -159,12 +166,33 @@ function createBulkRecoveryIssue() {
     statusCategory: 'started',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/07/31',
+    dueDate: deriveWorkItemScheduleDueDate(schedule),
+    schedule,
     priority: 'high',
     createdAt: '2026-07-16T00:00:00.000Z',
     updatedAt: '2026-07-16T00:00:00.000Z',
     source: 'dynamodb',
   }
+}
+
+/**
+ * Resolves a canonical schedule for an API test double without inferring it from another field.
+ *
+ * @param value - Candidate schedule supplied by the request.
+ * @param currentSchedule - Existing canonical schedule retained by updates that omit schedule.
+ * @returns The validated request schedule or the existing schedule for a partial update.
+ */
+function resolveApiTestWorkItemSchedule(
+  value: unknown,
+  currentSchedule?: WorkItemSchedule,
+): WorkItemSchedule {
+  if (isWorkItemSchedule(value)) {
+    return value
+  }
+  if (value === undefined && currentSchedule) {
+    return currentSchedule
+  }
+  throw new Error('API test request must contain a canonical Work Item schedule.')
 }
 
 function createBulkOperationAutomationFake(initialOperation?: BulkOperation) {
@@ -981,8 +1009,9 @@ function createAnalyticsAuditEvent(
 }
 
 function createHistoricalAnalyticsWorkItem(): CanonicalWorkItem {
+  const schedule = createDefaultDueDateWorkItemSchedule('2026-07-31')
   return {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 4,
     id: 'historical-item',
     teamId: 'core-team',
@@ -995,7 +1024,8 @@ function createHistoricalAnalyticsWorkItem(): CanonicalWorkItem {
     workflowSchemaVersion: 1,
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026-07-31',
+    dueDate: deriveWorkItemScheduleDueDate(schedule),
+    schedule,
     priority: 'medium',
     createdAt: '2026-07-01T00:00:00.000Z',
     updatedAt: '2026-07-17T12:00:00.000Z',
@@ -1158,7 +1188,7 @@ function createHeadlessWorkItem(
       title: 'Headless Enterprise Work Item',
       assigneeUserId: 'sato@example.com',
       assignedProjectId,
-      dueDate: '2026-07-31',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-31'),
       priority: 'medium',
     }),
   })
@@ -1281,6 +1311,10 @@ function configureFakeProjectClients(
     detailWorkflowStatusIds?: string[]
     /** Detail fake が read ごとに返す更新日時です。 */
     detailUpdatedAts?: string[]
+    /** Schedule preview fake が返す可視 Work Item relation です。 */
+    workItemRelations?: WorkItemRelation[]
+    /** Schedule preview fake が返す relation graph revision です。 */
+    workItemRelationGraphRevision?: number
     /** Project 作成 transaction と template application receipt の同時確定を再現する hook です。 */
     projectCreateHook?: (
       input: Record<string, unknown>,
@@ -1487,7 +1521,7 @@ function configureFakeProjectClients(
   })
   const createFakeTeamIssues = (teamId: string) =>
     Array.from({ length: options.teamIssueCount ?? 1 }, (_, index) => ({
-      schemaVersion: 1 as const,
+      schemaVersion: WORK_ITEM_SCHEMA_VERSION,
       revision: 1,
       id: index === 0 ? 'onboarding-friction' : `work-item-${index}`,
       teamId,
@@ -1505,7 +1539,8 @@ function configureFakeProjectClients(
       statusCategory: 'started' as const,
       customFieldValues: {},
       relationIds: [],
-      dueDate: '2026/06/18',
+      dueDate: '2026-06-18',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-06-18'),
       priority: 'high' as const,
       createdAt: '2026-06-08T00:00:00.000Z',
       updatedAt: '2026-06-08T00:00:00.000Z',
@@ -1741,7 +1776,14 @@ function configureFakeProjectClients(
         }
       },
     },
-    workItemConfigurations: createFakeWorkItemConfigurationClient(),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelations() {
+        return {
+          relations: (options.workItemRelations ?? []).map((relation) => ({ ...relation })),
+          graphRevision: options.workItemRelationGraphRevision ?? 0,
+        }
+      },
+    }),
     projectDirectory: {
       async getProjectDirectory(directoryId, locale, consistentRead) {
         calls.directoryReads.push({
@@ -2250,7 +2292,7 @@ function configureFakeProjectClients(
 
         const issues = options.canonicalProjectIssueIds
           ? options.canonicalProjectIssueIds.map((issueId, index) => ({
-              schemaVersion: 1 as const,
+              schemaVersion: WORK_ITEM_SCHEMA_VERSION,
               revision: 1,
               id: issueId,
               teamId: 'core-team',
@@ -2263,7 +2305,8 @@ function configureFakeProjectClients(
               statusCategory: 'started' as const,
               customFieldValues: {},
               relationIds: [],
-              dueDate: '2026/06/18',
+              dueDate: '2026-06-18',
+              schedule: createDefaultDueDateWorkItemSchedule('2026-06-18'),
               priority: 'high' as const,
               createdAt: '2026-06-08T00:00:00.000Z',
               updatedAt: '2026-06-08T00:00:00.000Z',
@@ -2271,7 +2314,7 @@ function configureFakeProjectClients(
             }))
           : [
               {
-                schemaVersion: 1 as const,
+                schemaVersion: WORK_ITEM_SCHEMA_VERSION,
                 revision: 1,
                 id: 'onboarding-friction',
                 teamId: 'core-team',
@@ -2284,7 +2327,8 @@ function configureFakeProjectClients(
                 statusCategory: 'started' as const,
                 customFieldValues: {},
                 relationIds: [],
-                dueDate: '2026/06/18',
+                dueDate: '2026-06-18',
+                schedule: createDefaultDueDateWorkItemSchedule('2026-06-18'),
                 priority: 'high' as const,
                 createdAt: '2026-06-08T00:00:00.000Z',
                 updatedAt: '2026-06-08T00:00:00.000Z',
@@ -2327,7 +2371,7 @@ function configureFakeProjectClients(
 
         return {
           issue: {
-            schemaVersion: 1,
+            schemaVersion: WORK_ITEM_SCHEMA_VERSION,
             revision: 1,
             id: issueId,
             teamId,
@@ -2347,7 +2391,8 @@ function configureFakeProjectClients(
                 : 'started',
             customFieldValues: options.detailCustomFieldValues ?? {},
             relationIds: [],
-            dueDate: '2026/06/18',
+            dueDate: '2026-06-18',
+            schedule: createDefaultDueDateWorkItemSchedule('2026-06-18'),
             priority: 'high',
             createdAt: '2026-06-08T00:00:00.000Z',
             updatedAt: options.detailUpdatedAts?.[detailReadIndex] ??
@@ -2389,9 +2434,10 @@ function configureFakeProjectClients(
             : { workflowStatusId: input.workflowStatusId }),
         })
 
+        const schedule = resolveApiTestWorkItemSchedule(input.schedule)
         return {
           issue: {
-            schemaVersion: 1,
+            schemaVersion: WORK_ITEM_SCHEMA_VERSION,
             revision: 1,
             id: 'new-issue',
             teamId,
@@ -2413,7 +2459,8 @@ function configureFakeProjectClients(
               : 'unstarted',
             customFieldValues: input.customFieldValues as Record<string, CustomFieldValue>,
             relationIds: [],
-            dueDate: String(input.dueDate),
+            dueDate: deriveWorkItemScheduleDueDate(schedule),
+            schedule,
             priority: 'medium',
             createdAt: '2026-06-08T00:00:00.000Z',
             updatedAt: '2026-06-08T00:00:00.000Z',
@@ -2430,9 +2477,13 @@ function configureFakeProjectClients(
           teamId,
         })
 
+        const schedule = resolveApiTestWorkItemSchedule(
+          input.schedule,
+          createDefaultDueDateWorkItemSchedule('2026-06-18'),
+        )
         return {
           issue: {
-            schemaVersion: 1,
+            schemaVersion: WORK_ITEM_SCHEMA_VERSION,
             revision: 2,
             id: issueId,
             teamId,
@@ -2455,7 +2506,8 @@ function configureFakeProjectClients(
               : 'started',
             customFieldValues: input.customFieldValues as Record<string, CustomFieldValue>,
             relationIds: [],
-            dueDate: typeof input.dueDate === 'string' ? input.dueDate : '2026/06/18',
+            dueDate: deriveWorkItemScheduleDueDate(schedule),
+            schedule,
             priority: input.priority === 'low' ? 'low' : 'high',
             createdAt: '2026-06-08T00:00:00.000Z',
             updatedAt: '2026-06-08T02:00:00.000Z',

@@ -470,7 +470,7 @@ bun run issues:check-dynamodb
 ```
 
 CDK stack の demo seed は stack 作成時だけ、`WorkItemsTableName` が指す canonical store へ
-`schemaVersion=1`, `revision=1` で投入します。手動 seed はローカル Floci 専用で、canonical store
+`schemaVersion=2`, `revision=1` で投入します。手動 seed はローカル Floci 専用で、canonical store
 だけを対象とし、既存 row は conditional write で保持します。
 
 ```sh

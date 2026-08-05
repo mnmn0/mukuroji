@@ -1,4 +1,9 @@
-import type { WorkItemConfiguration, WorkItemRelation } from '@mukuroji/contracts'
+import type {
+  WorkItemConfiguration,
+  WorkItemRelation,
+  WorkItemSchedule,
+  WorkItemScheduleCalendarPolicy,
+} from '@mukuroji/contracts'
 import { useState } from 'react'
 import { RelatedDocuments } from '../../documents/ui/RelatedDocuments'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
@@ -33,6 +38,16 @@ import {
 } from '../../work-items/ui/WorkItemRelationsEditor'
 import type { ProjectTask } from '../api/tasks'
 import { resolveTaskPriority, taskPriorities } from '../model/taskView'
+import {
+  areTaskSchedulesEqual,
+  countTaskSchedulePolicyWorkingDays,
+  createDefaultDateRangeTaskSchedule,
+  createDefaultDueDateTaskSchedule,
+  createDefaultMilestoneTaskSchedule,
+  createDefaultUnscheduledTaskSchedule,
+  resolveTaskScheduleEndDate,
+  resolveTaskScheduleStartDate,
+} from '../model/taskSchedule'
 import { TaskPriorityBadge } from './TaskViewPrimitives'
 
 /** Props accepted by the selected task detail pane. */
@@ -124,7 +139,10 @@ export function TaskDetailPane({
   const hasMatchingIssueDetail = Boolean(
     task && detail?.issue.id === task.id && detail.issue.teamId === task.teamId,
   )
-  const selectedIssue = hasMatchingIssueDetail ? detail?.issue : undefined
+  const matchingDetailIssue = hasMatchingIssueDetail ? detail?.issue : undefined
+  const selectedIssue = matchingDetailIssue && task && matchingDetailIssue.revision < task.revision
+    ? task
+    : matchingDetailIssue
   const resolvedAssignedProjectId = selectedIssue?.assignedProjectId ?? task?.assignedProjectId ?? ''
   const projectSelectionIdentity = `${task?.teamId ?? ''}:${task?.id ?? ''}:${selectedIssue?.revision ?? task?.revision ?? 'loading'}`
   const [selectedProject, setSelectedProject] = useState({
@@ -134,6 +152,20 @@ export function TaskDetailPane({
   const selectedProjectId = selectedProject.identity === projectSelectionIdentity
     ? selectedProject.value
     : resolvedAssignedProjectId
+  const resolvedSchedule = selectedIssue?.schedule ?? task?.schedule
+  const scheduleSelectionIdentity = `${task?.teamId ?? ''}:${task?.id ?? ''}:${selectedIssue?.revision ?? task?.revision ?? 'loading'}`
+  const [scheduleSelection, setScheduleSelection] = useState<{
+    /** Detail revision represented by the selected schedule mode. */
+    identity: string
+    /** Explicit schedule mode selected in the editor. */
+    mode: WorkItemSchedule['mode']
+  }>({
+    identity: scheduleSelectionIdentity,
+    mode: resolvedSchedule?.mode ?? 'unscheduled',
+  })
+  const selectedScheduleMode = scheduleSelection.identity === scheduleSelectionIdentity
+    ? scheduleSelection.mode
+    : resolvedSchedule?.mode ?? 'unscheduled'
 
   if (!task) {
     return (
@@ -158,7 +190,7 @@ export function TaskDetailPane({
   const assigneeUserId = issue?.assigneeUserId ?? task.assigneeUserId ?? ''
   const hasSelectedAssigneeOption = assigneeOptions.some((member) => member.id === assigneeUserId)
   const assigneeLabel = resolveWorkItemAssignee(issue ?? task)
-  const dueDate = issue?.dueDate ?? task.dueDate
+  const schedule = issue?.schedule ?? task.schedule
   const currentWorkflowStatusId = resolveWorkItemWorkflowStatusId(issue ?? task)
   const workflowStatuses = issue
     ? resolveEditableWorkflowStatuses(issue, resolvedConfiguration)
@@ -198,13 +230,17 @@ export function TaskDetailPane({
                 projectId: nextAssignedProjectId || undefined,
               })
             : { errors: [], values: {} }
+          const nextSchedule = createDetailSchedule(formData, schedule)
 
-          if (parsedCustomFields.errors.length > 0) {
-            setFieldErrors(createCustomFieldErrorMessages(
+          if (parsedCustomFields.errors.length > 0 || !nextSchedule) {
+            setFieldErrors({
+              ...createCustomFieldErrorMessages(
               parsedCustomFields.errors,
               resolvedConfiguration?.customFields ?? [],
               locale,
-            ))
+              ),
+              ...(!nextSchedule ? { schedule: t('tasks.schedule.invalid') } : {}),
+            })
             return
           }
 
@@ -218,8 +254,10 @@ export function TaskDetailPane({
               nextAssignedProjectId || undefined,
             ),
             description: String(formData.get('description') ?? '').trim(),
-            dueDate: String(formData.get('dueDate') ?? '').replaceAll('-', '/'),
             priority: resolveTaskPriority(formData.get('priority')),
+            ...(!areTaskSchedulesEqual(schedule, nextSchedule)
+              ? { schedule: nextSchedule }
+              : {}),
             title: String(formData.get('title') ?? '').trim(),
             workflowStatusId,
           }
@@ -332,14 +370,71 @@ export function TaskDetailPane({
               </select>
             </label>
             <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
-              {t('tasks.column.dueDate')}
+              {t('tasks.schedule.mode')}
+              <select
+                className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
+                name="scheduleMode"
+                onChange={(event) => setScheduleSelection({
+                  identity: scheduleSelectionIdentity,
+                  mode: readDetailScheduleMode(event.currentTarget.value),
+                })}
+                value={selectedScheduleMode}
+              >
+                <option value="unscheduled">{t('tasks.schedule.unscheduled')}</option>
+                <option value="due-date">{t('tasks.schedule.dueDate')}</option>
+                <option value="date-range">{t('tasks.schedule.dateRange')}</option>
+                <option value="milestone">{t('tasks.schedule.milestone')}</option>
+              </select>
+            </label>
+            {selectedScheduleMode === 'due-date' ? (
+              <DetailScheduleDateInput
+                defaultValue={resolveTaskScheduleEndDate(schedule) ?? ''}
+                label={t('tasks.schedule.dueDate')}
+                name="scheduleDueDate"
+              />
+            ) : null}
+            {selectedScheduleMode === 'date-range' ? (
+              <>
+                <DetailScheduleDateInput
+                  defaultValue={resolveTaskScheduleStartDate(schedule) ?? ''}
+                  label={t('tasks.schedule.startDate')}
+                  name="scheduleStartDate"
+                />
+                <DetailScheduleDateInput
+                  defaultValue={resolveTaskScheduleEndDate(schedule) ?? ''}
+                  label={t('tasks.schedule.endDate')}
+                  name="scheduleEndDate"
+                />
+              </>
+            ) : null}
+            {selectedScheduleMode === 'milestone' ? (
+              <DetailScheduleDateInput
+                defaultValue={resolveTaskScheduleStartDate(schedule) ?? ''}
+                label={t('tasks.schedule.milestoneDate')}
+                name="scheduleMilestoneDate"
+              />
+            ) : null}
+            <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
+              {t('tasks.schedule.effortMinutes')}
               <input
                 className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-                defaultValue={formatDateInputValue(dueDate)}
-                name="dueDate"
-                type="date"
+                defaultValue={schedule.plannedEffortMinutes}
+                min="0"
+                name="scheduleEffortMinutes"
+                type="number"
               />
             </label>
+            <p className="text-xs font-medium text-[var(--workbench-muted)]">
+              {schedule.calendarPolicy.timeZone} · {schedule.calendarPolicy.workingWeekdays.join(', ')}
+              {schedule.calendarPolicy.holidays.length > 0
+                ? ` · ${schedule.calendarPolicy.holidays.join(', ')}`
+                : ''}
+            </p>
+            {fieldErrors.schedule ? (
+              <p className="text-sm font-semibold text-red-700" role="alert">
+                {fieldErrors.schedule}
+              </p>
+            ) : null}
           </div>
           {hasCustomFields ? (
             <div className="workbench-panel-muted p-4">
@@ -421,9 +516,147 @@ export function TaskDetailPane({
   )
 }
 
-/** Converts the canonical slash-delimited date into an HTML date input value. */
-function formatDateInputValue(value: string) {
-  return value.replaceAll('/', '-')
+/** Props for a schedule date field in the detail editor. */
+type DetailScheduleDateInputProps = {
+  /** Current ISO date shown by the input. */
+  defaultValue: string
+  /** Visible and accessible input label. */
+  label: string
+  /** Form field name used to construct the schedule patch. */
+  name: string
+}
+
+/**
+ * Renders one required native date input for the selected schedule mode.
+ *
+ * @param props - Current value, label, and form name.
+ * @returns A labeled schedule date input.
+ */
+function DetailScheduleDateInput({
+  defaultValue,
+  label,
+  name,
+}: DetailScheduleDateInputProps) {
+  return (
+    <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
+      {label}
+      <input
+        className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
+        defaultValue={defaultValue}
+        name={name}
+        required
+        type="date"
+      />
+    </label>
+  )
+}
+
+/**
+ * Builds a complete replacement schedule while retaining its persisted calendar policy.
+ *
+ * @param formData - Submitted detail fields.
+ * @param currentSchedule - Current canonical schedule and calendar policy.
+ * @returns A replacement schedule, or undefined when its dates or effort are invalid.
+ */
+function createDetailSchedule(
+  formData: FormData,
+  currentSchedule: WorkItemSchedule,
+): WorkItemSchedule | undefined {
+  const mode = readDetailScheduleMode(String(formData.get('scheduleMode') ?? 'unscheduled'))
+  const plannedEffortMinutes = readDetailPlannedEffort(
+    formData.get('scheduleEffortMinutes'),
+  )
+  if (plannedEffortMinutes === null) {
+    return undefined
+  }
+  const calendarPolicy = cloneScheduleCalendarPolicy(currentSchedule.calendarPolicy)
+
+  try {
+    if (mode === 'unscheduled') {
+      return {
+        ...createDefaultUnscheduledTaskSchedule(plannedEffortMinutes),
+        calendarPolicy,
+      }
+    }
+    if (mode === 'due-date') {
+      return {
+        ...createDefaultDueDateTaskSchedule(
+          String(formData.get('scheduleDueDate') ?? ''),
+          plannedEffortMinutes,
+        ),
+        calendarPolicy,
+      }
+    }
+    if (mode === 'milestone') {
+      return {
+        ...createDefaultMilestoneTaskSchedule(
+          String(formData.get('scheduleMilestoneDate') ?? ''),
+          plannedEffortMinutes,
+        ),
+        calendarPolicy,
+      }
+    }
+
+    const draft = createDefaultDateRangeTaskSchedule(
+      String(formData.get('scheduleStartDate') ?? ''),
+      String(formData.get('scheduleEndDate') ?? ''),
+      plannedEffortMinutes,
+    )
+    const durationDays = countTaskSchedulePolicyWorkingDays(
+      draft.startDate,
+      draft.endDate,
+      calendarPolicy,
+    )
+    return durationDays > 0
+      ? { ...draft, calendarPolicy, durationDays }
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Narrows an editor value to one explicit schedule mode.
+ *
+ * @param value - Candidate select value.
+ * @returns A supported mode, defaulting unknown values to unscheduled.
+ */
+function readDetailScheduleMode(value: string): WorkItemSchedule['mode'] {
+  if (value === 'due-date' || value === 'date-range' || value === 'milestone') {
+    return value
+  }
+  return 'unscheduled'
+}
+
+/**
+ * Reads optional nonnegative planned effort.
+ *
+ * @param value - Submitted effort field.
+ * @returns Integer minutes, undefined for an empty field, or null when invalid.
+ */
+function readDetailPlannedEffort(value: FormDataEntryValue | null): number | undefined | null {
+  const text = String(value ?? '').trim()
+  if (!text) {
+    return undefined
+  }
+  const minutes = Number(text)
+  return Number.isSafeInteger(minutes) && minutes >= 0 ? minutes : null
+}
+
+/**
+ * Detaches a schedule calendar policy before it is placed in a mutation payload.
+ *
+ * @param policy - Persisted calendar policy.
+ * @returns A detached policy with copied weekday and holiday arrays.
+ */
+function cloneScheduleCalendarPolicy(
+  policy: WorkItemScheduleCalendarPolicy,
+): WorkItemScheduleCalendarPolicy {
+  return {
+    holidays: [...policy.holidays],
+    timeZone: policy.timeZone,
+    workingWeekdays: [...policy.workingWeekdays],
+  }
 }
 
 /** Formats a project member for an assignee select option. */

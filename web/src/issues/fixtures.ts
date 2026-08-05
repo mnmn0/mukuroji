@@ -5,6 +5,7 @@ import type {
   TeamIssueComment,
 } from './api'
 import {
+  createDefaultDueDateWorkItemSchedule,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
@@ -32,7 +33,8 @@ export const teamIssueFixtures = [
     workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/06/18',
+    dueDate: '2026-06-18',
+    schedule: createDefaultDueDateWorkItemSchedule('2026-06-18'),
     priority: 'high',
     createdAt: '2026-06-08T00:00:00.000Z',
     updatedAt: '2026-06-08T00:00:00.000Z',
@@ -54,7 +56,8 @@ export const teamIssueFixtures = [
     workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/06/21',
+    dueDate: '2026-06-21',
+    schedule: createDefaultDueDateWorkItemSchedule('2026-06-21'),
     priority: 'medium',
     createdAt: '2026-06-08T00:00:00.000Z',
     updatedAt: '2026-06-08T00:00:00.000Z',

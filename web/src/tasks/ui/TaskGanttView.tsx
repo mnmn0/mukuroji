@@ -1,17 +1,36 @@
+import { useMemo, useState, type DragEvent, type KeyboardEvent } from 'react'
 import type {
   ResolvedWorkItemConfiguration,
   WorkItemConfiguration,
+  WorkItemPatch,
+  WorkItemSchedule,
+  WorkItemScheduleChangePreview,
+  WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
 import type { ProjectTask } from '../api/tasks'
+import { TeamIssuesApiError } from '../../issues/api'
 import type { MessageKey } from '../../shared/i18n/i18n'
+import { useModalFocus } from '../../shared/ui/useModalFocus'
 import {
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
 } from '../../work-items/model/workItemDisplay'
 import {
+  addTaskTimelineDays,
+  createMoveTaskScheduleOperation,
+  createReplaceTaskScheduleOperation,
+  createResizeTaskScheduleOperation,
+  createTaskTimelineDateRange,
+  formatTaskScheduleRange,
+  resolveTaskSchedule,
+  resolveTaskScheduleEndDate,
+  resolveTaskSchedulePrimaryDate,
+  resolveTaskScheduleStartDate,
+  tryAddTaskTimelineDays,
+} from '../model/taskSchedule'
+import {
   createTaskKey,
   resolveProjectTaskConfiguration,
-  sortTasksByDueDate,
   type TaskCreateContext,
 } from '../model/taskView'
 import {
@@ -19,8 +38,53 @@ import {
   TaskViewHeading,
 } from './TaskViewPrimitives'
 
+const GANTT_DAY_WIDTH = 42
+const GANTT_TABLE_WIDTH = 360
+const MAX_GANTT_TIMELINE_COLUMNS = 180
+const MILLISECONDS_PER_CALENDAR_DAY = 86_400_000
+
 /** Resolves a localized task Gantt-view message. */
 type TaskGanttTranslator = (key: MessageKey) => string
+
+/** Context used when a task is created from a schedule-aware surface. */
+type TaskScheduleCreateContext = TaskCreateContext & {
+  /** Optional canonical schedule selected by a date-range interaction. */
+  schedule?: WorkItemSchedule
+}
+
+/** A task paired with the canonical schedule rendered in its Gantt row. */
+type GanttTaskRow = {
+  /** Work Item rendered in the row. */
+  task: ProjectTask
+  /** Canonical schedule rendered for the task. */
+  schedule: WorkItemSchedule
+}
+
+/** One bounded Gantt column that may aggregate several calendar dates. */
+type GanttTimelineColumn = {
+  /** Inclusive first date represented by the column. */
+  startDate: string
+  /** Inclusive final date represented by the column. */
+  endDate: string
+  /** Compact visible label for the timeline header. */
+  label: string
+}
+
+/** A preview waiting for the user to confirm or cancel it. */
+type PendingGanttScheduleChange = {
+  /** Task whose schedule operation was previewed. */
+  task: ProjectTask
+  /** Authoritative server preview. */
+  preview: WorkItemScheduleChangePreview
+}
+
+/** Drag operation carried from a Gantt bar or resize handle to a date cell. */
+type GanttDragChange = {
+  /** Stable composite key of the dragged Work Item. */
+  taskKey: string
+  /** Schedule operation selected by the drag source. */
+  type: 'move' | 'resize'
+}
 
 /** Props for the independent project task Gantt view. */
 export type TaskGanttViewProps = {
@@ -30,32 +94,162 @@ export type TaskGanttViewProps = {
   configuration?: WorkItemConfiguration
   /** Team-scoped resolved configurations used by task statuses. */
   configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>
-  /** Tasks displayed in ascending due-date order. */
+  /** Tasks displayed in schedule order. */
   tasks: ProjectTask[]
   /** Translator used for Gantt-view labels. */
   t: TaskGanttTranslator
   /** Opens the create panel with a planning-date context. */
-  onCreateTaskOpen?: (context?: TaskCreateContext) => void
+  onCreateTaskOpen?: (context?: TaskScheduleCreateContext) => void
   /** Selects a task in the shared detail pane. */
   onSelectTask?: (task: ProjectTask) => void
+  /** Requests an authoritative preview before a schedule mutation. */
+  onPreviewScheduleChange?: (
+    task: ProjectTask,
+    operation: WorkItemScheduleOperation,
+  ) => Promise<WorkItemScheduleChangePreview>
+  /** Applies the confirmed canonical schedule replacement. */
+  onUpdateTask?: (task: ProjectTask, patch: WorkItemPatch) => Promise<ProjectTask>
+}
+
+/** Props for the Gantt schedule-preview dialog. */
+type GanttSchedulePreviewProps = {
+  /** Preview and target task waiting for confirmation. */
+  pending: PendingGanttScheduleChange
+  /** Whether the confirmed schedule is being persisted. */
+  isApplying: boolean
+  /** Translator used by dialog actions. */
+  t: TaskGanttTranslator
+  /** Applies the previewed schedule. */
+  onConfirm: () => void
+  /** Discards the preview. */
+  onCancel: () => void
 }
 
 /**
- * Renders the existing due-date-ordered task list used as the Gantt view.
+ * Renders an editable task table and date-axis Gantt bars from canonical schedules.
  *
- * @param props - Tasks, workflow configurations, and localization inputs.
+ * Every move, resize, or left-table edit is previewed by the server. The returned canonical
+ * schedule is only persisted after the user confirms the before/after view.
+ *
+ * @param props - Tasks, workflow configurations, and schedule mutation callbacks.
  * @returns The independent project task Gantt view.
  */
 export function TaskGanttView({
   configuration,
   configurationsByTeam,
   onCreateTaskOpen,
+  onPreviewScheduleChange,
   onSelectTask,
+  onUpdateTask,
   projectId,
   t,
   tasks,
 }: TaskGanttViewProps) {
-  const sortedTasks = sortTasksByDueDate(tasks, 'due-date-asc')
+  const rows = useMemo(() => createGanttRows(tasks), [tasks])
+  const timelineColumns = useMemo(
+    () => createGanttTimelineColumns(rows.map((row) => row.schedule)),
+    [rows],
+  )
+  const [dragChange, setDragChange] = useState<GanttDragChange>()
+  const [busyTaskKey, setBusyTaskKey] = useState<string>()
+  const [pendingChange, setPendingChange] = useState<PendingGanttScheduleChange>()
+  const [isApplying, setIsApplying] = useState(false)
+  const [errorMessage, setErrorMessage] = useState<string>()
+  const canEditSchedule = onPreviewScheduleChange !== undefined && onUpdateTask !== undefined
+
+  /** Requests the server-owned before/after schedule preview. */
+  const previewScheduleChange = async (
+    task: ProjectTask,
+    operation: WorkItemScheduleOperation,
+  ) => {
+    if (!onPreviewScheduleChange || !onUpdateTask) {
+      return
+    }
+
+    const taskKey = createTaskKey(task)
+    setBusyTaskKey(taskKey)
+    setErrorMessage(undefined)
+    try {
+      const preview = await onPreviewScheduleChange(task, operation)
+      setPendingChange({ preview, task })
+    } catch (error) {
+      setErrorMessage(resolveScheduleActionError(error, t))
+    } finally {
+      setBusyTaskKey(undefined)
+    }
+  }
+
+  /** Persists the direct canonical result from the current preview. */
+  const confirmScheduleChange = async () => {
+    if (!pendingChange || !onUpdateTask) {
+      return
+    }
+
+    const schedule = findDirectPreviewSchedule(pendingChange.preview, pendingChange.task)
+    if (!schedule) {
+      setPendingChange(undefined)
+      setErrorMessage(t('tasks.action.updateError'))
+      return
+    }
+
+    setIsApplying(true)
+    setErrorMessage(undefined)
+    try {
+      await onUpdateTask(pendingChange.task, { schedule })
+      setPendingChange(undefined)
+    } catch (error) {
+      setPendingChange(undefined)
+      setErrorMessage(resolveScheduleActionError(error, t))
+    } finally {
+      setIsApplying(false)
+    }
+  }
+
+  /** Converts one row mode through a complete schedule replacement preview. */
+  const previewModeChange = (row: GanttTaskRow, mode: WorkItemSchedule['mode']) => {
+    if (row.schedule.mode === mode) {
+      return
+    }
+    if (row.schedule.mode === 'unscheduled' && mode !== 'unscheduled') {
+      setErrorMessage(t('tasks.schedule.selectDateFirst'))
+      return
+    }
+    const fallbackDate = mode === 'due-date'
+      ? resolveTaskScheduleEndDate(row.schedule)
+      : resolveTaskSchedulePrimaryDate(row.schedule)
+    if (!fallbackDate) {
+      return
+    }
+    void previewScheduleChange(
+      row.task,
+      createReplaceTaskScheduleOperation(createModeReplacement(row.schedule, mode, fallbackDate)),
+    )
+  }
+
+  /** Starts an HTML drag carrying a schedule move or resize intent. */
+  const startDrag = (
+    event: DragEvent<HTMLElement>,
+    row: GanttTaskRow,
+    type: GanttDragChange['type'],
+  ) => {
+    const nextDragChange = { taskKey: createTaskKey(row.task), type }
+    setDragChange(nextDragChange)
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', nextDragChange.taskKey)
+  }
+
+  /** Previews the drag operation against the date beneath the pointer. */
+  const dropOnDate = (row: GanttTaskRow, date: string) => {
+    if (!dragChange || dragChange.taskKey !== createTaskKey(row.task)) {
+      return
+    }
+
+    const operation = dragChange.type === 'resize'
+      ? createResizeTaskScheduleOperation(date)
+      : createMoveTaskScheduleOperation(date)
+    setDragChange(undefined)
+    void previewScheduleChange(row.task, operation)
+  }
 
   return (
     <section
@@ -82,68 +276,840 @@ export function TaskGanttView({
           </button>
         </div>
       ) : null}
-      {sortedTasks.length > 0 ? (
-        <div className="divide-y divide-[#e4e7ec]">
-          {sortedTasks.map((task) => (
-            <article
-              className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-4 px-4 py-3 max-[640px]:grid-cols-1"
-              key={createTaskKey(task)}
+      {errorMessage ? (
+        <p className="border-b border-[#fecaca] bg-[#fef2f2] px-4 py-2 text-sm font-medium text-[#b42318]" role="alert">
+          {errorMessage}
+        </p>
+      ) : null}
+      {rows.length > 0 ? (
+        <div className="overflow-x-auto" role="grid">
+          <div
+            className="grid min-w-max border-b border-[#d8dde5] bg-[#f8fafb]"
+            role="row"
+            style={{ gridTemplateColumns: `${GANTT_TABLE_WIDTH}px ${timelineColumns.length * GANTT_DAY_WIDTH}px` }}
+          >
+            <div className="sticky left-0 z-20 border-r border-[#d8dde5] bg-[#f8fafb] px-4 py-2 text-xs font-bold uppercase tracking-wide text-[#667085]" role="columnheader">
+              {t('tasks.gantt.owner')}
+            </div>
+            <div
+              className="grid"
+              style={{ gridTemplateColumns: `repeat(${timelineColumns.length}, ${GANTT_DAY_WIDTH}px)` }}
             >
-              <div className="min-w-0">
-                {onSelectTask ? (
-                  <button
-                    className="truncate text-left text-sm font-semibold text-[#1c1d1f] hover:text-[var(--workbench-primary)]"
-                    onClick={() => onSelectTask(task)}
-                    type="button"
-                  >
-                    {resolveWorkItemTitle(task)}
-                  </button>
-                ) : <p className="truncate text-sm font-semibold text-[#1c1d1f]">{resolveWorkItemTitle(task)}</p>}
-                <p className="mt-1 text-xs font-medium text-[#5f6874]">
-                  {resolveWorkItemAssignee(task)}
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center justify-end gap-2 max-[640px]:justify-start">
-                {onCreateTaskOpen ? (
-                  <button
-                    aria-label={`${t('tasks.gantt.add')}: ${resolveWorkItemTitle(task)}`}
-                    className="rounded px-2 py-1 text-lg font-semibold text-[var(--workbench-primary)] hover:bg-[#e5f7f4]"
-                    data-testid={`task-gantt-add-${task.id}`}
-                    onClick={() => onCreateTaskOpen({
-                      ...(task.assigneeUserId ? { assigneeUserId: task.assigneeUserId } : {}),
-                      ...(task.dueDate ? { dueDate: task.dueDate } : {}),
-                      projectId: projectId ?? task.assignedProjectId ?? '',
-                      source: 'gantt',
-                      teamId: task.teamId,
-                      workflowStatusId: task.workflowStatusId,
-                    })}
-                    type="button"
-                  >
-                    +
-                  </button>
-                ) : null}
-                <TaskStatusBadge
-                  configuration={resolveProjectTaskConfiguration(
-                    task,
-                    configurationsByTeam,
-                    configuration,
+              {timelineColumns.map((column) => (
+                <div
+                  aria-label={column.startDate === column.endDate
+                    ? column.startDate
+                    : `${column.startDate} – ${column.endDate}`}
+                  className="border-r border-[#e4e7ec] px-1 py-2 text-center text-[10px] font-semibold text-[#667085]"
+                  key={column.startDate}
+                  role="columnheader"
+                  title={column.startDate === column.endDate
+                    ? column.startDate
+                    : `${column.startDate} – ${column.endDate}`}
+                >
+                  {column.label}
+                </div>
+              ))}
+            </div>
+          </div>
+          {rows.map((row) => {
+            const taskKey = createTaskKey(row.task)
+            const isBusy = busyTaskKey === taskKey
+            const bar = createGanttBar(row.schedule, timelineColumns)
+            return (
+              <article
+                className="grid min-w-max border-b border-[#e4e7ec] last:border-b-0"
+                key={taskKey}
+                role="row"
+                style={{ gridTemplateColumns: `${GANTT_TABLE_WIDTH}px ${timelineColumns.length * GANTT_DAY_WIDTH}px` }}
+              >
+                <div className="sticky left-0 z-10 grid min-h-[92px] gap-2 border-r border-[#d8dde5] bg-white px-4 py-3" role="gridcell">
+                  <div className="flex min-w-0 items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      {onSelectTask ? (
+                        <button
+                          className="block max-w-full truncate text-left text-sm font-semibold text-[#1c1d1f] hover:text-[var(--workbench-primary)]"
+                          onClick={() => onSelectTask(row.task)}
+                          type="button"
+                        >
+                          {resolveWorkItemTitle(row.task)}
+                        </button>
+                      ) : (
+                        <p className="truncate text-sm font-semibold text-[#1c1d1f]">{resolveWorkItemTitle(row.task)}</p>
+                      )}
+                      <p className="mt-1 truncate text-xs font-medium text-[#5f6874]">
+                        {resolveWorkItemAssignee(row.task)}
+                      </p>
+                    </div>
+                    <span className="flex items-center gap-2">
+                      {onCreateTaskOpen ? (
+                        <button
+                          aria-label={`${t('tasks.gantt.add')}: ${resolveWorkItemTitle(row.task)}`}
+                          className="rounded px-2 py-1 text-lg font-semibold text-[var(--workbench-primary)] hover:bg-[#e5f7f4]"
+                          data-testid={`task-gantt-add-${row.task.id}`}
+                          onClick={() => onCreateTaskOpen({
+                            ...(row.task.assigneeUserId ? { assigneeUserId: row.task.assigneeUserId } : {}),
+                            projectId: projectId ?? row.task.assignedProjectId ?? '',
+                            schedule: row.schedule,
+                            source: 'gantt',
+                            teamId: row.task.teamId,
+                            workflowStatusId: row.task.workflowStatusId,
+                          })}
+                          type="button"
+                        >
+                          +
+                        </button>
+                      ) : null}
+                      <TaskStatusBadge
+                        configuration={resolveProjectTaskConfiguration(
+                          row.task,
+                          configurationsByTeam,
+                          configuration,
+                        )}
+                        task={row.task}
+                      />
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <label className="sr-only" htmlFor={`gantt-mode-${taskKey}`}>{t('tasks.schedule.mode')}</label>
+                    <select
+                      className="rounded border border-[#cfd5de] bg-white px-2 py-1 text-xs font-semibold text-[#344054] disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={!canEditSchedule || isBusy}
+                      id={`gantt-mode-${taskKey}`}
+                      onChange={(event) => {
+                        const mode = readScheduleMode(event.currentTarget.value)
+                        if (mode) {
+                          previewModeChange(row, mode)
+                        }
+                      }}
+                      value={row.schedule.mode}
+                    >
+                      <option value="unscheduled">{t('tasks.schedule.unscheduled')}</option>
+                      <option value="due-date">{t('tasks.schedule.dueDate')}</option>
+                      <option value="date-range">{t('tasks.schedule.dateRange')}</option>
+                      <option value="milestone">{t('tasks.schedule.milestone')}</option>
+                    </select>
+                    <GanttDateEditor
+                      disabled={!canEditSchedule || isBusy}
+                      onPreview={(operation) => void previewScheduleChange(row.task, operation)}
+                      schedule={row.schedule}
+                      t={t}
+                      taskKey={taskKey}
+                    />
+                    {isBusy ? <span className="text-xs text-[#667085]" role="status">{t('bulk.previewing')}</span> : null}
+                  </div>
+                </div>
+                <div
+                  aria-label={`${resolveWorkItemTitle(row.task)}: ${describeSchedule(row.schedule, t)}`}
+                  className="relative min-h-[92px] bg-white"
+                  data-testid={`task-gantt-timeline-${row.task.id}`}
+                  onDragOver={(event) => {
+                    if (dragChange?.taskKey === taskKey) {
+                      event.preventDefault()
+                      event.dataTransfer.dropEffect = 'move'
+                    }
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault()
+                    const date = resolveGanttDropDate(event, timelineColumns)
+                    if (date) {
+                      dropOnDate(row, date)
+                    }
+                  }}
+                  role="gridcell"
+                  style={{
+                    backgroundImage: `repeating-linear-gradient(to right, transparent 0, transparent ${GANTT_DAY_WIDTH - 1}px, #eef0f3 ${GANTT_DAY_WIDTH - 1}px, #eef0f3 ${GANTT_DAY_WIDTH}px)`,
+                  }}
+                >
+                  {bar ? (
+                    <div
+                      className={`absolute top-7 z-[1] h-9 overflow-visible text-xs font-bold shadow-sm ${resolveGanttBarClass(row.schedule.mode)}`}
+                      style={{
+                        left: `${bar.left}px`,
+                        width: `${bar.width}px`,
+                      }}
+                    >
+                      <button
+                        aria-label={canEditSchedule && !isBusy
+                          ? t('tasks.schedule.moveA11y').replace(
+                              '{task}',
+                              resolveWorkItemTitle(row.task),
+                            )
+                          : `${resolveWorkItemTitle(row.task)}: ${describeSchedule(row.schedule, t)}`}
+                        className="flex h-full w-full items-center px-2 text-left focus:outline-none focus:ring-2 focus:ring-[var(--workbench-primary)]"
+                        data-testid={`task-gantt-bar-${row.task.id}`}
+                        draggable={canEditSchedule && !isBusy}
+                        onClick={() => onSelectTask?.(row.task)}
+                        onDragEnd={() => setDragChange(undefined)}
+                        onDragStart={(event) => startDrag(event, row, 'move')}
+                        onKeyDown={(event) => {
+                          if (canEditSchedule && !isBusy) {
+                            handleMoveKey(event, row.schedule, (date) => {
+                              void previewScheduleChange(row.task, createMoveTaskScheduleOperation(date))
+                            })
+                          }
+                        }}
+                        type="button"
+                      >
+                        <span className="pointer-events-none truncate">{resolveGanttBarText(row.schedule, t)}</span>
+                      </button>
+                      {row.schedule.mode === 'date-range' ? (
+                        <button
+                          aria-label={t('tasks.schedule.resizeA11y').replace(
+                            '{task}',
+                            resolveWorkItemTitle(row.task),
+                          )}
+                          className="absolute -right-1 top-0 h-full w-3 cursor-ew-resize rounded bg-[#087c70] focus:outline-none focus:ring-2 focus:ring-white"
+                          data-testid={`task-gantt-resize-${row.task.id}`}
+                          disabled={!canEditSchedule || isBusy}
+                          draggable={canEditSchedule && !isBusy}
+                          onClick={(event) => event.stopPropagation()}
+                          onDragEnd={() => setDragChange(undefined)}
+                          onDragStart={(event) => {
+                            event.stopPropagation()
+                            startDrag(event, row, 'resize')
+                          }}
+                          onKeyDown={(event) => handleResizeKey(event, row.schedule, (date) => {
+                            void previewScheduleChange(row.task, createResizeTaskScheduleOperation(date))
+                          })}
+                          type="button"
+                        />
+                      ) : null}
+                    </div>
+                  ) : (
+                    <span className="absolute left-3 top-9 z-[1] rounded border border-dashed border-[#98a2b3] bg-white px-2 py-1 text-xs font-semibold text-[#667085]">
+                      {t('tasks.calendar.empty')}
+                    </span>
                   )}
-                  task={task}
-                />
-                <span className="text-xs font-semibold text-[#5f6874]">
-                  {task.dueDate
-                    ? t('tasks.gantt.window').replace('{date}', task.dueDate)
-                    : t('tasks.calendar.empty')}
-                </span>
-              </div>
-            </article>
-          ))}
+                </div>
+              </article>
+            )
+          })}
         </div>
       ) : (
         <p className="border-t border-[var(--workbench-border)] px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
           {t('tasks.empty')}
         </p>
       )}
+      {pendingChange ? (
+        <GanttSchedulePreview
+          isApplying={isApplying}
+          onCancel={() => {
+            if (!isApplying) setPendingChange(undefined)
+          }}
+          onConfirm={() => void confirmScheduleChange()}
+          pending={pendingChange}
+          t={t}
+        />
+      ) : null}
     </section>
   )
+}
+
+/** Props for the compact date editor shown in one Gantt table row. */
+type GanttDateEditorProps = {
+  /** Whether preview controls are disabled. */
+  disabled: boolean
+  /** Requests a schedule operation preview. */
+  onPreview: (operation: WorkItemScheduleOperation) => void
+  /** Schedule edited by the controls. */
+  schedule: WorkItemSchedule
+  /** Translator used by input labels. */
+  t: TaskGanttTranslator
+  /** Stable task key used to associate labels and inputs. */
+  taskKey: string
+}
+
+/**
+ * Renders mode-specific date inputs without inferring missing schedule dates.
+ *
+ * @param props - Schedule, disabled state, and preview callback.
+ * @returns Compact date controls for one Gantt row.
+ */
+function GanttDateEditor({ disabled, onPreview, schedule, t, taskKey }: GanttDateEditorProps) {
+  if (schedule.mode === 'unscheduled') {
+    return (
+      <span className="flex items-center gap-2">
+        <label className="text-xs font-semibold text-[#667085]" htmlFor={`gantt-create-${taskKey}`}>
+          {t('tasks.schedule.createBarDate')}
+        </label>
+        <input
+          className="w-[122px] rounded border border-[#cfd5de] px-2 py-1 text-xs disabled:opacity-60"
+          data-testid={`task-gantt-create-${taskKey}`}
+          disabled={disabled}
+          id={`gantt-create-${taskKey}`}
+          onChange={(event) => {
+            if (event.currentTarget.value) {
+              onPreview(createReplaceTaskScheduleOperation(createModeReplacement(
+                schedule,
+                'date-range',
+                event.currentTarget.value,
+              )))
+            }
+          }}
+          type="date"
+          value=""
+        />
+      </span>
+    )
+  }
+
+  if (schedule.mode === 'date-range') {
+    return (
+      <span className="flex items-center gap-1">
+        <label className="sr-only" htmlFor={`gantt-start-${taskKey}`}>{t('tasks.schedule.startDate')}</label>
+        <input
+          className="w-[122px] rounded border border-[#cfd5de] px-2 py-1 text-xs disabled:opacity-60"
+          disabled={disabled}
+          id={`gantt-start-${taskKey}`}
+          onChange={(event) => {
+            if (event.currentTarget.value) {
+              onPreview(createMoveTaskScheduleOperation(event.currentTarget.value))
+            }
+          }}
+          type="date"
+          value={schedule.startDate}
+        />
+        <span aria-hidden="true" className="text-[#98a2b3]">–</span>
+        <label className="sr-only" htmlFor={`gantt-end-${taskKey}`}>{t('tasks.schedule.endDate')}</label>
+        <input
+          className="w-[122px] rounded border border-[#cfd5de] px-2 py-1 text-xs disabled:opacity-60"
+          disabled={disabled}
+          id={`gantt-end-${taskKey}`}
+          onChange={(event) => {
+            if (event.currentTarget.value) {
+              onPreview(createResizeTaskScheduleOperation(event.currentTarget.value))
+            }
+          }}
+          type="date"
+          value={schedule.endDate}
+        />
+      </span>
+    )
+  }
+
+  const date = schedule.mode === 'due-date' ? schedule.dueDate : schedule.startDate
+  return (
+    <span>
+      <label className="sr-only" htmlFor={`gantt-date-${taskKey}`}>
+        {schedule.mode === 'milestone' ? t('tasks.schedule.milestoneDate') : t('tasks.schedule.dueDate')}
+      </label>
+      <input
+        className="w-[122px] rounded border border-[#cfd5de] px-2 py-1 text-xs disabled:opacity-60"
+        disabled={disabled}
+        id={`gantt-date-${taskKey}`}
+        onChange={(event) => {
+          if (event.currentTarget.value) {
+            onPreview(createMoveTaskScheduleOperation(event.currentTarget.value))
+          }
+        }}
+        type="date"
+        value={date}
+      />
+    </span>
+  )
+}
+
+/**
+ * Renders the server preview, including direct and ripple impacts, in an accessible dialog.
+ *
+ * @param props - Pending preview and confirm/cancel actions.
+ * @returns A modal schedule preview.
+ */
+function GanttSchedulePreview({
+  isApplying,
+  onCancel,
+  onConfirm,
+  pending,
+  t,
+}: GanttSchedulePreviewProps) {
+  const dialogRef = useModalFocus<HTMLDivElement>(onCancel)
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-[#101828]/45 p-4">
+      <div
+        aria-labelledby="gantt-schedule-preview-title"
+        aria-modal="true"
+        className="max-h-[min(680px,90vh)] w-full max-w-xl overflow-y-auto rounded-xl bg-white p-5 shadow-2xl"
+        ref={dialogRef}
+        role="dialog"
+        tabIndex={-1}
+      >
+        <h2 className="text-lg font-bold text-[#101828]" id="gantt-schedule-preview-title">
+          {t('bulk.preview.title')}
+        </h2>
+        <p className="mt-1 text-sm text-[#667085]">{resolveWorkItemTitle(pending.task)}</p>
+        <ul className="mt-4 grid gap-3">
+          {pending.preview.impacts.map((impact) => (
+            <li className="rounded-lg border border-[#d8dde5] bg-[#f8fafb] p-3" key={`${impact.teamId}:${impact.workItemId}`}>
+              <div className="flex items-center justify-between gap-3">
+                <span className="font-mono text-xs font-semibold text-[#344054]">{impact.workItemId}</span>
+                <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#667085]">
+                  {t(`tasks.schedule.impact.${impact.kind}`)}
+                </span>
+              </div>
+              <p className="mt-2 text-sm text-[#475467]">
+                <span className="sr-only">{t('tasks.schedule.before')}: </span>
+                <span className="line-through">{describeSchedule(impact.before, t)}</span>
+                <span aria-hidden="true"> → </span>
+                <span className="sr-only">{t('tasks.schedule.after')}: </span>
+                <span className="font-semibold text-[#101828]">{describeSchedule(impact.after, t)}</span>
+              </p>
+            </li>
+          ))}
+        </ul>
+        {pending.preview.warnings.length > 0 ? (
+          <div className="mt-4 rounded-lg border border-[#f4d38b] bg-[#fffaeb] p-3" role="status">
+            <p className="text-xs font-bold uppercase tracking-wide text-[#93370d]">
+              {t('tasks.schedule.warnings')}
+            </p>
+            <ul className="mt-1 list-disc pl-5 text-sm text-[#93370d]">
+              {pending.preview.warnings.map((warning) => (
+                <li key={warning}>{resolveScheduleWarning(warning, t)}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            className="rounded-md border border-[#cfd5de] bg-white px-4 py-2 text-sm font-semibold text-[#344054] disabled:opacity-60"
+            disabled={isApplying}
+            onClick={onCancel}
+            type="button"
+          >
+            {t('tasks.create.cancel')}
+          </button>
+          <button
+            className="rounded-md bg-[var(--workbench-primary)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+            data-modal-initial-focus
+            disabled={isApplying}
+            onClick={onConfirm}
+            type="button"
+          >
+            {isApplying ? t('bulk.applying') : t('bulk.apply')}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Resolves and schedule-sorts the task rows without mutating the source array.
+ *
+ * @param tasks - Work Items shown in the Gantt view.
+ * @returns Rows ordered by primary schedule date and stable task identity.
+ */
+function createGanttRows(tasks: readonly ProjectTask[]): GanttTaskRow[] {
+  return tasks
+    .map((task) => ({ schedule: resolveTaskSchedule(task), task }))
+    .toSorted((left, right) => {
+      const leftDate = resolveTaskSchedulePrimaryDate(left.schedule) ?? '9999-12-31'
+      const rightDate = resolveTaskSchedulePrimaryDate(right.schedule) ?? '9999-12-31'
+      return leftDate.localeCompare(rightDate) || createTaskKey(left.task).localeCompare(createTaskKey(right.task))
+    })
+}
+
+/**
+ * Builds a bounded inclusive timeline around every canonical schedule.
+ *
+ * Long planning horizons aggregate adjacent dates into at most a fixed number of columns. Exact
+ * dates remain available through the row editors and through pointer position within a column.
+ *
+ * @param schedules - Schedules rendered on the Gantt chart.
+ * @returns Ordered timeline columns covering the complete observed planning horizon.
+ */
+function createGanttTimelineColumns(
+  schedules: readonly WorkItemSchedule[],
+): GanttTimelineColumn[] {
+  const today = new Date().toISOString().slice(0, 10)
+  const range = createTaskTimelineDateRange(schedules, today)
+  const totalDays = differenceGanttCalendarDays(range.startDate, range.endDate) + 1
+  const daysPerColumn = Math.max(
+    1,
+    Math.ceil(totalDays / MAX_GANTT_TIMELINE_COLUMNS),
+  )
+  const columnCount = Math.ceil(totalDays / daysPerColumn)
+
+  return Array.from({ length: columnCount }, (_, index) => {
+    const startOffset = index * daysPerColumn
+    const endOffset = Math.min(totalDays - 1, startOffset + daysPerColumn - 1)
+    const startDate = addTaskTimelineDays(range.startDate, startOffset)
+    const endDate = addTaskTimelineDays(range.startDate, endOffset)
+    return {
+      endDate,
+      label: formatGanttTimelineColumnLabel(startDate, endDate),
+      startDate,
+    }
+  })
+}
+
+/** Pixel geometry for a schedule bar on the current date axis. */
+type GanttBar = {
+  /** Horizontal offset from the first timeline date. */
+  left: number
+  /** Inclusive schedule width. */
+  width: number
+}
+
+/**
+ * Calculates one schedule bar without creating dates for an unscheduled task.
+ *
+ * @param schedule - Canonical schedule represented by the bar.
+ * @param columns - Ordered bounded timeline columns.
+ * @returns Bar geometry, or undefined for an unscheduled or out-of-axis item.
+ */
+function createGanttBar(
+  schedule: WorkItemSchedule,
+  columns: readonly GanttTimelineColumn[],
+): GanttBar | undefined {
+  const startDate = resolveTaskScheduleStartDate(schedule) ?? resolveTaskScheduleEndDate(schedule)
+  const endDate = resolveTaskScheduleEndDate(schedule) ?? startDate
+  if (!startDate || !endDate) {
+    return undefined
+  }
+  const startIndex = findGanttTimelineColumnIndex(columns, startDate)
+  const endIndex = findGanttTimelineColumnIndex(columns, endDate)
+  if (startIndex < 0 || endIndex < startIndex) {
+    return undefined
+  }
+  return {
+    left: startIndex * GANTT_DAY_WIDTH + 4,
+    width: Math.max(GANTT_DAY_WIDTH - 8, (endIndex - startIndex + 1) * GANTT_DAY_WIDTH - 8),
+  }
+}
+
+/**
+ * Resolves a native drop coordinate to an exact date inside its bounded timeline column.
+ *
+ * @param event - Drop event received by the complete timeline row.
+ * @param columns - Ordered bounded timeline columns.
+ * @returns The date represented beneath the pointer, when layout information is available.
+ */
+function resolveGanttDropDate(
+  event: DragEvent<HTMLElement>,
+  columns: readonly GanttTimelineColumn[],
+): string | undefined {
+  if (columns.length === 0) {
+    return undefined
+  }
+
+  const bounds = event.currentTarget.getBoundingClientRect()
+  if (bounds.width <= 0) {
+    return undefined
+  }
+
+  const horizontalOffset = Math.min(
+    Math.max(event.clientX - bounds.left, 0),
+    bounds.width - Number.EPSILON,
+  )
+  const renderedColumnWidth = bounds.width / columns.length
+  const columnIndex = Math.min(
+    columns.length - 1,
+    Math.floor(horizontalOffset / renderedColumnWidth),
+  )
+  const column = columns[columnIndex]
+  if (!column) {
+    return undefined
+  }
+
+  const columnDayCount = differenceGanttCalendarDays(column.startDate, column.endDate) + 1
+  const offsetWithinColumn = horizontalOffset - columnIndex * renderedColumnWidth
+  const dayOffset = Math.min(
+    columnDayCount - 1,
+    Math.floor((offsetWithinColumn / renderedColumnWidth) * columnDayCount),
+  )
+  return addTaskTimelineDays(column.startDate, dayOffset)
+}
+
+/**
+ * Finds the bounded timeline column containing one canonical ISO date.
+ *
+ * @param columns - Ordered inclusive timeline columns.
+ * @param date - Canonical date to locate.
+ * @returns The containing column index, or -1 when the date is outside the timeline.
+ */
+function findGanttTimelineColumnIndex(
+  columns: readonly GanttTimelineColumn[],
+  date: string,
+): number {
+  return columns.findIndex((column) => column.startDate <= date && date <= column.endDate)
+}
+
+/**
+ * Calculates a signed UTC calendar-day distance between canonical ISO dates.
+ *
+ * @param startDate - First ISO calendar date.
+ * @param endDate - Second ISO calendar date.
+ * @returns Signed whole-day distance from the first date to the second.
+ */
+function differenceGanttCalendarDays(startDate: string, endDate: string): number {
+  const startTime = new Date(`${startDate}T00:00:00.000Z`).getTime()
+  const endTime = new Date(`${endDate}T00:00:00.000Z`).getTime()
+  return Math.round((endTime - startTime) / MILLISECONDS_PER_CALENDAR_DAY)
+}
+
+/**
+ * Formats one exact or aggregated timeline column for its compact header.
+ *
+ * @param startDate - Inclusive first date represented by the column.
+ * @param endDate - Inclusive final date represented by the column.
+ * @returns A compact date, month, or year label appropriate to the aggregation span.
+ */
+function formatGanttTimelineColumnLabel(startDate: string, endDate: string): string {
+  if (startDate === endDate) {
+    return startDate.slice(5)
+  }
+
+  const spanDays = differenceGanttCalendarDays(startDate, endDate) + 1
+  if (spanDays <= 7) {
+    return `${startDate.slice(5)}–${endDate.slice(5)}`
+  }
+  if (startDate.slice(0, 4) === endDate.slice(0, 4)) {
+    return startDate.slice(0, 7)
+  }
+  return startDate.slice(0, 4)
+}
+
+/**
+ * Creates a full replacement when the user deliberately changes schedule mode.
+ *
+ * @param current - Current canonical schedule.
+ * @param mode - Explicit target mode.
+ * @param fallbackDate - Date used only for target modes that require one.
+ * @returns A complete schedule candidate for server preview.
+ */
+function createModeReplacement(
+  current: WorkItemSchedule,
+  mode: WorkItemSchedule['mode'],
+  fallbackDate: string,
+): WorkItemSchedule {
+  const plannedEffortMinutes = current.plannedEffortMinutes
+  const calendarPolicy = {
+    holidays: [...current.calendarPolicy.holidays],
+    timeZone: current.calendarPolicy.timeZone,
+    workingWeekdays: [...current.calendarPolicy.workingWeekdays],
+  }
+  const effort = plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes }
+  if (mode === 'unscheduled') {
+    return {
+      calendarPolicy,
+      mode: 'unscheduled',
+      ...effort,
+    }
+  }
+  if (mode === 'due-date') {
+    return {
+      calendarPolicy,
+      dueDate: fallbackDate,
+      mode: 'due-date',
+      ...effort,
+    }
+  }
+  if (mode === 'milestone') {
+    return {
+      calendarPolicy,
+      durationDays: 0,
+      endDate: fallbackDate,
+      mode: 'milestone',
+      startDate: fallbackDate,
+      ...effort,
+    }
+  }
+  return {
+    calendarPolicy,
+    durationDays: 1,
+    endDate: fallbackDate,
+    mode: 'date-range',
+    startDate: fallbackDate,
+    ...effort,
+  }
+}
+
+/**
+ * Narrows a select value to one explicit schedule mode.
+ *
+ * @param value - Raw select value.
+ * @returns The recognized mode or undefined.
+ */
+function readScheduleMode(value: string): WorkItemSchedule['mode'] | undefined {
+  return value === 'unscheduled' || value === 'due-date' || value === 'date-range' || value === 'milestone'
+    ? value
+    : undefined
+}
+
+/**
+ * Handles day-by-day keyboard movement for a scheduled bar.
+ *
+ * @param event - Keyboard event from the focused bar.
+ * @param schedule - Schedule being moved.
+ * @param onMove - Callback receiving the next primary date.
+ */
+function handleMoveKey(
+  event: KeyboardEvent<HTMLElement>,
+  schedule: WorkItemSchedule,
+  onMove: (date: string) => void,
+) {
+  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') {
+    return
+  }
+  const date = resolveTaskSchedulePrimaryDate(schedule)
+  if (!date) {
+    return
+  }
+  const targetDate = tryAddTaskTimelineDays(
+    date,
+    event.key === 'ArrowLeft' ? -1 : 1,
+  )
+  if (!targetDate) {
+    return
+  }
+  event.preventDefault()
+  onMove(targetDate)
+}
+
+/**
+ * Handles day-by-day keyboard resizing for a date-range end handle.
+ *
+ * @param event - Keyboard event from the focused resize handle.
+ * @param schedule - Date-range schedule being resized.
+ * @param onResize - Callback receiving the next end date.
+ */
+function handleResizeKey(
+  event: KeyboardEvent<HTMLButtonElement>,
+  schedule: WorkItemSchedule,
+  onResize: (date: string) => void,
+) {
+  if (
+    schedule.mode !== 'date-range' ||
+    (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight')
+  ) {
+    return
+  }
+  const targetDate = tryAddTaskTimelineDays(
+    schedule.endDate,
+    event.key === 'ArrowLeft' ? -1 : 1,
+  )
+  if (!targetDate) {
+    return
+  }
+  event.preventDefault()
+  event.stopPropagation()
+  onResize(targetDate)
+}
+
+/**
+ * Returns distinct visual treatment for ranges, milestones, and deadline-only schedules.
+ *
+ * @param mode - Explicit schedule mode.
+ * @returns Tailwind class list for the bar.
+ */
+function resolveGanttBarClass(mode: WorkItemSchedule['mode']): string {
+  switch (mode) {
+    case 'date-range':
+      return 'rounded-md border border-[#0e9384] bg-[#ccfbea] text-[#085d55]'
+    case 'milestone':
+      return 'rotate-45 rounded-sm border border-[#7f56d9] bg-[#ebe9fe] text-[#53389e]'
+    case 'due-date':
+      return 'rounded-full border-2 border-dashed border-[#dc6803] bg-[#fffaeb] text-[#93370d]'
+    case 'unscheduled':
+      return 'border border-dashed border-[#98a2b3] bg-white text-[#667085]'
+  }
+}
+
+/**
+ * Chooses concise text rendered inside a Gantt bar.
+ *
+ * @param schedule - Schedule represented by the bar.
+ * @param t - Translator used for the deadline-only label.
+ * @returns Explicit mode or duration text.
+ */
+function resolveGanttBarText(
+  schedule: WorkItemSchedule,
+  t: TaskGanttTranslator,
+): string {
+  switch (schedule.mode) {
+    case 'date-range':
+      return `${schedule.durationDays}d`
+    case 'milestone':
+      return '◆'
+    case 'due-date':
+      return t('tasks.schedule.dueDate')
+    case 'unscheduled':
+      return ''
+  }
+}
+
+/**
+ * Formats an explicit schedule state for assistive text and preview comparisons.
+ *
+ * @param schedule - Schedule to describe.
+ * @param t - Translator used for the unscheduled label.
+ * @returns A compact mode-preserving description.
+ */
+function describeSchedule(schedule: WorkItemSchedule, t: TaskGanttTranslator): string {
+  const range = formatTaskScheduleRange(schedule)
+  if (!range) {
+    return t('tasks.calendar.empty')
+  }
+  if (schedule.mode === 'date-range') {
+    return `${t('tasks.schedule.dateRange')}: ${range} (${schedule.durationDays}d)`
+  }
+  if (schedule.mode === 'milestone') {
+    return `${t('tasks.schedule.milestone')}: ${range}`
+  }
+  return t('tasks.gantt.window').replace('{date}', range)
+}
+
+/**
+ * Finds the direct schedule replacement validated for the target Work Item.
+ *
+ * @param preview - Server preview containing direct and optional dependency impacts.
+ * @param task - Target task that initiated the preview.
+ * @returns The direct after-schedule or undefined for a malformed preview.
+ */
+function findDirectPreviewSchedule(
+  preview: WorkItemScheduleChangePreview,
+  task: ProjectTask,
+): WorkItemSchedule | undefined {
+  return preview.impacts.find((impact) =>
+    impact.kind === 'direct' &&
+    impact.teamId === task.teamId &&
+    impact.workItemId === task.id
+  )?.after
+}
+
+/**
+ * Preserves permission and revision details exposed by the parent callback.
+ *
+ * @param error - Unknown callback failure.
+ * @param t - Translator used for the generic fallback.
+ * @returns A safe message for the view-level alert.
+ */
+function resolveScheduleActionError(error: unknown, t: TaskGanttTranslator): string {
+  if (error instanceof TeamIssuesApiError) {
+    if (error.code === 'WorkItemRevisionConflict') {
+      return t('tasks.action.conflict')
+    }
+    if (error.status === 403) {
+      return t('tasks.action.permission')
+    }
+    if (error.status === 400) {
+      return t('tasks.schedule.invalid')
+    }
+  }
+  return t('tasks.action.updateError')
+}
+
+/**
+ * Maps stable server warning codes to localized review guidance.
+ *
+ * @param warning - Warning code returned by schedule preview.
+ * @param t - Translator used for known and generic warning text.
+ * @returns Localized warning copy without exposing raw server identifiers.
+ */
+function resolveScheduleWarning(warning: string, t: TaskGanttTranslator): string {
+  return warning === 'DependencyRippleRequiresReview'
+    ? t('tasks.schedule.warning.dependencyRipple')
+    : t('tasks.schedule.warning.generic')
 }

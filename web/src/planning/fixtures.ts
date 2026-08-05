@@ -1,4 +1,5 @@
 import {
+  createDefaultDueDateWorkItemSchedule,
   PLANNING_SCHEMA_VERSION,
   type PlanningSnapshot,
 } from '@mukuroji/contracts'
@@ -252,7 +253,8 @@ export const planningSnapshotFixture = {
       title: 'Finalize onboarding copy',
       projectId: 'refero',
       statusCategory: 'started',
-      dueDate: '2026/07/22',
+      dueDate: '2026-07-22',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-22'),
     },
     {
       id: 'journey-events',
@@ -261,7 +263,8 @@ export const planningSnapshotFixture = {
       title: 'Instrument activation events',
       projectId: 'refero',
       statusCategory: 'unstarted',
-      dueDate: '2026/07/25',
+      dueDate: '2026-07-25',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-25'),
     },
   ],
   criticalPath: {

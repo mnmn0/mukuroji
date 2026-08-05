@@ -3,6 +3,20 @@ export {
   createResourceId,
 } from './domain/resource-id'
 export {
+  WorkItemScheduleError,
+  addWorkItemScheduleCalendarDays,
+  applyWorkItemScheduleOperation,
+  calculateWorkItemScheduleDurationDays,
+  calculateWorkItemScheduleEndDate,
+  deriveWorkItemScheduleDueDate,
+  isCanonicalWorkItemSchedule,
+  isWorkItemSchedule,
+  normalizeWorkItemSchedule,
+  normalizeWorkItemScheduleOperation,
+  previewWorkItemScheduleChange,
+  workItemScheduleInstantToLocalDate,
+} from './domain/work-item-schedule'
+export {
   isCanonicalWorkItemRecord,
   isCanonicalWorkItemRelationIds,
   type CanonicalWorkItemRecord,
