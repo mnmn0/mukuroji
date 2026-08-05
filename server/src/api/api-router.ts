@@ -19252,7 +19252,14 @@ function rejectInternalWorkItemUpdateFields(input: PublicUpdateTeamIssueRequestB
  *
  * @param input - Untrusted create or update body.
  */
-function rejectDerivedWorkItemScheduleFields(input: object): void {
+function rejectDerivedWorkItemScheduleFields(input: unknown): void {
+  if (!isRecord(input)) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      'Work Item body must be an object.',
+    )
+  }
   if ('dueDate' in input) {
     throw new WorkItemScheduleError(
       400,

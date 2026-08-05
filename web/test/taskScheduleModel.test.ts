@@ -26,6 +26,7 @@ import {
   resolveTaskScheduleStartDate,
   resolveTaskScheduleSummary,
   replaceTaskDeadlineSchedule,
+  tryAddTaskTimelineDays,
   unscheduleTaskSchedule,
 } from '../src/tasks/model/taskSchedule'
 
@@ -178,6 +179,14 @@ describe('task timeline date helpers', () => {
       endDate: '2026-08-01',
       startDate: '2026-08-02',
     })).toEqual([])
+  })
+
+  test('does not shift timeline interactions outside supported schedule dates', () => {
+    expect(() => addTaskTimelineDays('1000-01-01', -1)).toThrow(RangeError)
+    expect(() => addTaskTimelineDays('9999-12-31', 1)).toThrow(RangeError)
+    expect(tryAddTaskTimelineDays('1000-01-01', -1)).toBeUndefined()
+    expect(tryAddTaskTimelineDays('9999-12-31', 1)).toBeUndefined()
+    expect(tryAddTaskTimelineDays('1000-01-01', 1)).toBe('1000-01-02')
   })
 
   test('bounds client-side daily iteration to the shared planning horizon', () => {

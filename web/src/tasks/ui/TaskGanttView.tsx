@@ -26,6 +26,7 @@ import {
   resolveTaskScheduleEndDate,
   resolveTaskSchedulePrimaryDate,
   resolveTaskScheduleStartDate,
+  tryAddTaskTimelineDays,
 } from '../model/taskSchedule'
 import {
   createTaskKey,
@@ -956,8 +957,15 @@ function handleMoveKey(
   if (!date) {
     return
   }
+  const targetDate = tryAddTaskTimelineDays(
+    date,
+    event.key === 'ArrowLeft' ? -1 : 1,
+  )
+  if (!targetDate) {
+    return
+  }
   event.preventDefault()
-  onMove(addTaskTimelineDays(date, event.key === 'ArrowLeft' ? -1 : 1))
+  onMove(targetDate)
 }
 
 /**
@@ -978,9 +986,16 @@ function handleResizeKey(
   ) {
     return
   }
+  const targetDate = tryAddTaskTimelineDays(
+    schedule.endDate,
+    event.key === 'ArrowLeft' ? -1 : 1,
+  )
+  if (!targetDate) {
+    return
+  }
   event.preventDefault()
   event.stopPropagation()
-  onResize(addTaskTimelineDays(schedule.endDate, event.key === 'ArrowLeft' ? -1 : 1))
+  onResize(targetDate)
 }
 
 /**

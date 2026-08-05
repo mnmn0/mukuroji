@@ -170,7 +170,7 @@ describe('independent task views', () => {
     )
   })
 
-  test('bounds the Gantt timeline across the complete ISO planning horizon', () => {
+  test('bounds timeline views across the complete ISO planning horizon', () => {
     const earlyTask = {
       ...taskViewStoryTasks[2],
       dueDate: '1000-01-01',
@@ -193,10 +193,17 @@ describe('independent task views', () => {
       />,
     )
     const columnHeaderCount = html.match(/role="columnheader"/gu)?.length ?? 0
+    const calendarHtml = renderToStaticMarkup(
+      <TaskCalendarView t={t} tasks={[earlyTask, lateTask]} />,
+    )
 
     expect(columnHeaderCount).toBeLessThanOrEqual(181)
     expect(html).toContain('1000-01-01')
     expect(html).toContain('9999-12-31')
+    expect(calendarHtml).toContain('1000-01-01')
+    expect(calendarHtml).toContain('9999-12-31')
+    expect(calendarHtml).not.toContain('0999-12-31')
+    expect(calendarHtml).not.toContain('+010000')
   })
 
   test('groups calendar tasks by due date and preserves the unscheduled bucket', () => {

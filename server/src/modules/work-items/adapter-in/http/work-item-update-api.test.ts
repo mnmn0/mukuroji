@@ -181,6 +181,29 @@ test('rejects a direct dueDate field even when update also includes a schedule',
   expect(calls.issueUpdates).toEqual([])
 })
 
+test('rejects non-object Work Item update bodies before reading schedule fields', async () => {
+  const calls = configureFakeProjectClients(true)
+
+  for (const body of [JSON.stringify('not-an-object'), JSON.stringify([])]) {
+    const response = await app.request('/api/teams/core-team/issues/onboarding-friction', {
+      method: 'PATCH',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body,
+    })
+
+    expect(response.status).toBe(400)
+      expect(await response.json()).toEqual({
+        message: 'Work Item body must be an object.',
+      })
+  }
+
+  expect(calls.issueDetails).toEqual([])
+  expect(calls.issueUpdates).toEqual([])
+})
+
 test('previews moving a due-date Work Item without mutating it', async () => {
   const calls = configureFakeProjectClients(true)
 

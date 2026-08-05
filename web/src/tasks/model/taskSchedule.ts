@@ -501,7 +501,28 @@ export function addTaskTimelineDays(date: string, days: number): string {
 
   const nextDate = requireTaskScheduleDateObject(date)
   nextDate.setUTCDate(nextDate.getUTCDate() + days)
-  return nextDate.toISOString().slice(0, 10)
+  return requireTaskScheduleDate(nextDate.toISOString().slice(0, 10))
+}
+
+/**
+ * Adds calendar days without crossing the schedule contract's supported date boundaries.
+ *
+ * @param date - Source date in `YYYY-MM-DD` form.
+ * @param days - Safe integer number of calendar days to add.
+ * @returns The shifted date, or undefined when the result is outside the supported range.
+ */
+export function tryAddTaskTimelineDays(
+  date: string,
+  days: number,
+): string | undefined {
+  try {
+    return addTaskTimelineDays(date, days)
+  } catch (error) {
+    if (error instanceof RangeError) {
+      return undefined
+    }
+    throw error
+  }
 }
 
 /**

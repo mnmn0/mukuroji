@@ -14,7 +14,6 @@ import {
   resolveWorkItemTitle,
 } from '../../work-items/model/workItemDisplay'
 import {
-  addTaskTimelineDays,
   createDefaultDateRangeTaskSchedule,
   createDefaultDueDateTaskSchedule,
   createDefaultUnscheduledTaskSchedule,
@@ -23,6 +22,7 @@ import {
   formatTaskScheduleRange,
   resolveTaskSchedule,
   resolveTaskSchedulePrimaryDate,
+  tryAddTaskTimelineDays,
   unscheduleTaskSchedule,
 } from '../model/taskSchedule'
 import { createTaskKey, type TaskCreateContext } from '../model/taskView'
@@ -636,7 +636,10 @@ function createCanonicalCalendarModel(tasks: readonly ProjectTask[]): CanonicalC
   })
   const anchors = primaryDates.length > 0 ? primaryDates : [today]
   const dates = [...new Set(anchors.flatMap((anchor) =>
-    [-3, -2, -1, 0, 1, 2, 3].map((offset) => addTaskTimelineDays(anchor, offset))
+    [-3, -2, -1, 0, 1, 2, 3].flatMap((offset) => {
+      const shiftedDate = tryAddTaskTimelineDays(anchor, offset)
+      return shiftedDate ? [shiftedDate] : []
+    })
   ))].toSorted()
   return {
     days: dates.map((date) => ({
@@ -700,8 +703,15 @@ function handleCalendarMoveKey(
   ) {
     return
   }
+  const targetDate = tryAddTaskTimelineDays(
+    primaryDate,
+    event.key === 'ArrowLeft' ? -1 : 1,
+  )
+  if (!targetDate) {
+    return
+  }
   event.preventDefault()
-  onMove(addTaskTimelineDays(primaryDate, event.key === 'ArrowLeft' ? -1 : 1))
+  onMove(targetDate)
 }
 
 /**
