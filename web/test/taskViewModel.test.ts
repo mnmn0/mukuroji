@@ -244,6 +244,30 @@ describe('task due-date model', () => {
     expect(matchesTaskDueDateFilter(undated, 'all', referenceDay)).toBe(true)
   })
 
+  test('uses each canonical schedule timezone for overdue boundaries', () => {
+    const instant = new Date('2026-07-11T15:00:00.000Z')
+    const schedule = createDefaultDueDateTaskSchedule('2026-07-11')
+    const tokyoTask = createTask({
+      schedule: {
+        ...schedule,
+        calendarPolicy: { ...schedule.calendarPolicy, timeZone: 'Asia/Tokyo' },
+      },
+      statusCategory: 'started',
+    })
+    const newYorkTask = createTask({
+      schedule: {
+        ...schedule,
+        calendarPolicy: { ...schedule.calendarPolicy, timeZone: 'America/New_York' },
+      },
+      statusCategory: 'started',
+    })
+
+    expect(isTaskOverdue(tokyoTask, instant)).toBe(true)
+    expect(matchesTaskDueDateFilter(tokyoTask, 'overdue', instant)).toBe(true)
+    expect(isTaskOverdue(newYorkTask, instant)).toBe(false)
+    expect(matchesTaskDueDateFilter(newYorkTask, 'upcoming', instant)).toBe(true)
+  })
+
   test('preserves due-date ordering, ID tie-breakers, source order, and missing-date placement', () => {
     const source = [
       createTask({

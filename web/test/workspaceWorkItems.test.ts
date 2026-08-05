@@ -14,6 +14,7 @@ import {
   createWorkspaceSummary,
   createWorkspaceTaskKey,
   isWorkspaceTaskAssignedToUser,
+  isWorkspaceTaskOverdue,
   parseWorkspaceTaskDueDate,
   resolveWorkspacePortfolioRisk,
 } from '../src/work-items/model/workspaceWorkItems'
@@ -42,6 +43,30 @@ function createTask(overrides: Omit<Partial<ProjectTask>, 'dueDate'>): ProjectTa
 
 describe('Workspace Work Item model', () => {
   const referenceDate = new Date('2026-07-20T12:00:00.000Z')
+
+  test('uses the schedule timezone for Workspace overdue attention', () => {
+    const instant = new Date('2026-07-11T15:00:00.000Z')
+    const schedule = createDefaultDueDateWorkItemSchedule('2026-07-11')
+    const tokyoTask = createTask({
+      schedule: {
+        ...schedule,
+        calendarPolicy: { ...schedule.calendarPolicy, timeZone: 'Asia/Tokyo' },
+      },
+      statusCategory: 'started',
+      workflowStatusId: 'todo',
+    })
+    const newYorkTask = createTask({
+      schedule: {
+        ...schedule,
+        calendarPolicy: { ...schedule.calendarPolicy, timeZone: 'America/New_York' },
+      },
+      statusCategory: 'started',
+      workflowStatusId: 'todo',
+    })
+
+    expect(isWorkspaceTaskOverdue(tokyoTask, instant)).toBe(true)
+    expect(isWorkspaceTaskOverdue(newYorkTask, instant)).toBe(false)
+  })
 
   test('orders action queue by score and due date using an explicit reference date', () => {
     const overdueHigh = createTask({

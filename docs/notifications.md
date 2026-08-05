@@ -69,6 +69,6 @@ in-app を無効にした状態で投影された notification は Inbox unread 
 
 ## Due / overdue scan
 
-EventBridge の定期 rule が canonical Work Item を bounded pagination で走査します。date-only の期限は UTC calendar day として評価し、未完了かつ担当者がある item に対し、期限当日は `work-item.due`、期限超過後は `work-item.overdue` を作ります。event ID は Workspace、Work Item、due date、reason から決定的に作るため、Lambda retry や翌日の再走査でも同じ due 状態を重複通知しません。
+EventBridge の定期 rule が canonical Work Item を bounded pagination で走査します。date-only の期限は各 item の `schedule.calendarPolicy.timeZone` における local calendar day として評価し、未完了かつ担当者がある item に対し、期限当日は `work-item.due`、期限超過後は `work-item.overdue` を作ります。event ID は Workspace、Work Item、due date、reason から決定的に作るため、Lambda retry や翌日の再走査でも同じ due 状態を重複通知しません。
 
-Workspace 単位の authoritative time zone は現行 schema に存在しません。将来これを導入する場合は、schedule だけを固定 time zone に変えず、Work Item の期限定義と Web の due/overdue 表示も同じ境界へ同時に移行します。
+期限境界の authoritative time zone は各 Work Item の canonical schedule が所有します。Notification scan と Web の due/overdue 表示は同じ `schedule.calendarPolicy.timeZone` を使用し、実行環境や viewer の local timezone から期限状態を推測しません。

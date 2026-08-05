@@ -29,6 +29,7 @@ import {
   deriveTaskScheduleDueDate,
   resolveTaskSchedule,
   resolveTaskSchedulePrimaryDate,
+  taskScheduleInstantToLocalDate,
 } from './taskSchedule'
 
 /** Task views available within the project task workspace. */
@@ -423,13 +424,13 @@ export function parseTaskDueDate(value: string) {
  * @returns True only for a parsed past date on a non-completed task.
  */
 export function isTaskOverdue(task: ProjectTask, now: Date = new Date()) {
-  const dueDate = parseTaskDueDate(deriveTaskScheduleDueDate(task.schedule))
+  const dueDate = deriveTaskScheduleDueDate(task.schedule)
 
-  if (resolveWorkflowStatusCategory(task) === 'completed' || !dueDate) {
+  if (resolveWorkflowStatusCategory(task) === 'completed' || !parseTaskDueDate(dueDate)) {
     return false
   }
 
-  const today = createLocalStartOfDay(now)
+  const today = taskScheduleInstantToLocalDate(now, task.schedule.calendarPolicy)
   return dueDate < today
 }
 
@@ -450,17 +451,18 @@ export function matchesTaskDueDateFilter(
     return true
   }
 
-  const dueDate = parseTaskDueDate(deriveTaskScheduleDueDate(task.schedule))
+  const dueDate = deriveTaskScheduleDueDate(task.schedule)
+  const parsedDueDate = parseTaskDueDate(dueDate)
 
   if (filter === 'no-date') {
-    return !dueDate
+    return !parsedDueDate
   }
 
-  if (resolveWorkflowStatusCategory(task) === 'completed' || !dueDate) {
+  if (resolveWorkflowStatusCategory(task) === 'completed' || !parsedDueDate) {
     return false
   }
 
-  const today = createLocalStartOfDay(now)
+  const today = taskScheduleInstantToLocalDate(now, task.schedule.calendarPolicy)
 
   if (filter === 'overdue') {
     return dueDate < today
@@ -965,18 +967,6 @@ export function resolveTaskPriority(value: unknown): TaskPriority {
   }
 
   return 'medium'
-}
-
-/**
- * Returns a copy of a reference time normalized to local midnight.
- *
- * @param value - Reference time to normalize without mutation.
- * @returns A new Date at the start of the same local day.
- */
-function createLocalStartOfDay(value: Date) {
-  const date = new Date(value)
-  date.setHours(0, 0, 0, 0)
-  return date
 }
 
 /**

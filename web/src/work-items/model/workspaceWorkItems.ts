@@ -5,6 +5,7 @@ import {
 } from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { ProjectTask } from '../../tasks/api'
+import { taskScheduleInstantToLocalDate } from '../../tasks/model/taskSchedule'
 import {
   isCompletedWorkItem,
   isOpenWorkItem,
@@ -407,14 +408,16 @@ export function hasApprovalAttention(task: ProjectTask) {
  * @returns True when the Work Item is incomplete and overdue.
  */
 export function isWorkspaceTaskOverdue(task: ProjectTask, referenceDate: Date) {
-  const dueDate = parseWorkspaceTaskDueDate(deriveWorkItemScheduleDueDate(task.schedule))
+  const dueDate = deriveWorkItemScheduleDueDate(task.schedule)
 
-  if (!isOpenWorkItem(task) || !dueDate) {
+  if (!isOpenWorkItem(task) || !parseWorkspaceTaskDueDate(dueDate)) {
     return false
   }
 
-  const today = new Date(referenceDate)
-  today.setHours(0, 0, 0, 0)
+  const today = taskScheduleInstantToLocalDate(
+    referenceDate,
+    task.schedule.calendarPolicy,
+  )
 
   return dueDate < today
 }

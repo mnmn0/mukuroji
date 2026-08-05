@@ -26,6 +26,7 @@ import {
   resolveTaskScheduleStartDate,
   resolveTaskScheduleSummary,
   replaceTaskDeadlineSchedule,
+  taskScheduleInstantToLocalDate,
   tryAddTaskTimelineDays,
   unscheduleTaskSchedule,
 } from '../src/tasks/model/taskSchedule'
@@ -66,6 +67,22 @@ describe('default task schedule construction', () => {
     expect(dueDate.calendarPolicy.workingWeekdays).not.toBe(
       dateRange.calendarPolicy.workingWeekdays,
     )
+  })
+
+  test('maps instants through the canonical schedule timezone', () => {
+    const instant = new Date('2026-07-11T15:00:00.000Z')
+    const policy = createDefaultDueDateTaskSchedule('2026-07-12').calendarPolicy
+
+    expect(taskScheduleInstantToLocalDate(instant, {
+      ...policy,
+      timeZone: 'Asia/Tokyo',
+    })).toBe('2026-07-12')
+    expect(taskScheduleInstantToLocalDate(instant, {
+      ...policy,
+      timeZone: 'America/New_York',
+    })).toBe('2026-07-11')
+    expect(() => taskScheduleInstantToLocalDate(new Date(Number.NaN), policy))
+      .toThrow('valid date')
   })
 
   test('counts inclusive weekdays for drafts without applying holiday rescheduling', () => {

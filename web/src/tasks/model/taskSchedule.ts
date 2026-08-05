@@ -355,6 +355,39 @@ export function deriveTaskScheduleDueDate(schedule: WorkItemSchedule): string {
 }
 
 /**
+ * Maps an absolute instant to the local ISO date defined by a schedule policy.
+ *
+ * @param instant - Absolute instant to map without using the browser's local timezone.
+ * @param policy - Canonical schedule policy whose IANA timezone owns the date boundary.
+ * @returns The corresponding local date in `YYYY-MM-DD` form.
+ */
+export function taskScheduleInstantToLocalDate(
+  instant: Date,
+  policy: WorkItemScheduleCalendarPolicy,
+): string {
+  if (!Number.isFinite(instant.getTime())) {
+    throw new RangeError('Task schedule instant must be a valid date.')
+  }
+
+  let parts: Intl.DateTimeFormatPart[]
+  try {
+    parts = new Intl.DateTimeFormat('en-US-u-ca-iso8601-nu-latn', {
+      day: '2-digit',
+      month: '2-digit',
+      timeZone: policy.timeZone,
+      year: 'numeric',
+    }).formatToParts(instant)
+  } catch {
+    throw new RangeError('Task schedule timezone must be a valid IANA identifier.')
+  }
+
+  const year = readTaskScheduleDatePart(parts, 'year')
+  const month = readTaskScheduleDatePart(parts, 'month')
+  const day = readTaskScheduleDatePart(parts, 'day')
+  return requireTaskScheduleDate(`${year.padStart(4, '0')}-${month}-${day}`)
+}
+
+/**
  * Counts UTC Monday-to-Friday dates in an inclusive range for an optimistic client draft.
  *
  * This helper intentionally does not apply timezone or holiday rules. The server owns the
@@ -706,6 +739,24 @@ function requireTaskScheduleDateObject(value: string): Date {
     throw new RangeError(`Invalid task schedule date: ${value}`)
   }
   return date
+}
+
+/**
+ * Reads one required calendar field from an Intl date formatter result.
+ *
+ * @param parts - Date parts generated under the schedule timezone.
+ * @param type - Required calendar component.
+ * @returns The formatter value for the requested component.
+ */
+function readTaskScheduleDatePart(
+  parts: readonly Intl.DateTimeFormatPart[],
+  type: 'year' | 'month' | 'day',
+): string {
+  const value = parts.find((part) => part.type === type)?.value
+  if (!value) {
+    throw new RangeError('Task schedule instant could not be mapped to a local date.')
+  }
+  return value
 }
 
 /**
